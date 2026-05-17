@@ -1,0 +1,10 @@
+.gitignore
+.npm-cache/**
+.vscode/**
+.vscode-test/**
+node_modules/**
+src/**
+*.vsix
+eslint.config.mjs
+package-lock.json
+tsconfig.json

@@ -1,0 +1,174 @@
+{
+  "name": "keepseek",
+  "displayName": "KeepSeek",
+  "description": "A VS Code agent chat extension for reading project context and safely proposing code edits.",
+  "version": "0.0.1",
+  "publisher": "keepseek",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:keepseek.chatView",
+    "onView:keepseek.chatSecondaryView",
+    "onCommand:keepseek.openChat",
+    "onCommand:keepseek.addCurrentFileToContext",
+    "onCommand:keepseek.pickWorkspaceFilesToContext",
+    "onCommand:keepseek.pickExternalFilesToContext",
+    "onCommand:keepseek.addSelectionToContext",
+    "onCommand:keepseek.addExplorerFileToContext"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "keepseek.openChat",
+        "title": "KeepSeek: Open Agent Chat"
+      },
+      {
+        "command": "keepseek.addCurrentFileToContext",
+        "title": "KeepSeek: Add Current File to Context"
+      },
+      {
+        "command": "keepseek.pickWorkspaceFilesToContext",
+        "title": "KeepSeek: Pick Workspace Files for Context"
+      },
+      {
+        "command": "keepseek.pickExternalFilesToContext",
+        "title": "KeepSeek: Pick External Files for Context"
+      },
+      {
+        "command": "keepseek.addSelectionToContext",
+        "title": "KeepSeek: Add Selection to Context"
+      },
+      {
+        "command": "keepseek.addExplorerFileToContext",
+        "title": "KeepSeek: Add File to Context"
+      }
+    ],
+    "configuration": {
+      "title": "KeepSeek",
+      "properties": {
+        "keepseek.models": {
+          "type": "array",
+          "default": [
+            {
+              "id": "keepseek-default",
+              "label": "KeepSeek Default",
+              "provider": "custom"
+            },
+            {
+              "id": "deepseek-chat",
+              "label": "DeepSeek Chat",
+              "provider": "deepseek"
+            },
+            {
+              "id": "custom-model",
+              "label": "Custom Model",
+              "provider": "custom"
+            }
+          ],
+          "description": "Models shown in the KeepSeek chat selector. Provider integration is implemented in src/agentRunner.ts."
+        },
+        "keepseek.maxFileBytes": {
+          "type": "number",
+          "default": 200000,
+          "minimum": 1000,
+          "description": "Maximum size in bytes for one context file."
+        },
+        "keepseek.maxContextFiles": {
+          "type": "number",
+          "default": 32,
+          "minimum": 1,
+          "description": "Maximum number of files KeepSeek keeps in chat context."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "keepseek",
+          "title": "KeepSeek",
+          "icon": "resources/keepseek.svg",
+          "when": "keepseek.doesNotSupportSecondarySidebar"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "keepseek-secondary",
+          "title": "KeepSeek",
+          "icon": "resources/keepseek.svg",
+          "when": "!keepseek.doesNotSupportSecondarySidebar"
+        }
+      ]
+    },
+    "views": {
+      "keepseek": [
+        {
+          "type": "webview",
+          "id": "keepseek.chatView",
+          "name": "KeepSeek",
+          "when": "keepseek.doesNotSupportSecondarySidebar"
+        }
+      ],
+      "keepseek-secondary": [
+        {
+          "type": "webview",
+          "id": "keepseek.chatSecondaryView",
+          "name": "KeepSeek",
+          "when": "!keepseek.doesNotSupportSecondarySidebar"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "keepseek.addSelectionToContext",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "editorHasSelection && editorTextFocus"
+      },
+      {
+        "command": "keepseek.addExplorerFileToContext",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "explorerViewletFocus && !explorerResourceIsFolder"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "keepseek.addSelectionToContext",
+          "when": "editorHasSelection",
+          "group": "keepseek@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "keepseek.addExplorerFileToContext",
+          "when": "!explorerResourceIsFolder",
+          "group": "keepseek@1"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.26.0",
+    "@types/node": "^22.15.18",
+    "@types/vscode": "^1.100.0",
+    "@vscode/vsce": "^3.3.2",
+    "eslint": "^9.26.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.32.1"
+  }
+}
