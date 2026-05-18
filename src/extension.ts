@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { clampColumn, clampLine, expandFileReferencesInPrompt, getExplorerFileUris } from './fileReference';
 import { AgentRunner } from './agentRunner';
 import { FileContextStore } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
@@ -17,82 +17,6 @@ const SECONDARY_CONTAINER_ID = 'keepseek-secondary';
 const SECONDARY_VIEW_TYPE = 'keepseek.chatSecondaryView';
 const MIN_SECONDARY_SIDEBAR_VERSION = { major: 1, minor: 106 };
 const DOES_NOT_SUPPORT_SECONDARY_SIDEBAR_CONTEXT = 'keepseek.doesNotSupportSecondarySidebar';
-const FILE_REFERENCE_PATTERN = /<([^<>\n]+)>/gu;
-const FILE_REFERENCE_LINE_PATTERN = /^(?<path>.+)#L(?<startLine>\d+)(?:-L(?<endLine>\d+))?$/u;
-const SKIPPED_REFERENCE_EXTENSIONS = new Set([
-  '.3gp',
-  '.7z',
-  '.aac',
-  '.ai',
-  '.avi',
-  '.avif',
-  '.bmp',
-  '.bz2',
-  '.class',
-  '.dll',
-  '.dmg',
-  '.doc',
-  '.docx',
-  '.dylib',
-  '.eot',
-  '.exe',
-  '.fig',
-  '.flac',
-  '.flv',
-  '.gif',
-  '.gz',
-  '.heic',
-  '.heif',
-  '.icns',
-  '.ico',
-  '.jar',
-  '.jpeg',
-  '.jpg',
-  '.m4a',
-  '.mkv',
-  '.mov',
-  '.mp3',
-  '.mp4',
-  '.ogg',
-  '.otf',
-  '.pdf',
-  '.png',
-  '.psd',
-  '.rar',
-  '.sketch',
-  '.so',
-  '.svg',
-  '.tar',
-  '.tif',
-  '.tiff',
-  '.ttf',
-  '.wasm',
-  '.wav',
-  '.webm',
-  '.webp',
-  '.wmv',
-  '.woff',
-  '.woff2',
-  '.xz',
-  '.zip'
-]);
-
-interface PromptFileReference {
-  matchStart: number;
-  matchEnd: number;
-  replacementStart: number;
-  target: string;
-  uri: vscode.Uri;
-  startLine: number;
-  endLine: number;
-}
-
-interface ExpandedFileReference {
-  heading: string;
-  content: string;
-  languageId: string;
-}
-
 type WebviewMessage =
   | { type: 'ready' }
   | { type: 'sendPrompt'; prompt: string; modelId: string }
@@ -100,7 +24,7 @@ type WebviewMessage =
   | { type: 'pickWorkspaceFiles' }
   | { type: 'pickExternalFiles' }
   | { type: 'readPath'; path: string }
-  | { type: 'openFileReference'; path: string; startLine: number; endLine: number }
+  | { type: 'openFileReference'; path: string; startLine: number; endLine: number; startColumn: number; endColumn: number }
   | { type: 'removeContextFile'; uri: string }
   | { type: 'clearContext' }
   | { type: 'applyDraftEdit'; id: string }
@@ -179,10 +103,12 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
     const startLine = editor.selection.start.line + 1;
     const endLine = editor.selection.end.line + 1;
+    const startColumn = editor.selection.start.character + 1;
+    const endColumn = editor.selection.end.character + 1;
     const path = editor.document.uri.fsPath;
 
     await this.reveal();
-    this.postToWebview({ type: 'insertFileReference', path, startLine, endLine });
+    this.postToWebview({ type: 'insertFileReference', path, startLine, endLine, startColumn, endColumn });
   }
 
   public async insertExplorerFileToInput(uri?: vscode.Uri, selectedUris?: vscode.Uri[]): Promise<void> {
@@ -258,7 +184,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.readPathToContext(message.path);
         return;
       case 'openFileReference':
-        await this.openFileReference(message.path, message.startLine, message.endLine);
+        await this.openFileReference(message.path, message.startLine, message.endLine, message.startColumn, message.endColumn);
         return;
       case 'removeContextFile':
         this.fileContext.remove(message.uri);
@@ -287,7 +213,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async openFileReference(rawPath: string, rawStartLine: number, rawEndLine: number): Promise<void> {
+  private async openFileReference(rawPath: string, rawStartLine: number, rawEndLine: number, rawStartColumn: number, rawEndColumn: number): Promise<void> {
     try {
       const trimmedPath = rawPath.trim();
       if (!trimmedPath) {
@@ -312,8 +238,12 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
       const startLine = clampLine(rawStartLine, 1, document.lineCount);
       const endLine = clampLine(rawEndLine, startLine, document.lineCount);
-      const start = new vscode.Position(startLine - 1, 0);
-      const end = new vscode.Position(endLine - 1, document.lineAt(endLine - 1).range.end.character);
+      const startLineMaxCol = document.lineAt(startLine - 1).range.end.character;
+      const endLineMaxCol = document.lineAt(endLine - 1).range.end.character;
+      const startCol = rawStartColumn > 0 ? clampColumn(rawStartColumn - 1, startLineMaxCol) : 0;
+      const endCol = rawEndColumn > 0 ? clampColumn(rawEndColumn - 1, endLineMaxCol) : endLineMaxCol;
+      const start = new vscode.Position(startLine - 1, startCol);
+      const end = new vscode.Position(endLine - 1, endCol);
 
       await vscode.window.showTextDocument(document, {
         preview: true,
@@ -607,276 +537,6 @@ function parseMajorMinorVersion(version: string): { major: number; minor: number
     major: Number(match.groups.major),
     minor: Number(match.groups.minor)
   };
-}
-
-function clampLine(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) {
-    return min;
-  }
-  return Math.min(Math.max(Math.floor(value), min), max);
-}
-
-function getExplorerFileUris(uri?: vscode.Uri, selectedUris?: vscode.Uri[]): vscode.Uri[] {
-  const sourceUris = selectedUris?.length ? selectedUris : uri ? [uri] : [];
-  const seen = new Set<string>();
-  const fileUris: vscode.Uri[] = [];
-
-  for (const sourceUri of sourceUris) {
-    if (!(sourceUri instanceof vscode.Uri)) {
-      continue;
-    }
-
-    const key = sourceUri.toString();
-    if (seen.has(key)) {
-      continue;
-    }
-
-    seen.add(key);
-    fileUris.push(sourceUri);
-  }
-
-  return fileUris;
-}
-
-async function expandFileReferencesInPrompt(prompt: string): Promise<string> {
-  const references = findPromptFileReferences(prompt);
-  if (!references.length) {
-    return prompt;
-  }
-
-  let expandedPrompt = '';
-  let cursor = 0;
-
-  for (const reference of references) {
-    if (reference.replacementStart < cursor) {
-      continue;
-    }
-
-    const expandedReference = await expandPromptFileReference(prompt, reference);
-    if (!expandedReference) {
-      continue;
-    }
-
-    expandedPrompt += prompt.slice(cursor, reference.replacementStart);
-    expandedPrompt += withPromptBlockBoundaries(prompt, reference.replacementStart, reference.matchEnd, expandedReference);
-    cursor = reference.matchEnd;
-  }
-
-  return expandedPrompt + prompt.slice(cursor);
-}
-
-function findPromptFileReferences(prompt: string): PromptFileReference[] {
-  const references: PromptFileReference[] = [];
-
-  for (const match of prompt.matchAll(FILE_REFERENCE_PATTERN)) {
-    const target = match[1]?.trim();
-    const matchStart = match.index;
-    if (!target || matchStart === undefined) {
-      continue;
-    }
-
-    const parsed = parseFileReferenceTarget(target);
-    if (!parsed) {
-      continue;
-    }
-
-    const matchEnd = matchStart + match[0].length;
-    references.push({
-      matchStart,
-      matchEnd,
-      replacementStart: getFileReferenceReplacementStart(prompt, matchStart, parsed.uri, parsed.startLine, parsed.endLine),
-      target,
-      uri: parsed.uri,
-      startLine: parsed.startLine,
-      endLine: parsed.endLine
-    });
-  }
-
-  return references;
-}
-
-function parseFileReferenceTarget(target: string): { uri: vscode.Uri; startLine: number; endLine: number } | undefined {
-  const lineMatch = FILE_REFERENCE_LINE_PATTERN.exec(target);
-  const referencePath = lineMatch?.groups?.path ?? target;
-  const uri = resolveReferenceUri(referencePath);
-  if (!uri) {
-    return undefined;
-  }
-
-  const startLine = Number(lineMatch?.groups?.startLine ?? 0);
-  const parsedEndLine = Number(lineMatch?.groups?.endLine ?? startLine);
-  const endLine = startLine > 0 ? Math.max(startLine, parsedEndLine) : 0;
-
-  return { uri, startLine, endLine };
-}
-
-function resolveReferenceUri(referencePath: string): vscode.Uri | undefined {
-  const trimmedPath = referencePath.trim();
-  if (!trimmedPath) {
-    return undefined;
-  }
-
-  try {
-    if (/^file:/iu.test(trimmedPath) || /^[a-z][a-z\d+.-]*:\/\//iu.test(trimmedPath)) {
-      return vscode.Uri.parse(trimmedPath);
-    }
-  } catch {
-    return undefined;
-  }
-
-  const expandedPath = trimmedPath.replace(/^~(?=$|[/\\])/, os.homedir());
-  if (path.isAbsolute(expandedPath)) {
-    return vscode.Uri.file(expandedPath);
-  }
-
-  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-  if (workspaceRoot) {
-    return vscode.Uri.joinPath(workspaceRoot, ...expandedPath.split(/[\\/]+/).filter(Boolean));
-  }
-
-  return vscode.Uri.file(path.resolve(expandedPath));
-}
-
-function getFileReferenceReplacementStart(
-  prompt: string,
-  matchStart: number,
-  uri: vscode.Uri,
-  startLine: number,
-  endLine: number
-): number {
-  const fileName = getUriFileName(uri);
-  const prefix = prompt.slice(0, matchStart);
-  const labels = startLine > 0 ? [`${fileName} (${formatReferenceLineLabel(startLine, endLine)}) `] : [];
-  labels.push(`${fileName} (全文) `, `${fileName} `);
-
-  for (const label of labels) {
-    if (prefix.endsWith(label)) {
-      return matchStart - label.length;
-    }
-  }
-
-  return matchStart;
-}
-
-async function expandPromptFileReference(
-  prompt: string,
-  reference: PromptFileReference
-): Promise<string | undefined> {
-  if (shouldSkipReferenceUri(reference.uri)) {
-    return undefined;
-  }
-
-  try {
-    const stat = await vscode.workspace.fs.stat(reference.uri);
-    if (stat.type !== vscode.FileType.File) {
-      return undefined;
-    }
-
-    if (reference.startLine <= 0 && stat.size > getReferenceExpansionMaxBytes()) {
-      return undefined;
-    }
-
-    const document = await vscode.workspace.openTextDocument(reference.uri);
-    const content = getReferenceDocumentText(document, reference.startLine, reference.endLine);
-    if (!isReadableTextContent(content) || exceedsReferenceExpansionLimit(content)) {
-      return undefined;
-    }
-
-    return formatExpandedFileReference({
-      heading: prompt.slice(reference.replacementStart, reference.matchEnd).trim(),
-      content,
-      languageId: getMarkdownFenceLanguage(document)
-    });
-  } catch {
-    return undefined;
-  }
-}
-
-function getReferenceDocumentText(document: vscode.TextDocument, rawStartLine: number, rawEndLine: number): string {
-  if (rawStartLine <= 0) {
-    return document.getText();
-  }
-
-  const startLine = clampLine(rawStartLine, 1, document.lineCount);
-  const endLine = clampLine(rawEndLine, startLine, document.lineCount);
-  const start = new vscode.Position(startLine - 1, 0);
-  const end = new vscode.Position(endLine - 1, document.lineAt(endLine - 1).range.end.character);
-  return document.getText(new vscode.Range(start, end));
-}
-
-function shouldSkipReferenceUri(uri: vscode.Uri): boolean {
-  return SKIPPED_REFERENCE_EXTENSIONS.has(path.extname(uri.fsPath || uri.path).toLowerCase());
-}
-
-function getMarkdownFenceLanguage(document: vscode.TextDocument): string {
-  const languageById: Record<string, string> = {
-    bat: 'batch',
-    javascriptreact: 'jsx',
-    plaintext: 'text',
-    shellscript: 'bash',
-    typescriptreact: 'tsx'
-  };
-  const language = languageById[document.languageId] ?? document.languageId;
-  return language.replace(/[^\w+.-]/gu, '') || 'text';
-}
-
-function formatExpandedFileReference(reference: ExpandedFileReference): string {
-  const content = reference.content.replace(/\r\n?/gu, '\n');
-  const fence = getMarkdownFence(content);
-  const fencedContent = content.endsWith('\n') ? content : `${content}\n`;
-  return `${reference.heading}\n${fence}${reference.languageId}\n${fencedContent}${fence}`;
-}
-
-function getMarkdownFence(content: string): string {
-  const runs = content.match(/`+/gu) ?? [];
-  const longestRun = runs.reduce((max, run) => Math.max(max, run.length), 0);
-  return '`'.repeat(Math.max(3, longestRun + 1));
-}
-
-function withPromptBlockBoundaries(prompt: string, start: number, end: number, block: string): string {
-  const needsLeadingBreak = start > 0 && !isLineBreak(prompt.charAt(start - 1));
-  const needsTrailingBreak = end < prompt.length && !isLineBreak(prompt.charAt(end));
-  return `${needsLeadingBreak ? '\n' : ''}${block}${needsTrailingBreak ? '\n' : ''}`;
-}
-
-function isLineBreak(value: string): boolean {
-  return value === '\n' || value === '\r';
-}
-
-function isReadableTextContent(content: string): boolean {
-  const sample = content.slice(0, 8192);
-  if (!sample) {
-    return true;
-  }
-
-  let suspiciousCharacters = 0;
-  for (let i = 0; i < sample.length; i += 1) {
-    const code = sample.charCodeAt(i);
-    if (code === 0 || code === 0xfffd || (code < 32 && code !== 9 && code !== 10 && code !== 12 && code !== 13)) {
-      suspiciousCharacters += 1;
-    }
-  }
-
-  return suspiciousCharacters / sample.length < 0.03;
-}
-
-function exceedsReferenceExpansionLimit(content: string): boolean {
-  return new TextEncoder().encode(content).byteLength > getReferenceExpansionMaxBytes();
-}
-
-function getReferenceExpansionMaxBytes(): number {
-  return vscode.workspace.getConfiguration('keepseek').get('maxFileBytes', 200_000);
-}
-
-function getUriFileName(uri: vscode.Uri): string {
-  return path.basename(uri.fsPath || uri.path) || uri.fsPath || uri.path || 'file';
-}
-
-function formatReferenceLineLabel(startLine: number, endLine: number): string {
-  if (startLine === endLine) {
-    return `第${startLine}行`;
-  }
-  return `第${startLine}-${endLine}行`;
 }
 
 function getConfiguredModels(): KeepseekModel[] {
