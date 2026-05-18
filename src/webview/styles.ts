@@ -348,7 +348,7 @@ export function getStyles(): string {
       min-height: 0;
       overflow-y: auto;
       padding: 12px;
-      background: var(--vscode-editor-background);
+      background: transparent;
     }
 
     .transcript-empty {
@@ -409,7 +409,7 @@ export function getStyles(): string {
     .composer {
       border-top: 1px solid var(--vscode-panel-border);
       background: var(--vscode-sideBar-background);
-      padding: 8px;
+      padding: 4px 4px;
     }
 
     .composer-input-wrap {
