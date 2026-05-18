@@ -109,9 +109,9 @@ export function getStyles(): string {
 
     textarea,
     .rich-input {
-      min-height: 40px;
-      max-height: 200px;
-      padding: 8px 10px;
+      min-height: 56px;
+      max-height: 220px;
+      padding: 10px 12px 6px;
       line-height: 1.45;
       font-size: 13px;
       border: none;
@@ -137,12 +137,15 @@ export function getStyles(): string {
     }
 
     .rich-input {
-      flex: 1;
+      display: block;
+      width: 100%;
+      flex: 0 0 auto;
       overflow-y: auto;
       color: var(--vscode-input-foreground);
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       user-select: text;
+      caret-color: var(--vscode-input-foreground);
     }
 
     .rich-input.is-empty::before {
@@ -152,12 +155,26 @@ export function getStyles(): string {
     }
 
     .rich-file-link {
+      display: inline-flex;
+      align-items: center;
+      max-width: 100%;
+      min-height: 20px;
+      margin: 0 2px 2px 0;
+      padding: 1px 6px;
+      border: 1px solid var(--vscode-inputOption-activeBorder, var(--vscode-panel-border));
+      border-radius: 4px;
+      background: var(--vscode-chat-slashCommandBackground, var(--vscode-badge-background, var(--vscode-editor-background)));
       color: var(--vscode-textLink-foreground);
-      text-decoration: underline;
+      text-decoration: none;
+      font-size: 12px;
+      line-height: 18px;
+      vertical-align: baseline;
+      white-space: nowrap;
       cursor: pointer;
     }
 
     .rich-file-link:hover {
+      background: var(--vscode-toolbar-hoverBackground);
       color: var(--vscode-textLink-activeForeground);
     }
 
@@ -392,17 +409,21 @@ export function getStyles(): string {
     .composer {
       border-top: 1px solid var(--vscode-panel-border);
       background: var(--vscode-sideBar-background);
+      padding: 8px;
     }
 
     .composer-input-wrap {
-      padding: 8px 12px 6px;
+      padding: 0;
     }
 
     .composer-input-inner {
       display: flex;
-      border: 1px solid var(--vscode-input-border, transparent);
+      flex-direction: column;
+      min-height: 116px;
+      border: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-border, transparent));
       border-radius: 6px;
-      background: var(--vscode-input-background);
+      overflow: hidden;
+      background: var(--vscode-chat-requestBackground, var(--vscode-input-background));
     }
 
     .composer-input-inner:focus-within {
@@ -411,35 +432,103 @@ export function getStyles(): string {
 
     .composer-input-inner textarea,
     .composer-input-inner .rich-input {
-      flex: 1;
-      min-height: 40px;
+      flex: 0 0 auto;
+      min-height: 74px;
+      padding: 10px 12px 6px;
+      background: transparent;
     }
 
-    .composer-footer {
+    .composer-toolbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 4px 12px 8px;
+      gap: 8px;
+      min-height: 32px;
+      padding: 0 8px 8px;
     }
 
-    .composer-shortcut {
-      font-size: 11px;
-      color: var(--vscode-descriptionForeground);
-      opacity: 0.7;
+    .composer-toolbar-left {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      min-width: 0;
+      flex: 1;
     }
 
+    .composer-icon-btn,
+    .composer-mode-btn,
     .composer-send-btn {
       display: inline-flex;
       align-items: center;
-      gap: 4px;
-      padding: 4px 14px;
-      min-height: 28px;
-      font-size: 12px;
-      font-weight: 500;
+      justify-content: center;
+      border: none;
       border-radius: 4px;
+      background: transparent;
+      color: var(--vscode-icon-foreground, var(--vscode-descriptionForeground));
+      cursor: pointer;
     }
 
+    .composer-icon-btn,
+    .composer-send-btn {
+      width: 24px;
+      min-width: 24px;
+      height: 24px;
+      min-height: 24px;
+      padding: 0;
+    }
+
+    .composer-mode-btn {
+      gap: 4px;
+      min-height: 24px;
+      padding: 0 6px;
+      font-size: 12px;
+      color: var(--vscode-foreground);
+    }
+
+    .composer-mode-btn::after {
+      content: "";
+      width: 0;
+      height: 0;
+      border-left: 3.5px solid transparent;
+      border-right: 3.5px solid transparent;
+      border-top: 4px solid currentColor;
+      opacity: 0.7;
+    }
+
+    .composer-icon-btn:hover,
+    .composer-mode-btn:hover,
+    .composer-send-btn:hover:not(:disabled) {
+      color: var(--vscode-foreground);
+      background: var(--vscode-toolbar-hoverBackground);
+    }
+
+    .composer-icon-btn:focus-visible,
+    .composer-mode-btn:focus-visible,
+    .composer-send-btn:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 1px;
+    }
+
+    .composer-toolbar-separator {
+      width: 1px;
+      height: 14px;
+      margin: 0 4px;
+      background: var(--vscode-panel-border);
+      opacity: 0.75;
+    }
+
+    .composer-send-btn {
+      flex: 0 0 auto;
+      margin-left: auto;
+    }
+
+    .composer-status,
     #status {
+      min-width: 0;
+      margin-left: 6px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
       font-size: 11px;
       color: var(--vscode-descriptionForeground);
     }

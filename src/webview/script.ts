@@ -646,7 +646,9 @@ export function getScript(): string {
       function updatePromptVisualState() {
         promptInput.style.height = 'auto';
         promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + 'px';
-        promptInput.classList.toggle('is-empty', isPromptEmpty());
+        var isEmpty = isPromptEmpty();
+        promptInput.classList.toggle('is-empty', isEmpty);
+        sendButton.disabled = state.isBusy || isEmpty;
       }
 
       function isPromptEmpty() {
@@ -747,7 +749,7 @@ export function getScript(): string {
       renderDraftEdits();
       renderTranscript();
       renderStatus();
-      sendButton.disabled = state.isBusy;
+      sendButton.disabled = state.isBusy || promptInput.classList.contains('is-empty');
     }
 
     function renderStatus() {
