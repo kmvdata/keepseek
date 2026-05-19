@@ -33,6 +33,22 @@ export function getScript(): string {
     let transientStatusTimer = 0;
     let sessionMenuOpen = false;
 
+    transcript.addEventListener('click', function(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      var link = target?.closest('a.message-file-link');
+      if (!link || !transcript.contains(link)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      vscode.postMessage({
+        type: 'openFileReference',
+        path: link.dataset.path || '',
+        startLine: readReferenceInteger(link.dataset.startLine, 0),
+        endLine: readReferenceInteger(link.dataset.endLine, 0),
+        startColumn: readReferenceInteger(link.dataset.startColumn, 0),
+        endColumn: readReferenceInteger(link.dataset.endColumn, 0)
+      });
+    });
+
     draftList.addEventListener('click', function(event) {
       var target = event.target instanceof Element ? event.target : null;
       var button = target?.closest('button[data-edit-id]');
@@ -326,7 +342,7 @@ export function getScript(): string {
 
         var content = document.createElement('div');
         content.className = 'message-content';
-        content.textContent = message.content;
+        renderMessageContent(content, message.content, message.role === 'user');
 
         item.append(role);
         if (message.role === 'assistant' && message.reasoningContent) {
@@ -346,6 +362,356 @@ export function getScript(): string {
       if (shouldStick) {
         transcript.scrollTop = transcript.scrollHeight;
       }
+    }
+
+    function renderMessageContent(container, value, hideExpandedReferences) {
+      var text = String(value || '');
+      var pattern = /<([^<>\\n]+)>/g;
+      var cursor = 0;
+      var match;
+
+      while ((match = pattern.exec(text)) !== null) {
+        var target = (match[1] || '').trim();
+        var reference = parseMessageFileReference(target);
+        if (!reference) {
+          continue;
+        }
+
+        var label = getMessageReferenceLabel(text, match.index, reference);
+        if (label.start < cursor) {
+          continue;
+        }
+
+        appendMessageText(container, text.slice(cursor, label.start));
+        container.append(createMessageFileLink(reference, label.text));
+        cursor = match.index + match[0].length;
+        if (hideExpandedReferences) {
+          var hiddenBlockEnd = getExpandedReferenceBlockEnd(text, cursor);
+          if (hiddenBlockEnd > cursor) {
+            cursor = hiddenBlockEnd;
+            if (cursor < text.length) {
+              appendMessageText(container, String.fromCharCode(10));
+            }
+          }
+        }
+      }
+
+      appendMessageText(container, text.slice(cursor));
+    }
+
+    function getExpandedReferenceBlockEnd(text, start) {
+      var cursor = start;
+      if (text.charAt(cursor) === String.fromCharCode(13)) {
+        cursor += 1;
+      }
+      if (text.charAt(cursor) !== String.fromCharCode(10)) {
+        return start;
+      }
+      cursor += 1;
+
+      var fenceLineEnd = getLineEndIndex(text, cursor);
+      var fenceLine = text.slice(cursor, fenceLineEnd).trim();
+      var fenceMatch = /^(\`{3,}|~{3,})[\\w+.-]*$/.exec(fenceLine);
+      if (!fenceMatch) {
+        return start;
+      }
+
+      var fence = fenceMatch[1];
+      cursor = getNextLineStart(text, fenceLineEnd);
+      while (cursor < text.length) {
+        var lineEnd = getLineEndIndex(text, cursor);
+        var line = text.slice(cursor, lineEnd).trim();
+        if (line === fence) {
+          return getNextLineStart(text, lineEnd);
+        }
+        cursor = getNextLineStart(text, lineEnd);
+      }
+
+      return start;
+    }
+
+    function getLineEndIndex(text, start) {
+      var lineFeed = text.indexOf(String.fromCharCode(10), start);
+      var carriageReturn = text.indexOf(String.fromCharCode(13), start);
+      if (lineFeed < 0) return carriageReturn < 0 ? text.length : carriageReturn;
+      if (carriageReturn < 0) return lineFeed;
+      return Math.min(lineFeed, carriageReturn);
+    }
+
+    function getNextLineStart(text, lineEnd) {
+      var cursor = lineEnd;
+      if (text.charAt(cursor) === String.fromCharCode(13)) {
+        cursor += 1;
+      }
+      if (text.charAt(cursor) === String.fromCharCode(10)) {
+        cursor += 1;
+      }
+      return cursor;
+    }
+
+    function appendMessageText(container, text) {
+      if (!text) return;
+      container.append(document.createTextNode(text));
+    }
+
+    function createMessageFileLink(reference, label) {
+      var anchor = document.createElement('a');
+      var href = makeMessageFileHref(reference);
+      anchor.className = 'rich-file-link message-file-link';
+      anchor.href = href;
+      anchor.title = href;
+      anchor.draggable = false;
+      anchor.textContent = label;
+      anchor.dataset.path = reference.path;
+      anchor.dataset.startLine = String(reference.startLine);
+      anchor.dataset.endLine = String(reference.endLine);
+      anchor.dataset.startColumn = String(reference.startColumn || 0);
+      anchor.dataset.endColumn = String(reference.endColumn || 0);
+      return anchor;
+    }
+
+    function parseMessageFileReference(target) {
+      if (hasNonFileUriScheme(target)) {
+        return null;
+      }
+      var reference = target.toLowerCase().indexOf('file:') === 0
+        ? parseMessageFileUri(target)
+        : splitMessageLineReference(target);
+      if (!reference || !isLikelyMessageFilePath(reference.path, target)) {
+        return null;
+      }
+      if (reference.startLine > 0 && reference.endLine < reference.startLine) {
+        reference.endLine = reference.startLine;
+      }
+      return reference;
+    }
+
+    function hasNonFileUriScheme(value) {
+      var match = /^[a-z][a-z\\d+.-]*:\\/\\//i.exec(String(value || '').trim());
+      return Boolean(match && match[0].toLowerCase().indexOf('file:') !== 0);
+    }
+
+    function parseMessageFileUri(target) {
+      try {
+        var url = new URL(target);
+        if (url.protocol !== 'file:') {
+          return null;
+        }
+        var parsed = parseMessageLineRange(url.hash ? url.hash.slice(1) : '');
+        var pathName = decodeURIComponent(url.pathname);
+        var filePath = url.hostname ? '//' + url.hostname + pathName : pathName;
+        if (filePath.charAt(0) === '/' && isMessageWindowsDrivePath(filePath.slice(1))) {
+          filePath = filePath.slice(1);
+        }
+        return {
+          path: filePath,
+          startLine: parsed.valid ? parsed.startLine : 0,
+          endLine: parsed.valid ? parsed.endLine : 0,
+          startColumn: parsed.valid ? parsed.startColumn : 0,
+          endColumn: parsed.valid ? parsed.endColumn : 0
+        };
+      } catch {
+        return splitMessageLineReference(target);
+      }
+    }
+
+    function splitMessageLineReference(value) {
+      var text = String(value || '').trim();
+      for (var i = text.length - 1; i >= 0; i--) {
+        if (text.charAt(i) !== '#') continue;
+        var parsed = parseMessageLineRange(text.slice(i + 1));
+        if (parsed.valid) {
+          return {
+            path: text.slice(0, i),
+            startLine: parsed.startLine,
+            endLine: parsed.endLine,
+            startColumn: parsed.startColumn,
+            endColumn: parsed.endColumn
+          };
+        }
+      }
+      return { path: text, startLine: 0, endLine: 0, startColumn: 0, endColumn: 0 };
+    }
+
+    function parseMessageLineRange(fragment) {
+      var text = String(fragment || '').trim();
+      if (!text) {
+        return { valid: false, startLine: 0, endLine: 0, startColumn: 0, endColumn: 0 };
+      }
+      if (text.charAt(0).toLowerCase() === 'l') {
+        text = text.slice(1);
+      }
+
+      var start = readLeadingReferenceInteger(text);
+      if (!start.valid) {
+        return { valid: false, startLine: 0, endLine: 0, startColumn: 0, endColumn: 0 };
+      }
+
+      var startLine = start.value;
+      var startColumn = 0;
+      var rest = start.rest;
+
+      if (rest.charAt(0).toLowerCase() === 'c') {
+        var col = readLeadingReferenceInteger(rest.slice(1));
+        if (col.valid) {
+          startColumn = col.value;
+          rest = col.rest;
+        }
+      }
+
+      if (rest.charAt(0) !== '-' && rest.charAt(0) !== ',' && rest.charAt(0) !== ':') {
+        return { valid: true, startLine: startLine, endLine: startLine, startColumn: startColumn, endColumn: startColumn };
+      }
+
+      rest = rest.slice(1);
+      var endLine = startLine;
+      var endColumn = 0;
+
+      if (rest.charAt(0).toLowerCase() === 'l') {
+        var endLineResult = readLeadingReferenceInteger(rest.slice(1));
+        if (endLineResult.valid) {
+          endLine = endLineResult.value;
+          rest = endLineResult.rest;
+          if (rest.charAt(0).toLowerCase() === 'c') {
+            var endColResult = readLeadingReferenceInteger(rest.slice(1));
+            if (endColResult.valid) {
+              endColumn = endColResult.value;
+            }
+          }
+        }
+      } else if (rest.charAt(0).toLowerCase() === 'c') {
+        var sameLineCol = readLeadingReferenceInteger(rest.slice(1));
+        if (sameLineCol.valid) {
+          endColumn = sameLineCol.value;
+        }
+      } else {
+        var endResult = readLeadingReferenceInteger(rest);
+        if (endResult.valid) {
+          endLine = endResult.value;
+        }
+      }
+
+      return {
+        valid: true,
+        startLine: startLine,
+        endLine: Math.max(startLine, endLine),
+        startColumn: startColumn,
+        endColumn: endColumn
+      };
+    }
+
+    function readLeadingReferenceInteger(value) {
+      var digits = '';
+      for (var i = 0; i < value.length; i++) {
+        var code = value.charCodeAt(i);
+        if (code < 48 || code > 57) break;
+        digits += value.charAt(i);
+      }
+      if (!digits) {
+        return { valid: false, value: 0, rest: value };
+      }
+      return {
+        valid: true,
+        value: Math.max(1, Number(digits)),
+        rest: value.slice(digits.length)
+      };
+    }
+
+    function getMessageReferenceLabel(text, matchStart, reference) {
+      var fileName = getMessageFileName(reference.path);
+      var labels = reference.startLine > 0
+        ? [fileName + ' (' + formatMessageLineLabel(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn) + ')']
+        : [];
+      labels.push(fileName + ' (全文)', fileName);
+
+      var prefix = text.slice(0, matchStart);
+      for (var i = 0; i < labels.length; i++) {
+        var labelWithSpace = labels[i] + ' ';
+        if (prefix.endsWith(labelWithSpace)) {
+          return {
+            start: matchStart - labelWithSpace.length,
+            text: labels[i]
+          };
+        }
+      }
+
+      return {
+        start: matchStart,
+        text: reference.startLine > 0
+          ? fileName + ' (' + formatMessageLineLabel(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn) + ')'
+          : fileName
+      };
+    }
+
+    function makeMessageFileHref(reference) {
+      if (reference.startLine <= 0) {
+        return reference.path;
+      }
+      var fragment = '#L' + reference.startLine;
+      if (reference.startColumn > 0) {
+        fragment += 'C' + reference.startColumn;
+      }
+      if (reference.endLine !== reference.startLine) {
+        fragment += '-L' + reference.endLine;
+        if (reference.endColumn > 0) {
+          fragment += 'C' + reference.endColumn;
+        }
+      } else if (reference.startColumn > 0 && reference.endColumn > reference.startColumn) {
+        fragment += '-C' + reference.endColumn;
+      }
+      return reference.path + fragment;
+    }
+
+    function formatMessageLineLabel(startLine, endLine, startColumn, endColumn) {
+      if (startLine === endLine) {
+        if (startColumn > 0) {
+          var colEnd = endColumn > startColumn ? endColumn : 0;
+          if (colEnd > 0) {
+            return '\\u7b2c' + startLine + '\\u884c\\u7b2c' + startColumn + '-' + colEnd + '\\u5217';
+          }
+          return '\\u7b2c' + startLine + '\\u884c\\u7b2c' + startColumn + '\\u5217\\u8d77';
+        }
+        return '\\u7b2c' + startLine + '\\u884c';
+      }
+      if (startColumn > 0 || endColumn > 0) {
+        var startCol = startColumn > 0 ? '\\u7b2c' + startColumn + '\\u5217' : '';
+        var endCol = endColumn > 0 ? '\\u7b2c' + endColumn + '\\u5217' : '';
+        return '\\u7b2c' + startLine + '\\u884c' + startCol + '-\\u7b2c' + endLine + '\\u884c' + endCol;
+      }
+      return '\\u7b2c' + startLine + '-' + endLine + '\\u884c';
+    }
+
+    function getMessageFileName(filePath) {
+      var normalized = String(filePath || '').split(String.fromCharCode(92)).join('/');
+      var parts = normalized.split('/');
+      return parts[parts.length - 1] || normalized || 'file';
+    }
+
+    function isLikelyMessageFilePath(path, rawTarget) {
+      var value = String(path || '').trim();
+      var target = String(rawTarget || '').trim();
+      if (!value) return false;
+      if (target.toLowerCase().indexOf('file:') === 0) return true;
+      if (value.charAt(0) === '/' || value.charAt(0) === '~') return true;
+      if (value.indexOf('./') === 0 || value.indexOf('../') === 0) return true;
+      if (isMessageWindowsDrivePath(value)) return true;
+      return value.indexOf('/') >= 0 || value.indexOf(String.fromCharCode(92)) >= 0;
+    }
+
+    function isMessageWindowsDrivePath(value) {
+      if (value.length < 3 || value.charAt(1) !== ':') return false;
+      var firstCode = value.charCodeAt(0);
+      var isLetter = (firstCode >= 65 && firstCode <= 90) || (firstCode >= 97 && firstCode <= 122);
+      var separator = value.charAt(2);
+      return isLetter && (separator === '/' || separator === String.fromCharCode(92));
+    }
+
+    function readReferenceInteger(value, fallback) {
+      var number = Number(value);
+      if (!Number.isFinite(number) || number < 1) {
+        return fallback;
+      }
+      return Math.floor(number);
     }
 
     function formatBytes(bytes) {

@@ -449,6 +449,11 @@ export function getStyles(): string {
       padding: 0 2px;
     }
 
+    .message-file-link {
+      margin: 0 3px 2px;
+      vertical-align: text-bottom;
+    }
+
     .message.user .message-content {
       border-left: 2px solid var(--vscode-chat-requestBorder, var(--vscode-textLink-foreground));
       padding-left: 10px;

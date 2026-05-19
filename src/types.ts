@@ -30,6 +30,7 @@ export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
+  expandedContent?: string;
   createdAt: string;
   modelId?: string;
   reasoningContent?: string;
@@ -57,6 +58,15 @@ export interface DraftEdit {
   label: string;
   newText: string;
   reason: string;
+}
+
+export interface ReferenceResource {
+  uri: string;
+  path: string;
+  label: string;
+  description: string;
+  workspaceFolder: string;
+  kind: 'file';
 }
 
 export interface AgentRequest {

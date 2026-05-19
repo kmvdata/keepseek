@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { AgentRequest, AgentResponse, DraftEdit, ReasoningEffort } from './types';
+import { AgentRequest, AgentResponse, ChatMessage, DraftEdit, ReasoningEffort } from './types';
 import { formatBytes } from './fileContext';
 
 const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
@@ -214,7 +214,7 @@ export class AgentRunner {
       .slice(-24);
 
     for (const message of recentHistory) {
-      const content = message.content.trim();
+      const content = this.getMessageContentForAgent(message);
       if (!content) {
         continue;
       }
@@ -226,7 +226,7 @@ export class AgentRunner {
     }
 
     const lastMessage = recentHistory[recentHistory.length - 1];
-    if (!lastMessage || lastMessage.role !== 'user' || lastMessage.content !== request.prompt) {
+    if (!lastMessage || lastMessage.role !== 'user' || this.getMessageContentForAgent(lastMessage) !== request.prompt) {
       messages.push({
         role: 'user',
         content: request.prompt
@@ -234,6 +234,10 @@ export class AgentRunner {
     }
 
     return messages;
+  }
+
+  private getMessageContentForAgent(message: ChatMessage): string {
+    return (message.expandedContent ?? message.content).trim();
   }
 
   private getSystemPrompt(request: AgentRequest): string {

@@ -142,7 +142,7 @@ function findPromptFileReferences(prompt: string): PromptFileReference[] {
 function parseFileReferenceTarget(target: string): { uri: vscode.Uri; startLine: number; endLine: number; startColumn: number; endColumn: number } | undefined {
   const lineMatch = FILE_REFERENCE_LINE_PATTERN.exec(target);
   const referencePath = lineMatch?.groups?.path ?? target;
-  const uri = resolveReferenceUri(referencePath);
+  const uri = resolveFileReferenceUri(referencePath);
   if (!uri) {
     return undefined;
   }
@@ -157,7 +157,7 @@ function parseFileReferenceTarget(target: string): { uri: vscode.Uri; startLine:
   return { uri, startLine, endLine, startColumn, endColumn };
 }
 
-function resolveReferenceUri(referencePath: string): vscode.Uri | undefined {
+export function resolveFileReferenceUri(referencePath: string): vscode.Uri | undefined {
   const trimmedPath = referencePath.trim();
   if (!trimmedPath) {
     return undefined;

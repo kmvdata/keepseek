@@ -94,6 +94,7 @@ export function getInputTemplate(): string {
             </button>
           </section>
         </div>
+        <div id="referenceMenu" class="reference-menu hidden" role="listbox" aria-label="引用工程文件"></div>
       </div>
     </form>
 

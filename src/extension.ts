@@ -2,11 +2,11 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { clampColumn, clampLine, expandFileReferencesInPrompt, getExplorerFileUris } from './fileReference';
+import { clampColumn, clampLine, expandFileReferencesInPrompt, getExplorerFileUris, getUriFileName, resolveFileReferenceUri } from './fileReference';
 import { AgentRunner } from './agentRunner';
 import { FileContextStore } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
-import { AgentSettings, ChatMessage, ChatSession, ChatSessionSummary, DraftEdit, KeepseekModel } from './types';
+import { AgentSettings, ChatMessage, ChatSession, ChatSessionSummary, DraftEdit, KeepseekModel, ReferenceResource } from './types';
 import { getScript } from './webview/script';
 import { getStyles } from './webview/styles';
 import { getTemplate } from './webview/template';
@@ -21,6 +21,7 @@ const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 const SESSION_STORAGE_VERSION = 1;
 const MAX_STORED_SESSIONS = 50;
 const DEFAULT_SESSION_TITLE = '新会话';
+const REFERENCE_RESOURCE_GLOB_EXCLUDE = '**/{.git,.vscode-test,build,coverage,dist,node_modules,out}/**';
 type WebviewMessage =
   | { type: 'ready' }
   | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings> }
@@ -33,6 +34,7 @@ type WebviewMessage =
   | { type: 'addCurrentFile' }
   | { type: 'pickWorkspaceFiles' }
   | { type: 'pickExternalFiles' }
+  | { type: 'requestReferenceResources'; requestId: string }
   | { type: 'readPath'; path: string }
   | { type: 'openFileReference'; path: string; startLine: number; endLine: number; startColumn: number; endColumn: number }
   | { type: 'removeContextFile'; uri: string }
@@ -231,6 +233,9 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'pickExternalFiles':
         await this.pickExternalFilesToContext();
         return;
+      case 'requestReferenceResources':
+        await this.postReferenceResources(message.requestId);
+        return;
       case 'readPath':
         await this.readPathToContext(message.path);
         return;
@@ -366,6 +371,23 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private async postReferenceResources(requestId: string): Promise<void> {
+    try {
+      this.postToWebview({
+        type: 'referenceResources',
+        requestId,
+        resources: await getWorkspaceReferenceResources()
+      });
+    } catch (error) {
+      this.postToWebview({
+        type: 'referenceResources',
+        requestId,
+        resources: [],
+        error: getErrorMessage(error)
+      });
+    }
+  }
+
   private setSelectedModel(modelId: string): void {
     const models = getConfiguredModels();
     if (!models.some((model) => model.id === modelId)) {
@@ -392,9 +414,10 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         throw new Error('File reference has no path.');
       }
 
-      const uri = trimmedPath.toLowerCase().startsWith('file:')
-        ? vscode.Uri.parse(trimmedPath)
-        : vscode.Uri.file(trimmedPath);
+      const uri = resolveFileReferenceUri(trimmedPath);
+      if (!uri) {
+        throw new Error('File reference path is not valid.');
+      }
       const stat = await vscode.workspace.fs.stat(uri);
       if (stat.type === vscode.FileType.Directory) {
         await vscode.commands.executeCommand('revealInExplorer', uri);
@@ -460,13 +483,17 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSession.createdAt = now;
       }
 
-      this.messages.push({
+      const userMessage: ChatMessage = {
         id: randomUUID(),
         role: 'user',
-        content: expandedPrompt,
+        content: trimmedPrompt,
         createdAt: now,
         modelId: model.id
-      });
+      };
+      if (expandedPrompt !== trimmedPrompt) {
+        userMessage.expandedContent = expandedPrompt;
+      }
+      this.messages.push(userMessage);
       activeSession.updatedAt = now;
       this.trimHistory();
       await this.persistSessions();
@@ -560,7 +587,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         models,
         selectedModelId: this.selectedModelId,
         agentSettings: this.agentSettings,
-        messages: this.messages,
+        messages: getVisibleMessages(this.messages),
         activeSessionId: this.activeSessionId,
         sessionSummaries: this.getSessionSummaries(),
         contextFiles: this.fileContext.getAll().map(({ content: _content, ...file }) => file),
@@ -808,10 +835,15 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     id: value.id,
     role,
     content: value.content,
+    expandedContent: typeof value.expandedContent === 'string' ? value.expandedContent : undefined,
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : new Date().toISOString(),
     modelId: typeof value.modelId === 'string' ? value.modelId : undefined,
     reasoningContent: typeof value.reasoningContent === 'string' ? value.reasoningContent : undefined
   };
+}
+
+function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map(({ expandedContent: _expandedContent, ...message }) => message);
 }
 
 function createTitleFromMessages(messages: ChatMessage[]): string {
@@ -854,6 +886,52 @@ function getConfiguredAgentSettings(): AgentSettings {
     thinkingEnabled: config.get<boolean>('thinkingEnabled', true),
     reasoningEffort: config.get<AgentSettings['reasoningEffort']>('reasoningEffort', 'high')
   });
+}
+
+async function getWorkspaceReferenceResources(): Promise<ReferenceResource[]> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (!folders.length) {
+    return [];
+  }
+
+  const includeWorkspaceFolder = folders.length > 1;
+  const resources: ReferenceResource[] = [];
+  const seen = new Set<string>();
+
+  for (const folder of folders) {
+    const uris = await vscode.workspace.findFiles(
+      new vscode.RelativePattern(folder, '**/*'),
+      REFERENCE_RESOURCE_GLOB_EXCLUDE
+    );
+
+    for (const uri of uris) {
+      const key = uri.toString();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+
+      const relativePath = vscode.workspace.asRelativePath(uri, includeWorkspaceFolder);
+      resources.push({
+        uri: key,
+        path: uri.scheme === 'file' ? uri.fsPath : key,
+        label: getUriFileName(uri),
+        description: relativePath,
+        workspaceFolder: folder.name,
+        kind: 'file'
+      });
+    }
+  }
+
+  resources.sort((left, right) => {
+    const labelOrder = left.label.localeCompare(right.label, undefined, { sensitivity: 'base' });
+    if (labelOrder !== 0) {
+      return labelOrder;
+    }
+    return left.description.localeCompare(right.description, undefined, { sensitivity: 'base' });
+  });
+
+  return resources;
 }
 
 function normalizeAgentSettings(settings: Partial<AgentSettings> | undefined, fallback?: AgentSettings): AgentSettings {

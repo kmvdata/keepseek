@@ -205,6 +205,107 @@ export function getInputStyles(): string {
       box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
     }
 
+    .reference-menu {
+      position: absolute;
+      left: 6px;
+      right: 6px;
+      bottom: calc(100% + 6px);
+      z-index: 35;
+      display: flex;
+      flex-direction: column;
+      max-height: min(50vh, 420px);
+      min-height: 72px;
+      overflow: hidden;
+      padding: 6px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 8px;
+      background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
+      color: var(--vscode-quickInput-foreground, var(--vscode-foreground));
+      box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
+    }
+
+    .reference-menu-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex: 0 0 auto;
+      padding: 4px 6px 7px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.2;
+    }
+
+    .reference-menu-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+
+    .reference-menu-count {
+      flex: 0 0 auto;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .reference-menu-list {
+      display: grid;
+      gap: 2px;
+      min-height: 0;
+      overflow-y: auto;
+    }
+
+    .reference-menu-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 1px;
+      width: 100%;
+      min-height: 36px;
+      padding: 5px 8px;
+      border: none;
+      border-radius: 6px;
+      color: var(--vscode-foreground);
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .reference-menu-item:hover,
+    .reference-menu-item:focus-visible,
+    .reference-menu-item.is-active {
+      color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
+      background: var(--vscode-quickInputList-focusBackground, var(--vscode-list-hoverBackground));
+      outline: none;
+    }
+
+    .reference-menu-item-name,
+    .reference-menu-item-path {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .reference-menu-item-name {
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+
+    .reference-menu-item-path {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.25;
+    }
+
+    .reference-menu-empty {
+      padding: 12px 8px 14px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      text-align: center;
+    }
+
     .command-menu-header {
       display: flex;
       align-items: center;

@@ -15,9 +15,20 @@ export function getInputScript(): string {
       var commandEffortValue = document.getElementById('commandEffortValue');
       var commandThinkingToggle = document.getElementById('commandThinkingToggle');
       var commandApiKeyButton = document.getElementById('commandApiKeyButton');
+      var referenceMenu = document.getElementById('referenceMenu');
       var commandMenuOpen = false;
       var commandModelListOpen = false;
+      var referenceMenuOpen = false;
       var activeSlashRange = null;
+      var activeMentionRange = null;
+      var activeMentionQuery = '';
+      var activeReferenceIndex = 0;
+      var referenceResources = [];
+      var referenceResourcesLoading = false;
+      var referenceResourcesLoaded = false;
+      var referenceResourcesError = '';
+      var referenceResourceRequestSequence = 0;
+      var referenceResourceRequestId = '';
       var effortLabels = {
         high: 'High',
         max: 'Max'
@@ -28,6 +39,7 @@ export function getInputScript(): string {
         var prompt = serializePrompt();
         if (!prompt.trim() || state.isBusy) return;
         closeCommandMenu();
+        closeReferenceMenu(false);
         vscode.postMessage({
           type: 'sendPrompt',
           prompt: prompt,
@@ -38,6 +50,30 @@ export function getInputScript(): string {
       });
 
       promptInput.addEventListener('keydown', function(event) {
+        if (event.isComposing || event.keyCode === 229) {
+          return;
+        }
+        if (referenceMenuOpen && event.key === 'Escape') {
+          event.preventDefault();
+          closeReferenceMenu(false);
+          promptInput.focus();
+          return;
+        }
+        if (referenceMenuOpen && event.key === 'ArrowDown') {
+          event.preventDefault();
+          moveReferenceSelection(1);
+          return;
+        }
+        if (referenceMenuOpen && event.key === 'ArrowUp') {
+          event.preventDefault();
+          moveReferenceSelection(-1);
+          return;
+        }
+        if (referenceMenuOpen && (event.key === 'Enter' || event.key === 'Tab')) {
+          event.preventDefault();
+          insertActiveReferenceResource();
+          return;
+        }
         if (commandMenuOpen && event.key === 'Escape') {
           event.preventDefault();
           closeCommandMenu();
@@ -62,6 +98,7 @@ export function getInputScript(): string {
         sanitizePromptLinks();
         updatePromptVisualState();
         savePromptSelection();
+        syncReferenceMenuFromPrompt();
         var slashRange = getSlashTriggerRange();
         if (slashRange) {
           activeSlashRange = slashRange;
@@ -141,6 +178,25 @@ export function getInputScript(): string {
         });
       }
 
+      if (referenceMenu) {
+        referenceMenu.addEventListener('mousedown', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          if (target?.closest('button[data-reference-index]')) {
+            event.preventDefault();
+          }
+        });
+
+        referenceMenu.addEventListener('click', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          var button = target?.closest('button[data-reference-index]');
+          if (!button) { return; }
+          event.preventDefault();
+          event.stopPropagation();
+          var index = readPositiveInteger(button.dataset.referenceIndex, 1) - 1;
+          insertReferenceResourceAtIndex(index);
+        });
+      }
+
       document.addEventListener('mousedown', function(event) {
         if (!commandMenuOpen) { return; }
         var target = event.target instanceof Element ? event.target : null;
@@ -149,6 +205,16 @@ export function getInputScript(): string {
           return;
         }
         closeCommandMenu();
+      });
+
+      document.addEventListener('mousedown', function(event) {
+        if (!referenceMenuOpen) { return; }
+        var target = event.target instanceof Element ? event.target : null;
+        if (!target) { return; }
+        if ((referenceMenu && referenceMenu.contains(target)) || promptInput.contains(target)) {
+          return;
+        }
+        closeReferenceMenu(false);
       });
 
       document.addEventListener('keydown', function(event) {
@@ -161,6 +227,9 @@ export function getInputScript(): string {
       document.addEventListener('selectionchange', function() {
         if (isNodeInsidePrompt(document.activeElement)) {
           savePromptSelection();
+          if (referenceMenuOpen) {
+            syncReferenceMenuFromPrompt();
+          }
         }
       });
 
@@ -222,6 +291,214 @@ export function getInputScript(): string {
           return;
         }
         openCommandMenu();
+      }
+
+      function syncReferenceMenuFromPrompt() {
+        var mention = getMentionTrigger();
+        if (!mention) {
+          closeReferenceMenu(false);
+          return;
+        }
+
+        var previousQuery = activeMentionQuery;
+        activeMentionRange = mention.range;
+        activeMentionQuery = mention.query;
+        if (previousQuery !== activeMentionQuery) {
+          activeReferenceIndex = 0;
+        }
+        if (!referenceMenuOpen) {
+          openReferenceMenu();
+          return;
+        }
+        renderReferenceMenu();
+      }
+
+      function openReferenceMenu() {
+        if (!referenceMenu) { return; }
+        closeCommandMenu();
+        referenceMenuOpen = true;
+        referenceMenu.classList.remove('hidden');
+        requestReferenceResources();
+        renderReferenceMenu();
+      }
+
+      function closeReferenceMenu(restoreFocus) {
+        if (!referenceMenu) { return; }
+        referenceMenuOpen = false;
+        activeMentionRange = null;
+        activeMentionQuery = '';
+        activeReferenceIndex = 0;
+        referenceMenu.classList.add('hidden');
+        referenceMenu.innerHTML = '';
+        if (restoreFocus) {
+          promptInput.focus();
+        }
+      }
+
+      function requestReferenceResources() {
+        if (referenceResourcesLoading) { return; }
+        referenceResourcesLoading = true;
+        referenceResourcesError = '';
+        referenceResourceRequestSequence += 1;
+        referenceResourceRequestId = 'referenceResources:' + referenceResourceRequestSequence + ':' + Date.now();
+        vscode.postMessage({ type: 'requestReferenceResources', requestId: referenceResourceRequestId });
+      }
+
+      function handleReferenceResourcesMessage(message) {
+        if (message.requestId && referenceResourceRequestId && message.requestId !== referenceResourceRequestId) {
+          return;
+        }
+        referenceResourcesLoading = false;
+        referenceResourcesLoaded = true;
+        referenceResourcesError = typeof message.error === 'string' ? message.error : '';
+        referenceResources = Array.isArray(message.resources) ? message.resources : [];
+        renderReferenceMenu();
+      }
+
+      function renderReferenceMenu() {
+        if (!referenceMenu || !referenceMenuOpen) { return; }
+        referenceMenu.innerHTML = '';
+
+        var header = document.createElement('div');
+        header.className = 'reference-menu-header';
+        var title = document.createElement('span');
+        title.className = 'reference-menu-title';
+        title.textContent = '引用文件';
+        var count = document.createElement('span');
+        count.className = 'reference-menu-count';
+        header.append(title, count);
+        referenceMenu.append(header);
+
+        if (referenceResourcesLoading && !referenceResourcesLoaded) {
+          count.textContent = '加载中';
+          appendReferenceMenuNotice('正在加载工程文件...');
+          return;
+        }
+
+        if (referenceResourcesError) {
+          count.textContent = '0';
+          appendReferenceMenuNotice(referenceResourcesError);
+          return;
+        }
+
+        var resources = getFilteredReferenceResources();
+        count.textContent = String(resources.length);
+        if (!resources.length) {
+          appendReferenceMenuNotice(activeMentionQuery ? '没有匹配的文件' : '没有可引用的文件');
+          return;
+        }
+
+        if (activeReferenceIndex >= resources.length) {
+          activeReferenceIndex = resources.length - 1;
+        }
+        if (activeReferenceIndex < 0) {
+          activeReferenceIndex = 0;
+        }
+
+        var list = document.createElement('div');
+        list.className = 'reference-menu-list';
+        for (var i = 0; i < resources.length; i++) {
+          list.append(createReferenceResourceButton(resources[i], i));
+        }
+        referenceMenu.append(list);
+        scrollActiveReferenceIntoView();
+      }
+
+      function appendReferenceMenuNotice(message) {
+        if (!referenceMenu) { return; }
+        var notice = document.createElement('div');
+        notice.className = 'reference-menu-empty';
+        notice.textContent = message;
+        referenceMenu.append(notice);
+      }
+
+      function createReferenceResourceButton(resource, index) {
+        var option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'reference-menu-item' + (index === activeReferenceIndex ? ' is-active' : '');
+        option.dataset.referenceIndex = String(index + 1);
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', index === activeReferenceIndex ? 'true' : 'false');
+
+        var name = document.createElement('span');
+        name.className = 'reference-menu-item-name';
+        name.textContent = getReferenceResourceName(resource);
+        name.title = name.textContent;
+
+        var pathLabel = document.createElement('span');
+        pathLabel.className = 'reference-menu-item-path';
+        pathLabel.textContent = resource.description || resource.path || '';
+        pathLabel.title = pathLabel.textContent;
+
+        option.append(name, pathLabel);
+        return option;
+      }
+
+      function getFilteredReferenceResources() {
+        var query = normalizeReferenceQuery(activeMentionQuery);
+        if (!query) {
+          return referenceResources.slice();
+        }
+        return referenceResources.filter(function(resource) {
+          return normalizeReferenceQuery(getReferenceResourceName(resource)).indexOf(query) === 0;
+        });
+      }
+
+      function normalizeReferenceQuery(value) {
+        return String(value || '').trim().toLocaleLowerCase();
+      }
+
+      function getReferenceResourceName(resource) {
+        return resource.label || getFileName(resource.path || '') || 'file';
+      }
+
+      function moveReferenceSelection(delta) {
+        var resources = getFilteredReferenceResources();
+        if (!resources.length) { return; }
+        activeReferenceIndex = (activeReferenceIndex + delta + resources.length) % resources.length;
+        renderReferenceMenu();
+      }
+
+      function insertActiveReferenceResource() {
+        insertReferenceResourceAtIndex(activeReferenceIndex);
+      }
+
+      function insertReferenceResourceAtIndex(index) {
+        var resources = getFilteredReferenceResources();
+        var resource = resources[index];
+        if (!resource) { return; }
+
+        var reference = {
+          path: resource.path || resource.uri || '',
+          startLine: 0,
+          endLine: 0,
+          startColumn: 0,
+          endColumn: 0
+        };
+        if (!reference.path) { return; }
+
+        var range = activeMentionRange && isRangeInsidePrompt(activeMentionRange)
+          ? activeMentionRange.cloneRange()
+          : getPromptInsertionRange();
+        var fragment = document.createDocumentFragment();
+        if (needsLeadingSpace(range)) {
+          fragment.append(document.createTextNode(' '));
+        }
+        fragment.append(createFileReferenceLink(reference));
+        if (needsTrailingSpace(range)) {
+          fragment.append(document.createTextNode(' '));
+        }
+        insertFragmentAtRange(range, fragment);
+        closeReferenceMenu(true);
+        setComposerStatus('已插入文件引用');
+      }
+
+      function scrollActiveReferenceIntoView() {
+        if (!referenceMenu) { return; }
+        var active = referenceMenu.querySelector('.reference-menu-item.is-active');
+        if (active && active.scrollIntoView) {
+          active.scrollIntoView({ block: 'nearest' });
+        }
       }
 
       function renderCommandMenu() {
@@ -351,6 +628,96 @@ export function getInputScript(): string {
         var previous = textBefore.charAt(textBefore.length - 2);
         if (previous && !isWhitespace(previous)) { return null; }
         return getCharacterRangeBeforeCaret(range, '/');
+      }
+
+      function getMentionTrigger() {
+        var selection = window.getSelection();
+        if (!selection || !selection.rangeCount || !selection.isCollapsed) { return null; }
+        var range = selection.getRangeAt(0);
+        if (!isRangeInsidePrompt(range)) { return null; }
+        var textBefore = getTextBeforeRange(range);
+        var triggerIndex = findMentionTriggerIndex(textBefore);
+        if (triggerIndex < 0) { return null; }
+        var mentionRange = getPromptTextRange(triggerIndex, textBefore.length);
+        if (!mentionRange) { return null; }
+        return {
+          range: mentionRange,
+          query: textBefore.slice(triggerIndex + 1)
+        };
+      }
+
+      function findMentionTriggerIndex(textBefore) {
+        for (var i = textBefore.length - 1; i >= 0; i--) {
+          var character = textBefore.charAt(i);
+          if (character === '@') {
+            return i;
+          }
+          if (isMentionTerminator(character)) {
+            return -1;
+          }
+        }
+        return -1;
+      }
+
+      function isMentionTerminator(character) {
+        return character === '<' || character === '>' || character === String.fromCharCode(10) || character === String.fromCharCode(13) || isWhitespace(character);
+      }
+
+      function getPromptTextRange(startOffset, endOffset) {
+        var range = document.createRange();
+        var cursor = 0;
+        var startSet = false;
+        var endSet = false;
+
+        function visit(node) {
+          if (endSet) { return; }
+          if (node.nodeType === Node.TEXT_NODE) {
+            var text = node.nodeValue || '';
+            var nextCursor = cursor + text.length;
+            if (!startSet && startOffset <= nextCursor) {
+              range.setStart(node, Math.max(0, startOffset - cursor));
+              startSet = true;
+            }
+            if (!endSet && endOffset <= nextCursor) {
+              range.setEnd(node, Math.max(0, endOffset - cursor));
+              endSet = true;
+            }
+            cursor = nextCursor;
+            return;
+          }
+
+          if (node.nodeType !== Node.ELEMENT_NODE) { return; }
+          var element = node;
+          if (element.tagName === 'BR') {
+            if (!startSet && startOffset <= cursor) {
+              range.setStartBefore(element);
+              startSet = true;
+            }
+            if (!endSet && endOffset <= cursor) {
+              range.setEndBefore(element);
+              endSet = true;
+            }
+            cursor += 1;
+            return;
+          }
+
+          var child = node.firstChild;
+          while (child) {
+            visit(child);
+            if (endSet) { return; }
+            child = child.nextSibling;
+          }
+        }
+
+        visit(promptInput);
+        if (!startSet) {
+          range.selectNodeContents(promptInput);
+          range.collapse(false);
+        }
+        if (!endSet) {
+          range.setEnd(range.startContainer, range.startOffset);
+        }
+        return range;
       }
 
       function getCharacterRangeBeforeCaret(caretRange, character) {
@@ -1046,6 +1413,7 @@ export function getInputScript(): string {
 
       function clearPrompt() {
         closeCommandMenu();
+        closeReferenceMenu(false);
         promptInput.innerHTML = '';
         savedPromptRange = null;
         updatePromptVisualState();
@@ -1189,6 +1557,10 @@ export function getInputScript(): string {
 
       window.addEventListener('message', function(event) {
         var msg = event.data;
+        if (msg.type === 'referenceResources') {
+          handleReferenceResourcesMessage(msg);
+          return;
+        }
         if (msg.type !== 'insertFileReference') return;
         var reference = { path: msg.path, startLine: msg.startLine, endLine: msg.endLine, startColumn: msg.startColumn || 0, endColumn: msg.endColumn || 0 };
         var range = getPromptInsertionRange();
