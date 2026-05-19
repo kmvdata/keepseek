@@ -25,6 +25,7 @@ const REFERENCE_RESOURCE_GLOB_EXCLUDE = '**/{.git,.vscode-test,build,coverage,di
 type WebviewMessage =
   | { type: 'ready' }
   | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings> }
+  | { type: 'editUserPrompt'; messageId: string; prompt: string; modelId: string; settings?: Partial<AgentSettings> }
   | { type: 'newSession' }
   | { type: 'selectSession'; sessionId: string }
   | { type: 'setSelectedModel'; modelId: string }
@@ -195,6 +196,9 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'sendPrompt':
         await this.sendPrompt(message.prompt, message.modelId, message.settings);
+        return;
+      case 'editUserPrompt':
+        await this.sendPrompt(message.prompt, message.modelId, message.settings, { replaceMessageId: message.messageId });
         return;
       case 'newSession':
         await this.createNewSession();
@@ -459,10 +463,23 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async sendPrompt(prompt: string, modelId: string, settings?: Partial<AgentSettings>): Promise<void> {
+  private async sendPrompt(
+    prompt: string,
+    modelId: string,
+    settings?: Partial<AgentSettings>,
+    options?: { replaceMessageId?: string }
+  ): Promise<void> {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt || this.isBusy) {
       return;
+    }
+
+    const replaceMessageId = options?.replaceMessageId;
+    if (replaceMessageId) {
+      const targetIndex = this.getActiveSession().messages.findIndex((message) => message.id === replaceMessageId && message.role === 'user');
+      if (targetIndex < 0) {
+        return;
+      }
     }
 
     this.agentSettings = normalizeAgentSettings(settings, this.agentSettings);
@@ -477,8 +494,20 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const expandedPrompt = await expandFileReferencesInPrompt(trimmedPrompt);
       const activeSession = this.getActiveSession();
       const now = new Date().toISOString();
+      const replacementIndex = replaceMessageId
+        ? activeSession.messages.findIndex((message) => message.id === replaceMessageId && message.role === 'user')
+        : -1;
 
-      if (!activeSession.messages.length) {
+      if (replaceMessageId) {
+        if (replacementIndex < 0) {
+          return;
+        }
+        activeSession.messages.splice(replacementIndex);
+        this.draftEdits.clear();
+        if (replacementIndex === 0) {
+          activeSession.title = createSessionTitle(trimmedPrompt);
+        }
+      } else if (!activeSession.messages.length) {
         activeSession.title = createSessionTitle(trimmedPrompt);
         activeSession.createdAt = now;
       }

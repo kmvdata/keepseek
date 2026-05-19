@@ -32,9 +32,20 @@ export function getScript(): string {
     let transientStatus = '';
     let transientStatusTimer = 0;
     let sessionMenuOpen = false;
+    let editingMessageId = '';
+    let editingDraftText = '';
+    let pendingEditFocusId = '';
 
     transcript.addEventListener('click', function(event) {
       var target = event.target instanceof Element ? event.target : null;
+      var actionButton = target?.closest('button[data-message-action]');
+      if (actionButton && transcript.contains(actionButton)) {
+        event.preventDefault();
+        event.stopPropagation();
+        handleMessageAction(actionButton);
+        return;
+      }
+
       var link = target?.closest('a.message-file-link');
       if (!link || !transcript.contains(link)) return;
       event.preventDefault();
@@ -47,6 +58,41 @@ export function getScript(): string {
         startColumn: readReferenceInteger(link.dataset.startColumn, 0),
         endColumn: readReferenceInteger(link.dataset.endColumn, 0)
       });
+    });
+
+    transcript.addEventListener('submit', function(event) {
+      var form = event.target instanceof Element ? event.target.closest('form.message-edit-form') : null;
+      if (!form || !transcript.contains(form)) return;
+      event.preventDefault();
+      submitEditedMessage(form.dataset.messageId || '');
+    });
+
+    transcript.addEventListener('input', function(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      var editor = target?.closest('textarea.message-edit-input');
+      if (!editor || !transcript.contains(editor)) return;
+      if (editor.dataset.messageId === editingMessageId) {
+        editingDraftText = editor.value;
+      }
+      resizeInlineEditor(editor);
+      updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
+    });
+
+    transcript.addEventListener('keydown', function(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      var editor = target?.closest('textarea.message-edit-input');
+      if (!editor || !transcript.contains(editor)) return;
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        cancelEditingMessage();
+        return;
+      }
+
+      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+        event.preventDefault();
+        submitEditedMessage(editor.dataset.messageId || '');
+      }
     });
 
     draftList.addEventListener('click', function(event) {
@@ -123,6 +169,7 @@ export function getScript(): string {
     });
 
     function render() {
+      syncEditingState();
       renderSessionControls();
       renderContextChips();
       renderDraftEdits();
@@ -238,6 +285,129 @@ export function getScript(): string {
       status.textContent = state.isBusy ? '\\u5904\\u7406\\u4e2d...' : transientStatus;
     }
 
+    function setTransientStatus(message) {
+      transientStatus = message;
+      renderStatus();
+      if (transientStatusTimer) {
+        clearTimeout(transientStatusTimer);
+      }
+      transientStatusTimer = setTimeout(function() {
+        transientStatus = '';
+        renderStatus();
+      }, 2200);
+    }
+
+    function syncEditingState() {
+      if (!editingMessageId) return;
+      var message = getMessageById(editingMessageId);
+      if (state.isBusy || !message || message.role !== 'user') {
+        editingMessageId = '';
+        editingDraftText = '';
+        pendingEditFocusId = '';
+      }
+    }
+
+    function getMessageById(messageId) {
+      for (var i = 0; i < state.messages.length; i++) {
+        if (state.messages[i].id === messageId) {
+          return state.messages[i];
+        }
+      }
+      return null;
+    }
+
+    function handleMessageAction(button) {
+      var action = button.dataset.messageAction || '';
+      var messageId = button.dataset.messageId || '';
+      var message = getMessageById(messageId);
+      if (!message) return;
+
+      if (action === 'copy') {
+        copyMessageText(message);
+        return;
+      }
+
+      if (action === 'edit' && message.role === 'user' && !state.isBusy) {
+        editingMessageId = message.id;
+        editingDraftText = String(message.content || '');
+        pendingEditFocusId = message.id;
+        render();
+        return;
+      }
+
+      if (action === 'cancel-edit') {
+        cancelEditingMessage();
+      }
+    }
+
+    function copyMessageText(message) {
+      var text = String(message.content || '');
+      copyTextToClipboard(text).then(function() {
+        setTransientStatus('\\u5df2\\u590d\\u5236');
+      }, function() {
+        setTransientStatus('\\u590d\\u5236\\u5931\\u8d25');
+      });
+    }
+
+    function copyTextToClipboard(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+      }
+
+      return new Promise(function(resolve, reject) {
+        var textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', 'true');
+        textarea.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0';
+        document.body.append(textarea);
+        textarea.select();
+        try {
+          var succeeded = document.execCommand('copy');
+          textarea.remove();
+          succeeded ? resolve() : reject(new Error('copy failed'));
+        } catch (error) {
+          textarea.remove();
+          reject(error);
+        }
+      });
+    }
+
+    function cancelEditingMessage() {
+      editingMessageId = '';
+      editingDraftText = '';
+      pendingEditFocusId = '';
+      render();
+    }
+
+    function submitEditedMessage(messageId) {
+      if (!messageId || messageId !== editingMessageId || state.isBusy) return;
+      var prompt = editingDraftText.trim();
+      if (!prompt) {
+        setTransientStatus('\\u8bf7\\u8f93\\u5165\\u5185\\u5bb9');
+        return;
+      }
+
+      vscode.postMessage({
+        type: 'editUserPrompt',
+        messageId: messageId,
+        prompt: editingDraftText,
+        modelId: state.selectedModelId,
+        settings: getCurrentAgentSettings()
+      });
+      editingMessageId = '';
+      editingDraftText = '';
+      pendingEditFocusId = '';
+      render();
+    }
+
+    function getCurrentAgentSettings() {
+      var configured = state.agentSettings || {};
+      return {
+        thinkingEnabled: typeof configured.thinkingEnabled === 'boolean' ? configured.thinkingEnabled : true,
+        reasoningEffort: configured.reasoningEffort === 'max' ? 'max' : 'high'
+      };
+    }
+
     function renderContextChips() {
       var existing = contextBar.querySelectorAll('.context-chip');
       existing.forEach(function(el) { el.remove(); });
@@ -334,17 +504,18 @@ export function getScript(): string {
       for (var i = 0; i < state.messages.length; i++) {
         var message = state.messages[i];
         var item = document.createElement('article');
-        item.className = 'message ' + message.role;
+        var isEditing = message.role === 'user' && message.id === editingMessageId;
+        item.className = 'message ' + message.role + (isEditing ? ' is-editing' : '');
+        item.dataset.messageId = message.id;
+
+        var body = document.createElement('div');
+        body.className = 'message-body';
 
         var role = document.createElement('div');
         role.className = 'message-role';
         role.textContent = message.role === 'user' ? 'You' : 'KeepSeek';
 
-        var content = document.createElement('div');
-        content.className = 'message-content';
-        renderMessageContent(content, message.content, message.role === 'user');
-
-        item.append(role);
+        body.append(role);
         if (message.role === 'assistant' && message.reasoningContent) {
           var reasoning = document.createElement('details');
           reasoning.className = 'reasoning-block';
@@ -353,15 +524,110 @@ export function getScript(): string {
           var reasoningContent = document.createElement('pre');
           reasoningContent.textContent = message.reasoningContent;
           reasoning.append(summary, reasoningContent);
-          item.append(reasoning);
+          body.append(reasoning);
         }
-        item.append(content);
+
+        if (isEditing) {
+          body.append(createInlineMessageEditor(message));
+        } else {
+          var content = document.createElement('div');
+          content.className = 'message-content';
+          renderMessageContent(content, message.content, message.role === 'user');
+          body.append(content);
+          if (message.role === 'user') {
+            body.append(createUserMessageActions(message));
+          }
+        }
+
+        item.append(body);
         transcript.append(item);
       }
 
       if (shouldStick) {
         transcript.scrollTop = transcript.scrollHeight;
       }
+    }
+
+    function createUserMessageActions(message) {
+      var actions = document.createElement('div');
+      actions.className = 'message-actions';
+
+      actions.append(
+        createMessageActionButton(message, 'copy', '\\u590d\\u5236', '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="7" height="8" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.25"/><path d="M4 11H3.4A1.4 1.4 0 0 1 2 9.6V3.4A1.4 1.4 0 0 1 3.4 2h6.2A1.4 1.4 0 0 1 11 3.4V4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>'),
+        createMessageActionButton(message, 'edit', '\\u7f16\\u8f91\\u5e76\\u91cd\\u53d1', '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 11.95 4 9.2l5.9-5.9a1.45 1.45 0 0 1 2.05 2.05l-5.9 5.9-2.8.7Z" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="m8.95 4.25 2.8 2.8" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>')
+      );
+
+      return actions;
+    }
+
+    function createMessageActionButton(message, action, label, icon) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'message-action-btn';
+      button.dataset.messageAction = action;
+      button.dataset.messageId = message.id;
+      button.title = label;
+      button.setAttribute('aria-label', label);
+      button.disabled = state.isBusy;
+      button.innerHTML = icon;
+      return button;
+    }
+
+    function createInlineMessageEditor(message) {
+      var form = document.createElement('form');
+      form.className = 'message-edit-form';
+      form.dataset.messageId = message.id;
+
+      var editor = document.createElement('textarea');
+      editor.className = 'message-edit-input';
+      editor.dataset.messageId = message.id;
+      editor.rows = 1;
+      editor.value = editingDraftText;
+      editor.setAttribute('aria-label', '\\u7f16\\u8f91\\u6d88\\u606f');
+
+      var footer = document.createElement('div');
+      footer.className = 'message-edit-footer';
+
+      var cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'secondary';
+      cancel.textContent = '\\u53d6\\u6d88';
+      cancel.dataset.messageAction = 'cancel-edit';
+      cancel.dataset.messageId = message.id;
+
+      var send = document.createElement('button');
+      send.type = 'submit';
+      send.className = 'message-edit-send';
+      send.textContent = '\\u53d1\\u9001';
+
+      footer.append(cancel, send);
+      form.append(editor, footer);
+
+      requestAnimationFrame(function() {
+        resizeInlineEditor(editor);
+        updateInlineEditorSubmitState(form);
+        if (pendingEditFocusId === message.id) {
+          pendingEditFocusId = '';
+          editor.focus();
+          editor.setSelectionRange(editor.value.length, editor.value.length);
+        }
+      });
+
+      return form;
+    }
+
+    function resizeInlineEditor(editor) {
+      if (!editor) return;
+      editor.style.height = 'auto';
+      editor.style.height = Math.min(editor.scrollHeight, 240) + 'px';
+    }
+
+    function updateInlineEditorSubmitState(form) {
+      if (!form) return;
+      var editor = form.querySelector('textarea.message-edit-input');
+      var send = form.querySelector('button[type="submit"]');
+      if (!send || !editor) return;
+      send.disabled = state.isBusy || !editor.value.trim();
     }
 
     function renderMessageContent(container, value, hideExpandedReferences) {

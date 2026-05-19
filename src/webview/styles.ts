@@ -421,28 +421,54 @@ export function getStyles(): string {
     }
 
     .message {
-      margin-bottom: 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      margin-bottom: 18px;
+    }
+
+    .message.user {
+      align-items: flex-end;
     }
 
     .message:last-child {
       margin-bottom: 0;
     }
 
+    .message-body {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      min-width: 0;
+      max-width: min(88%, 680px);
+    }
+
+    .message.user .message-body {
+      align-items: flex-end;
+    }
+
+    .message.is-editing .message-body {
+      width: min(88%, 680px);
+    }
+
     .message-role {
-      font-size: 11px;
+      width: 100%;
+      font-size: 10px;
       font-weight: 600;
       margin-bottom: 4px;
       color: var(--vscode-descriptionForeground);
       text-transform: uppercase;
-      letter-spacing: 0.3px;
+      letter-spacing: 0;
       padding: 0 2px;
     }
 
     .message.user .message-role {
       color: var(--vscode-chat-requestColor, var(--vscode-textLink-foreground));
+      text-align: right;
     }
 
     .message-content {
+      width: 100%;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       line-height: 1.55;
@@ -455,8 +481,84 @@ export function getStyles(): string {
     }
 
     .message.user .message-content {
-      border-left: 2px solid var(--vscode-chat-requestBorder, var(--vscode-textLink-foreground));
-      padding-left: 10px;
+      width: auto;
+      max-width: 100%;
+      padding: 7px 9px;
+      border: 1px solid var(--vscode-chat-requestBorder, var(--vscode-inputOption-activeBorder, var(--vscode-panel-border)));
+      border-radius: 8px 8px 2px 8px;
+      color: var(--vscode-chat-requestForeground, var(--vscode-foreground));
+      background: var(--vscode-chat-requestBackground, var(--vscode-inputOption-activeBackground, var(--vscode-editor-background)));
+      text-align: left;
+    }
+
+    .message-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 4px;
+      width: 100%;
+      min-height: 22px;
+      margin-top: 4px;
+    }
+
+    .message-action-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      min-width: 22px;
+      min-height: 22px;
+      padding: 0;
+      border: none;
+      border-radius: 4px;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+    }
+
+    .message-action-btn:hover:not(:disabled),
+    .message-action-btn:focus-visible {
+      color: var(--vscode-foreground);
+      background: var(--vscode-toolbar-hoverBackground);
+      outline: none;
+    }
+
+    .message-edit-form {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      width: min(100%, 520px);
+      min-width: min(100%, 240px);
+      padding: 8px;
+      border: 1px solid var(--vscode-focusBorder, var(--vscode-panel-border));
+      border-radius: 8px 8px 2px 8px;
+      background: var(--vscode-input-background, var(--vscode-editor-background));
+    }
+
+    .message-edit-input {
+      width: 100%;
+      min-height: 58px;
+      max-height: 240px;
+      padding: 0;
+      border: none;
+      border-radius: 0;
+      color: var(--vscode-input-foreground, var(--vscode-foreground));
+      background: transparent;
+      outline: none;
+      resize: none;
+      line-height: 1.5;
+      font-size: 13px;
+    }
+
+    .message-edit-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+    }
+
+    .message-edit-footer button {
+      min-height: 24px;
+      padding: 2px 10px;
+      font-size: 12px;
     }
 
     .reasoning-block {
