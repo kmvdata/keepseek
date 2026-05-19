@@ -6,7 +6,7 @@ import { clampColumn, clampLine, expandFileReferencesInPrompt, getExplorerFileUr
 import { AgentRunner } from './agentRunner';
 import { FileContextStore } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
-import { AgentSettings, ChatMessage, DraftEdit, KeepseekModel } from './types';
+import { AgentSettings, ChatMessage, ChatSession, ChatSessionSummary, DraftEdit, KeepseekModel } from './types';
 import { getScript } from './webview/script';
 import { getStyles } from './webview/styles';
 import { getTemplate } from './webview/template';
@@ -17,9 +17,15 @@ const SECONDARY_CONTAINER_ID = 'keepseek-secondary';
 const SECONDARY_VIEW_TYPE = 'keepseek.chatSecondaryView';
 const MIN_SECONDARY_SIDEBAR_VERSION = { major: 1, minor: 106 };
 const DOES_NOT_SUPPORT_SECONDARY_SIDEBAR_CONTEXT = 'keepseek.doesNotSupportSecondarySidebar';
+const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
+const SESSION_STORAGE_VERSION = 1;
+const MAX_STORED_SESSIONS = 50;
+const DEFAULT_SESSION_TITLE = '新会话';
 type WebviewMessage =
   | { type: 'ready' }
   | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings> }
+  | { type: 'newSession' }
+  | { type: 'selectSession'; sessionId: string }
   | { type: 'setSelectedModel'; modelId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
   | { type: 'openSettings'; query: string }
@@ -34,6 +40,12 @@ type WebviewMessage =
   | { type: 'applyDraftEdit'; id: string }
   | { type: 'discardDraftEdit'; id: string };
 
+interface StoredSessionState {
+  version: number;
+  activeSessionId: string;
+  sessions: ChatSession[];
+}
+
 class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly primaryViewType = PRIMARY_VIEW_TYPE;
   public static readonly secondaryViewType = SECONDARY_VIEW_TYPE;
@@ -41,14 +53,20 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly fileContext = new FileContextStore();
   private readonly agentRunner = new AgentRunner();
   private readonly safeFileEditor = new SafeFileEditor();
-  private readonly messages: ChatMessage[] = [];
+  private sessions: ChatSession[] = [];
+  private activeSessionId = '';
   private readonly draftEdits = new Map<string, DraftEdit>();
   private readonly views = new Set<vscode.WebviewView>();
   private selectedModelId = '';
   private agentSettings = getConfiguredAgentSettings();
   private isBusy = false;
 
-  public constructor(private readonly extensionUri: vscode.Uri) {}
+  public constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly sessionStorage: vscode.Memento
+  ) {
+    this.loadSessions();
+  }
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.views.add(webviewView);
@@ -176,6 +194,12 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'sendPrompt':
         await this.sendPrompt(message.prompt, message.modelId, message.settings);
         return;
+      case 'newSession':
+        await this.createNewSession();
+        return;
+      case 'selectSession':
+        await this.selectSession(message.sessionId);
+        return;
       case 'setSelectedModel':
         this.setSelectedModel(message.modelId);
         return;
@@ -229,6 +253,108 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.postState();
         return;
     }
+  }
+
+  private get messages(): ChatMessage[] {
+    return this.getActiveSession().messages;
+  }
+
+  private loadSessions(): void {
+    const stored = this.sessionStorage.get<StoredSessionState>(SESSION_STORAGE_KEY);
+    const sessions = normalizeStoredSessions(stored);
+    const activeSessionId = typeof stored?.activeSessionId === 'string' ? stored.activeSessionId : '';
+
+    this.sessions = sessions.length ? sessions : [createEmptySession()];
+    this.activeSessionId = this.sessions.some((session) => session.id === activeSessionId)
+      ? activeSessionId
+      : this.sessions[0].id;
+    this.compactSessions();
+  }
+
+  private getActiveSession(): ChatSession {
+    const existing = this.sessions.find((session) => session.id === this.activeSessionId);
+    if (existing) {
+      return existing;
+    }
+
+    const fallback = this.sessions[0] ?? createEmptySession();
+    if (!this.sessions.length) {
+      this.sessions.push(fallback);
+    }
+    this.activeSessionId = fallback.id;
+    return fallback;
+  }
+
+  private async createNewSession(): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+
+    const session = createEmptySession();
+    this.sessions.unshift(session);
+    this.activeSessionId = session.id;
+    this.draftEdits.clear();
+    await this.persistSessions();
+    this.postToWebview({ type: 'sessionChanged' });
+    this.postState();
+  }
+
+  private async selectSession(sessionId: string): Promise<void> {
+    if (this.isBusy || sessionId === this.activeSessionId) {
+      return;
+    }
+
+    const session = this.sessions.find((item) => item.id === sessionId);
+    if (!session) {
+      return;
+    }
+
+    session.updatedAt = new Date().toISOString();
+    this.activeSessionId = session.id;
+    this.draftEdits.clear();
+    await this.persistSessions();
+    this.postToWebview({ type: 'sessionChanged' });
+    this.postState();
+  }
+
+  private async persistSessions(): Promise<void> {
+    this.compactSessions();
+    await this.sessionStorage.update(SESSION_STORAGE_KEY, {
+      version: SESSION_STORAGE_VERSION,
+      activeSessionId: this.activeSessionId,
+      sessions: this.sessions
+    } satisfies StoredSessionState);
+  }
+
+  private compactSessions(): void {
+    const activeSession = this.getActiveSession();
+    this.sessions = this.sessions
+      .filter((session) => session.id === activeSession.id || session.messages.length > 0)
+      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+
+    if (!this.sessions.some((session) => session.id === activeSession.id)) {
+      this.sessions.unshift(activeSession);
+    }
+
+    if (this.sessions.length > MAX_STORED_SESSIONS) {
+      const activeIndex = this.sessions.findIndex((session) => session.id === activeSession.id);
+      this.sessions = this.sessions.slice(0, MAX_STORED_SESSIONS);
+      if (activeIndex >= MAX_STORED_SESSIONS) {
+        this.sessions[MAX_STORED_SESSIONS - 1] = activeSession;
+      }
+    }
+
+    this.activeSessionId = activeSession.id;
+  }
+
+  private getSessionSummaries(): ChatSessionSummary[] {
+    return this.sessions.map((session) => ({
+      id: session.id,
+      title: session.title || DEFAULT_SESSION_TITLE,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      messageCount: session.messages.length
+    }));
   }
 
   private async readPathToContext(inputPath: string): Promise<void> {
@@ -320,21 +446,32 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const models = getConfiguredModels();
     const model = models.find((item) => item.id === modelId) ?? models[0];
     this.selectedModelId = model.id;
-    const expandedPrompt = await expandFileReferencesInPrompt(trimmedPrompt);
-
-    this.messages.push({
-      id: randomUUID(),
-      role: 'user',
-      content: expandedPrompt,
-      createdAt: new Date().toISOString(),
-      modelId: model.id
-    });
-    this.trimHistory();
 
     this.isBusy = true;
     this.postState();
 
     try {
+      const expandedPrompt = await expandFileReferencesInPrompt(trimmedPrompt);
+      const activeSession = this.getActiveSession();
+      const now = new Date().toISOString();
+
+      if (!activeSession.messages.length) {
+        activeSession.title = createSessionTitle(trimmedPrompt);
+        activeSession.createdAt = now;
+      }
+
+      this.messages.push({
+        id: randomUUID(),
+        role: 'user',
+        content: expandedPrompt,
+        createdAt: now,
+        modelId: model.id
+      });
+      activeSession.updatedAt = now;
+      this.trimHistory();
+      await this.persistSessions();
+      this.postState();
+
       const response = await this.agentRunner.run({
         prompt: expandedPrompt,
         model,
@@ -357,6 +494,12 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       });
       this.trimHistory();
     } catch (error) {
+      const activeSession = this.getActiveSession();
+      if (!activeSession.messages.length) {
+        const now = new Date().toISOString();
+        activeSession.title = createSessionTitle(trimmedPrompt);
+        activeSession.createdAt = now;
+      }
       this.messages.push({
         id: randomUUID(),
         role: 'assistant',
@@ -365,7 +508,9 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         modelId: model.id
       });
     } finally {
+      this.getActiveSession().updatedAt = new Date().toISOString();
       this.isBusy = false;
+      await this.persistSessions();
       this.postState();
     }
   }
@@ -386,6 +531,8 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           content: `已写入 ${edit.label}。`,
           createdAt: new Date().toISOString()
         });
+        this.getActiveSession().updatedAt = new Date().toISOString();
+        await this.persistSessions();
       }
     } catch (error) {
       vscode.window.showErrorMessage(getErrorMessage(error));
@@ -414,6 +561,8 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         selectedModelId: this.selectedModelId,
         agentSettings: this.agentSettings,
         messages: this.messages,
+        activeSessionId: this.activeSessionId,
+        sessionSummaries: this.getSessionSummaries(),
         contextFiles: this.fileContext.getAll().map(({ content: _content, ...file }) => file),
         draftEdits: Array.from(this.draftEdits.values()).map(({ newText: _newText, ...edit }) => edit),
         isBusy: this.isBusy
@@ -519,7 +668,7 @@ function ensureKeybindings(context: vscode.ExtensionContext): void {
 export function activate(context: vscode.ExtensionContext): void {
   ensureKeybindings(context);
 
-  const provider = new KeepseekChatViewProvider(context.extensionUri);
+  const provider = new KeepseekChatViewProvider(context.extensionUri, context.workspaceState);
   const doesNotSupportSecondarySidebar = !supportsSecondarySidebar(vscode.version);
   void vscode.commands.executeCommand(
     'setContext',
@@ -587,6 +736,91 @@ function parseMajorMinorVersion(version: string): { major: number; minor: number
     major: Number(match.groups.major),
     minor: Number(match.groups.minor)
   };
+}
+
+function createEmptySession(): ChatSession {
+  const now = new Date().toISOString();
+  return {
+    id: randomUUID(),
+    title: DEFAULT_SESSION_TITLE,
+    messages: [],
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function createSessionTitle(prompt: string): string {
+  const normalized = prompt.replace(/\s+/gu, ' ').trim();
+  if (!normalized) {
+    return DEFAULT_SESSION_TITLE;
+  }
+  return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized;
+}
+
+function normalizeStoredSessions(value: unknown): ChatSession[] {
+  if (!isRecord(value) || !Array.isArray(value.sessions)) {
+    return [];
+  }
+
+  const sessions: ChatSession[] = [];
+  const seen = new Set<string>();
+
+  for (const item of value.sessions) {
+    if (!isRecord(item) || typeof item.id !== 'string' || seen.has(item.id)) {
+      continue;
+    }
+
+    const messages = Array.isArray(item.messages)
+      ? item.messages.map(normalizeStoredMessage).filter((message): message is ChatMessage => Boolean(message))
+      : [];
+    const createdAt = typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString();
+    const updatedAt = typeof item.updatedAt === 'string' ? item.updatedAt : createdAt;
+    const title = typeof item.title === 'string' && item.title.trim()
+      ? item.title.trim()
+      : createTitleFromMessages(messages);
+
+    sessions.push({
+      id: item.id,
+      title,
+      messages,
+      createdAt,
+      updatedAt
+    });
+    seen.add(item.id);
+  }
+
+  return sessions;
+}
+
+function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.content !== 'string') {
+    return undefined;
+  }
+
+  const role = value.role === 'user' || value.role === 'assistant' || value.role === 'system'
+    ? value.role
+    : undefined;
+  if (!role) {
+    return undefined;
+  }
+
+  return {
+    id: value.id,
+    role,
+    content: value.content,
+    createdAt: typeof value.createdAt === 'string' ? value.createdAt : new Date().toISOString(),
+    modelId: typeof value.modelId === 'string' ? value.modelId : undefined,
+    reasoningContent: typeof value.reasoningContent === 'string' ? value.reasoningContent : undefined
+  };
+}
+
+function createTitleFromMessages(messages: ChatMessage[]): string {
+  const firstUserMessage = messages.find((message) => message.role === 'user');
+  return firstUserMessage ? createSessionTitle(firstUserMessage.content) : DEFAULT_SESSION_TITLE;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 function getConfiguredModels(): KeepseekModel[] {

@@ -34,9 +34,7 @@ export function getInputScript(): string {
           modelId: state.selectedModelId,
           settings: readAgentSettingsFromControls()
         });
-        promptInput.innerHTML = '';
-        savedPromptRange = null;
-        updatePromptVisualState();
+        clearPrompt();
       });
 
       promptInput.addEventListener('keydown', function(event) {
@@ -1046,6 +1044,13 @@ export function getInputScript(): string {
         }, 2200);
       }
 
+      function clearPrompt() {
+        closeCommandMenu();
+        promptInput.innerHTML = '';
+        savedPromptRange = null;
+        updatePromptVisualState();
+      }
+
       var settingsOverlay = document.getElementById('settingsDialogOverlay');
       var settingsApiKey = document.getElementById('settingsApiKey');
       var settingsApiKeyVisibilityBtn = document.getElementById('settingsApiKeyVisibilityBtn');
@@ -1201,7 +1206,8 @@ export function getInputScript(): string {
 
       window.keepseekInputControls = {
         render: renderCommandMenu,
-        showSettingsDialog: showSettingsDialog
+        showSettingsDialog: showSettingsDialog,
+        clearPrompt: clearPrompt
       };
       renderCommandMenu();
       updatePromptVisualState();

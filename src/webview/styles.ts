@@ -138,6 +138,7 @@ export function getStyles(): string {
     ${getInputStyles()}
 
     .shell {
+      position: relative;
       display: flex;
       flex-direction: column;
       height: 100vh;
@@ -186,9 +187,99 @@ export function getStyles(): string {
       background: var(--vscode-toolbar-hoverBackground);
     }
 
+    .header-tab:disabled,
+    .header-tab:disabled:hover {
+      cursor: default;
+      opacity: 0.45;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+    }
+
     .header-tab.active {
       color: var(--vscode-foreground);
       background: var(--vscode-toolbar-activeBackground);
+    }
+
+    .session-menu {
+      position: absolute;
+      top: 36px;
+      left: 8px;
+      z-index: 40;
+      width: min(320px, calc(100% - 16px));
+      max-height: min(420px, calc(100vh - 72px));
+      overflow-y: auto;
+      padding: 6px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 8px;
+      background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
+      color: var(--vscode-quickInput-foreground, var(--vscode-foreground));
+      box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
+    }
+
+    .session-menu-title {
+      padding: 4px 6px 7px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.2;
+    }
+
+    .session-menu-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 2px;
+      width: 100%;
+      min-height: 42px;
+      padding: 7px 8px;
+      border: none;
+      border-radius: 6px;
+      color: var(--vscode-foreground);
+      background: transparent;
+      text-align: left;
+    }
+
+    .session-menu-item:hover,
+    .session-menu-item:focus-visible {
+      color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
+      background: var(--vscode-quickInputList-focusBackground, var(--vscode-list-hoverBackground));
+      outline: none;
+    }
+
+    .session-menu-item.is-active {
+      background: var(--vscode-list-activeSelectionBackground, var(--vscode-toolbar-activeBackground));
+      color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+    }
+
+    .session-menu-item-title,
+    .session-menu-item-meta {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .session-menu-item-title {
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1.25;
+    }
+
+    .session-menu-item-meta {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.25;
+    }
+
+    .session-menu-item.is-active .session-menu-item-meta {
+      color: inherit;
+      opacity: 0.78;
+    }
+
+    .session-menu-empty {
+      padding: 12px 8px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      text-align: center;
     }
 
     /* ---- context bar ---- */

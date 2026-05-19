@@ -35,6 +35,22 @@ export interface ChatMessage {
   reasoningContent?: string;
 }
 
+export interface ChatSession {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChatSessionSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
 export interface DraftEdit {
   id: string;
   uri: string;

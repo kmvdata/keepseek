@@ -6,13 +6,13 @@ export function getTemplate(): string {
     <header class="header">
       <span class="header-title">KeepSeek</span>
       <div class="header-actions">
-        <button type="button" class="header-tab" id="historyTab" title="Session history">
+        <button type="button" class="header-tab" id="historyTab" title="Session history" aria-label="Session history" aria-haspopup="menu" aria-expanded="false">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10"/>
             <polyline points="12 6 12 12 16 14"/>
           </svg>
         </button>
-        <button type="button" class="header-tab" id="newChatTab" title="New session">
+        <button type="button" class="header-tab" id="newChatTab" title="New session" aria-label="New session">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
             <line x1="12" y1="8" x2="12" y2="14"/>
@@ -21,6 +21,8 @@ export function getTemplate(): string {
         </button>
       </div>
     </header>
+
+    <div id="sessionMenu" class="session-menu hidden" role="menu" aria-label="Session history"></div>
 
     <div class="context-bar" id="contextBarOuter">
       <div class="context-bar-inner" id="contextBar"></div>
