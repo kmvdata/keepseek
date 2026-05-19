@@ -363,6 +363,30 @@ export function getStyles(): string {
       padding-left: 10px;
     }
 
+    .reasoning-block {
+      margin: 0 0 8px;
+      padding: 6px 8px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editor-background);
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+    }
+
+    .reasoning-block summary {
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    .reasoning-block pre {
+      margin: 6px 0 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
     .hidden {
       display: none !important;
     }

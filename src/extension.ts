@@ -6,7 +6,7 @@ import { clampColumn, clampLine, expandFileReferencesInPrompt, getExplorerFileUr
 import { AgentRunner } from './agentRunner';
 import { FileContextStore } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
-import { ChatMessage, DraftEdit, KeepseekModel } from './types';
+import { AgentSettings, ChatMessage, DraftEdit, KeepseekModel } from './types';
 import { getScript } from './webview/script';
 import { getStyles } from './webview/styles';
 import { getTemplate } from './webview/template';
@@ -19,9 +19,11 @@ const MIN_SECONDARY_SIDEBAR_VERSION = { major: 1, minor: 106 };
 const DOES_NOT_SUPPORT_SECONDARY_SIDEBAR_CONTEXT = 'keepseek.doesNotSupportSecondarySidebar';
 type WebviewMessage =
   | { type: 'ready' }
-  | { type: 'sendPrompt'; prompt: string; modelId: string }
+  | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings> }
   | { type: 'setSelectedModel'; modelId: string }
+  | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
   | { type: 'openSettings'; query: string }
+  | { type: 'saveSettings'; apiKey: string; baseUrl: string }
   | { type: 'addCurrentFile' }
   | { type: 'pickWorkspaceFiles' }
   | { type: 'pickExternalFiles' }
@@ -43,6 +45,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly draftEdits = new Map<string, DraftEdit>();
   private readonly views = new Set<vscode.WebviewView>();
   private selectedModelId = '';
+  private agentSettings = getConfiguredAgentSettings();
   private isBusy = false;
 
   public constructor(private readonly extensionUri: vscode.Uri) {}
@@ -171,14 +174,30 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.postState();
         return;
       case 'sendPrompt':
-        await this.sendPrompt(message.prompt, message.modelId);
+        await this.sendPrompt(message.prompt, message.modelId, message.settings);
         return;
       case 'setSelectedModel':
         this.setSelectedModel(message.modelId);
         return;
-      case 'openSettings':
-        await vscode.commands.executeCommand('workbench.action.openSettings', message.query || 'keepseek');
+      case 'setAgentSettings':
+        await this.setAgentSettings(message.settings);
         return;
+      case 'openSettings': {
+        const config = vscode.workspace.getConfiguration('keepseek');
+        this.postToWebview({
+          type: 'showSettingsDialog',
+          apiKey: config.get<string>('apiKey', ''),
+          baseUrl: config.get<string>('baseUrl', 'https://api.deepseek.com')
+        });
+        return;
+      }
+      case 'saveSettings': {
+        const config = vscode.workspace.getConfiguration('keepseek');
+        await config.update('apiKey', message.apiKey, vscode.ConfigurationTarget.Global);
+        await config.update('baseUrl', message.baseUrl, vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage('DeepSeek API 设置已保存。');
+        return;
+      }
       case 'addCurrentFile':
         await this.addCurrentFileToContext();
         return;
@@ -227,6 +246,16 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.selectedModelId = modelId;
+    this.postState();
+  }
+
+  private async setAgentSettings(settings: Partial<AgentSettings>): Promise<void> {
+    this.agentSettings = normalizeAgentSettings(settings, this.agentSettings);
+    const config = vscode.workspace.getConfiguration('keepseek');
+    await Promise.all([
+      config.update('thinkingEnabled', this.agentSettings.thinkingEnabled, vscode.ConfigurationTarget.Global),
+      config.update('reasoningEffort', this.agentSettings.reasoningEffort, vscode.ConfigurationTarget.Global)
+    ]);
     this.postState();
   }
 
@@ -281,12 +310,13 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async sendPrompt(prompt: string, modelId: string): Promise<void> {
+  private async sendPrompt(prompt: string, modelId: string, settings?: Partial<AgentSettings>): Promise<void> {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt || this.isBusy) {
       return;
     }
 
+    this.agentSettings = normalizeAgentSettings(settings, this.agentSettings);
     const models = getConfiguredModels();
     const model = models.find((item) => item.id === modelId) ?? models[0];
     this.selectedModelId = model.id;
@@ -308,6 +338,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const response = await this.agentRunner.run({
         prompt: expandedPrompt,
         model,
+        settings: this.agentSettings,
         contextFiles: this.fileContext.getAll(),
         history: this.messages
       });
@@ -320,6 +351,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         id: randomUUID(),
         role: 'assistant',
         content: response.message,
+        reasoningContent: response.reasoningContent,
         createdAt: new Date().toISOString(),
         modelId: model.id
       });
@@ -380,6 +412,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       state: {
         models,
         selectedModelId: this.selectedModelId,
+        agentSettings: this.agentSettings,
         messages: this.messages,
         contextFiles: this.fileContext.getAll().map(({ content: _content, ...file }) => file),
         draftEdits: Array.from(this.draftEdits.values()).map(({ newText: _newText, ...edit }) => edit),
@@ -569,11 +602,37 @@ function getConfiguredModels(): KeepseekModel[] {
 
   return [
     {
-      id: 'keepseek-default',
-      label: 'KeepSeek Default',
-      provider: 'custom'
+      id: 'deepseek-v4-flash',
+      label: 'DeepSeek-V4-Flash',
+      provider: 'deepseek'
+    },
+    {
+      id: 'deepseek-v4-pro',
+      label: 'DeepSeek-V4-Pro',
+      provider: 'deepseek'
     }
   ];
+}
+
+function getConfiguredAgentSettings(): AgentSettings {
+  const config = vscode.workspace.getConfiguration('keepseek');
+  return normalizeAgentSettings({
+    thinkingEnabled: config.get<boolean>('thinkingEnabled', true),
+    reasoningEffort: config.get<AgentSettings['reasoningEffort']>('reasoningEffort', 'high')
+  });
+}
+
+function normalizeAgentSettings(settings: Partial<AgentSettings> | undefined, fallback?: AgentSettings): AgentSettings {
+  return {
+    thinkingEnabled: typeof settings?.thinkingEnabled === 'boolean'
+      ? settings.thinkingEnabled
+      : fallback?.thinkingEnabled ?? true,
+    reasoningEffort: settings?.reasoningEffort === 'max'
+      ? 'max'
+      : settings?.reasoningEffort === 'high'
+        ? 'high'
+        : fallback?.reasoningEffort ?? 'high'
+  };
 }
 
 function getErrorMessage(error: unknown): string {

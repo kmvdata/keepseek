@@ -365,6 +365,11 @@ export function getInputStyles(): string {
       cursor: pointer;
     }
 
+    .command-effort-slider:disabled {
+      cursor: default;
+      opacity: 0.45;
+    }
+
     .command-toggle-row {
       position: relative;
       grid-template-columns: minmax(0, 1fr) 34px;
@@ -414,6 +419,139 @@ export function getInputStyles(): string {
     .command-toggle-input:focus-visible + .command-toggle-track {
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: 2px;
+    }
+
+    .settings-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.45);
+    }
+
+    .settings-dialog {
+      width: min(360px, calc(100vw - 32px));
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 10px;
+      background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
+      color: var(--vscode-quickInput-foreground, var(--vscode-foreground));
+      box-shadow: 0 12px 32px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+    }
+
+    .settings-dialog-header {
+      display: flex;
+      align-items: center;
+      padding: 14px 16px 0;
+    }
+
+    .settings-dialog-title {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .settings-dialog-body {
+      padding: 10px 16px 16px;
+    }
+
+    .settings-dialog-desc {
+      margin: 0 0 14px;
+      font-size: 12px;
+      color: var(--vscode-descriptionForeground);
+      line-height: 1.45;
+    }
+
+    .settings-field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-bottom: 12px;
+    }
+
+    .settings-field:last-of-type {
+      margin-bottom: 0;
+    }
+
+    .settings-field-label {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--vscode-descriptionForeground);
+    }
+
+    .settings-input {
+      width: 100%;
+      min-height: 28px;
+      padding: 4px 8px;
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      border-radius: 4px;
+      color: var(--vscode-input-foreground);
+      background: var(--vscode-input-background);
+      font-size: 12px;
+      outline-color: var(--vscode-focusBorder);
+    }
+
+    .settings-secret-input {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 28px;
+      align-items: center;
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      border-radius: 4px;
+      background: var(--vscode-input-background);
+    }
+
+    .settings-secret-input:focus-within {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+
+    .settings-secret-input .settings-input {
+      min-width: 0;
+      border: none;
+      background: transparent;
+      outline: none;
+    }
+
+    .settings-secret-toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      min-width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      border-left: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      border-radius: 0 3px 3px 0;
+      background: transparent;
+      color: var(--vscode-icon-foreground, var(--vscode-descriptionForeground));
+      cursor: pointer;
+    }
+
+    .settings-secret-toggle:hover {
+      color: var(--vscode-foreground);
+      background: var(--vscode-toolbar-hoverBackground);
+    }
+
+    .settings-secret-toggle:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+
+    .settings-secret-icon-hide,
+    .settings-secret-toggle.is-visible .settings-secret-icon-show {
+      display: none;
+    }
+
+    .settings-secret-toggle.is-visible .settings-secret-icon-hide {
+      display: block;
+    }
+
+    .settings-dialog-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: 0 16px 14px;
     }
 `;
 }

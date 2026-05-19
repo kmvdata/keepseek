@@ -4,6 +4,13 @@ export interface KeepseekModel {
   provider: string;
 }
 
+export type ReasoningEffort = 'high' | 'max';
+
+export interface AgentSettings {
+  thinkingEnabled: boolean;
+  reasoningEffort: ReasoningEffort;
+}
+
 export type ContextFileSource = 'workspace' | 'external';
 
 export interface ContextFile {
@@ -25,6 +32,7 @@ export interface ChatMessage {
   content: string;
   createdAt: string;
   modelId?: string;
+  reasoningContent?: string;
 }
 
 export interface DraftEdit {
@@ -38,11 +46,13 @@ export interface DraftEdit {
 export interface AgentRequest {
   prompt: string;
   model: KeepseekModel;
+  settings: AgentSettings;
   contextFiles: ContextFile[];
   history: ChatMessage[];
 }
 
 export interface AgentResponse {
   message: string;
+  reasoningContent?: string;
   draftEdits: DraftEdit[];
 }

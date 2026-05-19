@@ -19,11 +19,8 @@ export function getInputScript(): string {
       var commandModelListOpen = false;
       var activeSlashRange = null;
       var effortLabels = {
-        1: 'Minimal',
-        2: 'Medium',
-        3: 'High',
-        4: 'Deep',
-        5: 'Max'
+        high: 'High',
+        max: 'Max'
       };
 
       composer.addEventListener('submit', function(event) {
@@ -34,7 +31,8 @@ export function getInputScript(): string {
         vscode.postMessage({
           type: 'sendPrompt',
           prompt: prompt,
-          modelId: state.selectedModelId
+          modelId: state.selectedModelId,
+          settings: readAgentSettingsFromControls()
         });
         promptInput.innerHTML = '';
         savedPromptRange = null;
@@ -121,6 +119,7 @@ export function getInputScript(): string {
       if (commandEffortSlider) {
         commandEffortSlider.addEventListener('input', function() {
           consumeSlashTrigger(false);
+          updateAgentSettingsFromControls();
           renderCommandMenu();
         });
       }
@@ -128,6 +127,7 @@ export function getInputScript(): string {
       if (commandThinkingToggle) {
         commandThinkingToggle.addEventListener('change', function() {
           consumeSlashTrigger(false);
+          updateAgentSettingsFromControls();
           renderCommandMenu();
           setComposerStatus(commandThinkingToggle.checked ? 'Thinking 已开启' : 'Thinking 已关闭');
         });
@@ -139,8 +139,7 @@ export function getInputScript(): string {
           event.stopPropagation();
           consumeSlashTrigger(false);
           closeCommandMenu();
-          setComposerStatus('打开 API Key 设置');
-          vscode.postMessage({ type: 'openSettings', query: 'keepseek.apiKey' });
+          vscode.postMessage({ type: 'openSettings', query: 'keepseek' });
         });
       }
 
@@ -237,7 +236,7 @@ export function getInputScript(): string {
         var models = Array.isArray(state.models) ? state.models : [];
         var selected = getSelectedModel(models);
         if (commandModelValue) {
-          commandModelValue.textContent = selected ? getModelDisplayLabel(selected.model, selected.index) : 'Default (recommended)';
+          commandModelValue.textContent = selected ? getModelDisplayLabel(selected.model) : 'DeepSeek-V4-Flash';
           commandModelValue.title = commandModelValue.textContent;
         }
 
@@ -251,7 +250,7 @@ export function getInputScript(): string {
         if (!models.length) {
           var empty = document.createElement('div');
           empty.className = 'command-model-option command-model-empty';
-          empty.textContent = 'Default (recommended)';
+          empty.textContent = 'DeepSeek-V4-Flash';
           commandModelList.append(empty);
           return;
         }
@@ -272,7 +271,7 @@ export function getInputScript(): string {
 
           var label = document.createElement('span');
           label.className = 'command-model-name';
-          label.textContent = getModelDisplayLabel(model, i);
+          label.textContent = getModelDisplayLabel(model);
           label.title = model.label || model.id;
 
           option.append(check, label);
@@ -290,18 +289,44 @@ export function getInputScript(): string {
         return { model: models[0], index: 0 };
       }
 
-      function getModelDisplayLabel(model, index) {
-        if (!model) { return 'Default (recommended)'; }
-        if (index === 0 || model.id === 'keepseek-default') {
-          return 'Default (recommended)';
-        }
+      function getModelDisplayLabel(model) {
+        if (!model) { return 'DeepSeek-V4-Flash'; }
         return model.label || model.id || 'Model';
       }
 
       function renderEffort() {
-        if (!commandEffortSlider || !commandEffortValue) { return; }
-        var level = readPositiveInteger(commandEffortSlider.value, 3);
-        commandEffortValue.textContent = effortLabels[level] || 'High';
+        var settings = getAgentSettings();
+        if (commandThinkingToggle) {
+          commandThinkingToggle.checked = settings.thinkingEnabled;
+        }
+        if (commandEffortSlider) {
+          commandEffortSlider.value = settings.reasoningEffort === 'max' ? '2' : '1';
+          commandEffortSlider.disabled = !settings.thinkingEnabled;
+        }
+        if (commandEffortValue) {
+          commandEffortValue.textContent = settings.thinkingEnabled ? effortLabels[settings.reasoningEffort] : 'Off';
+        }
+      }
+
+      function updateAgentSettingsFromControls() {
+        var settings = readAgentSettingsFromControls();
+        state.agentSettings = settings;
+        vscode.postMessage({ type: 'setAgentSettings', settings: settings });
+      }
+
+      function readAgentSettingsFromControls() {
+        return {
+          thinkingEnabled: commandThinkingToggle ? commandThinkingToggle.checked : getAgentSettings().thinkingEnabled,
+          reasoningEffort: commandEffortSlider && Number(commandEffortSlider.value) >= 2 ? 'max' : 'high'
+        };
+      }
+
+      function getAgentSettings() {
+        var configured = state.agentSettings || {};
+        return {
+          thinkingEnabled: typeof configured.thinkingEnabled === 'boolean' ? configured.thinkingEnabled : true,
+          reasoningEffort: configured.reasoningEffort === 'max' ? 'max' : 'high'
+        };
       }
 
       function consumeSlashTrigger(restoreFocus) {
@@ -1021,6 +1046,96 @@ export function getInputScript(): string {
         }, 2200);
       }
 
+      var settingsOverlay = document.getElementById('settingsDialogOverlay');
+      var settingsApiKey = document.getElementById('settingsApiKey');
+      var settingsApiKeyVisibilityBtn = document.getElementById('settingsApiKeyVisibilityBtn');
+      var settingsBaseUrl = document.getElementById('settingsBaseUrl');
+      var settingsSaveBtn = document.getElementById('settingsSaveBtn');
+      var settingsCancelBtn = document.getElementById('settingsCancelBtn');
+      var apiKeyVisible = false;
+
+      function setApiKeyVisible(isVisible, shouldFocus) {
+        apiKeyVisible = Boolean(isVisible);
+        if (settingsApiKey) {
+          var selectionStart = settingsApiKey.selectionStart;
+          var selectionEnd = settingsApiKey.selectionEnd;
+          settingsApiKey.type = apiKeyVisible ? 'text' : 'password';
+          if (shouldFocus) {
+            settingsApiKey.focus();
+            if (typeof selectionStart === 'number' && typeof selectionEnd === 'number') {
+              settingsApiKey.setSelectionRange(selectionStart, selectionEnd);
+            }
+          }
+        }
+        if (settingsApiKeyVisibilityBtn) {
+          var label = apiKeyVisible ? '隐藏 API Key' : '显示 API Key';
+          settingsApiKeyVisibilityBtn.classList.toggle('is-visible', apiKeyVisible);
+          settingsApiKeyVisibilityBtn.setAttribute('aria-pressed', apiKeyVisible ? 'true' : 'false');
+          settingsApiKeyVisibilityBtn.setAttribute('aria-label', label);
+          settingsApiKeyVisibilityBtn.title = label;
+        }
+      }
+
+      function showSettingsDialog(apiKey, baseUrl) {
+        if (!settingsOverlay || !settingsApiKey || !settingsBaseUrl) { return; }
+        settingsApiKey.value = apiKey || '';
+        settingsBaseUrl.value = baseUrl || 'https://api.deepseek.com';
+        setApiKeyVisible(false, false);
+        settingsOverlay.classList.remove('hidden');
+        settingsApiKey.focus();
+      }
+
+      function hideSettingsDialog() {
+        if (!settingsOverlay) { return; }
+        settingsOverlay.classList.add('hidden');
+        promptInput.focus();
+      }
+
+      if (settingsSaveBtn) {
+        settingsSaveBtn.addEventListener('click', function() {
+          var apiKey = settingsApiKey ? settingsApiKey.value.trim() : '';
+          var baseUrl = settingsBaseUrl ? settingsBaseUrl.value.trim() : '';
+          if (!baseUrl) {
+            baseUrl = 'https://api.deepseek.com';
+          }
+          vscode.postMessage({ type: 'saveSettings', apiKey: apiKey, baseUrl: baseUrl });
+          setComposerStatus('API 设置已保存');
+          hideSettingsDialog();
+        });
+      }
+
+      if (settingsCancelBtn) {
+        settingsCancelBtn.addEventListener('click', function() {
+          hideSettingsDialog();
+        });
+      }
+
+      if (settingsApiKeyVisibilityBtn) {
+        settingsApiKeyVisibilityBtn.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          setApiKeyVisible(!apiKeyVisible, true);
+        });
+      }
+
+      if (settingsOverlay) {
+        settingsOverlay.addEventListener('click', function(event) {
+          if (event.target === settingsOverlay) {
+            hideSettingsDialog();
+          }
+        });
+
+        settingsOverlay.addEventListener('keydown', function(event) {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            hideSettingsDialog();
+          } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            if (settingsSaveBtn) { settingsSaveBtn.click(); }
+          }
+        });
+      }
+
       document.addEventListener('dragover', function (e) {
         e.preventDefault();
         e.stopPropagation();
@@ -1085,7 +1200,8 @@ export function getInputScript(): string {
       });
 
       window.keepseekInputControls = {
-        render: renderCommandMenu
+        render: renderCommandMenu,
+        showSettingsDialog: showSettingsDialog
       };
       renderCommandMenu();
       updatePromptVisualState();

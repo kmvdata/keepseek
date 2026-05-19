@@ -6,6 +6,10 @@ export function getScript(): string {
     const state = {
       models: [],
       selectedModelId: '',
+      agentSettings: {
+        thinkingEnabled: true,
+        reasoningEffort: 'high'
+      },
       messages: [],
       contextFiles: [],
       draftEdits: [],
@@ -37,6 +41,10 @@ export function getScript(): string {
       if (message.type === 'state') {
         Object.assign(state, message.state);
         render();
+      } else if (message.type === 'showSettingsDialog') {
+        if (window.keepseekInputControls && window.keepseekInputControls.showSettingsDialog) {
+          window.keepseekInputControls.showSettingsDialog(message.apiKey, message.baseUrl);
+        }
       }
     });
 
@@ -161,7 +169,18 @@ export function getScript(): string {
         content.className = 'message-content';
         content.textContent = message.content;
 
-        item.append(role, content);
+        item.append(role);
+        if (message.role === 'assistant' && message.reasoningContent) {
+          var reasoning = document.createElement('details');
+          reasoning.className = 'reasoning-block';
+          var summary = document.createElement('summary');
+          summary.textContent = 'Thinking';
+          var reasoningContent = document.createElement('pre');
+          reasoningContent.textContent = message.reasoningContent;
+          reasoning.append(summary, reasoningContent);
+          item.append(reasoning);
+        }
+        item.append(content);
         transcript.append(item);
       }
 

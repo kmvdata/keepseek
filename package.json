@@ -57,19 +57,14 @@
           "type": "array",
           "default": [
             {
-              "id": "keepseek-default",
-              "label": "KeepSeek Default",
-              "provider": "custom"
-            },
-            {
-              "id": "deepseek-chat",
-              "label": "DeepSeek Chat",
+              "id": "deepseek-v4-flash",
+              "label": "DeepSeek-V4-Flash",
               "provider": "deepseek"
             },
             {
-              "id": "custom-model",
-              "label": "Custom Model",
-              "provider": "custom"
+              "id": "deepseek-v4-pro",
+              "label": "DeepSeek-V4-Pro",
+              "provider": "deepseek"
             }
           ],
           "description": "Models shown in the KeepSeek chat selector. Provider integration is implemented in src/agentRunner.ts."
@@ -78,7 +73,50 @@
           "type": "string",
           "default": "",
           "scope": "application",
-          "description": "API key for the account or provider integration used by KeepSeek."
+          "description": "DeepSeek 官方 API Key。"
+        },
+        "keepseek.baseUrl": {
+          "type": "string",
+          "default": "https://api.deepseek.com",
+          "scope": "application",
+          "description": "DeepSeek API 端点地址。"
+        },
+        "keepseek.thinkingEnabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "是否启用 DeepSeek thinking 模式。"
+        },
+        "keepseek.reasoningEffort": {
+          "type": "string",
+          "enum": [
+            "high",
+            "max"
+          ],
+          "default": "high",
+          "scope": "application",
+          "description": "DeepSeek thinking 模式的推理强度。"
+        },
+        "keepseek.maxTokens": {
+          "type": "number",
+          "default": 8192,
+          "minimum": 0,
+          "maximum": 384000,
+          "description": "DeepSeek 单次响应的最大输出 token 数；0 表示不显式传入。"
+        },
+        "keepseek.maxToolIterations": {
+          "type": "number",
+          "default": 4,
+          "minimum": 0,
+          "maximum": 12,
+          "description": "Agent 单轮对话最多允许的工具调用迭代次数。"
+        },
+        "keepseek.requestTimeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 10000,
+          "maximum": 600000,
+          "description": "DeepSeek API 请求超时时间，单位毫秒。"
         },
         "keepseek.maxFileBytes": {
           "type": "number",
