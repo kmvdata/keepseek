@@ -29,12 +29,30 @@ export function getScript(): string {
     const promptInput = document.getElementById('promptInput');
     const status = document.getElementById('status');
     const sendButton = document.getElementById('sendButton');
+    const editReferenceMenu = document.createElement('div');
     let transientStatus = '';
     let transientStatusTimer = 0;
     let sessionMenuOpen = false;
     let editingMessageId = '';
     let editingDraftText = '';
     let pendingEditFocusId = '';
+    let savedEditRange = null;
+    let editReferenceMenuOpen = false;
+    let editReferenceEditor = null;
+    let editMentionRange = null;
+    let editMentionQuery = '';
+    let editReferenceIndex = 0;
+    let editReferenceResources = [];
+    let editReferenceResourcesLoading = false;
+    let editReferenceResourcesLoaded = false;
+    let editReferenceResourcesError = '';
+    let editReferenceResourceRequestSequence = 0;
+    let editReferenceResourceRequestId = '';
+
+    editReferenceMenu.className = 'reference-menu message-reference-menu hidden';
+    editReferenceMenu.setAttribute('role', 'listbox');
+    editReferenceMenu.setAttribute('aria-label', '\\u5f15\\u7528\\u5de5\\u7a0b\\u6587\\u4ef6');
+    document.body.append(editReferenceMenu);
 
     transcript.addEventListener('click', function(event) {
       var target = event.target instanceof Element ? event.target : null;
@@ -46,7 +64,30 @@ export function getScript(): string {
         return;
       }
 
+      var inlineEditLink = target?.closest('.message-edit-input a.rich-file-link');
+      if (inlineEditLink && transcript.contains(inlineEditLink)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+
       var link = target?.closest('a.message-file-link');
+      if (!link || !transcript.contains(link)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      vscode.postMessage({
+        type: 'openFileReference',
+        path: link.dataset.path || '',
+        startLine: readReferenceInteger(link.dataset.startLine, 0),
+        endLine: readReferenceInteger(link.dataset.endLine, 0),
+        startColumn: readReferenceInteger(link.dataset.startColumn, 0),
+        endColumn: readReferenceInteger(link.dataset.endColumn, 0)
+      });
+    });
+
+    transcript.addEventListener('dblclick', function(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      var link = target?.closest('.message-edit-input a.rich-file-link');
       if (!link || !transcript.contains(link)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -69,19 +110,45 @@ export function getScript(): string {
 
     transcript.addEventListener('input', function(event) {
       var target = event.target instanceof Element ? event.target : null;
-      var editor = target?.closest('textarea.message-edit-input');
+      var editor = target?.closest('.message-edit-input');
       if (!editor || !transcript.contains(editor)) return;
+      sanitizeInlineEditorLinks(editor);
       if (editor.dataset.messageId === editingMessageId) {
-        editingDraftText = editor.value;
+        editingDraftText = serializeInlineEditor(editor);
       }
       resizeInlineEditor(editor);
       updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
+      saveEditSelection(editor);
+      syncEditReferenceMenuFromEditor(editor);
     });
 
     transcript.addEventListener('keydown', function(event) {
       var target = event.target instanceof Element ? event.target : null;
-      var editor = target?.closest('textarea.message-edit-input');
+      var editor = target?.closest('.message-edit-input');
       if (!editor || !transcript.contains(editor)) return;
+
+      if (editReferenceMenuOpen && editReferenceEditor === editor) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeEditReferenceMenu(true);
+          return;
+        }
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          moveEditReferenceSelection(1);
+          return;
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          moveEditReferenceSelection(-1);
+          return;
+        }
+        if ((event.key === 'Enter' && !(event.metaKey || event.ctrlKey)) || event.key === 'Tab') {
+          event.preventDefault();
+          insertActiveEditReferenceResource();
+          return;
+        }
+      }
 
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -92,6 +159,72 @@ export function getScript(): string {
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
         event.preventDefault();
         submitEditedMessage(editor.dataset.messageId || '');
+      }
+    });
+
+    transcript.addEventListener('keyup', function(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      var editor = target?.closest('.message-edit-input');
+      if (!editor || !transcript.contains(editor)) return;
+      saveEditSelection(editor);
+      syncEditReferenceMenuFromEditor(editor);
+    });
+
+    transcript.addEventListener('mouseup', function(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      var editor = target?.closest('.message-edit-input');
+      if (!editor || !transcript.contains(editor)) return;
+      saveEditSelection(editor);
+      syncEditReferenceMenuFromEditor(editor);
+    });
+
+    document.addEventListener('selectionchange', function() {
+      var editor = getActiveInlineEditor();
+      if (!editor) return;
+      if (isSelectionInsideInlineEditor(editor)) {
+        saveEditSelection(editor);
+        if (editReferenceMenuOpen) {
+          syncEditReferenceMenuFromEditor(editor);
+        }
+      }
+    });
+
+    editReferenceMenu.addEventListener('mousedown', function(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('button[data-edit-reference-index]')) {
+        event.preventDefault();
+      }
+    });
+
+    editReferenceMenu.addEventListener('click', function(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      var button = target?.closest('button[data-edit-reference-index]');
+      if (!button) return;
+      event.preventDefault();
+      event.stopPropagation();
+      var index = readReferenceInteger(button.dataset.editReferenceIndex, 1) - 1;
+      insertEditReferenceResourceAtIndex(index);
+    });
+
+    document.addEventListener('mousedown', function(event) {
+      if (!editReferenceMenuOpen) return;
+      var target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      if (editReferenceMenu.contains(target) || (editReferenceEditor && editReferenceEditor.contains(target))) {
+        return;
+      }
+      closeEditReferenceMenu(false);
+    });
+
+    window.addEventListener('resize', function() {
+      if (editReferenceMenuOpen) {
+        positionEditReferenceMenu();
+      }
+    });
+
+    transcript.addEventListener('scroll', function() {
+      if (editReferenceMenuOpen) {
+        positionEditReferenceMenu();
       }
     });
 
@@ -152,6 +285,13 @@ export function getScript(): string {
       closeSessionMenu();
     });
 
+    window.keepseekInlineEditorControls = {
+      insertFileReference: insertFileReferenceIntoActiveEditor,
+      hasActiveEditor: function() {
+        return Boolean(getActiveInlineEditor());
+      }
+    };
+
     ${getInputScript()}
 
     window.addEventListener('message', function(event) {
@@ -165,6 +305,8 @@ export function getScript(): string {
         if (window.keepseekInputControls && window.keepseekInputControls.showSettingsDialog) {
           window.keepseekInputControls.showSettingsDialog(message.apiKey, message.baseUrl);
         }
+      } else if (message.type === 'referenceResources') {
+        handleEditReferenceResourcesMessage(message);
       }
     });
 
@@ -304,6 +446,8 @@ export function getScript(): string {
         editingMessageId = '';
         editingDraftText = '';
         pendingEditFocusId = '';
+        savedEditRange = null;
+        closeEditReferenceMenu(false);
       }
     }
 
@@ -331,6 +475,8 @@ export function getScript(): string {
         editingMessageId = message.id;
         editingDraftText = String(message.content || '');
         pendingEditFocusId = message.id;
+        savedEditRange = null;
+        closeEditReferenceMenu(false);
         render();
         return;
       }
@@ -376,11 +522,18 @@ export function getScript(): string {
       editingMessageId = '';
       editingDraftText = '';
       pendingEditFocusId = '';
+      savedEditRange = null;
+      closeEditReferenceMenu(false);
       render();
     }
 
     function submitEditedMessage(messageId) {
       if (!messageId || messageId !== editingMessageId || state.isBusy) return;
+      var editor = getActiveInlineEditor();
+      if (editor) {
+        sanitizeInlineEditorLinks(editor);
+        editingDraftText = serializeInlineEditor(editor);
+      }
       var prompt = editingDraftText.trim();
       if (!prompt) {
         setTransientStatus('\\u8bf7\\u8f93\\u5165\\u5185\\u5bb9');
@@ -397,6 +550,8 @@ export function getScript(): string {
       editingMessageId = '';
       editingDraftText = '';
       pendingEditFocusId = '';
+      savedEditRange = null;
+      closeEditReferenceMenu(false);
       render();
     }
 
@@ -406,6 +561,322 @@ export function getScript(): string {
         thinkingEnabled: typeof configured.thinkingEnabled === 'boolean' ? configured.thinkingEnabled : true,
         reasoningEffort: configured.reasoningEffort === 'max' ? 'max' : 'high'
       };
+    }
+
+    function syncEditReferenceMenuFromEditor(editor) {
+      if (!editor || editor.dataset.messageId !== editingMessageId) {
+        closeEditReferenceMenu(false);
+        return;
+      }
+
+      var mention = getEditMentionTrigger(editor);
+      if (!mention) {
+        closeEditReferenceMenu(false);
+        return;
+      }
+
+      var previousQuery = editMentionQuery;
+      editReferenceEditor = editor;
+      editMentionRange = mention.range;
+      editMentionQuery = mention.query;
+      if (previousQuery !== editMentionQuery) {
+        editReferenceIndex = 0;
+      }
+
+      if (!editReferenceMenuOpen) {
+        openEditReferenceMenu(editor);
+        return;
+      }
+
+      renderEditReferenceMenu();
+    }
+
+    function getEditMentionTrigger(editor) {
+      if (document.activeElement !== editor) return null;
+      var selection = window.getSelection();
+      if (!selection || !selection.rangeCount || !selection.isCollapsed) return null;
+      var range = selection.getRangeAt(0);
+      if (!isRangeInsideInlineEditor(range, editor)) return null;
+      if (range.startContainer.nodeType !== Node.TEXT_NODE) return null;
+      var textNode = range.startContainer;
+      var textBefore = (textNode.nodeValue || '').slice(0, range.startOffset);
+      var triggerIndex = findEditMentionTriggerIndex(textBefore);
+      if (triggerIndex < 0) return null;
+      var mentionRange = document.createRange();
+      mentionRange.setStart(textNode, triggerIndex);
+      mentionRange.setEnd(textNode, range.startOffset);
+      return {
+        range: mentionRange,
+        query: textBefore.slice(triggerIndex + 1)
+      };
+    }
+
+    function findEditMentionTriggerIndex(textBefore) {
+      for (var i = textBefore.length - 1; i >= 0; i--) {
+        var character = textBefore.charAt(i);
+        if (character === '@') {
+          return i;
+        }
+        if (isEditMentionTerminator(character)) {
+          return -1;
+        }
+      }
+      return -1;
+    }
+
+    function isEditMentionTerminator(character) {
+      return character === '<' || character === '>' || character === String.fromCharCode(10) || character === String.fromCharCode(13) || isEditWhitespace(character);
+    }
+
+    function isEditWhitespace(value) {
+      return /\\s/u.test(String(value || ''));
+    }
+
+    function openEditReferenceMenu(editor) {
+      closeSessionMenu();
+      editReferenceEditor = editor;
+      editReferenceMenuOpen = true;
+      editReferenceMenu.classList.remove('hidden');
+      requestEditReferenceResources();
+      renderEditReferenceMenu();
+    }
+
+    function closeEditReferenceMenu(restoreFocus) {
+      var editor = editReferenceEditor;
+      editReferenceMenuOpen = false;
+      editReferenceEditor = null;
+      editMentionRange = null;
+      editMentionQuery = '';
+      editReferenceIndex = 0;
+      editReferenceMenu.classList.add('hidden');
+      editReferenceMenu.classList.remove('is-above');
+      editReferenceMenu.innerHTML = '';
+      if (restoreFocus && editor) {
+        editor.focus();
+      }
+    }
+
+    function requestEditReferenceResources() {
+      if (editReferenceResourcesLoading) return;
+      editReferenceResourcesLoading = true;
+      editReferenceResourcesError = '';
+      editReferenceResourceRequestSequence += 1;
+      editReferenceResourceRequestId = 'editReferenceResources:' + editReferenceResourceRequestSequence + ':' + Date.now();
+      vscode.postMessage({ type: 'requestReferenceResources', requestId: editReferenceResourceRequestId });
+    }
+
+    function handleEditReferenceResourcesMessage(message) {
+      if (!editReferenceResourceRequestId || message.requestId !== editReferenceResourceRequestId) {
+        return;
+      }
+      editReferenceResourcesLoading = false;
+      editReferenceResourcesLoaded = true;
+      editReferenceResourcesError = typeof message.error === 'string' ? message.error : '';
+      editReferenceResources = Array.isArray(message.resources) ? message.resources : [];
+      renderEditReferenceMenu();
+    }
+
+    function renderEditReferenceMenu() {
+      if (!editReferenceMenuOpen || !editReferenceEditor) return;
+      editReferenceMenu.innerHTML = '';
+
+      var header = document.createElement('div');
+      header.className = 'reference-menu-header';
+      var title = document.createElement('span');
+      title.className = 'reference-menu-title';
+      title.textContent = '\\u5f15\\u7528\\u6587\\u4ef6';
+      var count = document.createElement('span');
+      count.className = 'reference-menu-count';
+      header.append(title, count);
+      editReferenceMenu.append(header);
+
+      if (editReferenceResourcesLoading && !editReferenceResourcesLoaded) {
+        count.textContent = '\\u52a0\\u8f7d\\u4e2d';
+        appendEditReferenceMenuNotice('\\u6b63\\u5728\\u52a0\\u8f7d\\u5de5\\u7a0b\\u6587\\u4ef6...');
+        positionEditReferenceMenu();
+        return;
+      }
+
+      if (editReferenceResourcesError) {
+        count.textContent = '0';
+        appendEditReferenceMenuNotice(editReferenceResourcesError);
+        positionEditReferenceMenu();
+        return;
+      }
+
+      var resources = getFilteredEditReferenceResources();
+      count.textContent = String(resources.length);
+      if (!resources.length) {
+        appendEditReferenceMenuNotice(editMentionQuery ? '\\u6ca1\\u6709\\u5339\\u914d\\u7684\\u6587\\u4ef6' : '\\u6ca1\\u6709\\u53ef\\u5f15\\u7528\\u7684\\u6587\\u4ef6');
+        positionEditReferenceMenu();
+        return;
+      }
+
+      if (editReferenceIndex >= resources.length) {
+        editReferenceIndex = resources.length - 1;
+      }
+      if (editReferenceIndex < 0) {
+        editReferenceIndex = 0;
+      }
+
+      var list = document.createElement('div');
+      list.className = 'reference-menu-list';
+      for (var i = 0; i < resources.length; i++) {
+        list.append(createEditReferenceResourceButton(resources[i], i));
+      }
+      editReferenceMenu.append(list);
+      positionEditReferenceMenu();
+      scrollActiveEditReferenceIntoView();
+    }
+
+    function appendEditReferenceMenuNotice(message) {
+      var notice = document.createElement('div');
+      notice.className = 'reference-menu-empty';
+      notice.textContent = message;
+      editReferenceMenu.append(notice);
+    }
+
+    function createEditReferenceResourceButton(resource, index) {
+      var option = document.createElement('button');
+      option.type = 'button';
+      option.className = 'reference-menu-item' + (index === editReferenceIndex ? ' is-active' : '');
+      option.dataset.editReferenceIndex = String(index + 1);
+      option.setAttribute('role', 'option');
+      option.setAttribute('aria-selected', index === editReferenceIndex ? 'true' : 'false');
+
+      var name = document.createElement('span');
+      name.className = 'reference-menu-item-name';
+      name.textContent = getEditReferenceResourceName(resource);
+      name.title = name.textContent;
+
+      var pathLabel = document.createElement('span');
+      pathLabel.className = 'reference-menu-item-path';
+      pathLabel.textContent = resource.description || resource.path || '';
+      pathLabel.title = pathLabel.textContent;
+
+      option.append(name, pathLabel);
+      return option;
+    }
+
+    function getFilteredEditReferenceResources() {
+      var query = normalizeEditReferenceQuery(editMentionQuery);
+      if (!query) {
+        return editReferenceResources.slice();
+      }
+      return editReferenceResources.filter(function(resource) {
+        return normalizeEditReferenceQuery(getEditReferenceResourceName(resource)).indexOf(query) === 0;
+      });
+    }
+
+    function normalizeEditReferenceQuery(value) {
+      return String(value || '').trim().toLocaleLowerCase();
+    }
+
+    function getEditReferenceResourceName(resource) {
+      return resource.label || getMessageFileName(resource.path || '') || 'file';
+    }
+
+    function moveEditReferenceSelection(delta) {
+      var resources = getFilteredEditReferenceResources();
+      if (!resources.length) return;
+      editReferenceIndex = (editReferenceIndex + delta + resources.length) % resources.length;
+      renderEditReferenceMenu();
+    }
+
+    function insertActiveEditReferenceResource() {
+      insertEditReferenceResourceAtIndex(editReferenceIndex);
+    }
+
+    function insertEditReferenceResourceAtIndex(index) {
+      var editor = editReferenceEditor;
+      var resources = getFilteredEditReferenceResources();
+      var resource = resources[index];
+      if (!editor || !resource) return;
+
+      var referencePath = resource.path || resource.uri || '';
+      if (!referencePath) return;
+
+      var reference = {
+        path: referencePath,
+        startLine: 0,
+        endLine: 0,
+        startColumn: 0,
+        endColumn: 0
+      };
+      var range = editMentionRange && isRangeInsideInlineEditor(editMentionRange, editor)
+        ? editMentionRange.cloneRange()
+        : getInlineEditorInsertionRange(editor);
+      insertInlineReferenceAtRange(editor, range, reference);
+      editingDraftText = serializeInlineEditor(editor);
+      resizeInlineEditor(editor);
+      updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
+      closeEditReferenceMenu(false);
+      setTransientStatus('\\u5df2\\u63d2\\u5165\\u6587\\u4ef6\\u5f15\\u7528');
+    }
+
+    function scrollActiveEditReferenceIntoView() {
+      var active = editReferenceMenu.querySelector('.reference-menu-item.is-active');
+      if (active && active.scrollIntoView) {
+        active.scrollIntoView({ block: 'nearest' });
+      }
+    }
+
+    function positionEditReferenceMenu() {
+      if (!editReferenceMenuOpen || !editReferenceEditor) return;
+      var editorRect = editReferenceEditor.getBoundingClientRect();
+      if (editorRect.bottom < 0 || editorRect.top > window.innerHeight) {
+        closeEditReferenceMenu(false);
+        return;
+      }
+
+      var caretRect = getInlineEditorCaretRect(editReferenceEditor, editMentionRange || savedEditRange);
+      var margin = 8;
+      var maxWidth = Math.max(180, window.innerWidth - margin * 2);
+      var menuWidth = Math.min(360, Math.max(220, editorRect.width));
+      menuWidth = Math.min(menuWidth, maxWidth);
+      editReferenceMenu.style.width = menuWidth + 'px';
+      editReferenceMenu.style.maxHeight = Math.min(360, Math.max(120, Math.floor(window.innerHeight * 0.5))) + 'px';
+
+      var menuHeight = editReferenceMenu.offsetHeight || 220;
+      var below = window.innerHeight - caretRect.bottom - margin;
+      var above = caretRect.top - margin;
+      var placeAbove = below < Math.min(menuHeight, 160) && above > below;
+      var left = Math.min(Math.max(margin, caretRect.left), window.innerWidth - menuWidth - margin);
+      var top = placeAbove ? caretRect.top - menuHeight - 8 : caretRect.bottom + 8;
+      top = Math.min(Math.max(margin, top), window.innerHeight - menuHeight - margin);
+
+      editReferenceMenu.style.left = left + 'px';
+      editReferenceMenu.style.top = top + 'px';
+      editReferenceMenu.style.right = 'auto';
+      editReferenceMenu.style.bottom = 'auto';
+      editReferenceMenu.classList.toggle('is-above', placeAbove);
+    }
+
+    function getInlineEditorCaretRect(editor, sourceRange) {
+      try {
+        var range = sourceRange && isRangeInsideInlineEditor(sourceRange, editor)
+          ? sourceRange.cloneRange()
+          : getInlineEditorInsertionRange(editor);
+        range.collapse(false);
+        var rect = range.getBoundingClientRect();
+        if (rect && (rect.width || rect.height)) {
+          return rect;
+        }
+
+        var marker = document.createElement('span');
+        marker.textContent = String.fromCharCode(8203);
+        range.insertNode(marker);
+        var markerRect = marker.getBoundingClientRect();
+        marker.remove();
+        return markerRect;
+      } catch {
+        var fallback = editor.getBoundingClientRect();
+        return {
+          left: fallback.left,
+          top: fallback.bottom,
+          bottom: fallback.bottom
+        };
+      }
     }
 
     function renderContextChips() {
@@ -573,17 +1044,292 @@ export function getScript(): string {
       return button;
     }
 
+    function getActiveInlineEditor() {
+      if (!editingMessageId) return null;
+      var editor = transcript.querySelector('.message.is-editing .message-edit-input');
+      return editor && editor.dataset.messageId === editingMessageId ? editor : null;
+    }
+
+    function saveEditSelection(editor) {
+      if (!editor || !isSelectionInsideInlineEditor(editor)) return;
+      var selection = window.getSelection();
+      if (!selection || !selection.rangeCount) return;
+      var range = selection.getRangeAt(0);
+      if (!isRangeInsideInlineEditor(range, editor)) return;
+      savedEditRange = range.cloneRange();
+    }
+
+    function isSelectionInsideInlineEditor(editor) {
+      var selection = window.getSelection();
+      if (!selection || !selection.rangeCount) return false;
+      return isRangeInsideInlineEditor(selection.getRangeAt(0), editor);
+    }
+
+    function isRangeInsideInlineEditor(range, editor) {
+      return Boolean(editor && isNodeInsideInlineEditor(range.commonAncestorContainer, editor));
+    }
+
+    function isNodeInsideInlineEditor(node, editor) {
+      if (!node || !editor) return false;
+      if (node === editor) return true;
+      return editor.contains(node.nodeType === Node.ELEMENT_NODE ? node : node.parentNode);
+    }
+
+    function renderInlineEditorContent(editor, value) {
+      editor.innerHTML = '';
+      var text = String(value || '');
+      var pattern = /<([^<>\\n]+)>/g;
+      var cursor = 0;
+      var match;
+
+      while ((match = pattern.exec(text)) !== null) {
+        var target = (match[1] || '').trim();
+        var reference = parseMessageFileReference(target);
+        if (!reference) {
+          continue;
+        }
+
+        var label = getMessageReferenceLabel(text, match.index, reference);
+        if (label.start < cursor) {
+          continue;
+        }
+
+        appendInlineEditorText(editor, text.slice(cursor, label.start));
+        editor.append(createInlineFileReferenceLink(reference));
+        cursor = match.index + match[0].length;
+      }
+
+      appendInlineEditorText(editor, text.slice(cursor));
+      sanitizeInlineEditorLinks(editor);
+    }
+
+    function appendInlineEditorText(editor, text) {
+      if (!text) return;
+      editor.append(document.createTextNode(text));
+    }
+
+    function createInlineFileReferenceLink(reference) {
+      var anchor = document.createElement('a');
+      var href = makeMessageFileHref(reference);
+      anchor.className = 'rich-file-link';
+      anchor.href = href;
+      anchor.title = href;
+      anchor.draggable = false;
+      anchor.setAttribute('contenteditable', 'false');
+      anchor.textContent = reference.startLine > 0
+        ? getMessageFileName(reference.path) + ' (' + formatMessageLineLabel(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn) + ')'
+        : getMessageFileName(reference.path);
+      anchor.dataset.path = reference.path;
+      anchor.dataset.startLine = String(reference.startLine);
+      anchor.dataset.endLine = String(reference.endLine);
+      anchor.dataset.startColumn = String(reference.startColumn || 0);
+      anchor.dataset.endColumn = String(reference.endColumn || 0);
+      return anchor;
+    }
+
+    function sanitizeInlineEditorLinks(editor) {
+      var links = editor.querySelectorAll('a.rich-file-link');
+      links.forEach(function(link) {
+        var startLine = readReferenceInteger(link.dataset.startLine, 0);
+        var endLine = startLine === 0 ? 0 : Math.max(startLine, readReferenceInteger(link.dataset.endLine, startLine));
+        var startColumn = readReferenceInteger(link.dataset.startColumn, 0);
+        var endColumn = readReferenceInteger(link.dataset.endColumn, 0);
+        var reference = {
+          path: link.dataset.path || '',
+          startLine: startLine,
+          endLine: endLine,
+          startColumn: startColumn,
+          endColumn: endColumn
+        };
+        link.className = 'rich-file-link';
+        link.setAttribute('href', makeMessageFileHref(reference));
+        link.setAttribute('contenteditable', 'false');
+        link.draggable = false;
+        link.title = makeMessageFileHref(reference);
+      });
+    }
+
+    function serializeInlineEditor(editor) {
+      var parts = [];
+      appendInlineEditorNode(editor, editor, parts);
+      return trimInlineEditorText(parts.join(''));
+    }
+
+    function appendInlineEditorNode(root, node, parts) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        parts.push(node.nodeValue || '');
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+      var element = node;
+      if (element.matches('a.rich-file-link')) {
+        parts.push(inlineFileReferenceLinkToText(element));
+        return;
+      }
+      if (element.tagName === 'BR') {
+        parts.push(String.fromCharCode(10));
+        return;
+      }
+
+      var isBlock = element !== root && isInlineEditorBlockElement(element);
+      if (isBlock && parts.length && !inlinePartsEndWithLineBreak(parts)) {
+        parts.push(String.fromCharCode(10));
+      }
+
+      var child = element.firstChild;
+      while (child) {
+        appendInlineEditorNode(root, child, parts);
+        child = child.nextSibling;
+      }
+
+      if (isBlock && !inlinePartsEndWithLineBreak(parts)) {
+        parts.push(String.fromCharCode(10));
+      }
+    }
+
+    function inlineFileReferenceLinkToText(link) {
+      var reference = {
+        path: link.dataset.path || '',
+        startLine: readReferenceInteger(link.dataset.startLine, 0),
+        endLine: readReferenceInteger(link.dataset.endLine, 0),
+        startColumn: readReferenceInteger(link.dataset.startColumn, 0),
+        endColumn: readReferenceInteger(link.dataset.endColumn, 0)
+      };
+      if (reference.startLine > 0 && reference.endLine < reference.startLine) {
+        reference.endLine = reference.startLine;
+      }
+      var label = link.textContent || getMessageFileName(reference.path);
+      return label + ' <' + makeMessageFileHref(reference) + '>';
+    }
+
+    function isInlineEditorBlockElement(element) {
+      var tag = element.tagName;
+      return tag === 'DIV' || tag === 'P' || tag === 'LI' || tag === 'UL' || tag === 'OL';
+    }
+
+    function inlinePartsEndWithLineBreak(parts) {
+      if (!parts.length) return false;
+      var last = parts[parts.length - 1];
+      return last.charAt(last.length - 1) === String.fromCharCode(10);
+    }
+
+    function trimInlineEditorText(value) {
+      var text = String(value || '');
+      while (text.length && isEditWhitespace(text.charAt(0))) {
+        text = text.slice(1);
+      }
+      while (text.length && isEditWhitespace(text.charAt(text.length - 1))) {
+        text = text.slice(0, -1);
+      }
+      return text;
+    }
+
+    function getInlineEditorInsertionRange(editor) {
+      if (savedEditRange && isRangeInsideInlineEditor(savedEditRange, editor)) {
+        return savedEditRange.cloneRange();
+      }
+      return getInlineEditorEndRange(editor);
+    }
+
+    function getInlineEditorEndRange(editor) {
+      var range = document.createRange();
+      range.selectNodeContents(editor);
+      range.collapse(false);
+      return range;
+    }
+
+    function setInlineEditorSelectionRange(editor, range) {
+      var selection = window.getSelection();
+      if (!selection || !range || !isRangeInsideInlineEditor(range, editor)) return;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      savedEditRange = range.cloneRange();
+    }
+
+    function insertInlineReferenceAtRange(editor, range, reference) {
+      var fragment = document.createDocumentFragment();
+      if (needsInlineEditorLeadingSpace(editor, range)) {
+        fragment.append(document.createTextNode(' '));
+      }
+      fragment.append(createInlineFileReferenceLink(reference));
+      if (needsInlineEditorTrailingSpace(editor, range)) {
+        fragment.append(document.createTextNode(' '));
+      }
+      insertInlineFragmentAtRange(editor, range, fragment);
+    }
+
+    function insertInlineFragmentAtRange(editor, range, fragment) {
+      var workingRange = range && isRangeInsideInlineEditor(range, editor) ? range.cloneRange() : getInlineEditorEndRange(editor);
+      workingRange.deleteContents();
+      var tail = document.createTextNode('');
+      fragment.append(tail);
+      workingRange.insertNode(fragment);
+      var nextRange = document.createRange();
+      nextRange.setStartAfter(tail);
+      nextRange.collapse(true);
+      setInlineEditorSelectionRange(editor, nextRange);
+      editor.focus();
+      editingDraftText = serializeInlineEditor(editor);
+    }
+
+    function needsInlineEditorLeadingSpace(editor, range) {
+      var text = getInlineEditorTextBeforeRange(editor, range);
+      return text.length > 0 && !isEditWhitespace(text.charAt(text.length - 1));
+    }
+
+    function needsInlineEditorTrailingSpace(editor, range) {
+      var text = getInlineEditorTextAfterRange(editor, range);
+      return text.length > 0 && !isEditWhitespace(text.charAt(0));
+    }
+
+    function getInlineEditorTextBeforeRange(editor, range) {
+      var clone = range.cloneRange();
+      clone.selectNodeContents(editor);
+      clone.setEnd(range.startContainer, range.startOffset);
+      return clone.toString();
+    }
+
+    function getInlineEditorTextAfterRange(editor, range) {
+      var clone = range.cloneRange();
+      clone.selectNodeContents(editor);
+      clone.setStart(range.endContainer, range.endOffset);
+      return clone.toString();
+    }
+
+    function insertFileReferenceIntoActiveEditor(message) {
+      var editor = getActiveInlineEditor();
+      if (!editor) return false;
+      var reference = {
+        path: message.path || '',
+        startLine: readReferenceInteger(message.startLine, 0),
+        endLine: readReferenceInteger(message.endLine, 0),
+        startColumn: readReferenceInteger(message.startColumn, 0),
+        endColumn: readReferenceInteger(message.endColumn, 0)
+      };
+      if (!reference.path) return true;
+      var range = getInlineEditorInsertionRange(editor);
+      insertInlineReferenceAtRange(editor, range, reference);
+      resizeInlineEditor(editor);
+      updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
+      closeEditReferenceMenu(false);
+      setTransientStatus('\\u5df2\\u63d2\\u5165\\u6587\\u4ef6\\u5f15\\u7528');
+      return true;
+    }
+
     function createInlineMessageEditor(message) {
       var form = document.createElement('form');
       form.className = 'message-edit-form';
       form.dataset.messageId = message.id;
 
-      var editor = document.createElement('textarea');
+      var editor = document.createElement('div');
       editor.className = 'message-edit-input';
       editor.dataset.messageId = message.id;
-      editor.rows = 1;
-      editor.value = editingDraftText;
+      editor.setAttribute('contenteditable', 'true');
+      editor.setAttribute('role', 'textbox');
+      editor.setAttribute('aria-multiline', 'true');
       editor.setAttribute('aria-label', '\\u7f16\\u8f91\\u6d88\\u606f');
+      renderInlineEditorContent(editor, editingDraftText);
 
       var footer = document.createElement('div');
       footer.className = 'message-edit-footer';
@@ -609,7 +1355,9 @@ export function getScript(): string {
         if (pendingEditFocusId === message.id) {
           pendingEditFocusId = '';
           editor.focus();
-          editor.setSelectionRange(editor.value.length, editor.value.length);
+          var range = getInlineEditorEndRange(editor);
+          setInlineEditorSelectionRange(editor, range);
+          saveEditSelection(editor);
         }
       });
 
@@ -624,10 +1372,10 @@ export function getScript(): string {
 
     function updateInlineEditorSubmitState(form) {
       if (!form) return;
-      var editor = form.querySelector('textarea.message-edit-input');
+      var editor = form.querySelector('.message-edit-input');
       var send = form.querySelector('button[type="submit"]');
       if (!send || !editor) return;
-      send.disabled = state.isBusy || !editor.value.trim();
+      send.disabled = state.isBusy || !serializeInlineEditor(editor).trim();
     }
 
     function renderMessageContent(container, value, hideExpandedReferences) {

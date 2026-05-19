@@ -535,6 +535,7 @@ export function getStyles(): string {
     }
 
     .message-edit-input {
+      display: block;
       width: 100%;
       min-height: 58px;
       max-height: 240px;
@@ -545,8 +546,13 @@ export function getStyles(): string {
       background: transparent;
       outline: none;
       resize: none;
+      overflow-y: auto;
       line-height: 1.5;
       font-size: 13px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      user-select: text;
+      caret-color: var(--vscode-input-foreground, var(--vscode-foreground));
     }
 
     .message-edit-footer {
@@ -559,6 +565,17 @@ export function getStyles(): string {
       min-height: 24px;
       padding: 2px 10px;
       font-size: 12px;
+    }
+
+    .message-reference-menu {
+      position: fixed;
+      left: 8px;
+      right: auto;
+      top: 8px;
+      bottom: auto;
+      z-index: 80;
+      width: min(360px, calc(100vw - 16px));
+      max-height: min(50vh, 360px);
     }
 
     .reasoning-block {

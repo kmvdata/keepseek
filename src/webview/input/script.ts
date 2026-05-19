@@ -1562,6 +1562,13 @@ export function getInputScript(): string {
           return;
         }
         if (msg.type !== 'insertFileReference') return;
+        if (
+          window.keepseekInlineEditorControls &&
+          window.keepseekInlineEditorControls.insertFileReference &&
+          window.keepseekInlineEditorControls.insertFileReference(msg)
+        ) {
+          return;
+        }
         var reference = { path: msg.path, startLine: msg.startLine, endLine: msg.endLine, startColumn: msg.startColumn || 0, endColumn: msg.endColumn || 0 };
         var range = getPromptInsertionRange();
         var fragment = document.createDocumentFragment();
