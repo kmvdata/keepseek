@@ -74,6 +74,12 @@
           ],
           "description": "Models shown in the KeepSeek chat selector. Provider integration is implemented in src/agentRunner.ts."
         },
+        "keepseek.apiKey": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "API key for the account or provider integration used by KeepSeek."
+        },
         "keepseek.maxFileBytes": {
           "type": "number",
           "default": 200000,

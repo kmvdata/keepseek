@@ -20,6 +20,8 @@ const DOES_NOT_SUPPORT_SECONDARY_SIDEBAR_CONTEXT = 'keepseek.doesNotSupportSecon
 type WebviewMessage =
   | { type: 'ready' }
   | { type: 'sendPrompt'; prompt: string; modelId: string }
+  | { type: 'setSelectedModel'; modelId: string }
+  | { type: 'openSettings'; query: string }
   | { type: 'addCurrentFile' }
   | { type: 'pickWorkspaceFiles' }
   | { type: 'pickExternalFiles' }
@@ -171,6 +173,12 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'sendPrompt':
         await this.sendPrompt(message.prompt, message.modelId);
         return;
+      case 'setSelectedModel':
+        this.setSelectedModel(message.modelId);
+        return;
+      case 'openSettings':
+        await vscode.commands.executeCommand('workbench.action.openSettings', message.query || 'keepseek');
+        return;
       case 'addCurrentFile':
         await this.addCurrentFileToContext();
         return;
@@ -211,6 +219,15 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         vscode.window.showInformationMessage(`KeepSeek added ${files.length} file(s).`);
       }
     });
+  }
+
+  private setSelectedModel(modelId: string): void {
+    const models = getConfiguredModels();
+    if (!models.some((model) => model.id === modelId)) {
+      return;
+    }
+    this.selectedModelId = modelId;
+    this.postState();
   }
 
   private async openFileReference(rawPath: string, rawStartLine: number, rawEndLine: number, rawStartColumn: number, rawEndColumn: number): Promise<void> {

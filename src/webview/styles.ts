@@ -4,6 +4,11 @@ export function getStyles(): string {
   return `
     :root {
       color-scheme: light dark;
+
+      /* ---- input 区域边距变量（修改这些值即可调整间距） ---- */
+      --keepseek-composer-padding: 0;
+      --keepseek-input-padding: 4px 4px 2px;
+      --keepseek-toolbar-padding: 0 4px 4px;
     }
 
     * {

@@ -6,11 +6,31 @@ export function getInputScript(): string {
       var dropZone = promptInput.closest('.composer-input-inner') || promptInput;
       var dropArea = promptInput.closest('.composer-input-wrap') || dropZone;
       var dragDepth = 0;
+      var commandMenuButton = document.getElementById('commandMenuButton');
+      var commandMenu = document.getElementById('commandMenu');
+      var commandModelSwitch = document.getElementById('commandModelSwitch');
+      var commandModelValue = document.getElementById('commandModelValue');
+      var commandModelList = document.getElementById('commandModelList');
+      var commandEffortSlider = document.getElementById('commandEffortSlider');
+      var commandEffortValue = document.getElementById('commandEffortValue');
+      var commandThinkingToggle = document.getElementById('commandThinkingToggle');
+      var commandApiKeyButton = document.getElementById('commandApiKeyButton');
+      var commandMenuOpen = false;
+      var commandModelListOpen = false;
+      var activeSlashRange = null;
+      var effortLabels = {
+        1: 'Minimal',
+        2: 'Medium',
+        3: 'High',
+        4: 'Deep',
+        5: 'Max'
+      };
 
       composer.addEventListener('submit', function(event) {
         event.preventDefault();
         var prompt = serializePrompt();
         if (!prompt.trim() || state.isBusy) return;
+        closeCommandMenu();
         vscode.postMessage({
           type: 'sendPrompt',
           prompt: prompt,
@@ -22,6 +42,20 @@ export function getInputScript(): string {
       });
 
       promptInput.addEventListener('keydown', function(event) {
+        if (commandMenuOpen && event.key === 'Escape') {
+          event.preventDefault();
+          closeCommandMenu();
+          promptInput.focus();
+          return;
+        }
+        if (commandMenuOpen && event.key === 'ArrowDown') {
+          var first = commandMenu ? commandMenu.querySelector('button, input') : null;
+          if (first) {
+            event.preventDefault();
+            first.focus();
+            return;
+          }
+        }
         if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
           event.preventDefault();
           composer.requestSubmit();
@@ -32,11 +66,100 @@ export function getInputScript(): string {
         sanitizePromptLinks();
         updatePromptVisualState();
         savePromptSelection();
+        var slashRange = getSlashTriggerRange();
+        if (slashRange) {
+          activeSlashRange = slashRange;
+          openCommandMenu();
+        }
       });
 
       promptInput.addEventListener('keyup', savePromptSelection);
       promptInput.addEventListener('mouseup', savePromptSelection);
       promptInput.addEventListener('focus', savePromptSelection);
+
+      if (commandMenuButton) {
+        commandMenuButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          activeSlashRange = null;
+          toggleCommandMenu();
+          if (commandMenuOpen) {
+            promptInput.focus();
+          }
+        });
+      }
+
+      if (commandModelSwitch) {
+        commandModelSwitch.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          consumeSlashTrigger(false);
+          commandModelListOpen = !commandModelListOpen;
+          renderCommandMenu();
+        });
+      }
+
+      if (commandModelList) {
+        commandModelList.addEventListener('click', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          var button = target?.closest('button[data-model-id]');
+          if (!button) { return; }
+          event.preventDefault();
+          event.stopPropagation();
+          var modelId = button.dataset.modelId || '';
+          if (modelId) {
+            state.selectedModelId = modelId;
+            vscode.postMessage({ type: 'setSelectedModel', modelId: modelId });
+          }
+          consumeSlashTrigger(false);
+          commandModelListOpen = false;
+          renderCommandMenu();
+          setComposerStatus('已切换模型');
+        });
+      }
+
+      if (commandEffortSlider) {
+        commandEffortSlider.addEventListener('input', function() {
+          consumeSlashTrigger(false);
+          renderCommandMenu();
+        });
+      }
+
+      if (commandThinkingToggle) {
+        commandThinkingToggle.addEventListener('change', function() {
+          consumeSlashTrigger(false);
+          renderCommandMenu();
+          setComposerStatus(commandThinkingToggle.checked ? 'Thinking 已开启' : 'Thinking 已关闭');
+        });
+      }
+
+      if (commandApiKeyButton) {
+        commandApiKeyButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          consumeSlashTrigger(false);
+          closeCommandMenu();
+          setComposerStatus('打开 API Key 设置');
+          vscode.postMessage({ type: 'openSettings', query: 'keepseek.apiKey' });
+        });
+      }
+
+      document.addEventListener('mousedown', function(event) {
+        if (!commandMenuOpen) { return; }
+        var target = event.target instanceof Element ? event.target : null;
+        if (!target) { return; }
+        if ((commandMenu && commandMenu.contains(target)) || (commandMenuButton && commandMenuButton.contains(target))) {
+          return;
+        }
+        closeCommandMenu();
+      });
+
+      document.addEventListener('keydown', function(event) {
+        if (!commandMenuOpen || event.key !== 'Escape') { return; }
+        event.preventDefault();
+        closeCommandMenu();
+        promptInput.focus();
+      });
 
       document.addEventListener('selectionchange', function() {
         if (isNodeInsidePrompt(document.activeElement)) {
@@ -75,6 +198,190 @@ export function getInputScript(): string {
           insertPlainText(text);
         }
       });
+
+      function openCommandMenu() {
+        if (!commandMenu || !commandMenuButton) { return; }
+        commandMenuOpen = true;
+        commandMenu.classList.remove('hidden');
+        commandMenuButton.classList.add('is-active');
+        commandMenuButton.setAttribute('aria-expanded', 'true');
+        renderCommandMenu();
+      }
+
+      function closeCommandMenu() {
+        if (!commandMenu || !commandMenuButton) { return; }
+        commandMenuOpen = false;
+        commandModelListOpen = false;
+        activeSlashRange = null;
+        commandMenu.classList.add('hidden');
+        commandMenuButton.classList.remove('is-active');
+        commandMenuButton.setAttribute('aria-expanded', 'false');
+        renderCommandMenu();
+      }
+
+      function toggleCommandMenu() {
+        if (commandMenuOpen) {
+          closeCommandMenu();
+          return;
+        }
+        openCommandMenu();
+      }
+
+      function renderCommandMenu() {
+        if (!commandMenu) { return; }
+        renderCommandModel();
+        renderEffort();
+      }
+
+      function renderCommandModel() {
+        var models = Array.isArray(state.models) ? state.models : [];
+        var selected = getSelectedModel(models);
+        if (commandModelValue) {
+          commandModelValue.textContent = selected ? getModelDisplayLabel(selected.model, selected.index) : 'Default (recommended)';
+          commandModelValue.title = commandModelValue.textContent;
+        }
+
+        if (commandModelSwitch) {
+          commandModelSwitch.setAttribute('aria-expanded', commandModelListOpen ? 'true' : 'false');
+        }
+        if (!commandModelList) { return; }
+
+        commandModelList.classList.toggle('hidden', !commandModelListOpen);
+        commandModelList.innerHTML = '';
+        if (!models.length) {
+          var empty = document.createElement('div');
+          empty.className = 'command-model-option command-model-empty';
+          empty.textContent = 'Default (recommended)';
+          commandModelList.append(empty);
+          return;
+        }
+
+        for (var i = 0; i < models.length; i++) {
+          var model = models[i];
+          var option = document.createElement('button');
+          var isSelected = model.id === state.selectedModelId || (!state.selectedModelId && i === 0);
+          option.type = 'button';
+          option.className = 'command-model-option';
+          option.dataset.modelId = model.id;
+          option.setAttribute('role', 'menuitemradio');
+          option.setAttribute('aria-checked', isSelected ? 'true' : 'false');
+
+          var check = document.createElement('span');
+          check.className = 'command-model-check';
+          check.textContent = isSelected ? '\\u2713' : '';
+
+          var label = document.createElement('span');
+          label.className = 'command-model-name';
+          label.textContent = getModelDisplayLabel(model, i);
+          label.title = model.label || model.id;
+
+          option.append(check, label);
+          commandModelList.append(option);
+        }
+      }
+
+      function getSelectedModel(models) {
+        if (!models.length) { return null; }
+        for (var i = 0; i < models.length; i++) {
+          if (models[i].id === state.selectedModelId) {
+            return { model: models[i], index: i };
+          }
+        }
+        return { model: models[0], index: 0 };
+      }
+
+      function getModelDisplayLabel(model, index) {
+        if (!model) { return 'Default (recommended)'; }
+        if (index === 0 || model.id === 'keepseek-default') {
+          return 'Default (recommended)';
+        }
+        return model.label || model.id || 'Model';
+      }
+
+      function renderEffort() {
+        if (!commandEffortSlider || !commandEffortValue) { return; }
+        var level = readPositiveInteger(commandEffortSlider.value, 3);
+        commandEffortValue.textContent = effortLabels[level] || 'High';
+      }
+
+      function consumeSlashTrigger(restoreFocus) {
+        if (!activeSlashRange || !isRangeInsidePrompt(activeSlashRange)) { return; }
+        var range = activeSlashRange.cloneRange();
+        range.deleteContents();
+        if (restoreFocus === false) {
+          savedPromptRange = range.cloneRange();
+        } else {
+          setPromptSelectionRange(range);
+          savePromptSelection();
+        }
+        updatePromptVisualState();
+        activeSlashRange = null;
+      }
+
+      function getSlashTriggerRange() {
+        var selection = window.getSelection();
+        if (!selection || !selection.rangeCount || !selection.isCollapsed) { return null; }
+        var range = selection.getRangeAt(0);
+        if (!isRangeInsidePrompt(range)) { return null; }
+        var textBefore = getTextBeforeRange(range);
+        if (!textBefore || textBefore.charAt(textBefore.length - 1) !== '/') { return null; }
+        var previous = textBefore.charAt(textBefore.length - 2);
+        if (previous && !isWhitespace(previous)) { return null; }
+        return getCharacterRangeBeforeCaret(range, '/');
+      }
+
+      function getCharacterRangeBeforeCaret(caretRange, character) {
+        if (caretRange.startContainer.nodeType === Node.TEXT_NODE && caretRange.startOffset > 0) {
+          var text = caretRange.startContainer.nodeValue || '';
+          if (text.charAt(caretRange.startOffset - 1) === character) {
+            var range = document.createRange();
+            range.setStart(caretRange.startContainer, caretRange.startOffset - 1);
+            range.setEnd(caretRange.startContainer, caretRange.startOffset);
+            return range;
+          }
+        }
+
+        var previousTextNode = getPreviousTextNode(caretRange.startContainer, caretRange.startOffset);
+        if (!previousTextNode) { return null; }
+        var previousText = previousTextNode.nodeValue || '';
+        if (!previousText || previousText.charAt(previousText.length - 1) !== character) { return null; }
+        var previousRange = document.createRange();
+        previousRange.setStart(previousTextNode, previousText.length - 1);
+        previousRange.setEnd(previousTextNode, previousText.length);
+        return previousRange;
+      }
+
+      function getPreviousTextNode(container, offset) {
+        if (container.nodeType === Node.ELEMENT_NODE && offset > 0) {
+          var child = container.childNodes[offset - 1];
+          var last = getLastTextNode(child);
+          if (last) { return last; }
+        }
+
+        var node = container.nodeType === Node.TEXT_NODE ? container : container.childNodes[offset] || container;
+        while (node && node !== promptInput) {
+          var sibling = node.previousSibling;
+          while (sibling) {
+            var textNode = getLastTextNode(sibling);
+            if (textNode) { return textNode; }
+            sibling = sibling.previousSibling;
+          }
+          node = node.parentNode;
+        }
+        return null;
+      }
+
+      function getLastTextNode(node) {
+        if (!node) { return null; }
+        if (node.nodeType === Node.TEXT_NODE) { return node; }
+        var child = node.lastChild;
+        while (child) {
+          var found = getLastTextNode(child);
+          if (found) { return found; }
+          child = child.previousSibling;
+        }
+        return null;
+      }
 
       function hasType(dt, name) {
         if (!dt.types) { return false; }
@@ -777,6 +1084,10 @@ export function getInputScript(): string {
         setComposerStatus('已插入文件引用');
       });
 
+      window.keepseekInputControls = {
+        render: renderCommandMenu
+      };
+      renderCommandMenu();
       updatePromptVisualState();
     })();
 `;

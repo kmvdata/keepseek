@@ -64,10 +64,11 @@ export function getInputStyles(): string {
     .composer {
       border-top: 1px solid var(--vscode-panel-border);
       background: var(--vscode-sideBar-background);
-      padding: 4px 4px;
+      padding: var(--keepseek-composer-padding, 0);
     }
 
     .composer-input-wrap {
+      position: relative;
       padding: 0;
     }
 
@@ -77,7 +78,7 @@ export function getInputStyles(): string {
       min-height: 116px;
       border: 1px solid var(--vscode-chat-requestBorder, var(--vscode-input-border, transparent));
       border-radius: 6px;
-      overflow: hidden;
+      overflow: visible;
       background: var(--vscode-chat-requestBackground, var(--vscode-input-background));
     }
 
@@ -88,7 +89,7 @@ export function getInputStyles(): string {
     .composer-input-inner .rich-input {
       flex: 0 0 auto;
       min-height: 74px;
-      padding: 10px 12px 6px;
+      padding: var(--keepseek-input-padding, 4px 4px 2px);
       background: transparent;
     }
 
@@ -98,7 +99,7 @@ export function getInputStyles(): string {
       justify-content: space-between;
       gap: 8px;
       min-height: 32px;
-      padding: 0 8px 8px;
+      padding: var(--keepseek-toolbar-padding, 0 4px 4px);
     }
 
     .composer-toolbar-left {
@@ -110,7 +111,6 @@ export function getInputStyles(): string {
     }
 
     .composer-icon-btn,
-    .composer-mode-btn,
     .composer-send-btn {
       display: inline-flex;
       align-items: center;
@@ -131,33 +131,35 @@ export function getInputStyles(): string {
       padding: 0;
     }
 
-    .composer-mode-btn {
-      gap: 4px;
-      min-height: 24px;
-      padding: 0 6px;
-      font-size: 12px;
-      color: var(--vscode-foreground);
+    .composer-command-btn {
+      font-weight: 700;
+      color: var(--vscode-descriptionForeground);
     }
 
-    .composer-mode-btn::after {
-      content: "";
-      width: 0;
-      height: 0;
-      border-left: 3.5px solid transparent;
-      border-right: 3.5px solid transparent;
-      border-top: 4px solid currentColor;
-      opacity: 0.7;
+    .composer-command-btn[aria-expanded="true"],
+    .composer-command-btn.is-active {
+      color: var(--vscode-foreground);
+      background: var(--vscode-toolbar-activeBackground, var(--vscode-toolbar-hoverBackground));
+    }
+
+    .command-trigger-glyph {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      font-size: 15px;
+      line-height: 16px;
+      font-family: var(--vscode-editor-font-family, monospace);
     }
 
     .composer-icon-btn:hover,
-    .composer-mode-btn:hover,
     .composer-send-btn:hover:not(:disabled) {
       color: var(--vscode-foreground);
       background: var(--vscode-toolbar-hoverBackground);
     }
 
     .composer-icon-btn:focus-visible,
-    .composer-mode-btn:focus-visible,
     .composer-send-btn:focus-visible {
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: 1px;
@@ -185,6 +187,233 @@ export function getInputStyles(): string {
       white-space: nowrap;
       font-size: 11px;
       color: var(--vscode-descriptionForeground);
+    }
+
+    .command-menu {
+      position: absolute;
+      left: 6px;
+      right: 6px;
+      bottom: 34px;
+      z-index: 30;
+      max-height: min(420px, calc(100vh - 96px));
+      overflow-y: auto;
+      padding: 6px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 8px;
+      background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
+      color: var(--vscode-quickInput-foreground, var(--vscode-foreground));
+      box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
+    }
+
+    .command-menu-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 4px 6px 7px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.2;
+    }
+
+    .command-menu-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+
+    .command-menu-shortcut {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border: 1px solid var(--vscode-keybindingLabel-border, var(--vscode-panel-border));
+      border-radius: 4px;
+      background: var(--vscode-keybindingLabel-background, var(--vscode-editor-background));
+      color: var(--vscode-keybindingLabel-foreground, var(--vscode-foreground));
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .command-section {
+      padding: 6px 0;
+      border-top: 1px solid var(--vscode-panel-border);
+    }
+
+    .command-section:first-of-type {
+      border-top: none;
+      padding-top: 0;
+    }
+
+    .command-section-label {
+      padding: 2px 6px 5px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .command-row,
+    .command-control-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      min-height: 38px;
+      padding: 6px 8px;
+      border: none;
+      border-radius: 6px;
+      color: var(--vscode-foreground);
+      background: transparent;
+      text-align: left;
+    }
+
+    .command-row {
+      cursor: pointer;
+    }
+
+    .command-row:hover,
+    .command-row:focus-visible,
+    .command-model-option:hover,
+    .command-model-option:focus-visible {
+      color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
+      background: var(--vscode-quickInputList-focusBackground, var(--vscode-list-hoverBackground));
+      outline: none;
+    }
+
+    .command-row-main {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      gap: 1px;
+    }
+
+    .command-row-title,
+    .command-row-description,
+    .command-row-value {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .command-row-title {
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+
+    .command-row-description {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.25;
+    }
+
+    .command-row-value {
+      max-width: 42vw;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.25;
+      text-align: right;
+    }
+
+    .command-model-list {
+      display: grid;
+      gap: 2px;
+      padding: 2px 0 4px 12px;
+    }
+
+    .command-model-option {
+      display: grid;
+      grid-template-columns: 14px minmax(0, 1fr);
+      align-items: center;
+      gap: 6px;
+      min-height: 28px;
+      padding: 4px 8px;
+      border: none;
+      border-radius: 5px;
+      color: var(--vscode-foreground);
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .command-model-check {
+      color: var(--vscode-textLink-foreground);
+      font-size: 12px;
+      line-height: 1;
+      text-align: center;
+    }
+
+    .command-model-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+    }
+
+    .command-effort-slider {
+      width: 88px;
+      min-width: 72px;
+      accent-color: var(--vscode-progressBar-background, var(--vscode-textLink-foreground));
+      cursor: pointer;
+    }
+
+    .command-toggle-row {
+      position: relative;
+      grid-template-columns: minmax(0, 1fr) 34px;
+      cursor: pointer;
+    }
+
+    .command-toggle-input {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .command-toggle-track {
+      position: relative;
+      width: 34px;
+      height: 18px;
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      border-radius: 999px;
+      background: var(--vscode-input-background);
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+
+    .command-toggle-track::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--vscode-descriptionForeground);
+      transition: transform 120ms ease, background 120ms ease;
+    }
+
+    .command-toggle-input:checked + .command-toggle-track {
+      border-color: var(--vscode-textLink-foreground);
+      background: var(--vscode-textLink-foreground);
+    }
+
+    .command-toggle-input:checked + .command-toggle-track::after {
+      transform: translateX(16px);
+      background: var(--vscode-button-foreground);
+    }
+
+    .command-toggle-input:focus-visible + .command-toggle-track {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 2px;
     }
 `;
 }

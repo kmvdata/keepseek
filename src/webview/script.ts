@@ -45,6 +45,9 @@ export function getScript(): string {
       renderDraftEdits();
       renderTranscript();
       renderStatus();
+      if (window.keepseekInputControls) {
+        window.keepseekInputControls.render();
+      }
       sendButton.disabled = state.isBusy || promptInput.classList.contains('is-empty');
     }
 
