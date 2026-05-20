@@ -14,6 +14,17 @@ export function getInputTemplate(): string {
           <div class="composer-toolbar" aria-label="Chat input toolbar">
             <div class="composer-toolbar-left">
               <button
+                id="referenceMenuButton"
+                type="button"
+                class="composer-icon-btn composer-reference-btn"
+                title="引用文件 @"
+                aria-label="引用文件"
+                aria-haspopup="listbox"
+                aria-expanded="false"
+              >
+                <span class="composer-trigger-glyph" aria-hidden="true">+</span>
+              </button>
+              <button
                 id="commandMenuButton"
                 type="button"
                 class="composer-icon-btn composer-command-btn"
@@ -22,7 +33,7 @@ export function getInputTemplate(): string {
                 aria-haspopup="menu"
                 aria-expanded="false"
               >
-                <span class="command-trigger-glyph" aria-hidden="true">/</span>
+                <span class="composer-trigger-glyph command-trigger-glyph" aria-hidden="true">/</span>
               </button>
               <span id="status" class="composer-status"></span>
             </div>

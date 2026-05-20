@@ -6,6 +6,7 @@ export function getInputScript(): string {
       var dropZone = promptInput.closest('.composer-input-inner') || promptInput;
       var dropArea = promptInput.closest('.composer-input-wrap') || dropZone;
       var dragDepth = 0;
+      var referenceMenuButton = document.getElementById('referenceMenuButton');
       var commandMenuButton = document.getElementById('commandMenuButton');
       var commandMenu = document.getElementById('commandMenu');
       var commandModelSwitch = document.getElementById('commandModelSwitch');
@@ -99,16 +100,28 @@ export function getInputScript(): string {
         updatePromptVisualState();
         savePromptSelection();
         syncReferenceMenuFromPrompt();
-        var slashRange = getSlashTriggerRange();
-        if (slashRange) {
-          activeSlashRange = slashRange;
-          openCommandMenu();
-        }
       });
 
       promptInput.addEventListener('keyup', savePromptSelection);
       promptInput.addEventListener('mouseup', savePromptSelection);
       promptInput.addEventListener('focus', savePromptSelection);
+
+      if (referenceMenuButton) {
+        referenceMenuButton.addEventListener('mousedown', function(event) {
+          event.preventDefault();
+          savePromptSelection();
+        });
+
+        referenceMenuButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (referenceMenuOpen) {
+            closeReferenceMenu(true);
+            return;
+          }
+          openReferenceMenuFromButton();
+        });
+      }
 
       if (commandMenuButton) {
         commandMenuButton.addEventListener('click', function(event) {
@@ -211,7 +224,7 @@ export function getInputScript(): string {
         if (!referenceMenuOpen) { return; }
         var target = event.target instanceof Element ? event.target : null;
         if (!target) { return; }
-        if ((referenceMenu && referenceMenu.contains(target)) || promptInput.contains(target)) {
+        if ((referenceMenu && referenceMenu.contains(target)) || (referenceMenuButton && referenceMenuButton.contains(target)) || promptInput.contains(target)) {
           return;
         }
         closeReferenceMenu(false);
@@ -318,8 +331,20 @@ export function getInputScript(): string {
         closeCommandMenu();
         referenceMenuOpen = true;
         referenceMenu.classList.remove('hidden');
+        if (referenceMenuButton) {
+          referenceMenuButton.classList.add('is-active');
+          referenceMenuButton.setAttribute('aria-expanded', 'true');
+        }
         requestReferenceResources();
         renderReferenceMenu();
+      }
+
+      function openReferenceMenuFromButton() {
+        activeMentionRange = null;
+        activeMentionQuery = '';
+        activeReferenceIndex = 0;
+        openReferenceMenu();
+        restorePromptSelection();
       }
 
       function closeReferenceMenu(restoreFocus) {
@@ -330,6 +355,10 @@ export function getInputScript(): string {
         activeReferenceIndex = 0;
         referenceMenu.classList.add('hidden');
         referenceMenu.innerHTML = '';
+        if (referenceMenuButton) {
+          referenceMenuButton.classList.remove('is-active');
+          referenceMenuButton.setAttribute('aria-expanded', 'false');
+        }
         if (restoreFocus) {
           promptInput.focus();
         }

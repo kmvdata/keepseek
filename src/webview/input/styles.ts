@@ -95,17 +95,17 @@ export function getInputStyles(): string {
 
     .composer-toolbar {
       display: flex;
-      align-items: center;
+      align-items: flex-end;
       justify-content: space-between;
       gap: 8px;
-      min-height: 32px;
+      min-height: 30px;
       padding: var(--keepseek-toolbar-padding, 0 4px 4px);
     }
 
     .composer-toolbar-left {
       display: flex;
-      align-items: center;
-      gap: 2px;
+      align-items: flex-end;
+      gap: 4px;
       min-width: 0;
       flex: 1;
     }
@@ -115,33 +115,45 @@ export function getInputStyles(): string {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      border: none;
-      border-radius: 4px;
-      background: transparent;
-      color: var(--vscode-icon-foreground, var(--vscode-descriptionForeground));
+      border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+      border-radius: 6px;
       cursor: pointer;
     }
 
     .composer-icon-btn,
     .composer-send-btn {
-      width: 24px;
-      min-width: 24px;
-      height: 24px;
-      min-height: 24px;
+      width: 26px;
+      min-width: 26px;
+      height: 26px;
+      min-height: 26px;
       padding: 0;
     }
 
-    .composer-command-btn {
-      font-weight: 700;
-      color: var(--vscode-descriptionForeground);
+    .composer-icon-btn {
+      background: transparent;
+      color: var(--vscode-foreground);
     }
 
+    .composer-send-btn {
+      background: var(--vscode-button-background, var(--vscode-foreground));
+      border-color: var(--vscode-button-background, var(--vscode-foreground));
+      color: var(--vscode-button-foreground, var(--vscode-editor-background));
+    }
+
+    .composer-reference-btn,
+    .composer-command-btn {
+      font-weight: 700;
+    }
+
+    .composer-reference-btn[aria-expanded="true"],
+    .composer-reference-btn.is-active,
     .composer-command-btn[aria-expanded="true"],
     .composer-command-btn.is-active {
       color: var(--vscode-foreground);
       background: var(--vscode-toolbar-activeBackground, var(--vscode-toolbar-hoverBackground));
     }
 
+    .composer-trigger-glyph,
     .command-trigger-glyph {
       display: inline-flex;
       align-items: center;
@@ -153,10 +165,16 @@ export function getInputStyles(): string {
       font-family: var(--vscode-editor-font-family, monospace);
     }
 
-    .composer-icon-btn:hover,
-    .composer-send-btn:hover:not(:disabled) {
+    .composer-icon-btn:hover {
       color: var(--vscode-foreground);
+      border-color: var(--vscode-focusBorder, var(--vscode-panel-border, var(--vscode-input-border, transparent)));
       background: var(--vscode-toolbar-hoverBackground);
+    }
+
+    .composer-send-btn:hover:not(:disabled) {
+      border-color: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+      background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+      color: var(--vscode-button-foreground, var(--vscode-editor-background));
     }
 
     .composer-icon-btn:focus-visible,
