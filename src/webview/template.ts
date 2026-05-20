@@ -24,7 +24,7 @@ export function getTemplate(): string {
 
     <div id="sessionMenu" class="session-menu hidden" role="menu" aria-label="Session history"></div>
 
-    <div class="context-bar" id="contextBarOuter">
+    <div class="context-bar hidden" id="contextBarOuter">
       <div class="context-bar-inner" id="contextBar"></div>
     </div>
 

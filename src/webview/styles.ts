@@ -285,9 +285,8 @@ export function getStyles(): string {
     /* ---- context bar ---- */
 
     .context-bar {
-      padding: 6px 12px;
-      border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border));
-      min-height: 28px;
+      padding: 4px 12px 2px;
+      min-height: 0;
     }
 
     .context-bar-inner {
@@ -397,7 +396,7 @@ export function getStyles(): string {
       flex: 1;
       min-height: 0;
       overflow-y: auto;
-      padding: 12px;
+      padding: 8px 12px 12px;
       background: transparent;
     }
 

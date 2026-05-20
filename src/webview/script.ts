@@ -21,6 +21,7 @@ export function getScript(): string {
     const historyTab = document.getElementById('historyTab');
     const newChatTab = document.getElementById('newChatTab');
     const sessionMenu = document.getElementById('sessionMenu');
+    const contextBarOuter = document.getElementById('contextBarOuter');
     const contextBar = document.getElementById('contextBar');
     const draftRegion = document.getElementById('draftRegion');
     const draftList = document.getElementById('draftList');
@@ -882,6 +883,10 @@ export function getScript(): string {
     function renderContextChips() {
       var existing = contextBar.querySelectorAll('.context-chip');
       existing.forEach(function(el) { el.remove(); });
+
+      if (contextBarOuter) {
+        contextBarOuter.classList.toggle('hidden', !state.contextFiles.length);
+      }
 
       if (!state.contextFiles.length) {
         return;
