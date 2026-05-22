@@ -20,6 +20,7 @@ export function getInputScript(): string {
       var commandMenuOpen = false;
       var commandModelListOpen = false;
       var referenceMenuOpen = false;
+      var referenceMenuSource = '';
       var activeSlashRange = null;
       var activeMentionRange = null;
       var activeMentionQuery = '';
@@ -309,27 +310,35 @@ export function getInputScript(): string {
       function syncReferenceMenuFromPrompt() {
         var mention = getMentionTrigger();
         if (!mention) {
+          if (referenceMenuOpen && referenceMenuSource === 'button') {
+            activeMentionRange = null;
+            activeMentionQuery = '';
+            renderReferenceMenu();
+            return;
+          }
           closeReferenceMenu(false);
           return;
         }
 
         var previousQuery = activeMentionQuery;
+        referenceMenuSource = 'mention';
         activeMentionRange = mention.range;
         activeMentionQuery = mention.query;
         if (previousQuery !== activeMentionQuery) {
           activeReferenceIndex = 0;
         }
         if (!referenceMenuOpen) {
-          openReferenceMenu();
+          openReferenceMenu('mention');
           return;
         }
         renderReferenceMenu();
       }
 
-      function openReferenceMenu() {
+      function openReferenceMenu(source) {
         if (!referenceMenu) { return; }
         closeCommandMenu();
         referenceMenuOpen = true;
+        referenceMenuSource = source || referenceMenuSource || 'mention';
         referenceMenu.classList.remove('hidden');
         if (referenceMenuButton) {
           referenceMenuButton.classList.add('is-active');
@@ -343,13 +352,14 @@ export function getInputScript(): string {
         activeMentionRange = null;
         activeMentionQuery = '';
         activeReferenceIndex = 0;
-        openReferenceMenu();
+        openReferenceMenu('button');
         restorePromptSelection();
       }
 
       function closeReferenceMenu(restoreFocus) {
         if (!referenceMenu) { return; }
         referenceMenuOpen = false;
+        referenceMenuSource = '';
         activeMentionRange = null;
         activeMentionQuery = '';
         activeReferenceIndex = 0;
