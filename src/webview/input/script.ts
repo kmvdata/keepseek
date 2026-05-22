@@ -1229,6 +1229,13 @@ export function getInputScript(): string {
         return getPromptEndRange();
       }
 
+      function getPromptStartRange() {
+        var range = document.createRange();
+        range.selectNodeContents(promptInput);
+        range.collapse(true);
+        return range;
+      }
+
       function getPromptEndRange() {
         var range = document.createRange();
         range.selectNodeContents(promptInput);
@@ -1245,6 +1252,14 @@ export function getInputScript(): string {
       }
 
       function savePromptSelection() {
+        if (isPromptEmpty()) {
+          var emptyRange = getPromptStartRange();
+          savedPromptRange = emptyRange.cloneRange();
+          if (isNodeInsidePrompt(document.activeElement) && !isSelectionAtPromptStart()) {
+            setPromptSelectionRange(emptyRange);
+          }
+          return;
+        }
         var selection = window.getSelection();
         if (!selection || !selection.rangeCount) { return; }
         var range = selection.getRangeAt(0);
@@ -1253,6 +1268,10 @@ export function getInputScript(): string {
       }
 
       function restorePromptSelection() {
+        if (isPromptEmpty()) {
+          setPromptSelectionRange(getPromptStartRange());
+          return;
+        }
         if (!savedPromptRange || !isRangeInsidePrompt(savedPromptRange)) {
           setPromptSelectionRange(getPromptEndRange());
           return;
@@ -1268,6 +1287,13 @@ export function getInputScript(): string {
         if (!node) { return false; }
         if (node === promptInput) { return true; }
         return promptInput.contains(node.nodeType === Node.ELEMENT_NODE ? node : node.parentNode);
+      }
+
+      function isSelectionAtPromptStart() {
+        var selection = window.getSelection();
+        if (!selection || !selection.rangeCount) { return false; }
+        var range = selection.getRangeAt(0);
+        return range.collapsed && range.startContainer === promptInput && range.startOffset === 0;
       }
 
       function needsLeadingSpace(range) {
@@ -1427,15 +1453,29 @@ export function getInputScript(): string {
       }
 
       function updatePromptVisualState() {
+        var isEmpty = isPromptEmpty();
+        if (isEmpty) {
+          normalizeEmptyPrompt();
+        }
         promptInput.style.height = 'auto';
         promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + 'px';
-        var isEmpty = isPromptEmpty();
         promptInput.classList.toggle('is-empty', isEmpty);
         sendButton.disabled = state.isBusy || isEmpty;
       }
 
       function isPromptEmpty() {
         return !promptInput.querySelector('a.rich-file-link') && !promptInput.textContent.trim();
+      }
+
+      function normalizeEmptyPrompt() {
+        if (promptInput.childNodes.length) {
+          promptInput.innerHTML = '';
+        }
+        savedPromptRange = null;
+        if (isNodeInsidePrompt(document.activeElement) && !isSelectionAtPromptStart()) {
+          setPromptSelectionRange(getPromptStartRange());
+          savePromptSelection();
+        }
       }
 
       function setComposerStatus(message) {

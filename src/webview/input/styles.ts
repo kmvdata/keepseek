@@ -1,6 +1,7 @@
 export function getInputStyles(): string {
   return `
     .rich-input {
+      position: relative;
       min-height: 56px;
       max-height: 220px;
       padding: 10px 12px 6px;
@@ -26,8 +27,15 @@ export function getInputStyles(): string {
 
     .rich-input.is-empty::before {
       content: attr(data-placeholder);
+      position: absolute;
+      top: 10px;
+      left: 12px;
+      right: 12px;
       color: var(--vscode-input-placeholderForeground);
       pointer-events: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .rich-input.drag-over,
@@ -91,6 +99,12 @@ export function getInputStyles(): string {
       min-height: 74px;
       padding: var(--keepseek-input-padding, 4px 4px 2px);
       background: transparent;
+    }
+
+    .composer-input-inner .rich-input.is-empty::before {
+      top: 4px;
+      left: 4px;
+      right: 4px;
     }
 
     .composer-toolbar {
