@@ -103,6 +103,14 @@ export function getScript(): string {
         return;
       }
 
+      var codeCopyButton = target?.closest('button[data-code-action="copy"]');
+      if (codeCopyButton && transcript.contains(codeCopyButton)) {
+        event.preventDefault();
+        event.stopPropagation();
+        copyCodeBlockText(codeCopyButton);
+        return;
+      }
+
       var inlineEditLink = target?.closest('.message-edit-input a.rich-file-link');
       if (inlineEditLink && transcript.contains(inlineEditLink)) {
         event.preventDefault();
@@ -114,19 +122,11 @@ export function getScript(): string {
       if (!link || !transcript.contains(link)) return;
       event.preventDefault();
       event.stopPropagation();
-      vscode.postMessage({
-        type: 'openFileReference',
-        path: link.dataset.path || '',
-        startLine: readReferenceInteger(link.dataset.startLine, 0),
-        endLine: readReferenceInteger(link.dataset.endLine, 0),
-        startColumn: readReferenceInteger(link.dataset.startColumn, 0),
-        endColumn: readReferenceInteger(link.dataset.endColumn, 0)
-      });
     });
 
     transcript.addEventListener('dblclick', function(event) {
       var target = event.target instanceof Element ? event.target : null;
-      var link = target?.closest('.message-edit-input a.rich-file-link');
+      var link = target?.closest('.message-edit-input a.rich-file-link, a.message-file-link');
       if (!link || !transcript.contains(link)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -663,6 +663,29 @@ export function getScript(): string {
       });
     }
 
+    function copyCodeBlockText(button) {
+      var block = button.closest('.message-code-block');
+      var code = block ? block.querySelector('code') : null;
+      var text = code ? code.textContent || '' : '';
+      copyTextToClipboard(text).then(function() {
+        setTransientStatus(t('copied'));
+        showCodeCopyFeedback(button);
+      }, function() {
+        setTransientStatus(t('copyFailed'));
+      });
+    }
+
+    function showCodeCopyFeedback(button) {
+      var original = button.textContent || t('copy');
+      button.textContent = t('copied');
+      button.disabled = true;
+      setTimeout(function() {
+        if (!button.isConnected) return;
+        button.textContent = original;
+        button.disabled = false;
+      }, 1200);
+    }
+
     function copyTextToClipboard(text) {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         return navigator.clipboard.writeText(text);
@@ -1192,7 +1215,11 @@ export function getScript(): string {
             if (shouldShowStreamingPlaceholder) {
               content.textContent = t('processing');
             } else {
-              renderMessageContent(content, message.content, message.role === 'user');
+              if (message.role === 'assistant') {
+                renderAssistantMarkdownContent(content, message.content);
+              } else {
+                renderMessageContent(content, message.content, true);
+              }
             }
             body.append(content);
           }
@@ -1584,6 +1611,570 @@ export function getScript(): string {
       var send = form.querySelector('button[type="submit"]');
       if (!send || !editor) return;
       send.disabled = state.isBusy || !serializeInlineEditor(editor).trim();
+    }
+
+    function renderAssistantMarkdownContent(container, value) {
+      container.classList.add('assistant-markdown');
+      var lineBreak = String.fromCharCode(10);
+      var text = String(value || '')
+        .split(String.fromCharCode(13) + lineBreak).join(lineBreak)
+        .split(String.fromCharCode(13)).join(lineBreak);
+      if (!text) return;
+
+      var lines = text.split(lineBreak);
+      var index = 0;
+      while (index < lines.length) {
+        if (isMarkdownBlankLine(lines[index])) {
+          index += 1;
+          continue;
+        }
+
+        var fence = parseMarkdownFenceLine(lines[index]);
+        if (fence) {
+          var codeLines = [];
+          index += 1;
+          while (index < lines.length) {
+            var closingFence = parseMarkdownFenceLine(lines[index]);
+            if (closingFence && closingFence.marker === fence.marker && closingFence.length >= fence.length && !closingFence.language) {
+              index += 1;
+              break;
+            }
+            codeLines.push(lines[index]);
+            index += 1;
+          }
+          container.append(createMarkdownCodeBlock(fence.language, codeLines.join(lineBreak)));
+          continue;
+        }
+
+        var heading = parseMarkdownHeadingLine(lines[index]);
+        if (heading) {
+          appendMarkdownHeading(container, heading.level, heading.text);
+          index += 1;
+          continue;
+        }
+
+        if (isMarkdownRuleLine(lines[index])) {
+          container.append(document.createElement('hr'));
+          index += 1;
+          continue;
+        }
+
+        var quote = parseMarkdownQuoteLine(lines[index]);
+        if (quote) {
+          var quoteLines = [];
+          while (index < lines.length) {
+            var quoteLine = parseMarkdownQuoteLine(lines[index]);
+            if (!quoteLine) break;
+            quoteLines.push(quoteLine.text);
+            index += 1;
+          }
+          appendMarkdownBlockquote(container, quoteLines.join(lineBreak));
+          continue;
+        }
+
+        var listItem = parseMarkdownListItemLine(lines[index]);
+        if (listItem) {
+          var list = collectMarkdownList(lines, index, listItem.ordered);
+          appendMarkdownList(container, list.ordered, list.items);
+          index = list.index;
+          continue;
+        }
+
+        var paragraphLines = [];
+        while (index < lines.length && !isMarkdownBlankLine(lines[index]) && !isMarkdownBlockStart(lines[index])) {
+          paragraphLines.push(lines[index]);
+          index += 1;
+        }
+        if (!paragraphLines.length) {
+          paragraphLines.push(lines[index]);
+          index += 1;
+        }
+        appendMarkdownParagraph(container, paragraphLines.join(lineBreak));
+      }
+    }
+
+    function isMarkdownBlankLine(line) {
+      return /^\\s*$/.test(String(line || ''));
+    }
+
+    function isMarkdownBlockStart(line) {
+      return Boolean(
+        parseMarkdownFenceLine(line) ||
+        parseMarkdownHeadingLine(line) ||
+        parseMarkdownQuoteLine(line) ||
+        parseMarkdownListItemLine(line) ||
+        isMarkdownRuleLine(line)
+      );
+    }
+
+    function parseMarkdownFenceLine(line) {
+      var text = String(line || '');
+      var index = 0;
+      while (index < text.length && index < 3 && text.charAt(index) === ' ') {
+        index += 1;
+      }
+      var marker = text.charAt(index);
+      var tick = String.fromCharCode(96);
+      if (marker !== tick && marker !== '~') {
+        return null;
+      }
+
+      var length = 0;
+      while (text.charAt(index + length) === marker) {
+        length += 1;
+      }
+      if (length < 3) {
+        return null;
+      }
+
+      var rest = text.slice(index + length).trim();
+      return {
+        marker: marker,
+        length: length,
+        language: sanitizeMarkdownCodeLanguage(rest.split(/\\s+/)[0] || '')
+      };
+    }
+
+    function sanitizeMarkdownCodeLanguage(value) {
+      var text = String(value || '').trim();
+      if (text.indexOf('{.') === 0 && text.charAt(text.length - 1) === '}') {
+        text = text.slice(2, -1);
+      }
+      if (text.charAt(0) === '.') {
+        text = text.slice(1);
+      }
+
+      var cleaned = '';
+      for (var i = 0; i < text.length && cleaned.length < 32; i++) {
+        var code = text.charCodeAt(i);
+        var isAllowed = (code >= 48 && code <= 57) ||
+          (code >= 65 && code <= 90) ||
+          (code >= 97 && code <= 122) ||
+          text.charAt(i) === '_' ||
+          text.charAt(i) === '+' ||
+          text.charAt(i) === '.' ||
+          text.charAt(i) === '-';
+        if (!isAllowed) break;
+        cleaned += text.charAt(i);
+      }
+      return cleaned;
+    }
+
+    function parseMarkdownHeadingLine(line) {
+      var match = /^ {0,3}(#{1,6})(?:\\s+|$)(.*)$/.exec(String(line || ''));
+      if (!match) return null;
+      return {
+        level: match[1].length,
+        text: String(match[2] || '').replace(/\\s+#+\\s*$/, '').trim()
+      };
+    }
+
+    function isMarkdownRuleLine(line) {
+      var text = String(line || '').trim();
+      if (text.length < 3) return false;
+      var marker = text.charAt(0);
+      if (marker !== '-' && marker !== '_' && marker !== '*') return false;
+      var count = 0;
+      for (var i = 0; i < text.length; i++) {
+        var character = text.charAt(i);
+        if (character === marker) {
+          count += 1;
+          continue;
+        }
+        if (character !== ' ' && character !== '\\t') {
+          return false;
+        }
+      }
+      return count >= 3;
+    }
+
+    function parseMarkdownQuoteLine(line) {
+      var text = String(line || '');
+      var index = 0;
+      while (index < text.length && index < 3 && text.charAt(index) === ' ') {
+        index += 1;
+      }
+      if (text.charAt(index) !== '>') {
+        return null;
+      }
+      index += 1;
+      if (text.charAt(index) === ' ') {
+        index += 1;
+      }
+      return { text: text.slice(index) };
+    }
+
+    function parseMarkdownListItemLine(line) {
+      var unordered = /^ {0,3}([-+*])\\s+(.*)$/.exec(String(line || ''));
+      if (unordered) {
+        return { ordered: false, text: unordered[2] || '' };
+      }
+      var ordered = /^ {0,3}(\\d{1,9})[.)]\\s+(.*)$/.exec(String(line || ''));
+      if (ordered) {
+        return { ordered: true, text: ordered[2] || '' };
+      }
+      return null;
+    }
+
+    function collectMarkdownList(lines, start, ordered) {
+      var items = [];
+      var index = start;
+      var current = null;
+      var lineBreak = String.fromCharCode(10);
+
+      while (index < lines.length) {
+        var item = parseMarkdownListItemLine(lines[index]);
+        if (item && item.ordered === ordered) {
+          current = { text: item.text };
+          items.push(current);
+          index += 1;
+          continue;
+        }
+
+        if (current && !isMarkdownBlankLine(lines[index]) && isMarkdownListContinuationLine(lines[index])) {
+          current.text += lineBreak + trimMarkdownContinuationLine(lines[index]);
+          index += 1;
+          continue;
+        }
+
+        break;
+      }
+
+      return { ordered: ordered, items: items, index: index };
+    }
+
+    function isMarkdownListContinuationLine(line) {
+      var text = String(line || '');
+      return text.indexOf('  ') === 0 || text.charAt(0) === String.fromCharCode(9);
+    }
+
+    function trimMarkdownContinuationLine(line) {
+      var text = String(line || '');
+      var count = 0;
+      while (count < text.length && count < 4 && text.charAt(count) === ' ') {
+        count += 1;
+      }
+      if (text.charAt(0) === String.fromCharCode(9)) {
+        return text.slice(1);
+      }
+      return text.slice(count);
+    }
+
+    function appendMarkdownHeading(container, level, text) {
+      var heading = document.createElement('h' + Math.min(Math.max(level, 1), 6));
+      appendMarkdownInline(heading, text);
+      container.append(heading);
+    }
+
+    function appendMarkdownParagraph(container, text) {
+      var paragraph = document.createElement('p');
+      appendMarkdownInline(paragraph, String(text || '').trim());
+      container.append(paragraph);
+    }
+
+    function appendMarkdownBlockquote(container, text) {
+      var blockquote = document.createElement('blockquote');
+      var parts = splitMarkdownParagraphs(text);
+      for (var i = 0; i < parts.length; i++) {
+        appendMarkdownParagraph(blockquote, parts[i]);
+      }
+      container.append(blockquote);
+    }
+
+    function appendMarkdownList(container, ordered, items) {
+      var list = document.createElement(ordered ? 'ol' : 'ul');
+      list.className = 'message-markdown-list';
+      for (var i = 0; i < items.length; i++) {
+        var item = document.createElement('li');
+        appendMarkdownInline(item, items[i].text);
+        list.append(item);
+      }
+      container.append(list);
+    }
+
+    function splitMarkdownParagraphs(text) {
+      var lineBreak = String.fromCharCode(10);
+      var lines = String(text || '').split(lineBreak);
+      var parts = [];
+      var current = [];
+      for (var i = 0; i < lines.length; i++) {
+        if (isMarkdownBlankLine(lines[i])) {
+          if (current.length) {
+            parts.push(current.join(lineBreak));
+            current = [];
+          }
+          continue;
+        }
+        current.push(lines[i]);
+      }
+      if (current.length) {
+        parts.push(current.join(lineBreak));
+      }
+      return parts.length ? parts : [''];
+    }
+
+    function createMarkdownCodeBlock(language, code) {
+      var block = document.createElement('div');
+      block.className = 'message-code-block';
+
+      var toolbar = document.createElement('div');
+      toolbar.className = 'message-code-toolbar';
+
+      var label = document.createElement('span');
+      label.className = 'message-code-language';
+      label.textContent = language || t('codeBlock');
+
+      var copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'message-code-copy';
+      copy.dataset.codeAction = 'copy';
+      copy.textContent = t('copy');
+      copy.title = t('copy');
+      copy.setAttribute('aria-label', t('copy'));
+
+      toolbar.append(label, copy);
+
+      var pre = document.createElement('pre');
+      var codeElement = document.createElement('code');
+      if (language) {
+        codeElement.className = 'language-' + language;
+      }
+      codeElement.textContent = String(code || '');
+      pre.append(codeElement);
+      block.append(toolbar, pre);
+      return block;
+    }
+
+    function appendMarkdownInline(container, text) {
+      var value = String(text || '');
+      var pattern = /<([^<>\\n]+)>/g;
+      var cursor = 0;
+      var match;
+
+      while ((match = pattern.exec(value)) !== null) {
+        var target = (match[1] || '').trim();
+        var reference = parseMessageFileReference(target);
+        if (!reference) {
+          continue;
+        }
+
+        var label = getMessageReferenceLabel(value, match.index, reference);
+        if (label.start < cursor) {
+          continue;
+        }
+
+        appendMarkdownFormattedText(container, value.slice(cursor, label.start));
+        container.append(createMessageFileLink(reference, label.text));
+        cursor = match.index + match[0].length;
+      }
+
+      appendMarkdownFormattedText(container, value.slice(cursor));
+    }
+
+    function appendMarkdownFormattedText(container, text) {
+      var value = String(text || '');
+      var cursor = 0;
+      while (cursor < value.length) {
+        var token = findNextMarkdownInlineToken(value, cursor);
+        if (!token) {
+          appendTextWithSoftBreaks(container, value.slice(cursor));
+          return;
+        }
+
+        appendTextWithSoftBreaks(container, value.slice(cursor, token.start));
+        if (token.type === 'code') {
+          var code = document.createElement('code');
+          code.className = 'message-inline-code';
+          code.textContent = token.text;
+          container.append(code);
+        } else if (token.type === 'strong') {
+          var strong = document.createElement('strong');
+          appendMarkdownFormattedText(strong, token.text);
+          container.append(strong);
+        } else if (token.type === 'emphasis') {
+          var emphasis = document.createElement('em');
+          appendMarkdownFormattedText(emphasis, token.text);
+          container.append(emphasis);
+        } else if (token.type === 'link') {
+          var link = document.createElement('a');
+          link.className = 'message-external-link';
+          link.href = token.href;
+          link.title = token.href;
+          link.target = '_blank';
+          link.rel = 'noreferrer noopener';
+          appendMarkdownFormattedText(link, token.text);
+          container.append(link);
+        }
+        cursor = token.end;
+      }
+    }
+
+    function findNextMarkdownInlineToken(text, from) {
+      var candidates = [
+        findNextCodeSpan(text, from),
+        findNextMarkdownLink(text, from),
+        findNextStrongSpan(text, from),
+        findNextEmphasisSpan(text, from)
+      ].filter(Boolean);
+      if (!candidates.length) {
+        return null;
+      }
+      candidates.sort(function(a, b) {
+        return a.start - b.start || a.priority - b.priority;
+      });
+      return candidates[0];
+    }
+
+    function findNextCodeSpan(text, from) {
+      var tick = String.fromCharCode(96);
+      var start = text.indexOf(tick, from);
+      while (start >= 0) {
+        var length = 1;
+        while (text.charAt(start + length) === tick) {
+          length += 1;
+        }
+        var marker = repeatCharacter(tick, length);
+        var end = text.indexOf(marker, start + length);
+        if (end >= 0) {
+          return {
+            type: 'code',
+            start: start,
+            end: end + length,
+            text: text.slice(start + length, end),
+            priority: 0
+          };
+        }
+        start = text.indexOf(tick, start + length);
+      }
+      return null;
+    }
+
+    function findNextMarkdownLink(text, from) {
+      var start = text.indexOf('[', from);
+      while (start >= 0) {
+        var labelEnd = text.indexOf(']', start + 1);
+        if (labelEnd < 0) return null;
+        if (text.charAt(labelEnd + 1) !== '(') {
+          start = text.indexOf('[', start + 1);
+          continue;
+        }
+        var urlEnd = findMarkdownLinkUrlEnd(text, labelEnd + 2);
+        if (urlEnd < 0) {
+          start = text.indexOf('[', start + 1);
+          continue;
+        }
+        var href = text.slice(labelEnd + 2, urlEnd).trim();
+        if (isSafeMarkdownExternalUrl(href)) {
+          return {
+            type: 'link',
+            start: start,
+            end: urlEnd + 1,
+            text: text.slice(start + 1, labelEnd),
+            href: href,
+            priority: 1
+          };
+        }
+        start = text.indexOf('[', start + 1);
+      }
+      return null;
+    }
+
+    function findMarkdownLinkUrlEnd(text, from) {
+      for (var i = from; i < text.length; i++) {
+        var character = text.charAt(i);
+        if (character === String.fromCharCode(10) || character === String.fromCharCode(13)) {
+          return -1;
+        }
+        if (character === ')') {
+          return i;
+        }
+      }
+      return -1;
+    }
+
+    function isSafeMarkdownExternalUrl(value) {
+      var text = String(value || '').trim().toLowerCase();
+      return text.indexOf('https://') === 0 || text.indexOf('http://') === 0 || text.indexOf('mailto:') === 0;
+    }
+
+    function findNextStrongSpan(text, from) {
+      var asterisk = findNextDelimitedSpan(text, from, '**', 'strong', 2);
+      var underscore = findNextDelimitedSpan(text, from, '__', 'strong', 2);
+      if (!asterisk) return underscore;
+      if (!underscore) return asterisk;
+      return asterisk.start <= underscore.start ? asterisk : underscore;
+    }
+
+    function findNextEmphasisSpan(text, from) {
+      var start = text.indexOf('*', from);
+      while (start >= 0) {
+        if (text.charAt(start + 1) === '*' || text.charAt(start - 1) === '*') {
+          start = text.indexOf('*', start + 1);
+          continue;
+        }
+        var end = findClosingSingleAsterisk(text, start + 1);
+        if (end >= 0 && end > start + 1) {
+          return {
+            type: 'emphasis',
+            start: start,
+            end: end + 1,
+            text: text.slice(start + 1, end),
+            priority: 3
+          };
+        }
+        start = text.indexOf('*', start + 1);
+      }
+      return null;
+    }
+
+    function findClosingSingleAsterisk(text, from) {
+      var end = text.indexOf('*', from);
+      while (end >= 0) {
+        if (text.charAt(end + 1) !== '*' && text.charAt(end - 1) !== '*') {
+          return end;
+        }
+        end = text.indexOf('*', end + 1);
+      }
+      return -1;
+    }
+
+    function findNextDelimitedSpan(text, from, marker, type, priority) {
+      var start = text.indexOf(marker, from);
+      while (start >= 0) {
+        var end = text.indexOf(marker, start + marker.length);
+        if (end > start + marker.length) {
+          return {
+            type: type,
+            start: start,
+            end: end + marker.length,
+            text: text.slice(start + marker.length, end),
+            priority: priority
+          };
+        }
+        start = text.indexOf(marker, start + marker.length);
+      }
+      return null;
+    }
+
+    function appendTextWithSoftBreaks(container, text) {
+      var lineBreak = String.fromCharCode(10);
+      var parts = String(text || '').split(lineBreak);
+      for (var i = 0; i < parts.length; i++) {
+        if (i > 0) {
+          container.append(document.createElement('br'));
+        }
+        if (parts[i]) {
+          container.append(document.createTextNode(parts[i]));
+        }
+      }
+    }
+
+    function repeatCharacter(character, count) {
+      var value = '';
+      for (var i = 0; i < count; i++) {
+        value += character;
+      }
+      return value;
     }
 
     function renderMessageContent(container, value, hideExpandedReferences) {

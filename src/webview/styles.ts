@@ -586,6 +586,172 @@ export function getStyles(): string {
       font-style: italic;
     }
 
+    .message-content.assistant-markdown {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .assistant-markdown > :first-child {
+      margin-top: 0;
+    }
+
+    .assistant-markdown > :last-child {
+      margin-bottom: 0;
+    }
+
+    .assistant-markdown p {
+      margin: 0 0 8px;
+    }
+
+    .assistant-markdown h1,
+    .assistant-markdown h2,
+    .assistant-markdown h3,
+    .assistant-markdown h4,
+    .assistant-markdown h5,
+    .assistant-markdown h6 {
+      margin: 10px 0 6px;
+      line-height: 1.3;
+      font-weight: 650;
+    }
+
+    .assistant-markdown h1 {
+      font-size: 17px;
+    }
+
+    .assistant-markdown h2 {
+      font-size: 15px;
+    }
+
+    .assistant-markdown h3,
+    .assistant-markdown h4,
+    .assistant-markdown h5,
+    .assistant-markdown h6 {
+      font-size: 13px;
+    }
+
+    .assistant-markdown .message-markdown-list {
+      margin: 0 0 8px;
+      padding-left: 20px;
+    }
+
+    .assistant-markdown li {
+      margin: 2px 0;
+      padding-left: 1px;
+    }
+
+    .assistant-markdown blockquote {
+      margin: 8px 0;
+      padding: 2px 0 2px 10px;
+      border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-panel-border));
+      color: var(--vscode-textBlockQuote-foreground, var(--vscode-descriptionForeground));
+    }
+
+    .assistant-markdown hr {
+      width: 100%;
+      height: 1px;
+      margin: 10px 0;
+      border: none;
+      background: var(--vscode-panel-border);
+    }
+
+    .assistant-markdown .message-file-link {
+      margin: 0 3px 2px;
+      transform: translateY(-1px);
+      vertical-align: middle;
+    }
+
+    .message-external-link {
+      color: var(--vscode-textLink-foreground);
+      text-decoration: none;
+    }
+
+    .message-external-link:hover,
+    .message-external-link:focus-visible {
+      color: var(--vscode-textLink-activeForeground);
+      text-decoration: underline;
+      outline: none;
+    }
+
+    .message-inline-code {
+      padding: 1px 4px;
+      border-radius: 4px;
+      color: var(--vscode-textPreformat-foreground, var(--vscode-editor-foreground));
+      background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 0.94em;
+      white-space: break-spaces;
+    }
+
+    .message-code-block {
+      width: 100%;
+      max-width: 100%;
+      margin: 8px 0;
+      overflow: hidden;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+    }
+
+    .message-code-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 28px;
+      padding: 3px 4px 3px 8px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+    }
+
+    .message-code-language {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.2;
+    }
+
+    .message-code-copy {
+      flex: 0 0 auto;
+      min-height: 22px;
+      padding: 1px 8px;
+      border: none;
+      border-radius: 4px;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+      font-size: 11px;
+    }
+
+    .message-code-copy:hover:not(:disabled),
+    .message-code-copy:focus-visible {
+      color: var(--vscode-foreground);
+      background: var(--vscode-toolbar-hoverBackground);
+      outline: none;
+    }
+
+    .message-code-block pre {
+      margin: 0;
+      max-height: 420px;
+      overflow: auto;
+      padding: 10px 12px;
+      color: var(--vscode-editor-foreground);
+      background: transparent;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: var(--vscode-editor-font-size, 12px);
+      line-height: 1.5;
+      white-space: pre;
+    }
+
+    .message-code-block code {
+      font-family: inherit;
+      font-size: inherit;
+      line-height: inherit;
+      white-space: pre;
+    }
+
     .message.user .message-content .message-file-link {
       margin: 0 3px;
       transform: translateY(-1px);
