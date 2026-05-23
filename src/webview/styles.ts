@@ -200,6 +200,101 @@ export function getStyles(): string {
       background: var(--vscode-toolbar-activeBackground);
     }
 
+    .settings-menu {
+      position: absolute;
+      top: 36px;
+      right: 8px;
+      z-index: 45;
+      width: min(300px, calc(100% - 16px));
+      padding: 6px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 8px;
+      background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
+      color: var(--vscode-quickInput-foreground, var(--vscode-foreground));
+      box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
+    }
+
+    .settings-menu-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 4px 6px 7px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.2;
+    }
+
+    .settings-menu-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+
+    .settings-menu-row {
+      min-height: 42px;
+    }
+
+    .settings-language-item {
+      position: relative;
+    }
+
+    .settings-submenu {
+      position: absolute;
+      top: 4px;
+      right: 8px;
+      z-index: 50;
+      display: none;
+      width: 132px;
+      padding: 4px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 6px;
+      background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
+      box-shadow: 0 8px 20px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
+    }
+
+    .settings-language-item:hover .settings-submenu,
+    .settings-language-item:focus-within .settings-submenu,
+    .settings-language-item.is-open .settings-submenu {
+      display: grid;
+      gap: 2px;
+    }
+
+    .settings-submenu-item {
+      display: grid;
+      grid-template-columns: 14px minmax(0, 1fr);
+      align-items: center;
+      gap: 6px;
+      width: 100%;
+      min-height: 28px;
+      padding: 4px 8px;
+      border: none;
+      border-radius: 5px;
+      color: var(--vscode-foreground);
+      background: transparent;
+      text-align: left;
+    }
+
+    .settings-submenu-item:hover,
+    .settings-submenu-item:focus-visible {
+      color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
+      background: var(--vscode-quickInputList-focusBackground, var(--vscode-list-hoverBackground));
+      outline: none;
+    }
+
+    .settings-submenu-check {
+      color: var(--vscode-textLink-foreground);
+      font-size: 12px;
+      line-height: 1;
+      text-align: center;
+    }
+
+    .settings-submenu-item[aria-checked="true"] .settings-submenu-check::before {
+      content: "\\2713";
+    }
+
     .session-menu {
       position: absolute;
       top: 36px;

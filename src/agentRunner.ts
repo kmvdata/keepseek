@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AgentRequest, AgentResponse, ChatMessage, DraftEdit, ReasoningEffort } from './types';
 import { formatBytes } from './fileContext';
+import type { KeepseekLanguage } from './i18n';
 
 const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
@@ -83,18 +84,23 @@ interface AgentRuntimeConfig {
 
 export class AgentRunner {
   public async run(request: AgentRequest): Promise<AgentResponse> {
-    const draftEdit = this.tryCreateDraftEdit(request.prompt);
+    const draftEdit = this.tryCreateDraftEdit(request.prompt, request.language);
     if (draftEdit) {
       return {
-        message: [
-          `已为 ${draftEdit.label} 准备一个待确认修改。`,
-          '点击修改卡片上的 Apply 后，扩展会再次弹窗请求写入许可。'
-        ].join('\n\n'),
+        message: request.language === 'en'
+          ? [
+              `Prepared a pending change for ${draftEdit.label}.`,
+              'Click Apply on the change card; VS Code will ask for write permission before anything is written.'
+            ].join('\n\n')
+          : [
+              `已为 ${draftEdit.label} 准备一个待确认修改。`,
+              '点击修改卡片上的应用后，扩展会再次弹窗请求写入许可。'
+            ].join('\n\n'),
         draftEdits: [draftEdit]
       };
     }
 
-    const runtimeConfig = this.getRuntimeConfig();
+    const runtimeConfig = this.getRuntimeConfig(request.language);
     const messages = this.buildMessages(request);
     const tools = this.getTools();
     const draftEdits: DraftEdit[] = [];
@@ -106,7 +112,9 @@ export class AgentRunner {
       const choice = response.choices?.[0];
       const assistant = choice?.message;
       if (!assistant) {
-        throw new Error('DeepSeek API 没有返回可用的 assistant message。');
+        throw new Error(request.language === 'en'
+          ? 'DeepSeek API did not return a usable assistant message.'
+          : 'DeepSeek API 没有返回可用的 assistant message。');
       }
 
       if (assistant.reasoning_content) {
@@ -116,7 +124,7 @@ export class AgentRunner {
       const toolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
       if (!toolCalls.length) {
         return {
-          message: this.getFinalMessage(assistant.content, draftEdits, choice?.finish_reason),
+          message: this.getFinalMessage(assistant.content, draftEdits, choice?.finish_reason, request.language),
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits
         };
@@ -140,7 +148,7 @@ export class AgentRunner {
     }
 
     return {
-      message: this.getFinalMessage(null, draftEdits, 'tool_iterations_exhausted'),
+      message: this.getFinalMessage(null, draftEdits, 'tool_iterations_exhausted', request.language),
       reasoningContent: this.formatReasoning(reasoningParts),
       draftEdits
     };
@@ -187,13 +195,17 @@ export class AgentRunner {
 
       const responseText = await response.text();
       if (!response.ok) {
-        throw new Error(`DeepSeek API 请求失败 (${response.status}): ${this.formatApiError(responseText)}`);
+        throw new Error(request.language === 'en'
+          ? `DeepSeek API request failed (${response.status}): ${this.formatApiError(responseText, request.language)}`
+          : `DeepSeek API 请求失败 (${response.status}): ${this.formatApiError(responseText, request.language)}`);
       }
 
-      return this.parseChatResponse(responseText);
+      return this.parseChatResponse(responseText, request.language);
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`DeepSeek API 请求超过 ${Math.round(runtimeConfig.requestTimeoutMs / 1000)} 秒未完成。`);
+        throw new Error(request.language === 'en'
+          ? `DeepSeek API request did not finish within ${Math.round(runtimeConfig.requestTimeoutMs / 1000)} seconds.`
+          : `DeepSeek API 请求超过 ${Math.round(runtimeConfig.requestTimeoutMs / 1000)} 秒未完成。`);
       }
       throw error;
     } finally {
@@ -242,15 +254,25 @@ export class AgentRunner {
 
   private getSystemPrompt(request: AgentRequest): string {
     const contextBlock = this.formatContextFiles(request);
-    return [
-      '你是 KeepSeek，一个运行在 VS Code 侧边栏里的代码 Agent。',
-      '你需要用中文和用户沟通，除非用户明确要求其它语言。',
-      '你可以根据用户的问题分析代码、解释方案、给出修改建议，并在需要改文件时调用工具创建待确认修改。',
-      '重要安全规则：工具只会创建 DraftEdit 待确认修改，不会直接写入磁盘；不要声称已经写入文件，除非用户之后手动确认。',
-      '当用户要求修改或创建文件时，优先调用 keepseek_create_draft_edit，并传入目标路径、完整的新文件内容和简短原因。',
-      '如果信息不足，先说明缺口；如果可以合理推进，就直接给出可执行结果。',
-      contextBlock
-    ].filter(Boolean).join('\n\n');
+    const instructions = request.language === 'en'
+      ? [
+          'You are KeepSeek, a coding agent running in the VS Code sidebar.',
+          'Communicate with the user in English unless the user explicitly asks for another language.',
+          'You can analyze code, explain approaches, suggest changes, and call tools to create pending edits when files need to change.',
+          'Important safety rule: tools only create DraftEdit pending changes and never write to disk directly. Do not claim files were written unless the user later applies the change.',
+          'When the user asks to modify or create files, prefer calling keepseek_create_draft_edit with the target path, complete new file content, and a short reason.',
+          'If information is missing, state the gap. If you can reasonably proceed, provide an actionable result.'
+        ]
+      : [
+          '你是 KeepSeek，一个运行在 VS Code 侧边栏里的代码 Agent。',
+          '你需要用中文和用户沟通，除非用户明确要求其它语言。',
+          '你可以根据用户的问题分析代码、解释方案、给出修改建议，并在需要改文件时调用工具创建待确认修改。',
+          '重要安全规则：工具只会创建 DraftEdit 待确认修改，不会直接写入磁盘；不要声称已经写入文件，除非用户之后手动确认。',
+          '当用户要求修改或创建文件时，优先调用 keepseek_create_draft_edit，并传入目标路径、完整的新文件内容和简短原因。',
+          '如果信息不足，先说明缺口；如果可以合理推进，就直接给出可执行结果。'
+        ];
+
+    return [...instructions, contextBlock].filter(Boolean).join('\n\n');
   }
 
   private formatContextFiles(request: AgentRequest): string {
@@ -263,16 +285,29 @@ export class AgentRunner {
       const fence = this.getMarkdownFence(content);
       const language = this.getMarkdownLanguage(file.languageId);
       const sizedLabel = `${file.label} (${file.languageId}, ${formatBytes(file.sizeBytes)})`;
-      return [
-        `上下文文件：${sizedLabel}`,
-        `路径：${file.fsPath}`,
-        `${fence}${language}`,
-        content.endsWith('\n') ? content : `${content}\n`,
-        fence
-      ].join('\n');
+      return request.language === 'en'
+        ? [
+            `Context file: ${sizedLabel}`,
+            `Path: ${file.fsPath}`,
+            `${fence}${language}`,
+            content.endsWith('\n') ? content : `${content}\n`,
+            fence
+          ].join('\n')
+        : [
+            `上下文文件：${sizedLabel}`,
+            `路径：${file.fsPath}`,
+            `${fence}${language}`,
+            content.endsWith('\n') ? content : `${content}\n`,
+            fence
+          ].join('\n');
     });
 
-    return ['以下是用户加入 KeepSeek 的上下文文件。回答时优先参考这些内容：', ...files].join('\n\n');
+    return [
+      request.language === 'en'
+        ? 'These are the context files the user added to KeepSeek. Prefer using them when answering:'
+        : '以下是用户加入 KeepSeek 的上下文文件。回答时优先参考这些内容：',
+      ...files
+    ].join('\n\n');
   }
 
   private getTools(): DeepSeekFunctionTool[] {
@@ -374,31 +409,47 @@ export class AgentRunner {
     return key === 'content' ? value : value.trim();
   }
 
-  private getFinalMessage(content: string | null | undefined, draftEdits: DraftEdit[], finishReason: string | null | undefined): string {
+  private getFinalMessage(
+    content: string | null | undefined,
+    draftEdits: DraftEdit[],
+    finishReason: string | null | undefined,
+    language: KeepseekLanguage
+  ): string {
     const text = (content ?? '').trim();
     if (text) {
       return text;
     }
 
     if (draftEdits.length) {
+      if (language === 'en') {
+        return draftEdits.length === 1
+          ? `Prepared a pending change for ${draftEdits[0].label}.`
+          : `Prepared ${draftEdits.length} pending changes.`;
+      }
       return draftEdits.length === 1
         ? `已准备 ${draftEdits[0].label} 的待确认修改。`
         : `已准备 ${draftEdits.length} 个待确认修改。`;
     }
 
     if (finishReason === 'content_filter') {
-      return 'DeepSeek 返回内容被安全策略过滤，未生成可展示回复。';
+      return language === 'en'
+        ? 'DeepSeek filtered the response because of a safety policy, so no displayable reply was generated.'
+        : 'DeepSeek 返回内容被安全策略过滤，未生成可展示回复。';
     }
 
     if (finishReason === 'length') {
-      return 'DeepSeek 输出达到长度上限，未生成完整回复。可以缩小上下文或提高 maxTokens 后重试。';
+      return language === 'en'
+        ? 'DeepSeek reached the output length limit before completing the reply. Reduce context or increase maxTokens and try again.'
+        : 'DeepSeek 输出达到长度上限，未生成完整回复。可以缩小上下文或提高 maxTokens 后重试。';
     }
 
     if (finishReason === 'tool_iterations_exhausted') {
-      return 'Agent 工具调用轮次已达上限，已停止本次执行。';
+      return language === 'en'
+        ? 'The agent reached the tool iteration limit and stopped this run.'
+        : 'Agent 工具调用轮次已达上限，已停止本次执行。';
     }
 
-    return 'DeepSeek 未返回文本内容。';
+    return language === 'en' ? 'DeepSeek did not return text content.' : 'DeepSeek 未返回文本内容。';
   }
 
   private formatReasoning(parts: string[]): string | undefined {
@@ -414,21 +465,23 @@ export class AgentRunner {
     return cleaned.map((part, index) => `Step ${index + 1}\n${part}`).join('\n\n');
   }
 
-  private parseChatResponse(responseText: string): DeepSeekChatResponse {
+  private parseChatResponse(responseText: string, language: KeepseekLanguage): DeepSeekChatResponse {
     try {
       const parsed: unknown = JSON.parse(responseText);
       if (!this.isRecord(parsed)) {
-        throw new Error('Response is not a JSON object.');
+        throw new Error(language === 'en' ? 'Response is not a JSON object.' : '响应不是 JSON 对象。');
       }
       return parsed as DeepSeekChatResponse;
     } catch (error) {
-      throw new Error(`无法解析 DeepSeek API 响应：${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(language === 'en'
+        ? `Cannot parse DeepSeek API response: ${error instanceof Error ? error.message : String(error)}`
+        : `无法解析 DeepSeek API 响应：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  private formatApiError(responseText: string): string {
+  private formatApiError(responseText: string, language: KeepseekLanguage): string {
     if (!responseText.trim()) {
-      return '响应为空。';
+      return language === 'en' ? 'Response is empty.' : '响应为空。';
     }
 
     try {
@@ -449,11 +502,13 @@ export class AgentRunner {
     return responseText.length > 800 ? `${responseText.slice(0, 800)}...` : responseText;
   }
 
-  private getRuntimeConfig(): AgentRuntimeConfig {
+  private getRuntimeConfig(language: KeepseekLanguage): AgentRuntimeConfig {
     const config = vscode.workspace.getConfiguration('keepseek');
     const apiKey = (config.get<string>('apiKey', '').trim() || process.env.DEEPSEEK_API_KEY || '').trim();
     if (!apiKey) {
-      throw new Error('请先在 KeepSeek 命令菜单的 Api Key 中保存 DeepSeek API Key，或设置 DEEPSEEK_API_KEY 环境变量。');
+      throw new Error(language === 'en'
+        ? 'Save a DeepSeek API Key in KeepSeek Settings > Api Key, or set the DEEPSEEK_API_KEY environment variable.'
+        : '请先在 KeepSeek 设置 > Api Key 中保存 DeepSeek API Key，或设置 DEEPSEEK_API_KEY 环境变量。');
     }
 
     return {
@@ -509,7 +564,7 @@ export class AgentRunner {
     return Math.min(Math.max(Math.floor(value as number), min), max);
   }
 
-  private tryCreateDraftEdit(prompt: string): DraftEdit | undefined {
+  private tryCreateDraftEdit(prompt: string, language: KeepseekLanguage): DraftEdit | undefined {
     const match = /^\/draft\s+([^\n]+)\n([\s\S]+)$/u.exec(prompt.trimEnd());
     if (!match) {
       return undefined;
@@ -527,7 +582,9 @@ export class AgentRunner {
       uri: uri.toString(),
       label: this.getLabel(uri),
       newText,
-      reason: 'Draft edit proposed from the KeepSeek chat panel.'
+      reason: language === 'en'
+        ? 'Draft edit proposed from the KeepSeek chat panel.'
+        : '来自 KeepSeek 对话面板的待确认修改。'
     };
   }
 

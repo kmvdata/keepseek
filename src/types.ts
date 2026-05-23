@@ -1,3 +1,5 @@
+import type { KeepseekLanguage } from './i18n';
+
 export interface KeepseekModel {
   id: string;
   label: string;
@@ -75,6 +77,7 @@ export interface AgentRequest {
   settings: AgentSettings;
   contextFiles: ContextFile[];
   history: ChatMessage[];
+  language: KeepseekLanguage;
 }
 
 export interface AgentResponse {

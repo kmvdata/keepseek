@@ -10,6 +10,7 @@ import { AgentSettings, ChatMessage, ChatSession, ChatSessionSummary, DraftEdit,
 import { getScript } from './webview/script';
 import { getStyles } from './webview/styles';
 import { getTemplate } from './webview/template';
+import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
 
 const PRIMARY_CONTAINER_ID = 'keepseek';
 const PRIMARY_VIEW_TYPE = 'keepseek.chatView';
@@ -20,7 +21,6 @@ const DOES_NOT_SUPPORT_SECONDARY_SIDEBAR_CONTEXT = 'keepseek.doesNotSupportSecon
 const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 const SESSION_STORAGE_VERSION = 1;
 const MAX_STORED_SESSIONS = 50;
-const DEFAULT_SESSION_TITLE = '新会话';
 const REFERENCE_RESOURCE_GLOB_EXCLUDE = '**/{.git,.vscode-test,build,coverage,dist,node_modules,out}/**';
 
 interface PromptReferenceInput {
@@ -47,8 +47,9 @@ type WebviewMessage =
   | { type: 'selectSession'; sessionId: string }
   | { type: 'setSelectedModel'; modelId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
-  | { type: 'openSettings'; query: string }
+  | { type: 'openSettings' }
   | { type: 'saveSettings'; apiKey: string; baseUrl: string }
+  | { type: 'setLanguage'; language: KeepseekLanguage }
   | { type: 'addCurrentFile' }
   | { type: 'pickWorkspaceFiles' }
   | { type: 'pickExternalFiles' }
@@ -82,6 +83,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly views = new Set<vscode.WebviewView>();
   private selectedModelId = '';
   private agentSettings = getConfiguredAgentSettings();
+  private language = getConfiguredKeepseekLanguage();
   private isBusy = false;
 
   public constructor(
@@ -129,7 +131,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public async addCurrentFileToContext(): Promise<void> {
     await this.runContextAction(async () => {
       const file = await this.fileContext.addCurrentEditor();
-      vscode.window.showInformationMessage(`KeepSeek added ${file.label}.`);
+      vscode.window.showInformationMessage(this.t('addedFile', { label: file.label }));
     });
   }
 
@@ -137,7 +139,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     await this.runContextAction(async () => {
       const files = await this.fileContext.pickWorkspaceFiles();
       if (files.length) {
-        vscode.window.showInformationMessage(`KeepSeek added ${files.length} workspace file(s).`);
+        vscode.window.showInformationMessage(this.t('addedWorkspaceFiles', { count: files.length }));
       }
     });
   }
@@ -170,7 +172,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
     }
     if (!targetUris.length) {
-      vscode.window.showWarningMessage('Choose a file to add to KeepSeek context.');
+      vscode.window.showWarningMessage(this.t('chooseFileToAdd'));
       return;
     }
 
@@ -184,7 +186,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       if (!files.length) {
-        vscode.window.showWarningMessage('KeepSeek can only insert file references from the Explorer.');
+        vscode.window.showWarningMessage(this.t('canOnlyInsertExplorerFiles'));
         return;
       }
 
@@ -199,7 +201,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         });
       }
     } catch (error) {
-      vscode.window.showErrorMessage(`KeepSeek cannot add file reference: ${getErrorMessage(error)}`);
+      vscode.window.showErrorMessage(this.t('cannotAddFileReference', { message: getErrorMessage(error) }));
     }
   }
 
@@ -207,7 +209,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     await this.runContextAction(async () => {
       const files = await this.fileContext.pickExternalFiles();
       if (files.length) {
-        vscode.window.showInformationMessage(`KeepSeek added ${files.length} external file(s).`);
+        vscode.window.showInformationMessage(this.t('addedExternalFiles', { count: files.length }));
       }
     });
   }
@@ -218,7 +220,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         canSelectFiles: true,
         canSelectFolders: false,
         canSelectMany: true,
-        openLabel: 'Add to KeepSeek'
+        openLabel: this.t('addExternalFilesLabel')
       });
 
       if (!picked?.length) {
@@ -241,11 +243,11 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       if (!files.length) {
-        vscode.window.showWarningMessage('KeepSeek can only insert file references for files.');
+        vscode.window.showWarningMessage(this.t('canOnlyInsertFileReferencesForFiles'));
         return;
       }
       if (skipped > 0) {
-        vscode.window.showWarningMessage(`KeepSeek skipped ${skipped} item(s) that are not readable files.`);
+        vscode.window.showWarningMessage(this.t('skippedUnreadableItems', { count: skipped }));
       }
 
       for (const file of files) {
@@ -258,7 +260,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         });
       }
     } catch (error) {
-      vscode.window.showErrorMessage(`KeepSeek cannot add external file reference: ${getErrorMessage(error)}`);
+      vscode.window.showErrorMessage(this.t('cannotAddExternalFileReference', { message: getErrorMessage(error) }));
     }
   }
 
@@ -315,19 +317,20 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       if (skipped > 0) {
-        vscode.window.showWarningMessage(`KeepSeek skipped ${skipped} dropped file(s) that are too large or unreadable.`);
+        vscode.window.showWarningMessage(this.t('skippedDroppedFiles', { count: skipped }));
       }
       if (!inserted && skipped === 0) {
-        vscode.window.showWarningMessage('KeepSeek did not find any readable dropped files.');
+        vscode.window.showWarningMessage(this.t('didNotFindDroppedFiles'));
       }
     } catch (error) {
-      vscode.window.showErrorMessage(`KeepSeek cannot import dropped file: ${getErrorMessage(error)}`);
+      vscode.window.showErrorMessage(this.t('cannotImportDroppedFile', { message: getErrorMessage(error) }));
     }
   }
 
   private async handleMessage(message: WebviewMessage): Promise<void> {
     switch (message.type) {
       case 'ready':
+        this.language = getConfiguredKeepseekLanguage();
         this.postState();
         return;
       case 'sendPrompt':
@@ -361,7 +364,19 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const config = vscode.workspace.getConfiguration('keepseek');
         await config.update('apiKey', message.apiKey, vscode.ConfigurationTarget.Global);
         await config.update('baseUrl', message.baseUrl, vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage('DeepSeek API 设置已保存。');
+        vscode.window.showInformationMessage(this.t('apiSettingsSaved'));
+        return;
+      }
+      case 'setLanguage': {
+        const language = normalizeKeepseekLanguage(message.language);
+        const config = vscode.workspace.getConfiguration('keepseek');
+        await config.update('language', language, vscode.ConfigurationTarget.Global);
+        this.language = language;
+        await this.relocalizeEmptySessionTitles(language);
+        this.postState();
+        vscode.window.showInformationMessage(
+          this.t('languageSaved', { language: getKeepseekLanguageName(language, language) })
+        );
         return;
       }
       case 'addCurrentFile':
@@ -415,7 +430,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const sessions = normalizeStoredSessions(stored);
     const activeSessionId = typeof stored?.activeSessionId === 'string' ? stored.activeSessionId : '';
 
-    this.sessions = sessions.length ? sessions : [createEmptySession()];
+    this.sessions = sessions.length ? sessions : [createEmptySession(this.language)];
     this.activeSessionId = this.sessions.some((session) => session.id === activeSessionId)
       ? activeSessionId
       : this.sessions[0].id;
@@ -428,7 +443,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return existing;
     }
 
-    const fallback = this.sessions[0] ?? createEmptySession();
+    const fallback = this.sessions[0] ?? createEmptySession(this.language);
     if (!this.sessions.length) {
       this.sessions.push(fallback);
     }
@@ -441,7 +456,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const session = createEmptySession();
+    const session = createEmptySession(this.language);
     this.sessions.unshift(session);
     this.activeSessionId = session.id;
     this.draftEdits.clear();
@@ -477,6 +492,23 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     } satisfies StoredSessionState);
   }
 
+  private async relocalizeEmptySessionTitles(language: KeepseekLanguage): Promise<void> {
+    const defaultTitles = new Set([
+      localize('zh-CN', 'defaultSessionTitle'),
+      localize('en', 'defaultSessionTitle')
+    ]);
+    let changed = false;
+    for (const session of this.sessions) {
+      if (!session.messages.length && defaultTitles.has(session.title)) {
+        session.title = localize(language, 'defaultSessionTitle');
+        changed = true;
+      }
+    }
+    if (changed) {
+      await this.persistSessions();
+    }
+  }
+
   private compactSessions(): void {
     const activeSession = this.getActiveSession();
     this.sessions = this.sessions
@@ -501,7 +533,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private getSessionSummaries(): ChatSessionSummary[] {
     return this.sessions.map((session) => ({
       id: session.id,
-      title: session.title || DEFAULT_SESSION_TITLE,
+      title: session.title || this.t('defaultSessionTitle'),
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
       messageCount: session.messages.length
@@ -512,7 +544,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     await this.runContextAction(async () => {
       const files = await this.fileContext.addPath(inputPath);
       if (files.length) {
-        vscode.window.showInformationMessage(`KeepSeek added ${files.length} file(s).`);
+        vscode.window.showInformationMessage(this.t('addedFiles', { count: files.length }));
       }
     });
   }
@@ -557,12 +589,12 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     try {
       const trimmedPath = rawPath.trim();
       if (!trimmedPath) {
-        throw new Error('File reference has no path.');
+        throw new Error(this.t('fileReferenceNoPath'));
       }
 
       const uri = resolveFileReferenceUri(trimmedPath);
       if (!uri) {
-        throw new Error('File reference path is not valid.');
+        throw new Error(this.t('fileReferenceInvalidPath'));
       }
       const stat = await vscode.workspace.fs.stat(uri);
       if (stat.type === vscode.FileType.Directory) {
@@ -591,7 +623,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         selection: new vscode.Range(start, end)
       });
     } catch (error) {
-      vscode.window.showErrorMessage(`KeepSeek cannot open file reference: ${getErrorMessage(error)}`);
+      vscode.window.showErrorMessage(this.t('cannotOpenFileReference', { message: getErrorMessage(error) }));
     }
   }
 
@@ -663,7 +695,10 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
     try {
       const authorizedExternalReferenceUris = this.collectAuthorizedExternalReferenceUris(options?.references);
-      const expandedPrompt = await expandFileReferencesInPrompt(trimmedPrompt, { authorizedExternalReferenceUris });
+      const expandedPrompt = await expandFileReferencesInPrompt(trimmedPrompt, {
+        authorizedExternalReferenceUris,
+        language: this.language
+      });
       const activeSession = this.getActiveSession();
       const now = new Date().toISOString();
       const replacementIndex = replaceMessageId
@@ -677,10 +712,10 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSession.messages.splice(replacementIndex);
         this.draftEdits.clear();
         if (replacementIndex === 0) {
-          activeSession.title = createSessionTitle(trimmedPrompt);
+          activeSession.title = createSessionTitle(trimmedPrompt, this.language);
         }
       } else if (!activeSession.messages.length) {
-        activeSession.title = createSessionTitle(trimmedPrompt);
+        activeSession.title = createSessionTitle(trimmedPrompt, this.language);
         activeSession.createdAt = now;
       }
 
@@ -705,7 +740,8 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         model,
         settings: this.agentSettings,
         contextFiles: this.fileContext.getAll(),
-        history: this.messages
+        history: this.messages,
+        language: this.language
       });
 
       for (const draftEdit of response.draftEdits) {
@@ -725,13 +761,13 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const activeSession = this.getActiveSession();
       if (!activeSession.messages.length) {
         const now = new Date().toISOString();
-        activeSession.title = createSessionTitle(trimmedPrompt);
+        activeSession.title = createSessionTitle(trimmedPrompt, this.language);
         activeSession.createdAt = now;
       }
       this.messages.push({
         id: randomUUID(),
         role: 'assistant',
-        content: `Error: ${getErrorMessage(error)}`,
+        content: `${this.t('errorPrefix')}: ${getErrorMessage(error)}`,
         createdAt: new Date().toISOString(),
         modelId: model.id
       });
@@ -756,7 +792,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.messages.push({
           id: randomUUID(),
           role: 'assistant',
-          content: `已写入 ${edit.label}。`,
+          content: this.t('wroteFile', { label: edit.label }),
           createdAt: new Date().toISOString()
         });
         this.getActiveSession().updatedAt = new Date().toISOString();
@@ -794,9 +830,14 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         contextFiles: this.fileContext.getAll().map(({ content: _content, ...file }) => file),
         draftEdits: Array.from(this.draftEdits.values()).map(({ newText: _newText, ...edit }) => edit),
         isBusy: this.isBusy,
-        maxFileBytes: getConfiguredMaxFileBytes()
+        maxFileBytes: getConfiguredMaxFileBytes(),
+        language: this.language
       }
     });
+  }
+
+  private t(key: string, values?: Record<string, string | number>): string {
+    return localize(this.language, key, values);
   }
 
   private postToWebview(message: unknown): void {
@@ -809,7 +850,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const nonce = getNonce();
     const keepseekLogoUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'resources', 'keepseek.svg'));
     return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="${this.language === 'en' ? 'en' : 'zh-CN'}">
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
@@ -969,21 +1010,21 @@ function parseMajorMinorVersion(version: string): { major: number; minor: number
   };
 }
 
-function createEmptySession(): ChatSession {
+function createEmptySession(language: KeepseekLanguage = getConfiguredKeepseekLanguage()): ChatSession {
   const now = new Date().toISOString();
   return {
     id: randomUUID(),
-    title: DEFAULT_SESSION_TITLE,
+    title: localize(language, 'defaultSessionTitle'),
     messages: [],
     createdAt: now,
     updatedAt: now
   };
 }
 
-function createSessionTitle(prompt: string): string {
+function createSessionTitle(prompt: string, language: KeepseekLanguage = getConfiguredKeepseekLanguage()): string {
   const normalized = prompt.replace(/\s+/gu, ' ').trim();
   if (!normalized) {
-    return DEFAULT_SESSION_TITLE;
+    return localize(language, 'defaultSessionTitle');
   }
   return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized;
 }
@@ -993,6 +1034,7 @@ function normalizeStoredSessions(value: unknown): ChatSession[] {
     return [];
   }
 
+  const language = getConfiguredKeepseekLanguage();
   const sessions: ChatSession[] = [];
   const seen = new Set<string>();
 
@@ -1008,7 +1050,7 @@ function normalizeStoredSessions(value: unknown): ChatSession[] {
     const updatedAt = typeof item.updatedAt === 'string' ? item.updatedAt : createdAt;
     const title = typeof item.title === 'string' && item.title.trim()
       ? item.title.trim()
-      : createTitleFromMessages(messages);
+      : createTitleFromMessages(messages, language);
 
     sessions.push({
       id: item.id,
@@ -1050,9 +1092,9 @@ function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
   return messages.map(({ expandedContent: _expandedContent, ...message }) => message);
 }
 
-function createTitleFromMessages(messages: ChatMessage[]): string {
+function createTitleFromMessages(messages: ChatMessage[], language: KeepseekLanguage = getConfiguredKeepseekLanguage()): string {
   const firstUserMessage = messages.find((message) => message.role === 'user');
-  return firstUserMessage ? createSessionTitle(firstUserMessage.content) : DEFAULT_SESSION_TITLE;
+  return firstUserMessage ? createSessionTitle(firstUserMessage.content, language) : localize(language, 'defaultSessionTitle');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

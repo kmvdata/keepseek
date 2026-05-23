@@ -10,8 +10,9 @@ export function getInputTemplate(): string {
             role="textbox"
             aria-multiline="true"
             data-placeholder="描述要构建的内容"
+            data-i18n-placeholder="promptPlaceholder"
           ></div>
-          <div class="composer-toolbar" aria-label="Chat input toolbar">
+          <div class="composer-toolbar" aria-label="Chat input toolbar" data-i18n-aria-label="chatInputToolbar">
             <div class="composer-toolbar-left">
               <button
                 id="referenceMenuButton"
@@ -19,6 +20,8 @@ export function getInputTemplate(): string {
                 class="composer-icon-btn composer-reference-btn"
                 title="引用文件 @"
                 aria-label="引用文件"
+                data-i18n-title="referenceFileTitle"
+                data-i18n-aria-label="referenceFile"
                 aria-haspopup="listbox"
                 aria-expanded="false"
               >
@@ -30,6 +33,8 @@ export function getInputTemplate(): string {
                 class="composer-icon-btn composer-command-btn"
                 title="显示命令菜单 /"
                 aria-label="显示命令菜单"
+                data-i18n-title="showCommandMenuTitle"
+                data-i18n-aria-label="showCommandMenu"
                 aria-haspopup="menu"
                 aria-expanded="false"
               >
@@ -37,16 +42,16 @@ export function getInputTemplate(): string {
               </button>
               <span id="status" class="composer-status"></span>
             </div>
-            <button id="sendButton" type="submit" class="composer-send-btn" title="发送" aria-label="发送" disabled>
+            <button id="sendButton" type="submit" class="composer-send-btn" title="发送" aria-label="发送" data-i18n-title="send" data-i18n-aria-label="send" disabled>
               <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 12.75V3.75M4.75 7 8 3.75 11.25 7" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
             </button>
           </div>
         </div>
-        <div id="commandMenu" class="command-menu hidden" role="menu" aria-label="命令菜单">
+        <div id="commandMenu" class="command-menu hidden" role="menu" aria-label="命令菜单" data-i18n-aria-label="commandMenu">
           <div class="command-menu-header">
-            <span class="command-menu-title">命令菜单</span>
+            <span class="command-menu-title" data-i18n="commandMenu">命令菜单</span>
             <span class="command-menu-shortcut">/</span>
           </div>
 
@@ -60,19 +65,19 @@ export function getInputTemplate(): string {
               aria-expanded="false"
             >
               <span class="command-row-main">
-                <span class="command-row-title">Switch model...</span>
-                <span class="command-row-description">切换 AI 模型</span>
+                <span class="command-row-title" data-i18n="switchModel">Switch model...</span>
+                <span class="command-row-description" data-i18n="switchModelDescription">切换 AI 模型</span>
               </span>
               <span id="commandModelValue" class="command-row-value">DeepSeek-V4-Flash</span>
             </button>
-            <div id="commandModelList" class="command-model-list hidden" role="group" aria-label="模型列表"></div>
+            <div id="commandModelList" class="command-model-list hidden" role="group" aria-label="模型列表" data-i18n-aria-label="modelList"></div>
           </section>
 
           <section class="command-section" aria-label="Reasoning">
             <label class="command-control-row" for="commandEffortSlider">
               <span class="command-row-main">
                 <span class="command-row-title">Effort (<span id="commandEffortValue">High</span>)</span>
-                <span class="command-row-description">调整生成内容的深度 / 复杂度</span>
+                <span class="command-row-description" data-i18n="effortDescription">调整生成内容的深度 / 复杂度</span>
               </span>
               <input
                 id="commandEffortSlider"
@@ -89,33 +94,24 @@ export function getInputTemplate(): string {
             <label class="command-control-row command-toggle-row">
               <span class="command-row-main">
                 <span class="command-row-title">Thinking</span>
-                <span class="command-row-description">提升复杂问题的推理质量</span>
+                <span class="command-row-description" data-i18n="thinkingDescription">提升复杂问题的推理质量</span>
               </span>
               <input id="commandThinkingToggle" class="command-toggle-input" type="checkbox" checked aria-label="Thinking" />
               <span class="command-toggle-track" aria-hidden="true"></span>
             </label>
           </section>
-
-          <section class="command-section" aria-label="Account">
-            <button id="commandApiKeyButton" type="button" class="command-row" role="menuitem">
-              <span class="command-row-main">
-                <span class="command-row-title">Api Key</span>
-                <span class="command-row-description">账户 API key 设置</span>
-              </span>
-            </button>
-          </section>
         </div>
-        <div id="referenceMenu" class="reference-menu hidden" role="listbox" aria-label="引用工程文件"></div>
+        <div id="referenceMenu" class="reference-menu hidden" role="listbox" aria-label="引用工程文件" data-i18n-aria-label="referenceWorkspaceFiles"></div>
       </div>
     </form>
 
     <div id="settingsDialogOverlay" class="settings-overlay hidden">
-      <div class="settings-dialog" role="dialog" aria-label="DeepSeek API 设置">
+      <div class="settings-dialog" role="dialog" aria-label="DeepSeek API 设置" data-i18n-aria-label="apiDialogLabel">
         <div class="settings-dialog-header">
-          <span class="settings-dialog-title">DeepSeek API 设置</span>
+          <span class="settings-dialog-title" data-i18n="apiDialogTitle">DeepSeek API 设置</span>
         </div>
         <div class="settings-dialog-body">
-          <p class="settings-dialog-desc">请输入 DeepSeek 官方申请的 API Key。</p>
+          <p class="settings-dialog-desc" data-i18n="apiDialogDesc">请输入 DeepSeek 官方申请的 API Key。</p>
           <div class="settings-field">
             <label class="settings-field-label" for="settingsApiKey">API Key</label>
             <div class="settings-secret-input">
@@ -127,6 +123,8 @@ export function getInputTemplate(): string {
                 aria-label="显示 API Key"
                 aria-pressed="false"
                 title="显示 API Key"
+                data-i18n-title="showApiKey"
+                data-i18n-aria-label="showApiKey"
               >
                 <svg class="settings-secret-icon settings-secret-icon-show" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M1.75 8s2.25-4 6.25-4 6.25 4 6.25 4-2.25 4-6.25 4S1.75 8 1.75 8Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
@@ -145,8 +143,8 @@ export function getInputTemplate(): string {
           </label>
         </div>
         <div class="settings-dialog-footer">
-          <button id="settingsCancelBtn" type="button" class="secondary">取消</button>
-          <button id="settingsSaveBtn" type="button">保存</button>
+          <button id="settingsCancelBtn" type="button" class="secondary" data-i18n="cancel">取消</button>
+          <button id="settingsSaveBtn" type="button" data-i18n="save">保存</button>
         </div>
       </div>
     </div>`;

@@ -1,6 +1,7 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { DEFAULT_KEEPSEEK_LANGUAGE, normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
 
 const FILE_REFERENCE_PATTERN = /<([^<>\n]+)>/gu;
 const FILE_REFERENCE_LINE_PATTERN = /^(?<path>.+)#L(?<startLine>\d+)(?:C(?<startColumn>\d+))?(?:-(?:L(?<endLine>\d+))?(?:C(?<endColumn>\d+))?)?$/u;
@@ -76,6 +77,7 @@ export interface PromptFileReference {
 
 export interface ExpandFileReferencesOptions {
   authorizedExternalReferenceUris?: Iterable<string>;
+  language?: KeepseekLanguage;
 }
 
 interface ExpandedFileReference {
@@ -85,7 +87,8 @@ interface ExpandedFileReference {
 }
 
 export async function expandFileReferencesInPrompt(prompt: string, options: ExpandFileReferencesOptions = {}): Promise<string> {
-  const references = findPromptFileReferences(prompt);
+  const language = normalizeKeepseekLanguage(options.language);
+  const references = findPromptFileReferences(prompt, language);
   if (!references.length) {
     return prompt;
   }
@@ -112,7 +115,7 @@ export async function expandFileReferencesInPrompt(prompt: string, options: Expa
   return expandedPrompt + prompt.slice(cursor);
 }
 
-function findPromptFileReferences(prompt: string): PromptFileReference[] {
+function findPromptFileReferences(prompt: string, language: KeepseekLanguage): PromptFileReference[] {
   const references: PromptFileReference[] = [];
 
   for (const match of prompt.matchAll(FILE_REFERENCE_PATTERN)) {
@@ -131,7 +134,7 @@ function findPromptFileReferences(prompt: string): PromptFileReference[] {
     references.push({
       matchStart,
       matchEnd,
-      replacementStart: getFileReferenceReplacementStart(prompt, matchStart, parsed.uri, parsed.startLine, parsed.endLine, parsed.startColumn, parsed.endColumn),
+      replacementStart: getFileReferenceReplacementStart(prompt, matchStart, parsed.uri, parsed.startLine, parsed.endLine, parsed.startColumn, parsed.endColumn, language),
       target,
       uri: parsed.uri,
       startLine: parsed.startLine,
@@ -200,12 +203,15 @@ function getFileReferenceReplacementStart(
   startLine: number,
   endLine: number,
   startColumn: number,
-  endColumn: number
+  endColumn: number,
+  language: KeepseekLanguage
 ): number {
   const fileName = getUriFileName(uri);
   const prefix = prompt.slice(0, matchStart);
-  const labels = startLine > 0 ? [`${fileName} (${formatReferenceLineLabel(startLine, endLine, startColumn, endColumn)}) `] : [];
-  labels.push(`${fileName} (全文) `, `${fileName} `);
+  const labels = startLine > 0
+    ? getReferenceLineLabelVariants(startLine, endLine, startColumn, endColumn, language).map((label) => `${fileName} (${label}) `)
+    : [];
+  labels.push(`${fileName} (${getFullReferenceLabel(language)}) `, `${fileName} (全文) `, `${fileName} (full file) `, `${fileName} `);
 
   for (const label of labels) {
     if (prefix.endsWith(label)) {
@@ -346,7 +352,32 @@ export function getUriFileName(uri: vscode.Uri): string {
   return path.basename(uri.fsPath || uri.path) || uri.fsPath || uri.path || 'file';
 }
 
-export function formatReferenceLineLabel(startLine: number, endLine: number, startColumn: number, endColumn: number): string {
+export function formatReferenceLineLabel(
+  startLine: number,
+  endLine: number,
+  startColumn: number,
+  endColumn: number,
+  language: KeepseekLanguage = DEFAULT_KEEPSEEK_LANGUAGE
+): string {
+  if (language === 'en') {
+    if (startLine === endLine) {
+      if (startColumn > 0) {
+        const colEnd = endColumn > startColumn ? endColumn : 0;
+        if (colEnd > 0) {
+          return `line ${startLine} cols ${startColumn}-${colEnd}`;
+        }
+        return `line ${startLine} from col ${startColumn}`;
+      }
+      return `line ${startLine}`;
+    }
+    if (startColumn > 0 || endColumn > 0) {
+      const startCol = startColumn > 0 ? ` col ${startColumn}` : '';
+      const endCol = endColumn > 0 ? ` col ${endColumn}` : '';
+      return `line ${startLine}${startCol}-line ${endLine}${endCol}`;
+    }
+    return `lines ${startLine}-${endLine}`;
+  }
+
   if (startLine === endLine) {
     if (startColumn > 0) {
       const colEnd = endColumn > startColumn ? endColumn : 0;
@@ -363,6 +394,25 @@ export function formatReferenceLineLabel(startLine: number, endLine: number, sta
     return `第${startLine}行${startCol}-第${endLine}行${endCol}`;
   }
   return `第${startLine}-${endLine}行`;
+}
+
+function getReferenceLineLabelVariants(
+  startLine: number,
+  endLine: number,
+  startColumn: number,
+  endColumn: number,
+  language: KeepseekLanguage
+): string[] {
+  const labels = [
+    formatReferenceLineLabel(startLine, endLine, startColumn, endColumn, language),
+    formatReferenceLineLabel(startLine, endLine, startColumn, endColumn, 'zh-CN'),
+    formatReferenceLineLabel(startLine, endLine, startColumn, endColumn, 'en')
+  ];
+  return labels.filter((label, index) => labels.indexOf(label) === index);
+}
+
+function getFullReferenceLabel(language: KeepseekLanguage): string {
+  return language === 'en' ? 'full file' : '全文';
 }
 
 export function clampLine(value: number, min: number, max: number): number {

@@ -15,7 +15,6 @@ export function getInputScript(): string {
       var commandEffortSlider = document.getElementById('commandEffortSlider');
       var commandEffortValue = document.getElementById('commandEffortValue');
       var commandThinkingToggle = document.getElementById('commandThinkingToggle');
-      var commandApiKeyButton = document.getElementById('commandApiKeyButton');
       var referenceMenu = document.getElementById('referenceMenu');
       var commandMenuOpen = false;
       var commandModelListOpen = false;
@@ -94,6 +93,10 @@ export function getInputScript(): string {
         if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
           event.preventDefault();
           composer.requestSubmit();
+          return;
+        }
+        if (event.key === 'Enter') {
+          setComposerStatus(getSendShortcutHint());
         }
       });
 
@@ -162,7 +165,7 @@ export function getInputScript(): string {
           consumeSlashTrigger(false);
           commandModelListOpen = false;
           renderCommandMenu();
-          setComposerStatus('已切换模型');
+          setComposerStatus(t('modelSwitched'));
         });
       }
 
@@ -179,17 +182,7 @@ export function getInputScript(): string {
           consumeSlashTrigger(false);
           updateAgentSettingsFromControls();
           renderCommandMenu();
-          setComposerStatus(commandThinkingToggle.checked ? 'Thinking 已开启' : 'Thinking 已关闭');
-        });
-      }
-
-      if (commandApiKeyButton) {
-        commandApiKeyButton.addEventListener('click', function(event) {
-          event.preventDefault();
-          event.stopPropagation();
-          consumeSlashTrigger(false);
-          closeCommandMenu();
-          vscode.postMessage({ type: 'openSettings', query: 'keepseek' });
+          setComposerStatus(commandThinkingToggle.checked ? t('thinkingOn') : t('thinkingOff'));
         });
       }
 
@@ -403,19 +396,19 @@ export function getInputScript(): string {
         header.className = 'reference-menu-header';
         var title = document.createElement('span');
         title.className = 'reference-menu-title';
-        title.textContent = '引用文件';
+        title.textContent = t('referenceFilesTitle');
         var count = document.createElement('span');
         count.className = 'reference-menu-count';
         header.append(title, count);
         referenceMenu.append(header);
 
         if (referenceResourcesLoading && !referenceResourcesLoaded) {
-          count.textContent = '加载中';
+          count.textContent = t('loading');
           var loadingEntries = referenceMenuSource === 'button' ? [createExternalPickerReferenceEntry()] : [];
           if (loadingEntries.length) {
             appendReferenceMenuEntries(loadingEntries);
           }
-          appendReferenceMenuNotice('正在加载工程文件...');
+          appendReferenceMenuNotice(t('loadingWorkspaceFiles'));
           return;
         }
 
@@ -432,7 +425,7 @@ export function getInputScript(): string {
         var entries = getReferenceMenuEntries();
         count.textContent = String(entries.length);
         if (!entries.length) {
-          appendReferenceMenuNotice(activeMentionQuery ? '没有匹配的文件' : '没有可引用的文件');
+          appendReferenceMenuNotice(activeMentionQuery ? t('noMatchingFiles') : t('noReferenceFiles'));
           return;
         }
 
@@ -481,11 +474,11 @@ export function getInputScript(): string {
 
         var name = document.createElement('span');
         name.className = 'reference-menu-item-name';
-        name.textContent = '选择外部文件...';
+        name.textContent = t('chooseExternalFiles');
 
         var pathLabel = document.createElement('span');
         pathLabel.className = 'reference-menu-item-path';
-        pathLabel.textContent = '从工程外选择当前用户可访问的文件';
+        pathLabel.textContent = t('chooseExternalFilesDescription');
 
         option.append(name, pathLabel);
         return option;
@@ -602,7 +595,7 @@ export function getInputScript(): string {
         }
         insertFragmentAtRange(range, fragment);
         closeReferenceMenu(true);
-        setComposerStatus('已插入文件引用');
+        setComposerStatus(t('insertedFileReference'));
       }
 
       function pickExternalFileReferences() {
@@ -625,6 +618,12 @@ export function getInputScript(): string {
         if (active && active.scrollIntoView) {
           active.scrollIntoView({ block: 'nearest' });
         }
+      }
+
+      function renderInputControls() {
+        refreshPromptFileLinkLabels();
+        renderCommandMenu();
+        setApiKeyVisible(apiKeyVisible, false);
       }
 
       function renderCommandMenu() {
@@ -705,7 +704,7 @@ export function getInputScript(): string {
           commandEffortSlider.disabled = !settings.thinkingEnabled;
         }
         if (commandEffortValue) {
-          commandEffortValue.textContent = settings.thinkingEnabled ? effortLabels[settings.reasoningEffort] : 'Off';
+          commandEffortValue.textContent = settings.thinkingEnabled ? effortLabels[settings.reasoningEffort] : t('off');
         }
       }
 
@@ -1004,17 +1003,17 @@ export function getInputScript(): string {
       }
 
       function importDroppedFilesWithoutPath(files) {
-        setComposerStatus('\\u6b63\\u5728\\u5bfc\\u5165\\u62d6\\u5165\\u6587\\u4ef6...');
+        setComposerStatus(t('importingDroppedFiles'));
         readDroppedFilePayloads(files).then(function(result) {
           if (result.files.length) {
             vscode.postMessage({ type: 'insertDroppedFileReferences', files: result.files });
             return;
           }
           setComposerStatus(result.skipped > 0
-            ? '\\u62d6\\u5165\\u6587\\u4ef6\\u8fc7\\u5927\\u6216\\u65e0\\u6cd5\\u8bfb\\u53d6'
-            : '\\u672a\\u8bc6\\u522b\\u5230\\u53ef\\u5f15\\u7528\\u7684\\u6587\\u4ef6\\u8def\\u5f84');
+            ? t('droppedFilesTooLarge')
+            : t('noReferencePath'));
         }).catch(function() {
-          setComposerStatus('\\u62d6\\u5165\\u6587\\u4ef6\\u65e0\\u6cd5\\u8bfb\\u53d6');
+          setComposerStatus(t('droppedFilesUnreadable'));
         });
       }
 
@@ -1342,22 +1341,7 @@ export function getInputScript(): string {
       }
 
       function formatLineLabel(startLine, endLine, startColumn, endColumn) {
-        if (startLine === endLine) {
-          if (startColumn > 0) {
-            var colEnd = endColumn > startColumn ? endColumn : 0;
-            if (colEnd > 0) {
-              return '\\u7b2c' + startLine + '\\u884c\\u7b2c' + startColumn + '-' + colEnd + '\\u5217';
-            }
-            return '\\u7b2c' + startLine + '\\u884c\\u7b2c' + startColumn + '\\u5217\\u8d77';
-          }
-          return '\\u7b2c' + startLine + '\\u884c';
-        }
-        if (startColumn > 0 || endColumn > 0) {
-          var startCol = startColumn > 0 ? '\\u7b2c' + startColumn + '\\u5217' : '';
-          var endCol = endColumn > 0 ? '\\u7b2c' + endColumn + '\\u5217' : '';
-          return '\\u7b2c' + startLine + '\\u884c' + startCol + '-\\u7b2c' + endLine + '\\u884c' + endCol;
-        }
-        return '\\u7b2c' + startLine + '-' + endLine + '\\u884c';
+        return formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, getLanguage());
       }
 
       function insertFileReferences(references) {
@@ -1379,7 +1363,7 @@ export function getInputScript(): string {
         }
 
         insertFragmentAtRange(range, fragment);
-        setComposerStatus('\\u5df2\\u63d2\\u5165 ' + references.length + ' \\u4e2a\\u6587\\u4ef6\\u5f15\\u7528');
+        setComposerStatus(t('insertedFileReferences', { count: references.length }));
       }
 
       function insertPlainText(text) {
@@ -1660,6 +1644,18 @@ export function getInputScript(): string {
         });
       }
 
+      function refreshPromptFileLinkLabels() {
+        var links = promptInput.querySelectorAll('a.rich-file-link');
+        links.forEach(function(link) {
+          var reference = readFileReferenceLink(link);
+          if (!reference.path) { return; }
+          var fileName = getFileName(reference.path);
+          link.textContent = reference.startLine === 0
+            ? fileName
+            : fileName + ' (' + formatLineLabel(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn) + ')';
+        });
+      }
+
       function updatePromptVisualState() {
         var isEmpty = isPromptEmpty();
         if (isEmpty) {
@@ -1728,7 +1724,7 @@ export function getInputScript(): string {
           }
         }
         if (settingsApiKeyVisibilityBtn) {
-          var label = apiKeyVisible ? '隐藏 API Key' : '显示 API Key';
+          var label = apiKeyVisible ? t('hideApiKey') : t('showApiKey');
           settingsApiKeyVisibilityBtn.classList.toggle('is-visible', apiKeyVisible);
           settingsApiKeyVisibilityBtn.setAttribute('aria-pressed', apiKeyVisible ? 'true' : 'false');
           settingsApiKeyVisibilityBtn.setAttribute('aria-label', label);
@@ -1759,7 +1755,7 @@ export function getInputScript(): string {
             baseUrl = 'https://api.deepseek.com';
           }
           vscode.postMessage({ type: 'saveSettings', apiKey: apiKey, baseUrl: baseUrl });
-          setComposerStatus('API 设置已保存');
+          setComposerStatus(t('apiSettingsSaved'));
           hideSettingsDialog();
         });
       }
@@ -1846,7 +1842,7 @@ export function getInputScript(): string {
           return;
         }
 
-        setComposerStatus('\\u672a\\u8bc6\\u522b\\u5230\\u53ef\\u5f15\\u7528\\u7684\\u6587\\u4ef6\\u8def\\u5f84');
+        setComposerStatus(t('noReferencePath'));
       }, true);
 
       window.addEventListener('message', function(event) {
@@ -1874,15 +1870,15 @@ export function getInputScript(): string {
           fragment.append(document.createTextNode(' '));
         }
         insertFragmentAtRange(range, fragment);
-        setComposerStatus('已插入文件引用');
+        setComposerStatus(t('insertedFileReference'));
       });
 
       window.keepseekInputControls = {
-        render: renderCommandMenu,
+        render: renderInputControls,
         showSettingsDialog: showSettingsDialog,
         clearPrompt: clearPrompt
       };
-      renderCommandMenu();
+      renderInputControls();
       updatePromptVisualState();
     })();
 `;

@@ -1,9 +1,11 @@
 import { getInputScript } from './input/script';
+import { WEBVIEW_TRANSLATIONS } from '../i18n';
 
 export function getScript(): string {
   return `
     const vscode = acquireVsCodeApi();
     const keepseekLogoUri = window.keepseekLogoUri || '';
+    const translations = ${JSON.stringify(WEBVIEW_TRANSLATIONS)};
     const state = {
       models: [],
       selectedModelId: '',
@@ -17,11 +19,43 @@ export function getScript(): string {
       contextFiles: [],
       draftEdits: [],
       isBusy: false,
-      maxFileBytes: 200000
+      maxFileBytes: 200000,
+      language: 'zh-CN'
     };
+
+    function getLanguage() {
+      return state.language === 'en' ? 'en' : 'zh-CN';
+    }
+
+    function t(key, values) {
+      var language = getLanguage();
+      var catalog = translations[language] || translations['zh-CN'];
+      var fallback = translations['zh-CN'] || {};
+      var template = catalog[key] || fallback[key] || key;
+      var replacements = values || {};
+      return String(template).replace(/\\{(\\w+)\\}/g, function(_match, name) {
+        return replacements[name] === undefined ? '' : String(replacements[name]);
+      });
+    }
+
+    function getSendShortcutHint() {
+      return t('sendShortcutHint');
+    }
+
+    function getLanguageDisplayName(language) {
+      return language === 'en'
+        ? t('languageValueEn')
+        : t('languageValueZh');
+    }
 
     const historyTab = document.getElementById('historyTab');
     const newChatTab = document.getElementById('newChatTab');
+    const settingsTab = document.getElementById('settingsTab');
+    const settingsMenu = document.getElementById('settingsMenu');
+    const settingsApiKeyMenuItem = document.getElementById('settingsApiKeyMenuItem');
+    const settingsLanguageMenuItem = document.getElementById('settingsLanguageMenuItem');
+    const settingsLanguageValue = document.getElementById('settingsLanguageValue');
+    const settingsLanguageSubmenu = document.getElementById('settingsLanguageSubmenu');
     const sessionMenu = document.getElementById('sessionMenu');
     const contextBarOuter = document.getElementById('contextBarOuter');
     const contextBar = document.getElementById('contextBar');
@@ -35,6 +69,7 @@ export function getScript(): string {
     const editReferenceMenu = document.createElement('div');
     let transientStatus = '';
     let transientStatusTimer = 0;
+    let settingsMenuOpen = false;
     let sessionMenuOpen = false;
     let editingMessageId = '';
     let editingDraftText = '';
@@ -54,7 +89,7 @@ export function getScript(): string {
 
     editReferenceMenu.className = 'reference-menu message-reference-menu hidden';
     editReferenceMenu.setAttribute('role', 'listbox');
-    editReferenceMenu.setAttribute('aria-label', '\\u5f15\\u7528\\u5de5\\u7a0b\\u6587\\u4ef6');
+    editReferenceMenu.setAttribute('aria-label', t('referenceWorkspaceFiles'));
     document.body.append(editReferenceMenu);
 
     transcript.addEventListener('click', function(event) {
@@ -162,6 +197,11 @@ export function getScript(): string {
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
         event.preventDefault();
         submitEditedMessage(editor.dataset.messageId || '');
+        return;
+      }
+
+      if (event.key === 'Enter') {
+        setTransientStatus(getSendShortcutHint());
       }
     });
 
@@ -241,9 +281,55 @@ export function getScript(): string {
     if (newChatTab) {
       newChatTab.addEventListener('click', function() {
         if (state.isBusy) return;
+        closeSettingsMenu();
         closeSessionMenu();
         clearPromptDraft();
         vscode.postMessage({ type: 'newSession' });
+      });
+    }
+
+    if (settingsTab) {
+      settingsTab.addEventListener('click', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (state.isBusy) return;
+        toggleSettingsMenu();
+      });
+    }
+
+    if (settingsApiKeyMenuItem) {
+      settingsApiKeyMenuItem.addEventListener('click', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsMenu();
+        vscode.postMessage({ type: 'openSettings' });
+      });
+    }
+
+    if (settingsLanguageMenuItem) {
+      settingsLanguageMenuItem.addEventListener('click', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var item = settingsLanguageMenuItem.closest('.settings-language-item');
+        if (item) {
+          item.classList.toggle('is-open');
+          settingsLanguageMenuItem.setAttribute('aria-expanded', item.classList.contains('is-open') ? 'true' : 'false');
+        }
+      });
+    }
+
+    if (settingsLanguageSubmenu) {
+      settingsLanguageSubmenu.addEventListener('click', function(event) {
+        var target = event.target instanceof Element ? event.target : null;
+        var button = target?.closest('button[data-language]');
+        if (!button) return;
+        event.preventDefault();
+        event.stopPropagation();
+        var language = button.dataset.language === 'en' ? 'en' : 'zh-CN';
+        state.language = language;
+        render();
+        setTransientStatus(t('languageSaved', { language: getLanguageDisplayName(language) }));
+        vscode.postMessage({ type: 'setLanguage', language: language });
       });
     }
 
@@ -252,6 +338,7 @@ export function getScript(): string {
         event.preventDefault();
         event.stopPropagation();
         if (state.isBusy) return;
+        closeSettingsMenu();
         toggleSessionMenu();
       });
     }
@@ -282,10 +369,21 @@ export function getScript(): string {
       closeSessionMenu();
     });
 
+    document.addEventListener('mousedown', function(event) {
+      if (!settingsMenuOpen) return;
+      var target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      if ((settingsMenu && settingsMenu.contains(target)) || (settingsTab && settingsTab.contains(target))) {
+        return;
+      }
+      closeSettingsMenu();
+    });
+
     document.addEventListener('keydown', function(event) {
-      if (!sessionMenuOpen || event.key !== 'Escape') return;
+      if ((!sessionMenuOpen && !settingsMenuOpen) || event.key !== 'Escape') return;
       event.preventDefault();
       closeSessionMenu();
+      closeSettingsMenu();
     });
 
     window.keepseekInlineEditorControls = {
@@ -314,7 +412,9 @@ export function getScript(): string {
     });
 
     function render() {
+      applyStaticTranslations();
       syncEditingState();
+      renderSettingsControls();
       renderSessionControls();
       renderContextChips();
       renderDraftEdits();
@@ -324,6 +424,44 @@ export function getScript(): string {
         window.keepseekInputControls.render();
       }
       sendButton.disabled = state.isBusy || promptInput.classList.contains('is-empty');
+    }
+
+    function applyStaticTranslations() {
+      document.documentElement.lang = getLanguage() === 'en' ? 'en' : 'zh-CN';
+      document.querySelectorAll('[data-i18n]').forEach(function(element) {
+        element.textContent = t(element.dataset.i18n || '');
+      });
+      document.querySelectorAll('[data-i18n-title]').forEach(function(element) {
+        element.setAttribute('title', t(element.dataset.i18nTitle || ''));
+      });
+      document.querySelectorAll('[data-i18n-aria-label]').forEach(function(element) {
+        element.setAttribute('aria-label', t(element.dataset.i18nAriaLabel || ''));
+      });
+      document.querySelectorAll('[data-i18n-placeholder]').forEach(function(element) {
+        element.setAttribute('data-placeholder', t(element.dataset.i18nPlaceholder || ''));
+      });
+      editReferenceMenu.setAttribute('aria-label', t('referenceWorkspaceFiles'));
+    }
+
+    function renderSettingsControls() {
+      if (settingsTab) {
+        settingsTab.disabled = state.isBusy;
+        settingsTab.classList.toggle('active', settingsMenuOpen);
+        settingsTab.setAttribute('aria-expanded', settingsMenuOpen ? 'true' : 'false');
+      }
+      if (settingsMenu) {
+        settingsMenu.classList.toggle('hidden', !settingsMenuOpen);
+      }
+      if (settingsLanguageValue) {
+        settingsLanguageValue.textContent = getLanguageDisplayName(getLanguage());
+      }
+      if (settingsLanguageSubmenu) {
+        var buttons = settingsLanguageSubmenu.querySelectorAll('button[data-language]');
+        buttons.forEach(function(button) {
+          var isSelected = (button.dataset.language === 'en' ? 'en' : 'zh-CN') === getLanguage();
+          button.setAttribute('aria-checked', isSelected ? 'true' : 'false');
+        });
+      }
     }
 
     function renderSessionControls() {
@@ -336,6 +474,32 @@ export function getScript(): string {
         historyTab.setAttribute('aria-expanded', sessionMenuOpen ? 'true' : 'false');
       }
       renderSessionMenu();
+    }
+
+    function toggleSettingsMenu() {
+      if (settingsMenuOpen) {
+        closeSettingsMenu();
+      } else {
+        openSettingsMenu();
+      }
+    }
+
+    function openSettingsMenu() {
+      closeSessionMenu();
+      settingsMenuOpen = true;
+      renderSettingsControls();
+    }
+
+    function closeSettingsMenu() {
+      settingsMenuOpen = false;
+      if (settingsLanguageMenuItem) {
+        settingsLanguageMenuItem.setAttribute('aria-expanded', 'false');
+      }
+      var languageItem = settingsLanguageMenuItem ? settingsLanguageMenuItem.closest('.settings-language-item') : null;
+      if (languageItem) {
+        languageItem.classList.remove('is-open');
+      }
+      renderSettingsControls();
     }
 
     function toggleSessionMenu() {
@@ -365,14 +529,14 @@ export function getScript(): string {
       if (!sessions.length) {
         var empty = document.createElement('div');
         empty.className = 'session-menu-empty';
-        empty.textContent = '\\u6682\\u65e0\\u5386\\u53f2\\u4f1a\\u8bdd';
+        empty.textContent = t('noHistory');
         sessionMenu.append(empty);
         return;
       }
 
       var title = document.createElement('div');
       title.className = 'session-menu-title';
-      title.textContent = '\\u5386\\u53f2\\u4f1a\\u8bdd';
+      title.textContent = t('sessionHistory');
       sessionMenu.append(title);
 
       for (var i = 0; i < sessions.length; i++) {
@@ -387,7 +551,7 @@ export function getScript(): string {
 
         var itemTitle = document.createElement('span');
         itemTitle.className = 'session-menu-item-title';
-        itemTitle.textContent = session.title || '\\u65b0\\u4f1a\\u8bdd';
+        itemTitle.textContent = session.title || t('newSession');
         itemTitle.title = itemTitle.textContent;
 
         var meta = document.createElement('span');
@@ -401,7 +565,7 @@ export function getScript(): string {
 
     function formatSessionMeta(session) {
       var count = Number(session.messageCount) || 0;
-      var countLabel = count > 0 ? count + ' \\u6761\\u6d88\\u606f' : '\\u7a7a\\u4f1a\\u8bdd';
+      var countLabel = count > 0 ? t('messageCount', { count: count }) : t('emptySession');
       var timeLabel = formatSessionTime(session.updatedAt || session.createdAt);
       return timeLabel ? timeLabel + ' · ' + countLabel : countLabel;
     }
@@ -409,7 +573,7 @@ export function getScript(): string {
     function formatSessionTime(value) {
       var time = Date.parse(value || '');
       if (!Number.isFinite(time)) return '';
-      return new Date(time).toLocaleString([], {
+      return new Date(time).toLocaleString(getLanguage() === 'en' ? 'en' : 'zh-CN', {
         month: '2-digit',
         day: '2-digit',
         hour: '2-digit',
@@ -427,7 +591,7 @@ export function getScript(): string {
     }
 
     function renderStatus() {
-      status.textContent = state.isBusy ? '\\u5904\\u7406\\u4e2d...' : transientStatus;
+      status.textContent = state.isBusy ? t('processing') : transientStatus;
     }
 
     function setTransientStatus(message) {
@@ -492,9 +656,9 @@ export function getScript(): string {
     function copyMessageText(message) {
       var text = String(message.content || '');
       copyTextToClipboard(text).then(function() {
-        setTransientStatus('\\u5df2\\u590d\\u5236');
+        setTransientStatus(t('copied'));
       }, function() {
-        setTransientStatus('\\u590d\\u5236\\u5931\\u8d25');
+        setTransientStatus(t('copyFailed'));
       });
     }
 
@@ -539,7 +703,7 @@ export function getScript(): string {
       }
       var prompt = editingDraftText.trim();
       if (!prompt) {
-        setTransientStatus('\\u8bf7\\u8f93\\u5165\\u5185\\u5bb9');
+        setTransientStatus(t('enterContent'));
         return;
       }
 
@@ -688,15 +852,15 @@ export function getScript(): string {
       header.className = 'reference-menu-header';
       var title = document.createElement('span');
       title.className = 'reference-menu-title';
-      title.textContent = '\\u5f15\\u7528\\u6587\\u4ef6';
+      title.textContent = t('referenceFilesTitle');
       var count = document.createElement('span');
       count.className = 'reference-menu-count';
       header.append(title, count);
       editReferenceMenu.append(header);
 
       if (editReferenceResourcesLoading && !editReferenceResourcesLoaded) {
-        count.textContent = '\\u52a0\\u8f7d\\u4e2d';
-        appendEditReferenceMenuNotice('\\u6b63\\u5728\\u52a0\\u8f7d\\u5de5\\u7a0b\\u6587\\u4ef6...');
+        count.textContent = t('loading');
+        appendEditReferenceMenuNotice(t('loadingWorkspaceFiles'));
         positionEditReferenceMenu();
         return;
       }
@@ -711,7 +875,7 @@ export function getScript(): string {
       var resources = getFilteredEditReferenceResources();
       count.textContent = String(resources.length);
       if (!resources.length) {
-        appendEditReferenceMenuNotice(editMentionQuery ? '\\u6ca1\\u6709\\u5339\\u914d\\u7684\\u6587\\u4ef6' : '\\u6ca1\\u6709\\u53ef\\u5f15\\u7528\\u7684\\u6587\\u4ef6');
+        appendEditReferenceMenuNotice(editMentionQuery ? t('noMatchingFiles') : t('noReferenceFiles'));
         positionEditReferenceMenu();
         return;
       }
@@ -815,7 +979,7 @@ export function getScript(): string {
       resizeInlineEditor(editor);
       updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
       closeEditReferenceMenu(false);
-      setTransientStatus('\\u5df2\\u63d2\\u5165\\u6587\\u4ef6\\u5f15\\u7528');
+      setTransientStatus(t('insertedFileReference'));
     }
 
     function scrollActiveEditReferenceIntoView() {
@@ -909,7 +1073,7 @@ export function getScript(): string {
         remove.className = 'context-chip-remove';
         remove.type = 'button';
         remove.textContent = '\\\\00d7';
-        remove.title = '\\u79fb\\u9664 ' + file.label;
+        remove.title = (getLanguage() === 'en' ? 'Remove ' : '移除 ') + file.label;
         remove.dataset.uri = file.uri;
 
         chip.append(label, remove);
@@ -944,14 +1108,14 @@ export function getScript(): string {
 
         var apply = document.createElement('button');
         apply.type = 'button';
-        apply.textContent = 'Apply';
+        apply.textContent = t('apply');
         apply.dataset.editId = edit.id;
         apply.dataset.editAction = 'applyDraftEdit';
 
         var discard = document.createElement('button');
         discard.type = 'button';
         discard.className = 'secondary';
-        discard.textContent = 'Discard';
+        discard.textContent = t('discard');
         discard.dataset.editId = edit.id;
         discard.dataset.editAction = 'discardDraftEdit';
 
@@ -980,10 +1144,10 @@ export function getScript(): string {
           icon.textContent = '\\\\2726';
         }
         var line1 = document.createElement('div');
-        line1.textContent = '\\u5f00\\u59cb KeepSeek \\u5bf9\\u8bdd';
+        line1.textContent = t('startChat');
         var line2 = document.createElement('div');
         line2.style.cssText = 'font-size:11px;opacity:0.6';
-        line2.textContent = '\\u6dfb\\u52a0\\u4e0a\\u4e0b\\u6587\\u6587\\u4ef6\\u540e\\uff0c\\u8f93\\u5165\\u6d88\\u606f\\u5e76\\u53d1\\u9001';
+        line2.textContent = t('emptyTranscriptHint');
         empty.append(icon, line1, line2);
         transcript.append(empty);
       }
@@ -1000,7 +1164,7 @@ export function getScript(): string {
 
         var role = document.createElement('div');
         role.className = 'message-role';
-        role.textContent = message.role === 'user' ? 'You' : 'KeepSeek';
+        role.textContent = message.role === 'user' ? t('you') : 'KeepSeek';
 
         body.append(role);
         if (message.role === 'assistant' && message.reasoningContent) {
@@ -1040,8 +1204,8 @@ export function getScript(): string {
       actions.className = 'message-actions';
 
       actions.append(
-        createMessageActionButton(message, 'copy', '\\u590d\\u5236', '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="7" height="8" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.25"/><path d="M4 11H3.4A1.4 1.4 0 0 1 2 9.6V3.4A1.4 1.4 0 0 1 3.4 2h6.2A1.4 1.4 0 0 1 11 3.4V4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>'),
-        createMessageActionButton(message, 'edit', '\\u7f16\\u8f91\\u5e76\\u91cd\\u53d1', '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 11.95 4 9.2l5.9-5.9a1.45 1.45 0 0 1 2.05 2.05l-5.9 5.9-2.8.7Z" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="m8.95 4.25 2.8 2.8" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>')
+        createMessageActionButton(message, 'copy', t('copy'), '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="7" height="8" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.25"/><path d="M4 11H3.4A1.4 1.4 0 0 1 2 9.6V3.4A1.4 1.4 0 0 1 3.4 2h6.2A1.4 1.4 0 0 1 11 3.4V4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>'),
+        createMessageActionButton(message, 'edit', t('editAndResend'), '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 11.95 4 9.2l5.9-5.9a1.45 1.45 0 0 1 2.05 2.05l-5.9 5.9-2.8.7Z" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="m8.95 4.25 2.8 2.8" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>')
       );
 
       return actions;
@@ -1346,7 +1510,7 @@ export function getScript(): string {
       resizeInlineEditor(editor);
       updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
       closeEditReferenceMenu(false);
-      setTransientStatus('\\u5df2\\u63d2\\u5165\\u6587\\u4ef6\\u5f15\\u7528');
+      setTransientStatus(t('insertedFileReference'));
       return true;
     }
 
@@ -1361,7 +1525,7 @@ export function getScript(): string {
       editor.setAttribute('contenteditable', 'true');
       editor.setAttribute('role', 'textbox');
       editor.setAttribute('aria-multiline', 'true');
-      editor.setAttribute('aria-label', '\\u7f16\\u8f91\\u6d88\\u606f');
+      editor.setAttribute('aria-label', t('editMessage'));
       renderInlineEditorContent(editor, editingDraftText);
 
       var footer = document.createElement('div');
@@ -1370,14 +1534,14 @@ export function getScript(): string {
       var cancel = document.createElement('button');
       cancel.type = 'button';
       cancel.className = 'secondary';
-      cancel.textContent = '\\u53d6\\u6d88';
+      cancel.textContent = t('cancel');
       cancel.dataset.messageAction = 'cancel-edit';
       cancel.dataset.messageId = message.id;
 
       var send = document.createElement('button');
       send.type = 'submit';
       send.className = 'message-edit-send';
-      send.textContent = '\\u53d1\\u9001';
+      send.textContent = t('send');
 
       footer.append(cancel, send);
       form.append(editor, footer);
@@ -1667,9 +1831,11 @@ export function getScript(): string {
     function getMessageReferenceLabel(text, matchStart, reference) {
       var fileName = getMessageFileName(reference.path);
       var labels = reference.startLine > 0
-        ? [fileName + ' (' + formatMessageLineLabel(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn) + ')']
+        ? getLineLabelVariants(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn).map(function(label) {
+            return fileName + ' (' + label + ')';
+          })
         : [];
-      labels.push(fileName + ' (全文)', fileName);
+      labels.push(fileName + ' (' + t('fullFileLabel') + ')', fileName + ' (全文)', fileName + ' (full file)', fileName);
 
       var prefix = text.slice(0, matchStart);
       for (var i = 0; i < labels.length; i++) {
@@ -1710,6 +1876,39 @@ export function getScript(): string {
     }
 
     function formatMessageLineLabel(startLine, endLine, startColumn, endColumn) {
+      return formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, getLanguage());
+    }
+
+    function getLineLabelVariants(startLine, endLine, startColumn, endColumn) {
+      var labels = [
+        formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, getLanguage()),
+        formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, 'zh-CN'),
+        formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, 'en')
+      ];
+      return labels.filter(function(label, index) {
+        return labels.indexOf(label) === index;
+      });
+    }
+
+    function formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, language) {
+      if (language === 'en') {
+        if (startLine === endLine) {
+          if (startColumn > 0) {
+            var colEndEn = endColumn > startColumn ? endColumn : 0;
+            if (colEndEn > 0) {
+              return 'line ' + startLine + ' cols ' + startColumn + '-' + colEndEn;
+            }
+            return 'line ' + startLine + ' from col ' + startColumn;
+          }
+          return 'line ' + startLine;
+        }
+        if (startColumn > 0 || endColumn > 0) {
+          var startColEn = startColumn > 0 ? ' col ' + startColumn : '';
+          var endColEn = endColumn > 0 ? ' col ' + endColumn : '';
+          return 'line ' + startLine + startColEn + '-line ' + endLine + endColEn;
+        }
+        return 'lines ' + startLine + '-' + endLine;
+      }
       if (startLine === endLine) {
         if (startColumn > 0) {
           var colEnd = endColumn > startColumn ? endColumn : 0;

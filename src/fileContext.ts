@@ -2,6 +2,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ContextFile } from './types';
+import { getConfiguredKeepseekLanguage, localize } from './i18n';
 
 const SKIPPED_DIRECTORY_NAMES = new Set([
   '.git',
@@ -39,7 +40,7 @@ export class FileContextStore {
   public async addCurrentEditor(): Promise<ContextFile> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
-      throw new Error('No active editor found.');
+      throw new Error(t('noActiveEditor'));
     }
 
     const document = editor.document;
@@ -53,7 +54,7 @@ export class FileContextStore {
 
   public async pickWorkspaceFiles(): Promise<ContextFile[]> {
     if (!vscode.workspace.workspaceFolders?.length) {
-      throw new Error('Open a workspace before picking workspace files.');
+      throw new Error(t('openWorkspaceFirst'));
     }
 
     const uris = await vscode.workspace.findFiles('**/*', WORKSPACE_GLOB_EXCLUDE, 1000);
@@ -66,7 +67,7 @@ export class FileContextStore {
     const picked = await vscode.window.showQuickPick(items, {
       canPickMany: true,
       matchOnDescription: true,
-      placeHolder: 'Select files to add to KeepSeek context'
+      placeHolder: t('selectFilesPlaceholder')
     });
 
     if (!picked?.length) {
@@ -85,7 +86,7 @@ export class FileContextStore {
       canSelectFiles: true,
       canSelectFolders: true,
       canSelectMany: true,
-      openLabel: 'Add to KeepSeek Context'
+      openLabel: t('addToContextLabel')
     });
 
     if (!picked?.length) {
@@ -118,12 +119,12 @@ export class FileContextStore {
 
     const stat = await vscode.workspace.fs.stat(uri);
     if (stat.type !== vscode.FileType.File) {
-      throw new Error(`${uri.fsPath} is not a regular file.`);
+      throw new Error(t('notRegularFile', { path: uri.fsPath }));
     }
 
     const limits = this.getLimits();
     if (stat.size > limits.maxFileBytes) {
-      throw new Error(`${this.getLabel(uri)} is larger than ${formatBytes(limits.maxFileBytes)}.`);
+      throw new Error(t('largerThanLimit', { label: this.getLabel(uri), limit: formatBytes(limits.maxFileBytes) }));
     }
 
     const bytes = await vscode.workspace.fs.readFile(uri);
@@ -192,7 +193,7 @@ export class FileContextStore {
   private decodeText(bytes: Uint8Array, uri: vscode.Uri): string {
     const prefix = bytes.subarray(0, Math.min(bytes.length, 4096));
     if (prefix.includes(0)) {
-      throw new Error(`${this.getLabel(uri)} appears to be a binary file.`);
+      throw new Error(t('appearsBinary', { label: this.getLabel(uri) }));
     }
     return this.decoder.decode(bytes);
   }
@@ -201,21 +202,21 @@ export class FileContextStore {
     const limits = this.getLimits();
     const size = new TextEncoder().encode(content).byteLength;
     if (size > limits.maxFileBytes) {
-      throw new Error(`${this.getLabel(uri)} is larger than ${formatBytes(limits.maxFileBytes)}.`);
+      throw new Error(t('largerThanLimit', { label: this.getLabel(uri), limit: formatBytes(limits.maxFileBytes) }));
     }
   }
 
   private ensureContextHasRoom(): void {
     const limits = this.getLimits();
     if (this.files.size >= limits.maxContextFiles) {
-      throw new Error(`Context already contains ${limits.maxContextFiles} files.`);
+      throw new Error(t('contextAlreadyFull', { count: limits.maxContextFiles }));
     }
   }
 
   private resolveInputPath(rawPath: string): vscode.Uri {
     const trimmed = rawPath.trim();
     if (!trimmed) {
-      throw new Error('Enter a file or folder path.');
+      throw new Error(t('enterPath'));
     }
 
     const expanded = trimmed.replace(/^~(?=$|[/\\])/, os.homedir());
@@ -255,4 +256,8 @@ export function formatBytes(bytes: number): string {
     return `${(bytes / 1024).toFixed(1)} KB`;
   }
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function t(key: string, values?: Record<string, string | number>): string {
+  return localize(getConfiguredKeepseekLanguage(), key, values);
 }

@@ -81,6 +81,20 @@
           "scope": "application",
           "description": "DeepSeek API 端点地址。"
         },
+        "keepseek.language": {
+          "type": "string",
+          "enum": [
+            "zh-CN",
+            "en"
+          ],
+          "enumDescriptions": [
+            "中文",
+            "English"
+          ],
+          "default": "zh-CN",
+          "scope": "application",
+          "description": "KeepSeek interface and prompt language."
+        },
         "keepseek.thinkingEnabled": {
           "type": "boolean",
           "default": true,
