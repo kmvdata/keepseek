@@ -17,8 +17,13 @@
     "Other"
   ],
   "activationEvents": [
-    "onWebviewPanel:keepseek.chatView",
-    "onWebviewPanel:keepseek.chatSecondaryView"
+    "onView:keepseek.chatView",
+    "onCommand:keepseek.openChat",
+    "onCommand:keepseek.addCurrentFileToContext",
+    "onCommand:keepseek.pickWorkspaceFilesToContext",
+    "onCommand:keepseek.pickExternalFilesToContext",
+    "onCommand:keepseek.addSelectionToContext",
+    "onCommand:keepseek.addExplorerFileToContext"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -29,28 +34,15 @@
           "title": "KeepSeek",
           "icon": "resources/keepseek.svg"
         }
-      ],
-      "secondarySidebar": [
-        {
-          "id": "keepseek-secondary",
-          "title": "KeepSeek",
-          "icon": "resources/keepseek.svg"
-        }
       ]
     },
     "views": {
       "keepseek": [
         {
-          "type": "keepseek.chatView",
+          "type": "webview",
           "id": "keepseek.chatView",
-          "name": "KeepSeek"
-        }
-      ],
-      "keepseek-secondary": [
-        {
-          "type": "keepseek.chatSecondaryView",
-          "id": "keepseek.chatSecondaryView",
-          "name": "KeepSeek"
+          "name": "KeepSeek",
+          "visibility": "visible"
         }
       ]
     },
@@ -90,7 +82,7 @@
       "explorer/context": [
         {
           "command": "keepseek.addExplorerFileToContext",
-          "when": "explorerViewletFocus && !explorerResourceIsFolder",
+          "when": "!explorerResourceIsFolder",
           "group": "navigation"
         }
       ],

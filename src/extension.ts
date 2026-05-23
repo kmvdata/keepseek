@@ -14,10 +14,6 @@ import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, norma
 
 const PRIMARY_CONTAINER_ID = 'keepseek';
 const PRIMARY_VIEW_TYPE = 'keepseek.chatView';
-const SECONDARY_CONTAINER_ID = 'keepseek-secondary';
-const SECONDARY_VIEW_TYPE = 'keepseek.chatSecondaryView';
-const MIN_SECONDARY_SIDEBAR_VERSION = { major: 1, minor: 106 };
-const DOES_NOT_SUPPORT_SECONDARY_SIDEBAR_CONTEXT = 'keepseek.doesNotSupportSecondarySidebar';
 const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 const SESSION_STORAGE_VERSION = 1;
 const MAX_STORED_SESSIONS = 50;
@@ -71,7 +67,6 @@ interface StoredSessionState {
 
 class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly primaryViewType = PRIMARY_VIEW_TYPE;
-  public static readonly secondaryViewType = SECONDARY_VIEW_TYPE;
 
   private readonly fileContext = new FileContextStore();
   private readonly agentRunner = new AgentRunner();
@@ -111,21 +106,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async reveal(): Promise<void> {
-    const target = supportsSecondarySidebar(vscode.version)
-      ? {
-          containerId: SECONDARY_CONTAINER_ID,
-          viewType: SECONDARY_VIEW_TYPE
-        }
-      : {
-          containerId: PRIMARY_CONTAINER_ID,
-          viewType: PRIMARY_VIEW_TYPE
-        };
-
-    try {
-      await focusView(target.containerId, target.viewType);
-    } catch {
-      await focusView(PRIMARY_CONTAINER_ID, PRIMARY_VIEW_TYPE);
-    }
+    await focusView(PRIMARY_CONTAINER_ID, PRIMARY_VIEW_TYPE);
   }
 
   public async addCurrentFileToContext(): Promise<void> {
@@ -941,12 +922,6 @@ export function activate(context: vscode.ExtensionContext): void {
   ensureKeybindings(context);
 
   const provider = new KeepseekChatViewProvider(context.extensionUri, context.workspaceState, context.globalStorageUri);
-  const doesNotSupportSecondarySidebar = !supportsSecondarySidebar(vscode.version);
-  void vscode.commands.executeCommand(
-    'setContext',
-    DOES_NOT_SUPPORT_SECONDARY_SIDEBAR_CONTEXT,
-    doesNotSupportSecondarySidebar
-  );
 
   const webviewProviders: vscode.Disposable[] = [
     vscode.window.registerWebviewViewProvider(KeepseekChatViewProvider.primaryViewType, provider, {
@@ -955,16 +930,6 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     })
   ];
-
-  if (!doesNotSupportSecondarySidebar) {
-    webviewProviders.push(
-      vscode.window.registerWebviewViewProvider(KeepseekChatViewProvider.secondaryViewType, provider, {
-        webviewOptions: {
-          retainContextWhenHidden: true
-        }
-      })
-    );
-  }
 
   context.subscriptions.push(
     ...webviewProviders,
@@ -985,29 +950,6 @@ export function deactivate(): void {}
 async function focusView(containerId: string, viewType: string): Promise<void> {
   await vscode.commands.executeCommand(`workbench.view.extension.${containerId}`);
   await vscode.commands.executeCommand(`${viewType}.focus`);
-}
-
-function supportsSecondarySidebar(version: string): boolean {
-  const parsed = parseMajorMinorVersion(version);
-  if (!parsed) {
-    return false;
-  }
-  if (parsed.major !== MIN_SECONDARY_SIDEBAR_VERSION.major) {
-    return parsed.major > MIN_SECONDARY_SIDEBAR_VERSION.major;
-  }
-  return parsed.minor >= MIN_SECONDARY_SIDEBAR_VERSION.minor;
-}
-
-function parseMajorMinorVersion(version: string): { major: number; minor: number } | undefined {
-  const match = /^(?<major>\d+)\.(?<minor>\d+)/u.exec(version);
-  if (!match?.groups) {
-    return undefined;
-  }
-
-  return {
-    major: Number(match.groups.major),
-    minor: Number(match.groups.minor)
-  };
 }
 
 function createEmptySession(language: KeepseekLanguage = getConfiguredKeepseekLanguage()): ChatSession {
