@@ -955,7 +955,8 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         draftEdits: Array.from(this.draftEdits.values()).map(({ newText: _newText, ...edit }) => edit),
         isBusy: this.isBusy,
         maxFileBytes: getConfiguredMaxFileBytes(),
-        language: this.language
+        language: this.language,
+        isMac: process.platform === 'darwin'
       }
     });
   }

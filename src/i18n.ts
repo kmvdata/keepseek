@@ -82,7 +82,8 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     discard: '丢弃',
     editMessage: '编辑消息',
     fullFileLabel: '全文',
-    sendShortcutHint: '按 Ctrl+Enter 或 Command+Enter 发送消息'
+    sendShortcutHint: '按 Ctrl+Enter 发送消息',
+    sendShortcutHintMac: '按 Ctrl+Enter 或 Command+Enter 发送消息'
   },
   en: {
     settings: 'Settings',
@@ -158,7 +159,8 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     discard: 'Discard',
     editMessage: 'Edit message',
     fullFileLabel: 'full file',
-    sendShortcutHint: 'Press Ctrl+Enter or Command+Enter to send'
+    sendShortcutHint: 'Press Ctrl+Enter to send',
+    sendShortcutHintMac: 'Press Ctrl+Enter or Command+Enter to send'
   }
 };
 

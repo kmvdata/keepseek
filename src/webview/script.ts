@@ -20,7 +20,8 @@ export function getScript(): string {
       draftEdits: [],
       isBusy: false,
       maxFileBytes: 200000,
-      language: 'zh-CN'
+      language: 'zh-CN',
+      isMac: false
     };
 
     function getLanguage() {
@@ -39,7 +40,7 @@ export function getScript(): string {
     }
 
     function getSendShortcutHint() {
-      return t('sendShortcutHint');
+      return t(state.isMac ? 'sendShortcutHintMac' : 'sendShortcutHint');
     }
 
     function getLanguageDisplayName(language) {
