@@ -715,14 +715,19 @@ export function getStyles(): string {
     }
 
     .message-code-copy {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       flex: 0 0 auto;
+      width: 22px;
+      height: 22px;
+      min-width: 22px;
       min-height: 22px;
-      padding: 1px 8px;
+      padding: 0;
       border: none;
       border-radius: 4px;
       color: var(--vscode-descriptionForeground);
       background: transparent;
-      font-size: 11px;
     }
 
     .message-code-copy:hover:not(:disabled),
@@ -730,6 +735,10 @@ export function getStyles(): string {
       color: var(--vscode-foreground);
       background: var(--vscode-toolbar-hoverBackground);
       outline: none;
+    }
+
+    .message-code-copy.is-copied {
+      color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
     }
 
     .message-code-block pre {

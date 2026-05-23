@@ -676,12 +676,17 @@ export function getScript(): string {
     }
 
     function showCodeCopyFeedback(button) {
-      var original = button.textContent || t('copy');
-      button.textContent = t('copied');
+      button.innerHTML = getCheckIconSvg();
+      button.title = t('copied');
+      button.setAttribute('aria-label', t('copied'));
+      button.classList.add('is-copied');
       button.disabled = true;
       setTimeout(function() {
         if (!button.isConnected) return;
-        button.textContent = original;
+        button.innerHTML = getCopyIconSvg();
+        button.title = t('copy');
+        button.setAttribute('aria-label', t('copy'));
+        button.classList.remove('is-copied');
         button.disabled = false;
       }, 1200);
     }
@@ -1928,7 +1933,7 @@ export function getScript(): string {
       copy.type = 'button';
       copy.className = 'message-code-copy';
       copy.dataset.codeAction = 'copy';
-      copy.textContent = t('copy');
+      copy.innerHTML = getCopyIconSvg();
       copy.title = t('copy');
       copy.setAttribute('aria-label', t('copy'));
 
@@ -1943,6 +1948,14 @@ export function getScript(): string {
       pre.append(codeElement);
       block.append(toolbar, pre);
       return block;
+    }
+
+    function getCopyIconSvg() {
+      return '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="7" height="8" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.25"/><path d="M4 11H3.4A1.4 1.4 0 0 1 2 9.6V3.4A1.4 1.4 0 0 1 3.4 2h6.2A1.4 1.4 0 0 1 11 3.4V4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>';
+    }
+
+    function getCheckIconSvg() {
+      return '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 8.15 6.45 11.4 12.9 4.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     }
 
     function appendMarkdownInline(container, text) {
