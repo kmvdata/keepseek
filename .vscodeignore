@@ -1,10 +1,15 @@
 .gitignore
+.claude/**
 .npm-cache/**
 .vscode/**
 .vscode-test/**
 node_modules/**
 src/**
 *.vsix
+AGENTS.md
+CLAUDE.md
+__SKILLS.md
+bun.lock
 eslint.config.mjs
 package-lock.json
 tsconfig.json

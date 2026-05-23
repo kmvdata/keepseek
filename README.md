@@ -1,164 +1,51 @@
 # KeepSeek
 
-KeepSeek 是一个 VS Code Agent 对话插件。目标体验类似 Cursor 的 Agent 面板：用户可以选择模型、持续对话、把当前工程或外部路径的文件加入上下文，并在用户明确允许后由 Agent 修改项目代码。
+KeepSeek 是一款面向 VS Code 的 AI 编程上下文助手。它把 Agent 对话面板放进 VS Code 侧边栏，让你可以把文件、选中代码、终端输出、调试控制台和 Output 面板里的关键内容快速加入上下文，再交给 AI 一起分析、解释和生成修改建议。
 
-当前仓库已经搭好一个可运行的扩展开发骨架，并在 [src/agentRunner.ts](src/agentRunner.ts) 接入了 DeepSeek OpenAI-compatible Chat Completions、Thinking 模式和安全修改草案工具。
+当前版本默认接入 DeepSeek OpenAI-compatible Chat Completions，支持 DeepSeek V4 Flash / Pro、Thinking 模式、多轮对话、文件引用、运行日志引用和安全的修改草案确认流程。
 
-## 功能概览
+English version is available below: [English](#keepseek-english).
 
-- VS Code 右侧 Secondary Sidebar 里的 `KeepSeek` Agent 面板，和 Codex、Claude Code 等聊天视图并列。
-- Agent 对话 Webview，支持模型下拉选择。
-- DeepSeek V4 Flash / Pro 调用，支持 Thinking 开关、`high` / `max` 推理强度和 `reasoning_content` 展示。
-- 多轮对话历史（自动裁剪到最近 80 条消息）。
-- 上下文文件管理：当前编辑器文件、工作区文件、外部文件/目录、手动输入路径。
-- 文件引用（File Reference）：编辑器选中文本、资源管理器文件、终端/输出窗口选区、拖拽文件到输入框自动生成为可点击的文件引用链接，发送时自动展开为 markdown 代码块。
-- 上下文文件数量（默认 32）和单文件大小（默认 200KB）限制，自动跳过二进制文件和常见非文本格式。
-- `DraftEdit` 修改草案机制：AI 返回修改建议后，用户点击 Apply → modal 弹窗确认 → 写入文件。
-- 快捷键支持：`Cmd+L` / `Ctrl+L` 快速添加选中文本、资源管理器文件、终端/调试输出到上下文。
+## 适用场景
 
-## 目录结构
+- 阅读陌生项目：选择入口文件、配置文件和关键代码片段，让 AI 帮你梳理模块关系、执行路径和风险点。
+- 调试运行错误：把终端报错、测试失败输出、Debug Console 内容或 Output 面板日志加入上下文，让 AI 基于真实现场分析原因。
+- 修改代码前做方案：引用相关文件和行号，让 AI 先解释影响范围，再生成可审阅的修改草案。
+- 处理跨文件任务：把多个工作区文件或外部文件加入上下文，围绕同一需求持续对话。
+- 复盘构建和测试：将编译输出、lint 结果、测试日志交给 AI，总结失败点和下一步动作。
 
-```
-src/
-├── extension.ts          # 入口：Provider 类、activate/deactivate、工具函数
-├── types.ts              # 共享类型定义
-├── agentRunner.ts        # AI 请求封装
-├── fileContext.ts        # 上下文文件管理
-├── safeFileEditor.ts     # 文件安全写入
-└── webview/
-    ├── styles.ts         # getStyles() — 所有 CSS
-    ├── template.ts       # getTemplate() — HTML 骨架
-    └── script.ts         # getScript() — Webview 内运行的 JS（IIFE）
-```
+## 适合谁
 
-## 架构
+- 独立开发者：在一个轻量侧边栏里完成代码阅读、问题定位和方案讨论。
+- 团队工程师：把真实代码和运行输出一并交给 AI，减少来回复制上下文的成本。
+- 新加入项目的开发者：快速理解代码结构、约定和关键文件。
+- 维护者和 Reviewer：围绕具体文件、行号、日志和修改草案做更精确的审查。
+- 使用 DeepSeek 或兼容 OpenAI API 网关的开发者：可以通过配置替换模型列表和 API base URL。
 
-- `extension.ts` 的 `getHtmlForWebview()` 通过 `${getStyles()}` / `${getTemplate()}` / `${getScript()}` 组装完整 HTML 文档。
-- webview 三层文件各自导出纯字符串，互不依赖。改样式只碰 `styles.ts`，改 JS 只碰 `script.ts`，改 HTML 只碰 `template.ts`。
-- `script.ts` 输出的是注入 webview 的 JS 代码（字符串形式），通过 `acquireVsCodeApi()` 与 Provider 通信。
-- Webview 端用原生 DOM 操作渲染，不依赖任何前端框架。`render()` 分别调用 `renderModels()`、`renderContext()`、`renderDraftEdits()`、`renderTranscript()` 更新对应区域。
+## 核心功能
 
-### 页面布局
+- 侧边栏 Agent 对话：KeepSeek 显示在 VS Code Secondary Sidebar 中，适合一边看代码一边对话。
+- 多模型配置：默认提供 DeepSeek V4 Flash / Pro，也支持通过 `keepseek.models` 配置模型列表。
+- Thinking 模式：支持开启或关闭 Thinking，并选择 `high` / `max` 推理强度。
+- 多轮会话历史：保留最近对话，支持切换历史会话。
+- 文件上下文：添加当前文件、工作区文件、外部文件或目录，也可以手动输入路径。
+- 精确文件引用：右键或快捷键添加编辑器选区，保留文件路径、行号和列号。
+- 运行现场引用：终端、Output 面板和调试控制台中的选中内容可以作为 `.log` 引用插入输入框，发送前会展开给 AI。
+- 拖拽文件引用：从 VS Code Explorer 或系统文件管理器拖入文件，自动生成可点击的引用 chip。
+- 安全修改草案：AI 只能创建待确认的 DraftEdit，用户点击 Apply 后还会经过 VS Code modal 确认再写入文件。
+- 基础防护：限制单个上下文文件大小，跳过常见二进制、媒体、归档和不可读文件。
 
-Webview UI 使用 CSS Grid 划分为四个区域（从上到下）：
+## 工作方式
 
-```
-┌─────────────────────────┐
-│  Header                 │  ← 标题 + 模型选择下拉框
-├─────────────────────────┤
-│  Context                │  ← 文件选择按钮、路径输入、上下文文件列表、待确认修改卡片
-├─────────────────────────┤
-│  Transcript             │  ← 聊天消息历史，可滚动，占剩余高度
-├─────────────────────────┤
-│  Composer               │  ← 文本输入框 + 发送按钮
-└─────────────────────────┘
-```
+KeepSeek 的核心是“显式上下文”。你选择哪些代码、文件或日志进入上下文，AI 就围绕这些材料回答，而不是猜测整个项目状态。
 
-对应的 HTML 结构：
+典型流程：
 
-- `.header` — `modelSelect` 模型选择器
-- `.context` — 工具栏（当前文件 / 工作区 / 外部文件 / 清空）、路径输入行、`contextList` 上下文文件列表、`draftList` 待确认修改列表
-- `#transcript` — 对话记录（`.message.user` / `.message.assistant`）
-- `#composer` — 输入表单，`Ctrl+Enter` 发送
-
-### 视图容器
-
-扩展贡献一个 Secondary Sidebar 容器：
-
-- 容器 ID：`keepseek`
-- WebviewView ID：`keepseek.chatView`
-- 打开命令：`KeepSeek: Open Agent Chat`
-
-VS Code 1.106 起支持通过 `viewsContainers.secondarySidebar` 注册自定义 View Container。KeepSeek 只注册一个 `keepseek.chatView` WebviewView，并使用 `onView:keepseek.chatView` 激活，避免为左右两侧创建重复视图。
-
-## 关键通信流
-
-### 1. Webview → Extension（用户操作）
-
-Webview JS 通过 `vscode.postMessage({ type, ... })` 向 Provider 发送消息，由 `handleMessage()` 分发处理。
-
-| type | 载荷 | 说明 |
-|------|------|------|
-| `ready` | — | Webview 加载完成，请求初始状态 |
-| `sendPrompt` | `prompt`, `modelId`, `settings` | 用户发送消息 |
-| `addCurrentFile` | — | 添加当前编辑器文件 |
-| `pickWorkspaceFiles` | — | 从工作区选择文件 |
-| `pickExternalFiles` | — | 从外部路径选择文件/目录 |
-| `setAgentSettings` | `settings` | 更新 Thinking / Effort 设置 |
-| `readPath` | `path` | 读取指定路径 |
-| `removeContextFile` | `uri` | 移除单个上下文文件 |
-| `clearContext` | — | 清空全部上下文文件 |
-| `applyDraftEdit` | `id` | 确认应用修改草案 |
-| `discardDraftEdit` | `id` | 丢弃修改草案 |
-| `openFileReference` | `path`, `startLine`, `endLine` | 在编辑器中打开文件引用 |
-
-### 2. Extension → Webview（状态同步）
-
-Provider 通过 `postToWebview({ type: 'state', state })` 全量推送状态，webview 收到后更新全局 `state` 并调用 `render()` 重渲染。
-
-| type | 载荷 | 说明 |
-|------|------|------|
-| `state` | `models`, `selectedModelId`, `agentSettings`, `messages`, `contextFiles`, `draftEdits`, `isBusy` | 全量状态推送 |
-
-### 3. Extension → Webview（主动推送）
-
-`insertFileReference` 不属于 `WebviewMessage` 联合类型，由 Provider 主动推送，不在 `handleMessage` switch 中处理：
-
-```
-Provider: postToWebview({ type: 'insertFileReference', path, startLine, endLine })
-  → script.ts IIFE 内 message listener
-    → createFileReferenceLink() 生成 <a.rich-file-link>
-    → insertFragmentAtRange() 插入到光标位置
-```
-
-## 数据流
-
-```
-用户操作 (Webview)
-    │  vscode.postMessage({ type, ... })
-    ▼
-KeepseekChatViewProvider.handleMessage()
-    │  根据 message.type 分发
-    ├── sendPrompt ───────────────► AgentRunner.run()
-    ├── addCurrentFile ──────────► FileContextStore.addCurrentEditor()
-    ├── pickWorkspaceFiles ──────► FileContextStore.pickWorkspaceFiles()
-    ├── pickExternalFiles ───────► FileContextStore.pickExternalFiles()
-    ├── readPath ────────────────► FileContextStore.addPath()
-    ├── applyDraftEdit ──────────► SafeFileEditor.applyDraftEdit()
-    └── removeContextFile/clearContext ──► FileContextStore.remove()/clear()
-         │
-         ▼
-    this.postState()
-         │  webview.postMessage({ type: 'state', state: {...} })
-         ▼
-    window.addEventListener('message') → Object.assign(state) → render()
-```
-
-## 命令
-
-| 命令 | 说明 |
-|------|------|
-| `KeepSeek: Open Agent Chat` | 打开 Agent 聊天面板 |
-| `KeepSeek: Add Current File to Context` | 将当前编辑器文件加入上下文 |
-| `KeepSeek: Pick Workspace Files for Context` | 从工作区选择文件加入上下文 |
-| `KeepSeek: Pick External Files for Context` | 从外部路径选择文件/目录加入上下文 |
-| `KeepSeek: Add Selection to Context` | 将编辑器选中文本作为文件引用插入输入框 |
-| `KeepSeek: Add File to Context` | 将资源管理器中的文件作为引用插入输入框 |
-
-## 配置项
-
-| 配置键 | 默认值 | 说明 |
-|--------|--------|------|
-| `keepseek.models` | `[{ "id": "deepseek-v4-flash", "label": "DeepSeek-V4-Flash", "provider": "deepseek" }, { "id": "deepseek-v4-pro", "label": "DeepSeek-V4-Pro", "provider": "deepseek" }]` | 聊天面板中显示的模型列表 |
-| `keepseek.apiKey` | `""` | DeepSeek 官方 API Key，也可用 `DEEPSEEK_API_KEY` 环境变量兜底 |
-| `keepseek.baseUrl` | `"https://api.deepseek.com"` | DeepSeek OpenAI-compatible API base URL |
-| `keepseek.thinkingEnabled` | `true` | 是否发送 `thinking: { "type": "enabled" }` |
-| `keepseek.reasoningEffort` | `"high"` | Thinking 模式推理强度：`high` 或 `max` |
-| `keepseek.maxTokens` | `8192` | 单次响应最大输出 token；设为 `0` 时不显式传入 |
-| `keepseek.maxToolIterations` | `4` | 单轮 Agent 工具调用循环上限 |
-| `keepseek.requestTimeoutMs` | `120000` | DeepSeek API 请求超时时间，单位毫秒 |
-| `keepseek.maxFileBytes` | `200000` | 单个上下文文件最大字节数（最小 1000） |
-| `keepseek.maxContextFiles` | `32` | 上下文最大文件数（最小 1） |
+1. 在编辑器、资源管理器、终端、Output 或 Debug Console 中选择需要的内容。
+2. 使用右键菜单或 `Cmd+L` / `Ctrl+L` 添加到 KeepSeek 输入框。
+3. 输入问题或任务，例如“解释这个报错为什么发生”或“给出最小修改方案”。
+4. AI 回复后，如果包含修改草案，你可以选择 Apply 或 Discard。
+5. Apply 时 VS Code 会再次弹窗确认，确认后才写入文件。
 
 ## 快捷键
 
@@ -169,140 +56,58 @@ KeepseekChatViewProvider.handleMessage()
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | 终端有选中文本 | `keepseek.addTerminalSelectionToContext` |
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | 调试控制台聚焦 | `keepseek.addDebugConsoleSelectionToContext` |
 
-扩展激活时会自动将快捷键写入用户的 `keybindings.json`，若已存在则跳过。
+扩展激活时会尝试把这些快捷键写入用户的 `keybindings.json`。如果已经存在对应绑定，则会跳过。
 
-## 文件引用机制
+## 右键菜单
 
-### 右键菜单：Add Selection to Context
+- 编辑器选区：`KeepSeek: 添加到上下文`
+- Explorer 文件：`KeepSeek: Add Explorer File to Chat`
+- 终端选区：`KeepSeek: 添加到上下文`
+- Output 面板选区：`KeepSeek: 添加到上下文`
 
-- 命令：`keepseek.addSelectionToContext`
-- 触发条件：编辑器中选中文本（`editorHasSelection`）
-- 路径：右键 → `KeepSeek: Add Selection to Context`
+调试控制台可以使用 `Cmd+L` / `Ctrl+L` 添加当前选区。VS Code 对 Debug Console 原生右键菜单的扩展点较有限，因此快捷键是当前最稳定的入口。
 
-**流程：**
+## 配置项
 
-```
-editor.selection (0-based) + editor.document.uri.fsPath
-  → extension.ts: insertSelectionToInput()  // 行号转为 1-based
-    → reveal() 展开面板
-    → postMessage({ type: 'insertFileReference', path, startLine, endLine })
-      → script.ts: 在输入框光标处插入文件引用 chip
-```
+| 配置键 | 默认值 | 说明 |
+|--------|--------|------|
+| `keepseek.apiKey` | `""` | DeepSeek API Key，也可用 `DEEPSEEK_API_KEY` 环境变量兜底 |
+| `keepseek.baseUrl` | `"https://api.deepseek.com"` | OpenAI-compatible API base URL |
+| `keepseek.models` | DeepSeek V4 Flash / Pro | 聊天面板中显示的模型列表 |
+| `keepseek.thinkingEnabled` | `true` | 是否开启 Thinking 模式 |
+| `keepseek.reasoningEffort` | `"high"` | Thinking 推理强度，支持 `high` 或 `max` |
+| `keepseek.maxFileBytes` | `200000` | 单个引用文件或日志片段的最大字节数 |
 
-**序列化格式**（与拖拽/粘贴一致）：`文件名 (第N-M行) <路径#LN-LM>`
+## 隐私与安全
 
-### 资源管理器右键菜单：Add File to Context
+- KeepSeek 只读取你明确选择或添加的文件、路径和选区。
+- 外部文件和拖拽文件需要经过扩展授权记录后才会在发送前展开。
+- 图片、媒体、归档和常见二进制文件不会被展开到 prompt。
+- AI 生成的文件修改不会静默写入。所有修改都以 DraftEdit 形式展示，并由用户确认后执行。
+- 终端和调试控制台选区会以临时 `.log` 文件形式存储在扩展全局存储目录中，用于复用现有文件引用展开机制。
 
-- 命令：`keepseek.addExplorerFileToContext`
-- 触发条件：资源管理器中文件右键（`!explorerResourceIsFolder`）
-- 路径：Explorer → 文件右键 → `KeepSeek: Add File to Context`
+## 安装与使用
 
-**流程：**
+从 VSIX 安装：
 
-```
-explorer/context 传入 vscode.Uri
-  → extension.ts: insertExplorerFileToInput()
-    → reveal() 展开面板
-    → postMessage({ type: 'insertFileReference', path, startLine: 0, endLine: 0 })
-      → script.ts: 在输入框光标处插入全文文件引用 chip；没有已保存光标时插入到末尾
-```
-
-`startLine: 0, endLine: 0` 表示全文引用，chip 只显示高亮文件名，序列化格式为：`文件名 <路径>`。
-
-### 终端 / 输出 / 调试控制台选区引用
-
-- 终端右键菜单：选中终端文本后右键 → `KeepSeek: 添加到上下文`，或按 `Cmd+L` / `Ctrl+L`。
-- 输出窗口：选中输出文本后右键 → `KeepSeek: 添加到上下文`，或按 `Cmd+L` / `Ctrl+L`。
-- 调试控制台：聚焦调试控制台后按 `Cmd+L` / `Ctrl+L` 添加当前选中文本。
-
-这些非文件选区会写入扩展全局存储中的临时 `.log` 文件，再按全文文件引用插入输入框；发送前仍由 `expandFileReferencesInPrompt()` 展开为 markdown 代码块，因此 AI 可以直接读取选中的终端/输出内容。
-
-### 拖拽文件到输入框
-
-从 VSCode 文件资源管理器（或系统文件管理器）直接拖拽文件到输入框：
-
-- 拖入的文件生成为文件引用链接（`.rich-file-link`），不含行号，显示为高亮文件名。
-- 双击链接在 VSCode 中打开对应文件（不选中特定行）。
-- 序列化格式：`文件名 <路径>`（与带行号的引用不同，没有 `#L` 片段）。
-
-**实现细节：**
-
-- `resolveWebviewView()` 必须设置 `enableDragAndDrop: true`（采用 `as vscode.WebviewOptions` 类型断言，因 `@types/vscode@1.100.0` 未声明该属性），否则 VSCode 资源管理器的拖拽事件不会传递到 webview。
-- `startLine: 0, endLine: 0` 在 script.ts 内部作为"全文引用"的哨兵值。
-- `extractFileReferences()` 处理多种拖拽数据格式：
-  - `dt.files[].path`（文件系统文件）
-  - `dt.items[]`（DataTransferItemList）
-  - `text/uri-list`（VSCode 资源管理器 / 系统拖拽）
-  - `application/vnd.code.uri-list`（VSCode 自定义 MIME，资源管理器拖入的主要数据来源）
-  - `text/plain`（兜底）
-- `createFileReferenceLink()` 检测 `startLine === 0` 时仅显示文件名。
-
-### 发送前引用展开
-
-发送消息时 `serializePrompt()` 遍历 `.rich-file-link` 元素，调用 `fileReferenceLinkToText()` 先还原为文本格式；`extension.ts` 的 `expandFileReferencesInPrompt()` 会在真正调用 AgentRunner 前读取可文本化的引用文件/行段，并把引用位置展开为 markdown 代码块。
-
-**带行号的引用展开格式：**
-
-````markdown
-文件名 (第N-M行) <路径#LN-LM>
-```typescript
-引用原文
-```
-````
-
-**全文引用展开格式：** 标题行为 `文件名 <路径>`，正文为文件全部内容。
-
-不可读取、超出大小限制、图片、媒体、归档和常见二进制文件会保留原引用，不展开。
-
-### 自动跳过的文件类型
-
-以下扩展名的文件不会被展开为内容（保留原引用）：
-
-`.3gp`, `.7z`, `.aac`, `.ai`, `.avi`, `.avif`, `.bmp`, `.bz2`, `.class`, `.dll`, `.dmg`, `.doc`, `.docx`, `.dylib`, `.eot`, `.exe`, `.fig`, `.flac`, `.flv`, `.gif`, `.gz`, `.heic`, `.heif`, `.icns`, `.ico`, `.jar`, `.jpeg`, `.jpg`, `.m4a`, `.mkv`, `.mov`, `.mp3`, `.mp4`, `.ogg`, `.otf`, `.pdf`, `.png`, `.psd`, `.rar`, `.sketch`, `.so`, `.svg`, `.tar`, `.tif`, `.tiff`, `.ttf`, `.wasm`, `.wav`, `.webm`, `.webp`, `.wmv`, `.woff`, `.woff2`, `.xz`, `.zip`
-
-另外，包含 null 字节或异常控制字符超过 3% 的文件也会被判定为二进制文件并跳过。
-
-## AgentRunner 调用链
-
-`AgentRequest` 包含 `prompt`、`model`、`settings`、`contextFiles`、`history`。当前实现已经接入 DeepSeek OpenAI-compatible Chat Completions：
-
-1. 保留 `/draft <path>` 临时指令，便于本地验证安全写文件流程。
-2. 使用 `keepseek.apiKey` / `keepseek.baseUrl` 调用 `/chat/completions`。
-3. 根据 UI 设置发送 `thinking: { "type": "enabled" | "disabled" }` 和 `reasoning_effort: "high" | "max"`。
-4. 读取 DeepSeek 返回的 `reasoning_content`，在回复中以可展开 Thinking 区块展示。
-5. 提供 `keepseek_create_draft_edit` function tool，让模型只能创建待确认修改卡片，不能直接写入文件。
-
-Thinking 模式下 DeepSeek 不支持 `temperature`、`top_p` 等采样参数，KeepSeek 当前不会在 thinking 请求中传入这些参数。
-
-## 安全写文件流程
-
-```
-AgentRunner 生成 DraftEdit
-    → Webview 显示修改卡片（Apply / Discard）
-    → 用户点击 Apply
-    → handleMessage('applyDraftEdit')
-    → SafeFileEditor.applyDraftEdit()
-        → vscode.window.showWarningMessage({ modal: true })  弹窗确认
-        → workspace.fs.writeFile()                           写入
-        → window.showTextDocument()                          打开文件
+```bash
+code --install-extension keepseek-0.0.3.vsix
 ```
 
-确认弹窗标注了"修改"还是"创建"，并展示文件路径和修改原因。
-
-## 临时开发指令
-
-聊天输入支持一个临时草稿指令，便于验证写文件确认流程：
+安装后在 VS Code 中执行：
 
 ```text
-/draft notes/hello.md
-# Hello KeepSeek
-
-This file was proposed by KeepSeek.
+KeepSeek: Open Agent Chat
 ```
 
-发送后面板会出现待确认修改卡片。点击 `Apply` 时，VS Code 会再次弹窗请求写入许可。
+配置 API Key：
 
-## 开发调试
+1. 打开 VS Code Settings。
+2. 搜索 `KeepSeek`。
+3. 填写 `keepseek.apiKey`。
+4. 如需使用代理或兼容网关，修改 `keepseek.baseUrl` 和 `keepseek.models`。
+
+## 开发
 
 ```bash
 npm install
@@ -310,128 +115,120 @@ npm run compile
 npm run lint
 ```
 
-在 VS Code 中打开本目录，按 `F5` 启动 Extension Development Host，然后执行命令：
+在 VS Code 中打开本目录，按 `F5` 启动 Extension Development Host，然后执行：
 
 ```text
 KeepSeek: Open Agent Chat
 ```
 
-也可以在右侧 Secondary Sidebar 的视图菜单中打开 KeepSeek，它会和 Codex、Claude Code 一样显示为可打开的 Agent 聊天窗口。
+## 发布准备
 
-## 打包 VSIX
+当前发布版本为 `0.0.3`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.0.3`，发布标签可以使用 `v0.0.3`。
 
-生成可安装的 VSIX：
-
-```bash
-npx vsce package --no-dependencies --out /private/tmp/keepseek-test.vsix
-```
-
-确认文件存在：
+生成 VSIX：
 
 ```bash
-ls /private/tmp/keepseek-test.vsix
+npm run compile
+npx vsce package --no-dependencies
 ```
 
-## 安装 VSIX 测试
-
-### 命令行安装
-
-如果本机已经有 `code` 命令：
+本地检查：
 
 ```bash
-code --install-extension /private/tmp/keepseek-test.vsix
+npm run lint
+npx vsce ls
 ```
 
-安装后在 VS Code 中执行：
+## KeepSeek English
 
-```text
-Developer: Reload Window
+KeepSeek is an AI coding context assistant for VS Code. It adds an Agent chat panel to the VS Code sidebar and makes it easy to send precise development context to AI: files, selected code, terminal output, Debug Console text, and Output panel logs.
+
+The current release connects to DeepSeek OpenAI-compatible Chat Completions by default. It supports DeepSeek V4 Flash / Pro, Thinking mode, multi-turn sessions, rich file references, runtime log references, and a safe draft-edit workflow.
+
+## Use Cases
+
+- Understand unfamiliar repositories: add entry files, configuration files, and selected code so AI can explain structure and execution flow.
+- Debug real failures: send terminal errors, failed test output, Debug Console text, or Output logs as context.
+- Plan code changes: reference exact files and line ranges before asking for an implementation strategy.
+- Work across files: gather related workspace or external files and keep the discussion grounded in the same context.
+- Review build and test output: ask AI to summarize failures and suggest the next step.
+
+## Who It Is For
+
+- Independent developers who want a lightweight AI assistant inside VS Code.
+- Engineering teams that need to share precise code and runtime context with AI.
+- Developers joining a new project who need to understand code structure quickly.
+- Maintainers and reviewers who want line-aware context and reviewable draft edits.
+- Users of DeepSeek or OpenAI-compatible model gateways.
+
+## Features
+
+- Sidebar Agent chat inside VS Code Secondary Sidebar.
+- Configurable model list with DeepSeek V4 Flash / Pro defaults.
+- Thinking mode with `high` and `max` reasoning effort.
+- Multi-turn chat history and session switching.
+- File context from the active editor, workspace files, external files, directories, or typed paths.
+- Precise file references from editor selections, including path, line, and column metadata.
+- Runtime context references from terminal selections, Output panel selections, and Debug Console text.
+- Drag-and-drop file references into the prompt composer.
+- Safe DraftEdit workflow where AI proposes changes and the user confirms before writing files.
+- Size limits and binary-file filtering to avoid sending unsuitable content.
+
+## How It Works
+
+KeepSeek is built around explicit context. You decide which files, selections, and logs AI can see.
+
+1. Select code, files, terminal output, Output text, or Debug Console text.
+2. Use the context menu or `Cmd+L` / `Ctrl+L` to insert it into the KeepSeek prompt.
+3. Ask a question or request a change.
+4. Review the response and any proposed DraftEdit.
+5. Apply changes only after confirming them in VS Code.
+
+## Shortcuts
+
+| Shortcut | Condition | Command |
+|----------|-----------|---------|
+| `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | Editor text is selected | `keepseek.addSelectionToContext` |
+| `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | Explorer is focused on a file | `keepseek.addExplorerFileToContext` |
+| `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | Terminal text is selected | `keepseek.addTerminalSelectionToContext` |
+| `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | Debug Console is focused | `keepseek.addDebugConsoleSelectionToContext` |
+
+## Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `keepseek.apiKey` | `""` | DeepSeek API Key. `DEEPSEEK_API_KEY` can be used as a fallback |
+| `keepseek.baseUrl` | `"https://api.deepseek.com"` | OpenAI-compatible API base URL |
+| `keepseek.models` | DeepSeek V4 Flash / Pro | Models shown in the chat panel |
+| `keepseek.thinkingEnabled` | `true` | Enables Thinking mode |
+| `keepseek.reasoningEffort` | `"high"` | Thinking effort, either `high` or `max` |
+| `keepseek.maxFileBytes` | `200000` | Maximum bytes for a referenced file or log snippet |
+
+## Privacy And Safety
+
+- KeepSeek reads only files, paths, and selections you explicitly add.
+- External and dropped files are authorized before they can be expanded into a prompt.
+- Common binary, media, image, and archive files are not expanded.
+- AI-generated edits are shown as drafts and require user confirmation before writing.
+- Terminal and Debug Console selections are stored as temporary `.log` files in the extension global storage directory so they can use the same reference expansion pipeline as files.
+
+## Development
+
+```bash
+npm install
+npm run compile
+npm run lint
 ```
 
-然后执行：
+Launch the Extension Development Host with `F5`, then run:
 
 ```text
 KeepSeek: Open Agent Chat
 ```
 
-### 安装 code 命令
-
-如果终端报错 `zsh: command not found: code`，在 VS Code 中执行：
-
-```text
-Shell Command: Install 'code' command in PATH
-```
-
-然后关闭当前终端，重新打开终端再执行安装命令。
-
-### 从 VS Code 图形界面安装
-
-1. 打开 Extensions 面板。
-2. 点击右上角 `...`。
-3. 选择 `Install from VSIX...`。
-4. 选择 `/private/tmp/keepseek-test.vsix`。
-5. 执行 `Developer: Reload Window`。
-
-### 重新安装新版本
-
-如果已经安装过旧版本，可以先卸载再安装：
+## Packaging
 
 ```bash
-code --uninstall-extension keepseek.keepseek
-code --install-extension /private/tmp/keepseek-test.vsix
+npm run compile
+npx vsce package --no-dependencies
 ```
-
-当前扩展 ID 来自 `publisher.name`，即 `keepseek.keepseek`。
-
-## 需求草案
-
-### 1. Agent 对话
-
-- 支持多轮对话历史。
-- 支持模型选择。
-- 支持流式输出。
-- 支持停止生成、重试、复制回复。
-- 支持把上下文文件列表随请求提交给模型服务。
-
-### 2. 模型接入
-
-模型列表由 `keepseek.models` 配置项驱动。建议后续把模型调用抽象为 Provider：
-
-- OpenAI-compatible API。
-- DeepSeek API。
-- 本地模型或本地网关。
-- 用户自定义 endpoint。
-
-所有真实调用可以先从 [src/agentRunner.ts](src/agentRunner.ts) 开始替换。
-
-### 3. 文件上下文
-
-KeepSeek 需要读取用户明确选择的文件：
-
-- 当前编辑器文件。
-- 工作区文件。
-- 外部绝对路径文件。
-- 外部目录中的文本文件。
-
-默认跳过 `.git`、`.vscode-test`、`node_modules`、`dist`、`build`、`out`、`coverage` 等目录。后续可以增加 `.gitignore` 解析、二进制识别增强、token 预算裁剪和文件摘要缓存。
-
-### 4. 安全修改代码
-
-Agent 不应该静默写文件。推荐流程：
-
-1. 模型返回结构化修改草案。
-2. KeepSeek 将草案渲染为可确认的修改卡片。
-3. 用户点击 Apply。
-4. VS Code 再弹出 modal 确认。
-5. 确认后写入文件并打开对应文档。
-
-当前的 [src/safeFileEditor.ts](src/safeFileEditor.ts) 已经实现了第 4 和第 5 步。
-
-### 5. 后续路线
-
-- 接入真实模型调用和 API key 配置。
-- 支持流式回复。
-- 增加 diff 预览，而不是直接展示 Apply。
-- 支持 workspace edit 批量修改。
-- 支持读取终端输出、诊断信息、Git diff。
-- 增加测试和打包发布流程。
