@@ -2,9 +2,13 @@
   "name": "keepseek",
   "displayName": "KeepSeek",
   "description": "A VS Code agent chat extension for reading project context and safely proposing code edits.",
-  "version": "0.0.1-beta.1",
+  "version": "0.0.1",
   "publisher": "keepseek",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kmvdata/keepseek"
+  },
   "engines": {
     "vscode": "^1.100.0"
   },
