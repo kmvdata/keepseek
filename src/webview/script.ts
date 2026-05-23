@@ -547,7 +547,8 @@ export function getScript(): string {
         messageId: messageId,
         prompt: editingDraftText,
         modelId: state.selectedModelId,
-        settings: getCurrentAgentSettings()
+        settings: getCurrentAgentSettings(),
+        references: editor ? collectInlineEditorFileReferences(editor) : []
       });
       editingMessageId = '';
       editingDraftText = '';
@@ -1203,18 +1204,35 @@ export function getScript(): string {
     }
 
     function inlineFileReferenceLinkToText(link) {
-      var reference = {
+      var reference = readInlineFileReferenceLink(link);
+      if (reference.startLine > 0 && reference.endLine < reference.startLine) {
+        reference.endLine = reference.startLine;
+      }
+      var label = link.textContent || getMessageFileName(reference.path);
+      return label + ' <' + makeMessageFileHref(reference) + '>';
+    }
+
+    function collectInlineEditorFileReferences(editor) {
+      var references = [];
+      if (!editor) return references;
+      var links = editor.querySelectorAll('a.rich-file-link');
+      links.forEach(function(link) {
+        var reference = readInlineFileReferenceLink(link);
+        if (reference.path) {
+          references.push(reference);
+        }
+      });
+      return references;
+    }
+
+    function readInlineFileReferenceLink(link) {
+      return {
         path: link.dataset.path || '',
         startLine: readReferenceInteger(link.dataset.startLine, 0),
         endLine: readReferenceInteger(link.dataset.endLine, 0),
         startColumn: readReferenceInteger(link.dataset.startColumn, 0),
         endColumn: readReferenceInteger(link.dataset.endColumn, 0)
       };
-      if (reference.startLine > 0 && reference.endLine < reference.startLine) {
-        reference.endLine = reference.startLine;
-      }
-      var label = link.textContent || getMessageFileName(reference.path);
-      return label + ' <' + makeMessageFileHref(reference) + '>';
     }
 
     function isInlineEditorBlockElement(element) {

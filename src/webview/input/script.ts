@@ -46,7 +46,8 @@ export function getInputScript(): string {
           type: 'sendPrompt',
           prompt: prompt,
           modelId: state.selectedModelId,
-          settings: readAgentSettingsFromControls()
+          settings: readAgentSettingsFromControls(),
+          references: collectPromptFileReferences()
         });
         clearPrompt();
       });
@@ -410,37 +411,49 @@ export function getInputScript(): string {
 
         if (referenceResourcesLoading && !referenceResourcesLoaded) {
           count.textContent = '加载中';
+          var loadingEntries = referenceMenuSource === 'button' ? [createExternalPickerReferenceEntry()] : [];
+          if (loadingEntries.length) {
+            appendReferenceMenuEntries(loadingEntries);
+          }
           appendReferenceMenuNotice('正在加载工程文件...');
           return;
         }
 
         if (referenceResourcesError) {
-          count.textContent = '0';
+          var errorEntries = referenceMenuSource === 'button' ? [createExternalPickerReferenceEntry()] : [];
+          count.textContent = String(errorEntries.length);
+          if (errorEntries.length) {
+            appendReferenceMenuEntries(errorEntries);
+          }
           appendReferenceMenuNotice(referenceResourcesError);
           return;
         }
 
-        var resources = getFilteredReferenceResources();
-        count.textContent = String(resources.length);
-        if (!resources.length) {
+        var entries = getReferenceMenuEntries();
+        count.textContent = String(entries.length);
+        if (!entries.length) {
           appendReferenceMenuNotice(activeMentionQuery ? '没有匹配的文件' : '没有可引用的文件');
           return;
         }
 
-        if (activeReferenceIndex >= resources.length) {
-          activeReferenceIndex = resources.length - 1;
+        if (activeReferenceIndex >= entries.length) {
+          activeReferenceIndex = entries.length - 1;
         }
         if (activeReferenceIndex < 0) {
           activeReferenceIndex = 0;
         }
 
+        appendReferenceMenuEntries(entries);
+        scrollActiveReferenceIntoView();
+      }
+
+      function appendReferenceMenuEntries(entries) {
         var list = document.createElement('div');
         list.className = 'reference-menu-list';
-        for (var i = 0; i < resources.length; i++) {
-          list.append(createReferenceResourceButton(resources[i], i));
+        for (var i = 0; i < entries.length; i++) {
+          list.append(createReferenceMenuEntryButton(entries[i], i));
         }
         referenceMenu.append(list);
-        scrollActiveReferenceIntoView();
       }
 
       function appendReferenceMenuNotice(message) {
@@ -449,6 +462,33 @@ export function getInputScript(): string {
         notice.className = 'reference-menu-empty';
         notice.textContent = message;
         referenceMenu.append(notice);
+      }
+
+      function createReferenceMenuEntryButton(entry, index) {
+        if (entry.kind === 'externalPicker') {
+          return createExternalPickerReferenceButton(index);
+        }
+        return createReferenceResourceButton(entry.resource, index);
+      }
+
+      function createExternalPickerReferenceButton(index) {
+        var option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'reference-menu-item reference-menu-action' + (index === activeReferenceIndex ? ' is-active' : '');
+        option.dataset.referenceIndex = String(index + 1);
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', index === activeReferenceIndex ? 'true' : 'false');
+
+        var name = document.createElement('span');
+        name.className = 'reference-menu-item-name';
+        name.textContent = '选择外部文件...';
+
+        var pathLabel = document.createElement('span');
+        pathLabel.className = 'reference-menu-item-path';
+        pathLabel.textContent = '从工程外选择当前用户可访问的文件';
+
+        option.append(name, pathLabel);
+        return option;
       }
 
       function createReferenceResourceButton(resource, index) {
@@ -483,6 +523,32 @@ export function getInputScript(): string {
         });
       }
 
+      function getReferenceMenuEntries() {
+        var resources = getFilteredReferenceResources().map(function(resource) {
+          return { kind: 'file', resource: resource };
+        });
+        if (!shouldShowExternalPickerReferenceEntry()) {
+          return resources;
+        }
+
+        var picker = createExternalPickerReferenceEntry();
+        if (referenceMenuSource === 'button') {
+          return [picker].concat(resources);
+        }
+        return resources.concat(picker);
+      }
+
+      function shouldShowExternalPickerReferenceEntry() {
+        if (referenceMenuSource === 'button') {
+          return true;
+        }
+        return !normalizeReferenceQuery(activeMentionQuery);
+      }
+
+      function createExternalPickerReferenceEntry() {
+        return { kind: 'externalPicker' };
+      }
+
       function normalizeReferenceQuery(value) {
         return String(value || '').trim().toLocaleLowerCase();
       }
@@ -492,9 +558,9 @@ export function getInputScript(): string {
       }
 
       function moveReferenceSelection(delta) {
-        var resources = getFilteredReferenceResources();
-        if (!resources.length) { return; }
-        activeReferenceIndex = (activeReferenceIndex + delta + resources.length) % resources.length;
+        var entries = getReferenceMenuEntries();
+        if (!entries.length) { return; }
+        activeReferenceIndex = (activeReferenceIndex + delta + entries.length) % entries.length;
         renderReferenceMenu();
       }
 
@@ -503,8 +569,15 @@ export function getInputScript(): string {
       }
 
       function insertReferenceResourceAtIndex(index) {
-        var resources = getFilteredReferenceResources();
-        var resource = resources[index];
+        var entries = getReferenceMenuEntries();
+        var entry = entries[index];
+        if (!entry) { return; }
+        if (entry.kind === 'externalPicker') {
+          pickExternalFileReferences();
+          return;
+        }
+
+        var resource = entry.resource;
         if (!resource) { return; }
 
         var reference = {
@@ -530,6 +603,20 @@ export function getInputScript(): string {
         insertFragmentAtRange(range, fragment);
         closeReferenceMenu(true);
         setComposerStatus('已插入文件引用');
+      }
+
+      function pickExternalFileReferences() {
+        consumeActiveMentionRangeForPicker();
+        closeReferenceMenu(false);
+        vscode.postMessage({ type: 'pickExternalFileReferences' });
+      }
+
+      function consumeActiveMentionRangeForPicker() {
+        if (!activeMentionRange || !isRangeInsidePrompt(activeMentionRange)) { return; }
+        var range = activeMentionRange.cloneRange();
+        range.deleteContents();
+        savedPromptRange = range.cloneRange();
+        updatePromptVisualState();
       }
 
       function scrollActiveReferenceIntoView() {
@@ -1393,18 +1480,34 @@ export function getInputScript(): string {
       }
 
       function fileReferenceLinkToText(link) {
-        var reference = {
+        var reference = readFileReferenceLink(link);
+        if (reference.startLine > 0 && reference.endLine < reference.startLine) {
+          reference.endLine = reference.startLine;
+        }
+        var label = link.textContent || getFileName(reference.path);
+        return label + ' <' + makeFileHref(reference) + '>';
+      }
+
+      function collectPromptFileReferences() {
+        var references = [];
+        var links = promptInput.querySelectorAll('a.rich-file-link');
+        links.forEach(function(link) {
+          var reference = readFileReferenceLink(link);
+          if (reference.path) {
+            references.push(reference);
+          }
+        });
+        return references;
+      }
+
+      function readFileReferenceLink(link) {
+        return {
           path: link.dataset.path || '',
           startLine: readPositiveInteger(link.dataset.startLine, 0),
           endLine: readPositiveInteger(link.dataset.endLine, 0),
           startColumn: readPositiveInteger(link.dataset.startColumn, 0),
           endColumn: readPositiveInteger(link.dataset.endColumn, 0)
         };
-        if (reference.startLine > 0 && reference.endLine < reference.startLine) {
-          reference.endLine = reference.startLine;
-        }
-        var label = link.textContent || getFileName(reference.path);
-        return label + ' <' + makeFileHref(reference) + '>';
       }
 
       function isBlockElement(element) {

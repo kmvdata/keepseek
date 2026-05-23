@@ -331,6 +331,10 @@ export function getInputStyles(): string {
       line-height: 1.25;
     }
 
+    .reference-menu-action .reference-menu-item-name {
+      color: var(--vscode-textLink-foreground);
+    }
+
     .reference-menu-empty {
       padding: 12px 8px 14px;
       color: var(--vscode-descriptionForeground);

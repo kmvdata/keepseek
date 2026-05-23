@@ -74,18 +74,23 @@ export interface PromptFileReference {
   endColumn: number;
 }
 
+export interface ExpandFileReferencesOptions {
+  authorizedExternalReferenceUris?: Iterable<string>;
+}
+
 interface ExpandedFileReference {
   heading: string;
   content: string;
   languageId: string;
 }
 
-export async function expandFileReferencesInPrompt(prompt: string): Promise<string> {
+export async function expandFileReferencesInPrompt(prompt: string, options: ExpandFileReferencesOptions = {}): Promise<string> {
   const references = findPromptFileReferences(prompt);
   if (!references.length) {
     return prompt;
   }
 
+  const authorizedExternalReferenceUris = new Set(options.authorizedExternalReferenceUris ?? []);
   let expandedPrompt = '';
   let cursor = 0;
 
@@ -94,7 +99,7 @@ export async function expandFileReferencesInPrompt(prompt: string): Promise<stri
       continue;
     }
 
-    const expandedReference = await expandPromptFileReference(prompt, reference);
+    const expandedReference = await expandPromptFileReference(prompt, reference, authorizedExternalReferenceUris);
     if (!expandedReference) {
       continue;
     }
@@ -184,6 +189,10 @@ export function resolveFileReferenceUri(referencePath: string): vscode.Uri | und
   return vscode.Uri.file(path.resolve(expandedPath));
 }
 
+export function getFileReferenceAuthorizationKey(uri: vscode.Uri): string {
+  return uri.toString();
+}
+
 function getFileReferenceReplacementStart(
   prompt: string,
   matchStart: number,
@@ -209,8 +218,13 @@ function getFileReferenceReplacementStart(
 
 async function expandPromptFileReference(
   prompt: string,
-  reference: PromptFileReference
+  reference: PromptFileReference,
+  authorizedExternalReferenceUris: ReadonlySet<string>
 ): Promise<string | undefined> {
+  if (!canExpandReferenceUri(reference.uri, authorizedExternalReferenceUris)) {
+    return undefined;
+  }
+
   if (shouldSkipReferenceUri(reference.uri)) {
     return undefined;
   }
@@ -239,6 +253,13 @@ async function expandPromptFileReference(
   } catch {
     return undefined;
   }
+}
+
+function canExpandReferenceUri(uri: vscode.Uri, authorizedExternalReferenceUris: ReadonlySet<string>): boolean {
+  if (vscode.workspace.getWorkspaceFolder(uri)) {
+    return true;
+  }
+  return authorizedExternalReferenceUris.has(getFileReferenceAuthorizationKey(uri));
 }
 
 export function getReferenceDocumentText(document: vscode.TextDocument, rawStartLine: number, rawEndLine: number, rawStartColumn: number, rawEndColumn: number): string {

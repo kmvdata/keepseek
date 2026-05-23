@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { clampColumn, clampLine, expandFileReferencesInPrompt, getExplorerFileUris, getUriFileName, resolveFileReferenceUri } from './fileReference';
+import { clampColumn, clampLine, expandFileReferencesInPrompt, getExplorerFileUris, getFileReferenceAuthorizationKey, getUriFileName, resolveFileReferenceUri } from './fileReference';
 import { AgentRunner } from './agentRunner';
 import { FileContextStore } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
@@ -22,10 +22,19 @@ const SESSION_STORAGE_VERSION = 1;
 const MAX_STORED_SESSIONS = 50;
 const DEFAULT_SESSION_TITLE = '新会话';
 const REFERENCE_RESOURCE_GLOB_EXCLUDE = '**/{.git,.vscode-test,build,coverage,dist,node_modules,out}/**';
+
+interface PromptReferenceInput {
+  path: string;
+  startLine?: number;
+  endLine?: number;
+  startColumn?: number;
+  endColumn?: number;
+}
+
 type WebviewMessage =
   | { type: 'ready' }
-  | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings> }
-  | { type: 'editUserPrompt'; messageId: string; prompt: string; modelId: string; settings?: Partial<AgentSettings> }
+  | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[] }
+  | { type: 'editUserPrompt'; messageId: string; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[] }
   | { type: 'newSession' }
   | { type: 'selectSession'; sessionId: string }
   | { type: 'setSelectedModel'; modelId: string }
@@ -35,6 +44,7 @@ type WebviewMessage =
   | { type: 'addCurrentFile' }
   | { type: 'pickWorkspaceFiles' }
   | { type: 'pickExternalFiles' }
+  | { type: 'pickExternalFileReferences' }
   | { type: 'requestReferenceResources'; requestId: string }
   | { type: 'readPath'; path: string }
   | { type: 'openFileReference'; path: string; startLine: number; endLine: number; startColumn: number; endColumn: number }
@@ -59,6 +69,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private sessions: ChatSession[] = [];
   private activeSessionId = '';
   private readonly draftEdits = new Map<string, DraftEdit>();
+  private readonly authorizedExternalReferenceUris = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
   private selectedModelId = '';
   private agentSettings = getConfiguredAgentSettings();
@@ -134,6 +145,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const path = editor.document.uri.fsPath;
 
     await this.reveal();
+    this.authorizeExternalReferenceUri(editor.document.uri);
     this.postToWebview({ type: 'insertFileReference', path, startLine, endLine, startColumn, endColumn });
   }
 
@@ -168,6 +180,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
       await this.reveal();
       for (const file of files) {
+        this.authorizeExternalReferenceUri(file);
         this.postToWebview({
           type: 'insertFileReference',
           path: file.fsPath,
@@ -189,16 +202,66 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  public async pickExternalFileReferencesToInput(): Promise<void> {
+    try {
+      const picked = await vscode.window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: true,
+        openLabel: 'Add to KeepSeek'
+      });
+
+      if (!picked?.length) {
+        return;
+      }
+
+      const files: vscode.Uri[] = [];
+      let skipped = 0;
+      for (const uri of picked) {
+        try {
+          const stat = await vscode.workspace.fs.stat(uri);
+          if (stat.type === vscode.FileType.File) {
+            files.push(uri);
+          } else {
+            skipped += 1;
+          }
+        } catch {
+          skipped += 1;
+        }
+      }
+
+      if (!files.length) {
+        vscode.window.showWarningMessage('KeepSeek can only insert file references for files.');
+        return;
+      }
+      if (skipped > 0) {
+        vscode.window.showWarningMessage(`KeepSeek skipped ${skipped} item(s) that are not readable files.`);
+      }
+
+      for (const file of files) {
+        this.authorizeExternalReferenceUri(file);
+        this.postToWebview({
+          type: 'insertFileReference',
+          path: file.fsPath,
+          startLine: 0,
+          endLine: 0
+        });
+      }
+    } catch (error) {
+      vscode.window.showErrorMessage(`KeepSeek cannot add external file reference: ${getErrorMessage(error)}`);
+    }
+  }
+
   private async handleMessage(message: WebviewMessage): Promise<void> {
     switch (message.type) {
       case 'ready':
         this.postState();
         return;
       case 'sendPrompt':
-        await this.sendPrompt(message.prompt, message.modelId, message.settings);
+        await this.sendPrompt(message.prompt, message.modelId, message.settings, { references: message.references });
         return;
       case 'editUserPrompt':
-        await this.sendPrompt(message.prompt, message.modelId, message.settings, { replaceMessageId: message.messageId });
+        await this.sendPrompt(message.prompt, message.modelId, message.settings, { replaceMessageId: message.messageId, references: message.references });
         return;
       case 'newSession':
         await this.createNewSession();
@@ -236,6 +299,9 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'pickExternalFiles':
         await this.pickExternalFilesToContext();
+        return;
+      case 'pickExternalFileReferences':
+        await this.pickExternalFileReferencesToInput();
         return;
       case 'requestReferenceResources':
         await this.postReferenceResources(message.requestId);
@@ -463,11 +529,40 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private collectAuthorizedExternalReferenceUris(references: PromptReferenceInput[] | undefined): Set<string> {
+    const authorized = new Set(this.authorizedExternalReferenceUris);
+    if (!references?.length) {
+      return authorized;
+    }
+
+    for (const reference of references) {
+      if (!reference || typeof reference.path !== 'string') {
+        continue;
+      }
+      const uri = resolveFileReferenceUri(reference.path);
+      if (!uri || vscode.workspace.getWorkspaceFolder(uri)) {
+        continue;
+      }
+      const key = getFileReferenceAuthorizationKey(uri);
+      this.authorizedExternalReferenceUris.add(key);
+      authorized.add(key);
+    }
+
+    return authorized;
+  }
+
+  private authorizeExternalReferenceUri(uri: vscode.Uri): void {
+    if (vscode.workspace.getWorkspaceFolder(uri)) {
+      return;
+    }
+    this.authorizedExternalReferenceUris.add(getFileReferenceAuthorizationKey(uri));
+  }
+
   private async sendPrompt(
     prompt: string,
     modelId: string,
     settings?: Partial<AgentSettings>,
-    options?: { replaceMessageId?: string }
+    options?: { replaceMessageId?: string; references?: PromptReferenceInput[] }
   ): Promise<void> {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt || this.isBusy) {
@@ -491,7 +586,8 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postState();
 
     try {
-      const expandedPrompt = await expandFileReferencesInPrompt(trimmedPrompt);
+      const authorizedExternalReferenceUris = this.collectAuthorizedExternalReferenceUris(options?.references);
+      const expandedPrompt = await expandFileReferencesInPrompt(trimmedPrompt, { authorizedExternalReferenceUris });
       const activeSession = this.getActiveSession();
       const now = new Date().toISOString();
       const replacementIndex = replaceMessageId
