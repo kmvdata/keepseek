@@ -134,13 +134,13 @@
     "keybindings": [
       {
         "command": "keepseek.addSelectionToContext",
-        "key": "ctrl+l",
+        "key": "ctrl+shift+l",
         "mac": "cmd+l",
         "when": "editorHasSelection && editorTextFocus && !inDebugRepl"
       },
       {
         "command": "keepseek.addExplorerFileToContext",
-        "key": "ctrl+l",
+        "key": "ctrl+shift+l",
         "mac": "cmd+l",
         "when": "explorerViewletFocus && !explorerResourceIsFolder"
       },
@@ -152,7 +152,7 @@
       },
       {
         "command": "keepseek.addDebugConsoleSelectionToContext",
-        "key": "ctrl+l",
+        "key": "ctrl+shift+l",
         "mac": "cmd+l",
         "when": "inDebugRepl"
       }

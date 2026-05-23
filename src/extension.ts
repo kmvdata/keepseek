@@ -1002,30 +1002,30 @@ function ensureKeybindings(context: vscode.ExtensionContext): void {
     const userDir = path.dirname(storageDir);
     const keybindingsPath = path.join(userDir, 'keybindings.json');
 
-    const primaryContextKey = process.platform === 'darwin' ? 'cmd+l' : 'ctrl+l';
-    const terminalContextKey = process.platform === 'darwin' ? 'cmd+l' : 'ctrl+shift+l';
+    const contextKey = process.platform === 'darwin' ? 'cmd+l' : 'ctrl+shift+l';
     const bindings = [
       {
-        key: primaryContextKey,
+        key: contextKey,
         command: 'keepseek.addSelectionToContext',
         when: 'editorHasSelection && editorTextFocus && !inDebugRepl'
       },
       {
-        key: primaryContextKey,
+        key: contextKey,
         command: 'keepseek.addExplorerFileToContext',
         when: 'explorerViewletFocus && !explorerResourceIsFolder'
       },
       {
-        key: terminalContextKey,
+        key: contextKey,
         command: 'keepseek.addTerminalSelectionToContext',
         when: 'terminalFocus && terminalTextSelectedInFocused'
       },
       {
-        key: primaryContextKey,
+        key: contextKey,
         command: 'keepseek.addDebugConsoleSelectionToContext',
         when: 'inDebugRepl'
       }
     ];
+    const keepseekCommands = new Set(bindings.map((binding) => binding.command));
 
     let keybindings: Array<Record<string, unknown>> = [];
     if (fs.existsSync(keybindingsPath)) {
@@ -1040,9 +1040,9 @@ function ensureKeybindings(context: vscode.ExtensionContext): void {
 
     if (process.platform !== 'darwin') {
       keybindings = keybindings.filter((entry) => !(
-        entry.command === 'keepseek.addTerminalSelectionToContext' &&
-        entry.key === 'ctrl+l' &&
-        entry.when === 'terminalFocus && terminalTextSelectedInFocused'
+        typeof entry.command === 'string' &&
+        keepseekCommands.has(entry.command) &&
+        entry.key === 'ctrl+l'
       ));
     }
 
