@@ -2,7 +2,7 @@
   "name": "keepseek",
   "displayName": "KeepSeek",
   "description": "A VS Code agent chat extension for reading project context and safely proposing code edits.",
-  "version": "0.0.1",
+  "version": "0.0.1-beta.1",
   "publisher": "keepseek",
   "license": "MIT",
   "engines": {
@@ -11,17 +11,7 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [
-    "onStartupFinished",
-    "onView:keepseek.chatView",
-    "onView:keepseek.chatSecondaryView",
-    "onCommand:keepseek.openChat",
-    "onCommand:keepseek.addCurrentFileToContext",
-    "onCommand:keepseek.pickWorkspaceFilesToContext",
-    "onCommand:keepseek.pickExternalFilesToContext",
-    "onCommand:keepseek.addSelectionToContext",
-    "onCommand:keepseek.addExplorerFileToContext"
-  ],
+  "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [

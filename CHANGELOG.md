@@ -1,5 +1,5 @@
 # Changelog
 
-## 0.0.1
+## 0.0.1-beta.1
 
-- Initial KeepSeek VS Code extension scaffold.
+- Initial beta release of KeepSeek VS Code extension.
