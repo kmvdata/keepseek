@@ -11,10 +11,10 @@ KeepSeek 是一个 VS Code Agent 对话插件。目标体验类似 Cursor 的 Ag
 - DeepSeek V4 Flash / Pro 调用，支持 Thinking 开关、`high` / `max` 推理强度和 `reasoning_content` 展示。
 - 多轮对话历史（自动裁剪到最近 80 条消息）。
 - 上下文文件管理：当前编辑器文件、工作区文件、外部文件/目录、手动输入路径。
-- 文件引用（File Reference）：选中文本、资源管理器文件、拖拽文件到输入框自动生成为可点击的文件引用链接，发送时自动展开为 markdown 代码块。
+- 文件引用（File Reference）：编辑器选中文本、资源管理器文件、终端/输出窗口选区、拖拽文件到输入框自动生成为可点击的文件引用链接，发送时自动展开为 markdown 代码块。
 - 上下文文件数量（默认 32）和单文件大小（默认 200KB）限制，自动跳过二进制文件和常见非文本格式。
 - `DraftEdit` 修改草案机制：AI 返回修改建议后，用户点击 Apply → modal 弹窗确认 → 写入文件。
-- 快捷键支持：`Cmd+L` / `Ctrl+L` 快速添加选中文本或资源管理器文件到上下文。
+- 快捷键支持：`Cmd+L` / `Ctrl+L` 快速添加选中文本、资源管理器文件、终端/调试输出到上下文。
 
 ## 目录结构
 
@@ -166,6 +166,8 @@ KeepseekChatViewProvider.handleMessage()
 |--------|------|------|
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | 编辑器有选中文本 | `keepseek.addSelectionToContext` |
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | 资源管理器聚焦且选中文件 | `keepseek.addExplorerFileToContext` |
+| `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | 终端有选中文本 | `keepseek.addTerminalSelectionToContext` |
+| `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | 调试控制台聚焦 | `keepseek.addDebugConsoleSelectionToContext` |
 
 扩展激活时会自动将快捷键写入用户的 `keybindings.json`，若已存在则跳过。
 
@@ -206,6 +208,14 @@ explorer/context 传入 vscode.Uri
 ```
 
 `startLine: 0, endLine: 0` 表示全文引用，chip 只显示高亮文件名，序列化格式为：`文件名 <路径>`。
+
+### 终端 / 输出 / 调试控制台选区引用
+
+- 终端右键菜单：选中终端文本后右键 → `KeepSeek: 添加到上下文`，或按 `Cmd+L` / `Ctrl+L`。
+- 输出窗口：选中输出文本后右键 → `KeepSeek: 添加到上下文`，或按 `Cmd+L` / `Ctrl+L`。
+- 调试控制台：聚焦调试控制台后按 `Cmd+L` / `Ctrl+L` 添加当前选中文本。
+
+这些非文件选区会写入扩展全局存储中的临时 `.log` 文件，再按全文文件引用插入输入框；发送前仍由 `expandFileReferencesInPrompt()` 展开为 markdown 代码块，因此 AI 可以直接读取选中的终端/输出内容。
 
 ### 拖拽文件到输入框
 

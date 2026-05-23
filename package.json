@@ -23,7 +23,9 @@
     "onCommand:keepseek.pickWorkspaceFilesToContext",
     "onCommand:keepseek.pickExternalFilesToContext",
     "onCommand:keepseek.addSelectionToContext",
-    "onCommand:keepseek.addExplorerFileToContext"
+    "onCommand:keepseek.addExplorerFileToContext",
+    "onCommand:keepseek.addTerminalSelectionToContext",
+    "onCommand:keepseek.addDebugConsoleSelectionToContext"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -69,8 +71,18 @@
       },
       {
         "command": "keepseek.addSelectionToContext",
-        "title": "KeepSeek: Add Selection to Chat",
+        "title": "KeepSeek: 添加到上下文",
         "icon": "$(whole-word)"
+      },
+      {
+        "command": "keepseek.addTerminalSelectionToContext",
+        "title": "KeepSeek: 添加到上下文",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "keepseek.addDebugConsoleSelectionToContext",
+        "title": "KeepSeek: 添加到上下文",
+        "icon": "$(debug-console)"
       },
       {
         "command": "keepseek.addExplorerFileToContext",
@@ -89,8 +101,20 @@
       "editor/context": [
         {
           "command": "keepseek.addSelectionToContext",
-          "when": "editorHasSelection",
+          "when": "editorHasSelection && !inDebugRepl",
           "group": "navigation"
+        },
+        {
+          "command": "keepseek.addDebugConsoleSelectionToContext",
+          "when": "inDebugRepl",
+          "group": "navigation"
+        }
+      ],
+      "terminal/context": [
+        {
+          "command": "keepseek.addTerminalSelectionToContext",
+          "when": "terminalTextSelected",
+          "group": "3_edit"
         }
       ],
       "editor/title": [
@@ -112,13 +136,25 @@
         "command": "keepseek.addSelectionToContext",
         "key": "ctrl+l",
         "mac": "cmd+l",
-        "when": "editorHasSelection && editorTextFocus"
+        "when": "editorHasSelection && editorTextFocus && !inDebugRepl"
       },
       {
         "command": "keepseek.addExplorerFileToContext",
         "key": "ctrl+l",
         "mac": "cmd+l",
         "when": "explorerViewletFocus && !explorerResourceIsFolder"
+      },
+      {
+        "command": "keepseek.addTerminalSelectionToContext",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "terminalFocus && terminalTextSelectedInFocused"
+      },
+      {
+        "command": "keepseek.addDebugConsoleSelectionToContext",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "inDebugRepl"
       }
     ],
     "configuration": {

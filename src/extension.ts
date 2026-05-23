@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { clampColumn, clampLine, expandFileReferencesInPrompt, getExplorerFileUris, getFileReferenceAuthorizationKey, getUriFileName, resolveFileReferenceUri } from './fileReference';
 import { AgentRunner } from './agentRunner';
-import { FileContextStore } from './fileContext';
+import { FileContextStore, formatBytes } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
 import { AgentSettings, ChatMessage, ChatSession, ChatSessionSummary, DraftEdit, KeepseekModel, ReferenceResource } from './types';
 import { getScript } from './webview/script';
@@ -18,6 +18,8 @@ const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 const SESSION_STORAGE_VERSION = 1;
 const MAX_STORED_SESSIONS = 50;
 const REFERENCE_RESOURCE_GLOB_EXCLUDE = '**/{.git,.vscode-test,build,coverage,dist,node_modules,out}/**';
+const TEXT_REFERENCE_STORAGE_DIR = 'text-references';
+const CLIPBOARD_COPY_SETTLE_MS = 50;
 
 interface PromptReferenceInput {
   path: string;
@@ -34,6 +36,8 @@ interface DroppedFileReferenceInput {
   lastModified?: number;
   dataBase64: string;
 }
+
+type TextReferenceSource = 'terminal' | 'debugConsole' | 'output';
 
 type WebviewMessage =
   | { type: 'ready' }
@@ -131,6 +135,12 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    const documentSelectionSource = getDocumentSelectionTextReferenceSource(editor.document);
+    if (documentSelectionSource) {
+      await this.insertDocumentSelectionReferenceToInput(editor, documentSelectionSource);
+      return;
+    }
+
     const startLine = editor.selection.start.line + 1;
     const endLine = editor.selection.end.line + 1;
     const startColumn = editor.selection.start.character + 1;
@@ -140,6 +150,29 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     await this.reveal();
     this.authorizeExternalReferenceUri(editor.document.uri);
     this.postToWebview({ type: 'insertFileReference', path, startLine, endLine, startColumn, endColumn });
+  }
+
+  public async insertTerminalSelectionToInput(): Promise<void> {
+    if (!vscode.window.activeTerminal) {
+      vscode.window.showWarningMessage(this.t('selectTerminalTextToAdd'));
+      return;
+    }
+
+    await this.insertClipboardSelectionReferenceToInput({
+      copyCommand: 'workbench.action.terminal.copySelection',
+      fileName: createTextReferenceFileName('terminal-selection', vscode.window.activeTerminal.name),
+      emptySelectionMessageKey: 'selectTerminalTextToAdd',
+      errorMessageKey: 'cannotAddTerminalSelection'
+    });
+  }
+
+  public async insertDebugConsoleSelectionToInput(): Promise<void> {
+    await this.insertClipboardSelectionReferenceToInput({
+      copyCommand: 'debug.replCopy',
+      fileName: createTextReferenceFileName('debug-console-selection'),
+      emptySelectionMessageKey: 'selectDebugConsoleTextToAdd',
+      errorMessageKey: 'cannotAddDebugConsoleSelection'
+    });
   }
 
   public async insertExplorerFileToInput(uri?: vscode.Uri, selectedUris?: vscode.Uri[]): Promise<void> {
@@ -306,6 +339,69 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     } catch (error) {
       vscode.window.showErrorMessage(this.t('cannotImportDroppedFile', { message: getErrorMessage(error) }));
     }
+  }
+
+  private async insertDocumentSelectionReferenceToInput(editor: vscode.TextEditor, source: TextReferenceSource): Promise<void> {
+    if (editor.selection.isEmpty) {
+      vscode.window.showWarningMessage(this.t('selectTextToAdd'));
+      return;
+    }
+
+    try {
+      const fileName = createTextReferenceFileName(`${source === 'output' ? 'output' : 'debug-console'}-selection`, getTextReferenceDocumentName(editor.document));
+      await this.insertTextReferenceToInput(editor.document.getText(editor.selection), fileName);
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('cannotAddTextSelection', { message: getErrorMessage(error) }));
+    }
+  }
+
+  private async insertClipboardSelectionReferenceToInput(options: {
+    copyCommand: string;
+    fileName: string;
+    emptySelectionMessageKey: string;
+    errorMessageKey: string;
+  }): Promise<void> {
+    try {
+      const selectionText = await copySelectionTextWithClipboardRestore(options.copyCommand);
+      if (!selectionText.trim()) {
+        vscode.window.showWarningMessage(this.t(options.emptySelectionMessageKey));
+        return;
+      }
+
+      await this.insertTextReferenceToInput(selectionText, options.fileName);
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t(options.errorMessageKey, { message: getErrorMessage(error) }));
+    }
+  }
+
+  private async insertTextReferenceToInput(content: string, fileName: string): Promise<void> {
+    const normalizedContent = content.replace(/\r\n?/gu, '\n');
+    if (!normalizedContent.trim()) {
+      vscode.window.showWarningMessage(this.t('selectTextToAdd'));
+      return;
+    }
+
+    const bytes = new TextEncoder().encode(normalizedContent);
+    const maxBytes = getConfiguredMaxFileBytes();
+    if (bytes.byteLength > maxBytes) {
+      vscode.window.showWarningMessage(this.t('selectedTextTooLarge', { limit: formatBytes(maxBytes) }));
+      return;
+    }
+
+    const referenceDir = vscode.Uri.joinPath(this.globalStorageUri, TEXT_REFERENCE_STORAGE_DIR, randomUUID());
+    await vscode.workspace.fs.createDirectory(referenceDir);
+    const fileUri = vscode.Uri.joinPath(referenceDir, sanitizeTextReferenceFileName(fileName));
+    await vscode.workspace.fs.writeFile(fileUri, bytes);
+
+    await this.reveal();
+    this.authorizeExternalReferenceUri(fileUri);
+    this.postToWebview({
+      type: 'insertFileReference',
+      path: fileUri.fsPath,
+      startLine: 0,
+      endLine: 0
+    });
+    vscode.window.showInformationMessage(this.t('addedTextSelection'));
   }
 
   private async handleMessage(message: WebviewMessage): Promise<void> {
@@ -906,8 +1002,25 @@ function ensureKeybindings(context: vscode.ExtensionContext): void {
     const keybindingsPath = path.join(userDir, 'keybindings.json');
 
     const key = process.platform === 'darwin' ? 'cmd+l' : 'ctrl+l';
-    const selectionCommand = 'keepseek.addSelectionToContext';
-    const explorerCommand = 'keepseek.addExplorerFileToContext';
+    const bindings = [
+      {
+        command: 'keepseek.addSelectionToContext',
+        when: 'editorHasSelection && editorTextFocus && !inDebugRepl'
+      },
+      {
+        command: 'keepseek.addExplorerFileToContext',
+        when: 'explorerViewletFocus && !explorerResourceIsFolder'
+      },
+      {
+        command: 'keepseek.addTerminalSelectionToContext',
+        when: 'terminalFocus && terminalTextSelectedInFocused'
+      },
+      {
+        command: 'keepseek.addDebugConsoleSelectionToContext',
+        when: 'inDebugRepl'
+      }
+    ];
+    const keepseekCommands = new Set(bindings.map((binding) => binding.command));
 
     let keybindings: Array<Record<string, unknown>> = [];
     if (fs.existsSync(keybindingsPath)) {
@@ -920,14 +1033,11 @@ function ensureKeybindings(context: vscode.ExtensionContext): void {
       }
     }
 
-    const hasSelection = keybindings.some(
-      (entry) => entry.command === selectionCommand && entry.key === key
-    );
-    const hasExplorer = keybindings.some(
-      (entry) => entry.command === explorerCommand && entry.key === key
-    );
+    const missingBindings = bindings.filter((binding) => !keybindings.some(
+      (entry) => entry.command === binding.command && entry.key === key
+    ));
 
-    if (hasSelection && hasExplorer) {
+    if (!missingBindings.length) {
       return;
     }
 
@@ -936,25 +1046,17 @@ function ensureKeybindings(context: vscode.ExtensionContext): void {
       if (entry.key !== key) {
         return true;
       }
-      if (entry.command === selectionCommand || entry.command === explorerCommand) {
+      if (typeof entry.command === 'string' && keepseekCommands.has(entry.command)) {
         return true;
       }
       return false;
     });
 
-    if (!hasSelection) {
+    for (const binding of missingBindings) {
       keybindings.push({
         key,
-        command: selectionCommand,
-        when: 'editorHasSelection && editorTextFocus'
-      });
-    }
-
-    if (!hasExplorer) {
-      keybindings.push({
-        key,
-        command: explorerCommand,
-        when: 'explorerViewletFocus && !explorerResourceIsFolder'
+        command: binding.command,
+        when: binding.when
       });
     }
 
@@ -985,6 +1087,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('keepseek.pickWorkspaceFilesToContext', () => provider.pickWorkspaceFilesToContext()),
     vscode.commands.registerCommand('keepseek.pickExternalFilesToContext', () => provider.pickExternalFilesToContext()),
     vscode.commands.registerCommand('keepseek.addSelectionToContext', () => provider.insertSelectionToInput()),
+    vscode.commands.registerCommand('keepseek.addTerminalSelectionToContext', () => provider.insertTerminalSelectionToInput()),
+    vscode.commands.registerCommand('keepseek.addDebugConsoleSelectionToContext', () => provider.insertDebugConsoleSelectionToInput()),
     vscode.commands.registerCommand(
       'keepseek.addExplorerFileToContext',
       (uri?: vscode.Uri, selectedUris?: vscode.Uri[]) => provider.insertExplorerFileToInput(uri, selectedUris)
@@ -1016,6 +1120,72 @@ function createSessionTitle(prompt: string, language: KeepseekLanguage = getConf
     return localize(language, 'defaultSessionTitle');
   }
   return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized;
+}
+
+function getDocumentSelectionTextReferenceSource(document: vscode.TextDocument): TextReferenceSource | undefined {
+  if (document.uri.scheme === 'output') {
+    return 'output';
+  }
+  if (document.uri.scheme === 'debug') {
+    return 'debugConsole';
+  }
+  return undefined;
+}
+
+async function copySelectionTextWithClipboardRestore(copyCommand: string): Promise<string> {
+  const previousClipboard = await vscode.env.clipboard.readText();
+  const sentinel = `__KEEPSEEK_SELECTION_${randomUUID()}__`;
+
+  try {
+    await vscode.env.clipboard.writeText(sentinel);
+    await vscode.commands.executeCommand(copyCommand);
+    await delay(CLIPBOARD_COPY_SETTLE_MS);
+    const copiedText = await vscode.env.clipboard.readText();
+    return copiedText === sentinel ? '' : copiedText;
+  } finally {
+    await vscode.env.clipboard.writeText(previousClipboard);
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+function createTextReferenceFileName(prefix: string, name?: string): string {
+  const cleanPrefix = sanitizeTextReferenceFileNameSegment(prefix) || 'selection';
+  const cleanName = sanitizeTextReferenceFileNameSegment(name);
+  return cleanName ? `${cleanPrefix}-${cleanName}.log` : `${cleanPrefix}.log`;
+}
+
+function getTextReferenceDocumentName(document: vscode.TextDocument): string {
+  const uriPath = document.uri.path || document.uri.toString();
+  return uriPath.split('/').filter(Boolean).pop() ?? '';
+}
+
+function sanitizeTextReferenceFileName(name: string): string {
+  const trimmed = name.trim() || 'selection.log';
+  const baseName = trimmed.split(/[\\/]+/u).pop() || 'selection.log';
+  const withoutControlCharacters = Array.from(baseName, (character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 ? '-' : character;
+  }).join('');
+  const sanitized = withoutControlCharacters
+    .replace(/[<>:"/\\|?*]+/gu, '-')
+    .replace(/^\.+$/u, 'selection.log')
+    .slice(0, 160);
+  return sanitized || 'selection.log';
+}
+
+function sanitizeTextReferenceFileNameSegment(value: string | undefined): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .replace(/-{2,}/gu, '-')
+    .slice(0, 80);
 }
 
 function normalizeStoredSessions(value: unknown): ChatSession[] {
