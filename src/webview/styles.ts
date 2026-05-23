@@ -414,9 +414,21 @@ export function getStyles(): string {
     }
 
     .transcript-empty-icon {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
       font-size: 32px;
-      opacity: 0.3;
+      opacity: 0.78;
       margin-bottom: 4px;
+    }
+
+    .transcript-empty-icon img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
     }
 
     .message {

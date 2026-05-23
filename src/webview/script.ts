@@ -3,6 +3,7 @@ import { getInputScript } from './input/script';
 export function getScript(): string {
   return `
     const vscode = acquireVsCodeApi();
+    const keepseekLogoUri = window.keepseekLogoUri || '';
     const state = {
       models: [],
       selectedModelId: '',
@@ -967,7 +968,15 @@ export function getScript(): string {
         empty.className = 'transcript-empty';
         var icon = document.createElement('div');
         icon.className = 'transcript-empty-icon';
-        icon.textContent = '\\\\2726';
+        if (keepseekLogoUri) {
+          var logo = document.createElement('img');
+          logo.src = keepseekLogoUri;
+          logo.alt = '';
+          logo.setAttribute('aria-hidden', 'true');
+          icon.append(logo);
+        } else {
+          icon.textContent = '\\\\2726';
+        }
         var line1 = document.createElement('div');
         line1.textContent = '\\u5f00\\u59cb KeepSeek \\u5bf9\\u8bdd';
         var line2 = document.createElement('div');

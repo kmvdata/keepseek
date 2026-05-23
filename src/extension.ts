@@ -634,6 +634,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private getHtmlForWebview(webview: vscode.Webview): string {
     const nonce = getNonce();
+    const keepseekLogoUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'resources', 'keepseek.svg'));
     return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -648,6 +649,7 @@ ${getStyles()}
 <body ondragover="event.preventDefault();event.dataTransfer.dropEffect='copy';return false;" ondrop="event.preventDefault();return false;">
 ${getTemplate()}
   <script nonce="${nonce}">
+window.keepseekLogoUri = ${JSON.stringify(String(keepseekLogoUri))};
 ${getScript()}
   </script>
 </body>
