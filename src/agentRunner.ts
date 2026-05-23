@@ -7,7 +7,7 @@ import type { KeepseekLanguage } from './i18n';
 
 const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
-const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 180_000;
 const DEFAULT_MAX_TOOL_ITERATIONS = 4;
 
 type DeepSeekRole = 'system' | 'user' | 'assistant' | 'tool';
@@ -101,7 +101,7 @@ interface AgentRuntimeConfig {
   baseUrl: string;
   maxTokens: number;
   maxToolIterations: number;
-  requestTimeoutMs: number;
+  streamIdleTimeoutMs: number;
 }
 
 interface StreamingToolCallAccumulator {
@@ -211,7 +211,24 @@ export class AgentRunner {
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), runtimeConfig.requestTimeoutMs);
+    let idleTimeout: ReturnType<typeof setTimeout> | undefined;
+    let abortedByStreamIdleTimeout = false;
+    const resetStreamIdleTimeout = () => {
+      if (idleTimeout) {
+        clearTimeout(idleTimeout);
+      }
+      idleTimeout = setTimeout(() => {
+        abortedByStreamIdleTimeout = true;
+        controller.abort();
+      }, runtimeConfig.streamIdleTimeoutMs);
+    };
+    const clearStreamIdleTimeout = () => {
+      if (idleTimeout) {
+        clearTimeout(idleTimeout);
+        idleTimeout = undefined;
+      }
+    };
+    resetStreamIdleTimeout();
 
     try {
       const response = await fetch(this.getChatCompletionsUrl(runtimeConfig.baseUrl), {
@@ -237,16 +254,17 @@ export class AgentRunner {
           : 'DeepSeek API 未返回流式响应体。');
       }
 
-      return await this.parseChatCompletionStream(response.body, request.language, callbacks);
+      resetStreamIdleTimeout();
+      return await this.parseChatCompletionStream(response.body, request.language, callbacks, resetStreamIdleTimeout);
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
+      if (error instanceof Error && error.name === 'AbortError' && abortedByStreamIdleTimeout) {
         throw new Error(request.language === 'en'
-          ? `DeepSeek API request did not finish within ${Math.round(runtimeConfig.requestTimeoutMs / 1000)} seconds.`
-          : `DeepSeek API 请求超过 ${Math.round(runtimeConfig.requestTimeoutMs / 1000)} 秒未完成。`);
+          ? `DeepSeek API streaming response was idle for ${Math.round(runtimeConfig.streamIdleTimeoutMs / 1000)} seconds.`
+          : `DeepSeek API 流式响应连续 ${Math.round(runtimeConfig.streamIdleTimeoutMs / 1000)} 秒没有返回数据，已停止本次请求。`);
       }
       throw error;
     } finally {
-      clearTimeout(timeout);
+      clearStreamIdleTimeout();
     }
   }
 
@@ -505,7 +523,8 @@ export class AgentRunner {
   private async parseChatCompletionStream(
     body: NonNullable<Response['body']>,
     language: KeepseekLanguage,
-    callbacks: AgentRunCallbacks
+    callbacks: AgentRunCallbacks,
+    onStreamActivity?: () => void
   ): Promise<DeepSeekStreamResult> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
@@ -525,6 +544,7 @@ export class AgentRunner {
       }
 
       buffer += decoder.decode(value, { stream: true });
+      onStreamActivity?.();
       buffer = buffer.replace(/\r\n?/gu, '\n');
 
       let separatorIndex = buffer.indexOf('\n\n');
@@ -730,7 +750,7 @@ export class AgentRunner {
       baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL).trim() || DEFAULT_DEEPSEEK_BASE_URL,
       maxTokens: this.clampInteger(config.get<number>('maxTokens', 8192), 0, 384_000),
       maxToolIterations: this.clampInteger(config.get<number>('maxToolIterations', DEFAULT_MAX_TOOL_ITERATIONS), 0, 12),
-      requestTimeoutMs: this.clampInteger(config.get<number>('requestTimeoutMs', DEFAULT_REQUEST_TIMEOUT_MS), 10_000, 600_000)
+      streamIdleTimeoutMs: this.clampInteger(config.get<number>('streamIdleTimeoutMs', DEFAULT_STREAM_IDLE_TIMEOUT_MS), 10_000, 3_600_000)
     };
   }
 

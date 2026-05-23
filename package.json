@@ -2,7 +2,7 @@
   "name": "keepseek",
   "displayName": "KeepSeek",
   "description": "AI-powered coding agent for VS Code",
-  "version": "0.0.3",
+  "version": "0.0.5",
   "publisher": "keepseek",
   "icon": "resources/keepseek.png",
   "repository": {
@@ -204,6 +204,11 @@
           "type": "number",
           "default": 200000,
           "description": "Maximum file size in bytes for reading"
+        },
+        "keepseek.streamIdleTimeoutMs": {
+          "type": "number",
+          "default": 180000,
+          "description": "Maximum time in milliseconds to wait for streaming data before stopping a DeepSeek request. This resets whenever streaming data is received and does not limit total run duration."
         },
         "keepseek.language": {
           "type": "string",
