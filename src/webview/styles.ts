@@ -586,9 +586,10 @@ export function getStyles(): string {
       font-style: italic;
     }
 
-    .message-file-link {
-      margin: 0 3px 2px;
-      vertical-align: text-bottom;
+    .message.user .message-content .message-file-link {
+      margin: 0 3px;
+      transform: translateY(-1px);
+      vertical-align: middle;
     }
 
     .message.user .message-content {
