@@ -42,7 +42,7 @@ keepseek/
 
 `activate()` 函数是扩展入口：
 
-1. **注册 Webview Provider**：`KeepseekChatViewProvider`，注册 Activity Bar 中的 `keepseek.chatView`。
+1. **注册 Webview Provider**：`KeepseekChatViewProvider`，注册 Secondary Sidebar 中的 `keepseek.chatView`。
 2. **注册命令**：
    - `keepseek.openChat` — 打开聊天窗口
    - `keepseek.addCurrentFileToContext` — 将当前编辑器文件添加上下文

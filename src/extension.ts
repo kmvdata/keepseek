@@ -12,8 +12,8 @@ import { getStyles } from './webview/styles';
 import { getTemplate } from './webview/template';
 import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
 
-const PRIMARY_CONTAINER_ID = 'keepseek';
-const PRIMARY_VIEW_TYPE = 'keepseek.chatView';
+const CHAT_CONTAINER_ID = 'keepseek';
+const CHAT_VIEW_TYPE = 'keepseek.chatView';
 const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 const SESSION_STORAGE_VERSION = 1;
 const MAX_STORED_SESSIONS = 50;
@@ -66,7 +66,7 @@ interface StoredSessionState {
 }
 
 class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
-  public static readonly primaryViewType = PRIMARY_VIEW_TYPE;
+  public static readonly viewType = CHAT_VIEW_TYPE;
 
   private readonly fileContext = new FileContextStore();
   private readonly agentRunner = new AgentRunner();
@@ -106,7 +106,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async reveal(): Promise<void> {
-    await focusView(PRIMARY_CONTAINER_ID, PRIMARY_VIEW_TYPE);
+    await focusView(CHAT_CONTAINER_ID, CHAT_VIEW_TYPE);
   }
 
   public async addCurrentFileToContext(): Promise<void> {
@@ -924,7 +924,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const provider = new KeepseekChatViewProvider(context.extensionUri, context.workspaceState, context.globalStorageUri);
 
   const webviewProviders: vscode.Disposable[] = [
-    vscode.window.registerWebviewViewProvider(KeepseekChatViewProvider.primaryViewType, provider, {
+    vscode.window.registerWebviewViewProvider(KeepseekChatViewProvider.viewType, provider, {
       webviewOptions: {
         retainContextWhenHidden: true
       }

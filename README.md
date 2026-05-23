@@ -6,7 +6,7 @@ KeepSeek 是一个 VS Code Agent 对话插件。目标体验类似 Cursor 的 Ag
 
 ## 功能概览
 
-- VS Code Activity Bar 里的 `KeepSeek` Agent 面板；用户也可以把该视图拖到 Secondary Sidebar 使用。
+- VS Code 右侧 Secondary Sidebar 里的 `KeepSeek` Agent 面板，和 Codex、Claude Code 等聊天视图并列。
 - Agent 对话 Webview，支持模型下拉选择。
 - DeepSeek V4 Flash / Pro 调用，支持 Thinking 开关、`high` / `max` 推理强度和 `reasoning_content` 展示。
 - 多轮对话历史（自动裁剪到最近 80 条消息）。
@@ -63,13 +63,13 @@ Webview UI 使用 CSS Grid 划分为四个区域（从上到下）：
 
 ### 视图容器
 
-扩展贡献一个稳定的 Activity Bar 容器：
+扩展贡献一个 Secondary Sidebar 容器：
 
 - 容器 ID：`keepseek`
 - WebviewView ID：`keepseek.chatView`
 - 打开命令：`KeepSeek: Open Agent Chat`
 
-VS Code 目前支持扩展将自定义 View Container 贡献到 Activity Bar 或 Panel。Secondary Sidebar 可以由用户在界面中拖拽视图过去，但扩展不直接把自定义容器声明到 Secondary Sidebar，这样在 Windows、Linux 和 macOS 的全新安装环境里行为一致。
+VS Code 1.106 起支持通过 `viewsContainers.secondarySidebar` 注册自定义 View Container。KeepSeek 只注册一个 `keepseek.chatView` WebviewView，并使用 `onView:keepseek.chatView` 激活，避免为左右两侧创建重复视图。
 
 ## 关键通信流
 
@@ -306,7 +306,7 @@ npm run lint
 KeepSeek: Open Agent Chat
 ```
 
-也可以点击 Activity Bar 中的 KeepSeek 图标打开 Agent 聊天窗口；如果希望放在右侧，可以在 VS Code 中把 KeepSeek 视图拖到 Secondary Sidebar。
+也可以在右侧 Secondary Sidebar 的视图菜单中打开 KeepSeek，它会和 Codex、Claude Code 一样显示为可打开的 Agent 聊天窗口。
 
 ## 打包 VSIX
 

@@ -28,7 +28,7 @@
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
-      "activitybar": [
+      "secondarySidebar": [
         {
           "id": "keepseek",
           "title": "KeepSeek",
@@ -185,16 +185,19 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts",
+    "lint": "eslint src",
     "pretest": "npm run compile && npm run lint"
   },
   "devDependencies": {
-    "@types/vscode": "^1.106.0",
+    "@eslint/js": "^8.57.1",
     "@types/node": "^20.0.0",
+    "@types/vscode": "^1.106.0",
     "@typescript-eslint/eslint-plugin": "^7.0.0",
     "@typescript-eslint/parser": "^7.0.0",
+    "@vscode/vsce": "^3.9.1",
     "eslint": "^8.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "typescript-eslint": "^7.18.0"
   },
   "dependencies": {
     "openai": "^4.0.0"
