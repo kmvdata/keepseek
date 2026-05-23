@@ -146,7 +146,7 @@
       },
       {
         "command": "keepseek.addTerminalSelectionToContext",
-        "key": "ctrl+l",
+        "key": "ctrl+shift+l",
         "mac": "cmd+l",
         "when": "terminalFocus && terminalTextSelectedInFocused"
       },

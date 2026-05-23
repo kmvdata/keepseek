@@ -1001,26 +1001,30 @@ function ensureKeybindings(context: vscode.ExtensionContext): void {
     const userDir = path.dirname(storageDir);
     const keybindingsPath = path.join(userDir, 'keybindings.json');
 
-    const key = process.platform === 'darwin' ? 'cmd+l' : 'ctrl+l';
+    const primaryContextKey = process.platform === 'darwin' ? 'cmd+l' : 'ctrl+l';
+    const terminalContextKey = process.platform === 'darwin' ? 'cmd+l' : 'ctrl+shift+l';
     const bindings = [
       {
+        key: primaryContextKey,
         command: 'keepseek.addSelectionToContext',
         when: 'editorHasSelection && editorTextFocus && !inDebugRepl'
       },
       {
+        key: primaryContextKey,
         command: 'keepseek.addExplorerFileToContext',
         when: 'explorerViewletFocus && !explorerResourceIsFolder'
       },
       {
+        key: terminalContextKey,
         command: 'keepseek.addTerminalSelectionToContext',
         when: 'terminalFocus && terminalTextSelectedInFocused'
       },
       {
+        key: primaryContextKey,
         command: 'keepseek.addDebugConsoleSelectionToContext',
         when: 'inDebugRepl'
       }
     ];
-    const keepseekCommands = new Set(bindings.map((binding) => binding.command));
 
     let keybindings: Array<Record<string, unknown>> = [];
     if (fs.existsSync(keybindingsPath)) {
@@ -1033,28 +1037,25 @@ function ensureKeybindings(context: vscode.ExtensionContext): void {
       }
     }
 
+    if (process.platform !== 'darwin') {
+      keybindings = keybindings.filter((entry) => !(
+        entry.command === 'keepseek.addTerminalSelectionToContext' &&
+        entry.key === 'ctrl+l' &&
+        entry.when === 'terminalFocus && terminalTextSelectedInFocused'
+      ));
+    }
+
     const missingBindings = bindings.filter((binding) => !keybindings.some(
-      (entry) => entry.command === binding.command && entry.key === key
+      (entry) => entry.command === binding.command && entry.key === binding.key
     ));
 
     if (!missingBindings.length) {
       return;
     }
 
-    // Remove any existing bindings for our key that aren't ours
-    keybindings = keybindings.filter((entry) => {
-      if (entry.key !== key) {
-        return true;
-      }
-      if (typeof entry.command === 'string' && keepseekCommands.has(entry.command)) {
-        return true;
-      }
-      return false;
-    });
-
     for (const binding of missingBindings) {
       keybindings.push({
-        key,
+        key: binding.key,
         command: binding.command,
         when: binding.when
       });
