@@ -734,7 +734,7 @@ export function getStyles(): string {
       overflow: hidden;
       border: 1px solid var(--vscode-panel-border);
       border-radius: 6px;
-      background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+      background: transparent;
     }
 
     .message-code-toolbar {
@@ -800,6 +800,8 @@ export function getStyles(): string {
     }
 
     .message-code-block code {
+      color: inherit;
+      background: transparent;
       font-family: inherit;
       font-size: inherit;
       line-height: inherit;
