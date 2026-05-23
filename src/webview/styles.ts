@@ -341,7 +341,7 @@ export function getStyles(): string {
 
     .draft-bar {
       padding: 6px 12px;
-      border-bottom: 1px solid var(--vscode-focusBorder, var(--vscode-panel-border));
+      border-top: 1px solid var(--vscode-focusBorder, var(--vscode-panel-border));
       background: var(--vscode-editor-background);
     }
 

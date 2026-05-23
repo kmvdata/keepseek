@@ -28,11 +28,6 @@ export function getTemplate(): string {
       <div class="context-bar-inner" id="contextBar"></div>
     </div>
 
-    <div id="draftRegion" class="draft-bar hidden">
-      <div class="draft-bar-label">待确认修改</div>
-      <div id="draftList" class="draft-bar-list"></div>
-    </div>
-
     <section id="transcript" class="transcript">
       <div class="transcript-empty">
         <div class="transcript-empty-icon">&#x2726;</div>
@@ -40,6 +35,11 @@ export function getTemplate(): string {
         <div style="font-size:11px;opacity:0.6">添加上下文文件后，输入消息并发送</div>
       </div>
     </section>
+
+    <div id="draftRegion" class="draft-bar hidden">
+      <div class="draft-bar-label">待确认修改</div>
+      <div id="draftList" class="draft-bar-list"></div>
+    </div>
 
     ${getInputTemplate()}
   </main>`;
