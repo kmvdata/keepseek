@@ -968,6 +968,111 @@ export function getInputScript(): string {
         return references;
       }
 
+      function extractDroppedFilesWithoutPath(dataTransfer) {
+        var files = [];
+        var dt = dataTransfer;
+        var seen = Object.create(null);
+        if (!dt) { return files; }
+
+        function addFile(file) {
+          if (!file || file.path) { return; }
+          var key = [
+            file.name || '',
+            String(file.size || 0),
+            String(file.lastModified || 0)
+          ].join(':');
+          if (seen[key]) { return; }
+          seen[key] = true;
+          files.push(file);
+        }
+
+        if (dt.files && dt.files.length) {
+          for (var i = 0; i < dt.files.length; i++) {
+            addFile(dt.files[i]);
+          }
+        }
+
+        if (dt.items && dt.items.length) {
+          for (var i1 = 0; i1 < dt.items.length; i1++) {
+            var item = dt.items[i1];
+            if (item.kind !== 'file' || !item.getAsFile) { continue; }
+            addFile(item.getAsFile());
+          }
+        }
+
+        return files;
+      }
+
+      function importDroppedFilesWithoutPath(files) {
+        setComposerStatus('\\u6b63\\u5728\\u5bfc\\u5165\\u62d6\\u5165\\u6587\\u4ef6...');
+        readDroppedFilePayloads(files).then(function(result) {
+          if (result.files.length) {
+            vscode.postMessage({ type: 'insertDroppedFileReferences', files: result.files });
+            return;
+          }
+          setComposerStatus(result.skipped > 0
+            ? '\\u62d6\\u5165\\u6587\\u4ef6\\u8fc7\\u5927\\u6216\\u65e0\\u6cd5\\u8bfb\\u53d6'
+            : '\\u672a\\u8bc6\\u522b\\u5230\\u53ef\\u5f15\\u7528\\u7684\\u6587\\u4ef6\\u8def\\u5f84');
+        }).catch(function() {
+          setComposerStatus('\\u62d6\\u5165\\u6587\\u4ef6\\u65e0\\u6cd5\\u8bfb\\u53d6');
+        });
+      }
+
+      function readDroppedFilePayloads(files) {
+        var skipped = 0;
+        var tasks = [];
+        var maxBytes = getMaxDroppedFileBytes();
+        for (var i = 0; i < files.length; i++) {
+          var file = files[i];
+          if (!file || !file.name || file.size > maxBytes || !file.arrayBuffer) {
+            skipped += 1;
+            continue;
+          }
+          tasks.push(readDroppedFilePayload(file).catch(function() {
+            skipped += 1;
+            return null;
+          }));
+        }
+
+        return Promise.all(tasks).then(function(payloads) {
+          return {
+            files: payloads.filter(function(payload) { return Boolean(payload); }),
+            skipped: skipped
+          };
+        });
+      }
+
+      function getMaxDroppedFileBytes() {
+        var configured = Number(state.maxFileBytes);
+        if (!Number.isFinite(configured) || configured <= 0) {
+          return 200000;
+        }
+        return configured;
+      }
+
+      function readDroppedFilePayload(file) {
+        return file.arrayBuffer().then(function(buffer) {
+          var bytes = new Uint8Array(buffer);
+          return {
+            name: file.name || 'dropped-file',
+            type: file.type || '',
+            size: bytes.byteLength,
+            lastModified: Number(file.lastModified) || 0,
+            dataBase64: bytesToBase64(bytes)
+          };
+        });
+      }
+
+      function bytesToBase64(bytes) {
+        var chunkSize = 32768;
+        var binary = '';
+        for (var i = 0; i < bytes.length; i += chunkSize) {
+          var chunk = bytes.subarray(i, i + chunkSize);
+          binary += String.fromCharCode.apply(null, Array.from(chunk));
+        }
+        return btoa(binary);
+      }
+
       function addReferenceList(references, seen, value) {
         var entries = splitDragLines(value);
         for (var i = 0; i < entries.length; i++) {
@@ -1732,9 +1837,16 @@ export function getInputScript(): string {
         var references = extractFileReferences(e.dataTransfer);
         if (references.length) {
           insertFileReferences(references);
-        } else {
-          setComposerStatus('\\u672a\\u8bc6\\u522b\\u5230\\u53ef\\u5f15\\u7528\\u7684\\u6587\\u4ef6\\u8def\\u5f84');
+          return;
         }
+
+        var droppedFiles = extractDroppedFilesWithoutPath(e.dataTransfer);
+        if (droppedFiles.length) {
+          importDroppedFilesWithoutPath(droppedFiles);
+          return;
+        }
+
+        setComposerStatus('\\u672a\\u8bc6\\u522b\\u5230\\u53ef\\u5f15\\u7528\\u7684\\u6587\\u4ef6\\u8def\\u5f84');
       }, true);
 
       window.addEventListener('message', function(event) {

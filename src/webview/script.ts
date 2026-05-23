@@ -16,7 +16,8 @@ export function getScript(): string {
       sessionSummaries: [],
       contextFiles: [],
       draftEdits: [],
-      isBusy: false
+      isBusy: false,
+      maxFileBytes: 200000
     };
 
     const historyTab = document.getElementById('historyTab');

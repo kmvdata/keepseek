@@ -31,6 +31,14 @@ interface PromptReferenceInput {
   endColumn?: number;
 }
 
+interface DroppedFileReferenceInput {
+  name: string;
+  type?: string;
+  size?: number;
+  lastModified?: number;
+  dataBase64: string;
+}
+
 type WebviewMessage =
   | { type: 'ready' }
   | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[] }
@@ -45,6 +53,7 @@ type WebviewMessage =
   | { type: 'pickWorkspaceFiles' }
   | { type: 'pickExternalFiles' }
   | { type: 'pickExternalFileReferences' }
+  | { type: 'insertDroppedFileReferences'; files: DroppedFileReferenceInput[] }
   | { type: 'requestReferenceResources'; requestId: string }
   | { type: 'readPath'; path: string }
   | { type: 'openFileReference'; path: string; startLine: number; endLine: number; startColumn: number; endColumn: number }
@@ -77,7 +86,8 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   public constructor(
     private readonly extensionUri: vscode.Uri,
-    private readonly sessionStorage: vscode.Memento
+    private readonly sessionStorage: vscode.Memento,
+    private readonly globalStorageUri: vscode.Uri
   ) {
     this.loadSessions();
   }
@@ -252,6 +262,69 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  public async insertDroppedFileReferencesToInput(files: DroppedFileReferenceInput[]): Promise<void> {
+    if (!Array.isArray(files) || !files.length) {
+      return;
+    }
+
+    try {
+      const maxBytes = getConfiguredMaxFileBytes();
+      const dropDir = vscode.Uri.joinPath(this.globalStorageUri, 'dropped-file-references', randomUUID());
+      await vscode.workspace.fs.createDirectory(dropDir);
+
+      let inserted = 0;
+      let skipped = 0;
+
+      for (const file of files) {
+        if (!file || typeof file.dataBase64 !== 'string') {
+          skipped += 1;
+          continue;
+        }
+
+        const declaredSize = typeof file.size === 'number' ? file.size : undefined;
+        const maxBase64Length = Math.ceil(maxBytes / 3) * 4 + 4;
+        if ((declaredSize !== undefined && declaredSize > maxBytes) || file.dataBase64.length > maxBase64Length) {
+          skipped += 1;
+          continue;
+        }
+
+        const bytes = Buffer.from(file.dataBase64, 'base64');
+        const expectedSize = declaredSize ?? bytes.byteLength;
+        if (!bytes.byteLength && expectedSize > 0) {
+          skipped += 1;
+          continue;
+        }
+        if (bytes.byteLength > maxBytes || expectedSize > maxBytes) {
+          skipped += 1;
+          continue;
+        }
+
+        const fileName = sanitizeDroppedFileName(file.name);
+        const fileDir = vscode.Uri.joinPath(dropDir, randomUUID());
+        await vscode.workspace.fs.createDirectory(fileDir);
+        const fileUri = vscode.Uri.joinPath(fileDir, fileName);
+        await vscode.workspace.fs.writeFile(fileUri, bytes);
+        this.authorizeExternalReferenceUri(fileUri);
+        this.postToWebview({
+          type: 'insertFileReference',
+          path: fileUri.fsPath,
+          startLine: 0,
+          endLine: 0
+        });
+        inserted += 1;
+      }
+
+      if (skipped > 0) {
+        vscode.window.showWarningMessage(`KeepSeek skipped ${skipped} dropped file(s) that are too large or unreadable.`);
+      }
+      if (!inserted && skipped === 0) {
+        vscode.window.showWarningMessage('KeepSeek did not find any readable dropped files.');
+      }
+    } catch (error) {
+      vscode.window.showErrorMessage(`KeepSeek cannot import dropped file: ${getErrorMessage(error)}`);
+    }
+  }
+
   private async handleMessage(message: WebviewMessage): Promise<void> {
     switch (message.type) {
       case 'ready':
@@ -302,6 +375,9 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'pickExternalFileReferences':
         await this.pickExternalFileReferencesToInput();
+        return;
+      case 'insertDroppedFileReferences':
+        await this.insertDroppedFileReferencesToInput(message.files);
         return;
       case 'requestReferenceResources':
         await this.postReferenceResources(message.requestId);
@@ -717,7 +793,8 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         sessionSummaries: this.getSessionSummaries(),
         contextFiles: this.fileContext.getAll().map(({ content: _content, ...file }) => file),
         draftEdits: Array.from(this.draftEdits.values()).map(({ newText: _newText, ...edit }) => edit),
-        isBusy: this.isBusy
+        isBusy: this.isBusy,
+        maxFileBytes: getConfiguredMaxFileBytes()
       }
     });
   }
@@ -822,7 +899,7 @@ function ensureKeybindings(context: vscode.ExtensionContext): void {
 export function activate(context: vscode.ExtensionContext): void {
   ensureKeybindings(context);
 
-  const provider = new KeepseekChatViewProvider(context.extensionUri, context.workspaceState);
+  const provider = new KeepseekChatViewProvider(context.extensionUri, context.workspaceState, context.globalStorageUri);
   const doesNotSupportSecondarySidebar = !supportsSecondarySidebar(vscode.version);
   void vscode.commands.executeCommand(
     'setContext',
@@ -1013,6 +1090,22 @@ function getConfiguredAgentSettings(): AgentSettings {
     thinkingEnabled: config.get<boolean>('thinkingEnabled', true),
     reasoningEffort: config.get<AgentSettings['reasoningEffort']>('reasoningEffort', 'high')
   });
+}
+
+function getConfiguredMaxFileBytes(): number {
+  return vscode.workspace.getConfiguration('keepseek').get('maxFileBytes', 200_000);
+}
+
+function sanitizeDroppedFileName(name: string): string {
+  const rawName = typeof name === 'string' && name.trim() ? name.trim() : 'dropped-file';
+  const baseName = rawName.split(/[\\/]+/u).pop() || 'dropped-file';
+  const invalidCharacters = new Set(['<', '>', ':', '"', '/', '\\', '|', '?', '*']);
+  const safeCharacters = Array.from(baseName, (character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || invalidCharacters.has(character) ? '_' : character;
+  }).join('');
+  const sanitized = safeCharacters.replace(/^\.+$/u, 'dropped-file').slice(0, 160);
+  return sanitized || 'dropped-file';
 }
 
 async function getWorkspaceReferenceResources(): Promise<ReferenceResource[]> {
