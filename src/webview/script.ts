@@ -1685,8 +1685,15 @@ export function getScript(): string {
           continue;
         }
 
+        var table = collectMarkdownTable(lines, index);
+        if (table) {
+          appendMarkdownTable(container, table);
+          index = table.index;
+          continue;
+        }
+
         var paragraphLines = [];
-        while (index < lines.length && !isMarkdownBlankLine(lines[index]) && !isMarkdownBlockStart(lines[index])) {
+        while (index < lines.length && !isMarkdownBlankLine(lines[index]) && !isMarkdownBlockStart(lines[index], lines, index)) {
           paragraphLines.push(lines[index]);
           index += 1;
         }
@@ -1702,13 +1709,14 @@ export function getScript(): string {
       return /^\\s*$/.test(String(line || ''));
     }
 
-    function isMarkdownBlockStart(line) {
+    function isMarkdownBlockStart(line, lines, index) {
       return Boolean(
         parseMarkdownFenceLine(line) ||
         parseMarkdownHeadingLine(line) ||
         parseMarkdownQuoteLine(line) ||
         parseMarkdownListItemLine(line) ||
-        isMarkdownRuleLine(line)
+        isMarkdownRuleLine(line) ||
+        (lines && typeof index === 'number' && isMarkdownTableStart(lines, index))
       );
     }
 
@@ -1865,6 +1873,186 @@ export function getScript(): string {
       return text.slice(count);
     }
 
+    function collectMarkdownTable(lines, start) {
+      if (!isMarkdownTableStart(lines, start)) {
+        return null;
+      }
+
+      var headers = parseMarkdownTableRow(lines[start]);
+      var separator = parseMarkdownTableSeparator(lines[start + 1], headers.length);
+      var columnCount = headers.length;
+      var rows = [];
+      var index = start + 2;
+
+      while (index < lines.length) {
+        if (isMarkdownBlankLine(lines[index])) {
+          break;
+        }
+
+        var cells = parseMarkdownTableRow(lines[index]);
+        if (!cells) {
+          break;
+        }
+
+        rows.push(normalizeMarkdownTableRow(cells, columnCount));
+        index += 1;
+      }
+
+      return {
+        headers: normalizeMarkdownTableRow(headers, columnCount),
+        alignments: separator.alignments,
+        rows: rows,
+        index: index
+      };
+    }
+
+    function isMarkdownTableStart(lines, index) {
+      if (!Array.isArray(lines) || index + 1 >= lines.length) {
+        return false;
+      }
+
+      var headers = parseMarkdownTableRow(lines[index]);
+      if (!headers || !hasNonEmptyMarkdownTableCells(headers)) {
+        return false;
+      }
+
+      return Boolean(parseMarkdownTableSeparator(lines[index + 1], headers.length));
+    }
+
+    function parseMarkdownTableSeparator(line, columnCount) {
+      var cells = parseMarkdownTableRow(line);
+      if (!cells || cells.length !== columnCount) {
+        return null;
+      }
+
+      var alignments = [];
+      for (var i = 0; i < cells.length; i++) {
+        var alignment = parseMarkdownTableAlignment(cells[i]);
+        if (alignment === null) {
+          return null;
+        }
+        alignments.push(alignment);
+      }
+
+      return { alignments: alignments };
+    }
+
+    function parseMarkdownTableAlignment(cell) {
+      var text = String(cell || '').trim()
+        .split(' ').join('')
+        .split(String.fromCharCode(9)).join('');
+      if (!text) {
+        return null;
+      }
+
+      var startsWithColon = text.charAt(0) === ':';
+      var endsWithColon = text.charAt(text.length - 1) === ':';
+      var start = startsWithColon ? 1 : 0;
+      var end = endsWithColon ? text.length - 1 : text.length;
+      var hyphenCount = 0;
+
+      for (var i = start; i < end; i++) {
+        if (text.charAt(i) !== '-') {
+          return null;
+        }
+        hyphenCount += 1;
+      }
+
+      if (hyphenCount < 3) {
+        return null;
+      }
+
+      if (startsWithColon && endsWithColon) {
+        return 'center';
+      }
+      if (endsWithColon) {
+        return 'right';
+      }
+      if (startsWithColon) {
+        return 'left';
+      }
+      return '';
+    }
+
+    function parseMarkdownTableRow(line) {
+      var text = String(line || '').trim();
+      if (!hasMarkdownTablePipe(text)) {
+        return null;
+      }
+
+      var cells = splitMarkdownTableCells(text);
+      return cells.length ? cells : null;
+    }
+
+    function splitMarkdownTableCells(line) {
+      var text = String(line || '').trim();
+      var cells = [];
+      var current = '';
+
+      if (text.charAt(0) === '|') {
+        text = text.slice(1);
+      }
+      if (text.length && text.charAt(text.length - 1) === '|' && !isEscapedMarkdownTablePipe(text, text.length - 1)) {
+        text = text.slice(0, -1);
+      }
+
+      for (var i = 0; i < text.length; i++) {
+        var character = text.charAt(i);
+        if (character === '|' && !isEscapedMarkdownTablePipe(text, i)) {
+          cells.push(cleanMarkdownTableCell(current));
+          current = '';
+          continue;
+        }
+        current += character;
+      }
+
+      cells.push(cleanMarkdownTableCell(current));
+      return cells;
+    }
+
+    function hasMarkdownTablePipe(line) {
+      var text = String(line || '');
+      for (var i = 0; i < text.length; i++) {
+        if (text.charAt(i) === '|' && !isEscapedMarkdownTablePipe(text, i)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function isEscapedMarkdownTablePipe(text, index) {
+      var backslash = String.fromCharCode(92);
+      var count = 0;
+      var cursor = index - 1;
+      while (cursor >= 0 && text.charAt(cursor) === backslash) {
+        count += 1;
+        cursor -= 1;
+      }
+      return count % 2 === 1;
+    }
+
+    function cleanMarkdownTableCell(value) {
+      var backslash = String.fromCharCode(92);
+      return String(value || '').trim().split(backslash + '|').join('|');
+    }
+
+    function hasNonEmptyMarkdownTableCells(cells) {
+      for (var i = 0; i < cells.length; i++) {
+        if (String(cells[i] || '').trim()) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function normalizeMarkdownTableRow(cells, columnCount) {
+      var normalized = [];
+      for (var i = 0; i < columnCount; i++) {
+        normalized.push(cells[i] === undefined ? '' : cells[i]);
+      }
+      return normalized;
+    }
+
     function appendMarkdownHeading(container, level, text) {
       var heading = document.createElement('h' + Math.min(Math.max(level, 1), 6));
       appendMarkdownInline(heading, text);
@@ -1895,6 +2083,49 @@ export function getScript(): string {
         list.append(item);
       }
       container.append(list);
+    }
+
+    function appendMarkdownTable(container, tableData) {
+      var wrapper = document.createElement('div');
+      wrapper.className = 'message-table-wrap';
+
+      var table = document.createElement('table');
+      table.className = 'message-markdown-table';
+
+      var thead = document.createElement('thead');
+      var headRow = document.createElement('tr');
+      for (var i = 0; i < tableData.headers.length; i++) {
+        var headerCell = document.createElement('th');
+        applyMarkdownTableAlignment(headerCell, tableData.alignments[i]);
+        appendMarkdownInline(headerCell, tableData.headers[i]);
+        headRow.append(headerCell);
+      }
+      thead.append(headRow);
+      table.append(thead);
+
+      if (tableData.rows.length) {
+        var tbody = document.createElement('tbody');
+        for (var rowIndex = 0; rowIndex < tableData.rows.length; rowIndex++) {
+          var row = document.createElement('tr');
+          for (var columnIndex = 0; columnIndex < tableData.headers.length; columnIndex++) {
+            var cell = document.createElement('td');
+            applyMarkdownTableAlignment(cell, tableData.alignments[columnIndex]);
+            appendMarkdownInline(cell, tableData.rows[rowIndex][columnIndex]);
+            row.append(cell);
+          }
+          tbody.append(row);
+        }
+        table.append(tbody);
+      }
+
+      wrapper.append(table);
+      container.append(wrapper);
+    }
+
+    function applyMarkdownTableAlignment(cell, alignment) {
+      if (alignment) {
+        cell.style.textAlign = alignment;
+      }
     }
 
     function splitMarkdownParagraphs(text) {

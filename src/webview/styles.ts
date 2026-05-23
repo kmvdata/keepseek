@@ -639,6 +639,51 @@ export function getStyles(): string {
       padding-left: 1px;
     }
 
+    .assistant-markdown .message-table-wrap {
+      width: 100%;
+      max-width: 100%;
+      margin: 8px 0;
+      overflow-x: auto;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editor-background);
+    }
+
+    .assistant-markdown .message-markdown-table {
+      width: 100%;
+      border-collapse: collapse;
+      border-spacing: 0;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .assistant-markdown .message-markdown-table th,
+    .assistant-markdown .message-markdown-table td {
+      min-width: 72px;
+      padding: 6px 8px;
+      border-right: 1px solid var(--vscode-panel-border);
+      border-bottom: 1px solid var(--vscode-panel-border);
+      color: var(--vscode-foreground);
+      text-align: left;
+      vertical-align: top;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .assistant-markdown .message-markdown-table th {
+      font-weight: 600;
+      background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background));
+    }
+
+    .assistant-markdown .message-markdown-table th:last-child,
+    .assistant-markdown .message-markdown-table td:last-child {
+      border-right: none;
+    }
+
+    .assistant-markdown .message-markdown-table tbody tr:last-child td {
+      border-bottom: none;
+    }
+
     .assistant-markdown blockquote {
       margin: 8px 0;
       padding: 2px 0 2px 10px;
