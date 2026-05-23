@@ -690,5 +690,9 @@ export function getInputStyles(): string {
       gap: 8px;
       padding: 0 16px 14px;
     }
+
+    .settings-clear-api-key {
+      margin-right: auto;
+    }
 `;
 }

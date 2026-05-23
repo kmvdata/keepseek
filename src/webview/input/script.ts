@@ -1706,6 +1706,7 @@ export function getInputScript(): string {
       var settingsApiKey = document.getElementById('settingsApiKey');
       var settingsApiKeyVisibilityBtn = document.getElementById('settingsApiKeyVisibilityBtn');
       var settingsBaseUrl = document.getElementById('settingsBaseUrl');
+      var settingsClearApiKeyBtn = document.getElementById('settingsClearApiKeyBtn');
       var settingsSaveBtn = document.getElementById('settingsSaveBtn');
       var settingsCancelBtn = document.getElementById('settingsCancelBtn');
       var apiKeyVisible = false;
@@ -1757,6 +1758,18 @@ export function getInputScript(): string {
           vscode.postMessage({ type: 'saveSettings', apiKey: apiKey, baseUrl: baseUrl });
           setComposerStatus(t('apiSettingsSaved'));
           hideSettingsDialog();
+        });
+      }
+
+      if (settingsClearApiKeyBtn) {
+        settingsClearApiKeyBtn.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (settingsApiKey) {
+            settingsApiKey.value = '';
+            settingsApiKey.focus();
+          }
+          setComposerStatus(t('apiKeyCleared'));
         });
       }
 
