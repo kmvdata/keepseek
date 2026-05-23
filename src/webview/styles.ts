@@ -581,6 +581,11 @@ export function getStyles(): string {
       padding: 0 2px;
     }
 
+    .message-content.is-placeholder {
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
+    }
+
     .message-file-link {
       margin: 0 3px 2px;
       vertical-align: text-bottom;
@@ -685,6 +690,7 @@ export function getStyles(): string {
     }
 
     .reasoning-block {
+      width: 100%;
       margin: 0 0 8px;
       padding: 6px 8px;
       border: 1px solid var(--vscode-panel-border);
@@ -706,6 +712,10 @@ export function getStyles(): string {
       font-family: var(--vscode-editor-font-family, monospace);
       font-size: 11px;
       line-height: 1.45;
+    }
+
+    .message.is-streaming .reasoning-block {
+      border-color: var(--vscode-focusBorder, var(--vscode-panel-border));
     }
 
     .hidden {

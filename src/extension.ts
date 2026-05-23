@@ -674,6 +674,25 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.isBusy = true;
     this.postState();
 
+    let assistantMessage: ChatMessage | undefined;
+    let liveStateTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleLiveState = () => {
+      if (liveStateTimer) {
+        return;
+      }
+      liveStateTimer = setTimeout(() => {
+        liveStateTimer = undefined;
+        this.postState();
+      }, 80);
+    };
+    const flushLiveState = () => {
+      if (liveStateTimer) {
+        clearTimeout(liveStateTimer);
+        liveStateTimer = undefined;
+      }
+      this.postState();
+    };
+
     try {
       const authorizedExternalReferenceUris = this.collectAuthorizedExternalReferenceUris(options?.references);
       const expandedPrompt = await expandFileReferencesInPrompt(trimmedPrompt, {
@@ -714,6 +733,19 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       activeSession.updatedAt = now;
       this.trimHistory();
       await this.persistSessions();
+
+      const agentHistory = [...this.messages];
+      assistantMessage = {
+        id: randomUUID(),
+        role: 'assistant',
+        content: '',
+        reasoningContent: '',
+        createdAt: new Date().toISOString(),
+        modelId: model.id,
+        isStreaming: true
+      };
+      this.messages.push(assistantMessage);
+      this.trimHistory();
       this.postState();
 
       const response = await this.agentRunner.run({
@@ -721,22 +753,32 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         model,
         settings: this.agentSettings,
         contextFiles: this.fileContext.getAll(),
-        history: this.messages,
+        history: agentHistory,
         language: this.language
+      }, {
+        onDelta: (event) => {
+          if (!assistantMessage) {
+            return;
+          }
+          if (event.type === 'reasoning') {
+            assistantMessage.reasoningContent = `${assistantMessage.reasoningContent ?? ''}${event.delta}`;
+          } else {
+            assistantMessage.content = `${assistantMessage.content}${event.delta}`;
+          }
+          activeSession.updatedAt = new Date().toISOString();
+          scheduleLiveState();
+        }
       });
 
       for (const draftEdit of response.draftEdits) {
         this.draftEdits.set(draftEdit.id, draftEdit);
       }
 
-      this.messages.push({
-        id: randomUUID(),
-        role: 'assistant',
-        content: response.message,
-        reasoningContent: response.reasoningContent,
-        createdAt: new Date().toISOString(),
-        modelId: model.id
-      });
+      if (assistantMessage) {
+        assistantMessage.content = response.message;
+        assistantMessage.reasoningContent = response.reasoningContent;
+        delete assistantMessage.isStreaming;
+      }
       this.trimHistory();
     } catch (error) {
       const activeSession = this.getActiveSession();
@@ -745,18 +787,23 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSession.title = createSessionTitle(trimmedPrompt, this.language);
         activeSession.createdAt = now;
       }
-      this.messages.push({
-        id: randomUUID(),
-        role: 'assistant',
-        content: `${this.t('errorPrefix')}: ${getErrorMessage(error)}`,
-        createdAt: new Date().toISOString(),
-        modelId: model.id
-      });
+      if (assistantMessage) {
+        assistantMessage.content = `${this.t('errorPrefix')}: ${getErrorMessage(error)}`;
+        delete assistantMessage.isStreaming;
+      } else {
+        this.messages.push({
+          id: randomUUID(),
+          role: 'assistant',
+          content: `${this.t('errorPrefix')}: ${getErrorMessage(error)}`,
+          createdAt: new Date().toISOString(),
+          modelId: model.id
+        });
+      }
     } finally {
       this.getActiveSession().updatedAt = new Date().toISOString();
       this.isBusy = false;
       await this.persistSessions();
-      this.postState();
+      flushLiveState();
     }
   }
 

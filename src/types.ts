@@ -36,6 +36,7 @@ export interface ChatMessage {
   createdAt: string;
   modelId?: string;
   reasoningContent?: string;
+  isStreaming?: boolean;
 }
 
 export interface ChatSession {
@@ -84,4 +85,12 @@ export interface AgentResponse {
   message: string;
   reasoningContent?: string;
   draftEdits: DraftEdit[];
+}
+
+export type AgentProgressEvent =
+  | { type: 'content'; delta: string }
+  | { type: 'reasoning'; delta: string };
+
+export interface AgentRunCallbacks {
+  onDelta?: (event: AgentProgressEvent) => void;
 }

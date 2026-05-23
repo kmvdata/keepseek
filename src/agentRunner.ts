@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { AgentRequest, AgentResponse, ChatMessage, DraftEdit, ReasoningEffort } from './types';
+import { AgentRequest, AgentResponse, AgentRunCallbacks, ChatMessage, DraftEdit, ReasoningEffort } from './types';
 import { formatBytes } from './fileContext';
 import type { KeepseekLanguage } from './i18n';
 
@@ -45,6 +45,16 @@ interface DeepSeekToolCall {
   };
 }
 
+interface DeepSeekToolCallDelta {
+  index?: number;
+  id?: string;
+  type?: 'function';
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
 interface DeepSeekAssistantMessage {
   role?: 'assistant';
   content?: string | null;
@@ -52,19 +62,31 @@ interface DeepSeekAssistantMessage {
   tool_calls?: DeepSeekToolCall[] | null;
 }
 
-interface DeepSeekChoice {
-  finish_reason?: string | null;
-  message?: DeepSeekAssistantMessage;
+interface DeepSeekStreamDelta {
+  role?: 'assistant';
+  content?: string | null;
+  reasoning_content?: string | null;
+  tool_calls?: DeepSeekToolCallDelta[] | null;
 }
 
-interface DeepSeekChatResponse {
-  choices?: DeepSeekChoice[];
+interface DeepSeekStreamChoice {
+  delta?: DeepSeekStreamDelta;
+  finish_reason?: string | null;
+}
+
+interface DeepSeekStreamChunk {
+  choices?: DeepSeekStreamChoice[];
+}
+
+interface DeepSeekStreamResult {
+  message: DeepSeekAssistantMessage;
+  finishReason?: string | null;
 }
 
 interface DeepSeekChatRequestBody {
   model: string;
   messages: DeepSeekMessage[];
-  stream: false;
+  stream: true;
   thinking?: {
     type: DeepSeekThinkingType;
   };
@@ -82,8 +104,17 @@ interface AgentRuntimeConfig {
   requestTimeoutMs: number;
 }
 
+interface StreamingToolCallAccumulator {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
 export class AgentRunner {
-  public async run(request: AgentRequest): Promise<AgentResponse> {
+  public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
     const draftEdit = this.tryCreateDraftEdit(request.prompt, request.language);
     if (draftEdit) {
       return {
@@ -108,9 +139,8 @@ export class AgentRunner {
     const maxIterations = Math.max(0, runtimeConfig.maxToolIterations);
 
     for (let turn = 0; turn <= maxIterations; turn += 1) {
-      const response = await this.createChatCompletion(request, runtimeConfig, messages, turn < maxIterations ? tools : []);
-      const choice = response.choices?.[0];
-      const assistant = choice?.message;
+      const response = await this.createChatCompletion(request, runtimeConfig, messages, turn < maxIterations ? tools : [], callbacks);
+      const assistant = response.message;
       if (!assistant) {
         throw new Error(request.language === 'en'
           ? 'DeepSeek API did not return a usable assistant message.'
@@ -124,7 +154,7 @@ export class AgentRunner {
       const toolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
       if (!toolCalls.length) {
         return {
-          message: this.getFinalMessage(assistant.content, draftEdits, choice?.finish_reason, request.language),
+          message: this.getFinalMessage(assistant.content, draftEdits, response.finishReason, request.language),
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits
         };
@@ -158,12 +188,13 @@ export class AgentRunner {
     request: AgentRequest,
     runtimeConfig: AgentRuntimeConfig,
     messages: DeepSeekMessage[],
-    tools: DeepSeekFunctionTool[]
-  ): Promise<DeepSeekChatResponse> {
+    tools: DeepSeekFunctionTool[],
+    callbacks: AgentRunCallbacks
+  ): Promise<DeepSeekStreamResult> {
     const body: DeepSeekChatRequestBody = {
       model: request.model.id,
       messages,
-      stream: false,
+      stream: true,
       thinking: {
         type: request.settings.thinkingEnabled ? 'enabled' : 'disabled'
       },
@@ -193,14 +224,20 @@ export class AgentRunner {
         signal: controller.signal
       });
 
-      const responseText = await response.text();
       if (!response.ok) {
+        const responseText = await response.text();
         throw new Error(request.language === 'en'
           ? `DeepSeek API request failed (${response.status}): ${this.formatApiError(responseText, request.language)}`
           : `DeepSeek API 请求失败 (${response.status}): ${this.formatApiError(responseText, request.language)}`);
       }
 
-      return this.parseChatResponse(responseText, request.language);
+      if (!response.body) {
+        throw new Error(request.language === 'en'
+          ? 'DeepSeek API did not return a streaming response body.'
+          : 'DeepSeek API 未返回流式响应体。');
+      }
+
+      return await this.parseChatCompletionStream(response.body, request.language, callbacks);
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         throw new Error(request.language === 'en'
@@ -465,18 +502,195 @@ export class AgentRunner {
     return cleaned.map((part, index) => `Step ${index + 1}\n${part}`).join('\n\n');
   }
 
-  private parseChatResponse(responseText: string, language: KeepseekLanguage): DeepSeekChatResponse {
-    try {
-      const parsed: unknown = JSON.parse(responseText);
-      if (!this.isRecord(parsed)) {
-        throw new Error(language === 'en' ? 'Response is not a JSON object.' : '响应不是 JSON 对象。');
+  private async parseChatCompletionStream(
+    body: NonNullable<Response['body']>,
+    language: KeepseekLanguage,
+    callbacks: AgentRunCallbacks
+  ): Promise<DeepSeekStreamResult> {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    const contentParts: string[] = [];
+    const reasoningParts: string[] = [];
+    const toolCallParts = new Map<number, StreamingToolCallAccumulator>();
+    let buffer = '';
+    let finishReason: string | null | undefined;
+    let streamDone = false;
+    let sawChunk = false;
+
+    while (!streamDone) {
+      const { done, value } = await reader.read();
+      if (done) {
+        buffer += decoder.decode();
+        break;
       }
-      return parsed as DeepSeekChatResponse;
+
+      buffer += decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\r\n?/gu, '\n');
+
+      let separatorIndex = buffer.indexOf('\n\n');
+      while (separatorIndex >= 0) {
+        const rawEvent = buffer.slice(0, separatorIndex);
+        buffer = buffer.slice(separatorIndex + 2);
+        const eventResult = this.consumeSseEvent(rawEvent, language, contentParts, reasoningParts, toolCallParts, callbacks);
+        sawChunk = sawChunk || eventResult.sawChunk;
+        finishReason = eventResult.finishReason ?? finishReason;
+        streamDone = eventResult.done;
+        if (streamDone) {
+          break;
+        }
+        separatorIndex = buffer.indexOf('\n\n');
+      }
+    }
+
+    const remaining = buffer.trim();
+    if (remaining && !streamDone) {
+      const eventResult = this.consumeSseEvent(remaining, language, contentParts, reasoningParts, toolCallParts, callbacks);
+      sawChunk = sawChunk || eventResult.sawChunk;
+      finishReason = eventResult.finishReason ?? finishReason;
+    }
+
+    if (!sawChunk) {
+      throw new Error(language === 'en'
+        ? 'DeepSeek API did not return any streaming chunks.'
+        : 'DeepSeek API 未返回任何流式数据块。');
+    }
+
+    return {
+      message: {
+        role: 'assistant',
+        content: contentParts.join(''),
+        reasoning_content: reasoningParts.join(''),
+        tool_calls: this.buildStreamingToolCalls(toolCallParts)
+      },
+      finishReason
+    };
+  }
+
+  private consumeSseEvent(
+    rawEvent: string,
+    language: KeepseekLanguage,
+    contentParts: string[],
+    reasoningParts: string[],
+    toolCallParts: Map<number, StreamingToolCallAccumulator>,
+    callbacks: AgentRunCallbacks
+  ): { done: boolean; sawChunk: boolean; finishReason?: string | null } {
+    const dataLines = rawEvent
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice('data:'.length).trimStart());
+
+    let finishReason: string | null | undefined;
+    let sawChunk = false;
+
+    for (const data of dataLines) {
+      if (data.trim() === '[DONE]') {
+        return { done: true, sawChunk, finishReason };
+      }
+
+      if (!data.trim()) {
+        continue;
+      }
+
+      const chunk = this.parseStreamChunk(data, language);
+      sawChunk = true;
+      finishReason = this.applyStreamChunk(chunk, contentParts, reasoningParts, toolCallParts, callbacks) ?? finishReason;
+    }
+
+    return { done: false, sawChunk, finishReason };
+  }
+
+  private parseStreamChunk(data: string, language: KeepseekLanguage): DeepSeekStreamChunk {
+    try {
+      const parsed: unknown = JSON.parse(data);
+      if (!this.isRecord(parsed)) {
+        throw new Error(language === 'en' ? 'Chunk is not a JSON object.' : '数据块不是 JSON 对象。');
+      }
+      return parsed as DeepSeekStreamChunk;
     } catch (error) {
       throw new Error(language === 'en'
-        ? `Cannot parse DeepSeek API response: ${error instanceof Error ? error.message : String(error)}`
-        : `无法解析 DeepSeek API 响应：${error instanceof Error ? error.message : String(error)}`);
+        ? `Cannot parse DeepSeek streaming response: ${error instanceof Error ? error.message : String(error)}`
+        : `无法解析 DeepSeek 流式响应：${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  private applyStreamChunk(
+    chunk: DeepSeekStreamChunk,
+    contentParts: string[],
+    reasoningParts: string[],
+    toolCallParts: Map<number, StreamingToolCallAccumulator>,
+    callbacks: AgentRunCallbacks
+  ): string | null | undefined {
+    let finishReason: string | null | undefined;
+    const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
+
+    for (const choice of choices) {
+      if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
+        finishReason = choice.finish_reason;
+      }
+
+      const delta = choice.delta;
+      if (!delta) {
+        continue;
+      }
+
+      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+        reasoningParts.push(delta.reasoning_content);
+        callbacks.onDelta?.({ type: 'reasoning', delta: delta.reasoning_content });
+      }
+
+      if (typeof delta.content === 'string' && delta.content) {
+        contentParts.push(delta.content);
+        callbacks.onDelta?.({ type: 'content', delta: delta.content });
+      }
+
+      const toolCallDeltas = delta.tool_calls ?? [];
+      for (let deltaIndex = 0; deltaIndex < toolCallDeltas.length; deltaIndex += 1) {
+        const toolCallDelta = toolCallDeltas[deltaIndex];
+        const index = typeof toolCallDelta.index === 'number' ? toolCallDelta.index : deltaIndex;
+        const current = toolCallParts.get(index) ?? {
+          id: '',
+          type: 'function' as const,
+          function: {
+            name: '',
+            arguments: ''
+          }
+        };
+
+        if (typeof toolCallDelta.id === 'string' && toolCallDelta.id) {
+          current.id = toolCallDelta.id;
+        }
+        if (toolCallDelta.type === 'function') {
+          current.type = 'function';
+        }
+        if (typeof toolCallDelta.function?.name === 'string') {
+          current.function.name += toolCallDelta.function.name;
+        }
+        if (typeof toolCallDelta.function?.arguments === 'string') {
+          current.function.arguments += toolCallDelta.function.arguments;
+        }
+
+        toolCallParts.set(index, current);
+      }
+    }
+
+    return finishReason;
+  }
+
+  private buildStreamingToolCalls(toolCallParts: Map<number, StreamingToolCallAccumulator>): DeepSeekToolCall[] | null {
+    const toolCalls = Array.from(toolCallParts.entries())
+      .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
+      .map(([index, toolCall]) => ({
+        id: toolCall.id || `tool-call-${index}`,
+        type: 'function' as const,
+        function: {
+          name: toolCall.function.name,
+          arguments: toolCall.function.arguments
+        }
+      }))
+      .filter((toolCall) => Boolean(toolCall.function.name));
+
+    return toolCalls.length ? toolCalls : null;
   }
 
   private formatApiError(responseText: string, language: KeepseekLanguage): string {

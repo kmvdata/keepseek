@@ -1156,7 +1156,7 @@ export function getScript(): string {
         var message = state.messages[i];
         var item = document.createElement('article');
         var isEditing = message.role === 'user' && message.id === editingMessageId;
-        item.className = 'message ' + message.role + (isEditing ? ' is-editing' : '');
+        item.className = 'message ' + message.role + (isEditing ? ' is-editing' : '') + (message.isStreaming ? ' is-streaming' : '');
         item.dataset.messageId = message.id;
 
         var body = document.createElement('div');
@@ -1170,9 +1170,11 @@ export function getScript(): string {
         if (message.role === 'assistant' && message.reasoningContent) {
           var reasoning = document.createElement('details');
           reasoning.className = 'reasoning-block';
+          reasoning.open = Boolean(message.isStreaming);
           var summary = document.createElement('summary');
-          summary.textContent = 'Thinking';
+          summary.textContent = message.isStreaming ? t('thinkingLive') : t('thinkingLabel');
           var reasoningContent = document.createElement('pre');
+          reasoningContent.setAttribute('aria-live', message.isStreaming ? 'polite' : 'off');
           reasoningContent.textContent = message.reasoningContent;
           reasoning.append(summary, reasoningContent);
           body.append(reasoning);
@@ -1181,10 +1183,18 @@ export function getScript(): string {
         if (isEditing) {
           body.append(createInlineMessageEditor(message));
         } else {
-          var content = document.createElement('div');
-          content.className = 'message-content';
-          renderMessageContent(content, message.content, message.role === 'user');
-          body.append(content);
+          var shouldShowStreamingPlaceholder = message.role === 'assistant' && message.isStreaming && !message.content && !message.reasoningContent;
+          var shouldRenderContent = message.role !== 'assistant' || message.content || shouldShowStreamingPlaceholder || !message.isStreaming;
+          if (shouldRenderContent) {
+            var content = document.createElement('div');
+            content.className = 'message-content' + (shouldShowStreamingPlaceholder ? ' is-placeholder' : '');
+            if (shouldShowStreamingPlaceholder) {
+              content.textContent = t('processing');
+            } else {
+              renderMessageContent(content, message.content, message.role === 'user');
+            }
+            body.append(content);
+          }
           if (message.role === 'user') {
             body.append(createUserMessageActions(message));
           }
