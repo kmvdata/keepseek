@@ -679,7 +679,10 @@ export function getInputStyles(): string {
     }
 
     .settings-dialog {
-      width: min(360px, calc(100vw - var(--keepseek-edge-padding-double, 8px)));
+      width: min(420px, calc(100vw - var(--keepseek-edge-padding-double, 8px)));
+      max-height: min(720px, calc(100vh - 24px));
+      display: flex;
+      flex-direction: column;
       border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
       border-radius: 10px;
       background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
@@ -700,6 +703,7 @@ export function getInputStyles(): string {
 
     .settings-dialog-body {
       padding: 10px 16px 16px;
+      overflow-y: auto;
     }
 
     .settings-dialog-desc {
@@ -730,6 +734,15 @@ export function getInputStyles(): string {
       color: var(--vscode-descriptionForeground);
       font-size: 11px;
       line-height: 1.35;
+    }
+
+    .settings-section-title {
+      margin: 16px 0 10px;
+      padding-top: 12px;
+      border-top: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+      color: var(--vscode-foreground);
+      font-size: 12px;
+      font-weight: 600;
     }
 
     .settings-input {

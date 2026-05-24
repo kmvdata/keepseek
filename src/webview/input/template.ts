@@ -116,12 +116,12 @@ export function getInputTemplate(): string {
     </form>
 
     <div id="settingsDialogOverlay" class="settings-overlay hidden">
-      <div class="settings-dialog" role="dialog" aria-label="DeepSeek API 设置" data-i18n-aria-label="apiDialogLabel">
+      <div class="settings-dialog" role="dialog" aria-label="KeepSeek 设置" data-i18n-aria-label="apiDialogLabel">
         <div class="settings-dialog-header">
-          <span class="settings-dialog-title" data-i18n="apiDialogTitle">DeepSeek API 设置</span>
+          <span class="settings-dialog-title" data-i18n="apiDialogTitle">KeepSeek 设置</span>
         </div>
         <div class="settings-dialog-body">
-          <p class="settings-dialog-desc" data-i18n="apiDialogDesc">请输入 DeepSeek 官方申请的 API Key。</p>
+          <p class="settings-dialog-desc" data-i18n="apiDialogDesc">配置 DeepSeek API 与 Agent 执行预算。</p>
           <div class="settings-field">
             <label class="settings-field-label" for="settingsApiKey">API Key</label>
             <div class="settings-secret-input">
@@ -155,6 +155,27 @@ export function getInputTemplate(): string {
             <span class="settings-field-label" data-i18n="settingsMaxTokensLabel">最大输出 tokens</span>
             <input id="settingsMaxTokens" class="settings-input" type="number" min="0" max="384000" step="1024" inputmode="numeric" autocomplete="off" />
             <span class="settings-field-hint" data-i18n="settingsMaxTokensHint">0 表示使用服务商默认值</span>
+          </label>
+          <div class="settings-section-title" data-i18n="settingsAgentBudgetTitle">Agent 执行预算</div>
+          <label class="settings-field">
+            <span class="settings-field-label" data-i18n="settingsMaxToolIterationsLabel">最大工具轮次</span>
+            <input id="settingsMaxToolIterations" class="settings-input" type="number" min="0" max="64" step="1" inputmode="numeric" autocomplete="off" />
+            <span class="settings-field-hint" data-i18n="settingsMaxToolIterationsHint">默认 8；0 表示禁用工具</span>
+          </label>
+          <label class="settings-field">
+            <span class="settings-field-label" data-i18n="settingsMaxToolCallsLabel">最大工具调用数</span>
+            <input id="settingsMaxToolCalls" class="settings-input" type="number" min="0" max="256" step="1" inputmode="numeric" autocomplete="off" />
+            <span class="settings-field-hint" data-i18n="settingsMaxToolCallsHint">默认 24；0 表示不启用单独调用数上限</span>
+          </label>
+          <label class="settings-field">
+            <span class="settings-field-label" data-i18n="settingsMaxRunMsLabel">最大运行时间（毫秒）</span>
+            <input id="settingsMaxRunMs" class="settings-input" type="number" min="0" max="3600000" step="30000" inputmode="numeric" autocomplete="off" />
+            <span class="settings-field-hint" data-i18n="settingsMaxRunMsHint">默认 600000（10 分钟）；0 表示不启用总时长上限</span>
+          </label>
+          <label class="settings-field">
+            <span class="settings-field-label" data-i18n="settingsToolResultTokenBudgetLabel">工具结果 token 预算</span>
+            <input id="settingsToolResultTokenBudget" class="settings-input" type="number" min="0" max="1048576" step="4096" inputmode="numeric" autocomplete="off" />
+            <span class="settings-field-hint" data-i18n="settingsToolResultTokenBudgetHint">默认 0，按模型上下文窗口自动估算</span>
           </label>
         </div>
         <div class="settings-dialog-footer">

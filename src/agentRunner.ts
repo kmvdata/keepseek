@@ -7,9 +7,13 @@ import {
   AGENT_HISTORY_MESSAGE_LIMIT,
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_MAX_TOKENS,
+  getConfiguredContextWindowTokens,
+  getConfiguredMaxRunMs,
+  getConfiguredMaxToolCalls,
   getConfiguredMaxToolIterations,
   getConfiguredMaxTokens,
   getConfiguredStreamIdleTimeoutMs,
+  getConfiguredToolResultTokenBudget,
   MAX_GENERATION_TOKENS
 } from './config';
 import { WorkspaceToolAdapter, WorkspaceToolService } from './workspaceTools';
@@ -35,8 +39,17 @@ interface AgentRuntimeConfig {
   baseUrl: string;
   maxTokens: number;
   maxToolIterations: number;
+  maxToolCalls: number;
+  maxRunMs: number;
+  toolResultTokenBudget: number;
   streamIdleTimeoutMs: number;
 }
+
+type AgentBudgetFinishReason =
+  | 'tool_iterations_exhausted'
+  | 'tool_call_limit_exhausted'
+  | 'tool_result_budget_exhausted'
+  | 'run_time_limit_exhausted';
 
 export class AgentRunner {
   private readonly streamParser = new DeepSeekStreamParser();
@@ -67,10 +80,27 @@ export class AgentRunner {
     const draftEdits: DraftEdit[] = [];
     const reasoningParts: string[] = [];
     const maxIterations = Math.max(0, runtimeConfig.maxToolIterations);
+    const runStartedAt = Date.now();
+    const runDeadlineAt = runtimeConfig.maxRunMs > 0 ? runStartedAt + runtimeConfig.maxRunMs : undefined;
+    const maxToolResultTokens = this.resolveToolResultTokenBudget(request, runtimeConfig, messages);
+    let toolCallCount = 0;
+    let toolResultTokens = 0;
+    let budgetStopReason: AgentBudgetFinishReason | undefined;
+    let budgetStopInstructionQueued = false;
 
     for (let turn = 0; turn <= maxIterations; turn += 1) {
-      const response = await this.createChatCompletion(request, runtimeConfig, messages, turn < maxIterations ? tools : [], callbacks);
-      const assistant = this.normalizeAssistantToolCalls(response.message);
+      const runTimeStopReason = this.getRunTimeStopReason(runDeadlineAt);
+      if (runTimeStopReason) {
+        return {
+          message: this.getFinalMessage(null, draftEdits, runTimeStopReason, request.language),
+          reasoningContent: this.formatReasoning(reasoningParts),
+          draftEdits
+        };
+      }
+
+      const toolsForTurn = !budgetStopReason && turn < maxIterations ? tools : [];
+      const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, callbacks, runDeadlineAt);
+      const assistant = this.normalizeAssistantToolCalls(response.message, toolsForTurn.length > 0);
       if (!assistant) {
         throw new Error(request.language === 'en'
           ? 'DeepSeek API did not return a usable assistant message.'
@@ -84,7 +114,7 @@ export class AgentRunner {
       const toolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
       if (!toolCalls.length) {
         return {
-          message: this.getFinalMessage(assistant.content, draftEdits, response.finishReason, request.language),
+          message: this.getFinalMessage(assistant.content, draftEdits, budgetStopReason ?? response.finishReason, request.language),
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits
         };
@@ -98,12 +128,47 @@ export class AgentRunner {
       });
 
       for (const toolCall of toolCalls) {
-        const toolResult = await this.handleToolCall(toolCall, draftEdits, request.language);
+        let toolResult: string;
+        if (budgetStopReason) {
+          toolResult = this.createBudgetToolResult(budgetStopReason, request.language);
+        } else if (runtimeConfig.maxToolCalls > 0 && toolCallCount >= runtimeConfig.maxToolCalls) {
+          budgetStopReason = 'tool_call_limit_exhausted';
+          toolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
+            toolCallCount,
+            maxToolCalls: runtimeConfig.maxToolCalls
+          });
+        } else {
+          toolCallCount += 1;
+          const rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language);
+          const nextToolResultTokens = this.estimateChatMessageTokens('tool', rawToolResult);
+          if (toolResultTokens + nextToolResultTokens > maxToolResultTokens) {
+            budgetStopReason = 'tool_result_budget_exhausted';
+            toolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
+              usedTokens: toolResultTokens,
+              nextTokens: nextToolResultTokens,
+              maxTokens: maxToolResultTokens
+            });
+          } else {
+            toolResultTokens += nextToolResultTokens;
+            toolResult = rawToolResult;
+          }
+
+          budgetStopReason = budgetStopReason ?? this.getRunTimeStopReason(runDeadlineAt);
+        }
+
         messages.push({
           role: 'tool',
           tool_call_id: toolCall.id,
           content: toolResult
         });
+      }
+
+      if (budgetStopReason && !budgetStopInstructionQueued) {
+        messages.push({
+          role: 'user',
+          content: this.getBudgetStopInstruction(budgetStopReason, request.language)
+        });
+        budgetStopInstructionQueued = true;
       }
     }
 
@@ -119,7 +184,8 @@ export class AgentRunner {
     runtimeConfig: AgentRuntimeConfig,
     messages: DeepSeekMessage[],
     tools: DeepSeekFunctionTool[],
-    callbacks: AgentRunCallbacks
+    callbacks: AgentRunCallbacks,
+    runDeadlineAt?: number
   ): Promise<DeepSeekStreamResult> {
     const body: DeepSeekChatRequestBody = {
       model: request.model.id,
@@ -142,7 +208,9 @@ export class AgentRunner {
 
     const controller = new AbortController();
     let idleTimeout: ReturnType<typeof setTimeout> | undefined;
+    let runTimeout: ReturnType<typeof setTimeout> | undefined;
     let abortedByStreamIdleTimeout = false;
+    let abortedByRunTimeLimit = false;
     const resetStreamIdleTimeout = () => {
       if (idleTimeout) {
         clearTimeout(idleTimeout);
@@ -158,7 +226,29 @@ export class AgentRunner {
         idleTimeout = undefined;
       }
     };
+    const setRunTimeout = () => {
+      if (typeof runDeadlineAt !== 'number') {
+        return;
+      }
+      const remainingMs = runDeadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        abortedByRunTimeLimit = true;
+        controller.abort();
+        return;
+      }
+      runTimeout = setTimeout(() => {
+        abortedByRunTimeLimit = true;
+        controller.abort();
+      }, remainingMs);
+    };
+    const clearRunTimeout = () => {
+      if (runTimeout) {
+        clearTimeout(runTimeout);
+        runTimeout = undefined;
+      }
+    };
     resetStreamIdleTimeout();
+    setRunTimeout();
 
     try {
       const response = await fetch(this.getChatCompletionsUrl(runtimeConfig.baseUrl), {
@@ -187,6 +277,9 @@ export class AgentRunner {
       resetStreamIdleTimeout();
       return await this.streamParser.parse(response.body, request.language, callbacks, resetStreamIdleTimeout);
     } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError' && abortedByRunTimeLimit) {
+        throw new Error(this.getRunTimeLimitError(runtimeConfig.maxRunMs, request.language));
+      }
       if (error instanceof Error && error.name === 'AbortError' && abortedByStreamIdleTimeout) {
         throw new Error(request.language === 'en'
           ? `DeepSeek API streaming response was idle for ${Math.round(runtimeConfig.streamIdleTimeoutMs / 1000)} seconds.`
@@ -195,6 +288,7 @@ export class AgentRunner {
       throw error;
     } finally {
       clearStreamIdleTimeout();
+      clearRunTimeout();
     }
   }
 
@@ -440,6 +534,94 @@ export class AgentRunner {
     return key === 'content' ? value : value.trim();
   }
 
+  private resolveToolResultTokenBudget(
+    request: AgentRequest,
+    runtimeConfig: AgentRuntimeConfig,
+    messages: DeepSeekMessage[]
+  ): number {
+    if (runtimeConfig.toolResultTokenBudget > 0) {
+      return runtimeConfig.toolResultTokenBudget;
+    }
+
+    const contextWindowTokens = getConfiguredContextWindowTokens(request.model);
+    const initialInputTokens = messages.reduce((total, message) => total + this.estimateDeepSeekMessageTokens(message), 0);
+    const outputReserveTokens = runtimeConfig.maxTokens > 0 ? runtimeConfig.maxTokens : DEFAULT_MAX_TOKENS;
+    const safetyReserveTokens = 16_000;
+    return Math.max(0, contextWindowTokens - initialInputTokens - outputReserveTokens - safetyReserveTokens);
+  }
+
+  private estimateDeepSeekMessageTokens(message: DeepSeekMessage): number {
+    const parts = [
+      message.role,
+      message.content ?? '',
+      message.reasoning_content ?? '',
+      message.tool_call_id ?? '',
+      message.tool_calls ? JSON.stringify(message.tool_calls) : ''
+    ];
+    return this.estimateChatMessageTokens(message.role, parts.join('\n'));
+  }
+
+  private estimateChatMessageTokens(role: string, content: string): number {
+    return this.estimateTokenCount(`${role}\n${content}`) + 4;
+  }
+
+  private estimateTokenCount(value: string): number {
+    let estimate = 0;
+    for (const character of String(value || '')) {
+      const codePoint = character.codePointAt(0) ?? 0;
+      estimate += codePoint <= 0x7f ? 0.3 : 0.6;
+    }
+    return Math.ceil(estimate);
+  }
+
+  private getRunTimeStopReason(runDeadlineAt: number | undefined): AgentBudgetFinishReason | undefined {
+    return typeof runDeadlineAt === 'number' && Date.now() >= runDeadlineAt
+      ? 'run_time_limit_exhausted'
+      : undefined;
+  }
+
+  private createBudgetToolResult(
+    reason: AgentBudgetFinishReason,
+    language: KeepseekLanguage,
+    details: Record<string, number> = {}
+  ): string {
+    return JSON.stringify({
+      ok: false,
+      error: this.getBudgetToolError(reason, language),
+      budgetReason: reason,
+      ...details
+    });
+  }
+
+  private getBudgetToolError(reason: AgentBudgetFinishReason, language: KeepseekLanguage): string {
+    switch (reason) {
+      case 'tool_call_limit_exhausted':
+        return language === 'en'
+          ? 'The KeepSeek tool-call budget was reached. Stop calling tools and answer from the available context.'
+          : 'KeepSeek 工具调用总数预算已达上限。请停止调用工具，并基于已有上下文回答。';
+      case 'tool_result_budget_exhausted':
+        return language === 'en'
+          ? 'The KeepSeek tool-result token budget was reached. Stop calling tools and answer from the available context.'
+          : 'KeepSeek 工具结果 token 预算已达上限。请停止调用工具，并基于已有上下文回答。';
+      case 'run_time_limit_exhausted':
+        return language === 'en'
+          ? 'The KeepSeek total run-time budget was reached. Stop calling tools and answer from the available context.'
+          : 'KeepSeek 本次执行总时长预算已达上限。请停止调用工具，并基于已有上下文回答。';
+      case 'tool_iterations_exhausted':
+      default:
+        return language === 'en'
+          ? 'The KeepSeek tool-iteration budget was reached. Stop calling tools and answer from the available context.'
+          : 'KeepSeek 工具调用轮次预算已达上限。请停止调用工具，并基于已有上下文回答。';
+    }
+  }
+
+  private getBudgetStopInstruction(reason: AgentBudgetFinishReason, language: KeepseekLanguage): string {
+    const error = this.getBudgetToolError(reason, language);
+    return language === 'en'
+      ? `${error} Do not emit function calls or DSML tool calls in the next response. Provide the best concise result using the information already gathered, and mention any remaining gap.`
+      : `${error} 下一次回复不要输出 function call 或 DSML 工具调用。请使用已经收集到的信息给出尽量完整、简洁的结果，并说明仍缺少的信息。`;
+  }
+
   private getFinalMessage(
     content: string | null | undefined,
     draftEdits: DraftEdit[],
@@ -476,11 +658,39 @@ export class AgentRunner {
 
     if (finishReason === 'tool_iterations_exhausted') {
       return language === 'en'
-        ? 'The agent reached the tool iteration limit and stopped this run.'
-        : 'Agent 工具调用轮次已达上限，已停止本次执行。';
+        ? 'The agent reached the tool iteration limit and stopped this run. Increase keepseek.maxToolIterations if this task needs more workspace exploration.'
+        : 'Agent 工具调用轮次已达上限，已停止本次执行。若本次任务需要更多工程探索，可以提高 keepseek.maxToolIterations。';
+    }
+
+    if (finishReason === 'tool_call_limit_exhausted') {
+      return language === 'en'
+        ? 'The agent reached the total tool-call limit and stopped this run. Increase keepseek.maxToolCalls if this task needs broader workspace exploration.'
+        : 'Agent 工具调用总数已达上限，已停止本次执行。若本次任务需要更大范围的工程探索，可以提高 keepseek.maxToolCalls。';
+    }
+
+    if (finishReason === 'tool_result_budget_exhausted') {
+      return language === 'en'
+        ? 'The agent reached the tool-result token budget and stopped this run. Increase keepseek.toolResultTokenBudget, or leave it at 0 to use the automatic context-window budget.'
+        : 'Agent 工具结果 token 预算已达上限，已停止本次执行。可以提高 keepseek.toolResultTokenBudget，或设为 0 使用基于上下文窗口的自动预算。';
+    }
+
+    if (finishReason === 'run_time_limit_exhausted') {
+      return this.getRunTimeLimitError(0, language);
     }
 
     return language === 'en' ? 'DeepSeek did not return text content.' : 'DeepSeek 未返回文本内容。';
+  }
+
+  private getRunTimeLimitError(maxRunMs: number, language: KeepseekLanguage): string {
+    const seconds = maxRunMs > 0 ? Math.round(maxRunMs / 1000) : 0;
+    if (language === 'en') {
+      return seconds > 0
+        ? `The agent reached the total run-time limit (${seconds} seconds) and stopped this run.`
+        : 'The agent reached the total run-time limit and stopped this run.';
+    }
+    return seconds > 0
+      ? `Agent 本次执行达到总时长上限（${seconds} 秒），已停止本次执行。`
+      : 'Agent 本次执行达到总时长上限，已停止本次执行。';
   }
 
   private getLengthLimitMessage(language: KeepseekLanguage): string {
@@ -502,7 +712,14 @@ export class AgentRunner {
     return cleaned.map((part, index) => `Step ${index + 1}\n${part}`).join('\n\n');
   }
 
-  private normalizeAssistantToolCalls(assistant: DeepSeekAssistantMessage): DeepSeekAssistantMessage {
+  private normalizeAssistantToolCalls(assistant: DeepSeekAssistantMessage, allowToolCalls: boolean): DeepSeekAssistantMessage {
+    if (!allowToolCalls) {
+      return {
+        ...assistant,
+        tool_calls: null
+      };
+    }
+
     const structuredToolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
     if (structuredToolCalls.length) {
       return assistant;
@@ -557,6 +774,9 @@ export class AgentRunner {
       baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL).trim() || DEFAULT_DEEPSEEK_BASE_URL,
       maxTokens: getConfiguredMaxTokens(),
       maxToolIterations: getConfiguredMaxToolIterations(),
+      maxToolCalls: getConfiguredMaxToolCalls(),
+      maxRunMs: getConfiguredMaxRunMs(),
+      toolResultTokenBudget: getConfiguredToolResultTokenBudget(),
       streamIdleTimeoutMs: getConfiguredStreamIdleTimeoutMs()
     };
   }

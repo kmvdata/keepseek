@@ -1843,12 +1843,20 @@ export function getInputScript(): string {
       var settingsApiKeyVisibilityBtn = document.getElementById('settingsApiKeyVisibilityBtn');
       var settingsBaseUrl = document.getElementById('settingsBaseUrl');
       var settingsMaxTokens = document.getElementById('settingsMaxTokens');
+      var settingsMaxToolIterations = document.getElementById('settingsMaxToolIterations');
+      var settingsMaxToolCalls = document.getElementById('settingsMaxToolCalls');
+      var settingsMaxRunMs = document.getElementById('settingsMaxRunMs');
+      var settingsToolResultTokenBudget = document.getElementById('settingsToolResultTokenBudget');
       var settingsClearApiKeyBtn = document.getElementById('settingsClearApiKeyBtn');
       var settingsSaveBtn = document.getElementById('settingsSaveBtn');
       var settingsCancelBtn = document.getElementById('settingsCancelBtn');
       var apiKeyVisible = false;
       var defaultMaxTokens = 64000;
       var maxGenerationTokens = 384000;
+      var defaultMaxToolIterations = 8;
+      var defaultMaxToolCalls = 24;
+      var defaultMaxRunMs = 600000;
+      var defaultToolResultTokenBudget = 0;
 
       function setApiKeyVisible(isVisible, shouldFocus) {
         apiKeyVisible = Boolean(isVisible);
@@ -1872,12 +1880,25 @@ export function getInputScript(): string {
         }
       }
 
-      function showSettingsDialog(apiKey, baseUrl, maxTokens) {
+      function showSettingsDialog(settings) {
         if (!settingsOverlay || !settingsApiKey || !settingsBaseUrl) { return; }
-        settingsApiKey.value = apiKey || '';
-        settingsBaseUrl.value = baseUrl || 'https://api.deepseek.com';
+        var values = settings && typeof settings === 'object' ? settings : {};
+        settingsApiKey.value = values.apiKey || '';
+        settingsBaseUrl.value = values.baseUrl || 'https://api.deepseek.com';
         if (settingsMaxTokens) {
-          settingsMaxTokens.value = String(normalizeMaxTokens(maxTokens));
+          settingsMaxTokens.value = String(normalizeMaxTokens(values.maxTokens));
+        }
+        if (settingsMaxToolIterations) {
+          settingsMaxToolIterations.value = String(normalizeIntegerInRange(values.maxToolIterations, 0, 64, defaultMaxToolIterations));
+        }
+        if (settingsMaxToolCalls) {
+          settingsMaxToolCalls.value = String(normalizeIntegerInRange(values.maxToolCalls, 0, 256, defaultMaxToolCalls));
+        }
+        if (settingsMaxRunMs) {
+          settingsMaxRunMs.value = String(normalizeIntegerInRange(values.maxRunMs, 0, 3600000, defaultMaxRunMs));
+        }
+        if (settingsToolResultTokenBudget) {
+          settingsToolResultTokenBudget.value = String(normalizeIntegerInRange(values.toolResultTokenBudget, 0, 1048576, defaultToolResultTokenBudget));
         }
         setApiKeyVisible(false, false);
         settingsOverlay.classList.remove('hidden');
@@ -1885,11 +1906,15 @@ export function getInputScript(): string {
       }
 
       function normalizeMaxTokens(value) {
+        return normalizeIntegerInRange(value, 0, maxGenerationTokens, defaultMaxTokens);
+      }
+
+      function normalizeIntegerInRange(value, min, max, fallback) {
         var number = Number(value);
         if (!Number.isFinite(number)) {
-          return defaultMaxTokens;
+          return fallback;
         }
-        return Math.min(maxGenerationTokens, Math.max(0, Math.floor(number)));
+        return Math.min(max, Math.max(min, Math.floor(number)));
       }
 
       function hideSettingsDialog() {
@@ -1906,10 +1931,35 @@ export function getInputScript(): string {
             baseUrl = 'https://api.deepseek.com';
           }
           var maxTokens = normalizeMaxTokens(settingsMaxTokens ? settingsMaxTokens.value : defaultMaxTokens);
+          var maxToolIterations = normalizeIntegerInRange(settingsMaxToolIterations ? settingsMaxToolIterations.value : defaultMaxToolIterations, 0, 64, defaultMaxToolIterations);
+          var maxToolCalls = normalizeIntegerInRange(settingsMaxToolCalls ? settingsMaxToolCalls.value : defaultMaxToolCalls, 0, 256, defaultMaxToolCalls);
+          var maxRunMs = normalizeIntegerInRange(settingsMaxRunMs ? settingsMaxRunMs.value : defaultMaxRunMs, 0, 3600000, defaultMaxRunMs);
+          var toolResultTokenBudget = normalizeIntegerInRange(settingsToolResultTokenBudget ? settingsToolResultTokenBudget.value : defaultToolResultTokenBudget, 0, 1048576, defaultToolResultTokenBudget);
           if (settingsMaxTokens) {
             settingsMaxTokens.value = String(maxTokens);
           }
-          vscode.postMessage({ type: 'saveSettings', apiKey: apiKey, baseUrl: baseUrl, maxTokens: maxTokens });
+          if (settingsMaxToolIterations) {
+            settingsMaxToolIterations.value = String(maxToolIterations);
+          }
+          if (settingsMaxToolCalls) {
+            settingsMaxToolCalls.value = String(maxToolCalls);
+          }
+          if (settingsMaxRunMs) {
+            settingsMaxRunMs.value = String(maxRunMs);
+          }
+          if (settingsToolResultTokenBudget) {
+            settingsToolResultTokenBudget.value = String(toolResultTokenBudget);
+          }
+          vscode.postMessage({
+            type: 'saveSettings',
+            apiKey: apiKey,
+            baseUrl: baseUrl,
+            maxTokens: maxTokens,
+            maxToolIterations: maxToolIterations,
+            maxToolCalls: maxToolCalls,
+            maxRunMs: maxRunMs,
+            toolResultTokenBudget: toolResultTokenBudget
+          });
           setComposerStatus(t('apiSettingsSaved'));
           hideSettingsDialog();
         });

@@ -80,6 +80,10 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 | `keepseek.reasoningEffort` | `"high"` | Thinking 推理强度，支持 `high` 或 `max` |
 | `keepseek.maxFileBytes` | `200000` | 单个引用文件或日志片段的最大字节数 |
 | `keepseek.maxTokens` | `64000` | 单次回复最大生成 tokens；设为 `0` 时使用服务商默认值 |
+| `keepseek.maxToolIterations` | `8` | 单次 Agent 执行的最大工具轮次；设为 `0` 时禁用工具 |
+| `keepseek.maxToolCalls` | `24` | 单次 Agent 执行的最大工具调用总数；设为 `0` 时不启用单独调用数上限 |
+| `keepseek.maxRunMs` | `600000` | 单次 Agent 执行的最大总时长（毫秒）；设为 `0` 时不启用总时长上限 |
+| `keepseek.toolResultTokenBudget` | `0` | 单次 Agent 执行中工具结果可使用的估算 token 预算；设为 `0` 时按模型上下文窗口自动估算 |
 
 ## 隐私与安全
 
@@ -239,6 +243,10 @@ KeepSeek is built around explicit context. You decide which files, selections, a
 | `keepseek.reasoningEffort` | `"high"` | Thinking effort, either `high` or `max` |
 | `keepseek.maxFileBytes` | `200000` | Maximum bytes for a referenced file or log snippet |
 | `keepseek.maxTokens` | `64000` | Maximum generated tokens per reply; set `0` to use the provider default |
+| `keepseek.maxToolIterations` | `8` | Maximum tool-use rounds in one agent run; set `0` to disable tool use |
+| `keepseek.maxToolCalls` | `24` | Maximum total tool calls in one agent run; set `0` to disable this separate cap |
+| `keepseek.maxRunMs` | `600000` | Maximum total run time in milliseconds for one agent run; set `0` to disable the total run-time cap |
+| `keepseek.toolResultTokenBudget` | `0` | Estimated token budget for tool results in one agent run; set `0` to derive it from the model context window |
 
 ## Privacy And Safety
 

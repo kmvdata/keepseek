@@ -212,6 +212,34 @@
           "maximum": 384000,
           "description": "Maximum generated tokens per request. Set 0 to omit max_tokens and use the provider default."
         },
+        "keepseek.maxToolIterations": {
+          "type": "number",
+          "default": 8,
+          "minimum": 0,
+          "maximum": 64,
+          "description": "Maximum agent tool-use rounds before the agent must answer without more tools. Set 0 to disable tool use."
+        },
+        "keepseek.maxToolCalls": {
+          "type": "number",
+          "default": 24,
+          "minimum": 0,
+          "maximum": 256,
+          "description": "Maximum total tool calls in one agent run. Set 0 to disable this separate tool-call cap."
+        },
+        "keepseek.maxRunMs": {
+          "type": "number",
+          "default": 600000,
+          "minimum": 0,
+          "maximum": 3600000,
+          "description": "Maximum total run time in milliseconds for one agent run. Set 0 to disable the total run-time cap."
+        },
+        "keepseek.toolResultTokenBudget": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1048576,
+          "description": "Maximum estimated tokens reserved for tool results in one agent run. Set 0 to automatically derive the budget from the selected model context window."
+        },
         "keepseek.maxWorkspaceToolFiles": {
           "type": "number",
           "default": 2000,

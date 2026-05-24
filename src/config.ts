@@ -5,10 +5,17 @@ export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 180_000;
 export const DEFAULT_MAX_TOKENS = 64_000;
 export const MAX_GENERATION_TOKENS = 384_000;
-export const DEFAULT_MAX_TOOL_ITERATIONS = 4;
+export const DEFAULT_MAX_TOOL_ITERATIONS = 8;
 export const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
 export const DEFAULT_MAX_FILE_BYTES = 200_000;
 export const DEFAULT_CONTEXT_WINDOW_TOKENS = 1_048_576;
+export const DEFAULT_MAX_TOOL_CALLS = 24;
+export const DEFAULT_MAX_RUN_MS = 600_000;
+export const DEFAULT_TOOL_RESULT_TOKEN_BUDGET = 0;
+export const MAX_TOOL_ITERATIONS = 64;
+export const MAX_TOOL_CALLS = 256;
+export const MAX_RUN_MS = 3_600_000;
+export const MAX_TOOL_RESULT_TOKEN_BUDGET = DEFAULT_CONTEXT_WINDOW_TOKENS;
 export const AGENT_HISTORY_MESSAGE_LIMIT = 24;
 
 export function getConfiguredModels(): KeepseekModel[] {
@@ -74,7 +81,33 @@ export function getConfiguredMaxToolIterations(): number {
   const configuredLimit = vscode.workspace
     .getConfiguration('keepseek')
     .get<number>('maxToolIterations', DEFAULT_MAX_TOOL_ITERATIONS);
-  return normalizeIntegerInRange(configuredLimit, 0, 12, DEFAULT_MAX_TOOL_ITERATIONS);
+  return normalizeIntegerInRange(configuredLimit, 0, MAX_TOOL_ITERATIONS, DEFAULT_MAX_TOOL_ITERATIONS);
+}
+
+export function getConfiguredMaxToolCalls(): number {
+  const configuredLimit = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('maxToolCalls', DEFAULT_MAX_TOOL_CALLS);
+  return normalizeIntegerInRange(configuredLimit, 0, MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS);
+}
+
+export function getConfiguredMaxRunMs(): number {
+  const configuredLimit = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('maxRunMs', DEFAULT_MAX_RUN_MS);
+  return normalizeIntegerInRange(configuredLimit, 0, MAX_RUN_MS, DEFAULT_MAX_RUN_MS);
+}
+
+export function getConfiguredToolResultTokenBudget(): number {
+  const configuredLimit = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('toolResultTokenBudget', DEFAULT_TOOL_RESULT_TOKEN_BUDGET);
+  return normalizeIntegerInRange(
+    configuredLimit,
+    0,
+    MAX_TOOL_RESULT_TOKEN_BUDGET,
+    DEFAULT_TOOL_RESULT_TOKEN_BUDGET
+  );
 }
 
 export function getConfiguredStreamIdleTimeoutMs(): number {

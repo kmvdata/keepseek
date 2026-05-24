@@ -13,11 +13,23 @@ import { openFileReference } from './fileReferenceOpener';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_MAX_TOKENS,
+  DEFAULT_MAX_RUN_MS,
+  DEFAULT_MAX_TOOL_CALLS,
+  DEFAULT_MAX_TOOL_ITERATIONS,
+  DEFAULT_TOOL_RESULT_TOKEN_BUDGET,
   getConfiguredAgentSettings,
   getConfiguredMaxFileBytes,
+  getConfiguredMaxRunMs,
+  getConfiguredMaxToolCalls,
+  getConfiguredMaxToolIterations,
   getConfiguredMaxTokens,
   getConfiguredModels,
+  getConfiguredToolResultTokenBudget,
   MAX_GENERATION_TOKENS,
+  MAX_RUN_MS,
+  MAX_TOOL_CALLS,
+  MAX_TOOL_ITERATIONS,
+  MAX_TOOL_RESULT_TOKEN_BUDGET,
   normalizeAgentSettings,
   normalizeIntegerInRange
 } from './config';
@@ -65,7 +77,16 @@ type WebviewMessage =
   | { type: 'setSelectedModel'; modelId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
   | { type: 'openSettings' }
-  | { type: 'saveSettings'; apiKey: string; baseUrl: string; maxTokens?: number }
+  | {
+      type: 'saveSettings';
+      apiKey: string;
+      baseUrl: string;
+      maxTokens?: number;
+      maxToolIterations?: number;
+      maxToolCalls?: number;
+      maxRunMs?: number;
+      toolResultTokenBudget?: number;
+    }
   | { type: 'setLanguage'; language: KeepseekLanguage }
   | { type: 'addCurrentFile' }
   | { type: 'pickWorkspaceFiles' }
@@ -446,7 +467,11 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           type: 'showSettingsDialog',
           apiKey: config.get<string>('apiKey', ''),
           baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL),
-          maxTokens: getConfiguredMaxTokens()
+          maxTokens: getConfiguredMaxTokens(),
+          maxToolIterations: getConfiguredMaxToolIterations(),
+          maxToolCalls: getConfiguredMaxToolCalls(),
+          maxRunMs: getConfiguredMaxRunMs(),
+          toolResultTokenBudget: getConfiguredToolResultTokenBudget()
         });
         return;
       }
@@ -455,6 +480,10 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await config.update('apiKey', message.apiKey, vscode.ConfigurationTarget.Global);
         await config.update('baseUrl', message.baseUrl, vscode.ConfigurationTarget.Global);
         await config.update('maxTokens', normalizeIntegerInRange(message.maxTokens, 0, MAX_GENERATION_TOKENS, DEFAULT_MAX_TOKENS), vscode.ConfigurationTarget.Global);
+        await config.update('maxToolIterations', normalizeIntegerInRange(message.maxToolIterations, 0, MAX_TOOL_ITERATIONS, DEFAULT_MAX_TOOL_ITERATIONS), vscode.ConfigurationTarget.Global);
+        await config.update('maxToolCalls', normalizeIntegerInRange(message.maxToolCalls, 0, MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS), vscode.ConfigurationTarget.Global);
+        await config.update('maxRunMs', normalizeIntegerInRange(message.maxRunMs, 0, MAX_RUN_MS, DEFAULT_MAX_RUN_MS), vscode.ConfigurationTarget.Global);
+        await config.update('toolResultTokenBudget', normalizeIntegerInRange(message.toolResultTokenBudget, 0, MAX_TOOL_RESULT_TOKEN_BUDGET, DEFAULT_TOOL_RESULT_TOKEN_BUDGET), vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage(this.t('apiSettingsSaved'));
         return;
       }

@@ -105,7 +105,7 @@ Agent 支持三个工具名：
 - 输入：`AgentRequest`，包含 prompt、模型、Agent 设置、上下文文件、历史消息、语言。
 - 输出：`AgentResponse`，包含最终文本、可选 reasoningContent、DraftEdit 列表。
 
-工具调用循环最多由 `keepseek.maxToolIterations` 控制，默认 4，范围 0-12。
+工具调用预算由 `keepseek.maxToolIterations`（默认 8，范围 0-64）、`keepseek.maxToolCalls`（默认 24，范围 0-256）、`keepseek.maxRunMs`（默认 600000，范围 0-3600000）和 `keepseek.toolResultTokenBudget`（默认 0，自动按模型上下文估算，范围 0-1048576）共同控制。
 
 ## 设计原则
 

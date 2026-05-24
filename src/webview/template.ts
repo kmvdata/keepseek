@@ -34,8 +34,8 @@ export function getTemplate(): string {
       </div>
       <button id="settingsApiKeyMenuItem" type="button" class="command-row settings-menu-row">
         <span class="command-row-main">
-          <span class="command-row-title" data-i18n="settingsApiKeyTitle">Api Key</span>
-          <span class="command-row-description" data-i18n="settingsApiKeyDescription">账户 API key 设置</span>
+          <span class="command-row-title" data-i18n="settingsApiKeyTitle">API 与预算</span>
+          <span class="command-row-description" data-i18n="settingsApiKeyDescription">API key、输出和 Agent 预算设置</span>
         </span>
       </button>
       <div class="settings-language-item">
