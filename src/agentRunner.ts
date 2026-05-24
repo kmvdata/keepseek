@@ -748,15 +748,7 @@ export class AgentRunner {
     let streamDone = false;
     let sawChunk = false;
 
-    while (!streamDone) {
-      const { done, value } = await reader.read();
-      if (done) {
-        buffer += decoder.decode();
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      onStreamActivity?.();
+    const normalizeAndConsumeBuffer = () => {
       buffer = buffer.replace(/\r\n?/gu, '\n');
 
       let separatorIndex = buffer.indexOf('\n\n');
@@ -772,6 +764,19 @@ export class AgentRunner {
         }
         separatorIndex = buffer.indexOf('\n\n');
       }
+    };
+
+    while (!streamDone) {
+      const { done, value } = await reader.read();
+      if (done) {
+        buffer += decoder.decode();
+        normalizeAndConsumeBuffer();
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      onStreamActivity?.();
+      normalizeAndConsumeBuffer();
     }
 
     const remaining = buffer.trim();

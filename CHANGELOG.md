@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.8 - 2026-05-24
+
+- Fixed a streaming parser edge case where the final SSE event could be left unprocessed when the response ended with pending decoded bytes, causing AI replies to appear interrupted.
+
 ## 0.0.6 - 2026-05-24
 
 - Added rich rendering for assistant markdown replies, including fenced code blocks and tables.
