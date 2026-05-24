@@ -5,8 +5,11 @@ export function getStyles(): string {
     :root {
       color-scheme: light dark;
 
+      --keepseek-edge-padding: 4px;
+      --keepseek-edge-padding-double: 8px;
+
       /* ---- input 区域边距变量（修改这些值即可调整间距） ---- */
-      --keepseek-composer-padding: 0;
+      --keepseek-composer-padding: 0 var(--keepseek-edge-padding) var(--keepseek-edge-padding);
       --keepseek-input-padding: 4px 4px 2px;
       --keepseek-toolbar-padding: 0 4px 4px;
     }
@@ -151,7 +154,7 @@ export function getStyles(): string {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 8px 12px;
+      padding: 8px var(--keepseek-edge-padding);
       border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-panel-border));
       min-height: 36px;
     }
@@ -203,10 +206,10 @@ export function getStyles(): string {
     .settings-menu {
       position: absolute;
       top: 36px;
-      right: 8px;
+      right: var(--keepseek-edge-padding);
       z-index: 45;
-      width: min(300px, calc(100% - 16px));
-      padding: 6px;
+      width: min(300px, calc(100% - var(--keepseek-edge-padding-double)));
+      padding: 4px;
       border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
       border-radius: 8px;
       background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
@@ -244,7 +247,7 @@ export function getStyles(): string {
     .settings-submenu {
       position: absolute;
       top: 4px;
-      right: 8px;
+      right: var(--keepseek-edge-padding);
       z-index: 50;
       display: none;
       width: 132px;
@@ -298,12 +301,12 @@ export function getStyles(): string {
     .session-menu {
       position: absolute;
       top: 36px;
-      left: 8px;
+      left: var(--keepseek-edge-padding);
       z-index: 40;
-      width: min(320px, calc(100% - 16px));
+      width: min(320px, calc(100% - var(--keepseek-edge-padding-double)));
       max-height: min(420px, calc(100vh - 72px));
       overflow-y: auto;
-      padding: 6px;
+      padding: 4px;
       border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
       border-radius: 8px;
       background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
@@ -380,7 +383,7 @@ export function getStyles(): string {
     /* ---- context bar ---- */
 
     .context-bar {
-      padding: 4px 12px 2px;
+      padding: 4px var(--keepseek-edge-padding) 2px;
       min-height: 0;
     }
 
@@ -435,7 +438,7 @@ export function getStyles(): string {
     }
 
     .draft-bar {
-      margin: 8px 12px 0;
+      margin: 8px var(--keepseek-edge-padding) 0;
       padding: 10px;
       border: 1px solid #d8dee4;
       border-radius: 8px;
@@ -527,7 +530,7 @@ export function getStyles(): string {
       flex: 1;
       min-height: 0;
       overflow-y: auto;
-      padding: 8px 12px 12px;
+      padding: 8px var(--keepseek-edge-padding) 12px;
       background: transparent;
     }
 
@@ -592,6 +595,12 @@ export function getStyles(): string {
 
     .message.user .message-body {
       align-items: flex-end;
+    }
+
+    .message.assistant .message-role,
+    .message.assistant .message-content {
+      padding-left: 0;
+      padding-right: 0;
     }
 
     .message.is-editing .message-body {
@@ -944,12 +953,12 @@ export function getStyles(): string {
 
     .message-reference-menu {
       position: fixed;
-      left: 8px;
+      left: var(--keepseek-edge-padding);
       right: auto;
-      top: 8px;
+      top: var(--keepseek-edge-padding);
       bottom: auto;
       z-index: 80;
-      width: min(360px, calc(100vw - 16px));
+      width: min(360px, calc(100vw - var(--keepseek-edge-padding-double)));
       max-height: min(50vh, 360px);
     }
 

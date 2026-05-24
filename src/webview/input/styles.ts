@@ -282,7 +282,7 @@ export function getInputStyles(): string {
       z-index: 45;
       display: block;
       width: max-content;
-      max-width: min(260px, calc(100vw - 18px));
+      max-width: min(260px, calc(100vw - var(--keepseek-edge-padding-double, 8px)));
       padding: 7px 9px;
       border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
       border-radius: 6px;
@@ -334,13 +334,13 @@ export function getInputStyles(): string {
 
     .command-menu {
       position: absolute;
-      left: 6px;
-      right: 6px;
+      left: var(--keepseek-edge-padding, 4px);
+      right: var(--keepseek-edge-padding, 4px);
       bottom: 34px;
       z-index: 30;
       max-height: min(420px, calc(100vh - 96px));
       overflow-y: auto;
-      padding: 6px;
+      padding: 4px;
       border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
       border-radius: 8px;
       background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
@@ -350,8 +350,8 @@ export function getInputStyles(): string {
 
     .reference-menu {
       position: absolute;
-      left: 6px;
-      right: 6px;
+      left: var(--keepseek-edge-padding, 4px);
+      right: var(--keepseek-edge-padding, 4px);
       bottom: calc(100% + 6px);
       z-index: 35;
       display: flex;
@@ -359,7 +359,7 @@ export function getInputStyles(): string {
       max-height: min(50vh, 420px);
       min-height: 72px;
       overflow: hidden;
-      padding: 6px;
+      padding: 4px;
       border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
       border-radius: 8px;
       background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
@@ -680,7 +680,7 @@ export function getInputStyles(): string {
     }
 
     .settings-dialog {
-      width: min(360px, calc(100vw - 32px));
+      width: min(360px, calc(100vw - var(--keepseek-edge-padding-double, 8px)));
       border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
       border-radius: 10px;
       background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));

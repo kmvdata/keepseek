@@ -1057,7 +1057,7 @@ export function getScript(): string {
       }
 
       var caretRect = getInlineEditorCaretRect(editReferenceEditor, editMentionRange || savedEditRange);
-      var margin = 8;
+      var margin = 4;
       var maxWidth = Math.max(180, window.innerWidth - margin * 2);
       var menuWidth = Math.min(360, Math.max(220, editorRect.width));
       menuWidth = Math.min(menuWidth, maxWidth);
