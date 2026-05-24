@@ -585,6 +585,11 @@ export function getStyles(): string {
       max-width: min(88%, 680px);
     }
 
+    .message.assistant .message-body {
+      width: 100%;
+      max-width: 100%;
+    }
+
     .message.user .message-body {
       align-items: flex-end;
     }
