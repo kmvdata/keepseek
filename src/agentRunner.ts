@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import { AgentRequest, AgentResponse, AgentRunCallbacks, ChatMessage, DraftEdit } from './types';
 import { formatBytes } from './format';
 import { getMarkdownFence, getMarkdownLanguage } from './markdown';
+import { estimateTokenCount } from './tokenEstimate';
 import {
   AGENT_HISTORY_MESSAGE_LIMIT,
   DEFAULT_DEEPSEEK_BASE_URL,
@@ -93,7 +94,7 @@ export class AgentRunner {
       const runTimeStopReason = this.getRunTimeStopReason(runDeadlineAt);
       if (runTimeStopReason) {
         return {
-          message: this.getFinalMessage(null, draftEdits, runTimeStopReason, request.language),
+          message: this.getFinalMessage(null, draftEdits, runTimeStopReason, request.language, runtimeConfig),
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits
         };
@@ -115,7 +116,7 @@ export class AgentRunner {
       const toolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
       if (!toolCalls.length) {
         return {
-          message: this.getFinalMessage(assistant.content, draftEdits, budgetStopReason ?? response.finishReason, request.language),
+          message: this.getFinalMessage(assistant.content, draftEdits, budgetStopReason ?? response.finishReason, request.language, runtimeConfig),
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits
         };
@@ -174,7 +175,7 @@ export class AgentRunner {
     }
 
     return {
-      message: this.getFinalMessage(null, draftEdits, 'tool_iterations_exhausted', request.language),
+      message: this.getFinalMessage(null, draftEdits, 'tool_iterations_exhausted', request.language, runtimeConfig),
       reasoningContent: this.formatReasoning(reasoningParts),
       draftEdits
     };
@@ -213,6 +214,9 @@ export class AgentRunner {
     let abortedByStreamIdleTimeout = false;
     let abortedByRunTimeLimit = false;
     const resetStreamIdleTimeout = () => {
+      if (runtimeConfig.streamIdleTimeoutMs <= 0) {
+        return;
+      }
       if (idleTimeout) {
         clearTimeout(idleTimeout);
       }
@@ -255,6 +259,8 @@ export class AgentRunner {
       const response = await fetch(this.getChatCompletionsUrl(runtimeConfig.baseUrl), {
         method: 'POST',
         headers: {
+          Accept: 'text/event-stream',
+          'Cache-Control': 'no-cache',
           'Content-Type': 'application/json',
           Authorization: `Bearer ${runtimeConfig.apiKey}`
         },
@@ -285,6 +291,9 @@ export class AgentRunner {
         throw new Error(request.language === 'en'
           ? `DeepSeek API streaming response was idle for ${Math.round(runtimeConfig.streamIdleTimeoutMs / 1000)} seconds.`
           : `DeepSeek API 流式响应连续 ${Math.round(runtimeConfig.streamIdleTimeoutMs / 1000)} 秒没有返回数据，已停止本次请求。`);
+      }
+      if (this.isStreamingTransportError(error)) {
+        throw new Error(this.getStreamingTransportErrorMessage(error, runtimeConfig, request.language));
       }
       throw error;
     } finally {
@@ -622,16 +631,7 @@ export class AgentRunner {
   }
 
   private estimateChatMessageTokens(role: string, content: string): number {
-    return this.estimateTokenCount(`${role}\n${content}`) + 4;
-  }
-
-  private estimateTokenCount(value: string): number {
-    let estimate = 0;
-    for (const character of String(value || '')) {
-      const codePoint = character.codePointAt(0) ?? 0;
-      estimate += codePoint <= 0x7f ? 0.3 : 0.6;
-    }
-    return Math.ceil(estimate);
+    return estimateTokenCount(`${role}\n${content}`) + 4;
   }
 
   private getRunTimeStopReason(runDeadlineAt: number | undefined): AgentBudgetFinishReason | undefined {
@@ -686,12 +686,13 @@ export class AgentRunner {
     content: string | null | undefined,
     draftEdits: DraftEdit[],
     finishReason: string | null | undefined,
-    language: KeepseekLanguage
+    language: KeepseekLanguage,
+    runtimeConfig?: AgentRuntimeConfig
   ): string {
     const text = (content ?? '').trim();
     if (text) {
       return finishReason === 'length'
-        ? `${text}\n\n${this.getLengthLimitMessage(language)}`
+        ? `${text}\n\n${this.getLengthLimitMessage(language, runtimeConfig?.maxTokens)}`
         : text;
     }
 
@@ -713,7 +714,7 @@ export class AgentRunner {
     }
 
     if (finishReason === 'length') {
-      return this.getLengthLimitMessage(language);
+      return this.getLengthLimitMessage(language, runtimeConfig?.maxTokens);
     }
 
     if (finishReason === 'tool_iterations_exhausted') {
@@ -753,10 +754,45 @@ export class AgentRunner {
       : 'Agent 本次执行达到总时长上限，已停止本次执行。';
   }
 
-  private getLengthLimitMessage(language: KeepseekLanguage): string {
+  private getLengthLimitMessage(language: KeepseekLanguage, maxTokens?: number): string {
+    const budgetHint = typeof maxTokens === 'number' && maxTokens > 0
+      ? (language === 'en' ? ` Current keepseek.maxTokens: ${maxTokens}.` : `当前 keepseek.maxTokens：${maxTokens}。`)
+      : (language === 'en' ? ' keepseek.maxTokens is omitted, so the provider default applies.' : '当前未发送 keepseek.maxTokens，使用服务商默认输出预算。');
     return language === 'en'
-      ? 'DeepSeek reached the generated-token budget before completing the reply. Increase keepseek.maxTokens, reduce reasoning effort, disable Thinking, or shrink context and try again.'
-      : 'DeepSeek 本次生成耗尽了输出 token 预算，未生成完整回复。可以提高 keepseek.maxTokens、降低推理强度、关闭 Thinking，或缩小上下文后重试。';
+      ? `DeepSeek returned finish_reason=length, which means the provider considers the generation budget exhausted before the reply was complete. Thinking/reasoning tokens may count toward that budget, so the visible answer can look shorter than expected.${budgetHint} Increase keepseek.maxTokens if the provider supports it, reduce reasoning effort, disable Thinking, or shrink context and try again.`
+      : `DeepSeek 返回 finish_reason=length，表示服务商认为本次生成预算已耗尽，回复尚未完整。Thinking/reasoning token 可能也计入这个预算，所以可见正文不一定很长。${budgetHint}如果服务商支持，可以提高 keepseek.maxTokens；也可以降低推理强度、关闭 Thinking，或缩小上下文后重试。`;
+  }
+
+  private isStreamingTransportError(error: unknown): boolean {
+    if (!(error instanceof Error)) {
+      return false;
+    }
+    const message = error.message.toLowerCase();
+    return error.name === 'TypeError' && (
+      message.includes('fetch failed') ||
+      message.includes('terminated') ||
+      message.includes('socket') ||
+      message.includes('network')
+    );
+  }
+
+  private getStreamingTransportErrorMessage(
+    error: unknown,
+    runtimeConfig: AgentRuntimeConfig,
+    language: KeepseekLanguage
+  ): string {
+    const originalMessage = error instanceof Error ? error.message : String(error);
+    const idleHint = runtimeConfig.streamIdleTimeoutMs > 0
+      ? (language === 'en'
+        ? ` KeepSeek's stream idle timeout is ${Math.round(runtimeConfig.streamIdleTimeoutMs / 1000)} seconds; set keepseek.streamIdleTimeoutMs to 0 to disable that client-side idle cap.`
+        : `KeepSeek 当前流式空闲超时为 ${Math.round(runtimeConfig.streamIdleTimeoutMs / 1000)} 秒；可将 keepseek.streamIdleTimeoutMs 设为 0 来禁用客户端空闲上限。`)
+      : (language === 'en'
+        ? ' KeepSeek stream idle timeout is disabled, so this usually means the network, proxy, or provider closed the SSE connection.'
+        : 'KeepSeek 已禁用流式空闲超时，因此这通常表示网络、代理或服务商关闭了 SSE 连接。');
+
+    return language === 'en'
+      ? `DeepSeek streaming connection failed before completion (${originalMessage}).${idleHint} Any partial output already received was kept in the transcript.`
+      : `DeepSeek 流式连接在完成前中断（${originalMessage}）。${idleHint} 已收到的部分输出会保留在对话中。`;
   }
 
   private formatReasoning(parts: string[]): string | undefined {

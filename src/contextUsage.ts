@@ -1,6 +1,7 @@
 import { AGENT_HISTORY_MESSAGE_LIMIT, getConfiguredContextWindowTokens } from './config';
 import { formatBytes } from './format';
 import type { KeepseekLanguage } from './i18n';
+import { estimateTokenCount } from './tokenEstimate';
 import { ChatMessage, ContextFile, ContextUsageEstimate, KeepseekModel } from './types';
 
 export function createContextUsageEstimate(input: {
@@ -89,16 +90,13 @@ function estimateChatMessageTokens(role: ChatMessage['role'], content: string): 
 }
 
 function getMessageContentForUsage(message: ChatMessage): string {
-  return (message.expandedContent ?? message.content).trim();
-}
-
-function estimateTokenCount(value: string): number {
-  let estimate = 0;
-  for (const character of String(value || '')) {
-    const codePoint = character.codePointAt(0) ?? 0;
-    estimate += codePoint <= 0x7f ? 0.3 : 0.6;
+  const content = (message.expandedContent ?? message.content).trim();
+  if (message.role !== 'assistant' || !message.isStreaming) {
+    return content;
   }
-  return Math.ceil(estimate);
+
+  const reasoningContent = (message.reasoningContent ?? '').trim();
+  return [reasoningContent, content].filter(Boolean).join('\n');
 }
 
 function getSystemPromptEstimateText(language: KeepseekLanguage): string {

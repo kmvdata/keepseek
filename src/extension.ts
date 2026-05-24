@@ -16,6 +16,7 @@ import {
   DEFAULT_MAX_RUN_MS,
   DEFAULT_MAX_TOOL_CALLS,
   DEFAULT_MAX_TOOL_ITERATIONS,
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_TOOL_RESULT_TOKEN_BUDGET,
   getConfiguredAgentSettings,
   getConfiguredMaxFileBytes,
@@ -25,9 +26,11 @@ import {
   getConfiguredMaxTokens,
   getConfiguredModels,
   getConfiguredSelectedModelId,
+  getConfiguredStreamIdleTimeoutMs,
   getConfiguredToolResultTokenBudget,
   MAX_GENERATION_TOKENS,
   MAX_RUN_MS,
+  MAX_STREAM_IDLE_TIMEOUT_MS,
   MAX_TOOL_CALLS,
   MAX_TOOL_ITERATIONS,
   MAX_TOOL_RESULT_TOKEN_BUDGET,
@@ -92,6 +95,7 @@ type WebviewMessage =
       maxToolIterations?: number;
       maxToolCalls?: number;
       maxRunMs?: number;
+      streamIdleTimeoutMs?: number;
       toolResultTokenBudget?: number;
     }
   | { type: 'setLanguage'; language: KeepseekLanguage }
@@ -524,6 +528,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           maxToolIterations: getConfiguredMaxToolIterations(),
           maxToolCalls: getConfiguredMaxToolCalls(),
           maxRunMs: getConfiguredMaxRunMs(),
+          streamIdleTimeoutMs: getConfiguredStreamIdleTimeoutMs(),
           toolResultTokenBudget: getConfiguredToolResultTokenBudget()
         });
         return;
@@ -541,6 +546,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await config.update('maxToolIterations', normalizeIntegerInRange(message.maxToolIterations, 0, MAX_TOOL_ITERATIONS, DEFAULT_MAX_TOOL_ITERATIONS), vscode.ConfigurationTarget.Global);
         await config.update('maxToolCalls', normalizeIntegerInRange(message.maxToolCalls, 0, MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS), vscode.ConfigurationTarget.Global);
         await config.update('maxRunMs', normalizeIntegerInRange(message.maxRunMs, 0, MAX_RUN_MS, DEFAULT_MAX_RUN_MS), vscode.ConfigurationTarget.Global);
+        await config.update('streamIdleTimeoutMs', normalizeIntegerInRange(message.streamIdleTimeoutMs, 0, MAX_STREAM_IDLE_TIMEOUT_MS, DEFAULT_STREAM_IDLE_TIMEOUT_MS), vscode.ConfigurationTarget.Global);
         await config.update('toolResultTokenBudget', normalizeIntegerInRange(message.toolResultTokenBudget, 0, MAX_TOOL_RESULT_TOKEN_BUDGET, DEFAULT_TOOL_RESULT_TOKEN_BUDGET), vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage(this.t('agentBudgetSettingsSaved'));
         return;
@@ -906,7 +912,11 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSession.createdAt = now;
       }
       if (assistantMessage) {
-        assistantMessage.content = `${this.t('errorPrefix')}: ${getErrorMessage(error)}`;
+        const errorText = `${this.t('errorPrefix')}: ${getErrorMessage(error)}`;
+        const hasPartialOutput = Boolean(assistantMessage.content.trim() || assistantMessage.reasoningContent?.trim());
+        assistantMessage.content = hasPartialOutput
+          ? [assistantMessage.content.trimEnd(), errorText].filter(Boolean).join('\n\n')
+          : errorText;
         delete assistantMessage.isStreaming;
       } else {
         this.messages.push({

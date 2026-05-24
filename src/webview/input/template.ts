@@ -188,6 +188,11 @@ export function getInputTemplate(): string {
             <span class="settings-field-hint" data-i18n="settingsMaxRunSecondsHint">默认 600 秒（10 分钟）；0 表示不启用总时长上限</span>
           </label>
           <label class="settings-field">
+            <span class="settings-field-label" data-i18n="settingsStreamIdleSecondsLabel">流式空闲超时（秒）</span>
+            <input id="agentBudgetStreamIdleSeconds" class="settings-input" type="number" min="0" max="3600" step="30" inputmode="numeric" autocomplete="off" />
+            <span class="settings-field-hint" data-i18n="settingsStreamIdleSecondsHint">默认 0，不因 thinking 阶段长时间无数据而主动中断</span>
+          </label>
+          <label class="settings-field">
             <span class="settings-field-label" data-i18n="settingsToolResultTokenBudgetLabel">工具结果预算（KB）</span>
             <input id="agentBudgetToolResultTokenBudget" class="settings-input" type="number" min="0" max="1000" step="10" inputmode="numeric" autocomplete="off" />
             <span class="settings-field-hint" data-i18n="settingsToolResultTokenBudgetHint">按 1 KB = 1000 tokens 换算；默认 0，按模型上下文窗口自动估算</span>

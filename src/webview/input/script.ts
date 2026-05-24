@@ -1939,6 +1939,7 @@ export function getInputScript(): string {
       var agentBudgetMaxToolIterations = document.getElementById('agentBudgetMaxToolIterations');
       var agentBudgetMaxToolCalls = document.getElementById('agentBudgetMaxToolCalls');
       var agentBudgetMaxRunSeconds = document.getElementById('agentBudgetMaxRunSeconds');
+      var agentBudgetStreamIdleSeconds = document.getElementById('agentBudgetStreamIdleSeconds');
       var agentBudgetToolResultTokenBudget = document.getElementById('agentBudgetToolResultTokenBudget');
       var settingsClearApiKeyBtn = document.getElementById('settingsClearApiKeyBtn');
       var settingsSaveBtn = document.getElementById('settingsSaveBtn');
@@ -1953,6 +1954,8 @@ export function getInputScript(): string {
       var defaultMaxToolCalls = 24;
       var defaultMaxRunMs = 600000;
       var defaultMaxRunSeconds = 600;
+      var defaultStreamIdleTimeoutMs = 0;
+      var defaultStreamIdleSeconds = 0;
       var defaultToolResultTokenBudget = 0;
       var maxToolResultTokenBudget = 1000000;
 
@@ -2003,6 +2006,9 @@ export function getInputScript(): string {
         if (agentBudgetMaxRunSeconds) {
           agentBudgetMaxRunSeconds.value = String(normalizeRunMsToSeconds(values.maxRunMs));
         }
+        if (agentBudgetStreamIdleSeconds) {
+          agentBudgetStreamIdleSeconds.value = String(normalizeStreamIdleMsToSeconds(values.streamIdleTimeoutMs));
+        }
         if (agentBudgetToolResultTokenBudget) {
           agentBudgetToolResultTokenBudget.value = formatBudgetKbFromTokens(normalizeIntegerInRange(values.toolResultTokenBudget, 0, maxToolResultTokenBudget, defaultToolResultTokenBudget));
         }
@@ -2040,6 +2046,11 @@ export function getInputScript(): string {
       function normalizeRunMsToSeconds(value) {
         var normalizedMs = normalizeIntegerInRange(value, 0, 3600000, defaultMaxRunMs);
         return normalizeIntegerInRange(Math.round(normalizedMs / 1000), 0, 3600, defaultMaxRunSeconds);
+      }
+
+      function normalizeStreamIdleMsToSeconds(value) {
+        var normalizedMs = normalizeIntegerInRange(value, 0, 3600000, defaultStreamIdleTimeoutMs);
+        return normalizeIntegerInRange(Math.round(normalizedMs / 1000), 0, 3600, defaultStreamIdleSeconds);
       }
 
       function normalizeNumberInRange(value, min, max, fallback) {
@@ -2095,6 +2106,8 @@ export function getInputScript(): string {
           var maxToolCalls = normalizeIntegerInRange(agentBudgetMaxToolCalls ? agentBudgetMaxToolCalls.value : defaultMaxToolCalls, 0, 256, defaultMaxToolCalls);
           var maxRunSeconds = normalizeIntegerInRange(agentBudgetMaxRunSeconds ? agentBudgetMaxRunSeconds.value : defaultMaxRunSeconds, 0, 3600, defaultMaxRunSeconds);
           var maxRunMs = maxRunSeconds * 1000;
+          var streamIdleSeconds = normalizeIntegerInRange(agentBudgetStreamIdleSeconds ? agentBudgetStreamIdleSeconds.value : defaultStreamIdleSeconds, 0, 3600, defaultStreamIdleSeconds);
+          var streamIdleTimeoutMs = streamIdleSeconds * 1000;
           var toolResultBudgetKb = normalizeToolResultBudgetKb(agentBudgetToolResultTokenBudget ? agentBudgetToolResultTokenBudget.value : defaultToolResultTokenBudget / tokensPerBudgetKb);
           var toolResultTokenBudget = normalizeIntegerInRange(budgetKbToTokens(toolResultBudgetKb), 0, maxToolResultTokenBudget, defaultToolResultTokenBudget);
           if (agentBudgetMaxTokens) {
@@ -2109,6 +2122,9 @@ export function getInputScript(): string {
           if (agentBudgetMaxRunSeconds) {
             agentBudgetMaxRunSeconds.value = String(maxRunSeconds);
           }
+          if (agentBudgetStreamIdleSeconds) {
+            agentBudgetStreamIdleSeconds.value = String(streamIdleSeconds);
+          }
           if (agentBudgetToolResultTokenBudget) {
             agentBudgetToolResultTokenBudget.value = formatBudgetKbFromTokens(toolResultTokenBudget);
           }
@@ -2118,6 +2134,7 @@ export function getInputScript(): string {
             maxToolIterations: maxToolIterations,
             maxToolCalls: maxToolCalls,
             maxRunMs: maxRunMs,
+            streamIdleTimeoutMs: streamIdleTimeoutMs,
             toolResultTokenBudget: toolResultTokenBudget
           });
           setComposerStatus(t('agentBudgetSettingsSaved'));

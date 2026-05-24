@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { AgentSettings, KeepseekModel } from './types';
 
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
-export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 180_000;
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 0;
 export const DEFAULT_MAX_TOKENS = 64_000;
 export const MAX_GENERATION_TOKENS = 384_000;
 export const DEFAULT_MAX_TOOL_ITERATIONS = 8;
@@ -16,6 +16,7 @@ export const DEFAULT_SELECTED_MODEL_ID = '';
 export const MAX_TOOL_ITERATIONS = 64;
 export const MAX_TOOL_CALLS = 256;
 export const MAX_RUN_MS = 3_600_000;
+export const MAX_STREAM_IDLE_TIMEOUT_MS = 3_600_000;
 export const MAX_TOOL_RESULT_TOKEN_BUDGET = DEFAULT_CONTEXT_WINDOW_TOKENS;
 export const AGENT_HISTORY_MESSAGE_LIMIT = 24;
 
@@ -127,7 +128,12 @@ export function getConfiguredStreamIdleTimeoutMs(): number {
   const configuredTimeout = vscode.workspace
     .getConfiguration('keepseek')
     .get<number>('streamIdleTimeoutMs', DEFAULT_STREAM_IDLE_TIMEOUT_MS);
-  return normalizeIntegerInRange(configuredTimeout, 10_000, 3_600_000, DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+  return normalizeIntegerInRange(
+    configuredTimeout,
+    0,
+    MAX_STREAM_IDLE_TIMEOUT_MS,
+    DEFAULT_STREAM_IDLE_TIMEOUT_MS
+  );
 }
 
 export function getConfiguredWorkspaceToolFileLimit(): number {
