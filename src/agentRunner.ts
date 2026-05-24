@@ -1,108 +1,34 @@
 import { randomUUID } from 'node:crypto';
-import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { AgentRequest, AgentResponse, AgentRunCallbacks, ChatMessage, DraftEdit, ReasoningEffort } from './types';
-import { formatBytes } from './fileContext';
-import { isReadableTextContent, shouldSkipReferenceUri } from './fileReference';
+import { AgentRequest, AgentResponse, AgentRunCallbacks, ChatMessage, DraftEdit } from './types';
+import { formatBytes } from './format';
+import { getMarkdownFence, getMarkdownLanguage } from './markdown';
+import {
+  AGENT_HISTORY_MESSAGE_LIMIT,
+  DEFAULT_DEEPSEEK_BASE_URL,
+  DEFAULT_MAX_TOKENS,
+  getConfiguredMaxToolIterations,
+  getConfiguredMaxTokens,
+  getConfiguredStreamIdleTimeoutMs,
+  MAX_GENERATION_TOKENS
+} from './config';
+import { WorkspaceToolAdapter, WorkspaceToolService } from './workspaceTools';
 import type { KeepseekLanguage } from './i18n';
+import { DeepSeekStreamParser } from './deepSeekStreamParser';
+import { DsmlToolParser } from './dsmlToolParser';
+import {
+  DeepSeekAssistantMessage,
+  DeepSeekChatRequestBody,
+  DeepSeekFunctionTool,
+  DeepSeekMessage,
+  DeepSeekStreamResult,
+  DeepSeekToolCall
+} from './deepSeekTypes';
 
-const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
 const LIST_WORKSPACE_FILES_TOOL_NAME = 'keepseek_list_workspace_files';
 const READ_WORKSPACE_FILE_TOOL_NAME = 'keepseek_read_workspace_file';
-const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 180_000;
-export const DEFAULT_MAX_TOKENS = 64_000;
-export const MAX_GENERATION_TOKENS = 384_000;
-const DEFAULT_MAX_TOOL_ITERATIONS = 4;
-const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
-const WORKSPACE_TOOL_GLOB_EXCLUDE = '**/{.git,.vscode-test,build,coverage,dist,node_modules,out}/**';
-export const AGENT_HISTORY_MESSAGE_LIMIT = 24;
-
-type DeepSeekRole = 'system' | 'user' | 'assistant' | 'tool';
-type DeepSeekThinkingType = 'enabled' | 'disabled';
-
-interface DeepSeekMessage {
-  role: DeepSeekRole;
-  content?: string | null;
-  reasoning_content?: string | null;
-  tool_calls?: DeepSeekToolCall[];
-  tool_call_id?: string;
-}
-
-interface DeepSeekFunctionTool {
-  type: 'function';
-  function: {
-    name: string;
-    description: string;
-    parameters: {
-      type: 'object';
-      properties: Record<string, unknown>;
-      required?: string[];
-      additionalProperties?: boolean;
-    };
-    strict?: boolean;
-  };
-}
-
-interface DeepSeekToolCall {
-  id: string;
-  type: 'function';
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
-
-interface DeepSeekToolCallDelta {
-  index?: number;
-  id?: string;
-  type?: 'function';
-  function?: {
-    name?: string;
-    arguments?: string;
-  };
-}
-
-interface DeepSeekAssistantMessage {
-  role?: 'assistant';
-  content?: string | null;
-  reasoning_content?: string | null;
-  tool_calls?: DeepSeekToolCall[] | null;
-}
-
-interface DeepSeekStreamDelta {
-  role?: 'assistant';
-  content?: string | null;
-  reasoning_content?: string | null;
-  tool_calls?: DeepSeekToolCallDelta[] | null;
-}
-
-interface DeepSeekStreamChoice {
-  delta?: DeepSeekStreamDelta;
-  finish_reason?: string | null;
-}
-
-interface DeepSeekStreamChunk {
-  choices?: DeepSeekStreamChoice[];
-}
-
-interface DeepSeekStreamResult {
-  message: DeepSeekAssistantMessage;
-  finishReason?: string | null;
-}
-
-interface DeepSeekChatRequestBody {
-  model: string;
-  messages: DeepSeekMessage[];
-  stream: true;
-  thinking?: {
-    type: DeepSeekThinkingType;
-  };
-  reasoning_effort?: ReasoningEffort;
-  tools?: DeepSeekFunctionTool[];
-  tool_choice?: 'auto' | 'none';
-  max_tokens?: number;
-}
+export { AGENT_HISTORY_MESSAGE_LIMIT, DEFAULT_MAX_TOKENS, MAX_GENERATION_TOKENS };
 
 interface AgentRuntimeConfig {
   apiKey: string;
@@ -112,27 +38,11 @@ interface AgentRuntimeConfig {
   streamIdleTimeoutMs: number;
 }
 
-interface StreamingToolCallAccumulator {
-  id: string;
-  type: 'function';
-  function: {
-    name: string;
-    arguments: string;
-  };
-}
-
-interface ParsedDsmlToolCalls {
-  content: string;
-  toolCalls: DeepSeekToolCall[];
-}
-
-interface DsmlCloseTag {
-  index: number;
-  endIndex: number;
-}
-
 export class AgentRunner {
-  private readonly decoder = new TextDecoder('utf-8', { fatal: false });
+  private readonly streamParser = new DeepSeekStreamParser();
+  private readonly dsmlToolParser = new DsmlToolParser();
+
+  public constructor(private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService()) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
     const draftEdit = this.tryCreateDraftEdit(request.prompt, request.language);
@@ -275,7 +185,7 @@ export class AgentRunner {
       }
 
       resetStreamIdleTimeout();
-      return await this.parseChatCompletionStream(response.body, request.language, callbacks, resetStreamIdleTimeout);
+      return await this.streamParser.parse(response.body, request.language, callbacks, resetStreamIdleTimeout);
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError' && abortedByStreamIdleTimeout) {
         throw new Error(request.language === 'en'
@@ -361,8 +271,8 @@ export class AgentRunner {
 
     const files = request.contextFiles.map((file) => {
       const content = file.content.replace(/\r\n?/gu, '\n');
-      const fence = this.getMarkdownFence(content);
-      const language = this.getMarkdownLanguage(file.languageId);
+      const fence = getMarkdownFence(content);
+      const language = getMarkdownLanguage(file.languageId);
       const sizedLabel = `${file.label} (${file.languageId}, ${formatBytes(file.sizeBytes)})`;
       return request.language === 'en'
         ? [
@@ -459,9 +369,9 @@ export class AgentRunner {
       const args = this.parseToolArguments(toolCall.function.arguments);
       switch (toolCall.function.name) {
         case LIST_WORKSPACE_FILES_TOOL_NAME:
-          return await this.listWorkspaceFiles(language);
+          return await this.workspaceTools.listWorkspaceFiles(language);
         case READ_WORKSPACE_FILE_TOOL_NAME:
-          return await this.readWorkspaceFile(args, language);
+          return await this.workspaceTools.readWorkspaceFile(this.readRequiredString(args, 'path'), language);
         case CREATE_DRAFT_EDIT_TOOL_NAME:
           return this.createDraftEdit(args, draftEdits);
         default:
@@ -482,11 +392,11 @@ export class AgentRunner {
     const rawPath = this.readRequiredString(args, 'path');
     const content = this.readRequiredString(args, 'content');
     const reason = this.readRequiredString(args, 'reason');
-    const uri = this.resolveTargetUri(rawPath);
+    const uri = this.workspaceTools.resolveTargetUri(rawPath);
     const draftEdit: DraftEdit = {
       id: randomUUID(),
       uri: uri.toString(),
-      label: this.getLabel(uri),
+      label: this.workspaceTools.getLabel(uri),
       newText: content,
       reason
     };
@@ -499,146 +409,6 @@ export class AgentRunner {
         label: draftEdit.label
       },
       message: 'Draft edit created. Tell the user they can review and apply it from the KeepSeek panel.'
-    });
-  }
-
-  private async listWorkspaceFiles(language: KeepseekLanguage): Promise<string> {
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    if (!folders.length) {
-      return JSON.stringify({
-        ok: false,
-        error: language === 'en'
-          ? 'Open a workspace before listing project files.'
-          : '请先打开一个工作区，再列出工程文件。'
-      });
-    }
-
-    const includeWorkspaceFolder = folders.length > 1;
-    const maxFiles = this.getWorkspaceToolFileLimit();
-    const files: Array<{
-      path: string;
-      label: string;
-      workspaceFolder: string;
-      sizeBytes: number;
-      size: string;
-      extension: string;
-    }> = [];
-    let truncated = false;
-
-    for (const folder of folders) {
-      const remaining = maxFiles - files.length;
-      if (remaining <= 0) {
-        truncated = true;
-        break;
-      }
-
-      const uris = await vscode.workspace.findFiles(
-        new vscode.RelativePattern(folder, '**/*'),
-        WORKSPACE_TOOL_GLOB_EXCLUDE,
-        remaining
-      );
-      if (uris.length >= remaining) {
-        truncated = true;
-      }
-
-      for (const uri of uris) {
-        try {
-          const stat = await vscode.workspace.fs.stat(uri);
-          if (stat.type !== vscode.FileType.File) {
-            continue;
-          }
-
-          const relativePath = vscode.workspace.asRelativePath(uri, includeWorkspaceFolder);
-          files.push({
-            path: relativePath,
-            label: path.basename(uri.fsPath || uri.path) || relativePath,
-            workspaceFolder: folder.name,
-            sizeBytes: stat.size,
-            size: formatBytes(stat.size),
-            extension: path.extname(uri.fsPath || uri.path).toLowerCase()
-          });
-        } catch {
-          // Skip files that disappeared or cannot be statted while listing.
-        }
-      }
-    }
-
-    files.sort((left, right) => left.path.localeCompare(right.path, undefined, { sensitivity: 'base' }));
-
-    return JSON.stringify({
-      ok: true,
-      files,
-      count: files.length,
-      limit: maxFiles,
-      truncated,
-      excluded: ['.git', '.vscode-test', 'build', 'coverage', 'dist', 'node_modules', 'out'],
-      workspaceFolders: folders.map((folder) => ({
-        name: folder.name,
-        uri: folder.uri.toString()
-      }))
-    });
-  }
-
-  private async readWorkspaceFile(args: Record<string, unknown>, language: KeepseekLanguage): Promise<string> {
-    const rawPath = this.readRequiredString(args, 'path');
-    const uri = this.resolveWorkspaceFileUri(rawPath);
-
-    if (shouldSkipReferenceUri(uri)) {
-      return JSON.stringify({
-        ok: false,
-        path: this.getLabel(uri),
-        error: language === 'en'
-          ? 'This file type is not read as text by KeepSeek.'
-          : 'KeepSeek 不会把这种文件类型作为文本读取。'
-      });
-    }
-
-    const stat = await vscode.workspace.fs.stat(uri);
-    if (stat.type !== vscode.FileType.File) {
-      return JSON.stringify({
-        ok: false,
-        path: this.getLabel(uri),
-        error: language === 'en' ? 'The requested path is not a regular file.' : '请求的路径不是普通文件。'
-      });
-    }
-
-    const maxBytes = this.getWorkspaceReadMaxBytes();
-    if (stat.size > maxBytes) {
-      return JSON.stringify({
-        ok: false,
-        path: this.getLabel(uri),
-        sizeBytes: stat.size,
-        limitBytes: maxBytes,
-        error: language === 'en'
-          ? `File is larger than the read limit (${formatBytes(maxBytes)}).`
-          : `文件超过读取上限（${formatBytes(maxBytes)}）。`
-      });
-    }
-
-    const bytes = await vscode.workspace.fs.readFile(uri);
-    const content = this.decodeWorkspaceText(bytes, uri, language);
-    const encodedSize = new TextEncoder().encode(content).byteLength;
-    if (encodedSize > maxBytes) {
-      return JSON.stringify({
-        ok: false,
-        path: this.getLabel(uri),
-        sizeBytes: encodedSize,
-        limitBytes: maxBytes,
-        error: language === 'en'
-          ? `Decoded text is larger than the read limit (${formatBytes(maxBytes)}).`
-          : `解码后的文本超过读取上限（${formatBytes(maxBytes)}）。`
-      });
-    }
-
-    const languageId = await this.detectLanguageId(uri);
-    return JSON.stringify({
-      ok: true,
-      path: this.getLabel(uri),
-      uri: uri.toString(),
-      languageId,
-      sizeBytes: encodedSize,
-      size: formatBytes(encodedSize),
-      content
     });
   }
 
@@ -732,211 +502,13 @@ export class AgentRunner {
     return cleaned.map((part, index) => `Step ${index + 1}\n${part}`).join('\n\n');
   }
 
-  private async parseChatCompletionStream(
-    body: NonNullable<Response['body']>,
-    language: KeepseekLanguage,
-    callbacks: AgentRunCallbacks,
-    onStreamActivity?: () => void
-  ): Promise<DeepSeekStreamResult> {
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
-    const contentParts: string[] = [];
-    const reasoningParts: string[] = [];
-    const toolCallParts = new Map<number, StreamingToolCallAccumulator>();
-    let buffer = '';
-    let finishReason: string | null | undefined;
-    let streamDone = false;
-    let sawChunk = false;
-
-    const normalizeAndConsumeBuffer = () => {
-      buffer = buffer.replace(/\r\n?/gu, '\n');
-
-      let separatorIndex = buffer.indexOf('\n\n');
-      while (separatorIndex >= 0) {
-        const rawEvent = buffer.slice(0, separatorIndex);
-        buffer = buffer.slice(separatorIndex + 2);
-        const eventResult = this.consumeSseEvent(rawEvent, language, contentParts, reasoningParts, toolCallParts, callbacks);
-        sawChunk = sawChunk || eventResult.sawChunk;
-        finishReason = eventResult.finishReason ?? finishReason;
-        streamDone = eventResult.done;
-        if (streamDone) {
-          break;
-        }
-        separatorIndex = buffer.indexOf('\n\n');
-      }
-    };
-
-    while (!streamDone) {
-      const { done, value } = await reader.read();
-      if (done) {
-        buffer += decoder.decode();
-        normalizeAndConsumeBuffer();
-        break;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-      onStreamActivity?.();
-      normalizeAndConsumeBuffer();
-    }
-
-    const remaining = buffer.trim();
-    if (remaining && !streamDone) {
-      const eventResult = this.consumeSseEvent(remaining, language, contentParts, reasoningParts, toolCallParts, callbacks);
-      sawChunk = sawChunk || eventResult.sawChunk;
-      finishReason = eventResult.finishReason ?? finishReason;
-    }
-
-    if (!sawChunk) {
-      throw new Error(language === 'en'
-        ? 'DeepSeek API did not return any streaming chunks.'
-        : 'DeepSeek API 未返回任何流式数据块。');
-    }
-
-    return {
-      message: {
-        role: 'assistant',
-        content: contentParts.join(''),
-        reasoning_content: reasoningParts.join(''),
-        tool_calls: this.buildStreamingToolCalls(toolCallParts)
-      },
-      finishReason
-    };
-  }
-
-  private consumeSseEvent(
-    rawEvent: string,
-    language: KeepseekLanguage,
-    contentParts: string[],
-    reasoningParts: string[],
-    toolCallParts: Map<number, StreamingToolCallAccumulator>,
-    callbacks: AgentRunCallbacks
-  ): { done: boolean; sawChunk: boolean; finishReason?: string | null } {
-    const dataLines = rawEvent
-      .split('\n')
-      .map((line) => line.trimEnd())
-      .filter((line) => line.startsWith('data:'))
-      .map((line) => line.slice('data:'.length).trimStart());
-
-    let finishReason: string | null | undefined;
-    let sawChunk = false;
-
-    for (const data of dataLines) {
-      if (data.trim() === '[DONE]') {
-        return { done: true, sawChunk, finishReason };
-      }
-
-      if (!data.trim()) {
-        continue;
-      }
-
-      const chunk = this.parseStreamChunk(data, language);
-      sawChunk = true;
-      finishReason = this.applyStreamChunk(chunk, contentParts, reasoningParts, toolCallParts, callbacks) ?? finishReason;
-    }
-
-    return { done: false, sawChunk, finishReason };
-  }
-
-  private parseStreamChunk(data: string, language: KeepseekLanguage): DeepSeekStreamChunk {
-    try {
-      const parsed: unknown = JSON.parse(data);
-      if (!this.isRecord(parsed)) {
-        throw new Error(language === 'en' ? 'Chunk is not a JSON object.' : '数据块不是 JSON 对象。');
-      }
-      return parsed as DeepSeekStreamChunk;
-    } catch (error) {
-      throw new Error(language === 'en'
-        ? `Cannot parse DeepSeek streaming response: ${error instanceof Error ? error.message : String(error)}`
-        : `无法解析 DeepSeek 流式响应：${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  private applyStreamChunk(
-    chunk: DeepSeekStreamChunk,
-    contentParts: string[],
-    reasoningParts: string[],
-    toolCallParts: Map<number, StreamingToolCallAccumulator>,
-    callbacks: AgentRunCallbacks
-  ): string | null | undefined {
-    let finishReason: string | null | undefined;
-    const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
-
-    for (const choice of choices) {
-      if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
-        finishReason = choice.finish_reason;
-      }
-
-      const delta = choice.delta;
-      if (!delta) {
-        continue;
-      }
-
-      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
-        reasoningParts.push(delta.reasoning_content);
-        callbacks.onDelta?.({ type: 'reasoning', delta: delta.reasoning_content });
-      }
-
-      if (typeof delta.content === 'string' && delta.content) {
-        contentParts.push(delta.content);
-        callbacks.onDelta?.({ type: 'content', delta: delta.content });
-      }
-
-      const toolCallDeltas = delta.tool_calls ?? [];
-      for (let deltaIndex = 0; deltaIndex < toolCallDeltas.length; deltaIndex += 1) {
-        const toolCallDelta = toolCallDeltas[deltaIndex];
-        const index = typeof toolCallDelta.index === 'number' ? toolCallDelta.index : deltaIndex;
-        const current = toolCallParts.get(index) ?? {
-          id: '',
-          type: 'function' as const,
-          function: {
-            name: '',
-            arguments: ''
-          }
-        };
-
-        if (typeof toolCallDelta.id === 'string' && toolCallDelta.id) {
-          current.id = toolCallDelta.id;
-        }
-        if (toolCallDelta.type === 'function') {
-          current.type = 'function';
-        }
-        if (typeof toolCallDelta.function?.name === 'string') {
-          current.function.name += toolCallDelta.function.name;
-        }
-        if (typeof toolCallDelta.function?.arguments === 'string') {
-          current.function.arguments += toolCallDelta.function.arguments;
-        }
-
-        toolCallParts.set(index, current);
-      }
-    }
-
-    return finishReason;
-  }
-
-  private buildStreamingToolCalls(toolCallParts: Map<number, StreamingToolCallAccumulator>): DeepSeekToolCall[] | null {
-    const toolCalls = Array.from(toolCallParts.entries())
-      .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
-      .map(([index, toolCall]) => ({
-        id: toolCall.id || `tool-call-${index}`,
-        type: 'function' as const,
-        function: {
-          name: toolCall.function.name,
-          arguments: toolCall.function.arguments
-        }
-      }))
-      .filter((toolCall) => Boolean(toolCall.function.name));
-
-    return toolCalls.length ? toolCalls : null;
-  }
-
   private normalizeAssistantToolCalls(assistant: DeepSeekAssistantMessage): DeepSeekAssistantMessage {
     const structuredToolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
     if (structuredToolCalls.length) {
       return assistant;
     }
 
-    const parsedDsml = this.parseDsmlToolCalls(assistant.content ?? '');
+    const parsedDsml = this.dsmlToolParser.parse(assistant.content ?? '');
     if (!parsedDsml?.toolCalls.length) {
       return assistant;
     }
@@ -946,147 +518,6 @@ export class AgentRunner {
       content: parsedDsml.content,
       tool_calls: parsedDsml.toolCalls
     };
-  }
-
-  private parseDsmlToolCalls(content: string): ParsedDsmlToolCalls | undefined {
-    if (!content.includes('DSML')) {
-      return undefined;
-    }
-
-    const normalized = this.normalizeDsmlMarkers(content);
-    const blockStartMatch = /<\|+DSML\|+tool_calls>/iu.exec(normalized);
-    if (!blockStartMatch || blockStartMatch.index === undefined) {
-      return undefined;
-    }
-
-    const blockStart = blockStartMatch.index;
-    const blockContentStart = blockStart + blockStartMatch[0].length;
-    const blockCloseMatch = /(?:<\/\|+DSML\|+tool_calls>|\|+DSML\|+tool_calls)/iu.exec(normalized.slice(blockContentStart));
-    if (!blockCloseMatch || blockCloseMatch.index === undefined) {
-      return undefined;
-    }
-
-    const blockContentEnd = blockContentStart + blockCloseMatch.index;
-    const blockEnd = blockContentEnd + blockCloseMatch[0].length;
-    const blockContent = normalized.slice(blockContentStart, blockContentEnd);
-    const toolCalls = this.parseDsmlInvocations(blockContent);
-    if (!toolCalls.length) {
-      return undefined;
-    }
-
-    return {
-      content: `${content.slice(0, blockStart)}${content.slice(blockEnd)}`.trim(),
-      toolCalls
-    };
-  }
-
-  private parseDsmlInvocations(blockContent: string): DeepSeekToolCall[] {
-    const toolCalls: DeepSeekToolCall[] = [];
-    const invokePattern = /<\|+DSML\|+invoke\b([^>]*)>/giu;
-    let invokeMatch: RegExpExecArray | null;
-
-    while ((invokeMatch = invokePattern.exec(blockContent)) !== null) {
-      const name = this.readDsmlAttribute(invokeMatch[1] ?? '', 'name');
-      if (!name) {
-        continue;
-      }
-
-      const bodyStart = invokeMatch.index + invokeMatch[0].length;
-      const closeTag = this.findDsmlCloseTag(blockContent, 'invoke', bodyStart);
-      const bodyEnd = closeTag?.index ?? blockContent.length;
-      const args = this.parseDsmlParameters(blockContent.slice(bodyStart, bodyEnd));
-      toolCalls.push({
-        id: `dsml-tool-call-${toolCalls.length}`,
-        type: 'function',
-        function: {
-          name,
-          arguments: JSON.stringify(args)
-        }
-      });
-
-      if (closeTag) {
-        invokePattern.lastIndex = closeTag.endIndex;
-      }
-    }
-
-    return toolCalls;
-  }
-
-  private parseDsmlParameters(invokeBody: string): Record<string, unknown> {
-    const args: Record<string, unknown> = {};
-    const parameterPattern = /<\|+DSML\|+parameter\b([^>]*)>/giu;
-    let parameterMatch: RegExpExecArray | null;
-
-    while ((parameterMatch = parameterPattern.exec(invokeBody)) !== null) {
-      const attributes = parameterMatch[1] ?? '';
-      const name = this.readDsmlAttribute(attributes, 'name');
-      if (!name) {
-        continue;
-      }
-
-      const bodyStart = parameterMatch.index + parameterMatch[0].length;
-      const closeTag = this.findDsmlCloseTag(invokeBody, 'parameter', bodyStart);
-      if (!closeTag) {
-        break;
-      }
-
-      const rawValue = invokeBody.slice(bodyStart, closeTag.index);
-      const isString = this.readDsmlAttribute(attributes, 'string') !== 'false';
-      args[name] = isString ? this.decodeDsmlText(rawValue) : this.parseDsmlJsonValue(rawValue);
-      parameterPattern.lastIndex = closeTag.endIndex;
-    }
-
-    return args;
-  }
-
-  private findDsmlCloseTag(content: string, tagName: 'invoke' | 'parameter', startIndex: number): DsmlCloseTag | undefined {
-    const closePattern = new RegExp(`(?:<\\/\\|+DSML\\|+${tagName}>|\\|+DSML\\|+${tagName})`, 'iu');
-    const match = closePattern.exec(content.slice(startIndex));
-    if (!match || match.index === undefined) {
-      return undefined;
-    }
-
-    const index = startIndex + match.index;
-    return {
-      index,
-      endIndex: index + match[0].length
-    };
-  }
-
-  private normalizeDsmlMarkers(content: string): string {
-    return content.replace(/\uFF5C/gu, '|');
-  }
-
-  private readDsmlAttribute(attributes: string, name: string): string | undefined {
-    const doubleQuoted = new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`, 'u').exec(attributes);
-    if (doubleQuoted) {
-      return this.decodeDsmlText(doubleQuoted[1]);
-    }
-
-    const singleQuoted = new RegExp(`\\b${name}\\s*=\\s*'([^']*)'`, 'u').exec(attributes);
-    return singleQuoted ? this.decodeDsmlText(singleQuoted[1]) : undefined;
-  }
-
-  private decodeDsmlText(value: string): string {
-    return value
-      .replace(/&quot;/gu, '"')
-      .replace(/&apos;/gu, "'")
-      .replace(/&lt;/gu, '<')
-      .replace(/&gt;/gu, '>')
-      .replace(/&amp;/gu, '&');
-  }
-
-  private parseDsmlJsonValue(value: string): unknown {
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return null;
-    }
-
-    try {
-      return JSON.parse(trimmed);
-    } catch {
-      return trimmed;
-    }
   }
 
   private formatApiError(responseText: string, language: KeepseekLanguage): string {
@@ -1124,9 +555,9 @@ export class AgentRunner {
     return {
       apiKey,
       baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL).trim() || DEFAULT_DEEPSEEK_BASE_URL,
-      maxTokens: this.clampInteger(config.get<number>('maxTokens', DEFAULT_MAX_TOKENS), 0, MAX_GENERATION_TOKENS),
-      maxToolIterations: this.clampInteger(config.get<number>('maxToolIterations', DEFAULT_MAX_TOOL_ITERATIONS), 0, 12),
-      streamIdleTimeoutMs: this.clampInteger(config.get<number>('streamIdleTimeoutMs', DEFAULT_STREAM_IDLE_TIMEOUT_MS), 10_000, 3_600_000)
+      maxTokens: getConfiguredMaxTokens(),
+      maxToolIterations: getConfiguredMaxToolIterations(),
+      streamIdleTimeoutMs: getConfiguredStreamIdleTimeoutMs()
     };
   }
 
@@ -1146,128 +577,8 @@ export class AgentRunner {
     return url.toString();
   }
 
-  private getMarkdownFence(content: string): string {
-    const runs = content.match(/`+/gu) ?? [];
-    const longestRun = runs.reduce((max, run) => Math.max(max, run.length), 0);
-    return '`'.repeat(Math.max(3, longestRun + 1));
-  }
-
-  private getMarkdownLanguage(languageId: string): string {
-    const languageById: Record<string, string> = {
-      bat: 'batch',
-      javascriptreact: 'jsx',
-      plaintext: 'text',
-      shellscript: 'bash',
-      typescriptreact: 'tsx'
-    };
-    return (languageById[languageId] ?? languageId).replace(/[^\w+.-]/gu, '') || 'text';
-  }
-
   private isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
-  }
-
-  private clampInteger(value: number | undefined, min: number, max: number): number {
-    if (!Number.isFinite(value)) {
-      return min;
-    }
-    return Math.min(Math.max(Math.floor(value as number), min), max);
-  }
-
-  private getWorkspaceToolFileLimit(): number {
-    const configuredLimit = vscode.workspace
-      .getConfiguration('keepseek')
-      .get<number>('maxWorkspaceToolFiles', DEFAULT_WORKSPACE_TOOL_FILE_LIMIT);
-    return this.clampInteger(configuredLimit, 1, 50_000);
-  }
-
-  private getWorkspaceReadMaxBytes(): number {
-    const configuredLimit = vscode.workspace
-      .getConfiguration('keepseek')
-      .get<number>('maxFileBytes', 200_000);
-    return this.clampInteger(configuredLimit, 1, 20_000_000);
-  }
-
-  private resolveWorkspaceFileUri(rawPath: string): vscode.Uri {
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    if (!folders.length) {
-      throw new Error('Open a workspace before reading project files.');
-    }
-
-    const uri = this.resolveWorkspaceFileUriCandidate(rawPath, folders);
-    if (!this.isUriInsideWorkspace(uri)) {
-      throw new Error('The requested file must be inside the currently open workspace.');
-    }
-    return uri;
-  }
-
-  private resolveWorkspaceFileUriCandidate(rawPath: string, folders: readonly vscode.WorkspaceFolder[]): vscode.Uri {
-    if (/^file:/iu.test(rawPath) || /^[a-z][a-z\d+.-]*:\/\//iu.test(rawPath)) {
-      return vscode.Uri.parse(rawPath);
-    }
-
-    if (path.isAbsolute(rawPath)) {
-      return vscode.Uri.file(rawPath);
-    }
-
-    const normalizedPath = rawPath.replace(/\\/gu, '/').replace(/^\/+/u, '');
-    if (!normalizedPath || normalizedPath.includes('\0')) {
-      throw new Error('Workspace file path cannot be empty.');
-    }
-
-    if (folders.length > 1) {
-      for (const folder of folders) {
-        const folderPrefix = `${folder.name}/`;
-        if (normalizedPath === folder.name || normalizedPath.startsWith(folderPrefix)) {
-          const pathWithinFolder = normalizedPath === folder.name
-            ? ''
-            : normalizedPath.slice(folderPrefix.length);
-          return vscode.Uri.joinPath(folder.uri, ...pathWithinFolder.split('/').filter(Boolean));
-        }
-      }
-    }
-
-    return vscode.Uri.joinPath(folders[0].uri, ...normalizedPath.split('/').filter(Boolean));
-  }
-
-  private isUriInsideWorkspace(uri: vscode.Uri): boolean {
-    const folder = vscode.workspace.getWorkspaceFolder(uri);
-    if (!folder) {
-      return false;
-    }
-
-    if (uri.scheme === 'file' && folder.uri.scheme === 'file') {
-      const relativePath = path.relative(folder.uri.fsPath, uri.fsPath);
-      return relativePath === '' || (Boolean(relativePath) && !relativePath.startsWith('..') && !path.isAbsolute(relativePath));
-    }
-
-    return true;
-  }
-
-  private decodeWorkspaceText(bytes: Uint8Array, uri: vscode.Uri, language: KeepseekLanguage): string {
-    const prefix = bytes.subarray(0, Math.min(bytes.length, 4096));
-    if (prefix.includes(0)) {
-      throw new Error(language === 'en'
-        ? `${this.getLabel(uri)} appears to be binary and was not read.`
-        : `${this.getLabel(uri)} 看起来是二进制文件，已跳过读取。`);
-    }
-
-    const content = this.decoder.decode(bytes);
-    if (!isReadableTextContent(content)) {
-      throw new Error(language === 'en'
-        ? `${this.getLabel(uri)} does not look like readable text.`
-        : `${this.getLabel(uri)} 看起来不是可读文本。`);
-    }
-    return content;
-  }
-
-  private async detectLanguageId(uri: vscode.Uri): Promise<string> {
-    try {
-      const document = await vscode.workspace.openTextDocument(uri);
-      return document.languageId;
-    } catch {
-      return 'plaintext';
-    }
   }
 
   private tryCreateDraftEdit(prompt: string, language: KeepseekLanguage): DraftEdit | undefined {
@@ -1282,11 +593,11 @@ export class AgentRunner {
       return undefined;
     }
 
-    const uri = this.resolveTargetUri(targetPath);
+    const uri = this.workspaceTools.resolveTargetUri(targetPath);
     return {
       id: randomUUID(),
       uri: uri.toString(),
-      label: this.getLabel(uri),
+      label: this.workspaceTools.getLabel(uri),
       newText,
       reason: language === 'en'
         ? 'Draft edit proposed from the KeepSeek chat panel.'
@@ -1294,27 +605,4 @@ export class AgentRunner {
     };
   }
 
-  private resolveTargetUri(targetPath: string): vscode.Uri {
-    if (/^file:/iu.test(targetPath)) {
-      return vscode.Uri.parse(targetPath);
-    }
-
-    if (path.isAbsolute(targetPath)) {
-      return vscode.Uri.file(targetPath);
-    }
-
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (!workspaceRoot) {
-      return vscode.Uri.file(path.resolve(targetPath));
-    }
-
-    return vscode.Uri.joinPath(workspaceRoot, ...targetPath.split(/[\\/]+/).filter(Boolean));
-  }
-
-  private getLabel(uri: vscode.Uri): string {
-    if (vscode.workspace.getWorkspaceFolder(uri)) {
-      return vscode.workspace.asRelativePath(uri, false);
-    }
-    return uri.fsPath;
-  }
 }

@@ -1,0 +1,128 @@
+import * as vscode from 'vscode';
+import { AgentSettings, KeepseekModel } from './types';
+
+export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 180_000;
+export const DEFAULT_MAX_TOKENS = 64_000;
+export const MAX_GENERATION_TOKENS = 384_000;
+export const DEFAULT_MAX_TOOL_ITERATIONS = 4;
+export const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
+export const DEFAULT_MAX_FILE_BYTES = 200_000;
+export const DEFAULT_CONTEXT_WINDOW_TOKENS = 1_048_576;
+export const AGENT_HISTORY_MESSAGE_LIMIT = 24;
+
+export function getConfiguredModels(): KeepseekModel[] {
+  const configured = vscode.workspace.getConfiguration('keepseek').get<KeepseekModel[]>('models', []);
+  const models = configured.filter((model) => model?.id && model.label);
+  if (models.length) {
+    return models.map((model) => ({
+      id: model.id,
+      label: model.label,
+      provider: model.provider ?? 'custom',
+      contextWindowTokens: normalizePositiveInteger(model.contextWindowTokens)
+    }));
+  }
+
+  return [
+    {
+      id: 'deepseek-v4-flash',
+      label: 'DeepSeek-V4-Flash',
+      provider: 'deepseek'
+    },
+    {
+      id: 'deepseek-v4-pro',
+      label: 'DeepSeek-V4-Pro',
+      provider: 'deepseek'
+    }
+  ];
+}
+
+export function getConfiguredAgentSettings(): AgentSettings {
+  const config = vscode.workspace.getConfiguration('keepseek');
+  return normalizeAgentSettings({
+    thinkingEnabled: config.get<boolean>('thinkingEnabled', true),
+    reasoningEffort: config.get<AgentSettings['reasoningEffort']>('reasoningEffort', 'high')
+  });
+}
+
+export function getConfiguredMaxFileBytes(): number {
+  return vscode.workspace.getConfiguration('keepseek').get('maxFileBytes', DEFAULT_MAX_FILE_BYTES);
+}
+
+export function getConfiguredMaxTokens(): number {
+  return normalizeIntegerInRange(
+    vscode.workspace.getConfiguration('keepseek').get<number>('maxTokens', DEFAULT_MAX_TOKENS),
+    0,
+    MAX_GENERATION_TOKENS,
+    DEFAULT_MAX_TOKENS
+  );
+}
+
+export function getConfiguredContextWindowTokens(model?: KeepseekModel): number {
+  const modelLimit = normalizePositiveInteger(model?.contextWindowTokens);
+  if (modelLimit) {
+    return modelLimit;
+  }
+
+  const configuredLimit = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('contextWindowTokens', DEFAULT_CONTEXT_WINDOW_TOKENS);
+  return normalizePositiveInteger(configuredLimit) ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
+}
+
+export function getConfiguredMaxToolIterations(): number {
+  const configuredLimit = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('maxToolIterations', DEFAULT_MAX_TOOL_ITERATIONS);
+  return normalizeIntegerInRange(configuredLimit, 0, 12, DEFAULT_MAX_TOOL_ITERATIONS);
+}
+
+export function getConfiguredStreamIdleTimeoutMs(): number {
+  const configuredTimeout = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('streamIdleTimeoutMs', DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+  return normalizeIntegerInRange(configuredTimeout, 10_000, 3_600_000, DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+}
+
+export function getConfiguredWorkspaceToolFileLimit(): number {
+  const configuredLimit = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('maxWorkspaceToolFiles', DEFAULT_WORKSPACE_TOOL_FILE_LIMIT);
+  return normalizeIntegerInRange(configuredLimit, 1, 50_000, DEFAULT_WORKSPACE_TOOL_FILE_LIMIT);
+}
+
+export function getConfiguredWorkspaceReadMaxBytes(): number {
+  const configuredLimit = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('maxFileBytes', DEFAULT_MAX_FILE_BYTES);
+  return normalizeIntegerInRange(configuredLimit, 1, 20_000_000, DEFAULT_MAX_FILE_BYTES);
+}
+
+export function normalizeAgentSettings(settings: Partial<AgentSettings> | undefined, fallback?: AgentSettings): AgentSettings {
+  return {
+    thinkingEnabled: typeof settings?.thinkingEnabled === 'boolean'
+      ? settings.thinkingEnabled
+      : fallback?.thinkingEnabled ?? true,
+    reasoningEffort: settings?.reasoningEffort === 'max'
+      ? 'max'
+      : settings?.reasoningEffort === 'high'
+        ? 'high'
+        : fallback?.reasoningEffort ?? 'high'
+  };
+}
+
+export function normalizePositiveInteger(value: unknown): number | undefined {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 1) {
+    return undefined;
+  }
+  return Math.floor(number);
+}
+
+export function normalizeIntegerInRange(value: unknown, min: number, max: number, fallback: number): number {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.floor(number)));
+}

@@ -1,262 +1,153 @@
-# KeepSeek 项目架构与关键实现
+# KeepSeek 架构与维护指南
 
-## 项目概述
+KeepSeek 是一个 VS Code 扩展，在 Secondary Sidebar 中提供 AI 对话面板。扩展负责会话、上下文文件、文件引用展开、DeepSeek/OpenAI 兼容流式请求、只读工作区工具，以及用户确认后的 DraftEdit 写入。
 
-KeepSeek 是一个 VS Code 扩展，在侧边栏中提供一个 AI 聊天 Agent（代码助手）。用户可以通过聊天与 AI 交互，AI 可以读取工作区文件、上下文文件，并生成可审阅的草稿编辑（DraftEdit）。
+本文档描述当前代码的真实结构。旧版约定若与本文冲突，以本文和当前源码为准。
 
-- **扩展 ID**: `keepseek.keepseek`
-- **发布者**: `keepseek`
-- **入口文件**: `src/extension.ts`
+## 分层结构
 
----
-
-## 文件结构
-
-```
-keepseek/
-├── src/
-│   ├── extension.ts          # 扩展入口 + Webview Provider（核心）
-│   ├── agentRunner.ts         # AI 调用运行器
-│   ├── fileContext.ts         # 上下文文件管理
-│   ├── fileReference.ts       # 文件引用解析、展开
-│   ├── safeFileEditor.ts      # 安全的文件编辑（DraftEdit 应用）
-│   ├── i18n.ts                # 国际化
-│   ├── types.ts               # TypeScript 类型定义
-│   ├── webview/
-│   │   ├── script.ts          # Webview 前端脚本
-│   │   ├── styles.ts          # Webview 样式
-│   │   └── template.ts        # Webview HTML 模板
-│   └── test/
-│       └── ...
-├── package.json               # VS Code 扩展清单
-├── tsconfig.json
-├── eslint.config.mjs
-└── __SKILLS.md                # 本文件
-```
-
----
-
-## 核心架构
-
-### 1. 扩展激活 (`extension.ts`)
-
-`activate()` 函数是扩展入口：
-
-1. **注册 Webview Provider**：`KeepseekChatViewProvider`，注册 Secondary Sidebar 中的 `keepseek.chatView`。
-2. **注册命令**：
-   - `keepseek.openChat` — 打开聊天窗口
-   - `keepseek.addCurrentFileToContext` — 将当前编辑器文件添加上下文
-   - `keepseek.pickWorkspaceFilesToContext` — 从工作区选取文件
-   - `keepseek.pickExternalFilesToContext` — 从外部选取文件
-   - `keepseek.addSelectionToContext` — 将选区作为文件引用插入输入框（快捷键 Ctrl+L / Cmd+L）
-   - `keepseek.addExplorerFileToContext` — 从资源管理器插入文件引用
-3. **快捷键注册** (`ensureKeybindings`)：自动在 `keybindings.json` 中注册 Ctrl+L / Cmd+L 快捷键。
-
-### 2. Webview Provider (`KeepseekChatViewProvider`)
-
-这是整个扩展的核心类，管理：
-
-| 职责 | 关键属性/方法 |
-|------|---------------|
-| Webview 生命周期 | `resolveWebviewView()`, `views: Set<WebviewView>` |
-| 会话管理 | `sessions: ChatSession[]`, `activeSessionId`, `loadSessions()`, `persistSessions()`, `createNewSession()`, `selectSession()` |
-| 消息处理 | `handleMessage()` — 处理前端发来的所有消息 |
-| 上下文文件 | `fileContext: FileContextStore` |
-| AI 运行 | `agentRunner: AgentRunner` |
-| 草稿编辑 | `safeFileEditor: SafeFileEditor`, `draftEdits: Map<string, DraftEdit>` |
-| 状态同步 | `postState()` — 将完整状态推送到 Webview |
-
-### 3. 消息流（前端 ↔ 后端）
-
-前端通过 `vscode.webview.postMessage()` 发送消息，后端在 `handleMessage()` 中处理。消息类型定义在 `WebviewMessage` 联合类型中：
-
-**用户操作类**：
-- `ready` — Webview 准备好，触发初始状态推送
-- `sendPrompt` — 发送聊天消息
-- `editUserPrompt` — 编辑已发送的用户消息（重新发送）
-- `newSession` / `selectSession` — 会话管理
-
-**设置类**：
-- `setSelectedModel` / `setAgentSettings` — 模型和代理设置
-- `openSettings` / `saveSettings` — API Key / Base URL 配置
-- `setLanguage` — 语言切换（中文/英文）
-
-**文件操作类**：
-- `addCurrentFile` / `pickWorkspaceFiles` / `pickExternalFiles` — 添加上下文文件
-- `pickExternalFileReferences` — 添加外部文件引用
-- `insertDroppedFileReferences` — 拖放文件引用
-- `readPath` — 读取路径到上下文
-- `removeContextFile` / `clearContext` — 移除/清除上下文文件
-- `requestReferenceResources` — 请求工作区文件列表（用于 `@` 补全）
-
-**文件引用类**：
-- `openFileReference` — 在编辑器中打开文件引用并定位到指定行列
-
-**草稿编辑类**：
-- `applyDraftEdit` / `discardDraftEdit` — 应用或丢弃 AI 生成的草稿编辑
-
-后端通过 `postState()` 统一推送状态，消息类型为 `'state'`，包含：
-- `models` — 可用模型列表
-- `selectedModelId` — 当前选中模型
-- `agentSettings` — Agent 设置（thinkingEnabled, reasoningEffort）
-- `messages` — 当前会话消息（不含 expandedContent）
-- `activeSessionId` / `sessionSummaries` — 会话信息
-- `contextFiles` — 上下文文件列表（不含文件内容）
-- `draftEdits` — 待处理的草稿编辑列表（不含 newText）
-- `isBusy` — 是否正在处理请求
-- `maxFileBytes` — 文件大小上限
-- `language` — 当前语言
-
-### 4. AI 调用 (`agentRunner.ts`)
-
-`AgentRunner.run()` 方法：
-
-**输入**：
-- `prompt` — 用户提示词（已展开文件引用）
-- `model` — 模型信息（id, label, provider）
-- `settings` — Agent 设置（thinkingEnabled, reasoningEffort）
-- `contextFiles` — 上下文文件（含内容）
-- `history` — 历史消息
-- `language` — 界面语言
-
-**流程**：
-1. 构造消息：system prompt（包含上下文文件内容、语言指令、工具使用说明）+ 历史消息 + 用户提示
-2. 调用 DeepSeek API（OpenAI 兼容格式），支持 streaming
-3. 解析响应中的 `reasoning_content`（思考过程）和 `content`（正式回答）
-4. 解析 AI 返回的 `__draft_edit` 工具调用，生成 `DraftEdit` 对象
-
-**输出**：
-```typescript
-{
-  message: string;           // AI 回答文本
-  reasoningContent?: string; // 思考过程
-  draftEdits: DraftEdit[];   // 草稿编辑列表
-}
+```text
+src/
+├── extension.ts                 # VS Code 激活入口与 Webview Provider 编排层
+├── agentRunner.ts               # Agent 请求编排、工具调用循环、最终响应整理
+├── deepSeekTypes.ts             # DeepSeek/OpenAI 兼容协议类型
+├── deepSeekStreamParser.ts      # SSE streaming 响应解析
+├── dsmlToolParser.ts            # DSML 工具调用兜底解析
+├── workspaceTools.ts            # Agent 只读工作区工具与目标路径解析
+├── chatSessionStore.ts          # 会话加载、持久化、裁剪与摘要
+├── draftEditStore.ts            # DraftEdit 状态、应用、应用后消息记录
+├── fileContext.ts               # 用户手动加入的上下文文件管理
+├── fileReference.ts             # prompt 内文件引用解析、授权、展开
+├── fileReferenceOpener.ts       # 双击/点击文件引用后的 VS Code 打开逻辑
+├── referenceResources.ts        # @ 文件补全资源列表
+├── textReferences.ts            # 终端/输出/调试控制台选区落盘为引用文件
+├── config.ts                    # keepseek 配置读取、默认值、范围归一化
+├── i18n.ts                      # 扩展端与 webview 端文案
+├── webview/
+│   ├── html.ts                  # CSP + HTML 拼装
+│   ├── template.ts              # Webview HTML 骨架字符串
+│   ├── styles.ts                # Webview CSS 字符串
+│   ├── script.ts                # Webview 主脚本字符串
+│   └── input/
+│       ├── template.ts          # 输入区 HTML
+│       ├── styles.ts            # 输入区 CSS
+│       └── script.ts            # 富文本输入、拖拽、@ 引用、命令菜单
+├── keybindings.ts               # 用户 keybindings.json 兼容写入
+├── markdown.ts                  # Markdown fence / language 共享工具
+├── format.ts                    # 通用格式化
+├── errors.ts                    # 错误信息归一化
+├── safeFileEditor.ts            # 用户确认后写入 DraftEdit
+└── types.ts                     # 跨模块共享领域类型
 ```
 
-### 5. 草稿编辑机制 (`safeFileEditor.ts`)
+## 核心职责
 
-AI 通过特殊格式生成草稿编辑：
+**表现层**
 
-- **格式**：`__draft_edit("path", startLine, endLine) ... __draft_edit_end`
-- `DraftEdit` 包含：`id`, `path`, `label`, `originalText`, `newText`, `startLine`, `endLine`
-- 前端显示为可展开的 diff 卡片，用户可选择 **Apply** 或 **Discard**
-- **Apply** 时调用 `safeFileEditor.applyDraftEdit()`，会：
-  1. 检查是否在 `.git` 中（安全）
-  2. 检查是否有未提交更改（安全）
-  3. 写入文件
+- `webview/template.ts`、`webview/styles.ts`、`webview/script.ts` 和 `webview/input/*` 只输出字符串。
+- `webview/html.ts` 负责 CSP、nonce、logo URI 和三段字符串拼装。
+- Webview 通过 `vscode.postMessage({ type, ... })` 发送 `WebviewMessage`；Provider 通过 `postToWebview({ type: 'state', state })` 推送状态。
 
-### 6. 文件引用系统 (`fileReference.ts`)
+**编排层**
 
-**文件引用格式**：用户在提示中使用 `@path:startLine-endLine` 引用文件。
+- `extension.ts` 中的 `KeepseekChatViewProvider` 是 VS Code/Webview 的协调者，不再直接持有会话数组或 DraftEdit Map。
+- Provider 负责注册/响应消息、调用服务、同步状态、展示 VS Code 通知。
+- 不要把可独立测试的纯逻辑继续塞回 Provider；优先放入独立模块。
 
-- `expandFileReferencesInPrompt()` — 解析提示中的 `@` 引用，替换为文件内容
-- `resolveFileReferenceUri()` — 将路径字符串解析为 VS Code URI
-- `getExplorerFileUris()` — 从资源管理器获取选中文件
-- 授权机制：外部文件引用需授权后才能读取（`authorizedExternalReferenceUris`）
+**业务层**
 
-### 7. 上下文文件管理 (`fileContext.ts`)
+- `ChatSessionStore` 管理会话生命周期，存储 key 为 `keepseek.chatSessions`，最多保留 50 个有内容会话，活跃空会话会保留。
+- `FileContextStore` 管理用户显式加入上下文的文件内容，读取限制来自 `keepseek.maxFileBytes` 和 `keepseek.maxContextFiles`。
+- `DraftEditStore` 管理待确认编辑，应用成功后追加一条 assistant 消息，并通过 `SafeFileEditor` 写入。
+- `fileReference.ts` 管理 prompt 内的 `<path>` / `<path#Lx-Ly>` 引用展开；外部文件必须先被授权。
 
-`FileContextStore` 类管理对话的上下文文件：
+**协议与基础设施层**
 
-- `addCurrentEditor()` — 添加当前编辑器文件
-- `pickWorkspaceFiles()` — 通过文件选择器添加工作区文件
-- `pickExternalFiles()` — 添加外部文件
-- `addPath()` — 通过路径添加文件
-- `remove()` / `clear()` — 移除/清除上下文
-- `getAll()` — 获取所有上下文文件（含内容）
+- `AgentRunner` 只做请求编排：构造 system prompt、拼历史、调用 DeepSeek chat completions、处理工具调用循环、整理最终消息。
+- `DeepSeekStreamParser` 只解析 SSE，包括 `content`、`reasoning_content` 和 streaming tool calls。
+- `DsmlToolParser` 是模型返回 DSML 文本工具调用时的兜底解析器。
+- `WorkspaceToolService` 是 Agent 可用的只读工作区工具边界：列文件、读文件、拒绝越界/二进制/过大文件。
+- `config.ts` 是配置默认值和归一化的唯一来源，避免各模块重复魔法数字。
 
-### 8. 国际化 (`i18n.ts`)
+## 关键通信流
 
-- 支持 `zh-CN` 和 `en` 两种语言
-- `localize(language, key, values?)` — 获取本地化字符串
-- `getConfiguredKeepseekLanguage()` — 从配置读取语言
-- 语言可通过设置面板切换
+1. Webview 调用 `vscode.postMessage({ type, ... })`。
+2. `KeepseekChatViewProvider.handleMessage()` 根据 `type` 分发。
+3. Provider 修改业务状态或调用 `AgentRunner`。
+4. Provider 调用 `postState()`，把当前状态推给所有 webview。
+5. Webview 全局 `state` 更新后 `render()`。
 
-### 9. 类型定义 (`types.ts`)
+主动从扩展推到 Webview 的特殊消息：
 
-关键类型：
+- `insertFileReference`：Provider 主动插入文件引用 chip，不属于 `WebviewMessage` 的 switch 输入。
+- `referenceResources`：回应 @ 文件补全请求。
+- `sessionChanged`、`showSettingsDialog`：UI 控制消息。
 
-```typescript
-ChatMessage        — { id, role, content, expandedContent?, reasoningContent?, createdAt, modelId? }
-ChatSession        — { id, title, messages, createdAt, updatedAt }
-ChatSessionSummary — { id, title, createdAt, updatedAt, messageCount }
-KeepseekModel      — { id, label, provider }
-AgentSettings      — { thinkingEnabled, reasoningEffort }
-DraftEdit          — { id, path, label, originalText, newText, startLine, endLine }
-ReferenceResource  — { uri, path, label, description, workspaceFolder, kind }
-ContextFile        — { uri, path, label, description, content }
-```
+## 文件引用约定
 
-### 10. 会话持久化
+- 行段引用序列化：`文件名 (第N-M行) <路径#LN-LM>`。
+- 全文引用序列化：`文件名 <路径>`。
+- `startLine: 0, endLine: 0` 表示全文引用。
+- `expandFileReferencesInPrompt()` 在发送给 Agent 前展开可读文本文件，格式为“标题行 + fenced code block”。
+- 图片、媒体、归档、常见二进制文件、超过 `keepseek.maxFileBytes` 的全文引用、未授权外部文件会保留原引用，不展开。
+- 外部文件授权 key 使用 `uri.toString()`，授权入口包括右键选区、Explorer 文件、外部文件选择、拖拽导入。
 
-- 存储在 `context.workspaceState`（VS Code 工作区状态）
-- Key: `keepseek.chatSessions`
-- 最多保存 50 个会话
-- 自动清理空会话（当前活跃会话除外）
-- 历史消息最多保留 80 条
+## Agent 与工具
 
----
+Agent 支持三个工具名：
 
-## 配置项 (`package.json` contributes.configuration)
+- `keepseek_list_workspace_files`：列出当前工作区文件，跳过 `.git`、`node_modules`、`dist` 等目录。
+- `keepseek_read_workspace_file`：读取工作区内文本文件，拒绝越界、二进制、超限文件。
+- `keepseek_create_draft_edit`：创建待确认 DraftEdit，不直接写磁盘。
 
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `keepseek.apiKey` | string | `""` | API Key |
-| `keepseek.baseUrl` | string | `"https://api.deepseek.com"` | API Base URL |
-| `keepseek.models` | array | DeepSeek-V4-Flash/V4-Pro | 可用模型列表 |
-| `keepseek.thinkingEnabled` | boolean | `true` | 是否启用思考模式 |
-| `keepseek.reasoningEffort` | string | `"high"` | 推理强度 (high/max) |
-| `keepseek.language` | string | 默认语言 | 界面语言 (zh-CN/en) |
-| `keepseek.maxFileBytes` | number | `200000` | 文件大小上限 |
+`AgentRunner.run()` 的输入输出保持在 `types.ts`：
 
----
+- 输入：`AgentRequest`，包含 prompt、模型、Agent 设置、上下文文件、历史消息、语言。
+- 输出：`AgentResponse`，包含最终文本、可选 reasoningContent、DraftEdit 列表。
 
-## 调试与安装
+工具调用循环最多由 `keepseek.maxToolIterations` 控制，默认 4，范围 0-12。
 
-### 开发调试
+## 设计原则
+
+- **依赖倒置**：`AgentRunner` 依赖 `WorkspaceToolAdapter`，默认实现是 `WorkspaceToolService`，便于测试替换。
+- **组合优于继承**：Provider 组合 `ChatSessionStore`、`DraftEditStore`、`FileContextStore`、`AgentRunner`。
+- **协议解析隔离**：SSE 和 DSML 解析独立于请求编排，避免 AgentRunner 继续膨胀。
+- **配置集中化**：默认值、范围 clamp、模型归一化都在 `config.ts`。
+- **错误边界清晰**：用户可见错误统一通过 `getErrorMessage()` + `localize()` 展示；工具返回 JSON `{ ok, error }`，不把异常直接泄漏给模型。
+- **安全写入**：AI 只能生成 DraftEdit。真正写入由用户点击 Apply 后触发。
+
+## 编码规范
+
+- 新增配置：先改 `package.json` 的 `contributes.configuration`，再在 `config.ts` 增加读取/归一化。
+- 新增 Webview 消息：更新 `WebviewMessage` 联合类型、`handleMessage()`、webview 脚本发送点；扩展主动消息不要误放进 `WebviewMessage`。
+- 修改样式只碰 `webview/styles.ts` 或 `webview/input/styles.ts`；修改输入交互只碰 `webview/input/script.ts`；修改 transcript/设置/会话 UI 只碰 `webview/script.ts`。
+- 注释只解释非显而易见的边界、安全规则或协议兼容逻辑。
+- 不要复制 Markdown fence、字节格式化、配置读取、错误字符串等公共逻辑；使用 `markdown.ts`、`format.ts`、`config.ts`、`errors.ts`。
+- 捕获异常时要么转换成用户可见本地化消息，要么转换成工具 JSON 错误。
+
+## 维护热点
+
+- `extension.ts` 仍是 VS Code Provider 编排中心，新增大功能时优先创建服务模块，再在 Provider 中接线。
+- `webview/script.ts` 和 `webview/input/script.ts` 仍是大字符串文件；改动时保持 DOM id、message type、序列化格式兼容，并重点手测输入、拖拽、@ 引用、编辑重发。
+- `safeFileEditor.ts` 当前只做确认后的整文件写入；如果未来增加 diff、冲突检测、备份或权限确认，应在这里扩展，不要放进 AgentRunner。
+- `fileReference.ts` 是引用格式兼容核心；修改时必须验证全文引用、行段引用、外部授权、不可读文件跳过。
+
+## 常用命令
 
 ```bash
-npm install
 npm run compile
 npm run lint
 ```
 
-用 VS Code 打开本目录，按 `F5` 启动 Extension Development Host。
+开发调试：用 VS Code 打开仓库，按 F5 启动 Extension Development Host。
 
-### 打包 VSIX
+## 推荐测试清单
 
-```bash
-npx vsce package --no-dependencies --out /private/tmp/keepseek-test.vsix
-```
-
-### 安装 VSIX
-
-```bash
-code --install-extension /private/tmp/keepseek-test.vsix
-```
-
-安装后执行 `Developer: Reload Window`，然后执行 `KeepSeek: Open Agent Chat`。
-
-### 重新安装
-
-```bash
-code --uninstall-extension keepseek.keepseek
-code --install-extension /private/tmp/keepseek-test.vsix
-```
-
----
-
-## 改进与扩展指南
-
-当需要修改此项目时，请参考以下关键文件：
-
-1. **添加新命令** → 修改 `extension.ts` 的 `activate()` 和 `handleMessage()`
-2. **修改 AI 行为** → 修改 `agentRunner.ts` 的 system prompt 和工具解析
-3. **添加新的前端功能** → 修改 `src/webview/script.ts`、`styles.ts`、`template.ts`
-4. **修改类型** → 修改 `src/types.ts`
-5. **添加/修改配置项** → 修改 `package.json` 的 `contributes.configuration` 和 `extension.ts` 中的读取逻辑
-6. **修改国际化** → 修改 `src/i18n.ts`
-7. **修改文件引用行为** → 修改 `src/fileReference.ts`
-8. **修改上下文文件管理** → 修改 `src/fileContext.ts`
-9. **修改草稿编辑逻辑** → 修改 `src/safeFileEditor.ts`
+- 发送普通 prompt，确认会话创建、标题生成、历史持久化。
+- 编辑已发送用户消息并重发，确认后续消息被截断并重新生成。
+- 添加当前文件、工作区文件、外部文件、目录到上下文，确认大小/二进制限制。
+- 编辑器选区、终端选区、Debug Console/Output 选区插入引用。
+- Explorer 文件右键与拖拽文件到输入框，确认全文 chip、序列化和双击打开。
+- `@` 文件补全、全文引用展开、行段引用展开、未授权外部引用不展开。
+- Agent 工具：列工作区文件、读工作区文件、生成 DraftEdit、Apply/Discard/Apply All。
+- 语言切换、API 设置保存、context window 估算显示。

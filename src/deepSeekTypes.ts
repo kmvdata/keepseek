@@ -1,0 +1,92 @@
+import type { ReasoningEffort } from './types';
+
+export type DeepSeekRole = 'system' | 'user' | 'assistant' | 'tool';
+export type DeepSeekThinkingType = 'enabled' | 'disabled';
+
+export interface DeepSeekMessage {
+  role: DeepSeekRole;
+  content?: string | null;
+  reasoning_content?: string | null;
+  tool_calls?: DeepSeekToolCall[];
+  tool_call_id?: string;
+}
+
+export interface DeepSeekFunctionTool {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: {
+      type: 'object';
+      properties: Record<string, unknown>;
+      required?: string[];
+      additionalProperties?: boolean;
+    };
+    strict?: boolean;
+  };
+}
+
+export interface DeepSeekToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export interface DeepSeekToolCallDelta {
+  index?: number;
+  id?: string;
+  type?: 'function';
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
+export interface DeepSeekAssistantMessage {
+  role?: 'assistant';
+  content?: string | null;
+  reasoning_content?: string | null;
+  tool_calls?: DeepSeekToolCall[] | null;
+}
+
+export interface DeepSeekStreamDelta {
+  role?: 'assistant';
+  content?: string | null;
+  reasoning_content?: string | null;
+  tool_calls?: DeepSeekToolCallDelta[] | null;
+}
+
+export interface DeepSeekStreamChoice {
+  delta?: DeepSeekStreamDelta;
+  finish_reason?: string | null;
+}
+
+export interface DeepSeekStreamChunk {
+  choices?: DeepSeekStreamChoice[];
+}
+
+export interface DeepSeekStreamResult {
+  message: DeepSeekAssistantMessage;
+  finishReason?: string | null;
+}
+
+export interface DeepSeekChatRequestBody {
+  model: string;
+  messages: DeepSeekMessage[];
+  stream: true;
+  thinking?: {
+    type: DeepSeekThinkingType;
+  };
+  reasoning_effort?: ReasoningEffort;
+  tools?: DeepSeekFunctionTool[];
+  tool_choice?: 'auto' | 'none';
+  max_tokens?: number;
+}
+
+export interface ParsedDsmlToolCalls {
+  content: string;
+  toolCalls: DeepSeekToolCall[];
+}

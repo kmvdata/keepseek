@@ -2,6 +2,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { DEFAULT_KEEPSEEK_LANGUAGE, normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
+import { getMarkdownFence, getMarkdownLanguage } from './markdown';
 
 const FILE_REFERENCE_PATTERN = /<([^<>\n]+)>/gu;
 const FILE_REFERENCE_LINE_PATTERN = /^(?<path>.+)#L(?<startLine>\d+)(?:C(?<startColumn>\d+))?(?:-(?:L(?<endLine>\d+))?(?:C(?<endColumn>\d+))?)?$/u;
@@ -254,7 +255,7 @@ async function expandPromptFileReference(
     return formatExpandedFileReference({
       heading: prompt.slice(reference.replacementStart, reference.matchEnd).trim(),
       content,
-      languageId: getMarkdownFenceLanguage(document)
+      languageId: getMarkdownLanguage(document.languageId)
     });
   } catch {
     return undefined;
@@ -288,29 +289,11 @@ export function shouldSkipReferenceUri(uri: vscode.Uri): boolean {
   return SKIPPED_REFERENCE_EXTENSIONS.has(path.extname(uri.fsPath || uri.path).toLowerCase());
 }
 
-function getMarkdownFenceLanguage(document: vscode.TextDocument): string {
-  const languageById: Record<string, string> = {
-    bat: 'batch',
-    javascriptreact: 'jsx',
-    plaintext: 'text',
-    shellscript: 'bash',
-    typescriptreact: 'tsx'
-  };
-  const language = languageById[document.languageId] ?? document.languageId;
-  return language.replace(/[^\w+.-]/gu, '') || 'text';
-}
-
 function formatExpandedFileReference(reference: ExpandedFileReference): string {
   const content = reference.content.replace(/\r\n?/gu, '\n');
   const fence = getMarkdownFence(content);
   const fencedContent = content.endsWith('\n') ? content : `${content}\n`;
   return `${reference.heading}\n${fence}${reference.languageId}\n${fencedContent}${fence}`;
-}
-
-function getMarkdownFence(content: string): string {
-  const runs = content.match(/`+/gu) ?? [];
-  const longestRun = runs.reduce((max, run) => Math.max(max, run.length), 0);
-  return '`'.repeat(Math.max(3, longestRun + 1));
 }
 
 function withPromptBlockBoundaries(prompt: string, start: number, end: number, block: string): string {

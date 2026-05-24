@@ -3,6 +3,8 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { ContextFile } from './types';
 import { getConfiguredKeepseekLanguage, localize } from './i18n';
+import { DEFAULT_MAX_FILE_BYTES } from './config';
+import { formatBytes } from './format';
 
 const SKIPPED_DIRECTORY_NAMES = new Set([
   '.git',
@@ -16,14 +18,18 @@ const SKIPPED_DIRECTORY_NAMES = new Set([
 
 const WORKSPACE_GLOB_EXCLUDE = '**/{.git,.vscode-test,build,coverage,dist,node_modules,out}/**';
 
-interface ContextLimits {
+export interface ContextLimits {
   maxFileBytes: number;
   maxContextFiles: number;
 }
 
+export type ContextLimitsProvider = () => ContextLimits;
+
 export class FileContextStore {
   private readonly files = new Map<string, ContextFile>();
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
+
+  public constructor(private readonly readLimits: ContextLimitsProvider = getConfiguredContextLimits) {}
 
   public getAll(): ContextFile[] {
     return Array.from(this.files.values());
@@ -240,23 +246,19 @@ export class FileContextStore {
   }
 
   private getLimits(): ContextLimits {
-    const config = vscode.workspace.getConfiguration('keepseek');
-    return {
-      maxFileBytes: config.get('maxFileBytes', 200_000),
-      maxContextFiles: config.get('maxContextFiles', 32)
-    };
+    return this.readLimits();
   }
 }
 
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+function getConfiguredContextLimits(): ContextLimits {
+  const config = vscode.workspace.getConfiguration('keepseek');
+  return {
+    maxFileBytes: config.get('maxFileBytes', DEFAULT_MAX_FILE_BYTES),
+    maxContextFiles: config.get('maxContextFiles', 32)
+  };
 }
+
+export { formatBytes } from './format';
 
 function t(key: string, values?: Record<string, string | number>): string {
   return localize(getConfiguredKeepseekLanguage(), key, values);
