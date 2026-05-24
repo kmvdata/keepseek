@@ -635,19 +635,22 @@ export function getInputScript(): string {
         if (!contextProgress) { return; }
         var usage = getContextUsageWithPrompt();
         var usedPercent = clampNumber(usage.usedPercent, 0, 100);
+        var remainingPercent = clampNumber(usage.remainingPercent, 0, 100);
+        var displayUsedPercent = formatPercent(usedPercent);
+        var displayRemainingPercent = formatPercent(remainingPercent);
         var angle = usedPercent * 3.6;
         var title = t('contextWindowEstimateTitle');
         var percentLine = t('contextWindowPercentLine', {
-          usedPercent: usedPercent,
-          remainingPercent: usage.remainingPercent
+          usedPercent: displayUsedPercent,
+          remainingPercent: displayRemainingPercent
         });
         var tokensLine = t('contextWindowTokensLine', {
           usedTokens: formatTokenCount(usage.usedTokensEstimate),
           maxTokens: formatTokenCount(usage.maxTokensEstimate)
         });
         var label = t('contextWindowProgressLabel', {
-          usedPercent: usedPercent,
-          remainingPercent: usage.remainingPercent,
+          usedPercent: displayUsedPercent,
+          remainingPercent: displayRemainingPercent,
           usedTokens: formatTokenCount(usage.usedTokensEstimate),
           maxTokens: formatTokenCount(usage.maxTokensEstimate)
         });
@@ -663,11 +666,11 @@ export function getInputScript(): string {
 
       function getContextUsageWithPrompt() {
         var usage = normalizeContextUsage(state.contextUsage);
-        var inputTokensEstimate = estimateTokenCount(serializePrompt());
+        var inputTokensEstimate = estimatePromptTokens(serializePrompt());
         var baseInputTokensEstimate = readBreakdownTokenEstimate(usage, 'inputTokensEstimate');
         var usedTokensEstimate = Math.max(0, usage.usedTokensEstimate - baseInputTokensEstimate + inputTokensEstimate);
         var maxTokensEstimate = Math.max(1, usage.maxTokensEstimate);
-        var usedPercent = Math.min(100, Math.round((usedTokensEstimate / maxTokensEstimate) * 100));
+        var usedPercent = Math.min(100, (usedTokensEstimate / maxTokensEstimate) * 100);
         return {
           usedTokensEstimate: usedTokensEstimate,
           maxTokensEstimate: maxTokensEstimate,
@@ -675,6 +678,11 @@ export function getInputScript(): string {
           usedPercent: usedPercent,
           remainingPercent: Math.max(0, 100 - usedPercent)
         };
+      }
+
+      function estimatePromptTokens(value) {
+        var text = String(value || '').trim();
+        return text ? estimateTokenCount('user\\n' + text) + 4 : 0;
       }
 
       function normalizeContextUsage(value) {
@@ -715,6 +723,20 @@ export function getInputScript(): string {
           }
         }
         return Math.ceil(estimate);
+      }
+
+      function formatPercent(value) {
+        var percent = clampNumber(value, 0, 100);
+        if (percent === 0 || percent === 100) {
+          return String(percent);
+        }
+        if (percent > 0 && percent < 0.1) {
+          return '<0.1';
+        }
+        if (percent < 10) {
+          return percent.toFixed(1);
+        }
+        return String(Math.round(percent));
       }
 
       function isCjkCodePoint(codePoint) {

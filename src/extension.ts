@@ -830,6 +830,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       activeSession.updatedAt = now;
       this.trimHistory();
       await this.persistSessions();
+      this.postState();
 
       const agentHistory = [...this.messages];
       assistantMessage = {
@@ -1274,7 +1275,10 @@ function createContextUsageEstimate(input: {
   const historyTokensEstimate = input.messages
     .filter((message) => message.role === 'user' || message.role === 'assistant')
     .slice(-AGENT_HISTORY_MESSAGE_LIMIT)
-    .reduce((total, message) => total + estimateChatMessageTokens(message.role, getMessageContentForUsage(message)), 0);
+    .reduce((total, message) => {
+      const content = getMessageContentForUsage(message);
+      return content ? total + estimateChatMessageTokens(message.role, content) : total;
+    }, 0);
   return normalizeContextUsageEstimate({
     maxTokensEstimate,
     systemTokensEstimate,
@@ -1298,7 +1302,7 @@ function normalizeContextUsageEstimate(input: {
   const inputTokensEstimate = Math.max(0, Math.floor(input.inputTokensEstimate));
   const usedTokensEstimate = systemTokensEstimate + contextFileTokensEstimate + historyTokensEstimate + inputTokensEstimate;
   const remainingTokensEstimate = Math.max(0, maxTokensEstimate - usedTokensEstimate);
-  const usedPercent = Math.min(100, Math.round((usedTokensEstimate / maxTokensEstimate) * 100));
+  const usedPercent = Math.min(100, (usedTokensEstimate / maxTokensEstimate) * 100);
 
   return {
     usedTokensEstimate,
