@@ -124,6 +124,15 @@ export function getInputStyles(): string {
       flex: 1;
     }
 
+    .composer-toolbar-right {
+      display: flex;
+      align-items: flex-end;
+      justify-content: flex-end;
+      gap: 6px;
+      flex: 0 0 auto;
+      margin-left: auto;
+    }
+
     .composer-icon-btn,
     .composer-send-btn {
       display: inline-flex;
@@ -208,6 +217,108 @@ export function getInputStyles(): string {
     .composer-send-btn {
       flex: 0 0 auto;
       margin-left: auto;
+    }
+
+    .context-progress {
+      --context-progress-angle: 0deg;
+      --context-progress-color: var(--vscode-focusBorder, var(--vscode-progressBar-background));
+      --context-progress-track: var(--vscode-panel-border, rgba(127, 127, 127, 0.28));
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      min-width: 26px;
+      height: 26px;
+      min-height: 26px;
+      border-radius: 50%;
+      color: var(--vscode-foreground);
+      outline: none;
+      cursor: default;
+    }
+
+    .context-progress.is-warning {
+      --context-progress-color: var(--vscode-editorWarning-foreground, #cca700);
+    }
+
+    .context-progress.is-danger {
+      --context-progress-color: var(--vscode-editorError-foreground, #f14c4c);
+    }
+
+    .context-progress-ring {
+      position: relative;
+      display: block;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: conic-gradient(
+        var(--context-progress-color) var(--context-progress-angle),
+        var(--context-progress-track) 0
+      );
+    }
+
+    .context-progress-ring::after {
+      content: "";
+      position: absolute;
+      inset: 4px;
+      border-radius: 50%;
+      background: var(--vscode-chat-requestBackground, var(--vscode-input-background));
+    }
+
+    .context-progress:hover .context-progress-ring,
+    .context-progress:focus-visible .context-progress-ring {
+      box-shadow: 0 0 0 1px var(--vscode-focusBorder);
+    }
+
+    .context-progress:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 1px;
+    }
+
+    .context-progress-tooltip {
+      position: absolute;
+      right: -32px;
+      bottom: calc(100% + 8px);
+      z-index: 45;
+      display: block;
+      width: max-content;
+      max-width: min(260px, calc(100vw - 18px));
+      padding: 7px 9px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 6px;
+      background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
+      color: var(--vscode-quickInput-foreground, var(--vscode-foreground));
+      box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
+      font-size: 11px;
+      line-height: 1.45;
+      white-space: normal;
+      opacity: 0;
+      transform: translateY(2px);
+      pointer-events: none;
+      transition: opacity 80ms ease, transform 80ms ease;
+    }
+
+    .context-progress-tooltip::after {
+      content: "";
+      position: absolute;
+      right: 38px;
+      bottom: -5px;
+      width: 8px;
+      height: 8px;
+      border-right: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
+      transform: rotate(45deg);
+    }
+
+    .context-progress-tooltip span {
+      display: block;
+    }
+
+    .context-progress:hover .context-progress-tooltip,
+    .context-progress:focus-visible .context-progress-tooltip {
+      opacity: 1;
+      transform: translateY(0);
     }
 
     .composer-status,

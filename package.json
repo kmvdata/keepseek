@@ -2,7 +2,7 @@
   "name": "keepseek",
   "displayName": "KeepSeek",
   "description": "AI-powered coding agent for VS Code",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "keepseek",
   "icon": "resources/keepseek.png",
   "repository": {
@@ -204,6 +204,11 @@
           "type": "number",
           "default": 200000,
           "description": "Maximum file size in bytes for reading"
+        },
+        "keepseek.contextWindowTokens": {
+          "type": "number",
+          "default": 1048576,
+          "description": "Estimated context window size in tokens for the context usage indicator"
         },
         "keepseek.streamIdleTimeoutMs": {
           "type": "number",

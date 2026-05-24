@@ -15,6 +15,10 @@ export function getInputScript(): string {
       var commandEffortSlider = document.getElementById('commandEffortSlider');
       var commandEffortValue = document.getElementById('commandEffortValue');
       var commandThinkingToggle = document.getElementById('commandThinkingToggle');
+      var contextProgress = document.getElementById('contextProgress');
+      var contextProgressTitle = document.getElementById('contextProgressTitle');
+      var contextProgressPercent = document.getElementById('contextProgressPercent');
+      var contextProgressTokens = document.getElementById('contextProgressTokens');
       var referenceMenu = document.getElementById('referenceMenu');
       var commandMenuOpen = false;
       var commandModelListOpen = false;
@@ -622,8 +626,117 @@ export function getInputScript(): string {
 
       function renderInputControls() {
         refreshPromptFileLinkLabels();
+        renderContextProgress();
         renderCommandMenu();
         setApiKeyVisible(apiKeyVisible, false);
+      }
+
+      function renderContextProgress() {
+        if (!contextProgress) { return; }
+        var usage = getContextUsageWithPrompt();
+        var usedPercent = clampNumber(usage.usedPercent, 0, 100);
+        var angle = usedPercent * 3.6;
+        var title = t('contextWindowEstimateTitle');
+        var percentLine = t('contextWindowPercentLine', {
+          usedPercent: usedPercent,
+          remainingPercent: usage.remainingPercent
+        });
+        var tokensLine = t('contextWindowTokensLine', {
+          usedTokens: formatTokenCount(usage.usedTokensEstimate),
+          maxTokens: formatTokenCount(usage.maxTokensEstimate)
+        });
+        var label = t('contextWindowProgressLabel', {
+          usedPercent: usedPercent,
+          remainingPercent: usage.remainingPercent,
+          usedTokens: formatTokenCount(usage.usedTokensEstimate),
+          maxTokens: formatTokenCount(usage.maxTokensEstimate)
+        });
+
+        contextProgress.style.setProperty('--context-progress-angle', angle + 'deg');
+        contextProgress.classList.toggle('is-warning', usedPercent >= 70 && usedPercent < 90);
+        contextProgress.classList.toggle('is-danger', usedPercent >= 90);
+        contextProgress.setAttribute('aria-label', label);
+        if (contextProgressTitle) { contextProgressTitle.textContent = title; }
+        if (contextProgressPercent) { contextProgressPercent.textContent = percentLine; }
+        if (contextProgressTokens) { contextProgressTokens.textContent = tokensLine; }
+      }
+
+      function getContextUsageWithPrompt() {
+        var usage = normalizeContextUsage(state.contextUsage);
+        var inputTokensEstimate = estimateTokenCount(serializePrompt());
+        var baseInputTokensEstimate = readBreakdownTokenEstimate(usage, 'inputTokensEstimate');
+        var usedTokensEstimate = Math.max(0, usage.usedTokensEstimate - baseInputTokensEstimate + inputTokensEstimate);
+        var maxTokensEstimate = Math.max(1, usage.maxTokensEstimate);
+        var usedPercent = Math.min(100, Math.round((usedTokensEstimate / maxTokensEstimate) * 100));
+        return {
+          usedTokensEstimate: usedTokensEstimate,
+          maxTokensEstimate: maxTokensEstimate,
+          remainingTokensEstimate: Math.max(0, maxTokensEstimate - usedTokensEstimate),
+          usedPercent: usedPercent,
+          remainingPercent: Math.max(0, 100 - usedPercent)
+        };
+      }
+
+      function normalizeContextUsage(value) {
+        var usage = value && typeof value === 'object' ? value : {};
+        var maxTokensEstimate = readFiniteNumber(usage.maxTokensEstimate, 1048576);
+        var usedTokensEstimate = readFiniteNumber(usage.usedTokensEstimate, 0);
+        return {
+          usedTokensEstimate: Math.max(0, Math.floor(usedTokensEstimate)),
+          maxTokensEstimate: Math.max(1, Math.floor(maxTokensEstimate)),
+          breakdown: usage.breakdown && typeof usage.breakdown === 'object' ? usage.breakdown : {}
+        };
+      }
+
+      function readBreakdownTokenEstimate(usage, key) {
+        return readFiniteNumber(usage.breakdown ? usage.breakdown[key] : 0, 0);
+      }
+
+      function readFiniteNumber(value, fallback) {
+        var number = Number(value);
+        return Number.isFinite(number) ? number : fallback;
+      }
+
+      function clampNumber(value, min, max) {
+        return Math.min(max, Math.max(min, Number(value) || 0));
+      }
+
+      function estimateTokenCount(value) {
+        var estimate = 0;
+        var text = String(value || '');
+        for (var character of text) {
+          var codePoint = character.codePointAt(0) || 0;
+          if (codePoint <= 0x7f) {
+            estimate += 0.3;
+          } else if (isCjkCodePoint(codePoint)) {
+            estimate += 0.6;
+          } else {
+            estimate += 0.6;
+          }
+        }
+        return Math.ceil(estimate);
+      }
+
+      function isCjkCodePoint(codePoint) {
+        return (codePoint >= 0x3400 && codePoint <= 0x9fff)
+          || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+          || (codePoint >= 0x20000 && codePoint <= 0x2a6df)
+          || (codePoint >= 0x2a700 && codePoint <= 0x2ebef);
+      }
+
+      function formatTokenCount(value) {
+        var tokens = Math.max(0, Math.round(Number(value) || 0));
+        if (tokens < 1000) {
+          return String(tokens);
+        }
+        if (tokens >= 1000000) {
+          return (Math.round((tokens / 1000000) * 10) / 10).toFixed(1).replace(/\\.0$/u, '') + 'M';
+        }
+        var thousands = tokens / 1000;
+        if (thousands >= 10) {
+          return Math.round(thousands) + 'k';
+        }
+        return (Math.round(thousands * 10) / 10).toFixed(1).replace(/\\.0$/u, '') + 'k';
       }
 
       function renderCommandMenu() {
@@ -1665,6 +1778,7 @@ export function getInputScript(): string {
         promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + 'px';
         promptInput.classList.toggle('is-empty', isEmpty);
         sendButton.disabled = state.isBusy || isEmpty;
+        renderContextProgress();
       }
 
       function isPromptEmpty() {

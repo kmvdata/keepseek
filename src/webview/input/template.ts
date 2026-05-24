@@ -42,11 +42,21 @@ export function getInputTemplate(): string {
               </button>
               <span id="status" class="composer-status"></span>
             </div>
-            <button id="sendButton" type="submit" class="composer-send-btn" title="发送" aria-label="发送" data-i18n-title="send" data-i18n-aria-label="send" disabled>
-              <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
-                <path d="M8 12.75V3.75M4.75 7 8 3.75 11.25 7" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </button>
+            <div class="composer-toolbar-right">
+              <div id="contextProgress" class="context-progress" role="status" tabindex="0" aria-describedby="contextProgressTooltip" aria-label="背景信息窗口（估算）：0% 已用（剩余 100%）。已用 0 标记，共 1M">
+                <span class="context-progress-ring" aria-hidden="true"></span>
+                <span id="contextProgressTooltip" class="context-progress-tooltip" role="tooltip">
+                  <span id="contextProgressTitle">背景信息窗口（估算）：</span>
+                  <span id="contextProgressPercent">0% 已用（剩余 100%）</span>
+                  <span id="contextProgressTokens">已用 0 标记，共 1M</span>
+                </span>
+              </div>
+              <button id="sendButton" type="submit" class="composer-send-btn" title="发送" aria-label="发送" data-i18n-title="send" data-i18n-aria-label="send" disabled>
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M8 12.75V3.75M4.75 7 8 3.75 11.25 7" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
         <div id="commandMenu" class="command-menu hidden" role="menu" aria-label="命令菜单" data-i18n-aria-label="commandMenu">

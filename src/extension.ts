@@ -3,10 +3,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { clampColumn, clampLine, expandFileReferencesInPrompt, getExplorerFileUris, getFileReferenceAuthorizationKey, getUriFileName, resolveFileReferenceUri } from './fileReference';
-import { AgentRunner } from './agentRunner';
+import { AGENT_HISTORY_MESSAGE_LIMIT, AgentRunner } from './agentRunner';
 import { FileContextStore, formatBytes } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
-import { AgentSettings, ChatMessage, ChatSession, ChatSessionSummary, DraftEdit, KeepseekModel, ReferenceResource } from './types';
+import { AgentSettings, ChatMessage, ChatSession, ChatSessionSummary, ContextFile, ContextUsageEstimate, DraftEdit, KeepseekModel, ReferenceResource } from './types';
 import { getScript } from './webview/script';
 import { getStyles } from './webview/styles';
 import { getTemplate } from './webview/template';
@@ -20,6 +20,7 @@ const MAX_STORED_SESSIONS = 50;
 const REFERENCE_RESOURCE_GLOB_EXCLUDE = '**/{.git,.vscode-test,build,coverage,dist,node_modules,out}/**';
 const TEXT_REFERENCE_STORAGE_DIR = 'text-references';
 const CLIPBOARD_COPY_SETTLE_MS = 50;
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 1_048_576;
 
 interface PromptReferenceInput {
   path: string;
@@ -941,6 +942,8 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (!this.selectedModelId || !models.some((model) => model.id === this.selectedModelId)) {
       this.selectedModelId = models[0].id;
     }
+    const selectedModel = models.find((model) => model.id === this.selectedModelId) ?? models[0];
+    const contextFiles = this.fileContext.getAll();
 
     this.postToWebview({
       type: 'state',
@@ -951,7 +954,13 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         messages: getVisibleMessages(this.messages),
         activeSessionId: this.activeSessionId,
         sessionSummaries: this.getSessionSummaries(),
-        contextFiles: this.fileContext.getAll().map(({ content: _content, ...file }) => file),
+        contextFiles: contextFiles.map(({ content: _content, ...file }) => file),
+        contextUsage: createContextUsageEstimate({
+          model: selectedModel,
+          contextFiles,
+          messages: this.messages,
+          language: this.language
+        }),
         draftEdits: Array.from(this.draftEdits.values()).map(({ newText: _newText, ...edit }) => edit),
         isBusy: this.isBusy,
         maxFileBytes: getConfiguredMaxFileBytes(),
@@ -1253,6 +1262,134 @@ function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
   return messages.map(({ expandedContent: _expandedContent, ...message }) => message);
 }
 
+function createContextUsageEstimate(input: {
+  model: KeepseekModel;
+  contextFiles: ContextFile[];
+  messages: ChatMessage[];
+  language: KeepseekLanguage;
+}): ContextUsageEstimate {
+  const maxTokensEstimate = getConfiguredContextWindowTokens(input.model);
+  const systemTokensEstimate = estimateChatMessageTokens('system', getSystemPromptEstimateText(input.language));
+  const contextFileTokensEstimate = estimateContextFileTokens(input.contextFiles, input.language);
+  const historyTokensEstimate = input.messages
+    .filter((message) => message.role === 'user' || message.role === 'assistant')
+    .slice(-AGENT_HISTORY_MESSAGE_LIMIT)
+    .reduce((total, message) => total + estimateChatMessageTokens(message.role, getMessageContentForUsage(message)), 0);
+  return normalizeContextUsageEstimate({
+    maxTokensEstimate,
+    systemTokensEstimate,
+    contextFileTokensEstimate,
+    historyTokensEstimate,
+    inputTokensEstimate: 0
+  });
+}
+
+function normalizeContextUsageEstimate(input: {
+  maxTokensEstimate: number;
+  systemTokensEstimate: number;
+  contextFileTokensEstimate: number;
+  historyTokensEstimate: number;
+  inputTokensEstimate: number;
+}): ContextUsageEstimate {
+  const maxTokensEstimate = Math.max(1, Math.floor(input.maxTokensEstimate));
+  const systemTokensEstimate = Math.max(0, Math.floor(input.systemTokensEstimate));
+  const contextFileTokensEstimate = Math.max(0, Math.floor(input.contextFileTokensEstimate));
+  const historyTokensEstimate = Math.max(0, Math.floor(input.historyTokensEstimate));
+  const inputTokensEstimate = Math.max(0, Math.floor(input.inputTokensEstimate));
+  const usedTokensEstimate = systemTokensEstimate + contextFileTokensEstimate + historyTokensEstimate + inputTokensEstimate;
+  const remainingTokensEstimate = Math.max(0, maxTokensEstimate - usedTokensEstimate);
+  const usedPercent = Math.min(100, Math.round((usedTokensEstimate / maxTokensEstimate) * 100));
+
+  return {
+    usedTokensEstimate,
+    maxTokensEstimate,
+    remainingTokensEstimate,
+    usedPercent,
+    remainingPercent: Math.max(0, 100 - usedPercent),
+    breakdown: {
+      systemTokensEstimate,
+      contextFileTokensEstimate,
+      historyTokensEstimate,
+      inputTokensEstimate
+    }
+  };
+}
+
+function estimateContextFileTokens(contextFiles: ContextFile[], language: KeepseekLanguage): number {
+  if (!contextFiles.length) {
+    return 0;
+  }
+
+  const intro = language === 'en'
+    ? 'These are the context files the user added to KeepSeek. Prefer using them when answering:'
+    : '以下是用户加入 KeepSeek 的上下文文件。回答时优先参考这些内容：';
+  let total = estimateTokenCount(intro);
+
+  for (const file of contextFiles) {
+    total += estimateTokenCount([
+      language === 'en' ? 'Context file:' : '上下文文件：',
+      file.label,
+      file.languageId,
+      formatBytes(file.sizeBytes),
+      'Path:',
+      file.fsPath,
+      file.content
+    ].join('\n')) + 8;
+  }
+
+  return total;
+}
+
+function estimateChatMessageTokens(role: ChatMessage['role'], content: string): number {
+  return estimateTokenCount(`${role}\n${content}`) + 4;
+}
+
+function getMessageContentForUsage(message: ChatMessage): string {
+  return (message.expandedContent ?? message.content).trim();
+}
+
+function estimateTokenCount(value: string): number {
+  let estimate = 0;
+  for (const character of String(value || '')) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint <= 0x7f) {
+      estimate += 0.3;
+    } else if (isCjkCodePoint(codePoint)) {
+      estimate += 0.6;
+    } else {
+      estimate += 0.6;
+    }
+  }
+  return Math.ceil(estimate);
+}
+
+function isCjkCodePoint(codePoint: number): boolean {
+  return (codePoint >= 0x3400 && codePoint <= 0x9fff)
+    || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+    || (codePoint >= 0x20000 && codePoint <= 0x2a6df)
+    || (codePoint >= 0x2a700 && codePoint <= 0x2ebef);
+}
+
+function getSystemPromptEstimateText(language: KeepseekLanguage): string {
+  return language === 'en'
+    ? [
+        'You are KeepSeek, a coding agent running in the VS Code sidebar.',
+        'Communicate with the user in English unless the user explicitly asks for another language.',
+        'You can analyze code, explain approaches, suggest changes, and call tools to create pending edits when files need to change.',
+        'Important safety rule: tools only create DraftEdit pending changes and never write to disk directly. Do not claim files were written unless the user later applies the change.',
+        'When the user asks to modify or create files, prefer calling keepseek_create_draft_edit with the target path, complete new file content, and a short reason.',
+        'If information is missing, state the gap. If you can reasonably proceed, provide an actionable result.'
+      ].join('\n')
+    : [
+        '你是 KeepSeek，一个运行在 VS Code 侧边栏里的代码 Agent。',
+        '你需要用中文和用户沟通，除非用户明确要求其它语言。',
+        '你可以根据用户的问题分析代码、解释方案、给出修改建议，并在需要改文件时调用工具创建待确认修改。',
+        '重要安全规则：工具只会创建 DraftEdit 待确认修改，不会直接写入磁盘；不要声称已经写入文件，除非用户之后手动确认。',
+        '当用户要求修改或创建文件时，优先调用 keepseek_create_draft_edit，并传入目标路径、完整的新文件内容和简短原因。',
+        '如果信息不足，先说明缺口；如果可以合理推进，就直接给出可执行结果。'
+      ].join('\n');
+}
+
 function createTitleFromMessages(messages: ChatMessage[], language: KeepseekLanguage = getConfiguredKeepseekLanguage()): string {
   const firstUserMessage = messages.find((message) => message.role === 'user');
   return firstUserMessage ? createSessionTitle(firstUserMessage.content, language) : localize(language, 'defaultSessionTitle');
@@ -1269,7 +1406,8 @@ function getConfiguredModels(): KeepseekModel[] {
     return models.map((model) => ({
       id: model.id,
       label: model.label,
-      provider: model.provider ?? 'custom'
+      provider: model.provider ?? 'custom',
+      contextWindowTokens: normalizePositiveInteger(model.contextWindowTokens)
     }));
   }
 
@@ -1297,6 +1435,26 @@ function getConfiguredAgentSettings(): AgentSettings {
 
 function getConfiguredMaxFileBytes(): number {
   return vscode.workspace.getConfiguration('keepseek').get('maxFileBytes', 200_000);
+}
+
+function getConfiguredContextWindowTokens(model?: KeepseekModel): number {
+  const modelLimit = normalizePositiveInteger(model?.contextWindowTokens);
+  if (modelLimit) {
+    return modelLimit;
+  }
+
+  const configuredLimit = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('contextWindowTokens', DEFAULT_CONTEXT_WINDOW_TOKENS);
+  return normalizePositiveInteger(configuredLimit) ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
+}
+
+function normalizePositiveInteger(value: unknown): number | undefined {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 1) {
+    return undefined;
+  }
+  return Math.floor(number);
 }
 
 function sanitizeDroppedFileName(name: string): string {

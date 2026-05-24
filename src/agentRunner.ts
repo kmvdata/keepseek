@@ -9,6 +9,7 @@ const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 180_000;
 const DEFAULT_MAX_TOOL_ITERATIONS = 4;
+export const AGENT_HISTORY_MESSAGE_LIMIT = 24;
 
 type DeepSeekRole = 'system' | 'user' | 'assistant' | 'tool';
 type DeepSeekThinkingType = 'enabled' | 'disabled';
@@ -278,7 +279,7 @@ export class AgentRunner {
 
     const recentHistory = request.history
       .filter((message) => message.role === 'user' || message.role === 'assistant')
-      .slice(-24);
+      .slice(-AGENT_HISTORY_MESSAGE_LIMIT);
 
     for (const message of recentHistory) {
       const content = this.getMessageContentForAgent(message);

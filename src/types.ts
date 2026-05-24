@@ -4,6 +4,7 @@ export interface KeepseekModel {
   id: string;
   label: string;
   provider: string;
+  contextWindowTokens?: number;
 }
 
 export type ReasoningEffort = 'high' | 'max';
@@ -24,6 +25,20 @@ export interface ContextFile {
   content: string;
   sizeBytes: number;
   source: ContextFileSource;
+}
+
+export interface ContextUsageEstimate {
+  usedTokensEstimate: number;
+  maxTokensEstimate: number;
+  remainingTokensEstimate: number;
+  usedPercent: number;
+  remainingPercent: number;
+  breakdown: {
+    systemTokensEstimate: number;
+    contextFileTokensEstimate: number;
+    historyTokensEstimate: number;
+    inputTokensEstimate: number;
+  };
 }
 
 export type ChatRole = 'user' | 'assistant' | 'system';

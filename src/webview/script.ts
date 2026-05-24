@@ -17,6 +17,19 @@ export function getScript(): string {
       activeSessionId: '',
       sessionSummaries: [],
       contextFiles: [],
+      contextUsage: {
+        usedTokensEstimate: 0,
+        maxTokensEstimate: 1048576,
+        remainingTokensEstimate: 1048576,
+        usedPercent: 0,
+        remainingPercent: 100,
+        breakdown: {
+          systemTokensEstimate: 0,
+          contextFileTokensEstimate: 0,
+          historyTokensEstimate: 0,
+          inputTokensEstimate: 0
+        }
+      },
       draftEdits: [],
       isBusy: false,
       maxFileBytes: 200000,
