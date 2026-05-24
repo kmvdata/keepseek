@@ -284,7 +284,7 @@ export function getReferenceDocumentText(document: vscode.TextDocument, rawStart
   return document.getText(new vscode.Range(start, end));
 }
 
-function shouldSkipReferenceUri(uri: vscode.Uri): boolean {
+export function shouldSkipReferenceUri(uri: vscode.Uri): boolean {
   return SKIPPED_REFERENCE_EXTENSIONS.has(path.extname(uri.fsPath || uri.path).toLowerCase());
 }
 
@@ -323,7 +323,7 @@ function isLineBreak(value: string): boolean {
   return value === '\n' || value === '\r';
 }
 
-function isReadableTextContent(content: string): boolean {
+export function isReadableTextContent(content: string): boolean {
   const sample = content.slice(0, 8192);
   if (!sample) {
     return true;

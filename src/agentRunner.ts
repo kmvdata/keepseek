@@ -3,12 +3,17 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { AgentRequest, AgentResponse, AgentRunCallbacks, ChatMessage, DraftEdit, ReasoningEffort } from './types';
 import { formatBytes } from './fileContext';
+import { isReadableTextContent, shouldSkipReferenceUri } from './fileReference';
 import type { KeepseekLanguage } from './i18n';
 
 const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
+const LIST_WORKSPACE_FILES_TOOL_NAME = 'keepseek_list_workspace_files';
+const READ_WORKSPACE_FILE_TOOL_NAME = 'keepseek_read_workspace_file';
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 180_000;
 const DEFAULT_MAX_TOOL_ITERATIONS = 4;
+const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
+const WORKSPACE_TOOL_GLOB_EXCLUDE = '**/{.git,.vscode-test,build,coverage,dist,node_modules,out}/**';
 export const AGENT_HISTORY_MESSAGE_LIMIT = 24;
 
 type DeepSeekRole = 'system' | 'user' | 'assistant' | 'tool';
@@ -115,6 +120,8 @@ interface StreamingToolCallAccumulator {
 }
 
 export class AgentRunner {
+  private readonly decoder = new TextDecoder('utf-8', { fatal: false });
+
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
     const draftEdit = this.tryCreateDraftEdit(request.prompt, request.language);
     if (draftEdit) {
@@ -169,7 +176,7 @@ export class AgentRunner {
       });
 
       for (const toolCall of toolCalls) {
-        const toolResult = this.handleToolCall(toolCall, draftEdits);
+        const toolResult = await this.handleToolCall(toolCall, draftEdits, request.language);
         messages.push({
           role: 'tool',
           tool_call_id: toolCall.id,
@@ -314,7 +321,9 @@ export class AgentRunner {
       ? [
           'You are KeepSeek, a coding agent running in the VS Code sidebar.',
           'Communicate with the user in English unless the user explicitly asks for another language.',
-          'You can analyze code, explain approaches, suggest changes, and call tools to create pending edits when files need to change.',
+          'You can analyze code, explain approaches, inspect the open workspace with read-only tools, suggest changes, and call tools to create pending edits when files need to change.',
+          'Use keepseek_list_workspace_files and keepseek_read_workspace_file when you need the current project structure or file contents. Do not ask the user to run directory listing commands or paste file contents when these tools can provide the information.',
+          'The read-only workspace tools only access files inside the open workspace, and they may skip large, binary, image, media, archive, or otherwise unreadable files.',
           'Important safety rule: tools only create DraftEdit pending changes and never write to disk directly. Do not claim files were written unless the user later applies the change.',
           'When the user asks to modify or create files, prefer calling keepseek_create_draft_edit with the target path, complete new file content, and a short reason.',
           'If information is missing, state the gap. If you can reasonably proceed, provide an actionable result.'
@@ -322,7 +331,9 @@ export class AgentRunner {
       : [
           '你是 KeepSeek，一个运行在 VS Code 侧边栏里的代码 Agent。',
           '你需要用中文和用户沟通，除非用户明确要求其它语言。',
-          '你可以根据用户的问题分析代码、解释方案、给出修改建议，并在需要改文件时调用工具创建待确认修改。',
+          '你可以根据用户的问题分析代码、解释方案、使用只读工具查看当前打开的工作区、给出修改建议，并在需要改文件时调用工具创建待确认修改。',
+          '当你需要了解当前工程结构或文件内容时，使用 keepseek_list_workspace_files 和 keepseek_read_workspace_file。只要这些工具能提供信息，就不要要求用户自行运行目录扫描命令或粘贴文件内容。',
+          '只读工作区工具只会访问当前打开工作区内的文件，并可能跳过过大、二进制、图片、媒体、归档或其它不可读文件。',
           '重要安全规则：工具只会创建 DraftEdit 待确认修改，不会直接写入磁盘；不要声称已经写入文件，除非用户之后手动确认。',
           '当用户要求修改或创建文件时，优先调用 keepseek_create_draft_edit，并传入目标路径、完整的新文件内容和简短原因。',
           '如果信息不足，先说明缺口；如果可以合理推进，就直接给出可执行结果。'
@@ -371,6 +382,39 @@ export class AgentRunner {
       {
         type: 'function',
         function: {
+          name: LIST_WORKSPACE_FILES_TOOL_NAME,
+          description: 'List files in the currently open VS Code workspace. This is read-only and skips common dependency, build, coverage, and VCS directories.',
+          strict: true,
+          parameters: {
+            type: 'object',
+            properties: {},
+            required: [],
+            additionalProperties: false
+          }
+        }
+      },
+      {
+        type: 'function',
+        function: {
+          name: READ_WORKSPACE_FILE_TOOL_NAME,
+          description: 'Read the complete text content of a file inside the currently open VS Code workspace. This is read-only and refuses files outside the workspace, oversized files, binary files, images, media, and archives.',
+          strict: true,
+          parameters: {
+            type: 'object',
+            properties: {
+              path: {
+                type: 'string',
+                description: 'Workspace-relative path from keepseek_list_workspace_files, or an absolute/file URI path that still points inside the current workspace.'
+              }
+            },
+            required: ['path'],
+            additionalProperties: false
+          }
+        }
+      },
+      {
+        type: 'function',
+        function: {
           name: CREATE_DRAFT_EDIT_TOOL_NAME,
           description: 'Create a safe draft file edit for the user to review and apply in VS Code. This never writes to disk directly.',
           strict: true,
@@ -398,43 +442,192 @@ export class AgentRunner {
     ];
   }
 
-  private handleToolCall(toolCall: DeepSeekToolCall, draftEdits: DraftEdit[]): string {
-    if (toolCall.function.name !== CREATE_DRAFT_EDIT_TOOL_NAME) {
-      return JSON.stringify({
-        ok: false,
-        error: `Unsupported tool: ${toolCall.function.name}`
-      });
-    }
-
+  private async handleToolCall(toolCall: DeepSeekToolCall, draftEdits: DraftEdit[], language: KeepseekLanguage): Promise<string> {
     try {
       const args = this.parseToolArguments(toolCall.function.arguments);
-      const rawPath = this.readRequiredString(args, 'path');
-      const content = this.readRequiredString(args, 'content');
-      const reason = this.readRequiredString(args, 'reason');
-      const uri = this.resolveTargetUri(rawPath);
-      const draftEdit: DraftEdit = {
-        id: randomUUID(),
-        uri: uri.toString(),
-        label: this.getLabel(uri),
-        newText: content,
-        reason
-      };
-
-      draftEdits.push(draftEdit);
-      return JSON.stringify({
-        ok: true,
-        draftEdit: {
-          id: draftEdit.id,
-          label: draftEdit.label
-        },
-        message: 'Draft edit created. Tell the user they can review and apply it from the KeepSeek panel.'
-      });
+      switch (toolCall.function.name) {
+        case LIST_WORKSPACE_FILES_TOOL_NAME:
+          return await this.listWorkspaceFiles(language);
+        case READ_WORKSPACE_FILE_TOOL_NAME:
+          return await this.readWorkspaceFile(args, language);
+        case CREATE_DRAFT_EDIT_TOOL_NAME:
+          return this.createDraftEdit(args, draftEdits);
+        default:
+          return JSON.stringify({
+            ok: false,
+            error: `Unsupported tool: ${toolCall.function.name}`
+          });
+      }
     } catch (error) {
       return JSON.stringify({
         ok: false,
         error: error instanceof Error ? error.message : String(error)
       });
     }
+  }
+
+  private createDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[]): string {
+    const rawPath = this.readRequiredString(args, 'path');
+    const content = this.readRequiredString(args, 'content');
+    const reason = this.readRequiredString(args, 'reason');
+    const uri = this.resolveTargetUri(rawPath);
+    const draftEdit: DraftEdit = {
+      id: randomUUID(),
+      uri: uri.toString(),
+      label: this.getLabel(uri),
+      newText: content,
+      reason
+    };
+
+    draftEdits.push(draftEdit);
+    return JSON.stringify({
+      ok: true,
+      draftEdit: {
+        id: draftEdit.id,
+        label: draftEdit.label
+      },
+      message: 'Draft edit created. Tell the user they can review and apply it from the KeepSeek panel.'
+    });
+  }
+
+  private async listWorkspaceFiles(language: KeepseekLanguage): Promise<string> {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (!folders.length) {
+      return JSON.stringify({
+        ok: false,
+        error: language === 'en'
+          ? 'Open a workspace before listing project files.'
+          : '请先打开一个工作区，再列出工程文件。'
+      });
+    }
+
+    const includeWorkspaceFolder = folders.length > 1;
+    const maxFiles = this.getWorkspaceToolFileLimit();
+    const files: Array<{
+      path: string;
+      label: string;
+      workspaceFolder: string;
+      sizeBytes: number;
+      size: string;
+      extension: string;
+    }> = [];
+    let truncated = false;
+
+    for (const folder of folders) {
+      const remaining = maxFiles - files.length;
+      if (remaining <= 0) {
+        truncated = true;
+        break;
+      }
+
+      const uris = await vscode.workspace.findFiles(
+        new vscode.RelativePattern(folder, '**/*'),
+        WORKSPACE_TOOL_GLOB_EXCLUDE,
+        remaining
+      );
+      if (uris.length >= remaining) {
+        truncated = true;
+      }
+
+      for (const uri of uris) {
+        try {
+          const stat = await vscode.workspace.fs.stat(uri);
+          if (stat.type !== vscode.FileType.File) {
+            continue;
+          }
+
+          const relativePath = vscode.workspace.asRelativePath(uri, includeWorkspaceFolder);
+          files.push({
+            path: relativePath,
+            label: path.basename(uri.fsPath || uri.path) || relativePath,
+            workspaceFolder: folder.name,
+            sizeBytes: stat.size,
+            size: formatBytes(stat.size),
+            extension: path.extname(uri.fsPath || uri.path).toLowerCase()
+          });
+        } catch {
+          // Skip files that disappeared or cannot be statted while listing.
+        }
+      }
+    }
+
+    files.sort((left, right) => left.path.localeCompare(right.path, undefined, { sensitivity: 'base' }));
+
+    return JSON.stringify({
+      ok: true,
+      files,
+      count: files.length,
+      limit: maxFiles,
+      truncated,
+      excluded: ['.git', '.vscode-test', 'build', 'coverage', 'dist', 'node_modules', 'out'],
+      workspaceFolders: folders.map((folder) => ({
+        name: folder.name,
+        uri: folder.uri.toString()
+      }))
+    });
+  }
+
+  private async readWorkspaceFile(args: Record<string, unknown>, language: KeepseekLanguage): Promise<string> {
+    const rawPath = this.readRequiredString(args, 'path');
+    const uri = this.resolveWorkspaceFileUri(rawPath);
+
+    if (shouldSkipReferenceUri(uri)) {
+      return JSON.stringify({
+        ok: false,
+        path: this.getLabel(uri),
+        error: language === 'en'
+          ? 'This file type is not read as text by KeepSeek.'
+          : 'KeepSeek 不会把这种文件类型作为文本读取。'
+      });
+    }
+
+    const stat = await vscode.workspace.fs.stat(uri);
+    if (stat.type !== vscode.FileType.File) {
+      return JSON.stringify({
+        ok: false,
+        path: this.getLabel(uri),
+        error: language === 'en' ? 'The requested path is not a regular file.' : '请求的路径不是普通文件。'
+      });
+    }
+
+    const maxBytes = this.getWorkspaceReadMaxBytes();
+    if (stat.size > maxBytes) {
+      return JSON.stringify({
+        ok: false,
+        path: this.getLabel(uri),
+        sizeBytes: stat.size,
+        limitBytes: maxBytes,
+        error: language === 'en'
+          ? `File is larger than the read limit (${formatBytes(maxBytes)}).`
+          : `文件超过读取上限（${formatBytes(maxBytes)}）。`
+      });
+    }
+
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    const content = this.decodeWorkspaceText(bytes, uri, language);
+    const encodedSize = new TextEncoder().encode(content).byteLength;
+    if (encodedSize > maxBytes) {
+      return JSON.stringify({
+        ok: false,
+        path: this.getLabel(uri),
+        sizeBytes: encodedSize,
+        limitBytes: maxBytes,
+        error: language === 'en'
+          ? `Decoded text is larger than the read limit (${formatBytes(maxBytes)}).`
+          : `解码后的文本超过读取上限（${formatBytes(maxBytes)}）。`
+      });
+    }
+
+    const languageId = await this.detectLanguageId(uri);
+    return JSON.stringify({
+      ok: true,
+      path: this.getLabel(uri),
+      uri: uri.toString(),
+      languageId,
+      sizeBytes: encodedSize,
+      size: formatBytes(encodedSize),
+      content
+    });
   }
 
   private parseToolArguments(rawArguments: string): Record<string, unknown> {
@@ -797,6 +990,102 @@ export class AgentRunner {
       return min;
     }
     return Math.min(Math.max(Math.floor(value as number), min), max);
+  }
+
+  private getWorkspaceToolFileLimit(): number {
+    const configuredLimit = vscode.workspace
+      .getConfiguration('keepseek')
+      .get<number>('maxWorkspaceToolFiles', DEFAULT_WORKSPACE_TOOL_FILE_LIMIT);
+    return this.clampInteger(configuredLimit, 1, 50_000);
+  }
+
+  private getWorkspaceReadMaxBytes(): number {
+    const configuredLimit = vscode.workspace
+      .getConfiguration('keepseek')
+      .get<number>('maxFileBytes', 200_000);
+    return this.clampInteger(configuredLimit, 1, 20_000_000);
+  }
+
+  private resolveWorkspaceFileUri(rawPath: string): vscode.Uri {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (!folders.length) {
+      throw new Error('Open a workspace before reading project files.');
+    }
+
+    const uri = this.resolveWorkspaceFileUriCandidate(rawPath, folders);
+    if (!this.isUriInsideWorkspace(uri)) {
+      throw new Error('The requested file must be inside the currently open workspace.');
+    }
+    return uri;
+  }
+
+  private resolveWorkspaceFileUriCandidate(rawPath: string, folders: readonly vscode.WorkspaceFolder[]): vscode.Uri {
+    if (/^file:/iu.test(rawPath) || /^[a-z][a-z\d+.-]*:\/\//iu.test(rawPath)) {
+      return vscode.Uri.parse(rawPath);
+    }
+
+    if (path.isAbsolute(rawPath)) {
+      return vscode.Uri.file(rawPath);
+    }
+
+    const normalizedPath = rawPath.replace(/\\/gu, '/').replace(/^\/+/u, '');
+    if (!normalizedPath || normalizedPath.includes('\0')) {
+      throw new Error('Workspace file path cannot be empty.');
+    }
+
+    if (folders.length > 1) {
+      for (const folder of folders) {
+        const folderPrefix = `${folder.name}/`;
+        if (normalizedPath === folder.name || normalizedPath.startsWith(folderPrefix)) {
+          const pathWithinFolder = normalizedPath === folder.name
+            ? ''
+            : normalizedPath.slice(folderPrefix.length);
+          return vscode.Uri.joinPath(folder.uri, ...pathWithinFolder.split('/').filter(Boolean));
+        }
+      }
+    }
+
+    return vscode.Uri.joinPath(folders[0].uri, ...normalizedPath.split('/').filter(Boolean));
+  }
+
+  private isUriInsideWorkspace(uri: vscode.Uri): boolean {
+    const folder = vscode.workspace.getWorkspaceFolder(uri);
+    if (!folder) {
+      return false;
+    }
+
+    if (uri.scheme === 'file' && folder.uri.scheme === 'file') {
+      const relativePath = path.relative(folder.uri.fsPath, uri.fsPath);
+      return relativePath === '' || (Boolean(relativePath) && !relativePath.startsWith('..') && !path.isAbsolute(relativePath));
+    }
+
+    return true;
+  }
+
+  private decodeWorkspaceText(bytes: Uint8Array, uri: vscode.Uri, language: KeepseekLanguage): string {
+    const prefix = bytes.subarray(0, Math.min(bytes.length, 4096));
+    if (prefix.includes(0)) {
+      throw new Error(language === 'en'
+        ? `${this.getLabel(uri)} appears to be binary and was not read.`
+        : `${this.getLabel(uri)} 看起来是二进制文件，已跳过读取。`);
+    }
+
+    const content = this.decoder.decode(bytes);
+    if (!isReadableTextContent(content)) {
+      throw new Error(language === 'en'
+        ? `${this.getLabel(uri)} does not look like readable text.`
+        : `${this.getLabel(uri)} 看起来不是可读文本。`);
+    }
+    return content;
+  }
+
+  private async detectLanguageId(uri: vscode.Uri): Promise<string> {
+    try {
+      const document = await vscode.workspace.openTextDocument(uri);
+      return document.languageId;
+    } catch {
+      return 'plaintext';
+    }
   }
 
   private tryCreateDraftEdit(prompt: string, language: KeepseekLanguage): DraftEdit | undefined {

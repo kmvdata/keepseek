@@ -205,6 +205,11 @@
           "default": 200000,
           "description": "Maximum file size in bytes for reading"
         },
+        "keepseek.maxWorkspaceToolFiles": {
+          "type": "number",
+          "default": 2000,
+          "description": "Maximum number of workspace files returned to the agent by the read-only file listing tool"
+        },
         "keepseek.contextWindowTokens": {
           "type": "number",
           "default": 1048576,
