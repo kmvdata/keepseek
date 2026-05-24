@@ -76,11 +76,15 @@ type WebviewMessage =
   | { type: 'selectSession'; sessionId: string }
   | { type: 'setSelectedModel'; modelId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
-  | { type: 'openSettings' }
+  | { type: 'openApiSettings' }
+  | { type: 'openAgentBudgetSettings' }
   | {
-      type: 'saveSettings';
+      type: 'saveApiSettings';
       apiKey: string;
       baseUrl: string;
+    }
+  | {
+      type: 'saveAgentBudgetSettings';
       maxTokens?: number;
       maxToolIterations?: number;
       maxToolCalls?: number;
@@ -461,12 +465,18 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'setAgentSettings':
         await this.setAgentSettings(message.settings);
         return;
-      case 'openSettings': {
+      case 'openApiSettings': {
         const config = vscode.workspace.getConfiguration('keepseek');
         this.postToWebview({
           type: 'showSettingsDialog',
           apiKey: config.get<string>('apiKey', ''),
-          baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL),
+          baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL)
+        });
+        return;
+      }
+      case 'openAgentBudgetSettings': {
+        this.postToWebview({
+          type: 'showAgentBudgetDialog',
           maxTokens: getConfiguredMaxTokens(),
           maxToolIterations: getConfiguredMaxToolIterations(),
           maxToolCalls: getConfiguredMaxToolCalls(),
@@ -475,16 +485,21 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         });
         return;
       }
-      case 'saveSettings': {
+      case 'saveApiSettings': {
         const config = vscode.workspace.getConfiguration('keepseek');
         await config.update('apiKey', message.apiKey, vscode.ConfigurationTarget.Global);
         await config.update('baseUrl', message.baseUrl, vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage(this.t('apiSettingsSaved'));
+        return;
+      }
+      case 'saveAgentBudgetSettings': {
+        const config = vscode.workspace.getConfiguration('keepseek');
         await config.update('maxTokens', normalizeIntegerInRange(message.maxTokens, 0, MAX_GENERATION_TOKENS, DEFAULT_MAX_TOKENS), vscode.ConfigurationTarget.Global);
         await config.update('maxToolIterations', normalizeIntegerInRange(message.maxToolIterations, 0, MAX_TOOL_ITERATIONS, DEFAULT_MAX_TOOL_ITERATIONS), vscode.ConfigurationTarget.Global);
         await config.update('maxToolCalls', normalizeIntegerInRange(message.maxToolCalls, 0, MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS), vscode.ConfigurationTarget.Global);
         await config.update('maxRunMs', normalizeIntegerInRange(message.maxRunMs, 0, MAX_RUN_MS, DEFAULT_MAX_RUN_MS), vscode.ConfigurationTarget.Global);
         await config.update('toolResultTokenBudget', normalizeIntegerInRange(message.toolResultTokenBudget, 0, MAX_TOOL_RESULT_TOKEN_BUDGET, DEFAULT_TOOL_RESULT_TOKEN_BUDGET), vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage(this.t('apiSettingsSaved'));
+        vscode.window.showInformationMessage(this.t('agentBudgetSettingsSaved'));
         return;
       }
       case 'setLanguage': {

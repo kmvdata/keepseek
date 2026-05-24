@@ -19,8 +19,8 @@ export function getScript(): string {
       contextFiles: [],
       contextUsage: {
         usedTokensEstimate: 0,
-        maxTokensEstimate: 1048576,
-        remainingTokensEstimate: 1048576,
+        maxTokensEstimate: 1000000,
+        remainingTokensEstimate: 1000000,
         usedPercent: 0,
         remainingPercent: 100,
         breakdown: {
@@ -67,6 +67,7 @@ export function getScript(): string {
     const settingsTab = document.getElementById('settingsTab');
     const settingsMenu = document.getElementById('settingsMenu');
     const settingsApiKeyMenuItem = document.getElementById('settingsApiKeyMenuItem');
+    const settingsAgentBudgetMenuItem = document.getElementById('settingsAgentBudgetMenuItem');
     const settingsLanguageMenuItem = document.getElementById('settingsLanguageMenuItem');
     const settingsLanguageValue = document.getElementById('settingsLanguageValue');
     const settingsLanguageSubmenu = document.getElementById('settingsLanguageSubmenu');
@@ -333,7 +334,16 @@ export function getScript(): string {
         event.preventDefault();
         event.stopPropagation();
         closeSettingsMenu();
-        vscode.postMessage({ type: 'openSettings' });
+        vscode.postMessage({ type: 'openApiSettings' });
+      });
+    }
+
+    if (settingsAgentBudgetMenuItem) {
+      settingsAgentBudgetMenuItem.addEventListener('click', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsMenu();
+        vscode.postMessage({ type: 'openAgentBudgetSettings' });
       });
     }
 
@@ -436,6 +446,10 @@ export function getScript(): string {
       } else if (message.type === 'showSettingsDialog') {
         if (window.keepseekInputControls && window.keepseekInputControls.showSettingsDialog) {
           window.keepseekInputControls.showSettingsDialog(message);
+        }
+      } else if (message.type === 'showAgentBudgetDialog') {
+        if (window.keepseekInputControls && window.keepseekInputControls.showAgentBudgetDialog) {
+          window.keepseekInputControls.showAgentBudgetDialog(message);
         }
       } else if (message.type === 'referenceResources') {
         handleEditReferenceResourcesMessage(message);

@@ -84,6 +84,7 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 | `keepseek.maxToolCalls` | `24` | 单次 Agent 执行的最大工具调用总数；设为 `0` 时不启用单独调用数上限 |
 | `keepseek.maxRunMs` | `600000` | 单次 Agent 执行的最大总时长（毫秒）；设为 `0` 时不启用总时长上限 |
 | `keepseek.toolResultTokenBudget` | `0` | 单次 Agent 执行中工具结果可使用的估算 token 预算；设为 `0` 时按模型上下文窗口自动估算 |
+| `keepseek.contextWindowTokens` | `1000000` | 上下文窗口估算 tokens，用于上下文用量指示器 |
 
 ## 隐私与安全
 
@@ -247,6 +248,7 @@ KeepSeek is built around explicit context. You decide which files, selections, a
 | `keepseek.maxToolCalls` | `24` | Maximum total tool calls in one agent run; set `0` to disable this separate cap |
 | `keepseek.maxRunMs` | `600000` | Maximum total run time in milliseconds for one agent run; set `0` to disable the total run-time cap |
 | `keepseek.toolResultTokenBudget` | `0` | Estimated token budget for tool results in one agent run; set `0` to derive it from the model context window |
+| `keepseek.contextWindowTokens` | `1000000` | Estimated context-window tokens for the context usage indicator |
 
 ## Privacy And Safety
 

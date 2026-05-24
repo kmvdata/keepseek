@@ -237,7 +237,7 @@
           "type": "number",
           "default": 0,
           "minimum": 0,
-          "maximum": 1048576,
+          "maximum": 1000000,
           "description": "Maximum estimated tokens reserved for tool results in one agent run. Set 0 to automatically derive the budget from the selected model context window."
         },
         "keepseek.maxWorkspaceToolFiles": {
@@ -247,7 +247,7 @@
         },
         "keepseek.contextWindowTokens": {
           "type": "number",
-          "default": 1048576,
+          "default": 1000000,
           "description": "Estimated context window size in tokens for the context usage indicator"
         },
         "keepseek.streamIdleTimeoutMs": {

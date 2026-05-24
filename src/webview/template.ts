@@ -34,8 +34,14 @@ export function getTemplate(): string {
       </div>
       <button id="settingsApiKeyMenuItem" type="button" class="command-row settings-menu-row">
         <span class="command-row-main">
-          <span class="command-row-title" data-i18n="settingsApiKeyTitle">API 与预算</span>
-          <span class="command-row-description" data-i18n="settingsApiKeyDescription">API key、输出和 Agent 预算设置</span>
+          <span class="command-row-title" data-i18n="settingsApiKeyTitle">API Key</span>
+          <span class="command-row-description" data-i18n="settingsApiKeyDescription">API Key 和 Base URL</span>
+        </span>
+      </button>
+      <button id="settingsAgentBudgetMenuItem" type="button" class="command-row settings-menu-row">
+        <span class="command-row-main">
+          <span class="command-row-title" data-i18n="settingsAgentBudgetMenuTitle">Agent 执行预算</span>
+          <span class="command-row-description" data-i18n="settingsAgentBudgetMenuDescription">输出 KB、工具轮次和运行时间上限</span>
         </span>
       </button>
       <div class="settings-language-item">

@@ -687,7 +687,7 @@ export function getInputScript(): string {
 
       function normalizeContextUsage(value) {
         var usage = value && typeof value === 'object' ? value : {};
-        var maxTokensEstimate = readFiniteNumber(usage.maxTokensEstimate, 1048576);
+        var maxTokensEstimate = readFiniteNumber(usage.maxTokensEstimate, 1000000);
         var usedTokensEstimate = readFiniteNumber(usage.usedTokensEstimate, 0);
         return {
           usedTokensEstimate: Math.max(0, Math.floor(usedTokensEstimate)),
@@ -1842,21 +1842,27 @@ export function getInputScript(): string {
       var settingsApiKey = document.getElementById('settingsApiKey');
       var settingsApiKeyVisibilityBtn = document.getElementById('settingsApiKeyVisibilityBtn');
       var settingsBaseUrl = document.getElementById('settingsBaseUrl');
-      var settingsMaxTokens = document.getElementById('settingsMaxTokens');
-      var settingsMaxToolIterations = document.getElementById('settingsMaxToolIterations');
-      var settingsMaxToolCalls = document.getElementById('settingsMaxToolCalls');
-      var settingsMaxRunMs = document.getElementById('settingsMaxRunMs');
-      var settingsToolResultTokenBudget = document.getElementById('settingsToolResultTokenBudget');
+      var agentBudgetOverlay = document.getElementById('agentBudgetDialogOverlay');
+      var agentBudgetMaxTokens = document.getElementById('agentBudgetMaxTokens');
+      var agentBudgetMaxToolIterations = document.getElementById('agentBudgetMaxToolIterations');
+      var agentBudgetMaxToolCalls = document.getElementById('agentBudgetMaxToolCalls');
+      var agentBudgetMaxRunSeconds = document.getElementById('agentBudgetMaxRunSeconds');
+      var agentBudgetToolResultTokenBudget = document.getElementById('agentBudgetToolResultTokenBudget');
       var settingsClearApiKeyBtn = document.getElementById('settingsClearApiKeyBtn');
       var settingsSaveBtn = document.getElementById('settingsSaveBtn');
       var settingsCancelBtn = document.getElementById('settingsCancelBtn');
+      var agentBudgetSaveBtn = document.getElementById('agentBudgetSaveBtn');
+      var agentBudgetCancelBtn = document.getElementById('agentBudgetCancelBtn');
       var apiKeyVisible = false;
       var defaultMaxTokens = 64000;
       var maxGenerationTokens = 384000;
+      var tokensPerBudgetKb = 1000;
       var defaultMaxToolIterations = 8;
       var defaultMaxToolCalls = 24;
       var defaultMaxRunMs = 600000;
+      var defaultMaxRunSeconds = 600;
       var defaultToolResultTokenBudget = 0;
+      var maxToolResultTokenBudget = 1000000;
 
       function setApiKeyVisible(isVisible, shouldFocus) {
         apiKeyVisible = Boolean(isVisible);
@@ -1885,28 +1891,71 @@ export function getInputScript(): string {
         var values = settings && typeof settings === 'object' ? settings : {};
         settingsApiKey.value = values.apiKey || '';
         settingsBaseUrl.value = values.baseUrl || 'https://api.deepseek.com';
-        if (settingsMaxTokens) {
-          settingsMaxTokens.value = String(normalizeMaxTokens(values.maxTokens));
-        }
-        if (settingsMaxToolIterations) {
-          settingsMaxToolIterations.value = String(normalizeIntegerInRange(values.maxToolIterations, 0, 64, defaultMaxToolIterations));
-        }
-        if (settingsMaxToolCalls) {
-          settingsMaxToolCalls.value = String(normalizeIntegerInRange(values.maxToolCalls, 0, 256, defaultMaxToolCalls));
-        }
-        if (settingsMaxRunMs) {
-          settingsMaxRunMs.value = String(normalizeIntegerInRange(values.maxRunMs, 0, 3600000, defaultMaxRunMs));
-        }
-        if (settingsToolResultTokenBudget) {
-          settingsToolResultTokenBudget.value = String(normalizeIntegerInRange(values.toolResultTokenBudget, 0, 1048576, defaultToolResultTokenBudget));
-        }
         setApiKeyVisible(false, false);
         settingsOverlay.classList.remove('hidden');
         settingsApiKey.focus();
       }
 
+      function showAgentBudgetDialog(settings) {
+        if (!agentBudgetOverlay) { return; }
+        var values = settings && typeof settings === 'object' ? settings : {};
+        if (agentBudgetMaxTokens) {
+          agentBudgetMaxTokens.value = formatBudgetKbFromTokens(normalizeMaxTokens(values.maxTokens));
+        }
+        if (agentBudgetMaxToolIterations) {
+          agentBudgetMaxToolIterations.value = String(normalizeIntegerInRange(values.maxToolIterations, 0, 64, defaultMaxToolIterations));
+        }
+        if (agentBudgetMaxToolCalls) {
+          agentBudgetMaxToolCalls.value = String(normalizeIntegerInRange(values.maxToolCalls, 0, 256, defaultMaxToolCalls));
+        }
+        if (agentBudgetMaxRunSeconds) {
+          agentBudgetMaxRunSeconds.value = String(normalizeRunMsToSeconds(values.maxRunMs));
+        }
+        if (agentBudgetToolResultTokenBudget) {
+          agentBudgetToolResultTokenBudget.value = formatBudgetKbFromTokens(normalizeIntegerInRange(values.toolResultTokenBudget, 0, maxToolResultTokenBudget, defaultToolResultTokenBudget));
+        }
+        agentBudgetOverlay.classList.remove('hidden');
+        if (agentBudgetMaxTokens) {
+          agentBudgetMaxTokens.focus();
+        }
+      }
+
       function normalizeMaxTokens(value) {
         return normalizeIntegerInRange(value, 0, maxGenerationTokens, defaultMaxTokens);
+      }
+
+      function normalizeMaxTokensKb(value) {
+        return normalizeNumberInRange(value, 0, maxGenerationTokens / tokensPerBudgetKb, defaultMaxTokens / tokensPerBudgetKb);
+      }
+
+      function normalizeToolResultBudgetKb(value) {
+        return normalizeNumberInRange(value, 0, maxToolResultTokenBudget / tokensPerBudgetKb, defaultToolResultTokenBudget / tokensPerBudgetKb);
+      }
+
+      function budgetKbToTokens(value) {
+        return Math.round(Number(value) * tokensPerBudgetKb);
+      }
+
+      function formatBudgetKbFromTokens(value) {
+        var kb = Number(value) / tokensPerBudgetKb;
+        if (!Number.isFinite(kb)) {
+          return '0';
+        }
+        var rounded = Math.round(kb * 100) / 100;
+        return String(rounded).replace(/\\.00$/u, '').replace(/(\\.\\d)0$/u, '$1');
+      }
+
+      function normalizeRunMsToSeconds(value) {
+        var normalizedMs = normalizeIntegerInRange(value, 0, 3600000, defaultMaxRunMs);
+        return normalizeIntegerInRange(Math.round(normalizedMs / 1000), 0, 3600, defaultMaxRunSeconds);
+      }
+
+      function normalizeNumberInRange(value, min, max, fallback) {
+        var number = Number(value);
+        if (!Number.isFinite(number)) {
+          return fallback;
+        }
+        return Math.min(max, Math.max(min, number));
       }
 
       function normalizeIntegerInRange(value, min, max, fallback) {
@@ -1923,6 +1972,12 @@ export function getInputScript(): string {
         promptInput.focus();
       }
 
+      function hideAgentBudgetDialog() {
+        if (!agentBudgetOverlay) { return; }
+        agentBudgetOverlay.classList.add('hidden');
+        promptInput.focus();
+      }
+
       if (settingsSaveBtn) {
         settingsSaveBtn.addEventListener('click', function() {
           var apiKey = settingsApiKey ? settingsApiKey.value.trim() : '';
@@ -1930,38 +1985,51 @@ export function getInputScript(): string {
           if (!baseUrl) {
             baseUrl = 'https://api.deepseek.com';
           }
-          var maxTokens = normalizeMaxTokens(settingsMaxTokens ? settingsMaxTokens.value : defaultMaxTokens);
-          var maxToolIterations = normalizeIntegerInRange(settingsMaxToolIterations ? settingsMaxToolIterations.value : defaultMaxToolIterations, 0, 64, defaultMaxToolIterations);
-          var maxToolCalls = normalizeIntegerInRange(settingsMaxToolCalls ? settingsMaxToolCalls.value : defaultMaxToolCalls, 0, 256, defaultMaxToolCalls);
-          var maxRunMs = normalizeIntegerInRange(settingsMaxRunMs ? settingsMaxRunMs.value : defaultMaxRunMs, 0, 3600000, defaultMaxRunMs);
-          var toolResultTokenBudget = normalizeIntegerInRange(settingsToolResultTokenBudget ? settingsToolResultTokenBudget.value : defaultToolResultTokenBudget, 0, 1048576, defaultToolResultTokenBudget);
-          if (settingsMaxTokens) {
-            settingsMaxTokens.value = String(maxTokens);
+          vscode.postMessage({
+            type: 'saveApiSettings',
+            apiKey: apiKey,
+            baseUrl: baseUrl
+          });
+          setComposerStatus(t('apiSettingsSaved'));
+          hideSettingsDialog();
+        });
+      }
+
+      if (agentBudgetSaveBtn) {
+        agentBudgetSaveBtn.addEventListener('click', function() {
+          var maxTokensKb = normalizeMaxTokensKb(agentBudgetMaxTokens ? agentBudgetMaxTokens.value : defaultMaxTokens / tokensPerBudgetKb);
+          var maxTokens = normalizeMaxTokens(budgetKbToTokens(maxTokensKb));
+          var maxToolIterations = normalizeIntegerInRange(agentBudgetMaxToolIterations ? agentBudgetMaxToolIterations.value : defaultMaxToolIterations, 0, 64, defaultMaxToolIterations);
+          var maxToolCalls = normalizeIntegerInRange(agentBudgetMaxToolCalls ? agentBudgetMaxToolCalls.value : defaultMaxToolCalls, 0, 256, defaultMaxToolCalls);
+          var maxRunSeconds = normalizeIntegerInRange(agentBudgetMaxRunSeconds ? agentBudgetMaxRunSeconds.value : defaultMaxRunSeconds, 0, 3600, defaultMaxRunSeconds);
+          var maxRunMs = maxRunSeconds * 1000;
+          var toolResultBudgetKb = normalizeToolResultBudgetKb(agentBudgetToolResultTokenBudget ? agentBudgetToolResultTokenBudget.value : defaultToolResultTokenBudget / tokensPerBudgetKb);
+          var toolResultTokenBudget = normalizeIntegerInRange(budgetKbToTokens(toolResultBudgetKb), 0, maxToolResultTokenBudget, defaultToolResultTokenBudget);
+          if (agentBudgetMaxTokens) {
+            agentBudgetMaxTokens.value = formatBudgetKbFromTokens(maxTokens);
           }
-          if (settingsMaxToolIterations) {
-            settingsMaxToolIterations.value = String(maxToolIterations);
+          if (agentBudgetMaxToolIterations) {
+            agentBudgetMaxToolIterations.value = String(maxToolIterations);
           }
-          if (settingsMaxToolCalls) {
-            settingsMaxToolCalls.value = String(maxToolCalls);
+          if (agentBudgetMaxToolCalls) {
+            agentBudgetMaxToolCalls.value = String(maxToolCalls);
           }
-          if (settingsMaxRunMs) {
-            settingsMaxRunMs.value = String(maxRunMs);
+          if (agentBudgetMaxRunSeconds) {
+            agentBudgetMaxRunSeconds.value = String(maxRunSeconds);
           }
-          if (settingsToolResultTokenBudget) {
-            settingsToolResultTokenBudget.value = String(toolResultTokenBudget);
+          if (agentBudgetToolResultTokenBudget) {
+            agentBudgetToolResultTokenBudget.value = formatBudgetKbFromTokens(toolResultTokenBudget);
           }
           vscode.postMessage({
-            type: 'saveSettings',
-            apiKey: apiKey,
-            baseUrl: baseUrl,
+            type: 'saveAgentBudgetSettings',
             maxTokens: maxTokens,
             maxToolIterations: maxToolIterations,
             maxToolCalls: maxToolCalls,
             maxRunMs: maxRunMs,
             toolResultTokenBudget: toolResultTokenBudget
           });
-          setComposerStatus(t('apiSettingsSaved'));
-          hideSettingsDialog();
+          setComposerStatus(t('agentBudgetSettingsSaved'));
+          hideAgentBudgetDialog();
         });
       }
 
@@ -1980,6 +2048,12 @@ export function getInputScript(): string {
       if (settingsCancelBtn) {
         settingsCancelBtn.addEventListener('click', function() {
           hideSettingsDialog();
+        });
+      }
+
+      if (agentBudgetCancelBtn) {
+        agentBudgetCancelBtn.addEventListener('click', function() {
+          hideAgentBudgetDialog();
         });
       }
 
@@ -2005,6 +2079,24 @@ export function getInputScript(): string {
           } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             if (settingsSaveBtn) { settingsSaveBtn.click(); }
+          }
+        });
+      }
+
+      if (agentBudgetOverlay) {
+        agentBudgetOverlay.addEventListener('click', function(event) {
+          if (event.target === agentBudgetOverlay) {
+            hideAgentBudgetDialog();
+          }
+        });
+
+        agentBudgetOverlay.addEventListener('keydown', function(event) {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            hideAgentBudgetDialog();
+          } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            if (agentBudgetSaveBtn) { agentBudgetSaveBtn.click(); }
           }
         });
       }
@@ -2093,6 +2185,7 @@ export function getInputScript(): string {
       window.keepseekInputControls = {
         render: renderInputControls,
         showSettingsDialog: showSettingsDialog,
+        showAgentBudgetDialog: showAgentBudgetDialog,
         clearPrompt: clearPrompt
       };
       renderInputControls();
