@@ -84,7 +84,7 @@ export interface ReferenceResource {
   label: string;
   description: string;
   workspaceFolder: string;
-  kind: 'file';
+  kind: 'file' | 'directory';
 }
 
 export interface AgentRequest {

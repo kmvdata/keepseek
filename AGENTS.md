@@ -18,8 +18,11 @@ src/
 ├── draftEditStore.ts            # DraftEdit 状态、应用、应用后消息记录
 ├── fileContext.ts               # 用户手动加入的上下文文件管理
 ├── fileReference.ts             # prompt 文件引用解析、授权、展开
+├── directoryReference.ts        # prompt 目录引用解析、授权、清单展开
+├── promptReferences.ts          # prompt 文件/目录引用统一展开入口
 ├── fileReferenceOpener.ts       # 点击/双击文件引用后的 VS Code 打开逻辑
-├── referenceResources.ts        # @ 文件补全资源列表
+├── referenceResources.ts        # @ 文件/目录补全资源列表
+├── workspaceDirectory.ts        # 工作区目录枚举共享工具
 ├── textReferences.ts            # 终端/输出/调试控制台选区落盘为引用文件
 ├── config.ts                    # keepseek 配置默认值、读取、范围归一化
 ├── i18n.ts                      # 扩展端与 Webview 端文案
@@ -68,21 +71,22 @@ src/
 
 这些消息不是 `WebviewMessage` 的输入，不应放进 `handleMessage()` switch：
 
-- `insertFileReference`：Provider 主动把文件引用 chip 插入输入框。
+- `insertFileReference` / `insertDirectoryReference`：Provider 主动把文件或目录引用 chip 插入输入框。
 - `referenceResources`：回应 `@` 文件补全请求。
 - `sessionChanged`：通知 Webview 会话切换。
 - `showSettingsDialog`：打开设置弹窗。
 
-## 文件引用系统
+## 文件与目录引用系统
 
 ### 序列化格式
 
 - 行段引用：`文件名 (第N-M行) <路径#LN-LM>`
 - 带列引用：`文件名 (第N行第C-D列) <路径#LNCx-Cy>`
 - 全文引用：`文件名 <路径>`
+- 目录引用：`目录名/ <keepseek-dir:路径>`
 - `startLine: 0, endLine: 0` 是全文引用哨兵值。
 
-发送消息时，Webview 的 `serializePrompt()` 遍历 `.rich-file-link`，先还原为文本格式；Provider 调用 `expandFileReferencesInPrompt()`，在真正传给 `AgentRunner` 前展开可读文本引用。
+发送消息时，Webview 的 `serializePrompt()` 遍历 `.rich-file-link`，先还原为文本格式；Provider 调用 `expandPromptReferencesInPrompt()`，在真正传给 `AgentRunner` 前展开可读文本文件引用和目录引用清单。
 
 发送前展开格式：
 
@@ -95,10 +99,12 @@ src/
 
 全文引用展开时标题行为 `文件名 <路径>`。不可读取、超出大小限制、图片、媒体、归档、常见二进制文件、未授权外部文件会保留原引用，不展开。
 
+目录引用不会直接展开整个目录内容，而是展开为目录锚点、使用说明和受限条目清单；Agent 需要更多细节时应调用 `keepseek_list_workspace_directory` 或 `keepseek_read_workspace_file`。
+
 ### 授权规则
 
-- 工作区内文件可展开。
-- 外部文件必须先进入授权集合，授权 key 是 `uri.toString()`。
+- 工作区内文件/目录可展开。
+- 外部文件/目录必须先进入授权集合，授权 key 是 `uri.toString()`。
 - 授权入口包括编辑器选区、Explorer 文件、外部文件选择、拖拽导入、终端/输出/Debug Console 选区落盘文件。
 
 ## 右键菜单：Add Selection to Context
@@ -138,6 +144,22 @@ explorer/context 传入 vscode.Uri
 
 没有已保存光标时，全文 chip 插入到输入框末尾。
 
+## 资源管理器右键菜单：Add Directory to Context
+
+- 命令：`keepseek.addExplorerDirectoryToContext`
+- 触发条件：资源管理器中目录右键（`explorerResourceIsFolder`）
+- 路径：Explorer → 目录右键 → `KeepSeek: Add Explorer Folder to Chat`
+
+流程：
+
+```text
+explorer/context 传入 vscode.Uri
+  → extension.ts: insertExplorerDirectoryToInput()
+    → reveal() 展开面板
+    → postMessage({ type: 'insertDirectoryReference', path })
+      → webview/input/script.ts: 插入目录引用 chip
+```
+
 ## 拖拽文件到输入框
 
 从 VS Code Explorer 或系统文件管理器拖入文件，会生成 `.rich-file-link`，不含行号，显示高亮文件名，序列化为 `文件名 <路径>`。
@@ -152,13 +174,14 @@ explorer/context 传入 vscode.Uri
 
 ## Agent 工具
 
-Agent 当前支持三个工具名：
+Agent 当前支持四个工具名：
 
 - `keepseek_list_workspace_files`
+- `keepseek_list_workspace_directory`
 - `keepseek_read_workspace_file`
 - `keepseek_create_draft_edit`
 
-`WorkspaceToolService` 只允许读取当前打开工作区内的文本文件，会拒绝越界、二进制、图片/媒体/归档和超限文件。`keepseek_create_draft_edit` 只创建待确认编辑，不写磁盘。
+`WorkspaceToolService` 只允许列出/读取当前打开工作区内的目录和文本文件，会拒绝越界、二进制、图片/媒体/归档和超限文件。`keepseek_create_draft_edit` 只创建待确认编辑，不写磁盘。
 
 ## 修改代码时的规则
 
@@ -166,7 +189,7 @@ Agent 当前支持三个工具名：
 - 新增 Webview→扩展消息：更新 `WebviewMessage`、`handleMessage()` 和 Webview 发送点。
 - 新增扩展→Webview 主动消息：不要放进 `WebviewMessage`，但要在 Webview message listener 中处理。
 - 新增 Agent 工具：更新 `agentRunner.ts` 的工具 schema 和工具路由；工具实现优先放独立模块。
-- 修改文件引用格式：同步检查 `fileReference.ts`、`webview/input/script.ts`、`webview/script.ts` 的序列化/反序列化/打开逻辑。
+- 修改文件或目录引用格式：同步检查 `fileReference.ts`、`directoryReference.ts`、`webview/input/script.ts`、`webview/script.ts` 的序列化/反序列化/打开逻辑。
 - 修改 DraftEdit 应用行为：优先改 `DraftEditStore` / `SafeFileEditor`，不要放进 `AgentRunner`。
 - 大型 UI 脚本仍是热点文件；改动后必须手测输入、拖拽、@ 引用、编辑重发、Apply/Discard。
 
@@ -177,4 +200,4 @@ npm run compile
 npm run lint
 ```
 
-重点手测：普通发送、编辑重发、会话切换、上下文文件添加、选区引用、Explorer 引用、拖拽引用、`@` 文件补全、引用展开、Agent 读文件/列文件、DraftEdit Apply/Discard/Apply All、语言切换、API 设置保存。
+重点手测：普通发送、编辑重发、会话切换、上下文文件添加、选区引用、Explorer 文件/目录引用、拖拽引用、`@` 文件/目录补全、引用展开、Agent 读文件/列文件/列目录、DraftEdit Apply/Discard/Apply All、语言切换、API 设置保存。

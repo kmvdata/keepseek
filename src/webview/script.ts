@@ -147,6 +147,13 @@ export function getScript(): string {
       if (!link || !transcript.contains(link)) return;
       event.preventDefault();
       event.stopPropagation();
+      if (link.dataset.kind === 'directory') {
+        vscode.postMessage({
+          type: 'openDirectoryReference',
+          path: link.dataset.path || ''
+        });
+        return;
+      }
       vscode.postMessage({
         type: 'openFileReference',
         path: link.dataset.path || '',
@@ -980,7 +987,7 @@ export function getScript(): string {
     function createEditReferenceResourceButton(resource, index) {
       var option = document.createElement('button');
       option.type = 'button';
-      option.className = 'reference-menu-item' + (index === editReferenceIndex ? ' is-active' : '');
+      option.className = 'reference-menu-item' + (resource.kind === 'directory' ? ' is-directory' : '') + (index === editReferenceIndex ? ' is-active' : '');
       option.dataset.editReferenceIndex = String(index + 1);
       option.setAttribute('role', 'option');
       option.setAttribute('aria-selected', index === editReferenceIndex ? 'true' : 'false');
@@ -1005,7 +1012,7 @@ export function getScript(): string {
         return editReferenceResources.slice();
       }
       return editReferenceResources.filter(function(resource) {
-        return normalizeEditReferenceQuery(getEditReferenceResourceName(resource)).indexOf(query) === 0;
+        return editReferenceResourceMatchesQuery(resource, query);
       });
     }
 
@@ -1014,7 +1021,14 @@ export function getScript(): string {
     }
 
     function getEditReferenceResourceName(resource) {
-      return resource.label || getMessageFileName(resource.path || '') || 'file';
+      var name = resource.label || getMessageFileName(resource.path || '') || 'file';
+      return resource.kind === 'directory' && name.charAt(name.length - 1) !== '/' ? name + '/' : name;
+    }
+
+    function editReferenceResourceMatchesQuery(resource, query) {
+      var normalizedName = normalizeEditReferenceQuery(getEditReferenceResourceName(resource));
+      var normalizedPath = normalizeEditReferenceQuery(resource.description || resource.path || '');
+      return normalizedName.indexOf(query) === 0 || normalizedPath.indexOf(query) >= 0;
     }
 
     function moveEditReferenceSelection(delta) {
@@ -1039,6 +1053,7 @@ export function getScript(): string {
 
       var reference = {
         path: referencePath,
+        kind: resource.kind === 'directory' ? 'directory' : 'file',
         startLine: 0,
         endLine: 0,
         startColumn: 0,
@@ -1052,7 +1067,7 @@ export function getScript(): string {
       resizeInlineEditor(editor);
       updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
       closeEditReferenceMenu(false);
-      setTransientStatus(t('insertedFileReference'));
+      setTransientStatus(reference.kind === 'directory' ? t('insertedDirectoryReference') : t('insertedFileReference'));
     }
 
     function scrollActiveEditReferenceIntoView() {
@@ -1371,7 +1386,7 @@ export function getScript(): string {
         }
 
         appendInlineEditorText(editor, text.slice(cursor, label.start));
-        editor.append(createInlineFileReferenceLink(reference));
+        editor.append(createInlineReferenceLink(reference));
         cursor = match.index + match[0].length;
       }
 
@@ -1382,6 +1397,12 @@ export function getScript(): string {
     function appendInlineEditorText(editor, text) {
       if (!text) return;
       editor.append(document.createTextNode(text));
+    }
+
+    function createInlineReferenceLink(reference) {
+      return reference.kind === 'directory'
+        ? createInlineDirectoryReferenceLink(reference)
+        : createInlineFileReferenceLink(reference);
     }
 
     function createInlineFileReferenceLink(reference) {
@@ -1396,6 +1417,7 @@ export function getScript(): string {
         ? getMessageFileName(reference.path) + ' (' + formatMessageLineLabel(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn) + ')'
         : getMessageFileName(reference.path);
       anchor.dataset.path = reference.path;
+      anchor.dataset.kind = 'file';
       anchor.dataset.startLine = String(reference.startLine);
       anchor.dataset.endLine = String(reference.endLine);
       anchor.dataset.startColumn = String(reference.startColumn || 0);
@@ -1403,9 +1425,41 @@ export function getScript(): string {
       return anchor;
     }
 
+    function createInlineDirectoryReferenceLink(reference) {
+      var anchor = document.createElement('a');
+      var href = makeMessageDirectoryHref(reference);
+      anchor.className = 'rich-file-link rich-directory-link';
+      anchor.href = href;
+      anchor.title = href;
+      anchor.draggable = false;
+      anchor.setAttribute('contenteditable', 'false');
+      anchor.textContent = getMessageDirectoryName(reference.path);
+      anchor.dataset.path = reference.path;
+      anchor.dataset.kind = 'directory';
+      anchor.dataset.startLine = '0';
+      anchor.dataset.endLine = '0';
+      anchor.dataset.startColumn = '0';
+      anchor.dataset.endColumn = '0';
+      return anchor;
+    }
+
     function sanitizeInlineEditorLinks(editor) {
       var links = editor.querySelectorAll('a.rich-file-link');
       links.forEach(function(link) {
+        if (link.dataset.kind === 'directory') {
+          var directoryPath = link.dataset.path || '';
+          var directoryHref = makeMessageDirectoryHref({ path: directoryPath });
+          link.className = 'rich-file-link rich-directory-link';
+          link.setAttribute('href', directoryHref);
+          link.setAttribute('contenteditable', 'false');
+          link.draggable = false;
+          link.title = directoryHref;
+          link.dataset.startLine = '0';
+          link.dataset.endLine = '0';
+          link.dataset.startColumn = '0';
+          link.dataset.endColumn = '0';
+          return;
+        }
         var startLine = readReferenceInteger(link.dataset.startLine, 0);
         var endLine = startLine === 0 ? 0 : Math.max(startLine, readReferenceInteger(link.dataset.endLine, startLine));
         var startColumn = readReferenceInteger(link.dataset.startColumn, 0);
@@ -1418,6 +1472,7 @@ export function getScript(): string {
           endColumn: endColumn
         };
         link.className = 'rich-file-link';
+        link.dataset.kind = 'file';
         link.setAttribute('href', makeMessageFileHref(reference));
         link.setAttribute('contenteditable', 'false');
         link.draggable = false;
@@ -1466,6 +1521,10 @@ export function getScript(): string {
 
     function inlineFileReferenceLinkToText(link) {
       var reference = readInlineFileReferenceLink(link);
+      if (reference.kind === 'directory') {
+        var directoryLabel = link.textContent || getMessageDirectoryName(reference.path);
+        return directoryLabel + ' <' + makeMessageDirectoryHref(reference) + '>';
+      }
       if (reference.startLine > 0 && reference.endLine < reference.startLine) {
         reference.endLine = reference.startLine;
       }
@@ -1487,8 +1546,10 @@ export function getScript(): string {
     }
 
     function readInlineFileReferenceLink(link) {
+      var kind = link.dataset.kind === 'directory' ? 'directory' : 'file';
       return {
         path: link.dataset.path || '',
+        kind: kind,
         startLine: readReferenceInteger(link.dataset.startLine, 0),
         endLine: readReferenceInteger(link.dataset.endLine, 0),
         startColumn: readReferenceInteger(link.dataset.startColumn, 0),
@@ -1545,7 +1606,7 @@ export function getScript(): string {
       if (needsInlineEditorLeadingSpace(editor, range)) {
         fragment.append(document.createTextNode(' '));
       }
-      fragment.append(createInlineFileReferenceLink(reference));
+      fragment.append(createInlineReferenceLink(reference));
       if (needsInlineEditorTrailingSpace(editor, range)) {
         fragment.append(document.createTextNode(' '));
       }
@@ -1595,6 +1656,7 @@ export function getScript(): string {
       if (!editor) return false;
       var reference = {
         path: message.path || '',
+        kind: message.type === 'insertDirectoryReference' ? 'directory' : 'file',
         startLine: readReferenceInteger(message.startLine, 0),
         endLine: readReferenceInteger(message.endLine, 0),
         startColumn: readReferenceInteger(message.startColumn, 0),
@@ -1606,7 +1668,7 @@ export function getScript(): string {
       resizeInlineEditor(editor);
       updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
       closeEditReferenceMenu(false);
-      setTransientStatus(t('insertedFileReference'));
+      setTransientStatus(reference.kind === 'directory' ? t('insertedDirectoryReference') : t('insertedFileReference'));
       return true;
     }
 
@@ -2566,13 +2628,15 @@ export function getScript(): string {
 
     function createMessageFileLink(reference, label) {
       var anchor = document.createElement('a');
-      var href = makeMessageFileHref(reference);
-      anchor.className = 'rich-file-link message-file-link';
+      var isDirectory = reference.kind === 'directory';
+      var href = isDirectory ? makeMessageDirectoryHref(reference) : makeMessageFileHref(reference);
+      anchor.className = isDirectory ? 'rich-file-link rich-directory-link message-file-link' : 'rich-file-link message-file-link';
       anchor.href = href;
       anchor.title = href;
       anchor.draggable = false;
       anchor.textContent = label;
       anchor.dataset.path = reference.path;
+      anchor.dataset.kind = isDirectory ? 'directory' : 'file';
       anchor.dataset.startLine = String(reference.startLine);
       anchor.dataset.endLine = String(reference.endLine);
       anchor.dataset.startColumn = String(reference.startColumn || 0);
@@ -2581,6 +2645,10 @@ export function getScript(): string {
     }
 
     function parseMessageFileReference(target) {
+      var directoryReference = parseMessageDirectoryReference(target);
+      if (directoryReference) {
+        return directoryReference;
+      }
       if (hasNonFileUriScheme(target)) {
         return null;
       }
@@ -2594,6 +2662,26 @@ export function getScript(): string {
         reference.endLine = reference.startLine;
       }
       return reference;
+    }
+
+    function parseMessageDirectoryReference(target) {
+      var text = String(target || '').trim();
+      var prefix = 'keepseek-dir:';
+      if (text.toLowerCase().indexOf(prefix) !== 0) {
+        return null;
+      }
+      var directoryPath = text.slice(prefix.length).trim();
+      if (!directoryPath) {
+        return null;
+      }
+      return {
+        path: directoryPath,
+        kind: 'directory',
+        startLine: 0,
+        endLine: 0,
+        startColumn: 0,
+        endColumn: 0
+      };
     }
 
     function hasNonFileUriScheme(value) {
@@ -2728,6 +2816,10 @@ export function getScript(): string {
     }
 
     function getMessageReferenceLabel(text, matchStart, reference) {
+      if (reference.kind === 'directory') {
+        return getMessageDirectoryReferenceLabel(text, matchStart, reference);
+      }
+
       var fileName = getMessageFileName(reference.path);
       var labels = reference.startLine > 0
         ? getLineLabelVariants(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn).map(function(label) {
@@ -2755,6 +2847,35 @@ export function getScript(): string {
       };
     }
 
+    function getMessageDirectoryReferenceLabel(text, matchStart, reference) {
+      var directoryName = getMessageDirectoryName(reference.path);
+      var bareName = directoryName.charAt(directoryName.length - 1) === '/'
+        ? directoryName.slice(0, -1)
+        : directoryName;
+      var labels = [
+        directoryName,
+        bareName + ' (' + t('directoryLabel') + ')',
+        bareName + ' (目录)',
+        bareName + ' (directory)',
+        bareName
+      ];
+      var prefix = text.slice(0, matchStart);
+      for (var i = 0; i < labels.length; i++) {
+        var labelWithSpace = labels[i] + ' ';
+        if (prefix.endsWith(labelWithSpace)) {
+          return {
+            start: matchStart - labelWithSpace.length,
+            text: labels[i]
+          };
+        }
+      }
+
+      return {
+        start: matchStart,
+        text: directoryName
+      };
+    }
+
     function makeMessageFileHref(reference) {
       if (reference.startLine <= 0) {
         return reference.path;
@@ -2772,6 +2893,10 @@ export function getScript(): string {
         fragment += '-C' + reference.endColumn;
       }
       return reference.path + fragment;
+    }
+
+    function makeMessageDirectoryHref(reference) {
+      return 'keepseek-dir:' + reference.path;
     }
 
     function formatMessageLineLabel(startLine, endLine, startColumn, endColumn) {
@@ -2830,6 +2955,11 @@ export function getScript(): string {
       var normalized = String(filePath || '').split(String.fromCharCode(92)).join('/');
       var parts = normalized.split('/');
       return parts[parts.length - 1] || normalized || 'file';
+    }
+
+    function getMessageDirectoryName(directoryPath) {
+      var name = getMessageFileName(directoryPath);
+      return name.charAt(name.length - 1) === '/' ? name : name + '/';
     }
 
     function isLikelyMessageFilePath(path, rawTarget) {

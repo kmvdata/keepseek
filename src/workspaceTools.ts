@@ -4,11 +4,13 @@ import { getConfiguredWorkspaceReadMaxBytes, getConfiguredWorkspaceToolFileLimit
 import { formatBytes } from './format';
 import { isReadableTextContent, shouldSkipReferenceUri } from './fileReference';
 import type { KeepseekLanguage } from './i18n';
+import { getWorkspaceResourcePath, listWorkspaceDirectoryEntries } from './workspaceDirectory';
 
 const WORKSPACE_TOOL_GLOB_EXCLUDE = '**/{.git,.vscode-test,build,coverage,dist,node_modules,out}/**';
 
 export interface WorkspaceToolAdapter {
   listWorkspaceFiles(language: KeepseekLanguage): Promise<string>;
+  listWorkspaceDirectory(rawPath: string, recursive: boolean, maxFiles: number | undefined, language: KeepseekLanguage): Promise<string>;
   readWorkspaceFile(rawPath: string, language: KeepseekLanguage): Promise<string>;
   resolveTargetUri(targetPath: string): vscode.Uri;
   getLabel(uri: vscode.Uri): string;
@@ -94,8 +96,43 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     });
   }
 
+  public async listWorkspaceDirectory(rawPath: string, recursive: boolean, maxFiles: number | undefined, language: KeepseekLanguage): Promise<string> {
+    const uri = this.resolveWorkspacePathUri(rawPath);
+    const stat = await vscode.workspace.fs.stat(uri);
+    if (stat.type !== vscode.FileType.Directory) {
+      return JSON.stringify({
+        ok: false,
+        path: this.getLabel(uri),
+        error: language === 'en' ? 'The requested path is not a directory.' : '请求的路径不是目录。'
+      });
+    }
+
+    const configuredLimit = getConfiguredWorkspaceToolFileLimit();
+    const requestedLimit = normalizeDirectoryListLimit(maxFiles, 100);
+    const limit = Math.min(configuredLimit, requestedLimit);
+    const includeWorkspaceFolder = (vscode.workspace.workspaceFolders?.length ?? 0) > 1;
+    const listing = await listWorkspaceDirectoryEntries(uri, {
+      recursive,
+      maxEntries: limit,
+      maxDepth: 8,
+      includeWorkspaceFolder
+    });
+
+    return JSON.stringify({
+      ok: true,
+      path: getWorkspaceResourcePath(uri, includeWorkspaceFolder),
+      uri: uri.toString(),
+      recursive,
+      entries: listing.entries,
+      count: listing.entries.length,
+      limit,
+      truncated: listing.truncated,
+      excluded: ['.git', '.vscode-test', 'build', 'coverage', 'dist', 'node_modules', 'out']
+    });
+  }
+
   public async readWorkspaceFile(rawPath: string, language: KeepseekLanguage): Promise<string> {
-    const uri = this.resolveWorkspaceFileUri(rawPath);
+    const uri = this.resolveWorkspacePathUri(rawPath);
 
     if (shouldSkipReferenceUri(uri)) {
       return JSON.stringify({
@@ -180,7 +217,7 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     return uri.fsPath;
   }
 
-  private resolveWorkspaceFileUri(rawPath: string): vscode.Uri {
+  private resolveWorkspacePathUri(rawPath: string): vscode.Uri {
     const folders = vscode.workspace.workspaceFolders ?? [];
     if (!folders.length) {
       throw new Error('Open a workspace before reading project files.');
@@ -261,4 +298,11 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
       return 'plaintext';
     }
   }
+}
+
+function normalizeDirectoryListLimit(value: number | undefined, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(Math.floor(value), 1), 2000);
 }

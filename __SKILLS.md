@@ -1,6 +1,6 @@
 # KeepSeek 架构与维护指南
 
-KeepSeek 是一个 VS Code 扩展，在 Secondary Sidebar 中提供 AI 对话面板。扩展负责会话、上下文文件、文件引用展开、DeepSeek/OpenAI 兼容流式请求、只读工作区工具，以及用户确认后的 DraftEdit 写入。
+KeepSeek 是一个 VS Code 扩展，在 Secondary Sidebar 中提供 AI 对话面板。扩展负责会话、上下文文件、文件/目录引用展开、DeepSeek/OpenAI 兼容流式请求、只读工作区工具，以及用户确认后的 DraftEdit 写入。
 
 本文档描述当前代码的真实结构。旧版约定若与本文冲突，以本文和当前源码为准。
 
@@ -18,8 +18,11 @@ src/
 ├── draftEditStore.ts            # DraftEdit 状态、应用、应用后消息记录
 ├── fileContext.ts               # 用户手动加入的上下文文件管理
 ├── fileReference.ts             # prompt 内文件引用解析、授权、展开
+├── directoryReference.ts        # prompt 内目录引用解析、授权、清单展开
+├── promptReferences.ts          # prompt 文件/目录引用统一展开入口
 ├── fileReferenceOpener.ts       # 双击/点击文件引用后的 VS Code 打开逻辑
-├── referenceResources.ts        # @ 文件补全资源列表
+├── referenceResources.ts        # @ 文件/目录补全资源列表
+├── workspaceDirectory.ts        # 工作区目录枚举共享工具
 ├── textReferences.ts            # 终端/输出/调试控制台选区落盘为引用文件
 ├── config.ts                    # keepseek 配置读取、默认值、范围归一化
 ├── i18n.ts                      # 扩展端与 webview 端文案
@@ -59,14 +62,14 @@ src/
 - `ChatSessionStore` 管理会话生命周期，存储 key 为 `keepseek.chatSessions`，最多保留 50 个有内容会话，活跃空会话会保留。
 - `FileContextStore` 管理用户显式加入上下文的文件内容，读取限制来自 `keepseek.maxFileBytes` 和 `keepseek.maxContextFiles`。
 - `DraftEditStore` 管理待确认编辑，应用成功后追加一条 assistant 消息，并通过 `SafeFileEditor` 写入。
-- `fileReference.ts` 管理 prompt 内的 `<path>` / `<path#Lx-Ly>` 引用展开；外部文件必须先被授权。
+- `fileReference.ts` 管理 prompt 内的 `<path>` / `<path#Lx-Ly>` 文件引用展开；`directoryReference.ts` 管理 `<keepseek-dir:path>` 目录引用清单展开；外部文件/目录必须先被授权。
 
 **协议与基础设施层**
 
 - `AgentRunner` 只做请求编排：构造 system prompt、拼历史、调用 DeepSeek chat completions、处理工具调用循环、整理最终消息。
 - `DeepSeekStreamParser` 只解析 SSE，包括 `content`、`reasoning_content` 和 streaming tool calls。
 - `DsmlToolParser` 是模型返回 DSML 文本工具调用时的兜底解析器。
-- `WorkspaceToolService` 是 Agent 可用的只读工作区工具边界：列文件、读文件、拒绝越界/二进制/过大文件。
+- `WorkspaceToolService` 是 Agent 可用的只读工作区工具边界：列文件、列目录、读文件、拒绝越界/二进制/过大文件。
 - `config.ts` 是配置默认值和归一化的唯一来源，避免各模块重复魔法数字。
 
 ## 关键通信流
@@ -79,24 +82,26 @@ src/
 
 主动从扩展推到 Webview 的特殊消息：
 
-- `insertFileReference`：Provider 主动插入文件引用 chip，不属于 `WebviewMessage` 的 switch 输入。
-- `referenceResources`：回应 @ 文件补全请求。
+- `insertFileReference` / `insertDirectoryReference`：Provider 主动插入文件或目录引用 chip，不属于 `WebviewMessage` 的 switch 输入。
+- `referenceResources`：回应 @ 文件/目录补全请求。
 - `sessionChanged`、`showSettingsDialog`：UI 控制消息。
 
-## 文件引用约定
+## 文件与目录引用约定
 
 - 行段引用序列化：`文件名 (第N-M行) <路径#LN-LM>`。
 - 全文引用序列化：`文件名 <路径>`。
+- 目录引用序列化：`目录名/ <keepseek-dir:路径>`。
 - `startLine: 0, endLine: 0` 表示全文引用。
-- `expandFileReferencesInPrompt()` 在发送给 Agent 前展开可读文本文件，格式为“标题行 + fenced code block”。
+- `expandPromptReferencesInPrompt()` 在发送给 Agent 前展开可读文本文件和目录引用；文件格式为“标题行 + fenced code block”，目录格式为“目录锚点 + 使用说明 + 受限条目清单”。
 - 图片、媒体、归档、常见二进制文件、超过 `keepseek.maxFileBytes` 的全文引用、未授权外部文件会保留原引用，不展开。
 - 外部文件授权 key 使用 `uri.toString()`，授权入口包括右键选区、Explorer 文件、外部文件选择、拖拽导入。
 
 ## Agent 与工具
 
-Agent 支持三个工具名：
+Agent 支持四个工具名：
 
 - `keepseek_list_workspace_files`：列出当前工作区文件，跳过 `.git`、`node_modules`、`dist` 等目录。
+- `keepseek_list_workspace_directory`：列出当前工作区内指定目录的文件和子目录，可递归，跳过依赖、构建、覆盖率和 VCS 目录。
 - `keepseek_read_workspace_file`：读取工作区内文本文件，拒绝越界、二进制、超限文件。
 - `keepseek_create_draft_edit`：创建待确认 DraftEdit，不直接写磁盘。
 
@@ -130,7 +135,7 @@ Agent 支持三个工具名：
 - `extension.ts` 仍是 VS Code Provider 编排中心，新增大功能时优先创建服务模块，再在 Provider 中接线。
 - `webview/script.ts` 和 `webview/input/script.ts` 仍是大字符串文件；改动时保持 DOM id、message type、序列化格式兼容，并重点手测输入、拖拽、@ 引用、编辑重发。
 - `safeFileEditor.ts` 当前只做确认后的整文件写入；如果未来增加 diff、冲突检测、备份或权限确认，应在这里扩展，不要放进 AgentRunner。
-- `fileReference.ts` 是引用格式兼容核心；修改时必须验证全文引用、行段引用、外部授权、不可读文件跳过。
+- `fileReference.ts` / `directoryReference.ts` 是引用格式兼容核心；修改时必须验证全文引用、行段引用、目录引用、外部授权、不可读文件跳过。
 
 ## 常用命令
 
@@ -148,6 +153,6 @@ npm run lint
 - 添加当前文件、工作区文件、外部文件、目录到上下文，确认大小/二进制限制。
 - 编辑器选区、终端选区、Debug Console/Output 选区插入引用。
 - Explorer 文件右键与拖拽文件到输入框，确认全文 chip、序列化和双击打开。
-- `@` 文件补全、全文引用展开、行段引用展开、未授权外部引用不展开。
-- Agent 工具：列工作区文件、读工作区文件、生成 DraftEdit、Apply/Discard/Apply All。
+- `@` 文件/目录补全、全文引用展开、行段引用展开、目录引用展开、未授权外部引用不展开。
+- Agent 工具：列工作区文件、列工作区目录、读工作区文件、生成 DraftEdit、Apply/Discard/Apply All。
 - 语言切换、API 设置保存、context window 估算显示。

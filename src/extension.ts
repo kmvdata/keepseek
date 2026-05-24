@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { expandFileReferencesInPrompt, getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from './fileReference';
+import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from './fileReference';
 import { AgentRunner } from './agentRunner';
 import { FileContextStore } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
@@ -36,6 +36,7 @@ import {
 import { getErrorMessage } from './errors';
 import { formatBytes } from './format';
 import { ensureKeybindings } from './keybindings';
+import { expandPromptReferencesInPrompt } from './promptReferences';
 import { getWorkspaceReferenceResources } from './referenceResources';
 import { getHtmlForWebview } from './webview/html';
 import {
@@ -54,6 +55,7 @@ const CHAT_VIEW_TYPE = 'keepseek.chatView';
 
 interface PromptReferenceInput {
   path: string;
+  kind?: 'file' | 'directory';
   startLine?: number;
   endLine?: number;
   startColumn?: number;
@@ -100,6 +102,7 @@ type WebviewMessage =
   | { type: 'requestReferenceResources'; requestId: string }
   | { type: 'readPath'; path: string }
   | { type: 'openFileReference'; path: string; startLine: number; endLine: number; startColumn: number; endColumn: number }
+  | { type: 'openDirectoryReference'; path: string }
   | { type: 'removeContextFile'; uri: string }
   | { type: 'clearContext' }
   | { type: 'applyDraftEdit'; id: string }
@@ -253,6 +256,40 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
     } catch (error) {
       vscode.window.showErrorMessage(this.t('cannotAddFileReference', { message: getErrorMessage(error) }));
+    }
+  }
+
+  public async insertExplorerDirectoryToInput(uri?: vscode.Uri, selectedUris?: vscode.Uri[]): Promise<void> {
+    const targetUris = getExplorerFileUris(uri, selectedUris);
+    if (!targetUris.length) {
+      vscode.window.showWarningMessage(this.t('chooseDirectoryToAdd'));
+      return;
+    }
+
+    try {
+      const directories: vscode.Uri[] = [];
+      for (const targetUri of targetUris) {
+        const stat = await vscode.workspace.fs.stat(targetUri);
+        if (stat.type === vscode.FileType.Directory) {
+          directories.push(targetUri);
+        }
+      }
+
+      if (!directories.length) {
+        vscode.window.showWarningMessage(this.t('canOnlyInsertExplorerDirectories'));
+        return;
+      }
+
+      await this.reveal();
+      for (const directory of directories) {
+        this.authorizeExternalReferenceUri(directory);
+        this.postToWebview({
+          type: 'insertDirectoryReference',
+          path: directory.fsPath
+        });
+      }
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('cannotAddDirectoryReference', { message: getErrorMessage(error) }));
     }
   }
 
@@ -545,6 +582,9 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           language: this.language
         });
         return;
+      case 'openDirectoryReference':
+        await this.openDirectoryReference(message.path);
+        return;
       case 'removeContextFile':
         this.fileContext.remove(message.uri);
         this.postState();
@@ -627,6 +667,28 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         resources: [],
         error: getErrorMessage(error)
       });
+    }
+  }
+
+  private async openDirectoryReference(inputPath: string): Promise<void> {
+    try {
+      if (!inputPath.trim()) {
+        throw new Error(this.t('directoryReferenceNoPath'));
+      }
+
+      const uri = resolveFileReferenceUri(inputPath);
+      if (!uri) {
+        throw new Error(this.t('directoryReferenceInvalidPath'));
+      }
+
+      const stat = await vscode.workspace.fs.stat(uri);
+      if (stat.type !== vscode.FileType.Directory) {
+        throw new Error(this.t('directoryReferenceInvalidPath'));
+      }
+
+      await vscode.commands.executeCommand('revealInExplorer', uri);
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('cannotOpenDirectoryReference', { message: getErrorMessage(error) }));
     }
   }
 
@@ -736,7 +798,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
     try {
       const authorizedExternalReferenceUris = this.collectAuthorizedExternalReferenceUris(options?.references);
-      const expandedPrompt = await expandFileReferencesInPrompt(trimmedPrompt, {
+      const expandedPrompt = await expandPromptReferencesInPrompt(trimmedPrompt, {
         authorizedExternalReferenceUris,
         language: this.language
       });
@@ -928,6 +990,10 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       'keepseek.addExplorerFileToContext',
       (uri?: vscode.Uri, selectedUris?: vscode.Uri[]) => provider.insertExplorerFileToInput(uri, selectedUris)
+    ),
+    vscode.commands.registerCommand(
+      'keepseek.addExplorerDirectoryToContext',
+      (uri?: vscode.Uri, selectedUris?: vscode.Uri[]) => provider.insertExplorerDirectoryToInput(uri, selectedUris)
     )
   );
 }

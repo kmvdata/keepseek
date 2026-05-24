@@ -24,6 +24,7 @@
     "onCommand:keepseek.pickExternalFilesToContext",
     "onCommand:keepseek.addSelectionToContext",
     "onCommand:keepseek.addExplorerFileToContext",
+    "onCommand:keepseek.addExplorerDirectoryToContext",
     "onCommand:keepseek.addTerminalSelectionToContext",
     "onCommand:keepseek.addDebugConsoleSelectionToContext"
   ],
@@ -88,6 +89,11 @@
         "command": "keepseek.addExplorerFileToContext",
         "title": "KeepSeek: Add Explorer File to Chat",
         "icon": "$(file-add)"
+      },
+      {
+        "command": "keepseek.addExplorerDirectoryToContext",
+        "title": "KeepSeek: Add Explorer Folder to Chat",
+        "icon": "$(folder-opened)"
       }
     ],
     "menus": {
@@ -95,6 +101,11 @@
         {
           "command": "keepseek.addExplorerFileToContext",
           "when": "!explorerResourceIsFolder",
+          "group": "navigation"
+        },
+        {
+          "command": "keepseek.addExplorerDirectoryToContext",
+          "when": "explorerResourceIsFolder",
           "group": "navigation"
         }
       ],
@@ -143,6 +154,12 @@
         "key": "ctrl+shift+l",
         "mac": "cmd+l",
         "when": "explorerViewletFocus && !explorerResourceIsFolder"
+      },
+      {
+        "command": "keepseek.addExplorerDirectoryToContext",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+l",
+        "when": "explorerViewletFocus && explorerResourceIsFolder"
       },
       {
         "command": "keepseek.addTerminalSelectionToContext",

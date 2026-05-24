@@ -31,6 +31,7 @@ import {
 
 const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
 const LIST_WORKSPACE_FILES_TOOL_NAME = 'keepseek_list_workspace_files';
+const LIST_WORKSPACE_DIRECTORY_TOOL_NAME = 'keepseek_list_workspace_directory';
 const READ_WORKSPACE_FILE_TOOL_NAME = 'keepseek_read_workspace_file';
 export { AGENT_HISTORY_MESSAGE_LIMIT, DEFAULT_MAX_TOKENS, MAX_GENERATION_TOKENS };
 
@@ -338,7 +339,8 @@ export class AgentRunner {
           'You are KeepSeek, a coding agent running in the VS Code sidebar.',
           'Communicate with the user in English unless the user explicitly asks for another language.',
           'You can analyze code, explain approaches, inspect the open workspace with read-only tools, suggest changes, and call tools to create pending edits when files need to change.',
-          'Use keepseek_list_workspace_files and keepseek_read_workspace_file when you need the current project structure or file contents. Do not ask the user to run directory listing commands or paste file contents when these tools can provide the information.',
+          'Use keepseek_list_workspace_files, keepseek_list_workspace_directory, and keepseek_read_workspace_file when you need the current project structure or file contents. Do not ask the user to run directory listing commands or paste file contents when these tools can provide the information.',
+          'When the user references a directory, treat it as a target or reference scope. Prefer that directory for related new files, and list/read files under it when you need examples.',
           'The read-only workspace tools only access files inside the open workspace, and they may skip large, binary, image, media, archive, or otherwise unreadable files.',
           'Important safety rule: tools only create DraftEdit pending changes and never write to disk directly. Do not claim files were written unless the user later applies the change.',
           'When the user asks to modify or create files, prefer calling keepseek_create_draft_edit with the target path, complete new file content, and a short reason.',
@@ -348,7 +350,8 @@ export class AgentRunner {
           '你是 KeepSeek，一个运行在 VS Code 侧边栏里的代码 Agent。',
           '你需要用中文和用户沟通，除非用户明确要求其它语言。',
           '你可以根据用户的问题分析代码、解释方案、使用只读工具查看当前打开的工作区、给出修改建议，并在需要改文件时调用工具创建待确认修改。',
-          '当你需要了解当前工程结构或文件内容时，使用 keepseek_list_workspace_files 和 keepseek_read_workspace_file。只要这些工具能提供信息，就不要要求用户自行运行目录扫描命令或粘贴文件内容。',
+          '当你需要了解当前工程结构或文件内容时，使用 keepseek_list_workspace_files、keepseek_list_workspace_directory 和 keepseek_read_workspace_file。只要这些工具能提供信息，就不要要求用户自行运行目录扫描命令或粘贴文件内容。',
+          '当用户引用目录时，把它视为目标位置或参考范围。创建相关新文件时优先放在该目录下；需要参考示例时，先列出并读取该目录下的文件。',
           '只读工作区工具只会访问当前打开工作区内的文件，并可能跳过过大、二进制、图片、媒体、归档或其它不可读文件。',
           '重要安全规则：工具只会创建 DraftEdit 待确认修改，不会直接写入磁盘；不要声称已经写入文件，除非用户之后手动确认。',
           '当用户要求修改或创建文件时，优先调用 keepseek_create_draft_edit，并传入目标路径、完整的新文件内容和简短原因。',
@@ -431,6 +434,33 @@ export class AgentRunner {
       {
         type: 'function',
         function: {
+          name: LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
+          description: 'List files and subdirectories under a directory inside the currently open VS Code workspace. This is read-only and skips common dependency, build, coverage, and VCS directories.',
+          strict: true,
+          parameters: {
+            type: 'object',
+            properties: {
+              path: {
+                type: 'string',
+                description: 'Workspace-relative path from a directory reference or keepseek_list_workspace_files, or an absolute/file URI path that still points inside the current workspace.'
+              },
+              recursive: {
+                type: 'boolean',
+                description: 'Whether to include nested files and subdirectories. Use false first unless the user needs a broader scan.'
+              },
+              maxFiles: {
+                type: 'number',
+                description: 'Maximum number of directory entries to return. Defaults to 100 and is capped by KeepSeek settings.'
+              }
+            },
+            required: ['path', 'recursive', 'maxFiles'],
+            additionalProperties: false
+          }
+        }
+      },
+      {
+        type: 'function',
+        function: {
           name: CREATE_DRAFT_EDIT_TOOL_NAME,
           description: 'Create a safe draft file edit for the user to review and apply in VS Code. This never writes to disk directly.',
           strict: true,
@@ -464,6 +494,13 @@ export class AgentRunner {
       switch (toolCall.function.name) {
         case LIST_WORKSPACE_FILES_TOOL_NAME:
           return await this.workspaceTools.listWorkspaceFiles(language);
+        case LIST_WORKSPACE_DIRECTORY_TOOL_NAME:
+          return await this.workspaceTools.listWorkspaceDirectory(
+            this.readRequiredString(args, 'path'),
+            this.readOptionalBoolean(args, 'recursive', false),
+            this.readOptionalNumber(args, 'maxFiles'),
+            language
+          );
         case READ_WORKSPACE_FILE_TOOL_NAME:
           return await this.workspaceTools.readWorkspaceFile(this.readRequiredString(args, 'path'), language);
         case CREATE_DRAFT_EDIT_TOOL_NAME:
@@ -532,6 +569,28 @@ export class AgentRunner {
     }
 
     return key === 'content' ? value : value.trim();
+  }
+
+  private readOptionalBoolean(args: Record<string, unknown>, key: string, fallback: boolean): boolean {
+    const value = args[key];
+    if (value === undefined) {
+      return fallback;
+    }
+    if (typeof value !== 'boolean') {
+      throw new Error(`Tool argument "${key}" must be a boolean.`);
+    }
+    return value;
+  }
+
+  private readOptionalNumber(args: Record<string, unknown>, key: string): number | undefined {
+    const value = args[key];
+    if (value === undefined) {
+      return undefined;
+    }
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Error(`Tool argument "${key}" must be a number.`);
+    }
+    return value;
   }
 
   private resolveToolResultTokenBudget(

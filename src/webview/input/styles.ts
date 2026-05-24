@@ -69,6 +69,10 @@ export function getInputStyles(): string {
       color: var(--vscode-textLink-activeForeground);
     }
 
+    .rich-directory-link {
+      color: var(--vscode-charts-green, var(--vscode-textLink-foreground));
+    }
+
     .composer {
       background: var(--vscode-sideBar-background);
       padding: var(--keepseek-composer-padding, 0);
@@ -433,6 +437,10 @@ export function getInputStyles(): string {
       font-size: 12px;
       font-weight: 600;
       line-height: 1.3;
+    }
+
+    .reference-menu-item.is-directory .reference-menu-item-name {
+      color: var(--vscode-charts-green, var(--vscode-textLink-foreground));
     }
 
     .reference-menu-item-path {
