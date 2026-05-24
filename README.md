@@ -4,6 +4,8 @@ KeepSeek 是一款面向 VS Code 的 AI 编程上下文助手。它把 Agent 对
 
 当前版本默认接入 DeepSeek OpenAI-compatible Chat Completions，支持 DeepSeek V4 Flash / Pro、Thinking 模式、多轮对话、文件引用、运行日志引用和安全的修改草案确认流程。
 
+**KeepSeek 是开源软件**，使用 [MIT 许可证](./LICENSE)。源码托管在 GitHub：**[https://github.com/kmvdata/keepseek](https://github.com/kmvdata/keepseek)**
+
 English version is available below: [English](#keepseek-english).
 
 ## 适用场景
@@ -37,13 +39,13 @@ English version is available below: [English](#keepseek-english).
 
 ## 工作方式
 
-KeepSeek 的核心是“显式上下文”。你选择哪些代码、文件或日志进入上下文，AI 就围绕这些材料回答，而不是猜测整个项目状态。
+KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志进入上下文，AI 就围绕这些材料回答，而不是猜测整个项目状态。
 
 典型流程：
 
 1. 在编辑器、资源管理器、终端、Output 或 Debug Console 中选择需要的内容。
 2. 使用右键菜单或 `Cmd+L` / `Ctrl+L` 添加到 KeepSeek 输入框。
-3. 输入问题或任务，例如“解释这个报错为什么发生”或“给出最小修改方案”。
+3. 输入问题或任务，例如"解释这个报错为什么发生"或"给出最小修改方案"。
 4. AI 回复后，如果包含修改草案，你可以选择 Apply 或 Discard。
 5. Apply 时 VS Code 会再次弹窗确认，确认后才写入文件。
 
@@ -139,11 +141,43 @@ npm run lint
 npx vsce ls
 ```
 
+## 许可证
+
+KeepSeek 使用 [MIT 许可证](./LICENSE)。
+
+```
+MIT License
+
+Copyright (c) 2026 kmvdata
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
 ## KeepSeek English
 
 KeepSeek is an AI coding context assistant for VS Code. It adds an Agent chat panel to the VS Code sidebar and makes it easy to send precise development context to AI: files, selected code, terminal output, Debug Console text, and Output panel logs.
 
 The current release connects to DeepSeek OpenAI-compatible Chat Completions by default. It supports DeepSeek V4 Flash / Pro, Thinking mode, multi-turn sessions, rich file references, runtime log references, and a safe draft-edit workflow.
+
+**KeepSeek is open source** under the [MIT license](./LICENSE). Source code is available on GitHub: **[https://github.com/kmvdata/keepseek](https://github.com/kmvdata/keepseek)**
 
 ## Use Cases
 
@@ -231,4 +265,32 @@ KeepSeek: Open Agent Chat
 ```bash
 npm run compile
 npx vsce package --no-dependencies
+```
+
+## License
+
+KeepSeek is open source under the [MIT license](./LICENSE).
+
+```
+MIT License
+
+Copyright (c) 2026 kmvdata
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```

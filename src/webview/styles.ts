@@ -5,11 +5,11 @@ export function getStyles(): string {
     :root {
       color-scheme: light dark;
 
-      --keepseek-edge-padding: 4px;
-      --keepseek-edge-padding-double: 8px;
+      --keepseek-edge-padding: 0px;
+      --keepseek-edge-padding-double: 0px;
 
       /* ---- input 区域边距变量（修改这些值即可调整间距） ---- */
-      --keepseek-composer-padding: 0 var(--keepseek-edge-padding) var(--keepseek-edge-padding);
+      --keepseek-composer-padding: 0;
       --keepseek-input-padding: 4px 4px 2px;
       --keepseek-toolbar-padding: 0 4px 4px;
     }

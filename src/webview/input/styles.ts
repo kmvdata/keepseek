@@ -70,7 +70,6 @@ export function getInputStyles(): string {
     }
 
     .composer {
-      border-top: 1px solid var(--vscode-panel-border);
       background: var(--vscode-sideBar-background);
       padding: var(--keepseek-composer-padding, 0);
     }
