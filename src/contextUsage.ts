@@ -17,7 +17,7 @@ export function createContextUsageEstimate(input: {
     .filter((message) => message.role === 'user' || message.role === 'assistant')
     .slice(-AGENT_HISTORY_MESSAGE_LIMIT)
     .reduce((total, message) => {
-      const content = getMessageContentForUsage(message);
+      const content = getMessageContentForNextRequest(message);
       return content ? total + estimateChatMessageTokens(message.role, content) : total;
     }, 0);
   return normalizeContextUsageEstimate({
@@ -89,14 +89,11 @@ function estimateChatMessageTokens(role: ChatMessage['role'], content: string): 
   return estimateTokenCount(`${role}\n${content}`) + 4;
 }
 
-function getMessageContentForUsage(message: ChatMessage): string {
-  const content = (message.expandedContent ?? message.content).trim();
-  if (message.role !== 'assistant' || !message.isStreaming) {
-    return content;
-  }
-
-  const reasoningContent = (message.reasoningContent ?? '').trim();
-  return [reasoningContent, content].filter(Boolean).join('\n');
+function getMessageContentForNextRequest(message: ChatMessage): string {
+  // DeepSeek has no server-side session memory here. KeepSeek only sends normal
+  // user/assistant content back on the next request; prior reasoning_content is
+  // displayed locally but is not part of the next prompt context.
+  return (message.expandedContent ?? message.content).trim();
 }
 
 function getSystemPromptEstimateText(language: KeepseekLanguage): string {

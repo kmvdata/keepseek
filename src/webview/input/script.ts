@@ -752,9 +752,9 @@ export function getInputScript(): string {
           if (codePoint <= 0x7f) {
             estimate += 0.3;
           } else if (isCjkCodePoint(codePoint)) {
-            estimate += 0.6;
+            estimate += 1;
           } else {
-            estimate += 0.6;
+            estimate += 0.75;
           }
         }
         return Math.ceil(estimate);
@@ -775,10 +775,12 @@ export function getInputScript(): string {
       }
 
       function isCjkCodePoint(codePoint) {
-        return (codePoint >= 0x3400 && codePoint <= 0x9fff)
+        return (codePoint >= 0x3400 && codePoint <= 0x4dbf)
+          || (codePoint >= 0x4e00 && codePoint <= 0x9fff)
           || (codePoint >= 0xf900 && codePoint <= 0xfaff)
-          || (codePoint >= 0x20000 && codePoint <= 0x2a6df)
-          || (codePoint >= 0x2a700 && codePoint <= 0x2ebef);
+          || (codePoint >= 0x20000 && codePoint <= 0x2ebef)
+          || (codePoint >= 0x3000 && codePoint <= 0x303f)
+          || (codePoint >= 0xff00 && codePoint <= 0xffef);
       }
 
       function formatTokenCount(value) {
