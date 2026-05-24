@@ -726,6 +726,12 @@ export function getInputStyles(): string {
       color: var(--vscode-descriptionForeground);
     }
 
+    .settings-field-hint {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
     .settings-input {
       width: 100%;
       min-height: 28px;

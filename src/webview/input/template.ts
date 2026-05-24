@@ -151,6 +151,11 @@ export function getInputTemplate(): string {
             <span class="settings-field-label">Base URL</span>
             <input id="settingsBaseUrl" class="settings-input" type="text" placeholder="https://api.deepseek.com" autocomplete="off" />
           </label>
+          <label class="settings-field">
+            <span class="settings-field-label" data-i18n="settingsMaxTokensLabel">最大输出 tokens</span>
+            <input id="settingsMaxTokens" class="settings-input" type="number" min="0" max="384000" step="1024" inputmode="numeric" autocomplete="off" />
+            <span class="settings-field-hint" data-i18n="settingsMaxTokensHint">0 表示使用服务商默认值</span>
+          </label>
         </div>
         <div class="settings-dialog-footer">
           <button id="settingsClearApiKeyBtn" type="button" class="secondary settings-clear-api-key" data-i18n="clearApiKey">清空</button>

@@ -3,6 +3,7 @@
 ## 0.0.6 - 2026-05-24
 
 - Added rich rendering for assistant markdown replies, including fenced code blocks and tables.
+- Raised the default generated-token budget and exposed `keepseek.maxTokens` so Thinking responses are less likely to exhaust output tokens before the final answer.
 - Bumped the VSIX version so installed Windows builds refresh the webview code instead of reusing an older same-version package.
 
 ## 0.0.3 - 2026-05-23

@@ -1842,10 +1842,13 @@ export function getInputScript(): string {
       var settingsApiKey = document.getElementById('settingsApiKey');
       var settingsApiKeyVisibilityBtn = document.getElementById('settingsApiKeyVisibilityBtn');
       var settingsBaseUrl = document.getElementById('settingsBaseUrl');
+      var settingsMaxTokens = document.getElementById('settingsMaxTokens');
       var settingsClearApiKeyBtn = document.getElementById('settingsClearApiKeyBtn');
       var settingsSaveBtn = document.getElementById('settingsSaveBtn');
       var settingsCancelBtn = document.getElementById('settingsCancelBtn');
       var apiKeyVisible = false;
+      var defaultMaxTokens = 64000;
+      var maxGenerationTokens = 384000;
 
       function setApiKeyVisible(isVisible, shouldFocus) {
         apiKeyVisible = Boolean(isVisible);
@@ -1869,13 +1872,24 @@ export function getInputScript(): string {
         }
       }
 
-      function showSettingsDialog(apiKey, baseUrl) {
+      function showSettingsDialog(apiKey, baseUrl, maxTokens) {
         if (!settingsOverlay || !settingsApiKey || !settingsBaseUrl) { return; }
         settingsApiKey.value = apiKey || '';
         settingsBaseUrl.value = baseUrl || 'https://api.deepseek.com';
+        if (settingsMaxTokens) {
+          settingsMaxTokens.value = String(normalizeMaxTokens(maxTokens));
+        }
         setApiKeyVisible(false, false);
         settingsOverlay.classList.remove('hidden');
         settingsApiKey.focus();
+      }
+
+      function normalizeMaxTokens(value) {
+        var number = Number(value);
+        if (!Number.isFinite(number)) {
+          return defaultMaxTokens;
+        }
+        return Math.min(maxGenerationTokens, Math.max(0, Math.floor(number)));
       }
 
       function hideSettingsDialog() {
@@ -1891,7 +1905,11 @@ export function getInputScript(): string {
           if (!baseUrl) {
             baseUrl = 'https://api.deepseek.com';
           }
-          vscode.postMessage({ type: 'saveSettings', apiKey: apiKey, baseUrl: baseUrl });
+          var maxTokens = normalizeMaxTokens(settingsMaxTokens ? settingsMaxTokens.value : defaultMaxTokens);
+          if (settingsMaxTokens) {
+            settingsMaxTokens.value = String(maxTokens);
+          }
+          vscode.postMessage({ type: 'saveSettings', apiKey: apiKey, baseUrl: baseUrl, maxTokens: maxTokens });
           setComposerStatus(t('apiSettingsSaved'));
           hideSettingsDialog();
         });

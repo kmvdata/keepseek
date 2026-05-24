@@ -205,6 +205,13 @@
           "default": 200000,
           "description": "Maximum file size in bytes for reading"
         },
+        "keepseek.maxTokens": {
+          "type": "number",
+          "default": 64000,
+          "minimum": 0,
+          "maximum": 384000,
+          "description": "Maximum generated tokens per request. Set 0 to omit max_tokens and use the provider default."
+        },
         "keepseek.maxWorkspaceToolFiles": {
           "type": "number",
           "default": 2000,

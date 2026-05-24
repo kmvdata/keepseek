@@ -79,6 +79,7 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 | `keepseek.thinkingEnabled` | `true` | 是否开启 Thinking 模式 |
 | `keepseek.reasoningEffort` | `"high"` | Thinking 推理强度，支持 `high` 或 `max` |
 | `keepseek.maxFileBytes` | `200000` | 单个引用文件或日志片段的最大字节数 |
+| `keepseek.maxTokens` | `64000` | 单次回复最大生成 tokens；设为 `0` 时使用服务商默认值 |
 
 ## 隐私与安全
 
@@ -237,6 +238,7 @@ KeepSeek is built around explicit context. You decide which files, selections, a
 | `keepseek.thinkingEnabled` | `true` | Enables Thinking mode |
 | `keepseek.reasoningEffort` | `"high"` | Thinking effort, either `high` or `max` |
 | `keepseek.maxFileBytes` | `200000` | Maximum bytes for a referenced file or log snippet |
+| `keepseek.maxTokens` | `64000` | Maximum generated tokens per reply; set `0` to use the provider default |
 
 ## Privacy And Safety
 

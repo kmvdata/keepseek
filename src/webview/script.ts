@@ -435,7 +435,7 @@ export function getScript(): string {
         clearPromptDraft();
       } else if (message.type === 'showSettingsDialog') {
         if (window.keepseekInputControls && window.keepseekInputControls.showSettingsDialog) {
-          window.keepseekInputControls.showSettingsDialog(message.apiKey, message.baseUrl);
+          window.keepseekInputControls.showSettingsDialog(message.apiKey, message.baseUrl, message.maxTokens);
         }
       } else if (message.type === 'referenceResources') {
         handleEditReferenceResourcesMessage(message);

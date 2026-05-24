@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { clampColumn, clampLine, expandFileReferencesInPrompt, getExplorerFileUris, getFileReferenceAuthorizationKey, getUriFileName, resolveFileReferenceUri } from './fileReference';
-import { AGENT_HISTORY_MESSAGE_LIMIT, AgentRunner } from './agentRunner';
+import { AGENT_HISTORY_MESSAGE_LIMIT, AgentRunner, DEFAULT_MAX_TOKENS, MAX_GENERATION_TOKENS } from './agentRunner';
 import { FileContextStore, formatBytes } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
 import { AgentSettings, ChatMessage, ChatSession, ChatSessionSummary, ContextFile, ContextUsageEstimate, DraftEdit, KeepseekModel, ReferenceResource } from './types';
@@ -49,7 +49,7 @@ type WebviewMessage =
   | { type: 'setSelectedModel'; modelId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
   | { type: 'openSettings' }
-  | { type: 'saveSettings'; apiKey: string; baseUrl: string }
+  | { type: 'saveSettings'; apiKey: string; baseUrl: string; maxTokens?: number }
   | { type: 'setLanguage'; language: KeepseekLanguage }
   | { type: 'addCurrentFile' }
   | { type: 'pickWorkspaceFiles' }
@@ -436,7 +436,8 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.postToWebview({
           type: 'showSettingsDialog',
           apiKey: config.get<string>('apiKey', ''),
-          baseUrl: config.get<string>('baseUrl', 'https://api.deepseek.com')
+          baseUrl: config.get<string>('baseUrl', 'https://api.deepseek.com'),
+          maxTokens: getConfiguredMaxTokens()
         });
         return;
       }
@@ -444,6 +445,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const config = vscode.workspace.getConfiguration('keepseek');
         await config.update('apiKey', message.apiKey, vscode.ConfigurationTarget.Global);
         await config.update('baseUrl', message.baseUrl, vscode.ConfigurationTarget.Global);
+        await config.update('maxTokens', normalizeIntegerInRange(message.maxTokens, 0, MAX_GENERATION_TOKENS, DEFAULT_MAX_TOKENS), vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage(this.t('apiSettingsSaved'));
         return;
       }
@@ -1488,6 +1490,15 @@ function getConfiguredMaxFileBytes(): number {
   return vscode.workspace.getConfiguration('keepseek').get('maxFileBytes', 200_000);
 }
 
+function getConfiguredMaxTokens(): number {
+  return normalizeIntegerInRange(
+    vscode.workspace.getConfiguration('keepseek').get<number>('maxTokens', DEFAULT_MAX_TOKENS),
+    0,
+    MAX_GENERATION_TOKENS,
+    DEFAULT_MAX_TOKENS
+  );
+}
+
 function getConfiguredContextWindowTokens(model?: KeepseekModel): number {
   const modelLimit = normalizePositiveInteger(model?.contextWindowTokens);
   if (modelLimit) {
@@ -1506,6 +1517,14 @@ function normalizePositiveInteger(value: unknown): number | undefined {
     return undefined;
   }
   return Math.floor(number);
+}
+
+function normalizeIntegerInRange(value: unknown, min: number, max: number, fallback: number): number {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.floor(number)));
 }
 
 function sanitizeDroppedFileName(name: string): string {

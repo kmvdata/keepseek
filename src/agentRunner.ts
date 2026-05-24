@@ -11,6 +11,8 @@ const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
 const LIST_WORKSPACE_FILES_TOOL_NAME = 'keepseek_list_workspace_files';
 const READ_WORKSPACE_FILE_TOOL_NAME = 'keepseek_read_workspace_file';
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 180_000;
+export const DEFAULT_MAX_TOKENS = 64_000;
+export const MAX_GENERATION_TOKENS = 384_000;
 const DEFAULT_MAX_TOOL_ITERATIONS = 4;
 const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
 const WORKSPACE_TOOL_GLOB_EXCLUDE = '**/{.git,.vscode-test,build,coverage,dist,node_modules,out}/**';
@@ -666,7 +668,9 @@ export class AgentRunner {
   ): string {
     const text = (content ?? '').trim();
     if (text) {
-      return text;
+      return finishReason === 'length'
+        ? `${text}\n\n${this.getLengthLimitMessage(language)}`
+        : text;
     }
 
     if (draftEdits.length) {
@@ -687,9 +691,7 @@ export class AgentRunner {
     }
 
     if (finishReason === 'length') {
-      return language === 'en'
-        ? 'DeepSeek reached the output length limit before completing the reply. Reduce context or increase maxTokens and try again.'
-        : 'DeepSeek 输出达到长度上限，未生成完整回复。可以缩小上下文或提高 maxTokens 后重试。';
+      return this.getLengthLimitMessage(language);
     }
 
     if (finishReason === 'tool_iterations_exhausted') {
@@ -699,6 +701,12 @@ export class AgentRunner {
     }
 
     return language === 'en' ? 'DeepSeek did not return text content.' : 'DeepSeek 未返回文本内容。';
+  }
+
+  private getLengthLimitMessage(language: KeepseekLanguage): string {
+    return language === 'en'
+      ? 'DeepSeek reached the generated-token budget before completing the reply. Increase keepseek.maxTokens, reduce reasoning effort, disable Thinking, or shrink context and try again.'
+      : 'DeepSeek 本次生成耗尽了输出 token 预算，未生成完整回复。可以提高 keepseek.maxTokens、降低推理强度、关闭 Thinking，或缩小上下文后重试。';
   }
 
   private formatReasoning(parts: string[]): string | undefined {
@@ -942,7 +950,7 @@ export class AgentRunner {
     return {
       apiKey,
       baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL).trim() || DEFAULT_DEEPSEEK_BASE_URL,
-      maxTokens: this.clampInteger(config.get<number>('maxTokens', 8192), 0, 384_000),
+      maxTokens: this.clampInteger(config.get<number>('maxTokens', DEFAULT_MAX_TOKENS), 0, MAX_GENERATION_TOKENS),
       maxToolIterations: this.clampInteger(config.get<number>('maxToolIterations', DEFAULT_MAX_TOOL_ITERATIONS), 0, 12),
       streamIdleTimeoutMs: this.clampInteger(config.get<number>('streamIdleTimeoutMs', DEFAULT_STREAM_IDLE_TIMEOUT_MS), 10_000, 3_600_000)
     };
