@@ -1025,10 +1025,29 @@ export function getScript(): string {
       return resource.kind === 'directory' && name.charAt(name.length - 1) !== '/' ? name + '/' : name;
     }
 
+    function getEditReferenceResourceSearchName(resource) {
+      var name = String(resource.label || '').trim();
+      if (!name) {
+        name = getEditReferencePathBasename(resource.path || resource.uri || resource.description || '');
+      }
+      while (name.charAt(name.length - 1) === '/' || name.charAt(name.length - 1) === String.fromCharCode(92)) {
+        name = name.slice(0, -1);
+      }
+      return name || 'file';
+    }
+
+    function getEditReferencePathBasename(value) {
+      var normalized = String(value || '').trim().split(String.fromCharCode(92)).join('/');
+      while (normalized.charAt(normalized.length - 1) === '/') {
+        normalized = normalized.slice(0, -1);
+      }
+      var parts = normalized.split('/');
+      return parts[parts.length - 1] || normalized || 'file';
+    }
+
     function editReferenceResourceMatchesQuery(resource, query) {
-      var normalizedName = normalizeEditReferenceQuery(getEditReferenceResourceName(resource));
-      var normalizedPath = normalizeEditReferenceQuery(resource.description || resource.path || '');
-      return normalizedName.indexOf(query) === 0 || normalizedPath.indexOf(query) >= 0;
+      var normalizedName = normalizeEditReferenceQuery(getEditReferenceResourceSearchName(resource));
+      return normalizedName.indexOf(query) >= 0;
     }
 
     function moveEditReferenceSelection(delta) {
@@ -1177,6 +1196,56 @@ export function getScript(): string {
       vscode.postMessage({ type: 'removeContextFile', uri: removeBtn.dataset.uri });
     });
 
+    function getDraftEditAction(edit) {
+      var action = edit && edit.action;
+      if (action === 'create' || action === 'modify' || action === 'delete' || action === 'move') {
+        return action;
+      }
+      return action ? 'unknown' : 'modify';
+    }
+
+    function getDraftEditActionLabel(action) {
+      switch (action) {
+        case 'create':
+          return t('draftActionCreate');
+        case 'delete':
+          return t('draftActionDelete');
+        case 'move':
+          return t('draftActionMove');
+        case 'modify':
+          return t('draftActionModify');
+        default:
+          return t('draftActionUnknown');
+      }
+    }
+
+    function getDraftEditActionIcon(action) {
+      switch (action) {
+        case 'create':
+          return '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.25v9.5M3.25 8h9.5" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/></svg>';
+        case 'delete':
+          return '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 4.5h9.5M6.25 4.5V3.2h3.5v1.3M5 6.25l.45 6.1c.05.8.48 1.15 1.22 1.15h2.66c.74 0 1.17-.35 1.22-1.15l.45-6.1" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        case 'move':
+          return '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h9.2M8.8 4.6 12.2 8l-3.4 3.4" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        case 'modify':
+          return '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 11.95 4 9.2l5.9-5.9a1.45 1.45 0 0 1 2.05 2.05l-5.9 5.9-2.8.7Z" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="m8.95 4.25 2.8 2.8" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>';
+        default:
+          return '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4.75" fill="none" stroke="currentColor" stroke-width="1.25"/><path d="M8 5.35v3.2" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><circle cx="8" cy="10.9" r=".65" fill="currentColor"/></svg>';
+      }
+    }
+
+    function createDraftEditActionIcon(edit) {
+      var action = getDraftEditAction(edit);
+      var label = getDraftEditActionLabel(action);
+      var icon = document.createElement('span');
+      icon.className = 'draft-chip-action-icon draft-chip-action-icon-' + action;
+      icon.title = label;
+      icon.setAttribute('aria-label', label);
+      icon.setAttribute('role', 'img');
+      icon.innerHTML = getDraftEditActionIcon(action);
+      return icon;
+    }
+
     function renderDraftEdits() {
       draftList.innerHTML = '';
       draftRegion.classList.toggle('hidden', state.draftEdits.length === 0);
@@ -1195,10 +1264,14 @@ export function getScript(): string {
         var chip = document.createElement('div');
         chip.className = 'draft-chip';
 
+        var main = document.createElement('div');
+        main.className = 'draft-chip-main';
+
         var label = document.createElement('span');
         label.className = 'draft-chip-label';
         label.textContent = edit.label;
         label.title = edit.reason;
+        main.append(createDraftEditActionIcon(edit), label);
 
         var actions = document.createElement('div');
         actions.className = 'draft-chip-actions';
@@ -1217,7 +1290,7 @@ export function getScript(): string {
         discard.dataset.editAction = 'discardDraftEdit';
 
         actions.append(apply, discard);
-        chip.append(label, actions);
+        chip.append(main, actions);
         draftList.append(chip);
       }
     }

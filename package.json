@@ -203,6 +203,11 @@
           ],
           "description": "Available AI models"
         },
+        "keepseek.selectedModelId": {
+          "type": "string",
+          "default": "",
+          "description": "Persisted ID of the currently selected AI model. When empty or unavailable, KeepSeek uses the first configured model."
+        },
         "keepseek.thinkingEnabled": {
           "type": "boolean",
           "default": true,

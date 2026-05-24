@@ -498,6 +498,49 @@ export function getStyles(): string {
       background: #f8fafc;
     }
 
+    .draft-chip-main {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .draft-chip-action-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 18px;
+      width: 18px;
+      height: 18px;
+      margin-top: -1px;
+      border: 1px solid #d0d7de;
+      border-radius: 4px;
+      color: #57606a;
+      background: #ffffff;
+    }
+
+    .draft-chip-action-icon svg {
+      display: block;
+      width: 13px;
+      height: 13px;
+    }
+
+    .draft-chip-action-icon-create {
+      color: var(--vscode-gitDecoration-addedResourceForeground, #1a7f37);
+    }
+
+    .draft-chip-action-icon-modify {
+      color: var(--vscode-charts-blue, #0969da);
+    }
+
+    .draft-chip-action-icon-delete {
+      color: var(--vscode-errorForeground, #cf222e);
+    }
+
+    .draft-chip-action-icon-move {
+      color: var(--vscode-charts-purple, #8250df);
+    }
+
     .draft-chip-label {
       min-width: 0;
       overflow-wrap: anywhere;

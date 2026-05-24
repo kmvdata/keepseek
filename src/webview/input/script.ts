@@ -563,10 +563,29 @@ export function getInputScript(): string {
         return resource.kind === 'directory' && name.charAt(name.length - 1) !== '/' ? name + '/' : name;
       }
 
+      function getReferenceResourceSearchName(resource) {
+        var name = String(resource.label || '').trim();
+        if (!name) {
+          name = getReferencePathBasename(resource.path || resource.uri || resource.description || '');
+        }
+        while (name.charAt(name.length - 1) === '/' || name.charAt(name.length - 1) === String.fromCharCode(92)) {
+          name = name.slice(0, -1);
+        }
+        return name || 'file';
+      }
+
+      function getReferencePathBasename(value) {
+        var normalized = String(value || '').trim().split(String.fromCharCode(92)).join('/');
+        while (normalized.charAt(normalized.length - 1) === '/') {
+          normalized = normalized.slice(0, -1);
+        }
+        var parts = normalized.split('/');
+        return parts[parts.length - 1] || normalized || 'file';
+      }
+
       function resourceMatchesReferenceQuery(resource, query) {
-        var normalizedName = normalizeReferenceQuery(getReferenceResourceName(resource));
-        var normalizedPath = normalizeReferenceQuery(resource.description || resource.path || '');
-        return normalizedName.indexOf(query) === 0 || normalizedPath.indexOf(query) >= 0;
+        var normalizedName = normalizeReferenceQuery(getReferenceResourceSearchName(resource));
+        return normalizedName.indexOf(query) >= 0;
       }
 
       function moveReferenceSelection(delta) {

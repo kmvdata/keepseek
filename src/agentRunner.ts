@@ -59,7 +59,7 @@ export class AgentRunner {
   public constructor(private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService()) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
-    const draftEdit = this.tryCreateDraftEdit(request.prompt, request.language);
+    const draftEdit = await this.tryCreateDraftEdit(request.prompt, request.language);
     if (draftEdit) {
       return {
         message: request.language === 'en'
@@ -504,7 +504,7 @@ export class AgentRunner {
         case READ_WORKSPACE_FILE_TOOL_NAME:
           return await this.workspaceTools.readWorkspaceFile(this.readRequiredString(args, 'path'), language);
         case CREATE_DRAFT_EDIT_TOOL_NAME:
-          return this.createDraftEdit(args, draftEdits);
+          return await this.createDraftEdit(args, draftEdits);
         default:
           return JSON.stringify({
             ok: false,
@@ -519,7 +519,7 @@ export class AgentRunner {
     }
   }
 
-  private createDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[]): string {
+  private async createDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[]): Promise<string> {
     const rawPath = this.readRequiredString(args, 'path');
     const content = this.readRequiredString(args, 'content');
     const reason = this.readRequiredString(args, 'reason');
@@ -528,6 +528,7 @@ export class AgentRunner {
       id: randomUUID(),
       uri: uri.toString(),
       label: this.workspaceTools.getLabel(uri),
+      action: await this.getDraftEditAction(uri),
       newText: content,
       reason
     };
@@ -860,7 +861,7 @@ export class AgentRunner {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
   }
 
-  private tryCreateDraftEdit(prompt: string, language: KeepseekLanguage): DraftEdit | undefined {
+  private async tryCreateDraftEdit(prompt: string, language: KeepseekLanguage): Promise<DraftEdit | undefined> {
     const match = /^\/draft\s+([^\n]+)\n([\s\S]+)$/u.exec(prompt.trimEnd());
     if (!match) {
       return undefined;
@@ -877,11 +878,21 @@ export class AgentRunner {
       id: randomUUID(),
       uri: uri.toString(),
       label: this.workspaceTools.getLabel(uri),
+      action: await this.getDraftEditAction(uri),
       newText,
       reason: language === 'en'
         ? 'Draft edit proposed from the KeepSeek chat panel.'
         : '来自 KeepSeek 对话面板的待确认修改。'
     };
+  }
+
+  private async getDraftEditAction(uri: vscode.Uri): Promise<DraftEdit['action']> {
+    try {
+      await vscode.workspace.fs.stat(uri);
+      return 'modify';
+    } catch {
+      return 'create';
+    }
   }
 
 }

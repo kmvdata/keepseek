@@ -24,6 +24,7 @@ import {
   getConfiguredMaxToolIterations,
   getConfiguredMaxTokens,
   getConfiguredModels,
+  getConfiguredSelectedModelId,
   getConfiguredToolResultTokenBudget,
   MAX_GENERATION_TOKENS,
   MAX_RUN_MS,
@@ -119,7 +120,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly draftEdits: DraftEditStore;
   private readonly authorizedExternalReferenceUris = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
-  private selectedModelId = '';
+  private selectedModelId = getConfiguredSelectedModelId();
   private agentSettings = getConfiguredAgentSettings();
   private language = getConfiguredKeepseekLanguage();
   private isBusy = false;
@@ -131,6 +132,11 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   ) {
     this.sessionStore = new ChatSessionStore(sessionStorage, this.language);
     this.draftEdits = new DraftEditStore(new SafeFileEditor(), this.sessionStore, (key, values) => this.t(key, values));
+  }
+
+  public refreshConfiguration(): void {
+    this.syncConfiguredState();
+    this.postState();
   }
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -481,7 +487,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private async handleMessage(message: WebviewMessage): Promise<void> {
     switch (message.type) {
       case 'ready':
-        this.language = getConfiguredKeepseekLanguage();
+        this.syncConfiguredState();
         this.postState();
         return;
       case 'sendPrompt':
@@ -497,7 +503,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.selectSession(message.sessionId);
         return;
       case 'setSelectedModel':
-        this.setSelectedModel(message.modelId);
+        await this.setSelectedModel(message.modelId);
         return;
       case 'setAgentSettings':
         await this.setAgentSettings(message.settings);
@@ -692,13 +698,23 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private setSelectedModel(modelId: string): void {
+  private async setSelectedModel(modelId: string): Promise<void> {
     const models = getConfiguredModels();
     if (!models.some((model) => model.id === modelId)) {
       return;
     }
     this.selectedModelId = modelId;
+    const config = vscode.workspace.getConfiguration('keepseek');
+    await config.update('selectedModelId', modelId, vscode.ConfigurationTarget.Global);
     this.postState();
+  }
+
+  private syncConfiguredState(): void {
+    const models = getConfiguredModels();
+    this.selectedModelId = getConfiguredSelectedModelId(models);
+    this.agentSettings = getConfiguredAgentSettings();
+    this.language = getConfiguredKeepseekLanguage();
+    this.sessionStore.setLanguage(this.language);
   }
 
   private async setAgentSettings(settings: Partial<AgentSettings>): Promise<void> {
@@ -994,7 +1010,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(
       'keepseek.addExplorerDirectoryToContext',
       (uri?: vscode.Uri, selectedUris?: vscode.Uri[]) => provider.insertExplorerDirectoryToInput(uri, selectedUris)
-    )
+    ),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('keepseek')) {
+        provider.refreshConfiguration();
+      }
+    })
   );
 }
 

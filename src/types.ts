@@ -70,10 +70,13 @@ export interface ChatSessionSummary {
   messageCount: number;
 }
 
+export type DraftEditAction = 'create' | 'modify' | 'delete' | 'move';
+
 export interface DraftEdit {
   id: string;
   uri: string;
   label: string;
+  action: DraftEditAction;
   newText: string;
   reason: string;
 }

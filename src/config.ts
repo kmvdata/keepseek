@@ -12,6 +12,7 @@ export const DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000;
 export const DEFAULT_MAX_TOOL_CALLS = 24;
 export const DEFAULT_MAX_RUN_MS = 600_000;
 export const DEFAULT_TOOL_RESULT_TOKEN_BUDGET = 0;
+export const DEFAULT_SELECTED_MODEL_ID = '';
 export const MAX_TOOL_ITERATIONS = 64;
 export const MAX_TOOL_CALLS = 256;
 export const MAX_RUN_MS = 3_600_000;
@@ -42,6 +43,18 @@ export function getConfiguredModels(): KeepseekModel[] {
       provider: 'deepseek'
     }
   ];
+}
+
+export function getConfiguredSelectedModelId(models = getConfiguredModels()): string {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<string>('selectedModelId', DEFAULT_SELECTED_MODEL_ID)
+    .trim();
+  if (configured && models.some((model) => model.id === configured)) {
+    return configured;
+  }
+
+  return models[0]?.id ?? DEFAULT_SELECTED_MODEL_ID;
 }
 
 export function getConfiguredAgentSettings(): AgentSettings {
