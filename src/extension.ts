@@ -62,7 +62,9 @@ type WebviewMessage =
   | { type: 'removeContextFile'; uri: string }
   | { type: 'clearContext' }
   | { type: 'applyDraftEdit'; id: string }
-  | { type: 'discardDraftEdit'; id: string };
+  | { type: 'discardDraftEdit'; id: string }
+  | { type: 'applyAllDraftEdits' }
+  | { type: 'discardAllDraftEdits' };
 
 interface StoredSessionState {
   version: number;
@@ -494,6 +496,13 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'discardDraftEdit':
         this.draftEdits.delete(message.id);
+        this.postState();
+        return;
+      case 'applyAllDraftEdits':
+        await this.applyAllDraftEdits();
+        return;
+      case 'discardAllDraftEdits':
+        this.draftEdits.clear();
         this.postState();
         return;
     }
@@ -929,6 +938,44 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     } finally {
       this.postState();
     }
+  }
+
+  private async applyAllDraftEdits(): Promise<void> {
+    const edits = Array.from(this.draftEdits.values());
+    if (!edits.length) {
+      return;
+    }
+
+    let appliedAny = false;
+    for (const edit of edits) {
+      if (!this.draftEdits.has(edit.id)) {
+        continue;
+      }
+
+      try {
+        const applied = await this.safeFileEditor.applyDraftEdit(edit);
+        if (!applied) {
+          continue;
+        }
+
+        this.draftEdits.delete(edit.id);
+        this.messages.push({
+          id: randomUUID(),
+          role: 'assistant',
+          content: this.t('wroteFile', { label: edit.label }),
+          createdAt: new Date().toISOString()
+        });
+        appliedAny = true;
+      } catch (error) {
+        vscode.window.showErrorMessage(getErrorMessage(error));
+      }
+    }
+
+    if (appliedAny) {
+      this.getActiveSession().updatedAt = new Date().toISOString();
+      await this.persistSessions();
+    }
+    this.postState();
   }
 
   private trimHistory(): void {

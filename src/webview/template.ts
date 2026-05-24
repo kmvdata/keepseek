@@ -74,7 +74,13 @@ export function getTemplate(): string {
     </section>
 
     <div id="draftRegion" class="draft-bar hidden">
-      <div class="draft-bar-label" data-i18n="pendingEdits">待确认修改</div>
+      <div class="draft-bar-header">
+        <div class="draft-bar-label" data-i18n="pendingEdits">待确认修改</div>
+        <div id="draftBulkActions" class="draft-bulk-actions hidden">
+          <button id="draftApplyAllBtn" type="button" data-i18n="applyAll">全部采纳</button>
+          <button id="draftDiscardAllBtn" type="button" class="secondary" data-i18n="discardAll">全部取消</button>
+        </div>
+      </div>
       <div id="draftList" class="draft-bar-list"></div>
     </div>
 

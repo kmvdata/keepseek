@@ -435,46 +435,76 @@ export function getStyles(): string {
     }
 
     .draft-bar {
-      padding: 6px 12px;
-      border-top: 1px solid var(--vscode-focusBorder, var(--vscode-panel-border));
-      background: var(--vscode-editor-background);
+      margin: 8px 12px 0;
+      padding: 10px;
+      border: 1px solid #d8dee4;
+      border-radius: 8px;
+      background: #ffffff;
+      color: #1f2328;
+    }
+
+    .draft-bar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 8px;
     }
 
     .draft-bar-label {
       font-size: 11px;
       font-weight: 600;
-      color: var(--vscode-descriptionForeground);
-      margin-bottom: 6px;
+      color: #57606a;
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
 
-    .draft-bar-list {
+    .draft-bulk-actions {
       display: flex;
+      align-items: center;
+      justify-content: flex-end;
       flex-wrap: wrap;
+      gap: 6px;
+      flex-shrink: 0;
+      margin-left: auto;
+    }
+
+    .draft-bulk-actions button {
+      font-size: 11px;
+      padding: 2px 8px;
+      min-height: 22px;
+      border-radius: 4px;
+    }
+
+    .draft-bar-list {
+      display: grid;
       gap: 6px;
     }
 
     .draft-chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 8px;
-      border: 1px solid var(--vscode-focusBorder);
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      align-items: start;
+      gap: 8px;
+      width: 100%;
+      padding: 7px 8px;
+      border: 1px solid #e5e7eb;
       border-radius: 6px;
       font-size: 12px;
-      background: var(--vscode-sideBar-background);
+      background: #f8fafc;
     }
 
     .draft-chip-label {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      max-width: 160px;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      white-space: normal;
     }
 
     .draft-chip-actions {
       display: flex;
+      justify-content: flex-end;
+      flex-wrap: wrap;
       gap: 4px;
     }
 
@@ -483,6 +513,12 @@ export function getStyles(): string {
       padding: 2px 8px;
       min-height: 20px;
       border-radius: 3px;
+    }
+
+    @media (min-width: 300px) {
+      .draft-chip {
+        grid-template-columns: minmax(0, 1fr) auto;
+      }
     }
 
     /* ---- transcript ---- */

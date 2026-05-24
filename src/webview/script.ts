@@ -74,6 +74,9 @@ export function getScript(): string {
     const contextBarOuter = document.getElementById('contextBarOuter');
     const contextBar = document.getElementById('contextBar');
     const draftRegion = document.getElementById('draftRegion');
+    const draftBulkActions = document.getElementById('draftBulkActions');
+    const draftApplyAllBtn = document.getElementById('draftApplyAllBtn');
+    const draftDiscardAllBtn = document.getElementById('draftDiscardAllBtn');
     const draftList = document.getElementById('draftList');
     const transcript = document.getElementById('transcript');
     const composer = document.getElementById('composer');
@@ -291,6 +294,20 @@ export function getScript(): string {
       if (!button) return;
       vscode.postMessage({ type: button.dataset.editAction, id: button.dataset.editId });
     });
+
+    if (draftApplyAllBtn) {
+      draftApplyAllBtn.addEventListener('click', function() {
+        if (state.draftEdits.length <= 1) return;
+        vscode.postMessage({ type: 'applyAllDraftEdits' });
+      });
+    }
+
+    if (draftDiscardAllBtn) {
+      draftDiscardAllBtn.addEventListener('click', function() {
+        if (state.draftEdits.length <= 1) return;
+        vscode.postMessage({ type: 'discardAllDraftEdits' });
+      });
+    }
 
     if (newChatTab) {
       newChatTab.addEventListener('click', function() {
@@ -1134,6 +1151,15 @@ export function getScript(): string {
     function renderDraftEdits() {
       draftList.innerHTML = '';
       draftRegion.classList.toggle('hidden', state.draftEdits.length === 0);
+      if (draftBulkActions) {
+        draftBulkActions.classList.toggle('hidden', state.draftEdits.length <= 1);
+      }
+      if (draftApplyAllBtn) {
+        draftApplyAllBtn.disabled = state.draftEdits.length <= 1;
+      }
+      if (draftDiscardAllBtn) {
+        draftDiscardAllBtn.disabled = state.draftEdits.length <= 1;
+      }
 
       for (var i = 0; i < state.draftEdits.length; i++) {
         var edit = state.draftEdits[i];
