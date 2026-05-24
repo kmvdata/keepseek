@@ -121,6 +121,16 @@ interface StreamingToolCallAccumulator {
   };
 }
 
+interface ParsedDsmlToolCalls {
+  content: string;
+  toolCalls: DeepSeekToolCall[];
+}
+
+interface DsmlCloseTag {
+  index: number;
+  endIndex: number;
+}
+
 export class AgentRunner {
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
 
@@ -150,7 +160,7 @@ export class AgentRunner {
 
     for (let turn = 0; turn <= maxIterations; turn += 1) {
       const response = await this.createChatCompletion(request, runtimeConfig, messages, turn < maxIterations ? tools : [], callbacks);
-      const assistant = response.message;
+      const assistant = this.normalizeAssistantToolCalls(response.message);
       if (!assistant) {
         throw new Error(request.language === 'en'
           ? 'DeepSeek API did not return a usable assistant message.'
@@ -913,6 +923,165 @@ export class AgentRunner {
       .filter((toolCall) => Boolean(toolCall.function.name));
 
     return toolCalls.length ? toolCalls : null;
+  }
+
+  private normalizeAssistantToolCalls(assistant: DeepSeekAssistantMessage): DeepSeekAssistantMessage {
+    const structuredToolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
+    if (structuredToolCalls.length) {
+      return assistant;
+    }
+
+    const parsedDsml = this.parseDsmlToolCalls(assistant.content ?? '');
+    if (!parsedDsml?.toolCalls.length) {
+      return assistant;
+    }
+
+    return {
+      ...assistant,
+      content: parsedDsml.content,
+      tool_calls: parsedDsml.toolCalls
+    };
+  }
+
+  private parseDsmlToolCalls(content: string): ParsedDsmlToolCalls | undefined {
+    if (!content.includes('DSML')) {
+      return undefined;
+    }
+
+    const normalized = this.normalizeDsmlMarkers(content);
+    const blockStartMatch = /<\|+DSML\|+tool_calls>/iu.exec(normalized);
+    if (!blockStartMatch || blockStartMatch.index === undefined) {
+      return undefined;
+    }
+
+    const blockStart = blockStartMatch.index;
+    const blockContentStart = blockStart + blockStartMatch[0].length;
+    const blockCloseMatch = /(?:<\/\|+DSML\|+tool_calls>|\|+DSML\|+tool_calls)/iu.exec(normalized.slice(blockContentStart));
+    if (!blockCloseMatch || blockCloseMatch.index === undefined) {
+      return undefined;
+    }
+
+    const blockContentEnd = blockContentStart + blockCloseMatch.index;
+    const blockEnd = blockContentEnd + blockCloseMatch[0].length;
+    const blockContent = normalized.slice(blockContentStart, blockContentEnd);
+    const toolCalls = this.parseDsmlInvocations(blockContent);
+    if (!toolCalls.length) {
+      return undefined;
+    }
+
+    return {
+      content: `${content.slice(0, blockStart)}${content.slice(blockEnd)}`.trim(),
+      toolCalls
+    };
+  }
+
+  private parseDsmlInvocations(blockContent: string): DeepSeekToolCall[] {
+    const toolCalls: DeepSeekToolCall[] = [];
+    const invokePattern = /<\|+DSML\|+invoke\b([^>]*)>/giu;
+    let invokeMatch: RegExpExecArray | null;
+
+    while ((invokeMatch = invokePattern.exec(blockContent)) !== null) {
+      const name = this.readDsmlAttribute(invokeMatch[1] ?? '', 'name');
+      if (!name) {
+        continue;
+      }
+
+      const bodyStart = invokeMatch.index + invokeMatch[0].length;
+      const closeTag = this.findDsmlCloseTag(blockContent, 'invoke', bodyStart);
+      const bodyEnd = closeTag?.index ?? blockContent.length;
+      const args = this.parseDsmlParameters(blockContent.slice(bodyStart, bodyEnd));
+      toolCalls.push({
+        id: `dsml-tool-call-${toolCalls.length}`,
+        type: 'function',
+        function: {
+          name,
+          arguments: JSON.stringify(args)
+        }
+      });
+
+      if (closeTag) {
+        invokePattern.lastIndex = closeTag.endIndex;
+      }
+    }
+
+    return toolCalls;
+  }
+
+  private parseDsmlParameters(invokeBody: string): Record<string, unknown> {
+    const args: Record<string, unknown> = {};
+    const parameterPattern = /<\|+DSML\|+parameter\b([^>]*)>/giu;
+    let parameterMatch: RegExpExecArray | null;
+
+    while ((parameterMatch = parameterPattern.exec(invokeBody)) !== null) {
+      const attributes = parameterMatch[1] ?? '';
+      const name = this.readDsmlAttribute(attributes, 'name');
+      if (!name) {
+        continue;
+      }
+
+      const bodyStart = parameterMatch.index + parameterMatch[0].length;
+      const closeTag = this.findDsmlCloseTag(invokeBody, 'parameter', bodyStart);
+      if (!closeTag) {
+        break;
+      }
+
+      const rawValue = invokeBody.slice(bodyStart, closeTag.index);
+      const isString = this.readDsmlAttribute(attributes, 'string') !== 'false';
+      args[name] = isString ? this.decodeDsmlText(rawValue) : this.parseDsmlJsonValue(rawValue);
+      parameterPattern.lastIndex = closeTag.endIndex;
+    }
+
+    return args;
+  }
+
+  private findDsmlCloseTag(content: string, tagName: 'invoke' | 'parameter', startIndex: number): DsmlCloseTag | undefined {
+    const closePattern = new RegExp(`(?:<\\/\\|+DSML\\|+${tagName}>|\\|+DSML\\|+${tagName})`, 'iu');
+    const match = closePattern.exec(content.slice(startIndex));
+    if (!match || match.index === undefined) {
+      return undefined;
+    }
+
+    const index = startIndex + match.index;
+    return {
+      index,
+      endIndex: index + match[0].length
+    };
+  }
+
+  private normalizeDsmlMarkers(content: string): string {
+    return content.replace(/\uFF5C/gu, '|');
+  }
+
+  private readDsmlAttribute(attributes: string, name: string): string | undefined {
+    const doubleQuoted = new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`, 'u').exec(attributes);
+    if (doubleQuoted) {
+      return this.decodeDsmlText(doubleQuoted[1]);
+    }
+
+    const singleQuoted = new RegExp(`\\b${name}\\s*=\\s*'([^']*)'`, 'u').exec(attributes);
+    return singleQuoted ? this.decodeDsmlText(singleQuoted[1]) : undefined;
+  }
+
+  private decodeDsmlText(value: string): string {
+    return value
+      .replace(/&quot;/gu, '"')
+      .replace(/&apos;/gu, "'")
+      .replace(/&lt;/gu, '<')
+      .replace(/&gt;/gu, '>')
+      .replace(/&amp;/gu, '&');
+  }
+
+  private parseDsmlJsonValue(value: string): unknown {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return trimmed;
+    }
   }
 
   private formatApiError(responseText: string, language: KeepseekLanguage): string {
