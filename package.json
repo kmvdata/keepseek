@@ -2,7 +2,7 @@
   "name": "keepseek",
   "displayName": "KeepSeek",
   "description": "AI-powered coding agent for VS Code",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "publisher": "keepseek",
   "icon": "resources/keepseek.png",
   "repository": {

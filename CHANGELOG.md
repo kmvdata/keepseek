@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.0.8 - 2026-05-24
+## 0.0.9 - 2026-05-24
 
 - Fixed a streaming parser edge case where the final SSE event could be left unprocessed when the response ended with pending decoded bytes, causing AI replies to appear interrupted.
 
