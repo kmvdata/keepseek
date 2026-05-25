@@ -326,6 +326,8 @@ export function getInputStyles(): string {
 
     .composer-status,
     #status {
+      display: block;
+      flex: 1 1 auto;
       min-width: 0;
       margin-left: 6px;
       overflow: hidden;
@@ -333,6 +335,13 @@ export function getInputStyles(): string {
       white-space: nowrap;
       font-size: 11px;
       color: var(--vscode-descriptionForeground);
+      opacity: 0.82;
+      transition: opacity 120ms ease;
+    }
+
+    .composer-status.is-active,
+    #status.is-active {
+      opacity: 1;
     }
 
     .command-menu {

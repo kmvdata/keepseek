@@ -105,10 +105,42 @@ export interface AgentResponse {
   draftEdits: DraftEdit[];
 }
 
+export type AgentActivityBase = 'idle' | 'thinking' | 'executing' | 'waiting' | 'complete' | 'error';
+
+export type AgentActivityPhase =
+  | 'idle'
+  | 'preparing'
+  | 'expanding_references'
+  | 'requesting_model'
+  | 'reasoning'
+  | 'planning_tool'
+  | 'executing_tool'
+  | 'reading_file'
+  | 'listing_files'
+  | 'listing_directory'
+  | 'creating_draft_edit'
+  | 'reviewing_tool_result'
+  | 'generating'
+  | 'finalizing'
+  | 'failed';
+
+export interface AgentActivityInput {
+  base: AgentActivityBase;
+  phase: AgentActivityPhase;
+  toolName?: string;
+  detail?: string;
+}
+
+export interface AgentActivityState extends AgentActivityInput {
+  updatedAt: string;
+  sequence: number;
+}
+
 export type AgentProgressEvent =
   | { type: 'content'; delta: string }
   | { type: 'reasoning'; delta: string };
 
 export interface AgentRunCallbacks {
   onDelta?: (event: AgentProgressEvent) => void;
+  onStatus?: (status: AgentActivityInput) => void;
 }

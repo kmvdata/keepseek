@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { AgentRequest, AgentResponse, AgentRunCallbacks, ChatMessage, DraftEdit } from './types';
+import { AgentActivityInput, AgentActivityPhase, AgentRequest, AgentResponse, AgentRunCallbacks, ChatMessage, DraftEdit } from './types';
 import { formatBytes } from './format';
 import { getMarkdownFence, getMarkdownLanguage } from './markdown';
 import { estimateTokenCount } from './tokenEstimate';
@@ -60,8 +60,22 @@ export class AgentRunner {
   public constructor(private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService()) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
+    const emitStatus = this.createStatusEmitter(callbacks);
+    const runCallbacks: AgentRunCallbacks = {
+      ...callbacks,
+      onStatus: emitStatus
+    };
     const draftEdit = await this.tryCreateDraftEdit(request.prompt, request.language);
     if (draftEdit) {
+      emitStatus({
+        base: 'executing',
+        phase: 'creating_draft_edit',
+        toolName: CREATE_DRAFT_EDIT_TOOL_NAME
+      });
+      emitStatus({
+        base: 'thinking',
+        phase: 'finalizing'
+      });
       return {
         message: request.language === 'en'
           ? [
@@ -93,6 +107,10 @@ export class AgentRunner {
     for (let turn = 0; turn <= maxIterations; turn += 1) {
       const runTimeStopReason = this.getRunTimeStopReason(runDeadlineAt);
       if (runTimeStopReason) {
+        emitStatus({
+          base: 'thinking',
+          phase: 'finalizing'
+        });
         return {
           message: this.getFinalMessage(null, draftEdits, runTimeStopReason, request.language, runtimeConfig),
           reasoningContent: this.formatReasoning(reasoningParts),
@@ -101,7 +119,7 @@ export class AgentRunner {
       }
 
       const toolsForTurn = !budgetStopReason && turn < maxIterations ? tools : [];
-      const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, callbacks, runDeadlineAt);
+      const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt);
       const assistant = this.normalizeAssistantToolCalls(response.message, toolsForTurn.length > 0);
       if (!assistant) {
         throw new Error(request.language === 'en'
@@ -115,12 +133,21 @@ export class AgentRunner {
 
       const toolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
       if (!toolCalls.length) {
+        emitStatus({
+          base: 'thinking',
+          phase: 'finalizing'
+        });
         return {
           message: this.getFinalMessage(assistant.content, draftEdits, budgetStopReason ?? response.finishReason, request.language, runtimeConfig),
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits
         };
       }
+
+      emitStatus({
+        base: 'thinking',
+        phase: 'planning_tool'
+      });
 
       messages.push({
         role: 'assistant',
@@ -141,6 +168,11 @@ export class AgentRunner {
           });
         } else {
           toolCallCount += 1;
+          emitStatus({
+            base: 'executing',
+            phase: this.getToolActivityPhase(toolCall.function.name),
+            toolName: toolCall.function.name
+          });
           const rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language);
           const nextToolResultTokens = this.estimateChatMessageTokens('tool', rawToolResult);
           if (toolResultTokens + nextToolResultTokens > maxToolResultTokens) {
@@ -163,6 +195,11 @@ export class AgentRunner {
           tool_call_id: toolCall.id,
           content: toolResult
         });
+        emitStatus({
+          base: 'thinking',
+          phase: 'reviewing_tool_result',
+          toolName: toolCall.function.name
+        });
       }
 
       if (budgetStopReason && !budgetStopInstructionQueued) {
@@ -174,6 +211,10 @@ export class AgentRunner {
       }
     }
 
+    emitStatus({
+      base: 'thinking',
+      phase: 'finalizing'
+    });
     return {
       message: this.getFinalMessage(null, draftEdits, 'tool_iterations_exhausted', request.language, runtimeConfig),
       reasoningContent: this.formatReasoning(reasoningParts),
@@ -256,6 +297,10 @@ export class AgentRunner {
     setRunTimeout();
 
     try {
+      callbacks.onStatus?.({
+        base: 'thinking',
+        phase: 'requesting_model'
+      });
       const response = await fetch(this.getChatCompletionsUrl(runtimeConfig.baseUrl), {
         method: 'POST',
         headers: {
@@ -495,6 +540,38 @@ export class AgentRunner {
         }
       }
     ];
+  }
+
+  private createStatusEmitter(callbacks: AgentRunCallbacks): (status: AgentActivityInput) => void {
+    let lastStatusKey = '';
+    return (status) => {
+      const nextStatusKey = [
+        status.base,
+        status.phase,
+        status.toolName ?? '',
+        status.detail ?? ''
+      ].join('\u0000');
+      if (nextStatusKey === lastStatusKey) {
+        return;
+      }
+      lastStatusKey = nextStatusKey;
+      callbacks.onStatus?.(status);
+    };
+  }
+
+  private getToolActivityPhase(toolName: string): AgentActivityPhase {
+    switch (toolName) {
+      case LIST_WORKSPACE_FILES_TOOL_NAME:
+        return 'listing_files';
+      case LIST_WORKSPACE_DIRECTORY_TOOL_NAME:
+        return 'listing_directory';
+      case READ_WORKSPACE_FILE_TOOL_NAME:
+        return 'reading_file';
+      case CREATE_DRAFT_EDIT_TOOL_NAME:
+        return 'creating_draft_edit';
+      default:
+        return 'executing_tool';
+    }
   }
 
   private async handleToolCall(toolCall: DeepSeekToolCall, draftEdits: DraftEdit[], language: KeepseekLanguage): Promise<string> {

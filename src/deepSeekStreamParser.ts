@@ -153,7 +153,7 @@ export class DeepSeekStreamParser {
 
       this.collectTextDelta(delta.reasoning_content, reasoningParts, callbacks, 'reasoning');
       this.collectTextDelta(delta.content, contentParts, callbacks, 'content');
-      this.collectToolCallDeltas(delta.tool_calls ?? [], toolCallParts);
+      this.collectToolCallDeltas(delta.tool_calls ?? [], toolCallParts, callbacks);
     }
 
     return finishReason;
@@ -169,13 +169,25 @@ export class DeepSeekStreamParser {
       return;
     }
     parts.push(delta);
+    callbacks.onStatus?.({
+      base: 'thinking',
+      phase: type === 'reasoning' ? 'reasoning' : 'generating'
+    });
     callbacks.onDelta?.({ type, delta });
   }
 
   private collectToolCallDeltas(
     toolCallDeltas: DeepSeekToolCallDelta[],
-    toolCallParts: Map<number, StreamingToolCallAccumulator>
+    toolCallParts: Map<number, StreamingToolCallAccumulator>,
+    callbacks: AgentRunCallbacks
   ): void {
+    if (toolCallDeltas.length) {
+      callbacks.onStatus?.({
+        base: 'thinking',
+        phase: 'planning_tool'
+      });
+    }
+
     for (let deltaIndex = 0; deltaIndex < toolCallDeltas.length; deltaIndex += 1) {
       const toolCallDelta = toolCallDeltas[deltaIndex];
       const index = typeof toolCallDelta.index === 'number' ? toolCallDelta.index : deltaIndex;

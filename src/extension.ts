@@ -4,7 +4,7 @@ import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileRefer
 import { AgentRunner } from './agentRunner';
 import { FileContextStore } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
-import { AgentSettings, ChatMessage } from './types';
+import { AgentActivityInput, AgentActivityState, AgentSettings, ChatMessage } from './types';
 import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
 import { ChatSessionStore, createSessionTitle, getVisibleMessages } from './chatSessionStore';
 import { createContextUsageEstimate } from './contextUsage';
@@ -128,6 +128,13 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private agentSettings = getConfiguredAgentSettings();
   private language = getConfiguredKeepseekLanguage();
   private isBusy = false;
+  private agentActivitySequence = 0;
+  private agentActivity: AgentActivityState = {
+    base: 'idle',
+    phase: 'idle',
+    updatedAt: new Date().toISOString(),
+    sequence: 0
+  };
 
   public constructor(
     private readonly extensionUri: vscode.Uri,
@@ -772,6 +779,43 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.authorizedExternalReferenceUris.add(getFileReferenceAuthorizationKey(uri));
   }
 
+  private setAgentActivity(
+    activity: AgentActivityInput,
+    options: { post?: boolean; schedulePost?: () => void } = {}
+  ): boolean {
+    const normalizedActivity: AgentActivityInput = {
+      base: activity.base,
+      phase: activity.phase,
+      toolName: activity.toolName?.trim() || undefined,
+      detail: activity.detail?.trim() || undefined
+    };
+    if (
+      this.agentActivity.base === normalizedActivity.base &&
+      this.agentActivity.phase === normalizedActivity.phase &&
+      this.agentActivity.toolName === normalizedActivity.toolName &&
+      this.agentActivity.detail === normalizedActivity.detail
+    ) {
+      return false;
+    }
+
+    this.agentActivitySequence += 1;
+    this.agentActivity = {
+      ...normalizedActivity,
+      updatedAt: new Date().toISOString(),
+      sequence: this.agentActivitySequence
+    };
+
+    if (options.post === false) {
+      return true;
+    }
+    if (options.schedulePost) {
+      options.schedulePost();
+    } else {
+      this.postState();
+    }
+    return true;
+  }
+
   private async sendPrompt(
     prompt: string,
     modelId: string,
@@ -797,7 +841,10 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.selectedModelId = model.id;
 
     this.isBusy = true;
-    this.postState();
+    this.setAgentActivity({
+      base: 'thinking',
+      phase: 'preparing'
+    });
 
     let assistantMessage: ChatMessage | undefined;
     let liveStateTimer: ReturnType<typeof setTimeout> | undefined;
@@ -820,6 +867,10 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
     try {
       const authorizedExternalReferenceUris = this.collectAuthorizedExternalReferenceUris(options?.references);
+      this.setAgentActivity({
+        base: 'thinking',
+        phase: 'expanding_references'
+      });
       const expandedPrompt = await expandPromptReferencesInPrompt(trimmedPrompt, {
         authorizedExternalReferenceUris,
         language: this.language
@@ -872,6 +923,10 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       };
       this.messages.push(assistantMessage);
       this.trimHistory();
+      this.setAgentActivity({
+        base: 'thinking',
+        phase: 'requesting_model'
+      }, { post: false });
       this.postState();
 
       const response = await this.agentRunner.run({
@@ -882,13 +937,24 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         history: agentHistory,
         language: this.language
       }, {
+        onStatus: (activity) => {
+          this.setAgentActivity(activity);
+        },
         onDelta: (event) => {
           if (!assistantMessage) {
             return;
           }
           if (event.type === 'reasoning') {
+            this.setAgentActivity({
+              base: 'thinking',
+              phase: 'reasoning'
+            }, { schedulePost: scheduleLiveState });
             assistantMessage.reasoningContent = `${assistantMessage.reasoningContent ?? ''}${event.delta}`;
           } else {
+            this.setAgentActivity({
+              base: 'thinking',
+              phase: 'generating'
+            }, { schedulePost: scheduleLiveState });
             assistantMessage.content = `${assistantMessage.content}${event.delta}`;
           }
           activeSession.updatedAt = new Date().toISOString();
@@ -896,6 +962,10 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
       });
 
+      this.setAgentActivity({
+        base: 'thinking',
+        phase: 'finalizing'
+      }, { post: false });
       this.draftEdits.addMany(response.draftEdits);
 
       if (assistantMessage) {
@@ -904,6 +974,10 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         delete assistantMessage.isStreaming;
       }
       this.trimHistory();
+      this.setAgentActivity({
+        base: 'complete',
+        phase: 'finalizing'
+      }, { post: false });
     } catch (error) {
       const activeSession = this.sessionStore.getActiveSession();
       if (!activeSession.messages.length) {
@@ -927,11 +1001,20 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           modelId: model.id
         });
       }
+      this.setAgentActivity({
+        base: 'error',
+        phase: 'failed'
+      }, { post: false });
     } finally {
       this.sessionStore.getActiveSession().updatedAt = new Date().toISOString();
       this.isBusy = false;
       await this.sessionStore.persist();
       flushLiveState();
+      this.setAgentActivity({
+        base: 'idle',
+        phase: 'idle'
+      }, { post: false });
+      this.postState();
     }
   }
 
@@ -965,6 +1048,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }),
         draftEdits: this.draftEdits.toWebviewState(),
         isBusy: this.isBusy,
+        agentActivity: this.agentActivity,
         maxFileBytes: getConfiguredMaxFileBytes(),
         language: this.language,
         isMac: process.platform === 'darwin'

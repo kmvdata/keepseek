@@ -32,6 +32,12 @@ export function getScript(): string {
       },
       draftEdits: [],
       isBusy: false,
+      agentActivity: {
+        base: 'idle',
+        phase: 'idle',
+        updatedAt: '',
+        sequence: 0
+      },
       maxFileBytes: 200000,
       language: 'zh-CN',
       isMac: false
@@ -87,6 +93,10 @@ export function getScript(): string {
     const editReferenceMenu = document.createElement('div');
     let transientStatus = '';
     let transientStatusTimer = 0;
+    let agentStatusRotationTimer = 0;
+    let agentStatusRotationIndex = 0;
+    let agentStatusRotationKey = '';
+    let terminalAgentStatusKey = '';
     let settingsMenuOpen = false;
     let sessionMenuOpen = false;
     let editingMessageId = '';
@@ -104,6 +114,23 @@ export function getScript(): string {
     let editReferenceResourcesError = '';
     let editReferenceResourceRequestSequence = 0;
     let editReferenceResourceRequestId = '';
+    const AGENT_STATUS_ROTATION_MS = 2600;
+    const agentStatusPools = {
+      preparing: ['agentStatusPreparingContext', 'agentStatusPreparingRequest'],
+      expanding_references: ['agentStatusExpandingReferences', 'agentStatusPreparingRequest'],
+      requesting_model: ['agentStatusWaitingModel', 'agentStatusDeepSeekReasoning', 'agentStatusWaitingStream'],
+      reasoning: ['agentStatusThinking', 'agentStatusReasoning', 'agentStatusPondering', 'agentStatusSynthesizingClues'],
+      planning_tool: ['agentStatusChoosingTools', 'agentStatusPlanningNextStep'],
+      executing_tool: ['agentStatusExecutingTool'],
+      reading_file: ['agentStatusReadingFile'],
+      listing_files: ['agentStatusScanningWorkspace', 'agentStatusListingFiles'],
+      listing_directory: ['agentStatusListingDirectory', 'agentStatusScanningWorkspace'],
+      creating_draft_edit: ['agentStatusPreparingDraftEdit'],
+      reviewing_tool_result: ['agentStatusReviewingToolResults', 'agentStatusContinuingReasoning'],
+      generating: ['agentStatusGenerating', 'agentStatusOrganizingResult', 'agentStatusWritingReply'],
+      finalizing: ['agentStatusFinalizingResponse'],
+      failed: ['agentStatusError']
+    };
 
     editReferenceMenu.className = 'reference-menu message-reference-menu hidden';
     editReferenceMenu.setAttribute('role', 'listbox');
@@ -447,6 +474,7 @@ export function getScript(): string {
       var message = event.data;
       if (message.type === 'state') {
         Object.assign(state, message.state);
+        rememberTerminalAgentActivity(state.agentActivity);
         render();
       } else if (message.type === 'sessionChanged') {
         clearPromptDraft();
@@ -643,10 +671,30 @@ export function getScript(): string {
     }
 
     function renderStatus() {
-      status.textContent = state.isBusy ? t('processing') : transientStatus;
+      if (!state.isBusy) {
+        stopAgentStatusRotation();
+        agentStatusRotationKey = '';
+        status.textContent = transientStatus;
+        status.title = transientStatus;
+        status.classList.toggle('is-active', Boolean(transientStatus));
+        return;
+      }
+
+      var activity = normalizeAgentActivity(state.agentActivity);
+      var activityKey = getAgentActivityKey(activity);
+      if (activityKey !== agentStatusRotationKey) {
+        agentStatusRotationKey = activityKey;
+        agentStatusRotationIndex = 0;
+      }
+      startAgentStatusRotation();
+
+      var statusText = getAgentActivityStatusText(activity) || t('processing');
+      status.textContent = statusText;
+      status.title = statusText;
+      status.classList.toggle('is-active', Boolean(statusText));
     }
 
-    function setTransientStatus(message) {
+    function setTransientStatus(message, durationMs) {
       transientStatus = message;
       renderStatus();
       if (transientStatusTimer) {
@@ -655,7 +703,108 @@ export function getScript(): string {
       transientStatusTimer = setTimeout(function() {
         transientStatus = '';
         renderStatus();
-      }, 2200);
+      }, durationMs || 2200);
+    }
+
+    function normalizeAgentActivity(activity) {
+      if (!activity || typeof activity !== 'object') {
+        return { base: 'idle', phase: 'idle', toolName: '', detail: '', sequence: 0, updatedAt: '' };
+      }
+      return {
+        base: typeof activity.base === 'string' ? activity.base : 'idle',
+        phase: typeof activity.phase === 'string' ? activity.phase : 'idle',
+        toolName: typeof activity.toolName === 'string' ? activity.toolName : '',
+        detail: typeof activity.detail === 'string' ? activity.detail : '',
+        sequence: Number(activity.sequence) || 0,
+        updatedAt: typeof activity.updatedAt === 'string' ? activity.updatedAt : ''
+      };
+    }
+
+    function rememberTerminalAgentActivity(activity) {
+      var normalized = normalizeAgentActivity(activity);
+      if (normalized.base !== 'complete' && normalized.base !== 'error') {
+        return;
+      }
+      var key = [normalized.base, normalized.sequence, normalized.updatedAt].join('|');
+      if (key === terminalAgentStatusKey) {
+        return;
+      }
+      terminalAgentStatusKey = key;
+      setTransientStatus(
+        t(normalized.base === 'error' ? 'agentStatusError' : 'agentStatusComplete'),
+        2600
+      );
+    }
+
+    function getAgentActivityKey(activity) {
+      return [
+        getLanguage(),
+        activity.base,
+        activity.phase,
+        activity.toolName,
+        activity.detail
+      ].join('|');
+    }
+
+    function startAgentStatusRotation() {
+      if (agentStatusRotationTimer) {
+        return;
+      }
+      agentStatusRotationTimer = setInterval(function() {
+        agentStatusRotationIndex += 1;
+        renderStatus();
+      }, AGENT_STATUS_ROTATION_MS);
+    }
+
+    function stopAgentStatusRotation() {
+      if (!agentStatusRotationTimer) {
+        return;
+      }
+      clearInterval(agentStatusRotationTimer);
+      agentStatusRotationTimer = 0;
+      agentStatusRotationIndex = 0;
+    }
+
+    function getAgentActivityStatusText(activity) {
+      var keys = getAgentActivityStatusKeys(activity);
+      if (!keys.length) {
+        return '';
+      }
+      return t(keys[agentStatusRotationIndex % keys.length]);
+    }
+
+    function getAgentActivityStatusKeys(activity) {
+      if (activity.base === 'idle') {
+        return [];
+      }
+      if (activity.base === 'complete') {
+        return ['agentStatusComplete'];
+      }
+      if (activity.base === 'error') {
+        return ['agentStatusError'];
+      }
+      if (activity.base === 'waiting') {
+        return agentStatusPools.requesting_model;
+      }
+      if (activity.base === 'executing') {
+        return agentStatusPools[activity.phase] || agentStatusPools[getToolPhaseFromName(activity.toolName)] || agentStatusPools.executing_tool;
+      }
+      return agentStatusPools[activity.phase] || agentStatusPools.preparing;
+    }
+
+    function getToolPhaseFromName(toolName) {
+      switch (toolName) {
+        case 'keepseek_list_workspace_files':
+          return 'listing_files';
+        case 'keepseek_list_workspace_directory':
+          return 'listing_directory';
+        case 'keepseek_read_workspace_file':
+          return 'reading_file';
+        case 'keepseek_create_draft_edit':
+          return 'creating_draft_edit';
+        default:
+          return 'executing_tool';
+      }
     }
 
     function syncEditingState() {
