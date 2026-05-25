@@ -112,7 +112,7 @@ export function getInputStyles(): string {
 
     .composer-toolbar {
       display: flex;
-      align-items: flex-end;
+      align-items: center;
       justify-content: space-between;
       gap: 8px;
       min-height: 30px;
@@ -121,7 +121,7 @@ export function getInputStyles(): string {
 
     .composer-toolbar-left {
       display: flex;
-      align-items: flex-end;
+      align-items: center;
       gap: 4px;
       min-width: 0;
       flex: 1;
@@ -129,7 +129,7 @@ export function getInputStyles(): string {
 
     .composer-toolbar-right {
       display: flex;
-      align-items: flex-end;
+      align-items: center;
       justify-content: flex-end;
       gap: 6px;
       flex: 0 0 auto;
@@ -329,11 +329,13 @@ export function getInputStyles(): string {
       display: block;
       flex: 1 1 auto;
       min-width: 0;
+      height: 26px;
       margin-left: 6px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
       font-size: 11px;
+      line-height: 26px;
       color: var(--vscode-descriptionForeground);
       opacity: 0.82;
       transition: opacity 120ms ease;
@@ -341,7 +343,34 @@ export function getInputStyles(): string {
 
     .composer-status.is-active,
     #status.is-active {
+      background-image: linear-gradient(
+        105deg,
+        var(--vscode-descriptionForeground) 0%,
+        var(--vscode-descriptionForeground) 38%,
+        var(--vscode-foreground) 50%,
+        var(--vscode-descriptionForeground) 62%,
+        var(--vscode-descriptionForeground) 100%
+      );
+      background-size: 240% 100%;
+      background-position: 120% 0;
+      background-clip: text;
+      -webkit-background-clip: text;
+      color: transparent;
+      -webkit-text-fill-color: transparent;
       opacity: 1;
+      animation: keepseek-status-shine 2.8s ease-in-out infinite;
+    }
+
+    @keyframes keepseek-status-shine {
+      0%,
+      18% {
+        background-position: 120% 0;
+      }
+
+      58%,
+      100% {
+        background-position: -120% 0;
+      }
     }
 
     .command-menu {
