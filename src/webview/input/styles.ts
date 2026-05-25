@@ -343,33 +343,23 @@ export function getInputStyles(): string {
 
     .composer-status.is-active,
     #status.is-active {
-      background-image: linear-gradient(
-        105deg,
-        var(--vscode-descriptionForeground) 0%,
-        var(--vscode-descriptionForeground) 38%,
-        var(--vscode-foreground) 50%,
-        var(--vscode-descriptionForeground) 62%,
-        var(--vscode-descriptionForeground) 100%
-      );
-      background-size: 240% 100%;
-      background-position: 120% 0;
-      background-clip: text;
-      -webkit-background-clip: text;
-      color: transparent;
-      -webkit-text-fill-color: transparent;
+      color: var(--vscode-descriptionForeground);
       opacity: 1;
-      animation: keepseek-status-shine 2.8s ease-in-out infinite;
+      animation: keepseek-status-breathe 2.6s ease-in-out infinite;
     }
 
-    @keyframes keepseek-status-shine {
+    @keyframes keepseek-status-breathe {
       0%,
-      18% {
-        background-position: 120% 0;
+      100% {
+        color: var(--vscode-descriptionForeground);
+        opacity: 0.72;
+        text-shadow: 0 0 0 transparent;
       }
 
-      58%,
-      100% {
-        background-position: -120% 0;
+      46% {
+        color: var(--vscode-foreground);
+        opacity: 1;
+        text-shadow: 0 0 8px var(--vscode-focusBorder, transparent);
       }
     }
 
