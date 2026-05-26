@@ -1762,7 +1762,7 @@ export function getInputScript(): string {
         if (reference.startLine > 0 && reference.endLine < reference.startLine) {
           reference.endLine = reference.startLine;
         }
-        return formatFileReferenceLabel(reference) + String.fromCharCode(10) + '<' + makeFileHref(reference) + '>';
+        return formatFileReferenceTextLabel(reference) + String.fromCharCode(10) + '<' + makeFileHref(reference) + '>';
       }
 
       function collectPromptFileReferences() {

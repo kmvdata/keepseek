@@ -2436,7 +2436,7 @@ export function getScript(): string {
       if (reference.startLine > 0 && reference.endLine < reference.startLine) {
         reference.endLine = reference.startLine;
       }
-      return formatFileReferenceLabel(reference) + String.fromCharCode(10) + '<' + makeMessageFileHref(reference) + '>';
+      return formatFileReferenceTextLabel(reference) + String.fromCharCode(10) + '<' + makeMessageFileHref(reference) + '>';
     }
 
     function collectInlineEditorFileReferences(editor) {
@@ -3554,7 +3554,7 @@ export function getScript(): string {
       anchor.href = href;
       anchor.title = href;
       anchor.draggable = false;
-      anchor.textContent = label;
+      anchor.textContent = isDirectory ? label : stripFileReferenceLabelBrackets(label);
       anchor.dataset.path = reference.path;
       anchor.dataset.kind = isDirectory ? 'directory' : 'file';
       anchor.dataset.startLine = String(reference.startLine);
@@ -3576,7 +3576,7 @@ export function getScript(): string {
     }
 
     function formatCodexMarkdownFileLabel(label, reference) {
-      var text = String(label || '').trim() || getMessageFileName(reference.path);
+      var text = stripFileReferenceLabelBrackets(label) || getMessageFileName(reference.path);
       if (reference.startLine <= 0 || codexMarkdownLabelHasLineReference(text, reference)) {
         return text;
       }
@@ -3934,7 +3934,7 @@ export function getScript(): string {
 
       return {
         start: labelStart,
-        text: prefix.slice(labelStart, labelEnd)
+        text: prefix.slice(labelStart + 1, labelEnd - 1)
       };
     }
 
@@ -4059,17 +4059,33 @@ export function getScript(): string {
     }
 
     function formatFileReferenceLabel(reference) {
+      return formatFileReferenceLabelContents(reference);
+    }
+
+    function formatFileReferenceTextLabel(reference) {
+      return '[' + formatFileReferenceLabelContents(reference) + ']';
+    }
+
+    function formatFileReferenceLabelContents(reference) {
       var displayPath = getReferenceDisplayPath(reference.path);
       if (reference.startLine > 0) {
-        return '[' + displayPath + '(' + formatLineReferenceLabel(
+        return displayPath + '(' + formatLineReferenceLabel(
           reference.startLine,
           reference.endLine,
           reference.startColumn,
           reference.endColumn,
           getLanguage()
-        ) + ')]';
+        ) + ')';
       }
-      return '[' + displayPath + ']';
+      return displayPath;
+    }
+
+    function stripFileReferenceLabelBrackets(value) {
+      var text = String(value || '').trim();
+      if (text.length >= 2 && text.charAt(0) === '[' && text.charAt(text.length - 1) === ']') {
+        return text.slice(1, -1);
+      }
+      return text;
     }
 
     function makeFileReferenceHref(reference) {
