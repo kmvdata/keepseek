@@ -50,6 +50,7 @@ export function getInputScript(): string {
           clearPrompt();
           return;
         }
+        sanitizePromptContent();
         var prompt = serializePrompt();
         if (!prompt.trim()) return;
         closeCommandMenu();
@@ -115,7 +116,7 @@ export function getInputScript(): string {
       });
 
       promptInput.addEventListener('input', function() {
-        sanitizePromptLinks();
+        sanitizePromptContent();
         updatePromptVisualState();
         savePromptSelection();
         syncReferenceMenuFromPrompt();
@@ -1843,6 +1844,67 @@ export function getInputScript(): string {
           return fallback;
         }
         return Math.floor(number);
+      }
+
+      function sanitizePromptContent() {
+        sanitizePromptFormatting();
+        sanitizePromptLinks();
+      }
+
+      function sanitizePromptFormatting() {
+        sanitizePromptFormattingNode(promptInput);
+      }
+
+      function sanitizePromptFormattingNode(node) {
+        var child = node.firstChild;
+        while (child) {
+          var next = child.nextSibling;
+          if (child.nodeType === Node.COMMENT_NODE) {
+            child.remove();
+            child = next;
+            continue;
+          }
+          if (child.nodeType !== Node.ELEMENT_NODE) {
+            child = next;
+            continue;
+          }
+
+          var element = child;
+          if (element.matches('a.rich-file-link')) {
+            child = next;
+            continue;
+          }
+          if (element.tagName === 'BR') {
+            clearPromptElementAttributes(element);
+            child = next;
+            continue;
+          }
+          if (isBlockElement(element)) {
+            clearPromptElementAttributes(element);
+            sanitizePromptFormattingNode(element);
+            child = next;
+            continue;
+          }
+
+          sanitizePromptFormattingNode(element);
+          unwrapPromptFormattingElement(element);
+          child = next;
+        }
+      }
+
+      function clearPromptElementAttributes(element) {
+        while (element.attributes.length) {
+          element.removeAttribute(element.attributes[0].name);
+        }
+      }
+
+      function unwrapPromptFormattingElement(element) {
+        var parent = element.parentNode;
+        if (!parent) { return; }
+        while (element.firstChild) {
+          parent.insertBefore(element.firstChild, element);
+        }
+        parent.removeChild(element);
       }
 
       function sanitizePromptLinks() {

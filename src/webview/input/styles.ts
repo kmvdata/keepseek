@@ -25,6 +25,15 @@ export function getInputStyles(): string {
       outline: none;
     }
 
+    .rich-input span,
+    .rich-input font,
+    .rich-input code,
+    .rich-input pre {
+      color: inherit !important;
+      background: transparent !important;
+      font: inherit !important;
+    }
+
     .rich-input.is-empty::before {
       content: attr(data-placeholder);
       position: absolute;

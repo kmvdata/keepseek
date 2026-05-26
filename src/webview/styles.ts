@@ -1188,6 +1188,15 @@ export function getStyles(): string {
       caret-color: var(--vscode-input-foreground, var(--vscode-foreground));
     }
 
+    .message-edit-input span,
+    .message-edit-input font,
+    .message-edit-input code,
+    .message-edit-input pre {
+      color: inherit !important;
+      background: transparent !important;
+      font: inherit !important;
+    }
+
     .message-edit-footer {
       display: flex;
       justify-content: flex-end;

@@ -226,10 +226,26 @@ export function getScript(): string {
       var target = event.target instanceof Element ? event.target : null;
       var editor = target?.closest('.message-edit-input');
       if (!editor || !transcript.contains(editor)) return;
-      sanitizeInlineEditorLinks(editor);
+      sanitizeInlineEditorContent(editor);
       if (editor.dataset.messageId === editingMessageId) {
         editingDraftText = serializeInlineEditor(editor);
       }
+      resizeInlineEditor(editor);
+      updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
+      saveEditSelection(editor);
+      syncEditReferenceMenuFromEditor(editor);
+    });
+
+    transcript.addEventListener('paste', function(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      var editor = target?.closest('.message-edit-input');
+      if (!editor || !transcript.contains(editor)) return;
+
+      event.preventDefault();
+      var text = event.clipboardData ? event.clipboardData.getData('text/plain') : '';
+      if (!text) return;
+
+      insertInlinePlainText(editor, text);
       resizeInlineEditor(editor);
       updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
       saveEditSelection(editor);
@@ -1608,7 +1624,7 @@ export function getScript(): string {
       if (!messageId || messageId !== editingMessageId || state.isBusy) return;
       var editor = getActiveInlineEditor();
       if (editor) {
-        sanitizeInlineEditorLinks(editor);
+        sanitizeInlineEditorContent(editor);
         editingDraftText = serializeInlineEditor(editor);
       }
       var prompt = editingDraftText.trim();
@@ -2191,11 +2207,7 @@ export function getScript(): string {
             if (shouldShowStreamingPlaceholder) {
               content.textContent = t('processing');
             } else {
-              if (message.role === 'assistant') {
-                renderAssistantMarkdownContent(content, message.content);
-              } else {
-                renderMessageContent(content, message.content, true);
-              }
+              renderMarkdownContent(content, message.content, message.role !== 'assistant');
             }
             body.append(content);
           }
@@ -2307,7 +2319,7 @@ export function getScript(): string {
       }
 
       appendInlineEditorText(editor, text.slice(cursor));
-      sanitizeInlineEditorLinks(editor);
+      sanitizeInlineEditorContent(editor);
     }
 
     function appendInlineEditorText(editor, text) {
@@ -2355,6 +2367,63 @@ export function getScript(): string {
       anchor.dataset.startColumn = '0';
       anchor.dataset.endColumn = '0';
       return anchor;
+    }
+
+    function sanitizeInlineEditorContent(editor) {
+      sanitizeInlineEditorFormatting(editor, editor);
+      sanitizeInlineEditorLinks(editor);
+    }
+
+    function sanitizeInlineEditorFormatting(root, node) {
+      var child = node.firstChild;
+      while (child) {
+        var next = child.nextSibling;
+        if (child.nodeType === Node.COMMENT_NODE) {
+          child.remove();
+          child = next;
+          continue;
+        }
+        if (child.nodeType !== Node.ELEMENT_NODE) {
+          child = next;
+          continue;
+        }
+
+        var element = child;
+        if (element.matches('a.rich-file-link')) {
+          child = next;
+          continue;
+        }
+        if (element.tagName === 'BR') {
+          clearInlineEditorElementAttributes(element);
+          child = next;
+          continue;
+        }
+        if (element !== root && isInlineEditorBlockElement(element)) {
+          clearInlineEditorElementAttributes(element);
+          sanitizeInlineEditorFormatting(root, element);
+          child = next;
+          continue;
+        }
+
+        sanitizeInlineEditorFormatting(root, element);
+        unwrapInlineEditorFormattingElement(element);
+        child = next;
+      }
+    }
+
+    function clearInlineEditorElementAttributes(element) {
+      while (element.attributes.length) {
+        element.removeAttribute(element.attributes[0].name);
+      }
+    }
+
+    function unwrapInlineEditorFormattingElement(element) {
+      var parent = element.parentNode;
+      if (!parent) return;
+      while (element.firstChild) {
+        parent.insertBefore(element.firstChild, element);
+      }
+      parent.removeChild(element);
     }
 
     function sanitizeInlineEditorLinks(editor) {
@@ -2540,6 +2609,25 @@ export function getScript(): string {
       editingDraftText = serializeInlineEditor(editor);
     }
 
+    function insertInlinePlainText(editor, text) {
+      var lineBreak = String.fromCharCode(10);
+      var normalized = String(text || '')
+        .split(String.fromCharCode(13) + lineBreak).join(lineBreak)
+        .split(String.fromCharCode(13)).join(lineBreak);
+      if (!normalized) return;
+
+      var lines = normalized.split(lineBreak);
+      var fragment = document.createDocumentFragment();
+      for (var i = 0; i < lines.length; i++) {
+        if (i > 0) {
+          fragment.append(document.createElement('br'));
+        }
+        fragment.append(document.createTextNode(lines[i]));
+      }
+
+      insertInlineFragmentAtRange(editor, getInlineEditorInsertionRange(editor), fragment);
+    }
+
     function needsInlineEditorLeadingSpace(editor, range) {
       var text = getInlineEditorTextBeforeRange(editor, range);
       return text.length > 0 && !isEditWhitespace(text.charAt(text.length - 1));
@@ -2646,7 +2734,7 @@ export function getScript(): string {
       send.disabled = state.isBusy || !serializeInlineEditor(editor).trim();
     }
 
-    function renderAssistantMarkdownContent(container, value) {
+    function renderMarkdownContent(container, value, hideExpandedReferences) {
       container.classList.add('assistant-markdown');
       var lineBreak = String.fromCharCode(10);
       var text = String(value || '')
@@ -2659,6 +2747,13 @@ export function getScript(): string {
       while (index < lines.length) {
         if (isMarkdownBlankLine(lines[index])) {
           index += 1;
+          continue;
+        }
+
+        var collapsedReferenceBlock = hideExpandedReferences ? collectExpandedReferenceMarkdownBlock(lines, index) : null;
+        if (collapsedReferenceBlock) {
+          appendMarkdownParagraph(container, collapsedReferenceBlock.text);
+          index = collapsedReferenceBlock.index;
           continue;
         }
 
@@ -2731,6 +2826,45 @@ export function getScript(): string {
         }
         appendMarkdownParagraph(container, paragraphLines.join(lineBreak));
       }
+    }
+
+    function collectExpandedReferenceMarkdownBlock(lines, start) {
+      if (!Array.isArray(lines) || start + 1 >= lines.length) {
+        return null;
+      }
+      if (!lineHasMessageFileReference(lines[start])) {
+        return null;
+      }
+
+      var openingFence = parseMarkdownFenceLine(lines[start + 1]);
+      if (!openingFence) {
+        return null;
+      }
+
+      var index = start + 2;
+      while (index < lines.length) {
+        var closingFence = parseMarkdownFenceLine(lines[index]);
+        if (closingFence && closingFence.marker === openingFence.marker && closingFence.length >= openingFence.length && !closingFence.language) {
+          return {
+            text: lines[start],
+            index: index + 1
+          };
+        }
+        index += 1;
+      }
+
+      return null;
+    }
+
+    function lineHasMessageFileReference(line) {
+      var pattern = /<([^<>\\n]+)>/g;
+      var match;
+      while ((match = pattern.exec(String(line || ''))) !== null) {
+        if (parseMessageFileReference((match[1] || '').trim())) {
+          return true;
+        }
+      }
+      return false;
     }
 
     function isMarkdownBlankLine(line) {
