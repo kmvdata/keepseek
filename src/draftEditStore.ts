@@ -89,7 +89,7 @@ export class DraftEditStore {
     this.sessionStore.messages.push({
       id: randomUUID(),
       role: 'assistant',
-      content: this.t('wroteFile', { label: edit.label }),
+      content: this.t(edit.action === 'delete' ? 'deletedFile' : 'wroteFile', { label: edit.label }),
       createdAt: new Date().toISOString()
     });
     this.sessionStore.getActiveSession().updatedAt = new Date().toISOString();

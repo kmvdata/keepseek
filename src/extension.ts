@@ -142,7 +142,11 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     private readonly globalStorageUri: vscode.Uri
   ) {
     this.sessionStore = new ChatSessionStore(sessionStorage, this.language);
-    this.draftEdits = new DraftEditStore(new SafeFileEditor(), this.sessionStore, (key, values) => this.t(key, values));
+    this.draftEdits = new DraftEditStore(
+      new SafeFileEditor((key, values) => this.t(key, values)),
+      this.sessionStore,
+      (key, values) => this.t(key, values)
+    );
   }
 
   public refreshConfiguration(): void {
