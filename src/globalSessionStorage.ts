@@ -13,7 +13,7 @@ import {
 } from './chatSessionStore';
 import { isRecord } from './errors';
 import { pruneExpiredSessions } from './sessionRetention';
-import type { ChatSession } from './types';
+import type { ChatSession, WorkspaceSummary } from './types';
 
 export const SESSION_MIGRATION_KEY = 'keepseek.chatSessionsMigratedToGlobalV1';
 
@@ -95,6 +95,119 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const manifest = await this.readManifest();
     this.setManifestWorkspace(manifest, file);
     await this.writeManifest(manifest);
+  }
+
+  public async listAllWorkspaceSummaries(): Promise<WorkspaceSummary[]> {
+    const manifest = await this.readManifest();
+    let manifestChanged = false;
+    const summaries: WorkspaceSummary[] = [];
+
+    for (const [manifestHash, entry] of Object.entries(manifest.workspaces)) {
+      const workspaceHash = getWorkspaceHash(entry.workspaceKey);
+      const fallback = manifestEntryToMetadata(entry);
+      const file = await this.readWorkspaceSessionFile(workspaceHash, fallback);
+      if (!file || file.workspaceKey !== entry.workspaceKey) {
+        delete manifest.workspaces[manifestHash];
+        manifestChanged = true;
+        continue;
+      }
+
+      if (manifestHash !== workspaceHash) {
+        delete manifest.workspaces[manifestHash];
+        manifestChanged = true;
+      }
+
+      const previousEntry = JSON.stringify(manifest.workspaces[workspaceHash]);
+      this.setManifestWorkspace(manifest, file);
+      if (previousEntry !== JSON.stringify(manifest.workspaces[workspaceHash])) {
+        manifestChanged = true;
+      }
+
+      summaries.push({
+        workspaceKey: file.workspaceKey,
+        workspaceName: file.workspaceName,
+        workspaceFolders: file.workspaceFolders,
+        sessionCount: file.sessions.length,
+        updatedAt: file.updatedAt
+      });
+    }
+
+    if (manifestChanged) {
+      await this.writeManifest(manifest);
+    }
+
+    return summaries.sort((a, b) => getIsoTimestamp(b.updatedAt) - getIsoTimestamp(a.updatedAt));
+  }
+
+  public async loadWorkspaceSessions(workspaceKey: string): Promise<ChatSession[]> {
+    const normalizedWorkspaceKey = workspaceKey.trim();
+    if (!normalizedWorkspaceKey) {
+      return [];
+    }
+
+    const manifest = await this.readManifest();
+    const manifestEntry = manifest.workspaces[getWorkspaceHash(normalizedWorkspaceKey)];
+    const file = await this.readWorkspaceSessionFile(
+      getWorkspaceHash(normalizedWorkspaceKey),
+      manifestEntryToMetadata(manifestEntry)
+    );
+    return file && file.workspaceKey === normalizedWorkspaceKey ? file.sessions : [];
+  }
+
+  public async deleteWorkspaceSessions(workspaceKey: string, sessionIds: string[]): Promise<void> {
+    const normalizedWorkspaceKey = workspaceKey.trim();
+    const ids = new Set(sessionIds.filter((sessionId) => typeof sessionId === 'string' && sessionId.trim()));
+    if (!normalizedWorkspaceKey || !ids.size) {
+      return;
+    }
+
+    const workspaceHash = getWorkspaceHash(normalizedWorkspaceKey);
+    const manifest = await this.readManifest();
+    const file = await this.readWorkspaceSessionFile(
+      workspaceHash,
+      manifestEntryToMetadata(manifest.workspaces[workspaceHash])
+    );
+    if (!file || file.workspaceKey !== normalizedWorkspaceKey) {
+      delete manifest.workspaces[workspaceHash];
+      await this.writeManifest(manifest);
+      return;
+    }
+
+    const retainedSessions = file.sessions.filter((session) => !ids.has(session.id));
+    if (retainedSessions.length === file.sessions.length) {
+      return;
+    }
+
+    if (retainedSessions.length) {
+      const updatedFile = withUpdatedSessions(file, retainedSessions, new Date().toISOString());
+      if (updatedFile.sessions.length) {
+        await this.writeWorkspaceSessionFile(updatedFile);
+        this.setManifestWorkspace(manifest, updatedFile);
+      } else {
+        await this.deleteWorkspaceSessionFile(workspaceHash);
+        delete manifest.workspaces[workspaceHash];
+      }
+    } else {
+      await this.deleteWorkspaceSessionFile(workspaceHash);
+      delete manifest.workspaces[workspaceHash];
+    }
+    await this.writeManifest(manifest);
+  }
+
+  public async deleteEntireWorkspace(workspaceKey: string): Promise<void> {
+    const normalizedWorkspaceKey = workspaceKey.trim();
+    if (!normalizedWorkspaceKey) {
+      return;
+    }
+
+    const workspaceHash = getWorkspaceHash(normalizedWorkspaceKey);
+    await this.deleteWorkspaceSessionFile(workspaceHash);
+
+    const manifest = await this.readManifest();
+    if (manifest.workspaces[workspaceHash]) {
+      delete manifest.workspaces[workspaceHash];
+      await this.writeManifest(manifest);
+    }
   }
 
   public async cleanupExpiredSessions(options: {
@@ -555,6 +668,11 @@ function normalizeIsoString(value: unknown, fallback: string): string {
     return fallback;
   }
   return Number.isFinite(Date.parse(value)) ? value : fallback;
+}
+
+function getIsoTimestamp(value: string): number {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function isFileNotFoundError(error: unknown): boolean {

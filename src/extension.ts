@@ -4,7 +4,7 @@ import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileRefer
 import { AgentRunner } from './agentRunner';
 import { FileContextStore } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
-import { AgentActivityInput, AgentActivityState, AgentSettings, ChatMessage } from './types';
+import { AgentActivityInput, AgentActivityState, AgentSettings, ChatMessage, WorkspaceSummary } from './types';
 import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
 import { ChatSessionStore, createSessionTitle, getCurrentWorkspaceSessionScope, getVisibleMessages } from './chatSessionStore';
 import { createContextUsageEstimate } from './contextUsage';
@@ -89,6 +89,10 @@ type WebviewMessage =
   | { type: 'toggleSessionFavorite'; sessionId: string }
   | { type: 'renameSession'; sessionId: string; title: string }
   | { type: 'deleteSessions'; sessionIds: string[] }
+  | { type: 'listOtherWorkspaces' }
+  | { type: 'loadOtherWorkspaceSessions'; workspaceKey: string }
+  | { type: 'deleteOtherWorkspaceSessions'; workspaceKey: string; sessionIds: string[] }
+  | { type: 'deleteOtherWorkspace'; workspaceKey: string }
   | { type: 'setSelectedModel'; modelId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
   | { type: 'openApiSettings' }
@@ -565,6 +569,18 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'deleteSessions':
         await this.deleteSessions(message.sessionIds);
         return;
+      case 'listOtherWorkspaces':
+        await this.postOtherWorkspaces();
+        return;
+      case 'loadOtherWorkspaceSessions':
+        await this.postOtherWorkspaceSessions(message.workspaceKey);
+        return;
+      case 'deleteOtherWorkspaceSessions':
+        await this.deleteOtherWorkspaceSessions(message.workspaceKey, message.sessionIds);
+        return;
+      case 'deleteOtherWorkspace':
+        await this.deleteOtherWorkspace(message.workspaceKey);
+        return;
       case 'setSelectedModel':
         await this.setSelectedModel(message.modelId);
         return;
@@ -767,6 +783,137 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.postToWebview({ type: 'sessionChanged' });
     }
     this.postState();
+  }
+
+  private async postOtherWorkspaces(): Promise<void> {
+    try {
+      this.postToWebview({
+        type: 'otherWorkspaces',
+        workspaces: await this.getOtherWorkspaceSummaries()
+      });
+    } catch (error) {
+      this.postToWebview({
+        type: 'otherWorkspaces',
+        workspaces: [],
+        error: getErrorMessage(error)
+      });
+    }
+  }
+
+  private async postOtherWorkspaceSessions(workspaceKey: string): Promise<void> {
+    const normalizedWorkspaceKey = workspaceKey.trim();
+    if (!normalizedWorkspaceKey || normalizedWorkspaceKey === this.sessionStore.workspaceKey) {
+      return;
+    }
+
+    try {
+      this.postToWebview({
+        type: 'otherWorkspaceSessions',
+        workspaceKey: normalizedWorkspaceKey,
+        sessions: await this.sessionStore.getOtherWorkspaceSessionSummaries(normalizedWorkspaceKey)
+      });
+    } catch (error) {
+      this.postToWebview({
+        type: 'otherWorkspaceSessions',
+        workspaceKey: normalizedWorkspaceKey,
+        sessions: [],
+        error: getErrorMessage(error)
+      });
+    }
+  }
+
+  private async deleteOtherWorkspaceSessions(workspaceKey: string, sessionIds: string[]): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+
+    const normalizedWorkspaceKey = workspaceKey.trim();
+    if (!normalizedWorkspaceKey || normalizedWorkspaceKey === this.sessionStore.workspaceKey) {
+      return;
+    }
+
+    const uniqueSessionIds = Array.from(new Set(sessionIds.filter((sessionId) => typeof sessionId === 'string' && sessionId.trim())));
+    if (!uniqueSessionIds.length) {
+      return;
+    }
+
+    const confirmAction = this.t('deleteSessionsConfirmAction');
+    const confirmed = await vscode.window.showWarningMessage(
+      this.t('deleteSessionsConfirm', { count: uniqueSessionIds.length }),
+      { modal: true },
+      confirmAction
+    );
+    if (confirmed !== confirmAction) {
+      return;
+    }
+
+    try {
+      await this.sessionStore.deleteOtherWorkspaceSessions(normalizedWorkspaceKey, uniqueSessionIds);
+      await this.postOtherWorkspaceSessions(normalizedWorkspaceKey);
+      await this.postOtherWorkspaces();
+    } catch (error) {
+      const message = getErrorMessage(error);
+      this.postToWebview({
+        type: 'otherWorkspaceSessions',
+        workspaceKey: normalizedWorkspaceKey,
+        sessions: [],
+        error: message
+      });
+      vscode.window.showErrorMessage(`${this.t('errorPrefix')}: ${message}`);
+    }
+  }
+
+  private async deleteOtherWorkspace(workspaceKey: string): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+
+    const normalizedWorkspaceKey = workspaceKey.trim();
+    if (!normalizedWorkspaceKey || normalizedWorkspaceKey === this.sessionStore.workspaceKey) {
+      return;
+    }
+
+    try {
+      const summary = (await this.getOtherWorkspaceSummaries())
+        .find((workspace) => workspace.workspaceKey === normalizedWorkspaceKey);
+      if (!summary) {
+        this.postToWebview({ type: 'otherWorkspaceDeleted', workspaceKey: normalizedWorkspaceKey });
+        await this.postOtherWorkspaces();
+        return;
+      }
+
+      const confirmAction = this.t('sessionDeleteWorkspaceConfirmAction');
+      const confirmed = await vscode.window.showWarningMessage(
+        this.t('sessionDeleteWorkspaceConfirm', {
+          name: summary.workspaceName || normalizedWorkspaceKey,
+          count: summary.sessionCount
+        }),
+        { modal: true },
+        confirmAction
+      );
+      if (confirmed !== confirmAction) {
+        return;
+      }
+
+      await this.sessionStore.deleteOtherWorkspace(normalizedWorkspaceKey);
+      this.postToWebview({ type: 'otherWorkspaceDeleted', workspaceKey: normalizedWorkspaceKey });
+      await this.postOtherWorkspaces();
+    } catch (error) {
+      const message = getErrorMessage(error);
+      this.postToWebview({
+        type: 'otherWorkspaceSessions',
+        workspaceKey: normalizedWorkspaceKey,
+        sessions: [],
+        error: message
+      });
+      vscode.window.showErrorMessage(`${this.t('errorPrefix')}: ${message}`);
+    }
+  }
+
+  private async getOtherWorkspaceSummaries(): Promise<WorkspaceSummary[]> {
+    return (await this.sessionStore.getAllWorkspaceSummaries())
+      .filter((workspace) => workspace.workspaceKey !== this.sessionStore.workspaceKey)
+      .sort((a, b) => getWorkspaceSummaryTimestamp(b) - getWorkspaceSummaryTimestamp(a));
   }
 
   private async readPathToContext(inputPath: string): Promise<void> {
@@ -1191,6 +1338,11 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       language: this.language
     });
   }
+}
+
+function getWorkspaceSummaryTimestamp(workspace: WorkspaceSummary): number {
+  const timestamp = Date.parse(workspace.updatedAt);
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {

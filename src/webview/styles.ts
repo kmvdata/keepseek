@@ -322,6 +322,53 @@ export function getStyles(): string {
       line-height: 1.2;
     }
 
+    .session-menu-tabs {
+      display: flex;
+      gap: 4px;
+      padding: 2px 4px 5px;
+      overflow-x: auto;
+      scrollbar-width: thin;
+    }
+
+    .session-menu-tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex: 0 0 auto;
+      max-width: 168px;
+      min-height: 26px;
+      min-width: 0;
+      padding: 3px 8px;
+      border: 1px solid var(--vscode-button-border, transparent);
+      border-radius: 4px;
+      color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+      background: var(--vscode-button-secondaryBackground, transparent);
+      font-size: 11px;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+
+    .session-menu-tab.is-active {
+      color: var(--vscode-list-activeSelectionForeground, var(--vscode-button-foreground));
+      background: var(--vscode-list-activeSelectionBackground, var(--vscode-button-background));
+    }
+
+    .session-menu-tab-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .session-menu-tab-count {
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+    }
+
+    .session-menu-tab.is-active .session-menu-tab-count {
+      color: inherit;
+      opacity: 0.8;
+    }
+
     .session-menu-controls,
     .session-menu-bulk {
       display: flex;
@@ -359,7 +406,8 @@ export function getStyles(): string {
     }
 
     .session-menu-filter,
-    .session-menu-bulk button {
+    .session-menu-bulk button,
+    .session-menu-delete-workspace {
       min-height: 26px;
       padding: 3px 7px;
       border: 1px solid var(--vscode-button-border, transparent);
@@ -368,6 +416,21 @@ export function getStyles(): string {
       background: var(--vscode-button-secondaryBackground, transparent);
       font-size: 11px;
       line-height: 1.2;
+    }
+
+    .session-menu-delete-workspace {
+      flex: 1 1 100%;
+      min-width: 0;
+      color: var(--vscode-errorForeground, var(--vscode-button-secondaryForeground, var(--vscode-foreground)));
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .session-menu-delete-workspace:hover,
+    .session-menu-delete-workspace:focus-visible {
+      color: var(--vscode-errorForeground, var(--vscode-button-foreground));
+      background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+      outline: none;
     }
 
     .session-menu-filter.is-active {
@@ -408,6 +471,14 @@ export function getStyles(): string {
       grid-template-columns: 18px 24px minmax(0, 1fr);
     }
 
+    .session-menu-item.is-other-workspace {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .session-menu.is-multi-select .session-menu-item.is-other-workspace {
+      grid-template-columns: 18px minmax(0, 1fr);
+    }
+
     .session-menu-item:hover,
     .session-menu-item:focus-visible {
       color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
@@ -429,6 +500,7 @@ export function getStyles(): string {
     }
 
     .session-menu-item-title {
+      display: block;
       width: 100%;
       padding: 1px 3px;
       border: 1px solid transparent;
@@ -505,6 +577,10 @@ export function getStyles(): string {
       color: var(--vscode-descriptionForeground);
       font-size: 12px;
       text-align: center;
+    }
+
+    .session-menu-error {
+      color: var(--vscode-errorForeground, var(--vscode-descriptionForeground));
     }
 
     /* ---- context bar ---- */

@@ -79,6 +79,14 @@ export interface ChatSessionSummary {
   customTitle?: string;
 }
 
+export interface WorkspaceSummary {
+  workspaceKey: string;
+  workspaceName: string;
+  workspaceFolders: string[];
+  sessionCount: number;
+  updatedAt: string;
+}
+
 export type DraftEditAction = 'create' | 'modify' | 'delete' | 'move';
 
 export interface DraftEdit {

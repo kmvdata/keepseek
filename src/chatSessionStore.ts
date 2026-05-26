@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { ChatMessage, ChatSession, ChatSessionSummary } from './types';
+import { ChatMessage, ChatSession, ChatSessionSummary, WorkspaceSummary } from './types';
 import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from './i18n';
 import { isRecord } from './errors';
 
@@ -24,6 +24,10 @@ export interface StoredWorkspaceSessionState {
 export interface ChatSessionStorageAdapter {
   loadWorkspace(workspaceScope: WorkspaceSessionScope): Promise<StoredWorkspaceSessionState>;
   saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
+  listAllWorkspaceSummaries(): Promise<WorkspaceSummary[]>;
+  loadWorkspaceSessions(workspaceKey: string): Promise<ChatSession[]>;
+  deleteWorkspaceSessions(workspaceKey: string, sessionIds: string[]): Promise<void>;
+  deleteEntireWorkspace(workspaceKey: string): Promise<void>;
   cleanupExpiredSessions(options: {
     currentWorkspaceKey: string;
     currentActiveSessionId: string;
@@ -203,17 +207,51 @@ export class ChatSessionStore {
   }
 
   public getSessionSummaries(): ChatSessionSummary[] {
-    return this.getCurrentWorkspaceSessions().map((session) => ({
-      id: session.id,
-      title: session.title || localize(this.language, 'defaultSessionTitle'),
-      createdAt: session.createdAt,
-      updatedAt: session.updatedAt,
-      messageCount: session.messages.length,
-      workspaceKey: session.workspaceKey,
-      workspaceName: session.workspaceName,
-      isFavorite: Boolean(session.isFavorite),
-      customTitle: session.customTitle
-    }));
+    return this.getCurrentWorkspaceSessions().map((session) => toSessionSummary(session, this.language));
+  }
+
+  public async getAllWorkspaceSummaries(): Promise<WorkspaceSummary[]> {
+    return this.sessionStorage.listAllWorkspaceSummaries();
+  }
+
+  public async getOtherWorkspaceSessionSummaries(workspaceKey: string): Promise<ChatSessionSummary[]> {
+    const normalizedWorkspaceKey = workspaceKey.trim();
+    if (!normalizedWorkspaceKey || normalizedWorkspaceKey === this.workspaceScope.key) {
+      return [];
+    }
+
+    const sessions = await this.sessionStorage.loadWorkspaceSessions(normalizedWorkspaceKey);
+    return sessions.map((session) => toSessionSummary(session, this.language));
+  }
+
+  public async deleteOtherWorkspaceSessions(workspaceKey: string, sessionIds: string[]): Promise<number> {
+    const normalizedWorkspaceKey = workspaceKey.trim();
+    if (!normalizedWorkspaceKey || normalizedWorkspaceKey === this.workspaceScope.key) {
+      return 0;
+    }
+
+    const ids = new Set(sessionIds.filter((sessionId) => typeof sessionId === 'string' && sessionId.trim()));
+    if (!ids.size) {
+      return 0;
+    }
+
+    const sessions = await this.sessionStorage.loadWorkspaceSessions(normalizedWorkspaceKey);
+    const deletedCount = sessions.filter((session) => ids.has(session.id)).length;
+    if (!deletedCount) {
+      return 0;
+    }
+
+    await this.sessionStorage.deleteWorkspaceSessions(normalizedWorkspaceKey, Array.from(ids));
+    return deletedCount;
+  }
+
+  public async deleteOtherWorkspace(workspaceKey: string): Promise<void> {
+    const normalizedWorkspaceKey = workspaceKey.trim();
+    if (!normalizedWorkspaceKey || normalizedWorkspaceKey === this.workspaceScope.key) {
+      return;
+    }
+
+    await this.sessionStorage.deleteEntireWorkspace(normalizedWorkspaceKey);
   }
 
   public trimActiveHistory(maxMessages = DEFAULT_ACTIVE_HISTORY_LIMIT): void {
@@ -328,6 +366,20 @@ export function createSessionTitle(prompt: string, language: KeepseekLanguage = 
     return localize(language, 'defaultSessionTitle');
   }
   return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized;
+}
+
+function toSessionSummary(session: ChatSession, language: KeepseekLanguage): ChatSessionSummary {
+  return {
+    id: session.id,
+    title: session.title || localize(language, 'defaultSessionTitle'),
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    messageCount: session.messages.length,
+    workspaceKey: session.workspaceKey,
+    workspaceName: session.workspaceName,
+    isFavorite: Boolean(session.isFavorite),
+    customTitle: session.customTitle
+  };
 }
 
 export function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {

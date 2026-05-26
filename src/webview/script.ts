@@ -113,6 +113,11 @@ export function getScript(): string {
     let sessionRangeDays = 7;
     let sessionFavoritesOnly = false;
     let selectedSessionIds = new Set();
+    let activeWorkspaceTab = 'current';
+    let otherWorkspaces = [];
+    let otherWorkspaceSessions = {};
+    let otherWorkspaceSessionErrors = {};
+    let otherWorkspacesError = '';
     let editingMessageId = '';
     let editingDraftText = '';
     let pendingEditFocusId = '';
@@ -464,6 +469,10 @@ export function getScript(): string {
 
         var item = target.closest('[data-session-id]');
         var sessionId = item?.dataset.sessionId || '';
+        if (item?.dataset.sessionOrigin === 'other') {
+          setTransientStatus(t('sessionOtherProjectHint'));
+          return;
+        }
         if (!sessionId || sessionId === state.activeSessionId) {
           closeSessionMenu();
           return;
@@ -527,6 +536,10 @@ export function getScript(): string {
         var item = target.closest('[data-session-id]');
         if (item && (event.key === 'Enter' || event.key === ' ')) {
           event.preventDefault();
+          if (item.dataset.sessionOrigin === 'other') {
+            setTransientStatus(t('sessionOtherProjectHint'));
+            return;
+          }
           var keyboardSessionId = item.dataset.sessionId || '';
           if (keyboardSessionId && keyboardSessionId !== state.activeSessionId) {
             clearPromptDraft();
@@ -593,6 +606,42 @@ export function getScript(): string {
         if (window.keepseekInputControls && window.keepseekInputControls.showHistorySettingsDialog) {
           window.keepseekInputControls.showHistorySettingsDialog(message);
         }
+      } else if (message.type === 'otherWorkspaces') {
+        otherWorkspacesError = message.error || '';
+        if (!otherWorkspacesError) {
+          otherWorkspaces = Array.isArray(message.workspaces) ? message.workspaces : [];
+          if (!isCurrentWorkspaceTab() && !otherWorkspaces.some(function(workspace) {
+            return workspace.workspaceKey === activeWorkspaceTab;
+          })) {
+            activeWorkspaceTab = 'current';
+            selectedSessionIds.clear();
+          }
+        }
+        renderSessionMenu();
+      } else if (message.type === 'otherWorkspaceSessions') {
+        var workspaceKey = String(message.workspaceKey || '');
+        if (workspaceKey) {
+          if (message.error) {
+            otherWorkspaceSessionErrors[workspaceKey] = message.error;
+            otherWorkspaceSessions[workspaceKey] = [];
+          } else {
+            otherWorkspaceSessions[workspaceKey] = Array.isArray(message.sessions) ? message.sessions : [];
+            delete otherWorkspaceSessionErrors[workspaceKey];
+          }
+        }
+        renderSessionMenu();
+      } else if (message.type === 'otherWorkspaceDeleted') {
+        var deletedWorkspaceKey = String(message.workspaceKey || '');
+        otherWorkspaces = otherWorkspaces.filter(function(workspace) {
+          return workspace.workspaceKey !== deletedWorkspaceKey;
+        });
+        delete otherWorkspaceSessions[deletedWorkspaceKey];
+        delete otherWorkspaceSessionErrors[deletedWorkspaceKey];
+        if (activeWorkspaceTab === deletedWorkspaceKey) {
+          activeWorkspaceTab = 'current';
+          selectedSessionIds.clear();
+        }
+        renderSessionMenu();
       } else if (message.type === 'referenceResources') {
         handleEditReferenceResourcesMessage(message);
       }
@@ -698,15 +747,20 @@ export function getScript(): string {
     }
 
     function openSessionMenu() {
+      activeWorkspaceTab = 'current';
       sessionRangeDays = normalizeSessionRetentionDays(state.historyRetentionDays);
       sessionMultiSelectMode = false;
       selectedSessionIds.clear();
       sessionMenuOpen = true;
       renderSessionControls();
+      vscode.postMessage({ type: 'listOtherWorkspaces' });
     }
 
     function closeSessionMenu() {
       sessionMenuOpen = false;
+      activeWorkspaceTab = 'current';
+      sessionMultiSelectMode = false;
+      selectedSessionIds.clear();
       renderSessionControls();
     }
 
@@ -715,18 +769,33 @@ export function getScript(): string {
       sessionMenu.classList.toggle('hidden', !sessionMenuOpen);
       if (!sessionMenuOpen) return;
       sessionMenu.classList.toggle('is-multi-select', sessionMultiSelectMode);
+      sessionMenu.classList.toggle('is-other-workspace', !isCurrentWorkspaceTab());
       sessionMenu.innerHTML = '';
 
-      var sessions = getVisibleSessionSummaries();
+      var sessions = getActiveVisibleSessions();
       pruneSelectedSessionIds(sessions);
       var allVisibleSelected = sessions.length > 0 && sessions.every(function(session) {
         return selectedSessionIds.has(session.id);
       });
+      var currentTab = isCurrentWorkspaceTab();
+      var activeOtherWorkspaceError = currentTab ? '' : (otherWorkspaceSessionErrors[activeWorkspaceTab] || '');
+      var activeOtherWorkspaceLoading = !currentTab
+        && !hasOtherWorkspaceSessionsCache(activeWorkspaceTab)
+        && !activeOtherWorkspaceError;
 
       var title = document.createElement('div');
       title.className = 'session-menu-title';
       title.textContent = t('sessionHistory');
       sessionMenu.append(title);
+
+      sessionMenu.append(renderWorkspaceTabs());
+
+      if (otherWorkspacesError) {
+        var workspaceError = document.createElement('div');
+        workspaceError.className = 'session-menu-empty session-menu-error';
+        workspaceError.textContent = t('sessionLoadError') + ': ' + otherWorkspacesError;
+        sessionMenu.append(workspaceError);
+      }
 
       var controls = document.createElement('div');
       controls.className = 'session-menu-controls';
@@ -740,13 +809,6 @@ export function getScript(): string {
       renderSessionRangeOptions(rangeSelect);
       rangeLabel.append(rangeText, rangeSelect);
 
-      var favoriteOnlyButton = document.createElement('button');
-      favoriteOnlyButton.type = 'button';
-      favoriteOnlyButton.className = 'session-menu-filter' + (sessionFavoritesOnly ? ' is-active' : '');
-      favoriteOnlyButton.dataset.sessionAction = 'toggleFavoritesOnly';
-      favoriteOnlyButton.setAttribute('aria-pressed', sessionFavoritesOnly ? 'true' : 'false');
-      favoriteOnlyButton.textContent = '★ ' + t('sessionFavoritesOnly');
-
       var multiSelectButton = document.createElement('button');
       multiSelectButton.type = 'button';
       multiSelectButton.className = 'session-menu-filter' + (sessionMultiSelectMode ? ' is-active' : '');
@@ -754,7 +816,25 @@ export function getScript(): string {
       multiSelectButton.setAttribute('aria-pressed', sessionMultiSelectMode ? 'true' : 'false');
       multiSelectButton.textContent = t(sessionMultiSelectMode ? 'sessionExitMultiSelect' : 'sessionMultiSelect');
 
-      controls.append(rangeLabel, favoriteOnlyButton, multiSelectButton);
+      controls.append(rangeLabel);
+      if (currentTab) {
+        var favoriteOnlyButton = document.createElement('button');
+        favoriteOnlyButton.type = 'button';
+        favoriteOnlyButton.className = 'session-menu-filter' + (sessionFavoritesOnly ? ' is-active' : '');
+        favoriteOnlyButton.dataset.sessionAction = 'toggleFavoritesOnly';
+        favoriteOnlyButton.setAttribute('aria-pressed', sessionFavoritesOnly ? 'true' : 'false');
+        favoriteOnlyButton.textContent = '★ ' + t('sessionFavoritesOnly');
+        controls.append(favoriteOnlyButton);
+      }
+      controls.append(multiSelectButton);
+      if (!currentTab) {
+        var deleteWorkspaceButton = document.createElement('button');
+        deleteWorkspaceButton.type = 'button';
+        deleteWorkspaceButton.className = 'session-menu-delete-workspace';
+        deleteWorkspaceButton.dataset.sessionAction = 'deleteWorkspace';
+        deleteWorkspaceButton.textContent = t('sessionDeleteWorkspace');
+        controls.append(deleteWorkspaceButton);
+      }
       sessionMenu.append(controls);
 
       if (sessionMultiSelectMode) {
@@ -781,6 +861,22 @@ export function getScript(): string {
         sessionMenu.append(bulk);
       }
 
+      if (activeOtherWorkspaceError) {
+        var loadError = document.createElement('div');
+        loadError.className = 'session-menu-empty session-menu-error';
+        loadError.textContent = t('sessionLoadError') + ': ' + activeOtherWorkspaceError;
+        sessionMenu.append(loadError);
+        return;
+      }
+
+      if (activeOtherWorkspaceLoading) {
+        var loading = document.createElement('div');
+        loading.className = 'session-menu-empty';
+        loading.textContent = t('loading') + '...';
+        sessionMenu.append(loading);
+        return;
+      }
+
       if (!sessions.length) {
         var empty = document.createElement('div');
         empty.className = 'session-menu-empty';
@@ -794,43 +890,41 @@ export function getScript(): string {
         var item = document.createElement('div');
         var isActive = session.id === state.activeSessionId;
         var isFavorite = session.isFavorite === true;
-        item.className = 'session-menu-item' + (isActive ? ' is-active' : '') + (isFavorite ? ' is-favorite' : '');
+        item.className = 'session-menu-item'
+          + (currentTab && isActive ? ' is-active' : '')
+          + (currentTab && isFavorite ? ' is-favorite' : '')
+          + (!currentTab ? ' is-other-workspace' : '');
         item.dataset.sessionId = session.id;
+        item.dataset.sessionOrigin = currentTab ? 'current' : 'other';
+        if (!currentTab) {
+          item.dataset.workspaceKey = activeWorkspaceTab;
+        }
         item.tabIndex = 0;
-        item.setAttribute('role', 'menuitemradio');
-        item.setAttribute('aria-checked', isActive ? 'true' : 'false');
-
-        var favoriteButton = document.createElement('button');
-        favoriteButton.type = 'button';
-        favoriteButton.className = 'session-menu-star' + (isFavorite ? ' is-active' : '');
-        favoriteButton.dataset.sessionAction = 'toggleFavorite';
-        favoriteButton.dataset.sessionId = session.id;
-        favoriteButton.setAttribute('aria-pressed', isFavorite ? 'true' : 'false');
-        favoriteButton.setAttribute('aria-label', t(isFavorite ? 'unfavoriteSession' : 'favoriteSession'));
-        favoriteButton.title = t(isFavorite ? 'unfavoriteSession' : 'favoriteSession');
-        favoriteButton.textContent = isFavorite ? '★' : '☆';
-        favoriteButton.addEventListener('click', function(event) {
-          event.preventDefault();
-          event.stopPropagation();
-          var button = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
-          var favoriteSessionId = button?.dataset.sessionId || '';
-          if (favoriteSessionId) {
-            vscode.postMessage({ type: 'toggleSessionFavorite', sessionId: favoriteSessionId });
-          }
-        });
+        item.setAttribute('role', currentTab ? 'menuitemradio' : 'menuitem');
+        if (currentTab) {
+          item.setAttribute('aria-checked', isActive ? 'true' : 'false');
+        }
 
         var main = document.createElement('div');
         main.className = 'session-menu-item-main';
 
-        var itemTitle = document.createElement('input');
-        itemTitle.className = 'session-menu-item-title';
-        itemTitle.type = 'text';
-        itemTitle.value = session.title || t('newSession');
-        itemTitle.title = itemTitle.value;
-        itemTitle.dataset.sessionTitle = 'true';
-        itemTitle.dataset.sessionId = session.id;
-        itemTitle.dataset.originalTitle = itemTitle.value;
-        itemTitle.setAttribute('aria-label', t('renameSessionTitle'));
+        var itemTitle;
+        if (currentTab) {
+          itemTitle = document.createElement('input');
+          itemTitle.className = 'session-menu-item-title';
+          itemTitle.type = 'text';
+          itemTitle.value = session.title || t('newSession');
+          itemTitle.title = itemTitle.value;
+          itemTitle.dataset.sessionTitle = 'true';
+          itemTitle.dataset.sessionId = session.id;
+          itemTitle.dataset.originalTitle = itemTitle.value;
+          itemTitle.setAttribute('aria-label', t('renameSessionTitle'));
+        } else {
+          itemTitle = document.createElement('span');
+          itemTitle.className = 'session-menu-item-title';
+          itemTitle.textContent = session.title || t('newSession');
+          itemTitle.title = itemTitle.textContent;
+        }
 
         var meta = document.createElement('span');
         meta.className = 'session-menu-item-meta';
@@ -847,12 +941,74 @@ export function getScript(): string {
           checkbox.setAttribute('aria-label', t('sessionSelectAll'));
           item.append(checkbox);
         }
-        item.append(favoriteButton, main);
+        if (currentTab) {
+          var favoriteButton = document.createElement('button');
+          favoriteButton.type = 'button';
+          favoriteButton.className = 'session-menu-star' + (isFavorite ? ' is-active' : '');
+          favoriteButton.dataset.sessionAction = 'toggleFavorite';
+          favoriteButton.dataset.sessionId = session.id;
+          favoriteButton.setAttribute('aria-pressed', isFavorite ? 'true' : 'false');
+          favoriteButton.setAttribute('aria-label', t(isFavorite ? 'unfavoriteSession' : 'favoriteSession'));
+          favoriteButton.title = t(isFavorite ? 'unfavoriteSession' : 'favoriteSession');
+          favoriteButton.textContent = isFavorite ? '★' : '☆';
+          favoriteButton.addEventListener('click', function(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            var button = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+            var favoriteSessionId = button?.dataset.sessionId || '';
+            if (favoriteSessionId) {
+              vscode.postMessage({ type: 'toggleSessionFavorite', sessionId: favoriteSessionId });
+            }
+          });
+          item.append(favoriteButton);
+        }
+        item.append(main);
         sessionMenu.append(item);
       }
     }
 
-    function getVisibleSessionSummaries() {
+    function renderWorkspaceTabs() {
+      var tabs = document.createElement('div');
+      tabs.className = 'session-menu-tabs';
+      tabs.setAttribute('role', 'tablist');
+
+      var currentButton = document.createElement('button');
+      currentButton.type = 'button';
+      currentButton.className = 'session-menu-tab' + (isCurrentWorkspaceTab() ? ' is-active' : '');
+      currentButton.dataset.sessionAction = 'switchWorkspaceTab';
+      currentButton.dataset.workspaceTab = 'current';
+      currentButton.setAttribute('role', 'tab');
+      currentButton.setAttribute('aria-selected', isCurrentWorkspaceTab() ? 'true' : 'false');
+      currentButton.textContent = t('sessionTabCurrentProject');
+      tabs.append(currentButton);
+
+      otherWorkspaces.forEach(function(workspace) {
+        var button = document.createElement('button');
+        var workspaceKey = String(workspace.workspaceKey || '');
+        button.type = 'button';
+        button.className = 'session-menu-tab' + (activeWorkspaceTab === workspaceKey ? ' is-active' : '');
+        button.dataset.sessionAction = 'switchWorkspaceTab';
+        button.dataset.workspaceTab = workspaceKey;
+        button.setAttribute('role', 'tab');
+        button.setAttribute('aria-selected', activeWorkspaceTab === workspaceKey ? 'true' : 'false');
+        button.title = workspace.workspaceName || t('sessionTabOtherProject');
+
+        var label = document.createElement('span');
+        label.className = 'session-menu-tab-label';
+        label.textContent = truncateWorkspaceName(workspace.workspaceName || t('sessionTabOtherProject'));
+
+        var count = document.createElement('span');
+        count.className = 'session-menu-tab-count';
+        count.textContent = '(' + (Number(workspace.sessionCount) || 0) + ')';
+
+        button.append(label, count);
+        tabs.append(button);
+      });
+
+      return tabs;
+    }
+
+    function getCurrentVisibleSessions() {
       var sessions = Array.isArray(state.sessionSummaries) ? state.sessionSummaries.slice() : [];
       sessions.sort(function(a, b) {
         var favoriteDelta = (b.isFavorite === true ? 1 : 0) - (a.isFavorite === true ? 1 : 0);
@@ -872,6 +1028,44 @@ export function getScript(): string {
         }
         return updatedAt >= Date.now() - sessionRangeDays * 24 * 60 * 60 * 1000;
       });
+    }
+
+    function getVisibleOtherWorkspaceSessions(workspaceKey) {
+      var sessions = Array.isArray(otherWorkspaceSessions[workspaceKey])
+        ? otherWorkspaceSessions[workspaceKey].slice()
+        : [];
+      sessions.sort(function(a, b) {
+        return getSessionTimestamp(b) - getSessionTimestamp(a);
+      });
+      return sessions.filter(function(session) {
+        if (sessionRangeDays <= 0) {
+          return true;
+        }
+        var updatedAt = getSessionTimestamp(session);
+        if (!Number.isFinite(updatedAt)) {
+          return true;
+        }
+        return updatedAt >= Date.now() - sessionRangeDays * 24 * 60 * 60 * 1000;
+      });
+    }
+
+    function getActiveVisibleSessions() {
+      return isCurrentWorkspaceTab()
+        ? getCurrentVisibleSessions()
+        : getVisibleOtherWorkspaceSessions(activeWorkspaceTab);
+    }
+
+    function isCurrentWorkspaceTab() {
+      return activeWorkspaceTab === 'current';
+    }
+
+    function hasOtherWorkspaceSessionsCache(workspaceKey) {
+      return Object.prototype.hasOwnProperty.call(otherWorkspaceSessions, workspaceKey);
+    }
+
+    function truncateWorkspaceName(name) {
+      var value = String(name || t('sessionTabOtherProject'));
+      return value.length > 16 ? value.slice(0, 16) + '...' : value;
     }
 
     function renderSessionRangeOptions(select) {
@@ -914,7 +1108,26 @@ export function getScript(): string {
 
     function handleSessionMenuAction(button) {
       var action = button.dataset.sessionAction || '';
+      if (action === 'switchWorkspaceTab') {
+        var workspaceTab = button.dataset.workspaceTab || 'current';
+        if (workspaceTab === activeWorkspaceTab) {
+          return;
+        }
+        activeWorkspaceTab = workspaceTab || 'current';
+        selectedSessionIds.clear();
+        if (!isCurrentWorkspaceTab() && (!hasOtherWorkspaceSessionsCache(activeWorkspaceTab) || otherWorkspaceSessionErrors[activeWorkspaceTab])) {
+          delete otherWorkspaceSessionErrors[activeWorkspaceTab];
+          delete otherWorkspaceSessions[activeWorkspaceTab];
+          vscode.postMessage({ type: 'loadOtherWorkspaceSessions', workspaceKey: activeWorkspaceTab });
+        }
+        renderSessionMenu();
+        return;
+      }
+
       if (action === 'toggleFavorite') {
+        if (!isCurrentWorkspaceTab()) {
+          return;
+        }
         var favoriteRow = button.closest('.session-menu-item');
         var favoriteSessionId = button.dataset.sessionId || favoriteRow?.dataset.sessionId || '';
         if (favoriteSessionId) {
@@ -931,6 +1144,9 @@ export function getScript(): string {
       }
 
       if (action === 'toggleFavoritesOnly') {
+        if (!isCurrentWorkspaceTab()) {
+          return;
+        }
         sessionFavoritesOnly = !sessionFavoritesOnly;
         selectedSessionIds.clear();
         renderSessionMenu();
@@ -938,7 +1154,7 @@ export function getScript(): string {
       }
 
       if (action === 'toggleSelectVisible') {
-        var visibleSessions = getVisibleSessionSummaries();
+        var visibleSessions = getActiveVisibleSessions();
         var shouldDeselect = visibleSessions.length > 0 && visibleSessions.every(function(session) {
           return selectedSessionIds.has(session.id);
         });
@@ -964,8 +1180,24 @@ export function getScript(): string {
           return;
         }
         selectedSessionIds.clear();
-        vscode.postMessage({ type: 'deleteSessions', sessionIds: sessionIds });
+        if (isCurrentWorkspaceTab()) {
+          vscode.postMessage({ type: 'deleteSessions', sessionIds: sessionIds });
+        } else {
+          vscode.postMessage({
+            type: 'deleteOtherWorkspaceSessions',
+            workspaceKey: activeWorkspaceTab,
+            sessionIds: sessionIds
+          });
+        }
         renderSessionMenu();
+        return;
+      }
+
+      if (action === 'deleteWorkspace') {
+        if (isCurrentWorkspaceTab()) {
+          return;
+        }
+        vscode.postMessage({ type: 'deleteOtherWorkspace', workspaceKey: activeWorkspaceTab });
       }
     }
 
