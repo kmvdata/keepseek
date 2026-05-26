@@ -2308,14 +2308,15 @@ export function getScript(): string {
           continue;
         }
 
+        var matchEnd = match.index + match[0].length;
         var label = getMessageReferenceLabel(text, match.index, reference);
-        if (label.start < cursor) {
+        if (label.start < cursor || !isStandaloneMessageReferenceLine(text, label.start, matchEnd)) {
           continue;
         }
 
         appendInlineEditorText(editor, text.slice(cursor, label.start));
         editor.append(createInlineReferenceLink(reference));
-        cursor = match.index + match[0].length;
+        cursor = matchEnd;
       }
 
       appendInlineEditorText(editor, text.slice(cursor));
@@ -2858,9 +2859,16 @@ export function getScript(): string {
 
     function lineHasMessageFileReference(line) {
       var pattern = /<([^<>\\n]+)>/g;
+      var text = String(line || '');
       var match;
-      while ((match = pattern.exec(String(line || ''))) !== null) {
-        if (parseMessageFileReference((match[1] || '').trim())) {
+      while ((match = pattern.exec(text)) !== null) {
+        var reference = parseMessageFileReference((match[1] || '').trim());
+        if (!reference) {
+          continue;
+        }
+        var matchEnd = match.index + match[0].length;
+        var label = getMessageReferenceLabel(text, match.index, reference);
+        if (isStandaloneMessageReferenceLine(text, label.start, matchEnd)) {
           return true;
         }
       }
@@ -3364,14 +3372,15 @@ export function getScript(): string {
           continue;
         }
 
+        var matchEnd = match.index + match[0].length;
         var label = getMessageReferenceLabel(value, match.index, reference);
-        if (label.start < cursor) {
+        if (label.start < cursor || !isStandaloneMessageReferenceLine(value, label.start, matchEnd)) {
           continue;
         }
 
         appendMarkdownFormattedText(container, value.slice(cursor, label.start));
         container.append(createMessageFileLink(reference, label.text));
-        cursor = match.index + match[0].length;
+        cursor = matchEnd;
       }
 
       appendMarkdownFormattedText(container, value.slice(cursor));
@@ -3609,14 +3618,15 @@ export function getScript(): string {
           continue;
         }
 
+        var matchEnd = match.index + match[0].length;
         var label = getMessageReferenceLabel(text, match.index, reference);
-        if (label.start < cursor) {
+        if (label.start < cursor || !isStandaloneMessageReferenceLine(text, label.start, matchEnd)) {
           continue;
         }
 
         appendMessageText(container, text.slice(cursor, label.start));
         container.append(createMessageFileLink(reference, label.text));
-        cursor = match.index + match[0].length;
+        cursor = matchEnd;
         if (hideExpandedReferences) {
           var hiddenBlockEnd = getExpandedReferenceBlockEnd(text, cursor);
           if (hiddenBlockEnd > cursor) {
@@ -3772,6 +3782,9 @@ export function getScript(): string {
       if (directoryReference) {
         return directoryReference;
       }
+      if (!isSafeMessageFileReferenceTarget(target)) {
+        return null;
+      }
       if (hasNonFileUriScheme(target)) {
         return null;
       }
@@ -3785,6 +3798,19 @@ export function getScript(): string {
         reference.endLine = reference.startLine;
       }
       return reference;
+    }
+
+    function isSafeMessageFileReferenceTarget(value) {
+      var text = String(value || '').trim();
+      if (!text) return false;
+      if (text.indexOf('"') >= 0 || text.indexOf("'") >= 0 || text.indexOf(String.fromCharCode(96)) >= 0 || /\\s+\\S+=/.test(text)) {
+        return false;
+      }
+      for (var i = 0; i < text.length; i++) {
+        var code = text.charCodeAt(i);
+        if (code < 32 || code === 127) return false;
+      }
+      return true;
     }
 
     function parseCodexMarkdownFileLinkHref(href) {
@@ -4052,6 +4078,30 @@ export function getScript(): string {
         start: matchStart,
         text: formatFileReferenceLabel(reference)
       };
+    }
+
+    function isStandaloneMessageReferenceLine(text, referenceStart, referenceEnd) {
+      var value = String(text || '');
+      var start = Math.max(0, Number(referenceStart) || 0);
+      var end = Math.max(start, Number(referenceEnd) || start);
+      var lineStart = getMessageLineStart(value, start);
+      var lineEnd = getMessageLineEnd(value, end);
+      return !value.slice(lineStart, start).trim() && !value.slice(end, lineEnd).trim();
+    }
+
+    function getMessageLineStart(text, index) {
+      var before = Math.max(0, index - 1);
+      var lineFeed = text.lastIndexOf(String.fromCharCode(10), before);
+      var carriageReturn = text.lastIndexOf(String.fromCharCode(13), before);
+      return Math.max(lineFeed, carriageReturn) + 1;
+    }
+
+    function getMessageLineEnd(text, index) {
+      var lineFeed = text.indexOf(String.fromCharCode(10), index);
+      var carriageReturn = text.indexOf(String.fromCharCode(13), index);
+      if (lineFeed < 0) return carriageReturn < 0 ? text.length : carriageReturn;
+      if (carriageReturn < 0) return lineFeed;
+      return Math.min(lineFeed, carriageReturn);
     }
 
     function getBracketMessageReferenceLabel(text, matchStart) {
@@ -4412,11 +4462,34 @@ export function getScript(): string {
       var value = String(path || '').trim();
       var target = String(rawTarget || '').trim();
       if (!value) return false;
+      var last = value.charAt(value.length - 1);
+      if (last === '/' || last === String.fromCharCode(92)) return false;
+      if (isSingleSegmentClosingTagPath(value)) return false;
       if (target.toLowerCase().indexOf('file:') === 0) return true;
       if (value.charAt(0) === '/' || value.charAt(0) === '~') return true;
       if (value.indexOf('./') === 0 || value.indexOf('../') === 0) return true;
       if (isMessageWindowsDrivePath(value)) return true;
       return value.indexOf('/') >= 0 || value.indexOf(String.fromCharCode(92)) >= 0;
+    }
+
+    function isSingleSegmentClosingTagPath(value) {
+      var text = String(value || '').trim();
+      if (text.charAt(0) !== '/' || text.indexOf('/', 1) >= 0 || text.indexOf('.') >= 0) {
+        return false;
+      }
+      var name = text.slice(1);
+      if (!name) return false;
+      for (var i = 0; i < name.length; i++) {
+        var code = name.charCodeAt(i);
+        var allowed = (code >= 48 && code <= 57) ||
+          (code >= 65 && code <= 90) ||
+          (code >= 97 && code <= 122) ||
+          name.charAt(i) === '_' ||
+          name.charAt(i) === '-' ||
+          name.charAt(i) === ':';
+        if (!allowed) return false;
+      }
+      return true;
     }
 
     function isMessageWindowsDrivePath(value) {

@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { DEFAULT_KEEPSEEK_LANGUAGE, normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
 import { getMarkdownFence, getMarkdownLanguage } from './markdown';
+import { hasUnsafeReferenceTargetCharacters, isStandaloneReferenceLine } from './referenceSyntax';
 
 const FILE_REFERENCE_PATTERN = /<([^<>\n]+)>/gu;
 const FILE_REFERENCE_LINE_PATTERN = /^(?<path>.+)#L(?<startLine>\d+)(?:C(?<startColumn>\d+))?(?:-(?:L(?<endLine>\d+))?(?:C(?<endColumn>\d+))?)?$/u;
@@ -132,10 +133,23 @@ function findPromptFileReferences(prompt: string, language: KeepseekLanguage): P
     }
 
     const matchEnd = matchStart + match[0].length;
+    const replacementStart = getFileReferenceReplacementStart(
+      prompt,
+      matchStart,
+      parsed.uri,
+      parsed.startLine,
+      parsed.endLine,
+      parsed.startColumn,
+      parsed.endColumn,
+      language
+    );
+    if (!isStandaloneReferenceLine(prompt, replacementStart, matchEnd)) {
+      continue;
+    }
     references.push({
       matchStart,
       matchEnd,
-      replacementStart: getFileReferenceReplacementStart(prompt, matchStart, parsed.uri, parsed.startLine, parsed.endLine, parsed.startColumn, parsed.endColumn, language),
+      replacementStart,
       target,
       uri: parsed.uri,
       startLine: parsed.startLine,
@@ -151,6 +165,9 @@ function findPromptFileReferences(prompt: string, language: KeepseekLanguage): P
 function parseFileReferenceTarget(target: string): { uri: vscode.Uri; startLine: number; endLine: number; startColumn: number; endColumn: number } | undefined {
   const lineMatch = FILE_REFERENCE_LINE_PATTERN.exec(target);
   const referencePath = lineMatch?.groups?.path ?? target;
+  if (hasUnsafeReferenceTargetCharacters(referencePath)) {
+    return undefined;
+  }
   const uri = resolveFileReferenceUri(referencePath);
   if (!uri) {
     return undefined;

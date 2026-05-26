@@ -284,7 +284,7 @@ export function getInputScript(): string {
 
       promptInput.addEventListener('paste', function(event) {
         event.preventDefault();
-        var refs = extractFileReferences(event.clipboardData);
+        var refs = extractFileReferences(event.clipboardData, false);
         if (refs.length) {
           insertFileReferences(refs);
           return;
@@ -1118,7 +1118,7 @@ export function getInputScript(): string {
         references.push(reference);
       }
 
-      function extractFileReferences(dataTransfer) {
+      function extractFileReferences(dataTransfer, allowPlainTextPaths) {
         var references = [];
         var dt = dataTransfer;
         var seen = Object.create(null);
@@ -1160,7 +1160,7 @@ export function getInputScript(): string {
 
         if (hasType(dt, 'text/plain')) {
           var text = dt.getData('text/plain');
-          addPlainTextReferences(references, seen, text);
+          addPlainTextReferences(references, seen, text, allowPlainTextPaths !== false);
         }
 
         return references;
@@ -1280,7 +1280,7 @@ export function getInputScript(): string {
         }
       }
 
-      function addPlainTextReferences(references, seen, value) {
+      function addPlainTextReferences(references, seen, value, allowPlainTextPaths) {
         if (!value) { return; }
         var entries = splitDragLines(value).map(function (entry) {
           return entry.trim();
@@ -1290,9 +1290,9 @@ export function getInputScript(): string {
         if (!entries.length) { return; }
 
         for (var i = 0; i < entries.length; i++) {
-          var reference = normalizeDraggedReference(entries[i]);
+          var reference = normalizePlainTextReference(entries[i], allowPlainTextPaths);
           if (!reference) { continue; }
-          var key = makeFileHref(reference);
+          var key = reference.kind === 'directory' ? makeDirectoryHref(reference) : makeFileHref(reference);
           if (seen[key]) { continue; }
           seen[key] = true;
           references.push(reference);
@@ -1303,6 +1303,64 @@ export function getInputScript(): string {
         return String(value || '')
           .split(String.fromCharCode(13)).join('')
           .split(String.fromCharCode(10));
+      }
+
+      function normalizePlainTextReference(value, allowPlainTextPaths) {
+        var text = String(value || '').trim().split(String.fromCharCode(0)).join('');
+        if (!text) { return null; }
+        if (startsWithFileScheme(text)) {
+          return fileUriToReference(text);
+        }
+
+        var target = getStandaloneBracketReferenceTarget(text);
+        if (!target) {
+          return allowPlainTextPaths ? normalizeDraggedReference(text) : null;
+        }
+        if (!isSafePlainFileReferenceTarget(target)) { return null; }
+        var directoryPrefix = 'keepseek-dir:';
+        if (target.toLowerCase().indexOf(directoryPrefix) === 0) {
+          var directoryPath = target.slice(directoryPrefix.length).trim();
+          if (!directoryPath) { return null; }
+          return { path: directoryPath, kind: 'directory', startLine: 0, endLine: 0, startColumn: 0, endColumn: 0 };
+        }
+        if (startsWithFileScheme(target)) {
+          return fileUriToReference(target);
+        }
+
+        var split = splitLineReference(target);
+        if (!split.path) { return null; }
+        return {
+          path: split.path,
+          startLine: split.startLine,
+          endLine: split.endLine,
+          startColumn: split.startColumn,
+          endColumn: split.endColumn
+        };
+      }
+
+      function getStandaloneBracketReferenceTarget(value) {
+        var text = String(value || '').trim();
+        if (text.length < 3 || text.charAt(0) !== '<' || text.charAt(text.length - 1) !== '>') {
+          return '';
+        }
+        var target = text.slice(1, -1).trim();
+        if (!target || target.indexOf('<') >= 0 || target.indexOf('>') >= 0) {
+          return '';
+        }
+        return target;
+      }
+
+      function isSafePlainFileReferenceTarget(value) {
+        var text = String(value || '').trim();
+        if (!text) { return false; }
+        if (text.indexOf('"') >= 0 || text.indexOf("'") >= 0 || text.indexOf(String.fromCharCode(96)) >= 0 || /\\s+\\S+=/.test(text)) {
+          return false;
+        }
+        for (var i = 0; i < text.length; i++) {
+          var code = text.charCodeAt(i);
+          if (code < 32 || code === 127) { return false; }
+        }
+        return true;
       }
 
       function normalizeDraggedReference(value) {
