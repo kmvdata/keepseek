@@ -390,7 +390,7 @@ export function getStyles(): string {
 
     .session-menu-item {
       display: grid;
-      grid-template-columns: 18px 24px minmax(0, 1fr);
+      grid-template-columns: 24px minmax(0, 1fr);
       align-items: center;
       gap: 6px;
       width: 100%;
@@ -402,6 +402,10 @@ export function getStyles(): string {
       background: transparent;
       text-align: left;
       cursor: pointer;
+    }
+
+    .session-menu.is-multi-select .session-menu-item {
+      grid-template-columns: 18px 24px minmax(0, 1fr);
     }
 
     .session-menu-item:hover,

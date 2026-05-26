@@ -109,6 +109,7 @@ export function getScript(): string {
     let terminalAgentStatusKey = '';
     let settingsMenuOpen = false;
     let sessionMenuOpen = false;
+    let sessionMultiSelectMode = false;
     let sessionRangeDays = 7;
     let sessionFavoritesOnly = false;
     let selectedSessionIds = new Set();
@@ -480,6 +481,9 @@ export function getScript(): string {
         }
 
         if (target.dataset.sessionCheck === 'true') {
+          if (!sessionMultiSelectMode) {
+            return;
+          }
           var checkSessionId = target.dataset.sessionId || '';
           if (target.checked) {
             selectedSessionIds.add(checkSessionId);
@@ -691,6 +695,7 @@ export function getScript(): string {
 
     function openSessionMenu() {
       sessionRangeDays = normalizeSessionRetentionDays(state.historyRetentionDays);
+      sessionMultiSelectMode = false;
       selectedSessionIds.clear();
       sessionMenuOpen = true;
       renderSessionControls();
@@ -705,10 +710,14 @@ export function getScript(): string {
       if (!sessionMenu) return;
       sessionMenu.classList.toggle('hidden', !sessionMenuOpen);
       if (!sessionMenuOpen) return;
+      sessionMenu.classList.toggle('is-multi-select', sessionMultiSelectMode);
       sessionMenu.innerHTML = '';
 
       var sessions = getVisibleSessionSummaries();
       pruneSelectedSessionIds(sessions);
+      var allVisibleSelected = sessions.length > 0 && sessions.every(function(session) {
+        return selectedSessionIds.has(session.id);
+      });
 
       var title = document.createElement('div');
       title.className = 'session-menu-title';
@@ -734,39 +743,39 @@ export function getScript(): string {
       favoriteOnlyButton.setAttribute('aria-pressed', sessionFavoritesOnly ? 'true' : 'false');
       favoriteOnlyButton.textContent = '★ ' + t('sessionFavoritesOnly');
 
-      controls.append(rangeLabel, favoriteOnlyButton);
+      var multiSelectButton = document.createElement('button');
+      multiSelectButton.type = 'button';
+      multiSelectButton.className = 'session-menu-filter' + (sessionMultiSelectMode ? ' is-active' : '');
+      multiSelectButton.dataset.sessionAction = 'toggleMultiSelect';
+      multiSelectButton.setAttribute('aria-pressed', sessionMultiSelectMode ? 'true' : 'false');
+      multiSelectButton.textContent = t(sessionMultiSelectMode ? 'sessionExitMultiSelect' : 'sessionMultiSelect');
+
+      controls.append(rangeLabel, favoriteOnlyButton, multiSelectButton);
       sessionMenu.append(controls);
 
-      var bulk = document.createElement('div');
-      bulk.className = 'session-menu-bulk';
+      if (sessionMultiSelectMode) {
+        var bulk = document.createElement('div');
+        bulk.className = 'session-menu-bulk';
 
-      var selectAll = document.createElement('button');
-      selectAll.type = 'button';
-      selectAll.className = 'secondary';
-      selectAll.dataset.sessionAction = 'selectVisible';
-      selectAll.disabled = !sessions.length;
-      selectAll.textContent = t('sessionSelectAllInRange');
+        var selectAll = document.createElement('button');
+        selectAll.type = 'button';
+        selectAll.className = 'secondary';
+        selectAll.dataset.sessionAction = 'toggleSelectVisible';
+        selectAll.disabled = !sessions.length;
+        selectAll.textContent = t(allVisibleSelected ? 'sessionDeselectAll' : 'sessionSelectAll');
 
-      var clearSelection = document.createElement('button');
-      clearSelection.type = 'button';
-      clearSelection.className = 'secondary';
-      clearSelection.dataset.sessionAction = 'clearSelection';
-      clearSelection.disabled = !selectedSessionIds.size;
-      clearSelection.textContent = selectedSessionIds.size
-        ? t('sessionSelectedCount', { count: selectedSessionIds.size })
-        : t('sessionClearSelection');
+        var deleteSelected = document.createElement('button');
+        deleteSelected.type = 'button';
+        deleteSelected.className = 'session-menu-delete';
+        deleteSelected.dataset.sessionAction = 'deleteSelected';
+        deleteSelected.disabled = !selectedSessionIds.size;
+        deleteSelected.textContent = selectedSessionIds.size
+          ? t('sessionDeleteSelected') + ' (' + selectedSessionIds.size + ')'
+          : t('sessionDeleteSelected');
 
-      var deleteSelected = document.createElement('button');
-      deleteSelected.type = 'button';
-      deleteSelected.className = 'session-menu-delete';
-      deleteSelected.dataset.sessionAction = 'deleteSelected';
-      deleteSelected.disabled = !selectedSessionIds.size;
-      deleteSelected.textContent = selectedSessionIds.size
-        ? t('sessionDeleteSelected') + ' (' + selectedSessionIds.size + ')'
-        : t('sessionDeleteSelected');
-
-      bulk.append(selectAll, clearSelection, deleteSelected);
-      sessionMenu.append(bulk);
+        bulk.append(selectAll, deleteSelected);
+        sessionMenu.append(bulk);
+      }
 
       if (!sessions.length) {
         var empty = document.createElement('div');
@@ -786,14 +795,6 @@ export function getScript(): string {
         item.tabIndex = 0;
         item.setAttribute('role', 'menuitemradio');
         item.setAttribute('aria-checked', isActive ? 'true' : 'false');
-
-        var checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.className = 'session-menu-checkbox';
-        checkbox.dataset.sessionCheck = 'true';
-        checkbox.dataset.sessionId = session.id;
-        checkbox.checked = selectedSessionIds.has(session.id);
-        checkbox.setAttribute('aria-label', t('sessionSelectAllInRange'));
 
         var favoriteButton = document.createElement('button');
         favoriteButton.type = 'button';
@@ -823,7 +824,17 @@ export function getScript(): string {
         meta.textContent = formatSessionMeta(session);
 
         main.append(itemTitle, meta);
-        item.append(checkbox, favoriteButton, main);
+        if (sessionMultiSelectMode) {
+          var checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.className = 'session-menu-checkbox';
+          checkbox.dataset.sessionCheck = 'true';
+          checkbox.dataset.sessionId = session.id;
+          checkbox.checked = selectedSessionIds.has(session.id);
+          checkbox.setAttribute('aria-label', t('sessionSelectAll'));
+          item.append(checkbox);
+        }
+        item.append(favoriteButton, main);
         sessionMenu.append(item);
       }
     }
@@ -891,10 +902,18 @@ export function getScript(): string {
     function handleSessionMenuAction(button) {
       var action = button.dataset.sessionAction || '';
       if (action === 'toggleFavorite') {
-        var favoriteSessionId = button.dataset.sessionId || '';
+        var favoriteRow = button.closest('.session-menu-item');
+        var favoriteSessionId = button.dataset.sessionId || favoriteRow?.dataset.sessionId || '';
         if (favoriteSessionId) {
           vscode.postMessage({ type: 'toggleSessionFavorite', sessionId: favoriteSessionId });
         }
+        return;
+      }
+
+      if (action === 'toggleMultiSelect') {
+        sessionMultiSelectMode = !sessionMultiSelectMode;
+        selectedSessionIds.clear();
+        renderSessionMenu();
         return;
       }
 
@@ -905,21 +924,28 @@ export function getScript(): string {
         return;
       }
 
-      if (action === 'selectVisible') {
-        getVisibleSessionSummaries().forEach(function(session) {
-          selectedSessionIds.add(session.id);
+      if (action === 'toggleSelectVisible') {
+        var visibleSessions = getVisibleSessionSummaries();
+        var shouldDeselect = visibleSessions.length > 0 && visibleSessions.every(function(session) {
+          return selectedSessionIds.has(session.id);
         });
-        renderSessionMenu();
-        return;
-      }
-
-      if (action === 'clearSelection') {
-        selectedSessionIds.clear();
+        if (shouldDeselect) {
+          visibleSessions.forEach(function(session) {
+            selectedSessionIds.delete(session.id);
+          });
+        } else {
+          visibleSessions.forEach(function(session) {
+            selectedSessionIds.add(session.id);
+          });
+        }
         renderSessionMenu();
         return;
       }
 
       if (action === 'deleteSelected') {
+        if (!sessionMultiSelectMode) {
+          return;
+        }
         var sessionIds = Array.from(selectedSessionIds);
         if (!sessionIds.length) {
           return;
