@@ -60,6 +60,11 @@ export interface ChatSession {
   messages: ChatMessage[];
   createdAt: string;
   updatedAt: string;
+  workspaceKey: string;
+  workspaceName: string;
+  workspaceFolders: string[];
+  isFavorite: boolean;
+  customTitle?: string;
 }
 
 export interface ChatSessionSummary {
@@ -68,6 +73,10 @@ export interface ChatSessionSummary {
   createdAt: string;
   updatedAt: string;
   messageCount: number;
+  workspaceKey: string;
+  workspaceName: string;
+  isFavorite: boolean;
+  customTitle?: string;
 }
 
 export type DraftEditAction = 'create' | 'modify' | 'delete' | 'move';

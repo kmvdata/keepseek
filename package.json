@@ -279,6 +279,13 @@
           "maximum": 3600000,
           "description": "Maximum time in milliseconds to wait for streaming data before stopping a DeepSeek request. This resets whenever streaming data is received and does not limit total run duration. Set 0 to disable the idle timeout."
         },
+        "keepseek.historyRetentionDays": {
+          "type": "number",
+          "default": 7,
+          "minimum": 1,
+          "maximum": 365,
+          "description": "Number of days to retain non-favorited historical sessions based on their last update time."
+        },
         "keepseek.language": {
           "type": "string",
           "enum": [

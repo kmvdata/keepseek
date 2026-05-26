@@ -203,5 +203,25 @@ export function getInputTemplate(): string {
           <button id="agentBudgetSaveBtn" type="button" data-i18n="save">保存</button>
         </div>
       </div>
+    </div>
+
+    <div id="historySettingsDialogOverlay" class="settings-overlay hidden">
+      <div class="settings-dialog" role="dialog" aria-label="历史会话设置" data-i18n-aria-label="historySettingsDialogLabel">
+        <div class="settings-dialog-header">
+          <span class="settings-dialog-title" data-i18n="historySettingsDialogTitle">历史会话</span>
+        </div>
+        <div class="settings-dialog-body">
+          <p class="settings-dialog-desc" data-i18n="historySettingsDialogDesc">设置未关注历史会话的自动保留天数。</p>
+          <label class="settings-field">
+            <span class="settings-field-label" data-i18n="settingsHistoryRetentionDaysLabel">历史会话保留天数</span>
+            <input id="historyRetentionDaysInput" class="settings-input" type="number" min="1" max="365" step="1" inputmode="numeric" autocomplete="off" />
+            <span class="settings-field-hint" data-i18n="settingsHistoryRetentionDaysHint">1～365 天；只清理未关注且非当前活跃的过期会话</span>
+          </label>
+        </div>
+        <div class="settings-dialog-footer">
+          <button id="historySettingsCancelBtn" type="button" class="secondary" data-i18n="cancel">取消</button>
+          <button id="historySettingsSaveBtn" type="button" data-i18n="save">保存</button>
+        </div>
+      </div>
     </div>`;
 }

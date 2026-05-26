@@ -44,6 +44,12 @@ export function getTemplate(): string {
           <span class="command-row-description" data-i18n="settingsAgentBudgetMenuDescription">输出 KB、工具轮次和运行时间上限</span>
         </span>
       </button>
+      <button id="settingsHistoryMenuItem" type="button" class="command-row settings-menu-row">
+        <span class="command-row-main">
+          <span class="command-row-title" data-i18n="settingsHistoryMenuTitle">历史会话</span>
+          <span class="command-row-description" data-i18n="settingsHistoryMenuDescription">保留天数与自动清理</span>
+        </span>
+      </button>
       <div class="settings-language-item">
         <button id="settingsLanguageMenuItem" type="button" class="command-row settings-menu-row" aria-haspopup="menu" aria-expanded="false">
           <span class="command-row-main">

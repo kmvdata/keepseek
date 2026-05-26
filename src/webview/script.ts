@@ -39,6 +39,7 @@ export function getScript(): string {
         sequence: 0
       },
       maxFileBytes: 200000,
+      historyRetentionDays: 7,
       language: 'zh-CN',
       isMac: false
     };
@@ -68,12 +69,21 @@ export function getScript(): string {
         : t('languageValueZh');
     }
 
+    function normalizeIntegerInRange(value, min, max, fallback) {
+      var number = Number(value);
+      if (!Number.isFinite(number)) {
+        return fallback;
+      }
+      return Math.min(max, Math.max(min, Math.floor(number)));
+    }
+
     const historyTab = document.getElementById('historyTab');
     const newChatTab = document.getElementById('newChatTab');
     const settingsTab = document.getElementById('settingsTab');
     const settingsMenu = document.getElementById('settingsMenu');
     const settingsApiKeyMenuItem = document.getElementById('settingsApiKeyMenuItem');
     const settingsAgentBudgetMenuItem = document.getElementById('settingsAgentBudgetMenuItem');
+    const settingsHistoryMenuItem = document.getElementById('settingsHistoryMenuItem');
     const settingsLanguageMenuItem = document.getElementById('settingsLanguageMenuItem');
     const settingsLanguageValue = document.getElementById('settingsLanguageValue');
     const settingsLanguageSubmenu = document.getElementById('settingsLanguageSubmenu');
@@ -99,6 +109,9 @@ export function getScript(): string {
     let terminalAgentStatusKey = '';
     let settingsMenuOpen = false;
     let sessionMenuOpen = false;
+    let sessionRangeDays = 7;
+    let sessionFavoritesOnly = false;
+    let selectedSessionIds = new Set();
     let editingMessageId = '';
     let editingDraftText = '';
     let pendingEditFocusId = '';
@@ -381,6 +394,15 @@ export function getScript(): string {
       });
     }
 
+    if (settingsHistoryMenuItem) {
+      settingsHistoryMenuItem.addEventListener('click', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsMenu();
+        vscode.postMessage({ type: 'openHistorySettings' });
+      });
+    }
+
     if (settingsLanguageMenuItem) {
       settingsLanguageMenuItem.addEventListener('click', function(event) {
         event.preventDefault();
@@ -421,9 +443,22 @@ export function getScript(): string {
     if (sessionMenu) {
       sessionMenu.addEventListener('click', function(event) {
         var target = event.target instanceof Element ? event.target : null;
-        var button = target?.closest('button[data-session-id]');
-        if (!button) return;
-        var sessionId = button.dataset.sessionId || '';
+        if (!target) return;
+
+        var actionButton = target.closest('button[data-session-action]');
+        if (actionButton) {
+          event.preventDefault();
+          event.stopPropagation();
+          handleSessionMenuAction(actionButton);
+          return;
+        }
+
+        if (target.closest('input, select, button, label')) {
+          return;
+        }
+
+        var item = target.closest('[data-session-id]');
+        var sessionId = item?.dataset.sessionId || '';
         if (!sessionId || sessionId === state.activeSessionId) {
           closeSessionMenu();
           return;
@@ -431,6 +466,66 @@ export function getScript(): string {
         clearPromptDraft();
         closeSessionMenu();
         vscode.postMessage({ type: 'selectSession', sessionId: sessionId });
+      });
+
+      sessionMenu.addEventListener('change', function(event) {
+        var target = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement ? event.target : null;
+        if (!target) return;
+
+        if (target.dataset.sessionRange === 'true') {
+          sessionRangeDays = normalizeSessionRangeDays(target.value);
+          selectedSessionIds.clear();
+          renderSessionMenu();
+          return;
+        }
+
+        if (target.dataset.sessionCheck === 'true') {
+          var checkSessionId = target.dataset.sessionId || '';
+          if (target.checked) {
+            selectedSessionIds.add(checkSessionId);
+          } else {
+            selectedSessionIds.delete(checkSessionId);
+          }
+          renderSessionMenu();
+          return;
+        }
+
+        if (target.dataset.sessionTitle === 'true') {
+          commitSessionTitle(target);
+        }
+      });
+
+      sessionMenu.addEventListener('keydown', function(event) {
+        var target = event.target instanceof Element ? event.target : null;
+        if (!target) return;
+
+        var titleInput = target.closest('input[data-session-title="true"]');
+        if (titleInput instanceof HTMLInputElement) {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            titleInput.blur();
+          } else if (event.key === 'Escape') {
+            event.preventDefault();
+            titleInput.value = titleInput.dataset.originalTitle || '';
+            titleInput.blur();
+          }
+          return;
+        }
+
+        if (target.closest('input, select, button')) {
+          return;
+        }
+
+        var item = target.closest('[data-session-id]');
+        if (item && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          var keyboardSessionId = item.dataset.sessionId || '';
+          if (keyboardSessionId && keyboardSessionId !== state.activeSessionId) {
+            clearPromptDraft();
+            closeSessionMenu();
+            vscode.postMessage({ type: 'selectSession', sessionId: keyboardSessionId });
+          }
+        }
       });
     }
 
@@ -485,6 +580,10 @@ export function getScript(): string {
       } else if (message.type === 'showAgentBudgetDialog') {
         if (window.keepseekInputControls && window.keepseekInputControls.showAgentBudgetDialog) {
           window.keepseekInputControls.showAgentBudgetDialog(message);
+        }
+      } else if (message.type === 'showHistorySettingsDialog') {
+        if (window.keepseekInputControls && window.keepseekInputControls.showHistorySettingsDialog) {
+          window.keepseekInputControls.showHistorySettingsDialog(message);
         }
       } else if (message.type === 'referenceResources') {
         handleEditReferenceResourcesMessage(message);
@@ -591,6 +690,8 @@ export function getScript(): string {
     }
 
     function openSessionMenu() {
+      sessionRangeDays = normalizeSessionRetentionDays(state.historyRetentionDays);
+      selectedSessionIds.clear();
       sessionMenuOpen = true;
       renderSessionControls();
     }
@@ -603,9 +704,70 @@ export function getScript(): string {
     function renderSessionMenu() {
       if (!sessionMenu) return;
       sessionMenu.classList.toggle('hidden', !sessionMenuOpen);
+      if (!sessionMenuOpen) return;
       sessionMenu.innerHTML = '';
 
-      var sessions = Array.isArray(state.sessionSummaries) ? state.sessionSummaries : [];
+      var sessions = getVisibleSessionSummaries();
+      pruneSelectedSessionIds(sessions);
+
+      var title = document.createElement('div');
+      title.className = 'session-menu-title';
+      title.textContent = t('sessionHistory');
+      sessionMenu.append(title);
+
+      var controls = document.createElement('div');
+      controls.className = 'session-menu-controls';
+
+      var rangeLabel = document.createElement('label');
+      rangeLabel.className = 'session-menu-range';
+      var rangeText = document.createElement('span');
+      rangeText.textContent = t('sessionRangeLabel');
+      var rangeSelect = document.createElement('select');
+      rangeSelect.dataset.sessionRange = 'true';
+      renderSessionRangeOptions(rangeSelect);
+      rangeLabel.append(rangeText, rangeSelect);
+
+      var favoriteOnlyButton = document.createElement('button');
+      favoriteOnlyButton.type = 'button';
+      favoriteOnlyButton.className = 'session-menu-filter' + (sessionFavoritesOnly ? ' is-active' : '');
+      favoriteOnlyButton.dataset.sessionAction = 'toggleFavoritesOnly';
+      favoriteOnlyButton.setAttribute('aria-pressed', sessionFavoritesOnly ? 'true' : 'false');
+      favoriteOnlyButton.textContent = '★ ' + t('sessionFavoritesOnly');
+
+      controls.append(rangeLabel, favoriteOnlyButton);
+      sessionMenu.append(controls);
+
+      var bulk = document.createElement('div');
+      bulk.className = 'session-menu-bulk';
+
+      var selectAll = document.createElement('button');
+      selectAll.type = 'button';
+      selectAll.className = 'secondary';
+      selectAll.dataset.sessionAction = 'selectVisible';
+      selectAll.disabled = !sessions.length;
+      selectAll.textContent = t('sessionSelectAllInRange');
+
+      var clearSelection = document.createElement('button');
+      clearSelection.type = 'button';
+      clearSelection.className = 'secondary';
+      clearSelection.dataset.sessionAction = 'clearSelection';
+      clearSelection.disabled = !selectedSessionIds.size;
+      clearSelection.textContent = selectedSessionIds.size
+        ? t('sessionSelectedCount', { count: selectedSessionIds.size })
+        : t('sessionClearSelection');
+
+      var deleteSelected = document.createElement('button');
+      deleteSelected.type = 'button';
+      deleteSelected.className = 'session-menu-delete';
+      deleteSelected.dataset.sessionAction = 'deleteSelected';
+      deleteSelected.disabled = !selectedSessionIds.size;
+      deleteSelected.textContent = selectedSessionIds.size
+        ? t('sessionDeleteSelected') + ' (' + selectedSessionIds.size + ')'
+        : t('sessionDeleteSelected');
+
+      bulk.append(selectAll, clearSelection, deleteSelected);
+      sessionMenu.append(bulk);
+
       if (!sessions.length) {
         var empty = document.createElement('div');
         empty.className = 'session-menu-empty';
@@ -614,33 +776,179 @@ export function getScript(): string {
         return;
       }
 
-      var title = document.createElement('div');
-      title.className = 'session-menu-title';
-      title.textContent = t('sessionHistory');
-      sessionMenu.append(title);
-
       for (var i = 0; i < sessions.length; i++) {
         var session = sessions[i];
-        var item = document.createElement('button');
+        var item = document.createElement('div');
         var isActive = session.id === state.activeSessionId;
-        item.type = 'button';
-        item.className = 'session-menu-item' + (isActive ? ' is-active' : '');
+        var isFavorite = session.isFavorite === true;
+        item.className = 'session-menu-item' + (isActive ? ' is-active' : '') + (isFavorite ? ' is-favorite' : '');
         item.dataset.sessionId = session.id;
+        item.tabIndex = 0;
         item.setAttribute('role', 'menuitemradio');
         item.setAttribute('aria-checked', isActive ? 'true' : 'false');
 
-        var itemTitle = document.createElement('span');
+        var checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'session-menu-checkbox';
+        checkbox.dataset.sessionCheck = 'true';
+        checkbox.dataset.sessionId = session.id;
+        checkbox.checked = selectedSessionIds.has(session.id);
+        checkbox.setAttribute('aria-label', t('sessionSelectAllInRange'));
+
+        var favoriteButton = document.createElement('button');
+        favoriteButton.type = 'button';
+        favoriteButton.className = 'session-menu-star' + (isFavorite ? ' is-active' : '');
+        favoriteButton.dataset.sessionAction = 'toggleFavorite';
+        favoriteButton.dataset.sessionId = session.id;
+        favoriteButton.setAttribute('aria-pressed', isFavorite ? 'true' : 'false');
+        favoriteButton.setAttribute('aria-label', t(isFavorite ? 'unfavoriteSession' : 'favoriteSession'));
+        favoriteButton.title = t(isFavorite ? 'unfavoriteSession' : 'favoriteSession');
+        favoriteButton.textContent = isFavorite ? '★' : '☆';
+
+        var main = document.createElement('div');
+        main.className = 'session-menu-item-main';
+
+        var itemTitle = document.createElement('input');
         itemTitle.className = 'session-menu-item-title';
-        itemTitle.textContent = session.title || t('newSession');
-        itemTitle.title = itemTitle.textContent;
+        itemTitle.type = 'text';
+        itemTitle.value = session.title || t('newSession');
+        itemTitle.title = itemTitle.value;
+        itemTitle.dataset.sessionTitle = 'true';
+        itemTitle.dataset.sessionId = session.id;
+        itemTitle.dataset.originalTitle = itemTitle.value;
+        itemTitle.setAttribute('aria-label', t('renameSessionTitle'));
 
         var meta = document.createElement('span');
         meta.className = 'session-menu-item-meta';
         meta.textContent = formatSessionMeta(session);
 
-        item.append(itemTitle, meta);
+        main.append(itemTitle, meta);
+        item.append(checkbox, favoriteButton, main);
         sessionMenu.append(item);
       }
+    }
+
+    function getVisibleSessionSummaries() {
+      var sessions = Array.isArray(state.sessionSummaries) ? state.sessionSummaries.slice() : [];
+      sessions.sort(function(a, b) {
+        var favoriteDelta = (b.isFavorite === true ? 1 : 0) - (a.isFavorite === true ? 1 : 0);
+        if (favoriteDelta) return favoriteDelta;
+        return getSessionTimestamp(b) - getSessionTimestamp(a);
+      });
+      return sessions.filter(function(session) {
+        if (sessionFavoritesOnly && session.isFavorite !== true) {
+          return false;
+        }
+        if (sessionRangeDays <= 0) {
+          return true;
+        }
+        var updatedAt = getSessionTimestamp(session);
+        if (!Number.isFinite(updatedAt)) {
+          return true;
+        }
+        return updatedAt >= Date.now() - sessionRangeDays * 24 * 60 * 60 * 1000;
+      });
+    }
+
+    function renderSessionRangeOptions(select) {
+      var configuredDays = normalizeSessionRetentionDays(state.historyRetentionDays);
+      var options = [];
+      [configuredDays, 7, 30].forEach(function(days) {
+        if (!options.some(function(option) { return option.value === String(days); })) {
+          options.push({ value: String(days), label: t('sessionRangeRecentDays', { count: days }) });
+        }
+      });
+      options.push({ value: 'all', label: t('sessionRangeAll') });
+      options.forEach(function(option) {
+        var element = document.createElement('option');
+        element.value = option.value;
+        element.textContent = option.label;
+        select.append(element);
+      });
+      select.value = sessionRangeDays <= 0 ? 'all' : String(sessionRangeDays);
+    }
+
+    function normalizeSessionRetentionDays(value) {
+      return normalizeIntegerInRange(value, 1, 365, 7);
+    }
+
+    function normalizeSessionRangeDays(value) {
+      if (value === 'all') {
+        return 0;
+      }
+      return normalizeSessionRetentionDays(value);
+    }
+
+    function pruneSelectedSessionIds(sessions) {
+      var visibleIds = new Set(sessions.map(function(session) { return session.id; }));
+      selectedSessionIds.forEach(function(sessionId) {
+        if (!visibleIds.has(sessionId)) {
+          selectedSessionIds.delete(sessionId);
+        }
+      });
+    }
+
+    function handleSessionMenuAction(button) {
+      var action = button.dataset.sessionAction || '';
+      if (action === 'toggleFavorite') {
+        var favoriteSessionId = button.dataset.sessionId || '';
+        if (favoriteSessionId) {
+          vscode.postMessage({ type: 'toggleSessionFavorite', sessionId: favoriteSessionId });
+        }
+        return;
+      }
+
+      if (action === 'toggleFavoritesOnly') {
+        sessionFavoritesOnly = !sessionFavoritesOnly;
+        selectedSessionIds.clear();
+        renderSessionMenu();
+        return;
+      }
+
+      if (action === 'selectVisible') {
+        getVisibleSessionSummaries().forEach(function(session) {
+          selectedSessionIds.add(session.id);
+        });
+        renderSessionMenu();
+        return;
+      }
+
+      if (action === 'clearSelection') {
+        selectedSessionIds.clear();
+        renderSessionMenu();
+        return;
+      }
+
+      if (action === 'deleteSelected') {
+        var sessionIds = Array.from(selectedSessionIds);
+        if (!sessionIds.length) {
+          return;
+        }
+        selectedSessionIds.clear();
+        vscode.postMessage({ type: 'deleteSessions', sessionIds: sessionIds });
+        renderSessionMenu();
+      }
+    }
+
+    function commitSessionTitle(input) {
+      var sessionId = input.dataset.sessionId || '';
+      var originalTitle = input.dataset.originalTitle || '';
+      var title = input.value.replace(/\\s+/g, ' ').trim();
+      if (!title) {
+        input.value = originalTitle || t('newSession');
+        return;
+      }
+      input.value = title;
+      if (!sessionId || title === originalTitle) {
+        return;
+      }
+      input.dataset.originalTitle = title;
+      vscode.postMessage({ type: 'renameSession', sessionId: sessionId, title: title });
+    }
+
+    function getSessionTimestamp(session) {
+      var timestamp = Date.parse(session.updatedAt || session.createdAt || '');
+      return Number.isFinite(timestamp) ? timestamp : 0;
     }
 
     function formatSessionMeta(session) {

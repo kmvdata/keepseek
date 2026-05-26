@@ -5,29 +5,48 @@ import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from '
 import { isRecord } from './errors';
 
 const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
-const SESSION_STORAGE_VERSION = 1;
+const SESSION_STORAGE_VERSION = 2;
 const MAX_STORED_SESSIONS = 50;
 const DEFAULT_ACTIVE_HISTORY_LIMIT = 80;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 interface StoredSessionState {
   version: number;
   activeSessionId: string;
+  activeSessionIdsByWorkspace?: Record<string, string>;
   sessions: ChatSession[];
+}
+
+export interface WorkspaceSessionScope {
+  key: string;
+  name: string;
+  folderUris: string[];
+}
+
+export interface DeleteSessionsResult {
+  deletedCount: number;
+  activeSessionChanged: boolean;
 }
 
 export class ChatSessionStore {
   private sessions: ChatSession[] = [];
   private activeSessionIdValue = '';
+  private activeSessionIdsByWorkspace: Record<string, string> = {};
 
   public constructor(
     private readonly sessionStorage: vscode.Memento,
-    private language: KeepseekLanguage = getConfiguredKeepseekLanguage()
+    private language: KeepseekLanguage = getConfiguredKeepseekLanguage(),
+    private workspaceScope: WorkspaceSessionScope = getCurrentWorkspaceSessionScope()
   ) {
     this.load();
   }
 
   public get activeSessionId(): string {
     return this.activeSessionIdValue;
+  }
+
+  public get workspaceKey(): string {
+    return this.workspaceScope.key;
   }
 
   public get messages(): ChatMessage[] {
@@ -38,25 +57,26 @@ export class ChatSessionStore {
     this.language = language;
   }
 
-  public getActiveSession(): ChatSession {
-    const existing = this.sessions.find((session) => session.id === this.activeSessionIdValue);
-    if (existing) {
-      return existing;
+  public setWorkspaceScope(workspaceScope: WorkspaceSessionScope): boolean {
+    if (workspaceScope.key === this.workspaceScope.key) {
+      return false;
     }
 
-    const fallback = this.sessions[0] ?? createEmptySession(this.language);
-    if (!this.sessions.length) {
-      this.sessions.push(fallback);
-    }
-    this.activeSessionIdValue = fallback.id;
-    return fallback;
+    this.workspaceScope = workspaceScope;
+    this.getActiveSession();
+    this.compact();
+    return true;
+  }
+
+  public getActiveSession(): ChatSession {
+    return this.ensureActiveSession();
   }
 
   public async createNewSession(language: KeepseekLanguage = this.language): Promise<ChatSession> {
     this.language = language;
-    const session = createEmptySession(language);
+    const session = createEmptySession(language, this.workspaceScope);
     this.sessions.unshift(session);
-    this.activeSessionIdValue = session.id;
+    this.setActiveSessionId(session.id);
     await this.persist();
     return session;
   }
@@ -66,15 +86,96 @@ export class ChatSessionStore {
       return undefined;
     }
 
-    const session = this.sessions.find((item) => item.id === sessionId);
+    const session = this.sessions.find((item) => item.id === sessionId && this.isInCurrentWorkspace(item));
     if (!session) {
       return undefined;
     }
 
-    session.updatedAt = new Date().toISOString();
-    this.activeSessionIdValue = session.id;
+    this.setActiveSessionId(session.id);
     await this.persist();
     return session;
+  }
+
+  public async toggleSessionFavorite(sessionId: string): Promise<ChatSession | undefined> {
+    const session = this.sessions.find((item) => item.id === sessionId && this.isInCurrentWorkspace(item));
+    if (!session) {
+      return undefined;
+    }
+
+    session.isFavorite = !session.isFavorite;
+    await this.persist();
+    return session;
+  }
+
+  public async renameSession(sessionId: string, title: string): Promise<ChatSession | undefined> {
+    const session = this.sessions.find((item) => item.id === sessionId && this.isInCurrentWorkspace(item));
+    if (!session) {
+      return undefined;
+    }
+
+    const normalizedTitle = title.replace(/\s+/gu, ' ').trim();
+    if (!normalizedTitle) {
+      return undefined;
+    }
+
+    session.title = normalizedTitle;
+    session.customTitle = normalizedTitle;
+    session.updatedAt = new Date().toISOString();
+    await this.persist();
+    return session;
+  }
+
+  public async deleteSessions(sessionIds: string[]): Promise<DeleteSessionsResult> {
+    const ids = new Set(sessionIds.filter((id) => typeof id === 'string' && id.trim()));
+    if (!ids.size) {
+      return { deletedCount: 0, activeSessionChanged: false };
+    }
+
+    const previousActiveSessionId = this.activeSessionIdValue;
+    let deletedCount = 0;
+    this.sessions = this.sessions.filter((session) => {
+      if (!this.isInCurrentWorkspace(session) || !ids.has(session.id)) {
+        return true;
+      }
+      deletedCount += 1;
+      return false;
+    });
+
+    for (const [workspaceKey, activeSessionId] of Object.entries(this.activeSessionIdsByWorkspace)) {
+      if (ids.has(activeSessionId)) {
+        delete this.activeSessionIdsByWorkspace[workspaceKey];
+      }
+    }
+
+    this.ensureActiveSession();
+    this.compact();
+    await this.persist();
+    return {
+      deletedCount,
+      activeSessionChanged: previousActiveSessionId !== this.activeSessionIdValue
+    };
+  }
+
+  public async cleanupExpiredSessions(retentionDays: number, now = Date.now()): Promise<boolean> {
+    const cutoff = now - Math.max(1, Math.floor(retentionDays)) * MS_PER_DAY;
+    const activeSessionIds = this.getActiveSessionIds();
+    const before = this.sessions.length;
+    this.sessions = this.sessions.filter((session) => {
+      if (activeSessionIds.has(session.id) || session.isFavorite) {
+        return true;
+      }
+
+      const updatedAt = Date.parse(session.updatedAt);
+      return Number.isFinite(updatedAt) ? updatedAt >= cutoff : true;
+    });
+
+    if (this.sessions.length === before) {
+      return false;
+    }
+
+    this.ensureActiveSession();
+    await this.persist();
+    return true;
   }
 
   public async persist(): Promise<void> {
@@ -82,6 +183,7 @@ export class ChatSessionStore {
     await this.sessionStorage.update(SESSION_STORAGE_KEY, {
       version: SESSION_STORAGE_VERSION,
       activeSessionId: this.activeSessionIdValue,
+      activeSessionIdsByWorkspace: this.activeSessionIdsByWorkspace,
       sessions: this.sessions
     } satisfies StoredSessionState);
   }
@@ -94,7 +196,7 @@ export class ChatSessionStore {
     ]);
     let changed = false;
     for (const session of this.sessions) {
-      if (!session.messages.length && defaultTitles.has(session.title)) {
+      if (!session.customTitle && !session.messages.length && defaultTitles.has(session.title)) {
         session.title = localize(language, 'defaultSessionTitle');
         changed = true;
       }
@@ -105,12 +207,16 @@ export class ChatSessionStore {
   }
 
   public getSessionSummaries(): ChatSessionSummary[] {
-    return this.sessions.map((session) => ({
+    return this.getCurrentWorkspaceSessions().map((session) => ({
       id: session.id,
       title: session.title || localize(this.language, 'defaultSessionTitle'),
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
-      messageCount: session.messages.length
+      messageCount: session.messages.length,
+      workspaceKey: session.workspaceKey,
+      workspaceName: session.workspaceName,
+      isFavorite: Boolean(session.isFavorite),
+      customTitle: session.customTitle
     }));
   }
 
@@ -123,46 +229,119 @@ export class ChatSessionStore {
 
   private load(): void {
     const stored = this.sessionStorage.get<StoredSessionState>(SESSION_STORAGE_KEY);
-    const sessions = normalizeStoredSessions(stored);
+    const sessions = normalizeStoredSessions(stored, this.workspaceScope);
     const activeSessionId = typeof stored?.activeSessionId === 'string' ? stored.activeSessionId : '';
 
-    this.sessions = sessions.length ? sessions : [createEmptySession(this.language)];
-    this.activeSessionIdValue = this.sessions.some((session) => session.id === activeSessionId)
-      ? activeSessionId
-      : this.sessions[0].id;
+    this.sessions = sessions;
+    this.activeSessionIdsByWorkspace = normalizeStoredActiveSessionIds(stored, sessions);
+    const legacyActiveSession = sessions.find((session) => session.id === activeSessionId);
+    if (legacyActiveSession && !this.activeSessionIdsByWorkspace[legacyActiveSession.workspaceKey]) {
+      this.activeSessionIdsByWorkspace[legacyActiveSession.workspaceKey] = legacyActiveSession.id;
+    }
+    this.activeSessionIdValue = this.activeSessionIdsByWorkspace[this.workspaceScope.key] ?? activeSessionId;
+    this.ensureActiveSession();
     this.compact();
   }
 
-  private compact(): void {
-    const activeSession = this.getActiveSession();
-    this.sessions = this.sessions
-      .filter((session) => session.id === activeSession.id || session.messages.length > 0)
-      .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
-
-    if (!this.sessions.some((session) => session.id === activeSession.id)) {
-      this.sessions.unshift(activeSession);
+  private ensureActiveSession(): ChatSession {
+    const currentSessions = this.getCurrentWorkspaceSessions();
+    const scopedActiveSessionId = this.activeSessionIdsByWorkspace[this.workspaceScope.key] || this.activeSessionIdValue;
+    const existing = currentSessions.find((session) => session.id === scopedActiveSessionId);
+    if (existing) {
+      this.setActiveSessionId(existing.id);
+      return existing;
     }
 
-    if (this.sessions.length > MAX_STORED_SESSIONS) {
-      const activeIndex = this.sessions.findIndex((session) => session.id === activeSession.id);
-      this.sessions = this.sessions.slice(0, MAX_STORED_SESSIONS);
-      if (activeIndex >= MAX_STORED_SESSIONS) {
-        this.sessions[MAX_STORED_SESSIONS - 1] = activeSession;
+    const fallback = currentSessions[0] ?? createEmptySession(this.language, this.workspaceScope);
+    if (!currentSessions.length) {
+      this.sessions.unshift(fallback);
+    }
+    this.setActiveSessionId(fallback.id);
+    return fallback;
+  }
+
+  private compact(): void {
+    const activeSession = this.ensureActiveSession();
+    const activeSessionIds = this.getActiveSessionIds();
+    activeSessionIds.add(activeSession.id);
+
+    const sessionsByWorkspace = new Map<string, ChatSession[]>();
+    for (const session of this.sessions) {
+      if (!session.workspaceKey) {
+        session.workspaceKey = this.workspaceScope.key;
+        session.workspaceName = this.workspaceScope.name;
+        session.workspaceFolders = this.workspaceScope.folderUris;
+      }
+
+      const isActive = activeSessionIds.has(session.id);
+      if (!isActive && !session.messages.length) {
+        continue;
+      }
+
+      const sessions = sessionsByWorkspace.get(session.workspaceKey) ?? [];
+      sessions.push(session);
+      sessionsByWorkspace.set(session.workspaceKey, sessions);
+    }
+
+    const compacted: ChatSession[] = [];
+    for (const sessions of sessionsByWorkspace.values()) {
+      const sorted = sortSessionsByUpdatedAt(sessions);
+      let storedNonFavoriteContentSessions = 0;
+      for (const session of sorted) {
+        const isActive = activeSessionIds.has(session.id);
+        if (isActive || session.isFavorite) {
+          compacted.push(session);
+          continue;
+        }
+
+        if (session.messages.length && storedNonFavoriteContentSessions < MAX_STORED_SESSIONS) {
+          compacted.push(session);
+          storedNonFavoriteContentSessions += 1;
+        }
       }
     }
 
-    this.activeSessionIdValue = activeSession.id;
+    this.sessions = sortSessionsByUpdatedAt(compacted);
+    this.setActiveSessionId(activeSession.id);
+  }
+
+  private getCurrentWorkspaceSessions(): ChatSession[] {
+    return sortSessionsByUpdatedAt(this.sessions.filter((session) => this.isInCurrentWorkspace(session)));
+  }
+
+  private isInCurrentWorkspace(session: ChatSession): boolean {
+    return session.workspaceKey === this.workspaceScope.key;
+  }
+
+  private setActiveSessionId(sessionId: string): void {
+    this.activeSessionIdValue = sessionId;
+    this.activeSessionIdsByWorkspace[this.workspaceScope.key] = sessionId;
+  }
+
+  private getActiveSessionIds(): Set<string> {
+    const ids = new Set(Object.values(this.activeSessionIdsByWorkspace).filter((id) => typeof id === 'string' && id));
+    if (this.activeSessionIdValue) {
+      ids.add(this.activeSessionIdValue);
+    }
+    return ids;
   }
 }
 
-export function createEmptySession(language: KeepseekLanguage = getConfiguredKeepseekLanguage()): ChatSession {
+export function createEmptySession(
+  language: KeepseekLanguage = getConfiguredKeepseekLanguage(),
+  workspaceScope: WorkspaceSessionScope = getCurrentWorkspaceSessionScope()
+): ChatSession {
   const now = new Date().toISOString();
   return {
     id: randomUUID(),
     title: localize(language, 'defaultSessionTitle'),
     messages: [],
     createdAt: now,
-    updatedAt: now
+    updatedAt: now,
+    workspaceKey: workspaceScope.key,
+    workspaceName: workspaceScope.name,
+    workspaceFolders: workspaceScope.folderUris,
+    isFavorite: false
   };
 }
 
@@ -178,7 +357,33 @@ export function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
   return messages.map(({ expandedContent: _expandedContent, ...message }) => message);
 }
 
-function normalizeStoredSessions(value: unknown): ChatSession[] {
+export function getCurrentWorkspaceSessionScope(): WorkspaceSessionScope {
+  const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+  const folderUris = workspaceFolders.map((folder) => folder.uri.toString());
+  if (vscode.workspace.workspaceFile) {
+    return {
+      key: `workspace:${vscode.workspace.workspaceFile.toString()}`,
+      name: vscode.workspace.name || getUriLabel(vscode.workspace.workspaceFile),
+      folderUris
+    };
+  }
+
+  if (workspaceFolders.length) {
+    return {
+      key: `folders:${[...folderUris].sort().join('|')}`,
+      name: vscode.workspace.name || workspaceFolders.map((folder) => folder.name).join(', '),
+      folderUris
+    };
+  }
+
+  return {
+    key: 'no-workspace',
+    name: vscode.workspace.name || 'No workspace',
+    folderUris: []
+  };
+}
+
+function normalizeStoredSessions(value: unknown, workspaceScope: WorkspaceSessionScope): ChatSession[] {
   if (!isRecord(value) || !Array.isArray(value.sessions)) {
     return [];
   }
@@ -197,21 +402,51 @@ function normalizeStoredSessions(value: unknown): ChatSession[] {
       : [];
     const createdAt = typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString();
     const updatedAt = typeof item.updatedAt === 'string' ? item.updatedAt : createdAt;
-    const title = typeof item.title === 'string' && item.title.trim()
-      ? item.title.trim()
-      : createTitleFromMessages(messages, language);
+    const customTitle = typeof item.customTitle === 'string' && item.customTitle.trim()
+      ? item.customTitle.trim()
+      : undefined;
+    const title = customTitle
+      ?? (typeof item.title === 'string' && item.title.trim()
+        ? item.title.trim()
+        : createTitleFromMessages(messages, language));
+    const workspaceKey = typeof item.workspaceKey === 'string' && item.workspaceKey.trim()
+      ? item.workspaceKey.trim()
+      : workspaceScope.key;
+    const workspaceName = typeof item.workspaceName === 'string' && item.workspaceName.trim()
+      ? item.workspaceName.trim()
+      : workspaceScope.name;
+    const workspaceFolders = Array.isArray(item.workspaceFolders)
+      ? item.workspaceFolders.filter((folder): folder is string => typeof folder === 'string' && Boolean(folder))
+      : workspaceScope.folderUris;
 
     sessions.push({
       id: item.id,
       title,
       messages,
       createdAt,
-      updatedAt
+      updatedAt,
+      workspaceKey,
+      workspaceName,
+      workspaceFolders,
+      isFavorite: item.isFavorite === true,
+      customTitle
     });
     seen.add(item.id);
   }
 
-  return sessions;
+  return sortSessionsByUpdatedAt(sessions);
+}
+
+function normalizeStoredActiveSessionIds(value: unknown, sessions: ChatSession[]): Record<string, string> {
+  const activeSessionIdsByWorkspace: Record<string, string> = {};
+  if (isRecord(value) && isRecord(value.activeSessionIdsByWorkspace)) {
+    for (const [workspaceKey, sessionId] of Object.entries(value.activeSessionIdsByWorkspace)) {
+      if (typeof sessionId === 'string' && sessions.some((session) => session.id === sessionId)) {
+        activeSessionIdsByWorkspace[workspaceKey] = sessionId;
+      }
+    }
+  }
+  return activeSessionIdsByWorkspace;
 }
 
 function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
@@ -240,4 +475,15 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
 function createTitleFromMessages(messages: ChatMessage[], language: KeepseekLanguage = getConfiguredKeepseekLanguage()): string {
   const firstUserMessage = messages.find((message) => message.role === 'user');
   return firstUserMessage ? createSessionTitle(firstUserMessage.content, language) : localize(language, 'defaultSessionTitle');
+}
+
+function sortSessionsByUpdatedAt(sessions: ChatSession[]): ChatSession[] {
+  return [...sessions].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+}
+
+function getUriLabel(uri: vscode.Uri): string {
+  const path = uri.fsPath || uri.path;
+  const normalized = path.replace(/[\\/]+$/u, '');
+  const index = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
+  return index >= 0 ? normalized.slice(index + 1) : normalized || uri.toString();
 }

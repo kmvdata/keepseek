@@ -13,6 +13,9 @@ export const DEFAULT_MAX_TOOL_CALLS = 24;
 export const DEFAULT_MAX_RUN_MS = 600_000;
 export const DEFAULT_TOOL_RESULT_TOKEN_BUDGET = 0;
 export const DEFAULT_SELECTED_MODEL_ID = '';
+export const DEFAULT_HISTORY_RETENTION_DAYS = 7;
+export const MIN_HISTORY_RETENTION_DAYS = 1;
+export const MAX_HISTORY_RETENTION_DAYS = 365;
 export const MAX_TOOL_ITERATIONS = 64;
 export const MAX_TOOL_CALLS = 256;
 export const MAX_RUN_MS = 3_600_000;
@@ -148,6 +151,18 @@ export function getConfiguredWorkspaceReadMaxBytes(): number {
     .getConfiguration('keepseek')
     .get<number>('maxFileBytes', DEFAULT_MAX_FILE_BYTES);
   return normalizeIntegerInRange(configuredLimit, 1, 20_000_000, DEFAULT_MAX_FILE_BYTES);
+}
+
+export function getConfiguredHistoryRetentionDays(): number {
+  const configuredLimit = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('historyRetentionDays', DEFAULT_HISTORY_RETENTION_DAYS);
+  return normalizeIntegerInRange(
+    configuredLimit,
+    MIN_HISTORY_RETENTION_DAYS,
+    MAX_HISTORY_RETENTION_DAYS,
+    DEFAULT_HISTORY_RETENTION_DAYS
+  );
 }
 
 export function normalizeAgentSettings(settings: Partial<AgentSettings> | undefined, fallback?: AgentSettings): AgentSettings {

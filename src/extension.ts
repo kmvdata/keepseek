@@ -6,12 +6,13 @@ import { FileContextStore } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
 import { AgentActivityInput, AgentActivityState, AgentSettings, ChatMessage } from './types';
 import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
-import { ChatSessionStore, createSessionTitle, getVisibleMessages } from './chatSessionStore';
+import { ChatSessionStore, createSessionTitle, getCurrentWorkspaceSessionScope, getVisibleMessages } from './chatSessionStore';
 import { createContextUsageEstimate } from './contextUsage';
 import { DraftEditStore } from './draftEditStore';
 import { openFileReference } from './fileReferenceOpener';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
+  DEFAULT_HISTORY_RETENTION_DAYS,
   DEFAULT_MAX_TOKENS,
   DEFAULT_MAX_RUN_MS,
   DEFAULT_MAX_TOOL_CALLS,
@@ -19,6 +20,7 @@ import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_TOOL_RESULT_TOKEN_BUDGET,
   getConfiguredAgentSettings,
+  getConfiguredHistoryRetentionDays,
   getConfiguredMaxFileBytes,
   getConfiguredMaxRunMs,
   getConfiguredMaxToolCalls,
@@ -29,11 +31,13 @@ import {
   getConfiguredStreamIdleTimeoutMs,
   getConfiguredToolResultTokenBudget,
   MAX_GENERATION_TOKENS,
+  MAX_HISTORY_RETENTION_DAYS,
   MAX_RUN_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
   MAX_TOOL_CALLS,
   MAX_TOOL_ITERATIONS,
   MAX_TOOL_RESULT_TOKEN_BUDGET,
+  MIN_HISTORY_RETENTION_DAYS,
   normalizeAgentSettings,
   normalizeIntegerInRange
 } from './config';
@@ -56,6 +60,7 @@ import {
 
 const CHAT_CONTAINER_ID = 'keepseek';
 const CHAT_VIEW_TYPE = 'keepseek.chatView';
+const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 interface PromptReferenceInput {
   path: string;
@@ -80,10 +85,14 @@ type WebviewMessage =
   | { type: 'editUserPrompt'; messageId: string; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[] }
   | { type: 'newSession' }
   | { type: 'selectSession'; sessionId: string }
+  | { type: 'toggleSessionFavorite'; sessionId: string }
+  | { type: 'renameSession'; sessionId: string; title: string }
+  | { type: 'deleteSessions'; sessionIds: string[] }
   | { type: 'setSelectedModel'; modelId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
   | { type: 'openApiSettings' }
   | { type: 'openAgentBudgetSettings' }
+  | { type: 'openHistorySettings' }
   | {
       type: 'saveApiSettings';
       apiKey: string;
@@ -97,6 +106,10 @@ type WebviewMessage =
       maxRunMs?: number;
       streamIdleTimeoutMs?: number;
       toolResultTokenBudget?: number;
+    }
+  | {
+      type: 'saveHistorySettings';
+      historyRetentionDays?: number;
     }
   | { type: 'setLanguage'; language: KeepseekLanguage }
   | { type: 'addCurrentFile' }
@@ -135,22 +148,44 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     updatedAt: new Date().toISOString(),
     sequence: 0
   };
+  private readonly sessionCleanupTimer: ReturnType<typeof setInterval>;
 
   public constructor(
     private readonly extensionUri: vscode.Uri,
     sessionStorage: vscode.Memento,
     private readonly globalStorageUri: vscode.Uri
   ) {
-    this.sessionStore = new ChatSessionStore(sessionStorage, this.language);
+    this.sessionStore = new ChatSessionStore(sessionStorage, this.language, getCurrentWorkspaceSessionScope());
     this.draftEdits = new DraftEditStore(
       new SafeFileEditor((key, values) => this.t(key, values)),
       this.sessionStore,
       (key, values) => this.t(key, values)
     );
+    void this.cleanupExpiredSessions({ post: false });
+    this.sessionCleanupTimer = setInterval(() => {
+      void this.cleanupExpiredSessions();
+    }, SESSION_CLEANUP_INTERVAL_MS);
+  }
+
+  public dispose(): void {
+    clearInterval(this.sessionCleanupTimer);
   }
 
   public refreshConfiguration(): void {
     this.syncConfiguredState();
+    void this.cleanupExpiredSessions();
+    this.postState();
+  }
+
+  public async refreshWorkspaceScope(): Promise<void> {
+    if (!this.sessionStore.setWorkspaceScope(getCurrentWorkspaceSessionScope())) {
+      return;
+    }
+
+    this.draftEdits.clear();
+    await this.sessionStore.persist();
+    await this.cleanupExpiredSessions({ post: false });
+    this.postToWebview({ type: 'sessionChanged' });
     this.postState();
   }
 
@@ -503,6 +538,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     switch (message.type) {
       case 'ready':
         this.syncConfiguredState();
+        await this.cleanupExpiredSessions({ post: false });
         this.postState();
         return;
       case 'sendPrompt':
@@ -516,6 +552,19 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'selectSession':
         await this.selectSession(message.sessionId);
+        return;
+      case 'toggleSessionFavorite':
+        if (await this.sessionStore.toggleSessionFavorite(message.sessionId)) {
+          this.postState();
+        }
+        return;
+      case 'renameSession':
+        if (await this.sessionStore.renameSession(message.sessionId, message.title)) {
+          this.postState();
+        }
+        return;
+      case 'deleteSessions':
+        await this.deleteSessions(message.sessionIds);
         return;
       case 'setSelectedModel':
         await this.setSelectedModel(message.modelId);
@@ -544,6 +593,13 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         });
         return;
       }
+      case 'openHistorySettings': {
+        this.postToWebview({
+          type: 'showHistorySettingsDialog',
+          historyRetentionDays: getConfiguredHistoryRetentionDays()
+        });
+        return;
+      }
       case 'saveApiSettings': {
         const config = vscode.workspace.getConfiguration('keepseek');
         await config.update('apiKey', message.apiKey, vscode.ConfigurationTarget.Global);
@@ -560,6 +616,20 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await config.update('streamIdleTimeoutMs', normalizeIntegerInRange(message.streamIdleTimeoutMs, 0, MAX_STREAM_IDLE_TIMEOUT_MS, DEFAULT_STREAM_IDLE_TIMEOUT_MS), vscode.ConfigurationTarget.Global);
         await config.update('toolResultTokenBudget', normalizeIntegerInRange(message.toolResultTokenBudget, 0, MAX_TOOL_RESULT_TOKEN_BUDGET, DEFAULT_TOOL_RESULT_TOKEN_BUDGET), vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage(this.t('agentBudgetSettingsSaved'));
+        return;
+      }
+      case 'saveHistorySettings': {
+        const config = vscode.workspace.getConfiguration('keepseek');
+        const historyRetentionDays = normalizeIntegerInRange(
+          message.historyRetentionDays,
+          MIN_HISTORY_RETENTION_DAYS,
+          MAX_HISTORY_RETENTION_DAYS,
+          DEFAULT_HISTORY_RETENTION_DAYS
+        );
+        await config.update('historyRetentionDays', historyRetentionDays, vscode.ConfigurationTarget.Global);
+        await this.cleanupExpiredSessions({ post: false });
+        this.postState();
+        vscode.window.showInformationMessage(this.t('historySettingsSaved'));
         return;
       }
       case 'setLanguage': {
@@ -664,6 +734,38 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
     this.draftEdits.clear();
     this.postToWebview({ type: 'sessionChanged' });
+    this.postState();
+  }
+
+  private async deleteSessions(sessionIds: string[]): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+
+    const uniqueSessionIds = Array.from(new Set(sessionIds.filter((sessionId) => typeof sessionId === 'string' && sessionId.trim())));
+    if (!uniqueSessionIds.length) {
+      return;
+    }
+
+    const confirmAction = this.t('deleteSessionsConfirmAction');
+    const confirmed = await vscode.window.showWarningMessage(
+      this.t('deleteSessionsConfirm', { count: uniqueSessionIds.length }),
+      { modal: true },
+      confirmAction
+    );
+    if (confirmed !== confirmAction) {
+      return;
+    }
+
+    const result = await this.sessionStore.deleteSessions(uniqueSessionIds);
+    if (!result.deletedCount) {
+      return;
+    }
+
+    if (result.activeSessionChanged) {
+      this.draftEdits.clear();
+      this.postToWebview({ type: 'sessionChanged' });
+    }
     this.postState();
   }
 
@@ -891,11 +993,13 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         activeSession.messages.splice(replacementIndex);
         this.draftEdits.clear();
-        if (replacementIndex === 0) {
+        if (replacementIndex === 0 && !activeSession.customTitle) {
           activeSession.title = createSessionTitle(trimmedPrompt, this.language);
         }
       } else if (!activeSession.messages.length) {
-        activeSession.title = createSessionTitle(trimmedPrompt, this.language);
+        if (!activeSession.customTitle) {
+          activeSession.title = createSessionTitle(trimmedPrompt, this.language);
+        }
         activeSession.createdAt = now;
       }
 
@@ -986,7 +1090,9 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const activeSession = this.sessionStore.getActiveSession();
       if (!activeSession.messages.length) {
         const now = new Date().toISOString();
-        activeSession.title = createSessionTitle(trimmedPrompt, this.language);
+        if (!activeSession.customTitle) {
+          activeSession.title = createSessionTitle(trimmedPrompt, this.language);
+        }
         activeSession.createdAt = now;
       }
       if (assistantMessage) {
@@ -1026,6 +1132,13 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.sessionStore.trimActiveHistory();
   }
 
+  private async cleanupExpiredSessions(options: { post?: boolean } = {}): Promise<void> {
+    const changed = await this.sessionStore.cleanupExpiredSessions(getConfiguredHistoryRetentionDays());
+    if (changed && options.post !== false) {
+      this.postState();
+    }
+  }
+
   private postState(): void {
     const models = getConfiguredModels();
     if (!this.selectedModelId || !models.some((model) => model.id === this.selectedModelId)) {
@@ -1054,6 +1167,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         isBusy: this.isBusy,
         agentActivity: this.agentActivity,
         maxFileBytes: getConfiguredMaxFileBytes(),
+        historyRetentionDays: getConfiguredHistoryRetentionDays(),
         language: this.language,
         isMac: process.platform === 'darwin'
       }
@@ -1093,6 +1207,7 @@ export function activate(context: vscode.ExtensionContext): void {
   ];
 
   context.subscriptions.push(
+    provider,
     ...webviewProviders,
     vscode.commands.registerCommand('keepseek.openChat', () => provider.reveal()),
     vscode.commands.registerCommand('keepseek.addCurrentFileToContext', () => provider.addCurrentFileToContext()),
@@ -1113,6 +1228,9 @@ export function activate(context: vscode.ExtensionContext): void {
       if (event.affectsConfiguration('keepseek')) {
         provider.refreshConfiguration();
       }
+    }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      void provider.refreshWorkspaceScope();
     })
   );
 }

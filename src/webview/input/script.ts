@@ -1943,11 +1943,15 @@ export function getInputScript(): string {
       var agentBudgetMaxRunSeconds = document.getElementById('agentBudgetMaxRunSeconds');
       var agentBudgetStreamIdleSeconds = document.getElementById('agentBudgetStreamIdleSeconds');
       var agentBudgetToolResultTokenBudget = document.getElementById('agentBudgetToolResultTokenBudget');
+      var historySettingsOverlay = document.getElementById('historySettingsDialogOverlay');
+      var historyRetentionDaysInput = document.getElementById('historyRetentionDaysInput');
       var settingsClearApiKeyBtn = document.getElementById('settingsClearApiKeyBtn');
       var settingsSaveBtn = document.getElementById('settingsSaveBtn');
       var settingsCancelBtn = document.getElementById('settingsCancelBtn');
       var agentBudgetSaveBtn = document.getElementById('agentBudgetSaveBtn');
       var agentBudgetCancelBtn = document.getElementById('agentBudgetCancelBtn');
+      var historySettingsSaveBtn = document.getElementById('historySettingsSaveBtn');
+      var historySettingsCancelBtn = document.getElementById('historySettingsCancelBtn');
       var apiKeyVisible = false;
       var defaultMaxTokens = 64000;
       var maxGenerationTokens = 384000;
@@ -1960,6 +1964,7 @@ export function getInputScript(): string {
       var defaultStreamIdleSeconds = 0;
       var defaultToolResultTokenBudget = 0;
       var maxToolResultTokenBudget = 1000000;
+      var defaultHistoryRetentionDays = 7;
 
       function setApiKeyVisible(isVisible, shouldFocus) {
         apiKeyVisible = Boolean(isVisible);
@@ -2017,6 +2022,19 @@ export function getInputScript(): string {
         agentBudgetOverlay.classList.remove('hidden');
         if (agentBudgetMaxTokens) {
           agentBudgetMaxTokens.focus();
+        }
+      }
+
+      function showHistorySettingsDialog(settings) {
+        if (!historySettingsOverlay) { return; }
+        var values = settings && typeof settings === 'object' ? settings : {};
+        if (historyRetentionDaysInput) {
+          historyRetentionDaysInput.value = String(normalizeIntegerInRange(values.historyRetentionDays, 1, 365, defaultHistoryRetentionDays));
+        }
+        historySettingsOverlay.classList.remove('hidden');
+        if (historyRetentionDaysInput) {
+          historyRetentionDaysInput.focus();
+          historyRetentionDaysInput.select();
         }
       }
 
@@ -2083,6 +2101,12 @@ export function getInputScript(): string {
         promptInput.focus();
       }
 
+      function hideHistorySettingsDialog() {
+        if (!historySettingsOverlay) { return; }
+        historySettingsOverlay.classList.add('hidden');
+        promptInput.focus();
+      }
+
       if (settingsSaveBtn) {
         settingsSaveBtn.addEventListener('click', function() {
           var apiKey = settingsApiKey ? settingsApiKey.value.trim() : '';
@@ -2144,6 +2168,26 @@ export function getInputScript(): string {
         });
       }
 
+      if (historySettingsSaveBtn) {
+        historySettingsSaveBtn.addEventListener('click', function() {
+          var historyRetentionDays = normalizeIntegerInRange(
+            historyRetentionDaysInput ? historyRetentionDaysInput.value : defaultHistoryRetentionDays,
+            1,
+            365,
+            defaultHistoryRetentionDays
+          );
+          if (historyRetentionDaysInput) {
+            historyRetentionDaysInput.value = String(historyRetentionDays);
+          }
+          vscode.postMessage({
+            type: 'saveHistorySettings',
+            historyRetentionDays: historyRetentionDays
+          });
+          setComposerStatus(t('historySettingsSaved'));
+          hideHistorySettingsDialog();
+        });
+      }
+
       if (settingsClearApiKeyBtn) {
         settingsClearApiKeyBtn.addEventListener('click', function(event) {
           event.preventDefault();
@@ -2165,6 +2209,12 @@ export function getInputScript(): string {
       if (agentBudgetCancelBtn) {
         agentBudgetCancelBtn.addEventListener('click', function() {
           hideAgentBudgetDialog();
+        });
+      }
+
+      if (historySettingsCancelBtn) {
+        historySettingsCancelBtn.addEventListener('click', function() {
+          hideHistorySettingsDialog();
         });
       }
 
@@ -2208,6 +2258,24 @@ export function getInputScript(): string {
           } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             if (agentBudgetSaveBtn) { agentBudgetSaveBtn.click(); }
+          }
+        });
+      }
+
+      if (historySettingsOverlay) {
+        historySettingsOverlay.addEventListener('click', function(event) {
+          if (event.target === historySettingsOverlay) {
+            hideHistorySettingsDialog();
+          }
+        });
+
+        historySettingsOverlay.addEventListener('keydown', function(event) {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            hideHistorySettingsDialog();
+          } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            if (historySettingsSaveBtn) { historySettingsSaveBtn.click(); }
           }
         });
       }
@@ -2304,6 +2372,7 @@ export function getInputScript(): string {
         render: renderInputControls,
         showSettingsDialog: showSettingsDialog,
         showAgentBudgetDialog: showAgentBudgetDialog,
+        showHistorySettingsDialog: showHistorySettingsDialog,
         clearPrompt: clearPrompt
       };
       renderInputControls();
