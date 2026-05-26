@@ -36,6 +36,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     showCommandMenu: '显示命令菜单',
     showCommandMenuTitle: '显示命令菜单 /',
     send: '发送',
+    stop: '中止',
     contextWindowEstimateTitle: '背景信息窗口（下次请求估算）：',
     contextWindowPercentLine: '{usedPercent}% 已用（剩余 {remainingPercent}%）',
     contextWindowTokensLine: '已用 {usedTokens} 标记，共 {maxTokens}',
@@ -108,6 +109,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     agentStatusFinalizingResponse: '整理最终回答...',
     agentStatusComplete: '完成',
     agentStatusError: '出错了',
+    agentStatusStopped: '已中止',
     noHistory: '暂无历史会话',
     sessionTabCurrentProject: '当前项目',
     sessionTabOtherProject: '其他项目',
@@ -172,7 +174,9 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     fullFileLabel: '全文',
     directoryLabel: '目录',
     sendShortcutHint: '按 Ctrl+Enter 发送消息',
-    sendShortcutHintMac: '按 Ctrl+Enter 或 Command+Enter 发送消息'
+    sendShortcutHintMac: '按 Ctrl+Enter 或 Command+Enter 发送消息',
+    stopShortcutHint: '按 Ctrl+Enter 中止',
+    stopShortcutHintMac: '按 Ctrl+Enter 或 Command+Enter 中止'
   },
   en: {
     settings: 'Settings',
@@ -202,6 +206,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     showCommandMenu: 'Show command menu',
     showCommandMenuTitle: 'Show command menu /',
     send: 'Send',
+    stop: 'Stop',
     contextWindowEstimateTitle: 'Context window (next request estimate):',
     contextWindowPercentLine: '{usedPercent}% used ({remainingPercent}% remaining)',
     contextWindowTokensLine: '{usedTokens} tokens used of {maxTokens}',
@@ -274,6 +279,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     agentStatusFinalizingResponse: 'Finalizing response...',
     agentStatusComplete: 'Complete',
     agentStatusError: 'Error',
+    agentStatusStopped: 'Stopped',
     noHistory: 'No session history',
     sessionTabCurrentProject: 'Current project',
     sessionTabOtherProject: 'Other projects',
@@ -338,7 +344,9 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     fullFileLabel: 'full file',
     directoryLabel: 'directory',
     sendShortcutHint: 'Press Ctrl+Enter to send',
-    sendShortcutHintMac: 'Press Ctrl+Enter or Command+Enter to send'
+    sendShortcutHintMac: 'Press Ctrl+Enter or Command+Enter to send',
+    stopShortcutHint: 'Press Ctrl+Enter to stop',
+    stopShortcutHintMac: 'Press Ctrl+Enter or Command+Enter to stop'
   }
 };
 

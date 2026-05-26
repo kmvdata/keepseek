@@ -114,6 +114,7 @@ export interface AgentRequest {
   contextFiles: ContextFile[];
   history: ChatMessage[];
   language: KeepseekLanguage;
+  signal?: AbortSignal;
 }
 
 export interface AgentResponse {
@@ -122,7 +123,7 @@ export interface AgentResponse {
   draftEdits: DraftEdit[];
 }
 
-export type AgentActivityBase = 'idle' | 'thinking' | 'executing' | 'waiting' | 'complete' | 'error';
+export type AgentActivityBase = 'idle' | 'thinking' | 'executing' | 'waiting' | 'complete' | 'error' | 'stopped';
 
 export type AgentActivityPhase =
   | 'idle'

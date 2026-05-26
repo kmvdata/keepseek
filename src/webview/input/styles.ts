@@ -206,6 +206,16 @@ export function getInputStyles(): string {
       color: var(--vscode-button-foreground, var(--vscode-editor-background));
     }
 
+    .composer-send-btn.is-abort {
+      border-color: var(--vscode-errorForeground, var(--vscode-button-background));
+      background: var(--vscode-errorForeground, var(--vscode-button-background));
+      color: var(--vscode-button-foreground, var(--vscode-editor-background));
+    }
+
+    .composer-send-btn.is-abort:hover:not(:disabled) {
+      opacity: 0.88;
+    }
+
     .composer-icon-btn:focus-visible,
     .composer-send-btn:focus-visible {
       outline: 1px solid var(--vscode-focusBorder);

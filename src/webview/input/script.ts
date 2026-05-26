@@ -38,11 +38,20 @@ export function getInputScript(): string {
         high: 'High',
         max: 'Max'
       };
+      var sendIconSvg = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.75V3.75M4.75 7 8 3.75 11.25 7" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      var stopIconSvg = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.25" y="4.25" width="7.5" height="7.5" rx="1.2" fill="currentColor"/></svg>';
 
       composer.addEventListener('submit', function(event) {
         event.preventDefault();
+        if (state.isBusy) {
+          closeCommandMenu();
+          closeReferenceMenu(false);
+          vscode.postMessage({ type: 'abortPrompt' });
+          clearPrompt();
+          return;
+        }
         var prompt = serializePrompt();
-        if (!prompt.trim() || state.isBusy) return;
+        if (!prompt.trim()) return;
         closeCommandMenu();
         closeReferenceMenu(false);
         vscode.postMessage({
@@ -52,6 +61,7 @@ export function getInputScript(): string {
           settings: readAgentSettingsFromControls(),
           references: collectPromptFileReferences()
         });
+        state.isBusy = true;
         clearPrompt();
       });
 
@@ -663,7 +673,23 @@ export function getInputScript(): string {
         refreshPromptFileLinkLabels();
         renderContextProgress();
         renderCommandMenu();
+        renderSendButton();
         setApiKeyVisible(apiKeyVisible, false);
+      }
+
+      function renderSendButton(isEmpty) {
+        if (!sendButton) { return; }
+        var isAbortMode = Boolean(state.isBusy);
+        var mode = isAbortMode ? 'abort' : 'send';
+        var label = t(isAbortMode ? 'stop' : 'send');
+        sendButton.disabled = !isAbortMode && (typeof isEmpty === 'boolean' ? isEmpty : isPromptEmpty());
+        sendButton.classList.toggle('is-abort', isAbortMode);
+        sendButton.title = label;
+        sendButton.setAttribute('aria-label', label);
+        if (sendButton.dataset.mode !== mode) {
+          sendButton.dataset.mode = mode;
+          sendButton.innerHTML = isAbortMode ? stopIconSvg : sendIconSvg;
+        }
       }
 
       function renderContextProgress() {
@@ -1868,7 +1894,7 @@ export function getInputScript(): string {
         promptInput.style.height = 'auto';
         promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + 'px';
         promptInput.classList.toggle('is-empty', isEmpty);
-        sendButton.disabled = state.isBusy || isEmpty;
+        renderSendButton(isEmpty);
         renderContextProgress();
       }
 

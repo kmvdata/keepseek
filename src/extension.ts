@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from './fileReference';
-import { AgentRunner } from './agentRunner';
+import { AgentRunAbortedError, AgentRunner } from './agentRunner';
 import { FileContextStore } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
 import { AgentActivityInput, AgentActivityState, AgentSettings, ChatMessage, WorkspaceSummary } from './types';
@@ -84,6 +84,7 @@ type WebviewMessage =
   | { type: 'ready' }
   | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[] }
   | { type: 'editUserPrompt'; messageId: string; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[] }
+  | { type: 'abortPrompt' }
   | { type: 'newSession' }
   | { type: 'selectSession'; sessionId: string }
   | { type: 'toggleSessionFavorite'; sessionId: string }
@@ -146,6 +147,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private agentSettings = getConfiguredAgentSettings();
   private language = getConfiguredKeepseekLanguage();
   private isBusy = false;
+  private currentRunAbortController: AbortController | undefined;
   private agentActivitySequence = 0;
   private agentActivity: AgentActivityState = {
     base: 'idle',
@@ -550,6 +552,9 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'editUserPrompt':
         await this.sendPrompt(message.prompt, message.modelId, message.settings, { replaceMessageId: message.messageId, references: message.references });
+        return;
+      case 'abortPrompt':
+        this.abortPrompt();
         return;
       case 'newSession':
         await this.createNewSession();
@@ -1091,6 +1096,17 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return true;
   }
 
+  private abortPrompt(): void {
+    if (!this.isBusy || !this.currentRunAbortController || this.currentRunAbortController.signal.aborted) {
+      return;
+    }
+    this.currentRunAbortController.abort();
+    this.setAgentActivity({
+      base: 'waiting',
+      phase: 'finalizing'
+    });
+  }
+
   private async sendPrompt(
     prompt: string,
     modelId: string,
@@ -1115,6 +1131,8 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const model = models.find((item) => item.id === modelId) ?? models[0];
     this.selectedModelId = model.id;
 
+    const abortController = new AbortController();
+    this.currentRunAbortController = abortController;
     this.isBusy = true;
     this.setAgentActivity({
       base: 'thinking',
@@ -1150,6 +1168,13 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         authorizedExternalReferenceUris,
         language: this.language
       });
+      if (abortController.signal.aborted) {
+        this.setAgentActivity({
+          base: 'stopped',
+          phase: 'finalizing'
+        }, { post: false });
+        return;
+      }
       const activeSession = this.sessionStore.getActiveSession();
       const now = new Date().toISOString();
       const replacementIndex = replaceMessageId
@@ -1186,6 +1211,13 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       activeSession.updatedAt = now;
       this.trimHistory();
       await this.sessionStore.persist();
+      if (abortController.signal.aborted) {
+        this.setAgentActivity({
+          base: 'stopped',
+          phase: 'finalizing'
+        }, { post: false });
+        return;
+      }
       this.postState();
 
       const agentHistory = [...this.messages];
@@ -1212,7 +1244,8 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         settings: this.agentSettings,
         contextFiles: this.fileContext.getAll(),
         history: agentHistory,
-        language: this.language
+        language: this.language,
+        signal: abortController.signal
       }, {
         onStatus: (activity) => {
           this.setAgentActivity(activity);
@@ -1256,6 +1289,26 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         phase: 'finalizing'
       }, { post: false });
     } catch (error) {
+      if (error instanceof AgentRunAbortedError || abortController.signal.aborted) {
+        if (assistantMessage) {
+          const hasPartialOutput = Boolean(assistantMessage.content.trim() || assistantMessage.reasoningContent?.trim());
+          const assistantMessageId = assistantMessage.id;
+          delete assistantMessage.isStreaming;
+          if (!hasPartialOutput) {
+            const assistantIndex = this.messages.findIndex((message) => message.id === assistantMessageId);
+            if (assistantIndex >= 0) {
+              this.messages.splice(assistantIndex, 1);
+            }
+            assistantMessage = undefined;
+          }
+        }
+        this.setAgentActivity({
+          base: 'stopped',
+          phase: 'finalizing'
+        }, { post: false });
+        return;
+      }
+
       const activeSession = this.sessionStore.getActiveSession();
       if (!activeSession.messages.length) {
         const now = new Date().toISOString();
@@ -1285,6 +1338,9 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         phase: 'failed'
       }, { post: false });
     } finally {
+      if (this.currentRunAbortController === abortController) {
+        this.currentRunAbortController = undefined;
+      }
       this.sessionStore.getActiveSession().updatedAt = new Date().toISOString();
       this.isBusy = false;
       await this.sessionStore.persist();

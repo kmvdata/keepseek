@@ -53,6 +53,13 @@ type AgentBudgetFinishReason =
   | 'tool_result_budget_exhausted'
   | 'run_time_limit_exhausted';
 
+export class AgentRunAbortedError extends Error {
+  public constructor(language: KeepseekLanguage) {
+    super(language === 'en' ? 'Agent run was stopped.' : 'Agent 推理已中止。');
+    this.name = 'AgentRunAbortedError';
+  }
+}
+
 export class AgentRunner {
   private readonly streamParser = new DeepSeekStreamParser();
   private readonly dsmlToolParser = new DsmlToolParser();
@@ -60,12 +67,14 @@ export class AgentRunner {
   public constructor(private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService()) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
+    this.throwIfAborted(request.signal, request.language);
     const emitStatus = this.createStatusEmitter(callbacks);
     const runCallbacks: AgentRunCallbacks = {
       ...callbacks,
       onStatus: emitStatus
     };
     const draftEdit = await this.tryCreateDraftEdit(request.prompt, request.language);
+    this.throwIfAborted(request.signal, request.language);
     if (draftEdit) {
       emitStatus({
         base: 'executing',
@@ -105,6 +114,7 @@ export class AgentRunner {
     let budgetStopInstructionQueued = false;
 
     for (let turn = 0; turn <= maxIterations; turn += 1) {
+      this.throwIfAborted(request.signal, request.language);
       const runTimeStopReason = this.getRunTimeStopReason(runDeadlineAt);
       if (runTimeStopReason) {
         emitStatus({
@@ -120,6 +130,7 @@ export class AgentRunner {
 
       const toolsForTurn = !budgetStopReason && turn < maxIterations ? tools : [];
       const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt);
+      this.throwIfAborted(request.signal, request.language);
       const assistant = this.normalizeAssistantToolCalls(response.message, toolsForTurn.length > 0);
       if (!assistant) {
         throw new Error(request.language === 'en'
@@ -157,6 +168,7 @@ export class AgentRunner {
       });
 
       for (const toolCall of toolCalls) {
+        this.throwIfAborted(request.signal, request.language);
         let toolResult: string;
         if (budgetStopReason) {
           toolResult = this.createBudgetToolResult(budgetStopReason, request.language);
@@ -174,6 +186,7 @@ export class AgentRunner {
             toolName: toolCall.function.name
           });
           const rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language);
+          this.throwIfAborted(request.signal, request.language);
           const nextToolResultTokens = this.estimateChatMessageTokens('tool', rawToolResult);
           if (toolResultTokens + nextToolResultTokens > maxToolResultTokens) {
             budgetStopReason = 'tool_result_budget_exhausted';
@@ -254,6 +267,11 @@ export class AgentRunner {
     let runTimeout: ReturnType<typeof setTimeout> | undefined;
     let abortedByStreamIdleTimeout = false;
     let abortedByRunTimeLimit = false;
+    let abortedByExternalSignal = false;
+    const abortByExternalSignal = () => {
+      abortedByExternalSignal = true;
+      controller.abort();
+    };
     const resetStreamIdleTimeout = () => {
       if (runtimeConfig.streamIdleTimeoutMs <= 0) {
         return;
@@ -295,6 +313,11 @@ export class AgentRunner {
     };
     resetStreamIdleTimeout();
     setRunTimeout();
+    if (request.signal?.aborted) {
+      abortByExternalSignal();
+    } else {
+      request.signal?.addEventListener('abort', abortByExternalSignal, { once: true });
+    }
 
     try {
       callbacks.onStatus?.({
@@ -329,6 +352,9 @@ export class AgentRunner {
       resetStreamIdleTimeout();
       return await this.streamParser.parse(response.body, request.language, callbacks, resetStreamIdleTimeout);
     } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError' && (abortedByExternalSignal || request.signal?.aborted)) {
+        throw new AgentRunAbortedError(request.language);
+      }
       if (error instanceof Error && error.name === 'AbortError' && abortedByRunTimeLimit) {
         throw new Error(this.getRunTimeLimitError(runtimeConfig.maxRunMs, request.language));
       }
@@ -342,6 +368,7 @@ export class AgentRunner {
       }
       throw error;
     } finally {
+      request.signal?.removeEventListener('abort', abortByExternalSignal);
       clearStreamIdleTimeout();
       clearRunTimeout();
     }
@@ -448,6 +475,12 @@ export class AgentRunner {
         : '以下是用户加入 KeepSeek 的上下文文件。回答时优先参考这些内容：',
       ...files
     ].join('\n\n');
+  }
+
+  private throwIfAborted(signal: AbortSignal | undefined, language: KeepseekLanguage): void {
+    if (signal?.aborted) {
+      throw new AgentRunAbortedError(language);
+    }
   }
 
   private getTools(): DeepSeekFunctionTool[] {

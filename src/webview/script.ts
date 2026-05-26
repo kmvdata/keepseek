@@ -61,6 +61,9 @@ export function getScript(): string {
     }
 
     function getSendShortcutHint() {
+      if (state.isBusy) {
+        return t(state.isMac ? 'stopShortcutHintMac' : 'stopShortcutHint');
+      }
       return t(state.isMac ? 'sendShortcutHintMac' : 'sendShortcutHint');
     }
 
@@ -687,7 +690,7 @@ export function getScript(): string {
       if (window.keepseekInputControls) {
         window.keepseekInputControls.render();
       }
-      sendButton.disabled = state.isBusy || promptInput.classList.contains('is-empty');
+      sendButton.disabled = !state.isBusy && promptInput.classList.contains('is-empty');
     }
 
     function applyStaticTranslations() {
@@ -1379,7 +1382,7 @@ export function getScript(): string {
 
     function rememberTerminalAgentActivity(activity) {
       var normalized = normalizeAgentActivity(activity);
-      if (normalized.base !== 'complete' && normalized.base !== 'error') {
+      if (normalized.base !== 'complete' && normalized.base !== 'error' && normalized.base !== 'stopped') {
         return;
       }
       var key = [normalized.base, normalized.sequence, normalized.updatedAt].join('|');
@@ -1388,7 +1391,7 @@ export function getScript(): string {
       }
       terminalAgentStatusKey = key;
       setTransientStatus(
-        t(normalized.base === 'error' ? 'agentStatusError' : 'agentStatusComplete'),
+        t(normalized.base === 'error' ? 'agentStatusError' : normalized.base === 'stopped' ? 'agentStatusStopped' : 'agentStatusComplete'),
         2600
       );
     }
@@ -1439,6 +1442,9 @@ export function getScript(): string {
       }
       if (activity.base === 'error') {
         return ['agentStatusError'];
+      }
+      if (activity.base === 'stopped') {
+        return ['agentStatusStopped'];
       }
       if (activity.base === 'waiting') {
         return agentStatusPools.requesting_model;
