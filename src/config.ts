@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { AgentSettings, KeepseekModel } from './types';
+import { SESSION_HARD_RETENTION_DAYS } from './sessionRetention';
 
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 0;
@@ -15,7 +16,7 @@ export const DEFAULT_TOOL_RESULT_TOKEN_BUDGET = 0;
 export const DEFAULT_SELECTED_MODEL_ID = '';
 export const DEFAULT_HISTORY_RETENTION_DAYS = 7;
 export const MIN_HISTORY_RETENTION_DAYS = 1;
-export const MAX_HISTORY_RETENTION_DAYS = 365;
+export const MAX_HISTORY_RETENTION_DAYS = SESSION_HARD_RETENTION_DAYS;
 export const MAX_TOOL_ITERATIONS = 64;
 export const MAX_TOOL_CALLS = 256;
 export const MAX_RUN_MS = 3_600_000;

@@ -4,17 +4,31 @@ import { ChatMessage, ChatSession, ChatSessionSummary } from './types';
 import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from './i18n';
 import { isRecord } from './errors';
 
-const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
-const SESSION_STORAGE_VERSION = 2;
+export const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
+export const SESSION_STORAGE_VERSION = 2;
 const MAX_STORED_SESSIONS = 50;
 const DEFAULT_ACTIVE_HISTORY_LIMIT = 80;
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-interface StoredSessionState {
+export interface StoredSessionState {
   version: number;
   activeSessionId: string;
   activeSessionIdsByWorkspace?: Record<string, string>;
   sessions: ChatSession[];
+}
+
+export interface StoredWorkspaceSessionState {
+  activeSessionId: string;
+  sessions: ChatSession[];
+}
+
+export interface ChatSessionStorageAdapter {
+  loadWorkspace(workspaceScope: WorkspaceSessionScope): Promise<StoredWorkspaceSessionState>;
+  saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
+  cleanupExpiredSessions(options: {
+    currentWorkspaceKey: string;
+    currentActiveSessionId: string;
+    now?: number;
+  }): Promise<boolean>;
 }
 
 export interface WorkspaceSessionScope {
@@ -31,14 +45,15 @@ export interface DeleteSessionsResult {
 export class ChatSessionStore {
   private sessions: ChatSession[] = [];
   private activeSessionIdValue = '';
-  private activeSessionIdsByWorkspace: Record<string, string> = {};
 
   public constructor(
-    private readonly sessionStorage: vscode.Memento,
+    private readonly sessionStorage: ChatSessionStorageAdapter,
     private language: KeepseekLanguage = getConfiguredKeepseekLanguage(),
     private workspaceScope: WorkspaceSessionScope = getCurrentWorkspaceSessionScope()
-  ) {
-    this.load();
+  ) {}
+
+  public async initialize(): Promise<void> {
+    await this.load();
   }
 
   public get activeSessionId(): string {
@@ -57,14 +72,13 @@ export class ChatSessionStore {
     this.language = language;
   }
 
-  public setWorkspaceScope(workspaceScope: WorkspaceSessionScope): boolean {
+  public async setWorkspaceScope(workspaceScope: WorkspaceSessionScope): Promise<boolean> {
     if (workspaceScope.key === this.workspaceScope.key) {
       return false;
     }
 
     this.workspaceScope = workspaceScope;
-    this.getActiveSession();
-    this.compact();
+    await this.load();
     return true;
   }
 
@@ -141,12 +155,6 @@ export class ChatSessionStore {
       return false;
     });
 
-    for (const [workspaceKey, activeSessionId] of Object.entries(this.activeSessionIdsByWorkspace)) {
-      if (ids.has(activeSessionId)) {
-        delete this.activeSessionIdsByWorkspace[workspaceKey];
-      }
-    }
-
     this.ensureActiveSession();
     this.compact();
     await this.persist();
@@ -156,36 +164,24 @@ export class ChatSessionStore {
     };
   }
 
-  public async cleanupExpiredSessions(retentionDays: number, now = Date.now()): Promise<boolean> {
-    const cutoff = now - Math.max(1, Math.floor(retentionDays)) * MS_PER_DAY;
-    const activeSessionIds = this.getActiveSessionIds();
-    const before = this.sessions.length;
-    this.sessions = this.sessions.filter((session) => {
-      if (activeSessionIds.has(session.id) || session.isFavorite) {
-        return true;
-      }
-
-      const updatedAt = Date.parse(session.updatedAt);
-      return Number.isFinite(updatedAt) ? updatedAt >= cutoff : true;
+  public async cleanupExpiredSessions(now = Date.now()): Promise<boolean> {
+    const changed = await this.sessionStorage.cleanupExpiredSessions({
+      currentWorkspaceKey: this.workspaceScope.key,
+      currentActiveSessionId: this.activeSessionIdValue,
+      now
     });
-
-    if (this.sessions.length === before) {
-      return false;
+    if (changed) {
+      await this.load();
     }
-
-    this.ensureActiveSession();
-    await this.persist();
-    return true;
+    return changed;
   }
 
   public async persist(): Promise<void> {
     this.compact();
-    await this.sessionStorage.update(SESSION_STORAGE_KEY, {
-      version: SESSION_STORAGE_VERSION,
+    await this.sessionStorage.saveWorkspace(this.workspaceScope, {
       activeSessionId: this.activeSessionIdValue,
-      activeSessionIdsByWorkspace: this.activeSessionIdsByWorkspace,
       sessions: this.sessions
-    } satisfies StoredSessionState);
+    });
   }
 
   public async relocalizeEmptySessionTitles(language: KeepseekLanguage): Promise<void> {
@@ -227,26 +223,19 @@ export class ChatSessionStore {
     }
   }
 
-  private load(): void {
-    const stored = this.sessionStorage.get<StoredSessionState>(SESSION_STORAGE_KEY);
-    const sessions = normalizeStoredSessions(stored, this.workspaceScope);
-    const activeSessionId = typeof stored?.activeSessionId === 'string' ? stored.activeSessionId : '';
+  private async load(): Promise<void> {
+    const stored = await this.sessionStorage.loadWorkspace(this.workspaceScope);
+    const sessions = normalizeStoredSessions({ sessions: stored.sessions }, this.workspaceScope);
 
-    this.sessions = sessions;
-    this.activeSessionIdsByWorkspace = normalizeStoredActiveSessionIds(stored, sessions);
-    const legacyActiveSession = sessions.find((session) => session.id === activeSessionId);
-    if (legacyActiveSession && !this.activeSessionIdsByWorkspace[legacyActiveSession.workspaceKey]) {
-      this.activeSessionIdsByWorkspace[legacyActiveSession.workspaceKey] = legacyActiveSession.id;
-    }
-    this.activeSessionIdValue = this.activeSessionIdsByWorkspace[this.workspaceScope.key] ?? activeSessionId;
+    this.sessions = sessions.filter((session) => this.isInCurrentWorkspace(session));
+    this.activeSessionIdValue = typeof stored.activeSessionId === 'string' ? stored.activeSessionId : '';
     this.ensureActiveSession();
     this.compact();
   }
 
   private ensureActiveSession(): ChatSession {
     const currentSessions = this.getCurrentWorkspaceSessions();
-    const scopedActiveSessionId = this.activeSessionIdsByWorkspace[this.workspaceScope.key] || this.activeSessionIdValue;
-    const existing = currentSessions.find((session) => session.id === scopedActiveSessionId);
+    const existing = currentSessions.find((session) => session.id === this.activeSessionIdValue);
     if (existing) {
       this.setActiveSessionId(existing.id);
       return existing;
@@ -262,9 +251,6 @@ export class ChatSessionStore {
 
   private compact(): void {
     const activeSession = this.ensureActiveSession();
-    const activeSessionIds = this.getActiveSessionIds();
-    activeSessionIds.add(activeSession.id);
-
     const sessionsByWorkspace = new Map<string, ChatSession[]>();
     for (const session of this.sessions) {
       if (!session.workspaceKey) {
@@ -273,7 +259,7 @@ export class ChatSessionStore {
         session.workspaceFolders = this.workspaceScope.folderUris;
       }
 
-      const isActive = activeSessionIds.has(session.id);
+      const isActive = session.id === activeSession.id;
       if (!isActive && !session.messages.length) {
         continue;
       }
@@ -288,7 +274,7 @@ export class ChatSessionStore {
       const sorted = sortSessionsByUpdatedAt(sessions);
       let storedNonFavoriteContentSessions = 0;
       for (const session of sorted) {
-        const isActive = activeSessionIds.has(session.id);
+        const isActive = session.id === activeSession.id;
         if (isActive || session.isFavorite) {
           compacted.push(session);
           continue;
@@ -315,15 +301,6 @@ export class ChatSessionStore {
 
   private setActiveSessionId(sessionId: string): void {
     this.activeSessionIdValue = sessionId;
-    this.activeSessionIdsByWorkspace[this.workspaceScope.key] = sessionId;
-  }
-
-  private getActiveSessionIds(): Set<string> {
-    const ids = new Set(Object.values(this.activeSessionIdsByWorkspace).filter((id) => typeof id === 'string' && id));
-    if (this.activeSessionIdValue) {
-      ids.add(this.activeSessionIdValue);
-    }
-    return ids;
   }
 }
 
@@ -383,7 +360,7 @@ export function getCurrentWorkspaceSessionScope(): WorkspaceSessionScope {
   };
 }
 
-function normalizeStoredSessions(value: unknown, workspaceScope: WorkspaceSessionScope): ChatSession[] {
+export function normalizeStoredSessions(value: unknown, workspaceScope: WorkspaceSessionScope): ChatSession[] {
   if (!isRecord(value) || !Array.isArray(value.sessions)) {
     return [];
   }
@@ -391,6 +368,7 @@ function normalizeStoredSessions(value: unknown, workspaceScope: WorkspaceSessio
   const language = getConfiguredKeepseekLanguage();
   const sessions: ChatSession[] = [];
   const seen = new Set<string>();
+  const now = new Date().toISOString();
 
   for (const item of value.sessions) {
     if (!isRecord(item) || typeof item.id !== 'string' || seen.has(item.id)) {
@@ -400,8 +378,8 @@ function normalizeStoredSessions(value: unknown, workspaceScope: WorkspaceSessio
     const messages = Array.isArray(item.messages)
       ? item.messages.map(normalizeStoredMessage).filter((message): message is ChatMessage => Boolean(message))
       : [];
-    const createdAt = typeof item.createdAt === 'string' ? item.createdAt : new Date().toISOString();
-    const updatedAt = typeof item.updatedAt === 'string' ? item.updatedAt : createdAt;
+    const createdAt = normalizeSessionTimestamp(item.createdAt, now);
+    const updatedAt = normalizeSessionTimestamp(item.updatedAt, createdAt);
     const customTitle = typeof item.customTitle === 'string' && item.customTitle.trim()
       ? item.customTitle.trim()
       : undefined;
@@ -437,7 +415,7 @@ function normalizeStoredSessions(value: unknown, workspaceScope: WorkspaceSessio
   return sortSessionsByUpdatedAt(sessions);
 }
 
-function normalizeStoredActiveSessionIds(value: unknown, sessions: ChatSession[]): Record<string, string> {
+export function normalizeStoredActiveSessionIds(value: unknown, sessions: ChatSession[]): Record<string, string> {
   const activeSessionIdsByWorkspace: Record<string, string> = {};
   if (isRecord(value) && isRecord(value.activeSessionIdsByWorkspace)) {
     for (const [workspaceKey, sessionId] of Object.entries(value.activeSessionIdsByWorkspace)) {
@@ -466,7 +444,7 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     role,
     content: value.content,
     expandedContent: typeof value.expandedContent === 'string' ? value.expandedContent : undefined,
-    createdAt: typeof value.createdAt === 'string' ? value.createdAt : new Date().toISOString(),
+    createdAt: normalizeSessionTimestamp(value.createdAt, new Date().toISOString()),
     modelId: typeof value.modelId === 'string' ? value.modelId : undefined,
     reasoningContent: typeof value.reasoningContent === 'string' ? value.reasoningContent : undefined
   };
@@ -477,8 +455,25 @@ function createTitleFromMessages(messages: ChatMessage[], language: KeepseekLang
   return firstUserMessage ? createSessionTitle(firstUserMessage.content, language) : localize(language, 'defaultSessionTitle');
 }
 
-function sortSessionsByUpdatedAt(sessions: ChatSession[]): ChatSession[] {
-  return [...sessions].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+export function sortSessionsByUpdatedAt(sessions: ChatSession[]): ChatSession[] {
+  return [...sessions].sort((a, b) => getSessionUpdatedTimestamp(b) - getSessionUpdatedTimestamp(a));
+}
+
+export function getSessionUpdatedTimestamp(session: ChatSession): number {
+  const updatedAt = Date.parse(session.updatedAt);
+  if (Number.isFinite(updatedAt)) {
+    return updatedAt;
+  }
+
+  const createdAt = Date.parse(session.createdAt);
+  return Number.isFinite(createdAt) ? createdAt : 0;
+}
+
+function normalizeSessionTimestamp(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+  return Number.isFinite(Date.parse(value)) ? value : fallback;
 }
 
 function getUriLabel(uri: vscode.Uri): string {

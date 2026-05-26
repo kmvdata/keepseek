@@ -10,6 +10,7 @@ import { ChatSessionStore, createSessionTitle, getCurrentWorkspaceSessionScope, 
 import { createContextUsageEstimate } from './contextUsage';
 import { DraftEditStore } from './draftEditStore';
 import { openFileReference } from './fileReferenceOpener';
+import { GlobalSessionStorage } from './globalSessionStorage';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_HISTORY_RETENTION_DAYS,
@@ -133,7 +134,6 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private readonly fileContext = new FileContextStore();
   private readonly agentRunner = new AgentRunner();
-  private readonly sessionStore: ChatSessionStore;
   private readonly draftEdits: DraftEditStore;
   private readonly authorizedExternalReferenceUris = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
@@ -152,10 +152,9 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   public constructor(
     private readonly extensionUri: vscode.Uri,
-    sessionStorage: vscode.Memento,
+    private readonly sessionStore: ChatSessionStore,
     private readonly globalStorageUri: vscode.Uri
   ) {
-    this.sessionStore = new ChatSessionStore(sessionStorage, this.language, getCurrentWorkspaceSessionScope());
     this.draftEdits = new DraftEditStore(
       new SafeFileEditor((key, values) => this.t(key, values)),
       this.sessionStore,
@@ -178,7 +177,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async refreshWorkspaceScope(): Promise<void> {
-    if (!this.sessionStore.setWorkspaceScope(getCurrentWorkspaceSessionScope())) {
+    if (!(await this.sessionStore.setWorkspaceScope(getCurrentWorkspaceSessionScope()))) {
       return;
     }
 
@@ -718,6 +717,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
     this.draftEdits.clear();
     await this.sessionStore.createNewSession(this.language);
+    await this.cleanupExpiredSessions({ post: false });
     this.postToWebview({ type: 'sessionChanged' });
     this.postState();
   }
@@ -1133,7 +1133,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async cleanupExpiredSessions(options: { post?: boolean } = {}): Promise<void> {
-    const changed = await this.sessionStore.cleanupExpiredSessions(getConfiguredHistoryRetentionDays());
+    const changed = await this.sessionStore.cleanupExpiredSessions();
     if (changed && options.post !== false) {
       this.postState();
     }
@@ -1193,10 +1193,17 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 }
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   ensureKeybindings(context);
 
-  const provider = new KeepseekChatViewProvider(context.extensionUri, context.workspaceState, context.globalStorageUri);
+  const globalSessionStorage = new GlobalSessionStorage(context.globalStorageUri);
+  const workspaceScope = getCurrentWorkspaceSessionScope();
+  await globalSessionStorage.migrateLegacyWorkspaceState(context.workspaceState, workspaceScope);
+  const sessionStore = new ChatSessionStore(globalSessionStorage, getConfiguredKeepseekLanguage(), workspaceScope);
+  await sessionStore.initialize();
+  await sessionStore.cleanupExpiredSessions();
+
+  const provider = new KeepseekChatViewProvider(context.extensionUri, sessionStore, context.globalStorageUri);
 
   const webviewProviders: vscode.Disposable[] = [
     vscode.window.registerWebviewViewProvider(KeepseekChatViewProvider.viewType, provider, {

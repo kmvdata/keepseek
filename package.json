@@ -283,8 +283,8 @@
           "type": "number",
           "default": 7,
           "minimum": 1,
-          "maximum": 365,
-          "description": "Number of days to retain non-favorited historical sessions based on their last update time."
+          "maximum": 60,
+          "description": "Default number of recent days shown in the session history menu. Stored sessions are hard-deleted after 60 days based on their last update time, except the currently active session in the open workspace."
         },
         "keepseek.language": {
           "type": "string",

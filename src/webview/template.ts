@@ -47,7 +47,7 @@ export function getTemplate(): string {
       <button id="settingsHistoryMenuItem" type="button" class="command-row settings-menu-row">
         <span class="command-row-main">
           <span class="command-row-title" data-i18n="settingsHistoryMenuTitle">历史会话</span>
-          <span class="command-row-description" data-i18n="settingsHistoryMenuDescription">保留天数与自动清理</span>
+          <span class="command-row-description" data-i18n="settingsHistoryMenuDescription">默认显示范围与 60 天清理</span>
         </span>
       </button>
       <div class="settings-language-item">

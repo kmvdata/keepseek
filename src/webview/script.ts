@@ -443,7 +443,11 @@ export function getScript(): string {
 
     if (sessionMenu) {
       sessionMenu.addEventListener('click', function(event) {
-        var target = event.target instanceof Element ? event.target : null;
+        var target = event.target instanceof Element
+          ? event.target
+          : event.target instanceof Node
+            ? event.target.parentElement
+            : null;
         if (!target) return;
 
         var actionButton = target.closest('button[data-session-action]');
@@ -805,6 +809,15 @@ export function getScript(): string {
         favoriteButton.setAttribute('aria-label', t(isFavorite ? 'unfavoriteSession' : 'favoriteSession'));
         favoriteButton.title = t(isFavorite ? 'unfavoriteSession' : 'favoriteSession');
         favoriteButton.textContent = isFavorite ? '★' : '☆';
+        favoriteButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          var button = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+          var favoriteSessionId = button?.dataset.sessionId || '';
+          if (favoriteSessionId) {
+            vscode.postMessage({ type: 'toggleSessionFavorite', sessionId: favoriteSessionId });
+          }
+        });
 
         var main = document.createElement('div');
         main.className = 'session-menu-item-main';
@@ -880,7 +893,7 @@ export function getScript(): string {
     }
 
     function normalizeSessionRetentionDays(value) {
-      return normalizeIntegerInRange(value, 1, 365, 7);
+      return normalizeIntegerInRange(value, 1, 60, 7);
     }
 
     function normalizeSessionRangeDays(value) {

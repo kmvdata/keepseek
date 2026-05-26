@@ -211,11 +211,11 @@ export function getInputTemplate(): string {
           <span class="settings-dialog-title" data-i18n="historySettingsDialogTitle">历史会话</span>
         </div>
         <div class="settings-dialog-body">
-          <p class="settings-dialog-desc" data-i18n="historySettingsDialogDesc">设置未关注历史会话的自动保留天数。</p>
+          <p class="settings-dialog-desc" data-i18n="historySettingsDialogDesc">设置历史菜单的默认显示范围；会话按最后更新时间全局最多保留 60 天。</p>
           <label class="settings-field">
-            <span class="settings-field-label" data-i18n="settingsHistoryRetentionDaysLabel">历史会话保留天数</span>
-            <input id="historyRetentionDaysInput" class="settings-input" type="number" min="1" max="365" step="1" inputmode="numeric" autocomplete="off" />
-            <span class="settings-field-hint" data-i18n="settingsHistoryRetentionDaysHint">1～365 天；只清理未关注且非当前活跃的过期会话</span>
+            <span class="settings-field-label" data-i18n="settingsHistoryRetentionDaysLabel">历史菜单默认显示天数</span>
+            <input id="historyRetentionDaysInput" class="settings-input" type="number" min="1" max="60" step="1" inputmode="numeric" autocomplete="off" />
+            <span class="settings-field-hint" data-i18n="settingsHistoryRetentionDaysHint">1～60 天；只影响菜单默认范围，历史会话仍按 60 天硬上限清理</span>
           </label>
         </div>
         <div class="settings-dialog-footer">

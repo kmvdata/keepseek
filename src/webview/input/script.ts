@@ -1965,6 +1965,7 @@ export function getInputScript(): string {
       var defaultToolResultTokenBudget = 0;
       var maxToolResultTokenBudget = 1000000;
       var defaultHistoryRetentionDays = 7;
+      var maxHistoryRetentionDays = 60;
 
       function setApiKeyVisible(isVisible, shouldFocus) {
         apiKeyVisible = Boolean(isVisible);
@@ -2029,7 +2030,7 @@ export function getInputScript(): string {
         if (!historySettingsOverlay) { return; }
         var values = settings && typeof settings === 'object' ? settings : {};
         if (historyRetentionDaysInput) {
-          historyRetentionDaysInput.value = String(normalizeIntegerInRange(values.historyRetentionDays, 1, 365, defaultHistoryRetentionDays));
+          historyRetentionDaysInput.value = String(normalizeIntegerInRange(values.historyRetentionDays, 1, maxHistoryRetentionDays, defaultHistoryRetentionDays));
         }
         historySettingsOverlay.classList.remove('hidden');
         if (historyRetentionDaysInput) {
@@ -2173,7 +2174,7 @@ export function getInputScript(): string {
           var historyRetentionDays = normalizeIntegerInRange(
             historyRetentionDaysInput ? historyRetentionDaysInput.value : defaultHistoryRetentionDays,
             1,
-            365,
+            maxHistoryRetentionDays,
             defaultHistoryRetentionDays
           );
           if (historyRetentionDaysInput) {
