@@ -322,53 +322,6 @@ export function getStyles(): string {
       line-height: 1.2;
     }
 
-    .session-menu-tabs {
-      display: flex;
-      gap: 4px;
-      padding: 2px 4px 5px;
-      overflow-x: auto;
-      scrollbar-width: thin;
-    }
-
-    .session-menu-tab {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      flex: 0 0 auto;
-      max-width: 168px;
-      min-height: 26px;
-      min-width: 0;
-      padding: 3px 8px;
-      border: 1px solid var(--vscode-button-border, transparent);
-      border-radius: 4px;
-      color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
-      background: var(--vscode-button-secondaryBackground, transparent);
-      font-size: 11px;
-      line-height: 1.2;
-      white-space: nowrap;
-    }
-
-    .session-menu-tab.is-active {
-      color: var(--vscode-list-activeSelectionForeground, var(--vscode-button-foreground));
-      background: var(--vscode-list-activeSelectionBackground, var(--vscode-button-background));
-    }
-
-    .session-menu-tab-label {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .session-menu-tab-count {
-      color: var(--vscode-descriptionForeground);
-      font-size: 10px;
-    }
-
-    .session-menu-tab.is-active .session-menu-tab-count {
-      color: inherit;
-      opacity: 0.8;
-    }
-
     .session-menu-controls,
     .session-menu-bulk {
       display: flex;
@@ -378,24 +331,15 @@ export function getStyles(): string {
 
     .session-menu-controls {
       align-items: center;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
     }
 
     .session-menu-bulk {
       align-items: stretch;
     }
 
-    .session-menu-range {
-      display: grid;
-      grid-template-columns: auto minmax(92px, 1fr);
-      align-items: center;
-      gap: 5px;
-      min-width: 150px;
-      color: var(--vscode-descriptionForeground);
-      font-size: 11px;
-    }
-
-    .session-menu-range select {
+    .session-menu-workspace-select,
+    .session-menu-range-select {
       height: 26px;
       min-width: 0;
       border: 1px solid var(--vscode-input-border, var(--vscode-widget-border));
@@ -403,6 +347,18 @@ export function getStyles(): string {
       color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
       background: var(--vscode-dropdown-background, var(--vscode-input-background));
       font: inherit;
+    }
+
+    .session-menu-workspace-select {
+      flex: 1 1 33%;
+      max-width: 33%;
+      min-width: 72px;
+      text-overflow: ellipsis;
+    }
+
+    .session-menu-range-select {
+      flex: 0 0 auto;
+      max-width: 86px;
     }
 
     .session-menu-filter,
@@ -416,10 +372,13 @@ export function getStyles(): string {
       background: var(--vscode-button-secondaryBackground, transparent);
       font-size: 11px;
       line-height: 1.2;
+      white-space: nowrap;
     }
 
     .session-menu-delete-workspace {
-      flex: 1 1 100%;
+      display: block;
+      width: calc(100% - 8px);
+      margin: 2px 4px 4px;
       min-width: 0;
       color: var(--vscode-errorForeground, var(--vscode-button-secondaryForeground, var(--vscode-foreground)));
       white-space: normal;
@@ -438,6 +397,10 @@ export function getStyles(): string {
       background: var(--vscode-button-background);
     }
 
+    .session-menu-edit-toggle {
+      margin-left: auto;
+    }
+
     .session-menu-bulk button {
       flex: 1 1 0;
       min-width: 0;
@@ -453,7 +416,7 @@ export function getStyles(): string {
 
     .session-menu-item {
       display: grid;
-      grid-template-columns: 24px minmax(0, 1fr);
+      grid-template-columns: 24px minmax(0, 1fr) 28px;
       align-items: center;
       gap: 6px;
       width: 100%;
@@ -468,7 +431,7 @@ export function getStyles(): string {
     }
 
     .session-menu.is-multi-select .session-menu-item {
-      grid-template-columns: 18px 24px minmax(0, 1fr);
+      grid-template-columns: 18px 24px minmax(0, 1fr) 28px;
     }
 
     .session-menu-item.is-other-workspace {
@@ -484,11 +447,6 @@ export function getStyles(): string {
       color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
       background: var(--vscode-quickInputList-focusBackground, var(--vscode-list-hoverBackground));
       outline: none;
-    }
-
-    .session-menu-item.is-active {
-      background: var(--vscode-list-activeSelectionBackground, var(--vscode-toolbar-activeBackground));
-      color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
     }
 
     .session-menu-item-title,
@@ -525,12 +483,7 @@ export function getStyles(): string {
       line-height: 1.25;
     }
 
-    .session-menu-item.is-active .session-menu-item-meta {
-      color: inherit;
-      opacity: 0.78;
-    }
-
-    .session-menu-item.is-favorite:not(.is-active) {
+    .session-menu-item.is-favorite {
       box-shadow: inset 2px 0 0 var(--vscode-textLink-foreground);
     }
 
@@ -564,6 +517,34 @@ export function getStyles(): string {
 
     .session-menu-star.is-active {
       color: var(--vscode-textLink-foreground);
+    }
+
+    .session-menu-rename {
+      display: grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      border: none;
+      border-radius: 4px;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+      opacity: 0;
+      transform: translateX(6px);
+      transition: opacity 120ms ease, transform 120ms ease, background-color 120ms ease, color 120ms ease;
+    }
+
+    .session-menu-item:hover .session-menu-rename,
+    .session-menu-item:focus-within .session-menu-rename {
+      opacity: 1;
+      transform: translateX(0);
+    }
+
+    .session-menu-rename:hover,
+    .session-menu-rename:focus-visible {
+      color: var(--vscode-textLink-foreground);
+      background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+      outline: none;
     }
 
     .session-menu-item-main {

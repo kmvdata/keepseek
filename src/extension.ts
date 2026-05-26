@@ -91,6 +91,7 @@ type WebviewMessage =
   | { type: 'deleteSessions'; sessionIds: string[] }
   | { type: 'listOtherWorkspaces' }
   | { type: 'loadOtherWorkspaceSessions'; workspaceKey: string }
+  | { type: 'copyOtherWorkspaceSession'; workspaceKey: string; sessionId: string }
   | { type: 'deleteOtherWorkspaceSessions'; workspaceKey: string; sessionIds: string[] }
   | { type: 'deleteOtherWorkspace'; workspaceKey: string }
   | { type: 'setSelectedModel'; modelId: string }
@@ -575,6 +576,9 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'loadOtherWorkspaceSessions':
         await this.postOtherWorkspaceSessions(message.workspaceKey);
         return;
+      case 'copyOtherWorkspaceSession':
+        await this.copyOtherWorkspaceSession(message.workspaceKey, message.sessionId);
+        return;
       case 'deleteOtherWorkspaceSessions':
         await this.deleteOtherWorkspaceSessions(message.workspaceKey, message.sessionIds);
         return;
@@ -739,11 +743,29 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async selectSession(sessionId: string): Promise<void> {
-    if (this.isBusy || sessionId === this.sessionStore.activeSessionId) {
+    if (this.isBusy) {
       return;
     }
 
+    const wasActiveSession = sessionId === this.sessionStore.activeSessionId;
     const session = await this.sessionStore.selectSession(sessionId);
+    if (!session) {
+      return;
+    }
+
+    if (!wasActiveSession) {
+      this.draftEdits.clear();
+      this.postToWebview({ type: 'sessionChanged' });
+    }
+    this.postState();
+  }
+
+  private async copyOtherWorkspaceSession(workspaceKey: string, sessionId: string): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+
+    const session = await this.sessionStore.copyOtherWorkspaceSession(workspaceKey, sessionId);
     if (!session) {
       return;
     }

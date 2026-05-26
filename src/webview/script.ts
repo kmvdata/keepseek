@@ -39,7 +39,7 @@ export function getScript(): string {
         sequence: 0
       },
       maxFileBytes: 200000,
-      historyRetentionDays: 7,
+      historyRetentionDays: 1,
       language: 'zh-CN',
       isMac: false
     };
@@ -110,9 +110,10 @@ export function getScript(): string {
     let settingsMenuOpen = false;
     let sessionMenuOpen = false;
     let sessionMultiSelectMode = false;
-    let sessionRangeDays = 7;
+    let sessionRangeDays = 1;
     let sessionFavoritesOnly = false;
     let selectedSessionIds = new Set();
+    let editingSessionTitleId = '';
     let activeWorkspaceTab = 'current';
     let otherWorkspaces = [];
     let otherWorkspaceSessions = {};
@@ -469,17 +470,27 @@ export function getScript(): string {
 
         var item = target.closest('[data-session-id]');
         var sessionId = item?.dataset.sessionId || '';
-        if (item?.dataset.sessionOrigin === 'other') {
-          setTransientStatus(t('sessionOtherProjectHint'));
-          return;
-        }
-        if (!sessionId || sessionId === state.activeSessionId) {
+        if (!sessionId) {
           closeSessionMenu();
           return;
         }
-        clearPromptDraft();
+
+        if (sessionId !== state.activeSessionId || item?.dataset.sessionOrigin === 'other') {
+          clearPromptDraft();
+        }
         closeSessionMenu();
-        vscode.postMessage({ type: 'selectSession', sessionId: sessionId });
+        if (item?.dataset.sessionOrigin === 'other') {
+          var workspaceKey = item.dataset.workspaceKey || activeWorkspaceTab;
+          if (workspaceKey) {
+            vscode.postMessage({
+              type: 'copyOtherWorkspaceSession',
+              workspaceKey: workspaceKey,
+              sessionId: sessionId
+            });
+          }
+        } else {
+          vscode.postMessage({ type: 'selectSession', sessionId: sessionId });
+        }
       });
 
       sessionMenu.addEventListener('change', function(event) {
@@ -490,6 +501,11 @@ export function getScript(): string {
           sessionRangeDays = normalizeSessionRangeDays(target.value);
           selectedSessionIds.clear();
           renderSessionMenu();
+          return;
+        }
+
+        if (target.dataset.sessionWorkspace === 'true') {
+          switchSessionWorkspace(target.value || 'current');
           return;
         }
 
@@ -507,7 +523,11 @@ export function getScript(): string {
           return;
         }
 
-        if (target.dataset.sessionTitle === 'true') {
+      });
+
+      sessionMenu.addEventListener('focusout', function(event) {
+        var target = event.target instanceof HTMLInputElement ? event.target : null;
+        if (target?.dataset.sessionTitle === 'true') {
           commitSessionTitle(target);
         }
       });
@@ -536,15 +556,22 @@ export function getScript(): string {
         var item = target.closest('[data-session-id]');
         if (item && (event.key === 'Enter' || event.key === ' ')) {
           event.preventDefault();
-          if (item.dataset.sessionOrigin === 'other') {
-            setTransientStatus(t('sessionOtherProjectHint'));
-            return;
-          }
           var keyboardSessionId = item.dataset.sessionId || '';
-          if (keyboardSessionId && keyboardSessionId !== state.activeSessionId) {
-            clearPromptDraft();
+          if (keyboardSessionId) {
+            var keyboardWorkspaceKey = item.dataset.workspaceKey || activeWorkspaceTab;
+            if (keyboardSessionId !== state.activeSessionId || item.dataset.sessionOrigin === 'other') {
+              clearPromptDraft();
+            }
             closeSessionMenu();
-            vscode.postMessage({ type: 'selectSession', sessionId: keyboardSessionId });
+            if (item.dataset.sessionOrigin === 'other' && keyboardWorkspaceKey) {
+              vscode.postMessage({
+                type: 'copyOtherWorkspaceSession',
+                workspaceKey: keyboardWorkspaceKey,
+                sessionId: keyboardSessionId
+              });
+            } else {
+              vscode.postMessage({ type: 'selectSession', sessionId: keyboardSessionId });
+            }
           }
         }
       });
@@ -748,9 +775,10 @@ export function getScript(): string {
 
     function openSessionMenu() {
       activeWorkspaceTab = 'current';
-      sessionRangeDays = normalizeSessionRetentionDays(state.historyRetentionDays);
+      sessionRangeDays = 1;
       sessionMultiSelectMode = false;
       selectedSessionIds.clear();
+      editingSessionTitleId = '';
       sessionMenuOpen = true;
       renderSessionControls();
       vscode.postMessage({ type: 'listOtherWorkspaces' });
@@ -761,6 +789,7 @@ export function getScript(): string {
       activeWorkspaceTab = 'current';
       sessionMultiSelectMode = false;
       selectedSessionIds.clear();
+      editingSessionTitleId = '';
       renderSessionControls();
     }
 
@@ -788,8 +817,6 @@ export function getScript(): string {
       title.textContent = t('sessionHistory');
       sessionMenu.append(title);
 
-      sessionMenu.append(renderWorkspaceTabs());
-
       if (otherWorkspacesError) {
         var workspaceError = document.createElement('div');
         workspaceError.className = 'session-menu-empty session-menu-error';
@@ -800,42 +827,45 @@ export function getScript(): string {
       var controls = document.createElement('div');
       controls.className = 'session-menu-controls';
 
-      var rangeLabel = document.createElement('label');
-      rangeLabel.className = 'session-menu-range';
-      var rangeText = document.createElement('span');
-      rangeText.textContent = t('sessionRangeLabel');
+      var workspaceSelect = document.createElement('select');
+      workspaceSelect.className = 'session-menu-workspace-select';
+      workspaceSelect.dataset.sessionWorkspace = 'true';
+      workspaceSelect.setAttribute('aria-label', t('sessionProjectSessions'));
+      renderWorkspaceOptions(workspaceSelect);
+
       var rangeSelect = document.createElement('select');
+      rangeSelect.className = 'session-menu-range-select';
       rangeSelect.dataset.sessionRange = 'true';
+      rangeSelect.setAttribute('aria-label', t('sessionRangeLabel'));
+      rangeSelect.title = t('sessionRangeLabel');
       renderSessionRangeOptions(rangeSelect);
-      rangeLabel.append(rangeText, rangeSelect);
 
       var multiSelectButton = document.createElement('button');
       multiSelectButton.type = 'button';
-      multiSelectButton.className = 'session-menu-filter' + (sessionMultiSelectMode ? ' is-active' : '');
+      multiSelectButton.className = 'session-menu-filter session-menu-edit-toggle' + (sessionMultiSelectMode ? ' is-active' : '');
       multiSelectButton.dataset.sessionAction = 'toggleMultiSelect';
       multiSelectButton.setAttribute('aria-pressed', sessionMultiSelectMode ? 'true' : 'false');
       multiSelectButton.textContent = t(sessionMultiSelectMode ? 'sessionExitMultiSelect' : 'sessionMultiSelect');
 
-      controls.append(rangeLabel);
-      if (currentTab) {
-        var favoriteOnlyButton = document.createElement('button');
-        favoriteOnlyButton.type = 'button';
-        favoriteOnlyButton.className = 'session-menu-filter' + (sessionFavoritesOnly ? ' is-active' : '');
-        favoriteOnlyButton.dataset.sessionAction = 'toggleFavoritesOnly';
-        favoriteOnlyButton.setAttribute('aria-pressed', sessionFavoritesOnly ? 'true' : 'false');
-        favoriteOnlyButton.textContent = '★ ' + t('sessionFavoritesOnly');
-        controls.append(favoriteOnlyButton);
-      }
+      controls.append(workspaceSelect, rangeSelect);
+      var favoriteOnlyButton = document.createElement('button');
+      favoriteOnlyButton.type = 'button';
+      favoriteOnlyButton.className = 'session-menu-filter' + (sessionFavoritesOnly ? ' is-active' : '');
+      favoriteOnlyButton.dataset.sessionAction = 'toggleFavoritesOnly';
+      favoriteOnlyButton.setAttribute('aria-pressed', sessionFavoritesOnly ? 'true' : 'false');
+      favoriteOnlyButton.textContent = t('sessionFavoritesOnly');
+      controls.append(favoriteOnlyButton);
       controls.append(multiSelectButton);
+      sessionMenu.append(controls);
+
       if (!currentTab) {
         var deleteWorkspaceButton = document.createElement('button');
         deleteWorkspaceButton.type = 'button';
         deleteWorkspaceButton.className = 'session-menu-delete-workspace';
         deleteWorkspaceButton.dataset.sessionAction = 'deleteWorkspace';
         deleteWorkspaceButton.textContent = t('sessionDeleteWorkspace');
-        controls.append(deleteWorkspaceButton);
+        sessionMenu.append(deleteWorkspaceButton);
       }
-      sessionMenu.append(controls);
 
       if (sessionMultiSelectMode) {
         var bulk = document.createElement('div');
@@ -909,7 +939,7 @@ export function getScript(): string {
         main.className = 'session-menu-item-main';
 
         var itemTitle;
-        if (currentTab) {
+        if (currentTab && editingSessionTitleId === session.id) {
           itemTitle = document.createElement('input');
           itemTitle.className = 'session-menu-item-title';
           itemTitle.type = 'text';
@@ -963,49 +993,43 @@ export function getScript(): string {
           item.append(favoriteButton);
         }
         item.append(main);
+        if (currentTab) {
+          var renameButton = document.createElement('button');
+          renameButton.type = 'button';
+          renameButton.className = 'session-menu-rename';
+          renameButton.dataset.sessionAction = 'startRename';
+          renameButton.dataset.sessionId = session.id;
+          renameButton.setAttribute('aria-label', t('renameSessionTitle'));
+          renameButton.title = t('renameSessionTitle');
+          renameButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+          item.append(renameButton);
+        }
         sessionMenu.append(item);
       }
     }
 
-    function renderWorkspaceTabs() {
-      var tabs = document.createElement('div');
-      tabs.className = 'session-menu-tabs';
-      tabs.setAttribute('role', 'tablist');
-
-      var currentButton = document.createElement('button');
-      currentButton.type = 'button';
-      currentButton.className = 'session-menu-tab' + (isCurrentWorkspaceTab() ? ' is-active' : '');
-      currentButton.dataset.sessionAction = 'switchWorkspaceTab';
-      currentButton.dataset.workspaceTab = 'current';
-      currentButton.setAttribute('role', 'tab');
-      currentButton.setAttribute('aria-selected', isCurrentWorkspaceTab() ? 'true' : 'false');
-      currentButton.textContent = t('sessionTabCurrentProject');
-      tabs.append(currentButton);
+    function renderWorkspaceOptions(select) {
+      var currentOption = document.createElement('option');
+      currentOption.value = 'current';
+      currentOption.textContent = t('sessionTabCurrentProject');
+      currentOption.title = currentOption.textContent;
+      select.append(currentOption);
 
       otherWorkspaces.forEach(function(workspace) {
-        var button = document.createElement('button');
         var workspaceKey = String(workspace.workspaceKey || '');
-        button.type = 'button';
-        button.className = 'session-menu-tab' + (activeWorkspaceTab === workspaceKey ? ' is-active' : '');
-        button.dataset.sessionAction = 'switchWorkspaceTab';
-        button.dataset.workspaceTab = workspaceKey;
-        button.setAttribute('role', 'tab');
-        button.setAttribute('aria-selected', activeWorkspaceTab === workspaceKey ? 'true' : 'false');
-        button.title = workspace.workspaceName || t('sessionTabOtherProject');
-
-        var label = document.createElement('span');
-        label.className = 'session-menu-tab-label';
-        label.textContent = truncateWorkspaceName(workspace.workspaceName || t('sessionTabOtherProject'));
-
-        var count = document.createElement('span');
-        count.className = 'session-menu-tab-count';
-        count.textContent = '(' + (Number(workspace.sessionCount) || 0) + ')';
-
-        button.append(label, count);
-        tabs.append(button);
+        if (!workspaceKey) return;
+        var option = document.createElement('option');
+        option.value = workspaceKey;
+        option.textContent = formatWorkspaceOptionLabel(workspace);
+        option.title = option.textContent;
+        select.append(option);
       });
 
-      return tabs;
+      select.value = activeWorkspaceTab;
+      if (select.value !== activeWorkspaceTab) {
+        activeWorkspaceTab = 'current';
+        select.value = 'current';
+      }
     }
 
     function getCurrentVisibleSessions() {
@@ -1038,6 +1062,9 @@ export function getScript(): string {
         return getSessionTimestamp(b) - getSessionTimestamp(a);
       });
       return sessions.filter(function(session) {
+        if (sessionFavoritesOnly && session.isFavorite !== true) {
+          return false;
+        }
         if (sessionRangeDays <= 0) {
           return true;
         }
@@ -1063,18 +1090,15 @@ export function getScript(): string {
       return Object.prototype.hasOwnProperty.call(otherWorkspaceSessions, workspaceKey);
     }
 
-    function truncateWorkspaceName(name) {
-      var value = String(name || t('sessionTabOtherProject'));
-      return value.length > 16 ? value.slice(0, 16) + '...' : value;
+    function formatWorkspaceOptionLabel(workspace) {
+      var name = String(workspace.workspaceName || t('sessionTabOtherProject'));
+      var count = Number(workspace.sessionCount) || 0;
+      return name + ' (' + count + ')';
     }
 
     function renderSessionRangeOptions(select) {
-      var configuredDays = normalizeSessionRetentionDays(state.historyRetentionDays);
-      var options = [];
-      [configuredDays, 7, 30].forEach(function(days) {
-        if (!options.some(function(option) { return option.value === String(days); })) {
-          options.push({ value: String(days), label: t('sessionRangeRecentDays', { count: days }) });
-        }
+      var options = [1, 2, 5].map(function(days) {
+        return { value: String(days), label: t('sessionRangeRecentDays', { count: days }) };
       });
       options.push({ value: 'all', label: t('sessionRangeAll') });
       options.forEach(function(option) {
@@ -1087,7 +1111,8 @@ export function getScript(): string {
     }
 
     function normalizeSessionRetentionDays(value) {
-      return normalizeIntegerInRange(value, 1, 60, 7);
+      var days = normalizeIntegerInRange(value, 1, 5, 1);
+      return days === 2 || days === 5 ? days : 1;
     }
 
     function normalizeSessionRangeDays(value) {
@@ -1106,21 +1131,45 @@ export function getScript(): string {
       });
     }
 
+    function switchSessionWorkspace(workspaceKey) {
+      var nextWorkspaceKey = workspaceKey || 'current';
+      if (nextWorkspaceKey === activeWorkspaceTab) {
+        return;
+      }
+      activeWorkspaceTab = nextWorkspaceKey;
+      selectedSessionIds.clear();
+      editingSessionTitleId = '';
+      if (!isCurrentWorkspaceTab() && (!hasOtherWorkspaceSessionsCache(activeWorkspaceTab) || otherWorkspaceSessionErrors[activeWorkspaceTab])) {
+        delete otherWorkspaceSessionErrors[activeWorkspaceTab];
+        delete otherWorkspaceSessions[activeWorkspaceTab];
+        vscode.postMessage({ type: 'loadOtherWorkspaceSessions', workspaceKey: activeWorkspaceTab });
+      }
+      renderSessionMenu();
+    }
+
+    function beginSessionTitleEdit(sessionId) {
+      editingSessionTitleId = sessionId;
+      renderSessionMenu();
+      setTimeout(function() {
+        var input = sessionMenu?.querySelector('input[data-session-title="true"][data-session-id="' + cssEscape(sessionId) + '"]');
+        if (input instanceof HTMLInputElement) {
+          input.focus();
+          input.select();
+        }
+      }, 0);
+    }
+
+    function cssEscape(value) {
+      if (window.CSS && typeof window.CSS.escape === 'function') {
+        return window.CSS.escape(value);
+      }
+      return String(value).replace(/"/g, '\\"');
+    }
+
     function handleSessionMenuAction(button) {
       var action = button.dataset.sessionAction || '';
       if (action === 'switchWorkspaceTab') {
-        var workspaceTab = button.dataset.workspaceTab || 'current';
-        if (workspaceTab === activeWorkspaceTab) {
-          return;
-        }
-        activeWorkspaceTab = workspaceTab || 'current';
-        selectedSessionIds.clear();
-        if (!isCurrentWorkspaceTab() && (!hasOtherWorkspaceSessionsCache(activeWorkspaceTab) || otherWorkspaceSessionErrors[activeWorkspaceTab])) {
-          delete otherWorkspaceSessionErrors[activeWorkspaceTab];
-          delete otherWorkspaceSessions[activeWorkspaceTab];
-          vscode.postMessage({ type: 'loadOtherWorkspaceSessions', workspaceKey: activeWorkspaceTab });
-        }
-        renderSessionMenu();
+        switchSessionWorkspace(button.dataset.workspaceTab || 'current');
         return;
       }
 
@@ -1139,17 +1188,27 @@ export function getScript(): string {
       if (action === 'toggleMultiSelect') {
         sessionMultiSelectMode = !sessionMultiSelectMode;
         selectedSessionIds.clear();
+        editingSessionTitleId = '';
         renderSessionMenu();
         return;
       }
 
       if (action === 'toggleFavoritesOnly') {
-        if (!isCurrentWorkspaceTab()) {
-          return;
-        }
         sessionFavoritesOnly = !sessionFavoritesOnly;
         selectedSessionIds.clear();
         renderSessionMenu();
+        return;
+      }
+
+      if (action === 'startRename') {
+        if (!isCurrentWorkspaceTab()) {
+          return;
+        }
+        var renameRow = button.closest('.session-menu-item');
+        var renameSessionId = button.dataset.sessionId || renameRow?.dataset.sessionId || '';
+        if (renameSessionId) {
+          beginSessionTitleEdit(renameSessionId);
+        }
         return;
       }
 
@@ -1207,14 +1266,32 @@ export function getScript(): string {
       var title = input.value.replace(/\\s+/g, ' ').trim();
       if (!title) {
         input.value = originalTitle || t('newSession');
+        editingSessionTitleId = '';
+        renderSessionMenu();
         return;
       }
       input.value = title;
+      editingSessionTitleId = '';
       if (!sessionId || title === originalTitle) {
+        renderSessionMenu();
         return;
       }
       input.dataset.originalTitle = title;
+      updateLocalSessionTitle(sessionId, title);
       vscode.postMessage({ type: 'renameSession', sessionId: sessionId, title: title });
+      renderSessionMenu();
+    }
+
+    function updateLocalSessionTitle(sessionId, title) {
+      if (!Array.isArray(state.sessionSummaries)) {
+        return;
+      }
+      state.sessionSummaries.forEach(function(session) {
+        if (session.id === sessionId) {
+          session.title = title;
+          session.customTitle = title;
+        }
+      });
     }
 
     function getSessionTimestamp(session) {

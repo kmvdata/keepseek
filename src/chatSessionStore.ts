@@ -100,18 +100,46 @@ export class ChatSessionStore {
   }
 
   public async selectSession(sessionId: string): Promise<ChatSession | undefined> {
-    if (sessionId === this.activeSessionIdValue) {
-      return undefined;
-    }
-
     const session = this.sessions.find((item) => item.id === sessionId && this.isInCurrentWorkspace(item));
     if (!session) {
       return undefined;
     }
 
+    session.updatedAt = new Date().toISOString();
     this.setActiveSessionId(session.id);
     await this.persist();
     return session;
+  }
+
+  public async copyOtherWorkspaceSession(workspaceKey: string, sessionId: string): Promise<ChatSession | undefined> {
+    const normalizedWorkspaceKey = workspaceKey.trim();
+    const normalizedSessionId = sessionId.trim();
+    if (!normalizedWorkspaceKey || normalizedWorkspaceKey === this.workspaceScope.key || !normalizedSessionId) {
+      return undefined;
+    }
+
+    const sessions = await this.sessionStorage.loadWorkspaceSessions(normalizedWorkspaceKey);
+    const source = sessions.find((session) => session.id === normalizedSessionId);
+    if (!source) {
+      return undefined;
+    }
+
+    const now = new Date().toISOString();
+    const copied: ChatSession = {
+      ...source,
+      id: randomUUID(),
+      messages: source.messages.map(copyMessage),
+      createdAt: now,
+      updatedAt: now,
+      workspaceKey: this.workspaceScope.key,
+      workspaceName: this.workspaceScope.name,
+      workspaceFolders: this.workspaceScope.folderUris
+    };
+
+    this.sessions.unshift(copied);
+    this.setActiveSessionId(copied.id);
+    await this.persist();
+    return copied;
   }
 
   public async toggleSessionFavorite(sessionId: string): Promise<ChatSession | undefined> {
@@ -379,6 +407,14 @@ function toSessionSummary(session: ChatSession, language: KeepseekLanguage): Cha
     workspaceName: session.workspaceName,
     isFavorite: Boolean(session.isFavorite),
     customTitle: session.customTitle
+  };
+}
+
+function copyMessage(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    id: randomUUID(),
+    isStreaming: undefined
   };
 }
 
