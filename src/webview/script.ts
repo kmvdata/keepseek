@@ -1491,7 +1491,7 @@ export function getScript(): string {
       if (!message) return;
 
       if (action === 'copy') {
-        copyMessageText(message);
+        copyMessageText(message, button);
         return;
       }
 
@@ -1510,13 +1510,31 @@ export function getScript(): string {
       }
     }
 
-    function copyMessageText(message) {
+    function copyMessageText(message, button) {
       var text = String(message.content || '');
       copyTextToClipboard(text).then(function() {
         setTransientStatus(t('copied'));
+        showMessageCopyFeedback(button);
       }, function() {
         setTransientStatus(t('copyFailed'));
       });
+    }
+
+    function showMessageCopyFeedback(button) {
+      if (!button) return;
+      button.innerHTML = getCheckIconSvg();
+      button.title = t('copied');
+      button.setAttribute('aria-label', t('copied'));
+      button.classList.add('is-copied');
+      button.disabled = true;
+      setTimeout(function() {
+        if (!button.isConnected) return;
+        button.innerHTML = getCopyIconSvg();
+        button.title = t('copy');
+        button.setAttribute('aria-label', t('copy'));
+        button.classList.remove('is-copied');
+        button.disabled = state.isBusy;
+      }, 1200);
     }
 
     function copyCodeBlockText(button) {
@@ -2176,6 +2194,8 @@ export function getScript(): string {
           }
           if (message.role === 'user') {
             body.append(createUserMessageActions(message));
+          } else if (message.role === 'assistant' && !message.isStreaming && String(message.content || '').length > 0) {
+            body.append(createAssistantMessageActions(message));
           }
         }
 
@@ -2193,8 +2213,19 @@ export function getScript(): string {
       actions.className = 'message-actions';
 
       actions.append(
-        createMessageActionButton(message, 'copy', t('copy'), '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="7" height="8" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.25"/><path d="M4 11H3.4A1.4 1.4 0 0 1 2 9.6V3.4A1.4 1.4 0 0 1 3.4 2h6.2A1.4 1.4 0 0 1 11 3.4V4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>'),
+        createMessageActionButton(message, 'copy', t('copy'), getCopyIconSvg()),
         createMessageActionButton(message, 'edit', t('editAndResend'), '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.25 11.95 4 9.2l5.9-5.9a1.45 1.45 0 0 1 2.05 2.05l-5.9 5.9-2.8.7Z" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="m8.95 4.25 2.8 2.8" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>')
+      );
+
+      return actions;
+    }
+
+    function createAssistantMessageActions(message) {
+      var actions = document.createElement('div');
+      actions.className = 'message-actions';
+
+      actions.append(
+        createMessageActionButton(message, 'copy', t('copy'), getCopyIconSvg())
       );
 
       return actions;

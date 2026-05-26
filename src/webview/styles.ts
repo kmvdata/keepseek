@@ -1133,6 +1133,10 @@ export function getStyles(): string {
       outline: none;
     }
 
+    .message-action-btn.is-copied {
+      color: var(--vscode-testing-iconPassed, var(--vscode-charts-green));
+    }
+
     .message-edit-form {
       display: flex;
       flex-direction: column;
