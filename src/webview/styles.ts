@@ -982,6 +982,24 @@ export function getStyles(): string {
       vertical-align: middle;
     }
 
+    .assistant-markdown .message-codex-file-link {
+      border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder, var(--vscode-panel-border)));
+      background: var(--vscode-inputOption-activeBackground, var(--vscode-chat-slashCommandBackground, var(--vscode-badge-background, var(--vscode-editor-background))));
+      color: var(--vscode-textLink-foreground);
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 0.92em;
+      font-weight: 600;
+    }
+
+    .assistant-markdown .message-codex-file-link:hover,
+    .assistant-markdown .message-codex-file-link:focus-visible {
+      border-color: var(--vscode-focusBorder, var(--vscode-inputOption-activeBorder, var(--vscode-panel-border)));
+      background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+      color: var(--vscode-textLink-activeForeground);
+      outline: 1px solid var(--vscode-focusBorder, transparent);
+      outline-offset: 1px;
+    }
+
     .message-external-link {
       color: var(--vscode-textLink-foreground);
       text-decoration: none;

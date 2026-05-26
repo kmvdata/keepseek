@@ -1324,6 +1324,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         agentSettings: this.agentSettings,
         messages: getVisibleMessages(this.messages),
         activeSessionId: this.sessionStore.activeSessionId,
+        workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath || folder.uri.toString()),
         sessionSummaries: this.sessionStore.getSessionSummaries(),
         contextFiles: contextFiles.map(({ content: _content, ...file }) => file),
         contextUsage: createContextUsageEstimate({

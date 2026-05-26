@@ -1482,9 +1482,7 @@ export function getInputScript(): string {
         anchor.setAttribute('contenteditable', 'false');
         anchor.draggable = false;
         anchor.title = href;
-        var isFullFile = reference.startLine === 0;
-        var fileName = getFileName(reference.path);
-        anchor.textContent = isFullFile ? fileName : fileName + ' (' + formatLineLabel(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn) + ')';
+        anchor.textContent = formatFileReferenceLabel(reference);
         anchor.dataset.path = reference.path;
         anchor.dataset.kind = 'file';
         anchor.dataset.startLine = String(reference.startLine);
@@ -1513,22 +1511,7 @@ export function getInputScript(): string {
       }
 
       function makeFileHref(reference) {
-        if (reference.startLine === 0) {
-          return reference.path;
-        }
-        var fragment = '#L' + reference.startLine;
-        if (reference.startColumn > 0) {
-          fragment += 'C' + reference.startColumn;
-        }
-        if (reference.endLine !== reference.startLine) {
-          fragment += '-L' + reference.endLine;
-          if (reference.endColumn > 0) {
-            fragment += 'C' + reference.endColumn;
-          }
-        } else if (reference.startColumn > 0 && reference.endColumn > reference.startColumn) {
-          fragment += '-C' + reference.endColumn;
-        }
-        return reference.path + fragment;
+        return makeFileReferenceHref(reference);
       }
 
       function makeDirectoryHref(reference) {
@@ -1544,10 +1527,6 @@ export function getInputScript(): string {
       function getDirectoryName(directoryPath) {
         var name = getFileName(directoryPath);
         return name.charAt(name.length - 1) === '/' ? name : name + '/';
-      }
-
-      function formatLineLabel(startLine, endLine, startColumn, endColumn) {
-        return formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, getLanguage());
       }
 
       function insertFileReferences(references) {
@@ -1783,8 +1762,7 @@ export function getInputScript(): string {
         if (reference.startLine > 0 && reference.endLine < reference.startLine) {
           reference.endLine = reference.startLine;
         }
-        var label = link.textContent || getFileName(reference.path);
-        return label + ' <' + makeFileHref(reference) + '>';
+        return formatFileReferenceLabel(reference) + String.fromCharCode(10) + '<' + makeFileHref(reference) + '>';
       }
 
       function collectPromptFileReferences() {
@@ -1878,10 +1856,7 @@ export function getInputScript(): string {
             link.textContent = getDirectoryName(reference.path);
             return;
           }
-          var fileName = getFileName(reference.path);
-          link.textContent = reference.startLine === 0
-            ? fileName
-            : fileName + ' (' + formatLineLabel(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn) + ')';
+          link.textContent = formatFileReferenceLabel(reference);
         });
       }
 

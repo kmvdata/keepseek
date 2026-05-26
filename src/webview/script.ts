@@ -15,6 +15,7 @@ export function getScript(): string {
       },
       messages: [],
       activeSessionId: '',
+      workspaceFolders: [],
       sessionSummaries: [],
       contextFiles: [],
       contextUsage: {
@@ -2322,9 +2323,7 @@ export function getScript(): string {
       anchor.title = href;
       anchor.draggable = false;
       anchor.setAttribute('contenteditable', 'false');
-      anchor.textContent = reference.startLine > 0
-        ? getMessageFileName(reference.path) + ' (' + formatMessageLineLabel(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn) + ')'
-        : getMessageFileName(reference.path);
+      anchor.textContent = formatFileReferenceLabel(reference);
       anchor.dataset.path = reference.path;
       anchor.dataset.kind = 'file';
       anchor.dataset.startLine = String(reference.startLine);
@@ -2437,8 +2436,7 @@ export function getScript(): string {
       if (reference.startLine > 0 && reference.endLine < reference.startLine) {
         reference.endLine = reference.startLine;
       }
-      var label = link.textContent || getMessageFileName(reference.path);
-      return label + ' <' + makeMessageFileHref(reference) + '>';
+      return formatFileReferenceLabel(reference) + String.fromCharCode(10) + '<' + makeMessageFileHref(reference) + '>';
     }
 
     function collectInlineEditorFileReferences(editor) {
@@ -3263,6 +3261,8 @@ export function getScript(): string {
           var emphasis = document.createElement('em');
           appendMarkdownFormattedText(emphasis, token.text);
           container.append(emphasis);
+        } else if (token.type === 'file-link') {
+          container.append(createCodexMarkdownFileLink(token.reference, token.text, token.href));
         } else if (token.type === 'link') {
           var link = document.createElement('a');
           link.className = 'message-external-link';
@@ -3332,7 +3332,18 @@ export function getScript(): string {
           continue;
         }
         var href = text.slice(labelEnd + 2, urlEnd).trim();
-        if (isSafeMarkdownExternalUrl(href)) {
+        var fileReference = parseCodexMarkdownFileLinkHref(href);
+        if (fileReference) {
+          return {
+            type: 'file-link',
+            start: start,
+            end: urlEnd + 1,
+            text: text.slice(start + 1, labelEnd),
+            href: href,
+            reference: fileReference,
+            priority: 1
+          };
+        } else if (isSafeMarkdownExternalUrl(href)) {
           return {
             type: 'link',
             start: start,
@@ -3553,6 +3564,69 @@ export function getScript(): string {
       return anchor;
     }
 
+    function createCodexMarkdownFileLink(reference, label, href) {
+      var anchor = createMessageFileLink(reference, formatCodexMarkdownFileLabel(label, reference));
+      anchor.classList.add('message-codex-file-link');
+      if (href) {
+        anchor.setAttribute('href', href);
+        anchor.title = href;
+        anchor.dataset.markdownHref = href;
+      }
+      return anchor;
+    }
+
+    function formatCodexMarkdownFileLabel(label, reference) {
+      var text = String(label || '').trim() || getMessageFileName(reference.path);
+      if (reference.startLine <= 0 || codexMarkdownLabelHasLineReference(text, reference)) {
+        return text;
+      }
+      return text + ' (' + formatLineReferenceLabel(
+        reference.startLine,
+        reference.endLine,
+        reference.startColumn,
+        reference.endColumn,
+        'en'
+      ) + ')';
+    }
+
+    function codexMarkdownLabelHasLineReference(label, reference) {
+      var text = String(label || '').trim().toLowerCase().replace(/\\s+/g, ' ');
+      if (!text || reference.startLine <= 0) {
+        return false;
+      }
+
+      var labels = getLineLabelVariants(
+        reference.startLine,
+        reference.endLine,
+        reference.startColumn,
+        reference.endColumn
+      ).concat(formatLineReferenceLabel(
+        reference.startLine,
+        reference.endLine,
+        reference.startColumn,
+        reference.endColumn,
+        'en'
+      ));
+      for (var i = 0; i < labels.length; i++) {
+        var lineLabel = String(labels[i] || '').toLowerCase();
+        if (lineLabel && (text.endsWith('(' + lineLabel + ')') || text.endsWith(' ' + lineLabel))) {
+          return true;
+        }
+      }
+
+      var range = reference.startLine === reference.endLine
+        ? String(reference.startLine)
+        : reference.startLine + '-' + reference.endLine;
+      if (text.endsWith(':' + range) || text.endsWith('#' + range)) {
+        return true;
+      }
+      if (reference.startLine === reference.endLine) {
+        return text.endsWith('#l' + reference.startLine);
+      }
+      return text.endsWith('#l' + reference.startLine + '-l' + reference.endLine) ||
+        text.endsWith('#l' + reference.startLine + '-' + reference.endLine);
+    }
+
     function parseMessageFileReference(target) {
       var directoryReference = parseMessageDirectoryReference(target);
       if (directoryReference) {
@@ -3571,6 +3645,87 @@ export function getScript(): string {
         reference.endLine = reference.startLine;
       }
       return reference;
+    }
+
+    function parseCodexMarkdownFileLinkHref(href) {
+      var text = String(href || '').trim();
+      if (!text || hasUnsafeMarkdownFileHrefScheme(text)) {
+        return null;
+      }
+
+      var reference = text.toLowerCase().indexOf('file:') === 0
+        ? parseCodexMarkdownFileUriReference(text)
+        : splitCodexMarkdownLineReference(text);
+      if (!reference || reference.startLine <= 0 || !isLikelyMessageFilePath(reference.path, text)) {
+        return null;
+      }
+      if (reference.endLine < reference.startLine) {
+        reference.endLine = reference.startLine;
+      }
+      return reference;
+    }
+
+    function hasUnsafeMarkdownFileHrefScheme(value) {
+      var text = String(value || '').trim();
+      if (text.indexOf('//') === 0) {
+        return true;
+      }
+      var match = /^([a-z][a-z\\d+.-]*):/i.exec(text);
+      if (!match) {
+        return false;
+      }
+      if (match[1].toLowerCase() === 'file') {
+        return false;
+      }
+      return !isMessageWindowsDrivePath(text);
+    }
+
+    function parseCodexMarkdownFileUriReference(href) {
+      var reference = parseMessageFileUri(href);
+      if (!reference) {
+        return null;
+      }
+      if (reference.startLine > 0) {
+        return reference;
+      }
+      return splitCodexMarkdownLineReference(reference.path);
+    }
+
+    function splitCodexMarkdownLineReference(value) {
+      var text = String(value || '').trim();
+      var hashReference = splitMessageLineReference(text);
+      if (hashReference.startLine > 0) {
+        return hashReference;
+      }
+
+      var separator = text.lastIndexOf(':');
+      if (separator < 0) {
+        return null;
+      }
+      var parsed = parseMessageLineRange(text.slice(separator + 1));
+      if (!parsed.valid) {
+        return null;
+      }
+      var filePath = decodeMarkdownFilePath(text.slice(0, separator));
+      if (!filePath) {
+        return null;
+      }
+      return {
+        path: filePath,
+        startLine: parsed.startLine,
+        endLine: parsed.endLine,
+        startColumn: parsed.startColumn,
+        endColumn: parsed.endColumn
+      };
+    }
+
+    function decodeMarkdownFilePath(value) {
+      var text = String(value || '').trim();
+      try {
+        return decodeURIComponent(text);
+      } catch {
+        return text;
+      }
     }
 
     function parseMessageDirectoryReference(target) {
@@ -3729,9 +3884,14 @@ export function getScript(): string {
         return getMessageDirectoryReferenceLabel(text, matchStart, reference);
       }
 
+      var bracketLabel = getBracketMessageReferenceLabel(text, matchStart);
+      if (bracketLabel) {
+        return bracketLabel;
+      }
+
       var fileName = getMessageFileName(reference.path);
       var labels = reference.startLine > 0
-        ? getLineLabelVariants(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn).map(function(label) {
+        ? getLegacyLineLabelVariants(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn).map(function(label) {
             return fileName + ' (' + label + ')';
           })
         : [];
@@ -3750,9 +3910,31 @@ export function getScript(): string {
 
       return {
         start: matchStart,
-        text: reference.startLine > 0
-          ? fileName + ' (' + formatMessageLineLabel(reference.startLine, reference.endLine, reference.startColumn, reference.endColumn) + ')'
-          : fileName
+        text: formatFileReferenceLabel(reference)
+      };
+    }
+
+    function getBracketMessageReferenceLabel(text, matchStart) {
+      var prefix = String(text || '').slice(0, matchStart);
+      var trailingWhitespaceMatch = /[ \\t]*(?:\\r?\\n[ \\t]*)?$/.exec(prefix);
+      var trailingWhitespace = trailingWhitespaceMatch ? trailingWhitespaceMatch[0] : '';
+      var labelEnd = prefix.length - trailingWhitespace.length;
+      if (labelEnd <= 0 || prefix.charAt(labelEnd - 1) !== ']') {
+        return null;
+      }
+
+      var lineStart = Math.max(prefix.lastIndexOf('\\n', labelEnd - 1) + 1, prefix.lastIndexOf('\\r', labelEnd - 1) + 1);
+      var labelStart = prefix.lastIndexOf('[', labelEnd - 1);
+      if (labelStart < lineStart || labelStart >= labelEnd - 1) {
+        return null;
+      }
+      if (prefix.slice(lineStart, labelStart).trim()) {
+        return null;
+      }
+
+      return {
+        start: labelStart,
+        text: prefix.slice(labelStart, labelEnd)
       };
     }
 
@@ -3786,37 +3968,30 @@ export function getScript(): string {
     }
 
     function makeMessageFileHref(reference) {
-      if (reference.startLine <= 0) {
-        return reference.path;
-      }
-      var fragment = '#L' + reference.startLine;
-      if (reference.startColumn > 0) {
-        fragment += 'C' + reference.startColumn;
-      }
-      if (reference.endLine !== reference.startLine) {
-        fragment += '-L' + reference.endLine;
-        if (reference.endColumn > 0) {
-          fragment += 'C' + reference.endColumn;
-        }
-      } else if (reference.startColumn > 0 && reference.endColumn > reference.startColumn) {
-        fragment += '-C' + reference.endColumn;
-      }
-      return reference.path + fragment;
+      return makeFileReferenceHref(reference);
     }
 
     function makeMessageDirectoryHref(reference) {
       return 'keepseek-dir:' + reference.path;
     }
 
-    function formatMessageLineLabel(startLine, endLine, startColumn, endColumn) {
-      return formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, getLanguage());
-    }
-
     function getLineLabelVariants(startLine, endLine, startColumn, endColumn) {
       var labels = [
         formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, getLanguage()),
-        formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, 'zh-CN'),
-        formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, 'en')
+        formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, getLanguage()),
+        formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, 'zh-CN'),
+        formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, 'en')
+      ];
+      return labels.filter(function(label, index) {
+        return labels.indexOf(label) === index;
+      });
+    }
+
+    function getLegacyLineLabelVariants(startLine, endLine, startColumn, endColumn) {
+      var labels = [
+        formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, getLanguage()),
+        formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, 'zh-CN'),
+        formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, 'en')
       ];
       return labels.filter(function(label, index) {
         return labels.indexOf(label) === index;
@@ -3824,6 +3999,29 @@ export function getScript(): string {
     }
 
     function formatLineReferenceLabel(startLine, endLine, startColumn, endColumn, language) {
+      var normalizedEndLine = Math.max(startLine, endLine || startLine);
+      var normalizedStartColumn = startColumn > 0 ? startColumn : 1;
+      var normalizedEndColumn = endColumn > 0 ? endColumn : normalizedStartColumn;
+      var hasColumnDetail = normalizedStartColumn !== 1 || normalizedEndColumn !== 1;
+
+      if (startLine === normalizedEndLine) {
+        if (!hasColumnDetail) {
+          return 'L' + startLine;
+        }
+        if (normalizedStartColumn === normalizedEndColumn) {
+          return 'L' + startLine + '#C' + normalizedStartColumn;
+        }
+        return 'L' + startLine + '#C' + normalizedStartColumn + '-L' + normalizedEndLine + '#C' + normalizedEndColumn;
+      }
+
+      if (!hasColumnDetail) {
+        return 'L' + startLine + '-' + normalizedEndLine;
+      }
+
+      return 'L' + startLine + '#C' + normalizedStartColumn + '-L' + normalizedEndLine + '#C' + normalizedEndColumn;
+    }
+
+    function formatLegacyLineReferenceLabel(startLine, endLine, startColumn, endColumn, language) {
       if (language === 'en') {
         if (startLine === endLine) {
           if (startColumn > 0) {
@@ -3858,6 +4056,189 @@ export function getScript(): string {
         return '\\u7b2c' + startLine + '\\u884c' + startCol + '-\\u7b2c' + endLine + '\\u884c' + endCol;
       }
       return '\\u7b2c' + startLine + '-' + endLine + '\\u884c';
+    }
+
+    function formatFileReferenceLabel(reference) {
+      var displayPath = getReferenceDisplayPath(reference.path);
+      if (reference.startLine > 0) {
+        return '[' + displayPath + '(' + formatLineReferenceLabel(
+          reference.startLine,
+          reference.endLine,
+          reference.startColumn,
+          reference.endColumn,
+          getLanguage()
+        ) + ')]';
+      }
+      return '[' + displayPath + ']';
+    }
+
+    function makeFileReferenceHref(reference) {
+      var href = makeFileReferenceBaseUri(reference.path);
+      if (reference.startLine <= 0) {
+        return href;
+      }
+      return href + '#' + formatFileReferenceFragment(reference);
+    }
+
+    function formatFileReferenceFragment(reference) {
+      var startLine = Math.max(1, Number(reference.startLine) || 1);
+      var endLine = Math.max(startLine, Number(reference.endLine) || startLine);
+      var startColumn = Math.max(1, Number(reference.startColumn) || 1);
+      var endColumn = Math.max(1, Number(reference.endColumn) || startColumn);
+      var fragment = 'L' + startLine + 'C' + startColumn;
+      if (endLine !== startLine || endColumn !== startColumn) {
+        fragment += '-L' + endLine + 'C' + endColumn;
+      }
+      return fragment;
+    }
+
+    function makeFileReferenceBaseUri(filePath) {
+      var text = String(filePath || '').trim();
+      if (!text) {
+        return '';
+      }
+      if (text.toLowerCase().indexOf('file:') === 0) {
+        try {
+          var url = new URL(text);
+          url.hash = '';
+          return url.toString();
+        } catch {
+          return stripReferenceHash(text);
+        }
+      }
+
+      var absolutePath = resolveReferencePathToAbsolutePath(text);
+      if (absolutePath && isAbsoluteReferencePath(absolutePath)) {
+        return pathToFileUri(absolutePath);
+      }
+      return stripReferenceHash(text);
+    }
+
+    function resolveReferencePathToAbsolutePath(filePath) {
+      var pathName = getFileReferencePathname(filePath);
+      if (isAbsoluteReferencePath(pathName)) {
+        return pathName;
+      }
+
+      var roots = getWorkspaceFolderPaths();
+      if (!roots.length) {
+        return pathName;
+      }
+
+      var normalizedRoot = stripTrailingReferenceSlashes(normalizeReferencePath(roots[0]));
+      var relativePath = normalizeReferencePath(pathName).replace(/^\\.\\//, '');
+      return normalizedRoot + '/' + relativePath;
+    }
+
+    function getReferenceDisplayPath(filePath) {
+      var pathName = getFileReferencePathname(filePath);
+      var normalizedPath = normalizeReferencePath(pathName);
+      var roots = getWorkspaceFolderPaths();
+      var bestRoot = '';
+
+      for (var i = 0; i < roots.length; i++) {
+        var root = stripTrailingReferenceSlashes(normalizeReferencePath(getFileReferencePathname(roots[i])));
+        if (root && isReferencePathInsideRoot(normalizedPath, root) && root.length > bestRoot.length) {
+          bestRoot = root;
+        }
+      }
+
+      if (bestRoot) {
+        var relativePath = normalizedPath.slice(bestRoot.length);
+        while (relativePath.charAt(0) === '/') {
+          relativePath = relativePath.slice(1);
+        }
+        return relativePath || getMessageFileName(normalizedPath);
+      }
+
+      return normalizedPath || String(filePath || '') || 'file';
+    }
+
+    function getWorkspaceFolderPaths() {
+      return Array.isArray(state.workspaceFolders)
+        ? state.workspaceFolders.filter(function(folder) { return typeof folder === 'string' && folder.trim(); })
+        : [];
+    }
+
+    function isReferencePathInsideRoot(filePath, rootPath) {
+      var normalizedPath = normalizeReferencePath(filePath);
+      var normalizedRoot = stripTrailingReferenceSlashes(normalizeReferencePath(rootPath));
+      if (!normalizedRoot) {
+        return false;
+      }
+      var comparePath = normalizeReferencePathForCompare(normalizedPath);
+      var compareRoot = normalizeReferencePathForCompare(normalizedRoot);
+      return comparePath === compareRoot || comparePath.indexOf(compareRoot + '/') === 0;
+    }
+
+    function normalizeReferencePathForCompare(filePath) {
+      var normalized = normalizeReferencePath(filePath);
+      return isMessageWindowsDrivePath(normalized) ? normalized.toLowerCase() : normalized;
+    }
+
+    function getFileReferencePathname(value) {
+      var text = String(value || '').trim();
+      if (text.toLowerCase().indexOf('file:') !== 0) {
+        return stripReferenceHash(text);
+      }
+      try {
+        var url = new URL(text);
+        var pathName = decodeURIComponent(url.pathname);
+        var filePath = url.hostname ? '//' + url.hostname + pathName : pathName;
+        if (filePath.charAt(0) === '/' && isMessageWindowsDrivePath(filePath.slice(1))) {
+          filePath = filePath.slice(1);
+        }
+        return filePath;
+      } catch {
+        return stripReferenceHash(text);
+      }
+    }
+
+    function pathToFileUri(filePath) {
+      var normalized = normalizeReferencePath(filePath);
+      if (normalized.indexOf('//') === 0) {
+        var uncParts = normalized.slice(2).split('/');
+        var host = uncParts.shift() || '';
+        return 'file://' + encodeURIComponent(host) + '/' + encodeFileUriPath(uncParts.join('/'));
+      }
+      if (isMessageWindowsDrivePath(normalized)) {
+        return 'file:///' + encodeFileUriPath(normalized);
+      }
+      if (normalized.charAt(0) !== '/') {
+        normalized = '/' + normalized;
+      }
+      return 'file://' + encodeFileUriPath(normalized);
+    }
+
+    function encodeFileUriPath(value) {
+      return encodeURI(String(value || '')).replace(/#/g, '%23').replace(/\\?/g, '%3F');
+    }
+
+    function normalizeReferencePath(value) {
+      return String(value || '').trim().split(String.fromCharCode(92)).join('/');
+    }
+
+    function stripTrailingReferenceSlashes(value) {
+      var text = String(value || '');
+      while (text.length > 1 && text.charAt(text.length - 1) === '/') {
+        text = text.slice(0, -1);
+      }
+      return text;
+    }
+
+    function stripReferenceHash(value) {
+      var text = String(value || '').trim();
+      var hash = text.lastIndexOf('#');
+      if (hash < 0) {
+        return text;
+      }
+      var parsed = parseMessageLineRange(text.slice(hash + 1));
+      return parsed.valid ? text.slice(0, hash) : text;
+    }
+
+    function isAbsoluteReferencePath(value) {
+      var text = String(value || '');
+      return text.charAt(0) === '/' || text.indexOf('//') === 0 || isMessageWindowsDrivePath(text);
     }
 
     function getMessageFileName(filePath) {

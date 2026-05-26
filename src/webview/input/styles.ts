@@ -57,6 +57,9 @@ export function getInputStyles(): string {
       background: var(--vscode-chat-slashCommandBackground, var(--vscode-badge-background, var(--vscode-editor-background)));
       color: var(--vscode-textLink-foreground);
       text-decoration: none;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-family: var(--vscode-editor-font-family, monospace);
       font-size: 12px;
       line-height: 18px;
       vertical-align: baseline;

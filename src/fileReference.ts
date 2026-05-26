@@ -207,6 +207,11 @@ function getFileReferenceReplacementStart(
   endColumn: number,
   language: KeepseekLanguage
 ): number {
+  const bracketLabelStart = getBracketFileReferenceReplacementStart(prompt, matchStart);
+  if (bracketLabelStart !== undefined) {
+    return bracketLabelStart;
+  }
+
   const fileName = getUriFileName(uri);
   const prefix = prompt.slice(0, matchStart);
   const labels = startLine > 0
@@ -221,6 +226,24 @@ function getFileReferenceReplacementStart(
   }
 
   return matchStart;
+}
+
+function getBracketFileReferenceReplacementStart(prompt: string, matchStart: number): number | undefined {
+  const prefix = prompt.slice(0, matchStart);
+  const trailingWhitespace = /[ \t]*(?:\r?\n[ \t]*)?$/u.exec(prefix)?.[0] ?? '';
+  const labelEnd = prefix.length - trailingWhitespace.length;
+  if (labelEnd <= 0 || prefix.charAt(labelEnd - 1) !== ']') {
+    return undefined;
+  }
+
+  const lineStart = Math.max(prefix.lastIndexOf('\n', labelEnd - 1) + 1, prefix.lastIndexOf('\r', labelEnd - 1) + 1);
+  const labelStart = prefix.lastIndexOf('[', labelEnd - 1);
+  if (labelStart < lineStart || labelStart >= labelEnd - 1) {
+    return undefined;
+  }
+
+  const beforeLabel = prefix.slice(lineStart, labelStart);
+  return beforeLabel.trim() ? undefined : labelStart;
 }
 
 async function expandPromptFileReference(
@@ -340,7 +363,36 @@ export function formatReferenceLineLabel(
   endLine: number,
   startColumn: number,
   endColumn: number,
-  language: KeepseekLanguage = DEFAULT_KEEPSEEK_LANGUAGE
+  _language: KeepseekLanguage = DEFAULT_KEEPSEEK_LANGUAGE
+): string {
+  const normalizedEndLine = Math.max(startLine, endLine || startLine);
+  const normalizedStartColumn = startColumn > 0 ? startColumn : 1;
+  const normalizedEndColumn = endColumn > 0 ? endColumn : normalizedStartColumn;
+  const hasColumnDetail = normalizedStartColumn !== 1 || normalizedEndColumn !== 1;
+
+  if (startLine === normalizedEndLine) {
+    if (!hasColumnDetail) {
+      return `L${startLine}`;
+    }
+    if (normalizedStartColumn === normalizedEndColumn) {
+      return `L${startLine}#C${normalizedStartColumn}`;
+    }
+    return `L${startLine}#C${normalizedStartColumn}-L${normalizedEndLine}#C${normalizedEndColumn}`;
+  }
+
+  if (!hasColumnDetail) {
+    return `L${startLine}-${normalizedEndLine}`;
+  }
+
+  return `L${startLine}#C${normalizedStartColumn}-L${normalizedEndLine}#C${normalizedEndColumn}`;
+}
+
+function formatLegacyReferenceLineLabel(
+  startLine: number,
+  endLine: number,
+  startColumn: number,
+  endColumn: number,
+  language: KeepseekLanguage
 ): string {
   if (language === 'en') {
     if (startLine === endLine) {
@@ -388,8 +440,9 @@ function getReferenceLineLabelVariants(
 ): string[] {
   const labels = [
     formatReferenceLineLabel(startLine, endLine, startColumn, endColumn, language),
-    formatReferenceLineLabel(startLine, endLine, startColumn, endColumn, 'zh-CN'),
-    formatReferenceLineLabel(startLine, endLine, startColumn, endColumn, 'en')
+    formatLegacyReferenceLineLabel(startLine, endLine, startColumn, endColumn, language),
+    formatLegacyReferenceLineLabel(startLine, endLine, startColumn, endColumn, 'zh-CN'),
+    formatLegacyReferenceLineLabel(startLine, endLine, startColumn, endColumn, 'en')
   ];
   return labels.filter((label, index) => labels.indexOf(label) === index);
 }
