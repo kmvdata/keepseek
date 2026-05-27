@@ -31,6 +31,7 @@ src/
 │   ├── styles.ts                # 主 Webview CSS 字符串
 │   ├── template.ts              # 主 Webview HTML 骨架字符串
 │   ├── script.ts                # 主 Webview JS 字符串
+│   ├── richTextShortcuts.ts     # 富文本输入/编辑器共享快捷键与剪贴板桥接
 │   └── input/
 │       ├── styles.ts            # 输入区 CSS 字符串
 │       ├── template.ts          # 输入区 HTML 字符串
@@ -50,6 +51,7 @@ src/
 - `webview/template.ts`、`webview/styles.ts`、`webview/script.ts` 和 `webview/input/*` 只输出字符串。
 - `webview/html.ts` 负责 CSP、nonce、logo URI 和三段字符串拼装。
 - Webview 通过 `acquireVsCodeApi()` 与 Provider 通信，通过 `vscode.postMessage({ type, ... })` 发送 `WebviewMessage`。
+- `webview/richTextShortcuts.ts` 生成共享的 Webview 端快捷键控制器，底部 prompt 输入框和消息编辑输入框都通过它支持 Emacs/macOS 文本快捷键；不要在两个编辑器里复制快捷键实现。
 
 **编排层**
 
@@ -211,12 +213,12 @@ Agent 支持四个工具名：
 ## 编码规范
 
 - 新增配置：先改 `package.json` 的 `contributes.configuration`，再在 `config.ts` 增加读取/归一化。
-- 新增 Webview → 扩展消息：更新 `WebviewMessage` 联合类型、`handleMessage()`、Webview 脚本发送点。
+- 新增 Webview → 扩展消息：更新 `WebviewMessage` 联合类型、`handleMessage()`、Webview 脚本发送点；剪贴板兜底消息 `requestClipboardText` / `writeClipboardText` 由 `webview/richTextShortcuts.ts` 统一发起。
 - 新增扩展 → Webview 主动消息：不要放进 `WebviewMessage`，但要在 Webview message listener 中处理。
 - 新增 Agent 工具：更新 `agentRunner.ts` 的工具 schema 和工具路由；工具实现优先放独立模块。
 - 修改文件或目录引用格式：同步检查 `fileReference.ts`、`directoryReference.ts`、`webview/input/script.ts`、`webview/script.ts` 的序列化/反序列化/打开逻辑。
 - 修改 DraftEdit 应用行为：优先改 `DraftEditStore` / `SafeFileEditor`，不要放进 `AgentRunner`。
-- 修改样式只碰 `webview/styles.ts` 或 `webview/input/styles.ts`；修改输入交互只碰 `webview/input/script.ts`；修改 transcript/设置/会话 UI 只碰 `webview/script.ts`。
+- 修改样式只碰 `webview/styles.ts` 或 `webview/input/styles.ts`；修改输入区专属交互只碰 `webview/input/script.ts`；修改 transcript/设置/会话 UI 只碰 `webview/script.ts`；修改富文本通用快捷键、mark/region、剪贴板桥接优先改 `webview/richTextShortcuts.ts`。
 - 注释只解释非显而易见的边界、安全规则或协议兼容逻辑。
 - 不要复制 Markdown fence、字节格式化、配置读取、错误字符串等公共逻辑；使用 `markdown.ts`、`format.ts`、`config.ts`、`errors.ts`。
 - 捕获异常时要么转换成用户可见本地化消息，要么转换成工具 JSON 错误。
@@ -225,6 +227,7 @@ Agent 支持四个工具名：
 
 - `extension.ts` 仍是 VS Code Provider 编排中心，新增大功能时优先创建服务模块，再在 Provider 中接线。
 - `webview/script.ts` 和 `webview/input/script.ts` 仍是大字符串文件；改动时保持 DOM id、message type、序列化格式兼容，并重点手测输入、拖拽、`@` 引用、编辑重发、Apply/Discard。
+- `webview/richTextShortcuts.ts` 同时影响底部 prompt 输入框和消息编辑输入框；修改后必须验证 Emacs 光标移动、mark/region、`Ctrl-K` 剪切行尾、`Ctrl-W` 剪切选区、`Alt-W` 复制、`Ctrl-Y` 粘贴，以及 `Command-A/C/X/V/Z` 系统习惯。
 - `safeFileEditor.ts` 当前只做确认后的整文件写入；如果未来增加 diff、冲突检测、备份或权限确认，应在这里扩展，不要放进 AgentRunner。
 - `fileReference.ts` / `directoryReference.ts` 是引用格式兼容核心；修改时必须验证全文引用、行段引用、目录引用、外部授权、不可读文件跳过。
 

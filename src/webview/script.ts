@@ -1,4 +1,5 @@
 import { getInputScript } from './input/script';
+import { getRichTextShortcutsScript } from './richTextShortcuts';
 import { WEBVIEW_TRANSLATIONS } from '../i18n';
 
 export function getScript(): string {
@@ -66,6 +67,8 @@ export function getScript(): string {
       }
       return t(state.isMac ? 'sendShortcutHintMac' : 'sendShortcutHint');
     }
+
+    ${getRichTextShortcutsScript()}
 
     function getLanguageDisplayName(language) {
       return language === 'en'
@@ -138,6 +141,21 @@ export function getScript(): string {
     let editReferenceResourcesError = '';
     let editReferenceResourceRequestSequence = 0;
     let editReferenceResourceRequestId = '';
+    const inlineShortcutController = window.keepseekRichTextShortcuts.createController({
+      getEditor: function() { return getActiveInlineEditor(); },
+      isRangeInside: function(range, editor) { return isRangeInsideInlineEditor(range, editor); },
+      isNodeInside: function(node, editor) { return isNodeInsideInlineEditor(node, editor); },
+      setSelectionRange: function(editor, range) { setInlineEditorSelectionRange(editor, range); },
+      saveSelection: function(editor) { saveEditSelection(editor); },
+      restoreSelection: function(editor) { setInlineEditorSelectionRange(editor, getInlineEditorInsertionRange(editor)); },
+      getInsertionRange: function(editor) { return getInlineEditorInsertionRange(editor); },
+      insertText: function(editor, text) {
+        insertInlinePlainText(editor, text);
+        refreshInlineEditorAfterEdit(editor);
+      },
+      onSelectionChanged: function(editor) { syncEditReferenceMenuFromEditor(editor); },
+      onEdited: function(editor) { refreshInlineEditorAfterEdit(editor); }
+    });
     const AGENT_STATUS_ROTATION_MS = 2600;
     const agentStatusPools = {
       preparing: ['agentStatusPreparingContext', 'agentStatusPreparingRequest'],
@@ -226,14 +244,7 @@ export function getScript(): string {
       var target = event.target instanceof Element ? event.target : null;
       var editor = target?.closest('.message-edit-input');
       if (!editor || !transcript.contains(editor)) return;
-      sanitizeInlineEditorContent(editor);
-      if (editor.dataset.messageId === editingMessageId) {
-        editingDraftText = serializeInlineEditor(editor);
-      }
-      resizeInlineEditor(editor);
-      updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
-      saveEditSelection(editor);
-      syncEditReferenceMenuFromEditor(editor);
+      refreshInlineEditorAfterEdit(editor);
     });
 
     transcript.addEventListener('paste', function(event) {
@@ -246,10 +257,7 @@ export function getScript(): string {
       if (!text) return;
 
       insertInlinePlainText(editor, text);
-      resizeInlineEditor(editor);
-      updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
-      saveEditSelection(editor);
-      syncEditReferenceMenuFromEditor(editor);
+      refreshInlineEditorAfterEdit(editor);
     });
 
     transcript.addEventListener('keydown', function(event) {
@@ -278,6 +286,10 @@ export function getScript(): string {
           insertActiveEditReferenceResource();
           return;
         }
+      }
+
+      if (inlineShortcutController.handleKeydown(event)) {
+        return;
       }
 
       if (event.key === 'Escape') {
@@ -309,6 +321,7 @@ export function getScript(): string {
       var target = event.target instanceof Element ? event.target : null;
       var editor = target?.closest('.message-edit-input');
       if (!editor || !transcript.contains(editor)) return;
+      inlineShortcutController.deactivateMark();
       saveEditSelection(editor);
       syncEditReferenceMenuFromEditor(editor);
     });
@@ -316,6 +329,9 @@ export function getScript(): string {
     document.addEventListener('selectionchange', function() {
       var editor = getActiveInlineEditor();
       if (!editor) return;
+      if (inlineShortcutController.isMarkActive() && !isSelectionInsideInlineEditor(editor)) {
+        inlineShortcutController.deactivateMark();
+      }
       if (isSelectionInsideInlineEditor(editor)) {
         saveEditSelection(editor);
         if (editReferenceMenuOpen) {
@@ -1494,6 +1510,7 @@ export function getScript(): string {
         editingDraftText = '';
         pendingEditFocusId = '';
         savedEditRange = null;
+        inlineShortcutController.deactivateMark();
         closeEditReferenceMenu(false);
       }
     }
@@ -1523,6 +1540,7 @@ export function getScript(): string {
         editingDraftText = String(message.content || '');
         pendingEditFocusId = message.id;
         savedEditRange = null;
+        inlineShortcutController.deactivateMark();
         closeEditReferenceMenu(false);
         render();
         return;
@@ -1616,6 +1634,7 @@ export function getScript(): string {
       editingDraftText = '';
       pendingEditFocusId = '';
       savedEditRange = null;
+      inlineShortcutController.deactivateMark();
       closeEditReferenceMenu(false);
       render();
     }
@@ -1645,6 +1664,7 @@ export function getScript(): string {
       editingDraftText = '';
       pendingEditFocusId = '';
       savedEditRange = null;
+      inlineShortcutController.deactivateMark();
       closeEditReferenceMenu(false);
       render();
     }
@@ -2269,6 +2289,18 @@ export function getScript(): string {
       return editor && editor.dataset.messageId === editingMessageId ? editor : null;
     }
 
+    function refreshInlineEditorAfterEdit(editor) {
+      if (!editor) return;
+      sanitizeInlineEditorContent(editor);
+      if (editor.dataset.messageId === editingMessageId) {
+        editingDraftText = serializeInlineEditor(editor);
+      }
+      resizeInlineEditor(editor);
+      updateInlineEditorSubmitState(editor.closest('form.message-edit-form'));
+      saveEditSelection(editor);
+      syncEditReferenceMenuFromEditor(editor);
+    }
+
     function saveEditSelection(editor) {
       if (!editor || !isSelectionInsideInlineEditor(editor)) return;
       var selection = window.getSelection();
@@ -2597,6 +2629,7 @@ export function getScript(): string {
     }
 
     function insertInlineFragmentAtRange(editor, range, fragment) {
+      inlineShortcutController.deactivateMark();
       var workingRange = range && isRangeInsideInlineEditor(range, editor) ? range.cloneRange() : getInlineEditorEndRange(editor);
       workingRange.deleteContents();
       var tail = document.createTextNode('');

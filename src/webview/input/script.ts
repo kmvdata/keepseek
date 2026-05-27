@@ -28,21 +28,35 @@ export function getInputScript(): string {
       var activeMentionRange = null;
       var activeMentionQuery = '';
       var activeReferenceIndex = 0;
-      var promptMarkActive = false;
       var referenceResources = [];
       var referenceResourcesLoading = false;
       var referenceResourcesLoaded = false;
       var referenceResourcesError = '';
       var referenceResourceRequestSequence = 0;
       var referenceResourceRequestId = '';
-      var clipboardPasteRequestSequence = 0;
-      var clipboardPasteRequests = Object.create(null);
       var effortLabels = {
         high: 'High',
         max: 'Max'
       };
       var sendIconSvg = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.75V3.75M4.75 7 8 3.75 11.25 7" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/></svg>';
       var stopIconSvg = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.25" y="4.25" width="7.5" height="7.5" rx="1.2" fill="currentColor"/></svg>';
+      var promptShortcutController = window.keepseekRichTextShortcuts.createController({
+        getEditor: function() { return promptInput; },
+        isRangeInside: function(range) { return isRangeInsidePrompt(range); },
+        isNodeInside: function(node) { return isNodeInsidePrompt(node); },
+        setSelectionRange: function(_editor, range) { setPromptSelectionRange(range); },
+        saveSelection: function() { savePromptSelection(); },
+        restoreSelection: function() { restorePromptSelection(); },
+        getInsertionRange: function() { return getPromptInsertionRange(); },
+        insertText: function(_editor, text) { insertPlainText(text); },
+        onSelectionChanged: function() { syncReferenceMenuFromPrompt(); },
+        onEdited: function() {
+          sanitizePromptContent();
+          updatePromptVisualState();
+          savePromptSelection();
+          syncReferenceMenuFromPrompt();
+        }
+      });
 
       composer.addEventListener('submit', function(event) {
         event.preventDefault();
@@ -108,7 +122,7 @@ export function getInputScript(): string {
             return;
           }
         }
-        if (handlePromptSystemShortcut(event) || handlePromptEmacsShortcut(event)) {
+        if (promptShortcutController.handleKeydown(event)) {
           return;
         }
         if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
@@ -130,7 +144,7 @@ export function getInputScript(): string {
 
       promptInput.addEventListener('keyup', savePromptSelection);
       promptInput.addEventListener('mouseup', function() {
-        deactivatePromptMark();
+        promptShortcutController.deactivateMark();
         savePromptSelection();
       });
       promptInput.addEventListener('focus', savePromptSelection);
@@ -258,8 +272,8 @@ export function getInputScript(): string {
 
       document.addEventListener('selectionchange', function() {
         if (isNodeInsidePrompt(document.activeElement)) {
-          if (promptMarkActive && !isPromptSelectionInside()) {
-            deactivatePromptMark();
+          if (promptShortcutController.isMarkActive() && !isPromptSelectionInside()) {
+            promptShortcutController.deactivateMark();
           }
           savePromptSelection();
           if (referenceMenuOpen) {
@@ -308,310 +322,9 @@ export function getInputScript(): string {
         }
       });
 
-      function handlePromptSystemShortcut(event) {
-        if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || !isPromptShortcutKey(event, 'a')) {
-          return false;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        selectPromptContents();
-        return true;
-      }
-
-      function handlePromptEmacsShortcut(event) {
-        if (event.metaKey) { return false; }
-        if (isPromptSetMarkShortcut(event)) {
-          return runPromptShortcut(event, setPromptMark);
-        }
-        if (event.altKey && !event.ctrlKey && !event.shiftKey && isPromptShortcutKey(event, 'w')) {
-          event.preventDefault();
-          event.stopPropagation();
-          copyPromptSelection();
-          return true;
-        }
-        if (!event.ctrlKey || event.altKey || event.shiftKey) { return false; }
-
-        if (isPromptShortcutKey(event, 'g')) {
-          return runPromptShortcut(event, cancelPromptMark);
-        }
-        if (isPromptShortcutKey(event, 'f')) {
-          return runPromptShortcut(event, function() { movePromptSelection('forward', 'character'); });
-        }
-        if (isPromptShortcutKey(event, 'b')) {
-          return runPromptShortcut(event, function() { movePromptSelection('backward', 'character'); });
-        }
-        if (isPromptShortcutKey(event, 'n')) {
-          return runPromptShortcut(event, function() { movePromptSelection('forward', 'line'); });
-        }
-        if (isPromptShortcutKey(event, 'p')) {
-          return runPromptShortcut(event, function() { movePromptSelection('backward', 'line'); });
-        }
-        if (isPromptShortcutKey(event, 'a')) {
-          return runPromptShortcut(event, function() { movePromptSelection('backward', 'lineboundary'); });
-        }
-        if (isPromptShortcutKey(event, 'e')) {
-          return runPromptShortcut(event, function() { movePromptSelection('forward', 'lineboundary'); });
-        }
-        if (isPromptShortcutKey(event, 'v')) {
-          return runPromptShortcut(event, pageDownPromptSelection);
-        }
-        if (isPromptShortcutKey(event, 'd')) {
-          return runPromptShortcut(event, function() { deletePromptSelectionOrCharacter('forward'); });
-        }
-        if (isPromptShortcutKey(event, 'h') || event.key === 'Backspace') {
-          return runPromptShortcut(event, function() { deletePromptSelectionOrCharacter('backward'); });
-        }
-        if (isPromptShortcutKey(event, 'k')) {
-          return runPromptShortcut(event, killPromptLine);
-        }
-        if (isPromptShortcutKey(event, 'w')) {
-          return runPromptShortcut(event, cutPromptSelection);
-        }
-        if (isPromptShortcutKey(event, 'y')) {
-          return runPromptShortcut(event, pastePromptClipboardText);
-        }
-        return false;
-      }
-
-      function runPromptShortcut(event, action) {
-        event.preventDefault();
-        event.stopPropagation();
-        action();
-        return true;
-      }
-
-      function isPromptShortcutKey(event, key) {
-        return String(event.key || '').toLowerCase() === key || event.code === 'Key' + key.toUpperCase();
-      }
-
-      function isPromptSetMarkShortcut(event) {
-        if (!event.ctrlKey || event.metaKey || event.altKey) { return false; }
-        return event.code === 'Space' ||
-          event.key === ' ' ||
-          event.key === 'Spacebar' ||
-          event.key === String.fromCharCode(0) ||
-          event.key === '@' ||
-          (event.shiftKey && event.code === 'Digit2');
-      }
-
-      function getPromptSelection() {
-        var selection = window.getSelection();
-        if (!selection || !selection.rangeCount) { return null; }
-        var range = selection.getRangeAt(0);
-        return isRangeInsidePrompt(range) ? selection : null;
-      }
-
       function isPromptSelectionInside() {
         var selection = window.getSelection();
         return Boolean(selection && selection.rangeCount && isRangeInsidePrompt(selection.getRangeAt(0)));
-      }
-
-      function movePromptSelection(direction, granularity) {
-        if (movePromptSelectionWithModify(promptMarkActive ? 'extend' : 'move', direction, granularity)) {
-          refreshPromptAfterSelectionShortcut();
-        }
-      }
-
-      function pageDownPromptSelection() {
-        var moved = movePromptSelectionWithModify(promptMarkActive ? 'extend' : 'move', 'forward', 'page');
-        promptInput.scrollTop = Math.min(promptInput.scrollHeight, promptInput.scrollTop + Math.max(promptInput.clientHeight, 120));
-        if (moved) {
-          refreshPromptAfterSelectionShortcut();
-        } else {
-          savePromptSelection();
-        }
-      }
-
-      function deletePromptSelectionOrCharacter(direction) {
-        var selection = getPromptSelection();
-        if (!selection) { return; }
-        if (selection.isCollapsed && !movePromptSelectionWithModify('extend', direction, 'character')) {
-          return;
-        }
-        if (selection.isCollapsed) { return; }
-        execPromptEditCommand('delete');
-      }
-
-      function killPromptLine() {
-        var selection = getPromptSelection();
-        if (!selection) { return; }
-        collapsePromptSelectionToFocus();
-        if (!movePromptSelectionWithModify('extend', 'forward', 'lineboundary')) {
-          return;
-        }
-        selection = getPromptSelection();
-        if (selection.isCollapsed) { return; }
-        cutPromptSelection();
-      }
-
-      function cutPromptSelection() {
-        var selection = getPromptSelection();
-        if (!selection || selection.isCollapsed) { return; }
-        if (execPromptEditCommand('cut')) { return; }
-
-        var range = selection.getRangeAt(0).cloneRange();
-        var text = selection.toString();
-        writeClipboardText(text).then(function() {
-          if (!isRangeInsidePrompt(range)) { return; }
-          setPromptSelectionRange(range);
-          savePromptSelection();
-          execPromptEditCommand('delete');
-        }).catch(function() {});
-      }
-
-      function copyPromptSelection() {
-        var selection = getPromptSelection();
-        if (!selection || selection.isCollapsed) { return; }
-        if (execPromptClipboardCommand('copy')) { return; }
-        writeClipboardText(selection.toString()).catch(function() {});
-      }
-
-      function pastePromptClipboardText() {
-        var range = getPromptInsertionRange().cloneRange();
-        if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
-          navigator.clipboard.readText().then(function(text) {
-            insertClipboardTextAtRange(text, range);
-          }).catch(function() {
-            requestClipboardText(range);
-          });
-          return;
-        }
-        requestClipboardText(range);
-      }
-
-      function insertClipboardTextAtRange(text, range) {
-        if (!text) { return; }
-        if (range && isRangeInsidePrompt(range)) {
-          setPromptSelectionRange(range);
-          savePromptSelection();
-        }
-        insertPlainText(text);
-      }
-
-      function requestClipboardText(range) {
-        clipboardPasteRequestSequence += 1;
-        var requestId = 'clipboardText:' + clipboardPasteRequestSequence + ':' + Date.now();
-        clipboardPasteRequests[requestId] = range.cloneRange();
-        vscode.postMessage({ type: 'requestClipboardText', requestId: requestId });
-      }
-
-      function handleClipboardTextMessage(message) {
-        var requestId = message.requestId || '';
-        var range = clipboardPasteRequests[requestId];
-        delete clipboardPasteRequests[requestId];
-        insertClipboardTextAtRange(message.text || '', range);
-      }
-
-      function writeClipboardText(text) {
-        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-          return navigator.clipboard.writeText(text).catch(function() {
-            vscode.postMessage({ type: 'writeClipboardText', text: text });
-          });
-        }
-        vscode.postMessage({ type: 'writeClipboardText', text: text });
-        return Promise.resolve();
-      }
-
-      function setPromptMark() {
-        if (!isPromptSelectionInside()) {
-          restorePromptSelection();
-        }
-        if (!collapsePromptSelectionToFocus()) { return; }
-        promptMarkActive = true;
-        savePromptSelection();
-        syncReferenceMenuFromPrompt();
-      }
-
-      function cancelPromptMark() {
-        deactivatePromptMark();
-        collapsePromptSelectionToFocus();
-        savePromptSelection();
-        syncReferenceMenuFromPrompt();
-      }
-
-      function deactivatePromptMark() {
-        promptMarkActive = false;
-      }
-
-      function collapsePromptSelectionToFocus() {
-        var selection = getPromptSelection();
-        if (!selection || !isNodeInsidePrompt(selection.focusNode)) { return false; }
-        var range = document.createRange();
-        range.setStart(selection.focusNode, selection.focusOffset);
-        range.collapse(true);
-        setPromptSelectionRange(range);
-        return true;
-      }
-
-      function movePromptSelectionWithModify(alter, direction, granularity) {
-        var selection = getPromptSelection();
-        if (!selection || typeof selection.modify !== 'function') { return false; }
-        var previous = selection.getRangeAt(0).cloneRange();
-        try {
-          selection.modify(alter, direction, granularity);
-        } catch (error) {
-          setPromptSelectionRange(previous);
-          savePromptSelection();
-          return false;
-        }
-        if (!isPromptSelectionInside()) {
-          setPromptSelectionRange(previous);
-          savePromptSelection();
-          return false;
-        }
-        return true;
-      }
-
-      function execPromptEditCommand(command) {
-        var didRun = execPromptClipboardCommand(command);
-        if (didRun) {
-          refreshPromptAfterEditShortcut();
-          return true;
-        }
-        if (command === 'delete') {
-          return deletePromptSelectionContents();
-        }
-        return false;
-      }
-
-      function execPromptClipboardCommand(command) {
-        try {
-          return document.execCommand(command);
-        } catch (error) {
-          return false;
-        }
-      }
-
-      function selectPromptContents() {
-        deactivatePromptMark();
-        var range = document.createRange();
-        range.selectNodeContents(promptInput);
-        setPromptSelectionRange(range);
-        refreshPromptAfterSelectionShortcut();
-      }
-
-      function deletePromptSelectionContents() {
-        var selection = getPromptSelection();
-        if (!selection || selection.isCollapsed) { return false; }
-        var range = selection.getRangeAt(0);
-        range.deleteContents();
-        range.collapse(true);
-        setPromptSelectionRange(range);
-        refreshPromptAfterEditShortcut();
-        return true;
-      }
-
-      function refreshPromptAfterSelectionShortcut() {
-        savePromptSelection();
-        syncReferenceMenuFromPrompt();
-      }
-
-      function refreshPromptAfterEditShortcut() {
-        deactivatePromptMark();
-        sanitizePromptContent();
-        updatePromptVisualState();
-        savePromptSelection();
-        syncReferenceMenuFromPrompt();
       }
 
       function openCommandMenu() {
@@ -1968,7 +1681,7 @@ export function getInputScript(): string {
 
       function insertFragmentAtRange(range, fragment) {
         if (!fragment.firstChild) { return; }
-        deactivatePromptMark();
+        promptShortcutController.deactivateMark();
         var lastNode = fragment.lastChild;
         range.deleteContents();
         range.insertNode(fragment);
@@ -2345,7 +2058,7 @@ export function getInputScript(): string {
         if (promptInput.childNodes.length) {
           promptInput.innerHTML = '';
         }
-        deactivatePromptMark();
+        promptShortcutController.deactivateMark();
         savedPromptRange = null;
         if (isNodeInsidePrompt(document.activeElement) && !isSelectionAtPromptStart()) {
           setPromptSelectionRange(getPromptStartRange());
@@ -2369,7 +2082,7 @@ export function getInputScript(): string {
         closeCommandMenu();
         closeReferenceMenu(false);
         promptInput.innerHTML = '';
-        deactivatePromptMark();
+        promptShortcutController.deactivateMark();
         savedPromptRange = null;
         updatePromptVisualState();
       }
@@ -2780,10 +2493,6 @@ export function getInputScript(): string {
         var msg = event.data;
         if (msg.type === 'referenceResources') {
           handleReferenceResourcesMessage(msg);
-          return;
-        }
-        if (msg.type === 'clipboardText') {
-          handleClipboardTextMessage(msg);
           return;
         }
         if (msg.type !== 'insertFileReference' && msg.type !== 'insertDirectoryReference') return;
