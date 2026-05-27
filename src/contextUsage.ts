@@ -92,6 +92,28 @@ export function createContextUsageEstimateFromMessages(input: {
   });
 }
 
+export function toSessionContextUsageEstimate(usage: ContextUsageEstimate): ContextUsageEstimate {
+  const breakdown = normalizeBreakdown({
+    ...usage.breakdown,
+    systemTokensEstimate: 0,
+    toolSchemaTokensEstimate: 0,
+    outputReserveTokensEstimate: 0,
+    safetyReserveTokensEstimate: 0
+  });
+  const usedTokensEstimate = breakdown.contextFileTokensEstimate +
+    breakdown.historyTokensEstimate +
+    breakdown.inputTokensEstimate +
+    breakdown.toolCallTokensEstimate +
+    breakdown.toolResultTokensEstimate +
+    breakdown.reasoningTokensEstimate;
+
+  return normalizeContextUsageEstimate({
+    maxTokensEstimate: usage.maxTokensEstimate,
+    usedTokensEstimate,
+    breakdown
+  });
+}
+
 export function resolveOutputReserveTokens(maxTokens: number): number {
   return maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS;
 }

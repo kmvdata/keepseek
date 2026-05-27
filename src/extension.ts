@@ -7,7 +7,7 @@ import { SafeFileEditor } from './safeFileEditor';
 import { AgentActivityInput, AgentActivityState, AgentSettings, ChatMessage, ContextUsageEstimate, WorkspaceSummary } from './types';
 import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
 import { ChatSessionStore, createSessionTitle, getCurrentWorkspaceSessionScope, getVisibleMessages } from './chatSessionStore';
-import { createContextUsageEstimate } from './contextUsage';
+import { createContextUsageEstimate, toSessionContextUsageEstimate } from './contextUsage';
 import { DraftEditStore } from './draftEditStore';
 import { openFileReference } from './fileReferenceOpener';
 import { GlobalSessionStorage } from './globalSessionStorage';
@@ -124,7 +124,7 @@ type WebviewMessage =
   | { type: 'pickExternalFiles' }
   | { type: 'pickExternalFileReferences' }
   | { type: 'insertDroppedFileReferences'; files: DroppedFileReferenceInput[] }
-  | { type: 'estimatePromptContextUsage'; requestId: string; prompt: string; modelId: string; references?: PromptReferenceInput[] }
+  | { type: 'estimatePromptContextUsage'; requestId: string; prompt: string; modelId: string; activeSessionId?: string; references?: PromptReferenceInput[] }
   | { type: 'requestReferenceResources'; requestId: string }
   | { type: 'requestClipboardText'; requestId: string }
   | { type: 'writeClipboardText'; text: string }
@@ -192,7 +192,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    this.draftEdits.clear();
+    this.clearSessionTransientState();
     await this.sessionStore.persist();
     await this.cleanupExpiredSessions({ post: false });
     this.postToWebview({ type: 'sessionChanged' });
@@ -748,12 +748,19 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return this.sessionStore.messages;
   }
 
+  private clearSessionTransientState(): void {
+    this.draftEdits.clear();
+    this.fileContext.clear();
+    this.authorizedExternalReferenceUris.clear();
+    this.liveContextUsage = undefined;
+  }
+
   private async createNewSession(): Promise<void> {
     if (this.isBusy) {
       return;
     }
 
-    this.draftEdits.clear();
+    this.clearSessionTransientState();
     await this.sessionStore.createNewSession(this.language);
     await this.cleanupExpiredSessions({ post: false });
     this.postToWebview({ type: 'sessionChanged' });
@@ -772,7 +779,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     if (!wasActiveSession) {
-      this.draftEdits.clear();
+      this.clearSessionTransientState();
       this.postToWebview({ type: 'sessionChanged' });
     }
     this.postState();
@@ -788,7 +795,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    this.draftEdits.clear();
+    this.clearSessionTransientState();
     this.postToWebview({ type: 'sessionChanged' });
     this.postState();
   }
@@ -819,7 +826,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     if (result.activeSessionChanged) {
-      this.draftEdits.clear();
+      this.clearSessionTransientState();
       this.postToWebview({ type: 'sessionChanged' });
     }
     this.postState();
@@ -983,6 +990,11 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async postPromptContextUsageEstimate(message: Extract<WebviewMessage, { type: 'estimatePromptContextUsage' }>): Promise<void> {
+    const activeSessionId = this.sessionStore.activeSessionId;
+    if (message.activeSessionId && message.activeSessionId !== activeSessionId) {
+      return;
+    }
+
     const prompt = message.prompt.trim();
     const models = getConfiguredModels();
     const model = models.find((item) => item.id === message.modelId) ?? models[0];
@@ -994,17 +1006,22 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         })
       : '';
 
+    if (activeSessionId !== this.sessionStore.activeSessionId) {
+      return;
+    }
+
     this.postToWebview({
       type: 'promptContextUsageEstimate',
       requestId: message.requestId,
+      activeSessionId,
       prompt: message.prompt,
-      contextUsage: createContextUsageEstimate({
+      contextUsage: toSessionContextUsageEstimate(createContextUsageEstimate({
         model,
         contextFiles: this.fileContext.getAll(),
         messages: this.messages,
         language: this.language,
         prompt: expandedPrompt
-      })
+      }))
     });
   }
 
@@ -1441,6 +1458,14 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     const selectedModel = models.find((model) => model.id === this.selectedModelId) ?? models[0];
     const contextFiles = this.fileContext.getAll();
+    const rawContextUsage = this.isBusy && this.liveContextUsage
+      ? this.liveContextUsage
+      : createContextUsageEstimate({
+          model: selectedModel,
+          contextFiles,
+          messages: this.messages,
+          language: this.language
+        });
 
     this.postToWebview({
       type: 'state',
@@ -1453,12 +1478,8 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath || folder.uri.toString()),
         sessionSummaries: this.sessionStore.getSessionSummaries(),
         contextFiles: contextFiles.map(({ content: _content, ...file }) => file),
-        contextUsage: this.liveContextUsage ?? createContextUsageEstimate({
-          model: selectedModel,
-          contextFiles,
-          messages: this.messages,
-          language: this.language
-        }),
+        contextUsage: toSessionContextUsageEstimate(rawContextUsage),
+        contextUsageSessionId: this.sessionStore.activeSessionId,
         draftEdits: this.draftEdits.toWebviewState(),
         isBusy: this.isBusy,
         agentActivity: this.agentActivity,

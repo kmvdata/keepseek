@@ -773,11 +773,19 @@ export function getInputScript(): string {
 
       function getContextUsageWithPrompt() {
         var usage = normalizeContextUsage(state.contextUsage);
+        if ((state.contextUsageSessionId || state.activeSessionId || '') !== (state.activeSessionId || '')) {
+          usage = normalizeContextUsage({ maxTokensEstimate: usage.maxTokensEstimate });
+        }
         if (state.isBusy) {
           return usage;
         }
         var prompt = serializePrompt();
-        if (promptUsageOverride && promptUsageOverride.prompt === prompt) {
+        if (
+          promptUsageOverride &&
+          promptUsageOverride.prompt === prompt &&
+          promptUsageOverride.activeSessionId === (state.activeSessionId || '') &&
+          promptUsageOverride.modelId === (state.selectedModelId || '')
+        ) {
           return normalizeContextUsage(promptUsageOverride.contextUsage);
         }
         var inputTokensEstimate = estimatePromptTokens(serializePrompt());
@@ -802,6 +810,22 @@ export function getInputScript(): string {
         var nextKey = getPromptUsageBaseKey();
         if (nextKey === promptUsageBaseKey) { return; }
         promptUsageBaseKey = nextKey;
+        resetPromptUsageEstimate();
+      }
+
+      function getPromptUsageBaseKey() {
+        var usage = normalizeContextUsage(state.contextUsage);
+        return [
+          state.activeSessionId || '',
+          state.contextUsageSessionId || '',
+          state.selectedModelId || '',
+          usage.usedTokensEstimate,
+          usage.maxTokensEstimate,
+          JSON.stringify(usage.breakdown || {})
+        ].join('|');
+      }
+
+      function resetPromptUsageEstimate() {
         promptUsageOverride = null;
         promptUsageRequestId = '';
         promptUsageRequestPrompt = '';
@@ -811,27 +835,11 @@ export function getInputScript(): string {
         }
       }
 
-      function getPromptUsageBaseKey() {
-        var usage = normalizeContextUsage(state.contextUsage);
-        return [
-          state.selectedModelId || '',
-          usage.usedTokensEstimate,
-          usage.maxTokensEstimate,
-          JSON.stringify(usage.breakdown || {})
-        ].join('|');
-      }
-
       function schedulePromptUsageEstimate() {
         if (state.isBusy) { return; }
         var prompt = serializePrompt();
         if (!shouldRequestExpandedPromptUsage(prompt)) {
-          promptUsageOverride = null;
-          promptUsageRequestId = '';
-          promptUsageRequestPrompt = '';
-          if (promptUsageRequestTimer) {
-            clearTimeout(promptUsageRequestTimer);
-            promptUsageRequestTimer = null;
-          }
+          resetPromptUsageEstimate();
           return;
         }
         if (promptUsageOverride && promptUsageOverride.prompt === prompt) { return; }
@@ -851,6 +859,7 @@ export function getInputScript(): string {
             requestId: promptUsageRequestId,
             prompt: currentPrompt,
             modelId: state.selectedModelId,
+            activeSessionId: state.activeSessionId,
             references: collectPromptFileReferences()
           });
         }, 180);
@@ -864,10 +873,13 @@ export function getInputScript(): string {
 
       function handlePromptContextUsageEstimate(message) {
         if (!message || message.requestId !== promptUsageRequestId) { return; }
+        if ((message.activeSessionId || '') !== (state.activeSessionId || '')) { return; }
         var currentPrompt = serializePrompt();
         if (currentPrompt !== promptUsageRequestPrompt || currentPrompt !== message.prompt) { return; }
         promptUsageOverride = {
           prompt: currentPrompt,
+          activeSessionId: state.activeSessionId || '',
+          modelId: state.selectedModelId || '',
           contextUsage: message.contextUsage
         };
         renderContextProgress();
@@ -2296,6 +2308,7 @@ export function getInputScript(): string {
       function clearPrompt() {
         closeCommandMenu();
         closeReferenceMenu(false);
+        resetPromptUsageEstimate();
         promptInput.innerHTML = '';
         promptShortcutController.deactivateMark();
         savedPromptRange = null;
@@ -2754,6 +2767,7 @@ export function getInputScript(): string {
         showSettingsDialog: showSettingsDialog,
         showAgentBudgetDialog: showAgentBudgetDialog,
         showHistorySettingsDialog: showHistorySettingsDialog,
+        resetPromptUsageEstimate: resetPromptUsageEstimate,
         clearPrompt: clearPrompt
       };
       renderInputControls();

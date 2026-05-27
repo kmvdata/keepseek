@@ -19,6 +19,7 @@ export function getScript(): string {
       workspaceFolders: [],
       sessionSummaries: [],
       contextFiles: [],
+      contextUsageSessionId: '',
       contextUsage: {
         usedTokensEstimate: 0,
         maxTokensEstimate: 1000000,
@@ -65,6 +66,37 @@ export function getScript(): string {
       return String(template).replace(/\\{(\\w+)\\}/g, function(_match, name) {
         return replacements[name] === undefined ? '' : String(replacements[name]);
       });
+    }
+
+    function createEmptyContextUsage(maxTokensEstimate) {
+      var maxTokens = Math.max(1, Math.floor(Number(maxTokensEstimate) || 1000000));
+      return {
+        usedTokensEstimate: 0,
+        maxTokensEstimate: maxTokens,
+        remainingTokensEstimate: maxTokens,
+        usedPercent: 0,
+        remainingPercent: 100,
+        breakdown: {
+          systemTokensEstimate: 0,
+          contextFileTokensEstimate: 0,
+          historyTokensEstimate: 0,
+          inputTokensEstimate: 0,
+          toolSchemaTokensEstimate: 0,
+          toolCallTokensEstimate: 0,
+          toolResultTokensEstimate: 0,
+          reasoningTokensEstimate: 0,
+          outputReserveTokensEstimate: 0,
+          safetyReserveTokensEstimate: 0
+        }
+      };
+    }
+
+    function resetLocalContextUsageEstimate() {
+      state.contextUsage = createEmptyContextUsage(state.contextUsage && state.contextUsage.maxTokensEstimate);
+      state.contextUsageSessionId = '';
+      if (window.keepseekInputControls && window.keepseekInputControls.resetPromptUsageEstimate) {
+        window.keepseekInputControls.resetPromptUsageEstimate();
+      }
     }
 
     function getSendShortcutHint() {
@@ -411,6 +443,7 @@ export function getScript(): string {
         if (state.isBusy) return;
         closeSettingsMenu();
         closeSessionMenu();
+        resetLocalContextUsageEstimate();
         clearPromptDraft();
         vscode.postMessage({ type: 'newSession' });
       });
@@ -518,6 +551,7 @@ export function getScript(): string {
         }
 
         if (sessionId !== state.activeSessionId || item?.dataset.sessionOrigin === 'other') {
+          resetLocalContextUsageEstimate();
           clearPromptDraft();
         }
         closeSessionMenu();
@@ -602,6 +636,7 @@ export function getScript(): string {
           if (keyboardSessionId) {
             var keyboardWorkspaceKey = item.dataset.workspaceKey || activeWorkspaceTab;
             if (keyboardSessionId !== state.activeSessionId || item.dataset.sessionOrigin === 'other') {
+              resetLocalContextUsageEstimate();
               clearPromptDraft();
             }
             closeSessionMenu();
@@ -658,10 +693,17 @@ export function getScript(): string {
     window.addEventListener('message', function(event) {
       var message = event.data;
       if (message.type === 'state') {
+        var previousActiveSessionId = state.activeSessionId || '';
         Object.assign(state, message.state);
+        if (previousActiveSessionId && previousActiveSessionId !== state.activeSessionId) {
+          if (window.keepseekInputControls && window.keepseekInputControls.resetPromptUsageEstimate) {
+            window.keepseekInputControls.resetPromptUsageEstimate();
+          }
+        }
         rememberTerminalAgentActivity(state.agentActivity);
         render();
       } else if (message.type === 'sessionChanged') {
+        resetLocalContextUsageEstimate();
         clearPromptDraft();
       } else if (message.type === 'showSettingsDialog') {
         if (window.keepseekInputControls && window.keepseekInputControls.showSettingsDialog) {
