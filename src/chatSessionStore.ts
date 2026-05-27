@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import { ChatMessage, ChatSession, ChatSessionSummary, WorkspaceSummary } from './types';
 import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from './i18n';
 import { isRecord } from './errors';
+import { normalizeContextUsageEstimateValue } from './contextUsage';
 
 export const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 export const SESSION_STORAGE_VERSION = 2;
@@ -489,6 +490,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       id: item.id,
       title,
       messages,
+      contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
       createdAt,
       updatedAt,
       workspaceKey,

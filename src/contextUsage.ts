@@ -5,6 +5,7 @@ import {
   getConfiguredMaxToolIterations
 } from './config';
 import { DeepSeekFunctionTool, DeepSeekMessage } from './deepSeekTypes';
+import { isRecord } from './errors';
 import {
   buildInitialAgentMessages,
   estimateChatMessageTokens,
@@ -58,6 +59,36 @@ export function createContextUsageEstimate(input: {
   });
 }
 
+export function createDisplayedSessionContextUsageEstimate(input: {
+  model: KeepseekModel;
+  contextFiles: ContextFile[];
+  messages: ChatMessage[];
+  language: KeepseekLanguage;
+  prompt?: string;
+}): ContextUsageEstimate {
+  const usage = toSessionContextUsageEstimate(createContextUsageEstimate(input));
+  const displayedReasoningTokens = input.messages.reduce((total, message) => {
+    const reasoningContent = message.role === 'assistant' ? message.reasoningContent?.trim() : '';
+    return reasoningContent
+      ? total + estimateChatMessageTokens('assistant', reasoningContent)
+      : total;
+  }, 0);
+
+  if (!displayedReasoningTokens) {
+    return usage;
+  }
+
+  const breakdown = normalizeBreakdown({
+    ...usage.breakdown,
+    reasoningTokensEstimate: usage.breakdown.reasoningTokensEstimate + displayedReasoningTokens
+  });
+  return normalizeContextUsageEstimate({
+    maxTokensEstimate: usage.maxTokensEstimate,
+    usedTokensEstimate: sumSessionBreakdownTokens(breakdown),
+    breakdown
+  });
+}
+
 export function createContextUsageEstimateFromMessages(input: {
   model: KeepseekModel;
   messages: DeepSeekMessage[];
@@ -100,17 +131,64 @@ export function toSessionContextUsageEstimate(usage: ContextUsageEstimate): Cont
     outputReserveTokensEstimate: 0,
     safetyReserveTokensEstimate: 0
   });
-  const usedTokensEstimate = breakdown.contextFileTokensEstimate +
-    breakdown.historyTokensEstimate +
-    breakdown.inputTokensEstimate +
-    breakdown.toolCallTokensEstimate +
-    breakdown.toolResultTokensEstimate +
-    breakdown.reasoningTokensEstimate;
 
   return normalizeContextUsageEstimate({
     maxTokensEstimate: usage.maxTokensEstimate,
-    usedTokensEstimate,
+    usedTokensEstimate: sumSessionBreakdownTokens(breakdown),
     breakdown
+  });
+}
+
+export function finalizeSessionContextUsageEstimate(usage: ContextUsageEstimate): ContextUsageEstimate {
+  const breakdown = normalizeBreakdown({
+    ...usage.breakdown,
+    historyTokensEstimate: usage.breakdown.historyTokensEstimate + usage.breakdown.inputTokensEstimate,
+    inputTokensEstimate: 0
+  });
+  return normalizeContextUsageEstimate({
+    maxTokensEstimate: usage.maxTokensEstimate,
+    usedTokensEstimate: sumSessionBreakdownTokens(breakdown),
+    breakdown
+  });
+}
+
+export function addInputTokensToContextUsage(
+  usage: ContextUsageEstimate,
+  inputTokensEstimate: number
+): ContextUsageEstimate {
+  const inputTokens = normalizeTokenEstimate(inputTokensEstimate);
+  const breakdown = normalizeBreakdown({
+    ...usage.breakdown,
+    inputTokensEstimate: inputTokens
+  });
+  return normalizeContextUsageEstimate({
+    maxTokensEstimate: usage.maxTokensEstimate,
+    usedTokensEstimate: usage.usedTokensEstimate + inputTokens,
+    breakdown
+  });
+}
+
+export function pickLargerContextUsageEstimate(
+  left: ContextUsageEstimate | undefined,
+  right: ContextUsageEstimate | undefined
+): ContextUsageEstimate | undefined {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  return left.usedTokensEstimate >= right.usedTokensEstimate ? left : right;
+}
+
+export function normalizeContextUsageEstimateValue(value: unknown): ContextUsageEstimate | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  return normalizeContextUsageEstimate({
+    maxTokensEstimate: readFiniteNumber(value.maxTokensEstimate, 0),
+    usedTokensEstimate: readFiniteNumber(value.usedTokensEstimate, 0),
+    breakdown: isRecord(value.breakdown) ? value.breakdown : {}
   });
 }
 
@@ -225,4 +303,18 @@ function normalizeBreakdown(input: Partial<ContextUsageBreakdown>): ContextUsage
 function normalizeTokenEstimate(value: unknown): number {
   const number = Number(value);
   return Math.max(0, Math.floor(Number.isFinite(number) ? number : 0));
+}
+
+function readFiniteNumber(value: unknown, fallback: number): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function sumSessionBreakdownTokens(breakdown: ContextUsageBreakdown): number {
+  return breakdown.contextFileTokensEstimate +
+    breakdown.historyTokensEstimate +
+    breakdown.inputTokensEstimate +
+    breakdown.toolCallTokensEstimate +
+    breakdown.toolResultTokensEstimate +
+    breakdown.reasoningTokensEstimate;
 }

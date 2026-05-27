@@ -64,6 +64,7 @@ export interface ChatSession {
   id: string;
   title: string;
   messages: ChatMessage[];
+  contextUsage?: ContextUsageEstimate;
   createdAt: string;
   updatedAt: string;
   workspaceKey: string;

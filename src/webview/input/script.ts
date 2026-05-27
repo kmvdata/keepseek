@@ -789,8 +789,7 @@ export function getInputScript(): string {
           return normalizeContextUsage(promptUsageOverride.contextUsage);
         }
         var inputTokensEstimate = estimatePromptTokens(serializePrompt());
-        var baseInputTokensEstimate = readBreakdownTokenEstimate(usage, 'inputTokensEstimate');
-        var usedTokensEstimate = Math.max(0, usage.usedTokensEstimate - baseInputTokensEstimate + inputTokensEstimate);
+        var usedTokensEstimate = Math.max(0, usage.usedTokensEstimate + inputTokensEstimate);
         var maxTokensEstimate = Math.max(1, usage.maxTokensEstimate);
         var usedPercent = Math.min(100, (usedTokensEstimate / maxTokensEstimate) * 100);
         var breakdown = Object.assign({}, usage.breakdown || {}, {
