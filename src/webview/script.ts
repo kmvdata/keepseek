@@ -29,7 +29,13 @@ export function getScript(): string {
           systemTokensEstimate: 0,
           contextFileTokensEstimate: 0,
           historyTokensEstimate: 0,
-          inputTokensEstimate: 0
+          inputTokensEstimate: 0,
+          toolSchemaTokensEstimate: 0,
+          toolCallTokensEstimate: 0,
+          toolResultTokensEstimate: 0,
+          reasoningTokensEstimate: 0,
+          outputReserveTokensEstimate: 0,
+          safetyReserveTokensEstimate: 0
         }
       },
       draftEdits: [],

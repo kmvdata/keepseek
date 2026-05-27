@@ -38,6 +38,12 @@ export interface ContextUsageEstimate {
     contextFileTokensEstimate: number;
     historyTokensEstimate: number;
     inputTokensEstimate: number;
+    toolSchemaTokensEstimate: number;
+    toolCallTokensEstimate: number;
+    toolResultTokensEstimate: number;
+    reasoningTokensEstimate: number;
+    outputReserveTokensEstimate: number;
+    safetyReserveTokensEstimate: number;
   };
 }
 
@@ -161,4 +167,5 @@ export type AgentProgressEvent =
 export interface AgentRunCallbacks {
   onDelta?: (event: AgentProgressEvent) => void;
   onStatus?: (status: AgentActivityInput) => void;
+  onUsageEstimate?: (usage: ContextUsageEstimate) => void;
 }

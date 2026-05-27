@@ -307,7 +307,7 @@ export function getInputStyles(): string {
       z-index: 45;
       display: block;
       width: max-content;
-      max-width: min(260px, calc(100vw - var(--keepseek-edge-padding-double, 8px)));
+      max-width: min(320px, calc(100vw - var(--keepseek-edge-padding-double, 8px)));
       padding: 7px 9px;
       border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
       border-radius: 6px;
@@ -338,6 +338,13 @@ export function getInputStyles(): string {
 
     .context-progress-tooltip span {
       display: block;
+    }
+
+    .context-progress-breakdown {
+      margin-top: 5px;
+      padding-top: 5px;
+      border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      color: var(--vscode-descriptionForeground, var(--vscode-foreground));
     }
 
     .context-progress:hover .context-progress-tooltip,

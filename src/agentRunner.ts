@@ -1,14 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { AgentActivityInput, AgentActivityPhase, AgentRequest, AgentResponse, AgentRunCallbacks, ChatMessage, DraftEdit } from './types';
-import { formatBytes } from './format';
-import { getMarkdownFence, getMarkdownLanguage } from './markdown';
-import { estimateTokenCount } from './tokenEstimate';
+import { AgentActivityInput, AgentActivityPhase, AgentRequest, AgentResponse, AgentRunCallbacks, DraftEdit } from './types';
 import {
-  AGENT_HISTORY_MESSAGE_LIMIT,
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_MAX_TOKENS,
-  getConfiguredContextWindowTokens,
   getConfiguredMaxRunMs,
   getConfiguredMaxToolCalls,
   getConfiguredMaxToolIterations,
@@ -17,6 +12,21 @@ import {
   getConfiguredToolResultTokenBudget,
   MAX_GENERATION_TOKENS
 } from './config';
+import {
+  buildInitialAgentMessages,
+  CREATE_DRAFT_EDIT_TOOL_NAME,
+  estimateChatMessageTokens,
+  estimateDeepSeekMessageTokens,
+  getAgentTools,
+  LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
+  LIST_WORKSPACE_FILES_TOOL_NAME,
+  READ_WORKSPACE_FILE_TOOL_NAME
+} from './agentProtocol';
+import {
+  createContextUsageEstimate,
+  createContextUsageEstimateFromMessages,
+  resolveOutputReserveTokens
+} from './contextUsage';
 import { WorkspaceToolAdapter, WorkspaceToolService } from './workspaceTools';
 import type { KeepseekLanguage } from './i18n';
 import { DeepSeekStreamParser } from './deepSeekStreamParser';
@@ -30,11 +40,10 @@ import {
   DeepSeekToolCall
 } from './deepSeekTypes';
 
-const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
-const LIST_WORKSPACE_FILES_TOOL_NAME = 'keepseek_list_workspace_files';
-const LIST_WORKSPACE_DIRECTORY_TOOL_NAME = 'keepseek_list_workspace_directory';
-const READ_WORKSPACE_FILE_TOOL_NAME = 'keepseek_read_workspace_file';
-export { AGENT_HISTORY_MESSAGE_LIMIT, DEFAULT_MAX_TOKENS, MAX_GENERATION_TOKENS };
+export { AGENT_HISTORY_MESSAGE_LIMIT } from './config';
+export { DEFAULT_MAX_TOKENS, MAX_GENERATION_TOKENS };
+
+const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;
 
 interface AgentRuntimeConfig {
   apiKey: string;
@@ -100,18 +109,48 @@ export class AgentRunner {
     }
 
     const runtimeConfig = this.getRuntimeConfig(request.language);
-    const messages = this.buildMessages(request);
-    const tools = this.getTools();
+    const messages = buildInitialAgentMessages(request);
+    const tools = getAgentTools();
     const draftEdits: DraftEdit[] = [];
     const reasoningParts: string[] = [];
     const maxIterations = Math.max(0, runtimeConfig.maxToolIterations);
     const runStartedAt = Date.now();
     const runDeadlineAt = runtimeConfig.maxRunMs > 0 ? runStartedAt + runtimeConfig.maxRunMs : undefined;
-    const maxToolResultTokens = this.resolveToolResultTokenBudget(request, runtimeConfig, messages);
+    const maxToolResultTokens = runtimeConfig.toolResultTokenBudget > 0
+      ? runtimeConfig.toolResultTokenBudget
+      : Number.POSITIVE_INFINITY;
+    const outputReserveTokens = resolveOutputReserveTokens(runtimeConfig.maxTokens);
+    const runtimeUsageBreakdown = {
+      ...createContextUsageEstimate({
+        model: request.model,
+        contextFiles: request.contextFiles,
+        messages: request.history,
+        language: request.language,
+        prompt: request.prompt,
+        includeTools: maxIterations > 0,
+        outputReserveTokens,
+        safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+      }).breakdown
+    };
+    const emitUsageEstimate = (toolsForNextRequest: DeepSeekFunctionTool[]) => {
+      callbacks.onUsageEstimate?.(createContextUsageEstimateFromMessages({
+        model: request.model,
+        messages,
+        tools: toolsForNextRequest,
+        outputReserveTokens,
+        safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
+        breakdown: {
+          ...runtimeUsageBreakdown,
+          toolSchemaTokensEstimate: undefined
+        }
+      }));
+    };
     let toolCallCount = 0;
     let toolResultTokens = 0;
     let budgetStopReason: AgentBudgetFinishReason | undefined;
     let budgetStopInstructionQueued = false;
+
+    emitUsageEstimate(maxIterations > 0 ? tools : []);
 
     for (let turn = 0; turn <= maxIterations; turn += 1) {
       this.throwIfAborted(request.signal, request.language);
@@ -129,6 +168,7 @@ export class AgentRunner {
       }
 
       const toolsForTurn = !budgetStopReason && turn < maxIterations ? tools : [];
+      emitUsageEstimate(toolsForTurn);
       const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt);
       this.throwIfAborted(request.signal, request.language);
       const assistant = this.normalizeAssistantToolCalls(response.message, toolsForTurn.length > 0);
@@ -160,12 +200,21 @@ export class AgentRunner {
         phase: 'planning_tool'
       });
 
-      messages.push({
+      const assistantToolCallMessage: DeepSeekMessage = {
         role: 'assistant',
         content: assistant.content ?? null,
         reasoning_content: assistant.reasoning_content ?? null,
         tool_calls: toolCalls
-      });
+      };
+      messages.push(assistantToolCallMessage);
+      runtimeUsageBreakdown.toolCallTokensEstimate += estimateChatMessageTokens('assistant', [
+        assistant.content ?? '',
+        JSON.stringify(toolCalls)
+      ].join('\n'));
+      if (assistant.reasoning_content) {
+        runtimeUsageBreakdown.reasoningTokensEstimate += estimateChatMessageTokens('assistant', assistant.reasoning_content);
+      }
+      emitUsageEstimate(toolsForTurn);
 
       for (const toolCall of toolCalls) {
         this.throwIfAborted(request.signal, request.language);
@@ -187,13 +236,33 @@ export class AgentRunner {
           });
           const rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language);
           this.throwIfAborted(request.signal, request.language);
-          const nextToolResultTokens = this.estimateChatMessageTokens('tool', rawToolResult);
+          const rawToolMessage: DeepSeekMessage = {
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: rawToolResult
+          };
+          const nextToolResultTokens = estimateDeepSeekMessageTokens(rawToolMessage);
+          const nextToolsForRequest = turn + 1 < maxIterations ? tools : [];
           if (toolResultTokens + nextToolResultTokens > maxToolResultTokens) {
             budgetStopReason = 'tool_result_budget_exhausted';
             toolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
               usedTokens: toolResultTokens,
               nextTokens: nextToolResultTokens,
-              maxTokens: maxToolResultTokens
+              maxTokens: Number.isFinite(maxToolResultTokens) ? maxToolResultTokens : 0
+            });
+          } else if (this.getContextWindowBudgetStopReason(request, [...messages, rawToolMessage], nextToolsForRequest, outputReserveTokens)) {
+            budgetStopReason = 'tool_result_budget_exhausted';
+            const projectedUsage = createContextUsageEstimateFromMessages({
+              model: request.model,
+              messages: [...messages, rawToolMessage],
+              tools: nextToolsForRequest,
+              outputReserveTokens,
+              safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+            });
+            toolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
+              usedTokens: projectedUsage.usedTokensEstimate,
+              nextTokens: nextToolResultTokens,
+              maxTokens: projectedUsage.maxTokensEstimate
             });
           } else {
             toolResultTokens += nextToolResultTokens;
@@ -203,11 +272,14 @@ export class AgentRunner {
           budgetStopReason = budgetStopReason ?? this.getRunTimeStopReason(runDeadlineAt);
         }
 
-        messages.push({
+        const toolMessage: DeepSeekMessage = {
           role: 'tool',
           tool_call_id: toolCall.id,
           content: toolResult
-        });
+        };
+        messages.push(toolMessage);
+        runtimeUsageBreakdown.toolResultTokensEstimate += estimateDeepSeekMessageTokens(toolMessage);
+        emitUsageEstimate(budgetStopReason ? [] : turn + 1 < maxIterations ? tools : []);
         emitStatus({
           base: 'thinking',
           phase: 'reviewing_tool_result',
@@ -216,11 +288,14 @@ export class AgentRunner {
       }
 
       if (budgetStopReason && !budgetStopInstructionQueued) {
-        messages.push({
+        const budgetInstructionMessage: DeepSeekMessage = {
           role: 'user',
           content: this.getBudgetStopInstruction(budgetStopReason, request.language)
-        });
+        };
+        messages.push(budgetInstructionMessage);
+        runtimeUsageBreakdown.inputTokensEstimate += estimateDeepSeekMessageTokens(budgetInstructionMessage);
         budgetStopInstructionQueued = true;
+        emitUsageEstimate([]);
       }
     }
 
@@ -374,205 +449,10 @@ export class AgentRunner {
     }
   }
 
-  private buildMessages(request: AgentRequest): DeepSeekMessage[] {
-    const messages: DeepSeekMessage[] = [
-      {
-        role: 'system',
-        content: this.getSystemPrompt(request)
-      }
-    ];
-
-    const recentHistory = request.history
-      .filter((message) => message.role === 'user' || message.role === 'assistant')
-      .slice(-AGENT_HISTORY_MESSAGE_LIMIT);
-
-    for (const message of recentHistory) {
-      const content = this.getMessageContentForAgent(message);
-      if (!content) {
-        continue;
-      }
-
-      messages.push({
-        role: message.role,
-        content
-      });
-    }
-
-    const lastMessage = recentHistory[recentHistory.length - 1];
-    if (!lastMessage || lastMessage.role !== 'user' || this.getMessageContentForAgent(lastMessage) !== request.prompt) {
-      messages.push({
-        role: 'user',
-        content: request.prompt
-      });
-    }
-
-    return messages;
-  }
-
-  private getMessageContentForAgent(message: ChatMessage): string {
-    return (message.expandedContent ?? message.content).trim();
-  }
-
-  private getSystemPrompt(request: AgentRequest): string {
-    const contextBlock = this.formatContextFiles(request);
-    const instructions = request.language === 'en'
-      ? [
-          'You are KeepSeek, a coding agent running in the VS Code sidebar.',
-          'Communicate with the user in English unless the user explicitly asks for another language.',
-          'You can analyze code, explain approaches, inspect the open workspace with read-only tools, suggest changes, and call tools to create pending edits when files need to change.',
-          'Use keepseek_list_workspace_files, keepseek_list_workspace_directory, and keepseek_read_workspace_file when you need the current project structure or file contents. Do not ask the user to run directory listing commands or paste file contents when these tools can provide the information.',
-          'When the user references a directory, treat it as a target or reference scope. Prefer that directory for related new files, and list/read files under it when you need examples.',
-          'The read-only workspace tools only access files inside the open workspace, and they may skip large, binary, image, media, archive, or otherwise unreadable files.',
-          'Important safety rule: tools only create DraftEdit pending changes and never write to disk directly. Do not claim files were written unless the user later applies the change.',
-          'When the user asks to modify or create files, prefer calling keepseek_create_draft_edit with the target path, complete new file content, and a short reason.',
-          'If information is missing, state the gap. If you can reasonably proceed, provide an actionable result.'
-        ]
-      : [
-          '你是 KeepSeek，一个运行在 VS Code 侧边栏里的代码 Agent。',
-          '你需要用中文和用户沟通，除非用户明确要求其它语言。',
-          '你可以根据用户的问题分析代码、解释方案、使用只读工具查看当前打开的工作区、给出修改建议，并在需要改文件时调用工具创建待确认修改。',
-          '当你需要了解当前工程结构或文件内容时，使用 keepseek_list_workspace_files、keepseek_list_workspace_directory 和 keepseek_read_workspace_file。只要这些工具能提供信息，就不要要求用户自行运行目录扫描命令或粘贴文件内容。',
-          '当用户引用目录时，把它视为目标位置或参考范围。创建相关新文件时优先放在该目录下；需要参考示例时，先列出并读取该目录下的文件。',
-          '只读工作区工具只会访问当前打开工作区内的文件，并可能跳过过大、二进制、图片、媒体、归档或其它不可读文件。',
-          '重要安全规则：工具只会创建 DraftEdit 待确认修改，不会直接写入磁盘；不要声称已经写入文件，除非用户之后手动确认。',
-          '当用户要求修改或创建文件时，优先调用 keepseek_create_draft_edit，并传入目标路径、完整的新文件内容和简短原因。',
-          '如果信息不足，先说明缺口；如果可以合理推进，就直接给出可执行结果。'
-        ];
-
-    return [...instructions, contextBlock].filter(Boolean).join('\n\n');
-  }
-
-  private formatContextFiles(request: AgentRequest): string {
-    if (!request.contextFiles.length) {
-      return '';
-    }
-
-    const files = request.contextFiles.map((file) => {
-      const content = file.content.replace(/\r\n?/gu, '\n');
-      const fence = getMarkdownFence(content);
-      const language = getMarkdownLanguage(file.languageId);
-      const sizedLabel = `${file.label} (${file.languageId}, ${formatBytes(file.sizeBytes)})`;
-      return request.language === 'en'
-        ? [
-            `Context file: ${sizedLabel}`,
-            `Path: ${file.fsPath}`,
-            `${fence}${language}`,
-            content.endsWith('\n') ? content : `${content}\n`,
-            fence
-          ].join('\n')
-        : [
-            `上下文文件：${sizedLabel}`,
-            `路径：${file.fsPath}`,
-            `${fence}${language}`,
-            content.endsWith('\n') ? content : `${content}\n`,
-            fence
-          ].join('\n');
-    });
-
-    return [
-      request.language === 'en'
-        ? 'These are the context files the user added to KeepSeek. Prefer using them when answering:'
-        : '以下是用户加入 KeepSeek 的上下文文件。回答时优先参考这些内容：',
-      ...files
-    ].join('\n\n');
-  }
-
   private throwIfAborted(signal: AbortSignal | undefined, language: KeepseekLanguage): void {
     if (signal?.aborted) {
       throw new AgentRunAbortedError(language);
     }
-  }
-
-  private getTools(): DeepSeekFunctionTool[] {
-    return [
-      {
-        type: 'function',
-        function: {
-          name: LIST_WORKSPACE_FILES_TOOL_NAME,
-          description: 'List files in the currently open VS Code workspace. This is read-only and skips common dependency, build, coverage, and VCS directories.',
-          strict: true,
-          parameters: {
-            type: 'object',
-            properties: {},
-            required: [],
-            additionalProperties: false
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: READ_WORKSPACE_FILE_TOOL_NAME,
-          description: 'Read the complete text content of a file inside the currently open VS Code workspace. This is read-only and refuses files outside the workspace, oversized files, binary files, images, media, and archives.',
-          strict: true,
-          parameters: {
-            type: 'object',
-            properties: {
-              path: {
-                type: 'string',
-                description: 'Workspace-relative path from keepseek_list_workspace_files, or an absolute/file URI path that still points inside the current workspace.'
-              }
-            },
-            required: ['path'],
-            additionalProperties: false
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
-          description: 'List files and subdirectories under a directory inside the currently open VS Code workspace. This is read-only and skips common dependency, build, coverage, and VCS directories.',
-          strict: true,
-          parameters: {
-            type: 'object',
-            properties: {
-              path: {
-                type: 'string',
-                description: 'Workspace-relative path from a directory reference or keepseek_list_workspace_files, or an absolute/file URI path that still points inside the current workspace.'
-              },
-              recursive: {
-                type: 'boolean',
-                description: 'Whether to include nested files and subdirectories. Use false first unless the user needs a broader scan.'
-              },
-              maxFiles: {
-                type: 'number',
-                description: 'Maximum number of directory entries to return. Defaults to 100 and is capped by KeepSeek settings.'
-              }
-            },
-            required: ['path', 'recursive', 'maxFiles'],
-            additionalProperties: false
-          }
-        }
-      },
-      {
-        type: 'function',
-        function: {
-          name: CREATE_DRAFT_EDIT_TOOL_NAME,
-          description: 'Create a safe draft file edit for the user to review and apply in VS Code. This never writes to disk directly.',
-          strict: true,
-          parameters: {
-            type: 'object',
-            properties: {
-              path: {
-                type: 'string',
-                description: 'Workspace-relative path, absolute filesystem path, or file URI for the file to create or replace.'
-              },
-              content: {
-                type: 'string',
-                description: 'The complete new file content. Use the full desired file content, not a diff.'
-              },
-              reason: {
-                type: 'string',
-                description: 'A short human-readable reason shown in the confirmation dialog.'
-              }
-            },
-            required: ['path', 'content', 'reason'],
-            additionalProperties: false
-          }
-        }
-      }
-    ];
   }
 
   private createStatusEmitter(callbacks: AgentRunCallbacks): (status: AgentActivityInput) => void {
@@ -713,35 +593,20 @@ export class AgentRunner {
     return value;
   }
 
-  private resolveToolResultTokenBudget(
+  private getContextWindowBudgetStopReason(
     request: AgentRequest,
-    runtimeConfig: AgentRuntimeConfig,
-    messages: DeepSeekMessage[]
-  ): number {
-    if (runtimeConfig.toolResultTokenBudget > 0) {
-      return runtimeConfig.toolResultTokenBudget;
-    }
-
-    const contextWindowTokens = getConfiguredContextWindowTokens(request.model);
-    const initialInputTokens = messages.reduce((total, message) => total + this.estimateDeepSeekMessageTokens(message), 0);
-    const outputReserveTokens = runtimeConfig.maxTokens > 0 ? runtimeConfig.maxTokens : DEFAULT_MAX_TOKENS;
-    const safetyReserveTokens = 16_000;
-    return Math.max(0, contextWindowTokens - initialInputTokens - outputReserveTokens - safetyReserveTokens);
-  }
-
-  private estimateDeepSeekMessageTokens(message: DeepSeekMessage): number {
-    const parts = [
-      message.role,
-      message.content ?? '',
-      message.reasoning_content ?? '',
-      message.tool_call_id ?? '',
-      message.tool_calls ? JSON.stringify(message.tool_calls) : ''
-    ];
-    return this.estimateChatMessageTokens(message.role, parts.join('\n'));
-  }
-
-  private estimateChatMessageTokens(role: string, content: string): number {
-    return estimateTokenCount(`${role}\n${content}`) + 4;
+    messages: DeepSeekMessage[],
+    tools: DeepSeekFunctionTool[],
+    outputReserveTokens: number
+  ): AgentBudgetFinishReason | undefined {
+    const usage = createContextUsageEstimateFromMessages({
+      model: request.model,
+      messages,
+      tools,
+      outputReserveTokens,
+      safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+    });
+    return usage.usedTokensEstimate > usage.maxTokensEstimate ? 'tool_result_budget_exhausted' : undefined;
   }
 
   private getRunTimeStopReason(runDeadlineAt: number | undefined): AgentBudgetFinishReason | undefined {

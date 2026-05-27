@@ -19,6 +19,7 @@ export function getInputScript(): string {
       var contextProgressTitle = document.getElementById('contextProgressTitle');
       var contextProgressPercent = document.getElementById('contextProgressPercent');
       var contextProgressTokens = document.getElementById('contextProgressTokens');
+      var contextProgressBreakdown = document.getElementById('contextProgressBreakdown');
       var referenceMenu = document.getElementById('referenceMenu');
       var commandMenuOpen = false;
       var commandModelListOpen = false;
@@ -34,6 +35,12 @@ export function getInputScript(): string {
       var referenceResourcesError = '';
       var referenceResourceRequestSequence = 0;
       var referenceResourceRequestId = '';
+      var promptUsageRequestSequence = 0;
+      var promptUsageRequestId = '';
+      var promptUsageRequestPrompt = '';
+      var promptUsageRequestTimer = null;
+      var promptUsageOverride = null;
+      var promptUsageBaseKey = '';
       var effortLabels = {
         high: 'High',
         max: 'Max'
@@ -703,7 +710,9 @@ export function getInputScript(): string {
       }
 
       function renderInputControls() {
+        syncPromptUsageBase();
         refreshPromptFileLinkLabels();
+        schedulePromptUsageEstimate();
         renderContextProgress();
         renderCommandMenu();
         renderSendButton();
@@ -756,22 +765,134 @@ export function getInputScript(): string {
         if (contextProgressTitle) { contextProgressTitle.textContent = title; }
         if (contextProgressPercent) { contextProgressPercent.textContent = percentLine; }
         if (contextProgressTokens) { contextProgressTokens.textContent = tokensLine; }
+        if (contextProgressBreakdown) {
+          contextProgressBreakdown.textContent = formatContextUsageBreakdown(usage.breakdown || {});
+          contextProgressBreakdown.classList.toggle('hidden', !contextProgressBreakdown.textContent);
+        }
       }
 
       function getContextUsageWithPrompt() {
         var usage = normalizeContextUsage(state.contextUsage);
+        if (state.isBusy) {
+          return usage;
+        }
+        var prompt = serializePrompt();
+        if (promptUsageOverride && promptUsageOverride.prompt === prompt) {
+          return normalizeContextUsage(promptUsageOverride.contextUsage);
+        }
         var inputTokensEstimate = estimatePromptTokens(serializePrompt());
         var baseInputTokensEstimate = readBreakdownTokenEstimate(usage, 'inputTokensEstimate');
         var usedTokensEstimate = Math.max(0, usage.usedTokensEstimate - baseInputTokensEstimate + inputTokensEstimate);
         var maxTokensEstimate = Math.max(1, usage.maxTokensEstimate);
         var usedPercent = Math.min(100, (usedTokensEstimate / maxTokensEstimate) * 100);
+        var breakdown = Object.assign({}, usage.breakdown || {}, {
+          inputTokensEstimate: inputTokensEstimate
+        });
         return {
           usedTokensEstimate: usedTokensEstimate,
           maxTokensEstimate: maxTokensEstimate,
           remainingTokensEstimate: Math.max(0, maxTokensEstimate - usedTokensEstimate),
           usedPercent: usedPercent,
-          remainingPercent: Math.max(0, 100 - usedPercent)
+          remainingPercent: Math.max(0, 100 - usedPercent),
+          breakdown: breakdown
         };
+      }
+
+      function syncPromptUsageBase() {
+        var nextKey = getPromptUsageBaseKey();
+        if (nextKey === promptUsageBaseKey) { return; }
+        promptUsageBaseKey = nextKey;
+        promptUsageOverride = null;
+        promptUsageRequestId = '';
+        promptUsageRequestPrompt = '';
+        if (promptUsageRequestTimer) {
+          clearTimeout(promptUsageRequestTimer);
+          promptUsageRequestTimer = null;
+        }
+      }
+
+      function getPromptUsageBaseKey() {
+        var usage = normalizeContextUsage(state.contextUsage);
+        return [
+          state.selectedModelId || '',
+          usage.usedTokensEstimate,
+          usage.maxTokensEstimate,
+          JSON.stringify(usage.breakdown || {})
+        ].join('|');
+      }
+
+      function schedulePromptUsageEstimate() {
+        if (state.isBusy) { return; }
+        var prompt = serializePrompt();
+        if (!shouldRequestExpandedPromptUsage(prompt)) {
+          promptUsageOverride = null;
+          promptUsageRequestId = '';
+          promptUsageRequestPrompt = '';
+          if (promptUsageRequestTimer) {
+            clearTimeout(promptUsageRequestTimer);
+            promptUsageRequestTimer = null;
+          }
+          return;
+        }
+        if (promptUsageOverride && promptUsageOverride.prompt === prompt) { return; }
+        if (promptUsageRequestPrompt === prompt && promptUsageRequestId) { return; }
+        if (promptUsageRequestTimer) {
+          clearTimeout(promptUsageRequestTimer);
+        }
+        promptUsageRequestTimer = setTimeout(function() {
+          promptUsageRequestTimer = null;
+          var currentPrompt = serializePrompt();
+          if (!shouldRequestExpandedPromptUsage(currentPrompt)) { return; }
+          promptUsageRequestSequence += 1;
+          promptUsageRequestId = 'prompt-usage-' + promptUsageRequestSequence;
+          promptUsageRequestPrompt = currentPrompt;
+          vscode.postMessage({
+            type: 'estimatePromptContextUsage',
+            requestId: promptUsageRequestId,
+            prompt: currentPrompt,
+            modelId: state.selectedModelId,
+            references: collectPromptFileReferences()
+          });
+        }, 180);
+      }
+
+      function shouldRequestExpandedPromptUsage(prompt) {
+        if (!String(prompt || '').trim()) { return false; }
+        if (promptInput.querySelector('a.rich-file-link')) { return true; }
+        return /<[^<>\\n]+>/u.test(String(prompt || ''));
+      }
+
+      function handlePromptContextUsageEstimate(message) {
+        if (!message || message.requestId !== promptUsageRequestId) { return; }
+        var currentPrompt = serializePrompt();
+        if (currentPrompt !== promptUsageRequestPrompt || currentPrompt !== message.prompt) { return; }
+        promptUsageOverride = {
+          prompt: currentPrompt,
+          contextUsage: message.contextUsage
+        };
+        renderContextProgress();
+      }
+
+      function formatContextUsageBreakdown(breakdown) {
+        var parts = [
+          formatBreakdownPart('contextUsageSystem', breakdown.systemTokensEstimate),
+          formatBreakdownPart('contextUsageContextFiles', breakdown.contextFileTokensEstimate),
+          formatBreakdownPart('contextUsageHistory', breakdown.historyTokensEstimate),
+          formatBreakdownPart('contextUsageInput', breakdown.inputTokensEstimate),
+          formatBreakdownPart('contextUsageToolSchema', breakdown.toolSchemaTokensEstimate),
+          formatBreakdownPart('contextUsageToolCalls', breakdown.toolCallTokensEstimate),
+          formatBreakdownPart('contextUsageToolResults', breakdown.toolResultTokensEstimate),
+          formatBreakdownPart('contextUsageReasoning', breakdown.reasoningTokensEstimate),
+          formatBreakdownPart('contextUsageOutputReserve', breakdown.outputReserveTokensEstimate),
+          formatBreakdownPart('contextUsageSafetyReserve', breakdown.safetyReserveTokensEstimate)
+        ].filter(Boolean);
+        return parts.join(' · ');
+      }
+
+      function formatBreakdownPart(labelKey, value) {
+        var tokens = Math.max(0, Math.floor(Number(value) || 0));
+        if (!tokens) { return ''; }
+        return t(labelKey) + ' ' + formatTokenCount(tokens);
       }
 
       function estimatePromptTokens(value) {
@@ -786,6 +907,9 @@ export function getInputScript(): string {
         return {
           usedTokensEstimate: Math.max(0, Math.floor(usedTokensEstimate)),
           maxTokensEstimate: Math.max(1, Math.floor(maxTokensEstimate)),
+          remainingTokensEstimate: Math.max(0, Math.floor(readFiniteNumber(usage.remainingTokensEstimate, maxTokensEstimate - usedTokensEstimate))),
+          usedPercent: readFiniteNumber(usage.usedPercent, maxTokensEstimate ? (usedTokensEstimate / maxTokensEstimate) * 100 : 0),
+          remainingPercent: readFiniteNumber(usage.remainingPercent, 100),
           breakdown: usage.breakdown && typeof usage.breakdown === 'object' ? usage.breakdown : {}
         };
       }
@@ -2137,6 +2261,7 @@ export function getInputScript(): string {
         promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + 'px';
         promptInput.classList.toggle('is-empty', isEmpty);
         renderSendButton(isEmpty);
+        schedulePromptUsageEstimate();
         renderContextProgress();
       }
 
@@ -2583,6 +2708,10 @@ export function getInputScript(): string {
         var msg = event.data;
         if (msg.type === 'referenceResources') {
           handleReferenceResourcesMessage(msg);
+          return;
+        }
+        if (msg.type === 'promptContextUsageEstimate') {
+          handlePromptContextUsageEstimate(msg);
           return;
         }
         if (msg.type !== 'insertFileReference' && msg.type !== 'insertDirectoryReference') return;

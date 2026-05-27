@@ -43,12 +43,13 @@ export function getInputTemplate(): string {
               <span id="status" class="composer-status"></span>
             </div>
             <div class="composer-toolbar-right">
-              <div id="contextProgress" class="context-progress" role="status" tabindex="0" aria-describedby="contextProgressTooltip" aria-label="背景信息窗口（下次请求估算）：0% 已用（剩余 100%）。已用 0 标记，共 1M">
+              <div id="contextProgress" class="context-progress" role="status" tabindex="0" aria-describedby="contextProgressTooltip" aria-label="背景信息窗口（下次请求估算）：0% 已占用/预留（剩余 100%）。已占用/预留 0 标记，共 1M">
                 <span class="context-progress-ring" aria-hidden="true"></span>
                 <span id="contextProgressTooltip" class="context-progress-tooltip" role="tooltip">
                   <span id="contextProgressTitle">背景信息窗口（下次请求估算）：</span>
-                  <span id="contextProgressPercent">0% 已用（剩余 100%）</span>
-                  <span id="contextProgressTokens">已用 0 标记，共 1M</span>
+                  <span id="contextProgressPercent">0% 已占用/预留（剩余 100%）</span>
+                  <span id="contextProgressTokens">已占用/预留 0 标记，共 1M</span>
+                  <span id="contextProgressBreakdown" class="context-progress-breakdown"></span>
                 </span>
               </div>
               <button id="sendButton" type="submit" class="composer-send-btn" title="发送" aria-label="发送" data-i18n-title="send" data-i18n-aria-label="send" disabled>

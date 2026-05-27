@@ -4,7 +4,7 @@ import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileRefer
 import { AgentRunAbortedError, AgentRunner } from './agentRunner';
 import { FileContextStore } from './fileContext';
 import { SafeFileEditor } from './safeFileEditor';
-import { AgentActivityInput, AgentActivityState, AgentSettings, ChatMessage, WorkspaceSummary } from './types';
+import { AgentActivityInput, AgentActivityState, AgentSettings, ChatMessage, ContextUsageEstimate, WorkspaceSummary } from './types';
 import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
 import { ChatSessionStore, createSessionTitle, getCurrentWorkspaceSessionScope, getVisibleMessages } from './chatSessionStore';
 import { createContextUsageEstimate } from './contextUsage';
@@ -124,6 +124,7 @@ type WebviewMessage =
   | { type: 'pickExternalFiles' }
   | { type: 'pickExternalFileReferences' }
   | { type: 'insertDroppedFileReferences'; files: DroppedFileReferenceInput[] }
+  | { type: 'estimatePromptContextUsage'; requestId: string; prompt: string; modelId: string; references?: PromptReferenceInput[] }
   | { type: 'requestReferenceResources'; requestId: string }
   | { type: 'requestClipboardText'; requestId: string }
   | { type: 'writeClipboardText'; text: string }
@@ -150,6 +151,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private language = getConfiguredKeepseekLanguage();
   private isBusy = false;
   private currentRunAbortController: AbortController | undefined;
+  private liveContextUsage: ContextUsageEstimate | undefined;
   private agentActivitySequence = 0;
   private agentActivity: AgentActivityState = {
     base: 'idle',
@@ -685,6 +687,9 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'insertDroppedFileReferences':
         await this.insertDroppedFileReferencesToInput(message.files);
         return;
+      case 'estimatePromptContextUsage':
+        await this.postPromptContextUsageEstimate(message);
+        return;
       case 'requestReferenceResources':
         await this.postReferenceResources(message.requestId);
         return;
@@ -977,6 +982,32 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async postPromptContextUsageEstimate(message: Extract<WebviewMessage, { type: 'estimatePromptContextUsage' }>): Promise<void> {
+    const prompt = message.prompt.trim();
+    const models = getConfiguredModels();
+    const model = models.find((item) => item.id === message.modelId) ?? models[0];
+    const authorizedExternalReferenceUris = this.collectAuthorizedExternalReferenceUris(message.references);
+    const expandedPrompt = prompt
+      ? await expandPromptReferencesInPrompt(prompt, {
+          authorizedExternalReferenceUris,
+          language: this.language
+        })
+      : '';
+
+    this.postToWebview({
+      type: 'promptContextUsageEstimate',
+      requestId: message.requestId,
+      prompt: message.prompt,
+      contextUsage: createContextUsageEstimate({
+        model,
+        contextFiles: this.fileContext.getAll(),
+        messages: this.messages,
+        language: this.language,
+        prompt: expandedPrompt
+      })
+    });
+  }
+
   private async postClipboardText(requestId: string): Promise<void> {
     try {
       this.postToWebview({
@@ -1167,6 +1198,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const abortController = new AbortController();
     this.currentRunAbortController = abortController;
     this.isBusy = true;
+    this.liveContextUsage = undefined;
     this.setAgentActivity({
       base: 'thinking',
       phase: 'preparing'
@@ -1302,6 +1334,10 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           }
           activeSession.updatedAt = new Date().toISOString();
           scheduleLiveState();
+        },
+        onUsageEstimate: (usage) => {
+          this.liveContextUsage = usage;
+          scheduleLiveState();
         }
       });
 
@@ -1374,6 +1410,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (this.currentRunAbortController === abortController) {
         this.currentRunAbortController = undefined;
       }
+      this.liveContextUsage = undefined;
       this.sessionStore.getActiveSession().updatedAt = new Date().toISOString();
       this.isBusy = false;
       await this.sessionStore.persist();
@@ -1416,7 +1453,7 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath || folder.uri.toString()),
         sessionSummaries: this.sessionStore.getSessionSummaries(),
         contextFiles: contextFiles.map(({ content: _content, ...file }) => file),
-        contextUsage: createContextUsageEstimate({
+        contextUsage: this.liveContextUsage ?? createContextUsageEstimate({
           model: selectedModel,
           contextFiles,
           messages: this.messages,
