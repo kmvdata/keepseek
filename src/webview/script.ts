@@ -2334,6 +2334,9 @@ export function getScript(): string {
       var match;
 
       while ((match = pattern.exec(text)) !== null) {
+        if (isOffsetInsideMarkdownFence(text, match.index)) {
+          continue;
+        }
         var target = (match[1] || '').trim();
         var reference = parseMessageFileReference(target);
         if (!reference) {
@@ -2342,7 +2345,7 @@ export function getScript(): string {
 
         var matchEnd = match.index + match[0].length;
         var label = getMessageReferenceLabel(text, match.index, reference);
-        if (label.start < cursor || !isStandaloneMessageReferenceLine(text, label.start, matchEnd)) {
+        if (!label || label.start < cursor || !isStandaloneMessageReferenceLine(text, label.start, matchEnd)) {
           continue;
         }
 
@@ -2618,6 +2621,11 @@ export function getScript(): string {
 
     function insertInlineReferenceAtRange(editor, range, reference) {
       var fragment = document.createDocumentFragment();
+      if (isInlineEditorRangeInsideMarkdownFence(editor, range)) {
+        fragment.append(document.createTextNode(referenceToInlinePlainText(reference)));
+        insertInlineFragmentAtRange(editor, range, fragment);
+        return;
+      }
       if (needsInlineEditorLeadingSpace(editor, range)) {
         fragment.append(document.createTextNode(' '));
       }
@@ -2626,6 +2634,10 @@ export function getScript(): string {
         fragment.append(document.createTextNode(' '));
       }
       insertInlineFragmentAtRange(editor, range, fragment);
+    }
+
+    function referenceToInlinePlainText(reference) {
+      return '<' + (reference.kind === 'directory' ? makeMessageDirectoryHref(reference) : makeMessageFileHref(reference)) + '>';
     }
 
     function insertInlineFragmentAtRange(editor, range, fragment) {
@@ -2677,6 +2689,10 @@ export function getScript(): string {
       clone.selectNodeContents(editor);
       clone.setEnd(range.startContainer, range.startOffset);
       return clone.toString();
+    }
+
+    function isInlineEditorRangeInsideMarkdownFence(editor, range) {
+      return isMarkdownFenceOpenAtTextEnd(getInlineEditorTextBeforeRange(editor, range));
     }
 
     function getInlineEditorTextAfterRange(editor, range) {
@@ -2901,7 +2917,7 @@ export function getScript(): string {
         }
         var matchEnd = match.index + match[0].length;
         var label = getMessageReferenceLabel(text, match.index, reference);
-        if (isStandaloneMessageReferenceLine(text, label.start, matchEnd)) {
+        if (label && isStandaloneMessageReferenceLine(text, label.start, matchEnd)) {
           return true;
         }
       }
@@ -2949,6 +2965,65 @@ export function getScript(): string {
         length: length,
         language: sanitizeMarkdownCodeLanguage(rest.split(/\\s+/)[0] || '')
       };
+    }
+
+    function isMarkdownFenceOpenAtTextEnd(value) {
+      var text = String(value || '')
+        .split(String.fromCharCode(13) + String.fromCharCode(10)).join(String.fromCharCode(10))
+        .split(String.fromCharCode(13)).join(String.fromCharCode(10));
+      var lines = text.split(String.fromCharCode(10));
+      var openFence = null;
+      for (var i = 0; i < lines.length; i++) {
+        var fence = parseMarkdownFenceLine(lines[i]);
+        if (!openFence) {
+          if (fence) {
+            openFence = fence;
+          }
+          continue;
+        }
+        if (fence && fence.marker === openFence.marker && fence.length >= openFence.length && !fence.language) {
+          openFence = null;
+        }
+      }
+      return Boolean(openFence);
+    }
+
+    function isOffsetInsideMarkdownFence(value, offset) {
+      var text = String(value || '');
+      var position = Math.max(0, Math.min(text.length, Number(offset) || 0));
+      var cursor = 0;
+      var openFence = null;
+
+      while (cursor <= text.length) {
+        var lineEnd = getLineEndIndex(text, cursor);
+        var lineNext = getNextLineStart(text, lineEnd);
+        var fence = parseMarkdownFenceLine(text.slice(cursor, lineEnd));
+
+        if (openFence) {
+          if (position < lineNext) {
+            return true;
+          }
+          if (fence && fence.marker === openFence.marker && fence.length >= openFence.length && !fence.language) {
+            openFence = null;
+          }
+        } else {
+          if (fence) {
+            if (position < lineNext) {
+              return false;
+            }
+            openFence = fence;
+          } else if (position < lineNext) {
+            return false;
+          }
+        }
+
+        if (lineNext <= cursor) {
+          break;
+        }
+        cursor = lineNext;
+      }
+
+      return Boolean(openFence);
     }
 
     function sanitizeMarkdownCodeLanguage(value) {
@@ -3399,6 +3474,9 @@ export function getScript(): string {
       var match;
 
       while ((match = pattern.exec(value)) !== null) {
+        if (isOffsetInsideMarkdownFence(value, match.index)) {
+          continue;
+        }
         var target = (match[1] || '').trim();
         var reference = parseMessageFileReference(target);
         if (!reference) {
@@ -3407,7 +3485,7 @@ export function getScript(): string {
 
         var matchEnd = match.index + match[0].length;
         var label = getMessageReferenceLabel(value, match.index, reference);
-        if (label.start < cursor || !isStandaloneMessageReferenceLine(value, label.start, matchEnd)) {
+        if (!label || label.start < cursor || !isStandaloneMessageReferenceLine(value, label.start, matchEnd)) {
           continue;
         }
 
@@ -3645,6 +3723,9 @@ export function getScript(): string {
       var match;
 
       while ((match = pattern.exec(text)) !== null) {
+        if (isOffsetInsideMarkdownFence(text, match.index)) {
+          continue;
+        }
         var target = (match[1] || '').trim();
         var reference = parseMessageFileReference(target);
         if (!reference) {
@@ -3653,7 +3734,7 @@ export function getScript(): string {
 
         var matchEnd = match.index + match[0].length;
         var label = getMessageReferenceLabel(text, match.index, reference);
-        if (label.start < cursor || !isStandaloneMessageReferenceLine(text, label.start, matchEnd)) {
+        if (!label || label.start < cursor || !isStandaloneMessageReferenceLine(text, label.start, matchEnd)) {
           continue;
         }
 
@@ -4107,10 +4188,7 @@ export function getScript(): string {
         }
       }
 
-      return {
-        start: matchStart,
-        text: formatFileReferenceLabel(reference)
-      };
+      return null;
     }
 
     function isStandaloneMessageReferenceLine(text, referenceStart, referenceEnd) {
@@ -4184,10 +4262,7 @@ export function getScript(): string {
         }
       }
 
-      return {
-        start: matchStart,
-        text: directoryName
-      };
+      return null;
     }
 
     function makeMessageFileHref(reference) {

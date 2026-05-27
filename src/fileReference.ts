@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { DEFAULT_KEEPSEEK_LANGUAGE, normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
 import { getMarkdownFence, getMarkdownLanguage } from './markdown';
-import { hasUnsafeReferenceTargetCharacters, isStandaloneReferenceLine } from './referenceSyntax';
+import { hasUnsafeReferenceTargetCharacters, isInsideMarkdownFence, isStandaloneReferenceLine } from './referenceSyntax';
 
 const FILE_REFERENCE_PATTERN = /<([^<>\n]+)>/gu;
 const FILE_REFERENCE_LINE_PATTERN = /^(?<path>.+)#L(?<startLine>\d+)(?:C(?<startColumn>\d+))?(?:-(?:L(?<endLine>\d+))?(?:C(?<endColumn>\d+))?)?$/u;
@@ -126,6 +126,9 @@ function findPromptFileReferences(prompt: string, language: KeepseekLanguage): P
     if (!target || matchStart === undefined) {
       continue;
     }
+    if (isInsideMarkdownFence(prompt, matchStart)) {
+      continue;
+    }
 
     const parsed = parseFileReferenceTarget(target);
     if (!parsed) {
@@ -143,6 +146,9 @@ function findPromptFileReferences(prompt: string, language: KeepseekLanguage): P
       parsed.endColumn,
       language
     );
+    if (replacementStart >= matchStart) {
+      continue;
+    }
     if (!isStandaloneReferenceLine(prompt, replacementStart, matchEnd)) {
       continue;
     }

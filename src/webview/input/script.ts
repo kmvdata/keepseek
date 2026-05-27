@@ -310,12 +310,6 @@ export function getInputScript(): string {
 
       promptInput.addEventListener('paste', function(event) {
         event.preventDefault();
-        var refs = extractFileReferences(event.clipboardData, false);
-        if (refs.length) {
-          insertFileReferences(refs);
-          return;
-        }
-
         var text = event.clipboardData ? event.clipboardData.getData('text/plain') : '';
         if (text) {
           insertPlainText(text);
@@ -667,6 +661,13 @@ export function getInputScript(): string {
           ? activeMentionRange.cloneRange()
           : getPromptInsertionRange();
         var fragment = document.createDocumentFragment();
+        if (isPromptRangeInsideMarkdownFence(range)) {
+          fragment.append(document.createTextNode(referenceToPlainText(reference)));
+          insertFragmentAtRange(range, fragment);
+          closeReferenceMenu(true);
+          setComposerStatus(reference.kind === 'directory' ? t('insertedDirectoryReference') : t('insertedFileReference'));
+          return;
+        }
         if (needsLeadingSpace(range)) {
           fragment.append(document.createTextNode(' '));
         }
@@ -1359,7 +1360,7 @@ export function getInputScript(): string {
         }
 
         var split = splitLineReference(target);
-        if (!split.path) { return null; }
+        if (!split.path || isSingleSegmentClosingTagPath(split.path)) { return null; }
         return {
           path: split.path,
           startLine: split.startLine,
@@ -1414,6 +1415,26 @@ export function getInputScript(): string {
 
       function startsWithFileScheme(value) {
         return value.toLowerCase().indexOf('file:') === 0;
+      }
+
+      function isSingleSegmentClosingTagPath(value) {
+        var text = String(value || '').trim();
+        if (text.charAt(0) !== '/' || text.indexOf('/', 1) >= 0 || text.indexOf('.') >= 0) {
+          return false;
+        }
+        var name = text.slice(1);
+        if (!name) { return false; }
+        for (var i = 0; i < name.length; i++) {
+          var code = name.charCodeAt(i);
+          var allowed = (code >= 48 && code <= 57) ||
+            (code >= 65 && code <= 90) ||
+            (code >= 97 && code <= 122) ||
+            name.charAt(i) === '_' ||
+            name.charAt(i) === '-' ||
+            name.charAt(i) === ':';
+          if (!allowed) { return false; }
+        }
+        return true;
       }
 
       function splitLineReference(value) {
@@ -1648,6 +1669,12 @@ export function getInputScript(): string {
       function insertFileReferences(references) {
         var range = getPromptInsertionRange();
         var fragment = document.createDocumentFragment();
+        if (isPromptRangeInsideMarkdownFence(range)) {
+          appendPlainReferenceText(fragment, references);
+          insertFragmentAtRange(range, fragment);
+          setComposerStatus(t('insertedFileReferences', { count: references.length }));
+          return;
+        }
         if (needsLeadingSpace(range)) {
           fragment.append(document.createTextNode(' '));
         }
@@ -1665,6 +1692,19 @@ export function getInputScript(): string {
 
         insertFragmentAtRange(range, fragment);
         setComposerStatus(t('insertedFileReferences', { count: references.length }));
+      }
+
+      function appendPlainReferenceText(fragment, references) {
+        for (var i = 0; i < references.length; i++) {
+          if (i > 0) {
+            fragment.append(document.createElement('br'));
+          }
+          fragment.append(document.createTextNode(referenceToPlainText(references[i])));
+        }
+      }
+
+      function referenceToPlainText(reference) {
+        return '<' + (reference.kind === 'directory' ? makeDirectoryHref(reference) : makeFileHref(reference)) + '>';
       }
 
       function insertPlainText(text) {
@@ -1796,6 +1836,56 @@ export function getInputScript(): string {
         clone.selectNodeContents(promptInput);
         clone.setStart(range.endContainer, range.endOffset);
         return clone.toString();
+      }
+
+      function isPromptRangeInsideMarkdownFence(range) {
+        return isMarkdownFenceOpenAtTextEnd(getTextBeforeRange(range));
+      }
+
+      function isMarkdownFenceOpenAtTextEnd(value) {
+        var text = String(value || '')
+          .split(String.fromCharCode(13) + String.fromCharCode(10)).join(String.fromCharCode(10))
+          .split(String.fromCharCode(13)).join(String.fromCharCode(10));
+        var lines = text.split(String.fromCharCode(10));
+        var openFence = null;
+        for (var i = 0; i < lines.length; i++) {
+          var fence = parsePlainMarkdownFenceLine(lines[i]);
+          if (!openFence) {
+            if (fence) {
+              openFence = fence;
+            }
+            continue;
+          }
+          if (fence && fence.marker === openFence.marker && fence.length >= openFence.length && !fence.language) {
+            openFence = null;
+          }
+        }
+        return Boolean(openFence);
+      }
+
+      function parsePlainMarkdownFenceLine(line) {
+        var text = String(line || '');
+        var index = 0;
+        while (index < text.length && index < 3 && text.charAt(index) === ' ') {
+          index += 1;
+        }
+        var marker = text.charAt(index);
+        var tick = String.fromCharCode(96);
+        if (marker !== tick && marker !== '~') {
+          return null;
+        }
+        var length = 0;
+        while (text.charAt(index + length) === marker) {
+          length += 1;
+        }
+        if (length < 3) {
+          return null;
+        }
+        return {
+          marker: marker,
+          length: length,
+          language: text.slice(index + length).trim()
+        };
       }
 
       function isWhitespace(value) {
@@ -2513,6 +2603,12 @@ export function getInputScript(): string {
         };
         var range = getPromptInsertionRange();
         var fragment = document.createDocumentFragment();
+        if (isPromptRangeInsideMarkdownFence(range)) {
+          fragment.append(document.createTextNode(referenceToPlainText(reference)));
+          insertFragmentAtRange(range, fragment);
+          setComposerStatus(reference.kind === 'directory' ? t('insertedDirectoryReference') : t('insertedFileReference'));
+          return;
+        }
         if (needsLeadingSpace(range)) {
           fragment.append(document.createTextNode(' '));
         }

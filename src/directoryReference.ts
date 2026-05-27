@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { getConfiguredWorkspaceToolFileLimit } from './config';
 import { getFileReferenceAuthorizationKey, resolveFileReferenceUri } from './fileReference';
 import { normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
-import { isStandaloneReferenceLine } from './referenceSyntax';
+import { isInsideMarkdownFence, isStandaloneReferenceLine } from './referenceSyntax';
 import {
   getWorkspaceDirectoryName,
   getWorkspaceResourcePath,
@@ -83,6 +83,9 @@ function findPromptDirectoryReferences(prompt: string, language: KeepseekLanguag
     if (!target || matchStart === undefined) {
       continue;
     }
+    if (isInsideMarkdownFence(prompt, matchStart)) {
+      continue;
+    }
 
     const uri = parseDirectoryReferenceTarget(target);
     if (!uri) {
@@ -91,6 +94,9 @@ function findPromptDirectoryReferences(prompt: string, language: KeepseekLanguag
 
     const matchEnd = matchStart + match[0].length;
     const replacementStart = getDirectoryReferenceReplacementStart(prompt, matchStart, uri, language);
+    if (replacementStart >= matchStart) {
+      continue;
+    }
     if (!isStandaloneReferenceLine(prompt, replacementStart, matchEnd)) {
       continue;
     }
