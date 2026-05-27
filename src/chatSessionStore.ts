@@ -179,16 +179,26 @@ export class ChatSessionStore {
     }
 
     const previousActiveSessionId = this.activeSessionIdValue;
+    let deletedActiveSession = false;
     let deletedCount = 0;
     this.sessions = this.sessions.filter((session) => {
       if (!this.isInCurrentWorkspace(session) || !ids.has(session.id)) {
         return true;
       }
+      if (session.id === previousActiveSessionId) {
+        deletedActiveSession = true;
+      }
       deletedCount += 1;
       return false;
     });
 
-    this.ensureActiveSession();
+    if (deletedActiveSession) {
+      const session = createEmptySession(this.language, this.workspaceScope);
+      this.sessions.unshift(session);
+      this.setActiveSessionId(session.id);
+    } else {
+      this.ensureActiveSession();
+    }
     this.compact();
     await this.persist();
     return {
