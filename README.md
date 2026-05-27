@@ -2,7 +2,7 @@
 
 KeepSeek 是一款面向 VS Code 的 AI 编程上下文助手。它把 Agent 对话面板放进 VS Code 侧边栏，让你可以把文件、选中代码、终端输出、调试控制台和 Output 面板里的关键内容快速加入上下文，再交给 AI 一起分析、解释和生成修改建议。
 
-当前版本默认接入 DeepSeek OpenAI-compatible Chat Completions，支持 DeepSeek V4 Flash / Pro、Thinking 模式、多轮对话、文件引用、运行日志引用和安全的修改草案确认流程。
+当前版本默认接入 DeepSeek OpenAI-compatible Chat Completions，支持 DeepSeek V4 Flash / Pro、Thinking 模式、多轮对话、跨项目 History Session 管理、文件引用、运行日志引用和安全的修改草案确认流程。
 
 **KeepSeek 是开源软件**，使用 [MIT 许可证](./LICENSE)。源码托管在 GitHub：**[https://github.com/kmvdata/keepseek](https://github.com/kmvdata/keepseek)**
 
@@ -14,6 +14,7 @@ English version is available below: [English](#keepseek-english).
 - 调试运行错误：把终端报错、测试失败输出、Debug Console 内容或 Output 面板日志加入上下文，让 AI 基于真实现场分析原因。
 - 修改代码前做方案：引用相关文件和行号，让 AI 先解释影响范围，再生成可审阅的修改草案。
 - 处理跨文件任务：把多个工作区文件或外部文件加入上下文，围绕同一需求持续对话。
+- 延续跨项目排查：从其他项目复制已有 history session 到当前项目，在新的工作区里继续沿用排查思路和上下文线索。
 - 复盘构建和测试：将编译输出、lint 结果、测试日志交给 AI，总结失败点和下一步动作。
 
 ## 适合谁
@@ -29,13 +30,23 @@ English version is available below: [English](#keepseek-english).
 - 侧边栏 Agent 对话：KeepSeek 显示在 VS Code Secondary Sidebar 中，适合一边看代码一边对话。
 - 多模型配置：默认提供 DeepSeek V4 Flash / Pro，也支持通过 `keepseek.models` 配置模型列表。
 - Thinking 模式：支持开启或关闭 Thinking，并选择 `high` / `max` 推理强度。
-- 多轮会话历史：保留最近对话，支持切换历史会话。
+- History Session 管理：会话按项目保存到全局存储，支持当前项目和其他项目浏览、跨项目复制到当前项目、收藏、重命名、按时间范围过滤、多选删除和项目级清理。
 - 文件上下文：添加当前文件、工作区文件、外部文件或目录，也可以手动输入路径。
 - 精确文件引用：右键或快捷键添加编辑器选区，保留文件路径、行号和列号。
 - 运行现场引用：终端、Output 面板和调试控制台中的选中内容可以作为 `.log` 引用插入输入框，发送前会展开给 AI。
 - 拖拽文件引用：从 VS Code Explorer 或系统文件管理器拖入文件，自动生成可点击的引用 chip。
+- 运行中止：Agent 正在推理或调用工具时，可以从输入区停止本次执行。
+- 回复复制：Assistant 回复支持一键复制，便于保存或转发排查结果。
+- 编辑器快捷键：底部输入框和消息编辑框共享 Emacs/macOS 风格文本快捷键。
 - 安全修改草案：AI 只能创建待确认的 DraftEdit，用户点击 Apply 后还会经过 VS Code modal 确认再写入文件。
 - 基础防护：限制单个上下文文件大小，跳过常见二进制、媒体、归档和不可读文件。
+
+## History Session 管理
+
+- 会话按项目维度写入全局存储。打开不同工作区时，KeepSeek 会自动回到该项目自己的历史会话。
+- 历史菜单可以在"当前项目"和"其他项目"之间切换。选择其他项目中的 session 时，会复制出一条新的当前项目会话，原项目记录不会被改动。
+- 当前项目会话支持收藏、重命名、按最近 N 天或全部过滤、只看收藏、多选删除；其他项目记录也支持按条删除或删除该项目全部记录。
+- `keepseek.historyRetentionDays` 控制历史菜单默认显示的最近天数；存储层会对非当前活动会话执行 60 天硬保留清理。
 
 ## 工作方式
 
@@ -55,6 +66,7 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 |--------|------|------|
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | 编辑器有选中文本 | `keepseek.addSelectionToContext` |
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | 资源管理器聚焦且选中文件 | `keepseek.addExplorerFileToContext` |
+| `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | 资源管理器聚焦且选中目录 | `keepseek.addExplorerDirectoryToContext` |
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | 终端有选中文本 | `keepseek.addTerminalSelectionToContext` |
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | 调试控制台聚焦 | `keepseek.addDebugConsoleSelectionToContext` |
 
@@ -64,6 +76,7 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 
 - 编辑器选区：`KeepSeek: 添加到上下文`
 - Explorer 文件：`KeepSeek: Add Explorer File to Chat`
+- Explorer 目录：`KeepSeek: Add Explorer Folder to Chat`
 - 终端选区：`KeepSeek: 添加到上下文`
 - Output 面板选区：`KeepSeek: 添加到上下文`
 
@@ -84,7 +97,10 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 | `keepseek.maxToolCalls` | `24` | 单次 Agent 执行的最大工具调用总数；设为 `0` 时不启用单独调用数上限 |
 | `keepseek.maxRunMs` | `600000` | 单次 Agent 执行的最大总时长（毫秒）；设为 `0` 时不启用总时长上限 |
 | `keepseek.toolResultTokenBudget` | `0` | 单次 Agent 执行中工具结果可使用的估算 token 预算；设为 `0` 时按模型上下文窗口自动估算 |
+| `keepseek.maxWorkspaceToolFiles` | `2000` | 只读工作区文件列表工具最多返回的文件数量 |
 | `keepseek.contextWindowTokens` | `1000000` | 上下文窗口估算 tokens，用于上下文用量指示器 |
+| `keepseek.streamIdleTimeoutMs` | `0` | 流式响应连续无数据时的空闲超时；设为 `0` 时禁用 |
+| `keepseek.historyRetentionDays` | `7` | 历史菜单默认显示最近天数，范围 1-60；存储记录仍按 60 天硬保留清理 |
 
 ## 隐私与安全
 
@@ -99,7 +115,7 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 从 VSIX 安装：
 
 ```bash
-code --install-extension keepseek-0.0.9.vsix
+code --install-extension keepseek-0.1.0.vsix
 ```
 
 安装后在 VS Code 中执行：
@@ -131,7 +147,7 @@ KeepSeek: Open Agent Chat
 
 ## 发布准备
 
-当前发布版本为 `0.0.9`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.0.9`，发布标签可以使用 `v0.0.9`。
+当前发布版本为 `0.1.0`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.1.0`，发布标签可以使用 `v0.1.0`。
 
 生成 VSIX：
 
@@ -181,7 +197,7 @@ SOFTWARE.
 
 KeepSeek is an AI coding context assistant for VS Code. It adds an Agent chat panel to the VS Code sidebar and makes it easy to send precise development context to AI: files, selected code, terminal output, Debug Console text, and Output panel logs.
 
-The current release connects to DeepSeek OpenAI-compatible Chat Completions by default. It supports DeepSeek V4 Flash / Pro, Thinking mode, multi-turn sessions, rich file references, runtime log references, and a safe draft-edit workflow.
+The current release connects to DeepSeek OpenAI-compatible Chat Completions by default. It supports DeepSeek V4 Flash / Pro, Thinking mode, multi-turn sessions, cross-project history session management, rich file references, runtime log references, and a safe draft-edit workflow.
 
 **KeepSeek is open source** under the [MIT license](./LICENSE). Source code is available on GitHub: **[https://github.com/kmvdata/keepseek](https://github.com/kmvdata/keepseek)**
 
@@ -191,6 +207,7 @@ The current release connects to DeepSeek OpenAI-compatible Chat Completions by d
 - Debug real failures: send terminal errors, failed test output, Debug Console text, or Output logs as context.
 - Plan code changes: reference exact files and line ranges before asking for an implementation strategy.
 - Work across files: gather related workspace or external files and keep the discussion grounded in the same context.
+- Continue across projects: copy a history session from another project into the current workspace and keep using the same investigation thread.
 - Review build and test output: ask AI to summarize failures and suggest the next step.
 
 ## Who It Is For
@@ -206,13 +223,23 @@ The current release connects to DeepSeek OpenAI-compatible Chat Completions by d
 - Sidebar Agent chat inside VS Code Secondary Sidebar.
 - Configurable model list with DeepSeek V4 Flash / Pro defaults.
 - Thinking mode with `high` and `max` reasoning effort.
-- Multi-turn chat history and session switching.
+- History session management with project-scoped global storage, current-project and other-project browsing, cross-project copy into the current project, favorites, rename, time-range filtering, multi-select delete, and project-level cleanup.
 - File context from the active editor, workspace files, external files, directories, or typed paths.
 - Precise file references from editor selections, including path, line, and column metadata.
 - Runtime context references from terminal selections, Output panel selections, and Debug Console text.
 - Drag-and-drop file references into the prompt composer.
+- Abort control for stopping an in-progress Agent run.
+- One-click copy for assistant replies.
+- Shared Emacs/macOS-style text shortcuts in the prompt composer and message edit boxes.
 - Safe DraftEdit workflow where AI proposes changes and the user confirms before writing files.
 - Size limits and binary-file filtering to avoid sending unsuitable content.
+
+## History Session Management
+
+- Sessions are stored globally while remaining scoped to each workspace, so reopening a project restores that project's own history.
+- The history menu can switch between the current project and other projects. Opening a session from another project copies it into the current workspace as a new session without changing the source project.
+- Current-project sessions support favorite, rename, recent-days or all-time filtering, favorites-only filtering, and multi-select deletion. Other-project records can be deleted by session or cleared for the whole project.
+- `keepseek.historyRetentionDays` controls the default recent-days range in the menu; stored non-active sessions are hard-pruned after 60 days.
 
 ## How It Works
 
@@ -230,6 +257,7 @@ KeepSeek is built around explicit context. You decide which files, selections, a
 |----------|-----------|---------|
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | Editor text is selected | `keepseek.addSelectionToContext` |
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | Explorer is focused on a file | `keepseek.addExplorerFileToContext` |
+| `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | Explorer is focused on a directory | `keepseek.addExplorerDirectoryToContext` |
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | Terminal text is selected | `keepseek.addTerminalSelectionToContext` |
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | Debug Console is focused | `keepseek.addDebugConsoleSelectionToContext` |
 
@@ -248,7 +276,10 @@ KeepSeek is built around explicit context. You decide which files, selections, a
 | `keepseek.maxToolCalls` | `24` | Maximum total tool calls in one agent run; set `0` to disable this separate cap |
 | `keepseek.maxRunMs` | `600000` | Maximum total run time in milliseconds for one agent run; set `0` to disable the total run-time cap |
 | `keepseek.toolResultTokenBudget` | `0` | Estimated token budget for tool results in one agent run; set `0` to derive it from the model context window |
+| `keepseek.maxWorkspaceToolFiles` | `2000` | Maximum number of files returned by the read-only workspace file listing tool |
 | `keepseek.contextWindowTokens` | `1000000` | Estimated context-window tokens for the context usage indicator |
+| `keepseek.streamIdleTimeoutMs` | `0` | Idle timeout for streaming responses with no data; set `0` to disable it |
+| `keepseek.historyRetentionDays` | `7` | Default recent-days range in the history menu, from 1 to 60; stored records still use the 60-day hard retention limit |
 
 ## Privacy And Safety
 

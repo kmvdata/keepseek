@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0 - 2026-05-27
+
+- Added project-aware global history session storage with current-project and other-project browsing, cross-project session copy, favorites, rename, recent-day filtering, multi-select deletion, and whole-project history cleanup.
+- Added `keepseek.historyRetentionDays` for the default history menu range, with stored sessions hard-pruned after 60 days except for the currently active session.
+- Added an abort/stop control so users can cancel an in-progress Agent run from the composer.
+- Added one-click copy for assistant replies.
+- Shared Emacs-style text shortcuts across the prompt composer and message edit boxes.
+- Improved file and directory reference rendering, line/column reference handling, reference type detection, and syntax highlighting for references in prompts and transcripts.
+
 ## 0.0.9 - 2026-05-24
 
 - Fixed a streaming parser edge case where the final SSE event could be left unprocessed when the response ended with pending decoded bytes, causing AI replies to appear interrupted.
