@@ -125,6 +125,8 @@ type WebviewMessage =
   | { type: 'pickExternalFileReferences' }
   | { type: 'insertDroppedFileReferences'; files: DroppedFileReferenceInput[] }
   | { type: 'requestReferenceResources'; requestId: string }
+  | { type: 'requestClipboardText'; requestId: string }
+  | { type: 'writeClipboardText'; text: string }
   | { type: 'readPath'; path: string }
   | { type: 'openFileReference'; path: string; startLine: number; endLine: number; startColumn: number; endColumn: number }
   | { type: 'openDirectoryReference'; path: string }
@@ -686,6 +688,12 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'requestReferenceResources':
         await this.postReferenceResources(message.requestId);
         return;
+      case 'requestClipboardText':
+        await this.postClipboardText(message.requestId);
+        return;
+      case 'writeClipboardText':
+        await this.writeClipboardText(message.text);
+        return;
       case 'readPath':
         await this.readPathToContext(message.path);
         return;
@@ -966,6 +974,31 @@ class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         resources: [],
         error: getErrorMessage(error)
       });
+    }
+  }
+
+  private async postClipboardText(requestId: string): Promise<void> {
+    try {
+      this.postToWebview({
+        type: 'clipboardText',
+        requestId,
+        text: await vscode.env.clipboard.readText()
+      });
+    } catch (error) {
+      this.postToWebview({
+        type: 'clipboardText',
+        requestId,
+        text: '',
+        error: getErrorMessage(error)
+      });
+    }
+  }
+
+  private async writeClipboardText(text: string): Promise<void> {
+    try {
+      await vscode.env.clipboard.writeText(text);
+    } catch {
+      // Clipboard writes are best-effort for shortcut compatibility.
     }
   }
 
