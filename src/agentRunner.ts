@@ -62,6 +62,17 @@ type AgentBudgetFinishReason =
   | 'tool_result_budget_exhausted'
   | 'run_time_limit_exhausted';
 
+interface NormalizedAssistantToolCalls {
+  assistant: DeepSeekAssistantMessage;
+  displayReasoningContent?: string | null;
+  source: 'native' | 'dsml';
+}
+
+interface EmulatedDsmlToolResult {
+  toolCall: DeepSeekToolCall;
+  content: string;
+}
+
 export class AgentRunAbortedError extends Error {
   public constructor(language: KeepseekLanguage) {
     super(language === 'en' ? 'Agent run was stopped.' : 'Agent 推理已中止。');
@@ -171,15 +182,16 @@ export class AgentRunner {
       emitUsageEstimate(toolsForTurn);
       const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt);
       this.throwIfAborted(request.signal, request.language);
-      const assistant = this.normalizeAssistantToolCalls(response.message, toolsForTurn.length > 0);
+      const normalizedAssistant = this.normalizeAssistantToolCalls(response.message, toolsForTurn.length > 0);
+      const assistant = normalizedAssistant.assistant;
       if (!assistant) {
         throw new Error(request.language === 'en'
           ? 'DeepSeek API did not return a usable assistant message.'
           : 'DeepSeek API 没有返回可用的 assistant message。');
       }
 
-      if (assistant.reasoning_content) {
-        reasoningParts.push(assistant.reasoning_content);
+      if (normalizedAssistant.displayReasoningContent) {
+        reasoningParts.push(normalizedAssistant.displayReasoningContent);
       }
 
       const toolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
@@ -200,91 +212,126 @@ export class AgentRunner {
         phase: 'planning_tool'
       });
 
-      const assistantToolCallMessage: DeepSeekMessage = {
-        role: 'assistant',
-        content: assistant.content ?? null,
-        reasoning_content: assistant.reasoning_content ?? null,
-        tool_calls: toolCalls
-      };
-      messages.push(assistantToolCallMessage);
-      runtimeUsageBreakdown.toolCallTokensEstimate += estimateChatMessageTokens('assistant', [
-        assistant.content ?? '',
-        JSON.stringify(toolCalls)
-      ].join('\n'));
-      if (assistant.reasoning_content) {
-        runtimeUsageBreakdown.reasoningTokensEstimate += estimateChatMessageTokens('assistant', assistant.reasoning_content);
-      }
-      emitUsageEstimate(toolsForTurn);
-
-      for (const toolCall of toolCalls) {
+      const executeToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
         this.throwIfAborted(request.signal, request.language);
-        let toolResult: string;
         if (budgetStopReason) {
-          toolResult = this.createBudgetToolResult(budgetStopReason, request.language);
-        } else if (runtimeConfig.maxToolCalls > 0 && toolCallCount >= runtimeConfig.maxToolCalls) {
+          return this.createBudgetToolResult(budgetStopReason, request.language);
+        }
+
+        if (runtimeConfig.maxToolCalls > 0 && toolCallCount >= runtimeConfig.maxToolCalls) {
           budgetStopReason = 'tool_call_limit_exhausted';
-          toolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
+          return this.createBudgetToolResult(budgetStopReason, request.language, {
             toolCallCount,
             maxToolCalls: runtimeConfig.maxToolCalls
           });
-        } else {
-          toolCallCount += 1;
-          emitStatus({
-            base: 'executing',
-            phase: this.getToolActivityPhase(toolCall.function.name),
-            toolName: toolCall.function.name
-          });
-          const rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language);
-          this.throwIfAborted(request.signal, request.language);
-          const rawToolMessage: DeepSeekMessage = {
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: rawToolResult
-          };
-          const nextToolResultTokens = estimateDeepSeekMessageTokens(rawToolMessage);
-          const nextToolsForRequest = turn + 1 < maxIterations ? tools : [];
-          if (toolResultTokens + nextToolResultTokens > maxToolResultTokens) {
-            budgetStopReason = 'tool_result_budget_exhausted';
-            toolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
-              usedTokens: toolResultTokens,
-              nextTokens: nextToolResultTokens,
-              maxTokens: Number.isFinite(maxToolResultTokens) ? maxToolResultTokens : 0
-            });
-          } else if (this.getContextWindowBudgetStopReason(request, [...messages, rawToolMessage], nextToolsForRequest, outputReserveTokens)) {
-            budgetStopReason = 'tool_result_budget_exhausted';
-            const projectedUsage = createContextUsageEstimateFromMessages({
-              model: request.model,
-              messages: [...messages, rawToolMessage],
-              tools: nextToolsForRequest,
-              outputReserveTokens,
-              safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-            });
-            toolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
-              usedTokens: projectedUsage.usedTokensEstimate,
-              nextTokens: nextToolResultTokens,
-              maxTokens: projectedUsage.maxTokensEstimate
-            });
-          } else {
-            toolResultTokens += nextToolResultTokens;
-            toolResult = rawToolResult;
-          }
-
-          budgetStopReason = budgetStopReason ?? this.getRunTimeStopReason(runDeadlineAt);
         }
 
-        const toolMessage: DeepSeekMessage = {
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: toolResult
-        };
-        messages.push(toolMessage);
-        runtimeUsageBreakdown.toolResultTokensEstimate += estimateDeepSeekMessageTokens(toolMessage);
-        emitUsageEstimate(budgetStopReason ? [] : turn + 1 < maxIterations ? tools : []);
+        toolCallCount += 1;
         emitStatus({
-          base: 'thinking',
-          phase: 'reviewing_tool_result',
+          base: 'executing',
+          phase: this.getToolActivityPhase(toolCall.function.name),
           toolName: toolCall.function.name
         });
+        const rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language);
+        this.throwIfAborted(request.signal, request.language);
+        const rawToolMessage: DeepSeekMessage = {
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: rawToolResult
+        };
+        const nextToolResultTokens = estimateDeepSeekMessageTokens(rawToolMessage);
+        const nextToolsForRequest = turn + 1 < maxIterations ? tools : [];
+        if (toolResultTokens + nextToolResultTokens > maxToolResultTokens) {
+          budgetStopReason = 'tool_result_budget_exhausted';
+          return this.createBudgetToolResult(budgetStopReason, request.language, {
+            usedTokens: toolResultTokens,
+            nextTokens: nextToolResultTokens,
+            maxTokens: Number.isFinite(maxToolResultTokens) ? maxToolResultTokens : 0
+          });
+        }
+
+        if (this.getContextWindowBudgetStopReason(request, [...messages, rawToolMessage], nextToolsForRequest, outputReserveTokens)) {
+          budgetStopReason = 'tool_result_budget_exhausted';
+          const projectedUsage = createContextUsageEstimateFromMessages({
+            model: request.model,
+            messages: [...messages, rawToolMessage],
+            tools: nextToolsForRequest,
+            outputReserveTokens,
+            safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+          });
+          return this.createBudgetToolResult(budgetStopReason, request.language, {
+            usedTokens: projectedUsage.usedTokensEstimate,
+            nextTokens: nextToolResultTokens,
+            maxTokens: projectedUsage.maxTokensEstimate
+          });
+        }
+
+        toolResultTokens += nextToolResultTokens;
+        budgetStopReason = budgetStopReason ?? this.getRunTimeStopReason(runDeadlineAt);
+        return rawToolResult;
+      };
+
+      if (normalizedAssistant.source === 'native') {
+        const assistantToolCallMessage: DeepSeekMessage = {
+          role: 'assistant',
+          content: assistant.content ?? null,
+          reasoning_content: assistant.reasoning_content ?? null,
+          tool_calls: toolCalls
+        };
+        messages.push(assistantToolCallMessage);
+        runtimeUsageBreakdown.toolCallTokensEstimate += estimateChatMessageTokens('assistant', [
+          assistant.content ?? '',
+          JSON.stringify(toolCalls)
+        ].join('\n'));
+        if (assistant.reasoning_content) {
+          runtimeUsageBreakdown.reasoningTokensEstimate += estimateChatMessageTokens('assistant', assistant.reasoning_content);
+        }
+        emitUsageEstimate(toolsForTurn);
+
+        for (const toolCall of toolCalls) {
+          const toolResult = await executeToolCall(toolCall);
+          const toolMessage: DeepSeekMessage = {
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: toolResult
+          };
+          messages.push(toolMessage);
+          runtimeUsageBreakdown.toolResultTokensEstimate += estimateDeepSeekMessageTokens(toolMessage);
+          emitUsageEstimate(budgetStopReason ? [] : turn + 1 < maxIterations ? tools : []);
+          emitStatus({
+            base: 'thinking',
+            phase: 'reviewing_tool_result',
+            toolName: toolCall.function.name
+          });
+        }
+      } else {
+        if (assistant.content?.trim()) {
+          const assistantTextMessage: DeepSeekMessage = {
+            role: 'assistant',
+            content: assistant.content.trim()
+          };
+          messages.push(assistantTextMessage);
+          runtimeUsageBreakdown.inputTokensEstimate += estimateDeepSeekMessageTokens(assistantTextMessage);
+        }
+
+        const emulatedResults: EmulatedDsmlToolResult[] = [];
+        for (const toolCall of toolCalls) {
+          const toolResult = await executeToolCall(toolCall);
+          emulatedResults.push({ toolCall, content: toolResult });
+          emitStatus({
+            base: 'thinking',
+            phase: 'reviewing_tool_result',
+            toolName: toolCall.function.name
+          });
+        }
+
+        const emulatedToolResultMessage: DeepSeekMessage = {
+          role: 'user',
+          content: this.formatEmulatedDsmlToolResults(emulatedResults, request.language)
+        };
+        messages.push(emulatedToolResultMessage);
+        runtimeUsageBreakdown.toolResultTokensEstimate += estimateDeepSeekMessageTokens(emulatedToolResultMessage);
+        emitUsageEstimate(budgetStopReason ? [] : turn + 1 < maxIterations ? tools : []);
       }
 
       if (budgetStopReason && !budgetStopInstructionQueued) {
@@ -783,29 +830,75 @@ export class AgentRunner {
     return cleaned.map((part, index) => `Step ${index + 1}\n${part}`).join('\n\n');
   }
 
-  private normalizeAssistantToolCalls(assistant: DeepSeekAssistantMessage, allowToolCalls: boolean): DeepSeekAssistantMessage {
+  private normalizeAssistantToolCalls(
+    assistant: DeepSeekAssistantMessage,
+    allowToolCalls: boolean
+  ): NormalizedAssistantToolCalls {
+    const displayReasoningContent = assistant.reasoning_content;
+
     if (!allowToolCalls) {
       return {
-        ...assistant,
-        tool_calls: null
+        assistant: {
+          ...assistant,
+          tool_calls: null
+        },
+        displayReasoningContent,
+        source: 'native'
       };
     }
 
     const structuredToolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
     if (structuredToolCalls.length) {
-      return assistant;
+      return { assistant, displayReasoningContent, source: 'native' };
     }
 
     const parsedDsml = this.dsmlToolParser.parse(assistant.content ?? '');
     if (!parsedDsml?.toolCalls.length) {
-      return assistant;
+      const parsedReasoningDsml = this.dsmlToolParser.parse(assistant.reasoning_content ?? '');
+      if (!parsedReasoningDsml?.toolCalls.length) {
+        return { assistant, displayReasoningContent, source: 'native' };
+      }
+
+      return {
+        assistant: {
+          ...assistant,
+          tool_calls: parsedReasoningDsml.toolCalls
+        },
+        displayReasoningContent: parsedReasoningDsml.content,
+        source: 'dsml'
+      };
     }
 
     return {
-      ...assistant,
-      content: parsedDsml.content,
-      tool_calls: parsedDsml.toolCalls
+      assistant: {
+        ...assistant,
+        content: parsedDsml.content,
+        tool_calls: parsedDsml.toolCalls
+      },
+      displayReasoningContent,
+      source: 'dsml'
     };
+  }
+
+  private formatEmulatedDsmlToolResults(results: EmulatedDsmlToolResult[], language: KeepseekLanguage): string {
+    const header = language === 'en'
+      ? [
+          'KeepSeek executed the DSML tool requests emitted in the previous assistant message.',
+          'Use these tool results to continue answering the original user request. Do not emit DSML in your next response; use native tool calls if more workspace context is needed.'
+        ].join(' ')
+      : [
+          'KeepSeek 已执行上一条 assistant 消息中输出的 DSML 工具请求。',
+          '请使用这些工具结果继续回答用户最初的问题。下一次回复不要输出 DSML；如果还需要更多工作区上下文，请使用原生 tool_calls。'
+        ].join('');
+
+    const blocks = results.map((result, index) => [
+      `Tool result ${index + 1}: ${result.toolCall.function.name}`,
+      `Arguments: ${result.toolCall.function.arguments || '{}'}`,
+      'Result:',
+      result.content
+    ].join('\n'));
+
+    return [header, ...blocks].join('\n\n');
   }
 
   private formatApiError(responseText: string, language: KeepseekLanguage): string {

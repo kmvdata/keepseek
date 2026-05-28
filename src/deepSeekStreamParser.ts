@@ -11,6 +11,60 @@ interface StreamingToolCallAccumulator {
   };
 }
 
+class StreamingDsmlDisplayFilter {
+  private static readonly maxMarkerLength = 40;
+  private static readonly startPattern = /<[\uFF5C|]+DSML[\uFF5C|]+tool_calls>/iu;
+  private static readonly endPattern = /<\/[\uFF5C|]+DSML[\uFF5C|]+tool_calls>/iu;
+
+  private pending = '';
+  private suppressing = false;
+
+  public push(delta: string): string {
+    let input = `${this.pending}${delta}`;
+    this.pending = '';
+    let output = '';
+
+    while (input) {
+      if (this.suppressing) {
+        const endMatch = StreamingDsmlDisplayFilter.endPattern.exec(input);
+        if (!endMatch || endMatch.index === undefined) {
+          this.pending = input.slice(-StreamingDsmlDisplayFilter.maxMarkerLength);
+          return output;
+        }
+
+        input = input.slice(endMatch.index + endMatch[0].length);
+        this.suppressing = false;
+        continue;
+      }
+
+      const startMatch = StreamingDsmlDisplayFilter.startPattern.exec(input);
+      if (!startMatch || startMatch.index === undefined) {
+        const emitLength = Math.max(0, input.length - StreamingDsmlDisplayFilter.maxMarkerLength);
+        output += input.slice(0, emitLength);
+        this.pending = input.slice(emitLength);
+        return output;
+      }
+
+      output += input.slice(0, startMatch.index);
+      input = input.slice(startMatch.index + startMatch[0].length);
+      this.suppressing = true;
+    }
+
+    return output;
+  }
+
+  public flush(): string {
+    if (this.suppressing) {
+      this.pending = '';
+      return '';
+    }
+
+    const output = this.pending;
+    this.pending = '';
+    return output;
+  }
+}
+
 export class DeepSeekStreamParser {
   public async parse(
     body: NonNullable<Response['body']>,
@@ -23,6 +77,8 @@ export class DeepSeekStreamParser {
     const contentParts: string[] = [];
     const reasoningParts: string[] = [];
     const toolCallParts = new Map<number, StreamingToolCallAccumulator>();
+    const contentDisplayFilter = new StreamingDsmlDisplayFilter();
+    const reasoningDisplayFilter = new StreamingDsmlDisplayFilter();
     let buffer = '';
     let finishReason: string | null | undefined;
     let streamDone = false;
@@ -35,7 +91,16 @@ export class DeepSeekStreamParser {
       while (separatorIndex >= 0) {
         const rawEvent = buffer.slice(0, separatorIndex);
         buffer = buffer.slice(separatorIndex + 2);
-        const eventResult = this.consumeSseEvent(rawEvent, language, contentParts, reasoningParts, toolCallParts, callbacks);
+        const eventResult = this.consumeSseEvent(
+          rawEvent,
+          language,
+          contentParts,
+          reasoningParts,
+          toolCallParts,
+          contentDisplayFilter,
+          reasoningDisplayFilter,
+          callbacks
+        );
         sawChunk = sawChunk || eventResult.sawChunk;
         finishReason = eventResult.finishReason ?? finishReason;
         streamDone = eventResult.done;
@@ -61,7 +126,16 @@ export class DeepSeekStreamParser {
 
     const remaining = buffer.trim();
     if (remaining && !streamDone) {
-      const eventResult = this.consumeSseEvent(remaining, language, contentParts, reasoningParts, toolCallParts, callbacks);
+      const eventResult = this.consumeSseEvent(
+        remaining,
+        language,
+        contentParts,
+        reasoningParts,
+        toolCallParts,
+        contentDisplayFilter,
+        reasoningDisplayFilter,
+        callbacks
+      );
       sawChunk = sawChunk || eventResult.sawChunk;
       finishReason = eventResult.finishReason ?? finishReason;
     }
@@ -71,6 +145,9 @@ export class DeepSeekStreamParser {
         ? 'DeepSeek API did not return any streaming chunks.'
         : 'DeepSeek API 未返回任何流式数据块。');
     }
+
+    this.flushDisplayFilter(reasoningDisplayFilter, callbacks, 'reasoning');
+    this.flushDisplayFilter(contentDisplayFilter, callbacks, 'content');
 
     return {
       message: {
@@ -89,6 +166,8 @@ export class DeepSeekStreamParser {
     contentParts: string[],
     reasoningParts: string[],
     toolCallParts: Map<number, StreamingToolCallAccumulator>,
+    contentDisplayFilter: StreamingDsmlDisplayFilter,
+    reasoningDisplayFilter: StreamingDsmlDisplayFilter,
     callbacks: AgentRunCallbacks
   ): { done: boolean; sawChunk: boolean; finishReason?: string | null } {
     const dataLines = rawEvent
@@ -111,7 +190,15 @@ export class DeepSeekStreamParser {
 
       const chunk = this.parseStreamChunk(data, language);
       sawChunk = true;
-      finishReason = this.applyStreamChunk(chunk, contentParts, reasoningParts, toolCallParts, callbacks) ?? finishReason;
+      finishReason = this.applyStreamChunk(
+        chunk,
+        contentParts,
+        reasoningParts,
+        toolCallParts,
+        contentDisplayFilter,
+        reasoningDisplayFilter,
+        callbacks
+      ) ?? finishReason;
     }
 
     return { done: false, sawChunk, finishReason };
@@ -136,6 +223,8 @@ export class DeepSeekStreamParser {
     contentParts: string[],
     reasoningParts: string[],
     toolCallParts: Map<number, StreamingToolCallAccumulator>,
+    contentDisplayFilter: StreamingDsmlDisplayFilter,
+    reasoningDisplayFilter: StreamingDsmlDisplayFilter,
     callbacks: AgentRunCallbacks
   ): string | null | undefined {
     let finishReason: string | null | undefined;
@@ -151,8 +240,8 @@ export class DeepSeekStreamParser {
         continue;
       }
 
-      this.collectTextDelta(delta.reasoning_content, reasoningParts, callbacks, 'reasoning');
-      this.collectTextDelta(delta.content, contentParts, callbacks, 'content');
+      this.collectTextDelta(delta.reasoning_content, reasoningParts, reasoningDisplayFilter, callbacks, 'reasoning');
+      this.collectTextDelta(delta.content, contentParts, contentDisplayFilter, callbacks, 'content');
       this.collectToolCallDeltas(delta.tool_calls ?? [], toolCallParts, callbacks);
     }
 
@@ -162,6 +251,7 @@ export class DeepSeekStreamParser {
   private collectTextDelta(
     delta: string | null | undefined,
     parts: string[],
+    displayFilter: StreamingDsmlDisplayFilter,
     callbacks: AgentRunCallbacks,
     type: 'content' | 'reasoning'
   ): void {
@@ -173,7 +263,21 @@ export class DeepSeekStreamParser {
       base: 'thinking',
       phase: type === 'reasoning' ? 'reasoning' : 'generating'
     });
-    callbacks.onDelta?.({ type, delta });
+    const displayDelta = displayFilter.push(delta);
+    if (displayDelta) {
+      callbacks.onDelta?.({ type, delta: displayDelta });
+    }
+  }
+
+  private flushDisplayFilter(
+    displayFilter: StreamingDsmlDisplayFilter,
+    callbacks: AgentRunCallbacks,
+    type: 'content' | 'reasoning'
+  ): void {
+    const delta = displayFilter.flush();
+    if (delta) {
+      callbacks.onDelta?.({ type, delta });
+    }
   }
 
   private collectToolCallDeltas(
