@@ -669,19 +669,17 @@ export function getInputScript(): string {
           : getPromptInsertionRange();
         var fragment = document.createDocumentFragment();
         if (isPromptRangeInsideMarkdownFence(range)) {
+          appendReferenceBoundarySpace(fragment);
           fragment.append(document.createTextNode(referenceToPlainText(reference)));
+          appendReferenceBoundarySpace(fragment);
           insertFragmentAtRange(range, fragment);
           closeReferenceMenu(true);
           setComposerStatus(reference.kind === 'directory' ? t('insertedDirectoryReference') : t('insertedFileReference'));
           return;
         }
-        if (needsLeadingSpace(range)) {
-          fragment.append(document.createTextNode(' '));
-        }
+        appendReferenceBoundarySpace(fragment);
         fragment.append(createReferenceLink(reference));
-        if (needsTrailingSpace(range)) {
-          fragment.append(document.createTextNode(' '));
-        }
+        appendReferenceBoundarySpace(fragment);
         insertFragmentAtRange(range, fragment);
         closeReferenceMenu(true);
         setComposerStatus(reference.kind === 'directory' ? t('insertedDirectoryReference') : t('insertedFileReference'));
@@ -1805,14 +1803,14 @@ export function getInputScript(): string {
         var range = getPromptInsertionRange();
         var fragment = document.createDocumentFragment();
         if (isPromptRangeInsideMarkdownFence(range)) {
+          appendReferenceBoundarySpace(fragment);
           appendPlainReferenceText(fragment, references);
+          appendReferenceBoundarySpace(fragment);
           insertFragmentAtRange(range, fragment);
           setComposerStatus(t('insertedFileReferences', { count: references.length }));
           return;
         }
-        if (needsLeadingSpace(range)) {
-          fragment.append(document.createTextNode(' '));
-        }
+        appendReferenceBoundarySpace(fragment);
 
         for (var i = 0; i < references.length; i++) {
           if (i > 0) {
@@ -1821,12 +1819,14 @@ export function getInputScript(): string {
           fragment.append(createReferenceLink(references[i]));
         }
 
-        if (needsTrailingSpace(range)) {
-          fragment.append(document.createTextNode(' '));
-        }
+        appendReferenceBoundarySpace(fragment);
 
         insertFragmentAtRange(range, fragment);
         setComposerStatus(t('insertedFileReferences', { count: references.length }));
+      }
+
+      function appendReferenceBoundarySpace(fragment) {
+        fragment.append(document.createTextNode(' '));
       }
 
       function appendPlainReferenceText(fragment, references) {
@@ -1949,27 +1949,10 @@ export function getInputScript(): string {
         return range.collapsed && range.startContainer === promptInput && range.startOffset === 0;
       }
 
-      function needsLeadingSpace(range) {
-        var text = getTextBeforeRange(range);
-        return text.length > 0 && !isWhitespace(text.charAt(text.length - 1));
-      }
-
-      function needsTrailingSpace(range) {
-        var text = getTextAfterRange(range);
-        return text.length > 0 && !isWhitespace(text.charAt(0));
-      }
-
       function getTextBeforeRange(range) {
         var clone = range.cloneRange();
         clone.selectNodeContents(promptInput);
         clone.setEnd(range.startContainer, range.startOffset);
-        return clone.toString();
-      }
-
-      function getTextAfterRange(range) {
-        var clone = range.cloneRange();
-        clone.selectNodeContents(promptInput);
-        clone.setStart(range.endContainer, range.endOffset);
         return clone.toString();
       }
 
@@ -2745,18 +2728,16 @@ export function getInputScript(): string {
         var range = getPromptInsertionRange();
         var fragment = document.createDocumentFragment();
         if (isPromptRangeInsideMarkdownFence(range)) {
+          appendReferenceBoundarySpace(fragment);
           fragment.append(document.createTextNode(referenceToPlainText(reference)));
+          appendReferenceBoundarySpace(fragment);
           insertFragmentAtRange(range, fragment);
           setComposerStatus(reference.kind === 'directory' ? t('insertedDirectoryReference') : t('insertedFileReference'));
           return;
         }
-        if (needsLeadingSpace(range)) {
-          fragment.append(document.createTextNode(' '));
-        }
+        appendReferenceBoundarySpace(fragment);
         fragment.append(createReferenceLink(reference));
-        if (needsTrailingSpace(range)) {
-          fragment.append(document.createTextNode(' '));
-        }
+        appendReferenceBoundarySpace(fragment);
         insertFragmentAtRange(range, fragment);
         setComposerStatus(reference.kind === 'directory' ? t('insertedDirectoryReference') : t('insertedFileReference'));
       });

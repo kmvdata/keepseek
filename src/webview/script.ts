@@ -2670,18 +2670,20 @@ export function getScript(): string {
     function insertInlineReferenceAtRange(editor, range, reference) {
       var fragment = document.createDocumentFragment();
       if (isInlineEditorRangeInsideMarkdownFence(editor, range)) {
+        appendInlineReferenceBoundarySpace(fragment);
         fragment.append(document.createTextNode(referenceToInlinePlainText(reference)));
+        appendInlineReferenceBoundarySpace(fragment);
         insertInlineFragmentAtRange(editor, range, fragment);
         return;
       }
-      if (needsInlineEditorLeadingSpace(editor, range)) {
-        fragment.append(document.createTextNode(' '));
-      }
+      appendInlineReferenceBoundarySpace(fragment);
       fragment.append(createInlineReferenceLink(reference));
-      if (needsInlineEditorTrailingSpace(editor, range)) {
-        fragment.append(document.createTextNode(' '));
-      }
+      appendInlineReferenceBoundarySpace(fragment);
       insertInlineFragmentAtRange(editor, range, fragment);
+    }
+
+    function appendInlineReferenceBoundarySpace(fragment) {
+      fragment.append(document.createTextNode(' '));
     }
 
     function referenceToInlinePlainText(reference) {
@@ -2722,16 +2724,6 @@ export function getScript(): string {
       insertInlineFragmentAtRange(editor, getInlineEditorInsertionRange(editor), fragment);
     }
 
-    function needsInlineEditorLeadingSpace(editor, range) {
-      var text = getInlineEditorTextBeforeRange(editor, range);
-      return text.length > 0 && !isEditWhitespace(text.charAt(text.length - 1));
-    }
-
-    function needsInlineEditorTrailingSpace(editor, range) {
-      var text = getInlineEditorTextAfterRange(editor, range);
-      return text.length > 0 && !isEditWhitespace(text.charAt(0));
-    }
-
     function getInlineEditorTextBeforeRange(editor, range) {
       var clone = range.cloneRange();
       clone.selectNodeContents(editor);
@@ -2741,13 +2733,6 @@ export function getScript(): string {
 
     function isInlineEditorRangeInsideMarkdownFence(editor, range) {
       return isMarkdownFenceOpenAtTextEnd(getInlineEditorTextBeforeRange(editor, range));
-    }
-
-    function getInlineEditorTextAfterRange(editor, range) {
-      var clone = range.cloneRange();
-      clone.selectNodeContents(editor);
-      clone.setStart(range.endContainer, range.endOffset);
-      return clone.toString();
     }
 
     function insertFileReferenceIntoActiveEditor(message) {
