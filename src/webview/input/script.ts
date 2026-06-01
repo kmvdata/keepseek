@@ -70,8 +70,8 @@ export function getInputScript(): string {
         if (state.isBusy) {
           closeCommandMenu();
           closeReferenceMenu(false);
-          vscode.postMessage({ type: 'abortPrompt' });
-          clearPrompt();
+          setComposerStatus(t('taskAlreadyRunning'));
+          promptInput.focus();
           return;
         }
         sanitizePromptContent();
@@ -89,6 +89,20 @@ export function getInputScript(): string {
         state.isBusy = true;
         clearPrompt();
       });
+
+      if (sendButton) {
+        sendButton.addEventListener('click', function(event) {
+          if (!state.isBusy) {
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          closeCommandMenu();
+          closeReferenceMenu(false);
+          vscode.postMessage({ type: 'abortPrompt' });
+          setComposerStatus(t('stoppingTask'));
+        });
+      }
 
       promptInput.addEventListener('keydown', function(event) {
         if (event.isComposing || event.keyCode === 229) {

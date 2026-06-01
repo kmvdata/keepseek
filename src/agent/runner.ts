@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { AgentActivityInput, AgentActivityPhase, AgentRequest, AgentResponse, AgentRunCallbacks, DraftEdit } from '../shared/types';
+import { AgentActivityInput, AgentActivityPhase, AgentRequest, AgentResponse, AgentRunCallbacks, ContextUsageEstimate, DraftEdit } from '../shared/types';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_MAX_TOKENS,
+  getConfiguredMaxRequestRetries,
   getConfiguredMaxRunMs,
   getConfiguredMaxToolCalls,
   getConfiguredMaxToolIterations,
   getConfiguredMaxTokens,
+  getConfiguredRequestRetryBaseMs,
   getConfiguredStreamIdleTimeoutMs,
   getConfiguredToolResultTokenBudget,
   MAX_GENERATION_TOKENS
@@ -29,8 +31,8 @@ import {
 } from './contextUsage';
 import { WorkspaceToolAdapter, WorkspaceToolService } from './tools/workspaceTools';
 import type { KeepseekLanguage } from '../shared/i18n';
-import { DeepSeekStreamParser } from './deepseek/streamParser';
 import { DsmlToolParser } from './deepseek/dsmlToolParser';
+import { DeepSeekClient, DeepSeekClientConfig } from './deepseek/client';
 import {
   DeepSeekAssistantMessage,
   DeepSeekChatRequestBody,
@@ -44,6 +46,7 @@ export { AGENT_HISTORY_MESSAGE_LIMIT } from '../shared/config';
 export { DEFAULT_MAX_TOKENS, MAX_GENERATION_TOKENS };
 
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;
+const MAX_LENGTH_CONTINUATION_REQUESTS = 1;
 
 interface AgentRuntimeConfig {
   apiKey: string;
@@ -54,6 +57,8 @@ interface AgentRuntimeConfig {
   maxRunMs: number;
   toolResultTokenBudget: number;
   streamIdleTimeoutMs: number;
+  maxRequestRetries: number;
+  requestRetryBaseMs: number;
 }
 
 type AgentBudgetFinishReason =
@@ -81,8 +86,8 @@ export class AgentRunAbortedError extends Error {
 }
 
 export class AgentRunner {
-  private readonly streamParser = new DeepSeekStreamParser();
   private readonly dsmlToolParser = new DsmlToolParser();
+  private readonly deepSeekClient = new DeepSeekClient();
 
   public constructor(private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService()) {}
 
@@ -160,6 +165,19 @@ export class AgentRunner {
     let toolResultTokens = 0;
     let budgetStopReason: AgentBudgetFinishReason | undefined;
     let budgetStopInstructionQueued = false;
+    const queueBudgetStopInstruction = () => {
+      if (!budgetStopReason || budgetStopInstructionQueued) {
+        return;
+      }
+      const budgetInstructionMessage: DeepSeekMessage = {
+        role: 'user',
+        content: this.getBudgetStopInstruction(budgetStopReason, request.language)
+      };
+      messages.push(budgetInstructionMessage);
+      runtimeUsageBreakdown.inputTokensEstimate += estimateDeepSeekMessageTokens(budgetInstructionMessage);
+      budgetStopInstructionQueued = true;
+      emitUsageEstimate([]);
+    };
 
     emitUsageEstimate(maxIterations > 0 ? tools : []);
 
@@ -178,6 +196,10 @@ export class AgentRunner {
         };
       }
 
+      if (!budgetStopReason && turn >= maxIterations) {
+        budgetStopReason = 'tool_iterations_exhausted';
+      }
+      queueBudgetStopInstruction();
       const toolsForTurn = !budgetStopReason && turn < maxIterations ? tools : [];
       emitUsageEstimate(toolsForTurn);
       const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt);
@@ -196,12 +218,40 @@ export class AgentRunner {
 
       const toolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
       if (!toolCalls.length) {
+        const continuedResponse = await this.tryContinueLengthLimitedResponse({
+          request,
+          runtimeConfig,
+          messages,
+          assistant,
+          response,
+          draftEdits,
+          callbacks: runCallbacks,
+          runDeadlineAt,
+          outputReserveTokens,
+          reasoningParts,
+          runtimeUsageBreakdown
+        });
+        if (continuedResponse) {
+          emitStatus({
+            base: 'thinking',
+            phase: 'finalizing'
+          });
+          return {
+            message: this.getFinalMessage(continuedResponse.content, draftEdits, continuedResponse.finishReason, request.language, runtimeConfig),
+            reasoningContent: this.formatReasoning(reasoningParts),
+            draftEdits
+          };
+        }
+
         emitStatus({
           base: 'thinking',
           phase: 'finalizing'
         });
+        const finalFinishReason = response.finishReason === 'length'
+          ? response.finishReason
+          : budgetStopReason ?? response.finishReason;
         return {
-          message: this.getFinalMessage(assistant.content, draftEdits, budgetStopReason ?? response.finishReason, request.language, runtimeConfig),
+          message: this.getFinalMessage(assistant.content, draftEdits, finalFinishReason, request.language, runtimeConfig),
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits
         };
@@ -334,16 +384,7 @@ export class AgentRunner {
         emitUsageEstimate(budgetStopReason ? [] : turn + 1 < maxIterations ? tools : []);
       }
 
-      if (budgetStopReason && !budgetStopInstructionQueued) {
-        const budgetInstructionMessage: DeepSeekMessage = {
-          role: 'user',
-          content: this.getBudgetStopInstruction(budgetStopReason, request.language)
-        };
-        messages.push(budgetInstructionMessage);
-        runtimeUsageBreakdown.inputTokensEstimate += estimateDeepSeekMessageTokens(budgetInstructionMessage);
-        budgetStopInstructionQueued = true;
-        emitUsageEstimate([]);
-      }
+      queueBudgetStopInstruction();
     }
 
     emitStatus({
@@ -363,7 +404,8 @@ export class AgentRunner {
     messages: DeepSeekMessage[],
     tools: DeepSeekFunctionTool[],
     callbacks: AgentRunCallbacks,
-    runDeadlineAt?: number
+    runDeadlineAt?: number,
+    options: { allowPartialRecovery?: boolean } = {}
   ): Promise<DeepSeekStreamResult> {
     const body: DeepSeekChatRequestBody = {
       model: request.model.id,
@@ -384,116 +426,236 @@ export class AgentRunner {
       body.max_tokens = runtimeConfig.maxTokens;
     }
 
-    const controller = new AbortController();
-    let idleTimeout: ReturnType<typeof setTimeout> | undefined;
-    let runTimeout: ReturnType<typeof setTimeout> | undefined;
-    let abortedByStreamIdleTimeout = false;
-    let abortedByRunTimeLimit = false;
-    let abortedByExternalSignal = false;
-    const abortByExternalSignal = () => {
-      abortedByExternalSignal = true;
-      controller.abort();
+    body.stream_options = {
+      include_usage: true
     };
-    const resetStreamIdleTimeout = () => {
-      if (runtimeConfig.streamIdleTimeoutMs <= 0) {
-        return;
-      }
-      if (idleTimeout) {
-        clearTimeout(idleTimeout);
-      }
-      idleTimeout = setTimeout(() => {
-        abortedByStreamIdleTimeout = true;
-        controller.abort();
-      }, runtimeConfig.streamIdleTimeoutMs);
-    };
-    const clearStreamIdleTimeout = () => {
-      if (idleTimeout) {
-        clearTimeout(idleTimeout);
-        idleTimeout = undefined;
-      }
-    };
-    const setRunTimeout = () => {
-      if (typeof runDeadlineAt !== 'number') {
-        return;
-      }
-      const remainingMs = runDeadlineAt - Date.now();
-      if (remainingMs <= 0) {
-        abortedByRunTimeLimit = true;
-        controller.abort();
-        return;
-      }
-      runTimeout = setTimeout(() => {
-        abortedByRunTimeLimit = true;
-        controller.abort();
-      }, remainingMs);
-    };
-    const clearRunTimeout = () => {
-      if (runTimeout) {
-        clearTimeout(runTimeout);
-        runTimeout = undefined;
-      }
-    };
-    resetStreamIdleTimeout();
-    setRunTimeout();
-    if (request.signal?.aborted) {
-      abortByExternalSignal();
-    } else {
-      request.signal?.addEventListener('abort', abortByExternalSignal, { once: true });
+
+    const response = await this.deepSeekClient.createChatCompletion(this.toDeepSeekClientConfig(runtimeConfig), {
+      body,
+      language: request.language,
+      signal: request.signal,
+      callbacks,
+      runDeadlineAt
+    });
+
+    if (response.ok && response.message) {
+      return {
+        message: response.message,
+        finishReason: response.finishReason,
+        usage: response.usage
+      };
     }
 
-    try {
-      callbacks.onStatus?.({
-        base: 'thinking',
-        phase: 'requesting_model'
-      });
-      const response = await fetch(this.getChatCompletionsUrl(runtimeConfig.baseUrl), {
-        method: 'POST',
-        headers: {
-          Accept: 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${runtimeConfig.apiKey}`
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal
-      });
-
-      if (!response.ok) {
-        const responseText = await response.text();
-        throw new Error(request.language === 'en'
-          ? `DeepSeek API request failed (${response.status}): ${this.formatApiError(responseText, request.language)}`
-          : `DeepSeek API 请求失败 (${response.status}): ${this.formatApiError(responseText, request.language)}`);
-      }
-
-      if (!response.body) {
-        throw new Error(request.language === 'en'
-          ? 'DeepSeek API did not return a streaming response body.'
-          : 'DeepSeek API 未返回流式响应体。');
-      }
-
-      resetStreamIdleTimeout();
-      return await this.streamParser.parse(response.body, request.language, callbacks, resetStreamIdleTimeout);
-    } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError' && (abortedByExternalSignal || request.signal?.aborted)) {
-        throw new AgentRunAbortedError(request.language);
-      }
-      if (error instanceof Error && error.name === 'AbortError' && abortedByRunTimeLimit) {
-        throw new Error(this.getRunTimeLimitError(runtimeConfig.maxRunMs, request.language));
-      }
-      if (error instanceof Error && error.name === 'AbortError' && abortedByStreamIdleTimeout) {
-        throw new Error(request.language === 'en'
-          ? `DeepSeek API streaming response was idle for ${Math.round(runtimeConfig.streamIdleTimeoutMs / 1000)} seconds.`
-          : `DeepSeek API 流式响应连续 ${Math.round(runtimeConfig.streamIdleTimeoutMs / 1000)} 秒没有返回数据，已停止本次请求。`);
-      }
-      if (this.isStreamingTransportError(error)) {
-        throw new Error(this.getStreamingTransportErrorMessage(error, runtimeConfig, request.language));
-      }
-      throw error;
-    } finally {
-      request.signal?.removeEventListener('abort', abortByExternalSignal);
-      clearStreamIdleTimeout();
-      clearRunTimeout();
+    if (response.failureKind === 'external_abort') {
+      throw new AgentRunAbortedError(request.language);
     }
+    if (response.failureKind === 'run_time_limit') {
+      throw new Error(this.getRunTimeLimitError(runtimeConfig.maxRunMs, request.language));
+    }
+    if (options.allowPartialRecovery !== false && response.hadPartialOutput && response.message?.content?.trim()) {
+      return await this.createContinuationAfterPartialFailure({
+        request,
+        runtimeConfig,
+        messages,
+        partialAssistant: response.message,
+        failureError: response.error,
+        callbacks,
+        runDeadlineAt
+      });
+    }
+
+    throw new Error(response.error ?? (request.language === 'en'
+      ? 'DeepSeek API request failed.'
+      : 'DeepSeek API 请求失败。'));
+  }
+
+  private async tryContinueLengthLimitedResponse(input: {
+    request: AgentRequest;
+    runtimeConfig: AgentRuntimeConfig;
+    messages: DeepSeekMessage[];
+    assistant: DeepSeekAssistantMessage;
+    response: DeepSeekStreamResult;
+    draftEdits: DraftEdit[];
+    callbacks: AgentRunCallbacks;
+    runDeadlineAt?: number;
+    outputReserveTokens: number;
+    reasoningParts: string[];
+    runtimeUsageBreakdown: ContextUsageEstimate['breakdown'];
+  }): Promise<{ content: string; finishReason?: string | null } | undefined> {
+    if (!this.canContinueLengthLimitedResponse(input)) {
+      return undefined;
+    }
+
+    let content = input.assistant.content ?? '';
+    let finishReason = input.response.finishReason;
+    for (let continuationIndex = 0; continuationIndex < MAX_LENGTH_CONTINUATION_REQUESTS; continuationIndex += 1) {
+      const assistantMessage: DeepSeekMessage = {
+        role: 'assistant',
+        content
+      };
+      const instructionMessage: DeepSeekMessage = {
+        role: 'user',
+        content: this.getLengthContinuationInstruction(input.request.language)
+      };
+      const continuationMessages = [
+        ...input.messages,
+        assistantMessage,
+        instructionMessage
+      ];
+
+      if (this.getContextWindowBudgetStopReason(input.request, continuationMessages, [], input.outputReserveTokens)) {
+        return continuationIndex > 0 ? { content, finishReason } : undefined;
+      }
+
+      input.messages.push(assistantMessage, instructionMessage);
+      input.runtimeUsageBreakdown.inputTokensEstimate +=
+        estimateDeepSeekMessageTokens(assistantMessage) + estimateDeepSeekMessageTokens(instructionMessage);
+
+      const continuationResponse = await this.createChatCompletion(
+        input.request,
+        input.runtimeConfig,
+        input.messages,
+        [],
+        input.callbacks,
+        input.runDeadlineAt,
+        { allowPartialRecovery: false }
+      );
+      const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false);
+      if (normalizedContinuation.displayReasoningContent) {
+        input.reasoningParts.push(normalizedContinuation.displayReasoningContent);
+      }
+      const continuationContent = normalizedContinuation.assistant.content ?? '';
+      content = this.joinContinuationContent(content, continuationContent);
+      finishReason = continuationResponse.finishReason;
+
+      if (finishReason !== 'length' || !continuationContent.trim()) {
+        break;
+      }
+    }
+
+    return { content, finishReason };
+  }
+
+  private canContinueLengthLimitedResponse(input: {
+    request: AgentRequest;
+    messages: DeepSeekMessage[];
+    assistant: DeepSeekAssistantMessage;
+    response: DeepSeekStreamResult;
+    draftEdits: DraftEdit[];
+    outputReserveTokens: number;
+  }): boolean {
+    if (input.response.finishReason !== 'length') {
+      return false;
+    }
+    if (input.draftEdits.length) {
+      return false;
+    }
+    if (!input.assistant.content?.trim()) {
+      return false;
+    }
+    if (input.assistant.tool_calls?.some((toolCall) => toolCall.type === 'function')) {
+      return false;
+    }
+
+    const continuationMessages: DeepSeekMessage[] = [
+      ...input.messages,
+      {
+        role: 'assistant',
+        content: input.assistant.content
+      },
+      {
+        role: 'user',
+        content: this.getLengthContinuationInstruction(input.request.language)
+      }
+    ];
+    return !this.getContextWindowBudgetStopReason(input.request, continuationMessages, [], input.outputReserveTokens);
+  }
+
+  private async createContinuationAfterPartialFailure(input: {
+    request: AgentRequest;
+    runtimeConfig: AgentRuntimeConfig;
+    messages: DeepSeekMessage[];
+    partialAssistant: DeepSeekAssistantMessage;
+    failureError?: string;
+    callbacks: AgentRunCallbacks;
+    runDeadlineAt?: number;
+  }): Promise<DeepSeekStreamResult> {
+    const partialContent = input.partialAssistant.content ?? '';
+    if (!partialContent.trim()) {
+      throw new Error(input.failureError ?? (input.request.language === 'en'
+        ? 'DeepSeek streaming connection failed before completion.'
+        : 'DeepSeek 流式连接在完成前中断。'));
+    }
+
+    const continuationMessages: DeepSeekMessage[] = [
+      ...input.messages,
+      {
+        role: 'assistant',
+        content: partialContent
+      },
+      {
+        role: 'user',
+        content: this.getPartialFailureContinuationInstruction(input.request.language)
+      }
+    ];
+    const outputReserveTokens = resolveOutputReserveTokens(input.runtimeConfig.maxTokens);
+    if (this.getContextWindowBudgetStopReason(input.request, continuationMessages, [], outputReserveTokens)) {
+      throw new Error(input.failureError ?? (input.request.language === 'en'
+        ? 'DeepSeek streaming connection failed before completion, and there was not enough context budget to request a continuation.'
+        : 'DeepSeek 流式连接在完成前中断，且上下文预算不足，无法请求续写。'));
+    }
+
+    const continuationResponse = await this.createChatCompletion(
+      input.request,
+      input.runtimeConfig,
+      continuationMessages,
+      [],
+      input.callbacks,
+      input.runDeadlineAt,
+      { allowPartialRecovery: false }
+    );
+    const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false);
+    return {
+      message: {
+        ...normalizedContinuation.assistant,
+        content: this.joinContinuationContent(partialContent, normalizedContinuation.assistant.content ?? ''),
+        tool_calls: null
+      },
+      finishReason: continuationResponse.finishReason,
+      usage: continuationResponse.usage
+    };
+  }
+
+  private getLengthContinuationInstruction(language: KeepseekLanguage): string {
+    return language === 'en'
+      ? 'Continue the previous answer from exactly where it was cut off. Do not repeat earlier text. Do not call tools.'
+      : '继续上一条回答，从截断处继续，不要重复前文。不要调用工具。';
+  }
+
+  private getPartialFailureContinuationInstruction(language: KeepseekLanguage): string {
+    return language === 'en'
+      ? 'The previous streaming response was interrupted after partial visible output. Continue from exactly where it stopped. Do not repeat earlier text. Do not call tools.'
+      : '上一条流式回答在输出部分可见内容后中断。请从刚才停止的位置继续，不要重复前文。不要调用工具。';
+  }
+
+  private joinContinuationContent(left: string, right: string): string {
+    if (!left) {
+      return right;
+    }
+    if (!right) {
+      return left;
+    }
+    return `${left}${right}`;
+  }
+
+  private toDeepSeekClientConfig(runtimeConfig: AgentRuntimeConfig): DeepSeekClientConfig {
+    return {
+      apiKey: runtimeConfig.apiKey,
+      baseUrl: runtimeConfig.baseUrl,
+      streamIdleTimeoutMs: runtimeConfig.streamIdleTimeoutMs,
+      maxRequestRetries: runtimeConfig.maxRequestRetries,
+      requestRetryBaseMs: runtimeConfig.requestRetryBaseMs
+    };
   }
 
   private throwIfAborted(signal: AbortSignal | undefined, language: KeepseekLanguage): void {
@@ -785,38 +947,6 @@ export class AgentRunner {
       : `DeepSeek 返回 finish_reason=length，表示服务商认为本次生成预算已耗尽，回复尚未完整。Thinking/reasoning token 可能也计入这个预算，所以可见正文不一定很长。${budgetHint}如果服务商支持，可以提高 keepseek.maxTokens；也可以降低推理强度、关闭 Thinking，或缩小上下文后重试。`;
   }
 
-  private isStreamingTransportError(error: unknown): boolean {
-    if (!(error instanceof Error)) {
-      return false;
-    }
-    const message = error.message.toLowerCase();
-    return error.name === 'TypeError' && (
-      message.includes('fetch failed') ||
-      message.includes('terminated') ||
-      message.includes('socket') ||
-      message.includes('network')
-    );
-  }
-
-  private getStreamingTransportErrorMessage(
-    error: unknown,
-    runtimeConfig: AgentRuntimeConfig,
-    language: KeepseekLanguage
-  ): string {
-    const originalMessage = error instanceof Error ? error.message : String(error);
-    const idleHint = runtimeConfig.streamIdleTimeoutMs > 0
-      ? (language === 'en'
-        ? ` KeepSeek's stream idle timeout is ${Math.round(runtimeConfig.streamIdleTimeoutMs / 1000)} seconds; set keepseek.streamIdleTimeoutMs to 0 to disable that client-side idle cap.`
-        : `KeepSeek 当前流式空闲超时为 ${Math.round(runtimeConfig.streamIdleTimeoutMs / 1000)} 秒；可将 keepseek.streamIdleTimeoutMs 设为 0 来禁用客户端空闲上限。`)
-      : (language === 'en'
-        ? ' KeepSeek stream idle timeout is disabled, so this usually means the network, proxy, or provider closed the SSE connection.'
-        : 'KeepSeek 已禁用流式空闲超时，因此这通常表示网络、代理或服务商关闭了 SSE 连接。');
-
-    return language === 'en'
-      ? `DeepSeek streaming connection failed before completion (${originalMessage}).${idleHint} Any partial output already received was kept in the transcript.`
-      : `DeepSeek 流式连接在完成前中断（${originalMessage}）。${idleHint} 已收到的部分输出会保留在对话中。`;
-  }
-
   private formatReasoning(parts: string[]): string | undefined {
     const cleaned = parts.map((part) => part.trim()).filter(Boolean);
     if (!cleaned.length) {
@@ -901,29 +1031,6 @@ export class AgentRunner {
     return [header, ...blocks].join('\n\n');
   }
 
-  private formatApiError(responseText: string, language: KeepseekLanguage): string {
-    if (!responseText.trim()) {
-      return language === 'en' ? 'Response is empty.' : '响应为空。';
-    }
-
-    try {
-      const parsed: unknown = JSON.parse(responseText);
-      if (this.isRecord(parsed)) {
-        const error = parsed.error;
-        if (this.isRecord(error) && typeof error.message === 'string') {
-          return error.message;
-        }
-        if (typeof parsed.message === 'string') {
-          return parsed.message;
-        }
-      }
-    } catch {
-      // Fall through to a clipped raw response.
-    }
-
-    return responseText.length > 800 ? `${responseText.slice(0, 800)}...` : responseText;
-  }
-
   private getRuntimeConfig(language: KeepseekLanguage): AgentRuntimeConfig {
     const config = vscode.workspace.getConfiguration('keepseek');
     const apiKey = (config.get<string>('apiKey', '').trim() || process.env.DEEPSEEK_API_KEY || '').trim();
@@ -941,24 +1048,10 @@ export class AgentRunner {
       maxToolCalls: getConfiguredMaxToolCalls(),
       maxRunMs: getConfiguredMaxRunMs(),
       toolResultTokenBudget: getConfiguredToolResultTokenBudget(),
-      streamIdleTimeoutMs: getConfiguredStreamIdleTimeoutMs()
+      streamIdleTimeoutMs: getConfiguredStreamIdleTimeoutMs(),
+      maxRequestRetries: getConfiguredMaxRequestRetries(),
+      requestRetryBaseMs: getConfiguredRequestRetryBaseMs()
     };
-  }
-
-  private getChatCompletionsUrl(rawBaseUrl: string): string {
-    const url = new URL(rawBaseUrl || DEFAULT_DEEPSEEK_BASE_URL);
-    const cleanPath = url.pathname.replace(/\/+$/u, '');
-
-    if (cleanPath.endsWith('/chat/completions')) {
-      url.pathname = cleanPath;
-      return url.toString();
-    }
-
-    const basePath = cleanPath.endsWith('/anthropic')
-      ? cleanPath.slice(0, -'/anthropic'.length)
-      : cleanPath;
-    url.pathname = `${basePath || ''}/chat/completions`;
-    return url.toString();
   }
 
   private isRecord(value: unknown): value is Record<string, unknown> {

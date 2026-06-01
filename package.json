@@ -279,6 +279,20 @@
           "maximum": 3600000,
           "description": "Maximum time in milliseconds to wait for streaming data before stopping a DeepSeek request. This resets whenever streaming data is received and does not limit total run duration. Set 0 to disable the idle timeout."
         },
+        "keepseek.maxRequestRetries": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Maximum number of automatic retries for replay-safe DeepSeek requests after retryable HTTP errors or network failures before the first stream chunk."
+        },
+        "keepseek.requestRetryBaseMs": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 0,
+          "maximum": 60000,
+          "description": "Base retry delay in milliseconds for replay-safe DeepSeek requests. Retries use exponential backoff from this value."
+        },
         "keepseek.historyRetentionDays": {
           "type": "number",
           "default": 7,

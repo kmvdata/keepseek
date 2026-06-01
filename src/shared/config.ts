@@ -13,6 +13,8 @@ export const DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000;
 export const DEFAULT_MAX_TOOL_CALLS = 24;
 export const DEFAULT_MAX_RUN_MS = 600_000;
 export const DEFAULT_TOOL_RESULT_TOKEN_BUDGET = 0;
+export const DEFAULT_MAX_REQUEST_RETRIES = 2;
+export const DEFAULT_REQUEST_RETRY_BASE_MS = 1_000;
 export const DEFAULT_SELECTED_MODEL_ID = '';
 export const DEFAULT_HISTORY_RETENTION_DAYS = 7;
 export const MIN_HISTORY_RETENTION_DAYS = 1;
@@ -22,6 +24,8 @@ export const MAX_TOOL_CALLS = 256;
 export const MAX_RUN_MS = 3_600_000;
 export const MAX_STREAM_IDLE_TIMEOUT_MS = 3_600_000;
 export const MAX_TOOL_RESULT_TOKEN_BUDGET = DEFAULT_CONTEXT_WINDOW_TOKENS;
+export const MAX_REQUEST_RETRIES = 10;
+export const MAX_REQUEST_RETRY_BASE_MS = 60_000;
 export const AGENT_HISTORY_MESSAGE_LIMIT = 24;
 
 export function getConfiguredModels(): KeepseekModel[] {
@@ -138,6 +142,20 @@ export function getConfiguredStreamIdleTimeoutMs(): number {
     MAX_STREAM_IDLE_TIMEOUT_MS,
     DEFAULT_STREAM_IDLE_TIMEOUT_MS
   );
+}
+
+export function getConfiguredMaxRequestRetries(): number {
+  const configuredLimit = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('maxRequestRetries', DEFAULT_MAX_REQUEST_RETRIES);
+  return normalizeIntegerInRange(configuredLimit, 0, MAX_REQUEST_RETRIES, DEFAULT_MAX_REQUEST_RETRIES);
+}
+
+export function getConfiguredRequestRetryBaseMs(): number {
+  const configuredDelay = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('requestRetryBaseMs', DEFAULT_REQUEST_RETRY_BASE_MS);
+  return normalizeIntegerInRange(configuredDelay, 0, MAX_REQUEST_RETRY_BASE_MS, DEFAULT_REQUEST_RETRY_BASE_MS);
 }
 
 export function getConfiguredWorkspaceToolFileLimit(): number {

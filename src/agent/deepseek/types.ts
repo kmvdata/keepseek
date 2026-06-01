@@ -64,13 +64,22 @@ export interface DeepSeekStreamChoice {
   finish_reason?: string | null;
 }
 
+export interface DeepSeekUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  [key: string]: unknown;
+}
+
 export interface DeepSeekStreamChunk {
   choices?: DeepSeekStreamChoice[];
+  usage?: DeepSeekUsage | null;
 }
 
 export interface DeepSeekStreamResult {
   message: DeepSeekAssistantMessage;
   finishReason?: string | null;
+  usage?: DeepSeekUsage | null;
 }
 
 export interface DeepSeekChatRequestBody {
@@ -84,6 +93,9 @@ export interface DeepSeekChatRequestBody {
   tools?: DeepSeekFunctionTool[];
   tool_choice?: 'auto' | 'none';
   max_tokens?: number;
+  stream_options?: {
+    include_usage?: boolean;
+  };
 }
 
 export interface ParsedDsmlToolCalls {

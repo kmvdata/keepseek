@@ -101,7 +101,7 @@ export function getScript(): string {
 
     function getSendShortcutHint() {
       if (state.isBusy) {
-        return t(state.isMac ? 'stopShortcutHintMac' : 'stopShortcutHint');
+        return t('busyTaskHint');
       }
       return t(state.isMac ? 'sendShortcutHintMac' : 'sendShortcutHint');
     }

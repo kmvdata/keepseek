@@ -81,6 +81,7 @@ export class DeepSeekStreamParser {
     const reasoningDisplayFilter = new StreamingDsmlDisplayFilter();
     let buffer = '';
     let finishReason: string | null | undefined;
+    let usage: DeepSeekStreamResult['usage'];
     let streamDone = false;
     let sawChunk = false;
 
@@ -103,6 +104,7 @@ export class DeepSeekStreamParser {
         );
         sawChunk = sawChunk || eventResult.sawChunk;
         finishReason = eventResult.finishReason ?? finishReason;
+        usage = eventResult.usage ?? usage;
         streamDone = eventResult.done;
         if (streamDone) {
           break;
@@ -138,6 +140,7 @@ export class DeepSeekStreamParser {
       );
       sawChunk = sawChunk || eventResult.sawChunk;
       finishReason = eventResult.finishReason ?? finishReason;
+      usage = eventResult.usage ?? usage;
     }
 
     if (!sawChunk) {
@@ -156,7 +159,8 @@ export class DeepSeekStreamParser {
         reasoning_content: reasoningParts.join(''),
         tool_calls: this.buildStreamingToolCalls(toolCallParts)
       },
-      finishReason
+      finishReason,
+      usage
     };
   }
 
@@ -169,7 +173,7 @@ export class DeepSeekStreamParser {
     contentDisplayFilter: StreamingDsmlDisplayFilter,
     reasoningDisplayFilter: StreamingDsmlDisplayFilter,
     callbacks: AgentRunCallbacks
-  ): { done: boolean; sawChunk: boolean; finishReason?: string | null } {
+  ): { done: boolean; sawChunk: boolean; finishReason?: string | null; usage?: DeepSeekStreamResult['usage'] } {
     const dataLines = rawEvent
       .split('\n')
       .map((line) => line.trimEnd())
@@ -177,6 +181,7 @@ export class DeepSeekStreamParser {
       .map((line) => line.slice('data:'.length).trimStart());
 
     let finishReason: string | null | undefined;
+    let usage: DeepSeekStreamResult['usage'];
     let sawChunk = false;
 
     for (const data of dataLines) {
@@ -190,6 +195,7 @@ export class DeepSeekStreamParser {
 
       const chunk = this.parseStreamChunk(data, language);
       sawChunk = true;
+      usage = chunk.usage ?? usage;
       finishReason = this.applyStreamChunk(
         chunk,
         contentParts,
@@ -201,7 +207,7 @@ export class DeepSeekStreamParser {
       ) ?? finishReason;
     }
 
-    return { done: false, sawChunk, finishReason };
+    return { done: false, sawChunk, finishReason, usage };
   }
 
   private parseStreamChunk(data: string, language: KeepseekLanguage): DeepSeekStreamChunk {
