@@ -1,0 +1,77 @@
+import type { KeepseekLanguage } from '../shared/i18n';
+import type { AgentSettings } from '../shared/types';
+
+export interface PromptReferenceInput {
+  path: string;
+  kind?: 'file' | 'directory';
+  startLine?: number;
+  endLine?: number;
+  startColumn?: number;
+  endColumn?: number;
+}
+
+export interface DroppedFileReferenceInput {
+  name: string;
+  type?: string;
+  size?: number;
+  lastModified?: number;
+  dataBase64: string;
+}
+
+export type WebviewMessage =
+  | { type: 'ready' }
+  | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[] }
+  | { type: 'editUserPrompt'; messageId: string; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[] }
+  | { type: 'abortPrompt' }
+  | { type: 'newSession' }
+  | { type: 'selectSession'; sessionId: string }
+  | { type: 'toggleSessionFavorite'; sessionId: string }
+  | { type: 'renameSession'; sessionId: string; title: string }
+  | { type: 'deleteSessions'; sessionIds: string[] }
+  | { type: 'listOtherWorkspaces' }
+  | { type: 'loadOtherWorkspaceSessions'; workspaceKey: string }
+  | { type: 'copyOtherWorkspaceSession'; workspaceKey: string; sessionId: string }
+  | { type: 'deleteOtherWorkspaceSessions'; workspaceKey: string; sessionIds: string[] }
+  | { type: 'deleteOtherWorkspace'; workspaceKey: string }
+  | { type: 'setSelectedModel'; modelId: string }
+  | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
+  | { type: 'openApiSettings' }
+  | { type: 'openAgentBudgetSettings' }
+  | { type: 'openHistorySettings' }
+  | {
+      type: 'saveApiSettings';
+      apiKey: string;
+      baseUrl: string;
+    }
+  | {
+      type: 'saveAgentBudgetSettings';
+      maxTokens?: number;
+      maxToolIterations?: number;
+      maxToolCalls?: number;
+      maxRunMs?: number;
+      streamIdleTimeoutMs?: number;
+      toolResultTokenBudget?: number;
+    }
+  | {
+      type: 'saveHistorySettings';
+      historyRetentionDays?: number;
+    }
+  | { type: 'setLanguage'; language: KeepseekLanguage }
+  | { type: 'addCurrentFile' }
+  | { type: 'pickWorkspaceFiles' }
+  | { type: 'pickExternalFiles' }
+  | { type: 'pickExternalFileReferences' }
+  | { type: 'insertDroppedFileReferences'; files: DroppedFileReferenceInput[] }
+  | { type: 'estimatePromptContextUsage'; requestId: string; prompt: string; modelId: string; activeSessionId?: string; references?: PromptReferenceInput[] }
+  | { type: 'requestReferenceResources'; requestId: string }
+  | { type: 'requestClipboardText'; requestId: string }
+  | { type: 'writeClipboardText'; text: string }
+  | { type: 'readPath'; path: string }
+  | { type: 'openFileReference'; path: string; startLine: number; endLine: number; startColumn: number; endColumn: number }
+  | { type: 'openDirectoryReference'; path: string }
+  | { type: 'removeContextFile'; uri: string }
+  | { type: 'clearContext' }
+  | { type: 'applyDraftEdit'; id: string }
+  | { type: 'discardDraftEdit'; id: string }
+  | { type: 'applyAllDraftEdits' }
+  | { type: 'discardAllDraftEdits' };

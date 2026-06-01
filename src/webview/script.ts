@@ -1,6 +1,6 @@
 import { getInputScript } from './input/script';
 import { getRichTextShortcutsScript } from './richTextShortcuts';
-import { WEBVIEW_TRANSLATIONS } from '../i18n';
+import { WEBVIEW_TRANSLATIONS } from '../shared/i18n';
 
 export function getScript(): string {
   return `

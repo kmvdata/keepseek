@@ -3,9 +3,9 @@ import {
   getConfiguredContextWindowTokens,
   getConfiguredMaxTokens,
   getConfiguredMaxToolIterations
-} from './config';
-import { DeepSeekFunctionTool, DeepSeekMessage } from './deepSeekTypes';
-import { isRecord } from './errors';
+} from '../shared/config';
+import { DeepSeekFunctionTool, DeepSeekMessage } from './deepseek/types';
+import { isRecord } from '../shared/errors';
 import {
   buildInitialAgentMessages,
   estimateChatMessageTokens,
@@ -13,9 +13,9 @@ import {
   estimateDeepSeekToolsTokens,
   getAgentSystemPrompt,
   getAgentTools
-} from './agentProtocol';
-import type { KeepseekLanguage } from './i18n';
-import { ChatMessage, ContextFile, ContextUsageEstimate, KeepseekModel } from './types';
+} from './protocol';
+import type { KeepseekLanguage } from '../shared/i18n';
+import { ChatMessage, ContextFile, ContextUsageEstimate, KeepseekModel } from '../shared/types';
 
 type ContextUsageBreakdown = ContextUsageEstimate['breakdown'];
 

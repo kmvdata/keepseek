@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { AgentSettings, KeepseekModel } from './types';
-import { SESSION_HARD_RETENTION_DAYS } from './sessionRetention';
+import { SESSION_HARD_RETENTION_DAYS } from '../sessions/sessionRetention';
 
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 0;

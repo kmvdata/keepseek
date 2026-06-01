@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { DraftEdit } from './types';
+import { DraftEdit } from '../shared/types';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
 

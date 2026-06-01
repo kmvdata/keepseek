@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { KeepseekLanguage } from '../i18n';
+import type { KeepseekLanguage } from '../shared/i18n';
 import { getScript } from './script';
 import { getStyles } from './styles';
 import { getTemplate } from './template';

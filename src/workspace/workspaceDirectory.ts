@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { formatBytes } from './format';
+import { formatBytes } from '../shared/format';
 
 export const SKIPPED_WORKSPACE_DIRECTORY_NAMES = new Set([
   '.git',

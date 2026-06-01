@@ -1,4 +1,4 @@
-import type { ReasoningEffort } from './types';
+import type { ReasoningEffort } from '../../shared/types';
 
 export type DeepSeekRole = 'system' | 'user' | 'assistant' | 'tool';
 export type DeepSeekThinkingType = 'enabled' | 'disabled';

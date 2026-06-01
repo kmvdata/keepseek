@@ -1,6 +1,6 @@
-import { AgentRunCallbacks } from './types';
-import type { KeepseekLanguage } from './i18n';
-import { DeepSeekStreamChunk, DeepSeekStreamResult, DeepSeekToolCall, DeepSeekToolCallDelta } from './deepSeekTypes';
+import { AgentRunCallbacks } from '../../shared/types';
+import type { KeepseekLanguage } from '../../shared/i18n';
+import { DeepSeekStreamChunk, DeepSeekStreamResult, DeepSeekToolCall, DeepSeekToolCallDelta } from './types';
 
 interface StreamingToolCallAccumulator {
   id: string;

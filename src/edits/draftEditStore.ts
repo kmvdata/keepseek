@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { ChatSessionStore } from './chatSessionStore';
-import { getErrorMessage } from './errors';
+import { ChatSessionStore } from '../sessions/chatSessionStore';
+import { getErrorMessage } from '../shared/errors';
 import { SafeFileEditor } from './safeFileEditor';
-import { DraftEdit } from './types';
+import { DraftEdit } from '../shared/types';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
 

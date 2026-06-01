@@ -1,4 +1,4 @@
-import type { ChatSession } from './types';
+import type { ChatSession } from '../shared/types';
 
 export const SESSION_HARD_RETENTION_DAYS = 60;
 

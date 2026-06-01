@@ -1,10 +1,10 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { getConfiguredWorkspaceReadMaxBytes, getConfiguredWorkspaceToolFileLimit } from './config';
-import { formatBytes } from './format';
-import { isReadableTextContent, shouldSkipReferenceUri } from './fileReference';
-import type { KeepseekLanguage } from './i18n';
-import { getWorkspaceResourcePath, listWorkspaceDirectoryEntries } from './workspaceDirectory';
+import { getConfiguredWorkspaceReadMaxBytes, getConfiguredWorkspaceToolFileLimit } from '../../shared/config';
+import { formatBytes } from '../../shared/format';
+import { isReadableTextContent, shouldSkipTextUri } from '../../shared/textFileGuards';
+import type { KeepseekLanguage } from '../../shared/i18n';
+import { getWorkspaceResourcePath, listWorkspaceDirectoryEntries } from '../../workspace/workspaceDirectory';
 
 const WORKSPACE_TOOL_GLOB_EXCLUDE = '**/{.git,.vscode-test,build,coverage,dist,node_modules,out}/**';
 
@@ -134,7 +134,7 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
   public async readWorkspaceFile(rawPath: string, language: KeepseekLanguage): Promise<string> {
     const uri = this.resolveWorkspacePathUri(rawPath);
 
-    if (shouldSkipReferenceUri(uri)) {
+    if (shouldSkipTextUri(uri)) {
       return JSON.stringify({
         ok: false,
         path: this.getLabel(uri),

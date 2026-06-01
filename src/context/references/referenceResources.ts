@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { getUriFileName } from './fileReference';
-import { ReferenceResource } from './types';
-import { isDirectoryFileType, SKIPPED_WORKSPACE_DIRECTORY_NAMES, WORKSPACE_DIRECTORY_GLOB_EXCLUDE } from './workspaceDirectory';
+import { ReferenceResource } from '../../shared/types';
+import { isDirectoryFileType, SKIPPED_WORKSPACE_DIRECTORY_NAMES, WORKSPACE_DIRECTORY_GLOB_EXCLUDE } from '../../workspace/workspaceDirectory';
 
 const REFERENCE_DIRECTORY_MAX_DEPTH = 16;
 

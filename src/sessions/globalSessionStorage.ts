@@ -11,9 +11,9 @@ import {
   type StoredWorkspaceSessionState,
   type WorkspaceSessionScope
 } from './chatSessionStore';
-import { isRecord } from './errors';
+import { isRecord } from '../shared/errors';
 import { pruneExpiredSessions } from './sessionRetention';
-import type { ChatSession, WorkspaceSummary } from './types';
+import type { ChatSession, WorkspaceSummary } from '../shared/types';
 
 export const SESSION_MIGRATION_KEY = 'keepseek.chatSessionsMigratedToGlobalV1';
 

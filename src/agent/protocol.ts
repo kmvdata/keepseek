@@ -1,10 +1,10 @@
-import { AGENT_HISTORY_MESSAGE_LIMIT } from './config';
-import { DeepSeekFunctionTool, DeepSeekMessage } from './deepSeekTypes';
-import { formatBytes } from './format';
-import type { KeepseekLanguage } from './i18n';
-import { getMarkdownFence, getMarkdownLanguage } from './markdown';
+import { AGENT_HISTORY_MESSAGE_LIMIT } from '../shared/config';
+import { DeepSeekFunctionTool, DeepSeekMessage } from './deepseek/types';
+import { formatBytes } from '../shared/format';
+import type { KeepseekLanguage } from '../shared/i18n';
+import { getMarkdownFence, getMarkdownLanguage } from '../shared/markdown';
 import { estimateTokenCount } from './tokenEstimate';
-import { ChatMessage, ContextFile } from './types';
+import { ChatMessage, ContextFile } from '../shared/types';
 
 export const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
 export const LIST_WORKSPACE_FILES_TOOL_NAME = 'keepseek_list_workspace_files';

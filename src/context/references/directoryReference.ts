@@ -1,14 +1,14 @@
 import * as vscode from 'vscode';
-import { getConfiguredWorkspaceToolFileLimit } from './config';
+import { getConfiguredWorkspaceToolFileLimit } from '../../shared/config';
 import { getFileReferenceAuthorizationKey, resolveFileReferenceUri } from './fileReference';
-import { normalizeKeepseekLanguage, type KeepseekLanguage } from './i18n';
+import { normalizeKeepseekLanguage, type KeepseekLanguage } from '../../shared/i18n';
 import { isInsideMarkdownFence, isStandaloneReferenceLine } from './referenceSyntax';
 import {
   getWorkspaceDirectoryName,
   getWorkspaceResourcePath,
   listWorkspaceDirectoryEntries,
   type WorkspaceDirectoryEntry
-} from './workspaceDirectory';
+} from '../../workspace/workspaceDirectory';
 
 export const DIRECTORY_REFERENCE_TARGET_PREFIX = 'keepseek-dir:';
 

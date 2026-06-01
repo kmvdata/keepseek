@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { ChatMessage, ChatSession, ChatSessionSummary, WorkspaceSummary } from './types';
-import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from './i18n';
-import { isRecord } from './errors';
-import { normalizeContextUsageEstimateValue } from './contextUsage';
+import { ChatMessage, ChatSession, ChatSessionSummary, WorkspaceSummary } from '../shared/types';
+import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from '../shared/i18n';
+import { isRecord } from '../shared/errors';
+import { normalizeContextUsageEstimateValue } from '../agent/contextUsage';
 
 export const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 export const SESSION_STORAGE_VERSION = 2;

@@ -139,6 +139,17 @@ npm run compile
 npm run lint
 ```
 
+源码按功能类型组织：
+
+- `src/extension.ts`：VS Code 激活入口、命令注册和 Provider 接线。
+- `src/provider/`：WebviewView Provider、Webview 消息类型和视图聚焦工具。
+- `src/agent/`：Agent 运行循环、DeepSeek/OpenAI-compatible 协议、SSE/DSML 解析、上下文用量估算和只读工具。
+- `src/sessions/`：当前项目和跨项目 History Session 存储、迁移和保留策略。
+- `src/context/`：上下文文件、终端/输出/调试选区引用，以及 prompt 文件/目录引用展开。
+- `src/edits/`：DraftEdit 状态和用户确认后的安全写入。
+- `src/shared/`：配置、类型、国际化、格式化、Markdown 和文本文件判断等共享基础设施。
+- `src/webview/`：Webview HTML/CSS/JS 字符串和输入区实现。
+
 在 VS Code 中打开本目录，按 `F5` 启动 Extension Development Host，然后执行：
 
 ```text
@@ -296,6 +307,17 @@ npm install
 npm run compile
 npm run lint
 ```
+
+Source code is grouped by feature area:
+
+- `src/extension.ts`: VS Code activation, command registration, and Provider wiring.
+- `src/provider/`: WebviewView Provider, Webview message types, and view focus helpers.
+- `src/agent/`: Agent run loop, DeepSeek/OpenAI-compatible protocol, SSE/DSML parsing, context usage estimation, and read-only tools.
+- `src/sessions/`: Current-project and cross-project History Session storage, migration, and retention.
+- `src/context/`: Context files, terminal/output/debug references, and prompt file/directory reference expansion.
+- `src/edits/`: DraftEdit state and safe user-confirmed writes.
+- `src/shared/`: Shared config, types, i18n, formatting, Markdown, and text-file guards.
+- `src/webview/`: Webview HTML/CSS/JS strings and prompt input implementation.
 
 Launch the Extension Development Host with `F5`, then run:
 

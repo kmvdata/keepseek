@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { AgentActivityInput, AgentActivityPhase, AgentRequest, AgentResponse, AgentRunCallbacks, DraftEdit } from './types';
+import { AgentActivityInput, AgentActivityPhase, AgentRequest, AgentResponse, AgentRunCallbacks, DraftEdit } from '../shared/types';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_MAX_TOKENS,
@@ -11,7 +11,7 @@ import {
   getConfiguredStreamIdleTimeoutMs,
   getConfiguredToolResultTokenBudget,
   MAX_GENERATION_TOKENS
-} from './config';
+} from '../shared/config';
 import {
   buildInitialAgentMessages,
   CREATE_DRAFT_EDIT_TOOL_NAME,
@@ -21,16 +21,16 @@ import {
   LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
   LIST_WORKSPACE_FILES_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME
-} from './agentProtocol';
+} from './protocol';
 import {
   createContextUsageEstimate,
   createContextUsageEstimateFromMessages,
   resolveOutputReserveTokens
 } from './contextUsage';
-import { WorkspaceToolAdapter, WorkspaceToolService } from './workspaceTools';
-import type { KeepseekLanguage } from './i18n';
-import { DeepSeekStreamParser } from './deepSeekStreamParser';
-import { DsmlToolParser } from './dsmlToolParser';
+import { WorkspaceToolAdapter, WorkspaceToolService } from './tools/workspaceTools';
+import type { KeepseekLanguage } from '../shared/i18n';
+import { DeepSeekStreamParser } from './deepseek/streamParser';
+import { DsmlToolParser } from './deepseek/dsmlToolParser';
 import {
   DeepSeekAssistantMessage,
   DeepSeekChatRequestBody,
@@ -38,9 +38,9 @@ import {
   DeepSeekMessage,
   DeepSeekStreamResult,
   DeepSeekToolCall
-} from './deepSeekTypes';
+} from './deepseek/types';
 
-export { AGENT_HISTORY_MESSAGE_LIMIT } from './config';
+export { AGENT_HISTORY_MESSAGE_LIMIT } from '../shared/config';
 export { DEFAULT_MAX_TOKENS, MAX_GENERATION_TOKENS };
 
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;

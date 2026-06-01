@@ -1,10 +1,10 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { ContextFile } from './types';
-import { getConfiguredKeepseekLanguage, localize } from './i18n';
-import { DEFAULT_MAX_FILE_BYTES } from './config';
-import { formatBytes } from './format';
+import { ContextFile } from '../shared/types';
+import { getConfiguredKeepseekLanguage, localize } from '../shared/i18n';
+import { DEFAULT_MAX_FILE_BYTES } from '../shared/config';
+import { formatBytes } from '../shared/format';
 
 const SKIPPED_DIRECTORY_NAMES = new Set([
   '.git',
@@ -258,7 +258,7 @@ function getConfiguredContextLimits(): ContextLimits {
   };
 }
 
-export { formatBytes } from './format';
+export { formatBytes } from '../shared/format';
 
 function t(key: string, values?: Record<string, string | number>): string {
   return localize(getConfiguredKeepseekLanguage(), key, values);

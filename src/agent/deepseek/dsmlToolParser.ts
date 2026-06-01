@@ -1,4 +1,4 @@
-import { DeepSeekToolCall, ParsedDsmlToolCalls } from './deepSeekTypes';
+import { DeepSeekToolCall, ParsedDsmlToolCalls } from './types';
 
 interface DsmlCloseTag {
   index: number;

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { clampColumn, clampLine, resolveFileReferenceUri } from './fileReference';
-import { getErrorMessage } from './errors';
-import { localize, type KeepseekLanguage } from './i18n';
+import { getErrorMessage } from '../../shared/errors';
+import { localize, type KeepseekLanguage } from '../../shared/i18n';
 
 export async function openFileReference(input: {
   path: string;
