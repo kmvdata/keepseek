@@ -17,8 +17,17 @@ export const DEFAULT_MAX_REQUEST_RETRIES = 2;
 export const DEFAULT_REQUEST_RETRY_BASE_MS = 1_000;
 export const DEFAULT_SELECTED_MODEL_ID = '';
 export const DEFAULT_HISTORY_RETENTION_DAYS = 7;
+export const DEFAULT_TRACE_ENABLED = false;
+export const DEFAULT_TRACE_LEVEL: InteractionTraceLevel = 'full';
+export const DEFAULT_TRACE_LOG_RAW_STREAM = true;
+export const DEFAULT_TRACE_RETENTION_DAYS = 7;
+export const DEFAULT_TRACE_MAX_FILE_BYTES = 20_000_000;
 export const MIN_HISTORY_RETENTION_DAYS = 1;
 export const MAX_HISTORY_RETENTION_DAYS = SESSION_HARD_RETENTION_DAYS;
+export const MIN_TRACE_RETENTION_DAYS = 1;
+export const MAX_TRACE_RETENTION_DAYS = 60;
+export const MIN_TRACE_MAX_FILE_BYTES = 1_000_000;
+export const MAX_TRACE_MAX_FILE_BYTES = 1_000_000_000;
 export const MAX_TOOL_ITERATIONS = 64;
 export const MAX_TOOL_CALLS = 256;
 export const MAX_RUN_MS = 3_600_000;
@@ -27,6 +36,16 @@ export const MAX_TOOL_RESULT_TOKEN_BUDGET = DEFAULT_CONTEXT_WINDOW_TOKENS;
 export const MAX_REQUEST_RETRIES = 10;
 export const MAX_REQUEST_RETRY_BASE_MS = 60_000;
 export const AGENT_HISTORY_MESSAGE_LIMIT = 24;
+
+export type InteractionTraceLevel = 'metadata' | 'request' | 'full';
+
+export interface InteractionTraceSettings {
+  enabled: boolean;
+  level: InteractionTraceLevel;
+  logRawStream: boolean;
+  retentionDays: number;
+  maxFileBytes: number;
+}
 
 export function getConfiguredModels(): KeepseekModel[] {
   const configured = vscode.workspace.getConfiguration('keepseek').get<KeepseekModel[]>('models', []);
@@ -158,6 +177,27 @@ export function getConfiguredRequestRetryBaseMs(): number {
   return normalizeIntegerInRange(configuredDelay, 0, MAX_REQUEST_RETRY_BASE_MS, DEFAULT_REQUEST_RETRY_BASE_MS);
 }
 
+export function getConfiguredInteractionTraceSettings(): InteractionTraceSettings {
+  const config = vscode.workspace.getConfiguration('keepseek');
+  return {
+    enabled: config.get<boolean>('trace.enabled', DEFAULT_TRACE_ENABLED),
+    level: normalizeInteractionTraceLevel(config.get<string>('trace.level', DEFAULT_TRACE_LEVEL)),
+    logRawStream: config.get<boolean>('trace.logRawStream', DEFAULT_TRACE_LOG_RAW_STREAM),
+    retentionDays: normalizeIntegerInRange(
+      config.get<number>('trace.retentionDays', DEFAULT_TRACE_RETENTION_DAYS),
+      MIN_TRACE_RETENTION_DAYS,
+      MAX_TRACE_RETENTION_DAYS,
+      DEFAULT_TRACE_RETENTION_DAYS
+    ),
+    maxFileBytes: normalizeIntegerInRange(
+      config.get<number>('trace.maxFileBytes', DEFAULT_TRACE_MAX_FILE_BYTES),
+      MIN_TRACE_MAX_FILE_BYTES,
+      MAX_TRACE_MAX_FILE_BYTES,
+      DEFAULT_TRACE_MAX_FILE_BYTES
+    )
+  };
+}
+
 export function getConfiguredWorkspaceToolFileLimit(): number {
   const configuredLimit = vscode.workspace
     .getConfiguration('keepseek')
@@ -203,6 +243,12 @@ export function normalizePositiveInteger(value: unknown): number | undefined {
     return undefined;
   }
   return Math.floor(number);
+}
+
+export function normalizeInteractionTraceLevel(value: unknown): InteractionTraceLevel {
+  return value === 'metadata' || value === 'request' || value === 'full'
+    ? value
+    : DEFAULT_TRACE_LEVEL;
 }
 
 export function normalizeIntegerInRange(value: unknown, min: number, max: number, fallback: number): number {

@@ -2,6 +2,7 @@ import { AgentRunCallbacks } from '../../shared/types';
 import type { KeepseekLanguage } from '../../shared/i18n';
 import { DEFAULT_DEEPSEEK_BASE_URL } from '../../shared/config';
 import { DeepSeekStreamParser } from './streamParser';
+import { AgentInteractionTrace, formatUnknownError, summarizeDeepSeekMessage, summarizeText } from '../logging/interactionTrace';
 import {
   DeepSeekAssistantMessage,
   DeepSeekChatRequestBody,
@@ -33,6 +34,8 @@ export interface DeepSeekClientRequest {
   signal?: AbortSignal;
   callbacks?: AgentRunCallbacks;
   runDeadlineAt?: number;
+  trace?: AgentInteractionTrace;
+  requestId?: string;
 }
 
 export interface DeepSeekClientResult {
@@ -61,11 +64,21 @@ export class DeepSeekClient {
     const maxRetries = Math.max(0, Math.floor(config.maxRequestRetries));
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      const result = await this.createChatCompletionAttempt(config, request);
+      const result = await this.createChatCompletionAttempt(config, request, attempt);
       if (result.ok || !this.shouldRetry(result, attempt, maxRetries)) {
         return result;
       }
 
+      request.trace?.record({
+        type: 'upstream_retry_scheduled',
+        requestId: request.requestId,
+        attempt,
+        nextAttempt: attempt + 1,
+        maxRetries,
+        failureKind: result.failureKind,
+        status: result.status,
+        error: result.error
+      });
       await this.sleepBeforeRetry(config.requestRetryBaseMs, attempt, request.signal, request.runDeadlineAt);
     }
 
@@ -81,7 +94,8 @@ export class DeepSeekClient {
 
   private async createChatCompletionAttempt(
     config: DeepSeekClientConfig,
-    request: DeepSeekClientRequest
+    request: DeepSeekClientRequest,
+    attempt: number
   ): Promise<DeepSeekAttemptResult> {
     const controller = new AbortController();
     let idleTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -94,6 +108,7 @@ export class DeepSeekClient {
     const partialContentParts: string[] = [];
     const partialReasoningParts: string[] = [];
     const language = request.language;
+    const trace = request.trace;
     const abortByExternalSignal = () => {
       abortedByExternalSignal = true;
       controller.abort();
@@ -176,7 +191,14 @@ export class DeepSeekClient {
         base: 'thinking',
         phase: 'requesting_model'
       });
-      const response = await fetch(this.getChatCompletionsUrl(config.baseUrl), {
+      const chatCompletionsUrl = this.getChatCompletionsUrl(config.baseUrl);
+      trace?.record({
+        type: 'upstream_attempt_start',
+        requestId: request.requestId,
+        attempt,
+        url: chatCompletionsUrl
+      });
+      const response = await fetch(chatCompletionsUrl, {
         method: 'POST',
         headers: {
           Accept: 'text/event-stream',
@@ -187,9 +209,23 @@ export class DeepSeekClient {
         body: JSON.stringify(request.body),
         signal: controller.signal
       });
+      trace?.record({
+        type: 'upstream_http_response',
+        requestId: request.requestId,
+        attempt,
+        status: response.status,
+        ok: response.ok
+      });
 
       if (!response.ok) {
         const responseText = await response.text();
+        trace?.record({
+          type: 'upstream_http_error',
+          requestId: request.requestId,
+          attempt,
+          status: response.status,
+          responseText: trace.includesPayload('request') ? responseText : summarizeText(responseText)
+        });
         return {
           ok: false,
           hadPartialOutput,
@@ -204,6 +240,11 @@ export class DeepSeekClient {
       }
 
       if (!response.body) {
+        trace?.record({
+          type: 'upstream_empty_body',
+          requestId: request.requestId,
+          attempt
+        });
         return {
           ok: false,
           hadPartialOutput,
@@ -221,11 +262,25 @@ export class DeepSeekClient {
         response.body,
         language,
         callbacks,
-        () => {
-          hadStreamActivity = true;
-          resetStreamIdleTimeout();
+        {
+          trace,
+          requestId: request.requestId,
+          attempt,
+          onStreamActivity: () => {
+            hadStreamActivity = true;
+            resetStreamIdleTimeout();
+          }
         }
       );
+      trace?.record({
+        type: 'upstream_attempt_finish',
+        requestId: request.requestId,
+        attempt,
+        ok: true,
+        finishReason: result.finishReason,
+        usage: result.usage,
+        message: trace.includesPayload('request') ? result.message : summarizeDeepSeekMessage(result.message)
+      });
       return {
         ok: true,
         finishReason: result.finishReason,
@@ -238,6 +293,16 @@ export class DeepSeekClient {
     } catch (error) {
       const abortError = error instanceof Error && error.name === 'AbortError';
       if (abortError && (abortedByExternalSignal || request.signal?.aborted)) {
+        trace?.record({
+          type: 'upstream_attempt_finish',
+          requestId: request.requestId,
+          attempt,
+          ok: false,
+          failureKind: 'external_abort',
+          hadPartialOutput,
+          hadStreamActivity,
+          partialMessage: trace.includesPayload('request') ? partialMessage() : summarizeDeepSeekMessage(partialMessage() ?? {})
+        });
         return {
           ok: false,
           message: partialMessage(),
@@ -249,6 +314,16 @@ export class DeepSeekClient {
         };
       }
       if (abortError && abortedByRunTimeLimit) {
+        trace?.record({
+          type: 'upstream_attempt_finish',
+          requestId: request.requestId,
+          attempt,
+          ok: false,
+          failureKind: 'run_time_limit',
+          hadPartialOutput,
+          hadStreamActivity,
+          partialMessage: trace.includesPayload('request') ? partialMessage() : summarizeDeepSeekMessage(partialMessage() ?? {})
+        });
         return {
           ok: false,
           message: partialMessage(),
@@ -262,6 +337,16 @@ export class DeepSeekClient {
         };
       }
       if (abortError && abortedByStreamIdleTimeout) {
+        trace?.record({
+          type: 'upstream_attempt_finish',
+          requestId: request.requestId,
+          attempt,
+          ok: false,
+          failureKind: 'stream_idle_timeout',
+          hadPartialOutput,
+          hadStreamActivity,
+          partialMessage: trace.includesPayload('request') ? partialMessage() : summarizeDeepSeekMessage(partialMessage() ?? {})
+        });
         return {
           ok: false,
           message: partialMessage(),
@@ -280,6 +365,18 @@ export class DeepSeekClient {
         error.message.includes('did not return any streaming chunks') ||
         error.message.includes('未返回任何流式数据块')
       );
+      trace?.record({
+        type: 'upstream_attempt_finish',
+        requestId: request.requestId,
+        attempt,
+        ok: false,
+        failureKind: this.isRetryableTransportError(error) ? 'network' : isEmptyStream ? 'empty_stream' : 'stream',
+        retryable: retryable || isEmptyStream,
+        hadPartialOutput,
+        hadStreamActivity,
+        error: formatUnknownError(error),
+        partialMessage: trace?.includesPayload('request') ? partialMessage() : summarizeDeepSeekMessage(partialMessage() ?? {})
+      });
       return {
         ok: false,
         message: partialMessage(),

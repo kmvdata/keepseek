@@ -54,6 +54,7 @@ import { getWorkspaceReferenceResources } from '../context/references/referenceR
 import { getHtmlForWebview } from '../webview/html';
 import { focusView } from './focusView';
 import type { DroppedFileReferenceInput, PromptReferenceInput, WebviewMessage } from './webviewMessages';
+import { InteractionTraceLogService } from '../agent/logging/interactionTrace';
 import {
   copySelectionTextWithClipboardRestore,
   createTextReferenceFileName,
@@ -73,7 +74,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = CHAT_VIEW_TYPE;
 
   private readonly fileContext = new FileContextStore();
-  private readonly agentRunner = new AgentRunner();
+  private readonly agentRunner: AgentRunner;
   private readonly draftEdits: DraftEditStore;
   private readonly authorizedExternalReferenceUris = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
@@ -97,6 +98,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     private readonly sessionStore: ChatSessionStore,
     private readonly globalStorageUri: vscode.Uri
   ) {
+    this.agentRunner = new AgentRunner(undefined, new InteractionTraceLogService(this.globalStorageUri));
     this.draftEdits = new DraftEditStore(
       new SafeFileEditor((key, values) => this.t(key, values)),
       this.sessionStore,

@@ -293,6 +293,40 @@
           "maximum": 60000,
           "description": "Base retry delay in milliseconds for replay-safe DeepSeek requests. Retries use exponential backoff from this value."
         },
+        "keepseek.trace.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write structured JSONL trace logs for DeepSeek requests, streaming responses, and agent tool-loop messages. Trace logs may include prompts, file contents, reasoning content, and draft edit content."
+        },
+        "keepseek.trace.level": {
+          "type": "string",
+          "enum": [
+            "metadata",
+            "request",
+            "full"
+          ],
+          "default": "full",
+          "description": "Trace detail level. metadata records lifecycle and sizes only; request records full upstream request and assembled response messages; full also records raw streaming SSE data."
+        },
+        "keepseek.trace.logRawStream": {
+          "type": "boolean",
+          "default": true,
+          "description": "When trace.level is full, record raw DeepSeek streaming SSE data lines."
+        },
+        "keepseek.trace.retentionDays": {
+          "type": "number",
+          "default": 7,
+          "minimum": 1,
+          "maximum": 60,
+          "description": "Number of days to keep KeepSeek interaction trace logs."
+        },
+        "keepseek.trace.maxFileBytes": {
+          "type": "number",
+          "default": 20000000,
+          "minimum": 1000000,
+          "maximum": 1000000000,
+          "description": "Maximum bytes written to one KeepSeek interaction trace log before it is truncated."
+        },
         "keepseek.historyRetentionDays": {
           "type": "number",
           "default": 7,

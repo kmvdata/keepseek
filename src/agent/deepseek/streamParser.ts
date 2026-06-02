@@ -1,5 +1,6 @@
 import { AgentRunCallbacks } from '../../shared/types';
 import type { KeepseekLanguage } from '../../shared/i18n';
+import type { AgentInteractionTrace } from '../logging/interactionTrace';
 import { DeepSeekStreamChunk, DeepSeekStreamResult, DeepSeekToolCall, DeepSeekToolCallDelta } from './types';
 
 interface StreamingToolCallAccumulator {
@@ -9,6 +10,13 @@ interface StreamingToolCallAccumulator {
     name: string;
     arguments: string;
   };
+}
+
+interface DeepSeekStreamParseOptions {
+  trace?: AgentInteractionTrace;
+  requestId?: string;
+  attempt?: number;
+  onStreamActivity?: () => void;
 }
 
 class StreamingDsmlDisplayFilter {
@@ -70,7 +78,7 @@ export class DeepSeekStreamParser {
     body: NonNullable<Response['body']>,
     language: KeepseekLanguage,
     callbacks: AgentRunCallbacks,
-    onStreamActivity?: () => void
+    options: DeepSeekStreamParseOptions = {}
   ): Promise<DeepSeekStreamResult> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
@@ -100,7 +108,8 @@ export class DeepSeekStreamParser {
           toolCallParts,
           contentDisplayFilter,
           reasoningDisplayFilter,
-          callbacks
+          callbacks,
+          options
         );
         sawChunk = sawChunk || eventResult.sawChunk;
         finishReason = eventResult.finishReason ?? finishReason;
@@ -122,7 +131,7 @@ export class DeepSeekStreamParser {
       }
 
       buffer += decoder.decode(value, { stream: true });
-      onStreamActivity?.();
+      options.onStreamActivity?.();
       normalizeAndConsumeBuffer();
     }
 
@@ -136,7 +145,8 @@ export class DeepSeekStreamParser {
         toolCallParts,
         contentDisplayFilter,
         reasoningDisplayFilter,
-        callbacks
+        callbacks,
+        options
       );
       sawChunk = sawChunk || eventResult.sawChunk;
       finishReason = eventResult.finishReason ?? finishReason;
@@ -172,7 +182,8 @@ export class DeepSeekStreamParser {
     toolCallParts: Map<number, StreamingToolCallAccumulator>,
     contentDisplayFilter: StreamingDsmlDisplayFilter,
     reasoningDisplayFilter: StreamingDsmlDisplayFilter,
-    callbacks: AgentRunCallbacks
+    callbacks: AgentRunCallbacks,
+    options: DeepSeekStreamParseOptions
   ): { done: boolean; sawChunk: boolean; finishReason?: string | null; usage?: DeepSeekStreamResult['usage'] } {
     const dataLines = rawEvent
       .split('\n')
@@ -186,6 +197,7 @@ export class DeepSeekStreamParser {
 
     for (const data of dataLines) {
       if (data.trim() === '[DONE]') {
+        this.recordRawSseData(data, options);
         return { done: true, sawChunk, finishReason };
       }
 
@@ -193,6 +205,7 @@ export class DeepSeekStreamParser {
         continue;
       }
 
+      this.recordRawSseData(data, options);
       const chunk = this.parseStreamChunk(data, language);
       sawChunk = true;
       usage = chunk.usage ?? usage;
@@ -208,6 +221,19 @@ export class DeepSeekStreamParser {
     }
 
     return { done: false, sawChunk, finishReason, usage };
+  }
+
+  private recordRawSseData(data: string, options: DeepSeekStreamParseOptions): void {
+    if (!options.trace?.enabled || !options.trace.logRawStream || !options.trace.includesPayload('full')) {
+      return;
+    }
+
+    options.trace.record({
+      type: 'upstream_sse_data',
+      requestId: options.requestId,
+      attempt: options.attempt,
+      data
+    });
   }
 
   private parseStreamChunk(data: string, language: KeepseekLanguage): DeepSeekStreamChunk {

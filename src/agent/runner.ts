@@ -34,6 +34,16 @@ import type { KeepseekLanguage } from '../shared/i18n';
 import { DsmlToolParser } from './deepseek/dsmlToolParser';
 import { DeepSeekClient, DeepSeekClientConfig } from './deepseek/client';
 import {
+  AgentInteractionTrace,
+  createNoopInteractionTrace,
+  formatUnknownError,
+  InteractionTraceLogService,
+  summarizeDeepSeekMessage,
+  summarizeDeepSeekRequestBody,
+  summarizeDeepSeekToolCall,
+  summarizeText
+} from './logging/interactionTrace';
+import {
   DeepSeekAssistantMessage,
   DeepSeekChatRequestBody,
   DeepSeekFunctionTool,
@@ -89,9 +99,61 @@ export class AgentRunner {
   private readonly dsmlToolParser = new DsmlToolParser();
   private readonly deepSeekClient = new DeepSeekClient();
 
-  public constructor(private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService()) {}
+  public constructor(
+    private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService(),
+    private readonly traceLogService?: InteractionTraceLogService
+  ) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
+    const trace = this.traceLogService?.createRunTrace() ?? createNoopInteractionTrace();
+    trace.record({
+      type: 'run_start',
+      model: request.model,
+      settings: request.settings,
+      language: request.language,
+      prompt: trace.includesPayload('request') ? request.prompt : summarizeText(request.prompt),
+      contextFiles: request.contextFiles.map((file) => ({
+        id: file.id,
+        label: file.label,
+        fsPath: file.fsPath,
+        languageId: file.languageId,
+        sizeBytes: file.sizeBytes,
+        source: file.source,
+        content: trace.includesPayload('request') ? file.content : summarizeText(file.content)
+      })),
+      history: request.history.map((message) => ({
+        id: message.id,
+        role: message.role,
+        createdAt: message.createdAt,
+        modelId: message.modelId,
+        content: trace.includesPayload('request') ? message.content : summarizeText(message.content),
+        expandedContent: trace.includesPayload('request') ? message.expandedContent : summarizeText(message.expandedContent),
+        reasoningContent: trace.includesPayload('request') ? message.reasoningContent : summarizeText(message.reasoningContent)
+      }))
+    });
+    const finishRun = (response: AgentResponse, details: Record<string, unknown> = {}): AgentResponse => {
+      trace.record({
+        type: 'run_finish',
+        ...details,
+        response: trace.includesPayload('request')
+          ? response
+          : {
+              message: summarizeText(response.message),
+              reasoningContent: summarizeText(response.reasoningContent),
+              draftEdits: response.draftEdits.map((edit) => ({
+                id: edit.id,
+                uri: edit.uri,
+                label: edit.label,
+                action: edit.action,
+                reason: edit.reason,
+                newText: summarizeText(edit.newText)
+              }))
+            }
+      });
+      return response;
+    };
+
+    try {
     this.throwIfAborted(request.signal, request.language);
     const emitStatus = this.createStatusEmitter(callbacks);
     const runCallbacks: AgentRunCallbacks = {
@@ -110,7 +172,7 @@ export class AgentRunner {
         base: 'thinking',
         phase: 'finalizing'
       });
-      return {
+      return finishRun({
         message: request.language === 'en'
           ? [
               `Prepared a pending change for ${draftEdit.label}.`,
@@ -121,11 +183,15 @@ export class AgentRunner {
               '点击修改卡片上的应用后，扩展会再次弹窗请求写入许可。'
             ].join('\n\n'),
         draftEdits: [draftEdit]
-      };
+      }, { shortcut: 'draft' });
     }
 
     const runtimeConfig = this.getRuntimeConfig(request.language);
     const messages = buildInitialAgentMessages(request);
+    trace.record({
+      type: 'agent_messages_initialized',
+      messages: trace.includesPayload('request') ? messages : messages.map(summarizeDeepSeekMessage)
+    });
     const tools = getAgentTools();
     const draftEdits: DraftEdit[] = [];
     const reasoningParts: string[] = [];
@@ -174,6 +240,12 @@ export class AgentRunner {
         content: this.getBudgetStopInstruction(budgetStopReason, request.language)
       };
       messages.push(budgetInstructionMessage);
+      trace.record({
+        type: 'agent_message_appended',
+        reason: 'budget_stop_instruction',
+        budgetStopReason,
+        message: trace.includesPayload('request') ? budgetInstructionMessage : summarizeDeepSeekMessage(budgetInstructionMessage)
+      });
       runtimeUsageBreakdown.inputTokensEstimate += estimateDeepSeekMessageTokens(budgetInstructionMessage);
       budgetStopInstructionQueued = true;
       emitUsageEstimate([]);
@@ -189,11 +261,11 @@ export class AgentRunner {
           base: 'thinking',
           phase: 'finalizing'
         });
-        return {
+        return finishRun({
           message: this.getFinalMessage(null, draftEdits, runTimeStopReason, request.language, runtimeConfig),
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits
-        };
+        }, { finishReason: runTimeStopReason });
       }
 
       if (!budgetStopReason && turn >= maxIterations) {
@@ -202,7 +274,7 @@ export class AgentRunner {
       queueBudgetStopInstruction();
       const toolsForTurn = !budgetStopReason && turn < maxIterations ? tools : [];
       emitUsageEstimate(toolsForTurn);
-      const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt);
+      const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, { trace });
       this.throwIfAborted(request.signal, request.language);
       const normalizedAssistant = this.normalizeAssistantToolCalls(response.message, toolsForTurn.length > 0);
       const assistant = normalizedAssistant.assistant;
@@ -217,6 +289,13 @@ export class AgentRunner {
       }
 
       const toolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
+      if (toolCalls.length) {
+        trace.record({
+          type: 'assistant_tool_calls_normalized',
+          source: normalizedAssistant.source,
+          toolCalls: trace.includesPayload('request') ? toolCalls : toolCalls.map(summarizeDeepSeekToolCall)
+        });
+      }
       if (!toolCalls.length) {
         const continuedResponse = await this.tryContinueLengthLimitedResponse({
           request,
@@ -229,18 +308,19 @@ export class AgentRunner {
           runDeadlineAt,
           outputReserveTokens,
           reasoningParts,
-          runtimeUsageBreakdown
+          runtimeUsageBreakdown,
+          trace
         });
         if (continuedResponse) {
           emitStatus({
             base: 'thinking',
             phase: 'finalizing'
           });
-          return {
+          return finishRun({
             message: this.getFinalMessage(continuedResponse.content, draftEdits, continuedResponse.finishReason, request.language, runtimeConfig),
             reasoningContent: this.formatReasoning(reasoningParts),
             draftEdits
-          };
+          }, { finishReason: continuedResponse.finishReason, continued: true });
         }
 
         emitStatus({
@@ -250,11 +330,11 @@ export class AgentRunner {
         const finalFinishReason = response.finishReason === 'length'
           ? response.finishReason
           : budgetStopReason ?? response.finishReason;
-        return {
+        return finishRun({
           message: this.getFinalMessage(assistant.content, draftEdits, finalFinishReason, request.language, runtimeConfig),
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits
-        };
+        }, { finishReason: finalFinishReason });
       }
 
       emitStatus({
@@ -264,16 +344,36 @@ export class AgentRunner {
 
       const executeToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
         this.throwIfAborted(request.signal, request.language);
+        trace.record({
+          type: 'tool_call',
+          toolCall: trace.includesPayload('request') ? toolCall : summarizeDeepSeekToolCall(toolCall)
+        });
         if (budgetStopReason) {
-          return this.createBudgetToolResult(budgetStopReason, request.language);
+          const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language);
+          trace.record({
+            type: 'tool_result',
+            toolCallId: toolCall.id,
+            toolName: toolCall.function.name,
+            budgetStopReason,
+            content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
+          });
+          return budgetToolResult;
         }
 
         if (runtimeConfig.maxToolCalls > 0 && toolCallCount >= runtimeConfig.maxToolCalls) {
           budgetStopReason = 'tool_call_limit_exhausted';
-          return this.createBudgetToolResult(budgetStopReason, request.language, {
+          const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
             toolCallCount,
             maxToolCalls: runtimeConfig.maxToolCalls
           });
+          trace.record({
+            type: 'tool_result',
+            toolCallId: toolCall.id,
+            toolName: toolCall.function.name,
+            budgetStopReason,
+            content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
+          });
+          return budgetToolResult;
         }
 
         toolCallCount += 1;
@@ -283,6 +383,12 @@ export class AgentRunner {
           toolName: toolCall.function.name
         });
         const rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language);
+        trace.record({
+          type: 'tool_result_raw',
+          toolCallId: toolCall.id,
+          toolName: toolCall.function.name,
+          content: trace.includesPayload('request') ? rawToolResult : summarizeText(rawToolResult)
+        });
         this.throwIfAborted(request.signal, request.language);
         const rawToolMessage: DeepSeekMessage = {
           role: 'tool',
@@ -293,11 +399,19 @@ export class AgentRunner {
         const nextToolsForRequest = turn + 1 < maxIterations ? tools : [];
         if (toolResultTokens + nextToolResultTokens > maxToolResultTokens) {
           budgetStopReason = 'tool_result_budget_exhausted';
-          return this.createBudgetToolResult(budgetStopReason, request.language, {
+          const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
             usedTokens: toolResultTokens,
             nextTokens: nextToolResultTokens,
             maxTokens: Number.isFinite(maxToolResultTokens) ? maxToolResultTokens : 0
           });
+          trace.record({
+            type: 'tool_result',
+            toolCallId: toolCall.id,
+            toolName: toolCall.function.name,
+            budgetStopReason,
+            content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
+          });
+          return budgetToolResult;
         }
 
         if (this.getContextWindowBudgetStopReason(request, [...messages, rawToolMessage], nextToolsForRequest, outputReserveTokens)) {
@@ -309,15 +423,29 @@ export class AgentRunner {
             outputReserveTokens,
             safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
           });
-          return this.createBudgetToolResult(budgetStopReason, request.language, {
+          const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
             usedTokens: projectedUsage.usedTokensEstimate,
             nextTokens: nextToolResultTokens,
             maxTokens: projectedUsage.maxTokensEstimate
           });
+          trace.record({
+            type: 'tool_result',
+            toolCallId: toolCall.id,
+            toolName: toolCall.function.name,
+            budgetStopReason,
+            content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
+          });
+          return budgetToolResult;
         }
 
         toolResultTokens += nextToolResultTokens;
         budgetStopReason = budgetStopReason ?? this.getRunTimeStopReason(runDeadlineAt);
+        trace.record({
+          type: 'tool_result',
+          toolCallId: toolCall.id,
+          toolName: toolCall.function.name,
+          content: trace.includesPayload('request') ? rawToolResult : summarizeText(rawToolResult)
+        });
         return rawToolResult;
       };
 
@@ -329,6 +457,11 @@ export class AgentRunner {
           tool_calls: toolCalls
         };
         messages.push(assistantToolCallMessage);
+        trace.record({
+          type: 'agent_message_appended',
+          reason: 'assistant_tool_call',
+          message: trace.includesPayload('request') ? assistantToolCallMessage : summarizeDeepSeekMessage(assistantToolCallMessage)
+        });
         runtimeUsageBreakdown.toolCallTokensEstimate += estimateChatMessageTokens('assistant', [
           assistant.content ?? '',
           JSON.stringify(toolCalls)
@@ -346,6 +479,11 @@ export class AgentRunner {
             content: toolResult
           };
           messages.push(toolMessage);
+          trace.record({
+            type: 'agent_message_appended',
+            reason: 'native_tool_result',
+            message: trace.includesPayload('request') ? toolMessage : summarizeDeepSeekMessage(toolMessage)
+          });
           runtimeUsageBreakdown.toolResultTokensEstimate += estimateDeepSeekMessageTokens(toolMessage);
           emitUsageEstimate(budgetStopReason ? [] : turn + 1 < maxIterations ? tools : []);
           emitStatus({
@@ -361,6 +499,11 @@ export class AgentRunner {
             content: assistant.content.trim()
           };
           messages.push(assistantTextMessage);
+          trace.record({
+            type: 'agent_message_appended',
+            reason: 'dsml_assistant_text',
+            message: trace.includesPayload('request') ? assistantTextMessage : summarizeDeepSeekMessage(assistantTextMessage)
+          });
           runtimeUsageBreakdown.inputTokensEstimate += estimateDeepSeekMessageTokens(assistantTextMessage);
         }
 
@@ -380,6 +523,11 @@ export class AgentRunner {
           content: this.formatEmulatedDsmlToolResults(emulatedResults, request.language)
         };
         messages.push(emulatedToolResultMessage);
+        trace.record({
+          type: 'agent_message_appended',
+          reason: 'dsml_emulated_tool_results',
+          message: trace.includesPayload('request') ? emulatedToolResultMessage : summarizeDeepSeekMessage(emulatedToolResultMessage)
+        });
         runtimeUsageBreakdown.toolResultTokensEstimate += estimateDeepSeekMessageTokens(emulatedToolResultMessage);
         emitUsageEstimate(budgetStopReason ? [] : turn + 1 < maxIterations ? tools : []);
       }
@@ -391,11 +539,20 @@ export class AgentRunner {
       base: 'thinking',
       phase: 'finalizing'
     });
-    return {
+    return finishRun({
       message: this.getFinalMessage(null, draftEdits, 'tool_iterations_exhausted', request.language, runtimeConfig),
       reasoningContent: this.formatReasoning(reasoningParts),
       draftEdits
-    };
+    }, { finishReason: 'tool_iterations_exhausted' });
+    } catch (error) {
+      trace.record({
+        type: 'run_error',
+        error: formatUnknownError(error)
+      });
+      throw error;
+    } finally {
+      await trace.flush();
+    }
   }
 
   private async createChatCompletion(
@@ -405,8 +562,9 @@ export class AgentRunner {
     tools: DeepSeekFunctionTool[],
     callbacks: AgentRunCallbacks,
     runDeadlineAt?: number,
-    options: { allowPartialRecovery?: boolean } = {}
+    options: { allowPartialRecovery?: boolean; trace?: AgentInteractionTrace } = {}
   ): Promise<DeepSeekStreamResult> {
+    const trace = options.trace ?? createNoopInteractionTrace();
     const body: DeepSeekChatRequestBody = {
       model: request.model.id,
       messages,
@@ -430,15 +588,31 @@ export class AgentRunner {
       include_usage: true
     };
 
+    const upstreamRequestId = randomUUID();
+    trace.record({
+      type: 'upstream_request',
+      requestId: upstreamRequestId,
+      body: trace.includesPayload('request') ? body : summarizeDeepSeekRequestBody(body)
+    });
+
     const response = await this.deepSeekClient.createChatCompletion(this.toDeepSeekClientConfig(runtimeConfig), {
       body,
       language: request.language,
       signal: request.signal,
       callbacks,
-      runDeadlineAt
+      runDeadlineAt,
+      trace,
+      requestId: upstreamRequestId
     });
 
     if (response.ok && response.message) {
+      trace.record({
+        type: 'upstream_response_message',
+        requestId: upstreamRequestId,
+        finishReason: response.finishReason,
+        usage: response.usage,
+        message: trace.includesPayload('request') ? response.message : summarizeDeepSeekMessage(response.message)
+      });
       return {
         message: response.message,
         finishReason: response.finishReason,
@@ -447,9 +621,25 @@ export class AgentRunner {
     }
 
     if (response.failureKind === 'external_abort') {
+      trace.record({
+        type: 'upstream_request_failed',
+        requestId: upstreamRequestId,
+        failureKind: response.failureKind,
+        retryable: response.retryable,
+        hadPartialOutput: response.hadPartialOutput,
+        error: response.error
+      });
       throw new AgentRunAbortedError(request.language);
     }
     if (response.failureKind === 'run_time_limit') {
+      trace.record({
+        type: 'upstream_request_failed',
+        requestId: upstreamRequestId,
+        failureKind: response.failureKind,
+        retryable: response.retryable,
+        hadPartialOutput: response.hadPartialOutput,
+        error: response.error
+      });
       throw new Error(this.getRunTimeLimitError(runtimeConfig.maxRunMs, request.language));
     }
     if (options.allowPartialRecovery !== false && response.hadPartialOutput && response.message?.content?.trim()) {
@@ -460,9 +650,20 @@ export class AgentRunner {
         partialAssistant: response.message,
         failureError: response.error,
         callbacks,
-        runDeadlineAt
+        runDeadlineAt,
+        trace
       });
     }
+
+    trace.record({
+      type: 'upstream_request_failed',
+      requestId: upstreamRequestId,
+      failureKind: response.failureKind,
+      status: response.status,
+      retryable: response.retryable,
+      hadPartialOutput: response.hadPartialOutput,
+      error: response.error
+    });
 
     throw new Error(response.error ?? (request.language === 'en'
       ? 'DeepSeek API request failed.'
@@ -481,6 +682,7 @@ export class AgentRunner {
     outputReserveTokens: number;
     reasoningParts: string[];
     runtimeUsageBreakdown: ContextUsageEstimate['breakdown'];
+    trace: AgentInteractionTrace;
   }): Promise<{ content: string; finishReason?: string | null } | undefined> {
     if (!this.canContinueLengthLimitedResponse(input)) {
       return undefined;
@@ -508,6 +710,16 @@ export class AgentRunner {
       }
 
       input.messages.push(assistantMessage, instructionMessage);
+      input.trace.record({
+        type: 'agent_message_appended',
+        reason: 'length_continuation_partial_assistant',
+        message: input.trace.includesPayload('request') ? assistantMessage : summarizeDeepSeekMessage(assistantMessage)
+      });
+      input.trace.record({
+        type: 'agent_message_appended',
+        reason: 'length_continuation_instruction',
+        message: input.trace.includesPayload('request') ? instructionMessage : summarizeDeepSeekMessage(instructionMessage)
+      });
       input.runtimeUsageBreakdown.inputTokensEstimate +=
         estimateDeepSeekMessageTokens(assistantMessage) + estimateDeepSeekMessageTokens(instructionMessage);
 
@@ -518,7 +730,7 @@ export class AgentRunner {
         [],
         input.callbacks,
         input.runDeadlineAt,
-        { allowPartialRecovery: false }
+        { allowPartialRecovery: false, trace: input.trace }
       );
       const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false);
       if (normalizedContinuation.displayReasoningContent) {
@@ -579,6 +791,7 @@ export class AgentRunner {
     failureError?: string;
     callbacks: AgentRunCallbacks;
     runDeadlineAt?: number;
+    trace: AgentInteractionTrace;
   }): Promise<DeepSeekStreamResult> {
     const partialContent = input.partialAssistant.content ?? '';
     if (!partialContent.trim()) {
@@ -598,6 +811,13 @@ export class AgentRunner {
         content: this.getPartialFailureContinuationInstruction(input.request.language)
       }
     ];
+    input.trace.record({
+      type: 'partial_failure_continuation_messages',
+      failureError: input.failureError,
+      messages: input.trace.includesPayload('request')
+        ? continuationMessages
+        : continuationMessages.map(summarizeDeepSeekMessage)
+    });
     const outputReserveTokens = resolveOutputReserveTokens(input.runtimeConfig.maxTokens);
     if (this.getContextWindowBudgetStopReason(input.request, continuationMessages, [], outputReserveTokens)) {
       throw new Error(input.failureError ?? (input.request.language === 'en'
@@ -612,7 +832,7 @@ export class AgentRunner {
       [],
       input.callbacks,
       input.runDeadlineAt,
-      { allowPartialRecovery: false }
+      { allowPartialRecovery: false, trace: input.trace }
     );
     const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false);
     return {
