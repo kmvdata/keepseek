@@ -209,6 +209,8 @@ export function getScript(): string {
       planning_tool: ['agentStatusChoosingTools', 'agentStatusPlanningNextStep'],
       executing_tool: ['agentStatusExecutingTool'],
       reading_file: ['agentStatusReadingFile'],
+      reading_file_range: ['agentStatusReadingFileRange', 'agentStatusReadingFile'],
+      searching_workspace: ['agentStatusSearchingWorkspace', 'agentStatusScanningWorkspace'],
       listing_files: ['agentStatusScanningWorkspace', 'agentStatusListingFiles'],
       listing_directory: ['agentStatusListingDirectory', 'agentStatusScanningWorkspace'],
       creating_draft_edit: ['agentStatusPreparingDraftEdit'],
@@ -1611,6 +1613,10 @@ export function getScript(): string {
           return 'listing_files';
         case 'keepseek_list_workspace_directory':
           return 'listing_directory';
+        case 'keepseek_search_workspace':
+          return 'searching_workspace';
+        case 'keepseek_read_workspace_file_range':
+          return 'reading_file_range';
         case 'keepseek_read_workspace_file':
           return 'reading_file';
         case 'keepseek_create_draft_edit':

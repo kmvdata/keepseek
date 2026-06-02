@@ -9,7 +9,9 @@ import { ChatMessage, ContextFile } from '../shared/types';
 export const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
 export const LIST_WORKSPACE_FILES_TOOL_NAME = 'keepseek_list_workspace_files';
 export const LIST_WORKSPACE_DIRECTORY_TOOL_NAME = 'keepseek_list_workspace_directory';
+export const SEARCH_WORKSPACE_TOOL_NAME = 'keepseek_search_workspace';
 export const READ_WORKSPACE_FILE_TOOL_NAME = 'keepseek_read_workspace_file';
+export const READ_WORKSPACE_FILE_RANGE_TOOL_NAME = 'keepseek_read_workspace_file_range';
 
 export interface BuildAgentMessagesInput {
   prompt: string;
@@ -67,7 +69,8 @@ export function getAgentSystemPrompt(input: {
         'You are KeepSeek, a coding agent running in the VS Code sidebar.',
         'Communicate with the user in English unless the user explicitly asks for another language.',
         'You can analyze code, explain approaches, inspect the open workspace with read-only tools, suggest changes, and call tools to create pending edits when files need to change.',
-        'Use keepseek_list_workspace_files, keepseek_list_workspace_directory, and keepseek_read_workspace_file when you need the current project structure or file contents. Do not ask the user to run directory listing commands or paste file contents when these tools can provide the information.',
+        'Use keepseek_search_workspace, keepseek_list_workspace_files, keepseek_list_workspace_directory, keepseek_read_workspace_file_range, and keepseek_read_workspace_file when you need the current project structure or file contents. Do not ask the user to run search/listing commands or paste file contents when these tools can provide the information.',
+        'Keep workspace exploration low-cost: search or list first to locate relevant files, then use keepseek_read_workspace_file_range for the relevant line ranges. Use keepseek_read_workspace_file only for small files or when complete file context is truly needed.',
         'When the user references a directory, treat it as a target or reference scope. Prefer that directory for related new files, and list/read files under it when you need examples.',
         'The read-only workspace tools only access files inside the open workspace, and they may skip large, binary, image, media, archive, or otherwise unreadable files.',
         'Important safety rule: tools only create DraftEdit pending changes and never write to disk directly. Do not claim files were written unless the user later applies the change.',
@@ -78,7 +81,8 @@ export function getAgentSystemPrompt(input: {
         '你是 KeepSeek，一个运行在 VS Code 侧边栏里的代码 Agent。',
         '你需要用中文和用户沟通，除非用户明确要求其它语言。',
         '你可以根据用户的问题分析代码、解释方案、使用只读工具查看当前打开的工作区、给出修改建议，并在需要改文件时调用工具创建待确认修改。',
-        '当你需要了解当前工程结构或文件内容时，使用 keepseek_list_workspace_files、keepseek_list_workspace_directory 和 keepseek_read_workspace_file。只要这些工具能提供信息，就不要要求用户自行运行目录扫描命令或粘贴文件内容。',
+        '当你需要了解当前工程结构或文件内容时，使用 keepseek_search_workspace、keepseek_list_workspace_files、keepseek_list_workspace_directory、keepseek_read_workspace_file_range 和 keepseek_read_workspace_file。只要这些工具能提供信息，就不要要求用户自行运行搜索、目录扫描命令或粘贴文件内容。',
+        '工作区探索要保持低成本：先 search 或 list 定位相关文件，再用 keepseek_read_workspace_file_range 读取相关行段。只有小文件或确实需要完整上下文时，才使用 keepseek_read_workspace_file。',
         '当用户引用目录时，把它视为目标位置或参考范围。创建相关新文件时优先放在该目录下；需要参考示例时，先列出并读取该目录下的文件。',
         '只读工作区工具只会访问当前打开工作区内的文件，并可能跳过过大、二进制、图片、媒体、归档或其它不可读文件。',
         '重要安全规则：工具只会创建 DraftEdit 待确认修改，不会直接写入磁盘；不要声称已经写入文件，除非用户之后手动确认。',
@@ -147,7 +151,7 @@ export function getAgentTools(): DeepSeekFunctionTool[] {
       type: 'function',
       function: {
         name: READ_WORKSPACE_FILE_TOOL_NAME,
-        description: 'Read the complete text content of a file inside the currently open VS Code workspace. This is read-only and refuses files outside the workspace, oversized files, binary files, images, media, and archives.',
+        description: 'Read the complete text content of a small file inside the currently open VS Code workspace. This is read-only and refuses files outside the workspace, oversized files, binary files, images, media, and archives. Prefer keepseek_read_workspace_file_range for large files or targeted inspection.',
         strict: true,
         parameters: {
           type: 'object',
@@ -158,6 +162,76 @@ export function getAgentTools(): DeepSeekFunctionTool[] {
             }
           },
           required: ['path'],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: SEARCH_WORKSPACE_TOOL_NAME,
+        description: 'Search text in the currently open VS Code workspace. This is read-only, stays inside the workspace, skips common dependency/build/VCS directories and unreadable text types, and returns small line-context snippets.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Text or regex pattern to search for.'
+            },
+            path: {
+              type: 'string',
+              description: 'Optional workspace-relative file or directory path to limit the search scope.'
+            },
+            include: {
+              type: 'string',
+              description: 'Optional workspace-relative glob such as "src/**/*.ts" to limit searched files. Do not use absolute paths.'
+            },
+            isRegex: {
+              type: 'boolean',
+              description: 'Whether query is a regular expression. Defaults to false.'
+            },
+            matchCase: {
+              type: 'boolean',
+              description: 'Whether search is case-sensitive. Defaults to false.'
+            },
+            maxResults: {
+              type: 'number',
+              description: 'Maximum number of matches to return. Defaults to 50 and is capped by KeepSeek.'
+            }
+          },
+          required: ['query'],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
+        description: 'Read a 1-based inclusive line range from a text file inside the currently open VS Code workspace. This is read-only and is preferred for large files or targeted inspection.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            path: {
+              type: 'string',
+              description: 'Workspace-relative path from search/list tools, or an absolute/file URI path that still points inside the current workspace.'
+            },
+            startLine: {
+              type: 'number',
+              description: '1-based inclusive start line. Must be at least 1.'
+            },
+            endLine: {
+              type: 'number',
+              description: '1-based inclusive end line. Must be greater than or equal to startLine.'
+            },
+            maxBytes: {
+              type: 'number',
+              description: 'Optional maximum number of UTF-8 bytes to return. KeepSeek caps this internally.'
+            }
+          },
+          required: ['path', 'startLine', 'endLine'],
           additionalProperties: false
         }
       }

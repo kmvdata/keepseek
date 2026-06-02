@@ -143,6 +143,8 @@ export type AgentActivityPhase =
   | 'planning_tool'
   | 'executing_tool'
   | 'reading_file'
+  | 'reading_file_range'
+  | 'searching_workspace'
   | 'listing_files'
   | 'listing_directory'
   | 'creating_draft_edit'

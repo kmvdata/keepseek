@@ -22,7 +22,9 @@ import {
   getAgentTools,
   LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
   LIST_WORKSPACE_FILES_TOOL_NAME,
-  READ_WORKSPACE_FILE_TOOL_NAME
+  READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
+  READ_WORKSPACE_FILE_TOOL_NAME,
+  SEARCH_WORKSPACE_TOOL_NAME
 } from './protocol';
 import {
   createContextUsageEstimate,
@@ -49,7 +51,8 @@ import {
   DeepSeekFunctionTool,
   DeepSeekMessage,
   DeepSeekStreamResult,
-  DeepSeekToolCall
+  DeepSeekToolCall,
+  DeepSeekUsage
 } from './deepseek/types';
 
 export { AGENT_HISTORY_MESSAGE_LIMIT } from '../shared/config';
@@ -57,6 +60,11 @@ export { DEFAULT_MAX_TOKENS, MAX_GENERATION_TOKENS };
 
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;
 const MAX_LENGTH_CONTINUATION_REQUESTS = 1;
+const SEARCH_SHAPED_RESULT_LIMIT = 120;
+const SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT = 12;
+const SEARCH_SHAPED_TOTAL_CHARS = 50_000;
+const SEARCH_SHAPED_LINE_CHARS = 500;
+const RANGE_READ_SHAPED_CONTENT_CHARS = 160_000;
 
 interface AgentRuntimeConfig {
   apiKey: string;
@@ -88,6 +96,37 @@ interface EmulatedDsmlToolResult {
   content: string;
 }
 
+interface ToolResultLedgerEntry {
+  toolName: string;
+  path?: string;
+  startLine?: number;
+  endLine?: number;
+  estimatedTokens: number;
+  rawLength: number;
+  shapedLength: number;
+  compressible: boolean;
+  truncated: boolean;
+}
+
+interface ShapedToolResult {
+  content: string;
+  path?: string;
+  startLine?: number;
+  endLine?: number;
+  rawLength: number;
+  shapedLength: number;
+  compressible: boolean;
+  truncated: boolean;
+}
+
+interface UpstreamUsageTotals {
+  requestCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  records: DeepSeekUsage[];
+}
+
 export class AgentRunAbortedError extends Error {
   public constructor(language: KeepseekLanguage) {
     super(language === 'en' ? 'Agent run was stopped.' : 'Agent 推理已中止。');
@@ -115,6 +154,14 @@ export class AgentRunner {
     if (traceLog) {
       callbacks.onTraceLog?.(traceLog);
     }
+    const toolResultLedger: ToolResultLedgerEntry[] = [];
+    const upstreamUsageTotals: UpstreamUsageTotals = {
+      requestCount: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      records: []
+    };
     trace.record({
       type: 'run_start',
       model: request.model,
@@ -144,6 +191,8 @@ export class AgentRunner {
       trace.record({
         type: 'run_finish',
         ...details,
+        upstreamUsage: this.summarizeUpstreamUsageTotals(upstreamUsageTotals),
+        toolResultLedger,
         response: trace.includesPayload('request')
           ? response
           : {
@@ -283,7 +332,7 @@ export class AgentRunner {
       queueBudgetStopInstruction();
       const toolsForTurn = !budgetStopReason && turn < maxIterations ? tools : [];
       emitUsageEstimate(toolsForTurn);
-      const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, { trace });
+      const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, { trace, usageTotals: upstreamUsageTotals });
       this.throwIfAborted(request.signal, request.language);
       const normalizedAssistant = this.normalizeAssistantToolCalls(response.message, toolsForTurn.length > 0);
       const assistant = normalizedAssistant.assistant;
@@ -318,7 +367,8 @@ export class AgentRunner {
           outputReserveTokens,
           reasoningParts,
           runtimeUsageBreakdown,
-          trace
+          trace,
+          usageTotals: upstreamUsageTotals
         });
         if (continuedResponse) {
           emitStatus({
@@ -396,15 +446,16 @@ export class AgentRunner {
           type: 'tool_result_raw',
           toolCallId: toolCall.id,
           toolName: toolCall.function.name,
-          content: trace.includesPayload('request') ? rawToolResult : summarizeText(rawToolResult)
+          content: summarizeText(rawToolResult)
         });
         this.throwIfAborted(request.signal, request.language);
-        const rawToolMessage: DeepSeekMessage = {
+        const shapedToolResult = this.shapeToolResult(toolCall.function.name, rawToolResult);
+        const shapedToolMessage: DeepSeekMessage = {
           role: 'tool',
           tool_call_id: toolCall.id,
-          content: rawToolResult
+          content: shapedToolResult.content
         };
-        const nextToolResultTokens = estimateDeepSeekMessageTokens(rawToolMessage);
+        const nextToolResultTokens = estimateDeepSeekMessageTokens(shapedToolMessage);
         const nextToolsForRequest = turn + 1 < maxIterations ? tools : [];
         if (toolResultTokens + nextToolResultTokens > maxToolResultTokens) {
           budgetStopReason = 'tool_result_budget_exhausted';
@@ -423,11 +474,11 @@ export class AgentRunner {
           return budgetToolResult;
         }
 
-        if (this.getContextWindowBudgetStopReason(request, [...messages, rawToolMessage], nextToolsForRequest, outputReserveTokens)) {
+        if (this.getContextWindowBudgetStopReason(request, [...messages, shapedToolMessage], nextToolsForRequest, outputReserveTokens)) {
           budgetStopReason = 'tool_result_budget_exhausted';
           const projectedUsage = createContextUsageEstimateFromMessages({
             model: request.model,
-            messages: [...messages, rawToolMessage],
+            messages: [...messages, shapedToolMessage],
             tools: nextToolsForRequest,
             outputReserveTokens,
             safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
@@ -448,14 +499,27 @@ export class AgentRunner {
         }
 
         toolResultTokens += nextToolResultTokens;
+        const ledgerEntry: ToolResultLedgerEntry = {
+          toolName: toolCall.function.name,
+          path: shapedToolResult.path,
+          startLine: shapedToolResult.startLine,
+          endLine: shapedToolResult.endLine,
+          estimatedTokens: nextToolResultTokens,
+          rawLength: shapedToolResult.rawLength,
+          shapedLength: shapedToolResult.shapedLength,
+          compressible: shapedToolResult.compressible,
+          truncated: shapedToolResult.truncated
+        };
+        toolResultLedger.push(ledgerEntry);
         budgetStopReason = budgetStopReason ?? this.getRunTimeStopReason(runDeadlineAt);
         trace.record({
           type: 'tool_result',
           toolCallId: toolCall.id,
           toolName: toolCall.function.name,
-          content: trace.includesPayload('request') ? rawToolResult : summarizeText(rawToolResult)
+          ledgerEntry,
+          content: trace.includesPayload('request') ? shapedToolResult.content : summarizeText(shapedToolResult.content)
         });
-        return rawToolResult;
+        return shapedToolResult.content;
       };
 
       if (normalizedAssistant.source === 'native') {
@@ -571,7 +635,7 @@ export class AgentRunner {
     tools: DeepSeekFunctionTool[],
     callbacks: AgentRunCallbacks,
     runDeadlineAt?: number,
-    options: { allowPartialRecovery?: boolean; trace?: AgentInteractionTrace } = {}
+    options: { allowPartialRecovery?: boolean; trace?: AgentInteractionTrace; usageTotals?: UpstreamUsageTotals } = {}
   ): Promise<DeepSeekStreamResult> {
     const trace = options.trace ?? createNoopInteractionTrace();
     const body: DeepSeekChatRequestBody = {
@@ -615,6 +679,7 @@ export class AgentRunner {
     });
 
     if (response.ok && response.message) {
+      this.recordUpstreamUsage(response.usage, options.usageTotals, trace, upstreamRequestId);
       trace.record({
         type: 'upstream_response_message',
         requestId: upstreamRequestId,
@@ -660,7 +725,8 @@ export class AgentRunner {
         failureError: response.error,
         callbacks,
         runDeadlineAt,
-        trace
+        trace,
+        usageTotals: options.usageTotals
       });
     }
 
@@ -692,6 +758,7 @@ export class AgentRunner {
     reasoningParts: string[];
     runtimeUsageBreakdown: ContextUsageEstimate['breakdown'];
     trace: AgentInteractionTrace;
+    usageTotals: UpstreamUsageTotals;
   }): Promise<{ content: string; finishReason?: string | null } | undefined> {
     if (!this.canContinueLengthLimitedResponse(input)) {
       return undefined;
@@ -739,7 +806,7 @@ export class AgentRunner {
         [],
         input.callbacks,
         input.runDeadlineAt,
-        { allowPartialRecovery: false, trace: input.trace }
+        { allowPartialRecovery: false, trace: input.trace, usageTotals: input.usageTotals }
       );
       const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false);
       if (normalizedContinuation.displayReasoningContent) {
@@ -801,6 +868,7 @@ export class AgentRunner {
     callbacks: AgentRunCallbacks;
     runDeadlineAt?: number;
     trace: AgentInteractionTrace;
+    usageTotals?: UpstreamUsageTotals;
   }): Promise<DeepSeekStreamResult> {
     const partialContent = input.partialAssistant.content ?? '';
     if (!partialContent.trim()) {
@@ -841,7 +909,7 @@ export class AgentRunner {
       [],
       input.callbacks,
       input.runDeadlineAt,
-      { allowPartialRecovery: false, trace: input.trace }
+      { allowPartialRecovery: false, trace: input.trace, usageTotals: input.usageTotals }
     );
     const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false);
     return {
@@ -887,6 +955,39 @@ export class AgentRunner {
     };
   }
 
+  private recordUpstreamUsage(
+    usage: DeepSeekUsage | null | undefined,
+    totals: UpstreamUsageTotals | undefined,
+    trace: AgentInteractionTrace,
+    requestId: string
+  ): void {
+    if (!usage || !totals) {
+      return;
+    }
+
+    totals.requestCount += 1;
+    totals.promptTokens += readUsageNumber(usage.prompt_tokens);
+    totals.completionTokens += readUsageNumber(usage.completion_tokens);
+    totals.totalTokens += readUsageNumber(usage.total_tokens);
+    totals.records.push(usage);
+    trace.record({
+      type: 'upstream_usage',
+      requestId,
+      usage,
+      totals: this.summarizeUpstreamUsageTotals(totals)
+    });
+  }
+
+  private summarizeUpstreamUsageTotals(totals: UpstreamUsageTotals): Record<string, unknown> {
+    return {
+      requestCount: totals.requestCount,
+      promptTokens: totals.promptTokens,
+      completionTokens: totals.completionTokens,
+      totalTokens: totals.totalTokens,
+      records: totals.records
+    };
+  }
+
   private throwIfAborted(signal: AbortSignal | undefined, language: KeepseekLanguage): void {
     if (signal?.aborted) {
       throw new AgentRunAbortedError(language);
@@ -916,6 +1017,10 @@ export class AgentRunner {
         return 'listing_files';
       case LIST_WORKSPACE_DIRECTORY_TOOL_NAME:
         return 'listing_directory';
+      case SEARCH_WORKSPACE_TOOL_NAME:
+        return 'searching_workspace';
+      case READ_WORKSPACE_FILE_RANGE_TOOL_NAME:
+        return 'reading_file_range';
       case READ_WORKSPACE_FILE_TOOL_NAME:
         return 'reading_file';
       case CREATE_DRAFT_EDIT_TOOL_NAME:
@@ -938,6 +1043,22 @@ export class AgentRunner {
             this.readOptionalNumber(args, 'maxFiles'),
             language
           );
+        case SEARCH_WORKSPACE_TOOL_NAME:
+          return await this.workspaceTools.searchWorkspace({
+            query: this.readRequiredString(args, 'query'),
+            path: this.readOptionalString(args, 'path'),
+            include: this.readOptionalString(args, 'include'),
+            isRegex: this.readOptionalBoolean(args, 'isRegex', false),
+            matchCase: this.readOptionalBoolean(args, 'matchCase', false),
+            maxResults: this.readOptionalNumber(args, 'maxResults')
+          }, language);
+        case READ_WORKSPACE_FILE_RANGE_TOOL_NAME:
+          return await this.workspaceTools.readWorkspaceFileRange({
+            path: this.readRequiredString(args, 'path'),
+            startLine: this.readRequiredNumber(args, 'startLine'),
+            endLine: this.readRequiredNumber(args, 'endLine'),
+            maxBytes: this.readOptionalNumber(args, 'maxBytes')
+          }, language);
         case READ_WORKSPACE_FILE_TOOL_NAME:
           return await this.workspaceTools.readWorkspaceFile(this.readRequiredString(args, 'path'), language);
         case CREATE_DRAFT_EDIT_TOOL_NAME:
@@ -981,6 +1102,157 @@ export class AgentRunner {
     });
   }
 
+  private shapeToolResult(toolName: string, rawContent: string): ShapedToolResult {
+    const rawLength = rawContent.length;
+    const parsed = this.parseToolResultObject(rawContent);
+    let shapedContent = rawContent;
+
+    if (toolName === SEARCH_WORKSPACE_TOOL_NAME && parsed) {
+      shapedContent = this.shapeSearchToolResult(parsed);
+    } else if (toolName === READ_WORKSPACE_FILE_RANGE_TOOL_NAME && parsed) {
+      shapedContent = this.shapeRangeReadToolResult(parsed);
+    }
+
+    const shapedMetadata = this.getToolResultMetadata(this.parseToolResultObject(shapedContent));
+    return {
+      content: shapedContent,
+      path: shapedMetadata.path,
+      startLine: shapedMetadata.startLine,
+      endLine: shapedMetadata.endLine,
+      rawLength,
+      shapedLength: shapedContent.length,
+      compressible: this.isCompressibleToolResult(toolName),
+      truncated: shapedMetadata.truncated || shapedContent.length < rawContent.length
+    };
+  }
+
+  private shapeSearchToolResult(parsed: Record<string, unknown>): string {
+    const rawResults = Array.isArray(parsed.results) ? parsed.results : [];
+    const shapedResults: unknown[] = [];
+    const perFileCounts = new Map<string, number>();
+    let totalChars = 0;
+    let truncated = parsed.truncated === true;
+
+    for (const rawResult of rawResults) {
+      if (!this.isRecord(rawResult)) {
+        continue;
+      }
+      if (shapedResults.length >= SEARCH_SHAPED_RESULT_LIMIT) {
+        truncated = true;
+        break;
+      }
+
+      const resultPath = typeof rawResult.path === 'string' ? rawResult.path : '';
+      const fileCount = perFileCounts.get(resultPath) ?? 0;
+      if (fileCount >= SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT) {
+        truncated = true;
+        continue;
+      }
+
+      const shapedResult = this.shapeSearchResult(rawResult);
+      const shapedChars = JSON.stringify(shapedResult).length;
+      if (totalChars + shapedChars > SEARCH_SHAPED_TOTAL_CHARS) {
+        truncated = true;
+        break;
+      }
+
+      totalChars += shapedChars;
+      perFileCounts.set(resultPath, fileCount + 1);
+      shapedResults.push(shapedResult);
+    }
+
+    return JSON.stringify({
+      ...parsed,
+      results: shapedResults,
+      count: shapedResults.length,
+      limit: Math.min(readFiniteNumber(parsed.limit, SEARCH_SHAPED_RESULT_LIMIT), SEARCH_SHAPED_RESULT_LIMIT),
+      truncated: truncated || shapedResults.length < rawResults.length,
+      perFileLimit: SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT,
+      totalCharLimit: SEARCH_SHAPED_TOTAL_CHARS
+    });
+  }
+
+  private shapeSearchResult(result: Record<string, unknown>): Record<string, unknown> {
+    return {
+      ...result,
+      matchLine: this.shapeSearchText(typeof result.matchLine === 'string' ? result.matchLine : ''),
+      matchLineTruncated: result.matchLineTruncated === true || this.isSearchTextTruncated(result.matchLine),
+      before: this.shapeSearchContextLines(result.before),
+      after: this.shapeSearchContextLines(result.after)
+    };
+  }
+
+  private shapeSearchContextLines(value: unknown): unknown[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value.map((item) => {
+      if (!this.isRecord(item)) {
+        return item;
+      }
+      return {
+        ...item,
+        text: this.shapeSearchText(typeof item.text === 'string' ? item.text : ''),
+        truncated: item.truncated === true || this.isSearchTextTruncated(item.text)
+      };
+    });
+  }
+
+  private shapeSearchText(value: string): string {
+    return value.length <= SEARCH_SHAPED_LINE_CHARS
+      ? value
+      : `${value.slice(0, SEARCH_SHAPED_LINE_CHARS)}...`;
+  }
+
+  private isSearchTextTruncated(value: unknown): boolean {
+    return typeof value === 'string' && value.length > SEARCH_SHAPED_LINE_CHARS;
+  }
+
+  private shapeRangeReadToolResult(parsed: Record<string, unknown>): string {
+    const content = typeof parsed.content === 'string' ? parsed.content : '';
+    if (content.length <= RANGE_READ_SHAPED_CONTENT_CHARS) {
+      return JSON.stringify(parsed);
+    }
+
+    return JSON.stringify({
+      ...parsed,
+      content: content.slice(0, RANGE_READ_SHAPED_CONTENT_CHARS),
+      truncated: true,
+      shapedContentCharLimit: RANGE_READ_SHAPED_CONTENT_CHARS
+    });
+  }
+
+  private parseToolResultObject(content: string): Record<string, unknown> | undefined {
+    try {
+      const parsed: unknown = JSON.parse(content);
+      return this.isRecord(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private getToolResultMetadata(parsed: Record<string, unknown> | undefined): {
+    path?: string;
+    startLine?: number;
+    endLine?: number;
+    truncated: boolean;
+  } {
+    if (!parsed) {
+      return { truncated: false };
+    }
+
+    return {
+      path: typeof parsed.path === 'string' ? parsed.path : undefined,
+      startLine: readOptionalFiniteNumber(parsed.startLine),
+      endLine: readOptionalFiniteNumber(parsed.endLine),
+      truncated: parsed.truncated === true
+    };
+  }
+
+  private isCompressibleToolResult(toolName: string): boolean {
+    return toolName !== READ_WORKSPACE_FILE_TOOL_NAME && toolName !== CREATE_DRAFT_EDIT_TOOL_NAME;
+  }
+
   private parseToolArguments(rawArguments: string): Record<string, unknown> {
     let parsed: unknown;
     try {
@@ -1007,6 +1279,26 @@ export class AgentRunner {
     }
 
     return key === 'content' ? value : value.trim();
+  }
+
+  private readOptionalString(args: Record<string, unknown>, key: string): string | undefined {
+    const value = args[key];
+    if (value === undefined) {
+      return undefined;
+    }
+    if (typeof value !== 'string') {
+      throw new Error(`Tool argument "${key}" must be a string.`);
+    }
+    const trimmed = value.trim();
+    return trimmed || undefined;
+  }
+
+  private readRequiredNumber(args: Record<string, unknown>, key: string): number {
+    const value = args[key];
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new Error(`Tool argument "${key}" must be a finite number.`);
+    }
+    return value;
   }
 
   private readOptionalBoolean(args: Record<string, unknown>, key: string, fallback: boolean): boolean {
@@ -1321,4 +1613,16 @@ export class AgentRunner {
     }
   }
 
+}
+
+function readUsageNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function readFiniteNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function readOptionalFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
