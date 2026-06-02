@@ -127,7 +127,6 @@ export function getScript(): string {
     const historyTab = document.getElementById('historyTab');
     const newChatTab = document.getElementById('newChatTab');
     const settingsTab = document.getElementById('settingsTab');
-    const openLogTab = document.getElementById('openLogTab');
     const settingsMenu = document.getElementById('settingsMenu');
     const settingsApiKeyMenuItem = document.getElementById('settingsApiKeyMenuItem');
     const settingsAgentBudgetMenuItem = document.getElementById('settingsAgentBudgetMenuItem');
@@ -462,17 +461,6 @@ export function getScript(): string {
         event.stopPropagation();
         if (state.isBusy) return;
         toggleSettingsMenu();
-      });
-    }
-
-    if (openLogTab) {
-      openLogTab.addEventListener('click', function(event) {
-        event.preventDefault();
-        event.stopPropagation();
-        if (!canRequestCurrentSessionLog()) return;
-        closeSettingsMenu();
-        closeSessionMenu();
-        vscode.postMessage({ type: 'openCurrentSessionLog' });
       });
     }
 
@@ -847,16 +835,6 @@ export function getScript(): string {
         settingsTab.disabled = state.isBusy;
         settingsTab.classList.toggle('active', settingsMenuOpen);
         settingsTab.setAttribute('aria-expanded', settingsMenuOpen ? 'true' : 'false');
-      }
-      if (openLogTab) {
-        var canRequestLog = canRequestCurrentSessionLog();
-        openLogTab.disabled = !canRequestLog;
-        openLogTab.classList.toggle('is-debug-active', state.debugMode === true);
-        var logTitleKey = state.debugMode
-          ? (state.hasCurrentSessionLog ? 'openCurrentSessionLog' : 'openCurrentSessionLogUnavailable')
-          : 'openCurrentSessionLogDebugOff';
-        openLogTab.title = t(logTitleKey);
-        openLogTab.setAttribute('aria-label', t(logTitleKey));
       }
       if (settingsMenu) {
         settingsMenu.classList.toggle('hidden', !settingsMenuOpen);

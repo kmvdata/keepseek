@@ -203,10 +203,6 @@ export function getStyles(): string {
       background: var(--vscode-toolbar-activeBackground);
     }
 
-    .header-tab.is-debug-active:not(:disabled) {
-      color: var(--vscode-textLink-foreground);
-    }
-
     .settings-menu {
       position: absolute;
       top: 36px;
