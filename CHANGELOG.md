@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.1 - 2026-06-02
+
+- Added two new read-only workspace tools:
+  - `keepseek_search_workspace` for low-cost workspace search with bounded context output.
+  - `keepseek_read_workspace_file_range` for bounded line-range reads with byte-size safeguards.
+- Added first-pass tool result shaping and ledger metadata for search/range/read tool outputs, including truncation and compressed-size indicators to keep tool context stable and low-cost.
+- Updated `keepseek_read_workspace_file` to return a structured fallback for oversized files and guide agents to use `keepseek_read_workspace_file_range` instead.
+- Updated system prompt workflow (CN/EN): prefer `search/list` → `read_workspace_file_range` and only use full-file read when files are small or complete context is truly needed.
+- Added new runtime phases and UI visibility updates for search/range phases so activity states and i18n labels stay consistent.
+- Added usage accounting scaffolding: trace-level upstream usage aggregation while preserving existing prompt token estimate behavior.
+- Updated `doc/keepseek-agent-runtime-workflow.md` to reflect the post-refactor runtime flow and tool strategy.
+
 ## 0.1.0 - 2026-05-27
 
 - Added project-aware global history session storage with current-project and other-project browsing, cross-project session copy, favorites, rename, recent-day filtering, multi-select deletion, and whole-project history cleanup.

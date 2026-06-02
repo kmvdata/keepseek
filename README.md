@@ -115,7 +115,7 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 从 VSIX 安装：
 
 ```bash
-code --install-extension keepseek-0.1.0.vsix
+code --install-extension keepseek-0.1.1.vsix
 ```
 
 安装后在 VS Code 中执行：
@@ -158,7 +158,7 @@ KeepSeek: Open Agent Chat
 
 ## 发布准备
 
-当前发布版本为 `0.1.0`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.1.0`，发布标签可以使用 `v0.1.0`。
+当前发布版本为 `0.1.1`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.1.1`，发布标签可以使用 `v0.1.1`。
 
 生成 VSIX：
 
