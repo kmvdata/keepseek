@@ -12,6 +12,14 @@ export function getTemplate(): string {
             <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.05a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.05A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.05a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.05A1.7 1.7 0 0 0 19.4 15Z"/>
           </svg>
         </button>
+        <button type="button" class="header-tab" id="openLogTab" title="打开当前会话日志" aria-label="打开当前会话日志" data-i18n-title="openCurrentSessionLog" data-i18n-aria-label="openCurrentSessionLog">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/>
+            <path d="M14 2v6h6"/>
+            <path d="M8 13h8"/>
+            <path d="M8 17h6"/>
+          </svg>
+        </button>
         <button type="button" class="header-tab" id="historyTab" title="Session history" aria-label="Session history" aria-haspopup="menu" aria-expanded="false" data-i18n-title="sessionHistory" data-i18n-aria-label="sessionHistory">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10"/>
@@ -50,6 +58,25 @@ export function getTemplate(): string {
           <span class="command-row-description" data-i18n="settingsHistoryMenuDescription">默认显示范围与 60 天清理</span>
         </span>
       </button>
+      <div class="settings-debug-item">
+        <button id="settingsDebugMenuItem" type="button" class="command-row settings-menu-row" aria-haspopup="menu" aria-expanded="false">
+          <span class="command-row-main">
+            <span class="command-row-title" data-i18n="settingsDebugModeTitle">调试模式</span>
+            <span class="command-row-description" data-i18n="settingsDebugModeDescription">记录请求、流式响应和工具循环日志</span>
+          </span>
+          <span id="settingsDebugValue" class="command-row-value">关闭</span>
+        </button>
+        <div id="settingsDebugSubmenu" class="settings-submenu settings-debug-submenu" role="menu" aria-label="调试模式" data-i18n-aria-label="settingsDebugModeTitle">
+          <button id="settingsDebugModeToggle" type="button" class="settings-submenu-item" role="menuitemcheckbox" aria-checked="false">
+            <span class="settings-submenu-check" aria-hidden="true"></span>
+            <span data-i18n="settingsDebugModeToggle">调试模式</span>
+          </button>
+          <button id="settingsOpenLogMenuItem" type="button" class="settings-submenu-item" role="menuitem">
+            <span class="settings-submenu-icon" aria-hidden="true"></span>
+            <span data-i18n="openCurrentSessionLog">打开当前会话日志</span>
+          </button>
+        </div>
+      </div>
       <div class="settings-language-item">
         <button id="settingsLanguageMenuItem" type="button" class="command-row settings-menu-row" aria-haspopup="menu" aria-expanded="false">
           <span class="command-row-main">

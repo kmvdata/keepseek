@@ -130,6 +130,7 @@ export class ChatSessionStore {
       ...source,
       id: randomUUID(),
       messages: source.messages.map(copyMessage),
+      lastTraceLogUri: undefined,
       createdAt: now,
       updatedAt: now,
       workspaceKey: this.workspaceScope.key,
@@ -501,6 +502,9 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       title,
       messages,
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
+      lastTraceLogUri: typeof item.lastTraceLogUri === 'string' && item.lastTraceLogUri.trim()
+        ? item.lastTraceLogUri.trim()
+        : undefined,
       createdAt,
       updatedAt,
       workspaceKey,

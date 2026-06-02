@@ -35,6 +35,8 @@ export type WebviewMessage =
   | { type: 'deleteOtherWorkspace'; workspaceKey: string }
   | { type: 'setSelectedModel'; modelId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
+  | { type: 'setDebugMode'; enabled: boolean }
+  | { type: 'openCurrentSessionLog' }
   | { type: 'openApiSettings' }
   | { type: 'openAgentBudgetSettings' }
   | { type: 'openHistorySettings' }

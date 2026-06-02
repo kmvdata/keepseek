@@ -177,10 +177,16 @@ export function getConfiguredRequestRetryBaseMs(): number {
   return normalizeIntegerInRange(configuredDelay, 0, MAX_REQUEST_RETRY_BASE_MS, DEFAULT_REQUEST_RETRY_BASE_MS);
 }
 
+export function getConfiguredDebugMode(): boolean {
+  return vscode.workspace
+    .getConfiguration('keepseek')
+    .get<boolean>('trace.enabled', DEFAULT_TRACE_ENABLED);
+}
+
 export function getConfiguredInteractionTraceSettings(): InteractionTraceSettings {
   const config = vscode.workspace.getConfiguration('keepseek');
   return {
-    enabled: config.get<boolean>('trace.enabled', DEFAULT_TRACE_ENABLED),
+    enabled: getConfiguredDebugMode(),
     level: normalizeInteractionTraceLevel(config.get<string>('trace.level', DEFAULT_TRACE_LEVEL)),
     logRawStream: config.get<boolean>('trace.logRawStream', DEFAULT_TRACE_LOG_RAW_STREAM),
     retentionDays: normalizeIntegerInRange(

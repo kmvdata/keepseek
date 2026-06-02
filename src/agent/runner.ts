@@ -106,6 +106,15 @@ export class AgentRunner {
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
     const trace = this.traceLogService?.createRunTrace() ?? createNoopInteractionTrace();
+    const traceLog = trace.enabled && trace.logUri
+      ? {
+          runId: trace.runId,
+          uri: trace.logUri
+        }
+      : undefined;
+    if (traceLog) {
+      callbacks.onTraceLog?.(traceLog);
+    }
     trace.record({
       type: 'run_start',
       model: request.model,
@@ -150,7 +159,7 @@ export class AgentRunner {
               }))
             }
       });
-      return response;
+      return traceLog ? { ...response, traceLog } : response;
     };
 
     try {

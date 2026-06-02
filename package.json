@@ -296,7 +296,7 @@
         "keepseek.trace.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Write structured JSONL trace logs for DeepSeek requests, streaming responses, and agent tool-loop messages. Trace logs may include prompts, file contents, reasoning content, and draft edit content."
+          "description": "Enable KeepSeek debug mode. When enabled, KeepSeek writes structured JSONL trace logs for DeepSeek requests, streaming responses, and agent tool-loop messages. Trace logs may include prompts, file contents, reasoning content, and draft edit content."
         },
         "keepseek.trace.level": {
           "type": "string",

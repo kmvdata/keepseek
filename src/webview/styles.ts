@@ -203,6 +203,10 @@ export function getStyles(): string {
       background: var(--vscode-toolbar-activeBackground);
     }
 
+    .header-tab.is-debug-active:not(:disabled) {
+      color: var(--vscode-textLink-foreground);
+    }
+
     .settings-menu {
       position: absolute;
       top: 36px;
@@ -240,7 +244,8 @@ export function getStyles(): string {
       min-height: 42px;
     }
 
-    .settings-language-item {
+    .settings-language-item,
+    .settings-debug-item {
       position: relative;
     }
 
@@ -260,7 +265,10 @@ export function getStyles(): string {
 
     .settings-language-item:hover .settings-submenu,
     .settings-language-item:focus-within .settings-submenu,
-    .settings-language-item.is-open .settings-submenu {
+    .settings-language-item.is-open .settings-submenu,
+    .settings-debug-item:hover .settings-submenu,
+    .settings-debug-item:focus-within .settings-submenu,
+    .settings-debug-item.is-open .settings-submenu {
       display: grid;
       gap: 2px;
     }
@@ -296,6 +304,13 @@ export function getStyles(): string {
 
     .settings-submenu-item[aria-checked="true"] .settings-submenu-check::before {
       content: "\\2713";
+    }
+
+    .settings-submenu-icon::before {
+      content: "\\21B1";
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      line-height: 1;
     }
 
     .session-menu {

@@ -49,6 +49,8 @@ export function getScript(): string {
       },
       maxFileBytes: 200000,
       historyRetentionDays: 1,
+      debugMode: false,
+      hasCurrentSessionLog: false,
       language: 'zh-CN',
       isMac: false
     };
@@ -125,10 +127,15 @@ export function getScript(): string {
     const historyTab = document.getElementById('historyTab');
     const newChatTab = document.getElementById('newChatTab');
     const settingsTab = document.getElementById('settingsTab');
+    const openLogTab = document.getElementById('openLogTab');
     const settingsMenu = document.getElementById('settingsMenu');
     const settingsApiKeyMenuItem = document.getElementById('settingsApiKeyMenuItem');
     const settingsAgentBudgetMenuItem = document.getElementById('settingsAgentBudgetMenuItem');
     const settingsHistoryMenuItem = document.getElementById('settingsHistoryMenuItem');
+    const settingsDebugMenuItem = document.getElementById('settingsDebugMenuItem');
+    const settingsDebugValue = document.getElementById('settingsDebugValue');
+    const settingsDebugModeToggle = document.getElementById('settingsDebugModeToggle');
+    const settingsOpenLogMenuItem = document.getElementById('settingsOpenLogMenuItem');
     const settingsLanguageMenuItem = document.getElementById('settingsLanguageMenuItem');
     const settingsLanguageValue = document.getElementById('settingsLanguageValue');
     const settingsLanguageSubmenu = document.getElementById('settingsLanguageSubmenu');
@@ -458,6 +465,17 @@ export function getScript(): string {
       });
     }
 
+    if (openLogTab) {
+      openLogTab.addEventListener('click', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!canRequestCurrentSessionLog()) return;
+        closeSettingsMenu();
+        closeSessionMenu();
+        vscode.postMessage({ type: 'openCurrentSessionLog' });
+      });
+    }
+
     if (settingsApiKeyMenuItem) {
       settingsApiKeyMenuItem.addEventListener('click', function(event) {
         event.preventDefault();
@@ -482,6 +500,40 @@ export function getScript(): string {
         event.stopPropagation();
         closeSettingsMenu();
         vscode.postMessage({ type: 'openHistorySettings' });
+      });
+    }
+
+    if (settingsDebugMenuItem) {
+      settingsDebugMenuItem.addEventListener('click', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var item = settingsDebugMenuItem.closest('.settings-debug-item');
+        if (item) {
+          item.classList.toggle('is-open');
+          settingsDebugMenuItem.setAttribute('aria-expanded', item.classList.contains('is-open') ? 'true' : 'false');
+        }
+      });
+    }
+
+    if (settingsDebugModeToggle) {
+      settingsDebugModeToggle.addEventListener('click', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (state.isBusy) return;
+        state.debugMode = !state.debugMode;
+        state.hasCurrentSessionLog = state.debugMode ? state.hasCurrentSessionLog : false;
+        renderSettingsControls();
+        vscode.postMessage({ type: 'setDebugMode', enabled: state.debugMode });
+      });
+    }
+
+    if (settingsOpenLogMenuItem) {
+      settingsOpenLogMenuItem.addEventListener('click', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!canRequestCurrentSessionLog()) return;
+        closeSettingsMenu();
+        vscode.postMessage({ type: 'openCurrentSessionLog' });
       });
     }
 
@@ -796,8 +848,37 @@ export function getScript(): string {
         settingsTab.classList.toggle('active', settingsMenuOpen);
         settingsTab.setAttribute('aria-expanded', settingsMenuOpen ? 'true' : 'false');
       }
+      if (openLogTab) {
+        var canRequestLog = canRequestCurrentSessionLog();
+        openLogTab.disabled = !canRequestLog;
+        openLogTab.classList.toggle('is-debug-active', state.debugMode === true);
+        var logTitleKey = state.debugMode
+          ? (state.hasCurrentSessionLog ? 'openCurrentSessionLog' : 'openCurrentSessionLogUnavailable')
+          : 'openCurrentSessionLogDebugOff';
+        openLogTab.title = t(logTitleKey);
+        openLogTab.setAttribute('aria-label', t(logTitleKey));
+      }
       if (settingsMenu) {
         settingsMenu.classList.toggle('hidden', !settingsMenuOpen);
+      }
+      if (settingsDebugValue) {
+        settingsDebugValue.textContent = t(state.debugMode ? 'on' : 'off');
+      }
+      if (settingsDebugMenuItem) {
+        var debugItem = settingsDebugMenuItem.closest('.settings-debug-item');
+        settingsDebugMenuItem.disabled = state.isBusy;
+        settingsDebugMenuItem.setAttribute('aria-expanded', debugItem?.classList.contains('is-open') ? 'true' : 'false');
+      }
+      if (settingsDebugModeToggle) {
+        settingsDebugModeToggle.disabled = state.isBusy;
+        settingsDebugModeToggle.setAttribute('aria-checked', state.debugMode ? 'true' : 'false');
+        settingsDebugModeToggle.title = t(state.debugMode ? 'settingsDebugModeDisable' : 'settingsDebugModeEnable');
+      }
+      if (settingsOpenLogMenuItem) {
+        settingsOpenLogMenuItem.disabled = !canRequestCurrentSessionLog();
+        settingsOpenLogMenuItem.title = t(state.debugMode
+          ? (state.hasCurrentSessionLog ? 'openCurrentSessionLog' : 'openCurrentSessionLogUnavailable')
+          : 'openCurrentSessionLogDebugOff');
       }
       if (settingsLanguageValue) {
         settingsLanguageValue.textContent = getLanguageDisplayName(getLanguage());
@@ -823,6 +904,10 @@ export function getScript(): string {
       renderSessionMenu();
     }
 
+    function canRequestCurrentSessionLog() {
+      return state.debugMode === true;
+    }
+
     function toggleSettingsMenu() {
       if (settingsMenuOpen) {
         closeSettingsMenu();
@@ -845,6 +930,13 @@ export function getScript(): string {
       var languageItem = settingsLanguageMenuItem ? settingsLanguageMenuItem.closest('.settings-language-item') : null;
       if (languageItem) {
         languageItem.classList.remove('is-open');
+      }
+      if (settingsDebugMenuItem) {
+        settingsDebugMenuItem.setAttribute('aria-expanded', 'false');
+      }
+      var debugItem = settingsDebugMenuItem ? settingsDebugMenuItem.closest('.settings-debug-item') : null;
+      if (debugItem) {
+        debugItem.classList.remove('is-open');
       }
       renderSettingsControls();
     }

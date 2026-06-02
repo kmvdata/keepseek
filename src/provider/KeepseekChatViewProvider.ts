@@ -26,6 +26,7 @@ import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_TOOL_RESULT_TOKEN_BUDGET,
   getConfiguredAgentSettings,
+  getConfiguredDebugMode,
   getConfiguredHistoryRetentionDays,
   getConfiguredMaxFileBytes,
   getConfiguredMaxRunMs,
@@ -75,7 +76,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private readonly fileContext = new FileContextStore();
   private readonly agentRunner: AgentRunner;
+  private readonly traceLogService: InteractionTraceLogService;
   private readonly draftEdits: DraftEditStore;
+  private readonly sessionTraceLogUris = new Map<string, string>();
   private readonly authorizedExternalReferenceUris = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
   private selectedModelId = getConfiguredSelectedModelId();
@@ -98,7 +101,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     private readonly sessionStore: ChatSessionStore,
     private readonly globalStorageUri: vscode.Uri
   ) {
-    this.agentRunner = new AgentRunner(undefined, new InteractionTraceLogService(this.globalStorageUri));
+    this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
+    this.agentRunner = new AgentRunner(undefined, this.traceLogService);
     this.draftEdits = new DraftEditStore(
       new SafeFileEditor((key, values) => this.t(key, values)),
       this.sessionStore,
@@ -532,6 +536,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'setAgentSettings':
         await this.setAgentSettings(message.settings);
+        return;
+      case 'setDebugMode':
+        await this.setDebugMode(message.enabled);
+        return;
+      case 'openCurrentSessionLog':
+        await this.openCurrentSessionLog();
         return;
       case 'openApiSettings': {
         const config = vscode.workspace.getConfiguration('keepseek');
@@ -1071,6 +1081,54 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postState();
   }
 
+  private async setDebugMode(enabled: boolean): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+
+    const debugMode = enabled === true;
+    const config = vscode.workspace.getConfiguration('keepseek');
+    await config.update('trace.enabled', debugMode, vscode.ConfigurationTarget.Global);
+    this.postState();
+    vscode.window.showInformationMessage(this.t(debugMode ? 'debugModeEnabled' : 'debugModeDisabled'));
+  }
+
+  private async openCurrentSessionLog(): Promise<void> {
+    if (!getConfiguredDebugMode()) {
+      vscode.window.showWarningMessage(this.t('debugModeRequiredForLogs'));
+      this.postState();
+      return;
+    }
+
+    const activeSession = this.sessionStore.getActiveSession();
+    const logUriText = activeSession.lastTraceLogUri?.trim()
+      || this.sessionTraceLogUris.get(activeSession.id)?.trim();
+    if (!logUriText) {
+      vscode.window.showWarningMessage(this.t('currentSessionLogUnavailable'));
+      this.postState();
+      return;
+    }
+
+    try {
+      const logUri = vscode.Uri.parse(logUriText);
+      const stat = await vscode.workspace.fs.stat(logUri);
+      if (stat.type !== vscode.FileType.File) {
+        throw new Error(this.t('currentSessionLogInvalid'));
+      }
+
+      const document = await vscode.workspace.openTextDocument(logUri);
+      activeSession.lastTraceLogUri = logUriText;
+      this.sessionTraceLogUris.set(activeSession.id, logUriText);
+      await vscode.window.showTextDocument(document, { preview: false });
+    } catch (error) {
+      activeSession.lastTraceLogUri = undefined;
+      this.sessionTraceLogUris.delete(activeSession.id);
+      await this.sessionStore.persist();
+      this.postState();
+      vscode.window.showErrorMessage(this.t('cannotOpenCurrentSessionLog', { message: getErrorMessage(error) }));
+    }
+  }
+
   private async runContextAction(action: () => Promise<void>): Promise<void> {
     try {
       await action();
@@ -1260,6 +1318,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (expandedPrompt !== trimmedPrompt) {
         userMessage.expandedContent = expandedPrompt;
       }
+      activeSession.lastTraceLogUri = undefined;
+      this.sessionTraceLogUris.delete(activeSession.id);
       this.messages.push(userMessage);
       activeSession.updatedAt = now;
       this.trimHistory();
@@ -1327,6 +1387,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.liveContextUsage = toSessionContextUsageEstimate(usage);
           this.updateActiveSessionContextUsage(this.liveContextUsage);
           scheduleLiveState();
+        },
+        onTraceLog: (traceLog) => {
+          activeSession.lastTraceLogUri = traceLog.uri;
+          this.sessionTraceLogUris.set(activeSession.id, traceLog.uri);
+          activeSession.updatedAt = new Date().toISOString();
+          scheduleLiveState();
         }
       });
 
@@ -1334,6 +1400,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         base: 'thinking',
         phase: 'finalizing'
       }, { post: false });
+      const traceLogUri = response.traceLog?.uri ?? this.traceLogService.getLastRunTraceLogUri();
+      if (traceLogUri) {
+        activeSession.lastTraceLogUri = traceLogUri;
+        this.sessionTraceLogUris.set(activeSession.id, traceLogUri);
+      }
       this.draftEdits.addMany(response.draftEdits);
 
       if (assistantMessage) {
@@ -1463,6 +1534,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         agentActivity: this.agentActivity,
         maxFileBytes: getConfiguredMaxFileBytes(),
         historyRetentionDays: getConfiguredHistoryRetentionDays(),
+        debugMode: getConfiguredDebugMode(),
+        hasCurrentSessionLog: Boolean(
+          activeSession.lastTraceLogUri?.trim()
+          || this.sessionTraceLogUris.get(activeSession.id)?.trim()
+        ),
         language: this.language,
         isMac: process.platform === 'darwin'
       }

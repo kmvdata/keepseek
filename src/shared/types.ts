@@ -65,6 +65,7 @@ export interface ChatSession {
   title: string;
   messages: ChatMessage[];
   contextUsage?: ContextUsageEstimate;
+  lastTraceLogUri?: string;
   createdAt: string;
   updatedAt: string;
   workspaceKey: string;
@@ -128,6 +129,7 @@ export interface AgentResponse {
   message: string;
   reasoningContent?: string;
   draftEdits: DraftEdit[];
+  traceLog?: AgentTraceLogInfo;
 }
 
 export type AgentActivityBase = 'idle' | 'thinking' | 'executing' | 'waiting' | 'complete' | 'error' | 'stopped';
@@ -165,8 +167,14 @@ export type AgentProgressEvent =
   | { type: 'content'; delta: string }
   | { type: 'reasoning'; delta: string };
 
+export interface AgentTraceLogInfo {
+  runId: string;
+  uri: string;
+}
+
 export interface AgentRunCallbacks {
   onDelta?: (event: AgentProgressEvent) => void;
   onStatus?: (status: AgentActivityInput) => void;
   onUsageEstimate?: (usage: ContextUsageEstimate) => void;
+  onTraceLog?: (traceLog: AgentTraceLogInfo) => void;
 }
