@@ -1,6 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { ChatMessage, ChatSession, ChatSessionSummary, WorkspaceSummary } from '../shared/types';
+import {
+  ChatMessage,
+  ChatMessageContextMeta,
+  ChatSession,
+  ChatSessionSummary,
+  ContextCompressionState,
+  HistorySummary,
+  WorkspaceSummary
+} from '../shared/types';
 import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from '../shared/i18n';
 import { isRecord } from '../shared/errors';
 import { normalizeContextUsageEstimateValue } from '../agent/contextUsage';
@@ -130,6 +138,7 @@ export class ChatSessionStore {
       ...source,
       id: randomUUID(),
       messages: source.messages.map(copyMessage),
+      contextCompression: undefined,
       lastTraceLogUri: undefined,
       createdAt: now,
       updatedAt: now,
@@ -295,6 +304,8 @@ export class ChatSessionStore {
   }
 
   public trimActiveHistory(maxMessages = DEFAULT_ACTIVE_HISTORY_LIMIT): void {
+    // MVP compatibility fallback: model context now uses projection, but storage still hard-trims
+    // until full history persistence and projected model history are split in a production pass.
     const messages = this.messages;
     if (messages.length > maxMessages) {
       messages.splice(0, messages.length - maxMessages);
@@ -501,6 +512,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       id: item.id,
       title,
       messages,
+      contextCompression: normalizeContextCompressionState(item.contextCompression),
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
       lastTraceLogUri: typeof item.lastTraceLogUri === 'string' && item.lastTraceLogUri.trim()
         ? item.lastTraceLogUri.trim()
@@ -550,7 +562,75 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     expandedContent: typeof value.expandedContent === 'string' ? value.expandedContent : undefined,
     createdAt: normalizeSessionTimestamp(value.createdAt, new Date().toISOString()),
     modelId: typeof value.modelId === 'string' ? value.modelId : undefined,
-    reasoningContent: typeof value.reasoningContent === 'string' ? value.reasoningContent : undefined
+    reasoningContent: typeof value.reasoningContent === 'string' ? value.reasoningContent : undefined,
+    contextMeta: normalizeMessageContextMeta(value.contextMeta)
+  };
+}
+
+function normalizeMessageContextMeta(value: unknown): ChatMessageContextMeta | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const isProtected = value.isProtected === true;
+  const protectedReason = typeof value.protectedReason === 'string' && value.protectedReason.trim()
+    ? value.protectedReason.trim()
+    : undefined;
+  return isProtected || protectedReason
+    ? {
+        isProtected,
+        protectedReason
+      }
+    : undefined;
+}
+
+function normalizeContextCompressionState(value: unknown): ContextCompressionState | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const summaries = Array.isArray(value.summaries)
+    ? value.summaries.map(normalizeHistorySummary).filter((summary): summary is HistorySummary => Boolean(summary))
+    : [];
+  const protectedMessageIds = Array.isArray(value.protectedMessageIds)
+    ? Array.from(new Set(value.protectedMessageIds.filter((id): id is string => typeof id === 'string' && Boolean(id.trim()))))
+    : [];
+  const lastCompressedAt = normalizeOptionalTimestamp(value.lastCompressedAt);
+  const lastFailureReason = typeof value.lastFailureReason === 'string' && value.lastFailureReason.trim()
+    ? value.lastFailureReason.trim()
+    : undefined;
+
+  if (!summaries.length && !protectedMessageIds.length && !lastCompressedAt && !lastFailureReason) {
+    return undefined;
+  }
+
+  return {
+    version: normalizePositiveInteger(value.version, 1),
+    summaries,
+    protectedMessageIds,
+    lastCompressedAt,
+    lastFailureReason
+  };
+}
+
+function normalizeHistorySummary(value: unknown): HistorySummary | undefined {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.content !== 'string') {
+    return undefined;
+  }
+  const now = new Date().toISOString();
+  const content = value.content.trim();
+  if (!content) {
+    return undefined;
+  }
+  return {
+    id: value.id,
+    content,
+    coveredMessageIds: Array.isArray(value.coveredMessageIds)
+      ? Array.from(new Set(value.coveredMessageIds.filter((id): id is string => typeof id === 'string' && Boolean(id.trim()))))
+      : [],
+    createdAt: normalizeSessionTimestamp(value.createdAt, now),
+    updatedAt: normalizeSessionTimestamp(value.updatedAt, normalizeSessionTimestamp(value.createdAt, now)),
+    tokenEstimate: normalizePositiveInteger(value.tokenEstimate, 0),
+    modelId: typeof value.modelId === 'string' && value.modelId.trim() ? value.modelId.trim() : undefined,
+    version: normalizePositiveInteger(value.version, 1)
   };
 }
 
@@ -578,6 +658,21 @@ function normalizeSessionTimestamp(value: unknown, fallback: string): string {
     return fallback;
   }
   return Number.isFinite(Date.parse(value)) ? value : fallback;
+}
+
+function normalizeOptionalTimestamp(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  return Number.isFinite(Date.parse(value)) ? value : undefined;
+}
+
+function normalizePositiveInteger(value: unknown, fallback: number): number {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) {
+    return fallback;
+  }
+  return Math.floor(number);
 }
 
 function getUriLabel(uri: vscode.Uri): string {

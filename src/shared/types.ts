@@ -49,6 +49,11 @@ export interface ContextUsageEstimate {
 
 export type ChatRole = 'user' | 'assistant' | 'system';
 
+export interface ChatMessageContextMeta {
+  isProtected?: boolean;
+  protectedReason?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
@@ -58,12 +63,42 @@ export interface ChatMessage {
   modelId?: string;
   reasoningContent?: string;
   isStreaming?: boolean;
+  contextMeta?: ChatMessageContextMeta;
+}
+
+export interface HistorySummary {
+  id: string;
+  content: string;
+  coveredMessageIds: string[];
+  createdAt: string;
+  updatedAt: string;
+  tokenEstimate: number;
+  modelId?: string;
+  version: number;
+}
+
+export interface ContextCompressionState {
+  version: number;
+  summaries: HistorySummary[];
+  protectedMessageIds: string[];
+  lastCompressedAt?: string;
+  lastFailureReason?: string;
+}
+
+export interface ContextProjectionMetadata {
+  compressionEnabled: boolean;
+  usedSummary: boolean;
+  summaryCount: number;
+  protectedMessageCount: number;
+  recentMessageCount: number;
+  fallbackReason?: string;
 }
 
 export interface ChatSession {
   id: string;
   title: string;
   messages: ChatMessage[];
+  contextCompression?: ContextCompressionState;
   contextUsage?: ContextUsageEstimate;
   lastTraceLogUri?: string;
   createdAt: string;
@@ -121,6 +156,7 @@ export interface AgentRequest {
   settings: AgentSettings;
   contextFiles: ContextFile[];
   history: ChatMessage[];
+  contextCompression?: ContextCompressionState;
   language: KeepseekLanguage;
   signal?: AbortSignal;
 }

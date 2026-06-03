@@ -15,7 +15,8 @@ import {
   getAgentTools
 } from './protocol';
 import type { KeepseekLanguage } from '../shared/i18n';
-import { ChatMessage, ContextFile, ContextUsageEstimate, KeepseekModel } from '../shared/types';
+import { ChatMessage, ContextCompressionState, ContextFile, ContextUsageEstimate, KeepseekModel } from '../shared/types';
+import { buildHistoryProjection } from './historyProjection';
 
 type ContextUsageBreakdown = ContextUsageEstimate['breakdown'];
 
@@ -23,6 +24,7 @@ export function createContextUsageEstimate(input: {
   model: KeepseekModel;
   contextFiles: ContextFile[];
   messages: ChatMessage[];
+  contextCompression?: ContextCompressionState;
   language: KeepseekLanguage;
   prompt?: string;
   includeTools?: boolean;
@@ -30,11 +32,18 @@ export function createContextUsageEstimate(input: {
   safetyReserveTokens?: number;
 }): ContextUsageEstimate {
   const prompt = input.prompt?.trim() ?? '';
+  const projection = buildHistoryProjection({
+    history: input.messages,
+    prompt,
+    language: input.language,
+    contextCompression: input.contextCompression
+  });
   const messages = buildInitialAgentMessages({
     prompt,
     contextFiles: input.contextFiles,
     history: input.messages,
-    language: input.language
+    language: input.language,
+    projection
   });
   const includeTools = input.includeTools ?? getConfiguredMaxToolIterations() > 0;
   const tools = includeTools ? getAgentTools() : [];
@@ -63,6 +72,7 @@ export function createDisplayedSessionContextUsageEstimate(input: {
   model: KeepseekModel;
   contextFiles: ContextFile[];
   messages: ChatMessage[];
+  contextCompression?: ContextCompressionState;
   language: KeepseekLanguage;
   prompt?: string;
 }): ContextUsageEstimate {

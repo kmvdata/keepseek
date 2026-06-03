@@ -26,6 +26,7 @@ import {
   READ_WORKSPACE_FILE_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME
 } from './protocol';
+import { buildHistoryProjection } from './historyProjection';
 import {
   createContextUsageEstimate,
   createContextUsageEstimateFromMessages,
@@ -182,10 +183,20 @@ export class AgentRunner {
         role: message.role,
         createdAt: message.createdAt,
         modelId: message.modelId,
+        contextMeta: message.contextMeta,
         content: trace.includesPayload('request') ? message.content : summarizeText(message.content),
         expandedContent: trace.includesPayload('request') ? message.expandedContent : summarizeText(message.expandedContent),
         reasoningContent: trace.includesPayload('request') ? message.reasoningContent : summarizeText(message.reasoningContent)
-      }))
+      })),
+      contextCompression: request.contextCompression
+        ? {
+            version: request.contextCompression.version,
+            summaryCount: request.contextCompression.summaries.length,
+            protectedMessageCount: request.contextCompression.protectedMessageIds.length,
+            lastCompressedAt: request.contextCompression.lastCompressedAt,
+            lastFailureReason: request.contextCompression.lastFailureReason
+          }
+        : undefined
     });
     const finishRun = (response: AgentResponse, details: Record<string, unknown> = {}): AgentResponse => {
       trace.record({
@@ -245,7 +256,25 @@ export class AgentRunner {
     }
 
     const runtimeConfig = this.getRuntimeConfig(request.language);
-    const messages = buildInitialAgentMessages(request);
+    const projection = buildHistoryProjection({
+      history: request.history,
+      prompt: request.prompt,
+      language: request.language,
+      contextCompression: request.contextCompression
+    });
+    const messages = buildInitialAgentMessages({
+      ...request,
+      projection
+    });
+    trace.record({
+      type: 'context_projection',
+      metadata: projection.metadata,
+      protectedMessageIds: projection.protectedMessageIds,
+      recentMessageIds: projection.recentMessageIds,
+      compressibleMessageCount: projection.compressibleMessageIds.length,
+      usedSummaryIds: projection.usedSummaryIds,
+      lastCompressionFailureReason: request.contextCompression?.lastFailureReason
+    });
     trace.record({
       type: 'agent_messages_initialized',
       messages: trace.includesPayload('request') ? messages : messages.map(summarizeDeepSeekMessage)
@@ -265,6 +294,7 @@ export class AgentRunner {
         model: request.model,
         contextFiles: request.contextFiles,
         messages: request.history,
+        contextCompression: request.contextCompression,
         language: request.language,
         prompt: request.prompt,
         includeTools: maxIterations > 0,

@@ -5,6 +5,7 @@ import type { KeepseekLanguage } from '../shared/i18n';
 import { getMarkdownFence, getMarkdownLanguage } from '../shared/markdown';
 import { estimateTokenCount } from './tokenEstimate';
 import { ChatMessage, ContextFile } from '../shared/types';
+import type { HistoryProjectionResult } from './historyProjection';
 
 export const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
 export const LIST_WORKSPACE_FILES_TOOL_NAME = 'keepseek_list_workspace_files';
@@ -18,6 +19,7 @@ export interface BuildAgentMessagesInput {
   contextFiles: ContextFile[];
   history: ChatMessage[];
   language: KeepseekLanguage;
+  projection?: HistoryProjectionResult;
 }
 
 export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepSeekMessage[] {
@@ -28,9 +30,21 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
     }
   ];
 
-  const recentHistory = input.history
-    .filter((message) => message.role === 'user' || message.role === 'assistant')
-    .slice(-AGENT_HISTORY_MESSAGE_LIMIT);
+  for (const summary of input.projection?.syntheticSystemMessages ?? []) {
+    if (!summary.trim()) {
+      continue;
+    }
+    messages.push({
+      role: 'system',
+      content: summary
+    });
+  }
+
+  const history = (input.projection?.history ?? input.history)
+    .filter((message) => message.role === 'user' || message.role === 'assistant');
+  const recentHistory = input.projection && !input.projection.useLegacyHistoryLimit
+    ? history
+    : history.slice(-AGENT_HISTORY_MESSAGE_LIMIT);
 
   for (const message of recentHistory) {
     const content = getMessageContentForAgent(message);

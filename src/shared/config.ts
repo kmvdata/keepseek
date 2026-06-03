@@ -22,12 +22,22 @@ export const DEFAULT_TRACE_LEVEL: InteractionTraceLevel = 'full';
 export const DEFAULT_TRACE_LOG_RAW_STREAM = true;
 export const DEFAULT_TRACE_RETENTION_DAYS = 7;
 export const DEFAULT_TRACE_MAX_FILE_BYTES = 20_000_000;
+export const DEFAULT_CONTEXT_COMPRESSION_ENABLED = true;
+export const DEFAULT_CONTEXT_KEEP_RECENT_TURNS = 12;
+export const DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO = 0.7;
+export const DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS = 3_000;
 export const MIN_HISTORY_RETENTION_DAYS = 1;
 export const MAX_HISTORY_RETENTION_DAYS = SESSION_HARD_RETENTION_DAYS;
 export const MIN_TRACE_RETENTION_DAYS = 1;
 export const MAX_TRACE_RETENTION_DAYS = 60;
 export const MIN_TRACE_MAX_FILE_BYTES = 1_000_000;
 export const MAX_TRACE_MAX_FILE_BYTES = 1_000_000_000;
+export const MIN_CONTEXT_KEEP_RECENT_TURNS = 1;
+export const MAX_CONTEXT_KEEP_RECENT_TURNS = 64;
+export const MIN_CONTEXT_COMPRESSION_TRIGGER_RATIO = 0.1;
+export const MAX_CONTEXT_COMPRESSION_TRIGGER_RATIO = 0.95;
+export const MIN_CONTEXT_SUMMARY_BUDGET_TOKENS = 500;
+export const MAX_CONTEXT_SUMMARY_BUDGET_TOKENS = 100_000;
 export const MAX_TOOL_ITERATIONS = 64;
 export const MAX_TOOL_CALLS = 256;
 export const MAX_RUN_MS = 3_600_000;
@@ -45,6 +55,13 @@ export interface InteractionTraceSettings {
   logRawStream: boolean;
   retentionDays: number;
   maxFileBytes: number;
+}
+
+export interface ContextCompressionSettings {
+  enabled: boolean;
+  keepRecentTurns: number;
+  triggerRatio: number;
+  summaryBudgetTokens: number;
 }
 
 export function getConfiguredModels(): KeepseekModel[] {
@@ -149,6 +166,31 @@ export function getConfiguredToolResultTokenBudget(): number {
     MAX_TOOL_RESULT_TOKEN_BUDGET,
     DEFAULT_TOOL_RESULT_TOKEN_BUDGET
   );
+}
+
+export function getConfiguredContextCompressionSettings(): ContextCompressionSettings {
+  const config = vscode.workspace.getConfiguration('keepseek');
+  return {
+    enabled: config.get<boolean>('contextCompressionEnabled', DEFAULT_CONTEXT_COMPRESSION_ENABLED),
+    keepRecentTurns: normalizeIntegerInRange(
+      config.get<number>('contextKeepRecentTurns', DEFAULT_CONTEXT_KEEP_RECENT_TURNS),
+      MIN_CONTEXT_KEEP_RECENT_TURNS,
+      MAX_CONTEXT_KEEP_RECENT_TURNS,
+      DEFAULT_CONTEXT_KEEP_RECENT_TURNS
+    ),
+    triggerRatio: normalizeNumberInRange(
+      config.get<number>('contextCompressionTriggerRatio', DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO),
+      MIN_CONTEXT_COMPRESSION_TRIGGER_RATIO,
+      MAX_CONTEXT_COMPRESSION_TRIGGER_RATIO,
+      DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO
+    ),
+    summaryBudgetTokens: normalizeIntegerInRange(
+      config.get<number>('contextSummaryBudgetTokens', DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS),
+      MIN_CONTEXT_SUMMARY_BUDGET_TOKENS,
+      MAX_CONTEXT_SUMMARY_BUDGET_TOKENS,
+      DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS
+    )
+  };
 }
 
 export function getConfiguredStreamIdleTimeoutMs(): number {
@@ -263,4 +305,12 @@ export function normalizeIntegerInRange(value: unknown, min: number, max: number
     return fallback;
   }
   return Math.min(max, Math.max(min, Math.floor(number)));
+}
+
+export function normalizeNumberInRange(value: unknown, min: number, max: number, fallback: number): number {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, number));
 }

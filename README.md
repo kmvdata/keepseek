@@ -38,6 +38,7 @@ English version is available below: [English](#keepseek-english).
 - 运行中止：Agent 正在推理或调用工具时，可以从输入区停止本次执行。
 - 回复复制：Assistant 回复支持一键复制，便于保存或转发排查结果。
 - 编辑器快捷键：底部输入框和消息编辑框共享 Emacs/macOS 风格文本快捷键。
+- 上下文压缩：长对话会使用"历史投影 + 会话摘要 + 关键消息保护 + 文件引用外化"组织模型输入，减少重复发送旧历史和展开后的大段文件正文。
 - 安全修改草案：AI 只能创建待确认的 DraftEdit，用户点击 Apply 后还会经过 VS Code modal 确认再写入文件。
 - 基础防护：限制单个上下文文件大小，跳过常见二进制、媒体、归档和不可读文件。
 
@@ -47,6 +48,18 @@ English version is available below: [English](#keepseek-english).
 - 历史菜单可以在"当前项目"和"其他项目"之间切换。选择其他项目中的 session 时，会复制出一条新的当前项目会话，原项目记录不会被改动。
 - 当前项目会话支持收藏、重命名、按最近 N 天或全部过滤、只看收藏、多选删除；其他项目记录也支持按条删除或删除该项目全部记录。
 - `keepseek.historyRetentionDays` 控制历史菜单默认显示的最近天数；存储层会对非当前活动会话执行 60 天硬保留清理。
+
+## 上下文压缩
+
+长对话里最浪费 token 的通常不是最近几句话，而是较早历史中反复出现的文件展开内容、日志片段、代码块和已经讨论过的细节。KeepSeek 的上下文压缩不会把摘要显示成真实聊天消息，而是在发送给模型前构造一个 projection：
+
+- 保留系统提示、当前输入和最近若干用户轮次。
+- 自动保护首条需求、最近输入、明确要求保留的约束、重要报错/测试失败、用户纠错和 DraftEdit 结果。
+- 把较早、未保护、未进入最近窗口的历史压缩成会话摘要。
+- 摘要只保留需求、决策、错误、文件路径、行段、函数名、已完成事项和待办，不保留旧历史里的大段文件正文。
+- 当需要代码细节时，模型会通过现有只读工作区工具重新读取当前文件内容。
+
+这带来的好处是：长会话下模型不再只能看到最近 24 条消息；它能同时看到摘要、关键保护消息和最近上下文。token 使用通常会更稳定，尤其是多次引用文件、拖入日志、展开大段代码之后。不过它不是保证每次都更省 token：如果对话本身很短，或没有可压缩的旧历史，KeepSeek 会保持接近原来的请求形态。
 
 ## 工作方式
 
@@ -99,6 +112,10 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 | `keepseek.toolResultTokenBudget` | `0` | 单次 Agent 执行中工具结果可使用的估算 token 预算；设为 `0` 时按模型上下文窗口自动估算 |
 | `keepseek.maxWorkspaceToolFiles` | `2000` | 只读工作区文件列表工具最多返回的文件数量 |
 | `keepseek.contextWindowTokens` | `1000000` | 上下文窗口估算 tokens，用于上下文用量指示器 |
+| `keepseek.contextCompressionEnabled` | `true` | 是否启用上下文压缩；关闭后尽量保持旧的最近消息窗口行为 |
+| `keepseek.contextKeepRecentTurns` | `12` | 压缩开启时，模型请求中保留最近多少个用户轮次及其后续 Assistant 回复 |
+| `keepseek.contextCompressionTriggerRatio` | `0.7` | 当前估算上下文达到模型窗口该比例时，可触发会话摘要刷新 |
+| `keepseek.contextSummaryBudgetTokens` | `3000` | 会话摘要请求的最大输出 token 预算 |
 | `keepseek.streamIdleTimeoutMs` | `0` | 流式响应连续无数据时的空闲超时；设为 `0` 时禁用 |
 | `keepseek.historyRetentionDays` | `7` | 历史菜单默认显示最近天数，范围 1-60；存储记录仍按 60 天硬保留清理 |
 
@@ -143,7 +160,7 @@ npm run lint
 
 - `src/extension.ts`：VS Code 激活入口、命令注册和 Provider 接线。
 - `src/provider/`：WebviewView Provider、Webview 消息类型和视图聚焦工具。
-- `src/agent/`：Agent 运行循环、DeepSeek/OpenAI-compatible 协议、SSE/DSML 解析、上下文用量估算和只读工具。
+- `src/agent/`：Agent 运行循环、DeepSeek/OpenAI-compatible 协议、SSE/DSML 解析、上下文投影/压缩、上下文用量估算和只读工具。
 - `src/sessions/`：当前项目和跨项目 History Session 存储、迁移和保留策略。
 - `src/context/`：上下文文件、终端/输出/调试选区引用，以及 prompt 文件/目录引用展开。
 - `src/edits/`：DraftEdit 状态和用户确认后的安全写入。
@@ -242,6 +259,7 @@ The current release connects to DeepSeek OpenAI-compatible Chat Completions by d
 - Abort control for stopping an in-progress Agent run.
 - One-click copy for assistant replies.
 - Shared Emacs/macOS-style text shortcuts in the prompt composer and message edit boxes.
+- Context compression that projects long chat history into summaries, protected messages, recent turns, and file-reference hints instead of repeatedly sending old expanded file bodies.
 - Safe DraftEdit workflow where AI proposes changes and the user confirms before writing files.
 - Size limits and binary-file filtering to avoid sending unsuitable content.
 
@@ -251,6 +269,18 @@ The current release connects to DeepSeek OpenAI-compatible Chat Completions by d
 - The history menu can switch between the current project and other projects. Opening a session from another project copies it into the current workspace as a new session without changing the source project.
 - Current-project sessions support favorite, rename, recent-days or all-time filtering, favorites-only filtering, and multi-select deletion. Other-project records can be deleted by session or cleared for the whole project.
 - `keepseek.historyRetentionDays` controls the default recent-days range in the menu; stored non-active sessions are hard-pruned after 60 days.
+
+## Context Compression
+
+In long chats, the expensive part is often not the latest question. It is older expanded files, logs, code blocks, and repeated details. KeepSeek compresses context by building a model-only projection before each request; the summary is not inserted into the visible chat transcript.
+
+- Keep the system prompt, current input, and recent user turns.
+- Protect the first request, latest input, explicit "remember this" constraints, important errors/test failures, user corrections, and DraftEdit results.
+- Summarize older, unprotected messages that no longer fit in the recent window.
+- Preserve goals, decisions, errors, file paths, line ranges, symbols, completed work, and todos instead of old expanded file bodies.
+- Ask the model to reread current workspace files through KeepSeek's read-only tools when code details matter.
+
+This usually reduces token pressure in long sessions and avoids losing the original goal when the newest-message window moves forward. It does not guarantee fewer tokens for every request: short chats or chats with little compressible history stay close to the original request shape.
 
 ## How It Works
 
@@ -289,6 +319,10 @@ KeepSeek is built around explicit context. You decide which files, selections, a
 | `keepseek.toolResultTokenBudget` | `0` | Estimated token budget for tool results in one agent run; set `0` to derive it from the model context window |
 | `keepseek.maxWorkspaceToolFiles` | `2000` | Maximum number of files returned by the read-only workspace file listing tool |
 | `keepseek.contextWindowTokens` | `1000000` | Estimated context-window tokens for the context usage indicator |
+| `keepseek.contextCompressionEnabled` | `true` | Enables context compression; when disabled, KeepSeek keeps the legacy recent-message window behavior as closely as possible |
+| `keepseek.contextKeepRecentTurns` | `12` | Recent user turns, plus following assistant replies, kept verbatim in the model request |
+| `keepseek.contextCompressionTriggerRatio` | `0.7` | Context-window usage ratio that can trigger a summary refresh |
+| `keepseek.contextSummaryBudgetTokens` | `3000` | Maximum generated tokens for the session summary request |
 | `keepseek.streamIdleTimeoutMs` | `0` | Idle timeout for streaming responses with no data; set `0` to disable it |
 | `keepseek.historyRetentionDays` | `7` | Default recent-days range in the history menu, from 1 to 60; stored records still use the 60-day hard retention limit |
 
@@ -312,7 +346,7 @@ Source code is grouped by feature area:
 
 - `src/extension.ts`: VS Code activation, command registration, and Provider wiring.
 - `src/provider/`: WebviewView Provider, Webview message types, and view focus helpers.
-- `src/agent/`: Agent run loop, DeepSeek/OpenAI-compatible protocol, SSE/DSML parsing, context usage estimation, and read-only tools.
+- `src/agent/`: Agent run loop, DeepSeek/OpenAI-compatible protocol, SSE/DSML parsing, history projection/compression, context usage estimation, and read-only tools.
 - `src/sessions/`: Current-project and cross-project History Session storage, migration, and retention.
 - `src/context/`: Context files, terminal/output/debug references, and prompt file/directory reference expansion.
 - `src/edits/`: DraftEdit state and safe user-confirmed writes.

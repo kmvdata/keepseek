@@ -2,9 +2,20 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
 import { AgentRunAbortedError, AgentRunner } from '../agent/runner';
+import { HistoryCompressor } from '../agent/historyCompressor';
+import { createProtectedContextMeta } from '../agent/historyProjection';
 import { FileContextStore } from '../context/fileContextStore';
 import { SafeFileEditor } from '../edits/safeFileEditor';
-import { AgentActivityInput, AgentActivityState, AgentSettings, ChatMessage, ContextUsageEstimate, WorkspaceSummary } from '../shared/types';
+import {
+  AgentActivityInput,
+  AgentActivityState,
+  AgentSettings,
+  ChatMessage,
+  ChatSession,
+  ContextUsageEstimate,
+  KeepseekModel,
+  WorkspaceSummary
+} from '../shared/types';
 import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage } from '../shared/i18n';
 import { ChatSessionStore, createSessionTitle, getCurrentWorkspaceSessionScope, getVisibleMessages } from '../sessions/chatSessionStore';
 import {
@@ -76,6 +87,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private readonly fileContext = new FileContextStore();
   private readonly agentRunner: AgentRunner;
+  private readonly historyCompressor = new HistoryCompressor();
   private readonly traceLogService: InteractionTraceLogService;
   private readonly draftEdits: DraftEditStore;
   private readonly sessionTraceLogUris = new Map<string, string>();
@@ -714,6 +726,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       model,
       contextFiles: this.fileContext.getAll(),
       messages: this.messages,
+      contextCompression: this.sessionStore.getActiveSession().contextCompression,
       language: this.language
     });
   }
@@ -985,6 +998,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       model,
       contextFiles: this.fileContext.getAll(),
       messages: this.messages,
+      contextCompression: this.sessionStore.getActiveSession().contextCompression,
       language: this.language,
       prompt: expandedPrompt
     });
@@ -1297,6 +1311,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         activeSession.messages.splice(replacementIndex);
         activeSession.contextUsage = undefined;
+        activeSession.contextCompression = undefined;
         this.draftEdits.clear();
         if (replacementIndex === 0 && !activeSession.customTitle) {
           activeSession.title = createSessionTitle(trimmedPrompt, this.language);
@@ -1313,7 +1328,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         role: 'user',
         content: trimmedPrompt,
         createdAt: now,
-        modelId: model.id
+        modelId: model.id,
+        contextMeta: activeSession.messages.some((message) => message.role === 'user')
+          ? undefined
+          : createProtectedContextMeta('first_user_request')
       };
       if (expandedPrompt !== trimmedPrompt) {
         userMessage.expandedContent = expandedPrompt;
@@ -1322,6 +1340,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.sessionTraceLogUris.delete(activeSession.id);
       this.messages.push(userMessage);
       activeSession.updatedAt = now;
+      this.postState();
+      await this.refreshContextCompressionBeforeRun(activeSession, expandedPrompt, model, abortController.signal);
       this.trimHistory();
       await this.sessionStore.persist();
       if (abortController.signal.aborted) {
@@ -1357,6 +1377,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         settings: this.agentSettings,
         contextFiles: this.fileContext.getAll(),
         history: agentHistory,
+        contextCompression: activeSession.contextCompression,
         language: this.language,
         signal: abortController.signal
       }, {
@@ -1410,6 +1431,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (assistantMessage) {
         assistantMessage.content = response.message;
         assistantMessage.reasoningContent = response.reasoningContent;
+        if (response.draftEdits.length) {
+          assistantMessage.contextMeta = createProtectedContextMeta('draft_edit_result');
+        }
         delete assistantMessage.isStreaming;
       }
       this.trimHistory();
@@ -1490,6 +1514,33 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.sessionStore.trimActiveHistory();
   }
 
+  private async refreshContextCompressionBeforeRun(
+    activeSession: ChatSession,
+    prompt: string,
+    model: KeepseekModel,
+    signal: AbortSignal
+  ): Promise<void> {
+    try {
+      const result = await this.historyCompressor.refresh({
+        session: activeSession,
+        prompt,
+        model,
+        contextFiles: this.fileContext.getAll(),
+        language: this.language,
+        signal
+      });
+      if (!result.changed) {
+        return;
+      }
+
+      activeSession.contextCompression = result.state;
+      activeSession.contextUsage = undefined;
+      activeSession.updatedAt = new Date().toISOString();
+    } catch {
+      // Context compression is best-effort and must never block the normal request path.
+    }
+  }
+
   private async cleanupExpiredSessions(options: { post?: boolean } = {}): Promise<void> {
     const changed = await this.sessionStore.cleanupExpiredSessions();
     if (changed && options.post !== false) {
@@ -1509,6 +1560,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       model: selectedModel,
       contextFiles,
       messages: this.messages,
+      contextCompression: activeSession.contextCompression,
       language: this.language
     });
     const contextUsage = pickLargerContextUsageEstimate(

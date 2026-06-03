@@ -90,7 +90,11 @@ export class DraftEditStore {
       id: randomUUID(),
       role: 'assistant',
       content: this.t(edit.action === 'delete' ? 'deletedFile' : 'wroteFile', { label: edit.label }),
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      contextMeta: {
+        isProtected: true,
+        protectedReason: 'draft_edit_result'
+      }
     });
     this.sessionStore.getActiveSession().updatedAt = new Date().toISOString();
   }

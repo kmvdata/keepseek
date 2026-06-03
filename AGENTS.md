@@ -16,6 +16,8 @@ src/
 ├── agent/
 │   ├── runner.ts                # Agent 请求编排、工具调用循环、最终响应整理
 │   ├── protocol.ts              # system prompt、消息拼装、工具 schema、token 估算入口
+│   ├── historyProjection.ts     # 模型请求用历史投影：摘要、保护消息、最近轮次
+│   ├── historyCompressor.ts     # 会话摘要刷新与失败回退
 │   ├── contextUsage.ts          # 上下文窗口用量估算
 │   ├── tokenEstimate.ts         # 轻量 token 估算
 │   ├── deepseek/
@@ -84,13 +86,17 @@ src/
 **业务层**
 
 - `ChatSessionStore` 管理会话生命周期，存储 key 为 `keepseek.chatSessions`，最多保留 50 个有内容会话，活跃空会话会保留。
+- `ChatSession.contextCompression` 存储会话摘要、受保护消息 id、最近压缩时间和失败原因；摘要不是聊天 UI 消息。
 - `FileContextStore` 管理用户显式加入上下文的文件内容，读取限制来自 `keepseek.maxFileBytes` 和 `keepseek.maxContextFiles`。
 - `DraftEditStore` 管理待确认编辑，应用成功后追加一条 assistant 消息，并通过 `SafeFileEditor` 写入。
 - `context/references/fileReference.ts` 管理 prompt 内的 `<path>` / `<path#Lx-Ly>` 文件引用展开；`context/references/directoryReference.ts` 管理 `<keepseek-dir:path>` 目录引用清单展开；外部文件/目录必须先被授权。
 
 **协议与基础设施层**
 
-- `AgentRunner` 只做请求编排：构造 system prompt、拼历史、调用 DeepSeek chat completions、处理工具调用循环、整理最终消息。
+- `AgentRunner` 只做请求编排：消费 history projection、构造模型消息、调用 DeepSeek chat completions、处理工具调用循环、整理最终消息。
+- `historyProjection.ts` 负责为模型请求选择 synthetic summary system message、protected messages、recent turns 和当前 prompt；压缩关闭时回退旧最近消息窗口。
+- `historyCompressor.ts` 负责在发送前 best-effort 刷新会话摘要；摘要请求关闭 thinking、限制输出 token、短超时，失败不得阻塞正常请求。
+- `contextUsage.ts` 必须和真实 Agent 请求使用同一套 projection，否则 UI 上下文估算会失真。
 - `DeepSeekStreamParser` 只解析 SSE，包括 `content`、`reasoning_content` 和 streaming tool calls。
 - `DsmlToolParser` 是模型返回 DSML 文本工具调用时的兜底解析器。
 - `WorkspaceToolService` 是 Agent 可用的只读工作区工具边界：列文件、列目录、读文件、拒绝越界/二进制/过大文件。
@@ -224,6 +230,49 @@ Agent 支持四个工具名：
 
 工具调用预算由 `keepseek.maxToolIterations`（默认 8，范围 0-64）、`keepseek.maxToolCalls`（默认 24，范围 0-256）、`keepseek.maxRunMs`（默认 600000，范围 0-3600000）和 `keepseek.toolResultTokenBudget`（默认 0，自动按模型上下文估算，范围 0-1000000）共同控制。
 
+## 上下文压缩与历史投影
+
+KeepSeek 的模型输入是 projection，不等同于 `session.messages`。不要把摘要插入真实聊天 UI 消息，也不要让 Webview 显示 synthetic summary message。
+
+projection 组成：
+
+- 原有 system prompt。
+- 可选 synthetic system summary message。
+- 受保护消息 protected messages。
+- 最近 `keepseek.contextKeepRecentTurns` 个用户轮次及其后续 assistant 回复。
+- 当前 prompt。
+
+配置集中在 `shared/config.ts` 与 `package.json`：
+
+- `keepseek.contextCompressionEnabled`：是否启用压缩。关闭时走旧最近消息窗口，尽量保持旧行为。
+- `keepseek.contextKeepRecentTurns`：保留最近用户轮次数，默认 12，约等价旧 24 条消息窗口。
+- `keepseek.contextCompressionTriggerRatio`：上下文估算达到模型窗口比例后可触发摘要刷新。
+- `keepseek.contextSummaryBudgetTokens`：摘要请求输出预算。
+
+数据结构集中在 `shared/types.ts`：
+
+- `ChatMessage.contextMeta?: ChatMessageContextMeta`：保护标记和原因。
+- `ChatSession.contextCompression?: ContextCompressionState`：摘要、covered message ids、protected ids、失败原因。
+- `ContextProjectionMetadata`：仅用于 trace/调试和内部判断，不进入 UI 消息。
+
+自动保护规则在 `agent/historyProjection.ts` 中维护，包括首条用户需求、最近用户输入、用户明确保留的偏好/约束、明显报错或测试失败、用户纠错、DraftEdit 关键结果。受保护消息不应被摘要覆盖或 projection 丢弃；如 protected 消息不在 recent window 中，应优先使用原始 `content`，避免携带旧的 `expandedContent` 大段文件正文。
+
+摘要规则：
+
+- 摘要存储在 `ChatSession.contextCompression.summaries`，不是 `messages`。
+- 摘要应保留用户目标、已确认决策、重要错误、文件路径/目录/行段/函数名、已完成事项、阻塞项和待办。
+- 历史里的文件引用展开内容只作为路径和关注点线索；模型需要代码细节时应使用现有只读工作区工具重新读取当前文件。
+- 摘要生成使用当前选中模型，关闭 thinking，无 tools，限制 `contextSummaryBudgetTokens`，并使用短超时。
+- 摘要失败、超时、空结果或格式异常不得影响用户发送消息；只记录 `lastFailureReason` 和 trace metadata。
+
+接入边界：
+
+- `provider/KeepseekChatViewProvider.ts` 可在发送前 best-effort 调用 `HistoryCompressor.refresh()`，但不要向用户弹压缩失败错误。
+- `agent/runner.ts` 发起请求前必须调用 `buildHistoryProjection()`，并在 trace 中记录 projection metadata，不记录超长摘要正文。
+- `agent/contextUsage.ts` 必须使用同一 projection 估算 token。
+- `sessions/chatSessionStore.ts` 负责兼容加载新增字段；旧会话没有 `contextMeta` 或 `contextCompression` 时必须正常加载。
+- 当前 MVP 仍保留 `trimActiveHistory()` 作为存储层兼容 fallback；生产化阶段应拆分完整历史持久化和模型投影历史，避免硬删除旧消息。
+
 ## 设计原则
 
 - **依赖倒置**：`AgentRunner` 依赖 `WorkspaceToolAdapter`，默认实现是 `WorkspaceToolService`，便于测试替换。
@@ -236,6 +285,7 @@ Agent 支持四个工具名：
 ## 编码规范
 
 - 新增配置：先改 `package.json` 的 `contributes.configuration`，再在 `shared/config.ts` 增加读取/归一化。
+- 新增或修改上下文压缩配置：同步检查 `shared/types.ts`、`agent/historyProjection.ts`、`agent/historyCompressor.ts`、`agent/contextUsage.ts` 和 `agent/runner.ts`，确保真实请求和 usage 估算仍共用同一 projection。
 - 新增 Webview → 扩展消息：更新 `provider/webviewMessages.ts` 的 `WebviewMessage` 联合类型、`provider/KeepseekChatViewProvider.ts` 的 `handleMessage()`、Webview 脚本发送点；剪贴板兜底消息 `requestClipboardText` / `writeClipboardText` 由 `webview/richTextShortcuts.ts` 统一发起。
 - 新增扩展 → Webview 主动消息：不要放进 `WebviewMessage`，但要在 Webview message listener 中处理。
 - 新增 Agent 工具：更新 `agent/protocol.ts` 的工具 schema 和 `agent/runner.ts` 的工具路由；工具实现优先放独立模块。
@@ -249,6 +299,7 @@ Agent 支持四个工具名：
 ## 维护热点
 
 - `extension.ts` 只保留激活和命令接线；`provider/KeepseekChatViewProvider.ts` 是 VS Code Provider 编排中心，新增大功能时优先创建服务模块，再在 Provider 中接线。
+- `agent/historyProjection.ts` / `agent/historyCompressor.ts` 是上下文压缩核心；修改后必须验证压缩关闭 fallback、无摘要 fallback、摘要失败 fallback、protected 消息、最近轮次和 context usage 估算。
 - `webview/script.ts` 和 `webview/input/script.ts` 仍是大字符串文件；改动时保持 DOM id、message type、序列化格式兼容，并重点手测输入、拖拽、`@` 引用、编辑重发、Apply/Discard。
 - `webview/richTextShortcuts.ts` 同时影响底部 prompt 输入框和消息编辑输入框；修改后必须验证 Emacs 光标移动、mark/region、`Ctrl-K` 剪切行尾、`Ctrl-W` 剪切选区、`Alt-W` 复制、`Ctrl-Y` 粘贴，以及 `Command-A/C/X/V/Z` 系统习惯。
 - `edits/safeFileEditor.ts` 当前只做确认后的整文件写入；如果未来增加 diff、冲突检测、备份或权限确认，应在这里扩展，不要放进 AgentRunner。
@@ -263,4 +314,4 @@ npm run lint
 
 开发调试：用 VS Code 打开仓库，按 F5 启动 Extension Development Host。
 
-重点手测：普通发送、编辑重发、会话切换、上下文文件添加、选区引用、Explorer 文件/目录引用、拖拽引用、`@` 文件/目录补全、引用展开、Agent 读文件/列文件/列目录、DraftEdit Apply/Discard/Apply All、语言切换、API 设置保存、context window 估算显示。
+重点手测：普通发送、长对话压缩、压缩关闭、摘要失败 fallback、编辑重发、会话切换、上下文文件添加、选区引用、Explorer 文件/目录引用、拖拽引用、`@` 文件/目录补全、引用展开、Agent 读文件/列文件/列目录、DraftEdit Apply/Discard/Apply All、语言切换、API 设置保存、context window 估算显示。

@@ -272,6 +272,32 @@
           "default": 1000000,
           "description": "Estimated context window size in tokens for the context usage indicator"
         },
+        "keepseek.contextCompressionEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable context compression for long chats. KeepSeek sends a projected history with summaries, protected messages, and recent turns instead of only the newest raw messages."
+        },
+        "keepseek.contextKeepRecentTurns": {
+          "type": "number",
+          "default": 12,
+          "minimum": 1,
+          "maximum": 64,
+          "description": "Number of recent user turns and their following assistant replies to keep verbatim in the model context when context compression is enabled."
+        },
+        "keepseek.contextCompressionTriggerRatio": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0.1,
+          "maximum": 0.95,
+          "description": "Context window usage ratio that can trigger a background summary refresh before the next agent request."
+        },
+        "keepseek.contextSummaryBudgetTokens": {
+          "type": "number",
+          "default": 3000,
+          "minimum": 500,
+          "maximum": 100000,
+          "description": "Maximum generated tokens for a session summary used by context compression."
+        },
         "keepseek.streamIdleTimeoutMs": {
           "type": "number",
           "default": 0,
