@@ -15,7 +15,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await sessionStore.initialize();
   await sessionStore.cleanupExpiredSessions();
 
-  const provider = new KeepseekChatViewProvider(context.extensionUri, sessionStore, context.globalStorageUri);
+  const provider = new KeepseekChatViewProvider(context.extensionUri, sessionStore, context.globalStorageUri, context.globalState);
   const webviewProvider = vscode.window.registerWebviewViewProvider(KeepseekChatViewProvider.viewType, provider, {
     webviewOptions: {
       retainContextWhenHidden: true
@@ -47,6 +47,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       void provider.refreshWorkspaceScope();
+    }),
+    vscode.workspace.onDidGrantWorkspaceTrust(() => {
+      void provider.refreshSkills();
     })
   );
 }

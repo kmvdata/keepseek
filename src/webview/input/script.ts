@@ -12,6 +12,10 @@ export function getInputScript(): string {
       var commandModelSwitch = document.getElementById('commandModelSwitch');
       var commandModelValue = document.getElementById('commandModelValue');
       var commandModelList = document.getElementById('commandModelList');
+      var commandSkillsButton = document.getElementById('commandSkillsButton');
+      var commandSkillsValue = document.getElementById('commandSkillsValue');
+      var commandSkillList = document.getElementById('commandSkillList');
+      var commandCreateSkillButton = document.getElementById('commandCreateSkillButton');
       var commandEffortSlider = document.getElementById('commandEffortSlider');
       var commandEffortValue = document.getElementById('commandEffortValue');
       var commandThinkingToggle = document.getElementById('commandThinkingToggle');
@@ -21,8 +25,11 @@ export function getInputScript(): string {
       var contextProgressTokens = document.getElementById('contextProgressTokens');
       var contextProgressBreakdown = document.getElementById('contextProgressBreakdown');
       var referenceMenu = document.getElementById('referenceMenu');
+      var skillsBar = document.getElementById('skillsBar');
+      var skillsBarList = document.getElementById('skillsBarList');
       var commandMenuOpen = false;
       var commandModelListOpen = false;
+      var commandSkillListOpen = false;
       var referenceMenuOpen = false;
       var referenceMenuSource = '';
       var activeSlashRange = null;
@@ -84,7 +91,8 @@ export function getInputScript(): string {
           prompt: prompt,
           modelId: state.selectedModelId,
           settings: readAgentSettingsFromControls(),
-          references: collectPromptFileReferences()
+          references: collectPromptFileReferences(),
+          skillIds: collectActiveSkillIds()
         });
         state.isBusy = true;
         clearPrompt();
@@ -161,6 +169,7 @@ export function getInputScript(): string {
         updatePromptVisualState();
         savePromptSelection();
         syncReferenceMenuFromPrompt();
+        syncCommandMenuFromPrompt();
       });
 
       promptInput.addEventListener('keyup', savePromptSelection);
@@ -225,6 +234,64 @@ export function getInputScript(): string {
           commandModelListOpen = false;
           renderCommandMenu();
           setComposerStatus(t('modelSwitched'));
+        });
+      }
+
+      if (commandSkillsButton) {
+        commandSkillsButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          consumeSlashTrigger(false);
+          commandSkillListOpen = !commandSkillListOpen;
+          if (commandSkillListOpen) {
+            commandModelListOpen = false;
+            vscode.postMessage({ type: 'requestSkills' });
+          }
+          renderCommandMenu();
+        });
+      }
+
+      if (commandSkillList) {
+        commandSkillList.addEventListener('mousedown', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          if (target?.closest('[data-skill-action]')) {
+            event.preventDefault();
+          }
+        });
+
+        commandSkillList.addEventListener('click', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          var control = target?.closest('[data-skill-action][data-skill-id]');
+          if (!control) { return; }
+          event.preventDefault();
+          event.stopPropagation();
+          handleSkillAction(control.dataset.skillAction || '', control.dataset.skillId || '');
+        });
+      }
+
+      if (commandCreateSkillButton) {
+        commandCreateSkillButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          consumeSlashTrigger(false);
+          vscode.postMessage({ type: 'createSkill' });
+          setComposerStatus(t('createSkillComingSoon'));
+          closeCommandMenu();
+        });
+      }
+
+      if (skillsBarList) {
+        skillsBarList.addEventListener('click', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          var button = target?.closest('button[data-skill-id]');
+          if (!button) { return; }
+          event.preventDefault();
+          event.stopPropagation();
+          var skillId = button.dataset.skillId || '';
+          var skill = getSkillById(skillId);
+          vscode.postMessage({ type: 'removeActiveSkill', skillId: skillId });
+          removePromptSkillChip(skillId);
+          setComposerStatus(t('skillRemoved', { name: skill ? skill.name : skillId }));
         });
       }
 
@@ -305,6 +372,12 @@ export function getInputScript(): string {
 
       promptInput.addEventListener('click', function(event) {
         var target = event.target instanceof Element ? event.target : null;
+        var skillLink = target?.closest('a.rich-skill-link');
+        if (skillLink && promptInput.contains(skillLink)) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
         var link = target?.closest('a.rich-file-link');
         if (!link || !promptInput.contains(link)) { return; }
 
@@ -355,6 +428,7 @@ export function getInputScript(): string {
         if (!commandMenu || !commandMenuButton) { return; }
         commandMenuOpen = false;
         commandModelListOpen = false;
+        commandSkillListOpen = false;
         activeSlashRange = null;
         commandMenu.classList.add('hidden');
         commandMenuButton.classList.remove('is-active');
@@ -368,6 +442,19 @@ export function getInputScript(): string {
           return;
         }
         openCommandMenu();
+      }
+
+      function syncCommandMenuFromPrompt() {
+        var slashRange = getSlashTriggerRange();
+        if (slashRange) {
+          activeSlashRange = slashRange;
+          closeReferenceMenu(false);
+          openCommandMenu();
+          return;
+        }
+        if (commandMenuOpen && activeSlashRange && !isRangeInsidePrompt(activeSlashRange)) {
+          closeCommandMenu();
+        }
       }
 
       function syncReferenceMenuFromPrompt() {
@@ -724,7 +811,9 @@ export function getInputScript(): string {
       function renderInputControls() {
         syncPromptUsageBase();
         refreshPromptFileLinkLabels();
+        refreshPromptSkillLinkLabels();
         schedulePromptUsageEstimate();
+        renderActiveSkillsBar();
         renderContextProgress();
         renderCommandMenu();
         renderSendButton();
@@ -736,7 +825,7 @@ export function getInputScript(): string {
         var isAbortMode = Boolean(state.isBusy);
         var mode = isAbortMode ? 'abort' : 'send';
         var label = t(isAbortMode ? 'stop' : 'send');
-        sendButton.disabled = !isAbortMode && (typeof isEmpty === 'boolean' ? isEmpty : isPromptEmpty());
+        sendButton.disabled = !isAbortMode && isPromptSubmittableEmpty();
         sendButton.classList.toggle('is-abort', isAbortMode);
         sendButton.title = label;
         sendButton.setAttribute('aria-label', label);
@@ -830,6 +919,7 @@ export function getInputScript(): string {
           state.activeSessionId || '',
           state.contextUsageSessionId || '',
           state.selectedModelId || '',
+          collectActiveSkillIds().join(','),
           usage.usedTokensEstimate,
           usage.maxTokensEstimate,
           JSON.stringify(usage.breakdown || {})
@@ -871,7 +961,8 @@ export function getInputScript(): string {
             prompt: currentPrompt,
             modelId: state.selectedModelId,
             activeSessionId: state.activeSessionId,
-            references: collectPromptFileReferences()
+            references: collectPromptFileReferences(),
+            skillIds: collectActiveSkillIds()
           });
         }, 180);
       }
@@ -1007,6 +1098,7 @@ export function getInputScript(): string {
       function renderCommandMenu() {
         if (!commandMenu) { return; }
         renderCommandModel();
+        renderCommandSkills();
         renderEffort();
       }
 
@@ -1054,6 +1146,150 @@ export function getInputScript(): string {
 
           option.append(check, label);
           commandModelList.append(option);
+        }
+      }
+
+      function renderCommandSkills() {
+        var skills = getSkillItems();
+        var activeIds = getActiveSkillIds();
+        if (commandSkillsValue) {
+          commandSkillsValue.textContent = String(activeIds.length);
+        }
+        if (commandSkillsButton) {
+          commandSkillsButton.setAttribute('aria-expanded', commandSkillListOpen ? 'true' : 'false');
+        }
+        if (!commandSkillList) { return; }
+
+        commandSkillList.classList.toggle('hidden', !commandSkillListOpen);
+        commandSkillList.innerHTML = '';
+        if (!commandSkillListOpen) { return; }
+        if (!skills.length) {
+          var empty = document.createElement('div');
+          empty.className = 'reference-menu-empty';
+          empty.textContent = t('skillsNone');
+          commandSkillList.append(empty);
+          return;
+        }
+
+        for (var i = 0; i < skills.length; i++) {
+          commandSkillList.append(createCommandSkillItem(skills[i]));
+        }
+      }
+
+      function createCommandSkillItem(skill) {
+        var active = isSkillActive(skill.id);
+        var canUse = Boolean(skill.enabled && skill.userInvocable && !skill.unavailableReason);
+        var item = document.createElement('div');
+        item.className = 'command-skill-item' + (active ? ' is-active' : '') + (!canUse ? ' is-disabled' : '');
+
+        var main = document.createElement('button');
+        main.type = 'button';
+        main.className = 'command-skill-main';
+        main.dataset.skillAction = 'use';
+        main.dataset.skillId = skill.id;
+        main.disabled = !canUse || active;
+
+        var copy = document.createElement('span');
+        copy.className = 'command-row-main';
+
+        var name = document.createElement('span');
+        name.className = 'command-skill-name';
+        name.textContent = skill.name || skill.id;
+        name.title = name.textContent;
+
+        var description = document.createElement('span');
+        description.className = 'command-skill-description';
+        description.textContent = skill.description || skill.sourceLabel || skill.source || '';
+        description.title = description.textContent;
+
+        var meta = document.createElement('span');
+        meta.className = 'command-skill-meta';
+        meta.textContent = formatSkillMeta(skill);
+        meta.title = meta.textContent;
+
+        copy.append(name, description, meta);
+
+        var status = document.createElement('span');
+        status.className = 'command-skill-status';
+        status.textContent = active
+          ? t('skillsActive')
+          : canUse ? t('skillsUse') : getSkillUnavailableText(skill);
+
+        main.append(copy, status);
+
+        var actions = document.createElement('div');
+        actions.className = 'command-skill-actions';
+        actions.append(
+          createSkillActionButton(skill, 'open', t('skillsOpen'), false),
+          createSkillActionButton(skill, skill.enabled ? 'disable' : 'enable', skill.enabled ? t('skillsDisable') : t('skillsEnable'), false),
+          createSkillActionButton(skill, 'implicit', skill.allowImplicit ? t('skillsManualOnly') : t('skillsAllowAuto'), !skill.enabled)
+        );
+
+        item.append(main, actions);
+        return item;
+      }
+
+      function createSkillActionButton(skill, action, label, disabled) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'command-skill-action';
+        button.dataset.skillAction = action;
+        button.dataset.skillId = skill.id;
+        button.textContent = label;
+        button.disabled = Boolean(disabled);
+        return button;
+      }
+
+      function formatSkillMeta(skill) {
+        var parts = [
+          skill.sourceLabel || skill.source || '',
+          skill.enabled ? t('skillsEnabled') : t('skillsDisabled'),
+          skill.allowImplicit ? t('skillsAllowAuto') : t('skillsManualOnly')
+        ];
+        if (skill.hasScripts) {
+          parts.push(t('skillsScriptsPresent'));
+        }
+        if (skill.loadError) {
+          parts.push(t('skillLoadError', { message: skill.loadError }));
+        } else if (skill.unavailableReason) {
+          parts.push(skill.unavailableReason);
+        }
+        return parts.filter(Boolean).join(' · ');
+      }
+
+      function getSkillUnavailableText(skill) {
+        if (skill.unavailableReason || skill.loadError) {
+          return t('skillsUnavailable');
+        }
+        if (!skill.enabled) {
+          return t('skillsDisabled');
+        }
+        return t('skillsUnavailable');
+      }
+
+      function handleSkillAction(action, skillId) {
+        var skill = getSkillById(skillId);
+        if (!skill) { return; }
+        if (action === 'use') {
+          if (!skill.enabled || !skill.userInvocable || skill.unavailableReason || isSkillActive(skillId)) {
+            return;
+          }
+          insertSkillChip(skill);
+          vscode.postMessage({ type: 'useSkill', skillId: skillId });
+          setComposerStatus(t('skillInserted', { name: skill.name || skillId }));
+          closeCommandMenu();
+          return;
+        }
+        if (action === 'open') {
+          vscode.postMessage({ type: 'openSkill', skillId: skillId });
+          return;
+        }
+        if (action === 'enable' || action === 'disable') {
+          vscode.postMessage({ type: 'setSkillEnabled', skillId: skillId, enabled: action === 'enable' });
+          return;
+        }
+        if (action === 'implicit') {
+          vscode.postMessage({ type: 'setSkillAllowImplicit', skillId: skillId, allowImplicit: !skill.allowImplicit });
         }
       }
 
@@ -1794,6 +2030,146 @@ export function getInputScript(): string {
         return anchor;
       }
 
+      function createSkillLink(skill) {
+        var anchor = document.createElement('a');
+        anchor.className = 'rich-skill-link';
+        anchor.setAttribute('href', 'keepseek-skill:' + encodeURIComponent(skill.id));
+        anchor.setAttribute('contenteditable', 'false');
+        anchor.draggable = false;
+        anchor.title = skill.description || skill.name || skill.id;
+        anchor.textContent = skill.name || skill.id;
+        anchor.dataset.skillId = skill.id;
+        return anchor;
+      }
+
+      function insertSkillChip(skill) {
+        var range = getPromptInsertionRange();
+        var fragment = document.createDocumentFragment();
+        appendReferenceBoundarySpace(fragment);
+        fragment.append(createSkillLink(skill));
+        appendReferenceBoundarySpace(fragment);
+        insertFragmentAtRange(range, fragment);
+      }
+
+      function removePromptSkillChip(skillId) {
+        var links = promptInput.querySelectorAll('a.rich-skill-link');
+        links.forEach(function(link) {
+          if ((link.dataset.skillId || '') !== skillId) { return; }
+          var previous = link.previousSibling;
+          var next = link.nextSibling;
+          link.remove();
+          if (previous && previous.nodeType === Node.TEXT_NODE && !previous.nodeValue.trim()) {
+            previous.remove();
+          }
+          if (next && next.nodeType === Node.TEXT_NODE && !next.nodeValue.trim()) {
+            next.remove();
+          }
+        });
+        updatePromptVisualState();
+      }
+
+      function refreshPromptSkillLinkLabels() {
+        var links = promptInput.querySelectorAll('a.rich-skill-link');
+        links.forEach(function(link) {
+          var skill = getSkillById(link.dataset.skillId || '');
+          if (!skill || !isSkillActive(skill.id)) {
+            link.remove();
+            return;
+          }
+          link.textContent = skill.name || skill.id;
+          link.title = skill.description || skill.name || skill.id;
+        });
+      }
+
+      function collectActiveSkillIds() {
+        var ids = [];
+        var seen = new Set();
+        function add(id) {
+          var normalized = String(id || '').trim();
+          if (!normalized || seen.has(normalized)) { return; }
+          seen.add(normalized);
+          ids.push(normalized);
+        }
+        getActiveSkillIds().forEach(add);
+        var links = promptInput.querySelectorAll('a.rich-skill-link');
+        links.forEach(function(link) {
+          add(link.dataset.skillId || '');
+        });
+        return ids;
+      }
+
+      function renderActiveSkillsBar() {
+        if (!skillsBar || !skillsBarList) { return; }
+        var activeIds = getActiveSkillIds();
+        skillsBar.classList.toggle('hidden', activeIds.length === 0);
+        skillsBarList.innerHTML = '';
+        for (var i = 0; i < activeIds.length; i++) {
+          var skill = getSkillById(activeIds[i]);
+          if (!skill) { continue; }
+          skillsBarList.append(createSkillPill(skill));
+        }
+      }
+
+      function createSkillPill(skill) {
+        var pill = document.createElement('span');
+        pill.className = 'skill-pill';
+        pill.title = skill.description || skill.name || skill.id;
+
+        var name = document.createElement('span');
+        name.className = 'skill-pill-name';
+        name.textContent = skill.name || skill.id;
+
+        var remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'skill-pill-remove';
+        remove.dataset.skillId = skill.id;
+        remove.title = t('removeSkill');
+        remove.setAttribute('aria-label', t('removeSkill'));
+        remove.textContent = '×';
+
+        pill.append(name, remove);
+        return pill;
+      }
+
+      function getSkillsState() {
+        var skills = state.skills && typeof state.skills === 'object' ? state.skills : {};
+        return {
+          items: Array.isArray(skills.items) ? skills.items : [],
+          activeSkillIds: Array.isArray(skills.activeSkillIds) ? skills.activeSkillIds : [],
+          workspaceTrusted: skills.workspaceTrusted !== false
+        };
+      }
+
+      function getSkillItems() {
+        return getSkillsState().items;
+      }
+
+      function getActiveSkillIds() {
+        var seen = new Set();
+        var ids = [];
+        getSkillsState().activeSkillIds.forEach(function(id) {
+          var normalized = String(id || '').trim();
+          if (!normalized || seen.has(normalized)) { return; }
+          seen.add(normalized);
+          ids.push(normalized);
+        });
+        return ids;
+      }
+
+      function getSkillById(skillId) {
+        var skills = getSkillItems();
+        for (var i = 0; i < skills.length; i++) {
+          if (skills[i].id === skillId) {
+            return skills[i];
+          }
+        }
+        return null;
+      }
+
+      function isSkillActive(skillId) {
+        return getActiveSkillIds().indexOf(skillId) >= 0;
+      }
+
       function makeFileHref(reference) {
         return makeFileReferenceHref(reference);
       }
@@ -2067,6 +2443,9 @@ export function getInputScript(): string {
         if (node.nodeType !== Node.ELEMENT_NODE) { return; }
 
         var element = node;
+        if (element.matches('a.rich-skill-link')) {
+          return;
+        }
         if (element.matches('a.rich-file-link')) {
           parts.push(fileReferenceLinkToText(element));
           return;
@@ -2182,7 +2561,7 @@ export function getInputScript(): string {
           }
 
           var element = child;
-          if (element.matches('a.rich-file-link')) {
+          if (element.matches('a.rich-file-link') || element.matches('a.rich-skill-link')) {
             child = next;
             continue;
           }
@@ -2245,6 +2624,14 @@ export function getInputScript(): string {
           link.setAttribute('contenteditable', 'false');
           link.title = href;
         });
+        var skillLinks = promptInput.querySelectorAll('a.rich-skill-link');
+        skillLinks.forEach(function(link) {
+          var skillId = link.dataset.skillId || '';
+          link.className = 'rich-skill-link';
+          link.setAttribute('href', 'keepseek-skill:' + encodeURIComponent(skillId));
+          link.setAttribute('contenteditable', 'false');
+          link.draggable = false;
+        });
       }
 
       function refreshPromptFileLinkLabels() {
@@ -2274,7 +2661,21 @@ export function getInputScript(): string {
       }
 
       function isPromptEmpty() {
-        return !promptInput.querySelector('a.rich-file-link') && !promptInput.textContent.trim();
+        return !promptInput.querySelector('a.rich-file-link') && !promptInput.querySelector('a.rich-skill-link') && !promptInput.textContent.trim();
+      }
+
+      function isPromptSubmittableEmpty() {
+        return !promptInput.querySelector('a.rich-file-link') && !getPromptTextWithoutSkillLinks().trim();
+      }
+
+      function getPromptTextWithoutSkillLinks() {
+        var clone = promptInput.cloneNode(true);
+        if (clone.querySelectorAll) {
+          clone.querySelectorAll('a.rich-skill-link').forEach(function(link) {
+            link.remove();
+          });
+        }
+        return clone.textContent || '';
       }
 
       function normalizeEmptyPrompt() {
@@ -2887,6 +3288,7 @@ export function getInputScript(): string {
         showAgentBudgetDialog: showAgentBudgetDialog,
         showHistorySettingsDialog: showHistorySettingsDialog,
         resetPromptUsageEstimate: resetPromptUsageEstimate,
+        isPromptSubmittableEmpty: isPromptSubmittableEmpty,
         clearPrompt: clearPrompt
       };
       renderInputControls();

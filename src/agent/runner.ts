@@ -276,6 +276,16 @@ export class AgentRunner {
       lastCompressionFailureReason: request.contextCompression?.lastFailureReason
     });
     trace.record({
+      type: 'active_skills',
+      skills: (request.skills ?? []).map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        source: skill.source,
+        skillUri: skill.skillUri,
+        contentLength: skill.content.length
+      }))
+    });
+    trace.record({
       type: 'agent_messages_initialized',
       messages: trace.includesPayload('request') ? messages : messages.map(summarizeDeepSeekMessage)
     });
@@ -293,6 +303,7 @@ export class AgentRunner {
       ...createContextUsageEstimate({
         model: request.model,
         contextFiles: request.contextFiles,
+        skills: request.skills,
         messages: request.history,
         contextCompression: request.contextCompression,
         language: request.language,

@@ -15,7 +15,7 @@ import {
   getAgentTools
 } from './protocol';
 import type { KeepseekLanguage } from '../shared/i18n';
-import { ChatMessage, ContextCompressionState, ContextFile, ContextUsageEstimate, KeepseekModel } from '../shared/types';
+import { ActivatedSkill, ChatMessage, ContextCompressionState, ContextFile, ContextUsageEstimate, KeepseekModel } from '../shared/types';
 import { buildHistoryProjection } from './historyProjection';
 
 type ContextUsageBreakdown = ContextUsageEstimate['breakdown'];
@@ -23,6 +23,7 @@ type ContextUsageBreakdown = ContextUsageEstimate['breakdown'];
 export function createContextUsageEstimate(input: {
   model: KeepseekModel;
   contextFiles: ContextFile[];
+  skills?: ActivatedSkill[];
   messages: ChatMessage[];
   contextCompression?: ContextCompressionState;
   language: KeepseekLanguage;
@@ -41,6 +42,7 @@ export function createContextUsageEstimate(input: {
   const messages = buildInitialAgentMessages({
     prompt,
     contextFiles: input.contextFiles,
+    skills: input.skills,
     history: input.messages,
     language: input.language,
     projection
@@ -71,6 +73,7 @@ export function createContextUsageEstimate(input: {
 export function createDisplayedSessionContextUsageEstimate(input: {
   model: KeepseekModel;
   contextFiles: ContextFile[];
+  skills?: ActivatedSkill[];
   messages: ChatMessage[];
   contextCompression?: ContextCompressionState;
   language: KeepseekLanguage;
@@ -222,6 +225,7 @@ function estimateInitialBreakdown(input: {
     'system',
     getAgentSystemPrompt({
       contextFiles: [],
+      skills: [],
       language: input.language
     })
   );

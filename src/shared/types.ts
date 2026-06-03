@@ -16,6 +16,8 @@ export interface AgentSettings {
 
 export type ContextFileSource = 'workspace' | 'external';
 
+export type SkillSource = 'workspace' | 'agentsWorkspace' | 'user' | 'agentsUser' | 'builtin';
+
 export interface ContextFile {
   id: string;
   uri: string;
@@ -64,6 +66,13 @@ export interface ChatMessage {
   reasoningContent?: string;
   isStreaming?: boolean;
   contextMeta?: ChatMessageContextMeta;
+  usedSkills?: ChatMessageSkill[];
+}
+
+export interface ChatMessageSkill {
+  id: string;
+  name: string;
+  source: SkillSource;
 }
 
 export interface HistorySummary {
@@ -98,6 +107,7 @@ export interface ChatSession {
   id: string;
   title: string;
   messages: ChatMessage[];
+  activeSkillIds?: string[];
   contextCompression?: ContextCompressionState;
   contextUsage?: ContextUsageEstimate;
   lastTraceLogUri?: string;
@@ -155,10 +165,21 @@ export interface AgentRequest {
   model: KeepseekModel;
   settings: AgentSettings;
   contextFiles: ContextFile[];
+  skills?: ActivatedSkill[];
   history: ChatMessage[];
   contextCompression?: ContextCompressionState;
   language: KeepseekLanguage;
   signal?: AbortSignal;
+}
+
+export interface ActivatedSkill {
+  id: string;
+  name: string;
+  source: SkillSource;
+  rootUri: string;
+  skillUri: string;
+  content: string;
+  loadedResourceUris?: string[];
 }
 
 export interface AgentResponse {

@@ -19,6 +19,7 @@ export interface AgentRequestCoordinatorInput {
   model: KeepseekModel;
   settings: AgentSettings;
   contextFiles: ContextFile[];
+  skills?: AgentRequest['skills'];
   history: AgentRequest['history'];
   contextCompression: AgentRequest['contextCompression'];
   language: KeepseekLanguage;
@@ -47,6 +48,10 @@ export class AgentRequestCoordinator {
       model: { ...input.model },
       settings: { ...input.settings },
       contextFiles: input.contextFiles.map((file) => ({ ...file })),
+      skills: input.skills?.map((skill) => ({
+        ...skill,
+        loadedResourceUris: skill.loadedResourceUris ? [...skill.loadedResourceUris] : undefined
+      })),
       history: input.history.map(cloneChatMessage),
       contextCompression: cloneContextCompressionState(input.contextCompression),
       language: input.language,
@@ -141,7 +146,8 @@ export class AgentRequestCoordinator {
 function cloneChatMessage(message: ChatMessage): ChatMessage {
   return {
     ...message,
-    contextMeta: message.contextMeta ? { ...message.contextMeta } : undefined
+    contextMeta: message.contextMeta ? { ...message.contextMeta } : undefined,
+    usedSkills: message.usedSkills?.map((skill) => ({ ...skill }))
   };
 }
 

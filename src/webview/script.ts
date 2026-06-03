@@ -19,6 +19,11 @@ export function getScript(): string {
       workspaceFolders: [],
       sessionSummaries: [],
       contextFiles: [],
+      skills: {
+        workspaceTrusted: true,
+        items: [],
+        activeSkillIds: []
+      },
       contextUsageSessionId: '',
       contextUsage: {
         usedTokensEstimate: 0,
@@ -68,6 +73,20 @@ export function getScript(): string {
       return String(template).replace(/\\{(\\w+)\\}/g, function(_match, name) {
         return replacements[name] === undefined ? '' : String(replacements[name]);
       });
+    }
+
+    function getActiveSkillIdsForRequest() {
+      var skills = state.skills && typeof state.skills === 'object' ? state.skills : {};
+      var ids = Array.isArray(skills.activeSkillIds) ? skills.activeSkillIds : [];
+      var seen = new Set();
+      var result = [];
+      ids.forEach(function(id) {
+        var normalized = String(id || '').trim();
+        if (!normalized || seen.has(normalized)) { return; }
+        seen.add(normalized);
+        result.push(normalized);
+      });
+      return result;
     }
 
     function createEmptyContextUsage(maxTokensEstimate) {
@@ -812,7 +831,11 @@ export function getScript(): string {
       if (window.keepseekInputControls) {
         window.keepseekInputControls.render();
       }
-      sendButton.disabled = !state.isBusy && promptInput.classList.contains('is-empty');
+      sendButton.disabled = !state.isBusy && (
+        window.keepseekInputControls && window.keepseekInputControls.isPromptSubmittableEmpty
+          ? window.keepseekInputControls.isPromptSubmittableEmpty()
+          : promptInput.classList.contains('is-empty')
+      );
     }
 
     function applyStaticTranslations() {
@@ -1782,7 +1805,8 @@ export function getScript(): string {
         prompt: editingDraftText,
         modelId: state.selectedModelId,
         settings: getCurrentAgentSettings(),
-        references: editor ? collectInlineEditorFileReferences(editor) : []
+        references: editor ? collectInlineEditorFileReferences(editor) : [],
+        skillIds: getActiveSkillIdsForRequest()
       });
       editingMessageId = '';
       editingDraftText = '';
@@ -2339,6 +2363,9 @@ export function getScript(): string {
           reasoning.append(summary, reasoningContent);
           body.append(reasoning);
         }
+        if (message.role === 'assistant' && Array.isArray(message.usedSkills) && message.usedSkills.length) {
+          body.append(createUsedSkillsNotice(message.usedSkills));
+        }
 
         if (isEditing) {
           body.append(createInlineMessageEditor(message));
@@ -2369,6 +2396,23 @@ export function getScript(): string {
       if (shouldStick) {
         transcript.scrollTop = transcript.scrollHeight;
       }
+    }
+
+    function createUsedSkillsNotice(usedSkills) {
+      var names = [];
+      var seen = new Set();
+      usedSkills.forEach(function(skill) {
+        var name = String(skill && (skill.name || skill.id) || '').trim();
+        if (!name || seen.has(name)) { return; }
+        seen.add(name);
+        names.push(name);
+      });
+      var notice = document.createElement('div');
+      notice.className = 'message-skill-usage';
+      notice.textContent = t(names.length === 1 ? 'usedSkill' : 'usedSkills', {
+        skills: names.join(' · ')
+      });
+      return notice;
     }
 
     function createUserMessageActions(message) {

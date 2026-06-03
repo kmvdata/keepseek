@@ -20,8 +20,8 @@ export interface DroppedFileReferenceInput {
 
 export type WebviewMessage =
   | { type: 'ready' }
-  | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[] }
-  | { type: 'editUserPrompt'; messageId: string; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[] }
+  | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
+  | { type: 'editUserPrompt'; messageId: string; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'abortPrompt' }
   | { type: 'newSession' }
   | { type: 'selectSession'; sessionId: string }
@@ -68,8 +68,15 @@ export type WebviewMessage =
   | { type: 'pickExternalFiles' }
   | { type: 'pickExternalFileReferences' }
   | { type: 'insertDroppedFileReferences'; files: DroppedFileReferenceInput[] }
-  | { type: 'estimatePromptContextUsage'; requestId: string; prompt: string; modelId: string; activeSessionId?: string; references?: PromptReferenceInput[] }
+  | { type: 'estimatePromptContextUsage'; requestId: string; prompt: string; modelId: string; activeSessionId?: string; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'requestReferenceResources'; requestId: string }
+  | { type: 'requestSkills' }
+  | { type: 'useSkill'; skillId: string }
+  | { type: 'removeActiveSkill'; skillId: string }
+  | { type: 'openSkill'; skillId: string }
+  | { type: 'setSkillEnabled'; skillId: string; enabled: boolean }
+  | { type: 'setSkillAllowImplicit'; skillId: string; allowImplicit: boolean }
+  | { type: 'createSkill' }
   | { type: 'requestClipboardText'; requestId: string }
   | { type: 'writeClipboardText'; text: string }
   | { type: 'readPath'; path: string }

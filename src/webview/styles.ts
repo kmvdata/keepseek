@@ -993,6 +993,23 @@ export function getStyles(): string {
       vertical-align: middle;
     }
 
+    .message-skill-usage {
+      display: inline-flex;
+      align-items: center;
+      max-width: 100%;
+      margin: 0 0 6px;
+      padding: 2px 6px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 4px;
+      background: var(--vscode-editor-background);
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.35;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .assistant-markdown .message-codex-file-link {
       border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder, var(--vscode-panel-border)));
       background: var(--vscode-inputOption-activeBackground, var(--vscode-chat-slashCommandBackground, var(--vscode-badge-background, var(--vscode-editor-background))));

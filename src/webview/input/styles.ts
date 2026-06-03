@@ -85,6 +85,37 @@ export function getInputStyles(): string {
       color: var(--vscode-charts-green, var(--vscode-textLink-foreground));
     }
 
+    .rich-skill-link,
+    .skill-pill {
+      display: inline-flex;
+      align-items: center;
+      max-width: 100%;
+      min-height: 20px;
+      margin: 0 2px 2px 0;
+      padding: 1px 6px;
+      border: 1px solid var(--vscode-inputOption-activeBorder, var(--vscode-panel-border));
+      border-radius: 4px;
+      background: var(--vscode-inputOption-activeBackground, var(--vscode-editor-background));
+      color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+      text-decoration: none;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 12px;
+      line-height: 18px;
+      vertical-align: baseline;
+      white-space: nowrap;
+      cursor: default;
+    }
+
+    .rich-skill-link::before,
+    .skill-pill-name::before {
+      content: "/";
+      margin-right: 1px;
+      color: var(--vscode-descriptionForeground);
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-weight: 700;
+    }
+
     .composer {
       background: var(--vscode-sideBar-background);
       padding: var(--keepseek-composer-padding, 0);
@@ -107,6 +138,65 @@ export function getInputStyles(): string {
 
     .composer-input-inner:focus-within {
       border-color: var(--vscode-focusBorder);
+    }
+
+    .skills-bar {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 28px;
+      padding: 4px 4px 0;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.25;
+    }
+
+    .skills-bar-label {
+      flex: 0 0 auto;
+      font-weight: 600;
+    }
+
+    .skills-bar-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .skill-pill {
+      gap: 4px;
+      margin: 0;
+      padding-right: 3px;
+    }
+
+    .skill-pill-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .skill-pill-remove {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      min-width: 16px;
+      height: 16px;
+      min-height: 16px;
+      padding: 0;
+      border: none;
+      border-radius: 3px;
+      background: transparent;
+      color: var(--vscode-descriptionForeground);
+      line-height: 1;
+    }
+
+    .skill-pill-remove:hover,
+    .skill-pill-remove:focus-visible {
+      color: var(--vscode-foreground);
+      background: var(--vscode-toolbar-hoverBackground);
+      outline: none;
     }
 
     .composer-input-inner .rich-input {
@@ -638,6 +728,102 @@ export function getInputStyles(): string {
       display: grid;
       gap: 2px;
       padding: 2px 0 4px 12px;
+    }
+
+    .command-skill-list {
+      display: grid;
+      gap: 3px;
+      padding: 2px 0 4px 10px;
+    }
+
+    .command-skill-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 5px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: transparent;
+    }
+
+    .command-skill-item.is-disabled {
+      opacity: 0.72;
+    }
+
+    .command-skill-main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      width: 100%;
+      min-height: 30px;
+      padding: 0;
+      border: none;
+      background: transparent;
+      color: var(--vscode-foreground);
+      text-align: left;
+    }
+
+    .command-skill-main:hover:not(:disabled),
+    .command-skill-main:focus-visible:not(:disabled) {
+      color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
+      outline: none;
+    }
+
+    .command-skill-name,
+    .command-skill-description,
+    .command-skill-meta {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .command-skill-name {
+      font-size: 12px;
+      font-weight: 650;
+      line-height: 1.3;
+    }
+
+    .command-skill-description,
+    .command-skill-meta {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.25;
+    }
+
+    .command-skill-status {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.25;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .command-skill-item.is-active .command-skill-status {
+      color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+      font-weight: 600;
+    }
+
+    .command-skill-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .command-skill-action {
+      min-height: 22px;
+      padding: 2px 6px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 4px;
+      background: transparent;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+    }
+
+    .command-skill-action:hover:not(:disabled),
+    .command-skill-action:focus-visible:not(:disabled) {
+      color: var(--vscode-foreground);
+      background: var(--vscode-toolbar-hoverBackground);
+      outline: none;
     }
 
     .command-model-option {

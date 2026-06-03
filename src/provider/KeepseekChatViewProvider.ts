@@ -11,7 +11,9 @@ import {
   AgentActivityInput,
   AgentActivityState,
   AgentSettings,
+  ActivatedSkill,
   ChatMessage,
+  ChatMessageSkill,
   ChatSession,
   ContextUsageEstimate,
   KeepseekModel,
@@ -80,6 +82,7 @@ import { getHtmlForWebview } from '../webview/html';
 import { focusView } from './focusView';
 import type { DroppedFileReferenceInput, PromptReferenceInput, WebviewMessage } from './webviewMessages';
 import { InteractionTraceLogService } from '../agent/logging/interactionTrace';
+import { SkillStore } from '../skills/skillStore';
 import {
   copySelectionTextWithClipboardRestore,
   createTextReferenceFileName,
@@ -103,6 +106,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly agentRequestCoordinator = new AgentRequestCoordinator();
   private readonly traceLogService: InteractionTraceLogService;
   private readonly draftEdits: DraftEditStore;
+  private readonly skillStore: SkillStore;
   private readonly sessionTraceLogUris = new Map<string, string>();
   private readonly authorizedExternalReferenceUris = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
@@ -124,9 +128,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly sessionStore: ChatSessionStore,
-    private readonly globalStorageUri: vscode.Uri
+    private readonly globalStorageUri: vscode.Uri,
+    skillState: vscode.Memento
   ) {
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
+    this.skillStore = new SkillStore(skillState);
     this.agentRunner = new AgentRunner(undefined, this.traceLogService);
     this.draftEdits = new DraftEditStore(
       new SafeFileEditor((key, values) => this.t(key, values)),
@@ -155,6 +161,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     this.clearSessionTransientState();
+    await this.refreshSkills({ post: false });
     await this.sessionStore.persist();
     await this.cleanupExpiredSessions({ post: false });
     this.postToWebview({ type: 'sessionChanged' });
@@ -510,14 +517,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     switch (message.type) {
       case 'ready':
         this.syncConfiguredState();
+        await this.refreshSkills({ post: false });
         await this.cleanupExpiredSessions({ post: false });
         this.postState();
         return;
       case 'sendPrompt':
-        await this.sendPrompt(message.prompt, message.modelId, message.settings, { references: message.references });
+        await this.sendPrompt(message.prompt, message.modelId, message.settings, { references: message.references, skillIds: message.skillIds });
         return;
       case 'editUserPrompt':
-        await this.sendPrompt(message.prompt, message.modelId, message.settings, { replaceMessageId: message.messageId, references: message.references });
+        await this.sendPrompt(message.prompt, message.modelId, message.settings, { replaceMessageId: message.messageId, references: message.references, skillIds: message.skillIds });
         return;
       case 'abortPrompt':
         this.abortPrompt();
@@ -701,6 +709,27 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'requestReferenceResources':
         await this.postReferenceResources(message.requestId);
         return;
+      case 'requestSkills':
+        await this.refreshSkills();
+        return;
+      case 'useSkill':
+        await this.useSkill(message.skillId);
+        return;
+      case 'removeActiveSkill':
+        await this.removeActiveSkill(message.skillId);
+        return;
+      case 'openSkill':
+        await this.openSkill(message.skillId);
+        return;
+      case 'setSkillEnabled':
+        await this.setSkillEnabled(message.skillId, message.enabled);
+        return;
+      case 'setSkillAllowImplicit':
+        await this.setSkillAllowImplicit(message.skillId, message.allowImplicit);
+        return;
+      case 'createSkill':
+        vscode.window.showInformationMessage(this.t('createSkillComingSoon'));
+        return;
       case 'requestClipboardText':
         await this.postClipboardText(message.requestId);
         return;
@@ -775,11 +804,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private createCurrentSessionContextUsage(model = this.getSelectedModel()): ContextUsageEstimate {
+    const activeSession = this.sessionStore.getActiveSession();
     return createDisplayedSessionContextUsageEstimate({
       model,
       contextFiles: this.fileContext.getAll(),
+      skills: this.skillStore.getCachedActiveSkills(activeSession),
       messages: this.messages,
-      contextCompression: this.sessionStore.getActiveSession().contextCompression,
+      contextCompression: activeSession.contextCompression,
       language: this.language
     });
   }
@@ -799,6 +830,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
     this.clearSessionTransientState();
     await this.sessionStore.createNewSession(this.language);
+    await this.refreshSkills({ post: false });
     await this.cleanupExpiredSessions({ post: false });
     this.postToWebview({ type: 'sessionChanged' });
     this.postState();
@@ -817,6 +849,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
     if (!wasActiveSession) {
       this.clearSessionTransientState();
+      await this.skillStore.preloadActiveSkills(session);
       this.postToWebview({ type: 'sessionChanged' });
     }
     this.postState();
@@ -1026,6 +1059,76 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  public async refreshSkills(options: { post?: boolean } = {}): Promise<void> {
+    await this.skillStore.refresh();
+    await this.skillStore.preloadActiveSkills(this.sessionStore.getActiveSession());
+    if (options.post !== false) {
+      this.postState();
+    }
+  }
+
+  private async useSkill(skillId: string): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+    const activeSession = this.sessionStore.getActiveSession();
+    if (!(await this.skillStore.useSkill(activeSession, skillId))) {
+      this.postState();
+      return;
+    }
+    activeSession.contextUsage = undefined;
+    activeSession.updatedAt = new Date().toISOString();
+    await this.sessionStore.persist();
+    this.postState();
+  }
+
+  private async removeActiveSkill(skillId: string): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+    const activeSession = this.sessionStore.getActiveSession();
+    if (!this.skillStore.removeActiveSkill(activeSession, skillId)) {
+      return;
+    }
+    activeSession.contextUsage = undefined;
+    activeSession.updatedAt = new Date().toISOString();
+    await this.sessionStore.persist();
+    this.postState();
+  }
+
+  private async openSkill(skillId: string): Promise<void> {
+    const manifest = this.skillStore.getManifest(skillId);
+    if (!manifest) {
+      return;
+    }
+    const document = await vscode.workspace.openTextDocument(manifest.skillUri);
+    await vscode.window.showTextDocument(document, { preview: false });
+  }
+
+  private async setSkillEnabled(skillId: string, enabled: boolean): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+    const activeSession = this.sessionStore.getActiveSession();
+    if (!(await this.skillStore.setSkillEnabled(activeSession, skillId, enabled))) {
+      return;
+    }
+    activeSession.contextUsage = undefined;
+    activeSession.updatedAt = new Date().toISOString();
+    await this.sessionStore.persist();
+    this.postState();
+  }
+
+  private async setSkillAllowImplicit(skillId: string, allowImplicit: boolean): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+    if (!(await this.skillStore.setSkillAllowImplicit(skillId, allowImplicit))) {
+      return;
+    }
+    this.postState();
+  }
+
   private async postPromptContextUsageEstimate(message: Extract<WebviewMessage, { type: 'estimatePromptContextUsage' }>): Promise<void> {
     const activeSessionId = this.sessionStore.activeSessionId;
     if (message.activeSessionId && message.activeSessionId !== activeSessionId) {
@@ -1047,15 +1150,21 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    const activeSession = this.sessionStore.getActiveSession();
+    const activeSkills = (await this.skillStore.loadActiveSkills(
+      activeSession,
+      normalizeSkillIds(message.skillIds)
+    )).skills;
     const promptContextUsage = createDisplayedSessionContextUsageEstimate({
       model,
       contextFiles: this.fileContext.getAll(),
+      skills: activeSkills,
       messages: this.messages,
-      contextCompression: this.sessionStore.getActiveSession().contextCompression,
+      contextCompression: activeSession.contextCompression,
       language: this.language,
       prompt: expandedPrompt
     });
-    const storedContextUsage = this.sessionStore.getActiveSession().contextUsage;
+    const storedContextUsage = activeSession.contextUsage;
     const contextUsage = storedContextUsage
       ? pickLargerContextUsageEstimate(
           addInputTokensToContextUsage(storedContextUsage, promptContextUsage.breakdown.inputTokensEstimate),
@@ -1287,7 +1396,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     prompt: string,
     modelId: string,
     settings?: Partial<AgentSettings>,
-    options?: { replaceMessageId?: string; references?: PromptReferenceInput[] }
+    options?: { replaceMessageId?: string; references?: PromptReferenceInput[]; skillIds?: string[] }
   ): Promise<void> {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt || this.isBusy) {
@@ -1353,6 +1462,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       const activeSession = this.sessionStore.getActiveSession();
+      const activeSkillResult = await this.skillStore.loadActiveSkills(
+        activeSession,
+        normalizeSkillIds(options?.skillIds)
+      );
+      if (activeSkillResult.failures.length) {
+        vscode.window.showWarningMessage(this.t('skillLoadFailed', {
+          skill: activeSkillResult.failures.map((failure) => failure.name).join(', ')
+        }));
+      }
+      const activeSkills = activeSkillResult.skills;
       const now = new Date().toISOString();
       const replacementIndex = replaceMessageId
         ? activeSession.messages.findIndex((message) => message.id === replaceMessageId && message.role === 'user')
@@ -1413,6 +1532,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         reasoningContent: '',
         createdAt: new Date().toISOString(),
         modelId: model.id,
+        usedSkills: toChatMessageSkills(activeSkills),
         isStreaming: true
       };
       this.messages.push(assistantMessage);
@@ -1427,6 +1547,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         model,
         settings: this.agentSettings,
         contextFiles: this.fileContext.getAll(),
+        skills: activeSkills,
         history: agentHistory,
         contextCompression: activeSession.contextCompression,
         language: this.language,
@@ -1653,9 +1774,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const selectedModel = models.find((model) => model.id === this.selectedModelId) ?? models[0];
     const contextFiles = this.fileContext.getAll();
     const activeSession = this.sessionStore.getActiveSession();
+    const cachedSkills = this.skillStore.getCachedActiveSkills(activeSession);
     const computedContextUsage = createDisplayedSessionContextUsageEstimate({
       model: selectedModel,
       contextFiles,
+      skills: cachedSkills,
       messages: this.messages,
       contextCompression: activeSession.contextCompression,
       language: this.language
@@ -1676,6 +1799,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath || folder.uri.toString()),
         sessionSummaries: this.sessionStore.getSessionSummaries(),
         contextFiles: contextFiles.map(({ content: _content, ...file }) => file),
+        skills: this.skillStore.getStateView(activeSession),
         contextUsage,
         contextUsageSessionId: this.sessionStore.activeSessionId,
         draftEdits: this.draftEdits.toWebviewState(),
@@ -1716,4 +1840,35 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 function getWorkspaceSummaryTimestamp(workspace: WorkspaceSummary): number {
   const timestamp = Date.parse(workspace.updatedAt);
   return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function normalizeSkillIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      continue;
+    }
+    const id = item.trim();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function toChatMessageSkills(skills: ActivatedSkill[]): ChatMessageSkill[] | undefined {
+  if (!skills.length) {
+    return undefined;
+  }
+  return skills.map((skill) => ({
+    id: skill.id,
+    name: skill.name,
+    source: skill.source
+  }));
 }

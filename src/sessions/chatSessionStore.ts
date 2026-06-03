@@ -397,6 +397,7 @@ export function createEmptySession(
     id: randomUUID(),
     title: localize(language, 'defaultSessionTitle'),
     messages: [],
+    activeSkillIds: [],
     createdAt: now,
     updatedAt: now,
     workspaceKey: workspaceScope.key,
@@ -507,6 +508,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       id: item.id,
       title,
       messages,
+      activeSkillIds: normalizeStringArray(item.activeSkillIds),
       contextCompression: normalizeContextCompressionState(item.contextCompression),
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
       lastTraceLogUri: typeof item.lastTraceLogUri === 'string' && item.lastTraceLogUri.trim()
@@ -558,8 +560,51 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     createdAt: normalizeSessionTimestamp(value.createdAt, new Date().toISOString()),
     modelId: typeof value.modelId === 'string' ? value.modelId : undefined,
     reasoningContent: typeof value.reasoningContent === 'string' ? value.reasoningContent : undefined,
-    contextMeta: normalizeMessageContextMeta(value.contextMeta)
+    contextMeta: normalizeMessageContextMeta(value.contextMeta),
+    usedSkills: normalizeMessageUsedSkills(value.usedSkills)
   };
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      continue;
+    }
+    const normalized = item.trim();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function normalizeMessageUsedSkills(value: unknown): ChatMessage['usedSkills'] {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const usedSkills = value
+    .filter(isRecord)
+    .map((item) => {
+      const id = typeof item.id === 'string' ? item.id.trim() : '';
+      const name = typeof item.name === 'string' ? item.name.trim() : '';
+      const source = item.source === 'workspace'
+        || item.source === 'agentsWorkspace'
+        || item.source === 'user'
+        || item.source === 'agentsUser'
+        || item.source === 'builtin'
+        ? item.source
+        : undefined;
+      return id && name && source ? { id, name, source } : undefined;
+    })
+    .filter((item): item is NonNullable<ChatMessage['usedSkills']>[number] => Boolean(item));
+  return usedSkills.length ? usedSkills : undefined;
 }
 
 function normalizeMessageContextMeta(value: unknown): ChatMessageContextMeta | undefined {

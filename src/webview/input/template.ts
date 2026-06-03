@@ -3,6 +3,10 @@ export function getInputTemplate(): string {
     <form id="composer" class="composer">
       <div class="composer-input-wrap">
         <div class="composer-input-inner">
+          <div id="skillsBar" class="skills-bar hidden" aria-label="Using skills">
+            <span class="skills-bar-label" data-i18n="skillsUsing">Using:</span>
+            <span id="skillsBarList" class="skills-bar-list"></span>
+          </div>
           <div
             id="promptInput"
             class="rich-input is-empty"
@@ -65,6 +69,35 @@ export function getInputTemplate(): string {
             <span class="command-menu-title" data-i18n="commandMenu">命令菜单</span>
             <span class="command-menu-shortcut">/</span>
           </div>
+
+          <section class="command-section" aria-label="Skills">
+            <div class="command-section-label">Skills</div>
+            <button
+              id="commandSkillsButton"
+              type="button"
+              class="command-row"
+              role="menuitem"
+              aria-expanded="false"
+            >
+              <span class="command-row-main">
+                <span class="command-row-title">/skills</span>
+                <span class="command-row-description" data-i18n="skillsDescription">选择可复用工作流</span>
+              </span>
+              <span id="commandSkillsValue" class="command-row-value">0</span>
+            </button>
+            <div id="commandSkillList" class="command-skill-list hidden" role="group" aria-label="Skills 列表" data-i18n-aria-label="skillsList"></div>
+            <button
+              id="commandCreateSkillButton"
+              type="button"
+              class="command-row"
+              role="menuitem"
+            >
+              <span class="command-row-main">
+                <span class="command-row-title" data-i18n="createSkill">Create Skill...</span>
+                <span class="command-row-description" data-i18n="createSkillDescription">预留入口：未来通过 DraftEdit 创建 SKILL.md</span>
+              </span>
+            </button>
+          </section>
 
           <section class="command-section" aria-label="Model">
             <div class="command-section-label">Model</div>
