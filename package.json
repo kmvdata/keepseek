@@ -377,7 +377,8 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src",
-    "pretest": "npm run compile && npm run lint"
+    "pretest": "npm run compile && npm run lint",
+    "test": "tsc -p tsconfig.test.json && node --test out-test/test/runTests.js"
   },
   "devDependencies": {
     "@eslint/js": "^8.57.1",

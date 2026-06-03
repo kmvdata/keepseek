@@ -11,14 +11,15 @@ KeepSeek 的 Agent 链路可以分成四层。
 | 层级 | 主要模块 | 职责 |
 |---|---|---|
 | Webview 表现层 | `src/webview/*`、`src/webview/input/*` | 输入框、消息列表、引用 chip、设置弹窗、活动状态文案、发送/停止交互 |
-| Provider 编排层 | `src/provider/KeepseekChatViewProvider.ts` | 接收 Webview 消息、维护 busy 状态、会话接线、引用授权、调用业务服务和 `AgentRunner` |
-| Agent Runtime 层 | `src/agent/runner.ts`、`src/agent/protocol.ts`、`src/agent/deepseek/*` | 构造请求、流式调用 DeepSeek/OpenAI-compatible API、执行工具循环、预算控制、结果整理 |
-| 本地能力层 | `src/agent/tools/workspaceTools.ts`、`src/edits/*`、`src/context/*`、`src/sessions/*` | 只读工作区工具、引用展开、DraftEdit 安全写入、上下文文件和会话存储 |
+| Provider 编排层 | `src/provider/KeepseekChatViewProvider.ts` | 接收 Webview 消息、维护 busy 状态、会话接线、引用授权、调用业务服务和 Agent Runtime |
+| Agent Runtime 层 | `src/agent/agentRequestCoordinator.ts`、`src/agent/runner.ts`、`src/agent/protocol.ts`、`src/agent/historyProjection.ts`、`src/agent/historyCompressor.ts`、`src/agent/contextUsage.ts`、`src/agent/deepseek/*` | 构造请求、上下文压缩与历史投影、上下文用量估算、流式调用 DeepSeek/OpenAI-compatible API、执行工具循环、预算控制、结果整理 |
+| 本地能力层 | `src/agent/tools/workspaceTools.ts`、`src/edits/*`、`src/context/*`、`src/sessions/*` | 只读工作区工具、引用展开、DraftEdit 安全写入、上下文文件、会话和压缩状态持久化 |
 
 几个边界很重要：
 
 - Provider 只做协调，不直接承载可独立测试的大块业务逻辑。
 - `AgentRunner` 只负责编排模型请求、工具调用循环和最终响应整理。
+- 上下文压缩属于 Agent Runtime 层：`AgentRequestCoordinator` 负责压缩刷新调度和 AgentRequest 组装，`HistoryCompressor` 负责摘要刷新，`historyProjection` 负责把真实会话投影成模型请求历史，`contextUsage` 使用同一套投影估算上下文窗口占用。Provider 只触发协调器，Session 存储只负责保存真实消息和 `contextCompression` 状态。
 - 工作区工具保持只读，不能写磁盘。
 - AI 不能直接修改文件，只能创建 DraftEdit。
 - 真正写入磁盘只发生在用户点击 Apply 后，由 `SafeFileEditor` 执行。
@@ -58,8 +59,10 @@ Provider 会完成这些本地准备：
 5. 设置活动状态为 `preparing`、`expanding_references`。
 6. 调用 `expandPromptReferencesInPrompt()` 展开文件/目录引用。
 7. 将用户消息写入当前会话。
-8. 创建 streaming assistant 消息，用来显示流式输出。
-9. 调用 `AgentRunner.run()`。
+8. best-effort 调用 `AgentRequestCoordinator.refreshContextCompressionBeforeRun()`。只有当前会话没有可用摘要且 raw 历史估算接近上下文窗口时，才会发送前同步刷新摘要；其它可刷新场景会留到本轮完成后的后台刷新。
+9. 创建 streaming assistant 消息，用来显示流式输出。
+10. 通过 `AgentRequestCoordinator.createAgentRequest()` 组装请求并调用 `AgentRunner.run()`。
+11. 本轮完成后，`AgentRequestCoordinator.scheduleBackgroundContextCompressionRefresh()` 可在后台刷新摘要。后台刷新按 session 去重，并在写回前检查消息位置，避免编辑重发或会话变化后用旧摘要覆盖新历史。
 
 Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节。它只是把 UI、会话状态和底层服务串起来。
 
@@ -89,14 +92,25 @@ Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节
 
 `AgentRunner.run()` 是 Agent runtime 的核心。它负责把一次用户请求转换为一轮或多轮模型请求。
 
-### 3.1 构造初始 messages
+### 3.1 构造上下文投影与初始 messages
 
-`src/agent/protocol.ts` 的 `buildInitialAgentMessages()` 会生成：
+`AgentRunner.run()` 在请求模型前会先调用 `src/agent/historyProjection.ts` 的 `buildHistoryProjection()`。这是上下文压缩进入模型请求的核心边界：真实的 `session.messages` 不会被替换成摘要，也不会因为上下文窗口限制被硬裁剪；Runner 只为本次模型请求构造 projection。
 
-1. system prompt。
-2. 用户显式加入的 context files。
-3. 最近历史消息，最多 `AGENT_HISTORY_MESSAGE_LIMIT = 24` 条。
+压缩开启时，projection 由这些部分组成：
+
+1. 可选 synthetic summary system message，来自 `ChatSession.contextCompression.summaries`。
+2. protected messages，包括首条用户需求、最近用户请求、显式保留约束、用户纠错、明显报错或测试失败、DraftEdit 关键结果等。
+3. 最近 `keepseek.contextKeepRecentTurns` 个用户轮次及其后续 assistant 回复。
 4. 当前展开后的用户 prompt。
+
+压缩关闭时，projection 会退回旧行为：只使用最近 `AGENT_HISTORY_MESSAGE_LIMIT = 24` 条原始历史消息。
+
+之后 `src/agent/protocol.ts` 的 `buildInitialAgentMessages()` 会把 projection 组装成 DeepSeek/OpenAI-compatible messages：
+
+1. system prompt，包含 Agent 规则和用户显式加入的 context files。
+2. synthetic summary system message。
+3. projection 选中的历史消息。
+4. 当前展开后的用户 prompt，如果它还没有作为最后一条 user message 出现在 projection 中。
 
 system prompt 会告诉模型：
 

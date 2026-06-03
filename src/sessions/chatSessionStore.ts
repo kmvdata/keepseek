@@ -16,7 +16,6 @@ import { normalizeContextUsageEstimateValue } from '../agent/contextUsage';
 export const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 export const SESSION_STORAGE_VERSION = 2;
 const MAX_STORED_SESSIONS = 50;
-const DEFAULT_ACTIVE_HISTORY_LIMIT = 80;
 
 export interface StoredSessionState {
   version: number;
@@ -303,13 +302,9 @@ export class ChatSessionStore {
     await this.sessionStorage.deleteEntireWorkspace(normalizedWorkspaceKey);
   }
 
-  public trimActiveHistory(maxMessages = DEFAULT_ACTIVE_HISTORY_LIMIT): void {
-    // MVP compatibility fallback: model context now uses projection, but storage still hard-trims
-    // until full history persistence and projected model history are split in a production pass.
-    const messages = this.messages;
-    if (messages.length > maxMessages) {
-      messages.splice(0, messages.length - maxMessages);
-    }
+  public trimActiveHistory(_maxMessages?: number): void {
+    // Compatibility no-op: model context is trimmed by historyProjection, not by deleting
+    // persisted active-session messages.
   }
 
   private async load(): Promise<void> {

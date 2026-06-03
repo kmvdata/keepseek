@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
 import { AgentRunAbortedError, AgentRunner } from '../agent/runner';
-import { HistoryCompressor } from '../agent/historyCompressor';
+import { AgentRequestCoordinator, type BackgroundContextCompressionRefreshUpdate } from '../agent/agentRequestCoordinator';
+import type { HistoryCompressionRefreshResult } from '../agent/historyCompressor';
 import { createProtectedContextMeta } from '../agent/historyProjection';
 import { FileContextStore } from '../context/fileContextStore';
 import { SafeFileEditor } from '../edits/safeFileEditor';
@@ -87,7 +88,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private readonly fileContext = new FileContextStore();
   private readonly agentRunner: AgentRunner;
-  private readonly historyCompressor = new HistoryCompressor();
+  private readonly agentRequestCoordinator = new AgentRequestCoordinator();
   private readonly traceLogService: InteractionTraceLogService;
   private readonly draftEdits: DraftEditStore;
   private readonly sessionTraceLogUris = new Map<string, string>();
@@ -1342,7 +1343,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       activeSession.updatedAt = now;
       this.postState();
       await this.refreshContextCompressionBeforeRun(activeSession, expandedPrompt, model, abortController.signal);
-      this.trimHistory();
       await this.sessionStore.persist();
       if (abortController.signal.aborted) {
         this.setAgentActivity({
@@ -1364,14 +1364,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         isStreaming: true
       };
       this.messages.push(assistantMessage);
-      this.trimHistory();
       this.setAgentActivity({
         base: 'thinking',
         phase: 'requesting_model'
       }, { post: false });
       this.postState();
 
-      const response = await this.agentRunner.run({
+      const response = await this.agentRunner.run(this.agentRequestCoordinator.createAgentRequest({
         prompt: expandedPrompt,
         model,
         settings: this.agentSettings,
@@ -1380,7 +1379,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         contextCompression: activeSession.contextCompression,
         language: this.language,
         signal: abortController.signal
-      }, {
+      }), {
         onStatus: (activity) => {
           this.setAgentActivity(activity);
         },
@@ -1436,8 +1435,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         delete assistantMessage.isStreaming;
       }
-      this.trimHistory();
       this.updateActiveSessionContextUsage(this.createCurrentSessionContextUsage(model));
+      this.scheduleContextCompressionRefresh(activeSession, expandedPrompt, model);
       this.setAgentActivity({
         base: 'complete',
         phase: 'finalizing'
@@ -1510,10 +1509,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private trimHistory(): void {
-    this.sessionStore.trimActiveHistory();
-  }
-
   private async refreshContextCompressionBeforeRun(
     activeSession: ChatSession,
     prompt: string,
@@ -1521,7 +1516,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     signal: AbortSignal
   ): Promise<void> {
     try {
-      const result = await this.historyCompressor.refresh({
+      const result = await this.agentRequestCoordinator.refreshContextCompressionBeforeRun({
         session: activeSession,
         prompt,
         model,
@@ -1529,16 +1524,68 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         language: this.language,
         signal
       });
-      if (!result.changed) {
-        return;
-      }
-
-      activeSession.contextCompression = result.state;
-      activeSession.contextUsage = undefined;
-      activeSession.updatedAt = new Date().toISOString();
+      this.applyContextCompressionRefreshResult(activeSession, result);
     } catch {
       // Context compression is best-effort and must never block the normal request path.
     }
+  }
+
+  private scheduleContextCompressionRefresh(
+    activeSession: ChatSession,
+    prompt: string,
+    model: KeepseekModel
+  ): void {
+    this.agentRequestCoordinator.scheduleBackgroundContextCompressionRefresh({
+      session: activeSession,
+      prompt,
+      model,
+      contextFiles: this.fileContext.getAll(),
+      language: this.language
+    }, (update) => {
+      void this.applyBackgroundContextCompressionRefresh(activeSession, update);
+    });
+  }
+
+  private async applyBackgroundContextCompressionRefresh(
+    session: ChatSession,
+    update: BackgroundContextCompressionRefreshUpdate
+  ): Promise<void> {
+    if (session.id !== update.sessionId || !this.canApplyBackgroundContextCompressionRefresh(session, update)) {
+      return;
+    }
+    if (!this.applyContextCompressionRefreshResult(session, update.result)) {
+      return;
+    }
+
+    await this.sessionStore.persist();
+    if (session.id === this.sessionStore.activeSessionId) {
+      this.postState();
+    }
+  }
+
+  private canApplyBackgroundContextCompressionRefresh(
+    session: ChatSession,
+    update: BackgroundContextCompressionRefreshUpdate
+  ): boolean {
+    if (session.messages.length < update.expectedMessageCount) {
+      return false;
+    }
+    const expectedLastMessage = session.messages[update.expectedMessageCount - 1];
+    return expectedLastMessage?.id === update.expectedLastMessageId;
+  }
+
+  private applyContextCompressionRefreshResult(
+    session: ChatSession,
+    result: HistoryCompressionRefreshResult | undefined
+  ): boolean {
+    if (!result?.changed) {
+      return false;
+    }
+
+    session.contextCompression = result.state;
+    session.contextUsage = undefined;
+    session.updatedAt = new Date().toISOString();
+    return true;
   }
 
   private async cleanupExpiredSessions(options: { post?: boolean } = {}): Promise<void> {

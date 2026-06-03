@@ -50,6 +50,21 @@ export interface HistoryCompressionRefreshResult {
   failureReason?: string;
 }
 
+export type HistoryCompressionRefreshMode = 'none' | 'sync' | 'background';
+
+export interface HistoryCompressionRefreshPlan {
+  state: ContextCompressionState;
+  changed: boolean;
+  mode: HistoryCompressionRefreshMode;
+  reason:
+    | 'compression_disabled'
+    | 'aborted'
+    | 'no_compressible_messages'
+    | 'fresh_enough'
+    | 'missing_summary_near_context_limit'
+    | 'background_refresh';
+}
+
 export type HistorySummaryCompletion = (input: {
   model: KeepseekModel;
   messages: DeepSeekMessage[];
@@ -63,53 +78,100 @@ export class HistoryCompressor {
 
   public constructor(private readonly completion?: HistorySummaryCompletion) {}
 
-  public async refresh(input: HistoryCompressionRefreshInput): Promise<HistoryCompressionRefreshResult> {
+  public planRefresh(input: HistoryCompressionRefreshInput): HistoryCompressionRefreshPlan {
     const settings = input.settings ?? getConfiguredContextCompressionSettings();
-    const currentState = createCompressionState(input.session.contextCompression);
-    const protectedMessageIds = getMergedProtectedMessageIds(input.session.messages, currentState);
-    const stateWithProtection = {
-      ...currentState,
-      protectedMessageIds
-    };
+    const protectedState = this.createProtectedState(input.session);
 
-    if (!settings.enabled || input.signal?.aborted) {
+    if (!settings.enabled) {
       return {
-        state: stateWithProtection,
-        changed: hasProtectedMessageIdsChanged(currentState.protectedMessageIds, protectedMessageIds),
-        reason: 'skipped'
+        state: protectedState.state,
+        changed: protectedState.changed,
+        mode: 'none',
+        reason: 'compression_disabled'
       };
     }
 
-    const projection = buildHistoryProjection({
-      history: input.session.messages,
-      prompt: input.prompt,
-      language: input.language,
-      contextCompression: stateWithProtection,
-      settings
-    });
-    const previousSummary = stateWithProtection.summaries[0];
-    const coveredMessageIds = new Set(previousSummary?.coveredMessageIds ?? []);
-    const newCompressibleMessages = input.session.messages.filter((message) => (
-      projection.compressibleMessageIds.includes(message.id) && !coveredMessageIds.has(message.id)
-    ));
+    if (input.signal?.aborted) {
+      return {
+        state: protectedState.state,
+        changed: protectedState.changed,
+        mode: 'none',
+        reason: 'aborted'
+      };
+    }
+
+    const summaryInput = this.createSummaryRefreshInput(input, settings, protectedState.state);
+    if (!summaryInput.newCompressibleMessages.length) {
+      return {
+        state: protectedState.state,
+        changed: protectedState.changed,
+        mode: 'none',
+        reason: 'no_compressible_messages'
+      };
+    }
 
     if (!this.shouldRefreshSummary({
       input,
       settings,
-      hasSummary: Boolean(previousSummary),
-      newCompressibleMessages
+      hasSummary: Boolean(summaryInput.previousSummary),
+      newCompressibleMessages: summaryInput.newCompressibleMessages
     })) {
       return {
-        state: stateWithProtection,
-        changed: hasProtectedMessageIdsChanged(currentState.protectedMessageIds, protectedMessageIds),
+        state: protectedState.state,
+        changed: protectedState.changed,
+        mode: 'none',
+        reason: 'fresh_enough'
+      };
+    }
+
+    if (!summaryInput.previousSummary && isRawConversationNearContextWindow(input, settings)) {
+      return {
+        state: protectedState.state,
+        changed: protectedState.changed,
+        mode: 'sync',
+        reason: 'missing_summary_near_context_limit'
+      };
+    }
+
+    return {
+      state: protectedState.state,
+      changed: protectedState.changed,
+      mode: 'background',
+      reason: 'background_refresh'
+    };
+  }
+
+  public async refresh(input: HistoryCompressionRefreshInput): Promise<HistoryCompressionRefreshResult> {
+    const settings = input.settings ?? getConfiguredContextCompressionSettings();
+    const protectedState = this.createProtectedState(input.session);
+
+    if (!settings.enabled || input.signal?.aborted) {
+      return {
+        state: protectedState.state,
+        changed: protectedState.changed,
+        reason: 'skipped'
+      };
+    }
+
+    const summaryInput = this.createSummaryRefreshInput(input, settings, protectedState.state);
+
+    if (!this.shouldRefreshSummary({
+      input,
+      settings,
+      hasSummary: Boolean(summaryInput.previousSummary),
+      newCompressibleMessages: summaryInput.newCompressibleMessages
+    })) {
+      return {
+        state: protectedState.state,
+        changed: protectedState.changed,
         reason: 'skipped'
       };
     }
 
     try {
       const summaryMessages = this.buildSummaryMessages({
-        messagesToSummarize: newCompressibleMessages,
-        previousSummary,
+        messagesToSummarize: summaryInput.newCompressibleMessages,
+        previousSummary: summaryInput.previousSummary,
         summaryBudgetTokens: settings.summaryBudgetTokens,
         language: input.language
       });
@@ -127,14 +189,14 @@ export class HistoryCompressor {
 
       const now = new Date().toISOString();
       const nextCoveredMessageIds = Array.from(new Set([
-        ...(previousSummary?.coveredMessageIds ?? []),
-        ...newCompressibleMessages.map((message) => message.id)
+        ...(summaryInput.previousSummary?.coveredMessageIds ?? []),
+        ...summaryInput.newCompressibleMessages.map((message) => message.id)
       ]));
       const summary: HistorySummary = {
-        id: previousSummary?.id ?? randomUUID(),
+        id: summaryInput.previousSummary?.id ?? randomUUID(),
         content,
         coveredMessageIds: nextCoveredMessageIds,
-        createdAt: previousSummary?.createdAt ?? now,
+        createdAt: summaryInput.previousSummary?.createdAt ?? now,
         updatedAt: now,
         tokenEstimate: estimateTokenCount(content),
         modelId: input.model.id,
@@ -144,18 +206,18 @@ export class HistoryCompressor {
         state: {
           version: CONTEXT_COMPRESSION_VERSION,
           summaries: [summary],
-          protectedMessageIds,
+          protectedMessageIds: protectedState.state.protectedMessageIds,
           lastCompressedAt: now,
           lastFailureReason: undefined
         },
         changed: true,
-        reason: previousSummary ? 'updated' : 'created'
+        reason: summaryInput.previousSummary ? 'updated' : 'created'
       };
     } catch (error) {
       const failureReason = summarizeFailureReason(error);
       return {
         state: {
-          ...stateWithProtection,
+          ...protectedState.state,
           lastFailureReason: failureReason
         },
         changed: true,
@@ -163,6 +225,47 @@ export class HistoryCompressor {
         failureReason
       };
     }
+  }
+
+  private createProtectedState(session: ChatSession): {
+    state: ContextCompressionState;
+    changed: boolean;
+  } {
+    const currentState = createCompressionState(session.contextCompression);
+    const protectedMessageIds = getMergedProtectedMessageIds(session.messages, currentState);
+    return {
+      state: {
+        ...currentState,
+        protectedMessageIds
+      },
+      changed: hasProtectedMessageIdsChanged(currentState.protectedMessageIds, protectedMessageIds)
+    };
+  }
+
+  private createSummaryRefreshInput(
+    input: HistoryCompressionRefreshInput,
+    settings: ContextCompressionSettings,
+    state: ContextCompressionState
+  ): {
+    previousSummary?: HistorySummary;
+    newCompressibleMessages: ChatMessage[];
+  } {
+    const projection = buildHistoryProjection({
+      history: input.session.messages,
+      prompt: input.prompt,
+      language: input.language,
+      contextCompression: state,
+      settings
+    });
+    const previousSummary = state.summaries[0];
+    const coveredMessageIds = new Set(previousSummary?.coveredMessageIds ?? []);
+    const newCompressibleMessages = input.session.messages.filter((message) => (
+      projection.compressibleMessageIds.includes(message.id) && !coveredMessageIds.has(message.id)
+    ));
+    return {
+      previousSummary,
+      newCompressibleMessages
+    };
   }
 
   private shouldRefreshSummary(input: {
@@ -298,6 +401,14 @@ function estimateRawConversationTokens(input: HistoryCompressionRefreshInput): n
   const promptTokens = prompt && prompt !== lastUserContent ? estimateTokenCount(`user\n${prompt}`) : 0;
   const contextFileTokens = input.contextFiles.reduce((total, file) => total + estimateTokenCount(file.content), 0);
   return historyTokens + promptTokens + contextFileTokens;
+}
+
+function isRawConversationNearContextWindow(
+  input: HistoryCompressionRefreshInput,
+  settings: ContextCompressionSettings
+): boolean {
+  const maxTokens = getConfiguredContextWindowTokens(input.model);
+  return estimateRawConversationTokens(input) / maxTokens >= settings.triggerRatio;
 }
 
 function getSummarySystemPrompt(language: KeepseekLanguage): string {
