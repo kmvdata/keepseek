@@ -53,6 +53,10 @@ export type WebviewMessage =
       maxRunMs?: number;
       streamIdleTimeoutMs?: number;
       toolResultTokenBudget?: number;
+      contextCompressionEnabled?: boolean;
+      contextKeepRecentTurns?: number;
+      contextCompressionTriggerRatio?: number;
+      contextSummaryBudgetTokens?: number;
     }
   | {
       type: 'saveHistorySettings';

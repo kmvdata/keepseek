@@ -810,6 +810,67 @@ export function getInputStyles(): string {
       font-weight: 600;
     }
 
+    .settings-toggle-field {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 34px;
+      align-items: center;
+      gap: 10px;
+      cursor: pointer;
+    }
+
+    .settings-toggle-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .settings-toggle-input {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .settings-toggle-track {
+      position: relative;
+      width: 34px;
+      height: 18px;
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      border-radius: 999px;
+      background: var(--vscode-input-background);
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+
+    .settings-toggle-track::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--vscode-descriptionForeground);
+      transition: transform 120ms ease, background 120ms ease;
+    }
+
+    .settings-toggle-input:checked + .settings-toggle-track {
+      border-color: var(--vscode-textLink-foreground);
+      background: var(--vscode-textLink-foreground);
+    }
+
+    .settings-toggle-input:checked + .settings-toggle-track::after {
+      transform: translateX(16px);
+      background: var(--vscode-button-foreground);
+    }
+
+    .settings-toggle-input:focus-visible + .settings-toggle-track {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 2px;
+    }
+
     .settings-input {
       width: 100%;
       min-height: 28px;
@@ -820,6 +881,11 @@ export function getInputStyles(): string {
       background: var(--vscode-input-background);
       font-size: 12px;
       outline-color: var(--vscode-focusBorder);
+    }
+
+    .settings-input:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
 
     .settings-secret-input {

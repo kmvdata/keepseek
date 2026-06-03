@@ -198,6 +198,30 @@ export function getInputTemplate(): string {
             <input id="agentBudgetToolResultTokenBudget" class="settings-input" type="number" min="0" max="1000" step="10" inputmode="numeric" autocomplete="off" />
             <span class="settings-field-hint" data-i18n="settingsToolResultTokenBudgetHint">按 1 KB = 1000 tokens 换算；默认 0，按模型上下文窗口自动估算</span>
           </label>
+          <div class="settings-section-title" data-i18n="settingsContextCompressionTitle">上下文压缩</div>
+          <label class="settings-field settings-toggle-field">
+            <span class="settings-toggle-copy">
+              <span class="settings-field-label" data-i18n="settingsContextCompressionEnabledLabel">启用上下文压缩</span>
+              <span class="settings-field-hint" data-i18n="settingsContextCompressionEnabledHint">默认开启；关闭后使用旧的最近消息窗口</span>
+            </span>
+            <input id="agentBudgetContextCompressionEnabled" class="settings-toggle-input" type="checkbox" />
+            <span class="settings-toggle-track" aria-hidden="true"></span>
+          </label>
+          <label class="settings-field">
+            <span class="settings-field-label" data-i18n="settingsContextKeepRecentTurnsLabel">原文保留最近用户轮次</span>
+            <input id="agentBudgetContextKeepRecentTurns" class="settings-input" type="number" min="1" max="64" step="1" inputmode="numeric" autocomplete="off" />
+            <span class="settings-field-hint" data-i18n="settingsContextKeepRecentTurnsHint">默认 12；这些最近轮次及其 assistant 回复不会进入摘要</span>
+          </label>
+          <label class="settings-field">
+            <span class="settings-field-label" data-i18n="settingsContextCompressionTriggerPercentLabel">无摘要触发比例（%）</span>
+            <input id="agentBudgetContextCompressionTriggerPercent" class="settings-input" type="number" min="10" max="95" step="5" inputmode="decimal" autocomplete="off" />
+            <span class="settings-field-hint" data-i18n="settingsContextCompressionTriggerPercentHint">默认 70%；原始对话估算达到上下文窗口该比例时可刷新摘要</span>
+          </label>
+          <label class="settings-field">
+            <span class="settings-field-label" data-i18n="settingsContextSummaryBudgetLabel">摘要输出预算（KB）</span>
+            <input id="agentBudgetContextSummaryBudget" class="settings-input" type="number" min="0.5" max="100" step="0.5" inputmode="decimal" autocomplete="off" />
+            <span class="settings-field-hint" data-i18n="settingsContextSummaryBudgetHint">按 1 KB = 1000 tokens 换算；默认 3 KB</span>
+          </label>
         </div>
         <div class="settings-dialog-footer">
           <button id="agentBudgetCancelBtn" type="button" class="secondary" data-i18n="cancel">取消</button>

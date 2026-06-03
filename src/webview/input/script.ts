@@ -2322,6 +2322,10 @@ export function getInputScript(): string {
       var agentBudgetMaxRunSeconds = document.getElementById('agentBudgetMaxRunSeconds');
       var agentBudgetStreamIdleSeconds = document.getElementById('agentBudgetStreamIdleSeconds');
       var agentBudgetToolResultTokenBudget = document.getElementById('agentBudgetToolResultTokenBudget');
+      var agentBudgetContextCompressionEnabled = document.getElementById('agentBudgetContextCompressionEnabled');
+      var agentBudgetContextKeepRecentTurns = document.getElementById('agentBudgetContextKeepRecentTurns');
+      var agentBudgetContextCompressionTriggerPercent = document.getElementById('agentBudgetContextCompressionTriggerPercent');
+      var agentBudgetContextSummaryBudget = document.getElementById('agentBudgetContextSummaryBudget');
       var historySettingsOverlay = document.getElementById('historySettingsDialogOverlay');
       var historyRetentionDaysInput = document.getElementById('historyRetentionDaysInput');
       var settingsClearApiKeyBtn = document.getElementById('settingsClearApiKeyBtn');
@@ -2343,6 +2347,16 @@ export function getInputScript(): string {
       var defaultStreamIdleSeconds = 0;
       var defaultToolResultTokenBudget = 0;
       var maxToolResultTokenBudget = 1000000;
+      var defaultContextCompressionEnabled = true;
+      var defaultContextKeepRecentTurns = 12;
+      var maxContextKeepRecentTurns = 64;
+      var defaultContextCompressionTriggerRatio = 0.7;
+      var defaultContextCompressionTriggerPercent = 70;
+      var minContextCompressionTriggerPercent = 10;
+      var maxContextCompressionTriggerPercent = 95;
+      var defaultContextSummaryBudgetTokens = 3000;
+      var minContextSummaryBudgetTokens = 500;
+      var maxContextSummaryBudgetTokens = 100000;
       var defaultHistoryRetentionDays = 7;
       var maxHistoryRetentionDays = 60;
 
@@ -2399,6 +2413,25 @@ export function getInputScript(): string {
         if (agentBudgetToolResultTokenBudget) {
           agentBudgetToolResultTokenBudget.value = formatBudgetKbFromTokens(normalizeIntegerInRange(values.toolResultTokenBudget, 0, maxToolResultTokenBudget, defaultToolResultTokenBudget));
         }
+        if (agentBudgetContextCompressionEnabled) {
+          agentBudgetContextCompressionEnabled.checked = typeof values.contextCompressionEnabled === 'boolean'
+            ? values.contextCompressionEnabled
+            : defaultContextCompressionEnabled;
+        }
+        if (agentBudgetContextKeepRecentTurns) {
+          agentBudgetContextKeepRecentTurns.value = String(normalizeIntegerInRange(values.contextKeepRecentTurns, 1, maxContextKeepRecentTurns, defaultContextKeepRecentTurns));
+        }
+        if (agentBudgetContextCompressionTriggerPercent) {
+          agentBudgetContextCompressionTriggerPercent.value = formatCompactNumber(
+            ratioToPercent(values.contextCompressionTriggerRatio)
+          );
+        }
+        if (agentBudgetContextSummaryBudget) {
+          agentBudgetContextSummaryBudget.value = formatBudgetKbFromTokens(
+            normalizeIntegerInRange(values.contextSummaryBudgetTokens, minContextSummaryBudgetTokens, maxContextSummaryBudgetTokens, defaultContextSummaryBudgetTokens)
+          );
+        }
+        syncContextCompressionControls();
         agentBudgetOverlay.classList.remove('hidden');
         if (agentBudgetMaxTokens) {
           agentBudgetMaxTokens.focus();
@@ -2430,8 +2463,45 @@ export function getInputScript(): string {
         return normalizeNumberInRange(value, 0, maxToolResultTokenBudget / tokensPerBudgetKb, defaultToolResultTokenBudget / tokensPerBudgetKb);
       }
 
+      function normalizeContextSummaryBudgetKb(value) {
+        return normalizeNumberInRange(
+          value,
+          minContextSummaryBudgetTokens / tokensPerBudgetKb,
+          maxContextSummaryBudgetTokens / tokensPerBudgetKb,
+          defaultContextSummaryBudgetTokens / tokensPerBudgetKb
+        );
+      }
+
+      function normalizeContextCompressionTriggerPercent(value) {
+        return normalizeNumberInRange(
+          value,
+          minContextCompressionTriggerPercent,
+          maxContextCompressionTriggerPercent,
+          defaultContextCompressionTriggerPercent
+        );
+      }
+
+      function ratioToPercent(value) {
+        var ratio = normalizeNumberInRange(value, 0.1, 0.95, defaultContextCompressionTriggerRatio);
+        return Math.round(ratio * 10000) / 100;
+      }
+
+      function percentToRatio(value) {
+        var percent = normalizeContextCompressionTriggerPercent(value);
+        return Math.round(percent * 100) / 10000;
+      }
+
       function budgetKbToTokens(value) {
         return Math.round(Number(value) * tokensPerBudgetKb);
+      }
+
+      function formatCompactNumber(value) {
+        var number = Number(value);
+        if (!Number.isFinite(number)) {
+          return '0';
+        }
+        var rounded = Math.round(number * 100) / 100;
+        return String(rounded).replace(/\\.00$/u, '').replace(/(\\.\\d)0$/u, '$1');
       }
 
       function formatBudgetKbFromTokens(value) {
@@ -2439,8 +2509,7 @@ export function getInputScript(): string {
         if (!Number.isFinite(kb)) {
           return '0';
         }
-        var rounded = Math.round(kb * 100) / 100;
-        return String(rounded).replace(/\\.00$/u, '').replace(/(\\.\\d)0$/u, '$1');
+        return formatCompactNumber(kb);
       }
 
       function normalizeRunMsToSeconds(value) {
@@ -2467,6 +2536,19 @@ export function getInputScript(): string {
           return fallback;
         }
         return Math.min(max, Math.max(min, Math.floor(number)));
+      }
+
+      function syncContextCompressionControls() {
+        var enabled = !agentBudgetContextCompressionEnabled || agentBudgetContextCompressionEnabled.checked;
+        [
+          agentBudgetContextKeepRecentTurns,
+          agentBudgetContextCompressionTriggerPercent,
+          agentBudgetContextSummaryBudget
+        ].forEach(function(input) {
+          if (input) {
+            input.disabled = !enabled;
+          }
+        });
       }
 
       function hideSettingsDialog() {
@@ -2516,6 +2598,28 @@ export function getInputScript(): string {
           var streamIdleTimeoutMs = streamIdleSeconds * 1000;
           var toolResultBudgetKb = normalizeToolResultBudgetKb(agentBudgetToolResultTokenBudget ? agentBudgetToolResultTokenBudget.value : defaultToolResultTokenBudget / tokensPerBudgetKb);
           var toolResultTokenBudget = normalizeIntegerInRange(budgetKbToTokens(toolResultBudgetKb), 0, maxToolResultTokenBudget, defaultToolResultTokenBudget);
+          var contextCompressionEnabled = agentBudgetContextCompressionEnabled
+            ? agentBudgetContextCompressionEnabled.checked
+            : defaultContextCompressionEnabled;
+          var contextKeepRecentTurns = normalizeIntegerInRange(
+            agentBudgetContextKeepRecentTurns ? agentBudgetContextKeepRecentTurns.value : defaultContextKeepRecentTurns,
+            1,
+            maxContextKeepRecentTurns,
+            defaultContextKeepRecentTurns
+          );
+          var contextCompressionTriggerPercent = normalizeContextCompressionTriggerPercent(
+            agentBudgetContextCompressionTriggerPercent ? agentBudgetContextCompressionTriggerPercent.value : defaultContextCompressionTriggerPercent
+          );
+          var contextCompressionTriggerRatio = percentToRatio(contextCompressionTriggerPercent);
+          var contextSummaryBudgetKb = normalizeContextSummaryBudgetKb(
+            agentBudgetContextSummaryBudget ? agentBudgetContextSummaryBudget.value : defaultContextSummaryBudgetTokens / tokensPerBudgetKb
+          );
+          var contextSummaryBudgetTokens = normalizeIntegerInRange(
+            budgetKbToTokens(contextSummaryBudgetKb),
+            minContextSummaryBudgetTokens,
+            maxContextSummaryBudgetTokens,
+            defaultContextSummaryBudgetTokens
+          );
           if (agentBudgetMaxTokens) {
             agentBudgetMaxTokens.value = formatBudgetKbFromTokens(maxTokens);
           }
@@ -2534,6 +2638,19 @@ export function getInputScript(): string {
           if (agentBudgetToolResultTokenBudget) {
             agentBudgetToolResultTokenBudget.value = formatBudgetKbFromTokens(toolResultTokenBudget);
           }
+          if (agentBudgetContextCompressionEnabled) {
+            agentBudgetContextCompressionEnabled.checked = contextCompressionEnabled;
+          }
+          if (agentBudgetContextKeepRecentTurns) {
+            agentBudgetContextKeepRecentTurns.value = String(contextKeepRecentTurns);
+          }
+          if (agentBudgetContextCompressionTriggerPercent) {
+            agentBudgetContextCompressionTriggerPercent.value = formatCompactNumber(contextCompressionTriggerPercent);
+          }
+          if (agentBudgetContextSummaryBudget) {
+            agentBudgetContextSummaryBudget.value = formatBudgetKbFromTokens(contextSummaryBudgetTokens);
+          }
+          syncContextCompressionControls();
           vscode.postMessage({
             type: 'saveAgentBudgetSettings',
             maxTokens: maxTokens,
@@ -2541,11 +2658,19 @@ export function getInputScript(): string {
             maxToolCalls: maxToolCalls,
             maxRunMs: maxRunMs,
             streamIdleTimeoutMs: streamIdleTimeoutMs,
-            toolResultTokenBudget: toolResultTokenBudget
+            toolResultTokenBudget: toolResultTokenBudget,
+            contextCompressionEnabled: contextCompressionEnabled,
+            contextKeepRecentTurns: contextKeepRecentTurns,
+            contextCompressionTriggerRatio: contextCompressionTriggerRatio,
+            contextSummaryBudgetTokens: contextSummaryBudgetTokens
           });
           setComposerStatus(t('agentBudgetSettingsSaved'));
           hideAgentBudgetDialog();
         });
+      }
+
+      if (agentBudgetContextCompressionEnabled) {
+        agentBudgetContextCompressionEnabled.addEventListener('change', syncContextCompressionControls);
       }
 
       if (historySettingsSaveBtn) {

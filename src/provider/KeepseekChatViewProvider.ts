@@ -30,6 +30,10 @@ import { DraftEditStore } from '../edits/draftEditStore';
 import { openFileReference } from '../context/references/fileReferenceOpener';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
+  DEFAULT_CONTEXT_COMPRESSION_ENABLED,
+  DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO,
+  DEFAULT_CONTEXT_KEEP_RECENT_TURNS,
+  DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS,
   DEFAULT_HISTORY_RETENTION_DAYS,
   DEFAULT_MAX_TOKENS,
   DEFAULT_MAX_RUN_MS,
@@ -38,6 +42,7 @@ import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_TOOL_RESULT_TOKEN_BUDGET,
   getConfiguredAgentSettings,
+  getConfiguredContextCompressionSettings,
   getConfiguredDebugMode,
   getConfiguredHistoryRetentionDays,
   getConfiguredMaxFileBytes,
@@ -51,14 +56,21 @@ import {
   getConfiguredToolResultTokenBudget,
   MAX_GENERATION_TOKENS,
   MAX_HISTORY_RETENTION_DAYS,
+  MAX_CONTEXT_COMPRESSION_TRIGGER_RATIO,
+  MAX_CONTEXT_KEEP_RECENT_TURNS,
+  MAX_CONTEXT_SUMMARY_BUDGET_TOKENS,
   MAX_RUN_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
   MAX_TOOL_CALLS,
   MAX_TOOL_ITERATIONS,
   MAX_TOOL_RESULT_TOKEN_BUDGET,
+  MIN_CONTEXT_COMPRESSION_TRIGGER_RATIO,
+  MIN_CONTEXT_KEEP_RECENT_TURNS,
+  MIN_CONTEXT_SUMMARY_BUDGET_TOKENS,
   MIN_HISTORY_RETENTION_DAYS,
   normalizeAgentSettings,
-  normalizeIntegerInRange
+  normalizeIntegerInRange,
+  normalizeNumberInRange
 } from '../shared/config';
 import { getErrorMessage } from '../shared/errors';
 import { formatBytes } from '../shared/format';
@@ -566,6 +578,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       case 'openAgentBudgetSettings': {
+        const contextCompression = getConfiguredContextCompressionSettings();
         this.postToWebview({
           type: 'showAgentBudgetDialog',
           maxTokens: getConfiguredMaxTokens(),
@@ -573,7 +586,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           maxToolCalls: getConfiguredMaxToolCalls(),
           maxRunMs: getConfiguredMaxRunMs(),
           streamIdleTimeoutMs: getConfiguredStreamIdleTimeoutMs(),
-          toolResultTokenBudget: getConfiguredToolResultTokenBudget()
+          toolResultTokenBudget: getConfiguredToolResultTokenBudget(),
+          contextCompressionEnabled: contextCompression.enabled,
+          contextKeepRecentTurns: contextCompression.keepRecentTurns,
+          contextCompressionTriggerRatio: contextCompression.triggerRatio,
+          contextSummaryBudgetTokens: contextCompression.summaryBudgetTokens
         });
         return;
       }
@@ -599,6 +616,41 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await config.update('maxRunMs', normalizeIntegerInRange(message.maxRunMs, 0, MAX_RUN_MS, DEFAULT_MAX_RUN_MS), vscode.ConfigurationTarget.Global);
         await config.update('streamIdleTimeoutMs', normalizeIntegerInRange(message.streamIdleTimeoutMs, 0, MAX_STREAM_IDLE_TIMEOUT_MS, DEFAULT_STREAM_IDLE_TIMEOUT_MS), vscode.ConfigurationTarget.Global);
         await config.update('toolResultTokenBudget', normalizeIntegerInRange(message.toolResultTokenBudget, 0, MAX_TOOL_RESULT_TOKEN_BUDGET, DEFAULT_TOOL_RESULT_TOKEN_BUDGET), vscode.ConfigurationTarget.Global);
+        await config.update(
+          'contextCompressionEnabled',
+          typeof message.contextCompressionEnabled === 'boolean' ? message.contextCompressionEnabled : DEFAULT_CONTEXT_COMPRESSION_ENABLED,
+          vscode.ConfigurationTarget.Global
+        );
+        await config.update(
+          'contextKeepRecentTurns',
+          normalizeIntegerInRange(
+            message.contextKeepRecentTurns,
+            MIN_CONTEXT_KEEP_RECENT_TURNS,
+            MAX_CONTEXT_KEEP_RECENT_TURNS,
+            DEFAULT_CONTEXT_KEEP_RECENT_TURNS
+          ),
+          vscode.ConfigurationTarget.Global
+        );
+        await config.update(
+          'contextCompressionTriggerRatio',
+          normalizeNumberInRange(
+            message.contextCompressionTriggerRatio,
+            MIN_CONTEXT_COMPRESSION_TRIGGER_RATIO,
+            MAX_CONTEXT_COMPRESSION_TRIGGER_RATIO,
+            DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO
+          ),
+          vscode.ConfigurationTarget.Global
+        );
+        await config.update(
+          'contextSummaryBudgetTokens',
+          normalizeIntegerInRange(
+            message.contextSummaryBudgetTokens,
+            MIN_CONTEXT_SUMMARY_BUDGET_TOKENS,
+            MAX_CONTEXT_SUMMARY_BUDGET_TOKENS,
+            DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS
+          ),
+          vscode.ConfigurationTarget.Global
+        );
         vscode.window.showInformationMessage(this.t('agentBudgetSettingsSaved'));
         return;
       }
