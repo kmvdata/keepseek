@@ -1541,9 +1541,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       model,
       contextFiles: this.fileContext.getAll(),
       language: this.language
-    }, (update) => {
-      void this.applyBackgroundContextCompressionRefresh(activeSession, update);
-    });
+    }, (update) => this.applyBackgroundContextCompressionRefresh(activeSession, update));
   }
 
   private async applyBackgroundContextCompressionRefresh(
