@@ -778,6 +778,10 @@ export function getScript(): string {
         if (window.keepseekInputControls && window.keepseekInputControls.showHistorySettingsDialog) {
           window.keepseekInputControls.showHistorySettingsDialog(message);
         }
+      } else if (message.type === 'skillDraftCreated') {
+        if (window.keepseekInputControls && window.keepseekInputControls.onSkillDraftCreated) {
+          window.keepseekInputControls.onSkillDraftCreated(message);
+        }
       } else if (message.type === 'otherWorkspaces') {
         otherWorkspacesError = message.error || '';
         if (!otherWorkspacesError) {

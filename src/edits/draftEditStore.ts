@@ -46,11 +46,12 @@ export class DraftEditStore {
         this.recordAppliedEdit(edit);
         await this.sessionStore.persist();
       }
+      return applied;
     } catch (error) {
       vscode.window.showErrorMessage(getErrorMessage(error));
     }
 
-    return true;
+    return false;
   }
 
   public async applyAll(): Promise<boolean> {
@@ -81,7 +82,7 @@ export class DraftEditStore {
     if (appliedAny) {
       await this.sessionStore.persist();
     }
-    return true;
+    return appliedAny;
   }
 
   private recordAppliedEdit(edit: DraftEdit): void {

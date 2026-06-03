@@ -93,8 +93,8 @@ export function getInputTemplate(): string {
               role="menuitem"
             >
               <span class="command-row-main">
-                <span class="command-row-title" data-i18n="createSkill">Create Skill...</span>
-                <span class="command-row-description" data-i18n="createSkillDescription">预留入口：未来通过 DraftEdit 创建 SKILL.md</span>
+                <span class="command-row-title" data-i18n="createSkill">/create-skill</span>
+                <span class="command-row-description" data-i18n="createSkillDescription">通过 DraftEdit 创建 workspace skill</span>
               </span>
             </button>
           </section>
@@ -279,6 +279,43 @@ export function getInputTemplate(): string {
         <div class="settings-dialog-footer">
           <button id="historySettingsCancelBtn" type="button" class="secondary" data-i18n="cancel">取消</button>
           <button id="historySettingsSaveBtn" type="button" data-i18n="save">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="createSkillDialogOverlay" class="settings-overlay hidden">
+      <div class="settings-dialog" role="dialog" aria-label="Create Skill" data-i18n-aria-label="createSkillDialogLabel">
+        <div class="settings-dialog-header">
+          <span class="settings-dialog-title" data-i18n="createSkillDialogTitle">Create Skill</span>
+        </div>
+        <div class="settings-dialog-body">
+          <p id="createSkillDialogStatus" class="settings-dialog-desc" data-i18n="createSkillDialogDesc">创建 .keepseek/skills/&lt;name&gt;/SKILL.md 待确认修改。</p>
+          <label class="settings-field">
+            <span class="settings-field-label" data-i18n="createSkillNameLabel">Skill name</span>
+            <input id="createSkillNameInput" class="settings-input" type="text" autocomplete="off" />
+          </label>
+          <label class="settings-field">
+            <span class="settings-field-label" data-i18n="createSkillDescriptionLabel">Description</span>
+            <textarea id="createSkillDescriptionInput" class="settings-input settings-textarea" rows="4"></textarea>
+          </label>
+          <label class="settings-field settings-toggle-field">
+            <span class="settings-toggle-copy">
+              <span class="settings-field-label" data-i18n="createSkillAllowAutoLabel">Allow Auto</span>
+            </span>
+            <input id="createSkillAllowImplicitInput" class="settings-toggle-input" type="checkbox" />
+            <span class="settings-toggle-track" aria-hidden="true"></span>
+          </label>
+          <label class="settings-field settings-toggle-field">
+            <span class="settings-toggle-copy">
+              <span class="settings-field-label" data-i18n="createSkillUserInvocableLabel">User Invocable</span>
+            </span>
+            <input id="createSkillUserInvocableInput" class="settings-toggle-input" type="checkbox" checked />
+            <span class="settings-toggle-track" aria-hidden="true"></span>
+          </label>
+        </div>
+        <div class="settings-dialog-footer">
+          <button id="createSkillCancelBtn" type="button" class="secondary" data-i18n="cancel">取消</button>
+          <button id="createSkillCreateBtn" type="button" data-i18n="createSkillCreateDraft">Create Draft</button>
         </div>
       </div>
     </div>`;

@@ -16,6 +16,7 @@ import {
   ChatMessageSkill,
   ChatSession,
   ContextUsageEstimate,
+  DraftEdit,
   KeepseekModel,
   WorkspaceSummary
 } from '../shared/types';
@@ -83,6 +84,7 @@ import { focusView } from './focusView';
 import type { DroppedFileReferenceInput, PromptReferenceInput, WebviewMessage } from './webviewMessages';
 import { InteractionTraceLogService } from '../agent/logging/interactionTrace';
 import { SkillStore } from '../skills/skillStore';
+import { SkillCreator } from '../skills/skillCreator';
 import {
   copySelectionTextWithClipboardRestore,
   createTextReferenceFileName,
@@ -107,6 +109,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly traceLogService: InteractionTraceLogService;
   private readonly draftEdits: DraftEditStore;
   private readonly skillStore: SkillStore;
+  private readonly skillCreator = new SkillCreator();
   private readonly sessionTraceLogUris = new Map<string, string>();
   private readonly authorizedExternalReferenceUris = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
@@ -727,8 +730,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'setSkillAllowImplicit':
         await this.setSkillAllowImplicit(message.skillId, message.allowImplicit);
         return;
-      case 'createSkill':
-        vscode.window.showInformationMessage(this.t('createSkillComingSoon'));
+      case 'createSkillDraft':
+        await this.createSkillDraft(message);
         return;
       case 'requestClipboardText':
         await this.postClipboardText(message.requestId);
@@ -762,6 +765,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'applyDraftEdit':
         if (await this.draftEdits.apply(message.id)) {
+          await this.refreshSkills({ post: false });
           this.postState();
         }
         return;
@@ -771,6 +775,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'applyAllDraftEdits':
         if (await this.draftEdits.applyAll()) {
+          await this.refreshSkills({ post: false });
           this.postState();
         }
         return;
@@ -1127,6 +1132,59 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.postState();
+  }
+
+  private async createSkillDraft(message: Extract<WebviewMessage, { type: 'createSkillDraft' }>): Promise<void> {
+    if (!vscode.workspace.isTrusted) {
+      vscode.window.showErrorMessage(this.t('createSkillWorkspaceUntrusted'));
+      return;
+    }
+
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      vscode.window.showErrorMessage(this.t('createSkillWorkspaceRequired'));
+      return;
+    }
+
+    try {
+      const draft = this.skillCreator.createDraft({
+        workspaceFolder,
+        rawName: message.name,
+        description: message.description,
+        allowImplicit: message.allowImplicit,
+        userInvocable: message.userInvocable,
+        language: this.language
+      });
+
+      if (await this.uriExists(draft.targetUri)) {
+        vscode.window.showErrorMessage(this.t('createSkillAlreadyExists', { label: draft.label }));
+        return;
+      }
+
+      const edit: DraftEdit = {
+        id: randomUUID(),
+        uri: draft.targetUri.toString(),
+        label: draft.label,
+        action: 'create',
+        newText: draft.content,
+        reason: draft.reason
+      };
+      this.draftEdits.addMany([edit]);
+      this.postState();
+      this.postToWebview({ type: 'skillDraftCreated', label: draft.label });
+      vscode.window.showInformationMessage(this.t('createSkillDraftCreated', { label: draft.label }));
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('cannotCreateSkillDraft', { message: getErrorMessage(error) }));
+    }
+  }
+
+  private async uriExists(uri: vscode.Uri): Promise<boolean> {
+    try {
+      await vscode.workspace.fs.stat(uri);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async postPromptContextUsageEstimate(message: Extract<WebviewMessage, { type: 'estimatePromptContextUsage' }>): Promise<void> {

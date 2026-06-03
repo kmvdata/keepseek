@@ -1074,6 +1074,13 @@ export function getInputStyles(): string {
       cursor: not-allowed;
     }
 
+    .settings-textarea {
+      min-height: 82px;
+      resize: vertical;
+      line-height: 1.4;
+      font-family: var(--vscode-font-family);
+    }
+
     .settings-secret-input {
       display: grid;
       grid-template-columns: minmax(0, 1fr) 28px;

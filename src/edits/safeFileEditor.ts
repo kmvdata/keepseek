@@ -21,6 +21,9 @@ export class SafeFileEditor {
     }
 
     const wasOpen = this.isOpenInEditor(uri);
+    if (edit.action === 'create') {
+      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
+    }
     await vscode.workspace.fs.writeFile(uri, this.encoder.encode(edit.newText));
     const document = await vscode.workspace.openTextDocument(uri);
     await vscode.window.showTextDocument(document, { preview: false });

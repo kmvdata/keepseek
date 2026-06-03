@@ -84,6 +84,9 @@ export function getInputScript(): string {
         sanitizePromptContent();
         var prompt = serializePrompt();
         if (!prompt.trim()) return;
+        if (handleSlashCommandPrompt(prompt)) {
+          return;
+        }
         closeCommandMenu();
         closeReferenceMenu(false);
         vscode.postMessage({
@@ -274,9 +277,8 @@ export function getInputScript(): string {
           event.preventDefault();
           event.stopPropagation();
           consumeSlashTrigger(false);
-          vscode.postMessage({ type: 'createSkill' });
-          setComposerStatus(t('createSkillComingSoon'));
           closeCommandMenu();
+          showCreateSkillDialog();
         });
       }
 
@@ -1099,6 +1101,7 @@ export function getInputScript(): string {
         if (!commandMenu) { return; }
         renderCommandModel();
         renderCommandSkills();
+        renderCreateSkillCommand();
         renderEffort();
       }
 
@@ -1174,6 +1177,13 @@ export function getInputScript(): string {
         for (var i = 0; i < skills.length; i++) {
           commandSkillList.append(createCommandSkillItem(skills[i]));
         }
+      }
+
+      function renderCreateSkillCommand() {
+        if (!commandCreateSkillButton) { return; }
+        var disabledReason = getCreateSkillDisabledReason();
+        commandCreateSkillButton.disabled = Boolean(disabledReason);
+        commandCreateSkillButton.title = disabledReason || '';
       }
 
       function createCommandSkillItem(skill) {
@@ -2140,6 +2150,16 @@ export function getInputScript(): string {
         };
       }
 
+      function getCreateSkillDisabledReason() {
+        if (!getSkillsState().workspaceTrusted) {
+          return t('createSkillWorkspaceUntrusted');
+        }
+        if (!Array.isArray(state.workspaceFolders) || !state.workspaceFolders.length) {
+          return t('createSkillWorkspaceRequired');
+        }
+        return '';
+      }
+
       function getSkillItems() {
         return getSkillsState().items;
       }
@@ -2712,6 +2732,24 @@ export function getInputScript(): string {
         updatePromptVisualState();
       }
 
+      function handleSlashCommandPrompt(prompt) {
+        var command = String(prompt || '').trim().toLowerCase();
+        if (command === '/create-skill') {
+          clearPrompt();
+          showCreateSkillDialog();
+          return true;
+        }
+        if (command === '/skills') {
+          clearPrompt();
+          commandSkillListOpen = true;
+          commandModelListOpen = false;
+          vscode.postMessage({ type: 'requestSkills' });
+          openCommandMenu();
+          return true;
+        }
+        return false;
+      }
+
       var settingsOverlay = document.getElementById('settingsDialogOverlay');
       var settingsApiKey = document.getElementById('settingsApiKey');
       var settingsApiKeyVisibilityBtn = document.getElementById('settingsApiKeyVisibilityBtn');
@@ -2729,6 +2767,12 @@ export function getInputScript(): string {
       var agentBudgetContextSummaryBudget = document.getElementById('agentBudgetContextSummaryBudget');
       var historySettingsOverlay = document.getElementById('historySettingsDialogOverlay');
       var historyRetentionDaysInput = document.getElementById('historyRetentionDaysInput');
+      var createSkillOverlay = document.getElementById('createSkillDialogOverlay');
+      var createSkillDialogStatus = document.getElementById('createSkillDialogStatus');
+      var createSkillNameInput = document.getElementById('createSkillNameInput');
+      var createSkillDescriptionInput = document.getElementById('createSkillDescriptionInput');
+      var createSkillAllowImplicitInput = document.getElementById('createSkillAllowImplicitInput');
+      var createSkillUserInvocableInput = document.getElementById('createSkillUserInvocableInput');
       var settingsClearApiKeyBtn = document.getElementById('settingsClearApiKeyBtn');
       var settingsSaveBtn = document.getElementById('settingsSaveBtn');
       var settingsCancelBtn = document.getElementById('settingsCancelBtn');
@@ -2736,6 +2780,8 @@ export function getInputScript(): string {
       var agentBudgetCancelBtn = document.getElementById('agentBudgetCancelBtn');
       var historySettingsSaveBtn = document.getElementById('historySettingsSaveBtn');
       var historySettingsCancelBtn = document.getElementById('historySettingsCancelBtn');
+      var createSkillCreateBtn = document.getElementById('createSkillCreateBtn');
+      var createSkillCancelBtn = document.getElementById('createSkillCancelBtn');
       var apiKeyVisible = false;
       var defaultMaxTokens = 64000;
       var maxGenerationTokens = 384000;
@@ -2849,6 +2895,38 @@ export function getInputScript(): string {
         if (historyRetentionDaysInput) {
           historyRetentionDaysInput.focus();
           historyRetentionDaysInput.select();
+        }
+      }
+
+      function showCreateSkillDialog() {
+        var disabledReason = getCreateSkillDisabledReason();
+        if (disabledReason) {
+          setComposerStatus(disabledReason);
+          return;
+        }
+        if (!createSkillOverlay) { return; }
+        if (createSkillNameInput) {
+          createSkillNameInput.value = '';
+        }
+        if (createSkillDescriptionInput) {
+          createSkillDescriptionInput.value = '';
+        }
+        if (createSkillAllowImplicitInput) {
+          createSkillAllowImplicitInput.checked = false;
+        }
+        if (createSkillUserInvocableInput) {
+          createSkillUserInvocableInput.checked = true;
+        }
+        setCreateSkillDialogStatus(t('createSkillDialogDesc'));
+        createSkillOverlay.classList.remove('hidden');
+        if (createSkillNameInput) {
+          createSkillNameInput.focus();
+        }
+      }
+
+      function setCreateSkillDialogStatus(message) {
+        if (createSkillDialogStatus) {
+          createSkillDialogStatus.textContent = message || t('createSkillDialogDesc');
         }
       }
 
@@ -2968,6 +3046,61 @@ export function getInputScript(): string {
         if (!historySettingsOverlay) { return; }
         historySettingsOverlay.classList.add('hidden');
         promptInput.focus();
+      }
+
+      function hideCreateSkillDialog(shouldFocusPrompt) {
+        if (!createSkillOverlay) { return; }
+        createSkillOverlay.classList.add('hidden');
+        if (shouldFocusPrompt !== false) {
+          promptInput.focus();
+        }
+      }
+
+      function submitCreateSkillDraft() {
+        var disabledReason = getCreateSkillDisabledReason();
+        if (disabledReason) {
+          setCreateSkillDialogStatus(disabledReason);
+          setComposerStatus(disabledReason);
+          return;
+        }
+        var name = createSkillNameInput ? createSkillNameInput.value.trim() : '';
+        var description = createSkillDescriptionInput ? createSkillDescriptionInput.value.trim() : '';
+        if (!name) {
+          setCreateSkillDialogStatus(t('createSkillNameRequired'));
+          if (createSkillNameInput) { createSkillNameInput.focus(); }
+          return;
+        }
+        if (/[\\x00-\\x1f\\x7f]/u.test(name) || name.indexOf('..') >= 0 || name.indexOf('/') >= 0 || name.indexOf('\\\\') >= 0) {
+          setCreateSkillDialogStatus(t('createSkillNameInvalid'));
+          if (createSkillNameInput) { createSkillNameInput.focus(); }
+          return;
+        }
+        var normalizedName = name.replace(/\\s+/gu, '-').replace(/-+/gu, '-').toLowerCase();
+        if (!/^[a-z0-9_-]+$/u.test(normalizedName) || !/[a-z0-9]/u.test(normalizedName)) {
+          setCreateSkillDialogStatus(t('createSkillNameInvalid'));
+          if (createSkillNameInput) { createSkillNameInput.focus(); }
+          return;
+        }
+        if (!description) {
+          setCreateSkillDialogStatus(t('createSkillDescriptionRequired'));
+          if (createSkillDescriptionInput) { createSkillDescriptionInput.focus(); }
+          return;
+        }
+        vscode.postMessage({
+          type: 'createSkillDraft',
+          name: name,
+          description: description,
+          allowImplicit: createSkillAllowImplicitInput ? createSkillAllowImplicitInput.checked : false,
+          userInvocable: createSkillUserInvocableInput ? createSkillUserInvocableInput.checked : true
+        });
+        setCreateSkillDialogStatus(t('createSkillDraftRequested'));
+        setComposerStatus(t('createSkillDraftRequested'));
+      }
+
+      function onSkillDraftCreated(message) {
+        var label = message && typeof message.label === 'string' ? message.label : '';
+        hideCreateSkillDialog();
+        setComposerStatus(t('createSkillDraftCreatedStatus', { label: label }));
       }
 
       if (settingsSaveBtn) {
@@ -3094,6 +3227,12 @@ export function getInputScript(): string {
         });
       }
 
+      if (createSkillCreateBtn) {
+        createSkillCreateBtn.addEventListener('click', function() {
+          submitCreateSkillDraft();
+        });
+      }
+
       if (settingsClearApiKeyBtn) {
         settingsClearApiKeyBtn.addEventListener('click', function(event) {
           event.preventDefault();
@@ -3123,6 +3262,19 @@ export function getInputScript(): string {
           hideHistorySettingsDialog();
         });
       }
+
+      if (createSkillCancelBtn) {
+        createSkillCancelBtn.addEventListener('click', function() {
+          hideCreateSkillDialog();
+        });
+      }
+
+      [createSkillNameInput, createSkillDescriptionInput].forEach(function(input) {
+        if (!input) { return; }
+        input.addEventListener('input', function() {
+          setCreateSkillDialogStatus(t('createSkillDialogDesc'));
+        });
+      });
 
       if (settingsApiKeyVisibilityBtn) {
         settingsApiKeyVisibilityBtn.addEventListener('click', function(event) {
@@ -3182,6 +3334,24 @@ export function getInputScript(): string {
           } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             if (historySettingsSaveBtn) { historySettingsSaveBtn.click(); }
+          }
+        });
+      }
+
+      if (createSkillOverlay) {
+        createSkillOverlay.addEventListener('click', function(event) {
+          if (event.target === createSkillOverlay) {
+            hideCreateSkillDialog();
+          }
+        });
+
+        createSkillOverlay.addEventListener('keydown', function(event) {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            hideCreateSkillDialog();
+          } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            submitCreateSkillDraft();
           }
         });
       }
@@ -3287,6 +3457,7 @@ export function getInputScript(): string {
         showSettingsDialog: showSettingsDialog,
         showAgentBudgetDialog: showAgentBudgetDialog,
         showHistorySettingsDialog: showHistorySettingsDialog,
+        onSkillDraftCreated: onSkillDraftCreated,
         resetPromptUsageEstimate: resetPromptUsageEstimate,
         isPromptSubmittableEmpty: isPromptSubmittableEmpty,
         clearPrompt: clearPrompt

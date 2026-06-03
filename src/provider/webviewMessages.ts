@@ -76,7 +76,7 @@ export type WebviewMessage =
   | { type: 'openSkill'; skillId: string }
   | { type: 'setSkillEnabled'; skillId: string; enabled: boolean }
   | { type: 'setSkillAllowImplicit'; skillId: string; allowImplicit: boolean }
-  | { type: 'createSkill' }
+  | { type: 'createSkillDraft'; name: string; description: string; allowImplicit: boolean; userInvocable: boolean }
   | { type: 'requestClipboardText'; requestId: string }
   | { type: 'writeClipboardText'; text: string }
   | { type: 'readPath'; path: string }
