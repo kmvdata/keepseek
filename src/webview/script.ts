@@ -2546,10 +2546,9 @@ export function getScript(): string {
       var href = makeMessageFileHref(reference);
       anchor.className = 'rich-file-link';
       anchor.href = href;
-      anchor.title = href;
       anchor.draggable = false;
       anchor.setAttribute('contenteditable', 'false');
-      anchor.textContent = formatFileReferenceLabel(reference);
+      renderFileReferenceLinkLabel(anchor, reference);
       anchor.dataset.path = reference.path;
       anchor.dataset.kind = 'file';
       anchor.dataset.startLine = String(reference.startLine);
@@ -2564,10 +2563,9 @@ export function getScript(): string {
       var href = makeMessageDirectoryHref(reference);
       anchor.className = 'rich-file-link rich-directory-link';
       anchor.href = href;
-      anchor.title = href;
       anchor.draggable = false;
       anchor.setAttribute('contenteditable', 'false');
-      anchor.textContent = getMessageDirectoryName(reference.path);
+      renderFileReferenceLinkLabel(anchor, reference);
       anchor.dataset.path = reference.path;
       anchor.dataset.kind = 'directory';
       anchor.dataset.startLine = '0';
@@ -2644,7 +2642,7 @@ export function getScript(): string {
           link.setAttribute('href', directoryHref);
           link.setAttribute('contenteditable', 'false');
           link.draggable = false;
-          link.title = directoryHref;
+          renderFileReferenceLinkLabel(link, { path: directoryPath, kind: 'directory', startLine: 0, endLine: 0, startColumn: 0, endColumn: 0 });
           link.dataset.startLine = '0';
           link.dataset.endLine = '0';
           link.dataset.startColumn = '0';
@@ -2667,7 +2665,7 @@ export function getScript(): string {
         link.setAttribute('href', makeMessageFileHref(reference));
         link.setAttribute('contenteditable', 'false');
         link.draggable = false;
-        link.title = makeMessageFileHref(reference);
+        renderFileReferenceLinkLabel(link, reference);
       });
     }
 
@@ -2713,13 +2711,18 @@ export function getScript(): string {
     function inlineFileReferenceLinkToText(link) {
       var reference = readInlineFileReferenceLink(link);
       if (reference.kind === 'directory') {
-        var directoryLabel = link.textContent || getMessageDirectoryName(reference.path);
-        return directoryLabel + ' <' + makeMessageDirectoryHref(reference) + '>';
+        var directoryLabel = getMessageDirectoryName(reference.path);
+        return makeStandaloneInlineReferenceText(directoryLabel + ' <' + makeMessageDirectoryHref(reference) + '>');
       }
       if (reference.startLine > 0 && reference.endLine < reference.startLine) {
         reference.endLine = reference.startLine;
       }
-      return formatFileReferenceTextLabel(reference) + String.fromCharCode(10) + '<' + makeMessageFileHref(reference) + '>';
+      return makeStandaloneInlineReferenceText(formatFileReferenceTextLabel(reference) + String.fromCharCode(10) + '<' + makeMessageFileHref(reference) + '>');
+    }
+
+    function makeStandaloneInlineReferenceText(text) {
+      var lineBreak = String.fromCharCode(10);
+      return lineBreak + text + lineBreak;
     }
 
     function collectInlineEditorFileReferences(editor) {
@@ -4522,9 +4525,38 @@ export function getScript(): string {
     }
 
     function formatFileReferenceLabelContents(reference) {
+      var label = getReferenceChipLabel(reference);
+      return label.secondary ? label.primary + ' - ' + label.secondary : label.primary;
+    }
+
+    function renderFileReferenceLinkLabel(anchor, reference) {
+      var label = getReferenceChipLabel(reference);
+      anchor.textContent = '';
+      anchor.append(createReferenceChipLabelPart('rich-file-link-primary', label.primary));
+      if (label.secondary) {
+        anchor.append(createReferenceChipLabelPart('rich-file-link-secondary', label.secondary));
+      }
+      var title = getReferenceChipTitle(reference);
+      anchor.title = title;
+      anchor.setAttribute('aria-label', title);
+    }
+
+    function createReferenceChipLabelPart(className, text) {
+      var span = document.createElement('span');
+      span.className = className;
+      span.textContent = text;
+      return span;
+    }
+
+    function getReferenceChipLabel(reference) {
+      var isDirectory = reference.kind === 'directory';
       var displayPath = getReferenceDisplayPath(reference.path);
-      if (reference.startLine > 0) {
-        return displayPath + '(' + formatLineReferenceLabel(
+      var targetPath = isDirectory
+        ? stripTrailingReferenceSlashes(normalizeReferencePath(displayPath))
+        : normalizeReferencePath(displayPath);
+      var primary = isDirectory ? getMessageDirectoryName(targetPath) : getMessageFileName(targetPath);
+      if (!isDirectory && reference.startLine > 0) {
+        primary += ' (' + formatLineReferenceLabel(
           reference.startLine,
           reference.endLine,
           reference.startColumn,
@@ -4532,7 +4564,69 @@ export function getScript(): string {
           getLanguage()
         ) + ')';
       }
-      return displayPath;
+      return {
+        primary: primary,
+        secondary: getCompactReferenceParentPath(targetPath)
+      };
+    }
+
+    function getReferenceChipTitle(reference) {
+      var isDirectory = reference.kind === 'directory';
+      var fullPath = getReferenceFullPath(reference.path);
+      if (!isDirectory && reference.startLine > 0) {
+        return fullPath + ' (' + formatLineReferenceLabel(
+          reference.startLine,
+          reference.endLine,
+          reference.startColumn,
+          reference.endColumn,
+          getLanguage()
+        ) + ')';
+      }
+      return isDirectory ? ensureTrailingReferenceSlash(fullPath) : fullPath;
+    }
+
+    function getReferenceFullPath(filePath) {
+      var pathName = getFileReferencePathname(filePath);
+      if (isAbsoluteReferencePath(pathName)) {
+        return normalizeReferencePath(pathName);
+      }
+      return normalizeReferencePath(resolveReferencePathToAbsolutePath(pathName) || pathName);
+    }
+
+    function getCompactReferenceParentPath(targetPath) {
+      var normalizedPath = stripTrailingReferenceSlashes(normalizeReferencePath(targetPath));
+      var lastSlash = normalizedPath.lastIndexOf('/');
+      if (lastSlash <= 0) {
+        return '';
+      }
+      var parentPath = normalizedPath.slice(0, lastSlash);
+      var parts = parentPath.split('/').filter(function(part) { return Boolean(part); });
+      if (!parts.length) {
+        return '';
+      }
+      var maxSegments = 3;
+      var visibleParts = parts.length > maxSegments ? parts.slice(parts.length - maxSegments) : parts;
+      var compactPath = visibleParts.map(compactReferencePathSegment).join('/');
+      if (parts.length > maxSegments) {
+        return '.../' + compactPath;
+      }
+      if (parentPath.charAt(0) === '/' && !isMessageWindowsDrivePath(parentPath)) {
+        return '/' + compactPath;
+      }
+      return compactPath;
+    }
+
+    function compactReferencePathSegment(segment) {
+      var text = String(segment || '');
+      if (text.length <= 36) {
+        return text;
+      }
+      return text.slice(0, 18) + '...' + text.slice(-10);
+    }
+
+    function ensureTrailingReferenceSlash(value) {
+      var text = String(value || '');
+      return text.charAt(text.length - 1) === '/' ? text : text + '/';
     }
 
     function stripFileReferenceLabelBrackets(value) {

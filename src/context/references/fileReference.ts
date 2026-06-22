@@ -92,7 +92,7 @@ function findPromptFileReferences(prompt: string, language: KeepseekLanguage): P
       parsed.endColumn,
       language
     );
-    if (replacementStart >= matchStart) {
+    if (replacementStart > matchStart) {
       continue;
     }
     if (!isStandaloneReferenceLine(prompt, replacementStart, matchEnd)) {

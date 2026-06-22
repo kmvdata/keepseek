@@ -76,6 +76,39 @@ export function getInputStyles(): string {
       cursor: pointer;
     }
 
+    .rich-input .rich-file-link,
+    .message-edit-input .rich-file-link {
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: center;
+      max-width: 100%;
+      min-height: 22px;
+      max-height: 38px;
+      padding: 2px 6px;
+      line-height: 15px;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .rich-input .rich-file-link-primary,
+    .rich-input .rich-file-link-secondary,
+    .message-edit-input .rich-file-link-primary,
+    .message-edit-input .rich-file-link-secondary {
+      display: block;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .rich-input .rich-file-link-secondary,
+    .message-edit-input .rich-file-link-secondary {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 14px;
+      opacity: 0.85;
+    }
+
     .rich-file-link:hover {
       background: var(--vscode-toolbar-hoverBackground);
       color: var(--vscode-textLink-activeForeground);

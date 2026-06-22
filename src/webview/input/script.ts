@@ -2011,8 +2011,7 @@ export function getInputScript(): string {
         anchor.setAttribute('href', href);
         anchor.setAttribute('contenteditable', 'false');
         anchor.draggable = false;
-        anchor.title = href;
-        anchor.textContent = formatFileReferenceLabel(reference);
+        renderFileReferenceLinkLabel(anchor, reference);
         anchor.dataset.path = reference.path;
         anchor.dataset.kind = 'file';
         anchor.dataset.startLine = String(reference.startLine);
@@ -2029,8 +2028,7 @@ export function getInputScript(): string {
         anchor.setAttribute('href', href);
         anchor.setAttribute('contenteditable', 'false');
         anchor.draggable = false;
-        anchor.title = href;
-        anchor.textContent = getDirectoryName(reference.path);
+        renderFileReferenceLinkLabel(anchor, reference);
         anchor.dataset.path = reference.path;
         anchor.dataset.kind = 'directory';
         anchor.dataset.startLine = '0';
@@ -2494,13 +2492,18 @@ export function getInputScript(): string {
       function fileReferenceLinkToText(link) {
         var reference = readFileReferenceLink(link);
         if (reference.kind === 'directory') {
-          var directoryLabel = link.textContent || getDirectoryName(reference.path);
-          return directoryLabel + ' <' + makeDirectoryHref(reference) + '>';
+          var directoryLabel = getDirectoryName(reference.path);
+          return makeStandaloneReferenceText(directoryLabel + ' <' + makeDirectoryHref(reference) + '>');
         }
         if (reference.startLine > 0 && reference.endLine < reference.startLine) {
           reference.endLine = reference.startLine;
         }
-        return formatFileReferenceTextLabel(reference) + String.fromCharCode(10) + '<' + makeFileHref(reference) + '>';
+        return makeStandaloneReferenceText(formatFileReferenceTextLabel(reference) + String.fromCharCode(10) + '<' + makeFileHref(reference) + '>');
+      }
+
+      function makeStandaloneReferenceText(text) {
+        var lineBreak = String.fromCharCode(10);
+        return lineBreak + text + lineBreak;
       }
 
       function collectPromptFileReferences() {
@@ -2627,7 +2630,7 @@ export function getInputScript(): string {
             link.className = 'rich-file-link rich-directory-link';
             link.setAttribute('href', directoryHref);
             link.setAttribute('contenteditable', 'false');
-            link.title = directoryHref;
+            renderFileReferenceLinkLabel(link, { path: directoryPath, kind: 'directory', startLine: 0, endLine: 0, startColumn: 0, endColumn: 0 });
             link.dataset.startLine = '0';
             link.dataset.endLine = '0';
             link.dataset.startColumn = '0';
@@ -2642,7 +2645,7 @@ export function getInputScript(): string {
           var href = makeFileHref({ path: path, startLine: startLine, endLine: endLine, startColumn: startColumn, endColumn: endColumn });
           link.setAttribute('href', href);
           link.setAttribute('contenteditable', 'false');
-          link.title = href;
+          renderFileReferenceLinkLabel(link, { path: path, startLine: startLine, endLine: endLine, startColumn: startColumn, endColumn: endColumn });
         });
         var skillLinks = promptInput.querySelectorAll('a.rich-skill-link');
         skillLinks.forEach(function(link) {
@@ -2659,11 +2662,7 @@ export function getInputScript(): string {
         links.forEach(function(link) {
           var reference = readFileReferenceLink(link);
           if (!reference.path) { return; }
-          if (reference.kind === 'directory') {
-            link.textContent = getDirectoryName(reference.path);
-            return;
-          }
-          link.textContent = formatFileReferenceLabel(reference);
+          renderFileReferenceLinkLabel(link, reference);
         });
       }
 

@@ -94,7 +94,7 @@ function findPromptDirectoryReferences(prompt: string, language: KeepseekLanguag
 
     const matchEnd = matchStart + match[0].length;
     const replacementStart = getDirectoryReferenceReplacementStart(prompt, matchStart, uri, language);
-    if (replacementStart >= matchStart) {
+    if (replacementStart > matchStart) {
       continue;
     }
     if (!isStandaloneReferenceLine(prompt, replacementStart, matchEnd)) {
