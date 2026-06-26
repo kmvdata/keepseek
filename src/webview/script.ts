@@ -89,6 +89,86 @@ export function getScript(): string {
       return result;
     }
 
+    function getSkillItemsForView() {
+      var skills = state.skills && typeof state.skills === 'object' ? state.skills : {};
+      return Array.isArray(skills.items) ? skills.items : [];
+    }
+
+    function getSkillByIdForView(skillId) {
+      var items = getSkillItemsForView();
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].id === skillId) {
+          return items[i];
+        }
+      }
+      return null;
+    }
+
+    function getSkillByMentionNameForView(name) {
+      var normalized = String(name || '').trim().toLocaleLowerCase();
+      if (!normalized) { return null; }
+      var items = getSkillItemsForView();
+      for (var i = 0; i < items.length; i++) {
+        if (getSkillMentionNameForView(items[i]).toLocaleLowerCase() === normalized) {
+          return items[i];
+        }
+      }
+      return null;
+    }
+
+    function getSkillMentionNameForView(skill) {
+      var name = String(skill && skill.name || '').trim();
+      if (isSafeSkillMentionNameForView(name)) {
+        return name;
+      }
+      var fallback = getSkillDirectoryNameForView(skill);
+      if (isSafeSkillMentionNameForView(fallback)) {
+        return fallback;
+      }
+      return 'skill';
+    }
+
+    function getSkillPromptTextForView(skill) {
+      return '$' + getSkillMentionNameForView(skill);
+    }
+
+    function getSkillDirectoryNameForView(skill) {
+      var rootUri = String(skill && skill.rootUri || '');
+      var rootPath = rootUri;
+      try {
+        if (rootUri.indexOf('file:') === 0) {
+          rootPath = decodeURIComponent(new URL(rootUri).pathname || rootUri);
+        }
+      } catch (error) {
+        rootPath = rootUri;
+      }
+      var normalized = String(rootPath || '').split(String.fromCharCode(92)).join('/');
+      while (normalized.charAt(normalized.length - 1) === '/') {
+        normalized = normalized.slice(0, -1);
+      }
+      var parts = normalized.split('/');
+      return parts[parts.length - 1] || normalized || 'skill';
+    }
+
+    function isSafeSkillMentionNameForView(value) {
+      return /^[A-Za-z0-9_-]+$/u.test(String(value || ''));
+    }
+
+    function mergeSkillIdsForRequest() {
+      var seen = new Set();
+      var result = [];
+      for (var listIndex = 0; listIndex < arguments.length; listIndex++) {
+        var ids = arguments[listIndex] || [];
+        for (var i = 0; i < ids.length; i++) {
+          var normalized = String(ids[i] || '').trim();
+          if (!normalized || seen.has(normalized)) { continue; }
+          seen.add(normalized);
+          result.push(normalized);
+        }
+      }
+      return result;
+    }
+
     function createEmptyContextUsage(maxTokensEstimate) {
       var maxTokens = Math.max(1, Math.floor(Number(maxTokensEstimate) || 1000000));
       return {
@@ -262,7 +342,7 @@ export function getScript(): string {
         return;
       }
 
-      var inlineEditLink = target?.closest('.message-edit-input a.rich-file-link');
+      var inlineEditLink = target?.closest('.message-edit-input a.rich-file-link, .message-edit-input a.rich-skill-link');
       if (inlineEditLink && transcript.contains(inlineEditLink)) {
         event.preventDefault();
         event.stopPropagation();
@@ -277,6 +357,12 @@ export function getScript(): string {
 
     transcript.addEventListener('dblclick', function(event) {
       var target = event.target instanceof Element ? event.target : null;
+      var skillLink = target?.closest('.message-edit-input a.rich-skill-link');
+      if (skillLink && transcript.contains(skillLink)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       var link = target?.closest('.message-edit-input a.rich-file-link, a.message-file-link');
       if (!link || !transcript.contains(link)) return;
       event.preventDefault();
@@ -1810,7 +1896,10 @@ export function getScript(): string {
         modelId: state.selectedModelId,
         settings: getCurrentAgentSettings(),
         references: editor ? collectInlineEditorFileReferences(editor) : [],
-        skillIds: getActiveSkillIdsForRequest()
+        skillIds: mergeSkillIdsForRequest(
+          getActiveSkillIdsForRequest(),
+          editor ? collectInlineEditorSkillIds(editor) : []
+        )
       });
       editingMessageId = '';
       editingDraftText = '';
@@ -2382,7 +2471,9 @@ export function getScript(): string {
             if (shouldShowStreamingPlaceholder) {
               content.textContent = t('processing');
             } else {
-              renderMarkdownContent(content, message.content, message.role !== 'assistant');
+              renderMarkdownContent(content, message.content, message.role !== 'assistant', {
+                compactReferenceLinks: message.role === 'user'
+              });
             }
             body.append(content);
           }
@@ -2501,12 +2592,26 @@ export function getScript(): string {
     function renderInlineEditorContent(editor, value) {
       editor.innerHTML = '';
       var text = String(value || '');
-      var pattern = /<([^<>\\n]+)>/g;
+      var pattern = /<([^<>\\n]+)>|\\$([A-Za-z0-9_-]+)/g;
       var cursor = 0;
       var match;
 
       while ((match = pattern.exec(text)) !== null) {
+        var matchText = match[0] || '';
         if (isOffsetInsideMarkdownFence(text, match.index)) {
+          continue;
+        }
+        if (matchText.charAt(0) === '$') {
+          if (match.index < cursor) {
+            continue;
+          }
+          var skill = getSkillByMentionNameForView(match[2] || '');
+          if (!skill) {
+            continue;
+          }
+          appendInlineEditorText(editor, text.slice(cursor, match.index));
+          editor.append(createInlineSkillLink(skill));
+          cursor = match.index + matchText.length;
           continue;
         }
         var target = (match[1] || '').trim();
@@ -2542,36 +2647,22 @@ export function getScript(): string {
     }
 
     function createInlineFileReferenceLink(reference) {
-      var anchor = document.createElement('a');
-      var href = makeMessageFileHref(reference);
-      anchor.className = 'rich-file-link';
-      anchor.href = href;
-      anchor.draggable = false;
-      anchor.setAttribute('contenteditable', 'false');
-      renderFileReferenceLinkLabel(anchor, reference);
-      anchor.dataset.path = reference.path;
-      anchor.dataset.kind = 'file';
-      anchor.dataset.startLine = String(reference.startLine);
-      anchor.dataset.endLine = String(reference.endLine);
-      anchor.dataset.startColumn = String(reference.startColumn || 0);
-      anchor.dataset.endColumn = String(reference.endColumn || 0);
-      return anchor;
+      return createReferenceLinkElement(reference, { kind: 'file' });
     }
 
     function createInlineDirectoryReferenceLink(reference) {
+      return createReferenceLinkElement(reference, { kind: 'directory' });
+    }
+
+    function createInlineSkillLink(skill) {
       var anchor = document.createElement('a');
-      var href = makeMessageDirectoryHref(reference);
-      anchor.className = 'rich-file-link rich-directory-link';
-      anchor.href = href;
-      anchor.draggable = false;
+      anchor.className = 'rich-skill-link';
+      anchor.setAttribute('href', 'keepseek-skill:' + encodeURIComponent(skill.id));
       anchor.setAttribute('contenteditable', 'false');
-      renderFileReferenceLinkLabel(anchor, reference);
-      anchor.dataset.path = reference.path;
-      anchor.dataset.kind = 'directory';
-      anchor.dataset.startLine = '0';
-      anchor.dataset.endLine = '0';
-      anchor.dataset.startColumn = '0';
-      anchor.dataset.endColumn = '0';
+      anchor.draggable = false;
+      anchor.title = skill.description || skill.name || skill.id;
+      anchor.textContent = getSkillPromptTextForView(skill);
+      anchor.dataset.skillId = skill.id;
       return anchor;
     }
 
@@ -2595,7 +2686,7 @@ export function getScript(): string {
         }
 
         var element = child;
-        if (element.matches('a.rich-file-link')) {
+        if (element.matches('a.rich-file-link') || element.matches('a.rich-skill-link')) {
           child = next;
           continue;
         }
@@ -2667,6 +2758,19 @@ export function getScript(): string {
         link.draggable = false;
         renderFileReferenceLinkLabel(link, reference);
       });
+      var skillLinks = editor.querySelectorAll('a.rich-skill-link');
+      skillLinks.forEach(function(link) {
+        var skillId = link.dataset.skillId || '';
+        var skill = getSkillByIdForView(skillId);
+        link.className = 'rich-skill-link';
+        link.setAttribute('href', 'keepseek-skill:' + encodeURIComponent(skillId));
+        link.setAttribute('contenteditable', 'false');
+        link.draggable = false;
+        if (skill) {
+          link.textContent = getSkillPromptTextForView(skill);
+          link.title = skill.description || skill.name || skill.id;
+        }
+      });
     }
 
     function serializeInlineEditor(editor) {
@@ -2685,6 +2789,10 @@ export function getScript(): string {
       var element = node;
       if (element.matches('a.rich-file-link')) {
         parts.push(inlineFileReferenceLinkToText(element));
+        return;
+      }
+      if (element.matches('a.rich-skill-link')) {
+        parts.push(inlineSkillLinkToText(element));
         return;
       }
       if (element.tagName === 'BR') {
@@ -2720,6 +2828,15 @@ export function getScript(): string {
       return makeStandaloneInlineReferenceText(formatFileReferenceTextLabel(reference) + String.fromCharCode(10) + '<' + makeMessageFileHref(reference) + '>');
     }
 
+    function inlineSkillLinkToText(link) {
+      var skill = getSkillByIdForView(link.dataset.skillId || '');
+      if (skill) {
+        return getSkillPromptTextForView(skill);
+      }
+      var text = String(link.textContent || '').trim();
+      return text.charAt(0) === '$' ? text : '$' + text;
+    }
+
     function makeStandaloneInlineReferenceText(text) {
       var lineBreak = String.fromCharCode(10);
       return lineBreak + text + lineBreak;
@@ -2736,6 +2853,20 @@ export function getScript(): string {
         }
       });
       return references;
+    }
+
+    function collectInlineEditorSkillIds(editor) {
+      var ids = [];
+      var seen = new Set();
+      if (!editor) return ids;
+      var links = editor.querySelectorAll('a.rich-skill-link');
+      links.forEach(function(link) {
+        var id = String(link.dataset.skillId || '').trim();
+        if (!id || seen.has(id)) { return; }
+        seen.add(id);
+        ids.push(id);
+      });
+      return ids;
     }
 
     function readInlineFileReferenceLink(link) {
@@ -2944,8 +3075,9 @@ export function getScript(): string {
       send.disabled = state.isBusy || !serializeInlineEditor(editor).trim();
     }
 
-    function renderMarkdownContent(container, value, hideExpandedReferences) {
+    function renderMarkdownContent(container, value, hideExpandedReferences, options) {
       container.classList.add('assistant-markdown');
+      var renderOptions = options || {};
       var lineBreak = String.fromCharCode(10);
       var text = String(value || '')
         .split(String.fromCharCode(13) + lineBreak).join(lineBreak)
@@ -2962,7 +3094,7 @@ export function getScript(): string {
 
         var collapsedReferenceBlock = hideExpandedReferences ? collectExpandedReferenceMarkdownBlock(lines, index) : null;
         if (collapsedReferenceBlock) {
-          appendMarkdownParagraph(container, collapsedReferenceBlock.text);
+          appendMarkdownParagraph(container, collapsedReferenceBlock.text, renderOptions);
           index = collapsedReferenceBlock.index;
           continue;
         }
@@ -2986,7 +3118,7 @@ export function getScript(): string {
 
         var heading = parseMarkdownHeadingLine(lines[index]);
         if (heading) {
-          appendMarkdownHeading(container, heading.level, heading.text);
+          appendMarkdownHeading(container, heading.level, heading.text, renderOptions);
           index += 1;
           continue;
         }
@@ -3006,21 +3138,21 @@ export function getScript(): string {
             quoteLines.push(quoteLine.text);
             index += 1;
           }
-          appendMarkdownBlockquote(container, quoteLines.join(lineBreak));
+          appendMarkdownBlockquote(container, quoteLines.join(lineBreak), renderOptions);
           continue;
         }
 
         var listItem = parseMarkdownListItemLine(lines[index]);
         if (listItem) {
           var list = collectMarkdownList(lines, index, listItem.ordered);
-          appendMarkdownList(container, list.ordered, list.items);
+          appendMarkdownList(container, list.ordered, list.items, renderOptions);
           index = list.index;
           continue;
         }
 
         var table = collectMarkdownTable(lines, index);
         if (table) {
-          appendMarkdownTable(container, table);
+          appendMarkdownTable(container, table, renderOptions);
           index = table.index;
           continue;
         }
@@ -3034,7 +3166,7 @@ export function getScript(): string {
           paragraphLines.push(lines[index]);
           index += 1;
         }
-        appendMarkdownParagraph(container, paragraphLines.join(lineBreak));
+        appendMarkdownParagraph(container, paragraphLines.join(lineBreak), renderOptions);
       }
     }
 
@@ -3491,39 +3623,39 @@ export function getScript(): string {
       return normalized;
     }
 
-    function appendMarkdownHeading(container, level, text) {
+    function appendMarkdownHeading(container, level, text, options) {
       var heading = document.createElement('h' + Math.min(Math.max(level, 1), 6));
-      appendMarkdownInline(heading, text);
+      appendMarkdownInline(heading, text, options);
       container.append(heading);
     }
 
-    function appendMarkdownParagraph(container, text) {
+    function appendMarkdownParagraph(container, text, options) {
       var paragraph = document.createElement('p');
-      appendMarkdownInline(paragraph, String(text || '').trim());
+      appendMarkdownInline(paragraph, String(text || '').trim(), options);
       container.append(paragraph);
     }
 
-    function appendMarkdownBlockquote(container, text) {
+    function appendMarkdownBlockquote(container, text, options) {
       var blockquote = document.createElement('blockquote');
       var parts = splitMarkdownParagraphs(text);
       for (var i = 0; i < parts.length; i++) {
-        appendMarkdownParagraph(blockquote, parts[i]);
+        appendMarkdownParagraph(blockquote, parts[i], options);
       }
       container.append(blockquote);
     }
 
-    function appendMarkdownList(container, ordered, items) {
+    function appendMarkdownList(container, ordered, items, options) {
       var list = document.createElement(ordered ? 'ol' : 'ul');
       list.className = 'message-markdown-list';
       for (var i = 0; i < items.length; i++) {
         var item = document.createElement('li');
-        appendMarkdownInline(item, items[i].text);
+        appendMarkdownInline(item, items[i].text, options);
         list.append(item);
       }
       container.append(list);
     }
 
-    function appendMarkdownTable(container, tableData) {
+    function appendMarkdownTable(container, tableData, options) {
       var wrapper = document.createElement('div');
       wrapper.className = 'message-table-wrap';
 
@@ -3535,7 +3667,7 @@ export function getScript(): string {
       for (var i = 0; i < tableData.headers.length; i++) {
         var headerCell = document.createElement('th');
         applyMarkdownTableAlignment(headerCell, tableData.alignments[i]);
-        appendMarkdownInline(headerCell, tableData.headers[i]);
+        appendMarkdownInline(headerCell, tableData.headers[i], options);
         headRow.append(headerCell);
       }
       thead.append(headRow);
@@ -3548,7 +3680,7 @@ export function getScript(): string {
           for (var columnIndex = 0; columnIndex < tableData.headers.length; columnIndex++) {
             var cell = document.createElement('td');
             applyMarkdownTableAlignment(cell, tableData.alignments[columnIndex]);
-            appendMarkdownInline(cell, tableData.rows[rowIndex][columnIndex]);
+            appendMarkdownInline(cell, tableData.rows[rowIndex][columnIndex], options);
             row.append(cell);
           }
           tbody.append(row);
@@ -3627,8 +3759,9 @@ export function getScript(): string {
       return '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 8.15 6.45 11.4 12.9 4.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     }
 
-    function appendMarkdownInline(container, text) {
+    function appendMarkdownInline(container, text, options) {
       var value = String(text || '');
+      var renderOptions = options || {};
       var pattern = /<([^<>\\n]+)>/g;
       var cursor = 0;
       var match;
@@ -3650,7 +3783,9 @@ export function getScript(): string {
         }
 
         appendMarkdownFormattedText(container, value.slice(cursor, label.start));
-        container.append(createMessageFileLink(reference, label.text));
+        container.append(createMessageFileLink(reference, label.text, {
+          compactLabel: Boolean(renderOptions.compactReferenceLinks)
+        }));
         cursor = matchEnd;
       }
 
@@ -3899,7 +4034,9 @@ export function getScript(): string {
         }
 
         appendMessageText(container, text.slice(cursor, label.start));
-        container.append(createMessageFileLink(reference, label.text));
+        container.append(createMessageFileLink(reference, label.text, {
+          compactLabel: Boolean(hideExpandedReferences)
+        }));
         cursor = matchEnd;
         if (hideExpandedReferences) {
           var hiddenBlockEnd = getExpandedReferenceBlockEnd(text, cursor);
@@ -3970,22 +4107,14 @@ export function getScript(): string {
       container.append(document.createTextNode(text));
     }
 
-    function createMessageFileLink(reference, label) {
-      var anchor = document.createElement('a');
+    function createMessageFileLink(reference, label, options) {
       var isDirectory = reference.kind === 'directory';
-      var href = isDirectory ? makeMessageDirectoryHref(reference) : makeMessageFileHref(reference);
-      anchor.className = isDirectory ? 'rich-file-link rich-directory-link message-file-link' : 'rich-file-link message-file-link';
-      anchor.href = href;
-      anchor.title = href;
-      anchor.draggable = false;
-      anchor.textContent = isDirectory ? label : stripFileReferenceLabelBrackets(label);
-      anchor.dataset.path = reference.path;
-      anchor.dataset.kind = isDirectory ? 'directory' : 'file';
-      anchor.dataset.startLine = String(reference.startLine);
-      anchor.dataset.endLine = String(reference.endLine);
-      anchor.dataset.startColumn = String(reference.startColumn || 0);
-      anchor.dataset.endColumn = String(reference.endColumn || 0);
-      return anchor;
+      return createReferenceLinkElement(reference, {
+        kind: isDirectory ? 'directory' : 'file',
+        message: true,
+        label: label,
+        compactLabel: Boolean(options?.compactLabel)
+      });
     }
 
     function createCodexMarkdownFileLink(reference, label, href) {
@@ -4527,6 +4656,60 @@ export function getScript(): string {
     function formatFileReferenceLabelContents(reference) {
       var label = getReferenceChipLabel(reference);
       return label.secondary ? label.primary + ' - ' + label.secondary : label.primary;
+    }
+
+    function createReferenceLinkElement(reference, options) {
+      var settings = options || {};
+      var normalized = normalizeReferenceLinkInput(reference, settings.kind);
+      var isDirectory = normalized.kind === 'directory';
+      var href = isDirectory ? makeMessageDirectoryHref(normalized) : makeMessageFileHref(normalized);
+      var anchor = document.createElement('a');
+      anchor.className = isDirectory ? 'rich-file-link rich-directory-link' : 'rich-file-link';
+      if (settings.message) {
+        anchor.classList.add('message-file-link');
+      }
+      anchor.setAttribute('href', href);
+      anchor.setAttribute('contenteditable', 'false');
+      anchor.draggable = false;
+      if (settings.compactLabel === false) {
+        anchor.title = href;
+        anchor.setAttribute('aria-label', href);
+        anchor.textContent = getReferenceFallbackLabel(normalized, settings.label);
+      } else {
+        renderFileReferenceLinkLabel(anchor, normalized);
+      }
+      writeReferenceLinkDataset(anchor, normalized);
+      return anchor;
+    }
+
+    function normalizeReferenceLinkInput(reference, kindOverride) {
+      var kind = kindOverride || (reference.kind === 'directory' ? 'directory' : 'file');
+      var startLine = kind === 'directory' ? 0 : Math.max(0, Number(reference.startLine) || 0);
+      return {
+        path: reference.path || '',
+        kind: kind,
+        startLine: startLine,
+        endLine: startLine > 0 ? Math.max(startLine, Number(reference.endLine) || startLine) : 0,
+        startColumn: kind === 'directory' ? 0 : Math.max(0, Number(reference.startColumn) || 0),
+        endColumn: kind === 'directory' ? 0 : Math.max(0, Number(reference.endColumn) || 0)
+      };
+    }
+
+    function getReferenceFallbackLabel(reference, label) {
+      var text = String(label || '').trim();
+      if (reference.kind === 'directory') {
+        return text || getMessageDirectoryName(reference.path);
+      }
+      return stripFileReferenceLabelBrackets(text || formatFileReferenceLabel(reference));
+    }
+
+    function writeReferenceLinkDataset(anchor, reference) {
+      anchor.dataset.path = reference.path;
+      anchor.dataset.kind = reference.kind;
+      anchor.dataset.startLine = String(reference.startLine);
+      anchor.dataset.endLine = String(reference.endLine);
+      anchor.dataset.startColumn = String(reference.startColumn || 0);
+      anchor.dataset.endColumn = String(reference.endColumn || 0);
     }
 
     function renderFileReferenceLinkLabel(anchor, reference) {

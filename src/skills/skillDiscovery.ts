@@ -1,10 +1,9 @@
-import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { getConfiguredMaxFileBytes } from '../shared/config';
 import { formatBytes } from '../shared/format';
 import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
-import { createSkillId, SKILL_FILE_NAME, type SkillManifest, type SkillSource } from './skillTypes';
+import { createSkillId, SKILL_INSTRUCTION_FILE_NAMES, type SkillManifest, type SkillSource } from './skillTypes';
 
 interface SkillBaseDirectory {
   source: SkillSource;
@@ -51,38 +50,19 @@ export class SkillDiscovery {
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
       bases.push(
         {
-          source: 'workspace',
-          uri: vscode.Uri.joinPath(folder.uri, '.keepseek', 'skills'),
-          label: `${folder.name}/.keepseek`,
+          source: 'agentsWorkspace',
+          uri: vscode.Uri.joinPath(folder.uri, '.agents', 'skills'),
+          label: `${folder.name}/.agents`,
           workspaceScoped: true
         },
         {
           source: 'agentsWorkspace',
-          uri: vscode.Uri.joinPath(folder.uri, '.agents', 'skills'),
+          uri: vscode.Uri.joinPath(folder.uri, '.agents'),
           label: `${folder.name}/.agents`,
           workspaceScoped: true
         }
       );
     }
-
-    const home = os.homedir();
-    if (home) {
-      bases.push(
-        {
-          source: 'user',
-          uri: vscode.Uri.file(path.join(home, '.keepseek', 'skills')),
-          label: '~/.keepseek',
-          workspaceScoped: false
-        },
-        {
-          source: 'agentsUser',
-          uri: vscode.Uri.file(path.join(home, '.agents', 'skills')),
-          label: '~/.agents',
-          workspaceScoped: false
-        }
-      );
-    }
-
     return bases;
   }
 
@@ -101,8 +81,8 @@ export class SkillDiscovery {
       }
 
       const rootUri = vscode.Uri.joinPath(base.uri, name);
-      const skillUri = vscode.Uri.joinPath(rootUri, SKILL_FILE_NAME);
-      if (!(await this.hasSkillFile(skillUri))) {
+      const skillUri = await this.findSkillInstructionFile(rootUri);
+      if (!skillUri) {
         continue;
       }
 
@@ -181,13 +161,19 @@ export class SkillDiscovery {
     };
   }
 
-  private async hasSkillFile(skillUri: vscode.Uri): Promise<boolean> {
-    try {
-      const stat = await vscode.workspace.fs.stat(skillUri);
-      return stat.type === vscode.FileType.File;
-    } catch {
-      return false;
+  private async findSkillInstructionFile(rootUri: vscode.Uri): Promise<vscode.Uri | undefined> {
+    for (const fileName of SKILL_INSTRUCTION_FILE_NAMES) {
+      const skillUri = vscode.Uri.joinPath(rootUri, fileName);
+      try {
+        const stat = await vscode.workspace.fs.stat(skillUri);
+        if (stat.type === vscode.FileType.File) {
+          return skillUri;
+        }
+      } catch {
+        // Try the next supported instruction filename.
+      }
     }
+    return undefined;
   }
 
   private async readChildNames(rootUri: vscode.Uri): Promise<Set<string>> {
@@ -203,22 +189,22 @@ export class SkillDiscovery {
 
   private async readSkillMarkdown(skillUri: vscode.Uri): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
     if (shouldSkipTextUri(skillUri)) {
-      return { ok: false, error: 'SKILL.md is not a readable text file.' };
+      return { ok: false, error: `${getUriBasename(skillUri)} is not a readable text file.` };
     }
 
     const maxBytes = getConfiguredMaxFileBytes();
     try {
       const stat = await vscode.workspace.fs.stat(skillUri);
       if (stat.size > maxBytes) {
-        return { ok: false, error: `SKILL.md is larger than ${formatBytes(maxBytes)}.` };
+        return { ok: false, error: `${getUriBasename(skillUri)} is larger than ${formatBytes(maxBytes)}.` };
       }
       const bytes = await vscode.workspace.fs.readFile(skillUri);
       if (bytes.byteLength > maxBytes) {
-        return { ok: false, error: `SKILL.md is larger than ${formatBytes(maxBytes)}.` };
+        return { ok: false, error: `${getUriBasename(skillUri)} is larger than ${formatBytes(maxBytes)}.` };
       }
       const content = this.decoder.decode(bytes);
       if (!isReadableTextContent(content)) {
-        return { ok: false, error: 'SKILL.md appears to be binary or unreadable text.' };
+        return { ok: false, error: `${getUriBasename(skillUri)} appears to be binary or unreadable text.` };
       }
       return { ok: true, content };
     } catch (error) {
@@ -228,6 +214,11 @@ export class SkillDiscovery {
       };
     }
   }
+}
+
+function getUriBasename(uri: vscode.Uri): string {
+  const value = uri.scheme === 'file' ? uri.fsPath : uri.path;
+  return path.basename(value) || 'skill instruction file';
 }
 
 function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {

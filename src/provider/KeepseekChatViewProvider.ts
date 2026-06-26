@@ -1559,6 +1559,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         content: trimmedPrompt,
         createdAt: now,
         modelId: model.id,
+        usedSkills: toChatMessageSkills(activeSkills),
         contextMeta: activeSession.messages.some((message) => message.role === 'user')
           ? undefined
           : createProtectedContextMeta('first_user_request')

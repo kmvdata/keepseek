@@ -25,14 +25,14 @@ export class SkillCreator {
   public createDraft(input: CreateSkillDraftInput): CreatedSkillDraft {
     const normalizedName = normalizeSkillName(input.rawName, input.language);
     const description = normalizeDescription(input.description, input.language);
-    const skillsRootUri = vscode.Uri.joinPath(input.workspaceFolder.uri, '.keepseek', 'skills');
+    const skillsRootUri = vscode.Uri.joinPath(input.workspaceFolder.uri, '.agents', 'skills');
     const targetUri = vscode.Uri.joinPath(skillsRootUri, normalizedName, SKILL_FILE_NAME);
 
     if (!isUriInside(skillsRootUri, targetUri)) {
       throw new Error(localize(input.language, 'createSkillInvalidPath'));
     }
 
-    const label = `.keepseek/skills/${normalizedName}/${SKILL_FILE_NAME}`;
+    const label = `.agents/skills/${normalizedName}/${SKILL_FILE_NAME}`;
     return {
       normalizedName,
       targetUri,

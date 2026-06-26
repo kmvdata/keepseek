@@ -140,15 +140,6 @@ export function getInputStyles(): string {
       cursor: default;
     }
 
-    .rich-skill-link::before,
-    .skill-pill-name::before {
-      content: "/";
-      margin-right: 1px;
-      color: var(--vscode-descriptionForeground);
-      font-family: var(--vscode-editor-font-family, monospace);
-      font-weight: 700;
-    }
-
     .composer {
       background: var(--vscode-sideBar-background);
       padding: var(--keepseek-composer-padding, 0);
@@ -621,6 +612,11 @@ export function getInputStyles(): string {
 
     .reference-menu-item.is-directory .reference-menu-item-name {
       color: var(--vscode-charts-green, var(--vscode-textLink-foreground));
+    }
+
+    .reference-menu-item.is-skill .reference-menu-item-name {
+      color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+      font-family: var(--vscode-editor-font-family, monospace);
     }
 
     .reference-menu-item-path {

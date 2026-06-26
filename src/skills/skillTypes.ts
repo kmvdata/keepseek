@@ -46,6 +46,7 @@ export interface SkillStateView {
 }
 
 export const SKILL_FILE_NAME = 'SKILL.md';
+export const SKILL_INSTRUCTION_FILE_NAMES = [SKILL_FILE_NAME, 'AGENTS.md'] as const;
 
 export function createSkillId(source: SkillSource, rootUri: vscode.Uri): string {
   return `${source}:${encodeURIComponent(rootUri.toString())}`;

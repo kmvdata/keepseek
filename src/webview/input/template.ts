@@ -289,7 +289,7 @@ export function getInputTemplate(): string {
           <span class="settings-dialog-title" data-i18n="createSkillDialogTitle">Create Skill</span>
         </div>
         <div class="settings-dialog-body">
-          <p id="createSkillDialogStatus" class="settings-dialog-desc" data-i18n="createSkillDialogDesc">创建 .keepseek/skills/&lt;name&gt;/SKILL.md 待确认修改。</p>
+          <p id="createSkillDialogStatus" class="settings-dialog-desc" data-i18n="createSkillDialogDesc">创建 .agents/skills/&lt;name&gt;/SKILL.md 待确认修改。</p>
           <label class="settings-field">
             <span class="settings-field-label" data-i18n="createSkillNameLabel">Skill name</span>
             <input id="createSkillNameInput" class="settings-input" type="text" autocomplete="off" />

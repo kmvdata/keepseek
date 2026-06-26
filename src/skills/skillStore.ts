@@ -159,6 +159,15 @@ export class SkillStore {
         const message = error instanceof Error ? error.message : String(error);
         this.activeSkillLoadErrors.set(id, message);
         failures.push({ id, name: manifest.name, error: message });
+        skills.push({
+          id: manifest.id,
+          name: manifest.name,
+          source: manifest.source,
+          rootUri: manifest.rootUri.toString(),
+          skillUri: manifest.skillUri.toString(),
+          content: `KeepSeek could not load this skill instruction file: ${message}`,
+          loadedResourceUris: [manifest.skillUri.toString()]
+        });
       }
     }
 

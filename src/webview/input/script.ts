@@ -460,6 +460,27 @@ export function getInputScript(): string {
       }
 
       function syncReferenceMenuFromPrompt() {
+        var skillTrigger = getSkillTrigger();
+        if (skillTrigger) {
+          var previousSkillQuery = referenceMenuSource === 'skill' ? activeMentionQuery : '';
+          referenceMenuSource = 'skill';
+          activeMentionRange = skillTrigger.range;
+          activeMentionQuery = skillTrigger.query;
+          if (previousSkillQuery !== activeMentionQuery) {
+            activeReferenceIndex = 0;
+          }
+          if (!referenceMenuOpen) {
+            openReferenceMenu('skill');
+            return;
+          }
+          renderReferenceMenu();
+          return;
+        }
+        if (referenceMenuOpen && referenceMenuSource === 'skill') {
+          closeReferenceMenu(false);
+          return;
+        }
+
         var mention = getMentionTrigger();
         if (!mention) {
           if (referenceMenuOpen && referenceMenuSource === 'button') {
@@ -493,10 +514,14 @@ export function getInputScript(): string {
         referenceMenuSource = source || referenceMenuSource || 'mention';
         referenceMenu.classList.remove('hidden');
         if (referenceMenuButton) {
-          referenceMenuButton.classList.add('is-active');
+          referenceMenuButton.classList.toggle('is-active', referenceMenuSource !== 'skill');
           referenceMenuButton.setAttribute('aria-expanded', 'true');
         }
-        requestReferenceResources();
+        if (referenceMenuSource === 'skill') {
+          vscode.postMessage({ type: 'requestSkills' });
+        } else {
+          requestReferenceResources();
+        }
         renderReferenceMenu();
       }
 
@@ -554,7 +579,7 @@ export function getInputScript(): string {
         header.className = 'reference-menu-header';
         var title = document.createElement('span');
         title.className = 'reference-menu-title';
-        title.textContent = t('referenceFilesTitle');
+        title.textContent = referenceMenuSource === 'skill' ? t('skillsTitle') : t('referenceFilesTitle');
         var count = document.createElement('span');
         count.className = 'reference-menu-count';
         header.append(title, count);
@@ -583,7 +608,9 @@ export function getInputScript(): string {
         var entries = getReferenceMenuEntries();
         count.textContent = String(entries.length);
         if (!entries.length) {
-          appendReferenceMenuNotice(activeMentionQuery ? t('noMatchingFiles') : t('noReferenceFiles'));
+          appendReferenceMenuNotice(referenceMenuSource === 'skill'
+            ? (activeMentionQuery ? t('noMatchingSkills') : t('skillsNone'))
+            : (activeMentionQuery ? t('noMatchingFiles') : t('noReferenceFiles')));
           return;
         }
 
@@ -618,6 +645,9 @@ export function getInputScript(): string {
       function createReferenceMenuEntryButton(entry, index) {
         if (entry.kind === 'externalPicker') {
           return createExternalPickerReferenceButton(index);
+        }
+        if (entry.kind === 'skill') {
+          return createSkillReferenceButton(entry.skill, index);
         }
         return createReferenceResourceButton(entry.resource, index);
       }
@@ -664,7 +694,32 @@ export function getInputScript(): string {
         return option;
       }
 
+      function createSkillReferenceButton(skill, index) {
+        var option = document.createElement('button');
+        option.type = 'button';
+        option.className = 'reference-menu-item is-skill' + (index === activeReferenceIndex ? ' is-active' : '');
+        option.dataset.referenceIndex = String(index + 1);
+        option.setAttribute('role', 'option');
+        option.setAttribute('aria-selected', index === activeReferenceIndex ? 'true' : 'false');
+
+        var name = document.createElement('span');
+        name.className = 'reference-menu-item-name';
+        name.textContent = getSkillPromptText(skill);
+        name.title = name.textContent;
+
+        var pathLabel = document.createElement('span');
+        pathLabel.className = 'reference-menu-item-path';
+        pathLabel.textContent = skill.description || skill.sourceLabel || skill.source || '';
+        pathLabel.title = pathLabel.textContent;
+
+        option.append(name, pathLabel);
+        return option;
+      }
+
       function getFilteredReferenceResources() {
+        if (referenceMenuSource === 'skill') {
+          return [];
+        }
         var query = normalizeReferenceQuery(activeMentionQuery);
         if (!query) {
           return referenceResources.slice();
@@ -675,6 +730,11 @@ export function getInputScript(): string {
       }
 
       function getReferenceMenuEntries() {
+        if (referenceMenuSource === 'skill') {
+          return getFilteredSkillMenuItems().map(function(skill) {
+            return { kind: 'skill', skill: skill };
+          });
+        }
         var resources = getFilteredReferenceResources().map(function(resource) {
           return { kind: 'resource', resource: resource };
         });
@@ -690,6 +750,9 @@ export function getInputScript(): string {
       }
 
       function shouldShowExternalPickerReferenceEntry() {
+        if (referenceMenuSource === 'skill') {
+          return false;
+        }
         if (referenceMenuSource === 'button') {
           return true;
         }
@@ -753,6 +816,10 @@ export function getInputScript(): string {
           pickExternalFileReferences();
           return;
         }
+        if (entry.kind === 'skill') {
+          insertSkillFromReferenceMenu(entry.skill);
+          return;
+        }
 
         var resource = entry.resource;
         if (!resource) { return; }
@@ -786,6 +853,26 @@ export function getInputScript(): string {
         insertFragmentAtRange(range, fragment);
         closeReferenceMenu(true);
         setComposerStatus(reference.kind === 'directory' ? t('insertedDirectoryReference') : t('insertedFileReference'));
+      }
+
+      function insertSkillFromReferenceMenu(skill) {
+        if (!skill || !skill.id) { return; }
+        if (!skill.enabled || !skill.userInvocable || skill.unavailableReason) {
+          return;
+        }
+        var range = activeMentionRange && isRangeInsidePrompt(activeMentionRange)
+          ? activeMentionRange.cloneRange()
+          : getPromptInsertionRange();
+        var fragment = document.createDocumentFragment();
+        appendReferenceBoundarySpace(fragment);
+        fragment.append(createSkillLink(skill));
+        appendReferenceBoundarySpace(fragment);
+        insertFragmentAtRange(range, fragment);
+        if (!isSkillActive(skill.id)) {
+          vscode.postMessage({ type: 'useSkill', skillId: skill.id });
+        }
+        closeReferenceMenu(true);
+        setComposerStatus(t('skillInserted', { name: skill.name || skill.id }));
       }
 
       function pickExternalFileReferences() {
@@ -1197,7 +1284,7 @@ export function getInputScript(): string {
         main.className = 'command-skill-main';
         main.dataset.skillAction = 'use';
         main.dataset.skillId = skill.id;
-        main.disabled = !canUse || active;
+        main.disabled = !canUse;
 
         var copy = document.createElement('span');
         copy.className = 'command-row-main';
@@ -1281,11 +1368,13 @@ export function getInputScript(): string {
         var skill = getSkillById(skillId);
         if (!skill) { return; }
         if (action === 'use') {
-          if (!skill.enabled || !skill.userInvocable || skill.unavailableReason || isSkillActive(skillId)) {
+          if (!skill.enabled || !skill.userInvocable || skill.unavailableReason) {
             return;
           }
           insertSkillChip(skill);
-          vscode.postMessage({ type: 'useSkill', skillId: skillId });
+          if (!isSkillActive(skillId)) {
+            vscode.postMessage({ type: 'useSkill', skillId: skillId });
+          }
           setComposerStatus(t('skillInserted', { name: skill.name || skillId }));
           closeCommandMenu();
           return;
@@ -1377,6 +1466,40 @@ export function getInputScript(): string {
         var previous = textBefore.charAt(textBefore.length - 2);
         if (previous && !isWhitespace(previous)) { return null; }
         return getCharacterRangeBeforeCaret(range, '/');
+      }
+
+      function getSkillTrigger() {
+        var selection = window.getSelection();
+        if (!selection || !selection.rangeCount || !selection.isCollapsed) { return null; }
+        var range = selection.getRangeAt(0);
+        if (!isRangeInsidePrompt(range) || isPromptRangeInsideMarkdownFence(range)) { return null; }
+        var textBefore = getTextBeforeRange(range);
+        var triggerIndex = findSkillTriggerIndex(textBefore);
+        if (triggerIndex < 0) { return null; }
+        var skillRange = getPromptTextRange(triggerIndex, textBefore.length);
+        if (!skillRange) { return null; }
+        return {
+          range: skillRange,
+          query: textBefore.slice(triggerIndex + 1)
+        };
+      }
+
+      function findSkillTriggerIndex(textBefore) {
+        for (var i = textBefore.length - 1; i >= 0; i--) {
+          var character = textBefore.charAt(i);
+          if (character === '$') {
+            var previous = i > 0 ? textBefore.charAt(i - 1) : '';
+            return !previous || isWhitespace(previous) ? i : -1;
+          }
+          if (isSkillTerminator(character)) {
+            return -1;
+          }
+        }
+        return -1;
+      }
+
+      function isSkillTerminator(character) {
+        return character === '<' || character === '>' || character === String.fromCharCode(10) || character === String.fromCharCode(13) || isWhitespace(character);
       }
 
       function getMentionTrigger() {
@@ -2005,37 +2128,11 @@ export function getInputScript(): string {
       }
 
       function createFileReferenceLink(reference) {
-        var anchor = document.createElement('a');
-        var href = makeFileHref(reference);
-        anchor.className = 'rich-file-link';
-        anchor.setAttribute('href', href);
-        anchor.setAttribute('contenteditable', 'false');
-        anchor.draggable = false;
-        renderFileReferenceLinkLabel(anchor, reference);
-        anchor.dataset.path = reference.path;
-        anchor.dataset.kind = 'file';
-        anchor.dataset.startLine = String(reference.startLine);
-        anchor.dataset.endLine = String(reference.endLine);
-        anchor.dataset.startColumn = String(reference.startColumn || 0);
-        anchor.dataset.endColumn = String(reference.endColumn || 0);
-        return anchor;
+        return createReferenceLinkElement(reference, { kind: 'file' });
       }
 
       function createDirectoryReferenceLink(reference) {
-        var anchor = document.createElement('a');
-        var href = makeDirectoryHref(reference);
-        anchor.className = 'rich-file-link rich-directory-link';
-        anchor.setAttribute('href', href);
-        anchor.setAttribute('contenteditable', 'false');
-        anchor.draggable = false;
-        renderFileReferenceLinkLabel(anchor, reference);
-        anchor.dataset.path = reference.path;
-        anchor.dataset.kind = 'directory';
-        anchor.dataset.startLine = '0';
-        anchor.dataset.endLine = '0';
-        anchor.dataset.startColumn = '0';
-        anchor.dataset.endColumn = '0';
-        return anchor;
+        return createReferenceLinkElement(reference, { kind: 'directory' });
       }
 
       function createSkillLink(skill) {
@@ -2045,7 +2142,7 @@ export function getInputScript(): string {
         anchor.setAttribute('contenteditable', 'false');
         anchor.draggable = false;
         anchor.title = skill.description || skill.name || skill.id;
-        anchor.textContent = skill.name || skill.id;
+        anchor.textContent = getSkillPromptText(skill);
         anchor.dataset.skillId = skill.id;
         return anchor;
       }
@@ -2080,11 +2177,11 @@ export function getInputScript(): string {
         var links = promptInput.querySelectorAll('a.rich-skill-link');
         links.forEach(function(link) {
           var skill = getSkillById(link.dataset.skillId || '');
-          if (!skill || !isSkillActive(skill.id)) {
+          if (!skill) {
             link.remove();
             return;
           }
-          link.textContent = skill.name || skill.id;
+          link.textContent = getSkillPromptText(skill);
           link.title = skill.description || skill.name || skill.id;
         });
       }
@@ -2125,7 +2222,7 @@ export function getInputScript(): string {
 
         var name = document.createElement('span');
         name.className = 'skill-pill-name';
-        name.textContent = skill.name || skill.id;
+        name.textContent = getSkillPromptText(skill);
 
         var remove = document.createElement('button');
         remove.type = 'button';
@@ -2162,6 +2259,35 @@ export function getInputScript(): string {
         return getSkillsState().items;
       }
 
+      function getFilteredSkillMenuItems() {
+        var query = normalizeReferenceQuery(activeMentionQuery);
+        return getSkillItems().filter(function(skill) {
+          if (!isSkillUserSelectable(skill)) { return false; }
+          if (!query) { return true; }
+          return skillMatchesQuery(skill, query);
+        });
+      }
+
+      function isSkillUserSelectable(skill) {
+        return Boolean(skill && skill.enabled && skill.userInvocable && !skill.unavailableReason);
+      }
+
+      function skillMatchesQuery(skill, query) {
+        var fields = [
+          getSkillMentionName(skill),
+          skill.name || '',
+          skill.description || '',
+          skill.sourceLabel || '',
+          skill.source || ''
+        ];
+        for (var i = 0; i < fields.length; i++) {
+          if (normalizeReferenceQuery(fields[i]).indexOf(query) >= 0) {
+            return true;
+          }
+        }
+        return false;
+      }
+
       function getActiveSkillIds() {
         var seen = new Set();
         var ids = [];
@@ -2186,6 +2312,39 @@ export function getInputScript(): string {
 
       function isSkillActive(skillId) {
         return getActiveSkillIds().indexOf(skillId) >= 0;
+      }
+
+      function getSkillMentionName(skill) {
+        var name = String(skill && skill.name || '').trim();
+        if (isSafeSkillMentionName(name)) {
+          return name;
+        }
+        var fallback = getSkillDirectoryName(skill);
+        if (isSafeSkillMentionName(fallback)) {
+          return fallback;
+        }
+        return 'skill';
+      }
+
+      function getSkillPromptText(skill) {
+        return '$' + getSkillMentionName(skill);
+      }
+
+      function getSkillDirectoryName(skill) {
+        var rootUri = String(skill && skill.rootUri || '');
+        var rootPath = rootUri;
+        try {
+          if (rootUri.indexOf('file:') === 0) {
+            rootPath = decodeURIComponent(new URL(rootUri).pathname || rootUri);
+          }
+        } catch (error) {
+          rootPath = rootUri;
+        }
+        return getReferencePathBasename(rootPath);
+      }
+
+      function isSafeSkillMentionName(value) {
+        return /^[A-Za-z0-9_-]+$/u.test(String(value || ''));
       }
 
       function makeFileHref(reference) {
@@ -2462,6 +2621,7 @@ export function getInputScript(): string {
 
         var element = node;
         if (element.matches('a.rich-skill-link')) {
+          parts.push(skillLinkToText(element));
           return;
         }
         if (element.matches('a.rich-file-link')) {
@@ -2499,6 +2659,15 @@ export function getInputScript(): string {
           reference.endLine = reference.startLine;
         }
         return makeStandaloneReferenceText(formatFileReferenceTextLabel(reference) + String.fromCharCode(10) + '<' + makeFileHref(reference) + '>');
+      }
+
+      function skillLinkToText(link) {
+        var skill = getSkillById(link.dataset.skillId || '');
+        if (skill) {
+          return getSkillPromptText(skill);
+        }
+        var text = String(link.textContent || '').trim();
+        return text.charAt(0) === '$' ? text : '$' + text;
       }
 
       function makeStandaloneReferenceText(text) {
@@ -2650,10 +2819,15 @@ export function getInputScript(): string {
         var skillLinks = promptInput.querySelectorAll('a.rich-skill-link');
         skillLinks.forEach(function(link) {
           var skillId = link.dataset.skillId || '';
+          var skill = getSkillById(skillId);
           link.className = 'rich-skill-link';
           link.setAttribute('href', 'keepseek-skill:' + encodeURIComponent(skillId));
           link.setAttribute('contenteditable', 'false');
           link.draggable = false;
+          if (skill) {
+            link.textContent = getSkillPromptText(skill);
+            link.title = skill.description || skill.name || skill.id;
+          }
         });
       }
 

@@ -178,6 +178,15 @@ export class AgentRunner {
         source: file.source,
         content: trace.includesPayload('request') ? file.content : summarizeText(file.content)
       })),
+      skills: request.skills?.map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        source: skill.source,
+        rootUri: skill.rootUri,
+        skillUri: skill.skillUri,
+        loadedResourceUris: skill.loadedResourceUris,
+        content: trace.includesPayload('request') ? skill.content : summarizeText(skill.content)
+      })),
       history: request.history.map((message) => ({
         id: message.id,
         role: message.role,

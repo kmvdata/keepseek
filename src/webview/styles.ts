@@ -1133,8 +1133,34 @@ export function getStyles(): string {
 
     .message.user .message-content .message-file-link {
       margin: 0 3px;
-      transform: translateY(-1px);
-      vertical-align: middle;
+      padding: 2px 6px;
+      transform: none;
+      vertical-align: text-top;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: center;
+      max-width: 100%;
+      min-height: 22px;
+      max-height: 38px;
+      line-height: 15px;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .message.user .message-content .message-file-link-primary,
+    .message.user .message-content .message-file-link-secondary {
+      display: block;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .message.user .message-content .message-file-link-secondary {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 14px;
+      opacity: 0.85;
     }
 
     .message.user .message-content {
@@ -1223,6 +1249,18 @@ export function getStyles(): string {
       color: inherit !important;
       background: transparent !important;
       font: inherit !important;
+    }
+
+    .message-edit-input .rich-file-link-primary {
+      font-size: 12px !important;
+      line-height: 15px !important;
+    }
+
+    .message-edit-input .rich-file-link-secondary {
+      color: var(--vscode-descriptionForeground) !important;
+      font-size: 11px !important;
+      line-height: 14px !important;
+      opacity: 0.85;
     }
 
     .message-edit-footer {

@@ -59,6 +59,7 @@ export const workspace = {
   workspaceFolders: [] as Array<{ uri: Uri; name?: string }>,
   workspaceFile: undefined as Uri | undefined,
   name: 'KeepSeek Test Workspace',
+  isTrusted: true,
   fs: {
     async stat(uri: Uri) {
       const stat = await fs.stat(uri.fsPath);
@@ -66,6 +67,23 @@ export const workspace = {
         type: stat.isFile() ? FileType.File : stat.isDirectory() ? FileType.Directory : FileType.Unknown,
         size: stat.size
       };
+    },
+    async readDirectory(uri: Uri): Promise<Array<[string, number]>> {
+      const entries = await fs.readdir(uri.fsPath, { withFileTypes: true });
+      return entries.map((entry) => [
+        entry.name,
+        entry.isFile() ? FileType.File : entry.isDirectory() ? FileType.Directory : FileType.Unknown
+      ]);
+    },
+    async readFile(uri: Uri): Promise<Uint8Array> {
+      return await fs.readFile(uri.fsPath);
+    },
+    async createDirectory(uri: Uri): Promise<void> {
+      await fs.mkdir(uri.fsPath, { recursive: true });
+    },
+    async writeFile(uri: Uri, content: Uint8Array): Promise<void> {
+      await fs.mkdir(path.dirname(uri.fsPath), { recursive: true });
+      await fs.writeFile(uri.fsPath, content);
     }
   },
   getConfiguration() {
