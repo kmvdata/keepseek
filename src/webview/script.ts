@@ -132,6 +132,49 @@ export function getScript(): string {
       return '$' + getSkillMentionNameForView(skill);
     }
 
+    function getSkillMarkdownTextForView(skill) {
+      return '[' + getSkillPromptTextForView(skill) + '](' + getSkillPathForView(skill) + ')';
+    }
+
+    function getSkillPathForView(skill) {
+      var skillPath = String(skill && skill.skillPath || '').trim();
+      if (skillPath) {
+        return skillPath;
+      }
+      var skillUri = String(skill && skill.skillUri || '').trim();
+      if (!skillUri) {
+        return '';
+      }
+      try {
+        if (skillUri.indexOf('file:') === 0) {
+          var url = new URL(skillUri);
+          var pathname = decodeURIComponent(url.pathname || '');
+          if (url.hostname) {
+            return '//' + url.hostname + pathname;
+          }
+          if (/^\\/[A-Za-z]:\\//.test(pathname)) {
+            return pathname.slice(1);
+          }
+          return pathname || skillUri;
+        }
+      } catch (error) {
+        return skillUri;
+      }
+      return skillUri;
+    }
+
+    function getSkillByMarkdownReferenceForView(name, href) {
+      var skill = getSkillByMentionNameForView(name);
+      if (!skill) {
+        return null;
+      }
+      return normalizeSkillPathForView(getSkillPathForView(skill)) === normalizeSkillPathForView(href) ? skill : null;
+    }
+
+    function normalizeSkillPathForView(value) {
+      return String(value || '').trim();
+    }
+
     function getSkillDirectoryNameForView(skill) {
       var rootUri = String(skill && skill.rootUri || '');
       var rootPath = rootUri;
@@ -2592,7 +2635,7 @@ export function getScript(): string {
     function renderInlineEditorContent(editor, value) {
       editor.innerHTML = '';
       var text = String(value || '');
-      var pattern = /<([^<>\\n]+)>|\\$([A-Za-z0-9_-]+)/g;
+      var pattern = /\\[\\$([A-Za-z0-9_-]+)\\]\\(([^)\\n]+)\\)|<([^<>\\n]+)>|\\$([A-Za-z0-9_-]+)/g;
       var cursor = 0;
       var match;
 
@@ -2601,11 +2644,13 @@ export function getScript(): string {
         if (isOffsetInsideMarkdownFence(text, match.index)) {
           continue;
         }
-        if (matchText.charAt(0) === '$') {
+        if (match[1] || matchText.charAt(0) === '$') {
           if (match.index < cursor) {
             continue;
           }
-          var skill = getSkillByMentionNameForView(match[2] || '');
+          var skill = match[1]
+            ? getSkillByMarkdownReferenceForView(match[1] || '', match[2] || '')
+            : getSkillByMentionNameForView(match[4] || '');
           if (!skill) {
             continue;
           }
@@ -2614,7 +2659,7 @@ export function getScript(): string {
           cursor = match.index + matchText.length;
           continue;
         }
-        var target = (match[1] || '').trim();
+        var target = (match[3] || '').trim();
         var reference = parseMessageFileReference(target);
         if (!reference) {
           continue;
@@ -2657,12 +2702,13 @@ export function getScript(): string {
     function createInlineSkillLink(skill) {
       var anchor = document.createElement('a');
       anchor.className = 'rich-skill-link';
-      anchor.setAttribute('href', 'keepseek-skill:' + encodeURIComponent(skill.id));
+      anchor.setAttribute('href', getSkillPathForView(skill));
       anchor.setAttribute('contenteditable', 'false');
       anchor.draggable = false;
       anchor.title = skill.description || skill.name || skill.id;
       anchor.textContent = getSkillPromptTextForView(skill);
       anchor.dataset.skillId = skill.id;
+      anchor.dataset.skillPath = getSkillPathForView(skill);
       return anchor;
     }
 
@@ -2763,12 +2809,15 @@ export function getScript(): string {
         var skillId = link.dataset.skillId || '';
         var skill = getSkillByIdForView(skillId);
         link.className = 'rich-skill-link';
-        link.setAttribute('href', 'keepseek-skill:' + encodeURIComponent(skillId));
         link.setAttribute('contenteditable', 'false');
         link.draggable = false;
         if (skill) {
+          link.setAttribute('href', getSkillPathForView(skill));
+          link.dataset.skillPath = getSkillPathForView(skill);
           link.textContent = getSkillPromptTextForView(skill);
           link.title = skill.description || skill.name || skill.id;
+        } else {
+          link.setAttribute('href', link.dataset.skillPath || link.getAttribute('href') || '');
         }
       });
     }
@@ -2831,10 +2880,12 @@ export function getScript(): string {
     function inlineSkillLinkToText(link) {
       var skill = getSkillByIdForView(link.dataset.skillId || '');
       if (skill) {
-        return getSkillPromptTextForView(skill);
+        return getSkillMarkdownTextForView(skill);
       }
       var text = String(link.textContent || '').trim();
-      return text.charAt(0) === '$' ? text : '$' + text;
+      var label = text.charAt(0) === '$' ? text : '$' + text;
+      var skillPath = String(link.dataset.skillPath || link.getAttribute('href') || '').trim();
+      return skillPath ? '[' + label + '](' + skillPath + ')' : label;
     }
 
     function makeStandaloneInlineReferenceText(text) {
@@ -2856,17 +2907,7 @@ export function getScript(): string {
     }
 
     function collectInlineEditorSkillIds(editor) {
-      var ids = [];
-      var seen = new Set();
-      if (!editor) return ids;
-      var links = editor.querySelectorAll('a.rich-skill-link');
-      links.forEach(function(link) {
-        var id = String(link.dataset.skillId || '').trim();
-        if (!id || seen.has(id)) { return; }
-        seen.add(id);
-        ids.push(id);
-      });
-      return ids;
+      return [];
     }
 
     function readInlineFileReferenceLink(link) {

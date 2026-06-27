@@ -27,7 +27,9 @@ export interface SkillManifestView {
   source: SkillSource;
   sourceLabel: string;
   rootUri: string;
+  rootPath: string;
   skillUri: string;
+  skillPath: string;
   enabled: boolean;
   allowImplicit: boolean;
   userInvocable: boolean;
@@ -72,13 +74,15 @@ export function toSkillManifestView(
     id: manifest.id,
     name: manifest.name,
     description: manifest.description,
-    source: manifest.source,
-    sourceLabel: manifest.sourceLabel,
-    rootUri: manifest.rootUri.toString(),
-    skillUri: manifest.skillUri.toString(),
-    enabled: manifest.enabled,
-    allowImplicit: manifest.allowImplicit,
-    userInvocable: manifest.userInvocable,
+      source: manifest.source,
+      sourceLabel: manifest.sourceLabel,
+      rootUri: manifest.rootUri.toString(),
+      rootPath: getUriDisplayPath(manifest.rootUri),
+      skillUri: manifest.skillUri.toString(),
+      skillPath: getUriDisplayPath(manifest.skillUri),
+      enabled: manifest.enabled,
+      allowImplicit: manifest.allowImplicit,
+      userInvocable: manifest.userInvocable,
     hasReferences: manifest.hasReferences,
     hasAssets: manifest.hasAssets,
     hasScripts: manifest.hasScripts,
@@ -86,4 +90,8 @@ export function toSkillManifestView(
     active: options.active,
     loadError: options.loadError
   };
+}
+
+function getUriDisplayPath(uri: vscode.Uri): string {
+  return uri.scheme === 'file' ? uri.fsPath : uri.toString();
 }

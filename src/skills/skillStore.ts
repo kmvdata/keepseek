@@ -60,6 +60,10 @@ export class SkillStore {
     return this.manifests.find((manifest) => manifest.id === id);
   }
 
+  public getManifests(): readonly SkillManifest[] {
+    return this.manifests;
+  }
+
   public getCachedActiveSkills(session: ChatSession): ActivatedSkill[] {
     const skills: ActivatedSkill[] = [];
     const seen = new Set<string>();

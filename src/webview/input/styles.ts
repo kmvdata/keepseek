@@ -573,6 +573,15 @@ export function getInputStyles(): string {
       overflow-y: auto;
     }
 
+    .reference-menu-group {
+      padding: 7px 8px 3px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
+
     .reference-menu-item {
       display: grid;
       grid-template-columns: minmax(0, 1fr);
@@ -586,6 +595,34 @@ export function getInputStyles(): string {
       background: transparent;
       text-align: left;
       cursor: pointer;
+    }
+
+    .reference-menu-item.is-skill {
+      grid-template-columns: 18px minmax(0, 1fr);
+      align-items: center;
+      column-gap: 7px;
+    }
+
+    .reference-menu-item-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border: 1px solid var(--vscode-inputOption-activeBorder, var(--vscode-panel-border));
+      border-radius: 4px;
+      color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+      background: var(--vscode-inputOption-activeBackground, transparent);
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .reference-menu-item-body {
+      display: grid;
+      gap: 1px;
+      min-width: 0;
     }
 
     .reference-menu-item:hover,
@@ -711,8 +748,12 @@ export function getInputStyles(): string {
 
     .command-row:hover,
     .command-row:focus-visible,
+    .command-row[aria-expanded="true"],
+    .command-control-row:hover,
+    .command-control-row:focus-within,
     .command-model-option:hover,
-    .command-model-option:focus-visible {
+    .command-model-option:focus-visible,
+    .command-model-option[aria-checked="true"] {
       color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
       background: var(--vscode-quickInputList-focusBackground, var(--vscode-list-hoverBackground));
       outline: none;
@@ -778,6 +819,10 @@ export function getInputStyles(): string {
       opacity: 0.72;
     }
 
+    .command-skill-item:focus-within {
+      background: var(--vscode-list-hoverBackground, transparent);
+    }
+
     .command-skill-main {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -794,6 +839,7 @@ export function getInputStyles(): string {
     .command-skill-main:hover:not(:disabled),
     .command-skill-main:focus-visible:not(:disabled) {
       color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
+      background: transparent;
       outline: none;
     }
 
@@ -883,6 +929,10 @@ export function getInputStyles(): string {
       text-overflow: ellipsis;
       white-space: nowrap;
       font-size: 12px;
+    }
+
+    .command-model-option[aria-checked="true"] .command-model-name {
+      font-weight: 600;
     }
 
     .command-effort-slider {

@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import * as vscode from 'vscode';
-import { SkillDiscovery } from '../src/skills/skillDiscovery';
+import { parseSkillFrontmatter, SkillDiscovery } from '../src/skills/skillDiscovery';
 
 type MutableWorkspaceStub = {
   workspaceFolders: Array<{ uri: vscode.Uri; name?: string }>;
@@ -34,7 +34,7 @@ test('discovers workspace skills directly under .agents with AGENTS.md instructi
   workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspacePath), name: 'project' }];
   workspace.isTrusted = true;
 
-  const manifests = await new SkillDiscovery().discover();
+  const manifests = await new SkillDiscovery({ includeCodexSkills: false }).discover();
   const manifest = manifests.find((item) => item.name === 'review-flow');
 
   assert.ok(manifest);
@@ -49,7 +49,63 @@ test('returns no skills when .agents is missing', async () => {
   workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspacePath), name: 'project' }];
   workspace.isTrusted = true;
 
-  const manifests = await new SkillDiscovery().discover();
+  const manifests = await new SkillDiscovery({ includeCodexSkills: false }).discover();
 
   assert.deepEqual(manifests, []);
+});
+
+test('discovers Codex home skills recursively from SKILL.md frontmatter', async () => {
+  const workspacePath = await mkdtemp(path.join(os.tmpdir(), 'keepseek-workspace-skills-'));
+  const codexSkillsPath = await mkdtemp(path.join(os.tmpdir(), 'keepseek-codex-skills-'));
+  const skillPath = path.join(codexSkillsPath, 'optimize-ui-interactions');
+  await mkdir(skillPath, { recursive: true });
+  await writeFile(
+    path.join(skillPath, 'SKILL.md'),
+    [
+      '---',
+      'name: optimize-ui-interactions',
+      'description: Optimize page-level UI interactions.',
+      '---',
+      '',
+      '# Optimize UI Interactions'
+    ].join('\n'),
+    'utf8'
+  );
+
+  const workspace = vscode.workspace as unknown as MutableWorkspaceStub;
+  workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspacePath), name: 'project' }];
+  workspace.isTrusted = true;
+
+  const manifests = await new SkillDiscovery({
+    codexSkillsUri: vscode.Uri.file(codexSkillsPath)
+  }).discover();
+  const manifest = manifests.find((item) => item.name === 'optimize-ui-interactions');
+
+  assert.ok(manifest);
+  assert.equal(manifest.description, 'Optimize page-level UI interactions.');
+  assert.equal(manifest.source, 'agentsUser');
+  assert.equal(manifest.sourceLabel, 'Codex skills');
+  assert.equal(manifest.skillUri.fsPath, path.join(skillPath, 'SKILL.md'));
+});
+
+test('parses Codex skill frontmatter name and description', () => {
+  const parsed = parseSkillFrontmatter([
+    '---',
+    'name: optimize-ui-interactions',
+    'description: Optimize page-level UI interactions.',
+    'metadata:',
+    '  keepseek:',
+    '    allowImplicit: true',
+    '    userInvocable: false',
+    '---',
+    '',
+    '# Body'
+  ].join('\n'));
+
+  assert.deepEqual(parsed, {
+    name: 'optimize-ui-interactions',
+    description: 'Optimize page-level UI interactions.',
+    allowImplicit: true,
+    userInvocable: false
+  });
 });

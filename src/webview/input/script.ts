@@ -211,6 +211,10 @@ export function getInputScript(): string {
         });
       }
 
+      if (commandMenu) {
+        commandMenu.addEventListener('keydown', handleCommandMenuKeydown);
+      }
+
       if (commandModelSwitch) {
         commandModelSwitch.addEventListener('click', function(event) {
           event.preventDefault();
@@ -331,6 +335,19 @@ export function getInputScript(): string {
           var index = readPositiveInteger(button.dataset.referenceIndex, 1) - 1;
           insertReferenceResourceAtIndex(index);
         });
+
+        referenceMenu.addEventListener('focusin', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          var button = target?.closest('button[data-reference-index]');
+          if (!button || !referenceMenu.contains(button)) { return; }
+          var index = readPositiveInteger(button.dataset.referenceIndex, 1) - 1;
+          if (index >= 0) {
+            activeReferenceIndex = index;
+            syncReferenceMenuActiveOption();
+          }
+        });
+
+        referenceMenu.addEventListener('keydown', handleReferenceMenuKeydown);
       }
 
       document.addEventListener('mousedown', function(event) {
@@ -446,6 +463,150 @@ export function getInputScript(): string {
         openCommandMenu();
       }
 
+      function handleCommandMenuKeydown(event) {
+        if (!commandMenuOpen) { return; }
+        var target = event.target instanceof Element ? event.target : null;
+        if (!target || !commandMenu || !commandMenu.contains(target)) { return; }
+
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeCommandMenu();
+          promptInput.focus();
+          return;
+        }
+
+        if (event.key === 'ArrowRight') {
+          if (target === commandModelSwitch) {
+            event.preventDefault();
+            openCommandModelListAndFocus();
+            return;
+          }
+          if (target === commandSkillsButton) {
+            event.preventDefault();
+            openCommandSkillListAndFocus();
+            return;
+          }
+        }
+
+        if (event.key === 'ArrowLeft') {
+          if (commandModelListOpen && commandModelList && (commandModelList.contains(target) || target === commandModelSwitch)) {
+            event.preventDefault();
+            commandModelListOpen = false;
+            renderCommandMenu();
+            if (commandModelSwitch) { commandModelSwitch.focus(); }
+            return;
+          }
+          if (commandSkillListOpen && commandSkillList && (commandSkillList.contains(target) || target === commandSkillsButton)) {
+            event.preventDefault();
+            commandSkillListOpen = false;
+            renderCommandMenu();
+            if (commandSkillsButton) { commandSkillsButton.focus(); }
+            return;
+          }
+        }
+
+        if (isCommandMenuNativeNavigationTarget(target)) {
+          return;
+        }
+
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          moveCommandMenuFocus(1);
+          return;
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          moveCommandMenuFocus(-1);
+          return;
+        }
+        if (event.key === 'Home') {
+          event.preventDefault();
+          focusCommandMenuControlAt(0);
+          return;
+        }
+        if (event.key === 'End') {
+          event.preventDefault();
+          focusCommandMenuControlAt(-1);
+        }
+      }
+
+      function openCommandModelListAndFocus() {
+        if (!commandModelSwitch) { return; }
+        consumeSlashTrigger(false);
+        commandModelListOpen = true;
+        commandSkillListOpen = false;
+        renderCommandMenu();
+        focusFirstCommandMenuControl(commandModelList);
+      }
+
+      function openCommandSkillListAndFocus() {
+        if (!commandSkillsButton) { return; }
+        consumeSlashTrigger(false);
+        commandSkillListOpen = true;
+        commandModelListOpen = false;
+        vscode.postMessage({ type: 'requestSkills' });
+        renderCommandMenu();
+        focusFirstCommandMenuControl(commandSkillList);
+      }
+
+      function isCommandMenuNativeNavigationTarget(target) {
+        if (target instanceof HTMLInputElement) {
+          return target.type === 'range' || target.type === 'number' || target.type === 'text';
+        }
+        return target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement;
+      }
+
+      function moveCommandMenuFocus(delta) {
+        var controls = getCommandMenuFocusableControls(commandMenu);
+        if (!controls.length) { return; }
+        var active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        var index = controls.indexOf(active);
+        if (index < 0 && active) {
+          for (var i = 0; i < controls.length; i++) {
+            if (controls[i].contains(active)) {
+              index = i;
+              break;
+            }
+          }
+        }
+        var nextIndex = index < 0
+          ? (delta > 0 ? 0 : controls.length - 1)
+          : (index + delta + controls.length) % controls.length;
+        focusCommandMenuControlAt(nextIndex);
+      }
+
+      function focusCommandMenuControlAt(index) {
+        var controls = getCommandMenuFocusableControls(commandMenu);
+        if (!controls.length) { return; }
+        var normalized = index < 0 ? controls.length - 1 : Math.min(index, controls.length - 1);
+        focusCommandMenuControl(controls[normalized]);
+      }
+
+      function focusFirstCommandMenuControl(container) {
+        var controls = getCommandMenuFocusableControls(container || commandMenu);
+        if (!controls.length) { return; }
+        focusCommandMenuControl(controls[0]);
+      }
+
+      function focusCommandMenuControl(control) {
+        if (!control) { return; }
+        control.focus();
+        if (control.scrollIntoView) {
+          control.scrollIntoView({ block: 'nearest' });
+        }
+      }
+
+      function getCommandMenuFocusableControls(container) {
+        if (!container) { return []; }
+        return Array.prototype.slice.call(container.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])'))
+          .filter(function(control) {
+            return control instanceof HTMLElement &&
+              !control.closest('.hidden') &&
+              control.tabIndex >= 0 &&
+              control.getClientRects().length > 0;
+          });
+      }
+
       function syncCommandMenuFromPrompt() {
         var slashRange = getSlashTriggerRange();
         if (slashRange) {
@@ -517,6 +678,7 @@ export function getInputScript(): string {
           referenceMenuButton.classList.toggle('is-active', referenceMenuSource !== 'skill');
           referenceMenuButton.setAttribute('aria-expanded', 'true');
         }
+        promptInput.setAttribute('aria-controls', 'referenceMenu');
         if (referenceMenuSource === 'skill') {
           vscode.postMessage({ type: 'requestSkills' });
         } else {
@@ -546,6 +708,8 @@ export function getInputScript(): string {
           referenceMenuButton.classList.remove('is-active');
           referenceMenuButton.setAttribute('aria-expanded', 'false');
         }
+        promptInput.removeAttribute('aria-controls');
+        promptInput.removeAttribute('aria-activedescendant');
         if (restoreFocus) {
           promptInput.focus();
         }
@@ -628,10 +792,35 @@ export function getInputScript(): string {
       function appendReferenceMenuEntries(entries) {
         var list = document.createElement('div');
         list.className = 'reference-menu-list';
-        for (var i = 0; i < entries.length; i++) {
-          list.append(createReferenceMenuEntryButton(entries[i], i));
+        if (referenceMenuSource === 'skill') {
+          appendSkillReferenceMenuEntries(list, entries);
+        } else {
+          for (var i = 0; i < entries.length; i++) {
+            list.append(createReferenceMenuEntryButton(entries[i], i));
+          }
         }
         referenceMenu.append(list);
+        syncReferenceMenuActiveOption();
+      }
+
+      function appendSkillReferenceMenuEntries(list, entries) {
+        var previousGroup = '';
+        for (var i = 0; i < entries.length; i++) {
+          var entry = entries[i];
+          var group = entry.kind === 'skill' ? getSkillSourceGroupLabel(entry.skill) : '';
+          if (group && group !== previousGroup) {
+            previousGroup = group;
+            list.append(createReferenceMenuGroupLabel(group));
+          }
+          list.append(createReferenceMenuEntryButton(entry, i));
+        }
+      }
+
+      function createReferenceMenuGroupLabel(label) {
+        var group = document.createElement('div');
+        group.className = 'reference-menu-group';
+        group.textContent = label;
+        return group;
       }
 
       function appendReferenceMenuNotice(message) {
@@ -655,6 +844,7 @@ export function getInputScript(): string {
       function createExternalPickerReferenceButton(index) {
         var option = document.createElement('button');
         option.type = 'button';
+        option.id = getReferenceMenuOptionId(index);
         option.className = 'reference-menu-item reference-menu-action' + (index === activeReferenceIndex ? ' is-active' : '');
         option.dataset.referenceIndex = String(index + 1);
         option.setAttribute('role', 'option');
@@ -675,6 +865,7 @@ export function getInputScript(): string {
       function createReferenceResourceButton(resource, index) {
         var option = document.createElement('button');
         option.type = 'button';
+        option.id = getReferenceMenuOptionId(index);
         option.className = 'reference-menu-item' + (resource.kind === 'directory' ? ' is-directory' : '') + (index === activeReferenceIndex ? ' is-active' : '');
         option.dataset.referenceIndex = String(index + 1);
         option.setAttribute('role', 'option');
@@ -697,22 +888,32 @@ export function getInputScript(): string {
       function createSkillReferenceButton(skill, index) {
         var option = document.createElement('button');
         option.type = 'button';
+        option.id = getReferenceMenuOptionId(index);
         option.className = 'reference-menu-item is-skill' + (index === activeReferenceIndex ? ' is-active' : '');
         option.dataset.referenceIndex = String(index + 1);
         option.setAttribute('role', 'option');
         option.setAttribute('aria-selected', index === activeReferenceIndex ? 'true' : 'false');
 
+        var icon = document.createElement('span');
+        icon.className = 'reference-menu-item-icon reference-menu-skill-icon';
+        icon.textContent = '$';
+        icon.setAttribute('aria-hidden', 'true');
+
+        var body = document.createElement('span');
+        body.className = 'reference-menu-item-body';
+
         var name = document.createElement('span');
         name.className = 'reference-menu-item-name';
-        name.textContent = getSkillPromptText(skill);
+        name.textContent = getSkillMentionName(skill);
         name.title = name.textContent;
 
         var pathLabel = document.createElement('span');
         pathLabel.className = 'reference-menu-item-path';
-        pathLabel.textContent = skill.description || skill.sourceLabel || skill.source || '';
+        pathLabel.textContent = skill.description || getSkillPath(skill) || skill.sourceLabel || skill.source || '';
         pathLabel.title = pathLabel.textContent;
 
-        option.append(name, pathLabel);
+        body.append(name, pathLabel);
+        option.append(icon, body);
         return option;
       }
 
@@ -798,10 +999,84 @@ export function getInputScript(): string {
       }
 
       function moveReferenceSelection(delta) {
+        setReferenceSelection(activeReferenceIndex + delta, false);
+      }
+
+      function setReferenceSelection(index, shouldFocus) {
         var entries = getReferenceMenuEntries();
         if (!entries.length) { return; }
-        activeReferenceIndex = (activeReferenceIndex + delta + entries.length) % entries.length;
+        activeReferenceIndex = (index + entries.length) % entries.length;
         renderReferenceMenu();
+        if (shouldFocus) {
+          focusActiveReferenceMenuItem();
+        }
+      }
+
+      function syncReferenceMenuActiveOption() {
+        if (!referenceMenu) { return; }
+        var activeId = '';
+        var buttons = referenceMenu.querySelectorAll('button[data-reference-index]');
+        buttons.forEach(function(button) {
+          var index = readPositiveInteger(button.dataset.referenceIndex, 1) - 1;
+          var isActive = index === activeReferenceIndex;
+          button.classList.toggle('is-active', isActive);
+          button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+          if (isActive) {
+            activeId = button.id || getReferenceMenuOptionId(index);
+          }
+        });
+        if (activeId) {
+          referenceMenu.setAttribute('aria-activedescendant', activeId);
+          promptInput.setAttribute('aria-activedescendant', activeId);
+        } else {
+          referenceMenu.removeAttribute('aria-activedescendant');
+          promptInput.removeAttribute('aria-activedescendant');
+        }
+      }
+
+      function getReferenceMenuOptionId(index) {
+        return 'referenceMenuOption' + String(index + 1);
+      }
+
+      function focusActiveReferenceMenuItem() {
+        if (!referenceMenu) { return; }
+        var active = referenceMenu.querySelector('button[data-reference-index="' + String(activeReferenceIndex + 1) + '"]');
+        if (active instanceof HTMLElement) {
+          active.focus();
+          if (active.scrollIntoView) {
+            active.scrollIntoView({ block: 'nearest' });
+          }
+        }
+      }
+
+      function handleReferenceMenuKeydown(event) {
+        if (!referenceMenuOpen) { return; }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeReferenceMenu(true);
+          return;
+        }
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          setReferenceSelection(activeReferenceIndex + 1, true);
+          return;
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          setReferenceSelection(activeReferenceIndex - 1, true);
+          return;
+        }
+        if (event.key === 'Home') {
+          event.preventDefault();
+          setReferenceSelection(0, true);
+          return;
+        }
+        if (event.key === 'End') {
+          var entries = getReferenceMenuEntries();
+          if (!entries.length) { return; }
+          event.preventDefault();
+          setReferenceSelection(entries.length - 1, true);
+        }
       }
 
       function insertActiveReferenceResource() {
@@ -868,9 +1143,6 @@ export function getInputScript(): string {
         fragment.append(createSkillLink(skill));
         appendReferenceBoundarySpace(fragment);
         insertFragmentAtRange(range, fragment);
-        if (!isSkillActive(skill.id)) {
-          vscode.postMessage({ type: 'useSkill', skillId: skill.id });
-        }
         closeReferenceMenu(true);
         setComposerStatus(t('skillInserted', { name: skill.name || skill.id }));
       }
@@ -2138,12 +2410,13 @@ export function getInputScript(): string {
       function createSkillLink(skill) {
         var anchor = document.createElement('a');
         anchor.className = 'rich-skill-link';
-        anchor.setAttribute('href', 'keepseek-skill:' + encodeURIComponent(skill.id));
+        anchor.setAttribute('href', getSkillPath(skill));
         anchor.setAttribute('contenteditable', 'false');
         anchor.draggable = false;
         anchor.title = skill.description || skill.name || skill.id;
         anchor.textContent = getSkillPromptText(skill);
         anchor.dataset.skillId = skill.id;
+        anchor.dataset.skillPath = getSkillPath(skill);
         return anchor;
       }
 
@@ -2181,6 +2454,8 @@ export function getInputScript(): string {
             link.remove();
             return;
           }
+          link.setAttribute('href', getSkillPath(skill));
+          link.dataset.skillPath = getSkillPath(skill);
           link.textContent = getSkillPromptText(skill);
           link.title = skill.description || skill.name || skill.id;
         });
@@ -2196,10 +2471,6 @@ export function getInputScript(): string {
           ids.push(normalized);
         }
         getActiveSkillIds().forEach(add);
-        var links = promptInput.querySelectorAll('a.rich-skill-link');
-        links.forEach(function(link) {
-          add(link.dataset.skillId || '');
-        });
         return ids;
       }
 
@@ -2328,6 +2599,41 @@ export function getInputScript(): string {
 
       function getSkillPromptText(skill) {
         return '$' + getSkillMentionName(skill);
+      }
+
+      function getSkillMarkdownText(skill) {
+        return '[' + getSkillPromptText(skill) + '](' + getSkillPath(skill) + ')';
+      }
+
+      function getSkillPath(skill) {
+        var skillPath = String(skill && skill.skillPath || '').trim();
+        if (skillPath) {
+          return skillPath;
+        }
+        var skillUri = String(skill && skill.skillUri || '').trim();
+        if (!skillUri) {
+          return '';
+        }
+        try {
+          if (skillUri.indexOf('file:') === 0) {
+            var url = new URL(skillUri);
+            var pathname = decodeURIComponent(url.pathname || '');
+            if (url.hostname) {
+              return '//' + url.hostname + pathname;
+            }
+            if (/^\\/[A-Za-z]:\\//.test(pathname)) {
+              return pathname.slice(1);
+            }
+            return pathname || skillUri;
+          }
+        } catch (error) {
+          return skillUri;
+        }
+        return skillUri;
+      }
+
+      function getSkillSourceGroupLabel(skill) {
+        return String(skill && skill.sourceLabel || skill && skill.source || t('skillsTitle')).trim() || t('skillsTitle');
       }
 
       function getSkillDirectoryName(skill) {
@@ -2664,10 +2970,12 @@ export function getInputScript(): string {
       function skillLinkToText(link) {
         var skill = getSkillById(link.dataset.skillId || '');
         if (skill) {
-          return getSkillPromptText(skill);
+          return getSkillMarkdownText(skill);
         }
         var text = String(link.textContent || '').trim();
-        return text.charAt(0) === '$' ? text : '$' + text;
+        var label = text.charAt(0) === '$' ? text : '$' + text;
+        var skillPath = String(link.dataset.skillPath || link.getAttribute('href') || '').trim();
+        return skillPath ? '[' + label + '](' + skillPath + ')' : label;
       }
 
       function makeStandaloneReferenceText(text) {
@@ -2821,12 +3129,15 @@ export function getInputScript(): string {
           var skillId = link.dataset.skillId || '';
           var skill = getSkillById(skillId);
           link.className = 'rich-skill-link';
-          link.setAttribute('href', 'keepseek-skill:' + encodeURIComponent(skillId));
           link.setAttribute('contenteditable', 'false');
           link.draggable = false;
           if (skill) {
+            link.setAttribute('href', getSkillPath(skill));
+            link.dataset.skillPath = getSkillPath(skill);
             link.textContent = getSkillPromptText(skill);
             link.title = skill.description || skill.name || skill.id;
+          } else {
+            link.setAttribute('href', link.dataset.skillPath || link.getAttribute('href') || '');
           }
         });
       }

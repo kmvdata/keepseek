@@ -1200,6 +1200,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const expandedPrompt = prompt
       ? await expandPromptReferencesInPrompt(prompt, {
           authorizedExternalReferenceUris,
+          skillManifests: this.skillStore.getManifests(),
           language: this.language
         })
       : '';
@@ -1510,6 +1511,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       });
       const expandedPrompt = await expandPromptReferencesInPrompt(trimmedPrompt, {
         authorizedExternalReferenceUris,
+        skillManifests: this.skillStore.getManifests(),
         language: this.language
       });
       if (abortController.signal.aborted) {

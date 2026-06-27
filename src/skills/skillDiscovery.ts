@@ -1,18 +1,21 @@
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { getConfiguredMaxFileBytes } from '../shared/config';
 import { formatBytes } from '../shared/format';
 import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
-import { createSkillId, SKILL_INSTRUCTION_FILE_NAMES, type SkillManifest, type SkillSource } from './skillTypes';
+import { createSkillId, SKILL_FILE_NAME, SKILL_INSTRUCTION_FILE_NAMES, type SkillManifest, type SkillSource } from './skillTypes';
 
 interface SkillBaseDirectory {
   source: SkillSource;
   uri: vscode.Uri;
   label: string;
   workspaceScoped: boolean;
+  recursive: boolean;
+  instructionFileNames: readonly string[];
 }
 
-interface ParsedSkillFrontmatter {
+export interface ParsedSkillFrontmatter {
   name?: string;
   description?: string;
   allowImplicit?: boolean;
@@ -20,76 +23,133 @@ interface ParsedSkillFrontmatter {
 }
 
 const DEFAULT_WORKSPACE_SKILL_DESCRIPTION = 'Project skill disabled because the workspace is not trusted.';
+const CODEX_SKILLS_SOURCE_LABEL = 'Codex skills';
+const MAX_SKILL_DISCOVERY_DEPTH = 16;
+const SKILL_DISCOVERY_SKIPPED_DIRECTORY_NAMES = new Set([
+  '.git',
+  '.hg',
+  '.svn',
+  'node_modules',
+  'dist',
+  'out',
+  'build',
+  'coverage'
+]);
+
+export interface SkillDiscoveryOptions {
+  codexSkillsUri?: vscode.Uri;
+  includeCodexSkills?: boolean;
+}
 
 export class SkillDiscovery {
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
 
+  public constructor(private readonly options: SkillDiscoveryOptions = {}) {}
+
   public async discover(): Promise<SkillManifest[]> {
     const manifests: SkillManifest[] = [];
     const seen = new Set<string>();
+    const seenSkillUris = new Set<string>();
 
     for (const base of this.getBaseDirectories()) {
       const discovered = await this.discoverBaseDirectory(base);
       for (const manifest of discovered) {
-        if (seen.has(manifest.id)) {
+        const skillUriKey = manifest.skillUri.toString();
+        if (seen.has(manifest.id) || seenSkillUris.has(skillUriKey)) {
           continue;
         }
         seen.add(manifest.id);
+        seenSkillUris.add(skillUriKey);
         manifests.push(manifest);
       }
     }
 
     return manifests.sort((left, right) => {
-      const nameOrder = left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
-      return nameOrder || left.sourceLabel.localeCompare(right.sourceLabel, undefined, { sensitivity: 'base' });
+      const sourceOrder = getSkillSourceSortRank(left) - getSkillSourceSortRank(right);
+      if (sourceOrder) {
+        return sourceOrder;
+      }
+      const labelOrder = left.sourceLabel.localeCompare(right.sourceLabel, undefined, { sensitivity: 'base' });
+      if (labelOrder) {
+        return labelOrder;
+      }
+      return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
     });
   }
 
   private getBaseDirectories(): SkillBaseDirectory[] {
     const bases: SkillBaseDirectory[] = [];
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
-      bases.push(
-        {
-          source: 'agentsWorkspace',
-          uri: vscode.Uri.joinPath(folder.uri, '.agents', 'skills'),
-          label: `${folder.name}/.agents`,
-          workspaceScoped: true
-        },
-        {
-          source: 'agentsWorkspace',
-          uri: vscode.Uri.joinPath(folder.uri, '.agents'),
-          label: `${folder.name}/.agents`,
-          workspaceScoped: true
-        }
-      );
+      bases.push({
+        source: 'agentsWorkspace',
+        uri: vscode.Uri.joinPath(folder.uri, '.agents'),
+        label: `${folder.name}/.agents`,
+        workspaceScoped: true,
+        recursive: true,
+        instructionFileNames: SKILL_INSTRUCTION_FILE_NAMES
+      });
+    }
+
+    if (this.options.includeCodexSkills !== false) {
+      bases.push({
+        source: 'agentsUser',
+        uri: this.options.codexSkillsUri ?? vscode.Uri.file(path.join(os.homedir(), '.codex', 'skills')),
+        label: CODEX_SKILLS_SOURCE_LABEL,
+        workspaceScoped: false,
+        recursive: true,
+        instructionFileNames: [SKILL_FILE_NAME]
+      });
     }
     return bases;
   }
 
   private async discoverBaseDirectory(base: SkillBaseDirectory): Promise<SkillManifest[]> {
+    const manifests: SkillManifest[] = [];
+    const seenDirectories = new Set<string>();
+    await this.discoverDirectory(base, base.uri, 0, manifests, seenDirectories);
+    return manifests;
+  }
+
+  private async discoverDirectory(
+    base: SkillBaseDirectory,
+    directoryUri: vscode.Uri,
+    depth: number,
+    manifests: SkillManifest[],
+    seenDirectories: Set<string>
+  ): Promise<void> {
+    if (depth > MAX_SKILL_DISCOVERY_DEPTH) {
+      return;
+    }
+
+    const directoryKey = directoryUri.toString();
+    if (seenDirectories.has(directoryKey)) {
+      return;
+    }
+    seenDirectories.add(directoryKey);
+
     let entries: [string, vscode.FileType][];
     try {
-      entries = await vscode.workspace.fs.readDirectory(base.uri);
+      entries = await vscode.workspace.fs.readDirectory(directoryUri);
     } catch {
-      return [];
+      return;
     }
 
-    const manifests: SkillManifest[] = [];
     for (const [name, type] of entries) {
-      if (type !== vscode.FileType.Directory || !name.trim()) {
+      if (!isDirectoryFileType(type) || !isDiscoverableDirectoryName(name)) {
         continue;
       }
 
-      const rootUri = vscode.Uri.joinPath(base.uri, name);
-      const skillUri = await this.findSkillInstructionFile(rootUri);
-      if (!skillUri) {
+      const rootUri = vscode.Uri.joinPath(directoryUri, name);
+      const skillUri = await this.findSkillInstructionFile(rootUri, base.instructionFileNames);
+      if (skillUri) {
+        manifests.push(await this.createManifest(base, rootUri, skillUri, name));
         continue;
       }
 
-      manifests.push(await this.createManifest(base, rootUri, skillUri, name));
+      if (base.recursive) {
+        await this.discoverDirectory(base, rootUri, depth + 1, manifests, seenDirectories);
+      }
     }
-
-    return manifests;
   }
 
   private async createManifest(
@@ -161,8 +221,8 @@ export class SkillDiscovery {
     };
   }
 
-  private async findSkillInstructionFile(rootUri: vscode.Uri): Promise<vscode.Uri | undefined> {
-    for (const fileName of SKILL_INSTRUCTION_FILE_NAMES) {
+  private async findSkillInstructionFile(rootUri: vscode.Uri, fileNames: readonly string[]): Promise<vscode.Uri | undefined> {
+    for (const fileName of fileNames) {
       const skillUri = vscode.Uri.joinPath(rootUri, fileName);
       try {
         const stat = await vscode.workspace.fs.stat(skillUri);
@@ -216,12 +276,36 @@ export class SkillDiscovery {
   }
 }
 
+function isDirectoryFileType(type: vscode.FileType): boolean {
+  return type === vscode.FileType.Directory || (type & vscode.FileType.Directory) !== 0;
+}
+
+function isDiscoverableDirectoryName(name: string): boolean {
+  const normalized = name.trim();
+  return Boolean(normalized) && !SKILL_DISCOVERY_SKIPPED_DIRECTORY_NAMES.has(normalized);
+}
+
+function getSkillSourceSortRank(manifest: SkillManifest): number {
+  switch (manifest.source) {
+    case 'agentsWorkspace':
+    case 'workspace':
+      return 0;
+    case 'agentsUser':
+    case 'user':
+      return 1;
+    case 'builtin':
+      return 2;
+    default:
+      return 3;
+  }
+}
+
 function getUriBasename(uri: vscode.Uri): string {
   const value = uri.scheme === 'file' ? uri.fsPath : uri.path;
   return path.basename(value) || 'skill instruction file';
 }
 
-function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
+export function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
   const normalized = content.replace(/\r\n?/gu, '\n');
   if (!normalized.startsWith('---\n')) {
     return {};
