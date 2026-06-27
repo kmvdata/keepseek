@@ -3251,6 +3251,13 @@ export function getInputScript(): string {
       var agentBudgetContextSummaryBudget = document.getElementById('agentBudgetContextSummaryBudget');
       var historySettingsOverlay = document.getElementById('historySettingsDialogOverlay');
       var historyRetentionDaysInput = document.getElementById('historyRetentionDaysInput');
+      var aboutOverlay = document.getElementById('aboutDialogOverlay');
+      var aboutProductValue = document.getElementById('aboutProductValue');
+      var aboutVersionValue = document.getElementById('aboutVersionValue');
+      var aboutAuthorValue = document.getElementById('aboutAuthorValue');
+      var aboutLicenseValue = document.getElementById('aboutLicenseValue');
+      var aboutRepositoryValue = document.getElementById('aboutRepositoryValue');
+      var aboutCopyrightValue = document.getElementById('aboutCopyrightValue');
       var createSkillOverlay = document.getElementById('createSkillDialogOverlay');
       var createSkillDialogStatus = document.getElementById('createSkillDialogStatus');
       var createSkillNameInput = document.getElementById('createSkillNameInput');
@@ -3264,6 +3271,7 @@ export function getInputScript(): string {
       var agentBudgetCancelBtn = document.getElementById('agentBudgetCancelBtn');
       var historySettingsSaveBtn = document.getElementById('historySettingsSaveBtn');
       var historySettingsCancelBtn = document.getElementById('historySettingsCancelBtn');
+      var aboutCloseBtn = document.getElementById('aboutCloseBtn');
       var createSkillCreateBtn = document.getElementById('createSkillCreateBtn');
       var createSkillCancelBtn = document.getElementById('createSkillCancelBtn');
       var apiKeyVisible = false;
@@ -3379,6 +3387,33 @@ export function getInputScript(): string {
         if (historyRetentionDaysInput) {
           historyRetentionDaysInput.focus();
           historyRetentionDaysInput.select();
+        }
+      }
+
+      function showAboutDialog() {
+        if (!aboutOverlay) { return; }
+        var info = getExtensionInfo();
+        if (aboutProductValue) {
+          aboutProductValue.textContent = info.displayName;
+        }
+        if (aboutVersionValue) {
+          aboutVersionValue.textContent = formatExtensionVersion(info.version);
+        }
+        if (aboutAuthorValue) {
+          aboutAuthorValue.textContent = info.author;
+        }
+        if (aboutLicenseValue) {
+          aboutLicenseValue.textContent = info.license;
+        }
+        if (aboutRepositoryValue) {
+          aboutRepositoryValue.textContent = info.repositoryUrl;
+        }
+        if (aboutCopyrightValue) {
+          aboutCopyrightValue.textContent = 'Copyright (c) 2026 ' + info.author;
+        }
+        aboutOverlay.classList.remove('hidden');
+        if (aboutCloseBtn) {
+          aboutCloseBtn.focus();
         }
       }
 
@@ -3529,6 +3564,12 @@ export function getInputScript(): string {
       function hideHistorySettingsDialog() {
         if (!historySettingsOverlay) { return; }
         historySettingsOverlay.classList.add('hidden');
+        promptInput.focus();
+      }
+
+      function hideAboutDialog() {
+        if (!aboutOverlay) { return; }
+        aboutOverlay.classList.add('hidden');
         promptInput.focus();
       }
 
@@ -3747,6 +3788,12 @@ export function getInputScript(): string {
         });
       }
 
+      if (aboutCloseBtn) {
+        aboutCloseBtn.addEventListener('click', function() {
+          hideAboutDialog();
+        });
+      }
+
       if (createSkillCancelBtn) {
         createSkillCancelBtn.addEventListener('click', function() {
           hideCreateSkillDialog();
@@ -3818,6 +3865,21 @@ export function getInputScript(): string {
           } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             if (historySettingsSaveBtn) { historySettingsSaveBtn.click(); }
+          }
+        });
+      }
+
+      if (aboutOverlay) {
+        aboutOverlay.addEventListener('click', function(event) {
+          if (event.target === aboutOverlay) {
+            hideAboutDialog();
+          }
+        });
+
+        aboutOverlay.addEventListener('keydown', function(event) {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            hideAboutDialog();
           }
         });
       }
@@ -3941,6 +4003,7 @@ export function getInputScript(): string {
         showSettingsDialog: showSettingsDialog,
         showAgentBudgetDialog: showAgentBudgetDialog,
         showHistorySettingsDialog: showHistorySettingsDialog,
+        showAboutDialog: showAboutDialog,
         onSkillDraftCreated: onSkillDraftCreated,
         resetPromptUsageEstimate: resetPromptUsageEstimate,
         isPromptSubmittableEmpty: isPromptSubmittableEmpty,

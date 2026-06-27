@@ -240,6 +240,12 @@ export function getStyles(): string {
       min-height: 42px;
     }
 
+    .settings-about-menu-row {
+      margin-top: 4px;
+      border-top: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+      border-radius: 0 0 6px 6px;
+    }
+
     .settings-language-item,
     .settings-debug-item {
       position: relative;

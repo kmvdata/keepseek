@@ -4,6 +4,7 @@ import { KeepseekChatViewProvider } from './provider/KeepseekChatViewProvider';
 import { GlobalSessionStorage } from './sessions/globalSessionStorage';
 import { ChatSessionStore, getCurrentWorkspaceSessionScope } from './sessions/chatSessionStore';
 import { getConfiguredKeepseekLanguage } from './shared/i18n';
+import type { KeepseekExtensionInfo } from './shared/types';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   ensureKeybindings(context);
@@ -15,7 +16,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await sessionStore.initialize();
   await sessionStore.cleanupExpiredSessions();
 
-  const provider = new KeepseekChatViewProvider(context.extensionUri, sessionStore, context.globalStorageUri, context.globalState);
+  const provider = new KeepseekChatViewProvider(
+    context.extensionUri,
+    sessionStore,
+    context.globalStorageUri,
+    context.globalState,
+    createExtensionInfo(context)
+  );
   const webviewProvider = vscode.window.registerWebviewViewProvider(KeepseekChatViewProvider.viewType, provider, {
     webviewOptions: {
       retainContextWhenHidden: true
@@ -55,3 +62,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export function deactivate(): void {}
+
+function createExtensionInfo(context: vscode.ExtensionContext): KeepseekExtensionInfo {
+  const packageJson = context.extension.packageJSON as Record<string, unknown>;
+  return {
+    displayName: readPackageString(packageJson.displayName, 'KeepSeek'),
+    version: readPackageString(packageJson.version, '0.0.0'),
+    publisher: readPackageString(packageJson.publisher, 'keepseek'),
+    author: 'kmvdata',
+    repositoryUrl: 'https://github.com/kmvdata/keepseek',
+    license: 'MIT'
+  };
+}
+
+function readPackageString(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}

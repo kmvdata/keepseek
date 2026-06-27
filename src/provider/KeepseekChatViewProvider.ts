@@ -17,6 +17,7 @@ import {
   ChatSession,
   ContextUsageEstimate,
   DraftEdit,
+  KeepseekExtensionInfo,
   KeepseekModel,
   WorkspaceSummary
 } from '../shared/types';
@@ -132,7 +133,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     private readonly extensionUri: vscode.Uri,
     private readonly sessionStore: ChatSessionStore,
     private readonly globalStorageUri: vscode.Uri,
-    skillState: vscode.Memento
+    skillState: vscode.Memento,
+    private readonly extensionInfo: KeepseekExtensionInfo
   ) {
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
     this.skillStore = new SkillStore(skillState);
@@ -1873,6 +1875,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           activeSession.lastTraceLogUri?.trim()
           || this.sessionTraceLogUris.get(activeSession.id)?.trim()
         ),
+        extensionInfo: this.extensionInfo,
         language: this.language,
         isMac: process.platform === 'darwin'
       }
@@ -1893,7 +1896,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return getHtmlForWebview({
       webview,
       extensionUri: this.extensionUri,
-      language: this.language
+      language: this.language,
+      extensionInfo: this.extensionInfo
     });
   }
 }

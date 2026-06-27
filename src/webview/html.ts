@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { KeepseekLanguage } from '../shared/i18n';
+import type { KeepseekExtensionInfo } from '../shared/types';
 import { getScript } from './script';
 import { getStyles } from './styles';
 import { getTemplate } from './template';
@@ -8,6 +9,7 @@ export function getHtmlForWebview(input: {
   webview: vscode.Webview;
   extensionUri: vscode.Uri;
   language: KeepseekLanguage;
+  extensionInfo: KeepseekExtensionInfo;
 }): string {
   const nonce = getNonce();
   const keepseekLogoUri = input.webview.asWebviewUri(vscode.Uri.joinPath(input.extensionUri, 'resources', 'keepseek.svg'));
@@ -23,7 +25,7 @@ ${getStyles()}
   </style>
 </head>
 <body ondragover="event.preventDefault();event.dataTransfer.dropEffect='copy';return false;" ondrop="event.preventDefault();return false;">
-${getTemplate()}
+${getTemplate(input.extensionInfo)}
   <script nonce="${nonce}">
 window.keepseekLogoUri = ${JSON.stringify(String(keepseekLogoUri))};
 ${getScript()}

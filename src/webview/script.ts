@@ -56,6 +56,14 @@ export function getScript(): string {
       historyRetentionDays: 1,
       debugMode: false,
       hasCurrentSessionLog: false,
+      extensionInfo: {
+        displayName: 'KeepSeek',
+        version: '',
+        publisher: 'keepseek',
+        author: 'kmvdata',
+        repositoryUrl: 'https://github.com/kmvdata/keepseek',
+        license: 'MIT'
+      },
       language: 'zh-CN',
       isMac: false
     };
@@ -258,6 +266,27 @@ export function getScript(): string {
         : t('languageValueZh');
     }
 
+    function readNonEmptyString(value, fallback) {
+      return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+    }
+
+    function getExtensionInfo() {
+      var info = state.extensionInfo && typeof state.extensionInfo === 'object' ? state.extensionInfo : {};
+      return {
+        displayName: readNonEmptyString(info.displayName, 'KeepSeek'),
+        version: readNonEmptyString(info.version, ''),
+        publisher: readNonEmptyString(info.publisher, 'keepseek'),
+        author: readNonEmptyString(info.author, 'kmvdata'),
+        repositoryUrl: readNonEmptyString(info.repositoryUrl, 'https://github.com/kmvdata/keepseek'),
+        license: readNonEmptyString(info.license, 'MIT')
+      };
+    }
+
+    function formatExtensionVersion(version) {
+      var value = readNonEmptyString(version, '');
+      return value ? 'v' + value.replace(/^v/iu, '') : '';
+    }
+
     function normalizeIntegerInRange(value, min, max, fallback) {
       var number = Number(value);
       if (!Number.isFinite(number)) {
@@ -273,6 +302,8 @@ export function getScript(): string {
     const settingsApiKeyMenuItem = document.getElementById('settingsApiKeyMenuItem');
     const settingsAgentBudgetMenuItem = document.getElementById('settingsAgentBudgetMenuItem');
     const settingsHistoryMenuItem = document.getElementById('settingsHistoryMenuItem');
+    const settingsAboutMenuItem = document.getElementById('settingsAboutMenuItem');
+    const settingsAboutVersionValue = document.getElementById('settingsAboutVersionValue');
     const settingsDebugMenuItem = document.getElementById('settingsDebugMenuItem');
     const settingsDebugValue = document.getElementById('settingsDebugValue');
     const settingsDebugModeToggle = document.getElementById('settingsDebugModeToggle');
@@ -638,6 +669,17 @@ export function getScript(): string {
         event.stopPropagation();
         closeSettingsMenu();
         vscode.postMessage({ type: 'openHistorySettings' });
+      });
+    }
+
+    if (settingsAboutMenuItem) {
+      settingsAboutMenuItem.addEventListener('click', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsMenu();
+        if (window.keepseekInputControls && window.keepseekInputControls.showAboutDialog) {
+          window.keepseekInputControls.showAboutDialog();
+        }
       });
     }
 
@@ -1018,6 +1060,9 @@ export function getScript(): string {
       }
       if (settingsLanguageValue) {
         settingsLanguageValue.textContent = getLanguageDisplayName(getLanguage());
+      }
+      if (settingsAboutVersionValue) {
+        settingsAboutVersionValue.textContent = formatExtensionVersion(getExtensionInfo().version);
       }
       if (settingsLanguageSubmenu) {
         var buttons = settingsLanguageSubmenu.querySelectorAll('button[data-language]');

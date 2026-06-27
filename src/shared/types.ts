@@ -7,6 +7,15 @@ export interface KeepseekModel {
   contextWindowTokens?: number;
 }
 
+export interface KeepseekExtensionInfo {
+  displayName: string;
+  version: string;
+  publisher: string;
+  author: string;
+  repositoryUrl: string;
+  license: string;
+}
+
 export type ReasoningEffort = 'high' | 'max';
 
 export interface AgentSettings {

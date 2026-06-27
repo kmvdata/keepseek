@@ -1,6 +1,8 @@
 import { getInputTemplate } from './input/template';
+import type { KeepseekExtensionInfo } from '../shared/types';
 
-export function getTemplate(): string {
+export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version'>): string {
+  const versionLabel = formatVersionLabel(extensionInfo?.version);
   return `
   <main class="shell">
     <header class="header">
@@ -88,6 +90,13 @@ export function getTemplate(): string {
           </button>
         </div>
       </div>
+      <button id="settingsAboutMenuItem" type="button" class="command-row settings-menu-row settings-about-menu-row">
+        <span class="command-row-main">
+          <span class="command-row-title" data-i18n="settingsAboutTitle">关于</span>
+          <span class="command-row-description" data-i18n="settingsAboutDescription">版本、作者和许可证</span>
+        </span>
+        <span id="settingsAboutVersionValue" class="command-row-value">${escapeHtml(versionLabel)}</span>
+      </button>
     </div>
 
     <div id="sessionMenu" class="session-menu hidden" role="menu" aria-label="Session history" data-i18n-aria-label="sessionHistory"></div>
@@ -117,4 +126,17 @@ export function getTemplate(): string {
 
     ${getInputTemplate()}
   </main>`;
+}
+
+function formatVersionLabel(version: string | undefined): string {
+  const value = typeof version === 'string' ? version.trim() : '';
+  return value ? `v${value.replace(/^v/iu, '')}` : '';
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;');
 }
