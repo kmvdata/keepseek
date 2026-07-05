@@ -1,15 +1,29 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { AgentActivityInput, AgentActivityPhase, AgentRequest, AgentResponse, AgentRunCallbacks, ContextUsageEstimate, DraftEdit } from '../shared/types';
+import {
+  AgentActivityInput,
+  AgentActivityPhase,
+  AgentRequest,
+  AgentResponse,
+  AgentRunCallbacks,
+  ContextUsageEstimate,
+  DraftEdit,
+  PromptCacheDiagnostics,
+  TurnUsageStats,
+  UsageEvent
+} from '../shared/types';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_MAX_TOKENS,
+  getConfiguredContextCompressionSettings,
   getConfiguredMaxRequestRetries,
   getConfiguredMaxRunMs,
   getConfiguredMaxToolCalls,
   getConfiguredMaxToolIterations,
   getConfiguredMaxTokens,
+  getConfiguredModelUsagePricing,
   getConfiguredRequestRetryBaseMs,
+  getConfiguredSlimToolModeEnabled,
   getConfiguredStreamIdleTimeoutMs,
   getConfiguredToolResultTokenBudget,
   MAX_GENERATION_TOKENS
@@ -19,6 +33,7 @@ import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
   estimateChatMessageTokens,
   estimateDeepSeekMessageTokens,
+  getAgentToolNamesForPrompt,
   getAgentTools,
   LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
   LIST_WORKSPACE_FILES_TOOL_NAME,
@@ -55,6 +70,11 @@ import {
   DeepSeekToolCall,
   DeepSeekUsage
 } from './deepseek/types';
+import {
+  calculateUsageCost,
+  createUsageEvent,
+  normalizeDeepSeekUsage
+} from './usageStats';
 
 export { AGENT_HISTORY_MESSAGE_LIMIT } from '../shared/config';
 export { DEFAULT_MAX_TOKENS, MAX_GENERATION_TOKENS };
@@ -65,7 +85,12 @@ const SEARCH_SHAPED_RESULT_LIMIT = 120;
 const SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT = 12;
 const SEARCH_SHAPED_TOTAL_CHARS = 50_000;
 const SEARCH_SHAPED_LINE_CHARS = 500;
+const SEARCH_SNIPPED_RESULT_LIMIT = 60;
+const SEARCH_SNIPPED_RESULTS_PER_FILE_LIMIT = 6;
+const SEARCH_SNIPPED_TOTAL_CHARS = 20_000;
+const SEARCH_SNIPPED_LINE_CHARS = 300;
 const RANGE_READ_SHAPED_CONTENT_CHARS = 160_000;
+const RANGE_READ_SNIPPED_CONTENT_CHARS = 60_000;
 
 interface AgentRuntimeConfig {
   apiKey: string;
@@ -125,7 +150,12 @@ interface UpstreamUsageTotals {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
-  records: DeepSeekUsage[];
+  cacheHitTokens: number;
+  cacheMissTokens: number;
+  reasoningTokens: number;
+  cost: number;
+  currency: string;
+  records: UsageEvent[];
 }
 
 export class AgentRunAbortedError extends Error {
@@ -156,13 +186,20 @@ export class AgentRunner {
       callbacks.onTraceLog?.(traceLog);
     }
     const toolResultLedger: ToolResultLedgerEntry[] = [];
+    const usagePricing = getConfiguredModelUsagePricing(request.model.id);
     const upstreamUsageTotals: UpstreamUsageTotals = {
       requestCount: 0,
       promptTokens: 0,
       completionTokens: 0,
       totalTokens: 0,
+      cacheHitTokens: 0,
+      cacheMissTokens: 0,
+      reasoningTokens: 0,
+      cost: 0,
+      currency: usagePricing.currency,
       records: []
     };
+    let promptCacheDiagnostics: PromptCacheDiagnostics | undefined;
     trace.record({
       type: 'run_start',
       model: request.model,
@@ -208,17 +245,24 @@ export class AgentRunner {
         : undefined
     });
     const finishRun = (response: AgentResponse, details: Record<string, unknown> = {}): AgentResponse => {
+      const responseWithUsage: AgentResponse = {
+        ...response,
+        usage: response.usage ?? this.toTurnUsageStats(upstreamUsageTotals, request.model.id),
+        promptCacheDiagnostics: response.promptCacheDiagnostics ?? promptCacheDiagnostics
+      };
       trace.record({
         type: 'run_finish',
         ...details,
         upstreamUsage: this.summarizeUpstreamUsageTotals(upstreamUsageTotals),
         toolResultLedger,
         response: trace.includesPayload('request')
-          ? response
+          ? responseWithUsage
           : {
-              message: summarizeText(response.message),
-              reasoningContent: summarizeText(response.reasoningContent),
-              draftEdits: response.draftEdits.map((edit) => ({
+              message: summarizeText(responseWithUsage.message),
+              reasoningContent: summarizeText(responseWithUsage.reasoningContent),
+              usage: responseWithUsage.usage,
+              promptCacheDiagnostics: responseWithUsage.promptCacheDiagnostics,
+              draftEdits: responseWithUsage.draftEdits.map((edit) => ({
                 id: edit.id,
                 uri: edit.uri,
                 label: edit.label,
@@ -228,7 +272,7 @@ export class AgentRunner {
               }))
             }
       });
-      return traceLog ? { ...response, traceLog } : response;
+      return traceLog ? { ...responseWithUsage, traceLog } : responseWithUsage;
     };
 
     try {
@@ -298,7 +342,20 @@ export class AgentRunner {
       type: 'agent_messages_initialized',
       messages: trace.includesPayload('request') ? messages : messages.map(summarizeDeepSeekMessage)
     });
-    const tools = getAgentTools();
+    const toolNames = getAgentToolNamesForPrompt(request.prompt, getConfiguredSlimToolModeEnabled());
+    const tools = getAgentTools({ toolNames });
+    promptCacheDiagnostics = this.createPromptCacheDiagnostics({
+      request,
+      messages,
+      tools,
+      historyCompacted: projection.metadata.usedSummary
+    });
+    trace.record({
+      type: 'prompt_cache_diagnostics',
+      ...promptCacheDiagnostics,
+      exposedToolNames: tools.map((tool) => tool.function.name),
+      projectionMetadata: projection.metadata
+    });
     const draftEdits: DraftEdit[] = [];
     const reasoningParts: string[] = [];
     const maxIterations = Math.max(0, runtimeConfig.maxToolIterations);
@@ -499,14 +556,18 @@ export class AgentRunner {
           content: summarizeText(rawToolResult)
         });
         this.throwIfAborted(request.signal, request.language);
-        const shapedToolResult = this.shapeToolResult(toolCall.function.name, rawToolResult);
+        const nextToolsForRequest = turn + 1 < maxIterations ? tools : [];
+        const shapedToolResult = this.shapeToolResult(
+          toolCall.function.name,
+          rawToolResult,
+          this.shouldSnipToolResult(request, messages, nextToolsForRequest, outputReserveTokens)
+        );
         const shapedToolMessage: DeepSeekMessage = {
           role: 'tool',
           tool_call_id: toolCall.id,
           content: shapedToolResult.content
         };
         const nextToolResultTokens = estimateDeepSeekMessageTokens(shapedToolMessage);
-        const nextToolsForRequest = turn + 1 < maxIterations ? tools : [];
         if (toolResultTokens + nextToolResultTokens > maxToolResultTokens) {
           budgetStopReason = 'tool_result_budget_exhausted';
           const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
@@ -729,7 +790,16 @@ export class AgentRunner {
     });
 
     if (response.ok && response.message) {
-      this.recordUpstreamUsage(response.usage, options.usageTotals, trace, upstreamRequestId);
+      const usageEvent = this.recordUpstreamUsage(
+        response.usage,
+        options.usageTotals,
+        trace,
+        upstreamRequestId,
+        request.model.id
+      );
+      if (usageEvent) {
+        callbacks.onUsage?.(usageEvent);
+      }
       trace.record({
         type: 'upstream_response_message',
         requestId: upstreamRequestId,
@@ -1009,23 +1079,45 @@ export class AgentRunner {
     usage: DeepSeekUsage | null | undefined,
     totals: UpstreamUsageTotals | undefined,
     trace: AgentInteractionTrace,
-    requestId: string
-  ): void {
+    requestId: string,
+    modelId: string
+  ): UsageEvent | undefined {
     if (!usage || !totals) {
-      return;
+      return undefined;
     }
 
+    const normalizedUsage = normalizeDeepSeekUsage(usage);
+    if (!normalizedUsage) {
+      return undefined;
+    }
+
+    const pricing = getConfiguredModelUsagePricing(modelId);
+    const usageEvent = createUsageEvent({
+      usage: normalizedUsage,
+      cost: calculateUsageCost(normalizedUsage, pricing),
+      currency: pricing.currency,
+      modelId,
+      requestId
+    });
     totals.requestCount += 1;
-    totals.promptTokens += readUsageNumber(usage.prompt_tokens);
-    totals.completionTokens += readUsageNumber(usage.completion_tokens);
-    totals.totalTokens += readUsageNumber(usage.total_tokens);
-    totals.records.push(usage);
+    totals.promptTokens += normalizedUsage.promptTokens;
+    totals.completionTokens += normalizedUsage.completionTokens;
+    totals.totalTokens += normalizedUsage.totalTokens;
+    totals.cacheHitTokens += normalizedUsage.cacheHitTokens;
+    totals.cacheMissTokens += normalizedUsage.cacheMissTokens;
+    totals.reasoningTokens += normalizedUsage.reasoningTokens ?? 0;
+    totals.cost += usageEvent.cost;
+    totals.currency = usageEvent.currency;
+    totals.records.push(usageEvent);
     trace.record({
       type: 'upstream_usage',
       requestId,
       usage,
+      normalizedUsage,
+      usageEvent,
       totals: this.summarizeUpstreamUsageTotals(totals)
     });
+    return usageEvent;
   }
 
   private summarizeUpstreamUsageTotals(totals: UpstreamUsageTotals): Record<string, unknown> {
@@ -1034,7 +1126,50 @@ export class AgentRunner {
       promptTokens: totals.promptTokens,
       completionTokens: totals.completionTokens,
       totalTokens: totals.totalTokens,
+      cacheHitTokens: totals.cacheHitTokens,
+      cacheMissTokens: totals.cacheMissTokens,
+      reasoningTokens: totals.reasoningTokens,
+      cost: totals.cost,
+      currency: totals.currency,
       records: totals.records
+    };
+  }
+
+  private createPromptCacheDiagnostics(input: {
+    request: AgentRequest;
+    messages: DeepSeekMessage[];
+    tools: DeepSeekFunctionTool[];
+    historyCompacted: boolean;
+  }): PromptCacheDiagnostics {
+    const systemPrompt = input.messages.find((message) => message.role === 'system')?.content ?? '';
+    const toolsSchema = JSON.stringify(input.tools);
+    return {
+      systemPromptHash: hashStableText(systemPrompt),
+      toolsSchemaHash: hashStableText(toolsSchema),
+      modelId: input.request.model.id,
+      historyCompacted: input.historyCompacted,
+      historyRewriteReason: input.request.historyRewriteReason,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  private toTurnUsageStats(totals: UpstreamUsageTotals, modelId: string): TurnUsageStats | undefined {
+    if (!totals.requestCount) {
+      return undefined;
+    }
+
+    return {
+      promptTokens: totals.promptTokens,
+      completionTokens: totals.completionTokens,
+      totalTokens: totals.totalTokens,
+      cacheHitTokens: totals.cacheHitTokens,
+      cacheMissTokens: totals.cacheMissTokens,
+      reasoningTokens: totals.reasoningTokens || undefined,
+      requestCount: totals.requestCount,
+      cost: totals.cost,
+      currency: totals.currency,
+      modelId,
+      updatedAt: new Date().toISOString()
     };
   }
 
@@ -1152,15 +1287,15 @@ export class AgentRunner {
     });
   }
 
-  private shapeToolResult(toolName: string, rawContent: string): ShapedToolResult {
+  private shapeToolResult(toolName: string, rawContent: string, snipForContextPressure: boolean): ShapedToolResult {
     const rawLength = rawContent.length;
     const parsed = this.parseToolResultObject(rawContent);
     let shapedContent = rawContent;
 
     if (toolName === SEARCH_WORKSPACE_TOOL_NAME && parsed) {
-      shapedContent = this.shapeSearchToolResult(parsed);
+      shapedContent = this.shapeSearchToolResult(parsed, snipForContextPressure);
     } else if (toolName === READ_WORKSPACE_FILE_RANGE_TOOL_NAME && parsed) {
-      shapedContent = this.shapeRangeReadToolResult(parsed);
+      shapedContent = this.shapeRangeReadToolResult(parsed, snipForContextPressure);
     }
 
     const shapedMetadata = this.getToolResultMetadata(this.parseToolResultObject(shapedContent));
@@ -1176,32 +1311,53 @@ export class AgentRunner {
     };
   }
 
-  private shapeSearchToolResult(parsed: Record<string, unknown>): string {
+  private shouldSnipToolResult(
+    request: AgentRequest,
+    messages: DeepSeekMessage[],
+    tools: DeepSeekFunctionTool[],
+    outputReserveTokens: number
+  ): boolean {
+    const settings = getConfiguredContextCompressionSettings();
+    const usage = createContextUsageEstimateFromMessages({
+      model: request.model,
+      messages,
+      tools,
+      outputReserveTokens,
+      safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+    });
+    return usage.usedPercent / 100 >= settings.toolResultSnipRatio;
+  }
+
+  private shapeSearchToolResult(parsed: Record<string, unknown>, snipForContextPressure: boolean): string {
     const rawResults = Array.isArray(parsed.results) ? parsed.results : [];
     const shapedResults: unknown[] = [];
     const perFileCounts = new Map<string, number>();
     let totalChars = 0;
     let truncated = parsed.truncated === true;
+    const resultLimit = snipForContextPressure ? SEARCH_SNIPPED_RESULT_LIMIT : SEARCH_SHAPED_RESULT_LIMIT;
+    const resultsPerFileLimit = snipForContextPressure ? SEARCH_SNIPPED_RESULTS_PER_FILE_LIMIT : SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT;
+    const totalCharLimit = snipForContextPressure ? SEARCH_SNIPPED_TOTAL_CHARS : SEARCH_SHAPED_TOTAL_CHARS;
+    const lineCharLimit = snipForContextPressure ? SEARCH_SNIPPED_LINE_CHARS : SEARCH_SHAPED_LINE_CHARS;
 
     for (const rawResult of rawResults) {
       if (!this.isRecord(rawResult)) {
         continue;
       }
-      if (shapedResults.length >= SEARCH_SHAPED_RESULT_LIMIT) {
+      if (shapedResults.length >= resultLimit) {
         truncated = true;
         break;
       }
 
       const resultPath = typeof rawResult.path === 'string' ? rawResult.path : '';
       const fileCount = perFileCounts.get(resultPath) ?? 0;
-      if (fileCount >= SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT) {
+      if (fileCount >= resultsPerFileLimit) {
         truncated = true;
         continue;
       }
 
-      const shapedResult = this.shapeSearchResult(rawResult);
+      const shapedResult = this.shapeSearchResult(rawResult, lineCharLimit);
       const shapedChars = JSON.stringify(shapedResult).length;
-      if (totalChars + shapedChars > SEARCH_SHAPED_TOTAL_CHARS) {
+      if (totalChars + shapedChars > totalCharLimit) {
         truncated = true;
         break;
       }
@@ -1215,24 +1371,25 @@ export class AgentRunner {
       ...parsed,
       results: shapedResults,
       count: shapedResults.length,
-      limit: Math.min(readFiniteNumber(parsed.limit, SEARCH_SHAPED_RESULT_LIMIT), SEARCH_SHAPED_RESULT_LIMIT),
+      limit: Math.min(readFiniteNumber(parsed.limit, resultLimit), resultLimit),
       truncated: truncated || shapedResults.length < rawResults.length,
-      perFileLimit: SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT,
-      totalCharLimit: SEARCH_SHAPED_TOTAL_CHARS
+      perFileLimit: resultsPerFileLimit,
+      totalCharLimit,
+      snippedForContextPressure: snipForContextPressure || undefined
     });
   }
 
-  private shapeSearchResult(result: Record<string, unknown>): Record<string, unknown> {
+  private shapeSearchResult(result: Record<string, unknown>, lineCharLimit: number): Record<string, unknown> {
     return {
       ...result,
-      matchLine: this.shapeSearchText(typeof result.matchLine === 'string' ? result.matchLine : ''),
-      matchLineTruncated: result.matchLineTruncated === true || this.isSearchTextTruncated(result.matchLine),
-      before: this.shapeSearchContextLines(result.before),
-      after: this.shapeSearchContextLines(result.after)
+      matchLine: this.shapeSearchText(typeof result.matchLine === 'string' ? result.matchLine : '', lineCharLimit),
+      matchLineTruncated: result.matchLineTruncated === true || this.isSearchTextTruncated(result.matchLine, lineCharLimit),
+      before: this.shapeSearchContextLines(result.before, lineCharLimit),
+      after: this.shapeSearchContextLines(result.after, lineCharLimit)
     };
   }
 
-  private shapeSearchContextLines(value: unknown): unknown[] {
+  private shapeSearchContextLines(value: unknown, lineCharLimit: number): unknown[] {
     if (!Array.isArray(value)) {
       return [];
     }
@@ -1242,33 +1399,35 @@ export class AgentRunner {
       }
       return {
         ...item,
-        text: this.shapeSearchText(typeof item.text === 'string' ? item.text : ''),
-        truncated: item.truncated === true || this.isSearchTextTruncated(item.text)
+        text: this.shapeSearchText(typeof item.text === 'string' ? item.text : '', lineCharLimit),
+        truncated: item.truncated === true || this.isSearchTextTruncated(item.text, lineCharLimit)
       };
     });
   }
 
-  private shapeSearchText(value: string): string {
-    return value.length <= SEARCH_SHAPED_LINE_CHARS
+  private shapeSearchText(value: string, lineCharLimit: number): string {
+    return value.length <= lineCharLimit
       ? value
-      : `${value.slice(0, SEARCH_SHAPED_LINE_CHARS)}...`;
+      : `${value.slice(0, lineCharLimit)}...`;
   }
 
-  private isSearchTextTruncated(value: unknown): boolean {
-    return typeof value === 'string' && value.length > SEARCH_SHAPED_LINE_CHARS;
+  private isSearchTextTruncated(value: unknown, lineCharLimit: number): boolean {
+    return typeof value === 'string' && value.length > lineCharLimit;
   }
 
-  private shapeRangeReadToolResult(parsed: Record<string, unknown>): string {
+  private shapeRangeReadToolResult(parsed: Record<string, unknown>, snipForContextPressure: boolean): string {
     const content = typeof parsed.content === 'string' ? parsed.content : '';
-    if (content.length <= RANGE_READ_SHAPED_CONTENT_CHARS) {
+    const contentCharLimit = snipForContextPressure ? RANGE_READ_SNIPPED_CONTENT_CHARS : RANGE_READ_SHAPED_CONTENT_CHARS;
+    if (content.length <= contentCharLimit) {
       return JSON.stringify(parsed);
     }
 
     return JSON.stringify({
       ...parsed,
-      content: content.slice(0, RANGE_READ_SHAPED_CONTENT_CHARS),
+      content: content.slice(0, contentCharLimit),
       truncated: true,
-      shapedContentCharLimit: RANGE_READ_SHAPED_CONTENT_CHARS
+      shapedContentCharLimit: contentCharLimit,
+      snippedForContextPressure: snipForContextPressure || undefined
     });
   }
 
@@ -1665,14 +1824,14 @@ export class AgentRunner {
 
 }
 
-function readUsageNumber(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
-}
-
 function readFiniteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
 function readOptionalFiniteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function hashStableText(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16);
 }

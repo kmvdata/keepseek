@@ -248,7 +248,7 @@ export function getInputTemplate(): string {
           <label class="settings-field">
             <span class="settings-field-label" data-i18n="settingsContextCompressionTriggerPercentLabel">无摘要触发比例（%）</span>
             <input id="agentBudgetContextCompressionTriggerPercent" class="settings-input" type="number" min="10" max="95" step="5" inputmode="decimal" autocomplete="off" />
-            <span class="settings-field-hint" data-i18n="settingsContextCompressionTriggerPercentHint">默认 70%；原始对话估算达到上下文窗口该比例时可刷新摘要</span>
+            <span class="settings-field-hint" data-i18n="settingsContextCompressionTriggerPercentHint">默认 80%；原始对话估算达到上下文窗口该比例时才刷新摘要</span>
           </label>
           <label class="settings-field">
             <span class="settings-field-label" data-i18n="settingsContextSummaryBudgetLabel">摘要输出预算（KB）</span>

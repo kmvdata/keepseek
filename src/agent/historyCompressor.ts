@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
-  AGENT_HISTORY_MESSAGE_LIMIT,
   DEFAULT_DEEPSEEK_BASE_URL,
   getConfiguredContextCompressionSettings,
   getConfiguredContextWindowTokens,
@@ -61,6 +60,7 @@ export interface HistoryCompressionRefreshPlan {
     | 'aborted'
     | 'no_compressible_messages'
     | 'fresh_enough'
+    | 'force_context_limit'
     | 'missing_summary_near_context_limit'
     | 'background_refresh';
 }
@@ -121,6 +121,15 @@ export class HistoryCompressor {
         changed: protectedState.changed,
         mode: 'none',
         reason: 'fresh_enough'
+      };
+    }
+
+    if (isRawConversationOverForceRatio(input, settings)) {
+      return {
+        state: protectedState.state,
+        changed: protectedState.changed,
+        mode: 'sync',
+        reason: 'force_context_limit'
       };
     }
 
@@ -278,20 +287,19 @@ export class HistoryCompressor {
       return false;
     }
 
-    if (input.hasSummary) {
+    const ratio = estimateRawConversationRatio(input.input);
+    if (ratio < input.settings.triggerRatio) {
+      return false;
+    }
+
+    if (input.hasSummary && ratio < input.settings.forceRatio) {
       return input.newCompressibleMessages.length >= Math.max(
         SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD,
         input.settings.keepRecentTurns
       );
     }
 
-    if (input.input.session.messages.length > AGENT_HISTORY_MESSAGE_LIMIT) {
-      return true;
-    }
-
-    const estimatedTokens = estimateRawConversationTokens(input.input);
-    const maxTokens = getConfiguredContextWindowTokens(input.input.model);
-    return estimatedTokens / maxTokens >= input.settings.triggerRatio;
+    return true;
   }
 
   private buildSummaryMessages(input: {
@@ -403,12 +411,23 @@ function estimateRawConversationTokens(input: HistoryCompressionRefreshInput): n
   return historyTokens + promptTokens + contextFileTokens;
 }
 
+function estimateRawConversationRatio(input: HistoryCompressionRefreshInput): number {
+  const maxTokens = getConfiguredContextWindowTokens(input.model);
+  return estimateRawConversationTokens(input) / maxTokens;
+}
+
 function isRawConversationNearContextWindow(
   input: HistoryCompressionRefreshInput,
   settings: ContextCompressionSettings
 ): boolean {
-  const maxTokens = getConfiguredContextWindowTokens(input.model);
-  return estimateRawConversationTokens(input) / maxTokens >= settings.triggerRatio;
+  return estimateRawConversationRatio(input) >= settings.triggerRatio;
+}
+
+function isRawConversationOverForceRatio(
+  input: HistoryCompressionRefreshInput,
+  settings: ContextCompressionSettings
+): boolean {
+  return estimateRawConversationRatio(input) >= settings.forceRatio;
 }
 
 function getSummarySystemPrompt(language: KeepseekLanguage): string {

@@ -58,6 +58,63 @@ export interface ContextUsageEstimate {
   };
 }
 
+export interface Usage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cacheHitTokens: number;
+  cacheMissTokens: number;
+  reasoningTokens?: number;
+}
+
+export interface UsageCostRates {
+  cacheHitPrice: number;
+  inputPrice: number;
+  outputPrice: number;
+  currency: string;
+}
+
+export interface UsageEvent {
+  usage: Usage;
+  cost: number;
+  currency: string;
+  modelId: string;
+  requestId?: string;
+}
+
+export interface TurnUsageStats extends Usage {
+  requestCount: number;
+  cost: number;
+  currency: string;
+  modelId?: string;
+  updatedAt?: string;
+}
+
+export interface SessionUsageStats extends Usage {
+  requestCount: number;
+  sessionCost: number;
+  currency: string;
+  updatedAt?: string;
+}
+
+export interface DeepSeekBalanceState {
+  totalBalance?: number;
+  currency: string;
+  isAvailable?: boolean;
+  updatedAt?: string;
+  error?: string;
+}
+
+export interface PromptCacheDiagnostics {
+  systemPromptHash?: string;
+  toolsSchemaHash?: string;
+  modelId?: string;
+  historyCompacted?: boolean;
+  historyRewriteReason?: string;
+  cacheMissPossibleReasons?: string[];
+  updatedAt?: string;
+}
+
 export type ChatRole = 'user' | 'assistant' | 'system';
 
 export interface ChatMessageContextMeta {
@@ -119,6 +176,10 @@ export interface ChatSession {
   activeSkillIds?: string[];
   contextCompression?: ContextCompressionState;
   contextUsage?: ContextUsageEstimate;
+  usageStats?: SessionUsageStats;
+  lastTurnUsage?: TurnUsageStats;
+  balance?: DeepSeekBalanceState;
+  promptCacheDiagnostics?: PromptCacheDiagnostics;
   lastTraceLogUri?: string;
   createdAt: string;
   updatedAt: string;
@@ -177,6 +238,7 @@ export interface AgentRequest {
   skills?: ActivatedSkill[];
   history: ChatMessage[];
   contextCompression?: ContextCompressionState;
+  historyRewriteReason?: string;
   language: KeepseekLanguage;
   signal?: AbortSignal;
 }
@@ -195,6 +257,8 @@ export interface AgentResponse {
   message: string;
   reasoningContent?: string;
   draftEdits: DraftEdit[];
+  usage?: TurnUsageStats;
+  promptCacheDiagnostics?: PromptCacheDiagnostics;
   traceLog?: AgentTraceLogInfo;
 }
 
@@ -244,5 +308,6 @@ export interface AgentRunCallbacks {
   onDelta?: (event: AgentProgressEvent) => void;
   onStatus?: (status: AgentActivityInput) => void;
   onUsageEstimate?: (usage: ContextUsageEstimate) => void;
+  onUsage?: (event: UsageEvent) => void;
   onTraceLog?: (traceLog: AgentTraceLogInfo) => void;
 }

@@ -4,5 +4,7 @@ import './chatSessionStore.test';
 import './fileReference.test';
 import './historyCompressor.test';
 import './historyProjection.test';
+import './protocolCache.test';
 import './skillDiscovery.test';
 import './skillReference.test';
+import './usageStats.test';

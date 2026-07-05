@@ -2,7 +2,8 @@ import {
   DEFAULT_MAX_TOKENS,
   getConfiguredContextWindowTokens,
   getConfiguredMaxTokens,
-  getConfiguredMaxToolIterations
+  getConfiguredMaxToolIterations,
+  getConfiguredSlimToolModeEnabled
 } from '../shared/config';
 import { DeepSeekFunctionTool, DeepSeekMessage } from './deepseek/types';
 import { isRecord } from '../shared/errors';
@@ -11,6 +12,9 @@ import {
   estimateChatMessageTokens,
   estimateDeepSeekMessageTokens,
   estimateDeepSeekToolsTokens,
+  formatActiveSkills,
+  formatAgentContextFiles,
+  getAgentToolNamesForPrompt,
   getAgentSystemPrompt,
   getAgentTools
 } from './protocol';
@@ -48,11 +52,16 @@ export function createContextUsageEstimate(input: {
     projection
   });
   const includeTools = input.includeTools ?? getConfiguredMaxToolIterations() > 0;
-  const tools = includeTools ? getAgentTools() : [];
+  const tools = includeTools
+    ? getAgentTools({
+        toolNames: getAgentToolNamesForPrompt(prompt, getConfiguredSlimToolModeEnabled())
+      })
+    : [];
   const outputReserveTokens = input.outputReserveTokens ?? resolveOutputReserveTokens(getConfiguredMaxTokens());
   const breakdown = estimateInitialBreakdown({
     messages,
     contextFiles: input.contextFiles,
+    skills: input.skills,
     language: input.language,
     prompt,
     tools,
@@ -212,6 +221,7 @@ export function resolveOutputReserveTokens(maxTokens: number): number {
 function estimateInitialBreakdown(input: {
   messages: DeepSeekMessage[];
   contextFiles: ContextFile[];
+  skills?: ActivatedSkill[];
   language: KeepseekLanguage;
   prompt: string;
   tools: DeepSeekFunctionTool[];
@@ -224,14 +234,25 @@ function estimateInitialBreakdown(input: {
   const systemOnlyTokens = estimateChatMessageTokens(
     'system',
     getAgentSystemPrompt({
-      contextFiles: [],
-      skills: [],
       language: input.language
     })
   );
 
+  const dynamicContextContent = [
+    formatAgentContextFiles({
+      contextFiles: input.contextFiles,
+      language: input.language
+    }),
+    formatActiveSkills({
+      skills: input.skills,
+      language: input.language
+    })
+  ].filter(Boolean).join('\n\n');
+
   breakdown.systemTokensEstimate = Math.min(fullSystemTokens, systemOnlyTokens);
-  breakdown.contextFileTokensEstimate = Math.max(0, fullSystemTokens - breakdown.systemTokensEstimate);
+  breakdown.contextFileTokensEstimate = dynamicContextContent
+    ? estimateChatMessageTokens('user', dynamicContextContent)
+    : 0;
   breakdown.toolSchemaTokensEstimate = estimateDeepSeekToolsTokens(input.tools);
   breakdown.outputReserveTokensEstimate = input.outputReserveTokens;
   breakdown.safetyReserveTokensEstimate = input.safetyReserveTokens;
@@ -241,7 +262,7 @@ function estimateInitialBreakdown(input: {
     const message = input.messages[index];
     const tokens = estimateDeepSeekMessageTokens(message);
     if (index === promptIndex) {
-      breakdown.inputTokensEstimate += tokens;
+      breakdown.inputTokensEstimate += Math.max(0, tokens - breakdown.contextFileTokensEstimate);
     } else {
       breakdown.historyTokensEstimate += tokens;
     }
@@ -256,7 +277,7 @@ function findPromptMessageIndex(messages: DeepSeekMessage[], prompt: string): nu
   }
   for (let index = messages.length - 1; index >= 1; index -= 1) {
     const message = messages[index];
-    if (message.role === 'user' && (message.content ?? '').trim() === prompt) {
+    if (message.role === 'user') {
       return index;
     }
   }

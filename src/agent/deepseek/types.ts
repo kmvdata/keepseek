@@ -68,6 +68,16 @@ export interface DeepSeekUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  prompt_cache_hit_tokens?: number;
+  prompt_cache_miss_tokens?: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    [key: string]: unknown;
+  };
+  completion_tokens_details?: {
+    reasoning_tokens?: number;
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 }
 

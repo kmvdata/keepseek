@@ -44,6 +44,18 @@ export function getScript(): string {
           safetyReserveTokensEstimate: 0
         }
       },
+      usageMetrics: {
+        sessionUsageStats: null,
+        lastTurnUsage: null,
+        balance: null,
+        promptCacheDiagnostics: null,
+        turnCount: 0,
+        contextCompressionTriggerRatio: 0.8,
+        contextSoftCompactRatio: 0.5,
+        toolResultSnipRatio: 0.6,
+        contextCompactForceRatio: 0.9,
+        slimToolModeEnabled: true
+      },
       draftEdits: [],
       isBusy: false,
       agentActivity: {
@@ -314,6 +326,7 @@ export function getScript(): string {
     const sessionMenu = document.getElementById('sessionMenu');
     const contextBarOuter = document.getElementById('contextBarOuter');
     const contextBar = document.getElementById('contextBar');
+    const usageStatsBar = document.getElementById('usageStatsBar');
     const draftRegion = document.getElementById('draftRegion');
     const draftBulkActions = document.getElementById('draftBulkActions');
     const draftApplyAllBtn = document.getElementById('draftApplyAllBtn');
@@ -1000,6 +1013,7 @@ export function getScript(): string {
       renderSettingsControls();
       renderSessionControls();
       renderContextChips();
+      renderUsageStats();
       renderDraftEdits();
       renderTranscript();
       renderStatus();
@@ -2381,6 +2395,165 @@ export function getScript(): string {
         chip.append(label, remove);
         contextBar.append(chip);
       }
+    }
+
+    function renderUsageStats() {
+      if (!usageStatsBar) return;
+      usageStatsBar.innerHTML = '';
+      var metrics = normalizeUsageMetrics(state.usageMetrics);
+      var contextUsage = normalizeContextUsageForStats(state.contextUsage);
+      var contextPercent = metrics.lastTurnUsage && metrics.lastTurnUsage.totalTokens > 0
+        ? (metrics.lastTurnUsage.totalTokens / Math.max(1, contextUsage.maxTokensEstimate)) * 100
+        : contextUsage.usedPercent;
+      var items = [
+        ['usageMetricTurnHit', formatPercent(calculateHitRate(metrics.lastTurnUsage))],
+        ['usageMetricAverageHit', formatPercent(calculateHitRate(metrics.sessionUsageStats))],
+        ['usageMetricSessionTokens', formatTokens(metrics.sessionUsageStats && metrics.sessionUsageStats.totalTokens, hasUsageData(metrics.sessionUsageStats))],
+        ['usageMetricTurnTokens', formatTokens(metrics.lastTurnUsage && metrics.lastTurnUsage.totalTokens, hasUsageData(metrics.lastTurnUsage))],
+        ['usageMetricTurnCost', formatCost(metrics.lastTurnUsage && metrics.lastTurnUsage.cost, getUsageCurrency(metrics.lastTurnUsage, metrics.sessionUsageStats), hasUsageData(metrics.lastTurnUsage))],
+        ['usageMetricTurnCount', metrics.turnCount > 0 ? formatInteger(metrics.turnCount) : '-'],
+        ['usageMetricContextPercent', formatPercent(contextPercent)],
+        ['usageMetricCompactThreshold', formatPercent(metrics.contextCompressionTriggerRatio * 100)],
+        ['usageMetricSessionCost', formatCost(metrics.sessionUsageStats && metrics.sessionUsageStats.sessionCost, getUsageCurrency(metrics.sessionUsageStats, metrics.lastTurnUsage), hasUsageData(metrics.sessionUsageStats))],
+        ['usageMetricBalance', formatBalance(metrics.balance)]
+      ];
+
+      items.forEach(function(item) {
+        var stat = document.createElement('span');
+        stat.className = 'usage-stat';
+
+        var label = document.createElement('span');
+        label.className = 'usage-stat-label';
+        label.textContent = t(item[0]);
+
+        var value = document.createElement('span');
+        value.className = 'usage-stat-value';
+        value.textContent = item[1];
+
+        stat.append(label, value);
+        usageStatsBar.append(stat);
+      });
+    }
+
+    function normalizeUsageMetrics(value) {
+      var metrics = value && typeof value === 'object' ? value : {};
+      return {
+        sessionUsageStats: normalizeUsageStats(metrics.sessionUsageStats, 'sessionCost'),
+        lastTurnUsage: normalizeUsageStats(metrics.lastTurnUsage, 'cost'),
+        balance: normalizeBalance(metrics.balance),
+        promptCacheDiagnostics: metrics.promptCacheDiagnostics || null,
+        turnCount: readNonNegativeNumber(metrics.turnCount, 0),
+        contextCompressionTriggerRatio: readRatio(metrics.contextCompressionTriggerRatio, 0.8),
+        contextSoftCompactRatio: readRatio(metrics.contextSoftCompactRatio, 0.5),
+        toolResultSnipRatio: readRatio(metrics.toolResultSnipRatio, 0.6),
+        contextCompactForceRatio: readRatio(metrics.contextCompactForceRatio, 0.9),
+        slimToolModeEnabled: metrics.slimToolModeEnabled !== false
+      };
+    }
+
+    function normalizeUsageStats(value, costKey) {
+      if (!value || typeof value !== 'object') {
+        return null;
+      }
+      return {
+        promptTokens: readNonNegativeNumber(value.promptTokens, 0),
+        completionTokens: readNonNegativeNumber(value.completionTokens, 0),
+        totalTokens: readNonNegativeNumber(value.totalTokens, 0),
+        cacheHitTokens: readNonNegativeNumber(value.cacheHitTokens, 0),
+        cacheMissTokens: readNonNegativeNumber(value.cacheMissTokens, 0),
+        requestCount: readNonNegativeNumber(value.requestCount, 0),
+        cost: readNonNegativeNumber(value[costKey], 0),
+        sessionCost: readNonNegativeNumber(value.sessionCost, 0),
+        currency: typeof value.currency === 'string' && value.currency.trim() ? value.currency.trim() : '¥'
+      };
+    }
+
+    function normalizeBalance(value) {
+      if (!value || typeof value !== 'object') {
+        return null;
+      }
+      var totalBalance = Number(value.totalBalance);
+      return {
+        totalBalance: Number.isFinite(totalBalance) ? totalBalance : null,
+        currency: typeof value.currency === 'string' && value.currency.trim() ? value.currency.trim() : '¥',
+        error: typeof value.error === 'string' ? value.error : ''
+      };
+    }
+
+    function normalizeContextUsageForStats(value) {
+      var usage = value && typeof value === 'object' ? value : {};
+      var maxTokensEstimate = Math.max(1, Math.floor(Number(usage.maxTokensEstimate) || 1000000));
+      var usedPercent = Number(usage.usedPercent);
+      return {
+        maxTokensEstimate: maxTokensEstimate,
+        usedPercent: Number.isFinite(usedPercent) ? usedPercent : 0
+      };
+    }
+
+    function hasUsageData(usage) {
+      return Boolean(usage && (usage.requestCount > 0 || usage.totalTokens > 0));
+    }
+
+    function calculateHitRate(usage) {
+      if (!usage) {
+        return null;
+      }
+      var denominator = Math.max(0, usage.cacheHitTokens) + Math.max(0, usage.cacheMissTokens);
+      return denominator > 0 ? (Math.max(0, usage.cacheHitTokens) / denominator) * 100 : null;
+    }
+
+    function formatPercent(value) {
+      var number = Number(value);
+      return Number.isFinite(number) ? number.toFixed(2) + '%' : '-';
+    }
+
+    function formatTokens(value, hasData) {
+      if (!hasData) {
+        return '-';
+      }
+      return formatInteger(readNonNegativeNumber(value, 0));
+    }
+
+    function formatInteger(value) {
+      return Math.max(0, Math.floor(Number(value) || 0)).toLocaleString();
+    }
+
+    function formatCost(value, currency, hasData) {
+      if (!hasData) {
+        return '-';
+      }
+      var number = Number(value);
+      if (!Number.isFinite(number)) {
+        return '-';
+      }
+      return (currency || '¥') + number.toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 6
+      });
+    }
+
+    function formatBalance(balance) {
+      if (!balance || balance.totalBalance === null) {
+        return '-';
+      }
+      return (balance.currency || '¥') + Number(balance.totalBalance).toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      });
+    }
+
+    function getUsageCurrency(primary, fallback) {
+      return primary && primary.currency ? primary.currency : fallback && fallback.currency ? fallback.currency : '¥';
+    }
+
+    function readNonNegativeNumber(value, fallback) {
+      var number = Number(value);
+      return Number.isFinite(number) && number >= 0 ? number : fallback;
+    }
+
+    function readRatio(value, fallback) {
+      var number = Number(value);
+      return Number.isFinite(number) && number >= 0 ? number : fallback;
     }
 
     contextBar.addEventListener('click', function(event) {

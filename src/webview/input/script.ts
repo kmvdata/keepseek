@@ -3289,8 +3289,8 @@ export function getInputScript(): string {
       var defaultContextCompressionEnabled = true;
       var defaultContextKeepRecentTurns = 12;
       var maxContextKeepRecentTurns = 64;
-      var defaultContextCompressionTriggerRatio = 0.7;
-      var defaultContextCompressionTriggerPercent = 70;
+      var defaultContextCompressionTriggerRatio = 0.8;
+      var defaultContextCompressionTriggerPercent = 80;
       var minContextCompressionTriggerPercent = 10;
       var maxContextCompressionTriggerPercent = 95;
       var defaultContextSummaryBudgetTokens = 3000;

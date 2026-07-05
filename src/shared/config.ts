@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { AgentSettings, KeepseekModel } from './types';
+import { AgentSettings, KeepseekModel, UsageCostRates } from './types';
 import { SESSION_HARD_RETENTION_DAYS } from '../sessions/sessionRetention';
 
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
@@ -24,8 +24,40 @@ export const DEFAULT_TRACE_RETENTION_DAYS = 7;
 export const DEFAULT_TRACE_MAX_FILE_BYTES = 20_000_000;
 export const DEFAULT_CONTEXT_COMPRESSION_ENABLED = true;
 export const DEFAULT_CONTEXT_KEEP_RECENT_TURNS = 12;
-export const DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO = 0.7;
+export const DEFAULT_CONTEXT_SOFT_COMPACT_RATIO = 0.5;
+export const DEFAULT_TOOL_RESULT_SNIP_RATIO = 0.6;
+export const DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO = 0.8;
+export const DEFAULT_CONTEXT_COMPACT_FORCE_RATIO = 0.9;
 export const DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS = 3_000;
+export const DEFAULT_BALANCE_ENDPOINT_URL = '';
+export const DEFAULT_BALANCE_REFRESH_INTERVAL_MS = 60_000;
+export const DEFAULT_SLIM_TOOL_MODE_ENABLED = true;
+export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
+  'deepseek-v4-flash': {
+    cacheHitPrice: 0.02,
+    inputPrice: 1,
+    outputPrice: 2,
+    currency: '¥'
+  },
+  'deepseek-chat': {
+    cacheHitPrice: 0.02,
+    inputPrice: 1,
+    outputPrice: 2,
+    currency: '¥'
+  },
+  'deepseek-v4-pro': {
+    cacheHitPrice: 0.025,
+    inputPrice: 3,
+    outputPrice: 6,
+    currency: '¥'
+  },
+  'deepseek-reasoner': {
+    cacheHitPrice: 0.025,
+    inputPrice: 3,
+    outputPrice: 6,
+    currency: '¥'
+  }
+};
 export const MIN_HISTORY_RETENTION_DAYS = 1;
 export const MAX_HISTORY_RETENTION_DAYS = SESSION_HARD_RETENTION_DAYS;
 export const MIN_TRACE_RETENTION_DAYS = 1;
@@ -36,8 +68,16 @@ export const MIN_CONTEXT_KEEP_RECENT_TURNS = 1;
 export const MAX_CONTEXT_KEEP_RECENT_TURNS = 64;
 export const MIN_CONTEXT_COMPRESSION_TRIGGER_RATIO = 0.1;
 export const MAX_CONTEXT_COMPRESSION_TRIGGER_RATIO = 0.95;
+export const MIN_CONTEXT_SOFT_COMPACT_RATIO = 0.1;
+export const MAX_CONTEXT_SOFT_COMPACT_RATIO = 0.95;
+export const MIN_TOOL_RESULT_SNIP_RATIO = 0.1;
+export const MAX_TOOL_RESULT_SNIP_RATIO = 0.95;
+export const MIN_CONTEXT_COMPACT_FORCE_RATIO = 0.1;
+export const MAX_CONTEXT_COMPACT_FORCE_RATIO = 0.99;
 export const MIN_CONTEXT_SUMMARY_BUDGET_TOKENS = 500;
 export const MAX_CONTEXT_SUMMARY_BUDGET_TOKENS = 100_000;
+export const MIN_BALANCE_REFRESH_INTERVAL_MS = 10_000;
+export const MAX_BALANCE_REFRESH_INTERVAL_MS = 3_600_000;
 export const MAX_TOOL_ITERATIONS = 64;
 export const MAX_TOOL_CALLS = 256;
 export const MAX_RUN_MS = 3_600_000;
@@ -60,7 +100,10 @@ export interface InteractionTraceSettings {
 export interface ContextCompressionSettings {
   enabled: boolean;
   keepRecentTurns: number;
+  softCompactRatio: number;
+  toolResultSnipRatio: number;
   triggerRatio: number;
+  forceRatio: number;
   summaryBudgetTokens: number;
 }
 
@@ -170,6 +213,12 @@ export function getConfiguredToolResultTokenBudget(): number {
 
 export function getConfiguredContextCompressionSettings(): ContextCompressionSettings {
   const config = vscode.workspace.getConfiguration('keepseek');
+  const triggerRatio = normalizeNumberInRange(
+    config.get<number>('contextCompressionTriggerRatio', DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO),
+    MIN_CONTEXT_COMPRESSION_TRIGGER_RATIO,
+    MAX_CONTEXT_COMPRESSION_TRIGGER_RATIO,
+    DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO
+  );
   return {
     enabled: config.get<boolean>('contextCompressionEnabled', DEFAULT_CONTEXT_COMPRESSION_ENABLED),
     keepRecentTurns: normalizeIntegerInRange(
@@ -178,11 +227,24 @@ export function getConfiguredContextCompressionSettings(): ContextCompressionSet
       MAX_CONTEXT_KEEP_RECENT_TURNS,
       DEFAULT_CONTEXT_KEEP_RECENT_TURNS
     ),
-    triggerRatio: normalizeNumberInRange(
-      config.get<number>('contextCompressionTriggerRatio', DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO),
-      MIN_CONTEXT_COMPRESSION_TRIGGER_RATIO,
-      MAX_CONTEXT_COMPRESSION_TRIGGER_RATIO,
-      DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO
+    softCompactRatio: normalizeNumberInRange(
+      config.get<number>('contextSoftCompactRatio', DEFAULT_CONTEXT_SOFT_COMPACT_RATIO),
+      MIN_CONTEXT_SOFT_COMPACT_RATIO,
+      Math.min(MAX_CONTEXT_SOFT_COMPACT_RATIO, triggerRatio),
+      DEFAULT_CONTEXT_SOFT_COMPACT_RATIO
+    ),
+    toolResultSnipRatio: normalizeNumberInRange(
+      config.get<number>('toolResultSnipRatio', DEFAULT_TOOL_RESULT_SNIP_RATIO),
+      MIN_TOOL_RESULT_SNIP_RATIO,
+      Math.min(MAX_TOOL_RESULT_SNIP_RATIO, triggerRatio),
+      DEFAULT_TOOL_RESULT_SNIP_RATIO
+    ),
+    triggerRatio,
+    forceRatio: normalizeNumberInRange(
+      config.get<number>('contextCompactForceRatio', DEFAULT_CONTEXT_COMPACT_FORCE_RATIO),
+      Math.max(MIN_CONTEXT_COMPACT_FORCE_RATIO, triggerRatio),
+      MAX_CONTEXT_COMPACT_FORCE_RATIO,
+      DEFAULT_CONTEXT_COMPACT_FORCE_RATIO
     ),
     summaryBudgetTokens: normalizeIntegerInRange(
       config.get<number>('contextSummaryBudgetTokens', DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS),
@@ -191,6 +253,67 @@ export function getConfiguredContextCompressionSettings(): ContextCompressionSet
       DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS
     )
   };
+}
+
+export function getConfiguredUsagePricingMap(): Record<string, UsageCostRates> {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<Record<string, Partial<UsageCostRates>>>('usagePricing', {});
+  const merged: Record<string, UsageCostRates> = { ...DEFAULT_USAGE_PRICING };
+
+  if (!configured || typeof configured !== 'object' || Array.isArray(configured)) {
+    return merged;
+  }
+
+  for (const [modelId, rates] of Object.entries(configured)) {
+    const normalizedModelId = modelId.trim();
+    if (!normalizedModelId || !rates || typeof rates !== 'object' || Array.isArray(rates)) {
+      continue;
+    }
+    merged[normalizedModelId] = normalizeUsageCostRates(rates, merged[normalizedModelId]);
+  }
+  return merged;
+}
+
+export function getConfiguredModelUsagePricing(modelId: string): UsageCostRates {
+  const pricing = getConfiguredUsagePricingMap();
+  return pricing[modelId] ?? pricing['deepseek-v4-flash'];
+}
+
+export function getConfiguredBalanceEndpointUrl(baseUrl: string): string {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<string>('balanceEndpointUrl', DEFAULT_BALANCE_ENDPOINT_URL)
+    .trim();
+  if (configured) {
+    return configured;
+  }
+
+  const url = new URL(baseUrl || DEFAULT_DEEPSEEK_BASE_URL);
+  const cleanPath = url.pathname.replace(/\/+$/u, '');
+  const basePath = cleanPath.endsWith('/chat/completions')
+    ? cleanPath.slice(0, -'/chat/completions'.length)
+    : cleanPath;
+  url.pathname = `${basePath || ''}/user/balance`;
+  return url.toString();
+}
+
+export function getConfiguredBalanceRefreshIntervalMs(): number {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('balanceRefreshIntervalMs', DEFAULT_BALANCE_REFRESH_INTERVAL_MS);
+  return normalizeIntegerInRange(
+    configured,
+    MIN_BALANCE_REFRESH_INTERVAL_MS,
+    MAX_BALANCE_REFRESH_INTERVAL_MS,
+    DEFAULT_BALANCE_REFRESH_INTERVAL_MS
+  );
+}
+
+export function getConfiguredSlimToolModeEnabled(): boolean {
+  return vscode.workspace
+    .getConfiguration('keepseek')
+    .get<boolean>('slimToolModeEnabled', DEFAULT_SLIM_TOOL_MODE_ENABLED);
 }
 
 export function getConfiguredStreamIdleTimeoutMs(): number {
@@ -313,4 +436,23 @@ export function normalizeNumberInRange(value: unknown, min: number, max: number,
     return fallback;
   }
   return Math.min(max, Math.max(min, number));
+}
+
+function normalizeUsageCostRates(
+  rates: Partial<UsageCostRates>,
+  fallback: UsageCostRates = DEFAULT_USAGE_PRICING['deepseek-v4-flash']
+): UsageCostRates {
+  return {
+    cacheHitPrice: normalizeNonNegativeNumber(rates.cacheHitPrice, fallback.cacheHitPrice),
+    inputPrice: normalizeNonNegativeNumber(rates.inputPrice, fallback.inputPrice),
+    outputPrice: normalizeNonNegativeNumber(rates.outputPrice, fallback.outputPrice),
+    currency: typeof rates.currency === 'string' && rates.currency.trim()
+      ? rates.currency.trim()
+      : fallback.currency
+  };
+}
+
+function normalizeNonNegativeNumber(value: unknown, fallback: number): number {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
 }

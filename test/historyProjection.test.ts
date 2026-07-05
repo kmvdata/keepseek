@@ -35,7 +35,10 @@ test('history projection uses summary, protected messages, and recent turns with
     settings: {
       enabled: true,
       keepRecentTurns: 2,
-      triggerRatio: 0.7,
+      softCompactRatio: 0.5,
+      toolResultSnipRatio: 0.6,
+      triggerRatio: 0.8,
+      forceRatio: 0.9,
       summaryBudgetTokens: 1000
     }
   });

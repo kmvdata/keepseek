@@ -16,6 +16,20 @@ export const READ_WORKSPACE_FILE_RANGE_TOOL_NAME = 'keepseek_read_workspace_file
 
 const MAX_ACTIVE_SKILL_CONTENT_CHARS = 24000;
 const MAX_ACTIVE_SKILLS_TOTAL_CHARS = 72000;
+const CORE_AGENT_TOOL_NAMES = [
+  CREATE_DRAFT_EDIT_TOOL_NAME,
+  LIST_WORKSPACE_FILES_TOOL_NAME,
+  READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
+  SEARCH_WORKSPACE_TOOL_NAME
+];
+const ALL_AGENT_TOOL_NAMES = [
+  CREATE_DRAFT_EDIT_TOOL_NAME,
+  LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
+  LIST_WORKSPACE_FILES_TOOL_NAME,
+  READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
+  READ_WORKSPACE_FILE_TOOL_NAME,
+  SEARCH_WORKSPACE_TOOL_NAME
+];
 
 export interface BuildAgentMessagesInput {
   prompt: string;
@@ -27,6 +41,7 @@ export interface BuildAgentMessagesInput {
 }
 
 export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepSeekMessage[] {
+  const currentPromptContent = formatCurrentUserPromptForAgent(input);
   const messages: DeepSeekMessage[] = [
     {
       role: 'system',
@@ -49,9 +64,12 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
   const recentHistory = input.projection && !input.projection.useLegacyHistoryLimit
     ? history
     : history.slice(-AGENT_HISTORY_MESSAGE_LIMIT);
+  const currentPromptMessage = findCurrentPromptMessage(recentHistory, input.prompt);
 
   for (const message of recentHistory) {
-    const content = getMessageContentForAgent(message);
+    const content = currentPromptMessage?.id === message.id
+      ? currentPromptContent
+      : getMessageContentForAgent(message);
     if (!content) {
       continue;
     }
@@ -62,15 +80,43 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
     });
   }
 
-  const lastMessage = recentHistory[recentHistory.length - 1];
-  if (input.prompt.trim() && (!lastMessage || lastMessage.role !== 'user' || getMessageContentForAgent(lastMessage) !== input.prompt)) {
+  if (input.prompt.trim() && !currentPromptMessage) {
     messages.push({
       role: 'user',
-      content: input.prompt
+      content: currentPromptContent
     });
   }
 
   return messages;
+}
+
+export function formatCurrentUserPromptForAgent(input: {
+  prompt: string;
+  contextFiles: ContextFile[];
+  skills?: ActivatedSkill[];
+  language: KeepseekLanguage;
+}): string {
+  const prompt = input.prompt.trim();
+  const contextBlock = formatAgentContextFiles(input);
+  const skillsBlock = formatActiveSkills(input);
+  const dynamicBlocks = [contextBlock, skillsBlock].filter(Boolean);
+  if (!dynamicBlocks.length) {
+    return prompt;
+  }
+
+  const header = input.language === 'en'
+    ? 'Current run context. Use this context for the current request; do not treat it as a permanent system instruction.'
+    : '当前请求上下文。请仅在本次请求中使用这些上下文，不要把它当作永久 system 规则。';
+  const requestHeader = input.language === 'en'
+    ? 'Current user request:'
+    : '当前用户请求：';
+
+  return [
+    header,
+    ...dynamicBlocks,
+    requestHeader,
+    prompt
+  ].join('\n\n');
 }
 
 export function getMessageContentForAgent(message: ChatMessage): string {
@@ -78,12 +124,10 @@ export function getMessageContentForAgent(message: ChatMessage): string {
 }
 
 export function getAgentSystemPrompt(input: {
-  contextFiles: ContextFile[];
+  contextFiles?: ContextFile[];
   skills?: ActivatedSkill[];
   language: KeepseekLanguage;
 }): string {
-  const contextBlock = formatAgentContextFiles(input);
-  const skillsBlock = formatActiveSkills(input);
   const instructions = input.language === 'en'
     ? [
         'You are KeepSeek, a coding agent running in the VS Code sidebar.',
@@ -110,7 +154,7 @@ export function getAgentSystemPrompt(input: {
         '如果信息不足，先说明缺口；如果可以合理推进，就直接给出可执行结果。'
       ];
 
-  return [...instructions, contextBlock, skillsBlock].filter(Boolean).join('\n\n');
+  return instructions.join('\n\n');
 }
 
 export function formatAgentContextFiles(input: {
@@ -240,7 +284,30 @@ function dedupeActivatedSkills(skills: ActivatedSkill[] | undefined): ActivatedS
   return deduped;
 }
 
-export function getAgentTools(): DeepSeekFunctionTool[] {
+export function getAgentToolNamesForPrompt(prompt: string, slimModeEnabled: boolean): string[] {
+  if (!slimModeEnabled) {
+    return [...ALL_AGENT_TOOL_NAMES];
+  }
+
+  const names = new Set(CORE_AGENT_TOOL_NAMES);
+  if (shouldExposeDirectoryTool(prompt)) {
+    names.add(LIST_WORKSPACE_DIRECTORY_TOOL_NAME);
+  }
+  if (shouldExposeWholeFileTool(prompt)) {
+    names.add(READ_WORKSPACE_FILE_TOOL_NAME);
+  }
+  return Array.from(names).sort();
+}
+
+export function getAgentTools(options: { toolNames?: readonly string[] } = {}): DeepSeekFunctionTool[] {
+  const allowedNames = options.toolNames?.length ? new Set(options.toolNames) : undefined;
+  return getRawAgentTools()
+    .filter((tool) => !allowedNames || allowedNames.has(tool.function.name))
+    .map(canonicalizeDeepSeekTool)
+    .sort((left, right) => left.function.name.localeCompare(right.function.name));
+}
+
+function getRawAgentTools(): DeepSeekFunctionTool[] {
   return [
     {
       type: 'function',
@@ -400,6 +467,59 @@ export function getAgentTools(): DeepSeekFunctionTool[] {
       }
     }
   ];
+}
+
+function findCurrentPromptMessage(history: ChatMessage[], prompt: string): ChatMessage | undefined {
+  const normalizedPrompt = prompt.trim();
+  if (!normalizedPrompt) {
+    return undefined;
+  }
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const message = history[index];
+    if (message.role === 'user' && getMessageContentForAgent(message) === normalizedPrompt) {
+      return message;
+    }
+  }
+  return undefined;
+}
+
+function shouldExposeDirectoryTool(prompt: string): boolean {
+  return /<keepseek-dir:|(?:\b(directory|folder|tree|list)\b)|(?:目录|文件夹|列出|树形|扫描)/iu.test(prompt);
+}
+
+function shouldExposeWholeFileTool(prompt: string): boolean {
+  return /(?:\b(full|whole|entire)\s+file\b)|(?:完整文件|全文|整个文件)/iu.test(prompt);
+}
+
+function canonicalizeDeepSeekTool(tool: DeepSeekFunctionTool): DeepSeekFunctionTool {
+  return canonicalizeJsonValue(tool) as DeepSeekFunctionTool;
+}
+
+function canonicalizeJsonValue(value: unknown, key = ''): unknown {
+  if (Array.isArray(value)) {
+    const canonicalItems = value.map((item) => canonicalizeJsonValue(item));
+    return key === 'required'
+      ? canonicalItems.filter((item): item is string => typeof item === 'string').sort()
+      : canonicalItems;
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  const record = value as Record<string, unknown>;
+  const canonical: Record<string, unknown> = {};
+  for (const entryKey of Object.keys(record).sort()) {
+    canonical[entryKey] = canonicalizeJsonValue(record[entryKey], entryKey);
+  }
+
+  if (canonical.type === 'object' && !canonical.properties) {
+    canonical.properties = {};
+  }
+  if (canonical.properties && typeof canonical.properties === 'object' && !Array.isArray(canonical.properties)) {
+    canonical.properties = canonicalizeJsonValue(canonical.properties);
+  }
+  return canonical;
 }
 
 export function estimateDeepSeekMessageTokens(message: DeepSeekMessage): number {

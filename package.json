@@ -277,6 +277,20 @@
           "default": true,
           "description": "Enable context compression for long chats. KeepSeek sends a projected history with summaries, protected messages, and recent turns instead of only the newest raw messages."
         },
+        "keepseek.contextSoftCompactRatio": {
+          "type": "number",
+          "default": 0.5,
+          "minimum": 0.1,
+          "maximum": 0.95,
+          "description": "Context window usage ratio where KeepSeek may warn or prepare for compaction without rewriting history."
+        },
+        "keepseek.toolResultSnipRatio": {
+          "type": "number",
+          "default": 0.6,
+          "minimum": 0.1,
+          "maximum": 0.95,
+          "description": "Context window usage ratio where KeepSeek prefers shortened tool results before summary compaction."
+        },
         "keepseek.contextKeepRecentTurns": {
           "type": "number",
           "default": 12,
@@ -286,10 +300,17 @@
         },
         "keepseek.contextCompressionTriggerRatio": {
           "type": "number",
-          "default": 0.7,
+          "default": 0.8,
           "minimum": 0.1,
           "maximum": 0.95,
-          "description": "Context window usage ratio that can trigger a background summary refresh before the next agent request."
+          "description": "Context window usage ratio that can trigger summary compaction before the next agent request."
+        },
+        "keepseek.contextCompactForceRatio": {
+          "type": "number",
+          "default": 0.9,
+          "minimum": 0.1,
+          "maximum": 0.99,
+          "description": "Context window usage ratio that forces synchronous summary compaction before the next agent request."
         },
         "keepseek.contextSummaryBudgetTokens": {
           "type": "number",
@@ -297,6 +318,53 @@
           "minimum": 500,
           "maximum": 100000,
           "description": "Maximum generated tokens for a session summary used by context compression."
+        },
+        "keepseek.usagePricing": {
+          "type": "object",
+          "default": {
+            "deepseek-v4-flash": {
+              "cacheHitPrice": 0.02,
+              "inputPrice": 1,
+              "outputPrice": 2,
+              "currency": "¥"
+            },
+            "deepseek-chat": {
+              "cacheHitPrice": 0.02,
+              "inputPrice": 1,
+              "outputPrice": 2,
+              "currency": "¥"
+            },
+            "deepseek-v4-pro": {
+              "cacheHitPrice": 0.025,
+              "inputPrice": 3,
+              "outputPrice": 6,
+              "currency": "¥"
+            },
+            "deepseek-reasoner": {
+              "cacheHitPrice": 0.025,
+              "inputPrice": 3,
+              "outputPrice": 6,
+              "currency": "¥"
+            }
+          },
+          "description": "Per-million-token usage pricing by model ID. Prices are cacheHitPrice, inputPrice, and outputPrice; currency is used for display."
+        },
+        "keepseek.balanceEndpointUrl": {
+          "type": "string",
+          "default": "",
+          "description": "DeepSeek balance endpoint URL. When empty, KeepSeek derives /user/balance from the configured base URL."
+        },
+        "keepseek.balanceRefreshIntervalMs": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 10000,
+          "maximum": 3600000,
+          "description": "Minimum interval between automatic balance refreshes."
+        },
+        "keepseek.slimToolModeEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Expose a smaller stable core tool schema by default and add broader workspace tools only when the current request appears to need them."
         },
         "keepseek.streamIdleTimeoutMs": {
           "type": "number",

@@ -22,6 +22,7 @@ export interface AgentRequestCoordinatorInput {
   skills?: AgentRequest['skills'];
   history: AgentRequest['history'];
   contextCompression: AgentRequest['contextCompression'];
+  historyRewriteReason?: string;
   language: KeepseekLanguage;
   signal?: AbortSignal;
 }
@@ -54,6 +55,7 @@ export class AgentRequestCoordinator {
       })),
       history: input.history.map(cloneChatMessage),
       contextCompression: cloneContextCompressionState(input.contextCompression),
+      historyRewriteReason: input.historyRewriteReason,
       language: input.language,
       signal: input.signal
     };

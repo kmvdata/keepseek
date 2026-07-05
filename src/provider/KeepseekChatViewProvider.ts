@@ -16,9 +16,13 @@ import {
   ChatMessageSkill,
   ChatSession,
   ContextUsageEstimate,
+  DeepSeekBalanceState,
   DraftEdit,
   KeepseekExtensionInfo,
   KeepseekModel,
+  PromptCacheDiagnostics,
+  TurnUsageStats,
+  UsageEvent,
   WorkspaceSummary
 } from '../shared/types';
 import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage } from '../shared/i18n';
@@ -47,6 +51,8 @@ import {
   DEFAULT_TOOL_RESULT_TOKEN_BUDGET,
   getConfiguredAgentSettings,
   getConfiguredContextCompressionSettings,
+  getConfiguredBalanceEndpointUrl,
+  getConfiguredBalanceRefreshIntervalMs,
   getConfiguredDebugMode,
   getConfiguredHistoryRetentionDays,
   getConfiguredMaxFileBytes,
@@ -56,6 +62,7 @@ import {
   getConfiguredMaxTokens,
   getConfiguredModels,
   getConfiguredSelectedModelId,
+  getConfiguredSlimToolModeEnabled,
   getConfiguredStreamIdleTimeoutMs,
   getConfiguredToolResultTokenBudget,
   MAX_GENERATION_TOKENS,
@@ -84,6 +91,13 @@ import { getHtmlForWebview } from '../webview/html';
 import { focusView } from './focusView';
 import type { DroppedFileReferenceInput, PromptReferenceInput, WebviewMessage } from './webviewMessages';
 import { InteractionTraceLogService } from '../agent/logging/interactionTrace';
+import { fetchDeepSeekBalance } from '../agent/deepseek/balance';
+import {
+  addUsageEventToSessionStats,
+  addUsageEventToTurnStats,
+  addTurnUsageToSessionStats,
+  calculateCacheHitRate
+} from '../agent/usageStats';
 import { SkillStore } from '../skills/skillStore';
 import { SkillCreator } from '../skills/skillCreator';
 import {
@@ -120,6 +134,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private isBusy = false;
   private currentRunAbortController: AbortController | undefined;
   private liveContextUsage: ContextUsageEstimate | undefined;
+  private liveTurnUsage: TurnUsageStats | undefined;
+  private balanceLastRefreshAt = 0;
+  private balanceRefreshPromise: Promise<void> | undefined;
   private agentActivitySequence = 0;
   private agentActivity: AgentActivityState = {
     base: 'idle',
@@ -525,6 +542,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.refreshSkills({ post: false });
         await this.cleanupExpiredSessions({ post: false });
         this.postState();
+        void this.refreshBalance();
         return;
       case 'sendPrompt':
         await this.sendPrompt(message.prompt, message.modelId, message.settings, { references: message.references, skillIds: message.skillIds });
@@ -618,6 +636,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const config = vscode.workspace.getConfiguration('keepseek');
         await config.update('apiKey', message.apiKey, vscode.ConfigurationTarget.Global);
         await config.update('baseUrl', message.baseUrl, vscode.ConfigurationTarget.Global);
+        this.balanceLastRefreshAt = 0;
+        this.sessionStore.getActiveSession().balance = undefined;
+        this.postState();
+        void this.refreshBalance({ force: true });
         vscode.window.showInformationMessage(this.t('apiSettingsSaved'));
         return;
       }
@@ -808,6 +830,101 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       activeSession.contextUsage,
       finalizeSessionContextUsageEstimate(usage)
     );
+  }
+
+  private applyUsageEvent(
+    session: ChatSession,
+    currentTurnUsage: TurnUsageStats | undefined,
+    event: UsageEvent
+  ): TurnUsageStats {
+    const nextTurnUsage = addUsageEventToTurnStats(currentTurnUsage, event);
+    session.lastTurnUsage = nextTurnUsage;
+    session.usageStats = addUsageEventToSessionStats(session.usageStats, event, nextTurnUsage.updatedAt);
+    session.updatedAt = nextTurnUsage.updatedAt ?? new Date().toISOString();
+    return nextTurnUsage;
+  }
+
+  private applyTurnUsage(session: ChatSession, turnUsage: TurnUsageStats): TurnUsageStats {
+    const normalizedTurnUsage: TurnUsageStats = {
+      ...turnUsage,
+      updatedAt: turnUsage.updatedAt ?? new Date().toISOString()
+    };
+    session.lastTurnUsage = normalizedTurnUsage;
+    session.usageStats = addTurnUsageToSessionStats(session.usageStats, normalizedTurnUsage, normalizedTurnUsage.updatedAt);
+    session.updatedAt = normalizedTurnUsage.updatedAt ?? new Date().toISOString();
+    return normalizedTurnUsage;
+  }
+
+  private applyPromptCacheDiagnostics(
+    session: ChatSession,
+    diagnostics: PromptCacheDiagnostics | undefined,
+    previousDiagnostics: PromptCacheDiagnostics | undefined,
+    previousTurnUsage: TurnUsageStats | undefined,
+    currentTurnUsage: TurnUsageStats | undefined
+  ): void {
+    if (!diagnostics) {
+      return;
+    }
+
+    const cacheMissPossibleReasons = this.getCacheMissPossibleReasons({
+      previousDiagnostics,
+      diagnostics,
+      previousTurnUsage,
+      currentTurnUsage
+    });
+    session.promptCacheDiagnostics = {
+      ...diagnostics,
+      cacheMissPossibleReasons
+    };
+
+    if (cacheMissPossibleReasons.length) {
+      console.debug('[KeepSeek] DeepSeek prefix cache hit rate dropped.', {
+        reasons: cacheMissPossibleReasons,
+        previousDiagnostics,
+        diagnostics,
+        previousHitRate: previousTurnUsage ? calculateCacheHitRate(previousTurnUsage) : undefined,
+        currentHitRate: currentTurnUsage ? calculateCacheHitRate(currentTurnUsage) : undefined
+      });
+    }
+  }
+
+  private getCacheMissPossibleReasons(input: {
+    previousDiagnostics: PromptCacheDiagnostics | undefined;
+    diagnostics: PromptCacheDiagnostics;
+    previousTurnUsage: TurnUsageStats | undefined;
+    currentTurnUsage: TurnUsageStats | undefined;
+  }): string[] {
+    const previousHitRate = input.previousTurnUsage ? calculateCacheHitRate(input.previousTurnUsage) : undefined;
+    const currentHitRate = input.currentTurnUsage ? calculateCacheHitRate(input.currentTurnUsage) : undefined;
+    if (
+      previousHitRate === undefined ||
+      currentHitRate === undefined ||
+      previousHitRate < 60 ||
+      previousHitRate - currentHitRate < 30
+    ) {
+      return [];
+    }
+
+    const reasons: string[] = [];
+    if (input.previousDiagnostics?.systemPromptHash && input.previousDiagnostics.systemPromptHash !== input.diagnostics.systemPromptHash) {
+      reasons.push('system_prompt_changed');
+    }
+    if (input.previousDiagnostics?.toolsSchemaHash && input.previousDiagnostics.toolsSchemaHash !== input.diagnostics.toolsSchemaHash) {
+      reasons.push('tools_schema_changed');
+    }
+    if (input.previousDiagnostics?.modelId && input.previousDiagnostics.modelId !== input.diagnostics.modelId) {
+      reasons.push('model_changed');
+    }
+    if (input.diagnostics.historyCompacted) {
+      reasons.push('history_compacted');
+    }
+    if (input.diagnostics.historyRewriteReason) {
+      reasons.push(`history_rewrite:${input.diagnostics.historyRewriteReason}`);
+    }
+    if (!reasons.length) {
+      reasons.push('prefix_changed_or_provider_cache_evicted');
+    }
+    return reasons;
   }
 
   private createCurrentSessionContextUsage(model = this.getSelectedModel()): ContextUsageEstimate {
@@ -1366,6 +1483,63 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async refreshBalance(options: { force?: boolean; post?: boolean } = {}): Promise<void> {
+    if (this.balanceRefreshPromise) {
+      await this.balanceRefreshPromise;
+      return;
+    }
+
+    const config = vscode.workspace.getConfiguration('keepseek');
+    const apiKey = (config.get<string>('apiKey', '').trim() || process.env.DEEPSEEK_API_KEY || '').trim();
+    if (!apiKey) {
+      this.sessionStore.getActiveSession().balance = undefined;
+      if (options.post !== false) {
+        this.postState();
+      }
+      return;
+    }
+
+    const now = Date.now();
+    if (!options.force && now - this.balanceLastRefreshAt < getConfiguredBalanceRefreshIntervalMs()) {
+      return;
+    }
+
+    const baseUrl = config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL).trim() || DEFAULT_DEEPSEEK_BASE_URL;
+    let endpointUrl: string;
+    try {
+      endpointUrl = getConfiguredBalanceEndpointUrl(baseUrl);
+    } catch (error) {
+      this.updateActiveSessionBalance({
+        currency: '¥',
+        error: getErrorMessage(error),
+        updatedAt: new Date().toISOString()
+      });
+      if (options.post !== false) {
+        this.postState();
+      }
+      return;
+    }
+    this.balanceRefreshPromise = (async () => {
+      const balance = await fetchDeepSeekBalance({ apiKey, endpointUrl });
+      this.balanceLastRefreshAt = Date.now();
+      this.updateActiveSessionBalance(balance);
+      await this.sessionStore.persist();
+      if (options.post !== false) {
+        this.postState();
+      }
+    })().finally(() => {
+      this.balanceRefreshPromise = undefined;
+    });
+
+    await this.balanceRefreshPromise;
+  }
+
+  private updateActiveSessionBalance(balance: DeepSeekBalanceState): void {
+    const activeSession = this.sessionStore.getActiveSession();
+    activeSession.balance = balance;
+    activeSession.updatedAt = new Date().toISOString();
+  }
+
   private async runContextAction(action: () => Promise<void>): Promise<void> {
     try {
       await action();
@@ -1481,12 +1655,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.currentRunAbortController = abortController;
     this.isBusy = true;
     this.liveContextUsage = undefined;
+    this.liveTurnUsage = undefined;
     this.setAgentActivity({
       base: 'thinking',
       phase: 'preparing'
     });
 
     let assistantMessage: ChatMessage | undefined;
+    let currentTurnUsage: TurnUsageStats | undefined;
+    let previousTurnUsage: TurnUsageStats | undefined;
+    let previousPromptCacheDiagnostics: PromptCacheDiagnostics | undefined;
     let liveStateTimer: ReturnType<typeof setTimeout> | undefined;
     const scheduleLiveState = () => {
       if (liveStateTimer) {
@@ -1524,6 +1702,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       const activeSession = this.sessionStore.getActiveSession();
+      previousTurnUsage = activeSession.lastTurnUsage;
+      previousPromptCacheDiagnostics = activeSession.promptCacheDiagnostics;
+      activeSession.lastTurnUsage = undefined;
       const activeSkillResult = await this.skillStore.loadActiveSkills(
         activeSession,
         normalizeSkillIds(options?.skillIds)
@@ -1613,6 +1794,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         skills: activeSkills,
         history: agentHistory,
         contextCompression: activeSession.contextCompression,
+        historyRewriteReason: replaceMessageId ? 'edit_user_prompt' : undefined,
         language: this.language,
         signal: abortController.signal
       }), {
@@ -1644,6 +1826,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.updateActiveSessionContextUsage(this.liveContextUsage);
           scheduleLiveState();
         },
+        onUsage: (event) => {
+          currentTurnUsage = this.applyUsageEvent(activeSession, currentTurnUsage, event);
+          this.liveTurnUsage = currentTurnUsage;
+          scheduleLiveState();
+        },
         onTraceLog: (traceLog) => {
           activeSession.lastTraceLogUri = traceLog.uri;
           this.sessionTraceLogUris.set(activeSession.id, traceLog.uri);
@@ -1662,6 +1849,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.sessionTraceLogUris.set(activeSession.id, traceLogUri);
       }
       this.draftEdits.addMany(response.draftEdits);
+      if (!currentTurnUsage && response.usage) {
+        currentTurnUsage = this.applyTurnUsage(activeSession, response.usage);
+        this.liveTurnUsage = currentTurnUsage;
+      }
+      this.applyPromptCacheDiagnostics(
+        activeSession,
+        response.promptCacheDiagnostics,
+        previousPromptCacheDiagnostics,
+        previousTurnUsage,
+        currentTurnUsage
+      );
 
       if (assistantMessage) {
         assistantMessage.content = response.message;
@@ -1733,9 +1931,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.updateActiveSessionContextUsage(this.liveContextUsage);
       this.liveContextUsage = undefined;
+      this.liveTurnUsage = undefined;
       this.sessionStore.getActiveSession().updatedAt = new Date().toISOString();
       this.isBusy = false;
       await this.sessionStore.persist();
+      void this.refreshBalance();
       flushLiveState();
       this.setAgentActivity({
         base: 'idle',
@@ -1850,6 +2050,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       pickLargerContextUsageEstimate(activeSession.contextUsage, computedContextUsage),
       this.isBusy ? this.liveContextUsage : undefined
     ) ?? computedContextUsage;
+    const contextCompression = getConfiguredContextCompressionSettings();
 
     this.postToWebview({
       type: 'state',
@@ -1865,6 +2066,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         skills: this.skillStore.getStateView(activeSession),
         contextUsage,
         contextUsageSessionId: this.sessionStore.activeSessionId,
+        usageMetrics: {
+          sessionUsageStats: activeSession.usageStats,
+          lastTurnUsage: this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage,
+          balance: activeSession.balance,
+          promptCacheDiagnostics: activeSession.promptCacheDiagnostics,
+          turnCount: activeSession.messages.filter((message) => message.role === 'user').length,
+          contextCompressionTriggerRatio: contextCompression.triggerRatio,
+          contextSoftCompactRatio: contextCompression.softCompactRatio,
+          toolResultSnipRatio: contextCompression.toolResultSnipRatio,
+          contextCompactForceRatio: contextCompression.forceRatio,
+          slimToolModeEnabled: getConfiguredSlimToolModeEnabled()
+        },
         draftEdits: this.draftEdits.toWebviewState(),
         isBusy: this.isBusy,
         agentActivity: this.agentActivity,

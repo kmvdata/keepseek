@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { HistoryCompressor } from '../src/agent/historyCompressor';
 import type { ChatMessage, ChatSession, KeepseekModel } from '../src/shared/types';
 
-test('context compression planning avoids synchronous refresh for long low-token history', () => {
+test('context compression planning does not refresh below compact ratio', () => {
   const compressor = new HistoryCompressor(async () => 'unused');
   const session = createSession(Array.from({ length: 30 }, (_value, index) => createMessage(index, 'short')));
 
@@ -13,19 +13,14 @@ test('context compression planning avoids synchronous refresh for long low-token
     model: createModel(1_000_000),
     contextFiles: [],
     language: 'en',
-    settings: {
-      enabled: true,
-      keepRecentTurns: 2,
-      triggerRatio: 0.7,
-      summaryBudgetTokens: 1000
-    }
+    settings: createCompressionSettings()
   });
 
-  assert.equal(plan.mode, 'background');
-  assert.equal(plan.reason, 'background_refresh');
+  assert.equal(plan.mode, 'none');
+  assert.equal(plan.reason, 'fresh_enough');
 });
 
-test('context compression planning uses synchronous refresh when missing summary near context limit', () => {
+test('context compression planning uses synchronous refresh over force ratio', () => {
   const compressor = new HistoryCompressor(async () => 'unused');
   const session = createSession(Array.from({ length: 30 }, (_value, index) => (
     createMessage(index, 'large referenced context '.repeat(40))
@@ -37,17 +32,24 @@ test('context compression planning uses synchronous refresh when missing summary
     model: createModel(800),
     contextFiles: [],
     language: 'en',
-    settings: {
-      enabled: true,
-      keepRecentTurns: 2,
-      triggerRatio: 0.7,
-      summaryBudgetTokens: 1000
-    }
+    settings: createCompressionSettings()
   });
 
   assert.equal(plan.mode, 'sync');
-  assert.equal(plan.reason, 'missing_summary_near_context_limit');
+  assert.equal(plan.reason, 'force_context_limit');
 });
+
+function createCompressionSettings() {
+  return {
+    enabled: true,
+    keepRecentTurns: 2,
+    softCompactRatio: 0.5,
+    toolResultSnipRatio: 0.6,
+    triggerRatio: 0.8,
+    forceRatio: 0.9,
+    summaryBudgetTokens: 1000
+  };
+}
 
 function createSession(messages: ChatMessage[]): ChatSession {
   const now = new Date(0).toISOString();

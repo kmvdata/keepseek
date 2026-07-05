@@ -12,6 +12,12 @@ import {
 import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from '../shared/i18n';
 import { isRecord } from '../shared/errors';
 import { normalizeContextUsageEstimateValue } from '../agent/contextUsage';
+import {
+  normalizeBalanceStateValue,
+  normalizePromptCacheDiagnosticsValue,
+  normalizeSessionUsageStatsValue,
+  normalizeTurnUsageStatsValue
+} from '../agent/usageStats';
 
 export const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 export const SESSION_STORAGE_VERSION = 2;
@@ -511,6 +517,10 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
       contextCompression: normalizeContextCompressionState(item.contextCompression),
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
+      usageStats: normalizeSessionUsageStatsValue(item.usageStats),
+      lastTurnUsage: normalizeTurnUsageStatsValue(item.lastTurnUsage),
+      balance: normalizeBalanceStateValue(item.balance),
+      promptCacheDiagnostics: normalizePromptCacheDiagnosticsValue(item.promptCacheDiagnostics),
       lastTraceLogUri: typeof item.lastTraceLogUri === 'string' && item.lastTraceLogUri.trim()
         ? item.lastTraceLogUri.trim()
         : undefined,
