@@ -111,7 +111,7 @@ import {
 } from '../context/textReferences';
 
 const CHAT_CONTAINER_ID = 'keepseek';
-const CHAT_VIEW_TYPE = 'keepseek.chatView';
+const CHAT_VIEW_TYPE = 'keepseek.chat';
 const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {

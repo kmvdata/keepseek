@@ -35,9 +35,10 @@
     "theme": "dark"
   },
   "activationEvents": [
+    "onView:keepseek.chat",
     "onStartupFinished"
   ],
-  "main": "./out-test/src/extension.js",
+  "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
@@ -75,7 +76,8 @@
         {
           "type": "webview",
           "id": "keepseek.chat",
-          "name": "Chat"
+          "name": "Chat",
+          "icon": "resources/keepseek.svg"
         }
       ]
     },
@@ -108,93 +110,66 @@
           "type": "string",
           "default": "https://api.deepseek.com/beta",
           "scope": "application",
-          "markdownDescription": "Base URL for the DeepSeek API."
+          "markdownDescription": "Base URL for the DeepSeek API. Defaults to `https://api.deepseek.com/beta`."
         },
         "keepseek.model": {
           "type": "string",
           "default": "deepseek-chat",
-          "enum": [
-            "deepseek-chat",
-            "deepseek-reasoner"
-          ],
-          "markdownDescription": "DeepSeek model to use (`deepseek-chat` or `deepseek-reasoner`)."
+          "markdownDescription": "DeepSeek model to use (e.g. `deepseek-chat`, `deepseek-reasoner`)."
         },
         "keepseek.maxTokens": {
-          "type": "integer",
+          "type": "number",
           "default": 8192,
-          "minimum": 1024,
-          "maximum": 65536,
-          "markdownDescription": "Maximum number of tokens to generate per response."
+          "markdownDescription": "Maximum output tokens for each model response."
         },
         "keepseek.temperature": {
           "type": "number",
-          "default": 0.0,
-          "minimum": 0.0,
-          "maximum": 2.0,
-          "markdownDescription": "Sampling temperature for the model."
+          "default": 0,
+          "markdownDescription": "Sampling temperature (0.0 – 2.0). Lower = more deterministic, higher = more creative."
         },
-        "keepseek.historyRetentionDays": {
-          "type": "integer",
-          "default": 7,
-          "minimum": 1,
-          "maximum": 60,
-          "markdownDescription": "Number of days of session history to show in the history menu. Sessions older than 60 days are hard-pruned automatically."
+        "keepseek.systemPrompt": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Custom system prompt to prepend to all conversations."
         },
-        "keepseek.maxTurns": {
-          "type": "integer",
-          "default": 50,
-          "minimum": 5,
-          "maximum": 200,
-          "markdownDescription": "Maximum number of conversational turns before auto-clearing context."
+        "keepseek.useGit": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enable Git integration for context-aware suggestions."
         },
-        "keepseek.locale": {
+        "keepseek.useActiveEditor": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Include active editor content as context automatically."
+        },
+        "keepseek.maxHistoryMessages": {
+          "type": "number",
+          "default": 80,
+          "markdownDescription": "Maximum number of chat history messages to retain per session."
+        },
+        "keepseek.language": {
           "type": "string",
           "default": "auto",
           "enum": [
             "auto",
+            "en",
             "zh-CN",
-            "en-US"
+            "zh-TW",
+            "ja",
+            "ko"
           ],
-          "markdownDescription": "Display language (`auto` follows VS Code's UI language)."
-        },
-        "keepseek.contextCompaction": {
-          "type": "object",
-          "default": {
-            "enabled": true,
-            "summaryTriggerRatio": 0.8,
-            "recentTurnRetention": 3,
-            "summaryBudgetTokens": 2048,
-            "toolResultBudgetTokens": 4096,
-            "historyProjectionTokens": 2048
-          },
-          "markdownDescription": "Advanced context compaction settings. Only modify if you understand the trade-offs."
-        },
-        "keepseek.usagePricing": {
-          "type": "object",
-          "default": {
-            "inputTokenCostPerMillion": 0.27,
-            "outputTokenCostPerMillion": 1.10,
-            "cacheHitTokenCostPerMillion": 0.07,
-            "currency": "USD"
-          },
-          "markdownDescription": "Per-token pricing for usage cost estimation."
-        },
-        "keepseek.deepseekBalance": {
-          "type": "object",
-          "default": {
-            "endpoint": "https://api.deepseek.com/user/balance",
-            "refreshIntervalMs": 300000
-          },
-          "markdownDescription": "DeepSeek account balance endpoint and refresh interval."
+          "markdownDescription": "Language preference. `auto` follows VS Code display language."
         }
       }
     }
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
-    "build": "tsc -p tsconfig.test.json",
-    "build:prod": "tsc -p tsconfig.test.json",
-    "watch": "tsc -watch -p tsconfig.test.json",
+    "compile": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json",
+    "build:test": "tsc -p tsconfig.test.json",
+    "build:prod": "tsc -p tsconfig.json",
+    "watch": "tsc -watch -p tsconfig.json",
     "lint": "eslint src/ test/",
     "test": "node out-test/test/runTests.js",
     "package": "npx @vscode/vsce package --allow-missing-repository"
@@ -203,7 +178,7 @@
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.14.0",
     "@types/vscode": "^1.98.0",
-    "@vscode/vsce": "^3.3.0",
+    "@vscode/vsce": "^3.9.2",
     "eslint": "^9.24.0",
     "neostandard": "^0.12.1",
     "typescript": "^5.8.3"

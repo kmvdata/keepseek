@@ -164,6 +164,8 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 code --install-extension keepseek-0.1.3.vsix
 ```
 
+VS Code 1.127.0 可能输出 DEP0169 warning，这是 VS Code CLI 内部警告，安装成功不受影响。
+
 安装后在 VS Code 中执行：
 
 ```text
