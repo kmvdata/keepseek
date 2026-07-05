@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5 - 2026-07-11
+
+- Version bump for v0.1.5 release.
+
 ## 0.1.3 - 2026-07-05
 
 - Added usage and cost visibility for Agent runs, including turn/session tokens, prompt-cache hit rate, estimated cost, turn count, context percentage, compaction threshold, and DeepSeek balance.

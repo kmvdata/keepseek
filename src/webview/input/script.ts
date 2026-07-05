@@ -1194,10 +1194,11 @@ export function getInputScript(): string {
         var usedPercent = clampNumber(metrics.contextPercent, 0, 100);
         var angle = usedPercent * 3.6;
         var title = t('usageStatsTitle');
-        var topLine = t('usageMetricTurnHit') + formatMetricPercent(calculateHitRate(metrics.lastTurnUsage));
-        var tokensLine = t('usageMetricTurnTokens') + formatMetricTokens(
-          metrics.lastTurnUsage && metrics.lastTurnUsage.totalTokens,
-          hasUsageData(metrics.lastTurnUsage)
+        var topLine = t('usageMetricContextPercent') + formatMetricPercent(usedPercent);
+        var tokensLine = t('usageMetricSessionCost') + formatMetricCost(
+          metrics.sessionUsageStats && metrics.sessionUsageStats.sessionCost,
+          getUsageCurrency(metrics.sessionUsageStats, metrics.lastTurnUsage),
+          hasUsageData(metrics.sessionUsageStats)
         );
         var items = [
           ['usageMetricTurnHit', formatMetricPercent(calculateHitRate(metrics.lastTurnUsage))],
@@ -1206,10 +1207,7 @@ export function getInputScript(): string {
           ['usageMetricTurnTokens', formatMetricTokens(metrics.lastTurnUsage && metrics.lastTurnUsage.totalTokens, hasUsageData(metrics.lastTurnUsage))],
           ['usageMetricTurnCost', formatMetricCost(metrics.lastTurnUsage && metrics.lastTurnUsage.cost, getUsageCurrency(metrics.lastTurnUsage, metrics.sessionUsageStats), hasUsageData(metrics.lastTurnUsage))],
           ['usageMetricTurnCount', metrics.turnCount > 0 ? formatMetricInteger(metrics.turnCount) : '-'],
-          ['usageMetricContextPercent', formatMetricPercent(usedPercent)],
-          ['usageMetricCompactThreshold', formatMetricPercent(metrics.contextCompressionTriggerRatio * 100)],
-          ['usageMetricSessionCost', formatMetricCost(metrics.sessionUsageStats && metrics.sessionUsageStats.sessionCost, getUsageCurrency(metrics.sessionUsageStats, metrics.lastTurnUsage), hasUsageData(metrics.sessionUsageStats))],
-          ['usageMetricBalance', formatMetricBalance(metrics.balance)]
+          ['usageMetricCompactThreshold', formatMetricPercent(metrics.contextCompressionTriggerRatio * 100)]
         ];
         var label = title + '。' + items.map(function(item) {
           return t(item[0]) + item[1];
@@ -3404,7 +3402,7 @@ export function getInputScript(): string {
           return '0';
         }
         var rounded = Math.round(number * 100) / 100;
-        return String(rounded).replace(/\\.00$/u, '').replace(/(\\.\\d)0$/u, '$1');
+        return String(rounded).replace(/\\\\.00$/u, '').replace(/(\\\\.\\\\d)0$/u, '$1');
       }
 
       function formatBudgetKbFromTokens(value) {
@@ -3500,12 +3498,12 @@ export function getInputScript(): string {
           if (createSkillNameInput) { createSkillNameInput.focus(); }
           return;
         }
-        if (/[\\x00-\\x1f\\x7f]/u.test(name) || name.indexOf('..') >= 0 || name.indexOf('/') >= 0 || name.indexOf('\\\\') >= 0) {
+        if (/[\\\\x00-\\\\x1f\\\\x7f]/u.test(name) || name.indexOf('..') >= 0 || name.indexOf('/') >= 0 || name.indexOf('\\\\\\\\') >= 0) {
           setCreateSkillDialogStatus(t('createSkillNameInvalid'));
           if (createSkillNameInput) { createSkillNameInput.focus(); }
           return;
         }
-        var normalizedName = name.replace(/\\s+/gu, '-').replace(/-+/gu, '-').toLowerCase();
+        var normalizedName = name.replace(/\\\\s+/gu, '-').replace(/-+/gu, '-').toLowerCase();
         if (!/^[a-z0-9_-]+$/u.test(normalizedName) || !/[a-z0-9]/u.test(normalizedName)) {
           setCreateSkillDialogStatus(t('createSkillNameInvalid'));
           if (createSkillNameInput) { createSkillNameInput.focus(); }

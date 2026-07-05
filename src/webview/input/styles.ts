@@ -454,6 +454,11 @@ export function getInputStyles(): string {
       display: block;
     }
 
+    #contextProgressTitle {
+      text-align: center;
+      font-weight: 600;
+    }
+
     .context-progress-breakdown {
       display: grid;
       grid-template-columns: minmax(0, 1fr);
