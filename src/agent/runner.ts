@@ -49,6 +49,7 @@ import {
 } from './contextUsage';
 import { WorkspaceToolAdapter, WorkspaceToolService } from './tools/workspaceTools';
 import type { KeepseekLanguage } from '../shared/i18n';
+import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
 import { DsmlToolParser } from './deepseek/dsmlToolParser';
 import { DeepSeekClient, DeepSeekClientConfig } from './deepseek/client';
 import {
@@ -143,6 +144,18 @@ interface ShapedToolResult {
   shapedLength: number;
   compressible: boolean;
   truncated: boolean;
+}
+
+interface LineReplacementRange {
+  startLine: number;
+  endLine: number;
+}
+
+interface DraftEditToolInput {
+  rawPath: string;
+  content: string;
+  reason: string;
+  replaceRange?: LineReplacementRange;
 }
 
 interface UpstreamUsageTotals {
@@ -438,10 +451,11 @@ export class AgentRunner {
       }
       queueBudgetStopInstruction();
       const toolsForTurn = !budgetStopReason && turn < maxIterations ? tools : [];
+      const allowTerminalDraftEdit = maxIterations > 0 && budgetStopReason === 'tool_iterations_exhausted';
       emitUsageEstimate(toolsForTurn);
       const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, { trace, usageTotals: upstreamUsageTotals });
       this.throwIfAborted(request.signal, request.language);
-      const normalizedAssistant = this.normalizeAssistantToolCalls(response.message, toolsForTurn.length > 0);
+      const normalizedAssistant = this.normalizeAssistantToolCalls(response.message, toolsForTurn.length > 0 || allowTerminalDraftEdit);
       const assistant = normalizedAssistant.assistant;
       if (!assistant) {
         throw new Error(request.language === 'en'
@@ -515,15 +529,27 @@ export class AgentRunner {
           toolCall: trace.includesPayload('request') ? toolCall : summarizeDeepSeekToolCall(toolCall)
         });
         if (budgetStopReason) {
-          const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language);
-          trace.record({
-            type: 'tool_result',
-            toolCallId: toolCall.id,
-            toolName: toolCall.function.name,
-            budgetStopReason,
-            content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
-          });
-          return budgetToolResult;
+          const allowBudgetedDraftEdit = budgetStopReason === 'tool_iterations_exhausted'
+            && allowTerminalDraftEdit
+            && toolCall.function.name === CREATE_DRAFT_EDIT_TOOL_NAME;
+          if (allowBudgetedDraftEdit) {
+            trace.record({
+              type: 'tool_budget_terminal_draft_edit',
+              toolCallId: toolCall.id,
+              toolName: toolCall.function.name,
+              budgetStopReason
+            });
+          } else {
+            const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language);
+            trace.record({
+              type: 'tool_result',
+              toolCallId: toolCall.id,
+              toolName: toolCall.function.name,
+              budgetStopReason,
+              content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
+            });
+            return budgetToolResult;
+          }
         }
 
         if (runtimeConfig.maxToolCalls > 0 && toolCallCount >= runtimeConfig.maxToolCalls) {
@@ -1247,7 +1273,7 @@ export class AgentRunner {
         case READ_WORKSPACE_FILE_TOOL_NAME:
           return await this.workspaceTools.readWorkspaceFile(this.readRequiredString(args, 'path'), language);
         case CREATE_DRAFT_EDIT_TOOL_NAME:
-          return await this.createDraftEdit(args, draftEdits);
+          return await this.createDraftEdit(args, draftEdits, language);
         default:
           return JSON.stringify({
             ok: false,
@@ -1262,18 +1288,19 @@ export class AgentRunner {
     }
   }
 
-  private async createDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[]): Promise<string> {
-    const rawPath = this.readRequiredString(args, 'path');
-    const content = this.readRequiredString(args, 'content');
-    const reason = this.readRequiredString(args, 'reason');
-    const uri = this.workspaceTools.resolveTargetUri(rawPath);
+  private async createDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[], language: KeepseekLanguage): Promise<string> {
+    const input = this.readDraftEditToolInput(args);
+    const uri = this.workspaceTools.resolveTargetUri(input.rawPath);
+    const content = input.replaceRange
+      ? await this.createRangeReplacedDraftContent(uri, input.content, input.replaceRange, language)
+      : input.content;
     const draftEdit: DraftEdit = {
       id: randomUUID(),
       uri: uri.toString(),
       label: this.workspaceTools.getLabel(uri),
       action: await this.getDraftEditAction(uri),
       newText: content,
-      reason
+      reason: input.reason
     };
 
     draftEdits.push(draftEdit);
@@ -1281,10 +1308,195 @@ export class AgentRunner {
       ok: true,
       draftEdit: {
         id: draftEdit.id,
-        label: draftEdit.label
+        label: draftEdit.label,
+        replaceRange: input.replaceRange
       },
       message: 'Draft edit created. Tell the user they can review and apply it from the KeepSeek panel.'
     });
+  }
+
+  private readDraftEditToolInput(args: Record<string, unknown>): DraftEditToolInput {
+    return {
+      rawPath: this.readDraftEditStringArgument(args, ['path', 'targetPath'], {
+        label: 'path'
+      }),
+      content: this.readDraftEditStringArgument(args, ['content', 'newContent'], {
+        label: 'content',
+        preserveWhitespace: true,
+        allowEmpty: true
+      }),
+      reason: this.readDraftEditStringArgument(args, ['reason'], {
+        label: 'reason'
+      }),
+      replaceRange: this.readOptionalLineReplacementRange(args)
+    };
+  }
+
+  private readDraftEditStringArgument(
+    args: Record<string, unknown>,
+    keys: string[],
+    options: { label: string; preserveWhitespace?: boolean; allowEmpty?: boolean }
+  ): string {
+    for (const key of keys) {
+      const value = args[key];
+      if (value === undefined) {
+        continue;
+      }
+      if (typeof value !== 'string') {
+        throw new Error(`Tool argument "${key}" must be a string.`);
+      }
+
+      const normalized = options.preserveWhitespace ? value : value.trim();
+      if (!options.allowEmpty && !normalized.trim()) {
+        throw new Error(`Tool argument "${key}" cannot be empty.`);
+      }
+      return normalized;
+    }
+
+    const aliases = keys.length > 1 ? ` (${keys.join(' or ')})` : '';
+    throw new Error(`Tool argument "${options.label}"${aliases} must be a string.`);
+  }
+
+  private readOptionalLineReplacementRange(args: Record<string, unknown>): LineReplacementRange | undefined {
+    const value = args.replaceRange ?? args.range;
+    if (value !== undefined) {
+      return this.parseLineReplacementRange(value, 'replaceRange');
+    }
+
+    if (args.startLine !== undefined || args.endLine !== undefined) {
+      const startLine = this.readLineNumberArgument(args.startLine, 'startLine');
+      const endLine = args.endLine === undefined
+        ? startLine
+        : this.readLineNumberArgument(args.endLine, 'endLine');
+      return this.normalizeLineReplacementRange(startLine, endLine, 'replaceRange');
+    }
+
+    return undefined;
+  }
+
+  private parseLineReplacementRange(value: unknown, argumentName: string): LineReplacementRange {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      const match = /(?:^|[^\d])#?L?(\d+)\b(?:\s*(?:-|–|—|:|,|to|到|至)\s*#?L?(\d+)\b)?/iu.exec(trimmed);
+      if (!match) {
+        throw new Error(`Tool argument "${argumentName}" must be a line range like "42-57".`);
+      }
+      const startLine = Number(match[1]);
+      const endLine = match[2] === undefined ? startLine : Number(match[2]);
+      return this.normalizeLineReplacementRange(startLine, endLine, argumentName);
+    }
+
+    if (this.isRecord(value)) {
+      const startValue = value.startLine ?? value.start ?? value.from;
+      const endValue = value.endLine ?? value.end ?? value.to ?? startValue;
+      return this.normalizeLineReplacementRange(
+        this.readLineNumberArgument(startValue, `${argumentName}.startLine`),
+        this.readLineNumberArgument(endValue, `${argumentName}.endLine`),
+        argumentName
+      );
+    }
+
+    throw new Error(`Tool argument "${argumentName}" must be a string or object.`);
+  }
+
+  private readLineNumberArgument(value: unknown, argumentName: string): number {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.floor(value);
+    }
+
+    if (typeof value === 'string' && /^\d+$/u.test(value.trim())) {
+      return Number(value.trim());
+    }
+
+    throw new Error(`Tool argument "${argumentName}" must be a positive line number.`);
+  }
+
+  private normalizeLineReplacementRange(startLine: number, endLine: number, argumentName: string): LineReplacementRange {
+    if (!Number.isFinite(startLine) || !Number.isFinite(endLine) || startLine < 1 || endLine < 1) {
+      throw new Error(`Tool argument "${argumentName}" must contain positive line numbers.`);
+    }
+    if (endLine < startLine) {
+      throw new Error(`Tool argument "${argumentName}" end line must be greater than or equal to the start line.`);
+    }
+    return {
+      startLine: Math.floor(startLine),
+      endLine: Math.floor(endLine)
+    };
+  }
+
+  private async createRangeReplacedDraftContent(
+    uri: vscode.Uri,
+    replacementContent: string,
+    replaceRange: LineReplacementRange,
+    language: KeepseekLanguage
+  ): Promise<string> {
+    if (shouldSkipTextUri(uri)) {
+      throw new Error(language === 'en'
+        ? 'Cannot apply replaceRange to a file type KeepSeek does not read as text.'
+        : '无法对 KeepSeek 不会作为文本读取的文件类型应用 replaceRange。');
+    }
+
+    const stat = await vscode.workspace.fs.stat(uri);
+    if (stat.type !== vscode.FileType.File) {
+      throw new Error(language === 'en'
+        ? 'replaceRange can only be applied to an existing regular file.'
+        : 'replaceRange 只能应用到已存在的普通文件。');
+    }
+
+    const originalContent = new TextDecoder('utf-8', { fatal: false }).decode(await vscode.workspace.fs.readFile(uri));
+    if (!isReadableTextContent(originalContent)) {
+      throw new Error(language === 'en'
+        ? 'Cannot apply replaceRange because the existing file does not look like readable text.'
+        : '无法应用 replaceRange，因为现有文件不像可读文本。');
+    }
+
+    return this.replaceWholeLines(originalContent, replacementContent, replaceRange);
+  }
+
+  private replaceWholeLines(originalContent: string, replacementContent: string, replaceRange: LineReplacementRange): string {
+    const newline = originalContent.includes('\r\n') ? '\r\n' : '\n';
+    const normalizedOriginal = originalContent.replace(/\r\n?/gu, '\n');
+    const normalizedReplacementBase = replacementContent.replace(/\r\n?/gu, '\n');
+    const lineStarts = this.getLineStartOffsets(normalizedOriginal);
+    const lineCount = this.getNormalizedLineCount(normalizedOriginal, lineStarts);
+    if (lineCount === 0) {
+      throw new Error('replaceRange cannot be applied to an empty file.');
+    }
+    if (replaceRange.endLine > lineCount) {
+      throw new Error(`replaceRange ${replaceRange.startLine}-${replaceRange.endLine} exceeds file length ${lineCount}.`);
+    }
+
+    const startOffset = lineStarts[replaceRange.startLine - 1] ?? normalizedOriginal.length;
+    const endOffset = replaceRange.endLine >= lineCount
+      ? normalizedOriginal.length
+      : lineStarts[replaceRange.endLine] ?? normalizedOriginal.length;
+    let normalizedReplacement = normalizedReplacementBase;
+    const shouldAppendLineBreak = Boolean(normalizedReplacement)
+      && !normalizedReplacement.endsWith('\n')
+      && (endOffset < normalizedOriginal.length || normalizedOriginal.endsWith('\n'));
+    if (shouldAppendLineBreak) {
+      normalizedReplacement = `${normalizedReplacement}\n`;
+    }
+
+    const replaced = `${normalizedOriginal.slice(0, startOffset)}${normalizedReplacement}${normalizedOriginal.slice(endOffset)}`;
+    return newline === '\n' ? replaced : replaced.replace(/\n/gu, newline);
+  }
+
+  private getLineStartOffsets(content: string): number[] {
+    const offsets = [0];
+    for (let index = 0; index < content.length; index += 1) {
+      if (content.charAt(index) === '\n') {
+        offsets.push(index + 1);
+      }
+    }
+    return offsets;
+  }
+
+  private getNormalizedLineCount(content: string, lineStarts: number[]): number {
+    if (!content) {
+      return 0;
+    }
+    return content.endsWith('\n') ? Math.max(1, lineStarts.length - 1) : lineStarts.length;
   }
 
   private shapeToolResult(toolName: string, rawContent: string, snipForContextPressure: boolean): ShapedToolResult {

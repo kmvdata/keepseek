@@ -103,6 +103,16 @@ export const workspace = {
       return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}${path.sep}`);
     });
   },
+  asRelativePath(uriOrPath: Uri | string, includeWorkspaceFolder = false): string {
+    const uri = typeof uriOrPath === 'string' ? Uri.file(uriOrPath) : uriOrPath;
+    const folder = workspace.getWorkspaceFolder(uri);
+    if (!folder) {
+      return uri.fsPath || uri.path;
+    }
+
+    const relativePath = path.relative(folder.uri.fsPath, uri.fsPath).split(path.sep).join('/');
+    return includeWorkspaceFolder && folder.name ? `${folder.name}/${relativePath}` : relativePath;
+  },
   async openTextDocument(uri: Uri): Promise<TextDocument> {
     const content = await fs.readFile(uri.fsPath, 'utf8');
     return new TextDocument(uri, content);

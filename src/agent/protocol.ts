@@ -138,7 +138,7 @@ export function getAgentSystemPrompt(input: {
         'When the user references a directory, treat it as a target or reference scope. Prefer that directory for related new files, and list/read files under it when you need examples.',
         'The read-only workspace tools only access files inside the open workspace, and they may skip large, binary, image, media, archive, or otherwise unreadable files.',
         'Important safety rule: tools only create DraftEdit pending changes and never write to disk directly. Do not claim files were written unless the user later applies the change.',
-        'When the user asks to modify or create files, prefer calling keepseek_create_draft_edit with the target path, complete new file content, and a short reason.',
+        'When the user asks to modify or create files, prefer calling keepseek_create_draft_edit with path, content, and reason. Pass complete new file content unless replaceRange is set; with replaceRange, content is the exact replacement text for that 1-based inclusive line range.',
         'If information is missing, state the gap. If you can reasonably proceed, provide an actionable result.'
       ]
     : [
@@ -150,7 +150,7 @@ export function getAgentSystemPrompt(input: {
         '当用户引用目录时，把它视为目标位置或参考范围。创建相关新文件时优先放在该目录下；需要参考示例时，先列出并读取该目录下的文件。',
         '只读工作区工具只会访问当前打开工作区内的文件，并可能跳过过大、二进制、图片、媒体、归档或其它不可读文件。',
         '重要安全规则：工具只会创建 DraftEdit 待确认修改，不会直接写入磁盘；不要声称已经写入文件，除非用户之后手动确认。',
-        '当用户要求修改或创建文件时，优先调用 keepseek_create_draft_edit，并传入目标路径、完整的新文件内容和简短原因。',
+        '当用户要求修改或创建文件时，优先调用 keepseek_create_draft_edit，并传入 path、content 和 reason。除非设置 replaceRange，否则 content 必须是完整的新文件内容；设置 replaceRange 时，content 是该 1-based 闭区间行范围的替换文本。',
         '如果信息不足，先说明缺口；如果可以合理推进，就直接给出可执行结果。'
       ];
 
@@ -454,11 +454,15 @@ function getRawAgentTools(): DeepSeekFunctionTool[] {
             },
             content: {
               type: 'string',
-              description: 'The complete new file content. Use the full desired file content, not a diff.'
+              description: 'The complete new file content. If replaceRange is set, this is the exact replacement text for that line range.'
             },
             reason: {
               type: 'string',
               description: 'A short human-readable reason shown in the confirmation dialog.'
+            },
+            replaceRange: {
+              type: 'string',
+              description: 'Optional 1-based inclusive whole-line range such as "42-57". When set, KeepSeek reads the current file and creates a full-file DraftEdit with this range replaced by content.'
             }
           },
           required: ['path', 'content', 'reason'],
