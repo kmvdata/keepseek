@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.3 - 2026-07-05
+
+- Added usage and cost visibility for Agent runs, including turn/session tokens, prompt-cache hit rate, estimated cost, turn count, context percentage, compaction threshold, and DeepSeek balance.
+- Added prompt-cache diagnostics and a lean default tool schema so KeepSeek can keep stable core tools hot while adding broader workspace tools only when the current request needs them.
+- Added configurable usage pricing, DeepSeek balance endpoint/refresh interval, replay-safe request retries, and structured interaction trace logs.
+- Improved context compaction controls with soft compaction, tool-result snipping, force-compaction thresholds, and an updated default summary trigger ratio of 0.8.
+- Moved usage metrics into the context progress tooltip and removed per-keystroke expanded prompt usage estimation to reduce Webview-to-extension chatter before send.
+- Updated release metadata, marketplace packaging scripts, and VSIX packaging exclusions for the 0.1.3 publish.
+
+## 0.1.2 - 2026-06-27
+
+- Added Codex-compatible KeepSeek Skills support, including discovery from workspace `.agents` and user Codex skills, active-skill selection, prompt skill references, and safe loading of referenced instruction resources.
+- Added `/skills` and `/create-skill` flows so users can browse reusable workflows or create a workspace skill draft under `.agents/skills/.../SKILL.md`.
+- Added the Agent budget/context settings UI for context compression, recent-turn retention, summary budget, tool budgets, and history retention.
+- Added the About dialog with extension version, maintainer, repository, and license information.
+- Improved external file reference and drag/drop reference handling so authorized references render and open more consistently.
+
 ## 0.1.1 - 2026-06-02
 
 - Added two new read-only workspace tools:

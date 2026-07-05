@@ -2,12 +2,30 @@
   "name": "keepseek",
   "displayName": "KeepSeek",
   "description": "AI-powered coding agent for VS Code",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "keepseek",
+  "author": "kmvdata",
+  "license": "MIT",
   "icon": "resources/keepseek.png",
+  "homepage": "https://github.com/kmvdata/keepseek#readme",
+  "bugs": {
+    "url": "https://github.com/kmvdata/keepseek/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/keepseek/keepseek"
+    "url": "https://github.com/kmvdata/keepseek.git"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "chat",
+    "context",
+    "deepseek",
+    "coding"
+  ],
+  "galleryBanner": {
+    "color": "#1f2937",
+    "theme": "dark"
   },
   "engines": {
     "vscode": "^1.106.0"
@@ -445,6 +463,8 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src",
+    "package": "vsce package --no-dependencies",
+    "publish:marketplace": "vsce publish --no-dependencies",
     "pretest": "npm run compile && npm run lint",
     "test": "tsc -p tsconfig.test.json && node --test out-test/test/runTests.js"
   },

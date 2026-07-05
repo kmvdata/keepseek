@@ -28,7 +28,6 @@ import {
 import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage } from '../shared/i18n';
 import { ChatSessionStore, createSessionTitle, getCurrentWorkspaceSessionScope, getVisibleMessages } from '../sessions/chatSessionStore';
 import {
-  addInputTokensToContextUsage,
   createDisplayedSessionContextUsageEstimate,
   finalizeSessionContextUsageEstimate,
   pickLargerContextUsageEstimate,
@@ -730,9 +729,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'insertDroppedFileReferences':
         await this.insertDroppedFileReferencesToInput(message.files);
         return;
-      case 'estimatePromptContextUsage':
-        await this.postPromptContextUsageEstimate(message);
-        return;
       case 'requestReferenceResources':
         await this.postReferenceResources(message.requestId);
         return;
@@ -1304,59 +1300,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     } catch {
       return false;
     }
-  }
-
-  private async postPromptContextUsageEstimate(message: Extract<WebviewMessage, { type: 'estimatePromptContextUsage' }>): Promise<void> {
-    const activeSessionId = this.sessionStore.activeSessionId;
-    if (message.activeSessionId && message.activeSessionId !== activeSessionId) {
-      return;
-    }
-
-    const prompt = message.prompt.trim();
-    const models = getConfiguredModels();
-    const model = models.find((item) => item.id === message.modelId) ?? models[0];
-    const authorizedExternalReferenceUris = this.collectAuthorizedExternalReferenceUris(message.references);
-    const expandedPrompt = prompt
-      ? await expandPromptReferencesInPrompt(prompt, {
-          authorizedExternalReferenceUris,
-          skillManifests: this.skillStore.getManifests(),
-          language: this.language
-        })
-      : '';
-
-    if (activeSessionId !== this.sessionStore.activeSessionId) {
-      return;
-    }
-
-    const activeSession = this.sessionStore.getActiveSession();
-    const activeSkills = (await this.skillStore.loadActiveSkills(
-      activeSession,
-      normalizeSkillIds(message.skillIds)
-    )).skills;
-    const promptContextUsage = createDisplayedSessionContextUsageEstimate({
-      model,
-      contextFiles: this.fileContext.getAll(),
-      skills: activeSkills,
-      messages: this.messages,
-      contextCompression: activeSession.contextCompression,
-      language: this.language,
-      prompt: expandedPrompt
-    });
-    const storedContextUsage = activeSession.contextUsage;
-    const contextUsage = storedContextUsage
-      ? pickLargerContextUsageEstimate(
-          addInputTokensToContextUsage(storedContextUsage, promptContextUsage.breakdown.inputTokensEstimate),
-          promptContextUsage
-        ) ?? promptContextUsage
-      : promptContextUsage;
-
-    this.postToWebview({
-      type: 'promptContextUsageEstimate',
-      requestId: message.requestId,
-      activeSessionId,
-      prompt: message.prompt,
-      contextUsage
-    });
   }
 
   private async postClipboardText(requestId: string): Promise<void> {
@@ -2051,6 +1994,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.isBusy ? this.liveContextUsage : undefined
     ) ?? computedContextUsage;
     const contextCompression = getConfiguredContextCompressionSettings();
+    const lastTurnUsage = this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage;
+    const contextPercent = lastTurnUsage?.totalTokens
+      ? (lastTurnUsage.totalTokens / Math.max(1, contextUsage.maxTokensEstimate)) * 100
+      : contextUsage.usedPercent;
 
     this.postToWebview({
       type: 'state',
@@ -2068,10 +2015,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         contextUsageSessionId: this.sessionStore.activeSessionId,
         usageMetrics: {
           sessionUsageStats: activeSession.usageStats,
-          lastTurnUsage: this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage,
+          lastTurnUsage,
           balance: activeSession.balance,
           promptCacheDiagnostics: activeSession.promptCacheDiagnostics,
           turnCount: activeSession.messages.filter((message) => message.role === 'user').length,
+          contextPercent,
           contextCompressionTriggerRatio: contextCompression.triggerRatio,
           contextSoftCompactRatio: contextCompression.softCompactRatio,
           toolResultSnipRatio: contextCompression.toolResultSnipRatio,

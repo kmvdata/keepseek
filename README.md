@@ -2,7 +2,7 @@
 
 KeepSeek 是一款面向 VS Code 的 AI 编程上下文助手。它把 Agent 对话面板放进 VS Code 侧边栏，让你可以把文件、选中代码、终端输出、调试控制台和 Output 面板里的关键内容快速加入上下文，再交给 AI 一起分析、解释和生成修改建议。
 
-当前版本默认接入 DeepSeek OpenAI-compatible Chat Completions，支持 DeepSeek V4 Flash / Pro、Thinking 模式、多轮对话、跨项目 History Session 管理、文件引用、运行日志引用和安全的修改草案确认流程。
+当前版本默认接入 DeepSeek OpenAI-compatible Chat Completions，支持 DeepSeek V4 Flash / Pro、Thinking 模式、多轮对话、跨项目 History Session 管理、文件/目录/Skills 引用、只读工作区搜索与行段读取、运行日志引用、用量/费用/余额统计，以及安全的修改草案确认流程。
 
 **KeepSeek 是开源软件**，使用 [MIT 许可证](./LICENSE)。源码托管在 GitHub：**[https://github.com/kmvdata/keepseek](https://github.com/kmvdata/keepseek)**
 
@@ -15,6 +15,7 @@ English version is available below: [English](#keepseek-english).
 - 修改代码前做方案：引用相关文件和行号，让 AI 先解释影响范围，再生成可审阅的修改草案。
 - 处理跨文件任务：把多个工作区文件或外部文件加入上下文，围绕同一需求持续对话。
 - 延续跨项目排查：从其他项目复制已有 history session 到当前项目，在新的工作区里继续沿用排查思路和上下文线索。
+- 沉淀重复工作流：把项目约定、排查步骤或团队提示词写成 KeepSeek Skill，按需加入当前对话。
 - 复盘构建和测试：将编译输出、lint 结果、测试日志交给 AI，总结失败点和下一步动作。
 
 ## 适合谁
@@ -38,7 +39,11 @@ English version is available below: [English](#keepseek-english).
 - 运行中止：Agent 正在推理或调用工具时，可以从输入区停止本次执行。
 - 回复复制：Assistant 回复支持一键复制，便于保存或转发排查结果。
 - 编辑器快捷键：底部输入框和消息编辑框共享 Emacs/macOS 风格文本快捷键。
+- KeepSeek Skills：从工作区 `.agents` 和用户 `~/.codex/skills` 发现可复用工作流，支持选择启用、`$` 引用和创建 workspace skill 草案。
+- 低成本工作区工具：Agent 可先搜索或列目录，再按行段读取文件，避免为了定位问题读取整份大文件。
+- 用量统计：显示本次/会话 tokens、prompt cache 命中率、估算费用、上下文百分比和 DeepSeek 余额。
 - 上下文压缩：长对话会使用"历史投影 + 会话摘要 + 关键消息保护 + 文件引用外化"组织模型输入，减少重复发送旧历史和展开后的大段文件正文。
+- 调试 trace：可选开启结构化 JSONL 交互日志，便于排查请求、流式响应和工具循环问题。
 - 安全修改草案：AI 只能创建待确认的 DraftEdit，用户点击 Apply 后还会经过 VS Code modal 确认再写入文件。
 - 基础防护：限制单个上下文文件大小，跳过常见二进制、媒体、归档和不可读文件。
 
@@ -60,6 +65,14 @@ English version is available below: [English](#keepseek-english).
 - 当需要代码细节时，模型会通过现有只读工作区工具重新读取当前文件内容。
 
 这带来的好处是：长会话下模型不再只能看到最近 24 条消息；它能同时看到摘要、关键保护消息和最近上下文。token 使用通常会更稳定，尤其是多次引用文件、拖入日志、展开大段代码之后。不过它不是保证每次都更省 token：如果对话本身很短，或没有可压缩的旧历史，KeepSeek 会保持接近原来的请求形态。
+
+## Skills 与用量统计
+
+- Skills 可以来自当前工作区的 `.agents` 或用户目录下的 `~/.codex/skills`。工作区 Skill 会遵守 VS Code Workspace Trust；不可用或被禁用的 Skill 不会进入模型上下文。
+- 输入框支持 `/skills` 打开 Skills 列表，也支持 `/create-skill` 创建 `.agents/skills/<name>/SKILL.md` 草案。Skill 内容会作为当前请求上下文注入，但不能覆盖 KeepSeek 的安全规则。
+- 当 prompt 中插入 `$` Skill 引用时，KeepSeek 会在发送前展开对应 `SKILL.md`，并保留引用来源，便于模型理解本轮需要遵循的工作流。
+- 用量统计来自上游返回的 usage 数据和本地计价配置，显示本次/会话 tokens、cache hit/miss、估算费用、上下文百分比、压缩阈值和 DeepSeek 余额。
+- trace 日志默认关闭。开启后会写入扩展全局存储目录，可能包含 prompt、文件内容、reasoning 内容和 DraftEdit 内容，适合调试时短期开启。
 
 ## 工作方式
 
@@ -102,6 +115,7 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 | `keepseek.apiKey` | `""` | DeepSeek API Key，也可用 `DEEPSEEK_API_KEY` 环境变量兜底 |
 | `keepseek.baseUrl` | `"https://api.deepseek.com"` | OpenAI-compatible API base URL |
 | `keepseek.models` | DeepSeek V4 Flash / Pro | 聊天面板中显示的模型列表 |
+| `keepseek.selectedModelId` | `""` | 当前选中模型 id；为空或不可用时使用模型列表第一项 |
 | `keepseek.thinkingEnabled` | `true` | 是否开启 Thinking 模式 |
 | `keepseek.reasoningEffort` | `"high"` | Thinking 推理强度，支持 `high` 或 `max` |
 | `keepseek.maxFileBytes` | `200000` | 单个引用文件或日志片段的最大字节数 |
@@ -113,11 +127,26 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 | `keepseek.maxWorkspaceToolFiles` | `2000` | 只读工作区文件列表工具最多返回的文件数量 |
 | `keepseek.contextWindowTokens` | `1000000` | 上下文窗口估算 tokens，用于上下文用量指示器 |
 | `keepseek.contextCompressionEnabled` | `true` | 是否启用上下文压缩；关闭后尽量保持旧的最近消息窗口行为 |
+| `keepseek.contextSoftCompactRatio` | `0.5` | 上下文达到该比例时进入软压缩/预警区间 |
+| `keepseek.toolResultSnipRatio` | `0.6` | 上下文达到该比例时优先缩短工具结果 |
 | `keepseek.contextKeepRecentTurns` | `12` | 压缩开启时，模型请求中保留最近多少个用户轮次及其后续 Assistant 回复 |
-| `keepseek.contextCompressionTriggerRatio` | `0.7` | 当前估算上下文达到模型窗口该比例时，可触发会话摘要刷新 |
+| `keepseek.contextCompressionTriggerRatio` | `0.8` | 当前估算上下文达到模型窗口该比例时，可触发会话摘要刷新 |
+| `keepseek.contextCompactForceRatio` | `0.9` | 当前估算上下文达到该比例时，发送前强制同步摘要压缩 |
 | `keepseek.contextSummaryBudgetTokens` | `3000` | 会话摘要请求的最大输出 token 预算 |
+| `keepseek.usagePricing` | DeepSeek 默认价目 | 按模型配置每百万 token 的 cache hit、输入、输出价格和币种，用于费用估算 |
+| `keepseek.balanceEndpointUrl` | `""` | DeepSeek 余额查询接口；为空时从 `baseUrl` 推导 `/user/balance` |
+| `keepseek.balanceRefreshIntervalMs` | `60000` | 自动刷新余额的最小间隔 |
+| `keepseek.slimToolModeEnabled` | `true` | 默认暴露较小稳定工具 schema，必要时再加入更宽的工作区工具 |
 | `keepseek.streamIdleTimeoutMs` | `0` | 流式响应连续无数据时的空闲超时；设为 `0` 时禁用 |
+| `keepseek.maxRequestRetries` | `2` | 首个流式 chunk 前遇到可重试错误时的最大自动重试次数 |
+| `keepseek.requestRetryBaseMs` | `1000` | 自动重试的指数退避基础延迟（毫秒） |
+| `keepseek.trace.enabled` | `false` | 是否开启结构化交互 trace 日志；日志可能包含敏感上下文 |
+| `keepseek.trace.level` | `"full"` | trace 级别：`metadata`、`request` 或 `full` |
+| `keepseek.trace.logRawStream` | `true` | `trace.level` 为 `full` 时是否记录原始 SSE 流 |
+| `keepseek.trace.retentionDays` | `7` | trace 日志保留天数 |
+| `keepseek.trace.maxFileBytes` | `20000000` | 单个 trace 日志文件最大字节数 |
 | `keepseek.historyRetentionDays` | `7` | 历史菜单默认显示最近天数，范围 1-60；存储记录仍按 60 天硬保留清理 |
+| `keepseek.language` | `"zh-CN"` | KeepSeek UI 语言 |
 
 ## 隐私与安全
 
@@ -132,7 +161,7 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 从 VSIX 安装：
 
 ```bash
-code --install-extension keepseek-0.1.2.vsix
+code --install-extension keepseek-0.1.3.vsix
 ```
 
 安装后在 VS Code 中执行：
@@ -161,8 +190,9 @@ npm run lint
 - `src/extension.ts`：VS Code 激活入口、命令注册和 Provider 接线。
 - `src/provider/`：WebviewView Provider、Webview 消息类型和视图聚焦工具。
 - `src/agent/`：Agent 运行循环、DeepSeek/OpenAI-compatible 协议、SSE/DSML 解析、上下文投影/压缩、上下文用量估算和只读工具。
+- `src/skills/`：KeepSeek Skills 的发现、加载、状态管理和 Skill 草案创建。
 - `src/sessions/`：当前项目和跨项目 History Session 存储、迁移和保留策略。
-- `src/context/`：上下文文件、终端/输出/调试选区引用，以及 prompt 文件/目录引用展开。
+- `src/context/`：上下文文件、终端/输出/调试选区引用，以及 prompt 文件/目录/Skill 引用展开。
 - `src/edits/`：DraftEdit 状态和用户确认后的安全写入。
 - `src/shared/`：配置、类型、国际化、格式化、Markdown 和文本文件判断等共享基础设施。
 - `src/webview/`：Webview HTML/CSS/JS 字符串和输入区实现。
@@ -175,20 +205,26 @@ KeepSeek: Open Agent Chat
 
 ## 发布准备
 
-当前发布版本为 `0.1.2`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.1.2`，发布标签可以使用 `v0.1.2`。
+当前发布版本为 `0.1.3`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.1.3`，发布标签可以使用 `v0.1.3`。
 
 生成 VSIX：
 
 ```bash
-npm run compile
-npx vsce package --no-dependencies
+npm run package
 ```
 
 本地检查：
 
 ```bash
+npm run compile
 npm run lint
 npx vsce ls
+```
+
+发布到 VS Code Marketplace：
+
+```bash
+VSCE_PAT=<token> npm run publish:marketplace
 ```
 
 ## 许可证
@@ -225,7 +261,7 @@ SOFTWARE.
 
 KeepSeek is an AI coding context assistant for VS Code. It adds an Agent chat panel to the VS Code sidebar and makes it easy to send precise development context to AI: files, selected code, terminal output, Debug Console text, and Output panel logs.
 
-The current release connects to DeepSeek OpenAI-compatible Chat Completions by default. It supports DeepSeek V4 Flash / Pro, Thinking mode, multi-turn sessions, cross-project history session management, rich file references, runtime log references, and a safe draft-edit workflow.
+The current release connects to DeepSeek OpenAI-compatible Chat Completions by default. It supports DeepSeek V4 Flash / Pro, Thinking mode, multi-turn sessions, cross-project history session management, file/directory/Skill references, read-only workspace search and range reads, runtime log references, usage/cost/balance stats, and a safe draft-edit workflow.
 
 **KeepSeek is open source** under the [MIT license](./LICENSE). Source code is available on GitHub: **[https://github.com/kmvdata/keepseek](https://github.com/kmvdata/keepseek)**
 
@@ -236,6 +272,7 @@ The current release connects to DeepSeek OpenAI-compatible Chat Completions by d
 - Plan code changes: reference exact files and line ranges before asking for an implementation strategy.
 - Work across files: gather related workspace or external files and keep the discussion grounded in the same context.
 - Continue across projects: copy a history session from another project into the current workspace and keep using the same investigation thread.
+- Reuse workflows: turn project conventions, investigation steps, or team prompts into KeepSeek Skills and add them to a chat when needed.
 - Review build and test output: ask AI to summarize failures and suggest the next step.
 
 ## Who It Is For
@@ -259,7 +296,11 @@ The current release connects to DeepSeek OpenAI-compatible Chat Completions by d
 - Abort control for stopping an in-progress Agent run.
 - One-click copy for assistant replies.
 - Shared Emacs/macOS-style text shortcuts in the prompt composer and message edit boxes.
+- KeepSeek Skills discovered from workspace `.agents` and user `~/.codex/skills`, with active selection, `$` references, and workspace skill draft creation.
+- Low-cost workspace tools so the Agent can search or list first, then read targeted file ranges instead of full large files.
+- Usage stats for turn/session tokens, prompt-cache hit rate, estimated cost, context percentage, and DeepSeek balance.
 - Context compression that projects long chat history into summaries, protected messages, recent turns, and file-reference hints instead of repeatedly sending old expanded file bodies.
+- Optional structured trace logs for debugging requests, streaming responses, and tool loops.
 - Safe DraftEdit workflow where AI proposes changes and the user confirms before writing files.
 - Size limits and binary-file filtering to avoid sending unsuitable content.
 
@@ -281,6 +322,14 @@ In long chats, the expensive part is often not the latest question. It is older 
 - Ask the model to reread current workspace files through KeepSeek's read-only tools when code details matter.
 
 This usually reduces token pressure in long sessions and avoids losing the original goal when the newest-message window moves forward. It does not guarantee fewer tokens for every request: short chats or chats with little compressible history stay close to the original request shape.
+
+## Skills And Usage
+
+- Skills can come from workspace `.agents` or user `~/.codex/skills`. Workspace Skills respect VS Code Workspace Trust; unavailable or disabled Skills are not added to model context.
+- Use `/skills` to browse Skills or `/create-skill` to create a `.agents/skills/<name>/SKILL.md` draft. Skill content is injected as current-run context and cannot override KeepSeek safety rules.
+- `$` Skill references in the prompt are expanded before send, preserving their source so the model can follow the requested workflow for that run.
+- Usage stats combine upstream usage data with local pricing config to show turn/session tokens, cache hit/miss, estimated cost, context percentage, compaction threshold, and DeepSeek balance.
+- Trace logs are off by default. When enabled, they are written under extension global storage and may include prompts, file contents, reasoning content, and DraftEdit content.
 
 ## How It Works
 
@@ -309,6 +358,7 @@ KeepSeek is built around explicit context. You decide which files, selections, a
 | `keepseek.apiKey` | `""` | DeepSeek API Key. `DEEPSEEK_API_KEY` can be used as a fallback |
 | `keepseek.baseUrl` | `"https://api.deepseek.com"` | OpenAI-compatible API base URL |
 | `keepseek.models` | DeepSeek V4 Flash / Pro | Models shown in the chat panel |
+| `keepseek.selectedModelId` | `""` | Persisted selected model id; falls back to the first configured model |
 | `keepseek.thinkingEnabled` | `true` | Enables Thinking mode |
 | `keepseek.reasoningEffort` | `"high"` | Thinking effort, either `high` or `max` |
 | `keepseek.maxFileBytes` | `200000` | Maximum bytes for a referenced file or log snippet |
@@ -320,11 +370,26 @@ KeepSeek is built around explicit context. You decide which files, selections, a
 | `keepseek.maxWorkspaceToolFiles` | `2000` | Maximum number of files returned by the read-only workspace file listing tool |
 | `keepseek.contextWindowTokens` | `1000000` | Estimated context-window tokens for the context usage indicator |
 | `keepseek.contextCompressionEnabled` | `true` | Enables context compression; when disabled, KeepSeek keeps the legacy recent-message window behavior as closely as possible |
+| `keepseek.contextSoftCompactRatio` | `0.5` | Context ratio where KeepSeek enters the soft compaction/warning range |
+| `keepseek.toolResultSnipRatio` | `0.6` | Context ratio where KeepSeek prefers shortened tool results |
 | `keepseek.contextKeepRecentTurns` | `12` | Recent user turns, plus following assistant replies, kept verbatim in the model request |
-| `keepseek.contextCompressionTriggerRatio` | `0.7` | Context-window usage ratio that can trigger a summary refresh |
+| `keepseek.contextCompressionTriggerRatio` | `0.8` | Context-window usage ratio that can trigger a summary refresh |
+| `keepseek.contextCompactForceRatio` | `0.9` | Context ratio that forces synchronous summary compaction before send |
 | `keepseek.contextSummaryBudgetTokens` | `3000` | Maximum generated tokens for the session summary request |
+| `keepseek.usagePricing` | DeepSeek defaults | Per-million-token cache-hit, input, output prices and currency by model id |
+| `keepseek.balanceEndpointUrl` | `""` | DeepSeek balance endpoint; empty derives `/user/balance` from `baseUrl` |
+| `keepseek.balanceRefreshIntervalMs` | `60000` | Minimum automatic balance refresh interval |
+| `keepseek.slimToolModeEnabled` | `true` | Exposes a smaller stable tool schema by default and adds broader workspace tools only when needed |
 | `keepseek.streamIdleTimeoutMs` | `0` | Idle timeout for streaming responses with no data; set `0` to disable it |
+| `keepseek.maxRequestRetries` | `2` | Automatic retry count for replay-safe failures before the first stream chunk |
+| `keepseek.requestRetryBaseMs` | `1000` | Exponential backoff base delay in milliseconds |
+| `keepseek.trace.enabled` | `false` | Enables structured interaction trace logs; logs may include sensitive context |
+| `keepseek.trace.level` | `"full"` | Trace detail level: `metadata`, `request`, or `full` |
+| `keepseek.trace.logRawStream` | `true` | Records raw SSE lines when `trace.level` is `full` |
+| `keepseek.trace.retentionDays` | `7` | Trace log retention in days |
+| `keepseek.trace.maxFileBytes` | `20000000` | Maximum bytes for one trace log file |
 | `keepseek.historyRetentionDays` | `7` | Default recent-days range in the history menu, from 1 to 60; stored records still use the 60-day hard retention limit |
+| `keepseek.language` | `"zh-CN"` | KeepSeek UI language |
 
 ## Privacy And Safety
 
@@ -347,8 +412,9 @@ Source code is grouped by feature area:
 - `src/extension.ts`: VS Code activation, command registration, and Provider wiring.
 - `src/provider/`: WebviewView Provider, Webview message types, and view focus helpers.
 - `src/agent/`: Agent run loop, DeepSeek/OpenAI-compatible protocol, SSE/DSML parsing, history projection/compression, context usage estimation, and read-only tools.
+- `src/skills/`: KeepSeek Skills discovery, loading, state management, and skill draft creation.
 - `src/sessions/`: Current-project and cross-project History Session storage, migration, and retention.
-- `src/context/`: Context files, terminal/output/debug references, and prompt file/directory reference expansion.
+- `src/context/`: Context files, terminal/output/debug references, and prompt file/directory/Skill reference expansion.
 - `src/edits/`: DraftEdit state and safe user-confirmed writes.
 - `src/shared/`: Shared config, types, i18n, formatting, Markdown, and text-file guards.
 - `src/webview/`: Webview HTML/CSS/JS strings and prompt input implementation.
@@ -362,8 +428,13 @@ KeepSeek: Open Agent Chat
 ## Packaging
 
 ```bash
-npm run compile
-npx vsce package --no-dependencies
+npm run package
+```
+
+Publish to VS Code Marketplace:
+
+```bash
+VSCE_PAT=<token> npm run publish:marketplace
 ```
 
 ## License

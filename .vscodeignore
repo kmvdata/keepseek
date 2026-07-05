@@ -1,10 +1,14 @@
 .gitignore
 .claude/**
 .npm-cache/**
+.agents/**
+.codex/**
 .vscode/**
 .vscode-test/**
 node_modules/**
 src/**
+test/**
+out-test/**
 *.vsix
 AGENTS.md
 CLAUDE.md
@@ -13,3 +17,10 @@ bun.lock
 eslint.config.mjs
 package-lock.json
 tsconfig.json
+tsconfig.test.json
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*
+.eslintcache
+npm-debug.log*

@@ -455,10 +455,41 @@ export function getInputStyles(): string {
     }
 
     .context-progress-breakdown {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 3px 10px;
       margin-top: 5px;
       padding-top: 5px;
       border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
       color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+    }
+
+    .context-progress-metric {
+      display: grid !important;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 6px;
+      align-items: baseline;
+      min-width: 0;
+    }
+
+    .context-progress-metric-label {
+      color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+      white-space: nowrap;
+    }
+
+    .context-progress-metric-value {
+      color: var(--vscode-foreground);
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    @media (min-width: 360px) {
+      .context-progress-breakdown {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      }
     }
 
     .context-progress:hover .context-progress-tooltip,

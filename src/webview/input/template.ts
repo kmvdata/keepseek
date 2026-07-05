@@ -47,12 +47,12 @@ export function getInputTemplate(): string {
               <span id="status" class="composer-status"></span>
             </div>
             <div class="composer-toolbar-right">
-              <div id="contextProgress" class="context-progress" role="status" tabindex="0" aria-describedby="contextProgressTooltip" aria-label="背景信息窗口（当前会话上下文估算）：0% 已使用（剩余 100%）。已估算 0 标记，共 1M">
+              <div id="contextProgress" class="context-progress" role="status" tabindex="0" aria-describedby="contextProgressTooltip" aria-label="背景信息窗口：用量统计">
                 <span class="context-progress-ring" aria-hidden="true"></span>
                 <span id="contextProgressTooltip" class="context-progress-tooltip" role="tooltip">
-                  <span id="contextProgressTitle">背景信息窗口（当前会话上下文估算）：</span>
-                  <span id="contextProgressPercent">0% 已使用（剩余 100%）</span>
-                  <span id="contextProgressTokens">已估算 0 标记，共 1M</span>
+                  <span id="contextProgressTitle">背景信息窗口</span>
+                  <span id="contextProgressPercent">本次命中：-</span>
+                  <span id="contextProgressTokens">本次 tokens：-</span>
                   <span id="contextProgressBreakdown" class="context-progress-breakdown"></span>
                 </span>
               </div>

@@ -42,12 +42,6 @@ export function getInputScript(): string {
       var referenceResourcesError = '';
       var referenceResourceRequestSequence = 0;
       var referenceResourceRequestId = '';
-      var promptUsageRequestSequence = 0;
-      var promptUsageRequestId = '';
-      var promptUsageRequestPrompt = '';
-      var promptUsageRequestTimer = null;
-      var promptUsageOverride = null;
-      var promptUsageBaseKey = '';
       var effortLabels = {
         high: 'High',
         max: 'Max'
@@ -1170,10 +1164,8 @@ export function getInputScript(): string {
       }
 
       function renderInputControls() {
-        syncPromptUsageBase();
         refreshPromptFileLinkLabels();
         refreshPromptSkillLinkLabels();
-        schedulePromptUsageEstimate();
         renderActiveSkillsBar();
         renderContextProgress();
         renderCommandMenu();
@@ -1198,262 +1190,177 @@ export function getInputScript(): string {
 
       function renderContextProgress() {
         if (!contextProgress) { return; }
-        var usage = getContextUsageWithPrompt();
-        var usedPercent = clampNumber(usage.usedPercent, 0, 100);
-        var remainingPercent = clampNumber(usage.remainingPercent, 0, 100);
-        var displayUsedPercent = formatPercent(usedPercent);
-        var displayRemainingPercent = formatPercent(remainingPercent);
+        var metrics = normalizeUsageMetrics(state.usageMetrics);
+        var usedPercent = clampNumber(metrics.contextPercent, 0, 100);
         var angle = usedPercent * 3.6;
-        var title = t('contextWindowEstimateTitle');
-        var percentLine = t('contextWindowPercentLine', {
-          usedPercent: displayUsedPercent,
-          remainingPercent: displayRemainingPercent
-        });
-        var tokensLine = t('contextWindowTokensLine', {
-          usedTokens: formatTokenCount(usage.usedTokensEstimate),
-          maxTokens: formatTokenCount(usage.maxTokensEstimate)
-        });
-        var label = t('contextWindowProgressLabel', {
-          usedPercent: displayUsedPercent,
-          remainingPercent: displayRemainingPercent,
-          usedTokens: formatTokenCount(usage.usedTokensEstimate),
-          maxTokens: formatTokenCount(usage.maxTokensEstimate)
-        });
+        var title = t('usageStatsTitle');
+        var topLine = t('usageMetricTurnHit') + formatMetricPercent(calculateHitRate(metrics.lastTurnUsage));
+        var tokensLine = t('usageMetricTurnTokens') + formatMetricTokens(
+          metrics.lastTurnUsage && metrics.lastTurnUsage.totalTokens,
+          hasUsageData(metrics.lastTurnUsage)
+        );
+        var items = [
+          ['usageMetricTurnHit', formatMetricPercent(calculateHitRate(metrics.lastTurnUsage))],
+          ['usageMetricAverageHit', formatMetricPercent(calculateHitRate(metrics.sessionUsageStats))],
+          ['usageMetricSessionTokens', formatMetricTokens(metrics.sessionUsageStats && metrics.sessionUsageStats.totalTokens, hasUsageData(metrics.sessionUsageStats))],
+          ['usageMetricTurnTokens', formatMetricTokens(metrics.lastTurnUsage && metrics.lastTurnUsage.totalTokens, hasUsageData(metrics.lastTurnUsage))],
+          ['usageMetricTurnCost', formatMetricCost(metrics.lastTurnUsage && metrics.lastTurnUsage.cost, getUsageCurrency(metrics.lastTurnUsage, metrics.sessionUsageStats), hasUsageData(metrics.lastTurnUsage))],
+          ['usageMetricTurnCount', metrics.turnCount > 0 ? formatMetricInteger(metrics.turnCount) : '-'],
+          ['usageMetricContextPercent', formatMetricPercent(usedPercent)],
+          ['usageMetricCompactThreshold', formatMetricPercent(metrics.contextCompressionTriggerRatio * 100)],
+          ['usageMetricSessionCost', formatMetricCost(metrics.sessionUsageStats && metrics.sessionUsageStats.sessionCost, getUsageCurrency(metrics.sessionUsageStats, metrics.lastTurnUsage), hasUsageData(metrics.sessionUsageStats))],
+          ['usageMetricBalance', formatMetricBalance(metrics.balance)]
+        ];
+        var label = title + '。' + items.map(function(item) {
+          return t(item[0]) + item[1];
+        }).join('；');
 
         contextProgress.style.setProperty('--context-progress-angle', angle + 'deg');
-        contextProgress.classList.toggle('is-warning', usedPercent >= 70 && usedPercent < 90);
-        contextProgress.classList.toggle('is-danger', usedPercent >= 90);
+        contextProgress.classList.toggle('is-warning', usedPercent >= metrics.contextSoftCompactRatio * 100 && usedPercent < metrics.contextCompactForceRatio * 100);
+        contextProgress.classList.toggle('is-danger', usedPercent >= metrics.contextCompactForceRatio * 100);
         contextProgress.setAttribute('aria-label', label);
         if (contextProgressTitle) { contextProgressTitle.textContent = title; }
-        if (contextProgressPercent) { contextProgressPercent.textContent = percentLine; }
+        if (contextProgressPercent) { contextProgressPercent.textContent = topLine; }
         if (contextProgressTokens) { contextProgressTokens.textContent = tokensLine; }
         if (contextProgressBreakdown) {
-          contextProgressBreakdown.textContent = formatContextUsageBreakdown(usage.breakdown || {});
-          contextProgressBreakdown.classList.toggle('hidden', !contextProgressBreakdown.textContent);
-        }
-      }
-
-      function getContextUsageWithPrompt() {
-        var usage = normalizeContextUsage(state.contextUsage);
-        if ((state.contextUsageSessionId || state.activeSessionId || '') !== (state.activeSessionId || '')) {
-          usage = normalizeContextUsage({ maxTokensEstimate: usage.maxTokensEstimate });
-        }
-        if (state.isBusy) {
-          return usage;
-        }
-        var prompt = serializePrompt();
-        if (
-          promptUsageOverride &&
-          promptUsageOverride.prompt === prompt &&
-          promptUsageOverride.activeSessionId === (state.activeSessionId || '') &&
-          promptUsageOverride.modelId === (state.selectedModelId || '')
-        ) {
-          return normalizeContextUsage(promptUsageOverride.contextUsage);
-        }
-        var inputTokensEstimate = estimatePromptTokens(serializePrompt());
-        var usedTokensEstimate = Math.max(0, usage.usedTokensEstimate + inputTokensEstimate);
-        var maxTokensEstimate = Math.max(1, usage.maxTokensEstimate);
-        var usedPercent = Math.min(100, (usedTokensEstimate / maxTokensEstimate) * 100);
-        var breakdown = Object.assign({}, usage.breakdown || {}, {
-          inputTokensEstimate: inputTokensEstimate
-        });
-        return {
-          usedTokensEstimate: usedTokensEstimate,
-          maxTokensEstimate: maxTokensEstimate,
-          remainingTokensEstimate: Math.max(0, maxTokensEstimate - usedTokensEstimate),
-          usedPercent: usedPercent,
-          remainingPercent: Math.max(0, 100 - usedPercent),
-          breakdown: breakdown
-        };
-      }
-
-      function syncPromptUsageBase() {
-        var nextKey = getPromptUsageBaseKey();
-        if (nextKey === promptUsageBaseKey) { return; }
-        promptUsageBaseKey = nextKey;
-        resetPromptUsageEstimate();
-      }
-
-      function getPromptUsageBaseKey() {
-        var usage = normalizeContextUsage(state.contextUsage);
-        return [
-          state.activeSessionId || '',
-          state.contextUsageSessionId || '',
-          state.selectedModelId || '',
-          collectActiveSkillIds().join(','),
-          usage.usedTokensEstimate,
-          usage.maxTokensEstimate,
-          JSON.stringify(usage.breakdown || {})
-        ].join('|');
-      }
-
-      function resetPromptUsageEstimate() {
-        promptUsageOverride = null;
-        promptUsageRequestId = '';
-        promptUsageRequestPrompt = '';
-        if (promptUsageRequestTimer) {
-          clearTimeout(promptUsageRequestTimer);
-          promptUsageRequestTimer = null;
-        }
-      }
-
-      function schedulePromptUsageEstimate() {
-        if (state.isBusy) { return; }
-        var prompt = serializePrompt();
-        if (!shouldRequestExpandedPromptUsage(prompt)) {
-          resetPromptUsageEstimate();
-          return;
-        }
-        if (promptUsageOverride && promptUsageOverride.prompt === prompt) { return; }
-        if (promptUsageRequestPrompt === prompt && promptUsageRequestId) { return; }
-        if (promptUsageRequestTimer) {
-          clearTimeout(promptUsageRequestTimer);
-        }
-        promptUsageRequestTimer = setTimeout(function() {
-          promptUsageRequestTimer = null;
-          var currentPrompt = serializePrompt();
-          if (!shouldRequestExpandedPromptUsage(currentPrompt)) { return; }
-          promptUsageRequestSequence += 1;
-          promptUsageRequestId = 'prompt-usage-' + promptUsageRequestSequence;
-          promptUsageRequestPrompt = currentPrompt;
-          vscode.postMessage({
-            type: 'estimatePromptContextUsage',
-            requestId: promptUsageRequestId,
-            prompt: currentPrompt,
-            modelId: state.selectedModelId,
-            activeSessionId: state.activeSessionId,
-            references: collectPromptFileReferences(),
-            skillIds: collectActiveSkillIds()
+          contextProgressBreakdown.innerHTML = '';
+          items.forEach(function(item) {
+            contextProgressBreakdown.append(createMetricLine(t(item[0]), item[1]));
           });
-        }, 180);
+          contextProgressBreakdown.classList.remove('hidden');
+        }
       }
 
-      function shouldRequestExpandedPromptUsage(prompt) {
-        if (!String(prompt || '').trim()) { return false; }
-        if (promptInput.querySelector('a.rich-file-link')) { return true; }
-        return /<[^<>\\n]+>/u.test(String(prompt || ''));
+      function createMetricLine(labelText, valueText) {
+        var row = document.createElement('span');
+        row.className = 'context-progress-metric';
+
+        var label = document.createElement('span');
+        label.className = 'context-progress-metric-label';
+        label.textContent = labelText;
+
+        var value = document.createElement('span');
+        value.className = 'context-progress-metric-value';
+        value.textContent = valueText;
+
+        row.append(label, value);
+        return row;
       }
 
-      function handlePromptContextUsageEstimate(message) {
-        if (!message || message.requestId !== promptUsageRequestId) { return; }
-        if ((message.activeSessionId || '') !== (state.activeSessionId || '')) { return; }
-        var currentPrompt = serializePrompt();
-        if (currentPrompt !== promptUsageRequestPrompt || currentPrompt !== message.prompt) { return; }
-        promptUsageOverride = {
-          prompt: currentPrompt,
-          activeSessionId: state.activeSessionId || '',
-          modelId: state.selectedModelId || '',
-          contextUsage: message.contextUsage
-        };
-        renderContextProgress();
-      }
-
-      function formatContextUsageBreakdown(breakdown) {
-        var parts = [
-          formatBreakdownPart('contextUsageSystem', breakdown.systemTokensEstimate),
-          formatBreakdownPart('contextUsageContextFiles', breakdown.contextFileTokensEstimate),
-          formatBreakdownPart('contextUsageHistory', breakdown.historyTokensEstimate),
-          formatBreakdownPart('contextUsageInput', breakdown.inputTokensEstimate),
-          formatBreakdownPart('contextUsageToolSchema', breakdown.toolSchemaTokensEstimate),
-          formatBreakdownPart('contextUsageToolCalls', breakdown.toolCallTokensEstimate),
-          formatBreakdownPart('contextUsageToolResults', breakdown.toolResultTokensEstimate),
-          formatBreakdownPart('contextUsageReasoning', breakdown.reasoningTokensEstimate),
-          formatBreakdownPart('contextUsageOutputReserve', breakdown.outputReserveTokensEstimate),
-          formatBreakdownPart('contextUsageSafetyReserve', breakdown.safetyReserveTokensEstimate)
-        ].filter(Boolean);
-        return parts.join(' · ');
-      }
-
-      function formatBreakdownPart(labelKey, value) {
-        var tokens = Math.max(0, Math.floor(Number(value) || 0));
-        if (!tokens) { return ''; }
-        return t(labelKey) + ' ' + formatTokenCount(tokens);
-      }
-
-      function estimatePromptTokens(value) {
-        var text = String(value || '').trim();
-        return text ? estimateTokenCount('user\\n' + text) + 4 : 0;
-      }
-
-      function normalizeContextUsage(value) {
-        var usage = value && typeof value === 'object' ? value : {};
-        var maxTokensEstimate = readFiniteNumber(usage.maxTokensEstimate, 1000000);
-        var usedTokensEstimate = readFiniteNumber(usage.usedTokensEstimate, 0);
+      function normalizeUsageMetrics(value) {
+        var metrics = value && typeof value === 'object' ? value : {};
         return {
-          usedTokensEstimate: Math.max(0, Math.floor(usedTokensEstimate)),
-          maxTokensEstimate: Math.max(1, Math.floor(maxTokensEstimate)),
-          remainingTokensEstimate: Math.max(0, Math.floor(readFiniteNumber(usage.remainingTokensEstimate, maxTokensEstimate - usedTokensEstimate))),
-          usedPercent: readFiniteNumber(usage.usedPercent, maxTokensEstimate ? (usedTokensEstimate / maxTokensEstimate) * 100 : 0),
-          remainingPercent: readFiniteNumber(usage.remainingPercent, 100),
-          breakdown: usage.breakdown && typeof usage.breakdown === 'object' ? usage.breakdown : {}
+          sessionUsageStats: normalizeUsageStats(metrics.sessionUsageStats, 'sessionCost'),
+          lastTurnUsage: normalizeUsageStats(metrics.lastTurnUsage, 'cost'),
+          balance: normalizeBalance(metrics.balance),
+          promptCacheDiagnostics: metrics.promptCacheDiagnostics || null,
+          turnCount: readNonNegativeNumber(metrics.turnCount, 0),
+          contextPercent: readNonNegativeNumber(metrics.contextPercent, 0),
+          contextCompressionTriggerRatio: readRatio(metrics.contextCompressionTriggerRatio, 0.8),
+          contextSoftCompactRatio: readRatio(metrics.contextSoftCompactRatio, 0.5),
+          toolResultSnipRatio: readRatio(metrics.toolResultSnipRatio, 0.6),
+          contextCompactForceRatio: readRatio(metrics.contextCompactForceRatio, 0.9),
+          slimToolModeEnabled: metrics.slimToolModeEnabled !== false
         };
       }
 
-      function readBreakdownTokenEstimate(usage, key) {
-        return readFiniteNumber(usage.breakdown ? usage.breakdown[key] : 0, 0);
+      function normalizeUsageStats(value, costKey) {
+        if (!value || typeof value !== 'object') {
+          return null;
+        }
+        return {
+          promptTokens: readNonNegativeNumber(value.promptTokens, 0),
+          completionTokens: readNonNegativeNumber(value.completionTokens, 0),
+          totalTokens: readNonNegativeNumber(value.totalTokens, 0),
+          cacheHitTokens: readNonNegativeNumber(value.cacheHitTokens, 0),
+          cacheMissTokens: readNonNegativeNumber(value.cacheMissTokens, 0),
+          requestCount: readNonNegativeNumber(value.requestCount, 0),
+          cost: readNonNegativeNumber(value[costKey], 0),
+          sessionCost: readNonNegativeNumber(value.sessionCost, 0),
+          currency: typeof value.currency === 'string' && value.currency.trim() ? value.currency.trim() : '¥'
+        };
       }
 
-      function readFiniteNumber(value, fallback) {
+      function normalizeBalance(value) {
+        if (!value || typeof value !== 'object') {
+          return null;
+        }
+        var totalBalance = Number(value.totalBalance);
+        return {
+          totalBalance: Number.isFinite(totalBalance) ? totalBalance : null,
+          currency: typeof value.currency === 'string' && value.currency.trim() ? value.currency.trim() : '¥',
+          error: typeof value.error === 'string' ? value.error : ''
+        };
+      }
+
+      function hasUsageData(usage) {
+        return Boolean(usage && (usage.requestCount > 0 || usage.totalTokens > 0));
+      }
+
+      function calculateHitRate(usage) {
+        if (!usage) {
+          return null;
+        }
+        var denominator = Math.max(0, usage.cacheHitTokens) + Math.max(0, usage.cacheMissTokens);
+        return denominator > 0 ? (Math.max(0, usage.cacheHitTokens) / denominator) * 100 : null;
+      }
+
+      function formatMetricPercent(value) {
         var number = Number(value);
-        return Number.isFinite(number) ? number : fallback;
+        return Number.isFinite(number) ? number.toFixed(2) + '%' : '-';
+      }
+
+      function formatMetricTokens(value, hasData) {
+        if (!hasData) {
+          return '-';
+        }
+        return formatMetricInteger(readNonNegativeNumber(value, 0));
+      }
+
+      function formatMetricInteger(value) {
+        return Math.max(0, Math.floor(Number(value) || 0)).toLocaleString();
+      }
+
+      function formatMetricCost(value, currency, hasData) {
+        if (!hasData) {
+          return '-';
+        }
+        var number = Number(value);
+        if (!Number.isFinite(number)) {
+          return '-';
+        }
+        return (currency || '¥') + number.toLocaleString(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 6
+        });
+      }
+
+      function formatMetricBalance(balance) {
+        if (!balance || balance.totalBalance === null) {
+          return '-';
+        }
+        return (balance.currency || '¥') + Number(balance.totalBalance).toLocaleString(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2
+        });
+      }
+
+      function getUsageCurrency(primary, fallback) {
+        return primary && primary.currency ? primary.currency : fallback && fallback.currency ? fallback.currency : '¥';
+      }
+
+      function readNonNegativeNumber(value, fallback) {
+        var number = Number(value);
+        return Number.isFinite(number) && number >= 0 ? number : fallback;
+      }
+
+      function readRatio(value, fallback) {
+        var number = Number(value);
+        return Number.isFinite(number) && number >= 0 ? number : fallback;
       }
 
       function clampNumber(value, min, max) {
         return Math.min(max, Math.max(min, Number(value) || 0));
-      }
-
-      function estimateTokenCount(value) {
-        var estimate = 0;
-        var text = String(value || '');
-        for (var character of text) {
-          var codePoint = character.codePointAt(0) || 0;
-          if (codePoint <= 0x7f) {
-            estimate += 0.3;
-          } else if (isCjkCodePoint(codePoint)) {
-            estimate += 1;
-          } else {
-            estimate += 0.75;
-          }
-        }
-        return Math.ceil(estimate);
-      }
-
-      function formatPercent(value) {
-        var percent = clampNumber(value, 0, 100);
-        if (percent === 0 || percent === 100) {
-          return String(percent);
-        }
-        if (percent > 0 && percent < 0.1) {
-          return '<0.1';
-        }
-        if (percent < 10) {
-          return percent.toFixed(1);
-        }
-        return String(Math.round(percent));
-      }
-
-      function isCjkCodePoint(codePoint) {
-        return (codePoint >= 0x3400 && codePoint <= 0x4dbf)
-          || (codePoint >= 0x4e00 && codePoint <= 0x9fff)
-          || (codePoint >= 0xf900 && codePoint <= 0xfaff)
-          || (codePoint >= 0x20000 && codePoint <= 0x2ebef)
-          || (codePoint >= 0x3000 && codePoint <= 0x303f)
-          || (codePoint >= 0xff00 && codePoint <= 0xffef);
-      }
-
-      function formatTokenCount(value) {
-        var tokens = Math.max(0, Math.round(Number(value) || 0));
-        if (tokens < 1000) {
-          return String(tokens);
-        }
-        if (tokens >= 1000000) {
-          return (Math.round((tokens / 1000000) * 10) / 10).toFixed(1).replace(/\\.0$/u, '') + 'M';
-        }
-        var thousands = tokens / 1000;
-        if (thousands >= 10) {
-          return Math.round(thousands) + 'k';
-        }
-        return (Math.round(thousands * 10) / 10).toFixed(1).replace(/\\.0$/u, '') + 'k';
       }
 
       function renderCommandMenu() {
@@ -3160,7 +3067,6 @@ export function getInputScript(): string {
         promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + 'px';
         promptInput.classList.toggle('is-empty', isEmpty);
         renderSendButton(isEmpty);
-        schedulePromptUsageEstimate();
         renderContextProgress();
       }
 
@@ -3209,7 +3115,6 @@ export function getInputScript(): string {
       function clearPrompt() {
         closeCommandMenu();
         closeReferenceMenu(false);
-        resetPromptUsageEstimate();
         promptInput.innerHTML = '';
         promptShortcutController.deactivateMark();
         savedPromptRange = null;
@@ -3961,10 +3866,6 @@ export function getInputScript(): string {
           handleReferenceResourcesMessage(msg);
           return;
         }
-        if (msg.type === 'promptContextUsageEstimate') {
-          handlePromptContextUsageEstimate(msg);
-          return;
-        }
         if (msg.type !== 'insertFileReference' && msg.type !== 'insertDirectoryReference') return;
         if (
           window.keepseekInlineEditorControls &&
@@ -4005,7 +3906,6 @@ export function getInputScript(): string {
         showHistorySettingsDialog: showHistorySettingsDialog,
         showAboutDialog: showAboutDialog,
         onSkillDraftCreated: onSkillDraftCreated,
-        resetPromptUsageEstimate: resetPromptUsageEstimate,
         isPromptSubmittableEmpty: isPromptSubmittableEmpty,
         clearPrompt: clearPrompt
       };

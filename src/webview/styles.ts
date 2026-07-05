@@ -638,51 +638,6 @@ export function getStyles(): string {
       background: var(--vscode-list-hoverBackground);
     }
 
-    .usage-stats-bar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
-      align-items: center;
-      padding: 4px var(--keepseek-edge-padding) 3px;
-      border-top: 1px solid color-mix(in srgb, var(--vscode-panel-border) 55%, transparent);
-      border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border) 55%, transparent);
-      color: var(--vscode-descriptionForeground);
-      background: color-mix(in srgb, var(--vscode-sideBar-background) 92%, var(--vscode-editor-background));
-      font-size: 10.5px;
-      line-height: 1.35;
-    }
-
-    .usage-stat {
-      display: inline-flex;
-      align-items: baseline;
-      gap: 3px;
-      min-width: 0;
-      max-width: 100%;
-      white-space: nowrap;
-    }
-
-    .usage-stat-label {
-      color: var(--vscode-descriptionForeground);
-      opacity: 0.78;
-    }
-
-    .usage-stat-value {
-      color: var(--vscode-foreground);
-      font-variant-numeric: tabular-nums;
-    }
-
-    .usage-stat::after {
-      content: "·";
-      color: var(--vscode-descriptionForeground);
-      opacity: 0.45;
-      padding-left: 1px;
-    }
-
-    .usage-stat:last-child::after {
-      content: "";
-      padding-left: 0;
-    }
-
     .draft-bar {
       margin: 8px var(--keepseek-edge-padding) 0;
       padding: 10px;

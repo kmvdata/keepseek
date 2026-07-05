@@ -68,7 +68,6 @@ export type WebviewMessage =
   | { type: 'pickExternalFiles' }
   | { type: 'pickExternalFileReferences' }
   | { type: 'insertDroppedFileReferences'; files: DroppedFileReferenceInput[] }
-  | { type: 'estimatePromptContextUsage'; requestId: string; prompt: string; modelId: string; activeSessionId?: string; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'requestReferenceResources'; requestId: string }
   | { type: 'requestSkills' }
   | { type: 'useSkill'; skillId: string }

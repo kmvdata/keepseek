@@ -105,8 +105,6 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
       <div class="context-bar-inner" id="contextBar"></div>
     </div>
 
-    <section id="usageStatsBar" class="usage-stats-bar" aria-label="用量统计" data-i18n-aria-label="usageStatsTitle"></section>
-
     <section id="transcript" class="transcript">
       <div class="transcript-empty">
         <div class="transcript-empty-icon">&#x2726;</div>
