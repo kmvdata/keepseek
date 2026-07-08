@@ -1,0 +1,4 @@
+interface:
+  display_name: "KeepSeek Regression Auditor"
+  short_description: "Audit KeepSeek regressions before merge"
+  default_prompt: "Use $keepseek-regression-auditor to audit this KeepSeek change before merge."

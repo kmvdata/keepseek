@@ -1,0 +1,4 @@
+interface:
+  display_name: "KeepSeek Architecture Guardian"
+  short_description: "Protect KeepSeek module boundaries"
+  default_prompt: "Use $keepseek-architecture-guardian to plan and review a KeepSeek code change."

@@ -1,0 +1,25 @@
+{
+  "name": "keepseek-architecture-guardian",
+  "version": "0.1.0",
+  "description": "KeepSeek architecture guardrails for module boundaries, ownership, and safe repository maintenance.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "KeepSeek Architecture Guardian",
+    "shortDescription": "Protect KeepSeek module boundaries.",
+    "longDescription": "Use this plugin when planning, implementing, or reviewing KeepSeek changes that must respect the extension's architecture, ownership boundaries, and cross-module contracts.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Planning",
+      "Code Review",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use $keepseek-architecture-guardian to plan this KeepSeek change.",
+      "Use $keepseek-architecture-guardian to check the module boundaries."
+    ]
+  }
+}

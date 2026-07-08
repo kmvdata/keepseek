@@ -1,0 +1,25 @@
+{
+  "name": "keepseek-context-reference-maintainer",
+  "version": "0.1.0",
+  "description": "KeepSeek file, directory, drag-drop, authorization, prompt reference, and opener maintenance workflows.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "KeepSeek Context Reference Maintainer",
+    "shortDescription": "Maintain prompt reference flows.",
+    "longDescription": "Use this plugin for prompt file and directory references, Explorer and editor context insertion, drag-and-drop references, external authorization, reference expansion, and reference opening behavior.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Debugging",
+      "Code Review",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use $keepseek-context-reference-maintainer to fix this reference bug.",
+      "Use $keepseek-context-reference-maintainer to update reference syntax."
+    ]
+  }
+}

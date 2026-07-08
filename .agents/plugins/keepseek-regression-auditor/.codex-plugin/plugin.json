@@ -1,0 +1,25 @@
+{
+  "name": "keepseek-regression-auditor",
+  "version": "0.1.0",
+  "description": "KeepSeek regression review workflow for pre-merge audits, validation commands, and risk-focused findings.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "KeepSeek Regression Auditor",
+    "shortDescription": "Audit regressions before merge.",
+    "longDescription": "Use this plugin to review KeepSeek changes before merge, prioritize behavioral regressions, missing tests, architecture drift, validation failures, and manual test gaps.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Code Review",
+      "Testing",
+      "Analysis"
+    ],
+    "defaultPrompt": [
+      "Use $keepseek-regression-auditor to audit this KeepSeek change.",
+      "Use $keepseek-regression-auditor before I merge this branch."
+    ]
+  }
+}

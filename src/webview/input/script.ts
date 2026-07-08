@@ -1194,12 +1194,12 @@ export function getInputScript(): string {
         var usedPercent = clampNumber(metrics.contextPercent, 0, 100);
         var angle = usedPercent * 3.6;
         var title = t('usageStatsTitle');
-        var topLine = t('usageMetricContextPercent') + formatMetricPercent(usedPercent);
-        var tokensLine = t('usageMetricSessionCost') + formatMetricCost(
+        var contextLine = ['usageMetricContextPercent', formatMetricPercent(usedPercent)];
+        var costLine = ['usageMetricSessionCost', formatMetricCost(
           metrics.sessionUsageStats && metrics.sessionUsageStats.sessionCost,
           getUsageCurrency(metrics.sessionUsageStats, metrics.lastTurnUsage),
           hasUsageData(metrics.sessionUsageStats)
-        );
+        )];
         var items = [
           ['usageMetricTurnHit', formatMetricPercent(calculateHitRate(metrics.lastTurnUsage))],
           ['usageMetricAverageHit', formatMetricPercent(calculateHitRate(metrics.sessionUsageStats))],
@@ -1209,7 +1209,7 @@ export function getInputScript(): string {
           ['usageMetricTurnCount', metrics.turnCount > 0 ? formatMetricInteger(metrics.turnCount) : '-'],
           ['usageMetricCompactThreshold', formatMetricPercent(metrics.contextCompressionTriggerRatio * 100)]
         ];
-        var label = title + '。' + items.map(function(item) {
+        var label = title + '。' + [contextLine, costLine].concat(items).map(function(item) {
           return t(item[0]) + item[1];
         }).join('；');
 
@@ -1218,8 +1218,12 @@ export function getInputScript(): string {
         contextProgress.classList.toggle('is-danger', usedPercent >= metrics.contextCompactForceRatio * 100);
         contextProgress.setAttribute('aria-label', label);
         if (contextProgressTitle) { contextProgressTitle.textContent = title; }
-        if (contextProgressPercent) { contextProgressPercent.textContent = topLine; }
-        if (contextProgressTokens) { contextProgressTokens.textContent = tokensLine; }
+        if (contextProgressPercent) {
+          renderMetricLineInto(contextProgressPercent, t(contextLine[0]), contextLine[1]);
+        }
+        if (contextProgressTokens) {
+          renderMetricLineInto(contextProgressTokens, t(costLine[0]), costLine[1]);
+        }
         if (contextProgressBreakdown) {
           contextProgressBreakdown.innerHTML = '';
           items.forEach(function(item) {
@@ -1243,6 +1247,11 @@ export function getInputScript(): string {
 
         row.append(label, value);
         return row;
+      }
+
+      function renderMetricLineInto(container, labelText, valueText) {
+        container.innerHTML = '';
+        container.append(createMetricLine(labelText, valueText));
       }
 
       function normalizeUsageMetrics(value) {
@@ -1327,9 +1336,10 @@ export function getInputScript(): string {
         if (!Number.isFinite(number)) {
           return '-';
         }
-        return (currency || '¥') + number.toLocaleString(undefined, {
+        var truncated = Math.trunc(number * 100) / 100;
+        return (currency || '¥') + truncated.toLocaleString(undefined, {
           minimumFractionDigits: 2,
-          maximumFractionDigits: 6
+          maximumFractionDigits: 2
         });
       }
 

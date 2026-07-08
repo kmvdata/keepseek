@@ -1,0 +1,4 @@
+interface:
+  display_name: "KeepSeek Context Reference Maintainer"
+  short_description: "Maintain file and directory references"
+  default_prompt: "Use $keepseek-context-reference-maintainer to fix a KeepSeek reference expansion issue."

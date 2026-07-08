@@ -54,7 +54,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     usageMetricTurnTokens: '本次 tokens：',
     usageMetricTurnCost: '本次费用：',
     usageMetricTurnCount: '当前会话轮次：',
-    usageMetricContextPercent: '上下文百分比：',
+    usageMetricContextPercent: '上下文：',
     usageMetricCompactThreshold: '压缩阈值百分比：',
     usageMetricSessionCost: '会话费用：',
     usageMetricBalance: '余额：',

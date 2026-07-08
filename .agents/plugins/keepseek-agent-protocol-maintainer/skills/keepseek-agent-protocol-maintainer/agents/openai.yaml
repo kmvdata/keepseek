@@ -1,0 +1,4 @@
+interface:
+  display_name: "KeepSeek Agent Protocol Maintainer"
+  short_description: "Maintain KeepSeek agent protocol flows"
+  default_prompt: "Use $keepseek-agent-protocol-maintainer to change an AgentRunner or tool protocol flow."

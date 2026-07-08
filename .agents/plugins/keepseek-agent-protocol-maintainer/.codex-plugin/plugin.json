@@ -1,0 +1,25 @@
+{
+  "name": "keepseek-agent-protocol-maintainer",
+  "version": "0.1.0",
+  "description": "KeepSeek AgentRunner, protocol, tool-call, streaming, and context-compression maintenance workflows.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "KeepSeek Agent Protocol Maintainer",
+    "shortDescription": "Maintain agent protocol flows.",
+    "longDescription": "Use this plugin for changes in AgentRunner, model message construction, DeepSeek/OpenAI-compatible streaming, DSML fallback parsing, workspace tools, history projection, and context usage estimation.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Debugging",
+      "Code Review",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use $keepseek-agent-protocol-maintainer to change an AgentRunner flow.",
+      "Use $keepseek-agent-protocol-maintainer to review a tool-call bug."
+    ]
+  }
+}

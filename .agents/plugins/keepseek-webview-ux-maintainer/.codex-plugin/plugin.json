@@ -1,0 +1,25 @@
+{
+  "name": "keepseek-webview-ux-maintainer",
+  "version": "0.1.0",
+  "description": "KeepSeek webview UI, input, shortcuts, transcript, settings, and interaction maintenance workflows.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "KeepSeek Webview UX Maintainer",
+    "shortDescription": "Maintain webview interactions.",
+    "longDescription": "Use this plugin for KeepSeek webview work across transcript rendering, settings UI, prompt input, rich-text shortcuts, drag and drop, command menus, styling, accessibility, and message wiring.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "UX",
+      "Debugging",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use $keepseek-webview-ux-maintainer to improve this webview flow.",
+      "Use $keepseek-webview-ux-maintainer to review a prompt input change."
+    ]
+  }
+}

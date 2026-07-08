@@ -1,0 +1,68 @@
+{
+  "name": "personal",
+  "interface": {
+    "displayName": "KeepSeek Maintenance Agents"
+  },
+  "plugins": [
+    {
+      "name": "keepseek-architecture-guardian",
+      "source": {
+        "source": "local",
+        "path": "./plugins/keepseek-architecture-guardian"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "keepseek-agent-protocol-maintainer",
+      "source": {
+        "source": "local",
+        "path": "./plugins/keepseek-agent-protocol-maintainer"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "keepseek-context-reference-maintainer",
+      "source": {
+        "source": "local",
+        "path": "./plugins/keepseek-context-reference-maintainer"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "keepseek-webview-ux-maintainer",
+      "source": {
+        "source": "local",
+        "path": "./plugins/keepseek-webview-ux-maintainer"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "keepseek-regression-auditor",
+      "source": {
+        "source": "local",
+        "path": "./plugins/keepseek-regression-auditor"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

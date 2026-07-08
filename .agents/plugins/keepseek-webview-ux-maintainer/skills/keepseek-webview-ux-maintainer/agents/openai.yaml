@@ -1,0 +1,4 @@
+interface:
+  display_name: "KeepSeek Webview UX Maintainer"
+  short_description: "Maintain KeepSeek webview interactions"
+  default_prompt: "Use $keepseek-webview-ux-maintainer to improve a KeepSeek webview interaction."
