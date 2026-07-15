@@ -2,7 +2,7 @@
 
 本文面向 KeepSeek 的维护者和需要理解运行机制的使用者，梳理 KeepSeek 在重构后作为 VS Code 侧边栏 Agent 的主要工作流程、核心功能边界和关键安全规则。本文以当前源码为准，不沿用旧版假设。
 
-KeepSeek 的本质是一个 VS Code 扩展内的轻量 coding agent runtime。扩展端负责会话、上下文、引用展开、本地只读工具、模型请求循环、预算控制、trace 记录和 DraftEdit 待确认写入；云端模型负责语言理解、推理、工具选择、参数生成和最终回复生成。
+KeepSeek 的本质是一个 VS Code 扩展内的轻量 coding agent runtime。扩展端负责会话、上下文、引用展开、本地只读工具、模型请求循环、自动档位预算控制、trace 记录和 DraftEdit 待确认写入；云端模型负责语言理解、推理、工具选择、参数生成和最终回复生成。
 
 ## 1. 总体架构
 
@@ -12,7 +12,7 @@ KeepSeek 的 Agent 链路可以分成四层。
 |---|---|---|
 | Webview 表现层 | `src/webview/*`、`src/webview/input/*` | 输入框、消息列表、引用 chip、设置弹窗、活动状态文案、发送/停止交互 |
 | Provider 编排层 | `src/provider/KeepseekChatViewProvider.ts` | 接收 Webview 消息、维护 busy 状态、会话接线、引用授权、调用业务服务和 Agent Runtime |
-| Agent Runtime 层 | `src/agent/agentRequestCoordinator.ts`、`src/agent/runner.ts`、`src/agent/protocol.ts`、`src/agent/historyProjection.ts`、`src/agent/historyCompressor.ts`、`src/agent/contextUsage.ts`、`src/agent/deepseek/*` | 构造请求、上下文压缩与历史投影、上下文用量估算、流式调用 DeepSeek/OpenAI-compatible API、执行工具循环、预算控制、结果整理 |
+| Agent Runtime 层 | `src/agent/agentRequestCoordinator.ts`、`src/agent/runner.ts`、`src/agent/protocol.ts`、`src/agent/historyProjection.ts`、`src/agent/historyCompressor.ts`、`src/agent/contextUsage.ts`、`src/agent/deepseek/*` | 构造请求、上下文压缩与历史投影、上下文用量估算、流式调用 DeepSeek/OpenAI-compatible API、执行工具循环、自动档位预算控制、结果整理 |
 | 本地能力层 | `src/agent/tools/workspaceTools.ts`、`src/edits/*`、`src/context/*`、`src/sessions/*` | 只读工作区工具、引用展开、DraftEdit 安全写入、上下文文件、会话和压缩状态持久化 |
 
 几个边界很重要：
@@ -31,11 +31,12 @@ KeepSeek 的 Agent 链路可以分成四层。
 用户在输入框中输入自然语言，也可以通过这些方式插入上下文引用：
 
 - 当前编辑器文件或选区。
-- Explorer 右键添加文件。
-- Explorer 右键添加目录。
+- Explorer 右键 `KeepSeek: Add File to Chat` 添加文件，支持多选去重。
+- Explorer 右键 `KeepSeek: Add Folder to Chat` 添加目录。
 - 拖拽文件到输入框。
 - 终端、输出、Debug Console 选区落盘后引用。
 - `@` 文件/目录补全。
+- `$` Skill 引用，Skill 可来自工作区 `.agents`、仓库 Codex 插件目录、用户 `~/.codex/skills` 或用户 `~/.codex/plugins`。
 
 Webview 内部使用富文本输入框显示引用 chip。发送时，`serializePrompt()` 会把 DOM 里的引用还原成可解析的文本格式：
 
@@ -559,14 +560,13 @@ trace level 控制 payload 细节：
 - 工具调用循环。
 - 只读工作区工具。
 - 搜索和范围读取。
-- 工具预算和结果 shaping。
+- 自动模型 / Thinking 档位预算和工具结果 shaping。
+- 历史投影、会话摘要和后台上下文压缩刷新。
 - DraftEdit 安全写入。
 - trace 和 usage 记录。
 
 仍未覆盖的方向：
 
-- Session summary。
-- 模型辅助摘要。
 - 队列 prompt。
 - MCP。
 - shell/test/lint/git 工具。

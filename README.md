@@ -39,7 +39,7 @@ English version is available below: [English](#keepseek-english).
 - 运行中止：Agent 正在推理或调用工具时，可以从输入区停止本次执行。
 - 回复复制：Assistant 回复支持一键复制，便于保存或转发排查结果。
 - 编辑器快捷键：底部输入框和消息编辑框共享 Emacs/macOS 风格文本快捷键。
-- KeepSeek Skills：从工作区 `.agents` 和用户 `~/.codex/skills` 发现可复用工作流，支持选择启用、`$` 引用和创建 workspace skill 草案。
+- KeepSeek Skills：从工作区 `.agents`、仓库 Codex 插件目录和用户 `~/.codex/skills` / `~/.codex/plugins` 发现可复用工作流，支持选择启用、`$` 引用和创建 workspace skill 草案。
 - 低成本工作区工具：Agent 可先搜索或列目录，再按行段读取文件，避免为了定位问题读取整份大文件。
 - 用量统计：显示本次/会话 tokens、prompt cache 命中率、估算费用、上下文百分比和 DeepSeek 余额。
 - 上下文压缩：长对话会使用"历史投影 + 会话摘要 + 关键消息保护 + 文件引用外化"组织模型输入，减少重复发送旧历史和展开后的大段文件正文。
@@ -68,7 +68,7 @@ English version is available below: [English](#keepseek-english).
 
 ## Skills 与用量统计
 
-- Skills 可以来自当前工作区的 `.agents` 或用户目录下的 `~/.codex/skills`。工作区 Skill 会遵守 VS Code Workspace Trust；不可用或被禁用的 Skill 不会进入模型上下文。
+- Skills 可以来自当前工作区的 `.agents`、仓库内 `.agents/plugins` 或 `plugins` 目录、用户目录下的 `~/.codex/skills` 或 `~/.codex/plugins`。工作区 Skill 会遵守 VS Code Workspace Trust；不可用或被禁用的 Skill 不会进入模型上下文。
 - 输入框支持 `/skills` 打开 Skills 列表，也支持 `/create-skill` 创建 `.agents/skills/<name>/SKILL.md` 草案。Skill 内容会作为当前请求上下文注入，但不能覆盖 KeepSeek 的安全规则。
 - 当 prompt 中插入 `$` Skill 引用时，KeepSeek 会在发送前展开对应 `SKILL.md`，并保留引用来源，便于模型理解本轮需要遵循的工作流。
 - 用量统计来自上游返回的 usage 数据和本地计价配置，显示本次/会话 tokens、cache hit/miss、估算费用、上下文百分比、压缩阈值和 DeepSeek 余额。
@@ -100,11 +100,11 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 
 ## 右键菜单
 
-- 编辑器选区：`KeepSeek: 添加到上下文`
-- Explorer 文件：`KeepSeek: Add Explorer File to Chat`
-- Explorer 目录：`KeepSeek: Add Explorer Folder to Chat`
-- 终端选区：`KeepSeek: 添加到上下文`
-- Output 面板选区：`KeepSeek: 添加到上下文`
+- 编辑器选区：`KeepSeek: Add Selection to Chat`
+- Explorer 文件：`KeepSeek: Add File to Chat`
+- Explorer 目录：`KeepSeek: Add Folder to Chat`
+- 终端选区：`KeepSeek: Add Terminal Selection to Chat`
+- Output 面板选区：使用编辑器选区入口 `KeepSeek: Add Selection to Chat`
 
 调试控制台可以使用 `Cmd+L` / `Ctrl+L` 添加当前选区。VS Code 对 Debug Console 原生右键菜单的扩展点较有限，因此快捷键是当前最稳定的入口。
 
@@ -159,7 +159,7 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 从 VSIX 安装：
 
 ```bash
-code --install-extension keepseek-0.1.3.vsix
+code --install-extension keepseek-0.1.6.vsix
 ```
 
 VS Code 1.127.0 可能输出 DEP0169 warning，这是 VS Code CLI 内部警告，安装成功不受影响。
@@ -205,7 +205,7 @@ KeepSeek: Open Agent Chat
 
 ## 发布准备
 
-当前发布版本为 `0.1.3`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.1.3`，发布标签可以使用 `v0.1.3`。
+当前发布版本为 `0.1.6`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.1.6`，发布标签可以使用 `v0.1.6`。
 
 生成 VSIX：
 
@@ -296,7 +296,7 @@ The current release connects to DeepSeek OpenAI-compatible Chat Completions by d
 - Abort control for stopping an in-progress Agent run.
 - One-click copy for assistant replies.
 - Shared Emacs/macOS-style text shortcuts in the prompt composer and message edit boxes.
-- KeepSeek Skills discovered from workspace `.agents` and user `~/.codex/skills`, with active selection, `$` references, and workspace skill draft creation.
+- KeepSeek Skills discovered from workspace `.agents`, repository Codex plugin folders, and user `~/.codex/skills` / `~/.codex/plugins`, with active selection, `$` references, and workspace skill draft creation.
 - Low-cost workspace tools so the Agent can search or list first, then read targeted file ranges instead of full large files.
 - Usage stats for turn/session tokens, prompt-cache hit rate, estimated cost, context percentage, and DeepSeek balance.
 - Context compression that projects long chat history into summaries, protected messages, recent turns, and file-reference hints instead of repeatedly sending old expanded file bodies.
@@ -325,7 +325,7 @@ This usually reduces token pressure in long sessions and avoids losing the origi
 
 ## Skills And Usage
 
-- Skills can come from workspace `.agents` or user `~/.codex/skills`. Workspace Skills respect VS Code Workspace Trust; unavailable or disabled Skills are not added to model context.
+- Skills can come from workspace `.agents`, repository `.agents/plugins` or `plugins` folders, user `~/.codex/skills`, or user `~/.codex/plugins`. Workspace Skills respect VS Code Workspace Trust; unavailable or disabled Skills are not added to model context.
 - Use `/skills` to browse Skills or `/create-skill` to create a `.agents/skills/<name>/SKILL.md` draft. Skill content is injected as current-run context and cannot override KeepSeek safety rules.
 - `$` Skill references in the prompt are expanded before send, preserving their source so the model can follow the requested workflow for that run.
 - Usage stats combine upstream usage data with local pricing config to show turn/session tokens, cache hit/miss, estimated cost, context percentage, compaction threshold, and DeepSeek balance.
@@ -350,6 +350,16 @@ KeepSeek is built around explicit context. You decide which files, selections, a
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | Explorer is focused on a directory | `keepseek.addExplorerDirectoryToContext` |
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | Terminal text is selected | `keepseek.addTerminalSelectionToContext` |
 | `Cmd+L` (Mac) / `Ctrl+L` (Windows/Linux) | Debug Console is focused | `keepseek.addDebugConsoleSelectionToContext` |
+
+## Context Menus
+
+- Editor selection: `KeepSeek: Add Selection to Chat`
+- Explorer file: `KeepSeek: Add File to Chat`
+- Explorer folder: `KeepSeek: Add Folder to Chat`
+- Terminal selection: `KeepSeek: Add Terminal Selection to Chat`
+- Output panel selection: use the editor-selection entry `KeepSeek: Add Selection to Chat`
+
+Debug Console selection capture is most reliable through `Cmd+L` / `Ctrl+L` because VS Code exposes fewer native context-menu extension points there.
 
 ## Configuration
 

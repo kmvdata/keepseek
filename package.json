@@ -2,7 +2,7 @@
   "name": "keepseek",
   "displayName": "KeepSeek",
   "description": "AI-powered coding agent for VS Code",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "keepseek",
   "author": "kmvdata",
   "license": "MIT",
