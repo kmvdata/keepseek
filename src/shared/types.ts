@@ -161,7 +161,6 @@ export interface ContextCompressionState {
 }
 
 export interface ContextProjectionMetadata {
-  compressionEnabled: boolean;
   usedSummary: boolean;
   summaryCount: number;
   protectedMessageCount: number;

@@ -103,6 +103,8 @@ export interface DeepSeekChatRequestBody {
   tools?: DeepSeekFunctionTool[];
   tool_choice?: 'auto' | 'none';
   max_tokens?: number;
+  temperature?: number;
+  top_p?: number;
   stream_options?: {
     include_usage?: boolean;
   };

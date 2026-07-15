@@ -1,4 +1,3 @@
-import { AGENT_HISTORY_MESSAGE_LIMIT } from '../shared/config';
 import { DeepSeekFunctionTool, DeepSeekMessage } from './deepseek/types';
 import { formatBytes } from '../shared/format';
 import type { KeepseekLanguage } from '../shared/i18n';
@@ -16,6 +15,7 @@ export const READ_WORKSPACE_FILE_RANGE_TOOL_NAME = 'keepseek_read_workspace_file
 
 const MAX_ACTIVE_SKILL_CONTENT_CHARS = 24000;
 const MAX_ACTIVE_SKILLS_TOTAL_CHARS = 72000;
+const UNPROJECTED_HISTORY_MESSAGE_LIMIT = 24;
 const CORE_AGENT_TOOL_NAMES = [
   CREATE_DRAFT_EDIT_TOOL_NAME,
   LIST_WORKSPACE_FILES_TOOL_NAME,
@@ -59,14 +59,11 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
     });
   }
 
-  const history = (input.projection?.history ?? input.history)
+  const history = (input.projection?.history ?? input.history.slice(-UNPROJECTED_HISTORY_MESSAGE_LIMIT))
     .filter((message) => message.role === 'user' || message.role === 'assistant');
-  const recentHistory = input.projection && !input.projection.useLegacyHistoryLimit
-    ? history
-    : history.slice(-AGENT_HISTORY_MESSAGE_LIMIT);
-  const currentPromptMessage = findCurrentPromptMessage(recentHistory, input.prompt);
+  const currentPromptMessage = findCurrentPromptMessage(history, input.prompt);
 
-  for (const message of recentHistory) {
+  for (const message of history) {
     const content = currentPromptMessage?.id === message.id
       ? currentPromptContent
       : getMessageContentForAgent(message);

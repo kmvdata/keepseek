@@ -40,12 +40,6 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
           <span class="command-row-description" data-i18n="settingsApiKeyDescription">API Key 和 Base URL</span>
         </span>
       </button>
-      <button id="settingsAgentBudgetMenuItem" type="button" class="command-row settings-menu-row">
-        <span class="command-row-main">
-          <span class="command-row-title" data-i18n="settingsAgentBudgetMenuTitle">Agent 执行预算</span>
-          <span class="command-row-description" data-i18n="settingsAgentBudgetMenuDescription">输出 KB、工具轮次和运行时间上限</span>
-        </span>
-      </button>
       <button id="settingsHistoryMenuItem" type="button" class="command-row settings-menu-row">
         <span class="command-row-main">
           <span class="command-row-title" data-i18n="settingsHistoryMenuTitle">历史会话</span>

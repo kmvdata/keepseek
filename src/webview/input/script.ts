@@ -3151,17 +3151,6 @@ export function getInputScript(): string {
       var settingsApiKey = document.getElementById('settingsApiKey');
       var settingsApiKeyVisibilityBtn = document.getElementById('settingsApiKeyVisibilityBtn');
       var settingsBaseUrl = document.getElementById('settingsBaseUrl');
-      var agentBudgetOverlay = document.getElementById('agentBudgetDialogOverlay');
-      var agentBudgetMaxTokens = document.getElementById('agentBudgetMaxTokens');
-      var agentBudgetMaxToolIterations = document.getElementById('agentBudgetMaxToolIterations');
-      var agentBudgetMaxToolCalls = document.getElementById('agentBudgetMaxToolCalls');
-      var agentBudgetMaxRunSeconds = document.getElementById('agentBudgetMaxRunSeconds');
-      var agentBudgetStreamIdleSeconds = document.getElementById('agentBudgetStreamIdleSeconds');
-      var agentBudgetToolResultTokenBudget = document.getElementById('agentBudgetToolResultTokenBudget');
-      var agentBudgetContextCompressionEnabled = document.getElementById('agentBudgetContextCompressionEnabled');
-      var agentBudgetContextKeepRecentTurns = document.getElementById('agentBudgetContextKeepRecentTurns');
-      var agentBudgetContextCompressionTriggerPercent = document.getElementById('agentBudgetContextCompressionTriggerPercent');
-      var agentBudgetContextSummaryBudget = document.getElementById('agentBudgetContextSummaryBudget');
       var historySettingsOverlay = document.getElementById('historySettingsDialogOverlay');
       var historyRetentionDaysInput = document.getElementById('historyRetentionDaysInput');
       var aboutOverlay = document.getElementById('aboutDialogOverlay');
@@ -3180,35 +3169,12 @@ export function getInputScript(): string {
       var settingsClearApiKeyBtn = document.getElementById('settingsClearApiKeyBtn');
       var settingsSaveBtn = document.getElementById('settingsSaveBtn');
       var settingsCancelBtn = document.getElementById('settingsCancelBtn');
-      var agentBudgetSaveBtn = document.getElementById('agentBudgetSaveBtn');
-      var agentBudgetCancelBtn = document.getElementById('agentBudgetCancelBtn');
       var historySettingsSaveBtn = document.getElementById('historySettingsSaveBtn');
       var historySettingsCancelBtn = document.getElementById('historySettingsCancelBtn');
       var aboutCloseBtn = document.getElementById('aboutCloseBtn');
       var createSkillCreateBtn = document.getElementById('createSkillCreateBtn');
       var createSkillCancelBtn = document.getElementById('createSkillCancelBtn');
       var apiKeyVisible = false;
-      var defaultMaxTokens = 64000;
-      var maxGenerationTokens = 384000;
-      var tokensPerBudgetKb = 1000;
-      var defaultMaxToolIterations = 8;
-      var defaultMaxToolCalls = 24;
-      var defaultMaxRunMs = 600000;
-      var defaultMaxRunSeconds = 600;
-      var defaultStreamIdleTimeoutMs = 0;
-      var defaultStreamIdleSeconds = 0;
-      var defaultToolResultTokenBudget = 0;
-      var maxToolResultTokenBudget = 1000000;
-      var defaultContextCompressionEnabled = true;
-      var defaultContextKeepRecentTurns = 12;
-      var maxContextKeepRecentTurns = 64;
-      var defaultContextCompressionTriggerRatio = 0.8;
-      var defaultContextCompressionTriggerPercent = 80;
-      var minContextCompressionTriggerPercent = 10;
-      var maxContextCompressionTriggerPercent = 95;
-      var defaultContextSummaryBudgetTokens = 3000;
-      var minContextSummaryBudgetTokens = 500;
-      var maxContextSummaryBudgetTokens = 100000;
       var defaultHistoryRetentionDays = 7;
       var maxHistoryRetentionDays = 60;
 
@@ -3242,52 +3208,6 @@ export function getInputScript(): string {
         setApiKeyVisible(false, false);
         settingsOverlay.classList.remove('hidden');
         settingsApiKey.focus();
-      }
-
-      function showAgentBudgetDialog(settings) {
-        if (!agentBudgetOverlay) { return; }
-        var values = settings && typeof settings === 'object' ? settings : {};
-        if (agentBudgetMaxTokens) {
-          agentBudgetMaxTokens.value = formatBudgetKbFromTokens(normalizeMaxTokens(values.maxTokens));
-        }
-        if (agentBudgetMaxToolIterations) {
-          agentBudgetMaxToolIterations.value = String(normalizeIntegerInRange(values.maxToolIterations, 0, 64, defaultMaxToolIterations));
-        }
-        if (agentBudgetMaxToolCalls) {
-          agentBudgetMaxToolCalls.value = String(normalizeIntegerInRange(values.maxToolCalls, 0, 256, defaultMaxToolCalls));
-        }
-        if (agentBudgetMaxRunSeconds) {
-          agentBudgetMaxRunSeconds.value = String(normalizeRunMsToSeconds(values.maxRunMs));
-        }
-        if (agentBudgetStreamIdleSeconds) {
-          agentBudgetStreamIdleSeconds.value = String(normalizeStreamIdleMsToSeconds(values.streamIdleTimeoutMs));
-        }
-        if (agentBudgetToolResultTokenBudget) {
-          agentBudgetToolResultTokenBudget.value = formatBudgetKbFromTokens(normalizeIntegerInRange(values.toolResultTokenBudget, 0, maxToolResultTokenBudget, defaultToolResultTokenBudget));
-        }
-        if (agentBudgetContextCompressionEnabled) {
-          agentBudgetContextCompressionEnabled.checked = typeof values.contextCompressionEnabled === 'boolean'
-            ? values.contextCompressionEnabled
-            : defaultContextCompressionEnabled;
-        }
-        if (agentBudgetContextKeepRecentTurns) {
-          agentBudgetContextKeepRecentTurns.value = String(normalizeIntegerInRange(values.contextKeepRecentTurns, 1, maxContextKeepRecentTurns, defaultContextKeepRecentTurns));
-        }
-        if (agentBudgetContextCompressionTriggerPercent) {
-          agentBudgetContextCompressionTriggerPercent.value = formatCompactNumber(
-            ratioToPercent(values.contextCompressionTriggerRatio)
-          );
-        }
-        if (agentBudgetContextSummaryBudget) {
-          agentBudgetContextSummaryBudget.value = formatBudgetKbFromTokens(
-            normalizeIntegerInRange(values.contextSummaryBudgetTokens, minContextSummaryBudgetTokens, maxContextSummaryBudgetTokens, defaultContextSummaryBudgetTokens)
-          );
-        }
-        syncContextCompressionControls();
-        agentBudgetOverlay.classList.remove('hidden');
-        if (agentBudgetMaxTokens) {
-          agentBudgetMaxTokens.focus();
-        }
       }
 
       function showHistorySettingsDialog(settings) {
@@ -3362,85 +3282,6 @@ export function getInputScript(): string {
         }
       }
 
-      function normalizeMaxTokens(value) {
-        return normalizeIntegerInRange(value, 0, maxGenerationTokens, defaultMaxTokens);
-      }
-
-      function normalizeMaxTokensKb(value) {
-        return normalizeNumberInRange(value, 0, maxGenerationTokens / tokensPerBudgetKb, defaultMaxTokens / tokensPerBudgetKb);
-      }
-
-      function normalizeToolResultBudgetKb(value) {
-        return normalizeNumberInRange(value, 0, maxToolResultTokenBudget / tokensPerBudgetKb, defaultToolResultTokenBudget / tokensPerBudgetKb);
-      }
-
-      function normalizeContextSummaryBudgetKb(value) {
-        return normalizeNumberInRange(
-          value,
-          minContextSummaryBudgetTokens / tokensPerBudgetKb,
-          maxContextSummaryBudgetTokens / tokensPerBudgetKb,
-          defaultContextSummaryBudgetTokens / tokensPerBudgetKb
-        );
-      }
-
-      function normalizeContextCompressionTriggerPercent(value) {
-        return normalizeNumberInRange(
-          value,
-          minContextCompressionTriggerPercent,
-          maxContextCompressionTriggerPercent,
-          defaultContextCompressionTriggerPercent
-        );
-      }
-
-      function ratioToPercent(value) {
-        var ratio = normalizeNumberInRange(value, 0.1, 0.95, defaultContextCompressionTriggerRatio);
-        return Math.round(ratio * 10000) / 100;
-      }
-
-      function percentToRatio(value) {
-        var percent = normalizeContextCompressionTriggerPercent(value);
-        return Math.round(percent * 100) / 10000;
-      }
-
-      function budgetKbToTokens(value) {
-        return Math.round(Number(value) * tokensPerBudgetKb);
-      }
-
-      function formatCompactNumber(value) {
-        var number = Number(value);
-        if (!Number.isFinite(number)) {
-          return '0';
-        }
-        var rounded = Math.round(number * 100) / 100;
-        return String(rounded).replace(/\\\\.00$/u, '').replace(/(\\\\.\\\\d)0$/u, '$1');
-      }
-
-      function formatBudgetKbFromTokens(value) {
-        var kb = Number(value) / tokensPerBudgetKb;
-        if (!Number.isFinite(kb)) {
-          return '0';
-        }
-        return formatCompactNumber(kb);
-      }
-
-      function normalizeRunMsToSeconds(value) {
-        var normalizedMs = normalizeIntegerInRange(value, 0, 3600000, defaultMaxRunMs);
-        return normalizeIntegerInRange(Math.round(normalizedMs / 1000), 0, 3600, defaultMaxRunSeconds);
-      }
-
-      function normalizeStreamIdleMsToSeconds(value) {
-        var normalizedMs = normalizeIntegerInRange(value, 0, 3600000, defaultStreamIdleTimeoutMs);
-        return normalizeIntegerInRange(Math.round(normalizedMs / 1000), 0, 3600, defaultStreamIdleSeconds);
-      }
-
-      function normalizeNumberInRange(value, min, max, fallback) {
-        var number = Number(value);
-        if (!Number.isFinite(number)) {
-          return fallback;
-        }
-        return Math.min(max, Math.max(min, number));
-      }
-
       function normalizeIntegerInRange(value, min, max, fallback) {
         var number = Number(value);
         if (!Number.isFinite(number)) {
@@ -3449,28 +3290,9 @@ export function getInputScript(): string {
         return Math.min(max, Math.max(min, Math.floor(number)));
       }
 
-      function syncContextCompressionControls() {
-        var enabled = !agentBudgetContextCompressionEnabled || agentBudgetContextCompressionEnabled.checked;
-        [
-          agentBudgetContextKeepRecentTurns,
-          agentBudgetContextCompressionTriggerPercent,
-          agentBudgetContextSummaryBudget
-        ].forEach(function(input) {
-          if (input) {
-            input.disabled = !enabled;
-          }
-        });
-      }
-
       function hideSettingsDialog() {
         if (!settingsOverlay) { return; }
         settingsOverlay.classList.add('hidden');
-        promptInput.focus();
-      }
-
-      function hideAgentBudgetDialog() {
-        if (!agentBudgetOverlay) { return; }
-        agentBudgetOverlay.classList.add('hidden');
         promptInput.focus();
       }
 
@@ -3558,93 +3380,6 @@ export function getInputScript(): string {
         });
       }
 
-      if (agentBudgetSaveBtn) {
-        agentBudgetSaveBtn.addEventListener('click', function() {
-          var maxTokensKb = normalizeMaxTokensKb(agentBudgetMaxTokens ? agentBudgetMaxTokens.value : defaultMaxTokens / tokensPerBudgetKb);
-          var maxTokens = normalizeMaxTokens(budgetKbToTokens(maxTokensKb));
-          var maxToolIterations = normalizeIntegerInRange(agentBudgetMaxToolIterations ? agentBudgetMaxToolIterations.value : defaultMaxToolIterations, 0, 64, defaultMaxToolIterations);
-          var maxToolCalls = normalizeIntegerInRange(agentBudgetMaxToolCalls ? agentBudgetMaxToolCalls.value : defaultMaxToolCalls, 0, 256, defaultMaxToolCalls);
-          var maxRunSeconds = normalizeIntegerInRange(agentBudgetMaxRunSeconds ? agentBudgetMaxRunSeconds.value : defaultMaxRunSeconds, 0, 3600, defaultMaxRunSeconds);
-          var maxRunMs = maxRunSeconds * 1000;
-          var streamIdleSeconds = normalizeIntegerInRange(agentBudgetStreamIdleSeconds ? agentBudgetStreamIdleSeconds.value : defaultStreamIdleSeconds, 0, 3600, defaultStreamIdleSeconds);
-          var streamIdleTimeoutMs = streamIdleSeconds * 1000;
-          var toolResultBudgetKb = normalizeToolResultBudgetKb(agentBudgetToolResultTokenBudget ? agentBudgetToolResultTokenBudget.value : defaultToolResultTokenBudget / tokensPerBudgetKb);
-          var toolResultTokenBudget = normalizeIntegerInRange(budgetKbToTokens(toolResultBudgetKb), 0, maxToolResultTokenBudget, defaultToolResultTokenBudget);
-          var contextCompressionEnabled = agentBudgetContextCompressionEnabled
-            ? agentBudgetContextCompressionEnabled.checked
-            : defaultContextCompressionEnabled;
-          var contextKeepRecentTurns = normalizeIntegerInRange(
-            agentBudgetContextKeepRecentTurns ? agentBudgetContextKeepRecentTurns.value : defaultContextKeepRecentTurns,
-            1,
-            maxContextKeepRecentTurns,
-            defaultContextKeepRecentTurns
-          );
-          var contextCompressionTriggerPercent = normalizeContextCompressionTriggerPercent(
-            agentBudgetContextCompressionTriggerPercent ? agentBudgetContextCompressionTriggerPercent.value : defaultContextCompressionTriggerPercent
-          );
-          var contextCompressionTriggerRatio = percentToRatio(contextCompressionTriggerPercent);
-          var contextSummaryBudgetKb = normalizeContextSummaryBudgetKb(
-            agentBudgetContextSummaryBudget ? agentBudgetContextSummaryBudget.value : defaultContextSummaryBudgetTokens / tokensPerBudgetKb
-          );
-          var contextSummaryBudgetTokens = normalizeIntegerInRange(
-            budgetKbToTokens(contextSummaryBudgetKb),
-            minContextSummaryBudgetTokens,
-            maxContextSummaryBudgetTokens,
-            defaultContextSummaryBudgetTokens
-          );
-          if (agentBudgetMaxTokens) {
-            agentBudgetMaxTokens.value = formatBudgetKbFromTokens(maxTokens);
-          }
-          if (agentBudgetMaxToolIterations) {
-            agentBudgetMaxToolIterations.value = String(maxToolIterations);
-          }
-          if (agentBudgetMaxToolCalls) {
-            agentBudgetMaxToolCalls.value = String(maxToolCalls);
-          }
-          if (agentBudgetMaxRunSeconds) {
-            agentBudgetMaxRunSeconds.value = String(maxRunSeconds);
-          }
-          if (agentBudgetStreamIdleSeconds) {
-            agentBudgetStreamIdleSeconds.value = String(streamIdleSeconds);
-          }
-          if (agentBudgetToolResultTokenBudget) {
-            agentBudgetToolResultTokenBudget.value = formatBudgetKbFromTokens(toolResultTokenBudget);
-          }
-          if (agentBudgetContextCompressionEnabled) {
-            agentBudgetContextCompressionEnabled.checked = contextCompressionEnabled;
-          }
-          if (agentBudgetContextKeepRecentTurns) {
-            agentBudgetContextKeepRecentTurns.value = String(contextKeepRecentTurns);
-          }
-          if (agentBudgetContextCompressionTriggerPercent) {
-            agentBudgetContextCompressionTriggerPercent.value = formatCompactNumber(contextCompressionTriggerPercent);
-          }
-          if (agentBudgetContextSummaryBudget) {
-            agentBudgetContextSummaryBudget.value = formatBudgetKbFromTokens(contextSummaryBudgetTokens);
-          }
-          syncContextCompressionControls();
-          vscode.postMessage({
-            type: 'saveAgentBudgetSettings',
-            maxTokens: maxTokens,
-            maxToolIterations: maxToolIterations,
-            maxToolCalls: maxToolCalls,
-            maxRunMs: maxRunMs,
-            streamIdleTimeoutMs: streamIdleTimeoutMs,
-            toolResultTokenBudget: toolResultTokenBudget,
-            contextCompressionEnabled: contextCompressionEnabled,
-            contextKeepRecentTurns: contextKeepRecentTurns,
-            contextCompressionTriggerRatio: contextCompressionTriggerRatio,
-            contextSummaryBudgetTokens: contextSummaryBudgetTokens
-          });
-          setComposerStatus(t('agentBudgetSettingsSaved'));
-          hideAgentBudgetDialog();
-        });
-      }
-
-      if (agentBudgetContextCompressionEnabled) {
-        agentBudgetContextCompressionEnabled.addEventListener('change', syncContextCompressionControls);
-      }
-
       if (historySettingsSaveBtn) {
         historySettingsSaveBtn.addEventListener('click', function() {
           var historyRetentionDays = normalizeIntegerInRange(
@@ -3686,12 +3421,6 @@ export function getInputScript(): string {
       if (settingsCancelBtn) {
         settingsCancelBtn.addEventListener('click', function() {
           hideSettingsDialog();
-        });
-      }
-
-      if (agentBudgetCancelBtn) {
-        agentBudgetCancelBtn.addEventListener('click', function() {
-          hideAgentBudgetDialog();
         });
       }
 
@@ -3742,24 +3471,6 @@ export function getInputScript(): string {
           } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             if (settingsSaveBtn) { settingsSaveBtn.click(); }
-          }
-        });
-      }
-
-      if (agentBudgetOverlay) {
-        agentBudgetOverlay.addEventListener('click', function(event) {
-          if (event.target === agentBudgetOverlay) {
-            hideAgentBudgetDialog();
-          }
-        });
-
-        agentBudgetOverlay.addEventListener('keydown', function(event) {
-          if (event.key === 'Escape') {
-            event.preventDefault();
-            hideAgentBudgetDialog();
-          } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-            event.preventDefault();
-            if (agentBudgetSaveBtn) { agentBudgetSaveBtn.click(); }
           }
         });
       }
@@ -3910,7 +3621,6 @@ export function getInputScript(): string {
       window.keepseekInputControls = {
         render: renderInputControls,
         showSettingsDialog: showSettingsDialog,
-        showAgentBudgetDialog: showAgentBudgetDialog,
         showHistorySettingsDialog: showHistorySettingsDialog,
         showAboutDialog: showAboutDialog,
         onSkillDraftCreated: onSkillDraftCreated,

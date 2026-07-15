@@ -1,9 +1,5 @@
-import {
-  AGENT_HISTORY_MESSAGE_LIMIT,
-  type ContextCompressionSettings,
-  getConfiguredContextCompressionSettings
-} from '../shared/config';
 import type { KeepseekLanguage } from '../shared/i18n';
+import type { ContextCompressionSettings } from '../shared/modelProfiles';
 import type {
   ChatMessage,
   ChatMessageContextMeta,
@@ -20,13 +16,12 @@ export interface HistoryProjectionInput {
   prompt: string;
   language: KeepseekLanguage;
   contextCompression?: ContextCompressionState;
-  settings?: ContextCompressionSettings;
+  settings: ContextCompressionSettings;
 }
 
 export interface HistoryProjectionResult {
   history: ChatMessage[];
   syntheticSystemMessages: string[];
-  useLegacyHistoryLimit: boolean;
   metadata: ContextProjectionMetadata;
   protectedMessageIds: string[];
   recentMessageIds: string[];
@@ -48,28 +43,8 @@ const STACK_FRAME_PATTERN = /(?:^\s*at\s+\S+|\n\s*at\s+\S+|\n\s*File\s+"[^"]+",\
 const DRAFT_RESULT_PATTERN = /(?:Draft edit|pending change|Prepared .*pending|待确认修改|已准备 .*修改|已写入|已删除|Wrote .*\.|Deleted .*|Draft edit created)/iu;
 
 export function buildHistoryProjection(input: HistoryProjectionInput): HistoryProjectionResult {
-  const settings = input.settings ?? getConfiguredContextCompressionSettings();
+  const settings = input.settings;
   const agentHistory = input.history.filter((message) => message.role === 'user' || message.role === 'assistant');
-
-  if (!settings.enabled) {
-    return {
-      history: agentHistory,
-      syntheticSystemMessages: [],
-      useLegacyHistoryLimit: true,
-      metadata: {
-        compressionEnabled: false,
-        usedSummary: false,
-        summaryCount: 0,
-        protectedMessageCount: 0,
-        recentMessageCount: Math.min(agentHistory.length, AGENT_HISTORY_MESSAGE_LIMIT),
-        fallbackReason: 'compression_disabled'
-      },
-      protectedMessageIds: [],
-      recentMessageIds: agentHistory.slice(-AGENT_HISTORY_MESSAGE_LIMIT).map((message) => message.id),
-      compressibleMessageIds: [],
-      usedSummaryIds: []
-    };
-  }
 
   const recentMessageIds = selectRecentTurnMessageIds(agentHistory, settings.keepRecentTurns);
   const protectedMessageIds = selectProtectedMessageIds(agentHistory, input.contextCompression);
@@ -86,7 +61,6 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
     .map((message) => recentMessageIds.has(message.id) ? message : externalizeMessageContent(message));
 
   const metadata: ContextProjectionMetadata = {
-    compressionEnabled: true,
     usedSummary: Boolean(summary),
     summaryCount: summary ? 1 : 0,
     protectedMessageCount: protectedMessageIds.size,
@@ -97,7 +71,6 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
   return {
     history: projectedHistory,
     syntheticSystemMessages,
-    useLegacyHistoryLimit: false,
     metadata,
     protectedMessageIds: Array.from(protectedMessageIds),
     recentMessageIds: Array.from(recentMessageIds),

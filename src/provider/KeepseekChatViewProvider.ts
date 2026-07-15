@@ -37,51 +37,22 @@ import { DraftEditStore } from '../edits/draftEditStore';
 import { openFileReference } from '../context/references/fileReferenceOpener';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
-  DEFAULT_CONTEXT_COMPRESSION_ENABLED,
-  DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO,
-  DEFAULT_CONTEXT_KEEP_RECENT_TURNS,
-  DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS,
   DEFAULT_HISTORY_RETENTION_DAYS,
-  DEFAULT_MAX_TOKENS,
-  DEFAULT_MAX_RUN_MS,
-  DEFAULT_MAX_TOOL_CALLS,
-  DEFAULT_MAX_TOOL_ITERATIONS,
-  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
-  DEFAULT_TOOL_RESULT_TOKEN_BUDGET,
   getConfiguredAgentSettings,
-  getConfiguredContextCompressionSettings,
   getConfiguredBalanceEndpointUrl,
   getConfiguredBalanceRefreshIntervalMs,
   getConfiguredDebugMode,
   getConfiguredHistoryRetentionDays,
   getConfiguredMaxFileBytes,
-  getConfiguredMaxRunMs,
-  getConfiguredMaxToolCalls,
-  getConfiguredMaxToolIterations,
-  getConfiguredMaxTokens,
   getConfiguredModels,
   getConfiguredSelectedModelId,
   getConfiguredSlimToolModeEnabled,
-  getConfiguredStreamIdleTimeoutMs,
-  getConfiguredToolResultTokenBudget,
-  MAX_GENERATION_TOKENS,
   MAX_HISTORY_RETENTION_DAYS,
-  MAX_CONTEXT_COMPRESSION_TRIGGER_RATIO,
-  MAX_CONTEXT_KEEP_RECENT_TURNS,
-  MAX_CONTEXT_SUMMARY_BUDGET_TOKENS,
-  MAX_RUN_MS,
-  MAX_STREAM_IDLE_TIMEOUT_MS,
-  MAX_TOOL_CALLS,
-  MAX_TOOL_ITERATIONS,
-  MAX_TOOL_RESULT_TOKEN_BUDGET,
-  MIN_CONTEXT_COMPRESSION_TRIGGER_RATIO,
-  MIN_CONTEXT_KEEP_RECENT_TURNS,
-  MIN_CONTEXT_SUMMARY_BUDGET_TOKENS,
   MIN_HISTORY_RETENTION_DAYS,
   normalizeAgentSettings,
-  normalizeIntegerInRange,
-  normalizeNumberInRange
+  normalizeIntegerInRange
 } from '../shared/config';
+import { getDeepSeekV4RuntimeProfile } from '../shared/modelProfiles';
 import { getErrorMessage } from '../shared/errors';
 import { formatBytes } from '../shared/format';
 import { expandPromptReferencesInPrompt } from '../context/references/promptReferences';
@@ -611,23 +582,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         });
         return;
       }
-      case 'openAgentBudgetSettings': {
-        const contextCompression = getConfiguredContextCompressionSettings();
-        this.postToWebview({
-          type: 'showAgentBudgetDialog',
-          maxTokens: getConfiguredMaxTokens(),
-          maxToolIterations: getConfiguredMaxToolIterations(),
-          maxToolCalls: getConfiguredMaxToolCalls(),
-          maxRunMs: getConfiguredMaxRunMs(),
-          streamIdleTimeoutMs: getConfiguredStreamIdleTimeoutMs(),
-          toolResultTokenBudget: getConfiguredToolResultTokenBudget(),
-          contextCompressionEnabled: contextCompression.enabled,
-          contextKeepRecentTurns: contextCompression.keepRecentTurns,
-          contextCompressionTriggerRatio: contextCompression.triggerRatio,
-          contextSummaryBudgetTokens: contextCompression.summaryBudgetTokens
-        });
-        return;
-      }
       case 'openHistorySettings': {
         this.postToWebview({
           type: 'showHistorySettingsDialog',
@@ -644,52 +598,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.postState();
         void this.refreshBalance({ force: true });
         vscode.window.showInformationMessage(this.t('apiSettingsSaved'));
-        return;
-      }
-      case 'saveAgentBudgetSettings': {
-        const config = vscode.workspace.getConfiguration('keepseek');
-        await config.update('maxTokens', normalizeIntegerInRange(message.maxTokens, 0, MAX_GENERATION_TOKENS, DEFAULT_MAX_TOKENS), vscode.ConfigurationTarget.Global);
-        await config.update('maxToolIterations', normalizeIntegerInRange(message.maxToolIterations, 0, MAX_TOOL_ITERATIONS, DEFAULT_MAX_TOOL_ITERATIONS), vscode.ConfigurationTarget.Global);
-        await config.update('maxToolCalls', normalizeIntegerInRange(message.maxToolCalls, 0, MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS), vscode.ConfigurationTarget.Global);
-        await config.update('maxRunMs', normalizeIntegerInRange(message.maxRunMs, 0, MAX_RUN_MS, DEFAULT_MAX_RUN_MS), vscode.ConfigurationTarget.Global);
-        await config.update('streamIdleTimeoutMs', normalizeIntegerInRange(message.streamIdleTimeoutMs, 0, MAX_STREAM_IDLE_TIMEOUT_MS, DEFAULT_STREAM_IDLE_TIMEOUT_MS), vscode.ConfigurationTarget.Global);
-        await config.update('toolResultTokenBudget', normalizeIntegerInRange(message.toolResultTokenBudget, 0, MAX_TOOL_RESULT_TOKEN_BUDGET, DEFAULT_TOOL_RESULT_TOKEN_BUDGET), vscode.ConfigurationTarget.Global);
-        await config.update(
-          'contextCompressionEnabled',
-          typeof message.contextCompressionEnabled === 'boolean' ? message.contextCompressionEnabled : DEFAULT_CONTEXT_COMPRESSION_ENABLED,
-          vscode.ConfigurationTarget.Global
-        );
-        await config.update(
-          'contextKeepRecentTurns',
-          normalizeIntegerInRange(
-            message.contextKeepRecentTurns,
-            MIN_CONTEXT_KEEP_RECENT_TURNS,
-            MAX_CONTEXT_KEEP_RECENT_TURNS,
-            DEFAULT_CONTEXT_KEEP_RECENT_TURNS
-          ),
-          vscode.ConfigurationTarget.Global
-        );
-        await config.update(
-          'contextCompressionTriggerRatio',
-          normalizeNumberInRange(
-            message.contextCompressionTriggerRatio,
-            MIN_CONTEXT_COMPRESSION_TRIGGER_RATIO,
-            MAX_CONTEXT_COMPRESSION_TRIGGER_RATIO,
-            DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO
-          ),
-          vscode.ConfigurationTarget.Global
-        );
-        await config.update(
-          'contextSummaryBudgetTokens',
-          normalizeIntegerInRange(
-            message.contextSummaryBudgetTokens,
-            MIN_CONTEXT_SUMMARY_BUDGET_TOKENS,
-            MAX_CONTEXT_SUMMARY_BUDGET_TOKENS,
-            DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS
-          ),
-          vscode.ConfigurationTarget.Global
-        );
-        vscode.window.showInformationMessage(this.t('agentBudgetSettingsSaved'));
         return;
       }
       case 'saveHistorySettings': {
@@ -931,6 +839,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const activeSession = this.sessionStore.getActiveSession();
     return createDisplayedSessionContextUsageEstimate({
       model,
+      agentSettings: this.agentSettings,
       contextFiles: this.fileContext.getAll(),
       skills: this.skillStore.getCachedActiveSkills(activeSession),
       messages: this.messages,
@@ -1903,6 +1812,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         session: activeSession,
         prompt,
         model,
+        agentSettings: this.agentSettings,
         contextFiles: this.fileContext.getAll(),
         language: this.language,
         signal
@@ -1922,6 +1832,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       session: activeSession,
       prompt,
       model,
+      agentSettings: this.agentSettings,
       contextFiles: this.fileContext.getAll(),
       language: this.language
     }, (update) => this.applyBackgroundContextCompressionRefresh(activeSession, update));
@@ -1987,6 +1898,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const cachedSkills = this.skillStore.getCachedActiveSkills(activeSession);
     const computedContextUsage = createDisplayedSessionContextUsageEstimate({
       model: selectedModel,
+      agentSettings: this.agentSettings,
       contextFiles,
       skills: cachedSkills,
       messages: this.messages,
@@ -1997,7 +1909,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       pickLargerContextUsageEstimate(activeSession.contextUsage, computedContextUsage),
       this.isBusy ? this.liveContextUsage : undefined
     ) ?? computedContextUsage;
-    const contextCompression = getConfiguredContextCompressionSettings();
+    const contextCompression = getDeepSeekV4RuntimeProfile(selectedModel, this.agentSettings).contextCompression;
     const lastTurnUsage = this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage;
     const contextPercent = lastTurnUsage?.totalTokens
       ? (lastTurnUsage.totalTokens / Math.max(1, contextUsage.maxTokensEstimate)) * 100

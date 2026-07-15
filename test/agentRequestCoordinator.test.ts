@@ -219,6 +219,10 @@ function createRefreshInput(session: ChatSession): HistoryCompressionRefreshInpu
     session,
     prompt: 'current request',
     model: createModel(),
+    agentSettings: {
+      thinkingEnabled: true,
+      reasoningEffort: 'high'
+    },
     contextFiles: [],
     language: 'en'
   };

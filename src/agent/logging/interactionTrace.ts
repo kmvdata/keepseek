@@ -415,6 +415,8 @@ export function summarizeDeepSeekRequestBody(body: DeepSeekChatRequestBody): Rec
     reasoningEffort: body.reasoning_effort,
     toolChoice: body.tool_choice,
     maxTokens: body.max_tokens,
+    temperature: body.temperature,
+    topP: body.top_p,
     streamOptions: body.stream_options,
     messages: body.messages.map(summarizeDeepSeekMessage),
     tools: body.tools?.map(summarizeDeepSeekTool) ?? []

@@ -11,6 +11,7 @@ test('context compression planning does not refresh below compact ratio', () => 
     session,
     prompt: 'current request',
     model: createModel(1_000_000),
+    agentSettings: { thinkingEnabled: true, reasoningEffort: 'high' },
     contextFiles: [],
     language: 'en',
     settings: createCompressionSettings()
@@ -30,6 +31,7 @@ test('context compression planning uses synchronous refresh over force ratio', (
     session,
     prompt: 'current request',
     model: createModel(800),
+    agentSettings: { thinkingEnabled: true, reasoningEffort: 'high' },
     contextFiles: [],
     language: 'en',
     settings: createCompressionSettings()
@@ -41,13 +43,13 @@ test('context compression planning uses synchronous refresh over force ratio', (
 
 function createCompressionSettings() {
   return {
-    enabled: true,
     keepRecentTurns: 2,
     softCompactRatio: 0.5,
     toolResultSnipRatio: 0.6,
     triggerRatio: 0.8,
     forceRatio: 0.9,
-    summaryBudgetTokens: 1000
+    summaryBudgetTokens: 1000,
+    summaryRequestTimeoutMs: 30_000
   };
 }
 

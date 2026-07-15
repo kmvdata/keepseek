@@ -2,12 +2,13 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
-  getConfiguredContextCompressionSettings,
   getConfiguredContextWindowTokens,
-  getConfiguredRequestRetryBaseMs,
-  getConfiguredStreamIdleTimeoutMs,
-  type ContextCompressionSettings
+  getConfiguredRequestRetryBaseMs
 } from '../shared/config';
+import {
+  getDeepSeekV4ContextCompressionSettings,
+  type ContextCompressionSettings
+} from '../shared/modelProfiles';
 import { getErrorMessage } from '../shared/errors';
 import type { KeepseekLanguage } from '../shared/i18n';
 import type {
@@ -16,7 +17,8 @@ import type {
   ContextCompressionState,
   ContextFile,
   HistorySummary,
-  KeepseekModel
+  KeepseekModel,
+  AgentSettings
 } from '../shared/types';
 import { DeepSeekClient, type DeepSeekClientConfig } from './deepseek/client';
 import type { DeepSeekChatRequestBody, DeepSeekMessage } from './deepseek/types';
@@ -27,7 +29,6 @@ import {
 } from './historyProjection';
 import { estimateTokenCount } from './tokenEstimate';
 
-const SUMMARY_REQUEST_TIMEOUT_MS = 8_000;
 const SUMMARY_MAX_MESSAGE_CHARS = 4_000;
 const SUMMARY_MAX_INPUT_CHARS = 90_000;
 const SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD = 12;
@@ -36,6 +37,7 @@ export interface HistoryCompressionRefreshInput {
   session: ChatSession;
   prompt: string;
   model: KeepseekModel;
+  agentSettings: AgentSettings;
   contextFiles: ContextFile[];
   language: KeepseekLanguage;
   settings?: ContextCompressionSettings;
@@ -56,7 +58,6 @@ export interface HistoryCompressionRefreshPlan {
   changed: boolean;
   mode: HistoryCompressionRefreshMode;
   reason:
-    | 'compression_disabled'
     | 'aborted'
     | 'no_compressible_messages'
     | 'fresh_enough'
@@ -79,17 +80,8 @@ export class HistoryCompressor {
   public constructor(private readonly completion?: HistorySummaryCompletion) {}
 
   public planRefresh(input: HistoryCompressionRefreshInput): HistoryCompressionRefreshPlan {
-    const settings = input.settings ?? getConfiguredContextCompressionSettings();
+    const settings = input.settings ?? getDeepSeekV4ContextCompressionSettings(input.model, input.agentSettings);
     const protectedState = this.createProtectedState(input.session);
-
-    if (!settings.enabled) {
-      return {
-        state: protectedState.state,
-        changed: protectedState.changed,
-        mode: 'none',
-        reason: 'compression_disabled'
-      };
-    }
 
     if (input.signal?.aborted) {
       return {
@@ -151,10 +143,10 @@ export class HistoryCompressor {
   }
 
   public async refresh(input: HistoryCompressionRefreshInput): Promise<HistoryCompressionRefreshResult> {
-    const settings = input.settings ?? getConfiguredContextCompressionSettings();
+    const settings = input.settings ?? getDeepSeekV4ContextCompressionSettings(input.model, input.agentSettings);
     const protectedState = this.createProtectedState(input.session);
 
-    if (!settings.enabled || input.signal?.aborted) {
+    if (input.signal?.aborted) {
       return {
         state: protectedState.state,
         changed: protectedState.changed,
@@ -188,6 +180,7 @@ export class HistoryCompressor {
         model: input.model,
         messages: summaryMessages,
         maxTokens: settings.summaryBudgetTokens,
+        timeoutMs: settings.summaryRequestTimeoutMs,
         language: input.language,
         signal: input.signal
       })).trim();
@@ -324,6 +317,7 @@ export class HistoryCompressor {
     model: KeepseekModel;
     messages: DeepSeekMessage[];
     maxTokens: number;
+    timeoutMs: number;
     language: KeepseekLanguage;
     signal?: AbortSignal;
   }): Promise<string> {
@@ -331,7 +325,7 @@ export class HistoryCompressor {
       return await this.completion(input);
     }
 
-    const abort = createTimeoutAbortSignal(input.signal, SUMMARY_REQUEST_TIMEOUT_MS);
+    const abort = createTimeoutAbortSignal(input.signal, input.timeoutMs);
     try {
       const body: DeepSeekChatRequestBody = {
         model: input.model.id,
@@ -345,11 +339,11 @@ export class HistoryCompressor {
           include_usage: true
         }
       };
-      const response = await this.deepSeekClient.createChatCompletion(getSummaryClientConfig(), {
+      const response = await this.deepSeekClient.createChatCompletion(getSummaryClientConfig(input.timeoutMs), {
         body,
         language: input.language,
         signal: abort.signal,
-        runDeadlineAt: Date.now() + SUMMARY_REQUEST_TIMEOUT_MS
+        runDeadlineAt: Date.now() + input.timeoutMs
       });
 
       if (!response.ok) {
@@ -544,19 +538,16 @@ function extractReferenceHints(content: string): string[] {
   return Array.from(hints);
 }
 
-function getSummaryClientConfig(): DeepSeekClientConfig {
+function getSummaryClientConfig(timeoutMs: number): DeepSeekClientConfig {
   const config = vscode.workspace.getConfiguration('keepseek');
   const apiKey = (config.get<string>('apiKey', '').trim() || process.env.DEEPSEEK_API_KEY || '').trim();
   if (!apiKey) {
     throw new Error('Missing DeepSeek API key for context summary.');
   }
-  const configuredIdleTimeout = getConfiguredStreamIdleTimeoutMs();
   return {
     apiKey,
     baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL).trim() || DEFAULT_DEEPSEEK_BASE_URL,
-    streamIdleTimeoutMs: configuredIdleTimeout > 0
-      ? Math.min(configuredIdleTimeout, SUMMARY_REQUEST_TIMEOUT_MS)
-      : SUMMARY_REQUEST_TIMEOUT_MS,
+    streamIdleTimeoutMs: timeoutMs,
     maxRequestRetries: 0,
     requestRetryBaseMs: getConfiguredRequestRetryBaseMs()
   };

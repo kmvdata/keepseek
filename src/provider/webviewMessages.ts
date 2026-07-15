@@ -38,25 +38,11 @@ export type WebviewMessage =
   | { type: 'setDebugMode'; enabled: boolean }
   | { type: 'openCurrentSessionLog' }
   | { type: 'openApiSettings' }
-  | { type: 'openAgentBudgetSettings' }
   | { type: 'openHistorySettings' }
   | {
       type: 'saveApiSettings';
       apiKey: string;
       baseUrl: string;
-    }
-  | {
-      type: 'saveAgentBudgetSettings';
-      maxTokens?: number;
-      maxToolIterations?: number;
-      maxToolCalls?: number;
-      maxRunMs?: number;
-      streamIdleTimeoutMs?: number;
-      toolResultTokenBudget?: number;
-      contextCompressionEnabled?: boolean;
-      contextKeepRecentTurns?: number;
-      contextCompressionTriggerRatio?: number;
-      contextSummaryBudgetTokens?: number;
     }
   | {
       type: 'saveHistorySettings';

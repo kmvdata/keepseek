@@ -96,14 +96,12 @@ Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节
 
 `AgentRunner.run()` 在请求模型前会先调用 `src/agent/historyProjection.ts` 的 `buildHistoryProjection()`。这是上下文压缩进入模型请求的核心边界：真实的 `session.messages` 不会被替换成摘要，也不会因为上下文窗口限制被硬裁剪；Runner 只为本次模型请求构造 projection。
 
-压缩开启时，projection 由这些部分组成：
+上下文压缩始终启用，projection 由这些部分组成：
 
 1. 可选 synthetic summary system message，来自 `ChatSession.contextCompression.summaries`。
 2. protected messages，包括首条用户需求、最近用户请求、显式保留约束、用户纠错、明显报错或测试失败、DraftEdit 关键结果等。
-3. 最近 `keepseek.contextKeepRecentTurns` 个用户轮次及其后续 assistant 回复。
+3. 当前模型 / Thinking 自动档位要求保留的最近用户轮次及其后续 assistant 回复。
 4. 当前展开后的用户 prompt。
-
-压缩关闭时，projection 会退回旧行为：只使用最近 `AGENT_HISTORY_MESSAGE_LIMIT = 24` 条原始历史消息。
 
 之后 `src/agent/protocol.ts` 的 `buildInitialAgentMessages()` 会把 projection 组装成 DeepSeek/OpenAI-compatible messages：
 
@@ -128,9 +126,10 @@ system prompt 会告诉模型：
 请求特征：
 
 - 使用 streaming。
-- Thinking 开关由 `keepseek.thinkingEnabled` 控制。
-- reasoning effort 使用 `high` 或 `max`。
-- `max_tokens` 来自 `keepseek.maxTokens`，0 表示不传。
+- 仅支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`。
+- Thinking 开关和 `high` / `max` reasoning effort 由输入区选择。
+- `max_tokens`、工具上限、运行时长与压缩阈值来自 `src/shared/modelProfiles.ts` 中对应的模型 / Thinking 自动档位。
+- 固定使用 DeepSeek V4 推荐的 `temperature=1.0`、`top_p=1.0`。
 - `stream_options.include_usage = true`，用于获取服务商真实 usage。
 - 有工具预算时发送 function tools 和 `tool_choice: "auto"`。
 
@@ -158,17 +157,9 @@ system prompt 会告诉模型：
   -> 再次请求模型
 ```
 
-循环受这些预算控制：
+循环上限由 `src/shared/modelProfiles.ts` 的 6 个自动档位控制（Flash / Pro × 非思考 / High / Max）。更强的模型和推理档位允许更多工具轮次、调用数、运行时间及工具结果；这些值不暴露为用户配置。两款模型的上下文窗口都固定按 1M tokens 估算。
 
-| 配置 | 默认值 | 作用 |
-|---|---:|---|
-| `keepseek.maxToolIterations` | 8 | 最大工具轮次，0 表示禁用工具 |
-| `keepseek.maxToolCalls` | 24 | 单次运行最大工具调用总数 |
-| `keepseek.maxRunMs` | 600000 | 单次运行最大总时长，默认 10 分钟 |
-| `keepseek.toolResultTokenBudget` | 0 | 工具结果 token 预算，0 表示按上下文窗口自动估算 |
-| `keepseek.contextWindowTokens` | 1000000 | 本地上下文窗口估算值 |
-
-如果预算耗尽，Runner 会追加一条本地用户消息，要求模型停止调用工具，基于已获得的信息给出最终回答并说明缺口。
+如果自动安全上限耗尽，Runner 会追加一条本地用户消息，要求模型停止调用工具，基于已获得的信息给出最终回答并说明缺口。
 
 ### 3.4 DSML 工具调用兜底
 

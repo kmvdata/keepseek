@@ -24,12 +24,12 @@ English version is available below: [English](#keepseek-english).
 - 团队工程师：把真实代码和运行输出一并交给 AI，减少来回复制上下文的成本。
 - 新加入项目的开发者：快速理解代码结构、约定和关键文件。
 - 维护者和 Reviewer：围绕具体文件、行号、日志和修改草案做更精确的审查。
-- 使用 DeepSeek 或兼容 OpenAI API 网关的开发者：可以通过配置替换模型列表和 API base URL。
+- 使用 DeepSeek V4 或兼容其 OpenAI Chat Completions 接口网关的开发者：可以配置 API base URL。
 
 ## 核心功能
 
 - 侧边栏 Agent 对话：KeepSeek 显示在 VS Code Secondary Sidebar 中，适合一边看代码一边对话。
-- 多模型配置：默认提供 DeepSeek V4 Flash / Pro，也支持通过 `keepseek.models` 配置模型列表。
+- DeepSeek V4 双模型：固定支持 Flash / Pro，切换模型和 Thinking 档位时自动应用对应的编程 Agent 参数。
 - Thinking 模式：支持开启或关闭 Thinking，并选择 `high` / `max` 推理强度。
 - History Session 管理：会话按项目保存到全局存储，支持当前项目和其他项目浏览、跨项目复制到当前项目、收藏、重命名、按时间范围过滤、多选删除和项目级清理。
 - 文件上下文：添加当前文件、工作区文件、外部文件或目录，也可以手动输入路径。
@@ -114,30 +114,15 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 |--------|--------|------|
 | `keepseek.apiKey` | `""` | DeepSeek API Key，也可用 `DEEPSEEK_API_KEY` 环境变量兜底 |
 | `keepseek.baseUrl` | `"https://api.deepseek.com"` | OpenAI-compatible API base URL |
-| `keepseek.models` | DeepSeek V4 Flash / Pro | 聊天面板中显示的模型列表 |
 | `keepseek.selectedModelId` | `""` | 当前选中模型 id；为空或不可用时使用模型列表第一项 |
 | `keepseek.thinkingEnabled` | `true` | 是否开启 Thinking 模式 |
 | `keepseek.reasoningEffort` | `"high"` | Thinking 推理强度，支持 `high` 或 `max` |
 | `keepseek.maxFileBytes` | `200000` | 单个引用文件或日志片段的最大字节数 |
-| `keepseek.maxTokens` | `64000` | 单次回复最大生成 tokens；设为 `0` 时使用服务商默认值 |
-| `keepseek.maxToolIterations` | `8` | 单次 Agent 执行的最大工具轮次；设为 `0` 时禁用工具 |
-| `keepseek.maxToolCalls` | `24` | 单次 Agent 执行的最大工具调用总数；设为 `0` 时不启用单独调用数上限 |
-| `keepseek.maxRunMs` | `600000` | 单次 Agent 执行的最大总时长（毫秒）；设为 `0` 时不启用总时长上限 |
-| `keepseek.toolResultTokenBudget` | `0` | 单次 Agent 执行中工具结果可使用的估算 token 预算；设为 `0` 时按模型上下文窗口自动估算 |
 | `keepseek.maxWorkspaceToolFiles` | `2000` | 只读工作区文件列表工具最多返回的文件数量 |
-| `keepseek.contextWindowTokens` | `1000000` | 上下文窗口估算 tokens，用于上下文用量指示器 |
-| `keepseek.contextCompressionEnabled` | `true` | 是否启用上下文压缩；关闭后尽量保持旧的最近消息窗口行为 |
-| `keepseek.contextSoftCompactRatio` | `0.5` | 上下文达到该比例时进入软压缩/预警区间 |
-| `keepseek.toolResultSnipRatio` | `0.6` | 上下文达到该比例时优先缩短工具结果 |
-| `keepseek.contextKeepRecentTurns` | `12` | 压缩开启时，模型请求中保留最近多少个用户轮次及其后续 Assistant 回复 |
-| `keepseek.contextCompressionTriggerRatio` | `0.8` | 当前估算上下文达到模型窗口该比例时，可触发会话摘要刷新 |
-| `keepseek.contextCompactForceRatio` | `0.9` | 当前估算上下文达到该比例时，发送前强制同步摘要压缩 |
-| `keepseek.contextSummaryBudgetTokens` | `3000` | 会话摘要请求的最大输出 token 预算 |
 | `keepseek.usagePricing` | DeepSeek 默认价目 | 按模型配置每百万 token 的 cache hit、输入、输出价格和币种，用于费用估算 |
 | `keepseek.balanceEndpointUrl` | `""` | DeepSeek 余额查询接口；为空时从 `baseUrl` 推导 `/user/balance` |
 | `keepseek.balanceRefreshIntervalMs` | `60000` | 自动刷新余额的最小间隔 |
 | `keepseek.slimToolModeEnabled` | `true` | 默认暴露较小稳定工具 schema，必要时再加入更宽的工作区工具 |
-| `keepseek.streamIdleTimeoutMs` | `0` | 流式响应连续无数据时的空闲超时；设为 `0` 时禁用 |
 | `keepseek.maxRequestRetries` | `2` | 首个流式 chunk 前遇到可重试错误时的最大自动重试次数 |
 | `keepseek.requestRetryBaseMs` | `1000` | 自动重试的指数退避基础延迟（毫秒） |
 | `keepseek.trace.enabled` | `false` | 是否开启结构化交互 trace 日志；日志可能包含敏感上下文 |
@@ -147,6 +132,19 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 | `keepseek.trace.maxFileBytes` | `20000000` | 单个 trace 日志文件最大字节数 |
 | `keepseek.historyRetentionDays` | `7` | 历史菜单默认显示最近天数，范围 1-60；存储记录仍按 60 天硬保留清理 |
 | `keepseek.language` | `"zh-CN"` | KeepSeek UI 语言 |
+
+### 自动编程档位
+
+这些值是内部固定档位，不在用户设置中暴露。两款模型都使用 1M 上下文、`temperature=1.0`、`top_p=1.0`，并始终启用上下文压缩；更高 Thinking 档位会预留更多生成与工具空间，因此更早触发压缩。
+
+| 模型 / 模式 | 最大输出 | 工具轮次 / 调用 | 最长运行 | 工具结果 | 最近原文轮次 | 摘要触发 / 强制 | 摘要输出 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Flash / 非思考 | 48K | 16 / 48 | 10 分钟 | 160K | 14 | 58% / 72% | 6K |
+| Flash / High | 96K | 24 / 72 | 20 分钟 | 240K | 12 | 54% / 68% | 8K |
+| Flash / Max | 192K | 32 / 96 | 30 分钟 | 320K | 10 | 46% / 62% | 10K |
+| Pro / 非思考 | 64K | 20 / 64 | 15 分钟 | 200K | 18 | 70% / 84% | 8K |
+| Pro / High | 128K | 32 / 96 | 30 分钟 | 320K | 16 | 62% / 78% | 12K |
+| Pro / Max | 256K | 48 / 144 | 60 分钟 | 400K | 12 | 50% / 70% | 16K |
 
 ## 隐私与安全
 
@@ -177,7 +175,7 @@ KeepSeek: Open Agent Chat
 1. 打开 VS Code Settings。
 2. 搜索 `KeepSeek`。
 3. 填写 `keepseek.apiKey`。
-4. 如需使用代理或兼容网关，修改 `keepseek.baseUrl` 和 `keepseek.models`。
+4. 如需使用代理或兼容网关，修改 `keepseek.baseUrl`。
 
 ## 开发
 
@@ -359,30 +357,15 @@ KeepSeek is built around explicit context. You decide which files, selections, a
 |---------|---------|-------------|
 | `keepseek.apiKey` | `""` | DeepSeek API Key. `DEEPSEEK_API_KEY` can be used as a fallback |
 | `keepseek.baseUrl` | `"https://api.deepseek.com"` | OpenAI-compatible API base URL |
-| `keepseek.models` | DeepSeek V4 Flash / Pro | Models shown in the chat panel |
 | `keepseek.selectedModelId` | `""` | Persisted selected model id; falls back to the first configured model |
 | `keepseek.thinkingEnabled` | `true` | Enables Thinking mode |
 | `keepseek.reasoningEffort` | `"high"` | Thinking effort, either `high` or `max` |
 | `keepseek.maxFileBytes` | `200000` | Maximum bytes for a referenced file or log snippet |
-| `keepseek.maxTokens` | `64000` | Maximum generated tokens per reply; set `0` to use the provider default |
-| `keepseek.maxToolIterations` | `8` | Maximum tool-use rounds in one agent run; set `0` to disable tool use |
-| `keepseek.maxToolCalls` | `24` | Maximum total tool calls in one agent run; set `0` to disable this separate cap |
-| `keepseek.maxRunMs` | `600000` | Maximum total run time in milliseconds for one agent run; set `0` to disable the total run-time cap |
-| `keepseek.toolResultTokenBudget` | `0` | Estimated token budget for tool results in one agent run; set `0` to derive it from the model context window |
 | `keepseek.maxWorkspaceToolFiles` | `2000` | Maximum number of files returned by the read-only workspace file listing tool |
-| `keepseek.contextWindowTokens` | `1000000` | Estimated context-window tokens for the context usage indicator |
-| `keepseek.contextCompressionEnabled` | `true` | Enables context compression; when disabled, KeepSeek keeps the legacy recent-message window behavior as closely as possible |
-| `keepseek.contextSoftCompactRatio` | `0.5` | Context ratio where KeepSeek enters the soft compaction/warning range |
-| `keepseek.toolResultSnipRatio` | `0.6` | Context ratio where KeepSeek prefers shortened tool results |
-| `keepseek.contextKeepRecentTurns` | `12` | Recent user turns, plus following assistant replies, kept verbatim in the model request |
-| `keepseek.contextCompressionTriggerRatio` | `0.8` | Context-window usage ratio that can trigger a summary refresh |
-| `keepseek.contextCompactForceRatio` | `0.9` | Context ratio that forces synchronous summary compaction before send |
-| `keepseek.contextSummaryBudgetTokens` | `3000` | Maximum generated tokens for the session summary request |
 | `keepseek.usagePricing` | DeepSeek defaults | Per-million-token cache-hit, input, output prices and currency by model id |
 | `keepseek.balanceEndpointUrl` | `""` | DeepSeek balance endpoint; empty derives `/user/balance` from `baseUrl` |
 | `keepseek.balanceRefreshIntervalMs` | `60000` | Minimum automatic balance refresh interval |
 | `keepseek.slimToolModeEnabled` | `true` | Exposes a smaller stable tool schema by default and adds broader workspace tools only when needed |
-| `keepseek.streamIdleTimeoutMs` | `0` | Idle timeout for streaming responses with no data; set `0` to disable it |
 | `keepseek.maxRequestRetries` | `2` | Automatic retry count for replay-safe failures before the first stream chunk |
 | `keepseek.requestRetryBaseMs` | `1000` | Exponential backoff base delay in milliseconds |
 | `keepseek.trace.enabled` | `false` | Enables structured interaction trace logs; logs may include sensitive context |
@@ -392,6 +375,19 @@ KeepSeek is built around explicit context. You decide which files, selections, a
 | `keepseek.trace.maxFileBytes` | `20000000` | Maximum bytes for one trace log file |
 | `keepseek.historyRetentionDays` | `7` | Default recent-days range in the history menu, from 1 to 60; stored records still use the 60-day hard retention limit |
 | `keepseek.language` | `"zh-CN"` | KeepSeek UI language |
+
+### Automatic coding profiles
+
+These are fixed internal profiles rather than user settings. Both models use a 1M context window, `temperature=1.0`, `top_p=1.0`, and always-on context compression. Higher Thinking modes reserve more generation and tool capacity, so they compact earlier.
+
+| Model / mode | Max output | Tool rounds / calls | Max run | Tool results | Recent verbatim turns | Summary trigger / force | Summary output |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Flash / Non-thinking | 48K | 16 / 48 | 10 min | 160K | 14 | 58% / 72% | 6K |
+| Flash / High | 96K | 24 / 72 | 20 min | 240K | 12 | 54% / 68% | 8K |
+| Flash / Max | 192K | 32 / 96 | 30 min | 320K | 10 | 46% / 62% | 10K |
+| Pro / Non-thinking | 64K | 20 / 64 | 15 min | 200K | 18 | 70% / 84% | 8K |
+| Pro / High | 128K | 32 / 96 | 30 min | 320K | 16 | 62% / 78% | 12K |
+| Pro / Max | 256K | 48 / 144 | 60 min | 400K | 12 | 50% / 70% | 16K |
 
 ## Privacy And Safety
 

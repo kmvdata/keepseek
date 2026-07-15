@@ -455,8 +455,8 @@ export class DeepSeekClient {
     const originalMessage = error instanceof Error ? error.message : String(error);
     const idleHint = config.streamIdleTimeoutMs > 0
       ? (language === 'en'
-        ? ` KeepSeek's stream idle timeout is ${Math.round(config.streamIdleTimeoutMs / 1000)} seconds; set keepseek.streamIdleTimeoutMs to 0 to disable that client-side idle cap.`
-        : `KeepSeek 当前流式空闲超时为 ${Math.round(config.streamIdleTimeoutMs / 1000)} 秒；可将 keepseek.streamIdleTimeoutMs 设为 0 来禁用客户端空闲上限。`)
+        ? ` KeepSeek's automatic stream timeout for this request is ${Math.round(config.streamIdleTimeoutMs / 1000)} seconds.`
+        : `KeepSeek 对本次请求使用的自动流式超时为 ${Math.round(config.streamIdleTimeoutMs / 1000)} 秒。`)
       : (language === 'en'
         ? ' KeepSeek stream idle timeout is disabled, so this usually means the network, proxy, or provider closed the SSE connection.'
         : 'KeepSeek 已禁用流式空闲超时，因此这通常表示网络、代理或服务商关闭了 SSE 连接。');

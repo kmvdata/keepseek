@@ -1,18 +1,14 @@
 import * as vscode from 'vscode';
 import { AgentSettings, KeepseekModel, UsageCostRates } from './types';
 import { SESSION_HARD_RETENTION_DAYS } from '../sessions/sessionRetention';
+import {
+  DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
+  getSupportedDeepSeekV4Models
+} from './modelProfiles';
 
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
-export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 0;
-export const DEFAULT_MAX_TOKENS = 64_000;
-export const MAX_GENERATION_TOKENS = 384_000;
-export const DEFAULT_MAX_TOOL_ITERATIONS = 8;
 export const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
 export const DEFAULT_MAX_FILE_BYTES = 200_000;
-export const DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000;
-export const DEFAULT_MAX_TOOL_CALLS = 24;
-export const DEFAULT_MAX_RUN_MS = 600_000;
-export const DEFAULT_TOOL_RESULT_TOKEN_BUDGET = 0;
 export const DEFAULT_MAX_REQUEST_RETRIES = 2;
 export const DEFAULT_REQUEST_RETRY_BASE_MS = 1_000;
 export const DEFAULT_SELECTED_MODEL_ID = '';
@@ -22,13 +18,6 @@ export const DEFAULT_TRACE_LEVEL: InteractionTraceLevel = 'full';
 export const DEFAULT_TRACE_LOG_RAW_STREAM = true;
 export const DEFAULT_TRACE_RETENTION_DAYS = 7;
 export const DEFAULT_TRACE_MAX_FILE_BYTES = 20_000_000;
-export const DEFAULT_CONTEXT_COMPRESSION_ENABLED = true;
-export const DEFAULT_CONTEXT_KEEP_RECENT_TURNS = 12;
-export const DEFAULT_CONTEXT_SOFT_COMPACT_RATIO = 0.5;
-export const DEFAULT_TOOL_RESULT_SNIP_RATIO = 0.6;
-export const DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO = 0.8;
-export const DEFAULT_CONTEXT_COMPACT_FORCE_RATIO = 0.9;
-export const DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS = 3_000;
 export const DEFAULT_BALANCE_ENDPOINT_URL = '';
 export const DEFAULT_BALANCE_REFRESH_INTERVAL_MS = 60_000;
 export const DEFAULT_SLIM_TOOL_MODE_ENABLED = true;
@@ -39,19 +28,7 @@ export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
     outputPrice: 2,
     currency: '¥'
   },
-  'deepseek-chat': {
-    cacheHitPrice: 0.02,
-    inputPrice: 1,
-    outputPrice: 2,
-    currency: '¥'
-  },
   'deepseek-v4-pro': {
-    cacheHitPrice: 0.025,
-    inputPrice: 3,
-    outputPrice: 6,
-    currency: '¥'
-  },
-  'deepseek-reasoner': {
     cacheHitPrice: 0.025,
     inputPrice: 3,
     outputPrice: 6,
@@ -64,28 +41,10 @@ export const MIN_TRACE_RETENTION_DAYS = 1;
 export const MAX_TRACE_RETENTION_DAYS = 60;
 export const MIN_TRACE_MAX_FILE_BYTES = 1_000_000;
 export const MAX_TRACE_MAX_FILE_BYTES = 1_000_000_000;
-export const MIN_CONTEXT_KEEP_RECENT_TURNS = 1;
-export const MAX_CONTEXT_KEEP_RECENT_TURNS = 64;
-export const MIN_CONTEXT_COMPRESSION_TRIGGER_RATIO = 0.1;
-export const MAX_CONTEXT_COMPRESSION_TRIGGER_RATIO = 0.95;
-export const MIN_CONTEXT_SOFT_COMPACT_RATIO = 0.1;
-export const MAX_CONTEXT_SOFT_COMPACT_RATIO = 0.95;
-export const MIN_TOOL_RESULT_SNIP_RATIO = 0.1;
-export const MAX_TOOL_RESULT_SNIP_RATIO = 0.95;
-export const MIN_CONTEXT_COMPACT_FORCE_RATIO = 0.1;
-export const MAX_CONTEXT_COMPACT_FORCE_RATIO = 0.99;
-export const MIN_CONTEXT_SUMMARY_BUDGET_TOKENS = 500;
-export const MAX_CONTEXT_SUMMARY_BUDGET_TOKENS = 100_000;
 export const MIN_BALANCE_REFRESH_INTERVAL_MS = 10_000;
 export const MAX_BALANCE_REFRESH_INTERVAL_MS = 3_600_000;
-export const MAX_TOOL_ITERATIONS = 64;
-export const MAX_TOOL_CALLS = 256;
-export const MAX_RUN_MS = 3_600_000;
-export const MAX_STREAM_IDLE_TIMEOUT_MS = 3_600_000;
-export const MAX_TOOL_RESULT_TOKEN_BUDGET = DEFAULT_CONTEXT_WINDOW_TOKENS;
 export const MAX_REQUEST_RETRIES = 10;
 export const MAX_REQUEST_RETRY_BASE_MS = 60_000;
-export const AGENT_HISTORY_MESSAGE_LIMIT = 24;
 
 export type InteractionTraceLevel = 'metadata' | 'request' | 'full';
 
@@ -97,40 +56,8 @@ export interface InteractionTraceSettings {
   maxFileBytes: number;
 }
 
-export interface ContextCompressionSettings {
-  enabled: boolean;
-  keepRecentTurns: number;
-  softCompactRatio: number;
-  toolResultSnipRatio: number;
-  triggerRatio: number;
-  forceRatio: number;
-  summaryBudgetTokens: number;
-}
-
 export function getConfiguredModels(): KeepseekModel[] {
-  const configured = vscode.workspace.getConfiguration('keepseek').get<KeepseekModel[]>('models', []);
-  const models = configured.filter((model) => model?.id && model.label);
-  if (models.length) {
-    return models.map((model) => ({
-      id: model.id,
-      label: model.label,
-      provider: model.provider ?? 'custom',
-      contextWindowTokens: normalizePositiveInteger(model.contextWindowTokens)
-    }));
-  }
-
-  return [
-    {
-      id: 'deepseek-v4-flash',
-      label: 'DeepSeek-V4-Flash',
-      provider: 'deepseek'
-    },
-    {
-      id: 'deepseek-v4-pro',
-      label: 'DeepSeek-V4-Pro',
-      provider: 'deepseek'
-    }
-  ];
+  return getSupportedDeepSeekV4Models();
 }
 
 export function getConfiguredSelectedModelId(models = getConfiguredModels()): string {
@@ -157,102 +84,9 @@ export function getConfiguredMaxFileBytes(): number {
   return vscode.workspace.getConfiguration('keepseek').get('maxFileBytes', DEFAULT_MAX_FILE_BYTES);
 }
 
-export function getConfiguredMaxTokens(): number {
-  return normalizeIntegerInRange(
-    vscode.workspace.getConfiguration('keepseek').get<number>('maxTokens', DEFAULT_MAX_TOKENS),
-    0,
-    MAX_GENERATION_TOKENS,
-    DEFAULT_MAX_TOKENS
-  );
-}
-
 export function getConfiguredContextWindowTokens(model?: KeepseekModel): number {
   const modelLimit = normalizePositiveInteger(model?.contextWindowTokens);
-  if (modelLimit) {
-    return modelLimit;
-  }
-
-  const configuredLimit = vscode.workspace
-    .getConfiguration('keepseek')
-    .get<number>('contextWindowTokens', DEFAULT_CONTEXT_WINDOW_TOKENS);
-  return normalizePositiveInteger(configuredLimit) ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
-}
-
-export function getConfiguredMaxToolIterations(): number {
-  const configuredLimit = vscode.workspace
-    .getConfiguration('keepseek')
-    .get<number>('maxToolIterations', DEFAULT_MAX_TOOL_ITERATIONS);
-  return normalizeIntegerInRange(configuredLimit, 0, MAX_TOOL_ITERATIONS, DEFAULT_MAX_TOOL_ITERATIONS);
-}
-
-export function getConfiguredMaxToolCalls(): number {
-  const configuredLimit = vscode.workspace
-    .getConfiguration('keepseek')
-    .get<number>('maxToolCalls', DEFAULT_MAX_TOOL_CALLS);
-  return normalizeIntegerInRange(configuredLimit, 0, MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS);
-}
-
-export function getConfiguredMaxRunMs(): number {
-  const configuredLimit = vscode.workspace
-    .getConfiguration('keepseek')
-    .get<number>('maxRunMs', DEFAULT_MAX_RUN_MS);
-  return normalizeIntegerInRange(configuredLimit, 0, MAX_RUN_MS, DEFAULT_MAX_RUN_MS);
-}
-
-export function getConfiguredToolResultTokenBudget(): number {
-  const configuredLimit = vscode.workspace
-    .getConfiguration('keepseek')
-    .get<number>('toolResultTokenBudget', DEFAULT_TOOL_RESULT_TOKEN_BUDGET);
-  return normalizeIntegerInRange(
-    configuredLimit,
-    0,
-    MAX_TOOL_RESULT_TOKEN_BUDGET,
-    DEFAULT_TOOL_RESULT_TOKEN_BUDGET
-  );
-}
-
-export function getConfiguredContextCompressionSettings(): ContextCompressionSettings {
-  const config = vscode.workspace.getConfiguration('keepseek');
-  const triggerRatio = normalizeNumberInRange(
-    config.get<number>('contextCompressionTriggerRatio', DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO),
-    MIN_CONTEXT_COMPRESSION_TRIGGER_RATIO,
-    MAX_CONTEXT_COMPRESSION_TRIGGER_RATIO,
-    DEFAULT_CONTEXT_COMPRESSION_TRIGGER_RATIO
-  );
-  return {
-    enabled: config.get<boolean>('contextCompressionEnabled', DEFAULT_CONTEXT_COMPRESSION_ENABLED),
-    keepRecentTurns: normalizeIntegerInRange(
-      config.get<number>('contextKeepRecentTurns', DEFAULT_CONTEXT_KEEP_RECENT_TURNS),
-      MIN_CONTEXT_KEEP_RECENT_TURNS,
-      MAX_CONTEXT_KEEP_RECENT_TURNS,
-      DEFAULT_CONTEXT_KEEP_RECENT_TURNS
-    ),
-    softCompactRatio: normalizeNumberInRange(
-      config.get<number>('contextSoftCompactRatio', DEFAULT_CONTEXT_SOFT_COMPACT_RATIO),
-      MIN_CONTEXT_SOFT_COMPACT_RATIO,
-      Math.min(MAX_CONTEXT_SOFT_COMPACT_RATIO, triggerRatio),
-      DEFAULT_CONTEXT_SOFT_COMPACT_RATIO
-    ),
-    toolResultSnipRatio: normalizeNumberInRange(
-      config.get<number>('toolResultSnipRatio', DEFAULT_TOOL_RESULT_SNIP_RATIO),
-      MIN_TOOL_RESULT_SNIP_RATIO,
-      Math.min(MAX_TOOL_RESULT_SNIP_RATIO, triggerRatio),
-      DEFAULT_TOOL_RESULT_SNIP_RATIO
-    ),
-    triggerRatio,
-    forceRatio: normalizeNumberInRange(
-      config.get<number>('contextCompactForceRatio', DEFAULT_CONTEXT_COMPACT_FORCE_RATIO),
-      Math.max(MIN_CONTEXT_COMPACT_FORCE_RATIO, triggerRatio),
-      MAX_CONTEXT_COMPACT_FORCE_RATIO,
-      DEFAULT_CONTEXT_COMPACT_FORCE_RATIO
-    ),
-    summaryBudgetTokens: normalizeIntegerInRange(
-      config.get<number>('contextSummaryBudgetTokens', DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS),
-      MIN_CONTEXT_SUMMARY_BUDGET_TOKENS,
-      MAX_CONTEXT_SUMMARY_BUDGET_TOKENS,
-      DEFAULT_CONTEXT_SUMMARY_BUDGET_TOKENS
-    )
-  };
+  return modelLimit ?? DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS;
 }
 
 export function getConfiguredUsagePricingMap(): Record<string, UsageCostRates> {
@@ -314,18 +148,6 @@ export function getConfiguredSlimToolModeEnabled(): boolean {
   return vscode.workspace
     .getConfiguration('keepseek')
     .get<boolean>('slimToolModeEnabled', DEFAULT_SLIM_TOOL_MODE_ENABLED);
-}
-
-export function getConfiguredStreamIdleTimeoutMs(): number {
-  const configuredTimeout = vscode.workspace
-    .getConfiguration('keepseek')
-    .get<number>('streamIdleTimeoutMs', DEFAULT_STREAM_IDLE_TIMEOUT_MS);
-  return normalizeIntegerInRange(
-    configuredTimeout,
-    0,
-    MAX_STREAM_IDLE_TIMEOUT_MS,
-    DEFAULT_STREAM_IDLE_TIMEOUT_MS
-  );
 }
 
 export function getConfiguredMaxRequestRetries(): number {
@@ -428,14 +250,6 @@ export function normalizeIntegerInRange(value: unknown, min: number, max: number
     return fallback;
   }
   return Math.min(max, Math.max(min, Math.floor(number)));
-}
-
-export function normalizeNumberInRange(value: unknown, min: number, max: number, fallback: number): number {
-  const number = Number(value);
-  if (!Number.isFinite(number)) {
-    return fallback;
-  }
-  return Math.min(max, Math.max(min, number));
 }
 
 function normalizeUsageCostRates(

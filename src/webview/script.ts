@@ -310,7 +310,6 @@ export function getScript(): string {
     const settingsTab = document.getElementById('settingsTab');
     const settingsMenu = document.getElementById('settingsMenu');
     const settingsApiKeyMenuItem = document.getElementById('settingsApiKeyMenuItem');
-    const settingsAgentBudgetMenuItem = document.getElementById('settingsAgentBudgetMenuItem');
     const settingsHistoryMenuItem = document.getElementById('settingsHistoryMenuItem');
     const settingsAboutMenuItem = document.getElementById('settingsAboutMenuItem');
     const settingsAboutVersionValue = document.getElementById('settingsAboutVersionValue');
@@ -664,15 +663,6 @@ export function getScript(): string {
       });
     }
 
-    if (settingsAgentBudgetMenuItem) {
-      settingsAgentBudgetMenuItem.addEventListener('click', function(event) {
-        event.preventDefault();
-        event.stopPropagation();
-        closeSettingsMenu();
-        vscode.postMessage({ type: 'openAgentBudgetSettings' });
-      });
-    }
-
     if (settingsHistoryMenuItem) {
       settingsHistoryMenuItem.addEventListener('click', function(event) {
         event.preventDefault();
@@ -947,10 +937,6 @@ export function getScript(): string {
       } else if (message.type === 'showSettingsDialog') {
         if (window.keepseekInputControls && window.keepseekInputControls.showSettingsDialog) {
           window.keepseekInputControls.showSettingsDialog(message);
-        }
-      } else if (message.type === 'showAgentBudgetDialog') {
-        if (window.keepseekInputControls && window.keepseekInputControls.showAgentBudgetDialog) {
-          window.keepseekInputControls.showAgentBudgetDialog(message);
         }
       } else if (message.type === 'showHistorySettingsDialog') {
         if (window.keepseekInputControls && window.keepseekInputControls.showHistorySettingsDialog) {

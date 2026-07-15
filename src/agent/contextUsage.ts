@@ -1,10 +1,8 @@
 import {
-  DEFAULT_MAX_TOKENS,
   getConfiguredContextWindowTokens,
-  getConfiguredMaxTokens,
-  getConfiguredMaxToolIterations,
   getConfiguredSlimToolModeEnabled
 } from '../shared/config';
+import { getDeepSeekV4RuntimeProfile } from '../shared/modelProfiles';
 import { DeepSeekFunctionTool, DeepSeekMessage } from './deepseek/types';
 import { isRecord } from '../shared/errors';
 import {
@@ -19,13 +17,14 @@ import {
   getAgentTools
 } from './protocol';
 import type { KeepseekLanguage } from '../shared/i18n';
-import { ActivatedSkill, ChatMessage, ContextCompressionState, ContextFile, ContextUsageEstimate, KeepseekModel } from '../shared/types';
+import { ActivatedSkill, AgentSettings, ChatMessage, ContextCompressionState, ContextFile, ContextUsageEstimate, KeepseekModel } from '../shared/types';
 import { buildHistoryProjection } from './historyProjection';
 
 type ContextUsageBreakdown = ContextUsageEstimate['breakdown'];
 
 export function createContextUsageEstimate(input: {
   model: KeepseekModel;
+  agentSettings: AgentSettings;
   contextFiles: ContextFile[];
   skills?: ActivatedSkill[];
   messages: ChatMessage[];
@@ -36,12 +35,14 @@ export function createContextUsageEstimate(input: {
   outputReserveTokens?: number;
   safetyReserveTokens?: number;
 }): ContextUsageEstimate {
+  const profile = getDeepSeekV4RuntimeProfile(input.model, input.agentSettings);
   const prompt = input.prompt?.trim() ?? '';
   const projection = buildHistoryProjection({
     history: input.messages,
     prompt,
     language: input.language,
-    contextCompression: input.contextCompression
+    contextCompression: input.contextCompression,
+    settings: profile.contextCompression
   });
   const messages = buildInitialAgentMessages({
     prompt,
@@ -51,13 +52,13 @@ export function createContextUsageEstimate(input: {
     language: input.language,
     projection
   });
-  const includeTools = input.includeTools ?? getConfiguredMaxToolIterations() > 0;
+  const includeTools = input.includeTools ?? profile.maxToolIterations > 0;
   const tools = includeTools
     ? getAgentTools({
         toolNames: getAgentToolNamesForPrompt(prompt, getConfiguredSlimToolModeEnabled())
       })
     : [];
-  const outputReserveTokens = input.outputReserveTokens ?? resolveOutputReserveTokens(getConfiguredMaxTokens());
+  const outputReserveTokens = input.outputReserveTokens ?? resolveOutputReserveTokens(profile.maxTokens);
   const breakdown = estimateInitialBreakdown({
     messages,
     contextFiles: input.contextFiles,
@@ -81,6 +82,7 @@ export function createContextUsageEstimate(input: {
 
 export function createDisplayedSessionContextUsageEstimate(input: {
   model: KeepseekModel;
+  agentSettings: AgentSettings;
   contextFiles: ContextFile[];
   skills?: ActivatedSkill[];
   messages: ChatMessage[];
@@ -215,7 +217,7 @@ export function normalizeContextUsageEstimateValue(value: unknown): ContextUsage
 }
 
 export function resolveOutputReserveTokens(maxTokens: number): number {
-  return maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS;
+  return Math.max(0, Math.floor(maxTokens));
 }
 
 function estimateInitialBreakdown(input: {

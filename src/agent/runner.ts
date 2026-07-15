@@ -14,20 +14,15 @@ import {
 } from '../shared/types';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
-  DEFAULT_MAX_TOKENS,
-  getConfiguredContextCompressionSettings,
   getConfiguredMaxRequestRetries,
-  getConfiguredMaxRunMs,
-  getConfiguredMaxToolCalls,
-  getConfiguredMaxToolIterations,
-  getConfiguredMaxTokens,
   getConfiguredModelUsagePricing,
   getConfiguredRequestRetryBaseMs,
-  getConfiguredSlimToolModeEnabled,
-  getConfiguredStreamIdleTimeoutMs,
-  getConfiguredToolResultTokenBudget,
-  MAX_GENERATION_TOKENS
+  getConfiguredSlimToolModeEnabled
 } from '../shared/config';
+import {
+  getDeepSeekV4RuntimeProfile,
+  type ContextCompressionSettings
+} from '../shared/modelProfiles';
 import {
   buildInitialAgentMessages,
   CREATE_DRAFT_EDIT_TOOL_NAME,
@@ -77,9 +72,6 @@ import {
   normalizeDeepSeekUsage
 } from './usageStats';
 
-export { AGENT_HISTORY_MESSAGE_LIMIT } from '../shared/config';
-export { DEFAULT_MAX_TOKENS, MAX_GENERATION_TOKENS };
-
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;
 const MAX_LENGTH_CONTINUATION_REQUESTS = 1;
 const SEARCH_SHAPED_RESULT_LIMIT = 120;
@@ -102,6 +94,9 @@ interface AgentRuntimeConfig {
   maxRunMs: number;
   toolResultTokenBudget: number;
   streamIdleTimeoutMs: number;
+  temperature: number;
+  topP: number;
+  contextCompression: ContextCompressionSettings;
   maxRequestRetries: number;
   requestRetryBaseMs: number;
 }
@@ -321,12 +316,13 @@ export class AgentRunner {
       }, { shortcut: 'draft' });
     }
 
-    const runtimeConfig = this.getRuntimeConfig(request.language);
+    const runtimeConfig = this.getRuntimeConfig(request);
     const projection = buildHistoryProjection({
       history: request.history,
       prompt: request.prompt,
       language: request.language,
-      contextCompression: request.contextCompression
+      contextCompression: request.contextCompression,
+      settings: runtimeConfig.contextCompression
     });
     const messages = buildInitialAgentMessages({
       ...request,
@@ -381,6 +377,7 @@ export class AgentRunner {
     const runtimeUsageBreakdown = {
       ...createContextUsageEstimate({
         model: request.model,
+        agentSettings: request.settings,
         contextFiles: request.contextFiles,
         skills: request.skills,
         messages: request.history,
@@ -782,6 +779,8 @@ export class AgentRunner {
       thinking: {
         type: request.settings.thinkingEnabled ? 'enabled' : 'disabled'
       },
+      temperature: runtimeConfig.temperature,
+      top_p: runtimeConfig.topP,
       tools: tools.length ? tools : undefined,
       tool_choice: tools.length ? 'auto' : undefined
     };
@@ -1529,7 +1528,7 @@ export class AgentRunner {
     tools: DeepSeekFunctionTool[],
     outputReserveTokens: number
   ): boolean {
-    const settings = getConfiguredContextCompressionSettings();
+    const settings = getDeepSeekV4RuntimeProfile(request.model, request.settings).contextCompression;
     const usage = createContextUsageEstimateFromMessages({
       model: request.model,
       messages,
@@ -1845,24 +1844,24 @@ export class AgentRunner {
 
     if (finishReason === 'tool_iterations_exhausted') {
       return language === 'en'
-        ? 'The agent reached the tool iteration limit and stopped this run. Increase keepseek.maxToolIterations if this task needs more workspace exploration.'
-        : 'Agent 工具调用轮次已达上限，已停止本次执行。若本次任务需要更多工程探索，可以提高 keepseek.maxToolIterations。';
+        ? 'The agent reached the automatic tool-round safety limit and stopped this run. Ask it to continue, or use Pro with Thinking Max for a broader coding task.'
+        : 'Agent 达到自动工具轮次安全上限，已停止本次执行。你可以让它继续，或对更大范围的编程任务使用 Pro + Thinking Max。';
     }
 
     if (finishReason === 'tool_call_limit_exhausted') {
       return language === 'en'
-        ? 'The agent reached the total tool-call limit and stopped this run. Increase keepseek.maxToolCalls if this task needs broader workspace exploration.'
-        : 'Agent 工具调用总数已达上限，已停止本次执行。若本次任务需要更大范围的工程探索，可以提高 keepseek.maxToolCalls。';
+        ? 'The agent reached the automatic tool-call safety limit and stopped this run. Ask it to continue with the remaining work.'
+        : 'Agent 达到自动工具调用安全上限，已停止本次执行。你可以让它继续完成剩余工作。';
     }
 
     if (finishReason === 'tool_result_budget_exhausted') {
       return language === 'en'
-        ? 'The agent reached the tool-result token budget and stopped this run. Increase keepseek.toolResultTokenBudget, or leave it at 0 to use the automatic context-window budget.'
-        : 'Agent 工具结果 token 预算已达上限，已停止本次执行。可以提高 keepseek.toolResultTokenBudget，或设为 0 使用基于上下文窗口的自动预算。';
+        ? 'The agent reached the automatic context safety limit and stopped this run. Narrow the scope or start a follow-up turn so context compression can compact the completed work.'
+        : 'Agent 达到自动上下文安全上限，已停止本次执行。请缩小任务范围，或发起后续轮次，让上下文压缩先整理已完成的工作。';
     }
 
     if (finishReason === 'run_time_limit_exhausted') {
-      return this.getRunTimeLimitError(0, language);
+      return this.getRunTimeLimitError(runtimeConfig?.maxRunMs ?? 0, language);
     }
 
     return language === 'en' ? 'DeepSeek did not return text content.' : 'DeepSeek 未返回文本内容。';
@@ -1882,11 +1881,11 @@ export class AgentRunner {
 
   private getLengthLimitMessage(language: KeepseekLanguage, maxTokens?: number): string {
     const budgetHint = typeof maxTokens === 'number' && maxTokens > 0
-      ? (language === 'en' ? ` Current keepseek.maxTokens: ${maxTokens}.` : `当前 keepseek.maxTokens：${maxTokens}。`)
-      : (language === 'en' ? ' keepseek.maxTokens is omitted, so the provider default applies.' : '当前未发送 keepseek.maxTokens，使用服务商默认输出预算。');
+      ? (language === 'en' ? ` The active model/mode profile allows up to ${maxTokens} generated tokens.` : `当前模型/模式的自动档位最多允许生成 ${maxTokens} tokens。`)
+      : '';
     return language === 'en'
-      ? `DeepSeek returned finish_reason=length, which means the provider considers the generation budget exhausted before the reply was complete. Thinking/reasoning tokens may count toward that budget, so the visible answer can look shorter than expected.${budgetHint} Increase keepseek.maxTokens if the provider supports it, reduce reasoning effort, disable Thinking, or shrink context and try again.`
-      : `DeepSeek 返回 finish_reason=length，表示服务商认为本次生成预算已耗尽，回复尚未完整。Thinking/reasoning token 可能也计入这个预算，所以可见正文不一定很长。${budgetHint}如果服务商支持，可以提高 keepseek.maxTokens；也可以降低推理强度、关闭 Thinking，或缩小上下文后重试。`;
+      ? `DeepSeek returned finish_reason=length before the reply was complete. Thinking tokens may count toward this limit, so the visible answer can be shorter than expected.${budgetHint} Ask the agent to continue, lower the reasoning mode, or narrow the context and retry.`
+      : `DeepSeek 在回复完成前返回 finish_reason=length。Thinking token 可能计入该上限，因此可见正文可能比预期短。${budgetHint}你可以让 Agent 继续、降低推理模式，或缩小上下文后重试。`;
   }
 
   private formatReasoning(parts: string[]): string | undefined {
@@ -1973,24 +1972,28 @@ export class AgentRunner {
     return [header, ...blocks].join('\n\n');
   }
 
-  private getRuntimeConfig(language: KeepseekLanguage): AgentRuntimeConfig {
+  private getRuntimeConfig(request: AgentRequest): AgentRuntimeConfig {
     const config = vscode.workspace.getConfiguration('keepseek');
     const apiKey = (config.get<string>('apiKey', '').trim() || process.env.DEEPSEEK_API_KEY || '').trim();
     if (!apiKey) {
-      throw new Error(language === 'en'
+      throw new Error(request.language === 'en'
         ? 'Save a DeepSeek API Key in KeepSeek Settings > Api Key, or set the DEEPSEEK_API_KEY environment variable.'
         : '请先在 KeepSeek 设置 > Api Key 中保存 DeepSeek API Key，或设置 DEEPSEEK_API_KEY 环境变量。');
     }
+    const profile = getDeepSeekV4RuntimeProfile(request.model, request.settings);
 
     return {
       apiKey,
       baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL).trim() || DEFAULT_DEEPSEEK_BASE_URL,
-      maxTokens: getConfiguredMaxTokens(),
-      maxToolIterations: getConfiguredMaxToolIterations(),
-      maxToolCalls: getConfiguredMaxToolCalls(),
-      maxRunMs: getConfiguredMaxRunMs(),
-      toolResultTokenBudget: getConfiguredToolResultTokenBudget(),
-      streamIdleTimeoutMs: getConfiguredStreamIdleTimeoutMs(),
+      maxTokens: profile.maxTokens,
+      maxToolIterations: profile.maxToolIterations,
+      maxToolCalls: profile.maxToolCalls,
+      maxRunMs: profile.maxRunMs,
+      toolResultTokenBudget: profile.toolResultTokenBudget,
+      streamIdleTimeoutMs: profile.streamIdleTimeoutMs,
+      temperature: profile.temperature,
+      topP: profile.topP,
+      contextCompression: profile.contextCompression,
       maxRequestRetries: getConfiguredMaxRequestRetries(),
       requestRetryBaseMs: getConfiguredRequestRetryBaseMs()
     };

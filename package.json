@@ -170,26 +170,11 @@
           "default": "",
           "markdownDescription": "Your DeepSeek API key. If set, this takes precedence over the `DEEPSEEK_API_KEY` environment variable.\n\nIf both are empty, KeepSeek will prompt you to enter the key on first use."
         },
-        "keepseek.apiBaseUrl": {
+        "keepseek.baseUrl": {
           "type": "string",
-          "default": "https://api.deepseek.com/beta",
+          "default": "https://api.deepseek.com",
           "scope": "application",
-          "markdownDescription": "Base URL for the DeepSeek API. Defaults to `https://api.deepseek.com/beta`."
-        },
-        "keepseek.model": {
-          "type": "string",
-          "default": "deepseek-chat",
-          "markdownDescription": "DeepSeek model to use (e.g. `deepseek-chat`, `deepseek-reasoner`)."
-        },
-        "keepseek.maxTokens": {
-          "type": "number",
-          "default": 8192,
-          "markdownDescription": "Maximum output tokens for each model response."
-        },
-        "keepseek.temperature": {
-          "type": "number",
-          "default": 0,
-          "markdownDescription": "Sampling temperature (0.0 – 2.0). Lower = more deterministic, higher = more creative."
+          "markdownDescription": "Base URL for the DeepSeek V4 API. Defaults to `https://api.deepseek.com`."
         },
         "keepseek.systemPrompt": {
           "type": "string",
