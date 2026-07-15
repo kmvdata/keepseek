@@ -1,6 +1,7 @@
 import './registerVscodeStub';
 import './agentRequestCoordinator.test';
 import './chatSessionStore.test';
+import './contextEntryPoints.test';
 import './draftEditRange.test';
 import './fileReference.test';
 import './historyCompressor.test';

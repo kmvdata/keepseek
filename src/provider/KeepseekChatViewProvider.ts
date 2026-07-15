@@ -110,7 +110,7 @@ import {
   type TextReferenceSource
 } from '../context/textReferences';
 
-const CHAT_CONTAINER_ID = 'keepseek';
+const CHAT_CONTAINER_ID = 'keepseek-sidebar';
 const CHAT_VIEW_TYPE = 'keepseek.chat';
 const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -228,6 +228,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public async insertSelectionToInput(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
+      return;
+    }
+    if (editor.selection.isEmpty) {
+      vscode.window.showWarningMessage(this.t('selectTextToAdd'));
       return;
     }
 

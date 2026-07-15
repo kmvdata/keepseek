@@ -60,8 +60,72 @@
       {
         "command": "keepseek.selectRange",
         "title": "KeepSeek: Select Range to Ask"
+      },
+      {
+        "command": "keepseek.openChat",
+        "title": "KeepSeek: Open Chat"
+      },
+      {
+        "command": "keepseek.addCurrentFileToContext",
+        "title": "KeepSeek: Add Current File to Context"
+      },
+      {
+        "command": "keepseek.pickWorkspaceFilesToContext",
+        "title": "KeepSeek: Add Workspace Files to Context"
+      },
+      {
+        "command": "keepseek.pickExternalFilesToContext",
+        "title": "KeepSeek: Add External Files to Context"
+      },
+      {
+        "command": "keepseek.addSelectionToContext",
+        "title": "KeepSeek: Add Selection to Chat"
+      },
+      {
+        "command": "keepseek.addTerminalSelectionToContext",
+        "title": "KeepSeek: Add Terminal Selection to Chat"
+      },
+      {
+        "command": "keepseek.addDebugConsoleSelectionToContext",
+        "title": "KeepSeek: Add Debug Console Selection to Chat"
+      },
+      {
+        "command": "keepseek.addExplorerFileToContext",
+        "title": "KeepSeek: Add File to Chat"
+      },
+      {
+        "command": "keepseek.addExplorerDirectoryToContext",
+        "title": "KeepSeek: Add Folder to Chat"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "keepseek.addSelectionToContext",
+          "when": "editorHasSelection",
+          "group": "keepseek@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "keepseek.addExplorerFileToContext",
+          "when": "!explorerResourceIsFolder",
+          "group": "keepseek@1"
+        },
+        {
+          "command": "keepseek.addExplorerDirectoryToContext",
+          "when": "explorerResourceIsFolder",
+          "group": "keepseek@2"
+        }
+      ],
+      "terminal/context": [
+        {
+          "command": "keepseek.addTerminalSelectionToContext",
+          "when": "terminalTextSelectedInFocused",
+          "group": "keepseek@1"
+        }
+      ]
+    },
     "viewsContainers": {
       "activitybar": [
         {

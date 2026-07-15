@@ -88,6 +88,83 @@ test('discovers Codex home skills recursively from SKILL.md frontmatter', async 
   assert.equal(manifest.skillUri.fsPath, path.join(skillPath, 'SKILL.md'));
 });
 
+test('discovers skills bundled in a repo-scoped Codex plugin', async () => {
+  const workspacePath = await mkdtemp(path.join(os.tmpdir(), 'keepseek-workspace-plugin-'));
+  const pluginPath = path.join(workspacePath, 'plugins', 'review-plugin');
+  const skillPath = path.join(pluginPath, 'skills', 'review-flow');
+  await mkdir(path.join(pluginPath, '.codex-plugin'), { recursive: true });
+  await mkdir(skillPath, { recursive: true });
+  await writeFile(
+    path.join(pluginPath, '.codex-plugin', 'plugin.json'),
+    JSON.stringify({
+      name: 'review-plugin',
+      version: '1.0.0',
+      description: 'Review workflows.',
+      skills: './skills/'
+    }),
+    'utf8'
+  );
+  await writeFile(
+    path.join(skillPath, 'SKILL.md'),
+    [
+      '---',
+      'name: review-flow',
+      'description: Review repository changes.',
+      '---',
+      '',
+      '# Review Flow'
+    ].join('\n'),
+    'utf8'
+  );
+
+  const workspace = vscode.workspace as unknown as MutableWorkspaceStub;
+  workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspacePath), name: 'project' }];
+  workspace.isTrusted = true;
+
+  const manifests = await new SkillDiscovery({ includeCodexSkills: false }).discover();
+  const manifest = manifests.find((item) => item.name === 'review-flow');
+
+  assert.ok(manifest);
+  assert.equal(manifest.source, 'agentsWorkspace');
+  assert.equal(manifest.sourceLabel, 'project Codex plugins');
+  assert.equal(manifest.skillUri.fsPath, path.join(skillPath, 'SKILL.md'));
+});
+
+test('discovers skills bundled in the personal Codex plugins directory', async () => {
+  const workspacePath = await mkdtemp(path.join(os.tmpdir(), 'keepseek-workspace-plugins-'));
+  const codexPluginsPath = await mkdtemp(path.join(os.tmpdir(), 'keepseek-codex-plugins-'));
+  const skillPath = path.join(codexPluginsPath, 'context-plugin', 'skills', 'context-flow');
+  await mkdir(skillPath, { recursive: true });
+  await writeFile(
+    path.join(skillPath, 'SKILL.md'),
+    [
+      '---',
+      'name: context-flow',
+      'description: Maintain prompt context references.',
+      '---',
+      '',
+      '# Context Flow'
+    ].join('\n'),
+    'utf8'
+  );
+
+  const workspace = vscode.workspace as unknown as MutableWorkspaceStub;
+  workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspacePath), name: 'project' }];
+  workspace.isTrusted = true;
+
+  const manifests = await new SkillDiscovery({
+    includeCodexSkills: false,
+    includeCodexPlugins: true,
+    codexPluginsUri: vscode.Uri.file(codexPluginsPath)
+  }).discover();
+  const manifest = manifests.find((item) => item.name === 'context-flow');
+
+  assert.ok(manifest);
+  assert.equal(manifest.source, 'agentsUser');
+  assert.equal(manifest.sourceLabel, 'Codex plugins');
+  assert.equal(manifest.skillUri.fsPath, path.join(skillPath, 'SKILL.md'));
+});
+
 test('parses Codex skill frontmatter name and description', () => {
   const parsed = parseSkillFrontmatter([
     '---',

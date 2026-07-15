@@ -24,12 +24,14 @@ export interface ParsedSkillFrontmatter {
 
 const DEFAULT_WORKSPACE_SKILL_DESCRIPTION = 'Project skill disabled because the workspace is not trusted.';
 const CODEX_SKILLS_SOURCE_LABEL = 'Codex skills';
+const CODEX_PLUGINS_SOURCE_LABEL = 'Codex plugins';
 const MAX_SKILL_DISCOVERY_DEPTH = 16;
 const SKILL_DISCOVERY_SKIPPED_DIRECTORY_NAMES = new Set([
   '.git',
   '.hg',
   '.svn',
   'node_modules',
+  '.codex-plugin',
   'dist',
   'out',
   'build',
@@ -39,6 +41,8 @@ const SKILL_DISCOVERY_SKIPPED_DIRECTORY_NAMES = new Set([
 export interface SkillDiscoveryOptions {
   codexSkillsUri?: vscode.Uri;
   includeCodexSkills?: boolean;
+  codexPluginsUri?: vscode.Uri;
+  includeCodexPlugins?: boolean;
 }
 
 export class SkillDiscovery {
@@ -82,11 +86,39 @@ export class SkillDiscovery {
     for (const folder of vscode.workspace.workspaceFolders ?? []) {
       bases.push({
         source: 'agentsWorkspace',
+        uri: vscode.Uri.joinPath(folder.uri, '.agents', 'plugins'),
+        label: `${folder.name} Codex plugins`,
+        workspaceScoped: true,
+        recursive: true,
+        instructionFileNames: [SKILL_FILE_NAME]
+      });
+      bases.push({
+        source: 'agentsWorkspace',
+        uri: vscode.Uri.joinPath(folder.uri, 'plugins'),
+        label: `${folder.name} Codex plugins`,
+        workspaceScoped: true,
+        recursive: true,
+        instructionFileNames: [SKILL_FILE_NAME]
+      });
+      bases.push({
+        source: 'agentsWorkspace',
         uri: vscode.Uri.joinPath(folder.uri, '.agents'),
         label: `${folder.name}/.agents`,
         workspaceScoped: true,
         recursive: true,
         instructionFileNames: SKILL_INSTRUCTION_FILE_NAMES
+      });
+    }
+
+    const includeCodexPlugins = this.options.includeCodexPlugins ?? this.options.includeCodexSkills ?? true;
+    if (includeCodexPlugins) {
+      bases.push({
+        source: 'agentsUser',
+        uri: this.options.codexPluginsUri ?? vscode.Uri.file(path.join(os.homedir(), '.codex', 'plugins')),
+        label: CODEX_PLUGINS_SOURCE_LABEL,
+        workspaceScoped: false,
+        recursive: true,
+        instructionFileNames: [SKILL_FILE_NAME]
       });
     }
 
