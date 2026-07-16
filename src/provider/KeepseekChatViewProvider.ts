@@ -1269,7 +1269,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     this.selectedModelId = modelId;
     const config = vscode.workspace.getConfiguration('keepseek');
-    await config.update('selectedModelId', modelId, vscode.ConfigurationTarget.Global);
+    await config.update('selectedModelId', modelId, vscode.ConfigurationTarget.Workspace);
     this.postState();
   }
 
@@ -1285,8 +1285,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.agentSettings = normalizeAgentSettings(settings, this.agentSettings);
     const config = vscode.workspace.getConfiguration('keepseek');
     await Promise.all([
-      config.update('thinkingEnabled', this.agentSettings.thinkingEnabled, vscode.ConfigurationTarget.Global),
-      config.update('reasoningEffort', this.agentSettings.reasoningEffort, vscode.ConfigurationTarget.Global)
+      config.update('thinkingEnabled', this.agentSettings.thinkingEnabled, vscode.ConfigurationTarget.Workspace),
+      config.update('reasoningEffort', this.agentSettings.reasoningEffort, vscode.ConfigurationTarget.Workspace)
     ]);
     this.postState();
   }

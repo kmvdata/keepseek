@@ -43,6 +43,52 @@ test('provider focuses the contributed KeepSeek view container before inserting 
   assert.ok(containerIds.includes(match[1]));
 });
 
+test('command menu model settings are registered and persisted for the current workspace', async () => {
+  const packagePath = path.resolve(process.cwd(), 'package.json');
+  const providerPath = path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts');
+  const packageJson = JSON.parse(await readFile(packagePath, 'utf8')) as {
+    contributes?: {
+      configuration?: {
+        properties?: Record<string, { type?: string; default?: unknown; scope?: string; enum?: unknown[] }>;
+      };
+    };
+  };
+  const properties = packageJson.contributes?.configuration?.properties ?? {};
+  const providerSource = await readFile(providerPath, 'utf8');
+
+  assert.deepEqual(properties['keepseek.selectedModelId'], {
+    type: 'string',
+    default: '',
+    scope: 'window',
+    markdownDescription: 'Selected model for the current workspace. An empty or unavailable value falls back to the first supported model.'
+  });
+  assert.deepEqual(properties['keepseek.thinkingEnabled'], {
+    type: 'boolean',
+    default: true,
+    scope: 'window',
+    markdownDescription: 'Enable Thinking mode for the current workspace.'
+  });
+  assert.deepEqual(properties['keepseek.reasoningEffort'], {
+    type: 'string',
+    default: 'high',
+    scope: 'window',
+    enum: ['high', 'max'],
+    markdownDescription: 'Thinking effort for the current workspace.'
+  });
+  assert.match(
+    providerSource,
+    /config\.update\('selectedModelId', modelId, vscode\.ConfigurationTarget\.Workspace\)/u
+  );
+  assert.match(
+    providerSource,
+    /config\.update\('thinkingEnabled', this\.agentSettings\.thinkingEnabled, vscode\.ConfigurationTarget\.Workspace\)/u
+  );
+  assert.match(
+    providerSource,
+    /config\.update\('reasoningEffort', this\.agentSettings\.reasoningEffort, vscode\.ConfigurationTarget\.Workspace\)/u
+  );
+});
+
 test('rich prompt script exposes reference, skill, and external drop entry points', () => {
   const script = getInputScript();
 

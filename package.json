@@ -2,9 +2,8 @@
   "name": "keepseek",
   "displayName": "KeepSeek",
   "description": "AI-powered coding agent for VS Code",
-  "version": "0.1.6",
   "publisher": "keepseek",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "license": "MIT",
   "icon": "resources/keepseek.png",
   "homepage": "https://github.com/kmvdata/keepseek#readme",
@@ -175,6 +174,28 @@
           "default": "https://api.deepseek.com",
           "scope": "application",
           "markdownDescription": "Base URL for the DeepSeek V4 API. Defaults to `https://api.deepseek.com`."
+        },
+        "keepseek.selectedModelId": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "Selected model for the current workspace. An empty or unavailable value falls back to the first supported model."
+        },
+        "keepseek.thinkingEnabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "Enable Thinking mode for the current workspace."
+        },
+        "keepseek.reasoningEffort": {
+          "type": "string",
+          "default": "high",
+          "scope": "window",
+          "enum": [
+            "high",
+            "max"
+          ],
+          "markdownDescription": "Thinking effort for the current workspace."
         },
         "keepseek.systemPrompt": {
           "type": "string",

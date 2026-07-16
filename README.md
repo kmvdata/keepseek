@@ -114,9 +114,9 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 |--------|--------|------|
 | `keepseek.apiKey` | `""` | DeepSeek API Key，也可用 `DEEPSEEK_API_KEY` 环境变量兜底 |
 | `keepseek.baseUrl` | `"https://api.deepseek.com"` | OpenAI-compatible API base URL |
-| `keepseek.selectedModelId` | `""` | 当前选中模型 id；为空或不可用时使用模型列表第一项 |
-| `keepseek.thinkingEnabled` | `true` | 是否开启 Thinking 模式 |
-| `keepseek.reasoningEffort` | `"high"` | Thinking 推理强度，支持 `high` 或 `max` |
+| `keepseek.selectedModelId` | `""` | 当前工程选中的模型 id；为空或不可用时使用模型列表第一项 |
+| `keepseek.thinkingEnabled` | `true` | 当前工程是否开启 Thinking 模式 |
+| `keepseek.reasoningEffort` | `"high"` | 当前工程的 Thinking 推理强度，支持 `high` 或 `max` |
 | `keepseek.maxFileBytes` | `200000` | 单个引用文件或日志片段的最大字节数 |
 | `keepseek.maxWorkspaceToolFiles` | `2000` | 只读工作区文件列表工具最多返回的文件数量 |
 | `keepseek.usagePricing` | DeepSeek 默认价目 | 按模型配置每百万 token 的 cache hit、输入、输出价格和币种，用于费用估算 |
@@ -159,7 +159,7 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 从 VSIX 安装：
 
 ```bash
-code --install-extension keepseek-0.1.6.vsix
+code --install-extension keepseek-0.1.8.vsix
 ```
 
 VS Code 1.127.0 可能输出 DEP0169 warning，这是 VS Code CLI 内部警告，安装成功不受影响。
@@ -189,7 +189,6 @@ npm run lint
 
 - `src/extension.ts`：VS Code 激活入口、命令注册和 Provider 接线。
 - `src/provider/`：WebviewView Provider、Webview 消息类型和视图聚焦工具。
-当前发布版本为 `0.1.7`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.1.7`，发布标签可以使用 `v0.1.7`。
 - `src/sessions/`：当前项目和跨项目 History Session 存储、迁移和保留策略。
 - `src/context/`：上下文文件、终端/输出/调试选区引用，以及 prompt 文件/目录/Skill 引用展开。
 - `src/edits/`：DraftEdit 状态和用户确认后的安全写入。
@@ -204,7 +203,7 @@ KeepSeek: Open Agent Chat
 
 ## 发布准备
 
-当前发布版本为 `0.1.6`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.1.6`，发布标签可以使用 `v0.1.6`。
+当前发布版本为 `0.1.8`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.1.8`，发布标签可以使用 `v0.1.8`。
 
 生成 VSIX：
 
@@ -366,9 +365,9 @@ Debug Console selection capture is most reliable through `Cmd+L` / `Ctrl+L` beca
 |---------|---------|-------------|
 | `keepseek.apiKey` | `""` | DeepSeek API Key. `DEEPSEEK_API_KEY` can be used as a fallback |
 | `keepseek.baseUrl` | `"https://api.deepseek.com"` | OpenAI-compatible API base URL |
-| `keepseek.selectedModelId` | `""` | Persisted selected model id; falls back to the first configured model |
-| `keepseek.thinkingEnabled` | `true` | Enables Thinking mode |
-| `keepseek.reasoningEffort` | `"high"` | Thinking effort, either `high` or `max` |
+| `keepseek.selectedModelId` | `""` | Selected model for the current workspace; falls back to the first configured model |
+| `keepseek.thinkingEnabled` | `true` | Enables Thinking mode for the current workspace |
+| `keepseek.reasoningEffort` | `"high"` | Thinking effort for the current workspace, either `high` or `max` |
 | `keepseek.maxFileBytes` | `200000` | Maximum bytes for a referenced file or log snippet |
 | `keepseek.maxWorkspaceToolFiles` | `2000` | Maximum number of files returned by the read-only workspace file listing tool |
 | `keepseek.usagePricing` | DeepSeek defaults | Per-million-token cache-hit, input, output prices and currency by model id |

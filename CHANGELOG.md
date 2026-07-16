@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.8 - 2026-07-16
+
+- Persisted the selected model, Thinking mode, and reasoning effort for each workspace across VS Code restarts.
+- Registered the command-menu model settings in the VS Code configuration manifest.
+
 ## 0.1.7 - 2026-07-18
 
 - Version bump for v0.1.7 release.
