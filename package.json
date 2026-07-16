@@ -121,7 +121,7 @@
       "terminal/context": [
         {
           "command": "keepseek.addTerminalSelectionToContext",
-          "when": "terminalTextSelectedInFocused",
+          "when": "terminalTextSelected",
           "group": "keepseek@1"
         }
       ]

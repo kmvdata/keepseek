@@ -9,7 +9,7 @@ test('contributes editor, Explorer, and terminal context commands', async () => 
   const packageJson = JSON.parse(await readFile(packagePath, 'utf8')) as {
     contributes?: {
       commands?: Array<{ command?: string }>;
-      menus?: Record<string, Array<{ command?: string }>>;
+      menus?: Record<string, Array<{ command?: string; when?: string }>>;
     };
   };
   const commandIds = new Set((packageJson.contributes?.commands ?? []).map((command) => command.command));
@@ -22,7 +22,11 @@ test('contributes editor, Explorer, and terminal context commands', async () => 
   assert.ok(menus['editor/context']?.some((item) => item.command === 'keepseek.addSelectionToContext'));
   assert.ok(menus['explorer/context']?.some((item) => item.command === 'keepseek.addExplorerFileToContext'));
   assert.ok(menus['explorer/context']?.some((item) => item.command === 'keepseek.addExplorerDirectoryToContext'));
-  assert.ok(menus['terminal/context']?.some((item) => item.command === 'keepseek.addTerminalSelectionToContext'));
+  const terminalSelectionMenu = menus['terminal/context']?.find(
+    (item) => item.command === 'keepseek.addTerminalSelectionToContext'
+  );
+  assert.ok(terminalSelectionMenu);
+  assert.equal(terminalSelectionMenu.when, 'terminalTextSelected');
 });
 
 test('provider focuses the contributed KeepSeek view container before inserting references', async () => {
