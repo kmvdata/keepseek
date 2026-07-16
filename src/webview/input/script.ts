@@ -32,7 +32,6 @@ export function getInputScript(): string {
       var commandSkillListOpen = false;
       var referenceMenuOpen = false;
       var referenceMenuSource = '';
-      var activeSlashRange = null;
       var activeMentionRange = null;
       var activeMentionQuery = '';
       var activeReferenceIndex = 0;
@@ -78,9 +77,6 @@ export function getInputScript(): string {
         sanitizePromptContent();
         var prompt = serializePrompt();
         if (!prompt.trim()) return;
-        if (handleSlashCommandPrompt(prompt)) {
-          return;
-        }
         closeCommandMenu();
         closeReferenceMenu(false);
         vscode.postMessage({
@@ -166,7 +162,6 @@ export function getInputScript(): string {
         updatePromptVisualState();
         savePromptSelection();
         syncReferenceMenuFromPrompt();
-        syncCommandMenuFromPrompt();
       });
 
       promptInput.addEventListener('keyup', savePromptSelection);
@@ -197,7 +192,6 @@ export function getInputScript(): string {
         commandMenuButton.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
-          activeSlashRange = null;
           toggleCommandMenu();
           if (commandMenuOpen) {
             promptInput.focus();
@@ -213,7 +207,6 @@ export function getInputScript(): string {
         commandModelSwitch.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
-          consumeSlashTrigger(false);
           commandModelListOpen = !commandModelListOpen;
           renderCommandMenu();
         });
@@ -231,7 +224,6 @@ export function getInputScript(): string {
             state.selectedModelId = modelId;
             vscode.postMessage({ type: 'setSelectedModel', modelId: modelId });
           }
-          consumeSlashTrigger(false);
           commandModelListOpen = false;
           renderCommandMenu();
           setComposerStatus(t('modelSwitched'));
@@ -242,7 +234,6 @@ export function getInputScript(): string {
         commandSkillsButton.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
-          consumeSlashTrigger(false);
           commandSkillListOpen = !commandSkillListOpen;
           if (commandSkillListOpen) {
             commandModelListOpen = false;
@@ -274,7 +265,6 @@ export function getInputScript(): string {
         commandCreateSkillButton.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
-          consumeSlashTrigger(false);
           closeCommandMenu();
           showCreateSkillDialog();
         });
@@ -297,7 +287,6 @@ export function getInputScript(): string {
 
       if (commandEffortSlider) {
         commandEffortSlider.addEventListener('input', function() {
-          consumeSlashTrigger(false);
           updateAgentSettingsFromControls();
           renderCommandMenu();
         });
@@ -305,7 +294,6 @@ export function getInputScript(): string {
 
       if (commandThinkingToggle) {
         commandThinkingToggle.addEventListener('change', function() {
-          consumeSlashTrigger(false);
           updateAgentSettingsFromControls();
           renderCommandMenu();
           setComposerStatus(commandThinkingToggle.checked ? t('thinkingOn') : t('thinkingOff'));
@@ -442,7 +430,6 @@ export function getInputScript(): string {
         commandMenuOpen = false;
         commandModelListOpen = false;
         commandSkillListOpen = false;
-        activeSlashRange = null;
         commandMenu.classList.add('hidden');
         commandMenuButton.classList.remove('is-active');
         commandMenuButton.setAttribute('aria-expanded', 'false');
@@ -526,7 +513,6 @@ export function getInputScript(): string {
 
       function openCommandModelListAndFocus() {
         if (!commandModelSwitch) { return; }
-        consumeSlashTrigger(false);
         commandModelListOpen = true;
         commandSkillListOpen = false;
         renderCommandMenu();
@@ -535,7 +521,6 @@ export function getInputScript(): string {
 
       function openCommandSkillListAndFocus() {
         if (!commandSkillsButton) { return; }
-        consumeSlashTrigger(false);
         commandSkillListOpen = true;
         commandModelListOpen = false;
         vscode.postMessage({ type: 'requestSkills' });
@@ -599,19 +584,6 @@ export function getInputScript(): string {
               control.tabIndex >= 0 &&
               control.getClientRects().length > 0;
           });
-      }
-
-      function syncCommandMenuFromPrompt() {
-        var slashRange = getSlashTriggerRange();
-        if (slashRange) {
-          activeSlashRange = slashRange;
-          closeReferenceMenu(false);
-          openCommandMenu();
-          return;
-        }
-        if (commandMenuOpen && activeSlashRange && !isRangeInsidePrompt(activeSlashRange)) {
-          closeCommandMenu();
-        }
       }
 
       function syncReferenceMenuFromPrompt() {
@@ -1627,32 +1599,6 @@ export function getInputScript(): string {
           thinkingEnabled: typeof configured.thinkingEnabled === 'boolean' ? configured.thinkingEnabled : true,
           reasoningEffort: configured.reasoningEffort === 'max' ? 'max' : 'high'
         };
-      }
-
-      function consumeSlashTrigger(restoreFocus) {
-        if (!activeSlashRange || !isRangeInsidePrompt(activeSlashRange)) { return; }
-        var range = activeSlashRange.cloneRange();
-        range.deleteContents();
-        if (restoreFocus === false) {
-          savedPromptRange = range.cloneRange();
-        } else {
-          setPromptSelectionRange(range);
-          savePromptSelection();
-        }
-        updatePromptVisualState();
-        activeSlashRange = null;
-      }
-
-      function getSlashTriggerRange() {
-        var selection = window.getSelection();
-        if (!selection || !selection.rangeCount || !selection.isCollapsed) { return null; }
-        var range = selection.getRangeAt(0);
-        if (!isRangeInsidePrompt(range)) { return null; }
-        var textBefore = getTextBeforeRange(range);
-        if (!textBefore || textBefore.charAt(textBefore.length - 1) !== '/') { return null; }
-        var previous = textBefore.charAt(textBefore.length - 2);
-        if (previous && !isWhitespace(previous)) { return null; }
-        return getCharacterRangeBeforeCaret(range, '/');
       }
 
       function getSkillTrigger() {
@@ -3127,24 +3073,6 @@ export function getInputScript(): string {
         promptShortcutController.deactivateMark();
         savedPromptRange = null;
         updatePromptVisualState();
-      }
-
-      function handleSlashCommandPrompt(prompt) {
-        var command = String(prompt || '').trim().toLowerCase();
-        if (command === '/create-skill') {
-          clearPrompt();
-          showCreateSkillDialog();
-          return true;
-        }
-        if (command === '/skills') {
-          clearPrompt();
-          commandSkillListOpen = true;
-          commandModelListOpen = false;
-          vscode.postMessage({ type: 'requestSkills' });
-          openCommandMenu();
-          return true;
-        }
-        return false;
       }
 
       var settingsOverlay = document.getElementById('settingsDialogOverlay');

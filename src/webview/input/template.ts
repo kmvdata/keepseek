@@ -35,7 +35,7 @@ export function getInputTemplate(): string {
                 id="commandMenuButton"
                 type="button"
                 class="composer-icon-btn composer-command-btn"
-                title="显示命令菜单 /"
+                title="显示命令菜单"
                 aria-label="显示命令菜单"
                 data-i18n-title="showCommandMenuTitle"
                 data-i18n-aria-label="showCommandMenu"
@@ -67,7 +67,6 @@ export function getInputTemplate(): string {
         <div id="commandMenu" class="command-menu hidden" role="menu" aria-label="命令菜单" data-i18n-aria-label="commandMenu">
           <div class="command-menu-header">
             <span class="command-menu-title" data-i18n="commandMenu">命令菜单</span>
-            <span class="command-menu-shortcut">/</span>
           </div>
 
           <section class="command-section" aria-label="Skills">

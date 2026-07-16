@@ -728,21 +728,6 @@ export function getInputStyles(): string {
       font-weight: 600;
     }
 
-    .command-menu-shortcut {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 18px;
-      height: 18px;
-      border: 1px solid var(--vscode-keybindingLabel-border, var(--vscode-panel-border));
-      border-radius: 4px;
-      background: var(--vscode-keybindingLabel-background, var(--vscode-editor-background));
-      color: var(--vscode-keybindingLabel-foreground, var(--vscode-foreground));
-      font-family: var(--vscode-editor-font-family, monospace);
-      font-size: 12px;
-      font-weight: 700;
-    }
-
     .command-section {
       padding: 6px 0;
       border-top: 1px solid var(--vscode-panel-border);
