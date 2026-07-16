@@ -1,7 +1,10 @@
 # Changelog
 
-## 0.1.6 - 2026-07-15
+## 0.1.7 - 2026-07-18
 
+- Version bump for v0.1.7 release.
+
+## 0.1.6 - 2026-07-15
 - Fixed context entry points for editor selections, Explorer files/folders, and terminal selections, including the contributed menu commands and KeepSeek view focus target.
 - Improved file and directory reference coverage with tests for selected line/column expansion, directory manifests, and Explorer multi-selection de-duplication.
 - Added discovery for skills bundled in workspace and personal Codex plugin directories, alongside existing workspace `.agents` and user Codex skills.

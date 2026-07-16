@@ -189,8 +189,7 @@ npm run lint
 
 - `src/extension.ts`：VS Code 激活入口、命令注册和 Provider 接线。
 - `src/provider/`：WebviewView Provider、Webview 消息类型和视图聚焦工具。
-- `src/agent/`：Agent 运行循环、DeepSeek/OpenAI-compatible 协议、SSE/DSML 解析、上下文投影/压缩、上下文用量估算和只读工具。
-- `src/skills/`：KeepSeek Skills 的发现、加载、状态管理和 Skill 草案创建。
+当前发布版本为 `0.1.7`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.1.7`，发布标签可以使用 `v0.1.7`。
 - `src/sessions/`：当前项目和跨项目 History Session 存储、迁移和保留策略。
 - `src/context/`：上下文文件、终端/输出/调试选区引用，以及 prompt 文件/目录/Skill 引用展开。
 - `src/edits/`：DraftEdit 状态和用户确认后的安全写入。
