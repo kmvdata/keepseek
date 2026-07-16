@@ -42,6 +42,7 @@ class MemorySessionStorage implements ChatSessionStorageAdapter {
   public constructor(private state: StoredWorkspaceSessionState) {}
 
   public async loadWorkspace(_workspaceScope: WorkspaceSessionScope): Promise<StoredWorkspaceSessionState> {
+    void _workspaceScope;
     return cloneWorkspaceState(this.state);
   }
 
@@ -49,6 +50,7 @@ class MemorySessionStorage implements ChatSessionStorageAdapter {
     _workspaceScope: WorkspaceSessionScope,
     state: StoredWorkspaceSessionState
   ): Promise<void> {
+    void _workspaceScope;
     this.state = cloneWorkspaceState(state);
     this.saved = cloneWorkspaceState(state);
   }
@@ -58,14 +60,18 @@ class MemorySessionStorage implements ChatSessionStorageAdapter {
   }
 
   public async loadWorkspaceSessions(_workspaceKey: string): Promise<ChatSession[]> {
+    void _workspaceKey;
     return [];
   }
 
   public async deleteWorkspaceSessions(_workspaceKey: string, _sessionIds: string[]): Promise<void> {
+    void _workspaceKey;
+    void _sessionIds;
     return undefined;
   }
 
   public async deleteEntireWorkspace(_workspaceKey: string): Promise<void> {
+    void _workspaceKey;
     return undefined;
   }
 

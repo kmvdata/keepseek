@@ -98,3 +98,13 @@ test('rich prompt script exposes reference, skill, and external drop entry point
   assert.match(script, /insertDroppedFileReferences/u);
   assert.match(script, /getPromptInsertionRange/u);
 });
+
+test('reference menu puts the external resource picker before workspace resources by default', () => {
+  const script = getInputScript();
+
+  assert.match(script, /return \[createExternalPickerReferenceEntry\(\)\]\.concat\(resources\)/u);
+  assert.match(
+    script,
+    /var loadingEntries = shouldShowExternalPickerReferenceEntry\(\) \? \[createExternalPickerReferenceEntry\(\)\] : \[\]/u
+  );
+});

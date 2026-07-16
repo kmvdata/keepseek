@@ -717,7 +717,7 @@ export function getInputScript(): string {
 
         if (referenceResourcesLoading && !referenceResourcesLoaded) {
           count.textContent = t('loading');
-          var loadingEntries = referenceMenuSource === 'button' ? [createExternalPickerReferenceEntry()] : [];
+          var loadingEntries = shouldShowExternalPickerReferenceEntry() ? [createExternalPickerReferenceEntry()] : [];
           if (loadingEntries.length) {
             appendReferenceMenuEntries(loadingEntries);
           }
@@ -726,7 +726,7 @@ export function getInputScript(): string {
         }
 
         if (referenceResourcesError) {
-          var errorEntries = referenceMenuSource === 'button' ? [createExternalPickerReferenceEntry()] : [];
+          var errorEntries = shouldShowExternalPickerReferenceEntry() ? [createExternalPickerReferenceEntry()] : [];
           count.textContent = String(errorEntries.length);
           if (errorEntries.length) {
             appendReferenceMenuEntries(errorEntries);
@@ -909,11 +909,7 @@ export function getInputScript(): string {
           return resources;
         }
 
-        var picker = createExternalPickerReferenceEntry();
-        if (referenceMenuSource === 'button') {
-          return [picker].concat(resources);
-        }
-        return resources.concat(picker);
+        return [createExternalPickerReferenceEntry()].concat(resources);
       }
 
       function shouldShowExternalPickerReferenceEntry() {
