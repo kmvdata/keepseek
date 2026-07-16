@@ -312,6 +312,16 @@ npm run compile
 npm run lint
 ```
 
+VSIX 打包发布前必须使用：
+
+```bash
+npm run package
+```
+
+不要直接绕过 `package:verify` 安装或发布 `.vsix`。打包脚本会先清理 `out/`、重新编译，并校验 VSIX 中包含 `package.json` 的运行时 dependencies（例如 `node_modules/ignore`）和 `main` 入口；如果缺失依赖或混入旧的扁平 `out/*.js` 产物，必须先修复再安装测试。
+
+本机一键重装验证使用 `npm run reinstall:vsix`；它会读取当前 `package.json` 的最新 `publisher/name/version`，生成对应版本的 VSIX，卸载 VS Code 中的当前 KeepSeek，再安装新包。
+
 开发调试：用 VS Code 打开仓库，按 F5 启动 Extension Development Host。
 
 重点手测：普通发送、长对话压缩、压缩关闭、摘要失败 fallback、编辑重发、会话切换、上下文文件添加、选区引用、Explorer 文件/目录引用、拖拽引用、`@` 文件/目录补全、引用展开、Agent 读文件/列文件/列目录、DraftEdit Apply/Discard/Apply All、语言切换、API 设置保存、context window 估算显示。

@@ -12,6 +12,7 @@ node_modules/**
 !node_modules/ignore/**
 src/**
 test/**
+scripts/**
 out-test/**
 *.vsix
 AGENTS.md

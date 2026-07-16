@@ -235,14 +235,17 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
+    "clean": "node scripts/clean.js",
     "compile": "tsc -p tsconfig.json",
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "build:test": "tsc -p tsconfig.test.json",
-    "build:prod": "tsc -p tsconfig.json",
+    "build:prod": "npm run build",
     "watch": "tsc -watch -p tsconfig.json",
     "lint": "eslint src/ test/",
     "test": "node out-test/test/runTests.js",
-    "package": "npx @vscode/vsce package --allow-missing-repository"
+    "package": "npx @vscode/vsce package --allow-missing-repository && npm run package:verify",
+    "package:verify": "node scripts/verify-vsix.js",
+    "reinstall:vsix": "node scripts/reinstall-vsix.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
