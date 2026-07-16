@@ -252,5 +252,8 @@
     "eslint": "^9.24.0",
     "neostandard": "^0.12.1",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "ignore": "^7.0.6"
   }
 }

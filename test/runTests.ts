@@ -8,6 +8,7 @@ import './historyCompressor.test';
 import './historyProjection.test';
 import './modelProfiles.test';
 import './protocolCache.test';
+import './referenceResources.test';
 import './skillDiscovery.test';
 import './skillReference.test';
 import './usageStats.test';
