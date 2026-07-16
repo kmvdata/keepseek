@@ -1289,7 +1289,19 @@ export function getInputScript(): string {
         if (!hasData) {
           return '-';
         }
-        return formatMetricInteger(readNonNegativeNumber(value, 0));
+        return formatCompactTokenCount(readNonNegativeNumber(value, 0));
+      }
+
+      function formatCompactTokenCount(value) {
+        var tokens = Math.max(0, Math.floor(Number(value) || 0));
+        if (tokens >= 1000000) {
+          var millions = Math.floor(tokens / 10000) / 100;
+          return millions.toFixed(2) + 'm';
+        }
+        if (tokens >= 1000) {
+          return Math.floor(tokens / 1000) + 'k';
+        }
+        return String(tokens);
       }
 
       function formatMetricInteger(value) {

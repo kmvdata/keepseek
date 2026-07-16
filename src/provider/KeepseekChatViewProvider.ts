@@ -1911,9 +1911,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     ) ?? computedContextUsage;
     const contextCompression = getDeepSeekV4RuntimeProfile(selectedModel, this.agentSettings).contextCompression;
     const lastTurnUsage = this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage;
-    const contextPercent = lastTurnUsage?.totalTokens
-      ? (lastTurnUsage.totalTokens / Math.max(1, contextUsage.maxTokensEstimate)) * 100
-      : contextUsage.usedPercent;
+    const contextPercent = contextUsage.usedPercent;
 
     this.postToWebview({
       type: 'state',

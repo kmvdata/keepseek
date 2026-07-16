@@ -51,7 +51,7 @@ export function getInputTemplate(): string {
                 <span class="context-progress-ring" aria-hidden="true"></span>
                 <span id="contextProgressTooltip" class="context-progress-tooltip" role="tooltip">
                   <span id="contextProgressTitle">背景信息窗口</span>
-                  <span id="contextProgressPercent">本次命中：-</span>
+                  <span id="contextProgressPercent">已用：-</span>
                   <span id="contextProgressTokens">本次 tokens：-</span>
                   <span id="contextProgressBreakdown" class="context-progress-breakdown"></span>
                 </span>
