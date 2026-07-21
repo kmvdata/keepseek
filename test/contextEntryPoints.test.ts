@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import { getInputScript } from '../src/webview/input/script';
+import { getInputTemplate } from '../src/webview/input/template';
+import { getTemplate } from '../src/webview/template';
 
 test('contributes editor, Explorer, and terminal context commands', async () => {
   const packagePath = path.resolve(process.cwd(), 'package.json');
@@ -107,4 +109,15 @@ test('reference menu puts the external resource picker before workspace resource
     script,
     /var loadingEntries = shouldShowExternalPickerReferenceEntry\(\) \? \[createExternalPickerReferenceEntry\(\)\] : \[\]/u
   );
+});
+
+test('background runs use an on-demand command instead of an always-visible launcher', () => {
+  const mainTemplate = getTemplate();
+  const inputTemplate = getInputTemplate();
+  const backgroundRegion = /<section id="backgroundRegion"[\s\S]*?<\/section>/u.exec(mainTemplate)?.[0] ?? '';
+
+  assert.match(backgroundRegion, /class="background-region hidden"/u);
+  assert.doesNotMatch(backgroundRegion, /id="backgroundStart"/u);
+  assert.match(inputTemplate, /id="commandBackgroundRunButton"/u);
+  assert.match(inputTemplate, /id="backgroundRunDialogOverlay" class="settings-overlay hidden"/u);
 });

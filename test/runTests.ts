@@ -21,3 +21,4 @@ import './skillReference.test';
 import './taskPlan.test';
 import './toolAuthorization.test';
 import './usageStats.test';
+import './validationAvailability.test';

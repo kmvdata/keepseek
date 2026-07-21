@@ -13,7 +13,8 @@ import type {
 import { RUN_VALIDATION_TOOL_NAME } from '../protocol';
 
 const MAX_DIAGNOSTIC_ITEMS = 200;
-const SAFE_NPM_SCRIPTS = new Set<SafeNpmScript>(['compile', 'lint', 'test']);
+const SAFE_NPM_SCRIPT_ORDER: SafeNpmScript[] = ['compile', 'lint', 'test'];
+const SAFE_NPM_SCRIPTS = new Set<SafeNpmScript>(SAFE_NPM_SCRIPT_ORDER);
 const HIGH_RISK_SCRIPT_PATTERN = /(?:\b(?:npm|pnpm|yarn)\s+(?:install|add|publish|deploy)\b|\bgit\s+push\b|\brm\s+(?:-[^\s]+\s+)*|\b(?:curl|wget)\b|\b(?:deploy|publish)\b)/iu;
 
 export interface ValidationToolAdapter {
@@ -147,6 +148,25 @@ export class ValidationToolService implements ValidationToolAdapter {
       }));
     }
   }
+}
+
+export async function getAvailableSafeValidationScripts(): Promise<SafeNpmScript[]> {
+  if (!vscode.workspace.isTrusted) {
+    return [];
+  }
+  const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+  if (!workspaceFolder) {
+    return [];
+  }
+  const definitions = await Promise.all(SAFE_NPM_SCRIPT_ORDER.map(async (script) => ({
+    script,
+    definition: await readNpmScript(workspaceFolder, script)
+  })));
+  return definitions
+    .filter((entry): entry is { script: SafeNpmScript; definition: string } =>
+      typeof entry.definition === 'string' && !HIGH_RISK_SCRIPT_PATTERN.test(entry.definition)
+    )
+    .map(({ script }) => script);
 }
 
 function createWorkspaceDiagnosticSummary(): WorkspaceDiagnosticSummary {

@@ -30,6 +30,7 @@ export function getScript(): string {
         pendingUpdates: []
       },
       backgroundRun: null,
+      backgroundAvailableScripts: [],
       backgroundDefaults: {
         maxRounds: 5,
         maxDurationMs: 1800000,
@@ -343,12 +344,16 @@ export function getScript(): string {
     const settingsLanguageSubmenu = document.getElementById('settingsLanguageSubmenu');
     const sessionMenu = document.getElementById('sessionMenu');
     const backgroundRegion = document.getElementById('backgroundRegion');
+    const backgroundLabel = document.getElementById('backgroundLabel');
     const backgroundStatus = document.getElementById('backgroundStatus');
+    const backgroundRunDialogOverlay = document.getElementById('backgroundRunDialogOverlay');
     const backgroundScript = document.getElementById('backgroundScript');
     const backgroundMaxRounds = document.getElementById('backgroundMaxRounds');
     const backgroundStart = document.getElementById('backgroundStart');
+    const backgroundCancel = document.getElementById('backgroundCancel');
     const backgroundResume = document.getElementById('backgroundResume');
     const backgroundStop = document.getElementById('backgroundStop');
+    const backgroundDismiss = document.getElementById('backgroundDismiss');
     const contextBarOuter = document.getElementById('contextBarOuter');
     const contextBar = document.getElementById('contextBar');
     const planRegion = document.getElementById('planRegion');
@@ -382,6 +387,8 @@ export function getScript(): string {
     const pendingChangeActions = new Set();
     let settingsMenuOpen = false;
     let memoryPanelOpen = false;
+    let backgroundRunDialogOpen = false;
+    let dismissedBackgroundRunId = '';
     let sessionMenuOpen = false;
     let sessionMultiSelectMode = false;
     let sessionRangeDays = 1;
@@ -802,11 +809,30 @@ export function getScript(): string {
     if (backgroundStart) {
       backgroundStart.addEventListener('click', function() {
         if (state.isBusy || isBackgroundActive()) return;
+        var scripts = getBackgroundAvailableScripts();
+        var script = normalizeValidationScript(backgroundScript?.value);
+        if (scripts.indexOf(script) < 0) return;
+        var maxRounds = Math.max(1, Number(state.backgroundDefaults?.maxRounds) || 5);
+        closeBackgroundRunDialog(false);
         vscode.postMessage({
           type: 'startBackgroundRun',
-          script: normalizeValidationScript(backgroundScript?.value),
-          maxRounds: normalizeIntegerInRange(backgroundMaxRounds?.value, 1, 10, 5)
+          script: script,
+          maxRounds: normalizeIntegerInRange(backgroundMaxRounds?.value, 1, maxRounds, maxRounds)
         });
+      });
+    }
+
+    if (backgroundCancel) {
+      backgroundCancel.addEventListener('click', function() {
+        closeBackgroundRunDialog(true);
+      });
+    }
+
+    if (backgroundRunDialogOverlay) {
+      backgroundRunDialogOverlay.addEventListener('mousedown', function(event) {
+        if (event.target === backgroundRunDialogOverlay) {
+          closeBackgroundRunDialog(true);
+        }
       });
     }
 
@@ -822,6 +848,23 @@ export function getScript(): string {
         vscode.postMessage({ type: 'stopBackgroundRun' });
       });
     }
+
+    if (backgroundDismiss) {
+      backgroundDismiss.addEventListener('click', function() {
+        var run = state.backgroundRun && typeof state.backgroundRun === 'object' ? state.backgroundRun : null;
+        if (!run || isBackgroundActive()) return;
+        dismissedBackgroundRunId = String(run.id || '');
+        renderBackgroundRun();
+      });
+    }
+
+    document.addEventListener('keydown', function(event) {
+      if (!backgroundRunDialogOpen || event.key !== 'Escape') return;
+      event.preventDefault();
+      closeBackgroundRunDialog(true);
+    });
+
+    window.keepseekOpenBackgroundRunDialog = openBackgroundRunDialog;
 
     if (settingsApiKeyMenuItem) {
       settingsApiKeyMenuItem.addEventListener('click', function(event) {
@@ -1376,35 +1419,93 @@ export function getScript(): string {
       renderProjectMemory();
     }
 
+    function getBackgroundAvailableScripts() {
+      return Array.isArray(state.backgroundAvailableScripts)
+        ? state.backgroundAvailableScripts.filter(function(script) {
+            return script === 'compile' || script === 'lint' || script === 'test';
+          })
+        : [];
+    }
+
+    function openBackgroundRunDialog() {
+      if (!backgroundRunDialogOverlay || state.isBusy || isBackgroundActive()) return;
+      if (!getBackgroundAvailableScripts().length) return;
+      backgroundRunDialogOpen = true;
+      backgroundRunDialogOverlay.classList.remove('hidden');
+      if (backgroundMaxRounds) {
+        backgroundMaxRounds.value = String(Math.max(1, Number(state.backgroundDefaults?.maxRounds) || 5));
+      }
+      renderBackgroundRunDialog();
+      window.setTimeout(function() {
+        backgroundScript?.focus();
+      }, 0);
+    }
+
+    function closeBackgroundRunDialog(restoreFocus) {
+      backgroundRunDialogOpen = false;
+      backgroundRunDialogOverlay?.classList.add('hidden');
+      if (restoreFocus) {
+        promptInput?.focus();
+      }
+    }
+
+    function renderBackgroundRunDialog() {
+      if (!backgroundScript || !backgroundMaxRounds || !backgroundStart) return;
+      var scripts = getBackgroundAvailableScripts();
+      if (!scripts.length) {
+        closeBackgroundRunDialog(false);
+        return;
+      }
+      var previousScript = normalizeValidationScript(backgroundScript.value);
+      var preferredScript = state.repairLoop?.lastValidationScript;
+      var selectedScript = scripts.indexOf(previousScript) >= 0
+        ? previousScript
+        : scripts.indexOf(preferredScript) >= 0
+          ? preferredScript
+          : scripts[0];
+      backgroundScript.innerHTML = '';
+      scripts.forEach(function(script) {
+        var option = document.createElement('option');
+        option.value = script;
+        option.textContent = script;
+        option.selected = script === selectedScript;
+        backgroundScript.append(option);
+      });
+      var maxRounds = Math.max(1, Number(state.backgroundDefaults?.maxRounds) || 5);
+      backgroundMaxRounds.max = String(maxRounds);
+      var selectedRounds = Number(backgroundMaxRounds.value);
+      if (!Number.isFinite(selectedRounds) || selectedRounds < 1 || selectedRounds > maxRounds) {
+        backgroundMaxRounds.value = String(maxRounds);
+      }
+      backgroundStart.disabled = state.isBusy || isBackgroundActive() || scripts.length === 0;
+    }
+
     function renderBackgroundRun() {
       if (!backgroundRegion || !backgroundStatus) return;
-      var run = state.backgroundRun && typeof state.backgroundRun === 'object' ? state.backgroundRun : null;
+      var candidate = state.backgroundRun && typeof state.backgroundRun === 'object' ? state.backgroundRun : null;
+      var run = candidate?.sessionId === state.activeSessionId ? candidate : null;
       var active = isBackgroundActive();
-      var statusKey = run ? 'backgroundStatus_' + run.status : 'backgroundIdle';
+      var visible = Boolean(run) && (active || String(run?.id || '') !== dismissedBackgroundRunId);
+      backgroundRegion.classList.toggle('hidden', !visible);
+      if (backgroundRunDialogOpen) {
+        renderBackgroundRunDialog();
+      }
+      if (!run || !visible) return;
+      if (backgroundLabel) {
+        backgroundLabel.textContent = t('backgroundRun') + ' · ' + normalizeValidationScript(run.goal?.script);
+      }
+      var statusKey = 'backgroundStatus_' + run.status;
       var statusLabel = t(statusKey);
-      if (statusLabel === statusKey) statusLabel = run?.status || t('backgroundIdle');
-      if (run) {
-        statusLabel += ' · ' + t('backgroundProgress', {
-          current: Number(run.progress?.round) || 0,
-          max: Number(run.limits?.maxRounds) || 0,
-          tools: Number(run.progress?.toolCalls) || 0
-        });
-        if (run.waitingReason || run.stopReason) {
-          statusLabel += ' · ' + String(run.waitingReason || run.stopReason);
-        }
+      if (statusLabel === statusKey) statusLabel = run.status || t('backgroundIdle');
+      statusLabel += ' · ' + t('backgroundProgress', {
+        current: Number(run.progress?.round) || 0,
+        max: Number(run.limits?.maxRounds) || 0,
+        tools: Number(run.progress?.toolCalls) || 0
+      });
+      if (run.waitingReason || run.stopReason) {
+        statusLabel += ' · ' + String(run.waitingReason || run.stopReason);
       }
       backgroundStatus.textContent = statusLabel;
-      if (backgroundScript) backgroundScript.disabled = active || state.isBusy;
-      if (backgroundMaxRounds) {
-        backgroundMaxRounds.disabled = active || state.isBusy;
-        if (!active && document.activeElement !== backgroundMaxRounds) {
-          backgroundMaxRounds.value = String(state.backgroundDefaults?.maxRounds || 5);
-        }
-      }
-      if (backgroundStart) {
-        backgroundStart.classList.toggle('hidden', active);
-        backgroundStart.disabled = state.isBusy || active;
-      }
       if (backgroundResume) {
         var canResume = run?.status === 'waiting_for_apply' && state.repairLoop?.status === 'ready_for_validation' && !state.isBusy;
         backgroundResume.classList.toggle('hidden', run?.status !== 'waiting_for_apply');
@@ -1413,6 +1514,9 @@ export function getScript(): string {
       if (backgroundStop) {
         backgroundStop.classList.toggle('hidden', !active);
         backgroundStop.disabled = false;
+      }
+      if (backgroundDismiss) {
+        backgroundDismiss.classList.toggle('hidden', active);
       }
     }
 

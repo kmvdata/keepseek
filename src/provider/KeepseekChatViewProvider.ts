@@ -96,6 +96,7 @@ import { ProjectMemoryStore } from '../memory/projectMemoryStore';
 import { ProjectMemoryService } from '../memory/projectMemoryService';
 import { BackgroundRunCoordinator } from '../agent/backgroundRunCoordinator';
 import { BackgroundRunStatusBar } from './backgroundRunStatusBar';
+import { getAvailableSafeValidationScripts } from '../agent/tools/validationTools';
 
 const CHAT_CONTAINER_ID = 'keepseek-sidebar';
 const CHAT_VIEW_TYPE = 'keepseek.chat';
@@ -120,6 +121,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly repairLoopsBySession = new Map<string, RepairLoopState>();
   private readonly authorizedExternalReferenceUris = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
+  private backgroundAvailableScripts: SafeNpmScript[] = [];
   private selectedModelId = getConfiguredSelectedModelId();
   private agentSettings = getConfiguredAgentSettings();
   private language = getConfiguredKeepseekLanguage();
@@ -199,6 +201,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.backgroundRunCoordinator.clear();
     await this.projectMemoryService.refresh();
     await this.refreshSkills({ post: false });
+    await this.refreshBackgroundRunAvailability({ post: false });
     await this.sessionStore.persist();
     await this.cleanupExpiredSessions({ post: false });
     this.postToWebview({ type: 'sessionChanged' });
@@ -561,6 +564,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.projectMemoryService.initialize();
         this.syncConfiguredState();
         await this.refreshSkills({ post: false });
+        await this.refreshBackgroundRunAvailability({ post: false });
         await this.cleanupExpiredSessions({ post: false });
         this.postState();
         void this.refreshBalance();
@@ -1294,6 +1298,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  public async refreshBackgroundRunAvailability(options: { post?: boolean } = {}): Promise<void> {
+    this.backgroundAvailableScripts = await getAvailableSafeValidationScripts();
+    if (options.post !== false) {
+      this.postState();
+    }
+  }
+
   private async useSkill(skillId: string): Promise<void> {
     if (this.isBusy) {
       return;
@@ -1897,6 +1908,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const safeScript: SafeNpmScript = script === 'test' || script === 'lint' ? script : 'compile';
+    await this.refreshBackgroundRunAvailability({ post: false });
+    if (!this.backgroundAvailableScripts.includes(safeScript)) {
+      this.postState();
+      vscode.window.showInformationMessage(this.language === 'en'
+        ? `The current workspace does not define an available safe "${safeScript}" npm script.`
+        : `当前工作区没有可用的安全 npm 脚本“${safeScript}”。`);
+      return;
+    }
     const configuredMaxRounds = getConfiguredBackgroundMaxRounds();
     const maxRounds = normalizeIntegerInRange(requestedMaxRounds, 1, configuredMaxRounds, configuredMaxRounds);
     try {
@@ -2581,6 +2600,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         skills: this.skillStore.getStateView(activeSession),
         projectMemory: this.projectMemoryService.getStateView(),
         backgroundRun: this.backgroundRunCoordinator.getActiveRun(),
+        backgroundAvailableScripts: this.backgroundAvailableScripts,
         backgroundDefaults: {
           maxRounds: getConfiguredBackgroundMaxRounds(),
           maxDurationMs: getConfiguredBackgroundMaxDurationMs(),

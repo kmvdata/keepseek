@@ -748,6 +748,10 @@ export function getStyles(): string {
       justify-content: space-between;
     }
 
+    .background-controls {
+      justify-content: flex-end;
+    }
+
     .background-label {
       font-size: 11px;
       font-weight: 600;
@@ -756,30 +760,16 @@ export function getStyles(): string {
     .background-status {
       color: var(--vscode-descriptionForeground);
       font-size: 10px;
+      line-height: 1.4;
       overflow-wrap: anywhere;
     }
 
-    .background-controls select,
-    .background-controls input {
-      min-height: 22px;
-      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
-      border-radius: 3px;
-      background: var(--vscode-dropdown-background, var(--vscode-input-background));
-      color: var(--vscode-dropdown-foreground, var(--vscode-input-foreground));
-      font: inherit;
-      font-size: 10px;
+    .background-dismiss {
+      padding-inline: 6px;
     }
 
-    .background-rounds {
-      display: inline-flex;
-      align-items: center;
-      gap: 3px;
-      color: var(--vscode-descriptionForeground);
-      font-size: 10px;
-    }
-
-    .background-rounds input {
-      width: 40px;
+    .background-run-dialog select {
+      width: 100%;
     }
 
     .plan-region {

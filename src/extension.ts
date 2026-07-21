@@ -57,6 +57,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.workspace.onDidGrantWorkspaceTrust(() => {
       void provider.refreshSkills();
+      void provider.refreshBackgroundRunAvailability();
+    }),
+    vscode.workspace.onDidSaveTextDocument((document) => {
+      if (/(?:^|\/)package\.json$/u.test(document.uri.path)) {
+        void provider.refreshBackgroundRunAvailability();
+      }
     })
   );
 }

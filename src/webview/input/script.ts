@@ -16,6 +16,9 @@ export function getInputScript(): string {
       var commandSkillsValue = document.getElementById('commandSkillsValue');
       var commandSkillList = document.getElementById('commandSkillList');
       var commandCreateSkillButton = document.getElementById('commandCreateSkillButton');
+      var commandBackgroundRunSection = document.getElementById('commandBackgroundRunSection');
+      var commandBackgroundRunButton = document.getElementById('commandBackgroundRunButton');
+      var commandBackgroundRunValue = document.getElementById('commandBackgroundRunValue');
       var commandEffortSlider = document.getElementById('commandEffortSlider');
       var commandEffortValue = document.getElementById('commandEffortValue');
       var commandThinkingToggle = document.getElementById('commandThinkingToggle');
@@ -267,6 +270,18 @@ export function getInputScript(): string {
           event.stopPropagation();
           closeCommandMenu();
           showCreateSkillDialog();
+        });
+      }
+
+      if (commandBackgroundRunButton) {
+        commandBackgroundRunButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (commandBackgroundRunButton.disabled) { return; }
+          closeCommandMenu();
+          if (typeof window.keepseekOpenBackgroundRunDialog === 'function') {
+            window.keepseekOpenBackgroundRunDialog();
+          }
         });
       }
 
@@ -1356,7 +1371,27 @@ export function getInputScript(): string {
         renderCommandModel();
         renderCommandSkills();
         renderCreateSkillCommand();
+        renderBackgroundRunCommand();
         renderEffort();
+      }
+
+      function renderBackgroundRunCommand() {
+        var scripts = Array.isArray(state.backgroundAvailableScripts)
+          ? state.backgroundAvailableScripts.filter(function(script) {
+              return script === 'compile' || script === 'lint' || script === 'test';
+            })
+          : [];
+        if (commandBackgroundRunSection) {
+          commandBackgroundRunSection.classList.toggle('hidden', scripts.length === 0);
+        }
+        if (commandBackgroundRunButton) {
+          commandBackgroundRunButton.disabled = state.isBusy || isBackgroundActive();
+        }
+        if (commandBackgroundRunValue) {
+          commandBackgroundRunValue.textContent = isBackgroundActive()
+            ? t('backgroundCommandActive')
+            : scripts.join(' / ');
+        }
       }
 
       function renderCommandModel() {

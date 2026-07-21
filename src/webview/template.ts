@@ -117,19 +117,13 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
       <div class="context-bar-inner" id="contextBar"></div>
     </div>
 
-    <section id="backgroundRegion" class="background-region" aria-label="后台任务" data-i18n-aria-label="backgroundRun">
+    <section id="backgroundRegion" class="background-region hidden" aria-label="后台任务" data-i18n-aria-label="backgroundRun">
       <div class="background-main">
-        <span class="background-label" data-i18n="backgroundRun">后台任务</span>
-        <span id="backgroundStatus" class="background-status" data-i18n="backgroundIdle">未运行</span>
+        <span id="backgroundLabel" class="background-label" data-i18n="backgroundRun">后台任务</span>
+        <button id="backgroundDismiss" type="button" class="background-dismiss secondary hidden" data-i18n="backgroundDismiss">收起</button>
       </div>
+      <span id="backgroundStatus" class="background-status"></span>
       <div class="background-controls">
-        <select id="backgroundScript" aria-label="Validation script">
-          <option value="compile">compile</option>
-          <option value="lint">lint</option>
-          <option value="test">test</option>
-        </select>
-        <label class="background-rounds"><span data-i18n="backgroundRounds">轮数</span><input id="backgroundMaxRounds" type="number" min="1" max="10" value="5"></label>
-        <button id="backgroundStart" type="button" data-i18n="backgroundStart">启动</button>
         <button id="backgroundResume" type="button" class="hidden" data-i18n="backgroundResume">继续</button>
         <button id="backgroundStop" type="button" class="secondary hidden" data-i18n="backgroundStop">停止</button>
       </div>
