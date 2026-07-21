@@ -98,6 +98,35 @@ export function getInputTemplate(): string {
             </button>
           </section>
 
+          <section id="commandLegacyMemorySection" class="command-section hidden" aria-label="Legacy memory migration" data-i18n-aria-label="legacyMemoryMigration">
+            <div class="command-section-label" data-i18n="legacyMemoryMigration">Legacy migration</div>
+            <button id="commandLegacyMemoryMigrateButton" type="button" class="command-row" role="menuitem">
+              <span class="command-row-main">
+                <span class="command-row-title">/migrate-legacy-memory</span>
+                <span class="command-row-description" data-i18n="legacyMemoryMigrationDescription">生成 AGENTS.md / Skill 待确认修改</span>
+              </span>
+              <span id="commandLegacyMemoryValue" class="command-row-value"></span>
+            </button>
+            <button id="commandLegacyMemoryExportButton" type="button" class="command-row" role="menuitem">
+              <span class="command-row-main">
+                <span class="command-row-title">/export-legacy-memory</span>
+                <span class="command-row-description" data-i18n="legacyMemoryExportDescription">复制只读迁移导出</span>
+              </span>
+            </button>
+            <button id="commandLegacyMemoryCompleteButton" type="button" class="command-row hidden" role="menuitem">
+              <span class="command-row-main">
+                <span class="command-row-title">/complete-memory-migration</span>
+                <span class="command-row-description" data-i18n="legacyMemoryCompleteDescription">确认迁移并停止旧记忆注入</span>
+              </span>
+            </button>
+            <button id="commandLegacyMemoryRollbackButton" type="button" class="command-row hidden" role="menuitem">
+              <span class="command-row-main">
+                <span class="command-row-title">/rollback-memory-migration</span>
+                <span class="command-row-description" data-i18n="legacyMemoryRollbackDescription">重置迁移状态；旧文件仍保留，可再次导出</span>
+              </span>
+            </button>
+          </section>
+
           <section id="commandBackgroundRunSection" class="command-section hidden" aria-label="Background task" data-i18n-aria-label="backgroundRun">
             <div class="command-section-label">Agent</div>
             <button

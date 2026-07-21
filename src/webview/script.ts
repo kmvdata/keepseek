@@ -22,12 +22,14 @@ export function getScript(): string {
       skills: {
         workspaceTrusted: true,
         items: [],
-        activeSkillIds: []
+        activeSkillIds: [],
+        workspaceDefaultSkillIds: []
       },
-      projectMemory: {
-        configuredMode: 'auto',
-        entries: [],
-        pendingUpdates: []
+      legacyMemoryMigration: {
+        detected: false,
+        status: 'pending',
+        sourceUris: [],
+        entryCount: 0
       },
       backgroundRun: null,
       backgroundAvailableScripts: [],
@@ -323,13 +325,6 @@ export function getScript(): string {
     const historyTab = document.getElementById('historyTab');
     const newChatTab = document.getElementById('newChatTab');
     const settingsTab = document.getElementById('settingsTab');
-    const memoryTab = document.getElementById('memoryTab');
-    const memoryPanel = document.getElementById('memoryPanel');
-    const memoryStorageLabel = document.getElementById('memoryStorageLabel');
-    const memoryAddButton = document.getElementById('memoryAddButton');
-    const memoryOpenFileButton = document.getElementById('memoryOpenFileButton');
-    const memoryPendingList = document.getElementById('memoryPendingList');
-    const memoryEntryList = document.getElementById('memoryEntryList');
     const settingsMenu = document.getElementById('settingsMenu');
     const settingsApiKeyMenuItem = document.getElementById('settingsApiKeyMenuItem');
     const settingsHistoryMenuItem = document.getElementById('settingsHistoryMenuItem');
@@ -386,7 +381,6 @@ export function getScript(): string {
     let planExpanded = false;
     const pendingChangeActions = new Set();
     let settingsMenuOpen = false;
-    let memoryPanelOpen = false;
     let backgroundRunDialogOpen = false;
     let dismissedBackgroundRunId = '';
     let sessionMenuOpen = false;
@@ -729,7 +723,6 @@ export function getScript(): string {
       newChatTab.addEventListener('click', function() {
         if (state.isBusy || isBackgroundActive()) return;
         closeSettingsMenu();
-        closeMemoryPanel();
         closeSessionMenu();
         resetLocalContextUsageEstimate();
         clearPromptDraft();
@@ -742,67 +735,7 @@ export function getScript(): string {
         event.preventDefault();
         event.stopPropagation();
         if (state.isBusy) return;
-        closeMemoryPanel();
         toggleSettingsMenu();
-      });
-    }
-
-    if (memoryTab) {
-      memoryTab.addEventListener('click', function(event) {
-        event.preventDefault();
-        event.stopPropagation();
-        closeSettingsMenu();
-        closeSessionMenu();
-        memoryPanelOpen = !memoryPanelOpen;
-        renderProjectMemory();
-      });
-    }
-
-    if (memoryAddButton) {
-      memoryAddButton.addEventListener('click', function() {
-        var content = window.prompt(t('memoryContentPrompt'), '');
-        if (!content || !content.trim()) return;
-        var category = promptMemoryCategory('project_note');
-        vscode.postMessage({ type: 'proposeMemoryAdd', content: content.trim(), category: category });
-      });
-    }
-
-    if (memoryOpenFileButton) {
-      memoryOpenFileButton.addEventListener('click', function() {
-        vscode.postMessage({ type: 'openProjectMemoryFile' });
-      });
-    }
-
-    if (memoryPanel) {
-      memoryPanel.addEventListener('click', function(event) {
-        var target = event.target instanceof Element ? event.target : null;
-        var button = target?.closest('button[data-memory-action]');
-        if (!button) return;
-        var action = button.dataset.memoryAction || '';
-        var entryId = button.dataset.entryId || '';
-        var updateId = button.dataset.updateId || '';
-        if (action === 'apply' && updateId) {
-          vscode.postMessage({ type: 'applyMemoryUpdate', updateId: updateId });
-        } else if (action === 'reject' && updateId) {
-          vscode.postMessage({ type: 'rejectMemoryUpdate', updateId: updateId });
-        } else if (action === 'delete' && entryId) {
-          vscode.postMessage({ type: 'proposeMemoryDelete', entryId: entryId });
-        } else if (action === 'toggle' && entryId) {
-          vscode.postMessage({ type: 'proposeMemoryToggle', entryId: entryId, enabled: button.dataset.enabled === 'true' });
-        } else if (action === 'edit' && entryId) {
-          var entry = getMemoryEntries().find(function(item) { return item.id === entryId; });
-          if (!entry) return;
-          var content = window.prompt(t('memoryContentPrompt'), String(entry.content || ''));
-          if (!content || !content.trim()) return;
-          var category = promptMemoryCategory(entry.category || 'project_note');
-          vscode.postMessage({
-            type: 'proposeMemoryUpdate',
-            entryId: entryId,
-            content: content.trim(),
-            category: category,
-            tags: Array.isArray(entry.tags) ? entry.tags : []
-          });
-        }
       });
     }
 
@@ -962,7 +895,6 @@ export function getScript(): string {
         event.stopPropagation();
         if (state.isBusy) return;
         closeSettingsMenu();
-        closeMemoryPanel();
         toggleSessionMenu();
       });
     }
@@ -1119,20 +1051,11 @@ export function getScript(): string {
       closeSettingsMenu();
     });
 
-    document.addEventListener('mousedown', function(event) {
-      if (!memoryPanelOpen) return;
-      var target = event.target instanceof Element ? event.target : null;
-      if (!target) return;
-      if ((memoryPanel && memoryPanel.contains(target)) || (memoryTab && memoryTab.contains(target))) return;
-      closeMemoryPanel();
-    });
-
     document.addEventListener('keydown', function(event) {
-      if ((!sessionMenuOpen && !settingsMenuOpen && !memoryPanelOpen) || event.key !== 'Escape') return;
+      if ((!sessionMenuOpen && !settingsMenuOpen) || event.key !== 'Escape') return;
       event.preventDefault();
       closeSessionMenu();
       closeSettingsMenu();
-      closeMemoryPanel();
     });
 
     window.keepseekInlineEditorControls = {
@@ -1216,7 +1139,6 @@ export function getScript(): string {
       syncEditingState();
       renderSettingsControls();
       renderSessionControls();
-      renderProjectMemory();
       renderBackgroundRun();
       renderContextChips();
       renderTaskPlan();
@@ -1291,132 +1213,6 @@ export function getScript(): string {
           button.setAttribute('aria-checked', isSelected ? 'true' : 'false');
         });
       }
-    }
-
-    function renderProjectMemory() {
-      if (!memoryPanel || !memoryEntryList || !memoryPendingList) return;
-      var memory = state.projectMemory && typeof state.projectMemory === 'object'
-        ? state.projectMemory
-        : { configuredMode: 'auto', entries: [], pendingUpdates: [] };
-      memoryPanel.classList.toggle('hidden', !memoryPanelOpen);
-      if (memoryTab) {
-        memoryTab.classList.toggle('active', memoryPanelOpen);
-        memoryTab.setAttribute('aria-expanded', memoryPanelOpen ? 'true' : 'false');
-      }
-      if (memoryStorageLabel) {
-        var mode = memory.actualMode || memory.configuredMode || 'auto';
-        memoryStorageLabel.textContent = t('memoryStorage', { mode: mode });
-        memoryStorageLabel.title = String(memory.location || memory.error || '');
-      }
-      if (memoryOpenFileButton) {
-        memoryOpenFileButton.disabled = !memory.location;
-      }
-      if (memoryAddButton) {
-        memoryAddButton.disabled = state.isBusy || memory.configuredMode === 'disabled';
-      }
-
-      memoryPendingList.innerHTML = '';
-      var pending = Array.isArray(memory.pendingUpdates) ? memory.pendingUpdates : [];
-      pending.forEach(function(update) {
-        var card = document.createElement('div');
-        card.className = 'memory-pending';
-        var label = document.createElement('div');
-        label.className = 'memory-entry-category';
-        label.textContent = t('memoryPendingChange', { action: getMemoryActionLabel(update.action) });
-        var content = document.createElement('div');
-        content.className = 'memory-pending-content';
-        content.textContent = String(update.proposedEntry?.content || update.previousEntry?.content || update.reason || '');
-        var actions = document.createElement('div');
-        actions.className = 'memory-pending-actions';
-        actions.append(
-          createMemoryButton(t('apply'), 'apply', '', update.id),
-          createMemoryButton(t('discard'), 'reject', '', update.id, true)
-        );
-        card.append(label, content, actions);
-        memoryPendingList.append(card);
-      });
-
-      memoryEntryList.innerHTML = '';
-      var entries = getMemoryEntries();
-      if (!entries.length) {
-        var empty = document.createElement('div');
-        empty.className = 'memory-empty';
-        empty.textContent = t('memoryEmpty');
-        memoryEntryList.append(empty);
-      }
-      entries.forEach(function(entry) {
-        var card = document.createElement('div');
-        card.className = 'memory-entry' + (entry.enabled === false ? ' is-disabled' : '');
-        var category = document.createElement('div');
-        category.className = 'memory-entry-category';
-        category.textContent = getMemoryCategoryLabel(entry.category);
-        var content = document.createElement('div');
-        content.className = 'memory-entry-content';
-        content.textContent = String(entry.content || '');
-        var meta = document.createElement('div');
-        meta.className = 'memory-entry-meta';
-        meta.textContent = [
-          entry.source,
-          Number.isFinite(Number(entry.confidence)) ? 'confidence=' + Number(entry.confidence).toFixed(2) : '',
-          Array.isArray(entry.tags) ? entry.tags.join(', ') : ''
-        ].filter(Boolean).join(' · ');
-        var actions = document.createElement('div');
-        actions.className = 'memory-entry-actions';
-        actions.append(
-          createMemoryButton(t('edit'), 'edit', entry.id),
-          createMemoryButton(t(entry.enabled === false ? 'enable' : 'disable'), 'toggle', entry.id, '', true, entry.enabled === false),
-          createMemoryButton(t('delete'), 'delete', entry.id, '', true)
-        );
-        card.append(category, content, meta, actions);
-        memoryEntryList.append(card);
-      });
-    }
-
-    function createMemoryButton(label, action, entryId, updateId, secondary, enabled) {
-      var button = document.createElement('button');
-      button.type = 'button';
-      button.textContent = label;
-      button.dataset.memoryAction = action;
-      if (entryId) button.dataset.entryId = entryId;
-      if (updateId) button.dataset.updateId = updateId;
-      if (typeof enabled === 'boolean') button.dataset.enabled = enabled ? 'true' : 'false';
-      if (secondary) button.className = 'secondary';
-      button.disabled = state.isBusy;
-      return button;
-    }
-
-    function getMemoryEntries() {
-      var memory = state.projectMemory && typeof state.projectMemory === 'object' ? state.projectMemory : {};
-      return Array.isArray(memory.entries) ? memory.entries : [];
-    }
-
-    function getMemoryActionLabel(action) {
-      switch (action) {
-        case 'add': return t('memoryActionAdd');
-        case 'update': return t('memoryActionUpdate');
-        case 'delete': return t('memoryActionDelete');
-        case 'enable': return t('enable');
-        case 'disable': return t('disable');
-        default: return String(action || '');
-      }
-    }
-
-    function getMemoryCategoryLabel(category) {
-      var key = 'memoryCategory_' + String(category || 'project_note');
-      var label = t(key);
-      return label === key ? String(category || 'project_note') : label;
-    }
-
-    function promptMemoryCategory(fallback) {
-      var categories = ['architecture', 'preference', 'command', 'testing', 'restriction', 'project_note', 'workflow'];
-      var value = window.prompt(t('memoryCategoryPrompt', { categories: categories.join(', ') }), fallback || 'project_note');
-      var normalized = String(value || fallback || 'project_note').trim();
-      return categories.indexOf(normalized) >= 0 ? normalized : fallback || 'project_note';
-    }
-
-    function closeMemoryPanel() {
-      memoryPanelOpen = false;
-      renderProjectMemory();
     }
 
     function getBackgroundAvailableScripts() {
@@ -3271,10 +3067,32 @@ export function getScript(): string {
         details.modelRequests?.maxOutputTokens ? 'max=' + String(details.modelRequests.maxOutputTokens) : ''
       ].filter(Boolean).join(' · '));
       appendRunDetailRow(grid, t('runDetailsTools'), String(Number(details.toolCallCount) || (Array.isArray(details.toolCalls) ? details.toolCalls.length : 0)));
-      if (Array.isArray(details.memoryEntryIds) && details.memoryEntryIds.length) {
-        appendRunDetailRow(grid, t('runDetailsMemory'), String(details.memoryEntryIds.length));
-      }
       body.append(grid);
+
+      var contextSources = Array.isArray(details.contextSources) ? details.contextSources : [];
+      var projectInstructions = contextSources.filter(function(source) { return source.kind === 'project-instructions'; });
+      var activatedSkills = contextSources.filter(function(source) { return source.kind === 'skill'; });
+      var legacyMemory = contextSources.filter(function(source) { return source.kind === 'legacy-memory'; });
+      if (projectInstructions.length) {
+        body.append(createRunTextSection(t('runDetailsProjectInstructions'), projectInstructions.map(formatRunContextSource)));
+      }
+      if (activatedSkills.length) {
+        body.append(createRunTextSection(t('runDetailsSkills'), activatedSkills.map(formatRunContextSource)));
+      }
+      if (legacyMemory.length) {
+        body.append(createRunTextSection(t('runDetailsLegacyMemory'), legacyMemory.map(formatRunContextSource)));
+      }
+      if (details.contextDeduplication) {
+        var discardedContext = Array.isArray(details.contextDiscarded) ? details.contextDiscarded : [];
+        body.append(createRunTextSection(t('runDetailsContextDedup'), [[
+          String(details.contextDeduplication.before || 0) + ' → ' + String(details.contextDeduplication.after || 0),
+          'discarded=' + String(details.contextDeduplication.discarded || 0),
+          details.contextDeduplication.truncated ? t('runDetailsTruncated') : ''
+        ].filter(Boolean).join(' · ')].concat(discardedContext.map(function(source) {
+          return [source.kind, source.id, source.reason, source.uri || '', source.keptId ? 'kept=' + source.keptId : '']
+            .filter(Boolean).join(' · ');
+        }))));
+      }
 
       if (details.taskPlan) {
         body.append(createRunTextSection(t('runDetailsTaskPlan'), [
@@ -3385,6 +3203,20 @@ export function getScript(): string {
       return element;
     }
 
+    function formatRunContextSource(source) {
+      return [
+        source.label || source.id || '',
+        source.source || '',
+        source.activation || '',
+        source.reason || '',
+        source.uri || '',
+        String(Number(source.characterCount) || 0) + ' chars',
+        String(Number(source.tokenEstimate) || 0) + ' tokens',
+        source.scriptsPresent ? t('skillsScriptsPresent') : '',
+        source.truncated ? t('runDetailsTruncated') : ''
+      ].filter(Boolean).join(' · ');
+    }
+
     function createRunActionButton(messageId, action, label, disabled) {
       var button = document.createElement('button');
       button.type = 'button';
@@ -3430,6 +3262,24 @@ export function getScript(): string {
         t('runDetailsTools') + ': ' + String(Number(details.toolCallCount) || (Array.isArray(details.toolCalls) ? details.toolCalls.length : 0))
       ];
       if (details.taskPlan?.goal) lines.push(t('runDetailsTaskPlan') + ': ' + details.taskPlan.goal);
+      var contextSources = Array.isArray(details.contextSources) ? details.contextSources : [];
+      contextSources.forEach(function(source) {
+        var label = source.kind === 'project-instructions'
+          ? t('runDetailsProjectInstructions')
+          : source.kind === 'skill' ? t('runDetailsSkills') : t('runDetailsLegacyMemory');
+        lines.push(label + ': ' + formatRunContextSource(source));
+      });
+      if (details.contextDeduplication) {
+        lines.push(t('runDetailsContextDedup') + ': ' + [
+          String(details.contextDeduplication.before || 0) + ' → ' + String(details.contextDeduplication.after || 0),
+          'discarded=' + String(details.contextDeduplication.discarded || 0),
+          details.contextDeduplication.truncated ? 'truncated' : ''
+        ].filter(Boolean).join(' · '));
+      }
+      (details.contextDiscarded || []).slice(0, 80).forEach(function(source) {
+        lines.push('- ' + [source.kind, source.id, source.reason, source.uri, source.keptId ? 'kept=' + source.keptId : '']
+          .filter(Boolean).join(' · '));
+      });
       if (details.budgetStopReason) lines.push(t('runDetailsBudgetStop') + ': ' + details.budgetStopReason);
       if (details.failureReason) lines.push(t('runDetailsFailure') + ': ' + details.failureReason);
       (details.toolCalls || []).slice(0, 40).forEach(function(tool) {

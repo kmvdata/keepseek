@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import { getInputScript } from '../src/webview/input/script';
 import { getInputTemplate } from '../src/webview/input/template';
+import { getScript } from '../src/webview/script';
 import { getTemplate } from '../src/webview/template';
 
 test('contributes editor, Explorer, and terminal context commands', async () => {
@@ -120,4 +121,39 @@ test('background runs use an on-demand command instead of an always-visible laun
   assert.doesNotMatch(backgroundRegion, /id="backgroundStart"/u);
   assert.match(inputTemplate, /id="commandBackgroundRunButton"/u);
   assert.match(inputTemplate, /id="backgroundRunDialogOverlay" class="settings-overlay hidden"/u);
+});
+
+test('Project Memory add/edit UI and blocking browser dialogs are removed', () => {
+  const mainTemplate = getTemplate();
+  const inputTemplate = getInputTemplate();
+  const script = getInputScript();
+
+  assert.doesNotMatch(mainTemplate, /projectMemoryTab|memoryAddButton|memoryPanel/u);
+  assert.doesNotMatch(`${mainTemplate}\n${inputTemplate}\n${script}`, /window\.(?:prompt|alert|confirm)\s*\(/u);
+  assert.doesNotMatch(script, /proposeMemory|applyMemory|discardMemory|deleteMemory/u);
+});
+
+test('retired Project Memory configuration keys are no longer contributed', async () => {
+  const packageJson = JSON.parse(await readFile(path.resolve(process.cwd(), 'package.json'), 'utf8')) as {
+    contributes?: { configuration?: { properties?: Record<string, unknown> } };
+  };
+  const keys = Object.keys(packageJson.contributes?.configuration?.properties ?? {});
+
+  assert.ok(!keys.some((key) => key.startsWith('keepseek.memory.')));
+  assert.ok(keys.includes('keepseek.projectInstructions.contextBudgetTokens'));
+  assert.ok(keys.includes('keepseek.skills.maxImplicitActivations'));
+});
+
+test('Legacy Memory migration command is hidden by default and appears only from detected state', () => {
+  const inputTemplate = getInputTemplate();
+  const script = getInputScript();
+
+  assert.match(inputTemplate, /id="commandLegacyMemorySection" class="command-section hidden"/u);
+  assert.match(script, /var visible = migration\.detected === true/u);
+  assert.match(script, /classList\.toggle\('hidden', !visible\)/u);
+  assert.match(script, /createLegacyMemoryMigrationDraft/u);
+});
+
+test('generated Webview JavaScript passes syntax compilation', () => {
+  assert.doesNotThrow(() => new Function(getScript()));
 });

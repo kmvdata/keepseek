@@ -19,7 +19,7 @@ export interface AgentRequestCoordinatorInput {
   model: KeepseekModel;
   settings: AgentSettings;
   contextFiles: ContextFile[];
-  skills?: AgentRequest['skills'];
+  currentRunContext?: AgentRequest['currentRunContext'];
   history: AgentRequest['history'];
   contextCompression: AgentRequest['contextCompression'];
   historyRewriteReason?: string;
@@ -27,7 +27,6 @@ export interface AgentRequestCoordinatorInput {
   sessionId?: string;
   assistantMessageId?: string;
   repairLoop?: AgentRequest['repairLoop'];
-  projectMemory?: AgentRequest['projectMemory'];
   executionLimits?: AgentRequest['executionLimits'];
   backgroundRunId?: string;
   signal?: AbortSignal;
@@ -55,10 +54,30 @@ export class AgentRequestCoordinator {
       model: { ...input.model },
       settings: { ...input.settings },
       contextFiles: input.contextFiles.map((file) => ({ ...file })),
-      skills: input.skills?.map((skill) => ({
-        ...skill,
-        loadedResourceUris: skill.loadedResourceUris ? [...skill.loadedResourceUris] : undefined
-      })),
+      currentRunContext: input.currentRunContext
+        ? {
+            projectInstructions: input.currentRunContext.projectInstructions.map((instruction) => ({ ...instruction })),
+            skills: input.currentRunContext.skills.map((skill) => ({
+              ...skill,
+              activation: skill.activation ? { ...skill.activation } : undefined,
+              loadedResourceUris: skill.loadedResourceUris ? [...skill.loadedResourceUris] : undefined
+            })),
+            legacyMemory: input.currentRunContext.legacyMemory
+              ? {
+                  ...input.currentRunContext.legacyMemory,
+                  entryIds: [...input.currentRunContext.legacyMemory.entryIds],
+                  sourceUris: [...input.currentRunContext.legacyMemory.sourceUris]
+                }
+              : undefined,
+            metadata: {
+              ...input.currentRunContext.metadata,
+              precedence: [...input.currentRunContext.metadata.precedence],
+              sources: input.currentRunContext.metadata.sources.map((source) => ({ ...source })),
+              discarded: input.currentRunContext.metadata.discarded.map((source) => ({ ...source })),
+              possibleConflicts: input.currentRunContext.metadata.possibleConflicts.map((conflict) => ({ ...conflict }))
+            }
+          }
+        : undefined,
       history: input.history.map(cloneChatMessage),
       contextCompression: cloneContextCompressionState(input.contextCompression),
       historyRewriteReason: input.historyRewriteReason,
@@ -67,9 +86,6 @@ export class AgentRequestCoordinator {
       assistantMessageId: input.assistantMessageId,
       repairLoop: input.repairLoop
         ? { ...input.repairLoop, pendingDraftEditIds: [...input.repairLoop.pendingDraftEditIds] }
-        : undefined,
-      projectMemory: input.projectMemory
-        ? { ...input.projectMemory, entryIds: [...input.projectMemory.entryIds] }
         : undefined,
       executionLimits: input.executionLimits ? { ...input.executionLimits } : undefined,
       backgroundRunId: input.backgroundRunId,

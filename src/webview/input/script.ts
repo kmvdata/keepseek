@@ -16,6 +16,12 @@ export function getInputScript(): string {
       var commandSkillsValue = document.getElementById('commandSkillsValue');
       var commandSkillList = document.getElementById('commandSkillList');
       var commandCreateSkillButton = document.getElementById('commandCreateSkillButton');
+      var commandLegacyMemorySection = document.getElementById('commandLegacyMemorySection');
+      var commandLegacyMemoryMigrateButton = document.getElementById('commandLegacyMemoryMigrateButton');
+      var commandLegacyMemoryExportButton = document.getElementById('commandLegacyMemoryExportButton');
+      var commandLegacyMemoryCompleteButton = document.getElementById('commandLegacyMemoryCompleteButton');
+      var commandLegacyMemoryRollbackButton = document.getElementById('commandLegacyMemoryRollbackButton');
+      var commandLegacyMemoryValue = document.getElementById('commandLegacyMemoryValue');
       var commandBackgroundRunSection = document.getElementById('commandBackgroundRunSection');
       var commandBackgroundRunButton = document.getElementById('commandBackgroundRunButton');
       var commandBackgroundRunValue = document.getElementById('commandBackgroundRunValue');
@@ -270,6 +276,44 @@ export function getInputScript(): string {
           event.stopPropagation();
           closeCommandMenu();
           showCreateSkillDialog();
+        });
+      }
+
+      if (commandLegacyMemoryMigrateButton) {
+        commandLegacyMemoryMigrateButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (commandLegacyMemoryMigrateButton.disabled) { return; }
+          closeCommandMenu();
+          vscode.postMessage({ type: 'createLegacyMemoryMigrationDraft' });
+        });
+      }
+
+      if (commandLegacyMemoryExportButton) {
+        commandLegacyMemoryExportButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          closeCommandMenu();
+          vscode.postMessage({ type: 'exportLegacyMemory' });
+        });
+      }
+
+      if (commandLegacyMemoryCompleteButton) {
+        commandLegacyMemoryCompleteButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (commandLegacyMemoryCompleteButton.disabled) { return; }
+          closeCommandMenu();
+          vscode.postMessage({ type: 'completeLegacyMemoryMigration' });
+        });
+      }
+
+      if (commandLegacyMemoryRollbackButton) {
+        commandLegacyMemoryRollbackButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          closeCommandMenu();
+          vscode.postMessage({ type: 'rollbackLegacyMemoryMigration' });
         });
       }
 
@@ -1371,6 +1415,7 @@ export function getInputScript(): string {
         renderCommandModel();
         renderCommandSkills();
         renderCreateSkillCommand();
+        renderLegacyMemoryCommand();
         renderBackgroundRunCommand();
         renderEffort();
       }
@@ -1475,6 +1520,41 @@ export function getInputScript(): string {
         commandCreateSkillButton.title = disabledReason || '';
       }
 
+      function renderLegacyMemoryCommand() {
+        var migration = state.legacyMemoryMigration && typeof state.legacyMemoryMigration === 'object'
+          ? state.legacyMemoryMigration
+          : { detected: false, status: 'pending', entryCount: 0 };
+        var visible = migration.detected === true;
+        if (commandLegacyMemorySection) {
+          commandLegacyMemorySection.classList.toggle('hidden', !visible);
+        }
+        if (!visible) { return; }
+        if (commandLegacyMemoryValue) {
+          commandLegacyMemoryValue.textContent = String(Number(migration.entryCount) || 0);
+        }
+        if (commandLegacyMemoryMigrateButton) {
+          commandLegacyMemoryMigrateButton.classList.toggle('hidden', migration.status !== 'pending');
+          commandLegacyMemoryMigrateButton.disabled = state.isBusy || migration.canCreateDraft === false;
+          commandLegacyMemoryMigrateButton.title = migration.error || '';
+        }
+        if (commandLegacyMemoryExportButton) {
+          commandLegacyMemoryExportButton.disabled = state.isBusy || migration.exportAvailable === false;
+        }
+        if (commandLegacyMemoryCompleteButton) {
+          commandLegacyMemoryCompleteButton.classList.toggle('hidden', migration.status !== 'draft-created');
+          commandLegacyMemoryCompleteButton.disabled = state.isBusy || migration.canComplete === false;
+          commandLegacyMemoryCompleteButton.title = migration.completeDisabledReason || '';
+        }
+        if (commandLegacyMemoryRollbackButton) {
+          commandLegacyMemoryRollbackButton.classList.toggle(
+            'hidden',
+            migration.status !== 'completed' && migration.canRollback !== true
+          );
+          commandLegacyMemoryRollbackButton.disabled = state.isBusy || migration.canRollback === false;
+          commandLegacyMemoryRollbackButton.title = migration.rollbackDisabledReason || '';
+        }
+      }
+
       function createCommandSkillItem(skill) {
         var active = isSkillActive(skill.id);
         var canUse = Boolean(skill.enabled && skill.userInvocable && !skill.unavailableReason);
@@ -1521,7 +1601,8 @@ export function getInputScript(): string {
         actions.append(
           createSkillActionButton(skill, 'open', t('skillsOpen'), false),
           createSkillActionButton(skill, skill.enabled ? 'disable' : 'enable', skill.enabled ? t('skillsDisable') : t('skillsEnable'), false),
-          createSkillActionButton(skill, 'implicit', skill.allowImplicit ? t('skillsManualOnly') : t('skillsAllowAuto'), !skill.enabled)
+          createSkillActionButton(skill, 'implicit', skill.allowImplicit ? t('skillsManualOnly') : t('skillsAllowAuto'), !skill.enabled),
+          createSkillActionButton(skill, 'workspace-default', skill.workspaceDefault ? t('skillsUnsetWorkspaceDefault') : t('skillsSetWorkspaceDefault'), !skill.enabled)
         );
 
         item.append(main, actions);
@@ -1543,7 +1624,8 @@ export function getInputScript(): string {
         var parts = [
           skill.sourceLabel || skill.source || '',
           skill.enabled ? t('skillsEnabled') : t('skillsDisabled'),
-          skill.allowImplicit ? t('skillsAllowAuto') : t('skillsManualOnly')
+          skill.allowImplicit ? t('skillsAllowAuto') : t('skillsManualOnly'),
+          skill.workspaceDefault ? t('skillsWorkspaceDefault') : ''
         ];
         if (skill.hasScripts) {
           parts.push(t('skillsScriptsPresent'));
@@ -1591,6 +1673,10 @@ export function getInputScript(): string {
         }
         if (action === 'implicit') {
           vscode.postMessage({ type: 'setSkillAllowImplicit', skillId: skillId, allowImplicit: !skill.allowImplicit });
+          return;
+        }
+        if (action === 'workspace-default') {
+          vscode.postMessage({ type: 'setSkillWorkspaceDefault', skillId: skillId, enabled: !skill.workspaceDefault });
         }
       }
 
@@ -2374,7 +2460,9 @@ export function getInputScript(): string {
           seen.add(normalized);
           ids.push(normalized);
         }
-        getActiveSkillIds().forEach(add);
+        promptInput.querySelectorAll('a.rich-skill-link').forEach(function(link) {
+          add(link.dataset.skillId || '');
+        });
         return ids;
       }
 
@@ -2416,6 +2504,7 @@ export function getInputScript(): string {
         return {
           items: Array.isArray(skills.items) ? skills.items : [],
           activeSkillIds: Array.isArray(skills.activeSkillIds) ? skills.activeSkillIds : [],
+          workspaceDefaultSkillIds: Array.isArray(skills.workspaceDefaultSkillIds) ? skills.workspaceDefaultSkillIds : [],
           workspaceTrusted: skills.workspaceTrusted !== false
         };
       }

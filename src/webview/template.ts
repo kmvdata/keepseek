@@ -8,11 +8,6 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
     <header class="header">
       <span class="header-title">KeepSeek</span>
       <div class="header-actions">
-        <button type="button" class="header-tab" id="memoryTab" title="Project Memory" aria-label="Project Memory" aria-haspopup="dialog" aria-expanded="false" data-i18n-title="projectMemory" data-i18n-aria-label="projectMemory">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>
-          </svg>
-        </button>
         <button type="button" class="header-tab" id="settingsTab" title="设置" aria-label="设置" aria-haspopup="dialog" aria-expanded="false" data-i18n-title="settings" data-i18n-aria-label="settings">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"/>
@@ -34,19 +29,6 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
         </button>
       </div>
     </header>
-
-    <div id="memoryPanel" class="memory-panel hidden" role="dialog" aria-label="Project Memory" data-i18n-aria-label="projectMemory">
-      <div class="memory-panel-header">
-        <span class="memory-panel-title" data-i18n="projectMemory">Project Memory</span>
-        <span id="memoryStorageLabel" class="memory-storage-label"></span>
-      </div>
-      <div class="memory-panel-actions">
-        <button id="memoryAddButton" type="button" data-i18n="memoryAdd">添加记忆</button>
-        <button id="memoryOpenFileButton" type="button" class="secondary" data-i18n="memoryOpenFile">打开文件</button>
-      </div>
-      <div id="memoryPendingList" class="memory-pending-list"></div>
-      <div id="memoryEntryList" class="memory-entry-list"></div>
-    </div>
 
     <div id="settingsMenu" class="settings-menu hidden" role="dialog" aria-label="设置" data-i18n-aria-label="settingsMenuTitle">
       <div class="settings-menu-header">

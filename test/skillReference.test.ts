@@ -10,6 +10,7 @@ import type { SkillManifest } from '../src/skills/skillTypes';
 test('expands allowed Codex skill Markdown reference', async () => {
   const skillRoot = await mkdtemp(path.join(os.tmpdir(), 'keepseek-skill-reference-'));
   await mkdir(path.join(skillRoot, 'references'), { recursive: true });
+  await mkdir(path.join(skillRoot, 'scripts'), { recursive: true });
   const skillUri = vscode.Uri.file(path.join(skillRoot, 'SKILL.md'));
   await writeFile(
     skillUri.fsPath,
@@ -23,7 +24,8 @@ test('expands allowed Codex skill Markdown reference', async () => {
       '',
       'Inspect the target page and improve interaction states.',
       '',
-      'Read [interaction checklist](references/checklist.md) before editing.'
+      'Read [interaction checklist](references/checklist.md) before editing.',
+      'A helper exists at [script](scripts/check.sh), but KeepSeek must not load or execute it.'
     ].join('\n'),
     'utf8'
   );
@@ -32,6 +34,7 @@ test('expands allowed Codex skill Markdown reference', async () => {
     'Check keyboard focus and empty states.\n',
     'utf8'
   );
+  await writeFile(path.join(skillRoot, 'scripts', 'check.sh'), 'SCRIPT_BODY_MUST_NOT_BE_LOADED\n', 'utf8');
 
   const manifest = createSkillManifest(skillRoot, skillUri);
   const prompt = `使用 [$optimize-ui-interactions](${skillUri.fsPath}) 优化输入框交互。`;
@@ -47,6 +50,7 @@ test('expands allowed Codex skill Markdown reference', async () => {
   assert.match(expanded, /Inspect the target page/u);
   assert.match(expanded, /Loaded relative skill resources/u);
   assert.match(expanded, /Check keyboard focus/u);
+  assert.doesNotMatch(expanded, /SCRIPT_BODY_MUST_NOT_BE_LOADED/u);
 });
 
 test('does not expand skill Markdown links outside allowed skill sources', async () => {
@@ -65,6 +69,22 @@ test('does not expand skill Markdown links outside allowed skill sources', async
   });
 
   assert.equal(expanded, prompt);
+});
+
+test('can defer Skill content injection to the unified activation context', async () => {
+  const skillRoot = await mkdtemp(path.join(os.tmpdir(), 'keepseek-deferred-skill-reference-'));
+  const skillUri = vscode.Uri.file(path.join(skillRoot, 'SKILL.md'));
+  await writeFile(skillUri.fsPath, '# Deferred Skill\n\nDo not duplicate me.\n', 'utf8');
+  const prompt = `[$optimize-ui-interactions](${skillUri.fsPath})`;
+
+  const expanded = await expandPromptReferencesInPrompt(prompt, {
+    skillManifests: [createSkillManifest(skillRoot, skillUri)],
+    expandSkillContents: false,
+    language: 'en'
+  });
+
+  assert.equal(expanded, prompt);
+  assert.doesNotMatch(expanded, /Do not duplicate me/u);
 });
 
 function createSkillManifest(rootPath: string, skillUri: vscode.Uri): SkillManifest {

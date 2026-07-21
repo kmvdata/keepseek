@@ -1,5 +1,5 @@
 import type { KeepseekLanguage } from '../shared/i18n';
-import type { AgentSettings, ProjectMemoryCategory, SafeNpmScript } from '../shared/types';
+import type { AgentSettings, SafeNpmScript } from '../shared/types';
 
 export interface PromptReferenceInput {
   path: string;
@@ -39,13 +39,10 @@ export type WebviewMessage =
   | { type: 'setDebugMode'; enabled: boolean }
   | { type: 'openCurrentSessionLog' }
   | { type: 'openRunTrace'; messageId: string }
-  | { type: 'openProjectMemoryFile' }
-  | { type: 'proposeMemoryAdd'; content: string; category: ProjectMemoryCategory; tags?: string[] }
-  | { type: 'proposeMemoryUpdate'; entryId: string; content: string; category: ProjectMemoryCategory; tags?: string[] }
-  | { type: 'proposeMemoryDelete'; entryId: string }
-  | { type: 'proposeMemoryToggle'; entryId: string; enabled: boolean }
-  | { type: 'applyMemoryUpdate'; updateId: string }
-  | { type: 'rejectMemoryUpdate'; updateId: string }
+  | { type: 'createLegacyMemoryMigrationDraft' }
+  | { type: 'exportLegacyMemory' }
+  | { type: 'completeLegacyMemoryMigration' }
+  | { type: 'rollbackLegacyMemoryMigration' }
   | { type: 'startBackgroundRun'; script: SafeNpmScript; maxRounds: number }
   | { type: 'resumeBackgroundRun' }
   | { type: 'stopBackgroundRun' }
@@ -73,6 +70,7 @@ export type WebviewMessage =
   | { type: 'openSkill'; skillId: string }
   | { type: 'setSkillEnabled'; skillId: string; enabled: boolean }
   | { type: 'setSkillAllowImplicit'; skillId: string; allowImplicit: boolean }
+  | { type: 'setSkillWorkspaceDefault'; skillId: string; enabled: boolean }
   | { type: 'createSkillDraft'; name: string; description: string; allowImplicit: boolean; userInvocable: boolean }
   | { type: 'requestClipboardText'; requestId: string }
   | { type: 'writeClipboardText'; text: string }

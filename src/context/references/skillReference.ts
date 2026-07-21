@@ -13,6 +13,7 @@ export interface ExpandSkillReferencesOptions {
   skillManifests?: readonly SkillManifest[];
   skillLoader?: SkillLoader;
   language?: KeepseekLanguage;
+  expandSkillContents?: boolean;
 }
 
 interface PromptSkillReference {
@@ -28,6 +29,9 @@ export async function expandSkillReferencesInPrompt(
   prompt: string,
   options: ExpandSkillReferencesOptions = {}
 ): Promise<string> {
+  if (options.expandSkillContents === false) {
+    return prompt;
+  }
   const references = findPromptSkillReferences(prompt, options.skillManifests ?? []);
   if (!references.length) {
     return prompt;

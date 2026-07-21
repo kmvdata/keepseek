@@ -36,23 +36,88 @@ test('dynamic context is kept out of the stable system prompt', () => {
   assert.ok(second.at(-1)?.content?.includes('two.ts'));
 });
 
-test('Project Memory stays in current-run context below the explicit user request', () => {
+test('project instructions and Skills do not mutate the stable system prefix', () => {
+  const withoutDynamicContext = buildInitialAgentMessages({
+    prompt: 'Inspect.',
+    contextFiles: [],
+    history: [],
+    language: 'en'
+  });
+  const withDynamicContext = buildInitialAgentMessages({
+    prompt: 'Inspect.',
+    contextFiles: [],
+    history: [],
+    language: 'en',
+    currentRunContext: {
+      projectInstructions: [{
+        id: 'root',
+        uri: 'file:///workspace/AGENTS.md',
+        workspaceFolder: 'workspace',
+        content: 'Project rule.',
+        characterCount: 13,
+        tokenEstimate: 4,
+        contentHash: 'hash-project',
+        truncated: false
+      }],
+      skills: [{
+        id: 'review',
+        name: 'review',
+        source: 'agentsWorkspace',
+        rootUri: 'file:///workspace/.agents/skills/review',
+        skillUri: 'file:///workspace/.agents/skills/review/SKILL.md',
+        content: 'Review workflow.',
+        activation: { source: 'explicit', reason: 'Selected.' }
+      }],
+      metadata: {
+        precedence: [],
+        beforeDeduplicationCount: 2,
+        afterDeduplicationCount: 2,
+        totalCharacterCount: 29,
+        totalTokenEstimate: 8,
+        truncated: false,
+        sources: [],
+        discarded: [],
+        possibleConflicts: []
+      }
+    }
+  });
+
+  assert.equal(withDynamicContext[0]?.content, withoutDynamicContext[0]?.content);
+  assert.match(withDynamicContext.at(-1)?.content ?? '', /Project rule[\s\S]*Review workflow/u);
+});
+
+test('Legacy Project Memory stays in lowest-priority current-run context below the explicit user request', () => {
   const messages = buildInitialAgentMessages({
     prompt: 'For this run, use pnpm instead.',
     contextFiles: [],
     history: [],
     language: 'en',
-    projectMemory: {
-      content: '- [command] Always use npm.',
-      entryIds: ['memory-1'],
-      tokenEstimate: 8,
-      storageMode: 'workspace'
+    currentRunContext: {
+      projectInstructions: [],
+      skills: [],
+      legacyMemory: {
+        content: '- [command] Always use npm.',
+        entryIds: ['memory-1'],
+        tokenEstimate: 8,
+        sourceUris: ['file:///workspace/.keepseek/memory.json']
+      },
+      metadata: {
+        precedence: [],
+        beforeDeduplicationCount: 1,
+        afterDeduplicationCount: 1,
+        totalCharacterCount: 27,
+        totalTokenEstimate: 8,
+        truncated: false,
+        sources: [],
+        discarded: [],
+        possibleConflicts: []
+      }
     }
   });
 
   assert.equal(messages.length, 2);
   assert.equal(messages[1]?.role, 'user');
-  assert.ok(messages[1]?.content?.includes('lower priority than the current user request'));
+  assert.ok(messages[1]?.content?.includes('lowest-priority migration compatibility'));
   assert.ok(messages[1]?.content?.endsWith('For this run, use pnpm instead.'));
 });
 

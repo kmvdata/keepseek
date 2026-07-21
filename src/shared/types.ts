@@ -27,6 +27,14 @@ export type ContextFileSource = 'workspace' | 'external';
 
 export type SkillSource = 'workspace' | 'agentsWorkspace' | 'user' | 'agentsUser' | 'builtin';
 
+export type SkillActivationSource = 'explicit' | 'session' | 'workspace-default' | 'implicit';
+
+export interface SkillActivationInfo {
+  source: SkillActivationSource;
+  reason: string;
+  score?: number;
+}
+
 export interface ContextFile {
   id: string;
   uri: string;
@@ -140,6 +148,7 @@ export interface ChatMessageSkill {
   id: string;
   name: string;
   source: SkillSource;
+  activation?: SkillActivationSource;
 }
 
 export interface HistorySummary {
@@ -169,63 +178,82 @@ export interface ContextProjectionMetadata {
   fallbackReason?: string;
 }
 
-export type ProjectMemoryCategory =
-  | 'architecture'
-  | 'preference'
-  | 'command'
-  | 'testing'
-  | 'restriction'
-  | 'project_note'
-  | 'workflow';
-
-export type ProjectMemorySource = 'user' | 'agent_suggestion' | 'manual';
-
-export type ProjectMemoryStorageMode = 'auto' | 'workspace' | 'global' | 'disabled';
-
-export interface ProjectMemoryEntry {
+export interface ProjectInstructionContext {
   id: string;
-  category: ProjectMemoryCategory;
+  uri: string;
+  workspaceFolder: string;
   content: string;
-  source: ProjectMemorySource;
-  confidence: number;
-  tags: string[];
-  enabled: boolean;
-  createdAt: string;
-  updatedAt: string;
+  characterCount: number;
+  tokenEstimate: number;
+  contentHash: string;
+  truncated: boolean;
 }
 
-export interface ProjectMemory {
-  schemaVersion: 1;
-  updatedAt: string;
-  entries: ProjectMemoryEntry[];
-}
-
-export type ProjectMemoryUpdateAction = 'add' | 'update' | 'delete' | 'enable' | 'disable';
-
-export interface ProjectMemoryUpdate {
-  id: string;
-  action: ProjectMemoryUpdateAction;
-  entryId?: string;
-  proposedEntry?: ProjectMemoryEntry;
-  previousEntry?: ProjectMemoryEntry;
-  reason: string;
-  source: ProjectMemorySource;
-  createdAt: string;
-}
-
-export interface ProjectMemoryContext {
+export interface LegacyProjectMemoryContext {
   content: string;
   entryIds: string[];
   tokenEstimate: number;
-  storageMode: Exclude<ProjectMemoryStorageMode, 'auto' | 'disabled'>;
+  sourceUris: string[];
 }
 
-export interface ProjectMemoryStateView {
-  configuredMode: ProjectMemoryStorageMode;
-  actualMode?: Exclude<ProjectMemoryStorageMode, 'auto' | 'disabled'>;
-  location?: string;
-  entries: ProjectMemoryEntry[];
-  pendingUpdates: ProjectMemoryUpdate[];
+export type RunContextSourceKind = 'project-instructions' | 'skill' | 'legacy-memory';
+
+export interface RunContextSourceSummary {
+  id: string;
+  kind: RunContextSourceKind;
+  label: string;
+  uri?: string;
+  source?: string;
+  activation?: SkillActivationSource;
+  reason?: string;
+  characterCount: number;
+  tokenEstimate: number;
+  contentHash: string;
+  truncated: boolean;
+  scriptsPresent?: boolean;
+}
+
+export interface RunContextDiscardedSource {
+  id: string;
+  kind: RunContextSourceKind;
+  uri?: string;
+  reason: 'duplicate_uri' | 'duplicate_content' | 'duplicate_skill' | 'budget_exhausted' | 'workspace_untrusted' | 'disabled' | 'implicit_not_allowed' | 'not_matched' | 'implicit_limit' | 'load_failed';
+  keptId?: string;
+}
+
+export interface RunContextProjectionMetadata {
+  precedence: string[];
+  beforeDeduplicationCount: number;
+  afterDeduplicationCount: number;
+  totalCharacterCount: number;
+  totalTokenEstimate: number;
+  truncated: boolean;
+  sources: RunContextSourceSummary[];
+  discarded: RunContextDiscardedSource[];
+  possibleConflicts: Array<{ leftId: string; rightId: string; reason: string }>;
+}
+
+export interface CurrentRunContext {
+  projectInstructions: ProjectInstructionContext[];
+  skills: ActivatedSkill[];
+  legacyMemory?: LegacyProjectMemoryContext;
+  metadata: RunContextProjectionMetadata;
+}
+
+export type LegacyProjectMemoryMigrationStatus = 'pending' | 'draft-created' | 'completed';
+
+export interface LegacyProjectMemoryMigrationStateView {
+  detected: boolean;
+  status: LegacyProjectMemoryMigrationStatus;
+  sourceUris: string[];
+  entryCount: number;
+  canCreateDraft: boolean;
+  canComplete: boolean;
+  canRollback: boolean;
+  exportAvailable: boolean;
+  lastDraftChangeSetId?: string;
+  completeDisabledReason?: string;
+  rollbackDisabledReason?: string;
   error?: string;
 }
 
@@ -445,6 +473,8 @@ export interface RunDetailsValidationSummary {
   error?: string;
 }
 
+export type RunDetailsContextSourceSummary = RunContextSourceSummary;
+
 export interface RunDetailsSummary {
   runId: string;
   sessionId?: string;
@@ -462,7 +492,14 @@ export interface RunDetailsSummary {
   authorizations: RunDetailsAuthorizationRecord[];
   changeSets: RunDetailsChangeSetSummary[];
   validations: RunDetailsValidationSummary[];
-  memoryEntryIds: string[];
+  contextSources: RunDetailsContextSourceSummary[];
+  contextDiscarded: RunContextDiscardedSource[];
+  contextDeduplication?: {
+    before: number;
+    after: number;
+    discarded: number;
+    truncated: boolean;
+  };
   budgetStopReason?: string;
   failureReason?: string;
   traceLogUri?: string;
@@ -579,7 +616,7 @@ export interface AgentRequest {
   model: KeepseekModel;
   settings: AgentSettings;
   contextFiles: ContextFile[];
-  skills?: ActivatedSkill[];
+  currentRunContext?: CurrentRunContext;
   history: ChatMessage[];
   contextCompression?: ContextCompressionState;
   historyRewriteReason?: string;
@@ -587,7 +624,6 @@ export interface AgentRequest {
   sessionId?: string;
   assistantMessageId?: string;
   repairLoop?: RepairLoopState;
-  projectMemory?: ProjectMemoryContext;
   executionLimits?: AgentExecutionLimits;
   backgroundRunId?: string;
   signal?: AbortSignal;
@@ -608,6 +644,9 @@ export interface ActivatedSkill {
   skillUri: string;
   content: string;
   loadedResourceUris?: string[];
+  activation?: SkillActivationInfo;
+  description?: string;
+  hasScripts?: boolean;
 }
 
 export interface AgentResponse {

@@ -63,7 +63,8 @@ function createRunDetails(toolCount: number): RunDetailsSummary {
     authorizations: [],
     changeSets: [],
     validations: [],
-    memoryEntryIds: [],
+    contextSources: [],
+    contextDiscarded: [],
     truncated: false
   };
 }

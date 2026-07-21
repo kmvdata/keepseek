@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { AgentSettings, KeepseekModel, ProjectMemoryStorageMode, UsageCostRates, ValidationAuthorizationPolicy } from './types';
+import { AgentSettings, KeepseekModel, UsageCostRates, ValidationAuthorizationPolicy } from './types';
 import { SESSION_HARD_RETENTION_DAYS } from '../sessions/sessionRetention';
 import {
   DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
@@ -25,8 +25,9 @@ export const DEFAULT_VALIDATION_AUTHORIZATION_POLICY: ValidationAuthorizationPol
 export const DEFAULT_MAX_VALIDATION_RUNS = 3;
 export const DEFAULT_MAX_REPAIR_ITERATIONS = 2;
 export const DEFAULT_VALIDATION_TIMEOUT_MS = 120_000;
-export const DEFAULT_PROJECT_MEMORY_STORAGE_MODE: ProjectMemoryStorageMode = 'auto';
-export const DEFAULT_PROJECT_MEMORY_CONTEXT_BUDGET_TOKENS = 1_200;
+export const DEFAULT_PROJECT_INSTRUCTIONS_CONTEXT_BUDGET_TOKENS = 4_000;
+export const DEFAULT_SKILL_CONTEXT_BUDGET_CHARS = 72_000;
+export const DEFAULT_MAX_IMPLICIT_SKILLS = 3;
 export const DEFAULT_BACKGROUND_MAX_ROUNDS = 5;
 export const DEFAULT_BACKGROUND_MAX_DURATION_MS = 30 * 60 * 1_000;
 export const DEFAULT_BACKGROUND_MAX_TOOL_CALLS = 60;
@@ -189,20 +190,25 @@ export function getConfiguredValidationTimeoutMs(): number {
   return normalizeIntegerInRange(configured, 1_000, 600_000, DEFAULT_VALIDATION_TIMEOUT_MS);
 }
 
-export function getConfiguredProjectMemoryStorageMode(): ProjectMemoryStorageMode {
+export function getConfiguredProjectInstructionsContextBudgetTokens(): number {
   const configured = vscode.workspace
     .getConfiguration('keepseek')
-    .get<string>('memory.storageMode', DEFAULT_PROJECT_MEMORY_STORAGE_MODE);
-  return configured === 'workspace' || configured === 'global' || configured === 'disabled'
-    ? configured
-    : DEFAULT_PROJECT_MEMORY_STORAGE_MODE;
+    .get<number>('projectInstructions.contextBudgetTokens', DEFAULT_PROJECT_INSTRUCTIONS_CONTEXT_BUDGET_TOKENS);
+  return normalizeIntegerInRange(configured, 0, 32_000, DEFAULT_PROJECT_INSTRUCTIONS_CONTEXT_BUDGET_TOKENS);
 }
 
-export function getConfiguredProjectMemoryContextBudgetTokens(): number {
+export function getConfiguredSkillContextBudgetChars(): number {
   const configured = vscode.workspace
     .getConfiguration('keepseek')
-    .get<number>('memory.contextBudgetTokens', DEFAULT_PROJECT_MEMORY_CONTEXT_BUDGET_TOKENS);
-  return normalizeIntegerInRange(configured, 0, 8_000, DEFAULT_PROJECT_MEMORY_CONTEXT_BUDGET_TOKENS);
+    .get<number>('skills.contextBudgetChars', DEFAULT_SKILL_CONTEXT_BUDGET_CHARS);
+  return normalizeIntegerInRange(configured, 0, 200_000, DEFAULT_SKILL_CONTEXT_BUDGET_CHARS);
+}
+
+export function getConfiguredMaxImplicitSkills(): number {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('skills.maxImplicitActivations', DEFAULT_MAX_IMPLICIT_SKILLS);
+  return normalizeIntegerInRange(configured, 0, 8, DEFAULT_MAX_IMPLICIT_SKILLS);
 }
 
 export function getConfiguredBackgroundMaxRounds(): number {

@@ -217,78 +217,6 @@ export function getStyles(): string {
       box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
     }
 
-    .memory-panel {
-      position: absolute;
-      top: 36px;
-      right: var(--keepseek-edge-padding);
-      z-index: 46;
-      display: grid;
-      gap: 8px;
-      width: min(420px, calc(100% - var(--keepseek-edge-padding-double)));
-      max-height: min(620px, calc(100vh - 72px));
-      overflow-y: auto;
-      padding: 10px;
-      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
-      border-radius: 8px;
-      background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
-      box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
-    }
-
-    .memory-panel-header,
-    .memory-panel-actions,
-    .memory-entry-actions,
-    .memory-pending-actions {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 6px;
-    }
-
-    .memory-panel-title,
-    .memory-entry-category {
-      font-size: 11px;
-      font-weight: 600;
-    }
-
-    .memory-storage-label,
-    .memory-entry-meta,
-    .memory-empty {
-      color: var(--vscode-descriptionForeground);
-      font-size: 10px;
-    }
-
-    .memory-entry-list,
-    .memory-pending-list {
-      display: grid;
-      gap: 6px;
-    }
-
-    .memory-entry,
-    .memory-pending {
-      display: grid;
-      gap: 5px;
-      padding: 8px;
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 6px;
-      background: var(--vscode-editor-background);
-    }
-
-    .memory-entry.is-disabled {
-      opacity: 0.55;
-    }
-
-    .memory-pending {
-      border-color: var(--vscode-notificationsWarningIcon-foreground, var(--vscode-focusBorder));
-    }
-
-    .memory-entry-content,
-    .memory-pending-content {
-      font-size: 11px;
-      line-height: 1.4;
-      overflow-wrap: anywhere;
-    }
-
-    .memory-panel button,
     .background-region button {
       padding: 3px 7px;
       border: 1px solid var(--vscode-button-border, transparent);
@@ -299,7 +227,6 @@ export function getStyles(): string {
       font-size: 10px;
     }
 
-    .memory-panel button.secondary,
     .background-region button.secondary {
       background: var(--vscode-button-secondaryBackground);
       color: var(--vscode-button-secondaryForeground);

@@ -122,7 +122,7 @@ function findReferencedResourceUris(rootUri: vscode.Uri, currentUri: vscode.Uri,
 
   for (const match of content.matchAll(MARKDOWN_LINK_TARGET_PATTERN)) {
     const target = normalizeMarkdownResourceTarget(match[1] ?? '');
-    if (!target || isExternalOrAbsoluteResourceTarget(target)) {
+    if (!target || isExternalOrAbsoluteResourceTarget(target) || isSkillScriptTarget(target)) {
       continue;
     }
 
@@ -134,6 +134,10 @@ function findReferencedResourceUris(rootUri: vscode.Uri, currentUri: vscode.Uri,
   }
 
   return uris;
+}
+
+function isSkillScriptTarget(target: string): boolean {
+  return target.split(/[\\/]+/u).some((segment) => segment.toLocaleLowerCase() === 'scripts');
 }
 
 function normalizeMarkdownResourceTarget(value: string): string {

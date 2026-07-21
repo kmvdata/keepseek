@@ -39,12 +39,14 @@ export interface SkillManifestView {
   unavailableReason?: string;
   active?: boolean;
   loadError?: string;
+  workspaceDefault?: boolean;
 }
 
 export interface SkillStateView {
   workspaceTrusted: boolean;
   items: SkillManifestView[];
   activeSkillIds: string[];
+  workspaceDefaultSkillIds: string[];
 }
 
 export const SKILL_FILE_NAME = 'SKILL.md';
@@ -62,33 +64,36 @@ export function toActivatedSkill(manifest: SkillManifest, content: string): Acti
     rootUri: manifest.rootUri.toString(),
     skillUri: manifest.skillUri.toString(),
     content,
+    description: manifest.description,
+    hasScripts: manifest.hasScripts,
     loadedResourceUris: [manifest.skillUri.toString()]
   };
 }
 
 export function toSkillManifestView(
   manifest: SkillManifest,
-  options: { active?: boolean; loadError?: string } = {}
+  options: { active?: boolean; loadError?: string; workspaceDefault?: boolean } = {}
 ): SkillManifestView {
   return {
     id: manifest.id,
     name: manifest.name,
     description: manifest.description,
-      source: manifest.source,
-      sourceLabel: manifest.sourceLabel,
-      rootUri: manifest.rootUri.toString(),
-      rootPath: getUriDisplayPath(manifest.rootUri),
-      skillUri: manifest.skillUri.toString(),
-      skillPath: getUriDisplayPath(manifest.skillUri),
-      enabled: manifest.enabled,
-      allowImplicit: manifest.allowImplicit,
-      userInvocable: manifest.userInvocable,
+    source: manifest.source,
+    sourceLabel: manifest.sourceLabel,
+    rootUri: manifest.rootUri.toString(),
+    rootPath: getUriDisplayPath(manifest.rootUri),
+    skillUri: manifest.skillUri.toString(),
+    skillPath: getUriDisplayPath(manifest.skillUri),
+    enabled: manifest.enabled,
+    allowImplicit: manifest.allowImplicit,
+    userInvocable: manifest.userInvocable,
     hasReferences: manifest.hasReferences,
     hasAssets: manifest.hasAssets,
     hasScripts: manifest.hasScripts,
     unavailableReason: manifest.unavailableReason,
     active: options.active,
-    loadError: options.loadError
+    loadError: options.loadError,
+    workspaceDefault: options.workspaceDefault
   };
 }
 

@@ -29,6 +29,35 @@ describe('RunDetailsBuilder', () => {
       durationMs: 42,
       diagnostics: { errors: 2, warnings: 1 }
     }));
+    builder.setRunContext({
+      precedence: ['core', 'project', 'skill'],
+      beforeDeduplicationCount: 2,
+      afterDeduplicationCount: 1,
+      totalCharacterCount: 120,
+      totalTokenEstimate: 30,
+      truncated: false,
+      sources: [{
+        id: 'skill-1',
+        kind: 'skill',
+        label: 'review-flow',
+        uri: 'file:///workspace/.agents/skills/review-flow/SKILL.md',
+        source: 'agentsWorkspace',
+        activation: 'implicit',
+        reason: 'Deterministic request match.',
+        characterCount: 120,
+        tokenEstimate: 30,
+        contentHash: 'hash',
+        truncated: false,
+        scriptsPresent: true
+      }],
+      discarded: [{
+        id: 'duplicate-skill',
+        kind: 'skill',
+        reason: 'duplicate_skill',
+        keptId: 'skill-1'
+      }],
+      possibleConflicts: []
+    });
     const plan = createPlan('blocked');
     const repairLoop: RepairLoopState = {
       status: 'waiting_for_apply',
@@ -44,6 +73,9 @@ describe('RunDetailsBuilder', () => {
     assert.match(summary.toolCalls[0].argumentsSummary ?? '', /\[redacted\]/u);
     assert.ok(!(summary.toolCalls[0].argumentsSummary ?? '').includes('must-not-leak'));
     assert.match(summary.toolCalls[0].argumentsSummary ?? '', /"chars":17/u);
+    assert.equal(summary.contextSources[0]?.activation, 'implicit');
+    assert.equal(summary.contextSources[0]?.scriptsPresent, true);
+    assert.equal(summary.contextDiscarded[0]?.reason, 'duplicate_skill');
   });
 
   it('updates persisted ChangeSet summaries after apply', () => {

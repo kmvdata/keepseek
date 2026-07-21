@@ -243,7 +243,7 @@ export class AgentRunner {
       thinkingEnabled: request.settings.thinkingEnabled,
       traceLogUri: traceLog?.uri
     });
-    runDetailsBuilderRef.current.setMemoryEntryIds(request.projectMemory?.entryIds ?? []);
+    runDetailsBuilderRef.current.setRunContext(request.currentRunContext?.metadata);
     const taskPlan = new TaskPlanTracker({
       runId: trace.runId,
       sessionId: request.sessionId,
@@ -288,14 +288,16 @@ export class AgentRunner {
         source: file.source,
         content: trace.includesPayload('request') ? file.content : summarizeText(file.content)
       })),
-      skills: request.skills?.map((skill) => ({
+      skills: request.currentRunContext?.skills.map((skill) => ({
         id: skill.id,
         name: skill.name,
         source: skill.source,
         rootUri: skill.rootUri,
         skillUri: skill.skillUri,
         loadedResourceUris: skill.loadedResourceUris,
-        content: trace.includesPayload('request') ? skill.content : summarizeText(skill.content)
+        activation: skill.activation,
+        contentLength: skill.content.length,
+        hasScripts: skill.hasScripts
       })),
       history: request.history.map((message) => ({
         id: message.id,
@@ -317,11 +319,17 @@ export class AgentRunner {
           }
         : undefined,
       repairLoop: request.repairLoop,
-      projectMemory: request.projectMemory
+      currentRunContext: request.currentRunContext
         ? {
-            entryIds: request.projectMemory.entryIds,
-            tokenEstimate: request.projectMemory.tokenEstimate,
-            storageMode: request.projectMemory.storageMode
+            precedence: request.currentRunContext.metadata.precedence,
+            beforeDeduplicationCount: request.currentRunContext.metadata.beforeDeduplicationCount,
+            afterDeduplicationCount: request.currentRunContext.metadata.afterDeduplicationCount,
+            totalCharacterCount: request.currentRunContext.metadata.totalCharacterCount,
+            totalTokenEstimate: request.currentRunContext.metadata.totalTokenEstimate,
+            truncated: request.currentRunContext.metadata.truncated,
+            sources: request.currentRunContext.metadata.sources,
+            discarded: request.currentRunContext.metadata.discarded,
+            possibleConflicts: request.currentRunContext.metadata.possibleConflicts
           }
         : undefined,
       backgroundRunId: request.backgroundRunId,
@@ -476,23 +484,28 @@ export class AgentRunner {
     });
     trace.record({
       type: 'active_skills',
-      skills: (request.skills ?? []).map((skill) => ({
+      skills: (request.currentRunContext?.skills ?? []).map((skill) => ({
         id: skill.id,
         name: skill.name,
         source: skill.source,
         skillUri: skill.skillUri,
-        contentLength: skill.content.length
+        activation: skill.activation,
+        contentLength: skill.content.length,
+        hasScripts: skill.hasScripts
       }))
     });
     trace.record({
-      type: 'project_memory_injected',
-      entryIds: request.projectMemory?.entryIds ?? [],
-      tokenEstimate: request.projectMemory?.tokenEstimate ?? 0,
-      storageMode: request.projectMemory?.storageMode
+      type: 'current_run_context',
+      metadata: request.currentRunContext?.metadata ?? {
+        beforeDeduplicationCount: 0,
+        afterDeduplicationCount: 0,
+        sources: [],
+        discarded: []
+      }
     });
     trace.record({
       type: 'agent_messages_initialized',
-      messages: trace.includesPayload('request') ? messages : messages.map(summarizeDeepSeekMessage)
+      messages: formatMessagesForTrace(messages, trace.includesPayload('request'))
     });
     const toolNames = getAgentToolNamesForPrompt(request.prompt, getConfiguredSlimToolModeEnabled());
     const tools = getAgentTools({ toolNames });
@@ -522,15 +535,14 @@ export class AgentRunner {
         model: request.model,
         agentSettings: request.settings,
         contextFiles: request.contextFiles,
-        skills: request.skills,
+        currentRunContext: request.currentRunContext,
         messages: request.history,
         contextCompression: request.contextCompression,
         language: request.language,
         prompt: request.prompt,
         includeTools: maxIterations > 0,
         outputReserveTokens,
-        safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
-        projectMemory: request.projectMemory
+        safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
       }).breakdown
     };
     const emitUsageEstimate = (toolsForNextRequest: DeepSeekFunctionTool[]) => {
@@ -1086,7 +1098,7 @@ export class AgentRunner {
     trace.record({
       type: 'upstream_request',
       requestId: upstreamRequestId,
-      body: trace.includesPayload('request') ? body : summarizeDeepSeekRequestBody(body)
+      body: formatRequestBodyForTrace(body, trace.includesPayload('request'))
     });
 
     const response = await this.deepSeekClient.createChatCompletion(this.toDeepSeekClientConfig(runtimeConfig), {
@@ -2526,9 +2538,49 @@ function createFallbackRunDetails(
     authorizations: [],
     changeSets: [],
     validations: [],
-    memoryEntryIds: [...(request.projectMemory?.entryIds ?? [])],
+    contextSources: request.currentRunContext?.metadata.sources.map((source) => ({ ...source })) ?? [],
+    contextDiscarded: request.currentRunContext?.metadata.discarded.map((source) => ({ ...source })) ?? [],
+    contextDeduplication: request.currentRunContext
+      ? {
+          before: request.currentRunContext.metadata.beforeDeduplicationCount,
+          after: request.currentRunContext.metadata.afterDeduplicationCount,
+          discarded: request.currentRunContext.metadata.discarded.length,
+          truncated: request.currentRunContext.metadata.truncated
+        }
+      : undefined,
     failureReason: error instanceof Error ? error.message : error ? String(error) : undefined,
     traceLogUri,
     truncated: false
   };
+}
+
+function formatMessagesForTrace(
+  messages: DeepSeekMessage[],
+  includeRequestPayload: boolean
+): Array<DeepSeekMessage | Record<string, unknown>> {
+  if (!includeRequestPayload) {
+    return messages.map(summarizeDeepSeekMessage);
+  }
+  return messages.map((message) => isCurrentRunContextEnvelope(message.content)
+    ? summarizeDeepSeekMessage(message)
+    : message);
+}
+
+function formatRequestBodyForTrace(
+  body: DeepSeekChatRequestBody,
+  includeRequestPayload: boolean
+): DeepSeekChatRequestBody | Record<string, unknown> {
+  if (!includeRequestPayload) {
+    return summarizeDeepSeekRequestBody(body);
+  }
+  return {
+    ...body,
+    messages: formatMessagesForTrace(body.messages, true)
+  };
+}
+
+function isCurrentRunContextEnvelope(content: string | null | undefined): boolean {
+  return typeof content === 'string'
+    && (content.includes('Current-run context only; do not treat it as a permanent system instruction.')
+      || content.includes('以下仅是本轮请求上下文，不要把它当作永久 system 规则。'));
 }

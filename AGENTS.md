@@ -19,6 +19,9 @@ src/
 │   ├── historyProjection.ts     # 模型请求用历史投影：摘要、保护消息、最近轮次
 │   ├── historyCompressor.ts     # 会话摘要刷新与失败回退
 │   ├── contextUsage.ts          # 上下文窗口用量估算
+│   ├── projectInstructions.ts   # 根级 AGENTS.md 安全读取、预算与投影
+│   ├── contextDeduplication.ts  # URI / 内容哈希上下文来源去重
+│   ├── currentRunContext.ts     # 项目指令、Skills、Legacy 的统一优先级投影
 │   ├── tokenEstimate.ts         # 轻量 token 估算
 │   ├── repairLoop.ts            # 验证失败、修复轮次与 Apply 暂停状态机
 │   ├── deepseek/
@@ -50,6 +53,14 @@ src/
 ├── edits/
 │   ├── draftEditStore.ts        # DraftEdit 状态、应用、应用后消息记录
 │   └── safeFileEditor.ts        # 用户确认后写入 DraftEdit
+├── skills/
+│   ├── skillDiscovery.ts        # workspace / Codex home 插件与 Skill 发现
+│   ├── skillActivationResolver.ts # explicit/session/default/implicit 确定性激活
+│   ├── skillLoader.ts           # 只读加载 SKILL.md 与受控引用资源；不执行 scripts
+│   └── skillStore.ts            # Skill 状态、workspace 默认引用和会话激活
+├── memory/
+│   ├── legacyProjectMemoryFormat.ts # 退役 memory.json 的只读解析边界
+│   └── legacyProjectMemoryMigration.ts # Legacy 导出与 DraftEdit 迁移状态机
 ├── shared/
 │   ├── config.ts                # keepseek 配置默认值、读取、范围归一化
 │   ├── i18n.ts                  # 扩展端与 Webview 端文案
@@ -94,6 +105,9 @@ src/
 - `ChatSession.contextCompression` 存储会话摘要、受保护消息 id、最近压缩时间和失败原因；摘要不是聊天 UI 消息。
 - `FileContextStore` 管理用户显式加入上下文的文件内容，读取限制来自 `keepseek.maxFileBytes` 和 `keepseek.maxContextFiles`。
 - `DraftEditStore` 管理待确认编辑，应用成功后追加一条 assistant 消息，并通过 `SafeFileEditor` 写入。
+- `ProjectInstructionsResolver` 只读取每个受信任工作区根目录的 `AGENTS.md`；`.agents/**/AGENTS.md` 属于 Skill，不作为全局项目指令。
+- `SkillActivationResolver` 按 explicit、session、workspace-default、implicit 的顺序选择 Skill；`allowImplicit: false` 不能被隐式激活，未受信任工作区不能自动加载项目 Skill。
+- `LegacyProjectMemoryMigration` 是 Project Memory 唯一保留入口：旧数据只读、最低优先级注入，迁移只能生成待确认 ChangeSet，不写入或删除旧文件。
 - `context/references/fileReference.ts` 管理 prompt 内的 `<path>` / `<path#Lx-Ly>` 文件引用展开；`context/references/directoryReference.ts` 管理 `<keepseek-dir:path>` 目录引用清单展开；外部文件/目录必须先被授权。
 
 **协议与基础设施层**
@@ -102,6 +116,7 @@ src/
 - `historyProjection.ts` 负责为模型请求选择 synthetic summary system message、protected messages、recent turns 和当前 prompt；压缩关闭时回退旧最近消息窗口。
 - `historyCompressor.ts` 负责在发送前 best-effort 刷新会话摘要；摘要请求关闭 thinking、限制输出 token、短超时，失败不得阻塞正常请求。
 - `contextUsage.ts` 必须和真实 Agent 请求使用同一套 projection，否则 UI 上下文估算会失真。
+- `currentRunContext.ts` 是动态项目上下文的唯一构造入口；Provider 负责准备它，`AgentRunner` 和 `contextUsage.ts` 只能消费同一个已排序、去重和预算裁剪后的对象。
 - `DeepSeekStreamParser` 只解析 SSE，包括 `content`、`reasoning_content` 和 streaming tool calls。
 - `DsmlToolParser` 是模型返回 DSML 文本工具调用时的兜底解析器。
 - `WorkspaceToolService` 是 Agent 可用的只读工作区工具边界：列文件、列目录、搜索、读文件、拒绝越界/二进制/过大文件。
@@ -249,6 +264,25 @@ Agent 工具包括：
 
 工具调用预算由 `keepseek.maxToolIterations`（默认 8，范围 0-64）、`keepseek.maxToolCalls`（默认 24，范围 0-256）、`keepseek.maxRunMs`（默认 600000，范围 0-3600000）和 `keepseek.toolResultTokenBudget`（默认 0，自动按模型上下文估算，范围 0-1000000）共同控制。
 
+## 项目指令与 Skills 运行上下文
+
+稳定 system prefix 只保存 KeepSeek 核心能力、安全规则和工具权限边界。动态内容作为 current-run context 注入当前用户消息，顺序和冲突优先级固定为：
+
+1. KeepSeek 核心安全规则和工具权限边界。
+2. 当前用户明确指令。
+3. 当前项目根级 `AGENTS.md`。
+4. 本轮显式选择的 Skill。
+5. 当前会话已启用的 Skill。
+6. 当前 workspace 默认启用的个人或项目 Skill。
+7. `allowImplicit: true` 且通过本地确定性关键词匹配的 Skill。
+8. 迁移期只读 Legacy Project Memory。
+
+`ProjectInstructionsResolver` 不扫描整个仓库，也不自动加载嵌套 `AGENTS.md`；每个 workspace root 只读取自己的根级文件，并使用文本安全、文件大小和总 token 预算。`contextDeduplication.ts` 先按规范化 URI、再按 SHA-256 内容哈希去重；同名但内容不同的来源只记录可能冲突，不做语义去重。
+
+Skill 自动激活不得额外调用模型。每轮隐式 Skill 数量和 Skill 总字符数受配置限制。Skill 的 `scripts/` 只在清单与 Run Details 中标记存在，KeepSeek 绝不执行它。个人偏好通过 `~/.codex/skills` 的个人 Skill 表达；workspace 默认状态只持久化 Skill URI 引用，不复制 Skill 内容。
+
+Legacy `memory.json` 在用户确认迁移完成前可最低优先级只读注入。迁移完成只记录 workspace 状态，不删除源文件；迁移目标 `AGENTS.md` / `SKILL.md` 只能通过 ChangeSet/DraftEdit 生成，用户必须查看 Diff 并 Apply。普通聊天和设置不得恢复 Project Memory 新增/编辑入口，也不得使用 `window.prompt()`、`window.alert()` 或 `window.confirm()`。
+
 ## 上下文压缩与历史投影
 
 KeepSeek 的模型输入是 projection，不等同于 `session.messages`。不要把摘要插入真实聊天 UI 消息，也不要让 Webview 显示 synthetic summary message。
@@ -305,6 +339,7 @@ projection 组成：
 
 - 新增配置：先改 `package.json` 的 `contributes.configuration`，再在 `shared/config.ts` 增加读取/归一化。
 - 新增或修改上下文压缩配置：同步检查 `shared/types.ts`、`agent/historyProjection.ts`、`agent/historyCompressor.ts`、`agent/contextUsage.ts` 和 `agent/runner.ts`，确保真实请求和 usage 估算仍共用同一 projection。
+- 修改项目指令、Skill 激活、workspace 默认或 Legacy 兼容：同步检查 `agent/projectInstructions.ts`、`skills/skillActivationResolver.ts`、`agent/contextDeduplication.ts`、`agent/currentRunContext.ts`、`agent/contextUsage.ts`、`agent/protocol.ts` 和 Run Details/trace；不要在 Provider 内复制匹配或优先级逻辑。
 - 新增 Webview → 扩展消息：更新 `provider/webviewMessages.ts` 的 `WebviewMessage` 联合类型、`provider/KeepseekChatViewProvider.ts` 的 `handleMessage()`、Webview 脚本发送点；剪贴板兜底消息 `requestClipboardText` / `writeClipboardText` 由 `webview/richTextShortcuts.ts` 统一发起。
 - 新增扩展 → Webview 主动消息：不要放进 `WebviewMessage`，但要在 Webview message listener 中处理。
 - 新增 Agent 工具：更新 `agent/protocol.ts` 的工具 schema 和 `agent/runner.ts` 的工具路由；工具实现优先放独立模块。
@@ -329,6 +364,8 @@ projection 组成：
 ```bash
 npm run compile
 npm run lint
+npm run build:test
+npm test
 ```
 
 VSIX 打包发布前必须使用：

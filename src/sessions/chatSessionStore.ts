@@ -658,12 +658,71 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
           error: typeof validation.error === 'string' ? validation.error.slice(0, 500) : undefined
         }))
       : [],
-    memoryEntryIds: normalizeStringArray(value.memoryEntryIds),
+    contextSources: Array.isArray(value.contextSources)
+      ? value.contextSources.filter(isRecord).slice(0, 40).map((source, index) => ({
+          id: typeof source.id === 'string' ? source.id : `context-${index + 1}`,
+          kind: source.kind === 'project-instructions' || source.kind === 'skill' || source.kind === 'legacy-memory'
+            ? source.kind
+            : 'skill',
+          label: typeof source.label === 'string' ? source.label.slice(0, 160) : 'Context source',
+          uri: typeof source.uri === 'string' ? source.uri : undefined,
+          source: typeof source.source === 'string' ? source.source.slice(0, 80) : undefined,
+          activation: source.activation === 'explicit' || source.activation === 'session'
+            || source.activation === 'workspace-default' || source.activation === 'implicit'
+            ? source.activation
+            : undefined,
+          reason: typeof source.reason === 'string' ? source.reason.slice(0, 240) : undefined,
+          characterCount: normalizeNonNegativeInteger(source.characterCount),
+          tokenEstimate: normalizeNonNegativeInteger(source.tokenEstimate),
+          contentHash: typeof source.contentHash === 'string' ? source.contentHash.slice(0, 128) : '',
+          truncated: source.truncated === true,
+          scriptsPresent: source.scriptsPresent === true
+        }))
+      : [],
+    contextDiscarded: Array.isArray(value.contextDiscarded)
+      ? value.contextDiscarded.filter(isRecord).slice(0, 80).map((source, index) => ({
+          id: typeof source.id === 'string' ? source.id : `discarded-context-${index + 1}`,
+          kind: source.kind === 'project-instructions' || source.kind === 'skill' || source.kind === 'legacy-memory'
+            ? source.kind
+            : 'skill',
+          uri: typeof source.uri === 'string' ? source.uri : undefined,
+          reason: normalizeRunContextDiscardReason(source.reason),
+          keptId: typeof source.keptId === 'string' ? source.keptId : undefined
+        }))
+      : [],
+    contextDeduplication: isRecord(value.contextDeduplication)
+      ? {
+          before: normalizeNonNegativeInteger(value.contextDeduplication.before),
+          after: normalizeNonNegativeInteger(value.contextDeduplication.after),
+          discarded: normalizeNonNegativeInteger(value.contextDeduplication.discarded),
+          truncated: value.contextDeduplication.truncated === true
+        }
+      : undefined,
     budgetStopReason: typeof value.budgetStopReason === 'string' ? value.budgetStopReason.slice(0, 120) : undefined,
     failureReason: typeof value.failureReason === 'string' ? value.failureReason.slice(0, 500) : undefined,
     traceLogUri: typeof value.traceLogUri === 'string' ? value.traceLogUri : undefined,
     truncated: value.truncated === true
   };
+}
+
+function normalizeRunContextDiscardReason(
+  value: unknown
+): NonNullable<ChatMessage['runDetails']>['contextDiscarded'][number]['reason'] {
+  switch (value) {
+    case 'duplicate_uri':
+    case 'duplicate_content':
+    case 'duplicate_skill':
+    case 'budget_exhausted':
+    case 'workspace_untrusted':
+    case 'disabled':
+    case 'implicit_not_allowed':
+    case 'not_matched':
+    case 'implicit_limit':
+    case 'load_failed':
+      return value;
+    default:
+      return 'load_failed';
+  }
 }
 
 function normalizeRunDetailsTaskPlan(value: unknown): NonNullable<ChatMessage['runDetails']>['taskPlan'] {

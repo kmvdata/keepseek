@@ -212,31 +212,29 @@
           "default": true,
           "markdownDescription": "Include active editor content as context automatically."
         },
-        "keepseek.memory.storageMode": {
-          "type": "string",
-          "default": "auto",
-          "scope": "window",
-          "enum": [
-            "auto",
-            "workspace",
-            "global",
-            "disabled"
-          ],
-          "enumDescriptions": [
-            "Use .keepseek/memory.json when available and fall back to VS Code global storage.",
-            "Prefer .keepseek/memory.json and fall back to VS Code global storage when the workspace is not writable.",
-            "Store project memory only in VS Code global storage.",
-            "Disable Project Memory persistence and injection."
-          ],
-          "markdownDescription": "Storage mode for confirmed Project Memory entries. Memory changes always require confirmation and credentials are rejected."
-        },
-        "keepseek.memory.contextBudgetTokens": {
+        "keepseek.projectInstructions.contextBudgetTokens": {
           "type": "number",
-          "default": 1200,
+          "default": 4000,
           "minimum": 0,
-          "maximum": 8000,
+          "maximum": 32000,
           "scope": "window",
-          "markdownDescription": "Maximum estimated tokens of relevant Project Memory injected into each Agent run. Set to 0 to disable injection without deleting stored entries."
+          "markdownDescription": "Maximum estimated tokens used by root AGENTS.md project instructions in each Agent run."
+        },
+        "keepseek.skills.contextBudgetChars": {
+          "type": "number",
+          "default": 72000,
+          "minimum": 0,
+          "maximum": 200000,
+          "scope": "window",
+          "markdownDescription": "Maximum total characters used by activated Codex-compatible Skill instructions in each Agent run. Skill scripts are never executed."
+        },
+        "keepseek.skills.maxImplicitActivations": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 8,
+          "scope": "window",
+          "markdownDescription": "Maximum number of allowImplicit Skills that deterministic request matching may activate per Agent run."
         },
         "keepseek.background.maxRounds": {
           "type": "number",

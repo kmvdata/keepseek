@@ -5,6 +5,7 @@ import type {
   RunDetailsStatus,
   RunDetailsSummary,
   RunDetailsToolCallSummary,
+  RunContextProjectionMetadata,
   SafeNpmScript,
   TaskPlan,
   ToolAuthorizationDecision
@@ -167,7 +168,9 @@ export class RunDetailsBuilder {
       authorizations: this.authorizations.map((authorization) => ({ ...authorization })),
       changeSets: this.changeSets.map((changeSet) => ({ ...changeSet, labels: [...changeSet.labels] })),
       validations: this.validations.map((validation) => ({ ...validation })),
-      memoryEntryIds: [...this.memoryEntryIds],
+      contextSources: this.contextSources.map((source) => ({ ...source })),
+      contextDiscarded: this.contextDiscarded.map((source) => ({ ...source })),
+      contextDeduplication: this.contextDeduplication ? { ...this.contextDeduplication } : undefined,
       budgetStopReason: this.budgetStopReason,
       failureReason: this.failureReason,
       traceLogUri: this.input.traceLogUri,
@@ -176,11 +179,26 @@ export class RunDetailsBuilder {
     return summary;
   }
 
-  public setMemoryEntryIds(entryIds: string[]): void {
-    this.memoryEntryIds = Array.from(new Set(entryIds));
-  }
+  private contextSources: RunDetailsSummary['contextSources'] = [];
+  private contextDiscarded: RunDetailsSummary['contextDiscarded'] = [];
+  private contextDeduplication: RunDetailsSummary['contextDeduplication'];
 
-  private memoryEntryIds: string[] = [];
+  public setRunContext(metadata: RunContextProjectionMetadata | undefined): void {
+    if (!metadata) {
+      this.contextSources = [];
+      this.contextDiscarded = [];
+      this.contextDeduplication = undefined;
+      return;
+    }
+    this.contextSources = metadata.sources.map((source) => ({ ...source }));
+    this.contextDiscarded = metadata.discarded.map((source) => ({ ...source }));
+    this.contextDeduplication = {
+      before: metadata.beforeDeduplicationCount,
+      after: metadata.afterDeduplicationCount,
+      discarded: metadata.discarded.length,
+      truncated: metadata.truncated
+    };
+  }
 
   private recordModelRequest(value: unknown): void {
     this.requestCount += 1;

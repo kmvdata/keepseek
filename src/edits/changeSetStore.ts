@@ -129,6 +129,15 @@ export class ChangeSetStore {
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]?.id;
   }
 
+  public getChangeSetStatus(changeSetId: string): ChangeSet['status'] | undefined {
+    return this.changeSets.get(changeSetId)?.status;
+  }
+
+  public isChangeSetFullyApplied(changeSetId: string): boolean {
+    const changeSet = this.changeSets.get(changeSetId);
+    return Boolean(changeSet?.files.length) && changeSet?.files.every((file) => file.status === 'applied') === true;
+  }
+
   public async openDiff(editId: string): Promise<boolean> {
     const found = this.findEdit(editId);
     if (!found) {
