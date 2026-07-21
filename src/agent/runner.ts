@@ -9,7 +9,9 @@ import {
   ContextUsageEstimate,
   DraftEdit,
   PromptCacheDiagnostics,
+  RunDetailsSummary,
   SafeNpmScript,
+  TaskPlan,
   ToolAuthorizationDecision,
   TurnUsageStats,
   UsageEvent
@@ -98,6 +100,7 @@ import {
 import { TaskPlanTracker } from './taskPlan';
 import { createChangeSet } from '../edits/changeSet';
 import { RepairLoopTracker } from './repairLoop';
+import { RunDetailsBuilder } from './logging/runDetails';
 
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;
 const MAX_LENGTH_CONTINUATION_REQUESTS = 1;
@@ -216,7 +219,12 @@ export class AgentRunner {
   ) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
-    const trace = this.traceLogService?.createRunTrace() ?? createNoopInteractionTrace();
+    const runDetailsBuilderRef: { current?: RunDetailsBuilder } = {};
+    const trace = this.traceLogService?.createRunTrace((event, timestamp) => {
+      runDetailsBuilderRef.current?.record(event, timestamp);
+    }) ?? createNoopInteractionTrace((event, timestamp) => {
+      runDetailsBuilderRef.current?.record(event, timestamp);
+    });
     const traceLog = trace.enabled && trace.logUri
       ? {
           runId: trace.runId,
@@ -226,6 +234,16 @@ export class AgentRunner {
     if (traceLog) {
       callbacks.onTraceLog?.(traceLog);
     }
+    runDetailsBuilderRef.current = new RunDetailsBuilder({
+      runId: trace.runId,
+      sessionId: request.sessionId,
+      assistantMessageId: request.assistantMessageId,
+      backgroundRunId: request.backgroundRunId,
+      modelId: request.model.id,
+      thinkingEnabled: request.settings.thinkingEnabled,
+      traceLogUri: traceLog?.uri
+    });
+    runDetailsBuilderRef.current.setMemoryEntryIds(request.projectMemory?.entryIds ?? []);
     const taskPlan = new TaskPlanTracker({
       runId: trace.runId,
       sessionId: request.sessionId,
@@ -235,7 +253,7 @@ export class AgentRunner {
       recordTrace: (event) => trace.record(event)
     });
     const repairLoop = new RepairLoopTracker(
-      getConfiguredMaxRepairIterations(),
+      normalizeRepairIterationLimit(request.executionLimits?.maxRepairIterations),
       (event) => trace.record(event),
       request.repairLoop
     );
@@ -298,10 +316,19 @@ export class AgentRunner {
             lastFailureReason: request.contextCompression.lastFailureReason
           }
         : undefined,
-      repairLoop: request.repairLoop
+      repairLoop: request.repairLoop,
+      projectMemory: request.projectMemory
+        ? {
+            entryIds: request.projectMemory.entryIds,
+            tokenEstimate: request.projectMemory.tokenEstimate,
+            storageMode: request.projectMemory.storageMode
+          }
+        : undefined,
+      backgroundRunId: request.backgroundRunId,
+      executionLimits: request.executionLimits
     });
     const finishRun = (
-      response: Omit<AgentResponse, 'runId' | 'taskPlan' | 'changeSet' | 'repairLoop'>,
+      response: Omit<AgentResponse, 'runId' | 'taskPlan' | 'changeSet' | 'repairLoop' | 'runDetails'>,
       details: Record<string, unknown> = {}
     ): AgentResponse => {
       const finishReason = typeof details.finishReason === 'string' ? details.finishReason : undefined;
@@ -323,7 +350,7 @@ export class AgentRunner {
         edits: response.draftEdits,
         operationSummary: completedPlan.goal
       });
-      const responseWithUsage: AgentResponse = {
+      const responseWithUsage = {
         runId: trace.runId,
         ...response,
         message: finalMessage,
@@ -372,7 +399,16 @@ export class AgentRunner {
           }))
         });
       }
-      return traceLog ? { ...responseWithUsage, traceLog } : responseWithUsage;
+      const runDetails = runDetailsBuilderRef.current?.finish({
+        taskPlan: completedPlan,
+        repairLoop: repairState,
+        changeSet,
+        finishReason
+      }) ?? createFallbackRunDetails(trace.runId, request, completedPlan, traceLog?.uri);
+      callbacks.onRunDetails?.(runDetails);
+      return traceLog
+        ? { ...responseWithUsage, traceLog, runDetails }
+        : { ...responseWithUsage, runDetails };
     };
 
     trace.record({
@@ -449,6 +485,12 @@ export class AgentRunner {
       }))
     });
     trace.record({
+      type: 'project_memory_injected',
+      entryIds: request.projectMemory?.entryIds ?? [],
+      tokenEstimate: request.projectMemory?.tokenEstimate ?? 0,
+      storageMode: request.projectMemory?.storageMode
+    });
+    trace.record({
       type: 'agent_messages_initialized',
       messages: trace.includesPayload('request') ? messages : messages.map(summarizeDeepSeekMessage)
     });
@@ -487,7 +529,8 @@ export class AgentRunner {
         prompt: request.prompt,
         includeTools: maxIterations > 0,
         outputReserveTokens,
-        safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+        safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
+        projectMemory: request.projectMemory
       }).breakdown
     };
     const emitUsageEstimate = (toolsForNextRequest: DeepSeekFunctionTool[]) => {
@@ -647,6 +690,7 @@ export class AgentRunner {
               budgetStopReason,
               content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
             });
+            runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, budgetToolResult);
             return budgetToolResult;
           }
         }
@@ -664,6 +708,7 @@ export class AgentRunner {
             budgetStopReason,
             content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
           });
+          runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, budgetToolResult);
           return budgetToolResult;
         }
 
@@ -679,6 +724,7 @@ export class AgentRunner {
         let authorizationDecision: ToolAuthorizationDecision | undefined;
         try {
           toolArgs = this.parseToolArguments(toolCall.function.arguments);
+          runDetailsBuilderRef.current?.recordToolArguments(toolCall.id, toolCall.function.name, toolArgs);
           if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && repairLoop.hasPendingRepair()) {
             rawToolResult = JSON.stringify({
               ok: false,
@@ -759,6 +805,7 @@ export class AgentRunner {
             error: error instanceof Error ? error.message : String(error)
           });
         }
+        runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, rawToolResult);
         taskPlan.finishTool(toolCall.function.name, rawToolResult);
         if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME) {
           const repairOutcome = repairLoop.recordValidationResult(rawToolResult);
@@ -978,15 +1025,22 @@ export class AgentRunner {
       draftEdits
     }, { finishReason: 'tool_iterations_exhausted' });
     } catch (error) {
+      let failedPlan;
       if (error instanceof AgentRunAbortedError || request.signal?.aborted) {
-        taskPlan.stop(error instanceof Error ? error.message : undefined);
+        failedPlan = taskPlan.stop(error instanceof Error ? error.message : undefined);
       } else {
-        taskPlan.fail(error instanceof Error ? error.message : String(error));
+        failedPlan = taskPlan.fail(error instanceof Error ? error.message : String(error));
       }
       trace.record({
         type: 'run_error',
         error: formatUnknownError(error)
       });
+      callbacks.onRunDetails?.(runDetailsBuilderRef.current?.finish({
+        taskPlan: failedPlan,
+        repairLoop: repairLoop.getState(),
+        failureReason: error instanceof Error ? error.message : String(error),
+        stopped: error instanceof AgentRunAbortedError || request.signal?.aborted
+      }) ?? createFallbackRunDetails(trace.runId, request, failedPlan, traceLog?.uri, error));
       throw error;
     } finally {
       await trace.flush();
@@ -2328,9 +2382,9 @@ export class AgentRunner {
       apiKey,
       baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL).trim() || DEFAULT_DEEPSEEK_BASE_URL,
       maxTokens: profile.maxTokens,
-      maxToolIterations: profile.maxToolIterations,
-      maxToolCalls: profile.maxToolCalls,
-      maxRunMs: profile.maxRunMs,
+      maxToolIterations: clampRunLimit(profile.maxToolIterations, request.executionLimits?.maxToolIterations),
+      maxToolCalls: clampRunLimit(profile.maxToolCalls, request.executionLimits?.maxToolCalls),
+      maxRunMs: clampRunLimit(profile.maxRunMs, request.executionLimits?.maxRunMs),
       toolResultTokenBudget: profile.toolResultTokenBudget,
       streamIdleTimeoutMs: profile.streamIdleTimeoutMs,
       temperature: profile.temperature,
@@ -2418,4 +2472,63 @@ function isGitToolName(toolName: string): boolean {
 
 function hashStableText(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+function clampRunLimit(profileLimit: number, requestedLimit: number | undefined): number {
+  if (typeof requestedLimit !== 'number' || !Number.isFinite(requestedLimit)) {
+    return profileLimit;
+  }
+  return Math.max(0, Math.min(profileLimit, Math.floor(requestedLimit)));
+}
+
+function normalizeRepairIterationLimit(requestedLimit: number | undefined): number {
+  if (typeof requestedLimit !== 'number' || !Number.isFinite(requestedLimit)) {
+    return getConfiguredMaxRepairIterations();
+  }
+  return Math.max(0, Math.min(10, Math.floor(requestedLimit)));
+}
+
+function createFallbackRunDetails(
+  runId: string,
+  request: AgentRequest,
+  taskPlan: TaskPlan,
+  traceLogUri?: string,
+  error?: unknown
+): RunDetailsSummary {
+  const now = new Date().toISOString();
+  const stopped = error instanceof AgentRunAbortedError || request.signal?.aborted;
+  return {
+    runId,
+    sessionId: request.sessionId,
+    assistantMessageId: request.assistantMessageId,
+    backgroundRunId: request.backgroundRunId,
+    modelId: request.model.id,
+    status: stopped ? 'stopped' : error ? 'failed' : taskPlan.status === 'blocked' ? 'blocked' : 'succeeded',
+    startedAt: taskPlan.createdAt,
+    endedAt: now,
+    durationMs: Math.max(0, Date.parse(now) - Date.parse(taskPlan.createdAt)),
+    taskPlan: {
+      status: taskPlan.status,
+      goal: taskPlan.goal,
+      updateCount: 0,
+      completedSteps: taskPlan.steps.filter((step) => step.status === 'completed' || step.status === 'skipped').length,
+      totalSteps: taskPlan.steps.length,
+      blockers: [...taskPlan.blockers]
+    },
+    modelRequests: {
+      requestCount: 0,
+      messageCount: 0,
+      exposedToolCount: 0,
+      thinkingEnabled: request.settings.thinkingEnabled
+    },
+    toolCallCount: 0,
+    toolCalls: [],
+    authorizations: [],
+    changeSets: [],
+    validations: [],
+    memoryEntryIds: [...(request.projectMemory?.entryIds ?? [])],
+    failureReason: error instanceof Error ? error.message : error ? String(error) : undefined,
+    traceLogUri,
+    truncated: false
+  };
 }

@@ -17,7 +17,7 @@ import {
   getAgentTools
 } from './protocol';
 import type { KeepseekLanguage } from '../shared/i18n';
-import { ActivatedSkill, AgentSettings, ChatMessage, ContextCompressionState, ContextFile, ContextUsageEstimate, KeepseekModel } from '../shared/types';
+import { ActivatedSkill, AgentSettings, ChatMessage, ContextCompressionState, ContextFile, ContextUsageEstimate, KeepseekModel, ProjectMemoryContext } from '../shared/types';
 import { buildHistoryProjection } from './historyProjection';
 
 type ContextUsageBreakdown = ContextUsageEstimate['breakdown'];
@@ -34,6 +34,7 @@ export function createContextUsageEstimate(input: {
   includeTools?: boolean;
   outputReserveTokens?: number;
   safetyReserveTokens?: number;
+  projectMemory?: ProjectMemoryContext;
 }): ContextUsageEstimate {
   const profile = getDeepSeekV4RuntimeProfile(input.model, input.agentSettings);
   const prompt = input.prompt?.trim() ?? '';
@@ -50,7 +51,8 @@ export function createContextUsageEstimate(input: {
     skills: input.skills,
     history: input.messages,
     language: input.language,
-    projection
+    projection,
+    projectMemory: input.projectMemory
   });
   const includeTools = input.includeTools ?? profile.maxToolIterations > 0;
   const tools = includeTools
@@ -89,6 +91,7 @@ export function createDisplayedSessionContextUsageEstimate(input: {
   contextCompression?: ContextCompressionState;
   language: KeepseekLanguage;
   prompt?: string;
+  projectMemory?: ProjectMemoryContext;
 }): ContextUsageEstimate {
   const usage = toSessionContextUsageEstimate(createContextUsageEstimate(input));
   const displayedReasoningTokens = input.messages.reduce((total, message) => {

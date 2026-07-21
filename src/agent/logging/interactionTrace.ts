@@ -35,16 +35,18 @@ export interface AgentInteractionTrace {
   flush(): Promise<void>;
 }
 
+export type InteractionTraceEventSink = (event: InteractionTraceEvent, timestamp: string) => void;
+
 export class InteractionTraceLogService {
   private lastRunTraceLogUri: string | undefined;
 
   public constructor(private readonly globalStorageUri: vscode.Uri) {}
 
-  public createRunTrace(): AgentInteractionTrace {
+  public createRunTrace(eventSink?: InteractionTraceEventSink): AgentInteractionTrace {
     const settings = getConfiguredInteractionTraceSettings();
     if (!settings.enabled) {
       this.lastRunTraceLogUri = undefined;
-      return createNoopInteractionTrace();
+      return createNoopInteractionTrace(eventSink);
     }
 
     const runId = randomUUID();
@@ -55,12 +57,12 @@ export class InteractionTraceLogService {
     void this.cleanupExpiredLogs(settings);
 
     if (fileUri.scheme === 'file') {
-      const trace = new JsonlInteractionTrace(runId, fileUri.fsPath, settings);
+      const trace = new JsonlInteractionTrace(runId, fileUri.fsPath, settings, eventSink);
       this.lastRunTraceLogUri = trace.logUri;
       return trace;
     }
 
-    const trace = new WorkspaceFsJsonlInteractionTrace(runId, fileUri, settings);
+    const trace = new WorkspaceFsJsonlInteractionTrace(runId, fileUri, settings, eventSink);
     this.lastRunTraceLogUri = trace.logUri;
     return trace;
   }
@@ -198,7 +200,8 @@ class JsonlInteractionTrace implements AgentInteractionTrace {
   public constructor(
     public readonly runId: string,
     private readonly filePath: string,
-    private readonly settings: InteractionTraceSettings
+    private readonly settings: InteractionTraceSettings,
+    private readonly eventSink?: InteractionTraceEventSink
   ) {
     this.logUri = vscode.Uri.file(filePath).toString();
     this.level = settings.level;
@@ -215,6 +218,7 @@ class JsonlInteractionTrace implements AgentInteractionTrace {
   }
 
   public record(event: InteractionTraceEvent): void {
+    this.eventSink?.(event, new Date().toISOString());
     if (this.stopped) {
       return;
     }
@@ -286,7 +290,8 @@ class WorkspaceFsJsonlInteractionTrace implements AgentInteractionTrace {
   public constructor(
     public readonly runId: string,
     private readonly fileUri: vscode.Uri,
-    private readonly settings: InteractionTraceSettings
+    private readonly settings: InteractionTraceSettings,
+    private readonly eventSink?: InteractionTraceEventSink
   ) {
     this.logUri = fileUri.toString();
     this.level = settings.level;
@@ -301,6 +306,7 @@ class WorkspaceFsJsonlInteractionTrace implements AgentInteractionTrace {
   }
 
   public record(event: InteractionTraceEvent): void {
+    this.eventSink?.(event, new Date().toISOString());
     if (this.stopped) {
       return;
     }
@@ -390,12 +396,14 @@ class NoopInteractionTrace implements AgentInteractionTrace {
   public readonly level: InteractionTraceLevel = 'metadata';
   public readonly logRawStream = false;
 
+  public constructor(private readonly eventSink?: InteractionTraceEventSink) {}
+
   public includesPayload(_level: 'request' | 'full'): boolean {
     return false;
   }
 
-  public record(_event: InteractionTraceEvent): void {
-    return;
+  public record(event: InteractionTraceEvent): void {
+    this.eventSink?.(event, new Date().toISOString());
   }
 
   public async flush(): Promise<void> {
@@ -403,8 +411,8 @@ class NoopInteractionTrace implements AgentInteractionTrace {
   }
 }
 
-export function createNoopInteractionTrace(): AgentInteractionTrace {
-  return new NoopInteractionTrace();
+export function createNoopInteractionTrace(eventSink?: InteractionTraceEventSink): AgentInteractionTrace {
+  return new NoopInteractionTrace(eventSink);
 }
 
 export function summarizeText(value: string | null | undefined): Record<string, unknown> {
@@ -486,7 +494,13 @@ export function formatUnknownError(error: unknown): Record<string, unknown> {
 
 function safeJsonStringify(value: unknown): string {
   try {
-    return JSON.stringify(value, (_key, innerValue: unknown) => {
+    return JSON.stringify(value, (key, innerValue: unknown) => {
+      if (typeof innerValue === 'string') {
+        if (/^(?:apiKey|authorizationHeader|accessToken|refreshToken|password|passwd|secret|clientSecret|privateKey)$/iu.test(key)) {
+          return '[redacted]';
+        }
+        return redactSensitiveTraceText(innerValue);
+      }
       if (typeof innerValue === 'bigint') {
         return innerValue.toString();
       }
@@ -501,6 +515,12 @@ function safeJsonStringify(value: unknown): string {
       error: formatUnknownError(error)
     });
   }
+}
+
+function redactSensitiveTraceText(value: string): string {
+  return value
+    .replace(/(api[_ -]?key|authorization|bearer|access[_ -]?token|refresh[_ -]?token|password|passwd|secret|private[_ -]?key|client[_ -]?secret)(\s*[:=]\s*)\S+/giu, '$1$2[redacted]')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[opsu]_[A-Za-z0-9]{16,}|AKIA[A-Z0-9]{12,})\b/gu, '[redacted]');
 }
 
 function formatTimestampForFile(date: Date): string {

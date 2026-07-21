@@ -133,6 +133,7 @@ export interface ChatMessage {
   isStreaming?: boolean;
   contextMeta?: ChatMessageContextMeta;
   usedSkills?: ChatMessageSkill[];
+  runDetails?: RunDetailsSummary;
 }
 
 export interface ChatMessageSkill {
@@ -166,6 +167,66 @@ export interface ContextProjectionMetadata {
   protectedMessageCount: number;
   recentMessageCount: number;
   fallbackReason?: string;
+}
+
+export type ProjectMemoryCategory =
+  | 'architecture'
+  | 'preference'
+  | 'command'
+  | 'testing'
+  | 'restriction'
+  | 'project_note'
+  | 'workflow';
+
+export type ProjectMemorySource = 'user' | 'agent_suggestion' | 'manual';
+
+export type ProjectMemoryStorageMode = 'auto' | 'workspace' | 'global' | 'disabled';
+
+export interface ProjectMemoryEntry {
+  id: string;
+  category: ProjectMemoryCategory;
+  content: string;
+  source: ProjectMemorySource;
+  confidence: number;
+  tags: string[];
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectMemory {
+  schemaVersion: 1;
+  updatedAt: string;
+  entries: ProjectMemoryEntry[];
+}
+
+export type ProjectMemoryUpdateAction = 'add' | 'update' | 'delete' | 'enable' | 'disable';
+
+export interface ProjectMemoryUpdate {
+  id: string;
+  action: ProjectMemoryUpdateAction;
+  entryId?: string;
+  proposedEntry?: ProjectMemoryEntry;
+  previousEntry?: ProjectMemoryEntry;
+  reason: string;
+  source: ProjectMemorySource;
+  createdAt: string;
+}
+
+export interface ProjectMemoryContext {
+  content: string;
+  entryIds: string[];
+  tokenEstimate: number;
+  storageMode: Exclude<ProjectMemoryStorageMode, 'auto' | 'disabled'>;
+}
+
+export interface ProjectMemoryStateView {
+  configuredMode: ProjectMemoryStorageMode;
+  actualMode?: Exclude<ProjectMemoryStorageMode, 'auto' | 'disabled'>;
+  location?: string;
+  entries: ProjectMemoryEntry[];
+  pendingUpdates: ProjectMemoryUpdate[];
+  error?: string;
 }
 
 export interface ChatSession {
@@ -323,6 +384,91 @@ export interface ChangeSet {
   updatedAt: string;
 }
 
+export type RunDetailsStatus = 'running' | 'succeeded' | 'waiting' | 'blocked' | 'failed' | 'stopped';
+
+export interface RunDetailsTaskPlanSummary {
+  status: TaskPlanStatus;
+  goal: string;
+  updateCount: number;
+  completedSteps: number;
+  totalSteps: number;
+  blockers: string[];
+}
+
+export interface RunDetailsModelRequestSummary {
+  requestCount: number;
+  messageCount: number;
+  exposedToolCount: number;
+  maxOutputTokens?: number;
+  thinkingEnabled: boolean;
+}
+
+export interface RunDetailsToolCallSummary {
+  id: string;
+  name: string;
+  startedAt: string;
+  endedAt?: string;
+  durationMs?: number;
+  status: 'running' | 'succeeded' | 'failed' | 'denied';
+  argumentsSummary?: string;
+  resultSummary?: string;
+  riskLevel?: ToolRiskLevel;
+  scope?: AuthorizedToolScope;
+  truncated?: boolean;
+}
+
+export interface RunDetailsAuthorizationRecord {
+  toolName: string;
+  allowed: boolean;
+  riskLevel: ToolRiskLevel;
+  scope: AuthorizedToolScope;
+  source: ToolAuthorizationDecision['source'];
+  reason?: string;
+}
+
+export interface RunDetailsChangeSetSummary {
+  id: string;
+  fileCount: number;
+  status: ChangeSetStatus;
+  labels: string[];
+  appliedCount: number;
+  failedCount: number;
+}
+
+export interface RunDetailsValidationSummary {
+  script?: SafeNpmScript;
+  ok?: boolean;
+  exitCode?: number;
+  durationMs?: number;
+  errors?: number;
+  warnings?: number;
+  error?: string;
+}
+
+export interface RunDetailsSummary {
+  runId: string;
+  sessionId?: string;
+  assistantMessageId?: string;
+  backgroundRunId?: string;
+  modelId: string;
+  status: RunDetailsStatus;
+  startedAt: string;
+  endedAt?: string;
+  durationMs?: number;
+  taskPlan?: RunDetailsTaskPlanSummary;
+  modelRequests: RunDetailsModelRequestSummary;
+  toolCallCount: number;
+  toolCalls: RunDetailsToolCallSummary[];
+  authorizations: RunDetailsAuthorizationRecord[];
+  changeSets: RunDetailsChangeSetSummary[];
+  validations: RunDetailsValidationSummary[];
+  memoryEntryIds: string[];
+  budgetStopReason?: string;
+  failureReason?: string;
+  traceLogUri?: string;
+  truncated: boolean;
+}
+
 export type ValidationAuthorizationPolicy = 'never' | 'ask' | 'always';
 
 export type ToolRiskLevel = 'low' | 'medium' | 'high';
@@ -441,7 +587,17 @@ export interface AgentRequest {
   sessionId?: string;
   assistantMessageId?: string;
   repairLoop?: RepairLoopState;
+  projectMemory?: ProjectMemoryContext;
+  executionLimits?: AgentExecutionLimits;
+  backgroundRunId?: string;
   signal?: AbortSignal;
+}
+
+export interface AgentExecutionLimits {
+  maxToolIterations?: number;
+  maxToolCalls?: number;
+  maxRunMs?: number;
+  maxRepairIterations?: number;
 }
 
 export interface ActivatedSkill {
@@ -465,6 +621,7 @@ export interface AgentResponse {
   usage?: TurnUsageStats;
   promptCacheDiagnostics?: PromptCacheDiagnostics;
   traceLog?: AgentTraceLogInfo;
+  runDetails: RunDetailsSummary;
 }
 
 export type AgentActivityBase = 'idle' | 'thinking' | 'executing' | 'waiting' | 'complete' | 'error' | 'stopped';
@@ -523,4 +680,47 @@ export interface AgentRunCallbacks {
   onUsage?: (event: UsageEvent) => void;
   onTraceLog?: (traceLog: AgentTraceLogInfo) => void;
   onTaskPlan?: (taskPlan: TaskPlan) => void;
+  onRunDetails?: (runDetails: RunDetailsSummary) => void;
+}
+
+export type BackgroundRunStatus =
+  | 'running'
+  | 'waiting_for_apply'
+  | 'waiting_for_authorization'
+  | 'completed'
+  | 'failed'
+  | 'stopped';
+
+export interface BackgroundRunGoal {
+  kind: 'repair_until_validation_passes';
+  script: SafeNpmScript;
+  description: string;
+}
+
+export interface BackgroundRunLimits {
+  maxRounds: number;
+  maxDurationMs: number;
+  maxToolCalls: number;
+}
+
+export interface BackgroundRunProgress {
+  round: number;
+  toolCalls: number;
+  runIds: string[];
+  lastRunId?: string;
+}
+
+export interface BackgroundRun {
+  id: string;
+  sessionId: string;
+  workspaceKey: string;
+  status: BackgroundRunStatus;
+  goal: BackgroundRunGoal;
+  limits: BackgroundRunLimits;
+  progress: BackgroundRunProgress;
+  startedAt: string;
+  updatedAt: string;
+  endedAt?: string;
+  waitingReason?: string;
+  stopReason?: string;
 }

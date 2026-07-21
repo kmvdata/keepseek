@@ -217,6 +217,94 @@ export function getStyles(): string {
       box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
     }
 
+    .memory-panel {
+      position: absolute;
+      top: 36px;
+      right: var(--keepseek-edge-padding);
+      z-index: 46;
+      display: grid;
+      gap: 8px;
+      width: min(420px, calc(100% - var(--keepseek-edge-padding-double)));
+      max-height: min(620px, calc(100vh - 72px));
+      overflow-y: auto;
+      padding: 10px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 8px;
+      background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
+      box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
+    }
+
+    .memory-panel-header,
+    .memory-panel-actions,
+    .memory-entry-actions,
+    .memory-pending-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
+    .memory-panel-title,
+    .memory-entry-category {
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .memory-storage-label,
+    .memory-entry-meta,
+    .memory-empty {
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+    }
+
+    .memory-entry-list,
+    .memory-pending-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .memory-entry,
+    .memory-pending {
+      display: grid;
+      gap: 5px;
+      padding: 8px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editor-background);
+    }
+
+    .memory-entry.is-disabled {
+      opacity: 0.55;
+    }
+
+    .memory-pending {
+      border-color: var(--vscode-notificationsWarningIcon-foreground, var(--vscode-focusBorder));
+    }
+
+    .memory-entry-content,
+    .memory-pending-content {
+      font-size: 11px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .memory-panel button,
+    .background-region button {
+      padding: 3px 7px;
+      border: 1px solid var(--vscode-button-border, transparent);
+      border-radius: 4px;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      font: inherit;
+      font-size: 10px;
+    }
+
+    .memory-panel button.secondary,
+    .background-region button.secondary {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
+
     .settings-menu-header {
       display: flex;
       align-items: center;
@@ -636,6 +724,62 @@ export function getStyles(): string {
     .context-chip-remove:hover {
       opacity: 1;
       background: var(--vscode-list-hoverBackground);
+    }
+
+    .background-region {
+      display: grid;
+      gap: 6px;
+      margin: 6px var(--keepseek-edge-padding) 0;
+      padding: 7px 9px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+    }
+
+    .background-main,
+    .background-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .background-main {
+      justify-content: space-between;
+    }
+
+    .background-label {
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .background-status {
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+      overflow-wrap: anywhere;
+    }
+
+    .background-controls select,
+    .background-controls input {
+      min-height: 22px;
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      border-radius: 3px;
+      background: var(--vscode-dropdown-background, var(--vscode-input-background));
+      color: var(--vscode-dropdown-foreground, var(--vscode-input-foreground));
+      font: inherit;
+      font-size: 10px;
+    }
+
+    .background-rounds {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+    }
+
+    .background-rounds input {
+      width: 40px;
     }
 
     .plan-region {
@@ -1482,6 +1626,67 @@ export function getStyles(): string {
       width: 100%;
       min-height: 22px;
       margin-top: 4px;
+    }
+
+    .run-details {
+      margin-top: 8px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editor-background);
+      font-size: 10px;
+    }
+
+    .run-details > summary {
+      padding: 5px 7px;
+      cursor: pointer;
+      color: var(--vscode-descriptionForeground);
+      font-weight: 600;
+    }
+
+    .run-details-body {
+      display: grid;
+      gap: 7px;
+      padding: 0 7px 7px;
+      border-top: 1px solid var(--vscode-panel-border);
+    }
+
+    .run-details-grid {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 3px 7px;
+      padding-top: 6px;
+    }
+
+    .run-details-label {
+      color: var(--vscode-descriptionForeground);
+    }
+
+    .run-details-section {
+      display: grid;
+      gap: 4px;
+    }
+
+    .run-details-section-title {
+      font-weight: 600;
+    }
+
+    .run-details-tool {
+      display: grid;
+      gap: 2px;
+      padding: 5px;
+      border-radius: 4px;
+      background: var(--vscode-textBlockQuote-background, var(--vscode-sideBar-background));
+      overflow-wrap: anywhere;
+    }
+
+    .run-details-error,
+    .run-details-denied {
+      color: var(--vscode-errorForeground);
+    }
+
+    .run-details-actions {
+      display: flex;
+      gap: 6px;
     }
 
     .message-action-btn {

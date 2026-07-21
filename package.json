@@ -212,6 +212,56 @@
           "default": true,
           "markdownDescription": "Include active editor content as context automatically."
         },
+        "keepseek.memory.storageMode": {
+          "type": "string",
+          "default": "auto",
+          "scope": "window",
+          "enum": [
+            "auto",
+            "workspace",
+            "global",
+            "disabled"
+          ],
+          "enumDescriptions": [
+            "Use .keepseek/memory.json when available and fall back to VS Code global storage.",
+            "Prefer .keepseek/memory.json and fall back to VS Code global storage when the workspace is not writable.",
+            "Store project memory only in VS Code global storage.",
+            "Disable Project Memory persistence and injection."
+          ],
+          "markdownDescription": "Storage mode for confirmed Project Memory entries. Memory changes always require confirmation and credentials are rejected."
+        },
+        "keepseek.memory.contextBudgetTokens": {
+          "type": "number",
+          "default": 1200,
+          "minimum": 0,
+          "maximum": 8000,
+          "scope": "window",
+          "markdownDescription": "Maximum estimated tokens of relevant Project Memory injected into each Agent run. Set to 0 to disable injection without deleting stored entries."
+        },
+        "keepseek.background.maxRounds": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 10,
+          "scope": "window",
+          "markdownDescription": "Maximum number of Agent rounds for a VS Code background repair task."
+        },
+        "keepseek.background.maxDurationMs": {
+          "type": "number",
+          "default": 1800000,
+          "minimum": 60000,
+          "maximum": 3600000,
+          "scope": "window",
+          "markdownDescription": "Maximum total duration of a background repair task in milliseconds."
+        },
+        "keepseek.background.maxToolCalls": {
+          "type": "number",
+          "default": 60,
+          "minimum": 1,
+          "maximum": 256,
+          "scope": "window",
+          "markdownDescription": "Maximum cumulative tool calls across all rounds of a background repair task."
+        },
         "keepseek.maxHistoryMessages": {
           "type": "number",
           "default": 80,

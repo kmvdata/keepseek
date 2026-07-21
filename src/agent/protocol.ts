@@ -3,7 +3,7 @@ import { formatBytes } from '../shared/format';
 import type { KeepseekLanguage } from '../shared/i18n';
 import { getMarkdownFence, getMarkdownLanguage } from '../shared/markdown';
 import { estimateTokenCount } from './tokenEstimate';
-import { ActivatedSkill, ChatMessage, ContextFile } from '../shared/types';
+import { ActivatedSkill, ChatMessage, ContextFile, ProjectMemoryContext } from '../shared/types';
 import type { HistoryProjectionResult } from './historyProjection';
 
 export const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
@@ -66,6 +66,7 @@ export interface BuildAgentMessagesInput {
   history: ChatMessage[];
   language: KeepseekLanguage;
   projection?: HistoryProjectionResult;
+  projectMemory?: ProjectMemoryContext;
 }
 
 export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepSeekMessage[] {
@@ -115,16 +116,38 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
   return messages;
 }
 
+export function formatProjectMemoryForAgent(
+  memory: ProjectMemoryContext | undefined,
+  language: KeepseekLanguage
+): string {
+  if (!memory?.content.trim()) {
+    return '';
+  }
+  return language === 'en'
+    ? [
+        'Confirmed Project Memory for this workspace (lower priority than the current user request):',
+        'Use these durable project conventions only when relevant. Ignore conflicting memory and follow the current user request. Never infer credentials or secret values from memory.',
+        memory.content
+      ].join('\n\n')
+    : [
+        '当前工作区已确认的 Project Memory（优先级低于当前用户请求）：',
+        '仅在相关时使用这些长期项目约定。如有冲突请忽略记忆并遵循当前用户请求。不要从记忆中推断凭据或敏感值。',
+        memory.content
+      ].join('\n\n');
+}
+
 export function formatCurrentUserPromptForAgent(input: {
   prompt: string;
   contextFiles: ContextFile[];
   skills?: ActivatedSkill[];
   language: KeepseekLanguage;
+  projectMemory?: ProjectMemoryContext;
 }): string {
   const prompt = input.prompt.trim();
   const contextBlock = formatAgentContextFiles(input);
   const skillsBlock = formatActiveSkills(input);
-  const dynamicBlocks = [contextBlock, skillsBlock].filter(Boolean);
+  const memoryBlock = formatProjectMemoryForAgent(input.projectMemory, input.language);
+  const dynamicBlocks = [memoryBlock, contextBlock, skillsBlock].filter(Boolean);
   if (!dynamicBlocks.length) {
     return prompt;
   }

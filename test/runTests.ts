@@ -1,5 +1,6 @@
 import './registerVscodeStub';
 import './agentRequestCoordinator.test';
+import './backgroundRunCoordinator.test';
 import './chatSessionStore.test';
 import './changeSet.test';
 import './contextEntryPoints.test';
@@ -10,7 +11,9 @@ import './historyCompressor.test';
 import './historyProjection.test';
 import './modelProfiles.test';
 import './protocolCache.test';
+import './projectMemory.test';
 import './repairLoop.test';
+import './runDetails.test';
 import './semanticTools.test';
 import './referenceResources.test';
 import './skillDiscovery.test';

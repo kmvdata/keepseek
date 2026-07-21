@@ -36,6 +36,26 @@ test('dynamic context is kept out of the stable system prompt', () => {
   assert.ok(second.at(-1)?.content?.includes('two.ts'));
 });
 
+test('Project Memory stays in current-run context below the explicit user request', () => {
+  const messages = buildInitialAgentMessages({
+    prompt: 'For this run, use pnpm instead.',
+    contextFiles: [],
+    history: [],
+    language: 'en',
+    projectMemory: {
+      content: '- [command] Always use npm.',
+      entryIds: ['memory-1'],
+      tokenEstimate: 8,
+      storageMode: 'workspace'
+    }
+  });
+
+  assert.equal(messages.length, 2);
+  assert.equal(messages[1]?.role, 'user');
+  assert.ok(messages[1]?.content?.includes('lower priority than the current user request'));
+  assert.ok(messages[1]?.content?.endsWith('For this run, use pnpm instead.'));
+});
+
 test('validation tool exposes only the fixed safe npm scripts', () => {
   const tool = getAgentTools({ toolNames: [RUN_VALIDATION_TOOL_NAME] })[0];
   const properties = tool.function.parameters.properties as Record<string, { enum?: string[] }>;

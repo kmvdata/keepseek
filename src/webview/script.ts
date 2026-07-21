@@ -24,6 +24,17 @@ export function getScript(): string {
         items: [],
         activeSkillIds: []
       },
+      projectMemory: {
+        configuredMode: 'auto',
+        entries: [],
+        pendingUpdates: []
+      },
+      backgroundRun: null,
+      backgroundDefaults: {
+        maxRounds: 5,
+        maxDurationMs: 1800000,
+        maxToolCalls: 60
+      },
       contextUsageSessionId: '',
       contextUsage: {
         usedTokensEstimate: 0,
@@ -311,6 +322,13 @@ export function getScript(): string {
     const historyTab = document.getElementById('historyTab');
     const newChatTab = document.getElementById('newChatTab');
     const settingsTab = document.getElementById('settingsTab');
+    const memoryTab = document.getElementById('memoryTab');
+    const memoryPanel = document.getElementById('memoryPanel');
+    const memoryStorageLabel = document.getElementById('memoryStorageLabel');
+    const memoryAddButton = document.getElementById('memoryAddButton');
+    const memoryOpenFileButton = document.getElementById('memoryOpenFileButton');
+    const memoryPendingList = document.getElementById('memoryPendingList');
+    const memoryEntryList = document.getElementById('memoryEntryList');
     const settingsMenu = document.getElementById('settingsMenu');
     const settingsApiKeyMenuItem = document.getElementById('settingsApiKeyMenuItem');
     const settingsHistoryMenuItem = document.getElementById('settingsHistoryMenuItem');
@@ -324,6 +342,13 @@ export function getScript(): string {
     const settingsLanguageValue = document.getElementById('settingsLanguageValue');
     const settingsLanguageSubmenu = document.getElementById('settingsLanguageSubmenu');
     const sessionMenu = document.getElementById('sessionMenu');
+    const backgroundRegion = document.getElementById('backgroundRegion');
+    const backgroundStatus = document.getElementById('backgroundStatus');
+    const backgroundScript = document.getElementById('backgroundScript');
+    const backgroundMaxRounds = document.getElementById('backgroundMaxRounds');
+    const backgroundStart = document.getElementById('backgroundStart');
+    const backgroundResume = document.getElementById('backgroundResume');
+    const backgroundStop = document.getElementById('backgroundStop');
     const contextBarOuter = document.getElementById('contextBarOuter');
     const contextBar = document.getElementById('contextBar');
     const planRegion = document.getElementById('planRegion');
@@ -356,6 +381,7 @@ export function getScript(): string {
     let planExpanded = false;
     const pendingChangeActions = new Set();
     let settingsMenuOpen = false;
+    let memoryPanelOpen = false;
     let sessionMenuOpen = false;
     let sessionMultiSelectMode = false;
     let sessionRangeDays = 1;
@@ -431,6 +457,20 @@ export function getScript(): string {
 
     transcript.addEventListener('click', function(event) {
       var target = event.target instanceof Element ? event.target : null;
+      var runButton = target?.closest('button[data-run-action]');
+      if (runButton && transcript.contains(runButton)) {
+        event.preventDefault();
+        event.stopPropagation();
+        var runMessage = state.messages.find(function(message) { return message.id === runButton.dataset.messageId; });
+        if (!runMessage?.runDetails) return;
+        if (runButton.dataset.runAction === 'openTrace') {
+          vscode.postMessage({ type: 'openRunTrace', messageId: runMessage.id });
+        } else if (runButton.dataset.runAction === 'copySummary') {
+          vscode.postMessage({ type: 'writeClipboardText', text: formatRunDetailsSummary(runMessage.runDetails) });
+          setTransientStatus(t('copied'));
+        }
+        return;
+      }
       var actionButton = target?.closest('button[data-message-action]');
       if (actionButton && transcript.contains(actionButton)) {
         event.preventDefault();
@@ -680,8 +720,9 @@ export function getScript(): string {
 
     if (newChatTab) {
       newChatTab.addEventListener('click', function() {
-        if (state.isBusy) return;
+        if (state.isBusy || isBackgroundActive()) return;
         closeSettingsMenu();
+        closeMemoryPanel();
         closeSessionMenu();
         resetLocalContextUsageEstimate();
         clearPromptDraft();
@@ -694,7 +735,91 @@ export function getScript(): string {
         event.preventDefault();
         event.stopPropagation();
         if (state.isBusy) return;
+        closeMemoryPanel();
         toggleSettingsMenu();
+      });
+    }
+
+    if (memoryTab) {
+      memoryTab.addEventListener('click', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSettingsMenu();
+        closeSessionMenu();
+        memoryPanelOpen = !memoryPanelOpen;
+        renderProjectMemory();
+      });
+    }
+
+    if (memoryAddButton) {
+      memoryAddButton.addEventListener('click', function() {
+        var content = window.prompt(t('memoryContentPrompt'), '');
+        if (!content || !content.trim()) return;
+        var category = promptMemoryCategory('project_note');
+        vscode.postMessage({ type: 'proposeMemoryAdd', content: content.trim(), category: category });
+      });
+    }
+
+    if (memoryOpenFileButton) {
+      memoryOpenFileButton.addEventListener('click', function() {
+        vscode.postMessage({ type: 'openProjectMemoryFile' });
+      });
+    }
+
+    if (memoryPanel) {
+      memoryPanel.addEventListener('click', function(event) {
+        var target = event.target instanceof Element ? event.target : null;
+        var button = target?.closest('button[data-memory-action]');
+        if (!button) return;
+        var action = button.dataset.memoryAction || '';
+        var entryId = button.dataset.entryId || '';
+        var updateId = button.dataset.updateId || '';
+        if (action === 'apply' && updateId) {
+          vscode.postMessage({ type: 'applyMemoryUpdate', updateId: updateId });
+        } else if (action === 'reject' && updateId) {
+          vscode.postMessage({ type: 'rejectMemoryUpdate', updateId: updateId });
+        } else if (action === 'delete' && entryId) {
+          vscode.postMessage({ type: 'proposeMemoryDelete', entryId: entryId });
+        } else if (action === 'toggle' && entryId) {
+          vscode.postMessage({ type: 'proposeMemoryToggle', entryId: entryId, enabled: button.dataset.enabled === 'true' });
+        } else if (action === 'edit' && entryId) {
+          var entry = getMemoryEntries().find(function(item) { return item.id === entryId; });
+          if (!entry) return;
+          var content = window.prompt(t('memoryContentPrompt'), String(entry.content || ''));
+          if (!content || !content.trim()) return;
+          var category = promptMemoryCategory(entry.category || 'project_note');
+          vscode.postMessage({
+            type: 'proposeMemoryUpdate',
+            entryId: entryId,
+            content: content.trim(),
+            category: category,
+            tags: Array.isArray(entry.tags) ? entry.tags : []
+          });
+        }
+      });
+    }
+
+    if (backgroundStart) {
+      backgroundStart.addEventListener('click', function() {
+        if (state.isBusy || isBackgroundActive()) return;
+        vscode.postMessage({
+          type: 'startBackgroundRun',
+          script: normalizeValidationScript(backgroundScript?.value),
+          maxRounds: normalizeIntegerInRange(backgroundMaxRounds?.value, 1, 10, 5)
+        });
+      });
+    }
+
+    if (backgroundResume) {
+      backgroundResume.addEventListener('click', function() {
+        if (state.isBusy) return;
+        vscode.postMessage({ type: 'resumeBackgroundRun' });
+      });
+    }
+
+    if (backgroundStop) {
+      backgroundStop.addEventListener('click', function() {
+        vscode.postMessage({ type: 'stopBackgroundRun' });
       });
     }
 
@@ -794,6 +919,7 @@ export function getScript(): string {
         event.stopPropagation();
         if (state.isBusy) return;
         closeSettingsMenu();
+        closeMemoryPanel();
         toggleSessionMenu();
       });
     }
@@ -950,11 +1076,20 @@ export function getScript(): string {
       closeSettingsMenu();
     });
 
+    document.addEventListener('mousedown', function(event) {
+      if (!memoryPanelOpen) return;
+      var target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      if ((memoryPanel && memoryPanel.contains(target)) || (memoryTab && memoryTab.contains(target))) return;
+      closeMemoryPanel();
+    });
+
     document.addEventListener('keydown', function(event) {
-      if ((!sessionMenuOpen && !settingsMenuOpen) || event.key !== 'Escape') return;
+      if ((!sessionMenuOpen && !settingsMenuOpen && !memoryPanelOpen) || event.key !== 'Escape') return;
       event.preventDefault();
       closeSessionMenu();
       closeSettingsMenu();
+      closeMemoryPanel();
     });
 
     window.keepseekInlineEditorControls = {
@@ -1038,6 +1173,8 @@ export function getScript(): string {
       syncEditingState();
       renderSettingsControls();
       renderSessionControls();
+      renderProjectMemory();
+      renderBackgroundRun();
       renderContextChips();
       renderTaskPlan();
       renderDraftEdits();
@@ -1113,12 +1250,187 @@ export function getScript(): string {
       }
     }
 
+    function renderProjectMemory() {
+      if (!memoryPanel || !memoryEntryList || !memoryPendingList) return;
+      var memory = state.projectMemory && typeof state.projectMemory === 'object'
+        ? state.projectMemory
+        : { configuredMode: 'auto', entries: [], pendingUpdates: [] };
+      memoryPanel.classList.toggle('hidden', !memoryPanelOpen);
+      if (memoryTab) {
+        memoryTab.classList.toggle('active', memoryPanelOpen);
+        memoryTab.setAttribute('aria-expanded', memoryPanelOpen ? 'true' : 'false');
+      }
+      if (memoryStorageLabel) {
+        var mode = memory.actualMode || memory.configuredMode || 'auto';
+        memoryStorageLabel.textContent = t('memoryStorage', { mode: mode });
+        memoryStorageLabel.title = String(memory.location || memory.error || '');
+      }
+      if (memoryOpenFileButton) {
+        memoryOpenFileButton.disabled = !memory.location;
+      }
+      if (memoryAddButton) {
+        memoryAddButton.disabled = state.isBusy || memory.configuredMode === 'disabled';
+      }
+
+      memoryPendingList.innerHTML = '';
+      var pending = Array.isArray(memory.pendingUpdates) ? memory.pendingUpdates : [];
+      pending.forEach(function(update) {
+        var card = document.createElement('div');
+        card.className = 'memory-pending';
+        var label = document.createElement('div');
+        label.className = 'memory-entry-category';
+        label.textContent = t('memoryPendingChange', { action: getMemoryActionLabel(update.action) });
+        var content = document.createElement('div');
+        content.className = 'memory-pending-content';
+        content.textContent = String(update.proposedEntry?.content || update.previousEntry?.content || update.reason || '');
+        var actions = document.createElement('div');
+        actions.className = 'memory-pending-actions';
+        actions.append(
+          createMemoryButton(t('apply'), 'apply', '', update.id),
+          createMemoryButton(t('discard'), 'reject', '', update.id, true)
+        );
+        card.append(label, content, actions);
+        memoryPendingList.append(card);
+      });
+
+      memoryEntryList.innerHTML = '';
+      var entries = getMemoryEntries();
+      if (!entries.length) {
+        var empty = document.createElement('div');
+        empty.className = 'memory-empty';
+        empty.textContent = t('memoryEmpty');
+        memoryEntryList.append(empty);
+      }
+      entries.forEach(function(entry) {
+        var card = document.createElement('div');
+        card.className = 'memory-entry' + (entry.enabled === false ? ' is-disabled' : '');
+        var category = document.createElement('div');
+        category.className = 'memory-entry-category';
+        category.textContent = getMemoryCategoryLabel(entry.category);
+        var content = document.createElement('div');
+        content.className = 'memory-entry-content';
+        content.textContent = String(entry.content || '');
+        var meta = document.createElement('div');
+        meta.className = 'memory-entry-meta';
+        meta.textContent = [
+          entry.source,
+          Number.isFinite(Number(entry.confidence)) ? 'confidence=' + Number(entry.confidence).toFixed(2) : '',
+          Array.isArray(entry.tags) ? entry.tags.join(', ') : ''
+        ].filter(Boolean).join(' · ');
+        var actions = document.createElement('div');
+        actions.className = 'memory-entry-actions';
+        actions.append(
+          createMemoryButton(t('edit'), 'edit', entry.id),
+          createMemoryButton(t(entry.enabled === false ? 'enable' : 'disable'), 'toggle', entry.id, '', true, entry.enabled === false),
+          createMemoryButton(t('delete'), 'delete', entry.id, '', true)
+        );
+        card.append(category, content, meta, actions);
+        memoryEntryList.append(card);
+      });
+    }
+
+    function createMemoryButton(label, action, entryId, updateId, secondary, enabled) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.dataset.memoryAction = action;
+      if (entryId) button.dataset.entryId = entryId;
+      if (updateId) button.dataset.updateId = updateId;
+      if (typeof enabled === 'boolean') button.dataset.enabled = enabled ? 'true' : 'false';
+      if (secondary) button.className = 'secondary';
+      button.disabled = state.isBusy;
+      return button;
+    }
+
+    function getMemoryEntries() {
+      var memory = state.projectMemory && typeof state.projectMemory === 'object' ? state.projectMemory : {};
+      return Array.isArray(memory.entries) ? memory.entries : [];
+    }
+
+    function getMemoryActionLabel(action) {
+      switch (action) {
+        case 'add': return t('memoryActionAdd');
+        case 'update': return t('memoryActionUpdate');
+        case 'delete': return t('memoryActionDelete');
+        case 'enable': return t('enable');
+        case 'disable': return t('disable');
+        default: return String(action || '');
+      }
+    }
+
+    function getMemoryCategoryLabel(category) {
+      var key = 'memoryCategory_' + String(category || 'project_note');
+      var label = t(key);
+      return label === key ? String(category || 'project_note') : label;
+    }
+
+    function promptMemoryCategory(fallback) {
+      var categories = ['architecture', 'preference', 'command', 'testing', 'restriction', 'project_note', 'workflow'];
+      var value = window.prompt(t('memoryCategoryPrompt', { categories: categories.join(', ') }), fallback || 'project_note');
+      var normalized = String(value || fallback || 'project_note').trim();
+      return categories.indexOf(normalized) >= 0 ? normalized : fallback || 'project_note';
+    }
+
+    function closeMemoryPanel() {
+      memoryPanelOpen = false;
+      renderProjectMemory();
+    }
+
+    function renderBackgroundRun() {
+      if (!backgroundRegion || !backgroundStatus) return;
+      var run = state.backgroundRun && typeof state.backgroundRun === 'object' ? state.backgroundRun : null;
+      var active = isBackgroundActive();
+      var statusKey = run ? 'backgroundStatus_' + run.status : 'backgroundIdle';
+      var statusLabel = t(statusKey);
+      if (statusLabel === statusKey) statusLabel = run?.status || t('backgroundIdle');
+      if (run) {
+        statusLabel += ' · ' + t('backgroundProgress', {
+          current: Number(run.progress?.round) || 0,
+          max: Number(run.limits?.maxRounds) || 0,
+          tools: Number(run.progress?.toolCalls) || 0
+        });
+        if (run.waitingReason || run.stopReason) {
+          statusLabel += ' · ' + String(run.waitingReason || run.stopReason);
+        }
+      }
+      backgroundStatus.textContent = statusLabel;
+      if (backgroundScript) backgroundScript.disabled = active || state.isBusy;
+      if (backgroundMaxRounds) {
+        backgroundMaxRounds.disabled = active || state.isBusy;
+        if (!active && document.activeElement !== backgroundMaxRounds) {
+          backgroundMaxRounds.value = String(state.backgroundDefaults?.maxRounds || 5);
+        }
+      }
+      if (backgroundStart) {
+        backgroundStart.classList.toggle('hidden', active);
+        backgroundStart.disabled = state.isBusy || active;
+      }
+      if (backgroundResume) {
+        var canResume = run?.status === 'waiting_for_apply' && state.repairLoop?.status === 'ready_for_validation' && !state.isBusy;
+        backgroundResume.classList.toggle('hidden', run?.status !== 'waiting_for_apply');
+        backgroundResume.disabled = !canResume;
+      }
+      if (backgroundStop) {
+        backgroundStop.classList.toggle('hidden', !active);
+        backgroundStop.disabled = false;
+      }
+    }
+
+    function isBackgroundActive() {
+      var statusValue = state.backgroundRun?.status;
+      return statusValue === 'running' || statusValue === 'waiting_for_apply' || statusValue === 'waiting_for_authorization';
+    }
+
+    function normalizeValidationScript(value) {
+      return value === 'test' || value === 'lint' ? value : 'compile';
+    }
+
     function renderSessionControls() {
       if (newChatTab) {
-        newChatTab.disabled = state.isBusy;
+        newChatTab.disabled = state.isBusy || isBackgroundActive();
       }
       if (historyTab) {
-        historyTab.disabled = state.isBusy;
+        historyTab.disabled = state.isBusy || isBackgroundActive();
         historyTab.classList.toggle('active', sessionMenuOpen);
         historyTab.setAttribute('aria-expanded', sessionMenuOpen ? 'true' : 'false');
       }
@@ -2530,7 +2842,7 @@ export function getScript(): string {
       renderPlanNote(planBlockers, t('planBlockers'), Array.isArray(plan.blockers) ? plan.blockers.join('\\n') : '');
       renderPlanNote(planCompletion, t('planCompletion'), plan.completionSummary || '');
       if (planContinueRepair) {
-        var canContinueRepair = state.repairLoop?.status === 'ready_for_validation' && !state.isBusy;
+        var canContinueRepair = state.repairLoop?.status === 'ready_for_validation' && !state.isBusy && !isBackgroundActive();
         planContinueRepair.classList.toggle('hidden', !canContinueRepair);
         planContinueRepair.disabled = !canContinueRepair;
       }
@@ -2818,6 +3130,10 @@ export function getScript(): string {
           }
         }
 
+        if (message.role === 'assistant' && !message.isStreaming && message.runDetails) {
+          body.append(createRunDetailsPanel(message));
+        }
+
         item.append(body);
         transcript.append(item);
       }
@@ -2825,6 +3141,197 @@ export function getScript(): string {
       if (shouldStick) {
         transcript.scrollTop = transcript.scrollHeight;
       }
+    }
+
+    function createRunDetailsPanel(message) {
+      var details = message.runDetails || {};
+      var panel = document.createElement('details');
+      panel.className = 'run-details';
+      var summary = document.createElement('summary');
+      summary.textContent = t('runDetailsSummary', {
+        status: getRunStatusLabel(details.status),
+        duration: formatDuration(details.durationMs)
+      });
+      var body = document.createElement('div');
+      body.className = 'run-details-body';
+      var grid = document.createElement('div');
+      grid.className = 'run-details-grid';
+      appendRunDetailRow(grid, t('runDetailsModel'), details.modelId || '—');
+      appendRunDetailRow(grid, t('runDetailsStarted'), formatDateTime(details.startedAt));
+      appendRunDetailRow(grid, t('runDetailsEnded'), formatDateTime(details.endedAt));
+      appendRunDetailRow(grid, t('runDetailsStatus'), getRunStatusLabel(details.status));
+      appendRunDetailRow(grid, t('runDetailsRequests'), [
+        String(details.modelRequests?.requestCount || 0),
+        'messages=' + String(details.modelRequests?.messageCount || 0),
+        'tools=' + String(details.modelRequests?.exposedToolCount || 0),
+        details.modelRequests?.maxOutputTokens ? 'max=' + String(details.modelRequests.maxOutputTokens) : ''
+      ].filter(Boolean).join(' · '));
+      appendRunDetailRow(grid, t('runDetailsTools'), String(Number(details.toolCallCount) || (Array.isArray(details.toolCalls) ? details.toolCalls.length : 0)));
+      if (Array.isArray(details.memoryEntryIds) && details.memoryEntryIds.length) {
+        appendRunDetailRow(grid, t('runDetailsMemory'), String(details.memoryEntryIds.length));
+      }
+      body.append(grid);
+
+      if (details.taskPlan) {
+        body.append(createRunTextSection(t('runDetailsTaskPlan'), [
+          details.taskPlan.goal,
+          t('runDetailsPlanProgress', {
+            completed: details.taskPlan.completedSteps || 0,
+            total: details.taskPlan.totalSteps || 0,
+            updates: details.taskPlan.updateCount || 0
+          }),
+          ...(Array.isArray(details.taskPlan.blockers) ? details.taskPlan.blockers : [])
+        ].filter(Boolean)));
+      }
+      if (details.budgetStopReason) {
+        body.append(createRunTextSection(t('runDetailsBudgetStop'), [details.budgetStopReason], 'run-details-error'));
+      }
+      if (details.failureReason) {
+        body.append(createRunTextSection(t('runDetailsFailure'), [details.failureReason], 'run-details-error'));
+      }
+
+      var toolCalls = Array.isArray(details.toolCalls) ? details.toolCalls.slice(0, 40) : [];
+      if (toolCalls.length) {
+        var toolSection = createRunSection(t('runDetailsToolCalls'));
+        toolCalls.forEach(function(tool) {
+          var item = document.createElement('div');
+          item.className = 'run-details-tool' + (tool.status === 'denied' ? ' run-details-denied' : tool.status === 'failed' ? ' run-details-error' : '');
+          var title = document.createElement('div');
+          title.textContent = String(tool.name || 'tool') + ' · ' + getRunToolStatusLabel(tool.status) + ' · ' + formatDuration(tool.durationMs);
+          item.append(title);
+          if (tool.argumentsSummary) item.append(createRunDetailText(t('runDetailsArguments') + ': ' + tool.argumentsSummary));
+          if (tool.resultSummary) item.append(createRunDetailText(t('runDetailsResult') + ': ' + tool.resultSummary));
+          if (tool.truncated) item.append(createRunDetailText(t('runDetailsTruncated')));
+          toolSection.append(item);
+        });
+        if ((details.toolCalls || []).length > toolCalls.length || details.truncated) {
+          toolSection.append(createRunDetailText(t('runDetailsTruncated')));
+        }
+        body.append(toolSection);
+      }
+
+      if (Array.isArray(details.validations) && details.validations.length) {
+        var validations = details.validations.map(function(validation) {
+          return [validation.script || 'validation', validation.ok === true ? t('passed') : validation.ok === false ? t('failed') : '',
+            typeof validation.exitCode === 'number' ? 'exit=' + validation.exitCode : '',
+            typeof validation.errors === 'number' ? 'errors=' + validation.errors : '',
+            validation.error || ''].filter(Boolean).join(' · ');
+        });
+        body.append(createRunTextSection(t('runDetailsValidation'), validations));
+      }
+
+      if (Array.isArray(details.authorizations) && details.authorizations.length) {
+        var authorizations = details.authorizations.map(function(record) {
+          return [record.toolName, record.allowed ? t('allowed') : t('denied'), record.scope, record.source, record.reason].filter(Boolean).join(' · ');
+        });
+        body.append(createRunTextSection(t('runDetailsAuthorization'), authorizations,
+          details.authorizations.some(function(record) { return !record.allowed; }) ? 'run-details-denied' : ''));
+      }
+
+      if (Array.isArray(details.changeSets) && details.changeSets.length) {
+        var changes = details.changeSets.map(function(changeSet) {
+          return [changeSet.fileCount + ' ' + t('files'), getChangeSetStatusLabel(changeSet.status),
+            Array.isArray(changeSet.labels) ? changeSet.labels.join(', ') : '',
+            changeSet.appliedCount ? t('runDetailsAppliedCount', { count: changeSet.appliedCount }) : '',
+            changeSet.failedCount ? t('runDetailsFailedCount', { count: changeSet.failedCount }) : ''].filter(Boolean).join(' · ');
+        });
+        body.append(createRunTextSection(t('runDetailsChangeSets'), changes));
+      }
+
+      var actions = document.createElement('div');
+      actions.className = 'run-details-actions';
+      actions.append(
+        createRunActionButton(message.id, 'copySummary', t('runDetailsCopy')),
+        createRunActionButton(message.id, 'openTrace', t('runDetailsOpenTrace'), !details.traceLogUri)
+      );
+      body.append(actions);
+      panel.append(summary, body);
+      return panel;
+    }
+
+    function appendRunDetailRow(grid, label, value) {
+      var labelElement = document.createElement('div');
+      labelElement.className = 'run-details-label';
+      labelElement.textContent = label;
+      var valueElement = document.createElement('div');
+      valueElement.textContent = value || '—';
+      grid.append(labelElement, valueElement);
+    }
+
+    function createRunSection(titleText) {
+      var section = document.createElement('div');
+      section.className = 'run-details-section';
+      var title = document.createElement('div');
+      title.className = 'run-details-section-title';
+      title.textContent = titleText;
+      section.append(title);
+      return section;
+    }
+
+    function createRunTextSection(title, lines, className) {
+      var section = createRunSection(title);
+      if (className) section.classList.add(className);
+      lines.slice(0, 20).forEach(function(line) { section.append(createRunDetailText(String(line))); });
+      return section;
+    }
+
+    function createRunDetailText(text) {
+      var element = document.createElement('div');
+      element.textContent = text;
+      return element;
+    }
+
+    function createRunActionButton(messageId, action, label, disabled) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'secondary';
+      button.dataset.runAction = action;
+      button.dataset.messageId = messageId;
+      button.textContent = label;
+      button.disabled = Boolean(disabled);
+      return button;
+    }
+
+    function getRunStatusLabel(statusValue) {
+      var key = 'runStatus_' + String(statusValue || 'failed');
+      var value = t(key);
+      return value === key ? String(statusValue || '') : value;
+    }
+
+    function getRunToolStatusLabel(statusValue) {
+      var key = 'runToolStatus_' + String(statusValue || 'running');
+      var value = t(key);
+      return value === key ? String(statusValue || '') : value;
+    }
+
+    function formatDuration(value) {
+      var duration = Number(value);
+      if (!Number.isFinite(duration) || duration < 0) return '—';
+      if (duration < 1000) return Math.round(duration) + ' ms';
+      return (duration / 1000).toFixed(duration < 10000 ? 1 : 0) + ' s';
+    }
+
+    function formatDateTime(value) {
+      var timestamp = Date.parse(value || '');
+      return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString(getLanguage() === 'en' ? 'en' : 'zh-CN') : '—';
+    }
+
+    function formatRunDetailsSummary(details) {
+      var lines = [
+        'KeepSeek Run ' + String(details.runId || ''),
+        t('runDetailsModel') + ': ' + String(details.modelId || ''),
+        t('runDetailsStatus') + ': ' + getRunStatusLabel(details.status),
+        t('runDetailsStarted') + ': ' + formatDateTime(details.startedAt),
+        t('runDetailsEnded') + ': ' + formatDateTime(details.endedAt),
+        t('runDetailsTools') + ': ' + String(Number(details.toolCallCount) || (Array.isArray(details.toolCalls) ? details.toolCalls.length : 0))
+      ];
+      if (details.taskPlan?.goal) lines.push(t('runDetailsTaskPlan') + ': ' + details.taskPlan.goal);
+      if (details.budgetStopReason) lines.push(t('runDetailsBudgetStop') + ': ' + details.budgetStopReason);
+      if (details.failureReason) lines.push(t('runDetailsFailure') + ': ' + details.failureReason);
+      (details.toolCalls || []).slice(0, 40).forEach(function(tool) {
+        lines.push('- ' + [tool.name, getRunToolStatusLabel(tool.status), tool.argumentsSummary, tool.resultSummary].filter(Boolean).join(' · '));
+      });
+      return lines.join('\\n');
     }
 
     function createUsedSkillsNotice(usedSkills) {

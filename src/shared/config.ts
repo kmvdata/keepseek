@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { AgentSettings, KeepseekModel, UsageCostRates, ValidationAuthorizationPolicy } from './types';
+import { AgentSettings, KeepseekModel, ProjectMemoryStorageMode, UsageCostRates, ValidationAuthorizationPolicy } from './types';
 import { SESSION_HARD_RETENTION_DAYS } from '../sessions/sessionRetention';
 import {
   DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
@@ -25,6 +25,11 @@ export const DEFAULT_VALIDATION_AUTHORIZATION_POLICY: ValidationAuthorizationPol
 export const DEFAULT_MAX_VALIDATION_RUNS = 3;
 export const DEFAULT_MAX_REPAIR_ITERATIONS = 2;
 export const DEFAULT_VALIDATION_TIMEOUT_MS = 120_000;
+export const DEFAULT_PROJECT_MEMORY_STORAGE_MODE: ProjectMemoryStorageMode = 'auto';
+export const DEFAULT_PROJECT_MEMORY_CONTEXT_BUDGET_TOKENS = 1_200;
+export const DEFAULT_BACKGROUND_MAX_ROUNDS = 5;
+export const DEFAULT_BACKGROUND_MAX_DURATION_MS = 30 * 60 * 1_000;
+export const DEFAULT_BACKGROUND_MAX_TOOL_CALLS = 60;
 export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
   'deepseek-v4-flash': {
     cacheHitPrice: 0.02,
@@ -182,6 +187,43 @@ export function getConfiguredValidationTimeoutMs(): number {
     .getConfiguration('keepseek')
     .get<number>('validation.timeoutMs', DEFAULT_VALIDATION_TIMEOUT_MS);
   return normalizeIntegerInRange(configured, 1_000, 600_000, DEFAULT_VALIDATION_TIMEOUT_MS);
+}
+
+export function getConfiguredProjectMemoryStorageMode(): ProjectMemoryStorageMode {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<string>('memory.storageMode', DEFAULT_PROJECT_MEMORY_STORAGE_MODE);
+  return configured === 'workspace' || configured === 'global' || configured === 'disabled'
+    ? configured
+    : DEFAULT_PROJECT_MEMORY_STORAGE_MODE;
+}
+
+export function getConfiguredProjectMemoryContextBudgetTokens(): number {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('memory.contextBudgetTokens', DEFAULT_PROJECT_MEMORY_CONTEXT_BUDGET_TOKENS);
+  return normalizeIntegerInRange(configured, 0, 8_000, DEFAULT_PROJECT_MEMORY_CONTEXT_BUDGET_TOKENS);
+}
+
+export function getConfiguredBackgroundMaxRounds(): number {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('background.maxRounds', DEFAULT_BACKGROUND_MAX_ROUNDS);
+  return normalizeIntegerInRange(configured, 1, 10, DEFAULT_BACKGROUND_MAX_ROUNDS);
+}
+
+export function getConfiguredBackgroundMaxDurationMs(): number {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('background.maxDurationMs', DEFAULT_BACKGROUND_MAX_DURATION_MS);
+  return normalizeIntegerInRange(configured, 60_000, 3_600_000, DEFAULT_BACKGROUND_MAX_DURATION_MS);
+}
+
+export function getConfiguredBackgroundMaxToolCalls(): number {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('background.maxToolCalls', DEFAULT_BACKGROUND_MAX_TOOL_CALLS);
+  return normalizeIntegerInRange(configured, 1, 256, DEFAULT_BACKGROUND_MAX_TOOL_CALLS);
 }
 
 export function getConfiguredMaxRequestRetries(): number {

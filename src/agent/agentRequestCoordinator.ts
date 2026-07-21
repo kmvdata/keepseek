@@ -27,6 +27,9 @@ export interface AgentRequestCoordinatorInput {
   sessionId?: string;
   assistantMessageId?: string;
   repairLoop?: AgentRequest['repairLoop'];
+  projectMemory?: AgentRequest['projectMemory'];
+  executionLimits?: AgentRequest['executionLimits'];
+  backgroundRunId?: string;
   signal?: AbortSignal;
 }
 
@@ -65,6 +68,11 @@ export class AgentRequestCoordinator {
       repairLoop: input.repairLoop
         ? { ...input.repairLoop, pendingDraftEditIds: [...input.repairLoop.pendingDraftEditIds] }
         : undefined,
+      projectMemory: input.projectMemory
+        ? { ...input.projectMemory, entryIds: [...input.projectMemory.entryIds] }
+        : undefined,
+      executionLimits: input.executionLimits ? { ...input.executionLimits } : undefined,
+      backgroundRunId: input.backgroundRunId,
       signal: input.signal
     };
   }

@@ -441,7 +441,8 @@ function copyMessage(message: ChatMessage): ChatMessage {
   return {
     ...message,
     id: randomUUID(),
-    isStreaming: undefined
+    isStreaming: undefined,
+    runDetails: message.runDetails ? cloneRunDetails(message.runDetails) : undefined
   };
 }
 
@@ -574,8 +575,145 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     modelId: typeof value.modelId === 'string' ? value.modelId : undefined,
     reasoningContent: typeof value.reasoningContent === 'string' ? value.reasoningContent : undefined,
     contextMeta: normalizeMessageContextMeta(value.contextMeta),
-    usedSkills: normalizeMessageUsedSkills(value.usedSkills)
+    usedSkills: normalizeMessageUsedSkills(value.usedSkills),
+    runDetails: normalizeRunDetails(value.runDetails)
   };
+}
+
+function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
+  if (!isRecord(value) || typeof value.runId !== 'string' || typeof value.modelId !== 'string') {
+    return undefined;
+  }
+  const status = value.status === 'running'
+    || value.status === 'succeeded'
+    || value.status === 'waiting'
+    || value.status === 'blocked'
+    || value.status === 'failed'
+    || value.status === 'stopped'
+    ? value.status
+    : 'failed';
+  const modelRequests = isRecord(value.modelRequests) ? value.modelRequests : {};
+  return {
+    runId: value.runId,
+    sessionId: typeof value.sessionId === 'string' ? value.sessionId : undefined,
+    assistantMessageId: typeof value.assistantMessageId === 'string' ? value.assistantMessageId : undefined,
+    backgroundRunId: typeof value.backgroundRunId === 'string' ? value.backgroundRunId : undefined,
+    modelId: value.modelId,
+    status,
+    startedAt: normalizeSessionTimestamp(value.startedAt, new Date().toISOString()),
+    endedAt: normalizeOptionalTimestamp(value.endedAt),
+    durationMs: typeof value.durationMs === 'number' ? Math.max(0, value.durationMs) : undefined,
+    taskPlan: normalizeRunDetailsTaskPlan(value.taskPlan),
+    modelRequests: {
+      requestCount: normalizeNonNegativeInteger(modelRequests.requestCount),
+      messageCount: normalizeNonNegativeInteger(modelRequests.messageCount),
+      exposedToolCount: normalizeNonNegativeInteger(modelRequests.exposedToolCount),
+      maxOutputTokens: typeof modelRequests.maxOutputTokens === 'number' ? Math.max(0, modelRequests.maxOutputTokens) : undefined,
+      thinkingEnabled: modelRequests.thinkingEnabled === true
+    },
+    toolCallCount: normalizeNonNegativeInteger(value.toolCallCount ?? (Array.isArray(value.toolCalls) ? value.toolCalls.length : 0)),
+    toolCalls: Array.isArray(value.toolCalls)
+      ? value.toolCalls.filter(isRecord).slice(0, 80).map((tool, index) => ({
+          id: typeof tool.id === 'string' ? tool.id : `tool-${index + 1}`,
+          name: typeof tool.name === 'string' ? tool.name : 'unknown_tool',
+          startedAt: normalizeSessionTimestamp(tool.startedAt, new Date().toISOString()),
+          endedAt: normalizeOptionalTimestamp(tool.endedAt),
+          durationMs: typeof tool.durationMs === 'number' ? Math.max(0, tool.durationMs) : undefined,
+          status: tool.status === 'succeeded' || tool.status === 'failed' || tool.status === 'denied' ? tool.status : 'running',
+          argumentsSummary: typeof tool.argumentsSummary === 'string' ? tool.argumentsSummary.slice(0, 500) : undefined,
+          resultSummary: typeof tool.resultSummary === 'string' ? tool.resultSummary.slice(0, 500) : undefined,
+          riskLevel: tool.riskLevel === 'low' || tool.riskLevel === 'medium' || tool.riskLevel === 'high' ? tool.riskLevel : undefined,
+          scope: typeof tool.scope === 'string' ? tool.scope as NonNullable<ChatMessage['runDetails']>['toolCalls'][number]['scope'] : undefined,
+          truncated: tool.truncated === true
+        }))
+      : [],
+    authorizations: Array.isArray(value.authorizations)
+      ? value.authorizations.filter(isRecord).slice(0, 80).map((authorization) => ({
+          toolName: typeof authorization.toolName === 'string' ? authorization.toolName : 'unknown_tool',
+          allowed: authorization.allowed === true,
+          riskLevel: authorization.riskLevel === 'low' || authorization.riskLevel === 'medium' ? authorization.riskLevel : 'high',
+          scope: typeof authorization.scope === 'string' ? authorization.scope as NonNullable<ChatMessage['runDetails']>['authorizations'][number]['scope'] : 'workspace_write',
+          source: normalizeAuthorizationSource(authorization.source),
+          reason: typeof authorization.reason === 'string' ? authorization.reason.slice(0, 240) : undefined
+        }))
+      : [],
+    changeSets: Array.isArray(value.changeSets)
+      ? value.changeSets.filter(isRecord).slice(0, 20).map((changeSet) => ({
+          id: typeof changeSet.id === 'string' ? changeSet.id : '',
+          fileCount: normalizeNonNegativeInteger(changeSet.fileCount),
+          status: normalizeChangeSetStatus(changeSet.status),
+          labels: normalizeStringArray(changeSet.labels).slice(0, 20),
+          appliedCount: normalizeNonNegativeInteger(changeSet.appliedCount),
+          failedCount: normalizeNonNegativeInteger(changeSet.failedCount)
+        })).filter((changeSet) => Boolean(changeSet.id))
+      : [],
+    validations: Array.isArray(value.validations)
+      ? value.validations.filter(isRecord).slice(0, 20).map((validation) => ({
+          script: validation.script === 'compile' || validation.script === 'lint' || validation.script === 'test' ? validation.script : undefined,
+          ok: typeof validation.ok === 'boolean' ? validation.ok : undefined,
+          exitCode: typeof validation.exitCode === 'number' ? validation.exitCode : undefined,
+          durationMs: typeof validation.durationMs === 'number' ? Math.max(0, validation.durationMs) : undefined,
+          errors: typeof validation.errors === 'number' ? Math.max(0, validation.errors) : undefined,
+          warnings: typeof validation.warnings === 'number' ? Math.max(0, validation.warnings) : undefined,
+          error: typeof validation.error === 'string' ? validation.error.slice(0, 500) : undefined
+        }))
+      : [],
+    memoryEntryIds: normalizeStringArray(value.memoryEntryIds),
+    budgetStopReason: typeof value.budgetStopReason === 'string' ? value.budgetStopReason.slice(0, 120) : undefined,
+    failureReason: typeof value.failureReason === 'string' ? value.failureReason.slice(0, 500) : undefined,
+    traceLogUri: typeof value.traceLogUri === 'string' ? value.traceLogUri : undefined,
+    truncated: value.truncated === true
+  };
+}
+
+function normalizeRunDetailsTaskPlan(value: unknown): NonNullable<ChatMessage['runDetails']>['taskPlan'] {
+  if (!isRecord(value) || typeof value.goal !== 'string') {
+    return undefined;
+  }
+  const status = value.status === 'running'
+    || value.status === 'blocked'
+    || value.status === 'completed'
+    || value.status === 'failed'
+    || value.status === 'stopped'
+    ? value.status
+    : 'failed';
+  return {
+    status,
+    goal: value.goal.slice(0, 320),
+    updateCount: normalizeNonNegativeInteger(value.updateCount),
+    completedSteps: normalizeNonNegativeInteger(value.completedSteps),
+    totalSteps: normalizeNonNegativeInteger(value.totalSteps),
+    blockers: normalizeStringArray(value.blockers).slice(0, 10)
+  };
+}
+
+function normalizeAuthorizationSource(value: unknown): NonNullable<ChatMessage['runDetails']>['authorizations'][number]['source'] {
+  return value === 'low_risk'
+    || value === 'run_policy'
+    || value === 'configuration'
+    || value === 'explicit_confirmation'
+    || value === 'user_denied'
+    ? value
+    : 'user_denied';
+}
+
+function normalizeChangeSetStatus(value: unknown): NonNullable<ChatMessage['runDetails']>['changeSets'][number]['status'] {
+  return value === 'pending'
+    || value === 'partially_applied'
+    || value === 'applied'
+    || value === 'partially_failed'
+    || value === 'reverted'
+    || value === 'discarded'
+    ? value
+    : 'pending';
+}
+
+function cloneRunDetails(details: NonNullable<ChatMessage['runDetails']>): NonNullable<ChatMessage['runDetails']> {
+  return normalizeRunDetails(details) ?? details;
+}
+
+function normalizeNonNegativeInteger(value: unknown): number {
+  return normalizePositiveInteger(value, 0);
 }
 
 function normalizeStringArray(value: unknown): string[] {

@@ -10,6 +10,8 @@ import { SafeFileEditor } from '../edits/safeFileEditor';
 import {
   AgentActivityInput,
   AgentActivityState,
+  AgentExecutionLimits,
+  AgentResponse,
   AgentSettings,
   ActivatedSkill,
   ChatMessage,
@@ -23,6 +25,7 @@ import {
   KeepseekModel,
   PromptCacheDiagnostics,
   RepairLoopState,
+  SafeNpmScript,
   TaskPlan,
   TurnUsageStats,
   UsageEvent,
@@ -46,6 +49,9 @@ import {
   getConfiguredAgentSettings,
   getConfiguredBalanceEndpointUrl,
   getConfiguredBalanceRefreshIntervalMs,
+  getConfiguredBackgroundMaxDurationMs,
+  getConfiguredBackgroundMaxRounds,
+  getConfiguredBackgroundMaxToolCalls,
   getConfiguredDebugMode,
   getConfiguredHistoryRetentionDays,
   getConfiguredMaxFileBytes,
@@ -66,6 +72,7 @@ import { getHtmlForWebview } from '../webview/html';
 import { focusView } from './focusView';
 import type { DroppedFileReferenceInput, PromptReferenceInput, WebviewMessage } from './webviewMessages';
 import { InteractionTraceLogService } from '../agent/logging/interactionTrace';
+import { applyChangeSetEventToRunDetails } from '../agent/logging/runDetails';
 import { fetchDeepSeekBalance } from '../agent/deepseek/balance';
 import {
   addUsageEventToSessionStats,
@@ -85,6 +92,10 @@ import {
   TEXT_REFERENCE_STORAGE_DIR,
   type TextReferenceSource
 } from '../context/textReferences';
+import { ProjectMemoryStore } from '../memory/projectMemoryStore';
+import { ProjectMemoryService } from '../memory/projectMemoryService';
+import { BackgroundRunCoordinator } from '../agent/backgroundRunCoordinator';
+import { BackgroundRunStatusBar } from './backgroundRunStatusBar';
 
 const CHAT_CONTAINER_ID = 'keepseek-sidebar';
 const CHAT_VIEW_TYPE = 'keepseek.chat';
@@ -101,6 +112,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly draftDiffService: DraftDiffService;
   private readonly skillStore: SkillStore;
   private readonly skillCreator = new SkillCreator();
+  private readonly projectMemoryService: ProjectMemoryService;
+  private readonly backgroundRunCoordinator: BackgroundRunCoordinator;
+  private readonly backgroundRunStatusBar = new BackgroundRunStatusBar();
   private readonly sessionTraceLogUris = new Map<string, string>();
   private readonly taskPlansBySession = new Map<string, TaskPlan>();
   private readonly repairLoopsBySession = new Map<string, RepairLoopState>();
@@ -133,6 +147,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   ) {
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
     this.skillStore = new SkillStore(skillState);
+    this.projectMemoryService = new ProjectMemoryService(new ProjectMemoryStore(this.globalStorageUri));
+    this.backgroundRunCoordinator = new BackgroundRunCoordinator((run) => {
+      this.backgroundRunStatusBar.update(run);
+      this.postState();
+    });
     this.agentRunner = new AgentRunner(undefined, this.traceLogService);
     this.draftDiffService = new DraftDiffService();
     this.changeSets = new ChangeSetStore(
@@ -142,6 +161,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.globalStorageUri,
       (key, values) => this.t(key, values),
       (changeSet, event) => {
+        this.updateRunDetailsForChangeSet(changeSet.messageId, event);
         void this.traceLogService.appendRunEvent(
           changeSet.traceLogUri
             ? { runId: changeSet.runId, uri: changeSet.traceLogUri }
@@ -159,12 +179,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public dispose(): void {
     clearInterval(this.sessionCleanupTimer);
     this.draftDiffService.dispose();
+    this.backgroundRunStatusBar.dispose();
   }
 
   public refreshConfiguration(): void {
     this.syncConfiguredState();
     void this.cleanupExpiredSessions();
     this.postState();
+    void this.projectMemoryService.refresh().then(() => this.postState()).catch(() => undefined);
   }
 
   public async refreshWorkspaceScope(): Promise<void> {
@@ -173,6 +195,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     this.clearSessionTransientState();
+    this.abortPrompt();
+    this.backgroundRunCoordinator.clear();
+    await this.projectMemoryService.refresh();
     await this.refreshSkills({ post: false });
     await this.sessionStore.persist();
     await this.cleanupExpiredSessions({ post: false });
@@ -533,6 +558,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     switch (message.type) {
       case 'ready':
         await this.changeSets.initialize();
+        await this.projectMemoryService.initialize();
         this.syncConfiguredState();
         await this.refreshSkills({ post: false });
         await this.cleanupExpiredSessions({ post: false });
@@ -596,6 +622,48 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'openCurrentSessionLog':
         await this.openCurrentSessionLog();
+        return;
+      case 'openRunTrace':
+        await this.openRunTrace(message.messageId);
+        return;
+      case 'openProjectMemoryFile':
+        await this.openProjectMemoryFile();
+        return;
+      case 'proposeMemoryAdd':
+        this.handleMemoryAction(() => this.projectMemoryService.proposeAdd({
+          content: message.content,
+          category: message.category,
+          tags: message.tags,
+          source: 'manual'
+        }));
+        return;
+      case 'proposeMemoryUpdate':
+        this.handleMemoryAction(() => this.projectMemoryService.proposeUpdate(message.entryId, {
+          content: message.content,
+          category: message.category,
+          tags: message.tags
+        }));
+        return;
+      case 'proposeMemoryDelete':
+        this.handleMemoryAction(() => this.projectMemoryService.proposeDelete(message.entryId));
+        return;
+      case 'proposeMemoryToggle':
+        this.handleMemoryAction(() => this.projectMemoryService.proposeToggle(message.entryId, message.enabled));
+        return;
+      case 'applyMemoryUpdate':
+        await this.applyMemoryUpdate(message.updateId);
+        return;
+      case 'rejectMemoryUpdate':
+        this.rejectMemoryUpdate(message.updateId);
+        return;
+      case 'startBackgroundRun':
+        await this.startBackgroundRun(message.script, message.maxRounds);
+        return;
+      case 'resumeBackgroundRun':
+        await this.resumeBackgroundRun();
+        return;
+      case 'stopBackgroundRun':
+        await this.stopBackgroundRun();
         return;
       case 'openApiSettings': {
         const config = vscode.workspace.getConfiguration('keepseek');
@@ -965,7 +1033,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       skills: this.skillStore.getCachedActiveSkills(activeSession),
       messages: this.messages,
       contextCompression: activeSession.contextCompression,
-      language: this.language
+      language: this.language,
+      projectMemory: this.projectMemoryService.createContext('')
     });
   }
 
@@ -978,7 +1047,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async createNewSession(): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.hasActiveBackgroundRun()) {
       return;
     }
 
@@ -991,7 +1060,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async selectSession(sessionId: string): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.hasActiveBackgroundRun()) {
       return;
     }
 
@@ -1010,7 +1079,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async copyOtherWorkspaceSession(workspaceKey: string, sessionId: string): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.hasActiveBackgroundRun()) {
       return;
     }
 
@@ -1025,7 +1094,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async deleteSessions(sessionIds: string[]): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.hasActiveBackgroundRun()) {
       return;
     }
 
@@ -1680,6 +1749,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       });
       this.appendRepairTrace(plan, { type: 'repair_loop_stopped', reason: 'repair_discarded', editId });
     }
+    const backgroundRun = this.backgroundRunCoordinator.getActiveRun();
+    if (backgroundRun?.sessionId === sessionId && backgroundRun.status === 'waiting_for_apply') {
+      const failed = this.backgroundRunCoordinator.fail(this.language === 'en'
+        ? 'The pending background repair ChangeSet was discarded.'
+        : '后台修复任务的待确认 ChangeSet 已被丢弃。');
+      await this.appendBackgroundOutcomeMessage(failed.stopReason ?? 'The pending repair was discarded.');
+    }
     await this.sessionStore.persist();
   }
 
@@ -1728,14 +1804,284 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     );
   }
 
+  private handleMemoryAction(action: () => unknown): void {
+    try {
+      const update = action() as { id?: string; action?: string; entryId?: string; proposedEntry?: { category?: string } };
+      this.appendProjectMemoryTrace({
+        type: 'project_memory_change_proposed',
+        updateId: update.id,
+        action: update.action,
+        entryId: update.entryId,
+        category: update.proposedEntry?.category
+      });
+      this.postState();
+    } catch (error) {
+      vscode.window.showErrorMessage(getErrorMessage(error));
+    }
+  }
+
+  private async applyMemoryUpdate(updateId: string): Promise<void> {
+    try {
+      const update = await this.projectMemoryService.applyUpdate(updateId);
+      this.appendProjectMemoryTrace({
+        type: 'project_memory_change_applied',
+        updateId: update.id,
+        action: update.action,
+        entryId: update.entryId ?? update.proposedEntry?.id,
+        category: update.proposedEntry?.category ?? update.previousEntry?.category
+      });
+      this.postState();
+    } catch (error) {
+      vscode.window.showErrorMessage(getErrorMessage(error));
+    }
+  }
+
+  private rejectMemoryUpdate(updateId: string): void {
+    try {
+      const update = this.projectMemoryService.rejectUpdate(updateId);
+      this.appendProjectMemoryTrace({
+        type: 'project_memory_change_rejected',
+        updateId: update.id,
+        action: update.action,
+        entryId: update.entryId ?? update.proposedEntry?.id
+      });
+      this.postState();
+    } catch (error) {
+      vscode.window.showErrorMessage(getErrorMessage(error));
+    }
+  }
+
+  private appendProjectMemoryTrace(event: { type: string; [key: string]: unknown }): void {
+    const session = this.sessionStore.getActiveSession();
+    const latestDetails = [...session.messages].reverse().find((message) => message.runDetails)?.runDetails;
+    const uri = latestDetails?.traceLogUri ?? session.lastTraceLogUri;
+    void this.traceLogService.appendRunEvent(
+      uri && latestDetails?.runId ? { runId: latestDetails.runId, uri } : undefined,
+      event
+    );
+  }
+
+  private async openProjectMemoryFile(): Promise<void> {
+    const location = this.projectMemoryService.getStateView().location;
+    if (!location) {
+      vscode.window.showInformationMessage(this.language === 'en'
+        ? 'Project Memory does not currently have a storage file.'
+        : 'Project Memory 当前没有可打开的存储文件。');
+      return;
+    }
+    try {
+      await vscode.commands.executeCommand('vscode.open', vscode.Uri.parse(location));
+    } catch (error) {
+      vscode.window.showErrorMessage(getErrorMessage(error));
+    }
+  }
+
+  private async openRunTrace(messageId: string): Promise<void> {
+    const message = this.messages.find((item) => item.id === messageId);
+    const uri = message?.runDetails?.traceLogUri;
+    if (!uri) {
+      vscode.window.showInformationMessage(this.language === 'en'
+        ? 'This run does not have a raw trace log. Enable Debug Mode for future raw logs.'
+        : '本次运行没有原始 trace log。可开启调试模式以记录后续运行。');
+      return;
+    }
+    try {
+      await vscode.commands.executeCommand('vscode.open', vscode.Uri.parse(uri));
+    } catch (error) {
+      vscode.window.showErrorMessage(getErrorMessage(error));
+    }
+  }
+
+  private async startBackgroundRun(script: SafeNpmScript, requestedMaxRounds: number): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+    const safeScript: SafeNpmScript = script === 'test' || script === 'lint' ? script : 'compile';
+    const configuredMaxRounds = getConfiguredBackgroundMaxRounds();
+    const maxRounds = normalizeIntegerInRange(requestedMaxRounds, 1, configuredMaxRounds, configuredMaxRounds);
+    try {
+      this.backgroundRunCoordinator.start({
+        sessionId: this.sessionStore.activeSessionId,
+        workspaceKey: this.sessionStore.workspaceKey,
+        goal: {
+          kind: 'repair_until_validation_passes',
+          script: safeScript,
+          description: this.language === 'en'
+            ? `Repair until ${safeScript} passes, with review between ChangeSets.`
+            : `持续修复直到 ${safeScript} 通过，每个 ChangeSet 仍需用户审核。`
+        },
+        limits: {
+          maxRounds,
+          maxDurationMs: getConfiguredBackgroundMaxDurationMs(),
+          maxToolCalls: getConfiguredBackgroundMaxToolCalls()
+        }
+      });
+      await this.executeBackgroundRound(false);
+    } catch (error) {
+      vscode.window.showErrorMessage(getErrorMessage(error));
+    }
+  }
+
+  private hasActiveBackgroundRun(): boolean {
+    const status = this.backgroundRunCoordinator.getActiveRun()?.status;
+    return status === 'running' || status === 'waiting_for_apply' || status === 'waiting_for_authorization';
+  }
+
+  private async resumeBackgroundRun(): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+    const run = this.backgroundRunCoordinator.getActiveRun();
+    if (!run || run.status !== 'waiting_for_apply' || run.sessionId !== this.sessionStore.activeSessionId) {
+      return;
+    }
+    const repairLoop = this.repairLoopsBySession.get(run.sessionId) ?? this.sessionStore.getActiveSession().repairLoop;
+    if (repairLoop?.status !== 'ready_for_validation') {
+      vscode.window.showInformationMessage(this.language === 'en'
+        ? 'Apply the complete pending repair ChangeSet before resuming the background task.'
+        : '请先完整应用待确认修复 ChangeSet，再继续后台任务。');
+      return;
+    }
+    await this.executeBackgroundRound(true);
+  }
+
+  private async executeBackgroundRound(resume: boolean): Promise<void> {
+    const started = this.backgroundRunCoordinator.beginRound();
+    if (started.status === 'failed') {
+      await this.appendBackgroundOutcomeMessage(started.stopReason ?? 'Background task limit reached.');
+      return;
+    }
+    const activeSession = this.sessionStore.getActiveSession();
+    if (started.sessionId !== activeSession.id) {
+      const failed = this.backgroundRunCoordinator.fail('The active chat session changed.');
+      await this.appendBackgroundOutcomeMessage(failed.stopReason ?? 'The active chat session changed.');
+      return;
+    }
+    const currentRepair = this.repairLoopsBySession.get(started.sessionId) ?? activeSession.repairLoop;
+    const repairLoop = resume && currentRepair
+      ? { ...currentRepair, status: 'running_validation' as const, pendingDraftEditIds: [], stopReason: undefined }
+      : undefined;
+    if (repairLoop) {
+      this.repairLoopsBySession.set(started.sessionId, repairLoop);
+      activeSession.repairLoop = repairLoop;
+    }
+    const script = started.goal.script;
+    const prompt = resume
+      ? this.language === 'en'
+        ? `Continue the visible background repair task after the user applied the previous ChangeSet. Run keepseek_run_validation with script "${script}". If it fails, read Problems and prepare one reviewed repair ChangeSet. Do not bypass authorization or apply edits automatically.`
+        : `用户已应用上一轮 ChangeSet，继续当前可见后台修复任务。运行 keepseek_run_validation，script 为“${script}”。若失败，读取 Problems 并准备一个需审核的修复 ChangeSet。不得绕过授权或自动应用修改。`
+      : this.language === 'en'
+        ? `Start a controlled background repair task. Run keepseek_run_validation with script "${script}". If it fails, read Problems and prepare one reviewed repair ChangeSet. Stop when validation passes or user review is required. Never bypass authorization or apply edits automatically.`
+        : `启动受控后台修复任务。运行 keepseek_run_validation，script 为“${script}”。若失败，读取 Problems 并准备一个需审核的修复 ChangeSet。验证通过或需要用户审核时停止。不得绕过授权或自动应用修改。`;
+    const response = await this.sendPrompt(prompt, this.selectedModelId, this.agentSettings, {
+      repairLoop,
+      executionLimits: this.backgroundRunCoordinator.getRemainingExecutionLimits(),
+      backgroundRunId: started.id
+    });
+    const current = this.backgroundRunCoordinator.getActiveRun();
+    if (!current || current.status === 'stopped') {
+      return;
+    }
+    if (!response) {
+      const failed = this.backgroundRunCoordinator.fail('The background Agent run ended without a result.');
+      await this.appendBackgroundOutcomeMessage(failed.stopReason ?? 'Background Agent run failed.');
+      return;
+    }
+    this.backgroundRunCoordinator.recordRun(response.runDetails);
+    if (response.repairLoop.status === 'waiting_for_apply' || response.changeSet?.status === 'pending') {
+      this.backgroundRunCoordinator.waitForApply(this.language === 'en'
+        ? 'Review and apply the pending ChangeSet, then choose Resume.'
+        : '请审核并应用待确认 ChangeSet，然后点击继续。');
+      return;
+    }
+    if (response.repairLoop.stopReason === 'validation_passed' || response.repairLoop.status === 'completed') {
+      const completed = this.backgroundRunCoordinator.complete(this.language === 'en'
+        ? `${script} passed.`
+        : `${script} 已通过。`);
+      await this.appendBackgroundOutcomeMessage(completed.stopReason ?? `${script} passed.`);
+      return;
+    }
+    if (response.repairLoop.stopReason === 'authorization_denied') {
+      const failed = this.backgroundRunCoordinator.fail(this.language === 'en'
+        ? 'The required validation authorization was denied.'
+        : '所需验证授权已被拒绝。');
+      await this.appendBackgroundOutcomeMessage(failed.stopReason ?? 'Authorization denied.');
+      return;
+    }
+    const stopReason = response.runDetails.budgetStopReason
+      ?? response.runDetails.failureReason
+      ?? response.taskPlan.blockers[0]
+      ?? (this.language === 'en' ? 'The task stopped before validation passed.' : '任务在验证通过前停止。');
+    const failed = this.backgroundRunCoordinator.fail(stopReason);
+    await this.appendBackgroundOutcomeMessage(failed.stopReason ?? stopReason);
+  }
+
+  private async stopBackgroundRun(): Promise<void> {
+    const run = this.backgroundRunCoordinator.getActiveRun();
+    if (!run || run.status === 'completed' || run.status === 'failed' || run.status === 'stopped') {
+      return;
+    }
+    if (this.isBusy) {
+      this.abortPrompt();
+    }
+    const stopped = this.backgroundRunCoordinator.stop(this.language === 'en'
+      ? 'Stopped by the user.'
+      : '已由用户停止。');
+    if (!this.isBusy) {
+      await this.appendBackgroundOutcomeMessage(stopped.stopReason ?? 'Stopped by the user.');
+    }
+  }
+
+  private async appendBackgroundOutcomeMessage(reason: string): Promise<void> {
+    const session = this.sessionStore.getActiveSession();
+    session.messages.push({
+      id: randomUUID(),
+      role: 'assistant',
+      content: this.language === 'en'
+        ? `Background task update: ${reason}`
+        : `后台任务状态：${reason}`,
+      createdAt: new Date().toISOString(),
+      contextMeta: createProtectedContextMeta('background_run_result')
+    });
+    session.updatedAt = new Date().toISOString();
+    await this.sessionStore.persist();
+    this.postState();
+  }
+
+  private updateRunDetailsForChangeSet(messageId: string, event: Record<string, unknown>): void {
+    const message = this.messages.find((item) => item.id === messageId);
+    if (!message?.runDetails) {
+      return;
+    }
+    message.runDetails = applyChangeSetEventToRunDetails(message.runDetails, event);
+    void this.sessionStore.persist();
+  }
+
   private async sendPrompt(
     prompt: string,
     modelId: string,
     settings?: Partial<AgentSettings>,
-    options?: { replaceMessageId?: string; references?: PromptReferenceInput[]; skillIds?: string[]; repairLoop?: RepairLoopState }
-  ): Promise<void> {
+    options?: {
+      replaceMessageId?: string;
+      references?: PromptReferenceInput[];
+      skillIds?: string[];
+      repairLoop?: RepairLoopState;
+      executionLimits?: AgentExecutionLimits;
+      backgroundRunId?: string;
+    }
+  ): Promise<AgentResponse | undefined> {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt || this.isBusy) {
+      return;
+    }
+    const backgroundRun = this.backgroundRunCoordinator.getActiveRun();
+    if (!options?.backgroundRunId && backgroundRun
+      && (backgroundRun.status === 'running'
+        || backgroundRun.status === 'waiting_for_apply'
+        || backgroundRun.status === 'waiting_for_authorization')) {
+      vscode.window.showInformationMessage(this.language === 'en'
+        ? 'Stop or finish the current background task before starting another Agent run.'
+        : '请先停止或完成当前后台任务，再启动新的 Agent 运行。');
       return;
     }
 
@@ -1766,6 +2112,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     let currentTurnUsage: TurnUsageStats | undefined;
     let previousTurnUsage: TurnUsageStats | undefined;
     let previousPromptCacheDiagnostics: PromptCacheDiagnostics | undefined;
+    let completedResponse: AgentResponse | undefined;
+    let memorySuggestionIds: string[] = [];
     let liveStateTimer: ReturnType<typeof setTimeout> | undefined;
     const scheduleLiveState = () => {
       if (liveStateTimer) {
@@ -1803,6 +2151,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       const activeSession = this.sessionStore.getActiveSession();
+      const memorySuggestions = this.projectMemoryService.suggestFromPrompt(trimmedPrompt);
+      memorySuggestionIds = memorySuggestions.map((update) => update.id);
+      if (memorySuggestions.length) {
+        this.postState();
+      }
       if (!options?.repairLoop) {
         this.repairLoopsBySession.delete(activeSession.id);
         activeSession.repairLoop = undefined;
@@ -1892,6 +2245,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }, { post: false });
       this.postState();
 
+      const projectMemory = this.projectMemoryService.createContext(expandedPrompt);
       const response = await this.agentRunner.run(this.agentRequestCoordinator.createAgentRequest({
         prompt: expandedPrompt,
         model,
@@ -1905,9 +2259,19 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         sessionId: activeSession.id,
         assistantMessageId: assistantMessage.id,
         repairLoop: options?.repairLoop,
+        projectMemory,
+        executionLimits: options?.executionLimits,
+        backgroundRunId: options?.backgroundRunId,
         signal: abortController.signal
       }), {
         onStatus: (activity) => {
+          if (options?.backgroundRunId) {
+            if (activity.phase === 'awaiting_authorization') {
+              this.backgroundRunCoordinator.waitForAuthorization(activity.detail ?? activity.toolName ?? 'Waiting for authorization.');
+            } else if (this.backgroundRunCoordinator.getActiveRun()?.status === 'waiting_for_authorization') {
+              this.backgroundRunCoordinator.markRunning();
+            }
+          }
           this.setAgentActivity(activity);
         },
         onDelta: (event) => {
@@ -1944,13 +2308,26 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           activeSession.lastTraceLogUri = traceLog.uri;
           this.sessionTraceLogUris.set(activeSession.id, traceLog.uri);
           activeSession.updatedAt = new Date().toISOString();
+          if (memorySuggestionIds.length) {
+            void this.traceLogService.appendRunEvent(traceLog, {
+              type: 'project_memory_suggested',
+              updateIds: memorySuggestionIds
+            });
+          }
           scheduleLiveState();
         },
         onTaskPlan: (taskPlan) => {
           this.taskPlansBySession.set(activeSession.id, taskPlan);
           scheduleLiveState();
+        },
+        onRunDetails: (runDetails) => {
+          if (assistantMessage) {
+            assistantMessage.runDetails = runDetails;
+          }
+          scheduleLiveState();
         }
       });
+      completedResponse = response;
 
       this.setAgentActivity({
         base: 'thinking',
@@ -1994,6 +2371,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           assistantMessage.contextMeta = createProtectedContextMeta('draft_edit_result');
         }
         delete assistantMessage.isStreaming;
+        assistantMessage.runDetails = response.runDetails;
       }
       this.updateActiveSessionContextUsage(this.createCurrentSessionContextUsage(model));
       this.scheduleContextCompressionRefresh(activeSession, expandedPrompt, model);
@@ -2007,7 +2385,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           const hasPartialOutput = Boolean(assistantMessage.content.trim() || assistantMessage.reasoningContent?.trim());
           const assistantMessageId = assistantMessage.id;
           delete assistantMessage.isStreaming;
-          if (!hasPartialOutput) {
+          if (!hasPartialOutput && assistantMessage.runDetails) {
+            assistantMessage.content = this.language === 'en'
+              ? 'Agent run stopped by the user.'
+              : 'Agent 运行已由用户停止。';
+          } else if (!hasPartialOutput) {
             const assistantIndex = this.messages.findIndex((message) => message.id === assistantMessageId);
             if (assistantIndex >= 0) {
               this.messages.splice(assistantIndex, 1);
@@ -2069,6 +2451,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }, { post: false });
       this.postState();
     }
+    return completedResponse;
   }
 
   private async refreshContextCompressionBeforeRun(
@@ -2173,7 +2556,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       skills: cachedSkills,
       messages: this.messages,
       contextCompression: activeSession.contextCompression,
-      language: this.language
+      language: this.language,
+      projectMemory: this.projectMemoryService.createContext('')
     });
     const contextUsage = pickLargerContextUsageEstimate(
       pickLargerContextUsageEstimate(activeSession.contextUsage, computedContextUsage),
@@ -2195,6 +2579,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         sessionSummaries: this.sessionStore.getSessionSummaries(),
         contextFiles: contextFiles.map(({ content: _content, ...file }) => file),
         skills: this.skillStore.getStateView(activeSession),
+        projectMemory: this.projectMemoryService.getStateView(),
+        backgroundRun: this.backgroundRunCoordinator.getActiveRun(),
+        backgroundDefaults: {
+          maxRounds: getConfiguredBackgroundMaxRounds(),
+          maxDurationMs: getConfiguredBackgroundMaxDurationMs(),
+          maxToolCalls: getConfiguredBackgroundMaxToolCalls()
+        },
         contextUsage,
         contextUsageSessionId: this.sessionStore.activeSessionId,
         usageMetrics: {

@@ -1,5 +1,5 @@
 import type { KeepseekLanguage } from '../shared/i18n';
-import type { AgentSettings } from '../shared/types';
+import type { AgentSettings, ProjectMemoryCategory, SafeNpmScript } from '../shared/types';
 
 export interface PromptReferenceInput {
   path: string;
@@ -38,6 +38,17 @@ export type WebviewMessage =
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
   | { type: 'setDebugMode'; enabled: boolean }
   | { type: 'openCurrentSessionLog' }
+  | { type: 'openRunTrace'; messageId: string }
+  | { type: 'openProjectMemoryFile' }
+  | { type: 'proposeMemoryAdd'; content: string; category: ProjectMemoryCategory; tags?: string[] }
+  | { type: 'proposeMemoryUpdate'; entryId: string; content: string; category: ProjectMemoryCategory; tags?: string[] }
+  | { type: 'proposeMemoryDelete'; entryId: string }
+  | { type: 'proposeMemoryToggle'; entryId: string; enabled: boolean }
+  | { type: 'applyMemoryUpdate'; updateId: string }
+  | { type: 'rejectMemoryUpdate'; updateId: string }
+  | { type: 'startBackgroundRun'; script: SafeNpmScript; maxRounds: number }
+  | { type: 'resumeBackgroundRun' }
+  | { type: 'stopBackgroundRun' }
   | { type: 'openApiSettings' }
   | { type: 'openHistorySettings' }
   | {

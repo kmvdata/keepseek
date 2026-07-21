@@ -77,6 +77,13 @@ export class Uri {
     return Uri.file(path.join(base.fsPath, ...segments));
   }
 
+  public with(change: { scheme?: string; path?: string }): Uri {
+    if ((change.scheme ?? this.scheme) === 'file') {
+      return Uri.file(change.path ?? this.path);
+    }
+    return new Uri(change.scheme ?? this.scheme, this.fsPath, change.path ?? this.path);
+  }
+
   public toString(): string {
     if (this.scheme === 'file') {
       return pathToFileURL(this.fsPath).toString();
