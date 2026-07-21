@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import { getInputScript } from '../src/webview/input/script';
 import { getInputTemplate } from '../src/webview/input/template';
 import { getScript } from '../src/webview/script';
+import { getStyles } from '../src/webview/styles';
 import { getTemplate } from '../src/webview/template';
 
 test('contributes editor, Explorer, and terminal context commands', async () => {
@@ -156,4 +157,36 @@ test('Legacy Memory migration command is hidden by default and appears only from
 
 test('generated Webview JavaScript passes syntax compilation', () => {
   assert.doesNotThrow(() => new Function(getScript()));
+});
+
+test('ChangeSets render in their assistant timeline entry with an unlinked actionable fallback', () => {
+  const template = getTemplate();
+  const script = getScript();
+
+  assert.doesNotMatch(template, /id="draftRegion"|id="draftList"/u);
+  assert.match(template, /id="unlinkedChangeSetRegion"/u);
+  assert.match(script, /buildChangeSetTimelineProjection/u);
+  assert.match(script, /changeSet\.messageId/u);
+  assert.match(script, /body\.append\(createChangeSetCard\(changeSet\)\)/u);
+  assert.match(script, /message\.role === 'assistant' && !message\.isStreaming/u);
+  assert.doesNotMatch(script, /function renderDraftEdits/u);
+});
+
+test('ChangeSet controls stay stacked and wrapping in a narrow Secondary Sidebar', () => {
+  const styles = getStyles();
+
+  assert.match(styles, /\.change-set-actions\s*\{[\s\S]*?flex-wrap:\s*wrap/u);
+  assert.match(styles, /\.draft-chip-actions\s*\{[\s\S]*?flex-wrap:\s*wrap/u);
+  assert.match(styles, /@media \(min-width: 380px\)/u);
+  assert.match(styles, /\.change-set-actions button\s*\{[\s\S]*?max-width:\s*100%/u);
+});
+
+test('Skill creation and Legacy Memory migration attach their ChangeSets to explicit timeline messages', async () => {
+  const providerSource = await readFile(
+    path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
+    'utf8'
+  );
+
+  assert.match(providerSource, /appendChangeSetTimelineMessage\([\s\S]*?createSkillDraftCreated[\s\S]*?messageId: timelineMessage\.id/u);
+  assert.match(providerSource, /legacyMemoryMigrationDraftCreated[\s\S]*?messageId: timelineMessage\?\.id/u);
 });

@@ -965,6 +965,8 @@ export function getStyles(): string {
     .change-set-card {
       display: grid;
       gap: 7px;
+      width: 100%;
+      min-width: 0;
       padding: 8px;
       border: 1px solid var(--vscode-panel-border);
       border-radius: 6px;
@@ -973,6 +975,23 @@ export function getStyles(): string {
 
     .change-set-partially_failed {
       border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+      background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-inputValidation-errorBackground, transparent));
+    }
+
+    .message.assistant .change-set-card {
+      margin-top: 10px;
+    }
+
+    .change-set-applied,
+    .change-set-discarded,
+    .change-set-reverted,
+    .change-set-card.is-historical {
+      background: color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-descriptionForeground));
+    }
+
+    .change-set-card.is-terminal {
+      gap: 5px;
+      padding: 6px 7px;
     }
 
     .change-set-header {
@@ -1009,9 +1028,12 @@ export function getStyles(): string {
     }
 
     .change-set-actions button {
+      max-width: 100%;
       min-height: 21px;
       padding: 2px 7px;
       font-size: 10px;
+      overflow-wrap: anywhere;
+      white-space: normal;
     }
 
     .change-set-files {
@@ -1107,13 +1129,22 @@ export function getStyles(): string {
     }
 
     .draft-chip-actions button {
+      max-width: 100%;
       font-size: 11px;
       padding: 2px 8px;
       min-height: 20px;
       border-radius: 3px;
+      overflow-wrap: anywhere;
+      white-space: normal;
     }
 
-    @media (min-width: 300px) {
+    .change-set-actions button:focus-visible,
+    .draft-chip-actions button:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 2px;
+    }
+
+    @media (min-width: 380px) {
       .draft-chip {
         grid-template-columns: minmax(0, 1fr) auto;
       }

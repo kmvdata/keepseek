@@ -26,6 +26,44 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "commands": [
+      {
+        "command": "keepseek.openChat",
+        "title": "KeepSeek: Open Chat"
+      },
+      {
+        "command": "keepseek.addCurrentFileToContext",
+        "title": "KeepSeek: Add Current File to Context"
+      },
+      {
+        "command": "keepseek.pickWorkspaceFilesToContext",
+        "title": "KeepSeek: Add Workspace Files to Context"
+      },
+      {
+        "command": "keepseek.pickExternalFilesToContext",
+        "title": "KeepSeek: Add External Files to Context"
+      },
+      {
+        "command": "keepseek.addSelectionToContext",
+        "title": "KeepSeek: Add Selection to Context"
+      },
+      {
+        "command": "keepseek.addTerminalSelectionToContext",
+        "title": "KeepSeek: Add Terminal Selection to Context"
+      },
+      {
+        "command": "keepseek.addDebugConsoleSelectionToContext",
+        "title": "KeepSeek: Add Debug Console Selection to Context"
+      },
+      {
+        "command": "keepseek.addExplorerFileToContext",
+        "title": "KeepSeek: Add File to Context"
+      },
+      {
+        "command": "keepseek.addExplorerDirectoryToContext",
+        "title": "KeepSeek: Add Explorer Folder to Chat"
+      }
+    ],
     "configuration": {
       "title": "KeepSeek",
       "properties": {
@@ -34,10 +72,32 @@
           "default": "",
           "description": "DeepSeek API key"
         },
-        "keepseek.apiBaseUrl": {
+        "keepseek.baseUrl": {
           "type": "string",
           "default": "https://api.deepseek.com",
-          "description": "API base URL"
+          "description": "DeepSeek API base URL"
+        },
+        "keepseek.selectedModelId": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "Selected model for the current workspace. An empty or unavailable value falls back to the first supported model."
+        },
+        "keepseek.thinkingEnabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "Enable Thinking mode for the current workspace."
+        },
+        "keepseek.reasoningEffort": {
+          "type": "string",
+          "default": "high",
+          "scope": "window",
+          "enum": [
+            "high",
+            "max"
+          ],
+          "markdownDescription": "Thinking effort for the current workspace."
         },
         "keepseek.model": {
           "type": "string",
@@ -71,6 +131,30 @@
             "never"
           ],
           "description": "Tool execution authorization policy"
+        },
+        "keepseek.projectInstructions.contextBudgetTokens": {
+          "type": "number",
+          "default": 4000,
+          "minimum": 0,
+          "maximum": 32000,
+          "scope": "window",
+          "markdownDescription": "Maximum estimated tokens used by root AGENTS.md project instructions in each Agent run."
+        },
+        "keepseek.skills.contextBudgetChars": {
+          "type": "number",
+          "default": 72000,
+          "minimum": 0,
+          "maximum": 200000,
+          "scope": "window",
+          "markdownDescription": "Maximum total characters used by activated Codex-compatible Skill instructions in each Agent run. Skill scripts are never executed."
+        },
+        "keepseek.skills.maxImplicitActivations": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 8,
+          "scope": "window",
+          "markdownDescription": "Maximum number of allowImplicit Skills that deterministic request matching may activate per Agent run."
         },
         "keepseek.contextCompression": {
           "type": "boolean",
@@ -130,19 +214,26 @@
           "when": "editorHasSelection",
           "group": "1_modification"
         }
+      ],
+      "terminal/context": [
+        {
+          "command": "keepseek.addTerminalSelectionToContext",
+          "when": "terminalTextSelected",
+          "group": "keepseek@1"
+        }
       ]
     },
     "viewsContainers": {
-      "panel": [
+      "activitybar": [
         {
-          "id": "keepseek",
+          "id": "keepseek-sidebar",
           "title": "KeepSeek",
           "icon": "resources/keepseek.svg"
         }
       ]
     },
     "views": {
-      "keepseek": [
+      "keepseek-sidebar": [
         {
           "type": "webview",
           "id": "keepseek.chat",
@@ -158,7 +249,7 @@
     "lint": "eslint src/",
     "build:test": "tsc -p tsconfig.test.json",
     "test": "node out-test/test/runTests.js",
-    "package": "vsce package --no-dependencies --out keepseek-${npm_package_version}.vsix && node scripts/verify-vsix.js keepseek-${npm_package_version}.vsix",
+    "package": "vsce package --dependencies --out keepseek-${npm_package_version}.vsix && node scripts/verify-vsix.js keepseek-${npm_package_version}.vsix",
     "reinstall:vsix": "node scripts/reinstall-vsix.js"
   },
   "dependencies": {

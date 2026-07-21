@@ -17,6 +17,7 @@ import {
   ChatMessage,
   ChatMessageSkill,
   ChatSession,
+  ChangeSet,
   ChangeSetApplyFailure,
   ContextUsageEstimate,
   CurrentRunContext,
@@ -173,7 +174,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.globalStorageUri,
       (key, values) => this.t(key, values),
       (changeSet, event) => {
-        this.updateRunDetailsForChangeSet(changeSet.messageId, event);
+        this.updateRunDetailsForChangeSet(changeSet.messageId, event, changeSet);
         void this.traceLogService.appendRunEvent(
           changeSet.traceLogUri
             ? { runId: changeSet.runId, uri: changeSet.traceLogUri }
@@ -1412,6 +1413,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postState();
   }
 
+  private appendChangeSetTimelineMessage(content: string): ChatMessage {
+    const activeSession = this.sessionStore.getActiveSession();
+    const message: ChatMessage = {
+      id: randomUUID(),
+      role: 'assistant',
+      content,
+      createdAt: new Date().toISOString(),
+      contextMeta: createProtectedContextMeta('draft_edit_result')
+    };
+    activeSession.messages.push(message);
+    activeSession.updatedAt = message.createdAt;
+    return message;
+  }
+
   private async createSkillDraft(message: Extract<WebviewMessage, { type: 'createSkillDraft' }>): Promise<void> {
     if (!vscode.workspace.isTrusted) {
       vscode.window.showErrorMessage(this.t('createSkillWorkspaceUntrusted'));
@@ -1447,11 +1462,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         newText: draft.content,
         reason: draft.reason
       };
+      const timelineMessage = this.appendChangeSetTimelineMessage(
+        this.t('createSkillDraftCreated', { label: draft.label })
+      );
       this.changeSets.addDraftEdits({
         edits: [edit],
         sessionId: this.sessionStore.activeSessionId,
+        messageId: timelineMessage.id,
         operationSummary: draft.reason
       });
+      await this.sessionStore.persist();
       this.postState();
       this.postToWebview({ type: 'skillDraftCreated', label: draft.label });
       vscode.window.showInformationMessage(this.t('createSkillDraftCreated', { label: draft.label }));
@@ -1876,12 +1896,21 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     try {
       const draft = await this.legacyMemoryMigration.createDraft();
+      const timelineMessage = draft.edits.length
+        ? this.appendChangeSetTimelineMessage(
+            this.t('legacyMemoryMigrationDraftCreated', { count: draft.edits.length })
+          )
+        : undefined;
       const changeSet = this.changeSets.addDraftEdits({
         edits: draft.edits,
         sessionId: this.sessionStore.activeSessionId,
+        messageId: timelineMessage?.id,
         operationSummary: this.t('legacyMemoryMigrationDraftReason')
       });
       await this.legacyMemoryMigration.markDraftCreated(changeSet?.id);
+      if (timelineMessage) {
+        await this.sessionStore.persist();
+      }
       this.appendLegacyMemoryTrace({
         type: 'legacy_memory_migration_draft_created',
         sourceUris: draft.sourceUris,
@@ -2122,12 +2151,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postState();
   }
 
-  private updateRunDetailsForChangeSet(messageId: string, event: Record<string, unknown>): void {
+  private updateRunDetailsForChangeSet(
+    messageId: string,
+    event: Record<string, unknown>,
+    changeSet: ChangeSet
+  ): void {
     const message = this.messages.find((item) => item.id === messageId);
     if (!message?.runDetails) {
       return;
     }
-    message.runDetails = applyChangeSetEventToRunDetails(message.runDetails, event);
+    message.runDetails = applyChangeSetEventToRunDetails(message.runDetails, event, changeSet);
     void this.sessionStore.persist();
   }
 
@@ -2655,6 +2688,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const lastTurnUsage = this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage;
     const contextPercent = contextUsage.usedPercent;
 
+    const webviewChangeSets = this.changeSets.toWebviewState(activeSession.id);
     this.postToWebview({
       type: 'state',
       state: {
@@ -2692,8 +2726,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         },
         taskPlan: this.taskPlansBySession.get(activeSession.id),
         repairLoop: this.repairLoopsBySession.get(activeSession.id) ?? activeSession.repairLoop,
-        changeSets: this.changeSets.toWebviewState(activeSession.id),
-        draftEdits: this.changeSets.toWebviewState(activeSession.id).flatMap((changeSet) => changeSet.files),
+        changeSets: webviewChangeSets,
         isBusy: this.isBusy,
         agentActivity: this.agentActivity,
         maxFileBytes: getConfiguredMaxFileBytes(),

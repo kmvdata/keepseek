@@ -1,7 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { applyChangeSetEventToRunDetails, RunDetailsBuilder } from '../src/agent/logging/runDetails';
-import type { RepairLoopState, TaskPlan } from '../src/shared/types';
+import { createChangeSet } from '../src/edits/changeSet';
+import type { ChangeSet, RepairLoopState, TaskPlan } from '../src/shared/types';
 
 describe('RunDetailsBuilder', () => {
   it('redacts sensitive arguments and summarizes tools, validation, and waiting state', () => {
@@ -96,7 +97,84 @@ describe('RunDetailsBuilder', () => {
     assert.equal(updated.changeSets[0].status, 'applied');
     assert.equal(updated.changeSets[0].appliedCount, 2);
   });
+
+  it('tracks single-file discard and mixed file status in the lightweight history summary', () => {
+    const changeSet = createTwoFileChangeSet();
+    const summary = createSummaryWithChangeSet(changeSet);
+    const updated = applyChangeSetEventToRunDetails(summary, {
+      type: 'change_set_file_discarded',
+      changeSetId: changeSet.id,
+      editId: 'edit-a'
+    });
+
+    assert.equal(updated.changeSets[0].status, 'pending');
+    assert.deepEqual(updated.changeSets[0].files?.map((file) => file.status), ['discarded', 'pending']);
+  });
+
+  it('uses the current ChangeSet snapshot for partial apply and failed revert outcomes', () => {
+    const changeSet = createTwoFileChangeSet();
+    const summary = createSummaryWithChangeSet(changeSet);
+    changeSet.files[0].status = 'applied';
+    changeSet.files[1].status = 'apply_failed';
+    changeSet.files[1].error = 'Cannot write b.ts';
+    changeSet.status = 'partially_failed';
+
+    const applied = applyChangeSetEventToRunDetails(summary, {
+      type: 'change_set_apply_result',
+      result: {
+        changeSetId: changeSet.id,
+        appliedEditIds: ['edit-a'],
+        failed: [{ editId: 'edit-b', error: 'Cannot write b.ts' }]
+      }
+    }, changeSet);
+    assert.equal(applied.changeSets[0].status, 'partially_failed');
+    assert.deepEqual(applied.changeSets[0].files?.map((file) => file.status), ['applied', 'apply_failed']);
+    assert.equal(applied.changeSets[0].failedCount, 1);
+
+    changeSet.files[0].status = 'revert_failed';
+    changeSet.files[0].error = 'File changed after apply';
+    const reverted = applyChangeSetEventToRunDetails(applied, {
+      type: 'change_set_revert_result',
+      result: {
+        changeSetId: changeSet.id,
+        revertedEditIds: [],
+        failed: [{ editId: 'edit-a', error: 'File changed after apply' }]
+      }
+    }, changeSet);
+    assert.equal(reverted.changeSets[0].files?.[0]?.status, 'revert_failed');
+    assert.match(reverted.changeSets[0].files?.[0]?.error ?? '', /changed after apply/u);
+  });
 });
+
+function createTwoFileChangeSet(): ChangeSet {
+  const changeSet = createChangeSet({
+    runId: 'run-change-set',
+    sessionId: 'session-1',
+    messageId: 'message-1',
+    operationSummary: 'Update two files',
+    edits: [
+      { id: 'edit-a', uri: 'file:///a.ts', label: 'a.ts', action: 'modify', newText: 'a', reason: 'A' },
+      { id: 'edit-b', uri: 'file:///b.ts', label: 'b.ts', action: 'modify', newText: 'b', reason: 'B' }
+    ]
+  });
+  assert.ok(changeSet);
+  return changeSet;
+}
+
+function createSummaryWithChangeSet(changeSet: ChangeSet) {
+  const builder = new RunDetailsBuilder({
+    runId: changeSet.runId,
+    sessionId: changeSet.sessionId,
+    assistantMessageId: changeSet.messageId,
+    modelId: 'deepseek-v4-flash',
+    thinkingEnabled: false
+  });
+  return builder.finish({
+    taskPlan: createPlan('completed'),
+    repairLoop: { status: 'completed', iteration: 0, maxIterations: 2, pendingDraftEditIds: [] },
+    changeSet
+  });
+}
 
 function createPlan(status: TaskPlan['status']): TaskPlan {
   const now = new Date().toISOString();

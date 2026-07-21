@@ -642,7 +642,19 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
           id: typeof changeSet.id === 'string' ? changeSet.id : '',
           fileCount: normalizeNonNegativeInteger(changeSet.fileCount),
           status: normalizeChangeSetStatus(changeSet.status),
-          labels: normalizeStringArray(changeSet.labels).slice(0, 20),
+          operationSummary: typeof changeSet.operationSummary === 'string'
+            ? changeSet.operationSummary.slice(0, 320)
+            : undefined,
+          labels: normalizeStringArray(changeSet.labels).slice(0, 256),
+          files: Array.isArray(changeSet.files)
+            ? changeSet.files.filter(isRecord).slice(0, 256).map((file, index) => ({
+                id: typeof file.id === 'string' ? file.id : `file-${index + 1}`,
+                label: typeof file.label === 'string' ? file.label.slice(0, 240) : `File ${index + 1}`,
+                action: normalizeDraftEditAction(file.action),
+                status: normalizeChangeSetFileStatus(file.status),
+                error: typeof file.error === 'string' ? file.error.slice(0, 500) : undefined
+              }))
+            : undefined,
           appliedCount: normalizeNonNegativeInteger(changeSet.appliedCount),
           failedCount: normalizeNonNegativeInteger(changeSet.failedCount)
         })).filter((changeSet) => Boolean(changeSet.id))
@@ -765,6 +777,20 @@ function normalizeChangeSetStatus(value: unknown): NonNullable<ChatMessage['runD
     || value === 'discarded'
     ? value
     : 'pending';
+}
+
+function normalizeChangeSetFileStatus(value: unknown): NonNullable<NonNullable<ChatMessage['runDetails']>['changeSets'][number]['files']>[number]['status'] {
+  return value === 'applied'
+    || value === 'discarded'
+    || value === 'apply_failed'
+    || value === 'reverted'
+    || value === 'revert_failed'
+    ? value
+    : 'pending';
+}
+
+function normalizeDraftEditAction(value: unknown): NonNullable<NonNullable<ChatMessage['runDetails']>['changeSets'][number]['files']>[number]['action'] {
+  return value === 'create' || value === 'delete' || value === 'move' ? value : 'modify';
 }
 
 function cloneRunDetails(details: NonNullable<ChatMessage['runDetails']>): NonNullable<ChatMessage['runDetails']> {

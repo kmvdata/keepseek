@@ -138,12 +138,12 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
       </div>
     </section>
 
-    <div id="draftRegion" class="draft-bar hidden">
+    <aside id="unlinkedChangeSetRegion" class="draft-bar hidden" aria-labelledby="unlinkedChangeSetLabel">
       <div class="draft-bar-header">
-        <div class="draft-bar-label" data-i18n="changeSets">Agent 修改</div>
+        <div id="unlinkedChangeSetLabel" class="draft-bar-label" data-i18n="unlinkedChangeSets">未关联的待处理修改</div>
       </div>
-      <div id="draftList" class="draft-bar-list"></div>
-    </div>
+      <div id="unlinkedChangeSetList" class="draft-bar-list"></div>
+    </aside>
 
     ${getInputTemplate()}
   </main>`;

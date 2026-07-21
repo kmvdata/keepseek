@@ -17,6 +17,7 @@ import { createChangeSet } from './changeSet';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
 type ChangeSetTraceHandler = (changeSet: ChangeSet, event: Record<string, unknown>) => void;
+const MAX_COMPACT_HISTORY_CHANGE_SETS = 500;
 
 export type WebviewChangeSet = Omit<ChangeSet, 'files'> & {
   files: Array<Omit<ChangeSetFile, 'newText'>>;
@@ -24,6 +25,7 @@ export type WebviewChangeSet = Omit<ChangeSet, 'files'> & {
 
 export class ChangeSetStore {
   private readonly changeSets = new Map<string, ChangeSet>();
+  private readonly historicalChangeSets = new Map<string, WebviewChangeSet>();
   private readonly checkpoints = new Map<string, ChangeCheckpoint>();
   private readonly storageUri: vscode.Uri;
   private persistenceQueue: Promise<void> = Promise.resolve();
@@ -52,14 +54,20 @@ export class ChangeSetStore {
       const parsed = JSON.parse(content) as {
         version?: number;
         changeSets?: ChangeSet[];
+        history?: WebviewChangeSet[];
         checkpoints?: ChangeCheckpoint[];
       };
-      if (parsed.version !== 1) {
+      if (parsed.version !== 1 && parsed.version !== 2) {
         return;
       }
       for (const changeSet of parsed.changeSets ?? []) {
         if (isStoredChangeSet(changeSet)) {
-          this.changeSets.set(changeSet.id, cloneChangeSet(changeSet));
+          this.changeSets.set(changeSet.id, normalizeStoredChangeSet(changeSet));
+        }
+      }
+      for (const changeSet of parsed.history ?? []) {
+        if (isStoredHistoricalChangeSet(changeSet)) {
+          this.historicalChangeSets.set(changeSet.id, cloneWebviewChangeSet(changeSet));
         }
       }
       for (const checkpoint of parsed.checkpoints ?? []) {
@@ -74,6 +82,7 @@ export class ChangeSetStore {
 
   public add(changeSet: ChangeSet): void {
     this.changeSets.set(changeSet.id, cloneChangeSet(changeSet));
+    this.historicalChangeSets.delete(changeSet.id);
     this.recordTrace(changeSet, {
       type: 'change_set_registered',
       changeSetId: changeSet.id,
@@ -106,21 +115,16 @@ export class ChangeSetStore {
   }
 
   public toWebviewState(sessionId: string): WebviewChangeSet[] {
-    return Array.from(this.changeSets.values())
-      .filter((changeSet) => changeSet.sessionId === sessionId && changeSet.status !== 'discarded')
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-      .slice(0, 10)
-      .map((changeSet) => ({
-        ...changeSet,
-        files: changeSet.files.map(({ newText: _newText, ...file }) => ({ ...file })),
-        lastApplyResult: changeSet.lastApplyResult
-          ? {
-              ...changeSet.lastApplyResult,
-              appliedEditIds: [...changeSet.lastApplyResult.appliedEditIds],
-              failed: changeSet.lastApplyResult.failed.map((failure) => ({ ...failure }))
-            }
-          : undefined
-      }));
+    const merged = new Map<string, WebviewChangeSet>();
+    for (const changeSet of this.historicalChangeSets.values()) {
+      merged.set(changeSet.id, cloneWebviewChangeSet(changeSet));
+    }
+    for (const changeSet of this.changeSets.values()) {
+      merged.set(changeSet.id, toWebviewChangeSet(changeSet));
+    }
+    return Array.from(merged.values())
+      .filter((changeSet) => changeSet.sessionId === sessionId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
   public getLatestChangeSetId(sessionId: string): string | undefined {
@@ -130,7 +134,7 @@ export class ChangeSetStore {
   }
 
   public getChangeSetStatus(changeSetId: string): ChangeSet['status'] | undefined {
-    return this.changeSets.get(changeSetId)?.status;
+    return this.changeSets.get(changeSetId)?.status ?? this.historicalChangeSets.get(changeSetId)?.status;
   }
 
   public isChangeSetFullyApplied(changeSetId: string): boolean {
@@ -192,6 +196,7 @@ export class ChangeSetStore {
       editId: found.edit.id,
       label: found.edit.label
     });
+    this.compactTerminalChangeSet(found.changeSet);
     this.schedulePersist();
     return true;
   }
@@ -218,6 +223,7 @@ export class ChangeSetStore {
       type: 'change_set_discarded',
       changeSetId: changeSet.id
     });
+    this.compactTerminalChangeSet(changeSet);
     this.schedulePersist();
     return true;
   }
@@ -256,10 +262,16 @@ export class ChangeSetStore {
         continue;
       }
       this.changeSets.delete(changeSetId);
+      this.historicalChangeSets.delete(changeSetId);
       for (const file of changeSet.files) {
         if (file.checkpointId) {
           this.checkpoints.delete(file.checkpointId);
         }
+      }
+    }
+    for (const [changeSetId, changeSet] of this.historicalChangeSets) {
+      if (changeSet.sessionId === sessionId) {
+        this.historicalChangeSets.delete(changeSetId);
       }
     }
     this.schedulePersist();
@@ -271,6 +283,7 @@ export class ChangeSetStore {
       if (changeSet.sessionId !== sessionId) {
         continue;
       }
+      let changeSetChanged = false;
       for (const file of changeSet.files) {
         if (!isApplicable(file)) {
           continue;
@@ -278,8 +291,16 @@ export class ChangeSetStore {
         file.status = 'discarded';
         file.error = undefined;
         changed = true;
+        changeSetChanged = true;
       }
       this.updateChangeSetStatus(changeSet);
+      if (changeSetChanged) {
+        this.recordTrace(changeSet, {
+          type: 'change_set_discarded',
+          changeSetId: changeSet.id
+        });
+        this.compactTerminalChangeSet(changeSet);
+      }
     }
     if (changed) {
       this.schedulePersist();
@@ -288,6 +309,7 @@ export class ChangeSetStore {
 
   public clear(): void {
     this.changeSets.clear();
+    this.historicalChangeSets.clear();
     this.checkpoints.clear();
     this.schedulePersist();
   }
@@ -364,6 +386,7 @@ export class ChangeSetStore {
       type: 'change_set_revert_result',
       result
     });
+    this.compactTerminalChangeSet(changeSet);
     this.schedulePersist();
     return result;
   }
@@ -448,12 +471,40 @@ export class ChangeSetStore {
     this.onTraceEvent?.(cloneChangeSet(changeSet), event);
   }
 
+  private compactTerminalChangeSet(changeSet: ChangeSet): void {
+    if (requiresRuntimeState(changeSet)) {
+      return;
+    }
+    this.historicalChangeSets.set(changeSet.id, toWebviewChangeSet(changeSet));
+    this.changeSets.delete(changeSet.id);
+    for (const file of changeSet.files) {
+      if (file.checkpointId) {
+        this.checkpoints.delete(file.checkpointId);
+      }
+    }
+  }
+
   private schedulePersist(): void {
     const changeSets = Array.from(this.changeSets.values())
-      .filter((changeSet) => changeSet.status !== 'discarded' && changeSet.status !== 'reverted')
+      .filter(requiresRuntimeState)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .slice(0, 30)
       .map(cloneChangeSet);
+    const historyById = new Map(this.historicalChangeSets);
+    for (const changeSet of this.changeSets.values()) {
+      if (requiresRuntimeState(changeSet)) {
+        historyById.delete(changeSet.id);
+      } else {
+        historyById.set(changeSet.id, toWebviewChangeSet(changeSet));
+      }
+    }
+    const history = Array.from(historyById.values())
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .slice(0, MAX_COMPACT_HISTORY_CHANGE_SETS)
+      .map(cloneWebviewChangeSet);
+    this.historicalChangeSets.clear();
+    for (const changeSet of history) {
+      this.historicalChangeSets.set(changeSet.id, changeSet);
+    }
     const checkpointIds = new Set(
       changeSets.flatMap((changeSet) => changeSet.files
         .map((file) => file.checkpointId)
@@ -463,8 +514,9 @@ export class ChangeSetStore {
       .filter((checkpoint) => checkpointIds.has(checkpoint.id))
       .map((checkpoint) => ({ ...checkpoint }));
     const bytes = new TextEncoder().encode(JSON.stringify({
-      version: 1,
+      version: 2,
       changeSets,
+      history,
       checkpoints
     }));
     this.persistenceQueue = this.persistenceQueue
@@ -486,10 +538,59 @@ function isRevertible(file: ChangeSetFile): boolean {
   return file.status === 'applied' || file.status === 'revert_failed';
 }
 
+function requiresRuntimeState(changeSet: ChangeSet): boolean {
+  return changeSet.files.some((file) => isApplicable(file) || isRevertible(file));
+}
+
 function cloneChangeSet(changeSet: ChangeSet): ChangeSet {
   return {
     ...changeSet,
     files: changeSet.files.map((file) => ({ ...file })),
+    lastApplyResult: changeSet.lastApplyResult
+      ? {
+          ...changeSet.lastApplyResult,
+          appliedEditIds: [...changeSet.lastApplyResult.appliedEditIds],
+          failed: changeSet.lastApplyResult.failed.map((failure) => ({ ...failure }))
+        }
+      : undefined
+  };
+}
+
+function normalizeStoredChangeSet(changeSet: ChangeSet): ChangeSet {
+  return cloneChangeSet({
+    ...changeSet,
+    messageId: typeof changeSet.messageId === 'string' ? changeSet.messageId : ''
+  });
+}
+
+function toWebviewChangeSet(changeSet: ChangeSet): WebviewChangeSet {
+  return {
+    ...changeSet,
+    files: changeSet.files.map(({ newText: _newText, ...file }) => ({ ...file })),
+    lastApplyResult: changeSet.lastApplyResult
+      ? {
+          ...changeSet.lastApplyResult,
+          appliedEditIds: [...changeSet.lastApplyResult.appliedEditIds],
+          failed: changeSet.lastApplyResult.failed.map((failure) => ({ ...failure }))
+        }
+      : undefined
+  };
+}
+
+function cloneWebviewChangeSet(changeSet: WebviewChangeSet): WebviewChangeSet {
+  return {
+    ...changeSet,
+    messageId: typeof changeSet.messageId === 'string' ? changeSet.messageId : '',
+    files: changeSet.files.map((file) => ({
+      id: file.id,
+      uri: file.uri,
+      label: file.label,
+      action: file.action,
+      reason: file.reason,
+      status: file.status,
+      error: file.error,
+      checkpointId: file.checkpointId
+    })),
     lastApplyResult: changeSet.lastApplyResult
       ? {
           ...changeSet.lastApplyResult,
@@ -520,4 +621,15 @@ function isStoredCheckpoint(value: unknown): value is ChangeCheckpoint {
     && typeof record.changeSetId === 'string'
     && typeof record.editId === 'string'
     && typeof record.uri === 'string';
+}
+
+function isStoredHistoricalChangeSet(value: unknown): value is WebviewChangeSet {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record.id === 'string'
+    && typeof record.runId === 'string'
+    && typeof record.sessionId === 'string'
+    && Array.isArray(record.files);
 }

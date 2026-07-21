@@ -74,7 +74,6 @@ export function getScript(): string {
       taskPlan: null,
       repairLoop: null,
       changeSets: [],
-      draftEdits: [],
       isBusy: false,
       agentActivity: {
         base: 'idle',
@@ -361,11 +360,8 @@ export function getScript(): string {
     const planBlockers = document.getElementById('planBlockers');
     const planCompletion = document.getElementById('planCompletion');
     const planContinueRepair = document.getElementById('planContinueRepair');
-    const draftRegion = document.getElementById('draftRegion');
-    const draftBulkActions = document.getElementById('draftBulkActions');
-    const draftApplyAllBtn = document.getElementById('draftApplyAllBtn');
-    const draftDiscardAllBtn = document.getElementById('draftDiscardAllBtn');
-    const draftList = document.getElementById('draftList');
+    const unlinkedChangeSetRegion = document.getElementById('unlinkedChangeSetRegion');
+    const unlinkedChangeSetList = document.getElementById('unlinkedChangeSetList');
     const transcript = document.getElementById('transcript');
     const composer = document.getElementById('composer');
     const promptInput = document.getElementById('promptInput');
@@ -676,7 +672,7 @@ export function getScript(): string {
       }
     });
 
-    draftList.addEventListener('click', function(event) {
+    function handleChangeSetActionClick(event) {
       var target = event.target instanceof Element ? event.target : null;
       var button = target?.closest('button[data-edit-id], button[data-change-set-id]');
       if (!button || button.disabled) return;
@@ -685,10 +681,13 @@ export function getScript(): string {
       if (!id || !action) return;
       if (action !== 'openDraftDiff') {
         pendingChangeActions.add(action + ':' + id);
-        renderDraftEdits();
+        render();
       }
       vscode.postMessage({ type: action, id: id });
-    });
+    }
+
+    transcript.addEventListener('click', handleChangeSetActionClick);
+    unlinkedChangeSetList.addEventListener('click', handleChangeSetActionClick);
 
     if (planToggle) {
       planToggle.addEventListener('click', function() {
@@ -702,20 +701,6 @@ export function getScript(): string {
         if (state.isBusy || state.repairLoop?.status !== 'ready_for_validation') return;
         planContinueRepair.disabled = true;
         vscode.postMessage({ type: 'continueRepair' });
-      });
-    }
-
-    if (draftApplyAllBtn) {
-      draftApplyAllBtn.addEventListener('click', function() {
-        if (state.draftEdits.length <= 1) return;
-        vscode.postMessage({ type: 'applyAllDraftEdits' });
-      });
-    }
-
-    if (draftDiscardAllBtn) {
-      draftDiscardAllBtn.addEventListener('click', function() {
-        if (state.draftEdits.length <= 1) return;
-        vscode.postMessage({ type: 'discardAllDraftEdits' });
       });
     }
 
@@ -1142,8 +1127,9 @@ export function getScript(): string {
       renderBackgroundRun();
       renderContextChips();
       renderTaskPlan();
-      renderDraftEdits();
-      renderTranscript();
+      var changeSetProjection = buildChangeSetTimelineProjection();
+      renderTranscript(changeSetProjection);
+      renderUnlinkedChangeSets(changeSetProjection.unlinked);
       renderStatus();
       if (window.keepseekInputControls) {
         window.keepseekInputControls.render();
@@ -2816,32 +2802,130 @@ export function getScript(): string {
       }
     }
 
-    function renderDraftEdits() {
-      draftList.innerHTML = '';
+    function buildChangeSetTimelineProjection() {
+      var byMessageId = Object.create(null);
+      var unlinked = [];
+      var messagesById = Object.create(null);
+      var liveChangeSetIds = new Set();
+      var messages = Array.isArray(state.messages) ? state.messages : [];
+      messages.forEach(function(message) {
+        if (message && message.id) messagesById[String(message.id)] = message;
+      });
+
       var changeSets = Array.isArray(state.changeSets) ? state.changeSets : [];
-      draftRegion.classList.toggle('hidden', changeSets.length === 0);
+      changeSets.forEach(function(changeSet) {
+        if (!changeSet || !changeSet.id) return;
+        liveChangeSetIds.add(String(changeSet.id));
+        var messageId = String(changeSet.messageId || '');
+        var message = messageId ? messagesById[messageId] : null;
+        if (message?.role === 'assistant' && !message.isStreaming) {
+          if (!byMessageId[messageId]) byMessageId[messageId] = [];
+          byMessageId[messageId].push(changeSet);
+        } else if (!message || message.role !== 'assistant') {
+          unlinked.push(changeSet);
+        }
+      });
 
-      for (var i = 0; i < changeSets.length; i++) {
-        var changeSet = changeSets[i];
-        var card = document.createElement('section');
-        card.className = 'change-set-card change-set-' + String(changeSet.status || 'pending');
+      messages.forEach(function(message) {
+        if (message?.role !== 'assistant' || message.isStreaming) return;
+        var summaries = Array.isArray(message.runDetails?.changeSets) ? message.runDetails.changeSets : [];
+        summaries.forEach(function(summary) {
+          if (!summary?.id || liveChangeSetIds.has(String(summary.id))) return;
+          var messageId = String(message.id || '');
+          if (!byMessageId[messageId]) byMessageId[messageId] = [];
+          byMessageId[messageId].push(createHistoricalChangeSet(summary, messageId));
+        });
+      });
 
-        var header = document.createElement('div');
-        header.className = 'change-set-header';
-        var heading = document.createElement('div');
-        heading.className = 'change-set-heading';
-        var title = document.createElement('div');
-        title.className = 'change-set-title';
-        title.textContent = String(changeSet.operationSummary || t('changeSets'));
-        title.title = title.textContent;
-        var meta = document.createElement('div');
-        meta.className = 'change-set-meta';
-        meta.textContent = t('changeSetFiles', { count: Number(changeSet.fileCount) || 0 }) + ' · ' + getChangeSetStatusLabel(changeSet.status);
-        heading.append(title, meta);
+      return { byMessageId: byMessageId, unlinked: unlinked };
+    }
 
-        var setActions = document.createElement('div');
-        setActions.className = 'change-set-actions';
-        var files = Array.isArray(changeSet.files) ? changeSet.files : [];
+    function createHistoricalChangeSet(summary, messageId) {
+      var statusValue = String(summary.status || 'pending');
+      var files = Array.isArray(summary.files) && summary.files.length
+        ? summary.files.map(function(file, index) {
+            return {
+              id: String(file.id || summary.id + '-history-' + index),
+              label: String(file.label || ''),
+              action: String(file.action || 'modify'),
+              status: String(file.status || statusValue),
+              error: file.error ? String(file.error) : ''
+            };
+          })
+        : (Array.isArray(summary.labels) ? summary.labels : []).map(function(label, index) {
+            return {
+              id: String(summary.id) + '-history-' + index,
+              label: String(label || ''),
+              action: 'modify',
+              status: getHistoricalFileStatus(statusValue, index, summary)
+            };
+          });
+      return {
+        id: String(summary.id),
+        messageId: messageId,
+        fileCount: Number(summary.fileCount) || files.length,
+        operationSummary: String(summary.operationSummary || t('changeSets')),
+        status: statusValue,
+        files: files,
+        historical: true
+      };
+    }
+
+    function getHistoricalFileStatus(statusValue, index, summary) {
+      if (statusValue === 'applied' || statusValue === 'discarded' || statusValue === 'reverted') {
+        return statusValue;
+      }
+      var appliedCount = Math.max(0, Number(summary?.appliedCount) || 0);
+      var failedCount = Math.max(0, Number(summary?.failedCount) || 0);
+      if (index < appliedCount) return 'applied';
+      if (index < appliedCount + failedCount) return 'apply_failed';
+      return 'pending';
+    }
+
+    function renderUnlinkedChangeSets(changeSets) {
+      unlinkedChangeSetList.innerHTML = '';
+      var actionable = (Array.isArray(changeSets) ? changeSets : []).filter(isChangeSetActionable);
+      unlinkedChangeSetRegion.classList.toggle('hidden', actionable.length === 0);
+      actionable.forEach(function(changeSet) {
+        unlinkedChangeSetList.append(createChangeSetCard(changeSet));
+      });
+    }
+
+    function isChangeSetActionable(changeSet) {
+      return (Array.isArray(changeSet?.files) ? changeSet.files : []).some(function(file) {
+        return file.status === 'pending'
+          || file.status === 'apply_failed'
+          || file.status === 'applied'
+          || file.status === 'revert_failed';
+      });
+    }
+
+    function createChangeSetCard(changeSet) {
+      var historical = changeSet.historical === true;
+      var statusValue = String(changeSet.status || 'pending');
+      var card = document.createElement('section');
+      card.className = 'change-set-card change-set-' + statusValue
+        + (historical ? ' is-historical' : '')
+        + (statusValue === 'discarded' || statusValue === 'reverted' ? ' is-terminal' : '');
+      card.dataset.changeSetId = String(changeSet.id || '');
+
+      var header = document.createElement('div');
+      header.className = 'change-set-header';
+      var heading = document.createElement('div');
+      heading.className = 'change-set-heading';
+      var title = document.createElement('div');
+      title.className = 'change-set-title';
+      title.textContent = String(changeSet.operationSummary || t('changeSets'));
+      title.title = title.textContent;
+      var meta = document.createElement('div');
+      meta.className = 'change-set-meta';
+      meta.textContent = t('changeSetFiles', { count: Number(changeSet.fileCount) || 0 }) + ' · ' + getChangeSetStatusLabel(statusValue);
+      heading.append(title, meta);
+
+      var setActions = document.createElement('div');
+      setActions.className = 'change-set-actions';
+      var files = Array.isArray(changeSet.files) ? changeSet.files : [];
+      if (!historical) {
         var applicableFiles = files.filter(function(file) { return file.status === 'pending' || file.status === 'apply_failed'; });
         var revertibleFiles = files.filter(function(file) { return file.status === 'applied' || file.status === 'revert_failed'; });
         if (applicableFiles.length) {
@@ -2853,19 +2937,19 @@ export function getScript(): string {
         if (revertibleFiles.length) {
           setActions.append(createChangeSetActionButton(t('revertAgentChange'), 'revertChangeSet', changeSet.id, true));
         }
-        header.append(heading, setActions);
-
-        var fileList = document.createElement('div');
-        fileList.className = 'change-set-files';
-        files.forEach(function(edit) {
-          fileList.append(createChangeSetFileRow(edit));
-        });
-        card.append(header, fileList);
-        draftList.append(card);
       }
+      header.append(heading, setActions);
+
+      var fileList = document.createElement('div');
+      fileList.className = 'change-set-files';
+      files.forEach(function(edit) {
+        fileList.append(createChangeSetFileRow(edit, !historical));
+      });
+      card.append(header, fileList);
+      return card;
     }
 
-    function createChangeSetFileRow(edit) {
+    function createChangeSetFileRow(edit, allowActions) {
       var chip = document.createElement('div');
       chip.className = 'draft-chip draft-chip-' + String(edit.status || 'pending');
       var content = document.createElement('div');
@@ -2890,15 +2974,15 @@ export function getScript(): string {
 
       var actions = document.createElement('div');
       actions.className = 'draft-chip-actions';
-      if (edit.status !== 'discarded') {
+      if (allowActions && edit.status !== 'discarded') {
         actions.append(createEditActionButton(t('previewDiff'), 'openDraftDiff', edit.id, true));
       }
-      if (edit.status === 'pending' || edit.status === 'apply_failed') {
+      if (allowActions && (edit.status === 'pending' || edit.status === 'apply_failed')) {
         actions.append(
           createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false),
           createEditActionButton(t('discard'), 'discardDraftEdit', edit.id, true)
         );
-      } else if (edit.status === 'applied' || edit.status === 'revert_failed') {
+      } else if (allowActions && (edit.status === 'applied' || edit.status === 'revert_failed')) {
         actions.append(createEditActionButton(t('revert'), 'revertDraftEdit', edit.id, true));
       }
       chip.append(content, actions);
@@ -2933,6 +3017,7 @@ export function getScript(): string {
         case 'applied': return t('changeSetStatusApplied');
         case 'partially_failed': return t('changeSetStatusPartiallyFailed');
         case 'reverted': return t('changeSetStatusReverted');
+        case 'discarded': return t('changeSetStatusDiscarded');
         default: return t('changeSetStatusPending');
       }
     }
@@ -2948,7 +3033,7 @@ export function getScript(): string {
       }
     }
 
-    function renderTranscript() {
+    function renderTranscript(changeSetProjection) {
       var shouldStick = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 24;
       transcript.innerHTML = '';
 
@@ -3032,6 +3117,13 @@ export function getScript(): string {
 
         if (message.role === 'assistant' && !message.isStreaming && message.runDetails) {
           body.append(createRunDetailsPanel(message));
+        }
+
+        if (message.role === 'assistant' && !message.isStreaming) {
+          var messageChangeSets = changeSetProjection.byMessageId[String(message.id)] || [];
+          messageChangeSets.forEach(function(changeSet) {
+            body.append(createChangeSetCard(changeSet));
+          });
         }
 
         item.append(body);

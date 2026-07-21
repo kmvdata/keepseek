@@ -14,6 +14,7 @@ import type { InteractionTraceEvent } from './interactionTrace';
 
 const MAX_TOOL_CALLS_IN_SUMMARY = 80;
 const MAX_SUMMARY_CHARS = 500;
+const MAX_CHANGE_SET_FILES_IN_SUMMARY = 256;
 const SENSITIVE_KEY_PATTERN = /(?:api.?key|authorization|bearer|token|password|passwd|secret|private.?key|client.?secret)/iu;
 
 export interface RunDetailsBuilderInput {
@@ -166,7 +167,7 @@ export class RunDetailsBuilder {
       toolCallCount: this.toolCallCount,
       toolCalls: this.toolCalls.map((tool) => ({ ...tool })),
       authorizations: this.authorizations.map((authorization) => ({ ...authorization })),
-      changeSets: this.changeSets.map((changeSet) => ({ ...changeSet, labels: [...changeSet.labels] })),
+      changeSets: this.changeSets.map(cloneChangeSetSummary),
       validations: this.validations.map((validation) => ({ ...validation })),
       contextSources: this.contextSources.map((source) => ({ ...source })),
       contextDiscarded: this.contextDiscarded.map((source) => ({ ...source })),
@@ -280,7 +281,14 @@ export class RunDetailsBuilder {
       id: event.changeSetId,
       fileCount: typeof event.fileCount === 'number' ? event.fileCount : files.length,
       status: 'pending',
-      labels: files.map((file) => compactString(file.label)).filter((label): label is string => Boolean(label)).slice(0, 20),
+      operationSummary: compactString(event.operationSummary),
+      labels: files.map((file) => compactString(file.label)).filter((label): label is string => Boolean(label)).slice(0, MAX_CHANGE_SET_FILES_IN_SUMMARY),
+      files: files.slice(0, MAX_CHANGE_SET_FILES_IN_SUMMARY).map((file, index) => ({
+        id: compactString(file.id) ?? `file-${index + 1}`,
+        label: compactString(file.label) ?? `File ${index + 1}`,
+        action: normalizeDraftEditAction(file.action),
+        status: 'pending'
+      })),
       appliedCount: 0,
       failedCount: 0
     });
@@ -343,7 +351,8 @@ export function summarizeToolResult(rawResult: string): string {
 
 export function applyChangeSetEventToRunDetails(
   summary: RunDetailsSummary,
-  event: Record<string, unknown>
+  event: Record<string, unknown>,
+  changeSet?: ChangeSet
 ): RunDetailsSummary {
   const changeSetId = typeof event.changeSetId === 'string'
     ? event.changeSetId
@@ -353,26 +362,103 @@ export function applyChangeSetEventToRunDetails(
   if (!changeSetId) {
     return summary;
   }
-  const changeSets = summary.changeSets.map((item) => ({ ...item, labels: [...item.labels] }));
+  const changeSets = summary.changeSets.map(cloneChangeSetSummary);
   const target = changeSets.find((item) => item.id === changeSetId);
   if (!target) {
     return summary;
+  }
+  if (changeSet?.id === changeSetId) {
+    changeSets[changeSets.indexOf(target)] = toChangeSetSummary(changeSet);
+    return { ...summary, changeSets };
   }
   const result = isRecord(event.result) ? event.result : undefined;
   const applied = Array.isArray(result?.appliedEditIds) ? result.appliedEditIds.length : undefined;
   const reverted = Array.isArray(result?.revertedEditIds) ? result.revertedEditIds.length : undefined;
   const failures = Array.isArray(result?.failed) ? result.failed.length : 0;
   if (event.type === 'change_set_apply_result') {
-    target.appliedCount = applied ?? target.appliedCount;
-    target.failedCount = failures;
-    target.status = failures ? 'partially_failed' : target.appliedCount >= target.fileCount ? 'applied' : 'partially_applied';
+    updateSummaryFileStatuses(target, result, 'applied', 'apply_failed');
+    if (target.files?.length) {
+      updateChangeSetSummaryCounts(target);
+    } else {
+      target.appliedCount = applied ?? target.appliedCount;
+      target.failedCount = failures;
+      target.status = failures ? 'partially_failed' : target.appliedCount >= target.fileCount ? 'applied' : 'partially_applied';
+    }
   } else if (event.type === 'change_set_revert_result') {
-    target.failedCount = failures;
-    target.status = failures ? 'partially_failed' : (reverted ?? 0) >= target.fileCount ? 'reverted' : 'partially_applied';
+    updateSummaryFileStatuses(target, result, 'reverted', 'revert_failed');
+    if (target.files?.length) {
+      updateChangeSetSummaryCounts(target);
+    } else {
+      target.failedCount = failures;
+      target.status = failures ? 'partially_failed' : (reverted ?? 0) >= target.fileCount ? 'reverted' : 'partially_applied';
+    }
   } else if (event.type === 'change_set_discarded') {
-    target.status = 'discarded';
+    target.files?.forEach((file) => {
+      if (file.status === 'pending' || file.status === 'apply_failed') file.status = 'discarded';
+    });
+    if (target.files?.length) {
+      updateChangeSetSummaryCounts(target);
+    } else {
+      target.status = 'discarded';
+    }
+  } else if (event.type === 'change_set_file_discarded' && typeof event.editId === 'string') {
+    const file = target.files?.find((item) => item.id === event.editId);
+    if (file) {
+      file.status = 'discarded';
+      file.error = undefined;
+      updateChangeSetSummaryCounts(target);
+    }
   }
   return { ...summary, changeSets };
+}
+
+function updateSummaryFileStatuses(
+  target: RunDetailsChangeSetSummary,
+  result: Record<string, unknown> | undefined,
+  succeededStatus: 'applied' | 'reverted',
+  failedStatus: 'apply_failed' | 'revert_failed'
+): void {
+  if (!target.files || !result) return;
+  const succeededKey = succeededStatus === 'applied' ? 'appliedEditIds' : 'revertedEditIds';
+  const succeededIds = new Set(Array.isArray(result[succeededKey])
+    ? result[succeededKey].filter((id): id is string => typeof id === 'string')
+    : []);
+  const failures = new Map<string, string>();
+  if (Array.isArray(result.failed)) {
+    for (const failure of result.failed) {
+      if (!isRecord(failure) || typeof failure.editId !== 'string') continue;
+      failures.set(failure.editId, compactString(failure.error) ?? 'Operation failed.');
+    }
+  }
+  for (const file of target.files) {
+    if (succeededIds.has(file.id)) {
+      file.status = succeededStatus;
+      file.error = undefined;
+    } else if (failures.has(file.id)) {
+      file.status = failedStatus;
+      file.error = failures.get(file.id)?.slice(0, 500);
+    }
+  }
+}
+
+function updateChangeSetSummaryCounts(target: RunDetailsChangeSetSummary): void {
+  if (!target.files) return;
+  const statuses = target.files.map((file) => file.status);
+  target.appliedCount = statuses.filter((status) => status === 'applied').length;
+  target.failedCount = statuses.filter((status) => status === 'apply_failed' || status === 'revert_failed').length;
+  if (statuses.every((status) => status === 'discarded')) {
+    target.status = 'discarded';
+  } else if (statuses.every((status) => status === 'reverted' || status === 'discarded')) {
+    target.status = 'reverted';
+  } else if (statuses.every((status) => status === 'applied' || status === 'discarded')) {
+    target.status = 'applied';
+  } else if (target.failedCount > 0) {
+    target.status = 'partially_failed';
+  } else if (statuses.some((status) => status === 'applied' || status === 'reverted')) {
+    target.status = 'partially_applied';
+  } else {
+    target.status = 'pending';
+  }
 }
 
 function toChangeSetSummary(changeSet: ChangeSet): RunDetailsChangeSetSummary {
@@ -380,10 +466,30 @@ function toChangeSetSummary(changeSet: ChangeSet): RunDetailsChangeSetSummary {
     id: changeSet.id,
     fileCount: changeSet.fileCount,
     status: changeSet.status,
-    labels: changeSet.files.map((file) => file.label).slice(0, 20),
+    operationSummary: changeSet.operationSummary.slice(0, 320),
+    labels: changeSet.files.map((file) => file.label).slice(0, MAX_CHANGE_SET_FILES_IN_SUMMARY),
+    files: changeSet.files.slice(0, MAX_CHANGE_SET_FILES_IN_SUMMARY).map((file) => ({
+      id: file.id,
+      label: file.label.slice(0, 240),
+      action: file.action,
+      status: file.status,
+      error: file.error?.slice(0, 500)
+    })),
     appliedCount: changeSet.files.filter((file) => file.status === 'applied').length,
     failedCount: changeSet.files.filter((file) => file.status === 'apply_failed' || file.status === 'revert_failed').length
   };
+}
+
+function cloneChangeSetSummary(changeSet: RunDetailsChangeSetSummary): RunDetailsChangeSetSummary {
+  return {
+    ...changeSet,
+    labels: [...changeSet.labels],
+    files: changeSet.files?.map((file) => ({ ...file }))
+  };
+}
+
+function normalizeDraftEditAction(value: unknown): ChangeSet['files'][number]['action'] {
+  return value === 'create' || value === 'delete' || value === 'move' ? value : 'modify';
 }
 
 function resolveStatus(input: {

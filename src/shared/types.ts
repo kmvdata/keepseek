@@ -458,9 +458,19 @@ export interface RunDetailsChangeSetSummary {
   id: string;
   fileCount: number;
   status: ChangeSetStatus;
+  operationSummary?: string;
   labels: string[];
+  files?: RunDetailsChangeSetFileSummary[];
   appliedCount: number;
   failedCount: number;
+}
+
+export interface RunDetailsChangeSetFileSummary {
+  id: string;
+  label: string;
+  action: DraftEditAction;
+  status: ChangeSetFileStatus;
+  error?: string;
 }
 
 export interface RunDetailsValidationSummary {

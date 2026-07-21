@@ -12,23 +12,41 @@ main();
 
 function main() {
   const beforePackage = readPackageJson();
-  const extensionId = getExtensionId(beforePackage);
+  const expectedExtensionId = getExtensionId(beforePackage);
 
-  step(`Packaging ${extensionId}...`);
+  step(`Packaging ${expectedExtensionId}...`);
   run(npmCommand, ['run', 'package']);
 
   const packageJson = readPackageJson();
+  const extensionId = getExtensionId(packageJson);
   const version = readRequiredString(packageJson.version, 'version');
+  if (extensionId !== expectedExtensionId) {
+    fail(`Extension ID changed while packaging: ${expectedExtensionId} -> ${extensionId}.`);
+  }
+
   const vsixPath = path.join(root, `${packageJson.name}-${version}.vsix`);
   if (!fs.existsSync(vsixPath)) {
     fail(`Expected VSIX was not created: ${path.relative(root, vsixPath)}`);
   }
 
-  step(`Uninstalling ${extensionId} from VS Code...`);
-  runOptional(codeCommand, ['--uninstall-extension', extensionId]);
+  const installedVersion = getInstalledExtensionVersion(extensionId);
+  if (installedVersion) {
+    step(`Uninstalling ${extensionId}@${installedVersion} from VS Code...`);
+    run(codeCommand, ['--uninstall-extension', extensionId]);
+    if (getInstalledExtensionVersion(extensionId)) {
+      fail(`VS Code still reports ${extensionId} as installed after uninstalling it.`);
+    }
+  } else {
+    step(`${extensionId} is not currently installed; skipping uninstall.`);
+  }
 
   step(`Installing ${path.basename(vsixPath)}...`);
   run(codeCommand, ['--install-extension', vsixPath, '--force']);
+
+  const actualVersion = getInstalledExtensionVersion(extensionId);
+  if (actualVersion !== version) {
+    fail(`Installation verification failed: expected ${extensionId}@${version}, found ${actualVersion || 'not installed'}.`);
+  }
 
   step(`Done. Installed ${extensionId}@${version}. Reload VS Code if the old extension host is still active.`);
 }
@@ -64,24 +82,37 @@ function run(command, args) {
   }
 }
 
-function runOptional(command, args) {
+function getInstalledExtensionVersion(extensionId) {
+  const result = runCapture(codeCommand, ['--list-extensions', '--show-versions']);
+  const prefix = `${extensionId.toLowerCase()}@`;
+  const installed = result.stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find((line) => line.toLowerCase().startsWith(prefix));
+
+  return installed ? installed.slice(installed.lastIndexOf('@') + 1) : undefined;
+}
+
+function runCapture(command, args) {
   const result = spawnSync(command, args, {
     cwd: root,
     encoding: 'utf8'
   });
 
-  if (result.stdout) {
-    process.stdout.write(result.stdout);
-  }
-  if (result.stderr) {
-    process.stderr.write(result.stderr);
-  }
   if (result.error) {
     fail(`Failed to run ${formatCommand(command, args)}: ${result.error.message}`);
   }
   if (result.status !== 0) {
-    console.warn(`Warning: ${formatCommand(command, args)} exited with ${result.status}. Continuing with install.`);
+    if (result.stdout) {
+      process.stdout.write(result.stdout);
+    }
+    if (result.stderr) {
+      process.stderr.write(result.stderr);
+    }
+    fail(`${formatCommand(command, args)} exited with ${result.status}.`);
   }
+
+  return result;
 }
 
 function step(message) {
