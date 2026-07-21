@@ -21,35 +21,11 @@
     "Chat",
     "Other"
   ],
-  "keywords": [
-    "ai",
-    "deepseek",
-    "coding agent",
-    "chat"
+  "activationEvents": [
+    "onView:keepseek.chat"
   ],
   "main": "./out/extension.js",
-  "activationEvents": [
-    "onStartupFinished"
-  ],
   "contributes": {
-    "commands": [
-      {
-        "command": "keepseek.focus",
-        "title": "Open KeepSeek"
-      },
-      {
-        "command": "keepseek.addSelectionToContext",
-        "title": "KeepSeek: Add Selection to Context"
-      },
-      {
-        "command": "keepseek.addExplorerFileToContext",
-        "title": "KeepSeek: Add File to Context"
-      },
-      {
-        "command": "keepseek.addExplorerDirectoryToContext",
-        "title": "KeepSeek: Add Explorer Folder to Chat"
-      }
-    ],
     "configuration": {
       "title": "KeepSeek",
       "properties": {
@@ -61,12 +37,12 @@
         "keepseek.apiBaseUrl": {
           "type": "string",
           "default": "https://api.deepseek.com",
-          "description": "DeepSeek API base URL"
+          "description": "API base URL"
         },
         "keepseek.model": {
           "type": "string",
           "default": "deepseek-chat",
-          "description": "Model name for chat completions"
+          "description": "Model name"
         },
         "keepseek.language": {
           "type": "string",
@@ -76,154 +52,117 @@
             "zh-CN",
             "en-US"
           ],
-          "description": "Language for KeepSeek UI and replies"
-        },
-        "keepseek.maxTokens": {
-          "type": "number",
-          "default": 8192,
-          "minimum": 256,
-          "maximum": 65536,
-          "description": "Maximum tokens per response"
+          "description": "UI/Agent language"
         },
         "keepseek.maxFileBytes": {
           "type": "number",
-          "default": 65536,
-          "minimum": 1024,
-          "maximum": 524288,
-          "description": "Maximum file size in bytes for context files"
+          "default": 51200
         },
         "keepseek.maxContextFiles": {
           "type": "number",
-          "default": 10,
-          "minimum": 1,
-          "maximum": 50,
-          "description": "Maximum number of context files"
+          "default": 10
         },
-        "keepseek.contextCompressionEnabled": {
+        "keepseek.authorizationPolicy": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "always",
+            "never"
+          ],
+          "description": "Tool execution authorization policy"
+        },
+        "keepseek.contextCompression": {
           "type": "boolean",
           "default": true,
-          "description": "Enable context compression for long conversations"
+          "description": "Enable context compression for long sessions"
         },
-        "keepseek.contextKeepRecentTurns": {
+        "keepseek.maxTurns": {
           "type": "number",
-          "default": 12,
-          "minimum": 1,
-          "maximum": 50,
-          "description": "Number of recent user turns to keep in projection"
+          "default": 75,
+          "description": "Max turns before compression"
         },
-        "keepseek.contextCompressionTriggerRatio": {
-          "type": "number",
-          "default": 0.8,
-          "minimum": 0.5,
-          "maximum": 1.0,
-          "description": "Context usage ratio to trigger summary refresh"
-        },
-        "keepseek.contextSummaryBudgetTokens": {
-          "type": "number",
-          "default": 512,
-          "minimum": 128,
-          "maximum": 4096,
-          "description": "Token budget for summary generation"
-        },
-        "keepseek.historyRetentionDays": {
-          "type": "number",
-          "default": 30,
-          "minimum": 1,
-          "maximum": 365,
-          "description": "Days to keep session history in the picker"
-        },
-        "keepseek.maxToolIterations": {
-          "type": "number",
-          "default": 8,
-          "minimum": 0,
-          "maximum": 64,
-          "description": "Maximum tool call iterations per run"
-        },
-        "keepseek.maxToolCalls": {
-          "type": "number",
-          "default": 24,
-          "minimum": 0,
-          "maximum": 256,
-          "description": "Maximum total tool calls per run"
-        },
-        "keepseek.maxRunMs": {
-          "type": "number",
-          "default": 600000,
-          "minimum": 0,
-          "maximum": 3600000,
-          "description": "Maximum run duration in milliseconds"
-        },
-        "keepseek.toolResultTokenBudget": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "maximum": 1000000,
-          "description": "Tool result token budget (0 = auto)"
-        },
-        "keepseek.thinkingMode": {
+        "keepseek.thinking": {
           "type": "boolean",
           "default": false,
-          "description": "Enable thinking/reasoning mode"
+          "description": "Show model reasoning content in chat UI"
         },
-        "keepseek.reasoningEffort": {
-          "type": "string",
-          "default": "medium",
-          "enum": [
-            "low",
-            "medium",
-            "high"
-          ],
-          "description": "Reasoning effort level for thinking mode"
-        },
-        "keepseek.validation.maxRepairIterations": {
-          "type": "number",
-          "default": 3,
-          "minimum": 0,
-          "maximum": 10,
-          "description": "Maximum repair iterations per validation failure"
+        "keepseek.enableCache": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable API caching for reduced latency and cost"
         }
       }
-    },
-    "menus": {
-      "editor/context": [
-        {
-          "when": "editorHasSelection",
-          "command": "keepseek.addSelectionToContext",
-          "group": "KeepSeek@1"
-        }
-      ],
-      "explorer/context": [
-        {
-          "when": "!explorerResourceIsFolder",
-          "command": "keepseek.addExplorerFileToContext",
-          "group": "KeepSeek@1"
-        },
-        {
-          "when": "explorerResourceIsFolder",
-          "command": "keepseek.addExplorerDirectoryToContext",
-          "group": "KeepSeek@1"
-        }
-      ]
     },
     "keybindings": [
       {
-        "command": "keepseek.focus",
+        "command": "keepseek.openChat",
         "key": "ctrl+shift+k",
         "mac": "cmd+shift+k"
+      },
+      {
+        "command": "keepseek.addSelectionToContext",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l"
+      },
+      {
+        "command": "keepseek.addExplorerFileToContext",
+        "key": "ctrl+shift+i",
+        "mac": "cmd+shift+i"
       }
-    ]
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "keepseek.addExplorerFileToContext",
+          "when": "!explorerResourceIsFolder",
+          "group": "2_keepseek"
+        },
+        {
+          "command": "keepseek.addExplorerDirectoryToContext",
+          "when": "explorerResourceIsFolder",
+          "group": "2_keepseek"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "keepseek.addSelectionToContext",
+          "when": "editorHasSelection",
+          "group": "1_modification"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "keepseek",
+          "title": "KeepSeek",
+          "icon": "resources/keepseek.svg"
+        }
+      ]
+    },
+    "views": {
+      "keepseek": [
+        {
+          "type": "webview",
+          "id": "keepseek.chat",
+          "name": "Chat"
+        }
+      ]
+    }
   },
   "scripts": {
-    "compile": "tsc -p tsconfig.json",
-    "lint": "eslint src/",
-    "build:test": "tsc -p tsconfig.test.json --outDir out-test",
-    "test": "node out-test/test/runTests.js",
     "vscode:prepublish": "npm run compile",
-    "package": "node scripts/verify-vsix.js",
+    "compile": "tsc -p tsconfig.json",
+    "watch": "tsc -watch -p tsconfig.json",
+    "lint": "eslint src/",
+    "build:test": "tsc -p tsconfig.test.json",
+    "test": "node out-test/test/runTests.js",
+    "package": "vsce package --no-dependencies --out keepseek-${npm_package_version}.vsix && node scripts/verify-vsix.js keepseek-${npm_package_version}.vsix",
     "reinstall:vsix": "node scripts/reinstall-vsix.js"
   },
   "dependencies": {
-    "ignore": "^5.3.1"
+    "ignore": "^7.0.0"
   },
   "devDependencies": {
     "@types/vscode": "^1.98.0",
