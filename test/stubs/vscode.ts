@@ -9,6 +9,13 @@ export const FileType = {
   SymbolicLink: 64
 } as const;
 
+export const SymbolKind: Record<string | number, string | number> = {
+  Function: 11,
+  Class: 4,
+  11: 'Function',
+  4: 'Class'
+};
+
 export class Position {
   public constructor(
     public readonly line: number,
@@ -21,6 +28,29 @@ export class Range {
     public readonly start: Position,
     public readonly end: Position
   ) {}
+}
+
+const commandHandlers = new Map<string, (...args: unknown[]) => unknown>();
+
+export const commands = {
+  async executeCommand<T>(command: string, ...args: unknown[]): Promise<T | undefined> {
+    return await commandHandlers.get(command)?.(...args) as T | undefined;
+  }
+};
+
+export const extensions = {
+  getExtension<T>(_id: string): T | undefined {
+    void _id;
+    return undefined;
+  }
+};
+
+export function setCommandHandler(command: string, handler: (...args: unknown[]) => unknown): void {
+  commandHandlers.set(command, handler);
+}
+
+export function clearCommandHandlers(): void {
+  commandHandlers.clear();
 }
 
 export class Uri {
@@ -151,8 +181,9 @@ class TextDocument {
     return normalizedContent.slice(start, end);
   }
 
-  public lineAt(index: number): { range: { end: { character: number } } } {
+  public lineAt(index: number): { text: string; range: { end: { character: number } } } {
     return {
+      text: this.lines[index] ?? '',
       range: {
         end: {
           character: this.lines[index]?.length ?? 0

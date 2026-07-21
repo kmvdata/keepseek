@@ -14,12 +14,25 @@ export const READ_WORKSPACE_FILE_TOOL_NAME = 'keepseek_read_workspace_file';
 export const READ_WORKSPACE_FILE_RANGE_TOOL_NAME = 'keepseek_read_workspace_file_range';
 export const READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME = 'keepseek_read_workspace_diagnostics';
 export const RUN_VALIDATION_TOOL_NAME = 'keepseek_run_validation';
+export const FIND_SYMBOL_TOOL_NAME = 'keepseek_find_symbol';
+export const FIND_REFERENCES_TOOL_NAME = 'keepseek_find_references';
+export const GET_DOCUMENT_SYMBOLS_TOOL_NAME = 'keepseek_get_document_symbols';
+export const GET_WORKSPACE_SYMBOLS_TOOL_NAME = 'keepseek_get_workspace_symbols';
+export const GIT_STATUS_TOOL_NAME = 'keepseek_git_status';
+export const GIT_DIFF_TOOL_NAME = 'keepseek_git_diff';
+export const GIT_CURRENT_BRANCH_TOOL_NAME = 'keepseek_git_current_branch';
+export const GIT_CREATE_PATCH_TOOL_NAME = 'keepseek_git_create_patch';
+export const GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME = 'keepseek_git_suggest_commit_message';
 
 const MAX_ACTIVE_SKILL_CONTENT_CHARS = 24000;
 const MAX_ACTIVE_SKILLS_TOTAL_CHARS = 72000;
 const UNPROJECTED_HISTORY_MESSAGE_LIMIT = 24;
 const CORE_AGENT_TOOL_NAMES = [
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  FIND_REFERENCES_TOOL_NAME,
+  FIND_SYMBOL_TOOL_NAME,
+  GET_DOCUMENT_SYMBOLS_TOOL_NAME,
+  GET_WORKSPACE_SYMBOLS_TOOL_NAME,
   LIST_WORKSPACE_FILES_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
@@ -28,6 +41,15 @@ const CORE_AGENT_TOOL_NAMES = [
 ];
 const ALL_AGENT_TOOL_NAMES = [
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  FIND_REFERENCES_TOOL_NAME,
+  FIND_SYMBOL_TOOL_NAME,
+  GET_DOCUMENT_SYMBOLS_TOOL_NAME,
+  GET_WORKSPACE_SYMBOLS_TOOL_NAME,
+  GIT_CREATE_PATCH_TOOL_NAME,
+  GIT_CURRENT_BRANCH_TOOL_NAME,
+  GIT_DIFF_TOOL_NAME,
+  GIT_STATUS_TOOL_NAME,
+  GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME,
   LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
   LIST_WORKSPACE_FILES_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
@@ -136,11 +158,14 @@ export function getAgentSystemPrompt(input: {
         'You are KeepSeek, a coding agent running in the VS Code sidebar.',
         'Communicate with the user in English unless the user explicitly asks for another language.',
         'You can analyze code, explain approaches, inspect the open workspace with read-only tools, suggest changes, and call tools to create pending edits when files need to change.',
+        'Use the semantic symbol/reference tools before text search when locating declarations, document structure, or references. They call VS Code language providers and explicitly report when they fall back to workspace text search.',
         'Use keepseek_search_workspace, keepseek_list_workspace_files, keepseek_list_workspace_directory, keepseek_read_workspace_file_range, and keepseek_read_workspace_file when you need the current project structure or file contents. Do not ask the user to run search/listing commands or paste file contents when these tools can provide the information.',
         'Use keepseek_read_workspace_diagnostics to inspect VS Code Problems. After preparing code changes, use keepseek_run_validation with only the fixed compile, lint, or test script when relevant. Validation is controlled by the user authorization policy and never accepts arbitrary commands.',
         'Keep workspace exploration low-cost: search or list first to locate relevant files, then use keepseek_read_workspace_file_range for the relevant line ranges. Use keepseek_read_workspace_file only for small files or when complete file context is truly needed.',
         'When the user references a directory, treat it as a target or reference scope. Prefer that directory for related new files, and list/read files under it when you need examples.',
         'The read-only workspace tools only access files inside the open workspace, and they may skip large, binary, image, media, archive, or otherwise unreadable files.',
+        'If validation fails, read Problems, prepare a repair through DraftEdit, and stop for user review. Never rerun validation while a repair DraftEdit is still pending because validation would only see the old files.',
+        'Git status, branch, diff, patch generation, and commit-message suggestions are read-only helpers. Never push, modify remotes, or claim a commit was created.',
         'Important safety rule: tools only create DraftEdit pending changes and never write to disk directly. Do not claim files were written unless the user later applies the change.',
         'When the user asks to modify or create files, prefer calling keepseek_create_draft_edit with path, content, and reason. Pass complete new file content unless replaceRange is set; with replaceRange, content is the exact replacement text for that 1-based inclusive line range.',
         'If information is missing, state the gap. If you can reasonably proceed, provide an actionable result.'
@@ -149,11 +174,14 @@ export function getAgentSystemPrompt(input: {
         '你是 KeepSeek，一个运行在 VS Code 侧边栏里的代码 Agent。',
         '你需要用中文和用户沟通，除非用户明确要求其它语言。',
         '你可以根据用户的问题分析代码、解释方案、使用只读工具查看当前打开的工作区、给出修改建议，并在需要改文件时调用工具创建待确认修改。',
+        '定位声明、文档结构或引用时，优先使用语义 symbol/reference 工具，再考虑文本搜索。这些工具会调用 VS Code language provider，并在退化为工作区文本搜索时明确标记。',
         '当你需要了解当前工程结构或文件内容时，使用 keepseek_search_workspace、keepseek_list_workspace_files、keepseek_list_workspace_directory、keepseek_read_workspace_file_range 和 keepseek_read_workspace_file。只要这些工具能提供信息，就不要要求用户自行运行搜索、目录扫描命令或粘贴文件内容。',
         '使用 keepseek_read_workspace_diagnostics 查看 VS Code Problems。准备代码修改后，在适用时使用 keepseek_run_validation，并且只能选择固定的 compile、lint 或 test 脚本。验证受用户授权策略控制，不接受任意命令。',
         '工作区探索要保持低成本：先 search 或 list 定位相关文件，再用 keepseek_read_workspace_file_range 读取相关行段。只有小文件或确实需要完整上下文时，才使用 keepseek_read_workspace_file。',
         '当用户引用目录时，把它视为目标位置或参考范围。创建相关新文件时优先放在该目录下；需要参考示例时，先列出并读取该目录下的文件。',
         '只读工作区工具只会访问当前打开工作区内的文件，并可能跳过过大、二进制、图片、媒体、归档或其它不可读文件。',
+        '验证失败后，读取 Problems、通过 DraftEdit 准备修复，然后停下来等待用户审核。修复 DraftEdit 尚未应用时不要再次验证，因为验证只能看到旧文件。',
+        'Git status、branch、diff、patch 生成和 commit message 建议都只是只读辅助；绝不 push、修改远端或声称已经创建 commit。',
         '重要安全规则：工具只会创建 DraftEdit 待确认修改，不会直接写入磁盘；不要声称已经写入文件，除非用户之后手动确认。',
         '当用户要求修改或创建文件时，优先调用 keepseek_create_draft_edit，并传入 path、content 和 reason。除非设置 replaceRange，否则 content 必须是完整的新文件内容；设置 replaceRange 时，content 是该 1-based 闭区间行范围的替换文本。',
         '如果信息不足，先说明缺口；如果可以合理推进，就直接给出可执行结果。'
@@ -301,6 +329,13 @@ export function getAgentToolNamesForPrompt(prompt: string, slimModeEnabled: bool
   if (shouldExposeWholeFileTool(prompt)) {
     names.add(READ_WORKSPACE_FILE_TOOL_NAME);
   }
+  if (shouldExposeGitTools(prompt)) {
+    names.add(GIT_STATUS_TOOL_NAME);
+    names.add(GIT_DIFF_TOOL_NAME);
+    names.add(GIT_CURRENT_BRANCH_TOOL_NAME);
+    names.add(GIT_CREATE_PATCH_TOOL_NAME);
+    names.add(GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME);
+  }
   return Array.from(names).sort();
 }
 
@@ -314,6 +349,142 @@ export function getAgentTools(options: { toolNames?: readonly string[] } = {}): 
 
 function getRawAgentTools(): DeepSeekFunctionTool[] {
   return [
+    {
+      type: 'function',
+      function: {
+        name: FIND_SYMBOL_TOOL_NAME,
+        description: 'Find declarations by symbol name using VS Code document/workspace symbol providers. Falls back to safe workspace text search only when no language provider is available.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Symbol name or partial symbol name.' },
+            path: { type: 'string', description: 'Optional workspace file path. When present, use the document symbol provider for this file.' },
+            maxResults: { type: 'number', description: 'Maximum results, capped by KeepSeek.' }
+          },
+          required: ['query'],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: FIND_REFERENCES_TOOL_NAME,
+        description: 'Find semantic references at a source position using the VS Code reference provider. When declarations are excluded, the definition provider is used to filter them. Falls back to safe text search only when the provider is unavailable.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Workspace file containing the symbol.' },
+            line: { type: 'number', description: '1-based line containing the symbol.' },
+            column: { type: 'number', description: '1-based column inside the symbol.' },
+            includeDeclaration: { type: 'boolean', description: 'Whether to include the declaration. Defaults to false.' },
+            maxResults: { type: 'number', description: 'Maximum results, capped by KeepSeek.' }
+          },
+          required: ['path', 'line', 'column'],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: GET_DOCUMENT_SYMBOLS_TOOL_NAME,
+        description: 'Return the semantic symbol tree for one workspace document using the VS Code document symbol provider.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Workspace file path.' },
+            maxResults: { type: 'number', description: 'Maximum flattened symbols, capped by KeepSeek.' }
+          },
+          required: ['path'],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: GET_WORKSPACE_SYMBOLS_TOOL_NAME,
+        description: 'Search semantic workspace symbols through the VS Code workspace symbol provider.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Workspace symbol query.' },
+            maxResults: { type: 'number', description: 'Maximum results, capped by KeepSeek.' }
+          },
+          required: ['query'],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: GIT_STATUS_TOOL_NAME,
+        description: 'Read repository status using the VS Code Git extension when available, with a controlled read-only git fallback.',
+        strict: true,
+        parameters: { type: 'object', properties: { workspaceFolder: { type: 'string', description: 'Optional workspace folder name.' } }, required: [], additionalProperties: false }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: GIT_CURRENT_BRANCH_TOOL_NAME,
+        description: 'Read the current Git branch and upstream metadata without changing the repository.',
+        strict: true,
+        parameters: { type: 'object', properties: { workspaceFolder: { type: 'string', description: 'Optional workspace folder name.' } }, required: [], additionalProperties: false }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: GIT_DIFF_TOOL_NAME,
+        description: 'Read a capped Git diff. Oversized diffs return a summary and truncation metadata.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            workspaceFolder: { type: 'string', description: 'Optional workspace folder name.' },
+            staged: { type: 'boolean', description: 'Read the staged diff instead of unstaged changes.' },
+            path: { type: 'string', description: 'Optional workspace-relative path to limit the diff.' },
+            maxChars: { type: 'number', description: 'Optional output character cap, bounded by KeepSeek.' }
+          },
+          required: [],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: GIT_CREATE_PATCH_TOOL_NAME,
+        description: 'Generate capped patch content from the current Git diff. This tool returns content only and never writes or applies a patch.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            workspaceFolder: { type: 'string', description: 'Optional workspace folder name.' },
+            staged: { type: 'boolean', description: 'Generate from staged changes.' },
+            path: { type: 'string', description: 'Optional workspace-relative path.' }
+          },
+          required: [],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME,
+        description: 'Inspect the current Git change summary and return suggested commit messages without creating a commit.',
+        strict: true,
+        parameters: { type: 'object', properties: { workspaceFolder: { type: 'string', description: 'Optional workspace folder name.' } }, required: [], additionalProperties: false }
+      }
+    },
     {
       type: 'function',
       function: {
@@ -536,6 +707,10 @@ function shouldExposeDirectoryTool(prompt: string): boolean {
 
 function shouldExposeWholeFileTool(prompt: string): boolean {
   return /(?:\b(full|whole|entire)\s+file\b)|(?:完整文件|全文|整个文件)/iu.test(prompt);
+}
+
+function shouldExposeGitTools(prompt: string): boolean {
+  return /(?:\bgit\b|\bcommit\b|\bbranch\b|\bpatch\b|\bdiff\b|版本控制|提交信息|分支|补丁|差异)/iu.test(prompt);
 }
 
 function canonicalizeDeepSeekTool(tool: DeepSeekFunctionTool): DeepSeekFunctionTool {

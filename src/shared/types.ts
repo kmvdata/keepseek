@@ -180,6 +180,7 @@ export interface ChatSession {
   balance?: DeepSeekBalanceState;
   promptCacheDiagnostics?: PromptCacheDiagnostics;
   lastTraceLogUri?: string;
+  repairLoop?: RepairLoopState;
   createdAt: string;
   updatedAt: string;
   workspaceKey: string;
@@ -324,6 +325,38 @@ export interface ChangeSet {
 
 export type ValidationAuthorizationPolicy = 'never' | 'ask' | 'always';
 
+export type ToolRiskLevel = 'low' | 'medium' | 'high';
+
+export type AuthorizedToolScope =
+  | 'workspace_read'
+  | 'diagnostics_read'
+  | 'semantic_read'
+  | 'validation_compile_lint'
+  | 'validation_test'
+  | 'draft_edit_prepare'
+  | 'workspace_write'
+  | 'git_read'
+  | 'git_patch_create'
+  | 'git_commit'
+  | 'git_push';
+
+export interface RunAuthorizationPolicy {
+  runId: string;
+  mediumRiskPolicy: ValidationAuthorizationPolicy;
+  authorizedScopes: AuthorizedToolScope[];
+  deniedScopes: AuthorizedToolScope[];
+}
+
+export interface ToolAuthorizationDecision {
+  allowed: boolean;
+  toolName: string;
+  riskLevel: ToolRiskLevel;
+  scope: AuthorizedToolScope;
+  source: 'low_risk' | 'run_policy' | 'configuration' | 'explicit_confirmation' | 'user_denied';
+  requiresExplicitConfirmation: boolean;
+  reason?: string;
+}
+
 export type SafeNpmScript = 'compile' | 'lint' | 'test';
 
 export interface WorkspaceDiagnosticItem {
@@ -360,8 +393,30 @@ export interface ValidationToolResult {
   exitCode?: number;
   durationMs: number;
   timedOut: boolean;
+  authorization?: ToolAuthorizationDecision;
   diagnostics?: WorkspaceDiagnosticSummary;
   error?: string;
+}
+
+export type RepairLoopStatus =
+  | 'idle'
+  | 'validation_failed'
+  | 'reading_problems'
+  | 'generating_repair'
+  | 'waiting_for_apply'
+  | 'ready_for_validation'
+  | 'running_validation'
+  | 'completed'
+  | 'blocked';
+
+export interface RepairLoopState {
+  status: RepairLoopStatus;
+  iteration: number;
+  maxIterations: number;
+  lastValidationScript?: SafeNpmScript;
+  lastFailureSummary?: string;
+  pendingDraftEditIds: string[];
+  stopReason?: 'waiting_for_apply' | 'repair_iteration_limit' | 'validation_passed' | 'authorization_denied' | 'repair_discarded';
 }
 
 export interface ReferenceResource {
@@ -385,6 +440,7 @@ export interface AgentRequest {
   language: KeepseekLanguage;
   sessionId?: string;
   assistantMessageId?: string;
+  repairLoop?: RepairLoopState;
   signal?: AbortSignal;
 }
 
@@ -404,6 +460,7 @@ export interface AgentResponse {
   reasoningContent?: string;
   draftEdits: DraftEdit[];
   taskPlan: TaskPlan;
+  repairLoop: RepairLoopState;
   changeSet?: ChangeSet;
   usage?: TurnUsageStats;
   promptCacheDiagnostics?: PromptCacheDiagnostics;
@@ -427,6 +484,11 @@ export type AgentActivityPhase =
   | 'listing_directory'
   | 'creating_draft_edit'
   | 'reading_diagnostics'
+  | 'reading_semantic_context'
+  | 'reading_git_state'
+  | 'awaiting_authorization'
+  | 'generating_repair'
+  | 'waiting_for_apply'
   | 'running_validation'
   | 'reviewing_tool_result'
   | 'generating'

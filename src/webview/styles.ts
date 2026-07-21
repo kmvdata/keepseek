@@ -830,6 +830,27 @@ export function getStyles(): string {
       font-weight: 600;
     }
 
+    .plan-continue-repair {
+      justify-self: start;
+      padding: 4px 9px;
+      border: 1px solid var(--vscode-button-border, transparent);
+      border-radius: 4px;
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+      font: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .plan-continue-repair:hover:not(:disabled) {
+      background: var(--vscode-button-hoverBackground);
+    }
+
+    .plan-continue-repair:disabled {
+      cursor: default;
+      opacity: 0.6;
+    }
+
     .draft-bar {
       margin: 8px var(--keepseek-edge-padding) 0;
       padding: 10px;

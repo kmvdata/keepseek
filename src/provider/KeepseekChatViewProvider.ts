@@ -22,11 +22,13 @@ import {
   KeepseekExtensionInfo,
   KeepseekModel,
   PromptCacheDiagnostics,
+  RepairLoopState,
   TaskPlan,
   TurnUsageStats,
   UsageEvent,
   WorkspaceSummary
 } from '../shared/types';
+import { markTaskPlanReadyForValidation } from '../agent/taskPlan';
 import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage } from '../shared/i18n';
 import { ChatSessionStore, createSessionTitle, getCurrentWorkspaceSessionScope, getVisibleMessages } from '../sessions/chatSessionStore';
 import {
@@ -101,6 +103,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly skillCreator = new SkillCreator();
   private readonly sessionTraceLogUris = new Map<string, string>();
   private readonly taskPlansBySession = new Map<string, TaskPlan>();
+  private readonly repairLoopsBySession = new Map<string, RepairLoopState>();
   private readonly authorizedExternalReferenceUris = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
   private selectedModelId = getConfiguredSelectedModelId();
@@ -545,6 +548,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'abortPrompt':
         this.abortPrompt();
         return;
+      case 'continueRepair':
+        await this.continueRepair();
+        return;
       case 'newSession':
         await this.createNewSession();
         return;
@@ -721,6 +727,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           const result = await this.changeSets.applyEdit(message.id);
           if (result?.appliedEditIds.length) {
             await this.refreshSkills({ post: false });
+            await this.handleAppliedRepairEdits(result.appliedEditIds);
           }
           this.showChangeSetFailures(result?.failed);
           this.postState();
@@ -731,6 +738,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
         this.changeSets.discardEdit(message.id);
+        await this.markActiveRepairDiscarded(message.id);
         this.postState();
         return;
       case 'openDraftDiff':
@@ -748,6 +756,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           const result = await this.changeSets.applyAll(message.id);
           if (result?.appliedEditIds.length) {
             await this.refreshSkills({ post: false });
+            await this.handleAppliedRepairEdits(result.appliedEditIds);
           }
           this.showChangeSetFailures(result?.failed);
           this.postState();
@@ -758,6 +767,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
         this.changeSets.discardAll(message.id);
+        await this.markActiveRepairDiscarded();
         this.postState();
         return;
       case 'revertDraftEdit':
@@ -794,6 +804,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const result = changeSetId ? await this.changeSets.applyAll(changeSetId) : undefined;
         if (result?.appliedEditIds.length) {
           await this.refreshSkills({ post: false });
+          await this.handleAppliedRepairEdits(result.appliedEditIds);
         }
         this.showChangeSetFailures(result?.failed);
         this.postState();
@@ -807,6 +818,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           const changeSetId = this.changeSets.getLatestChangeSetId(this.sessionStore.activeSessionId);
           if (changeSetId) {
             this.changeSets.discardAll(changeSetId);
+            await this.markActiveRepairDiscarded();
           }
         }
         this.postState();
@@ -1600,11 +1612,127 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private async handleAppliedRepairEdits(appliedEditIds: readonly string[]): Promise<void> {
+    const sessionId = this.sessionStore.activeSessionId;
+    const activeSession = this.sessionStore.getActiveSession();
+    const repairLoop = this.repairLoopsBySession.get(sessionId) ?? activeSession.repairLoop;
+    if (!repairLoop || repairLoop.status !== 'waiting_for_apply') {
+      return;
+    }
+    const applied = new Set(appliedEditIds);
+    const pendingDraftEditIds = repairLoop.pendingDraftEditIds.filter((id) => !applied.has(id));
+    if (pendingDraftEditIds.length === repairLoop.pendingDraftEditIds.length) {
+      return;
+    }
+    const next: RepairLoopState = {
+      ...repairLoop,
+      pendingDraftEditIds,
+      status: pendingDraftEditIds.length ? 'waiting_for_apply' : 'ready_for_validation',
+      stopReason: pendingDraftEditIds.length ? 'waiting_for_apply' : undefined
+    };
+    this.repairLoopsBySession.set(sessionId, next);
+    activeSession.repairLoop = next;
+    if (!pendingDraftEditIds.length) {
+      const plan = this.taskPlansBySession.get(sessionId);
+      if (plan) {
+        this.taskPlansBySession.set(sessionId, markTaskPlanReadyForValidation(plan, this.language));
+        this.appendRepairTrace(plan, {
+          type: 'repair_loop_ready_for_validation',
+          iteration: next.iteration,
+          appliedEditIds
+        });
+      }
+    }
+    await this.sessionStore.persist();
+  }
+
+  private async markActiveRepairDiscarded(editId?: string): Promise<void> {
+    const sessionId = this.sessionStore.activeSessionId;
+    const activeSession = this.sessionStore.getActiveSession();
+    const repairLoop = this.repairLoopsBySession.get(sessionId) ?? activeSession.repairLoop;
+    if (!repairLoop || repairLoop.status !== 'waiting_for_apply') {
+      return;
+    }
+    if (editId && !repairLoop.pendingDraftEditIds.includes(editId)) {
+      return;
+    }
+    const next: RepairLoopState = {
+      ...repairLoop,
+      status: 'blocked',
+      pendingDraftEditIds: editId
+        ? repairLoop.pendingDraftEditIds.filter((id) => id !== editId)
+        : [],
+      stopReason: 'repair_discarded'
+    };
+    this.repairLoopsBySession.set(sessionId, next);
+    activeSession.repairLoop = next;
+    const plan = this.taskPlansBySession.get(sessionId);
+    if (plan) {
+      const detail = this.language === 'en'
+        ? 'The pending repair was discarded. Start a new repair request to continue.'
+        : '待确认修复已被放弃。请发起新的修复请求后继续。';
+      this.taskPlansBySession.set(sessionId, {
+        ...plan,
+        status: 'blocked',
+        currentStepId: undefined,
+        blockers: [...plan.blockers.filter((blocker) => !/apply|应用/iu.test(blocker)), detail],
+        updatedAt: new Date().toISOString()
+      });
+      this.appendRepairTrace(plan, { type: 'repair_loop_stopped', reason: 'repair_discarded', editId });
+    }
+    await this.sessionStore.persist();
+  }
+
+  private async continueRepair(): Promise<void> {
+    if (this.isBusy) {
+      return;
+    }
+    const sessionId = this.sessionStore.activeSessionId;
+    const activeSession = this.sessionStore.getActiveSession();
+    const repairLoop = this.repairLoopsBySession.get(sessionId) ?? activeSession.repairLoop;
+    if (!repairLoop || repairLoop.status !== 'ready_for_validation') {
+      return;
+    }
+    const next: RepairLoopState = {
+      ...repairLoop,
+      status: 'running_validation',
+      pendingDraftEditIds: [],
+      stopReason: undefined
+    };
+    this.repairLoopsBySession.set(sessionId, next);
+    activeSession.repairLoop = next;
+    const script = next.lastValidationScript ?? 'compile';
+    const prompt = this.language === 'en'
+      ? `Continue the controlled repair loop. The user applied the previous repair ChangeSet. First run keepseek_run_validation with script "${script}" against the real workspace. If it still fails, read Problems and prepare another ChangeSet only if the remaining repair budget allows it.`
+      : `继续受控修复闭环。用户已经应用上一个修复 ChangeSet。请先对真实工作区运行 keepseek_run_validation，script 为“${script}”。如果仍然失败，请读取 Problems，并且只在剩余修复轮次允许时准备新的 ChangeSet。`;
+    const plan = this.taskPlansBySession.get(sessionId);
+    if (plan) {
+      this.appendRepairTrace(plan, { type: 'repair_loop_resumed', iteration: next.iteration, script });
+    }
+    await this.sendPrompt(prompt, this.selectedModelId, this.agentSettings, { repairLoop: next });
+    const latest = this.repairLoopsBySession.get(sessionId) ?? activeSession.repairLoop;
+    if (latest?.status === 'running_validation') {
+      const ready: RepairLoopState = { ...latest, status: 'ready_for_validation' };
+      this.repairLoopsBySession.set(sessionId, ready);
+      activeSession.repairLoop = ready;
+      await this.sessionStore.persist();
+      this.postState();
+    }
+  }
+
+  private appendRepairTrace(plan: TaskPlan, event: { type: string; [key: string]: unknown }): void {
+    const session = this.sessionStore.getActiveSession();
+    void this.traceLogService.appendRunEvent(
+      session.lastTraceLogUri ? { runId: plan.runId, uri: session.lastTraceLogUri } : undefined,
+      event
+    );
+  }
+
   private async sendPrompt(
     prompt: string,
     modelId: string,
     settings?: Partial<AgentSettings>,
-    options?: { replaceMessageId?: string; references?: PromptReferenceInput[]; skillIds?: string[] }
+    options?: { replaceMessageId?: string; references?: PromptReferenceInput[]; skillIds?: string[]; repairLoop?: RepairLoopState }
   ): Promise<void> {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt || this.isBusy) {
@@ -1675,6 +1803,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       const activeSession = this.sessionStore.getActiveSession();
+      if (!options?.repairLoop) {
+        this.repairLoopsBySession.delete(activeSession.id);
+        activeSession.repairLoop = undefined;
+      }
       previousTurnUsage = activeSession.lastTurnUsage;
       previousPromptCacheDiagnostics = activeSession.promptCacheDiagnostics;
       activeSession.lastTurnUsage = undefined;
@@ -1772,6 +1904,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         language: this.language,
         sessionId: activeSession.id,
         assistantMessageId: assistantMessage.id,
+        repairLoop: options?.repairLoop,
         signal: abortController.signal
       }), {
         onStatus: (activity) => {
@@ -1829,6 +1962,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.sessionTraceLogUris.set(activeSession.id, traceLogUri);
       }
       this.taskPlansBySession.set(activeSession.id, response.taskPlan);
+      this.repairLoopsBySession.set(activeSession.id, response.repairLoop);
+      activeSession.repairLoop = response.repairLoop;
       if (response.changeSet) {
         this.changeSets.add(response.changeSet);
       } else if (response.draftEdits.length) {
@@ -2076,6 +2211,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           slimToolModeEnabled: getConfiguredSlimToolModeEnabled()
         },
         taskPlan: this.taskPlansBySession.get(activeSession.id),
+        repairLoop: this.repairLoopsBySession.get(activeSession.id) ?? activeSession.repairLoop,
         changeSets: this.changeSets.toWebviewState(activeSession.id),
         draftEdits: this.changeSets.toWebviewState(activeSession.id).flatMap((changeSet) => changeSet.files),
         isBusy: this.isBusy,

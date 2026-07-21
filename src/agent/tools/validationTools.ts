@@ -1,15 +1,16 @@
 import * as vscode from 'vscode';
 import {
-  getConfiguredValidationAuthorizationPolicy,
   getConfiguredValidationTimeoutMs
 } from '../../shared/config';
 import type { KeepseekLanguage } from '../../shared/i18n';
 import type {
   SafeNpmScript,
+  ToolAuthorizationDecision,
   ValidationToolResult,
   WorkspaceDiagnosticItem,
   WorkspaceDiagnosticSummary
 } from '../../shared/types';
+import { RUN_VALIDATION_TOOL_NAME } from '../protocol';
 
 const MAX_DIAGNOSTIC_ITEMS = 200;
 const SAFE_NPM_SCRIPTS = new Set<SafeNpmScript>(['compile', 'lint', 'test']);
@@ -23,6 +24,7 @@ export interface ValidationToolAdapter {
     language: KeepseekLanguage;
     signal?: AbortSignal;
     runDeadlineAt?: number;
+    authorization: ToolAuthorizationDecision;
   }): Promise<string>;
 }
 
@@ -37,6 +39,7 @@ export class ValidationToolService implements ValidationToolAdapter {
     language: KeepseekLanguage;
     signal?: AbortSignal;
     runDeadlineAt?: number;
+    authorization: ToolAuthorizationDecision;
   }): Promise<string> {
     const startedAt = Date.now();
     const createResult = (result: Partial<ValidationToolResult>): ValidationToolResult => ({
@@ -46,6 +49,7 @@ export class ValidationToolService implements ValidationToolAdapter {
       authorized: false,
       durationMs: Date.now() - startedAt,
       timedOut: false,
+      authorization: input.authorization,
       ...result
     });
 
@@ -86,9 +90,14 @@ export class ValidationToolService implements ValidationToolAdapter {
       }));
     }
 
-    if (!(await authorizeValidation(input.script, workspaceFolder, input.language))) {
+    const expectedScope = input.script === 'test' ? 'validation_test' : 'validation_compile_lint';
+    if (!input.authorization.allowed
+      || input.authorization.toolName !== RUN_VALIDATION_TOOL_NAME
+      || input.authorization.riskLevel !== 'medium'
+      || input.authorization.scope !== expectedScope) {
       return JSON.stringify(createResult({
         workspaceFolder: workspaceFolder.name,
+        authorization: input.authorization,
         error: localizeValidation(input.language, 'notAuthorized')
       }));
     }
@@ -246,38 +255,6 @@ async function readNpmScript(workspaceFolder: vscode.WorkspaceFolder, script: Sa
   } catch {
     return undefined;
   }
-}
-
-async function authorizeValidation(
-  script: SafeNpmScript,
-  workspaceFolder: vscode.WorkspaceFolder,
-  language: KeepseekLanguage
-): Promise<boolean> {
-  const policy = getConfiguredValidationAuthorizationPolicy();
-  if (policy === 'always') {
-    return true;
-  }
-  if (policy === 'never') {
-    return false;
-  }
-
-  const allowOnce = language === 'en' ? 'Run once' : '仅运行一次';
-  const alwaysAllow = language === 'en' ? 'Always allow safe validation' : '始终允许安全验证';
-  const selected = await vscode.window.showInformationMessage(
-    language === 'en'
-      ? `Allow KeepSeek to run "npm run ${script}" in ${workspaceFolder.name}?`
-      : `允许 KeepSeek 在 ${workspaceFolder.name} 中运行“npm run ${script}”吗？`,
-    { modal: true },
-    allowOnce,
-    alwaysAllow
-  );
-  if (selected === alwaysAllow) {
-    await vscode.workspace
-      .getConfiguration('keepseek')
-      .update('validation.authorizationPolicy', 'always', vscode.ConfigurationTarget.Workspace);
-    return true;
-  }
-  return selected === allowOnce;
 }
 
 function createValidationTask(workspaceFolder: vscode.WorkspaceFolder, script: SafeNpmScript): vscode.Task {

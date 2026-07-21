@@ -20,12 +20,17 @@ src/
 │   ├── historyCompressor.ts     # 会话摘要刷新与失败回退
 │   ├── contextUsage.ts          # 上下文窗口用量估算
 │   ├── tokenEstimate.ts         # 轻量 token 估算
+│   ├── repairLoop.ts            # 验证失败、修复轮次与 Apply 暂停状态机
 │   ├── deepseek/
 │   │   ├── types.ts             # DeepSeek/OpenAI 兼容协议类型
 │   │   ├── streamParser.ts      # SSE streaming 响应解析
 │   │   └── dsmlToolParser.ts    # DSML 工具调用兜底解析
 │   └── tools/
-│       └── workspaceTools.ts    # Agent 只读工作区工具与目标路径解析
+│       ├── workspaceTools.ts    # Agent 只读工作区工具与目标路径解析
+│       ├── semanticTools.ts     # VS Code language provider 语义 symbol/reference 工具
+│       ├── validationTools.ts   # Problems 与受控 npm 验证任务
+│       ├── gitTools.ts          # VS Code Git API 优先的只读 Git 辅助
+│       └── toolAuthorization.ts # 工具风险分级与 per-run 授权
 ├── workspace/
 │   └── workspaceDirectory.ts    # 工作区目录枚举共享工具
 ├── sessions/
@@ -99,7 +104,10 @@ src/
 - `contextUsage.ts` 必须和真实 Agent 请求使用同一套 projection，否则 UI 上下文估算会失真。
 - `DeepSeekStreamParser` 只解析 SSE，包括 `content`、`reasoning_content` 和 streaming tool calls。
 - `DsmlToolParser` 是模型返回 DSML 文本工具调用时的兜底解析器。
-- `WorkspaceToolService` 是 Agent 可用的只读工作区工具边界：列文件、列目录、读文件、拒绝越界/二进制/过大文件。
+- `WorkspaceToolService` 是 Agent 可用的只读工作区工具边界：列文件、列目录、搜索、读文件、拒绝越界/二进制/过大文件。
+- `SemanticToolService` 优先调用 VS Code document/workspace symbol 和 reference/definition provider；provider 不可用时才退化为受控文本搜索，结果必须标记 `fallback` 与原因。
+- `ToolAuthorizationService` 统一维护低/中/高风险工具边界；compile/lint 与 test 分 scope 做 per-run 授权，高风险操作每次单独确认。
+- `GitToolService` 优先调用内置 Git extension API，失败时只允许固定参数的只读 `git` fallback；没有任意 shell、自动 commit 或 push。
 - `shared/config.ts` 是配置默认值和归一化的唯一来源，避免各模块重复魔法数字。
 - `shared/textFileGuards.ts` 是文本可读性和跳过扩展名判断的共享边界；Agent 工具和引用展开都应复用它。
 
@@ -216,12 +224,23 @@ explorer/context 传入 vscode.Uri
 
 ## Agent 与工具
 
-Agent 支持四个工具名：
+Agent 工具包括：
 
 - `keepseek_list_workspace_files`：列出当前工作区文件，跳过 `.git`、`node_modules`、`dist` 等目录。
 - `keepseek_list_workspace_directory`：列出当前工作区内指定目录的文件和子目录，可递归，跳过依赖、构建、覆盖率和 VCS 目录。
 - `keepseek_read_workspace_file`：读取工作区内文本文件，拒绝越界、二进制、超限文件。
 - `keepseek_create_draft_edit`：创建待确认 DraftEdit，不直接写磁盘。
+- `keepseek_find_symbol` / `keepseek_find_references`：语义定位 symbol 与 references。
+- `keepseek_get_document_symbols` / `keepseek_get_workspace_symbols`：读取文档或工作区语义 symbol。
+- `keepseek_read_workspace_diagnostics`：读取 VS Code Problems。
+- `keepseek_run_validation`：只运行固定 compile、lint、test npm scripts，并受 per-run 中风险授权控制。
+- `keepseek_git_status` / `keepseek_git_diff` / `keepseek_git_current_branch`：只读 Git 状态辅助。
+- `keepseek_git_create_patch`：仅返回受大小限制的 patch 内容，不写入或应用 patch。
+- `keepseek_git_suggest_commit_message`：只生成 commit message 建议，不创建 commit。
+
+工具风险规则：工作区读取、Problems、语义查询和 Git 只读查询是低风险；受控 compile/lint/test 是中风险并按 run 授权；真正写文件、删除、commit、push 是高风险。Agent 写文件仍只能创建 ChangeSet/DraftEdit，用户 Apply 后才会写入；当前不暴露 commit/push Agent 工具，且绝不自动 push。
+
+验证失败后由 `RepairLoopTracker` 记录失败摘要和修复轮次。Agent 读取 Problems、生成修复 ChangeSet 后必须进入 `waiting_for_apply`；待修改未应用时 Runner 会结构化拒绝再次验证。用户 Apply 完整 ChangeSet 后 Webview 可显式继续验证，修复轮次跨 run/session 持久化并受 `keepseek.validation.maxRepairIterations` 限制。
 
 `AgentRunner.run()` 的输入输出保持在 `shared/types.ts`：
 

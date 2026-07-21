@@ -58,6 +58,7 @@ export function getScript(): string {
         slimToolModeEnabled: true
       },
       taskPlan: null,
+      repairLoop: null,
       changeSets: [],
       draftEdits: [],
       isBusy: false,
@@ -334,6 +335,7 @@ export function getScript(): string {
     const planSteps = document.getElementById('planSteps');
     const planBlockers = document.getElementById('planBlockers');
     const planCompletion = document.getElementById('planCompletion');
+    const planContinueRepair = document.getElementById('planContinueRepair');
     const draftRegion = document.getElementById('draftRegion');
     const draftBulkActions = document.getElementById('draftBulkActions');
     const draftApplyAllBtn = document.getElementById('draftApplyAllBtn');
@@ -410,6 +412,11 @@ export function getScript(): string {
       listing_directory: ['agentStatusListingDirectory', 'agentStatusScanningWorkspace'],
       creating_draft_edit: ['agentStatusPreparingDraftEdit'],
       reading_diagnostics: ['agentStatusReadingDiagnostics'],
+      reading_semantic_context: ['agentStatusReadingSemanticContext'],
+      reading_git_state: ['agentStatusReadingGitState'],
+      awaiting_authorization: ['agentStatusAwaitingAuthorization'],
+      generating_repair: ['agentStatusGeneratingRepair'],
+      waiting_for_apply: ['agentStatusWaitingForApply'],
       running_validation: ['agentStatusRunningValidation'],
       reviewing_tool_result: ['agentStatusReviewingToolResults', 'agentStatusContinuingReasoning'],
       generating: ['agentStatusGenerating', 'agentStatusOrganizingResult', 'agentStatusWritingReply'],
@@ -646,6 +653,14 @@ export function getScript(): string {
       planToggle.addEventListener('click', function() {
         planExpanded = !planExpanded;
         renderTaskPlan();
+      });
+    }
+
+    if (planContinueRepair) {
+      planContinueRepair.addEventListener('click', function() {
+        if (state.isBusy || state.repairLoop?.status !== 'ready_for_validation') return;
+        planContinueRepair.disabled = true;
+        vscode.postMessage({ type: 'continueRepair' });
       });
     }
 
@@ -2467,7 +2482,10 @@ export function getScript(): string {
     }
 
     function renderTaskPlan() {
-      var plan = state.taskPlan && typeof state.taskPlan === 'object' ? state.taskPlan : null;
+      var repairLoop = state.repairLoop && typeof state.repairLoop === 'object' ? state.repairLoop : null;
+      var plan = state.taskPlan && typeof state.taskPlan === 'object'
+        ? state.taskPlan
+        : createRepairFallbackPlan(repairLoop);
       if (!planRegion || !planToggle || !planBody || !planSteps) return;
       planRegion.classList.toggle('hidden', !plan);
       if (!plan) return;
@@ -2511,6 +2529,44 @@ export function getScript(): string {
 
       renderPlanNote(planBlockers, t('planBlockers'), Array.isArray(plan.blockers) ? plan.blockers.join('\\n') : '');
       renderPlanNote(planCompletion, t('planCompletion'), plan.completionSummary || '');
+      if (planContinueRepair) {
+        var canContinueRepair = state.repairLoop?.status === 'ready_for_validation' && !state.isBusy;
+        planContinueRepair.classList.toggle('hidden', !canContinueRepair);
+        planContinueRepair.disabled = !canContinueRepair;
+      }
+    }
+
+    function createRepairFallbackPlan(repairLoop) {
+      if (!repairLoop || ['waiting_for_apply', 'ready_for_validation', 'running_validation', 'blocked'].indexOf(repairLoop.status) < 0) {
+        return null;
+      }
+      var waiting = repairLoop.status === 'waiting_for_apply';
+      var ready = repairLoop.status === 'ready_for_validation';
+      var running = repairLoop.status === 'running_validation';
+      var blocked = repairLoop.status === 'blocked';
+      return {
+        goal: t('repairProgressGoal'),
+        status: blocked || waiting ? 'blocked' : 'running',
+        currentStepId: waiting ? 'repair_wait_apply' : 'repair_validate',
+        blockers: waiting ? [t('agentStatusWaitingForApply')] : [],
+        steps: [
+          {
+            id: 'repair_generate',
+            title: t('repairIterationLabel', { current: Number(repairLoop.iteration) || 0, max: Number(repairLoop.maxIterations) || 0 }),
+            status: 'completed'
+          },
+          {
+            id: 'repair_wait_apply',
+            title: t('agentStatusWaitingForApply'),
+            status: waiting ? 'blocked' : 'completed'
+          },
+          {
+            id: 'repair_validate',
+            title: t('continueRepairValidation'),
+            status: blocked ? 'blocked' : running || ready ? 'in_progress' : 'pending'
+          }
+        ]
+      };
     }
 
     function renderPlanNote(element, label, text) {

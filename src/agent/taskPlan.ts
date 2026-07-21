@@ -3,6 +3,15 @@ import type { KeepseekLanguage } from '../shared/i18n';
 import type { TaskPlan, TaskPlanStep, TaskPlanStepStatus } from '../shared/types';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  FIND_REFERENCES_TOOL_NAME,
+  FIND_SYMBOL_TOOL_NAME,
+  GET_DOCUMENT_SYMBOLS_TOOL_NAME,
+  GET_WORKSPACE_SYMBOLS_TOOL_NAME,
+  GIT_CREATE_PATCH_TOOL_NAME,
+  GIT_CURRENT_BRANCH_TOOL_NAME,
+  GIT_DIFF_TOOL_NAME,
+  GIT_STATUS_TOOL_NAME,
+  GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME,
   LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
   LIST_WORKSPACE_FILES_TOOL_NAME,
   READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
@@ -124,6 +133,56 @@ export class TaskPlanTracker {
     this.touchAndEmit('blocker_added');
   }
 
+  public beginRepair(iteration: number, maxIterations: number, detail?: string): void {
+    this.ensureRepairSteps();
+    const validation = this.getStep('repair_validate');
+    if (validation) {
+      validation.status = 'failed';
+      validation.detail = detail;
+      validation.updatedAt = new Date().toISOString();
+    }
+    this.activateStep('repair_read_problems', this.language === 'en'
+      ? `Repair ${iteration}/${maxIterations}: read current Problems`
+      : `修复 ${iteration}/${maxIterations}：读取当前 Problems`);
+  }
+
+  public markProblemsRead(): void {
+    if (!this.getStep('repair_read_problems')) {
+      return;
+    }
+    this.setStepStatus('repair_read_problems', 'completed');
+    this.activateStep('repair_generate');
+  }
+
+  public markGeneratingRepair(): void {
+    this.ensureRepairSteps();
+    this.activateStep('repair_generate');
+  }
+
+  public markWaitingForApply(detail: string): void {
+    this.ensureRepairSteps();
+    this.setStepStatus('repair_generate', 'completed');
+    this.setStepStatus('repair_wait_apply', 'blocked', detail);
+    this.setStepStatus('repair_validate', 'pending');
+    this.plan.currentStepId = 'repair_wait_apply';
+    this.plan.status = 'blocked';
+    const previous = this.blockerByStep.get('repair_wait_apply');
+    if (previous) {
+      this.plan.blockers = this.plan.blockers.filter((blocker) => blocker !== previous);
+    }
+    this.blockerByStep.set('repair_wait_apply', detail);
+    if (!this.plan.blockers.includes(detail)) {
+      this.plan.blockers.push(detail);
+    }
+    this.touchAndEmit('repair_waiting_for_apply');
+  }
+
+  public markRepairLimitReached(detail: string): void {
+    this.ensureRepairSteps();
+    this.setStepStatus('repair_generate', 'blocked', detail);
+    this.addBlocker(detail);
+  }
+
   public fail(error: string): TaskPlan {
     const message = compactText(error, 240);
     const current = this.plan.currentStepId ? this.getStep(this.plan.currentStepId) : undefined;
@@ -173,6 +232,35 @@ export class TaskPlanTracker {
     this.plan.steps.splice(responseIndex < 0 ? this.plan.steps.length : responseIndex, 0, step);
     this.touchAndEmit('step_added');
     return step;
+  }
+
+  private ensureRepairSteps(): void {
+    const now = new Date().toISOString();
+    const definitions: Array<[string, string, string]> = this.language === 'en'
+      ? [
+          ['repair_read_problems', 'Read Problems', 'Inspect diagnostics after validation failure'],
+          ['repair_generate', 'Generate repair', 'Prepare a safe ChangeSet repair'],
+          ['repair_wait_apply', 'Wait for ChangeSet apply', 'Validation must pause until the user applies the repair'],
+          ['repair_validate', 'Run validation again', 'Validate the applied repair in a later run']
+        ]
+      : [
+          ['repair_read_problems', '读取 Problems', '验证失败后检查诊断信息'],
+          ['repair_generate', '生成修复', '通过安全 ChangeSet 准备修复'],
+          ['repair_wait_apply', '等待用户应用 ChangeSet', '用户应用修复前必须暂停验证'],
+          ['repair_validate', '再次运行验证', '在后续运行中验证已应用的修复']
+        ];
+    const responseIndex = this.plan.steps.findIndex((item) => item.id === 'respond');
+    let insertAt = responseIndex < 0 ? this.plan.steps.length : responseIndex;
+    for (const [id, title, detail] of definitions) {
+      if (this.getStep(id)) {
+        continue;
+      }
+      const step = createStep(id, title, 'pending', now);
+      step.detail = detail;
+      this.plan.steps.splice(insertAt, 0, step);
+      insertAt += 1;
+    }
+    this.touchAndEmit('repair_steps_added');
   }
 
   private activateStep(id: string, detail?: string): void {
@@ -227,6 +315,37 @@ export class TaskPlanTracker {
   }
 }
 
+export function markTaskPlanReadyForValidation(plan: TaskPlan, language: KeepseekLanguage): TaskPlan {
+  const snapshot: TaskPlan = {
+    ...plan,
+    steps: plan.steps.map((step) => ({ ...step })),
+    blockers: [...plan.blockers]
+  };
+  const waiting = snapshot.steps.find((step) => step.id === 'repair_wait_apply');
+  const validation = snapshot.steps.find((step) => step.id === 'repair_validate');
+  const now = new Date().toISOString();
+  if (waiting) {
+    const previousDetail = waiting.detail;
+    waiting.status = 'completed';
+    waiting.detail = language === 'en' ? 'Repair ChangeSet applied by the user' : '用户已应用修复 ChangeSet';
+    waiting.updatedAt = now;
+    if (previousDetail) {
+      snapshot.blockers = snapshot.blockers.filter((blocker) => blocker !== previousDetail);
+    }
+  }
+  if (validation) {
+    validation.status = 'in_progress';
+    validation.detail = language === 'en'
+      ? 'Ready to continue controlled validation'
+      : '已可继续执行受控验证';
+    validation.updatedAt = now;
+    snapshot.currentStepId = validation.id;
+  }
+  snapshot.status = 'running';
+  snapshot.updatedAt = now;
+  return snapshot;
+}
+
 function createStep(id: string, title: string, status: TaskPlanStepStatus, updatedAt: string): TaskPlanStep {
   return { id, title, status, updatedAt };
 }
@@ -244,6 +363,15 @@ function getToolStepKind(toolName: string): PlanStepKind | undefined {
     case READ_WORKSPACE_FILE_RANGE_TOOL_NAME:
     case READ_WORKSPACE_FILE_TOOL_NAME:
     case READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME:
+    case FIND_SYMBOL_TOOL_NAME:
+    case FIND_REFERENCES_TOOL_NAME:
+    case GET_DOCUMENT_SYMBOLS_TOOL_NAME:
+    case GET_WORKSPACE_SYMBOLS_TOOL_NAME:
+    case GIT_STATUS_TOOL_NAME:
+    case GIT_DIFF_TOOL_NAME:
+    case GIT_CURRENT_BRANCH_TOOL_NAME:
+    case GIT_CREATE_PATCH_TOOL_NAME:
+    case GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME:
       return 'inspect';
     case CREATE_DRAFT_EDIT_TOOL_NAME:
       return 'edit';
@@ -277,6 +405,15 @@ function getToolDetail(toolName: string, language: KeepseekLanguage): string {
     [READ_WORKSPACE_FILE_RANGE_TOOL_NAME]: ['Reading a file range', '读取文件行段'],
     [READ_WORKSPACE_FILE_TOOL_NAME]: ['Reading a file', '读取文件'],
     [READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME]: ['Reading Problems diagnostics', '读取 Problems 诊断'],
+    [FIND_SYMBOL_TOOL_NAME]: ['Finding semantic symbols', '查找语义 symbol'],
+    [FIND_REFERENCES_TOOL_NAME]: ['Finding semantic references', '查找语义引用'],
+    [GET_DOCUMENT_SYMBOLS_TOOL_NAME]: ['Reading document symbols', '读取文档 symbols'],
+    [GET_WORKSPACE_SYMBOLS_TOOL_NAME]: ['Reading workspace symbols', '读取工作区 symbols'],
+    [GIT_STATUS_TOOL_NAME]: ['Reading Git status', '读取 Git 状态'],
+    [GIT_DIFF_TOOL_NAME]: ['Reading Git diff', '读取 Git diff'],
+    [GIT_CURRENT_BRANCH_TOOL_NAME]: ['Reading current Git branch', '读取当前 Git 分支'],
+    [GIT_CREATE_PATCH_TOOL_NAME]: ['Generating patch content', '生成补丁内容'],
+    [GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME]: ['Preparing commit message suggestions', '准备提交信息建议'],
     [CREATE_DRAFT_EDIT_TOOL_NAME]: ['Creating a pending edit', '创建待确认修改'],
     [RUN_VALIDATION_TOOL_NAME]: ['Running an approved project script', '运行已授权的项目脚本']
   };

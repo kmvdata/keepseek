@@ -23,6 +23,7 @@ export const DEFAULT_BALANCE_REFRESH_INTERVAL_MS = 60_000;
 export const DEFAULT_SLIM_TOOL_MODE_ENABLED = true;
 export const DEFAULT_VALIDATION_AUTHORIZATION_POLICY: ValidationAuthorizationPolicy = 'ask';
 export const DEFAULT_MAX_VALIDATION_RUNS = 3;
+export const DEFAULT_MAX_REPAIR_ITERATIONS = 2;
 export const DEFAULT_VALIDATION_TIMEOUT_MS = 120_000;
 export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
   'deepseek-v4-flash': {
@@ -167,6 +168,13 @@ export function getConfiguredMaxValidationRuns(): number {
     .getConfiguration('keepseek')
     .get<number>('validation.maxRunsPerAgentRun', DEFAULT_MAX_VALIDATION_RUNS);
   return normalizeIntegerInRange(configured, 0, 8, DEFAULT_MAX_VALIDATION_RUNS);
+}
+
+export function getConfiguredMaxRepairIterations(): number {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('validation.maxRepairIterations', DEFAULT_MAX_REPAIR_ITERATIONS);
+  return normalizeIntegerInRange(configured, 0, 5, DEFAULT_MAX_REPAIR_ITERATIONS);
 }
 
 export function getConfiguredValidationTimeoutMs(): number {

@@ -23,6 +23,14 @@ test('trimActiveHistory preserves persisted active session messages', async () =
     activeSessionId: session.id,
     sessions: [session]
   });
+  session.repairLoop = {
+    status: 'waiting_for_apply',
+    iteration: 1,
+    maxIterations: 2,
+    lastValidationScript: 'compile',
+    pendingDraftEditIds: ['edit-1'],
+    stopReason: 'waiting_for_apply'
+  };
   const store = new ChatSessionStore(storage, 'en', workspaceScope);
 
   await store.initialize();
@@ -34,6 +42,7 @@ test('trimActiveHistory preserves persisted active session messages', async () =
   assert.equal(store.messages[99].id, 'm99');
   assert.equal(storage.saved?.sessions[0]?.messages.length, 100);
   assert.equal(storage.saved?.sessions[0]?.messages[0]?.id, 'm0');
+  assert.deepEqual(storage.saved?.sessions[0]?.repairLoop?.pendingDraftEditIds, ['edit-1']);
 });
 
 class MemorySessionStorage implements ChatSessionStorageAdapter {
@@ -123,6 +132,9 @@ function cloneWorkspaceState(state: StoredWorkspaceSessionState): StoredWorkspac
               coveredMessageIds: [...summary.coveredMessageIds]
             }))
           }
+        : undefined,
+      repairLoop: session.repairLoop
+        ? { ...session.repairLoop, pendingDraftEditIds: [...session.repairLoop.pendingDraftEditIds] }
         : undefined
     }))
   };

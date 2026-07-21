@@ -2,6 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  FIND_REFERENCES_TOOL_NAME,
+  FIND_SYMBOL_TOOL_NAME,
+  GET_DOCUMENT_SYMBOLS_TOOL_NAME,
+  GET_WORKSPACE_SYMBOLS_TOOL_NAME,
+  GIT_CREATE_PATCH_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME,
@@ -38,6 +43,32 @@ test('validation tool exposes only the fixed safe npm scripts', () => {
   assert.equal(tool.function.name, RUN_VALIDATION_TOOL_NAME);
   assert.deepEqual(properties.script?.enum, ['compile', 'lint', 'test']);
   assert.equal(properties.command, undefined);
+});
+
+test('semantic tools expose structured provider inputs', () => {
+  const tools = getAgentTools({
+    toolNames: [
+      FIND_SYMBOL_TOOL_NAME,
+      FIND_REFERENCES_TOOL_NAME,
+      GET_DOCUMENT_SYMBOLS_TOOL_NAME,
+      GET_WORKSPACE_SYMBOLS_TOOL_NAME
+    ]
+  });
+  assert.deepEqual(tools.map((tool) => tool.function.name), [
+    FIND_REFERENCES_TOOL_NAME,
+    FIND_SYMBOL_TOOL_NAME,
+    GET_DOCUMENT_SYMBOLS_TOOL_NAME,
+    GET_WORKSPACE_SYMBOLS_TOOL_NAME
+  ]);
+  const references = tools.find((tool) => tool.function.name === FIND_REFERENCES_TOOL_NAME);
+  assert.deepEqual(references?.function.parameters.required, ['column', 'line', 'path']);
+});
+
+test('patch tool does not expose a target path or write option', () => {
+  const tool = getAgentTools({ toolNames: [GIT_CREATE_PATCH_TOOL_NAME] })[0];
+  const properties = tool.function.parameters.properties as Record<string, unknown>;
+  assert.equal(properties.outputPath, undefined);
+  assert.equal(properties.apply, undefined);
 });
 
 test('tool schema order is canonicalized by tool name', () => {

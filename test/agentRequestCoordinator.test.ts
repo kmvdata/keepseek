@@ -35,6 +35,13 @@ test('createAgentRequest snapshots mutable request inputs', () => {
   ];
   const contextCompression = createCompressionState('original');
   const signal = new AbortController().signal;
+  const repairLoop = {
+    status: 'ready_for_validation' as const,
+    iteration: 1,
+    maxIterations: 2,
+    lastValidationScript: 'compile' as const,
+    pendingDraftEditIds: [] as string[]
+  };
 
   const request = coordinator.createAgentRequest({
     prompt: 'current request',
@@ -43,6 +50,7 @@ test('createAgentRequest snapshots mutable request inputs', () => {
     contextFiles,
     history,
     contextCompression,
+    repairLoop,
     language: 'en',
     signal
   });
@@ -57,6 +65,7 @@ test('createAgentRequest snapshots mutable request inputs', () => {
   };
   contextCompression.protectedMessageIds.push('new-protected-id');
   contextCompression.summaries[0].coveredMessageIds.push('new-covered-id');
+  repairLoop.pendingDraftEditIds.push('mutated-edit');
 
   assert.equal(request.model.label, 'Test Model');
   assert.equal(request.settings.thinkingEnabled, true);
@@ -65,6 +74,7 @@ test('createAgentRequest snapshots mutable request inputs', () => {
   assert.equal(request.history[0]?.contextMeta?.protectedReason, 'first_user_request');
   assert.deepEqual(request.contextCompression?.protectedMessageIds, ['protected-original']);
   assert.deepEqual(request.contextCompression?.summaries[0]?.coveredMessageIds, ['covered-original']);
+  assert.deepEqual(request.repairLoop?.pendingDraftEditIds, []);
   assert.equal(request.signal, signal);
 });
 

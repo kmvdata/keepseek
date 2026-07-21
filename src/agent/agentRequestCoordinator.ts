@@ -26,6 +26,7 @@ export interface AgentRequestCoordinatorInput {
   language: KeepseekLanguage;
   sessionId?: string;
   assistantMessageId?: string;
+  repairLoop?: AgentRequest['repairLoop'];
   signal?: AbortSignal;
 }
 
@@ -61,6 +62,9 @@ export class AgentRequestCoordinator {
       language: input.language,
       sessionId: input.sessionId,
       assistantMessageId: input.assistantMessageId,
+      repairLoop: input.repairLoop
+        ? { ...input.repairLoop, pendingDraftEditIds: [...input.repairLoop.pendingDraftEditIds] }
+        : undefined,
       signal: input.signal
     };
   }

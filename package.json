@@ -241,10 +241,10 @@
           ],
           "enumDescriptions": [
             "Never let the agent run validation tasks.",
-            "Ask before every safe validation task.",
+            "Ask once per validation scope (compile/lint or test) for each Agent run.",
             "Allow the fixed compile, lint, and test scripts without prompting."
           ],
-          "markdownDescription": "Authorization policy for KeepSeek's controlled validation tools. Only fixed `npm run compile`, `npm run lint`, and `npm run test` tasks are eligible; arbitrary shell commands remain unavailable."
+          "markdownDescription": "Medium-risk authorization policy for KeepSeek's controlled validation tools. In `ask` mode, compile/lint and test are authorized separately for each Agent run. Only fixed `npm run compile`, `npm run lint`, and `npm run test` tasks are eligible; arbitrary shell commands remain unavailable."
         },
         "keepseek.validation.maxRunsPerAgentRun": {
           "type": "number",
@@ -253,6 +253,14 @@
           "maximum": 8,
           "scope": "window",
           "markdownDescription": "Maximum number of controlled validation tasks an Agent run may start. Set to 0 to disable validation execution."
+        },
+        "keepseek.validation.maxRepairIterations": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 5,
+          "scope": "window",
+          "markdownDescription": "Maximum number of validation-failure repair attempts in one Agent run. Repairs remain pending ChangeSets and validation pauses until the user applies them."
         },
         "keepseek.validation.timeoutMs": {
           "type": "number",

@@ -114,6 +114,7 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
         <ol id="planSteps" class="plan-steps"></ol>
         <div id="planBlockers" class="plan-note hidden"></div>
         <div id="planCompletion" class="plan-note hidden"></div>
+        <button id="planContinueRepair" type="button" class="plan-continue-repair hidden" data-i18n="continueRepairValidation">继续验证修复</button>
       </div>
     </section>
 

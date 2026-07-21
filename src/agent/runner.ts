@@ -10,12 +10,14 @@ import {
   DraftEdit,
   PromptCacheDiagnostics,
   SafeNpmScript,
+  ToolAuthorizationDecision,
   TurnUsageStats,
   UsageEvent
 } from '../shared/types';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
   getConfiguredMaxRequestRetries,
+  getConfiguredMaxRepairIterations,
   getConfiguredMaxValidationRuns,
   getConfiguredModelUsagePricing,
   getConfiguredRequestRetryBaseMs,
@@ -32,6 +34,15 @@ import {
   estimateDeepSeekMessageTokens,
   getAgentToolNamesForPrompt,
   getAgentTools,
+  FIND_REFERENCES_TOOL_NAME,
+  FIND_SYMBOL_TOOL_NAME,
+  GET_DOCUMENT_SYMBOLS_TOOL_NAME,
+  GET_WORKSPACE_SYMBOLS_TOOL_NAME,
+  GIT_CREATE_PATCH_TOOL_NAME,
+  GIT_CURRENT_BRANCH_TOOL_NAME,
+  GIT_DIFF_TOOL_NAME,
+  GIT_STATUS_TOOL_NAME,
+  GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME,
   LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
   LIST_WORKSPACE_FILES_TOOL_NAME,
   READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
@@ -48,6 +59,14 @@ import {
 } from './contextUsage';
 import { WorkspaceToolAdapter, WorkspaceToolService } from './tools/workspaceTools';
 import { ValidationToolAdapter, ValidationToolService } from './tools/validationTools';
+import { SemanticToolAdapter, SemanticToolService } from './tools/semanticTools';
+import { GitToolAdapter, GitToolService } from './tools/gitTools';
+import {
+  createAuthorizationDeniedToolResult,
+  getToolAuthorizationMetadata,
+  ToolAuthorizationAdapter,
+  ToolAuthorizationService
+} from './tools/toolAuthorization';
 import type { KeepseekLanguage } from '../shared/i18n';
 import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
 import { DsmlToolParser } from './deepseek/dsmlToolParser';
@@ -78,6 +97,7 @@ import {
 } from './usageStats';
 import { TaskPlanTracker } from './taskPlan';
 import { createChangeSet } from '../edits/changeSet';
+import { RepairLoopTracker } from './repairLoop';
 
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;
 const MAX_LENGTH_CONTINUATION_REQUESTS = 1;
@@ -107,6 +127,7 @@ interface AgentRuntimeConfig {
   maxRequestRetries: number;
   requestRetryBaseMs: number;
   maxValidationRuns: number;
+  maxRepairIterations: number;
 }
 
 type AgentBudgetFinishReason =
@@ -188,7 +209,10 @@ export class AgentRunner {
   public constructor(
     private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService(),
     private readonly traceLogService?: InteractionTraceLogService,
-    private readonly validationTools: ValidationToolAdapter = new ValidationToolService()
+    private readonly validationTools: ValidationToolAdapter = new ValidationToolService(),
+    private readonly semanticTools: SemanticToolAdapter = new SemanticToolService(workspaceTools),
+    private readonly gitTools: GitToolAdapter = new GitToolService(workspaceTools),
+    private readonly toolAuthorization: ToolAuthorizationAdapter = new ToolAuthorizationService()
   ) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
@@ -210,6 +234,12 @@ export class AgentRunner {
       onChange: callbacks.onTaskPlan,
       recordTrace: (event) => trace.record(event)
     });
+    const repairLoop = new RepairLoopTracker(
+      getConfiguredMaxRepairIterations(),
+      (event) => trace.record(event),
+      request.repairLoop
+    );
+    const runAuthorizationPolicy = this.toolAuthorization.createRunPolicy(trace.runId);
     const toolResultLedger: ToolResultLedgerEntry[] = [];
     const usagePricing = getConfiguredModelUsagePricing(request.model.id);
     const upstreamUsageTotals: UpstreamUsageTotals = {
@@ -267,10 +297,11 @@ export class AgentRunner {
             lastCompressedAt: request.contextCompression.lastCompressedAt,
             lastFailureReason: request.contextCompression.lastFailureReason
           }
-        : undefined
+        : undefined,
+      repairLoop: request.repairLoop
     });
     const finishRun = (
-      response: Omit<AgentResponse, 'runId' | 'taskPlan' | 'changeSet'>,
+      response: Omit<AgentResponse, 'runId' | 'taskPlan' | 'changeSet' | 'repairLoop'>,
       details: Record<string, unknown> = {}
     ): AgentResponse => {
       const finishReason = typeof details.finishReason === 'string' ? details.finishReason : undefined;
@@ -281,7 +312,9 @@ export class AgentRunner {
       if (isBlocked && finishReason) {
         taskPlan.addBlocker(this.getBudgetToolError(finishReason as AgentBudgetFinishReason, request.language));
       }
-      const completedPlan = taskPlan.complete(response.message, isBlocked);
+      const repairState = repairLoop.getState();
+      const finalMessage = this.decorateRepairMessage(response.message, repairState, request.language);
+      const completedPlan = taskPlan.complete(finalMessage, isBlocked);
       const changeSet = createChangeSet({
         runId: trace.runId,
         sessionId: request.sessionId,
@@ -293,7 +326,9 @@ export class AgentRunner {
       const responseWithUsage: AgentResponse = {
         runId: trace.runId,
         ...response,
+        message: finalMessage,
         taskPlan: completedPlan,
+        repairLoop: repairState,
         changeSet,
         usage: response.usage ?? this.toTurnUsageStats(upstreamUsageTotals, request.model.id),
         promptCacheDiagnostics: response.promptCacheDiagnostics ?? promptCacheDiagnostics
@@ -339,6 +374,11 @@ export class AgentRunner {
       }
       return traceLog ? { ...responseWithUsage, traceLog } : responseWithUsage;
     };
+
+    trace.record({
+      type: 'run_authorization_policy',
+      policy: runAuthorizationPolicy
+    });
 
     try {
     this.throwIfAborted(request.signal, request.language);
@@ -635,33 +675,124 @@ export class AgentRunner {
           toolName: toolCall.function.name
         });
         let rawToolResult: string;
-        if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && validationRunCount >= runtimeConfig.maxValidationRuns) {
+        let toolArgs: Record<string, unknown> = {};
+        let authorizationDecision: ToolAuthorizationDecision | undefined;
+        try {
+          toolArgs = this.parseToolArguments(toolCall.function.arguments);
+          if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && repairLoop.hasPendingRepair()) {
+            rawToolResult = JSON.stringify({
+              ok: false,
+              errorType: 'pending_changes_require_apply',
+              pendingDraftEditIds: repairLoop.getState().pendingDraftEditIds,
+              error: request.language === 'en'
+                ? 'Validation paused: apply the pending repair ChangeSet before running validation again.'
+                : '验证已暂停：请先应用待确认的修复 ChangeSet，再次运行验证。'
+            });
+          } else if (toolCall.function.name === CREATE_DRAFT_EDIT_TOOL_NAME && !repairLoop.beginRepair()) {
+            const state = repairLoop.getState();
+            const detail = request.language === 'en'
+              ? `The automatic repair limit of ${state.maxIterations} iteration(s) was reached.`
+              : `自动修复已达到 ${state.maxIterations} 轮上限。`;
+            taskPlan.markRepairLimitReached(detail);
+            rawToolResult = JSON.stringify({
+              ok: false,
+              errorType: 'repair_iteration_limit_exhausted',
+              repairLoop: state,
+              error: detail
+            });
+          } else {
+            const authorizationMetadata = getToolAuthorizationMetadata(toolCall.function.name, toolArgs);
+            if (authorizationMetadata.riskLevel !== 'low') {
+              emitStatus({
+                base: 'waiting',
+                phase: 'awaiting_authorization',
+                toolName: toolCall.function.name,
+                detail: authorizationMetadata.scope
+              });
+            }
+            authorizationDecision = await this.toolAuthorization.authorize({
+              toolName: toolCall.function.name,
+              args: toolArgs,
+              language: request.language,
+              policy: runAuthorizationPolicy
+            });
+            trace.record({
+              type: 'tool_authorization_decision',
+              toolCallId: toolCall.id,
+              decision: authorizationDecision,
+              runAuthorizedScopes: [...runAuthorizationPolicy.authorizedScopes],
+              runDeniedScopes: [...runAuthorizationPolicy.deniedScopes]
+            });
+            if (!authorizationDecision.allowed) {
+              rawToolResult = createAuthorizationDeniedToolResult(authorizationDecision);
+            } else if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && validationRunCount >= runtimeConfig.maxValidationRuns) {
+              rawToolResult = JSON.stringify({
+                ok: false,
+                error: request.language === 'en'
+                  ? `The controlled validation budget of ${runtimeConfig.maxValidationRuns} run(s) was reached.`
+                  : `本轮受控验证预算已达到 ${runtimeConfig.maxValidationRuns} 次上限。`,
+                budgetReason: 'validation_run_limit_exhausted'
+              });
+            } else {
+              if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME) {
+                validationRunCount += 1;
+                const script = this.readSafeNpmScript(toolArgs, 'script');
+                repairLoop.startValidation(script);
+                trace.record({
+                  type: 'validation_tool_call',
+                  toolCallId: toolCall.id,
+                  validationRunCount,
+                  maxValidationRuns: runtimeConfig.maxValidationRuns,
+                  repairIteration: repairLoop.getState().iteration
+                });
+              }
+              rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language, {
+                signal: request.signal,
+                runDeadlineAt,
+                authorization: authorizationDecision
+              });
+            }
+          }
+        } catch (error) {
           rawToolResult = JSON.stringify({
             ok: false,
-            error: request.language === 'en'
-              ? `The controlled validation budget of ${runtimeConfig.maxValidationRuns} run(s) was reached.`
-              : `本轮受控验证预算已达到 ${runtimeConfig.maxValidationRuns} 次上限。`,
-            budgetReason: 'validation_run_limit_exhausted'
-          });
-        } else {
-          if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME) {
-            validationRunCount += 1;
-            trace.record({
-              type: 'validation_tool_call',
-              toolCallId: toolCall.id,
-              validationRunCount,
-              maxValidationRuns: runtimeConfig.maxValidationRuns
-            });
-          }
-          rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language, {
-            signal: request.signal,
-            runDeadlineAt
+            error: error instanceof Error ? error.message : String(error)
           });
         }
         taskPlan.finishTool(toolCall.function.name, rawToolResult);
+        if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME) {
+          const repairOutcome = repairLoop.recordValidationResult(rawToolResult);
+          if (repairOutcome.failed && repairOutcome.limitReached) {
+            taskPlan.markRepairLimitReached(repairOutcome.summary ?? 'Repair iteration limit reached.');
+          } else if (repairOutcome.failed) {
+            const state = repairLoop.getState();
+            taskPlan.beginRepair(state.iteration, state.maxIterations, repairOutcome.summary);
+          }
+        } else if (toolCall.function.name === READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME) {
+          repairLoop.recordProblemsRead();
+          taskPlan.markProblemsRead();
+        } else if (toolCall.function.name === CREATE_DRAFT_EDIT_TOOL_NAME) {
+          const draftEditId = readDraftEditId(rawToolResult);
+          if (draftEditId && repairLoop.getState().status === 'generating_repair') {
+            repairLoop.recordDraftEdit(draftEditId);
+            const detail = request.language === 'en'
+              ? 'Repair prepared. Apply the pending ChangeSet before validation can continue.'
+              : '修复已准备。请先应用待确认 ChangeSet，之后才能继续验证。';
+            taskPlan.markWaitingForApply(detail);
+            emitStatus({ base: 'waiting', phase: 'waiting_for_apply', toolName: toolCall.function.name, detail });
+          }
+        }
         if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME || toolCall.function.name === READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME) {
           trace.record({
             type: 'validation_tool_result',
+            toolCallId: toolCall.id,
+            toolName: toolCall.function.name,
+            content: trace.includesPayload('request') ? rawToolResult : summarizeText(rawToolResult)
+          });
+        }
+        if (isGitToolName(toolCall.function.name)) {
+          trace.record({
+            type: 'git_tool_result',
             toolCallId: toolCall.id,
             toolName: toolCall.function.name,
             content: trace.includesPayload('request') ? rawToolResult : summarizeText(rawToolResult)
@@ -1337,6 +1468,17 @@ export class AgentRunner {
         return 'creating_draft_edit';
       case READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME:
         return 'reading_diagnostics';
+      case FIND_SYMBOL_TOOL_NAME:
+      case FIND_REFERENCES_TOOL_NAME:
+      case GET_DOCUMENT_SYMBOLS_TOOL_NAME:
+      case GET_WORKSPACE_SYMBOLS_TOOL_NAME:
+        return 'reading_semantic_context';
+      case GIT_STATUS_TOOL_NAME:
+      case GIT_DIFF_TOOL_NAME:
+      case GIT_CURRENT_BRANCH_TOOL_NAME:
+      case GIT_CREATE_PATCH_TOOL_NAME:
+      case GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME:
+        return 'reading_git_state';
       case RUN_VALIDATION_TOOL_NAME:
         return 'running_validation';
       default:
@@ -1348,7 +1490,7 @@ export class AgentRunner {
     toolCall: DeepSeekToolCall,
     draftEdits: DraftEdit[],
     language: KeepseekLanguage,
-    options: { signal?: AbortSignal; runDeadlineAt?: number } = {}
+    options: { signal?: AbortSignal; runDeadlineAt?: number; authorization?: ToolAuthorizationDecision } = {}
   ): Promise<string> {
     try {
       const args = this.parseToolArguments(toolCall.function.arguments);
@@ -1382,13 +1524,64 @@ export class AgentRunner {
           return await this.workspaceTools.readWorkspaceFile(this.readRequiredString(args, 'path'), language);
         case READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME:
           return await this.validationTools.readWorkspaceDiagnostics(language);
+        case FIND_SYMBOL_TOOL_NAME:
+          return await this.semanticTools.findSymbol({
+            query: this.readRequiredString(args, 'query'),
+            path: this.readOptionalString(args, 'path'),
+            maxResults: this.readOptionalNumber(args, 'maxResults')
+          }, language);
+        case FIND_REFERENCES_TOOL_NAME:
+          return await this.semanticTools.findReferences({
+            path: this.readRequiredString(args, 'path'),
+            line: this.readRequiredNumber(args, 'line'),
+            column: this.readRequiredNumber(args, 'column'),
+            includeDeclaration: this.readOptionalBoolean(args, 'includeDeclaration', false),
+            maxResults: this.readOptionalNumber(args, 'maxResults')
+          }, language);
+        case GET_DOCUMENT_SYMBOLS_TOOL_NAME:
+          return await this.semanticTools.getDocumentSymbols({
+            path: this.readRequiredString(args, 'path'),
+            maxResults: this.readOptionalNumber(args, 'maxResults')
+          }, language);
+        case GET_WORKSPACE_SYMBOLS_TOOL_NAME:
+          return await this.semanticTools.getWorkspaceSymbols({
+            query: this.readRequiredString(args, 'query'),
+            maxResults: this.readOptionalNumber(args, 'maxResults')
+          }, language);
+        case GIT_STATUS_TOOL_NAME:
+          return await this.gitTools.getStatus({ workspaceFolder: this.readOptionalString(args, 'workspaceFolder') }, language);
+        case GIT_CURRENT_BRANCH_TOOL_NAME:
+          return await this.gitTools.getCurrentBranch({ workspaceFolder: this.readOptionalString(args, 'workspaceFolder') }, language);
+        case GIT_DIFF_TOOL_NAME:
+          return await this.gitTools.getDiff({
+            workspaceFolder: this.readOptionalString(args, 'workspaceFolder'),
+            staged: this.readOptionalBoolean(args, 'staged', false),
+            path: this.readOptionalString(args, 'path'),
+            maxChars: this.readOptionalNumber(args, 'maxChars')
+          }, language);
+        case GIT_CREATE_PATCH_TOOL_NAME:
+          return await this.gitTools.createPatch({
+            workspaceFolder: this.readOptionalString(args, 'workspaceFolder'),
+            staged: this.readOptionalBoolean(args, 'staged', false),
+            path: this.readOptionalString(args, 'path')
+          }, language);
+        case GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME:
+          return await this.gitTools.suggestCommitMessage({ workspaceFolder: this.readOptionalString(args, 'workspaceFolder') }, language);
         case RUN_VALIDATION_TOOL_NAME:
+          if (!options.authorization) {
+            return JSON.stringify({
+              ok: false,
+              errorType: 'authorization_denied',
+              error: 'Validation requires a ToolAuthorizationDecision.'
+            });
+          }
           return await this.validationTools.runSafeNpmScript({
             script: this.readSafeNpmScript(args, 'script'),
             workspaceFolder: this.readOptionalString(args, 'workspaceFolder'),
             language,
             signal: options.signal,
-            runDeadlineAt: options.runDeadlineAt
+            runDeadlineAt: options.runDeadlineAt,
+            authorization: options.authorization
           });
         case CREATE_DRAFT_EDIT_TOOL_NAME:
           return await this.createDraftEdit(args, draftEdits, language);
@@ -1994,6 +2187,28 @@ export class AgentRunner {
     return language === 'en' ? 'DeepSeek did not return text content.' : 'DeepSeek 未返回文本内容。';
   }
 
+  private decorateRepairMessage(
+    message: string,
+    state: ReturnType<RepairLoopTracker['getState']>,
+    language: KeepseekLanguage
+  ): string {
+    const text = message.trim();
+    if (state.status === 'waiting_for_apply') {
+      const notice = language === 'en'
+        ? 'Validation is paused. Review and apply the pending ChangeSet, then use “Continue repair validation” to test the real updated workspace.'
+        : '验证已暂停。请审核并应用待确认 ChangeSet，然后点击“继续验证修复”，对真实更新后的工作区进行验证。';
+      return text.includes(notice) ? text : [text, notice].filter(Boolean).join('\n\n');
+    }
+    if (state.stopReason === 'repair_iteration_limit') {
+      const failure = state.lastFailureSummary ? ` ${state.lastFailureSummary}` : '';
+      const notice = language === 'en'
+        ? `Automatic repair stopped after reaching the ${state.maxIterations}-iteration limit.${failure}`
+        : `自动修复达到 ${state.maxIterations} 轮上限，已停止。${failure}`;
+      return [text, notice].filter(Boolean).join('\n\n');
+    }
+    return text;
+  }
+
   private getRunTimeLimitError(maxRunMs: number, language: KeepseekLanguage): string {
     const seconds = maxRunMs > 0 ? Math.round(maxRunMs / 1000) : 0;
     if (language === 'en') {
@@ -2123,7 +2338,8 @@ export class AgentRunner {
       contextCompression: profile.contextCompression,
       maxRequestRetries: getConfiguredMaxRequestRetries(),
       requestRetryBaseMs: getConfiguredRequestRetryBaseMs(),
-      maxValidationRuns: getConfiguredMaxValidationRuns()
+      maxValidationRuns: getConfiguredMaxValidationRuns(),
+      maxRepairIterations: getConfiguredMaxRepairIterations()
     };
   }
 
@@ -2173,6 +2389,31 @@ function readFiniteNumber(value: unknown, fallback: number): number {
 
 function readOptionalFiniteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function readDraftEditId(rawResult: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(rawResult);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return undefined;
+    }
+    const draftEdit = (parsed as Record<string, unknown>).draftEdit;
+    if (!draftEdit || typeof draftEdit !== 'object' || Array.isArray(draftEdit)) {
+      return undefined;
+    }
+    const id = (draftEdit as Record<string, unknown>).id;
+    return typeof id === 'string' && id ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isGitToolName(toolName: string): boolean {
+  return toolName === GIT_STATUS_TOOL_NAME
+    || toolName === GIT_DIFF_TOOL_NAME
+    || toolName === GIT_CURRENT_BRANCH_TOOL_NAME
+    || toolName === GIT_CREATE_PATCH_TOOL_NAME
+    || toolName === GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME;
 }
 
 function hashStableText(value: string): string {

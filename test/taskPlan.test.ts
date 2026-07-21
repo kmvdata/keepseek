@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { TaskPlanTracker } from '../src/agent/taskPlan';
+import { markTaskPlanReadyForValidation, TaskPlanTracker } from '../src/agent/taskPlan';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
@@ -50,4 +50,26 @@ test('a later successful validation clears the earlier validation blocker', () =
   const plan = tracker.complete('Validation passed after the fix.');
   assert.equal(plan.status, 'completed');
   assert.deepEqual(plan.blockers, []);
+});
+
+test('moves a paused repair plan from ChangeSet apply to ready validation', () => {
+  const tracker = new TaskPlanTracker({
+    runId: 'run-repair',
+    sessionId: 'session-repair',
+    prompt: 'Fix compile errors',
+    language: 'en'
+  });
+  tracker.beginExecution();
+  tracker.beginRepair(1, 2, 'compile failed');
+  tracker.markProblemsRead();
+  tracker.markGeneratingRepair();
+  tracker.markWaitingForApply('Apply the repair ChangeSet.');
+
+  const ready = markTaskPlanReadyForValidation(tracker.getPlan(), 'en');
+
+  assert.equal(ready.status, 'running');
+  assert.equal(ready.currentStepId, 'repair_validate');
+  assert.equal(ready.steps.find((step) => step.id === 'repair_wait_apply')?.status, 'completed');
+  assert.equal(ready.steps.find((step) => step.id === 'repair_validate')?.status, 'in_progress');
+  assert.deepEqual(ready.blockers, []);
 });

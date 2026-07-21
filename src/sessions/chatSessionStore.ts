@@ -7,6 +7,7 @@ import {
   ChatSessionSummary,
   ContextCompressionState,
   HistorySummary,
+  RepairLoopState,
   WorkspaceSummary
 } from '../shared/types';
 import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from '../shared/i18n';
@@ -144,6 +145,7 @@ export class ChatSessionStore {
       id: randomUUID(),
       messages: source.messages.map(copyMessage),
       contextCompression: undefined,
+      repairLoop: undefined,
       lastTraceLogUri: undefined,
       createdAt: now,
       updatedAt: now,
@@ -516,6 +518,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       messages,
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
       contextCompression: normalizeContextCompressionState(item.contextCompression),
+      repairLoop: normalizeRepairLoopState(item.repairLoop),
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
       usageStats: normalizeSessionUsageStatsValue(item.usageStats),
       lastTurnUsage: normalizeTurnUsageStatsValue(item.lastTurnUsage),
@@ -658,6 +661,52 @@ function normalizeContextCompressionState(value: unknown): ContextCompressionSta
     protectedMessageIds,
     lastCompressedAt,
     lastFailureReason
+  };
+}
+
+function normalizeRepairLoopState(value: unknown): RepairLoopState | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const statuses: RepairLoopState['status'][] = [
+    'idle',
+    'validation_failed',
+    'reading_problems',
+    'generating_repair',
+    'waiting_for_apply',
+    'ready_for_validation',
+    'running_validation',
+    'completed',
+    'blocked'
+  ];
+  const status = statuses.includes(value.status as RepairLoopState['status'])
+    ? value.status as RepairLoopState['status']
+    : undefined;
+  if (!status) {
+    return undefined;
+  }
+  const scripts = ['compile', 'lint', 'test'];
+  const stopReasons: NonNullable<RepairLoopState['stopReason']>[] = [
+    'waiting_for_apply',
+    'repair_iteration_limit',
+    'validation_passed',
+    'authorization_denied',
+    'repair_discarded'
+  ];
+  return {
+    status,
+    iteration: normalizePositiveInteger(value.iteration, 0),
+    maxIterations: normalizePositiveInteger(value.maxIterations, 2),
+    lastValidationScript: scripts.includes(String(value.lastValidationScript))
+      ? value.lastValidationScript as RepairLoopState['lastValidationScript']
+      : undefined,
+    lastFailureSummary: typeof value.lastFailureSummary === 'string'
+      ? value.lastFailureSummary.slice(0, 1000)
+      : undefined,
+    pendingDraftEditIds: normalizeStringArray(value.pendingDraftEditIds),
+    stopReason: stopReasons.includes(value.stopReason as NonNullable<RepairLoopState['stopReason']>)
+      ? value.stopReason as RepairLoopState['stopReason']
+      : undefined
   };
 }
 
