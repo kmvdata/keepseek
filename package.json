@@ -3,7 +3,7 @@
   "displayName": "KeepSeek",
   "description": "AI-powered coding agent for VS Code",
   "publisher": "keepseek",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "license": "MIT",
   "icon": "resources/keepseek.png",
   "homepage": "https://github.com/kmvdata/keepseek#readme",
@@ -19,146 +19,35 @@
   },
   "categories": [
     "Chat",
-    "Machine Learning",
     "Other"
   ],
   "keywords": [
+    "ai",
     "deepseek",
-    "agent",
-    "coding",
-    "ai"
-  ],
-  "qna": "marketplace",
-  "galleryBanner": {
-    "color": "#1C1C1C",
-    "theme": "dark"
-  },
-  "activationEvents": [
-    "onView:keepseek.chat",
-    "onStartupFinished"
+    "coding agent",
+    "chat"
   ],
   "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "commands": [
       {
         "command": "keepseek.focus",
-        "title": "KeepSeek: Focus on KeepSeek View"
-      },
-      {
-        "command": "keepseek.newChat",
-        "title": "KeepSeek: New Chat"
-      },
-      {
-        "command": "keepseek.toggleMode",
-        "title": "KeepSeek: Toggle Mode"
-      },
-      {
-        "command": "keepseek.clearHistory",
-        "title": "KeepSeek: Clear All History"
-      },
-      {
-        "command": "keepseek.selectRange",
-        "title": "KeepSeek: Select Range to Ask"
-      },
-      {
-        "command": "keepseek.openChat",
-        "title": "KeepSeek: Open Chat"
-      },
-      {
-        "command": "keepseek.addCurrentFileToContext",
-        "title": "KeepSeek: Add Current File to Context"
-      },
-      {
-        "command": "keepseek.pickWorkspaceFilesToContext",
-        "title": "KeepSeek: Add Workspace Files to Context"
-      },
-      {
-        "command": "keepseek.pickExternalFilesToContext",
-        "title": "KeepSeek: Add External Files to Context"
+        "title": "Open KeepSeek"
       },
       {
         "command": "keepseek.addSelectionToContext",
-        "title": "KeepSeek: Add Selection to Chat"
-      },
-      {
-        "command": "keepseek.addTerminalSelectionToContext",
-        "title": "KeepSeek: Add Terminal Selection to Chat"
-      },
-      {
-        "command": "keepseek.addDebugConsoleSelectionToContext",
-        "title": "KeepSeek: Add Debug Console Selection to Chat"
+        "title": "KeepSeek: Add Selection to Context"
       },
       {
         "command": "keepseek.addExplorerFileToContext",
-        "title": "KeepSeek: Add File to Chat"
+        "title": "KeepSeek: Add File to Context"
       },
       {
         "command": "keepseek.addExplorerDirectoryToContext",
-        "title": "KeepSeek: Add Folder to Chat"
-      }
-    ],
-    "menus": {
-      "editor/context": [
-        {
-          "command": "keepseek.addSelectionToContext",
-          "when": "editorHasSelection",
-          "group": "keepseek@1"
-        }
-      ],
-      "explorer/context": [
-        {
-          "command": "keepseek.addExplorerFileToContext",
-          "when": "!explorerResourceIsFolder",
-          "group": "keepseek@1"
-        },
-        {
-          "command": "keepseek.addExplorerDirectoryToContext",
-          "when": "explorerResourceIsFolder",
-          "group": "keepseek@2"
-        }
-      ],
-      "terminal/context": [
-        {
-          "command": "keepseek.addTerminalSelectionToContext",
-          "when": "terminalTextSelected",
-          "group": "keepseek@1"
-        }
-      ]
-    },
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "keepseek-sidebar",
-          "title": "KeepSeek",
-          "icon": "resources/keepseek.svg"
-        }
-      ]
-    },
-    "views": {
-      "keepseek-sidebar": [
-        {
-          "type": "webview",
-          "id": "keepseek.chat",
-          "name": "Chat",
-          "icon": "resources/keepseek.svg"
-        }
-      ]
-    },
-    "keybindings": [
-      {
-        "command": "keepseek.focus",
-        "key": "alt+k",
-        "mac": "alt+k"
-      },
-      {
-        "command": "keepseek.newChat",
-        "key": "alt+shift+k",
-        "mac": "alt+shift+k"
-      },
-      {
-        "command": "keepseek.selectRange",
-        "key": "alt+l",
-        "mac": "alt+l"
+        "title": "KeepSeek: Add Explorer Folder to Chat"
       }
     ],
     "configuration": {
@@ -167,184 +56,183 @@
         "keepseek.apiKey": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Your DeepSeek API key. If set, this takes precedence over the `DEEPSEEK_API_KEY` environment variable.\n\nIf both are empty, KeepSeek will prompt you to enter the key on first use."
+          "description": "DeepSeek API key"
         },
-        "keepseek.baseUrl": {
+        "keepseek.apiBaseUrl": {
           "type": "string",
           "default": "https://api.deepseek.com",
-          "scope": "application",
-          "markdownDescription": "Base URL for the DeepSeek V4 API. Defaults to `https://api.deepseek.com`."
+          "description": "DeepSeek API base URL"
         },
-        "keepseek.selectedModelId": {
+        "keepseek.model": {
           "type": "string",
-          "default": "",
-          "scope": "window",
-          "markdownDescription": "Selected model for the current workspace. An empty or unavailable value falls back to the first supported model."
-        },
-        "keepseek.thinkingEnabled": {
-          "type": "boolean",
-          "default": true,
-          "scope": "window",
-          "markdownDescription": "Enable Thinking mode for the current workspace."
-        },
-        "keepseek.reasoningEffort": {
-          "type": "string",
-          "default": "high",
-          "scope": "window",
-          "enum": [
-            "high",
-            "max"
-          ],
-          "markdownDescription": "Thinking effort for the current workspace."
-        },
-        "keepseek.systemPrompt": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Custom system prompt to prepend to all conversations."
-        },
-        "keepseek.useGit": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Enable Git integration for context-aware suggestions."
-        },
-        "keepseek.useActiveEditor": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Include active editor content as context automatically."
-        },
-        "keepseek.projectInstructions.contextBudgetTokens": {
-          "type": "number",
-          "default": 4000,
-          "minimum": 0,
-          "maximum": 32000,
-          "scope": "window",
-          "markdownDescription": "Maximum estimated tokens used by root AGENTS.md project instructions in each Agent run."
-        },
-        "keepseek.skills.contextBudgetChars": {
-          "type": "number",
-          "default": 72000,
-          "minimum": 0,
-          "maximum": 200000,
-          "scope": "window",
-          "markdownDescription": "Maximum total characters used by activated Codex-compatible Skill instructions in each Agent run. Skill scripts are never executed."
-        },
-        "keepseek.skills.maxImplicitActivations": {
-          "type": "number",
-          "default": 3,
-          "minimum": 0,
-          "maximum": 8,
-          "scope": "window",
-          "markdownDescription": "Maximum number of allowImplicit Skills that deterministic request matching may activate per Agent run."
-        },
-        "keepseek.background.maxRounds": {
-          "type": "number",
-          "default": 5,
-          "minimum": 1,
-          "maximum": 10,
-          "scope": "window",
-          "markdownDescription": "Maximum number of Agent rounds for a VS Code background repair task."
-        },
-        "keepseek.background.maxDurationMs": {
-          "type": "number",
-          "default": 1800000,
-          "minimum": 60000,
-          "maximum": 3600000,
-          "scope": "window",
-          "markdownDescription": "Maximum total duration of a background repair task in milliseconds."
-        },
-        "keepseek.background.maxToolCalls": {
-          "type": "number",
-          "default": 60,
-          "minimum": 1,
-          "maximum": 256,
-          "scope": "window",
-          "markdownDescription": "Maximum cumulative tool calls across all rounds of a background repair task."
-        },
-        "keepseek.maxHistoryMessages": {
-          "type": "number",
-          "default": 80,
-          "markdownDescription": "Maximum number of chat history messages to retain per session."
+          "default": "deepseek-chat",
+          "description": "Model name for chat completions"
         },
         "keepseek.language": {
           "type": "string",
           "default": "auto",
           "enum": [
             "auto",
-            "en",
             "zh-CN",
-            "zh-TW",
-            "ja",
-            "ko"
+            "en-US"
           ],
-          "markdownDescription": "Language preference. `auto` follows VS Code display language."
+          "description": "Language for KeepSeek UI and replies"
         },
-        "keepseek.validation.authorizationPolicy": {
-          "type": "string",
-          "default": "ask",
-          "scope": "window",
-          "enum": [
-            "never",
-            "ask",
-            "always"
-          ],
-          "enumDescriptions": [
-            "Never let the agent run validation tasks.",
-            "Ask once per validation scope (compile/lint or test) for each Agent run.",
-            "Allow the fixed compile, lint, and test scripts without prompting."
-          ],
-          "markdownDescription": "Medium-risk authorization policy for KeepSeek's controlled validation tools. In `ask` mode, compile/lint and test are authorized separately for each Agent run. Only fixed `npm run compile`, `npm run lint`, and `npm run test` tasks are eligible; arbitrary shell commands remain unavailable."
-        },
-        "keepseek.validation.maxRunsPerAgentRun": {
+        "keepseek.maxTokens": {
           "type": "number",
-          "default": 3,
+          "default": 8192,
+          "minimum": 256,
+          "maximum": 65536,
+          "description": "Maximum tokens per response"
+        },
+        "keepseek.maxFileBytes": {
+          "type": "number",
+          "default": 65536,
+          "minimum": 1024,
+          "maximum": 524288,
+          "description": "Maximum file size in bytes for context files"
+        },
+        "keepseek.maxContextFiles": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Maximum number of context files"
+        },
+        "keepseek.contextCompressionEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable context compression for long conversations"
+        },
+        "keepseek.contextKeepRecentTurns": {
+          "type": "number",
+          "default": 12,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Number of recent user turns to keep in projection"
+        },
+        "keepseek.contextCompressionTriggerRatio": {
+          "type": "number",
+          "default": 0.8,
+          "minimum": 0.5,
+          "maximum": 1.0,
+          "description": "Context usage ratio to trigger summary refresh"
+        },
+        "keepseek.contextSummaryBudgetTokens": {
+          "type": "number",
+          "default": 512,
+          "minimum": 128,
+          "maximum": 4096,
+          "description": "Token budget for summary generation"
+        },
+        "keepseek.historyRetentionDays": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 365,
+          "description": "Days to keep session history in the picker"
+        },
+        "keepseek.maxToolIterations": {
+          "type": "number",
+          "default": 8,
           "minimum": 0,
-          "maximum": 8,
-          "scope": "window",
-          "markdownDescription": "Maximum number of controlled validation tasks an Agent run may start. Set to 0 to disable validation execution."
+          "maximum": 64,
+          "description": "Maximum tool call iterations per run"
+        },
+        "keepseek.maxToolCalls": {
+          "type": "number",
+          "default": 24,
+          "minimum": 0,
+          "maximum": 256,
+          "description": "Maximum total tool calls per run"
+        },
+        "keepseek.maxRunMs": {
+          "type": "number",
+          "default": 600000,
+          "minimum": 0,
+          "maximum": 3600000,
+          "description": "Maximum run duration in milliseconds"
+        },
+        "keepseek.toolResultTokenBudget": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1000000,
+          "description": "Tool result token budget (0 = auto)"
+        },
+        "keepseek.thinkingMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable thinking/reasoning mode"
+        },
+        "keepseek.reasoningEffort": {
+          "type": "string",
+          "default": "medium",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "description": "Reasoning effort level for thinking mode"
         },
         "keepseek.validation.maxRepairIterations": {
           "type": "number",
-          "default": 2,
+          "default": 3,
           "minimum": 0,
-          "maximum": 5,
-          "scope": "window",
-          "markdownDescription": "Maximum number of validation-failure repair attempts in one Agent run. Repairs remain pending ChangeSets and validation pauses until the user applies them."
-        },
-        "keepseek.validation.timeoutMs": {
-          "type": "number",
-          "default": 120000,
-          "minimum": 1000,
-          "maximum": 600000,
-          "scope": "window",
-          "markdownDescription": "Maximum duration in milliseconds for each controlled validation task."
+          "maximum": 10,
+          "description": "Maximum repair iterations per validation failure"
         }
       }
-    }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "when": "editorHasSelection",
+          "command": "keepseek.addSelectionToContext",
+          "group": "KeepSeek@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "when": "!explorerResourceIsFolder",
+          "command": "keepseek.addExplorerFileToContext",
+          "group": "KeepSeek@1"
+        },
+        {
+          "when": "explorerResourceIsFolder",
+          "command": "keepseek.addExplorerDirectoryToContext",
+          "group": "KeepSeek@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "keepseek.focus",
+        "key": "ctrl+shift+k",
+        "mac": "cmd+shift+k"
+      }
+    ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run build",
-    "clean": "node scripts/clean.js",
     "compile": "tsc -p tsconfig.json",
-    "build": "npm run clean && tsc -p tsconfig.json",
-    "build:test": "tsc -p tsconfig.test.json",
-    "build:prod": "npm run build",
-    "watch": "tsc -watch -p tsconfig.json",
-    "lint": "eslint src/ test/",
+    "lint": "eslint src/",
+    "build:test": "tsc -p tsconfig.test.json --outDir out-test",
     "test": "node out-test/test/runTests.js",
-    "package": "npx @vscode/vsce package --allow-missing-repository && npm run package:verify",
-    "package:verify": "node scripts/verify-vsix.js",
+    "vscode:prepublish": "npm run compile",
+    "package": "node scripts/verify-vsix.js",
     "reinstall:vsix": "node scripts/reinstall-vsix.js"
   },
-  "devDependencies": {
-    "@types/mocha": "^10.0.10",
-    "@types/node": "^22.14.0",
-    "@types/vscode": "^1.98.0",
-    "@vscode/vsce": "^3.9.2",
-    "eslint": "^9.24.0",
-    "neostandard": "^0.12.1",
-    "typescript": "^5.8.3"
-  },
   "dependencies": {
-    "ignore": "^7.0.6"
+    "ignore": "^5.3.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.98.0",
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0",
+    "@types/mocha": "^10.0.0",
+    "eslint": "^9.0.0",
+    "@eslint/js": "^9.0.0",
+    "typescript-eslint": "^8.0.0",
+    "vsce": "^2.15.0"
   }
 }

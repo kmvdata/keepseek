@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.9 - 2026-07-19
+
+- Created comprehensive `AGENTS.md` as the root-level project instruction and single source of truth for KeepSeek architecture and maintenance conventions.
+- Documented the full codebase structure, core responsibilities (presentation/orchestration/business/protocol layers), communication flows, and design principles.
+- Formalized the deterministic runtime context priority system: KeepSeek core security → user request → AGENTS.md → explicit Skill → session Skill → workspace-default Skill → implicit Skill → Legacy Project Memory.
+- Added new runtime infrastructure modules:
+  - `currentRunContext.ts` for unified dynamic project context construction, sorting, deduplication, and budget trimming.
+  - `repairLoop.ts` for validation-failure state machine with repair iteration tracking and `waiting_for_apply` guard.
+  - `projectInstructions.ts` for safe root `AGENTS.md` reading with file-size and token-budget limits.
+  - `contextDeduplication.ts` for URI-normalized and SHA-256 content-hash based context deduplication.
+  - `tokenEstimate.ts` for lightweight token estimation.
+  - `usageStats.ts` for Agent run token/cost tracking and prompt-cache diagnostics.
+  - `agentRequestCoordinator.ts` and `backgroundRunCoordinator.ts` for run lifecycle management.
+- Added Skill system modules: `skillActivationResolver.ts`, `skillDiscovery.ts`, `skillLoader.ts`, `skillStore.ts`, `skillCreator.ts`, `skillReference.ts` with deterministic activation order and implicit-activation safety guards.
+- Added Legacy Project Memory migration support via `legacyProjectMemoryFormat.ts` and `legacyProjectMemoryMigration.ts`, ensuring read-only injection and ChangeSet-based migration without deleting legacy files.
+- Added `shared/modelProfiles.ts` for DeepSeek V4 and Thinking model profile definitions with fixed runtime limits.
+- Enhanced `shared/i18n.ts`, `shared/types.ts`, `shared/config.ts` with expanded configuration surface and localized messaging.
+- Expanded Agent tool catalog with semantic tools (symbol/reference providers), validation tools (Problems + controlled npm scripts), and Git tools (VS Code Git API with read-only fallback).
+- Updated runtime documentation (`doc/keepseek-agent-runtime-workflow.md`) and user-facing `README.md` for the post-refactor architecture.
+
 ## 0.1.8 - 2026-07-16
 
 - Persisted the selected model, Thinking mode, and reasoning effort for each workspace across VS Code restarts.

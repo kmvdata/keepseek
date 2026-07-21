@@ -1,4 +1,4 @@
 {
-    "keepseek.thinkingEnabled": true,
+    "keepseek.thinkingEnabled": false,
     "keepseek.reasoningEffort": "max"
 }
