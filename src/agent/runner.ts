@@ -9,12 +9,14 @@ import {
   ContextUsageEstimate,
   DraftEdit,
   PromptCacheDiagnostics,
+  SafeNpmScript,
   TurnUsageStats,
   UsageEvent
 } from '../shared/types';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
   getConfiguredMaxRequestRetries,
+  getConfiguredMaxValidationRuns,
   getConfiguredModelUsagePricing,
   getConfiguredRequestRetryBaseMs,
   getConfiguredSlimToolModeEnabled
@@ -32,8 +34,10 @@ import {
   getAgentTools,
   LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
   LIST_WORKSPACE_FILES_TOOL_NAME,
+  READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
+  RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME
 } from './protocol';
 import { buildHistoryProjection } from './historyProjection';
@@ -43,6 +47,7 @@ import {
   resolveOutputReserveTokens
 } from './contextUsage';
 import { WorkspaceToolAdapter, WorkspaceToolService } from './tools/workspaceTools';
+import { ValidationToolAdapter, ValidationToolService } from './tools/validationTools';
 import type { KeepseekLanguage } from '../shared/i18n';
 import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
 import { DsmlToolParser } from './deepseek/dsmlToolParser';
@@ -71,6 +76,8 @@ import {
   createUsageEvent,
   normalizeDeepSeekUsage
 } from './usageStats';
+import { TaskPlanTracker } from './taskPlan';
+import { createChangeSet } from '../edits/changeSet';
 
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;
 const MAX_LENGTH_CONTINUATION_REQUESTS = 1;
@@ -99,6 +106,7 @@ interface AgentRuntimeConfig {
   contextCompression: ContextCompressionSettings;
   maxRequestRetries: number;
   requestRetryBaseMs: number;
+  maxValidationRuns: number;
 }
 
 type AgentBudgetFinishReason =
@@ -179,7 +187,8 @@ export class AgentRunner {
 
   public constructor(
     private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService(),
-    private readonly traceLogService?: InteractionTraceLogService
+    private readonly traceLogService?: InteractionTraceLogService,
+    private readonly validationTools: ValidationToolAdapter = new ValidationToolService()
   ) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
@@ -193,6 +202,14 @@ export class AgentRunner {
     if (traceLog) {
       callbacks.onTraceLog?.(traceLog);
     }
+    const taskPlan = new TaskPlanTracker({
+      runId: trace.runId,
+      sessionId: request.sessionId,
+      prompt: request.prompt,
+      language: request.language,
+      onChange: callbacks.onTaskPlan,
+      recordTrace: (event) => trace.record(event)
+    });
     const toolResultLedger: ToolResultLedgerEntry[] = [];
     const usagePricing = getConfiguredModelUsagePricing(request.model.id);
     const upstreamUsageTotals: UpstreamUsageTotals = {
@@ -252,9 +269,32 @@ export class AgentRunner {
           }
         : undefined
     });
-    const finishRun = (response: AgentResponse, details: Record<string, unknown> = {}): AgentResponse => {
+    const finishRun = (
+      response: Omit<AgentResponse, 'runId' | 'taskPlan' | 'changeSet'>,
+      details: Record<string, unknown> = {}
+    ): AgentResponse => {
+      const finishReason = typeof details.finishReason === 'string' ? details.finishReason : undefined;
+      const isBlocked = finishReason === 'tool_iterations_exhausted'
+        || finishReason === 'tool_call_limit_exhausted'
+        || finishReason === 'tool_result_budget_exhausted'
+        || finishReason === 'run_time_limit_exhausted';
+      if (isBlocked && finishReason) {
+        taskPlan.addBlocker(this.getBudgetToolError(finishReason as AgentBudgetFinishReason, request.language));
+      }
+      const completedPlan = taskPlan.complete(response.message, isBlocked);
+      const changeSet = createChangeSet({
+        runId: trace.runId,
+        sessionId: request.sessionId,
+        messageId: request.assistantMessageId,
+        traceLogUri: traceLog?.uri,
+        edits: response.draftEdits,
+        operationSummary: completedPlan.goal
+      });
       const responseWithUsage: AgentResponse = {
+        runId: trace.runId,
         ...response,
+        taskPlan: completedPlan,
+        changeSet,
         usage: response.usage ?? this.toTurnUsageStats(upstreamUsageTotals, request.model.id),
         promptCacheDiagnostics: response.promptCacheDiagnostics ?? promptCacheDiagnostics
       };
@@ -280,6 +320,23 @@ export class AgentRunner {
               }))
             }
       });
+      if (changeSet) {
+        trace.record({
+          type: 'change_set_created',
+          changeSetId: changeSet.id,
+          sessionId: changeSet.sessionId,
+          messageId: changeSet.messageId,
+          fileCount: changeSet.fileCount,
+          operationSummary: changeSet.operationSummary,
+          files: changeSet.files.map((file) => ({
+            id: file.id,
+            uri: file.uri,
+            label: file.label,
+            action: file.action,
+            reason: file.reason
+          }))
+        });
+      }
       return traceLog ? { ...responseWithUsage, traceLog } : responseWithUsage;
     };
 
@@ -293,11 +350,14 @@ export class AgentRunner {
     const draftEdit = await this.tryCreateDraftEdit(request.prompt, request.language);
     this.throwIfAborted(request.signal, request.language);
     if (draftEdit) {
+      taskPlan.beginExecution();
+      taskPlan.startTool(CREATE_DRAFT_EDIT_TOOL_NAME);
       emitStatus({
         base: 'executing',
         phase: 'creating_draft_edit',
         toolName: CREATE_DRAFT_EDIT_TOOL_NAME
       });
+      taskPlan.finishTool(CREATE_DRAFT_EDIT_TOOL_NAME, JSON.stringify({ ok: true }));
       emitStatus({
         base: 'thinking',
         phase: 'finalizing'
@@ -317,6 +377,7 @@ export class AgentRunner {
     }
 
     const runtimeConfig = this.getRuntimeConfig(request);
+    taskPlan.beginExecution();
     const projection = buildHistoryProjection({
       history: request.history,
       prompt: request.prompt,
@@ -403,6 +464,7 @@ export class AgentRunner {
       }));
     };
     let toolCallCount = 0;
+    let validationRunCount = 0;
     let toolResultTokens = 0;
     let budgetStopReason: AgentBudgetFinishReason | undefined;
     let budgetStopInstructionQueued = false;
@@ -566,12 +628,45 @@ export class AgentRunner {
         }
 
         toolCallCount += 1;
+        taskPlan.startTool(toolCall.function.name);
         emitStatus({
           base: 'executing',
           phase: this.getToolActivityPhase(toolCall.function.name),
           toolName: toolCall.function.name
         });
-        const rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language);
+        let rawToolResult: string;
+        if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && validationRunCount >= runtimeConfig.maxValidationRuns) {
+          rawToolResult = JSON.stringify({
+            ok: false,
+            error: request.language === 'en'
+              ? `The controlled validation budget of ${runtimeConfig.maxValidationRuns} run(s) was reached.`
+              : `本轮受控验证预算已达到 ${runtimeConfig.maxValidationRuns} 次上限。`,
+            budgetReason: 'validation_run_limit_exhausted'
+          });
+        } else {
+          if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME) {
+            validationRunCount += 1;
+            trace.record({
+              type: 'validation_tool_call',
+              toolCallId: toolCall.id,
+              validationRunCount,
+              maxValidationRuns: runtimeConfig.maxValidationRuns
+            });
+          }
+          rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language, {
+            signal: request.signal,
+            runDeadlineAt
+          });
+        }
+        taskPlan.finishTool(toolCall.function.name, rawToolResult);
+        if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME || toolCall.function.name === READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME) {
+          trace.record({
+            type: 'validation_tool_result',
+            toolCallId: toolCall.id,
+            toolName: toolCall.function.name,
+            content: trace.includesPayload('request') ? rawToolResult : summarizeText(rawToolResult)
+          });
+        }
         trace.record({
           type: 'tool_result_raw',
           toolCallId: toolCall.id,
@@ -752,6 +847,11 @@ export class AgentRunner {
       draftEdits
     }, { finishReason: 'tool_iterations_exhausted' });
     } catch (error) {
+      if (error instanceof AgentRunAbortedError || request.signal?.aborted) {
+        taskPlan.stop(error instanceof Error ? error.message : undefined);
+      } else {
+        taskPlan.fail(error instanceof Error ? error.message : String(error));
+      }
       trace.record({
         type: 'run_error',
         error: formatUnknownError(error)
@@ -1235,12 +1335,21 @@ export class AgentRunner {
         return 'reading_file';
       case CREATE_DRAFT_EDIT_TOOL_NAME:
         return 'creating_draft_edit';
+      case READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME:
+        return 'reading_diagnostics';
+      case RUN_VALIDATION_TOOL_NAME:
+        return 'running_validation';
       default:
         return 'executing_tool';
     }
   }
 
-  private async handleToolCall(toolCall: DeepSeekToolCall, draftEdits: DraftEdit[], language: KeepseekLanguage): Promise<string> {
+  private async handleToolCall(
+    toolCall: DeepSeekToolCall,
+    draftEdits: DraftEdit[],
+    language: KeepseekLanguage,
+    options: { signal?: AbortSignal; runDeadlineAt?: number } = {}
+  ): Promise<string> {
     try {
       const args = this.parseToolArguments(toolCall.function.arguments);
       switch (toolCall.function.name) {
@@ -1271,6 +1380,16 @@ export class AgentRunner {
           }, language);
         case READ_WORKSPACE_FILE_TOOL_NAME:
           return await this.workspaceTools.readWorkspaceFile(this.readRequiredString(args, 'path'), language);
+        case READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME:
+          return await this.validationTools.readWorkspaceDiagnostics(language);
+        case RUN_VALIDATION_TOOL_NAME:
+          return await this.validationTools.runSafeNpmScript({
+            script: this.readSafeNpmScript(args, 'script'),
+            workspaceFolder: this.readOptionalString(args, 'workspaceFolder'),
+            language,
+            signal: options.signal,
+            runDeadlineAt: options.runDeadlineAt
+          });
         case CREATE_DRAFT_EDIT_TOOL_NAME:
           return await this.createDraftEdit(args, draftEdits, language);
         default:
@@ -1743,6 +1862,14 @@ export class AgentRunner {
     return value;
   }
 
+  private readSafeNpmScript(args: Record<string, unknown>, key: string): SafeNpmScript {
+    const value = this.readRequiredString(args, key);
+    if (value === 'compile' || value === 'lint' || value === 'test') {
+      return value;
+    }
+    throw new Error(`Tool argument "${key}" must be one of: compile, lint, test.`);
+  }
+
   private getContextWindowBudgetStopReason(
     request: AgentRequest,
     messages: DeepSeekMessage[],
@@ -1995,7 +2122,8 @@ export class AgentRunner {
       topP: profile.topP,
       contextCompression: profile.contextCompression,
       maxRequestRetries: getConfiguredMaxRequestRetries(),
-      requestRetryBaseMs: getConfiguredRequestRetryBaseMs()
+      requestRetryBaseMs: getConfiguredRequestRetryBaseMs(),
+      maxValidationRuns: getConfiguredMaxValidationRuns()
     };
   }
 

@@ -12,6 +12,8 @@ export const LIST_WORKSPACE_DIRECTORY_TOOL_NAME = 'keepseek_list_workspace_direc
 export const SEARCH_WORKSPACE_TOOL_NAME = 'keepseek_search_workspace';
 export const READ_WORKSPACE_FILE_TOOL_NAME = 'keepseek_read_workspace_file';
 export const READ_WORKSPACE_FILE_RANGE_TOOL_NAME = 'keepseek_read_workspace_file_range';
+export const READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME = 'keepseek_read_workspace_diagnostics';
+export const RUN_VALIDATION_TOOL_NAME = 'keepseek_run_validation';
 
 const MAX_ACTIVE_SKILL_CONTENT_CHARS = 24000;
 const MAX_ACTIVE_SKILLS_TOTAL_CHARS = 72000;
@@ -20,6 +22,8 @@ const CORE_AGENT_TOOL_NAMES = [
   CREATE_DRAFT_EDIT_TOOL_NAME,
   LIST_WORKSPACE_FILES_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
+  READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
+  RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME
 ];
 const ALL_AGENT_TOOL_NAMES = [
@@ -28,6 +32,8 @@ const ALL_AGENT_TOOL_NAMES = [
   LIST_WORKSPACE_FILES_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
+  READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
+  RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME
 ];
 
@@ -131,6 +137,7 @@ export function getAgentSystemPrompt(input: {
         'Communicate with the user in English unless the user explicitly asks for another language.',
         'You can analyze code, explain approaches, inspect the open workspace with read-only tools, suggest changes, and call tools to create pending edits when files need to change.',
         'Use keepseek_search_workspace, keepseek_list_workspace_files, keepseek_list_workspace_directory, keepseek_read_workspace_file_range, and keepseek_read_workspace_file when you need the current project structure or file contents. Do not ask the user to run search/listing commands or paste file contents when these tools can provide the information.',
+        'Use keepseek_read_workspace_diagnostics to inspect VS Code Problems. After preparing code changes, use keepseek_run_validation with only the fixed compile, lint, or test script when relevant. Validation is controlled by the user authorization policy and never accepts arbitrary commands.',
         'Keep workspace exploration low-cost: search or list first to locate relevant files, then use keepseek_read_workspace_file_range for the relevant line ranges. Use keepseek_read_workspace_file only for small files or when complete file context is truly needed.',
         'When the user references a directory, treat it as a target or reference scope. Prefer that directory for related new files, and list/read files under it when you need examples.',
         'The read-only workspace tools only access files inside the open workspace, and they may skip large, binary, image, media, archive, or otherwise unreadable files.',
@@ -143,6 +150,7 @@ export function getAgentSystemPrompt(input: {
         '你需要用中文和用户沟通，除非用户明确要求其它语言。',
         '你可以根据用户的问题分析代码、解释方案、使用只读工具查看当前打开的工作区、给出修改建议，并在需要改文件时调用工具创建待确认修改。',
         '当你需要了解当前工程结构或文件内容时，使用 keepseek_search_workspace、keepseek_list_workspace_files、keepseek_list_workspace_directory、keepseek_read_workspace_file_range 和 keepseek_read_workspace_file。只要这些工具能提供信息，就不要要求用户自行运行搜索、目录扫描命令或粘贴文件内容。',
+        '使用 keepseek_read_workspace_diagnostics 查看 VS Code Problems。准备代码修改后，在适用时使用 keepseek_run_validation，并且只能选择固定的 compile、lint 或 test 脚本。验证受用户授权策略控制，不接受任意命令。',
         '工作区探索要保持低成本：先 search 或 list 定位相关文件，再用 keepseek_read_workspace_file_range 读取相关行段。只有小文件或确实需要完整上下文时，才使用 keepseek_read_workspace_file。',
         '当用户引用目录时，把它视为目标位置或参考范围。创建相关新文件时优先放在该目录下；需要参考示例时，先列出并读取该目录下的文件。',
         '只读工作区工具只会访问当前打开工作区内的文件，并可能跳过过大、二进制、图片、媒体、归档或其它不可读文件。',
@@ -306,6 +314,44 @@ export function getAgentTools(options: { toolNames?: readonly string[] } = {}): 
 
 function getRawAgentTools(): DeepSeekFunctionTool[] {
   return [
+    {
+      type: 'function',
+      function: {
+        name: READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
+        description: 'Read the current VS Code Problems diagnostics for files inside the open workspace. This is read-only and returns capped, structured error/warning locations.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {},
+          required: [],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: RUN_VALIDATION_TOOL_NAME,
+        description: 'Run one controlled project validation through the VS Code Tasks API. Only the fixed npm scripts compile, lint, and test are accepted. The workspace must be trusted, the package script must exist and pass safety checks, and the configured user authorization policy is enforced. Arbitrary commands are never accepted.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            script: {
+              type: 'string',
+              enum: ['compile', 'lint', 'test'],
+              description: 'The fixed safe npm script to run.'
+            },
+            workspaceFolder: {
+              type: 'string',
+              description: 'Optional exact VS Code workspace-folder name for multi-root workspaces. Omit to use the first folder.'
+            }
+          },
+          required: ['script'],
+          additionalProperties: false
+        }
+      }
+    },
     {
       type: 'function',
       function: {

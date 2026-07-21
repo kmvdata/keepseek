@@ -1,6 +1,7 @@
 import './registerVscodeStub';
 import './agentRequestCoordinator.test';
 import './chatSessionStore.test';
+import './changeSet.test';
 import './contextEntryPoints.test';
 import './draftEditRange.test';
 import './fileReference.test';
@@ -11,4 +12,5 @@ import './protocolCache.test';
 import './referenceResources.test';
 import './skillDiscovery.test';
 import './skillReference.test';
+import './taskPlan.test';
 import './usageStats.test';

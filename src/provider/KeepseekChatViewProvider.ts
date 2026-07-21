@@ -15,12 +15,14 @@ import {
   ChatMessage,
   ChatMessageSkill,
   ChatSession,
+  ChangeSetApplyFailure,
   ContextUsageEstimate,
   DeepSeekBalanceState,
   DraftEdit,
   KeepseekExtensionInfo,
   KeepseekModel,
   PromptCacheDiagnostics,
+  TaskPlan,
   TurnUsageStats,
   UsageEvent,
   WorkspaceSummary
@@ -33,7 +35,8 @@ import {
   pickLargerContextUsageEstimate,
   toSessionContextUsageEstimate
 } from '../agent/contextUsage';
-import { DraftEditStore } from '../edits/draftEditStore';
+import { ChangeSetStore } from '../edits/changeSetStore';
+import { DraftDiffService } from '../edits/draftDiffService';
 import { openFileReference } from '../context/references/fileReferenceOpener';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
@@ -92,10 +95,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly agentRunner: AgentRunner;
   private readonly agentRequestCoordinator = new AgentRequestCoordinator();
   private readonly traceLogService: InteractionTraceLogService;
-  private readonly draftEdits: DraftEditStore;
+  private readonly changeSets: ChangeSetStore;
+  private readonly draftDiffService: DraftDiffService;
   private readonly skillStore: SkillStore;
   private readonly skillCreator = new SkillCreator();
   private readonly sessionTraceLogUris = new Map<string, string>();
+  private readonly taskPlansBySession = new Map<string, TaskPlan>();
   private readonly authorizedExternalReferenceUris = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
   private selectedModelId = getConfiguredSelectedModelId();
@@ -126,10 +131,21 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
     this.skillStore = new SkillStore(skillState);
     this.agentRunner = new AgentRunner(undefined, this.traceLogService);
-    this.draftEdits = new DraftEditStore(
+    this.draftDiffService = new DraftDiffService();
+    this.changeSets = new ChangeSetStore(
       new SafeFileEditor((key, values) => this.t(key, values)),
+      this.draftDiffService,
       this.sessionStore,
-      (key, values) => this.t(key, values)
+      this.globalStorageUri,
+      (key, values) => this.t(key, values),
+      (changeSet, event) => {
+        void this.traceLogService.appendRunEvent(
+          changeSet.traceLogUri
+            ? { runId: changeSet.runId, uri: changeSet.traceLogUri }
+            : undefined,
+          event.type ? event as { type: string; [key: string]: unknown } : { type: 'change_set_event', ...event }
+        );
+      }
     );
     void this.cleanupExpiredSessions({ post: false });
     this.sessionCleanupTimer = setInterval(() => {
@@ -139,6 +155,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   public dispose(): void {
     clearInterval(this.sessionCleanupTimer);
+    this.draftDiffService.dispose();
   }
 
   public refreshConfiguration(): void {
@@ -512,6 +529,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private async handleMessage(message: WebviewMessage): Promise<void> {
     switch (message.type) {
       case 'ready':
+        await this.changeSets.initialize();
         this.syncConfiguredState();
         await this.refreshSkills({ post: false });
         await this.cleanupExpiredSessions({ post: false });
@@ -696,23 +714,101 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.postState();
         return;
       case 'applyDraftEdit':
-        if (await this.draftEdits.apply(message.id)) {
-          await this.refreshSkills({ post: false });
+        {
+          if (this.isBusy) {
+            return;
+          }
+          const result = await this.changeSets.applyEdit(message.id);
+          if (result?.appliedEditIds.length) {
+            await this.refreshSkills({ post: false });
+          }
+          this.showChangeSetFailures(result?.failed);
           this.postState();
         }
         return;
       case 'discardDraftEdit':
-        this.draftEdits.delete(message.id);
+        if (this.isBusy) {
+          return;
+        }
+        this.changeSets.discardEdit(message.id);
         this.postState();
         return;
-      case 'applyAllDraftEdits':
-        if (await this.draftEdits.applyAll()) {
-          await this.refreshSkills({ post: false });
+      case 'openDraftDiff':
+        try {
+          await this.changeSets.openDiff(message.id);
+        } catch (error) {
+          vscode.window.showErrorMessage(getErrorMessage(error));
+        }
+        return;
+      case 'applyChangeSet':
+        {
+          if (this.isBusy) {
+            return;
+          }
+          const result = await this.changeSets.applyAll(message.id);
+          if (result?.appliedEditIds.length) {
+            await this.refreshSkills({ post: false });
+          }
+          this.showChangeSetFailures(result?.failed);
           this.postState();
         }
         return;
+      case 'discardChangeSet':
+        if (this.isBusy) {
+          return;
+        }
+        this.changeSets.discardAll(message.id);
+        this.postState();
+        return;
+      case 'revertDraftEdit':
+        {
+          if (this.isBusy) {
+            return;
+          }
+          const result = await this.changeSets.revertEdit(message.id);
+          if (result?.revertedEditIds.length) {
+            await this.refreshSkills({ post: false });
+          }
+          this.showChangeSetFailures(result?.failed);
+          this.postState();
+        }
+        return;
+      case 'revertChangeSet':
+        {
+          if (this.isBusy) {
+            return;
+          }
+          const result = await this.changeSets.revertAll(message.id);
+          if (result?.revertedEditIds.length) {
+            await this.refreshSkills({ post: false });
+          }
+          this.showChangeSetFailures(result?.failed);
+          this.postState();
+        }
+        return;
+      case 'applyAllDraftEdits': {
+        if (this.isBusy) {
+          return;
+        }
+        const changeSetId = this.changeSets.getLatestChangeSetId(this.sessionStore.activeSessionId);
+        const result = changeSetId ? await this.changeSets.applyAll(changeSetId) : undefined;
+        if (result?.appliedEditIds.length) {
+          await this.refreshSkills({ post: false });
+        }
+        this.showChangeSetFailures(result?.failed);
+        this.postState();
+        return;
+      }
       case 'discardAllDraftEdits':
-        this.draftEdits.clear();
+        {
+          if (this.isBusy) {
+            return;
+          }
+          const changeSetId = this.changeSets.getLatestChangeSetId(this.sessionStore.activeSessionId);
+          if (changeSetId) {
+            this.changeSets.discardAll(changeSetId);
+          }
+        }
         this.postState();
         return;
     }
@@ -723,10 +819,23 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private clearSessionTransientState(): void {
-    this.draftEdits.clear();
     this.fileContext.clear();
     this.authorizedExternalReferenceUris.clear();
     this.liveContextUsage = undefined;
+  }
+
+  private showChangeSetFailures(failures: readonly ChangeSetApplyFailure[] | undefined): void {
+    if (!failures?.length) {
+      return;
+    }
+    const details = failures
+      .slice(0, 3)
+      .map((failure) => `${failure.label}: ${failure.error}`)
+      .join('\n');
+    vscode.window.showWarningMessage(this.t('changeSetOperationFailed', {
+      count: failures.length,
+      details
+    }));
   }
 
   private updateActiveSessionContextUsage(usage: ContextUsageEstimate | undefined): void {
@@ -926,6 +1035,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const result = await this.sessionStore.deleteSessions(uniqueSessionIds);
     if (!result.deletedCount) {
       return;
+    }
+    for (const sessionId of uniqueSessionIds) {
+      this.changeSets.clearSession(sessionId);
+      this.taskPlansBySession.delete(sessionId);
     }
 
     if (result.activeSessionChanged) {
@@ -1197,7 +1310,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         newText: draft.content,
         reason: draft.reason
       };
-      this.draftEdits.addMany([edit]);
+      this.changeSets.addDraftEdits({
+        edits: [edit],
+        sessionId: this.sessionStore.activeSessionId,
+        operationSummary: draft.reason
+      });
       this.postState();
       this.postToWebview({ type: 'skillDraftCreated', label: draft.label });
       vscode.window.showInformationMessage(this.t('createSkillDraftCreated', { label: draft.label }));
@@ -1583,7 +1700,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSession.messages.splice(replacementIndex);
         activeSession.contextUsage = undefined;
         activeSession.contextCompression = undefined;
-        this.draftEdits.clear();
+        this.changeSets.discardPendingForSession(activeSession.id);
+        this.taskPlansBySession.delete(activeSession.id);
         if (replacementIndex === 0 && !activeSession.customTitle) {
           activeSession.title = createSessionTitle(trimmedPrompt, this.language);
         }
@@ -1652,6 +1770,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         contextCompression: activeSession.contextCompression,
         historyRewriteReason: replaceMessageId ? 'edit_user_prompt' : undefined,
         language: this.language,
+        sessionId: activeSession.id,
+        assistantMessageId: assistantMessage.id,
         signal: abortController.signal
       }), {
         onStatus: (activity) => {
@@ -1692,6 +1812,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.sessionTraceLogUris.set(activeSession.id, traceLog.uri);
           activeSession.updatedAt = new Date().toISOString();
           scheduleLiveState();
+        },
+        onTaskPlan: (taskPlan) => {
+          this.taskPlansBySession.set(activeSession.id, taskPlan);
+          scheduleLiveState();
         }
       });
 
@@ -1704,7 +1828,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSession.lastTraceLogUri = traceLogUri;
         this.sessionTraceLogUris.set(activeSession.id, traceLogUri);
       }
-      this.draftEdits.addMany(response.draftEdits);
+      this.taskPlansBySession.set(activeSession.id, response.taskPlan);
+      if (response.changeSet) {
+        this.changeSets.add(response.changeSet);
+      } else if (response.draftEdits.length) {
+        this.changeSets.addDraftEdits({
+          edits: response.draftEdits,
+          runId: response.runId,
+          sessionId: activeSession.id,
+          messageId: assistantMessage?.id,
+          traceLogUri
+        });
+      }
       if (!currentTurnUsage && response.usage) {
         currentTurnUsage = this.applyTurnUsage(activeSession, response.usage);
         this.liveTurnUsage = currentTurnUsage;
@@ -1940,7 +2075,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           contextCompactForceRatio: contextCompression.forceRatio,
           slimToolModeEnabled: getConfiguredSlimToolModeEnabled()
         },
-        draftEdits: this.draftEdits.toWebviewState(),
+        taskPlan: this.taskPlansBySession.get(activeSession.id),
+        changeSets: this.changeSets.toWebviewState(activeSession.id),
+        draftEdits: this.changeSets.toWebviewState(activeSession.id).flatMap((changeSet) => changeSet.files),
         isBusy: this.isBusy,
         agentActivity: this.agentActivity,
         maxFileBytes: getConfiguredMaxFileBytes(),

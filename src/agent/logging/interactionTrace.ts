@@ -69,6 +69,44 @@ export class InteractionTraceLogService {
     return this.lastRunTraceLogUri;
   }
 
+  public async appendRunEvent(
+    traceLog: { runId: string; uri: string } | undefined,
+    event: InteractionTraceEvent
+  ): Promise<void> {
+    if (!traceLog?.uri || traceLog.runId === 'disabled') {
+      return;
+    }
+    const settings = getConfiguredInteractionTraceSettings();
+    if (!settings.enabled) {
+      return;
+    }
+    const line = `${safeJsonStringify({
+      ts: new Date().toISOString(),
+      runId: traceLog.runId,
+      external: true,
+      ...event
+    })}\n`;
+    const bytes = Buffer.byteLength(line, 'utf8');
+    try {
+      const uri = vscode.Uri.parse(traceLog.uri);
+      const stat = await vscode.workspace.fs.stat(uri);
+      if (stat.size + bytes > settings.maxFileBytes) {
+        return;
+      }
+      if (uri.scheme === 'file') {
+        await appendFile(uri.fsPath, line, 'utf8');
+        return;
+      }
+      const previous = await vscode.workspace.fs.readFile(uri);
+      const next = new Uint8Array(previous.byteLength + bytes);
+      next.set(previous, 0);
+      next.set(new TextEncoder().encode(line), previous.byteLength);
+      await vscode.workspace.fs.writeFile(uri, next);
+    } catch {
+      // Post-run trace updates are best-effort and must never block apply or revert actions.
+    }
+  }
+
   private async cleanupExpiredLogs(settings: InteractionTraceSettings): Promise<void> {
     if (this.globalStorageUri.scheme !== 'file') {
       await this.cleanupExpiredLogsWithWorkspaceFs(settings);
@@ -347,7 +385,7 @@ class WorkspaceFsJsonlInteractionTrace implements AgentInteractionTrace {
 }
 
 class NoopInteractionTrace implements AgentInteractionTrace {
-  public readonly runId = 'disabled';
+  public readonly runId = randomUUID();
   public readonly enabled = false;
   public readonly level: InteractionTraceLevel = 'metadata';
   public readonly logRawStream = false;

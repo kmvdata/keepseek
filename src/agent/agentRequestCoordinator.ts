@@ -24,6 +24,8 @@ export interface AgentRequestCoordinatorInput {
   contextCompression: AgentRequest['contextCompression'];
   historyRewriteReason?: string;
   language: KeepseekLanguage;
+  sessionId?: string;
+  assistantMessageId?: string;
   signal?: AbortSignal;
 }
 
@@ -57,6 +59,8 @@ export class AgentRequestCoordinator {
       contextCompression: cloneContextCompressionState(input.contextCompression),
       historyRewriteReason: input.historyRewriteReason,
       language: input.language,
+      sessionId: input.sessionId,
+      assistantMessageId: input.assistantMessageId,
       signal: input.signal
     };
   }

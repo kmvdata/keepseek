@@ -229,6 +229,38 @@
             "ko"
           ],
           "markdownDescription": "Language preference. `auto` follows VS Code display language."
+        },
+        "keepseek.validation.authorizationPolicy": {
+          "type": "string",
+          "default": "ask",
+          "scope": "window",
+          "enum": [
+            "never",
+            "ask",
+            "always"
+          ],
+          "enumDescriptions": [
+            "Never let the agent run validation tasks.",
+            "Ask before every safe validation task.",
+            "Allow the fixed compile, lint, and test scripts without prompting."
+          ],
+          "markdownDescription": "Authorization policy for KeepSeek's controlled validation tools. Only fixed `npm run compile`, `npm run lint`, and `npm run test` tasks are eligible; arbitrary shell commands remain unavailable."
+        },
+        "keepseek.validation.maxRunsPerAgentRun": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 8,
+          "scope": "window",
+          "markdownDescription": "Maximum number of controlled validation tasks an Agent run may start. Set to 0 to disable validation execution."
+        },
+        "keepseek.validation.timeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 1000,
+          "maximum": 600000,
+          "scope": "window",
+          "markdownDescription": "Maximum duration in milliseconds for each controlled validation task."
         }
       }
     }

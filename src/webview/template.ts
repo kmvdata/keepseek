@@ -99,6 +99,24 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
       <div class="context-bar-inner" id="contextBar"></div>
     </div>
 
+    <section id="planRegion" class="plan-region hidden" aria-label="计划 / 进度" data-i18n-aria-label="planProgress">
+      <button id="planToggle" type="button" class="plan-toggle" aria-expanded="false" aria-controls="planBody">
+        <span class="plan-toggle-main">
+          <span class="plan-status-dot" aria-hidden="true"></span>
+          <span class="plan-toggle-label" data-i18n="planProgress">计划 / 进度</span>
+          <span id="planSummary" class="plan-summary"></span>
+        </span>
+        <span id="planCount" class="plan-count"></span>
+        <span class="plan-chevron" aria-hidden="true">⌄</span>
+      </button>
+      <div id="planBody" class="plan-body hidden">
+        <div id="planGoal" class="plan-goal"></div>
+        <ol id="planSteps" class="plan-steps"></ol>
+        <div id="planBlockers" class="plan-note hidden"></div>
+        <div id="planCompletion" class="plan-note hidden"></div>
+      </div>
+    </section>
+
     <section id="transcript" class="transcript">
       <div class="transcript-empty">
         <div class="transcript-empty-icon">&#x2726;</div>
@@ -109,11 +127,7 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
 
     <div id="draftRegion" class="draft-bar hidden">
       <div class="draft-bar-header">
-        <div class="draft-bar-label" data-i18n="pendingEdits">待确认修改</div>
-        <div id="draftBulkActions" class="draft-bulk-actions hidden">
-          <button id="draftApplyAllBtn" type="button" data-i18n="applyAll">全部采纳</button>
-          <button id="draftDiscardAllBtn" type="button" class="secondary" data-i18n="discardAll">全部取消</button>
-        </div>
+        <div class="draft-bar-label" data-i18n="changeSets">Agent 修改</div>
       </div>
       <div id="draftList" class="draft-bar-list"></div>
     </div>

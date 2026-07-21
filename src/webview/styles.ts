@@ -638,13 +638,207 @@ export function getStyles(): string {
       background: var(--vscode-list-hoverBackground);
     }
 
+    .plan-region {
+      margin: 5px var(--keepseek-edge-padding) 0;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--vscode-sideBar-background) 88%, var(--vscode-editor-background));
+      overflow: hidden;
+    }
+
+    .plan-toggle {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      width: 100%;
+      min-height: 30px;
+      padding: 5px 8px;
+      border: none;
+      border-radius: 0;
+      color: var(--vscode-foreground);
+      background: transparent;
+      text-align: left;
+    }
+
+    .plan-toggle:hover,
+    .plan-toggle:focus-visible {
+      background: var(--vscode-list-hoverBackground);
+      outline: none;
+    }
+
+    .plan-toggle:focus-visible {
+      box-shadow: inset 0 0 0 1px var(--vscode-focusBorder);
+    }
+
+    .plan-toggle-main {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      gap: 6px;
+      flex: 1;
+    }
+
+    .plan-status-dot {
+      flex: 0 0 7px;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--vscode-progressBar-background, var(--vscode-textLink-foreground));
+    }
+
+    .plan-status-completed .plan-status-dot {
+      background: var(--vscode-testing-iconPassed, #2ea043);
+    }
+
+    .plan-status-blocked .plan-status-dot,
+    .plan-status-failed .plan-status-dot {
+      background: var(--vscode-testing-iconFailed, var(--vscode-errorForeground));
+    }
+
+    .plan-status-stopped .plan-status-dot {
+      background: var(--vscode-descriptionForeground);
+    }
+
+    .plan-toggle-label {
+      flex: 0 0 auto;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .plan-summary {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .plan-count {
+      flex: 0 0 auto;
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+    }
+
+    .plan-chevron {
+      flex: 0 0 auto;
+      color: var(--vscode-descriptionForeground);
+      font-size: 13px;
+      transform: rotate(-90deg);
+      transition: transform 100ms ease;
+    }
+
+    .plan-region.is-expanded .plan-chevron {
+      transform: rotate(0deg);
+    }
+
+    .plan-body {
+      display: grid;
+      gap: 7px;
+      padding: 3px 9px 9px;
+      border-top: 1px solid var(--vscode-panel-border);
+    }
+
+    .plan-goal {
+      padding-top: 6px;
+      color: var(--vscode-foreground);
+      font-size: 11px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .plan-steps {
+      display: grid;
+      gap: 4px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .plan-step {
+      display: grid;
+      grid-template-columns: 15px minmax(0, 1fr);
+      gap: 5px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .plan-step-in_progress,
+    .plan-step-completed {
+      color: var(--vscode-foreground);
+    }
+
+    .plan-step-blocked,
+    .plan-step-failed {
+      color: var(--vscode-errorForeground);
+    }
+
+    .plan-step-marker {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 50%;
+      font-size: 9px;
+      line-height: 1;
+    }
+
+    .plan-step-in_progress .plan-step-marker {
+      border-color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+      color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+    }
+
+    .plan-step-completed .plan-step-marker {
+      border-color: var(--vscode-testing-iconPassed, #2ea043);
+      color: var(--vscode-testing-iconPassed, #2ea043);
+    }
+
+    .plan-step-copy {
+      display: grid;
+      min-width: 0;
+      gap: 1px;
+    }
+
+    .plan-step-title,
+    .plan-step-detail {
+      overflow-wrap: anywhere;
+    }
+
+    .plan-step-detail {
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+    }
+
+    .plan-note {
+      display: grid;
+      gap: 2px;
+      padding: 6px;
+      border-radius: 4px;
+      background: var(--vscode-textBlockQuote-background, var(--vscode-editor-background));
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .plan-note-label {
+      color: var(--vscode-foreground);
+      font-weight: 600;
+    }
+
     .draft-bar {
       margin: 8px var(--keepseek-edge-padding) 0;
       padding: 10px;
-      border: 1px solid #d8dee4;
+      max-height: min(40vh, 420px);
+      overflow-y: auto;
+      border: 1px solid var(--vscode-panel-border);
       border-radius: 8px;
-      background: #ffffff;
-      color: #1f2328;
+      background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+      color: var(--vscode-foreground);
     }
 
     .draft-bar-header {
@@ -659,7 +853,7 @@ export function getStyles(): string {
     .draft-bar-label {
       font-size: 11px;
       font-weight: 600;
-      color: #57606a;
+      color: var(--vscode-descriptionForeground);
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
@@ -683,7 +877,64 @@ export function getStyles(): string {
 
     .draft-bar-list {
       display: grid;
-      gap: 6px;
+      gap: 8px;
+    }
+
+    .change-set-card {
+      display: grid;
+      gap: 7px;
+      padding: 8px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editor-background);
+    }
+
+    .change-set-partially_failed {
+      border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+    }
+
+    .change-set-header {
+      display: grid;
+      gap: 7px;
+    }
+
+    .change-set-heading {
+      display: grid;
+      min-width: 0;
+      gap: 2px;
+    }
+
+    .change-set-title {
+      overflow: hidden;
+      font-size: 12px;
+      font-weight: 600;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .change-set-meta,
+    .draft-chip-details {
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+      line-height: 1.35;
+    }
+
+    .change-set-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 4px;
+    }
+
+    .change-set-actions button {
+      min-height: 21px;
+      padding: 2px 7px;
+      font-size: 10px;
+    }
+
+    .change-set-files {
+      display: grid;
+      gap: 5px;
     }
 
     .draft-chip {
@@ -693,10 +944,16 @@ export function getStyles(): string {
       gap: 8px;
       width: 100%;
       padding: 7px 8px;
-      border: 1px solid #e5e7eb;
+      border: 1px solid var(--vscode-panel-border);
       border-radius: 6px;
       font-size: 12px;
-      background: #f8fafc;
+      background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-list-hoverBackground));
+    }
+
+    .draft-chip-content {
+      display: grid;
+      min-width: 0;
+      gap: 3px;
     }
 
     .draft-chip-main {
@@ -714,10 +971,10 @@ export function getStyles(): string {
       width: 18px;
       height: 18px;
       margin-top: -1px;
-      border: 1px solid #d0d7de;
+      border: 1px solid var(--vscode-panel-border);
       border-radius: 4px;
-      color: #57606a;
-      background: #ffffff;
+      color: var(--vscode-descriptionForeground);
+      background: var(--vscode-editor-background);
     }
 
     .draft-chip-action-icon svg {
@@ -748,6 +1005,18 @@ export function getStyles(): string {
       white-space: normal;
     }
 
+    .draft-chip-details,
+    .draft-chip-error {
+      margin-left: 24px;
+      overflow-wrap: anywhere;
+    }
+
+    .draft-chip-error {
+      color: var(--vscode-errorForeground);
+      font-size: 10px;
+      line-height: 1.35;
+    }
+
     .draft-chip-actions {
       display: flex;
       justify-content: flex-end;
@@ -765,6 +1034,11 @@ export function getStyles(): string {
     @media (min-width: 300px) {
       .draft-chip {
         grid-template-columns: minmax(0, 1fr) auto;
+      }
+
+      .change-set-header {
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
       }
     }
 

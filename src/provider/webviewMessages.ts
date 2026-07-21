@@ -71,5 +71,10 @@ export type WebviewMessage =
   | { type: 'clearContext' }
   | { type: 'applyDraftEdit'; id: string }
   | { type: 'discardDraftEdit'; id: string }
+  | { type: 'openDraftDiff'; id: string }
+  | { type: 'applyChangeSet'; id: string }
+  | { type: 'discardChangeSet'; id: string }
+  | { type: 'revertDraftEdit'; id: string }
+  | { type: 'revertChangeSet'; id: string }
   | { type: 'applyAllDraftEdits' }
   | { type: 'discardAllDraftEdits' };

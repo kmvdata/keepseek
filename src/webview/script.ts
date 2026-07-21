@@ -57,6 +57,8 @@ export function getScript(): string {
         contextCompactForceRatio: 0.9,
         slimToolModeEnabled: true
       },
+      taskPlan: null,
+      changeSets: [],
       draftEdits: [],
       isBusy: false,
       agentActivity: {
@@ -323,6 +325,15 @@ export function getScript(): string {
     const sessionMenu = document.getElementById('sessionMenu');
     const contextBarOuter = document.getElementById('contextBarOuter');
     const contextBar = document.getElementById('contextBar');
+    const planRegion = document.getElementById('planRegion');
+    const planToggle = document.getElementById('planToggle');
+    const planSummary = document.getElementById('planSummary');
+    const planCount = document.getElementById('planCount');
+    const planBody = document.getElementById('planBody');
+    const planGoal = document.getElementById('planGoal');
+    const planSteps = document.getElementById('planSteps');
+    const planBlockers = document.getElementById('planBlockers');
+    const planCompletion = document.getElementById('planCompletion');
     const draftRegion = document.getElementById('draftRegion');
     const draftBulkActions = document.getElementById('draftBulkActions');
     const draftApplyAllBtn = document.getElementById('draftApplyAllBtn');
@@ -340,6 +351,8 @@ export function getScript(): string {
     let agentStatusRotationIndex = 0;
     let agentStatusRotationKey = '';
     let terminalAgentStatusKey = '';
+    let planExpanded = false;
+    const pendingChangeActions = new Set();
     let settingsMenuOpen = false;
     let sessionMenuOpen = false;
     let sessionMultiSelectMode = false;
@@ -396,6 +409,8 @@ export function getScript(): string {
       listing_files: ['agentStatusScanningWorkspace', 'agentStatusListingFiles'],
       listing_directory: ['agentStatusListingDirectory', 'agentStatusScanningWorkspace'],
       creating_draft_edit: ['agentStatusPreparingDraftEdit'],
+      reading_diagnostics: ['agentStatusReadingDiagnostics'],
+      running_validation: ['agentStatusRunningValidation'],
       reviewing_tool_result: ['agentStatusReviewingToolResults', 'agentStatusContinuingReasoning'],
       generating: ['agentStatusGenerating', 'agentStatusOrganizingResult', 'agentStatusWritingReply'],
       finalizing: ['agentStatusFinalizingResponse'],
@@ -615,10 +630,24 @@ export function getScript(): string {
 
     draftList.addEventListener('click', function(event) {
       var target = event.target instanceof Element ? event.target : null;
-      var button = target?.closest('button[data-edit-id]');
-      if (!button) return;
-      vscode.postMessage({ type: button.dataset.editAction, id: button.dataset.editId });
+      var button = target?.closest('button[data-edit-id], button[data-change-set-id]');
+      if (!button || button.disabled) return;
+      var id = button.dataset.editId || button.dataset.changeSetId || '';
+      var action = button.dataset.editAction || button.dataset.changeSetAction || '';
+      if (!id || !action) return;
+      if (action !== 'openDraftDiff') {
+        pendingChangeActions.add(action + ':' + id);
+        renderDraftEdits();
+      }
+      vscode.postMessage({ type: action, id: id });
     });
+
+    if (planToggle) {
+      planToggle.addEventListener('click', function() {
+        planExpanded = !planExpanded;
+        renderTaskPlan();
+      });
+    }
 
     if (draftApplyAllBtn) {
       draftApplyAllBtn.addEventListener('click', function() {
@@ -927,7 +956,9 @@ export function getScript(): string {
       if (message.type === 'state') {
         var previousActiveSessionId = state.activeSessionId || '';
         Object.assign(state, message.state);
+        pendingChangeActions.clear();
         if (previousActiveSessionId && previousActiveSessionId !== state.activeSessionId) {
+          planExpanded = false;
         }
         rememberTerminalAgentActivity(state.agentActivity);
         render();
@@ -993,6 +1024,7 @@ export function getScript(): string {
       renderSettingsControls();
       renderSessionControls();
       renderContextChips();
+      renderTaskPlan();
       renderDraftEdits();
       renderTranscript();
       renderStatus();
@@ -2434,52 +2466,217 @@ export function getScript(): string {
       return icon;
     }
 
+    function renderTaskPlan() {
+      var plan = state.taskPlan && typeof state.taskPlan === 'object' ? state.taskPlan : null;
+      if (!planRegion || !planToggle || !planBody || !planSteps) return;
+      planRegion.classList.toggle('hidden', !plan);
+      if (!plan) return;
+
+      var steps = Array.isArray(plan.steps) ? plan.steps : [];
+      var completed = steps.filter(function(step) { return step.status === 'completed' || step.status === 'skipped'; }).length;
+      var current = steps.find(function(step) { return step.id === plan.currentStepId; });
+      planToggle.setAttribute('aria-expanded', planExpanded ? 'true' : 'false');
+      planBody.classList.toggle('hidden', !planExpanded);
+      planRegion.className = 'plan-region plan-status-' + String(plan.status || 'running') + (planExpanded ? ' is-expanded' : '');
+      planSummary.textContent = current ? current.title : getPlanStatusLabel(plan.status);
+      planCount.textContent = t('planStepsComplete', { completed: completed, total: steps.length });
+      planGoal.textContent = String(plan.goal || '');
+      planSteps.innerHTML = '';
+
+      steps.forEach(function(step) {
+        var item = document.createElement('li');
+        item.className = 'plan-step plan-step-' + String(step.status || 'pending');
+        if (step.id === plan.currentStepId) {
+          item.setAttribute('aria-current', 'step');
+        }
+        var marker = document.createElement('span');
+        marker.className = 'plan-step-marker';
+        marker.setAttribute('aria-hidden', 'true');
+        marker.textContent = getPlanStepMarker(step.status);
+        var copy = document.createElement('span');
+        copy.className = 'plan-step-copy';
+        var title = document.createElement('span');
+        title.className = 'plan-step-title';
+        title.textContent = String(step.title || '');
+        copy.append(title);
+        if (step.detail) {
+          var detail = document.createElement('span');
+          detail.className = 'plan-step-detail';
+          detail.textContent = String(step.detail);
+          copy.append(detail);
+        }
+        item.append(marker, copy);
+        planSteps.append(item);
+      });
+
+      renderPlanNote(planBlockers, t('planBlockers'), Array.isArray(plan.blockers) ? plan.blockers.join('\\n') : '');
+      renderPlanNote(planCompletion, t('planCompletion'), plan.completionSummary || '');
+    }
+
+    function renderPlanNote(element, label, text) {
+      if (!element) return;
+      var value = String(text || '').trim();
+      element.classList.toggle('hidden', !value);
+      element.innerHTML = '';
+      if (!value) return;
+      var heading = document.createElement('span');
+      heading.className = 'plan-note-label';
+      heading.textContent = label;
+      var content = document.createElement('span');
+      content.textContent = value;
+      element.append(heading, content);
+    }
+
+    function getPlanStatusLabel(statusValue) {
+      switch (statusValue) {
+        case 'blocked': return t('planStatusBlocked');
+        case 'completed': return t('planStatusCompleted');
+        case 'failed': return t('planStatusFailed');
+        case 'stopped': return t('planStatusStopped');
+        default: return t('planStatusRunning');
+      }
+    }
+
+    function getPlanStepMarker(statusValue) {
+      switch (statusValue) {
+        case 'completed': return '✓';
+        case 'blocked': return '!';
+        case 'failed': return '×';
+        case 'skipped': return '–';
+        case 'in_progress': return '•';
+        default: return '';
+      }
+    }
+
     function renderDraftEdits() {
       draftList.innerHTML = '';
-      draftRegion.classList.toggle('hidden', state.draftEdits.length === 0);
-      if (draftBulkActions) {
-        draftBulkActions.classList.toggle('hidden', state.draftEdits.length <= 1);
+      var changeSets = Array.isArray(state.changeSets) ? state.changeSets : [];
+      draftRegion.classList.toggle('hidden', changeSets.length === 0);
+
+      for (var i = 0; i < changeSets.length; i++) {
+        var changeSet = changeSets[i];
+        var card = document.createElement('section');
+        card.className = 'change-set-card change-set-' + String(changeSet.status || 'pending');
+
+        var header = document.createElement('div');
+        header.className = 'change-set-header';
+        var heading = document.createElement('div');
+        heading.className = 'change-set-heading';
+        var title = document.createElement('div');
+        title.className = 'change-set-title';
+        title.textContent = String(changeSet.operationSummary || t('changeSets'));
+        title.title = title.textContent;
+        var meta = document.createElement('div');
+        meta.className = 'change-set-meta';
+        meta.textContent = t('changeSetFiles', { count: Number(changeSet.fileCount) || 0 }) + ' · ' + getChangeSetStatusLabel(changeSet.status);
+        heading.append(title, meta);
+
+        var setActions = document.createElement('div');
+        setActions.className = 'change-set-actions';
+        var files = Array.isArray(changeSet.files) ? changeSet.files : [];
+        var applicableFiles = files.filter(function(file) { return file.status === 'pending' || file.status === 'apply_failed'; });
+        var revertibleFiles = files.filter(function(file) { return file.status === 'applied' || file.status === 'revert_failed'; });
+        if (applicableFiles.length) {
+          setActions.append(
+            createChangeSetActionButton(t('changeSetApplyAll'), 'applyChangeSet', changeSet.id, false),
+            createChangeSetActionButton(t('changeSetDiscardAll'), 'discardChangeSet', changeSet.id, true)
+          );
+        }
+        if (revertibleFiles.length) {
+          setActions.append(createChangeSetActionButton(t('revertAgentChange'), 'revertChangeSet', changeSet.id, true));
+        }
+        header.append(heading, setActions);
+
+        var fileList = document.createElement('div');
+        fileList.className = 'change-set-files';
+        files.forEach(function(edit) {
+          fileList.append(createChangeSetFileRow(edit));
+        });
+        card.append(header, fileList);
+        draftList.append(card);
       }
-      if (draftApplyAllBtn) {
-        draftApplyAllBtn.disabled = state.draftEdits.length <= 1;
+    }
+
+    function createChangeSetFileRow(edit) {
+      var chip = document.createElement('div');
+      chip.className = 'draft-chip draft-chip-' + String(edit.status || 'pending');
+      var content = document.createElement('div');
+      content.className = 'draft-chip-content';
+      var main = document.createElement('div');
+      main.className = 'draft-chip-main';
+      var label = document.createElement('span');
+      label.className = 'draft-chip-label';
+      label.textContent = String(edit.label || '');
+      label.title = String(edit.reason || '');
+      main.append(createDraftEditActionIcon(edit), label);
+      var details = document.createElement('div');
+      details.className = 'draft-chip-details';
+      details.textContent = getChangeFileStatusLabel(edit.status) + (edit.reason ? ' · ' + edit.reason : '');
+      content.append(main, details);
+      if (edit.error) {
+        var error = document.createElement('div');
+        error.className = 'draft-chip-error';
+        error.textContent = String(edit.error);
+        content.append(error);
       }
-      if (draftDiscardAllBtn) {
-        draftDiscardAllBtn.disabled = state.draftEdits.length <= 1;
+
+      var actions = document.createElement('div');
+      actions.className = 'draft-chip-actions';
+      if (edit.status !== 'discarded') {
+        actions.append(createEditActionButton(t('previewDiff'), 'openDraftDiff', edit.id, true));
       }
+      if (edit.status === 'pending' || edit.status === 'apply_failed') {
+        actions.append(
+          createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false),
+          createEditActionButton(t('discard'), 'discardDraftEdit', edit.id, true)
+        );
+      } else if (edit.status === 'applied' || edit.status === 'revert_failed') {
+        actions.append(createEditActionButton(t('revert'), 'revertDraftEdit', edit.id, true));
+      }
+      chip.append(content, actions);
+      return chip;
+    }
 
-      for (var i = 0; i < state.draftEdits.length; i++) {
-        var edit = state.draftEdits[i];
-        var chip = document.createElement('div');
-        chip.className = 'draft-chip';
+    function createEditActionButton(label, action, id, secondary) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.className = secondary ? 'secondary' : '';
+      button.dataset.editId = id;
+      button.dataset.editAction = action;
+      button.disabled = (state.isBusy && action !== 'openDraftDiff') || pendingChangeActions.has(action + ':' + id);
+      return button;
+    }
 
-        var main = document.createElement('div');
-        main.className = 'draft-chip-main';
+    function createChangeSetActionButton(label, action, id, secondary) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.className = secondary ? 'secondary' : '';
+      button.dataset.changeSetId = id;
+      button.dataset.changeSetAction = action;
+      button.disabled = state.isBusy || pendingChangeActions.has(action + ':' + id);
+      return button;
+    }
 
-        var label = document.createElement('span');
-        label.className = 'draft-chip-label';
-        label.textContent = edit.label;
-        label.title = edit.reason;
-        main.append(createDraftEditActionIcon(edit), label);
+    function getChangeSetStatusLabel(statusValue) {
+      switch (statusValue) {
+        case 'partially_applied': return t('changeSetStatusPartiallyApplied');
+        case 'applied': return t('changeSetStatusApplied');
+        case 'partially_failed': return t('changeSetStatusPartiallyFailed');
+        case 'reverted': return t('changeSetStatusReverted');
+        default: return t('changeSetStatusPending');
+      }
+    }
 
-        var actions = document.createElement('div');
-        actions.className = 'draft-chip-actions';
-
-        var apply = document.createElement('button');
-        apply.type = 'button';
-        apply.textContent = t('apply');
-        apply.dataset.editId = edit.id;
-        apply.dataset.editAction = 'applyDraftEdit';
-
-        var discard = document.createElement('button');
-        discard.type = 'button';
-        discard.className = 'secondary';
-        discard.textContent = t('discard');
-        discard.dataset.editId = edit.id;
-        discard.dataset.editAction = 'discardDraftEdit';
-
-        actions.append(apply, discard);
-        chip.append(main, actions);
-        draftList.append(chip);
+    function getChangeFileStatusLabel(statusValue) {
+      switch (statusValue) {
+        case 'applied': return t('changeFileStatusApplied');
+        case 'discarded': return t('changeFileStatusDiscarded');
+        case 'apply_failed': return t('changeFileStatusApplyFailed');
+        case 'reverted': return t('changeFileStatusReverted');
+        case 'revert_failed': return t('changeFileStatusRevertFailed');
+        default: return t('changeFileStatusPending');
       }
     }
 

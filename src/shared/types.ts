@@ -220,6 +220,150 @@ export interface DraftEdit {
   reason: string;
 }
 
+export type TaskPlanStatus = 'running' | 'blocked' | 'completed' | 'failed' | 'stopped';
+
+export type TaskPlanStepStatus = 'pending' | 'in_progress' | 'completed' | 'blocked' | 'failed' | 'skipped';
+
+export interface TaskPlanStep {
+  id: string;
+  title: string;
+  status: TaskPlanStepStatus;
+  detail?: string;
+  updatedAt: string;
+}
+
+export interface TaskPlan {
+  id: string;
+  runId: string;
+  sessionId?: string;
+  goal: string;
+  status: TaskPlanStatus;
+  steps: TaskPlanStep[];
+  currentStepId?: string;
+  blockers: string[];
+  completionSummary?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ChangeSetStatus =
+  | 'pending'
+  | 'partially_applied'
+  | 'applied'
+  | 'partially_failed'
+  | 'reverted'
+  | 'discarded';
+
+export type ChangeSetFileStatus =
+  | 'pending'
+  | 'applied'
+  | 'discarded'
+  | 'apply_failed'
+  | 'reverted'
+  | 'revert_failed';
+
+export interface ChangeSetFile extends DraftEdit {
+  status: ChangeSetFileStatus;
+  error?: string;
+  checkpointId?: string;
+}
+
+export interface ChangeSetApplyFailure {
+  editId: string;
+  label: string;
+  error: string;
+}
+
+export interface ChangeSetApplyResult {
+  changeSetId: string;
+  attempted: number;
+  appliedEditIds: string[];
+  failed: ChangeSetApplyFailure[];
+  completedAt: string;
+}
+
+export interface ChangeSetRevertResult {
+  changeSetId: string;
+  attempted: number;
+  revertedEditIds: string[];
+  failed: ChangeSetApplyFailure[];
+  completedAt: string;
+}
+
+export interface ChangeCheckpoint {
+  id: string;
+  changeSetId: string;
+  editId: string;
+  uri: string;
+  label: string;
+  action: DraftEditAction;
+  originalExists: boolean;
+  originalText?: string;
+  originalTextHash?: string;
+  appliedExists: boolean;
+  appliedTextHash?: string;
+  createdAt: string;
+  appliedAt: string;
+  revertedAt?: string;
+}
+
+export interface ChangeSet {
+  id: string;
+  runId: string;
+  sessionId: string;
+  messageId: string;
+  traceLogUri?: string;
+  fileCount: number;
+  operationSummary: string;
+  files: ChangeSetFile[];
+  status: ChangeSetStatus;
+  lastApplyResult?: ChangeSetApplyResult;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ValidationAuthorizationPolicy = 'never' | 'ask' | 'always';
+
+export type SafeNpmScript = 'compile' | 'lint' | 'test';
+
+export interface WorkspaceDiagnosticItem {
+  uri: string;
+  path: string;
+  severity: 'error' | 'warning' | 'information' | 'hint';
+  message: string;
+  source?: string;
+  code?: string;
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
+}
+
+export interface WorkspaceDiagnosticSummary {
+  ok: boolean;
+  total: number;
+  errors: number;
+  warnings: number;
+  information: number;
+  hints: number;
+  truncated: boolean;
+  items: WorkspaceDiagnosticItem[];
+}
+
+export interface ValidationToolResult {
+  ok: boolean;
+  kind: 'npm_script';
+  script: SafeNpmScript;
+  workspaceFolder?: string;
+  taskName?: string;
+  authorized: boolean;
+  exitCode?: number;
+  durationMs: number;
+  timedOut: boolean;
+  diagnostics?: WorkspaceDiagnosticSummary;
+  error?: string;
+}
+
 export interface ReferenceResource {
   uri: string;
   path: string;
@@ -239,6 +383,8 @@ export interface AgentRequest {
   contextCompression?: ContextCompressionState;
   historyRewriteReason?: string;
   language: KeepseekLanguage;
+  sessionId?: string;
+  assistantMessageId?: string;
   signal?: AbortSignal;
 }
 
@@ -253,9 +399,12 @@ export interface ActivatedSkill {
 }
 
 export interface AgentResponse {
+  runId: string;
   message: string;
   reasoningContent?: string;
   draftEdits: DraftEdit[];
+  taskPlan: TaskPlan;
+  changeSet?: ChangeSet;
   usage?: TurnUsageStats;
   promptCacheDiagnostics?: PromptCacheDiagnostics;
   traceLog?: AgentTraceLogInfo;
@@ -277,6 +426,8 @@ export type AgentActivityPhase =
   | 'listing_files'
   | 'listing_directory'
   | 'creating_draft_edit'
+  | 'reading_diagnostics'
+  | 'running_validation'
   | 'reviewing_tool_result'
   | 'generating'
   | 'finalizing'
@@ -309,4 +460,5 @@ export interface AgentRunCallbacks {
   onUsageEstimate?: (usage: ContextUsageEstimate) => void;
   onUsage?: (event: UsageEvent) => void;
   onTraceLog?: (traceLog: AgentTraceLogInfo) => void;
+  onTaskPlan?: (taskPlan: TaskPlan) => void;
 }

@@ -41,12 +41,10 @@ export class DraftEditStore {
     }
 
     try {
-      const applied = await this.safeFileEditor.applyDraftEdit(edit);
-      if (applied) {
-        this.recordAppliedEdit(edit);
-        await this.sessionStore.persist();
-      }
-      return applied;
+      await this.safeFileEditor.applyDraftEdit(edit);
+      this.recordAppliedEdit(edit);
+      await this.sessionStore.persist();
+      return true;
     } catch (error) {
       vscode.window.showErrorMessage(getErrorMessage(error));
     }

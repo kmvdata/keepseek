@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { AgentSettings, KeepseekModel, UsageCostRates } from './types';
+import { AgentSettings, KeepseekModel, UsageCostRates, ValidationAuthorizationPolicy } from './types';
 import { SESSION_HARD_RETENTION_DAYS } from '../sessions/sessionRetention';
 import {
   DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
@@ -21,6 +21,9 @@ export const DEFAULT_TRACE_MAX_FILE_BYTES = 20_000_000;
 export const DEFAULT_BALANCE_ENDPOINT_URL = '';
 export const DEFAULT_BALANCE_REFRESH_INTERVAL_MS = 60_000;
 export const DEFAULT_SLIM_TOOL_MODE_ENABLED = true;
+export const DEFAULT_VALIDATION_AUTHORIZATION_POLICY: ValidationAuthorizationPolicy = 'ask';
+export const DEFAULT_MAX_VALIDATION_RUNS = 3;
+export const DEFAULT_VALIDATION_TIMEOUT_MS = 120_000;
 export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
   'deepseek-v4-flash': {
     cacheHitPrice: 0.02,
@@ -148,6 +151,29 @@ export function getConfiguredSlimToolModeEnabled(): boolean {
   return vscode.workspace
     .getConfiguration('keepseek')
     .get<boolean>('slimToolModeEnabled', DEFAULT_SLIM_TOOL_MODE_ENABLED);
+}
+
+export function getConfiguredValidationAuthorizationPolicy(): ValidationAuthorizationPolicy {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<string>('validation.authorizationPolicy', DEFAULT_VALIDATION_AUTHORIZATION_POLICY);
+  return configured === 'never' || configured === 'always'
+    ? configured
+    : DEFAULT_VALIDATION_AUTHORIZATION_POLICY;
+}
+
+export function getConfiguredMaxValidationRuns(): number {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('validation.maxRunsPerAgentRun', DEFAULT_MAX_VALIDATION_RUNS);
+  return normalizeIntegerInRange(configured, 0, 8, DEFAULT_MAX_VALIDATION_RUNS);
+}
+
+export function getConfiguredValidationTimeoutMs(): number {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('validation.timeoutMs', DEFAULT_VALIDATION_TIMEOUT_MS);
+  return normalizeIntegerInRange(configured, 1_000, 600_000, DEFAULT_VALIDATION_TIMEOUT_MS);
 }
 
 export function getConfiguredMaxRequestRetries(): number {

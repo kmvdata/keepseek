@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
+  RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME,
   buildInitialAgentMessages,
   getAgentTools
@@ -28,6 +29,15 @@ test('dynamic context is kept out of the stable system prompt', () => {
   assert.equal(first[0]?.content, second[0]?.content);
   assert.ok(first.at(-1)?.content?.includes('one.ts'));
   assert.ok(second.at(-1)?.content?.includes('two.ts'));
+});
+
+test('validation tool exposes only the fixed safe npm scripts', () => {
+  const tool = getAgentTools({ toolNames: [RUN_VALIDATION_TOOL_NAME] })[0];
+  const properties = tool.function.parameters.properties as Record<string, { enum?: string[] }>;
+
+  assert.equal(tool.function.name, RUN_VALIDATION_TOOL_NAME);
+  assert.deepEqual(properties.script?.enum, ['compile', 'lint', 'test']);
+  assert.equal(properties.command, undefined);
 });
 
 test('tool schema order is canonicalized by tool name', () => {
