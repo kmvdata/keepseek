@@ -173,6 +173,24 @@ export function getScript(): string {
       return '[' + getSkillPromptTextForView(skill) + '](' + getSkillPathForView(skill) + ')';
     }
 
+    var skillReferenceIconTemplate = document.createElement('template');
+    skillReferenceIconTemplate.innerHTML = '<svg viewBox="0 0 66 92" fill="none" focusable="false"><path d="M37.776 2.67 63 17v48.772L28 88.714 3 72.691V26.036ZM3 50.263 28 63l35-19.5M7 28l20.5 11.318L63 18.265M28 39.318v48.034" stroke="#1a6bb5" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+    function createSkillReferenceIcon() {
+      var icon = document.createElement('span');
+      icon.className = 'rich-skill-link-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.appendChild(skillReferenceIconTemplate.content.cloneNode(true));
+      return icon;
+    }
+
+    function renderSkillReferenceContent(link, label) {
+      var text = document.createElement('span');
+      text.className = 'rich-skill-link-label';
+      text.textContent = label;
+      link.replaceChildren(createSkillReferenceIcon(), text);
+    }
+
     function getSkillPathForView(skill) {
       var skillPath = String(skill && skill.skillPath || '').trim();
       if (skillPath) {
@@ -488,6 +506,29 @@ export function getScript(): string {
       if (inlineEditLink && transcript.contains(inlineEditLink)) {
         event.preventDefault();
         event.stopPropagation();
+        if (event.detail > 1) return;
+        if (inlineEditLink.matches('a.rich-skill-link')) {
+          vscode.postMessage({
+            type: 'openSkill',
+            skillId: inlineEditLink.dataset.skillId || ''
+          });
+          return;
+        }
+        if (inlineEditLink.dataset.kind === 'directory') {
+          vscode.postMessage({
+            type: 'openDirectoryReference',
+            path: inlineEditLink.dataset.path || ''
+          });
+          return;
+        }
+        vscode.postMessage({
+          type: 'openFileReference',
+          path: inlineEditLink.dataset.path || '',
+          startLine: readReferenceInteger(inlineEditLink.dataset.startLine, 0),
+          endLine: readReferenceInteger(inlineEditLink.dataset.endLine, 0),
+          startColumn: readReferenceInteger(inlineEditLink.dataset.startColumn, 0),
+          endColumn: readReferenceInteger(inlineEditLink.dataset.endColumn, 0)
+        });
         return;
       }
 
@@ -499,13 +540,7 @@ export function getScript(): string {
 
     transcript.addEventListener('dblclick', function(event) {
       var target = event.target instanceof Element ? event.target : null;
-      var skillLink = target?.closest('.message-edit-input a.rich-skill-link');
-      if (skillLink && transcript.contains(skillLink)) {
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      var link = target?.closest('.message-edit-input a.rich-file-link, a.message-file-link');
+      var link = target?.closest('a.message-file-link');
       if (!link || !transcript.contains(link)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -3550,7 +3585,7 @@ export function getScript(): string {
       anchor.setAttribute('contenteditable', 'false');
       anchor.draggable = false;
       anchor.title = skill.description || skill.name || skill.id;
-      anchor.textContent = getSkillPromptTextForView(skill);
+      renderSkillReferenceContent(anchor, getSkillPromptTextForView(skill));
       anchor.dataset.skillId = skill.id;
       anchor.dataset.skillPath = getSkillPathForView(skill);
       return anchor;
@@ -3658,7 +3693,7 @@ export function getScript(): string {
         if (skill) {
           link.setAttribute('href', getSkillPathForView(skill));
           link.dataset.skillPath = getSkillPathForView(skill);
-          link.textContent = getSkillPromptTextForView(skill);
+          renderSkillReferenceContent(link, getSkillPromptTextForView(skill));
           link.title = skill.description || skill.name || skill.id;
         } else {
           link.setAttribute('href', link.dataset.skillPath || link.getAttribute('href') || '');

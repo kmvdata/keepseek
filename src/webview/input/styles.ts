@@ -140,6 +140,44 @@ export function getInputStyles(): string {
       cursor: default;
     }
 
+    .rich-skill-link {
+      gap: 4px;
+      min-width: 0;
+      cursor: pointer;
+    }
+
+    .rich-skill-link:hover {
+      border-color: var(--vscode-focusBorder, var(--vscode-inputOption-activeBorder, var(--vscode-panel-border)));
+      background: var(--vscode-toolbar-hoverBackground);
+      color: var(--vscode-textLink-activeForeground);
+    }
+
+    .rich-skill-link:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 1px;
+    }
+
+    .rich-skill-link-icon {
+      display: inline-flex;
+      flex: 0 0 12px;
+      width: 12px;
+      height: 12px;
+      color: currentColor;
+    }
+
+    .rich-skill-link-icon svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    .rich-skill-link-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .composer {
       background: var(--vscode-sideBar-background);
       padding: var(--keepseek-composer-padding, 0);

@@ -103,6 +103,66 @@ test('rich prompt script exposes reference, skill, and external drop entry point
   assert.match(script, /getPromptInsertionRange/u);
 });
 
+test('rich input references open once from either a single click or a double click', async () => {
+  const inputScript = getInputScript();
+  const transcriptScript = getScript();
+  const promptClickHandler = getGeneratedSection(
+    inputScript,
+    "promptInput.addEventListener('click'",
+    "promptInput.addEventListener('paste'"
+  );
+  const transcriptClickHandler = getGeneratedSection(
+    transcriptScript,
+    "transcript.addEventListener('click'",
+    "transcript.addEventListener('dblclick'"
+  );
+  const transcriptDoubleClickHandler = getGeneratedSection(
+    transcriptScript,
+    "transcript.addEventListener('dblclick'",
+    "transcript.addEventListener('submit'"
+  );
+  const providerSource = await readFile(
+    path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
+    'utf8'
+  );
+
+  assert.match(promptClickHandler, /a\.rich-skill-link/u);
+  assert.match(promptClickHandler, /event\.detail > 1/u);
+  assert.match(promptClickHandler, /type: 'openSkill'/u);
+  assert.match(promptClickHandler, /type: 'openFileReference'/u);
+  assert.equal(promptClickHandler.match(/type: 'openSkill'/gu)?.length, 1);
+  assert.doesNotMatch(inputScript, /promptInput\.addEventListener\('dblclick'/u);
+
+  assert.match(transcriptClickHandler, /\.message-edit-input a\.rich-skill-link/u);
+  assert.match(transcriptClickHandler, /event\.detail > 1/u);
+  assert.match(transcriptClickHandler, /type: 'openSkill'/u);
+  assert.match(transcriptClickHandler, /type: 'openFileReference'/u);
+  assert.equal(transcriptClickHandler.match(/type: 'openSkill'/gu)?.length, 1);
+  assert.doesNotMatch(transcriptDoubleClickHandler, /openSkill|message-edit-input/u);
+  assert.match(transcriptDoubleClickHandler, /a\.message-file-link/u);
+
+  assert.match(
+    providerSource,
+    /const manifest = this\.skillStore\.getManifest\(skillId\);[\s\S]*?openTextDocument\(manifest\.skillUri\)[\s\S]*?showTextDocument\(document, \{ preview: false \}\)/u
+  );
+});
+
+test('Skill reference chips use a Codex-style icon and pointer hover affordance', () => {
+  const inputScript = getInputScript();
+  const transcriptScript = getScript();
+  const styles = getStyles();
+
+  assert.match(styles, /\.rich-skill-link\s*\{[^}]*cursor:\s*pointer/us);
+  assert.match(styles, /\.rich-skill-link:hover\s*\{[^}]*background:/us);
+  assert.match(styles, /\.rich-skill-link-icon\s*\{[^}]*width:\s*12px/us);
+  assert.match(styles, /\.rich-skill-link-label\s*\{[^}]*text-overflow:\s*ellipsis/us);
+  assert.match(transcriptScript, /function createSkillReferenceIcon\(\)[\s\S]*?<svg[\s\S]*?currentColor/u);
+  assert.match(inputScript, /createSkillLink\(skill\)[\s\S]*?renderSkillReferenceContent\(anchor, getSkillPromptText\(skill\)\)/u);
+  assert.match(inputScript, /refreshPromptSkillLinkLabels\(\)[\s\S]*?renderSkillReferenceContent\(link, getSkillPromptText\(skill\)\)/u);
+  assert.match(transcriptScript, /createInlineSkillLink\(skill\)[\s\S]*?renderSkillReferenceContent\(anchor, getSkillPromptTextForView\(skill\)\)/u);
+  assert.match(transcriptScript, /sanitizeInlineEditorLinks\(editor\)[\s\S]*?renderSkillReferenceContent\(link, getSkillPromptTextForView\(skill\)\)/u);
+});
+
 test('reference menu puts the external resource picker before workspace resources by default', () => {
   const script = getInputScript();
 
@@ -156,6 +216,7 @@ test('Legacy Memory migration command is hidden by default and appears only from
 });
 
 test('generated Webview JavaScript passes syntax compilation', () => {
+  assert.doesNotThrow(() => new Function(getInputScript()));
   assert.doesNotThrow(() => new Function(getScript()));
 });
 
@@ -190,3 +251,11 @@ test('Skill creation and Legacy Memory migration attach their ChangeSets to expl
   assert.match(providerSource, /appendChangeSetTimelineMessage\([\s\S]*?createSkillDraftCreated[\s\S]*?messageId: timelineMessage\.id/u);
   assert.match(providerSource, /legacyMemoryMigrationDraftCreated[\s\S]*?messageId: timelineMessage\?\.id/u);
 });
+
+function getGeneratedSection(source: string, startMarker: string, endMarker: string): string {
+  const start = source.indexOf(startMarker);
+  assert.ok(start >= 0, `Missing generated section start: ${startMarker}`);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert.ok(end > start, `Missing generated section end: ${endMarker}`);
+  return source.slice(start, end);
+}

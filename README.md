@@ -159,7 +159,7 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 从 VSIX 安装：
 
 ```bash
-code --install-extension keepseek-0.1.8.vsix
+code --install-extension keepseek-0.2.0.vsix
 ```
 
 VS Code 1.127.0 可能输出 DEP0169 warning，这是 VS Code CLI 内部警告，安装成功不受影响。
@@ -203,7 +203,7 @@ KeepSeek: Open Agent Chat
 
 ## 发布准备
 
-当前发布版本为 `0.1.8`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.1.8`，发布标签可以使用 `v0.1.8`。
+当前发布版本为 `0.2.0`。VS Code 扩展的 `package.json` 必须使用 SemVer 格式，所以文件中写作 `0.2.0`，发布标签可以使用 `v0.2.0`。
 
 生成 VSIX：
 

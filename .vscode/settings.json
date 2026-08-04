@@ -1,5 +1,5 @@
 {
-    "keepseek.thinkingEnabled": true,
+    "keepseek.thinkingEnabled": false,
     "keepseek.reasoningEffort": "max",
-    "keepseek.selectedModelId": "deepseek-v4-pro"
+    "keepseek.selectedModelId": "deepseek-v4-flash"
 }
