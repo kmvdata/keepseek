@@ -683,14 +683,12 @@ export function getInputStyles(): string {
       justify-content: center;
       width: 18px;
       height: 18px;
-      border: 1px solid var(--vscode-inputOption-activeBorder, var(--vscode-panel-border));
-      border-radius: 4px;
-      color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
-      background: var(--vscode-inputOption-activeBackground, transparent);
-      font-family: var(--vscode-editor-font-family, monospace);
-      font-size: 12px;
-      font-weight: 700;
-      line-height: 1;
+    }
+
+    .reference-menu-skill-icon svg {
+      display: block;
+      width: 13px;
+      height: 18px;
     }
 
     .reference-menu-item-body {

@@ -156,11 +156,25 @@ test('Skill reference chips use a Codex-style icon and pointer hover affordance'
   assert.match(styles, /\.rich-skill-link:hover\s*\{[^}]*background:/us);
   assert.match(styles, /\.rich-skill-link-icon\s*\{[^}]*width:\s*12px/us);
   assert.match(styles, /\.rich-skill-link-label\s*\{[^}]*text-overflow:\s*ellipsis/us);
-  assert.match(transcriptScript, /function createSkillReferenceIcon\(\)[\s\S]*?<svg[\s\S]*?currentColor/u);
+  assert.match(transcriptScript, /function createSkillReferenceIcon\(className\)[\s\S]*?<svg[\s\S]*?currentColor/u);
   assert.match(inputScript, /createSkillLink\(skill\)[\s\S]*?renderSkillReferenceContent\(anchor, getSkillPromptText\(skill\)\)/u);
   assert.match(inputScript, /refreshPromptSkillLinkLabels\(\)[\s\S]*?renderSkillReferenceContent\(link, getSkillPromptText\(skill\)\)/u);
   assert.match(transcriptScript, /createInlineSkillLink\(skill\)[\s\S]*?renderSkillReferenceContent\(anchor, getSkillPromptTextForView\(skill\)\)/u);
   assert.match(transcriptScript, /sanitizeInlineEditorLinks\(editor\)[\s\S]*?renderSkillReferenceContent\(link, getSkillPromptTextForView\(skill\)\)/u);
+});
+
+test('skill suggestions reuse the cached plugin icon template', () => {
+  const inputScript = getInputScript();
+  const transcriptScript = getScript();
+  const styles = getStyles();
+
+  assert.match(
+    inputScript,
+    /createSkillReferenceButton\(skill, index\)[\s\S]*?createSkillReferenceIcon\('reference-menu-item-icon reference-menu-skill-icon'\)/u
+  );
+  assert.doesNotMatch(inputScript, /icon\.textContent = '\$'/u);
+  assert.match(transcriptScript, /skillReferenceIconTemplate\.content\.cloneNode\(true\)/u);
+  assert.match(styles, /\.reference-menu-skill-icon svg\s*\{[^}]*width:\s*13px/us);
 });
 
 test('reference menu puts the external resource picker before workspace resources by default', () => {

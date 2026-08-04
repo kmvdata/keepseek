@@ -176,9 +176,9 @@ export function getScript(): string {
     var skillReferenceIconTemplate = document.createElement('template');
     skillReferenceIconTemplate.innerHTML = '<svg viewBox="0 0 66 92" fill="none" focusable="false"><path d="M37.776 2.67 63 17v48.772L28 88.714 3 72.691V26.036ZM3 50.263 28 63l35-19.5M7 28l20.5 11.318L63 18.265M28 39.318v48.034" stroke="#1a6bb5" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
-    function createSkillReferenceIcon() {
+    function createSkillReferenceIcon(className) {
       var icon = document.createElement('span');
-      icon.className = 'rich-skill-link-icon';
+      icon.className = className || 'rich-skill-link-icon';
       icon.setAttribute('aria-hidden', 'true');
       icon.appendChild(skillReferenceIconTemplate.content.cloneNode(true));
       return icon;

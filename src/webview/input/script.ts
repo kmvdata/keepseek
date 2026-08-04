@@ -925,10 +925,7 @@ export function getInputScript(): string {
         option.setAttribute('role', 'option');
         option.setAttribute('aria-selected', index === activeReferenceIndex ? 'true' : 'false');
 
-        var icon = document.createElement('span');
-        icon.className = 'reference-menu-item-icon reference-menu-skill-icon';
-        icon.textContent = '$';
-        icon.setAttribute('aria-hidden', 'true');
+        var icon = createSkillReferenceIcon('reference-menu-item-icon reference-menu-skill-icon');
 
         var body = document.createElement('span');
         body.className = 'reference-menu-item-body';
