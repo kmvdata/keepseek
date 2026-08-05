@@ -1159,14 +1159,10 @@ export function getInputScript(): string {
         if (!skill.enabled || !skill.userInvocable || skill.unavailableReason) {
           return;
         }
-        var range = activeMentionRange && isRangeInsidePrompt(activeMentionRange)
-          ? activeMentionRange.cloneRange()
-          : getPromptInsertionRange();
-        var fragment = document.createDocumentFragment();
-        appendReferenceBoundarySpace(fragment);
-        fragment.append(createSkillLink(skill));
-        appendReferenceBoundarySpace(fragment);
-        insertFragmentAtRange(range, fragment);
+        consumeActiveMentionRangeForPicker();
+        if (!isSkillActive(skill.id)) {
+          vscode.postMessage({ type: 'useSkill', skillId: skill.id });
+        }
         closeReferenceMenu(true);
         setComposerStatus(t('skillInserted', { name: skill.name || skill.id }));
       }
@@ -1658,7 +1654,6 @@ export function getInputScript(): string {
           if (!skill.enabled || !skill.userInvocable || skill.unavailableReason) {
             return;
           }
-          insertSkillChip(skill);
           if (!isSkillActive(skillId)) {
             vscode.postMessage({ type: 'useSkill', skillId: skillId });
           }
