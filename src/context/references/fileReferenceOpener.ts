@@ -22,32 +22,55 @@ export async function openFileReference(input: {
       throw new Error(localize(input.language, 'fileReferenceInvalidPath'));
     }
     const stat = await vscode.workspace.fs.stat(uri);
-    if (stat.type === vscode.FileType.Directory) {
-      await vscode.commands.executeCommand('revealInExplorer', uri);
+    if ((stat.type & vscode.FileType.Directory) !== 0) {
+      if (!(await revealReferenceInOperatingSystem(uri))) {
+        await vscode.commands.executeCommand('revealInExplorer', uri);
+      }
       return;
     }
-
-    const document = await vscode.workspace.openTextDocument(uri);
 
     if (input.startLine <= 0) {
-      await vscode.window.showTextDocument(document, { preview: true });
+      await openInVisualStudioCodeOrReveal(uri, async () => {
+        await vscode.commands.executeCommand('vscode.open', uri, { preview: true });
+      });
       return;
     }
 
-    const startLine = clampLine(input.startLine, 1, document.lineCount);
-    const endLine = clampLine(input.endLine, startLine, document.lineCount);
-    const startLineMaxCol = document.lineAt(startLine - 1).range.end.character;
-    const endLineMaxCol = document.lineAt(endLine - 1).range.end.character;
-    const startCol = input.startColumn > 0 ? clampColumn(input.startColumn - 1, startLineMaxCol) : 0;
-    const endCol = input.endColumn > 0 ? clampColumn(input.endColumn - 1, endLineMaxCol) : endLineMaxCol;
-    const start = new vscode.Position(startLine - 1, startCol);
-    const end = new vscode.Position(endLine - 1, endCol);
+    await openInVisualStudioCodeOrReveal(uri, async () => {
+      const document = await vscode.workspace.openTextDocument(uri);
+      const startLine = clampLine(input.startLine, 1, document.lineCount);
+      const endLine = clampLine(input.endLine, startLine, document.lineCount);
+      const startLineMaxCol = document.lineAt(startLine - 1).range.end.character;
+      const endLineMaxCol = document.lineAt(endLine - 1).range.end.character;
+      const startCol = input.startColumn > 0 ? clampColumn(input.startColumn - 1, startLineMaxCol) : 0;
+      const endCol = input.endColumn > 0 ? clampColumn(input.endColumn - 1, endLineMaxCol) : endLineMaxCol;
+      const start = new vscode.Position(startLine - 1, startCol);
+      const end = new vscode.Position(endLine - 1, endCol);
 
-    await vscode.window.showTextDocument(document, {
-      preview: true,
-      selection: new vscode.Range(start, end)
+      await vscode.window.showTextDocument(document, {
+        preview: true,
+        selection: new vscode.Range(start, end)
+      });
     });
   } catch (error) {
     vscode.window.showErrorMessage(localize(input.language, 'cannotOpenFileReference', { message: getErrorMessage(error) }));
+  }
+}
+
+export async function revealReferenceInOperatingSystem(uri: vscode.Uri): Promise<boolean> {
+  if (uri.scheme !== 'file') {
+    return false;
+  }
+  await vscode.commands.executeCommand('revealFileInOS', uri);
+  return true;
+}
+
+async function openInVisualStudioCodeOrReveal(uri: vscode.Uri, open: () => Promise<void>): Promise<void> {
+  try {
+    await open();
+  } catch (error) {
+    if (!(await revealReferenceInOperatingSystem(uri))) {
+      throw error;
+    }
   }
 }

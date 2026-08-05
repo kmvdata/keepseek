@@ -2407,7 +2407,7 @@ export function getInputScript(): string {
         anchor.setAttribute('contenteditable', 'false');
         anchor.draggable = false;
         anchor.title = skill.description || skill.name || skill.id;
-        renderSkillReferenceContent(anchor, getSkillPromptText(skill));
+        renderSkillReferenceContent(anchor, getSkillMentionName(skill));
         anchor.dataset.skillId = skill.id;
         anchor.dataset.skillPath = getSkillPath(skill);
         return anchor;
@@ -2449,7 +2449,7 @@ export function getInputScript(): string {
           }
           link.setAttribute('href', getSkillPath(skill));
           link.dataset.skillPath = getSkillPath(skill);
-          renderSkillReferenceContent(link, getSkillPromptText(skill));
+          renderSkillReferenceContent(link, getSkillMentionName(skill));
           link.title = skill.description || skill.name || skill.id;
         });
       }
@@ -2486,9 +2486,11 @@ export function getInputScript(): string {
         pill.className = 'skill-pill';
         pill.title = skill.description || skill.name || skill.id;
 
+        var icon = createSkillReferenceIcon('skill-pill-icon');
+
         var name = document.createElement('span');
         name.className = 'skill-pill-name';
-        name.textContent = getSkillPromptText(skill);
+        name.textContent = getSkillMentionName(skill);
 
         var remove = document.createElement('button');
         remove.type = 'button';
@@ -2498,7 +2500,7 @@ export function getInputScript(): string {
         remove.setAttribute('aria-label', t('removeSkill'));
         remove.textContent = '×';
 
-        pill.append(name, remove);
+        pill.append(icon, name, remove);
         return pill;
       }
 
@@ -3130,7 +3132,7 @@ export function getInputScript(): string {
           if (skill) {
             link.setAttribute('href', getSkillPath(skill));
             link.dataset.skillPath = getSkillPath(skill);
-            renderSkillReferenceContent(link, getSkillPromptText(skill));
+            renderSkillReferenceContent(link, getSkillMentionName(skill));
             link.title = skill.description || skill.name || skill.id;
           } else {
             link.setAttribute('href', link.dataset.skillPath || link.getAttribute('href') || '');

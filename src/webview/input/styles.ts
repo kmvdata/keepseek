@@ -57,6 +57,8 @@ export function getInputStyles(): string {
     .rich-file-link {
       display: inline-flex;
       align-items: center;
+      gap: 4px;
+      min-width: 0;
       max-width: 100%;
       min-height: 20px;
       margin: 0 2px 2px 0;
@@ -78,40 +80,43 @@ export function getInputStyles(): string {
 
     .rich-input .rich-file-link,
     .message-edit-input .rich-file-link {
-      flex-direction: column;
-      align-items: flex-start;
-      justify-content: center;
       max-width: 100%;
       min-height: 22px;
-      max-height: 38px;
-      padding: 2px 6px;
-      line-height: 15px;
-      white-space: normal;
-      overflow-wrap: anywhere;
+      padding: 1px 6px;
+      line-height: 18px;
+      white-space: nowrap;
     }
 
-    .rich-input .rich-file-link-primary,
-    .rich-input .rich-file-link-secondary,
-    .message-edit-input .rich-file-link-primary,
-    .message-edit-input .rich-file-link-secondary {
+    .rich-file-link-primary {
       display: block;
+      min-width: 0;
       max-width: 100%;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
 
-    .rich-input .rich-file-link-secondary,
-    .message-edit-input .rich-file-link-secondary {
-      color: var(--vscode-descriptionForeground);
-      font-size: 11px;
-      line-height: 14px;
-      opacity: 0.85;
+    .rich-reference-link-icon {
+      display: inline-flex;
+      flex: 0 0 14px;
+      width: 14px;
+      height: 14px;
+    }
+
+    .rich-reference-link-icon svg {
+      display: block;
+      width: 100%;
+      height: 100%;
     }
 
     .rich-file-link:hover {
       background: var(--vscode-toolbar-hoverBackground);
       color: var(--vscode-textLink-activeForeground);
+    }
+
+    .rich-file-link:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 1px;
     }
 
     .rich-directory-link {
@@ -165,10 +170,18 @@ export function getInputStyles(): string {
       color: currentColor;
     }
 
-    .rich-skill-link-icon svg {
+    .rich-skill-link-icon img,
+    .skill-pill-icon img {
       display: block;
       width: 100%;
       height: 100%;
+    }
+
+    .skill-pill-icon {
+      display: inline-flex;
+      flex: 0 0 12px;
+      width: 12px;
+      height: 12px;
     }
 
     .rich-skill-link-label {
@@ -685,7 +698,7 @@ export function getInputStyles(): string {
       height: 18px;
     }
 
-    .reference-menu-skill-icon svg {
+    .reference-menu-skill-icon img {
       display: block;
       width: 13px;
       height: 18px;

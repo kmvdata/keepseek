@@ -13,6 +13,7 @@ export function getHtmlForWebview(input: {
 }): string {
   const nonce = getNonce();
   const keepseekLogoUri = input.webview.asWebviewUri(vscode.Uri.joinPath(input.extensionUri, 'resources', 'keepseek.svg'));
+  const pluginIconUri = input.webview.asWebviewUri(vscode.Uri.joinPath(input.extensionUri, 'resources', 'plugin.svg'));
   return `<!DOCTYPE html>
 <html lang="${input.language === 'en' ? 'en' : 'zh-CN'}">
 <head>
@@ -28,6 +29,7 @@ ${getStyles()}
 ${getTemplate(input.extensionInfo)}
   <script nonce="${nonce}">
 window.keepseekLogoUri = ${JSON.stringify(String(keepseekLogoUri))};
+window.keepseekPluginIconUri = ${JSON.stringify(String(pluginIconUri))};
 ${getScript()}
   </script>
 </body>

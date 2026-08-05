@@ -7,6 +7,7 @@ import './contextEntryPoints.test';
 import './currentRunContext.test';
 import './draftEditRange.test';
 import './fileReference.test';
+import './fileReferenceOpener.test';
 import './gitTools.test';
 import './historyCompressor.test';
 import './historyProjection.test';

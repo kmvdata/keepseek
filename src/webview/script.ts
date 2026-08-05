@@ -6,6 +6,7 @@ export function getScript(): string {
   return `
     const vscode = acquireVsCodeApi();
     const keepseekLogoUri = window.keepseekLogoUri || '';
+    const keepseekPluginIconUri = window.keepseekPluginIconUri || '';
     const translations = ${JSON.stringify(WEBVIEW_TRANSLATIONS)};
     const state = {
       models: [],
@@ -173,14 +174,30 @@ export function getScript(): string {
       return '[' + getSkillPromptTextForView(skill) + '](' + getSkillPathForView(skill) + ')';
     }
 
-    var skillReferenceIconTemplate = document.createElement('template');
-    skillReferenceIconTemplate.innerHTML = '<svg viewBox="0 0 66 92" fill="none" focusable="false"><path d="M37.776 2.67 63 17v48.772L28 88.714 3 72.691V26.036ZM3 50.263 28 63l35-19.5M7 28l20.5 11.318L63 18.265M28 39.318v48.034" stroke="#1a6bb5" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    var fileReferenceIconTemplate = document.createElement('template');
+    fileReferenceIconTemplate.innerHTML = '<svg viewBox="0 0 16 16" fill="none" focusable="false"><path d="M4 1.75h5.25L12 4.5v9.75H4zM9 1.75V4.5h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+    var directoryReferenceIconTemplate = document.createElement('template');
+    directoryReferenceIconTemplate.innerHTML = '<svg viewBox="0 0 16 16" fill="none" focusable="false"><path d="M1.75 3.25h4l1.2 1.5h7.3v8.5H1.75z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+    function createReferenceTypeIcon(kind, className) {
+      var icon = document.createElement('span');
+      icon.className = className || 'rich-reference-link-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      var template = kind === 'directory' ? directoryReferenceIconTemplate : fileReferenceIconTemplate;
+      icon.appendChild(template.content.cloneNode(true));
+      return icon;
+    }
 
     function createSkillReferenceIcon(className) {
       var icon = document.createElement('span');
       icon.className = className || 'rich-skill-link-icon';
       icon.setAttribute('aria-hidden', 'true');
-      icon.appendChild(skillReferenceIconTemplate.content.cloneNode(true));
+      var image = document.createElement('img');
+      image.src = keepseekPluginIconUri;
+      image.alt = '';
+      image.setAttribute('aria-hidden', 'true');
+      icon.appendChild(image);
       return icon;
     }
 
@@ -502,63 +519,35 @@ export function getScript(): string {
         return;
       }
 
-      var inlineEditLink = target?.closest('.message-edit-input a.rich-file-link, .message-edit-input a.rich-skill-link');
-      if (inlineEditLink && transcript.contains(inlineEditLink)) {
+      var referenceLink = target?.closest('a.rich-file-link, a.rich-skill-link');
+      if (referenceLink && transcript.contains(referenceLink)) {
         event.preventDefault();
         event.stopPropagation();
         if (event.detail > 1) return;
-        if (inlineEditLink.matches('a.rich-skill-link')) {
+        if (referenceLink.matches('a.rich-skill-link')) {
           vscode.postMessage({
             type: 'openSkill',
-            skillId: inlineEditLink.dataset.skillId || ''
+            skillId: referenceLink.dataset.skillId || ''
           });
           return;
         }
-        if (inlineEditLink.dataset.kind === 'directory') {
+        if (referenceLink.dataset.kind === 'directory') {
           vscode.postMessage({
             type: 'openDirectoryReference',
-            path: inlineEditLink.dataset.path || ''
+            path: referenceLink.dataset.path || ''
           });
           return;
         }
         vscode.postMessage({
           type: 'openFileReference',
-          path: inlineEditLink.dataset.path || '',
-          startLine: readReferenceInteger(inlineEditLink.dataset.startLine, 0),
-          endLine: readReferenceInteger(inlineEditLink.dataset.endLine, 0),
-          startColumn: readReferenceInteger(inlineEditLink.dataset.startColumn, 0),
-          endColumn: readReferenceInteger(inlineEditLink.dataset.endColumn, 0)
+          path: referenceLink.dataset.path || '',
+          startLine: readReferenceInteger(referenceLink.dataset.startLine, 0),
+          endLine: readReferenceInteger(referenceLink.dataset.endLine, 0),
+          startColumn: readReferenceInteger(referenceLink.dataset.startColumn, 0),
+          endColumn: readReferenceInteger(referenceLink.dataset.endColumn, 0)
         });
         return;
       }
-
-      var link = target?.closest('a.message-file-link');
-      if (!link || !transcript.contains(link)) return;
-      event.preventDefault();
-      event.stopPropagation();
-    });
-
-    transcript.addEventListener('dblclick', function(event) {
-      var target = event.target instanceof Element ? event.target : null;
-      var link = target?.closest('a.message-file-link');
-      if (!link || !transcript.contains(link)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (link.dataset.kind === 'directory') {
-        vscode.postMessage({
-          type: 'openDirectoryReference',
-          path: link.dataset.path || ''
-        });
-        return;
-      }
-      vscode.postMessage({
-        type: 'openFileReference',
-        path: link.dataset.path || '',
-        startLine: readReferenceInteger(link.dataset.startLine, 0),
-        endLine: readReferenceInteger(link.dataset.endLine, 0),
-        startColumn: readReferenceInteger(link.dataset.startColumn, 0),
-        endColumn: readReferenceInteger(link.dataset.endColumn, 0)
-      });
     });
 
     transcript.addEventListener('submit', function(event) {
@@ -3585,7 +3574,7 @@ export function getScript(): string {
       anchor.setAttribute('contenteditable', 'false');
       anchor.draggable = false;
       anchor.title = skill.description || skill.name || skill.id;
-      renderSkillReferenceContent(anchor, getSkillPromptTextForView(skill));
+      renderSkillReferenceContent(anchor, getSkillMentionNameForView(skill));
       anchor.dataset.skillId = skill.id;
       anchor.dataset.skillPath = getSkillPathForView(skill);
       return anchor;
@@ -3693,7 +3682,7 @@ export function getScript(): string {
         if (skill) {
           link.setAttribute('href', getSkillPathForView(skill));
           link.dataset.skillPath = getSkillPathForView(skill);
-          renderSkillReferenceContent(link, getSkillPromptTextForView(skill));
+          renderSkillReferenceContent(link, getSkillMentionNameForView(skill));
           link.title = skill.description || skill.name || skill.id;
         } else {
           link.setAttribute('href', link.dataset.skillPath || link.getAttribute('href') || '');
@@ -4738,6 +4727,8 @@ export function getScript(): string {
           container.append(emphasis);
         } else if (token.type === 'file-link') {
           container.append(createCodexMarkdownFileLink(token.reference, token.text, token.href));
+        } else if (token.type === 'skill-link') {
+          container.append(createMessageSkillLink(token.skill));
         } else if (token.type === 'link') {
           var link = document.createElement('a');
           link.className = 'message-external-link';
@@ -4807,6 +4798,19 @@ export function getScript(): string {
           continue;
         }
         var href = text.slice(labelEnd + 2, urlEnd).trim();
+        var label = text.slice(start + 1, labelEnd).trim();
+        var skill = label.charAt(0) === '$'
+          ? getSkillByMarkdownReferenceForView(label.slice(1), href)
+          : null;
+        if (skill) {
+          return {
+            type: 'skill-link',
+            start: start,
+            end: urlEnd + 1,
+            skill: skill,
+            priority: 1
+          };
+        }
         var fileReference = parseCodexMarkdownFileLinkHref(href);
         if (fileReference) {
           return {
@@ -4831,6 +4835,12 @@ export function getScript(): string {
         start = text.indexOf('[', start + 1);
       }
       return null;
+    }
+
+    function createMessageSkillLink(skill) {
+      var link = createInlineSkillLink(skill);
+      link.classList.add('message-skill-link');
+      return link;
     }
 
     function findMarkdownLinkUrlEnd(text, from) {
@@ -5593,8 +5603,8 @@ export function getScript(): string {
       anchor.draggable = false;
       if (settings.compactLabel === false) {
         anchor.title = href;
-        anchor.setAttribute('aria-label', href);
-        anchor.textContent = getReferenceFallbackLabel(normalized, settings.label);
+        anchor.setAttribute('aria-label', getReferenceChipAriaLabel(normalized.kind, href));
+        renderReferenceLinkContent(anchor, normalized.kind, getReferenceFallbackLabel(normalized, settings.label));
       } else {
         renderFileReferenceLinkLabel(anchor, normalized);
       }
@@ -5633,15 +5643,17 @@ export function getScript(): string {
     }
 
     function renderFileReferenceLinkLabel(anchor, reference) {
-      var label = getReferenceChipLabel(reference);
-      anchor.textContent = '';
-      anchor.append(createReferenceChipLabelPart('rich-file-link-primary', label.primary));
-      if (label.secondary) {
-        anchor.append(createReferenceChipLabelPart('rich-file-link-secondary', label.secondary));
-      }
+      renderReferenceLinkContent(anchor, reference.kind, getReferenceChipDisplayName(reference));
       var title = getReferenceChipTitle(reference);
       anchor.title = title;
-      anchor.setAttribute('aria-label', title);
+      anchor.setAttribute('aria-label', getReferenceChipAriaLabel(reference.kind, title));
+    }
+
+    function renderReferenceLinkContent(anchor, kind, label) {
+      anchor.replaceChildren(
+        createReferenceTypeIcon(kind),
+        createReferenceChipLabelPart('rich-file-link-primary', label)
+      );
     }
 
     function createReferenceChipLabelPart(className, text) {
@@ -5671,6 +5683,18 @@ export function getScript(): string {
         primary: primary,
         secondary: getCompactReferenceParentPath(targetPath)
       };
+    }
+
+    function getReferenceChipDisplayName(reference) {
+      var displayPath = getReferenceDisplayPath(reference.path);
+      var targetPath = reference.kind === 'directory'
+        ? stripTrailingReferenceSlashes(normalizeReferencePath(displayPath))
+        : normalizeReferencePath(displayPath);
+      return getMessageFileName(targetPath);
+    }
+
+    function getReferenceChipAriaLabel(kind, pathLabel) {
+      return t(kind === 'directory' ? 'directoryReferenceType' : 'fileReferenceType') + ': ' + pathLabel;
     }
 
     function getReferenceChipTitle(reference) {

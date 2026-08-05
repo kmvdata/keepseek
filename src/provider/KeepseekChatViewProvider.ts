@@ -45,7 +45,7 @@ import {
 } from '../agent/contextUsage';
 import { ChangeSetStore } from '../edits/changeSetStore';
 import { DraftDiffService } from '../edits/draftDiffService';
-import { openFileReference } from '../context/references/fileReferenceOpener';
+import { openFileReference, revealReferenceInOperatingSystem } from '../context/references/fileReferenceOpener';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_HISTORY_RETENTION_DAYS,
@@ -1368,8 +1368,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (!manifest) {
       return;
     }
-    const document = await vscode.workspace.openTextDocument(manifest.skillUri);
-    await vscode.window.showTextDocument(document, { preview: false });
+    try {
+      const document = await vscode.workspace.openTextDocument(manifest.skillUri);
+      await vscode.window.showTextDocument(document, { preview: false });
+    } catch (error) {
+      try {
+        if (await revealReferenceInOperatingSystem(manifest.skillUri)) {
+          return;
+        }
+      } catch (fallbackError) {
+        vscode.window.showErrorMessage(this.t('cannotOpenFileReference', { message: getErrorMessage(fallbackError) }));
+        return;
+      }
+      vscode.window.showErrorMessage(this.t('cannotOpenFileReference', { message: getErrorMessage(error) }));
+    }
   }
 
   private async setSkillEnabled(skillId: string, enabled: boolean): Promise<void> {
@@ -1526,11 +1538,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       const stat = await vscode.workspace.fs.stat(uri);
-      if (stat.type !== vscode.FileType.Directory) {
+      if ((stat.type & vscode.FileType.Directory) === 0) {
         throw new Error(this.t('directoryReferenceInvalidPath'));
       }
 
-      await vscode.commands.executeCommand('revealInExplorer', uri);
+      if (!(await revealReferenceInOperatingSystem(uri))) {
+        await vscode.commands.executeCommand('revealInExplorer', uri);
+      }
     } catch (error) {
       vscode.window.showErrorMessage(this.t('cannotOpenDirectoryReference', { message: getErrorMessage(error) }));
     }

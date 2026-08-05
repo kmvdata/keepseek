@@ -103,7 +103,7 @@ test('rich prompt script exposes reference, skill, and external drop entry point
   assert.match(script, /getPromptInsertionRange/u);
 });
 
-test('rich input references open once from either a single click or a double click', async () => {
+test('references open once from a single click in the prompt, message editor, and transcript', async () => {
   const inputScript = getInputScript();
   const transcriptScript = getScript();
   const promptClickHandler = getGeneratedSection(
@@ -114,11 +114,6 @@ test('rich input references open once from either a single click or a double cli
   const transcriptClickHandler = getGeneratedSection(
     transcriptScript,
     "transcript.addEventListener('click'",
-    "transcript.addEventListener('dblclick'"
-  );
-  const transcriptDoubleClickHandler = getGeneratedSection(
-    transcriptScript,
-    "transcript.addEventListener('dblclick'",
     "transcript.addEventListener('submit'"
   );
   const providerSource = await readFile(
@@ -133,37 +128,70 @@ test('rich input references open once from either a single click or a double cli
   assert.equal(promptClickHandler.match(/type: 'openSkill'/gu)?.length, 1);
   assert.doesNotMatch(inputScript, /promptInput\.addEventListener\('dblclick'/u);
 
-  assert.match(transcriptClickHandler, /\.message-edit-input a\.rich-skill-link/u);
+  assert.match(transcriptClickHandler, /a\.rich-file-link, a\.rich-skill-link/u);
   assert.match(transcriptClickHandler, /event\.detail > 1/u);
   assert.match(transcriptClickHandler, /type: 'openSkill'/u);
+  assert.match(transcriptClickHandler, /type: 'openDirectoryReference'/u);
   assert.match(transcriptClickHandler, /type: 'openFileReference'/u);
   assert.equal(transcriptClickHandler.match(/type: 'openSkill'/gu)?.length, 1);
-  assert.doesNotMatch(transcriptDoubleClickHandler, /openSkill|message-edit-input/u);
-  assert.match(transcriptDoubleClickHandler, /a\.message-file-link/u);
+  assert.doesNotMatch(transcriptScript, /transcript\.addEventListener\('dblclick'/u);
 
   assert.match(
     providerSource,
     /const manifest = this\.skillStore\.getManifest\(skillId\);[\s\S]*?openTextDocument\(manifest\.skillUri\)[\s\S]*?showTextDocument\(document, \{ preview: false \}\)/u
   );
+  assert.match(providerSource, /revealReferenceInOperatingSystem\(manifest\.skillUri\)/u);
 });
 
-test('Skill reference chips use a Codex-style icon and pointer hover affordance', () => {
+test('reference chips use type icons, one-line names, and full-path hover labels', () => {
+  const transcriptScript = getScript();
+  const styles = getStyles();
+  const labelRenderer = getGeneratedSection(
+    transcriptScript,
+    'function renderFileReferenceLinkLabel',
+    'function createReferenceChipLabelPart'
+  );
+
+  assert.match(transcriptScript, /fileReferenceIconTemplate\.innerHTML = '<svg/u);
+  assert.match(transcriptScript, /directoryReferenceIconTemplate\.innerHTML = '<svg/u);
+  assert.match(transcriptScript, /function createReferenceTypeIcon\(kind, className\)/u);
+  assert.match(labelRenderer, /getReferenceChipDisplayName\(reference\)/u);
+  assert.match(labelRenderer, /createReferenceTypeIcon\(kind\)/u);
+  assert.doesNotMatch(labelRenderer, /rich-file-link-secondary/u);
+  assert.match(labelRenderer, /getReferenceChipTitle\(reference\)/u);
+  assert.match(labelRenderer, /getReferenceChipAriaLabel\(reference\.kind, title\)/u);
+  assert.match(styles, /\.rich-reference-link-icon\s*\{[^}]*width:\s*14px/us);
+  assert.match(styles, /\.rich-file-link:focus-visible\s*\{[^}]*outline:/us);
+  assert.doesNotMatch(styles, /rich-file-link-secondary/u);
+  assert.match(styles, /\.message\.user \.message-content \.message-file-link\s*\{[^}]*white-space:\s*nowrap/us);
+  assert.match(transcriptScript, /function formatFileReferenceLabelContents\(reference\)[\s\S]*?getReferenceChipLabel\(reference\)/u);
+});
+
+test('Skill reference chips reuse plugin.svg and hide the protocol dollar prefix', async () => {
   const inputScript = getInputScript();
   const transcriptScript = getScript();
   const styles = getStyles();
+  const htmlSource = await readFile(path.resolve(process.cwd(), 'src/webview/html.ts'), 'utf8');
 
   assert.match(styles, /\.rich-skill-link\s*\{[^}]*cursor:\s*pointer/us);
   assert.match(styles, /\.rich-skill-link:hover\s*\{[^}]*background:/us);
   assert.match(styles, /\.rich-skill-link-icon\s*\{[^}]*width:\s*12px/us);
   assert.match(styles, /\.rich-skill-link-label\s*\{[^}]*text-overflow:\s*ellipsis/us);
-  assert.match(transcriptScript, /function createSkillReferenceIcon\(className\)[\s\S]*?<svg[\s\S]*?currentColor/u);
-  assert.match(inputScript, /createSkillLink\(skill\)[\s\S]*?renderSkillReferenceContent\(anchor, getSkillPromptText\(skill\)\)/u);
-  assert.match(inputScript, /refreshPromptSkillLinkLabels\(\)[\s\S]*?renderSkillReferenceContent\(link, getSkillPromptText\(skill\)\)/u);
-  assert.match(transcriptScript, /createInlineSkillLink\(skill\)[\s\S]*?renderSkillReferenceContent\(anchor, getSkillPromptTextForView\(skill\)\)/u);
-  assert.match(transcriptScript, /sanitizeInlineEditorLinks\(editor\)[\s\S]*?renderSkillReferenceContent\(link, getSkillPromptTextForView\(skill\)\)/u);
+  assert.match(htmlSource, /resources', 'plugin\.svg'/u);
+  assert.match(htmlSource, /window\.keepseekPluginIconUri/u);
+  assert.match(transcriptScript, /function createSkillReferenceIcon\(className\)[\s\S]*?image\.src = keepseekPluginIconUri/u);
+  assert.match(inputScript, /createSkillLink\(skill\)[\s\S]*?renderSkillReferenceContent\(anchor, getSkillMentionName\(skill\)\)/u);
+  assert.match(inputScript, /refreshPromptSkillLinkLabels\(\)[\s\S]*?renderSkillReferenceContent\(link, getSkillMentionName\(skill\)\)/u);
+  assert.match(inputScript, /createSkillPill\(skill\)[\s\S]*?createSkillReferenceIcon\('skill-pill-icon'\)[\s\S]*?name\.textContent = getSkillMentionName\(skill\)/u);
+  assert.match(transcriptScript, /createInlineSkillLink\(skill\)[\s\S]*?renderSkillReferenceContent\(anchor, getSkillMentionNameForView\(skill\)\)/u);
+  assert.match(transcriptScript, /sanitizeInlineEditorLinks\(editor\)[\s\S]*?renderSkillReferenceContent\(link, getSkillMentionNameForView\(skill\)\)/u);
+  assert.match(transcriptScript, /token\.type === 'skill-link'[\s\S]*?createMessageSkillLink\(token\.skill\)/u);
+  assert.match(transcriptScript, /type: 'skill-link'[\s\S]*?skill: skill/u);
+  assert.match(inputScript, /function getSkillMarkdownText\(skill\)[\s\S]*?getSkillPromptText\(skill\)/u);
+  assert.match(transcriptScript, /function getSkillMarkdownTextForView\(skill\)[\s\S]*?getSkillPromptTextForView\(skill\)/u);
 });
 
-test('skill suggestions reuse the cached plugin icon template', () => {
+test('skill suggestions reuse the plugin icon asset', () => {
   const inputScript = getInputScript();
   const transcriptScript = getScript();
   const styles = getStyles();
@@ -173,8 +201,8 @@ test('skill suggestions reuse the cached plugin icon template', () => {
     /createSkillReferenceButton\(skill, index\)[\s\S]*?createSkillReferenceIcon\('reference-menu-item-icon reference-menu-skill-icon'\)/u
   );
   assert.doesNotMatch(inputScript, /icon\.textContent = '\$'/u);
-  assert.match(transcriptScript, /skillReferenceIconTemplate\.content\.cloneNode\(true\)/u);
-  assert.match(styles, /\.reference-menu-skill-icon svg\s*\{[^}]*width:\s*13px/us);
+  assert.match(transcriptScript, /image\.src = keepseekPluginIconUri/u);
+  assert.match(styles, /\.reference-menu-skill-icon img\s*\{[^}]*width:\s*13px/us);
 });
 
 test('reference menu puts the external resource picker before workspace resources by default', () => {
