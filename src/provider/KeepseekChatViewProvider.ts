@@ -2582,14 +2582,22 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.liveTurnUsage = undefined;
       this.sessionStore.getActiveSession().updatedAt = new Date().toISOString();
       this.isBusy = false;
-      await this.sessionStore.persist();
-      void this.refreshBalance();
+      // Push UI state (changeSets, idle status) before session persistence so a
+      // slow or failing persist() can never leave the webview stuck on
+      // "finalizing" without showing the pending changes.
       flushLiveState();
       this.setAgentActivity({
         base: 'idle',
         phase: 'idle'
       }, { post: false });
       this.postState();
+      try {
+        await this.sessionStore.persist();
+      } catch (error) {
+        // Persistence is best-effort here; it must never block or break the UI flow.
+        console.warn('[KeepSeek] Failed to persist session after Agent run:', getErrorMessage(error));
+      }
+      void this.refreshBalance();
     }
     return completedResponse;
   }
