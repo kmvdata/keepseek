@@ -141,6 +141,10 @@ test('references open once from a single click in the prompt, message editor, an
     /const manifest = this\.skillStore\.getManifest\(skillId\);[\s\S]*?openTextDocument\(manifest\.skillUri\)[\s\S]*?showTextDocument\(document, \{ preview: false \}\)/u
   );
   assert.match(providerSource, /revealReferenceInOperatingSystem\(manifest\.skillUri\)/u);
+  assert.match(
+    providerSource,
+    /private async openDirectoryReference\(inputPath: string\)[\s\S]*?await openDirectoryReferenceUri\(uri\)/u
+  );
 });
 
 test('reference chips use type icons, one-line names, and full-path hover labels', () => {

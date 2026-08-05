@@ -45,7 +45,11 @@ import {
 } from '../agent/contextUsage';
 import { ChangeSetStore } from '../edits/changeSetStore';
 import { DraftDiffService } from '../edits/draftDiffService';
-import { openFileReference, revealReferenceInOperatingSystem } from '../context/references/fileReferenceOpener';
+import {
+  openDirectoryReferenceUri,
+  openFileReference,
+  revealReferenceInOperatingSystem
+} from '../context/references/fileReferenceOpener';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_HISTORY_RETENTION_DAYS,
@@ -1542,8 +1546,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         throw new Error(this.t('directoryReferenceInvalidPath'));
       }
 
-      if (!(await revealReferenceInOperatingSystem(uri))) {
-        await vscode.commands.executeCommand('revealInExplorer', uri);
+      if (!(await openDirectoryReferenceUri(uri))) {
+        throw new Error(this.t('directoryReferenceInvalidPath'));
       }
     } catch (error) {
       vscode.window.showErrorMessage(this.t('cannotOpenDirectoryReference', { message: getErrorMessage(error) }));

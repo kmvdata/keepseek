@@ -23,8 +23,8 @@ export async function openFileReference(input: {
     }
     const stat = await vscode.workspace.fs.stat(uri);
     if ((stat.type & vscode.FileType.Directory) !== 0) {
-      if (!(await revealReferenceInOperatingSystem(uri))) {
-        await vscode.commands.executeCommand('revealInExplorer', uri);
+      if (!(await openDirectoryReferenceUri(uri))) {
+        throw new Error(localize(input.language, 'fileReferenceInvalidPath'));
       }
       return;
     }
@@ -63,6 +63,22 @@ export async function revealReferenceInOperatingSystem(uri: vscode.Uri): Promise
   }
   await vscode.commands.executeCommand('revealFileInOS', uri);
   return true;
+}
+
+export async function openDirectoryReferenceUri(uri: vscode.Uri): Promise<boolean> {
+  if (vscode.workspace.getWorkspaceFolder(uri)) {
+    try {
+      await vscode.commands.executeCommand('revealInExplorer', uri);
+      return true;
+    } catch (error) {
+      if (!(await revealReferenceInOperatingSystem(uri))) {
+        throw error;
+      }
+      return true;
+    }
+  }
+
+  return await revealReferenceInOperatingSystem(uri);
 }
 
 async function openInVisualStudioCodeOrReveal(uri: vscode.Uri, open: () => Promise<void>): Promise<void> {
