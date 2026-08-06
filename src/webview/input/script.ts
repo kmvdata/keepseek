@@ -114,6 +114,17 @@ export function getInputScript(): string {
         });
       }
 
+      if (contextProgress) {
+        // 用量统计界面(popover)通过 hover/focus 弹出;弹出时请求一次余额,
+        // 由扩展端 60s 限流保证 1 分钟内只真正发起一次请求。
+        contextProgress.addEventListener('mouseenter', function() {
+          vscode.postMessage({ type: 'refreshBalance' });
+        });
+        contextProgress.addEventListener('focus', function() {
+          vscode.postMessage({ type: 'refreshBalance' });
+        });
+      }
+
       promptInput.addEventListener('keydown', function(event) {
         if (event.isComposing || event.keyCode === 229) {
           return;
@@ -1233,7 +1244,8 @@ export function getInputScript(): string {
           ['usageMetricTurnTokens', formatMetricTokens(metrics.lastTurnUsage && metrics.lastTurnUsage.totalTokens, hasUsageData(metrics.lastTurnUsage))],
           ['usageMetricTurnCost', formatMetricCost(metrics.lastTurnUsage && metrics.lastTurnUsage.cost, getUsageCurrency(metrics.lastTurnUsage, metrics.sessionUsageStats), hasUsageData(metrics.lastTurnUsage))],
           ['usageMetricTurnCount', metrics.turnCount > 0 ? formatMetricInteger(metrics.turnCount) : '-'],
-          ['usageMetricCompactThreshold', formatMetricPercent(metrics.contextCompressionTriggerRatio * 100)]
+          ['usageMetricCompactThreshold', formatMetricPercent(metrics.contextCompressionTriggerRatio * 100)],
+          ['usageMetricBalance', formatMetricBalance(metrics.balance)]
         ];
         var label = title + '。' + [contextLine, costLine].concat(items).map(function(item) {
           return t(item[0]) + item[1];

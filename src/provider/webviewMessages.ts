@@ -20,6 +20,7 @@ export interface DroppedFileReferenceInput {
 
 export type WebviewMessage =
   | { type: 'ready' }
+  | { type: 'refreshBalance' }
   | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'editUserPrompt'; messageId: string; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'abortPrompt' }

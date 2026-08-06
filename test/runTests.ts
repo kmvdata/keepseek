@@ -3,6 +3,7 @@ import './agentRequestCoordinator.test';
 import './backgroundRunCoordinator.test';
 import './chatSessionStore.test';
 import './changeSet.test';
+import './config.test';
 import './contextEntryPoints.test';
 import './currentRunContext.test';
 import './draftEditRange.test';

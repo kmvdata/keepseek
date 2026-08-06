@@ -6,6 +6,8 @@ export interface DeepSeekBalanceRequest {
   signal?: AbortSignal;
 }
 
+const BALANCE_FETCH_TIMEOUT_MS = 10_000;
+
 export async function fetchDeepSeekBalance(input: DeepSeekBalanceRequest): Promise<DeepSeekBalanceState> {
   const apiKey = input.apiKey.trim();
   const endpointUrl = input.endpointUrl.trim();
@@ -25,21 +27,30 @@ export async function fetchDeepSeekBalance(input: DeepSeekBalanceRequest): Promi
   }
 
   try {
-    const response = await fetch(endpointUrl, {
-      method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${apiKey}`
-      },
-      signal: input.signal
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), BALANCE_FETCH_TIMEOUT_MS);
+    const onExternalAbort = (): void => controller.abort();
+    input.signal?.addEventListener('abort', onExternalAbort, { once: true });
+    try {
+      const response = await fetch(endpointUrl, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${apiKey}`
+        },
+        signal: controller.signal
+      });
 
-    if (!response.ok) {
-      return createBalanceError(`DeepSeek balance request failed (${response.status}).`);
+      if (!response.ok) {
+        return createBalanceError(`DeepSeek balance request failed (${response.status}).`);
+      }
+
+      const parsed: unknown = await response.json();
+      return parseDeepSeekBalanceResponse(parsed);
+    } finally {
+      clearTimeout(timeout);
+      input.signal?.removeEventListener('abort', onExternalAbort);
     }
-
-    const parsed: unknown = await response.json();
-    return parseDeepSeekBalanceResponse(parsed);
   } catch (error) {
     return createBalanceError(error instanceof Error ? error.message : String(error));
   }

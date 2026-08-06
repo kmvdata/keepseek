@@ -138,6 +138,15 @@ export function getConfiguredBalanceEndpointUrl(baseUrl: string): string {
   }
 
   const url = new URL(baseUrl || DEFAULT_DEEPSEEK_BASE_URL);
+  // DeepSeek 官方余额端点固定为 https://api.deepseek.com/user/balance,不带
+  // /v1 或 /chat/completions 前缀(baseUrl 可能是 .../v1 或 .../v1/chat/completions)。
+  // 只有非官方域名(自托管 / 代理)才按 baseUrl 路径推导。
+  if (url.host === 'api.deepseek.com') {
+    url.pathname = '/user/balance';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  }
   const cleanPath = url.pathname.replace(/\/+$/u, '');
   const basePath = cleanPath.endsWith('/chat/completions')
     ? cleanPath.slice(0, -'/chat/completions'.length)

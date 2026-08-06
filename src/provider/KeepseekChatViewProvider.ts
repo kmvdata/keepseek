@@ -592,6 +592,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.postState();
         void this.refreshBalance();
         return;
+      case 'refreshBalance':
+        // 用量统计界面弹出时触发:不 force,遵守 60s 限流,1 分钟内只真正请求一次。
+        void this.refreshBalance({ force: false });
+        return;
       case 'sendPrompt':
         await this.sendPrompt(message.prompt, message.modelId, message.settings, { references: message.references, skillIds: message.skillIds });
         return;
