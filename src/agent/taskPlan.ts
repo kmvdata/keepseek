@@ -3,6 +3,7 @@ import type { KeepseekLanguage } from '../shared/i18n';
 import type { TaskPlan, TaskPlanStep, TaskPlanStepStatus } from '../shared/types';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  DELETE_WORKSPACE_FILE_TOOL_NAME,
   FIND_REFERENCES_TOOL_NAME,
   FIND_SYMBOL_TOOL_NAME,
   GET_DOCUMENT_SYMBOLS_TOOL_NAME,
@@ -374,6 +375,7 @@ function getToolStepKind(toolName: string): PlanStepKind | undefined {
     case GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME:
       return 'inspect';
     case CREATE_DRAFT_EDIT_TOOL_NAME:
+    case DELETE_WORKSPACE_FILE_TOOL_NAME:
       return 'edit';
     case RUN_VALIDATION_TOOL_NAME:
       return 'validate';
@@ -415,6 +417,7 @@ function getToolDetail(toolName: string, language: KeepseekLanguage): string {
     [GIT_CREATE_PATCH_TOOL_NAME]: ['Generating patch content', '生成补丁内容'],
     [GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME]: ['Preparing commit message suggestions', '准备提交信息建议'],
     [CREATE_DRAFT_EDIT_TOOL_NAME]: ['Creating a pending edit', '创建待确认修改'],
+    [DELETE_WORKSPACE_FILE_TOOL_NAME]: ['Preparing a pending file deletion', '准备待确认文件删除'],
     [RUN_VALIDATION_TOOL_NAME]: ['Running an approved project script', '运行已授权的项目脚本']
   };
   const label = labels[toolName];

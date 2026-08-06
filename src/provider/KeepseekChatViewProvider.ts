@@ -43,7 +43,7 @@ import {
   pickLargerContextUsageEstimate,
   toSessionContextUsageEstimate
 } from '../agent/contextUsage';
-import { ChangeSetStore } from '../edits/changeSetStore';
+import { ChangeSetStore, type PendingDeleteTarget } from '../edits/changeSetStore';
 import { DraftDiffService } from '../edits/draftDiffService';
 import {
   openDirectoryReferenceUri,
@@ -110,6 +110,7 @@ import { getAvailableSafeValidationScripts } from '../agent/tools/validationTool
 const CHAT_CONTAINER_ID = 'keepseek-sidebar';
 const CHAT_VIEW_TYPE = 'keepseek.chat';
 const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+const MAX_DELETE_CONFIRMATION_PATHS = 10;
 
 export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = CHAT_VIEW_TYPE;
@@ -803,6 +804,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           if (this.isBusy) {
             return;
           }
+          const deleteTargets = this.changeSets.getPendingDeleteTargetsForEdit(message.id);
+          if (!(await this.confirmDeleteApply(deleteTargets))) {
+            return;
+          }
           const result = await this.changeSets.applyEdit(message.id);
           if (result?.appliedEditIds.length) {
             await this.refreshSkills({ post: false });
@@ -830,6 +835,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'applyChangeSet':
         {
           if (this.isBusy) {
+            return;
+          }
+          const deleteTargets = this.changeSets.getPendingDeleteTargetsForChangeSet(message.id);
+          if (!(await this.confirmDeleteApply(deleteTargets))) {
             return;
           }
           const result = await this.changeSets.applyAll(message.id);
@@ -880,6 +889,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
         const changeSetId = this.changeSets.getLatestChangeSetId(this.sessionStore.activeSessionId);
+        const deleteTargets = changeSetId
+          ? this.changeSets.getPendingDeleteTargetsForChangeSet(changeSetId)
+          : [];
+        if (!(await this.confirmDeleteApply(deleteTargets))) {
+          return;
+        }
         const result = changeSetId ? await this.changeSets.applyAll(changeSetId) : undefined;
         if (result?.appliedEditIds.length) {
           await this.refreshSkills({ post: false });
@@ -927,6 +942,32 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       count: failures.length,
       details
     }));
+  }
+
+  private async confirmDeleteApply(targets: readonly PendingDeleteTarget[]): Promise<boolean> {
+    if (!targets.length) {
+      return true;
+    }
+
+    const confirmAction = this.t('deleteDraftApplyConfirmAction');
+    const visibleTargets = targets.slice(0, MAX_DELETE_CONFIRMATION_PATHS);
+    const hiddenCount = targets.length - visibleTargets.length;
+    const detail = targets.length > 1
+      ? [
+          ...visibleTargets.map((target) => target.label),
+          ...(hiddenCount > 0
+            ? [this.t('deleteDraftApplyAdditionalTargets', { count: hiddenCount })]
+            : [])
+        ].join('\n')
+      : undefined;
+    const selected = await vscode.window.showWarningMessage(
+      targets.length === 1
+        ? this.t('deleteDraftApplyConfirm', { label: targets[0]?.label ?? '' })
+        : this.t('deleteChangeSetApplyConfirm', { count: targets.length }),
+      { modal: true, detail },
+      confirmAction
+    );
+    return selected === confirmAction;
   }
 
   private updateActiveSessionContextUsage(usage: ContextUsageEstimate | undefined): void {

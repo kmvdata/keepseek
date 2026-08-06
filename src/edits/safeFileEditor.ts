@@ -1,5 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
+import { getConfiguredWorkspaceReadMaxBytes } from '../shared/config';
+import { formatBytes } from '../shared/format';
+import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
+import { shouldSkipTextUri } from '../shared/textFileGuards';
 import type { ChangeCheckpoint, DraftEdit } from '../shared/types';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
@@ -8,6 +12,13 @@ interface FileSnapshot {
   exists: boolean;
   text?: string;
   hash?: string;
+  sizeBytes?: number;
+}
+
+interface SnapshotReadOptions {
+  label?: string;
+  readContent?: boolean;
+  requireSafeDeleteText?: boolean;
 }
 
 export class SafeFileEditor {
@@ -22,8 +33,14 @@ export class SafeFileEditor {
     const uri = vscode.Uri.parse(edit.uri);
     this.assertWorkspaceTarget(uri, edit.label);
     this.assertNoDirtyOpenEditor(uri, edit.label);
-    const original = await this.readSnapshot(uri);
+    const original = await this.readSnapshot(uri, {
+      label: edit.label,
+      requireSafeDeleteText: edit.action === 'delete'
+    });
     this.assertActionMatchesSnapshot(edit, original);
+    if (edit.action === 'delete') {
+      this.assertDeleteBaselineMatches(edit, original);
+    }
 
     const checkpoint: ChangeCheckpoint = {
       id: randomUUID(),
@@ -55,7 +72,10 @@ export class SafeFileEditor {
     const uri = vscode.Uri.parse(checkpoint.uri);
     this.assertWorkspaceTarget(uri, checkpoint.label);
     this.assertNoDirtyOpenEditor(uri, checkpoint.label);
-    const current = await this.readSnapshot(uri);
+    const current = await this.readSnapshot(uri, {
+      label: checkpoint.label,
+      readContent: checkpoint.appliedExists
+    });
     this.assertSnapshotMatchesAppliedChange(checkpoint, current);
 
     if (checkpoint.originalExists) {
@@ -99,6 +119,18 @@ export class SafeFileEditor {
     }
   }
 
+  private assertDeleteBaselineMatches(edit: DraftEdit, snapshot: FileSnapshot): void {
+    const sizeChanged = edit.expectedOriginalSize !== undefined
+      && edit.expectedOriginalSize !== snapshot.sizeBytes;
+    const textChanged = edit.expectedOriginalTextHash !== undefined
+      && edit.expectedOriginalTextHash !== snapshot.hash;
+    if (!sizeChanged && !textChanged) {
+      return;
+    }
+
+    throw new Error(this.t('cannotApplyChangedDeleteTarget', { label: edit.label }));
+  }
+
   private assertSnapshotMatchesAppliedChange(checkpoint: ChangeCheckpoint, current: FileSnapshot): void {
     if (checkpoint.appliedExists !== current.exists) {
       throw new Error(this.t('cannotRevertChangedAgentFile', { label: checkpoint.label }));
@@ -108,17 +140,36 @@ export class SafeFileEditor {
     }
   }
 
-  private async readSnapshot(uri: vscode.Uri): Promise<FileSnapshot> {
+  private async readSnapshot(uri: vscode.Uri, options: SnapshotReadOptions = {}): Promise<FileSnapshot> {
     try {
       const stat = await vscode.workspace.fs.stat(uri);
+      const label = options.label ?? (uri.fsPath || uri.toString());
       if (stat.type !== vscode.FileType.File) {
-        throw new Error(this.t('draftTargetNotFile', { label: uri.fsPath || uri.toString() }));
+        throw new Error(this.t('draftTargetNotFile', { label }));
       }
-      const text = this.decoder.decode(await vscode.workspace.fs.readFile(uri));
+      if (options.requireSafeDeleteText) {
+        this.assertSafeDeleteFileMetadata(uri, label, stat.size);
+      }
+      if (options.readContent === false) {
+        return {
+          exists: true,
+          sizeBytes: stat.size
+        };
+      }
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      if (options.requireSafeDeleteText) {
+        // Re-check the bytes actually read so a target swapped after stat cannot
+        // bypass the rollback snapshot limit.
+        this.assertSafeDeleteFileMetadata(uri, label, bytes.byteLength);
+      }
+      const text = options.requireSafeDeleteText
+        ? this.decodeSafeDeleteText(bytes, label)
+        : this.decoder.decode(bytes);
       return {
         exists: true,
         text,
-        hash: hashText(text)
+        hash: hashText(text),
+        sizeBytes: bytes.byteLength
       };
     } catch (error) {
       if (isFileNotFoundError(error)) {
@@ -126,6 +177,27 @@ export class SafeFileEditor {
       }
       throw error;
     }
+  }
+
+  private assertSafeDeleteFileMetadata(uri: vscode.Uri, label: string, sizeBytes: number): void {
+    if (shouldSkipTextUri(uri)) {
+      throw new Error(this.t('cannotDeleteUnreadableFile', { label }));
+    }
+    const maxBytes = getConfiguredWorkspaceReadMaxBytes();
+    if (sizeBytes > maxBytes) {
+      throw new Error(this.t('cannotDeleteOversizedFile', {
+        label,
+        limit: formatBytes(maxBytes)
+      }));
+    }
+  }
+
+  private decodeSafeDeleteText(bytes: Uint8Array, label: string): string {
+    const text = decodeRollbackSafeUtf8Text(bytes);
+    if (text !== undefined) {
+      return text;
+    }
+    throw new Error(this.t('cannotDeleteUnreadableFile', { label }));
   }
 
   private async writeTextFile(uri: vscode.Uri, text: string, createParent: boolean): Promise<void> {

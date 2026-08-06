@@ -2,11 +2,15 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  DELETE_WORKSPACE_FILE_TOOL_NAME,
   FIND_REFERENCES_TOOL_NAME,
   GIT_DIFF_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME
 } from '../src/agent/protocol';
-import { getToolAuthorizationMetadata } from '../src/agent/tools/toolAuthorization';
+import {
+  getHighRiskToolConfirmationPrompt,
+  getToolAuthorizationMetadata
+} from '../src/agent/tools/toolAuthorization';
 
 test('classifies read-only semantic and Git tools as low risk', () => {
   assert.deepEqual(getToolAuthorizationMetadata(FIND_REFERENCES_TOOL_NAME), {
@@ -38,7 +42,11 @@ test('separates compile/lint and test authorization scopes per run', () => {
   });
 });
 
-test('unknown and high-risk Git mutation tools fail closed', () => {
+test('delete, unknown, and high-risk Git mutation tools fail closed', () => {
+  assert.deepEqual(getToolAuthorizationMetadata(DELETE_WORKSPACE_FILE_TOOL_NAME), {
+    riskLevel: 'high',
+    scope: 'workspace_write'
+  });
   assert.deepEqual(getToolAuthorizationMetadata('keepseek_git_commit'), {
     riskLevel: 'high',
     scope: 'git_commit'
@@ -51,4 +59,24 @@ test('unknown and high-risk Git mutation tools fail closed', () => {
     riskLevel: 'high',
     scope: 'workspace_write'
   });
+});
+
+test('delete confirmation shows its path and reason without claiming an immediate deletion', () => {
+  const english = getHighRiskToolConfirmationPrompt(DELETE_WORKSPACE_FILE_TOOL_NAME, {
+    path: 'src/obsolete.ts',
+    reason: 'No longer used'
+  }, 'en');
+  const chinese = getHighRiskToolConfirmationPrompt(DELETE_WORKSPACE_FILE_TOOL_NAME, {
+    path: 'src/obsolete.ts',
+    reason: '已不再使用'
+  }, 'zh-CN');
+
+  assert.match(english, /Path: src\/obsolete\.ts/u);
+  assert.match(english, /Reason: No longer used/u);
+  assert.match(english, /does not delete the file immediately/u);
+  assert.match(english, /pending ChangeSet/u);
+  assert.match(chinese, /路径：src\/obsolete\.ts/u);
+  assert.match(chinese, /原因：已不再使用/u);
+  assert.match(chinese, /不会立即删除文件/u);
+  assert.match(chinese, /待确认 ChangeSet/u);
 });

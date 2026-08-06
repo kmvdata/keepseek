@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  DELETE_WORKSPACE_FILE_TOOL_NAME,
   FIND_REFERENCES_TOOL_NAME,
   FIND_SYMBOL_TOOL_NAME,
   GET_DOCUMENT_SYMBOLS_TOOL_NAME,
@@ -11,7 +12,10 @@ import {
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME,
   buildInitialAgentMessages,
-  getAgentTools
+  getAgentSystemPrompt,
+  getAgentToolNamesForPrompt,
+  getAgentTools,
+  isDraftEditPreparationTool
 } from '../src/agent/protocol';
 import type { ContextFile } from '../src/shared/types';
 
@@ -130,6 +134,38 @@ test('validation tool exposes only the fixed safe npm scripts', () => {
   assert.equal(properties.command, undefined);
 });
 
+test('delete tool is always exposed and only prepares a non-recursive pending file deletion', () => {
+  const tool = getAgentTools({ toolNames: [DELETE_WORKSPACE_FILE_TOOL_NAME] })[0];
+  const properties = tool.function.parameters.properties as Record<string, unknown>;
+
+  assert.equal(tool.function.name, DELETE_WORKSPACE_FILE_TOOL_NAME);
+  assert.deepEqual(Object.keys(properties).sort(), ['path', 'reason']);
+  assert.deepEqual(tool.function.parameters.required, ['path', 'reason']);
+  assert.equal(tool.function.parameters.additionalProperties, false);
+  assert.match(tool.function.description, /pending delete DraftEdit/u);
+  assert.match(tool.function.description, /never deletes the file immediately/u);
+  assert.match(tool.function.description, /never targets directories/u);
+  assert.match(tool.function.description, /never deletes recursively/u);
+  assert.ok(getAgentToolNamesForPrompt('Explain this code.', true).includes(DELETE_WORKSPACE_FILE_TOOL_NAME));
+  assert.ok(getAgentToolNamesForPrompt('Explain this code.', false).includes(DELETE_WORKSPACE_FILE_TOOL_NAME));
+});
+
+test('system prompts explain safe pending file deletion in both languages', () => {
+  const english = getAgentSystemPrompt({ language: 'en' });
+  const chinese = getAgentSystemPrompt({ language: 'zh-CN' });
+
+  assert.match(english, /keepseek_delete_workspace_file/u);
+  assert.match(english, /never deletes immediately/u);
+  assert.match(chinese, /keepseek_delete_workspace_file/u);
+  assert.match(chinese, /不会立即删除/u);
+});
+
+test('classifies both file-changing tools as DraftEdit preparation tools', () => {
+  assert.equal(isDraftEditPreparationTool(CREATE_DRAFT_EDIT_TOOL_NAME), true);
+  assert.equal(isDraftEditPreparationTool(DELETE_WORKSPACE_FILE_TOOL_NAME), true);
+  assert.equal(isDraftEditPreparationTool(SEARCH_WORKSPACE_TOOL_NAME), false);
+});
+
 test('semantic tools expose structured provider inputs', () => {
   const tools = getAgentTools({
     toolNames: [
@@ -161,6 +197,7 @@ test('tool schema order is canonicalized by tool name', () => {
     toolNames: [
       SEARCH_WORKSPACE_TOOL_NAME,
       CREATE_DRAFT_EDIT_TOOL_NAME,
+      DELETE_WORKSPACE_FILE_TOOL_NAME,
       READ_WORKSPACE_FILE_RANGE_TOOL_NAME
     ]
   });
@@ -168,6 +205,7 @@ test('tool schema order is canonicalized by tool name', () => {
     toolNames: [
       READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
       SEARCH_WORKSPACE_TOOL_NAME,
+      DELETE_WORKSPACE_FILE_TOOL_NAME,
       CREATE_DRAFT_EDIT_TOOL_NAME
     ]
   });
@@ -176,6 +214,7 @@ test('tool schema order is canonicalized by tool name', () => {
     left.map((tool) => tool.function.name),
     [
       CREATE_DRAFT_EDIT_TOOL_NAME,
+      DELETE_WORKSPACE_FILE_TOOL_NAME,
       READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
       SEARCH_WORKSPACE_TOOL_NAME
     ]

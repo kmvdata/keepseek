@@ -23,8 +23,11 @@ import {
   getConfiguredMaxValidationRuns,
   getConfiguredModelUsagePricing,
   getConfiguredRequestRetryBaseMs,
-  getConfiguredSlimToolModeEnabled
+  getConfiguredSlimToolModeEnabled,
+  getConfiguredWorkspaceReadMaxBytes
 } from '../shared/config';
+import { formatBytes } from '../shared/format';
+import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
 import {
   getDeepSeekV4RuntimeProfile,
   type ContextCompressionSettings
@@ -32,6 +35,7 @@ import {
 import {
   buildInitialAgentMessages,
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  DELETE_WORKSPACE_FILE_TOOL_NAME,
   estimateChatMessageTokens,
   estimateDeepSeekMessageTokens,
   getAgentToolNamesForPrompt,
@@ -51,7 +55,8 @@ import {
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
-  SEARCH_WORKSPACE_TOOL_NAME
+  SEARCH_WORKSPACE_TOOL_NAME,
+  isDraftEditPreparationTool
 } from './protocol';
 import { buildHistoryProjection } from './historyProjection';
 import {
@@ -685,7 +690,7 @@ export class AgentRunner {
         if (budgetStopReason) {
           const allowBudgetedDraftEdit = budgetStopReason === 'tool_iterations_exhausted'
             && allowTerminalDraftEdit
-            && toolCall.function.name === CREATE_DRAFT_EDIT_TOOL_NAME;
+            && isDraftEditPreparationTool(toolCall.function.name);
           if (allowBudgetedDraftEdit) {
             trace.record({
               type: 'tool_budget_terminal_draft_edit',
@@ -746,7 +751,7 @@ export class AgentRunner {
                 ? 'Validation paused: apply the pending repair ChangeSet before running validation again.'
                 : '验证已暂停：请先应用待确认的修复 ChangeSet，再次运行验证。'
             });
-          } else if (toolCall.function.name === CREATE_DRAFT_EDIT_TOOL_NAME && !repairLoop.beginRepair()) {
+          } else if (isDraftEditPreparationTool(toolCall.function.name) && !repairLoop.beginRepair()) {
             const state = repairLoop.getState();
             const detail = request.language === 'en'
               ? `The automatic repair limit of ${state.maxIterations} iteration(s) was reached.`
@@ -830,7 +835,7 @@ export class AgentRunner {
         } else if (toolCall.function.name === READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME) {
           repairLoop.recordProblemsRead();
           taskPlan.markProblemsRead();
-        } else if (toolCall.function.name === CREATE_DRAFT_EDIT_TOOL_NAME) {
+        } else if (isDraftEditPreparationTool(toolCall.function.name)) {
           const draftEditId = readDraftEditId(rawToolResult);
           if (draftEditId && repairLoop.getState().status === 'generating_repair') {
             repairLoop.recordDraftEdit(draftEditId);
@@ -1531,6 +1536,7 @@ export class AgentRunner {
       case READ_WORKSPACE_FILE_TOOL_NAME:
         return 'reading_file';
       case CREATE_DRAFT_EDIT_TOOL_NAME:
+      case DELETE_WORKSPACE_FILE_TOOL_NAME:
         return 'creating_draft_edit';
       case READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME:
         return 'reading_diagnostics';
@@ -1578,7 +1584,10 @@ export class AgentRunner {
             isRegex: this.readOptionalBoolean(args, 'isRegex', false),
             matchCase: this.readOptionalBoolean(args, 'matchCase', false),
             maxResults: this.readOptionalNumber(args, 'maxResults')
-          }, language);
+          }, language, {
+            signal: options.signal,
+            runDeadlineAt: options.runDeadlineAt
+          });
         case READ_WORKSPACE_FILE_RANGE_TOOL_NAME:
           return await this.workspaceTools.readWorkspaceFileRange({
             path: this.readRequiredString(args, 'path'),
@@ -1651,6 +1660,8 @@ export class AgentRunner {
           });
         case CREATE_DRAFT_EDIT_TOOL_NAME:
           return await this.createDraftEdit(args, draftEdits, language);
+        case DELETE_WORKSPACE_FILE_TOOL_NAME:
+          return await this.createDeleteDraftEdit(args, draftEdits, language);
         default:
           return JSON.stringify({
             ok: false,
@@ -1668,6 +1679,10 @@ export class AgentRunner {
   private async createDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[], language: KeepseekLanguage): Promise<string> {
     const input = this.readDraftEditToolInput(args);
     const uri = this.workspaceTools.resolveTargetUri(input.rawPath);
+    const conflict = this.findDraftEditConflict(uri, draftEdits);
+    if (conflict) {
+      return this.createDraftEditConflictResult(uri, conflict, language);
+    }
     const content = input.replaceRange
       ? await this.createRangeReplacedDraftContent(uri, input.content, input.replaceRange, language)
       : input.content;
@@ -1689,6 +1704,143 @@ export class AgentRunner {
         replaceRange: input.replaceRange
       },
       message: 'Draft edit created. Tell the user they can review and apply it from the KeepSeek panel.'
+    });
+  }
+
+  private async createDeleteDraftEdit(
+    args: Record<string, unknown>,
+    draftEdits: DraftEdit[],
+    language: KeepseekLanguage
+  ): Promise<string> {
+    const rawPath = this.readRequiredString(args, 'path');
+    const reason = this.readRequiredString(args, 'reason');
+    const uri = this.workspaceTools.resolveTargetUri(rawPath);
+    const conflict = this.findDraftEditConflict(uri, draftEdits);
+    if (conflict) {
+      return this.createDraftEditConflictResult(uri, conflict, language);
+    }
+
+    let stat: vscode.FileStat;
+    try {
+      stat = await vscode.workspace.fs.stat(uri);
+    } catch (error) {
+      if (!isFileNotFoundError(error)) {
+        throw error;
+      }
+      return JSON.stringify({
+        ok: false,
+        errorType: 'delete_target_missing',
+        path: this.workspaceTools.getLabel(uri),
+        error: language === 'en'
+          ? 'The file requested for deletion does not exist.'
+          : '请求删除的文件不存在。'
+      });
+    }
+    if (stat.type !== vscode.FileType.File) {
+      return JSON.stringify({
+        ok: false,
+        errorType: 'delete_target_not_file',
+        path: this.workspaceTools.getLabel(uri),
+        error: language === 'en'
+          ? 'Only regular files can be prepared for deletion. Directory deletion is not supported.'
+          : '只能为普通文件准备删除；当前不支持目录删除。'
+      });
+    }
+    const label = this.workspaceTools.getLabel(uri);
+    if (shouldSkipTextUri(uri)) {
+      return JSON.stringify({
+        ok: false,
+        errorType: 'delete_target_unreadable',
+        path: label,
+        error: language === 'en'
+          ? 'Only readable UTF-8 text files can be prepared for safe deletion and rollback.'
+          : '安全删除与回滚仅支持可读的 UTF-8 文本文件。'
+      });
+    }
+    const maxBytes = getConfiguredWorkspaceReadMaxBytes();
+    if (stat.size > maxBytes) {
+      return JSON.stringify({
+        ok: false,
+        errorType: 'delete_target_oversized',
+        path: label,
+        sizeBytes: stat.size,
+        limitBytes: maxBytes,
+        error: language === 'en'
+          ? `The file exceeds the ${formatBytes(maxBytes)} safe deletion and rollback limit.`
+          : `文件超过安全删除与回滚上限 ${formatBytes(maxBytes)}。`
+      });
+    }
+    const originalBytes = await vscode.workspace.fs.readFile(uri);
+    if (originalBytes.byteLength > maxBytes) {
+      return JSON.stringify({
+        ok: false,
+        errorType: 'delete_target_oversized',
+        path: label,
+        sizeBytes: originalBytes.byteLength,
+        limitBytes: maxBytes,
+        error: language === 'en'
+          ? `The file exceeds the ${formatBytes(maxBytes)} safe deletion and rollback limit.`
+          : `文件超过安全删除与回滚上限 ${formatBytes(maxBytes)}。`
+      });
+    }
+    const originalText = decodeRollbackSafeUtf8Text(originalBytes);
+    if (originalText === undefined) {
+      return JSON.stringify({
+        ok: false,
+        errorType: 'delete_target_unreadable',
+        path: label,
+        error: language === 'en'
+          ? 'The file is not exact, rollback-safe UTF-8 text.'
+          : '该文件不是可无损回滚的 UTF-8 文本。'
+      });
+    }
+
+    const draftEdit: DraftEdit = {
+      id: randomUUID(),
+      uri: uri.toString(),
+      label,
+      action: 'delete',
+      newText: '',
+      reason,
+      expectedOriginalTextHash: hashText(originalText),
+      expectedOriginalSize: originalBytes.byteLength
+    };
+    draftEdits.push(draftEdit);
+    return JSON.stringify({
+      ok: true,
+      draftEdit: {
+        id: draftEdit.id,
+        label: draftEdit.label,
+        action: draftEdit.action
+      },
+      message: language === 'en'
+        ? 'Pending deletion created. The file has not been deleted; the user must review and apply it in KeepSeek.'
+        : '已创建待确认删除；文件尚未删除，用户必须在 KeepSeek 中审核并应用。'
+    });
+  }
+
+  private findDraftEditConflict(uri: vscode.Uri, draftEdits: readonly DraftEdit[]): DraftEdit | undefined {
+    const key = uri.toString();
+    return draftEdits.find((edit) => edit.uri === key);
+  }
+
+  private createDraftEditConflictResult(
+    uri: vscode.Uri,
+    conflict: DraftEdit,
+    language: KeepseekLanguage
+  ): string {
+    return JSON.stringify({
+      ok: false,
+      errorType: 'draft_edit_conflict',
+      path: this.workspaceTools.getLabel(uri),
+      existingDraftEdit: {
+        id: conflict.id,
+        action: conflict.action,
+        label: conflict.label
+      },
+      error: language === 'en'
+        ? 'A pending edit for this file already exists in the current Agent run.'
+        : '当前 Agent 运行中已经存在该文件的待确认修改。'
     });
   }
 
@@ -2048,7 +2200,7 @@ export class AgentRunner {
   }
 
   private isCompressibleToolResult(toolName: string): boolean {
-    return toolName !== READ_WORKSPACE_FILE_TOOL_NAME && toolName !== CREATE_DRAFT_EDIT_TOOL_NAME;
+    return toolName !== READ_WORKSPACE_FILE_TOOL_NAME && !isDraftEditPreparationTool(toolName);
   }
 
   private parseToolArguments(rawArguments: string): Record<string, unknown> {
@@ -2209,9 +2361,15 @@ export class AgentRunner {
 
     if (draftEdits.length) {
       if (language === 'en') {
+        if (draftEdits.length === 1 && draftEdits[0].action === 'delete') {
+          return `Prepared a pending deletion for ${draftEdits[0].label}. The file has not been deleted yet.`;
+        }
         return draftEdits.length === 1
           ? `Prepared a pending change for ${draftEdits[0].label}.`
           : `Prepared ${draftEdits.length} pending changes.`;
+      }
+      if (draftEdits.length === 1 && draftEdits[0].action === 'delete') {
+        return `已为 ${draftEdits[0].label} 准备待确认删除，文件尚未删除。`;
       }
       return draftEdits.length === 1
         ? `已准备 ${draftEdits[0].label} 的待确认修改。`
@@ -2484,6 +2642,20 @@ function isGitToolName(toolName: string): boolean {
 
 function hashStableText(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+function hashText(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function isFileNotFoundError(error: unknown): boolean {
+  if (error instanceof vscode.FileSystemError) {
+    return error.code === 'FileNotFound';
+  }
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : '';
+  return code === 'ENOENT' || code === 'FileNotFound';
 }
 
 function clampRunLimit(profileLimit: number, requestedLimit: number | undefined): number {

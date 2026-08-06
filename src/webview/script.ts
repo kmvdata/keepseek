@@ -2083,6 +2083,7 @@ export function getScript(): string {
         case 'keepseek_read_workspace_file':
           return 'reading_file';
         case 'keepseek_create_draft_edit':
+        case 'keepseek_delete_workspace_file':
           return 'creating_draft_edit';
         default:
           return 'executing_tool';

@@ -23,6 +23,7 @@ const SEARCH_LINE_MAX_CHARS = 500;
 const SEARCH_CONTEXT_MAX_BYTES = 32_000;
 const SEARCH_RESULT_TOTAL_CHAR_LIMIT = 60_000;
 const SEARCH_FALLBACK_MAX_READ_BYTES = 1_000_000;
+const MAX_SEARCH_QUERY_CHARS = 1_000;
 const DEFAULT_RANGE_READ_MAX_BYTES = 64_000;
 const MAX_RANGE_READ_MAX_BYTES = 200_000;
 const MAX_RANGE_READ_LINES = 5_000;
@@ -37,6 +38,11 @@ export interface WorkspaceSearchInput {
   isRegex?: boolean;
   matchCase?: boolean;
   maxResults?: number;
+}
+
+export interface WorkspaceSearchExecutionOptions {
+  signal?: AbortSignal;
+  runDeadlineAt?: number;
 }
 
 export interface WorkspaceFileRangeInput {
@@ -84,6 +90,21 @@ interface WorkspaceSearchHit {
   uri: vscode.Uri;
   range: vscode.Range;
   previewText?: string;
+  sourceLines?: string[];
+}
+
+interface WorkspaceSearchSkippedFiles {
+  unreadable: number;
+  oversized: number;
+  unsupported: number;
+}
+
+interface WorkspaceSearchCollection {
+  hits: WorkspaceSearchHit[];
+  truncated: boolean;
+  engine: 'vscode' | 'fallback';
+  candidateFilesTruncated: boolean;
+  skippedFiles: WorkspaceSearchSkippedFiles;
 }
 
 interface WorkspaceSearchLine {
@@ -129,7 +150,7 @@ type TextEncoderLike = {
 export interface WorkspaceToolAdapter {
   listWorkspaceFiles(language: KeepseekLanguage): Promise<string>;
   listWorkspaceDirectory(rawPath: string, recursive: boolean, maxFiles: number | undefined, language: KeepseekLanguage): Promise<string>;
-  searchWorkspace(input: WorkspaceSearchInput, language: KeepseekLanguage): Promise<string>;
+  searchWorkspace(input: WorkspaceSearchInput, language: KeepseekLanguage, options?: WorkspaceSearchExecutionOptions): Promise<string>;
   readWorkspaceFile(rawPath: string, language: KeepseekLanguage): Promise<string>;
   readWorkspaceFileRange(input: WorkspaceFileRangeInput, language: KeepseekLanguage): Promise<string>;
   resolveTargetUri(targetPath: string): vscode.Uri;
@@ -252,7 +273,12 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     });
   }
 
-  public async searchWorkspace(input: WorkspaceSearchInput, language: KeepseekLanguage): Promise<string> {
+  public async searchWorkspace(
+    input: WorkspaceSearchInput,
+    language: KeepseekLanguage,
+    options: WorkspaceSearchExecutionOptions = {}
+  ): Promise<string> {
+    this.throwIfSearchStopped(options, language);
     const folders = vscode.workspace.workspaceFolders ?? [];
     if (!folders.length) {
       return JSON.stringify({
@@ -270,9 +296,17 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
         error: language === 'en' ? 'Search query cannot be empty.' : '搜索关键词不能为空。'
       });
     }
+    if (query.length > MAX_SEARCH_QUERY_CHARS) {
+      return JSON.stringify({
+        ok: false,
+        error: language === 'en'
+          ? `Search query exceeds the ${MAX_SEARCH_QUERY_CHARS}-character limit.`
+          : `搜索关键词超过 ${MAX_SEARCH_QUERY_CHARS} 个字符的上限。`
+      });
+    }
     if (input.isRegex) {
       try {
-        new RegExp(query);
+        createSearchMatcher(query, true, input.matchCase === true);
       } catch (error) {
         return JSON.stringify({
           ok: false,
@@ -286,12 +320,13 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
 
     const limit = normalizeSearchResultLimit(input.maxResults);
     const scope = await this.resolveSearchScope(input.path, input.include);
-    const hits = await this.collectSearchHits(input, scope, limit);
+    const hits = await this.collectSearchHits(input, scope, limit, language, options);
     const results: WorkspaceSearchResult[] = [];
     let truncated = hits.truncated;
     let totalChars = 0;
 
     for (const hit of hits.hits) {
+      this.throwIfSearchStopped(options, language);
       if (results.length >= limit || totalChars >= SEARCH_RESULT_TOTAL_CHAR_LIMIT) {
         truncated = true;
         break;
@@ -317,6 +352,9 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
       count: results.length,
       limit,
       truncated: truncated || results.length >= limit,
+      engine: hits.engine,
+      candidateFilesTruncated: hits.candidateFilesTruncated,
+      skippedFiles: hits.skippedFiles,
       excluded: WORKSPACE_TOOL_EXCLUDED_DIRECTORIES
     });
   }
@@ -424,25 +462,12 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
   }
 
   public resolveTargetUri(targetPath: string): vscode.Uri {
-    if (/^file:/iu.test(targetPath)) {
-      return vscode.Uri.parse(targetPath);
-    }
-
-    if (path.isAbsolute(targetPath)) {
-      return vscode.Uri.file(targetPath);
-    }
-
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
-    if (!workspaceRoot) {
-      return vscode.Uri.file(path.resolve(targetPath));
-    }
-
-    return vscode.Uri.joinPath(workspaceRoot, ...targetPath.split(/[\\/]+/).filter(Boolean));
+    return this.resolveWorkspacePathUri(targetPath);
   }
 
   public getLabel(uri: vscode.Uri): string {
     if (vscode.workspace.getWorkspaceFolder(uri)) {
-      return vscode.workspace.asRelativePath(uri, false);
+      return vscode.workspace.asRelativePath(uri, (vscode.workspace.workspaceFolders?.length ?? 0) > 1);
     }
     return uri.fsPath;
   }
@@ -450,22 +475,34 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
   private async collectSearchHits(
     input: WorkspaceSearchInput,
     scope: WorkspaceSearchScope,
-    limit: number
-  ): Promise<{ hits: WorkspaceSearchHit[]; truncated: boolean }> {
+    limit: number,
+    language: KeepseekLanguage,
+    options: WorkspaceSearchExecutionOptions
+  ): Promise<WorkspaceSearchCollection> {
+    this.throwIfSearchStopped(options, language);
     const textSearchApi = vscode.workspace as unknown as WorkspaceTextSearchApi;
     if (typeof textSearchApi.findTextInFiles === 'function') {
-      return await this.collectSearchHitsWithVsCode(textSearchApi.findTextInFiles.bind(vscode.workspace), input, scope, limit);
+      return await this.collectSearchHitsWithVsCode(
+        textSearchApi.findTextInFiles.bind(vscode.workspace),
+        input,
+        scope,
+        limit,
+        language,
+        options
+      );
     }
 
-    return await this.collectSearchHitsWithFallback(input, scope, limit);
+    return await this.collectSearchHitsWithFallback(input, scope, limit, language, options);
   }
 
   private async collectSearchHitsWithVsCode(
     findTextInFiles: NonNullable<WorkspaceTextSearchApi['findTextInFiles']>,
     input: WorkspaceSearchInput,
     scope: WorkspaceSearchScope,
-    limit: number
-  ): Promise<{ hits: WorkspaceSearchHit[]; truncated: boolean }> {
+    limit: number,
+    language: KeepseekLanguage,
+    options: WorkspaceSearchExecutionOptions
+  ): Promise<WorkspaceSearchCollection> {
     const hits: WorkspaceSearchHit[] = [];
     let truncated = false;
     await findTextInFiles(
@@ -480,6 +517,7 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
         maxResults: limit
       },
       (result) => {
+        this.throwIfSearchStopped(options, language);
         if (!this.canUseSearchUri(result.uri, scope.filterUri)) {
           return;
         }
@@ -500,39 +538,56 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
 
     return {
       hits,
-      truncated: truncated || hits.length >= limit
+      truncated: truncated || hits.length >= limit,
+      engine: 'vscode',
+      candidateFilesTruncated: false,
+      skippedFiles: createEmptySearchSkippedFiles()
     };
   }
 
   private async collectSearchHitsWithFallback(
     input: WorkspaceSearchInput,
     scope: WorkspaceSearchScope,
-    limit: number
-  ): Promise<{ hits: WorkspaceSearchHit[]; truncated: boolean }> {
+    limit: number,
+    language: KeepseekLanguage,
+    options: WorkspaceSearchExecutionOptions
+  ): Promise<WorkspaceSearchCollection> {
     const include = scope.include ?? '**/*';
-    const uris = await vscode.workspace.findFiles(include, WORKSPACE_TOOL_GLOB_EXCLUDE, getConfiguredWorkspaceToolFileLimit());
+    const candidateLimit = getConfiguredWorkspaceToolFileLimit();
+    const foundUris = await vscode.workspace.findFiles(include, WORKSPACE_TOOL_GLOB_EXCLUDE, candidateLimit + 1);
+    const candidateFilesTruncated = foundUris.length > candidateLimit;
+    const uris = candidateFilesTruncated ? foundUris.slice(0, candidateLimit) : foundUris;
     const hits: WorkspaceSearchHit[] = [];
     let truncated = false;
+    const skippedFiles = createEmptySearchSkippedFiles();
     const matcher = createSearchMatcher(input.query, input.isRegex === true, input.matchCase === true);
 
     for (const uri of uris.sort((left, right) => this.getLabel(left).localeCompare(this.getLabel(right), undefined, { sensitivity: 'base' }))) {
+      this.throwIfSearchStopped(options, language);
       if (hits.length >= limit) {
         truncated = true;
         break;
       }
       if (!this.canUseSearchUri(uri, scope.filterUri) || shouldSkipTextUri(uri)) {
+        skippedFiles.unsupported += 1;
         continue;
       }
 
       try {
         const stat = await vscode.workspace.fs.stat(uri);
-        if (stat.type !== vscode.FileType.File || stat.size > SEARCH_FALLBACK_MAX_READ_BYTES) {
+        if (stat.type !== vscode.FileType.File) {
+          skippedFiles.unsupported += 1;
+          continue;
+        }
+        if (stat.size > SEARCH_FALLBACK_MAX_READ_BYTES) {
+          skippedFiles.oversized += 1;
           continue;
         }
         const bytes = await vscode.workspace.fs.readFile(uri);
-        const content = this.decodeWorkspaceText(bytes, uri, 'en').replace(/\r\n?/gu, '\n');
+        const content = this.decodeWorkspaceText(bytes, uri, language).replace(/\r\n?/gu, '\n');
         const lines = content.split('\n');
         for (let index = 0; index < lines.length && hits.length < limit; index += 1) {
+          this.throwIfSearchStopped(options, language);
           matcher.lastIndex = 0;
           let match = matcher.exec(lines[index] ?? '');
           while (match && hits.length < limit) {
@@ -541,7 +596,8 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
             hits.push({
               uri,
               range: new vscode.Range(index, startCharacter, index, endCharacter),
-              previewText: lines[index]
+              previewText: lines[index],
+              sourceLines: lines
             });
             if (!matcher.global) {
               break;
@@ -552,14 +608,21 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
             match = matcher.exec(lines[index] ?? '');
           }
         }
-      } catch {
+      } catch (error) {
+        if (isSearchStopped(error)) {
+          throw error;
+        }
+        skippedFiles.unreadable += 1;
         // Skip files that cannot be read safely by the fallback search path.
       }
     }
 
     return {
       hits,
-      truncated: truncated || hits.length >= limit
+      truncated: truncated || hits.length >= limit || candidateFilesTruncated,
+      engine: 'fallback',
+      candidateFilesTruncated,
+      skippedFiles
     };
   }
 
@@ -571,6 +634,24 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     const line = hit.range.start.line + 1;
     const contextStartLine = Math.max(1, line - SEARCH_CONTEXT_BEFORE_LINES);
     const contextEndLine = line + SEARCH_CONTEXT_AFTER_LINES;
+    if (hit.sourceLines) {
+      const matchLine = shapeSearchLine(hit.sourceLines[line - 1] ?? hit.previewText ?? '');
+      return {
+        path: this.getLabel(hit.uri),
+        uri: hit.uri.toString(),
+        line,
+        startColumn: hit.range.start.character + 1,
+        endColumn: Math.max(hit.range.start.character + 1, hit.range.end.character + 1),
+        matchLine: matchLine.text,
+        matchLineTruncated: matchLine.truncated,
+        before: hit.sourceLines
+          .slice(contextStartLine - 1, line - 1)
+          .map((text, index) => toSearchLine(contextStartLine + index, text)),
+        after: hit.sourceLines
+          .slice(line, Math.min(hit.sourceLines.length, contextEndLine))
+          .map((text, index) => toSearchLine(line + 1 + index, text))
+      };
+    }
     let context: WorkspaceRangeReadData | undefined;
     try {
       context = await this.readWorkspaceFileRangeData(hit.uri, contextStartLine, contextEndLine, SEARCH_CONTEXT_MAX_BYTES, language);
@@ -610,6 +691,9 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
   }
 
   private async resolveSearchScope(rawPath: string | undefined, rawInclude: string | undefined): Promise<WorkspaceSearchScope> {
+    if (rawPath?.trim() && rawInclude?.trim()) {
+      throw new Error('Search path and include cannot be used together. Choose one search scope.');
+    }
     if (rawPath?.trim()) {
       const uri = this.resolveWorkspacePathUri(rawPath);
       const stat = await vscode.workspace.fs.stat(uri);
@@ -733,6 +817,17 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     return uri.path.startsWith(folderPath)
       ? uri.path.slice(folderPath.length)
       : vscode.workspace.asRelativePath(uri, false).split('\\').join('/');
+  }
+
+  private throwIfSearchStopped(options: WorkspaceSearchExecutionOptions, language: KeepseekLanguage): void {
+    if (options.signal?.aborted) {
+      throw new WorkspaceSearchStoppedError(language === 'en' ? 'Workspace search was stopped.' : '工作区搜索已停止。');
+    }
+    if (options.runDeadlineAt !== undefined && Date.now() >= options.runDeadlineAt) {
+      throw new WorkspaceSearchStoppedError(language === 'en'
+        ? 'Workspace search reached the Agent run-time limit.'
+        : '工作区搜索已达到 Agent 运行时限。');
+    }
   }
 
   private normalizeRangeInput(startLine: number, endLine: number, maxBytes: number | undefined): {
@@ -941,6 +1036,20 @@ function normalizeDirectoryListLimit(value: number | undefined, fallback: number
     return fallback;
   }
   return Math.min(Math.max(Math.floor(value), 1), 2000);
+}
+
+function createEmptySearchSkippedFiles(): WorkspaceSearchSkippedFiles {
+  return {
+    unreadable: 0,
+    oversized: 0,
+    unsupported: 0
+  };
+}
+
+class WorkspaceSearchStoppedError extends Error {}
+
+function isSearchStopped(error: unknown): error is WorkspaceSearchStoppedError {
+  return error instanceof WorkspaceSearchStoppedError;
 }
 
 function normalizeSearchResultLimit(value: number | undefined): number {

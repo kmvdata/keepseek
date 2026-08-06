@@ -288,6 +288,17 @@ test('ChangeSet controls stay stacked and wrapping in a narrow Secondary Sidebar
   assert.match(styles, /\.change-set-actions button\s*\{[\s\S]*?max-width:\s*100%/u);
 });
 
+test('delete DraftEdits require a path-aware modal before the Provider applies them', async () => {
+  const providerSource = await readFile(
+    path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
+    'utf8'
+  );
+
+  assert.match(providerSource, /getPendingDeleteTargetsForEdit\(message\.id\)[\s\S]*?confirmDeleteApply/u);
+  assert.match(providerSource, /getPendingDeleteTargetsForChangeSet\(message\.id\)[\s\S]*?confirmDeleteApply/u);
+  assert.match(providerSource, /showWarningMessage\([\s\S]*?\{ modal: true, detail \}/u);
+});
+
 test('Skill creation and Legacy Memory migration attach their ChangeSets to explicit timeline messages', async () => {
   const providerSource = await readFile(
     path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),

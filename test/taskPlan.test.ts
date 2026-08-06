@@ -3,9 +3,36 @@ import { test } from 'node:test';
 import { markTaskPlanReadyForValidation, TaskPlanTracker } from '../src/agent/taskPlan';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  DELETE_WORKSPACE_FILE_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME
 } from '../src/agent/protocol';
+
+test('task plan treats pending file deletion as an edit step', () => {
+  const english = new TaskPlanTracker({
+    runId: 'run-delete-en',
+    prompt: 'Delete src/obsolete.ts.',
+    language: 'en'
+  });
+  english.beginExecution();
+  english.startTool(DELETE_WORKSPACE_FILE_TOOL_NAME);
+
+  const englishEdit = english.getPlan().steps.find((step) => step.id === 'edit');
+  assert.equal(englishEdit?.status, 'in_progress');
+  assert.equal(englishEdit?.detail, 'Preparing a pending file deletion');
+
+  const chinese = new TaskPlanTracker({
+    runId: 'run-delete-zh',
+    prompt: '删除 src/obsolete.ts。',
+    language: 'zh-CN'
+  });
+  chinese.beginExecution();
+  chinese.startTool(DELETE_WORKSPACE_FILE_TOOL_NAME);
+
+  const chineseEdit = chinese.getPlan().steps.find((step) => step.id === 'edit');
+  assert.equal(chineseEdit?.status, 'in_progress');
+  assert.equal(chineseEdit?.detail, '准备待确认文件删除');
+});
 
 test('task plan tracks inspection, edit, validation, and blockers', () => {
   const updates: string[] = [];

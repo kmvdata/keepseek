@@ -308,6 +308,10 @@ export interface DraftEdit {
   action: DraftEditAction;
   newText: string;
   reason: string;
+  /** Internal apply precondition. Never expose this value to the Webview. */
+  expectedOriginalTextHash?: string;
+  /** Internal apply precondition. Never expose this value to the Webview. */
+  expectedOriginalSize?: number;
 }
 
 export type TaskPlanStatus = 'running' | 'blocked' | 'completed' | 'failed' | 'stopped';

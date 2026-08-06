@@ -116,7 +116,25 @@
         },
         "keepseek.maxFileBytes": {
           "type": "number",
-          "default": 51200
+          "default": 200000,
+          "minimum": 1,
+          "maximum": 20000000,
+          "scope": "window",
+          "markdownDescription": "Maximum bytes KeepSeek reads from one referenced or workspace text file. Binary, media, archive, and otherwise unreadable files are still rejected."
+        },
+        "keepseek.maxWorkspaceToolFiles": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 1,
+          "maximum": 50000,
+          "scope": "window",
+          "markdownDescription": "Maximum candidate files enumerated by read-only workspace list and fallback text-search tools. Search results have a separate per-call result limit."
+        },
+        "keepseek.slimToolModeEnabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "Expose the smaller stable Agent tool schema by default. Core workspace text search remains available in slim mode."
         },
         "keepseek.maxContextFiles": {
           "type": "number",

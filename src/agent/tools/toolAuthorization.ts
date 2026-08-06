@@ -9,6 +9,7 @@ import type {
 } from '../../shared/types';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  DELETE_WORKSPACE_FILE_TOOL_NAME,
   FIND_REFERENCES_TOOL_NAME,
   FIND_SYMBOL_TOOL_NAME,
   GET_DOCUMENT_SYMBOLS_TOOL_NAME,
@@ -63,7 +64,7 @@ const LOW_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
 
 const HIGH_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
   ['keepseek_apply_workspace_edit', 'workspace_write'],
-  ['keepseek_delete_workspace_file', 'workspace_write'],
+  [DELETE_WORKSPACE_FILE_TOOL_NAME, 'workspace_write'],
   ['keepseek_git_commit', 'git_commit'],
   ['keepseek_git_push', 'git_push']
 ]);
@@ -90,7 +91,7 @@ export class ToolAuthorizationService implements ToolAuthorizationAdapter {
     }
 
     if (metadata.riskLevel === 'high') {
-      return await this.confirmHighRiskTool(input.toolName, metadata, input.language);
+      return await this.confirmHighRiskTool(input.toolName, metadata, input.args, input.language);
     }
 
     if (input.policy.authorizedScopes.includes(metadata.scope)) {
@@ -142,13 +143,12 @@ export class ToolAuthorizationService implements ToolAuthorizationAdapter {
   private async confirmHighRiskTool(
     toolName: string,
     metadata: ToolAuthorizationMetadata,
+    args: Record<string, unknown>,
     language: KeepseekLanguage
   ): Promise<ToolAuthorizationDecision> {
     const confirm = language === 'en' ? 'Confirm once' : '仅确认本次';
     const selected = await vscode.window.showWarningMessage(
-      language === 'en'
-        ? `KeepSeek requests a high-risk operation (${toolName}). Confirm this single operation?`
-        : `KeepSeek 请求执行高风险操作（${toolName}）。是否仅确认本次操作？`,
+      getHighRiskToolConfirmationPrompt(toolName, args, language),
       { modal: true },
       confirm
     );
@@ -166,6 +166,34 @@ export class ToolAuthorizationService implements ToolAuthorizationAdapter {
           : '高风险操作每次都需要单独显式确认。'
     );
   }
+}
+
+export function getHighRiskToolConfirmationPrompt(
+  toolName: string,
+  args: Record<string, unknown>,
+  language: KeepseekLanguage
+): string {
+  if (toolName === DELETE_WORKSPACE_FILE_TOOL_NAME) {
+    const targetPath = formatHighRiskArgument(args.path, language === 'en' ? '(path unavailable)' : '（路径不可用）');
+    const reason = formatHighRiskArgument(args.reason, language === 'en' ? '(reason unavailable)' : '（原因不可用）');
+    return language === 'en'
+      ? [
+          'KeepSeek requests confirmation to prepare one pending file deletion.',
+          `Path: ${targetPath}`,
+          `Reason: ${reason}`,
+          'This only prepares a delete DraftEdit and does not delete the file immediately. The file will be deleted only if you later review and apply the pending ChangeSet. Confirm this single preparation request?'
+        ].join('\n')
+      : [
+          'KeepSeek 请求确认准备一个待确认文件删除。',
+          `路径：${targetPath}`,
+          `原因：${reason}`,
+          '这只会准备 delete DraftEdit，不会立即删除文件。只有你之后审核并应用待确认 ChangeSet，文件才会真正删除。是否仅确认本次准备请求？'
+        ].join('\n');
+  }
+
+  return language === 'en'
+    ? `KeepSeek requests a high-risk operation (${toolName}). Confirm this single operation?`
+    : `KeepSeek 请求执行高风险操作（${toolName}）。是否仅确认本次操作？`;
 }
 
 export function getToolAuthorizationMetadata(
@@ -217,6 +245,17 @@ function createDecision(
     requiresExplicitConfirmation,
     reason
   };
+}
+
+function formatHighRiskArgument(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+  const normalized = value.trim().replace(/\s+/gu, ' ');
+  if (!normalized) {
+    return fallback;
+  }
+  return normalized.length <= 320 ? normalized : `${normalized.slice(0, 319).trimEnd()}…`;
 }
 
 function getMediumRiskPrompt(

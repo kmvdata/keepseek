@@ -76,6 +76,52 @@ test('keeps multiple rounds associated with their assistant message and omits ne
   assert.equal(updated[1]?.id, second?.id);
 });
 
+test('keeps delete baselines internal and exposes only pending delete targets for confirmation', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-delete-targets-'));
+  const fixture = createStoreFixture(root);
+  const changeSet = fixture.store.addDraftEdits({
+    runId: 'run-delete',
+    sessionId: 'session-1',
+    messageId: 'assistant-delete',
+    edits: [
+      {
+        id: 'delete-a',
+        uri: 'file:///workspace/a.ts',
+        label: 'a.ts',
+        action: 'delete',
+        newText: '',
+        reason: 'Remove A',
+        expectedOriginalTextHash: 'private-hash',
+        expectedOriginalSize: 42
+      },
+      draft('modify-b', 'b.ts')
+    ]
+  });
+  assert.ok(changeSet);
+
+  assert.deepEqual(fixture.store.getPendingDeleteTargetsForEdit('delete-a'), [{
+    id: 'delete-a',
+    uri: 'file:///workspace/a.ts',
+    label: 'a.ts'
+  }]);
+  assert.deepEqual(fixture.store.getPendingDeleteTargetsForChangeSet(changeSet.id), [{
+    id: 'delete-a',
+    uri: 'file:///workspace/a.ts',
+    label: 'a.ts'
+  }]);
+
+  const webviewFile = fixture.store.toWebviewState('session-1')[0]?.files[0];
+  assert.ok(webviewFile);
+  assert.equal(webviewFile.action, 'delete');
+  assert.ok(!('newText' in webviewFile));
+  assert.ok(!('expectedOriginalTextHash' in webviewFile));
+  assert.ok(!('expectedOriginalSize' in webviewFile));
+
+  fixture.store.discardEdit('delete-a');
+  assert.deepEqual(fixture.store.getPendingDeleteTargetsForEdit('delete-a'), []);
+  assert.deepEqual(fixture.store.getPendingDeleteTargetsForChangeSet(changeSet.id), []);
+});
+
 test('reports mixed apply results per file and preserves retryable failures', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-partial-'));
   const fixture = createStoreFixture(root, 'b.ts');
@@ -236,9 +282,9 @@ async function waitForStoredRuntimeChangeSet(storagePath: string, changeSetId: s
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       const parsed = JSON.parse(await readFile(storagePath, 'utf8')) as {
-        changeSets?: Array<{ id?: string }>;
+        changeSets?: Array<{ id?: string; status?: string }>;
       };
-      if (parsed.changeSets?.some((changeSet) => changeSet.id === changeSetId)) return;
+      if (parsed.changeSets?.some((changeSet) => changeSet.id === changeSetId && changeSet.status === 'applied')) return;
     } catch {
       // Persistence is queued; retry until the applied runtime state is durable.
     }

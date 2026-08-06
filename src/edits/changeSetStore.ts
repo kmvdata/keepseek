@@ -19,9 +19,20 @@ type Translator = (key: string, values?: Record<string, string | number>) => str
 type ChangeSetTraceHandler = (changeSet: ChangeSet, event: Record<string, unknown>) => void;
 const MAX_COMPACT_HISTORY_CHANGE_SETS = 500;
 
+type WebviewChangeSetFile = Omit<
+  ChangeSetFile,
+  'newText' | 'expectedOriginalTextHash' | 'expectedOriginalSize'
+>;
+
 export type WebviewChangeSet = Omit<ChangeSet, 'files'> & {
-  files: Array<Omit<ChangeSetFile, 'newText'>>;
+  files: WebviewChangeSetFile[];
 };
+
+export interface PendingDeleteTarget {
+  id: string;
+  uri: string;
+  label: string;
+}
 
 export class ChangeSetStore {
   private readonly changeSets = new Map<string, ChangeSet>();
@@ -135,6 +146,22 @@ export class ChangeSetStore {
 
   public getChangeSetStatus(changeSetId: string): ChangeSet['status'] | undefined {
     return this.changeSets.get(changeSetId)?.status ?? this.historicalChangeSets.get(changeSetId)?.status;
+  }
+
+  public getPendingDeleteTargetsForEdit(editId: string): PendingDeleteTarget[] {
+    const found = this.findEdit(editId);
+    return found && found.edit.action === 'delete' && isApplicable(found.edit)
+      ? [toPendingDeleteTarget(found.edit)]
+      : [];
+  }
+
+  public getPendingDeleteTargetsForChangeSet(changeSetId: string): PendingDeleteTarget[] {
+    const changeSet = this.changeSets.get(changeSetId);
+    return changeSet
+      ? changeSet.files
+        .filter((file) => file.action === 'delete' && isApplicable(file))
+        .map(toPendingDeleteTarget)
+      : [];
   }
 
   public isChangeSetFullyApplied(changeSetId: string): boolean {
@@ -566,7 +593,12 @@ function normalizeStoredChangeSet(changeSet: ChangeSet): ChangeSet {
 function toWebviewChangeSet(changeSet: ChangeSet): WebviewChangeSet {
   return {
     ...changeSet,
-    files: changeSet.files.map(({ newText: _newText, ...file }) => ({ ...file })),
+    files: changeSet.files.map(({
+      newText: _newText,
+      expectedOriginalTextHash: _expectedOriginalTextHash,
+      expectedOriginalSize: _expectedOriginalSize,
+      ...file
+    }) => ({ ...file })),
     lastApplyResult: changeSet.lastApplyResult
       ? {
           ...changeSet.lastApplyResult,
@@ -574,6 +606,14 @@ function toWebviewChangeSet(changeSet: ChangeSet): WebviewChangeSet {
           failed: changeSet.lastApplyResult.failed.map((failure) => ({ ...failure }))
         }
       : undefined
+  };
+}
+
+function toPendingDeleteTarget(file: ChangeSetFile): PendingDeleteTarget {
+  return {
+    id: file.id,
+    uri: file.uri,
+    label: file.label
   };
 }
 

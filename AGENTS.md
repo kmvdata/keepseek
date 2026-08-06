@@ -51,8 +51,11 @@ src/
 │       ├── referenceResources.ts # @ 文件/目录补全资源列表
 │       └── referenceSyntax.ts   # 引用语法安全与 Markdown fence 判断
 ├── edits/
-│   ├── draftEditStore.ts        # DraftEdit 状态、应用、应用后消息记录
-│   └── safeFileEditor.ts        # 用户确认后写入 DraftEdit
+│   ├── changeSet.ts             # DraftEdit 转 ChangeSet 的纯逻辑
+│   ├── changeSetStore.ts        # ChangeSet 状态、持久化、Apply/Revert 与 checkpoint
+│   ├── draftDiffService.ts      # DraftEdit 对比预览
+│   ├── draftEditStore.ts        # 旧版独立 DraftEdit store 兼容边界
+│   └── safeFileEditor.ts        # ChangeSetStore Apply 后的安全文件写入/删除与回滚
 ├── skills/
 │   ├── skillDiscovery.ts        # workspace / Codex home 插件与 Skill 发现
 │   ├── skillActivationResolver.ts # explicit/session/default/implicit 确定性激活
@@ -104,7 +107,7 @@ src/
 - `ChatSessionStore` 管理会话生命周期，存储 key 为 `keepseek.chatSessions`，最多保留 50 个有内容会话，活跃空会话会保留。
 - `ChatSession.contextCompression` 存储会话摘要、受保护消息 id、最近压缩时间和失败原因；摘要不是聊天 UI 消息。
 - `FileContextStore` 管理用户显式加入上下文的文件内容，读取限制来自 `keepseek.maxFileBytes` 和 `keepseek.maxContextFiles`。
-- `DraftEditStore` 管理待确认编辑，应用成功后追加一条 assistant 消息，并通过 `SafeFileEditor` 写入。
+- `ChangeSetStore` 是待确认修改的真实主管线：持久化 ChangeSet/checkpoint，处理 Diff、Apply、Discard 和 Revert，并通过 `SafeFileEditor` 执行用户点击 Apply 后的文件操作。`DraftEditStore` 不是 Provider 当前的主管线。
 - `ProjectInstructionsResolver` 只读取每个受信任工作区根目录的 `AGENTS.md`；`.agents/**/AGENTS.md` 属于 Skill，不作为全局项目指令。
 - `SkillActivationResolver` 按 explicit、session、workspace-default、implicit 的顺序选择 Skill；`allowImplicit: false` 不能被隐式激活，未受信任工作区不能自动加载项目 Skill。
 - `LegacyProjectMemoryMigration` 是 Project Memory 唯一保留入口：旧数据只读、最低优先级注入，迁移只能生成待确认 ChangeSet，不写入或删除旧文件。
@@ -119,7 +122,7 @@ src/
 - `currentRunContext.ts` 是动态项目上下文的唯一构造入口；Provider 负责准备它，`AgentRunner` 和 `contextUsage.ts` 只能消费同一个已排序、去重和预算裁剪后的对象。
 - `DeepSeekStreamParser` 只解析 SSE，包括 `content`、`reasoning_content` 和 streaming tool calls。
 - `DsmlToolParser` 是模型返回 DSML 文本工具调用时的兜底解析器。
-- `WorkspaceToolService` 是 Agent 可用的只读工作区工具边界：列文件、列目录、搜索、读文件、拒绝越界/二进制/过大文件。
+- `WorkspaceToolService` 是 Agent 可用的只读工作区工具边界：列文件、列目录、搜索、读文件、拒绝越界/二进制/过大文件。其中 `keepseek_search_workspace` 是当前打开工作区内的只读行级文本搜索：支持 literal/regex、大小写、文件/目录 path 或 workspace-relative include glob，返回 URI、1-based 行列和小段上下文；不是网络搜索、替换或工作区外搜索。
 - `SemanticToolService` 优先调用 VS Code document/workspace symbol 和 reference/definition provider；provider 不可用时才退化为受控文本搜索，结果必须标记 `fallback` 与原因。
 - `ToolAuthorizationService` 统一维护低/中/高风险工具边界；compile/lint 与 test 分 scope 做 per-run 授权，高风险操作每次单独确认。
 - `GitToolService` 优先调用内置 Git extension API，失败时只允许固定参数的只读 `git` fallback；没有任意 shell、自动 commit 或 push。
@@ -243,8 +246,11 @@ Agent 工具包括：
 
 - `keepseek_list_workspace_files`：列出当前工作区文件，跳过 `.git`、`node_modules`、`dist` 等目录。
 - `keepseek_list_workspace_directory`：列出当前工作区内指定目录的文件和子目录，可递归，跳过依赖、构建、覆盖率和 VCS 目录。
+- `keepseek_search_workspace`：在当前工作区内执行只读文本搜索，支持 literal/regex、大小写和 path/include 范围，返回行列、上下文、搜索引擎、跳过文件数和截断信息。
+- `keepseek_read_workspace_file_range`：按 1-based 闭区间读取工作区文本文件的指定行段。
 - `keepseek_read_workspace_file`：读取工作区内文本文件，拒绝越界、二进制、超限文件。
 - `keepseek_create_draft_edit`：创建待确认 DraftEdit，不直接写磁盘。
+- `keepseek_delete_workspace_file`：仅为工作区内一个已存在的普通可读文本文件准备 `action: 'delete'` 的待确认 DraftEdit；不会立即删除、不支持目录或递归删除。
 - `keepseek_find_symbol` / `keepseek_find_references`：语义定位 symbol 与 references。
 - `keepseek_get_document_symbols` / `keepseek_get_workspace_symbols`：读取文档或工作区语义 symbol。
 - `keepseek_read_workspace_diagnostics`：读取 VS Code Problems。
@@ -253,7 +259,7 @@ Agent 工具包括：
 - `keepseek_git_create_patch`：仅返回受大小限制的 patch 内容，不写入或应用 patch。
 - `keepseek_git_suggest_commit_message`：只生成 commit message 建议，不创建 commit。
 
-工具风险规则：工作区读取、Problems、语义查询和 Git 只读查询是低风险；受控 compile/lint/test 是中风险并按 run 授权；真正写文件、删除、commit、push 是高风险。Agent 写文件仍只能创建 ChangeSet/DraftEdit，用户 Apply 后才会写入；当前不暴露 commit/push Agent 工具，且绝不自动 push。
+工具风险规则：工作区读取/搜索、Problems、语义查询和 Git 只读查询是低风险；受控 compile/lint/test 是中风险并按 run 授权；删除准备工具按高风险处理，每次调用都会显示带目标路径和原因的 VS Code modal，但授权后仍只产生待确认 DraftEdit。Agent 对文件的 create/modify/delete 都只能进入 ChangeSet；Provider 把 `AgentResponse.changeSet` 登记到 `ChangeSetStore`，Webview 展示 Diff/Apply/Discard，只有用户点击 Apply 后 `ChangeSetStore` 才会调用 `SafeFileEditor`。单项 delete Apply 和包含 delete 的 Apply All 在真正执行前还会弹出带删除目标的专用 VS Code modal；非删除 DraftEdit 的 Apply 不会额外弹出该删除确认。当前不暴露 commit/push Agent 工具，且绝不自动 push。
 
 验证失败后由 `RepairLoopTracker` 记录失败摘要和修复轮次。Agent 读取 Problems、生成修复 ChangeSet 后必须进入 `waiting_for_apply`；待修改未应用时 Runner 会结构化拒绝再次验证。用户 Apply 完整 ChangeSet 后 Webview 可显式继续验证，修复轮次跨 run/session 持久化并受 `keepseek.validation.maxRepairIterations` 限制。
 
@@ -329,7 +335,7 @@ projection 组成：
 ## 设计原则
 
 - **依赖倒置**：`AgentRunner` 依赖 `WorkspaceToolAdapter`，默认实现是 `WorkspaceToolService`，便于测试替换。
-- **组合优于继承**：Provider 组合 `ChatSessionStore`、`DraftEditStore`、`FileContextStore`、`AgentRunner`。
+- **组合优于继承**：Provider 组合 `ChatSessionStore`、`ChangeSetStore`、`FileContextStore`、`AgentRunner`。
 - **协议解析隔离**：SSE 和 DSML 解析独立于请求编排，避免 AgentRunner 继续膨胀。
 - **配置集中化**：默认值、范围 clamp、模型归一化都在 `shared/config.ts`。
 - **错误边界清晰**：用户可见错误统一通过 `getErrorMessage()` + `localize()` 展示；工具返回 JSON `{ ok, error }`，不把异常直接泄漏给模型。
@@ -344,7 +350,7 @@ projection 组成：
 - 新增扩展 → Webview 主动消息：不要放进 `WebviewMessage`，但要在 Webview message listener 中处理。
 - 新增 Agent 工具：更新 `agent/protocol.ts` 的工具 schema 和 `agent/runner.ts` 的工具路由；工具实现优先放独立模块。
 - 修改文件或目录引用格式：同步检查 `context/references/fileReference.ts`、`context/references/directoryReference.ts`、`webview/input/script.ts`、`webview/script.ts` 的序列化/反序列化/打开逻辑。
-- 修改 DraftEdit 应用行为：优先改 `DraftEditStore` / `SafeFileEditor`，不要放进 `AgentRunner`。
+- 修改 DraftEdit/ChangeSet 应用行为：优先改 `ChangeSetStore` / `SafeFileEditor`，不要放进 `AgentRunner`。
 - 修改样式只碰 `webview/styles.ts` 或 `webview/input/styles.ts`；修改输入区专属交互只碰 `webview/input/script.ts`；修改 transcript/设置/会话 UI 只碰 `webview/script.ts`；修改富文本通用快捷键、mark/region、剪贴板桥接优先改 `webview/richTextShortcuts.ts`。
 - 注释只解释非显而易见的边界、安全规则或协议兼容逻辑。
 - 不要复制 Markdown fence、字节格式化、配置读取、错误字符串、文本文件判断等公共逻辑；使用 `shared/markdown.ts`、`shared/format.ts`、`shared/config.ts`、`shared/errors.ts`、`shared/textFileGuards.ts`。
@@ -356,7 +362,7 @@ projection 组成：
 - `agent/historyProjection.ts` / `agent/historyCompressor.ts` 是上下文压缩核心；修改后必须验证压缩关闭 fallback、无摘要 fallback、摘要失败 fallback、protected 消息、最近轮次和 context usage 估算。
 - `webview/script.ts` 和 `webview/input/script.ts` 仍是大字符串文件；改动时保持 DOM id、message type、序列化格式兼容，并重点手测输入、拖拽、`@` 引用、编辑重发、Apply/Discard。
 - `webview/richTextShortcuts.ts` 同时影响底部 prompt 输入框和消息编辑输入框；修改后必须验证 Emacs 光标移动、mark/region、`Ctrl-K` 剪切行尾、`Ctrl-W` 剪切选区、`Alt-W` 复制、`Ctrl-Y` 粘贴，以及 `Command-A/C/X/V/Z` 系统习惯。
-- `edits/safeFileEditor.ts` 当前只做确认后的整文件写入；如果未来增加 diff、冲突检测、备份或权限确认，应在这里扩展，不要放进 AgentRunner。
+- `edits/changeSetStore.ts` 是待确认变更的状态、持久化和批量 Apply/Revert 边界；`edits/safeFileEditor.ts` 负责单文件写入/删除、脏编辑器保护、删除前基线检查与 checkpoint 回滚。不要把这些行为放进 AgentRunner。
 - `context/references/fileReference.ts` / `context/references/directoryReference.ts` 是引用格式兼容核心；修改时必须验证全文引用、行段引用、目录引用、外部授权、不可读文件跳过。
 
 ## 常用验证
@@ -380,4 +386,4 @@ npm run package
 
 开发调试：用 VS Code 打开仓库，按 F5 启动 Extension Development Host。
 
-重点手测：普通发送、长对话压缩、压缩关闭、摘要失败 fallback、编辑重发、会话切换、上下文文件添加、选区引用、Explorer 文件/目录引用、拖拽引用、`@` 文件/目录补全、引用展开、Agent 读文件/列文件/列目录、DraftEdit Apply/Discard/Apply All、语言切换、API 设置保存、context window 估算显示。
+重点手测：普通发送、长对话压缩、压缩关闭、摘要失败 fallback、编辑重发、会话切换、上下文文件添加、选区引用、Explorer 文件/目录引用、拖拽引用、`@` 文件/目录补全、引用展开、Agent 读文件/列文件/列目录、literal/regex/大小写/path/include/多根工作区搜索、搜索中止与截断元数据、DraftEdit Apply/Discard/Apply All、删除授权 modal、删除 Diff/Apply/Discard/Revert、删除前文件变化冲突、脏编辑器拒绝、目录/二进制/超限/越界删除拒绝、语言切换、API 设置保存、context window 估算显示。

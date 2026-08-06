@@ -40,11 +40,11 @@ English version is available below: [English](#keepseek-english).
 - 回复复制：Assistant 回复支持一键复制，便于保存或转发排查结果。
 - 编辑器快捷键：底部输入框和消息编辑框共享 Emacs/macOS 风格文本快捷键。
 - KeepSeek Skills：从工作区 `.agents`、仓库 Codex 插件目录和用户 `~/.codex/skills` / `~/.codex/plugins` 发现可复用工作流，支持选择启用、`$` 引用和创建 workspace skill 草案。
-- 低成本工作区工具：Agent 可先搜索或列目录，再按行段读取文件，避免为了定位问题读取整份大文件。
+- 低成本工作区工具：Agent 可在当前工作区内执行只读 literal/regex 文本搜索，用 path 或 include glob 限定范围，再按返回的 1-based 行列读取相关行段。这不是网络搜索或搜索替换。
 - 用量统计：显示本次/会话 tokens、prompt cache 命中率、估算费用、上下文百分比和 DeepSeek 余额。
 - 上下文压缩：长对话会使用"历史投影 + 会话摘要 + 关键消息保护 + 文件引用外化"组织模型输入，减少重复发送旧历史和展开后的大段文件正文。
 - 调试 trace：可选开启结构化 JSONL 交互日志，便于排查请求、流式响应和工具循环问题。
-- 安全修改草案：AI 只能创建待确认的 DraftEdit，用户点击 Apply 后还会经过 VS Code modal 确认再写入文件。
+- 安全 ChangeSet：AI 只能准备 DraftEdit，Provider 会把它们登记到 `ChangeSetStore` 供用户查看 Diff、Apply、Discard 或 Revert。每个删除 DraftEdit 仅面向工作区内一个已存在的普通可读文本文件，不支持目录或递归删除。
 - 基础防护：限制单个上下文文件大小，跳过常见二进制、媒体、归档和不可读文件。
 
 ## History Session 管理
@@ -83,8 +83,14 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 1. 在编辑器、资源管理器、终端、Output 或 Debug Console 中选择需要的内容。
 2. 使用右键菜单或 `Cmd+L` / `Ctrl+L` 添加到 KeepSeek 输入框。
 3. 输入问题或任务，例如"解释这个报错为什么发生"或"给出最小修改方案"。
-4. AI 回复后，如果包含修改草案，你可以选择 Apply 或 Discard。
-5. Apply 时 VS Code 会再次弹窗确认，确认后才写入文件。
+4. AI 回复后，如果包含修改草案，它会以 ChangeSet 形式展示，你可以查看 Diff 并选择 Apply 或 Discard。
+5. create/modify 只有在你点击 Apply 后才会写入。delete 在工具调用时先经过一次带路径和原因的高风险 modal，但此时仍只准备 DraftEdit；你审阅 ChangeSet 并点击 Apply/Apply All 后，执行前还会弹出删除专用 modal。
+
+### Agent 工作区搜索
+
+- `keepseek_search_workspace` 搜索当前打开工作区内的可读文本，支持普通文本或正则、大小写匹配、单文件/目录 path 或 workspace-relative include glob。
+- 搜索结果包含 URI、1-based 行列、命中行与小段上下文，以及引擎、跳过文件数和截断元数据。依赖、构建和 VCS 目录会被跳过；二进制、媒体、归档、超限或不可读文件不会当作文本返回。
+- 定位声明、文档结构或引用时，Agent 会优先使用 VS Code semantic provider；provider 不可用时才回退到受控文本搜索，并在结果中标记 fallback 原因。
 
 ## 快捷键
 
@@ -117,12 +123,12 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 | `keepseek.selectedModelId` | `""` | 当前工程选中的模型 id；为空或不可用时使用模型列表第一项 |
 | `keepseek.thinkingEnabled` | `true` | 当前工程是否开启 Thinking 模式 |
 | `keepseek.reasoningEffort` | `"high"` | 当前工程的 Thinking 推理强度，支持 `high` 或 `max` |
-| `keepseek.maxFileBytes` | `200000` | 单个引用文件或日志片段的最大字节数 |
-| `keepseek.maxWorkspaceToolFiles` | `2000` | 只读工作区文件列表工具最多返回的文件数量 |
+| `keepseek.maxFileBytes` | `200000` | 单个引用或工作区文本文件的最大读取字节数，范围 1-20000000 |
+| `keepseek.maxWorkspaceToolFiles` | `2000` | 只读工作区列表和 fallback 文本搜索最多枚举的候选文件数，范围 1-50000 |
 | `keepseek.usagePricing` | DeepSeek 默认价目 | 按模型配置每百万 token 的 cache hit、输入、输出价格和币种，用于费用估算 |
 | `keepseek.balanceEndpointUrl` | `""` | DeepSeek 余额查询接口；为空时从 `baseUrl` 推导 `/user/balance` |
 | `keepseek.balanceRefreshIntervalMs` | `60000` | 自动刷新余额的最小间隔 |
-| `keepseek.slimToolModeEnabled` | `true` | 默认暴露较小稳定工具 schema，必要时再加入更宽的工作区工具 |
+| `keepseek.slimToolModeEnabled` | `true` | 默认暴露较小稳定工具 schema，核心工作区文本搜索仍会保留 |
 | `keepseek.maxRequestRetries` | `2` | 首个流式 chunk 前遇到可重试错误时的最大自动重试次数 |
 | `keepseek.requestRetryBaseMs` | `1000` | 自动重试的指数退避基础延迟（毫秒） |
 | `keepseek.trace.enabled` | `false` | 是否开启结构化交互 trace 日志；日志可能包含敏感上下文 |
@@ -148,10 +154,11 @@ KeepSeek 的核心是"显式上下文"。你选择哪些代码、文件或日志
 
 ## 隐私与安全
 
-- KeepSeek 只读取你明确选择或添加的文件、路径和选区。
+- KeepSeek 会读取你明确选择/添加的文件、路径和选区；当 Agent 根据当前请求调用只读 workspace 工具时，也可以搜索或读取当前打开工作区内的文本文件，但不会越出工作区。
 - 外部文件和拖拽文件需要经过扩展授权记录后才会在发送前展开。
 - 图片、媒体、归档和常见二进制文件不会被展开到 prompt。
-- AI 生成的文件修改不会静默写入。所有修改都以 DraftEdit 形式展示，并由用户确认后执行。
+- AI 生成的文件修改不会静默写入。DraftEdit 会进入 `ChangeSetStore`，由用户审阅和 Apply；删除还有工具调用高风险 modal 和实际 Apply 前的删除专用 modal。
+- 实际文件删除不使用系统废纸篓；`ChangeSetStore` 会保留文本 checkpoint 以支持 Revert，并在文件于草案准备后发生变化时拒绝删除，避免误删新内容。
 - 终端和调试控制台选区会以临时 `.log` 文件形式存储在扩展全局存储目录中，用于复用现有文件引用展开机制。
 
 ## 安装与使用
@@ -191,7 +198,7 @@ npm run lint
 - `src/provider/`：WebviewView Provider、Webview 消息类型和视图聚焦工具。
 - `src/sessions/`：当前项目和跨项目 History Session 存储、迁移和保留策略。
 - `src/context/`：上下文文件、终端/输出/调试选区引用，以及 prompt 文件/目录/Skill 引用展开。
-- `src/edits/`：DraftEdit 状态和用户确认后的安全写入。
+- `src/edits/`：ChangeSet/DraftEdit 状态、checkpoint、Diff 与用户 Apply 后的安全写入/删除。
 - `src/shared/`：配置、类型、国际化、格式化、Markdown 和文本文件判断等共享基础设施。
 - `src/webview/`：Webview HTML/CSS/JS 字符串和输入区实现。
 
@@ -295,11 +302,11 @@ The current release connects to DeepSeek OpenAI-compatible Chat Completions by d
 - One-click copy for assistant replies.
 - Shared Emacs/macOS-style text shortcuts in the prompt composer and message edit boxes.
 - KeepSeek Skills discovered from workspace `.agents`, repository Codex plugin folders, and user `~/.codex/skills` / `~/.codex/plugins`, with active selection, `$` references, and workspace skill draft creation.
-- Low-cost workspace tools so the Agent can search or list first, then read targeted file ranges instead of full large files.
+- Low-cost workspace tools let the Agent run read-only literal or regex text searches inside the open workspace, scope them by path or include glob, and then read targeted 1-based line ranges. This is not web search or search-and-replace.
 - Usage stats for turn/session tokens, prompt-cache hit rate, estimated cost, context percentage, and DeepSeek balance.
 - Context compression that projects long chat history into summaries, protected messages, recent turns, and file-reference hints instead of repeatedly sending old expanded file bodies.
 - Optional structured trace logs for debugging requests, streaming responses, and tool loops.
-- Safe DraftEdit workflow where AI proposes changes and the user confirms before writing files.
+- Safe ChangeSet workflow where AI only prepares DraftEdits, the Provider registers them with `ChangeSetStore`, and the user can inspect a diff, apply, discard, or revert. Each delete DraftEdit targets one existing regular readable text file inside the workspace; directories and recursive deletion are not supported.
 - Size limits and binary-file filtering to avoid sending unsuitable content.
 
 ## History Session Management
@@ -336,8 +343,14 @@ KeepSeek is built around explicit context. You decide which files, selections, a
 1. Select code, files, terminal output, Output text, or Debug Console text.
 2. Use the context menu or `Cmd+L` / `Ctrl+L` to insert it into the KeepSeek prompt.
 3. Ask a question or request a change.
-4. Review the response and any proposed DraftEdit.
-5. Apply changes only after confirming them in VS Code.
+4. Review the response and any proposed ChangeSet, inspect its diff, and choose Apply or Discard.
+5. Create/modify drafts write only after Apply. A delete tool call first requires a high-risk modal showing its path and reason, but still only prepares a DraftEdit; after ChangeSet review, applying one or more deletions shows a dedicated delete modal immediately before execution.
+
+### Agent Workspace Search
+
+- `keepseek_search_workspace` searches readable text in the currently open workspace. It supports literal or regular-expression queries, case matching, a single file/directory path, or a workspace-relative include glob.
+- Results contain a URI, 1-based line and column positions, the matching line, nearby context, and engine/skipped-file/truncation metadata. Dependency, build, and VCS directories are excluded; binary, media, archive, oversized, and unreadable files are not returned as text.
+- For declarations, document structure, and references, the Agent prefers VS Code semantic providers. It falls back to controlled text search only when the applicable provider is unavailable and marks the fallback reason in the result.
 
 ## Shortcuts
 
@@ -368,12 +381,12 @@ Debug Console selection capture is most reliable through `Cmd+L` / `Ctrl+L` beca
 | `keepseek.selectedModelId` | `""` | Selected model for the current workspace; falls back to the first configured model |
 | `keepseek.thinkingEnabled` | `true` | Enables Thinking mode for the current workspace |
 | `keepseek.reasoningEffort` | `"high"` | Thinking effort for the current workspace, either `high` or `max` |
-| `keepseek.maxFileBytes` | `200000` | Maximum bytes for a referenced file or log snippet |
-| `keepseek.maxWorkspaceToolFiles` | `2000` | Maximum number of files returned by the read-only workspace file listing tool |
+| `keepseek.maxFileBytes` | `200000` | Maximum bytes read from one referenced or workspace text file, from 1 to 20000000 |
+| `keepseek.maxWorkspaceToolFiles` | `2000` | Maximum candidate files enumerated by read-only workspace listing and fallback text search, from 1 to 50000 |
 | `keepseek.usagePricing` | DeepSeek defaults | Per-million-token cache-hit, input, output prices and currency by model id |
 | `keepseek.balanceEndpointUrl` | `""` | DeepSeek balance endpoint; empty derives `/user/balance` from `baseUrl` |
 | `keepseek.balanceRefreshIntervalMs` | `60000` | Minimum automatic balance refresh interval |
-| `keepseek.slimToolModeEnabled` | `true` | Exposes a smaller stable tool schema by default and adds broader workspace tools only when needed |
+| `keepseek.slimToolModeEnabled` | `true` | Exposes a smaller stable tool schema while keeping core workspace text search available |
 | `keepseek.maxRequestRetries` | `2` | Automatic retry count for replay-safe failures before the first stream chunk |
 | `keepseek.requestRetryBaseMs` | `1000` | Exponential backoff base delay in milliseconds |
 | `keepseek.trace.enabled` | `false` | Enables structured interaction trace logs; logs may include sensitive context |
@@ -399,10 +412,11 @@ These are fixed internal profiles rather than user settings. Both models use a 1
 
 ## Privacy And Safety
 
-- KeepSeek reads only files, paths, and selections you explicitly add.
+- KeepSeek reads files, paths, and selections you explicitly add. When the Agent invokes a read-only workspace tool for the current request, it can also search or read text inside the open workspace, but cannot cross the workspace boundary.
 - External and dropped files are authorized before they can be expanded into a prompt.
 - Common binary, media, image, and archive files are not expanded.
-- AI-generated edits are shown as drafts and require user confirmation before writing.
+- AI-generated edits enter `ChangeSetStore` and require explicit review and Apply. Deletion additionally has a high-risk tool-call modal and a dedicated modal immediately before an applied delete executes.
+- Applied deletion does not use the operating-system trash. `ChangeSetStore` keeps a text checkpoint for Revert and refuses to delete when the file no longer matches the baseline captured while preparing the draft.
 - Terminal and Debug Console selections are stored as temporary `.log` files in the extension global storage directory so they can use the same reference expansion pipeline as files.
 
 ## Development
@@ -421,7 +435,7 @@ Source code is grouped by feature area:
 - `src/skills/`: KeepSeek Skills discovery, loading, state management, and skill draft creation.
 - `src/sessions/`: Current-project and cross-project History Session storage, migration, and retention.
 - `src/context/`: Context files, terminal/output/debug references, and prompt file/directory/Skill reference expansion.
-- `src/edits/`: DraftEdit state and safe user-confirmed writes.
+- `src/edits/`: ChangeSet/DraftEdit state, checkpoints, diffs, and safe writes or deletions after Apply.
 - `src/shared/`: Shared config, types, i18n, formatting, Markdown, and text-file guards.
 - `src/webview/`: Webview HTML/CSS/JS strings and prompt input implementation.
 
