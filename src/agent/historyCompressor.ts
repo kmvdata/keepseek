@@ -31,7 +31,11 @@ import { estimateTokenCount } from './tokenEstimate';
 
 const SUMMARY_MAX_MESSAGE_CHARS = 4_000;
 const SUMMARY_MAX_INPUT_CHARS = 90_000;
-const SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD = 12;
+// Deliberately high: every summary refresh rewrites the synthetic summary message and
+// drops covered messages from the projection, which invalidates DeepSeek's prefix
+// cache from the summary message onward. Keep refreshes rare (a low-frequency
+// cache-invalidation point) instead of sliding the recent-turn window every turn.
+const SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD = 48;
 
 export interface HistoryCompressionRefreshInput {
   session: ChatSession;
@@ -260,9 +264,8 @@ export class HistoryCompressor {
       settings
     });
     const previousSummary = state.summaries[0];
-    const coveredMessageIds = new Set(previousSummary?.coveredMessageIds ?? []);
     const newCompressibleMessages = input.session.messages.filter((message) => (
-      projection.compressibleMessageIds.includes(message.id) && !coveredMessageIds.has(message.id)
+      projection.compressibleMessageIds.includes(message.id)
     ));
     return {
       previousSummary,
@@ -334,6 +337,9 @@ export class HistoryCompressor {
         thinking: {
           type: 'disabled'
         },
+        // Deterministic summaries: a stable completion reduces unrelated byte drift
+        // between refreshes (the covered-message change is the unavoidable part).
+        temperature: 0,
         max_tokens: input.maxTokens,
         stream_options: {
           include_usage: true

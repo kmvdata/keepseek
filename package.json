@@ -132,9 +132,9 @@
         },
         "keepseek.slimToolModeEnabled": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "scope": "window",
-          "markdownDescription": "Expose the smaller stable Agent tool schema by default. Core workspace text search remains available in slim mode."
+          "markdownDescription": "Expose only a smaller core Agent tool schema, adding tools that match the current prompt. Defaults to off so the exposed tool set stays constant across turns and DeepSeek prompt-cache prefixes stay stable. Core workspace text search is available either way."
         },
         "keepseek.maxContextFiles": {
           "type": "number",

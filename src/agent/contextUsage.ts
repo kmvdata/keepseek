@@ -44,7 +44,10 @@ export function createContextUsageEstimate(input: {
     prompt,
     language: input.language,
     contextCompression: input.contextCompression,
-    settings: profile.contextCompression
+    settings: profile.contextCompression,
+    maxProjectionTokens: input.model.contextWindowTokens === undefined
+      ? undefined
+      : input.model.contextWindowTokens * profile.contextCompression.forceRatio
   });
   const messages = buildInitialAgentMessages({
     prompt,

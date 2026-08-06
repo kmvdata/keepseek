@@ -20,7 +20,11 @@ export const DEFAULT_TRACE_RETENTION_DAYS = 7;
 export const DEFAULT_TRACE_MAX_FILE_BYTES = 20_000_000;
 export const DEFAULT_BALANCE_ENDPOINT_URL = '';
 export const DEFAULT_BALANCE_REFRESH_INTERVAL_MS = 60_000;
-export const DEFAULT_SLIM_TOOL_MODE_ENABLED = true;
+// Default off for prompt-cache stability: the exposed tool set must not vary with
+// the prompt text, otherwise the tools section of the request prefix changes and
+// DeepSeek's prefix cache (byte-identical from token 0) is invalidated. Users can
+// opt into the smaller schema explicitly.
+export const DEFAULT_SLIM_TOOL_MODE_ENABLED = false;
 export const DEFAULT_VALIDATION_AUTHORIZATION_POLICY: ValidationAuthorizationPolicy = 'ask';
 export const DEFAULT_MAX_VALIDATION_RUNS = 3;
 export const DEFAULT_MAX_REPAIR_ITERATIONS = 2;

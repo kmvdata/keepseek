@@ -70,7 +70,7 @@ export function getScript(): string {
         contextSoftCompactRatio: 0.5,
         toolResultSnipRatio: 0.6,
         contextCompactForceRatio: 0.9,
-        slimToolModeEnabled: true
+        slimToolModeEnabled: false
       },
       taskPlan: null,
       repairLoop: null,

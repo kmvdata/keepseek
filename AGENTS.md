@@ -297,14 +297,14 @@ projection 组成：
 
 - 原有 system prompt。
 - 可选 synthetic system summary message。
-- 受保护消息 protected messages。
-- 最近 `keepseek.contextKeepRecentTurns` 个用户轮次及其后续 assistant 回复。
+- 受保护消息 protected messages（首条用户需求、显式保留约束、报错/测试失败、DraftEdit 结果等）。
+- 未被摘要覆盖的其余 user/assistant 消息（**append-only**：消息进入投影后只追加，只有摘要刷新覆盖时才成批移除）。
 - 当前 prompt。
 
 配置集中在 `shared/config.ts` 与 `package.json`：
 
-- `keepseek.contextCompressionEnabled`：是否启用压缩。关闭时走旧最近消息窗口，尽量保持旧行为。
-- `keepseek.contextKeepRecentTurns`：保留最近用户轮次数，默认 12，约等价旧 24 条消息窗口。
+- `keepseek.contextCompressionEnabled`：历史兼容配置（代码已无引用）；投影始终启用。
+- `keepseek.contextKeepRecentTurns`：决定哪些消息可作为压缩候选——recent 窗口之外、未保护、未被摘要覆盖的消息才会被下一次摘要刷新覆盖。它只影响压缩判定，不影响投影成员。
 - `keepseek.contextCompressionTriggerRatio`：上下文估算达到模型窗口比例后可触发摘要刷新。
 - `keepseek.contextSummaryBudgetTokens`：摘要请求输出预算。
 
@@ -314,7 +314,7 @@ projection 组成：
 - `ChatSession.contextCompression?: ContextCompressionState`：摘要、covered message ids、protected ids、失败原因。
 - `ContextProjectionMetadata`：仅用于 trace/调试和内部判断，不进入 UI 消息。
 
-自动保护规则在 `agent/historyProjection.ts` 中维护，包括首条用户需求、最近用户输入、用户明确保留的偏好/约束、明显报错或测试失败、用户纠错、DraftEdit 关键结果。受保护消息不应被摘要覆盖或 projection 丢弃；如 protected 消息不在 recent window 中，应优先使用原始 `content`，避免携带旧的 `expandedContent` 大段文件正文。
+自动保护规则在 `agent/historyProjection.ts` 中维护，包括首条用户需求、最近用户输入、用户明确保留的偏好/约束、明显报错或测试失败、用户纠错、DraftEdit 关键结果。受保护消息不应被摘要覆盖或 projection 丢弃。为保持 DeepSeek 前缀缓存（从第 0 个 token 起逐字节匹配）命中，投影是 append-only 且内容冻结：消息进入投影后始终以 `(expandedContent ?? content)` 原样发送，不因滑出 recent window 而外部化改写；历史中段任何消息的改写或删除都会让该点之后的缓存全部失效。
 
 摘要规则：
 
@@ -323,6 +323,8 @@ projection 组成：
 - 历史里的文件引用展开内容只作为路径和关注点线索；模型需要代码细节时应使用现有只读工作区工具重新读取当前文件。
 - 摘要生成使用当前选中模型，关闭 thinking，无 tools，限制 `contextSummaryBudgetTokens`，并使用短超时。
 - 摘要失败、超时、空结果或格式异常不得影响用户发送消息；只记录 `lastFailureReason` 和 trace metadata。
+- 摘要刷新是**低频缓存失效点**：`SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD` 故意调高，避免频繁重写 synthetic summary、成批移除 covered 消息而让前缀整体失效；只有上下文接近窗口时才允许同步刷新。
+- 降级兜底：无可用摘要（压缩持续失败）且投影估算超过 `contextWindowTokens × forceRatio` 时，投影截断为最近消息尾部，避免请求超出模型窗口；这是异常路径，正常路径仍是 append-only。
 
 接入边界：
 

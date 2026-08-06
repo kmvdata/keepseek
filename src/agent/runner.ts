@@ -472,7 +472,10 @@ export class AgentRunner {
       prompt: request.prompt,
       language: request.language,
       contextCompression: request.contextCompression,
-      settings: runtimeConfig.contextCompression
+      settings: runtimeConfig.contextCompression,
+      maxProjectionTokens: request.model.contextWindowTokens === undefined
+        ? undefined
+        : request.model.contextWindowTokens * runtimeConfig.contextCompression.forceRatio
     });
     const messages = buildInitialAgentMessages({
       ...request,

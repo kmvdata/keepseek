@@ -17,6 +17,10 @@ export interface HistoryProjectionInput {
   language: KeepseekLanguage;
   contextCompression?: ContextCompressionState;
   settings: ContextCompressionSettings;
+  /** Optional fallback cap: when no summary is available (refreshes keep failing)
+   *  and the projection exceeds this token budget, truncate to the recent window
+   *  instead of growing without bound. Omit on normal paths. */
+  maxProjectionTokens?: number;
 }
 
 export interface HistoryProjectionResult {
@@ -48,17 +52,44 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
 
   const recentMessageIds = selectRecentTurnMessageIds(agentHistory, settings.keepRecentTurns);
   const protectedMessageIds = selectProtectedMessageIds(agentHistory, input.contextCompression);
-  const selectedMessageIds = new Set<string>([...recentMessageIds, ...protectedMessageIds]);
-  const compressibleMessages = agentHistory.filter((message) => !selectedMessageIds.has(message.id));
   const summaries = getUsableSummaries(input.contextCompression);
   const summary = summaries[0];
+  const coveredMessageIds = new Set(summary?.coveredMessageIds ?? []);
+
+  // Cache-first projection: selected messages are append-only. A message enters the
+  // projection when it is created and leaves only when a summary refresh covers it —
+  // a deliberately low-frequency cache-invalidation point. Sliding a recent-turn
+  // window would drop or rewrite mid-history messages every turn, invalidating
+  // DeepSeek's prefix cache (byte-identical prefix from token 0) for everything
+  // after the first changed message. recentMessageIds therefore only decides
+  // compressibility, never projection membership.
+  const selectedMessageIds = new Set<string>(protectedMessageIds);
+  for (const message of agentHistory) {
+    if (!coveredMessageIds.has(message.id)) {
+      selectedMessageIds.add(message.id);
+    }
+  }
+  const compressibleMessages = agentHistory.filter((message) => (
+    !protectedMessageIds.has(message.id) &&
+    !recentMessageIds.has(message.id) &&
+    !coveredMessageIds.has(message.id)
+  ));
   const syntheticSystemMessages = summary
     ? [formatSyntheticSummaryMessage(summary, input.language)]
     : [];
 
-  const projectedHistory = agentHistory
-    .filter((message) => selectedMessageIds.has(message.id))
-    .map((message) => recentMessageIds.has(message.id) ? message : externalizeMessageContent(message));
+  // Messages keep their (expandedContent ?? content) form for their whole life in
+  // the projection so their serialized bytes never change between turns.
+  const projectedHistory = agentHistory.filter((message) => selectedMessageIds.has(message.id));
+
+  // Degraded-mode fallback: if no summary exists (compression refreshes keep
+  // failing) and the projection would exceed the caller's token budget, keep only
+  // the most recent messages instead of growing without bound until the request
+  // exceeds the model context window. This truncation is a rare failure path, not
+  // the normal cache-friendly append-only path.
+  const history = !summary && input.maxProjectionTokens && projectedHistory.length
+    ? capProjectionToTokenBudget(projectedHistory, input.maxProjectionTokens)
+    : projectedHistory;
 
   const metadata: ContextProjectionMetadata = {
     usedSummary: Boolean(summary),
@@ -69,7 +100,7 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
   };
 
   return {
-    history: projectedHistory,
+    history,
     syntheticSystemMessages,
     metadata,
     protectedMessageIds: Array.from(protectedMessageIds),
@@ -77,6 +108,25 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
     compressibleMessageIds: compressibleMessages.map((message) => message.id),
     usedSummaryIds: summary ? [summary.id] : []
   };
+}
+
+function capProjectionToTokenBudget(messages: ChatMessage[], maxTokens: number): ChatMessage[] {
+  // Keeps only the most recent tail. In this degraded mode even protected messages
+  // may be dropped: staying inside the model context window wins over protection
+  // when compression has been failing and the conversation would otherwise exceed
+  // the window. Normal (append-only) projection never takes this path.
+  let tokenCount = 0;
+  const capped: ChatMessage[] = [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const content = (message.expandedContent ?? message.content).trim();
+    tokenCount += estimateTokenCount(`${message.role}\n${content}`);
+    if (tokenCount > maxTokens && capped.length) {
+      break;
+    }
+    capped.unshift(message);
+  }
+  return capped;
 }
 
 export function getAutoProtectedMessageIds(
@@ -233,16 +283,6 @@ function formatSyntheticSummaryMessage(summary: HistorySummary, language: Keepse
       ];
 
   return [...header, '', summary.content.trim()].join('\n');
-}
-
-function externalizeMessageContent(message: ChatMessage): ChatMessage {
-  if (!message.expandedContent) {
-    return message;
-  }
-  return {
-    ...message,
-    expandedContent: undefined
-  };
 }
 
 function hasSignificantErrorText(content: string): boolean {

@@ -449,10 +449,11 @@ Skill scripts 只展示存在状态，绝不能执行。
 
 历史投影 (`historyProjection`) 从真实会话历史中筛选消息：
 
-- **recent turns**：最近的 N 轮对话（N 由模型档位决定）
-- **protected messages**：首条用户需求、最后用户请求、显式保留约束、用户纠错、报错/测试失败、DraftEdit 结果等
+- **append-only 成员**：受保护消息 + 未被摘要覆盖（`coveredMessageIds`）的所有 user/assistant 消息。消息进入投影后只追加，只有摘要刷新覆盖时才成批移除——这是刻意设计的低频缓存失效点。
+- **protected messages**：首条用户需求、最后用户请求、显式保留约束、用户纠错、报错/测试失败、DraftEdit 结果等。
+- **recent turns**：最近 N 轮只决定哪些消息可作为压缩候选，不决定投影成员。
 
-被保护的旧消息会保留进入 projection，但内容可能会被「外部化」（`externalizeMessageContent`），即对于非 recent 消息，模型被告知这些是历史上下文而非当前指令。
+投影内消息内容冻结：始终以 `(expandedContent ?? content)` 原样发送，不做「外部化」改写。DeepSeek 前缀缓存要求从第 0 个 token 起逐字节匹配，任何中段改写/删除都会让该点之后的缓存全部失效，因此投影的字节稳定性是缓存命中的前提。
 
 ### 5.4 工具调用循环中的消息
 

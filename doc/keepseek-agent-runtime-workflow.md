@@ -101,7 +101,7 @@ Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节
 
 1. 可选 synthetic summary system message，来自 `ChatSession.contextCompression.summaries`。
 2. protected messages，包括首条用户需求、最近用户请求、显式保留约束、用户纠错、明显报错或测试失败、DraftEdit 关键结果等。
-3. 当前模型 / Thinking 自动档位要求保留的最近用户轮次及其后续 assistant 回复。
+3. 未被摘要覆盖（`coveredMessageIds`）的其余 user/assistant 消息——**append-only**：消息只追加、内容冻结（始终以 `expandedContent ?? content` 原样发送），只有摘要刷新覆盖时才成批移除，这是低频缓存失效点。recent 窗口（`keepRecentTurns`）只用于判定哪些消息可压缩。
 4. 当前展开后的用户 prompt。
 
 之后 `src/agent/protocol.ts` 的 `buildInitialAgentMessages()` 会把 projection 组装成 DeepSeek/OpenAI-compatible messages：
