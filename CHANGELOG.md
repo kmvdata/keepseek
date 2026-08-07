@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0 - 2026-07-20
+
+- Significantly improved DeepSeek prompt-cache hit rates for multi-turn agent runs:
+  - Reworked history projection to be cache-first and append-only: every message keeps byte-identical serialization for its whole projected life and leaves the prefix only through summary refresh (a deliberately low-frequency cache-invalidation point), so consecutive turns reuse the provider prefix cache from token 0.
+  - Decoupled the recent-turn window from projection membership: `keepRecentTurns` now only decides compressibility and never drops or rewrites mid-history messages, eliminating the per-turn prefix invalidation that sliding windows used to cause.
+  - Kept context instructions (AGENTS.md, Skills, Legacy Project Memory, context files) as a byte-stable system-message block that is rebuilt only when its inputs actually change.
+  - Replayed history byte-for-byte: assistant tool rounds expand deterministically and the current prompt shares the exact byte path of historical messages, keeping the message prefix stable across turns.
+  - Kept the lean default tool schema so stable core tools stay hot, expanding the schema only when the current request actually needs broader workspace/Git tools — tool-schema churn no longer invalidates the cached prefix.
+- Strengthened prompt-cache observability: cache hit/miss tokens are normalized from both `prompt_cache_hit_tokens` and `prompt_tokens_details.cached_tokens`, per-turn/session hit rates are computed, and cache-miss reasons (system prompt change, tool schema change, model change, history compaction/rewrite, history prefix change, provider eviction) are attributed and surfaced in usage tooltips.
+- Kept context-window estimation in lockstep with the real request by sharing the same projection and the session-frozen slim tool set, so displayed usage stays consistent with what is actually sent.
+
 ## 0.1.9 - 2026-07-19
 
 - Created comprehensive `AGENTS.md` as the root-level project instruction and single source of truth for KeepSeek architecture and maintenance conventions.
