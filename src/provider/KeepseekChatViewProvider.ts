@@ -22,7 +22,6 @@ import {
   ChangeSetApplyFailure,
   ContextUsageEstimate,
   CurrentRunContext,
-  DeepSeekBalanceState,
   DraftEdit,
   KeepseekExtensionInfo,
   KeepseekModel,
@@ -83,6 +82,7 @@ import type { DroppedFileReferenceInput, PromptReferenceInput, WebviewMessage } 
 import { InteractionTraceLogService } from '../agent/logging/interactionTrace';
 import { applyChangeSetEventToRunDetails } from '../agent/logging/runDetails';
 import { fetchDeepSeekBalance } from '../agent/deepseek/balance';
+import { GlobalBalanceStore } from '../agent/deepseek/balanceStore';
 import {
   addUsageEventToSessionStats,
   addUsageEventToTurnStats,
@@ -142,8 +142,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private currentRunAbortController: AbortController | undefined;
   private liveContextUsage: ContextUsageEstimate | undefined;
   private liveTurnUsage: TurnUsageStats | undefined;
-  private balanceLastRefreshAt = 0;
+  /** 防并发：同一时刻只允许一个余额请求在途；限流计时由全局 balanceStore 持有。 */
   private balanceRefreshPromise: Promise<void> | undefined;
+  /** 全局余额 store：所有工程共享同一份余额快照与限流时间戳。 */
+  private readonly balanceStore: GlobalBalanceStore;
   private agentActivitySequence = 0;
   private agentActivity: AgentActivityState = {
     base: 'idle',
@@ -162,6 +164,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   ) {
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
     this.skillStore = new SkillStore(skillState);
+    // skillState 即 extension 的 context.globalState：余额快照与限流时间戳存入
+    // 全局存储，跨 workspace / 窗口共享同一份记录。
+    this.balanceStore = new GlobalBalanceStore(skillState);
     this.legacyMemoryMigration = new LegacyProjectMemoryMigration(
       this.globalStorageUri,
       skillState,
@@ -699,8 +704,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const config = vscode.workspace.getConfiguration('keepseek');
         await config.update('apiKey', message.apiKey, vscode.ConfigurationTarget.Global);
         await config.update('baseUrl', message.baseUrl, vscode.ConfigurationTarget.Global);
-        this.balanceLastRefreshAt = 0;
-        this.sessionStore.getActiveSession().balance = undefined;
+        // API key 变更后旧余额快照可能属于另一个账号：清空全局记录并强制刷新。
+        this.balanceStore.clear();
         this.postState();
         void this.refreshBalance({ force: true });
         vscode.window.showInformationMessage(this.t('apiSettingsSaved'));
@@ -1689,7 +1694,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const config = vscode.workspace.getConfiguration('keepseek');
     const apiKey = (config.get<string>('apiKey', '').trim() || process.env.DEEPSEEK_API_KEY || '').trim();
     if (!apiKey) {
-      this.sessionStore.getActiveSession().balance = undefined;
+      // 无 API key：保留全局余额快照（用量统计仍可展示上次记录），只刷新 UI。
       if (options.post !== false) {
         this.postState();
       }
@@ -1697,7 +1702,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const now = Date.now();
-    if (!options.force && now - this.balanceLastRefreshAt < getConfiguredBalanceRefreshIntervalMs()) {
+    // 限流计时与余额快照都在全局 store：任何工程弹出用量统计都遵守同一份
+    // lastRefreshAt，间隔内直接忽略（webview 仍显示已有记录）。
+    if (!this.balanceStore.isRefreshDue(now, getConfiguredBalanceRefreshIntervalMs(), options.force)) {
       return;
     }
 
@@ -1706,11 +1713,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     try {
       endpointUrl = getConfiguredBalanceEndpointUrl(baseUrl);
     } catch (error) {
-      this.updateActiveSessionBalance({
+      this.balanceStore.update({
         currency: '¥',
         error: getErrorMessage(error),
         updatedAt: new Date().toISOString()
-      });
+      }, Date.now());
       if (options.post !== false) {
         this.postState();
       }
@@ -1718,9 +1725,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     this.balanceRefreshPromise = (async () => {
       const balance = await fetchDeepSeekBalance({ apiKey, endpointUrl });
-      this.balanceLastRefreshAt = Date.now();
-      this.updateActiveSessionBalance(balance);
-      await this.sessionStore.persist();
+      this.balanceStore.update(balance, Date.now());
       if (options.post !== false) {
         this.postState();
       }
@@ -1729,12 +1734,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     });
 
     await this.balanceRefreshPromise;
-  }
-
-  private updateActiveSessionBalance(balance: DeepSeekBalanceState): void {
-    const activeSession = this.sessionStore.getActiveSession();
-    activeSession.balance = balance;
-    activeSession.updatedAt = new Date().toISOString();
   }
 
   private async runContextAction(action: () => Promise<void>): Promise<void> {
@@ -2805,7 +2804,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         usageMetrics: {
           sessionUsageStats: activeSession.usageStats,
           lastTurnUsage,
-          balance: activeSession.balance,
+          balance: this.balanceStore.getBalance(),
           promptCacheDiagnostics: activeSession.promptCacheDiagnostics,
           turnCount: activeSession.messages.filter((message) => message.role === 'user').length,
           contextPercent,

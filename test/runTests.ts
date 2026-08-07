@@ -1,5 +1,6 @@
 import './registerVscodeStub';
 import './agentRequestCoordinator.test';
+import './balanceStore.test';
 import './backgroundRunCoordinator.test';
 import './cacheByteStability.test';
 import './chatSessionStore.test';
