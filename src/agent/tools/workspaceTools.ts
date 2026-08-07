@@ -482,14 +482,24 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     this.throwIfSearchStopped(options, language);
     const textSearchApi = vscode.workspace as unknown as WorkspaceTextSearchApi;
     if (typeof textSearchApi.findTextInFiles === 'function') {
-      return await this.collectSearchHitsWithVsCode(
-        textSearchApi.findTextInFiles.bind(vscode.workspace),
-        input,
-        scope,
-        limit,
-        language,
-        options
-      );
+      try {
+        return await this.collectSearchHitsWithVsCode(
+          textSearchApi.findTextInFiles.bind(vscode.workspace),
+          input,
+          scope,
+          limit,
+          language,
+          options
+        );
+      } catch (error) {
+        if (isSearchStopped(error)) {
+          throw error;
+        }
+        // 正式安装的扩展未声明 enabledApiProposals 时，VS Code 注入的 proposed API
+        // 桩（findTextInFiles）在调用时才抛 "CANNOT use API proposal" 错误，typeof
+        // 检查无法提前识别。此处捕获后降级到内置 fallback 搜索，保证正式安装
+        // （本地 VSIX 或市场安装）下搜索功能始终可用；开发模式仍走 VS Code 原生搜索。
+      }
     }
 
     return await this.collectSearchHitsWithFallback(input, scope, limit, language, options);

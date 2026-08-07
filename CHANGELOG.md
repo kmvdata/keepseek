@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 - 2026-07-21
+
+- Fixed a marketplace-install regression where the packaged VSIX could miss the `ignore` runtime dependency (or ship stale flat build outputs), causing extension activation to fail and the chat view to stay stuck loading. Packaging now always goes through `npm run package` (`vsce package --dependencies`) plus the VSIX content verifier, and the published version was bumped so marketplace clients replace the stale same-version package.
+- Fixed workspace search being unusable on stable (non-development) installs: `vscode.workspace.findTextInFiles` is a proposed API that throws "CANNOT use API proposal" unless the extension is started with `--enable-proposed-api`. The search path now catches that error and gracefully falls back to the built-in bounded text search, keeping `keepseek_search_workspace` available on marketplace and local VSIX installs while retaining the native engine in development mode.
+
 ## 0.2.0 - 2026-07-20
 
 - Significantly improved DeepSeek prompt-cache hit rates for multi-turn agent runs:
