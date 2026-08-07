@@ -1,28 +1,20 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import * as vscode from 'vscode';
-import {
-  GLOBAL_BALANCE_RECORD_KEY,
-  GlobalBalanceStore,
-  normalizeGlobalBalanceRecord
-} from '../src/agent/deepseek/balanceStore';
+import { GlobalBalanceStore, normalizeGlobalBalanceRecord } from '../src/agent/deepseek/balanceStore';
 
-class MemoryMemento implements vscode.Memento {
-  private readonly values = new Map<string, unknown>();
+const NOW = 1_700_000_000_000;
+const INTERVAL_MS = 60_000;
 
-  public keys(): readonly string[] {
-    return [...this.values.keys()];
-  }
-
-  public get<T>(key: string): T | undefined;
-  public get<T>(key: string, defaultValue: T): T;
-  public get<T>(key: string, defaultValue?: T): T | undefined {
-    return this.values.has(key) ? this.values.get(key) as T : defaultValue;
-  }
-
-  public async update(key: string, value: unknown): Promise<void> {
-    this.values.set(key, value);
-  }
+function createStore(): { store: GlobalBalanceStore; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), 'keepseek-balance-'));
+  return {
+    store: new GlobalBalanceStore(vscode.Uri.file(dir)),
+    cleanup: () => rmSync(dir, { recursive: true, force: true })
+  };
 }
 
 test('normalizeGlobalBalanceRecord keeps balance and lastRefreshAt from valid records', () => {
@@ -33,7 +25,7 @@ test('normalizeGlobalBalanceRecord keeps balance and lastRefreshAt from valid re
       isAvailable: true,
       updatedAt: '2026-01-01T00:00:00.000Z'
     },
-    lastRefreshAt: 1_700_000_000_000
+    lastRefreshAt: NOW
   });
 
   assert.deepEqual(record?.balance && {
@@ -47,7 +39,7 @@ test('normalizeGlobalBalanceRecord keeps balance and lastRefreshAt from valid re
     isAvailable: true,
     updatedAt: '2026-01-01T00:00:00.000Z'
   });
-  assert.equal(record?.lastRefreshAt, 1_700_000_000_000);
+  assert.equal(record?.lastRefreshAt, NOW);
 });
 
 test('normalizeGlobalBalanceRecord tolerates missing optional fields and rejects invalid records', () => {
@@ -59,46 +51,72 @@ test('normalizeGlobalBalanceRecord tolerates missing optional fields and rejects
   assert.equal(normalizeGlobalBalanceRecord('not a record'), undefined);
 });
 
-test('GlobalBalanceStore loads a persisted record from memento at construction', () => {
-  const memento = new MemoryMemento();
-  const stored = {
-    balance: { totalBalance: 9.99, currency: '¥', updatedAt: '2026-01-01T00:00:00.000Z' },
-    lastRefreshAt: 1_700_000_000_000
-  };
-  void memento.update(GLOBAL_BALANCE_RECORD_KEY, stored);
-
-  const store = new GlobalBalanceStore(memento);
-  assert.equal(store.getBalance()?.totalBalance, stored.balance.totalBalance);
-  assert.equal(store.getBalance()?.currency, '¥');
-  assert.equal(store.getBalance()?.updatedAt, stored.balance.updatedAt);
+test('store starts with no record and treats the first refresh as due', async () => {
+  const { store, cleanup } = createStore();
+  try {
+    assert.equal(store.getBalance(), undefined);
+    assert.equal(await store.isRefreshDue(NOW, INTERVAL_MS), true);
+  } finally {
+    cleanup();
+  }
 });
 
-test('GlobalBalanceStore enforces the shared throttle window using the persisted lastRefreshAt', () => {
-  const memento = new MemoryMemento();
-  const store = new GlobalBalanceStore(memento);
-  const now = 1_700_000_000_000;
+test('update persists the shared record and enforces the throttle window', async () => {
+  const { store, cleanup } = createStore();
+  try {
+    await store.update({ totalBalance: 1, currency: '¥' }, NOW);
 
-  // 从未刷新过：视为到期。
-  assert.equal(store.isRefreshDue(now, 60_000), true);
-
-  store.update({ totalBalance: 1, currency: '¥' }, now);
-  // 间隔内忽略（不 force）。
-  assert.equal(store.isRefreshDue(now + 59_999, 60_000), false);
-  // 到达间隔即允许再次请求。
-  assert.equal(store.isRefreshDue(now + 60_000, 60_000), true);
-  // force 无视间隔。
-  assert.equal(store.isRefreshDue(now + 1, 60_000, true), true);
-  // 更新同时持久化到 memento。
-  assert.deepEqual(memento.get(GLOBAL_BALANCE_RECORD_KEY), { balance: { totalBalance: 1, currency: '¥' }, lastRefreshAt: now });
+    // 间隔内忽略（不 force）。
+    assert.equal(await store.isRefreshDue(NOW + INTERVAL_MS - 1, INTERVAL_MS), false);
+    // 到达间隔即允许再次请求。
+    assert.equal(await store.isRefreshDue(NOW + INTERVAL_MS, INTERVAL_MS), true);
+    // force 无视间隔。
+    assert.equal(await store.isRefreshDue(NOW + 1, INTERVAL_MS, true), true);
+  } finally {
+    cleanup();
+  }
 });
 
-test('GlobalBalanceStore.clear drops the snapshot and resets the throttle timestamp', () => {
-  const memento = new MemoryMemento();
-  const store = new GlobalBalanceStore(memento);
-  store.update({ totalBalance: 5, currency: '¥' }, 1_700_000_000_000);
-  assert.equal(store.getBalance()?.totalBalance, 5);
+test('a second store on the same storage dir shares balance and throttle timestamp', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'keepseek-balance-'));
+  try {
+    const first = new GlobalBalanceStore(vscode.Uri.file(dir));
+    await first.update({ totalBalance: 8.88, currency: '¥' }, NOW);
 
-  store.clear();
-  assert.equal(store.getBalance(), undefined);
-  assert.equal(store.isRefreshDue(Date.now(), 60_000), true);
+    // 模拟另一个窗口：新实例从磁盘读到同一份 lastRefreshAt 与余额快照。
+    const second = new GlobalBalanceStore(vscode.Uri.file(dir));
+    assert.equal(await second.isRefreshDue(NOW + INTERVAL_MS - 1, INTERVAL_MS), false);
+    await second.refreshFromDisk();
+    assert.equal(second.getBalance()?.totalBalance, 8.88);
+    assert.equal(second.getBalance()?.currency, '¥');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('clear drops the snapshot, deletes the file, and resets the throttle timestamp', async () => {
+  const { store, cleanup } = createStore();
+  try {
+    await store.update({ totalBalance: 5, currency: '¥' }, NOW);
+    assert.equal(store.getBalance()?.totalBalance, 5);
+
+    await store.clear();
+    assert.equal(store.getBalance(), undefined);
+    assert.equal(await store.isRefreshDue(Date.now(), INTERVAL_MS), true);
+  } finally {
+    cleanup();
+  }
+});
+
+test('a corrupted shared file is treated as no record', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'keepseek-balance-'));
+  try {
+    mkdirSync(join(dir, 'balance'), { recursive: true });
+    writeFileSync(join(dir, 'balance', 'balance.json'), 'not-json{{{', 'utf8');
+    const store = new GlobalBalanceStore(vscode.Uri.file(dir));
+    assert.equal(await store.isRefreshDue(NOW, INTERVAL_MS), true);
+    assert.equal(store.getBalance(), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

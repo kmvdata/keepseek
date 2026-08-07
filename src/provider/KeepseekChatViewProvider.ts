@@ -164,9 +164,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   ) {
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
     this.skillStore = new SkillStore(skillState);
-    // skillState 即 extension 的 context.globalState：余额快照与限流时间戳存入
-    // 全局存储，跨 workspace / 窗口共享同一份记录。
-    this.balanceStore = new GlobalBalanceStore(skillState);
+    // 余额快照与限流时间戳落在 globalStorageUri 下的共享文件：跨 workspace /
+    // 窗口的每个 Provider 实例读写同一份记录。
+    this.balanceStore = new GlobalBalanceStore(this.globalStorageUri);
     this.legacyMemoryMigration = new LegacyProjectMemoryMigration(
       this.globalStorageUri,
       skillState,
@@ -704,8 +704,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const config = vscode.workspace.getConfiguration('keepseek');
         await config.update('apiKey', message.apiKey, vscode.ConfigurationTarget.Global);
         await config.update('baseUrl', message.baseUrl, vscode.ConfigurationTarget.Global);
+        // 先在途余额请求可能仍用旧 key，等待其结束再清空，避免旧账号余额回写。
+        if (this.balanceRefreshPromise) {
+          await this.balanceRefreshPromise;
+        }
         // API key 变更后旧余额快照可能属于另一个账号：清空全局记录并强制刷新。
-        this.balanceStore.clear();
+        await this.balanceStore.clear();
         this.postState();
         void this.refreshBalance({ force: true });
         vscode.window.showInformationMessage(this.t('apiSettingsSaved'));
@@ -1702,9 +1706,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const now = Date.now();
-    // 限流计时与余额快照都在全局 store：任何工程弹出用量统计都遵守同一份
-    // lastRefreshAt，间隔内直接忽略（webview 仍显示已有记录）。
-    if (!this.balanceStore.isRefreshDue(now, getConfiguredBalanceRefreshIntervalMs(), options.force)) {
+    // 限流计时与余额快照都在全局共享文件：先读磁盘拿到最新 lastRefreshAt，
+    // 间隔内直接忽略（webview 仍显示已同步的最新记录）。
+    if (!(await this.balanceStore.isRefreshDue(now, getConfiguredBalanceRefreshIntervalMs(), options.force))) {
+      if (options.post !== false) {
+        // 未到期：不请求，但把磁盘上的最新共享记录同步进内存并推给 UI。
+        this.postState();
+      }
       return;
     }
 
@@ -1713,7 +1721,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     try {
       endpointUrl = getConfiguredBalanceEndpointUrl(baseUrl);
     } catch (error) {
-      this.balanceStore.update({
+      await this.balanceStore.update({
         currency: '¥',
         error: getErrorMessage(error),
         updatedAt: new Date().toISOString()
@@ -1725,7 +1733,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     this.balanceRefreshPromise = (async () => {
       const balance = await fetchDeepSeekBalance({ apiKey, endpointUrl });
-      this.balanceStore.update(balance, Date.now());
+      await this.balanceStore.update(balance, Date.now());
       if (options.post !== false) {
         this.postState();
       }
