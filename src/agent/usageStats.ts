@@ -144,6 +144,59 @@ export function calculateCacheHitRate(usage: Pick<Usage, 'cacheHitTokens' | 'cac
   return denominator > 0 ? (Math.max(0, usage.cacheHitTokens) / denominator) * 100 : undefined;
 }
 
+export interface CacheMissReasonInput {
+  previousDiagnostics: PromptCacheDiagnostics | undefined;
+  diagnostics: PromptCacheDiagnostics;
+  previousTurnUsage: TurnUsageStats | undefined;
+  currentTurnUsage: TurnUsageStats | undefined;
+}
+
+/**
+ * 前缀缓存失效归因。
+ *
+ * - system / tools schema 指纹变化是从该点起整段前缀失效的直接证据，无条件归因（不依赖命中率门槛）。
+ * - history 段在 append-only 投影下每轮必然追加新消息，historyPrefixHash 逐轮变化是预期行为；
+ *   只有命中率显著下降时才把 history 变化或 provider 缓存逐出列为候选原因。
+ */
+export function getCacheMissPossibleReasons(input: CacheMissReasonInput): string[] {
+  const reasons: string[] = [];
+  const previous = input.previousDiagnostics;
+  const current = input.diagnostics;
+
+  if (previous?.systemPromptHash && previous.systemPromptHash !== current.systemPromptHash) {
+    reasons.push('system_prompt_changed');
+  }
+  if (previous?.toolsSchemaHash && previous.toolsSchemaHash !== current.toolsSchemaHash) {
+    reasons.push('tools_schema_changed');
+  }
+  if (previous?.modelId && previous.modelId !== current.modelId) {
+    reasons.push('model_changed');
+  }
+  if (current.historyCompacted) {
+    reasons.push('history_compacted');
+  }
+  if (current.historyRewriteReason) {
+    reasons.push(`history_rewrite:${current.historyRewriteReason}`);
+  }
+
+  const previousHitRate = input.previousTurnUsage ? calculateCacheHitRate(input.previousTurnUsage) : undefined;
+  const currentHitRate = input.currentTurnUsage ? calculateCacheHitRate(input.currentTurnUsage) : undefined;
+  if (
+    previousHitRate !== undefined &&
+    currentHitRate !== undefined &&
+    previousHitRate >= 60 &&
+    previousHitRate - currentHitRate >= 30
+  ) {
+    if (previous?.historyPrefixHash && previous.historyPrefixHash !== current.historyPrefixHash) {
+      reasons.push('history_prefix_changed');
+    }
+    if (!reasons.length) {
+      reasons.push('prefix_changed_or_provider_cache_evicted');
+    }
+  }
+  return reasons;
+}
+
 export function normalizeSessionUsageStatsValue(value: unknown): SessionUsageStats | undefined {
   if (!isRecord(value)) {
     return undefined;

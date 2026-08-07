@@ -36,6 +36,8 @@ export function createContextUsageEstimate(input: {
   includeTools?: boolean;
   outputReserveTokens?: number;
   safetyReserveTokens?: number;
+  /** 会话冻结的 slim 工具集；与真实请求保持一致（缺省时按 prompt 现算） */
+  slimToolNames?: string[];
 }): ContextUsageEstimate {
   const profile = getDeepSeekV4RuntimeProfile(input.model, input.agentSettings);
   const prompt = input.prompt?.trim() ?? '';
@@ -60,7 +62,7 @@ export function createContextUsageEstimate(input: {
   const includeTools = input.includeTools ?? profile.maxToolIterations > 0;
   const tools = includeTools
     ? getAgentTools({
-        toolNames: getAgentToolNamesForPrompt(prompt, getConfiguredSlimToolModeEnabled())
+        toolNames: input.slimToolNames ?? getAgentToolNamesForPrompt(prompt, getConfiguredSlimToolModeEnabled())
       })
     : [];
   const outputReserveTokens = input.outputReserveTokens ?? resolveOutputReserveTokens(profile.maxTokens);
@@ -94,6 +96,8 @@ export function createDisplayedSessionContextUsageEstimate(input: {
   contextCompression?: ContextCompressionState;
   language: KeepseekLanguage;
   prompt?: string;
+  /** 会话冻结的 slim 工具集；与真实请求保持一致 */
+  slimToolNames?: string[];
 }): ContextUsageEstimate {
   const usage = toSessionContextUsageEstimate(createContextUsageEstimate(input));
   const displayedReasoningTokens = input.messages.reduce((total, message) => {

@@ -521,6 +521,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       title,
       messages,
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
+      frozenImplicitSkillIds: normalizeStringArray(item.frozenImplicitSkillIds),
       contextCompression: normalizeContextCompressionState(item.contextCompression),
       contextInstructions: typeof item.contextInstructions === 'string'
         ? item.contextInstructions

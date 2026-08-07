@@ -5,7 +5,7 @@ import { AgentRunAbortedError, AgentRunner } from '../agent/runner';
 import { AgentRequestCoordinator, type BackgroundContextCompressionRefreshUpdate } from '../agent/agentRequestCoordinator';
 import type { HistoryCompressionRefreshResult } from '../agent/historyCompressor';
 import { createProtectedContextMeta } from '../agent/historyProjection';
-import { formatCurrentRunContextForAgent } from '../agent/protocol';
+import { formatCurrentRunContextForAgent, getAgentToolNamesForPrompt } from '../agent/protocol';
 import { FileContextStore } from '../context/fileContextStore';
 import { SafeFileEditor } from '../edits/safeFileEditor';
 import {
@@ -87,7 +87,8 @@ import {
   addUsageEventToSessionStats,
   addUsageEventToTurnStats,
   addTurnUsageToSessionStats,
-  calculateCacheHitRate
+  calculateCacheHitRate,
+  getCacheMissPossibleReasons
 } from '../agent/usageStats';
 import { SkillStore } from '../skills/skillStore';
 import { SkillCreator } from '../skills/skillCreator';
@@ -132,6 +133,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly taskPlansBySession = new Map<string, TaskPlan>();
   private readonly repairLoopsBySession = new Map<string, RepairLoopState>();
   private readonly currentRunContextsBySession = new Map<string, CurrentRunContext>();
+  /** 会话冻结的 slim 工具集（首轮确定后跨轮复用，保证 tools schema 前缀稳定） */
+  private readonly slimToolNamesBySession = new Map<string, string[]>();
   private readonly authorizedExternalReferenceUris = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
   private backgroundAvailableScripts: SafeNpmScript[] = [];
@@ -222,6 +225,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.abortPrompt();
     this.backgroundRunCoordinator.clear();
     this.currentRunContextsBySession.clear();
+    this.slimToolNamesBySession.clear();
     await this.legacyMemoryMigration.refresh();
     await this.refreshSkills({ post: false });
     await this.refreshBackgroundRunAvailability({ post: false });
@@ -1029,7 +1033,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const cacheMissPossibleReasons = this.getCacheMissPossibleReasons({
+    const cacheMissPossibleReasons = getCacheMissPossibleReasons({
       previousDiagnostics,
       diagnostics,
       previousTurnUsage,
@@ -1051,48 +1055,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private getCacheMissPossibleReasons(input: {
-    previousDiagnostics: PromptCacheDiagnostics | undefined;
-    diagnostics: PromptCacheDiagnostics;
-    previousTurnUsage: TurnUsageStats | undefined;
-    currentTurnUsage: TurnUsageStats | undefined;
-  }): string[] {
-    const previousHitRate = input.previousTurnUsage ? calculateCacheHitRate(input.previousTurnUsage) : undefined;
-    const currentHitRate = input.currentTurnUsage ? calculateCacheHitRate(input.currentTurnUsage) : undefined;
-    if (
-      previousHitRate === undefined ||
-      currentHitRate === undefined ||
-      previousHitRate < 60 ||
-      previousHitRate - currentHitRate < 30
-    ) {
-      return [];
-    }
-
-    const reasons: string[] = [];
-    if (input.previousDiagnostics?.systemPromptHash && input.previousDiagnostics.systemPromptHash !== input.diagnostics.systemPromptHash) {
-      reasons.push('system_prompt_changed');
-    }
-    if (input.previousDiagnostics?.toolsSchemaHash && input.previousDiagnostics.toolsSchemaHash !== input.diagnostics.toolsSchemaHash) {
-      reasons.push('tools_schema_changed');
-    }
-    if (input.previousDiagnostics?.historyPrefixHash && input.previousDiagnostics.historyPrefixHash !== input.diagnostics.historyPrefixHash) {
-      reasons.push('history_prefix_changed');
-    }
-    if (input.previousDiagnostics?.modelId && input.previousDiagnostics.modelId !== input.diagnostics.modelId) {
-      reasons.push('model_changed');
-    }
-    if (input.diagnostics.historyCompacted) {
-      reasons.push('history_compacted');
-    }
-    if (input.diagnostics.historyRewriteReason) {
-      reasons.push(`history_rewrite:${input.diagnostics.historyRewriteReason}`);
-    }
-    if (!reasons.length) {
-      reasons.push('prefix_changed_or_provider_cache_evicted');
-    }
-    return reasons;
-  }
-
   private createCurrentSessionContextUsage(model = this.getSelectedModel()): ContextUsageEstimate {
     const activeSession = this.sessionStore.getActiveSession();
     return createDisplayedSessionContextUsageEstimate({
@@ -1102,7 +1064,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       currentRunContext: this.currentRunContextsBySession.get(activeSession.id),
       messages: this.messages,
       contextCompression: activeSession.contextCompression,
-      language: this.language
+      language: this.language,
+      slimToolNames: this.slimToolNamesBySession.get(activeSession.id)
     });
   }
 
@@ -1357,7 +1320,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   public async refreshSkills(options: { post?: boolean } = {}): Promise<void> {
     await this.skillStore.refresh();
-    await this.refreshCurrentRunContext(this.sessionStore.getActiveSession(), '');
+    const session = this.sessionStore.getActiveSession();
+    this.skillStore.invalidateImplicitSkillSnapshot(session);
+    await this.refreshCurrentRunContext(session, '');
     if (options.post !== false) {
       this.postState();
     }
@@ -1405,6 +1370,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     activeSession.contextUsage = undefined;
     activeSession.updatedAt = new Date().toISOString();
+    this.skillStore.invalidateImplicitSkillSnapshot(activeSession);
     await this.refreshCurrentRunContext(activeSession, '');
     await this.sessionStore.persist();
     this.postState();
@@ -1420,6 +1386,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     activeSession.contextUsage = undefined;
     activeSession.updatedAt = new Date().toISOString();
+    this.skillStore.invalidateImplicitSkillSnapshot(activeSession);
     await this.refreshCurrentRunContext(activeSession, '');
     await this.sessionStore.persist();
     this.postState();
@@ -2365,6 +2332,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       previousTurnUsage = activeSession.lastTurnUsage;
       previousPromptCacheDiagnostics = activeSession.promptCacheDiagnostics;
       activeSession.lastTurnUsage = undefined;
+      if (replaceMessageId) {
+        // 编辑重发：历史将被 splice（前缀本来就从该点失效），按新 prompt 重新确定
+        // implicit skill 集合与 slim 工具集，避免沿用旧请求的冻结状态。
+        this.skillStore.invalidateImplicitSkillSnapshot(activeSession);
+        this.slimToolNamesBySession.delete(activeSession.id);
+      }
       const runContextResult = await this.refreshCurrentRunContext(
         activeSession,
         expandedPrompt,
@@ -2377,6 +2350,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       const currentRunContext = runContextResult.context;
       const activeSkills = currentRunContext.skills;
+      // 会话冻结的 slim 工具集：首轮请求确定后跨轮复用，保证 tools schema 前缀稳定
+      const slimToolNames = this.slimToolNamesBySession.get(activeSession.id)
+        ?? getAgentToolNamesForPrompt(expandedPrompt, getConfiguredSlimToolModeEnabled());
+      this.slimToolNamesBySession.set(activeSession.id, slimToolNames);
       const now = new Date().toISOString();
       const replacementIndex = replaceMessageId
         ? activeSession.messages.findIndex((message) => message.id === replaceMessageId && message.role === 'user')
@@ -2467,6 +2444,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         contextFiles: this.fileContext.getAll(),
         currentRunContext,
         contextInstructions,
+        slimToolNames,
         history: agentHistory,
         contextCompression: activeSession.contextCompression,
         historyRewriteReason: replaceMessageId ? 'edit_user_prompt' : undefined,

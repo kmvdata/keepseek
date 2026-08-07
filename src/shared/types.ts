@@ -296,6 +296,13 @@ export interface ChatSession {
   title: string;
   messages: ChatMessage[];
   activeSkillIds?: string[];
+  /**
+   * 会话内冻结的 implicit skill 激活结果（仅存 id 引用，不复制内容）。
+   * 首个真实用户请求确定后写入；后续轮次不再随 prompt 波动重新匹配，
+   * 保证 Skills 上下文块字节稳定（system 段前缀缓存可命中）。
+   * 显式使用/移除 Skill、Skill 列表刷新时失效并重新计算。
+   */
+  frozenImplicitSkillIds?: string[];
   contextCompression?: ContextCompressionState;
   /**
    * 持久化的稳定上下文块（AGENTS.md / Skills / Legacy Memory / Context Files 的
@@ -673,6 +680,12 @@ export interface AgentRequest {
   currentRunContext?: CurrentRunContext;
   /** 持久化的稳定上下文块；跨轮字节不变时由调用方原样复用 */
   contextInstructions?: string;
+  /**
+   * 会话冻结的 slim 工具集（工具名列表）：首轮请求确定后跨轮复用，
+   * 避免工具 schema 随每轮 prompt 变化导致 tools 段前缀失效。
+   * 未提供时按 prompt 现算。
+   */
+  slimToolNames?: string[];
   history: ChatMessage[];
   contextCompression?: ContextCompressionState;
   historyRewriteReason?: string;

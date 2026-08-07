@@ -8,6 +8,7 @@ import {
   GET_DOCUMENT_SYMBOLS_TOOL_NAME,
   GET_WORKSPACE_SYMBOLS_TOOL_NAME,
   GIT_CREATE_PATCH_TOOL_NAME,
+  GIT_STATUS_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME,
@@ -261,3 +262,15 @@ function createContextFile(label: string, content: string): ContextFile {
     source: 'workspace'
   };
 }
+
+test('slim tool set varies with prompt keywords, so it must freeze per session', () => {
+  const plain = getAgentToolNamesForPrompt('Summarize this code.', true);
+  const git = getAgentToolNamesForPrompt('Show git status and the current diff.', true);
+  assert.ok(!plain.includes(GIT_STATUS_TOOL_NAME));
+  assert.ok(git.includes(GIT_STATUS_TOOL_NAME));
+  // 冻结后：同一工具集生成的 schema 跨轮稳定（按名排序、内容一致）
+  const first = getAgentTools({ toolNames: git });
+  const second = getAgentTools({ toolNames: git });
+  assert.deepEqual(first.map((tool) => tool.function.name), second.map((tool) => tool.function.name));
+  assert.deepEqual(first, second);
+});

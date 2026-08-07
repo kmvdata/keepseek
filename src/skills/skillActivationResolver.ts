@@ -28,6 +28,11 @@ export interface SkillActivationResolverInput {
   workspaceDefaultSkillIds?: readonly string[];
   workspaceTrusted: boolean;
   maxImplicitSkills: number;
+  /**
+   * 会话冻结的 implicit skill id 集合：提供后跳过 prompt 关键词匹配，
+   * 只按这些 id 激活（跨轮字节稳定）；不提供时按当前 prompt 确定性匹配。
+   */
+  implicitSkillIds?: readonly string[];
 }
 
 interface RankedCandidate extends SkillActivationDecision {
@@ -50,6 +55,10 @@ export class SkillActivationResolver {
     this.addRequestedCandidates(candidates, claimedIds, skipped, byId, input.workspaceDefaultSkillIds, 'workspace-default', input);
 
     const implicitCandidates: RankedCandidate[] = [];
+    // 区分"未冻结"（undefined → 按 prompt 匹配）与"冻结为空集"（[] → 不激活任何 implicit）
+    const frozenImplicitIds = input.implicitSkillIds !== undefined
+      ? new Set(uniqueIds(input.implicitSkillIds))
+      : undefined;
     input.manifests.forEach((manifest, index) => {
       if (claimedIds.has(manifest.id)) {
         return;
@@ -60,6 +69,15 @@ export class SkillActivationResolver {
       }
       if (!manifest.allowImplicit) {
         skipped.push(createSkip(manifest, 'allow_implicit_false'));
+        return;
+      }
+      if (frozenImplicitIds) {
+        // 会话冻结路径：不按当前 prompt 重新匹配，只激活快照中的 id
+        if (!frozenImplicitIds.has(manifest.id)) {
+          skipped.push(createSkip(manifest, 'not_matched'));
+          return;
+        }
+        implicitCandidates.push(createCandidate(manifest, index, 'implicit', 'Frozen from the first user request of this chat session.'));
         return;
       }
       const match = scoreImplicitMatch(manifest, input.prompt);

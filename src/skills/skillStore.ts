@@ -166,6 +166,10 @@ export class SkillStore {
     explicitSkillIds?: readonly string[];
     maxImplicitSkills?: number;
   }): Promise<ActiveSkillLoadResult> {
+    const hasFrozenImplicitSnapshot = Array.isArray(input.session.frozenImplicitSkillIds);
+    const frozenImplicitSkillIds = hasFrozenImplicitSnapshot
+      ? normalizeFrozenImplicitSkillIds(input.session.frozenImplicitSkillIds)
+      : [];
     const activation = this.activationResolver.resolve({
       manifests: this.manifests,
       prompt: input.prompt,
@@ -173,8 +177,23 @@ export class SkillStore {
       sessionSkillIds: this.getSessionActiveSkillIds(input.session),
       workspaceDefaultSkillIds: this.getWorkspaceDefaultSkillIds(),
       workspaceTrusted: vscode.workspace.isTrusted,
-      maxImplicitSkills: input.maxImplicitSkills ?? getConfiguredMaxImplicitSkills()
+      maxImplicitSkills: input.maxImplicitSkills ?? getConfiguredMaxImplicitSkills(),
+      implicitSkillIds: hasFrozenImplicitSnapshot ? frozenImplicitSkillIds : undefined
     });
+    // 会话冻结：首个真实用户请求确定 implicit 集合后写回快照（空集也冻结），
+    // 后续轮次不再随 prompt 波动。prompt 为空（预加载/刷新）时不写回。
+    if (!hasFrozenImplicitSnapshot && input.prompt.trim()) {
+      input.session.frozenImplicitSkillIds = activation.activated
+        .filter((decision) => decision.activation.source === 'implicit')
+        .map((decision) => decision.manifest.id);
+    } else if (frozenImplicitSkillIds.length) {
+      // 惰性清理：快照中的 id 已失效（manifest 被禁用/移除）时收缩快照
+      const validIds = activation.activated.map((decision) => decision.manifest.id);
+      const keptIds = frozenImplicitSkillIds.filter((id) => validIds.includes(id));
+      if (keptIds.length !== frozenImplicitSkillIds.length) {
+        input.session.frozenImplicitSkillIds = keptIds.length ? keptIds : undefined;
+      }
+    }
     const skills: ActivatedSkill[] = [];
     const failures: ActiveSkillLoadResult['failures'] = [];
     for (const decision of activation.activated) {
@@ -211,6 +230,16 @@ export class SkillStore {
     this.cachedActiveSkills.set(manifest.id, skill);
     this.activeSkillLoadErrors.delete(manifest.id);
     return skill;
+  }
+
+  /**
+   * 显式使用/移除 Skill、Skill 列表刷新后调用：清除会话内冻结的 implicit
+   * 集合，下次真实请求时重新按 prompt 匹配。
+   */
+  public invalidateImplicitSkillSnapshot(session: ChatSession): void {
+    if (session.frozenImplicitSkillIds?.length) {
+      delete session.frozenImplicitSkillIds;
+    }
   }
 
   private getSessionActiveSkillIds(session: ChatSession): string[] {
@@ -276,4 +305,11 @@ export class SkillStore {
       workspaceDefaultSkillRefs: Object.fromEntries(this.workspaceDefaultSkillRefs)
     } satisfies StoredSkillState);
   }
+}
+
+function normalizeFrozenImplicitSkillIds(value: string[] | undefined): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return Array.from(new Set(value.filter((id): id is string => typeof id === 'string' && Boolean(id.trim()))));
 }

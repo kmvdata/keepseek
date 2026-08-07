@@ -521,7 +521,7 @@ export class AgentRunner {
       type: 'agent_messages_initialized',
       messages: formatMessagesForTrace(messages, trace.includesPayload('request'))
     });
-    const toolNames = getAgentToolNamesForPrompt(request.prompt, getConfiguredSlimToolModeEnabled());
+    const toolNames = request.slimToolNames ?? getAgentToolNamesForPrompt(request.prompt, getConfiguredSlimToolModeEnabled());
     const tools = getAgentTools({ toolNames });
     promptCacheDiagnostics = this.createPromptCacheDiagnostics({
       request,
@@ -556,7 +556,8 @@ export class AgentRunner {
         prompt: request.prompt,
         includeTools: maxIterations > 0,
         outputReserveTokens,
-        safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+        safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
+        slimToolNames: request.slimToolNames
       }).breakdown
     };
     const emitUsageEstimate = (toolsForNextRequest: DeepSeekFunctionTool[]) => {

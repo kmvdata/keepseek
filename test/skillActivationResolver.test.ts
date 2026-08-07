@@ -205,3 +205,83 @@ function session(id: string): ChatSession {
     isFavorite: false
   };
 }
+
+test('frozen implicitSkillIds activate regardless of the current prompt keywords', () => {
+  const frozen = manifest('frozen-review', 'review-flow', 'agentsWorkspace', true);
+  const other = manifest('other-flow', 'other-flow', 'agentsWorkspace', true);
+  const result = new SkillActivationResolver().resolve({
+    manifests: [other, frozen],
+    prompt: 'Something unrelated to any skill.',
+    implicitSkillIds: [frozen.id],
+    workspaceTrusted: true,
+    maxImplicitSkills: 3
+  });
+
+  assert.deepEqual(result.activated.map((item) => item.manifest.id), [frozen.id]);
+  assert.equal(result.activated[0]?.activation.source, 'implicit');
+  assert.match(result.activated[0]?.activation.reason ?? '', /Frozen/u);
+  assert.equal(result.skipped.find((item) => item.id === other.id)?.reason, 'not_matched');
+});
+
+test('frozen implicit activation still respects allowImplicit false', () => {
+  const manual = manifest('manual-frozen', 'review-flow', 'agentsWorkspace', false);
+  const result = new SkillActivationResolver().resolve({
+    manifests: [manual],
+    prompt: 'anything',
+    implicitSkillIds: [manual.id],
+    workspaceTrusted: true,
+    maxImplicitSkills: 3
+  });
+
+  assert.deepEqual(result.activated, []);
+  assert.equal(result.skipped[0]?.reason, 'allow_implicit_false');
+});
+
+test('implicit activation freezes per session and ignores later prompt changes', async () => {
+  const implicit = manifest('auto-freeze', 'freeze-flow', 'agentsWorkspace', true);
+  const memento = new MemoryMemento();
+  const discovery = { discover: async () => [implicit] } as SkillDiscovery;
+  const loader = {
+    loadSkill: async (item: SkillManifest) => toActivatedSkill(item, '# Freeze flow')
+  } as SkillLoader;
+  const store = new SkillStore(memento, discovery, loader, new SkillActivationResolver(), () => 'workspace-one');
+  await store.refresh();
+
+  const chatSession = session('freeze-session');
+  const first = await store.resolveAndLoadSkills({ session: chatSession, prompt: 'Please run freeze-flow.' });
+  assert.equal(first.skills[0]?.id, implicit.id);
+  assert.equal(first.skills[0]?.activation?.source, 'implicit');
+  assert.deepEqual(chatSession.frozenImplicitSkillIds, [implicit.id]);
+
+  // 后续 prompt 不再包含关键词，冻结集合仍激活
+  const second = await store.resolveAndLoadSkills({ session: chatSession, prompt: 'Completely unrelated request.' });
+  assert.equal(second.skills[0]?.id, implicit.id);
+  assert.equal(second.skills[0]?.activation?.source, 'implicit');
+
+  // 显式失效后按新 prompt 重新匹配
+  store.invalidateImplicitSkillSnapshot(chatSession);
+  assert.equal(chatSession.frozenImplicitSkillIds, undefined);
+  const third = await store.resolveAndLoadSkills({ session: chatSession, prompt: 'Completely unrelated request.' });
+  assert.deepEqual(third.skills, []);
+});
+
+test('implicit activation freezes the empty set too (no late activation on later prompts)', async () => {
+  const implicit = manifest('late-freeze', 'late-flow', 'agentsWorkspace', true);
+  const memento = new MemoryMemento();
+  const discovery = { discover: async () => [implicit] } as SkillDiscovery;
+  const loader = {
+    loadSkill: async (item: SkillManifest) => toActivatedSkill(item, '# Late flow')
+  } as SkillLoader;
+  const store = new SkillStore(memento, discovery, loader, new SkillActivationResolver(), () => 'workspace-one');
+  await store.refresh();
+
+  const chatSession = session('empty-freeze-session');
+  const first = await store.resolveAndLoadSkills({ session: chatSession, prompt: 'Unrelated first request.' });
+  assert.deepEqual(first.skills, []);
+  assert.deepEqual(chatSession.frozenImplicitSkillIds, []);
+
+  // 后续 prompt 命中关键词，但空集已冻结 → 不突然激活（避免 contextInstructions 重写）
+  const second = await store.resolveAndLoadSkills({ session: chatSession, prompt: 'Please run late-flow.' });
+  assert.deepEqual(second.skills, []);
+  assert.deepEqual(chatSession.frozenImplicitSkillIds, []);
+});

@@ -5,7 +5,14 @@ import {
   formatCurrentRunContextForAgent,
   getAgentSystemPrompt
 } from '../src/agent/protocol';
-import type { AgentToolCall, AgentToolRound, ChatMessage, ContextFile } from '../src/shared/types';
+import type {
+  ActivatedSkill,
+  AgentToolCall,
+  AgentToolRound,
+  ChatMessage,
+  ContextFile,
+  CurrentRunContext
+} from '../src/shared/types';
 
 // 缓存契约测试：请求前缀（system + contextInstructions + 历史消息）必须跨轮逐字节稳定。
 // 这些断言是 DeepSeek 前缀缓存命中的直接守护：任何“包装版 vs 历史版”不一致都会让
@@ -218,4 +225,71 @@ test('system prompt 不随 contextInstructions 或历史变化（base-first 分�
 
   assert.equal(withHistory[0]?.role, 'system');
   assert.equal(withHistory[0]?.content, baseline);
+});
+
+test('会话冻结后（skills 块不变）轮次请求序列保持字节前缀', () => {
+  // 模拟 frozenImplicitSkillIds 生效后的稳定 skills 列表：后续 prompt 不再含关键词也不变
+  const skill: ActivatedSkill = {
+    id: 'auto-review',
+    name: 'review-flow',
+    source: 'agentsWorkspace',
+    rootUri: 'file:///workspace/.agents/plugins/review',
+    skillUri: 'file:///workspace/.agents/plugins/review/SKILL.md',
+    content: '# Review flow\n\nRun the review workflow.',
+    activation: { source: 'implicit', reason: 'Frozen from the first user request of this chat session.' }
+  };
+  const runContext: CurrentRunContext = {
+    projectInstructions: [],
+    skills: [skill],
+    metadata: {
+      precedence: [],
+      beforeDeduplicationCount: 1,
+      afterDeduplicationCount: 1,
+      totalCharacterCount: skill.content.length,
+      totalTokenEstimate: 12,
+      truncated: false,
+      sources: [{
+        id: skill.id,
+        kind: 'skill',
+        label: skill.name,
+        uri: skill.skillUri,
+        source: 'agentsWorkspace',
+        activation: 'implicit',
+        characterCount: skill.content.length,
+        tokenEstimate: 12,
+        contentHash: 'skill-content-hash',
+        truncated: false,
+        scriptsPresent: false
+      }],
+      discarded: [],
+      possibleConflicts: []
+    }
+  };
+  const contextInstructions = formatCurrentRunContextForAgent({
+    contextFiles: [],
+    currentRunContext: runContext,
+    language: 'en'
+  });
+
+  const user1 = userMessage('u1', 'Please run review-flow.');
+  const assistant1 = assistantMessage('a1', 'Reviewing now.');
+  const round1 = buildInitialAgentMessages({
+    prompt: 'Please run review-flow.',
+    contextFiles: [],
+    contextInstructions,
+    history: [],
+    language: 'en'
+  });
+  const round2 = buildInitialAgentMessages({
+    prompt: 'Now fix the findings.',
+    contextFiles: [],
+    contextInstructions,
+    history: [user1, assistant1],
+    language: 'en'
+  });
+
+  // 冻结语义：skills 块在会话内字节稳定（即使后续 prompt 不再含关键词）
+  assert.equal(round1[1]?.content, round2[1]?.content);
+  // append-only：第一轮请求序列是第二轮请求序列的字节前缀
+  assert.equal(JSON.stringify(round1), JSON.stringify(round2.slice(0, round1.length)));
 });

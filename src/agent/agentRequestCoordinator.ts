@@ -21,6 +21,7 @@ export interface AgentRequestCoordinatorInput {
   contextFiles: ContextFile[];
   currentRunContext?: AgentRequest['currentRunContext'];
   contextInstructions?: AgentRequest['contextInstructions'];
+  slimToolNames?: AgentRequest['slimToolNames'];
   history: AgentRequest['history'];
   contextCompression: AgentRequest['contextCompression'];
   historyRewriteReason?: string;
@@ -80,6 +81,7 @@ export class AgentRequestCoordinator {
           }
         : undefined,
       contextInstructions: input.contextInstructions,
+      slimToolNames: input.slimToolNames,
       history: input.history.map(cloneChatMessage),
       contextCompression: cloneContextCompressionState(input.contextCompression),
       historyRewriteReason: input.historyRewriteReason,
