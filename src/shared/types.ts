@@ -116,6 +116,8 @@ export interface DeepSeekBalanceState {
 export interface PromptCacheDiagnostics {
   systemPromptHash?: string;
   toolsSchemaHash?: string;
+  /** 历史消息（非 system 段）序列的指纹；变化即该段之后的前缀缓存全部失效 */
+  historyPrefixHash?: string;
   modelId?: string;
   historyCompacted?: boolean;
   historyRewriteReason?: string;
@@ -142,6 +144,38 @@ export interface ChatMessage {
   contextMeta?: ChatMessageContextMeta;
   usedSkills?: ChatMessageSkill[];
   runDetails?: RunDetailsSummary;
+  /**
+   * 本 assistant 消息对应的工具轮序列（跨轮重建时逐字节还原）。
+   * 每个 round = 一条带 tool_calls 的 assistant 消息 + 其后的 tool 结果消息。
+   * 只对 native 工具协议收集；DSML 兑底路径不收集。
+   */
+  toolRounds?: AgentToolRound[];
+}
+
+export interface AgentToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export interface AgentToolResult {
+  toolCallId: string;
+  content: string;
+}
+
+/**
+ * 一个工具轮的原样字节快照，用于跨轮重建与上一轮请求序列完全一致。
+ */
+export interface AgentToolRound {
+  /** 工具轮 assistant 消息的 content 原样（null 表示原请求中为 null） */
+  assistantContent: string | null;
+  /** 工具轮 assistant 消息的 reasoning_content 原样 */
+  reasoningContent: string | null;
+  toolCalls: AgentToolCall[];
+  toolResults: AgentToolResult[];
 }
 
 export interface ChatMessageSkill {
@@ -263,6 +297,12 @@ export interface ChatSession {
   messages: ChatMessage[];
   activeSkillIds?: string[];
   contextCompression?: ContextCompressionState;
+  /**
+   * 持久化的稳定上下文块（AGENTS.md / Skills / Legacy Memory / Context Files 的
+   * 格式化结果）。字节不变时跨轮复用，保证 system 段前缀稳定；变化时整体重写
+   * （一次可接受的缓存代价）。
+   */
+  contextInstructions?: string;
   contextUsage?: ContextUsageEstimate;
   usageStats?: SessionUsageStats;
   lastTurnUsage?: TurnUsageStats;
@@ -631,6 +671,8 @@ export interface AgentRequest {
   settings: AgentSettings;
   contextFiles: ContextFile[];
   currentRunContext?: CurrentRunContext;
+  /** 持久化的稳定上下文块；跨轮字节不变时由调用方原样复用 */
+  contextInstructions?: string;
   history: ChatMessage[];
   contextCompression?: ContextCompressionState;
   historyRewriteReason?: string;
@@ -673,6 +715,8 @@ export interface AgentResponse {
   changeSet?: ChangeSet;
   usage?: TurnUsageStats;
   promptCacheDiagnostics?: PromptCacheDiagnostics;
+  /** 本 run 内工具轮的原样字节快照，调用方持久化到 assistant 消息后跨轮还原 */
+  toolRounds?: AgentToolRound[];
   traceLog?: AgentTraceLogInfo;
   runDetails: RunDetailsSummary;
 }

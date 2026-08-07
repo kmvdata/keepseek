@@ -6,6 +6,8 @@ import {
   AgentRequest,
   AgentResponse,
   AgentRunCallbacks,
+  AgentToolResult,
+  AgentToolRound,
   ContextUsageEstimate,
   DraftEdit,
   PromptCacheDiagnostics,
@@ -264,6 +266,9 @@ export class AgentRunner {
     );
     const runAuthorizationPolicy = this.toolAuthorization.createRunPolicy(trace.runId);
     const toolResultLedger: ToolResultLedgerEntry[] = [];
+    // 本 run 内 native 工具轮的原样字节快照（assistant tool_calls + tool 结果），
+    // 由调用方持久化到 assistant 消息，跨轮重建时逐字节还原。
+    const toolRounds: AgentToolRound[] = [];
     const usagePricing = getConfiguredModelUsagePricing(request.model.id);
     const upstreamUsageTotals: UpstreamUsageTotals = {
       requestCount: 0,
@@ -371,7 +376,8 @@ export class AgentRunner {
         repairLoop: repairState,
         changeSet,
         usage: response.usage ?? this.toTurnUsageStats(upstreamUsageTotals, request.model.id),
-        promptCacheDiagnostics: response.promptCacheDiagnostics ?? promptCacheDiagnostics
+        promptCacheDiagnostics: response.promptCacheDiagnostics ?? promptCacheDiagnostics,
+        toolRounds: toolRounds.length ? toolRounds : undefined
       };
       trace.record({
         type: 'run_finish',
@@ -971,6 +977,7 @@ export class AgentRunner {
         }
         emitUsageEstimate(toolsForTurn);
 
+        const roundToolResults: AgentToolResult[] = [];
         for (const toolCall of toolCalls) {
           const toolResult = await executeToolCall(toolCall);
           const toolMessage: DeepSeekMessage = {
@@ -979,6 +986,10 @@ export class AgentRunner {
             content: toolResult
           };
           messages.push(toolMessage);
+          roundToolResults.push({
+            toolCallId: toolCall.id,
+            content: toolResult
+          });
           trace.record({
             type: 'agent_message_appended',
             reason: 'native_tool_result',
@@ -992,6 +1003,13 @@ export class AgentRunner {
             toolName: toolCall.function.name
           });
         }
+        // 保存本工具轮的原样字节快照，供跨轮重建（toolRounds 展开 == 本轮发送序列）。
+        toolRounds.push({
+          assistantContent: assistantToolCallMessage.content ?? null,
+          reasoningContent: assistantToolCallMessage.reasoning_content ?? null,
+          toolCalls,
+          toolResults: roundToolResults
+        });
       } else {
         if (assistant.content?.trim()) {
           const assistantTextMessage: DeepSeekMessage = {
@@ -1471,11 +1489,26 @@ export class AgentRunner {
     tools: DeepSeekFunctionTool[];
     historyCompacted: boolean;
   }): PromptCacheDiagnostics {
-    const systemPrompt = input.messages.find((message) => message.role === 'system')?.content ?? '';
+    const systemMessages = input.messages.filter((message) => message.role === 'system');
+    const systemPrompt = systemMessages.map((message) => message.content ?? '').join('\n');
     const toolsSchema = JSON.stringify(input.tools);
+    // 历史前缀指纹：system 段之后的所有消息（含 tool_calls / reasoning_content）。
+    // 该指纹跨轮不变即前缀缓存可命中；变化则归因为 history_prefix_changed。
+    const historyPrefixHash = hashStableText(JSON.stringify(
+      input.messages
+        .filter((message) => message.role !== 'system')
+        .map((message) => ({
+          role: message.role,
+          content: message.content ?? null,
+          reasoning_content: message.reasoning_content ?? null,
+          tool_calls: message.tool_calls ?? null,
+          tool_call_id: message.tool_call_id ?? null
+        }))
+    ));
     return {
       systemPromptHash: hashStableText(systemPrompt),
       toolsSchemaHash: hashStableText(toolsSchema),
+      historyPrefixHash,
       modelId: input.request.model.id,
       historyCompacted: input.historyCompacted,
       historyRewriteReason: input.request.historyRewriteReason,

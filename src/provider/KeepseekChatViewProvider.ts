@@ -5,6 +5,7 @@ import { AgentRunAbortedError, AgentRunner } from '../agent/runner';
 import { AgentRequestCoordinator, type BackgroundContextCompressionRefreshUpdate } from '../agent/agentRequestCoordinator';
 import type { HistoryCompressionRefreshResult } from '../agent/historyCompressor';
 import { createProtectedContextMeta } from '../agent/historyProjection';
+import { formatCurrentRunContextForAgent } from '../agent/protocol';
 import { FileContextStore } from '../context/fileContextStore';
 import { SafeFileEditor } from '../edits/safeFileEditor';
 import {
@@ -1064,6 +1065,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (input.previousDiagnostics?.toolsSchemaHash && input.previousDiagnostics.toolsSchemaHash !== input.diagnostics.toolsSchemaHash) {
       reasons.push('tools_schema_changed');
+    }
+    if (input.previousDiagnostics?.historyPrefixHash && input.previousDiagnostics.historyPrefixHash !== input.diagnostics.historyPrefixHash) {
+      reasons.push('history_prefix_changed');
     }
     if (input.previousDiagnostics?.modelId && input.previousDiagnostics.modelId !== input.diagnostics.modelId) {
       reasons.push('model_changed');
@@ -2371,6 +2375,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         ? activeSession.messages.findIndex((message) => message.id === replaceMessageId && message.role === 'user')
         : -1;
 
+      // 稳定上下文块：字节不变时跨轮复用（system 段前缀稳定），只有
+      // AGENTS.md/Skills/Legacy Memory/Context Files 真正变化才整体重写。
+      const contextInstructions = formatCurrentRunContextForAgent({
+        contextFiles: this.fileContext.getAll(),
+        currentRunContext,
+        language: this.language
+      });
+      if (activeSession.contextInstructions !== contextInstructions) {
+        activeSession.contextInstructions = contextInstructions;
+      }
+
       if (replaceMessageId) {
         if (replacementIndex < 0) {
           return;
@@ -2444,6 +2459,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         settings: this.agentSettings,
         contextFiles: this.fileContext.getAll(),
         currentRunContext,
+        contextInstructions,
         history: agentHistory,
         contextCompression: activeSession.contextCompression,
         historyRewriteReason: replaceMessageId ? 'edit_user_prompt' : undefined,
@@ -2554,6 +2570,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         assistantMessage.reasoningContent = response.reasoningContent;
         if (response.draftEdits.length) {
           assistantMessage.contextMeta = createProtectedContextMeta('draft_edit_result');
+        }
+        // 持久化工具轮原样字节，跨轮重建时逐字节还原（缓存前缀稳定）。
+        if (response.toolRounds?.length) {
+          assistantMessage.toolRounds = response.toolRounds;
         }
         delete assistantMessage.isStreaming;
         assistantMessage.runDetails = response.runDetails;

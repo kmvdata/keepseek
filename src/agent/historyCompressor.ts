@@ -288,6 +288,13 @@ export class HistoryCompressor {
       return false;
     }
 
+    // C3 失败自锁：上次摘要刷新失败时暂停自动刷新，避免在缓存已受伤的情况下
+    // 反复触发可能再次失败的刷新（每次成功刷新都会重写前缀）。只有接近/超过
+    // 强制上限时才允许重试，保护上下文窗口。
+    if (input.input.session.contextCompression?.lastFailureReason && ratio < input.settings.forceRatio) {
+      return false;
+    }
+
     if (input.hasSummary && ratio < input.settings.forceRatio) {
       return input.newCompressibleMessages.length >= Math.max(
         SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD,

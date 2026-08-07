@@ -20,6 +20,7 @@ export interface AgentRequestCoordinatorInput {
   settings: AgentSettings;
   contextFiles: ContextFile[];
   currentRunContext?: AgentRequest['currentRunContext'];
+  contextInstructions?: AgentRequest['contextInstructions'];
   history: AgentRequest['history'];
   contextCompression: AgentRequest['contextCompression'];
   historyRewriteReason?: string;
@@ -78,6 +79,7 @@ export class AgentRequestCoordinator {
             }
           }
         : undefined,
+      contextInstructions: input.contextInstructions,
       history: input.history.map(cloneChatMessage),
       contextCompression: cloneContextCompressionState(input.contextCompression),
       historyRewriteReason: input.historyRewriteReason,

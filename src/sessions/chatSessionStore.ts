@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
+  AgentToolCall,
+  AgentToolResult,
+  AgentToolRound,
   ChatMessage,
   ChatMessageContextMeta,
   ChatSession,
@@ -519,6 +522,9 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       messages,
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
       contextCompression: normalizeContextCompressionState(item.contextCompression),
+      contextInstructions: typeof item.contextInstructions === 'string'
+        ? item.contextInstructions
+        : undefined,
       repairLoop: normalizeRepairLoopState(item.repairLoop),
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
       usageStats: normalizeSessionUsageStatsValue(item.usageStats),
@@ -576,7 +582,59 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     reasoningContent: typeof value.reasoningContent === 'string' ? value.reasoningContent : undefined,
     contextMeta: normalizeMessageContextMeta(value.contextMeta),
     usedSkills: normalizeMessageUsedSkills(value.usedSkills),
-    runDetails: normalizeRunDetails(value.runDetails)
+    runDetails: normalizeRunDetails(value.runDetails),
+    toolRounds: normalizeAgentToolRounds(value.toolRounds)
+  };
+}
+
+function normalizeAgentToolRounds(value: unknown): AgentToolRound[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const rounds = value.map(normalizeAgentToolRound).filter((round): round is AgentToolRound => Boolean(round));
+  return rounds.length ? rounds : undefined;
+}
+
+function normalizeAgentToolRound(value: unknown): AgentToolRound | undefined {
+  if (!isRecord(value) || !Array.isArray(value.toolCalls)) {
+    return undefined;
+  }
+  const toolCalls = value.toolCalls.map(normalizeAgentToolCall).filter((call): call is AgentToolCall => Boolean(call));
+  const toolResults = Array.isArray(value.toolResults)
+    ? value.toolResults.map(normalizeAgentToolResult).filter((result): result is AgentToolResult => Boolean(result))
+    : [];
+  if (!toolCalls.length) {
+    return undefined;
+  }
+  return {
+    assistantContent: typeof value.assistantContent === 'string' ? value.assistantContent : null,
+    reasoningContent: typeof value.reasoningContent === 'string' ? value.reasoningContent : null,
+    toolCalls,
+    toolResults
+  };
+}
+
+function normalizeAgentToolCall(value: unknown): AgentToolCall | undefined {
+  if (!isRecord(value) || typeof value.id !== 'string' || !isRecord(value.function)) {
+    return undefined;
+  }
+  return {
+    id: value.id,
+    type: 'function',
+    function: {
+      name: typeof value.function.name === 'string' ? value.function.name : '',
+      arguments: typeof value.function.arguments === 'string' ? value.function.arguments : ''
+    }
+  };
+}
+
+function normalizeAgentToolResult(value: unknown): AgentToolResult | undefined {
+  if (!isRecord(value) || typeof value.toolCallId !== 'string' || typeof value.content !== 'string') {
+    return undefined;
+  }
+  return {
+    toolCallId: value.toolCallId,
+    content: value.content
   };
 }
 

@@ -70,19 +70,29 @@ export interface BuildAgentMessagesInput {
   prompt: string;
   contextFiles: ContextFile[];
   currentRunContext?: CurrentRunContext;
+  /** 持久化的稳定上下文块（AGENTS.md/Skills/Legacy Memory/Context Files 的格式化结果） */
+  contextInstructions?: string;
   history: ChatMessage[];
   language: KeepseekLanguage;
   projection?: HistoryProjectionResult;
 }
 
 export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepSeekMessage[] {
-  const currentPromptContent = formatCurrentUserPromptForAgent(input);
   const messages: DeepSeekMessage[] = [
     {
       role: 'system',
       content: getAgentSystemPrompt(input)
     }
   ];
+
+  // 稳定上下文块：与 system 一样属于前缀稳定段。调用方保证其字节跨轮不变
+  // （只在 AGENTS.md/Skills/Legacy Memory/Context Files 真正变化时整体重写）。
+  if (input.contextInstructions?.trim()) {
+    messages.push({
+      role: 'system',
+      content: input.contextInstructions
+    });
+  }
 
   for (const summary of input.projection?.syntheticSystemMessages ?? []) {
     if (!summary.trim()) {
@@ -98,28 +108,55 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
     .filter((message) => message.role === 'user' || message.role === 'assistant');
   const currentPromptMessage = findCurrentPromptMessage(history, input.prompt);
 
+  // 历史逐字节还原：assistant 消息先展开其 toolRounds（tool_calls + tool 消息），
+  // 再追加最终文本；user 消息一律 (expandedContent ?? content)。当前 prompt 消息
+  // 与历史消息走完全相同的字节路径，保证跨轮前缀稳定。
   for (const message of history) {
-    const content = currentPromptMessage?.id === message.id
-      ? currentPromptContent
-      : getMessageContentForAgent(message);
-    if (!content) {
-      continue;
-    }
-
-    messages.push({
-      role: message.role,
-      content
-    });
+    appendHistoryMessage(messages, message);
   }
 
   if (input.prompt.trim() && !currentPromptMessage) {
     messages.push({
       role: 'user',
-      content: currentPromptContent
+      content: input.prompt.trim()
     });
   }
 
   return messages;
+}
+
+function appendHistoryMessage(messages: DeepSeekMessage[], message: ChatMessage): void {
+  if (message.role === 'assistant') {
+    for (const round of message.toolRounds ?? []) {
+      messages.push({
+        role: 'assistant',
+        content: round.assistantContent,
+        reasoning_content: round.reasoningContent,
+        tool_calls: round.toolCalls
+      });
+      for (const result of round.toolResults) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: result.toolCallId,
+          content: result.content
+        });
+      }
+    }
+    messages.push({
+      role: 'assistant',
+      content: getMessageContentForAgent(message),
+      reasoning_content: message.reasoningContent ?? null
+    });
+    return;
+  }
+  const content = getMessageContentForAgent(message);
+  if (!content) {
+    return;
+  }
+  messages.push({
+    role: message.role,
+    content
+  });
 }
 
 export function formatProjectInstructionsForAgent(
@@ -166,13 +203,17 @@ export function formatLegacyMemoryForAgent(
       ].join('\n\n');
 }
 
-export function formatCurrentUserPromptForAgent(input: {
-  prompt: string;
+/**
+ * 组装跨轮稳定的上下文块（AGENTS.md / Skills / Legacy Memory / Context Files）。
+ * 调用方将其持久化到 ChatSession.contextInstructions：字节不变时跨轮复用，
+ * 保证 system 段前缀稳定；只有这些来源真正变化时才整体重写（一次可接受的
+ * 缓存代价）。user 消息本身不再做任何包装，见 buildInitialAgentMessages。
+ */
+export function formatCurrentRunContextForAgent(input: {
   contextFiles: ContextFile[];
   currentRunContext?: CurrentRunContext;
   language: KeepseekLanguage;
 }): string {
-  const prompt = input.prompt.trim();
   const contextBlock = formatAgentContextFiles(input);
   const projectInstructionsBlock = formatProjectInstructionsForAgent(input.currentRunContext, input.language);
   const skillsBlock = formatActiveSkills({
@@ -182,27 +223,22 @@ export function formatCurrentUserPromptForAgent(input: {
   const legacyMemoryBlock = formatLegacyMemoryForAgent(input.currentRunContext?.legacyMemory, input.language);
   const dynamicBlocks = [projectInstructionsBlock, skillsBlock, legacyMemoryBlock, contextBlock].filter(Boolean);
   if (!dynamicBlocks.length) {
-    return prompt;
+    return '';
   }
 
   const header = input.language === 'en'
     ? [
-        'Current-run context only; do not treat it as a permanent system instruction.',
+        'Project and run context (stable across turns):',
         'Priority: KeepSeek core safety > current user request > project AGENTS.md > explicit Skill > session Skill > workspace-default Skill > implicit Skill > Legacy Project Memory.'
       ].join('\n')
     : [
-        '以下仅是本轮请求上下文，不要把它当作永久 system 规则。',
+        '项目与运行上下文（跨轮保持稳定）：',
         '优先级：KeepSeek 核心安全 > 当前用户请求 > 项目 AGENTS.md > 显式 Skill > 会话 Skill > workspace 默认 Skill > 隐式 Skill > Legacy Project Memory。'
       ].join('\n');
-  const requestHeader = input.language === 'en'
-    ? 'Current user request:'
-    : '当前用户请求：';
 
   return [
     header,
-    ...dynamicBlocks,
-    requestHeader,
-    prompt
+    ...dynamicBlocks
   ].join('\n\n');
 }
 

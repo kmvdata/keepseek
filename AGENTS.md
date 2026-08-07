@@ -289,6 +289,25 @@ Skill 自动激活不得额外调用模型。每轮隐式 Skill 数量和 Skill 
 
 Legacy `memory.json` 在用户确认迁移完成前可最低优先级只读注入。迁移完成只记录 workspace 状态，不删除源文件；迁移目标 `AGENTS.md` / `SKILL.md` 只能通过 ChangeSet/DraftEdit 生成，用户必须查看 Diff 并 Apply。普通聊天和设置不得恢复 Project Memory 新增/编辑入口，也不得使用 `window.prompt()`、`window.alert()` 或 `window.confirm()`。
 
+## 缓存命中率是产品行为（第一位）
+
+DeepSeek 前缀缓存从请求第 0 个 token 起逐字节匹配，命中部分按折扣计费。缓存命中率直接决定用户的成本与延迟，是**第一位维护的产品行为**，优先级高于"实现简洁性"，与安全规则同级。任何改动若可能改变请求前缀字节，必须同时证明前缀仍然稳定，或明确标注这是可接受的缓存代价。
+
+请求前缀契约（从第 0 个 token 起不可变）：
+
+- **system 段**：`getAgentSystemPrompt()` 保持纯静态；`contextInstructions`（AGENTS.md / Skills / Legacy Memory / Context Files 的格式化结果）持久化在 `ChatSession.contextInstructions`，字节变化即整体重写（一次可接受的缓存代价），未变化时必须逐字节复用，禁止每轮重新生成。
+- **user 消息**：所有轮次一律以 `(expandedContent ?? content).trim()` 发送，禁止在发送时再做任何包装/拼接——"发送字节 == 持久化字节"，跨轮必须一致。
+- **assistant 消息**：工具轮（tool_calls / tool 消息）通过 `ChatMessage.toolRounds` 原样持久化，跨轮重建时逐字节还原；`reasoning_content` 原样保存。
+- **动态内容**（goal、临时指令、后台任务状态等）一律追加在 user 消息尾部（turn tail），绝不改写已发送的历史消息。
+- **历史投影 append-only**：消息进入投影后只追加，不重写、不 trim、不重排；摘要刷新是低频缓存重置点（见下）。
+
+禁止事项：
+
+- 禁止在 `buildInitialAgentMessages` 或任何发送路径中，对同一消息在不同轮次生成不同字节（"包装版 vs 历史版"）。
+- 禁止把时间戳、随机 UUID、绝对路径、激活 reason 等易变内容写进 system 段或历史消息。
+- 禁止在热会话（缓存未冷）中重写历史消息或移除未覆盖消息。
+- 禁止让工具 schema 集合或顺序随每轮 prompt 变化（slim mode 按会话冻结）。
+
 ## 上下文压缩与历史投影
 
 KeepSeek 的模型输入是 projection，不等同于 `session.messages`。不要把摘要插入真实聊天 UI 消息，也不要让 Webview 显示 synthetic summary message。

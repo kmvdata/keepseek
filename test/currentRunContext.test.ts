@@ -7,7 +7,7 @@ import {
 } from '../src/agent/contextUsage';
 import { buildCurrentRunContext } from '../src/agent/currentRunContext';
 import { hashContent } from '../src/agent/projectInstructions';
-import { buildInitialAgentMessages } from '../src/agent/protocol';
+import { buildInitialAgentMessages, formatCurrentRunContextForAgent } from '../src/agent/protocol';
 import { getSupportedDeepSeekV4Models } from '../src/shared/modelProfiles';
 import type { ActivatedSkill, ProjectInstructionContext } from '../src/shared/types';
 
@@ -64,19 +64,25 @@ test('current-run context preserves project, explicit, default, implicit, and Le
     'legacy-memory'
   ]);
 
+  const contextInstructions = formatCurrentRunContextForAgent({
+    contextFiles: [],
+    currentRunContext: context,
+    language: 'en'
+  });
   const messages = buildInitialAgentMessages({
     prompt: 'Current explicit request.',
     contextFiles: [],
-    currentRunContext: context,
+    contextInstructions,
     history: [],
     language: 'en'
   });
-  const current = messages.at(-1)?.content ?? '';
-  assert.ok(current.indexOf('Project architecture rules.') < current.indexOf('Explicit flow.'));
-  assert.ok(current.indexOf('Explicit flow.') < current.indexOf('Default flow.'));
-  assert.ok(current.indexOf('Default flow.') < current.indexOf('Implicit flow.'));
-  assert.ok(current.indexOf('Implicit flow.') < current.indexOf('Legacy fallback.'));
-  assert.ok(current.endsWith('Current explicit request.'));
+  const instructions = messages[1]?.content ?? '';
+  assert.ok(instructions.indexOf('Project architecture rules.') < instructions.indexOf('Explicit flow.'));
+  assert.ok(instructions.indexOf('Explicit flow.') < instructions.indexOf('Default flow.'));
+  assert.ok(instructions.indexOf('Default flow.') < instructions.indexOf('Implicit flow.'));
+  assert.ok(instructions.indexOf('Implicit flow.') < instructions.indexOf('Legacy fallback.'));
+  // user 消息是纯 prompt，动态上下文全部在稳定的 contextInstructions system 消息中
+  assert.equal(messages.at(-1)?.content, 'Current explicit request.');
 });
 
 test('Skill character budget is enforced before AgentRunner consumes current-run context', () => {

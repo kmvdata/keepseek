@@ -12,23 +12,34 @@ import {
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME,
   buildInitialAgentMessages,
+  formatCurrentRunContextForAgent,
   getAgentSystemPrompt,
   getAgentToolNamesForPrompt,
   getAgentTools,
   isDraftEditPreparationTool
 } from '../src/agent/protocol';
-import type { ContextFile } from '../src/shared/types';
+import type { ContextFile, CurrentRunContext } from '../src/shared/types';
 
-test('dynamic context is kept out of the stable system prompt', () => {
+test('dynamic context files live in a stable contextInstructions system message, never in the user message', () => {
+  const firstContextFiles = [createContextFile('one.ts', 'export const one = 1;')];
+  const secondContextFiles = [createContextFile('two.ts', 'export const two = 2;')];
   const first = buildInitialAgentMessages({
     prompt: 'Explain the file.',
-    contextFiles: [createContextFile('one.ts', 'export const one = 1;')],
+    contextFiles: firstContextFiles,
+    contextInstructions: formatCurrentRunContextForAgent({
+      contextFiles: firstContextFiles,
+      language: 'en'
+    }),
     history: [],
     language: 'en'
   });
   const second = buildInitialAgentMessages({
     prompt: 'Explain the file.',
-    contextFiles: [createContextFile('two.ts', 'export const two = 2;')],
+    contextFiles: secondContextFiles,
+    contextInstructions: formatCurrentRunContextForAgent({
+      contextFiles: secondContextFiles,
+      language: 'en'
+    }),
     history: [],
     language: 'en'
   });
@@ -36,11 +47,47 @@ test('dynamic context is kept out of the stable system prompt', () => {
   assert.equal(first[0]?.role, 'system');
   assert.equal(second[0]?.role, 'system');
   assert.equal(first[0]?.content, second[0]?.content);
-  assert.ok(first.at(-1)?.content?.includes('one.ts'));
-  assert.ok(second.at(-1)?.content?.includes('two.ts'));
+  // context files 进入稳定上下文块（第二条 system 消息），而不是 user 消息
+  assert.ok(first[1]?.content?.includes('one.ts'));
+  assert.ok(second[1]?.content?.includes('two.ts'));
+  // user 消息是纯 prompt，不含任何包装，跨轮字节一致
+  assert.equal(first.at(-1)?.content, 'Explain the file.');
+  assert.ok(!first.at(-1)?.content?.includes('one.ts'));
 });
 
-test('project instructions and Skills do not mutate the stable system prefix', () => {
+test('project instructions and Skills live in contextInstructions, keeping the system prompt byte-stable', () => {
+  const dynamicContext: CurrentRunContext = {
+    projectInstructions: [{
+      id: 'root',
+      uri: 'file:///workspace/AGENTS.md',
+      workspaceFolder: 'workspace',
+      content: 'Project rule.',
+      characterCount: 13,
+      tokenEstimate: 4,
+      contentHash: 'hash-project',
+      truncated: false
+    }],
+    skills: [{
+      id: 'review',
+      name: 'review',
+      source: 'agentsWorkspace',
+      rootUri: 'file:///workspace/.agents/skills/review',
+      skillUri: 'file:///workspace/.agents/skills/review/SKILL.md',
+      content: 'Review workflow.',
+      activation: { source: 'explicit', reason: 'Selected.' }
+    }],
+    metadata: {
+      precedence: [],
+      beforeDeduplicationCount: 2,
+      afterDeduplicationCount: 2,
+      totalCharacterCount: 29,
+      totalTokenEstimate: 8,
+      truncated: false,
+      sources: [],
+      discarded: [],
+      possibleConflicts: []
+    }
+  };
   const withoutDynamicContext = buildInitialAgentMessages({
     prompt: 'Inspect.',
     contextFiles: [],
@@ -52,77 +99,57 @@ test('project instructions and Skills do not mutate the stable system prefix', (
     contextFiles: [],
     history: [],
     language: 'en',
-    currentRunContext: {
-      projectInstructions: [{
-        id: 'root',
-        uri: 'file:///workspace/AGENTS.md',
-        workspaceFolder: 'workspace',
-        content: 'Project rule.',
-        characterCount: 13,
-        tokenEstimate: 4,
-        contentHash: 'hash-project',
-        truncated: false
-      }],
-      skills: [{
-        id: 'review',
-        name: 'review',
-        source: 'agentsWorkspace',
-        rootUri: 'file:///workspace/.agents/skills/review',
-        skillUri: 'file:///workspace/.agents/skills/review/SKILL.md',
-        content: 'Review workflow.',
-        activation: { source: 'explicit', reason: 'Selected.' }
-      }],
-      metadata: {
-        precedence: [],
-        beforeDeduplicationCount: 2,
-        afterDeduplicationCount: 2,
-        totalCharacterCount: 29,
-        totalTokenEstimate: 8,
-        truncated: false,
-        sources: [],
-        discarded: [],
-        possibleConflicts: []
-      }
-    }
+    contextInstructions: formatCurrentRunContextForAgent({
+      contextFiles: [],
+      currentRunContext: dynamicContext,
+      language: 'en'
+    })
   });
 
   assert.equal(withDynamicContext[0]?.content, withoutDynamicContext[0]?.content);
-  assert.match(withDynamicContext.at(-1)?.content ?? '', /Project rule[\s\S]*Review workflow/u);
+  assert.match(withDynamicContext[1]?.content ?? '', /Project rule[\s\S]*Review workflow/u);
+  assert.equal(withDynamicContext.at(-1)?.content, 'Inspect.');
 });
 
-test('Legacy Project Memory stays in lowest-priority current-run context below the explicit user request', () => {
+test('Legacy Project Memory stays in the stable contextInstructions block below the explicit user request', () => {
+  const dynamicContext: CurrentRunContext = {
+    projectInstructions: [],
+    skills: [],
+    legacyMemory: {
+      content: '- [command] Always use npm.',
+      entryIds: ['memory-1'],
+      tokenEstimate: 8,
+      sourceUris: ['file:///workspace/.keepseek/memory.json']
+    },
+    metadata: {
+      precedence: [],
+      beforeDeduplicationCount: 1,
+      afterDeduplicationCount: 1,
+      totalCharacterCount: 27,
+      totalTokenEstimate: 8,
+      truncated: false,
+      sources: [],
+      discarded: [],
+      possibleConflicts: []
+    }
+  };
   const messages = buildInitialAgentMessages({
     prompt: 'For this run, use pnpm instead.',
     contextFiles: [],
     history: [],
     language: 'en',
-    currentRunContext: {
-      projectInstructions: [],
-      skills: [],
-      legacyMemory: {
-        content: '- [command] Always use npm.',
-        entryIds: ['memory-1'],
-        tokenEstimate: 8,
-        sourceUris: ['file:///workspace/.keepseek/memory.json']
-      },
-      metadata: {
-        precedence: [],
-        beforeDeduplicationCount: 1,
-        afterDeduplicationCount: 1,
-        totalCharacterCount: 27,
-        totalTokenEstimate: 8,
-        truncated: false,
-        sources: [],
-        discarded: [],
-        possibleConflicts: []
-      }
-    }
+    contextInstructions: formatCurrentRunContextForAgent({
+      contextFiles: [],
+      currentRunContext: dynamicContext,
+      language: 'en'
+    })
   });
 
-  assert.equal(messages.length, 2);
-  assert.equal(messages[1]?.role, 'user');
+  assert.equal(messages.length, 3);
+  assert.equal(messages[1]?.role, 'system');
   assert.ok(messages[1]?.content?.includes('lowest-priority migration compatibility'));
-  assert.ok(messages[1]?.content?.endsWith('For this run, use pnpm instead.'));
+  assert.equal(messages[2]?.role, 'user');
+  assert.equal(messages[2]?.content, 'For this run, use pnpm instead.');
 });
 
 test('validation tool exposes only the fixed safe npm scripts', () => {
