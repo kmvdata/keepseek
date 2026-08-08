@@ -97,6 +97,7 @@ export function getInputScript(): string {
           skillIds: collectActiveSkillIds()
         });
         state.isBusy = true;
+        renderInputControls();
         clearPrompt();
       });
 
@@ -146,6 +147,10 @@ export function getInputScript(): string {
           return;
         }
         if (referenceMenuOpen && (event.key === 'Enter' || event.key === 'Tab')) {
+          // 推理期间引用菜单只读：放行默认行为（Enter 换行 / Tab 移焦），不吞键。
+          if (state.isBusy) {
+            return;
+          }
           event.preventDefault();
           insertActiveReferenceResource();
           return;
@@ -227,6 +232,7 @@ export function getInputScript(): string {
         commandModelSwitch.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
+          if (state.isBusy) { return; }
           commandModelListOpen = !commandModelListOpen;
           renderCommandMenu();
         });
@@ -236,7 +242,7 @@ export function getInputScript(): string {
         commandModelList.addEventListener('click', function(event) {
           var target = event.target instanceof Element ? event.target : null;
           var button = target?.closest('button[data-model-id]');
-          if (!button) { return; }
+          if (!button || state.isBusy) { return; }
           event.preventDefault();
           event.stopPropagation();
           var modelId = button.dataset.modelId || '';
@@ -254,6 +260,7 @@ export function getInputScript(): string {
         commandSkillsButton.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
+          if (state.isBusy) { return; }
           commandSkillListOpen = !commandSkillListOpen;
           if (commandSkillListOpen) {
             commandModelListOpen = false;
@@ -304,6 +311,7 @@ export function getInputScript(): string {
         commandLegacyMemoryExportButton.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
+          if (commandLegacyMemoryExportButton.disabled) { return; }
           closeCommandMenu();
           vscode.postMessage({ type: 'exportLegacyMemory' });
         });
@@ -323,6 +331,7 @@ export function getInputScript(): string {
         commandLegacyMemoryRollbackButton.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
+          if (commandLegacyMemoryRollbackButton.disabled) { return; }
           closeCommandMenu();
           vscode.postMessage({ type: 'rollbackLegacyMemoryMigration' });
         });
@@ -347,6 +356,7 @@ export function getInputScript(): string {
           if (removeButton) {
             event.preventDefault();
             event.stopPropagation();
+            if (state.isBusy) { return; }
             var skillId = removeButton.dataset.skillId || '';
             var skill = getSkillById(skillId);
             vscode.postMessage({ type: 'removeActiveSkill', skillId: skillId });
@@ -358,6 +368,7 @@ export function getInputScript(): string {
           if (!pill) { return; }
           event.preventDefault();
           event.stopPropagation();
+          if (state.isBusy) { return; }
           var pillSkillId = pill.dataset.skillId || '';
           var pillSkill = getSkillById(pillSkillId);
           vscode.postMessage({ type: 'openSkill', skillId: pillSkillId });
@@ -370,6 +381,7 @@ export function getInputScript(): string {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();
             event.stopPropagation();
+            if (state.isBusy) { return; }
             var skillId = pill.dataset.skillId || '';
             var skill = getSkillById(skillId);
             vscode.postMessage({ type: 'openSkill', skillId: skillId });
@@ -380,6 +392,7 @@ export function getInputScript(): string {
 
       if (commandEffortSlider) {
         commandEffortSlider.addEventListener('input', function() {
+          if (state.isBusy) { return; }
           updateAgentSettingsFromControls();
           renderCommandMenu();
         });
@@ -387,6 +400,7 @@ export function getInputScript(): string {
 
       if (commandThinkingToggle) {
         commandThinkingToggle.addEventListener('change', function() {
+          if (state.isBusy) { return; }
           updateAgentSettingsFromControls();
           renderCommandMenu();
           setComposerStatus(commandThinkingToggle.checked ? t('thinkingOn') : t('thinkingOff'));
@@ -407,6 +421,10 @@ export function getInputScript(): string {
           if (!button) { return; }
           event.preventDefault();
           event.stopPropagation();
+          if (state.isBusy) {
+            setComposerStatus(t('referenceFileDisabledWhileBusy'));
+            return;
+          }
           var index = readPositiveInteger(button.dataset.referenceIndex, 1) - 1;
           insertReferenceResourceAtIndex(index);
         });
@@ -611,7 +629,7 @@ export function getInputScript(): string {
       }
 
       function openCommandModelListAndFocus() {
-        if (!commandModelSwitch) { return; }
+        if (!commandModelSwitch || state.isBusy) { return; }
         commandModelListOpen = true;
         commandSkillListOpen = false;
         renderCommandMenu();
@@ -619,7 +637,7 @@ export function getInputScript(): string {
       }
 
       function openCommandSkillListAndFocus() {
-        if (!commandSkillsButton) { return; }
+        if (!commandSkillsButton || state.isBusy) { return; }
         commandSkillListOpen = true;
         commandModelListOpen = false;
         vscode.postMessage({ type: 'requestSkills' });
@@ -865,6 +883,11 @@ export function getInputScript(): string {
           }
         }
         referenceMenu.append(list);
+        // 推理期间引用菜单保持可见但只读，与 "+" 按钮禁用保持一致。
+        var isBusy = Boolean(state.isBusy);
+        list.querySelectorAll('button[data-reference-index]').forEach(function(button) {
+          button.disabled = isBusy;
+        });
         syncReferenceMenuActiveOption();
       }
 
@@ -1138,10 +1161,15 @@ export function getInputScript(): string {
       }
 
       function insertActiveReferenceResource() {
+        if (state.isBusy) {
+          setComposerStatus(t('referenceFileDisabledWhileBusy'));
+          return;
+        }
         insertReferenceResourceAtIndex(activeReferenceIndex);
       }
 
       function insertReferenceResourceAtIndex(index) {
+        if (state.isBusy) { return; }
         var entries = getReferenceMenuEntries();
         var entry = entries[index];
         if (!entry) { return; }
@@ -1229,8 +1257,18 @@ export function getInputScript(): string {
         renderActiveSkillsBar();
         renderContextProgress();
         renderCommandMenu();
+        renderReferenceMenuButton();
         renderSendButton();
         setApiKeyVisible(apiKeyVisible, false);
+      }
+
+      function renderReferenceMenuButton() {
+        if (!referenceMenuButton) { return; }
+        var busy = Boolean(state.isBusy);
+        referenceMenuButton.disabled = busy;
+        referenceMenuButton.title = busy ? t('referenceFileDisabledWhileBusy') : t('referenceFileTitle');
+        referenceMenuButton.setAttribute('aria-disabled', busy ? 'true' : 'false');
+        referenceMenuButton.setAttribute('aria-label', busy ? t('referenceFileDisabledWhileBusy') : t('referenceFile'));
       }
 
       function renderSendButton(isEmpty) {
@@ -1446,6 +1484,7 @@ export function getInputScript(): string {
 
       function renderCommandMenu() {
         if (!commandMenu) { return; }
+        commandMenu.classList.toggle('is-readonly', Boolean(state.isBusy));
         renderCommandModel();
         renderCommandSkills();
         renderCreateSkillCommand();
@@ -1482,6 +1521,7 @@ export function getInputScript(): string {
         }
 
         if (commandModelSwitch) {
+          commandModelSwitch.disabled = Boolean(state.isBusy);
           commandModelSwitch.setAttribute('aria-expanded', commandModelListOpen ? 'true' : 'false');
         }
         if (!commandModelList) { return; }
@@ -1503,6 +1543,7 @@ export function getInputScript(): string {
           option.type = 'button';
           option.className = 'command-model-option';
           option.dataset.modelId = model.id;
+          option.disabled = Boolean(state.isBusy);
           option.setAttribute('role', 'menuitemradio');
           option.setAttribute('aria-checked', isSelected ? 'true' : 'false');
 
@@ -1527,6 +1568,7 @@ export function getInputScript(): string {
           commandSkillsValue.textContent = String(activeIds.length);
         }
         if (commandSkillsButton) {
+          commandSkillsButton.disabled = Boolean(state.isBusy);
           commandSkillsButton.setAttribute('aria-expanded', commandSkillListOpen ? 'true' : 'false');
         }
         if (!commandSkillList) { return; }
@@ -1550,8 +1592,8 @@ export function getInputScript(): string {
       function renderCreateSkillCommand() {
         if (!commandCreateSkillButton) { return; }
         var disabledReason = getCreateSkillDisabledReason();
-        commandCreateSkillButton.disabled = Boolean(disabledReason);
-        commandCreateSkillButton.title = disabledReason || '';
+        commandCreateSkillButton.disabled = Boolean(state.isBusy) || Boolean(disabledReason);
+        commandCreateSkillButton.title = state.isBusy ? t('commandMenuReadonlyWhileBusy') : (disabledReason || '');
       }
 
       function renderLegacyMemoryCommand() {
@@ -1600,7 +1642,7 @@ export function getInputScript(): string {
         main.className = 'command-skill-main';
         main.dataset.skillAction = 'use';
         main.dataset.skillId = skill.id;
-        main.disabled = !canUse;
+        main.disabled = !canUse || Boolean(state.isBusy);
 
         var copy = document.createElement('span');
         copy.className = 'command-row-main';
@@ -1650,7 +1692,7 @@ export function getInputScript(): string {
         button.dataset.skillAction = action;
         button.dataset.skillId = skill.id;
         button.textContent = label;
-        button.disabled = Boolean(disabled);
+        button.disabled = Boolean(disabled) || Boolean(state.isBusy);
         return button;
       }
 
@@ -1683,6 +1725,7 @@ export function getInputScript(): string {
       }
 
       function handleSkillAction(action, skillId) {
+        if (state.isBusy) { return; }
         var skill = getSkillById(skillId);
         if (!skill) { return; }
         if (action === 'use') {
@@ -1732,10 +1775,11 @@ export function getInputScript(): string {
         var settings = getAgentSettings();
         if (commandThinkingToggle) {
           commandThinkingToggle.checked = settings.thinkingEnabled;
+          commandThinkingToggle.disabled = Boolean(state.isBusy);
         }
         if (commandEffortSlider) {
           commandEffortSlider.value = settings.reasoningEffort === 'max' ? '2' : '1';
-          commandEffortSlider.disabled = !settings.thinkingEnabled;
+          commandEffortSlider.disabled = Boolean(state.isBusy) || !settings.thinkingEnabled;
         }
         if (commandEffortValue) {
           commandEffortValue.textContent = settings.thinkingEnabled ? effortLabels[settings.reasoningEffort] : t('off');
@@ -2530,8 +2574,9 @@ export function getInputScript(): string {
         remove.type = 'button';
         remove.className = 'skill-pill-remove';
         remove.dataset.skillId = skill.id;
-        remove.title = t('removeSkill');
-        remove.setAttribute('aria-label', t('removeSkill'));
+        remove.disabled = Boolean(state.isBusy);
+        remove.title = state.isBusy ? t('skillRemoveDisabledWhileBusy') : t('removeSkill');
+        remove.setAttribute('aria-label', state.isBusy ? t('skillRemoveDisabledWhileBusy') : t('removeSkill'));
         remove.textContent = '×';
 
         pill.append(icon, name, remove);
@@ -3416,6 +3461,10 @@ export function getInputScript(): string {
       }
 
       function submitCreateSkillDraft() {
+        if (state.isBusy) {
+          setCreateSkillDialogStatus(t('commandMenuReadonlyWhileBusy'));
+          return;
+        }
         var disabledReason = getCreateSkillDisabledReason();
         if (disabledReason) {
           setCreateSkillDialogStatus(disabledReason);

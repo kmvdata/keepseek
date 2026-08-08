@@ -380,10 +380,15 @@ export function getInputStyles(): string {
       font-family: var(--vscode-editor-font-family, monospace);
     }
 
-    .composer-icon-btn:hover {
+    .composer-icon-btn:hover:not(:disabled) {
       color: var(--vscode-foreground);
       border-color: var(--vscode-focusBorder, var(--vscode-panel-border, var(--vscode-input-border, transparent)));
       background: var(--vscode-toolbar-hoverBackground);
+    }
+
+    .composer-icon-btn:disabled {
+      opacity: 0.4;
+      cursor: default;
     }
 
     .composer-send-btn:hover:not(:disabled) {
@@ -621,6 +626,34 @@ export function getInputStyles(): string {
       box-shadow: 0 8px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
     }
 
+    .command-menu.is-readonly {
+      opacity: 0.82;
+    }
+
+    .command-menu.is-readonly .command-row,
+    .command-menu.is-readonly .command-control-row,
+    .command-menu.is-readonly .command-model-option {
+      cursor: default;
+    }
+
+    .command-menu.is-readonly .command-row:hover,
+    .command-menu.is-readonly .command-row:focus-visible,
+    .command-menu.is-readonly .command-row[aria-expanded="true"],
+    .command-menu.is-readonly .command-control-row:hover,
+    .command-menu.is-readonly .command-control-row:focus-within,
+    .command-menu.is-readonly .command-model-option:hover,
+    .command-menu.is-readonly .command-model-option:focus-visible,
+    .command-menu.is-readonly .command-model-option[aria-checked="true"] {
+      color: inherit;
+      background: transparent;
+      outline: none;
+    }
+
+    .command-menu.is-readonly .command-row:disabled,
+    .command-menu.is-readonly .command-control-row:disabled {
+      color: var(--vscode-descriptionForeground);
+    }
+
     .reference-menu {
       position: absolute;
       left: var(--keepseek-edge-padding, 4px);
@@ -727,6 +760,19 @@ export function getInputStyles(): string {
     .reference-menu-item.is-active {
       color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
       background: var(--vscode-quickInputList-focusBackground, var(--vscode-list-hoverBackground));
+      outline: none;
+    }
+
+    .reference-menu-item:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+
+    .reference-menu-item:disabled:hover,
+    .reference-menu-item:disabled:focus-visible,
+    .reference-menu-item:disabled.is-active {
+      color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
+      background: transparent;
       outline: none;
     }
 
