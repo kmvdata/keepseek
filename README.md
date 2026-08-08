@@ -1,3 +1,5 @@
+> **English version: [README.en.md](./README.en.md) | 中文版：本文档**
+
 ## 什么人需要 KeepSeek？
 
 > **Cursor 的手感 × Reasonix 的省钱 × DeepSeek 的低价 —— 全都在 VS Code 里。**
