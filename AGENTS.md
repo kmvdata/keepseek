@@ -57,7 +57,7 @@ src/
 │   ├── draftEditStore.ts        # 旧版独立 DraftEdit store 兼容边界
 │   └── safeFileEditor.ts        # ChangeSetStore Apply 后的安全文件写入/删除与回滚
 ├── skills/
-│   ├── skillDiscovery.ts        # workspace / Codex home 插件与 Skill 发现
+│   ├── skillDiscovery.ts        # workspace / Codex home Skill 发现
 │   ├── skillActivationResolver.ts # explicit/session/default/implicit 确定性激活
 │   ├── skillLoader.ts           # 只读加载 SKILL.md 与受控引用资源；不执行 scripts
 │   └── skillStore.ts            # Skill 状态、workspace 默认引用和会话激活

@@ -242,6 +242,18 @@ export function getInputStyles(): string {
       gap: 4px;
       margin: 0;
       padding-right: 3px;
+      cursor: pointer;
+    }
+
+    .skill-pill:hover {
+      border-color: var(--vscode-focusBorder, var(--vscode-inputOption-activeBorder, var(--vscode-panel-border)));
+      background: var(--vscode-toolbar-hoverBackground);
+      color: var(--vscode-textLink-activeForeground);
+    }
+
+    .skill-pill:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 1px;
     }
 
     .skill-pill-name {

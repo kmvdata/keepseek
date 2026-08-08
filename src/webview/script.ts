@@ -6,7 +6,7 @@ export function getScript(): string {
   return `
     const vscode = acquireVsCodeApi();
     const keepseekLogoUri = window.keepseekLogoUri || '';
-    const keepseekPluginIconUri = window.keepseekPluginIconUri || '';
+    const keepseekPluginIconUri = window.keepseekSkillIconUri || '';
     const translations = ${JSON.stringify(WEBVIEW_TRANSLATIONS)};
     const state = {
       models: [],

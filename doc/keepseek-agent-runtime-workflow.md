@@ -36,7 +36,7 @@ KeepSeek 的 Agent 链路可以分成四层。
 - 拖拽文件到输入框。
 - 终端、输出、Debug Console 选区落盘后引用。
 - `@` 文件/目录补全。
-- `$` Skill 引用，Skill 可来自工作区 `.agents`、仓库 Codex 插件目录、用户 `~/.codex/skills` 或用户 `~/.codex/plugins`。
+- `$` Skill 引用，Skill 可来自工作区 `.agents` 或用户 `~/.codex/skills`。
 
 Webview 内部使用富文本输入框显示引用 chip。发送时，`serializePrompt()` 会把 DOM 里的引用还原成可解析的文本格式：
 

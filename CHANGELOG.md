@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 - 2026-07-22
+
+- Skills are now the only Agent extension mechanism: removed Codex-style plugin discovery (workspace `plugins` / `.agents/plugins`, user `~/.codex/plugins`) and the stale `.agents/marketplace.json`; Skills are discovered from workspace `.agents` and user `~/.codex/skills` only.
+- Clicking a Skill pill in the Using bar now opens its SKILL.md instruction file in VS Code (keyboard accessible via Enter/Space).
 ## 0.2.1 - 2026-07-21
 
 - Fixed a marketplace-install regression where the packaged VSIX could miss the `ignore` runtime dependency (or ship stale flat build outputs), causing extension activation to fail and the chat view to stay stuck loading. Packaging now always goes through `npm run package` (`vsce package --dependencies`) plus the VSIX content verifier, and the published version was bumped so marketplace clients replace the stale same-version package.

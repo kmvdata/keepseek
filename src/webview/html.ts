@@ -13,7 +13,8 @@ export function getHtmlForWebview(input: {
 }): string {
   const nonce = getNonce();
   const keepseekLogoUri = input.webview.asWebviewUri(vscode.Uri.joinPath(input.extensionUri, 'resources', 'keepseek.svg'));
-  const pluginIconUri = input.webview.asWebviewUri(vscode.Uri.joinPath(input.extensionUri, 'resources', 'plugin.svg'));
+  // 该图标仅用于 Skill 引用 chip；资源文件保留历史名称 plugin.svg。
+  const skillIconUri = input.webview.asWebviewUri(vscode.Uri.joinPath(input.extensionUri, 'resources', 'plugin.svg'));
   return `<!DOCTYPE html>
 <html lang="${input.language === 'en' ? 'en' : 'zh-CN'}">
 <head>
@@ -29,7 +30,7 @@ ${getStyles()}
 ${getTemplate(input.extensionInfo)}
   <script nonce="${nonce}">
 window.keepseekLogoUri = ${JSON.stringify(String(keepseekLogoUri))};
-window.keepseekPluginIconUri = ${JSON.stringify(String(pluginIconUri))};
+window.keepseekSkillIconUri = ${JSON.stringify(String(skillIconUri))};
 ${getScript()}
   </script>
 </body>

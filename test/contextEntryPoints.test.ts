@@ -182,7 +182,7 @@ test('Skill reference chips reuse plugin.svg and hide the protocol dollar prefix
   assert.match(styles, /\.rich-skill-link-icon\s*\{[^}]*width:\s*12px/us);
   assert.match(styles, /\.rich-skill-link-label\s*\{[^}]*text-overflow:\s*ellipsis/us);
   assert.match(htmlSource, /resources', 'plugin\.svg'/u);
-  assert.match(htmlSource, /window\.keepseekPluginIconUri/u);
+  assert.match(htmlSource, /window\.keepseekSkillIconUri/u);
   assert.match(transcriptScript, /function createSkillReferenceIcon\(className\)[\s\S]*?image\.src = keepseekPluginIconUri/u);
   assert.match(inputScript, /createSkillLink\(skill\)[\s\S]*?renderSkillReferenceContent\(anchor, getSkillMentionName\(skill\)\)/u);
   assert.match(inputScript, /refreshPromptSkillLinkLabels\(\)[\s\S]*?renderSkillReferenceContent\(link, getSkillMentionName\(skill\)\)/u);

@@ -343,15 +343,38 @@ export function getInputScript(): string {
       if (skillsBarList) {
         skillsBarList.addEventListener('click', function(event) {
           var target = event.target instanceof Element ? event.target : null;
-          var button = target?.closest('button[data-skill-id]');
-          if (!button) { return; }
+          var removeButton = target?.closest('button[data-skill-id]');
+          if (removeButton) {
+            event.preventDefault();
+            event.stopPropagation();
+            var skillId = removeButton.dataset.skillId || '';
+            var skill = getSkillById(skillId);
+            vscode.postMessage({ type: 'removeActiveSkill', skillId: skillId });
+            removePromptSkillChip(skillId);
+            setComposerStatus(t('skillRemoved', { name: skill ? skill.name : skillId }));
+            return;
+          }
+          var pill = target?.closest('[data-skill-id]');
+          if (!pill) { return; }
           event.preventDefault();
           event.stopPropagation();
-          var skillId = button.dataset.skillId || '';
-          var skill = getSkillById(skillId);
-          vscode.postMessage({ type: 'removeActiveSkill', skillId: skillId });
-          removePromptSkillChip(skillId);
-          setComposerStatus(t('skillRemoved', { name: skill ? skill.name : skillId }));
+          var pillSkillId = pill.dataset.skillId || '';
+          var pillSkill = getSkillById(pillSkillId);
+          vscode.postMessage({ type: 'openSkill', skillId: pillSkillId });
+          setComposerStatus(t('skillOpened', { name: pillSkill ? pillSkill.name : pillSkillId }));
+        });
+        skillsBarList.addEventListener('keydown', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          var pill = target?.closest('[data-skill-id]');
+          if (!pill || pill.matches('button')) { return; }
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            event.stopPropagation();
+            var skillId = pill.dataset.skillId || '';
+            var skill = getSkillById(skillId);
+            vscode.postMessage({ type: 'openSkill', skillId: skillId });
+            setComposerStatus(t('skillOpened', { name: skill ? skill.name : skillId }));
+          }
         });
       }
 
@@ -2492,6 +2515,10 @@ export function getInputScript(): string {
         var pill = document.createElement('span');
         pill.className = 'skill-pill';
         pill.title = skill.description || skill.name || skill.id;
+        pill.dataset.skillId = skill.id;
+        pill.setAttribute('role', 'button');
+        pill.tabIndex = 0;
+        pill.setAttribute('aria-label', t('openSkillInstruction', { name: skill.name || skill.id }));
 
         var icon = createSkillReferenceIcon('skill-pill-icon');
 

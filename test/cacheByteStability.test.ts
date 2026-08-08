@@ -233,8 +233,8 @@ test('会话冻结后（skills 块不变）轮次请求序列保持字节前缀'
     id: 'auto-review',
     name: 'review-flow',
     source: 'agentsWorkspace',
-    rootUri: 'file:///workspace/.agents/plugins/review',
-    skillUri: 'file:///workspace/.agents/plugins/review/SKILL.md',
+    rootUri: 'file:///workspace/.agents/skills/review',
+    skillUri: 'file:///workspace/.agents/skills/review/SKILL.md',
     content: '# Review flow\n\nRun the review workflow.',
     activation: { source: 'implicit', reason: 'Frozen from the first user request of this chat session.' }
   };

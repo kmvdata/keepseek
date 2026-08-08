@@ -1,3 +1,18 @@
+## 什么人需要 KeepSeek？
+
+> **Cursor 的手感 × Reasonix 的省钱 × DeepSeek 的低价 —— 全都在 VS Code 里。**
+
+如果你想要的，是一个**交互像 Cursor 一样顺手、省 token 像 Reasonix 一样极致**的 **VS Code DeepSeek 智能体插件**，那么 **KeepSeek 就是你不二的选择**。
+
+只要你对下面任何一条点头，KeepSeek 就是为你准备的：
+
+- **羡慕 Cursor 的交互，又不想换掉 VS Code** —— 侧边栏对话、右键选区、`Cmd+L` 快捷引用、拖拽文件进输入框……Cursor 式的原生手感，KeepSeek 在 VS Code 里原样复刻：不换编辑器、不改习惯、不折腾迁移；
+- **像 Reasonix 一样，把 token 当钱省** —— 前缀缓存命中价格低至全价的 **1/50（Flash）~ 1/120（Pro）**，长对话每一轮都复用上一轮的缓存，聊得越多省得越多，而不是越聊越贵；
+- **想要一个真正「懂代码」的智能体** —— 语义定位、只读探索、行段读取，AI 看到的永远是你最新的代码，而不是几轮前的旧正文；
+- **对「AI 偷偷改文件」零容忍** —— 所有修改都以 DraftEdit 呈现，你确认后才落盘；只读工具绝不越出工作区。
+
+**只要有一条戳中你，就往下看** —— KeepSeek 凭什么把 Cursor 的手感、Reasonix 的省法和 DeepSeek 的低价同时给你。
+
 # KeepSeek：把 DeepSeek 前缀缓存吃满的 VS Code 编程助手
 
 > **同等任务，更少 token、更低费用、更快响应。**
@@ -141,7 +156,7 @@ KeepSeek 住在 VS Code Secondary Sidebar 里，不用切窗口、不用复制�
 
 ### 可复用工作流（Skills）
 
-把项目约定、排查步骤、团队提示词写成 Skill（`.agents`、Codex 插件目录、`~/.codex/skills` 均可发现），`/skills` 浏览、`$` 引用即用，还支持 `/create-skill` 生成草案。
+把项目约定、排查步骤、团队提示词写成 Skill（`.agents`、`~/.codex/skills` 均可发现），`/skills` 浏览、`$` 引用即用，还支持 `/create-skill` 生成草案。
 
 ### 跨项目继续排查
 
