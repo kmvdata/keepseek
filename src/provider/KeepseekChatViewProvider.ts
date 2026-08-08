@@ -587,7 +587,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       startLine: 0,
       endLine: 0
     });
-    vscode.window.showInformationMessage(this.t('addedTextSelection'));
   }
 
   private async handleMessage(message: WebviewMessage): Promise<void> {

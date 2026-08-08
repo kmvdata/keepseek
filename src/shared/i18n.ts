@@ -720,7 +720,6 @@ const EXTENSION_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
     selectTerminalTextToAdd: '请先在终端中选择要添加到 KeepSeek 上下文的内容。',
     selectDebugConsoleTextToAdd: '请先在调试控制台中选择要添加到 KeepSeek 上下文的内容。',
     selectedTextTooLarge: '选中的内容大于 {limit}，未添加。',
-    addedTextSelection: 'KeepSeek 已添加选中内容。',
     cannotAddTextSelection: 'KeepSeek 无法添加选中内容：{message}',
     cannotAddTerminalSelection: 'KeepSeek 无法添加终端内容：{message}',
     cannotAddDebugConsoleSelection: 'KeepSeek 无法添加调试控制台内容：{message}',
