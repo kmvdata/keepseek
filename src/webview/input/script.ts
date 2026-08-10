@@ -1500,7 +1500,7 @@ export function getInputScript(): string {
             })
           : [];
         if (commandBackgroundRunSection) {
-          commandBackgroundRunSection.classList.toggle('hidden', scripts.length === 0);
+          commandBackgroundRunSection.classList.add('hidden');
         }
         if (commandBackgroundRunButton) {
           commandBackgroundRunButton.disabled = state.isBusy || isBackgroundActive();

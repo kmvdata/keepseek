@@ -1235,9 +1235,13 @@ export function getScript(): string {
 
     function openBackgroundRunDialog() {
       if (!backgroundRunDialogOverlay || state.isBusy || isBackgroundActive()) return;
-      if (!getBackgroundAvailableScripts().length) return;
+      var scripts = getBackgroundAvailableScripts();
+      if (!scripts.length) return;
       backgroundRunDialogOpen = true;
       backgroundRunDialogOverlay.classList.remove('hidden');
+      if (backgroundScript) {
+        backgroundScript.value = scripts.indexOf('compile') >= 0 ? 'compile' : scripts[0];
+      }
       if (backgroundMaxRounds) {
         backgroundMaxRounds.value = String(Math.max(1, Number(state.backgroundDefaults?.maxRounds) || 5));
       }
@@ -1263,11 +1267,10 @@ export function getScript(): string {
         return;
       }
       var previousScript = normalizeValidationScript(backgroundScript.value);
-      var preferredScript = state.repairLoop?.lastValidationScript;
       var selectedScript = scripts.indexOf(previousScript) >= 0
         ? previousScript
-        : scripts.indexOf(preferredScript) >= 0
-          ? preferredScript
+        : scripts.indexOf('compile') >= 0
+          ? 'compile'
           : scripts[0];
       backgroundScript.innerHTML = '';
       scripts.forEach(function(script) {
