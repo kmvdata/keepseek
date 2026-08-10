@@ -1,4 +1,4 @@
-import type { AgentSettings, KeepseekModel } from './types';
+import type { AgentSettings, CompressionThreshold, KeepseekModel } from './types';
 
 export const DEEPSEEK_V4_FLASH_MODEL_ID = 'deepseek-v4-flash';
 export const DEEPSEEK_V4_PRO_MODEL_ID = 'deepseek-v4-pro';
@@ -31,6 +31,18 @@ export interface DeepSeekV4RuntimeProfile {
   topP: number;
   contextCompression: ContextCompressionSettings;
 }
+
+export const COMPRESSION_THRESHOLDS: Record<
+  CompressionThreshold,
+  Pick<ContextCompressionSettings, 'triggerRatio' | 'forceRatio'>
+> = {
+  aggressive: { triggerRatio: 0.7, forceRatio: 0.85 },
+  balanced: { triggerRatio: 0.8, forceRatio: 0.92 },
+  cache: { triggerRatio: 0.85, forceRatio: 0.95 }
+};
+
+type RuntimeAgentSettings = Pick<AgentSettings, 'thinkingEnabled' | 'reasoningEffort'>
+  & Partial<Pick<AgentSettings, 'compressionThreshold'>>;
 
 const SUPPORTED_MODELS: readonly KeepseekModel[] = [
   {
@@ -161,7 +173,7 @@ export function normalizeDeepSeekV4ModelId(modelId: string | undefined): DeepSee
 
 export function getDeepSeekV4RuntimeProfile(
   model: Pick<KeepseekModel, 'id'> | string,
-  settings: AgentSettings
+  settings: RuntimeAgentSettings
 ): DeepSeekV4RuntimeProfile {
   const modelId = normalizeDeepSeekV4ModelId(typeof model === 'string' ? model : model.id);
   const reasoningMode = settings.thinkingEnabled
@@ -170,6 +182,8 @@ export function getDeepSeekV4RuntimeProfile(
   const selected = modelId === DEEPSEEK_V4_PRO_MODEL_ID
     ? PRO_PROFILES[reasoningMode]
     : FLASH_PROFILES[reasoningMode];
+  const threshold = COMPRESSION_THRESHOLDS[settings.compressionThreshold ?? 'balanced']
+    ?? COMPRESSION_THRESHOLDS.balanced;
 
   return {
     modelId,
@@ -182,13 +196,16 @@ export function getDeepSeekV4RuntimeProfile(
     streamIdleTimeoutMs: 0,
     temperature: 1,
     topP: 1,
-    contextCompression: { ...selected.contextCompression }
+    contextCompression: {
+      ...selected.contextCompression,
+      ...threshold
+    }
   };
 }
 
 export function getDeepSeekV4ContextCompressionSettings(
   model: Pick<KeepseekModel, 'id'> | string,
-  settings: AgentSettings
+  settings: RuntimeAgentSettings
 ): ContextCompressionSettings {
   return getDeepSeekV4RuntimeProfile(model, settings).contextCompression;
 }

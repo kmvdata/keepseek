@@ -1602,7 +1602,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const config = vscode.workspace.getConfiguration('keepseek');
     await Promise.all([
       config.update('thinkingEnabled', this.agentSettings.thinkingEnabled, vscode.ConfigurationTarget.Workspace),
-      config.update('reasoningEffort', this.agentSettings.reasoningEffort, vscode.ConfigurationTarget.Workspace)
+      config.update('reasoningEffort', this.agentSettings.reasoningEffort, vscode.ConfigurationTarget.Workspace),
+      config.update('compressionThreshold', this.agentSettings.compressionThreshold, vscode.ConfigurationTarget.Workspace)
     ]);
     this.postState();
   }

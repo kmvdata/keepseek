@@ -1,5 +1,11 @@
 import * as vscode from 'vscode';
-import { AgentSettings, KeepseekModel, UsageCostRates, ValidationAuthorizationPolicy } from './types';
+import {
+  AgentSettings,
+  CompressionThreshold,
+  KeepseekModel,
+  UsageCostRates,
+  ValidationAuthorizationPolicy
+} from './types';
 import { SESSION_HARD_RETENTION_DAYS } from '../sessions/sessionRetention';
 import {
   DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
@@ -25,6 +31,7 @@ export const DEFAULT_BALANCE_REFRESH_INTERVAL_MS = 60_000;
 // DeepSeek's prefix cache (byte-identical from token 0) is invalidated. Users can
 // opt into the smaller schema explicitly.
 export const DEFAULT_SLIM_TOOL_MODE_ENABLED = false;
+export const DEFAULT_COMPRESSION_THRESHOLD: CompressionThreshold = 'balanced';
 export const DEFAULT_VALIDATION_AUTHORIZATION_POLICY: ValidationAuthorizationPolicy = 'ask';
 export const DEFAULT_MAX_VALIDATION_RUNS = 3;
 export const DEFAULT_MAX_REPAIR_ITERATIONS = 2;
@@ -90,8 +97,16 @@ export function getConfiguredAgentSettings(): AgentSettings {
   const config = vscode.workspace.getConfiguration('keepseek');
   return normalizeAgentSettings({
     thinkingEnabled: config.get<boolean>('thinkingEnabled', true),
-    reasoningEffort: config.get<AgentSettings['reasoningEffort']>('reasoningEffort', 'high')
+    reasoningEffort: config.get<AgentSettings['reasoningEffort']>('reasoningEffort', 'high'),
+    compressionThreshold: getConfiguredCompressionThreshold()
   });
+}
+
+export function getConfiguredCompressionThreshold(): CompressionThreshold {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<unknown>('compressionThreshold', DEFAULT_COMPRESSION_THRESHOLD);
+  return normalizeCompressionThreshold(configured);
 }
 
 export function getConfiguredMaxFileBytes(): number {
@@ -321,8 +336,21 @@ export function normalizeAgentSettings(settings: Partial<AgentSettings> | undefi
       ? 'max'
       : settings?.reasoningEffort === 'high'
         ? 'high'
-        : fallback?.reasoningEffort ?? 'high'
+        : fallback?.reasoningEffort ?? 'high',
+    compressionThreshold: normalizeCompressionThreshold(
+      settings?.compressionThreshold,
+      fallback?.compressionThreshold ?? DEFAULT_COMPRESSION_THRESHOLD
+    )
   };
+}
+
+export function normalizeCompressionThreshold(
+  value: unknown,
+  fallback: CompressionThreshold = DEFAULT_COMPRESSION_THRESHOLD
+): CompressionThreshold {
+  return value === 'aggressive' || value === 'balanced' || value === 'cache'
+    ? value
+    : fallback;
 }
 
 export function normalizePositiveInteger(value: unknown): number | undefined {

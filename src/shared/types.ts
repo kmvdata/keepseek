@@ -18,9 +18,12 @@ export interface KeepseekExtensionInfo {
 
 export type ReasoningEffort = 'high' | 'max';
 
+export type CompressionThreshold = 'aggressive' | 'balanced' | 'cache';
+
 export interface AgentSettings {
   thinkingEnabled: boolean;
   reasoningEffort: ReasoningEffort;
+  compressionThreshold: CompressionThreshold;
 }
 
 export type ContextFileSource = 'workspace' | 'external';

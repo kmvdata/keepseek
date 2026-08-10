@@ -79,6 +79,13 @@ test('command menu model settings are registered and persisted for the current w
     enum: ['high', 'max'],
     markdownDescription: 'Thinking effort for the current workspace.'
   });
+  assert.deepEqual(properties['keepseek.compressionThreshold'], {
+    type: 'string',
+    default: 'balanced',
+    scope: 'window',
+    enum: ['aggressive', 'balanced', 'cache'],
+    markdownDescription: 'Automatic history compaction threshold for the current workspace: 70% early cleanup, 80% balanced, or 85% cache first.'
+  });
   assert.match(
     providerSource,
     /config\.update\('selectedModelId', modelId, vscode\.ConfigurationTarget\.Workspace\)/u
@@ -91,6 +98,31 @@ test('command menu model settings are registered and persisted for the current w
     providerSource,
     /config\.update\('reasoningEffort', this\.agentSettings\.reasoningEffort, vscode\.ConfigurationTarget\.Workspace\)/u
   );
+  assert.match(
+    providerSource,
+    /config\.update\('compressionThreshold', this\.agentSettings\.compressionThreshold, vscode\.ConfigurationTarget\.Workspace\)/u
+  );
+});
+
+test('command menu exposes an accessible persisted compression threshold tab selector', () => {
+  const inputTemplate = getInputTemplate();
+  const inputScript = getInputScript();
+  const styles = getStyles();
+  const modelListIndex = inputTemplate.indexOf('id="commandModelList"');
+  const compressionTabsIndex = inputTemplate.indexOf('id="commandCompressionTabs"');
+  const reasoningSectionIndex = inputTemplate.indexOf('aria-label="Reasoning"');
+
+  assert.ok(modelListIndex >= 0 && compressionTabsIndex > modelListIndex);
+  assert.ok(reasoningSectionIndex > compressionTabsIndex);
+  assert.match(inputTemplate, /id="commandCompressionTabs"[\s\S]*?role="tablist"/u);
+  assert.equal((inputTemplate.match(/role="tab"/gu) ?? []).length, 3);
+  assert.equal((inputTemplate.match(/aria-controls="commandCompressionDescription"/gu) ?? []).length, 3);
+  assert.match(inputTemplate, /data-threshold="balanced"[\s\S]*?aria-selected="true"/u);
+  assert.match(inputScript, /function renderCompressionThreshold\(\)/u);
+  assert.match(inputScript, /tab\.disabled = Boolean\(state\.isBusy\)/u);
+  assert.match(inputScript, /type: 'setAgentSettings', settings: settings/u);
+  assert.match(styles, /\.command-compression-tab\[aria-selected="true"\]/u);
+  assert.match(styles, /\.command-menu\.is-readonly \.command-compression-tab/u);
 });
 
 test('rich prompt script exposes reference, skill, and external drop entry points', () => {

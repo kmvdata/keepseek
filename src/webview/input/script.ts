@@ -12,6 +12,8 @@ export function getInputScript(): string {
       var commandModelSwitch = document.getElementById('commandModelSwitch');
       var commandModelValue = document.getElementById('commandModelValue');
       var commandModelList = document.getElementById('commandModelList');
+      var commandCompressionTabs = document.getElementById('commandCompressionTabs');
+      var commandCompressionDescription = document.getElementById('commandCompressionDescription');
       var commandSkillsButton = document.getElementById('commandSkillsButton');
       var commandSkillsValue = document.getElementById('commandSkillsValue');
       var commandSkillList = document.getElementById('commandSkillList');
@@ -253,6 +255,23 @@ export function getInputScript(): string {
           commandModelListOpen = false;
           renderCommandMenu();
           setComposerStatus(t('modelSwitched'));
+        });
+      }
+
+      if (commandCompressionTabs) {
+        commandCompressionTabs.addEventListener('click', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          var button = target?.closest('button[data-threshold]');
+          if (!button) { return; }
+          event.preventDefault();
+          event.stopPropagation();
+          if (state.isBusy) { return; }
+          var threshold = normalizeCompressionThreshold(button.dataset.threshold);
+          var settings = getAgentSettings();
+          settings.compressionThreshold = threshold;
+          state.agentSettings = settings;
+          vscode.postMessage({ type: 'setAgentSettings', settings: settings });
+          renderCommandMenu();
         });
       }
 
@@ -1486,6 +1505,7 @@ export function getInputScript(): string {
         if (!commandMenu) { return; }
         commandMenu.classList.toggle('is-readonly', Boolean(state.isBusy));
         renderCommandModel();
+        renderCompressionThreshold();
         renderCommandSkills();
         renderCreateSkillCommand();
         renderLegacyMemoryCommand();
@@ -1559,6 +1579,50 @@ export function getInputScript(): string {
           option.append(check, label);
           commandModelList.append(option);
         }
+      }
+
+      function renderCompressionThreshold() {
+        var threshold = getAgentSettings().compressionThreshold;
+        var selectedTabId = '';
+        if (commandCompressionTabs) {
+          commandCompressionTabs.setAttribute('aria-disabled', state.isBusy ? 'true' : 'false');
+          commandCompressionTabs.title = t('compressionThresholdDescription');
+          var tabs = commandCompressionTabs.querySelectorAll('button[data-threshold]');
+          for (var i = 0; i < tabs.length; i++) {
+            var tab = tabs[i];
+            var tabThreshold = normalizeCompressionThreshold(tab.dataset.threshold);
+            var selected = tabThreshold === threshold;
+            tab.disabled = Boolean(state.isBusy);
+            tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+            tab.textContent = t(getCompressionThresholdTabLabelKey(tabThreshold));
+            tab.title = t(getCompressionThresholdDescriptionKey(tabThreshold));
+            if (selected) {
+              selectedTabId = tab.id;
+            }
+          }
+        }
+        if (commandCompressionDescription) {
+          commandCompressionDescription.textContent = t(getCompressionThresholdDescriptionKey(threshold));
+          if (selectedTabId) {
+            commandCompressionDescription.setAttribute('aria-labelledby', selectedTabId);
+          }
+        }
+      }
+
+      function getCompressionThresholdTabLabelKey(threshold) {
+        return threshold === 'aggressive'
+          ? 'compressionEarlyTab'
+          : threshold === 'cache'
+            ? 'compressionCacheFirstTab'
+            : 'compressionBalancedTab';
+      }
+
+      function getCompressionThresholdDescriptionKey(threshold) {
+        return threshold === 'aggressive'
+          ? 'compressionEarlyDescription'
+          : threshold === 'cache'
+            ? 'compressionCacheFirstDescription'
+            : 'compressionBalancedDescription';
       }
 
       function renderCommandSkills() {
@@ -1793,9 +1857,15 @@ export function getInputScript(): string {
       }
 
       function readAgentSettingsFromControls() {
+        var selectedCompressionTab = commandCompressionTabs
+          ? commandCompressionTabs.querySelector('button[data-threshold][aria-selected="true"]')
+          : null;
         return {
           thinkingEnabled: commandThinkingToggle ? commandThinkingToggle.checked : getAgentSettings().thinkingEnabled,
-          reasoningEffort: commandEffortSlider && Number(commandEffortSlider.value) >= 2 ? 'max' : 'high'
+          reasoningEffort: commandEffortSlider && Number(commandEffortSlider.value) >= 2 ? 'max' : 'high',
+          compressionThreshold: normalizeCompressionThreshold(
+            selectedCompressionTab?.dataset.threshold || getAgentSettings().compressionThreshold
+          )
         };
       }
 
@@ -1803,8 +1873,13 @@ export function getInputScript(): string {
         var configured = state.agentSettings || {};
         return {
           thinkingEnabled: typeof configured.thinkingEnabled === 'boolean' ? configured.thinkingEnabled : true,
-          reasoningEffort: configured.reasoningEffort === 'max' ? 'max' : 'high'
+          reasoningEffort: configured.reasoningEffort === 'max' ? 'max' : 'high',
+          compressionThreshold: normalizeCompressionThreshold(configured.compressionThreshold)
         };
+      }
+
+      function normalizeCompressionThreshold(value) {
+        return value === 'aggressive' || value === 'cache' ? value : 'balanced';
       }
 
       function getSkillTrigger() {

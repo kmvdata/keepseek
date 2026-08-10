@@ -13,7 +13,8 @@ export function getScript(): string {
       selectedModelId: '',
       agentSettings: {
         thinkingEnabled: true,
-        reasoningEffort: 'high'
+        reasoningEffort: 'high',
+        compressionThreshold: 'balanced'
       },
       messages: [],
       activeSessionId: '',
@@ -2268,7 +2269,10 @@ export function getScript(): string {
       var configured = state.agentSettings || {};
       return {
         thinkingEnabled: typeof configured.thinkingEnabled === 'boolean' ? configured.thinkingEnabled : true,
-        reasoningEffort: configured.reasoningEffort === 'max' ? 'max' : 'high'
+        reasoningEffort: configured.reasoningEffort === 'max' ? 'max' : 'high',
+        compressionThreshold: configured.compressionThreshold === 'aggressive' || configured.compressionThreshold === 'cache'
+          ? configured.compressionThreshold
+          : 'balanced'
       };
     }
 

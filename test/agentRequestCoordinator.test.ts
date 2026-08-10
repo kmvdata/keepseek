@@ -21,7 +21,8 @@ test('createAgentRequest snapshots mutable request inputs', () => {
   const model = createModel();
   const settings: AgentSettings = {
     thinkingEnabled: true,
-    reasoningEffort: 'high'
+    reasoningEffort: 'high',
+    compressionThreshold: 'balanced'
   };
   const contextFiles = [createContextFile()];
   const history = [
@@ -231,7 +232,8 @@ function createRefreshInput(session: ChatSession): HistoryCompressionRefreshInpu
     model: createModel(),
     agentSettings: {
       thinkingEnabled: true,
-      reasoningEffort: 'high'
+      reasoningEffort: 'high',
+      compressionThreshold: 'balanced'
     },
     contextFiles: [],
     language: 'en'

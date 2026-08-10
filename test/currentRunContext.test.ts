@@ -123,7 +123,7 @@ test('contextUsage estimates the exact same current-run message projection as th
   });
   const usage = createContextUsageEstimate({
     model,
-    agentSettings: { thinkingEnabled: false, reasoningEffort: 'high' },
+    agentSettings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' },
     contextFiles: [],
     currentRunContext,
     messages: [],

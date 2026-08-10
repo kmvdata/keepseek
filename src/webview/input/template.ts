@@ -159,6 +159,57 @@ export function getInputTemplate(): string {
               <span id="commandModelValue" class="command-row-value">DeepSeek-V4-Flash</span>
             </button>
             <div id="commandModelList" class="command-model-list hidden" role="group" aria-label="模型列表" data-i18n-aria-label="modelList"></div>
+            <div class="command-control-row command-compression-row">
+              <span class="command-row-main">
+                <span class="command-row-title" data-i18n="compressionThreshold">自动压缩阈值</span>
+                <span
+                  id="commandCompressionDescription"
+                  class="command-row-description"
+                  role="tabpanel"
+                  aria-labelledby="commandCompressionBalanced"
+                  data-i18n="compressionBalancedDescription"
+                >80% 触发，平衡上下文空间与前缀缓存</span>
+              </span>
+              <div
+                id="commandCompressionTabs"
+                class="command-compression-tabs"
+                role="tablist"
+                aria-label="自动压缩阈值"
+                data-i18n-aria-label="compressionThreshold"
+                aria-describedby="commandCompressionDescription"
+              >
+                <button
+                  id="commandCompressionAggressive"
+                  type="button"
+                  class="command-compression-tab"
+                  role="tab"
+                  data-threshold="aggressive"
+                  data-i18n="compressionEarlyTab"
+                  aria-selected="false"
+                  aria-controls="commandCompressionDescription"
+                >70%（提前清理）</button>
+                <button
+                  id="commandCompressionBalanced"
+                  type="button"
+                  class="command-compression-tab"
+                  role="tab"
+                  data-threshold="balanced"
+                  data-i18n="compressionBalancedTab"
+                  aria-selected="true"
+                  aria-controls="commandCompressionDescription"
+                >80%（平衡）</button>
+                <button
+                  id="commandCompressionCache"
+                  type="button"
+                  class="command-compression-tab"
+                  role="tab"
+                  data-threshold="cache"
+                  data-i18n="compressionCacheFirstTab"
+                  aria-selected="false"
+                  aria-controls="commandCompressionDescription"
+                >85%（缓存优先）</button>
+              </div>
+            </div>
           </section>
 
           <section class="command-section" aria-label="Reasoning">

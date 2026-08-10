@@ -99,6 +99,17 @@
           ],
           "markdownDescription": "Thinking effort for the current workspace."
         },
+        "keepseek.compressionThreshold": {
+          "type": "string",
+          "default": "balanced",
+          "scope": "window",
+          "enum": [
+            "aggressive",
+            "balanced",
+            "cache"
+          ],
+          "markdownDescription": "Automatic history compaction threshold for the current workspace: 70% early cleanup, 80% balanced, or 85% cache first."
+        },
         "keepseek.model": {
           "type": "string",
           "default": "deepseek-chat",

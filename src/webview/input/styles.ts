@@ -632,7 +632,8 @@ export function getInputStyles(): string {
 
     .command-menu.is-readonly .command-row,
     .command-menu.is-readonly .command-control-row,
-    .command-menu.is-readonly .command-model-option {
+    .command-menu.is-readonly .command-model-option,
+    .command-menu.is-readonly .command-compression-tab {
       cursor: default;
     }
 
@@ -643,7 +644,9 @@ export function getInputStyles(): string {
     .command-menu.is-readonly .command-control-row:focus-within,
     .command-menu.is-readonly .command-model-option:hover,
     .command-menu.is-readonly .command-model-option:focus-visible,
-    .command-menu.is-readonly .command-model-option[aria-checked="true"] {
+    .command-menu.is-readonly .command-model-option[aria-checked="true"],
+    .command-menu.is-readonly .command-compression-tab:hover,
+    .command-menu.is-readonly .command-compression-tab:focus-visible {
       color: inherit;
       background: transparent;
       outline: none;
@@ -1061,6 +1064,63 @@ export function getInputStyles(): string {
 
     .command-model-option[aria-checked="true"] .command-model-name {
       font-weight: 600;
+    }
+
+    .command-compression-row {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 6px;
+      padding-top: 7px;
+      padding-bottom: 8px;
+    }
+
+    .command-compression-tabs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 3px;
+      width: 100%;
+      padding: 2px;
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      border-radius: 6px;
+      background: var(--vscode-input-background, transparent);
+    }
+
+    .command-compression-tab {
+      min-width: 0;
+      min-height: 27px;
+      padding: 4px 3px;
+      overflow: hidden;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+      font-size: 10px;
+      line-height: 1.25;
+      text-align: center;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .command-compression-tab:hover:not(:disabled),
+    .command-compression-tab:focus-visible:not(:disabled) {
+      color: var(--vscode-foreground);
+      background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+
+    .command-compression-tab[aria-selected="true"] {
+      color: var(--vscode-button-foreground, var(--vscode-foreground));
+      border-color: var(--vscode-focusBorder, var(--vscode-button-background));
+      background: var(--vscode-button-background, var(--vscode-list-activeSelectionBackground));
+      font-weight: 600;
+    }
+
+    .command-compression-tab:disabled {
+      opacity: 0.62;
+      cursor: default;
     }
 
     .command-effort-slider {

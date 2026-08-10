@@ -129,7 +129,8 @@ system prompt 会告诉模型：
 - 使用 streaming。
 - 仅支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`。
 - Thinking 开关和 `high` / `max` reasoning effort 由输入区选择。
-- `max_tokens`、工具上限、运行时长与压缩阈值来自 `src/shared/modelProfiles.ts` 中对应的模型 / Thinking 自动档位。
+- `max_tokens`、工具上限、运行时长来自 `src/shared/modelProfiles.ts` 中对应的模型 / Thinking 自动档位。
+- 自动压缩阈值由命令菜单中的用户档位覆盖 profile 的 `triggerRatio / forceRatio`：提前清理 `0.70 / 0.85`、默认平衡 `0.80 / 0.92`、缓存优先 `0.85 / 0.95`；其他压缩参数仍保留 profile 原值。
 - 固定使用 DeepSeek V4 推荐的 `temperature=1.0`、`top_p=1.0`。
 - `stream_options.include_usage = true`，用于获取服务商真实 usage。
 - 有工具预算时发送 function tools 和 `tool_choice: "auto"`。
@@ -159,6 +160,8 @@ system prompt 会告诉模型：
 ```
 
 循环上限由 `src/shared/modelProfiles.ts` 的 6 个自动档位控制（Flash / Pro × 非思考 / High / Max）。更强的模型和推理档位允许更多工具轮次、调用数、运行时间及工具结果；这些值不暴露为用户配置。两款模型的上下文窗口都固定按 1M tokens 估算。
+
+上下文投影上限按 `maxProjectionTokens = contextWindow × forceRatio` 计算。选择 85% 缓存优先档时，`forceRatio=0.95` 会让投影上限增大，从而保留更多原始历史、尽量延后会破坏前缀缓存的摘要刷新；这是预期行为。
 
 如果自动安全上限耗尽，Runner 会追加一条本地用户消息，要求模型停止调用工具，基于已获得的信息给出最终回答并说明缺口。
 
