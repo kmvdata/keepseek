@@ -20,13 +20,20 @@ import {
 } from '../shared/types';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
+  DEFAULT_PLANNER_MAX_RESEARCH_STEPS,
+  DEFAULT_PLANNER_MAX_TOKENS,
+  DEFAULT_PLANNER_MODE,
+  DEFAULT_PLANNER_REASONING_EFFORT,
+  DEFAULT_PLANNER_THINKING_ENABLED,
+  DEFAULT_SUBAGENT_MAX_CONCURRENCY,
   getConfiguredMaxRequestRetries,
   getConfiguredMaxRepairIterations,
   getConfiguredMaxValidationRuns,
   getConfiguredModelUsagePricing,
   getConfiguredRequestRetryBaseMs,
   getConfiguredSlimToolModeEnabled,
-  getConfiguredWorkspaceReadMaxBytes
+  getConfiguredWorkspaceReadMaxBytes,
+  normalizeAgentSettings
 } from '../shared/config';
 import { formatBytes } from '../shared/format';
 import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
@@ -108,9 +115,19 @@ import { TaskPlanTracker } from './taskPlan';
 import { createChangeSet } from '../edits/changeSet';
 import { RepairLoopTracker } from './repairLoop';
 import { RunDetailsBuilder } from './logging/runDetails';
+import { getErrorMessage } from '../shared/errors';
+import { localize } from '../shared/i18n';
+import { decidePlannerRoute } from './plannerRoute';
+import { appendPlannerPlanToExecutorTurn } from './plannerPrompt';
+import { PlannerRunner } from './plannerRunner';
+import { SubagentRunner } from './subagent/subagentRunner';
+import { resolveSubagentModel } from './subagent/modelResolver';
+import { ReviewSubagent, runReviewBestEffort } from './subagent/reviewSubagent';
+import { SubagentScheduler } from './subagent/scheduler';
 
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;
 const MAX_LENGTH_CONTINUATION_REQUESTS = 1;
+const PLANNER_MAX_DURATION_MS = 120_000;
 const SEARCH_SHAPED_RESULT_LIMIT = 120;
 const SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT = 12;
 const SEARCH_SHAPED_TOTAL_CHARS = 50_000;
@@ -215,6 +232,9 @@ export class AgentRunAbortedError extends Error {
 export class AgentRunner {
   private readonly dsmlToolParser = new DsmlToolParser();
   private readonly deepSeekClient = new DeepSeekClient();
+  private readonly readonlySubagentRunner: SubagentRunner;
+  private readonly plannerRunner: PlannerRunner;
+  private readonly reviewSubagent: ReviewSubagent;
 
   public constructor(
     private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService(),
@@ -222,8 +242,18 @@ export class AgentRunner {
     private readonly validationTools: ValidationToolAdapter = new ValidationToolService(),
     private readonly semanticTools: SemanticToolAdapter = new SemanticToolService(workspaceTools),
     private readonly gitTools: GitToolAdapter = new GitToolService(workspaceTools),
-    private readonly toolAuthorization: ToolAuthorizationAdapter = new ToolAuthorizationService()
-  ) {}
+    private readonly toolAuthorization: ToolAuthorizationAdapter = new ToolAuthorizationService(),
+    readonlySubagentRunner?: SubagentRunner
+  ) {
+    this.readonlySubagentRunner = readonlySubagentRunner ?? new SubagentRunner(
+      workspaceTools,
+      validationTools,
+      semanticTools,
+      gitTools
+    );
+    this.plannerRunner = new PlannerRunner(this.readonlySubagentRunner);
+    this.reviewSubagent = new ReviewSubagent(this.readonlySubagentRunner, workspaceTools);
+  }
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
     const runDetailsBuilderRef: { current?: RunDetailsBuilder } = {};
@@ -269,6 +299,9 @@ export class AgentRunner {
     // 本 run 内 native 工具轮的原样字节快照（assistant tool_calls + tool 结果），
     // 由调用方持久化到 assistant 消息，跨轮重建时逐字节还原。
     const toolRounds: AgentToolRound[] = [];
+    const normalizedSettings = normalizeAgentSettings(request.settings);
+    let runtimeConfig: AgentRuntimeConfig | undefined;
+    let plannerPlan = request.plannerPlan?.trim() || undefined;
     const usagePricing = getConfiguredModelUsagePricing(request.model.id);
     const upstreamUsageTotals: UpstreamUsageTotals = {
       requestCount: 0,
@@ -345,10 +378,55 @@ export class AgentRunner {
       backgroundRunId: request.backgroundRunId,
       executionLimits: request.executionLimits
     });
-    const finishRun = (
+    const finishRun = async (
       response: Omit<AgentResponse, 'runId' | 'taskPlan' | 'changeSet' | 'repairLoop' | 'runDetails'>,
       details: Record<string, unknown> = {}
-    ): AgentResponse => {
+    ): Promise<AgentResponse> => {
+      let finalResponse = response;
+      if (normalizedSettings.subagentReviewEnabled && response.draftEdits.length) {
+        taskPlan.beginSubagentReview();
+        callbacks.onStatus?.({ base: 'thinking', phase: 'running_subagent' });
+        const subagentModelId = resolveSubagentModel({
+          taskType: 'review',
+          overrides: normalizedSettings.subagentModelOverrides,
+          defaultModel: normalizedSettings.subagentModelId,
+          executorModel: request.model.id
+        });
+        const scheduler = new SubagentScheduler(
+          normalizedSettings.subagentMaxConcurrency ?? DEFAULT_SUBAGENT_MAX_CONCURRENCY
+        );
+        const review = await runReviewBestEffort(() => {
+          const reviewRuntimeConfig = runtimeConfig ?? this.getRuntimeConfig(request);
+          return scheduler.run(() => this.reviewSubagent.run({
+            prompt: request.prompt,
+            draftEdits: response.draftEdits,
+            contextInstructions: request.contextInstructions,
+            modelId: subagentModelId,
+            thinkingEnabled: normalizedSettings.thinkingEnabled,
+            reasoningEffort: normalizedSettings.reasoningEffort,
+            clientConfig: this.toDeepSeekClientConfig(reviewRuntimeConfig),
+            language: request.language,
+            signal: request.signal,
+            callbacks: { onUsage: callbacks.onUsage }
+          }));
+        });
+        this.throwIfAborted(request.signal, request.language);
+        taskPlan.finishSubagentReview(Boolean(review));
+        if (review) {
+          finalResponse = {
+            ...response,
+            message: [
+              response.message.trimEnd(),
+              localize(request.language, 'subagentReviewHeading'),
+              review.review.trim()
+            ].filter(Boolean).join('\n\n'),
+            subagentReviews: [...(response.subagentReviews ?? []), review]
+          };
+        }
+      }
+      if (plannerPlan && !finalResponse.plannerPlan) {
+        finalResponse = { ...finalResponse, plannerPlan };
+      }
       const finishReason = typeof details.finishReason === 'string' ? details.finishReason : undefined;
       const isBlocked = finishReason === 'tool_iterations_exhausted'
         || finishReason === 'tool_call_limit_exhausted'
@@ -358,25 +436,25 @@ export class AgentRunner {
         taskPlan.addBlocker(this.getBudgetToolError(finishReason as AgentBudgetFinishReason, request.language));
       }
       const repairState = repairLoop.getState();
-      const finalMessage = this.decorateRepairMessage(response.message, repairState, request.language);
+      const finalMessage = this.decorateRepairMessage(finalResponse.message, repairState, request.language);
       const completedPlan = taskPlan.complete(finalMessage, isBlocked);
       const changeSet = createChangeSet({
         runId: trace.runId,
         sessionId: request.sessionId,
         messageId: request.assistantMessageId,
         traceLogUri: traceLog?.uri,
-        edits: response.draftEdits,
+        edits: finalResponse.draftEdits,
         operationSummary: completedPlan.goal
       });
       const responseWithUsage = {
         runId: trace.runId,
-        ...response,
+        ...finalResponse,
         message: finalMessage,
         taskPlan: completedPlan,
         repairLoop: repairState,
         changeSet,
-        usage: response.usage ?? this.toTurnUsageStats(upstreamUsageTotals, request.model.id),
-        promptCacheDiagnostics: response.promptCacheDiagnostics ?? promptCacheDiagnostics,
+        usage: finalResponse.usage ?? this.toTurnUsageStats(upstreamUsageTotals, request.model.id),
+        promptCacheDiagnostics: finalResponse.promptCacheDiagnostics ?? promptCacheDiagnostics,
         toolRounds: toolRounds.length ? toolRounds : undefined
       };
       trace.record({
@@ -457,7 +535,7 @@ export class AgentRunner {
         base: 'thinking',
         phase: 'finalizing'
       });
-      return finishRun({
+      return await finishRun({
         message: request.language === 'en'
           ? [
               `Prepared a pending change for ${draftEdit.label}.`,
@@ -471,20 +549,99 @@ export class AgentRunner {
       }, { shortcut: 'draft' });
     }
 
-    const runtimeConfig = this.getRuntimeConfig(request);
+    const plannerModelId = normalizedSettings.plannerModelId?.trim() ?? '';
+    const plannerDecision = plannerModelId
+      ? decidePlannerRoute({
+          prompt: request.prompt,
+          language: request.language,
+          mode: normalizedSettings.plannerMode ?? DEFAULT_PLANNER_MODE
+        })
+      : { route: 'executor_only' as const, reason: 'default' as const };
+    let executorPrompt = request.prompt;
+    let executorHistory = request.history;
+    if (plannerDecision.route !== 'executor_only') {
+      taskPlan.beginPlanning();
+      emitStatus({ base: 'thinking', phase: 'planning' });
+      trace.record({ type: 'planner_route', decision: plannerDecision, modelId: plannerModelId });
+      try {
+        runtimeConfig = this.getRuntimeConfig(request);
+        if (!plannerPlan) {
+          const result = await this.plannerRunner.run({
+            prompt: request.prompt,
+            contextInstructions: request.contextInstructions,
+            modelId: plannerModelId,
+            thinkingEnabled: normalizedSettings.plannerThinkingEnabled ?? DEFAULT_PLANNER_THINKING_ENABLED,
+            reasoningEffort: normalizedSettings.plannerReasoningEffort ?? DEFAULT_PLANNER_REASONING_EFFORT,
+            maxResearchSteps: normalizedSettings.plannerMaxResearchSteps ?? DEFAULT_PLANNER_MAX_RESEARCH_STEPS,
+            maxTokens: normalizedSettings.plannerMaxTokens ?? DEFAULT_PLANNER_MAX_TOKENS,
+            maxDurationMs: Math.min(
+              PLANNER_MAX_DURATION_MS,
+              runtimeConfig.maxRunMs > 0 ? runtimeConfig.maxRunMs : PLANNER_MAX_DURATION_MS
+            ),
+            clientConfig: this.toDeepSeekClientConfig(runtimeConfig),
+            language: request.language,
+            signal: request.signal,
+            callbacks: { onUsage: callbacks.onUsage }
+          });
+          plannerPlan = result.plan;
+          trace.record({
+            type: 'planner_finish',
+            modelId: result.modelId,
+            researchSteps: result.researchSteps,
+            truncated: result.truncated,
+            finishReason: result.finishReason
+          });
+        }
+        taskPlan.finishPlanning(true);
+        if (plannerDecision.route === 'plan_only') {
+          return await finishRun({
+            message: plannerPlan,
+            draftEdits: [],
+            plannerPlan
+          }, { finishReason: 'planner_complete' });
+        }
+        const executorTurn = appendPlannerPlanToExecutorTurn({
+          prompt: request.prompt,
+          history: request.history,
+          plan: plannerPlan,
+          language: request.language
+        });
+        executorPrompt = executorTurn.prompt;
+        executorHistory = executorTurn.history;
+      } catch (error) {
+        this.throwIfAborted(request.signal, request.language);
+        const plannerError = localize(request.language, 'plannerFailed', { message: getErrorMessage(error) });
+        taskPlan.finishPlanning(false);
+        trace.record({ type: 'planner_failed', modelId: plannerModelId, error: getErrorMessage(error) });
+        if (plannerDecision.route === 'plan_only') {
+          taskPlan.addBlocker(plannerError);
+          return await finishRun({
+            message: plannerError,
+            draftEdits: []
+          }, { finishReason: 'planner_failed' });
+        }
+        plannerPlan = undefined;
+      }
+    }
+
+    runtimeConfig = runtimeConfig ?? this.getRuntimeConfig(request);
+    const executorRuntimeConfig = runtimeConfig;
     taskPlan.beginExecution();
+    emitStatus({ base: 'thinking', phase: 'requesting_model' });
     const projection = buildHistoryProjection({
-      history: request.history,
-      prompt: request.prompt,
+      history: executorHistory,
+      prompt: executorPrompt,
       language: request.language,
       contextCompression: request.contextCompression,
-      settings: runtimeConfig.contextCompression,
+      settings: executorRuntimeConfig.contextCompression,
       maxProjectionTokens: request.model.contextWindowTokens === undefined
         ? undefined
-        : request.model.contextWindowTokens * runtimeConfig.contextCompression.forceRatio
+        : request.model.contextWindowTokens * executorRuntimeConfig.contextCompression.forceRatio
     });
     const messages = buildInitialAgentMessages({
       ...request,
+      prompt: executorPrompt,
+      history: executorHistory,
       projection
     });
     trace.record({
@@ -537,23 +694,23 @@ export class AgentRunner {
     });
     const draftEdits: DraftEdit[] = [];
     const reasoningParts: string[] = [];
-    const maxIterations = Math.max(0, runtimeConfig.maxToolIterations);
+    const maxIterations = Math.max(0, executorRuntimeConfig.maxToolIterations);
     const runStartedAt = Date.now();
-    const runDeadlineAt = runtimeConfig.maxRunMs > 0 ? runStartedAt + runtimeConfig.maxRunMs : undefined;
-    const maxToolResultTokens = runtimeConfig.toolResultTokenBudget > 0
-      ? runtimeConfig.toolResultTokenBudget
+    const runDeadlineAt = executorRuntimeConfig.maxRunMs > 0 ? runStartedAt + executorRuntimeConfig.maxRunMs : undefined;
+    const maxToolResultTokens = executorRuntimeConfig.toolResultTokenBudget > 0
+      ? executorRuntimeConfig.toolResultTokenBudget
       : Number.POSITIVE_INFINITY;
-    const outputReserveTokens = resolveOutputReserveTokens(runtimeConfig.maxTokens);
+    const outputReserveTokens = resolveOutputReserveTokens(executorRuntimeConfig.maxTokens);
     const runtimeUsageBreakdown = {
       ...createContextUsageEstimate({
         model: request.model,
         agentSettings: request.settings,
         contextFiles: request.contextFiles,
         currentRunContext: request.currentRunContext,
-        messages: request.history,
+        messages: executorHistory,
         contextCompression: request.contextCompression,
         language: request.language,
-        prompt: request.prompt,
+        prompt: executorPrompt,
         includeTools: maxIterations > 0,
         outputReserveTokens,
         safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
@@ -608,8 +765,8 @@ export class AgentRunner {
           base: 'thinking',
           phase: 'finalizing'
         });
-        return finishRun({
-          message: this.getFinalMessage(null, draftEdits, runTimeStopReason, request.language, runtimeConfig),
+        return await finishRun({
+          message: this.getFinalMessage(null, draftEdits, runTimeStopReason, request.language, executorRuntimeConfig),
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits
         }, { finishReason: runTimeStopReason });
@@ -622,7 +779,7 @@ export class AgentRunner {
       const toolsForTurn = !budgetStopReason && turn < maxIterations ? tools : [];
       const allowTerminalDraftEdit = maxIterations > 0 && budgetStopReason === 'tool_iterations_exhausted';
       emitUsageEstimate(toolsForTurn);
-      const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, { trace, usageTotals: upstreamUsageTotals });
+      const response = await this.createChatCompletion(request, executorRuntimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, { trace, usageTotals: upstreamUsageTotals });
       this.throwIfAborted(request.signal, request.language);
       const normalizedAssistant = this.normalizeAssistantToolCalls(response.message, toolsForTurn.length > 0 || allowTerminalDraftEdit);
       const assistant = normalizedAssistant.assistant;
@@ -647,7 +804,7 @@ export class AgentRunner {
       if (!toolCalls.length) {
         const continuedResponse = await this.tryContinueLengthLimitedResponse({
           request,
-          runtimeConfig,
+          runtimeConfig: executorRuntimeConfig,
           messages,
           assistant,
           response,
@@ -665,8 +822,8 @@ export class AgentRunner {
             base: 'thinking',
             phase: 'finalizing'
           });
-          return finishRun({
-            message: this.getFinalMessage(continuedResponse.content, draftEdits, continuedResponse.finishReason, request.language, runtimeConfig),
+          return await finishRun({
+            message: this.getFinalMessage(continuedResponse.content, draftEdits, continuedResponse.finishReason, request.language, executorRuntimeConfig),
             reasoningContent: this.formatReasoning(reasoningParts),
             draftEdits
           }, { finishReason: continuedResponse.finishReason, continued: true });
@@ -679,8 +836,8 @@ export class AgentRunner {
         const finalFinishReason = response.finishReason === 'length'
           ? response.finishReason
           : budgetStopReason ?? response.finishReason;
-        return finishRun({
-          message: this.getFinalMessage(assistant.content, draftEdits, finalFinishReason, request.language, runtimeConfig),
+        return await finishRun({
+          message: this.getFinalMessage(assistant.content, draftEdits, finalFinishReason, request.language, executorRuntimeConfig),
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits
         }, { finishReason: finalFinishReason });
@@ -722,11 +879,11 @@ export class AgentRunner {
           }
         }
 
-        if (runtimeConfig.maxToolCalls > 0 && toolCallCount >= runtimeConfig.maxToolCalls) {
+        if (executorRuntimeConfig.maxToolCalls > 0 && toolCallCount >= executorRuntimeConfig.maxToolCalls) {
           budgetStopReason = 'tool_call_limit_exhausted';
           const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
             toolCallCount,
-            maxToolCalls: runtimeConfig.maxToolCalls
+            maxToolCalls: executorRuntimeConfig.maxToolCalls
           });
           trace.record({
             type: 'tool_result',
@@ -798,12 +955,12 @@ export class AgentRunner {
             });
             if (!authorizationDecision.allowed) {
               rawToolResult = createAuthorizationDeniedToolResult(authorizationDecision);
-            } else if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && validationRunCount >= runtimeConfig.maxValidationRuns) {
+            } else if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && validationRunCount >= executorRuntimeConfig.maxValidationRuns) {
               rawToolResult = JSON.stringify({
                 ok: false,
                 error: request.language === 'en'
-                  ? `The controlled validation budget of ${runtimeConfig.maxValidationRuns} run(s) was reached.`
-                  : `本轮受控验证预算已达到 ${runtimeConfig.maxValidationRuns} 次上限。`,
+                  ? `The controlled validation budget of ${executorRuntimeConfig.maxValidationRuns} run(s) was reached.`
+                  : `本轮受控验证预算已达到 ${executorRuntimeConfig.maxValidationRuns} 次上限。`,
                 budgetReason: 'validation_run_limit_exhausted'
               });
             } else {
@@ -815,7 +972,7 @@ export class AgentRunner {
                   type: 'validation_tool_call',
                   toolCallId: toolCall.id,
                   validationRunCount,
-                  maxValidationRuns: runtimeConfig.maxValidationRuns,
+                  maxValidationRuns: executorRuntimeConfig.maxValidationRuns,
                   repairIteration: repairLoop.getState().iteration
                 });
               }
@@ -1058,8 +1215,8 @@ export class AgentRunner {
       base: 'thinking',
       phase: 'finalizing'
     });
-    return finishRun({
-      message: this.getFinalMessage(null, draftEdits, 'tool_iterations_exhausted', request.language, runtimeConfig),
+    return await finishRun({
+      message: this.getFinalMessage(null, draftEdits, 'tool_iterations_exhausted', request.language, executorRuntimeConfig),
       reasoningContent: this.formatReasoning(reasoningParts),
       draftEdits
     }, { finishReason: 'tool_iterations_exhausted' });

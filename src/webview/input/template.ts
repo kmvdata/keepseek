@@ -1,3 +1,12 @@
+import {
+  MAX_PLANNER_MAX_RESEARCH_STEPS,
+  MAX_PLANNER_MAX_TOKENS,
+  MAX_SUBAGENT_MAX_CONCURRENCY,
+  MIN_PLANNER_MAX_RESEARCH_STEPS,
+  MIN_PLANNER_MAX_TOKENS,
+  MIN_SUBAGENT_MAX_CONCURRENCY
+} from '../../shared/config';
+
 export function getInputTemplate(): string {
   return `
     <form id="composer" class="composer">
@@ -159,6 +168,19 @@ export function getInputTemplate(): string {
               <span id="commandModelValue" class="command-row-value">DeepSeek-V4-Flash</span>
             </button>
             <div id="commandModelList" class="command-model-list hidden" role="group" aria-label="模型列表" data-i18n-aria-label="modelList"></div>
+            <button
+              id="commandModelStrategyButton"
+              type="button"
+              class="command-row"
+              role="menuitem"
+              aria-haspopup="dialog"
+            >
+              <span class="command-row-main">
+                <span class="command-row-title" data-i18n="modelStrategyTitle">模型策略</span>
+                <span class="command-row-description" data-i18n="modelStrategyDescription">配置独立规划与只读评审子代理</span>
+              </span>
+              <span id="commandModelStrategyValue" class="command-row-value" data-i18n="modelStrategySingleModel">单模型模式</span>
+            </button>
             <div class="command-control-row command-compression-row">
               <span class="command-row-main">
                 <span class="command-row-title" data-i18n="compressionThreshold">自动压缩阈值</span>
@@ -264,6 +286,99 @@ export function getInputTemplate(): string {
         <div class="settings-dialog-footer">
           <button id="backgroundCancel" type="button" class="secondary" data-i18n="cancel">取消</button>
           <button id="backgroundStart" type="button" data-i18n="backgroundStart">启动</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="modelStrategyDialogOverlay" class="settings-overlay hidden">
+      <div class="settings-dialog model-strategy-dialog" role="dialog" aria-modal="true" aria-label="模型策略" data-i18n-aria-label="modelStrategyDialogLabel">
+        <div class="settings-dialog-header">
+          <span class="settings-dialog-title" data-i18n="modelStrategyDialogTitle">模型策略</span>
+        </div>
+        <div class="settings-dialog-body">
+          <p class="settings-dialog-desc" data-i18n="modelStrategyDialogDescription">按需启用独立规划和只读评审；额外模型调用会增加耗时和 Token 消耗。</p>
+
+          <label class="settings-field settings-toggle-field">
+            <span class="settings-toggle-copy">
+              <span class="settings-field-label" data-i18n="modelStrategyPlannerEnabledLabel">独立规划模型</span>
+              <span class="settings-field-hint" data-i18n="modelStrategyPlannerEnabledHint">关闭时保持原有单模型请求路径</span>
+            </span>
+            <input id="modelStrategyPlannerEnabled" class="settings-toggle-input" type="checkbox" />
+            <span class="settings-toggle-track" aria-hidden="true"></span>
+          </label>
+          <div id="modelStrategyPlannerFields" class="model-strategy-fields">
+            <label class="settings-field">
+              <span class="settings-field-label" data-i18n="modelStrategyPlannerModelLabel">规划模型</span>
+              <select id="modelStrategyPlannerModel" class="settings-input" data-i18n-aria-label="modelStrategyPlannerModelLabel"></select>
+            </label>
+            <label class="settings-field">
+              <span class="settings-field-label" data-i18n="modelStrategyPlannerModeLabel">触发方式</span>
+              <select id="modelStrategyPlannerMode" class="settings-input" data-i18n-aria-label="modelStrategyPlannerModeLabel">
+                <option value="explicit" data-i18n="modelStrategyPlannerModeExplicit">明确要求时</option>
+                <option value="auto" data-i18n="modelStrategyPlannerModeAuto">自动判断复杂任务</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="settings-section-title" data-i18n="modelStrategyReviewSectionTitle">评审子代理</div>
+          <label class="settings-field settings-toggle-field">
+            <span class="settings-toggle-copy">
+              <span class="settings-field-label" data-i18n="modelStrategyReviewEnabledLabel">修改后自动评审</span>
+              <span class="settings-field-hint" data-i18n="modelStrategyReviewEnabledHint">仅在本次运行产生 DraftEdit 后执行只读评审</span>
+            </span>
+            <input id="modelStrategyReviewEnabled" class="settings-toggle-input" type="checkbox" />
+            <span class="settings-toggle-track" aria-hidden="true"></span>
+          </label>
+          <label class="settings-field">
+            <span class="settings-field-label" data-i18n="modelStrategySubagentModelLabel">子代理模型</span>
+            <select id="modelStrategySubagentModel" class="settings-input" data-i18n-aria-label="modelStrategySubagentModelLabel"></select>
+            <span class="settings-field-hint" data-i18n="modelStrategySubagentModelHint">继承主模型时，评审使用当前执行器模型</span>
+          </label>
+
+          <details id="modelStrategyAdvanced" class="model-strategy-advanced">
+            <summary data-i18n="modelStrategyAdvancedTitle">高级设置</summary>
+            <div class="model-strategy-advanced-body">
+              <label class="settings-field settings-toggle-field">
+                <span class="settings-toggle-copy">
+                  <span class="settings-field-label" data-i18n="modelStrategyPlannerThinkingLabel">规划 Thinking</span>
+                  <span class="settings-field-hint" data-i18n="modelStrategyPlannerThinkingHint">仅影响独立规划请求</span>
+                </span>
+                <input id="modelStrategyPlannerThinking" class="settings-toggle-input" type="checkbox" />
+                <span class="settings-toggle-track" aria-hidden="true"></span>
+              </label>
+              <label class="settings-field">
+                <span class="settings-field-label" data-i18n="modelStrategyPlannerEffortLabel">规划 reasoning effort</span>
+                <select id="modelStrategyPlannerEffort" class="settings-input" data-i18n-aria-label="modelStrategyPlannerEffortLabel">
+                  <option value="high">High</option>
+                  <option value="max">Max</option>
+                </select>
+              </label>
+              <div class="model-strategy-number-grid">
+                <label class="settings-field">
+                  <span class="settings-field-label" data-i18n="modelStrategyResearchStepsLabel">最大调研轮次</span>
+                  <input id="modelStrategyResearchSteps" class="settings-input" type="number" min="${MIN_PLANNER_MAX_RESEARCH_STEPS}" max="${MAX_PLANNER_MAX_RESEARCH_STEPS}" step="1" inputmode="numeric" autocomplete="off" />
+                </label>
+                <label class="settings-field">
+                  <span class="settings-field-label" data-i18n="modelStrategyMaxTokensLabel">最大输出 Token</span>
+                  <input id="modelStrategyMaxTokens" class="settings-input" type="number" min="${MIN_PLANNER_MAX_TOKENS}" max="${MAX_PLANNER_MAX_TOKENS}" step="512" inputmode="numeric" autocomplete="off" />
+                </label>
+              </div>
+              <label class="settings-field">
+                <span class="settings-field-label" data-i18n="modelStrategyReviewOverrideLabel">评审任务模型覆盖</span>
+                <select id="modelStrategyReviewOverride" class="settings-input" data-i18n-aria-label="modelStrategyReviewOverrideLabel"></select>
+                <span class="settings-field-hint" data-i18n="modelStrategyReviewOverrideHint">可让 review 使用不同于默认子代理的模型</span>
+              </label>
+              <label class="settings-field">
+                <span class="settings-field-label" data-i18n="modelStrategyConcurrencyLabel">子代理最大并发数</span>
+                <input id="modelStrategyConcurrency" class="settings-input" type="number" min="${MIN_SUBAGENT_MAX_CONCURRENCY}" max="${MAX_SUBAGENT_MAX_CONCURRENCY}" step="1" inputmode="numeric" autocomplete="off" />
+                <span class="settings-field-hint" data-i18n="modelStrategyConcurrencyHint">只限制只读子代理任务，不代表并行写入</span>
+              </label>
+            </div>
+          </details>
+        </div>
+        <div class="settings-dialog-footer">
+          <button id="modelStrategyCancelButton" type="button" class="secondary" data-i18n="cancel">取消</button>
+          <button id="modelStrategySaveButton" type="button" data-i18n="save">保存</button>
         </div>
       </div>
     </div>

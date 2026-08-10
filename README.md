@@ -156,6 +156,14 @@ KeepSeek 住在 VS Code Secondary Sidebar 里，不用切窗口、不用复制�
 - 定位声明、引用优先走 VS Code 语义 provider（symbol/reference），省 token 且更准；
 - 依赖、构建、VCS 目录自动跳过；二进制、媒体、归档、超限文件不会进上下文。
 
+### 独立规划模型与评审子代理
+
+从输入框旁的命令菜单进入 **MODEL → 模型策略**，可快速开启或关闭独立规划与评审子代理；高级设置包含规划预算、评审模型覆盖和子代理并发上限。该面板直接读写工作区的 VS Code 配置，与 Settings 中的 `keepseek.*` 配置保持一致。
+
+复杂任务可以指定独立规划模型：`explicit` 模式只响应“先规划 / plan first”等明确要求，`auto` 模式还会按固定规则路由复杂任务。规划器在独立的一次性会话中使用静态只读工具集调研；`plan_only` 只返回计划，`plan_and_execute` 把计划追加到当前 user turn 尾部后交给执行器，不改写会话历史。
+
+开启评审子代理后，只要本轮产生 DraftEdit，KeepSeek 就会用单独解析的子代理模型检查需求一致性、明显回归、遗漏和安全边界。规划器与评审器都没有 DraftEdit、删除或验证工具，任何修改仍必须由执行器生成 ChangeSet，并由你点击 Apply。
+
 ### 可复用工作流（Skills）
 
 把项目约定、排查步骤、团队提示词写成 Skill（`.agents`、`~/.codex/skills` 均可发现），`/skills` 浏览、`$` 引用即用，还支持 `/create-skill` 生成草案。
@@ -245,6 +253,16 @@ keepseek.apiKey = sk-...
 | `keepseek.maxWorkspaceToolFiles` | `2000` | 只读列表与搜索最多枚举的候选文件数 |
 | `keepseek.maxRequestRetries` | `2` | 首块响应前的自动重试次数（指数退避） |
 | `keepseek.historyRetentionDays` | `7` | 历史菜单默认显示范围（存储按 60 天硬清理） |
+| `keepseek.plannerModelId` | `""` | 独立规划模型；空值关闭规划路由 |
+| `keepseek.plannerMode` | `explicit` | 明确要求时规划，或用 `auto` 确定性路由复杂任务 |
+| `keepseek.plannerThinkingEnabled` | `true` | 规划请求启用 Thinking |
+| `keepseek.plannerReasoningEffort` | `high` | 规划请求的推理强度：`high` / `max` |
+| `keepseek.plannerMaxResearchSteps` | `6` | 单次规划最多只读工具轮次（1–20） |
+| `keepseek.plannerMaxTokens` | `4096` | 单次规划输出预算（512–32768） |
+| `keepseek.subagentModelId` | `""` | 子代理默认模型；空值继承执行器模型 |
+| `keepseek.subagentModelOverrides` | `{}` | 按任务类型覆盖子代理模型（`-` / `_` 等价） |
+| `keepseek.subagentReviewEnabled` | `false` | DraftEdit 生成后运行只读评审子代理 |
+| `keepseek.subagentMaxConcurrency` | `1` | 会话级子代理并发上限（1–4） |
 
 模型与 Thinking 档位对应的输出预算、工具轮次、摘要触发/强制比例是内部固定档位，始终开启上下文压缩。
 

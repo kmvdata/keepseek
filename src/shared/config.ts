@@ -3,6 +3,7 @@ import {
   AgentSettings,
   CompressionThreshold,
   KeepseekModel,
+  PlannerMode,
   UsageCostRates,
   ValidationAuthorizationPolicy
 } from './types';
@@ -32,6 +33,21 @@ export const DEFAULT_BALANCE_REFRESH_INTERVAL_MS = 60_000;
 // opt into the smaller schema explicitly.
 export const DEFAULT_SLIM_TOOL_MODE_ENABLED = false;
 export const DEFAULT_COMPRESSION_THRESHOLD: CompressionThreshold = 'balanced';
+export const DEFAULT_PLANNER_MODEL_ID = '';
+export const DEFAULT_PLANNER_MODE: PlannerMode = 'explicit';
+export const DEFAULT_PLANNER_THINKING_ENABLED = true;
+export const DEFAULT_PLANNER_REASONING_EFFORT = 'high' as const;
+export const DEFAULT_PLANNER_MAX_RESEARCH_STEPS = 6;
+export const DEFAULT_PLANNER_MAX_TOKENS = 4_096;
+export const DEFAULT_SUBAGENT_MODEL_ID = '';
+export const DEFAULT_SUBAGENT_REVIEW_ENABLED = false;
+export const DEFAULT_SUBAGENT_MAX_CONCURRENCY = 1;
+export const MIN_PLANNER_MAX_RESEARCH_STEPS = 1;
+export const MAX_PLANNER_MAX_RESEARCH_STEPS = 20;
+export const MIN_PLANNER_MAX_TOKENS = 512;
+export const MAX_PLANNER_MAX_TOKENS = 32_768;
+export const MIN_SUBAGENT_MAX_CONCURRENCY = 1;
+export const MAX_SUBAGENT_MAX_CONCURRENCY = 4;
 export const DEFAULT_VALIDATION_AUTHORIZATION_POLICY: ValidationAuthorizationPolicy = 'ask';
 export const DEFAULT_MAX_VALIDATION_RUNS = 3;
 export const DEFAULT_MAX_REPAIR_ITERATIONS = 2;
@@ -95,11 +111,85 @@ export function getConfiguredSelectedModelId(models = getConfiguredModels()): st
 
 export function getConfiguredAgentSettings(): AgentSettings {
   const config = vscode.workspace.getConfiguration('keepseek');
+  const models = getConfiguredModels();
   return normalizeAgentSettings({
     thinkingEnabled: config.get<boolean>('thinkingEnabled', true),
     reasoningEffort: config.get<AgentSettings['reasoningEffort']>('reasoningEffort', 'high'),
-    compressionThreshold: getConfiguredCompressionThreshold()
+    compressionThreshold: getConfiguredCompressionThreshold(),
+    plannerModelId: normalizeOptionalSupportedModelId(
+      config.get<unknown>('plannerModelId', DEFAULT_PLANNER_MODEL_ID),
+      models
+    ),
+    plannerMode: normalizePlannerMode(config.get<unknown>('plannerMode', DEFAULT_PLANNER_MODE)),
+    plannerThinkingEnabled: config.get<boolean>('plannerThinkingEnabled', DEFAULT_PLANNER_THINKING_ENABLED),
+    plannerReasoningEffort: config.get<AgentSettings['plannerReasoningEffort']>(
+      'plannerReasoningEffort',
+      DEFAULT_PLANNER_REASONING_EFFORT
+    ),
+    plannerMaxResearchSteps: normalizeIntegerInRange(
+      config.get<unknown>('plannerMaxResearchSteps', DEFAULT_PLANNER_MAX_RESEARCH_STEPS),
+      MIN_PLANNER_MAX_RESEARCH_STEPS,
+      MAX_PLANNER_MAX_RESEARCH_STEPS,
+      DEFAULT_PLANNER_MAX_RESEARCH_STEPS
+    ),
+    plannerMaxTokens: normalizeIntegerInRange(
+      config.get<unknown>('plannerMaxTokens', DEFAULT_PLANNER_MAX_TOKENS),
+      MIN_PLANNER_MAX_TOKENS,
+      MAX_PLANNER_MAX_TOKENS,
+      DEFAULT_PLANNER_MAX_TOKENS
+    ),
+    subagentModelId: normalizeOptionalSupportedModelId(
+      config.get<unknown>('subagentModelId', DEFAULT_SUBAGENT_MODEL_ID),
+      models
+    ),
+    subagentModelOverrides: normalizeSubagentModelOverrides(
+      config.get<unknown>('subagentModelOverrides', {}),
+      models
+    ),
+    subagentReviewEnabled: config.get<boolean>('subagentReviewEnabled', DEFAULT_SUBAGENT_REVIEW_ENABLED),
+    subagentMaxConcurrency: normalizeIntegerInRange(
+      config.get<unknown>('subagentMaxConcurrency', DEFAULT_SUBAGENT_MAX_CONCURRENCY),
+      MIN_SUBAGENT_MAX_CONCURRENCY,
+      MAX_SUBAGENT_MAX_CONCURRENCY,
+      DEFAULT_SUBAGENT_MAX_CONCURRENCY
+    )
   });
+}
+
+export interface InvalidAgentModelSetting {
+  setting: 'plannerModelId' | 'subagentModelId' | 'subagentModelOverrides';
+  value: string;
+  taskType?: string;
+}
+
+export function getInvalidConfiguredAgentModelSettings(
+  models = getConfiguredModels()
+): InvalidAgentModelSetting[] {
+  const config = vscode.workspace.getConfiguration('keepseek');
+  const supported = new Set(models.map((model) => model.id));
+  const invalid: InvalidAgentModelSetting[] = [];
+  const plannerModelId = normalizeString(config.get<unknown>('plannerModelId', DEFAULT_PLANNER_MODEL_ID));
+  if (plannerModelId && !supported.has(plannerModelId)) {
+    invalid.push({ setting: 'plannerModelId', value: plannerModelId });
+  }
+  const subagentModelId = normalizeString(config.get<unknown>('subagentModelId', DEFAULT_SUBAGENT_MODEL_ID));
+  if (subagentModelId && !supported.has(subagentModelId)) {
+    invalid.push({ setting: 'subagentModelId', value: subagentModelId });
+  }
+  const overrides = config.get<unknown>('subagentModelOverrides', {});
+  if (isRecord(overrides)) {
+    for (const [taskType, value] of Object.entries(overrides)) {
+      const modelId = normalizeString(value);
+      if (modelId && !supported.has(modelId)) {
+        invalid.push({
+          setting: 'subagentModelOverrides',
+          value: modelId,
+          taskType: normalizeSubagentTaskType(taskType)
+        });
+      }
+    }
+  }
+  return invalid;
 }
 
 export function getConfiguredCompressionThreshold(): CompressionThreshold {
@@ -340,8 +430,76 @@ export function normalizeAgentSettings(settings: Partial<AgentSettings> | undefi
     compressionThreshold: normalizeCompressionThreshold(
       settings?.compressionThreshold,
       fallback?.compressionThreshold ?? DEFAULT_COMPRESSION_THRESHOLD
+    ),
+    plannerModelId: normalizeString(settings?.plannerModelId ?? fallback?.plannerModelId),
+    plannerMode: normalizePlannerMode(settings?.plannerMode, fallback?.plannerMode),
+    plannerThinkingEnabled: typeof settings?.plannerThinkingEnabled === 'boolean'
+      ? settings.plannerThinkingEnabled
+      : fallback?.plannerThinkingEnabled ?? DEFAULT_PLANNER_THINKING_ENABLED,
+    plannerReasoningEffort: settings?.plannerReasoningEffort === 'max'
+      ? 'max'
+      : settings?.plannerReasoningEffort === 'high'
+        ? 'high'
+        : fallback?.plannerReasoningEffort ?? DEFAULT_PLANNER_REASONING_EFFORT,
+    plannerMaxResearchSteps: normalizeIntegerInRange(
+      settings?.plannerMaxResearchSteps ?? fallback?.plannerMaxResearchSteps,
+      MIN_PLANNER_MAX_RESEARCH_STEPS,
+      MAX_PLANNER_MAX_RESEARCH_STEPS,
+      DEFAULT_PLANNER_MAX_RESEARCH_STEPS
+    ),
+    plannerMaxTokens: normalizeIntegerInRange(
+      settings?.plannerMaxTokens ?? fallback?.plannerMaxTokens,
+      MIN_PLANNER_MAX_TOKENS,
+      MAX_PLANNER_MAX_TOKENS,
+      DEFAULT_PLANNER_MAX_TOKENS
+    ),
+    subagentModelId: normalizeString(settings?.subagentModelId ?? fallback?.subagentModelId),
+    subagentModelOverrides: normalizeSubagentModelOverrides(
+      settings?.subagentModelOverrides ?? fallback?.subagentModelOverrides
+    ),
+    subagentReviewEnabled: typeof settings?.subagentReviewEnabled === 'boolean'
+      ? settings.subagentReviewEnabled
+      : fallback?.subagentReviewEnabled ?? DEFAULT_SUBAGENT_REVIEW_ENABLED,
+    subagentMaxConcurrency: normalizeIntegerInRange(
+      settings?.subagentMaxConcurrency ?? fallback?.subagentMaxConcurrency,
+      MIN_SUBAGENT_MAX_CONCURRENCY,
+      MAX_SUBAGENT_MAX_CONCURRENCY,
+      DEFAULT_SUBAGENT_MAX_CONCURRENCY
     )
   };
+}
+
+export function normalizePlannerMode(value: unknown, fallback: PlannerMode = DEFAULT_PLANNER_MODE): PlannerMode {
+  return value === 'auto' || value === 'explicit' ? value : fallback;
+}
+
+export function normalizeOptionalSupportedModelId(value: unknown, models = getConfiguredModels()): string {
+  const modelId = normalizeString(value);
+  return modelId && models.some((model) => model.id === modelId) ? modelId : '';
+}
+
+export function normalizeSubagentTaskType(value: string): string {
+  return value.trim().toLowerCase().replace(/[-_]+/gu, '_');
+}
+
+export function normalizeSubagentModelOverrides(
+  value: unknown,
+  models?: readonly KeepseekModel[]
+): Record<string, string> {
+  if (!isRecord(value)) {
+    return {};
+  }
+  const supported = models ? new Set(models.map((model) => model.id)) : undefined;
+  const normalized: Record<string, string> = {};
+  for (const [rawTaskType, rawModelId] of Object.entries(value)) {
+    const taskType = normalizeSubagentTaskType(rawTaskType);
+    const modelId = normalizeString(rawModelId);
+    if (!taskType || !modelId || (supported && !supported.has(modelId))) {
+      continue;
+    }
+    normalized[taskType] = modelId;
+  }
+  return normalized;
 }
 
 export function normalizeCompressionThreshold(
@@ -392,4 +550,12 @@ function normalizeUsageCostRates(
 function normalizeNonNegativeNumber(value: unknown, fallback: number): number {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
+function normalizeString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

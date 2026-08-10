@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { KeepseekLanguage } from '../shared/i18n';
+import { localize } from '../shared/i18n';
 import type { TaskPlan, TaskPlanStep, TaskPlanStepStatus } from '../shared/types';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
@@ -67,6 +68,27 @@ export class TaskPlanTracker {
 
   public beginExecution(): void {
     this.setStepStatus('understand', 'completed');
+    this.activateStep('respond');
+  }
+
+  public beginPlanning(): void {
+    this.setStepStatus('understand', 'completed');
+    this.ensurePhaseStep('planning', localize(this.language, 'taskPlanPlanning'));
+    this.activateStep('planning');
+  }
+
+  public finishPlanning(succeeded: boolean): void {
+    this.setStepStatus('planning', succeeded ? 'completed' : 'skipped');
+    this.activateStep('respond');
+  }
+
+  public beginSubagentReview(): void {
+    this.ensurePhaseStep('subagent_review', localize(this.language, 'taskPlanSubagentReview'));
+    this.activateStep('subagent_review');
+  }
+
+  public finishSubagentReview(succeeded: boolean): void {
+    this.setStepStatus('subagent_review', succeeded ? 'completed' : 'skipped');
     this.activateStep('respond');
   }
 
@@ -229,6 +251,18 @@ export class TaskPlanTracker {
     }
     const now = new Date().toISOString();
     const step = createStep(kind, getStepTitle(kind, this.language), 'pending', now);
+    const responseIndex = this.plan.steps.findIndex((item) => item.id === 'respond');
+    this.plan.steps.splice(responseIndex < 0 ? this.plan.steps.length : responseIndex, 0, step);
+    this.touchAndEmit('step_added');
+    return step;
+  }
+
+  private ensurePhaseStep(id: string, title: string): TaskPlanStep {
+    const existing = this.getStep(id);
+    if (existing) {
+      return existing;
+    }
+    const step = createStep(id, title, 'pending', new Date().toISOString());
     const responseIndex = this.plan.steps.findIndex((item) => item.id === 'respond');
     this.plan.steps.splice(responseIndex < 0 ? this.plan.steps.length : responseIndex, 0, step);
     this.touchAndEmit('step_added');

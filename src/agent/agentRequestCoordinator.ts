@@ -31,6 +31,7 @@ export interface AgentRequestCoordinatorInput {
   repairLoop?: AgentRequest['repairLoop'];
   executionLimits?: AgentRequest['executionLimits'];
   backgroundRunId?: string;
+  plannerPlan?: string;
   signal?: AbortSignal;
 }
 
@@ -54,7 +55,12 @@ export class AgentRequestCoordinator {
     return {
       prompt: input.prompt,
       model: { ...input.model },
-      settings: { ...input.settings },
+      settings: {
+        ...input.settings,
+        subagentModelOverrides: input.settings.subagentModelOverrides
+          ? { ...input.settings.subagentModelOverrides }
+          : undefined
+      },
       contextFiles: input.contextFiles.map((file) => ({ ...file })),
       currentRunContext: input.currentRunContext
         ? {
@@ -93,6 +99,7 @@ export class AgentRequestCoordinator {
         : undefined,
       executionLimits: input.executionLimits ? { ...input.executionLimits } : undefined,
       backgroundRunId: input.backgroundRunId,
+      plannerPlan: input.plannerPlan,
       signal: input.signal
     };
   }

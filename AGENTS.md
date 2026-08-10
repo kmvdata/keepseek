@@ -15,6 +15,10 @@ src/
 │   └── focusView.ts             # 打开并聚焦 KeepSeek 视图
 ├── agent/
 │   ├── runner.ts                # Agent 请求编排、工具调用循环、最终响应整理
+│   ├── plannerRoute.ts          # 独立规划模型的确定性路由（无模型调用）
+│   ├── plannerPrompt.ts         # 规划器纯静态 system prompt 与 turn-tail 格式
+│   ├── plannerRunner.ts         # 一次性独立规划会话编排
+│   ├── subagent/                # 子代理模型解析、只读运行器、评审与会话级调度器
 │   ├── protocol.ts              # system prompt、消息拼装、工具 schema、token 估算入口
 │   ├── historyProjection.ts     # 模型请求用历史投影：摘要、保护消息、最近轮次
 │   ├── historyCompressor.ts     # 会话摘要刷新与失败回退
@@ -265,8 +269,12 @@ Agent 工具包括：
 
 `AgentRunner.run()` 的输入输出保持在 `shared/types.ts`：
 
-- 输入：`AgentRequest`，包含 prompt、模型、Agent 设置、上下文文件、历史消息、语言。
-- 输出：`AgentResponse`，包含最终文本、可选 reasoningContent、DraftEdit 列表。
+- 输入：`AgentRequest`，包含 prompt、执行器模型、Agent 设置、上下文文件、历史消息、语言，以及可选的一次性 `plannerPlan`。
+- 输出：`AgentResponse`，包含最终文本、可选 reasoningContent、DraftEdit 列表、规划文本和评审子代理结果。
+
+独立规划与评审子代理遵循同一安全边界：只使用冻结的只读工具 schema，不暴露 DraftEdit、delete 或 validation 工具，也不把独立会话历史写入主会话。`plannerMode: explicit` 只匹配明确规划标记；`auto` 额外使用 `plannerRoute.ts` 的确定性复杂度规则。`plan_and_execute` 的计划只进入当前 user turn 的临时尾部投影，不回写持久化历史；规划失败时执行路由降级，评审失败始终 best-effort 静默降级。规划器与子代理请求分别按实际模型产生 usage 事件。
+
+命令菜单的 `MODEL → 模型策略` 是上述 workspace 配置的 Webview 入口，只通过 `setAgentSettings` 读写既有 `keepseek.*` 配置，不维护第二份状态或持久化格式；高级预算边界继续以 `shared/config.ts` 的归一化结果为准。
 
 工具调用预算由 `keepseek.maxToolIterations`（默认 8，范围 0-64）、`keepseek.maxToolCalls`（默认 24，范围 0-256）、`keepseek.maxRunMs`（默认 600000，范围 0-3600000）和 `keepseek.toolResultTokenBudget`（默认 0，自动按模型上下文估算，范围 0-1000000）共同控制。
 
@@ -299,6 +307,7 @@ DeepSeek 前缀缓存从请求第 0 个 token 起逐字节匹配，命中部分�
 - **user 消息**：所有轮次一律以 `(expandedContent ?? content).trim()` 发送，禁止在发送时再做任何包装/拼接——"发送字节 == 持久化字节"，跨轮必须一致。
 - **assistant 消息**：工具轮（tool_calls / tool 消息）通过 `ChatMessage.toolRounds` 原样持久化，跨轮重建时逐字节还原；`reasoning_content` 原样保存。
 - **动态内容**（goal、临时指令、后台任务状态等）一律追加在 user 消息尾部（turn tail），绝不改写已发送的历史消息。
+- **规划器 turn tail**：启用 `plan_and_execute` 时，计划以固定标题追加到当前 user 消息的临时投影；不得回写历史消息，也不得改变之前任何消息的字节。规划器和评审器各自使用纯静态 system prompt、稳定 `contextInstructions` 与静态只读工具 schema。
 - **历史投影 append-only**：消息进入投影后只追加，不重写、不 trim、不重排；摘要刷新是低频缓存重置点（见下）。
 
 禁止事项：
@@ -370,6 +379,7 @@ projection 组成：
 - 新增 Webview → 扩展消息：更新 `provider/webviewMessages.ts` 的 `WebviewMessage` 联合类型、`provider/KeepseekChatViewProvider.ts` 的 `handleMessage()`、Webview 脚本发送点；剪贴板兜底消息 `requestClipboardText` / `writeClipboardText` 由 `webview/richTextShortcuts.ts` 统一发起。
 - 新增扩展 → Webview 主动消息：不要放进 `WebviewMessage`，但要在 Webview message listener 中处理。
 - 新增 Agent 工具：更新 `agent/protocol.ts` 的工具 schema 和 `agent/runner.ts` 的工具路由；工具实现优先放独立模块。
+- 修改规划/子代理能力：同步检查 `agent/plannerRoute.ts`、`agent/plannerRunner.ts`、`agent/subagent/`、`shared/config.ts`、`shared/types.ts`、Provider 状态透传与缓存字节测试；只读子代理不得复用执行器的写入或验证路由。
 - 修改文件或目录引用格式：同步检查 `context/references/fileReference.ts`、`context/references/directoryReference.ts`、`webview/input/script.ts`、`webview/script.ts` 的序列化/反序列化/打开逻辑。
 - 修改 DraftEdit/ChangeSet 应用行为：优先改 `ChangeSetStore` / `SafeFileEditor`，不要放进 `AgentRunner`。
 - 修改样式只碰 `webview/styles.ts` 或 `webview/input/styles.ts`；修改输入区专属交互只碰 `webview/input/script.ts`；修改 transcript/设置/会话 UI 只碰 `webview/script.ts`；修改富文本通用快捷键、mark/region、剪贴板桥接优先改 `webview/richTextShortcuts.ts`。

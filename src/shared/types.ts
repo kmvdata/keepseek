@@ -20,10 +20,46 @@ export type ReasoningEffort = 'high' | 'max';
 
 export type CompressionThreshold = 'aggressive' | 'balanced' | 'cache';
 
+export type PlannerMode = 'explicit' | 'auto';
+
+export type PlannerRoute = 'executor_only' | 'plan_and_execute' | 'plan_only';
+
+export interface PlannerDecision {
+  route: PlannerRoute;
+  reason: 'explicit_plan' | 'plan_only_marker' | 'auto_complexity' | 'default';
+}
+
+export interface PlannerResult {
+  plan: string;
+  modelId: string;
+  researchSteps: number;
+  truncated: boolean;
+  finishReason?: string | null;
+}
+
+export interface SubagentReviewResult {
+  taskType: 'review';
+  modelId: string;
+  review: string;
+  researchSteps: number;
+  truncated: boolean;
+}
+
 export interface AgentSettings {
   thinkingEnabled: boolean;
   reasoningEffort: ReasoningEffort;
   compressionThreshold: CompressionThreshold;
+  /** Optional for backward compatibility with sessions and callers created before model strategies. */
+  plannerModelId?: string;
+  plannerMode?: PlannerMode;
+  plannerThinkingEnabled?: boolean;
+  plannerReasoningEffort?: ReasoningEffort;
+  plannerMaxResearchSteps?: number;
+  plannerMaxTokens?: number;
+  subagentModelId?: string;
+  subagentModelOverrides?: Record<string, string>;
+  subagentReviewEnabled?: boolean;
+  subagentMaxConcurrency?: number;
 }
 
 export type ContextFileSource = 'workspace' | 'external';
@@ -698,6 +734,8 @@ export interface AgentRequest {
   repairLoop?: RepairLoopState;
   executionLimits?: AgentExecutionLimits;
   backgroundRunId?: string;
+  /** Optional one-shot planner output reserved for approval/retry flows. */
+  plannerPlan?: string;
   signal?: AbortSignal;
 }
 
@@ -735,6 +773,8 @@ export interface AgentResponse {
   toolRounds?: AgentToolRound[];
   traceLog?: AgentTraceLogInfo;
   runDetails: RunDetailsSummary;
+  plannerPlan?: string;
+  subagentReviews?: SubagentReviewResult[];
 }
 
 export type AgentActivityBase = 'idle' | 'thinking' | 'executing' | 'waiting' | 'complete' | 'error' | 'stopped';
@@ -743,6 +783,7 @@ export type AgentActivityPhase =
   | 'idle'
   | 'preparing'
   | 'expanding_references'
+  | 'planning'
   | 'requesting_model'
   | 'reasoning'
   | 'planning_tool'
@@ -760,6 +801,7 @@ export type AgentActivityPhase =
   | 'generating_repair'
   | 'waiting_for_apply'
   | 'running_validation'
+  | 'running_subagent'
   | 'reviewing_tool_result'
   | 'generating'
   | 'finalizing'

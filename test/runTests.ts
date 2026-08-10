@@ -16,6 +16,7 @@ import './gitTools.test';
 import './historyCompressor.test';
 import './historyProjection.test';
 import './modelProfiles.test';
+import './modelStrategy.test';
 import './protocolCache.test';
 import './projectInstructions.test';
 import './legacyProjectMemoryMigration.test';

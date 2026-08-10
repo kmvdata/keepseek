@@ -100,3 +100,20 @@ test('moves a paused repair plan from ChangeSet apply to ready validation', () =
   assert.equal(ready.steps.find((step) => step.id === 'repair_validate')?.status, 'in_progress');
   assert.deepEqual(ready.blockers, []);
 });
+
+test('task plan exposes planner and review subagent phases', () => {
+  const tracker = new TaskPlanTracker({
+    runId: 'run-model-strategy',
+    prompt: 'Plan and implement the change.',
+    language: 'en'
+  });
+  tracker.beginPlanning();
+  assert.equal(tracker.getPlan().currentStepId, 'planning');
+  tracker.finishPlanning(true);
+  tracker.beginSubagentReview();
+  assert.equal(tracker.getPlan().currentStepId, 'subagent_review');
+  tracker.finishSubagentReview(true);
+  const plan = tracker.complete('Done.');
+  assert.equal(plan.steps.find((step) => step.id === 'planning')?.status, 'completed');
+  assert.equal(plan.steps.find((step) => step.id === 'subagent_review')?.status, 'completed');
+});

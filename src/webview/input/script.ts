@@ -1,3 +1,21 @@
+import {
+  DEFAULT_PLANNER_MAX_RESEARCH_STEPS,
+  DEFAULT_PLANNER_MAX_TOKENS,
+  DEFAULT_PLANNER_MODEL_ID,
+  DEFAULT_PLANNER_MODE,
+  DEFAULT_PLANNER_REASONING_EFFORT,
+  DEFAULT_PLANNER_THINKING_ENABLED,
+  DEFAULT_SUBAGENT_MAX_CONCURRENCY,
+  DEFAULT_SUBAGENT_MODEL_ID,
+  DEFAULT_SUBAGENT_REVIEW_ENABLED,
+  MAX_PLANNER_MAX_RESEARCH_STEPS,
+  MAX_PLANNER_MAX_TOKENS,
+  MAX_SUBAGENT_MAX_CONCURRENCY,
+  MIN_PLANNER_MAX_RESEARCH_STEPS,
+  MIN_PLANNER_MAX_TOKENS,
+  MIN_SUBAGENT_MAX_CONCURRENCY
+} from '../../shared/config';
+
 export function getInputScript(): string {
   return `
     let savedPromptRange = null;
@@ -12,6 +30,8 @@ export function getInputScript(): string {
       var commandModelSwitch = document.getElementById('commandModelSwitch');
       var commandModelValue = document.getElementById('commandModelValue');
       var commandModelList = document.getElementById('commandModelList');
+      var commandModelStrategyButton = document.getElementById('commandModelStrategyButton');
+      var commandModelStrategyValue = document.getElementById('commandModelStrategyValue');
       var commandCompressionTabs = document.getElementById('commandCompressionTabs');
       var commandCompressionDescription = document.getElementById('commandCompressionDescription');
       var commandSkillsButton = document.getElementById('commandSkillsButton');
@@ -255,6 +275,16 @@ export function getInputScript(): string {
           commandModelListOpen = false;
           renderCommandMenu();
           setComposerStatus(t('modelSwitched'));
+        });
+      }
+
+      if (commandModelStrategyButton) {
+        commandModelStrategyButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (state.isBusy) { return; }
+          closeCommandMenu();
+          showModelStrategyDialog();
         });
       }
 
@@ -1505,6 +1535,7 @@ export function getInputScript(): string {
         if (!commandMenu) { return; }
         commandMenu.classList.toggle('is-readonly', Boolean(state.isBusy));
         renderCommandModel();
+        renderModelStrategySummary();
         renderCompressionThreshold();
         renderCommandSkills();
         renderCreateSkillCommand();
@@ -1578,6 +1609,41 @@ export function getInputScript(): string {
 
           option.append(check, label);
           commandModelList.append(option);
+        }
+      }
+
+      function renderModelStrategySummary() {
+        var settings = getAgentSettings();
+        var plannerModelId = settings.plannerModelId;
+        var reviewEnabled = settings.subagentReviewEnabled;
+        var summary = t('modelStrategySingleModel');
+        if (plannerModelId || reviewEnabled) {
+          var parts = [];
+          if (plannerModelId) {
+            parts.push(t('modelStrategySummaryPlanner', {
+              model: getModelDisplayLabelById(plannerModelId),
+              mode: t(settings.plannerMode === 'auto'
+                ? 'modelStrategySummaryModeAuto'
+                : 'modelStrategySummaryModeExplicit')
+            }));
+          }
+          if (reviewEnabled) {
+            var reviewModelId = settings.subagentModelOverrides.review
+              || settings.subagentModelId
+              || state.selectedModelId;
+            parts.push(t('modelStrategySummaryReview', {
+              model: getModelDisplayLabelById(reviewModelId)
+            }));
+          }
+          summary = parts.join(' · ');
+        }
+        if (commandModelStrategyValue) {
+          commandModelStrategyValue.textContent = summary;
+          commandModelStrategyValue.title = summary;
+        }
+        if (commandModelStrategyButton) {
+          commandModelStrategyButton.disabled = Boolean(state.isBusy);
+          commandModelStrategyButton.setAttribute('aria-label', t('modelStrategyTitle') + ': ' + summary);
         }
       }
 
@@ -1835,6 +1901,16 @@ export function getInputScript(): string {
         return model.label || model.id || 'Model';
       }
 
+      function getModelDisplayLabelById(modelId) {
+        var models = Array.isArray(state.models) ? state.models : [];
+        for (var i = 0; i < models.length; i++) {
+          if (models[i].id === modelId) {
+            return getModelDisplayLabel(models[i]);
+          }
+        }
+        return modelId || getModelDisplayLabel(getSelectedModel(models)?.model);
+      }
+
       function renderEffort() {
         var settings = getAgentSettings();
         if (commandThinkingToggle) {
@@ -1860,13 +1936,13 @@ export function getInputScript(): string {
         var selectedCompressionTab = commandCompressionTabs
           ? commandCompressionTabs.querySelector('button[data-threshold][aria-selected="true"]')
           : null;
-        return {
-          thinkingEnabled: commandThinkingToggle ? commandThinkingToggle.checked : getAgentSettings().thinkingEnabled,
-          reasoningEffort: commandEffortSlider && Number(commandEffortSlider.value) >= 2 ? 'max' : 'high',
-          compressionThreshold: normalizeCompressionThreshold(
-            selectedCompressionTab?.dataset.threshold || getAgentSettings().compressionThreshold
-          )
-        };
+        var settings = getAgentSettings();
+        settings.thinkingEnabled = commandThinkingToggle ? commandThinkingToggle.checked : settings.thinkingEnabled;
+        settings.reasoningEffort = commandEffortSlider && Number(commandEffortSlider.value) >= 2 ? 'max' : 'high';
+        settings.compressionThreshold = normalizeCompressionThreshold(
+          selectedCompressionTab?.dataset.threshold || settings.compressionThreshold
+        );
+        return settings;
       }
 
       function getAgentSettings() {
@@ -1874,8 +1950,31 @@ export function getInputScript(): string {
         return {
           thinkingEnabled: typeof configured.thinkingEnabled === 'boolean' ? configured.thinkingEnabled : true,
           reasoningEffort: configured.reasoningEffort === 'max' ? 'max' : 'high',
-          compressionThreshold: normalizeCompressionThreshold(configured.compressionThreshold)
+          compressionThreshold: normalizeCompressionThreshold(configured.compressionThreshold),
+          plannerModelId: typeof configured.plannerModelId === 'string' ? configured.plannerModelId : ${JSON.stringify(DEFAULT_PLANNER_MODEL_ID)},
+          plannerMode: configured.plannerMode === 'auto' ? 'auto' : ${JSON.stringify(DEFAULT_PLANNER_MODE)},
+          plannerThinkingEnabled: typeof configured.plannerThinkingEnabled === 'boolean' ? configured.plannerThinkingEnabled : ${DEFAULT_PLANNER_THINKING_ENABLED},
+          plannerReasoningEffort: configured.plannerReasoningEffort === 'max' ? 'max' : ${JSON.stringify(DEFAULT_PLANNER_REASONING_EFFORT)},
+          plannerMaxResearchSteps: normalizeIntegerInRange(configured.plannerMaxResearchSteps, ${MIN_PLANNER_MAX_RESEARCH_STEPS}, ${MAX_PLANNER_MAX_RESEARCH_STEPS}, ${DEFAULT_PLANNER_MAX_RESEARCH_STEPS}),
+          plannerMaxTokens: normalizeIntegerInRange(configured.plannerMaxTokens, ${MIN_PLANNER_MAX_TOKENS}, ${MAX_PLANNER_MAX_TOKENS}, ${DEFAULT_PLANNER_MAX_TOKENS}),
+          subagentModelId: typeof configured.subagentModelId === 'string' ? configured.subagentModelId : ${JSON.stringify(DEFAULT_SUBAGENT_MODEL_ID)},
+          subagentModelOverrides: normalizeModelStrategyOverrides(configured.subagentModelOverrides),
+          subagentReviewEnabled: configured.subagentReviewEnabled === true ? true : ${DEFAULT_SUBAGENT_REVIEW_ENABLED},
+          subagentMaxConcurrency: normalizeIntegerInRange(configured.subagentMaxConcurrency, ${MIN_SUBAGENT_MAX_CONCURRENCY}, ${MAX_SUBAGENT_MAX_CONCURRENCY}, ${DEFAULT_SUBAGENT_MAX_CONCURRENCY})
         };
+      }
+
+      function normalizeModelStrategyOverrides(value) {
+        var source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+        var overrides = {};
+        Object.keys(source).forEach(function(key) {
+          var normalizedKey = String(key || '').trim().toLowerCase().replace(/[-_]+/g, '_');
+          var modelId = typeof source[key] === 'string' ? source[key].trim() : '';
+          if (normalizedKey && modelId) {
+            overrides[normalizedKey] = modelId;
+          }
+        });
+        return overrides;
       }
 
       function normalizeCompressionThreshold(value) {
@@ -3370,6 +3469,21 @@ export function getInputScript(): string {
       var settingsApiKey = document.getElementById('settingsApiKey');
       var settingsApiKeyVisibilityBtn = document.getElementById('settingsApiKeyVisibilityBtn');
       var settingsBaseUrl = document.getElementById('settingsBaseUrl');
+      var modelStrategyOverlay = document.getElementById('modelStrategyDialogOverlay');
+      var modelStrategyPlannerEnabled = document.getElementById('modelStrategyPlannerEnabled');
+      var modelStrategyPlannerFields = document.getElementById('modelStrategyPlannerFields');
+      var modelStrategyPlannerModel = document.getElementById('modelStrategyPlannerModel');
+      var modelStrategyPlannerMode = document.getElementById('modelStrategyPlannerMode');
+      var modelStrategyReviewEnabled = document.getElementById('modelStrategyReviewEnabled');
+      var modelStrategySubagentModel = document.getElementById('modelStrategySubagentModel');
+      var modelStrategyPlannerThinking = document.getElementById('modelStrategyPlannerThinking');
+      var modelStrategyPlannerEffort = document.getElementById('modelStrategyPlannerEffort');
+      var modelStrategyResearchSteps = document.getElementById('modelStrategyResearchSteps');
+      var modelStrategyMaxTokens = document.getElementById('modelStrategyMaxTokens');
+      var modelStrategyReviewOverride = document.getElementById('modelStrategyReviewOverride');
+      var modelStrategyConcurrency = document.getElementById('modelStrategyConcurrency');
+      var modelStrategySaveButton = document.getElementById('modelStrategySaveButton');
+      var modelStrategyCancelButton = document.getElementById('modelStrategyCancelButton');
       var historySettingsOverlay = document.getElementById('historySettingsDialogOverlay');
       var historyRetentionDaysInput = document.getElementById('historyRetentionDaysInput');
       var aboutOverlay = document.getElementById('aboutDialogOverlay');
@@ -3440,6 +3554,151 @@ export function getInputScript(): string {
           historyRetentionDaysInput.focus();
           historyRetentionDaysInput.select();
         }
+      }
+
+      function showModelStrategyDialog() {
+        if (!modelStrategyOverlay) { return; }
+        var settings = getAgentSettings();
+        var fallbackModelId = state.selectedModelId || (state.models[0] && state.models[0].id) || '';
+        renderModelStrategyModelOptions(modelStrategyPlannerModel, settings.plannerModelId || fallbackModelId, '', '');
+        renderModelStrategyModelOptions(
+          modelStrategySubagentModel,
+          settings.subagentModelId,
+          '',
+          t('modelStrategyInheritExecutor')
+        );
+        renderModelStrategyModelOptions(
+          modelStrategyReviewOverride,
+          settings.subagentModelOverrides.review || '',
+          '',
+          t('modelStrategyUseSubagentDefault')
+        );
+        if (modelStrategyPlannerEnabled) {
+          modelStrategyPlannerEnabled.checked = Boolean(settings.plannerModelId);
+        }
+        if (modelStrategyPlannerMode) {
+          modelStrategyPlannerMode.value = settings.plannerMode;
+        }
+        if (modelStrategyReviewEnabled) {
+          modelStrategyReviewEnabled.checked = settings.subagentReviewEnabled;
+        }
+        if (modelStrategyPlannerThinking) {
+          modelStrategyPlannerThinking.checked = settings.plannerThinkingEnabled;
+        }
+        if (modelStrategyPlannerEffort) {
+          modelStrategyPlannerEffort.value = settings.plannerReasoningEffort;
+        }
+        if (modelStrategyResearchSteps) {
+          modelStrategyResearchSteps.value = String(settings.plannerMaxResearchSteps);
+        }
+        if (modelStrategyMaxTokens) {
+          modelStrategyMaxTokens.value = String(settings.plannerMaxTokens);
+        }
+        if (modelStrategyConcurrency) {
+          modelStrategyConcurrency.value = String(settings.subagentMaxConcurrency);
+        }
+        updateModelStrategyDialogState();
+        modelStrategyOverlay.classList.remove('hidden');
+        if (modelStrategyPlannerEnabled) {
+          modelStrategyPlannerEnabled.focus();
+        }
+      }
+
+      function renderModelStrategyModelOptions(select, selectedModelId, emptyValue, emptyLabel) {
+        if (!select) { return; }
+        select.innerHTML = '';
+        if (emptyLabel) {
+          var emptyOption = document.createElement('option');
+          emptyOption.value = emptyValue;
+          emptyOption.textContent = emptyLabel;
+          select.append(emptyOption);
+        }
+        var models = Array.isArray(state.models) ? state.models : [];
+        for (var i = 0; i < models.length; i++) {
+          var option = document.createElement('option');
+          option.value = models[i].id;
+          option.textContent = getModelDisplayLabel(models[i]);
+          select.append(option);
+        }
+        select.value = selectedModelId;
+        if (!select.value && !emptyLabel && models.length) {
+          select.value = models[0].id;
+        }
+      }
+
+      function updateModelStrategyDialogState() {
+        var plannerEnabled = Boolean(modelStrategyPlannerEnabled && modelStrategyPlannerEnabled.checked);
+        var plannerThinkingEnabled = Boolean(modelStrategyPlannerThinking && modelStrategyPlannerThinking.checked);
+        if (modelStrategyPlannerFields) {
+          modelStrategyPlannerFields.classList.toggle('is-disabled', !plannerEnabled);
+        }
+        [
+          modelStrategyPlannerModel,
+          modelStrategyPlannerMode,
+          modelStrategyPlannerThinking,
+          modelStrategyResearchSteps,
+          modelStrategyMaxTokens
+        ].forEach(function(control) {
+          if (control) { control.disabled = !plannerEnabled; }
+        });
+        if (modelStrategyPlannerEffort) {
+          modelStrategyPlannerEffort.disabled = !plannerEnabled || !plannerThinkingEnabled;
+        }
+      }
+
+      function saveModelStrategySettings() {
+        if (state.isBusy) {
+          setComposerStatus(t('commandMenuReadonlyWhileBusy'));
+          return;
+        }
+        var settings = getAgentSettings();
+        var plannerEnabled = Boolean(modelStrategyPlannerEnabled && modelStrategyPlannerEnabled.checked);
+        var fallbackModelId = state.selectedModelId || (state.models[0] && state.models[0].id) || '';
+        settings.plannerModelId = plannerEnabled
+          ? ((modelStrategyPlannerModel && modelStrategyPlannerModel.value) || fallbackModelId)
+          : ${JSON.stringify(DEFAULT_PLANNER_MODEL_ID)};
+        settings.plannerMode = modelStrategyPlannerMode && modelStrategyPlannerMode.value === 'auto'
+          ? 'auto'
+          : ${JSON.stringify(DEFAULT_PLANNER_MODE)};
+        settings.plannerThinkingEnabled = Boolean(modelStrategyPlannerThinking && modelStrategyPlannerThinking.checked);
+        settings.plannerReasoningEffort = modelStrategyPlannerEffort && modelStrategyPlannerEffort.value === 'max'
+          ? 'max'
+          : ${JSON.stringify(DEFAULT_PLANNER_REASONING_EFFORT)};
+        settings.plannerMaxResearchSteps = normalizeIntegerInRange(
+          modelStrategyResearchSteps ? modelStrategyResearchSteps.value : settings.plannerMaxResearchSteps,
+          ${MIN_PLANNER_MAX_RESEARCH_STEPS},
+          ${MAX_PLANNER_MAX_RESEARCH_STEPS},
+          ${DEFAULT_PLANNER_MAX_RESEARCH_STEPS}
+        );
+        settings.plannerMaxTokens = normalizeIntegerInRange(
+          modelStrategyMaxTokens ? modelStrategyMaxTokens.value : settings.plannerMaxTokens,
+          ${MIN_PLANNER_MAX_TOKENS},
+          ${MAX_PLANNER_MAX_TOKENS},
+          ${DEFAULT_PLANNER_MAX_TOKENS}
+        );
+        settings.subagentReviewEnabled = Boolean(modelStrategyReviewEnabled && modelStrategyReviewEnabled.checked);
+        settings.subagentModelId = modelStrategySubagentModel
+          ? modelStrategySubagentModel.value
+          : ${JSON.stringify(DEFAULT_SUBAGENT_MODEL_ID)};
+        settings.subagentMaxConcurrency = normalizeIntegerInRange(
+          modelStrategyConcurrency ? modelStrategyConcurrency.value : settings.subagentMaxConcurrency,
+          ${MIN_SUBAGENT_MAX_CONCURRENCY},
+          ${MAX_SUBAGENT_MAX_CONCURRENCY},
+          ${DEFAULT_SUBAGENT_MAX_CONCURRENCY}
+        );
+        var overrides = normalizeModelStrategyOverrides(settings.subagentModelOverrides);
+        var reviewOverride = modelStrategyReviewOverride ? modelStrategyReviewOverride.value : '';
+        if (reviewOverride) {
+          overrides.review = reviewOverride;
+        } else {
+          delete overrides.review;
+        }
+        settings.subagentModelOverrides = overrides;
+        state.agentSettings = settings;
+        vscode.postMessage({ type: 'setAgentSettings', settings: settings });
+        renderCommandMenu();
+        hideModelStrategyDialog();
+        setComposerStatus(t('modelStrategySaved'));
       }
 
       function showAboutDialog() {
@@ -3513,6 +3772,16 @@ export function getInputScript(): string {
         if (!settingsOverlay) { return; }
         settingsOverlay.classList.add('hidden');
         promptInput.focus();
+      }
+
+      function hideModelStrategyDialog() {
+        if (!modelStrategyOverlay) { return; }
+        modelStrategyOverlay.classList.add('hidden');
+        if (commandMenuButton) {
+          commandMenuButton.focus();
+        } else {
+          promptInput.focus();
+        }
       }
 
       function hideHistorySettingsDialog() {
@@ -3623,6 +3892,22 @@ export function getInputScript(): string {
         });
       }
 
+      if (modelStrategySaveButton) {
+        modelStrategySaveButton.addEventListener('click', saveModelStrategySettings);
+      }
+
+      if (modelStrategyCancelButton) {
+        modelStrategyCancelButton.addEventListener('click', hideModelStrategyDialog);
+      }
+
+      if (modelStrategyPlannerEnabled) {
+        modelStrategyPlannerEnabled.addEventListener('change', updateModelStrategyDialogState);
+      }
+
+      if (modelStrategyPlannerThinking) {
+        modelStrategyPlannerThinking.addEventListener('change', updateModelStrategyDialogState);
+      }
+
       if (createSkillCreateBtn) {
         createSkillCreateBtn.addEventListener('click', function() {
           submitCreateSkillDraft();
@@ -3712,6 +3997,24 @@ export function getInputScript(): string {
           } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             if (historySettingsSaveBtn) { historySettingsSaveBtn.click(); }
+          }
+        });
+      }
+
+      if (modelStrategyOverlay) {
+        modelStrategyOverlay.addEventListener('click', function(event) {
+          if (event.target === modelStrategyOverlay) {
+            hideModelStrategyDialog();
+          }
+        });
+
+        modelStrategyOverlay.addEventListener('keydown', function(event) {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            hideModelStrategyDialog();
+          } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+            event.preventDefault();
+            saveModelStrategySettings();
           }
         });
       }

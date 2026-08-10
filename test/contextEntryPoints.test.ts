@@ -125,6 +125,59 @@ test('command menu exposes an accessible persisted compression threshold tab sel
   assert.match(styles, /\.command-menu\.is-readonly \.command-compression-tab/u);
 });
 
+test('MODEL section exposes a persisted model strategy dialog with bounded advanced controls', async () => {
+  const inputTemplate = getInputTemplate();
+  const inputScript = getInputScript();
+  const styles = getStyles();
+  const providerSource = await readFile(
+    path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
+    'utf8'
+  );
+  const modelListIndex = inputTemplate.indexOf('id="commandModelList"');
+  const strategyButtonIndex = inputTemplate.indexOf('id="commandModelStrategyButton"');
+  const compressionTabsIndex = inputTemplate.indexOf('id="commandCompressionTabs"');
+
+  assert.ok(modelListIndex >= 0 && strategyButtonIndex > modelListIndex);
+  assert.ok(compressionTabsIndex > strategyButtonIndex);
+  assert.match(inputTemplate, /id="commandModelStrategyButton"[\s\S]*?aria-haspopup="dialog"/u);
+  assert.match(inputTemplate, /id="modelStrategyDialogOverlay" class="settings-overlay hidden"/u);
+  assert.match(inputTemplate, /class="settings-dialog model-strategy-dialog"[\s\S]*?aria-modal="true"/u);
+  assert.match(inputTemplate, /id="modelStrategyPlannerEnabled"[\s\S]*?type="checkbox"/u);
+  assert.match(inputTemplate, /id="modelStrategyReviewEnabled"[\s\S]*?type="checkbox"/u);
+  assert.match(inputTemplate, /id="modelStrategyAdvanced"[\s\S]*?<summary/u);
+  assert.match(inputTemplate, /id="modelStrategyResearchSteps"[^>]*min="1"[^>]*max="20"/u);
+  assert.match(inputTemplate, /id="modelStrategyMaxTokens"[^>]*min="512"[^>]*max="32768"/u);
+  assert.match(inputTemplate, /id="modelStrategyConcurrency"[^>]*min="1"[^>]*max="4"/u);
+
+  assert.match(inputScript, /function renderModelStrategySummary\(\)/u);
+  assert.match(inputScript, /function showModelStrategyDialog\(\)/u);
+  assert.match(inputScript, /function saveModelStrategySettings\(\)/u);
+  assert.match(inputScript, /settings\.plannerModelId = plannerEnabled/u);
+  assert.match(inputScript, /settings\.subagentReviewEnabled = Boolean/u);
+  assert.match(inputScript, /vscode\.postMessage\(\{ type: 'setAgentSettings', settings: settings \}\)/u);
+  assert.match(styles, /\.model-strategy-dialog/u);
+  assert.match(styles, /@media \(max-width: 360px\)[\s\S]*?\.model-strategy-number-grid/u);
+
+  for (const setting of [
+    'plannerModelId',
+    'plannerMode',
+    'plannerThinkingEnabled',
+    'plannerReasoningEffort',
+    'plannerMaxResearchSteps',
+    'plannerMaxTokens',
+    'subagentModelId',
+    'subagentModelOverrides',
+    'subagentReviewEnabled',
+    'subagentMaxConcurrency'
+  ]) {
+    assert.match(
+      providerSource,
+      new RegExp(`config\\.update\\('${setting}'`, 'u'),
+      `${setting} should persist through VS Code workspace settings`
+    );
+  }
+});
+
 test('rich prompt script exposes reference, skill, and external drop entry points', () => {
   const script = getInputScript();
 

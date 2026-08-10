@@ -1,6 +1,17 @@
 import { getInputScript } from './input/script';
 import { getRichTextShortcutsScript } from './richTextShortcuts';
 import { WEBVIEW_TRANSLATIONS } from '../shared/i18n';
+import {
+  DEFAULT_PLANNER_MAX_RESEARCH_STEPS,
+  DEFAULT_PLANNER_MAX_TOKENS,
+  DEFAULT_PLANNER_MODEL_ID,
+  DEFAULT_PLANNER_MODE,
+  DEFAULT_PLANNER_REASONING_EFFORT,
+  DEFAULT_PLANNER_THINKING_ENABLED,
+  DEFAULT_SUBAGENT_MAX_CONCURRENCY,
+  DEFAULT_SUBAGENT_MODEL_ID,
+  DEFAULT_SUBAGENT_REVIEW_ENABLED
+} from '../shared/config';
 
 export function getScript(): string {
   return `
@@ -14,7 +25,17 @@ export function getScript(): string {
       agentSettings: {
         thinkingEnabled: true,
         reasoningEffort: 'high',
-        compressionThreshold: 'balanced'
+        compressionThreshold: 'balanced',
+        plannerModelId: ${JSON.stringify(DEFAULT_PLANNER_MODEL_ID)},
+        plannerMode: ${JSON.stringify(DEFAULT_PLANNER_MODE)},
+        plannerThinkingEnabled: ${DEFAULT_PLANNER_THINKING_ENABLED},
+        plannerReasoningEffort: ${JSON.stringify(DEFAULT_PLANNER_REASONING_EFFORT)},
+        plannerMaxResearchSteps: ${DEFAULT_PLANNER_MAX_RESEARCH_STEPS},
+        plannerMaxTokens: ${DEFAULT_PLANNER_MAX_TOKENS},
+        subagentModelId: ${JSON.stringify(DEFAULT_SUBAGENT_MODEL_ID)},
+        subagentModelOverrides: {},
+        subagentReviewEnabled: ${DEFAULT_SUBAGENT_REVIEW_ENABLED},
+        subagentMaxConcurrency: ${DEFAULT_SUBAGENT_MAX_CONCURRENCY}
       },
       messages: [],
       activeSessionId: '',
@@ -460,6 +481,7 @@ export function getScript(): string {
     const agentStatusPools = {
       preparing: ['agentStatusPreparingContext', 'agentStatusPreparingRequest'],
       expanding_references: ['agentStatusExpandingReferences', 'agentStatusPreparingRequest'],
+      planning: ['agentStatusPlanning'],
       requesting_model: ['agentStatusWaitingModel', 'agentStatusDeepSeekReasoning', 'agentStatusWaitingStream'],
       reasoning: ['agentStatusThinking', 'agentStatusReasoning', 'agentStatusPondering', 'agentStatusSynthesizingClues'],
       planning_tool: ['agentStatusChoosingTools', 'agentStatusPlanningNextStep'],
@@ -477,6 +499,7 @@ export function getScript(): string {
       generating_repair: ['agentStatusGeneratingRepair'],
       waiting_for_apply: ['agentStatusWaitingForApply'],
       running_validation: ['agentStatusRunningValidation'],
+      running_subagent: ['agentStatusRunningSubagent'],
       reviewing_tool_result: ['agentStatusReviewingToolResults', 'agentStatusContinuingReasoning'],
       generating: ['agentStatusGenerating', 'agentStatusOrganizingResult', 'agentStatusWritingReply'],
       finalizing: ['agentStatusFinalizingResponse'],

@@ -53,6 +53,15 @@ import {
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_HISTORY_RETENTION_DAYS,
+  DEFAULT_PLANNER_MODEL_ID,
+  DEFAULT_PLANNER_MAX_RESEARCH_STEPS,
+  DEFAULT_PLANNER_MAX_TOKENS,
+  DEFAULT_PLANNER_MODE,
+  DEFAULT_PLANNER_REASONING_EFFORT,
+  DEFAULT_PLANNER_THINKING_ENABLED,
+  DEFAULT_SUBAGENT_MAX_CONCURRENCY,
+  DEFAULT_SUBAGENT_MODEL_ID,
+  DEFAULT_SUBAGENT_REVIEW_ENABLED,
   getConfiguredAgentSettings,
   getConfiguredBalanceEndpointUrl,
   getConfiguredBalanceRefreshIntervalMs,
@@ -61,6 +70,7 @@ import {
   getConfiguredBackgroundMaxToolCalls,
   getConfiguredDebugMode,
   getConfiguredHistoryRetentionDays,
+  getInvalidConfiguredAgentModelSettings,
   getConfiguredMaxFileBytes,
   getConfiguredSkillContextBudgetChars,
   getConfiguredModels,
@@ -136,6 +146,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   /** 会话冻结的 slim 工具集（首轮确定后跨轮复用，保证 tools schema 前缀稳定） */
   private readonly slimToolNamesBySession = new Map<string, string[]>();
   private readonly authorizedExternalReferenceUris = new Set<string>();
+  private readonly warnedInvalidAgentModelSettings = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
   private backgroundAvailableScripts: SafeNpmScript[] = [];
   private selectedModelId = getConfiguredSelectedModelId();
@@ -1594,7 +1605,38 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.selectedModelId = getConfiguredSelectedModelId(models);
     this.agentSettings = getConfiguredAgentSettings();
     this.language = getConfiguredKeepseekLanguage();
+    this.warnAboutInvalidAgentModels(models);
     this.sessionStore.setLanguage(this.language);
+  }
+
+  private warnAboutInvalidAgentModels(models: KeepseekModel[]): void {
+    const invalidSettings = getInvalidConfiguredAgentModelSettings(models);
+    const currentKeys = new Set(invalidSettings.map((item) => [
+      item.setting,
+      item.taskType ?? '',
+      item.value
+    ].join('\u0000')));
+    for (const warned of [...this.warnedInvalidAgentModelSettings]) {
+      if (!currentKeys.has(warned)) {
+        this.warnedInvalidAgentModelSettings.delete(warned);
+      }
+    }
+    for (const item of invalidSettings) {
+      const key = [item.setting, item.taskType ?? '', item.value].join('\u0000');
+      if (this.warnedInvalidAgentModelSettings.has(key)) {
+        continue;
+      }
+      this.warnedInvalidAgentModelSettings.add(key);
+      const message = item.setting === 'plannerModelId'
+        ? this.t('plannerInvalidModel', { model: item.value })
+        : item.setting === 'subagentModelId'
+          ? this.t('subagentInvalidModel', { model: item.value })
+          : this.t('subagentOverrideInvalidModel', {
+              model: item.value,
+              taskType: item.taskType ?? 'unknown'
+            });
+      vscode.window.showWarningMessage(message);
+    }
   }
 
   private async setAgentSettings(settings: Partial<AgentSettings>): Promise<void> {
@@ -1603,7 +1645,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     await Promise.all([
       config.update('thinkingEnabled', this.agentSettings.thinkingEnabled, vscode.ConfigurationTarget.Workspace),
       config.update('reasoningEffort', this.agentSettings.reasoningEffort, vscode.ConfigurationTarget.Workspace),
-      config.update('compressionThreshold', this.agentSettings.compressionThreshold, vscode.ConfigurationTarget.Workspace)
+      config.update('compressionThreshold', this.agentSettings.compressionThreshold, vscode.ConfigurationTarget.Workspace),
+      config.update('plannerModelId', this.agentSettings.plannerModelId ?? DEFAULT_PLANNER_MODEL_ID, vscode.ConfigurationTarget.Workspace),
+      config.update('plannerMode', this.agentSettings.plannerMode ?? DEFAULT_PLANNER_MODE, vscode.ConfigurationTarget.Workspace),
+      config.update('plannerThinkingEnabled', this.agentSettings.plannerThinkingEnabled ?? DEFAULT_PLANNER_THINKING_ENABLED, vscode.ConfigurationTarget.Workspace),
+      config.update('plannerReasoningEffort', this.agentSettings.plannerReasoningEffort ?? DEFAULT_PLANNER_REASONING_EFFORT, vscode.ConfigurationTarget.Workspace),
+      config.update('plannerMaxResearchSteps', this.agentSettings.plannerMaxResearchSteps ?? DEFAULT_PLANNER_MAX_RESEARCH_STEPS, vscode.ConfigurationTarget.Workspace),
+      config.update('plannerMaxTokens', this.agentSettings.plannerMaxTokens ?? DEFAULT_PLANNER_MAX_TOKENS, vscode.ConfigurationTarget.Workspace),
+      config.update('subagentModelId', this.agentSettings.subagentModelId ?? DEFAULT_SUBAGENT_MODEL_ID, vscode.ConfigurationTarget.Workspace),
+      config.update('subagentModelOverrides', this.agentSettings.subagentModelOverrides ?? {}, vscode.ConfigurationTarget.Workspace),
+      config.update('subagentReviewEnabled', this.agentSettings.subagentReviewEnabled ?? DEFAULT_SUBAGENT_REVIEW_ENABLED, vscode.ConfigurationTarget.Workspace),
+      config.update('subagentMaxConcurrency', this.agentSettings.subagentMaxConcurrency ?? DEFAULT_SUBAGENT_MAX_CONCURRENCY, vscode.ConfigurationTarget.Workspace)
     ]);
     this.postState();
   }

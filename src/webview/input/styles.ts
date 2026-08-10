@@ -1208,6 +1208,10 @@ export function getInputStyles(): string {
       box-shadow: 0 12px 32px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
     }
 
+    .model-strategy-dialog {
+      width: min(460px, calc(100vw - var(--keepseek-edge-padding-double, 8px)));
+    }
+
     .settings-dialog-header {
       display: flex;
       align-items: center;
@@ -1294,6 +1298,52 @@ export function getInputStyles(): string {
       color: var(--vscode-foreground);
       font-size: 12px;
       font-weight: 600;
+    }
+
+    .model-strategy-fields {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 8px;
+    }
+
+    .model-strategy-fields.is-disabled {
+      opacity: 0.62;
+    }
+
+    .model-strategy-advanced {
+      margin-top: 14px;
+      border-top: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+    }
+
+    .model-strategy-advanced summary {
+      padding: 12px 0 4px;
+      color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .model-strategy-advanced summary:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 2px;
+    }
+
+    .model-strategy-advanced-body {
+      padding-top: 10px;
+    }
+
+    .model-strategy-number-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 8px;
+    }
+
+    @media (max-width: 360px) {
+      .model-strategy-fields,
+      .model-strategy-number-grid {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0;
+      }
     }
 
     .settings-toggle-field {

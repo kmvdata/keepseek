@@ -156,6 +156,14 @@ KeepSeek lives in the VS Code Secondary Sidebar — no window switching, no copy
 - Declarations and references prefer VS Code semantic providers (symbol/reference) — more accurate and more token-efficient;
 - Dependency, build, and VCS directories are auto-skipped; binary, media, archive, and oversized files never enter context.
 
+### Independent planner and review subagent models
+
+Open **MODEL → Model strategy** from the command menu beside the input to enable or disable independent planning and review. Advanced settings expose planning budgets, the review-model override, and the subagent concurrency limit. The panel writes the same workspace-scoped VS Code `keepseek.*` settings shown in Settings.
+
+Complex tasks can use a separately configured planning model. `explicit` mode responds only to requests such as “plan first”; `auto` also routes deterministic complex requests. The planner researches through a static read-only tool set in a one-shot isolated session. `plan_only` returns the plan, while `plan_and_execute` appends it only to the current user-turn tail before the executor runs, without rewriting session history.
+
+When review is enabled, any run that produces DraftEdits starts a read-only review with the resolved subagent model. It checks requirement alignment, obvious regressions, omissions, and security boundaries. Neither planner nor reviewer receives edit, delete, or validation tools; file changes still require an executor-created ChangeSet and your Apply click.
+
 ### Reusable workflows (Skills)
 
 Write project conventions, debugging playbooks, and team prompts as Skills (discoverable from `.agents` or `~/.codex/skills`); browse with `/skills`, invoke with `$` references, and generate drafts with `/create-skill`.
@@ -245,6 +253,16 @@ Then select some code, press `Cmd+L` / `Ctrl+L` (or right-click → KeepSeek: Ad
 | `keepseek.maxWorkspaceToolFiles` | `2000` | Max candidate files enumerated by read-only listings and search |
 | `keepseek.maxRequestRetries` | `2` | Automatic retries before the first response chunk (exponential backoff) |
 | `keepseek.historyRetentionDays` | `7` | Default time range shown in the history menu (storage hard-cleans at 60 days) |
+| `keepseek.plannerModelId` | `""` | Independent planner model; empty disables planner routing |
+| `keepseek.plannerMode` | `explicit` | Plan only on explicit requests, or deterministically route complex work with `auto` |
+| `keepseek.plannerThinkingEnabled` | `true` | Enable Thinking for planner requests |
+| `keepseek.plannerReasoningEffort` | `high` | Planner reasoning effort: `high` / `max` |
+| `keepseek.plannerMaxResearchSteps` | `6` | Maximum read-only tool rounds per plan (1–20) |
+| `keepseek.plannerMaxTokens` | `4096` | Planner output budget (512–32768) |
+| `keepseek.subagentModelId` | `""` | Default subagent model; empty inherits the executor model |
+| `keepseek.subagentModelOverrides` | `{}` | Per-task subagent model overrides (`-` and `_` are equivalent) |
+| `keepseek.subagentReviewEnabled` | `false` | Run a read-only review after DraftEdits are produced |
+| `keepseek.subagentMaxConcurrency` | `1` | Per-session subagent concurrency limit (1–4) |
 
 Model & Thinking-tier output budgets, tool-turn limits, and summary trigger/force ratios are fixed internal tiers; context compression is always on.
 

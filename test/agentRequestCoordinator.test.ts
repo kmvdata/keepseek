@@ -22,7 +22,8 @@ test('createAgentRequest snapshots mutable request inputs', () => {
   const settings: AgentSettings = {
     thinkingEnabled: true,
     reasoningEffort: 'high',
-    compressionThreshold: 'balanced'
+    compressionThreshold: 'balanced',
+    subagentModelOverrides: { review: 'deepseek-v4-pro' }
   };
   const contextFiles = [createContextFile()];
   const history = [
@@ -58,6 +59,7 @@ test('createAgentRequest snapshots mutable request inputs', () => {
 
   model.label = 'Changed Model';
   settings.thinkingEnabled = false;
+  settings.subagentModelOverrides!.review = 'deepseek-v4-flash';
   contextFiles[0].content = 'changed context file';
   history[0].content = 'changed message';
   history[0].contextMeta = {
@@ -70,6 +72,7 @@ test('createAgentRequest snapshots mutable request inputs', () => {
 
   assert.equal(request.model.label, 'Test Model');
   assert.equal(request.settings.thinkingEnabled, true);
+  assert.equal(request.settings.subagentModelOverrides?.review, 'deepseek-v4-pro');
   assert.equal(request.contextFiles[0]?.content, 'context file content');
   assert.equal(request.history[0]?.content, 'message 0');
   assert.equal(request.history[0]?.contextMeta?.protectedReason, 'first_user_request');

@@ -99,6 +99,97 @@
           ],
           "markdownDescription": "Thinking effort for the current workspace."
         },
+        "keepseek.plannerModelId": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "Independent planning model for the current workspace. Empty disables planner routing.",
+          "enum": [
+            "",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro"
+          ]
+        },
+        "keepseek.plannerMode": {
+          "type": "string",
+          "default": "explicit",
+          "scope": "window",
+          "enum": [
+            "explicit",
+            "auto"
+          ],
+          "markdownDescription": "Run the planner only for explicit planning requests, or route deterministic complex requests automatically."
+        },
+        "keepseek.plannerThinkingEnabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "Enable Thinking for independent planning requests."
+        },
+        "keepseek.plannerReasoningEffort": {
+          "type": "string",
+          "default": "high",
+          "scope": "window",
+          "enum": [
+            "high",
+            "max"
+          ],
+          "markdownDescription": "Thinking effort for independent planning requests."
+        },
+        "keepseek.plannerMaxResearchSteps": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 20,
+          "scope": "window",
+          "markdownDescription": "Maximum read-only tool-call rounds for one planning request."
+        },
+        "keepseek.plannerMaxTokens": {
+          "type": "number",
+          "default": 4096,
+          "minimum": 512,
+          "maximum": 32768,
+          "scope": "window",
+          "markdownDescription": "Maximum output tokens for one planning request."
+        },
+        "keepseek.subagentModelId": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "Default subagent model. Empty inherits the executor model.",
+          "enum": [
+            "",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro"
+          ]
+        },
+        "keepseek.subagentModelOverrides": {
+          "type": "object",
+          "default": {},
+          "scope": "window",
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "deepseek-v4-flash",
+              "deepseek-v4-pro"
+            ]
+          },
+          "markdownDescription": "Per-task subagent model overrides. Hyphens and underscores in task names are equivalent."
+        },
+        "keepseek.subagentReviewEnabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "Run a best-effort read-only review subagent when an Agent run prepares DraftEdits."
+        },
+        "keepseek.subagentMaxConcurrency": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 4,
+          "scope": "window",
+          "markdownDescription": "Maximum concurrent subagent tasks in one session. Nested acquisition fails immediately."
+        },
         "keepseek.compressionThreshold": {
           "type": "string",
           "default": "balanced",
