@@ -5,12 +5,16 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import { AgentRunner } from '../src/agent/runner';
 import { DsmlToolParser } from '../src/agent/deepseek/dsmlToolParser';
-import { CREATE_DRAFT_EDIT_TOOL_NAME } from '../src/agent/protocol';
+import {
+  CREATE_DRAFT_EDIT_TOOL_NAME,
+  CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME
+} from '../src/agent/protocol';
 import { DraftEdit } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
 
 type DraftEditInvoker = {
   createDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[], language: 'en' | 'zh-CN'): Promise<string>;
+  createIncrementalDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[], language: 'en' | 'zh-CN'): Promise<string>;
 };
 
 test('parses full-width DSML draft edit calls with range aliases', () => {
@@ -63,4 +67,60 @@ test('creates a full-file DraftEdit from targetPath/newContent/replaceRange alia
   assert.equal(draftEdits[0].label, 'src/sample.ts');
   assert.equal(draftEdits[0].newText, 'one\ndeux\ntrois\nfour\n');
   assert.equal(await fs.readFile(targetPath, 'utf8'), originalContent);
+});
+
+test('combines multiple exact incremental edits into one safe full-file DraftEdit', async (t) => {
+  const previousWorkspaceFolders = vscode.workspace.workspaceFolders;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'keepseek-incremental-edit-'));
+  t.after(async () => {
+    vscode.workspace.workspaceFolders = previousWorkspaceFolders;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(root), name: 'keepseek-test' }];
+  const targetPath = path.join(root, 'src', 'large.ts');
+  const originalContent = ['const alpha = 1;', 'const untouched = 2;', 'const omega = 3;', ''].join('\n');
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.writeFile(targetPath, originalContent, 'utf8');
+
+  const draftEdits: DraftEdit[] = [];
+  const runner = new AgentRunner() as unknown as DraftEditInvoker;
+  const result = await runner.createIncrementalDraftEdit({
+    path: targetPath,
+    reason: 'small exact changes',
+    edits: [
+      { search: 'const alpha = 1;', replace: 'const alpha = 10;' },
+      { replaceRange: '3', replace: 'const omega = 30;' }
+    ]
+  }, draftEdits, 'en');
+
+  assert.equal(JSON.parse(result).ok, true);
+  assert.equal(JSON.parse(result).draftEdit.editCount, 2);
+  assert.equal(draftEdits.length, 1);
+  assert.equal(draftEdits[0].newText, ['const alpha = 10;', 'const untouched = 2;', 'const omega = 30;', ''].join('\n'));
+  assert.equal(await fs.readFile(targetPath, 'utf8'), originalContent);
+  assert.equal(CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME, 'keepseek_create_incremental_draft_edit');
+});
+
+test('incremental edit refuses ambiguous search targets instead of guessing', async (t) => {
+  const previousWorkspaceFolders = vscode.workspace.workspaceFolders;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'keepseek-ambiguous-edit-'));
+  t.after(async () => {
+    vscode.workspace.workspaceFolders = previousWorkspaceFolders;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(root), name: 'keepseek-test' }];
+  const targetPath = path.join(root, 'duplicate.ts');
+  await fs.writeFile(targetPath, 'same\nsame\n', 'utf8');
+  const draftEdits: DraftEdit[] = [];
+  const runner = new AgentRunner() as unknown as DraftEditInvoker;
+
+  await assert.rejects(
+    runner.createIncrementalDraftEdit({
+      path: targetPath,
+      reason: 'ambiguous',
+      edits: [{ search: 'same', replace: 'changed' }]
+    }, draftEdits, 'en'),
+    /ambiguous/iu
+  );
+  assert.equal(draftEdits.length, 0);
 });

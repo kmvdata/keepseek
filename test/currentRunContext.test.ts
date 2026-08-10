@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { deduplicateContextSources } from '../src/agent/contextDeduplication';
 import {
+  calibrateContextUsageEstimate,
   createContextUsageEstimate,
   createContextUsageEstimateFromMessages
 } from '../src/agent/contextUsage';
@@ -142,6 +143,23 @@ test('contextUsage estimates the exact same current-run message projection as th
   });
 
   assert.equal(usage.usedTokensEstimate, direct.usedTokensEstimate);
+});
+
+test('provider prompt_tokens calibrate the local estimate without another model call', () => {
+  const model = getSupportedDeepSeekV4Models()[0];
+  const estimate = createContextUsageEstimateFromMessages({
+    model,
+    messages: [{ role: 'system', content: 'system' }, { role: 'user', content: 'input'.repeat(100) }],
+    tools: [],
+    outputReserveTokens: 500,
+    safetyReserveTokens: 100
+  });
+  const calibrated = calibrateContextUsageEstimate(estimate, 1_234);
+  const promptBreakdown = Object.entries(calibrated.breakdown)
+    .filter(([key]) => key !== 'outputReserveTokensEstimate' && key !== 'safetyReserveTokensEstimate')
+    .reduce((total, [, value]) => total + value, 0);
+  assert.equal(promptBreakdown, 1_234);
+  assert.equal(calibrated.usedTokensEstimate, 1_834);
 });
 
 function candidate(id: string, uri: string, content: string, priority: number) {

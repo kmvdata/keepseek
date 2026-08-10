@@ -96,6 +96,30 @@ test('calculates turn cost and cumulative average hit rate', () => {
   assert.equal(stats.cacheMissTokens, 700);
   assert.equal(calculateCacheHitRate(stats), (800 / 1500) * 100);
   assert.equal(stats.sessionCost, 0.001316);
+  assert.equal(stats.bySource?.executor?.requestCount, 2);
+});
+
+test('classifies hidden calls by source without dropping their cost', () => {
+  const event = createUsageEvent({
+    usage: {
+      promptTokens: 500,
+      completionTokens: 100,
+      totalTokens: 600,
+      cacheHitTokens: 200,
+      cacheMissTokens: 300,
+      reasoningTokens: 40
+    },
+    cost: 0.001,
+    currency: '¥',
+    modelId: 'deepseek-v4-flash',
+    source: 'summary'
+  });
+  const stats = addUsageEventToSessionStats(undefined, event);
+  assert.equal(stats.requestCount, 1);
+  assert.equal(stats.sessionCost, 0.001);
+  assert.equal(stats.bySource?.summary?.promptTokens, 500);
+  assert.equal(stats.bySource?.summary?.reasoningTokens, 40);
+  assert.equal(stats.bySource?.executor, undefined);
 });
 
 function createTurnUsage(cacheHitTokens: number, cacheMissTokens: number): TurnUsageStats {

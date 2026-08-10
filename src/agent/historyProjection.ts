@@ -17,6 +17,8 @@ export interface HistoryProjectionInput {
   language: KeepseekLanguage;
   contextCompression?: ContextCompressionState;
   settings: ContextCompressionSettings;
+  /** Determines whether ordinary final assistant reasoning is provider-visible. */
+  requestProtocolVersion?: number;
   /** Optional fallback cap: when no summary is available (refreshes keep failing)
    *  and the projection exceeds this token budget, truncate to the recent window
    *  instead of growing without bound. Omit on normal paths. */
@@ -53,8 +55,7 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
   const recentMessageIds = selectRecentTurnMessageIds(agentHistory, settings.keepRecentTurns);
   const protectedMessageIds = selectProtectedMessageIds(agentHistory, input.contextCompression);
   const summaries = getUsableSummaries(input.contextCompression);
-  const summary = summaries[0];
-  const coveredMessageIds = new Set(summary?.coveredMessageIds ?? []);
+  const coveredMessageIds = new Set(summaries.flatMap((summary) => summary.coveredMessageIds));
 
   // Cache-first projection: selected messages are append-only. A message enters the
   // projection when it is created and leaves only when a summary refresh covers it —
@@ -74,9 +75,7 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
     !recentMessageIds.has(message.id) &&
     !coveredMessageIds.has(message.id)
   ));
-  const syntheticSystemMessages = summary
-    ? [formatSyntheticSummaryMessage(summary, input.language)]
-    : [];
+  const syntheticSystemMessages = summaries.map((summary) => formatSyntheticSummaryMessage(summary, input.language));
 
   // Messages keep their (expandedContent ?? content) form for their whole life in
   // the projection so their serialized bytes never change between turns.
@@ -87,16 +86,20 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
   // the most recent messages instead of growing without bound until the request
   // exceeds the model context window. This truncation is a rare failure path, not
   // the normal cache-friendly append-only path.
-  const history = !summary && input.maxProjectionTokens && projectedHistory.length
-    ? capProjectionToTokenBudget(projectedHistory, input.maxProjectionTokens)
+  const history = !summaries.length && input.maxProjectionTokens && projectedHistory.length
+    ? capProjectionToTokenBudget(
+        projectedHistory,
+        input.maxProjectionTokens,
+        input.requestProtocolVersion ?? 1
+      )
     : projectedHistory;
 
   const metadata: ContextProjectionMetadata = {
-    usedSummary: Boolean(summary),
-    summaryCount: summary ? 1 : 0,
+    usedSummary: summaries.length > 0,
+    summaryCount: summaries.length,
     protectedMessageCount: protectedMessageIds.size,
     recentMessageCount: recentMessageIds.size,
-    fallbackReason: summary || !compressibleMessages.length ? undefined : 'summary_unavailable'
+    fallbackReason: summaries.length || !compressibleMessages.length ? undefined : 'summary_unavailable'
   };
 
   return {
@@ -106,11 +109,15 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
     protectedMessageIds: Array.from(protectedMessageIds),
     recentMessageIds: Array.from(recentMessageIds),
     compressibleMessageIds: compressibleMessages.map((message) => message.id),
-    usedSummaryIds: summary ? [summary.id] : []
+    usedSummaryIds: summaries.map((summary) => summary.id)
   };
 }
 
-function capProjectionToTokenBudget(messages: ChatMessage[], maxTokens: number): ChatMessage[] {
+function capProjectionToTokenBudget(
+  messages: ChatMessage[],
+  maxTokens: number,
+  requestProtocolVersion: number
+): ChatMessage[] {
   // Keeps only the most recent tail. In this degraded mode even protected messages
   // may be dropped: staying inside the model context window wins over protection
   // when compression has been failing and the conversation would otherwise exceed
@@ -119,14 +126,36 @@ function capProjectionToTokenBudget(messages: ChatMessage[], maxTokens: number):
   const capped: ChatMessage[] = [];
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    const content = (message.expandedContent ?? message.content).trim();
-    tokenCount += estimateTokenCount(`${message.role}\n${content}`);
+    tokenCount += estimateProjectedChatMessageTokens(message, requestProtocolVersion);
     if (tokenCount > maxTokens && capped.length) {
       break;
     }
     capped.unshift(message);
   }
   return capped;
+}
+
+function estimateProjectedChatMessageTokens(message: ChatMessage, requestProtocolVersion: number): number {
+  const content = (message.providerContent ?? message.expandedContent ?? message.content).trim();
+  let tokens = estimateTokenCount(`${message.role}\n${content}`) + 4;
+  if (message.role !== 'assistant') {
+    return tokens;
+  }
+  if (requestProtocolVersion <= 1 && message.reasoningContent) {
+    tokens += estimateTokenCount(message.reasoningContent);
+  }
+  for (const round of message.toolRounds ?? []) {
+    tokens += estimateTokenCount([
+      'assistant',
+      round.assistantContent ?? '',
+      round.reasoningContent ?? '',
+      JSON.stringify(round.toolCalls)
+    ].join('\n')) + 4;
+    for (const result of round.toolResults) {
+      tokens += estimateTokenCount(`tool\n${result.toolCallId}\n${result.content}`) + 4;
+    }
+  }
+  return tokens;
 }
 
 export function getAutoProtectedMessageIds(
@@ -202,15 +231,18 @@ export function createProtectedContextMeta(reason: string): ChatMessageContextMe
   };
 }
 
-export function estimateHistoryProjectionTokens(projection: HistoryProjectionResult): number {
+export function estimateHistoryProjectionTokens(
+  projection: HistoryProjectionResult,
+  requestProtocolVersion = 1
+): number {
   const summaryTokens = projection.syntheticSystemMessages.reduce(
     (total, content) => total + estimateTokenCount(`system\n${content}`),
     0
   );
-  const historyTokens = projection.history.reduce((total, message) => {
-    const content = (message.expandedContent ?? message.content).trim();
-    return total + estimateTokenCount(`${message.role}\n${content}`);
-  }, 0);
+  const historyTokens = projection.history.reduce(
+    (total, message) => total + estimateProjectedChatMessageTokens(message, requestProtocolVersion),
+    0
+  );
   return summaryTokens + historyTokens;
 }
 
@@ -257,7 +289,7 @@ function selectRecentTurnMessageIds(history: ChatMessage[], keepRecentTurns: num
 function getUsableSummaries(contextCompression: ContextCompressionState | undefined): HistorySummary[] {
   return [...(contextCompression?.summaries ?? [])]
     .filter((summary) => summary.content.trim())
-    .sort((left, right) => getSummaryTimestamp(right) - getSummaryTimestamp(left));
+    .sort((left, right) => getSummaryTimestamp(left) - getSummaryTimestamp(right));
 }
 
 function getSummaryTimestamp(summary: HistorySummary): number {

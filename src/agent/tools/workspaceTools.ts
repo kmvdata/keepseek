@@ -136,12 +136,21 @@ interface WorkspaceRangeReadData {
   requestedEndLine: number;
   totalLines: number;
   truncated: boolean;
+  hasMore: boolean;
+  nextStartLine?: number;
   sizeBytes?: number;
 }
 
 type InternalRangeReadData = Omit<
   WorkspaceRangeReadData,
-  'path' | 'uri' | 'languageId' | 'requestedStartLine' | 'requestedEndLine' | 'sizeBytes'
+  | 'path'
+  | 'uri'
+  | 'languageId'
+  | 'requestedStartLine'
+  | 'requestedEndLine'
+  | 'hasMore'
+  | 'nextStartLine'
+  | 'sizeBytes'
 >;
 type TextEncoderLike = {
   encode(input?: string): Uint8Array;
@@ -899,6 +908,10 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
       requestedStartLine: startLine,
       requestedEndLine,
       truncated: scan.truncated || lineRangeTruncated,
+      hasMore: scan.endLine < scan.totalLines,
+      nextStartLine: scan.endLine < scan.totalLines
+        ? (scan.truncated ? scan.endLine : scan.endLine + 1)
+        : undefined,
       sizeBytes: stat.size
     };
   }

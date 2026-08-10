@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import {
   DEFAULT_DEEPSEEK_BASE_URL,
   getConfiguredContextWindowTokens,
+  getConfiguredModelUsagePricing,
   getConfiguredRequestRetryBaseMs
 } from '../shared/config';
 import {
@@ -18,7 +19,10 @@ import type {
   ContextFile,
   HistorySummary,
   KeepseekModel,
-  AgentSettings
+  AgentSettings,
+  CurrentRunContext,
+  UsageEvent,
+  UsageSource
 } from '../shared/types';
 import { DeepSeekClient, type DeepSeekClientConfig } from './deepseek/client';
 import type { DeepSeekChatRequestBody, DeepSeekMessage } from './deepseek/types';
@@ -28,8 +32,10 @@ import {
   getDurableProtectedMessageIds
 } from './historyProjection';
 import { estimateTokenCount } from './tokenEstimate';
+import { buildProviderRequestProjection } from './providerRequestProjection';
+import { estimateDeepSeekMessageTokens, estimateDeepSeekToolsTokens } from './protocol';
+import { calculateUsageCost, createUsageEvent, normalizeDeepSeekUsage } from './usageStats';
 
-const SUMMARY_MAX_MESSAGE_CHARS = 4_000;
 const SUMMARY_MAX_INPUT_CHARS = 90_000;
 // Deliberately high: every summary refresh rewrites the synthetic summary message and
 // drops covered messages from the projection, which invalidates DeepSeek's prefix
@@ -46,6 +52,11 @@ export interface HistoryCompressionRefreshInput {
   language: KeepseekLanguage;
   settings?: ContextCompressionSettings;
   signal?: AbortSignal;
+  currentRunContext?: CurrentRunContext;
+  contextInstructions?: string;
+  slimToolNames?: string[];
+  requestProtocolVersion?: number;
+  usageSource?: Extract<UsageSource, 'summary' | 'background'>;
 }
 
 export interface HistoryCompressionRefreshResult {
@@ -53,6 +64,7 @@ export interface HistoryCompressionRefreshResult {
   changed: boolean;
   reason: 'created' | 'updated' | 'skipped' | 'failed';
   failureReason?: string;
+  usageEvents?: UsageEvent[];
 }
 
 export type HistoryCompressionRefreshMode = 'none' | 'sync' | 'background';
@@ -70,13 +82,18 @@ export interface HistoryCompressionRefreshPlan {
     | 'background_refresh';
 }
 
+export interface HistorySummaryCompletionResult {
+  content: string;
+  usageEvent?: UsageEvent;
+}
+
 export type HistorySummaryCompletion = (input: {
   model: KeepseekModel;
   messages: DeepSeekMessage[];
   maxTokens: number;
   language: KeepseekLanguage;
   signal?: AbortSignal;
-}) => Promise<string>;
+}) => Promise<string | HistorySummaryCompletionResult>;
 
 export class HistoryCompressor {
   private readonly deepSeekClient = new DeepSeekClient();
@@ -109,7 +126,7 @@ export class HistoryCompressor {
     if (!this.shouldRefreshSummary({
       input,
       settings,
-      hasSummary: Boolean(summaryInput.previousSummary),
+      hasSummary: protectedState.state.summaries.length > 0,
       newCompressibleMessages: summaryInput.newCompressibleMessages
     })) {
       return {
@@ -129,7 +146,7 @@ export class HistoryCompressor {
       };
     }
 
-    if (!summaryInput.previousSummary && isRawConversationNearContextWindow(input, settings)) {
+    if (!protectedState.state.summaries.length && isRawConversationNearContextWindow(input, settings)) {
       return {
         state: protectedState.state,
         changed: protectedState.changed,
@@ -163,7 +180,7 @@ export class HistoryCompressor {
     if (!this.shouldRefreshSummary({
       input,
       settings,
-      hasSummary: Boolean(summaryInput.previousSummary),
+      hasSummary: protectedState.state.summaries.length > 0,
       newCompressibleMessages: summaryInput.newCompressibleMessages
     })) {
       return {
@@ -174,35 +191,39 @@ export class HistoryCompressor {
     }
 
     try {
-      const summaryMessages = this.buildSummaryMessages({
+      const summaryBatch = this.buildSummaryMessages({
         messagesToSummarize: summaryInput.newCompressibleMessages,
-        previousSummary: summaryInput.previousSummary,
         summaryBudgetTokens: settings.summaryBudgetTokens,
         language: input.language
       });
-      const content = (await this.completeSummary({
+      if (!summaryBatch.includedMessageIds.length) {
+        return {
+          state: protectedState.state,
+          changed: protectedState.changed,
+          reason: 'skipped'
+        };
+      }
+      const completion = await this.completeSummary({
         model: input.model,
-        messages: summaryMessages,
+        messages: summaryBatch.messages,
         maxTokens: settings.summaryBudgetTokens,
         timeoutMs: settings.summaryRequestTimeoutMs,
         language: input.language,
-        signal: input.signal
-      })).trim();
+        signal: input.signal,
+        usageSource: input.usageSource ?? 'summary'
+      });
+      const content = completion.content.trim();
 
       if (!content) {
         throw new Error('Context summary result was empty.');
       }
 
       const now = new Date().toISOString();
-      const nextCoveredMessageIds = Array.from(new Set([
-        ...(summaryInput.previousSummary?.coveredMessageIds ?? []),
-        ...summaryInput.newCompressibleMessages.map((message) => message.id)
-      ]));
       const summary: HistorySummary = {
-        id: summaryInput.previousSummary?.id ?? randomUUID(),
+        id: randomUUID(),
         content,
-        coveredMessageIds: nextCoveredMessageIds,
-        createdAt: summaryInput.previousSummary?.createdAt ?? now,
+        coveredMessageIds: summaryBatch.includedMessageIds,
+        createdAt: now,
         updatedAt: now,
         tokenEstimate: estimateTokenCount(content),
         modelId: input.model.id,
@@ -211,13 +232,14 @@ export class HistoryCompressor {
       return {
         state: {
           version: CONTEXT_COMPRESSION_VERSION,
-          summaries: [summary],
+          summaries: [...protectedState.state.summaries, summary],
           protectedMessageIds: protectedState.state.protectedMessageIds,
           lastCompressedAt: now,
           lastFailureReason: undefined
         },
         changed: true,
-        reason: summaryInput.previousSummary ? 'updated' : 'created'
+        reason: protectedState.state.summaries.length ? 'updated' : 'created',
+        usageEvents: completion.usageEvent ? [completion.usageEvent] : undefined
       };
     } catch (error) {
       const failureReason = summarizeFailureReason(error);
@@ -253,7 +275,6 @@ export class HistoryCompressor {
     settings: ContextCompressionSettings,
     state: ContextCompressionState
   ): {
-    previousSummary?: HistorySummary;
     newCompressibleMessages: ChatMessage[];
   } {
     const projection = buildHistoryProjection({
@@ -261,14 +282,13 @@ export class HistoryCompressor {
       prompt: input.prompt,
       language: input.language,
       contextCompression: state,
-      settings
+      settings,
+      requestProtocolVersion: input.requestProtocolVersion
     });
-    const previousSummary = state.summaries[0];
     const newCompressibleMessages = input.session.messages.filter((message) => (
       projection.compressibleMessageIds.includes(message.id)
     ));
     return {
-      previousSummary,
       newCompressibleMessages
     };
   }
@@ -307,20 +327,26 @@ export class HistoryCompressor {
 
   private buildSummaryMessages(input: {
     messagesToSummarize: ChatMessage[];
-    previousSummary?: HistorySummary;
     summaryBudgetTokens: number;
     language: KeepseekLanguage;
-  }): DeepSeekMessage[] {
-    return [
+  }): { messages: DeepSeekMessage[]; includedMessageIds: string[] } {
+    const formatted = formatMessagesForSummary(input.messagesToSummarize, input.language);
+    return {
+      messages: [
       {
         role: 'system',
         content: getSummarySystemPrompt(input.language)
       },
       {
         role: 'user',
-        content: buildSummaryUserPrompt(input)
+        content: buildSummaryUserPrompt({
+          ...input,
+          formattedMessages: formatted.content
+        })
       }
-    ];
+      ],
+      includedMessageIds: formatted.includedMessageIds
+    };
   }
 
   private async completeSummary(input: {
@@ -330,9 +356,11 @@ export class HistoryCompressor {
     timeoutMs: number;
     language: KeepseekLanguage;
     signal?: AbortSignal;
-  }): Promise<string> {
+    usageSource: Extract<UsageSource, 'summary' | 'background'>;
+  }): Promise<HistorySummaryCompletionResult> {
     if (this.completion) {
-      return await this.completion(input);
+      const result = await this.completion(input);
+      return typeof result === 'string' ? { content: result } : result;
     }
 
     const abort = createTimeoutAbortSignal(input.signal, input.timeoutMs);
@@ -365,7 +393,21 @@ export class HistoryCompressor {
           : response.error ?? 'Context summary request failed.');
       }
 
-      return response.message?.content ?? '';
+      const normalizedUsage = normalizeDeepSeekUsage(response.usage);
+      const pricing = getConfiguredModelUsagePricing(input.model.id);
+      return {
+        content: response.message?.content ?? '',
+        usageEvent: normalizedUsage
+          ? createUsageEvent({
+              usage: normalizedUsage,
+              cost: calculateUsageCost(normalizedUsage, pricing),
+              currency: pricing.currency,
+              modelId: input.model.id,
+              requestId: randomUUID(),
+              source: input.usageSource
+            })
+          : undefined
+      };
     } finally {
       abort.dispose();
     }
@@ -377,8 +419,7 @@ function createCompressionState(state: ContextCompressionState | undefined): Con
     version: CONTEXT_COMPRESSION_VERSION,
     summaries: [...(state?.summaries ?? [])]
       .filter((summary) => summary.content.trim())
-      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
-      .slice(0, 1),
+      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)),
     protectedMessageIds: Array.from(new Set(state?.protectedMessageIds ?? [])),
     lastCompressedAt: state?.lastCompressedAt,
     lastFailureReason: state?.lastFailureReason
@@ -404,18 +445,21 @@ function hasProtectedMessageIdsChanged(left: readonly string[], right: readonly 
 }
 
 function estimateRawConversationTokens(input: HistoryCompressionRefreshInput): number {
-  const historyTokens = input.session.messages.reduce((total, message) => {
-    const content = (message.expandedContent ?? message.content).trim();
-    return total + estimateTokenCount(`${message.role}\n${content}`);
-  }, 0);
-  const prompt = input.prompt.trim();
-  const lastUserMessage = [...input.session.messages].reverse().find((message) => message.role === 'user');
-  const lastUserContent = lastUserMessage
-    ? (lastUserMessage.expandedContent ?? lastUserMessage.content).trim()
-    : '';
-  const promptTokens = prompt && prompt !== lastUserContent ? estimateTokenCount(`user\n${prompt}`) : 0;
-  const contextFileTokens = input.contextFiles.reduce((total, file) => total + estimateTokenCount(file.content), 0);
-  return historyTokens + promptTokens + contextFileTokens;
+  const projection = buildProviderRequestProjection({
+    model: input.model,
+    agentSettings: input.agentSettings,
+    contextFiles: input.contextFiles,
+    currentRunContext: input.currentRunContext,
+    contextInstructions: input.contextInstructions,
+    history: input.session.messages,
+    contextCompression: input.session.contextCompression,
+    language: input.language,
+    prompt: input.prompt,
+    slimToolNames: input.slimToolNames,
+    requestProtocolVersion: input.requestProtocolVersion
+  });
+  return projection.messages.reduce((total, message) => total + estimateDeepSeekMessageTokens(message), 0)
+    + estimateDeepSeekToolsTokens(projection.tools);
 }
 
 function estimateRawConversationRatio(input: HistoryCompressionRefreshInput): number {
@@ -459,9 +503,9 @@ function getSummarySystemPrompt(language: KeepseekLanguage): string {
 
 function buildSummaryUserPrompt(input: {
   messagesToSummarize: ChatMessage[];
-  previousSummary?: HistorySummary;
   summaryBudgetTokens: number;
   language: KeepseekLanguage;
+  formattedMessages: string;
 }): string {
   const headings = input.language === 'en'
     ? [
@@ -485,21 +529,18 @@ function buildSummaryUserPrompt(input: {
   const instruction = input.language === 'en'
     ? `Update the conversation summary. Keep it near ${input.summaryBudgetTokens} tokens or less. Use these headings:\n${headings.map((heading) => `- ${heading}`).join('\n')}`
     : `请更新会话摘要，尽量控制在 ${input.summaryBudgetTokens} token 以内。使用这些标题：\n${headings.map((heading) => `- ${heading}`).join('\n')}`;
-  const previous = input.previousSummary?.content.trim()
-    ? [
-        input.language === 'en' ? 'Existing summary to update:' : '需要更新的既有摘要：',
-        input.previousSummary.content.trim()
-      ].join('\n\n')
-    : '';
-  const messages = formatMessagesForSummary(input.messagesToSummarize, input.language);
-  return [instruction, previous, messages].filter(Boolean).join('\n\n');
+  return [instruction, input.formattedMessages].filter(Boolean).join('\n\n');
 }
 
-function formatMessagesForSummary(messages: ChatMessage[], language: KeepseekLanguage): string {
+function formatMessagesForSummary(messages: ChatMessage[], language: KeepseekLanguage): {
+  content: string;
+  includedMessageIds: string[];
+} {
   const header = language === 'en'
     ? 'New older messages to compress. Prefer original file/reference text over expanded file bodies:'
     : '需要压缩的新增较早消息。优先保留原始文件/目录引用文本，不要保留展开后的大段文件正文：';
   const blocks: string[] = [];
+  const includedMessageIds: string[] = [];
   let totalChars = header.length;
 
   for (const message of messages) {
@@ -511,17 +552,27 @@ function formatMessagesForSummary(messages: ChatMessage[], language: KeepseekLan
       break;
     }
     blocks.push(block);
+    includedMessageIds.push(message.id);
     totalChars += block.length;
   }
 
-  return [header, ...blocks].join('\n\n');
+  return {
+    content: [header, ...blocks].join('\n\n'),
+    includedMessageIds
+  };
 }
 
 function formatMessageForSummary(message: ChatMessage): string {
-  const content = truncateForSummary(message.content.replace(/\r\n?/gu, '\n'));
+  const content = message.content.replace(/\r\n?/gu, '\n').trim();
   const referenceHints = message.expandedContent && message.expandedContent !== message.content
     ? extractReferenceHints(message.expandedContent)
     : [];
+  const toolRounds = (message.toolRounds ?? []).map((round, index) => [
+    `Tool round ${index + 1} assistant reasoning:`,
+    round.reasoningContent ?? '',
+    `Tool calls: ${JSON.stringify(round.toolCalls)}`,
+    ...round.toolResults.map((result) => `Tool result ${result.toolCallId}:\n${result.content}`)
+  ].filter(Boolean).join('\n')).join('\n\n');
   return [
     `Message ${message.id}`,
     `Role: ${message.role}`,
@@ -529,16 +580,9 @@ function formatMessageForSummary(message: ChatMessage): string {
     message.modelId ? `Model: ${message.modelId}` : '',
     'Content:',
     content,
+    toolRounds,
     referenceHints.length ? `Reference hints:\n${referenceHints.join('\n')}` : ''
   ].filter(Boolean).join('\n');
-}
-
-function truncateForSummary(content: string): string {
-  const trimmed = content.trim();
-  if (trimmed.length <= SUMMARY_MAX_MESSAGE_CHARS) {
-    return trimmed;
-  }
-  return `${trimmed.slice(0, SUMMARY_MAX_MESSAGE_CHARS)}\n[message content truncated]`;
 }
 
 function extractReferenceHints(content: string): string[] {

@@ -13,6 +13,9 @@ import {
   type HistoryCompressionRefreshInput,
   type HistoryCompressionRefreshResult
 } from './historyCompressor';
+import { capOversizedFirstUserProviderContent, maintainArchivedToolResults } from './historyArchive';
+import { getConfiguredPromptCacheTtlMs } from '../shared/config';
+import { getDeepSeekV4ContextCompressionSettings } from '../shared/modelProfiles';
 
 export interface AgentRequestCoordinatorInput {
   prompt: string;
@@ -22,6 +25,8 @@ export interface AgentRequestCoordinatorInput {
   currentRunContext?: AgentRequest['currentRunContext'];
   contextInstructions?: AgentRequest['contextInstructions'];
   slimToolNames?: AgentRequest['slimToolNames'];
+  requestProtocolVersion?: AgentRequest['requestProtocolVersion'];
+  historyArchive?: AgentRequest['historyArchive'];
   history: AgentRequest['history'];
   contextCompression: AgentRequest['contextCompression'];
   historyRewriteReason?: string;
@@ -82,6 +87,8 @@ export class AgentRequestCoordinator {
         : undefined,
       contextInstructions: input.contextInstructions,
       slimToolNames: input.slimToolNames,
+      requestProtocolVersion: input.requestProtocolVersion,
+      historyArchive: input.historyArchive?.map((entry) => ({ ...entry })),
       history: input.history.map(cloneChatMessage),
       contextCompression: cloneContextCompressionState(input.contextCompression),
       historyRewriteReason: input.historyRewriteReason,
@@ -100,7 +107,7 @@ export class AgentRequestCoordinator {
   public async refreshContextCompressionBeforeRun(
     input: HistoryCompressionRefreshInput
   ): Promise<HistoryCompressionRefreshResult | undefined> {
-    const plan = this.historyCompressor.planRefresh(input);
+    let plan = this.historyCompressor.planRefresh(input);
     if (plan.mode !== 'sync') {
       return plan.changed
         ? {
@@ -109,6 +116,32 @@ export class AgentRequestCoordinator {
             reason: 'skipped'
           }
         : undefined;
+    }
+
+    const keepRecentTurns = (input.settings
+      ?? getDeepSeekV4ContextCompressionSettings(input.model, input.agentSettings)).keepRecentTurns;
+    capOversizedFirstUserProviderContent(input.session);
+    const snipResult = maintainArchivedToolResults(input.session, 'snip', keepRecentTurns);
+    if (snipResult.changed) {
+      plan = this.historyCompressor.planRefresh(input);
+      if (plan.mode !== 'sync') {
+        return {
+          state: plan.state,
+          changed: true,
+          reason: 'skipped'
+        };
+      }
+    }
+    const pruneResult = maintainArchivedToolResults(input.session, 'prune', keepRecentTurns);
+    if (pruneResult.changed) {
+      plan = this.historyCompressor.planRefresh(input);
+      if (plan.mode !== 'sync') {
+        return {
+          state: plan.state,
+          changed: true,
+          reason: 'skipped'
+        };
+      }
     }
 
     const backgroundRefresh = this.backgroundRefreshes.get(input.session.id);
@@ -152,11 +185,18 @@ export class AgentRequestCoordinator {
     if (plan.mode === 'none' || this.backgroundRefreshes.has(sessionId)) {
       return;
     }
+    if (plan.mode === 'background' && !isPromptCacheCold(input.session)) {
+      // A background summary would rewrite a still-hot prefix and add a paid model
+      // call. Defer it until the provider cache is cold or sync compaction becomes
+      // unavoidable.
+      return;
+    }
 
     const expectation = createBackgroundRefreshExpectation(input.session);
     const refreshPromise = this.historyCompressor.refresh({
       ...input,
-      signal: undefined
+      signal: undefined,
+      usageSource: 'background'
     })
       .then(async (result) => {
         if (!result.changed) {
@@ -179,6 +219,11 @@ export class AgentRequestCoordinator {
 
     this.backgroundRefreshes.set(sessionId, refreshPromise);
   }
+}
+
+function isPromptCacheCold(session: ChatSession): boolean {
+  const lastRequestAt = Date.parse(session.requestProtocol?.lastProviderRequestAt ?? session.updatedAt);
+  return Number.isFinite(lastRequestAt) && Date.now() - lastRequestAt >= getConfiguredPromptCacheTtlMs();
 }
 
 function cloneChatMessage(message: ChatMessage): ChatMessage {

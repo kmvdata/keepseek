@@ -13,10 +13,12 @@ import {
 import type { HistoryProjectionResult } from './historyProjection';
 
 export const CREATE_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_draft_edit';
+export const CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME = 'keepseek_create_incremental_draft_edit';
 export const DELETE_WORKSPACE_FILE_TOOL_NAME = 'keepseek_delete_workspace_file';
 export const LIST_WORKSPACE_FILES_TOOL_NAME = 'keepseek_list_workspace_files';
 export const LIST_WORKSPACE_DIRECTORY_TOOL_NAME = 'keepseek_list_workspace_directory';
 export const SEARCH_WORKSPACE_TOOL_NAME = 'keepseek_search_workspace';
+export const SEARCH_SESSION_ARCHIVE_TOOL_NAME = 'keepseek_search_session_archive';
 export const READ_WORKSPACE_FILE_TOOL_NAME = 'keepseek_read_workspace_file';
 export const READ_WORKSPACE_FILE_RANGE_TOOL_NAME = 'keepseek_read_workspace_file_range';
 export const READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME = 'keepseek_read_workspace_diagnostics';
@@ -32,7 +34,7 @@ export const GIT_CREATE_PATCH_TOOL_NAME = 'keepseek_git_create_patch';
 export const GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME = 'keepseek_git_suggest_commit_message';
 
 const UNPROJECTED_HISTORY_MESSAGE_LIMIT = 24;
-const CORE_AGENT_TOOL_NAMES = [
+const CORE_AGENT_TOOL_NAMES_V1 = [
   CREATE_DRAFT_EDIT_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   FIND_REFERENCES_TOOL_NAME,
@@ -45,7 +47,7 @@ const CORE_AGENT_TOOL_NAMES = [
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME
 ];
-const ALL_AGENT_TOOL_NAMES = [
+const ALL_AGENT_TOOL_NAMES_V1 = [
   CREATE_DRAFT_EDIT_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   FIND_REFERENCES_TOOL_NAME,
@@ -65,6 +67,16 @@ const ALL_AGENT_TOOL_NAMES = [
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME
 ];
+const CORE_AGENT_TOOL_NAMES = [
+  ...CORE_AGENT_TOOL_NAMES_V1,
+  CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
+  SEARCH_SESSION_ARCHIVE_TOOL_NAME
+];
+const ALL_AGENT_TOOL_NAMES = [
+  ...ALL_AGENT_TOOL_NAMES_V1,
+  CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
+  SEARCH_SESSION_ARCHIVE_TOOL_NAME
+];
 
 export interface BuildAgentMessagesInput {
   prompt: string;
@@ -75,6 +87,8 @@ export interface BuildAgentMessagesInput {
   history: ChatMessage[];
   language: KeepseekLanguage;
   projection?: HistoryProjectionResult;
+  /** Frozen per session. v1 preserves legacy final-answer reasoning bytes. */
+  requestProtocolVersion?: number;
 }
 
 export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepSeekMessage[] {
@@ -112,7 +126,7 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
   // 再追加最终文本；user 消息一律 (expandedContent ?? content)。当前 prompt 消息
   // 与历史消息走完全相同的字节路径，保证跨轮前缀稳定。
   for (const message of history) {
-    appendHistoryMessage(messages, message);
+    appendHistoryMessage(messages, message, input.requestProtocolVersion ?? 1);
   }
 
   if (input.prompt.trim() && !currentPromptMessage) {
@@ -125,7 +139,11 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
   return messages;
 }
 
-function appendHistoryMessage(messages: DeepSeekMessage[], message: ChatMessage): void {
+function appendHistoryMessage(
+  messages: DeepSeekMessage[],
+  message: ChatMessage,
+  requestProtocolVersion: number
+): void {
   if (message.role === 'assistant') {
     for (const round of message.toolRounds ?? []) {
       messages.push({
@@ -145,7 +163,12 @@ function appendHistoryMessage(messages: DeepSeekMessage[], message: ChatMessage)
     messages.push({
       role: 'assistant',
       content: getMessageContentForAgent(message),
-      reasoning_content: message.reasoningContent ?? null
+      // DeepSeek requires reasoning_content on assistant tool-call turns, which
+      // are replayed above as an atomic round. Ordinary final-answer reasoning is
+      // local UI/debug state in v2 and must not inflate every later prompt.
+      ...(requestProtocolVersion <= 1
+        ? { reasoning_content: message.reasoningContent ?? null }
+        : {})
     });
     return;
   }
@@ -213,6 +236,7 @@ export function formatCurrentRunContextForAgent(input: {
   contextFiles: ContextFile[];
   currentRunContext?: CurrentRunContext;
   language: KeepseekLanguage;
+  totalBudgetCharacters?: number;
 }): string {
   const contextBlock = formatAgentContextFiles(input);
   const projectInstructionsBlock = formatProjectInstructionsForAgent(input.currentRunContext, input.language);
@@ -221,7 +245,10 @@ export function formatCurrentRunContextForAgent(input: {
     language: input.language
   });
   const legacyMemoryBlock = formatLegacyMemoryForAgent(input.currentRunContext?.legacyMemory, input.language);
-  const dynamicBlocks = [projectInstructionsBlock, skillsBlock, legacyMemoryBlock, contextBlock].filter(Boolean);
+  const dynamicBlocks = applySharedContextBudget(
+    [projectInstructionsBlock, contextBlock, skillsBlock, legacyMemoryBlock].filter(Boolean),
+    input.totalBudgetCharacters
+  );
   if (!dynamicBlocks.length) {
     return '';
   }
@@ -242,8 +269,35 @@ export function formatCurrentRunContextForAgent(input: {
   ].join('\n\n');
 }
 
+function applySharedContextBudget(blocks: string[], maxCharacters: number | undefined): string[] {
+  if (!Number.isFinite(maxCharacters) || (maxCharacters ?? 0) <= 0) {
+    return blocks;
+  }
+  let remaining = Math.max(0, Math.floor(maxCharacters as number));
+  const projected: string[] = [];
+  for (const block of blocks) {
+    if (remaining <= 0) {
+      break;
+    }
+    if (block.length <= remaining) {
+      projected.push(block);
+      remaining -= block.length;
+      continue;
+    }
+    const notice = '\n\n[KeepSeek truncated this context source to fit the shared context budget.]\n\n';
+    if (remaining <= notice.length) {
+      break;
+    }
+    const contentBudget = remaining - notice.length;
+    const headChars = Math.floor(contentBudget * 0.75);
+    projected.push(`${block.slice(0, headChars).trimEnd()}${notice}${block.slice(-(contentBudget - headChars)).trimStart()}`);
+    break;
+  }
+  return projected;
+}
+
 export function getMessageContentForAgent(message: ChatMessage): string {
-  return (message.expandedContent ?? message.content).trim();
+  return (message.providerContent ?? message.expandedContent ?? message.content).trim();
 }
 
 export function getAgentSystemPrompt(input: {
@@ -379,12 +433,18 @@ function dedupeActivatedSkills(skills: ActivatedSkill[] | undefined): ActivatedS
   return deduped;
 }
 
-export function getAgentToolNamesForPrompt(prompt: string, slimModeEnabled: boolean): string[] {
+export function getAgentToolNamesForPrompt(
+  prompt: string,
+  slimModeEnabled: boolean,
+  requestProtocolVersion = 2
+): string[] {
+  const coreNames = requestProtocolVersion >= 2 ? CORE_AGENT_TOOL_NAMES : CORE_AGENT_TOOL_NAMES_V1;
+  const allNames = requestProtocolVersion >= 2 ? ALL_AGENT_TOOL_NAMES : ALL_AGENT_TOOL_NAMES_V1;
   if (!slimModeEnabled) {
-    return [...ALL_AGENT_TOOL_NAMES];
+    return [...allNames];
   }
 
-  const names = new Set(CORE_AGENT_TOOL_NAMES);
+  const names = new Set(coreNames);
   if (shouldExposeDirectoryTool(prompt)) {
     names.add(LIST_WORKSPACE_DIRECTORY_TOOL_NAME);
   }
@@ -410,11 +470,62 @@ export function getAgentTools(options: { toolNames?: readonly string[] } = {}): 
 }
 
 export function isDraftEditPreparationTool(toolName: string): boolean {
-  return toolName === CREATE_DRAFT_EDIT_TOOL_NAME || toolName === DELETE_WORKSPACE_FILE_TOOL_NAME;
+  return toolName === CREATE_DRAFT_EDIT_TOOL_NAME
+    || toolName === CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME
+    || toolName === DELETE_WORKSPACE_FILE_TOOL_NAME;
 }
 
 function getRawAgentTools(): DeepSeekFunctionTool[] {
   return [
+    {
+      type: 'function',
+      function: {
+        name: CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
+        description: 'Create one safe pending DraftEdit for an existing text file from small exact edits. Prefer this over sending a complete large file. Every search must match exactly once; ambiguous or missing targets fail without guessing. Multiple non-overlapping edits are combined locally into one full-file DraftEdit for normal review/checkpoint safety.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Existing workspace text file path.' },
+            reason: { type: 'string', description: 'Short human-readable reason shown during review.' },
+            edits: {
+              type: 'array',
+              description: 'One or more exact, non-overlapping search/replace or whole-line range replacements.',
+              items: {
+                type: 'object',
+                properties: {
+                  search: { type: 'string', description: 'Exact original text. Must occur exactly once. Use either search or replaceRange.' },
+                  replace: { type: 'string', description: 'Replacement text; may be empty.' },
+                  replaceRange: { type: 'string', description: 'Optional 1-based inclusive whole-line range such as "42-57". Use either replaceRange or search.' }
+                },
+                required: ['replace'],
+                additionalProperties: false
+              }
+            }
+          },
+          required: ['path', 'reason', 'edits'],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: SEARCH_SESSION_ARCHIVE_TOOL_NAME,
+        description: 'Search complete tool results archived locally from earlier session history. This is read-only, uses local lexical/BM25 ranking, makes no model call, and returns bounded excerpts with stable archive reference ids.',
+        strict: true,
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Keywords, path, symbol, error text, or exact fact to recall.' },
+            maxResults: { type: 'number', description: 'Maximum excerpts, capped by KeepSeek.' },
+            maxChars: { type: 'number', description: 'Maximum total excerpt characters, capped by KeepSeek.' }
+          },
+          required: ['query'],
+          additionalProperties: false
+        }
+      }
+    },
     {
       type: 'function',
       function: {
@@ -783,7 +894,9 @@ function findCurrentPromptMessage(history: ChatMessage[], prompt: string): ChatM
   }
   for (let index = history.length - 1; index >= 0; index -= 1) {
     const message = history[index];
-    if (message.role === 'user' && getMessageContentForAgent(message) === normalizedPrompt) {
+    const originalContent = (message.expandedContent ?? message.content).trim();
+    if (message.role === 'user'
+      && (getMessageContentForAgent(message) === normalizedPrompt || originalContent === normalizedPrompt)) {
       return message;
     }
   }

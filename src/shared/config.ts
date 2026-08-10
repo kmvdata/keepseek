@@ -31,6 +31,9 @@ export const DEFAULT_BALANCE_REFRESH_INTERVAL_MS = 60_000;
 // DeepSeek's prefix cache (byte-identical from token 0) is invalidated. Users can
 // opt into the smaller schema explicitly.
 export const DEFAULT_SLIM_TOOL_MODE_ENABLED = false;
+/** Conservative DeepSeek prompt-cache boundary used before rewriting persisted history. */
+export const DEFAULT_PROMPT_CACHE_TTL_MINUTES = 24 * 60;
+export const DEFAULT_TOTAL_CONTEXT_BUDGET_TOKENS = 32_000;
 export const DEFAULT_COMPRESSION_THRESHOLD: CompressionThreshold = 'balanced';
 export const DEFAULT_VALIDATION_AUTHORIZATION_POLICY: ValidationAuthorizationPolicy = 'ask';
 export const DEFAULT_MAX_VALIDATION_RUNS = 3;
@@ -186,6 +189,20 @@ export function getConfiguredSlimToolModeEnabled(): boolean {
   return vscode.workspace
     .getConfiguration('keepseek')
     .get<boolean>('slimToolModeEnabled', DEFAULT_SLIM_TOOL_MODE_ENABLED);
+}
+
+export function getConfiguredPromptCacheTtlMs(): number {
+  const minutes = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('promptCacheTtlMinutes', DEFAULT_PROMPT_CACHE_TTL_MINUTES);
+  return normalizeIntegerInRange(minutes, 5, 10_080, DEFAULT_PROMPT_CACHE_TTL_MINUTES) * 60_000;
+}
+
+export function getConfiguredTotalContextBudgetTokens(): number {
+  const value = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('context.totalBudgetTokens', DEFAULT_TOTAL_CONTEXT_BUDGET_TOKENS);
+  return normalizeIntegerInRange(value, 1_000, 96_000, DEFAULT_TOTAL_CONTEXT_BUDGET_TOKENS);
 }
 
 export function getConfiguredValidationAuthorizationPolicy(): ValidationAuthorizationPolicy {

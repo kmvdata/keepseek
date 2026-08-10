@@ -6,7 +6,9 @@ import type {
   TurnUsageStats,
   Usage,
   UsageCostRates,
-  UsageEvent
+  UsageEvent,
+  UsageSource,
+  UsageSourceStats
 } from '../shared/types';
 
 const DEFAULT_CURRENCY = '¥';
@@ -75,13 +77,17 @@ export function createUsageEvent(input: {
   currency: string;
   modelId: string;
   requestId?: string;
+  source?: UsageSource;
+  requestCount?: number;
 }): UsageEvent {
   return {
     usage: normalizeUsage(input.usage),
     cost: normalizeCost(input.cost),
     currency: normalizeCurrency(input.currency),
     modelId: input.modelId,
-    requestId: input.requestId
+    requestId: input.requestId,
+    source: input.source ?? 'executor',
+    requestCount: Math.max(1, Math.floor(input.requestCount ?? 1))
   };
 }
 
@@ -93,11 +99,12 @@ export function addUsageEventToTurnStats(
   const base = current ?? createEmptyTurnUsageStats(event.currency, event.modelId);
   return {
     ...sumUsage(base, event.usage),
-    requestCount: base.requestCount + 1,
+    requestCount: base.requestCount + (event.requestCount ?? 1),
     cost: normalizeCost(base.cost + event.cost),
     currency: normalizeCurrency(event.currency || base.currency),
     modelId: event.modelId || base.modelId,
-    updatedAt: now
+    updatedAt: now,
+    bySource: addUsageSourceStats(base.bySource, event.source, event.usage, event.cost, event.requestCount)
   };
 }
 
@@ -109,10 +116,11 @@ export function addUsageEventToSessionStats(
   const base = current ?? createEmptySessionUsageStats(event.currency);
   return {
     ...sumUsage(base, event.usage),
-    requestCount: base.requestCount + 1,
+    requestCount: base.requestCount + (event.requestCount ?? 1),
     sessionCost: normalizeCost(base.sessionCost + event.cost),
     currency: normalizeCurrency(event.currency || base.currency),
-    updatedAt: now
+    updatedAt: now,
+    bySource: addUsageSourceStats(base.bySource, event.source, event.usage, event.cost, event.requestCount)
   };
 }
 
@@ -127,7 +135,8 @@ export function addTurnUsageToSessionStats(
     requestCount: base.requestCount + turn.requestCount,
     sessionCost: normalizeCost(base.sessionCost + turn.cost),
     currency: normalizeCurrency(turn.currency || base.currency),
-    updatedAt: now
+    updatedAt: now,
+    bySource: mergeUsageSourceStats(base.bySource, turn.bySource)
   };
 }
 
@@ -206,7 +215,8 @@ export function normalizeSessionUsageStatsValue(value: unknown): SessionUsageSta
     requestCount: readNonNegativeInteger(value.requestCount),
     sessionCost: normalizeCost(value.sessionCost),
     currency: normalizeCurrency(value.currency),
-    updatedAt: normalizeOptionalString(value.updatedAt)
+    updatedAt: normalizeOptionalString(value.updatedAt),
+    bySource: normalizeUsageSourceStatsMap(value.bySource)
   };
   return hasAnyUsage(stats) || stats.requestCount > 0 || stats.sessionCost > 0 ? stats : undefined;
 }
@@ -221,7 +231,8 @@ export function normalizeTurnUsageStatsValue(value: unknown): TurnUsageStats | u
     cost: normalizeCost(value.cost),
     currency: normalizeCurrency(value.currency),
     modelId: normalizeOptionalString(value.modelId),
-    updatedAt: normalizeOptionalString(value.updatedAt)
+    updatedAt: normalizeOptionalString(value.updatedAt),
+    bySource: normalizeUsageSourceStatsMap(value.bySource)
   };
   return hasAnyUsage(stats) || stats.requestCount > 0 || stats.cost > 0 ? stats : undefined;
 }
@@ -251,6 +262,7 @@ export function normalizePromptCacheDiagnosticsValue(value: unknown): PromptCach
   const diagnostics: PromptCacheDiagnostics = {
     systemPromptHash: normalizeOptionalString(value.systemPromptHash),
     toolsSchemaHash: normalizeOptionalString(value.toolsSchemaHash),
+    historyPrefixHash: normalizeOptionalString(value.historyPrefixHash),
     modelId: normalizeOptionalString(value.modelId),
     historyCompacted: typeof value.historyCompacted === 'boolean' ? value.historyCompacted : undefined,
     historyRewriteReason: normalizeOptionalString(value.historyRewriteReason),
@@ -278,6 +290,78 @@ function sumUsage<T extends Usage>(left: T, right: Usage): Usage {
     cacheMissTokens: left.cacheMissTokens + right.cacheMissTokens,
     ...(reasoningTokens > 0 ? { reasoningTokens } : {})
   };
+}
+
+const USAGE_SOURCES: UsageSource[] = [
+  'executor',
+  'summary',
+  'retry',
+  'continuation',
+  'background',
+  'retrieval',
+  'router'
+];
+
+function addUsageSourceStats(
+  current: Partial<Record<UsageSource, UsageSourceStats>> | undefined,
+  source: UsageSource,
+  usage: Usage,
+  cost: number,
+  requestCount = 1
+): Partial<Record<UsageSource, UsageSourceStats>> {
+  const previous = current?.[source] ?? {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    cacheHitTokens: 0,
+    cacheMissTokens: 0,
+    requestCount: 0,
+    cost: 0
+  };
+  return {
+    ...(current ?? {}),
+    [source]: {
+      ...sumUsage(previous, usage),
+      requestCount: previous.requestCount + Math.max(1, Math.floor(requestCount)),
+      cost: normalizeCost(previous.cost + cost)
+    }
+  };
+}
+
+function mergeUsageSourceStats(
+  left: Partial<Record<UsageSource, UsageSourceStats>> | undefined,
+  right: Partial<Record<UsageSource, UsageSourceStats>> | undefined
+): Partial<Record<UsageSource, UsageSourceStats>> | undefined {
+  let merged = left ? { ...left } : undefined;
+  for (const source of USAGE_SOURCES) {
+    const stats = right?.[source];
+    if (!stats) {
+      continue;
+    }
+    merged = addUsageSourceStats(merged, source, stats, stats.cost, stats.requestCount);
+  }
+  return merged;
+}
+
+function normalizeUsageSourceStatsMap(
+  value: unknown
+): Partial<Record<UsageSource, UsageSourceStats>> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const result: Partial<Record<UsageSource, UsageSourceStats>> = {};
+  for (const source of USAGE_SOURCES) {
+    const raw = value[source];
+    if (!isRecord(raw)) {
+      continue;
+    }
+    result[source] = {
+      ...normalizeUsage(raw),
+      requestCount: readNonNegativeInteger(raw.requestCount),
+      cost: normalizeCost(raw.cost)
+    };
+  }
+  return Object.keys(result).length ? result : undefined;
 }
 
 function normalizeUsage(value: unknown): Usage {

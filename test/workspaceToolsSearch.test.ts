@@ -70,6 +70,33 @@ test('workspace search finds literal text case-insensitively and returns line co
   assert.equal(caseSensitiveMiss.count, 0);
 });
 
+test('range reads expose a stable continuation cursor within the output budget', async (t) => {
+  const root = await createWorkspace(t, 'range-cursor');
+  await writeWorkspaceFile(root, 'src/large.ts', Array.from({ length: 200 }, (_value, index) => (
+    `line ${index + 1} ${'x'.repeat(40)}`
+  )).join('\n'));
+  const service = new WorkspaceToolService();
+  const first = JSON.parse(await service.readWorkspaceFileRange({
+    path: 'src/large.ts',
+    startLine: 1,
+    endLine: 100,
+    maxBytes: 500
+  }, 'en')) as { ok: boolean; endLine: number; totalLines: number; truncated: boolean; hasMore: boolean; nextStartLine?: number };
+
+  assert.equal(first.ok, true);
+  assert.equal(first.truncated, true);
+  assert.equal(first.hasMore, true);
+  assert.equal(first.nextStartLine, first.endLine);
+  const second = JSON.parse(await service.readWorkspaceFileRange({
+    path: 'src/large.ts',
+    startLine: first.nextStartLine!,
+    endLine: first.nextStartLine! + 10,
+    maxBytes: 2_000
+  }, 'en')) as { ok: boolean; startLine: number };
+  assert.equal(second.ok, true);
+  assert.equal(second.startLine, first.nextStartLine);
+});
+
 test('workspace search supports regex, path and include scopes while excluding generated directories', async (t) => {
   const root = await createWorkspace(t, 'scope');
   await writeWorkspaceFile(root, 'src/one.ts', 'export const Needle = 42;\n');

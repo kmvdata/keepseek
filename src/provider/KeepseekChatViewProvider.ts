@@ -1,10 +1,15 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
 import { AgentRunAbortedError, AgentRunner } from '../agent/runner';
 import { AgentRequestCoordinator, type BackgroundContextCompressionRefreshUpdate } from '../agent/agentRequestCoordinator';
 import type { HistoryCompressionRefreshResult } from '../agent/historyCompressor';
 import { createProtectedContextMeta } from '../agent/historyProjection';
+import {
+  archiveContextSourcesBeyondBudget,
+  capOversizedFirstUserProviderContent,
+  maintainArchivedToolResults
+} from '../agent/historyArchive';
 import { formatCurrentRunContextForAgent, getAgentToolNamesForPrompt } from '../agent/protocol';
 import { FileContextStore } from '../context/fileContextStore';
 import { SafeFileEditor } from '../edits/safeFileEditor';
@@ -62,7 +67,9 @@ import {
   getConfiguredDebugMode,
   getConfiguredHistoryRetentionDays,
   getConfiguredMaxFileBytes,
+  getConfiguredPromptCacheTtlMs,
   getConfiguredSkillContextBudgetChars,
+  getConfiguredTotalContextBudgetTokens,
   getConfiguredModels,
   getConfiguredSelectedModelId,
   getConfiguredSlimToolModeEnabled,
@@ -108,6 +115,11 @@ import { LegacyProjectMemoryMigration } from '../memory/legacyProjectMemoryMigra
 import { BackgroundRunCoordinator } from '../agent/backgroundRunCoordinator';
 import { BackgroundRunStatusBar } from './backgroundRunStatusBar';
 import { getAvailableSafeValidationScripts } from '../agent/tools/validationTools';
+import {
+  CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
+  CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
+  LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION
+} from '../agent/providerRequestProjection';
 
 const CHAT_CONTAINER_ID = 'keepseek-sidebar';
 const CHAT_VIEW_TYPE = 'keepseek.chat';
@@ -1061,11 +1073,86 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       agentSettings: this.agentSettings,
       contextFiles: this.fileContext.getAll(),
       currentRunContext: this.currentRunContextsBySession.get(activeSession.id),
+      contextInstructions: activeSession.contextInstructions,
       messages: this.messages,
       contextCompression: activeSession.contextCompression,
       language: this.language,
-      slimToolNames: this.slimToolNamesBySession.get(activeSession.id)
+      slimToolNames: activeSession.requestProtocol?.toolNames.length
+        ? activeSession.requestProtocol.toolNames
+        : this.slimToolNamesBySession.get(activeSession.id),
+      requestProtocolVersion: activeSession.requestProtocol?.version
     });
+  }
+
+  private resolveSessionToolNames(
+    session: ChatSession,
+    prompt: string,
+    model: KeepseekModel
+  ): string[] {
+    let protocol = session.requestProtocol;
+    const baseUrl = vscode.workspace
+      .getConfiguration('keepseek')
+      .get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL)
+      .trim() || DEFAULT_DEEPSEEK_BASE_URL;
+    const modelChanged = Boolean(protocol?.modelId && protocol.modelId !== model.id);
+    const providerChanged = Boolean(protocol?.providerId && protocol.providerId !== model.provider);
+    const baseUrlChanged = Boolean(protocol?.baseUrl && protocol.baseUrl !== baseUrl);
+    const lastProviderRequestAt = Date.parse(protocol?.lastProviderRequestAt ?? session.updatedAt);
+    const cacheCold = session.messages.length > 0
+      && Number.isFinite(lastProviderRequestAt)
+      && Date.now() - lastProviderRequestAt >= getConfiguredPromptCacheTtlMs();
+    const canMigrateProtocol = modelChanged || providerChanged || baseUrlChanged || cacheCold;
+    if (canMigrateProtocol && (!protocol || protocol.version < CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION
+      || modelChanged || providerChanged || baseUrlChanged)) {
+      // The previous cache lane is unusable anyway, so this is a safe migration
+      // boundary for the current serialization and tool schema.
+      protocol = {
+        version: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
+        serializationStrategy: 'provider-projection-v2',
+        toolSchemaVersion: CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
+        toolNames: [],
+        modelId: model.id,
+        providerId: model.provider,
+        baseUrl,
+        createdAt: new Date().toISOString()
+      };
+      session.requestProtocol = protocol;
+    }
+
+    if (!protocol) {
+      // A pre-upgrade session stays on v1 until a cold/compaction boundary.
+      // Persisting the explicit metadata freezes its tool set across restarts
+      // without changing any provider-visible bytes.
+      protocol = {
+        version: LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION,
+        serializationStrategy: 'legacy-v1',
+        toolSchemaVersion: 1,
+        toolNames: [],
+        modelId: model.id,
+        providerId: model.provider,
+        baseUrl,
+        createdAt: session.createdAt
+      };
+      session.requestProtocol = protocol;
+    }
+
+    protocol.modelId = protocol.modelId ?? model.id;
+    protocol.providerId = protocol.providerId ?? model.provider;
+    protocol.baseUrl = protocol.baseUrl ?? baseUrl;
+    if (cacheCold) {
+      // The provider prefix has already expired, so stale successful tool output
+      // may be pruned without sacrificing a live cache entry.
+      maintainArchivedToolResults(session, 'prune', 4);
+      capOversizedFirstUserProviderContent(session);
+    }
+    if (!protocol.toolNames.length) {
+      protocol.toolNames = getAgentToolNamesForPrompt(
+        prompt,
+        getConfiguredSlimToolModeEnabled(),
+        protocol.version
+      );
+    }
+    return [...protocol.toolNames];
   }
 
   private getSelectedModel(): ReturnType<typeof getConfiguredModels>[number] {
@@ -2337,6 +2424,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         // implicit skill 集合与 slim 工具集，避免沿用旧请求的冻结状态。
         this.skillStore.invalidateImplicitSkillSnapshot(activeSession);
         this.slimToolNamesBySession.delete(activeSession.id);
+        if (activeSession.requestProtocol) {
+          activeSession.requestProtocol.toolNames = [];
+        }
       }
       const runContextResult = await this.refreshCurrentRunContext(
         activeSession,
@@ -2351,8 +2441,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const currentRunContext = runContextResult.context;
       const activeSkills = currentRunContext.skills;
       // 会话冻结的 slim 工具集：首轮请求确定后跨轮复用，保证 tools schema 前缀稳定
-      const slimToolNames = this.slimToolNamesBySession.get(activeSession.id)
-        ?? getAgentToolNamesForPrompt(expandedPrompt, getConfiguredSlimToolModeEnabled());
+      const slimToolNames = this.resolveSessionToolNames(activeSession, expandedPrompt, model);
       this.slimToolNamesBySession.set(activeSession.id, slimToolNames);
       const now = new Date().toISOString();
       const replacementIndex = replaceMessageId
@@ -2361,14 +2450,46 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
       // 稳定上下文块：字节不变时跨轮复用（system 段前缀稳定），只有
       // AGENTS.md/Skills/Legacy Memory/Context Files 真正变化才整体重写。
-      const contextInstructions = formatCurrentRunContextForAgent({
-        contextFiles: this.fileContext.getAll(),
+      const contextFiles = this.fileContext.getAll();
+      const totalContextBudgetCharacters = getConfiguredTotalContextBudgetTokens() * 4;
+      archiveContextSourcesBeyondBudget(activeSession, [
+        ...currentRunContext.projectInstructions.map((instruction) => ({
+          id: instruction.id,
+          kind: 'project-instructions',
+          content: instruction.content
+        })),
+        ...contextFiles.map((file) => ({ id: file.id, kind: 'context-file', content: file.content })),
+        ...currentRunContext.skills.map((skill) => ({ id: skill.id, kind: 'skill', content: skill.content })),
+        ...(currentRunContext.legacyMemory ? [{
+          id: 'legacy-project-memory',
+          kind: 'legacy-memory',
+          content: currentRunContext.legacyMemory.content
+        }] : [])
+      ], totalContextBudgetCharacters);
+      const computedContextInstructions = formatCurrentRunContextForAgent({
+        contextFiles,
         currentRunContext,
-        language: this.language
+        language: this.language,
+        totalBudgetCharacters: totalContextBudgetCharacters
       });
-      if (activeSession.contextInstructions !== contextInstructions) {
-        activeSession.contextInstructions = contextInstructions;
+      let dynamicContextTail = '';
+      if (activeSession.contextInstructions === undefined) {
+        activeSession.contextInstructions = computedContextInstructions;
+        if (activeSession.requestProtocol) {
+          activeSession.requestProtocol.lastDynamicContextHash = hashContextInstructions(computedContextInstructions);
+        }
+      } else {
+        const computedHash = hashContextInstructions(computedContextInstructions);
+        const appliedHash = activeSession.requestProtocol?.lastDynamicContextHash
+          ?? hashContextInstructions(activeSession.contextInstructions);
+        if (computedHash !== appliedHash) {
+          dynamicContextTail = formatDynamicContextTail(computedContextInstructions, this.language);
+          if (activeSession.requestProtocol) {
+            activeSession.requestProtocol.lastDynamicContextHash = computedHash;
+          }
+        }
       }
+      const contextInstructions = activeSession.contextInstructions;
 
       if (replaceMessageId) {
         if (replacementIndex < 0) {
@@ -2403,9 +2524,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (expandedPrompt !== trimmedPrompt) {
         userMessage.expandedContent = expandedPrompt;
       }
+      if (dynamicContextTail) {
+        userMessage.providerContent = `${expandedPrompt.trim()}\n\n${dynamicContextTail}`;
+      }
       activeSession.lastTraceLogUri = undefined;
       this.sessionTraceLogUris.delete(activeSession.id);
       this.messages.push(userMessage);
+      if ((activeSession.requestProtocol?.version ?? 1) >= CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION) {
+        capOversizedFirstUserProviderContent(activeSession);
+      }
       activeSession.updatedAt = now;
       this.postState();
       await this.refreshContextCompressionBeforeRun(activeSession, expandedPrompt, model, abortController.signal);
@@ -2445,6 +2572,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         currentRunContext,
         contextInstructions,
         slimToolNames,
+        requestProtocolVersion: activeSession.requestProtocol?.version,
+        historyArchive: activeSession.historyArchive,
         history: agentHistory,
         contextCompression: activeSession.contextCompression,
         historyRewriteReason: replaceMessageId ? 'edit_user_prompt' : undefined,
@@ -2514,6 +2643,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
       });
       completedResponse = response;
+      if (activeSession.requestProtocol) {
+        activeSession.requestProtocol.lastProviderRequestAt = new Date().toISOString();
+      }
 
       this.setAgentActivity({
         base: 'thinking',
@@ -2665,6 +2797,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         model,
         agentSettings: this.agentSettings,
         contextFiles: this.fileContext.getAll(),
+        currentRunContext: this.currentRunContextsBySession.get(activeSession.id),
+        contextInstructions: activeSession.contextInstructions,
+        slimToolNames: activeSession.requestProtocol?.toolNames,
+        requestProtocolVersion: activeSession.requestProtocol?.version,
         language: this.language,
         signal
       });
@@ -2685,6 +2821,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       model,
       agentSettings: this.agentSettings,
       contextFiles: this.fileContext.getAll(),
+      currentRunContext: this.currentRunContextsBySession.get(activeSession.id),
+      contextInstructions: activeSession.contextInstructions,
+      slimToolNames: activeSession.requestProtocol?.toolNames,
+      requestProtocolVersion: activeSession.requestProtocol?.version,
       language: this.language
     }, (update) => this.applyBackgroundContextCompressionRefresh(activeSession, update));
   }
@@ -2726,6 +2866,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     session.contextCompression = result.state;
+    if ((result.reason === 'created' || result.reason === 'updated') && session.requestProtocol) {
+      session.requestProtocol.version = CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION;
+      session.requestProtocol.serializationStrategy = 'provider-projection-v2';
+      session.requestProtocol.toolSchemaVersion = CURRENT_PROVIDER_TOOL_SCHEMA_VERSION;
+      session.requestProtocol.toolNames = [];
+    }
+    for (const usageEvent of result.usageEvents ?? []) {
+      session.usageStats = addUsageEventToSessionStats(session.usageStats, usageEvent);
+    }
     session.contextUsage = undefined;
     session.updatedAt = new Date().toISOString();
     return true;
@@ -2752,9 +2901,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       agentSettings: this.agentSettings,
       contextFiles,
       currentRunContext,
+      contextInstructions: activeSession.contextInstructions,
       messages: this.messages,
       contextCompression: activeSession.contextCompression,
-      language: this.language
+      language: this.language,
+      slimToolNames: activeSession.requestProtocol?.toolNames,
+      requestProtocolVersion: activeSession.requestProtocol?.version
     });
     const contextUsage = pickLargerContextUsageEstimate(
       pickLargerContextUsageEstimate(activeSession.contextUsage, computedContextUsage),
@@ -2842,6 +2994,21 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 function getWorkspaceSummaryTimestamp(workspace: WorkspaceSummary): number {
   const timestamp = Date.parse(workspace.updatedAt);
   return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function hashContextInstructions(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function formatDynamicContextTail(value: string, language: 'en' | 'zh-CN'): string {
+  const content = value.trim();
+  const header = language === 'en'
+    ? 'Session context update for this turn and later turns (appended here to preserve the cached stable prefix):'
+    : '本轮及后续轮次的会话上下文更新（追加在此处以保护已缓存的稳定前缀）：';
+  const empty = language === 'en'
+    ? 'The previously appended dynamic context is no longer active; use only the stable session context above.'
+    : '先前追加的动态上下文已不再生效；仅使用上方稳定会话上下文。';
+  return `<keepseek-dynamic-context>\n${header}\n\n${content || empty}\n</keepseek-dynamic-context>`;
 }
 
 function normalizeSkillIds(value: unknown): string[] | undefined {

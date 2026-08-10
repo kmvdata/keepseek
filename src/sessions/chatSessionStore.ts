@@ -10,9 +10,15 @@ import {
   ChatSessionSummary,
   ContextCompressionState,
   HistorySummary,
+  HistoryArchiveEntry,
   RepairLoopState,
+  SessionRequestProtocol,
   WorkspaceSummary
 } from '../shared/types';
+import {
+  CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
+  CURRENT_PROVIDER_TOOL_SCHEMA_VERSION
+} from '../agent/providerRequestProjection';
 import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from '../shared/i18n';
 import { isRecord } from '../shared/errors';
 import { normalizeContextUsageEstimateValue } from '../agent/contextUsage';
@@ -148,6 +154,7 @@ export class ChatSessionStore {
       id: randomUUID(),
       messages: source.messages.map(copyMessage),
       contextCompression: undefined,
+      requestProtocol: createNewSessionRequestProtocol(now),
       repairLoop: undefined,
       lastTraceLogUri: undefined,
       createdAt: now,
@@ -409,6 +416,7 @@ export function createEmptySession(
     title: localize(language, 'defaultSessionTitle'),
     messages: [],
     activeSkillIds: [],
+    requestProtocol: createNewSessionRequestProtocol(now),
     createdAt: now,
     updatedAt: now,
     workspaceKey: workspaceScope.key,
@@ -522,6 +530,8 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       messages,
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
       frozenImplicitSkillIds: normalizeStringArray(item.frozenImplicitSkillIds),
+      requestProtocol: normalizeSessionRequestProtocol(item.requestProtocol),
+      historyArchive: normalizeHistoryArchive(item.historyArchive),
       contextCompression: normalizeContextCompressionState(item.contextCompression),
       contextInstructions: typeof item.contextInstructions === 'string'
         ? item.contextInstructions
@@ -581,11 +591,83 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     createdAt: normalizeSessionTimestamp(value.createdAt, new Date().toISOString()),
     modelId: typeof value.modelId === 'string' ? value.modelId : undefined,
     reasoningContent: typeof value.reasoningContent === 'string' ? value.reasoningContent : undefined,
+    providerContent: typeof value.providerContent === 'string' ? value.providerContent : undefined,
     contextMeta: normalizeMessageContextMeta(value.contextMeta),
     usedSkills: normalizeMessageUsedSkills(value.usedSkills),
     runDetails: normalizeRunDetails(value.runDetails),
     toolRounds: normalizeAgentToolRounds(value.toolRounds)
   };
+}
+
+function createNewSessionRequestProtocol(now: string): SessionRequestProtocol {
+  return {
+    version: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
+    serializationStrategy: 'provider-projection-v2',
+    toolSchemaVersion: CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
+    toolNames: [],
+    createdAt: now
+  };
+}
+
+function normalizeSessionRequestProtocol(value: unknown): SessionRequestProtocol | undefined {
+  if (!isRecord(value)) {
+    // Missing means a pre-v2 session. Leaving it absent is deliberate: request
+    // construction falls back to v1 until a cache-safe migration boundary.
+    return undefined;
+  }
+  const version = normalizePositiveInteger(value.version, 1);
+  return {
+    version,
+    serializationStrategy: version >= CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION
+      ? 'provider-projection-v2'
+      : 'legacy-v1',
+    toolSchemaVersion: normalizePositiveInteger(value.toolSchemaVersion, 1),
+    toolNames: normalizeStringArray(value.toolNames),
+    modelId: typeof value.modelId === 'string' && value.modelId.trim() ? value.modelId.trim() : undefined,
+    providerId: typeof value.providerId === 'string' && value.providerId.trim() ? value.providerId.trim() : undefined,
+    baseUrl: typeof value.baseUrl === 'string' && value.baseUrl.trim() ? value.baseUrl.trim() : undefined,
+    createdAt: normalizeSessionTimestamp(value.createdAt, new Date().toISOString()),
+    lastProviderRequestAt: normalizeOptionalTimestamp(value.lastProviderRequestAt),
+    lastDynamicContextHash: typeof value.lastDynamicContextHash === 'string' && value.lastDynamicContextHash.trim()
+      ? value.lastDynamicContextHash.trim()
+      : undefined
+  };
+}
+
+function normalizeHistoryArchive(value: unknown): HistoryArchiveEntry[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const entries: HistoryArchiveEntry[] = [];
+  const seen = new Set<string>();
+  for (const raw of value) {
+    if (!isRecord(raw)
+      || typeof raw.id !== 'string'
+      || typeof raw.messageId !== 'string'
+      || typeof raw.content !== 'string'
+      || typeof raw.contentHash !== 'string'
+      || seen.has(raw.id)) {
+      continue;
+    }
+    const role = raw.role === 'user' || raw.role === 'assistant' || raw.role === 'system' || raw.role === 'tool'
+      ? raw.role
+      : undefined;
+    if (!role) {
+      continue;
+    }
+    seen.add(raw.id);
+    entries.push({
+      id: raw.id,
+      messageId: raw.messageId,
+      toolCallId: typeof raw.toolCallId === 'string' ? raw.toolCallId : undefined,
+      toolName: typeof raw.toolName === 'string' ? raw.toolName : undefined,
+      role,
+      content: raw.content,
+      contentHash: raw.contentHash,
+      createdAt: normalizeSessionTimestamp(raw.createdAt, new Date().toISOString())
+    });
+  }
+  return entries.length ? entries : undefined;
 }
 
 function normalizeAgentToolRounds(value: unknown): AgentToolRound[] | undefined {

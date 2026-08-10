@@ -1,12 +1,8 @@
-import {
-  getConfiguredContextWindowTokens,
-  getConfiguredSlimToolModeEnabled
-} from '../shared/config';
+import { getConfiguredContextWindowTokens } from '../shared/config';
 import { getDeepSeekV4RuntimeProfile } from '../shared/modelProfiles';
 import { DeepSeekFunctionTool, DeepSeekMessage } from './deepseek/types';
 import { isRecord } from '../shared/errors';
 import {
-  buildInitialAgentMessages,
   estimateChatMessageTokens,
   estimateDeepSeekMessageTokens,
   estimateDeepSeekToolsTokens,
@@ -14,13 +10,11 @@ import {
   formatAgentContextFiles,
   formatLegacyMemoryForAgent,
   formatProjectInstructionsForAgent,
-  getAgentToolNamesForPrompt,
-  getAgentSystemPrompt,
-  getAgentTools
+  getAgentSystemPrompt
 } from './protocol';
 import type { KeepseekLanguage } from '../shared/i18n';
 import { AgentSettings, ChatMessage, ContextCompressionState, ContextFile, ContextUsageEstimate, CurrentRunContext, KeepseekModel } from '../shared/types';
-import { buildHistoryProjection } from './historyProjection';
+import { buildProviderRequestProjection } from './providerRequestProjection';
 
 type ContextUsageBreakdown = ContextUsageEstimate['breakdown'];
 
@@ -29,6 +23,7 @@ export function createContextUsageEstimate(input: {
   agentSettings: AgentSettings;
   contextFiles: ContextFile[];
   currentRunContext?: CurrentRunContext;
+  contextInstructions?: string;
   messages: ChatMessage[];
   contextCompression?: ContextCompressionState;
   language: KeepseekLanguage;
@@ -38,34 +33,28 @@ export function createContextUsageEstimate(input: {
   safetyReserveTokens?: number;
   /** 会话冻结的 slim 工具集；与真实请求保持一致（缺省时按 prompt 现算） */
   slimToolNames?: string[];
+  requestProtocolVersion?: number;
 }): ContextUsageEstimate {
-  const profile = getDeepSeekV4RuntimeProfile(input.model, input.agentSettings);
   const prompt = input.prompt?.trim() ?? '';
-  const projection = buildHistoryProjection({
-    history: input.messages,
-    prompt,
-    language: input.language,
-    contextCompression: input.contextCompression,
-    settings: profile.contextCompression,
-    maxProjectionTokens: input.model.contextWindowTokens === undefined
-      ? undefined
-      : input.model.contextWindowTokens * profile.contextCompression.forceRatio
-  });
-  const messages = buildInitialAgentMessages({
+  const providerProjection = buildProviderRequestProjection({
+    model: input.model,
+    agentSettings: input.agentSettings,
     prompt,
     contextFiles: input.contextFiles,
     currentRunContext: input.currentRunContext,
+    contextInstructions: input.contextInstructions,
     history: input.messages,
+    contextCompression: input.contextCompression,
     language: input.language,
-    projection
+    slimToolNames: input.slimToolNames,
+    requestProtocolVersion: input.requestProtocolVersion,
+    includeTools: input.includeTools
   });
-  const includeTools = input.includeTools ?? profile.maxToolIterations > 0;
-  const tools = includeTools
-    ? getAgentTools({
-        toolNames: input.slimToolNames ?? getAgentToolNamesForPrompt(prompt, getConfiguredSlimToolModeEnabled())
-      })
-    : [];
-  const outputReserveTokens = input.outputReserveTokens ?? resolveOutputReserveTokens(profile.maxTokens);
+  const messages = providerProjection.messages;
+  const tools = providerProjection.tools;
+  const outputReserveTokens = input.outputReserveTokens ?? resolveOutputReserveTokens(
+    getDeepSeekV4RuntimeProfile(input.model, input.agentSettings).maxTokens
+  );
   const breakdown = estimateInitialBreakdown({
     messages,
     contextFiles: input.contextFiles,
@@ -92,34 +81,19 @@ export function createDisplayedSessionContextUsageEstimate(input: {
   agentSettings: AgentSettings;
   contextFiles: ContextFile[];
   currentRunContext?: CurrentRunContext;
+  contextInstructions?: string;
   messages: ChatMessage[];
   contextCompression?: ContextCompressionState;
   language: KeepseekLanguage;
   prompt?: string;
   /** 会话冻结的 slim 工具集；与真实请求保持一致 */
   slimToolNames?: string[];
+  requestProtocolVersion?: number;
 }): ContextUsageEstimate {
-  const usage = toSessionContextUsageEstimate(createContextUsageEstimate(input));
-  const displayedReasoningTokens = input.messages.reduce((total, message) => {
-    const reasoningContent = message.role === 'assistant' ? message.reasoningContent?.trim() : '';
-    return reasoningContent
-      ? total + estimateChatMessageTokens('assistant', reasoningContent)
-      : total;
-  }, 0);
-
-  if (!displayedReasoningTokens) {
-    return usage;
-  }
-
-  const breakdown = normalizeBreakdown({
-    ...usage.breakdown,
-    reasoningTokensEstimate: usage.breakdown.reasoningTokensEstimate + displayedReasoningTokens
-  });
-  return normalizeContextUsageEstimate({
-    maxTokensEstimate: usage.maxTokensEstimate,
-    usedTokensEstimate: sumSessionBreakdownTokens(breakdown),
-    breakdown
-  });
+  // The authoritative provider projection already contains every reasoning byte
+  // that will be sent (tool-call reasoning and legacy-v1 final reasoning). UI-only
+  // v2 final reasoning must not be counted a second time.
+  return toSessionContextUsageEstimate(createContextUsageEstimate(input));
 }
 
 export function createContextUsageEstimateFromMessages(input: {
@@ -153,6 +127,40 @@ export function createContextUsageEstimateFromMessages(input: {
       outputReserveTokensEstimate,
       safetyReserveTokensEstimate
     }
+  });
+}
+
+/**
+ * Replaces the character-based prompt estimate with usage returned by the
+ * provider, without issuing another request. Breakdown categories are scaled so
+ * the UI, hard-limit telemetry and the recorded prompt total remain consistent.
+ */
+export function calibrateContextUsageEstimate(
+  estimate: ContextUsageEstimate,
+  actualPromptTokens: number
+): ContextUsageEstimate {
+  const promptTokens = Math.max(0, Math.floor(actualPromptTokens));
+  const reserveKeys: Array<keyof ContextUsageBreakdown> = [
+    'outputReserveTokensEstimate',
+    'safetyReserveTokensEstimate'
+  ];
+  const promptKeys = (Object.keys(estimate.breakdown) as Array<keyof ContextUsageBreakdown>)
+    .filter((key) => !reserveKeys.includes(key));
+  const estimatedPromptTokens = promptKeys.reduce((total, key) => total + estimate.breakdown[key], 0);
+  const ratio = estimatedPromptTokens > 0 ? promptTokens / estimatedPromptTokens : 1;
+  const breakdown = { ...estimate.breakdown };
+  for (const key of promptKeys) {
+    breakdown[key] = Math.max(0, Math.floor(breakdown[key] * ratio));
+  }
+  const scaledTotal = promptKeys.reduce((total, key) => total + breakdown[key], 0);
+  const adjustmentKey: keyof ContextUsageBreakdown = 'historyTokensEstimate';
+  breakdown[adjustmentKey] = Math.max(0, breakdown[adjustmentKey] + promptTokens - scaledTotal);
+  return normalizeContextUsageEstimate({
+    maxTokensEstimate: estimate.maxTokensEstimate,
+    usedTokensEstimate: promptTokens
+      + breakdown.outputReserveTokensEstimate
+      + breakdown.safetyReserveTokensEstimate,
+    breakdown
   });
 }
 

@@ -48,6 +48,8 @@ export interface DeepSeekClientResult {
   error?: string;
   failureKind?: DeepSeekClientFailureKind;
   status?: number;
+  attemptCount?: number;
+  retryCount?: number;
 }
 
 interface DeepSeekAttemptResult extends DeepSeekClientResult {
@@ -66,7 +68,11 @@ export class DeepSeekClient {
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       const result = await this.createChatCompletionAttempt(config, request, attempt);
       if (result.ok || !this.shouldRetry(result, attempt, maxRetries)) {
-        return result;
+        return {
+          ...result,
+          attemptCount: attempt + 1,
+          retryCount: attempt
+        };
       }
 
       request.trace?.record({
@@ -86,6 +92,8 @@ export class DeepSeekClient {
       ok: false,
       hadPartialOutput: false,
       retryable: false,
+      attemptCount: maxRetries + 1,
+      retryCount: maxRetries,
       error: request.language === 'en'
         ? 'DeepSeek API request failed after retries.'
         : 'DeepSeek API 请求重试后仍失败。'

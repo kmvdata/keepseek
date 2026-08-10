@@ -157,6 +157,24 @@ test('refreshContextCompressionBeforeRun runs sync refresh when background resul
   assert.equal(compressor.refreshCalls.length, 2);
 });
 
+test('hot sessions defer paid background summaries to protect the provider prefix', () => {
+  const compressor = new FakeHistoryCompressor();
+  const coordinator = new AgentRequestCoordinator(compressor);
+  const session = createSession();
+  session.updatedAt = new Date().toISOString();
+  session.requestProtocol = {
+    version: 2,
+    serializationStrategy: 'provider-projection-v2',
+    toolSchemaVersion: 2,
+    toolNames: [],
+    createdAt: session.updatedAt,
+    lastProviderRequestAt: session.updatedAt
+  };
+  compressor.queuePlan(createPlan('background', createCompressionState('hot')));
+  coordinator.scheduleBackgroundContextCompressionRefresh(createRefreshInput(session), () => undefined);
+  assert.equal(compressor.refreshCalls.length, 0);
+});
+
 type RefreshHandler = (
   input: HistoryCompressionRefreshInput
 ) => Promise<HistoryCompressionRefreshResult> | HistoryCompressionRefreshResult;

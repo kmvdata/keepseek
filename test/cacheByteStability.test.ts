@@ -30,15 +30,78 @@ function userMessage(id: string, content: string, expandedContent?: string): Cha
   };
 }
 
-function assistantMessage(id: string, content: string, toolRounds?: AgentToolRound[]): ChatMessage {
+function assistantMessage(
+  id: string,
+  content: string,
+  toolRounds?: AgentToolRound[],
+  reasoningContent?: string
+): ChatMessage {
   return {
     id,
     role: 'assistant',
     content,
     createdAt: '2026-01-01T00:00:00.000Z',
-    ...(toolRounds ? { toolRounds } : {})
+    ...(toolRounds ? { toolRounds } : {}),
+    ...(reasoningContent ? { reasoningContent } : {})
   };
 }
+
+test('v2 keeps ordinary final-answer reasoning local while v1 preserves legacy bytes', () => {
+  const history = [
+    userMessage('u1', 'question'),
+    assistantMessage('a1', 'answer', undefined, 'private final reasoning')
+  ];
+  const legacy = buildInitialAgentMessages({
+    prompt: 'next',
+    contextFiles: [],
+    history,
+    language: 'en',
+    requestProtocolVersion: 1
+  });
+  const optimized = buildInitialAgentMessages({
+    prompt: 'next',
+    contextFiles: [],
+    history,
+    language: 'en',
+    requestProtocolVersion: 2
+  });
+
+  const legacyFinal = legacy.find((message) => message.role === 'assistant');
+  const optimizedFinal = optimized.find((message) => message.role === 'assistant');
+  assert.equal(legacyFinal?.reasoning_content, 'private final reasoning');
+  assert.equal(optimizedFinal?.reasoning_content, undefined);
+  assert.equal(history[1]?.reasoningContent, 'private final reasoning');
+});
+
+test('v2 omits only final reasoning and keeps tool-call reasoning atomically paired', () => {
+  const toolCall: AgentToolCall = {
+    id: 'call_v2',
+    type: 'function',
+    function: { name: 'keepseek_read_workspace_file_range', arguments: '{"path":"a.ts","startLine":1,"endLine":2}' }
+  };
+  const round: AgentToolRound = {
+    assistantContent: null,
+    reasoningContent: 'required tool reasoning',
+    toolCalls: [toolCall],
+    toolResults: [{ toolCallId: toolCall.id, content: '{"ok":true}' }]
+  };
+  const messages = buildInitialAgentMessages({
+    prompt: 'next',
+    contextFiles: [],
+    history: [
+      userMessage('u1', 'inspect'),
+      assistantMessage('a1', 'done', [round], 'local final reasoning')
+    ],
+    language: 'en',
+    requestProtocolVersion: 2
+  });
+
+  const toolAssistant = messages.find((message) => message.tool_calls?.length);
+  const finalAssistant = [...messages].reverse().find((message) => message.role === 'assistant');
+  assert.equal(toolAssistant?.reasoning_content, 'required tool reasoning');
+  assert.equal(messages[messages.indexOf(toolAssistant!) + 1]?.tool_call_id, toolCall.id);
+  assert.equal(finalAssistant?.reasoning_content, undefined);
+});
 
 test('同一 user 消息作为当前 prompt 与作为历史重发时字节一致（B1 契约）', () => {
   const user1 = userMessage('u1', 'first question');
@@ -87,6 +150,20 @@ test('引用展开（expandedContent）跨轮保持原样，不因发送时机�
   // 第二轮以历史身份重发时字节不变
   const round2User1 = round2.find((message) => message.role === 'user');
   assert.equal(round2User1?.content, user1.expandedContent);
+});
+
+test('tail-appended providerContent is reused as history without duplicating the raw current prompt', () => {
+  const current = userMessage('u1', 'raw prompt', 'expanded prompt');
+  current.providerContent = 'expanded prompt\n\n<keepseek-dynamic-context>new skill</keepseek-dynamic-context>';
+  const messages = buildInitialAgentMessages({
+    prompt: 'expanded prompt',
+    contextFiles: [],
+    history: [current],
+    language: 'en',
+    requestProtocolVersion: 2
+  });
+  assert.equal(messages.filter((message) => message.role === 'user').length, 1);
+  assert.equal(messages.at(-1)?.content, current.providerContent);
 });
 
 test('toolRounds 跨轮重建与上一轮发送序列逐字节一致（B4 契约）', () => {

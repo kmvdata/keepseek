@@ -31,6 +31,15 @@ test('trimActiveHistory preserves persisted active session messages', async () =
     pendingDraftEditIds: ['edit-1'],
     stopReason: 'waiting_for_apply'
   };
+  session.historyArchive = [{
+    id: 'archive-1', messageId: 'm1', toolCallId: 'call-1', toolName: 'read', role: 'tool',
+    content: 'complete archived result', contentHash: 'hash-1', createdAt: '2026-01-01T00:00:00.000Z'
+  }];
+  session.requestProtocol = {
+    version: 2, serializationStrategy: 'provider-projection-v2', toolSchemaVersion: 2,
+    toolNames: ['keepseek_read_workspace_file_range'], createdAt: '2026-01-01T00:00:00.000Z',
+    lastProviderRequestAt: '2026-01-01T00:01:00.000Z'
+  };
   const store = new ChatSessionStore(storage, 'en', workspaceScope);
 
   await store.initialize();
@@ -43,6 +52,8 @@ test('trimActiveHistory preserves persisted active session messages', async () =
   assert.equal(storage.saved?.sessions[0]?.messages.length, 100);
   assert.equal(storage.saved?.sessions[0]?.messages[0]?.id, 'm0');
   assert.deepEqual(storage.saved?.sessions[0]?.repairLoop?.pendingDraftEditIds, ['edit-1']);
+  assert.equal(storage.saved?.sessions[0]?.historyArchive?.[0]?.content, 'complete archived result');
+  assert.deepEqual(storage.saved?.sessions[0]?.requestProtocol?.toolNames, ['keepseek_read_workspace_file_range']);
 });
 
 class MemorySessionStorage implements ChatSessionStorageAdapter {

@@ -147,6 +147,22 @@
           "scope": "window",
           "markdownDescription": "Expose only a smaller core Agent tool schema, adding tools that match the current prompt. Defaults to off so the exposed tool set stays constant across turns and DeepSeek prompt-cache prefixes stay stable. Core workspace text search is available either way."
         },
+        "keepseek.promptCacheTtlMinutes": {
+          "type": "number",
+          "default": 1440,
+          "minimum": 5,
+          "maximum": 10080,
+          "scope": "window",
+          "markdownDescription": "Conservative provider prompt-cache TTL. KeepSeek rewrites archived history only after this cold boundary, a provider/model change, or unavoidable context compaction."
+        },
+        "keepseek.context.totalBudgetTokens": {
+          "type": "number",
+          "default": 32000,
+          "minimum": 1000,
+          "maximum": 96000,
+          "scope": "window",
+          "markdownDescription": "Shared token budget for project instructions, activated Skills, legacy memory, and attached context files before they enter a session."
+        },
         "keepseek.maxContextFiles": {
           "type": "number",
           "default": 10

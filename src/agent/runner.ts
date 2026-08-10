@@ -25,7 +25,6 @@ import {
   getConfiguredMaxValidationRuns,
   getConfiguredModelUsagePricing,
   getConfiguredRequestRetryBaseMs,
-  getConfiguredSlimToolModeEnabled,
   getConfiguredWorkspaceReadMaxBytes
 } from '../shared/config';
 import { formatBytes } from '../shared/format';
@@ -35,13 +34,11 @@ import {
   type ContextCompressionSettings
 } from '../shared/modelProfiles';
 import {
-  buildInitialAgentMessages,
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   estimateChatMessageTokens,
   estimateDeepSeekMessageTokens,
-  getAgentToolNamesForPrompt,
-  getAgentTools,
   FIND_REFERENCES_TOOL_NAME,
   FIND_SYMBOL_TOOL_NAME,
   GET_DOCUMENT_SYMBOLS_TOOL_NAME,
@@ -57,11 +54,14 @@ import {
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
+  SEARCH_SESSION_ARCHIVE_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME,
   isDraftEditPreparationTool
 } from './protocol';
-import { buildHistoryProjection } from './historyProjection';
+import { searchHistoryArchive } from './historyArchive';
+import { buildProviderRequestProjection } from './providerRequestProjection';
 import {
+  calibrateContextUsageEstimate,
   createContextUsageEstimate,
   createContextUsageEstimateFromMessages,
   resolveOutputReserveTokens
@@ -100,6 +100,7 @@ import {
   DeepSeekUsage
 } from './deepseek/types';
 import {
+  addUsageEventToTurnStats,
   calculateUsageCost,
   createUsageEvent,
   normalizeDeepSeekUsage
@@ -473,20 +474,25 @@ export class AgentRunner {
 
     const runtimeConfig = this.getRuntimeConfig(request);
     taskPlan.beginExecution();
-    const projection = buildHistoryProjection({
+    const providerProjection = buildProviderRequestProjection({
+      model: request.model,
+      agentSettings: request.settings,
+      contextFiles: request.contextFiles,
+      currentRunContext: request.currentRunContext,
+      contextInstructions: request.contextInstructions,
       history: request.history,
-      prompt: request.prompt,
-      language: request.language,
       contextCompression: request.contextCompression,
-      settings: runtimeConfig.contextCompression,
+      language: request.language,
+      prompt: request.prompt,
+      slimToolNames: request.slimToolNames,
+      requestProtocolVersion: request.requestProtocolVersion,
+      includeTools: runtimeConfig.maxToolIterations > 0,
       maxProjectionTokens: request.model.contextWindowTokens === undefined
         ? undefined
         : request.model.contextWindowTokens * runtimeConfig.contextCompression.forceRatio
     });
-    const messages = buildInitialAgentMessages({
-      ...request,
-      projection
-    });
+    const projection = providerProjection.historyProjection;
+    const messages = providerProjection.messages;
     trace.record({
       type: 'context_projection',
       metadata: projection.metadata,
@@ -521,8 +527,7 @@ export class AgentRunner {
       type: 'agent_messages_initialized',
       messages: formatMessagesForTrace(messages, trace.includesPayload('request'))
     });
-    const toolNames = request.slimToolNames ?? getAgentToolNamesForPrompt(request.prompt, getConfiguredSlimToolModeEnabled());
-    const tools = getAgentTools({ toolNames });
+    const tools = providerProjection.tools;
     promptCacheDiagnostics = this.createPromptCacheDiagnostics({
       request,
       messages,
@@ -550,6 +555,7 @@ export class AgentRunner {
         agentSettings: request.settings,
         contextFiles: request.contextFiles,
         currentRunContext: request.currentRunContext,
+        contextInstructions: request.contextInstructions,
         messages: request.history,
         contextCompression: request.contextCompression,
         language: request.language,
@@ -557,7 +563,8 @@ export class AgentRunner {
         includeTools: maxIterations > 0,
         outputReserveTokens,
         safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
-        slimToolNames: request.slimToolNames
+        slimToolNames: request.slimToolNames,
+        requestProtocolVersion: request.requestProtocolVersion
       }).breakdown
     };
     const emitUsageEstimate = (toolsForNextRequest: DeepSeekFunctionTool[]) => {
@@ -595,10 +602,22 @@ export class AgentRunner {
       });
       runtimeUsageBreakdown.inputTokensEstimate += estimateDeepSeekMessageTokens(budgetInstructionMessage);
       budgetStopInstructionQueued = true;
-      emitUsageEstimate([]);
+      emitUsageEstimate(tools);
     };
 
-    emitUsageEstimate(maxIterations > 0 ? tools : []);
+    emitUsageEstimate(tools);
+
+    const initialBudgetStopReason = this.getContextWindowBudgetStopReason(
+      request,
+      messages,
+      tools,
+      outputReserveTokens
+    );
+    if (initialBudgetStopReason) {
+      throw new Error(request.language === 'en'
+        ? 'The provider request would exceed the model context window before the first API call. Reduce attached context or allow history compression to complete.'
+        : '首次 API 调用前的 Provider 请求将超过模型上下文窗口。请减少附件上下文，或等待历史压缩完成。');
+    }
 
     for (let turn = 0; turn <= maxIterations; turn += 1) {
       this.throwIfAborted(request.signal, request.language);
@@ -619,12 +638,20 @@ export class AgentRunner {
         budgetStopReason = 'tool_iterations_exhausted';
       }
       queueBudgetStopInstruction();
-      const toolsForTurn = !budgetStopReason && turn < maxIterations ? tools : [];
+      // The schema is frozen for the whole session/run. When tool calls are no
+      // longer allowed, keep the identical tools array and switch tool_choice to
+      // none instead of removing the cached schema prefix.
+      const allowToolCalls = !budgetStopReason && turn < maxIterations;
+      const toolsForTurn = tools;
       const allowTerminalDraftEdit = maxIterations > 0 && budgetStopReason === 'tool_iterations_exhausted';
       emitUsageEstimate(toolsForTurn);
-      const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, { trace, usageTotals: upstreamUsageTotals });
+      const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, {
+        trace,
+        usageTotals: upstreamUsageTotals,
+        toolChoice: allowToolCalls ? 'auto' : 'none'
+      });
       this.throwIfAborted(request.signal, request.language);
-      const normalizedAssistant = this.normalizeAssistantToolCalls(response.message, toolsForTurn.length > 0 || allowTerminalDraftEdit);
+      const normalizedAssistant = this.normalizeAssistantToolCalls(response.message, allowToolCalls || allowTerminalDraftEdit);
       const assistant = normalizedAssistant.assistant;
       if (!assistant) {
         throw new Error(request.language === 'en'
@@ -658,7 +685,8 @@ export class AgentRunner {
           reasoningParts,
           runtimeUsageBreakdown,
           trace,
-          usageTotals: upstreamUsageTotals
+          usageTotals: upstreamUsageTotals,
+          tools
         });
         if (continuedResponse) {
           emitStatus({
@@ -822,7 +850,8 @@ export class AgentRunner {
               rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language, {
                 signal: request.signal,
                 runDeadlineAt,
-                authorization: authorizationDecision
+                authorization: authorizationDecision,
+                historyArchive: request.historyArchive
               });
             }
           }
@@ -879,7 +908,7 @@ export class AgentRunner {
           content: summarizeText(rawToolResult)
         });
         this.throwIfAborted(request.signal, request.language);
-        const nextToolsForRequest = turn + 1 < maxIterations ? tools : [];
+        const nextToolsForRequest = tools;
         const shapedToolResult = this.shapeToolResult(
           toolCall.function.name,
           rawToolResult,
@@ -997,7 +1026,7 @@ export class AgentRunner {
             message: trace.includesPayload('request') ? toolMessage : summarizeDeepSeekMessage(toolMessage)
           });
           runtimeUsageBreakdown.toolResultTokensEstimate += estimateDeepSeekMessageTokens(toolMessage);
-          emitUsageEstimate(budgetStopReason ? [] : turn + 1 < maxIterations ? tools : []);
+          emitUsageEstimate(tools);
           emitStatus({
             base: 'thinking',
             phase: 'reviewing_tool_result',
@@ -1048,7 +1077,7 @@ export class AgentRunner {
           message: trace.includesPayload('request') ? emulatedToolResultMessage : summarizeDeepSeekMessage(emulatedToolResultMessage)
         });
         runtimeUsageBreakdown.toolResultTokensEstimate += estimateDeepSeekMessageTokens(emulatedToolResultMessage);
-        emitUsageEstimate(budgetStopReason ? [] : turn + 1 < maxIterations ? tools : []);
+        emitUsageEstimate(tools);
       }
 
       queueBudgetStopInstruction();
@@ -1093,7 +1122,13 @@ export class AgentRunner {
     tools: DeepSeekFunctionTool[],
     callbacks: AgentRunCallbacks,
     runDeadlineAt?: number,
-    options: { allowPartialRecovery?: boolean; trace?: AgentInteractionTrace; usageTotals?: UpstreamUsageTotals } = {}
+    options: {
+      allowPartialRecovery?: boolean;
+      trace?: AgentInteractionTrace;
+      usageTotals?: UpstreamUsageTotals;
+      toolChoice?: 'auto' | 'none';
+      usageSource?: 'executor' | 'continuation';
+    } = {}
   ): Promise<DeepSeekStreamResult> {
     const trace = options.trace ?? createNoopInteractionTrace();
     const body: DeepSeekChatRequestBody = {
@@ -1106,7 +1141,7 @@ export class AgentRunner {
       temperature: runtimeConfig.temperature,
       top_p: runtimeConfig.topP,
       tools: tools.length ? tools : undefined,
-      tool_choice: tools.length ? 'auto' : undefined
+      tool_choice: tools.length ? options.toolChoice ?? 'auto' : undefined
     };
 
     if (request.settings.thinkingEnabled) {
@@ -1138,16 +1173,51 @@ export class AgentRunner {
       requestId: upstreamRequestId
     });
 
+    const retryCount = response.retryCount ?? 0;
+    if (retryCount > 0) {
+      const retryEvent = createUsageEvent({
+        usage: {
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          cacheHitTokens: 0,
+          cacheMissTokens: 0
+        },
+        cost: 0,
+        currency: getConfiguredModelUsagePricing(request.model.id).currency,
+        modelId: request.model.id,
+        requestId: upstreamRequestId,
+        source: 'retry',
+        requestCount: retryCount
+      });
+      options.usageTotals?.records.push(retryEvent);
+      if (options.usageTotals) {
+        options.usageTotals.requestCount += retryCount;
+      }
+      callbacks.onUsage?.(retryEvent);
+    }
+
     if (response.ok && response.message) {
       const usageEvent = this.recordUpstreamUsage(
         response.usage,
         options.usageTotals,
         trace,
         upstreamRequestId,
-        request.model.id
+        request.model.id,
+        options.usageSource ?? 'executor'
       );
       if (usageEvent) {
         callbacks.onUsage?.(usageEvent);
+        callbacks.onUsageEstimate?.(calibrateContextUsageEstimate(
+          createContextUsageEstimateFromMessages({
+            model: request.model,
+            messages,
+            tools,
+            outputReserveTokens: resolveOutputReserveTokens(runtimeConfig.maxTokens),
+            safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+          }),
+          usageEvent.usage.promptTokens
+        ));
       }
       trace.record({
         type: 'upstream_response_message',
@@ -1195,7 +1265,8 @@ export class AgentRunner {
         callbacks,
         runDeadlineAt,
         trace,
-        usageTotals: options.usageTotals
+        usageTotals: options.usageTotals,
+        tools
       });
     }
 
@@ -1228,6 +1299,7 @@ export class AgentRunner {
     runtimeUsageBreakdown: ContextUsageEstimate['breakdown'];
     trace: AgentInteractionTrace;
     usageTotals: UpstreamUsageTotals;
+    tools: DeepSeekFunctionTool[];
   }): Promise<{ content: string; finishReason?: string | null } | undefined> {
     if (!this.canContinueLengthLimitedResponse(input)) {
       return undefined;
@@ -1250,7 +1322,7 @@ export class AgentRunner {
         instructionMessage
       ];
 
-      if (this.getContextWindowBudgetStopReason(input.request, continuationMessages, [], input.outputReserveTokens)) {
+      if (this.getContextWindowBudgetStopReason(input.request, continuationMessages, input.tools, input.outputReserveTokens)) {
         return continuationIndex > 0 ? { content, finishReason } : undefined;
       }
 
@@ -1272,10 +1344,16 @@ export class AgentRunner {
         input.request,
         input.runtimeConfig,
         input.messages,
-        [],
+        input.tools,
         input.callbacks,
         input.runDeadlineAt,
-        { allowPartialRecovery: false, trace: input.trace, usageTotals: input.usageTotals }
+        {
+          allowPartialRecovery: false,
+          trace: input.trace,
+          usageTotals: input.usageTotals,
+          toolChoice: 'none',
+          usageSource: 'continuation'
+        }
       );
       const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false);
       if (normalizedContinuation.displayReasoningContent) {
@@ -1300,6 +1378,7 @@ export class AgentRunner {
     response: DeepSeekStreamResult;
     draftEdits: DraftEdit[];
     outputReserveTokens: number;
+    tools: DeepSeekFunctionTool[];
   }): boolean {
     if (input.response.finishReason !== 'length') {
       return false;
@@ -1325,7 +1404,7 @@ export class AgentRunner {
         content: this.getLengthContinuationInstruction(input.request.language)
       }
     ];
-    return !this.getContextWindowBudgetStopReason(input.request, continuationMessages, [], input.outputReserveTokens);
+    return !this.getContextWindowBudgetStopReason(input.request, continuationMessages, input.tools, input.outputReserveTokens);
   }
 
   private async createContinuationAfterPartialFailure(input: {
@@ -1338,6 +1417,7 @@ export class AgentRunner {
     runDeadlineAt?: number;
     trace: AgentInteractionTrace;
     usageTotals?: UpstreamUsageTotals;
+    tools: DeepSeekFunctionTool[];
   }): Promise<DeepSeekStreamResult> {
     const partialContent = input.partialAssistant.content ?? '';
     if (!partialContent.trim()) {
@@ -1365,7 +1445,7 @@ export class AgentRunner {
         : continuationMessages.map(summarizeDeepSeekMessage)
     });
     const outputReserveTokens = resolveOutputReserveTokens(input.runtimeConfig.maxTokens);
-    if (this.getContextWindowBudgetStopReason(input.request, continuationMessages, [], outputReserveTokens)) {
+    if (this.getContextWindowBudgetStopReason(input.request, continuationMessages, input.tools, outputReserveTokens)) {
       throw new Error(input.failureError ?? (input.request.language === 'en'
         ? 'DeepSeek streaming connection failed before completion, and there was not enough context budget to request a continuation.'
         : 'DeepSeek 流式连接在完成前中断，且上下文预算不足，无法请求续写。'));
@@ -1375,10 +1455,16 @@ export class AgentRunner {
       input.request,
       input.runtimeConfig,
       continuationMessages,
-      [],
+      input.tools,
       input.callbacks,
       input.runDeadlineAt,
-      { allowPartialRecovery: false, trace: input.trace, usageTotals: input.usageTotals }
+      {
+        allowPartialRecovery: false,
+        trace: input.trace,
+        usageTotals: input.usageTotals,
+        toolChoice: 'none',
+        usageSource: 'continuation'
+      }
     );
     const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false);
     return {
@@ -1429,7 +1515,8 @@ export class AgentRunner {
     totals: UpstreamUsageTotals | undefined,
     trace: AgentInteractionTrace,
     requestId: string,
-    modelId: string
+    modelId: string,
+    source: 'executor' | 'continuation'
   ): UsageEvent | undefined {
     if (!usage || !totals) {
       return undefined;
@@ -1446,7 +1533,8 @@ export class AgentRunner {
       cost: calculateUsageCost(normalizedUsage, pricing),
       currency: pricing.currency,
       modelId,
-      requestId
+      requestId,
+      source
     });
     totals.requestCount += 1;
     totals.promptTokens += normalizedUsage.promptTokens;
@@ -1522,19 +1610,11 @@ export class AgentRunner {
       return undefined;
     }
 
-    return {
-      promptTokens: totals.promptTokens,
-      completionTokens: totals.completionTokens,
-      totalTokens: totals.totalTokens,
-      cacheHitTokens: totals.cacheHitTokens,
-      cacheMissTokens: totals.cacheMissTokens,
-      reasoningTokens: totals.reasoningTokens || undefined,
-      requestCount: totals.requestCount,
-      cost: totals.cost,
-      currency: totals.currency,
-      modelId,
-      updatedAt: new Date().toISOString()
-    };
+    let stats: TurnUsageStats | undefined;
+    for (const record of totals.records) {
+      stats = addUsageEventToTurnStats(stats, record);
+    }
+    return stats ? { ...stats, modelId } : undefined;
   }
 
   private throwIfAborted(signal: AbortSignal | undefined, language: KeepseekLanguage): void {
@@ -1573,6 +1653,7 @@ export class AgentRunner {
       case READ_WORKSPACE_FILE_TOOL_NAME:
         return 'reading_file';
       case CREATE_DRAFT_EDIT_TOOL_NAME:
+      case CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME:
       case DELETE_WORKSPACE_FILE_TOOL_NAME:
         return 'creating_draft_edit';
       case READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME:
@@ -1599,11 +1680,29 @@ export class AgentRunner {
     toolCall: DeepSeekToolCall,
     draftEdits: DraftEdit[],
     language: KeepseekLanguage,
-    options: { signal?: AbortSignal; runDeadlineAt?: number; authorization?: ToolAuthorizationDecision } = {}
+    options: {
+      signal?: AbortSignal;
+      runDeadlineAt?: number;
+      authorization?: ToolAuthorizationDecision;
+      historyArchive?: AgentRequest['historyArchive'];
+    } = {}
   ): Promise<string> {
     try {
       const args = this.parseToolArguments(toolCall.function.arguments);
       switch (toolCall.function.name) {
+        case SEARCH_SESSION_ARCHIVE_TOOL_NAME:
+          return JSON.stringify({
+            ok: true,
+            query: this.readRequiredString(args, 'query'),
+            results: searchHistoryArchive(
+              options.historyArchive,
+              this.readRequiredString(args, 'query'),
+              {
+                maxResults: this.readOptionalNumber(args, 'maxResults'),
+                maxChars: this.readOptionalNumber(args, 'maxChars')
+              }
+            )
+          });
         case LIST_WORKSPACE_FILES_TOOL_NAME:
           return await this.workspaceTools.listWorkspaceFiles(language);
         case LIST_WORKSPACE_DIRECTORY_TOOL_NAME:
@@ -1697,6 +1796,8 @@ export class AgentRunner {
           });
         case CREATE_DRAFT_EDIT_TOOL_NAME:
           return await this.createDraftEdit(args, draftEdits, language);
+        case CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME:
+          return await this.createIncrementalDraftEdit(args, draftEdits, language);
         case DELETE_WORKSPACE_FILE_TOOL_NAME:
           return await this.createDeleteDraftEdit(args, draftEdits, language);
         default:
@@ -1742,6 +1843,121 @@ export class AgentRunner {
       },
       message: 'Draft edit created. Tell the user they can review and apply it from the KeepSeek panel.'
     });
+  }
+
+  private async createIncrementalDraftEdit(
+    args: Record<string, unknown>,
+    draftEdits: DraftEdit[],
+    language: KeepseekLanguage
+  ): Promise<string> {
+    const rawPath = this.readRequiredString(args, 'path');
+    const reason = this.readRequiredString(args, 'reason');
+    const uri = this.workspaceTools.resolveTargetUri(rawPath);
+    const conflict = this.findDraftEditConflict(uri, draftEdits);
+    if (conflict) {
+      return this.createDraftEditConflictResult(uri, conflict, language);
+    }
+    if (shouldSkipTextUri(uri)) {
+      throw new Error('Incremental edits require an existing readable text file.');
+    }
+    const stat = await vscode.workspace.fs.stat(uri);
+    if (stat.type !== vscode.FileType.File) {
+      throw new Error('Incremental edits require an existing regular file.');
+    }
+    const originalContent = new TextDecoder('utf-8', { fatal: false }).decode(await vscode.workspace.fs.readFile(uri));
+    if (!isReadableTextContent(originalContent)) {
+      throw new Error('Incremental edits require readable UTF-8 text.');
+    }
+    const edits = this.readIncrementalEditOperations(args.edits, originalContent);
+    const ordered = [...edits].sort((left, right) => right.startOffset - left.startOffset);
+    let nextText = originalContent;
+    for (const edit of ordered) {
+      nextText = `${nextText.slice(0, edit.startOffset)}${edit.replacement}${nextText.slice(edit.endOffset)}`;
+    }
+    const draftEdit: DraftEdit = {
+      id: randomUUID(),
+      uri: uri.toString(),
+      label: this.workspaceTools.getLabel(uri),
+      action: 'modify',
+      newText: nextText,
+      reason
+    };
+    draftEdits.push(draftEdit);
+    return JSON.stringify({
+      ok: true,
+      draftEdit: { id: draftEdit.id, label: draftEdit.label, editCount: edits.length },
+      message: 'Incremental edits were combined into one pending full-file DraftEdit for review and checkpoint safety.'
+    });
+  }
+
+  private readIncrementalEditOperations(
+    value: unknown,
+    originalContent: string
+  ): Array<{ startOffset: number; endOffset: number; replacement: string }> {
+    if (!Array.isArray(value) || value.length < 1 || value.length > 100) {
+      throw new Error('Tool argument "edits" must contain between 1 and 100 edits.');
+    }
+    const newline = originalContent.includes('\r\n') ? '\r\n' : '\n';
+    const lineStarts = this.getRawLineStartOffsets(originalContent);
+    const lineCount = this.getNormalizedLineCount(originalContent.replace(/\r\n?/gu, '\n'), this.getLineStartOffsets(originalContent.replace(/\r\n?/gu, '\n')));
+    const operations = value.map((raw, index) => {
+      if (!this.isRecord(raw)) {
+        throw new Error(`edits[${index}] must be an object.`);
+      }
+      if (typeof raw.replace !== 'string') {
+        throw new Error(`edits[${index}].replace must be a string.`);
+      }
+      const hasSearch = typeof raw.search === 'string';
+      const hasRange = raw.replaceRange !== undefined;
+      if (hasSearch === hasRange) {
+        throw new Error(`edits[${index}] must provide exactly one of search or replaceRange.`);
+      }
+      if (hasSearch) {
+        const search = raw.search as string;
+        if (!search) {
+          throw new Error(`edits[${index}].search cannot be empty.`);
+        }
+        const startOffset = originalContent.indexOf(search);
+        if (startOffset < 0) {
+          throw new Error(`edits[${index}].search did not match the current file. Reread the relevant range and retry.`);
+        }
+        if (originalContent.indexOf(search, startOffset + search.length) >= 0) {
+          throw new Error(`edits[${index}].search is ambiguous because it matches more than once.`);
+        }
+        return { startOffset, endOffset: startOffset + search.length, replacement: raw.replace as string };
+      }
+      const range = this.parseLineReplacementRange(raw.replaceRange, `edits[${index}].replaceRange`);
+      if (range.endLine > lineCount) {
+        throw new Error(`edits[${index}].replaceRange exceeds file length ${lineCount}.`);
+      }
+      const startOffset = lineStarts[range.startLine - 1] ?? originalContent.length;
+      const endOffset = range.endLine >= lineCount
+        ? originalContent.length
+        : lineStarts[range.endLine] ?? originalContent.length;
+      let replacement = (raw.replace as string).replace(/\r\n?|\n/gu, newline);
+      if (replacement && !replacement.endsWith(newline)
+        && (endOffset < originalContent.length || originalContent.endsWith(newline))) {
+        replacement += newline;
+      }
+      return { startOffset, endOffset, replacement };
+    });
+    const ascending = [...operations].sort((left, right) => left.startOffset - right.startOffset);
+    for (let index = 1; index < ascending.length; index += 1) {
+      if (ascending[index].startOffset < ascending[index - 1].endOffset) {
+        throw new Error('Incremental edits overlap; reread the relevant range and submit non-overlapping targets.');
+      }
+    }
+    return operations;
+  }
+
+  private getRawLineStartOffsets(content: string): number[] {
+    const starts = [0];
+    for (let index = 0; index < content.length; index += 1) {
+      if (content[index] === '\n') {
+        starts.push(index + 1);
+      }
+    }
+    return starts;
   }
 
   private async createDeleteDraftEdit(

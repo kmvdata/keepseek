@@ -41,6 +41,93 @@ test('context compression planning uses synchronous refresh over force ratio', (
   assert.equal(plan.reason, 'force_context_limit');
 });
 
+test('summary character cap covers only message ids actually included in the successful request', async () => {
+  let capturedPrompt = '';
+  const compressor = new HistoryCompressor(async (input) => {
+    capturedPrompt = input.messages[1]?.content ?? '';
+    return 'bounded summary';
+  });
+  const messages = Array.from({ length: 12 }, (_value, index) => createMessage(
+    index,
+    index === 0 || index >= 10 ? `small ${index}` : `${`payload-${index} `.repeat(5_000)}`
+  ));
+  const session = createSession(messages);
+  const result = await compressor.refresh({
+    session,
+    prompt: 'current request',
+    model: createModel(2_000),
+    agentSettings: { thinkingEnabled: true, reasoningEffort: 'high', compressionThreshold: 'balanced' },
+    contextFiles: [],
+    language: 'en',
+    settings: { ...createCompressionSettings(), keepRecentTurns: 1, triggerRatio: 0.01, forceRatio: 0.02 }
+  });
+
+  const covered = new Set(result.state.summaries.at(-1)?.coveredMessageIds ?? []);
+  assert.ok(covered.size > 0);
+  assert.ok(covered.size < messages.length - 2);
+  for (const message of messages) {
+    assert.equal(covered.has(message.id), capturedPrompt.includes(`Message ${message.id}\n`));
+  }
+  const firstUncoveredCompressible = messages.slice(1, 10).find((message) => !covered.has(message.id));
+  assert.ok(firstUncoveredCompressible, 'overflow messages must remain for a later batch');
+});
+
+test('summary failure never advances covered ids', async () => {
+  const compressor = new HistoryCompressor(async () => {
+    throw new Error('summary failed');
+  });
+  const messages = Array.from({ length: 12 }, (_value, index) => createMessage(index, `payload ${index} `.repeat(500)));
+  const result = await compressor.refresh({
+    session: createSession(messages),
+    prompt: 'current request',
+    model: createModel(2_000),
+    agentSettings: { thinkingEnabled: true, reasoningEffort: 'high', compressionThreshold: 'balanced' },
+    contextFiles: [],
+    language: 'en',
+    settings: { ...createCompressionSettings(), keepRecentTurns: 1, triggerRatio: 0.01, forceRatio: 0.02 }
+  });
+
+  assert.equal(result.reason, 'failed');
+  assert.deepEqual(result.state.summaries, []);
+});
+
+test('new compression appends an immutable summary segment without rewriting the old one', async () => {
+  const messages = Array.from({ length: 20 }, (_value, index) => createMessage(index, `payload ${index} `.repeat(300)));
+  const session = createSession(messages);
+  session.contextCompression = {
+    version: 1,
+    protectedMessageIds: [],
+    summaries: [{
+      id: 'summary-old',
+      content: 'BYTE-STABLE OLD SUMMARY',
+      coveredMessageIds: messages.slice(1, 8).map((message) => message.id),
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      tokenEstimate: 6,
+      version: 1
+    }]
+  };
+  const compressor = new HistoryCompressor(async () => 'NEW SUMMARY SEGMENT');
+  const result = await compressor.refresh({
+    session,
+    prompt: 'current request',
+    model: createModel(2_000),
+    agentSettings: { thinkingEnabled: true, reasoningEffort: 'high', compressionThreshold: 'balanced' },
+    contextFiles: [],
+    language: 'en',
+    settings: { ...createCompressionSettings(), keepRecentTurns: 1, triggerRatio: 0.01, forceRatio: 0.02 }
+  });
+
+  assert.equal(result.reason, 'updated');
+  assert.equal(result.state.summaries.length, 2);
+  assert.equal(result.state.summaries[0]?.id, 'summary-old');
+  assert.equal(result.state.summaries[0]?.content, 'BYTE-STABLE OLD SUMMARY');
+  assert.equal(result.state.summaries[1]?.content, 'NEW SUMMARY SEGMENT');
+  assert.equal(result.state.summaries[1]?.coveredMessageIds.some((id) => (
+    result.state.summaries[0]?.coveredMessageIds.includes(id)
+  )), false);
+});
+
 function createCompressionSettings() {
   return {
     keepRecentTurns: 2,

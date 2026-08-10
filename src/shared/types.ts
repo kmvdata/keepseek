@@ -91,6 +91,23 @@ export interface UsageEvent {
   currency: string;
   modelId: string;
   requestId?: string;
+  source: UsageSource;
+  /** Physical provider attempts represented by this event. Defaults to one. */
+  requestCount?: number;
+}
+
+export type UsageSource =
+  | 'executor'
+  | 'summary'
+  | 'retry'
+  | 'continuation'
+  | 'background'
+  | 'retrieval'
+  | 'router';
+
+export interface UsageSourceStats extends Usage {
+  requestCount: number;
+  cost: number;
 }
 
 export interface TurnUsageStats extends Usage {
@@ -99,6 +116,7 @@ export interface TurnUsageStats extends Usage {
   currency: string;
   modelId?: string;
   updatedAt?: string;
+  bySource?: Partial<Record<UsageSource, UsageSourceStats>>;
 }
 
 export interface SessionUsageStats extends Usage {
@@ -106,6 +124,7 @@ export interface SessionUsageStats extends Usage {
   sessionCost: number;
   currency: string;
   updatedAt?: string;
+  bySource?: Partial<Record<UsageSource, UsageSourceStats>>;
 }
 
 export interface DeepSeekBalanceState {
@@ -143,6 +162,9 @@ export interface ChatMessage {
   createdAt: string;
   modelId?: string;
   reasoningContent?: string;
+  /** Exact provider-visible user content when a cache-safe tail (for example
+   * archive recall) was appended without changing the text shown in the UI. */
+  providerContent?: string;
   isStreaming?: boolean;
   contextMeta?: ChatMessageContextMeta;
   usedSkills?: ChatMessageSkill[];
@@ -306,6 +328,8 @@ export interface ChatSession {
    * 显式使用/移除 Skill、Skill 列表刷新时失效并重新计算。
    */
   frozenImplicitSkillIds?: string[];
+  requestProtocol?: SessionRequestProtocol;
+  historyArchive?: HistoryArchiveEntry[];
   contextCompression?: ContextCompressionState;
   /**
    * 持久化的稳定上下文块（AGENTS.md / Skills / Legacy Memory / Context Files 的
@@ -327,6 +351,31 @@ export interface ChatSession {
   workspaceFolders: string[];
   isFavorite: boolean;
   customTitle?: string;
+}
+
+export interface HistoryArchiveEntry {
+  id: string;
+  messageId: string;
+  toolCallId?: string;
+  toolName?: string;
+  role: ChatRole | 'tool';
+  content: string;
+  contentHash: string;
+  createdAt: string;
+}
+
+export interface SessionRequestProtocol {
+  /** v1 replays ordinary final-answer reasoning; v2 keeps it local-only. */
+  version: number;
+  serializationStrategy: 'legacy-v1' | 'provider-projection-v2';
+  toolSchemaVersion: number;
+  toolNames: string[];
+  modelId?: string;
+  providerId?: string;
+  baseUrl?: string;
+  createdAt: string;
+  lastProviderRequestAt?: string;
+  lastDynamicContextHash?: string;
 }
 
 export interface ChatSessionSummary {
@@ -689,6 +738,8 @@ export interface AgentRequest {
    * 未提供时按 prompt 现算。
    */
   slimToolNames?: string[];
+  requestProtocolVersion?: number;
+  historyArchive?: HistoryArchiveEntry[];
   history: ChatMessage[];
   contextCompression?: ContextCompressionState;
   historyRewriteReason?: string;

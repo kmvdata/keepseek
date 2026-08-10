@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   FIND_REFERENCES_TOOL_NAME,
   FIND_SYMBOL_TOOL_NAME,
@@ -12,6 +13,7 @@ import {
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME,
+  SEARCH_SESSION_ARCHIVE_TOOL_NAME,
   buildInitialAgentMessages,
   formatCurrentRunContextForAgent,
   getAgentSystemPrompt,
@@ -190,8 +192,50 @@ test('system prompts explain safe pending file deletion in both languages', () =
 
 test('classifies both file-changing tools as DraftEdit preparation tools', () => {
   assert.equal(isDraftEditPreparationTool(CREATE_DRAFT_EDIT_TOOL_NAME), true);
+  assert.equal(isDraftEditPreparationTool(CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME), true);
   assert.equal(isDraftEditPreparationTool(DELETE_WORKSPACE_FILE_TOOL_NAME), true);
   assert.equal(isDraftEditPreparationTool(SEARCH_WORKSPACE_TOOL_NAME), false);
+});
+
+test('protocol v1 keeps the legacy schema while v2 freezes the new archive and incremental tools', () => {
+  const legacy = getAgentToolNamesForPrompt('edit this', false, 1);
+  const current = getAgentToolNamesForPrompt('edit this', false, 2);
+  assert.equal(legacy.includes(SEARCH_SESSION_ARCHIVE_TOOL_NAME), false);
+  assert.equal(legacy.includes(CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME), false);
+  assert.equal(current.includes(SEARCH_SESSION_ARCHIVE_TOOL_NAME), true);
+  assert.equal(current.includes(CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME), true);
+  assert.equal(JSON.stringify(getAgentTools({ toolNames: current })), JSON.stringify(getAgentTools({ toolNames: [...current] })));
+});
+
+test('project rules, skills, legacy memory, and attachments share one deterministic context budget', () => {
+  const file = createContextFile('large.ts', 'f'.repeat(2_000));
+  const context: CurrentRunContext = {
+    projectInstructions: [{
+      id: 'root', uri: 'file:///workspace/AGENTS.md', workspaceFolder: 'workspace',
+      content: 'p'.repeat(1_000), characterCount: 1_000, tokenEstimate: 250,
+      contentHash: 'project', truncated: false
+    }],
+    skills: [{
+      id: 'skill', name: 'skill', source: 'agentsWorkspace', rootUri: 'file:///skill',
+      skillUri: 'file:///skill/SKILL.md', content: 's'.repeat(2_000), hasScripts: false,
+      activation: { source: 'explicit', reason: 'selected' }
+    }],
+    legacyMemory: { content: 'l'.repeat(2_000), entryIds: ['l1'], tokenEstimate: 500, sourceUris: ['file:///legacy'] },
+    metadata: {
+      precedence: [], beforeDeduplicationCount: 3, afterDeduplicationCount: 3,
+      totalCharacterCount: 5_000, totalTokenEstimate: 1_250, truncated: false,
+      sources: [], discarded: [], possibleConflicts: []
+    }
+  };
+  const first = formatCurrentRunContextForAgent({
+    contextFiles: [file], currentRunContext: context, language: 'en', totalBudgetCharacters: 2_500
+  });
+  const second = formatCurrentRunContextForAgent({
+    contextFiles: [file], currentRunContext: context, language: 'en', totalBudgetCharacters: 2_500
+  });
+  assert.equal(first, second);
+  assert.ok(first.length < 3_000);
+  assert.match(first, /shared context budget/u);
 });
 
 test('semantic tools expose structured provider inputs', () => {

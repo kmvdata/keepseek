@@ -183,6 +183,36 @@ test('projection truncates to the recent tail when no summary exists and the bud
   assert.equal(withSummary.history.length, messages.length);
 });
 
+test('projection fallback counts tool rounds atomically instead of only final assistant text', () => {
+  const messages: ChatMessage[] = [
+    {
+      id: 'u1', role: 'user', content: 'old', createdAt: new Date(0).toISOString()
+    },
+    {
+      id: 'a1', role: 'assistant', content: 'done', createdAt: new Date(1).toISOString(),
+      toolRounds: [{
+        assistantContent: null,
+        reasoningContent: 'reasoning'.repeat(200),
+        toolCalls: [{ id: 'call-1', type: 'function', function: { name: 'read', arguments: '{}' } }],
+        toolResults: [{ toolCallId: 'call-1', content: 'large tool output '.repeat(600) }]
+      }]
+    },
+    {
+      id: 'u2', role: 'user', content: 'current', createdAt: new Date(2).toISOString()
+    }
+  ];
+  const projection = buildHistoryProjection({
+    history: messages,
+    prompt: 'current',
+    language: 'en',
+    settings: createProjectionSettings(),
+    requestProtocolVersion: 2,
+    maxProjectionTokens: 100
+  });
+
+  assert.deepEqual(projection.history.map((message) => message.id), ['u2']);
+});
+
 function createProjectionSettings() {
   return {
     keepRecentTurns: 2,
