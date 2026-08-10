@@ -18,6 +18,7 @@
 - Improved large-file workflows:
   - Range reads now return `hasMore` and a stable `nextStartLine` continuation cursor under explicit line/byte budgets.
   - Added `keepseek_create_incremental_draft_edit` for exact unique search/replace, line-range replacement, and multiple non-overlapping edits in one existing file. KeepSeek combines them locally into the existing full DraftEdit/ChangeSet/checkpoint flow and refuses missing, ambiguous, or overlapping targets instead of guessing.
+- Fixed `keepseek_create_incremental_draft_edit` being misclassified by the unknown-tool fallback as high risk. Like full DraftEdit preparation, incremental edits now proceed without a tool confirmation because they only create a reviewable pending ChangeSet; applying changes still requires the user's explicit Apply action.
 - Added deterministic context-maintenance benchmarks covering ordinary reasoning, multi-tool reading, failed validation and repair, summary overflow, oversized first requests, warm/cold session recovery, small edits to large files, archive recall, and extension restart. The offline fixture reduced estimated total cost by 49.04% while keeping every hot-cache scenario's stable-prefix and cache-hit-rate checks non-inferior; the full suite now passes 181 tests.
 
 ## 0.2.1 - 2026-07-21

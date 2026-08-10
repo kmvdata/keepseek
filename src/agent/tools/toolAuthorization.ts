@@ -9,6 +9,7 @@ import type {
 } from '../../shared/types';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   FIND_REFERENCES_TOOL_NAME,
   FIND_SYMBOL_TOOL_NAME,
@@ -55,6 +56,7 @@ const LOW_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
   [GET_DOCUMENT_SYMBOLS_TOOL_NAME, 'semantic_read'],
   [GET_WORKSPACE_SYMBOLS_TOOL_NAME, 'semantic_read'],
   [CREATE_DRAFT_EDIT_TOOL_NAME, 'draft_edit_prepare'],
+  [CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME, 'draft_edit_prepare'],
   [GIT_STATUS_TOOL_NAME, 'git_read'],
   [GIT_DIFF_TOOL_NAME, 'git_read'],
   [GIT_CURRENT_BRANCH_TOOL_NAME, 'git_read'],

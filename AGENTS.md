@@ -250,6 +250,7 @@ Agent 工具包括：
 - `keepseek_read_workspace_file_range`：按 1-based 闭区间读取工作区文本文件的指定行段。
 - `keepseek_read_workspace_file`：读取工作区内文本文件，拒绝越界、二进制、超限文件。
 - `keepseek_create_draft_edit`：创建待确认 DraftEdit，不直接写磁盘。
+- `keepseek_create_incremental_draft_edit`：对现有文本文件执行精确唯一匹配或行段替换，生成待确认 DraftEdit；不直接写磁盘。
 - `keepseek_delete_workspace_file`：仅为工作区内一个已存在的普通可读文本文件准备 `action: 'delete'` 的待确认 DraftEdit；不会立即删除、不支持目录或递归删除。
 - `keepseek_find_symbol` / `keepseek_find_references`：语义定位 symbol 与 references。
 - `keepseek_get_document_symbols` / `keepseek_get_workspace_symbols`：读取文档或工作区语义 symbol。
@@ -259,7 +260,7 @@ Agent 工具包括：
 - `keepseek_git_create_patch`：仅返回受大小限制的 patch 内容，不写入或应用 patch。
 - `keepseek_git_suggest_commit_message`：只生成 commit message 建议，不创建 commit。
 
-工具风险规则：工作区读取/搜索、Problems、语义查询和 Git 只读查询是低风险；受控 compile/lint/test 是中风险并按 run 授权；删除准备工具按高风险处理，每次调用都会显示带目标路径和原因的 VS Code modal，但授权后仍只产生待确认 DraftEdit。Agent 对文件的 create/modify/delete 都只能进入 ChangeSet；Provider 把 `AgentResponse.changeSet` 登记到 `ChangeSetStore`，Webview 展示 Diff/Apply/Discard，只有用户点击 Apply 后 `ChangeSetStore` 才会调用 `SafeFileEditor`。单项 delete Apply 和包含 delete 的 Apply All 在真正执行前还会弹出带删除目标的专用 VS Code modal；非删除 DraftEdit 的 Apply 不会额外弹出该删除确认。当前不暴露 commit/push Agent 工具，且绝不自动 push。
+工具风险规则：工作区读取/搜索、Problems、语义查询、Git 只读查询，以及完整/增量 DraftEdit 准备是低风险；受控 compile/lint/test 是中风险并按 run 授权；删除准备工具按高风险处理，每次调用都会显示带目标路径和原因的 VS Code modal，但授权后仍只产生待确认 DraftEdit。Agent 对文件的 create/modify/delete 都只能进入 ChangeSet；Provider 把 `AgentResponse.changeSet` 登记到 `ChangeSetStore`，Webview 展示 Diff/Apply/Discard，只有用户点击 Apply 后 `ChangeSetStore` 才会调用 `SafeFileEditor`。单项 delete Apply 和包含 delete 的 Apply All 在真正执行前还会弹出带删除目标的专用 VS Code modal；非删除 DraftEdit 的 Apply 不会额外弹出该删除确认。当前不暴露 commit/push Agent 工具，且绝不自动 push。
 
 验证失败后由 `RepairLoopTracker` 记录失败摘要和修复轮次。Agent 读取 Problems、生成修复 ChangeSet 后必须进入 `waiting_for_apply`；待修改未应用时 Runner 会结构化拒绝再次验证。用户 Apply 完整 ChangeSet 后 Webview 可显式继续验证，修复轮次跨 run/session 持久化并受 `keepseek.validation.maxRepairIterations` 限制。
 

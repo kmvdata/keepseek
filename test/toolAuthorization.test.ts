@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   FIND_REFERENCES_TOOL_NAME,
   GIT_DIFF_TOOL_NAME,
@@ -22,6 +23,10 @@ test('classifies read-only semantic and Git tools as low risk', () => {
     scope: 'git_read'
   });
   assert.deepEqual(getToolAuthorizationMetadata(CREATE_DRAFT_EDIT_TOOL_NAME), {
+    riskLevel: 'low',
+    scope: 'draft_edit_prepare'
+  });
+  assert.deepEqual(getToolAuthorizationMetadata(CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME), {
     riskLevel: 'low',
     scope: 'draft_edit_prepare'
   });
