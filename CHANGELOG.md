@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3
+
+- Fixed composer input flickering when the input exceeds the max display height: the JS autogrow cap (200px) and the CSS `max-height` (220px) were out of sync, so with the scrollbar active, every keystroke at the last visible line resized the input and clamped `scrollTop`, making the viewport jump on each edit. The CSS cap is now aligned with the autogrow limit, and the scroll position is defensively restored after every height recalculation.
+
 ## 0.2.2 - 2026-08-10
 
 - Skills are now the only Agent extension mechanism: removed Codex-style plugin discovery (workspace `plugins` / `.agents/plugins`, user `~/.codex/plugins`) and the stale `.agents/marketplace.json`; Skills are now discovered only from workspace `.agents` and user `~/.codex/skills`.
