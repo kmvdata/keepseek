@@ -3,7 +3,10 @@ export function getInputStyles(): string {
     .rich-input {
       position: relative;
       min-height: 56px;
-      max-height: 220px;
+      /* 必须与 updatePromptVisualState() 的 autogrow 上限（200）保持一致：
+         不一致时 height='auto' 会被钳到 max-height、随后收缩回固定值，
+         导致 scrollTop 被 clamp，滚动条出现后每次输入视口跳动（闪烁）。 */
+      max-height: 200px;
       padding: 10px 12px 6px;
       line-height: 1.45;
       font-size: 13px;

@@ -3308,8 +3308,13 @@ export function getInputScript(): string {
         if (isEmpty) {
           normalizeEmptyPrompt();
         }
+        // 上限 200 必须与 .rich-input 的 CSS max-height 保持一致；
+        // 高度重置会让浏览器 clamp scrollTop（尤其滚动条出现、位于最后一行时），
+        // 这里显式恢复滚动位置，避免每次输入视口跳动。
+        var prevScrollTop = promptInput.scrollTop;
         promptInput.style.height = 'auto';
         promptInput.style.height = Math.min(promptInput.scrollHeight, 200) + 'px';
+        promptInput.scrollTop = Math.min(prevScrollTop, Math.max(0, promptInput.scrollHeight - promptInput.clientHeight));
         promptInput.classList.toggle('is-empty', isEmpty);
         renderSendButton(isEmpty);
         renderContextProgress();
