@@ -223,20 +223,20 @@ KeepSeek: Open Agent Chat
 ```
 
 ```text
-# 3. 打开 KeepSeek 设置中的“账号与模型”，新建或选择账号并填写 API Key
+# 3. 打开 KeepSeek 设置中的“模型与来源”，添加模型并填写 API Key / Base URL
 # 旧版配置仍兼容：keepseek.apiKey / keepseek.baseUrl / DEEPSEEK_API_KEY
 ```
 
 然后选中一段代码，按 `Cmd+L` / `Ctrl+L`（或右键 → KeepSeek: Add Selection to Chat），问你的第一个问题。打开用量统计，看第一轮和第二轮的命中率差距——那两行数字，就是 KeepSeek 存在的意义。
 
-### 多账号与模型昵称
+### 多来源模型体系
 
-- API 设置页可新建、重命名、删除和切换多个 `deepseek` / `openai-compatible` 账号；切换只影响后续请求，不会改写或绑定已有会话。
-- 每个账号拥有独立的 API Key、Base URL、模型列表、模型昵称和余额缓存。模型切换菜单按“用户昵称 → API 返回名称 → 内置名称 → 模型 ID”显示，悬停仍可查看完整模型 ID。
-- DeepSeek 账号保留 Thinking、余额等完整能力；OpenAI 兼容账号提供对话、SSE 流式响应和工具调用，不保证 DeepSeek 专属 reasoning、余额或运行参数。
+- 模型来源保存一组 `provider + API Key + Base URL`，一个来源可挂多个模型；用相同连接信息再次添加模型时会复用来源，不重复保存凭证。
+- “切换模型”菜单聚合全部来源并按来源分组；选中模型后，请求与摘要都使用该模型所属来源的凭证，不存在单独的“当前账号”。
+- 仅 `provider=deepseek` 且 Base URL host 为 `api.deepseek.com` 的官网来源支持自动发现、余额和费用统计。代理 DeepSeek 与 OpenAI 兼容来源只统计 token。
 - “刷新模型”失败时会静默使用上次缓存，不影响对话；如果 OpenAI 兼容服务不提供 `/models`，可在设置中手动添加模型 ID。
-- 账号文件只保存在 VS Code 扩展的全局存储目录，不进入工作区或 Git：`<globalStorageUri>/accounts/<provider>/<accountId>.json`；余额位于 `<globalStorageUri>/accounts/<provider>/<accountId>/balance.json`。
-- 老用户无需迁移操作：首次升级且尚无账号文件时，KeepSeek 会把现有 `keepseek.apiKey` / `keepseek.baseUrl` 复制到 `accounts/deepseek/default.json`，但不会删除或修改旧配置，因此仍可回退旧版本。
+- 来源文件只保存在 VS Code 扩展的全局存储目录，不进入工作区或 Git：`<globalStorageUri>/accounts/<provider>/<sourceId>.json`；官网来源余额位于 `<globalStorageUri>/accounts/<provider>/<sourceId>/balance.json`。
+- 老用户无需迁移操作：首次升级且尚无来源文件时，KeepSeek 会把现有 `keepseek.apiKey` / `keepseek.baseUrl` 复制到 `accounts/deepseek/default.json`，但不会删除或修改旧配置，因此仍可回退旧版本。旧环境变量回退不会作为未配置来源进入模型菜单。
 
 ---
 
@@ -244,8 +244,8 @@ KeepSeek: Open Agent Chat
 
 | 配置键 | 默认值 | 说明 |
 |--------|--------|------|
-| `keepseek.activeAccountId` | `""` | 当前激活的全局账号；空值优先选择迁移得到的 `default` 账号 |
-| `keepseek.usagePricing` | DeepSeek 默认价目 | 每百万 token 的 cache hit / 输入 / 输出价格与币种，按模型配置，用于费用估算 |
+| `keepseek.selectedSourceId` | `""` | 与 `selectedModelId` 配对保存当前工作区所选模型的来源 |
+| `keepseek.usagePricing` | DeepSeek 默认价目 | 仅用于官网 DeepSeek 来源；未知模型不再回退套用其它模型价格 |
 | `keepseek.balanceEndpointUrl` | `""` | 余额查询接口，为空时从 `baseUrl` 推导 `/user/balance` |
 | `keepseek.balanceRefreshIntervalMs` | `60000` | 余额自动刷新最小间隔 |
 | `keepseek.slimToolModeEnabled` | `false` | **默认关闭**：完整工具集保证 tools 段字节稳定、缓存持续命中；开启可换取更小的 schema，但工具集随 prompt 变化会降低命中率 |

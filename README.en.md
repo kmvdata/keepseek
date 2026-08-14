@@ -223,20 +223,20 @@ KeepSeek: Open Agent Chat
 ```
 
 ```text
-# 3. Open “Accounts and models” in KeepSeek settings, then create or select an account
+# 3. Open “Models and sources” in KeepSeek settings, then add a model with its API key and Base URL
 # Legacy settings remain compatible: keepseek.apiKey / keepseek.baseUrl / DEEPSEEK_API_KEY
 ```
 
 Then select some code, press `Cmd+L` / `Ctrl+L` (or right-click → KeepSeek: Add Selection to Chat), and ask your first question. Open the usage stats and compare the hit rates of turn 1 and turn 2 — those two numbers are the reason KeepSeek exists.
 
-### Multiple accounts and model aliases
+### Multiple model sources
 
-- The API settings dialog can create, rename, delete, and switch among multiple `deepseek` and `openai-compatible` accounts. Switching affects future requests only; existing sessions are neither rewritten nor bound to an account.
-- Each account has its own API key, Base URL, model list, model aliases, and balance cache. The model switcher displays user alias → API-provided name → built-in label → model ID, while hover still reveals the full ID.
-- DeepSeek accounts keep the complete Thinking and balance experience. OpenAI-compatible accounts provide chat, SSE streaming, and tool calls, without promising DeepSeek-specific reasoning, balance, or runtime parameters.
+- A model source stores one `provider + API key + Base URL` connection and can own multiple models. Adding another model with matching connection details reuses that source and does not duplicate credentials.
+- The model switcher aggregates every source and groups models by source. Requests and summaries use the selected model's source; there is no separate active-account state.
+- Only a `deepseek` source whose Base URL host is exactly `api.deepseek.com` supports automatic discovery, balance, and cost reporting. DeepSeek proxies and OpenAI-compatible sources report tokens only.
 - A failed model refresh silently keeps the last cache and never blocks chat. If an OpenAI-compatible endpoint does not expose `/models`, add its model ID manually in settings.
-- Account files live only in VS Code extension global storage, never in the workspace or Git: `<globalStorageUri>/accounts/<provider>/<accountId>.json`; balance data lives at `<globalStorageUri>/accounts/<provider>/<accountId>/balance.json`.
-- Existing users need no manual migration. On the first upgrade with no account files, KeepSeek copies `keepseek.apiKey` / `keepseek.baseUrl` into `accounts/deepseek/default.json` without deleting or modifying the old settings, so downgrading remains safe.
+- Source files live only in VS Code extension global storage, never in the workspace or Git: `<globalStorageUri>/accounts/<provider>/<sourceId>.json`; official-source balance data lives at `<globalStorageUri>/accounts/<provider>/<sourceId>/balance.json`.
+- Existing users need no manual migration. On the first upgrade with no source files, KeepSeek copies `keepseek.apiKey` / `keepseek.baseUrl` into `accounts/deepseek/default.json` without deleting or modifying the old settings, so downgrading remains safe. Environment fallback values never appear as an unconfigured source in the model switcher.
 
 ---
 
@@ -244,8 +244,8 @@ Then select some code, press `Cmd+L` / `Ctrl+L` (or right-click → KeepSeek: Ad
 
 | Setting key | Default | Description |
 |--------|--------|------|
-| `keepseek.activeAccountId` | `""` | Globally active account; an empty value prefers the migrated `default` account |
-| `keepseek.usagePricing` | DeepSeek default price list | Cache-hit / input / output prices per million tokens and currency, per model, used for cost estimation |
+| `keepseek.selectedSourceId` | `""` | Paired with `selectedModelId` to persist the selected model source for this workspace |
+| `keepseek.usagePricing` | DeepSeek default price list | Applies only to official DeepSeek sources; unknown models no longer inherit another model's rates |
 | `keepseek.balanceEndpointUrl` | `""` | Balance query endpoint; when empty, derived from `baseUrl` as `/user/balance` |
 | `keepseek.balanceRefreshIntervalMs` | `60000` | Minimum interval for automatic balance refresh |
 | `keepseek.slimToolModeEnabled` | `false` | **Off by default**: the full tool set keeps the tools section byte-stable for sustained cache hits; enabling it trades a smaller schema for a schema that varies with the prompt and lowers the hit rate |

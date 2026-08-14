@@ -1,4 +1,4 @@
-import type { AccountModelCache, KeepseekAccount } from './types';
+import type { ModelDiscoveryCache, ModelSource } from './types';
 
 export interface ModelDisplayNameInput {
   id: string;
@@ -15,21 +15,21 @@ export function resolveModelDisplayName(input: ModelDisplayNameInput): string {
   return firstNonEmpty(input.alias, input.fetchedName, input.label, input.id);
 }
 
-export function resolveAccountModelDisplayName(
-  account: Pick<KeepseekAccount, 'modelAliases' | 'modelCache'>,
+export function resolveSourceModelDisplayName(
+  source: Pick<ModelSource, 'models' | 'modelCache'>,
   modelId: string,
   builtInLabel?: string
 ): string {
   return resolveModelDisplayName({
     id: modelId,
-    alias: account.modelAliases[modelId],
-    fetchedName: findFetchedModelName(account.modelCache, modelId),
+    alias: source.models.find((model) => model.id === modelId)?.name,
+    fetchedName: findFetchedModelName(source.modelCache, modelId),
     label: builtInLabel
   });
 }
 
 export function findFetchedModelName(
-  cache: AccountModelCache | undefined,
+  cache: ModelDiscoveryCache | undefined,
   modelId: string
 ): string | undefined {
   return cache?.models.find((model) => model.id === modelId)?.name;

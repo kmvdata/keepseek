@@ -36,7 +36,7 @@ export interface AgentRequestCoordinatorInput {
   repairLoop?: AgentRequest['repairLoop'];
   executionLimits?: AgentRequest['executionLimits'];
   backgroundRunId?: string;
-  accountConfig?: AgentRequest['accountConfig'];
+  sourceConfig?: AgentRequest['sourceConfig'];
   signal?: AbortSignal;
 }
 
@@ -101,7 +101,7 @@ export class AgentRequestCoordinator {
         : undefined,
       executionLimits: input.executionLimits ? { ...input.executionLimits } : undefined,
       backgroundRunId: input.backgroundRunId,
-      accountConfig: input.accountConfig ? { ...input.accountConfig } : undefined,
+      sourceConfig: input.sourceConfig ? { ...input.sourceConfig } : undefined,
       signal: input.signal
     };
   }

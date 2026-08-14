@@ -1,9 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import {
-  resolveAccountModelDisplayName,
-  resolveModelDisplayName
-} from '../src/accounts/modelAlias';
+import { resolveModelDisplayName, resolveSourceModelDisplayName } from '../src/accounts/modelAlias';
 
 test('model display name uses alias, fetched name, built-in label, then id', () => {
   assert.equal(resolveModelDisplayName({
@@ -26,9 +23,9 @@ test('model display name uses alias, fetched name, built-in label, then id', () 
   assert.equal(resolveModelDisplayName({ id: ' model-id ' }), 'model-id');
 });
 
-test('account model display resolution reads aliases and fetched names by model id', () => {
-  const account = {
-    modelAliases: { alpha: 'Alias Alpha' },
+test('source model display resolution reads nicknames and fetched names by model id', () => {
+  const source = {
+    models: [{ id: 'alpha', name: 'Alias Alpha' }],
     modelCache: {
       fetchedAt: 123,
       models: [
@@ -37,8 +34,8 @@ test('account model display resolution reads aliases and fetched names by model 
       ]
     }
   };
-  assert.equal(resolveAccountModelDisplayName(account, 'alpha', 'Built-in Alpha'), 'Alias Alpha');
-  assert.equal(resolveAccountModelDisplayName(account, 'beta', 'Built-in Beta'), 'Fetched Beta');
-  assert.equal(resolveAccountModelDisplayName(account, 'gamma', 'Built-in Gamma'), 'Built-in Gamma');
-  assert.equal(resolveAccountModelDisplayName(account, 'delta'), 'delta');
+  assert.equal(resolveSourceModelDisplayName(source, 'alpha', 'Built-in Alpha'), 'Alias Alpha');
+  assert.equal(resolveSourceModelDisplayName(source, 'beta', 'Built-in Beta'), 'Fetched Beta');
+  assert.equal(resolveSourceModelDisplayName(source, 'gamma', 'Built-in Gamma'), 'Built-in Gamma');
+  assert.equal(resolveSourceModelDisplayName(source, 'delta'), 'delta');
 });

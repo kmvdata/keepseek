@@ -1,76 +1,85 @@
-export const ACCOUNT_PROVIDERS = ['deepseek', 'openai-compatible'] as const;
+export const MODEL_SOURCE_PROVIDERS = ['deepseek', 'openai-compatible'] as const;
 
-export type AccountProvider = typeof ACCOUNT_PROVIDERS[number];
+export type ModelSourceProvider = typeof MODEL_SOURCE_PROVIDERS[number];
 
-export interface AccountModelInfo {
+/** Model metadata returned by a provider's OpenAI-compatible /models endpoint. */
+export interface DiscoveredModelInfo {
   id: string;
   name?: string;
 }
 
-export interface AccountModelCache {
-  models: AccountModelInfo[];
+export interface ModelDiscoveryCache {
+  models: DiscoveredModelInfo[];
   fetchedAt: number;
 }
 
-/** Persisted account schema stored below the extension's globalStorageUri. */
-export interface KeepseekAccount {
+/** A model explicitly attached to a source. `name` is the user's display nickname. */
+export interface ModelSourceModel {
+  id: string;
+  name?: string;
+}
+
+/** Persisted model-source schema stored below the extension's globalStorageUri. */
+export interface ModelSource {
   id: string;
   name: string;
-  provider: AccountProvider;
+  provider: ModelSourceProvider;
   apiKey: string;
   baseUrl: string;
-  modelAliases: Record<string, string>;
-  modelCache?: AccountModelCache;
+  models: ModelSourceModel[];
+  modelCache?: ModelDiscoveryCache;
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
 }
 
-export interface CreateAccountInput {
-  provider: AccountProvider;
+export interface CreateModelSourceInput {
+  provider: ModelSourceProvider;
   id?: string;
   name?: string;
   apiKey?: string;
   baseUrl?: string;
-  modelAliases?: Record<string, string>;
-  modelCache?: AccountModelCache;
+  models?: ModelSourceModel[];
+  modelCache?: ModelDiscoveryCache;
   enabled?: boolean;
 }
 
-export interface UpdateAccountInput {
+export interface UpdateModelSourceInput {
   name?: string;
   apiKey?: string;
   baseUrl?: string;
-  modelAliases?: Record<string, string>;
-  modelCache?: AccountModelCache;
+  models?: ModelSourceModel[];
+  modelCache?: ModelDiscoveryCache;
   enabled?: boolean;
 }
 
-export type ResolvedAccountSource =
-  | 'account'
+export type ResolvedModelSourceKind =
+  | 'source'
   | 'migration'
   | 'legacy-config'
   | 'environment'
   | 'unconfigured';
 
 /** Credential and model context consumed by every upstream request path. */
-export interface ResolvedActiveAccountConfig {
-  accountId: string;
-  provider: AccountProvider;
+export interface ResolvedModelSourceConfig {
+  sourceId: string;
+  provider: ModelSourceProvider;
   name: string;
   apiKey: string;
   baseUrl: string;
-  models: AccountModelInfo[];
-  modelCache?: AccountModelCache;
-  account?: KeepseekAccount;
-  source: ResolvedAccountSource;
-  legacyFallback: boolean;
+  models: ModelSourceModel[];
+  modelCache?: ModelDiscoveryCache;
+  modelSource?: ModelSource;
+  source: ResolvedModelSourceKind;
+  unconfigured: boolean;
+  supportsBilling: boolean;
 }
 
 /** Immutable per-run credentials shared by the main and summary requests. */
-export interface ActiveAccountConfigSnapshot {
-  readonly accountId: string;
-  readonly provider: AccountProvider;
+export interface ModelSourceConfigSnapshot {
+  readonly sourceId: string;
+  readonly provider: ModelSourceProvider;
   readonly apiKey: string;
   readonly baseUrl: string;
+  readonly supportsBilling: boolean;
 }

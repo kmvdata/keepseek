@@ -70,17 +70,20 @@
         "keepseek.apiKey": {
           "type": "string",
           "default": "",
-          "description": "DeepSeek API key"
+          "description": "Legacy DeepSeek API key",
+          "markdownDeprecationMessage": "Legacy compatibility only. Add or edit models in the KeepSeek model settings dialog."
         },
         "keepseek.baseUrl": {
           "type": "string",
           "default": "https://api.deepseek.com",
-          "description": "DeepSeek API base URL"
+          "description": "Legacy DeepSeek API base URL",
+          "markdownDeprecationMessage": "Legacy compatibility only. Add or edit models in the KeepSeek model settings dialog."
         },
-        "keepseek.activeAccountId": {
+        "keepseek.selectedSourceId": {
           "type": "string",
           "default": "",
-          "description": "Active KeepSeek account ID. Empty selects the migrated default DeepSeek account when available."
+          "scope": "window",
+          "markdownDescription": "Source ID paired with `keepseek.selectedModelId` for the selected model. This is model identity, not a globally active source."
         },
         "keepseek.selectedModelId": {
           "type": "string",

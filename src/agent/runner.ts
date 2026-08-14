@@ -27,7 +27,7 @@ import {
   getConfiguredRequestRetryBaseMs,
   getConfiguredWorkspaceReadMaxBytes
 } from '../shared/config';
-import { MissingAccountApiKeyError, resolveActiveAccountConfig } from '../accounts/accountResolver';
+import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
 import { formatBytes } from '../shared/format';
 import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
 import {
@@ -125,10 +125,11 @@ const RANGE_READ_SHAPED_CONTENT_CHARS = 160_000;
 const RANGE_READ_SNIPPED_CONTENT_CHARS = 60_000;
 
 interface AgentRuntimeConfig {
-  accountId: string;
+  sourceId: string;
   provider: 'deepseek' | 'openai-compatible';
   apiKey: string;
   baseUrl: string;
+  supportsBilling: boolean;
   maxTokens: number;
   maxToolIterations: number;
   maxToolCalls: number;
@@ -274,7 +275,10 @@ export class AgentRunner {
     // 本 run 内 native 工具轮的原样字节快照（assistant tool_calls + tool 结果），
     // 由调用方持久化到 assistant 消息，跨轮重建时逐字节还原。
     const toolRounds: AgentToolRound[] = [];
-    const usagePricing = getConfiguredModelUsagePricing(request.model.id);
+    const supportsBilling = request.sourceConfig?.supportsBilling ?? request.model.supportsBilling === true;
+    const usagePricing = supportsBilling
+      ? getConfiguredModelUsagePricing(request.model.id)
+      : undefined;
     const upstreamUsageTotals: UpstreamUsageTotals = {
       requestCount: 0,
       promptTokens: 0,
@@ -284,7 +288,7 @@ export class AgentRunner {
       cacheMissTokens: 0,
       reasoningTokens: 0,
       cost: 0,
-      currency: usagePricing.currency,
+      currency: usagePricing?.currency ?? '',
       records: []
     };
     let promptCacheDiagnostics: PromptCacheDiagnostics | undefined;
@@ -1192,7 +1196,9 @@ export class AgentRunner {
           cacheMissTokens: 0
         },
         cost: 0,
-        currency: getConfiguredModelUsagePricing(request.model.id).currency,
+        currency: runtimeConfig.supportsBilling
+          ? getConfiguredModelUsagePricing(request.model.id)?.currency ?? ''
+          : '',
         modelId: request.model.id,
         requestId: upstreamRequestId,
         source: 'retry',
@@ -1212,6 +1218,7 @@ export class AgentRunner {
         trace,
         upstreamRequestId,
         request.model.id,
+        runtimeConfig.supportsBilling,
         options.usageSource ?? 'executor'
       );
       if (usageEvent) {
@@ -1524,6 +1531,7 @@ export class AgentRunner {
     trace: AgentInteractionTrace,
     requestId: string,
     modelId: string,
+    supportsBilling: boolean,
     source: 'executor' | 'continuation'
   ): UsageEvent | undefined {
     if (!usage || !totals) {
@@ -1535,11 +1543,13 @@ export class AgentRunner {
       return undefined;
     }
 
-    const pricing = getConfiguredModelUsagePricing(modelId);
+    const pricing = supportsBilling
+      ? getConfiguredModelUsagePricing(modelId)
+      : undefined;
     const usageEvent = createUsageEvent({
       usage: normalizedUsage,
-      cost: calculateUsageCost(normalizedUsage, pricing),
-      currency: pricing.currency,
+      cost: pricing ? calculateUsageCost(normalizedUsage, pricing) : 0,
+      currency: pricing?.currency ?? '',
       modelId,
       requestId,
       source
@@ -2800,19 +2810,24 @@ export class AgentRunner {
   }
 
   private async getRuntimeConfig(request: AgentRequest): Promise<AgentRuntimeConfig> {
-    const activeAccount = request.accountConfig ?? await resolveActiveAccountConfig(this.globalStorageUri, {
-      language: request.language
-    });
-    if (!activeAccount.apiKey.trim()) {
-      throw new MissingAccountApiKeyError(request.language);
+    const sourceConfig = request.sourceConfig ?? await resolveModelSourceConfig(
+      request.model.sourceId,
+      this.globalStorageUri,
+      {
+        language: request.language
+      }
+    );
+    if (!sourceConfig.apiKey.trim()) {
+      throw new MissingModelSourceApiKeyError(request.language);
     }
     const profile = getDeepSeekV4RuntimeProfile(request.model, request.settings);
 
     return {
-      accountId: activeAccount.accountId,
-      provider: activeAccount.provider,
-      apiKey: activeAccount.apiKey,
-      baseUrl: activeAccount.baseUrl,
+      sourceId: sourceConfig.sourceId,
+      provider: sourceConfig.provider,
+      apiKey: sourceConfig.apiKey,
+      baseUrl: sourceConfig.baseUrl,
+      supportsBilling: sourceConfig.supportsBilling,
       maxTokens: profile.maxTokens,
       maxToolIterations: clampRunLimit(profile.maxToolIterations, request.executionLimits?.maxToolIterations),
       maxToolCalls: clampRunLimit(profile.maxToolCalls, request.executionLimits?.maxToolCalls),

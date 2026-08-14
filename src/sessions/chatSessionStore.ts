@@ -624,6 +624,7 @@ function normalizeSessionRequestProtocol(value: unknown): SessionRequestProtocol
     toolSchemaVersion: normalizePositiveInteger(value.toolSchemaVersion, 1),
     toolNames: normalizeStringArray(value.toolNames),
     modelId: typeof value.modelId === 'string' && value.modelId.trim() ? value.modelId.trim() : undefined,
+    sourceId: typeof value.sourceId === 'string' && value.sourceId.trim() ? value.sourceId.trim() : undefined,
     providerId: typeof value.providerId === 'string' && value.providerId.trim() ? value.providerId.trim() : undefined,
     baseUrl: typeof value.baseUrl === 'string' && value.baseUrl.trim() ? value.baseUrl.trim() : undefined,
     createdAt: normalizeSessionTimestamp(value.createdAt, new Date().toISOString()),

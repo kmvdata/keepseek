@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   getConfiguredAgentSettings,
-  getConfiguredActiveAccountId,
   getConfiguredBalanceEndpointUrl,
+  getConfiguredModelUsagePricing,
   normalizeAgentSettings,
   normalizeCompressionThreshold
 } from '../src/shared/config';
@@ -44,11 +44,15 @@ test('non-official proxy baseUrl keeps its path prefix', () => {
 });
 
 test('compression threshold configuration defaults to balanced and normalizes invalid values', () => {
-  assert.equal(getConfiguredActiveAccountId(), '');
   assert.equal(getConfiguredAgentSettings().compressionThreshold, 'balanced');
   assert.equal(normalizeCompressionThreshold('aggressive'), 'aggressive');
   assert.equal(normalizeCompressionThreshold('cache'), 'cache');
   assert.equal(normalizeCompressionThreshold('invalid'), 'balanced');
+});
+
+test('usage pricing has no unknown-model fallback', () => {
+  assert.equal(getConfiguredModelUsagePricing('unknown-vendor-model'), undefined);
+  assert.equal(getConfiguredModelUsagePricing('deepseek-v4-flash')?.currency, '¥');
 });
 
 test('partial agent settings preserve the fallback compression threshold', () => {

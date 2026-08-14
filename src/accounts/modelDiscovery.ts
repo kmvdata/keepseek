@@ -1,10 +1,11 @@
 import { DEFAULT_DEEPSEEK_BASE_URL } from '../shared/config';
-import { AccountStore } from './accountStore';
+import { ModelSourceStore } from './accountStore';
+import { isOfficialDeepSeekSource } from './sourceCapabilities';
 import type {
-  AccountModelCache,
-  AccountModelInfo,
-  AccountProvider,
-  KeepseekAccount
+  DiscoveredModelInfo,
+  ModelDiscoveryCache,
+  ModelSource,
+  ModelSourceProvider
 } from './types';
 
 export const DEFAULT_MODEL_DISCOVERY_TIMEOUT_MS = 10_000;
@@ -21,21 +22,21 @@ export type ModelsFetch = (
   init: RequestInit
 ) => Promise<ModelsFetchResponse>;
 
-export interface DiscoverAccountModelsOptions {
+export interface DiscoverSourceModelsOptions {
   fetchImpl?: ModelsFetch;
   signal?: AbortSignal;
   timeoutMs?: number;
   now?: number;
 }
 
-export interface RefreshAccountModelCacheOptions extends DiscoverAccountModelsOptions {
+export interface RefreshSourceModelCacheOptions extends DiscoverSourceModelsOptions {
   force?: boolean;
   maxAgeMs?: number;
 }
 
-export function getAccountModelsEndpointUrl(
+export function getSourceModelsEndpointUrl(
   rawBaseUrl: string,
-  provider: AccountProvider = 'deepseek'
+  provider: ModelSourceProvider = 'deepseek'
 ): string {
   const fallback = provider === 'deepseek' ? DEFAULT_DEEPSEEK_BASE_URL : '';
   const url = new URL(rawBaseUrl.trim() || fallback);
@@ -43,7 +44,7 @@ export function getAccountModelsEndpointUrl(
 
   // DeepSeek accepts /v1 for OpenAI compatibility, but its canonical models
   // endpoint is rooted at /models. Proxies retain their routing prefix.
-  if (url.hostname === 'api.deepseek.com') {
+  if (isOfficialDeepSeekSource({ provider, baseUrl: url.toString() })) {
     url.pathname = '/models';
     url.search = '';
     url.hash = '';
@@ -61,7 +62,7 @@ export function getAccountModelsEndpointUrl(
   return url.toString();
 }
 
-export function parseAccountModelsResponse(value: unknown): AccountModelInfo[] | undefined {
+export function parseSourceModelsResponse(value: unknown): DiscoveredModelInfo[] | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
@@ -72,10 +73,10 @@ export function parseAccountModelsResponse(value: unknown): AccountModelInfo[] |
     return undefined;
   }
 
-  const models: AccountModelInfo[] = [];
+  const models: DiscoveredModelInfo[] = [];
   const seenIds = new Set<string>();
   for (const rawModel of rawModels) {
-    const model = parseAccountModel(rawModel);
+    const model = parseSourceModel(rawModel);
     if (!model || seenIds.has(model.id)) {
       continue;
     }
@@ -86,12 +87,12 @@ export function parseAccountModelsResponse(value: unknown): AccountModelInfo[] |
 }
 
 /** A failed request returns undefined and never disrupts the chat request path. */
-export async function discoverAccountModels(
-  account: Pick<KeepseekAccount, 'apiKey' | 'baseUrl' | 'provider'>,
-  options: DiscoverAccountModelsOptions = {}
-): Promise<AccountModelCache | undefined> {
-  const apiKey = account.apiKey.trim();
-  if (!apiKey || !account.baseUrl.trim()) {
+export async function discoverSourceModels(
+  source: Pick<ModelSource, 'apiKey' | 'baseUrl' | 'provider'>,
+  options: DiscoverSourceModelsOptions = {}
+): Promise<ModelDiscoveryCache | undefined> {
+  const apiKey = source.apiKey.trim();
+  if (!apiKey || !source.baseUrl.trim()) {
     return undefined;
   }
 
@@ -112,7 +113,7 @@ export async function discoverAccountModels(
       timeout = setTimeout(() => controller.abort(), timeoutMs);
     }
 
-    const endpointUrl = getAccountModelsEndpointUrl(account.baseUrl, account.provider);
+    const endpointUrl = getSourceModelsEndpointUrl(source.baseUrl, source.provider);
     const fetchImpl: ModelsFetch = options.fetchImpl ?? fetch;
     const response = await fetchImpl(endpointUrl, {
       method: 'GET',
@@ -130,7 +131,7 @@ export async function discoverAccountModels(
       return undefined;
     }
     const parsed: unknown = JSON.parse(responseText);
-    const models = parseAccountModelsResponse(parsed);
+    const models = parseSourceModelsResponse(parsed);
     if (!models) {
       return undefined;
     }
@@ -152,87 +153,58 @@ export async function discoverAccountModels(
  * Return a fresh cache when possible and a stale cache on discovery failure.
  * Persisting cache data is best-effort because it is never request-critical.
  */
-export async function refreshAccountModelCache(
-  accountStore: AccountStore,
-  accountId: string,
-  options: RefreshAccountModelCacheOptions = {}
-): Promise<AccountModelCache | undefined> {
-  const account = await accountStore.getAccount(accountId);
-  if (!account) {
-    return undefined;
+export interface RefreshSourceModelCacheResult {
+  cache?: ModelDiscoveryCache;
+  status: 'fresh' | 'cached' | 'failed' | 'missing-source';
+}
+
+export async function refreshSourceModelCache(
+  sourceStore: ModelSourceStore,
+  sourceId: string,
+  options: RefreshSourceModelCacheOptions = {}
+): Promise<RefreshSourceModelCacheResult> {
+  const source = await sourceStore.getSource(sourceId);
+  if (!source) {
+    return { status: 'missing-source' };
   }
   const now = normalizeTimestamp(options.now, Date.now());
   const maxAgeMs = normalizeNonNegativeInteger(options.maxAgeMs, DEFAULT_MODEL_CACHE_MAX_AGE_MS);
-  if (!options.force && account.modelCache && now - account.modelCache.fetchedAt < maxAgeMs) {
-    return cloneCache(account.modelCache);
+  if (!options.force && source.modelCache && now - source.modelCache.fetchedAt < maxAgeMs) {
+    return { cache: cloneCache(source.modelCache), status: 'cached' };
   }
 
-  const discovered = await discoverAccountModels(account, { ...options, now });
+  const discovered = await discoverSourceModels(source, { ...options, now });
   if (!discovered) {
-    return account.modelCache ? cloneCache(account.modelCache) : undefined;
+    return {
+      cache: source.modelCache ? cloneCache(source.modelCache) : undefined,
+      status: 'failed'
+    };
   }
-  const latestAccount = await accountStore.getAccount(account.id);
-  if (!latestAccount) {
-    return undefined;
+  const latestSource = await sourceStore.getSource(source.id);
+  if (!latestSource) {
+    return { status: 'missing-source' };
   }
   if (
-    latestAccount.provider !== account.provider
-    || latestAccount.apiKey !== account.apiKey
-    || latestAccount.baseUrl !== account.baseUrl
+    latestSource.provider !== source.provider
+    || latestSource.apiKey !== source.apiKey
+    || latestSource.baseUrl !== source.baseUrl
   ) {
     // A slow response from the previous connection must not populate the cache
     // after the user has saved a different key or endpoint.
-    return latestAccount.modelCache ? cloneCache(latestAccount.modelCache) : undefined;
+    return {
+      cache: latestSource.modelCache ? cloneCache(latestSource.modelCache) : undefined,
+      status: 'failed'
+    };
   }
-  const merged = mergeDiscoveredCacheWithManualModels(discovered, latestAccount.modelCache);
   try {
-    await accountStore.updateAccount(account.id, { modelCache: merged });
+    await sourceStore.updateSource(source.id, { modelCache: discovered });
   } catch {
     // The newly fetched result is still useful for the current UI render.
   }
-  return cloneCache(merged);
+  return { cache: cloneCache(discovered), status: 'fresh' };
 }
 
-/**
- * Provider responses replace stale named entries, while unnamed entries that
- * are absent from the response are retained as manually entered model ids.
- */
-export function mergeDiscoveredCacheWithManualModels(
-  discovered: AccountModelCache,
-  previous: AccountModelCache | undefined
-): AccountModelCache {
-  const models = discovered.models.map((model) => ({ ...model }));
-  const discoveredIds = new Set(models.map((model) => model.id));
-  for (const model of previous?.models ?? []) {
-    if (!model.name && !discoveredIds.has(model.id)) {
-      discoveredIds.add(model.id);
-      models.push({ id: model.id });
-    }
-  }
-  return {
-    models,
-    fetchedAt: discovered.fetchedAt
-  };
-}
-
-/**
- * Connection changes invalidate provider-discovered names, but model ids entered
- * manually must remain available when an OpenAI-compatible endpoint has no
- * usable /models response. Unnamed cache entries are the persisted manual-id
- * representation used by the settings UI and discovery merge path.
- */
-export function retainManualAccountModelCache(
-  cache: AccountModelCache | undefined
-): AccountModelCache | undefined {
-  const models = (cache?.models ?? [])
-    .filter((model) => !model.name?.trim())
-    .map((model) => ({ id: model.id }));
-  return models.length
-    ? { models, fetchedAt: 0 }
-    : undefined;
-}
-
-function parseAccountModel(value: unknown): AccountModelInfo | undefined {
+function parseSourceModel(value: unknown): DiscoveredModelInfo | undefined {
   if (typeof value === 'string') {
     const id = value.trim();
     return id ? { id } : undefined;
@@ -251,7 +223,7 @@ function parseAccountModel(value: unknown): AccountModelInfo | undefined {
   return name ? { id, name } : { id };
 }
 
-function cloneCache(cache: AccountModelCache): AccountModelCache {
+function cloneCache(cache: ModelDiscoveryCache): ModelDiscoveryCache {
   return {
     fetchedAt: cache.fetchedAt,
     models: cache.models.map((model) => ({ ...model }))

@@ -415,7 +415,7 @@ function normalizePrice(value: unknown): number {
 }
 
 function normalizeCurrency(value: unknown): string {
-  return typeof value === 'string' && value.trim() ? value.trim() : DEFAULT_CURRENCY;
+  return typeof value === 'string' ? value.trim() : DEFAULT_CURRENCY;
 }
 
 function normalizeOptionalString(value: unknown): string | undefined {

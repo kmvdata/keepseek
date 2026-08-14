@@ -4,16 +4,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import * as vscode from 'vscode';
-import { AccountStore } from '../src/accounts/accountStore';
-import type { ActiveAccountConfigSnapshot } from '../src/accounts/types';
+import { ModelSourceStore } from '../src/accounts/accountStore';
+import type { ModelSourceConfigSnapshot } from '../src/accounts/types';
 import { HistoryCompressor } from '../src/agent/historyCompressor';
 import { AgentRunner } from '../src/agent/runner';
 import type {
   DeepSeekChatRequestBody,
   DeepSeekFunctionTool,
   DeepSeekMessage,
-  DeepSeekStreamResult
+  DeepSeekStreamResult,
+  DeepSeekUsage
 } from '../src/agent/deepseek/types';
+import { createNoopInteractionTrace } from '../src/agent/logging/interactionTrace';
+import type { UsageEvent } from '../src/shared/types';
 import type {
   DeepSeekClientConfig,
   DeepSeekClientRequest,
@@ -23,10 +26,11 @@ import type { ContextCompressionSettings } from '../src/shared/modelProfiles';
 import type { AgentRequest } from '../src/shared/types';
 
 interface TestRuntimeConfig {
-  accountId: string;
+  sourceId: string;
   provider: 'deepseek' | 'openai-compatible';
   apiKey: string;
   baseUrl: string;
+  supportsBilling: boolean;
   maxTokens: number;
   maxToolIterations: number;
   maxToolCalls: number;
@@ -66,8 +70,31 @@ interface SummaryInvoker {
     timeoutMs: number;
     language: AgentRequest['language'];
     usageSource: 'summary';
-    accountConfig?: ActiveAccountConfigSnapshot;
+    sourceConfig?: ModelSourceConfigSnapshot;
   }): Promise<{ content: string }>;
+}
+
+interface UsageInvoker {
+  recordUpstreamUsage(
+    usage: DeepSeekUsage,
+    totals: {
+      requestCount: number;
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+      cacheHitTokens: number;
+      cacheMissTokens: number;
+      reasoningTokens: number;
+      cost: number;
+      currency: string;
+      records: UsageEvent[];
+    },
+    trace: ReturnType<typeof createNoopInteractionTrace>,
+    requestId: string,
+    modelId: string,
+    supportsBilling: boolean,
+    source: 'executor'
+  ): UsageEvent | undefined;
 }
 
 class CapturingClient {
@@ -149,11 +176,11 @@ test('openai-compatible runtime sends the actual model id without DeepSeek-only 
   assert.equal('reasoning_content' in messages[1], false);
 });
 
-test('main runtime resolves credentials from the active account store', async () => {
+test('main runtime resolves credentials from the model source bound to the selected model', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'keepseek-main-runtime-account-'));
   try {
     const globalStorageUri = vscode.Uri.file(dir);
-    await new AccountStore(globalStorageUri).createAccount({
+    await new ModelSourceStore(globalStorageUri).createSource({
       id: 'compatible',
       provider: 'openai-compatible',
       name: 'Compatible',
@@ -173,7 +200,7 @@ test('main runtime resolves credentials from the active account store', async ()
     const runtime = await runner.getRuntimeConfig(
       createRequest('vendor-model', 'openai-compatible')
     );
-    assert.equal(runtime.accountId, 'compatible');
+    assert.equal(runtime.sourceId, 'compatible');
     assert.equal(runtime.provider, 'openai-compatible');
     assert.equal(runtime.apiKey, 'compatible-key');
     assert.equal(runtime.baseUrl, 'https://compatible.example/v1');
@@ -183,18 +210,19 @@ test('main runtime resolves credentials from the active account store', async ()
   }
 });
 
-test('main runtime uses the immutable per-run account snapshot', async () => {
+test('main runtime uses the immutable per-run source snapshot', async () => {
   const runner = new AgentRunner() as unknown as RuntimeConfigInvoker;
   const request = createRequest('snapshot-model', 'openai-compatible');
-  request.accountConfig = {
-    accountId: 'snapshot-account',
+  request.sourceConfig = {
+    sourceId: 'snapshot-source',
     provider: 'openai-compatible',
     apiKey: 'snapshot-key',
-    baseUrl: 'https://snapshot.example/v1'
+    baseUrl: 'https://snapshot.example/v1',
+    supportsBilling: false
   };
 
   const runtime = await runner.getRuntimeConfig(request);
-  assert.equal(runtime.accountId, 'snapshot-account');
+  assert.equal(runtime.sourceId, 'snapshot-source');
   assert.equal(runtime.provider, 'openai-compatible');
   assert.equal(runtime.apiKey, 'snapshot-key');
   assert.equal(runtime.baseUrl, 'https://snapshot.example/v1');
@@ -222,11 +250,11 @@ test('DeepSeek runtime preserves thinking and reasoning effort fields', async ()
   assert.equal(messages[0].reasoning_content, null);
 });
 
-test('context summaries resolve the same account storage and omit DeepSeek-only fields for compatible providers', async () => {
+test('context summaries resolve the selected source and omit DeepSeek-only fields for compatible providers', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'keepseek-runtime-account-'));
   try {
     const globalStorageUri = vscode.Uri.file(dir);
-    await new AccountStore(globalStorageUri).createAccount({
+    await new ModelSourceStore(globalStorageUri).createSource({
       id: 'compatible',
       provider: 'openai-compatible',
       name: 'Compatible',
@@ -241,7 +269,8 @@ test('context summaries resolve the same account storage and omit DeepSeek-only 
       model: {
         id: 'summary-model',
         label: 'Summary Model',
-        provider: 'openai-compatible'
+        provider: 'openai-compatible',
+        sourceId: 'compatible'
       },
       messages: [{ role: 'user', content: 'summarize' }],
       maxTokens: 100,
@@ -260,15 +289,16 @@ test('context summaries resolve the same account storage and omit DeepSeek-only 
   }
 });
 
-test('context summaries use the same immutable per-run account snapshot', async () => {
+test('context summaries use the same immutable per-run source snapshot', async () => {
   const compressor = new HistoryCompressor() as unknown as SummaryInvoker;
   const client = new CapturingClient();
   compressor.deepSeekClient = client;
-  const accountConfig: ActiveAccountConfigSnapshot = {
-    accountId: 'snapshot-account',
+  const sourceConfig: ModelSourceConfigSnapshot = {
+    sourceId: 'snapshot-source',
     provider: 'openai-compatible',
     apiKey: 'snapshot-key',
-    baseUrl: 'https://snapshot.example/v1'
+    baseUrl: 'https://snapshot.example/v1',
+    supportsBilling: false
   };
 
   await compressor.completeSummary({
@@ -282,7 +312,7 @@ test('context summaries use the same immutable per-run account snapshot', async 
     timeoutMs: 1_000,
     language: 'en',
     usageSource: 'summary',
-    accountConfig
+    sourceConfig
   });
 
   assert.equal(client.config?.apiKey, 'snapshot-key');
@@ -292,12 +322,43 @@ test('context summaries use the same immutable per-run account snapshot', async 
   assert.equal('thinking' in body, false);
 });
 
+test('non-official sources record tokens but force cost and currency to empty values', () => {
+  const runner = new AgentRunner() as unknown as UsageInvoker;
+  const totals = {
+    requestCount: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    cacheHitTokens: 0,
+    cacheMissTokens: 0,
+    reasoningTokens: 0,
+    cost: 0,
+    currency: '',
+    records: [] as UsageEvent[]
+  };
+  const event = runner.recordUpstreamUsage(
+    { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 },
+    totals,
+    createNoopInteractionTrace(),
+    'request-1',
+    'deepseek-v4-flash',
+    false,
+    'executor'
+  );
+  assert.equal(event?.usage.totalTokens, 120);
+  assert.equal(event?.cost, 0);
+  assert.equal(event?.currency, '');
+  assert.equal(totals.cost, 0);
+});
+
 function createRequest(modelId: string, provider: string): AgentRequest {
   return {
     model: {
       id: modelId,
       label: modelId,
-      provider
+      provider,
+      sourceId: provider === 'deepseek' ? 'official' : 'compatible',
+      supportsBilling: provider === 'deepseek'
     },
     settings: {
       thinkingEnabled: true,
@@ -310,10 +371,11 @@ function createRequest(modelId: string, provider: string): AgentRequest {
 
 function createRuntimeConfig(provider: TestRuntimeConfig['provider']): TestRuntimeConfig {
   return {
-    accountId: provider === 'deepseek' ? 'default' : 'compatible',
+    sourceId: provider === 'deepseek' ? 'official' : 'compatible',
     provider,
     apiKey: 'test-key',
     baseUrl: 'https://example.com/v1',
+    supportsBilling: provider === 'deepseek',
     maxTokens: 1_000,
     maxToolIterations: 8,
     maxToolCalls: 24,

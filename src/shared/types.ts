@@ -1,17 +1,24 @@
 import type { KeepseekLanguage } from './i18n';
-import type { ActiveAccountConfigSnapshot } from '../accounts/types';
+import type { ModelSourceConfigSnapshot } from '../accounts/types';
 
 export interface KeepseekModel {
   id: string;
   label: string;
   provider: string;
   contextWindowTokens?: number;
-  /** User-defined display name scoped to the active account. */
+  /** User-defined display name scoped to the owning model source. */
   alias?: string;
   /** Display name returned by the provider's OpenAI-compatible /models endpoint. */
   fetchedName?: string;
-  /** Account that owns this model view. Omitted for legacy built-in models. */
-  accountId?: string;
+  /** Every selectable catalog model has these fields; profile-only fixtures may omit them. */
+  sourceId?: string;
+  sourceName?: string;
+  supportsBilling?: boolean;
+}
+
+export interface ModelSelection {
+  sourceId: string;
+  modelId: string;
 }
 
 export interface KeepseekExtensionInfo {
@@ -378,6 +385,7 @@ export interface SessionRequestProtocol {
   toolSchemaVersion: number;
   toolNames: string[];
   modelId?: string;
+  sourceId?: string;
   providerId?: string;
   baseUrl?: string;
   createdAt: string;
@@ -757,7 +765,7 @@ export interface AgentRequest {
   executionLimits?: AgentExecutionLimits;
   backgroundRunId?: string;
   /** Credentials frozen once at run start so summaries and the main request cannot diverge. */
-  accountConfig?: ActiveAccountConfigSnapshot;
+  sourceConfig?: ModelSourceConfigSnapshot;
   signal?: AbortSignal;
 }
 

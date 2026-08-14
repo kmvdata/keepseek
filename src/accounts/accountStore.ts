@@ -3,17 +3,18 @@ import * as vscode from 'vscode';
 import { DEFAULT_DEEPSEEK_BASE_URL } from '../shared/config';
 import { isRecord } from '../shared/errors';
 import {
-  ACCOUNT_PROVIDERS,
-  type AccountModelCache,
-  type AccountModelInfo,
-  type AccountProvider,
-  type CreateAccountInput,
-  type KeepseekAccount,
-  type UpdateAccountInput
+  MODEL_SOURCE_PROVIDERS,
+  type CreateModelSourceInput,
+  type DiscoveredModelInfo,
+  type ModelDiscoveryCache,
+  type ModelSource,
+  type ModelSourceModel,
+  type ModelSourceProvider,
+  type UpdateModelSourceInput
 } from './types';
 
 export const ACCOUNTS_STORAGE_DIRECTORY = 'accounts';
-export const DEFAULT_ACCOUNT_ID = 'default';
+export const DEFAULT_MODEL_SOURCE_ID = 'default';
 export const DEFAULT_OPENAI_COMPATIBLE_BASE_URL = 'https://api.openai.com/v1';
 
 const ACCOUNT_FILE_EXTENSION = '.json';
@@ -23,18 +24,18 @@ const MAX_ACCOUNT_NAME_LENGTH = 200;
 const MAX_MODEL_ID_LENGTH = 512;
 const MAX_MODEL_NAME_LENGTH = 512;
 
-export interface AccountStoreOptions {
+export interface ModelSourceStoreOptions {
   now?: () => number;
   createId?: () => string;
 }
 
-export interface NormalizeAccountOptions {
+export interface NormalizeModelSourceOptions {
   expectedId?: string;
-  expectedProvider?: AccountProvider;
+  expectedProvider?: ModelSourceProvider;
   now?: number;
 }
 
-export class AccountStore {
+export class ModelSourceStore {
   private readonly accountsRootUri: vscode.Uri;
   private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder();
@@ -43,69 +44,68 @@ export class AccountStore {
 
   public constructor(
     globalStorageUri: vscode.Uri,
-    options: AccountStoreOptions = {}
+    options: ModelSourceStoreOptions = {}
   ) {
     this.accountsRootUri = vscode.Uri.joinPath(globalStorageUri, ACCOUNTS_STORAGE_DIRECTORY);
     this.now = options.now ?? Date.now;
     this.createId = options.createId ?? randomUUID;
   }
 
-  public async listAccounts(provider?: AccountProvider): Promise<KeepseekAccount[]> {
-    const providers = provider ? [provider] : [...ACCOUNT_PROVIDERS];
-    const accounts: KeepseekAccount[] = [];
+  public async listSources(provider?: ModelSourceProvider): Promise<ModelSource[]> {
+    const providers = provider ? [provider] : [...MODEL_SOURCE_PROVIDERS];
+    const sources: ModelSource[] = [];
     const seenIds = new Set<string>();
 
     for (const currentProvider of providers) {
-      const providerAccounts = await this.readProviderAccounts(currentProvider);
-      for (const account of providerAccounts) {
-        // activeAccountId intentionally contains only the id, so duplicate ids
-        // across provider directories would be ambiguous. Keep the first stable
-        // provider-order entry and refuse to create duplicates through the API.
-        if (!seenIds.has(account.id)) {
-          seenIds.add(account.id);
-          accounts.push(account);
+      const providerSources = await this.readProviderSources(currentProvider);
+      for (const source of providerSources) {
+        // sourceId is the stable half of a model selection, so it remains unique
+        // across provider directories even though the physical storage is scoped.
+        if (!seenIds.has(source.id)) {
+          seenIds.add(source.id);
+          sources.push(source);
         }
       }
     }
 
-    return accounts;
+    return sources;
   }
 
-  public async getAccount(accountId: string): Promise<KeepseekAccount | undefined> {
-    if (!isValidAccountId(accountId)) {
+  public async getSource(sourceId: string): Promise<ModelSource | undefined> {
+    if (!isValidModelSourceId(sourceId)) {
       return undefined;
     }
-    return (await this.listAccounts()).find((account) => account.id === accountId);
+    return (await this.listSources()).find((source) => source.id === sourceId);
   }
 
-  public async getAccountByProvider(
-    provider: AccountProvider,
-    accountId: string
-  ): Promise<KeepseekAccount | undefined> {
-    if (!isAccountProvider(provider) || !isValidAccountId(accountId)) {
+  public async getSourceByProvider(
+    provider: ModelSourceProvider,
+    sourceId: string
+  ): Promise<ModelSource | undefined> {
+    if (!isModelSourceProvider(provider) || !isValidModelSourceId(sourceId)) {
       return undefined;
     }
-    return await this.readAccountFile(provider, accountId);
+    return await this.readSourceFile(provider, sourceId);
   }
 
-  public async createAccount(input: CreateAccountInput): Promise<KeepseekAccount> {
-    if (!isAccountProvider(input.provider)) {
-      throw new Error('Unsupported KeepSeek account provider.');
+  public async createSource(input: CreateModelSourceInput): Promise<ModelSource> {
+    if (!isModelSourceProvider(input.provider)) {
+      throw new Error('Unsupported KeepSeek model source provider.');
     }
     const id = input.id?.trim() || this.createId();
-    assertValidAccountId(id);
-    if (await this.getAccount(id)) {
-      throw new Error(`KeepSeek account already exists: ${id}`);
+    assertValidModelSourceId(id);
+    if (await this.getSource(id)) {
+      throw new Error(`KeepSeek model source already exists: ${id}`);
     }
 
     const timestamp = normalizeTimestamp(this.now(), Date.now());
-    const account = normalizeAccount({
+    const source = normalizeModelSource({
       id,
       name: input.name,
       provider: input.provider,
       apiKey: input.apiKey,
       baseUrl: input.baseUrl,
-      modelAliases: input.modelAliases,
+      models: input.models ?? [],
       modelCache: input.modelCache,
       enabled: input.enabled,
       createdAt: timestamp,
@@ -115,78 +115,78 @@ export class AccountStore {
       expectedProvider: input.provider,
       now: timestamp
     });
-    if (!account) {
-      throw new Error('Invalid KeepSeek account settings.');
+    if (!source) {
+      throw new Error('Invalid KeepSeek model source settings.');
     }
-    await this.writeAccount(account);
+    await this.writeSource(source);
     await this.markStorageInitialized();
-    return account;
+    return source;
   }
 
-  public async saveAccount(account: KeepseekAccount): Promise<KeepseekAccount> {
-    const normalized = normalizeAccount(account, {
-      expectedId: account.id,
-      expectedProvider: account.provider,
+  public async saveSource(source: ModelSource): Promise<ModelSource> {
+    const normalized = normalizeModelSource(source, {
+      expectedId: source.id,
+      expectedProvider: source.provider,
       now: this.now()
     });
     if (!normalized) {
-      throw new Error('Invalid KeepSeek account settings.');
+      throw new Error('Invalid KeepSeek model source settings.');
     }
-    await this.writeAccount(normalized);
+    await this.writeSource(normalized);
     return normalized;
   }
 
-  public async updateAccount(
-    accountId: string,
-    patch: UpdateAccountInput
-  ): Promise<KeepseekAccount | undefined> {
-    const current = await this.getAccount(accountId);
+  public async updateSource(
+    sourceId: string,
+    patch: UpdateModelSourceInput
+  ): Promise<ModelSource | undefined> {
+    const current = await this.getSource(sourceId);
     if (!current) {
       return undefined;
     }
     const timestamp = Math.max(current.updatedAt, normalizeTimestamp(this.now(), Date.now()));
-    const candidate: KeepseekAccount = {
+    const candidate: ModelSource = {
       ...current,
       name: patch.name ?? current.name,
       apiKey: patch.apiKey ?? current.apiKey,
       baseUrl: patch.baseUrl ?? current.baseUrl,
-      modelAliases: patch.modelAliases ?? current.modelAliases,
+      models: patch.models ?? current.models,
       modelCache: Object.prototype.hasOwnProperty.call(patch, 'modelCache')
         ? patch.modelCache
         : current.modelCache,
       enabled: patch.enabled ?? current.enabled,
       updatedAt: timestamp
     };
-    return await this.saveAccount(candidate);
+    return await this.saveSource(candidate);
   }
 
-  public async deleteAccount(accountId: string): Promise<KeepseekAccount | undefined> {
-    const account = await this.getAccount(accountId);
-    if (!account) {
+  public async deleteSource(sourceId: string): Promise<ModelSource | undefined> {
+    const source = await this.getSource(sourceId);
+    if (!source) {
       return undefined;
     }
-    // Persist the user's explicit account-system choice before removing the
+    // Persist the user's explicit source-system choice before removing the
     // last JSON file, otherwise the preserved legacy key could remigrate it.
     await this.markStorageInitialized();
-    await vscode.workspace.fs.delete(this.getAccountFileUri(account.provider, account.id), {
+    await vscode.workspace.fs.delete(this.getSourceFileUri(source.provider, source.id), {
       recursive: false,
       useTrash: false
     });
-    return account;
+    return source;
   }
 
   /** Create the legacy migration target without ever mutating an existing default. */
-  public async upsertDefaultAccount(input: {
+  public async upsertDefaultSource(input: {
     apiKey: string;
     baseUrl?: string;
     name?: string;
-  }): Promise<KeepseekAccount> {
-    const existing = await this.getAccountByProvider('deepseek', DEFAULT_ACCOUNT_ID);
+  }): Promise<ModelSource> {
+    const existing = await this.getSourceByProvider('deepseek', DEFAULT_MODEL_SOURCE_ID);
     if (existing) {
       return existing;
     }
-    return await this.createAccount({
-      id: DEFAULT_ACCOUNT_ID,
+    return await this.createSource({
+      id: DEFAULT_MODEL_SOURCE_ID,
       name: input.name ?? 'DeepSeek',
       provider: 'deepseek',
       apiKey: input.apiKey,
@@ -194,9 +194,9 @@ export class AccountStore {
     });
   }
 
-  /** Migration is allowed only when no physical account JSON exists. */
-  public async hasStoredAccountFiles(): Promise<boolean> {
-    for (const provider of ACCOUNT_PROVIDERS) {
+  /** Migration is allowed only when no physical source JSON exists. */
+  public async hasStoredSourceFiles(): Promise<boolean> {
+    for (const provider of MODEL_SOURCE_PROVIDERS) {
       const providerUri = this.getProviderDirectoryUri(provider);
       try {
         const entries = await vscode.workspace.fs.readDirectory(providerUri);
@@ -218,7 +218,7 @@ export class AccountStore {
 
   /**
    * Distinguishes a never-migrated installation from one where the user deleted
-   * the last account. The marker contains no account data or credentials.
+   * the last source. The marker contains no source data or credentials.
    */
   public async isStorageInitialized(): Promise<boolean> {
     try {
@@ -229,22 +229,22 @@ export class AccountStore {
     }
   }
 
-  public getProviderDirectoryUri(provider: AccountProvider): vscode.Uri {
-    if (!isAccountProvider(provider)) {
-      throw new Error('Unsupported KeepSeek account provider.');
+  public getProviderDirectoryUri(provider: ModelSourceProvider): vscode.Uri {
+    if (!isModelSourceProvider(provider)) {
+      throw new Error('Unsupported KeepSeek model source provider.');
     }
     return vscode.Uri.joinPath(this.accountsRootUri, provider);
   }
 
-  public getAccountFileUri(provider: AccountProvider, accountId: string): vscode.Uri {
-    assertValidAccountId(accountId);
+  public getSourceFileUri(provider: ModelSourceProvider, sourceId: string): vscode.Uri {
+    assertValidModelSourceId(sourceId);
     return vscode.Uri.joinPath(
       this.getProviderDirectoryUri(provider),
-      `${accountId}${ACCOUNT_FILE_EXTENSION}`
+      `${sourceId}${ACCOUNT_FILE_EXTENSION}`
     );
   }
 
-  private async readProviderAccounts(provider: AccountProvider): Promise<KeepseekAccount[]> {
+  private async readProviderSources(provider: ModelSourceProvider): Promise<ModelSource[]> {
     const providerUri = this.getProviderDirectoryUri(provider);
     let entries: Array<[string, vscode.FileType]>;
     try {
@@ -253,49 +253,49 @@ export class AccountStore {
       return [];
     }
 
-    const accounts: KeepseekAccount[] = [];
-    const accountFileNames = entries
+    const sources: ModelSource[] = [];
+    const sourceFileNames = entries
       .filter(([name, type]) => type === vscode.FileType.File && name.endsWith(ACCOUNT_FILE_EXTENSION))
       .map(([name]) => name)
       .sort((left, right) => left.localeCompare(right));
-    for (const fileName of accountFileNames) {
-      const accountId = fileName.slice(0, -ACCOUNT_FILE_EXTENSION.length);
-      if (!isValidAccountId(accountId)) {
+    for (const fileName of sourceFileNames) {
+      const sourceId = fileName.slice(0, -ACCOUNT_FILE_EXTENSION.length);
+      if (!isValidModelSourceId(sourceId)) {
         continue;
       }
-      const account = await this.readAccountFile(provider, accountId);
-      if (account) {
-        accounts.push(account);
+      const source = await this.readSourceFile(provider, sourceId);
+      if (source) {
+        sources.push(source);
       }
     }
-    return accounts;
+    return sources;
   }
 
-  private async readAccountFile(
-    provider: AccountProvider,
-    accountId: string
-  ): Promise<KeepseekAccount | undefined> {
+  private async readSourceFile(
+    provider: ModelSourceProvider,
+    sourceId: string
+  ): Promise<ModelSource | undefined> {
     try {
-      const bytes = await vscode.workspace.fs.readFile(this.getAccountFileUri(provider, accountId));
+      const bytes = await vscode.workspace.fs.readFile(this.getSourceFileUri(provider, sourceId));
       const parsed: unknown = JSON.parse(this.decoder.decode(bytes));
-      return normalizeAccount(parsed, {
-        expectedId: accountId,
+      return normalizeModelSource(parsed, {
+        expectedId: sourceId,
         expectedProvider: provider,
         now: this.now()
       });
     } catch {
-      // A single damaged account must not hide other usable accounts or block
+      // A single damaged source must not hide other usable sources or block
       // KeepSeek's legacy configuration fallback.
       return undefined;
     }
   }
 
-  private async writeAccount(account: KeepseekAccount): Promise<void> {
-    const providerUri = this.getProviderDirectoryUri(account.provider);
+  private async writeSource(source: ModelSource): Promise<void> {
+    const providerUri = this.getProviderDirectoryUri(source.provider);
     await vscode.workspace.fs.createDirectory(providerUri);
     await vscode.workspace.fs.writeFile(
-      this.getAccountFileUri(account.provider, account.id),
-      this.encoder.encode(`${JSON.stringify(account, null, 2)}\n`)
+      this.getSourceFileUri(source.provider, source.id),
+      this.encoder.encode(`${JSON.stringify(source, null, 2)}\n`)
     );
   }
 
@@ -312,16 +312,16 @@ export class AccountStore {
   }
 }
 
-export function normalizeAccount(
+export function normalizeModelSource(
   value: unknown,
-  options: NormalizeAccountOptions = {}
-): KeepseekAccount | undefined {
+  options: NormalizeModelSourceOptions = {}
+): ModelSource | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
   const id = readNonEmptyString(value.id);
-  const provider = normalizeAccountProvider(value.provider);
-  if (!id || !isValidAccountId(id) || !provider) {
+  const provider = normalizeModelSourceProvider(value.provider);
+  if (!id || !isValidModelSourceId(id) || !provider) {
     return undefined;
   }
   if (options.expectedId && id !== options.expectedId) {
@@ -337,33 +337,33 @@ export function normalizeAccount(
   return {
     id,
     name: normalizeBoundedString(value.name, MAX_ACCOUNT_NAME_LENGTH)
-      || getDefaultAccountName(provider),
+      || getDefaultModelSourceName(provider),
     provider,
     apiKey: typeof value.apiKey === 'string' ? value.apiKey.trim() : '',
-    baseUrl: readNonEmptyString(value.baseUrl) || getDefaultAccountBaseUrl(provider),
-    modelAliases: normalizeModelAliases(value.modelAliases),
-    modelCache: normalizeAccountModelCache(value.modelCache),
+    baseUrl: readNonEmptyString(value.baseUrl) || getDefaultModelSourceBaseUrl(provider),
+    models: normalizePersistedSourceModels(value),
+    modelCache: normalizeModelDiscoveryCache(value.modelCache),
     enabled: value.enabled !== false,
     createdAt,
     updatedAt
   };
 }
 
-export function normalizeAccountModelCache(value: unknown): AccountModelCache | undefined {
+export function normalizeModelDiscoveryCache(value: unknown): ModelDiscoveryCache | undefined {
   if (!isRecord(value) || !Array.isArray(value.models)) {
     return undefined;
   }
   return {
-    models: normalizeAccountModels(value.models),
+    models: normalizeDiscoveredModels(value.models),
     fetchedAt: normalizeTimestamp(value.fetchedAt, 0)
   };
 }
 
-export function normalizeAccountModels(value: unknown): AccountModelInfo[] {
+export function normalizeDiscoveredModels(value: unknown): DiscoveredModelInfo[] {
   if (!Array.isArray(value)) {
     return [];
   }
-  const models: AccountModelInfo[] = [];
+  const models: DiscoveredModelInfo[] = [];
   const seenIds = new Set<string>();
   for (const item of value) {
     if (!isRecord(item)) {
@@ -378,6 +378,63 @@ export function normalizeAccountModels(value: unknown): AccountModelInfo[] {
     models.push(name ? { id, name } : { id });
   }
   return models;
+}
+
+export function normalizeSourceModels(value: unknown): ModelSourceModel[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const models: ModelSourceModel[] = [];
+  const seenIds = new Set<string>();
+  for (const item of value) {
+    if (!isRecord(item)) {
+      continue;
+    }
+    const id = normalizeBoundedString(item.id, MAX_MODEL_ID_LENGTH);
+    if (!id || seenIds.has(id)) {
+      continue;
+    }
+    seenIds.add(id);
+    const name = normalizeBoundedString(item.name, MAX_MODEL_NAME_LENGTH);
+    models.push(name ? { id, name } : { id });
+  }
+  return models;
+}
+
+function normalizePersistedSourceModels(value: Record<string, unknown>): ModelSourceModel[] {
+  const hasCurrentModels = Array.isArray(value.models);
+  const models = hasCurrentModels ? normalizeSourceModels(value.models) : [];
+  const byId = new Map(models.map((model) => [model.id, { ...model }]));
+  const order = models.map((model) => model.id);
+  const aliases = normalizeModelAliases(value.modelAliases);
+
+  for (const [id, name] of Object.entries(aliases)) {
+    const current = byId.get(id);
+    if (current) {
+      if (!current.name) {
+        current.name = name;
+      }
+      continue;
+    }
+    byId.set(id, { id, name });
+    order.push(id);
+  }
+
+  // Older account files represented manually entered ids as unnamed cache
+  // entries. Only perform that conversion when the new `models` field is
+  // absent; current provider discovery can legitimately return unnamed ids.
+  if (!hasCurrentModels) {
+    const legacyCache = normalizeModelDiscoveryCache(value.modelCache);
+    for (const model of legacyCache?.models ?? []) {
+      if (model.name || byId.has(model.id)) {
+        continue;
+      }
+      byId.set(model.id, { id: model.id });
+      order.push(model.id);
+    }
+  }
+
+  return order.map((id) => byId.get(id) as ModelSourceModel);
 }
 
 export function normalizeModelAliases(value: unknown): Record<string, string> {
@@ -395,31 +452,31 @@ export function normalizeModelAliases(value: unknown): Record<string, string> {
   return Object.fromEntries(aliases);
 }
 
-export function normalizeAccountProvider(value: unknown): AccountProvider | undefined {
-  return isAccountProvider(value) ? value : undefined;
+export function normalizeModelSourceProvider(value: unknown): ModelSourceProvider | undefined {
+  return isModelSourceProvider(value) ? value : undefined;
 }
 
-export function isAccountProvider(value: unknown): value is AccountProvider {
-  return typeof value === 'string' && ACCOUNT_PROVIDERS.some((provider) => provider === value);
+export function isModelSourceProvider(value: unknown): value is ModelSourceProvider {
+  return typeof value === 'string' && MODEL_SOURCE_PROVIDERS.some((provider) => provider === value);
 }
 
-export function isValidAccountId(value: string): boolean {
+export function isValidModelSourceId(value: string): boolean {
   return ACCOUNT_ID_PATTERN.test(value) && value !== '.' && value !== '..';
 }
 
-export function getDefaultAccountName(provider: AccountProvider): string {
+export function getDefaultModelSourceName(provider: ModelSourceProvider): string {
   return provider === 'deepseek' ? 'DeepSeek' : 'OpenAI Compatible';
 }
 
-export function getDefaultAccountBaseUrl(provider: AccountProvider): string {
+export function getDefaultModelSourceBaseUrl(provider: ModelSourceProvider): string {
   return provider === 'deepseek'
     ? DEFAULT_DEEPSEEK_BASE_URL
     : DEFAULT_OPENAI_COMPATIBLE_BASE_URL;
 }
 
-function assertValidAccountId(accountId: string): void {
-  if (!isValidAccountId(accountId)) {
-    throw new Error('Invalid KeepSeek account id.');
+function assertValidModelSourceId(sourceId: string): void {
+  if (!isValidModelSourceId(sourceId)) {
+    throw new Error('Invalid KeepSeek model source id.');
   }
 }
 

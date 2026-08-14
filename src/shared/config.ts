@@ -3,6 +3,7 @@ import {
   AgentSettings,
   CompressionThreshold,
   KeepseekModel,
+  ModelSelection,
   UsageCostRates,
   ValidationAuthorizationPolicy
 } from './types';
@@ -11,6 +12,7 @@ import {
   DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
   getSupportedDeepSeekV4Models
 } from './modelProfiles';
+import { isOfficialDeepSeekSource } from '../accounts/sourceCapabilities';
 
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
@@ -18,7 +20,7 @@ export const DEFAULT_MAX_FILE_BYTES = 200_000;
 export const DEFAULT_MAX_REQUEST_RETRIES = 2;
 export const DEFAULT_REQUEST_RETRY_BASE_MS = 1_000;
 export const DEFAULT_SELECTED_MODEL_ID = '';
-export const DEFAULT_ACTIVE_ACCOUNT_ID = '';
+export const DEFAULT_SELECTED_SOURCE_ID = '';
 export const DEFAULT_HISTORY_RETENTION_DAYS = 7;
 export const DEFAULT_TRACE_ENABLED = false;
 export const DEFAULT_TRACE_LEVEL: InteractionTraceLevel = 'full';
@@ -85,23 +87,21 @@ export function getConfiguredModels(): KeepseekModel[] {
   return getSupportedDeepSeekV4Models();
 }
 
-export function getConfiguredActiveAccountId(): string {
-  return vscode.workspace
-    .getConfiguration('keepseek')
-    .get<string>('activeAccountId', DEFAULT_ACTIVE_ACCOUNT_ID)
-    .trim();
-}
-
-export function getConfiguredSelectedModelId(models = getConfiguredModels()): string {
-  const configured = vscode.workspace
-    .getConfiguration('keepseek')
-    .get<string>('selectedModelId', DEFAULT_SELECTED_MODEL_ID)
-    .trim();
-  if (configured && models.some((model) => model.id === configured)) {
-    return configured;
-  }
-
-  return models[0]?.id ?? DEFAULT_SELECTED_MODEL_ID;
+export function getConfiguredModelSelection(models: readonly KeepseekModel[]): ModelSelection {
+  const config = vscode.workspace.getConfiguration('keepseek');
+  const sourceId = config.get<string>('selectedSourceId', DEFAULT_SELECTED_SOURCE_ID).trim();
+  const modelId = config.get<string>('selectedModelId', DEFAULT_SELECTED_MODEL_ID).trim();
+  const exact = sourceId && modelId
+    ? models.find((model) => model.sourceId === sourceId && model.id === modelId)
+    : undefined;
+  const backwardCompatible = !exact && modelId
+    ? models.find((model) => model.id === modelId)
+    : undefined;
+  const selected = exact ?? backwardCompatible ?? models[0];
+  return {
+    sourceId: selected?.sourceId ?? DEFAULT_SELECTED_SOURCE_ID,
+    modelId: selected?.id ?? DEFAULT_SELECTED_MODEL_ID
+  };
 }
 
 export function getConfiguredAgentSettings(): AgentSettings {
@@ -149,9 +149,9 @@ export function getConfiguredUsagePricingMap(): Record<string, UsageCostRates> {
   return merged;
 }
 
-export function getConfiguredModelUsagePricing(modelId: string): UsageCostRates {
+export function getConfiguredModelUsagePricing(modelId: string): UsageCostRates | undefined {
   const pricing = getConfiguredUsagePricingMap();
-  return pricing[modelId] ?? pricing['deepseek-v4-flash'];
+  return pricing[modelId];
 }
 
 export function getConfiguredBalanceEndpointUrl(baseUrl: string): string {
@@ -167,7 +167,7 @@ export function getConfiguredBalanceEndpointUrl(baseUrl: string): string {
   // DeepSeek 官方余额端点固定为 https://api.deepseek.com/user/balance,不带
   // /v1 或 /chat/completions 前缀(baseUrl 可能是 .../v1 或 .../v1/chat/completions)。
   // 只有非官方域名(自托管 / 代理)才按 baseUrl 路径推导。
-  if (url.host === 'api.deepseek.com') {
+  if (isOfficialDeepSeekSource({ provider: 'deepseek', baseUrl: url.toString() })) {
     url.pathname = '/user/balance';
     url.search = '';
     url.hash = '';

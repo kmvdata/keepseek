@@ -60,10 +60,11 @@ test('command menu model settings are registered and persisted for the current w
   const properties = packageJson.contributes?.configuration?.properties ?? {};
   const providerSource = await readFile(providerPath, 'utf8');
 
-  assert.deepEqual(properties['keepseek.activeAccountId'], {
+  assert.deepEqual(properties['keepseek.selectedSourceId'], {
     type: 'string',
     default: '',
-    description: 'Active KeepSeek account ID. Empty selects the migrated default DeepSeek account when available.'
+    scope: 'window',
+    markdownDescription: 'Source ID paired with `keepseek.selectedModelId` for the selected model. This is model identity, not a globally active source.'
   });
 
   assert.deepEqual(properties['keepseek.selectedModelId'], {
@@ -96,6 +97,11 @@ test('command menu model settings are registered and persisted for the current w
     providerSource,
     /config\.update\('selectedModelId', modelId, vscode\.ConfigurationTarget\.Workspace\)/u
   );
+  assert.match(
+    providerSource,
+    /config\.update\('selectedSourceId', sourceId, vscode\.ConfigurationTarget\.Workspace\)/u
+  );
+  assert.doesNotMatch(providerSource, /activeAccountId/u);
   assert.match(
     providerSource,
     /config\.update\('thinkingEnabled', this\.agentSettings\.thinkingEnabled, vscode\.ConfigurationTarget\.Workspace\)/u
@@ -131,7 +137,7 @@ test('command menu exposes an accessible persisted compression threshold tab sel
   assert.match(styles, /\.command-menu\.is-readonly \.command-compression-tab/u);
 });
 
-test('API settings dialog manages provider-grouped accounts and per-account model aliases', async () => {
+test('model settings dialog manages grouped sources and per-source model nicknames', async () => {
   const inputTemplate = getInputTemplate();
   const inputScript = getInputScript();
   const styles = getStyles();
@@ -173,12 +179,12 @@ test('API settings dialog manages provider-grouped accounts and per-account mode
   assert.match(inputTemplate, /value="openai-compatible"/u);
   assert.match(inputTemplate, /settings-account-dialog" role="dialog" aria-modal="true"/u);
   assert.match(inputTemplate, /id="settingsDialogStatus"[^>]*role="status"[^>]*aria-live="polite"/u);
-  assert.match(inputScript, /type: 'saveAccountSettings'/u);
-  assert.match(inputScript, /type: 'createAccount'/u);
-  assert.match(inputScript, /type: 'deleteAccount'/u);
-  assert.match(inputScript, /type: 'selectAccount'/u);
-  assert.match(inputScript, /type: 'setModelAlias'/u);
-  assert.match(inputScript, /type: 'refreshAccountModels'/u);
+  assert.match(inputScript, /type: 'addModel'/u);
+  assert.match(inputScript, /type: 'saveModelSource'/u);
+  assert.match(inputScript, /type: 'deleteModelSource'/u);
+  assert.match(inputScript, /type: 'saveModel'/u);
+  assert.match(inputScript, /type: 'refreshSourceModels'/u);
+  assert.doesNotMatch(inputScript, /type: 'selectAccount'/u);
   assert.match(inputScript, /function beginSettingsDialogAction/u);
   assert.match(inputScript, /function blockSettingsActionForUnsavedChanges/u);
   assert.match(inputScript, /function blockAccountSettingsWhileRunBusy/u);
@@ -189,20 +195,20 @@ test('API settings dialog manages provider-grouped accounts and per-account mode
   assert.match(inputScript, /button\.disabled = controlsDisabled \|\| !account\.enabled/u);
   assert.match(inputScript, /alias\.disabled = controlsDisabled/u);
   assert.match(inputScript, /settingsCancelBtn\.disabled = operationBusy/u);
-  assert.match(inputScript, /t\('accountSettingsReadonlyWhileBusy'\)/u);
+  assert.match(inputScript, /t\('modelSettingsReadonlyWhileBusy'\)/u);
   assert.ok((inputScript.match(/blockAccountSettingsWhileRunBusy\(\)/gu) ?? []).length >= 9);
-  assert.match(i18nSource, /accountSettingsReadonlyWhileBusy: '正在生成回复；完成或停止后才能修改账号设置。'/u);
-  assert.match(i18nSource, /accountSettingsReadonlyWhileBusy: 'Account settings are read-only while a response is being generated\. Finish or stop it first\.'/u);
+  assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: '正在生成回复；完成或停止后才能修改模型设置。'/u);
+  assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: 'Model settings are read-only while a response is being generated\. Finish or stop it first\.'/u);
   assert.match(inputScript, /focusedModelId === model\.id/u);
   assert.match(
     inputScript,
-    /settingsDialogBusyTimer = setTimeout\(function\(\) \{[\s\S]*?setSettingsDialogStatus\(t\('accountOperationStillPending'\)\)[\s\S]*?\}, 15000\)/u
+    /settingsDialogBusyTimer = setTimeout\(function\(\) \{[\s\S]*?setSettingsDialogStatus\(t\('modelOperationStillPending'\)\)[\s\S]*?\}, 15000\)/u
   );
   assert.match(inputScript, /settings-account-group/u);
   assert.match(styles, /\.settings-account-group/u);
   assert.match(styles, /@media \(max-width: 540px\)/u);
-  assert.match(messageSource, /type: 'saveApiSettings'/u);
-  assert.match(messageSource, /type: 'saveAccountSettings'/u);
+  assert.match(messageSource, /type: 'addModel'/u);
+  assert.match(messageSource, /type: 'saveModelSource'/u);
   assert.doesNotMatch(inputScript, /window\.(?:prompt|alert|confirm)\s*\(/u);
 });
 

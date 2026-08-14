@@ -21,8 +21,8 @@ export interface DroppedFileReferenceInput {
 export type WebviewMessage =
   | { type: 'ready' }
   | { type: 'refreshBalance' }
-  | { type: 'sendPrompt'; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
-  | { type: 'editUserPrompt'; messageId: string; prompt: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
+  | { type: 'sendPrompt'; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
+  | { type: 'editUserPrompt'; messageId: string; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'abortPrompt' }
   | { type: 'continueRepair' }
   | { type: 'newSession' }
@@ -35,7 +35,7 @@ export type WebviewMessage =
   | { type: 'copyOtherWorkspaceSession'; workspaceKey: string; sessionId: string }
   | { type: 'deleteOtherWorkspaceSessions'; workspaceKey: string; sessionIds: string[] }
   | { type: 'deleteOtherWorkspace'; workspaceKey: string }
-  | { type: 'setSelectedModel'; modelId: string }
+  | { type: 'setSelectedModel'; sourceId: string; modelId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
   | { type: 'setDebugMode'; enabled: boolean }
   | { type: 'openCurrentSessionLog' }
@@ -50,22 +50,18 @@ export type WebviewMessage =
   | { type: 'openApiSettings' }
   | { type: 'openHistorySettings' }
   | {
-      type: 'saveApiSettings';
+      type: 'addModel';
+      sourceId?: string;
+      provider: 'deepseek' | 'openai-compatible';
       apiKey: string;
       baseUrl: string;
+      modelId?: string;
+      nickname?: string;
     }
-  | {
-      type: 'saveAccountSettings';
-      accountId?: string;
-      name: string;
-      apiKey: string;
-      baseUrl: string;
-    }
-  | { type: 'createAccount'; provider: 'deepseek' | 'openai-compatible' }
-  | { type: 'deleteAccount'; id: string }
-  | { type: 'selectAccount'; id: string }
-  | { type: 'setModelAlias'; accountId: string; modelId: string; alias: string }
-  | { type: 'refreshAccountModels'; accountId: string }
+  | { type: 'saveModelSource'; sourceId: string; name?: string; apiKey: string; baseUrl: string }
+  | { type: 'saveModel'; sourceId: string; modelId: string; nickname?: string }
+  | { type: 'deleteModelSource'; sourceId: string }
+  | { type: 'refreshSourceModels'; sourceId: string }
   | {
       type: 'saveHistorySettings';
       historyRetentionDays?: number;

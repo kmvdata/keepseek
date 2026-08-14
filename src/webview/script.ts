@@ -10,9 +10,8 @@ export function getScript(): string {
     const translations = ${JSON.stringify(WEBVIEW_TRANSLATIONS)};
     const state = {
       models: [],
+      selectedSourceId: '',
       selectedModelId: '',
-      activeAccountId: '',
-      activeAccountProvider: 'deepseek',
       agentSettings: {
         thinkingEnabled: true,
         reasoningEffort: 'high',
@@ -65,6 +64,7 @@ export function getScript(): string {
       usageMetrics: {
         sessionUsageStats: null,
         lastTurnUsage: null,
+        supportsBilling: false,
         balance: null,
         promptCacheDiagnostics: null,
         turnCount: 0,
@@ -2250,6 +2250,7 @@ export function getScript(): string {
         type: 'editUserPrompt',
         messageId: messageId,
         prompt: editingDraftText,
+        sourceId: state.selectedSourceId,
         modelId: state.selectedModelId,
         settings: getCurrentAgentSettings(),
         references: editor ? collectInlineEditorFileReferences(editor) : [],

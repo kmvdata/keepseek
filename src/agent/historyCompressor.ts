@@ -5,8 +5,8 @@ import {
   getConfiguredModelUsagePricing,
   getConfiguredRequestRetryBaseMs
 } from '../shared/config';
-import { MissingAccountApiKeyError, resolveActiveAccountConfig } from '../accounts/accountResolver';
-import type { ActiveAccountConfigSnapshot } from '../accounts/types';
+import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
+import type { ModelSourceConfigSnapshot } from '../accounts/types';
 import {
   getDeepSeekV4ContextCompressionSettings,
   type ContextCompressionSettings
@@ -59,7 +59,7 @@ export interface HistoryCompressionRefreshInput {
   requestProtocolVersion?: number;
   usageSource?: Extract<UsageSource, 'summary' | 'background'>;
   /** Per-run credentials shared with AgentRunner; omitted for legacy direct callers. */
-  accountConfig?: ActiveAccountConfigSnapshot;
+  sourceConfig?: ModelSourceConfigSnapshot;
 }
 
 export interface HistoryCompressionRefreshResult {
@@ -217,7 +217,7 @@ export class HistoryCompressor {
         language: input.language,
         signal: input.signal,
         usageSource: input.usageSource ?? 'summary',
-        accountConfig: input.accountConfig
+        sourceConfig: input.sourceConfig
       });
       const content = completion.content.trim();
 
@@ -364,7 +364,7 @@ export class HistoryCompressor {
     language: KeepseekLanguage;
     signal?: AbortSignal;
     usageSource: Extract<UsageSource, 'summary' | 'background'>;
-    accountConfig?: ActiveAccountConfigSnapshot;
+    sourceConfig?: ModelSourceConfigSnapshot;
   }): Promise<HistorySummaryCompletionResult> {
     if (this.completion) {
       const result = await this.completion(input);
@@ -377,7 +377,8 @@ export class HistoryCompressor {
         input.timeoutMs,
         this.globalStorageUri,
         input.language,
-        input.accountConfig
+        input.sourceConfig,
+        input.model.sourceId
       );
       const body: DeepSeekChatRequestBody = {
         model: input.model.id,
@@ -406,14 +407,16 @@ export class HistoryCompressor {
       }
 
       const normalizedUsage = normalizeDeepSeekUsage(response.usage);
-      const pricing = getConfiguredModelUsagePricing(input.model.id);
+      const pricing = clientConfig.supportsBilling
+        ? getConfiguredModelUsagePricing(input.model.id)
+        : undefined;
       return {
         content: response.message?.content ?? '',
         usageEvent: normalizedUsage
           ? createUsageEvent({
               usage: normalizedUsage,
-              cost: calculateUsageCost(normalizedUsage, pricing),
-              currency: pricing.currency,
+              cost: pricing ? calculateUsageCost(normalizedUsage, pricing) : 0,
+              currency: pricing?.currency ?? '',
               modelId: input.model.id,
               requestId: randomUUID(),
               source: input.usageSource
@@ -608,25 +611,28 @@ function extractReferenceHints(content: string): string[] {
 }
 
 interface SummaryClientConfig extends DeepSeekClientConfig {
-  accountId: string;
+  sourceId: string;
   provider: 'deepseek' | 'openai-compatible';
+  supportsBilling: boolean;
 }
 
 async function getSummaryClientConfig(
   timeoutMs: number,
   globalStorageUri: vscode.Uri | undefined,
   language: KeepseekLanguage,
-  accountConfig?: ActiveAccountConfigSnapshot
+  sourceConfig: ModelSourceConfigSnapshot | undefined,
+  sourceId: string | undefined
 ): Promise<SummaryClientConfig> {
-  const activeAccount = accountConfig ?? await resolveActiveAccountConfig(globalStorageUri, { language });
-  if (!activeAccount.apiKey.trim()) {
-    throw new MissingAccountApiKeyError(language);
+  const resolvedSource = sourceConfig ?? await resolveModelSourceConfig(sourceId, globalStorageUri, { language });
+  if (!resolvedSource.apiKey.trim()) {
+    throw new MissingModelSourceApiKeyError(language);
   }
   return {
-    accountId: activeAccount.accountId,
-    provider: activeAccount.provider,
-    apiKey: activeAccount.apiKey,
-    baseUrl: activeAccount.baseUrl,
+    sourceId: resolvedSource.sourceId,
+    provider: resolvedSource.provider,
+    apiKey: resolvedSource.apiKey,
+    baseUrl: resolvedSource.baseUrl,
+    supportsBilling: resolvedSource.supportsBilling,
     streamIdleTimeoutMs: timeoutMs,
     maxRequestRetries: 0,
     requestRetryBaseMs: getConfiguredRequestRetryBaseMs()
