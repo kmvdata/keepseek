@@ -3,12 +3,15 @@ import type { DeepSeekBalanceState } from '../../shared/types';
 import { isRecord } from '../../shared/errors';
 import { normalizeBalanceStateValue } from '../usageStats';
 
+/** Identifies the account whose balance and refresh throttle are being stored. */
+export interface BalanceAccountScope {
+  provider: 'deepseek' | 'openai-compatible';
+  accountId: string;
+}
+
 /**
- * 全局余额记录存储在 `globalStorageUri/balance/balance.json`，所有工程
- * （跨 workspace、跨窗口）共享同一份物理文件：
- * - 余额快照：任意工程弹出“用量统计”都优先展示这份记录；
- * - 限流时间戳 lastRefreshAt：任意工程发起余额请求前都先读磁盘判断，
- *   间隔内一律忽略，保证全局只有一份真正的请求节奏。
+ * Each account has its own globally shared balance record. Multiple workspaces and
+ * windows using the same account still share one snapshot and one throttle clock.
  */
 export interface GlobalBalanceRecord {
   /** 最近一次成功（或失败）刷新得到的余额快照；无记录时为 undefined。 */
@@ -19,6 +22,17 @@ export interface GlobalBalanceRecord {
 
 const BALANCE_STORAGE_DIR = 'balance';
 const BALANCE_STORAGE_FILE = 'balance.json';
+const DEFAULT_BALANCE_ACCOUNT_SCOPE: BalanceAccountScope = {
+  provider: 'deepseek',
+  accountId: 'default'
+};
+const SAFE_PATH_SEGMENT_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/u;
+
+// Different Provider instances can own different stores inside one extension host.
+// Serialize the read-check-reserve sequence per persisted account so two callers
+// cannot both observe an expired timestamp before either reservation is written.
+const refreshClaimLocks = new Map<string, Promise<void>>();
+const activeRefreshClaims = new Map<string, { owner: object; token: symbol }>();
 
 export function normalizeGlobalBalanceRecord(value: unknown): GlobalBalanceRecord | undefined {
   if (!isRecord(value)) {
@@ -37,68 +51,296 @@ function readFiniteNonNegativeTimestamp(value: unknown): number {
 }
 
 /**
- * 全局余额 store：内存缓存 + `globalStorageUri` 下 JSON 文件持久化。
- * 内存缓存只用于同步展示（postState）；每次限流判断前都从磁盘刷新，
- * 使同一扩展的所有窗口共享同一份最新记录。
+ * Account-scoped global balance store. Records live at
+ * `globalStorageUri/accounts/<provider>/<accountId>/balance.json`. The optional scope on
+ * each operation makes account switching explicit; callers that omit it retain
+ * the legacy DeepSeek/default behavior.
  */
 export class GlobalBalanceStore {
-  private record: GlobalBalanceRecord = { lastRefreshAt: 0 };
-  private readonly dirUri: vscode.Uri;
-  private readonly fileUri: vscode.Uri;
+  private readonly records = new Map<string, GlobalBalanceRecord>();
+  private readonly refreshClaimTokens = new Map<string, symbol>();
+  private activeScope: BalanceAccountScope;
+  private readonly accountsRootUri: vscode.Uri;
+  private readonly legacyFileUri: vscode.Uri;
+  private readonly globalStorageKey: string;
   private readonly decoder = new TextDecoder();
 
-  public constructor(globalStorageUri: vscode.Uri) {
-    this.dirUri = vscode.Uri.joinPath(globalStorageUri, BALANCE_STORAGE_DIR);
-    this.fileUri = vscode.Uri.joinPath(this.dirUri, BALANCE_STORAGE_FILE);
+  public constructor(
+    globalStorageUri: vscode.Uri,
+    initialScope: BalanceAccountScope = DEFAULT_BALANCE_ACCOUNT_SCOPE
+  ) {
+    this.accountsRootUri = vscode.Uri.joinPath(globalStorageUri, 'accounts');
+    this.legacyFileUri = vscode.Uri.joinPath(globalStorageUri, BALANCE_STORAGE_DIR, BALANCE_STORAGE_FILE);
+    this.globalStorageKey = globalStorageUri.toString();
+    this.activeScope = normalizeBalanceAccountScope(initialScope);
   }
 
-  /** 当前内存中的全局余额快照（同步读取，供 UI 立即展示）。 */
-  public getBalance(): DeepSeekBalanceState | undefined {
-    return this.record.balance;
+  /** Selects the account used by operations whose scope argument is omitted. */
+  public selectAccount(scope: BalanceAccountScope): void {
+    this.activeScope = normalizeBalanceAccountScope(scope);
   }
 
-  /** 从磁盘读取最新记录并刷新内存缓存；文件缺失或损坏时视为无记录。 */
-  public async refreshFromDisk(): Promise<void> {
-    try {
-      const bytes = await vscode.workspace.fs.readFile(this.fileUri);
-      const parsed: unknown = JSON.parse(this.decoder.decode(bytes));
-      this.record = normalizeGlobalBalanceRecord(parsed) ?? { lastRefreshAt: 0 };
-    } catch {
-      this.record = { lastRefreshAt: 0 };
+  /** 当前账号在内存中的全局余额快照（同步读取，供 UI 立即展示）。 */
+  public getBalance(scope?: BalanceAccountScope): DeepSeekBalanceState | undefined {
+    return this.records.get(this.getScopeKey(scope))?.balance;
+  }
+
+  /** 从磁盘读取账号最新记录并刷新内存缓存；文件缺失或损坏时视为无记录。 */
+  public async refreshFromDisk(scope?: BalanceAccountScope): Promise<void> {
+    const normalizedScope = this.getScope(scope);
+    const scopeKey = getBalanceScopeKey(normalizedScope);
+    const fileUri = this.getFileUri(normalizedScope);
+    const record = await this.readRecord(fileUri)
+      ?? await this.readLegacyDefaultRecord(normalizedScope);
+    this.records.set(scopeKey, record ?? { lastRefreshAt: 0 });
+  }
+
+  /** 距该账号上次请求是否已超过限流间隔（force 时始终视为到期）。 */
+  public async isRefreshDue(
+    now: number,
+    intervalMs: number,
+    force?: boolean,
+    scope?: BalanceAccountScope
+  ): Promise<boolean> {
+    const normalizedScope = this.getScope(scope);
+    await this.refreshFromDisk(normalizedScope);
+    const record = this.records.get(getBalanceScopeKey(normalizedScope)) ?? { lastRefreshAt: 0 };
+    return Boolean(force) || now - record.lastRefreshAt >= intervalMs;
+  }
+
+  /**
+   * Atomically claims this account's next refresh within the current extension
+   * host. A successful claim persists its timestamp before returning so other
+   * stores and windows observe the reservation before any network request starts.
+   */
+  public async claimRefresh(
+    now: number,
+    intervalMs: number,
+    force?: boolean,
+    scope?: BalanceAccountScope
+  ): Promise<boolean> {
+    const normalizedScope = this.getScope(scope);
+    const scopeKey = getBalanceScopeKey(normalizedScope);
+    const claimKey = this.getRefreshClaimKey(normalizedScope);
+
+    return withRefreshClaimLock(claimKey, async () => {
+      await this.refreshFromDisk(normalizedScope);
+      if (activeRefreshClaims.has(claimKey)) {
+        return false;
+      }
+
+      const record = this.records.get(scopeKey) ?? { lastRefreshAt: 0 };
+      if (!force && now - record.lastRefreshAt < intervalMs) {
+        return false;
+      }
+
+      const reservation: GlobalBalanceRecord = {
+        balance: record.balance,
+        lastRefreshAt: now
+      };
+      try {
+        await this.writeRecordOrThrow(normalizedScope, reservation);
+      } catch {
+        // A reservation that exists only in memory cannot enforce the promised
+        // cross-store throttle. Do not allow the network request to start.
+        return false;
+      }
+      const token = Symbol(claimKey);
+      this.records.set(scopeKey, reservation);
+      this.refreshClaimTokens.set(claimKey, token);
+      activeRefreshClaims.set(claimKey, { owner: this, token });
+      return true;
+    });
+  }
+
+  /** Releases an in-flight refresh claim owned by this store. */
+  public releaseRefreshClaim(scope?: BalanceAccountScope): void {
+    const normalizedScope = this.getScope(scope);
+    const claimKey = this.getRefreshClaimKey(normalizedScope);
+    const token = this.refreshClaimTokens.get(claimKey);
+    this.refreshClaimTokens.delete(claimKey);
+    const activeClaim = activeRefreshClaims.get(claimKey);
+    if (token && activeClaim?.owner === this && activeClaim.token === token) {
+      activeRefreshClaims.delete(claimKey);
     }
   }
 
-  /** 距上次请求是否已超过限流间隔（force 时始终视为到期）；判断前先读磁盘。 */
-  public async isRefreshDue(now: number, intervalMs: number, force?: boolean): Promise<boolean> {
-    await this.refreshFromDisk();
-    return Boolean(force) || now - this.record.lastRefreshAt >= intervalMs;
+  /** 写入该账号最新余额快照并推进其全局限流时间戳。 */
+  public async update(
+    balance: DeepSeekBalanceState,
+    now: number,
+    scope?: BalanceAccountScope
+  ): Promise<void> {
+    const normalizedScope = this.getScope(scope);
+    const scopeKey = getBalanceScopeKey(normalizedScope);
+    const claimKey = this.getRefreshClaimKey(normalizedScope);
+    await withRefreshClaimLock(claimKey, async () => {
+      const token = this.refreshClaimTokens.get(claimKey);
+      if (token) {
+        this.refreshClaimTokens.delete(claimKey);
+        const activeClaim = activeRefreshClaims.get(claimKey);
+        if (activeClaim?.owner !== this || activeClaim.token !== token) {
+          // clear/delete invalidated this request while it was in flight. Its
+          // stale result must not recreate a removed file or overwrite a new key.
+          this.records.set(scopeKey, { lastRefreshAt: 0 });
+          return;
+        }
+      }
+
+      const record = { balance, lastRefreshAt: now };
+      this.records.set(scopeKey, record);
+      try {
+        await this.writeRecord(normalizedScope, record);
+      } finally {
+        const activeClaim = activeRefreshClaims.get(claimKey);
+        if (token && activeClaim?.owner === this && activeClaim.token === token) {
+          activeRefreshClaims.delete(claimKey);
+        }
+      }
+    });
   }
 
-  /** 写入最新余额快照并推进全局限流时间戳。 */
-  public async update(balance: DeepSeekBalanceState, now: number): Promise<void> {
-    this.record = { balance, lastRefreshAt: now };
-    await this.writeRecord();
+  /** 清空单个账号记录（例如其 API key / endpoint 变更后强制刷新）。 */
+  public async clear(scope?: BalanceAccountScope): Promise<void> {
+    const normalizedScope = this.getScope(scope);
+    const claimKey = this.getRefreshClaimKey(normalizedScope);
+    await withRefreshClaimLock(claimKey, async () => {
+      activeRefreshClaims.delete(claimKey);
+      this.records.set(getBalanceScopeKey(normalizedScope), { lastRefreshAt: 0 });
+      await this.deleteFile(this.getFileUri(normalizedScope));
+
+      // The old shared file belongs to the historical DeepSeek/default account.
+      // Removing it prevents a cleared account from being repopulated by fallback.
+      if (isDefaultBalanceAccountScope(normalizedScope)) {
+        await this.deleteFile(this.legacyFileUri);
+      }
+    });
   }
 
-  /** 清空全局记录（例如 API key / endpoint 变更后强制刷新）。 */
-  public async clear(): Promise<void> {
-    this.record = { lastRefreshAt: 0 };
+  /** Physically removes a deleted account's balance file and cached snapshot. */
+  public async deleteAccount(scope: BalanceAccountScope): Promise<void> {
+    const normalizedScope = this.getScope(scope);
+    const claimKey = this.getRefreshClaimKey(normalizedScope);
+    await withRefreshClaimLock(claimKey, async () => {
+      activeRefreshClaims.delete(claimKey);
+      this.records.set(getBalanceScopeKey(normalizedScope), { lastRefreshAt: 0 });
+      await this.deleteFileOrThrow(this.getFileUri(normalizedScope));
+      if (isDefaultBalanceAccountScope(normalizedScope)) {
+        await this.deleteFileOrThrow(this.legacyFileUri);
+      }
+    });
+  }
+
+  private getScope(scope?: BalanceAccountScope): BalanceAccountScope {
+    return scope ? normalizeBalanceAccountScope(scope) : this.activeScope;
+  }
+
+  private getScopeKey(scope?: BalanceAccountScope): string {
+    return getBalanceScopeKey(this.getScope(scope));
+  }
+
+  private getFileUri(scope: BalanceAccountScope): vscode.Uri {
+    return vscode.Uri.joinPath(this.accountsRootUri, scope.provider, scope.accountId, BALANCE_STORAGE_FILE);
+  }
+
+  private getRefreshClaimKey(scope: BalanceAccountScope): string {
+    return JSON.stringify([this.globalStorageKey, scope.provider, scope.accountId]);
+  }
+
+  private async readLegacyDefaultRecord(scope: BalanceAccountScope): Promise<GlobalBalanceRecord | undefined> {
+    return isDefaultBalanceAccountScope(scope) ? this.readRecord(this.legacyFileUri) : undefined;
+  }
+
+  private async readRecord(fileUri: vscode.Uri): Promise<GlobalBalanceRecord | undefined> {
     try {
-      await vscode.workspace.fs.delete(this.fileUri, { useTrash: false });
+      const bytes = await vscode.workspace.fs.readFile(fileUri);
+      const parsed: unknown = JSON.parse(this.decoder.decode(bytes));
+      return normalizeGlobalBalanceRecord(parsed);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async writeRecord(scope: BalanceAccountScope, record: GlobalBalanceRecord): Promise<void> {
+    try {
+      await this.writeRecordOrThrow(scope, record);
+    } catch {
+      // 余额记录是次要展示数据：写入失败时保留内存快照，下次刷新再重试。
+    }
+  }
+
+  private async writeRecordOrThrow(
+    scope: BalanceAccountScope,
+    record: GlobalBalanceRecord
+  ): Promise<void> {
+    const dirUri = vscode.Uri.joinPath(this.accountsRootUri, scope.provider, scope.accountId);
+    await vscode.workspace.fs.createDirectory(dirUri);
+    await vscode.workspace.fs.writeFile(
+      this.getFileUri(scope),
+      new TextEncoder().encode(`${JSON.stringify(record, null, 2)}\n`)
+    );
+  }
+
+  private async deleteFile(fileUri: vscode.Uri): Promise<void> {
+    try {
+      await vscode.workspace.fs.delete(fileUri, { useTrash: false });
     } catch {
       // 文件不存在时忽略：无记录状态即目标状态。
     }
   }
 
-  private async writeRecord(): Promise<void> {
+  private async deleteFileOrThrow(fileUri: vscode.Uri): Promise<void> {
     try {
-      await vscode.workspace.fs.createDirectory(this.dirUri);
-      await vscode.workspace.fs.writeFile(
-        this.fileUri,
-        new TextEncoder().encode(`${JSON.stringify(this.record, null, 2)}\n`)
-      );
-    } catch {
-      // 余额记录是次要展示数据：写入失败时保留内存快照，下次刷新再重试。
+      await vscode.workspace.fs.delete(fileUri, { useTrash: false });
+    } catch (error) {
+      if (!isFileNotFoundError(error)) {
+        throw error;
+      }
+    }
+  }
+}
+
+function normalizeBalanceAccountScope(scope: BalanceAccountScope): BalanceAccountScope {
+  const accountId = scope.accountId.trim();
+  if (!SAFE_PATH_SEGMENT_PATTERN.test(accountId) || accountId === '.' || accountId === '..') {
+    throw new Error('Invalid balance account id.');
+  }
+  if (scope.provider !== 'deepseek' && scope.provider !== 'openai-compatible') {
+    throw new Error('Invalid balance account provider.');
+  }
+  return { provider: scope.provider, accountId };
+}
+
+function getBalanceScopeKey(scope: BalanceAccountScope): string {
+  return `${scope.provider}/${scope.accountId}`;
+}
+
+function isDefaultBalanceAccountScope(scope: BalanceAccountScope): boolean {
+  return scope.provider === DEFAULT_BALANCE_ACCOUNT_SCOPE.provider
+    && scope.accountId === DEFAULT_BALANCE_ACCOUNT_SCOPE.accountId;
+}
+
+function isFileNotFoundError(error: unknown): boolean {
+  return isRecord(error) && (error.code === 'FileNotFound' || error.code === 'ENOENT');
+}
+
+async function withRefreshClaimLock<T>(key: string, action: () => Promise<T>): Promise<T> {
+  const previous = refreshClaimLocks.get(key);
+  let releaseCurrent!: () => void;
+  const current = new Promise<void>((resolve) => {
+    releaseCurrent = resolve;
+  });
+  refreshClaimLocks.set(key, current);
+
+  if (previous) {
+    await previous;
+  }
+  try {
+    return await action();
+  } finally {
+    releaseCurrent();
+    if (refreshClaimLocks.get(key) === current) {
+      refreshClaimLocks.delete(key);
     }
   }
 }

@@ -77,6 +77,11 @@
           "default": "https://api.deepseek.com",
           "description": "DeepSeek API base URL"
         },
+        "keepseek.activeAccountId": {
+          "type": "string",
+          "default": "",
+          "description": "Active KeepSeek account ID. Empty selects the migrated default DeepSeek account when available."
+        },
         "keepseek.selectedModelId": {
           "type": "string",
           "default": "",

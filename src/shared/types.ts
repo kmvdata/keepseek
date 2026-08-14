@@ -1,10 +1,17 @@
 import type { KeepseekLanguage } from './i18n';
+import type { ActiveAccountConfigSnapshot } from '../accounts/types';
 
 export interface KeepseekModel {
   id: string;
   label: string;
   provider: string;
   contextWindowTokens?: number;
+  /** User-defined display name scoped to the active account. */
+  alias?: string;
+  /** Display name returned by the provider's OpenAI-compatible /models endpoint. */
+  fetchedName?: string;
+  /** Account that owns this model view. Omitted for legacy built-in models. */
+  accountId?: string;
 }
 
 export interface KeepseekExtensionInfo {
@@ -749,6 +756,8 @@ export interface AgentRequest {
   repairLoop?: RepairLoopState;
   executionLimits?: AgentExecutionLimits;
   backgroundRunId?: string;
+  /** Credentials frozen once at run start so summaries and the main request cannot diverge. */
+  accountConfig?: ActiveAccountConfigSnapshot;
   signal?: AbortSignal;
 }
 

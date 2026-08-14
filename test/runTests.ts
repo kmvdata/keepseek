@@ -1,5 +1,11 @@
 import './registerVscodeStub';
+import './accountResolver.test';
+import './accountRuntime.test';
+import './accountStore.test';
+import './modelAlias.test';
+import './modelDiscovery.test';
 import './agentRequestCoordinator.test';
+import './accountProviderSafety.test';
 import './balanceStore.test';
 import './backgroundRunCoordinator.test';
 import './cacheByteStability.test';

@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
 import { AgentRunAbortedError, AgentRunner } from '../agent/runner';
 import { AgentRequestCoordinator, type BackgroundContextCompressionRefreshUpdate } from '../agent/agentRequestCoordinator';
-import type { HistoryCompressionRefreshResult } from '../agent/historyCompressor';
+import { HistoryCompressor, type HistoryCompressionRefreshResult } from '../agent/historyCompressor';
 import { createProtectedContextMeta } from '../agent/historyProjection';
 import {
   archiveContextSourcesBeyondBudget,
@@ -89,7 +89,7 @@ import type { DroppedFileReferenceInput, PromptReferenceInput, WebviewMessage } 
 import { InteractionTraceLogService } from '../agent/logging/interactionTrace';
 import { applyChangeSetEventToRunDetails } from '../agent/logging/runDetails';
 import { fetchDeepSeekBalance } from '../agent/deepseek/balance';
-import { GlobalBalanceStore } from '../agent/deepseek/balanceStore';
+import { GlobalBalanceStore, type BalanceAccountScope } from '../agent/deepseek/balanceStore';
 import {
   addUsageEventToSessionStats,
   addUsageEventToTurnStats,
@@ -120,6 +120,24 @@ import {
   CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
   LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION
 } from '../agent/providerRequestProjection';
+import {
+  AccountStore,
+  DEFAULT_ACCOUNT_ID,
+  getDefaultAccountBaseUrl,
+  getDefaultAccountName
+} from '../accounts/accountStore';
+import { resolveActiveAccountConfig } from '../accounts/accountResolver';
+import {
+  refreshAccountModelCache,
+  retainManualAccountModelCache
+} from '../accounts/modelDiscovery';
+import type {
+  ActiveAccountConfigSnapshot,
+  AccountModelCache,
+  AccountProvider,
+  KeepseekAccount,
+  ResolvedActiveAccountConfig
+} from '../accounts/types';
 
 const CHAT_CONTAINER_ID = 'keepseek-sidebar';
 const CHAT_VIEW_TYPE = 'keepseek.chat';
@@ -131,7 +149,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private readonly fileContext = new FileContextStore();
   private readonly agentRunner: AgentRunner;
-  private readonly agentRequestCoordinator = new AgentRequestCoordinator();
+  private readonly agentRequestCoordinator: AgentRequestCoordinator;
+  private readonly accountStore: AccountStore;
   private readonly traceLogService: InteractionTraceLogService;
   private readonly changeSets: ChangeSetStore;
   private readonly draftDiffService: DraftDiffService;
@@ -150,6 +169,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly authorizedExternalReferenceUris = new Set<string>();
   private readonly views = new Set<vscode.WebviewView>();
   private backgroundAvailableScripts: SafeNpmScript[] = [];
+  private accounts: KeepseekAccount[] = [];
+  private activeAccountConfig: ResolvedActiveAccountConfig | undefined;
+  private accountStateRefreshGeneration = 0;
+  private accountStateRefreshPromise: Promise<void> | undefined;
+  private availableModels: KeepseekModel[] = getConfiguredModels();
   private selectedModelId = getConfiguredSelectedModelId();
   private agentSettings = getConfiguredAgentSettings();
   private language = getConfiguredKeepseekLanguage();
@@ -157,9 +181,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private currentRunAbortController: AbortController | undefined;
   private liveContextUsage: ContextUsageEstimate | undefined;
   private liveTurnUsage: TurnUsageStats | undefined;
-  /** 防并发：同一时刻只允许一个余额请求在途；限流计时由全局 balanceStore 持有。 */
+  /** 防并发：同一 Provider 同时只允许一个余额刷新流程；限流按账号全局共享。 */
   private balanceRefreshPromise: Promise<void> | undefined;
-  /** 全局余额 store：所有工程共享同一份余额快照与限流时间戳。 */
+  /** 账号隔离的全局余额 store：同一账号跨 workspace/window 共享快照与限流。 */
   private readonly balanceStore: GlobalBalanceStore;
   private agentActivitySequence = 0;
   private agentActivity: AgentActivityState = {
@@ -179,8 +203,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   ) {
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
     this.skillStore = new SkillStore(skillState);
-    // 余额快照与限流时间戳落在 globalStorageUri 下的共享文件：跨 workspace /
-    // 窗口的每个 Provider 实例读写同一份记录。
+    this.accountStore = new AccountStore(this.globalStorageUri);
+    this.agentRequestCoordinator = new AgentRequestCoordinator(
+      new HistoryCompressor(undefined, this.globalStorageUri)
+    );
+    // 余额快照与限流时间戳落在 globalStorageUri 下，并按 provider/account 隔离。
     this.balanceStore = new GlobalBalanceStore(this.globalStorageUri);
     this.legacyMemoryMigration = new LegacyProjectMemoryMigration(
       this.globalStorageUri,
@@ -191,7 +218,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.backgroundRunStatusBar.update(run);
       this.postState();
     });
-    this.agentRunner = new AgentRunner(undefined, this.traceLogService);
+    this.agentRunner = new AgentRunner(
+      undefined,
+      this.traceLogService,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      this.globalStorageUri
+    );
     this.draftDiffService = new DraftDiffService();
     this.changeSets = new ChangeSetStore(
       new SafeFileEditor((key, values) => this.t(key, values)),
@@ -225,6 +260,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.syncConfiguredState();
     void this.cleanupExpiredSessions();
     this.postState();
+    void this.refreshAccountState().then(() => this.postState()).catch(() => undefined);
     void this.refreshCurrentRunContext(this.sessionStore.getActiveSession(), '').then(() => this.postState()).catch(() => undefined);
   }
 
@@ -606,6 +642,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'ready':
         await this.changeSets.initialize();
         await this.legacyMemoryMigration.refresh();
+        await this.refreshAccountState();
         this.syncConfiguredState();
         await this.refreshSkills({ post: false });
         await this.refreshBackgroundRunAvailability({ post: false });
@@ -700,12 +737,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.stopBackgroundRun();
         return;
       case 'openApiSettings': {
-        const config = vscode.workspace.getConfiguration('keepseek');
-        this.postToWebview({
-          type: 'showSettingsDialog',
-          apiKey: config.get<string>('apiKey', ''),
-          baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL)
-        });
+        await this.refreshAccountState();
+        this.postAccountSettingsDialog();
         return;
       }
       case 'openHistorySettings': {
@@ -716,18 +749,31 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       case 'saveApiSettings': {
-        const config = vscode.workspace.getConfiguration('keepseek');
-        await config.update('apiKey', message.apiKey, vscode.ConfigurationTarget.Global);
-        await config.update('baseUrl', message.baseUrl, vscode.ConfigurationTarget.Global);
-        // 先在途余额请求可能仍用旧 key，等待其结束再清空，避免旧账号余额回写。
-        if (this.balanceRefreshPromise) {
-          await this.balanceRefreshPromise;
-        }
-        // API key 变更后旧余额快照可能属于另一个账号：清空全局记录并强制刷新。
-        await this.balanceStore.clear();
-        this.postState();
-        void this.refreshBalance({ force: true });
-        vscode.window.showInformationMessage(this.t('apiSettingsSaved'));
+        await this.saveLegacyCompatibleApiSettings(message.apiKey, message.baseUrl);
+        return;
+      }
+      case 'saveAccountSettings': {
+        await this.saveAccountSettings(message);
+        return;
+      }
+      case 'createAccount': {
+        await this.createAccount(message.provider);
+        return;
+      }
+      case 'deleteAccount': {
+        await this.deleteAccount(message.id);
+        return;
+      }
+      case 'selectAccount': {
+        await this.selectAccount(message.id);
+        return;
+      }
+      case 'setModelAlias': {
+        await this.setModelAlias(message.accountId, message.modelId, message.alias);
+        return;
+      }
+      case 'refreshAccountModels': {
+        await this.refreshAccountModels(message.accountId);
         return;
       }
       case 'saveHistorySettings': {
@@ -1087,15 +1133,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private resolveSessionToolNames(
     session: ChatSession,
     prompt: string,
-    model: KeepseekModel
+    model: KeepseekModel,
+    accountConfig: ActiveAccountConfigSnapshot
   ): string[] {
     let protocol = session.requestProtocol;
-    const baseUrl = vscode.workspace
-      .getConfiguration('keepseek')
-      .get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL)
-      .trim() || DEFAULT_DEEPSEEK_BASE_URL;
+    const baseUrl = accountConfig.baseUrl || DEFAULT_DEEPSEEK_BASE_URL;
     const modelChanged = Boolean(protocol?.modelId && protocol.modelId !== model.id);
-    const providerChanged = Boolean(protocol?.providerId && protocol.providerId !== model.provider);
+    const providerChanged = Boolean(protocol?.providerId && protocol.providerId !== accountConfig.provider);
     const baseUrlChanged = Boolean(protocol?.baseUrl && protocol.baseUrl !== baseUrl);
     const lastProviderRequestAt = Date.parse(protocol?.lastProviderRequestAt ?? session.updatedAt);
     const cacheCold = session.messages.length > 0
@@ -1112,7 +1156,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         toolSchemaVersion: CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
         toolNames: [],
         modelId: model.id,
-        providerId: model.provider,
+        providerId: accountConfig.provider,
         baseUrl,
         createdAt: new Date().toISOString()
       };
@@ -1129,7 +1173,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         toolSchemaVersion: 1,
         toolNames: [],
         modelId: model.id,
-        providerId: model.provider,
+        providerId: accountConfig.provider,
         baseUrl,
         createdAt: session.createdAt
       };
@@ -1155,12 +1199,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return [...protocol.toolNames];
   }
 
-  private getSelectedModel(): ReturnType<typeof getConfiguredModels>[number] {
-    const models = getConfiguredModels();
+  private getSelectedModel(): KeepseekModel {
+    const models = this.availableModels;
     if (!this.selectedModelId || !models.some((model) => model.id === this.selectedModelId)) {
-      this.selectedModelId = models[0].id;
+      this.selectedModelId = models[0]?.id ?? '';
     }
-    return models.find((model) => model.id === this.selectedModelId) ?? models[0];
+    return models.find((model) => model.id === this.selectedModelId)
+      ?? models[0]
+      ?? getConfiguredModels()[0];
   }
 
   private async createNewSession(): Promise<void> {
@@ -1665,9 +1711,420 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async refreshAccountState(): Promise<void> {
+    const generation = ++this.accountStateRefreshGeneration;
+    const refreshPromise = (async () => {
+      const resolved = await resolveActiveAccountConfig(this.globalStorageUri, {
+        accountStore: this.accountStore,
+        language: this.language,
+        requireApiKey: false
+      });
+      const accounts = await this.accountStore.listAccounts();
+      const availableModels = this.createAccountModelViews(
+        resolved.account,
+        resolved.accountId,
+        resolved.provider
+      );
+      const balanceScope = this.getBalanceAccountScope(resolved);
+      await this.balanceStore.refreshFromDisk(balanceScope);
+      if (generation !== this.accountStateRefreshGeneration) {
+        return;
+      }
+      this.activeAccountConfig = resolved;
+      this.accounts = accounts;
+      this.availableModels = availableModels;
+      this.balanceStore.selectAccount(balanceScope);
+      this.selectedModelId = getConfiguredSelectedModelId(availableModels);
+    })();
+    this.accountStateRefreshPromise = refreshPromise;
+
+    // Callers that triggered an older refresh wait through the newest refresh
+    // before posting state, so a config event cannot make them publish stale UI.
+    let pending = refreshPromise;
+    while (true) {
+      try {
+        await pending;
+      } catch (error) {
+        if (this.accountStateRefreshPromise === pending) {
+          throw error;
+        }
+      }
+      const latest = this.accountStateRefreshPromise;
+      if (!latest || latest === pending) {
+        return;
+      }
+      pending = latest;
+    }
+  }
+
+  private createAccountModelViews(
+    account: KeepseekAccount | undefined,
+    accountId: string,
+    provider: AccountProvider
+  ): KeepseekModel[] {
+    const builtInModels = provider === 'deepseek' ? getConfiguredModels() : [];
+    const fetchedModels = account?.modelCache?.models ?? [];
+    const aliases = account?.modelAliases ?? {};
+    const orderedIds: string[] = [];
+    const seenIds = new Set<string>();
+    const addId = (modelId: string) => {
+      const normalized = modelId.trim();
+      if (!normalized || seenIds.has(normalized)) {
+        return;
+      }
+      seenIds.add(normalized);
+      orderedIds.push(normalized);
+    };
+    builtInModels.forEach((model) => addId(model.id));
+    fetchedModels.forEach((model) => addId(model.id));
+    Object.keys(aliases).forEach(addId);
+
+    return orderedIds.map((modelId) => {
+      const builtIn = builtInModels.find((model) => model.id === modelId);
+      const fetched = fetchedModels.find((model) => model.id === modelId);
+      return {
+        id: modelId,
+        label: builtIn?.label ?? modelId,
+        provider,
+        contextWindowTokens: builtIn?.contextWindowTokens,
+        alias: aliases[modelId],
+        fetchedName: fetched?.name,
+        accountId
+      };
+    });
+  }
+
+  private getBalanceAccountScope(
+    account = this.activeAccountConfig
+  ): BalanceAccountScope {
+    return {
+      provider: account?.provider ?? 'deepseek',
+      accountId: account?.accountId ?? DEFAULT_ACCOUNT_ID
+    };
+  }
+
+  private postAccountSettingsDialog(): void {
+    const activeAccount = this.accounts.find(
+      (account) => account.id === this.activeAccountConfig?.accountId
+    );
+    const useLegacyFallback = !activeAccount && this.activeAccountConfig?.legacyFallback === true;
+    const legacyApiKey = useLegacyFallback && this.activeAccountConfig?.source === 'legacy-config'
+      ? this.activeAccountConfig.apiKey
+      : '';
+    this.postToWebview({
+      type: 'showSettingsDialog',
+      apiKey: activeAccount?.apiKey ?? legacyApiKey,
+      baseUrl: activeAccount?.baseUrl
+        ?? (useLegacyFallback
+          ? this.activeAccountConfig?.baseUrl ?? DEFAULT_DEEPSEEK_BASE_URL
+          : DEFAULT_DEEPSEEK_BASE_URL),
+      activeAccountId: this.activeAccountConfig?.accountId ?? '',
+      accounts: this.accounts.map((account) => ({
+        ...account,
+        modelAliases: { ...account.modelAliases },
+        modelCache: account.modelCache
+          ? {
+              fetchedAt: account.modelCache.fetchedAt,
+              models: account.modelCache.models.map((model) => ({ ...model }))
+            }
+          : undefined,
+        models: this.createAccountModelViews(account, account.id, account.provider).map((model) => ({
+          id: model.id,
+          name: model.fetchedName ?? model.label
+        }))
+      }))
+    });
+  }
+
+  private async waitForBalanceRefresh(): Promise<void> {
+    if (this.balanceRefreshPromise) {
+      await this.balanceRefreshPromise;
+    }
+  }
+
+  private rejectAccountMutationWhileBusy(): boolean {
+    if (!this.isBusy) {
+      return false;
+    }
+    void vscode.window.showInformationMessage(this.t('accountSettingsReadonlyWhileBusy'));
+    this.postAccountSettingsDialog();
+    return true;
+  }
+
+  private async saveLegacyCompatibleApiSettings(apiKey: string, baseUrl: string): Promise<void> {
+    if (this.rejectAccountMutationWhileBusy()) {
+      return;
+    }
+    try {
+      await this.refreshAccountState();
+      const activeAccount = this.accounts.find(
+        (account) => account.id === this.activeAccountConfig?.accountId
+      );
+      await this.waitForBalanceRefresh();
+      if (activeAccount) {
+        const scope = {
+          provider: activeAccount.provider,
+          accountId: activeAccount.id
+        } satisfies BalanceAccountScope;
+        await this.balanceStore.clear(scope);
+        await this.accountStore.updateAccount(activeAccount.id, {
+          apiKey,
+          baseUrl,
+          modelCache: activeAccount.baseUrl === baseUrl && activeAccount.apiKey === apiKey
+            ? activeAccount.modelCache
+            : retainManualAccountModelCache(activeAccount.modelCache)
+        });
+      } else if (
+        this.activeAccountConfig?.source === 'unconfigured'
+        && this.accounts.length === 0
+      ) {
+        await this.balanceStore.clear({ provider: 'deepseek', accountId: DEFAULT_ACCOUNT_ID });
+        await this.accountStore.upsertDefaultAccount({
+          apiKey,
+          baseUrl: baseUrl.trim() || DEFAULT_DEEPSEEK_BASE_URL,
+          name: getDefaultAccountName('deepseek')
+        });
+        const config = vscode.workspace.getConfiguration('keepseek');
+        await config.update('activeAccountId', DEFAULT_ACCOUNT_ID, vscode.ConfigurationTarget.Global);
+      } else {
+        await this.balanceStore.clear({ provider: 'deepseek', accountId: DEFAULT_ACCOUNT_ID });
+        const config = vscode.workspace.getConfiguration('keepseek');
+        await config.update('apiKey', apiKey, vscode.ConfigurationTarget.Global);
+        await config.update('baseUrl', baseUrl, vscode.ConfigurationTarget.Global);
+      }
+      await this.refreshAccountState();
+      this.postState();
+      void this.refreshBalance({ force: true });
+      vscode.window.showInformationMessage(this.t('apiSettingsSaved'));
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('accountOperationFailed', { message: getErrorMessage(error) }));
+      this.postState();
+    }
+  }
+
+  private async saveAccountSettings(input: {
+    accountId?: string;
+    name: string;
+    apiKey: string;
+    baseUrl: string;
+  }): Promise<void> {
+    if (this.rejectAccountMutationWhileBusy()) {
+      return;
+    }
+    try {
+      const accountId = input.accountId?.trim() || this.activeAccountConfig?.accountId || '';
+      const account = await this.accountStore.getAccount(accountId);
+      if (!account) {
+        throw new Error(this.t('accountNotFound'));
+      }
+      const nextBaseUrl = input.baseUrl.trim() || getDefaultAccountBaseUrl(account.provider);
+      const nextApiKey = input.apiKey.trim();
+      const connectionChanged = account.apiKey !== nextApiKey || account.baseUrl !== nextBaseUrl;
+      await this.waitForBalanceRefresh();
+      const scope = { provider: account.provider, accountId: account.id } satisfies BalanceAccountScope;
+      if (connectionChanged) {
+        await this.balanceStore.clear(scope);
+      }
+      await this.accountStore.updateAccount(account.id, {
+        name: input.name,
+        apiKey: nextApiKey,
+        baseUrl: nextBaseUrl,
+        modelCache: connectionChanged
+          ? retainManualAccountModelCache(account.modelCache)
+          : account.modelCache
+      });
+      await this.refreshAccountState();
+      this.postState();
+      this.postAccountSettingsDialog();
+      if (this.activeAccountConfig?.accountId === account.id) {
+        void this.refreshBalance({ force: connectionChanged });
+      }
+      vscode.window.showInformationMessage(this.t('accountSettingsSaved'));
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('accountOperationFailed', { message: getErrorMessage(error) }));
+      this.postAccountSettingsDialog();
+    }
+  }
+
+  private async createAccount(provider: AccountProvider): Promise<void> {
+    if (this.rejectAccountMutationWhileBusy()) {
+      return;
+    }
+    try {
+      await this.waitForBalanceRefresh();
+      const account = await this.accountStore.createAccount({
+        provider,
+        name: getDefaultAccountName(provider),
+        baseUrl: getDefaultAccountBaseUrl(provider)
+      });
+      const config = vscode.workspace.getConfiguration('keepseek');
+      await config.update('activeAccountId', account.id, vscode.ConfigurationTarget.Global);
+      await this.refreshAccountState();
+      this.postState();
+      this.postAccountSettingsDialog();
+      void this.refreshBalance({ force: true });
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('accountOperationFailed', { message: getErrorMessage(error) }));
+      this.postAccountSettingsDialog();
+    }
+  }
+
+  private async deleteAccount(accountId: string): Promise<void> {
+    if (this.rejectAccountMutationWhileBusy()) {
+      return;
+    }
+    const account = await this.accountStore.getAccount(accountId);
+    if (!account) {
+      this.postAccountSettingsDialog();
+      return;
+    }
+    const deleteAction = this.t('deleteAccountConfirmAction');
+    const confirmed = await vscode.window.showWarningMessage(
+      this.t('deleteAccountConfirm', { name: account.name }),
+      { modal: true },
+      deleteAction
+    );
+    if (confirmed !== deleteAction) {
+      this.postAccountSettingsDialog();
+      return;
+    }
+
+    let accountRemoved = false;
+    try {
+      await this.waitForBalanceRefresh();
+      const wasActive = this.activeAccountConfig?.accountId === account.id;
+      await this.balanceStore.deleteAccount({ provider: account.provider, accountId: account.id });
+      await this.accountStore.deleteAccount(account.id);
+      accountRemoved = true;
+      this.scrubDeletedAccountFromMemory(account.id);
+      if (wasActive) {
+        const config = vscode.workspace.getConfiguration('keepseek');
+        await config.update('activeAccountId', '', vscode.ConfigurationTarget.Global);
+      }
+      await this.refreshAccountState();
+      if (this.accounts.length && this.activeAccountConfig?.account) {
+        const config = vscode.workspace.getConfiguration('keepseek');
+        await config.update(
+          'activeAccountId',
+          this.activeAccountConfig.accountId,
+          vscode.ConfigurationTarget.Global
+        );
+      }
+      this.postState();
+      this.postAccountSettingsDialog();
+      void this.refreshBalance({ force: true });
+    } catch (error) {
+      try {
+        await this.refreshAccountState();
+      } catch {
+        if (accountRemoved) {
+          this.scrubDeletedAccountFromMemory(account.id);
+        }
+      }
+      vscode.window.showErrorMessage(this.t('accountOperationFailed', { message: getErrorMessage(error) }));
+      this.postState();
+      this.postAccountSettingsDialog();
+    }
+  }
+
+  private scrubDeletedAccountFromMemory(accountId: string): void {
+    // Invalidate any refresh that captured this account before its file was
+    // deleted; otherwise that stale read could re-publish the removed key.
+    this.accountStateRefreshGeneration += 1;
+    this.accounts = this.accounts.filter((account) => account.id !== accountId);
+    if (this.activeAccountConfig?.accountId !== accountId) {
+      return;
+    }
+    this.activeAccountConfig = undefined;
+    this.availableModels = this.createAccountModelViews(
+      undefined,
+      DEFAULT_ACCOUNT_ID,
+      'deepseek'
+    );
+    this.selectedModelId = getConfiguredSelectedModelId(this.availableModels);
+  }
+
+  private async selectAccount(accountId: string): Promise<void> {
+    if (this.rejectAccountMutationWhileBusy()) {
+      return;
+    }
+    try {
+      const account = await this.accountStore.getAccount(accountId);
+      if (!account?.enabled) {
+        throw new Error(this.t('accountNotFound'));
+      }
+      await this.waitForBalanceRefresh();
+      const config = vscode.workspace.getConfiguration('keepseek');
+      await config.update('activeAccountId', account.id, vscode.ConfigurationTarget.Global);
+      await this.refreshAccountState();
+      this.postState();
+      this.postAccountSettingsDialog();
+      void this.refreshBalance({ force: false });
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('accountOperationFailed', { message: getErrorMessage(error) }));
+      this.postAccountSettingsDialog();
+    }
+  }
+
+  private async setModelAlias(accountId: string, rawModelId: string, rawAlias: string): Promise<void> {
+    if (this.rejectAccountMutationWhileBusy()) {
+      return;
+    }
+    try {
+      const account = await this.accountStore.getAccount(accountId);
+      const modelId = rawModelId.trim();
+      if (!account || !modelId) {
+        throw new Error(this.t('accountModelRequired'));
+      }
+      const alias = rawAlias.trim();
+      const modelAliases = { ...account.modelAliases };
+      if (alias) {
+        modelAliases[modelId] = alias;
+      } else {
+        delete modelAliases[modelId];
+      }
+      let modelCache: AccountModelCache | undefined = account.modelCache;
+      const isBuiltIn = account.provider === 'deepseek'
+        && getConfiguredModels().some((model) => model.id === modelId);
+      const isCached = modelCache?.models.some((model) => model.id === modelId) ?? false;
+      if (!isBuiltIn && !isCached) {
+        modelCache = {
+          fetchedAt: modelCache?.fetchedAt ?? 0,
+          models: [...(modelCache?.models ?? []), { id: modelId }]
+        };
+      }
+      await this.accountStore.updateAccount(account.id, { modelAliases, modelCache });
+      await this.refreshAccountState();
+      this.postState();
+      this.postAccountSettingsDialog();
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('accountOperationFailed', { message: getErrorMessage(error) }));
+      this.postAccountSettingsDialog();
+    }
+  }
+
+  private async refreshAccountModels(accountId: string): Promise<void> {
+    if (this.rejectAccountMutationWhileBusy()) {
+      return;
+    }
+    try {
+      await refreshAccountModelCache(this.accountStore, accountId, { force: true });
+      await this.refreshAccountState();
+      this.postState();
+      this.postAccountSettingsDialog();
+    } catch {
+      // Model discovery is optional. Keep the last cache and silently degrade.
+      this.postAccountSettingsDialog();
+    }
+  }
+
   private async setSelectedModel(modelId: string): Promise<void> {
-    const models = getConfiguredModels();
-    if (!models.some((model) => model.id === modelId)) {
+    if (this.isBusy) {
+      return;
+    }
+    const activeAccountId = this.activeAccountConfig?.accountId;
+    const model = this.availableModels.find((candidate) => candidate.id === modelId);
+    if (!model || (model.accountId && activeAccountId && model.accountId !== activeAccountId)) {
       return;
     }
     this.selectedModelId = modelId;
@@ -1677,8 +2134,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private syncConfiguredState(): void {
-    const models = getConfiguredModels();
-    this.selectedModelId = getConfiguredSelectedModelId(models);
+    this.selectedModelId = getConfiguredSelectedModelId(this.availableModels);
     this.agentSettings = getConfiguredAgentSettings();
     this.language = getConfiguredKeepseekLanguage();
     this.sessionStore.setLanguage(this.language);
@@ -1749,10 +2205,34 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const config = vscode.workspace.getConfiguration('keepseek');
-    const apiKey = (config.get<string>('apiKey', '').trim() || process.env.DEEPSEEK_API_KEY || '').trim();
+    const refresh = this.performBalanceRefresh(options).finally(() => {
+      if (this.balanceRefreshPromise === refresh) {
+        this.balanceRefreshPromise = undefined;
+      }
+    });
+    this.balanceRefreshPromise = refresh;
+    await refresh;
+  }
+
+  private async performBalanceRefresh(options: { force?: boolean; post?: boolean }): Promise<void> {
+    const account = await resolveActiveAccountConfig(this.globalStorageUri, {
+      accountStore: this.accountStore,
+      language: this.language,
+      requireApiKey: false
+    });
+    const scope = this.getBalanceAccountScope(account);
+    this.balanceStore.selectAccount(scope);
+    if (account.provider !== 'deepseek') {
+      await this.balanceStore.refreshFromDisk(scope);
+      if (options.post !== false) {
+        this.postState();
+      }
+      return;
+    }
+
+    const apiKey = account.apiKey.trim();
     if (!apiKey) {
-      // 无 API key：保留全局余额快照（用量统计仍可展示上次记录），只刷新 UI。
+      // 无 API key：保留当前账号余额快照，只刷新 UI。
       if (options.post !== false) {
         this.postState();
       }
@@ -1760,9 +2240,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const now = Date.now();
-    // 限流计时与余额快照都在全局共享文件：先读磁盘拿到最新 lastRefreshAt，
-    // 间隔内直接忽略（webview 仍显示已同步的最新记录）。
-    if (!(await this.balanceStore.isRefreshDue(now, getConfiguredBalanceRefreshIntervalMs(), options.force))) {
+    // 每个账号独立共享限流时间戳；同账号跨窗口仍只发一份请求节奏。
+    if (!(await this.balanceStore.claimRefresh(
+      now,
+      getConfiguredBalanceRefreshIntervalMs(),
+      options.force,
+      scope
+    ))) {
       if (options.post !== false) {
         // 未到期：不请求，但把磁盘上的最新共享记录同步进内存并推给 UI。
         this.postState();
@@ -1770,32 +2254,29 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const baseUrl = config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL).trim() || DEFAULT_DEEPSEEK_BASE_URL;
-    let endpointUrl: string;
     try {
-      endpointUrl = getConfiguredBalanceEndpointUrl(baseUrl);
-    } catch (error) {
-      await this.balanceStore.update({
-        currency: '¥',
-        error: getErrorMessage(error),
-        updatedAt: new Date().toISOString()
-      }, Date.now());
-      if (options.post !== false) {
-        this.postState();
+      let endpointUrl: string;
+      try {
+        endpointUrl = getConfiguredBalanceEndpointUrl(account.baseUrl);
+      } catch (error) {
+        await this.balanceStore.update({
+          currency: '¥',
+          error: getErrorMessage(error),
+          updatedAt: new Date().toISOString()
+        }, Date.now(), scope);
+        if (options.post !== false) {
+          this.postState();
+        }
+        return;
       }
-      return;
-    }
-    this.balanceRefreshPromise = (async () => {
       const balance = await fetchDeepSeekBalance({ apiKey, endpointUrl });
-      await this.balanceStore.update(balance, Date.now());
+      await this.balanceStore.update(balance, Date.now(), scope);
       if (options.post !== false) {
         this.postState();
       }
-    })().finally(() => {
-      this.balanceRefreshPromise = undefined;
-    });
-
-    await this.balanceRefreshPromise;
+    } finally {
+      this.balanceStore.releaseRefreshClaim(scope);
+    }
   }
 
   private async runContextAction(action: () => Promise<void>): Promise<void> {
@@ -2354,10 +2835,28 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
     }
 
+    // Re-resolve immediately before model validation so a configuration change
+    // can never pair the previous account's model view with the new credentials.
+    await this.refreshAccountState();
     this.agentSettings = normalizeAgentSettings(settings, this.agentSettings);
-    const models = getConfiguredModels();
+    const models = this.availableModels;
     const model = models.find((item) => item.id === modelId) ?? models[0];
+    if (!model) {
+      vscode.window.showWarningMessage(this.t('accountModelRequired'));
+      return;
+    }
     this.selectedModelId = model.id;
+    const resolvedAccount = this.activeAccountConfig;
+    if (!resolvedAccount) {
+      vscode.window.showWarningMessage(this.t('accountModelRequired'));
+      return;
+    }
+    const accountConfig: ActiveAccountConfigSnapshot = Object.freeze({
+      accountId: resolvedAccount.accountId,
+      provider: resolvedAccount.provider,
+      apiKey: resolvedAccount.apiKey,
+      baseUrl: resolvedAccount.baseUrl
+    });
 
     const abortController = new AbortController();
     this.currentRunAbortController = abortController;
@@ -2441,7 +2940,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const currentRunContext = runContextResult.context;
       const activeSkills = currentRunContext.skills;
       // 会话冻结的 slim 工具集：首轮请求确定后跨轮复用，保证 tools schema 前缀稳定
-      const slimToolNames = this.resolveSessionToolNames(activeSession, expandedPrompt, model);
+      const slimToolNames = this.resolveSessionToolNames(
+        activeSession,
+        expandedPrompt,
+        model,
+        accountConfig
+      );
       this.slimToolNamesBySession.set(activeSession.id, slimToolNames);
       const now = new Date().toISOString();
       const replacementIndex = replaceMessageId
@@ -2535,7 +3039,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       activeSession.updatedAt = now;
       this.postState();
-      await this.refreshContextCompressionBeforeRun(activeSession, expandedPrompt, model, abortController.signal);
+      await this.refreshContextCompressionBeforeRun(
+        activeSession,
+        expandedPrompt,
+        model,
+        accountConfig,
+        abortController.signal
+      );
       await this.sessionStore.persist();
       if (abortController.signal.aborted) {
         this.setAgentActivity({
@@ -2583,6 +3093,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         repairLoop: options?.repairLoop,
         executionLimits: options?.executionLimits,
         backgroundRunId: options?.backgroundRunId,
+        accountConfig,
         signal: abortController.signal
       }), {
         onStatus: (activity) => {
@@ -2696,7 +3207,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         assistantMessage.runDetails = response.runDetails;
       }
       this.updateActiveSessionContextUsage(this.createCurrentSessionContextUsage(model));
-      this.scheduleContextCompressionRefresh(activeSession, expandedPrompt, model);
+      this.scheduleContextCompressionRefresh(activeSession, expandedPrompt, model, accountConfig);
       this.setAgentActivity({
         base: 'complete',
         phase: 'finalizing'
@@ -2788,6 +3299,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     activeSession: ChatSession,
     prompt: string,
     model: KeepseekModel,
+    accountConfig: ActiveAccountConfigSnapshot,
     signal: AbortSignal
   ): Promise<void> {
     try {
@@ -2802,6 +3314,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         slimToolNames: activeSession.requestProtocol?.toolNames,
         requestProtocolVersion: activeSession.requestProtocol?.version,
         language: this.language,
+        accountConfig,
         signal
       });
       this.applyContextCompressionRefreshResult(activeSession, result);
@@ -2813,7 +3326,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private scheduleContextCompressionRefresh(
     activeSession: ChatSession,
     prompt: string,
-    model: KeepseekModel
+    model: KeepseekModel,
+    accountConfig: ActiveAccountConfigSnapshot
   ): void {
     this.agentRequestCoordinator.scheduleBackgroundContextCompressionRefresh({
       session: activeSession,
@@ -2825,7 +3339,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       contextInstructions: activeSession.contextInstructions,
       slimToolNames: activeSession.requestProtocol?.toolNames,
       requestProtocolVersion: activeSession.requestProtocol?.version,
-      language: this.language
+      language: this.language,
+      accountConfig
     }, (update) => this.applyBackgroundContextCompressionRefresh(activeSession, update));
   }
 
@@ -2888,11 +3403,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private postState(): void {
-    const models = getConfiguredModels();
+    const models = this.availableModels;
     if (!this.selectedModelId || !models.some((model) => model.id === this.selectedModelId)) {
-      this.selectedModelId = models[0].id;
+      this.selectedModelId = models[0]?.id ?? '';
     }
-    const selectedModel = models.find((model) => model.id === this.selectedModelId) ?? models[0];
+    const selectedModel = models.find((model) => model.id === this.selectedModelId)
+      ?? models[0]
+      ?? getConfiguredModels()[0];
     const contextFiles = this.fileContext.getAll();
     const activeSession = this.sessionStore.getActiveSession();
     const currentRunContext = this.currentRunContextsBySession.get(activeSession.id);
@@ -2922,6 +3439,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       state: {
         models,
         selectedModelId: this.selectedModelId,
+        activeAccountId: this.activeAccountConfig?.accountId ?? DEFAULT_ACCOUNT_ID,
+        activeAccountProvider: this.activeAccountConfig?.provider ?? 'deepseek',
         agentSettings: this.agentSettings,
         messages: getVisibleMessages(this.messages),
         activeSessionId: this.sessionStore.activeSessionId,
@@ -2942,7 +3461,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         usageMetrics: {
           sessionUsageStats: activeSession.usageStats,
           lastTurnUsage,
-          balance: this.balanceStore.getBalance(),
+          balance: this.activeAccountConfig?.provider === 'openai-compatible'
+            ? undefined
+            : this.balanceStore.getBalance(),
           promptCacheDiagnostics: activeSession.promptCacheDiagnostics,
           turnCount: activeSession.messages.filter((message) => message.role === 'user').length,
           contextPercent,

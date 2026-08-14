@@ -269,41 +269,98 @@ export function getInputTemplate(): string {
     </div>
 
     <div id="settingsDialogOverlay" class="settings-overlay hidden">
-      <div class="settings-dialog" role="dialog" aria-label="KeepSeek 设置" data-i18n-aria-label="apiDialogLabel">
+      <div class="settings-dialog settings-account-dialog" role="dialog" aria-modal="true" aria-label="KeepSeek 设置" data-i18n-aria-label="accountSettingsDialogLabel">
         <div class="settings-dialog-header">
-          <span class="settings-dialog-title" data-i18n="apiDialogTitle">API Key</span>
+          <span id="settingsDialogTitle" class="settings-dialog-title" data-i18n="accountSettingsDialogTitle">账号与模型</span>
         </div>
         <div class="settings-dialog-body">
-          <p class="settings-dialog-desc" data-i18n="apiDialogDesc">配置 DeepSeek API Key 和 Base URL。</p>
-          <div class="settings-field">
-            <label class="settings-field-label" for="settingsApiKey">API Key</label>
-            <div class="settings-secret-input">
-              <input id="settingsApiKey" class="settings-input" type="password" placeholder="sk-..." autocomplete="off" />
-              <button
-                id="settingsApiKeyVisibilityBtn"
-                class="settings-secret-toggle"
-                type="button"
-                aria-label="显示 API Key"
-                aria-pressed="false"
-                title="显示 API Key"
-                data-i18n-title="showApiKey"
-                data-i18n-aria-label="showApiKey"
-              >
-                <svg class="settings-secret-icon settings-secret-icon-show" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
-                  <path d="M1.75 8s2.25-4 6.25-4 6.25 4 6.25 4-2.25 4-6.25 4S1.75 8 1.75 8Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
-                  <circle cx="8" cy="8" r="1.75" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                </svg>
-                <svg class="settings-secret-icon settings-secret-icon-hide" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
-                  <path d="M2.25 2.25l11.5 11.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
-                  <path d="M6.55 4.28A6.7 6.7 0 0 1 8 4c4 0 6.25 4 6.25 4a10.7 10.7 0 0 1-1.67 2.08M9.42 11.82A6.7 6.7 0 0 1 8 12c-4 0-6.25-4-6.25-4a10.2 10.2 0 0 1 2.8-3.01" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </button>
-            </div>
+          <p id="settingsDialogDesc" class="settings-dialog-desc" data-i18n="accountSettingsDialogDesc">管理账号连接信息与账号内模型昵称。</p>
+          <div id="settingsDialogStatus" class="settings-dialog-status hidden" role="status" aria-live="polite" tabindex="-1"></div>
+          <div class="settings-account-workspace">
+            <aside class="settings-account-sidebar" aria-labelledby="settingsAccountsTitle">
+              <div class="settings-account-section-header">
+                <span id="settingsAccountsTitle" class="settings-section-heading" data-i18n="accountsTitle">账号</span>
+              </div>
+              <div class="settings-account-create-row">
+                <select id="settingsCreateProvider" aria-label="账号服务商" data-i18n-aria-label="accountProviderLabel">
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="openai-compatible">OpenAI compatible</option>
+                </select>
+                <button id="settingsCreateAccountBtn" type="button" class="secondary" data-i18n="createAccount">新建</button>
+              </div>
+              <div id="settingsAccountList" class="settings-account-list" role="listbox" aria-label="账号列表" data-i18n-aria-label="accountListLabel"></div>
+              <div id="settingsAccountEmpty" class="settings-empty-state hidden" data-i18n="accountListEmpty">暂无账号。选择服务商后新建一个账号。</div>
+            </aside>
+
+            <section id="settingsAccountEditor" class="settings-account-editor" aria-labelledby="settingsCurrentAccountTitle">
+              <div class="settings-account-editor-header">
+                <div>
+                  <span id="settingsCurrentAccountTitle" class="settings-section-heading" data-i18n="currentAccount">当前账号</span>
+                  <span id="settingsCurrentProvider" class="settings-account-provider"></span>
+                </div>
+                <button id="settingsDeleteAccountBtn" type="button" class="secondary settings-danger-button" data-i18n="deleteAccount">删除账号…</button>
+              </div>
+              <div id="settingsAccountEditorEmpty" class="settings-empty-state hidden" data-i18n="accountEditorEmpty">新建或选择一个账号以编辑连接信息。</div>
+              <div id="settingsAccountFields">
+                <label class="settings-field">
+                  <span id="settingsAccountNameLabel" class="settings-field-label" data-i18n="accountName">账号名称</span>
+                  <input id="settingsAccountName" class="settings-input" type="text" autocomplete="off" />
+                </label>
+                <div class="settings-field">
+                  <label class="settings-field-label" for="settingsApiKey">API Key</label>
+                  <div class="settings-secret-input">
+                    <input id="settingsApiKey" class="settings-input" type="password" placeholder="sk-..." autocomplete="off" />
+                    <button
+                      id="settingsApiKeyVisibilityBtn"
+                      class="settings-secret-toggle"
+                      type="button"
+                      aria-label="显示 API Key"
+                      aria-pressed="false"
+                      title="显示 API Key"
+                      data-i18n-title="showApiKey"
+                      data-i18n-aria-label="showApiKey"
+                    >
+                      <svg class="settings-secret-icon settings-secret-icon-show" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+                        <path d="M1.75 8s2.25-4 6.25-4 6.25 4 6.25 4-2.25 4-6.25 4S1.75 8 1.75 8Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+                        <circle cx="8" cy="8" r="1.75" fill="none" stroke="currentColor" stroke-width="1.3"/>
+                      </svg>
+                      <svg class="settings-secret-icon settings-secret-icon-hide" width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+                        <path d="M2.25 2.25l11.5 11.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                        <path d="M6.55 4.28A6.7 6.7 0 0 1 8 4c4 0 6.25 4 6.25 4a10.7 10.7 0 0 1-1.67 2.08M9.42 11.82A6.7 6.7 0 0 1 8 12c-4 0-6.25-4-6.25-4a10.2 10.2 0 0 1 2.8-3.01" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <label class="settings-field">
+                  <span class="settings-field-label">Base URL</span>
+                  <input id="settingsBaseUrl" class="settings-input" type="text" placeholder="https://api.deepseek.com" autocomplete="off" />
+                </label>
+
+                <div class="settings-model-section">
+                  <div class="settings-account-section-header settings-model-header">
+                    <div>
+                      <span id="settingsModelsTitle" class="settings-section-heading" data-i18n="modelAliasesTitle">模型昵称</span>
+                      <span id="settingsModelsHint" class="settings-field-hint" data-i18n="modelAliasesHint">昵称会优先显示在模型切换菜单中。</span>
+                    </div>
+                    <button id="settingsRefreshModelsBtn" type="button" class="secondary" data-i18n="refreshModels">刷新模型</button>
+                  </div>
+                  <div id="settingsModelList" class="settings-model-list"></div>
+                  <div id="settingsModelEmpty" class="settings-empty-state hidden" data-i18n="accountModelsEmpty">没有可用模型；可刷新或手动添加模型 ID。</div>
+                  <div class="settings-manual-model">
+                    <label class="settings-field">
+                      <span id="settingsManualModelIdLabel" class="settings-field-label" data-i18n="manualModelId">模型 ID</span>
+                      <input id="settingsManualModelId" class="settings-input" type="text" placeholder="model-id" autocomplete="off" />
+                    </label>
+                    <label class="settings-field">
+                      <span id="settingsManualModelAliasLabel" class="settings-field-label" data-i18n="manualModelAlias">昵称（可选）</span>
+                      <input id="settingsManualModelAlias" class="settings-input" type="text" autocomplete="off" />
+                    </label>
+                    <button id="settingsSaveModelAliasBtn" type="button" class="secondary" data-i18n="addModel">添加模型</button>
+                  </div>
+                </div>
+              </div>
+            </section>
           </div>
-          <label class="settings-field">
-            <span class="settings-field-label">Base URL</span>
-            <input id="settingsBaseUrl" class="settings-input" type="text" placeholder="https://api.deepseek.com" autocomplete="off" />
-          </label>
         </div>
         <div class="settings-dialog-footer">
           <button id="settingsClearApiKeyBtn" type="button" class="secondary settings-clear-api-key" data-i18n="clearApiKey">清空</button>

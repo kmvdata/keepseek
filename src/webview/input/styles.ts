@@ -1211,6 +1211,10 @@ export function getInputStyles(): string {
       box-shadow: 0 12px 32px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
     }
 
+    .settings-account-dialog {
+      width: min(720px, calc(100vw - var(--keepseek-edge-padding-double, 8px)));
+    }
+
     .settings-dialog-header {
       display: flex;
       align-items: center;
@@ -1232,6 +1236,227 @@ export function getInputStyles(): string {
       font-size: 12px;
       color: var(--vscode-descriptionForeground);
       line-height: 1.45;
+    }
+
+    .settings-dialog-status {
+      margin: -4px 0 12px;
+      padding: 7px 9px;
+      border: 1px solid var(--vscode-inputValidation-infoBorder, var(--vscode-panel-border));
+      border-radius: 4px;
+      color: var(--vscode-inputValidation-infoForeground, var(--vscode-foreground));
+      background: var(--vscode-inputValidation-infoBackground, var(--vscode-textBlockQuote-background));
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .settings-account-workspace {
+      display: grid;
+      grid-template-columns: minmax(160px, 0.38fr) minmax(240px, 1fr);
+      align-items: start;
+      gap: 12px;
+    }
+
+    .settings-account-sidebar,
+    .settings-account-editor {
+      min-width: 0;
+      padding: 10px;
+      border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+      border-radius: 6px;
+      background: var(--vscode-editor-background, transparent);
+    }
+
+    .settings-account-section-header,
+    .settings-account-editor-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 9px;
+    }
+
+    .settings-account-editor-header > div,
+    .settings-model-header > div {
+      flex: 1 1 140px;
+      min-width: 0;
+    }
+
+    .settings-section-heading {
+      display: block;
+      color: var(--vscode-foreground);
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1.35;
+    }
+
+    .settings-account-provider {
+      display: block;
+      margin-top: 2px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+      line-height: 1.25;
+    }
+
+    .settings-account-create-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+
+    .settings-account-create-row select {
+      min-width: 0;
+    }
+
+    .settings-account-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 330px;
+      overflow-y: auto;
+    }
+
+    .settings-account-group {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .settings-account-group-label {
+      padding: 2px 4px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+
+    .settings-account-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      width: 100%;
+      min-width: 0;
+      padding: 6px 7px;
+      border-color: transparent;
+      color: var(--vscode-foreground);
+      background: transparent;
+      text-align: left;
+    }
+
+    .settings-account-item:hover {
+      background: var(--vscode-list-hoverBackground, var(--vscode-toolbar-hoverBackground));
+    }
+
+    .settings-account-item[aria-selected="true"] {
+      border-color: var(--vscode-focusBorder, var(--vscode-inputOption-activeBorder));
+      background: var(--vscode-list-activeSelectionBackground, var(--vscode-editor-selectionBackground));
+      color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+    }
+
+    .settings-account-item-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .settings-account-item-check {
+      flex: 0 0 auto;
+      width: 14px;
+      color: currentColor;
+      text-align: center;
+    }
+
+    .settings-account-editor[aria-busy="true"],
+    .settings-account-sidebar[aria-busy="true"] {
+      opacity: 0.78;
+    }
+
+    .settings-danger-button {
+      flex: 0 0 auto;
+      color: var(--vscode-errorForeground);
+    }
+
+    .settings-empty-state {
+      padding: 10px;
+      border: 1px dashed var(--vscode-panel-border, var(--vscode-input-border, transparent));
+      border-radius: 4px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.4;
+      text-align: center;
+    }
+
+    .settings-model-section {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+    }
+
+    .settings-model-header {
+      align-items: flex-start;
+    }
+
+    .settings-model-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 238px;
+      overflow-y: auto;
+    }
+
+    .settings-model-row {
+      display: grid;
+      grid-template-columns: minmax(92px, 0.7fr) minmax(110px, 1fr) auto;
+      align-items: center;
+      gap: 6px;
+      padding: 7px;
+      border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+      border-radius: 4px;
+    }
+
+    .settings-model-identity {
+      min-width: 0;
+    }
+
+    .settings-model-name,
+    .settings-model-id {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .settings-model-name {
+      color: var(--vscode-foreground);
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    .settings-model-id {
+      color: var(--vscode-descriptionForeground);
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 10px;
+    }
+
+    .settings-model-alias-input {
+      min-width: 0;
+    }
+
+    .settings-manual-model {
+      display: grid;
+      grid-template-columns: minmax(100px, 1fr) minmax(100px, 1fr) auto;
+      align-items: end;
+      gap: 6px;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+    }
+
+    .settings-manual-model .settings-field {
+      margin: 0;
     }
 
     .about-details {
@@ -1442,6 +1667,7 @@ export function getInputStyles(): string {
 
     .settings-dialog-footer {
       display: flex;
+      flex-wrap: wrap;
       justify-content: flex-end;
       gap: 8px;
       padding: 0 16px 14px;
@@ -1449,6 +1675,26 @@ export function getInputStyles(): string {
 
     .settings-clear-api-key {
       margin-right: auto;
+    }
+
+    @media (max-width: 540px) {
+      .settings-account-workspace {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .settings-account-list {
+        max-height: 156px;
+      }
+
+      .settings-model-row,
+      .settings-manual-model {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .settings-model-row button,
+      .settings-manual-model button {
+        justify-self: end;
+      }
     }
 `;
 }

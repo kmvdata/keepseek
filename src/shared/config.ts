@@ -18,6 +18,7 @@ export const DEFAULT_MAX_FILE_BYTES = 200_000;
 export const DEFAULT_MAX_REQUEST_RETRIES = 2;
 export const DEFAULT_REQUEST_RETRY_BASE_MS = 1_000;
 export const DEFAULT_SELECTED_MODEL_ID = '';
+export const DEFAULT_ACTIVE_ACCOUNT_ID = '';
 export const DEFAULT_HISTORY_RETENTION_DAYS = 7;
 export const DEFAULT_TRACE_ENABLED = false;
 export const DEFAULT_TRACE_LEVEL: InteractionTraceLevel = 'full';
@@ -82,6 +83,13 @@ export interface InteractionTraceSettings {
 
 export function getConfiguredModels(): KeepseekModel[] {
   return getSupportedDeepSeekV4Models();
+}
+
+export function getConfiguredActiveAccountId(): string {
+  return vscode.workspace
+    .getConfiguration('keepseek')
+    .get<string>('activeAccountId', DEFAULT_ACTIVE_ACCOUNT_ID)
+    .trim();
 }
 
 export function getConfiguredSelectedModelId(models = getConfiguredModels()): string {

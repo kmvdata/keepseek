@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   getConfiguredAgentSettings,
+  getConfiguredActiveAccountId,
   getConfiguredBalanceEndpointUrl,
   normalizeAgentSettings,
   normalizeCompressionThreshold
@@ -43,6 +44,7 @@ test('non-official proxy baseUrl keeps its path prefix', () => {
 });
 
 test('compression threshold configuration defaults to balanced and normalizes invalid values', () => {
+  assert.equal(getConfiguredActiveAccountId(), '');
   assert.equal(getConfiguredAgentSettings().compressionThreshold, 'balanced');
   assert.equal(normalizeCompressionThreshold('aggressive'), 'aggressive');
   assert.equal(normalizeCompressionThreshold('cache'), 'cache');

@@ -1279,6 +1279,9 @@ export function getInputScript(): string {
         renderReferenceMenuButton();
         renderSendButton();
         setApiKeyVisible(apiKeyVisible, false);
+        if (settingsOverlay && !settingsOverlay.classList.contains('hidden')) {
+          renderAccountSettings();
+        }
       }
 
       function renderReferenceMenuButton() {
@@ -1537,7 +1540,7 @@ export function getInputScript(): string {
         var selected = getSelectedModel(models);
         if (commandModelValue) {
           commandModelValue.textContent = selected ? getModelDisplayLabel(selected.model) : 'DeepSeek-V4-Flash';
-          commandModelValue.title = commandModelValue.textContent;
+          commandModelValue.title = selected && selected.model.id ? selected.model.id : commandModelValue.textContent;
         }
 
         if (commandModelSwitch) {
@@ -1574,7 +1577,8 @@ export function getInputScript(): string {
           var label = document.createElement('span');
           label.className = 'command-model-name';
           label.textContent = getModelDisplayLabel(model);
-          label.title = model.label || model.id;
+          label.title = model.id || getModelDisplayLabel(model);
+          option.title = model.id || getModelDisplayLabel(model);
 
           option.append(check, label);
           commandModelList.append(option);
@@ -1832,7 +1836,7 @@ export function getInputScript(): string {
 
       function getModelDisplayLabel(model) {
         if (!model) { return 'DeepSeek-V4-Flash'; }
-        return model.label || model.id || 'Model';
+        return model.alias || model.fetchedName || model.label || model.id || 'Model';
       }
 
       function renderEffort() {
@@ -3372,9 +3376,37 @@ export function getInputScript(): string {
       }
 
       var settingsOverlay = document.getElementById('settingsDialogOverlay');
+      var settingsDialog = settingsOverlay ? settingsOverlay.querySelector('.settings-dialog') : null;
+      var settingsDialogTitle = document.getElementById('settingsDialogTitle');
+      var settingsDialogDesc = document.getElementById('settingsDialogDesc');
+      var settingsDialogStatus = document.getElementById('settingsDialogStatus');
+      var settingsAccountSidebar = settingsOverlay ? settingsOverlay.querySelector('.settings-account-sidebar') : null;
+      var settingsAccountEditor = document.getElementById('settingsAccountEditor');
+      var settingsAccountsTitle = document.getElementById('settingsAccountsTitle');
+      var settingsCreateProvider = document.getElementById('settingsCreateProvider');
+      var settingsCreateAccountBtn = document.getElementById('settingsCreateAccountBtn');
+      var settingsAccountList = document.getElementById('settingsAccountList');
+      var settingsAccountEmpty = document.getElementById('settingsAccountEmpty');
+      var settingsCurrentAccountTitle = document.getElementById('settingsCurrentAccountTitle');
+      var settingsCurrentProvider = document.getElementById('settingsCurrentProvider');
+      var settingsDeleteAccountBtn = document.getElementById('settingsDeleteAccountBtn');
+      var settingsAccountEditorEmpty = document.getElementById('settingsAccountEditorEmpty');
+      var settingsAccountFields = document.getElementById('settingsAccountFields');
+      var settingsAccountNameLabel = document.getElementById('settingsAccountNameLabel');
+      var settingsAccountName = document.getElementById('settingsAccountName');
       var settingsApiKey = document.getElementById('settingsApiKey');
       var settingsApiKeyVisibilityBtn = document.getElementById('settingsApiKeyVisibilityBtn');
       var settingsBaseUrl = document.getElementById('settingsBaseUrl');
+      var settingsModelsTitle = document.getElementById('settingsModelsTitle');
+      var settingsModelsHint = document.getElementById('settingsModelsHint');
+      var settingsRefreshModelsBtn = document.getElementById('settingsRefreshModelsBtn');
+      var settingsModelList = document.getElementById('settingsModelList');
+      var settingsModelEmpty = document.getElementById('settingsModelEmpty');
+      var settingsManualModelIdLabel = document.getElementById('settingsManualModelIdLabel');
+      var settingsManualModelId = document.getElementById('settingsManualModelId');
+      var settingsManualModelAliasLabel = document.getElementById('settingsManualModelAliasLabel');
+      var settingsManualModelAlias = document.getElementById('settingsManualModelAlias');
+      var settingsSaveModelAliasBtn = document.getElementById('settingsSaveModelAliasBtn');
       var historySettingsOverlay = document.getElementById('historySettingsDialogOverlay');
       var historyRetentionDaysInput = document.getElementById('historyRetentionDaysInput');
       var aboutOverlay = document.getElementById('aboutDialogOverlay');
@@ -3399,6 +3431,15 @@ export function getInputScript(): string {
       var createSkillCreateBtn = document.getElementById('createSkillCreateBtn');
       var createSkillCancelBtn = document.getElementById('createSkillCancelBtn');
       var apiKeyVisible = false;
+      var settingsAccounts = [];
+      var settingsActiveAccountId = '';
+      var settingsDialogBusyAction = '';
+      var settingsDialogBusyTimer = null;
+      var settingsDialogDirty = false;
+      var settingsOriginalFormSignature = '';
+      var settingsPendingAliasAccountId = '';
+      var settingsPendingAliasDrafts = null;
+      var settingsRunBusyStatusVisible = false;
       var defaultHistoryRetentionDays = 7;
       var maxHistoryRetentionDays = 60;
 
@@ -3424,14 +3465,441 @@ export function getInputScript(): string {
         }
       }
 
+      function readSettingsString(value, fallback) {
+        return typeof value === 'string' ? value : fallback;
+      }
+
+      function normalizeSettingsProvider(value) {
+        return value === 'openai-compatible' ? 'openai-compatible' : 'deepseek';
+      }
+
+      function getSettingsProviderLabel(provider) {
+        return provider === 'openai-compatible' ? 'OpenAI compatible' : 'DeepSeek';
+      }
+
+      function normalizeSettingsModelAliases(value) {
+        var aliases = {};
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          return aliases;
+        }
+        Object.keys(value).forEach(function(modelId) {
+          var normalizedModelId = String(modelId || '').trim();
+          if (!normalizedModelId || typeof value[modelId] !== 'string') { return; }
+          aliases[normalizedModelId] = value[modelId];
+        });
+        return aliases;
+      }
+
+      function normalizeSettingsAccount(rawAccount, index) {
+        if (!rawAccount || typeof rawAccount !== 'object') { return null; }
+        var id = readSettingsString(rawAccount.id || rawAccount.accountId, '').trim();
+        if (!id) { return null; }
+        var provider = normalizeSettingsProvider(rawAccount.provider);
+        return {
+          id: id,
+          name: readSettingsString(rawAccount.name, '').trim() || (provider === 'deepseek' ? t('defaultDeepSeekAccountName') : t('defaultCompatibleAccountName')),
+          provider: provider,
+          apiKey: readSettingsString(rawAccount.apiKey, ''),
+          baseUrl: readSettingsString(rawAccount.baseUrl, ''),
+          modelAliases: normalizeSettingsModelAliases(rawAccount.modelAliases),
+          modelCache: rawAccount.modelCache && typeof rawAccount.modelCache === 'object' ? rawAccount.modelCache : null,
+          models: Array.isArray(rawAccount.models) ? rawAccount.models : [],
+          enabled: rawAccount.enabled !== false,
+          legacyFallback: rawAccount.legacyFallback === true,
+          sortIndex: index
+        };
+      }
+
+      function getSettingsActiveAccount() {
+        for (var i = 0; i < settingsAccounts.length; i++) {
+          if (settingsAccounts[i].id === settingsActiveAccountId) {
+            return settingsAccounts[i];
+          }
+        }
+        return settingsAccounts.length ? settingsAccounts[0] : null;
+      }
+
+      function getSettingsAccountModels(account) {
+        if (!account) { return []; }
+        var modelsById = {};
+        var modelOrder = [];
+        function addModel(rawModel) {
+          var source = typeof rawModel === 'string' ? { id: rawModel } : rawModel;
+          if (!source || typeof source !== 'object') { return; }
+          var id = readSettingsString(source.id, '').trim();
+          if (!id) { return; }
+          if (!modelsById[id]) {
+            modelsById[id] = { id: id, alias: '', fetchedName: '', label: '' };
+            modelOrder.push(id);
+          }
+          var model = modelsById[id];
+          model.alias = readSettingsString(source.alias, model.alias);
+          model.fetchedName = readSettingsString(source.fetchedName || source.name, model.fetchedName);
+          model.label = readSettingsString(source.label, model.label);
+        }
+        var cachedModels = account.modelCache && Array.isArray(account.modelCache.models)
+          ? account.modelCache.models
+          : [];
+        cachedModels.forEach(addModel);
+        account.models.forEach(addModel);
+        if (Array.isArray(state.models)) {
+          state.models.forEach(function(model) {
+            if (!model || typeof model !== 'object') { return; }
+            if (model.accountId && model.accountId !== account.id) { return; }
+            if (!model.accountId && account.provider !== 'deepseek') { return; }
+            addModel(model);
+          });
+        }
+        Object.keys(account.modelAliases).forEach(function(modelId) {
+          addModel({ id: modelId });
+          modelsById[modelId].alias = account.modelAliases[modelId];
+        });
+        return modelOrder.map(function(modelId) { return modelsById[modelId]; });
+      }
+
+      function getSettingsFormSignature() {
+        return JSON.stringify({
+          name: settingsAccountName ? settingsAccountName.value.trim() : '',
+          apiKey: settingsApiKey ? settingsApiKey.value.trim() : '',
+          baseUrl: settingsBaseUrl ? settingsBaseUrl.value.trim() : ''
+        });
+      }
+
+      function updateSettingsDialogDirtyState() {
+        settingsDialogDirty = getSettingsFormSignature() !== settingsOriginalFormSignature;
+      }
+
+      function getFirstUnsavedSettingsAliasInput() {
+        var account = getSettingsActiveAccount();
+        if (!account || !settingsModelList) { return null; }
+        var models = getSettingsAccountModels(account);
+        var savedAliases = {};
+        models.forEach(function(model) {
+          savedAliases[model.id] = Object.prototype.hasOwnProperty.call(account.modelAliases, model.id)
+            ? account.modelAliases[model.id]
+            : model.alias || '';
+        });
+        return Array.from(settingsModelList.querySelectorAll('input[data-model-id]')).find(function(input) {
+          var modelId = input.dataset.modelId || '';
+          return input.value.trim() !== (savedAliases[modelId] || '').trim();
+        }) || null;
+      }
+
+      function captureSettingsAliasDrafts() {
+        var drafts = {};
+        if (!settingsModelList) { return drafts; }
+        settingsModelList.querySelectorAll('input[data-model-id]').forEach(function(input) {
+          if (input.dataset.modelId) {
+            drafts[input.dataset.modelId] = input.value;
+          }
+        });
+        return drafts;
+      }
+
+      function restoreSettingsAliasDrafts(accountId, drafts) {
+        if (!settingsModelList || !drafts || accountId !== settingsActiveAccountId) { return; }
+        settingsModelList.querySelectorAll('input[data-model-id]').forEach(function(input) {
+          var modelId = input.dataset.modelId || '';
+          if (Object.prototype.hasOwnProperty.call(drafts, modelId)) {
+            input.value = drafts[modelId];
+          }
+        });
+      }
+
+      function blockSettingsActionForUnsavedChanges(includeAliasDrafts) {
+        updateSettingsDialogDirtyState();
+        var unsavedAlias = includeAliasDrafts === false ? null : getFirstUnsavedSettingsAliasInput();
+        if (!settingsDialogDirty && !unsavedAlias) { return false; }
+        setSettingsDialogStatus(t('accountUnsavedChanges'));
+        if (settingsDialogDirty && settingsSaveBtn) {
+          settingsSaveBtn.focus();
+        } else if (unsavedAlias) {
+          unsavedAlias.focus();
+        }
+        return true;
+      }
+
+      function setSettingsDialogStatus(message) {
+        if (!settingsDialogStatus) { return; }
+        settingsDialogStatus.textContent = message || '';
+        settingsDialogStatus.classList.toggle('hidden', !message);
+      }
+
+      function blockAccountSettingsWhileRunBusy() {
+        if (!state.isBusy) { return false; }
+        settingsRunBusyStatusVisible = true;
+        setSettingsDialogStatus(t('accountSettingsReadonlyWhileBusy'));
+        if (settingsDialogStatus) { settingsDialogStatus.focus(); }
+        return true;
+      }
+
+      function syncAccountSettingsRunBusyStatus(runBusy, operationBusy) {
+        if (runBusy && !operationBusy) {
+          settingsRunBusyStatusVisible = true;
+          setSettingsDialogStatus(t('accountSettingsReadonlyWhileBusy'));
+          return;
+        }
+        if (settingsRunBusyStatusVisible) {
+          settingsRunBusyStatusVisible = false;
+          setSettingsDialogStatus('');
+        }
+      }
+
+      function clearSettingsDialogBusy() {
+        settingsDialogBusyAction = '';
+        if (settingsDialogBusyTimer) {
+          clearTimeout(settingsDialogBusyTimer);
+          settingsDialogBusyTimer = null;
+        }
+      }
+
+      function beginSettingsDialogAction(action, statusMessage) {
+        clearSettingsDialogBusy();
+        if (action !== 'save-alias') {
+          settingsPendingAliasAccountId = '';
+          settingsPendingAliasDrafts = null;
+        }
+        settingsDialogBusyAction = action;
+        settingsRunBusyStatusVisible = false;
+        setSettingsDialogStatus(statusMessage);
+        renderAccountSettings();
+        if (settingsDialogStatus) { settingsDialogStatus.focus(); }
+        settingsDialogBusyTimer = setTimeout(function() {
+          settingsDialogBusyTimer = null;
+          setSettingsDialogStatus(t('accountOperationStillPending'));
+        }, 15000);
+      }
+
+      function populateSettingsAccount(account) {
+        if (settingsAccountName) {
+          settingsAccountName.value = account ? account.name : '';
+        }
+        if (settingsApiKey) {
+          settingsApiKey.value = account ? account.apiKey : '';
+        }
+        if (settingsBaseUrl) {
+          settingsBaseUrl.value = account
+            ? account.baseUrl || (account.provider === 'deepseek' ? 'https://api.deepseek.com' : '')
+            : '';
+        }
+        if (settingsManualModelId) { settingsManualModelId.value = ''; }
+        if (settingsManualModelAlias) { settingsManualModelAlias.value = ''; }
+        settingsOriginalFormSignature = getSettingsFormSignature();
+        settingsDialogDirty = false;
+      }
+
+      function renderSettingsAccountList(controlsDisabled) {
+        if (!settingsAccountList) { return; }
+        settingsAccountList.innerHTML = '';
+        var providerOrder = ['deepseek', 'openai-compatible'];
+        providerOrder.forEach(function(provider) {
+          var accounts = settingsAccounts.filter(function(account) { return account.provider === provider; });
+          if (!accounts.length) { return; }
+          var group = document.createElement('div');
+          group.className = 'settings-account-group';
+          group.setAttribute('role', 'group');
+          group.setAttribute('aria-label', getSettingsProviderLabel(provider));
+          var groupLabel = document.createElement('div');
+          groupLabel.className = 'settings-account-group-label';
+          groupLabel.textContent = getSettingsProviderLabel(provider);
+          group.append(groupLabel);
+          accounts.forEach(function(account) {
+            var button = document.createElement('button');
+            var selected = account.id === settingsActiveAccountId;
+            button.type = 'button';
+            button.className = 'settings-account-item';
+            button.dataset.accountId = account.id;
+            button.setAttribute('role', 'option');
+            button.setAttribute('aria-selected', selected ? 'true' : 'false');
+            button.disabled = controlsDisabled || !account.enabled;
+            button.title = account.name + ' · ' + account.id;
+            var name = document.createElement('span');
+            name.className = 'settings-account-item-name';
+            name.textContent = account.name + (account.enabled ? '' : ' (' + t('accountDisabled') + ')');
+            var check = document.createElement('span');
+            check.className = 'settings-account-item-check';
+            check.setAttribute('aria-hidden', 'true');
+            check.textContent = selected ? '\\u2713' : '';
+            button.append(name, check);
+            group.append(button);
+          });
+          settingsAccountList.append(group);
+        });
+      }
+
+      function renderSettingsModelList(account, controlsDisabled) {
+        if (!settingsModelList) { return; }
+        var models = getSettingsAccountModels(account);
+        var focusedModelId = document.activeElement instanceof HTMLInputElement
+          && document.activeElement.matches('.settings-model-alias-input[data-model-id]')
+          ? document.activeElement.dataset.modelId || ''
+          : '';
+        var focusedSelectionStart = focusedModelId ? document.activeElement.selectionStart : null;
+        var focusedSelectionEnd = focusedModelId ? document.activeElement.selectionEnd : null;
+        var draftAliases = {};
+        settingsModelList.querySelectorAll('input[data-model-id]').forEach(function(input) {
+          if (input.dataset.modelId) {
+            draftAliases[input.dataset.modelId] = input.value;
+          }
+        });
+        settingsModelList.innerHTML = '';
+        models.forEach(function(model) {
+          var row = document.createElement('div');
+          row.className = 'settings-model-row';
+          row.dataset.modelId = model.id;
+          var identity = document.createElement('div');
+          identity.className = 'settings-model-identity';
+          identity.title = model.id;
+          var name = document.createElement('span');
+          name.className = 'settings-model-name';
+          name.textContent = model.fetchedName || model.label || model.id;
+          var id = document.createElement('span');
+          id.className = 'settings-model-id';
+          id.textContent = model.id;
+          identity.append(name, id);
+          var alias = document.createElement('input');
+          alias.type = 'text';
+          alias.className = 'settings-input settings-model-alias-input';
+          alias.dataset.modelId = model.id;
+          alias.value = Object.prototype.hasOwnProperty.call(draftAliases, model.id)
+            ? draftAliases[model.id]
+            : Object.prototype.hasOwnProperty.call(account.modelAliases, model.id)
+              ? account.modelAliases[model.id]
+              : model.alias || '';
+          alias.placeholder = t('modelAliasPlaceholder');
+          alias.setAttribute('aria-label', t('modelAliasFor', { modelId: model.id }));
+          alias.disabled = controlsDisabled;
+          var save = document.createElement('button');
+          save.type = 'button';
+          save.className = 'secondary';
+          save.dataset.action = 'save-model-alias';
+          save.dataset.modelId = model.id;
+          save.textContent = t('saveAlias');
+          save.title = model.id;
+          save.disabled = controlsDisabled;
+          row.append(identity, alias, save);
+          settingsModelList.append(row);
+          if (focusedModelId === model.id) {
+            alias.focus();
+            if (typeof focusedSelectionStart === 'number' && typeof focusedSelectionEnd === 'number') {
+              alias.setSelectionRange(focusedSelectionStart, focusedSelectionEnd);
+            }
+          }
+        });
+        if (settingsModelEmpty) {
+          settingsModelEmpty.classList.toggle('hidden', models.length > 0);
+        }
+      }
+
+      function renderAccountSettings() {
+        var account = getSettingsActiveAccount();
+        var operationBusy = Boolean(settingsDialogBusyAction);
+        var runBusy = Boolean(state.isBusy);
+        var controlsDisabled = operationBusy || runBusy;
+        if (settingsDialog) {
+          settingsDialog.setAttribute('aria-busy', operationBusy ? 'true' : 'false');
+        }
+        if (settingsAccountSidebar) {
+          settingsAccountSidebar.setAttribute('aria-busy', operationBusy ? 'true' : 'false');
+          settingsAccountSidebar.setAttribute('aria-disabled', controlsDisabled ? 'true' : 'false');
+        }
+        if (settingsAccountEditor) {
+          settingsAccountEditor.setAttribute('aria-busy', operationBusy ? 'true' : 'false');
+          settingsAccountEditor.setAttribute('aria-disabled', controlsDisabled ? 'true' : 'false');
+        }
+        syncAccountSettingsRunBusyStatus(runBusy, operationBusy);
+        if (settingsDialogTitle) { settingsDialogTitle.textContent = t('accountSettingsDialogTitle'); }
+        if (settingsDialogDesc) { settingsDialogDesc.textContent = t('accountSettingsDialogDesc'); }
+        if (settingsOverlay) { settingsOverlay.querySelector('.settings-dialog')?.setAttribute('aria-label', t('accountSettingsDialogLabel')); }
+        if (settingsAccountsTitle) { settingsAccountsTitle.textContent = t('accountsTitle'); }
+        if (settingsCreateProvider) {
+          settingsCreateProvider.setAttribute('aria-label', t('accountProviderLabel'));
+          settingsCreateProvider.disabled = controlsDisabled;
+        }
+        if (settingsCreateAccountBtn) {
+          settingsCreateAccountBtn.textContent = settingsDialogBusyAction === 'create' ? t('creatingAccount') : t('createAccount');
+          settingsCreateAccountBtn.disabled = controlsDisabled;
+        }
+        if (settingsAccountList) {
+          settingsAccountList.setAttribute('aria-label', t('accountListLabel'));
+          settingsAccountList.setAttribute('aria-disabled', controlsDisabled ? 'true' : 'false');
+        }
+        if (settingsAccountEmpty) {
+          settingsAccountEmpty.textContent = t('accountListEmpty');
+          settingsAccountEmpty.classList.toggle('hidden', settingsAccounts.length > 0);
+        }
+        if (settingsCurrentAccountTitle) { settingsCurrentAccountTitle.textContent = t('currentAccount'); }
+        if (settingsCurrentProvider) { settingsCurrentProvider.textContent = account ? getSettingsProviderLabel(account.provider) : ''; }
+        if (settingsDeleteAccountBtn) {
+          settingsDeleteAccountBtn.textContent = settingsDialogBusyAction === 'delete' ? t('waitingForDeleteConfirmation') : t('deleteAccount');
+          settingsDeleteAccountBtn.disabled = !account || controlsDisabled;
+        }
+        if (settingsAccountEditorEmpty) {
+          settingsAccountEditorEmpty.textContent = t('accountEditorEmpty');
+          settingsAccountEditorEmpty.classList.toggle('hidden', Boolean(account));
+        }
+        if (settingsAccountFields) { settingsAccountFields.classList.toggle('hidden', !account); }
+        if (settingsAccountNameLabel) { settingsAccountNameLabel.textContent = t('accountName'); }
+        if (settingsModelsTitle) { settingsModelsTitle.textContent = t('modelAliasesTitle'); }
+        if (settingsModelsHint) { settingsModelsHint.textContent = t('modelAliasesHint'); }
+        if (settingsRefreshModelsBtn) {
+          settingsRefreshModelsBtn.textContent = settingsDialogBusyAction === 'refresh-models' ? t('refreshingModels') : t('refreshModels');
+          settingsRefreshModelsBtn.disabled = !account || controlsDisabled;
+        }
+        if (settingsModelEmpty) { settingsModelEmpty.textContent = t('accountModelsEmpty'); }
+        if (settingsManualModelIdLabel) { settingsManualModelIdLabel.textContent = t('manualModelId'); }
+        if (settingsManualModelAliasLabel) { settingsManualModelAliasLabel.textContent = t('manualModelAlias'); }
+        if (settingsSaveModelAliasBtn) {
+          settingsSaveModelAliasBtn.textContent = settingsDialogBusyAction === 'save-alias' ? t('savingAlias') : t('addModel');
+          settingsSaveModelAliasBtn.disabled = !account || controlsDisabled;
+        }
+        [settingsAccountName, settingsApiKey, settingsBaseUrl, settingsApiKeyVisibilityBtn, settingsClearApiKeyBtn, settingsSaveBtn, settingsManualModelId, settingsManualModelAlias].forEach(function(control) {
+          if (control) { control.disabled = !account || controlsDisabled; }
+        });
+        if (settingsCancelBtn) { settingsCancelBtn.disabled = operationBusy; }
+        renderSettingsAccountList(controlsDisabled);
+        renderSettingsModelList(account, controlsDisabled);
+      }
+
       function showSettingsDialog(settings) {
         if (!settingsOverlay || !settingsApiKey || !settingsBaseUrl) { return; }
+        var aliasDraftAccountId = settingsDialogBusyAction === 'save-alias' ? settingsPendingAliasAccountId : '';
+        var aliasDrafts = settingsDialogBusyAction === 'save-alias' ? settingsPendingAliasDrafts : null;
         var values = settings && typeof settings === 'object' ? settings : {};
-        settingsApiKey.value = values.apiKey || '';
-        settingsBaseUrl.value = values.baseUrl || 'https://api.deepseek.com';
+        var hasAccountsPayload = Array.isArray(values.accounts);
+        var rawAccounts = hasAccountsPayload ? values.accounts : [{
+          id: readSettingsString(values.accountId || values.activeAccountId, 'default'),
+          name: readSettingsString(values.accountName, '') || t('defaultDeepSeekAccountName'),
+          provider: 'deepseek',
+          apiKey: readSettingsString(values.apiKey, ''),
+          baseUrl: readSettingsString(values.baseUrl, 'https://api.deepseek.com'),
+          modelAliases: {},
+          legacyFallback: true
+        }];
+        settingsAccounts = rawAccounts.map(normalizeSettingsAccount).filter(Boolean);
+        var requestedActiveId = readSettingsString(values.activeAccountId || values.accountId, '').trim();
+        settingsActiveAccountId = settingsAccounts.some(function(account) { return account.id === requestedActiveId; })
+          ? requestedActiveId
+          : settingsAccounts.length ? settingsAccounts[0].id : '';
+        clearSettingsDialogBusy();
+        settingsRunBusyStatusVisible = false;
+        setSettingsDialogStatus('');
+        populateSettingsAccount(getSettingsActiveAccount());
+        if (settingsModelList) { settingsModelList.innerHTML = ''; }
         setApiKeyVisible(false, false);
+        renderAccountSettings();
+        restoreSettingsAliasDrafts(aliasDraftAccountId, aliasDrafts);
+        settingsPendingAliasAccountId = '';
+        settingsPendingAliasDrafts = null;
         settingsOverlay.classList.remove('hidden');
-        settingsApiKey.focus();
+        if (state.isBusy && settingsDialogStatus) {
+          settingsDialogStatus.focus();
+        } else if (settingsAccountName && getSettingsActiveAccount()) {
+          settingsAccountName.focus();
+          settingsAccountName.select();
+        } else if (settingsCreateProvider) {
+          settingsCreateProvider.focus();
+        }
       }
 
       function showHistorySettingsDialog(settings) {
@@ -3516,8 +3984,32 @@ export function getInputScript(): string {
 
       function hideSettingsDialog() {
         if (!settingsOverlay) { return; }
+        if (settingsDialogBusyAction) {
+          setSettingsDialogStatus(t('accountOperationStillPending'));
+          return;
+        }
+        clearSettingsDialogBusy();
+        settingsPendingAliasAccountId = '';
+        settingsPendingAliasDrafts = null;
+        settingsRunBusyStatusVisible = false;
+        setSettingsDialogStatus('');
         settingsOverlay.classList.add('hidden');
         promptInput.focus();
+      }
+
+      function trapSettingsDialogFocus(event) {
+        if (!settingsDialog || event.key !== 'Tab') { return; }
+        var controls = Array.from(settingsDialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'));
+        if (!controls.length) { return; }
+        var first = controls[0];
+        var last = controls[controls.length - 1];
+        if (event.shiftKey && (document.activeElement === first || !settingsDialog.contains(document.activeElement))) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
       }
 
       function hideHistorySettingsDialog() {
@@ -3593,20 +4085,167 @@ export function getInputScript(): string {
 
       if (settingsSaveBtn) {
         settingsSaveBtn.addEventListener('click', function() {
+          if (blockAccountSettingsWhileRunBusy()) { return; }
+          var account = getSettingsActiveAccount();
+          if (!account || settingsDialogBusyAction) { return; }
+          var unsavedAlias = getFirstUnsavedSettingsAliasInput();
+          if (unsavedAlias) {
+            setSettingsDialogStatus(t('accountUnsavedChanges'));
+            unsavedAlias.focus();
+            return;
+          }
+          var name = settingsAccountName ? settingsAccountName.value.trim() : '';
           var apiKey = settingsApiKey ? settingsApiKey.value.trim() : '';
           var baseUrl = settingsBaseUrl ? settingsBaseUrl.value.trim() : '';
-          if (!baseUrl) {
+          if (!name) {
+            setSettingsDialogStatus(t('accountNameRequired'));
+            if (settingsAccountName) { settingsAccountName.focus(); }
+            return;
+          }
+          if (!baseUrl && account.provider === 'deepseek') {
             baseUrl = 'https://api.deepseek.com';
           }
+          if (!baseUrl) {
+            setSettingsDialogStatus(t('accountBaseUrlRequired'));
+            if (settingsBaseUrl) { settingsBaseUrl.focus(); }
+            return;
+          }
           vscode.postMessage({
-            type: 'saveApiSettings',
+            type: 'saveAccountSettings',
+            accountId: account.id,
+            name: name,
             apiKey: apiKey,
             baseUrl: baseUrl
           });
-          setComposerStatus(t('apiSettingsSaved'));
-          hideSettingsDialog();
+          beginSettingsDialogAction('save-account', t('savingAccountSettings'));
+          setComposerStatus(t('savingAccountSettings'));
         });
       }
+
+      if (settingsAccountList) {
+        settingsAccountList.addEventListener('click', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          var button = target?.closest('button[data-account-id]');
+          if (!button || blockAccountSettingsWhileRunBusy() || settingsDialogBusyAction) { return; }
+          var accountId = button.dataset.accountId || '';
+          if (!accountId || accountId === settingsActiveAccountId) { return; }
+          if (blockSettingsActionForUnsavedChanges()) { return; }
+          settingsActiveAccountId = accountId;
+          populateSettingsAccount(getSettingsActiveAccount());
+          if (settingsModelList) { settingsModelList.innerHTML = ''; }
+          renderAccountSettings();
+          vscode.postMessage({ type: 'selectAccount', id: accountId });
+          beginSettingsDialogAction('select', t('switchingAccount'));
+        });
+      }
+
+      if (settingsCreateAccountBtn) {
+        settingsCreateAccountBtn.addEventListener('click', function() {
+          if (blockAccountSettingsWhileRunBusy() || settingsDialogBusyAction) { return; }
+          if (getSettingsActiveAccount() && blockSettingsActionForUnsavedChanges()) { return; }
+          var provider = normalizeSettingsProvider(settingsCreateProvider ? settingsCreateProvider.value : 'deepseek');
+          vscode.postMessage({ type: 'createAccount', provider: provider });
+          beginSettingsDialogAction('create', t('creatingAccount'));
+        });
+      }
+
+      if (settingsDeleteAccountBtn) {
+        settingsDeleteAccountBtn.addEventListener('click', function() {
+          if (blockAccountSettingsWhileRunBusy()) { return; }
+          var account = getSettingsActiveAccount();
+          if (!account || settingsDialogBusyAction) { return; }
+          vscode.postMessage({ type: 'deleteAccount', id: account.id });
+          beginSettingsDialogAction('delete', t('deleteConfirmationInVsCode'));
+        });
+      }
+
+      if (settingsRefreshModelsBtn) {
+        settingsRefreshModelsBtn.addEventListener('click', function() {
+          if (blockAccountSettingsWhileRunBusy()) { return; }
+          var account = getSettingsActiveAccount();
+          if (!account || settingsDialogBusyAction) { return; }
+          if (blockSettingsActionForUnsavedChanges()) { return; }
+          vscode.postMessage({ type: 'refreshAccountModels', accountId: account.id });
+          beginSettingsDialogAction('refresh-models', t('refreshingModels'));
+        });
+      }
+
+      if (settingsModelList) {
+        settingsModelList.addEventListener('click', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          var button = target?.closest('button[data-action="save-model-alias"]');
+          var account = getSettingsActiveAccount();
+          if (!button || blockAccountSettingsWhileRunBusy() || !account || settingsDialogBusyAction) { return; }
+          if (blockSettingsActionForUnsavedChanges(false)) { return; }
+          var modelId = button.dataset.modelId || '';
+          var row = button.closest('.settings-model-row');
+          var aliasInput = row ? row.querySelector('input[data-model-id]') : null;
+          var alias = aliasInput ? aliasInput.value.trim() : '';
+          if (!modelId) { return; }
+          settingsPendingAliasAccountId = account.id;
+          settingsPendingAliasDrafts = captureSettingsAliasDrafts();
+          vscode.postMessage({
+            type: 'setModelAlias',
+            accountId: account.id,
+            modelId: modelId,
+            alias: alias
+          });
+          beginSettingsDialogAction('save-alias', t('savingAlias'));
+        });
+        settingsModelList.addEventListener('keydown', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          if (event.key !== 'Enter' || !target?.matches('input[data-model-id]')) { return; }
+          var row = target.closest('.settings-model-row');
+          var save = row ? row.querySelector('button[data-action="save-model-alias"]') : null;
+          if (!save) { return; }
+          event.preventDefault();
+          save.click();
+        });
+      }
+
+      if (settingsSaveModelAliasBtn) {
+        settingsSaveModelAliasBtn.addEventListener('click', function() {
+          if (blockAccountSettingsWhileRunBusy()) { return; }
+          var account = getSettingsActiveAccount();
+          if (!account || settingsDialogBusyAction) { return; }
+          if (blockSettingsActionForUnsavedChanges()) { return; }
+          var modelId = settingsManualModelId ? settingsManualModelId.value.trim() : '';
+          var alias = settingsManualModelAlias ? settingsManualModelAlias.value.trim() : '';
+          if (!modelId) {
+            setSettingsDialogStatus(t('manualModelIdRequired'));
+            if (settingsManualModelId) { settingsManualModelId.focus(); }
+            return;
+          }
+          settingsPendingAliasAccountId = account.id;
+          settingsPendingAliasDrafts = captureSettingsAliasDrafts();
+          vscode.postMessage({
+            type: 'setModelAlias',
+            accountId: account.id,
+            modelId: modelId,
+            alias: alias
+          });
+          beginSettingsDialogAction('save-alias', t('savingAlias'));
+        });
+      }
+
+      [settingsManualModelId, settingsManualModelAlias].forEach(function(input) {
+        if (!input) { return; }
+        input.addEventListener('keydown', function(event) {
+          if (event.key !== 'Enter' || event.metaKey || event.ctrlKey) { return; }
+          event.preventDefault();
+          if (settingsSaveModelAliasBtn) { settingsSaveModelAliasBtn.click(); }
+        });
+      });
+
+      [settingsAccountName, settingsApiKey, settingsBaseUrl].forEach(function(input) {
+        if (!input) { return; }
+        input.addEventListener('input', function() {
+          updateSettingsDialogDirtyState();
+          if (!settingsDialogBusyAction) {
+            setSettingsDialogStatus('');
+          }
+        });
+      });
 
       if (historySettingsSaveBtn) {
         historySettingsSaveBtn.addEventListener('click', function() {
@@ -3638,10 +4277,13 @@ export function getInputScript(): string {
         settingsClearApiKeyBtn.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
+          if (blockAccountSettingsWhileRunBusy()) { return; }
           if (settingsApiKey) {
             settingsApiKey.value = '';
             settingsApiKey.focus();
           }
+          updateSettingsDialogDirtyState();
+          setSettingsDialogStatus(t('apiKeyCleared'));
           setComposerStatus(t('apiKeyCleared'));
         });
       }
@@ -3681,6 +4323,7 @@ export function getInputScript(): string {
         settingsApiKeyVisibilityBtn.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
+          if (blockAccountSettingsWhileRunBusy()) { return; }
           setApiKeyVisible(!apiKeyVisible, true);
         });
       }
@@ -3699,6 +4342,8 @@ export function getInputScript(): string {
           } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             if (settingsSaveBtn) { settingsSaveBtn.click(); }
+          } else {
+            trapSettingsDialogFocus(event);
           }
         });
       }

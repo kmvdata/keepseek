@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
-  DEFAULT_DEEPSEEK_BASE_URL,
   getConfiguredContextWindowTokens,
   getConfiguredModelUsagePricing,
   getConfiguredRequestRetryBaseMs
 } from '../shared/config';
+import { MissingAccountApiKeyError, resolveActiveAccountConfig } from '../accounts/accountResolver';
+import type { ActiveAccountConfigSnapshot } from '../accounts/types';
 import {
   getDeepSeekV4ContextCompressionSettings,
   type ContextCompressionSettings
@@ -57,6 +58,8 @@ export interface HistoryCompressionRefreshInput {
   slimToolNames?: string[];
   requestProtocolVersion?: number;
   usageSource?: Extract<UsageSource, 'summary' | 'background'>;
+  /** Per-run credentials shared with AgentRunner; omitted for legacy direct callers. */
+  accountConfig?: ActiveAccountConfigSnapshot;
 }
 
 export interface HistoryCompressionRefreshResult {
@@ -98,7 +101,10 @@ export type HistorySummaryCompletion = (input: {
 export class HistoryCompressor {
   private readonly deepSeekClient = new DeepSeekClient();
 
-  public constructor(private readonly completion?: HistorySummaryCompletion) {}
+  public constructor(
+    private readonly completion?: HistorySummaryCompletion,
+    private readonly globalStorageUri?: vscode.Uri
+  ) {}
 
   public planRefresh(input: HistoryCompressionRefreshInput): HistoryCompressionRefreshPlan {
     const settings = input.settings ?? getDeepSeekV4ContextCompressionSettings(input.model, input.agentSettings);
@@ -210,7 +216,8 @@ export class HistoryCompressor {
         timeoutMs: settings.summaryRequestTimeoutMs,
         language: input.language,
         signal: input.signal,
-        usageSource: input.usageSource ?? 'summary'
+        usageSource: input.usageSource ?? 'summary',
+        accountConfig: input.accountConfig
       });
       const content = completion.content.trim();
 
@@ -357,6 +364,7 @@ export class HistoryCompressor {
     language: KeepseekLanguage;
     signal?: AbortSignal;
     usageSource: Extract<UsageSource, 'summary' | 'background'>;
+    accountConfig?: ActiveAccountConfigSnapshot;
   }): Promise<HistorySummaryCompletionResult> {
     if (this.completion) {
       const result = await this.completion(input);
@@ -365,13 +373,17 @@ export class HistoryCompressor {
 
     const abort = createTimeoutAbortSignal(input.signal, input.timeoutMs);
     try {
+      const clientConfig = await getSummaryClientConfig(
+        input.timeoutMs,
+        this.globalStorageUri,
+        input.language,
+        input.accountConfig
+      );
       const body: DeepSeekChatRequestBody = {
         model: input.model.id,
         messages: input.messages,
         stream: true,
-        thinking: {
-          type: 'disabled'
-        },
+        thinking: clientConfig.provider === 'deepseek' ? { type: 'disabled' } : undefined,
         // Deterministic summaries: a stable completion reduces unrelated byte drift
         // between refreshes (the covered-message change is the unavoidable part).
         temperature: 0,
@@ -380,7 +392,7 @@ export class HistoryCompressor {
           include_usage: true
         }
       };
-      const response = await this.deepSeekClient.createChatCompletion(getSummaryClientConfig(input.timeoutMs), {
+      const response = await this.deepSeekClient.createChatCompletion(clientConfig, {
         body,
         language: input.language,
         signal: abort.signal,
@@ -595,15 +607,26 @@ function extractReferenceHints(content: string): string[] {
   return Array.from(hints);
 }
 
-function getSummaryClientConfig(timeoutMs: number): DeepSeekClientConfig {
-  const config = vscode.workspace.getConfiguration('keepseek');
-  const apiKey = (config.get<string>('apiKey', '').trim() || process.env.DEEPSEEK_API_KEY || '').trim();
-  if (!apiKey) {
-    throw new Error('Missing DeepSeek API key for context summary.');
+interface SummaryClientConfig extends DeepSeekClientConfig {
+  accountId: string;
+  provider: 'deepseek' | 'openai-compatible';
+}
+
+async function getSummaryClientConfig(
+  timeoutMs: number,
+  globalStorageUri: vscode.Uri | undefined,
+  language: KeepseekLanguage,
+  accountConfig?: ActiveAccountConfigSnapshot
+): Promise<SummaryClientConfig> {
+  const activeAccount = accountConfig ?? await resolveActiveAccountConfig(globalStorageUri, { language });
+  if (!activeAccount.apiKey.trim()) {
+    throw new MissingAccountApiKeyError(language);
   }
   return {
-    apiKey,
-    baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL).trim() || DEFAULT_DEEPSEEK_BASE_URL,
+    accountId: activeAccount.accountId,
+    provider: activeAccount.provider,
+    apiKey: activeAccount.apiKey,
+    baseUrl: activeAccount.baseUrl,
     streamIdleTimeoutMs: timeoutMs,
     maxRequestRetries: 0,
     requestRetryBaseMs: getConfiguredRequestRetryBaseMs()

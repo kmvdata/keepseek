@@ -55,6 +55,18 @@ export type WebviewMessage =
       baseUrl: string;
     }
   | {
+      type: 'saveAccountSettings';
+      accountId?: string;
+      name: string;
+      apiKey: string;
+      baseUrl: string;
+    }
+  | { type: 'createAccount'; provider: 'deepseek' | 'openai-compatible' }
+  | { type: 'deleteAccount'; id: string }
+  | { type: 'selectAccount'; id: string }
+  | { type: 'setModelAlias'; accountId: string; modelId: string; alias: string }
+  | { type: 'refreshAccountModels'; accountId: string }
+  | {
       type: 'saveHistorySettings';
       historyRetentionDays?: number;
     }

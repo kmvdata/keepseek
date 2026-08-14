@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Added global multi-account management for DeepSeek and OpenAI-compatible chat endpoints, with provider-scoped account files, safe legacy-setting migration, active-account switching, and physical account deletion.
+- Added per-account model discovery and aliases. The model switcher now displays user alias, API-provided name, built-in label, then model ID, while keeping the full ID in hover text.
+- Kept main Agent requests, context summaries, provider protocol metadata, and DeepSeek balance refreshes on the same active account; balance snapshots and refresh throttles are isolated per account.
+- Preserved `keepseek.apiKey` / `keepseek.baseUrl` and `DEEPSEEK_API_KEY` fallback behavior for existing installations. OpenAI-compatible accounts use the minimal chat-completions SSE/tool-call subset without DeepSeek-only reasoning parameters or balance requests.
+
 ## 0.2.3
 
 - Fixed composer input flickering when the input exceeds the max display height: the JS autogrow cap (200px) and the CSS `max-height` (220px) were out of sync, so with the scrollbar active, every keystroke at the last visible line resized the input and clamped `scrollTop`, making the viewport jump on each edit. The CSS cap is now aligned with the autogrow limit, and the scroll position is defensively restored after every height recalculation.

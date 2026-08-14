@@ -11,6 +11,8 @@ export function getScript(): string {
     const state = {
       models: [],
       selectedModelId: '',
+      activeAccountId: '',
+      activeAccountProvider: 'deepseek',
       agentSettings: {
         thinkingEnabled: true,
         reasoningEffort: 'high',

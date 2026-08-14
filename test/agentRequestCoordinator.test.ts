@@ -43,6 +43,12 @@ test('createAgentRequest snapshots mutable request inputs', () => {
     lastValidationScript: 'compile' as const,
     pendingDraftEditIds: [] as string[]
   };
+  const accountConfig = {
+    accountId: 'primary',
+    provider: 'deepseek' as const,
+    apiKey: 'original-key',
+    baseUrl: 'https://api.deepseek.com'
+  };
 
   const request = coordinator.createAgentRequest({
     prompt: 'current request',
@@ -52,6 +58,7 @@ test('createAgentRequest snapshots mutable request inputs', () => {
     history,
     contextCompression,
     repairLoop,
+    accountConfig,
     language: 'en',
     signal
   });
@@ -67,6 +74,7 @@ test('createAgentRequest snapshots mutable request inputs', () => {
   contextCompression.protectedMessageIds.push('new-protected-id');
   contextCompression.summaries[0].coveredMessageIds.push('new-covered-id');
   repairLoop.pendingDraftEditIds.push('mutated-edit');
+  accountConfig.apiKey = 'changed-key';
 
   assert.equal(request.model.label, 'Test Model');
   assert.equal(request.settings.thinkingEnabled, true);
@@ -76,6 +84,7 @@ test('createAgentRequest snapshots mutable request inputs', () => {
   assert.deepEqual(request.contextCompression?.protectedMessageIds, ['protected-original']);
   assert.deepEqual(request.contextCompression?.summaries[0]?.coveredMessageIds, ['covered-original']);
   assert.deepEqual(request.repairLoop?.pendingDraftEditIds, []);
+  assert.equal(request.accountConfig?.apiKey, 'original-key');
   assert.equal(request.signal, signal);
 });
 

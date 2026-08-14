@@ -34,6 +34,12 @@ src/
 │       ├── validationTools.ts   # Problems 与受控 npm 验证任务
 │       ├── gitTools.ts          # VS Code Git API 优先的只读 Git 辅助
 │       └── toolAuthorization.ts # 工具风险分级与 per-run 授权
+├── accounts/
+│   ├── types.ts                 # 多账号与模型缓存领域类型
+│   ├── accountStore.ts          # provider 分目录的账号 CRUD 与安全持久化
+│   ├── accountResolver.ts       # 激活账号、旧配置回退与自动迁移唯一入口
+│   ├── modelAlias.ts            # 模型昵称显示优先级纯函数
+│   └── modelDiscovery.ts        # OpenAI 兼容 /models 发现与缓存
 ├── workspace/
 │   └── workspaceDirectory.ts    # 工作区目录枚举共享工具
 ├── sessions/
@@ -107,6 +113,8 @@ src/
 - `ChatSessionStore` 管理会话生命周期，存储 key 为 `keepseek.chatSessions`，最多保留 50 个有内容会话，活跃空会话会保留。
 - `ChatSession.contextCompression` 存储会话摘要、受保护消息 id、最近压缩时间和失败原因；摘要不是聊天 UI 消息。
 - `FileContextStore` 管理用户显式加入上下文的文件内容，读取限制来自 `keepseek.maxFileBytes` 和 `keepseek.maxContextFiles`。
+- `AccountStore` 只在 `globalStorageUri/accounts/<provider>/` 下持久化账号 JSON；`resolveActiveAccountConfig()` 是主请求、摘要、余额和 Provider 共用的唯一激活账号/凭据解析入口。旧 `keepseek.apiKey` / `keepseek.baseUrl` 只复制迁移、不修改；`.initialized` 不含密钥，用于防止用户删除最后账号后旧配置再次自动复活。
+- DeepSeek 账号保留完整运行参数和余额能力；`openai-compatible` 只使用 chat completions、SSE 和工具调用通用子集。模型显示固定按用户昵称、API 名称、内置 label、模型 id 降级。
 - `ChangeSetStore` 是待确认修改的真实主管线：持久化 ChangeSet/checkpoint，处理 Diff、Apply、Discard 和 Revert，并通过 `SafeFileEditor` 执行用户点击 Apply 后的文件操作。`DraftEditStore` 不是 Provider 当前的主管线。
 - `ProjectInstructionsResolver` 只读取每个受信任工作区根目录的 `AGENTS.md`；`.agents/**/AGENTS.md` 属于 Skill，不作为全局项目指令。
 - `SkillActivationResolver` 按 explicit、session、workspace-default、implicit 的顺序选择 Skill；`allowImplicit: false` 不能被隐式激活，未受信任工作区不能自动加载项目 Skill。
@@ -115,7 +123,7 @@ src/
 
 **协议与基础设施层**
 
-- `AgentRunner` 只做请求编排：消费 history projection、构造模型消息、调用 DeepSeek chat completions、处理工具调用循环、整理最终消息。
+- `AgentRunner` 只做请求编排：消费 history projection、构造模型消息、通过当前激活账号调用 DeepSeek/OpenAI 兼容 chat completions、处理工具调用循环、整理最终消息。
 - `historyProjection.ts` 负责为模型请求选择 synthetic summary system message、protected messages、recent turns 和当前 prompt；压缩关闭时回退旧最近消息窗口。
 - `historyCompressor.ts` 负责在发送前 best-effort 刷新会话摘要；摘要请求关闭 thinking、限制输出 token、短超时，失败不得阻塞正常请求。
 - `contextUsage.ts` 必须和真实 Agent 请求使用同一套 projection，否则 UI 上下文估算会失真。
@@ -366,6 +374,7 @@ projection 组成：
 ## 编码规范
 
 - 新增配置：先改 `package.json` 的 `contributes.configuration`，再在 `shared/config.ts` 增加读取/归一化。
+- 修改账号、模型发现或余额隔离：同步检查 `accounts/accountStore.ts`、`accounts/accountResolver.ts`、`accounts/modelDiscovery.ts`、`agent/runner.ts`、`agent/historyCompressor.ts`、`agent/deepseek/balanceStore.ts` 和 Provider；不得在任一请求路径重新直读 apiKey/baseUrl。
 - 新增或修改上下文压缩配置：同步检查 `shared/types.ts`、`agent/historyProjection.ts`、`agent/historyCompressor.ts`、`agent/contextUsage.ts` 和 `agent/runner.ts`，确保真实请求和 usage 估算仍共用同一 projection。
 - 修改项目指令、Skill 激活、workspace 默认或 Legacy 兼容：同步检查 `agent/projectInstructions.ts`、`skills/skillActivationResolver.ts`、`agent/contextDeduplication.ts`、`agent/currentRunContext.ts`、`agent/contextUsage.ts`、`agent/protocol.ts` 和 Run Details/trace；不要在 Provider 内复制匹配或优先级逻辑。
 - 新增 Webview → 扩展消息：更新 `provider/webviewMessages.ts` 的 `WebviewMessage` 联合类型、`provider/KeepseekChatViewProvider.ts` 的 `handleMessage()`、Webview 脚本发送点；剪贴板兜底消息 `requestClipboardText` / `writeClipboardText` 由 `webview/richTextShortcuts.ts` 统一发起。
@@ -381,6 +390,7 @@ projection 组成：
 ## 维护热点
 
 - `extension.ts` 只保留激活和命令接线；`provider/KeepseekChatViewProvider.ts` 是 VS Code Provider 编排中心，新增大功能时优先创建服务模块，再在 Provider 中接线。
+- `accounts/accountResolver.ts` 是账号选择与旧配置兼容的唯一入口；删除、切换、摘要、主请求与余额的账号语义必须一致，账号密钥不得写入 workspace 或 trace。
 - `agent/historyProjection.ts` / `agent/historyCompressor.ts` 是上下文压缩核心；修改后必须验证压缩关闭 fallback、无摘要 fallback、摘要失败 fallback、protected 消息、最近轮次和 context usage 估算。
 - `webview/script.ts` 和 `webview/input/script.ts` 仍是大字符串文件；改动时保持 DOM id、message type、序列化格式兼容，并重点手测输入、拖拽、`@` 引用、编辑重发、Apply/Discard。
 - `webview/richTextShortcuts.ts` 同时影响底部 prompt 输入框和消息编辑输入框；修改后必须验证 Emacs 光标移动、mark/region、`Ctrl-K` 剪切行尾、`Ctrl-W` 剪切选区、`Alt-W` 复制、`Ctrl-Y` 粘贴，以及 `Command-A/C/X/V/Z` 系统习惯。

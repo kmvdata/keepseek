@@ -19,7 +19,7 @@ import {
   UsageEvent
 } from '../shared/types';
 import {
-  DEFAULT_DEEPSEEK_BASE_URL,
+  getConfiguredContextWindowTokens,
   getConfiguredMaxRequestRetries,
   getConfiguredMaxRepairIterations,
   getConfiguredMaxValidationRuns,
@@ -27,6 +27,7 @@ import {
   getConfiguredRequestRetryBaseMs,
   getConfiguredWorkspaceReadMaxBytes
 } from '../shared/config';
+import { MissingAccountApiKeyError, resolveActiveAccountConfig } from '../accounts/accountResolver';
 import { formatBytes } from '../shared/format';
 import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
 import {
@@ -124,6 +125,8 @@ const RANGE_READ_SHAPED_CONTENT_CHARS = 160_000;
 const RANGE_READ_SNIPPED_CONTENT_CHARS = 60_000;
 
 interface AgentRuntimeConfig {
+  accountId: string;
+  provider: 'deepseek' | 'openai-compatible';
   apiKey: string;
   baseUrl: string;
   maxTokens: number;
@@ -223,7 +226,8 @@ export class AgentRunner {
     private readonly validationTools: ValidationToolAdapter = new ValidationToolService(),
     private readonly semanticTools: SemanticToolAdapter = new SemanticToolService(workspaceTools),
     private readonly gitTools: GitToolAdapter = new GitToolService(workspaceTools),
-    private readonly toolAuthorization: ToolAuthorizationAdapter = new ToolAuthorizationService()
+    private readonly toolAuthorization: ToolAuthorizationAdapter = new ToolAuthorizationService(),
+    private readonly globalStorageUri?: vscode.Uri
   ) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
@@ -472,7 +476,7 @@ export class AgentRunner {
       }, { shortcut: 'draft' });
     }
 
-    const runtimeConfig = this.getRuntimeConfig(request);
+    const runtimeConfig = await this.getRuntimeConfig(request);
     taskPlan.beginExecution();
     const providerProjection = buildProviderRequestProjection({
       model: request.model,
@@ -487,9 +491,8 @@ export class AgentRunner {
       slimToolNames: request.slimToolNames,
       requestProtocolVersion: request.requestProtocolVersion,
       includeTools: runtimeConfig.maxToolIterations > 0,
-      maxProjectionTokens: request.model.contextWindowTokens === undefined
-        ? undefined
-        : request.model.contextWindowTokens * runtimeConfig.contextCompression.forceRatio
+      maxProjectionTokens: getConfiguredContextWindowTokens(request.model)
+        * runtimeConfig.contextCompression.forceRatio
     });
     const projection = providerProjection.historyProjection;
     const messages = providerProjection.messages;
@@ -1133,18 +1136,23 @@ export class AgentRunner {
     const trace = options.trace ?? createNoopInteractionTrace();
     const body: DeepSeekChatRequestBody = {
       model: request.model.id,
-      messages,
+      // Keep DeepSeek's exact message objects for prefix-cache stability. Strict
+      // OpenAI-compatible endpoints reject DeepSeek's reasoning_content field,
+      // including null values on assistant tool-call turns.
+      messages: runtimeConfig.provider === 'deepseek'
+        ? messages
+        : messages.map(withoutDeepSeekReasoningContent),
       stream: true,
-      thinking: {
-        type: request.settings.thinkingEnabled ? 'enabled' : 'disabled'
-      },
+      thinking: runtimeConfig.provider === 'deepseek'
+        ? { type: request.settings.thinkingEnabled ? 'enabled' : 'disabled' }
+        : undefined,
       temperature: runtimeConfig.temperature,
       top_p: runtimeConfig.topP,
       tools: tools.length ? tools : undefined,
       tool_choice: tools.length ? options.toolChoice ?? 'auto' : undefined
     };
 
-    if (request.settings.thinkingEnabled) {
+    if (runtimeConfig.provider === 'deepseek' && request.settings.thinkingEnabled) {
       body.reasoning_effort = request.settings.reasoningEffort;
     }
 
@@ -2791,19 +2799,20 @@ export class AgentRunner {
     return [header, ...blocks].join('\n\n');
   }
 
-  private getRuntimeConfig(request: AgentRequest): AgentRuntimeConfig {
-    const config = vscode.workspace.getConfiguration('keepseek');
-    const apiKey = (config.get<string>('apiKey', '').trim() || process.env.DEEPSEEK_API_KEY || '').trim();
-    if (!apiKey) {
-      throw new Error(request.language === 'en'
-        ? 'Save a DeepSeek API Key in KeepSeek Settings > Api Key, or set the DEEPSEEK_API_KEY environment variable.'
-        : '请先在 KeepSeek 设置 > Api Key 中保存 DeepSeek API Key，或设置 DEEPSEEK_API_KEY 环境变量。');
+  private async getRuntimeConfig(request: AgentRequest): Promise<AgentRuntimeConfig> {
+    const activeAccount = request.accountConfig ?? await resolveActiveAccountConfig(this.globalStorageUri, {
+      language: request.language
+    });
+    if (!activeAccount.apiKey.trim()) {
+      throw new MissingAccountApiKeyError(request.language);
     }
     const profile = getDeepSeekV4RuntimeProfile(request.model, request.settings);
 
     return {
-      apiKey,
-      baseUrl: config.get<string>('baseUrl', DEFAULT_DEEPSEEK_BASE_URL).trim() || DEFAULT_DEEPSEEK_BASE_URL,
+      accountId: activeAccount.accountId,
+      provider: activeAccount.provider,
+      apiKey: activeAccount.apiKey,
+      baseUrl: activeAccount.baseUrl,
       maxTokens: profile.maxTokens,
       maxToolIterations: clampRunLimit(profile.maxToolIterations, request.executionLimits?.maxToolIterations),
       maxToolCalls: clampRunLimit(profile.maxToolCalls, request.executionLimits?.maxToolCalls),
@@ -2858,6 +2867,12 @@ export class AgentRunner {
     }
   }
 
+}
+
+function withoutDeepSeekReasoningContent(message: DeepSeekMessage): DeepSeekMessage {
+  const compatibleMessage = { ...message };
+  delete compatibleMessage.reasoning_content;
+  return compatibleMessage;
 }
 
 function readFiniteNumber(value: unknown, fallback: number): number {
