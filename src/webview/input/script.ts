@@ -4057,7 +4057,7 @@ export function getInputScript(): string {
             baseUrl = 'https://api.deepseek.com';
           }
           if (!baseUrl && provider === 'ollama') {
-            baseUrl = 'http://127.0.0.1:11434/v1';
+            baseUrl = 'http://localhost:11434/v1';
           }
           if (!baseUrl) {
             setSettingsDialogStatus(t('baseUrlRequired'));
@@ -4121,7 +4121,7 @@ export function getInputScript(): string {
             settingsBaseUrl.value = selectedProvider === 'deepseek'
               ? 'https://api.deepseek.com'
               : selectedProvider === 'ollama'
-                ? 'http://127.0.0.1:11434/v1'
+                ? 'http://localhost:11434/v1'
                 : '';
           }
           if (settingsApiKey && normalizeSettingsProvider(settingsCreateProvider.value) === 'ollama') {
