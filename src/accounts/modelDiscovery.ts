@@ -14,6 +14,7 @@ export const MAX_MODEL_DISCOVERY_RESPONSE_CHARS = 2_000_000;
 
 export interface ModelsFetchResponse {
   ok: boolean;
+  status?: number;
   text(): Promise<string>;
 }
 
@@ -141,6 +142,82 @@ export async function discoverSourceModels(
     };
   } catch {
     return undefined;
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+    options.signal?.removeEventListener('abort', abortFromParent);
+  }
+}
+
+export interface ProbeSourceConnectionResult {
+  ok: boolean;
+  status?: number;
+  error?: string;
+}
+
+export type SourceConnectionProber = (
+  source: Pick<ModelSource, 'apiKey' | 'baseUrl' | 'provider'>,
+  options?: DiscoverSourceModelsOptions
+) => Promise<ProbeSourceConnectionResult>;
+
+/**
+ * Lightweight connectivity probe run before creating a new source. With an
+ * API key the probe requires a 2xx response (authentication succeeded).
+ * Without a key any HTTP response proves the Base URL is reachable, which
+ * matches local models that need no credentials.
+ */
+export async function probeSourceConnection(
+  source: Pick<ModelSource, 'apiKey' | 'baseUrl' | 'provider'>,
+  options: DiscoverSourceModelsOptions = {}
+): Promise<ProbeSourceConnectionResult> {
+  const baseUrl = source.baseUrl.trim();
+  if (!baseUrl) {
+    return { ok: false, error: 'Base URL is required.' };
+  }
+  const apiKey = source.apiKey.trim();
+
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    if (options.signal?.aborted) {
+      controller.abort();
+    } else {
+      options.signal?.addEventListener('abort', abortFromParent, { once: true });
+    }
+    const timeoutMs = normalizeNonNegativeInteger(
+      options.timeoutMs,
+      DEFAULT_MODEL_DISCOVERY_TIMEOUT_MS
+    );
+    if (timeoutMs > 0) {
+      timeout = setTimeout(() => controller.abort(), timeoutMs);
+    }
+
+    const endpointUrl = getSourceModelsEndpointUrl(baseUrl, source.provider);
+    const fetchImpl: ModelsFetch = options.fetchImpl ?? fetch;
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+    const response = await fetchImpl(endpointUrl, {
+      method: 'GET',
+      headers,
+      signal: controller.signal
+    });
+    if (apiKey && !response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        error: `Authentication failed (HTTP ${response.status}). Check the API Key and Base URL.`
+      };
+    }
+    return { ok: true, status: response.status };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Cannot reach the Base URL: ${error instanceof Error ? error.message : String(error)}`
+    };
   } finally {
     if (timeout) {
       clearTimeout(timeout);

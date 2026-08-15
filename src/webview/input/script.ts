@@ -3452,7 +3452,6 @@ export function getInputScript(): string {
       var createSkillDescriptionInput = document.getElementById('createSkillDescriptionInput');
       var createSkillAllowImplicitInput = document.getElementById('createSkillAllowImplicitInput');
       var createSkillUserInvocableInput = document.getElementById('createSkillUserInvocableInput');
-      var settingsClearApiKeyBtn = document.getElementById('settingsClearApiKeyBtn');
       var settingsSaveBtn = document.getElementById('settingsSaveBtn');
       var settingsCancelBtn = document.getElementById('settingsCancelBtn');
       var historySettingsSaveBtn = document.getElementById('historySettingsSaveBtn');
@@ -3793,7 +3792,7 @@ export function getInputScript(): string {
         if (settingsAccountNameLabel) { settingsAccountNameLabel.textContent = t('modelSourceName'); }
         if (settingsAccountName) {
           var sourceNameField = settingsAccountName.closest('label');
-          if (sourceNameField) { sourceNameField.classList.toggle('hidden', !account); }
+          if (sourceNameField) { sourceNameField.classList.remove('hidden'); }
         }
         if (settingsModelsTitle) { settingsModelsTitle.textContent = t('modelListTitle'); }
         if (settingsModelsHint) { settingsModelsHint.textContent = t('modelListHint'); }
@@ -3809,7 +3808,7 @@ export function getInputScript(): string {
         if (settingsConfirmAddModelBtn) {
           settingsConfirmAddModelBtn.disabled = !account || controlsDisabled;
         }
-        [settingsAccountName, settingsApiKey, settingsBaseUrl, settingsApiKeyVisibilityBtn, settingsClearApiKeyBtn, settingsSaveBtn, settingsManualModelId, settingsConfirmAddModelBtn].forEach(function(control) {
+        [settingsAccountName, settingsApiKey, settingsBaseUrl, settingsApiKeyVisibilityBtn, settingsSaveBtn, settingsManualModelId, settingsConfirmAddModelBtn].forEach(function(control) {
           if (control) { control.disabled = controlsDisabled; }
         });
         if (settingsSaveBtn) { settingsSaveBtn.textContent = account ? t('save') : t('addAccount'); }
@@ -4036,9 +4035,18 @@ export function getInputScript(): string {
             ? source.provider
             : normalizeSettingsProvider(settingsCreateProvider ? settingsCreateProvider.value : 'deepseek');
           var modelId = settingsManualModelId ? settingsManualModelId.value.trim() : '';
-          if (!apiKey) {
-            setSettingsDialogStatus(t('apiKeyRequired'));
-            if (settingsApiKey) { settingsApiKey.focus(); }
+          if (!name) {
+            setSettingsDialogStatus(t('modelSourceNameRequired'));
+            if (settingsAccountName) { settingsAccountName.focus(); }
+            return;
+          }
+          var duplicateName = settingsSources.some(function(candidate) {
+            return candidate.id !== (source ? source.id : '')
+              && candidate.name.trim().toLowerCase() === name.toLowerCase();
+          });
+          if (duplicateName) {
+            setSettingsDialogStatus(t('modelSourceNameDuplicate'));
+            if (settingsAccountName) { settingsAccountName.focus(); }
             return;
           }
           if (!baseUrl && provider === 'deepseek') {
@@ -4059,18 +4067,10 @@ export function getInputScript(): string {
             });
             beginSettingsDialogAction('save-source', t('savingModelSource'));
           } else {
-            var officialDeepSeek = false;
-            try {
-              officialDeepSeek = provider === 'deepseek' && new URL(baseUrl).host === 'api.deepseek.com';
-            } catch {}
-            if (!modelId && !officialDeepSeek) {
-              setSettingsDialogStatus(t('manualModelIdRequired'));
-              if (settingsManualModelId) { settingsManualModelId.focus(); }
-              return;
-            }
             vscode.postMessage({
               type: 'addModel',
               provider: provider,
+              name: name,
               apiKey: apiKey,
               baseUrl: baseUrl,
               modelId: modelId
@@ -4102,7 +4102,7 @@ export function getInputScript(): string {
           settingsSelectedSourceId = '';
           populateSettingsAccount(null);
           renderAccountSettings();
-          if (settingsApiKey) { settingsApiKey.focus(); }
+          if (settingsAccountName) { settingsAccountName.focus(); }
         });
       }
 
@@ -4220,21 +4220,6 @@ export function getInputScript(): string {
       if (createSkillCreateBtn) {
         createSkillCreateBtn.addEventListener('click', function() {
           submitCreateSkillDraft();
-        });
-      }
-
-      if (settingsClearApiKeyBtn) {
-        settingsClearApiKeyBtn.addEventListener('click', function(event) {
-          event.preventDefault();
-          event.stopPropagation();
-          if (blockAccountSettingsWhileRunBusy()) { return; }
-          if (settingsApiKey) {
-            settingsApiKey.value = '';
-            settingsApiKey.focus();
-          }
-          updateSettingsDialogDirtyState();
-          setSettingsDialogStatus(t('apiKeyCleared'));
-          setComposerStatus(t('apiKeyCleared'));
         });
       }
 

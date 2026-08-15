@@ -1686,10 +1686,6 @@ export function getInputStyles(): string {
       padding: 0 16px 14px;
     }
 
-    .settings-clear-api-key {
-      margin-right: auto;
-    }
-
     @media (max-width: 540px) {
       .settings-account-workspace {
         grid-template-columns: minmax(0, 1fr);

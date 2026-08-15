@@ -1,11 +1,10 @@
+import { ModelSourceStore } from './accountStore';
 import {
-  getDefaultModelSourceName,
-  ModelSourceStore
-} from './accountStore';
-import {
+  probeSourceConnection,
   refreshSourceModelCache,
   type RefreshSourceModelCacheOptions,
-  type RefreshSourceModelCacheResult
+  type RefreshSourceModelCacheResult,
+  type SourceConnectionProber
 } from './modelDiscovery';
 import { isOfficialDeepSeekSource } from './sourceCapabilities';
 import type { ModelSource, ModelSourceModel, ModelSourceProvider } from './types';
@@ -13,6 +12,7 @@ import type { ModelSource, ModelSourceModel, ModelSourceProvider } from './types
 export interface AddModelInput {
   sourceId?: string;
   provider: ModelSourceProvider;
+  name?: string;
   apiKey: string;
   baseUrl: string;
   modelId?: string;
@@ -33,7 +33,8 @@ export type SourceModelCacheRefresher = (
 export class ModelSourceService {
   public constructor(
     private readonly sourceStore: ModelSourceStore,
-    private readonly refreshModelCache: SourceModelCacheRefresher = refreshSourceModelCache
+    private readonly refreshModelCache: SourceModelCacheRefresher = refreshSourceModelCache,
+    private readonly probeConnection: SourceConnectionProber = probeSourceConnection
   ) {}
 
   public async addModel(input: AddModelInput): Promise<AddModelResult> {
@@ -45,20 +46,20 @@ export class ModelSourceService {
     let reusedSource = Boolean(source);
 
     if (!source) {
+      const name = normalizeRequiredSourceName(input.name);
+      await this.assertUniqueSourceName(name);
       const apiKey = input.apiKey.trim();
       const baseUrl = normalizeRequiredBaseUrl(input.baseUrl);
-      if (!apiKey) {
-        throw new Error('API Key is required.');
-      }
-      if (!modelId && !isOfficialDeepSeekSource({ provider: input.provider, baseUrl })) {
-        throw new Error('Model ID is required for this source.');
-      }
       source = await this.findReusableSource(input.provider, apiKey, baseUrl);
       reusedSource = Boolean(source);
       if (!source) {
+        const probe = await this.probeConnection({ provider: input.provider, apiKey, baseUrl });
+        if (!probe.ok) {
+          throw new Error(probe.error || 'The Base URL is unreachable or authentication failed.');
+        }
         source = await this.sourceStore.createSource({
           provider: input.provider,
-          name: createSourceName(input.provider, baseUrl),
+          name,
           apiKey,
           baseUrl,
           models: []
@@ -68,9 +69,6 @@ export class ModelSourceService {
 
     if (!source.enabled) {
       throw new Error('The selected model source is disabled.');
-    }
-    if (!modelId && !isOfficialDeepSeekSource(source)) {
-      throw new Error('Model ID is required for this source.');
     }
     if (modelId) {
       source = await this.upsertModel(source, modelId);
@@ -110,14 +108,13 @@ export class ModelSourceService {
     if (!source) {
       throw new Error('Model source not found.');
     }
+    const name = input.name?.trim() || source.name;
+    await this.assertUniqueSourceName(name, source.id);
     const apiKey = input.apiKey.trim();
     const baseUrl = normalizeRequiredBaseUrl(input.baseUrl);
-    if (!apiKey) {
-      throw new Error('API Key is required.');
-    }
     const connectionChanged = source.apiKey !== apiKey || source.baseUrl !== baseUrl;
     const updated = await this.sourceStore.updateSource(source.id, {
-      name: input.name?.trim() || source.name,
+      name,
       apiKey,
       baseUrl,
       modelCache: connectionChanged ? undefined : source.modelCache
@@ -146,6 +143,18 @@ export class ModelSourceService {
       && source.apiKey === apiKey
       && normalizeBaseUrlForMatch(source.baseUrl) === normalizedBaseUrl
     ));
+  }
+
+  private async assertUniqueSourceName(name: string, excludeSourceId?: string): Promise<void> {
+    const normalizedName = name.trim().toLowerCase();
+    const sources = await this.sourceStore.listSources();
+    const duplicate = sources.find((source) => (
+      source.id !== excludeSourceId
+      && source.name.trim().toLowerCase() === normalizedName
+    ));
+    if (duplicate) {
+      throw new Error(`KeepSeek model source name already exists: ${name}`);
+    }
   }
 
   private async upsertModel(
@@ -187,13 +196,15 @@ function normalizeBaseUrlForMatch(rawBaseUrl: string): string {
   }
 }
 
-function createSourceName(provider: ModelSourceProvider, baseUrl: string): string {
-  if (isOfficialDeepSeekSource({ provider, baseUrl })) {
-    return 'DeepSeek Official';
+const MAX_SOURCE_NAME_LENGTH = 200;
+
+function normalizeRequiredSourceName(rawName: string | undefined): string {
+  const name = rawName?.trim() ?? '';
+  if (!name) {
+    throw new Error('Source name is required.');
   }
-  try {
-    return new URL(baseUrl).host || getDefaultModelSourceName(provider);
-  } catch {
-    return getDefaultModelSourceName(provider);
+  if (name.length > MAX_SOURCE_NAME_LENGTH) {
+    throw new Error('Source name is too long (200 characters max).');
   }
+  return name;
 }

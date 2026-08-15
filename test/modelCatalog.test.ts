@@ -29,7 +29,8 @@ describe('model source catalog', () => {
         id: 'proxy',
         name: 'Proxy',
         baseUrl: 'https://proxy.example/v1',
-        models: [{ id: 'shared', name: 'Proxy Shared' }]
+        models: [{ id: 'shared' }],
+        modelCache: { fetchedAt: NOW, models: [{ id: 'shared', name: 'Proxy Shared' }] }
       }),
       createSource({
         id: 'compatible',
@@ -43,7 +44,7 @@ describe('model source catalog', () => {
 
     assert.ok(catalog.some((model) => model.sourceId === 'official' && model.id === 'deepseek-v4-flash'));
     assert.equal(catalog.filter((model) => model.id === 'shared').length, 2);
-    assert.equal(findModelBySelection(catalog, { sourceId: 'proxy', modelId: 'shared' })?.alias, 'Proxy Shared');
+    assert.equal(findModelBySelection(catalog, { sourceId: 'proxy', modelId: 'shared' })?.fetchedName, 'Proxy Shared');
     assert.equal(findModelBySelection(catalog, { sourceId: 'compatible', modelId: 'shared' })?.provider, 'openai-compatible');
     assert.equal(catalog.find((model) => model.sourceId === 'official')?.supportsBilling, true);
     assert.equal(catalog.find((model) => model.sourceId === 'proxy')?.supportsBilling, false);
@@ -53,7 +54,7 @@ describe('model source catalog', () => {
     const catalog = createModelCatalog([createSource({
       id: 'official',
       baseUrl: 'https://api.deepseek.com/v1',
-      models: [{ id: 'manual-model', name: 'Manual' }],
+      models: [{ id: 'manual-model' }],
       modelCache: { fetchedAt: NOW, models: [{ id: 'discovered-model', name: 'Discovered' }] }
     })]);
     assert.deepEqual(catalog.map((model) => model.id), ['discovered-model', 'manual-model']);
@@ -81,41 +82,72 @@ describe('ModelSourceService', () => {
         modelCache: { fetchedAt: NOW, models: [{ id: 'deepseek-chat' }] }
       });
       return { status: 'fresh', cache: { fetchedAt: NOW, models: [{ id: 'deepseek-chat' }] } };
-    });
+    }, async () => ({ ok: true, status: 200 }));
 
     const result = await service.addModel({
-      provider: 'deepseek', apiKey: 'key', baseUrl: 'https://api.deepseek.com', modelId: ''
+      provider: 'deepseek', name: 'DeepSeek', apiKey: 'key', baseUrl: 'https://api.deepseek.com', modelId: ''
     });
     assert.deepEqual(refreshCalls, [{ sourceId: 'official', force: true }]);
     assert.deepEqual(result.source.modelCache?.models, [{ id: 'deepseek-chat' }]);
   });
 
-  it('requires manual IDs for other sources and reuses matching credentials', async () => {
+  it('creates sources without API keys or model IDs and reuses matching credentials', async () => {
     const ids = ['compatible', 'unused'];
     const store = new ModelSourceStore(vscode.Uri.file(storageRoot), {
       now: () => NOW,
       createId: () => ids.shift() ?? 'fallback'
     });
     let refreshCount = 0;
-    const service = new ModelSourceService(store, async () => {
-      refreshCount += 1;
-      return { status: 'failed' };
-    });
+    let probeCount = 0;
+    const service = new ModelSourceService(
+      store,
+      async () => {
+        refreshCount += 1;
+        return { status: 'failed' };
+      },
+      async () => {
+        probeCount += 1;
+        return { ok: true, status: 200 };
+      }
+    );
 
+    // A source name is required before creating an account.
     await assert.rejects(service.addModel({
-      provider: 'openai-compatible', apiKey: 'key', baseUrl: 'https://proxy.example/v1'
-    }), /Model ID is required/u);
+      provider: 'openai-compatible', apiKey: '', baseUrl: 'https://proxy.example/v1'
+    }), /Source name is required/u);
+    // Without an API key or model ID the account can still be created.
     const first = await service.addModel({
-      provider: 'openai-compatible', apiKey: 'key', baseUrl: 'https://proxy.example/v1', modelId: 'one'
+      provider: 'openai-compatible', name: 'Proxy One', apiKey: '', baseUrl: 'https://proxy.example/v1'
     });
+    assert.equal(first.source.name, 'Proxy One');
+    assert.deepEqual(first.source.models, []);
+    // Duplicate names (case-insensitive) are rejected.
+    await assert.rejects(service.addModel({
+      provider: 'openai-compatible', name: 'proxy one', apiKey: 'key', baseUrl: 'https://proxy.example/v2'
+    }), /name already exists/u);
+    // Matching credentials reuse the existing source; the name is not applied.
     const second = await service.addModel({
-      provider: 'openai-compatible', apiKey: 'key', baseUrl: 'https://proxy.example/v1/', modelId: 'two'
+      provider: 'openai-compatible', name: 'Proxy One', apiKey: '', baseUrl: 'https://proxy.example/v1/', modelId: 'two'
     });
     assert.equal(first.source.id, second.source.id);
     assert.equal(second.reusedSource, true);
-    assert.deepEqual(second.source.models.map((model) => model.id), ['one', 'two']);
+    assert.deepEqual(second.source.models.map((model) => model.id), ['two']);
     assert.equal((await store.listSources()).length, 1);
     assert.equal(refreshCount, 0);
+    assert.equal(probeCount, 1);
+  });
+
+  it('rejects account creation when the Base URL probe fails', async () => {
+    const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { now: () => NOW });
+    const service = new ModelSourceService(
+      store,
+      async () => ({ status: 'failed' }),
+      async () => ({ ok: false, status: 401, error: 'Authentication failed (HTTP 401). Check the API Key and Base URL.' })
+    );
+    await assert.rejects(service.addModel({
+      provider: 'openai-compatible', name: 'Proxy', apiKey: 'bad-key', baseUrl: 'https://proxy.example/v1'
+    }), /HTTP 401/u);
+    assert.equal((await store.listSources()).length, 0);
   });
 });
 

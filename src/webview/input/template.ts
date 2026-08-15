@@ -360,7 +360,6 @@ export function getInputTemplate(): string {
           </div>
         </div>
         <div class="settings-dialog-footer">
-          <button id="settingsClearApiKeyBtn" type="button" class="secondary settings-clear-api-key" data-i18n="clearApiKey">清空</button>
           <button id="settingsCancelBtn" type="button" class="secondary" data-i18n="cancel">取消</button>
           <button id="settingsSaveBtn" type="button" data-i18n="save">保存</button>
         </div>

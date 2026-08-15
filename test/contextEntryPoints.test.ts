@@ -156,7 +156,6 @@ test('model settings dialog manages grouped sources and per-source models', asyn
     'settingsBaseUrl',
     'settingsSaveBtn',
     'settingsCancelBtn',
-    'settingsClearApiKeyBtn',
     'settingsApiKeyVisibilityBtn'
   ]) {
     assert.match(inputTemplate, new RegExp(`id="${legacyId}"`, 'u'));

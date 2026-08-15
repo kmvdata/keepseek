@@ -53,6 +53,7 @@ export type WebviewMessage =
       type: 'addModel';
       sourceId?: string;
       provider: 'deepseek' | 'openai-compatible';
+      name?: string;
       apiKey: string;
       baseUrl: string;
       modelId?: string;
