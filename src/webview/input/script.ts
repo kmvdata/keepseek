@@ -3769,7 +3769,7 @@ export function getInputScript(): string {
           settingsCreateProvider.disabled = controlsDisabled;
         }
         if (settingsCreateAccountBtn) {
-          settingsCreateAccountBtn.textContent = t('addModel');
+          settingsCreateAccountBtn.textContent = t('addAccount');
           settingsCreateAccountBtn.disabled = controlsDisabled;
         }
         if (settingsAccountList) {
@@ -3781,7 +3781,7 @@ export function getInputScript(): string {
           settingsAccountEmpty.classList.toggle('hidden', settingsSources.length > 0);
         }
         if (settingsCurrentAccountTitle) {
-          settingsCurrentAccountTitle.textContent = account ? t('modelSourceTitle') : t('addModel');
+          settingsCurrentAccountTitle.textContent = account ? t('modelSourceTitle') : t('addAccount');
         }
         if (settingsCurrentProvider) { settingsCurrentProvider.textContent = account ? getSettingsProviderLabel(account.provider) : ''; }
         if (settingsDeleteAccountBtn) {
@@ -3812,7 +3812,7 @@ export function getInputScript(): string {
         [settingsAccountName, settingsApiKey, settingsBaseUrl, settingsApiKeyVisibilityBtn, settingsClearApiKeyBtn, settingsSaveBtn, settingsManualModelId, settingsConfirmAddModelBtn].forEach(function(control) {
           if (control) { control.disabled = controlsDisabled; }
         });
-        if (settingsSaveBtn) { settingsSaveBtn.textContent = account ? t('save') : t('addModel'); }
+        if (settingsSaveBtn) { settingsSaveBtn.textContent = account ? t('save') : t('addAccount'); }
         if (settingsCancelBtn) { settingsCancelBtn.disabled = operationBusy; }
         renderSettingsAccountList(controlsDisabled);
         renderSettingsModelList(account, controlsDisabled);

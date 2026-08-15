@@ -643,6 +643,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     manualModelId: 'Model ID',
     manualModelIdRequired: 'Enter a model ID.',
     addModel: 'Add model',
+    addAccount: 'Add account',
     confirmAddModel: 'Add',
     deleteModel: 'Delete model',
     deletingModel: 'Deleting model…',
