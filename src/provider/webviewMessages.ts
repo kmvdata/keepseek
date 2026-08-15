@@ -57,6 +57,7 @@ export type WebviewMessage =
       baseUrl: string;
       modelId?: string;
     }
+  | { type: 'deleteModel'; sourceId: string; modelId: string }
   | { type: 'saveModelSource'; sourceId: string; name?: string; apiKey: string; baseUrl: string }
   | { type: 'deleteModelSource'; sourceId: string }
   | { type: 'refreshSourceModels'; sourceId: string }

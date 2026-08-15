@@ -181,6 +181,7 @@ test('model settings dialog manages grouped sources and per-source models', asyn
   assert.match(inputScript, /type: 'addModel'/u);
   assert.match(inputScript, /type: 'saveModelSource'/u);
   assert.match(inputScript, /type: 'deleteModelSource'/u);
+  assert.match(inputScript, /type: 'deleteModel'/u);
   assert.match(inputScript, /type: 'refreshSourceModels'/u);
   assert.doesNotMatch(inputScript, /type: 'selectAccount'/u);
   assert.match(inputScript, /function beginSettingsDialogAction/u);
@@ -206,6 +207,7 @@ test('model settings dialog manages grouped sources and per-source models', asyn
   assert.match(styles, /@media \(max-width: 540px\)/u);
   assert.match(messageSource, /type: 'addModel'/u);
   assert.match(messageSource, /type: 'saveModelSource'/u);
+  assert.match(messageSource, /type: 'deleteModel'/u);
   assert.doesNotMatch(inputScript, /window\.(?:prompt|alert|confirm)\s*\(/u);
 });
 

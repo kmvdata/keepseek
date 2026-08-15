@@ -1409,7 +1409,7 @@ export function getInputStyles(): string {
 
     .settings-model-row {
       display: grid;
-      grid-template-columns: minmax(92px, 0.7fr) minmax(110px, 1fr) auto;
+      grid-template-columns: minmax(0, 1fr) auto;
       align-items: center;
       gap: 6px;
       padding: 7px;
@@ -1421,24 +1421,41 @@ export function getInputStyles(): string {
       min-width: 0;
     }
 
-    .settings-model-name,
-    .settings-model-id {
+    .settings-model-name {
       display: block;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-    }
-
-    .settings-model-name {
       color: var(--vscode-foreground);
       font-size: 11px;
       font-weight: 500;
     }
 
-    .settings-model-id {
+    .settings-model-delete {
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      border: none;
+      border-radius: 4px;
+      background: transparent;
       color: var(--vscode-descriptionForeground);
-      font-family: var(--vscode-editor-font-family, monospace);
-      font-size: 10px;
+      font-size: 14px;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .settings-model-delete:hover {
+      background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+      color: var(--vscode-errorForeground, var(--vscode-foreground));
+    }
+
+    .settings-model-delete:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
 
     .settings-manual-model {

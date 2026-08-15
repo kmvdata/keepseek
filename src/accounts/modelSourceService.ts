@@ -86,6 +86,20 @@ export class ModelSourceService {
     };
   }
 
+  public async removeModel(sourceId: string, modelId: string): Promise<ModelSource> {
+    const trimmedModelId = modelId.trim();
+    const source = await this.sourceStore.getSource(sourceId);
+    if (!source) {
+      throw new Error('Model source not found.');
+    }
+    const models = source.models.filter((model) => model.id !== trimmedModelId);
+    const updated = await this.sourceStore.updateSource(sourceId, { models });
+    if (!updated) {
+      throw new Error('Model source not found.');
+    }
+    return updated;
+  }
+
   public async saveSource(input: {
     sourceId: string;
     apiKey: string;

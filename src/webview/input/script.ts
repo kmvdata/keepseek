@@ -3435,6 +3435,8 @@ export function getInputScript(): string {
       var settingsManualModelIdLabel = document.getElementById('settingsManualModelIdLabel');
       var settingsManualModelId = document.getElementById('settingsManualModelId');
       var settingsAddModelBtn = document.getElementById('settingsAddModelBtn');
+      var settingsConfirmAddModelBtn = document.getElementById('settingsConfirmAddModelBtn');
+      var settingsManualModelBox = document.querySelector('.settings-manual-model');
       var historySettingsOverlay = document.getElementById('historySettingsDialogOverlay');
       var historyRetentionDaysInput = document.getElementById('historyRetentionDaysInput');
       var aboutOverlay = document.getElementById('aboutDialogOverlay');
@@ -3509,6 +3511,9 @@ export function getInputScript(): string {
         if (!id) { return null; }
         var provider = normalizeSettingsProvider(rawSource.provider);
         var explicitModels = Array.isArray(rawSource.models) ? rawSource.models : [];
+        var explicitModelIds = explicitModels.map(function(model) {
+          return typeof model === 'string' ? model.trim() : readSettingsString(model.id, '').trim();
+        }).filter(Boolean);
         return {
           id: id,
           name: readSettingsString(rawSource.name, '').trim() || getSettingsProviderLabel(provider),
@@ -3517,6 +3522,7 @@ export function getInputScript(): string {
           baseUrl: readSettingsString(rawSource.baseUrl, ''),
           modelCache: rawSource.modelCache && typeof rawSource.modelCache === 'object' ? rawSource.modelCache : null,
           models: Array.isArray(rawSource.availableModels) ? rawSource.availableModels : explicitModels,
+          manualModelIds: explicitModelIds,
           enabled: rawSource.enabled !== false,
           isOfficialDeepSeek: rawSource.isOfficialDeepSeek === true,
           sortIndex: index
@@ -3648,6 +3654,7 @@ export function getInputScript(): string {
               : '';
         }
         if (settingsManualModelId) { settingsManualModelId.value = ''; }
+        if (settingsManualModelBox) { settingsManualModelBox.classList.add('hidden'); }
         settingsOriginalFormSignature = getSettingsFormSignature();
         settingsDialogDirty = false;
       }
@@ -3695,6 +3702,7 @@ export function getInputScript(): string {
         if (!settingsModelList) { return; }
         var models = getSettingsAccountModels(account);
         settingsModelList.innerHTML = '';
+        var manualModelIds = account && Array.isArray(account.manualModelIds) ? account.manualModelIds : [];
         models.forEach(function(model) {
           var row = document.createElement('div');
           row.className = 'settings-model-row';
@@ -3704,12 +3712,30 @@ export function getInputScript(): string {
           identity.title = model.id;
           var name = document.createElement('span');
           name.className = 'settings-model-name';
-          name.textContent = model.fetchedName || model.label || model.id;
-          var id = document.createElement('span');
-          id.className = 'settings-model-id';
-          id.textContent = model.id;
-          identity.append(name, id);
+          name.textContent = model.id;
+          identity.append(name);
           row.append(identity);
+          if (manualModelIds.indexOf(model.id) >= 0) {
+            var removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'settings-model-delete';
+            removeBtn.setAttribute('aria-label', t('deleteModel') + ' ' + model.id);
+            removeBtn.title = t('deleteModel');
+            removeBtn.textContent = '×';
+            removeBtn.addEventListener('click', function() {
+              if (blockAccountSettingsWhileRunBusy()) { return; }
+              var source = getSettingsActiveAccount();
+              if (!source || settingsDialogBusyAction) { return; }
+              if (blockSettingsActionForUnsavedChanges()) { return; }
+              vscode.postMessage({
+                type: 'deleteModel',
+                sourceId: source.id,
+                modelId: model.id
+              });
+              beginSettingsDialogAction('delete-model', t('deletingModel'));
+            });
+            row.append(removeBtn);
+          }
           settingsModelList.append(row);
         });
         if (settingsModelEmpty) {
@@ -3780,7 +3806,10 @@ export function getInputScript(): string {
         if (settingsAddModelBtn) {
           settingsAddModelBtn.disabled = !account || controlsDisabled;
         }
-        [settingsAccountName, settingsApiKey, settingsBaseUrl, settingsApiKeyVisibilityBtn, settingsClearApiKeyBtn, settingsSaveBtn, settingsManualModelId].forEach(function(control) {
+        if (settingsConfirmAddModelBtn) {
+          settingsConfirmAddModelBtn.disabled = !account || controlsDisabled;
+        }
+        [settingsAccountName, settingsApiKey, settingsBaseUrl, settingsApiKeyVisibilityBtn, settingsClearApiKeyBtn, settingsSaveBtn, settingsManualModelId, settingsConfirmAddModelBtn].forEach(function(control) {
           if (control) { control.disabled = controlsDisabled; }
         });
         if (settingsSaveBtn) { settingsSaveBtn.textContent = account ? t('save') : t('addModel'); }
@@ -4116,6 +4145,20 @@ export function getInputScript(): string {
           var source = getSettingsActiveAccount();
           if (!source || settingsDialogBusyAction) { return; }
           if (blockSettingsActionForUnsavedChanges()) { return; }
+          if (settingsManualModelBox) { settingsManualModelBox.classList.remove('hidden'); }
+          if (settingsManualModelId) {
+            settingsManualModelId.focus();
+            settingsManualModelId.select();
+          }
+        });
+      }
+
+      if (settingsConfirmAddModelBtn) {
+        settingsConfirmAddModelBtn.addEventListener('click', function() {
+          if (blockAccountSettingsWhileRunBusy()) { return; }
+          var source = getSettingsActiveAccount();
+          if (!source || settingsDialogBusyAction) { return; }
+          if (blockSettingsActionForUnsavedChanges()) { return; }
           var modelId = settingsManualModelId ? settingsManualModelId.value.trim() : '';
           if (!modelId) {
             setSettingsDialogStatus(t('manualModelIdRequired'));
@@ -4130,6 +4173,7 @@ export function getInputScript(): string {
             baseUrl: source.baseUrl,
             modelId: modelId
           });
+          if (settingsManualModelBox) { settingsManualModelBox.classList.add('hidden'); }
           beginSettingsDialogAction('add-model', t('savingModelSource'));
         });
       }
@@ -4139,7 +4183,7 @@ export function getInputScript(): string {
         input.addEventListener('keydown', function(event) {
           if (event.key !== 'Enter' || event.metaKey || event.ctrlKey) { return; }
           event.preventDefault();
-          if (settingsAddModelBtn) { settingsAddModelBtn.click(); }
+          if (settingsConfirmAddModelBtn) { settingsConfirmAddModelBtn.click(); }
         });
       });
 

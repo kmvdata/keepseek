@@ -752,6 +752,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.saveModelSource(message);
         return;
       }
+      case 'deleteModel': {
+        await this.deleteModel(message);
+        return;
+      }
       case 'deleteModelSource': {
         await this.deleteModelSource(message.sourceId);
         return;
@@ -1824,6 +1828,33 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           : '模型已保存，但自动获取模型失败；可稍后手动刷新。');
       }
       void this.refreshBalance({ force: true });
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
+      this.postModelSettingsDialog();
+    }
+  }
+
+  private async deleteModel(input: { sourceId: string; modelId: string }): Promise<void> {
+    if (this.rejectModelSourceMutationWhileBusy()) {
+      return;
+    }
+    try {
+      await this.waitForBalanceRefresh();
+      const source = await this.sourceStore.getSource(input.sourceId);
+      if (!source) {
+        throw new Error(this.t('modelSourceNotFound'));
+      }
+      const modelId = input.modelId.trim();
+      await this.modelSourceService.removeModel(input.sourceId, modelId);
+      await this.refreshModelSourceState();
+      if (this.selectedSourceId === input.sourceId && this.selectedModelId === modelId) {
+        const fallback = this.availableModels.find((model) => model.sourceId === input.sourceId);
+        if (fallback?.sourceId) {
+          await this.persistModelSelection(fallback.sourceId, fallback.id);
+        }
+      }
+      this.postState();
+      this.postModelSettingsDialog();
     } catch (error) {
       vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
       this.postModelSettingsDialog();

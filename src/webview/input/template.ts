@@ -343,15 +343,16 @@ export function getInputTemplate(): string {
                       <span id="settingsModelsHint" class="settings-field-hint" data-i18n="modelListHint">模型名称取自服务商返回的名称，其次为内置标签与模型 ID。</span>
                     </div>
                     <button id="settingsRefreshModelsBtn" type="button" class="secondary" data-i18n="refreshModels">刷新模型</button>
+                    <button id="settingsAddModelBtn" type="button" class="secondary" data-i18n="addModel">添加模型</button>
                   </div>
                   <div id="settingsModelList" class="settings-model-list"></div>
                   <div id="settingsModelEmpty" class="settings-empty-state hidden" data-i18n="modelsEmpty">没有可用模型；非官网来源请手动添加模型 ID。</div>
-                  <div class="settings-manual-model">
+                  <div class="settings-manual-model hidden">
                     <label class="settings-field">
                       <span id="settingsManualModelIdLabel" class="settings-field-label" data-i18n="manualModelId">模型 ID</span>
                       <input id="settingsManualModelId" class="settings-input" type="text" placeholder="model-id" autocomplete="off" />
                     </label>
-                    <button id="settingsAddModelBtn" type="button" class="secondary" data-i18n="addModel">添加模型</button>
+                    <button id="settingsConfirmAddModelBtn" type="button" class="secondary" data-i18n="confirmAddModel">添加</button>
                   </div>
                 </div>
               </div>
