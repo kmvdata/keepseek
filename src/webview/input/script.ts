@@ -1861,7 +1861,7 @@ export function getInputScript(): string {
 
       function getModelDisplayLabel(model) {
         if (!model) { return 'DeepSeek-V4-Flash'; }
-        return model.alias || model.fetchedName || model.label || model.id || 'Model';
+        return model.fetchedName || model.label || model.id || 'Model';
       }
 
       function getModelSourceLabel(model) {
@@ -3434,9 +3434,7 @@ export function getInputScript(): string {
       var settingsModelEmpty = document.getElementById('settingsModelEmpty');
       var settingsManualModelIdLabel = document.getElementById('settingsManualModelIdLabel');
       var settingsManualModelId = document.getElementById('settingsManualModelId');
-      var settingsManualModelAliasLabel = document.getElementById('settingsManualModelAliasLabel');
-      var settingsManualModelAlias = document.getElementById('settingsManualModelAlias');
-      var settingsSaveModelAliasBtn = document.getElementById('settingsSaveModelAliasBtn');
+      var settingsAddModelBtn = document.getElementById('settingsAddModelBtn');
       var historySettingsOverlay = document.getElementById('historySettingsDialogOverlay');
       var historyRetentionDaysInput = document.getElementById('historyRetentionDaysInput');
       var aboutOverlay = document.getElementById('aboutDialogOverlay');
@@ -3467,8 +3465,6 @@ export function getInputScript(): string {
       var settingsDialogBusyTimer = null;
       var settingsDialogDirty = false;
       var settingsOriginalFormSignature = '';
-      var settingsPendingModelSourceId = '';
-      var settingsPendingAliasDrafts = null;
       var settingsRunBusyStatusVisible = false;
       var defaultHistoryRetentionDays = 7;
       var maxHistoryRetentionDays = 60;
@@ -3513,19 +3509,12 @@ export function getInputScript(): string {
         if (!id) { return null; }
         var provider = normalizeSettingsProvider(rawSource.provider);
         var explicitModels = Array.isArray(rawSource.models) ? rawSource.models : [];
-        var aliases = {};
-        explicitModels.forEach(function(model) {
-          var modelId = readSettingsString(model && model.id, '').trim();
-          var nickname = readSettingsString(model && model.name, '').trim();
-          if (modelId && nickname) { aliases[modelId] = nickname; }
-        });
         return {
           id: id,
           name: readSettingsString(rawSource.name, '').trim() || getSettingsProviderLabel(provider),
           provider: provider,
           apiKey: readSettingsString(rawSource.apiKey, ''),
           baseUrl: readSettingsString(rawSource.baseUrl, ''),
-          modelAliases: aliases,
           modelCache: rawSource.modelCache && typeof rawSource.modelCache === 'object' ? rawSource.modelCache : null,
           models: Array.isArray(rawSource.availableModels) ? rawSource.availableModels : explicitModels,
           enabled: rawSource.enabled !== false,
@@ -3553,11 +3542,10 @@ export function getInputScript(): string {
           var id = readSettingsString(source.id, '').trim();
           if (!id) { return; }
           if (!modelsById[id]) {
-            modelsById[id] = { id: id, alias: '', fetchedName: '', label: '' };
+            modelsById[id] = { id: id, fetchedName: '', label: '' };
             modelOrder.push(id);
           }
           var model = modelsById[id];
-          model.alias = readSettingsString(source.alias, model.alias);
           model.fetchedName = readSettingsString(source.fetchedName || source.name, model.fetchedName);
           model.label = readSettingsString(source.label, model.label);
         }
@@ -3573,10 +3561,6 @@ export function getInputScript(): string {
             addModel(model);
           });
         }
-        Object.keys(account.modelAliases).forEach(function(modelId) {
-          addModel({ id: modelId });
-          modelsById[modelId].alias = account.modelAliases[modelId];
-        });
         return modelOrder.map(function(modelId) { return modelsById[modelId]; });
       }
 
@@ -3592,52 +3576,12 @@ export function getInputScript(): string {
         settingsDialogDirty = getSettingsFormSignature() !== settingsOriginalFormSignature;
       }
 
-      function getFirstUnsavedSettingsAliasInput() {
-        var account = getSettingsActiveAccount();
-        if (!account || !settingsModelList) { return null; }
-        var models = getSettingsAccountModels(account);
-        var savedAliases = {};
-        models.forEach(function(model) {
-          savedAliases[model.id] = Object.prototype.hasOwnProperty.call(account.modelAliases, model.id)
-            ? account.modelAliases[model.id]
-            : model.alias || '';
-        });
-        return Array.from(settingsModelList.querySelectorAll('input[data-model-id]')).find(function(input) {
-          var modelId = input.dataset.modelId || '';
-          return input.value.trim() !== (savedAliases[modelId] || '').trim();
-        }) || null;
-      }
-
-      function captureSettingsAliasDrafts() {
-        var drafts = {};
-        if (!settingsModelList) { return drafts; }
-        settingsModelList.querySelectorAll('input[data-model-id]').forEach(function(input) {
-          if (input.dataset.modelId) {
-            drafts[input.dataset.modelId] = input.value;
-          }
-        });
-        return drafts;
-      }
-
-      function restoreSettingsAliasDrafts(sourceId, drafts) {
-        if (!settingsModelList || !drafts || sourceId !== settingsSelectedSourceId) { return; }
-        settingsModelList.querySelectorAll('input[data-model-id]').forEach(function(input) {
-          var modelId = input.dataset.modelId || '';
-          if (Object.prototype.hasOwnProperty.call(drafts, modelId)) {
-            input.value = drafts[modelId];
-          }
-        });
-      }
-
-      function blockSettingsActionForUnsavedChanges(includeAliasDrafts) {
+      function blockSettingsActionForUnsavedChanges() {
         updateSettingsDialogDirtyState();
-        var unsavedAlias = includeAliasDrafts === false ? null : getFirstUnsavedSettingsAliasInput();
-        if (!settingsDialogDirty && !unsavedAlias) { return false; }
-          setSettingsDialogStatus(t('modelSourceUnsavedChanges'));
-        if (settingsDialogDirty && settingsSaveBtn) {
+        if (!settingsDialogDirty) { return false; }
+        setSettingsDialogStatus(t('modelSourceUnsavedChanges'));
+        if (settingsSaveBtn) {
           settingsSaveBtn.focus();
-        } else if (unsavedAlias) {
-          unsavedAlias.focus();
         }
         return true;
       }
@@ -3678,10 +3622,6 @@ export function getInputScript(): string {
 
       function beginSettingsDialogAction(action, statusMessage) {
         clearSettingsDialogBusy();
-        if (action !== 'save-alias') {
-          settingsPendingModelSourceId = '';
-          settingsPendingAliasDrafts = null;
-        }
         settingsDialogBusyAction = action;
         settingsRunBusyStatusVisible = false;
         setSettingsDialogStatus(statusMessage);
@@ -3708,7 +3648,6 @@ export function getInputScript(): string {
               : '';
         }
         if (settingsManualModelId) { settingsManualModelId.value = ''; }
-        if (settingsManualModelAlias) { settingsManualModelAlias.value = ''; }
         settingsOriginalFormSignature = getSettingsFormSignature();
         settingsDialogDirty = false;
       }
@@ -3755,18 +3694,6 @@ export function getInputScript(): string {
       function renderSettingsModelList(account, controlsDisabled) {
         if (!settingsModelList) { return; }
         var models = getSettingsAccountModels(account);
-        var focusedModelId = document.activeElement instanceof HTMLInputElement
-          && document.activeElement.matches('.settings-model-alias-input[data-model-id]')
-          ? document.activeElement.dataset.modelId || ''
-          : '';
-        var focusedSelectionStart = focusedModelId ? document.activeElement.selectionStart : null;
-        var focusedSelectionEnd = focusedModelId ? document.activeElement.selectionEnd : null;
-        var draftAliases = {};
-        settingsModelList.querySelectorAll('input[data-model-id]').forEach(function(input) {
-          if (input.dataset.modelId) {
-            draftAliases[input.dataset.modelId] = input.value;
-          }
-        });
         settingsModelList.innerHTML = '';
         models.forEach(function(model) {
           var row = document.createElement('div');
@@ -3782,34 +3709,8 @@ export function getInputScript(): string {
           id.className = 'settings-model-id';
           id.textContent = model.id;
           identity.append(name, id);
-          var alias = document.createElement('input');
-          alias.type = 'text';
-          alias.className = 'settings-input settings-model-alias-input';
-          alias.dataset.modelId = model.id;
-          alias.value = Object.prototype.hasOwnProperty.call(draftAliases, model.id)
-            ? draftAliases[model.id]
-            : Object.prototype.hasOwnProperty.call(account.modelAliases, model.id)
-              ? account.modelAliases[model.id]
-              : model.alias || '';
-          alias.placeholder = t('modelAliasPlaceholder');
-          alias.setAttribute('aria-label', t('modelAliasFor', { modelId: model.id }));
-          alias.disabled = controlsDisabled;
-          var save = document.createElement('button');
-          save.type = 'button';
-          save.className = 'secondary';
-          save.dataset.action = 'save-model-alias';
-          save.dataset.modelId = model.id;
-          save.textContent = t('saveAlias');
-          save.title = model.id;
-          save.disabled = controlsDisabled;
-          row.append(identity, alias, save);
+          row.append(identity);
           settingsModelList.append(row);
-          if (focusedModelId === model.id) {
-            alias.focus();
-            if (typeof focusedSelectionStart === 'number' && typeof focusedSelectionEnd === 'number') {
-              alias.setSelectionRange(focusedSelectionStart, focusedSelectionEnd);
-            }
-          }
         });
         if (settingsModelEmpty) {
           settingsModelEmpty.classList.toggle('hidden', models.length > 0);
@@ -3868,20 +3769,18 @@ export function getInputScript(): string {
           var sourceNameField = settingsAccountName.closest('label');
           if (sourceNameField) { sourceNameField.classList.toggle('hidden', !account); }
         }
-        if (settingsModelsTitle) { settingsModelsTitle.textContent = t('modelAliasesTitle'); }
-        if (settingsModelsHint) { settingsModelsHint.textContent = t('modelAliasesHint'); }
+        if (settingsModelsTitle) { settingsModelsTitle.textContent = t('modelListTitle'); }
+        if (settingsModelsHint) { settingsModelsHint.textContent = t('modelListHint'); }
         if (settingsRefreshModelsBtn) {
           settingsRefreshModelsBtn.textContent = settingsDialogBusyAction === 'refresh-models' ? t('refreshingModels') : t('refreshModels');
           settingsRefreshModelsBtn.disabled = !account || controlsDisabled;
         }
         if (settingsModelEmpty) { settingsModelEmpty.textContent = t('modelsEmpty'); }
         if (settingsManualModelIdLabel) { settingsManualModelIdLabel.textContent = t('manualModelId'); }
-        if (settingsManualModelAliasLabel) { settingsManualModelAliasLabel.textContent = t('manualModelAlias'); }
-        if (settingsSaveModelAliasBtn) {
-          settingsSaveModelAliasBtn.textContent = settingsDialogBusyAction === 'save-alias' ? t('savingAlias') : t('addModel');
-          settingsSaveModelAliasBtn.disabled = !account || controlsDisabled;
+        if (settingsAddModelBtn) {
+          settingsAddModelBtn.disabled = !account || controlsDisabled;
         }
-        [settingsAccountName, settingsApiKey, settingsBaseUrl, settingsApiKeyVisibilityBtn, settingsClearApiKeyBtn, settingsSaveBtn, settingsManualModelId, settingsManualModelAlias].forEach(function(control) {
+        [settingsAccountName, settingsApiKey, settingsBaseUrl, settingsApiKeyVisibilityBtn, settingsClearApiKeyBtn, settingsSaveBtn, settingsManualModelId].forEach(function(control) {
           if (control) { control.disabled = controlsDisabled; }
         });
         if (settingsSaveBtn) { settingsSaveBtn.textContent = account ? t('save') : t('addModel'); }
@@ -3892,8 +3791,6 @@ export function getInputScript(): string {
 
       function showSettingsDialog(settings) {
         if (!settingsOverlay || !settingsApiKey || !settingsBaseUrl) { return; }
-        var aliasDraftSourceId = settingsDialogBusyAction === 'save-alias' ? settingsPendingModelSourceId : '';
-        var aliasDrafts = settingsDialogBusyAction === 'save-alias' ? settingsPendingAliasDrafts : null;
         var values = settings && typeof settings === 'object' ? settings : {};
         var rawSources = Array.isArray(values.sources) ? values.sources : [];
         settingsSources = rawSources.map(normalizeSettingsSource).filter(Boolean);
@@ -3908,9 +3805,6 @@ export function getInputScript(): string {
         if (settingsModelList) { settingsModelList.innerHTML = ''; }
         setApiKeyVisible(false, false);
         renderAccountSettings();
-        restoreSettingsAliasDrafts(aliasDraftSourceId, aliasDrafts);
-        settingsPendingModelSourceId = '';
-        settingsPendingAliasDrafts = null;
         settingsOverlay.classList.remove('hidden');
         if (state.isBusy && settingsDialogStatus) {
           settingsDialogStatus.focus();
@@ -4009,8 +3903,6 @@ export function getInputScript(): string {
           return;
         }
         clearSettingsDialogBusy();
-        settingsPendingModelSourceId = '';
-        settingsPendingAliasDrafts = null;
         settingsRunBusyStatusVisible = false;
         setSettingsDialogStatus('');
         settingsOverlay.classList.add('hidden');
@@ -4108,12 +4000,6 @@ export function getInputScript(): string {
           if (blockAccountSettingsWhileRunBusy()) { return; }
           var source = getSettingsActiveAccount();
           if (settingsDialogBusyAction) { return; }
-          var unsavedAlias = source ? getFirstUnsavedSettingsAliasInput() : null;
-          if (unsavedAlias) {
-            setSettingsDialogStatus(t('modelSourceUnsavedChanges'));
-            unsavedAlias.focus();
-            return;
-          }
           var name = settingsAccountName ? settingsAccountName.value.trim() : '';
           var apiKey = settingsApiKey ? settingsApiKey.value.trim() : '';
           var baseUrl = settingsBaseUrl ? settingsBaseUrl.value.trim() : '';
@@ -4121,7 +4007,6 @@ export function getInputScript(): string {
             ? source.provider
             : normalizeSettingsProvider(settingsCreateProvider ? settingsCreateProvider.value : 'deepseek');
           var modelId = settingsManualModelId ? settingsManualModelId.value.trim() : '';
-          var nickname = settingsManualModelAlias ? settingsManualModelAlias.value.trim() : '';
           if (!apiKey) {
             setSettingsDialogStatus(t('apiKeyRequired'));
             if (settingsApiKey) { settingsApiKey.focus(); }
@@ -4159,10 +4044,9 @@ export function getInputScript(): string {
               provider: provider,
               apiKey: apiKey,
               baseUrl: baseUrl,
-              modelId: modelId,
-              nickname: nickname
+              modelId: modelId
             });
-            beginSettingsDialogAction('add-model', t('savingAlias'));
+            beginSettingsDialogAction('add-model', t('savingModelSource'));
           }
         });
       }
@@ -4226,70 +4110,36 @@ export function getInputScript(): string {
         });
       }
 
-      if (settingsModelList) {
-        settingsModelList.addEventListener('click', function(event) {
-          var target = event.target instanceof Element ? event.target : null;
-          var button = target?.closest('button[data-action="save-model-alias"]');
-          var source = getSettingsActiveAccount();
-          if (!button || blockAccountSettingsWhileRunBusy() || !source || settingsDialogBusyAction) { return; }
-          if (blockSettingsActionForUnsavedChanges(false)) { return; }
-          var modelId = button.dataset.modelId || '';
-          var row = button.closest('.settings-model-row');
-          var aliasInput = row ? row.querySelector('input[data-model-id]') : null;
-          var alias = aliasInput ? aliasInput.value.trim() : '';
-          if (!modelId) { return; }
-          settingsPendingModelSourceId = source.id;
-          settingsPendingAliasDrafts = captureSettingsAliasDrafts();
-          vscode.postMessage({
-            type: 'saveModel',
-            sourceId: source.id,
-            modelId: modelId,
-            nickname: alias
-          });
-          beginSettingsDialogAction('save-alias', t('savingAlias'));
-        });
-        settingsModelList.addEventListener('keydown', function(event) {
-          var target = event.target instanceof Element ? event.target : null;
-          if (event.key !== 'Enter' || !target?.matches('input[data-model-id]')) { return; }
-          var row = target.closest('.settings-model-row');
-          var save = row ? row.querySelector('button[data-action="save-model-alias"]') : null;
-          if (!save) { return; }
-          event.preventDefault();
-          save.click();
-        });
-      }
-
-      if (settingsSaveModelAliasBtn) {
-        settingsSaveModelAliasBtn.addEventListener('click', function() {
+      if (settingsAddModelBtn) {
+        settingsAddModelBtn.addEventListener('click', function() {
           if (blockAccountSettingsWhileRunBusy()) { return; }
           var source = getSettingsActiveAccount();
           if (!source || settingsDialogBusyAction) { return; }
           if (blockSettingsActionForUnsavedChanges()) { return; }
           var modelId = settingsManualModelId ? settingsManualModelId.value.trim() : '';
-          var alias = settingsManualModelAlias ? settingsManualModelAlias.value.trim() : '';
           if (!modelId) {
             setSettingsDialogStatus(t('manualModelIdRequired'));
             if (settingsManualModelId) { settingsManualModelId.focus(); }
             return;
           }
-          settingsPendingModelSourceId = source.id;
-          settingsPendingAliasDrafts = captureSettingsAliasDrafts();
           vscode.postMessage({
-            type: 'saveModel',
+            type: 'addModel',
             sourceId: source.id,
-            modelId: modelId,
-            nickname: alias
+            provider: source.provider,
+            apiKey: source.apiKey,
+            baseUrl: source.baseUrl,
+            modelId: modelId
           });
-          beginSettingsDialogAction('save-alias', t('savingAlias'));
+          beginSettingsDialogAction('add-model', t('savingModelSource'));
         });
       }
 
-      [settingsManualModelId, settingsManualModelAlias].forEach(function(input) {
+      [settingsManualModelId].forEach(function(input) {
         if (!input) { return; }
         input.addEventListener('keydown', function(event) {
           if (event.key !== 'Enter' || event.metaKey || event.ctrlKey) { return; }
           event.preventDefault();
-          if (settingsSaveModelAliasBtn) { settingsSaveModelAliasBtn.click(); }
+          if (settingsAddModelBtn) { settingsAddModelBtn.click(); }
         });
       });
 

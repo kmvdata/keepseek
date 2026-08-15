@@ -30,7 +30,7 @@ test('contributes editor, Explorer, and terminal context commands', async () => 
     (item) => item.command === 'keepseek.addTerminalSelectionToContext'
   );
   assert.ok(terminalSelectionMenu);
-  assert.equal(terminalSelectionMenu.when, 'terminalTextSelected');
+  assert.equal(terminalSelectionMenu?.when, 'terminalTextSelected');
 });
 
 test('provider focuses the contributed KeepSeek view container before inserting references', async () => {
@@ -44,7 +44,7 @@ test('provider focuses the contributed KeepSeek view container before inserting 
   const match = /const CHAT_CONTAINER_ID = '([^']+)'/u.exec(providerSource);
 
   assert.ok(match);
-  assert.ok(containerIds.includes(match[1]));
+  assert.ok(match?.[1] && containerIds.includes(match[1]));
 });
 
 test('command menu model settings are registered and persisted for the current workspace', async () => {
@@ -137,7 +137,7 @@ test('command menu exposes an accessible persisted compression threshold tab sel
   assert.match(styles, /\.command-menu\.is-readonly \.command-compression-tab/u);
 });
 
-test('model settings dialog manages grouped sources and per-source model nicknames', async () => {
+test('model settings dialog manages grouped sources and per-source models', async () => {
   const inputTemplate = getInputTemplate();
   const inputScript = getInputScript();
   const styles = getStyles();
@@ -170,8 +170,7 @@ test('model settings dialog manages grouped sources and per-source model nicknam
     'settingsRefreshModelsBtn',
     'settingsModelList',
     'settingsManualModelId',
-    'settingsManualModelAlias',
-    'settingsSaveModelAliasBtn'
+    'settingsAddModelBtn'
   ]) {
     assert.match(inputTemplate, new RegExp(`id="${accountId}"`, 'u'));
   }
@@ -182,7 +181,6 @@ test('model settings dialog manages grouped sources and per-source model nicknam
   assert.match(inputScript, /type: 'addModel'/u);
   assert.match(inputScript, /type: 'saveModelSource'/u);
   assert.match(inputScript, /type: 'deleteModelSource'/u);
-  assert.match(inputScript, /type: 'saveModel'/u);
   assert.match(inputScript, /type: 'refreshSourceModels'/u);
   assert.doesNotMatch(inputScript, /type: 'selectAccount'/u);
   assert.match(inputScript, /function beginSettingsDialogAction/u);
@@ -193,7 +191,6 @@ test('model settings dialog manages grouped sources and per-source model nicknam
   assert.match(inputScript, /var runBusy = Boolean\(state\.isBusy\)/u);
   assert.match(inputScript, /var controlsDisabled = operationBusy \|\| runBusy/u);
   assert.match(inputScript, /button\.disabled = controlsDisabled \|\| !account\.enabled/u);
-  assert.match(inputScript, /alias\.disabled = controlsDisabled/u);
   assert.match(inputScript, /settingsCancelBtn\.disabled = operationBusy/u);
   assert.match(inputScript, /t\('modelSettingsReadonlyWhileBusy'\)/u);
   assert.ok((inputScript.match(/blockAccountSettingsWhileRunBusy\(\)/gu) ?? []).length >= 9);
@@ -212,12 +209,12 @@ test('model settings dialog manages grouped sources and per-source model nicknam
   assert.doesNotMatch(inputScript, /window\.(?:prompt|alert|confirm)\s*\(/u);
 });
 
-test('command model labels prefer aliases and fetched names while hover keeps the model id', () => {
+test('command model labels prefer fetched names while hover keeps the model id', () => {
   const inputScript = getInputScript();
 
   assert.match(
     inputScript,
-    /return model\.alias \|\| model\.fetchedName \|\| model\.label \|\| model\.id \|\| 'Model'/u
+    /return model\.fetchedName \|\| model\.label \|\| model\.id \|\| 'Model'/u
   );
   assert.match(inputScript, /label\.title = model\.id \|\| getModelDisplayLabel\(model\)/u);
   assert.match(inputScript, /option\.title = model\.id \|\| getModelDisplayLabel\(model\)/u);

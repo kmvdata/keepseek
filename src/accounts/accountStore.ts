@@ -395,8 +395,7 @@ export function normalizeSourceModels(value: unknown): ModelSourceModel[] {
       continue;
     }
     seenIds.add(id);
-    const name = normalizeBoundedString(item.name, MAX_MODEL_NAME_LENGTH);
-    models.push(name ? { id, name } : { id });
+    models.push({ id });
   }
   return models;
 }
@@ -406,19 +405,6 @@ function normalizePersistedSourceModels(value: Record<string, unknown>): ModelSo
   const models = hasCurrentModels ? normalizeSourceModels(value.models) : [];
   const byId = new Map(models.map((model) => [model.id, { ...model }]));
   const order = models.map((model) => model.id);
-  const aliases = normalizeModelAliases(value.modelAliases);
-
-  for (const [id, name] of Object.entries(aliases)) {
-    const current = byId.get(id);
-    if (current) {
-      if (!current.name) {
-        current.name = name;
-      }
-      continue;
-    }
-    byId.set(id, { id, name });
-    order.push(id);
-  }
 
   // Older account files represented manually entered ids as unnamed cache
   // entries. Only perform that conversion when the new `models` field is
@@ -435,21 +421,6 @@ function normalizePersistedSourceModels(value: Record<string, unknown>): ModelSo
   }
 
   return order.map((id) => byId.get(id) as ModelSourceModel);
-}
-
-export function normalizeModelAliases(value: unknown): Record<string, string> {
-  if (!isRecord(value)) {
-    return {};
-  }
-  const aliases: Array<[string, string]> = [];
-  for (const [rawModelId, rawAlias] of Object.entries(value)) {
-    const modelId = normalizeBoundedString(rawModelId, MAX_MODEL_ID_LENGTH);
-    const alias = normalizeBoundedString(rawAlias, MAX_MODEL_NAME_LENGTH);
-    if (modelId && alias) {
-      aliases.push([modelId, alias]);
-    }
-  }
-  return Object.fromEntries(aliases);
 }
 
 export function normalizeModelSourceProvider(value: unknown): ModelSourceProvider | undefined {

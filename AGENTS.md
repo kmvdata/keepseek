@@ -38,7 +38,6 @@ src/
 │   ├── types.ts                 # 模型来源、来源模型与发现缓存领域类型
 │   ├── accountStore.ts          # provider 分目录的模型来源 CRUD 与安全持久化
 │   ├── accountResolver.ts       # 按来源解析凭证、旧配置回退与自动迁移唯一入口
-│   ├── modelAlias.ts            # 模型昵称显示优先级纯函数
 │   └── modelDiscovery.ts        # OpenAI 兼容 /models 发现与缓存
 ├── workspace/
 │   └── workspaceDirectory.ts    # 工作区目录枚举共享工具
@@ -114,7 +113,7 @@ src/
 - `ChatSession.contextCompression` 存储会话摘要、受保护消息 id、最近压缩时间和失败原因；摘要不是聊天 UI 消息。
 - `FileContextStore` 管理用户显式加入上下文的文件内容，读取限制来自 `keepseek.maxFileBytes` 和 `keepseek.maxContextFiles`。
 - `ModelSourceStore` 只在 `globalStorageUri/accounts/<provider>/` 下持久化来源 JSON；`resolveModelSourceConfig(sourceId)` 是主请求、摘要、余额和 Provider 共用的唯一凭据解析入口，不存在全局激活来源。旧 `keepseek.apiKey` / `keepseek.baseUrl` 只复制迁移、不修改；`.initialized` 不含密钥，用于防止用户删除最后来源后旧配置再次自动复活。
-- 仅官网 DeepSeek 来源（`provider === 'deepseek' && baseUrl.host === 'api.deepseek.com'`）保留余额与费用能力；`openai-compatible` 和代理来源只使用 chat completions、SSE、工具调用与 token 统计。模型显示固定按用户昵称、API 名称、内置 label、模型 id 降级。
+- 仅官网 DeepSeek 来源（`provider === 'deepseek' && baseUrl.host === 'api.deepseek.com'`）保留余额与费用能力；`openai-compatible` 和代理来源只使用 chat completions、SSE、工具调用与 token 统计。模型显示固定按服务商返回名称（fetchedName）、API 名称、内置 label、模型 id 降级。
 - `ChangeSetStore` 是待确认修改的真实主管线：持久化 ChangeSet/checkpoint，处理 Diff、Apply、Discard 和 Revert，并通过 `SafeFileEditor` 执行用户点击 Apply 后的文件操作。`DraftEditStore` 不是 Provider 当前的主管线。
 - `ProjectInstructionsResolver` 只读取每个受信任工作区根目录的 `AGENTS.md`；`.agents/**/AGENTS.md` 属于 Skill，不作为全局项目指令。
 - `SkillActivationResolver` 按 explicit、session、workspace-default、implicit 的顺序选择 Skill；`allowImplicit: false` 不能被隐式激活，未受信任工作区不能自动加载项目 Skill。

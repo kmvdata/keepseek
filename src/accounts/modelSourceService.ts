@@ -16,7 +16,6 @@ export interface AddModelInput {
   apiKey: string;
   baseUrl: string;
   modelId?: string;
-  nickname?: string;
 }
 
 export interface AddModelResult {
@@ -74,7 +73,7 @@ export class ModelSourceService {
       throw new Error('Model ID is required for this source.');
     }
     if (modelId) {
-      source = await this.upsertModel(source, modelId, input.nickname ?? '');
+      source = await this.upsertModel(source, modelId);
     }
 
     const discovery = isOfficialDeepSeekSource(source)
@@ -122,22 +121,6 @@ export class ModelSourceService {
     };
   }
 
-  public async saveModel(input: {
-    sourceId: string;
-    modelId: string;
-    nickname?: string;
-  }): Promise<ModelSource> {
-    const source = await this.sourceStore.getSource(input.sourceId);
-    const modelId = input.modelId.trim();
-    if (!source) {
-      throw new Error('Model source not found.');
-    }
-    if (!modelId) {
-      throw new Error('Model ID is required.');
-    }
-    return await this.upsertModel(source, modelId, input.nickname ?? '');
-  }
-
   private async findReusableSource(
     provider: ModelSourceProvider,
     apiKey: string,
@@ -153,13 +136,11 @@ export class ModelSourceService {
 
   private async upsertModel(
     source: ModelSource,
-    modelId: string,
-    nickname: string
+    modelId: string
   ): Promise<ModelSource> {
-    const normalizedNickname = nickname.trim();
     const models: ModelSourceModel[] = source.models.map((model) => ({ ...model }));
     const index = models.findIndex((model) => model.id === modelId);
-    const next = normalizedNickname ? { id: modelId, name: normalizedNickname } : { id: modelId };
+    const next = { id: modelId };
     if (index >= 0) {
       models[index] = next;
     } else {

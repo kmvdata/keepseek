@@ -1441,13 +1441,9 @@ export function getInputStyles(): string {
       font-size: 10px;
     }
 
-    .settings-model-alias-input {
-      min-width: 0;
-    }
-
     .settings-manual-model {
       display: grid;
-      grid-template-columns: minmax(100px, 1fr) minmax(100px, 1fr) auto;
+      grid-template-columns: minmax(100px, 1fr) auto;
       align-items: end;
       gap: 6px;
       margin-top: 10px;

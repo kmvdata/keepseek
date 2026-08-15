@@ -33,14 +33,12 @@ export function createModelCatalog(sources: readonly ModelSource[]): KeepseekMod
 
     for (const modelId of orderedIds) {
       const builtIn = builtIns.find((model) => model.id === modelId);
-      const explicit = source.models.find((model) => model.id === modelId);
       const fetched = source.modelCache?.models.find((model) => model.id === modelId);
       catalog.push({
         id: modelId,
         label: builtIn?.label ?? modelId,
         provider: source.provider,
         contextWindowTokens: builtIn?.contextWindowTokens,
-        alias: explicit?.name,
         fetchedName: fetched?.name,
         sourceId: source.id,
         sourceName: source.name,

@@ -6,8 +6,6 @@ export interface KeepseekModel {
   label: string;
   provider: string;
   contextWindowTokens?: number;
-  /** User-defined display name scoped to the owning model source. */
-  alias?: string;
   /** Display name returned by the provider's OpenAI-compatible /models endpoint. */
   fetchedName?: string;
   /** Every selectable catalog model has these fields; profile-only fixtures may omit them. */

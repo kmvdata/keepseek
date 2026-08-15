@@ -752,10 +752,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.saveModelSource(message);
         return;
       }
-      case 'saveModel': {
-        await this.saveModel(message);
-        return;
-      }
       case 'deleteModelSource': {
         await this.deleteModelSource(message.sourceId);
         return;
@@ -1777,7 +1773,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         availableModels: createModelCatalog([source]).map((model) => ({
           id: model.id,
           name: model.fetchedName ?? model.label,
-          nickname: model.alias,
           supportsBilling: model.supportsBilling === true
         })),
         isOfficialDeepSeek: isOfficialDeepSeekSource(source)
@@ -1806,7 +1801,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     apiKey: string;
     baseUrl: string;
     modelId?: string;
-    nickname?: string;
   }): Promise<void> {
     if (this.rejectModelSourceMutationWhileBusy()) {
       return;
@@ -1866,21 +1860,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (this.selectedSourceId === source.id) {
         void this.refreshBalance({ force: result.connectionChanged });
       }
-    } catch (error) {
-      vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
-      this.postModelSettingsDialog();
-    }
-  }
-
-  private async saveModel(input: { sourceId: string; modelId: string; nickname?: string }): Promise<void> {
-    if (this.rejectModelSourceMutationWhileBusy()) {
-      return;
-    }
-    try {
-      await this.modelSourceService.saveModel(input);
-      await this.refreshModelSourceState();
-      this.postState();
-      this.postModelSettingsDialog();
     } catch (error) {
       vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
       this.postModelSettingsDialog();

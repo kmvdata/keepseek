@@ -13,10 +13,9 @@ export interface ModelDiscoveryCache {
   fetchedAt: number;
 }
 
-/** A model explicitly attached to a source. `name` is the user's display nickname. */
+/** A model explicitly attached to a source. */
 export interface ModelSourceModel {
   id: string;
-  name?: string;
 }
 
 /** Persisted model-source schema stored below the extension's globalStorageUri. */

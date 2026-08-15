@@ -8,8 +8,7 @@ import * as vscode from 'vscode';
 import {
   ModelSourceStore,
   normalizeModelDiscoveryCache,
-  normalizeModelSource,
-  normalizeModelAliases
+  normalizeModelSource
 } from '../src/accounts/accountStore';
 
 const NOW = 1_710_000_000_000;
@@ -32,7 +31,7 @@ describe('ModelSourceStore', () => {
       provider: 'deepseek',
       apiKey: ' sk-secret ',
       baseUrl: ' https://proxy.example.com/v1 ',
-      models: [{ id: ' model-a ', name: ' Daily ' }, { id: 'model-a', name: 'duplicate' }],
+      models: [{ id: ' model-a ' }, { id: 'model-a' }],
       modelCache: {
         models: [{ id: ' model-a ', name: ' Model A ' }, { id: 'model-b' }],
         fetchedAt: NOW - 100
@@ -48,7 +47,7 @@ describe('ModelSourceStore', () => {
       provider: 'deepseek',
       apiKey: 'sk-secret',
       baseUrl: 'https://proxy.example.com/v1',
-      models: [{ id: 'model-a', name: 'Daily' }],
+      models: [{ id: 'model-a' }],
       modelCache: {
         models: [{ id: 'model-a', name: 'Model A' }, { id: 'model-b' }],
         fetchedAt: NOW - 100
@@ -59,11 +58,10 @@ describe('ModelSourceStore', () => {
     });
     assert.equal(normalizeModelSource({ id: '../escape', provider: 'deepseek' }, { now: NOW }), undefined);
     assert.equal(normalizeModelSource({ id: 'a', provider: 'anthropic' }, { now: NOW }), undefined);
-    assert.deepEqual(normalizeModelAliases(null), {});
     assert.equal(normalizeModelDiscoveryCache({ models: 'invalid' }), undefined);
   });
 
-  it('reads old account JSON and projects aliases/manual cache entries into source models', () => {
+  it('reads old account JSON and projects manual cache entries into source models', () => {
     const source = normalizeModelSource({
       id: 'legacy',
       name: 'Legacy Account',
@@ -78,10 +76,7 @@ describe('ModelSourceStore', () => {
       createdAt: NOW,
       updatedAt: NOW
     }, { now: NOW });
-    assert.deepEqual(source?.models, [
-      { id: 'manual-model', name: 'Daily' },
-      { id: 'cached-model', name: 'Named' }
-    ]);
+    assert.deepEqual(source?.models, [{ id: 'manual-model' }]);
     assert.equal(source?.modelCache?.models[1]?.name, 'Discovered');
   });
 
@@ -106,10 +101,10 @@ describe('ModelSourceStore', () => {
 
     const updated = await store.updateSource('generated-id', {
       name: 'Renamed',
-      models: [{ id: 'proxy-model', name: 'Fast' }]
+      models: [{ id: 'proxy-model' }]
     });
     assert.equal(updated?.name, 'Renamed');
-    assert.deepEqual(updated?.models, [{ id: 'proxy-model', name: 'Fast' }]);
+    assert.deepEqual(updated?.models, [{ id: 'proxy-model' }]);
 
     assert.equal((await store.deleteSource('generated-id'))?.id, 'generated-id');
     await assert.rejects(access(storedPath));

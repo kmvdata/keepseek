@@ -339,8 +339,8 @@ export function getInputTemplate(): string {
                 <div class="settings-model-section">
                   <div class="settings-account-section-header settings-model-header">
                     <div>
-                      <span id="settingsModelsTitle" class="settings-section-heading" data-i18n="modelAliasesTitle">模型昵称</span>
-                      <span id="settingsModelsHint" class="settings-field-hint" data-i18n="modelAliasesHint">昵称会优先显示在模型切换菜单中。</span>
+                      <span id="settingsModelsTitle" class="settings-section-heading" data-i18n="modelListTitle">模型</span>
+                      <span id="settingsModelsHint" class="settings-field-hint" data-i18n="modelListHint">模型名称取自服务商返回的名称，其次为内置标签与模型 ID。</span>
                     </div>
                     <button id="settingsRefreshModelsBtn" type="button" class="secondary" data-i18n="refreshModels">刷新模型</button>
                   </div>
@@ -351,11 +351,7 @@ export function getInputTemplate(): string {
                       <span id="settingsManualModelIdLabel" class="settings-field-label" data-i18n="manualModelId">模型 ID</span>
                       <input id="settingsManualModelId" class="settings-input" type="text" placeholder="model-id" autocomplete="off" />
                     </label>
-                    <label class="settings-field">
-                      <span id="settingsManualModelAliasLabel" class="settings-field-label" data-i18n="manualModelAlias">昵称（可选）</span>
-                      <input id="settingsManualModelAlias" class="settings-input" type="text" autocomplete="off" />
-                    </label>
-                    <button id="settingsSaveModelAliasBtn" type="button" class="secondary" data-i18n="addModel">添加模型</button>
+                    <button id="settingsAddModelBtn" type="button" class="secondary" data-i18n="addModel">添加模型</button>
                   </div>
                 </div>
               </div>
