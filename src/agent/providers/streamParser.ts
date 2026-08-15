@@ -1,7 +1,7 @@
 import { AgentRunCallbacks } from '../../shared/types';
 import type { KeepseekLanguage } from '../../shared/i18n';
 import type { AgentInteractionTrace } from '../logging/interactionTrace';
-import { DeepSeekStreamChunk, DeepSeekStreamResult, DeepSeekToolCall, DeepSeekToolCallDelta } from './types';
+import { DeepSeekStreamChunk, DeepSeekStreamResult, DeepSeekToolCall, DeepSeekToolCallDelta } from '../deepseek/types';
 
 interface StreamingToolCallAccumulator {
   id: string;
@@ -12,7 +12,7 @@ interface StreamingToolCallAccumulator {
   };
 }
 
-interface DeepSeekStreamParseOptions {
+interface StreamParseOptions {
   trace?: AgentInteractionTrace;
   requestId?: string;
   attempt?: number;
@@ -73,12 +73,16 @@ class StreamingDsmlDisplayFilter {
   }
 }
 
-export class DeepSeekStreamParser {
+/**
+ * OpenAI 兼容 SSE 流解析器。deepseek / ollama / openai-compatible
+ * 三种账号类型共享同一套流式协议解析，属于协议层而不是某一家服务商。
+ */
+export class StreamParser {
   public async parse(
     body: NonNullable<Response['body']>,
     language: KeepseekLanguage,
     callbacks: AgentRunCallbacks,
-    options: DeepSeekStreamParseOptions = {}
+    options: StreamParseOptions = {}
   ): Promise<DeepSeekStreamResult> {
     const reader = body.getReader();
     const decoder = new TextDecoder();
@@ -155,8 +159,8 @@ export class DeepSeekStreamParser {
 
     if (!sawChunk) {
       throw new Error(language === 'en'
-        ? 'DeepSeek API did not return any streaming chunks.'
-        : 'DeepSeek API 未返回任何流式数据块。');
+        ? 'The model API did not return any streaming chunks.'
+        : '模型 API 未返回任何流式数据块。');
     }
 
     this.flushDisplayFilter(reasoningDisplayFilter, callbacks, 'reasoning');
@@ -183,7 +187,7 @@ export class DeepSeekStreamParser {
     contentDisplayFilter: StreamingDsmlDisplayFilter,
     reasoningDisplayFilter: StreamingDsmlDisplayFilter,
     callbacks: AgentRunCallbacks,
-    options: DeepSeekStreamParseOptions
+    options: StreamParseOptions
   ): { done: boolean; sawChunk: boolean; finishReason?: string | null; usage?: DeepSeekStreamResult['usage'] } {
     const dataLines = rawEvent
       .split('\n')
@@ -223,7 +227,7 @@ export class DeepSeekStreamParser {
     return { done: false, sawChunk, finishReason, usage };
   }
 
-  private recordRawSseData(data: string, options: DeepSeekStreamParseOptions): void {
+  private recordRawSseData(data: string, options: StreamParseOptions): void {
     if (!options.trace?.enabled || !options.trace.logRawStream || !options.trace.includesPayload('full')) {
       return;
     }
@@ -245,8 +249,8 @@ export class DeepSeekStreamParser {
       return parsed as DeepSeekStreamChunk;
     } catch (error) {
       throw new Error(language === 'en'
-        ? `Cannot parse DeepSeek streaming response: ${error instanceof Error ? error.message : String(error)}`
-        : `无法解析 DeepSeek 流式响应：${error instanceof Error ? error.message : String(error)}`);
+        ? `Cannot parse the streaming response: ${error instanceof Error ? error.message : String(error)}`
+        : `无法解析流式响应：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

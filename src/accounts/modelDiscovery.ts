@@ -93,7 +93,7 @@ export async function discoverSourceModels(
   options: DiscoverSourceModelsOptions = {}
 ): Promise<ModelDiscoveryCache | undefined> {
   const apiKey = source.apiKey.trim();
-  if (!apiKey || !source.baseUrl.trim()) {
+  if (!source.baseUrl.trim()) {
     return undefined;
   }
 
@@ -116,12 +116,13 @@ export async function discoverSourceModels(
 
     const endpointUrl = getSourceModelsEndpointUrl(source.baseUrl, source.provider);
     const fetchImpl: ModelsFetch = options.fetchImpl ?? fetch;
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
     const response = await fetchImpl(endpointUrl, {
       method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${apiKey}`
-      },
+      headers,
       signal: controller.signal
     });
     if (!response.ok) {

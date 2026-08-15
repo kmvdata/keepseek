@@ -1,4 +1,4 @@
-export const MODEL_SOURCE_PROVIDERS = ['deepseek', 'openai-compatible'] as const;
+export const MODEL_SOURCE_PROVIDERS = ['deepseek', 'ollama', 'openai-compatible'] as const;
 
 export type ModelSourceProvider = typeof MODEL_SOURCE_PROVIDERS[number];
 

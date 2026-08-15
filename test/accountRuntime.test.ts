@@ -9,19 +9,11 @@ import type { ModelSourceConfigSnapshot } from '../src/accounts/types';
 import { HistoryCompressor } from '../src/agent/historyCompressor';
 import { AgentRunner } from '../src/agent/runner';
 import type {
-  DeepSeekChatRequestBody,
   DeepSeekFunctionTool,
   DeepSeekMessage,
   DeepSeekStreamResult,
   DeepSeekUsage
 } from '../src/agent/deepseek/types';
-import { createNoopInteractionTrace } from '../src/agent/logging/interactionTrace';
-import type { UsageEvent } from '../src/shared/types';
-import type {
-  DeepSeekClientConfig,
-  DeepSeekClientRequest,
-  DeepSeekClientResult
-} from '../src/agent/deepseek/client';
 import type { ContextCompressionSettings } from '../src/shared/modelProfiles';
 import type { AgentRequest } from '../src/shared/types';
 
@@ -47,7 +39,6 @@ interface TestRuntimeConfig {
 }
 
 interface RuntimeInvoker {
-  deepSeekClient: CapturingClient;
   createChatCompletion(
     request: AgentRequest,
     runtimeConfig: TestRuntimeConfig,
@@ -62,7 +53,6 @@ interface RuntimeConfigInvoker {
 }
 
 interface SummaryInvoker {
-  deepSeekClient: CapturingClient;
   completeSummary(input: {
     model: AgentRequest['model'];
     messages: DeepSeekMessage[];
@@ -97,24 +87,49 @@ interface UsageInvoker {
   ): UsageEvent | undefined;
 }
 
-class CapturingClient {
-  public config: DeepSeekClientConfig | undefined;
-  public request: DeepSeekClientRequest | undefined;
+interface CapturedRequest {
+  url: string;
+  body: string;
+  authorization: string | undefined;
+}
 
-  public async createChatCompletion(
-    config: DeepSeekClientConfig,
-    request: DeepSeekClientRequest
-  ): Promise<DeepSeekClientResult> {
-    this.config = config;
-    this.request = request;
-    return {
-      ok: true,
-      message: { role: 'assistant', content: 'ok' },
-      finishReason: 'stop',
-      hadPartialOutput: true,
-      retryable: false
-    };
-  }
+/** 替换全局 fetch 捕获上游请求，返回一段固定 SSE 流；返回恢复函数。 */
+function mockFetchCapturing(
+  captured: CapturedRequest[],
+  content: string
+): () => void {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (
+    input: Parameters<typeof fetch>[0],
+    init?: Parameters<typeof fetch>[1]
+  ): Promise<Response> => {
+    const headers = init?.headers as Record<string, string> | undefined;
+    captured.push({
+      url: String(input),
+      body: typeof init?.body === 'string' ? init.body : '',
+      authorization: headers?.Authorization
+    });
+    return new Response(createSseStream(content), {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' }
+    });
+  }) as typeof fetch;
+  return () => {
+    globalThis.fetch = originalFetch;
+  };
+}
+
+function createSseStream(content: string): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const text = `data: ${JSON.stringify({
+    choices: [{ delta: { content }, finish_reason: 'stop' }]
+  })}\n\ndata: [DONE]\n\n`;
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(text));
+      controller.close();
+    }
+  });
 }
 
 const BASE_COMPRESSION: ContextCompressionSettings = {
@@ -140,40 +155,45 @@ const TEST_TOOL: DeepSeekFunctionTool = {
 };
 
 test('openai-compatible runtime sends the actual model id without DeepSeek-only parameters', async () => {
-  const runner = new AgentRunner() as unknown as RuntimeInvoker;
-  const client = new CapturingClient();
-  runner.deepSeekClient = client;
+  const captured: CapturedRequest[] = [];
+  const restore = mockFetchCapturing(captured, 'ok');
+  try {
+    const runner = new AgentRunner() as unknown as RuntimeInvoker;
 
-  await runner.createChatCompletion(
-    createRequest('vendor-reasoning-model', 'openai-compatible'),
-    createRuntimeConfig('openai-compatible'),
-    [
-      { role: 'user', content: 'hello' },
-      {
-        role: 'assistant',
-        content: null,
-        reasoning_content: null,
-        tool_calls: [{
-          id: 'call-1',
-          type: 'function',
-          function: { name: 'read_file', arguments: '{}' }
-        }]
-      },
-      { role: 'tool', tool_call_id: 'call-1', content: 'result' }
-    ],
-    [TEST_TOOL],
-    {}
-  );
+    await runner.createChatCompletion(
+      createRequest('vendor-reasoning-model', 'openai-compatible'),
+      createRuntimeConfig('openai-compatible'),
+      [
+        { role: 'user', content: 'hello' },
+        {
+          role: 'assistant',
+          content: null,
+          reasoning_content: null,
+          tool_calls: [{
+            id: 'call-1',
+            type: 'function',
+            function: { name: 'read_file', arguments: '{}' }
+          }]
+        },
+        { role: 'tool', tool_call_id: 'call-1', content: 'result' }
+      ],
+      [TEST_TOOL],
+      {}
+    );
 
-  const body = serializeBody(client.request?.body);
-  assert.equal(body.model, 'vendor-reasoning-model');
-  assert.equal('thinking' in body, false);
-  assert.equal('reasoning_effort' in body, false);
-  assert.equal(body.stream, true);
-  assert.equal(body.tool_choice, 'auto');
-  assert.deepEqual(body.tools, [TEST_TOOL]);
-  const messages = body.messages as Array<Record<string, unknown>>;
-  assert.equal('reasoning_content' in messages[1], false);
+    assert.equal(captured.length, 1);
+    const body = parseRequestBody(captured[0].body);
+    assert.equal(body.model, 'vendor-reasoning-model');
+    assert.equal('thinking' in body, false);
+    assert.equal('reasoning_effort' in body, false);
+    assert.equal(body.stream, true);
+    assert.equal(body.tool_choice, 'auto');
+    assert.deepEqual(body.tools, [TEST_TOOL]);
+    const messages = body.messages as Array<Record<string, unknown>>;
+    assert.equal('reasoning_content' in messages[1], false);
+  } finally {
+    restore();
+  }
 });
 
 test('main runtime resolves credentials from the model source bound to the selected model', async () => {
@@ -229,25 +249,30 @@ test('main runtime uses the immutable per-run source snapshot', async () => {
 });
 
 test('DeepSeek runtime preserves thinking and reasoning effort fields', async () => {
-  const runner = new AgentRunner() as unknown as RuntimeInvoker;
-  const client = new CapturingClient();
-  runner.deepSeekClient = client;
+  const captured: CapturedRequest[] = [];
+  const restore = mockFetchCapturing(captured, 'ok');
+  try {
+    const runner = new AgentRunner() as unknown as RuntimeInvoker;
 
-  await runner.createChatCompletion(
-    createRequest('deepseek-v4-pro', 'deepseek'),
-    createRuntimeConfig('deepseek'),
-    [{ role: 'assistant', content: null, reasoning_content: null, tool_calls: [] }],
-    [],
-    {}
-  );
+    await runner.createChatCompletion(
+      createRequest('deepseek-v4-pro', 'deepseek'),
+      createRuntimeConfig('deepseek'),
+      [{ role: 'assistant', content: null, reasoning_content: null, tool_calls: [] }],
+      [],
+      {}
+    );
 
-  const body = serializeBody(client.request?.body);
-  assert.equal(body.model, 'deepseek-v4-pro');
-  assert.deepEqual(body.thinking, { type: 'enabled' });
-  assert.equal(body.reasoning_effort, 'max');
-  const messages = body.messages as Array<Record<string, unknown>>;
-  assert.equal(Object.prototype.hasOwnProperty.call(messages[0], 'reasoning_content'), true);
-  assert.equal(messages[0].reasoning_content, null);
+    assert.equal(captured.length, 1);
+    const body = parseRequestBody(captured[0].body);
+    assert.equal(body.model, 'deepseek-v4-pro');
+    assert.deepEqual(body.thinking, { type: 'enabled' });
+    assert.equal(body.reasoning_effort, 'max');
+    const messages = body.messages as Array<Record<string, unknown>>;
+    assert.equal(Object.prototype.hasOwnProperty.call(messages[0], 'reasoning_content'), true);
+    assert.equal(messages[0].reasoning_content, null);
+  } finally {
+    restore();
+  }
 });
 
 test('context summaries resolve the selected source and omit DeepSeek-only fields for compatible providers', async () => {
@@ -261,65 +286,73 @@ test('context summaries resolve the selected source and omit DeepSeek-only field
       apiKey: 'compatible-key',
       baseUrl: 'https://compatible.example/v1'
     });
-    const compressor = new HistoryCompressor(undefined, globalStorageUri) as unknown as SummaryInvoker;
-    const client = new CapturingClient();
-    compressor.deepSeekClient = client;
+    const captured: CapturedRequest[] = [];
+    const restore = mockFetchCapturing(captured, 'ok');
+    try {
+      const compressor = new HistoryCompressor(undefined, globalStorageUri) as unknown as SummaryInvoker;
 
-    await compressor.completeSummary({
-      model: {
-        id: 'summary-model',
-        label: 'Summary Model',
-        provider: 'openai-compatible',
-        sourceId: 'compatible'
-      },
-      messages: [{ role: 'user', content: 'summarize' }],
-      maxTokens: 100,
-      timeoutMs: 1_000,
-      language: 'en',
-      usageSource: 'summary'
-    });
+      await compressor.completeSummary({
+        model: {
+          id: 'summary-model',
+          label: 'Summary Model',
+          provider: 'openai-compatible',
+          sourceId: 'compatible'
+        },
+        messages: [{ role: 'user', content: 'summarize' }],
+        maxTokens: 100,
+        timeoutMs: 1_000,
+        language: 'en',
+        usageSource: 'summary'
+      });
 
-    const body = serializeBody(client.request?.body);
-    assert.equal(client.config?.apiKey, 'compatible-key');
-    assert.equal(client.config?.baseUrl, 'https://compatible.example/v1');
-    assert.equal(body.model, 'summary-model');
-    assert.equal('thinking' in body, false);
+      assert.equal(captured.length, 1);
+      assert.equal(captured[0].authorization, 'Bearer compatible-key');
+      const body = parseRequestBody(captured[0].body);
+      assert.equal(body.model, 'summary-model');
+      assert.equal('thinking' in body, false);
+    } finally {
+      restore();
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test('context summaries use the same immutable per-run source snapshot', async () => {
-  const compressor = new HistoryCompressor() as unknown as SummaryInvoker;
-  const client = new CapturingClient();
-  compressor.deepSeekClient = client;
-  const sourceConfig: ModelSourceConfigSnapshot = {
-    sourceId: 'snapshot-source',
-    provider: 'openai-compatible',
-    apiKey: 'snapshot-key',
-    baseUrl: 'https://snapshot.example/v1',
-    supportsBilling: false
-  };
+  const captured: CapturedRequest[] = [];
+  const restore = mockFetchCapturing(captured, 'ok');
+  try {
+    const compressor = new HistoryCompressor() as unknown as SummaryInvoker;
+    const sourceConfig: ModelSourceConfigSnapshot = {
+      sourceId: 'snapshot-source',
+      provider: 'openai-compatible',
+      apiKey: 'snapshot-key',
+      baseUrl: 'https://snapshot.example/v1',
+      supportsBilling: false
+    };
 
-  await compressor.completeSummary({
-    model: {
-      id: 'snapshot-model',
-      label: 'Snapshot Model',
-      provider: 'openai-compatible'
-    },
-    messages: [{ role: 'user', content: 'summarize' }],
-    maxTokens: 100,
-    timeoutMs: 1_000,
-    language: 'en',
-    usageSource: 'summary',
-    sourceConfig
-  });
+    await compressor.completeSummary({
+      model: {
+        id: 'snapshot-model',
+        label: 'Snapshot Model',
+        provider: 'openai-compatible'
+      },
+      messages: [{ role: 'user', content: 'summarize' }],
+      maxTokens: 100,
+      timeoutMs: 1_000,
+      language: 'en',
+      usageSource: 'summary',
+      sourceConfig
+    });
 
-  assert.equal(client.config?.apiKey, 'snapshot-key');
-  assert.equal(client.config?.baseUrl, 'https://snapshot.example/v1');
-  const body = serializeBody(client.request?.body);
-  assert.equal(body.model, 'snapshot-model');
-  assert.equal('thinking' in body, false);
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].authorization, 'Bearer snapshot-key');
+    const body = parseRequestBody(captured[0].body);
+    assert.equal(body.model, 'snapshot-model');
+    assert.equal('thinking' in body, false);
+  } finally {
+    restore();
+  }
 });
 
 test('non-official sources record tokens but force cost and currency to empty values', () => {
@@ -392,7 +425,9 @@ function createRuntimeConfig(provider: TestRuntimeConfig['provider']): TestRunti
   };
 }
 
-function serializeBody(body: DeepSeekChatRequestBody | undefined): Record<string, unknown> {
-  assert.ok(body);
-  return JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
+function parseRequestBody(body: string): Record<string, unknown> {
+  return JSON.parse(body) as Record<string, unknown>;
 }
+
+import type { UsageEvent } from '../src/shared/types';
+import { createNoopInteractionTrace } from '../src/agent/logging/interactionTrace';

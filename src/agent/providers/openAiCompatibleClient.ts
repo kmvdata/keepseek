@@ -1,68 +1,48 @@
 import { AgentRunCallbacks } from '../../shared/types';
 import type { KeepseekLanguage } from '../../shared/i18n';
-import { DEFAULT_DEEPSEEK_BASE_URL } from '../../shared/config';
-import { DeepSeekStreamParser } from './streamParser';
-import { AgentInteractionTrace, formatUnknownError, summarizeDeepSeekMessage, summarizeText } from '../logging/interactionTrace';
-import {
+import { StreamParser } from './streamParser';
+import { formatUnknownError, summarizeDeepSeekMessage, summarizeText } from '../logging/interactionTrace';
+import type {
   DeepSeekAssistantMessage,
-  DeepSeekChatRequestBody,
-  DeepSeekStreamResult,
-  DeepSeekUsage
+  DeepSeekStreamResult
+} from '../deepseek/types';
+import type {
+  ProviderClient,
+  ProviderClientConfig,
+  ProviderClientRequest,
+  ProviderClientResult
 } from './types';
 
-export type DeepSeekClientFailureKind =
-  | 'http'
-  | 'empty_body'
-  | 'empty_stream'
-  | 'network'
-  | 'stream'
-  | 'external_abort'
-  | 'run_time_limit'
-  | 'stream_idle_timeout';
-
-export interface DeepSeekClientConfig {
-  apiKey: string;
-  baseUrl: string;
-  streamIdleTimeoutMs: number;
-  maxRequestRetries: number;
-  requestRetryBaseMs: number;
+interface OpenAICompatibleClientOptions {
+  /** 用于错误提示的展示名，例如 DeepSeek / Ollama / OpenAI Compatible。 */
+  displayName: string;
+  /** Base URL 为空时使用的默认端点。 */
+  defaultBaseUrl?: string;
 }
 
-export interface DeepSeekClientRequest {
-  body: DeepSeekChatRequestBody;
-  language: KeepseekLanguage;
-  signal?: AbortSignal;
-  callbacks?: AgentRunCallbacks;
-  runDeadlineAt?: number;
-  trace?: AgentInteractionTrace;
-  requestId?: string;
-}
-
-export interface DeepSeekClientResult {
-  ok: boolean;
-  finishReason?: string | null;
-  message?: DeepSeekAssistantMessage;
-  usage?: DeepSeekUsage | null;
-  hadPartialOutput: boolean;
-  retryable: boolean;
-  error?: string;
-  failureKind?: DeepSeekClientFailureKind;
-  status?: number;
-  attemptCount?: number;
-  retryCount?: number;
-}
-
-interface DeepSeekAttemptResult extends DeepSeekClientResult {
+interface ClientAttemptResult extends ProviderClientResult {
   hadStreamActivity: boolean;
 }
 
-export class DeepSeekClient {
-  private readonly streamParser = new DeepSeekStreamParser();
+/**
+ * 通用 OpenAI 兼容上游客户端：负责 chat completions 请求、重试、
+ * 流式空闲超时、运行时限与 SSE 解析，并托管所有 provider 共享的
+ * 传输行为。具体账号类型通过子类或工厂参数化展示名与默认端点。
+ */
+export class OpenAICompatibleClient implements ProviderClient {
+  protected readonly displayName: string;
+  protected readonly defaultBaseUrl: string;
+  private readonly streamParser = new StreamParser();
+
+  public constructor(options: OpenAICompatibleClientOptions) {
+    this.displayName = options.displayName;
+    this.defaultBaseUrl = options.defaultBaseUrl ?? '';
+  }
 
   public async createChatCompletion(
-    config: DeepSeekClientConfig,
-    request: DeepSeekClientRequest
-  ): Promise<DeepSeekClientResult> {
+    config: ProviderClientConfig,
+    request: ProviderClientRequest
+  ): Promise<ProviderClientResult> {
     const maxRetries = Math.max(0, Math.floor(config.maxRequestRetries));
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
@@ -95,16 +75,16 @@ export class DeepSeekClient {
       attemptCount: maxRetries + 1,
       retryCount: maxRetries,
       error: request.language === 'en'
-        ? 'DeepSeek API request failed after retries.'
-        : 'DeepSeek API 请求重试后仍失败。'
+        ? `${this.displayName} API request failed after retries.`
+        : `${this.displayName} API 请求重试后仍失败。`
     };
   }
 
   private async createChatCompletionAttempt(
-    config: DeepSeekClientConfig,
-    request: DeepSeekClientRequest,
+    config: ProviderClientConfig,
+    request: ProviderClientRequest,
     attempt: number
-  ): Promise<DeepSeekAttemptResult> {
+  ): Promise<ClientAttemptResult> {
     const controller = new AbortController();
     let idleTimeout: ReturnType<typeof setTimeout> | undefined;
     let runTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -206,14 +186,18 @@ export class DeepSeekClient {
         attempt,
         url: chatCompletionsUrl
       });
+      const headers: Record<string, string> = {
+        Accept: 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Content-Type': 'application/json'
+      };
+      // Ollama 等本地部署不需要 API Key；空 key 时不发送 Authorization 头。
+      if (config.apiKey.trim()) {
+        headers.Authorization = `Bearer ${config.apiKey}`;
+      }
       const response = await fetch(chatCompletionsUrl, {
         method: 'POST',
-        headers: {
-          Accept: 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${config.apiKey}`
-        },
+        headers,
         body: JSON.stringify(request.body),
         signal: controller.signal
       });
@@ -242,8 +226,8 @@ export class DeepSeekClient {
           failureKind: 'http',
           status: response.status,
           error: language === 'en'
-            ? `DeepSeek API request failed (${response.status}): ${this.formatApiError(responseText, language)}`
-            : `DeepSeek API 请求失败 (${response.status}): ${this.formatApiError(responseText, language)}`
+            ? `${this.displayName} API request failed (${response.status}): ${this.formatApiError(responseText, language)}`
+            : `${this.displayName} API 请求失败 (${response.status}): ${this.formatApiError(responseText, language)}`
         };
       }
 
@@ -260,8 +244,8 @@ export class DeepSeekClient {
           retryable: false,
           failureKind: 'empty_body',
           error: language === 'en'
-            ? 'DeepSeek API did not return a streaming response body.'
-            : 'DeepSeek API 未返回流式响应体。'
+            ? `${this.displayName} API did not return a streaming response body.`
+            : `${this.displayName} API 未返回流式响应体。`
         };
       }
 
@@ -363,8 +347,8 @@ export class DeepSeekClient {
           retryable: false,
           failureKind: 'stream_idle_timeout',
           error: language === 'en'
-            ? `DeepSeek API streaming response was idle for ${Math.round(config.streamIdleTimeoutMs / 1000)} seconds.`
-            : `DeepSeek API 流式响应连续 ${Math.round(config.streamIdleTimeoutMs / 1000)} 秒没有返回数据，已停止本次请求。`
+            ? `${this.displayName} API streaming response was idle for ${Math.round(config.streamIdleTimeoutMs / 1000)} seconds.`
+            : `${this.displayName} API 流式响应连续 ${Math.round(config.streamIdleTimeoutMs / 1000)} 秒没有返回数据，已停止本次请求。`
         };
       }
 
@@ -401,7 +385,7 @@ export class DeepSeekClient {
     }
   }
 
-  private shouldRetry(result: DeepSeekAttemptResult, attempt: number, maxRetries: number): boolean {
+  private shouldRetry(result: ClientAttemptResult, attempt: number, maxRetries: number): boolean {
     return result.retryable && !result.hadPartialOutput && !result.hadStreamActivity && attempt < maxRetries;
   }
 
@@ -452,7 +436,7 @@ export class DeepSeekClient {
 
   private formatStreamingError(
     error: unknown,
-    config: DeepSeekClientConfig,
+    config: ProviderClientConfig,
     language: KeepseekLanguage,
     hadPartialOutput: boolean
   ): string {
@@ -473,8 +457,8 @@ export class DeepSeekClient {
       : '';
 
     return language === 'en'
-      ? `DeepSeek streaming connection failed before completion (${originalMessage}).${idleHint}${partialHint}`
-      : `DeepSeek 流式连接在完成前中断（${originalMessage}）。${idleHint}${partialHint}`;
+      ? `${this.displayName} streaming connection failed before completion (${originalMessage}).${idleHint}${partialHint}`
+      : `${this.displayName} 流式连接在完成前中断（${originalMessage}）。${idleHint}${partialHint}`;
   }
 
   private formatApiError(responseText: string, language: KeepseekLanguage): string {
@@ -500,8 +484,11 @@ export class DeepSeekClient {
     return responseText.length > 800 ? `${responseText.slice(0, 800)}...` : responseText;
   }
 
-  private getChatCompletionsUrl(rawBaseUrl: string): string {
-    const url = new URL(rawBaseUrl || DEFAULT_DEEPSEEK_BASE_URL);
+  /**
+   * 拼接 /chat/completions 端点。子类可覆写以适配服务商的路径约定。
+   */
+  protected getChatCompletionsUrl(rawBaseUrl: string): string {
+    const url = new URL(rawBaseUrl || this.defaultBaseUrl);
     const cleanPath = url.pathname.replace(/\/+$/u, '');
 
     if (cleanPath.endsWith('/chat/completions')) {

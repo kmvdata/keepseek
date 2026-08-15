@@ -1801,7 +1801,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private async addModel(input: {
     sourceId?: string;
-    provider: 'deepseek' | 'openai-compatible';
+    provider: 'deepseek' | 'ollama' | 'openai-compatible';
     name?: string;
     apiKey: string;
     baseUrl: string;

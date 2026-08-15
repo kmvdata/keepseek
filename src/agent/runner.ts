@@ -28,6 +28,7 @@ import {
   getConfiguredWorkspaceReadMaxBytes
 } from '../shared/config';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
+import type { ModelSourceProvider } from '../accounts/types';
 import { formatBytes } from '../shared/format';
 import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
 import {
@@ -80,7 +81,8 @@ import {
 import type { KeepseekLanguage } from '../shared/i18n';
 import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
 import { DsmlToolParser } from './deepseek/dsmlToolParser';
-import { DeepSeekClient, DeepSeekClientConfig } from './deepseek/client';
+import { createProviderClient } from './providers/factory';
+import type { ProviderClientConfig } from './providers/types';
 import {
   AgentInteractionTrace,
   createNoopInteractionTrace,
@@ -126,7 +128,7 @@ const RANGE_READ_SNIPPED_CONTENT_CHARS = 60_000;
 
 interface AgentRuntimeConfig {
   sourceId: string;
-  provider: 'deepseek' | 'openai-compatible';
+  provider: ModelSourceProvider;
   apiKey: string;
   baseUrl: string;
   supportsBilling: boolean;
@@ -219,7 +221,6 @@ export class AgentRunAbortedError extends Error {
 
 export class AgentRunner {
   private readonly dsmlToolParser = new DsmlToolParser();
-  private readonly deepSeekClient = new DeepSeekClient();
 
   public constructor(
     private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService(),
@@ -1175,7 +1176,7 @@ export class AgentRunner {
       body: formatRequestBodyForTrace(body, trace.includesPayload('request'))
     });
 
-    const response = await this.deepSeekClient.createChatCompletion(this.toDeepSeekClientConfig(runtimeConfig), {
+    const response = await createProviderClient(runtimeConfig.provider).createChatCompletion(this.toProviderClientConfig(runtimeConfig), {
       body,
       language: request.language,
       signal: request.signal,
@@ -1515,7 +1516,7 @@ export class AgentRunner {
     return `${left}${right}`;
   }
 
-  private toDeepSeekClientConfig(runtimeConfig: AgentRuntimeConfig): DeepSeekClientConfig {
+  private toProviderClientConfig(runtimeConfig: AgentRuntimeConfig): ProviderClientConfig {
     return {
       apiKey: runtimeConfig.apiKey,
       baseUrl: runtimeConfig.baseUrl,
@@ -2814,10 +2815,12 @@ export class AgentRunner {
       request.model.sourceId,
       this.globalStorageUri,
       {
-        language: request.language
+        language: request.language,
+        requireApiKey: false
       }
     );
-    if (!sourceConfig.apiKey.trim()) {
+    // Ollama 等本地 OpenAI 兼容端点不需要 API Key；只有 DeepSeek 保留预检提示。
+    if (!sourceConfig.apiKey.trim() && sourceConfig.provider === 'deepseek') {
       throw new MissingModelSourceApiKeyError(request.language);
     }
     const profile = getDeepSeekV4RuntimeProfile(request.model, request.settings);

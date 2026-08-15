@@ -6,7 +6,7 @@ import {
   getConfiguredRequestRetryBaseMs
 } from '../shared/config';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
-import type { ModelSourceConfigSnapshot } from '../accounts/types';
+import type { ModelSourceConfigSnapshot, ModelSourceProvider } from '../accounts/types';
 import {
   getDeepSeekV4ContextCompressionSettings,
   type ContextCompressionSettings
@@ -25,7 +25,8 @@ import type {
   UsageEvent,
   UsageSource
 } from '../shared/types';
-import { DeepSeekClient, type DeepSeekClientConfig } from './deepseek/client';
+import { createProviderClient } from './providers/factory';
+import type { ProviderClientConfig } from './providers/types';
 import type { DeepSeekChatRequestBody, DeepSeekMessage } from './deepseek/types';
 import {
   CONTEXT_COMPRESSION_VERSION,
@@ -99,7 +100,6 @@ export type HistorySummaryCompletion = (input: {
 }) => Promise<string | HistorySummaryCompletionResult>;
 
 export class HistoryCompressor {
-  private readonly deepSeekClient = new DeepSeekClient();
 
   public constructor(
     private readonly completion?: HistorySummaryCompletion,
@@ -393,7 +393,7 @@ export class HistoryCompressor {
           include_usage: true
         }
       };
-      const response = await this.deepSeekClient.createChatCompletion(clientConfig, {
+      const response = await createProviderClient(clientConfig.provider).createChatCompletion(clientConfig, {
         body,
         language: input.language,
         signal: abort.signal,
@@ -610,9 +610,9 @@ function extractReferenceHints(content: string): string[] {
   return Array.from(hints);
 }
 
-interface SummaryClientConfig extends DeepSeekClientConfig {
+interface SummaryClientConfig extends ProviderClientConfig {
   sourceId: string;
-  provider: 'deepseek' | 'openai-compatible';
+  provider: ModelSourceProvider;
   supportsBilling: boolean;
 }
 
@@ -623,8 +623,12 @@ async function getSummaryClientConfig(
   sourceConfig: ModelSourceConfigSnapshot | undefined,
   sourceId: string | undefined
 ): Promise<SummaryClientConfig> {
-  const resolvedSource = sourceConfig ?? await resolveModelSourceConfig(sourceId, globalStorageUri, { language });
-  if (!resolvedSource.apiKey.trim()) {
+  const resolvedSource = sourceConfig ?? await resolveModelSourceConfig(sourceId, globalStorageUri, {
+    language,
+    requireApiKey: false
+  });
+  // Ollama 等本地 OpenAI 兼容端点不需要 API Key；只有 DeepSeek 保留预检提示。
+  if (!resolvedSource.apiKey.trim() && resolvedSource.provider === 'deepseek') {
     throw new MissingModelSourceApiKeyError(language);
   }
   return {

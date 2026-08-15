@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
 import type { DeepSeekBalanceState } from '../../shared/types';
 import { isRecord } from '../../shared/errors';
+import { isModelSourceProvider } from '../../accounts/accountStore';
+import type { ModelSourceProvider } from '../../accounts/types';
 import { normalizeBalanceStateValue } from '../usageStats';
 
 /** Identifies the model source whose balance and refresh throttle are being stored. */
 export interface BalanceSourceScope {
-  provider: 'deepseek' | 'openai-compatible';
+  provider: ModelSourceProvider;
   sourceId: string;
 }
 
@@ -305,7 +307,7 @@ function normalizeBalanceSourceScope(scope: BalanceSourceScope): BalanceSourceSc
   if (!SAFE_PATH_SEGMENT_PATTERN.test(sourceId) || sourceId === '.' || sourceId === '..') {
     throw new Error('Invalid balance source id.');
   }
-  if (scope.provider !== 'deepseek' && scope.provider !== 'openai-compatible') {
+  if (!isModelSourceProvider(scope.provider)) {
     throw new Error('Invalid balance source provider.');
   }
   return { provider: scope.provider, sourceId };

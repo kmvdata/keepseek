@@ -1866,7 +1866,9 @@ export function getInputScript(): string {
 
       function getModelSourceLabel(model) {
         if (!model) { return 'Model'; }
-        return model.sourceName || (model.provider === 'openai-compatible' ? 'OpenAI Compatible' : 'DeepSeek');
+        return model.sourceName || (model.provider === 'openai-compatible' ? 'OpenAI Compatible'
+          : model.provider === 'ollama' ? 'Ollama'
+          : 'DeepSeek');
       }
 
       function renderEffort() {
@@ -3497,11 +3499,13 @@ export function getInputScript(): string {
       }
 
       function normalizeSettingsProvider(value) {
-        return value === 'openai-compatible' ? 'openai-compatible' : 'deepseek';
+        return value === 'ollama' || value === 'openai-compatible' ? value : 'deepseek';
       }
 
       function getSettingsProviderLabel(provider) {
-        return provider === 'openai-compatible' ? 'OpenAI compatible' : 'DeepSeek';
+        return provider === 'openai-compatible' ? 'OpenAI compatible'
+          : provider === 'ollama' ? 'Ollama'
+          : 'DeepSeek';
       }
 
       function normalizeSettingsSource(rawSource, index) {
@@ -3661,7 +3665,7 @@ export function getInputScript(): string {
       function renderSettingsAccountList(controlsDisabled) {
         if (!settingsAccountList) { return; }
         settingsAccountList.innerHTML = '';
-        var providerOrder = ['deepseek', 'openai-compatible'];
+        var providerOrder = ['deepseek', 'ollama', 'openai-compatible'];
         providerOrder.forEach(function(provider) {
           var sources = settingsSources.filter(function(source) { return source.provider === provider; });
           if (!sources.length) { return; }
@@ -4052,6 +4056,9 @@ export function getInputScript(): string {
           if (!baseUrl && provider === 'deepseek') {
             baseUrl = 'https://api.deepseek.com';
           }
+          if (!baseUrl && provider === 'ollama') {
+            baseUrl = 'http://127.0.0.1:11434/v1';
+          }
           if (!baseUrl) {
             setSettingsDialogStatus(t('baseUrlRequired'));
             if (settingsBaseUrl) { settingsBaseUrl.focus(); }
@@ -4110,9 +4117,15 @@ export function getInputScript(): string {
         settingsCreateProvider.addEventListener('change', function() {
           if (getSettingsActiveAccount() || settingsDialogBusyAction) { return; }
           if (settingsBaseUrl) {
-            settingsBaseUrl.value = normalizeSettingsProvider(settingsCreateProvider.value) === 'deepseek'
+            var selectedProvider = normalizeSettingsProvider(settingsCreateProvider.value);
+            settingsBaseUrl.value = selectedProvider === 'deepseek'
               ? 'https://api.deepseek.com'
-              : '';
+              : selectedProvider === 'ollama'
+                ? 'http://127.0.0.1:11434/v1'
+                : '';
+          }
+          if (settingsApiKey && normalizeSettingsProvider(settingsCreateProvider.value) === 'ollama') {
+            settingsApiKey.value = '';
           }
           updateSettingsDialogDirtyState();
         });
