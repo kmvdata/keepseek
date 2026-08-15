@@ -630,7 +630,7 @@ export function getInputStyles(): string {
     }
 
     .command-menu.is-readonly {
-      opacity: 0.82;
+      opacity: 0.95;
     }
 
     .command-menu.is-readonly .command-row,
