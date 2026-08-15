@@ -62,6 +62,7 @@ export type WebviewMessage =
   | { type: 'saveModelSource'; sourceId: string; name?: string; apiKey: string; baseUrl: string }
   | { type: 'deleteModelSource'; sourceId: string }
   | { type: 'refreshSourceModels'; sourceId: string }
+  | { type: 'testSourceConnection'; provider: 'deepseek' | 'ollama' | 'openai-compatible'; apiKey: string; baseUrl: string }
   | {
       type: 'saveHistorySettings';
       historyRetentionDays?: number;

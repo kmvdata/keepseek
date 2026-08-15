@@ -1,3 +1,5 @@
+import { getNewAccountDialogStyles } from './newAccountDialog';
+
 export function getInputStyles(): string {
   return `
     .rich-input {
@@ -1705,5 +1707,5 @@ export function getInputStyles(): string {
         justify-self: end;
       }
     }
-`;
+${getNewAccountDialogStyles()}`;
 }

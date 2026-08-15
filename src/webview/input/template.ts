@@ -1,3 +1,5 @@
+import { getNewAccountDialogTemplate } from './newAccountDialog';
+
 export function getInputTemplate(): string {
   return `
     <form id="composer" class="composer">
@@ -282,11 +284,6 @@ export function getInputTemplate(): string {
                 <span id="settingsAccountsTitle" class="settings-section-heading" data-i18n="modelsTitle">账号</span>
               </div>
               <div class="settings-account-create-row">
-                <select id="settingsCreateProvider" aria-label="模型服务商" data-i18n-aria-label="modelProviderLabel">
-                  <option value="deepseek">DeepSeek</option>
-                  <option value="ollama">Ollama</option>
-                  <option value="openai-compatible">OpenAI compatible</option>
-                </select>
                 <button id="settingsCreateAccountBtn" type="button" class="secondary" data-i18n="addAccount">添加账号</button>
               </div>
               <div id="settingsAccountList" class="settings-account-list" role="listbox" aria-label="账号列表" data-i18n-aria-label="modelSourceListLabel"></div>
@@ -462,5 +459,6 @@ export function getInputTemplate(): string {
           <button id="createSkillCreateBtn" type="button" data-i18n="createSkillCreateDraft">Create Draft</button>
         </div>
       </div>
-    </div>`;
+    </div>
+${getNewAccountDialogTemplate()}`;
 }

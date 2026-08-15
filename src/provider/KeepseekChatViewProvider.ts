@@ -124,7 +124,7 @@ import {
   ModelSourceStore
 } from '../accounts/accountStore';
 import { resolveModelSourceConfig } from '../accounts/accountResolver';
-import { refreshSourceModelCache } from '../accounts/modelDiscovery';
+import { probeSourceConnection, refreshSourceModelCache } from '../accounts/modelDiscovery';
 import { createModelCatalog, findModelBySelection } from '../accounts/modelCatalog';
 import { ModelSourceService } from '../accounts/modelSourceService';
 import { isOfficialDeepSeekSource } from '../accounts/sourceCapabilities';
@@ -762,6 +762,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       case 'refreshSourceModels': {
         await this.refreshSourceModels(message.sourceId);
+        return;
+      }
+      case 'testSourceConnection': {
+        const probeResult = await probeSourceConnection({
+          provider: message.provider,
+          apiKey: message.apiKey,
+          baseUrl: message.baseUrl
+        });
+        this.postToWebview({
+          type: 'sourceConnectionTestResult',
+          ok: probeResult.ok,
+          status: probeResult.status,
+          error: probeResult.error
+        });
         return;
       }
       case 'saveHistorySettings': {

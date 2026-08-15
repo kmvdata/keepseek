@@ -3415,7 +3415,6 @@ export function getInputScript(): string {
       var settingsAccountSidebar = settingsOverlay ? settingsOverlay.querySelector('.settings-account-sidebar') : null;
       var settingsAccountEditor = document.getElementById('settingsAccountEditor');
       var settingsAccountsTitle = document.getElementById('settingsAccountsTitle');
-      var settingsCreateProvider = document.getElementById('settingsCreateProvider');
       var settingsCreateAccountBtn = document.getElementById('settingsCreateAccountBtn');
       var settingsAccountList = document.getElementById('settingsAccountList');
       var settingsAccountEmpty = document.getElementById('settingsAccountEmpty');
@@ -3652,9 +3651,7 @@ export function getInputScript(): string {
         if (settingsBaseUrl) {
           settingsBaseUrl.value = account
             ? account.baseUrl || (account.provider === 'deepseek' ? 'https://api.deepseek.com' : '')
-            : normalizeSettingsProvider(settingsCreateProvider ? settingsCreateProvider.value : 'deepseek') === 'deepseek'
-              ? 'https://api.deepseek.com'
-              : '';
+            : 'https://api.deepseek.com';
         }
         if (settingsManualModelId) { settingsManualModelId.value = ''; }
         if (settingsManualModelBox) { settingsManualModelBox.classList.add('hidden'); }
@@ -3767,10 +3764,6 @@ export function getInputScript(): string {
         if (settingsDialogDesc) { settingsDialogDesc.textContent = t('modelSettingsDialogDesc'); }
         if (settingsOverlay) { settingsOverlay.querySelector('.settings-dialog')?.setAttribute('aria-label', t('modelSettingsDialogLabel')); }
         if (settingsAccountsTitle) { settingsAccountsTitle.textContent = t('modelsTitle'); }
-        if (settingsCreateProvider) {
-          settingsCreateProvider.setAttribute('aria-label', t('modelProviderLabel'));
-          settingsCreateProvider.disabled = controlsDisabled;
-        }
         if (settingsCreateAccountBtn) {
           settingsCreateAccountBtn.textContent = t('addAccount');
           settingsCreateAccountBtn.disabled = controlsDisabled;
@@ -3843,8 +3836,8 @@ export function getInputScript(): string {
         } else if (settingsAccountName && getSettingsActiveAccount()) {
           settingsAccountName.focus();
           settingsAccountName.select();
-        } else if (settingsCreateProvider) {
-          settingsCreateProvider.focus();
+        } else if (settingsCreateAccountBtn) {
+          settingsCreateAccountBtn.focus();
         }
       }
 
@@ -4035,9 +4028,7 @@ export function getInputScript(): string {
           var name = settingsAccountName ? settingsAccountName.value.trim() : '';
           var apiKey = settingsApiKey ? settingsApiKey.value.trim() : '';
           var baseUrl = settingsBaseUrl ? settingsBaseUrl.value.trim() : '';
-          var provider = source
-            ? source.provider
-            : normalizeSettingsProvider(settingsCreateProvider ? settingsCreateProvider.value : 'deepseek');
+          var provider = source ? source.provider : 'deepseek';
           var modelId = settingsManualModelId ? settingsManualModelId.value.trim() : '';
           if (!name) {
             setSettingsDialogStatus(t('modelSourceNameRequired'));
@@ -4106,28 +4097,9 @@ export function getInputScript(): string {
         settingsCreateAccountBtn.addEventListener('click', function() {
           if (blockAccountSettingsWhileRunBusy() || settingsDialogBusyAction) { return; }
           if (getSettingsActiveAccount() && blockSettingsActionForUnsavedChanges()) { return; }
-          settingsSelectedSourceId = '';
-          populateSettingsAccount(null);
-          renderAccountSettings();
-          if (settingsAccountName) { settingsAccountName.focus(); }
-        });
-      }
-
-      if (settingsCreateProvider) {
-        settingsCreateProvider.addEventListener('change', function() {
-          if (getSettingsActiveAccount() || settingsDialogBusyAction) { return; }
-          if (settingsBaseUrl) {
-            var selectedProvider = normalizeSettingsProvider(settingsCreateProvider.value);
-            settingsBaseUrl.value = selectedProvider === 'deepseek'
-              ? 'https://api.deepseek.com'
-              : selectedProvider === 'ollama'
-                ? 'http://localhost:11434/v1'
-                : '';
+          if (window.keepseekNewAccountDialog && typeof window.keepseekNewAccountDialog.open === 'function') {
+            window.keepseekNewAccountDialog.open();
           }
-          if (settingsApiKey && normalizeSettingsProvider(settingsCreateProvider.value) === 'ollama') {
-            settingsApiKey.value = '';
-          }
-          updateSettingsDialogDirtyState();
         });
       }
 

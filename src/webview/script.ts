@@ -1,4 +1,5 @@
 import { getInputScript } from './input/script';
+import { getNewAccountDialogScript } from './input/newAccountDialog';
 import { getRichTextShortcutsScript } from './richTextShortcuts';
 import { WEBVIEW_TRANSLATIONS } from '../shared/i18n';
 
@@ -1079,6 +1080,7 @@ export function getScript(): string {
     };
 
     ${getInputScript()}
+    ${getNewAccountDialogScript()}
 
     window.addEventListener('message', function(event) {
       var message = event.data;
