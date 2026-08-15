@@ -160,9 +160,15 @@ export function getStyles(): string {
     }
 
     .header-title {
+      flex: 1;
+      min-width: 0;
       font-weight: 600;
       font-size: 13px;
       user-select: none;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-right: 8px;
     }
 
     .header-actions {

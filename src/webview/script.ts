@@ -359,6 +359,7 @@ export function getScript(): string {
       return Math.min(max, Math.max(min, Math.floor(number)));
     }
 
+    const currentSessionTitle = document.getElementById('currentSessionTitle');
     const historyTab = document.getElementById('historyTab');
     const newChatTab = document.getElementById('newChatTab');
     const settingsTab = document.getElementById('settingsTab');
@@ -1148,6 +1149,7 @@ export function getScript(): string {
 
     function render() {
       applyStaticTranslations();
+      renderCurrentSessionTitle();
       syncEditingState();
       renderSettingsControls();
       renderSessionControls();
@@ -1166,6 +1168,22 @@ export function getScript(): string {
           ? window.keepseekInputControls.isPromptSubmittableEmpty()
           : promptInput.classList.contains('is-empty')
       );
+    }
+
+    function renderCurrentSessionTitle() {
+      var title = t('newSession');
+      if (Array.isArray(state.sessionSummaries)) {
+        for (var i = 0; i < state.sessionSummaries.length; i++) {
+          if (state.sessionSummaries[i].id === state.activeSessionId) {
+            title = state.sessionSummaries[i].title || t('newSession');
+            break;
+          }
+        }
+      }
+      if (currentSessionTitle) {
+        currentSessionTitle.textContent = title;
+        currentSessionTitle.title = title;
+      }
     }
 
     function applyStaticTranslations() {
@@ -1903,6 +1921,7 @@ export function getScript(): string {
       }
       input.dataset.originalTitle = title;
       updateLocalSessionTitle(sessionId, title);
+      renderCurrentSessionTitle();
       vscode.postMessage({ type: 'renameSession', sessionId: sessionId, title: title });
       renderSessionMenu();
     }
