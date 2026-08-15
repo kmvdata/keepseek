@@ -9,7 +9,9 @@
  * 对外只暴露 window.keepseekNewAccountDialog.open()，由账号管理对话框的
  * "添加账号"按钮调用。保存走 addModel 消息（复用 Provider 的账号创建能力），
  * 测试连接走 testSourceConnection 消息，结果通过 sourceConnectionTestResult
- * 回传后由本对话框自己监听处理。
+ * 回传后由本对话框自己监听处理；保存走 addModel 消息，结果通过
+ * addModelResult 回传：新建成功时关闭，复用已有账号或保存失败时保持
+ * 打开并展示提示。
  */
 
 export function getNewAccountDialogTemplate(): string {
@@ -445,9 +447,21 @@ export function getNewAccountDialogScript(): string {
             var reason = typeof message.error === 'string' ? message.error : '';
             setStatus(t('connectionTestFailed', { message: reason || t('connectionTestUnknownReason') }));
           }
-        } else if (message.type === 'showSettingsDialog') {
-          // 添加账号保存完成后，Provider 会推送账号管理对话框；本对话框自动关闭。
-          if (busyAction === 'add-account') { close(); }
+        } else if (message.type === 'addModelResult') {
+          if (busyAction !== 'add-account') { return; }
+          clearBusy();
+          if (message.ok) {
+            if (message.reusedSource) {
+              setStatus(t('newAccountReused'));
+              render();
+            } else {
+              close();
+            }
+          } else {
+            var reason = typeof message.error === 'string' ? message.error : '';
+            setStatus(t('modelOperationFailed', { message: reason || t('connectionTestUnknownReason') }));
+            render();
+          }
         }
       });
 

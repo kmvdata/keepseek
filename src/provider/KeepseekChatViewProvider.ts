@@ -1837,6 +1837,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.postState();
       this.postModelSettingsDialog();
+      this.postToWebview({
+        type: 'addModelResult',
+        ok: true,
+        reusedSource: result.reusedSource
+      });
       if (result.discovery?.status === 'failed') {
         vscode.window.showWarningMessage(this.language === 'en'
           ? 'The model was saved, but automatic model discovery failed. You can refresh it manually.'
@@ -1844,8 +1849,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       void this.refreshBalance({ force: true });
     } catch (error) {
-      vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
-      this.postModelSettingsDialog();
+      const errorMessage = getErrorMessage(error);
+      vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: errorMessage }));
+      this.postToWebview({
+        type: 'addModelResult',
+        ok: false,
+        error: errorMessage
+      });
     }
   }
 
