@@ -223,7 +223,7 @@ KeepSeek: Open Agent Chat
 ```
 
 ```text
-# 3. 打开 KeepSeek 设置中的“模型与来源”，添加模型并填写 API Key / Base URL
+# 3. 打开 KeepSeek 设置中的“账号管理”，添加账号并填写 API Key / Base URL
 # 旧版配置仍兼容：keepseek.apiKey / keepseek.baseUrl / DEEPSEEK_API_KEY
 ```
 
@@ -231,8 +231,8 @@ KeepSeek: Open Agent Chat
 
 ### 多来源模型体系
 
-- 模型来源保存一组 `provider + API Key + Base URL`，一个来源可挂多个模型；用相同连接信息再次添加模型时会复用来源，不重复保存凭证。
-- “切换模型”菜单聚合全部来源并按来源分组；选中模型后，请求与摘要都使用该模型所属来源的凭证，不存在单独的“当前账号”。
+- 账号保存一组 `provider + API Key + Base URL`，一个账号可挂多个模型；用相同连接信息再次添加模型时会复用账号，不重复保存凭证。
+- “切换模型”菜单聚合全部账号并按账号分组；选中模型后，请求与摘要都使用该模型所属账号的凭证。
 - 仅 `provider=deepseek` 且 Base URL host 为 `api.deepseek.com` 的官网来源支持自动发现、余额和费用统计。代理 DeepSeek 与 OpenAI 兼容来源只统计 token。
 - “刷新模型”失败时会静默使用上次缓存，不影响对话；如果 OpenAI 兼容服务不提供 `/models`，可在设置中手动添加模型 ID。
 - 来源文件只保存在 VS Code 扩展的全局存储目录，不进入工作区或 Git：`<globalStorageUri>/accounts/<provider>/<sourceId>.json`；官网来源余额位于 `<globalStorageUri>/accounts/<provider>/<sourceId>/balance.json`。

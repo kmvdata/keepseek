@@ -269,41 +269,41 @@ export function getInputTemplate(): string {
     </div>
 
     <div id="settingsDialogOverlay" class="settings-overlay hidden">
-      <div class="settings-dialog settings-account-dialog" role="dialog" aria-modal="true" aria-label="KeepSeek 模型设置" data-i18n-aria-label="modelSettingsDialogLabel">
+      <div class="settings-dialog settings-account-dialog" role="dialog" aria-modal="true" aria-label="KeepSeek 账号管理" data-i18n-aria-label="modelSettingsDialogLabel">
         <div class="settings-dialog-header">
-          <span id="settingsDialogTitle" class="settings-dialog-title" data-i18n="modelSettingsDialogTitle">模型与来源</span>
+          <span id="settingsDialogTitle" class="settings-dialog-title" data-i18n="modelSettingsDialogTitle">账号管理</span>
         </div>
         <div class="settings-dialog-body">
-          <p id="settingsDialogDesc" class="settings-dialog-desc" data-i18n="modelSettingsDialogDesc">添加模型并管理其 API 来源；同一来源的凭证只保存一次。</p>
+          <p id="settingsDialogDesc" class="settings-dialog-desc" data-i18n="modelSettingsDialogDesc">添加账号并管理其 API 连接；同一账号的凭证只保存一次。</p>
           <div id="settingsDialogStatus" class="settings-dialog-status hidden" role="status" aria-live="polite" tabindex="-1"></div>
           <div class="settings-account-workspace">
             <aside class="settings-account-sidebar" aria-labelledby="settingsAccountsTitle">
               <div class="settings-account-section-header">
-                <span id="settingsAccountsTitle" class="settings-section-heading" data-i18n="modelsTitle">模型来源</span>
+                <span id="settingsAccountsTitle" class="settings-section-heading" data-i18n="modelsTitle">账号</span>
               </div>
               <div class="settings-account-create-row">
                 <select id="settingsCreateProvider" aria-label="模型服务商" data-i18n-aria-label="modelProviderLabel">
                   <option value="deepseek">DeepSeek</option>
                   <option value="openai-compatible">OpenAI compatible</option>
                 </select>
-                <button id="settingsCreateAccountBtn" type="button" class="secondary" data-i18n="addModel">添加模型</button>
+                <button id="settingsCreateAccountBtn" type="button" class="secondary" data-i18n="addAccount">添加账号</button>
               </div>
-              <div id="settingsAccountList" class="settings-account-list" role="listbox" aria-label="模型来源列表" data-i18n-aria-label="modelSourceListLabel"></div>
-              <div id="settingsAccountEmpty" class="settings-empty-state hidden" data-i18n="modelSourceListEmpty">暂无模型来源。点击“添加模型”开始配置。</div>
+              <div id="settingsAccountList" class="settings-account-list" role="listbox" aria-label="账号列表" data-i18n-aria-label="modelSourceListLabel"></div>
+              <div id="settingsAccountEmpty" class="settings-empty-state hidden" data-i18n="modelSourceListEmpty">暂无账号。点击“添加账号”开始配置。</div>
             </aside>
 
             <section id="settingsAccountEditor" class="settings-account-editor" aria-labelledby="settingsCurrentAccountTitle">
               <div class="settings-account-editor-header">
                 <div>
-                  <span id="settingsCurrentAccountTitle" class="settings-section-heading" data-i18n="modelSourceTitle">模型来源</span>
+                  <span id="settingsCurrentAccountTitle" class="settings-section-heading" data-i18n="modelSourceTitle">账号</span>
                   <span id="settingsCurrentProvider" class="settings-account-provider"></span>
                 </div>
-                <button id="settingsDeleteAccountBtn" type="button" class="secondary settings-danger-button" data-i18n="deleteModelSource">删除来源…</button>
+                <button id="settingsDeleteAccountBtn" type="button" class="secondary settings-danger-button" data-i18n="deleteModelSource">删除账号…</button>
               </div>
-              <div id="settingsAccountEditorEmpty" class="settings-empty-state hidden" data-i18n="modelSourceEditorEmpty">选择来源，或添加一个新模型。</div>
+              <div id="settingsAccountEditorEmpty" class="settings-empty-state hidden" data-i18n="modelSourceEditorEmpty">选择账号，或添加一个新账号。</div>
               <div id="settingsAccountFields">
                 <label class="settings-field">
-                  <span id="settingsAccountNameLabel" class="settings-field-label" data-i18n="modelSourceName">来源名称</span>
+                  <span id="settingsAccountNameLabel" class="settings-field-label" data-i18n="modelSourceName">账号名称</span>
                   <input id="settingsAccountName" class="settings-input" type="text" autocomplete="off" />
                 </label>
                 <div class="settings-field">
