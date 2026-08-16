@@ -3818,11 +3818,16 @@ export function getInputScript(): string {
         if (!settingsOverlay || !settingsApiKey || !settingsBaseUrl) { return; }
         var values = settings && typeof settings === 'object' ? settings : {};
         var rawSources = Array.isArray(values.sources) ? values.sources : [];
+        var rawSources = Array.isArray(values.sources) ? values.sources : [];
         settingsSources = rawSources.map(normalizeSettingsSource).filter(Boolean);
         var requestedSourceId = readSettingsString(values.selectedSourceId, '').trim();
-        settingsSelectedSourceId = settingsSources.some(function(source) { return source.id === requestedSourceId; })
-          ? requestedSourceId
-          : settingsSources.length ? settingsSources[0].id : '';
+        if (settingsOverlay.classList.contains('hidden')) {
+          settingsSelectedSourceId = settingsSources.some(function(source) { return source.id === requestedSourceId; })
+            ? requestedSourceId
+            : settingsSources.length ? settingsSources[0].id : '';
+        } else if (!settingsSources.some(function(source) { return source.id === settingsSelectedSourceId; })) {
+          if (settingsSources.length) { settingsSelectedSourceId = settingsSources[0].id; }
+        }
         clearSettingsDialogBusy();
         settingsRunBusyStatusVisible = false;
         setSettingsDialogStatus('');
