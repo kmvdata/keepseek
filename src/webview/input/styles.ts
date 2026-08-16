@@ -1052,6 +1052,15 @@ export function getInputStyles(): string {
       cursor: pointer;
     }
 
+    .command-model-empty {
+      display: block;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      cursor: default;
+    }
+
     .command-model-check {
       color: var(--vscode-textLink-foreground);
       font-size: 12px;

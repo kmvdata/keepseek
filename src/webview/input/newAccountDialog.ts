@@ -65,11 +65,6 @@ export function getNewAccountDialogTemplate(): string {
             <span class="new-account-field-label">Base URL</span>
             <input id="newAccountBaseUrl" class="new-account-input" type="text" placeholder="https://api.deepseek.com" autocomplete="off" />
           </label>
-          <label class="new-account-field">
-            <span class="new-account-field-label" data-i18n="manualModelId">模型 ID</span>
-            <input id="newAccountModelId" class="new-account-input" type="text" placeholder="model-id" autocomplete="off" />
-            <span class="new-account-field-hint" data-i18n="newAccountModelHint">可选；留空可稍后在账号管理中自动发现或手动添加模型。</span>
-          </label>
         </div>
         <div class="new-account-dialog-footer">
           <button id="newAccountTestBtn" type="button" class="new-account-btn secondary" data-i18n="testConnection">测试连接</button>
@@ -270,7 +265,6 @@ export function getNewAccountDialogScript(): string {
       var apiKeyInput = document.getElementById('newAccountApiKey');
       var apiKeyVisibilityBtn = document.getElementById('newAccountApiKeyVisibilityBtn');
       var baseUrlInput = document.getElementById('newAccountBaseUrl');
-      var modelIdInput = document.getElementById('newAccountModelId');
       var testBtn = document.getElementById('newAccountTestBtn');
       var cancelBtn = document.getElementById('newAccountCancelBtn');
       var saveBtn = document.getElementById('newAccountSaveBtn');
@@ -310,7 +304,7 @@ export function getNewAccountDialogScript(): string {
 
       function render() {
         var busy = Boolean(busyAction);
-        [providerSelect, nameInput, apiKeyInput, apiKeyVisibilityBtn, baseUrlInput, modelIdInput].forEach(function(control) {
+        [providerSelect, nameInput, apiKeyInput, apiKeyVisibilityBtn, baseUrlInput].forEach(function(control) {
           if (control) { control.disabled = busy; }
         });
         if (testBtn) {
@@ -368,7 +362,6 @@ export function getNewAccountDialogScript(): string {
         if (nameInput) { nameInput.value = ''; }
         if (apiKeyInput) { apiKeyInput.value = ''; }
         if (baseUrlInput) { baseUrlInput.value = 'https://api.deepseek.com'; }
-        if (modelIdInput) { modelIdInput.value = ''; }
         setApiKeyVisible(false, false);
         setStatus('');
         render();
@@ -410,7 +403,6 @@ export function getNewAccountDialogScript(): string {
         var apiKey = apiKeyInput ? apiKeyInput.value.trim() : '';
         var baseUrl = baseUrlInput ? baseUrlInput.value.trim() : '';
         var provider = normalizeProvider(providerSelect ? providerSelect.value : 'deepseek');
-        var modelId = modelIdInput ? modelIdInput.value.trim() : '';
         if (!name) {
           setStatus(t('modelSourceNameRequired'));
           if (nameInput) { nameInput.focus(); }
@@ -429,7 +421,6 @@ export function getNewAccountDialogScript(): string {
           name: name,
           apiKey: apiKey,
           baseUrl: baseUrl,
-          modelId: modelId || undefined
         });
         beginBusy('add-account', t('newAccountSaving'));
       }
@@ -510,7 +501,7 @@ export function getNewAccountDialogScript(): string {
         });
       }
 
-      [nameInput, apiKeyInput, baseUrlInput, modelIdInput].forEach(function(input) {
+      [nameInput, apiKeyInput, baseUrlInput].forEach(function(input) {
         if (!input) { return; }
         input.addEventListener('input', function() {
           if (!busyAction) { setStatus(''); }
