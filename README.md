@@ -9,7 +9,7 @@
 只要你对下面任何一条点头，KeepSeek 就是为你准备的：
 
 - **羡慕 Cursor 的交互，又不想换掉 VS Code** —— 侧边栏对话、右键选区、`Cmd+L` 快捷引用、拖拽文件进输入框……Cursor 式的原生手感，KeepSeek 在 VS Code 里原样复刻：不换编辑器、不改习惯、不折腾迁移；
-- **像 Reasonix 一样，把 token 当钱省** —— 前缀缓存命中价格低至全价的 **1/50（Flash）~ 1/120（Pro）**，长对话每一轮都复用上一轮的缓存，聊得越多省得越多，而不是越聊越贵；
+- **像 Reasonix 一样，把 token 当钱省** —— 前缀缓存命中价格低至普通输入的 **1/30**，长对话每一轮都复用上一轮的缓存，聊得越多省得越多，而不是越聊越贵；
 - **想要一个真正「懂代码」的智能体** —— 语义定位、只读探索、行段读取，AI 看到的永远是你最新的代码，而不是几轮前的旧正文；
 - **对「AI 偷偷改文件」零容忍** —— 所有修改都以 DraftEdit 呈现，你确认后才落盘；只读工具绝不越出工作区。
 
@@ -18,7 +18,7 @@
 # KeepSeek：把 DeepSeek 前缀缓存吃满的 VS Code 编程助手
 
 > **同等任务，更少 token、更低费用、更快响应。**
-> KeepSeek 是运行在 VS Code 侧边栏里的 AI 编程助手（Agent Chat），操作像 Cursor 一样原生顺手：不用切窗口、不用复制粘贴，右键、快捷键或拖拽就能把选区、文件、日志交给 AI。它把「上下文」变成一门精确的技艺——只发送必要的文件、选区和日志，让 DeepSeek 的**前缀缓存**在多轮会话中持续命中（命中价格只有全价的 **1/50 ~ 1/120**）。
+> KeepSeek 是运行在 VS Code 侧边栏里的 AI 编程助手（Agent Chat），操作像 Cursor 一样原生顺手：不用切窗口、不用复制粘贴，右键、快捷键或拖拽就能把选区、文件、日志交给 AI。它把「上下文」变成一门精确的技艺——只发送必要的文件、选区和日志，让 DeepSeek 的**前缀缓存**在多轮会话中持续命中（命中价格只有普通输入的 **1/30**）。
 > 对用 AI 开发项目的人来说，KeepSeek 同时是一台专业的代码阅读工具：语义定位、只读搜索、行段读取，让你随时把控架构节奏。长对话的每一轮，都在为上一轮的内容付费，而不是重新买一遍。
 
 **开源软件 · MIT License · GitHub: [https://github.com/kmvdata/keepseek](https://github.com/kmvdata/keepseek)**
@@ -27,16 +27,20 @@
 
 ## 一、为什么省 token？因为缓存命中率是产品行为，不是巧合
 
-DeepSeek 的计费里有一个绝大多数人忽略的事实：**前缀缓存命中的 token，价格是普通输入的 1/50 ~ 1/120**。
+DeepSeek 的计费里有一个绝大多数人忽略的事实：**前缀缓存命中的 token，价格是普通输入的 1/30**。
 
-KeepSeek 默认价格表：
+自 **2026 年 8 月 17 日**起，DeepSeek 改为**峰谷定价**，但无论高峰还是空闲时段，缓存命中的优惠倍率始终不变。KeepSeek 参考价格表：
 
-| 模型 | 普通输入 | 缓存命中 | 差距 |
-|---|---:|---:|---:|
-| DeepSeek V4 Flash | ¥1 / 1M tokens | ¥0.02 / 1M tokens | **50 倍** |
-| DeepSeek V4 Pro | ¥3 / 1M tokens | ¥0.025 / 1M tokens | **120 倍** |
+| 模型 | 时段 | 普通输入 | 缓存命中 | 差距 |
+|---|---|---:|---:|---:|
+| DeepSeek V4 Flash | 空闲 | ¥1.5 / 1M tokens | ¥0.05 / 1M tokens | **30 倍** |
+| DeepSeek V4 Flash | 高峰 | ¥3.0 / 1M tokens | ¥0.10 / 1M tokens | **30 倍** |
+| DeepSeek V4 Pro | 空闲 | ¥4.5 / 1M tokens | ¥0.15 / 1M tokens | **30 倍** |
+| DeepSeek V4 Pro | 高峰 | ¥9.0 / 1M tokens | ¥0.30 / 1M tokens | **30 倍** |
 
-换算一下：一次 100 万 token 的输入，全价需要 ¥1（Flash）或 ¥3（Pro）；**如果命中缓存，只要 ¥0.02 / ¥0.025**。而 Agent 多轮会话里，历史消息 + 工具定义 + 系统提示通常占请求的绝大部分——这些内容每轮都要重复发送。命中还是不命中，成本相差一到两个数量级。
+> **高峰时段**为北京时间每日 **9:00-12:00** 和 **14:00-18:00**，其余时间均为空闲时段。
+
+以空闲时段为例：一次 100 万 token 的输入，全价需要 ¥1.5（Flash）或 ¥4.5（Pro）；**如果命中缓存，只要 ¥0.05 / ¥0.15**。而 Agent 多轮会话里，历史消息 + 工具定义 + 系统提示通常占请求的绝大部分——这些内容每轮都要重复发送。命中还是不命中，成本相差一个数量级（约 30 倍）。
 
 缓存的规则很残酷：请求前缀必须**从第 0 个 token 起逐字节一致**，命中部分才按折扣价计费；任何一处的字节漂移，都会让**该点之后整个前缀全部失效**，重新按全价计算。
 
@@ -90,6 +94,8 @@ KeepSeek 的模型输入是一个 projection，不是「把聊天记录倒进请
 
 KeepSeek 的工具集在会话内保持不变——工具 schema 集合和顺序不随每轮 prompt 变化（schema 规范化、key 排序，跨轮字节一致）。slim 工具模式默认关闭，也是出于同一个原因：**暴露的 schema 越小越稳定，tools 段前缀越容易命中**。
 
+而 0.2.2 起，KeepSeek 更进一步：**按会话持久化请求协议、序列化方式、工具 schema 与 Provider / 模型 / 地址等信息；每个工具回合保留完整冻结的 tools schema，后续禁止调用时改用 `tool_choice: none` 而非移除 tools**——缓存不会因为一次「禁用工具」就整个断掉。同时引入**可配置的缓存有效期**（`keepseek.promptCacheTtlMinutes`，默认 1440 分钟），上下文被拆为固定的系统前缀与只增的每轮更新。
+
 ---
 
 ## 三、上下文压缩：总 token 也省
@@ -101,15 +107,23 @@ KeepSeek 的工具集在会话内保持不变——工具 schema 集合和顺序
 - **文件引用外化**：历史里展开过的文件内容只保留路径线索，模型需要代码细节时，通过只读工作区工具**重新读取当前文件**；
 - **自动保护**：首条需求、最近输入、显式「记住这条」、重要报错/测试失败、用户纠错、DraftEdit 结果不会被摘要覆盖。
 
+0.2.2 起，压缩管线升级为**缓存安全的 Snip → Prune → Summary 流水线**：
+
+- **热会话不重写历史、不开付费后台摘要**——只有冷恢复或必要压缩时才归档并裁剪过期工具输出；
+- 摘要覆盖只在**成功请求**后推进——溢出内容留待后续批次，失败不推进覆盖进度，新摘要以**不可变分段追加**而非重写旧摘要；
+- **持久化的本地会话归档 + 受限搜索**：完整原始工具输出等不再随压缩丢失，错误、失败测试、校验输出及高风险编辑/删除结果受保护免于自动清理；
+- 自动压缩档位可选：**70% 提前清理 / 80% 均衡 / 85% 缓存优先**，并按工作区持久化，覆盖模型默认配置。
+
 > 典型效果：多轮引用文件、拖入日志、展开大段代码的长会话，token 消耗从「线性膨胀」变成「稳定增长」。
 
 ---
 
-## 四、看得见的缓存健康：诊断与归因
+## 四、看得见的缓存健康：诊断、归因与用量
 
 KeepSeek 不让你在黑盒里猜花了多少钱：
 
-- **本次/会话 token 统计**：输入、输出、缓存命中与未命中分别计数，每轮显示 prompt cache hit / miss 与命中率百分比；
+- **场景级用量统计**（0.2.2）：按执行、摘要、重试、续接、后台等场景分类，覆盖缓存命中/未命中的输入、输出/推理 Token、请求次数与来源成本——每一分钱花在哪都清清楚楚；
+- **统一 Provider 请求投影**（0.2.2)：实际请求、上下文/Token 估算、越界防护、压缩决策、UI 用量与缓存测试使用**同一套投影**——显示用量与实际发送完全一致；
 - **费用估算**：按本地价格表（`keepseek.usagePricing` 可自定义）实时折算估算费用；
 - **上下文占用**：当前上下文占模型窗口的百分比、压缩触发阈值，快到压缩线时会提前告诉你；
 - **DeepSeek 余额**：自动查询并展示账户余额，心里有数；
@@ -123,19 +137,44 @@ KeepSeek 不让你在黑盒里猜花了多少钱：
 
 ## 五、省下来的时间与钱，长什么样
 
-以 100K tokens 前缀、50 轮长对话、Flash 模型粗算（仅输入侧）：
+以 100K tokens 前缀、50 轮长对话、Flash 模型（空闲时段价格）粗算（仅输入侧）：
 
 | | 普通客户端 | KeepSeek |
 |---|---:|---:|
-| 第 1 轮 100K 前缀 | 全价 ¥0.1 | 全价 ¥0.1 |
-| 第 2~50 轮 100K 前缀（假设命中） | 每轮全价 ¥0.1（若缓存漂移） | 每轮 ¥0.002 |
-| 50 轮输入成本 | ≈ ¥5.0（全部全价） | ≈ ¥0.2（命中） |
+| 第 1 轮 100K 前缀 | 全价 ¥0.15 | 全价 ¥0.15 |
+| 第 2~50 轮 100K 前缀（假设命中） | 每轮全价 ¥0.15（若缓存漂移） | 每轮 ¥0.005 |
+| 50 轮输入成本 | ≈ ¥7.5（全部全价） | ≈ ¥0.40（命中） |
 
 再叠加上下文压缩对**总量**的削减：KeepSeek 的长期会话不会把每轮的历史文件正文都背在身上。
 
 ---
 
-## 六、像 Cursor 一样顺手的原生体验
+## 六、账户、模型与 Skills：一套顺手的扩展体系
+
+### 多账户管理（0.2.3）：官方 DeepSeek、OpenAI 兼容、本地 Ollama 一站齐活
+
+KeepSeek 的账号体系不限制你用什么模型——**官方 DeepSeek、OpenAI 兼容服务、本地 Ollama**三类来源可同时挂在侧边栏里，互不干扰、随切随用：
+
+- **免责 / 三来源并存，一键切换**：官方 DeepSeek、任意 OpenAI 兼容端点、本地 Ollama（`http://localhost:11434`）都作为独立账号配置；多个账号同时存在，**活跃账户一键切换**，旧配置平滑迁移，也可物理删除任意账户；
+- **Ollama 免 API Key**：本地部署无需密钥（空 key 时不发送 Authorization 头），Base URL 省略 `/v1` 也会自动补全——粘贴 `http://localhost:11434` 就能直接连上；
+- **每个账号可挂多模型 + 模型别名**：切换模型菜单按账号分组，用顺口的名字（别名）调用不同来源的模型，完整模型 ID 保留在悬浮提示中；
+- **统一账户流量**：对话请求、上下文摘要与余额刷新统一走当前活跃账户，余额快照与查询频率按账户独立统计；
+- **能力差异自动适配**：仅官网 DeepSeek 来源（`provider=deepseek` 且 Base URL host 为 `api.deepseek.com`）保留余额与费用统计；OpenAI 兼容、代理与 Ollama 来源自动只走 chat completions / 工具调用 / token 统计，不会误报余额；
+- **兼容旧设置**：老用户的 `keepseek.apiKey` / `baseUrl` 与 `DEEPSEEK_API_KEY` 仍然有效，无需迁移即可继续使用。
+
+### Agent 的唯一扩展机制：Skills（0.2.2）
+
+把项目约定、排查步骤、团队提示词写成 **Skill**（工作区 `.agents` 与 `~/.codex/skills` 均可发现），KeepSeek 用 `/skills` 浏览、`$` 引用即用，还能 `/create-skill` 生成草案，点击使用栏中的 Skill 标签即可在 VS Code 中打开其 SKILL.md（支持 Enter/Space 访问）。扩展世界，从此**只有一条路**——干净、可控、不重写。
+
+### 工具集稳定，随手可调用
+
+- **工具 schema 按会话冻结**：工具集与顺序跨轮字节一致，点击使用、多步推理照常，但 tools 段前缀永不变形；
+- **优化大文件处理**（0.2.2）：行段读取新增 `hasMore` 与 `nextStartLine` 续读游标；新增 `keepseek_create_incremental_draft_edit`，支持精确的唯一搜索替换、行段替换及同文件多处不重叠编辑——遇到缺失、歧义或重叠目标时**直接拒绝而不猜测**，不用把整份大文件灌给模型；
+- **减少重复输入**（0.2.2）：普通回复不再重复携带推理内容（同时保持工具调用相关内容的稳定），进一步省 token。
+
+---
+
+## 七、像 Cursor 一样顺手的原生体验
 
 KeepSeek 的省钱不是以牺牲体验为代价的——它像 Cursor 一样，把常用操作做成 VS Code 的原生交互：
 
@@ -156,24 +195,17 @@ KeepSeek 住在 VS Code Secondary Sidebar 里，不用切窗口、不用复制�
 - 定位声明、引用优先走 VS Code 语义 provider（symbol/reference），省 token 且更准；
 - 依赖、构建、VCS 目录自动跳过；二进制、媒体、归档、超限文件不会进上下文。
 
-### 可复用工作流（Skills）
-
-把项目约定、排查步骤、团队提示词写成 Skill（`.agents`、`~/.codex/skills` 均可发现），`/skills` 浏览、`$` 引用即用，还支持 `/create-skill` 生成草案。
-
-### 跨项目继续排查
-
-历史会话按项目保存，支持浏览其他项目、复制到当前项目、收藏、重命名、按时间过滤、多选删除——换工作区不换思路。
-
 ### 更省心的工程配套
 
 - **验证与修复**：Agent 可运行受控的 `npm run compile / lint / test`，失败后读取 Problems 自动准备修复草案，循环修复并等待你确认；
 - **运行中止**：推理或工具循环中可以随时停止本次执行；
 - **断线重试**：首块响应前的可重试错误自动指数退避重试；
+- **跨项目继续排查**：历史会话按项目保存，支持浏览其他项目、复制到当前项目、收藏、重命名、按时间过滤、多选删除——换工作区不换思路；
 - **后台运行**：同一时刻互斥串行，保证会话前缀不被并发改写（这也是缓存稳定的一部分）。
 
 ---
 
-## 七、AI 开发项目的搭档：把架构节奏握在自己手里
+## 八、AI 开发项目的搭档：把架构节奏握在自己手里
 
 AI 生成代码越来越快，但项目架构、依赖关系、模块边界，依然需要人来把控。KeepSeek 不只是一个聊天窗口，它是一台**专业的代码阅读工具**——这正是 AI 开发项目时最容易被忽视、也最需要的一环：
 
@@ -187,7 +219,7 @@ AI 生成代码越来越快，但项目架构、依赖关系、模块边界，�
 
 ---
 
-## 八、隐私与安全：修改永远由你拍板
+## 九、隐私与安全：修改永远由你拍板
 
 - **修改永不静默写入**：AI 只能准备 DraftEdit，进入 ChangeSet 后你可以查看 Diff，选择 Apply / Discard / Revert；**create/modify 只有你点击 Apply 才会写入磁盘**；
 - **删除双重确认**：工具调用高风险 modal + Apply 前删除专用 modal；草案准备后文件若被改动会拒绝删除，避免误删新内容；
@@ -198,7 +230,7 @@ AI 生成代码越来越快，但项目架构、依赖关系、模块边界，�
 
 ---
 
-## 九、适合谁
+## 十、适合谁
 
 - **按量付费的 DeepSeek 用户**：想让 API 账单降一个数量级的人，KeepSeek 是为此设计的；
 - **重度 Agent 用户**：一天几十轮对话、长会话不断的人——每轮都在省钱；
@@ -209,7 +241,7 @@ AI 生成代码越来越快，但项目架构、依赖关系、模块边界，�
 
 ---
 
-## 十、快速上手（3 步）
+## 十一、快速上手（3 步）
 
 ```bash
 # 1. 构建并安装 VSIX
@@ -238,9 +270,13 @@ KeepSeek: Open Agent Chat
 - 来源文件只保存在 VS Code 扩展的全局存储目录，不进入工作区或 Git：`<globalStorageUri>/accounts/<provider>/<sourceId>.json`；官网来源余额位于 `<globalStorageUri>/accounts/<provider>/<sourceId>/balance.json`。
 - 老用户无需迁移操作：首次升级且尚无来源文件时，KeepSeek 会把现有 `keepseek.apiKey` / `keepseek.baseUrl` 复制到 `accounts/deepseek/default.json`，但不会删除或修改旧配置，因此仍可回退旧版本。旧环境变量回退不会作为未配置来源进入模型菜单。
 
+### 自动压缩档位
+
+在命令菜单的模型区可直接选择压缩策略：**70% 提前清理**（追求更低延迟与更省 token）、**80% 均衡**（默认推荐）、**85% 缓存优先**（最大化前缀缓存命中）。选择按工作区持久化，覆盖模型内置默认档位。
+
 ---
 
-## 十一、与成本相关的配置速查
+## 十二、与成本相关的配置速查
 
 | 配置键 | 默认值 | 说明 |
 |--------|--------|------|
@@ -249,6 +285,7 @@ KeepSeek: Open Agent Chat
 | `keepseek.balanceEndpointUrl` | `""` | 余额查询接口，为空时从 `baseUrl` 推导 `/user/balance` |
 | `keepseek.balanceRefreshIntervalMs` | `60000` | 余额自动刷新最小间隔 |
 | `keepseek.slimToolModeEnabled` | `false` | **默认关闭**：完整工具集保证 tools 段字节稳定、缓存持续命中；开启可换取更小的 schema，但工具集随 prompt 变化会降低命中率 |
+| `keepseek.promptCacheTtlMinutes` | `1440` | 提示缓存有效期（分钟），到期后主动重连以刷新缓存窗口 |
 | `keepseek.maxFileBytes` | `200000` | 单个引用/工作区文件最大读取字节，控制上下文体积 |
 | `keepseek.maxWorkspaceToolFiles` | `2000` | 只读列表与搜索最多枚举的候选文件数 |
 | `keepseek.maxRequestRetries` | `2` | 首块响应前的自动重试次数（指数退避） |
@@ -258,7 +295,7 @@ KeepSeek: Open Agent Chat
 
 ---
 
-## 十二、致谢：向 Reasonix 致敬
+## 十三、致谢：向 Reasonix 致敬
 
 KeepSeek 的缓存友好机制，直接借鉴了 **Reasonix** 在处理「以最少 token 完成 Agent 任务」时的成熟做法：请求前缀逐字节稳定、历史 append-only 只增不改、摘要低频刷新、工具 schema 会话内冻结。这些思路在 Reasonix 的实践中被验证是有效的，KeepSeek 在此基础上，针对 DeepSeek 的前缀缓存计费做了工程化落地与产品化。
 
@@ -266,7 +303,7 @@ KeepSeek 的缓存友好机制，直接借鉴了 **Reasonix** 在处理「以最
 
 ---
 
-## 十三、更多资料
+## 十四、更多资料
 
 - **缓存命中优化技术详解（维护者/进阶）**：[doc/cache.md](./doc/cache.md)、[doc/cache_keepseek.md](./doc/cache_keepseek.md)
 - **Agent 运行时工作流**：[doc/keepseek-agent-runtime-workflow.md](./doc/keepseek-agent-runtime-workflow.md)
@@ -277,4 +314,4 @@ KeepSeek 的缓存友好机制，直接借鉴了 **Reasonix** 在处理「以最
 
 *KeepSeek 是开源软件（MIT License），源码在 [github.com/kmvdata/keepseek](https://github.com/kmvdata/keepseek)。缓存友好不是宣传口号，是 `agent/historyProjection.ts`、`agent/historyCompressor.ts`、`agent/runner.ts` 里的工程契约。*
 
-*KeepSeek in one line (English): KeepSeek is a VS Code sidebar agent that treats context as a precise craft — it sends only the files, selections, and logs you choose, and keeps DeepSeek's prompt prefix cache hot across turns, with cached input costing as little as 1/50 (Flash) to 1/120 (Pro) of full price. It pairs Cursor-like native interactions with a professional read-only code navigation experience, so you stay in control of your architecture. Open source, MIT licensed.*
+*KeepSeek in one line (English): KeepSeek is a VS Code sidebar agent that treats context as a precise craft — it sends only the files, selections, and logs you choose, and keeps DeepSeek's prompt prefix cache hot across turns, with cached input costing as little as 1/30 of the full price. It pairs Cursor-like native interactions with a professional read-only code navigation experience, so you stay in control of your architecture. Open source, MIT licensed.*

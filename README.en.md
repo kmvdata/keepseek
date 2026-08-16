@@ -9,7 +9,7 @@ If what you want is a **VS Code DeepSeek agent extension** with interaction as s
 If any of the following sounds like you, KeepSeek was built for you:
 
 - **You admire Cursor's interaction but don't want to leave VS Code** — sidebar chat, right-click selections, `Cmd+L` quick references, dragging files into the input box... KeepSeek reproduces Cursor's native feel right inside VS Code: no editor switch, no habit changes, no migration hassle;
-- **You treat tokens like money, the Reasonix way** — prefix cache hits cost as little as **1/50 (Flash) to 1/120 (Pro)** of the full input price; every turn of a long conversation reuses the previous turn's cache, so the longer you chat, the more you save — instead of paying more and more;
+- **You treat tokens like money, the Reasonix way** — prefix cache hits cost as little as **1/30 of the full input price**; every turn of a long conversation reuses the previous turn's cache, so the longer you chat, the more you save — instead of paying more and more;
 - **You want an agent that truly "understands code"** — semantic navigation, read-only exploration, line-range reads: the AI always sees your latest code, not stale text from turns ago;
 - **You have zero tolerance for AI silently editing files** — every modification is presented as a DraftEdit and nothing touches disk until you confirm; read-only tools never leave the workspace.
 
@@ -18,7 +18,7 @@ If any of the following sounds like you, KeepSeek was built for you:
 # KeepSeek: A VS Code Coding Assistant That Fully Exploits DeepSeek's Prefix Cache
 
 > **Same tasks, fewer tokens, lower cost, faster responses.**
-> KeepSeek is an AI coding assistant (Agent Chat) living in the VS Code sidebar. It feels as native and effortless as Cursor: no window switching, no copy-paste — right-click, shortcuts, or drag-and-drop hand your selections, files, and logs to the AI. It treats "context" as a precise craft — sending only the files, selections, and logs you choose, so DeepSeek's **prefix cache** keeps hitting across multi-turn conversations (cache-hit input costs as little as **1/50 ~ 1/120** of the full price).
+> KeepSeek is an AI coding assistant (Agent Chat) living in the VS Code sidebar. It feels as native and effortless as Cursor: no window switching, no copy-paste — right-click, shortcuts, or drag-and-drop hand your selections, files, and logs to the AI. It treats "context" as a precise craft — sending only the files, selections, and logs you choose, so DeepSeek's **prefix cache** keeps hitting across multi-turn conversations (cache-hit input costs as little as **1/30 of the full price**).
 > For developers building projects with AI, KeepSeek is also a professional code-reading tool: semantic navigation, read-only search, line-range reads — you stay in control of your architecture at every step. Every turn of a long conversation pays for the content you already have, instead of buying it all over again.
 
 **Open source · MIT License · GitHub: [https://github.com/kmvdata/keepseek](https://github.com/kmvdata/keepseek)**
@@ -27,16 +27,20 @@ If any of the following sounds like you, KeepSeek was built for you:
 
 ## 1. Why does KeepSeek save tokens? Because cache hit rate is product behavior, not luck
 
-DeepSeek's billing hides a fact most people overlook: **tokens that hit the prefix cache cost 1/50 ~ 1/120 of regular input**.
+DeepSeek's billing hides a fact most people overlook: **tokens that hit the prefix cache cost 1/30 of regular input**.
 
-KeepSeek's default price table:
+Since **August 17, 2026**, DeepSeek switched to **peak/off-peak pricing**, but the cache-hit discount ratio stays the same whether it's peak or off-peak. KeepSeek's reference price table:
 
-| Model | Regular input | Cache hit | Gap |
-|---|---:|---:|---:|
-| DeepSeek V4 Flash | ¥1 / 1M tokens | ¥0.02 / 1M tokens | **50x** |
-| DeepSeek V4 Pro | ¥3 / 1M tokens | ¥0.025 / 1M tokens | **120x** |
+| Model | Time | Regular input | Cache hit | Gap |
+|---|---|---:|---:|---:|
+| DeepSeek V4 Flash | Off-peak | ¥1.5 / 1M tokens | ¥0.05 / 1M tokens | **30x** |
+| DeepSeek V4 Flash | Peak | ¥3.0 / 1M tokens | ¥0.10 / 1M tokens | **30x** |
+| DeepSeek V4 Pro | Off-peak | ¥4.5 / 1M tokens | ¥0.15 / 1M tokens | **30x** |
+| DeepSeek V4 Pro | Peak | ¥9.0 / 1M tokens | ¥0.30 / 1M tokens | **30x** |
 
-In other words: a 1M-token input costs ¥1 (Flash) or ¥3 (Pro) at full price; **if the cache hits, it costs only ¥0.02 / ¥0.025**. In an agent's multi-turn session, history messages + tool definitions + system prompt usually make up the vast majority of every request — and they are re-sent every turn. Hit or miss is a difference of one to two orders of magnitude.
+> **Peak hours** are Beijing-time daily **9:00-12:00** and **14:00-18:00**; all other times are off-peak.
+
+At off-peak pricing: a 1M-token input costs ¥1.5 (Flash) or ¥4.5 (Pro) at full price; **if the cache hits, it costs only ¥0.05 / ¥0.15**. In an agent's multi-turn session, history messages + tool definitions + system prompt usually make up the vast majority of every request — and they are re-sent every turn. Hit or miss is a difference of about an order of magnitude (roughly 30x).
 
 The cache rule is brutal: the request prefix must be **byte-for-byte identical from token 0** for the hit portion to be billed at the discounted rate; any byte drift at any point makes **the entire prefix after that point miss**, and everything is re-billed at full price.
 
@@ -90,6 +94,8 @@ The compressed summary (synthetic summary) of a long conversation is one of the 
 
 KeepSeek's tool set stays constant within a session — the tool schema set and order don't change with each prompt (schemas are normalized, keys sorted, byte-stable across turns). Slim tool mode is off by default for the same reason: **the smaller and more stable the exposed schema, the easier the tools prefix hits.**
 
+Since 0.2.2, KeepSeek goes further: **it persists the request protocol, serialization, tool schema, and Provider/model/endpoint details per session; each tool turn keeps the fully frozen tools schema, and when a tool becomes forbidden it switches to `tool_choice: none` instead of removing tools** — so one "disable tool" never breaks the cache. It also adds a **configurable cache TTL** (`keepseek.promptCacheTtlMinutes`, default 1440 minutes), splitting the context into a fixed system prefix and append-only per-turn updates.
+
 ---
 
 ## 3. Context compression: total tokens saved too
@@ -101,15 +107,23 @@ The cache solves the "unit price"; context compression solves the "total volume"
 - **File references externalized**: expanded file content in history keeps only a path clue; when the model needs code details, it **re-reads the current file** through read-only workspace tools;
 - **Automatic protection**: the first requirement, the latest input, explicit "remember this" messages, important errors/test failures, user corrections, and DraftEdit results are never covered by summaries.
 
+Since 0.2.2, the compression pipeline is upgraded to a **cache-safe Snip → Prune → Summary pipeline**:
+
+- **Hot sessions never rewrite history or start paid background summaries** — only cold recovery or necessary compression archives and prunes stale tool output;
+- Summary coverage advances **only after successful requests** — overflow is left for a later batch, failures don't advance coverage, and new summaries are **appended as immutable segments** instead of rewriting the old one;
+- **Persistent local session archiving + scoped search**: full raw tool output no longer disappears with compression; errors, failed tests, validation output, and high-risk edit/delete results are protected from automatic cleanup;
+- Pick an auto-compression tier: **70% early cleanup / 80% balanced / 85% cache-first**, persisted per workspace and overriding the model default.
+
 > Typical effect: long sessions that reference files, drag in logs, and expand large code blocks go from "linear bloat" to "stable growth" in token consumption.
 
 ---
 
-## 4. Visible cache health: diagnostics and attribution
+## 4. Visible cache health: diagnostics, attribution & usage
 
 KeepSeek doesn't make you guess what you spent in a black box:
 
-- **Per-run / per-session token stats**: input, output, cache hits and misses counted separately, with prompt cache hit/miss and hit-rate percentage shown every turn;
+- **Scenario-level usage stats (0.2.2)**: categorized by execution, summary, retry, continuation, and background — covering cached/missed input, output/reasoning tokens, request counts, and per-source cost. Every cent is accounted for;
+- **Unified Provider request projection (0.2.2)**: the actual request, context/token estimation, overflow guard, compression decisions, UI usage, and cache tests all use **the same projection** — what you see is exactly what gets sent;
 - **Cost estimation**: estimated in real time from the local price table (`keepseek.usagePricing` is customizable);
 - **Context usage**: current context as a percentage of the model window, compression trigger thresholds, and early warnings before you hit the compression line;
 - **DeepSeek balance**: auto-queried and displayed, so you always know where you stand;
@@ -123,71 +137,89 @@ KeepSeek doesn't make you guess what you spent in a black box:
 
 ## 5. What the saved time and money look like
 
-Rough estimate with a 100K-token prefix, 50-turn conversation, Flash model (input side only):
+Rough estimate with a 100K-token prefix, 50-turn conversation, Flash model at off-peak pricing (input side only):
 
 | | Ordinary client | KeepSeek |
 |---|---:|---:|
-| Turn 1: 100K prefix | Full price ¥0.1 | Full price ¥0.1 |
-| Turns 2–50: 100K prefix (assuming hit) | ¥0.1 per turn at full price (if cache drifts) | ¥0.002 per turn |
-| 50-turn input cost | ≈ ¥5.0 (all full price) | ≈ ¥0.2 (with hits) |
+| Turn 1: 100K prefix | Full price ¥0.15 | Full price ¥0.15 |
+| Turns 2–50: 100K prefix (assuming hit) | ¥0.15 per turn at full price (if cache drifts) | ¥0.005 per turn |
+| 50-turn input cost | ≈ ¥7.5 (all full price) | ≈ ¥0.40 (with hits) |
 
 Add context compression's cut to the **total volume** on top: KeepSeek's long sessions don't carry every historical file body on their back each turn.
 
 ---
 
-## 6. Native experience as smooth as Cursor
+## 6. Accounts, models & Skills: an extension system that just works
+
+### Multi-account management (0.2.3): official DeepSeek, OpenAI-compatible & local Ollama, all in one place
+
+KeepSeek's account system doesn't limit which models you combine — **official DeepSeek, OpenAI-compatible services, and local Ollama** can live side by side in the sidebar, each independent and instantly switchable:
+
+- **Multiple accounts coexist, switch in one click**: official DeepSeek, any OpenAI-compatible endpoint, and local Ollama (`http://localhost:11434`) each configure as independent accounts; keep several at once, with **one-click active-account switching**, smooth migration of legacy config, and physical deletion whenever you want;
+- **Ollama needs no API key**: local deployments work without a secret (no Authorization header is sent when the key is empty), and Base URLs missing `/v1` are auto-completed — just paste `http://localhost:11434` and connect;
+- **Several models per account + model aliases**: the model switcher groups models by account, so you can call different sources with names you like (aliases), with the full model ID kept in a tooltip;
+- **Unified account traffic**: chat requests, context summaries, and balance refreshes flow through the current active account; balance snapshots and query frequency are tracked independently per account;
+- **Capability gaps adapt automatically**: only an official DeepSeek source (`provider=deepseek` with Base URL host `api.deepseek.com`) keeps balance and cost reporting; OpenAI-compatible, proxy, and Ollama sources automatically fall back to chat completions / tool calling / token stats and never misreport a balance;
+- **Legacy compatibility**: existing `keepseek.apiKey` / `baseUrl` and `DEEPSEEK_API_KEY` still work — no migration needed to keep using them.
+
+### The only extension mechanism for agents: Skills (0.2.2)
+
+Write project conventions, debugging playbooks, and team prompts as **Skills** (discoverable in workspace `.agents` and `~/.codex/skills`). KeepSeek lets you browse with `/skills`, invoke with `$`, and draft with `/create-skill`; clicking a Skill tag in the use bar opens its SKILL.md in VS Code (Enter/Space accessible). From now on, extending the world is **one path only** — clean, controlled, no rewriting.
+
+### Stable tooling, ready at hand
+
+- **Tool schemas frozen per session**: the tool set and order stay byte-stable across turns — clicks, multi-step reasoning all work as usual, but the tools prefix never deforms;
+- **Optimized large-file handling (0.2.2)**: line-range reads gain a `hasMore` / `nextStartLine` continuation cursor; new `keepseek_create_incremental_draft_edit` supports exact unique search-replace, range replacement, and multi-edit in one file — **refusing rather than guessing** on missing, ambiguous, or overlapping targets, so you never dump a whole big file into the model;
+- **Less redundant input (0.2.2)**: ordinary replies no longer re-send reasoning content (while tool-call-related content stays stable), saving even more tokens.
+
+---
+
+## 7. Native experience as smooth as Cursor
 
 KeepSeek doesn't sacrifice experience to save money — it turns everyday operations into native VS Code interactions, Cursor-style:
 
 ### Sidebar chat: ask while reading code
 
-KeepSeek lives in the VS Code Secondary Sidebar — no window switching, no copy-paste. Supports DeepSeek V4 Flash / Pro dual models and Thinking modes (`high` / `max` reasoning intensity); model and tier automatically apply the matching programming parameters (1M context window, output/tool budgets, compression thresholds).
+KeepSeek lives in the VS Code Secondary Sidebar — no window switching, no copy-paste. Supports DeepSeek V4 Flash / Pro dual models and Thinking modes (`high` / `max` reasoning), with coding parameters (1M context window, output/tool budgets, compression thresholds) automatically applied per model and tier.
 
-### Context: only what you want to give
+### Context: only what you choose
 
 - **Editor selections**: right-click or `Cmd+L` / `Ctrl+L` to add, preserving file path, line, and column;
-- **Explorer files/directories**: right-click to add, or drag them straight into the input box to create reference chips;
-- **Live runtime evidence**: selected content from the terminal, Output panel, or Debug Console added as `.log` references, so the AI analyzes real output;
-- **Precise line ranges**: `<path#L10-L20>`-style references expand only the part you need — never the whole file.
+- **Explorer files/directories**: right-click to add, or drag them into the input box to generate reference chips;
+- **Live runtime**: selections in the terminal, Output panel, and Debug Console join as `.log` references, so the AI analyzes real runtime state;
+- **Precise line ranges**: `<path#L10-L20>` references expand only the part you need — never the whole file.
 
-### Agent tools designed for low cost
+### Agent tools designed to be "low-cost"
 
 - Read-only workspace search (literal/regex, path/include scoping, case matching) + line-range reads — **not web search, not search-and-replace**;
-- Declarations and references prefer VS Code semantic providers (symbol/reference) — more accurate and more token-efficient;
+- Declaration and reference lookup prefer VS Code semantic providers (symbol/reference) — more accurate and cheaper;
 - Dependency, build, and VCS directories are auto-skipped; binary, media, archive, and oversized files never enter context.
 
-### Reusable workflows (Skills)
+### Engineering conveniences
 
-Write project conventions, debugging playbooks, and team prompts as Skills (discoverable from `.agents` or `~/.codex/skills`); browse with `/skills`, invoke with `$` references, and generate drafts with `/create-skill`.
-
-### Continue debugging across projects
-
-History sessions are saved per project — browse other projects, copy to the current one, favorite, rename, filter by time, multi-select delete. Switch workspaces without losing your thread.
-
-### Better engineering conveniences
-
-- **Validate & fix**: the agent can run controlled `npm run compile / lint / test`, read Problems on failure, prepare fix drafts automatically, and loop until fixed — then wait for your confirmation;
-- **Run cancellation**: stop the current run anytime during reasoning or the tool loop;
-- **Disconnect retry**: retryable errors before the first response chunk get automatic exponential-backoff retries;
-- **Background runs**: mutually exclusive and serialized — no concurrent runs that would rewrite the session prefix (this is also part of cache stability).
+- **Validate and repair**: the agent can run controlled `npm run compile / lint / test`, read Problems on failure, prepare fix drafts, loop, and wait for your confirmation;
+- **Stop anytime**: halt the current run mid-reasoning or mid-tool-loop;
+- **Retry on disconnect**: recoverable errors before the first chunk retry automatically with exponential backoff;
+- **Cross-project continuity**: sessions are saved per project — browse other projects, copy into the current one, bookmark, rename, filter by time, multi-select delete. Switch workspaces without losing your train of thought;
+- **Background running**: mutually exclusive and serial at any moment, so the session prefix is never concurrently rewritten (this is also part of cache stability).
 
 ---
 
-## 7. A partner for AI-driven development: keep the architectural rhythm in your hands
+## 8. A partner for AI-built projects: keep the architectural rhythm in your hands
 
-AI-generated code gets faster every day, but architecture, dependencies, and module boundaries still need a human at the wheel. KeepSeek isn't just a chat window — it's a **professional code-reading tool**, the piece most overlooked and most needed when building projects with AI:
+AI codegen is getting faster, but the architecture, dependency graph, and module boundaries still need a human hand. KeepSeek is not just a chat window — it's a **professional code-reading tool**, the piece AI-built projects overlook most and need most:
 
-- **Semantic navigation, not guessing**: finding declarations and references goes through VS Code language services (symbol/reference providers) first — one-click jumps and call-relationship inspection, more accurate than full-text search and cheaper in tokens;
-- **Read-only exploration, zero side effects**: workspace search (literal/regex, path/include scoping, case matching), line-range reads, directory listings — all read-only, never leaving the workspace;
-- **Re-read on demand, never misled by stale code**: in long sessions, when the model needs code details it **re-reads the current file** through read-only tools, instead of referencing old bodies expanded turns ago — the code the AI sees is always the latest state after your edits;
-- **Git read-only assistance**: branch, status, diff, patch, and commit-message suggestions give you the full picture of changes — but it never pushes and never commits for you;
+- **Semantic navigation, not guesswork**: declaration and reference lookup prefer VS Code language services (symbol / reference providers) — jump and see call relationships more accurately and for fewer tokens;
+- **Read-only exploration, zero side effects**: workspace search (literal/regex, path/include scoping, case matching), line-range reads, and directory listings are all read-only, never leaving the workspace;
+- **Re-read on demand, never misled by stale code**: in long sessions, when the model needs code details it **re-reads the current file** with read-only tools, rather than citing bodies expanded turns ago — the code you changed is what the AI always sees;
+- **Read-only Git assistance**: branch, status, diff, patch, and commit-message suggestions give you the full picture of changes — but it never pushes and never commits for you;
 - **Context visualization**: current context as a percentage of the model window, compression thresholds at a glance, early warnings before compression — architecture discussions can run as long as you like without losing control.
 
 For developers building projects with AI, KeepSeek lets you switch between "AI writes code" and "human steers architecture" at will: let the AI do the work while using KeepSeek to read code, check references, and review diffs — pacing every step.
 
 ---
 
-## 8. Privacy & security: every modification is your call
+## 9. Privacy & security: every modification is your call
 
 - **No silent writes, ever**: the AI can only prepare DraftEdits, which enter a ChangeSet where you review the diff and choose Apply / Discard / Revert; **create/modify touches disk only when you click Apply**;
 - **Double confirmation for deletion**: high-risk tool-call modal + a dedicated deletion modal before Apply; if the file changed after the draft was prepared, deletion is refused to avoid removing new content;
@@ -198,7 +230,7 @@ For developers building projects with AI, KeepSeek lets you switch between "AI w
 
 ---
 
-## 9. Who it's for
+## 10. Who it's for
 
 - **Pay-as-you-go DeepSeek users**: people who want their API bill down by an order of magnitude — KeepSeek is built for this;
 - **Heavy agent users**: dozens of turns a day, endless long sessions — every turn saves money;
@@ -209,7 +241,7 @@ For developers building projects with AI, KeepSeek lets you switch between "AI w
 
 ---
 
-## 10. Quick start (3 steps)
+## 11. Quick start (3 steps)
 
 ```bash
 # 1. Build and install the VSIX
@@ -238,9 +270,13 @@ Then select some code, press `Cmd+L` / `Ctrl+L` (or right-click → KeepSeek: Ad
 - Source files live only in VS Code extension global storage, never in the workspace or Git: `<globalStorageUri>/accounts/<provider>/<sourceId>.json`; official-source balance data lives at `<globalStorageUri>/accounts/<provider>/<sourceId>/balance.json`.
 - Existing users need no manual migration. On the first upgrade with no source files, KeepSeek copies `keepseek.apiKey` / `keepseek.baseUrl` into `accounts/deepseek/default.json` without deleting or modifying the old settings, so downgrading remains safe. Environment fallback values never appear as an unconfigured source in the model switcher.
 
+### Auto-compression tiers
+
+In the command menu's model area you can pick a compression strategy directly: **70% early cleanup** (lower latency and lighter tokens), **80% balanced** (recommended default), and **85% cache-first** (maximize prefix cache hits). The choice is persisted per workspace and overrides the model's built-in default tier.
+
 ---
 
-## 11. Cost-related configuration cheat sheet
+## 12. Cost-related configuration cheat sheet
 
 | Setting key | Default | Description |
 |--------|--------|------|
@@ -249,6 +285,7 @@ Then select some code, press `Cmd+L` / `Ctrl+L` (or right-click → KeepSeek: Ad
 | `keepseek.balanceEndpointUrl` | `""` | Balance query endpoint; when empty, derived from `baseUrl` as `/user/balance` |
 | `keepseek.balanceRefreshIntervalMs` | `60000` | Minimum interval for automatic balance refresh |
 | `keepseek.slimToolModeEnabled` | `false` | **Off by default**: the full tool set keeps the tools section byte-stable for sustained cache hits; enabling it trades a smaller schema for a schema that varies with the prompt and lowers the hit rate |
+| `keepseek.promptCacheTtlMinutes` | `1440` | Prompt cache TTL in minutes; proactively reconnects after expiry to refresh the cache window |
 | `keepseek.maxFileBytes` | `200000` | Max bytes read for a single reference/workspace file, controlling context size |
 | `keepseek.maxWorkspaceToolFiles` | `2000` | Max candidate files enumerated by read-only listings and search |
 | `keepseek.maxRequestRetries` | `2` | Automatic retries before the first response chunk (exponential backoff) |
@@ -258,7 +295,7 @@ Model & Thinking-tier output budgets, tool-turn limits, and summary trigger/forc
 
 ---
 
-## 12. Acknowledgments: tribute to Reasonix
+## 13. Acknowledgments: tribute to Reasonix
 
 KeepSeek's cache-friendly mechanisms directly borrow from **Reasonix**'s proven approach to "accomplishing agent tasks with minimal tokens": byte-stable request prefixes, append-only history that only grows, low-frequency summary refreshes, and per-session frozen tool schemas. These ideas were validated in Reasonix's practice; KeepSeek builds on them with engineering and product work tailored to DeepSeek's prefix-cache billing.
 
@@ -266,7 +303,7 @@ Sincere **thanks** to Reasonix and its developers — every token and every cent
 
 ---
 
-## 13. Further reading
+## 14. Further reading
 
 - **Cache-hit optimization deep dive (maintainers/advanced)**: [doc/cache.md](./doc/cache.md), [doc/cache_keepseek.md](./doc/cache_keepseek.md)
 - **Agent runtime workflow**: [doc/keepseek-agent-runtime-workflow.md](./doc/keepseek-agent-runtime-workflow.md)
@@ -277,4 +314,4 @@ Sincere **thanks** to Reasonix and its developers — every token and every cent
 
 *KeepSeek is open source (MIT License); source at [github.com/kmvdata/keepseek](https://github.com/kmvdata/keepseek). Cache-friendliness is not a slogan — it's an engineering contract in `agent/historyProjection.ts`, `agent/historyCompressor.ts`, and `agent/runner.ts`.*
 
-*KeepSeek in one line: KeepSeek is a VS Code sidebar agent that treats context as a precise craft — it sends only the files, selections, and logs you choose, and keeps DeepSeek's prompt prefix cache hot across turns, with cached input costing as little as 1/50 (Flash) to 1/120 (Pro) of full price. It pairs Cursor-like native interactions with a professional read-only code navigation experience, so you stay in control of your architecture. Open source, MIT licensed.*
+*KeepSeek in one line: KeepSeek is a VS Code sidebar agent that treats context as a precise craft — it sends only the files, selections, and logs you choose, and keeps DeepSeek's prompt prefix cache hot across turns, with cached input costing as little as 1/30 of the full price. It pairs Cursor-like native interactions with a professional read-only code navigation experience, so you stay in control of your architecture. Open source, MIT licensed.*
