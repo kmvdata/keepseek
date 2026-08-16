@@ -140,11 +140,56 @@ export function addTurnUsageToSessionStats(
   };
 }
 
+export type PricingPeriod = 'offPeak' | 'peak';
+
+/**
+ * DeepSeek 峰谷计价时段判定(北京时间,公告口径 2026-08-17 起)。
+ *
+ * 高峰时段 = 北京时间每日 9:00-12:00 与 14:00-18:00,其余为空闲时段。
+ * 把时间整体加 8 小时再读 UTC 小时,得到等价于北京时钟的小时数,不依赖运行环境时区。
+ */
+export function getPricingPeriod(date: Date = new Date()): PricingPeriod {
+  const beijingHour = new Date(date.getTime() + 8 * 60 * 60 * 1000).getUTCHours();
+  const isPeak =
+    (beijingHour >= 9 && beijingHour < 12) ||
+    (beijingHour >= 14 && beijingHour < 18);
+  return isPeak ? 'peak' : 'offPeak';
+}
+
+/** 高峰档字段未配置时回退到空闲档。 */
+function pickPeakRate(
+  peakValue: number | undefined,
+  isPeak: boolean,
+  offPeakValue: number
+): number {
+  if (!isPeak) {
+    return normalizePrice(offPeakValue);
+  }
+  return peakValue === undefined
+    ? normalizePrice(offPeakValue)
+    : normalizePrice(peakValue);
+}
+
+/** 按空闲档价格折算成本(保留旧入口,等价于按非高峰档计费)。 */
 export function calculateUsageCost(usage: Usage, rates: UsageCostRates): number {
+  return calculateUsageCostAt(usage, rates, new Date());
+}
+
+/**
+ * 按请求发生时刻的峰/谷时段选价并折算成本。
+ * 高峰档字段(peakCacheHitPrice / peakInputPrice / peakOutputPrice)缺省时,
+ * 回退到空闲档对应字段(兼容升级前的单档配置)。
+ */
+export function calculateUsageCostAt(
+  usage: Usage,
+  rates: UsageCostRates,
+  at: Date
+): number {
+  const peak = getPricingPeriod(at) === 'peak';
   return normalizeCost((
-    usage.cacheHitTokens * normalizePrice(rates.cacheHitPrice) +
-    usage.cacheMissTokens * normalizePrice(rates.inputPrice) +
-    usage.completionTokens * normalizePrice(rates.outputPrice)
+    usage.cacheHitTokens * pickPeakRate(peak ? rates.peakCacheHitPrice : undefined, peak, rates.cacheHitPrice) +
+    usage.cacheMissTokens * pickPeakRate(peak ? rates.peakInputPrice : undefined, peak, rates.inputPrice) +
+    usage.completionTokens * pickPeakRate(peak ? rates.peakOutputPrice : undefined, peak, rates.outputPrice)
   ) / 1_000_000);
 }
 

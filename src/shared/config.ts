@@ -49,16 +49,24 @@ export const DEFAULT_BACKGROUND_MAX_ROUNDS = 5;
 export const DEFAULT_BACKGROUND_MAX_DURATION_MS = 30 * 60 * 1_000;
 export const DEFAULT_BACKGROUND_MAX_TOOL_CALLS = 60;
 export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
+  // DeepSeek 峰谷定价(自 2026-08-17 北京时间 00:00 起生效)。
+  // 空闲档为常规价;高峰档(北京时间每日 9-12 点、14-18 点)价格更高。
   'deepseek-v4-flash': {
-    cacheHitPrice: 0.02,
-    inputPrice: 1,
-    outputPrice: 2,
+    cacheHitPrice: 0.05,
+    inputPrice: 1.5,
+    outputPrice: 4.5,
+    peakCacheHitPrice: 0.1,
+    peakInputPrice: 3.0,
+    peakOutputPrice: 9.0,
     currency: '¥'
   },
   'deepseek-v4-pro': {
-    cacheHitPrice: 0.025,
-    inputPrice: 3,
-    outputPrice: 6,
+    cacheHitPrice: 0.15,
+    inputPrice: 4.5,
+    outputPrice: 13.5,
+    peakCacheHitPrice: 0.3,
+    peakInputPrice: 9.0,
+    peakOutputPrice: 27.0,
     currency: '¥'
   }
 };

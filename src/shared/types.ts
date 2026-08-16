@@ -91,10 +91,15 @@ export interface Usage {
 }
 
 export interface UsageCostRates {
-  cacheHitPrice: number;
-  inputPrice: number;
-  outputPrice: number;
+  // 空闲时段(或单一档)价格,兼容旧配置;旧配置缺省峰谷时段时按此档计费
+  cacheHitPrice: number; // 输入·缓存命中 (¥/M tokens)
+  inputPrice: number; // 输入·缓存未命中 (¥/M tokens)
+  outputPrice: number; // 输出 (¥/M tokens)
   currency: string;
+  // DeepSeek 峰谷定价(2026-08-17 起):高峰时段可选,缺省时回退到上面空闲档
+  peakCacheHitPrice?: number;
+  peakInputPrice?: number;
+  peakOutputPrice?: number;
 }
 
 export interface UsageEvent {

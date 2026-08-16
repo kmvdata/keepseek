@@ -1,7 +1,7 @@
 {
-    "keepseek.thinkingEnabled": false,
+    "keepseek.thinkingEnabled": true,
     "keepseek.reasoningEffort": "max",
-    "keepseek.selectedModelId": "deepseek-v4-flash",
+    "keepseek.selectedModelId": "deepseek-v4-flash-0731",
     "keepseek.compressionThreshold": "balanced",
-    "keepseek.selectedSourceId": "default"
+    "keepseek.selectedSourceId": "cfa6b147-6535-4df0-a7d1-a22c6ea44a65"
 }
