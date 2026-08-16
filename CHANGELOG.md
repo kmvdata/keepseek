@@ -1,148 +1,135 @@
-# Changelog
-
-## Unreleased
-
-- Added global multi-account management for DeepSeek and OpenAI-compatible chat endpoints, with provider-scoped account files, safe legacy-setting migration, active-account switching, and physical account deletion.
-- Added per-account model discovery and aliases. The model switcher now displays user alias, API-provided name, built-in label, then model ID, while keeping the full ID in hover text.
-- Kept main Agent requests, context summaries, provider protocol metadata, and DeepSeek balance refreshes on the same active account; balance snapshots and refresh throttles are isolated per account.
-- Preserved `keepseek.apiKey` / `keepseek.baseUrl` and `DEEPSEEK_API_KEY` fallback behavior for existing installations. OpenAI-compatible accounts use the minimal chat-completions SSE/tool-call subset without DeepSeek-only reasoning parameters or balance requests.
+# 更新日志
 
 ## 0.2.3
 
-- Fixed composer input flickering when the input exceeds the max display height: the JS autogrow cap (200px) and the CSS `max-height` (220px) were out of sync, so with the scrollbar active, every keystroke at the last visible line resized the input and clamped `scrollTop`, making the viewport jump on each edit. The CSS cap is now aligned with the autogrow limit, and the scroll position is defensively restored after every height recalculation.
+- 新增多账户管理：现在可为 DeepSeek / OpenAI-compatible 端点配置和管理多个账户，支持活跃账户切换、旧配置平滑迁移以及物理删除账户。
+- 模型别名：可为每个账户自定义模型别名，模型切换时按别名优先展示，完整模型 ID 保留在悬浮提示中。
+- 统一账户流量：对话请求、上下文摘要与余额刷新统一走当前活跃账户，余额快照与查询频率按账户独立统计。
+- 兼容旧设置：老用户的 `keepseek.apiKey` / `baseUrl` 与 `DEEPSEEK_API_KEY` 仍然有效；OpenAI-compatible 服务只保留对话与工具调用能力。
+- 修复输入框抖动：输入内容超过最大高度时，输入框不再随输入跳动，滚动位置保持稳定。
 
 ## 0.2.2 - 2026-08-10
 
-- Skills are now the only Agent extension mechanism: removed Codex-style plugin discovery (workspace `plugins` / `.agents/plugins`, user `~/.codex/plugins`) and the stale `.agents/marketplace.json`; Skills are now discovered only from workspace `.agents` and user `~/.codex/skills`.
-- Clicking a Skill pill in the Using bar opens its SKILL.md in VS Code (Enter/Space accessible).
-- Added an auto-compaction threshold selector to the command menu's Model section: 70% early-clean / 80% balanced / 85% cache-first, overriding the model profile compression ratios and persisted per workspace via `keepseek.compressionThreshold`.
-- Reduced repeated DeepSeek input without discarding local history: protocol-v2 sessions no longer resend `reasoning_content` from ordinary final assistant answers, while tool-call reasoning and every matching tool result remain byte-stable atomic groups. Existing hot sessions stay on their frozen legacy protocol until a cache-safe migration boundary.
-- Added a single authoritative Provider request projection shared by Agent execution, context/token estimates, preflight context-window guards, compression decisions, UI usage, and cache-prefix tests. Provider-reported `prompt_tokens` now calibrate the local estimate without another model call.
-- Strengthened prompt-cache stability and session recovery:
-  - Persisted the request protocol, serialization strategy, tool schema/version/order, provider/model/base URL, dynamic-context hash, and last Provider request time per session.
-  - Kept the complete frozen tool schema on every tool/continuation round and now uses `tool_choice: none` when further calls are forbidden instead of removing `tools`.
-  - Split context into a frozen system prefix and append-only per-turn updates, added a shared budget for project instructions, Skills, legacy memory, and attachments, and introduced a configurable conservative cache TTL (`keepseek.promptCacheTtlMinutes`, default 1440 minutes).
-- Reworked history maintenance into a cache-safe Snip → Prune → Summary pipeline. Hot sessions do not rewrite previously sent history or launch paid background summaries; cold recovery or unavoidable compaction can archive and trim stale successful tool output before deciding whether a summary call is still necessary.
-- Fixed summary coverage at the input-size boundary: only message IDs actually included in a successful summary request are marked covered, overflow stays available for later batches, failures never advance coverage, and new summaries are appended as immutable segments instead of rewriting older summaries.
-- Added persistent local session archives and bounded lexical/BM25-style retrieval through `keepseek_search_session_archive`. Full original tool output, oversized first requests, and context sources omitted by the shared budget remain locally retrievable through stable archive IDs without an additional model call; errors, failed tests, validation/diagnostic output, user constraints, and high-risk edit/delete results are protected from automatic pruning.
-- Expanded usage and cost accounting to classify executor, summary, retry, continuation, background, retrieval, and future router calls, including cache-hit input, cache-miss input, output/reasoning tokens, request counts, per-source cost, and total session cost.
-- Improved large-file workflows:
-  - Range reads now return `hasMore` and a stable `nextStartLine` continuation cursor under explicit line/byte budgets.
-  - Added `keepseek_create_incremental_draft_edit` for exact unique search/replace, line-range replacement, and multiple non-overlapping edits in one existing file. KeepSeek combines them locally into the existing full DraftEdit/ChangeSet/checkpoint flow and refuses missing, ambiguous, or overlapping targets instead of guessing.
-- Fixed `keepseek_create_incremental_draft_edit` being misclassified by the unknown-tool fallback as high risk. Like full DraftEdit preparation, incremental edits now proceed without a tool confirmation because they only create a reviewable pending ChangeSet; applying changes still requires the user's explicit Apply action.
-- Added deterministic context-maintenance benchmarks covering ordinary reasoning, multi-tool reading, failed validation and repair, summary overflow, oversized first requests, warm/cold session recovery, small edits to large files, archive recall, and extension restart. The offline fixture reduced estimated total cost by 49.04% while keeping every hot-cache scenario's stable-prefix and cache-hit-rate checks non-inferior; the full suite now passes 181 tests.
+- Skills 成为 Agent 唯一的扩展机制：移除了旧的插件发现机制，Skill 只从工作区 `.agents` 和用户 `~/.codex/skills` 中发现。
+- 点击使用栏中的 Skill 标签即可在 VS Code 中打开其 SKILL.md（支持 Enter/Space 访问）。
+- 在命令菜单的模型区新增自动压缩阈值选择：70% 提前清理 / 80% 均衡 / 85% 缓存优先，覆盖模型配置的压缩比例，并按工作区持久化保存。
+- 减少重复发送的 DeepSeek 输入：普通回复不再重复携带推理内容，同时保持工具调用相关内容的稳定。
+- 引入统一的 Provider 请求投影，让实际请求、上下文/Token 估算、越界防护、压缩决策、UI 用量与缓存测试使用同一套投影，显示用量与实际发送保持一致。
+- 增强提示缓存稳定性与会话恢复：
+  - 按会话持久化请求协议、序列化方式、工具 schema 及 Provider / 模型 / 地址等信息。
+  - 每个工具回合保留完整冻结的工具 schema，后续禁止调用时改用 `tool_choice: none` 而非移除 tools。
+  - 将上下文拆为固定的系统前缀与只增的每轮更新，并为项目指令、Skills、旧版记忆、附件设置共享预算，新增可配置的缓存有效期（`keepseek.promptCacheTtlMinutes`，默认 1440 分钟）。
+- 重构历史维护为缓存安全的 Snip → Prune → Summary 流水线：热会话不重写历史或启动付费后台摘要，冷恢复或必要压缩时才归档并裁剪过期工具输出。
+- 修复了输入规模边界处的摘要覆盖问题：仅标记实际纳入成功摘要请求的消息，溢出内容留待后续批次，失败不推进覆盖进度，新摘要以不可变分段追加而非重写旧摘要。
+- 新增持久化的本地会话归档与受限搜索：完整原始工具输出等不再随压缩丢失，错误、失败测试、校验输出及高风险编辑/删除结果受保护免于自动清理。
+- 扩展用量与成本统计：按执行、摘要、重试、续接、后台等场景分类，覆盖缓存命中/未命中的输入、输出/推理 Token、请求次数与来源成本。
+- 优化大文件处理：
+  - 行段读取新增 `hasMore` 与 `nextStartLine` 续读游标。
+  - 新增 `keepseek_create_incremental_draft_edit`，支持精确的唯一搜索替换、行段替换及同文件多处不重叠编辑；遇到缺失、歧义或重叠目标时直接拒绝而不猜测。
+- 修复 `keepseek_create_incremental_draft_edit` 被未知工具兜底误判为高风险的问题：和普通 DraftEdit 一样只生成可审阅的待确认修改，无需额外确认，应用时仍需用户显式 Apply。
+- 新增确定性的上下文维护基准测试，覆盖推理、多工具读取、校验失败修复、摘要溢出、超大首次请求、热/冷会话恢复、大文件小改动、归档召回及扩展重启等场景；离线夹具将整体成本预估降低 49.04%，全套测试现通过 181 项。
 
 ## 0.2.1 - 2026-07-21
 
-- Fixed a marketplace-install regression where the packaged VSIX could miss the `ignore` runtime dependency (or ship stale flat build outputs), causing extension activation to fail and the chat view to stay stuck loading. Packaging now always goes through `npm run package` (`vsce package --dependencies`) plus the VSIX content verifier, and the published version was bumped so marketplace clients replace the stale same-version package.
-- Fixed workspace search being unusable on stable (non-development) installs: `vscode.workspace.findTextInFiles` is a proposed API that throws "CANNOT use API proposal" unless the extension is started with `--enable-proposed-api`. The search path now catches that error and gracefully falls back to the built-in bounded text search, keeping `keepseek_search_workspace` available on marketplace and local VSIX installs while retaining the native engine in development mode.
+- 修复市场安装回归：打进 VSIX 的运行时依赖可能缺失（或混入过期构建产物），导致扩展激活失败、聊天视图卡在加载中。打包现在统一走 `npm run package` 并校验 VSIX 内容，同时提升发布版本确保市场端替换旧包。
+- 修复稳定版（非开发版）工作区搜索不可用的问题：内置搜索在稳定版拒绝使用，现在会优雅回退到内置的有界文本搜索，保证搜索功能在市场和本地安装可用，开发模式仍使用原生引擎。
 
 ## 0.2.0 - 2026-07-20
 
-- Significantly improved DeepSeek prompt-cache hit rates for multi-turn agent runs:
-  - Reworked history projection to be cache-first and append-only: every message keeps byte-identical serialization for its whole projected life and leaves the prefix only through summary refresh (a deliberately low-frequency cache-invalidation point), so consecutive turns reuse the provider prefix cache from token 0.
-  - Decoupled the recent-turn window from projection membership: `keepRecentTurns` now only decides compressibility and never drops or rewrites mid-history messages, eliminating the per-turn prefix invalidation that sliding windows used to cause.
-  - Kept context instructions (AGENTS.md, Skills, Legacy Project Memory, context files) as a byte-stable system-message block that is rebuilt only when its inputs actually change.
-  - Replayed history byte-for-byte: assistant tool rounds expand deterministically and the current prompt shares the exact byte path of historical messages, keeping the message prefix stable across turns.
-  - Kept the lean default tool schema so stable core tools stay hot, expanding the schema only when the current request actually needs broader workspace/Git tools — tool-schema churn no longer invalidates the cached prefix.
-- Strengthened prompt-cache observability: cache hit/miss tokens are normalized from both `prompt_cache_hit_tokens` and `prompt_tokens_details.cached_tokens`, per-turn/session hit rates are computed, and cache-miss reasons (system prompt change, tool schema change, model change, history compaction/rewrite, history prefix change, provider eviction) are attributed and surfaced in usage tooltips.
-- Kept context-window estimation in lockstep with the real request by sharing the same projection and the session-frozen slim tool set, so displayed usage stays consistent with what is actually sent.
+- 大幅提升多轮 Agent 运行时的 DeepSeek 提示缓存命中率：
+  - 将历史投影改造成缓存优先、只增不改：每条消息在其投影生命周期内序列化保持逐字节一致，只在摘要刷新时改变前缀，使连续轮次从头复用服务端前缀缓存。
+  - 将最近轮次窗口与投影成员解耦：近轮窗口只决定是否可压缩，不再丢弃或改写中间消息，消除了滑动窗口导致的每轮前缀失效。
+  - 保持项目指令（AGENTS.md、Skills、旧版记忆、上下文文件）为字节稳定的系统消息块，仅在输入真正变化时重建。
+  - 历史逐字节回放，Agent 工具轮次确定性展开，当前提示与历史消息共享完全相同的字节路径。
+  - 维持精简的默认工具 schema，让稳定核心工具保持热缓存，仅当当前请求确实需要更广泛的工具时才扩展 schema。
+- 增强提示缓存可观测性：统一从不同字段归一化缓存命中/未命中 Token，计算每轮/会话命中率，并将未命中原因（系统提示变化、工具 schema 变化、模型变化、历史压缩/改写、历史前缀变化、服务端淘汰）归因并在用量提示中展示。
+- 保持上下文窗口估算与实际请求一致：共享同一套投影与会话冻结的精简工具集，使界面显示用量与实际发送一致。
 
 ## 0.1.9 - 2026-07-19
 
-- Created comprehensive `AGENTS.md` as the root-level project instruction and single source of truth for KeepSeek architecture and maintenance conventions.
-- Documented the full codebase structure, core responsibilities (presentation/orchestration/business/protocol layers), communication flows, and design principles.
-- Formalized the deterministic runtime context priority system: KeepSeek core security → user request → AGENTS.md → explicit Skill → session Skill → workspace-default Skill → implicit Skill → Legacy Project Memory.
-- Added new runtime infrastructure modules:
-  - `currentRunContext.ts` for unified dynamic project context construction, sorting, deduplication, and budget trimming.
-  - `repairLoop.ts` for validation-failure state machine with repair iteration tracking and `waiting_for_apply` guard.
-  - `projectInstructions.ts` for safe root `AGENTS.md` reading with file-size and token-budget limits.
-  - `contextDeduplication.ts` for URI-normalized and SHA-256 content-hash based context deduplication.
-  - `tokenEstimate.ts` for lightweight token estimation.
-  - `usageStats.ts` for Agent run token/cost tracking and prompt-cache diagnostics.
-  - `agentRequestCoordinator.ts` and `backgroundRunCoordinator.ts` for run lifecycle management.
-- Added Skill system modules: `skillActivationResolver.ts`, `skillDiscovery.ts`, `skillLoader.ts`, `skillStore.ts`, `skillCreator.ts`, `skillReference.ts` with deterministic activation order and implicit-activation safety guards.
-- Added Legacy Project Memory migration support via `legacyProjectMemoryFormat.ts` and `legacyProjectMemoryMigration.ts`, ensuring read-only injection and ChangeSet-based migration without deleting legacy files.
-- Added `shared/modelProfiles.ts` for DeepSeek V4 and Thinking model profile definitions with fixed runtime limits.
-- Enhanced `shared/i18n.ts`, `shared/types.ts`, `shared/config.ts` with expanded configuration surface and localized messaging.
-- Expanded Agent tool catalog with semantic tools (symbol/reference providers), validation tools (Problems + controlled npm scripts), and Git tools (VS Code Git API with read-only fallback).
-- Updated runtime documentation (`doc/keepseek-agent-runtime-workflow.md`) and user-facing `README.md` for the post-refactor architecture.
+- 创建了综合性的根级 `AGENTS.md`，作为 KeepSeek 架构与维护约定的唯一来源，并整理归档了完整代码结构与分层职责、通信流程与设计原则。
+- 规范了确定性的运行上下文优先级：KeepSeek 核心安全 → 用户请求 → AGENTS.md → 显式 Skill → 会话 Skill → 工作区默认 Skill → 隐式 Skill → 旧版项目记忆。
+- 新增运行基础设施模块：统一的动态项目上下文构建、校验失败修复状态机、根级 AGENTS.md 安全读取与预算控制、上下文去重、轻量 Token 估算、运行 Token/成本统计、请求与后台运行生命周期管理。
+- 新增 Skill 系统模块：确定性激活顺序与隐式激活安全防护。
+- 新增旧版项目记忆迁移支持：以只读方式注入，迁移仅生成待确认修改，不删除旧文件。
+- 新增 DeepSeek V4 与 Thinking 模型配置定义与固定运行上限，并扩展配置面与本地化文案。
+- 扩展 Agent 工具集：语义符号/引用工具、校验工具（Problems + 受控 npm 脚本）、Git 工具（VS Code Git API，只读回退）。
+- 更新运行文档与面向用户的 `README.md`，适配重构后的架构。
 
 ## 0.1.8 - 2026-07-16
 
-- Persisted the selected model, Thinking mode, and reasoning effort for each workspace across VS Code restarts.
-- Registered the command-menu model settings in the VS Code configuration manifest.
+- 为每个工作区持久化已选模型、思考模式与推理强度，跨 VS Code 重启保留。
+- 在 VS Code 配置清单中注册命令菜单的模型设置。
 
 ## 0.1.7 - 2026-07-18
 
-- Version bump for v0.1.7 release.
+- 0.1.7 版本号更新。
 
 ## 0.1.6 - 2026-07-15
-- Fixed context entry points for editor selections, Explorer files/folders, and terminal selections, including the contributed menu commands and KeepSeek view focus target.
-- Improved file and directory reference coverage with tests for selected line/column expansion, directory manifests, and Explorer multi-selection de-duplication.
-- Added discovery for skills bundled in workspace and personal Codex plugin directories, alongside existing workspace `.agents` and user Codex skills.
-- Removed the Agent execution-budget settings page and moved runtime limits, output budgets, tool budgets, and compression thresholds into fixed DeepSeek V4 model/Thinking profiles.
-- Updated runtime documentation for always-on history projection, automatic profiles, and background context-compression refresh.
+
+- 修复上下文入口：编辑器选区、资源管理器文件/文件夹、终端选区的加入按预期工作，并完善相关菜单命令与视图焦点。
+- 完善文件与目录引用覆盖，补充选区行列展开、目录清单与多选去重的测试。
+- 扩展 Skill 发现范围，纳入工作区与个人 Codex 插件目录。
+- 移除执行预算设置页，将运行上限、输出预算、工具预算与压缩阈值固定进 DeepSeek V4 模型/Thinking 配置。
+- 更新运行文档，适配常开历史投影、自动配置与后台压缩刷新。
 
 ## 0.1.5 - 2026-07-11
 
-- Version bump for v0.1.5 release.
+- 0.1.5 版本号更新。
 
 ## 0.1.3 - 2026-07-05
 
-- Added usage and cost visibility for Agent runs, including turn/session tokens, prompt-cache hit rate, estimated cost, turn count, context percentage, compaction threshold, and DeepSeek balance.
-- Added prompt-cache diagnostics and a lean default tool schema so KeepSeek can keep stable core tools hot while adding broader workspace tools only when the current request needs them.
-- Added configurable usage pricing, DeepSeek balance endpoint/refresh interval, replay-safe request retries, and structured interaction trace logs.
-- Improved context compaction controls with soft compaction, tool-result snipping, force-compaction thresholds, and an updated default summary trigger ratio of 0.8.
-- Moved usage metrics into the context progress tooltip and removed per-keystroke expanded prompt usage estimation to reduce Webview-to-extension chatter before send.
-- Updated release metadata, marketplace packaging scripts, and VSIX packaging exclusions for the 0.1.3 publish.
+- 新增 Agent 运行用量与成本查看：每轮/会话 Token、提示缓存命中率、预估成本、轮次数、上下文占比、压缩阈值与 DeepSeek 余额。
+- 新增提示缓存诊断，并以精简默认工具 schema 让稳定核心工具保持热缓存。
+- 新增可配置用量计价、DeepSeek 余额接口与刷新间隔、可重放的安全请求重试及结构化交互日志。
+- 优化上下文压缩：软压缩、工具结果裁剪、强制压缩阈值，默认摘要触发比调整为 0.8。
+- 将用量指标移入上下文进度提示，发送前不再按次按键估算，减少 Webview 与扩展之间的通信。
 
 ## 0.1.2 - 2026-06-27
 
-- Added Codex-compatible KeepSeek Skills support, including discovery from workspace `.agents` and user Codex skills, active-skill selection, prompt skill references, and safe loading of referenced instruction resources.
-- Added `/skills` and `/create-skill` flows so users can browse reusable workflows or create a workspace skill draft under `.agents/skills/.../SKILL.md`.
-- Added the Agent budget/context settings UI for context compression, recent-turn retention, summary budget, tool budgets, and history retention.
-- Added the About dialog with extension version, maintainer, repository, and license information.
-- Improved external file reference and drag/drop reference handling so authorized references render and open more consistently.
+- 新增 Codex 兼容的 KeepSeek Skills 支持：从工作区 `.agents` 与用户 Codex skills 发现、活跃 Skill 选择、提示引用及指令资源的受控加载。
+- 新增 `/skills` 与 `/create-skill` 流程，可浏览可复用工作流或在 `.agents/skills/.../SKILL.md` 下创建工作区 Skill 草稿。
+- 新增 Agent 预算/上下文设置界面：上下文压缩、近轮保留、摘要预算、工具预算与历史保留。
+- 新增关于对话框：扩展版本、维护者、仓库与许可信息。
+- 改进外部文件引用与拖拽引用处理，引用渲染与打开更一致。
 
 ## 0.1.1 - 2026-06-02
 
-- Added two new read-only workspace tools:
-  - `keepseek_search_workspace` for low-cost workspace search with bounded context output.
-  - `keepseek_read_workspace_file_range` for bounded line-range reads with byte-size safeguards.
-- Added first-pass tool result shaping and ledger metadata for search/range/read tool outputs, including truncation and compressed-size indicators to keep tool context stable and low-cost.
-- Updated `keepseek_read_workspace_file` to return a structured fallback for oversized files and guide agents to use `keepseek_read_workspace_file_range` instead.
-- Updated system prompt workflow (CN/EN): prefer `search/list` → `read_workspace_file_range` and only use full-file read when files are small or complete context is truly needed.
-- Added new runtime phases and UI visibility updates for search/range phases so activity states and i18n labels stay consistent.
-- Added usage accounting scaffolding: trace-level upstream usage aggregation while preserving existing prompt token estimate behavior.
-- Updated `doc/keepseek-agent-runtime-workflow.md` to reflect the post-refactor runtime flow and tool strategy.
+- 新增两个只读工作区工具：
+  - `keepseek_search_workspace`：低成本工作区搜索，有界输出。
+  - `keepseek_read_workspace_file_range`：有界行段读取，带字节数保护。
+- 为搜索/行段/读取等工具输出加入裁剪与压缩提示，让工具上下文保持稳定、低成本。
+- 超大文件读取返回结构化回退，并引导使用行段读取工具。
+- 更新系统提示的工作流：优先使用搜索/列目录 → 行段读取，仅小文件或确实需要完整上下文时才整文件读取。
+- 新增搜索/行段阶段的运行状态与文案，使活动状态与本地化保持一致。
+- 新增用量统计骨架：保留既有 Token 估算行为，同时聚合上游用量记录。
+- 更新运行文档，适配重构后的运行流程与工具策略。
 
 ## 0.1.0 - 2026-05-27
 
-- Added project-aware global history session storage with current-project and other-project browsing, cross-project session copy, favorites, rename, recent-day filtering, multi-select deletion, and whole-project history cleanup.
-- Added `keepseek.historyRetentionDays` for the default history menu range, with stored sessions hard-pruned after 60 days except for the currently active session.
-- Added an abort/stop control so users can cancel an in-progress Agent run from the composer.
-- Added one-click copy for assistant replies.
-- Shared Emacs-style text shortcuts across the prompt composer and message edit boxes.
-- Improved file and directory reference rendering, line/column reference handling, reference type detection, and syntax highlighting for references in prompts and transcripts.
+- 新增按项目区分的全局历史会话存储：可浏览当前/其他项目会话、跨项目复制、收藏、重命名，支持按最近日期筛选、多选删除与整个项目历史清理。
+- 新增 `keepseek.historyRetentionDays` 设置默认历史范围，存储会话超出 60 天后硬清理（当前活跃会话除外）。
+- 新增中止/停止控制，可从输入框取消进行中的 Agent 运行。
+- 助手回复新增一键复制。
+- 输入框与消息编辑框共享 Emacs 风格文本快捷键。
+- 改进文件与目录引用渲染、行列引用处理、引用类型识别与提示/记录中的语法高亮。
 
 ## 0.0.9 - 2026-05-24
 
-- Fixed a streaming parser edge case where the final SSE event could be left unprocessed when the response ended with pending decoded bytes, causing AI replies to appear interrupted.
+- 修复流式解析边界问题：响应以未处理的解码字节结束时，最后一个 SSE 事件可能被遗漏，导致 AI 回复像被中断一样。
 
 ## 0.0.6 - 2026-05-24
 
-- Added rich rendering for assistant markdown replies, including fenced code blocks and tables.
-- Raised the default generated-token budget and exposed `keepseek.maxTokens` so Thinking responses are less likely to exhaust output tokens before the final answer.
-- Added a DeepSeek V4 DSML tool-call fallback parser so leaked `<｜DSML｜tool_calls>` blocks are executed instead of shown as interrupted replies.
-- Bumped the VSIX version so installed Windows builds refresh the webview code instead of reusing an older same-version package.
+- 新增助手 Markdown 回复的富渲染，支持围栏代码块与表格。
+- 提高默认生成 Token 预算并暴露 `keepseek.maxTokens`，降低 Thinking 回复在输出完成前耗尽 Token 的概率。
+- 新增 DeepSeek V4 DSML 工具调用兜底解析，让泄漏的 `<｜DSML｜tool_calls>` 块被正确执行而非显示为中断回复。
 
 ## 0.0.3 - 2026-05-23
 
-- Added terminal, output, and debug console selection references so runtime logs can be inserted into the KeepSeek prompt as AI-readable context.
-- Added `Cmd+L` / `Ctrl+L` shortcuts for terminal and debug console context capture.
-- Reworked README content into a user-facing Chinese and English product overview for release.
+- 新增终端、输出与控制台调试选区的引用，可将运行日志作为 AI 可读上下文插入输入框。
+- 为终端与调试控制台上下文捕获新增 `Cmd+L` / `Ctrl+L` 快捷键。
+- 将 README 重写为中英双语的产品概述。
 
 ## 0.0.1-beta.1
 
-- Initial beta release of KeepSeek VS Code extension.
+- KeepSeek VS Code 扩展的初始测试版。

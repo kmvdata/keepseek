@@ -2072,7 +2072,11 @@ export function getScript(): string {
       if (!keys.length) {
         return '';
       }
-      return t(keys[agentStatusRotationIndex % keys.length]);
+      var key = keys[agentStatusRotationIndex % keys.length];
+      if (key === 'agentStatusDeepSeekReasoning') {
+        return t(key, { modelId: state.selectedModelId || 'DeepSeek' });
+      }
+      return t(key);
     }
 
     function getAgentActivityStatusKeys(activity) {
