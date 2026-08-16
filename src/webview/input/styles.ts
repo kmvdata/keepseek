@@ -1250,14 +1250,25 @@ export function getInputStyles(): string {
     }
 
     .settings-dialog-status {
-      margin: -4px 0 12px;
-      padding: 7px 9px;
-      border: 1px solid var(--vscode-inputValidation-infoBorder, var(--vscode-panel-border));
-      border-radius: 4px;
-      color: var(--vscode-inputValidation-infoForeground, var(--vscode-foreground));
-      background: var(--vscode-inputValidation-infoBackground, var(--vscode-textBlockQuote-background));
-      font-size: 11px;
-      line-height: 1.35;
+      flex: 1 1 160px;
+      min-width: 0;
+      align-self: center;
+      margin: 0 auto 0 0;
+      padding: 4px 0;
+      color: var(--vscode-foreground);
+      font-size: 12px;
+      line-height: 1.45;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      white-space: normal;
+      animation: keepseek-settings-status-breath 2.4s ease-in-out infinite;
+    }
+
+    @keyframes keepseek-settings-status-breath {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 1; }
     }
 
     .settings-account-workspace {

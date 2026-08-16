@@ -277,7 +277,6 @@ export function getInputTemplate(): string {
         </div>
         <div class="settings-dialog-body">
           <p id="settingsDialogDesc" class="settings-dialog-desc" data-i18n="modelSettingsDialogDesc">添加账号并管理其 API 连接；同一账号的凭证只保存一次。</p>
-          <div id="settingsDialogStatus" class="settings-dialog-status hidden" role="status" aria-live="polite" tabindex="-1"></div>
           <div class="settings-account-workspace">
             <aside class="settings-account-sidebar" aria-labelledby="settingsAccountsTitle">
               <div class="settings-account-section-header">
@@ -358,6 +357,7 @@ export function getInputTemplate(): string {
           </div>
         </div>
         <div class="settings-dialog-footer">
+          <div id="settingsDialogStatus" class="settings-dialog-status hidden" role="status" aria-live="polite" tabindex="-1"></div>
           <button id="settingsCancelBtn" type="button" class="secondary" data-i18n="cancel">取消</button>
           <button id="settingsSaveBtn" type="button" data-i18n="save">保存</button>
         </div>
