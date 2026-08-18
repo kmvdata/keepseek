@@ -61,12 +61,13 @@ const LOW_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
   [GIT_DIFF_TOOL_NAME, 'git_read'],
   [GIT_CURRENT_BRANCH_TOOL_NAME, 'git_read'],
   [GIT_CREATE_PATCH_TOOL_NAME, 'git_patch_create'],
-  [GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME, 'git_read']
+  [GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME, 'git_read'],
+  // 方案A：delete_workspace_file 只创建待确认的 delete DraftEdit，不会立即删除文件。真正的删除由用户在 Apply 时通过 confirmDeleteApply 确认，因此准备阶段不再弹授权窗，降为低风险。
+  [DELETE_WORKSPACE_FILE_TOOL_NAME, 'workspace_write']
 ]);
 
 const HIGH_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
   ['keepseek_apply_workspace_edit', 'workspace_write'],
-  [DELETE_WORKSPACE_FILE_TOOL_NAME, 'workspace_write'],
   ['keepseek_git_commit', 'git_commit'],
   ['keepseek_git_push', 'git_push']
 ]);
