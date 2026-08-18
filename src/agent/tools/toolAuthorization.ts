@@ -26,6 +26,7 @@ import {
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
+  SEARCH_SESSION_ARCHIVE_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME
 } from '../protocol';
 
@@ -48,6 +49,8 @@ const LOW_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
   [LIST_WORKSPACE_FILES_TOOL_NAME, 'workspace_read'],
   [LIST_WORKSPACE_DIRECTORY_TOOL_NAME, 'workspace_read'],
   [SEARCH_WORKSPACE_TOOL_NAME, 'workspace_read'],
+  // keepseek_search_session_archive 是本地只读的会话归档检索（词法/BM25、无模型调用），与 search_workspace 同级对待，归为低风险，避免被当作未知工具每次都弹高风险授权窗。
+  [SEARCH_SESSION_ARCHIVE_TOOL_NAME, 'workspace_read'],
   [READ_WORKSPACE_FILE_TOOL_NAME, 'workspace_read'],
   [READ_WORKSPACE_FILE_RANGE_TOOL_NAME, 'workspace_read'],
   [READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME, 'diagnostics_read'],
