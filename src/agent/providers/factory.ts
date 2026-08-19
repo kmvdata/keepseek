@@ -1,4 +1,4 @@
-import type { ModelSourceProvider } from '../../accounts/types';
+import type { AccountApiType } from '../../accounts/types';
 import { DeepSeekClient } from './deepseekClient';
 import { OllamaClient } from './ollamaClient';
 import { OpenAICompatibleClient } from './openAiCompatibleClient';
@@ -15,7 +15,7 @@ const openAiCompatibleClient = new OpenAICompatibleClient({ displayName: 'OpenAI
  * - ollama → Ollama 分支（免 API Key、/v1 端点补全）
  * - openai-compatible → 通用 OpenAI 兼容分支
  */
-export function createProviderClient(provider: ModelSourceProvider): ProviderClient {
+export function createProviderClient(provider: AccountApiType): ProviderClient {
   switch (provider) {
     case 'deepseek':
       return deepSeekClient;

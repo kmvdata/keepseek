@@ -14,12 +14,10 @@ import {
 } from './types';
 
 export const ACCOUNTS_STORAGE_DIRECTORY = 'accounts';
-export const DEFAULT_MODEL_SOURCE_ID = 'default';
 export const DEFAULT_OPENAI_COMPATIBLE_BASE_URL = 'https://api.openai.com/v1';
 export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434/v1';
 
 const ACCOUNT_FILE_EXTENSION = '.json';
-const ACCOUNT_STORAGE_INITIALIZED_FILE = '.initialized';
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MAX_ACCOUNT_NAME_LENGTH = 200;
 const MAX_MODEL_ID_LENGTH = 512;
@@ -120,7 +118,6 @@ export class ModelSourceStore {
       throw new Error('Invalid KeepSeek model source settings.');
     }
     await this.writeSource(source);
-    await this.markStorageInitialized();
     return source;
   }
 
@@ -166,68 +163,11 @@ export class ModelSourceStore {
     if (!source) {
       return undefined;
     }
-    // Persist the user's explicit source-system choice before removing the
-    // last JSON file, otherwise the preserved legacy key could remigrate it.
-    await this.markStorageInitialized();
     await vscode.workspace.fs.delete(this.getSourceFileUri(source.provider, source.id), {
       recursive: false,
       useTrash: false
     });
     return source;
-  }
-
-  /** Create the legacy migration target without ever mutating an existing default. */
-  public async upsertDefaultSource(input: {
-    apiKey: string;
-    baseUrl?: string;
-    name?: string;
-  }): Promise<ModelSource> {
-    const existing = await this.getSourceByProvider('deepseek', DEFAULT_MODEL_SOURCE_ID);
-    if (existing) {
-      return existing;
-    }
-    return await this.createSource({
-      id: DEFAULT_MODEL_SOURCE_ID,
-      name: input.name ?? 'DeepSeek',
-      provider: 'deepseek',
-      apiKey: input.apiKey,
-      baseUrl: input.baseUrl || DEFAULT_DEEPSEEK_BASE_URL
-    });
-  }
-
-  /** Migration is allowed only when no physical source JSON exists. */
-  public async hasStoredSourceFiles(): Promise<boolean> {
-    for (const provider of MODEL_SOURCE_PROVIDERS) {
-      const providerUri = this.getProviderDirectoryUri(provider);
-      try {
-        const entries = await vscode.workspace.fs.readDirectory(providerUri);
-        if (entries.some(([name, type]) => (
-          type === vscode.FileType.File && name.endsWith(ACCOUNT_FILE_EXTENSION)
-        ))) {
-          return true;
-        }
-      } catch (error) {
-        if (!isFileNotFoundError(error)) {
-          // An unreadable directory is not safely known to be empty. Suppress
-          // migration rather than risking an accidental overwrite.
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Distinguishes a never-migrated installation from one where the user deleted
-   * the last source. The marker contains no source data or credentials.
-   */
-  public async isStorageInitialized(): Promise<boolean> {
-    try {
-      const stat = await vscode.workspace.fs.stat(this.getInitializedMarkerUri());
-      return stat.type === vscode.FileType.File;
-    } catch (error) {
-      return !isFileNotFoundError(error);
-    }
   }
 
   public getProviderDirectoryUri(provider: ModelSourceProvider): vscode.Uri {
@@ -300,17 +240,6 @@ export class ModelSourceStore {
     );
   }
 
-  private async markStorageInitialized(): Promise<void> {
-    await vscode.workspace.fs.createDirectory(this.accountsRootUri);
-    await vscode.workspace.fs.writeFile(
-      this.getInitializedMarkerUri(),
-      this.encoder.encode('1\n')
-    );
-  }
-
-  private getInitializedMarkerUri(): vscode.Uri {
-    return vscode.Uri.joinPath(this.accountsRootUri, ACCOUNT_STORAGE_INITIALIZED_FILE);
-  }
 }
 
 export function normalizeModelSource(
@@ -402,26 +331,8 @@ export function normalizeSourceModels(value: unknown): ModelSourceModel[] {
 }
 
 function normalizePersistedSourceModels(value: Record<string, unknown>): ModelSourceModel[] {
-  const hasCurrentModels = Array.isArray(value.models);
-  const models = hasCurrentModels ? normalizeSourceModels(value.models) : [];
-  const byId = new Map(models.map((model) => [model.id, { ...model }]));
-  const order = models.map((model) => model.id);
-
-  // Older account files represented manually entered ids as unnamed cache
-  // entries. Only perform that conversion when the new `models` field is
-  // absent; current provider discovery can legitimately return unnamed ids.
-  if (!hasCurrentModels) {
-    const legacyCache = normalizeModelDiscoveryCache(value.modelCache);
-    for (const model of legacyCache?.models ?? []) {
-      if (model.name || byId.has(model.id)) {
-        continue;
-      }
-      byId.set(model.id, { id: model.id });
-      order.push(model.id);
-    }
-  }
-
-  return order.map((id) => byId.get(id) as ModelSourceModel);
+  // 只认新 schema 的 models 字段；旧账号文件的兼容转换已废弃，直接舍弃。
+  return Array.isArray(value.models) ? normalizeSourceModels(value.models) : [];
 }
 
 export function normalizeModelSourceProvider(value: unknown): ModelSourceProvider | undefined {
@@ -470,6 +381,3 @@ function normalizeBoundedString(value: unknown, maxLength: number): string {
   return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
 }
 
-function isFileNotFoundError(error: unknown): boolean {
-  return isRecord(error) && (error.code === 'FileNotFound' || error.code === 'ENOENT');
-}

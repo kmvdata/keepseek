@@ -1728,13 +1728,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private async refreshModelSourceState(): Promise<void> {
     const generation = ++this.modelSourceStateRefreshGeneration;
     const refreshPromise = (async () => {
-      // Keep the old read-only apiKey/baseUrl migration boundary, but never put
-      // an unpersisted legacy/environment fallback into the model catalog.
-      await resolveModelSourceConfig(undefined, this.globalStorageUri, {
-        sourceStore: this.sourceStore,
-        language: this.language,
-        requireApiKey: false
-      });
       const modelSources = await this.sourceStore.listSources();
       const availableModels = createModelCatalog(modelSources);
       const selection = getConfiguredModelSelection(availableModels);

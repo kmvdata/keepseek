@@ -303,6 +303,10 @@ export function getInputTemplate(): string {
                   <span id="settingsAccountNameLabel" class="settings-field-label" data-i18n="modelSourceName">账号名称</span>
                   <input id="settingsAccountName" class="settings-input" type="text" autocomplete="off" />
                 </label>
+                <label class="settings-field">
+                  <span class="settings-field-label">Base URL</span>
+                  <input id="settingsBaseUrl" class="settings-input" type="text" placeholder="https://api.deepseek.com" autocomplete="off" />
+                </label>
                 <div class="settings-field">
                   <label class="settings-field-label" for="settingsApiKey">API Key</label>
                   <div class="settings-secret-input">
@@ -328,10 +332,6 @@ export function getInputTemplate(): string {
                     </button>
                   </div>
                 </div>
-                <label class="settings-field">
-                  <span class="settings-field-label">Base URL</span>
-                  <input id="settingsBaseUrl" class="settings-input" type="text" placeholder="https://api.deepseek.com" autocomplete="off" />
-                </label>
 
                 <div class="settings-model-section">
                   <div class="settings-account-section-header settings-model-header">

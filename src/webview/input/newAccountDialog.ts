@@ -36,6 +36,10 @@ export function getNewAccountDialogTemplate(): string {
             <span class="new-account-field-label" data-i18n="modelSourceName">账号名称</span>
             <input id="newAccountName" class="new-account-input" type="text" autocomplete="off" />
           </label>
+          <label class="new-account-field">
+            <span class="new-account-field-label">Base URL</span>
+            <input id="newAccountBaseUrl" class="new-account-input" type="text" placeholder="https://api.deepseek.com" autocomplete="off" />
+          </label>
           <div class="new-account-field">
             <span class="new-account-field-label">API Key</span>
             <div class="new-account-secret">
@@ -61,10 +65,6 @@ export function getNewAccountDialogTemplate(): string {
               </button>
             </div>
           </div>
-          <label class="new-account-field">
-            <span class="new-account-field-label">Base URL</span>
-            <input id="newAccountBaseUrl" class="new-account-input" type="text" placeholder="https://api.deepseek.com" autocomplete="off" />
-          </label>
         </div>
         <div class="new-account-dialog-footer">
           <button id="newAccountTestBtn" type="button" class="new-account-btn secondary" data-i18n="testConnection">测试连接</button>

@@ -1,6 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -8,9 +8,7 @@ import * as vscode from 'vscode';
 import { ModelSourceStore } from '../src/accounts/accountStore';
 import {
   MissingModelSourceApiKeyError,
-  resolveModelSourceConfig,
-  shouldMigrateLegacySource,
-  type ModelSourceConfigurationReader
+  resolveModelSourceConfig
 } from '../src/accounts/accountResolver';
 
 const NOW = 1_710_000_000_000;
@@ -26,50 +24,22 @@ describe('resolveModelSourceConfig', () => {
     await rm(storageRoot, { recursive: true, force: true });
   });
 
-  it('keeps legacy and environment values only as unconfigured compatibility snapshots', async () => {
-    const legacy = await resolveModelSourceConfig(undefined, undefined, {
-      configuration: configuration({ apiKey: ' legacy-key ', baseUrl: ' https://legacy.example.com/v1 ' }),
-      environmentApiKey: 'env-key',
+  it('returns an unconfigured snapshot when no source id is requested', async () => {
+    const resolved = await resolveModelSourceConfig(undefined, vscode.Uri.file(storageRoot), {
       requireApiKey: false
     });
-    assert.equal(legacy.sourceId, '');
-    assert.equal(legacy.apiKey, 'legacy-key');
-    assert.equal(legacy.source, 'legacy-config');
-    assert.equal(legacy.unconfigured, true);
-    assert.equal(legacy.supportsBilling, false);
-
-    const environment = await resolveModelSourceConfig(undefined, undefined, {
-      configuration: configuration({ apiKey: '', baseUrl: '' }),
-      environmentApiKey: ' env-key ',
-      requireApiKey: false
-    });
-    assert.equal(environment.apiKey, 'env-key');
-    assert.equal(environment.source, 'environment');
-
-    await assert.rejects(
-      resolveModelSourceConfig(undefined, undefined, { environmentApiKey: 'env-key', language: 'en' }),
-      MissingModelSourceApiKeyError
-    );
+    assert.equal(resolved.sourceId, '');
+    assert.equal(resolved.source, 'unconfigured');
+    assert.equal(resolved.unconfigured, true);
+    assert.equal(resolved.apiKey, '');
+    assert.equal(resolved.supportsBilling, false);
   });
 
-  it('migrates a non-empty legacy key once and resolves the explicit default source', async () => {
-    assert.equal(shouldMigrateLegacySource({ hasStoredSourceFiles: false, legacyApiKey: ' key ' }), true);
-    assert.equal(shouldMigrateLegacySource({ hasStoredSourceFiles: true, legacyApiKey: 'key' }), false);
-    assert.equal(shouldMigrateLegacySource({ hasStoredSourceFiles: false, legacyApiKey: '   ' }), false);
-
-    const resolved = await resolveModelSourceConfig('default', vscode.Uri.file(storageRoot), {
-      configuration: configuration({ apiKey: 'legacy-key', baseUrl: 'https://api.deepseek.com/v1' }),
-      environmentApiKey: '',
-      now: NOW
-    });
-    assert.equal(resolved.sourceId, 'default');
-    assert.equal(resolved.source, 'migration');
-    assert.equal(resolved.apiKey, 'legacy-key');
-    assert.equal(resolved.supportsBilling, true);
-
-    const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { now: () => NOW });
-    const migrated = await store.getSourceByProvider('deepseek', 'default');
-    assert.equal(migrated?.baseUrl, 'https://api.deepseek.com/v1');
+  it('throws when credentials are required but no source is configured', async () => {
+    await assert.rejects(
+      resolveModelSourceConfig(undefined, vscode.Uri.file(storageRoot), { language: 'en' }),
+      MissingModelSourceApiKeyError
+    );
   });
 
   it('resolves only the requested source and never chooses another source implicitly', async () => {
@@ -80,8 +50,7 @@ describe('resolveModelSourceConfig', () => {
     });
 
     const resolved = await resolveModelSourceConfig('two', vscode.Uri.file(storageRoot), {
-      sourceStore: store,
-      legacyApiKey: 'legacy-key'
+      sourceStore: store
     });
     assert.equal(resolved.sourceId, 'two');
     assert.equal(resolved.provider, 'openai-compatible');
@@ -93,21 +62,23 @@ describe('resolveModelSourceConfig', () => {
     );
   });
 
-  it('suppresses migration when a damaged legacy account JSON exists', async () => {
-    const providerDir = path.join(storageRoot, 'accounts', 'deepseek');
-    await mkdir(providerDir, { recursive: true });
-    await writeFile(path.join(providerDir, 'broken.json'), 'invalid', 'utf8');
+  it('treats a missing or disabled source as unconfigured when inspection allows it', async () => {
+    const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { now: () => NOW });
+    await store.createSource({ id: 'disabled', provider: 'deepseek', apiKey: 'key', enabled: false });
 
-    const resolved = await resolveModelSourceConfig(undefined, vscode.Uri.file(storageRoot), {
-      legacyApiKey: 'legacy-key',
-      legacyBaseUrl: 'https://legacy.example.com',
-      environmentApiKey: '',
+    const missing = await resolveModelSourceConfig('missing', vscode.Uri.file(storageRoot), {
+      sourceStore: store,
       requireApiKey: false
     });
-    assert.equal(resolved.source, 'legacy-config');
-    assert.equal(resolved.unconfigured, true);
-    const store = new ModelSourceStore(vscode.Uri.file(storageRoot));
-    assert.equal(await store.getSource('default'), undefined);
+    assert.equal(missing.source, 'unconfigured');
+    assert.equal(missing.apiKey, '');
+
+    const disabled = await resolveModelSourceConfig('disabled', vscode.Uri.file(storageRoot), {
+      sourceStore: store,
+      requireApiKey: false
+    });
+    assert.equal(disabled.source, 'unconfigured');
+    assert.equal(disabled.apiKey, '');
   });
 
   it('allows settings to inspect an empty-key source while runtime rejects it', async () => {
@@ -128,31 +99,17 @@ describe('resolveModelSourceConfig', () => {
     );
   });
 
-  it('does not recreate a deleted final source from the preserved legacy key', async () => {
+  it('marks official DeepSeek sources as billing-capable', async () => {
     const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { now: () => NOW });
-    await resolveModelSourceConfig('default', vscode.Uri.file(storageRoot), {
-      sourceStore: store,
-      legacyApiKey: 'preserved-legacy-key',
-      environmentApiKey: ''
+    await store.createSource({
+      id: 'official',
+      provider: 'deepseek',
+      apiKey: 'deepseek-key',
+      baseUrl: 'https://api.deepseek.com'
     });
-    await store.deleteSource('default');
-
-    const afterDelete = await resolveModelSourceConfig(undefined, vscode.Uri.file(storageRoot), {
-      sourceStore: store,
-      legacyApiKey: 'preserved-legacy-key',
-      environmentApiKey: '',
-      requireApiKey: false
+    const resolved = await resolveModelSourceConfig('official', vscode.Uri.file(storageRoot), {
+      sourceStore: store
     });
-    assert.equal(afterDelete.source, 'unconfigured');
-    assert.equal(afterDelete.apiKey, '');
-    assert.equal(await store.getSource('default'), undefined);
+    assert.equal(resolved.supportsBilling, true);
   });
 });
-
-function configuration(values: Record<string, string>): ModelSourceConfigurationReader {
-  return {
-    get<T>(section: string, defaultValue: T): T {
-      return (Object.prototype.hasOwnProperty.call(values, section) ? values[section] : defaultValue) as T;
-    }
-  };
-}

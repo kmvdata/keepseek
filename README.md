@@ -258,8 +258,8 @@ KeepSeek: Open Agent Chat
 ```
 
 ```text
-# 3. 打开 KeepSeek 设置中的“账号管理”，添加账号并填写 API Key / Base URL
-# 旧版配置仍兼容：keepseek.apiKey / keepseek.baseUrl / DEEPSEEK_API_KEY
+# 3. 打开 KeepSeek 设置中的“账号管理”，添加账号（DeepSeek / Ollama / OpenAI 兼容）并填写 API Key / Base URL
+# 旧版配置（keepseek.apiKey / keepseek.baseUrl / DEEPSEEK_API_KEY 环境变量）不再支持，读取时直接舍弃
 ```
 
 然后选中一段代码，按 `Cmd+L` / `Ctrl+L`（或右键 → KeepSeek: Add Selection to Chat），问你的第一个问题。打开用量统计，看第一轮和第二轮的命中率差距——那两行数字，就是 KeepSeek 存在的意义。

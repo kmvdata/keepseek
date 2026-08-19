@@ -155,12 +155,12 @@ Add context compression's cut to the **total volume** on top: KeepSeek's long se
 
 KeepSeek's account system doesn't limit which models you combine — **official DeepSeek, OpenAI-compatible services, and local Ollama** can live side by side in the sidebar, each independent and instantly switchable:
 
-- **Multiple accounts coexist, switch in one click**: official DeepSeek, any OpenAI-compatible endpoint, and local Ollama (`http://localhost:11434`) each configure as independent accounts; keep several at once, with **one-click active-account switching**, smooth migration of legacy config, and physical deletion whenever you want;
+- **Multiple accounts coexist, switch in one click**: official DeepSeek, any OpenAI-compatible endpoint, and local Ollama (`http://localhost:11434`) each configure as independent accounts; keep several at once, with **one-click active-account switching** and physical deletion whenever you want;
 - **Ollama needs no API key**: local deployments work without a secret (no Authorization header is sent when the key is empty), and Base URLs missing `/v1` are auto-completed — just paste `http://localhost:11434` and connect;
 - **Several models per account + model aliases**: the model switcher groups models by account, so you can call different sources with names you like (aliases), with the full model ID kept in a tooltip;
 - **Unified account traffic**: chat requests, context summaries, and balance refreshes flow through the current active account; balance snapshots and query frequency are tracked independently per account;
 - **Capability gaps adapt automatically**: only an official DeepSeek source (`provider=deepseek` with Base URL host `api.deepseek.com`) keeps balance and cost reporting; OpenAI-compatible, proxy, and Ollama sources automatically fall back to chat completions / tool calling / token stats and never misreport a balance;
-- **Legacy compatibility**: existing `keepseek.apiKey` / `baseUrl` and `DEEPSEEK_API_KEY` still work — no migration needed to keep using them.
+- **Legacy config is dropped**: old `keepseek.apiKey` / `keepseek.baseUrl` and `DEEPSEEK_API_KEY` environment values are ignored; configure accounts in the model settings dialog instead.
 
 ### The only extension mechanism for agents: Skills (0.2.2)
 
@@ -259,7 +259,7 @@ KeepSeek: Open Agent Chat
 
 ```text
 # 3. Open “Models and sources” in KeepSeek settings, then add a model with its API key and Base URL
-# Legacy settings remain compatible: keepseek.apiKey / keepseek.baseUrl / DEEPSEEK_API_KEY
+# Legacy settings (keepseek.apiKey / keepseek.baseUrl / DEEPSEEK_API_KEY) are no longer supported and are ignored
 ```
 
 Then select some code, press `Cmd+L` / `Ctrl+L` (or right-click → KeepSeek: Add Selection to Chat), and ask your first question. Open the usage stats and compare the hit rates of turn 1 and turn 2 — those two numbers are the reason KeepSeek exists.
@@ -289,7 +289,7 @@ bun run package:market
 - Only a `deepseek` source whose Base URL host is exactly `api.deepseek.com` supports automatic discovery, balance, and cost reporting. DeepSeek proxies and OpenAI-compatible sources report tokens only.
 - A failed model refresh silently keeps the last cache and never blocks chat. If an OpenAI-compatible endpoint does not expose `/models`, add its model ID manually in settings.
 - Source files live only in VS Code extension global storage, never in the workspace or Git: `<globalStorageUri>/accounts/<provider>/<sourceId>.json`; official-source balance data lives at `<globalStorageUri>/accounts/<provider>/<sourceId>/balance.json`.
-- Existing users need no manual migration. On the first upgrade with no source files, KeepSeek copies `keepseek.apiKey` / `keepseek.baseUrl` into `accounts/deepseek/default.json` without deleting or modifying the old settings, so downgrading remains safe. Environment fallback values never appear as an unconfigured source in the model switcher.
+- Legacy `keepseek.apiKey` / `keepseek.baseUrl` and `DEEPSEEK_API_KEY` environment values are no longer read; they are dropped and ignored. Accounts are managed exclusively through the model settings dialog.
 
 ### Auto-compression tiers
 

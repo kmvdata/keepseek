@@ -61,25 +61,6 @@ describe('ModelSourceStore', () => {
     assert.equal(normalizeModelDiscoveryCache({ models: 'invalid' }), undefined);
   });
 
-  it('reads old account JSON and projects manual cache entries into source models', () => {
-    const source = normalizeModelSource({
-      id: 'legacy',
-      name: 'Legacy Account',
-      provider: 'openai-compatible',
-      apiKey: 'key',
-      baseUrl: 'https://proxy.example/v1',
-      modelAliases: { 'manual-model': 'Daily', 'cached-model': 'Named' },
-      modelCache: {
-        fetchedAt: NOW,
-        models: [{ id: 'manual-model' }, { id: 'discovered', name: 'Discovered' }]
-      },
-      createdAt: NOW,
-      updatedAt: NOW
-    }, { now: NOW });
-    assert.deepEqual(source?.models, [{ id: 'manual-model' }]);
-    assert.equal(source?.modelCache?.models[1]?.name, 'Discovered');
-  });
-
   it('creates, lists, updates, and physically deletes provider-scoped source files', async () => {
     const store = new ModelSourceStore(vscode.Uri.file(storageRoot), {
       now: () => NOW,
@@ -92,7 +73,6 @@ describe('ModelSourceStore', () => {
       baseUrl: 'https://proxy.example.com/v1'
     });
     assert.equal(created.id, 'generated-id');
-    assert.equal(await store.hasStoredSourceFiles(), true);
 
     const storedPath = path.join(storageRoot, 'accounts', 'openai-compatible', 'generated-id.json');
     const stored = JSON.parse(await readFile(storedPath, 'utf8')) as { apiKey: string };
@@ -108,8 +88,6 @@ describe('ModelSourceStore', () => {
 
     assert.equal((await store.deleteSource('generated-id'))?.id, 'generated-id');
     await assert.rejects(access(storedPath));
-    assert.equal(await store.hasStoredSourceFiles(), false);
-    assert.equal(await store.isStorageInitialized(), true);
   });
 
   it('ignores damaged and path-mismatched JSON while preserving other sources', async () => {
@@ -130,15 +108,6 @@ describe('ModelSourceStore', () => {
 
     const sources = await store.listSources();
     assert.deepEqual(sources.map((source) => source.id), ['healthy-id']);
-    assert.equal(await store.hasStoredSourceFiles(), true);
   });
 
-  it('creates the legacy default without overwriting an existing source', async () => {
-    const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { now: () => NOW });
-    const first = await store.upsertDefaultSource({ apiKey: 'first-key', baseUrl: 'https://first.example.com' });
-    const second = await store.upsertDefaultSource({ apiKey: 'second-key', baseUrl: 'https://second.example.com' });
-    assert.equal(first.id, 'default');
-    assert.equal(second.apiKey, 'first-key');
-    assert.equal(second.baseUrl, 'https://first.example.com');
-  });
 });

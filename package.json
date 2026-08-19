@@ -67,18 +67,6 @@
     "configuration": {
       "title": "KeepSeek",
       "properties": {
-        "keepseek.apiKey": {
-          "type": "string",
-          "default": "",
-          "description": "Legacy DeepSeek API key",
-          "markdownDeprecationMessage": "Legacy compatibility only. Add or edit models in the KeepSeek model settings dialog."
-        },
-        "keepseek.baseUrl": {
-          "type": "string",
-          "default": "https://api.deepseek.com",
-          "description": "Legacy DeepSeek API base URL",
-          "markdownDeprecationMessage": "Legacy compatibility only. Add or edit models in the KeepSeek model settings dialog."
-        },
         "keepseek.selectedSourceId": {
           "type": "string",
           "default": "",

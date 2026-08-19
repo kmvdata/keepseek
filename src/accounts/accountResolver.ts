@@ -1,28 +1,16 @@
 import * as vscode from 'vscode';
 import { DEFAULT_DEEPSEEK_BASE_URL } from '../shared/config';
 import type { KeepseekLanguage } from '../shared/i18n';
-import {
-  DEFAULT_MODEL_SOURCE_ID,
-  ModelSourceStore
-} from './accountStore';
+import { ModelSourceStore } from './accountStore';
 import { isOfficialDeepSeekSource } from './sourceCapabilities';
 import type {
   ModelDiscoveryCache,
   ModelSource,
-  ResolvedModelSourceConfig,
-  ResolvedModelSourceKind
+  ResolvedModelSourceConfig
 } from './types';
 
-export interface ModelSourceConfigurationReader {
-  get<T>(section: string, defaultValue: T): T;
-}
-
 export interface ResolveModelSourceOptions {
-  configuration?: ModelSourceConfigurationReader;
   sourceStore?: ModelSourceStore;
-  legacyApiKey?: string;
-  legacyBaseUrl?: string;
-  environmentApiKey?: string;
   language?: KeepseekLanguage;
   now?: number;
   requireApiKey?: boolean;
@@ -40,32 +28,20 @@ export class MissingModelSourceApiKeyError extends Error {
 }
 
 /**
- * Resolves credentials only for the requested source. A missing source id never
- * selects another stored source; legacy values are returned solely as an
- * unconfigured compatibility snapshot and are not eligible for model requests.
+ * 凭据解析的唯一入口：只解析请求的账号（ModelSource）。账号缺失或未启用时
+ * 绝不隐式选择其它账号；旧版 keepseek.apiKey / keepseek.baseUrl 与
+ * DEEPSEEK_API_KEY 环境变量不再支持，一律忽略（旧配置直接舍弃）。
  */
 export async function resolveModelSourceConfig(
   sourceId: string | undefined,
   globalStorageUri?: vscode.Uri,
   options: ResolveModelSourceOptions = {}
 ): Promise<ResolvedModelSourceConfig> {
-  const configuration = options.configuration ?? vscode.workspace.getConfiguration('keepseek');
-  const legacyApiKey = readConfiguredString(options.legacyApiKey, configuration, 'apiKey', '');
-  const legacyBaseUrl = readConfiguredString(
-    options.legacyBaseUrl,
-    configuration,
-    'baseUrl',
-    DEFAULT_DEEPSEEK_BASE_URL
-  ) || DEFAULT_DEEPSEEK_BASE_URL;
-  const environmentApiKey = (options.environmentApiKey ?? process.env.DEEPSEEK_API_KEY ?? '').trim();
   const sourceStore = options.sourceStore ?? (globalStorageUri
     ? new ModelSourceStore(globalStorageUri, {
         now: options.now === undefined ? undefined : () => options.now as number
       })
     : undefined);
-  const migration = sourceStore
-    ? await ensureLegacyModelSourceMigration(sourceStore, { legacyApiKey, legacyBaseUrl })
-    : { migrated: false, storageInitialized: false };
 
   const normalizedSourceId = sourceId?.trim() ?? '';
   if (normalizedSourceId && sourceStore) {
@@ -75,75 +51,28 @@ export async function resolveModelSourceConfig(
       if (!apiKey && options.requireApiKey !== false) {
         throw new MissingModelSourceApiKeyError(options.language);
       }
-      return createResolvedStoredSource(
-        source,
-        migration.migrated && source.id === DEFAULT_MODEL_SOURCE_ID ? 'migration' : 'source',
-        apiKey
-      );
+      return createResolvedStoredSource(source, apiKey);
     }
   }
 
   if (options.requireApiKey !== false) {
     throw new MissingModelSourceApiKeyError(options.language);
   }
-
-  const apiKey = migration.storageInitialized ? '' : legacyApiKey || environmentApiKey;
-  const kind: ResolvedModelSourceKind = migration.storageInitialized
-    ? 'unconfigured'
-    : legacyApiKey ? 'legacy-config' : environmentApiKey ? 'environment' : 'unconfigured';
   return {
     sourceId: '',
     provider: 'deepseek',
     name: 'DeepSeek',
-    apiKey,
-    baseUrl: legacyBaseUrl,
+    apiKey: '',
+    baseUrl: DEFAULT_DEEPSEEK_BASE_URL,
     models: [],
-    source: kind,
+    source: 'unconfigured',
     unconfigured: true,
     supportsBilling: false
   };
 }
 
-export async function ensureLegacyModelSourceMigration(
-  sourceStore: ModelSourceStore,
-  input: { legacyApiKey: string; legacyBaseUrl: string }
-): Promise<{ migrated: boolean; storageInitialized: boolean }> {
-  let migrated = false;
-  try {
-    const hasStoredSources = await sourceStore.hasStoredSourceFiles();
-    const initializedBefore = await sourceStore.isStorageInitialized();
-    if (shouldMigrateLegacySource({
-      hasStoredSourceFiles: hasStoredSources || initializedBefore,
-      legacyApiKey: input.legacyApiKey
-    })) {
-      await sourceStore.upsertDefaultSource({
-        apiKey: input.legacyApiKey,
-        baseUrl: input.legacyBaseUrl,
-        name: 'DeepSeek'
-      });
-      migrated = true;
-    }
-    return {
-      migrated,
-      storageInitialized: initializedBefore || migrated
-    };
-  } catch {
-    // Storage failures leave legacy values as an unconfigured compatibility
-    // snapshot; they never authorize selecting an arbitrary stored source.
-    return { migrated: false, storageInitialized: false };
-  }
-}
-
-export function shouldMigrateLegacySource(input: {
-  hasStoredSourceFiles: boolean;
-  legacyApiKey: string;
-}): boolean {
-  return !input.hasStoredSourceFiles && Boolean(input.legacyApiKey.trim());
-}
-
 function createResolvedStoredSource(
   source: ModelSource,
-  kind: 'source' | 'migration',
   apiKey: string
 ): ResolvedModelSourceConfig {
   return {
@@ -155,19 +84,10 @@ function createResolvedStoredSource(
     models: source.models.map((model) => ({ ...model })),
     modelCache: cloneCache(source.modelCache),
     modelSource: cloneSource(source),
-    source: kind,
+    source: 'source',
     unconfigured: false,
     supportsBilling: isOfficialDeepSeekSource(source)
   };
-}
-
-function readConfiguredString(
-  override: string | undefined,
-  configuration: ModelSourceConfigurationReader,
-  key: string,
-  fallback: string
-): string {
-  return (override ?? configuration.get<string>(key, fallback) ?? fallback).trim();
 }
 
 function cloneCache(cache: ModelDiscoveryCache | undefined): ModelDiscoveryCache | undefined {
