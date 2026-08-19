@@ -233,6 +233,7 @@ export class AgentRunner {
   ) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
+    this.workspaceTools.setAuthorizedExternalReferenceUris(request.authorizedExternalReferenceUris);
     const runDetailsBuilderRef: { current?: RunDetailsBuilder } = {};
     const trace = this.traceLogService?.createRunTrace((event, timestamp) => {
       runDetailsBuilderRef.current?.record(event, timestamp);

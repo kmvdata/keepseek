@@ -30,6 +30,8 @@ export interface AgentRequestCoordinatorInput {
   history: AgentRequest['history'];
   contextCompression: AgentRequest['contextCompression'];
   historyRewriteReason?: string;
+  /** 用户显式引用（input 组件/右键/拖拽）已授权的外部文件/目录 URI（uri.toString()）。只读工具对这些路径放行，不弹确认。 */
+  authorizedExternalReferenceUris?: AgentRequest['authorizedExternalReferenceUris'];
   language: KeepseekLanguage;
   sessionId?: string;
   assistantMessageId?: string;
@@ -93,6 +95,9 @@ export class AgentRequestCoordinator {
       history: input.history.map(cloneChatMessage),
       contextCompression: cloneContextCompressionState(input.contextCompression),
       historyRewriteReason: input.historyRewriteReason,
+      authorizedExternalReferenceUris: input.authorizedExternalReferenceUris
+        ? [...input.authorizedExternalReferenceUris]
+        : undefined,
       language: input.language,
       sessionId: input.sessionId,
       assistantMessageId: input.assistantMessageId,

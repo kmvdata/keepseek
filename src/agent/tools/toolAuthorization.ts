@@ -97,6 +97,21 @@ export class ToolAuthorizationService implements ToolAuthorizationAdapter {
     }
 
     if (metadata.riskLevel === 'high') {
+      // 未知工具：不在 LOW_RISK_TOOLS / HIGH_RISK_TOOLS 中，schema 未注册、handleToolCall 无法路由
+      // （default 返回 Unsupported tool），确认弹窗没有意义（确认后也无法执行）。直接静默拒绝并返回
+      // 错误，让模型改用 schema 中的精确工具名。保持 fail-closed，安全性不降级。
+      if (!HIGH_RISK_TOOLS.has(input.toolName)) {
+        return createDecision(
+          input.toolName,
+          metadata,
+          false,
+          'user_denied',
+          false,
+          input.language === 'en'
+            ? `Tool "${input.toolName}" is not registered in the current tool schema and cannot be executed. Denied without a confirmation dialog; use the exact tool name from the schema.`
+            : `工具“${input.toolName}”未在当前工具 schema 中注册，无法执行，已直接拒绝（不再弹确认窗）。请使用 schema 中的精确工具名。`
+        );
+      }
       return await this.confirmHighRiskTool(input.toolName, metadata, input.args, input.language);
     }
 
@@ -221,7 +236,8 @@ export function getToolAuthorizationMetadata(
     return { riskLevel: 'high', scope: highRiskScope };
   }
 
-  // Unknown tools fail closed at the highest risk level.
+  // Unknown tools fail closed at the highest risk level. authorize() denies them silently
+  // (no confirmation dialog) because an unregistered tool name cannot be routed to any handler.
   return { riskLevel: 'high', scope: 'workspace_write' };
 }
 

@@ -3000,6 +3000,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         requestProtocolVersion: activeSession.requestProtocol?.version,
         historyArchive: activeSession.historyArchive,
         history: agentHistory,
+        authorizedExternalReferenceUris: [...authorizedExternalReferenceUris],
         contextCompression: activeSession.contextCompression,
         historyRewriteReason: replaceMessageId ? 'edit_user_prompt' : undefined,
         language: this.language,

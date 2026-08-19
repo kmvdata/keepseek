@@ -164,11 +164,25 @@ export interface WorkspaceToolAdapter {
   readWorkspaceFileRange(input: WorkspaceFileRangeInput, language: KeepseekLanguage): Promise<string>;
   resolveTargetUri(targetPath: string): vscode.Uri;
   getLabel(uri: vscode.Uri): string;
+  /** 设置本轮 Agent run 中用户显式引用、已授权的外部文件/目录 URI 集合（uri.toString()）。 */
+  setAuthorizedExternalReferenceUris(uris?: Iterable<string>): void;
 }
 
 export class WorkspaceToolService implements WorkspaceToolAdapter {
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
   private readonly encoder = new TextEncoder();
+  private readonly authorizedExternalReferenceUris = new Set<string>();
+
+  public setAuthorizedExternalReferenceUris(uris?: Iterable<string>): void {
+    this.authorizedExternalReferenceUris.clear();
+    if (uris) {
+      for (const uri of uris) {
+        if (uri) {
+          this.authorizedExternalReferenceUris.add(uri);
+        }
+      }
+    }
+  }
 
   public async listWorkspaceFiles(language: KeepseekLanguage): Promise<string> {
     const folders = vscode.workspace.workspaceFolders ?? [];
@@ -758,8 +772,10 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     }
 
     const uri = this.resolveWorkspaceFileUriCandidate(rawPath, folders);
-    if (!this.isUriInsideWorkspace(uri)) {
-      throw new Error('The requested file must be inside the currently open workspace.');
+    if (!this.isUriInsideWorkspace(uri) && !this.authorizedExternalReferenceUris.has(uri.toString())) {
+      throw new Error(
+        'The requested file must be inside the currently open workspace or an explicitly referenced external file.'
+      );
     }
     return uri;
   }

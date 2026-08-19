@@ -761,6 +761,8 @@ export interface AgentRequest {
   history: ChatMessage[];
   contextCompression?: ContextCompressionState;
   historyRewriteReason?: string;
+  /** 用户显式引用（input 组件/右键/拖拽）已授权的外部文件/目录 URI（uri.toString()）。只读工具对这些路径放行，不弹确认。 */
+  authorizedExternalReferenceUris?: string[];
   language: KeepseekLanguage;
   sessionId?: string;
   assistantMessageId?: string;
