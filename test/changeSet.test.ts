@@ -142,6 +142,55 @@ test('reports mixed apply results per file and preserves retryable failures', as
   assert.match(state?.files[1]?.error ?? '', /failed b\.ts/u);
 });
 
+test('opens a pending edit file that exists inside the workspace', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-open-file-'));
+  const targetPath = path.join(root, 'open.ts');
+  await writeFile(targetPath, 'export const open = true;\n', 'utf8');
+  const previousWorkspaceFolders = vscode.workspace.workspaceFolders;
+  vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(root), name: 'keepseek-test' }];
+  t.after(() => {
+    vscode.workspace.workspaceFolders = previousWorkspaceFolders;
+  });
+  const fixture = createStoreFixture(root);
+  const changeSet = fixture.store.addDraftEdits({
+    runId: 'run-open',
+    sessionId: 'session-1',
+    messageId: 'assistant-open',
+    edits: [{
+      id: 'open-a',
+      uri: vscode.Uri.file(targetPath).toString(),
+      label: 'open.ts',
+      action: 'modify',
+      newText: 'export const open = true;\n',
+      reason: 'Open A'
+    }]
+  });
+  assert.ok(changeSet);
+  assert.equal(await fixture.store.openEditFile('open-a'), true);
+
+  fixture.store.addDraftEdits({
+    runId: 'run-open-missing',
+    sessionId: 'session-1',
+    edits: [{
+      id: 'missing-a',
+      uri: vscode.Uri.file(path.join(root, 'missing.ts')).toString(),
+      label: 'missing.ts',
+      action: 'create',
+      newText: '// pending\n',
+      reason: 'Missing A'
+    }]
+  });
+  await assert.rejects(fixture.store.openEditFile('missing-a'), /draftEditFileNotFound/u);
+
+  fixture.store.addDraftEdits({
+    runId: 'run-open-outside',
+    sessionId: 'session-1',
+    edits: [draft('outside-a', 'outside.ts')]
+  });
+  await assert.rejects(fixture.store.openEditFile('outside-a'), /cannotOpenDraftEditOutsideWorkspace/u);
+  assert.equal(await fixture.store.openEditFile('unknown-edit'), false);
+});
+
 test('persists discarded and reverted terminal history without source text', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-history-'));
   const fixture = createStoreFixture(root);

@@ -181,6 +181,25 @@ export class ChangeSetStore {
     return true;
   }
 
+  public async openEditFile(editId: string): Promise<boolean> {
+    const found = this.findEdit(editId);
+    if (!found) {
+      return false;
+    }
+    const uri = vscode.Uri.parse(found.edit.uri);
+    if (!vscode.workspace.getWorkspaceFolder(uri)) {
+      throw new Error(this.t('cannotOpenDraftEditOutsideWorkspace', { label: found.edit.label }));
+    }
+    try {
+      await vscode.workspace.fs.stat(uri);
+    } catch {
+      throw new Error(this.t('draftEditFileNotFound', { label: found.edit.label }));
+    }
+    const document = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(document, { preview: true });
+    return true;
+  }
+
   public async applyEdit(editId: string): Promise<ChangeSetApplyResult | undefined> {
     const found = this.findEdit(editId);
     if (!found || !isApplicable(found.edit)) {

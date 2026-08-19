@@ -909,6 +909,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           vscode.window.showErrorMessage(getErrorMessage(error));
         }
         return;
+      case 'openDraftEditFile':
+        try {
+          await this.changeSets.openEditFile(message.id);
+        } catch (error) {
+          vscode.window.showErrorMessage(getErrorMessage(error));
+        }
+        return;
       case 'applyChangeSet':
         {
           if (this.isBusy) {

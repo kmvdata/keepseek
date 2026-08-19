@@ -80,6 +80,89 @@ test('keeps the existing dirty-editor protection for deletion targets', async (t
   assert.equal(await fs.readFile(targetPath, 'utf8'), 'dirty source');
 });
 
+test('does not open a text editor when applying a modify draft to an unopened file', async (t) => {
+  const root = await configureWorkspace(t, 'keepseek-safe-no-open-');
+  const targetPath = path.join(root, 'target.ts');
+  await fs.writeFile(targetPath, 'before', 'utf8');
+  const editor = new SafeFileEditor((key) => key);
+  const showCalls: string[] = [];
+  const originalShow = vscode.window.showTextDocument;
+  vscode.window.showTextDocument = async (document) => {
+    showCalls.push(document.uri.toString());
+    return document;
+  };
+  t.after(() => {
+    vscode.window.showTextDocument = originalShow;
+  });
+
+  await editor.applyDraftEdit(createModifyEdit(targetPath), 'change-1');
+  assert.equal(showCalls.length, 0);
+  assert.equal(await fs.readFile(targetPath, 'utf8'), 'after');
+});
+
+test('does not open a text editor when only a diff tab references the file', async (t) => {
+  const root = await configureWorkspace(t, 'keepseek-safe-no-open-diff-');
+  const targetPath = path.join(root, 'target.ts');
+  await fs.writeFile(targetPath, 'before', 'utf8');
+  const uri = vscode.Uri.file(targetPath);
+  vscode.window.tabGroups.all = [{
+    tabs: [{ input: new vscode.TabInputTextDiff(uri, uri) }]
+  }];
+  const editor = new SafeFileEditor((key) => key);
+  const showCalls: string[] = [];
+  const originalShow = vscode.window.showTextDocument;
+  vscode.window.showTextDocument = async (document) => {
+    showCalls.push(document.uri.toString());
+    return document;
+  };
+  t.after(() => {
+    vscode.window.showTextDocument = originalShow;
+  });
+
+  await editor.applyDraftEdit(createModifyEdit(targetPath), 'change-1');
+  assert.equal(showCalls.length, 0);
+});
+
+test('refreshes the active text tab content after applying', async (t) => {
+  const root = await configureWorkspace(t, 'keepseek-safe-active-tab-');
+  const targetPath = path.join(root, 'target.ts');
+  await fs.writeFile(targetPath, 'before', 'utf8');
+  const uri = vscode.Uri.file(targetPath);
+  vscode.window.tabGroups.all = [{
+    tabs: [{ input: new vscode.TabInputText(uri), isActive: true }]
+  }];
+  let reverted = false;
+  vscode.setCommandHandler('workbench.action.files.revert', () => {
+    reverted = true;
+  });
+  const editor = new SafeFileEditor((key) => key);
+  const showCalls: string[] = [];
+  const originalShow = vscode.window.showTextDocument;
+  vscode.window.showTextDocument = async (document) => {
+    showCalls.push(document.uri.toString());
+    return document;
+  };
+  t.after(() => {
+    vscode.window.showTextDocument = originalShow;
+  });
+
+  await editor.applyDraftEdit(createModifyEdit(targetPath), 'change-1');
+  assert.equal(showCalls.length, 1);
+  assert.equal(reverted, true);
+  assert.equal(await fs.readFile(targetPath, 'utf8'), 'after');
+});
+
+function createModifyEdit(targetPath: string): DraftEdit {
+  return {
+    id: `modify-${path.basename(targetPath)}`,
+    uri: vscode.Uri.file(targetPath).toString(),
+    label: path.basename(targetPath),
+    action: 'modify',
+    newText: 'after',
+    reason: 'Modify file'
+  };
+}
+
 function createDeleteEdit(targetPath: string, expectedText?: string, expectedSize?: number): DraftEdit {
   return {
     id: `delete-${path.basename(targetPath)}`,

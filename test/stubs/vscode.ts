@@ -151,6 +151,7 @@ export class TabInputNotebookDiff {
 
 export interface TestTab {
   input: TabInputText | TabInputCustom | TabInputNotebook | TabInputTextDiff | TabInputNotebookDiff;
+  isActive?: boolean;
   isDirty?: boolean;
 }
 

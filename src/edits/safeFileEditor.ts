@@ -201,21 +201,28 @@ export class SafeFileEditor {
   }
 
   private async writeTextFile(uri: vscode.Uri, text: string, createParent: boolean): Promise<void> {
-    const wasOpen = this.isOpenInEditor(uri);
+    const hasActiveTextTab = this.findOpenTextTabs(uri).some((tab) => tab.isActive);
     if (createParent) {
       await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
     }
     await vscode.workspace.fs.writeFile(uri, this.encoder.encode(text));
-    const document = await vscode.workspace.openTextDocument(uri);
-    await vscode.window.showTextDocument(document, { preview: false });
-    if (wasOpen) {
+    if (hasActiveTextTab) {
+      const document = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(document, { preview: false });
       await vscode.commands.executeCommand('workbench.action.files.revert');
     }
   }
 
-  private isOpenInEditor(uri: vscode.Uri): boolean {
-    return vscode.workspace.textDocuments.some((document) => this.isSameUri(document.uri, uri))
-      || this.findOpenTabs(uri).length > 0;
+  private findOpenTextTabs(uri: vscode.Uri): vscode.Tab[] {
+    const tabs: vscode.Tab[] = [];
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        if (tab.input instanceof vscode.TabInputText && this.isSameUri(tab.input.uri, uri)) {
+          tabs.push(tab);
+        }
+      }
+    }
+    return tabs;
   }
 
   private async closeOpenTabs(uri: vscode.Uri): Promise<void> {

@@ -708,7 +708,7 @@ export function getScript(): string {
       var id = button.dataset.editId || button.dataset.changeSetId || '';
       var action = button.dataset.editAction || button.dataset.changeSetAction || '';
       if (!id || !action) return;
-      if (action !== 'openDraftDiff') {
+      if (action !== 'openDraftDiff' && action !== 'openDraftEditFile') {
         pendingChangeActions.add(action + ':' + id);
         render();
       }
@@ -3034,6 +3034,9 @@ export function getScript(): string {
 
       var actions = document.createElement('div');
       actions.className = 'draft-chip-actions';
+      if (edit.uri) {
+        actions.append(createEditOpenFileButton(edit));
+      }
       if (allowActions && edit.status !== 'discarded') {
         actions.append(createEditActionButton(t('previewDiff'), 'openDraftDiff', edit.id, true));
       }
@@ -3057,6 +3060,18 @@ export function getScript(): string {
       button.dataset.editId = id;
       button.dataset.editAction = action;
       button.disabled = (state.isBusy && action !== 'openDraftDiff') || pendingChangeActions.has(action + ':' + id);
+      return button;
+    }
+
+    function createEditOpenFileButton(edit) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'draft-chip-open-file';
+      button.dataset.editId = edit.id;
+      button.dataset.editAction = 'openDraftEditFile';
+      button.title = t('openDraftEditFile');
+      button.setAttribute('aria-label', t('openDraftEditFile'));
+      button.innerHTML = '<svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 2.6c0-.5.4-.9.9-.9h4l1.5 1.6h2.3c.5 0 .9.4.9.9v8.2c0 .5-.4.9-.9.9H4.1c-.5 0-.9-.4-.9-.9V2.6Z" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="M6.4 9.6l2.7-2.7M9.1 6.9H7.2M9.1 6.9v1.9" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/></svg>';
       return button;
     }
 

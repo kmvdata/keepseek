@@ -1,5 +1,9 @@
 # 更新日志
 
+## 0.2.6
+
+- 改进 Draft Edit 列表交互：采纳后不再自动打开文件（查看 Diff 后采纳也不再触发），改为由每条修改左下角的蓝色“打开文件”图标按钮按需打开；卡片级操作按钮文案与条目级统一（全部采纳/全部取消 ↔ 采纳/取消，英文 Accept all/Cancel all ↔ Accept/Cancel），文件类型图标改为深绿色纯标识、不再呈现为按钮。
+
 ## 0.2.5
 
 - 新增一键安全发布打包命令 `bun run package:market`（`scripts/package-market.js`）：自动检查运行时依赖（如 `ignore`）已安装、清理 `out/`、重新编译，再以 `vsce package --dependencies` 打包并运行 `verify-vsix.js` 校验（确认 VSIX 包含运行时依赖与 `main` 入口、无旧扁平产物），杜绝 `npx vsce package --no-dependencies` 导致市场版缺依赖、安装后无法激活的问题；`bun run reinstall:vsix` 保留用于本地一键重装验证。

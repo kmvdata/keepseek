@@ -1080,33 +1080,13 @@ export function getStyles(): string {
       flex: 0 0 18px;
       width: 18px;
       height: 18px;
-      margin-top: -1px;
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 4px;
-      color: var(--vscode-descriptionForeground);
-      background: var(--vscode-editor-background);
+      color: var(--vscode-gitDecoration-addedResourceForeground, #1a7f37);
     }
 
     .draft-chip-action-icon svg {
       display: block;
       width: 13px;
       height: 13px;
-    }
-
-    .draft-chip-action-icon-create {
-      color: var(--vscode-gitDecoration-addedResourceForeground, #1a7f37);
-    }
-
-    .draft-chip-action-icon-modify {
-      color: var(--vscode-charts-blue, #0969da);
-    }
-
-    .draft-chip-action-icon-delete {
-      color: var(--vscode-errorForeground, #cf222e);
-    }
-
-    .draft-chip-action-icon-move {
-      color: var(--vscode-charts-purple, #8250df);
     }
 
     .draft-chip-label {
@@ -1142,6 +1122,31 @@ export function getStyles(): string {
       border-radius: 3px;
       overflow-wrap: anywhere;
       white-space: normal;
+    }
+
+    .draft-chip-actions button.draft-chip-open-file {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+      width: 20px;
+      height: 20px;
+      margin-right: auto;
+      padding: 0;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 3px;
+      color: var(--vscode-charts-blue, #0969da);
+      background: transparent;
+    }
+
+    .draft-chip-actions button.draft-chip-open-file:hover {
+      background: var(--vscode-list-hoverBackground);
+    }
+
+    .draft-chip-open-file svg {
+      display: block;
+      width: 13px;
+      height: 13px;
     }
 
     .change-set-actions button:focus-visible,
