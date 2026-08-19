@@ -197,7 +197,7 @@ KeepSeek lives in the VS Code Secondary Sidebar — no window switching, no copy
 
 ### Engineering conveniences
 
-- **Validate and repair**: the agent can run controlled `npm run compile / lint / test`, read Problems on failure, prepare fix drafts, loop, and wait for your confirmation;
+- **Validate and repair**: the agent can run controlled `bun run compile / lint / test`, read Problems on failure, prepare fix drafts, loop, and wait for your confirmation;
 - **Stop anytime**: halt the current run mid-reasoning or mid-tool-loop;
 - **Retry on disconnect**: recoverable errors before the first chunk retry automatically with exponential backoff;
 - **Cross-project continuity**: sessions are saved per project — browse other projects, copy into the current one, bookmark, rename, filter by time, multi-select delete. Switch workspaces without losing your train of thought;
@@ -244,9 +244,12 @@ For developers building projects with AI, KeepSeek lets you switch between "AI w
 ## 11. Quick start (3 steps)
 
 ```bash
-# 1. Build and install the VSIX
-npm run package          # generates the VSIX
+# 1. Build and install the VSIX (local use)
+bun run package          # generates keepseek-<version>.vsix
 code --install-extension keepseek-<version>.vsix
+
+# One-command reinstall verification: package → uninstall old → install new
+bun run reinstall:vsix
 ```
 
 ```text
@@ -260,6 +263,24 @@ KeepSeek: Open Agent Chat
 ```
 
 Then select some code, press `Cmd+L` / `Ctrl+L` (or right-click → KeepSeek: Add Selection to Chat), and ask your first question. Open the usage stats and compare the hit rates of turn 1 and turn 2 — those two numbers are the reason KeepSeek exists.
+
+### Testing and marketplace packaging (maintainers)
+
+```bash
+# Run the full test suite
+bun run build:test       # compiles tests into out-test/
+bun run test             # runs the tests
+
+# Lint
+bun run lint
+```
+
+```bash
+# Package for the marketplace (recommended; includes verification)
+bun run package:market
+```
+
+`package:market` first confirms that runtime dependencies (e.g. `ignore`) are installed, cleans `out/`, recompiles, packages with `vsce package --dependencies`, and runs `verify-vsix.js` to confirm the VSIX contains the runtime dependencies and the `main` entry. When verification passes, the generated `keepseek-<version>.vsix` is ready to upload to a marketplace. **Never** run bare `npx vsce package --no-dependencies` — the resulting package lacks runtime dependencies and the extension will fail to activate after installation from a marketplace.
 
 ### Multiple model sources
 

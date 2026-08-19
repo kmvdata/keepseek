@@ -1,5 +1,11 @@
 # 更新日志
 
+## 0.2.5
+
+- 新增一键安全发布打包命令 `bun run package:market`（`scripts/package-market.js`）：自动检查运行时依赖（如 `ignore`）已安装、清理 `out/`、重新编译，再以 `vsce package --dependencies` 打包并运行 `verify-vsix.js` 校验（确认 VSIX 包含运行时依赖与 `main` 入口、无旧扁平产物），杜绝 `npx vsce package --no-dependencies` 导致市场版缺依赖、安装后无法激活的问题；`bun run reinstall:vsix` 保留用于本地一键重装验证。
+- 重写根级 `AGENTS.md`：按 DeepSeek V4 Flash 模型特点（1M 上下文窗口、前缀缓存 1/30）重新梳理篇幅与侧重点——全文控制在项目指令预算内完整加载、不再被截断；将缓存字节冻结、DraftEdit 待确认、只读/Git 边界、受控验证列为最高优先级不变式，新增改动影响面清单，详细设计移入 `doc/` 按需读取。
+- 文档与命令统一为 bun：`README.md` 与 `README.en.md` 快速上手改用 `bun run`，新增“测试与发布打包（维护者）”章节，说明测试（`bun run build:test` / `bun run test`）、本地安装（`bun run package` + `code --install-extension`、`bun run reinstall:vsix`）与市场发布（`bun run package:market`）流程。
+
 ## 0.2.3
 
 - 新增多账户管理：现在可为 DeepSeek / OpenAI-compatible 端点配置和管理多个账户，支持活跃账户切换、旧配置平滑迁移以及物理删除账户。

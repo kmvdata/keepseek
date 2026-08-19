@@ -1,420 +1,129 @@
 # KeepSeek 架构与维护指南
 
-KeepSeek 是一个 VS Code 扩展，在 Secondary Sidebar 中提供 AI 对话面板。扩展负责会话、上下文文件、文件/目录引用展开、DeepSeek/OpenAI 兼容流式请求、只读工作区工具，以及用户确认后的 DraftEdit 写入。
+KeepSeek 是一个 VS Code 扩展：在 Secondary Sidebar 提供 AI 对话面板，负责会话、上下文文件、文件/目录引用展开、DeepSeek/OpenAI 兼容流式请求、只读工作区工具，以及用户确认后的 DraftEdit 写入。本文档是仓库内 Agent/维护者约定的唯一来源，旧版约定若与本文冲突，以当前源码和本文为准。
 
-本文档是仓库内 Agent/维护者约定的唯一来源。旧版约定若与本文冲突，以当前源码和本文为准。
+> **给维护 Agent 的说明**：本文件作为 project instructions 注入每个 Agent run，默认受 `keepseek.projectInstructions.contextBudgetTokens`（4000 token）预算约束。**保持精简是为了完整加载、不被截断**；详细设计在 `doc/` 下，需要时用只读工具按需读取。
+> **模型画像**：主力模型 DeepSeek V4 Flash（1M 上下文窗口、Thinking high/max）。1M 窗口让"投影 + 摘要"取代硬裁剪可行；前缀缓存命中价低至 1/30，是产品的经济命脉——因此"字节冻结"是本文档最高优先级不变式。本文档用结构化中文编写，便于逐条引用。
 
-## 分层结构
+## 一、最高优先级不变式（不可违反）
 
-```text
-src/
-├── extension.ts                 # VS Code 激活入口、命令注册、Provider 接线
-├── provider/
-│   ├── KeepseekChatViewProvider.ts # VS Code/Webview 协调者
-│   ├── webviewMessages.ts       # Webview → 扩展消息联合类型
-│   └── focusView.ts             # 打开并聚焦 KeepSeek 视图
-├── agent/
-│   ├── runner.ts                # Agent 请求编排、工具调用循环、最终响应整理
-│   ├── protocol.ts              # system prompt、消息拼装、工具 schema、token 估算入口
-│   ├── historyProjection.ts     # 模型请求用历史投影：摘要、保护消息、最近轮次
-│   ├── historyCompressor.ts     # 会话摘要刷新与失败回退
-│   ├── contextUsage.ts          # 上下文窗口用量估算
-│   ├── projectInstructions.ts   # 根级 AGENTS.md 安全读取、预算与投影
-│   ├── contextDeduplication.ts  # URI / 内容哈希上下文来源去重
-│   ├── currentRunContext.ts     # 项目指令、Skills、Legacy 的统一优先级投影
-│   ├── tokenEstimate.ts         # 轻量 token 估算
-│   ├── repairLoop.ts            # 验证失败、修复轮次与 Apply 暂停状态机
-│   ├── deepseek/
-│   │   ├── types.ts             # DeepSeek/OpenAI 兼容协议类型
-│   │   ├── streamParser.ts      # SSE streaming 响应解析
-│   │   └── dsmlToolParser.ts    # DSML 工具调用兜底解析
-│   └── tools/
-│       ├── workspaceTools.ts    # Agent 只读工作区工具与目标路径解析
-│       ├── semanticTools.ts     # VS Code language provider 语义 symbol/reference 工具
-│       ├── validationTools.ts   # Problems 与受控 npm 验证任务
-│       ├── gitTools.ts          # VS Code Git API 优先的只读 Git 辅助
-│       └── toolAuthorization.ts # 工具风险分级与 per-run 授权
-├── accounts/
-│   ├── types.ts                 # 模型来源、来源模型与发现缓存领域类型
-│   ├── accountStore.ts          # provider 分目录的模型来源 CRUD 与安全持久化
-│   ├── accountResolver.ts       # 按来源解析凭证、旧配置回退与自动迁移唯一入口
-│   └── modelDiscovery.ts        # OpenAI 兼容 /models 发现与缓存
-├── workspace/
-│   └── workspaceDirectory.ts    # 工作区目录枚举共享工具
-├── sessions/
-│   ├── chatSessionStore.ts      # 会话加载、持久化、裁剪与摘要
-│   ├── globalSessionStorage.ts  # 全局跨工作区会话文件存储与迁移
-│   └── sessionRetention.ts      # 历史会话保留策略
-├── context/
-│   ├── fileContextStore.ts      # 用户手动加入的上下文文件管理
-│   ├── textReferences.ts        # 终端/输出/调试控制台选区落盘为引用文件
-│   └── references/
-│       ├── fileReference.ts     # prompt 内文件引用解析、授权、展开
-│       ├── directoryReference.ts # prompt 内目录引用解析、授权、清单展开
-│       ├── promptReferences.ts  # prompt 文件/目录引用统一展开入口
-│       ├── fileReferenceOpener.ts # 点击/双击文件引用后的 VS Code 打开逻辑
-│       ├── referenceResources.ts # @ 文件/目录补全资源列表
-│       └── referenceSyntax.ts   # 引用语法安全与 Markdown fence 判断
-├── edits/
-│   ├── changeSet.ts             # DraftEdit 转 ChangeSet 的纯逻辑
-│   ├── changeSetStore.ts        # ChangeSet 状态、持久化、Apply/Revert 与 checkpoint
-│   ├── draftDiffService.ts      # DraftEdit 对比预览
-│   ├── draftEditStore.ts        # 旧版独立 DraftEdit store 兼容边界
-│   └── safeFileEditor.ts        # ChangeSetStore Apply 后的安全文件写入/删除与回滚
-├── skills/
-│   ├── skillDiscovery.ts        # workspace / Codex home Skill 发现
-│   ├── skillActivationResolver.ts # explicit/session/default/implicit 确定性激活
-│   ├── skillLoader.ts           # 只读加载 SKILL.md 与受控引用资源；不执行 scripts
-│   └── skillStore.ts            # Skill 状态、workspace 默认引用和会话激活
-├── memory/
-│   ├── legacyProjectMemoryFormat.ts # 退役 memory.json 的只读解析边界
-│   └── legacyProjectMemoryMigration.ts # Legacy 导出与 DraftEdit 迁移状态机
-├── shared/
-│   ├── config.ts                # keepseek 配置默认值、读取、范围归一化
-│   ├── i18n.ts                  # 扩展端与 Webview 端文案
-│   ├── types.ts                 # 跨模块共享领域类型
-│   ├── errors.ts                # 错误信息归一化
-│   ├── format.ts                # 通用格式化
-│   ├── markdown.ts              # Markdown fence/language 共享工具
-│   └── textFileGuards.ts        # 文本/二进制、跳过扩展名判断
-├── webview/
-│   ├── html.ts                  # CSP、nonce、logo URI、HTML 拼装
-│   ├── styles.ts                # 主 Webview CSS 字符串
-│   ├── template.ts              # 主 Webview HTML 骨架字符串
-│   ├── script.ts                # 主 Webview JS 字符串
-│   ├── richTextShortcuts.ts     # 富文本输入/编辑器共享快捷键与剪贴板桥接
-│   └── input/
-│       ├── styles.ts            # 输入区 CSS 字符串
-│       ├── template.ts          # 输入区 HTML 字符串
-│       └── script.ts            # 富文本输入、拖拽、@ 引用、命令菜单
-└── keybindings.ts               # 用户 keybindings.json 兼容写入
-```
+1. **缓存命中率是第一位的产品行为**（与安全同级，高于"实现简洁性"）：DeepSeek 前缀缓存从请求第 0 个 token 起逐字节匹配，任何历史字节漂移都会使该点之后整段缓存失效。改动若可能改变请求前缀字节，必须证明前缀仍稳定，或明确标注为可接受的缓存代价。
+2. **Agent 永不直接写盘**：create/modify/delete 只能生成待确认 DraftEdit → 进入 ChangeSet；只有用户点击 Apply 后 `ChangeSetStore` 才通过 `SafeFileEditor` 落盘。不要声称文件已写入。
+3. **只读与 Git 边界**：Agent 只读工具不出工作区；Git 只有只读查询（status/diff/branch/patch/commit message 建议），绝不 push、不自动 commit。
+4. **受控验证**：只运行固定 `compile` / `lint` / `test`。验证失败后读取 Problems、准备修复 DraftEdit 并进入 `waiting_for_apply`；修复未应用不得再次验证，修复轮次受 `keepseek.validation.maxRepairIterations` 限制。
 
-## 核心职责
-
-**表现层**
-
-- `webview/template.ts`、`webview/styles.ts`、`webview/script.ts` 和 `webview/input/*` 只输出字符串。
-- `webview/html.ts` 负责 CSP、nonce、logo URI 和三段字符串拼装。
-- Webview 通过 `acquireVsCodeApi()` 与 Provider 通信，通过 `vscode.postMessage({ type, ... })` 发送 `WebviewMessage`。
-- `webview/richTextShortcuts.ts` 生成共享的 Webview 端快捷键控制器，底部 prompt 输入框和消息编辑输入框都通过它支持 Emacs/macOS 文本快捷键；不要在两个编辑器里复制快捷键实现。
-
-**编排层**
-
-- `extension.ts` 只做 VS Code 激活入口、命令注册、Provider 实例化和配置/工作区事件接线。
-- `provider/KeepseekChatViewProvider.ts` 中的 `KeepseekChatViewProvider` 是 VS Code/Webview 的协调者，不再直接持有会话数组或 DraftEdit Map。
-- `provider/webviewMessages.ts` 是 Webview → 扩展消息联合类型的唯一来源；主动推送到 Webview 的消息仍在 Webview listener 中处理，不放入该联合类型。
-- Provider 负责注册/响应消息、调用服务、同步状态、展示 VS Code 通知。
-- 不要把可独立测试的纯逻辑继续塞回 Provider；优先放入独立模块。
-
-**业务层**
-
-- `ChatSessionStore` 管理会话生命周期，存储 key 为 `keepseek.chatSessions`，最多保留 50 个有内容会话，活跃空会话会保留。
-- `ChatSession.contextCompression` 存储会话摘要、受保护消息 id、最近压缩时间和失败原因；摘要不是聊天 UI 消息。
-- `FileContextStore` 管理用户显式加入上下文的文件内容，读取限制来自 `keepseek.maxFileBytes` 和 `keepseek.maxContextFiles`。
-- `ModelSourceStore` 只在 `globalStorageUri/accounts/<provider>/` 下持久化来源 JSON；`resolveModelSourceConfig(sourceId)` 是主请求、摘要、余额和 Provider 共用的唯一凭据解析入口，不存在全局激活来源。旧 `keepseek.apiKey` / `keepseek.baseUrl` 只复制迁移、不修改；`.initialized` 不含密钥，用于防止用户删除最后来源后旧配置再次自动复活。
-- 仅官网 DeepSeek 来源（`provider === 'deepseek' && baseUrl.host === 'api.deepseek.com'`）保留余额与费用能力；`openai-compatible` 和代理来源只使用 chat completions、SSE、工具调用与 token 统计。模型显示固定按服务商返回名称（fetchedName）、API 名称、内置 label、模型 id 降级。
-- `ChangeSetStore` 是待确认修改的真实主管线：持久化 ChangeSet/checkpoint，处理 Diff、Apply、Discard 和 Revert，并通过 `SafeFileEditor` 执行用户点击 Apply 后的文件操作。`DraftEditStore` 不是 Provider 当前的主管线。
-- `ProjectInstructionsResolver` 只读取每个受信任工作区根目录的 `AGENTS.md`；`.agents/**/AGENTS.md` 属于 Skill，不作为全局项目指令。
-- `SkillActivationResolver` 按 explicit、session、workspace-default、implicit 的顺序选择 Skill；`allowImplicit: false` 不能被隐式激活，未受信任工作区不能自动加载项目 Skill。
-- `LegacyProjectMemoryMigration` 是 Project Memory 唯一保留入口：旧数据只读、最低优先级注入，迁移只能生成待确认 ChangeSet，不写入或删除旧文件。
-- `context/references/fileReference.ts` 管理 prompt 内的 `<path>` / `<path#Lx-Ly>` 文件引用展开；`context/references/directoryReference.ts` 管理 `<keepseek-dir:path>` 目录引用清单展开；外部文件/目录必须先被授权。
-
-**协议与基础设施层**
-
-- `AgentRunner` 只做请求编排：消费 history projection、构造模型消息、通过所选模型的来源调用 DeepSeek/OpenAI 兼容 chat completions、处理工具调用循环、整理最终消息。
-- `historyProjection.ts` 负责为模型请求选择 synthetic summary system message、protected messages、recent turns 和当前 prompt；压缩关闭时回退旧最近消息窗口。
-- `historyCompressor.ts` 负责在发送前 best-effort 刷新会话摘要；摘要请求关闭 thinking、限制输出 token、短超时，失败不得阻塞正常请求。
-- `contextUsage.ts` 必须和真实 Agent 请求使用同一套 projection，否则 UI 上下文估算会失真。
-- `currentRunContext.ts` 是动态项目上下文的唯一构造入口；Provider 负责准备它，`AgentRunner` 和 `contextUsage.ts` 只能消费同一个已排序、去重和预算裁剪后的对象。
-- `DeepSeekStreamParser` 只解析 SSE，包括 `content`、`reasoning_content` 和 streaming tool calls。
-- `DsmlToolParser` 是模型返回 DSML 文本工具调用时的兜底解析器。
-- `WorkspaceToolService` 是 Agent 可用的只读工作区工具边界：列文件、列目录、搜索、读文件、拒绝越界/二进制/过大文件。其中 `keepseek_search_workspace` 是当前打开工作区内的只读行级文本搜索：支持 literal/regex、大小写、文件/目录 path 或 workspace-relative include glob，返回 URI、1-based 行列和小段上下文；不是网络搜索、替换或工作区外搜索。
-- `SemanticToolService` 优先调用 VS Code document/workspace symbol 和 reference/definition provider；provider 不可用时才退化为受控文本搜索，结果必须标记 `fallback` 与原因。
-- `ToolAuthorizationService` 统一维护低/中/高风险工具边界；compile/lint 与 test 分 scope 做 per-run 授权，高风险操作每次单独确认。
-- `GitToolService` 优先调用内置 Git extension API，失败时只允许固定参数的只读 `git` fallback；没有任意 shell、自动 commit 或 push。
-- `shared/config.ts` 是配置默认值和归一化的唯一来源，避免各模块重复魔法数字。
-- `shared/textFileGuards.ts` 是文本可读性和跳过扩展名判断的共享边界；Agent 工具和引用展开都应复用它。
-
-## 关键通信流
-
-1. Webview 调用 `vscode.postMessage({ type, ... })`。
-2. `provider/KeepseekChatViewProvider.ts` 的 `handleMessage()` 根据 `provider/webviewMessages.ts` 中的 `type` 分发。
-3. Provider 修改业务状态或调用 `AgentRunner`。
-4. Provider 调用 `postState()` 或 `postToWebview({ type: 'state', state })`，把当前状态推给 Webview。
-5. Webview 全局 `state` 更新后 `render()`。
-
-主动从扩展推到 Webview 的特殊消息不属于 `WebviewMessage` 的 switch 输入：
-
-- `insertFileReference` / `insertDirectoryReference`：Provider 主动插入文件或目录引用 chip。
-- `referenceResources`：回应 `@` 文件/目录补全请求。
-- `sessionChanged`：通知 Webview 会话切换。
-- `showSettingsDialog`：打开设置弹窗。
-
-## 文件与目录引用系统
-
-### 序列化格式
-
-- 行段引用：`文件名 (第N-M行) <路径#LN-LM>`。
-- 带列引用：`文件名 (第N行第C-D列) <路径#LNCx-Cy>`。
-- 全文引用：`文件名 <路径>`。
-- 目录引用：`目录名/ <keepseek-dir:路径>`。
-- `startLine: 0, endLine: 0` 是全文引用哨兵值。
-
-发送消息时，Webview 的 `serializePrompt()` 遍历 `.rich-file-link`，先还原为文本格式；Provider 调用 `expandPromptReferencesInPrompt()`，在真正传给 `AgentRunner` 前展开可读文本文件引用和目录引用清单。
-
-文件引用展开格式：
-
-````markdown
-文件名 (第N-M行) <路径#LN-LM>
-```typescript
-引用原文
-```
-````
-
-全文引用展开时标题行为 `文件名 <路径>`。不可读取、超出大小限制、图片、媒体、归档、常见二进制文件、未授权外部文件会保留原引用，不展开。
-
-目录引用不会直接展开整个目录内容，而是展开为目录锚点、使用说明和受限条目清单；Agent 需要更多细节时应调用 `keepseek_list_workspace_directory` 或 `keepseek_read_workspace_file`。
-
-### 授权规则
-
-- 工作区内文件/目录可展开。
-- 外部文件/目录必须先进入授权集合，授权 key 是 `uri.toString()`。
-- 授权入口包括编辑器选区、Explorer 文件、外部文件选择、拖拽导入、终端/输出/Debug Console 选区落盘文件。
-
-### 右键菜单：Add Selection to Context
-
-- 命令：`keepseek.addSelectionToContext`
-- 触发条件：编辑器中选中文本（`editorHasSelection`）
-- 路径：右键 → `KeepSeek: Add Selection to Context`
-
-流程：
-
-```text
-editor.selection (0-based) + editor.document.uri.fsPath
-  → provider/KeepseekChatViewProvider.ts: insertSelectionToInput()  // 行号/列号转为 1-based
-    → reveal() 展开面板
-    → postMessage({ type: 'insertFileReference', path, startLine, endLine, startColumn, endColumn })
-      → webview/input/script.ts: createFileReferenceLink()
-      → insertFragmentAtRange() 插入到光标位置
-```
-
-Output / Debug Console 文档和 Terminal 选区不是直接引用原 URI，而是通过 `context/textReferences.ts` 复制或读取选区，写入 `globalStorageUri/text-references/...` 后作为全文文件引用插入。
-
-### 资源管理器右键菜单：Add File to Context
-
-- 命令：`keepseek.addExplorerFileToContext`
-- 触发条件：资源管理器中文件右键（`!explorerResourceIsFolder`）
-- 路径：Explorer → 文件右键 → `KeepSeek: Add File to Context`
-
-流程：
-
-```text
-explorer/context 传入 vscode.Uri
-  → provider/KeepseekChatViewProvider.ts: insertExplorerFileToInput()
-    → reveal() 展开面板
-    → postMessage({ type: 'insertFileReference', path, startLine: 0, endLine: 0 })
-      → webview/input/script.ts: 插入全文文件引用 chip
-```
-
-没有已保存光标时，全文 chip 插入到输入框末尾。
-
-### 资源管理器右键菜单：Add Directory to Context
-
-- 命令：`keepseek.addExplorerDirectoryToContext`
-- 触发条件：资源管理器中目录右键（`explorerResourceIsFolder`）
-- 路径：Explorer → 目录右键 → `KeepSeek: Add Explorer Folder to Chat`
-
-流程：
-
-```text
-explorer/context 传入 vscode.Uri
-  → provider/KeepseekChatViewProvider.ts: insertExplorerDirectoryToInput()
-    → reveal() 展开面板
-    → postMessage({ type: 'insertDirectoryReference', path })
-      → webview/input/script.ts: 插入目录引用 chip
-```
-
-### 拖拽文件到输入框
-
-从 VS Code Explorer 或系统文件管理器拖入文件，会生成 `.rich-file-link`，不含行号，显示高亮文件名，序列化为 `文件名 <路径>`。
-
-实现要点：
-
-- `resolveWebviewView()` 必须设置 `enableDragAndDrop: true`，否则 VS Code Explorer 拖拽事件不会传递到 Webview。
-- 拖入的文件内容会导入 `globalStorageUri/dropped-file-references/...`，再作为外部全文引用授权并插入。
-- `extractFileReferences()` 处理多种拖拽数据：`dt.files[]`、`dt.items[]`、`text/uri-list`、`application/vnd.code.uri-list`、`text/plain`。
-- `createFileReferenceLink()` 检测 `startLine === 0` 时只显示文件名。
-- 打开引用逻辑在 `context/references/fileReferenceOpener.ts`；`startLine <= 0` 时仅打开文件，不创建选区。
-
-## Agent 与工具
-
-Agent 工具包括：
-
-- `keepseek_list_workspace_files`：列出当前工作区文件，跳过 `.git`、`node_modules`、`dist` 等目录。
-- `keepseek_list_workspace_directory`：列出当前工作区内指定目录的文件和子目录，可递归，跳过依赖、构建、覆盖率和 VCS 目录。
-- `keepseek_search_workspace`：在当前工作区内执行只读文本搜索，支持 literal/regex、大小写和 path/include 范围，返回行列、上下文、搜索引擎、跳过文件数和截断信息。
-- `keepseek_read_workspace_file_range`：按 1-based 闭区间读取工作区文本文件的指定行段。
-- `keepseek_read_workspace_file`：读取工作区内文本文件，拒绝越界、二进制、超限文件。
-- `keepseek_create_draft_edit`：创建待确认 DraftEdit，不直接写磁盘。
-- `keepseek_create_incremental_draft_edit`：对现有文本文件执行精确唯一匹配或行段替换，生成待确认 DraftEdit；不直接写磁盘。
-- `keepseek_delete_workspace_file`：仅为工作区内一个已存在的普通可读文本文件准备 `action: 'delete'` 的待确认 DraftEdit；不会立即删除、不支持目录或递归删除。
-- `keepseek_find_symbol` / `keepseek_find_references`：语义定位 symbol 与 references。
-- `keepseek_get_document_symbols` / `keepseek_get_workspace_symbols`：读取文档或工作区语义 symbol。
-- `keepseek_read_workspace_diagnostics`：读取 VS Code Problems。
-- `keepseek_run_validation`：只运行固定 compile、lint、test npm scripts，并受 per-run 中风险授权控制。
-- `keepseek_git_status` / `keepseek_git_diff` / `keepseek_git_current_branch`：只读 Git 状态辅助。
-- `keepseek_git_create_patch`：仅返回受大小限制的 patch 内容，不写入或应用 patch。
-- `keepseek_git_suggest_commit_message`：只生成 commit message 建议，不创建 commit。
-
-工具风险规则：工作区读取/搜索、Problems、语义查询、Git 只读查询，以及完整/增量 DraftEdit 准备是低风险；受控 compile/lint/test 是中风险并按 run 授权；删除准备工具按高风险处理，每次调用都会显示带目标路径和原因的 VS Code modal，但授权后仍只产生待确认 DraftEdit。Agent 对文件的 create/modify/delete 都只能进入 ChangeSet；Provider 把 `AgentResponse.changeSet` 登记到 `ChangeSetStore`，Webview 展示 Diff/Apply/Discard，只有用户点击 Apply 后 `ChangeSetStore` 才会调用 `SafeFileEditor`。单项 delete Apply 和包含 delete 的 Apply All 在真正执行前还会弹出带删除目标的专用 VS Code modal；非删除 DraftEdit 的 Apply 不会额外弹出该删除确认。当前不暴露 commit/push Agent 工具，且绝不自动 push。
-
-验证失败后由 `RepairLoopTracker` 记录失败摘要和修复轮次。Agent 读取 Problems、生成修复 ChangeSet 后必须进入 `waiting_for_apply`；待修改未应用时 Runner 会结构化拒绝再次验证。用户 Apply 完整 ChangeSet 后 Webview 可显式继续验证，修复轮次跨 run/session 持久化并受 `keepseek.validation.maxRepairIterations` 限制。
-
-`AgentRunner.run()` 的输入输出保持在 `shared/types.ts`：
-
-- 输入：`AgentRequest`，包含 prompt、模型、Agent 设置、上下文文件、历史消息、语言。
-- 输出：`AgentResponse`，包含最终文本、可选 reasoningContent、DraftEdit 列表。
-
-工具调用预算由 `keepseek.maxToolIterations`（默认 8，范围 0-64）、`keepseek.maxToolCalls`（默认 24，范围 0-256）、`keepseek.maxRunMs`（默认 600000，范围 0-3600000）和 `keepseek.toolResultTokenBudget`（默认 0，自动按模型上下文估算，范围 0-1000000）共同控制。
-
-## 项目指令与 Skills 运行上下文
-
-稳定 system prefix 只保存 KeepSeek 核心能力、安全规则和工具权限边界。动态内容作为 current-run context 注入当前用户消息，顺序和冲突优先级固定为：
-
-1. KeepSeek 核心安全规则和工具权限边界。
-2. 当前用户明确指令。
-3. 当前项目根级 `AGENTS.md`。
-4. 本轮显式选择的 Skill。
-5. 当前会话已启用的 Skill。
-6. 当前 workspace 默认启用的个人或项目 Skill。
-7. `allowImplicit: true` 且通过本地确定性关键词匹配的 Skill。
-8. 迁移期只读 Legacy Project Memory。
-
-`ProjectInstructionsResolver` 不扫描整个仓库，也不自动加载嵌套 `AGENTS.md`；每个 workspace root 只读取自己的根级文件，并使用文本安全、文件大小和总 token 预算。`contextDeduplication.ts` 先按规范化 URI、再按 SHA-256 内容哈希去重；同名但内容不同的来源只记录可能冲突，不做语义去重。
-
-Skill 自动激活不得额外调用模型。每轮隐式 Skill 数量和 Skill 总字符数受配置限制。Skill 的 `scripts/` 只在清单与 Run Details 中标记存在，KeepSeek 绝不执行它。个人偏好通过 `~/.codex/skills` 的个人 Skill 表达；workspace 默认状态只持久化 Skill URI 引用，不复制 Skill 内容。
-
-Legacy `memory.json` 在用户确认迁移完成前可最低优先级只读注入。迁移完成只记录 workspace 状态，不删除源文件；迁移目标 `AGENTS.md` / `SKILL.md` 只能通过 ChangeSet/DraftEdit 生成，用户必须查看 Diff 并 Apply。普通聊天和设置不得恢复 Project Memory 新增/编辑入口，也不得使用 `window.prompt()`、`window.alert()` 或 `window.confirm()`。
-
-## 缓存命中率是产品行为（第一位）
-
-DeepSeek 前缀缓存从请求第 0 个 token 起逐字节匹配，命中部分按折扣计费。缓存命中率直接决定用户的成本与延迟，是**第一位维护的产品行为**，优先级高于"实现简洁性"，与安全规则同级。任何改动若可能改变请求前缀字节，必须同时证明前缀仍然稳定，或明确标注这是可接受的缓存代价。
-
-请求前缀契约（从第 0 个 token 起不可变）：
-
-- **system 段**：`getAgentSystemPrompt()` 保持纯静态；`contextInstructions`（AGENTS.md / Skills / Legacy Memory / Context Files 的格式化结果）持久化在 `ChatSession.contextInstructions`，字节变化即整体重写（一次可接受的缓存代价），未变化时必须逐字节复用，禁止每轮重新生成。
-- **user 消息**：所有轮次一律以 `(expandedContent ?? content).trim()` 发送，禁止在发送时再做任何包装/拼接——"发送字节 == 持久化字节"，跨轮必须一致。
-- **assistant 消息**：工具轮（tool_calls / tool 消息）通过 `ChatMessage.toolRounds` 原样持久化，跨轮重建时逐字节还原；`reasoning_content` 原样保存。
-- **动态内容**（goal、临时指令、后台任务状态等）一律追加在 user 消息尾部（turn tail），绝不改写已发送的历史消息。
-- **历史投影 append-only**：消息进入投影后只追加，不重写、不 trim、不重排；摘要刷新是低频缓存重置点（见下）。
-
-禁止事项：
-
-- 禁止在 `buildInitialAgentMessages` 或任何发送路径中，对同一消息在不同轮次生成不同字节（"包装版 vs 历史版"）。
-- 禁止把时间戳、随机 UUID、绝对路径、激活 reason 等易变内容写进 system 段或历史消息。
-- 禁止在热会话（缓存未冷）中重写历史消息或移除未覆盖消息。
-- 禁止让工具 schema 集合或顺序随每轮 prompt 变化（slim mode 按会话冻结）。
-
-## 上下文压缩与历史投影
-
-KeepSeek 的模型输入是 projection，不等同于 `session.messages`。不要把摘要插入真实聊天 UI 消息，也不要让 Webview 显示 synthetic summary message。
-
-projection 组成：
-
-- 原有 system prompt。
-- 可选 synthetic system summary message。
-- 受保护消息 protected messages（首条用户需求、显式保留约束、报错/测试失败、DraftEdit 结果等）。
-- 未被摘要覆盖的其余 user/assistant 消息（**append-only**：消息进入投影后只追加，只有摘要刷新覆盖时才成批移除）。
-- 当前 prompt。
-
-配置集中在 `shared/config.ts` 与 `package.json`：
-
-- `keepseek.contextCompressionEnabled`：历史兼容配置（代码已无引用）；投影始终启用。
-- `keepseek.contextKeepRecentTurns`：决定哪些消息可作为压缩候选——recent 窗口之外、未保护、未被摘要覆盖的消息才会被下一次摘要刷新覆盖。它只影响压缩判定，不影响投影成员。
-- `keepseek.contextCompressionTriggerRatio`：上下文估算达到模型窗口比例后可触发摘要刷新。
-- `keepseek.contextSummaryBudgetTokens`：摘要请求输出预算。
-
-数据结构集中在 `shared/types.ts`：
-
-- `ChatMessage.contextMeta?: ChatMessageContextMeta`：保护标记和原因。
-- `ChatSession.contextCompression?: ContextCompressionState`：摘要、covered message ids、protected ids、失败原因。
-- `ContextProjectionMetadata`：仅用于 trace/调试和内部判断，不进入 UI 消息。
-
-自动保护规则在 `agent/historyProjection.ts` 中维护，包括首条用户需求、最近用户输入、用户明确保留的偏好/约束、明显报错或测试失败、用户纠错、DraftEdit 关键结果。受保护消息不应被摘要覆盖或 projection 丢弃。为保持 DeepSeek 前缀缓存（从第 0 个 token 起逐字节匹配）命中，投影是 append-only 且内容冻结：消息进入投影后始终以 `(expandedContent ?? content)` 原样发送，不因滑出 recent window 而外部化改写；历史中段任何消息的改写或删除都会让该点之后的缓存全部失效。
-
-摘要规则：
-
-- 摘要存储在 `ChatSession.contextCompression.summaries`，不是 `messages`。
-- 摘要应保留用户目标、已确认决策、重要错误、文件路径/目录/行段/函数名、已完成事项、阻塞项和待办。
-- 历史里的文件引用展开内容只作为路径和关注点线索；模型需要代码细节时应使用现有只读工作区工具重新读取当前文件。
-- 摘要生成使用当前选中模型，关闭 thinking，无 tools，限制 `contextSummaryBudgetTokens`，并使用短超时。
-- 摘要失败、超时、空结果或格式异常不得影响用户发送消息；只记录 `lastFailureReason` 和 trace metadata。
-- 摘要刷新是**低频缓存失效点**：`SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD` 故意调高，避免频繁重写 synthetic summary、成批移除 covered 消息而让前缀整体失效；只有上下文接近窗口时才允许同步刷新。
-- 降级兜底：无可用摘要（压缩持续失败）且投影估算超过 `contextWindowTokens × forceRatio` 时，投影截断为最近消息尾部，避免请求超出模型窗口；这是异常路径，正常路径仍是 append-only。
-
-接入边界：
-
-- `provider/KeepseekChatViewProvider.ts` 可在发送前 best-effort 调用 `HistoryCompressor.refresh()`，但不要向用户弹压缩失败错误。
-- `agent/runner.ts` 发起请求前必须调用 `buildHistoryProjection()`，并在 trace 中记录 projection metadata，不记录超长摘要正文。
-- `agent/contextUsage.ts` 必须使用同一 projection 估算 token。
-- `sessions/chatSessionStore.ts` 负责兼容加载新增字段；旧会话没有 `contextMeta` 或 `contextCompression` 时必须正常加载。
-- 当前 MVP 仍保留 `trimActiveHistory()` 作为存储层兼容 fallback；生产化阶段应拆分完整历史持久化和模型投影历史，避免硬删除旧消息。
-
-## 设计原则
-
-- **依赖倒置**：`AgentRunner` 依赖 `WorkspaceToolAdapter`，默认实现是 `WorkspaceToolService`，便于测试替换。
-- **组合优于继承**：Provider 组合 `ChatSessionStore`、`ChangeSetStore`、`FileContextStore`、`AgentRunner`。
-- **协议解析隔离**：SSE 和 DSML 解析独立于请求编排，避免 AgentRunner 继续膨胀。
-- **配置集中化**：默认值、范围 clamp、模型归一化都在 `shared/config.ts`。
-- **错误边界清晰**：用户可见错误统一通过 `getErrorMessage()` + `localize()` 展示；工具返回 JSON `{ ok, error }`，不把异常直接泄漏给模型。
-- **安全写入**：AI 只能生成 DraftEdit。真正写入由用户点击 Apply 后触发。
-
-## 编码规范
-
-- 新增配置：先改 `package.json` 的 `contributes.configuration`，再在 `shared/config.ts` 增加读取/归一化。
-- 修改模型来源、模型发现或余额隔离：同步检查 `accounts/accountStore.ts`、`accounts/accountResolver.ts`、`accounts/modelDiscovery.ts`、`agent/runner.ts`、`agent/historyCompressor.ts`、`agent/deepseek/balanceStore.ts` 和 Provider；不得在任一请求路径重新直读 apiKey/baseUrl。
-- 新增或修改上下文压缩配置：同步检查 `shared/types.ts`、`agent/historyProjection.ts`、`agent/historyCompressor.ts`、`agent/contextUsage.ts` 和 `agent/runner.ts`，确保真实请求和 usage 估算仍共用同一 projection。
-- 修改项目指令、Skill 激活、workspace 默认或 Legacy 兼容：同步检查 `agent/projectInstructions.ts`、`skills/skillActivationResolver.ts`、`agent/contextDeduplication.ts`、`agent/currentRunContext.ts`、`agent/contextUsage.ts`、`agent/protocol.ts` 和 Run Details/trace；不要在 Provider 内复制匹配或优先级逻辑。
-- 新增 Webview → 扩展消息：更新 `provider/webviewMessages.ts` 的 `WebviewMessage` 联合类型、`provider/KeepseekChatViewProvider.ts` 的 `handleMessage()`、Webview 脚本发送点；剪贴板兜底消息 `requestClipboardText` / `writeClipboardText` 由 `webview/richTextShortcuts.ts` 统一发起。
-- 新增扩展 → Webview 主动消息：不要放进 `WebviewMessage`，但要在 Webview message listener 中处理。
-- 新增 Agent 工具：更新 `agent/protocol.ts` 的工具 schema 和 `agent/runner.ts` 的工具路由；工具实现优先放独立模块。
-- 修改文件或目录引用格式：同步检查 `context/references/fileReference.ts`、`context/references/directoryReference.ts`、`webview/input/script.ts`、`webview/script.ts` 的序列化/反序列化/打开逻辑。
-- 修改 DraftEdit/ChangeSet 应用行为：优先改 `ChangeSetStore` / `SafeFileEditor`，不要放进 `AgentRunner`。
-- 修改样式只碰 `webview/styles.ts` 或 `webview/input/styles.ts`；修改输入区专属交互只碰 `webview/input/script.ts`；修改 transcript/设置/会话 UI 只碰 `webview/script.ts`；修改富文本通用快捷键、mark/region、剪贴板桥接优先改 `webview/richTextShortcuts.ts`。
-- 注释只解释非显而易见的边界、安全规则或协议兼容逻辑。
-- 不要复制 Markdown fence、字节格式化、配置读取、错误字符串、文本文件判断等公共逻辑；使用 `shared/markdown.ts`、`shared/format.ts`、`shared/config.ts`、`shared/errors.ts`、`shared/textFileGuards.ts`。
-- 捕获异常时要么转换成用户可见本地化消息，要么转换成工具 JSON 错误。
-
-## 维护热点
-
-- `extension.ts` 只保留激活和命令接线；`provider/KeepseekChatViewProvider.ts` 是 VS Code Provider 编排中心，新增大功能时优先创建服务模块，再在 Provider 中接线。
-- `accounts/accountResolver.ts` 是按来源解析凭证与旧配置兼容的唯一入口；删除、模型切换、摘要、主请求与余额的来源语义必须一致，来源密钥不得写入 workspace 或 trace。
-- `agent/historyProjection.ts` / `agent/historyCompressor.ts` 是上下文压缩核心；修改后必须验证压缩关闭 fallback、无摘要 fallback、摘要失败 fallback、protected 消息、最近轮次和 context usage 估算。
-- `webview/script.ts` 和 `webview/input/script.ts` 仍是大字符串文件；改动时保持 DOM id、message type、序列化格式兼容，并重点手测输入、拖拽、`@` 引用、编辑重发、Apply/Discard。
-- `webview/richTextShortcuts.ts` 同时影响底部 prompt 输入框和消息编辑输入框；修改后必须验证 Emacs 光标移动、mark/region、`Ctrl-K` 剪切行尾、`Ctrl-W` 剪切选区、`Alt-W` 复制、`Ctrl-Y` 粘贴，以及 `Command-A/C/X/V/Z` 系统习惯。
-- `edits/changeSetStore.ts` 是待确认变更的状态、持久化和批量 Apply/Revert 边界；`edits/safeFileEditor.ts` 负责单文件写入/删除、脏编辑器保护、删除前基线检查与 checkpoint 回滚。不要把这些行为放进 AgentRunner。
-- `context/references/fileReference.ts` / `context/references/directoryReference.ts` 是引用格式兼容核心；修改时必须验证全文引用、行段引用、目录引用、外部授权、不可读文件跳过。
-
-## 常用验证
+## 二、常用命令（bun）
 
 ```bash
-npm run compile
-npm run lint
-npm run build:test
-npm test
+bun run compile          # src → out/（F5 调试的 preLaunchTask 也会跑）
+bun run lint             # ESLint
+bun run build:test       # 测试编译 → out-test/
+bun run test             # 测试套件（node out-test/test/runTests.js）
+bun run package:market   # 发布打包（含安全校验，见"七、发布"）
+bun run reinstall:vsix   # 本机一键重装验证：打包 → 卸载旧版 → 安装新版
 ```
-
-VSIX 打包发布前必须使用：
-
-```bash
-npm run package
-```
-
-不要直接绕过 `package:verify` 安装或发布 `.vsix`。打包脚本会先清理 `out/`、重新编译，并校验 VSIX 中包含 `package.json` 的运行时 dependencies（例如 `node_modules/ignore`）和 `main` 入口；如果缺失依赖或混入旧的扁平 `out/*.js` 产物，必须先修复再安装测试。
-
-本机一键重装验证使用 `npm run reinstall:vsix`；它会读取当前 `package.json` 的最新 `publisher/name/version`，生成对应版本的 VSIX，卸载 VS Code 中的当前 KeepSeek，再安装新包。
 
 开发调试：用 VS Code 打开仓库，按 F5 启动 Extension Development Host。
 
-重点手测：普通发送、长对话压缩、压缩关闭、摘要失败 fallback、编辑重发、会话切换、上下文文件添加、选区引用、Explorer 文件/目录引用、拖拽引用、`@` 文件/目录补全、引用展开、Agent 读文件/列文件/列目录、literal/regex/大小写/path/include/多根工作区搜索、搜索中止与截断元数据、DraftEdit Apply/Discard/Apply All、删除授权 modal、删除 Diff/Apply/Discard/Revert、删除前文件变化冲突、脏编辑器拒绝、目录/二进制/超限/越界删除拒绝、语言切换、API 设置保存、context window 估算显示。
+## 三、分层结构速览
+
+```text
+src/
+├── extension.ts                 # 激活入口、命令注册、事件接线（不放业务）
+├── provider/
+│   ├── KeepseekChatViewProvider.ts # VS Code/Webview 协调者（消息分发/状态推送/服务接线）
+│   └── webviewMessages.ts       # Webview → 扩展消息联合类型唯一来源
+├── agent/
+│   ├── runner.ts                # 请求编排、工具调用循环、最终响应整理
+│   ├── protocol.ts              # system prompt、消息拼装、工具 schema、token 估算入口
+│   ├── historyProjection.ts     # 模型历史投影（摘要+保护消息+最近轮次）★压缩核心
+│   ├── historyCompressor.ts     # 会话摘要刷新与失败回退 ★压缩核心
+│   ├── contextUsage.ts          # 用量估算（必须与真实请求共用同一 projection）
+│   ├── currentRunContext.ts     # 项目指令/Skills/Legacy 统一投影入口
+│   └── tools/                   # workspace / semantic / validation / git / toolAuthorization
+├── accounts/                    # 来源 CRUD、accountResolver（凭据唯一入口）、modelDiscovery
+├── context/references/          # <path> / <path#Lx-Ly> / <keepseek-dir:> 展开、授权、@ 补全
+├── edits/                       # changeSetStore（主管线）、safeFileEditor、draftDiffService
+├── sessions/                    # chatSessionStore、globalSessionStorage（摘要/归档存这里）
+├── skills/                      # Skill 发现/激活/加载（绝不执行 scripts）
+├── memory/                      # legacy memory.json 只读解析与迁移
+├── shared/                      # config / types / i18n / markdown / textFileGuards 共享边界
+└── webview/                     # html（CSP/拼装）/ styles / script / input / richTextShortcuts（只输出字符串）
+```
+
+## 四、核心不变式
+
+### 4.1 请求前缀字节冻结（缓存第一）
+
+- **system 段纯静态**：`getAgentSystemPrompt()` 不随轮次变化。`contextInstructions`（AGENTS.md / Skills / Legacy Memory / Context Files 的格式化结果）持久化在 `ChatSession.contextInstructions`——字节未变就逐字节复用，禁止每轮重新生成；变化即整体重写（一次可接受的缓存代价）。
+- **user 消息"发送字节 == 持久化字节"**：一律以 `(expandedContent ?? content).trim()` 发送，禁止发送时再包装/拼接。动态内容（goal、临时指令、后台任务状态）只追加在 user 消息尾部，绝不改写已发送历史。
+- **assistant 消息原样持久化**：工具轮（tool_calls / tool 结果）经 `ChatMessage.toolRounds` 逐字节还原；`reasoning_content` 原样保存。
+- **历史投影 append-only**：只追加，不重写、不 trim、不重排；摘要刷新是受控低频缓存重置点（`SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD` 故意调高）。
+- **工具 schema 按会话冻结**：集合与顺序跨轮不变；禁用工具用 `tool_choice: none` 而非移除 tools；slim mode 默认关闭。
+
+禁止：把时间戳/随机 UUID/绝对路径/激活 reason 写入 system 段或历史消息；在热会话中重写历史或移除未覆盖消息；让 schema 随 prompt 变化。
+
+### 4.2 上下文压缩与投影
+
+- 模型输入是 projection，不等同于 `session.messages`；摘要存 `ChatSession.contextCompression.summaries`，绝不进入聊天 UI。
+- 摘要只留线索（目标、决策、错误、文件路径/行段/函数名、完成项、待办）；文件正文/日志/代码块不保留，模型需要细节时用只读工具**重读当前文件**。
+- 自动保护：首条需求、最近输入、显式"记住"、报错/测试失败、用户纠错、DraftEdit 结果——不被摘要覆盖。
+- 摘要请求：当前模型、关 thinking、无 tools、限 `contextSummaryBudgetTokens`、短超时；失败只记录 `lastFailureReason`，绝不阻塞用户消息。
+- 降级兜底（异常路径）：无可用摘要且投影估算超 `contextWindowTokens × forceRatio` 时，截断为最近消息尾部。
+- 配置集中在 `shared/config.ts`；数据结构在 `shared/types.ts`（`contextMeta` / `contextCompression` / `ContextProjectionMetadata`）。
+
+### 4.3 账户与模型来源
+
+- `accounts/accountResolver.ts` 是按来源解析凭证的唯一入口；删除、模型切换、摘要、主请求、余额的来源语义必须一致；密钥不得写入 workspace 或 trace。
+- 仅官网 DeepSeek（`provider === 'deepseek' && baseUrl.host === 'api.deepseek.com'`）保留余额/费用能力；其余来源只走 chat completions / SSE / 工具调用 / token 统计。
+- 来源持久化在 `globalStorageUri/accounts/<provider>/`；旧 `keepseek.apiKey` / `keepseek.baseUrl` 只复制迁移、不修改；`.initialized` 不含密钥。
+
+### 4.4 安全写入与删除
+
+- `ChangeSetStore` 是待确认修改主管线（Diff/Apply/Discard/Revert/checkpoint）；`SafeFileEditor` 负责单文件写入/删除、脏编辑器保护、删除前基线检查与 checkpoint 回滚。不要把应用行为放进 `AgentRunner`。
+- 删除是高风险：授权 modal + Apply 前删除专用 modal；草案后文件被改动则拒绝删除；目录/二进制/超限/越界拒绝。
+- 外部文件/目录必须先授权（授权 key = `uri.toString()`）。
+
+### 4.5 Skills 与项目指令
+
+- 激活顺序：explicit → session → workspace-default → implicit；`allowImplicit: false` 不可隐式激活；未受信任工作区不自动加载项目 Skill。
+- `ProjectInstructionsResolver` 只读各受信任 workspace root 的 `AGENTS.md`（`.agents/**/AGENTS.md` 属于 Skill，不作为全局项目指令）；受文件大小与 token 预算约束。
+- Skill 的 `scripts/` 只在清单与 Run Details 中标记存在，**绝不执行**；workspace 默认只持久化 Skill URI 引用，不复制内容。
+- Legacy `memory.json` 只读、最低优先级注入；迁移只能生成待确认 ChangeSet，不删除旧文件。不使用 `window.prompt()` / `window.alert()` / `window.confirm()`。
+
+## 五、改动影响面清单（改前必查）
+
+- **新增配置**：先改 `package.json` 的 contributes.configuration，再改 `shared/config.ts`。
+- **模型来源/发现/余额**：同步检查 accountStore、accountResolver、modelDiscovery、runner、historyCompressor、balanceStore、Provider；任何请求路径不得重新直读 apiKey/baseUrl。
+- **压缩相关**：同步检查 shared/types.ts、historyProjection、historyCompressor、contextUsage、runner——真实请求与 usage 估算必须共用同一 projection。
+- **项目指令/Skill/Legacy**：同步检查 projectInstructions、skillActivationResolver、contextDeduplication、currentRunContext、contextUsage、protocol、Run Details/trace；不要在 Provider 内复制匹配或优先级逻辑。
+- **Webview → 扩展消息**：更新 webviewMessages.ts 的联合类型 + Provider `handleMessage()` + webview 发送点；剪贴板兜底消息由 richTextShortcuts 统一发起。
+- **扩展 → Webview 主动消息**：不进 `WebviewMessage`，在 webview message listener 中处理。
+- **新增 Agent 工具**：更新 protocol.ts 的 schema + runner 的工具路由；实现放独立模块。
+- **引用格式**：同步检查 fileReference、directoryReference、webview/input/script.ts、webview/script.ts 的序列化/反序列化/打开逻辑。
+- **DraftEdit/ChangeSet 行为**：优先改 ChangeSetStore / SafeFileEditor。
+- **UI 归属**：样式只碰 styles.ts；输入区只碰 input/script.ts；transcript/设置/会话只碰 script.ts；通用快捷键碰 richTextShortcuts.ts（两个编辑器共用，勿复制实现）。
+- **公共逻辑复用**：Markdown fence、字节格式化、配置读取、错误字符串、文本文件判断用 shared/*，勿复制。
+
+## 六、测试与手测
+
+- 单测：`bun run build:test && bun run test`（重点覆盖：缓存字节稳定、压缩 fallback、引用展开、ChangeSet、授权、Skill 激活）。
+- 改压缩核心后必须验证：压缩关闭 fallback、无摘要 fallback、摘要失败 fallback、protected 消息、最近轮次、context usage 估算一致。
+- 改引用/输入后手测：全文/行段/目录引用、外部授权、不可读文件跳过、拖拽（多数据源 + 判空）、`@` 补全、编辑重发。
+- 改 edits 后手测：Apply/Discard/Apply All、删除 modal、删除前文件变化冲突、脏编辑器拒绝。
+- 大字符串文件（webview/script.ts、webview/input/script.ts）改动后保持 DOM id / message type / 序列化格式兼容，并手测输入、拖拽、`@` 引用、Apply/Discard。
+
+## 七、发布
+
+```bash
+bun run package:market
+```
+
+`package:market`（scripts/package-market.js）：检查运行时依赖已安装 → 清理 `out/` → 编译 → `vsce package --dependencies` → `verify-vsix.js` 校验（确认含 `node_modules/ignore` 与 main 入口、无旧扁平 `out/*.js` 产物）。**绝不**裸跑 `npx vsce package --no-dependencies`（市场版会缺依赖、激活失败）。`bun run reinstall:vsix` 用于本地一键重装验证。
+
+## 八、详细设计文档
+
+- `doc/cache_keepseek.md`：缓存命中优化技术详解（维护者/进阶）
+- `doc/keepseek-agent-runtime-workflow.md`：Agent 运行时工作流
+- `doc/keepseek-api-payload-reference.md`：API payload 参考
+- `doc/keepseek-file-reference-spec.md`：文件引用规范（序列化格式、右键菜单、拖拽流程等细节）

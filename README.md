@@ -197,7 +197,7 @@ KeepSeek 住在 VS Code Secondary Sidebar 里，不用切窗口、不用复制�
 
 ### 更省心的工程配套
 
-- **验证与修复**：Agent 可运行受控的 `npm run compile / lint / test`，失败后读取 Problems 自动准备修复草案，循环修复并等待你确认；
+- **验证与修复**：Agent 可运行受控的 `bun run compile / lint / test`，失败后读取 Problems 自动准备修复草案，循环修复并等待你确认；
 - **运行中止**：推理或工具循环中可以随时停止本次执行；
 - **断线重试**：首块响应前的可重试错误自动指数退避重试；
 - **跨项目继续排查**：历史会话按项目保存，支持浏览其他项目、复制到当前项目、收藏、重命名、按时间过滤、多选删除——换工作区不换思路；
@@ -244,9 +244,12 @@ AI 生成代码越来越快，但项目架构、依赖关系、模块边界，�
 ## 十一、快速上手（3 步）
 
 ```bash
-# 1. 构建并安装 VSIX
-npm run package          # 生成 VSIX
+# 1. 构建并安装 VSIX（本地自用）
+bun run package          # 生成 keepseek-<version>.vsix
 code --install-extension keepseek-<version>.vsix
+
+# 一键重装验证：打包 → 卸载旧版 → 安装新版
+bun run reinstall:vsix
 ```
 
 ```text
@@ -260,6 +263,24 @@ KeepSeek: Open Agent Chat
 ```
 
 然后选中一段代码，按 `Cmd+L` / `Ctrl+L`（或右键 → KeepSeek: Add Selection to Chat），问你的第一个问题。打开用量统计，看第一轮和第二轮的命中率差距——那两行数字，就是 KeepSeek 存在的意义。
+
+### 测试与发布打包（维护者）
+
+```bash
+# 运行完整测试套件
+bun run build:test       # 编译测试产物到 out-test/
+bun run test             # 运行测试
+
+# 代码质量检查
+bun run lint
+```
+
+```bash
+# 打包发布到插件市场（推荐，自带安全校验）
+bun run package:market
+```
+
+`package:market` 会先确认运行时依赖（如 `ignore`）已安装，清理 `out/`、重新编译，再用 `vsce package --dependencies` 打包并运行 `verify-vsix.js` 校验（确认 VSIX 包含运行时依赖与 `main` 入口），校验通过后生成的 `keepseek-<version>.vsix` 即可上传插件市场。**不要**裸跑 `npx vsce package --no-dependencies`——那样打出的包缺少运行时依赖，从市场安装后扩展无法激活。
 
 ### 多来源模型体系
 

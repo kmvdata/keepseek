@@ -3,7 +3,7 @@
   "displayName": "KeepSeek",
   "description": "AI-powered coding agent for VS Code",
   "publisher": "keepseek",
-  "version": "0.2.3",
+  "version": "0.2.5",
   "license": "MIT",
   "icon": "resources/keepseek.png",
   "homepage": "https://github.com/kmvdata/keepseek#readme",
@@ -303,6 +303,7 @@
     "build:test": "tsc -p tsconfig.test.json",
     "test": "node out-test/test/runTests.js",
     "package": "vsce package --dependencies --out keepseek-${npm_package_version}.vsix && node scripts/verify-vsix.js keepseek-${npm_package_version}.vsix",
+    "package:market": "node scripts/package-market.js",
     "reinstall:vsix": "node scripts/reinstall-vsix.js"
   },
   "dependencies": {
