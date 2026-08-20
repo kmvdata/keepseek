@@ -28,6 +28,7 @@ import './protocolCache.test';
 import './projectInstructions.test';
 import './legacyProjectMemoryMigration.test';
 import './repairLoop.test';
+import './richTextShortcuts.test';
 import './runDetails.test';
 import './safeFileEditor.test';
 import './semanticTools.test';

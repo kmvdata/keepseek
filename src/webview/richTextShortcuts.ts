@@ -186,7 +186,11 @@ export function getRichTextShortcutsScript(): string {
         function moveSelection(direction, granularity) {
           var editor = getEditor();
           if (!editor) { return; }
-          if (moveSelectionWithModify(editor, markActive ? 'extend' : 'move', direction, granularity)) {
+          var alter = markActive ? 'extend' : 'move';
+          var moved = granularity === 'lineboundary'
+            ? moveSelectionToLogicalLineBoundary(editor, alter, direction)
+            : moveSelectionWithModify(editor, alter, direction, granularity);
+          if (moved) {
             notifySelectionChanged(editor);
           }
         }
@@ -218,7 +222,7 @@ export function getRichTextShortcutsScript(): string {
         function killLine() {
           var editor = getEditor();
           if (!editor || !collapseSelectionToFocus(editor)) { return; }
-          if (!moveSelectionWithModify(editor, 'extend', 'forward', 'lineboundary')) {
+          if (!moveSelectionToLogicalLineBoundary(editor, 'extend', 'forward')) {
             return;
           }
           var selection = getSelection(editor);
@@ -319,6 +323,270 @@ export function getRichTextShortcutsScript(): string {
             return false;
           }
           return true;
+        }
+
+        function moveSelectionToLogicalLineBoundary(editor, alter, direction) {
+          var selection = getSelection(editor);
+          if (!selection || !isNodeInside(selection.focusNode, editor)) { return false; }
+          var previous = {
+            anchorNode: selection.anchorNode,
+            anchorOffset: selection.anchorOffset,
+            focusNode: selection.focusNode,
+            focusOffset: selection.focusOffset,
+            range: selection.getRangeAt(0).cloneRange()
+          };
+          var boundary = direction === 'backward'
+            ? findLogicalLineStart(editor, selection.focusNode, selection.focusOffset)
+            : findLogicalLineEnd(editor, selection.focusNode, selection.focusOffset);
+          if (!boundary || !isRangeInside(boundary, editor)) { return false; }
+
+          var didSetSelection = alter === 'extend'
+            ? setDirectionalSelection(
+              editor,
+              selection.anchorNode,
+              selection.anchorOffset,
+              boundary.startContainer,
+              boundary.startOffset
+            )
+            : setCollapsedSelection(editor, boundary);
+          if (!didSetSelection || !isSelectionInside()) {
+            restoreSelectionSnapshot(editor, previous);
+            return false;
+          }
+          return true;
+        }
+
+        function findLogicalLineStart(editor, focusNode, focusOffset) {
+          var point = normalizeDomPoint(editor, focusNode, focusOffset);
+          if (!point) { return null; }
+
+          if (point.node.nodeType === Node.ELEMENT_NODE && point.offset < point.node.childNodes.length) {
+            var nextChild = point.node.childNodes[point.offset];
+            if (isLogicalLineBoundaryElement(nextChild) && nextChild.tagName !== 'BR') {
+              return createLogicalLineBoundaryRange(editor, point, 'backward');
+            }
+          }
+
+          while (point) {
+            if (point.node.nodeType === Node.TEXT_NODE) {
+              var textBefore = point.node.nodeValue || '';
+              var previousLineBreak = point.offset > 0
+                ? textBefore.lastIndexOf(String.fromCharCode(10), point.offset - 1)
+                : -1;
+              if (previousLineBreak >= 0) {
+                return createLogicalLineBoundaryRange(editor, {
+                  node: point.node,
+                  offset: previousLineBreak + 1
+                }, 'backward');
+              }
+              point = getPointBeforeNode(point.node);
+              continue;
+            }
+            if (point.offset > 0) {
+              var previousChild = point.node.childNodes[point.offset - 1];
+              if (isLogicalLineBoundaryElement(previousChild)) {
+                return createLogicalLineBoundaryRange(editor, point, 'backward');
+              }
+              point = { node: previousChild, offset: getNodeEndOffset(previousChild) };
+              continue;
+            }
+            if (point.node === editor || isBlockElement(point.node)) {
+              return createLogicalLineBoundaryRange(editor, point, 'backward');
+            }
+            point = getPointBeforeNode(point.node);
+          }
+          return null;
+        }
+
+        function findLogicalLineEnd(editor, focusNode, focusOffset) {
+          var point = normalizeDomPoint(editor, focusNode, focusOffset);
+          if (!point) { return null; }
+          var canEnterFollowingBlock = point.node.nodeType === Node.ELEMENT_NODE;
+
+          while (point) {
+            if (point.node.nodeType === Node.TEXT_NODE) {
+              var textAfter = point.node.nodeValue || '';
+              var nextLineBreak = textAfter.indexOf(String.fromCharCode(10), point.offset);
+              if (nextLineBreak >= 0) {
+                return createLogicalLineBoundaryRange(editor, {
+                  node: point.node,
+                  offset: nextLineBreak
+                }, 'forward');
+              }
+              canEnterFollowingBlock = false;
+              point = getPointAfterNode(point.node);
+              continue;
+            }
+            if (point.offset < point.node.childNodes.length) {
+              var nextChild = point.node.childNodes[point.offset];
+              if (isLogicalLineBoundaryElement(nextChild)) {
+                if (nextChild.tagName !== 'BR' && canEnterFollowingBlock) {
+                  point = { node: nextChild, offset: 0 };
+                  continue;
+                }
+                return createLogicalLineBoundaryRange(editor, point, 'forward');
+              }
+              point = { node: nextChild, offset: 0 };
+              continue;
+            }
+            if (point.node === editor || isBlockElement(point.node)) {
+              return createLogicalLineBoundaryRange(editor, point, 'forward');
+            }
+            point = getPointAfterNode(point.node);
+          }
+          return null;
+        }
+
+        function isLogicalLineBoundaryElement(node) {
+          return Boolean(node && node.nodeType === Node.ELEMENT_NODE &&
+            (node.tagName === 'BR' || isBlockElement(node)));
+        }
+
+        function isBlockElement(node) {
+          if (!node || node.nodeType !== Node.ELEMENT_NODE) { return false; }
+          if (options.isBlockElement) {
+            return Boolean(options.isBlockElement(node));
+          }
+          return node.tagName === 'DIV' || node.tagName === 'P' || node.tagName === 'LI' ||
+            node.tagName === 'UL' || node.tagName === 'OL';
+        }
+
+        function normalizeDomPoint(editor, node, offset) {
+          if (!node || !isNodeInside(node, editor)) { return null; }
+          if (node.nodeType === Node.TEXT_NODE) {
+            return {
+              node: node,
+              offset: clampOffset(offset, (node.nodeValue || '').length)
+            };
+          }
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            return {
+              node: node,
+              offset: clampOffset(offset, node.childNodes.length)
+            };
+          }
+          var parent = node.parentNode;
+          if (!parent || !isNodeInside(parent, editor)) { return null; }
+          var index = getNodeIndex(node);
+          return {
+            node: parent,
+            offset: index + (Number(offset) > 0 ? 1 : 0)
+          };
+        }
+
+        function clampOffset(offset, maximum) {
+          var value = Number(offset);
+          if (!Number.isFinite(value)) { value = 0; }
+          return Math.max(0, Math.min(maximum, Math.floor(value)));
+        }
+
+        function getNodeEndOffset(node) {
+          return node.nodeType === Node.TEXT_NODE
+            ? (node.nodeValue || '').length
+            : node.childNodes.length;
+        }
+
+        function getPointBeforeNode(node) {
+          var parent = node && node.parentNode;
+          if (!parent) { return null; }
+          return { node: parent, offset: getNodeIndex(node) };
+        }
+
+        function getPointAfterNode(node) {
+          var parent = node && node.parentNode;
+          if (!parent) { return null; }
+          return { node: parent, offset: getNodeIndex(node) + 1 };
+        }
+
+        function getNodeIndex(node) {
+          return Array.prototype.indexOf.call(node.parentNode.childNodes, node);
+        }
+
+        function createLogicalLineBoundaryRange(editor, point, direction) {
+          var safePoint = movePointOutsideNonEditable(editor, point, direction);
+          if (!safePoint) { return null; }
+          var range = document.createRange();
+          try {
+            range.setStart(safePoint.node, safePoint.offset);
+            range.collapse(true);
+          } catch (error) {
+            return null;
+          }
+          return isRangeInside(range, editor) ? range : null;
+        }
+
+        function movePointOutsideNonEditable(editor, point, direction) {
+          var element = point.node.nodeType === Node.ELEMENT_NODE ? point.node : point.node.parentNode;
+          var nonEditable = null;
+          while (element && element !== editor) {
+            if (element.nodeType === Node.ELEMENT_NODE &&
+              String(element.getAttribute('contenteditable') || '').toLowerCase() === 'false') {
+              nonEditable = element;
+            }
+            element = element.parentNode;
+          }
+          if (!nonEditable || !nonEditable.parentNode) { return point; }
+          var index = getNodeIndex(nonEditable);
+          return {
+            node: nonEditable.parentNode,
+            offset: direction === 'backward' ? index : index + 1
+          };
+        }
+
+        function setCollapsedSelection(editor, range) {
+          setSelectionRange(editor, range);
+          var selection = getSelection(editor);
+          return Boolean(selection && selection.isCollapsed &&
+            selection.focusNode === range.startContainer && selection.focusOffset === range.startOffset);
+        }
+
+        function setDirectionalSelection(editor, anchorNode, anchorOffset, focusNode, focusOffset) {
+          if (!isNodeInside(anchorNode, editor) || !isNodeInside(focusNode, editor)) { return false; }
+          var anchorRange = document.createRange();
+          var focusRange = document.createRange();
+          try {
+            anchorRange.setStart(anchorNode, anchorOffset);
+            anchorRange.collapse(true);
+            focusRange.setStart(focusNode, focusOffset);
+            focusRange.collapse(true);
+          } catch (error) {
+            return false;
+          }
+          if (!isRangeInside(anchorRange, editor) || !isRangeInside(focusRange, editor)) { return false; }
+
+          var selection = window.getSelection();
+          if (!selection) { return false; }
+          try {
+            editor.focus();
+            if (typeof selection.setBaseAndExtent === 'function') {
+              selection.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
+            } else if (typeof selection.extend === 'function') {
+              setSelectionRange(editor, anchorRange);
+              selection = window.getSelection();
+              if (!selection) { return false; }
+              selection.extend(focusNode, focusOffset);
+            } else {
+              return false;
+            }
+          } catch (error) {
+            return false;
+          }
+          return Boolean(selection.anchorNode === anchorNode && selection.anchorOffset === anchorOffset &&
+            selection.focusNode === focusNode && selection.focusOffset === focusOffset &&
+            selection.rangeCount && isRangeInside(selection.getRangeAt(0), editor));
+        }
+
+        function restoreSelectionSnapshot(editor, snapshot) {
+          if (!setDirectionalSelection(
+            editor,
+            snapshot.anchorNode,
+            snapshot.anchorOffset,
+            snapshot.focusNode,
+            snapshot.focusOffset
+          )) {
+            setSelectionRange(editor, snapshot.range);
+          }
+          saveSelection(editor);
         }
 
         function execEditCommand(editor, command) {
