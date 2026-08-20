@@ -191,8 +191,76 @@ export function getRichTextShortcutsScript(): string {
             ? moveSelectionToLogicalLineBoundary(editor, alter, direction)
             : moveSelectionWithModify(editor, alter, direction, granularity);
           if (moved) {
+            if (granularity === 'line') {
+              scrollSelectionFocusIntoView(editor);
+            }
             notifySelectionChanged(editor);
           }
+        }
+
+        function scrollSelectionFocusIntoView(editor) {
+          var selection = getSelection(editor);
+          if (!selection || !isNodeInside(selection.focusNode, editor) ||
+            typeof editor.getBoundingClientRect !== 'function') {
+            return;
+          }
+          var focusRange = document.createRange();
+          try {
+            focusRange.setStart(selection.focusNode, selection.focusOffset);
+            focusRange.collapse(true);
+          } catch (error) {
+            return;
+          }
+          var caretRect = getVisibleRangeRect(focusRange);
+          if (!caretRect) { return; }
+
+          var editorRect = editor.getBoundingClientRect();
+          var viewportTop = editorRect.top + (Number(editor.clientTop) || 0);
+          var viewportBottom = viewportTop + (Number(editor.clientHeight) || 0);
+          if (!Number.isFinite(viewportTop) || !Number.isFinite(viewportBottom) || viewportBottom <= viewportTop) {
+            return;
+          }
+
+          var edgePadding = 2;
+          var scrollDelta = 0;
+          if (caretRect.top < viewportTop + edgePadding) {
+            scrollDelta = caretRect.top - viewportTop - edgePadding;
+          } else if (caretRect.bottom > viewportBottom - edgePadding) {
+            scrollDelta = caretRect.bottom - viewportBottom + edgePadding;
+          }
+          if (!scrollDelta) { return; }
+
+          var maximumScrollTop = Math.max(0,
+            (Number(editor.scrollHeight) || 0) - (Number(editor.clientHeight) || 0));
+          var nextScrollTop = Math.max(0, Math.min(maximumScrollTop,
+            (Number(editor.scrollTop) || 0) + scrollDelta));
+          editor.scrollTop = nextScrollTop;
+        }
+
+        function getVisibleRangeRect(range) {
+          var rect = null;
+          if (range && typeof range.getBoundingClientRect === 'function') {
+            try {
+              rect = range.getBoundingClientRect();
+            } catch (error) {
+              rect = null;
+            }
+          }
+          if (!isUsableVerticalRect(rect) && range && typeof range.getClientRects === 'function') {
+            try {
+              var rects = range.getClientRects();
+              if (rects && rects.length) {
+                rect = rects[rects.length - 1];
+              }
+            } catch (error) {
+              rect = null;
+            }
+          }
+          return isUsableVerticalRect(rect) ? rect : null;
+        }
+
+        function isUsableVerticalRect(rect) {
+          return Boolean(rect && Number.isFinite(rect.top) && Number.isFinite(rect.bottom) && rect.bottom > rect.top);
         }
 
         function pageDownSelection() {

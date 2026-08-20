@@ -9,6 +9,8 @@ class FakeText {
   readonly nodeType = 3;
   readonly childNodes: FakeNode[] = [];
   parentNode: FakeElement | null = null;
+  layoutHeight = 16;
+  layoutTop = 0;
 
   constructor(public nodeValue: string) {}
 }
@@ -17,6 +19,11 @@ class FakeElement {
   readonly nodeType = 1;
   readonly childNodes: FakeNode[] = [];
   parentNode: FakeElement | null = null;
+  clientHeight = 100;
+  clientTop = 0;
+  layoutTop = 0;
+  scrollHeight = 100;
+  scrollTop = 0;
   private readonly attributes = new Map<string, string>();
 
   constructor(readonly tagName: string) {}
@@ -41,6 +48,13 @@ class FakeElement {
   }
 
   focus(): void {}
+
+  getBoundingClientRect(): { bottom: number; top: number } {
+    return {
+      top: this.layoutTop,
+      bottom: this.layoutTop + this.clientHeight
+    };
+  }
 
   getAttribute(name: string): string | null {
     return this.attributes.get(name) ?? null;
@@ -117,6 +131,18 @@ class FakeRange {
     clone.endOffset = this.endOffset;
     return clone;
   }
+
+  getBoundingClientRect(): { bottom: number; top: number } {
+    const top = this.startContainer.layoutTop;
+    const height = this.startContainer instanceof FakeText
+      ? this.startContainer.layoutHeight
+      : 16;
+    return { top, bottom: top + height };
+  }
+
+  getClientRects(): Array<{ bottom: number; top: number }> {
+    return [this.getBoundingClientRect()];
+  }
 }
 
 class FakeSelection {
@@ -125,6 +151,7 @@ class FakeSelection {
   focusNode: FakeNode | FakeElement | null = null;
   focusOffset = 0;
   rangeCount = 0;
+  modifyHandler: ((alter: string, direction: string, granularity: string) => void) | null = null;
 
   get isCollapsed(): boolean {
     return this.anchorNode === this.focusNode && this.anchorOffset === this.focusOffset;
@@ -166,6 +193,10 @@ class FakeSelection {
     this.focusNode = focusNode;
     this.focusOffset = focusOffset;
     this.rangeCount = 1;
+  }
+
+  modify(alter: string, direction: string, granularity: string): void {
+    this.modifyHandler?.(alter, direction, granularity);
   }
 }
 
@@ -384,4 +415,32 @@ test('Ctrl+K selects only through the current logical line end', () => {
   assert.equal(cut.anchorOffset, 1);
   assert.equal(cut.focusNode, editor);
   assert.equal(cut.focusOffset, 1);
+});
+
+test('Ctrl+P/N scroll the editor just enough to keep the moved focus visible', () => {
+  const upper = text('upper');
+  upper.layoutTop = -16;
+  const current = text('current');
+  current.layoutTop = 40;
+  const lower = text('lower');
+  lower.layoutTop = 120;
+  const editor = element('DIV', upper, current, lower);
+  editor.clientHeight = 100;
+  editor.scrollHeight = 400;
+  const harness = createShortcutHarness(editor);
+
+  harness.selection.modifyHandler = (_alter, direction, granularity) => {
+    assert.equal(granularity, 'line');
+    const target = direction === 'forward' ? lower : upper;
+    harness.selection.setBaseAndExtent(target, 0, target, 0);
+  };
+
+  harness.setCaret(current, 0);
+  harness.press('n', 'KeyN');
+  assert.equal(editor.scrollTop, 38);
+
+  editor.scrollTop = 100;
+  harness.setCaret(current, 0);
+  harness.press('p', 'KeyP');
+  assert.equal(editor.scrollTop, 82);
 });
