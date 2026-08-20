@@ -204,10 +204,13 @@ interface ShortcutHarness {
   controller: {
     handleKeydown(event: Record<string, unknown>): boolean;
     deactivateMark(): void;
+    isMarkActive(): boolean;
   };
   cutSelection: (() => { anchorNode: FakeNode | FakeElement; anchorOffset: number; focusNode: FakeNode | FakeElement; focusOffset: number }) | null;
+  editedCount: number;
   editor: FakeElement;
-  press(key: string, code: string, overrides?: Record<string, unknown>): void;
+  executedCommands: string[];
+  press(key: string, code: string, overrides?: Record<string, unknown>): boolean;
   selection: FakeSelection;
   setCaret(node: FakeNode | FakeElement, offset: number): void;
 }
@@ -225,14 +228,20 @@ function createShortcutHarness(editor: FakeElement): ShortcutHarness {
   const harness: ShortcutHarness = {
     controller: undefined as unknown as ShortcutHarness['controller'],
     cutSelection: null,
+    editedCount: 0,
     editor,
-    press: () => undefined,
+    executedCommands: [],
+    press: () => false,
     selection,
     setCaret: () => undefined
   };
   const document = {
     createRange: () => new FakeRange(editor),
     execCommand: (command: string) => {
+      harness.executedCommands.push(command);
+      if (command === 'undo') {
+        return true;
+      }
       if (command !== 'cut' || !selection.anchorNode || !selection.focusNode || selection.isCollapsed) {
         return false;
       }
@@ -275,7 +284,7 @@ function createShortcutHarness(editor: FakeElement): ShortcutHarness {
     saveSelection: () => undefined,
     restoreSelection: () => undefined,
     onSelectionChanged: () => undefined,
-    onEdited: () => undefined
+    onEdited: () => { harness.editedCount += 1; }
   });
   harness.setCaret = (node, offset) => {
     const range = new FakeRange(node);
@@ -285,7 +294,7 @@ function createShortcutHarness(editor: FakeElement): ShortcutHarness {
     selection.addRange(range);
   };
   harness.press = (key, code, overrides = {}) => {
-    harness.controller.handleKeydown({
+    return harness.controller.handleKeydown({
       key,
       code,
       ctrlKey: true,
@@ -443,4 +452,78 @@ test('Ctrl+P/N scroll the editor just enough to keep the moved focus visible', (
   harness.setCaret(current, 0);
   harness.press('p', 'KeyP');
   assert.equal(editor.scrollTop, 82);
+});
+
+test('Alt+Shift+< and Alt+Shift+> move to editor boundaries and preserve Mark anchor', () => {
+  const content = text('first\nsecond\nlast');
+  const editor = element('DIV', content);
+  editor.clientHeight = 100;
+  editor.scrollHeight = 400;
+  editor.scrollTop = 180;
+  const harness = createShortcutHarness(editor);
+
+  harness.setCaret(content, 8);
+  assert.equal(harness.press('¯', 'Comma', { ctrlKey: false, altKey: true, shiftKey: true }), true);
+  assert.equal(harness.selection.focusNode, editor);
+  assert.equal(harness.selection.focusOffset, 0);
+  assert.equal(editor.scrollTop, 0);
+
+  harness.setCaret(content, 8);
+  assert.equal(harness.press('˘', 'Period', { ctrlKey: false, altKey: true, shiftKey: true }), true);
+  assert.equal(harness.selection.focusNode, editor);
+  assert.equal(harness.selection.focusOffset, 1);
+  assert.equal(editor.scrollTop, 300);
+
+  harness.setCaret(content, 8);
+  harness.press(' ', 'Space');
+  harness.press('<', 'Comma', { ctrlKey: false, altKey: true, shiftKey: true });
+  assert.equal(harness.selection.anchorNode, content);
+  assert.equal(harness.selection.anchorOffset, 8);
+  assert.equal(harness.selection.focusNode, editor);
+  assert.equal(harness.selection.focusOffset, 0);
+  harness.press('>', 'Period', { ctrlKey: false, altKey: true, shiftKey: true });
+  assert.equal(harness.selection.anchorNode, content);
+  assert.equal(harness.selection.anchorOffset, 8);
+  assert.equal(harness.selection.focusNode, editor);
+  assert.equal(harness.selection.focusOffset, 1);
+});
+
+test('Emacs boundary shortcuts ignore IME composition, unrelated punctuation and old modifiers', () => {
+  const content = text('content');
+  const editor = element('DIV', content);
+  const harness = createShortcutHarness(editor);
+  harness.setCaret(content, 3);
+
+  assert.equal(harness.press('<', 'Comma', {
+    ctrlKey: false,
+    altKey: true,
+    shiftKey: true,
+    isComposing: true
+  }), false);
+  assert.equal(harness.press('>', 'Period', {
+    ctrlKey: false,
+    altKey: true,
+    shiftKey: true,
+    keyCode: 229
+  }), false);
+  assert.equal(harness.press('＜', 'IntlBackslash', { ctrlKey: false, altKey: true, shiftKey: true }), false);
+  assert.equal(harness.press('<', 'Comma', { shiftKey: true }), false);
+  assert.equal(harness.press('>', 'Period', { shiftKey: true }), false);
+  assert.equal(harness.press('＿', 'Minus', { shiftKey: true }), false);
+  assert.equal(harness.selection.focusNode, content);
+  assert.equal(harness.selection.focusOffset, 3);
+  assert.deepEqual(harness.executedCommands, []);
+});
+
+test('Ctrl+Shift+_ runs one undo through the contenteditable history', () => {
+  const content = text('content');
+  const harness = createShortcutHarness(element('DIV', content));
+  harness.setCaret(content, 4);
+  harness.press(' ', 'Space');
+  assert.equal(harness.controller.isMarkActive(), true);
+
+  assert.equal(harness.press('_', 'Minus', { shiftKey: true }), true);
+  assert.deepEqual(harness.executedCommands, ['undo']);
+  assert.equal(harness.editedCount, 1);
+  assert.equal(harness.controller.isMarkActive(), false);
 });

@@ -50,6 +50,7 @@ export function getRichTextShortcutsScript(): string {
         }
 
         function handleKeydown(event) {
+          if (!event || event.isComposing || event.keyCode === 229) { return false; }
           return handleSystemShortcut(event) || handleEmacsShortcut(event);
         }
 
@@ -62,6 +63,15 @@ export function getRichTextShortcutsScript(): string {
 
         function handleEmacsShortcut(event) {
           if (event.metaKey) { return false; }
+          if (isAltShiftBoundaryShortcut(event, '<', 'Comma')) {
+            return runShortcut(event, function() { moveSelectionToEditorBoundary('backward'); });
+          }
+          if (isAltShiftBoundaryShortcut(event, '>', 'Period')) {
+            return runShortcut(event, function() { moveSelectionToEditorBoundary('forward'); });
+          }
+          if (isCtrlShiftAsciiShortcut(event, '_')) {
+            return runShortcut(event, undoEdit);
+          }
           if (isSetMarkShortcut(event)) {
             return runShortcut(event, setMark);
           }
@@ -121,6 +131,15 @@ export function getRichTextShortcutsScript(): string {
 
         function isShortcutKey(event, key) {
           return String(event.key || '').toLowerCase() === key || event.code === 'Key' + key.toUpperCase();
+        }
+
+        function isCtrlShiftAsciiShortcut(event, key) {
+          return Boolean(event.ctrlKey && event.shiftKey && !event.metaKey && !event.altKey && event.key === key);
+        }
+
+        function isAltShiftBoundaryShortcut(event, key, code) {
+          return Boolean(event.altKey && event.shiftKey && !event.metaKey && !event.ctrlKey &&
+            (event.code === code || event.key === key));
         }
 
         function isSetMarkShortcut(event) {
@@ -196,6 +215,21 @@ export function getRichTextShortcutsScript(): string {
             }
             notifySelectionChanged(editor);
           }
+        }
+
+        function moveSelectionToEditorBoundary(direction) {
+          var editor = getEditor();
+          if (!editor) { return; }
+          var boundary = document.createRange();
+          boundary.selectNodeContents(editor);
+          boundary.collapse(direction === 'backward');
+          if (!moveSelectionToBoundaryRange(editor, markActive ? 'extend' : 'move', boundary)) {
+            return;
+          }
+          editor.scrollTop = direction === 'backward'
+            ? 0
+            : Math.max(0, (Number(editor.scrollHeight) || 0) - (Number(editor.clientHeight) || 0));
+          notifySelectionChanged(editor);
         }
 
         function scrollSelectionFocusIntoView(editor) {
@@ -285,6 +319,12 @@ export function getRichTextShortcutsScript(): string {
           selection = getSelection(editor);
           if (!selection || selection.isCollapsed) { return; }
           execEditCommand(editor, 'delete');
+        }
+
+        function undoEdit() {
+          var editor = getEditor();
+          if (!editor) { return; }
+          execEditCommand(editor, 'undo');
         }
 
         function killLine() {
@@ -396,6 +436,15 @@ export function getRichTextShortcutsScript(): string {
         function moveSelectionToLogicalLineBoundary(editor, alter, direction) {
           var selection = getSelection(editor);
           if (!selection || !isNodeInside(selection.focusNode, editor)) { return false; }
+          var boundary = direction === 'backward'
+            ? findLogicalLineStart(editor, selection.focusNode, selection.focusOffset)
+            : findLogicalLineEnd(editor, selection.focusNode, selection.focusOffset);
+          return moveSelectionToBoundaryRange(editor, alter, boundary);
+        }
+
+        function moveSelectionToBoundaryRange(editor, alter, boundary) {
+          var selection = getSelection(editor);
+          if (!selection || !boundary || !isRangeInside(boundary, editor)) { return false; }
           var previous = {
             anchorNode: selection.anchorNode,
             anchorOffset: selection.anchorOffset,
@@ -403,11 +452,6 @@ export function getRichTextShortcutsScript(): string {
             focusOffset: selection.focusOffset,
             range: selection.getRangeAt(0).cloneRange()
           };
-          var boundary = direction === 'backward'
-            ? findLogicalLineStart(editor, selection.focusNode, selection.focusOffset)
-            : findLogicalLineEnd(editor, selection.focusNode, selection.focusOffset);
-          if (!boundary || !isRangeInside(boundary, editor)) { return false; }
-
           var didSetSelection = alter === 'extend'
             ? setDirectionalSelection(
               editor,
