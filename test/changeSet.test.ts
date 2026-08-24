@@ -147,9 +147,11 @@ test('opens a pending edit file that exists inside the workspace', async (t) => 
   const targetPath = path.join(root, 'open.ts');
   await writeFile(targetPath, 'export const open = true;\n', 'utf8');
   const previousWorkspaceFolders = vscode.workspace.workspaceFolders;
-  vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(root), name: 'keepseek-test' }];
+  (vscode.workspace as { workspaceFolders: typeof vscode.workspace.workspaceFolders }).workspaceFolders = [
+    { uri: vscode.Uri.file(root), name: 'keepseek-test', index: 0 }
+  ];
   t.after(() => {
-    vscode.workspace.workspaceFolders = previousWorkspaceFolders;
+    (vscode.workspace as { workspaceFolders: typeof vscode.workspace.workspaceFolders }).workspaceFolders = previousWorkspaceFolders;
   });
   const fixture = createStoreFixture(root);
   const changeSet = fixture.store.addDraftEdits({

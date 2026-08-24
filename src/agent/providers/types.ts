@@ -6,6 +6,7 @@ import type {
   DeepSeekChatRequestBody,
   DeepSeekUsage
 } from '../deepseek/types';
+import type { OpenAiResponsesItem, OpenAiResponsesRequestBody } from './responsesTypes';
 
 export type ProviderClientFailureKind =
   | 'http'
@@ -26,7 +27,7 @@ export interface ProviderClientConfig {
 }
 
 export interface ProviderClientRequest {
-  body: DeepSeekChatRequestBody;
+  body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody;
   language: KeepseekLanguage;
   signal?: AbortSignal;
   callbacks?: AgentRunCallbacks;
@@ -47,14 +48,15 @@ export interface ProviderClientResult {
   status?: number;
   attemptCount?: number;
   retryCount?: number;
+  nativeOutputItems?: OpenAiResponsesItem[];
 }
 
 /**
  * 上游模型客户端的统一协议边界。每种账号类型（deepseek / ollama /
- * openai-compatible）提供自己的实现，由 providers/factory 按类型分发。
+ * openai-compatible / openai-responses）由 providers/factory 按类型分发。
  */
 export interface ProviderClient {
-  createChatCompletion(
+  createModelResponse(
     config: ProviderClientConfig,
     request: ProviderClientRequest
   ): Promise<ProviderClientResult>;

@@ -19,6 +19,8 @@ export interface HistoryProjectionInput {
   settings: ContextCompressionSettings;
   /** Determines whether ordinary final assistant reasoning is provider-visible. */
   requestProtocolVersion?: number;
+  /** Count provider-native replay only for a Responses request lane. */
+  includeProviderReplay?: boolean;
   /** Optional fallback cap: when no summary is available (refreshes keep failing)
    *  and the projection exceeds this token budget, truncate to the recent window
    *  instead of growing without bound. Omit on normal paths. */
@@ -90,7 +92,8 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
     ? capProjectionToTokenBudget(
         projectedHistory,
         input.maxProjectionTokens,
-        input.requestProtocolVersion ?? 1
+        input.requestProtocolVersion ?? 1,
+        input.includeProviderReplay === true
       )
     : projectedHistory;
 
@@ -116,7 +119,8 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
 function capProjectionToTokenBudget(
   messages: ChatMessage[],
   maxTokens: number,
-  requestProtocolVersion: number
+  requestProtocolVersion: number,
+  includeProviderReplay: boolean
 ): ChatMessage[] {
   // Keeps only the most recent tail. In this degraded mode even protected messages
   // may be dropped: staying inside the model context window wins over protection
@@ -126,7 +130,11 @@ function capProjectionToTokenBudget(
   const capped: ChatMessage[] = [];
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    tokenCount += estimateProjectedChatMessageTokens(message, requestProtocolVersion);
+    tokenCount += estimateProjectedChatMessageTokens(
+      message,
+      requestProtocolVersion,
+      includeProviderReplay
+    );
     if (tokenCount > maxTokens && capped.length) {
       break;
     }
@@ -135,7 +143,11 @@ function capProjectionToTokenBudget(
   return capped;
 }
 
-function estimateProjectedChatMessageTokens(message: ChatMessage, requestProtocolVersion: number): number {
+function estimateProjectedChatMessageTokens(
+  message: ChatMessage,
+  requestProtocolVersion: number,
+  includeProviderReplay = false
+): number {
   const content = (message.providerContent ?? message.expandedContent ?? message.content).trim();
   let tokens = estimateTokenCount(`${message.role}\n${content}`) + 4;
   if (message.role !== 'assistant') {
@@ -155,7 +167,10 @@ function estimateProjectedChatMessageTokens(message: ChatMessage, requestProtoco
       tokens += estimateTokenCount(`tool\n${result.toolCallId}\n${result.content}`) + 4;
     }
   }
-  return tokens;
+  const replayTokens = includeProviderReplay && message.providerReplay?.items.length
+    ? estimateTokenCount(JSON.stringify(message.providerReplay.items)) + message.providerReplay.items.length * 4
+    : 0;
+  return Math.max(tokens, replayTokens);
 }
 
 export function getAutoProtectedMessageIds(

@@ -44,6 +44,9 @@ export class ModelSourceService {
       : undefined;
     let source = existingById;
     let reusedSource = Boolean(source);
+    if (source && source.provider !== input.provider) {
+      throw new Error('An account API protocol cannot be changed. Create a new account for the other protocol.');
+    }
 
     if (!source) {
       const name = normalizeRequiredSourceName(input.name);
@@ -74,7 +77,7 @@ export class ModelSourceService {
       source = await this.upsertModel(source, modelId);
     }
 
-    const discovery = isOfficialDeepSeekSource(source)
+    const discovery = shouldRefreshAfterSave(source)
       ? await this.refreshModelCache(this.sourceStore, source.id, { force: true })
       : undefined;
     return {
@@ -122,7 +125,7 @@ export class ModelSourceService {
     if (!updated) {
       throw new Error('Model source not found.');
     }
-    const discovery = isOfficialDeepSeekSource(updated)
+    const discovery = shouldRefreshAfterSave(updated)
       ? await this.refreshModelCache(this.sourceStore, updated.id, { force: true })
       : undefined;
     return {
@@ -175,6 +178,10 @@ export class ModelSourceService {
     }
     return updated;
   }
+}
+
+function shouldRefreshAfterSave(source: Pick<ModelSource, 'provider' | 'baseUrl'>): boolean {
+  return isOfficialDeepSeekSource(source) || source.provider === 'openai-responses';
 }
 
 function normalizeRequiredBaseUrl(rawBaseUrl: string): string {

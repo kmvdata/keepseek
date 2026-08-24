@@ -47,9 +47,9 @@ test('separates compile/lint and test authorization scopes per run', () => {
   });
 });
 
-test('delete, unknown, and high-risk Git mutation tools fail closed', () => {
+test('delete preparation stays low risk while unknown and Git mutations fail closed', () => {
   assert.deepEqual(getToolAuthorizationMetadata(DELETE_WORKSPACE_FILE_TOOL_NAME), {
-    riskLevel: 'high',
+    riskLevel: 'low',
     scope: 'workspace_write'
   });
   assert.deepEqual(getToolAuthorizationMetadata('keepseek_git_commit'), {

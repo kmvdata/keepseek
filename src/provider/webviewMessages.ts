@@ -1,5 +1,6 @@
 import type { KeepseekLanguage } from '../shared/i18n';
 import type { AgentSettings, SafeNpmScript } from '../shared/types';
+import type { ModelSourceProvider } from '../accounts/types';
 
 export interface PromptReferenceInput {
   path: string;
@@ -52,7 +53,7 @@ export type WebviewMessage =
   | {
       type: 'addModel';
       sourceId?: string;
-      provider: 'deepseek' | 'ollama' | 'openai-compatible';
+      provider: ModelSourceProvider;
       name?: string;
       apiKey: string;
       baseUrl: string;
@@ -62,7 +63,7 @@ export type WebviewMessage =
   | { type: 'saveModelSource'; sourceId: string; name?: string; apiKey: string; baseUrl: string }
   | { type: 'deleteModelSource'; sourceId: string }
   | { type: 'refreshSourceModels'; sourceId: string }
-  | { type: 'testSourceConnection'; provider: 'deepseek' | 'ollama' | 'openai-compatible'; apiKey: string; baseUrl: string }
+  | { type: 'testSourceConnection'; provider: ModelSourceProvider; apiKey: string; baseUrl: string }
   | {
       type: 'saveHistorySettings';
       historyRetentionDays?: number;

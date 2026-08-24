@@ -14,7 +14,7 @@ export class OllamaClient extends OpenAICompatibleClient {
     });
   }
 
-  protected getChatCompletionsUrl(rawBaseUrl: string): string {
+  protected getRequestUrl(rawBaseUrl: string): string {
     const url = new URL(rawBaseUrl || this.defaultBaseUrl);
     const cleanPath = url.pathname.replace(/\/+$/u, '');
 

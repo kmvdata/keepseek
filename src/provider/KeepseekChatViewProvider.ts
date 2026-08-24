@@ -41,7 +41,13 @@ import {
 } from '../shared/types';
 import { markTaskPlanReadyForValidation } from '../agent/taskPlan';
 import { getConfiguredKeepseekLanguage, getKeepseekLanguageName, localize, normalizeKeepseekLanguage } from '../shared/i18n';
-import { ChatSessionStore, createSessionTitle, getCurrentWorkspaceSessionScope, getVisibleMessages } from '../sessions/chatSessionStore';
+import {
+  ChatSessionStore,
+  createSessionTitle,
+  getCurrentWorkspaceSessionScope,
+  getVisibleMessages,
+  normalizeOpenAiResponsesReplay
+} from '../sessions/chatSessionStore';
 import {
   createDisplayedSessionContextUsageEstimate,
   finalizeSessionContextUsageEstimate,
@@ -130,7 +136,8 @@ import { ModelSourceService } from '../accounts/modelSourceService';
 import { isOfficialDeepSeekSource } from '../accounts/sourceCapabilities';
 import type {
   ModelSource,
-  ModelSourceConfigSnapshot
+  ModelSourceConfigSnapshot,
+  ModelSourceProvider
 } from '../accounts/types';
 
 const CHAT_CONTAINER_ID = 'keepseek-sidebar';
@@ -1135,7 +1142,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       slimToolNames: activeSession.requestProtocol?.toolNames.length
         ? activeSession.requestProtocol.toolNames
         : this.slimToolNamesBySession.get(activeSession.id),
-      requestProtocolVersion: activeSession.requestProtocol?.version
+      requestProtocolVersion: activeSession.requestProtocol?.version,
+      provider: model.provider === 'openai-responses' ? 'openai-responses' : undefined,
+      sourceId: activeSession.requestProtocol?.sourceId ?? model.sourceId,
+      baseUrl: activeSession.requestProtocol?.baseUrl
     });
   }
 
@@ -1815,7 +1825,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private async addModel(input: {
     sourceId?: string;
-    provider: 'deepseek' | 'ollama' | 'openai-compatible';
+    provider: ModelSourceProvider;
     name?: string;
     apiKey: string;
     baseUrl: string;
@@ -3112,6 +3122,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (response.toolRounds?.length) {
           assistantMessage.toolRounds = response.toolRounds;
         }
+        const providerReplay = normalizeOpenAiResponsesReplay(response.providerReplay);
+        if (providerReplay) {
+          assistantMessage.providerReplay = providerReplay;
+        }
         delete assistantMessage.isStreaming;
         assistantMessage.runDetails = response.runDetails;
       }
@@ -3333,7 +3347,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       contextCompression: activeSession.contextCompression,
       language: this.language,
       slimToolNames: activeSession.requestProtocol?.toolNames,
-      requestProtocolVersion: activeSession.requestProtocol?.version
+      requestProtocolVersion: activeSession.requestProtocol?.version,
+      provider: selectedModel.provider === 'openai-responses' ? 'openai-responses' : undefined,
+      sourceId: activeSession.requestProtocol?.sourceId ?? selectedModel.sourceId,
+      baseUrl: activeSession.requestProtocol?.baseUrl
     });
     const contextUsage = pickLargerContextUsageEstimate(
       pickLargerContextUsageEstimate(activeSession.contextUsage, computedContextUsage),

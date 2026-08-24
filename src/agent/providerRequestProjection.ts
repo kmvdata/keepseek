@@ -1,4 +1,5 @@
 import type { KeepseekLanguage } from '../shared/i18n';
+import type { ModelSourceProvider } from '../accounts/types';
 import type {
   AgentSettings,
   ChatMessage,
@@ -10,9 +11,15 @@ import type {
 import { getConfiguredSlimToolModeEnabled } from '../shared/config';
 import { getDeepSeekV4RuntimeProfile } from '../shared/modelProfiles';
 import type { DeepSeekFunctionTool, DeepSeekMessage } from './deepseek/types';
+import type {
+  OpenAiResponsesFunctionTool,
+  OpenAiResponsesItem
+} from './providers/responsesTypes';
+import { getOpenAiResponsesEndpointUrl } from './providers/openAiResponsesClient';
 import { buildHistoryProjection, type HistoryProjectionResult } from './historyProjection';
 import {
   buildInitialAgentMessages,
+  getMessageContentForAgent,
   getAgentToolNamesForPrompt,
   getAgentTools
 } from './protocol';
@@ -35,6 +42,18 @@ export interface ProviderRequestProjectionInput {
   requestProtocolVersion?: number;
   includeTools?: boolean;
   maxProjectionTokens?: number;
+  provider?: ModelSourceProvider;
+  sourceId?: string;
+  baseUrl?: string;
+}
+
+export interface OpenAiResponsesRequestProjection {
+  input: OpenAiResponsesItem[];
+  tools: OpenAiResponsesFunctionTool[];
+  lane: {
+    sourceId: string;
+    baseUrl: string;
+  };
 }
 
 export interface ProviderRequestProjection {
@@ -43,6 +62,7 @@ export interface ProviderRequestProjection {
   toolNames: string[];
   historyProjection: HistoryProjectionResult;
   requestProtocolVersion: number;
+  responses?: OpenAiResponsesRequestProjection;
 }
 
 /**
@@ -56,6 +76,9 @@ export function buildProviderRequestProjection(
 ): ProviderRequestProjection {
   const profile = getDeepSeekV4RuntimeProfile(input.model, input.agentSettings);
   const requestProtocolVersion = normalizeRequestProtocolVersion(input.requestProtocolVersion);
+  const provider = input.provider ?? (input.model.provider === 'openai-responses'
+    ? 'openai-responses'
+    : undefined);
   const historyProjection = buildHistoryProjection({
     history: input.history,
     prompt: input.prompt,
@@ -63,7 +86,8 @@ export function buildProviderRequestProjection(
     contextCompression: input.contextCompression,
     settings: profile.contextCompression,
     requestProtocolVersion,
-    maxProjectionTokens: input.maxProjectionTokens
+    maxProjectionTokens: input.maxProjectionTokens,
+    includeProviderReplay: provider === 'openai-responses'
   });
   const messages = buildInitialAgentMessages({
     prompt: input.prompt,
@@ -84,14 +108,120 @@ export function buildProviderRequestProjection(
       ))]
     : [];
   const tools = includeTools ? getAgentTools({ toolNames }) : [];
+  const responses = provider === 'openai-responses'
+    ? buildOpenAiResponsesRequestProjection({
+        messages,
+        tools,
+        history: historyProjection.history,
+        prompt: input.prompt,
+        sourceId: input.sourceId ?? input.model.sourceId ?? '',
+        baseUrl: input.baseUrl ?? ''
+      })
+    : undefined;
 
   return {
     messages,
     tools,
     toolNames,
     historyProjection,
-    requestProtocolVersion
+    requestProtocolVersion,
+    responses
   };
+}
+
+function buildOpenAiResponsesRequestProjection(input: {
+  messages: DeepSeekMessage[];
+  tools: DeepSeekFunctionTool[];
+  history: ChatMessage[];
+  prompt: string;
+  sourceId: string;
+  baseUrl: string;
+}): OpenAiResponsesRequestProjection {
+  const lane = {
+    sourceId: input.sourceId,
+    baseUrl: normalizeOpenAiResponsesLaneBaseUrl(input.baseUrl)
+  };
+  const responseInput: OpenAiResponsesItem[] = [];
+
+  // System/context/summary messages are already ordered by the authoritative
+  // Chat projection. They contain no tool rounds, so projecting just this stable
+  // prefix cannot alter the legacy Chat Completions serialization.
+  for (const message of input.messages) {
+    if (message.role !== 'system' || typeof message.content !== 'string' || !message.content) {
+      continue;
+    }
+    responseInput.push({ role: 'system', content: message.content });
+  }
+
+  let currentPromptIncluded = false;
+  const normalizedPrompt = input.prompt.trim();
+  for (const message of input.history) {
+    if (message.role === 'user') {
+      const content = getMessageContentForAgent(message);
+      if (!content) {
+        continue;
+      }
+      responseInput.push({ role: 'user', content });
+      const originalContent = (message.expandedContent ?? message.content).trim();
+      currentPromptIncluded = currentPromptIncluded || Boolean(normalizedPrompt
+        && (content === normalizedPrompt
+          || originalContent === normalizedPrompt
+          || message.content.trim() === normalizedPrompt));
+      continue;
+    }
+
+    if (isReplayInLane(message, lane)) {
+      // Persisted objects are appended without rebuilding or key reordering.
+      responseInput.push(...message.providerReplay?.items ?? []);
+      continue;
+    }
+
+    const visibleContent = getMessageContentForAgent(message);
+    if (visibleContent) {
+      // At a provider-lane boundary only visible text survives. Standard
+      // toolRounds and orphan function outputs must not cross the boundary.
+      responseInput.push({ role: 'assistant', content: visibleContent });
+    }
+  }
+
+  if (normalizedPrompt && !currentPromptIncluded) {
+    responseInput.push({ role: 'user', content: normalizedPrompt });
+  }
+
+  return {
+    input: responseInput,
+    tools: toOpenAiResponsesTools(input.tools),
+    lane
+  };
+}
+
+export function toOpenAiResponsesTools(
+  tools: DeepSeekFunctionTool[]
+): OpenAiResponsesFunctionTool[] {
+  return tools.map((tool) => ({
+      type: 'function',
+      name: tool.function.name,
+      description: tool.function.description,
+      parameters: tool.function.parameters,
+      strict: tool.function.strict ?? false
+    }));
+}
+
+function isReplayInLane(
+  message: ChatMessage,
+  lane: OpenAiResponsesRequestProjection['lane']
+): boolean {
+  return message.providerReplay?.protocol === 'openai-responses'
+    && message.providerReplay.sourceId === lane.sourceId
+    && normalizeOpenAiResponsesLaneBaseUrl(message.providerReplay.baseUrl) === lane.baseUrl;
+}
+
+export function normalizeOpenAiResponsesLaneBaseUrl(rawBaseUrl: string): string {
+  try {
+    return getOpenAiResponsesEndpointUrl(rawBaseUrl).replace(/#.*$/u, '');
+  } catch {
+    return rawBaseUrl.trim().replace(/\/+$/u, '');
+  }
 }
 
 function normalizeRequestProtocolVersion(value: number | undefined): number {

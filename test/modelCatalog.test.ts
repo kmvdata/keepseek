@@ -149,6 +149,46 @@ describe('ModelSourceService', () => {
     }), /HTTP 401/u);
     assert.equal((await store.listSources()).length, 0);
   });
+
+  it('keeps Chat Completions and Responses credentials in distinct accounts and refreshes Responses models', async () => {
+    const ids = ['chat-account', 'responses-account'];
+    const store = new ModelSourceStore(vscode.Uri.file(storageRoot), {
+      now: () => NOW,
+      createId: () => ids.shift() ?? 'fallback'
+    });
+    const refreshCalls: string[] = [];
+    const service = new ModelSourceService(
+      store,
+      async (_store, sourceId) => {
+        refreshCalls.push(sourceId);
+        return { status: 'fresh', cache: { fetchedAt: NOW, models: [{ id: 'model' }] } };
+      },
+      async () => ({ ok: true, status: 200 })
+    );
+    const chat = await service.addModel({
+      provider: 'openai-compatible', name: 'Chat', apiKey: 'same-key', baseUrl: 'https://api.example/v1'
+    });
+    const responses = await service.addModel({
+      provider: 'openai-responses', name: 'Responses', apiKey: 'same-key', baseUrl: 'https://api.example/v1'
+    });
+    assert.notEqual(chat.source.id, responses.source.id);
+    assert.equal(responses.reusedSource, false);
+    const reusedResponses = await service.addModel({
+      provider: 'openai-responses',
+      name: 'Responses alias',
+      apiKey: 'same-key',
+      baseUrl: 'https://api.example/v1/'
+    });
+    assert.equal(reusedResponses.source.id, responses.source.id);
+    assert.equal(reusedResponses.reusedSource, true);
+    assert.deepEqual(refreshCalls, ['responses-account', 'responses-account']);
+    await assert.rejects(service.addModel({
+      sourceId: responses.source.id,
+      provider: 'openai-compatible',
+      apiKey: 'same-key',
+      baseUrl: 'https://api.example/v1'
+    }), /protocol cannot be changed/iu);
+  });
 });
 
 function createSource(overrides: Partial<ModelSource>): ModelSource {

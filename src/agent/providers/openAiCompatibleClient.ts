@@ -6,6 +6,7 @@ import type {
   DeepSeekAssistantMessage,
   DeepSeekStreamResult
 } from '../deepseek/types';
+import type { OpenAiResponsesStreamResult } from './responsesTypes';
 import type {
   ProviderClient,
   ProviderClientConfig,
@@ -25,9 +26,9 @@ interface ClientAttemptResult extends ProviderClientResult {
 }
 
 /**
- * 通用 OpenAI 兼容上游客户端：负责 chat completions 请求、重试、
- * 流式空闲超时、运行时限与 SSE 解析，并托管所有 provider 共享的
- * 传输行为。具体账号类型通过子类或工厂参数化展示名与默认端点。
+ * 通用 OpenAI 兼容传输客户端：负责 HTTP 请求、重试、流式空闲超时、
+ * 运行时限与 SSE 生命周期。Chat Completions 使用默认端点/解析器；
+ * Responses 子类只替换协议端点与流解析器，复用相同的安全传输策略。
  */
 export class OpenAICompatibleClient implements ProviderClient {
   protected readonly displayName: string;
@@ -39,14 +40,14 @@ export class OpenAICompatibleClient implements ProviderClient {
     this.defaultBaseUrl = options.defaultBaseUrl ?? '';
   }
 
-  public async createChatCompletion(
+  public async createModelResponse(
     config: ProviderClientConfig,
     request: ProviderClientRequest
   ): Promise<ProviderClientResult> {
     const maxRetries = Math.max(0, Math.floor(config.maxRequestRetries));
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      const result = await this.createChatCompletionAttempt(config, request, attempt);
+      const result = await this.createModelResponseAttempt(config, request, attempt);
       if (result.ok || !this.shouldRetry(result, attempt, maxRetries)) {
         return {
           ...result,
@@ -80,7 +81,7 @@ export class OpenAICompatibleClient implements ProviderClient {
     };
   }
 
-  private async createChatCompletionAttempt(
+  private async createModelResponseAttempt(
     config: ProviderClientConfig,
     request: ProviderClientRequest,
     attempt: number
@@ -179,12 +180,12 @@ export class OpenAICompatibleClient implements ProviderClient {
         base: 'thinking',
         phase: 'requesting_model'
       });
-      const chatCompletionsUrl = this.getChatCompletionsUrl(config.baseUrl);
+      const requestUrl = this.getRequestUrl(config.baseUrl);
       trace?.record({
         type: 'upstream_attempt_start',
         requestId: request.requestId,
         attempt,
-        url: chatCompletionsUrl
+        url: requestUrl
       });
       const headers: Record<string, string> = {
         Accept: 'text/event-stream',
@@ -195,7 +196,7 @@ export class OpenAICompatibleClient implements ProviderClient {
       if (config.apiKey.trim()) {
         headers.Authorization = `Bearer ${config.apiKey}`;
       }
-      const response = await fetch(chatCompletionsUrl, {
+      const response = await fetch(requestUrl, {
         method: 'POST',
         headers,
         body: JSON.stringify(request.body),
@@ -250,7 +251,7 @@ export class OpenAICompatibleClient implements ProviderClient {
       }
 
       resetStreamIdleTimeout();
-      const result: DeepSeekStreamResult = await this.streamParser.parse(
+      const result = await this.parseStream(
         response.body,
         language,
         callbacks,
@@ -271,13 +272,23 @@ export class OpenAICompatibleClient implements ProviderClient {
         ok: true,
         finishReason: result.finishReason,
         usage: result.usage,
+        nativeOutputItems: 'outputItems' in result
+          ? {
+              count: result.outputItems.length,
+              types: result.outputItems.map((item) => item.type ?? 'local_message')
+            }
+          : undefined,
         message: trace.includesPayload('request') ? result.message : summarizeDeepSeekMessage(result.message)
       });
+      const normalizedMessage = 'outputItems' in result && partialReasoningParts.length
+        ? { ...result.message, reasoning_content: partialReasoningParts.join('') }
+        : result.message;
       return {
         ok: true,
         finishReason: result.finishReason,
-        message: result.message,
+        message: normalizedMessage,
         usage: result.usage,
+        nativeOutputItems: 'outputItems' in result ? result.outputItems : undefined,
         hadPartialOutput,
         hadStreamActivity,
         retryable: false
@@ -355,7 +366,9 @@ export class OpenAICompatibleClient implements ProviderClient {
       const retryable = !hadPartialOutput && !hadStreamActivity && this.isRetryableTransportError(error);
       const isEmptyStream = error instanceof Error && (
         error.message.includes('did not return any streaming chunks') ||
-        error.message.includes('未返回任何流式数据块')
+        error.message.includes('未返回任何流式数据块') ||
+        error.message.includes('did not return any streaming events') ||
+        error.message.includes('未返回任何流式事件')
       );
       trace?.record({
         type: 'upstream_attempt_finish',
@@ -485,9 +498,9 @@ export class OpenAICompatibleClient implements ProviderClient {
   }
 
   /**
-   * 拼接 /chat/completions 端点。子类可覆写以适配服务商的路径约定。
+   * 默认拼接 /chat/completions；协议子类可覆写端点推导。
    */
-  protected getChatCompletionsUrl(rawBaseUrl: string): string {
+  protected getRequestUrl(rawBaseUrl: string): string {
     const url = new URL(rawBaseUrl || this.defaultBaseUrl);
     const cleanPath = url.pathname.replace(/\/+$/u, '');
 
@@ -501,6 +514,20 @@ export class OpenAICompatibleClient implements ProviderClient {
       : cleanPath;
     url.pathname = `${basePath || ''}/chat/completions`;
     return url.toString();
+  }
+
+  protected async parseStream(
+    body: NonNullable<Response['body']>,
+    language: KeepseekLanguage,
+    callbacks: AgentRunCallbacks,
+    options: {
+      trace?: import('../logging/interactionTrace').AgentInteractionTrace;
+      requestId?: string;
+      attempt?: number;
+      onStreamActivity?: () => void;
+    }
+  ): Promise<DeepSeekStreamResult | OpenAiResponsesStreamResult> {
+    return await this.streamParser.parse(body, language, callbacks, options);
   }
 
   private isRecord(value: unknown): value is Record<string, unknown> {

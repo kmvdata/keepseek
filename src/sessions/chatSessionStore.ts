@@ -11,6 +11,8 @@ import {
   ContextCompressionState,
   HistorySummary,
   HistoryArchiveEntry,
+  OpenAiResponsesReplayItem,
+  OpenAiResponsesReplayState,
   RepairLoopState,
   SessionRequestProtocol,
   WorkspaceSummary
@@ -32,6 +34,14 @@ import {
 export const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 export const SESSION_STORAGE_VERSION = 2;
 const MAX_STORED_SESSIONS = 50;
+const MAX_PROVIDER_REPLAY_BYTES = 2_000_000;
+const MAX_PROVIDER_REPLAY_ITEMS = 1_024;
+const OPENAI_RESPONSES_REPLAY_ITEM_TYPES = new Set([
+  'message',
+  'reasoning',
+  'function_call',
+  'function_call_output'
+]);
 
 export interface StoredSessionState {
   version: number;
@@ -458,7 +468,11 @@ function copyMessage(message: ChatMessage): ChatMessage {
 }
 
 export function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
-  return messages.map(({ expandedContent: _expandedContent, ...message }) => message);
+  return messages.map(({
+    expandedContent: _expandedContent,
+    providerReplay: _providerReplay,
+    ...message
+  }) => message);
 }
 
 export function getCurrentWorkspaceSessionScope(): WorkspaceSessionScope {
@@ -595,8 +609,89 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     contextMeta: normalizeMessageContextMeta(value.contextMeta),
     usedSkills: normalizeMessageUsedSkills(value.usedSkills),
     runDetails: normalizeRunDetails(value.runDetails),
-    toolRounds: normalizeAgentToolRounds(value.toolRounds)
+    toolRounds: normalizeAgentToolRounds(value.toolRounds),
+    providerReplay: normalizeOpenAiResponsesReplay(value.providerReplay)
   };
+}
+
+export function normalizeOpenAiResponsesReplay(value: unknown): OpenAiResponsesReplayState | undefined {
+  if (!isRecord(value)
+    || value.protocol !== 'openai-responses'
+    || typeof value.sourceId !== 'string'
+    || !value.sourceId.trim()
+    || typeof value.baseUrl !== 'string'
+    || !value.baseUrl.trim()
+    || !Array.isArray(value.items)
+    || !value.items.length
+    || value.items.length > MAX_PROVIDER_REPLAY_ITEMS) {
+    return undefined;
+  }
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value.items);
+  } catch {
+    return undefined;
+  }
+  if (!serialized || Buffer.byteLength(serialized, 'utf8') > MAX_PROVIDER_REPLAY_BYTES) {
+    return undefined;
+  }
+  let items: OpenAiResponsesReplayItem[];
+  try {
+    const cloned: unknown = JSON.parse(serialized);
+    if (!Array.isArray(cloned) || !cloned.every(isValidOpenAiResponsesReplayItem)) {
+      return undefined;
+    }
+    items = cloned;
+  } catch {
+    return undefined;
+  }
+  return {
+    protocol: 'openai-responses',
+    sourceId: value.sourceId.trim(),
+    baseUrl: value.baseUrl.trim(),
+    items
+  };
+}
+
+function isValidOpenAiResponsesReplayItem(value: unknown): value is OpenAiResponsesReplayItem {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (value.type === undefined) {
+    return (value.role === 'user' || value.role === 'assistant' || value.role === 'system')
+      && typeof value.content === 'string';
+  }
+  if (typeof value.type !== 'string' || !OPENAI_RESPONSES_REPLAY_ITEM_TYPES.has(value.type)) {
+    return false;
+  }
+  switch (value.type) {
+    case 'message':
+      return (value.role === 'assistant' || value.role === 'user' || value.role === 'system')
+        && isValidOpenAiResponsesMessageContent(value.content);
+    case 'reasoning':
+      return true;
+    case 'function_call':
+      return typeof value.call_id === 'string'
+        && Boolean(value.call_id)
+        && typeof value.name === 'string'
+        && typeof value.arguments === 'string';
+    case 'function_call_output':
+      return typeof value.call_id === 'string'
+        && Boolean(value.call_id)
+        && typeof value.output === 'string';
+    default:
+      return false;
+  }
+}
+
+function isValidOpenAiResponsesMessageContent(value: unknown): boolean {
+  if (typeof value === 'string') {
+    return true;
+  }
+  return Array.isArray(value) && value.every((part) => isRecord(part) && (
+    (part.type === 'output_text' && typeof part.text === 'string')
+    || (part.type === 'refusal' && typeof part.refusal === 'string')
+  ));
 }
 
 function createNewSessionRequestProtocol(now: string): SessionRequestProtocol {

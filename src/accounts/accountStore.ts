@@ -15,6 +15,7 @@ import {
 
 export const ACCOUNTS_STORAGE_DIRECTORY = 'accounts';
 export const DEFAULT_OPENAI_COMPATIBLE_BASE_URL = 'https://api.openai.com/v1';
+export const DEFAULT_OPENAI_RESPONSES_BASE_URL = 'https://api.openai.com/v1';
 export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434/v1';
 
 const ACCOUNT_FILE_EXTENSION = '.json';
@@ -350,6 +351,7 @@ export function isValidModelSourceId(value: string): boolean {
 export function getDefaultModelSourceName(provider: ModelSourceProvider): string {
   return provider === 'deepseek' ? 'DeepSeek'
     : provider === 'ollama' ? 'Ollama'
+    : provider === 'openai-responses' ? 'OpenAI Responses compatible'
     : 'OpenAI Compatible';
 }
 
@@ -358,7 +360,9 @@ export function getDefaultModelSourceBaseUrl(provider: ModelSourceProvider): str
     ? DEFAULT_DEEPSEEK_BASE_URL
     : provider === 'ollama'
       ? DEFAULT_OLLAMA_BASE_URL
-      : DEFAULT_OPENAI_COMPATIBLE_BASE_URL;
+      : provider === 'openai-responses'
+        ? DEFAULT_OPENAI_RESPONSES_BASE_URL
+        : DEFAULT_OPENAI_COMPATIBLE_BASE_URL;
 }
 
 function assertValidModelSourceId(sourceId: string): void {
@@ -380,4 +384,3 @@ function readNonEmptyString(value: unknown): string | undefined {
 function normalizeBoundedString(value: unknown, maxLength: number): string {
   return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
 }
-

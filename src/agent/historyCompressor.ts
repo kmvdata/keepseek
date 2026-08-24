@@ -28,6 +28,7 @@ import type {
 import { createProviderClient } from './providers/factory';
 import type { ProviderClientConfig } from './providers/types';
 import type { DeepSeekChatRequestBody, DeepSeekMessage } from './deepseek/types';
+import type { OpenAiResponsesRequestBody } from './providers/responsesTypes';
 import {
   CONTEXT_COMPRESSION_VERSION,
   buildHistoryProjection,
@@ -380,20 +381,34 @@ export class HistoryCompressor {
         input.sourceConfig,
         input.model.sourceId
       );
-      const body: DeepSeekChatRequestBody = {
-        model: input.model.id,
-        messages: input.messages,
-        stream: true,
-        thinking: clientConfig.provider === 'deepseek' ? { type: 'disabled' } : undefined,
-        // Deterministic summaries: a stable completion reduces unrelated byte drift
-        // between refreshes (the covered-message change is the unavoidable part).
-        temperature: 0,
-        max_tokens: input.maxTokens,
-        stream_options: {
-          include_usage: true
-        }
-      };
-      const response = await createProviderClient(clientConfig.provider).createChatCompletion(clientConfig, {
+      const body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody = clientConfig.provider === 'openai-responses'
+        ? {
+            model: input.model.id,
+            input: input.messages.map((message) => ({
+              role: message.role === 'tool' ? 'user' : message.role,
+              content: message.content ?? ''
+            })),
+            stream: true,
+            store: false,
+            // Deterministic summaries reduce unrelated byte drift at the
+            // unavoidable summary cache-reset boundary.
+            temperature: 0,
+            max_output_tokens: input.maxTokens
+          }
+        : {
+            model: input.model.id,
+            messages: input.messages,
+            stream: true,
+            thinking: clientConfig.provider === 'deepseek' ? { type: 'disabled' } : undefined,
+            // Deterministic summaries: a stable completion reduces unrelated byte drift
+            // between refreshes (the covered-message change is the unavoidable part).
+            temperature: 0,
+            max_tokens: input.maxTokens,
+            stream_options: {
+              include_usage: true
+            }
+          };
+      const response = await createProviderClient(clientConfig.provider).createModelResponse(clientConfig, {
         body,
         language: input.language,
         signal: abort.signal,
@@ -471,10 +486,17 @@ function estimateRawConversationTokens(input: HistoryCompressionRefreshInput): n
     language: input.language,
     prompt: input.prompt,
     slimToolNames: input.slimToolNames,
-    requestProtocolVersion: input.requestProtocolVersion
+    requestProtocolVersion: input.requestProtocolVersion,
+    provider: input.sourceConfig?.provider,
+    sourceId: input.sourceConfig?.sourceId ?? input.model.sourceId,
+    baseUrl: input.sourceConfig?.baseUrl
   });
-  return projection.messages.reduce((total, message) => total + estimateDeepSeekMessageTokens(message), 0)
-    + estimateDeepSeekToolsTokens(projection.tools);
+  return projection.responses
+    ? estimateTokenCount(JSON.stringify(projection.responses.input))
+      + estimateTokenCount(JSON.stringify(projection.responses.tools))
+      + projection.responses.input.length * 4
+    : projection.messages.reduce((total, message) => total + estimateDeepSeekMessageTokens(message), 0)
+      + estimateDeepSeekToolsTokens(projection.tools);
 }
 
 function estimateRawConversationRatio(input: HistoryCompressionRefreshInput): number {

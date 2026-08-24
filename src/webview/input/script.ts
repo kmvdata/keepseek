@@ -1866,7 +1866,8 @@ export function getInputScript(): string {
 
       function getModelSourceLabel(model) {
         if (!model) { return 'Model'; }
-        return model.sourceName || (model.provider === 'openai-compatible' ? 'OpenAI Compatible'
+        return model.sourceName || (model.provider === 'openai-responses' ? t('openAiResponsesCompatible')
+          : model.provider === 'openai-compatible' ? 'OpenAI Compatible'
           : model.provider === 'ollama' ? 'Ollama'
           : 'DeepSeek');
       }
@@ -3498,11 +3499,14 @@ export function getInputScript(): string {
       }
 
       function normalizeSettingsProvider(value) {
-        return value === 'ollama' || value === 'openai-compatible' ? value : 'deepseek';
+        return value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses'
+          ? value
+          : 'deepseek';
       }
 
       function getSettingsProviderLabel(provider) {
-        return provider === 'openai-compatible' ? 'OpenAI compatible'
+        return provider === 'openai-responses' ? t('openAiResponsesCompatible')
+          : provider === 'openai-compatible' ? 'OpenAI compatible'
           : provider === 'ollama' ? 'Ollama'
           : 'DeepSeek';
       }
@@ -3650,7 +3654,9 @@ export function getInputScript(): string {
         }
         if (settingsBaseUrl) {
           settingsBaseUrl.value = account
-            ? account.baseUrl || (account.provider === 'deepseek' ? 'https://api.deepseek.com' : '')
+            ? account.baseUrl || (account.provider === 'deepseek'
+              ? 'https://api.deepseek.com'
+              : account.provider === 'openai-responses' ? 'https://api.openai.com/v1' : '')
             : 'https://api.deepseek.com';
         }
         if (settingsManualModelId) { settingsManualModelId.value = ''; }
@@ -3662,7 +3668,7 @@ export function getInputScript(): string {
       function renderSettingsAccountList(controlsDisabled) {
         if (!settingsAccountList) { return; }
         settingsAccountList.innerHTML = '';
-        var providerOrder = ['deepseek', 'ollama', 'openai-compatible'];
+        var providerOrder = ['deepseek', 'ollama', 'openai-compatible', 'openai-responses'];
         providerOrder.forEach(function(provider) {
           var sources = settingsSources.filter(function(source) { return source.provider === provider; });
           if (!sources.length) { return; }
@@ -4054,6 +4060,9 @@ export function getInputScript(): string {
           }
           if (!baseUrl && provider === 'ollama') {
             baseUrl = 'http://localhost:11434/v1';
+          }
+          if (!baseUrl && provider === 'openai-responses') {
+            baseUrl = 'https://api.openai.com/v1';
           }
           if (!baseUrl) {
             setSettingsDialogStatus(t('baseUrlRequired'));

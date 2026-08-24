@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import * as vscode from 'vscode';
 import { ModelSourceStore } from '../src/accounts/accountStore';
-import type { ModelSourceConfigSnapshot } from '../src/accounts/types';
+import type { ModelSourceConfigSnapshot, ModelSourceProvider } from '../src/accounts/types';
 import { HistoryCompressor } from '../src/agent/historyCompressor';
 import { AgentRunner } from '../src/agent/runner';
 import type {
@@ -19,7 +19,7 @@ import type { AgentRequest } from '../src/shared/types';
 
 interface TestRuntimeConfig {
   sourceId: string;
-  provider: 'deepseek' | 'openai-compatible';
+  provider: ModelSourceProvider;
   apiKey: string;
   baseUrl: string;
   supportsBilling: boolean;
@@ -39,7 +39,7 @@ interface TestRuntimeConfig {
 }
 
 interface RuntimeInvoker {
-  createChatCompletion(
+  createModelResponse(
     request: AgentRequest,
     runtimeConfig: TestRuntimeConfig,
     messages: DeepSeekMessage[],
@@ -160,7 +160,7 @@ test('openai-compatible runtime sends the actual model id without DeepSeek-only 
   try {
     const runner = new AgentRunner() as unknown as RuntimeInvoker;
 
-    await runner.createChatCompletion(
+    await runner.createModelResponse(
       createRequest('vendor-reasoning-model', 'openai-compatible'),
       createRuntimeConfig('openai-compatible'),
       [
@@ -248,13 +248,32 @@ test('main runtime uses the immutable per-run source snapshot', async () => {
   assert.equal(runtime.baseUrl, 'https://snapshot.example/v1');
 });
 
+test('Responses runtime uses its immutable non-billing source snapshot', async () => {
+  const runner = new AgentRunner() as unknown as RuntimeConfigInvoker;
+  const request = createRequest('responses-model', 'openai-responses');
+  request.sourceConfig = Object.freeze({
+    sourceId: 'responses-snapshot',
+    provider: 'openai-responses',
+    apiKey: 'responses-key',
+    baseUrl: 'https://responses.example/v1',
+    supportsBilling: false
+  });
+
+  const runtime = await runner.getRuntimeConfig(request);
+  assert.equal(runtime.sourceId, 'responses-snapshot');
+  assert.equal(runtime.provider, 'openai-responses');
+  assert.equal(runtime.apiKey, 'responses-key');
+  assert.equal(runtime.baseUrl, 'https://responses.example/v1');
+  assert.equal(runtime.supportsBilling, false);
+});
+
 test('DeepSeek runtime preserves thinking and reasoning effort fields', async () => {
   const captured: CapturedRequest[] = [];
   const restore = mockFetchCapturing(captured, 'ok');
   try {
     const runner = new AgentRunner() as unknown as RuntimeInvoker;
 
-    await runner.createChatCompletion(
+    await runner.createModelResponse(
       createRequest('deepseek-v4-pro', 'deepseek'),
       createRuntimeConfig('deepseek'),
       [{ role: 'assistant', content: null, reasoning_content: null, tool_calls: [] }],

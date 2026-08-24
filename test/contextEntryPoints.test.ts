@@ -161,7 +161,7 @@ test('model settings dialog manages grouped sources and per-source models', asyn
     assert.match(inputTemplate, new RegExp(`id="${legacyId}"`, 'u'));
   }
   for (const accountId of [
-    'settingsCreateProvider',
+    'newAccountProvider',
     'settingsCreateAccountBtn',
     'settingsAccountList',
     'settingsAccountName',
@@ -175,6 +175,7 @@ test('model settings dialog manages grouped sources and per-source models', asyn
   }
   assert.match(inputTemplate, /value="deepseek"/u);
   assert.match(inputTemplate, /value="openai-compatible"/u);
+  assert.match(inputTemplate, /value="openai-responses"/u);
   assert.match(inputTemplate, /settings-account-dialog" role="dialog" aria-modal="true"/u);
   assert.match(inputTemplate, /id="settingsDialogStatus"[^>]*role="status"[^>]*aria-live="polite"/u);
   assert.match(inputScript, /type: 'addModel'/u);
@@ -196,7 +197,6 @@ test('model settings dialog manages grouped sources and per-source models', asyn
   assert.ok((inputScript.match(/blockAccountSettingsWhileRunBusy\(\)/gu) ?? []).length >= 9);
   assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: '正在生成回复；完成或停止后才能修改模型设置。'/u);
   assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: 'Model settings are read-only while a response is being generated\. Finish or stop it first\.'/u);
-  assert.match(inputScript, /focusedModelId === model\.id/u);
   assert.match(
     inputScript,
     /settingsDialogBusyTimer = setTimeout\(function\(\) \{[\s\S]*?setSettingsDialogStatus\(t\('modelOperationStillPending'\)\)[\s\S]*?\}, 15000\)/u

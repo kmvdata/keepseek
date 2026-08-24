@@ -53,12 +53,15 @@ export function getSourceModelsEndpointUrl(
   }
 
   const completionsSuffix = '/chat/completions';
-  const withoutCompletions = cleanPath.endsWith(completionsSuffix)
+  const responsesSuffix = '/responses';
+  const withoutProtocolEndpoint = cleanPath.endsWith(completionsSuffix)
     ? cleanPath.slice(0, -completionsSuffix.length)
-    : cleanPath;
-  url.pathname = withoutCompletions.endsWith('/models')
-    ? withoutCompletions
-    : `${withoutCompletions || ''}/models`;
+    : cleanPath.endsWith(responsesSuffix)
+      ? cleanPath.slice(0, -responsesSuffix.length)
+      : cleanPath;
+  url.pathname = withoutProtocolEndpoint.endsWith('/models')
+    ? withoutProtocolEndpoint
+    : `${withoutProtocolEndpoint || ''}/models`;
   url.hash = '';
   return url.toString();
 }
@@ -206,11 +209,23 @@ export async function probeSourceConnection(
       headers,
       signal: controller.signal
     });
-    if (apiKey && !response.ok) {
+    if (!response.ok) {
+      if (source.provider === 'openai-responses' && response.status === 404) {
+        return {
+          ok: false,
+          status: response.status,
+          error: 'KeepSeek Responses accounts require a compatible GET /models endpoint for account discovery.'
+        };
+      }
+      if (!apiKey) {
+        return { ok: true, status: response.status };
+      }
       return {
         ok: false,
         status: response.status,
-        error: `Authentication failed (HTTP ${response.status}). Check the API Key and Base URL.`
+        error: response.status === 401 || response.status === 403
+          ? `Authentication failed (HTTP ${response.status}). Check the API Key and Base URL.`
+          : `Model discovery failed (HTTP ${response.status}). KeepSeek account discovery requires GET /models.`
       };
     }
     return { ok: true, status: response.status };

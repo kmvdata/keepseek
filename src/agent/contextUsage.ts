@@ -15,6 +15,9 @@ import {
 import type { KeepseekLanguage } from '../shared/i18n';
 import { AgentSettings, ChatMessage, ContextCompressionState, ContextFile, ContextUsageEstimate, CurrentRunContext, KeepseekModel } from '../shared/types';
 import { buildProviderRequestProjection } from './providerRequestProjection';
+import type { ModelSourceProvider } from '../accounts/types';
+import type { OpenAiResponsesFunctionTool, OpenAiResponsesItem } from './providers/responsesTypes';
+import { estimateTokenCount } from './tokenEstimate';
 
 type ContextUsageBreakdown = ContextUsageEstimate['breakdown'];
 
@@ -34,6 +37,9 @@ export function createContextUsageEstimate(input: {
   /** 会话冻结的 slim 工具集；与真实请求保持一致（缺省时按 prompt 现算） */
   slimToolNames?: string[];
   requestProtocolVersion?: number;
+  provider?: ModelSourceProvider;
+  sourceId?: string;
+  baseUrl?: string;
 }): ContextUsageEstimate {
   const prompt = input.prompt?.trim() ?? '';
   const providerProjection = buildProviderRequestProjection({
@@ -48,7 +54,10 @@ export function createContextUsageEstimate(input: {
     language: input.language,
     slimToolNames: input.slimToolNames,
     requestProtocolVersion: input.requestProtocolVersion,
-    includeTools: input.includeTools
+    includeTools: input.includeTools,
+    provider: input.provider ?? normalizeKnownProvider(input.model.provider),
+    sourceId: input.sourceId ?? input.model.sourceId,
+    baseUrl: input.baseUrl
   });
   const messages = providerProjection.messages;
   const tools = providerProjection.tools;
@@ -65,6 +74,17 @@ export function createContextUsageEstimate(input: {
     outputReserveTokens,
     safetyReserveTokens: input.safetyReserveTokens ?? 0
   });
+
+  if (providerProjection.responses) {
+    return createContextUsageEstimateFromResponses({
+      model: input.model,
+      input: providerProjection.responses.input,
+      tools: providerProjection.responses.tools,
+      outputReserveTokens,
+      safetyReserveTokens: input.safetyReserveTokens,
+      breakdown
+    });
+  }
 
   return createContextUsageEstimateFromMessages({
     model: input.model,
@@ -89,6 +109,9 @@ export function createDisplayedSessionContextUsageEstimate(input: {
   /** 会话冻结的 slim 工具集；与真实请求保持一致 */
   slimToolNames?: string[];
   requestProtocolVersion?: number;
+  provider?: ModelSourceProvider;
+  sourceId?: string;
+  baseUrl?: string;
 }): ContextUsageEstimate {
   // The authoritative provider projection already contains every reasoning byte
   // that will be sent (tool-call reasoning and legacy-v1 final reasoning). UI-only
@@ -127,6 +150,57 @@ export function createContextUsageEstimateFromMessages(input: {
       outputReserveTokensEstimate,
       safetyReserveTokensEstimate
     }
+  });
+}
+
+export function createContextUsageEstimateFromResponses(input: {
+  model: KeepseekModel;
+  input: OpenAiResponsesItem[];
+  tools?: OpenAiResponsesFunctionTool[];
+  outputReserveTokens?: number;
+  safetyReserveTokens?: number;
+  breakdown?: Partial<ContextUsageBreakdown>;
+}): ContextUsageEstimate {
+  const maxTokensEstimate = getConfiguredContextWindowTokens(input.model);
+  const inputTokensEstimate = estimateTokenCount(JSON.stringify(input.input)) + input.input.length * 4;
+  const toolSchemaTokensEstimate = input.tools?.length
+    ? estimateTokenCount(JSON.stringify(input.tools))
+    : 0;
+  const outputReserveTokensEstimate = Math.max(0, Math.floor(input.outputReserveTokens ?? 0));
+  const safetyReserveTokensEstimate = Math.max(0, Math.floor(input.safetyReserveTokens ?? 0));
+  const breakdown = normalizeBreakdown({
+    ...createEmptyBreakdown(),
+    ...input.breakdown,
+    toolSchemaTokensEstimate,
+    outputReserveTokensEstimate,
+    safetyReserveTokensEstimate
+  });
+  const responseInputKeys: Array<keyof ContextUsageBreakdown> = [
+    'systemTokensEstimate',
+    'contextFileTokensEstimate',
+    'historyTokensEstimate',
+    'inputTokensEstimate',
+    'toolCallTokensEstimate',
+    'toolResultTokensEstimate',
+    'reasoningTokensEstimate'
+  ];
+  const previousInputEstimate = responseInputKeys.reduce((total, key) => total + breakdown[key], 0);
+  const scale = previousInputEstimate > 0 ? inputTokensEstimate / previousInputEstimate : 0;
+  for (const key of responseInputKeys) {
+    breakdown[key] = Math.max(0, Math.floor(breakdown[key] * scale));
+  }
+  const scaledInput = responseInputKeys.reduce((total, key) => total + breakdown[key], 0);
+  breakdown.historyTokensEstimate = Math.max(
+    0,
+    breakdown.historyTokensEstimate + inputTokensEstimate - scaledInput
+  );
+  return normalizeContextUsageEstimate({
+    maxTokensEstimate,
+    usedTokensEstimate: inputTokensEstimate
+      + toolSchemaTokensEstimate
+      + outputReserveTokensEstimate
+      + safetyReserveTokensEstimate,
+    breakdown
   });
 }
 
@@ -373,4 +447,13 @@ function sumSessionBreakdownTokens(breakdown: ContextUsageBreakdown): number {
     breakdown.toolCallTokensEstimate +
     breakdown.toolResultTokensEstimate +
     breakdown.reasoningTokensEstimate;
+}
+
+function normalizeKnownProvider(value: string): ModelSourceProvider | undefined {
+  return value === 'deepseek'
+    || value === 'ollama'
+    || value === 'openai-compatible'
+    || value === 'openai-responses'
+    ? value
+    : undefined;
 }

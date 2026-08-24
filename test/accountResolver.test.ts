@@ -112,4 +112,20 @@ describe('resolveModelSourceConfig', () => {
     });
     assert.equal(resolved.supportsBilling, true);
   });
+
+  it('resolves Responses credentials without enabling DeepSeek billing', async () => {
+    const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { now: () => NOW });
+    await store.createSource({
+      id: 'responses',
+      provider: 'openai-responses',
+      apiKey: 'responses-key',
+      baseUrl: 'https://api.openai.com/v1'
+    });
+    const resolved = await resolveModelSourceConfig('responses', vscode.Uri.file(storageRoot), {
+      sourceStore: store
+    });
+    assert.equal(resolved.provider, 'openai-responses');
+    assert.equal(resolved.apiKey, 'responses-key');
+    assert.equal(resolved.supportsBilling, false);
+  });
 });

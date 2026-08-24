@@ -10,6 +10,7 @@ import {
   discoverSourceModels,
   getSourceModelsEndpointUrl,
   parseSourceModelsResponse,
+  probeSourceConnection,
   refreshSourceModelCache,
   type ModelsFetch
 } from '../src/accounts/modelDiscovery';
@@ -41,6 +42,24 @@ describe('model source discovery', () => {
       getSourceModelsEndpointUrl('https://proxy.example.com/openai/v1/chat/completions?tenant=a', 'openai-compatible'),
       'https://proxy.example.com/openai/v1/models?tenant=a'
     );
+    assert.equal(
+      getSourceModelsEndpointUrl('https://proxy.example.com/openai/v1/responses/?tenant=a#fragment', 'openai-responses'),
+      'https://proxy.example.com/openai/v1/models?tenant=a'
+    );
+  });
+
+  it('explains that Responses account discovery still requires GET /models', async () => {
+    const result = await probeSourceConnection({
+      provider: 'openai-responses',
+      apiKey: 'key',
+      baseUrl: 'https://responses-only.example/v1'
+    }, {
+      timeoutMs: 0,
+      fetchImpl: async () => ({ ok: false, status: 404, text: async () => '' })
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 404);
+    assert.match(result.error ?? '', /require.*GET \/models/iu);
   });
 
   it('parses OpenAI-compatible response names, alternate fields, and duplicates', () => {

@@ -192,6 +192,29 @@ export interface ChatMessage {
    * 只对 native 工具协议收集；DSML 兑底路径不收集。
    */
   toolRounds?: AgentToolRound[];
+  /** Provider-native Responses Items, valid only inside the recorded source/Base URL lane. */
+  providerReplay?: OpenAiResponsesReplayState;
+}
+
+export type OpenAiResponsesReplayJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | OpenAiResponsesReplayJsonValue[]
+  | { [key: string]: OpenAiResponsesReplayJsonValue };
+
+export interface OpenAiResponsesReplayItem {
+  type?: string;
+  role?: string;
+  [key: string]: OpenAiResponsesReplayJsonValue | undefined;
+}
+
+export interface OpenAiResponsesReplayState {
+  protocol: 'openai-responses';
+  sourceId: string;
+  baseUrl: string;
+  items: OpenAiResponsesReplayItem[];
 }
 
 export interface AgentToolCall {
@@ -806,6 +829,7 @@ export interface AgentResponse {
   promptCacheDiagnostics?: PromptCacheDiagnostics;
   /** 本 run 内工具轮的原样字节快照，调用方持久化到 assistant 消息后跨轮还原 */
   toolRounds?: AgentToolRound[];
+  providerReplay?: OpenAiResponsesReplayState;
   traceLog?: AgentTraceLogInfo;
   runDetails: RunDetailsSummary;
 }

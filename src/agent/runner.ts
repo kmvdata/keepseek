@@ -18,6 +18,7 @@ import {
   TurnUsageStats,
   UsageEvent
 } from '../shared/types';
+import type { OpenAiResponsesReplayState } from '../shared/types';
 import {
   getConfiguredContextWindowTokens,
   getConfiguredMaxRequestRetries,
@@ -66,6 +67,7 @@ import {
   calibrateContextUsageEstimate,
   createContextUsageEstimate,
   createContextUsageEstimateFromMessages,
+  createContextUsageEstimateFromResponses,
   resolveOutputReserveTokens
 } from './contextUsage';
 import { WorkspaceToolAdapter, WorkspaceToolService } from './tools/workspaceTools';
@@ -83,6 +85,11 @@ import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuar
 import { DsmlToolParser } from './deepseek/dsmlToolParser';
 import { createProviderClient } from './providers/factory';
 import type { ProviderClientConfig } from './providers/types';
+import type {
+  OpenAiResponsesFunctionTool,
+  OpenAiResponsesItem,
+  OpenAiResponsesRequestBody
+} from './providers/responsesTypes';
 import {
   AgentInteractionTrace,
   createNoopInteractionTrace,
@@ -145,6 +152,16 @@ interface AgentRuntimeConfig {
   requestRetryBaseMs: number;
   maxValidationRuns: number;
   maxRepairIterations: number;
+}
+
+interface OpenAiResponsesRunState {
+  input: OpenAiResponsesItem[];
+  tools: OpenAiResponsesFunctionTool[];
+  replayItems: OpenAiResponsesItem[];
+  lane: {
+    sourceId: string;
+    baseUrl: string;
+  };
 }
 
 type AgentBudgetFinishReason =
@@ -294,6 +311,7 @@ export class AgentRunner {
       records: []
     };
     let promptCacheDiagnostics: PromptCacheDiagnostics | undefined;
+    let responsesRunState: OpenAiResponsesRunState | undefined;
     trace.record({
       type: 'run_start',
       model: request.model,
@@ -388,7 +406,8 @@ export class AgentRunner {
         changeSet,
         usage: response.usage ?? this.toTurnUsageStats(upstreamUsageTotals, request.model.id),
         promptCacheDiagnostics: response.promptCacheDiagnostics ?? promptCacheDiagnostics,
-        toolRounds: toolRounds.length ? toolRounds : undefined
+        toolRounds: toolRounds.length ? toolRounds : undefined,
+        providerReplay: response.providerReplay ?? this.createResponsesReplayState(responsesRunState)
       };
       trace.record({
         type: 'run_finish',
@@ -498,10 +517,21 @@ export class AgentRunner {
       requestProtocolVersion: request.requestProtocolVersion,
       includeTools: runtimeConfig.maxToolIterations > 0,
       maxProjectionTokens: getConfiguredContextWindowTokens(request.model)
-        * runtimeConfig.contextCompression.forceRatio
+        * runtimeConfig.contextCompression.forceRatio,
+      provider: runtimeConfig.provider,
+      sourceId: runtimeConfig.sourceId,
+      baseUrl: runtimeConfig.baseUrl
     });
     const projection = providerProjection.historyProjection;
     const messages = providerProjection.messages;
+    responsesRunState = providerProjection.responses
+      ? {
+          input: [...providerProjection.responses.input],
+          tools: providerProjection.responses.tools,
+          replayItems: [],
+          lane: providerProjection.responses.lane
+        }
+      : undefined;
     trace.record({
       type: 'context_projection',
       metadata: projection.metadata,
@@ -541,7 +571,8 @@ export class AgentRunner {
       request,
       messages,
       tools,
-      historyCompacted: projection.metadata.usedSummary
+      historyCompacted: projection.metadata.usedSummary,
+      responses: providerProjection.responses
     });
     trace.record({
       type: 'prompt_cache_diagnostics',
@@ -573,21 +604,34 @@ export class AgentRunner {
         outputReserveTokens,
         safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
         slimToolNames: request.slimToolNames,
-        requestProtocolVersion: request.requestProtocolVersion
+        requestProtocolVersion: request.requestProtocolVersion,
+        provider: runtimeConfig.provider,
+        sourceId: runtimeConfig.sourceId,
+        baseUrl: runtimeConfig.baseUrl
       }).breakdown
     };
     const emitUsageEstimate = (toolsForNextRequest: DeepSeekFunctionTool[]) => {
-      callbacks.onUsageEstimate?.(createContextUsageEstimateFromMessages({
-        model: request.model,
-        messages,
-        tools: toolsForNextRequest,
-        outputReserveTokens,
-        safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
-        breakdown: {
-          ...runtimeUsageBreakdown,
-          toolSchemaTokensEstimate: undefined
-        }
-      }));
+      const breakdown = {
+        ...runtimeUsageBreakdown,
+        toolSchemaTokensEstimate: undefined
+      };
+      callbacks.onUsageEstimate?.(responsesRunState
+        ? createContextUsageEstimateFromResponses({
+            model: request.model,
+            input: responsesRunState.input,
+            tools: responsesRunState.tools,
+            outputReserveTokens,
+            safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
+            breakdown
+          })
+        : createContextUsageEstimateFromMessages({
+            model: request.model,
+            messages,
+            tools: toolsForNextRequest,
+            outputReserveTokens,
+            safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
+            breakdown
+          }));
     };
     let toolCallCount = 0;
     let validationRunCount = 0;
@@ -603,6 +647,14 @@ export class AgentRunner {
         content: this.getBudgetStopInstruction(budgetStopReason, request.language)
       };
       messages.push(budgetInstructionMessage);
+      responsesRunState?.input.push({
+        role: 'user',
+        content: budgetInstructionMessage.content ?? ''
+      });
+      responsesRunState?.replayItems.push({
+        role: 'user',
+        content: budgetInstructionMessage.content ?? ''
+      });
       trace.record({
         type: 'agent_message_appended',
         reason: 'budget_stop_instruction',
@@ -620,7 +672,8 @@ export class AgentRunner {
       request,
       messages,
       tools,
-      outputReserveTokens
+      outputReserveTokens,
+      responsesRunState
     );
     if (initialBudgetStopReason) {
       throw new Error(request.language === 'en'
@@ -654,10 +707,11 @@ export class AgentRunner {
       const toolsForTurn = tools;
       const allowTerminalDraftEdit = maxIterations > 0 && budgetStopReason === 'tool_iterations_exhausted';
       emitUsageEstimate(toolsForTurn);
-      const response = await this.createChatCompletion(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, {
+      const response = await this.createModelResponse(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, {
         trace,
         usageTotals: upstreamUsageTotals,
-        toolChoice: allowToolCalls ? 'auto' : 'none'
+        toolChoice: allowToolCalls ? 'auto' : 'none',
+        responsesRunState
       });
       this.throwIfAborted(request.signal, request.language);
       const normalizedAssistant = this.normalizeAssistantToolCalls(response.message, allowToolCalls || allowTerminalDraftEdit);
@@ -695,7 +749,8 @@ export class AgentRunner {
           runtimeUsageBreakdown,
           trace,
           usageTotals: upstreamUsageTotals,
-          tools
+          tools,
+          responsesRunState
         });
         if (continuedResponse) {
           emitStatus({
@@ -728,6 +783,7 @@ export class AgentRunner {
         phase: 'planning_tool'
       });
 
+      const responseFunctionOutputs: OpenAiResponsesItem[] = [];
       const executeToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
         this.throwIfAborted(request.signal, request.language);
         trace.record({
@@ -921,7 +977,14 @@ export class AgentRunner {
         const shapedToolResult = this.shapeToolResult(
           toolCall.function.name,
           rawToolResult,
-          this.shouldSnipToolResult(request, messages, nextToolsForRequest, outputReserveTokens)
+          this.shouldSnipToolResult(
+            request,
+            messages,
+            nextToolsForRequest,
+            outputReserveTokens,
+            responsesRunState,
+            responseFunctionOutputs
+          )
         );
         const shapedToolMessage: DeepSeekMessage = {
           role: 'tool',
@@ -946,15 +1009,35 @@ export class AgentRunner {
           return budgetToolResult;
         }
 
-        if (this.getContextWindowBudgetStopReason(request, [...messages, shapedToolMessage], nextToolsForRequest, outputReserveTokens)) {
+        const prospectiveResponseOutput: OpenAiResponsesItem = {
+          type: 'function_call_output',
+          call_id: toolCall.id,
+          output: shapedToolResult.content
+        };
+        if (this.getContextWindowBudgetStopReason(
+          request,
+          [...messages, shapedToolMessage],
+          nextToolsForRequest,
+          outputReserveTokens,
+          responsesRunState,
+          responsesRunState ? [...responseFunctionOutputs, prospectiveResponseOutput] : []
+        )) {
           budgetStopReason = 'tool_result_budget_exhausted';
-          const projectedUsage = createContextUsageEstimateFromMessages({
-            model: request.model,
-            messages: [...messages, shapedToolMessage],
-            tools: nextToolsForRequest,
-            outputReserveTokens,
-            safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-          });
+          const projectedUsage = responsesRunState
+            ? createContextUsageEstimateFromResponses({
+                model: request.model,
+                input: [...responsesRunState.input, ...responseFunctionOutputs, prospectiveResponseOutput],
+                tools: responsesRunState.tools,
+                outputReserveTokens,
+                safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+              })
+            : createContextUsageEstimateFromMessages({
+                model: request.model,
+                messages: [...messages, shapedToolMessage],
+                tools: nextToolsForRequest,
+                outputReserveTokens,
+                safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+              });
           const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
             usedTokens: projectedUsage.usedTokensEstimate,
             nextTokens: nextToolResultTokens,
@@ -1029,6 +1112,11 @@ export class AgentRunner {
             toolCallId: toolCall.id,
             content: toolResult
           });
+          responseFunctionOutputs.push({
+            type: 'function_call_output',
+            call_id: toolCall.id,
+            output: toolResult
+          });
           trace.record({
             type: 'agent_message_appended',
             reason: 'native_tool_result',
@@ -1041,6 +1129,12 @@ export class AgentRunner {
             phase: 'reviewing_tool_result',
             toolName: toolCall.function.name
           });
+        }
+        if (responsesRunState && responseFunctionOutputs.length) {
+          // All provider output Items were appended by createModelResponse before
+          // execution. Function outputs follow in stable function-call order.
+          responsesRunState.input.push(...responseFunctionOutputs);
+          responsesRunState.replayItems.push(...responseFunctionOutputs);
         }
         // 保存本工具轮的原样字节快照，供跨轮重建（toolRounds 展开 == 本轮发送序列）。
         toolRounds.push({
@@ -1080,6 +1174,14 @@ export class AgentRunner {
           content: this.formatEmulatedDsmlToolResults(emulatedResults, request.language)
         };
         messages.push(emulatedToolResultMessage);
+        responsesRunState?.input.push({
+          role: 'user',
+          content: emulatedToolResultMessage.content ?? ''
+        });
+        responsesRunState?.replayItems.push({
+          role: 'user',
+          content: emulatedToolResultMessage.content ?? ''
+        });
         trace.record({
           type: 'agent_message_appended',
           reason: 'dsml_emulated_tool_results',
@@ -1124,7 +1226,7 @@ export class AgentRunner {
     }
   }
 
-  private async createChatCompletion(
+  private async createModelResponse(
     request: AgentRequest,
     runtimeConfig: AgentRuntimeConfig,
     messages: DeepSeekMessage[],
@@ -1137,38 +1239,68 @@ export class AgentRunner {
       usageTotals?: UpstreamUsageTotals;
       toolChoice?: 'auto' | 'none';
       usageSource?: 'executor' | 'continuation';
+      responsesRunState?: OpenAiResponsesRunState;
     } = {}
   ): Promise<DeepSeekStreamResult> {
     const trace = options.trace ?? createNoopInteractionTrace();
-    const body: DeepSeekChatRequestBody = {
-      model: request.model.id,
-      // Keep DeepSeek's exact message objects for prefix-cache stability. Strict
-      // OpenAI-compatible endpoints reject DeepSeek's reasoning_content field,
-      // including null values on assistant tool-call turns.
-      messages: runtimeConfig.provider === 'deepseek'
-        ? messages
-        : messages.map(withoutDeepSeekReasoningContent),
-      stream: true,
-      thinking: runtimeConfig.provider === 'deepseek'
-        ? { type: request.settings.thinkingEnabled ? 'enabled' : 'disabled' }
-        : undefined,
-      temperature: runtimeConfig.temperature,
-      top_p: runtimeConfig.topP,
-      tools: tools.length ? tools : undefined,
-      tool_choice: tools.length ? options.toolChoice ?? 'auto' : undefined
-    };
+    let body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody;
+    if (runtimeConfig.provider === 'openai-responses') {
+      const responsesState = options.responsesRunState;
+      if (!responsesState) {
+        throw new Error('OpenAI Responses request projection is unavailable.');
+      }
+      body = {
+        model: request.model.id,
+        input: responsesState.input,
+        stream: true,
+        store: false,
+        tools: responsesState.tools.length ? responsesState.tools : undefined,
+        tool_choice: responsesState.tools.length ? options.toolChoice ?? 'auto' : undefined,
+        max_output_tokens: runtimeConfig.maxTokens > 0 ? runtimeConfig.maxTokens : undefined,
+        // KeepSeek's `max` is a DeepSeek-only setting. The Responses protocol
+        // uses its portable supported level instead of emitting a pseudo value.
+        include: request.settings.thinkingEnabled
+          ? ['reasoning.encrypted_content']
+          : undefined,
+        reasoning: request.settings.thinkingEnabled
+          ? { effort: 'high' }
+          : undefined,
+        temperature: runtimeConfig.temperature,
+        top_p: runtimeConfig.topP
+      };
+    } else {
+      // This object and its field order are intentionally unchanged: DeepSeek's
+      // request prefix and existing compatible-provider fixtures are cache state.
+      body = {
+        model: request.model.id,
+        // Keep DeepSeek's exact message objects for prefix-cache stability. Strict
+        // OpenAI-compatible endpoints reject DeepSeek's reasoning_content field,
+        // including null values on assistant tool-call turns.
+        messages: runtimeConfig.provider === 'deepseek'
+          ? messages
+          : messages.map(withoutDeepSeekReasoningContent),
+        stream: true,
+        thinking: runtimeConfig.provider === 'deepseek'
+          ? { type: request.settings.thinkingEnabled ? 'enabled' : 'disabled' }
+          : undefined,
+        temperature: runtimeConfig.temperature,
+        top_p: runtimeConfig.topP,
+        tools: tools.length ? tools : undefined,
+        tool_choice: tools.length ? options.toolChoice ?? 'auto' : undefined
+      };
 
-    if (runtimeConfig.provider === 'deepseek' && request.settings.thinkingEnabled) {
-      body.reasoning_effort = request.settings.reasoningEffort;
+      if (runtimeConfig.provider === 'deepseek' && request.settings.thinkingEnabled) {
+        body.reasoning_effort = request.settings.reasoningEffort;
+      }
+
+      if (runtimeConfig.maxTokens > 0) {
+        body.max_tokens = runtimeConfig.maxTokens;
+      }
+
+      body.stream_options = {
+        include_usage: true
+      };
     }
-
-    if (runtimeConfig.maxTokens > 0) {
-      body.max_tokens = runtimeConfig.maxTokens;
-    }
-
-    body.stream_options = {
-      include_usage: true
-    };
 
     const upstreamRequestId = randomUUID();
     trace.record({
@@ -1177,7 +1309,7 @@ export class AgentRunner {
       body: formatRequestBodyForTrace(body, trace.includesPayload('request'))
     });
 
-    const response = await createProviderClient(runtimeConfig.provider).createChatCompletion(this.toProviderClientConfig(runtimeConfig), {
+    const response = await createProviderClient(runtimeConfig.provider).createModelResponse(this.toProviderClientConfig(runtimeConfig), {
       body,
       language: request.language,
       signal: request.signal,
@@ -1226,15 +1358,29 @@ export class AgentRunner {
       if (usageEvent) {
         callbacks.onUsage?.(usageEvent);
         callbacks.onUsageEstimate?.(calibrateContextUsageEstimate(
-          createContextUsageEstimateFromMessages({
-            model: request.model,
-            messages,
-            tools,
-            outputReserveTokens: resolveOutputReserveTokens(runtimeConfig.maxTokens),
-            safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-          }),
+          options.responsesRunState
+            ? createContextUsageEstimateFromResponses({
+                model: request.model,
+                input: options.responsesRunState.input,
+                tools: options.responsesRunState.tools,
+                outputReserveTokens: resolveOutputReserveTokens(runtimeConfig.maxTokens),
+                safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+              })
+            : createContextUsageEstimateFromMessages({
+                model: request.model,
+                messages,
+                tools,
+                outputReserveTokens: resolveOutputReserveTokens(runtimeConfig.maxTokens),
+                safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+              }),
           usageEvent.usage.promptTokens
         ));
+      }
+      if (options.responsesRunState && response.nativeOutputItems?.length) {
+        // response.output is authoritative and must precede all local function
+        // outputs in the next stateless Responses request.
+        options.responsesRunState.input.push(...response.nativeOutputItems);
+        options.responsesRunState.replayItems.push(...response.nativeOutputItems);
       }
       trace.record({
         type: 'upstream_response_message',
@@ -1246,7 +1392,8 @@ export class AgentRunner {
       return {
         message: response.message,
         finishReason: response.finishReason,
-        usage: response.usage
+        usage: response.usage,
+        nativeOutputItems: response.nativeOutputItems
       };
     }
 
@@ -1283,7 +1430,8 @@ export class AgentRunner {
         runDeadlineAt,
         trace,
         usageTotals: options.usageTotals,
-        tools
+        tools,
+        responsesRunState: options.responsesRunState
       });
     }
 
@@ -1317,6 +1465,7 @@ export class AgentRunner {
     trace: AgentInteractionTrace;
     usageTotals: UpstreamUsageTotals;
     tools: DeepSeekFunctionTool[];
+    responsesRunState?: OpenAiResponsesRunState;
   }): Promise<{ content: string; finishReason?: string | null } | undefined> {
     if (!this.canContinueLengthLimitedResponse(input)) {
       return undefined;
@@ -1339,11 +1488,30 @@ export class AgentRunner {
         instructionMessage
       ];
 
-      if (this.getContextWindowBudgetStopReason(input.request, continuationMessages, input.tools, input.outputReserveTokens)) {
+      const continuationInstructionItem: OpenAiResponsesItem = {
+        role: 'user',
+        content: instructionMessage.content ?? ''
+      };
+      if (this.getContextWindowBudgetStopReason(
+        input.request,
+        continuationMessages,
+        input.tools,
+        input.outputReserveTokens,
+        input.responsesRunState,
+        input.responsesRunState ? [continuationInstructionItem] : []
+      )) {
         return continuationIndex > 0 ? { content, finishReason } : undefined;
       }
 
       input.messages.push(assistantMessage, instructionMessage);
+      if (input.responsesRunState) {
+        const responseInstruction: OpenAiResponsesItem = {
+          role: 'user',
+          content: instructionMessage.content ?? ''
+        };
+        input.responsesRunState.input.push(responseInstruction);
+        input.responsesRunState.replayItems.push(responseInstruction);
+      }
       input.trace.record({
         type: 'agent_message_appended',
         reason: 'length_continuation_partial_assistant',
@@ -1357,7 +1525,7 @@ export class AgentRunner {
       input.runtimeUsageBreakdown.inputTokensEstimate +=
         estimateDeepSeekMessageTokens(assistantMessage) + estimateDeepSeekMessageTokens(instructionMessage);
 
-      const continuationResponse = await this.createChatCompletion(
+      const continuationResponse = await this.createModelResponse(
         input.request,
         input.runtimeConfig,
         input.messages,
@@ -1369,7 +1537,8 @@ export class AgentRunner {
           trace: input.trace,
           usageTotals: input.usageTotals,
           toolChoice: 'none',
-          usageSource: 'continuation'
+          usageSource: 'continuation',
+          responsesRunState: input.responsesRunState
         }
       );
       const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false);
@@ -1396,6 +1565,7 @@ export class AgentRunner {
     draftEdits: DraftEdit[];
     outputReserveTokens: number;
     tools: DeepSeekFunctionTool[];
+    responsesRunState?: OpenAiResponsesRunState;
   }): boolean {
     if (input.response.finishReason !== 'length') {
       return false;
@@ -1421,7 +1591,16 @@ export class AgentRunner {
         content: this.getLengthContinuationInstruction(input.request.language)
       }
     ];
-    return !this.getContextWindowBudgetStopReason(input.request, continuationMessages, input.tools, input.outputReserveTokens);
+    return !this.getContextWindowBudgetStopReason(
+      input.request,
+      continuationMessages,
+      input.tools,
+      input.outputReserveTokens,
+      input.responsesRunState,
+      input.responsesRunState
+        ? [{ role: 'user', content: this.getLengthContinuationInstruction(input.request.language) }]
+        : []
+    );
   }
 
   private async createContinuationAfterPartialFailure(input: {
@@ -1435,6 +1614,7 @@ export class AgentRunner {
     trace: AgentInteractionTrace;
     usageTotals?: UpstreamUsageTotals;
     tools: DeepSeekFunctionTool[];
+    responsesRunState?: OpenAiResponsesRunState;
   }): Promise<DeepSeekStreamResult> {
     const partialContent = input.partialAssistant.content ?? '';
     if (!partialContent.trim()) {
@@ -1454,6 +1634,15 @@ export class AgentRunner {
         content: this.getPartialFailureContinuationInstruction(input.request.language)
       }
     ];
+    if (input.responsesRunState) {
+      const partialMessage: OpenAiResponsesItem = { role: 'assistant', content: partialContent };
+      const instructionItem: OpenAiResponsesItem = {
+        role: 'user',
+        content: this.getPartialFailureContinuationInstruction(input.request.language)
+      };
+      input.responsesRunState.input.push(partialMessage, instructionItem);
+      input.responsesRunState.replayItems.push(partialMessage, instructionItem);
+    }
     input.trace.record({
       type: 'partial_failure_continuation_messages',
       failureError: input.failureError,
@@ -1462,13 +1651,19 @@ export class AgentRunner {
         : continuationMessages.map(summarizeDeepSeekMessage)
     });
     const outputReserveTokens = resolveOutputReserveTokens(input.runtimeConfig.maxTokens);
-    if (this.getContextWindowBudgetStopReason(input.request, continuationMessages, input.tools, outputReserveTokens)) {
+    if (this.getContextWindowBudgetStopReason(
+      input.request,
+      continuationMessages,
+      input.tools,
+      outputReserveTokens,
+      input.responsesRunState
+    )) {
       throw new Error(input.failureError ?? (input.request.language === 'en'
         ? 'DeepSeek streaming connection failed before completion, and there was not enough context budget to request a continuation.'
         : 'DeepSeek 流式连接在完成前中断，且上下文预算不足，无法请求续写。'));
     }
 
-    const continuationResponse = await this.createChatCompletion(
+    const continuationResponse = await this.createModelResponse(
       input.request,
       input.runtimeConfig,
       continuationMessages,
@@ -1480,7 +1675,8 @@ export class AgentRunner {
         trace: input.trace,
         usageTotals: input.usageTotals,
         toolChoice: 'none',
-        usageSource: 'continuation'
+        usageSource: 'continuation',
+        responsesRunState: input.responsesRunState
       }
     );
     const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false);
@@ -1524,6 +1720,20 @@ export class AgentRunner {
       streamIdleTimeoutMs: runtimeConfig.streamIdleTimeoutMs,
       maxRequestRetries: runtimeConfig.maxRequestRetries,
       requestRetryBaseMs: runtimeConfig.requestRetryBaseMs
+    };
+  }
+
+  private createResponsesReplayState(
+    state: OpenAiResponsesRunState | undefined
+  ): OpenAiResponsesReplayState | undefined {
+    if (!state?.replayItems.length) {
+      return undefined;
+    }
+    return {
+      protocol: 'openai-responses',
+      sourceId: state.lane.sourceId,
+      baseUrl: state.lane.baseUrl,
+      items: state.replayItems
     };
   }
 
@@ -1597,7 +1807,24 @@ export class AgentRunner {
     messages: DeepSeekMessage[];
     tools: DeepSeekFunctionTool[];
     historyCompacted: boolean;
+    responses?: {
+      input: OpenAiResponsesItem[];
+      tools: OpenAiResponsesFunctionTool[];
+    };
   }): PromptCacheDiagnostics {
+    if (input.responses) {
+      const systemItems = input.responses.input.filter((item) => item.role === 'system');
+      const historyItems = input.responses.input.filter((item) => item.role !== 'system');
+      return {
+        systemPromptHash: hashStableText(JSON.stringify(systemItems)),
+        toolsSchemaHash: hashStableText(JSON.stringify(input.responses.tools)),
+        historyPrefixHash: hashStableText(JSON.stringify(historyItems)),
+        modelId: input.request.model.id,
+        historyCompacted: input.historyCompacted,
+        historyRewriteReason: input.request.historyRewriteReason,
+        updatedAt: new Date().toISOString()
+      };
+    }
     const systemMessages = input.messages.filter((message) => message.role === 'system');
     const systemPrompt = systemMessages.map((message) => message.content ?? '').join('\n');
     const toolsSchema = JSON.stringify(input.tools);
@@ -2329,16 +2556,26 @@ export class AgentRunner {
     request: AgentRequest,
     messages: DeepSeekMessage[],
     tools: DeepSeekFunctionTool[],
-    outputReserveTokens: number
+    outputReserveTokens: number,
+    responsesRunState?: OpenAiResponsesRunState,
+    pendingResponseFunctionOutputs: OpenAiResponsesItem[] = []
   ): boolean {
     const settings = getDeepSeekV4RuntimeProfile(request.model, request.settings).contextCompression;
-    const usage = createContextUsageEstimateFromMessages({
-      model: request.model,
-      messages,
-      tools,
-      outputReserveTokens,
-      safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-    });
+    const usage = responsesRunState
+      ? createContextUsageEstimateFromResponses({
+          model: request.model,
+          input: [...responsesRunState.input, ...pendingResponseFunctionOutputs],
+          tools: responsesRunState.tools,
+          outputReserveTokens,
+          safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+        })
+      : createContextUsageEstimateFromMessages({
+          model: request.model,
+          messages,
+          tools,
+          outputReserveTokens,
+          safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+        });
     return usage.usedPercent / 100 >= settings.toolResultSnipRatio;
   }
 
@@ -2558,15 +2795,25 @@ export class AgentRunner {
     request: AgentRequest,
     messages: DeepSeekMessage[],
     tools: DeepSeekFunctionTool[],
-    outputReserveTokens: number
+    outputReserveTokens: number,
+    responsesRunState?: OpenAiResponsesRunState,
+    additionalResponsesItems: OpenAiResponsesItem[] = []
   ): AgentBudgetFinishReason | undefined {
-    const usage = createContextUsageEstimateFromMessages({
-      model: request.model,
-      messages,
-      tools,
-      outputReserveTokens,
-      safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-    });
+    const usage = responsesRunState
+      ? createContextUsageEstimateFromResponses({
+          model: request.model,
+          input: [...responsesRunState.input, ...additionalResponsesItems],
+          tools: responsesRunState.tools,
+          outputReserveTokens,
+          safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+        })
+      : createContextUsageEstimateFromMessages({
+          model: request.model,
+          messages,
+          tools,
+          outputReserveTokens,
+          safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+        });
     return usage.usedTokensEstimate > usage.maxTokensEstimate ? 'tool_result_budget_exhausted' : undefined;
   }
 
@@ -3026,9 +3273,26 @@ function formatMessagesForTrace(
 }
 
 function formatRequestBodyForTrace(
-  body: DeepSeekChatRequestBody,
+  body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody,
   includeRequestPayload: boolean
-): DeepSeekChatRequestBody | Record<string, unknown> {
+): DeepSeekChatRequestBody | OpenAiResponsesRequestBody | Record<string, unknown> {
+  if ('input' in body) {
+    return includeRequestPayload
+      ? body
+      : {
+          model: body.model,
+          protocol: 'openai-responses',
+          inputItemCount: body.input.length,
+          inputCharacters: JSON.stringify(body.input).length,
+          stream: body.stream,
+          store: body.store,
+          toolCount: body.tools?.length ?? 0,
+          toolChoice: body.tool_choice,
+          maxOutputTokens: body.max_output_tokens,
+          include: body.include,
+          reasoning: body.reasoning ? { effort: body.reasoning.effort } : undefined
+        };
+  }
   if (!includeRequestPayload) {
     return summarizeDeepSeekRequestBody(body);
   }

@@ -90,6 +90,27 @@ describe('ModelSourceStore', () => {
     await assert.rejects(access(storedPath));
   });
 
+  it('stores Responses accounts in their own provider directory', async () => {
+    const store = new ModelSourceStore(vscode.Uri.file(storageRoot), {
+      now: () => NOW,
+      createId: () => 'responses-account'
+    });
+    await store.createSource({
+      provider: 'openai-responses',
+      name: 'Responses',
+      apiKey: 'responses-key'
+    });
+    const storedPath = path.join(
+      storageRoot,
+      'accounts',
+      'openai-responses',
+      'responses-account.json'
+    );
+    const stored = JSON.parse(await readFile(storedPath, 'utf8')) as { provider: string; baseUrl: string };
+    assert.equal(stored.provider, 'openai-responses');
+    assert.equal(stored.baseUrl, 'https://api.openai.com/v1');
+  });
+
   it('ignores damaged and path-mismatched JSON while preserving other sources', async () => {
     const deepseekDir = path.join(storageRoot, 'accounts', 'deepseek');
     await mkdir(deepseekDir, { recursive: true });
