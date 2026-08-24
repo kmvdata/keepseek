@@ -1866,7 +1866,8 @@ export function getInputScript(): string {
 
       function getModelSourceLabel(model) {
         if (!model) { return 'Model'; }
-        return model.sourceName || (model.provider === 'openai-responses' ? t('openAiResponsesCompatible')
+        return model.sourceName || (model.provider === 'anthropic-compatible' ? t('anthropicMessagesCompatible')
+          : model.provider === 'openai-responses' ? t('openAiResponsesCompatible')
           : model.provider === 'openai-compatible' ? 'OpenAI Compatible'
           : model.provider === 'ollama' ? 'Ollama'
           : 'DeepSeek');
@@ -3499,13 +3500,14 @@ export function getInputScript(): string {
       }
 
       function normalizeSettingsProvider(value) {
-        return value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses'
+        return value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses' || value === 'anthropic-compatible'
           ? value
           : 'deepseek';
       }
 
       function getSettingsProviderLabel(provider) {
-        return provider === 'openai-responses' ? t('openAiResponsesCompatible')
+        return provider === 'anthropic-compatible' ? t('anthropicMessagesCompatible')
+          : provider === 'openai-responses' ? t('openAiResponsesCompatible')
           : provider === 'openai-compatible' ? 'OpenAI compatible'
           : provider === 'ollama' ? 'Ollama'
           : 'DeepSeek';
@@ -3656,7 +3658,8 @@ export function getInputScript(): string {
           settingsBaseUrl.value = account
             ? account.baseUrl || (account.provider === 'deepseek'
               ? 'https://api.deepseek.com'
-              : account.provider === 'openai-responses' ? 'https://api.openai.com/v1' : '')
+              : account.provider === 'openai-responses' ? 'https://api.openai.com/v1'
+              : account.provider === 'anthropic-compatible' ? 'https://api.anthropic.com/v1' : '')
             : 'https://api.deepseek.com';
         }
         if (settingsManualModelId) { settingsManualModelId.value = ''; }
@@ -3668,7 +3671,7 @@ export function getInputScript(): string {
       function renderSettingsAccountList(controlsDisabled) {
         if (!settingsAccountList) { return; }
         settingsAccountList.innerHTML = '';
-        var providerOrder = ['deepseek', 'ollama', 'openai-compatible', 'openai-responses'];
+        var providerOrder = ['deepseek', 'ollama', 'openai-compatible', 'openai-responses', 'anthropic-compatible'];
         providerOrder.forEach(function(provider) {
           var sources = settingsSources.filter(function(source) { return source.provider === provider; });
           if (!sources.length) { return; }
@@ -4063,6 +4066,9 @@ export function getInputScript(): string {
           }
           if (!baseUrl && provider === 'openai-responses') {
             baseUrl = 'https://api.openai.com/v1';
+          }
+          if (!baseUrl && provider === 'anthropic-compatible') {
+            baseUrl = 'https://api.anthropic.com/v1';
           }
           if (!baseUrl) {
             setSettingsDialogStatus(t('baseUrlRequired'));

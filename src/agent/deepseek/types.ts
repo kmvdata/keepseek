@@ -1,5 +1,5 @@
 import type { ReasoningEffort } from '../../shared/types';
-import type { OpenAiResponsesReplayItem } from '../../shared/types';
+import type { AnthropicReplayContentBlock, OpenAiResponsesReplayItem } from '../../shared/types';
 
 export type DeepSeekRole = 'system' | 'user' | 'assistant' | 'tool';
 export type DeepSeekThinkingType = 'enabled' | 'disabled';
@@ -92,6 +92,7 @@ export interface DeepSeekStreamResult {
   finishReason?: string | null;
   usage?: DeepSeekUsage | null;
   nativeOutputItems?: OpenAiResponsesReplayItem[];
+  nativeAnthropicContentBlocks?: AnthropicReplayContentBlock[];
 }
 
 export interface DeepSeekChatRequestBody {

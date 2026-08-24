@@ -7,6 +7,7 @@ import type {
   DeepSeekStreamResult
 } from '../deepseek/types';
 import type { OpenAiResponsesStreamResult } from './responsesTypes';
+import type { AnthropicMessagesStreamResult } from './anthropicTypes';
 import type {
   ProviderClient,
   ProviderClientConfig,
@@ -187,15 +188,7 @@ export class OpenAICompatibleClient implements ProviderClient {
         attempt,
         url: requestUrl
       });
-      const headers: Record<string, string> = {
-        Accept: 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Content-Type': 'application/json'
-      };
-      // Ollama 等本地部署不需要 API Key；空 key 时不发送 Authorization 头。
-      if (config.apiKey.trim()) {
-        headers.Authorization = `Bearer ${config.apiKey}`;
-      }
+      const headers = this.buildRequestHeaders(config);
       const response = await fetch(requestUrl, {
         method: 'POST',
         headers,
@@ -278,6 +271,9 @@ export class OpenAICompatibleClient implements ProviderClient {
               types: result.outputItems.map((item) => item.type ?? 'local_message')
             }
           : undefined,
+        nativeAnthropicBlocks: 'contentBlocks' in result
+          ? { count: result.contentBlocks.length, types: result.contentBlocks.map((block) => block.type) }
+          : undefined,
         message: trace.includesPayload('request') ? result.message : summarizeDeepSeekMessage(result.message)
       });
       const normalizedMessage = 'outputItems' in result && partialReasoningParts.length
@@ -289,6 +285,7 @@ export class OpenAICompatibleClient implements ProviderClient {
         message: normalizedMessage,
         usage: result.usage,
         nativeOutputItems: 'outputItems' in result ? result.outputItems : undefined,
+        nativeAnthropicContentBlocks: 'contentBlocks' in result ? result.contentBlocks : undefined,
         hadPartialOutput,
         hadStreamActivity,
         retryable: false
@@ -516,6 +513,19 @@ export class OpenAICompatibleClient implements ProviderClient {
     return url.toString();
   }
 
+  protected buildRequestHeaders(config: ProviderClientConfig): Record<string, string> {
+    const headers: Record<string, string> = {
+      Accept: 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Content-Type': 'application/json'
+    };
+    // Ollama 等本地部署不需要 API Key；空 key 时不发送 Authorization 头。
+    if (config.apiKey.trim()) {
+      headers.Authorization = `Bearer ${config.apiKey}`;
+    }
+    return headers;
+  }
+
   protected async parseStream(
     body: NonNullable<Response['body']>,
     language: KeepseekLanguage,
@@ -526,7 +536,7 @@ export class OpenAICompatibleClient implements ProviderClient {
       attempt?: number;
       onStreamActivity?: () => void;
     }
-  ): Promise<DeepSeekStreamResult | OpenAiResponsesStreamResult> {
+  ): Promise<DeepSeekStreamResult | OpenAiResponsesStreamResult | AnthropicMessagesStreamResult> {
     return await this.streamParser.parse(body, language, callbacks, options);
   }
 

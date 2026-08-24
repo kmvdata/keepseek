@@ -4,6 +4,7 @@ import { DEFAULT_DEEPSEEK_BASE_URL } from '../shared/config';
 import { isRecord } from '../shared/errors';
 import {
   MODEL_SOURCE_PROVIDERS,
+  type AnthropicModelCapabilities,
   type CreateModelSourceInput,
   type DiscoveredModelInfo,
   type ModelDiscoveryCache,
@@ -16,6 +17,7 @@ import {
 export const ACCOUNTS_STORAGE_DIRECTORY = 'accounts';
 export const DEFAULT_OPENAI_COMPATIBLE_BASE_URL = 'https://api.openai.com/v1';
 export const DEFAULT_OPENAI_RESPONSES_BASE_URL = 'https://api.openai.com/v1';
+export const DEFAULT_ANTHROPIC_COMPATIBLE_BASE_URL = 'https://api.anthropic.com/v1';
 export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434/v1';
 
 const ACCOUNT_FILE_EXTENSION = '.json';
@@ -23,6 +25,8 @@ const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MAX_ACCOUNT_NAME_LENGTH = 200;
 const MAX_MODEL_ID_LENGTH = 512;
 const MAX_MODEL_NAME_LENGTH = 512;
+export const MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS = 10_000_000;
+export const MAX_DISCOVERED_OUTPUT_TOKENS = 1_000_000;
 
 export interface ModelSourceStoreOptions {
   now?: () => number;
@@ -306,7 +310,22 @@ export function normalizeDiscoveredModels(value: unknown): DiscoveredModelInfo[]
     }
     seenIds.add(id);
     const name = normalizeBoundedString(item.name, MAX_MODEL_NAME_LENGTH);
-    models.push(name ? { id, name } : { id });
+    const contextWindowTokens = normalizeBoundedPositiveInteger(
+      item.contextWindowTokens,
+      MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS
+    );
+    const maxOutputTokens = normalizeBoundedPositiveInteger(
+      item.maxOutputTokens,
+      MAX_DISCOVERED_OUTPUT_TOKENS
+    );
+    const anthropicCapabilities = normalizeAnthropicModelCapabilities(item.anthropicCapabilities);
+    models.push({
+      id,
+      ...(name ? { name } : {}),
+      ...(contextWindowTokens ? { contextWindowTokens } : {}),
+      ...(maxOutputTokens ? { maxOutputTokens } : {}),
+      ...(anthropicCapabilities ? { anthropicCapabilities } : {})
+    });
   }
   return models;
 }
@@ -352,6 +371,7 @@ export function getDefaultModelSourceName(provider: ModelSourceProvider): string
   return provider === 'deepseek' ? 'DeepSeek'
     : provider === 'ollama' ? 'Ollama'
     : provider === 'openai-responses' ? 'OpenAI Responses compatible'
+    : provider === 'anthropic-compatible' ? 'Anthropic compatible'
     : 'OpenAI Compatible';
 }
 
@@ -362,7 +382,27 @@ export function getDefaultModelSourceBaseUrl(provider: ModelSourceProvider): str
       ? DEFAULT_OLLAMA_BASE_URL
       : provider === 'openai-responses'
         ? DEFAULT_OPENAI_RESPONSES_BASE_URL
+        : provider === 'anthropic-compatible'
+          ? DEFAULT_ANTHROPIC_COMPATIBLE_BASE_URL
         : DEFAULT_OPENAI_COMPATIBLE_BASE_URL;
+}
+
+export function normalizeAnthropicModelCapabilities(
+  value: unknown
+): AnthropicModelCapabilities | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const thinking = value.thinking === 'adaptive' || value.thinking === 'enabled'
+    ? value.thinking
+    : undefined;
+  const rawEffort = value.effort;
+  const effort = Array.isArray(rawEffort)
+    ? (['high', 'max'] as const).filter((level) => rawEffort.includes(level))
+    : [];
+  return thinking || effort.length
+    ? { ...(thinking ? { thinking } : {}), ...(effort.length ? { effort } : {}) }
+    : undefined;
 }
 
 function assertValidModelSourceId(sourceId: string): void {
@@ -383,4 +423,10 @@ function readNonEmptyString(value: unknown): string | undefined {
 
 function normalizeBoundedString(value: unknown, maxLength: number): string {
   return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
+}
+
+function normalizeBoundedPositiveInteger(value: unknown, max: number): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= max
+    ? Math.floor(value)
+    : undefined;
 }

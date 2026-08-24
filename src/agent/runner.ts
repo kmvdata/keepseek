@@ -18,7 +18,7 @@ import {
   TurnUsageStats,
   UsageEvent
 } from '../shared/types';
-import type { OpenAiResponsesReplayState } from '../shared/types';
+import type { ProviderReplayState } from '../shared/types';
 import {
   getConfiguredContextWindowTokens,
   getConfiguredMaxRequestRetries,
@@ -30,6 +30,7 @@ import {
 } from '../shared/config';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
 import type { ModelSourceProvider } from '../accounts/types';
+import { isOfficialAnthropicSource } from '../accounts/sourceCapabilities';
 import { formatBytes } from '../shared/format';
 import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
 import {
@@ -66,6 +67,7 @@ import { buildProviderRequestProjection } from './providerRequestProjection';
 import {
   calibrateContextUsageEstimate,
   createContextUsageEstimate,
+  createContextUsageEstimateFromAnthropic,
   createContextUsageEstimateFromMessages,
   createContextUsageEstimateFromResponses,
   resolveOutputReserveTokens
@@ -90,6 +92,14 @@ import type {
   OpenAiResponsesItem,
   OpenAiResponsesRequestBody
 } from './providers/responsesTypes';
+import type {
+  AnthropicFunctionTool,
+  AnthropicMessage,
+  AnthropicMessagesRequestBody,
+  AnthropicSystemTextBlock,
+  AnthropicUserContentBlock
+} from './providers/anthropicTypes';
+import { DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS } from './providers/anthropicTypes';
 import {
   AgentInteractionTrace,
   createNoopInteractionTrace,
@@ -155,6 +165,7 @@ interface AgentRuntimeConfig {
 }
 
 interface OpenAiResponsesRunState {
+  protocol: 'openai-responses';
   input: OpenAiResponsesItem[];
   tools: OpenAiResponsesFunctionTool[];
   replayItems: OpenAiResponsesItem[];
@@ -163,6 +174,23 @@ interface OpenAiResponsesRunState {
     baseUrl: string;
   };
 }
+
+interface AnthropicMessagesRunState {
+  protocol: 'anthropic-messages';
+  system: AnthropicSystemTextBlock[];
+  messages: AnthropicMessage[];
+  tools: AnthropicFunctionTool[];
+  replayMessages: AnthropicMessage[];
+  lane: {
+    sourceId: string;
+    baseUrl: string;
+  };
+  thinking?: AnthropicMessagesRequestBody['thinking'];
+  outputConfig?: AnthropicMessagesRequestBody['output_config'];
+  cacheControl?: AnthropicMessagesRequestBody['cache_control'];
+}
+
+type ProviderNativeRunState = OpenAiResponsesRunState | AnthropicMessagesRunState;
 
 type AgentBudgetFinishReason =
   | 'tool_iterations_exhausted'
@@ -311,7 +339,7 @@ export class AgentRunner {
       records: []
     };
     let promptCacheDiagnostics: PromptCacheDiagnostics | undefined;
-    let responsesRunState: OpenAiResponsesRunState | undefined;
+    let providerRunState: ProviderNativeRunState | undefined;
     trace.record({
       type: 'run_start',
       model: request.model,
@@ -407,7 +435,7 @@ export class AgentRunner {
         usage: response.usage ?? this.toTurnUsageStats(upstreamUsageTotals, request.model.id),
         promptCacheDiagnostics: response.promptCacheDiagnostics ?? promptCacheDiagnostics,
         toolRounds: toolRounds.length ? toolRounds : undefined,
-        providerReplay: response.providerReplay ?? this.createResponsesReplayState(responsesRunState)
+        providerReplay: response.providerReplay ?? this.createProviderReplayState(providerRunState)
       };
       trace.record({
         type: 'run_finish',
@@ -524,14 +552,29 @@ export class AgentRunner {
     });
     const projection = providerProjection.historyProjection;
     const messages = providerProjection.messages;
-    responsesRunState = providerProjection.responses
+    providerRunState = providerProjection.responses
       ? {
+          protocol: 'openai-responses',
           input: [...providerProjection.responses.input],
           tools: providerProjection.responses.tools,
           replayItems: [],
           lane: providerProjection.responses.lane
         }
-      : undefined;
+      : providerProjection.anthropic
+        ? {
+            protocol: 'anthropic-messages',
+            system: providerProjection.anthropic.system,
+            messages: [...providerProjection.anthropic.messages],
+            tools: providerProjection.anthropic.tools,
+            replayMessages: [],
+            lane: providerProjection.anthropic.lane,
+            ...this.createAnthropicThinkingConfig(request, runtimeConfig.maxTokens),
+            cacheControl: isOfficialAnthropicSource({
+              provider: runtimeConfig.provider,
+              baseUrl: runtimeConfig.baseUrl
+            }) ? { type: 'ephemeral' } : undefined
+          }
+        : undefined;
     trace.record({
       type: 'context_projection',
       metadata: projection.metadata,
@@ -572,7 +615,8 @@ export class AgentRunner {
       messages,
       tools,
       historyCompacted: projection.metadata.usedSummary,
-      responses: providerProjection.responses
+      responses: providerProjection.responses,
+      anthropic: providerProjection.anthropic
     });
     trace.record({
       type: 'prompt_cache_diagnostics',
@@ -615,16 +659,26 @@ export class AgentRunner {
         ...runtimeUsageBreakdown,
         toolSchemaTokensEstimate: undefined
       };
-      callbacks.onUsageEstimate?.(responsesRunState
+      callbacks.onUsageEstimate?.(providerRunState?.protocol === 'openai-responses'
         ? createContextUsageEstimateFromResponses({
             model: request.model,
-            input: responsesRunState.input,
-            tools: responsesRunState.tools,
+            input: providerRunState.input,
+            tools: providerRunState.tools,
             outputReserveTokens,
             safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
             breakdown
           })
-        : createContextUsageEstimateFromMessages({
+        : providerRunState?.protocol === 'anthropic-messages'
+          ? createContextUsageEstimateFromAnthropic({
+              model: request.model,
+              system: providerRunState.system,
+              messages: providerRunState.messages,
+              tools: providerRunState.tools,
+              outputReserveTokens,
+              safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
+              breakdown
+            })
+          : createContextUsageEstimateFromMessages({
             model: request.model,
             messages,
             tools: toolsForNextRequest,
@@ -647,14 +701,7 @@ export class AgentRunner {
         content: this.getBudgetStopInstruction(budgetStopReason, request.language)
       };
       messages.push(budgetInstructionMessage);
-      responsesRunState?.input.push({
-        role: 'user',
-        content: budgetInstructionMessage.content ?? ''
-      });
-      responsesRunState?.replayItems.push({
-        role: 'user',
-        content: budgetInstructionMessage.content ?? ''
-      });
+      this.appendProviderUserText(providerRunState, budgetInstructionMessage.content ?? '');
       trace.record({
         type: 'agent_message_appended',
         reason: 'budget_stop_instruction',
@@ -673,7 +720,7 @@ export class AgentRunner {
       messages,
       tools,
       outputReserveTokens,
-      responsesRunState
+      providerRunState
     );
     if (initialBudgetStopReason) {
       throw new Error(request.language === 'en'
@@ -711,15 +758,19 @@ export class AgentRunner {
         trace,
         usageTotals: upstreamUsageTotals,
         toolChoice: allowToolCalls ? 'auto' : 'none',
-        responsesRunState
+        providerRunState
       });
       this.throwIfAborted(request.signal, request.language);
-      const normalizedAssistant = this.normalizeAssistantToolCalls(response.message, allowToolCalls || allowTerminalDraftEdit);
+      const normalizedAssistant = this.normalizeAssistantToolCalls(
+        response.message,
+        allowToolCalls || allowTerminalDraftEdit,
+        runtimeConfig.provider !== 'anthropic-compatible'
+      );
       const assistant = normalizedAssistant.assistant;
       if (!assistant) {
         throw new Error(request.language === 'en'
-          ? 'DeepSeek API did not return a usable assistant message.'
-          : 'DeepSeek API 没有返回可用的 assistant message。');
+          ? 'The provider API did not return a usable assistant message.'
+          : 'Provider API 没有返回可用的 assistant message。');
       }
 
       if (normalizedAssistant.displayReasoningContent) {
@@ -750,7 +801,7 @@ export class AgentRunner {
           trace,
           usageTotals: upstreamUsageTotals,
           tools,
-          responsesRunState
+          providerRunState
         });
         if (continuedResponse) {
           emitStatus({
@@ -784,6 +835,7 @@ export class AgentRunner {
       });
 
       const responseFunctionOutputs: OpenAiResponsesItem[] = [];
+      const anthropicToolResults: AnthropicUserContentBlock[] = [];
       const executeToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
         this.throwIfAborted(request.signal, request.language);
         trace.record({
@@ -982,8 +1034,9 @@ export class AgentRunner {
             messages,
             nextToolsForRequest,
             outputReserveTokens,
-            responsesRunState,
-            responseFunctionOutputs
+            providerRunState,
+            responseFunctionOutputs,
+            anthropicToolResults
           )
         );
         const shapedToolMessage: DeepSeekMessage = {
@@ -1019,19 +1072,46 @@ export class AgentRunner {
           [...messages, shapedToolMessage],
           nextToolsForRequest,
           outputReserveTokens,
-          responsesRunState,
-          responsesRunState ? [...responseFunctionOutputs, prospectiveResponseOutput] : []
+          providerRunState,
+          providerRunState?.protocol === 'openai-responses'
+            ? [...responseFunctionOutputs, prospectiveResponseOutput]
+            : [],
+          providerRunState?.protocol === 'anthropic-messages'
+            ? [...anthropicToolResults, {
+                type: 'tool_result',
+                tool_use_id: toolCall.id,
+                content: shapedToolResult.content,
+                ...(this.isToolResultError(shapedToolResult.content) ? { is_error: true } : {})
+              }]
+            : []
         )) {
           budgetStopReason = 'tool_result_budget_exhausted';
-          const projectedUsage = responsesRunState
+          const projectedUsage = providerRunState?.protocol === 'openai-responses'
             ? createContextUsageEstimateFromResponses({
                 model: request.model,
-                input: [...responsesRunState.input, ...responseFunctionOutputs, prospectiveResponseOutput],
-                tools: responsesRunState.tools,
+                input: [...providerRunState.input, ...responseFunctionOutputs, prospectiveResponseOutput],
+                tools: providerRunState.tools,
                 outputReserveTokens,
                 safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
               })
-            : createContextUsageEstimateFromMessages({
+            : providerRunState?.protocol === 'anthropic-messages'
+              ? createContextUsageEstimateFromAnthropic({
+                  model: request.model,
+                  system: providerRunState.system,
+                  messages: [...providerRunState.messages, {
+                    role: 'user',
+                    content: [...anthropicToolResults, {
+                      type: 'tool_result',
+                      tool_use_id: toolCall.id,
+                      content: shapedToolResult.content,
+                      ...(this.isToolResultError(shapedToolResult.content) ? { is_error: true } : {})
+                    }]
+                  }],
+                  tools: providerRunState.tools,
+                  outputReserveTokens,
+                  safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+                })
+              : createContextUsageEstimateFromMessages({
                 model: request.model,
                 messages: [...messages, shapedToolMessage],
                 tools: nextToolsForRequest,
@@ -1117,6 +1197,12 @@ export class AgentRunner {
             call_id: toolCall.id,
             output: toolResult
           });
+          anthropicToolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolCall.id,
+            content: toolResult,
+            ...(this.isToolResultError(toolResult) ? { is_error: true } : {})
+          });
           trace.record({
             type: 'agent_message_appended',
             reason: 'native_tool_result',
@@ -1130,11 +1216,18 @@ export class AgentRunner {
             toolName: toolCall.function.name
           });
         }
-        if (responsesRunState && responseFunctionOutputs.length) {
+        if (providerRunState?.protocol === 'openai-responses' && responseFunctionOutputs.length) {
           // All provider output Items were appended by createModelResponse before
           // execution. Function outputs follow in stable function-call order.
-          responsesRunState.input.push(...responseFunctionOutputs);
-          responsesRunState.replayItems.push(...responseFunctionOutputs);
+          providerRunState.input.push(...responseFunctionOutputs);
+          providerRunState.replayItems.push(...responseFunctionOutputs);
+        } else if (providerRunState?.protocol === 'anthropic-messages' && anthropicToolResults.length) {
+          const toolResultMessage: AnthropicMessage = {
+            role: 'user',
+            content: anthropicToolResults
+          };
+          providerRunState.messages.push(toolResultMessage);
+          providerRunState.replayMessages.push(toolResultMessage);
         }
         // 保存本工具轮的原样字节快照，供跨轮重建（toolRounds 展开 == 本轮发送序列）。
         toolRounds.push({
@@ -1174,14 +1267,7 @@ export class AgentRunner {
           content: this.formatEmulatedDsmlToolResults(emulatedResults, request.language)
         };
         messages.push(emulatedToolResultMessage);
-        responsesRunState?.input.push({
-          role: 'user',
-          content: emulatedToolResultMessage.content ?? ''
-        });
-        responsesRunState?.replayItems.push({
-          role: 'user',
-          content: emulatedToolResultMessage.content ?? ''
-        });
+        this.appendProviderUserText(providerRunState, emulatedToolResultMessage.content ?? '');
         trace.record({
           type: 'agent_message_appended',
           reason: 'dsml_emulated_tool_results',
@@ -1239,14 +1325,14 @@ export class AgentRunner {
       usageTotals?: UpstreamUsageTotals;
       toolChoice?: 'auto' | 'none';
       usageSource?: 'executor' | 'continuation';
-      responsesRunState?: OpenAiResponsesRunState;
+      providerRunState?: ProviderNativeRunState;
     } = {}
   ): Promise<DeepSeekStreamResult> {
     const trace = options.trace ?? createNoopInteractionTrace();
-    let body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody;
+    let body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody;
     if (runtimeConfig.provider === 'openai-responses') {
-      const responsesState = options.responsesRunState;
-      if (!responsesState) {
+      const responsesState = options.providerRunState;
+      if (responsesState?.protocol !== 'openai-responses') {
         throw new Error('OpenAI Responses request projection is unavailable.');
       }
       body = {
@@ -1267,6 +1353,26 @@ export class AgentRunner {
           : undefined,
         temperature: runtimeConfig.temperature,
         top_p: runtimeConfig.topP
+      };
+    } else if (runtimeConfig.provider === 'anthropic-compatible') {
+      const anthropicState = options.providerRunState;
+      if (anthropicState?.protocol !== 'anthropic-messages') {
+        throw new Error('Anthropic Messages request projection is unavailable.');
+      }
+      body = {
+        model: request.model.id,
+        system: anthropicState.system,
+        messages: anthropicState.messages,
+        tools: anthropicState.tools.length ? anthropicState.tools : undefined,
+        tool_choice: anthropicState.tools.length
+          ? { type: options.toolChoice ?? 'auto' }
+          : undefined,
+        stream: true,
+        max_tokens: runtimeConfig.maxTokens,
+        thinking: anthropicState.thinking,
+        output_config: anthropicState.outputConfig,
+        temperature: runtimeConfig.temperature,
+        cache_control: anthropicState.cacheControl
       };
     } else {
       // This object and its field order are intentionally unchanged: DeepSeek's
@@ -1358,15 +1464,24 @@ export class AgentRunner {
       if (usageEvent) {
         callbacks.onUsage?.(usageEvent);
         callbacks.onUsageEstimate?.(calibrateContextUsageEstimate(
-          options.responsesRunState
+          options.providerRunState?.protocol === 'openai-responses'
             ? createContextUsageEstimateFromResponses({
                 model: request.model,
-                input: options.responsesRunState.input,
-                tools: options.responsesRunState.tools,
+                input: options.providerRunState.input,
+                tools: options.providerRunState.tools,
                 outputReserveTokens: resolveOutputReserveTokens(runtimeConfig.maxTokens),
                 safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
               })
-            : createContextUsageEstimateFromMessages({
+            : options.providerRunState?.protocol === 'anthropic-messages'
+              ? createContextUsageEstimateFromAnthropic({
+                  model: request.model,
+                  system: options.providerRunState.system,
+                  messages: options.providerRunState.messages,
+                  tools: options.providerRunState.tools,
+                  outputReserveTokens: resolveOutputReserveTokens(runtimeConfig.maxTokens),
+                  safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+                })
+              : createContextUsageEstimateFromMessages({
                 model: request.model,
                 messages,
                 tools,
@@ -1376,11 +1491,19 @@ export class AgentRunner {
           usageEvent.usage.promptTokens
         ));
       }
-      if (options.responsesRunState && response.nativeOutputItems?.length) {
+      if (options.providerRunState?.protocol === 'openai-responses' && response.nativeOutputItems?.length) {
         // response.output is authoritative and must precede all local function
         // outputs in the next stateless Responses request.
-        options.responsesRunState.input.push(...response.nativeOutputItems);
-        options.responsesRunState.replayItems.push(...response.nativeOutputItems);
+        options.providerRunState.input.push(...response.nativeOutputItems);
+        options.providerRunState.replayItems.push(...response.nativeOutputItems);
+      } else if (options.providerRunState?.protocol === 'anthropic-messages'
+        && response.nativeAnthropicContentBlocks?.length) {
+        const nativeMessage: AnthropicMessage = {
+          role: 'assistant',
+          content: response.nativeAnthropicContentBlocks
+        };
+        options.providerRunState.messages.push(nativeMessage);
+        options.providerRunState.replayMessages.push(nativeMessage);
       }
       trace.record({
         type: 'upstream_response_message',
@@ -1393,7 +1516,8 @@ export class AgentRunner {
         message: response.message,
         finishReason: response.finishReason,
         usage: response.usage,
-        nativeOutputItems: response.nativeOutputItems
+        nativeOutputItems: response.nativeOutputItems,
+        nativeAnthropicContentBlocks: response.nativeAnthropicContentBlocks
       };
     }
 
@@ -1431,7 +1555,7 @@ export class AgentRunner {
         trace,
         usageTotals: options.usageTotals,
         tools,
-        responsesRunState: options.responsesRunState
+        providerRunState: options.providerRunState
       });
     }
 
@@ -1446,8 +1570,8 @@ export class AgentRunner {
     });
 
     throw new Error(response.error ?? (request.language === 'en'
-      ? 'DeepSeek API request failed.'
-      : 'DeepSeek API 请求失败。'));
+      ? 'The provider API request failed.'
+      : 'Provider API 请求失败。'));
   }
 
   private async tryContinueLengthLimitedResponse(input: {
@@ -1465,7 +1589,7 @@ export class AgentRunner {
     trace: AgentInteractionTrace;
     usageTotals: UpstreamUsageTotals;
     tools: DeepSeekFunctionTool[];
-    responsesRunState?: OpenAiResponsesRunState;
+    providerRunState?: ProviderNativeRunState;
   }): Promise<{ content: string; finishReason?: string | null } | undefined> {
     if (!this.canContinueLengthLimitedResponse(input)) {
       return undefined;
@@ -1488,29 +1612,41 @@ export class AgentRunner {
         instructionMessage
       ];
 
+      const isAnthropicPause = input.providerRunState?.protocol === 'anthropic-messages'
+        && finishReason === 'pause_turn';
       const continuationInstructionItem: OpenAiResponsesItem = {
         role: 'user',
         content: instructionMessage.content ?? ''
+      };
+      const anthropicContinuationMessage: AnthropicMessage = {
+        role: 'user',
+        content: [{ type: 'text', text: instructionMessage.content ?? '' }]
       };
       if (this.getContextWindowBudgetStopReason(
         input.request,
         continuationMessages,
         input.tools,
         input.outputReserveTokens,
-        input.responsesRunState,
-        input.responsesRunState ? [continuationInstructionItem] : []
+        input.providerRunState,
+        input.providerRunState?.protocol === 'openai-responses' ? [continuationInstructionItem] : [],
+        input.providerRunState?.protocol === 'anthropic-messages' && !isAnthropicPause
+          ? anthropicContinuationMessage.content
+          : []
       )) {
         return continuationIndex > 0 ? { content, finishReason } : undefined;
       }
 
       input.messages.push(assistantMessage, instructionMessage);
-      if (input.responsesRunState) {
+      if (input.providerRunState?.protocol === 'openai-responses') {
         const responseInstruction: OpenAiResponsesItem = {
           role: 'user',
           content: instructionMessage.content ?? ''
         };
-        input.responsesRunState.input.push(responseInstruction);
-        input.responsesRunState.replayItems.push(responseInstruction);
+        input.providerRunState.input.push(responseInstruction);
+        input.providerRunState.replayItems.push(responseInstruction);
+      } else if (input.providerRunState?.protocol === 'anthropic-messages' && !isAnthropicPause) {
+        input.providerRunState.messages.push(anthropicContinuationMessage);
+        input.providerRunState.replayMessages.push(anthropicContinuationMessage);
       }
       input.trace.record({
         type: 'agent_message_appended',
@@ -1538,10 +1674,10 @@ export class AgentRunner {
           usageTotals: input.usageTotals,
           toolChoice: 'none',
           usageSource: 'continuation',
-          responsesRunState: input.responsesRunState
+          providerRunState: input.providerRunState
         }
       );
-      const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false);
+      const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false, false);
       if (normalizedContinuation.displayReasoningContent) {
         input.reasoningParts.push(normalizedContinuation.displayReasoningContent);
       }
@@ -1549,7 +1685,7 @@ export class AgentRunner {
       content = this.joinContinuationContent(content, continuationContent);
       finishReason = continuationResponse.finishReason;
 
-      if (finishReason !== 'length' || !continuationContent.trim()) {
+      if ((finishReason !== 'length' && finishReason !== 'pause_turn') || (!continuationContent.trim() && finishReason !== 'pause_turn')) {
         break;
       }
     }
@@ -1565,15 +1701,18 @@ export class AgentRunner {
     draftEdits: DraftEdit[];
     outputReserveTokens: number;
     tools: DeepSeekFunctionTool[];
-    responsesRunState?: OpenAiResponsesRunState;
+    providerRunState?: ProviderNativeRunState;
   }): boolean {
-    if (input.response.finishReason !== 'length') {
+    const isLength = input.response.finishReason === 'length';
+    const isAnthropicPause = input.response.finishReason === 'pause_turn'
+      && input.providerRunState?.protocol === 'anthropic-messages';
+    if (!isLength && !isAnthropicPause) {
       return false;
     }
     if (input.draftEdits.length) {
       return false;
     }
-    if (!input.assistant.content?.trim()) {
+    if (isLength && !input.assistant.content?.trim()) {
       return false;
     }
     if (input.assistant.tool_calls?.some((toolCall) => toolCall.type === 'function')) {
@@ -1596,9 +1735,12 @@ export class AgentRunner {
       continuationMessages,
       input.tools,
       input.outputReserveTokens,
-      input.responsesRunState,
-      input.responsesRunState
+      input.providerRunState,
+      input.providerRunState?.protocol === 'openai-responses'
         ? [{ role: 'user', content: this.getLengthContinuationInstruction(input.request.language) }]
+        : [],
+      input.providerRunState?.protocol === 'anthropic-messages' && isLength
+        ? [{ type: 'text', text: this.getLengthContinuationInstruction(input.request.language) }]
         : []
     );
   }
@@ -1614,13 +1756,13 @@ export class AgentRunner {
     trace: AgentInteractionTrace;
     usageTotals?: UpstreamUsageTotals;
     tools: DeepSeekFunctionTool[];
-    responsesRunState?: OpenAiResponsesRunState;
+    providerRunState?: ProviderNativeRunState;
   }): Promise<DeepSeekStreamResult> {
     const partialContent = input.partialAssistant.content ?? '';
     if (!partialContent.trim()) {
       throw new Error(input.failureError ?? (input.request.language === 'en'
-        ? 'DeepSeek streaming connection failed before completion.'
-        : 'DeepSeek 流式连接在完成前中断。'));
+        ? 'The provider streaming connection failed before completion.'
+        : 'Provider 流式连接在完成前中断。'));
     }
 
     const continuationMessages: DeepSeekMessage[] = [
@@ -1634,14 +1776,25 @@ export class AgentRunner {
         content: this.getPartialFailureContinuationInstruction(input.request.language)
       }
     ];
-    if (input.responsesRunState) {
+    if (input.providerRunState?.protocol === 'openai-responses') {
       const partialMessage: OpenAiResponsesItem = { role: 'assistant', content: partialContent };
       const instructionItem: OpenAiResponsesItem = {
         role: 'user',
         content: this.getPartialFailureContinuationInstruction(input.request.language)
       };
-      input.responsesRunState.input.push(partialMessage, instructionItem);
-      input.responsesRunState.replayItems.push(partialMessage, instructionItem);
+      input.providerRunState.input.push(partialMessage, instructionItem);
+      input.providerRunState.replayItems.push(partialMessage, instructionItem);
+    } else if (input.providerRunState?.protocol === 'anthropic-messages') {
+      const partialMessage: AnthropicMessage = {
+        role: 'assistant',
+        content: [{ type: 'text', text: partialContent }]
+      };
+      const instructionMessage: AnthropicMessage = {
+        role: 'user',
+        content: [{ type: 'text', text: this.getPartialFailureContinuationInstruction(input.request.language) }]
+      };
+      input.providerRunState.messages.push(partialMessage, instructionMessage);
+      input.providerRunState.replayMessages.push(partialMessage, instructionMessage);
     }
     input.trace.record({
       type: 'partial_failure_continuation_messages',
@@ -1656,11 +1809,11 @@ export class AgentRunner {
       continuationMessages,
       input.tools,
       outputReserveTokens,
-      input.responsesRunState
+      input.providerRunState
     )) {
       throw new Error(input.failureError ?? (input.request.language === 'en'
-        ? 'DeepSeek streaming connection failed before completion, and there was not enough context budget to request a continuation.'
-        : 'DeepSeek 流式连接在完成前中断，且上下文预算不足，无法请求续写。'));
+        ? 'The provider streaming connection failed before completion, and there was not enough context budget to request a continuation.'
+        : 'Provider 流式连接在完成前中断，且上下文预算不足，无法请求续写。'));
     }
 
     const continuationResponse = await this.createModelResponse(
@@ -1676,10 +1829,10 @@ export class AgentRunner {
         usageTotals: input.usageTotals,
         toolChoice: 'none',
         usageSource: 'continuation',
-        responsesRunState: input.responsesRunState
+        providerRunState: input.providerRunState
       }
     );
-    const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false);
+    const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false, false);
     return {
       message: {
         ...normalizedContinuation.assistant,
@@ -1723,18 +1876,26 @@ export class AgentRunner {
     };
   }
 
-  private createResponsesReplayState(
-    state: OpenAiResponsesRunState | undefined
-  ): OpenAiResponsesReplayState | undefined {
-    if (!state?.replayItems.length) {
-      return undefined;
+  private createProviderReplayState(
+    state: ProviderNativeRunState | undefined
+  ): ProviderReplayState | undefined {
+    if (state?.protocol === 'openai-responses' && state.replayItems.length) {
+      return {
+        protocol: 'openai-responses',
+        sourceId: state.lane.sourceId,
+        baseUrl: state.lane.baseUrl,
+        items: state.replayItems
+      };
     }
-    return {
-      protocol: 'openai-responses',
-      sourceId: state.lane.sourceId,
-      baseUrl: state.lane.baseUrl,
-      items: state.replayItems
-    };
+    if (state?.protocol === 'anthropic-messages' && state.replayMessages.length) {
+      return {
+        protocol: 'anthropic-messages',
+        sourceId: state.lane.sourceId,
+        baseUrl: state.lane.baseUrl,
+        messages: state.replayMessages
+      };
+    }
+    return undefined;
   }
 
   private recordUpstreamUsage(
@@ -1811,7 +1972,27 @@ export class AgentRunner {
       input: OpenAiResponsesItem[];
       tools: OpenAiResponsesFunctionTool[];
     };
+    anthropic?: {
+      system: AnthropicSystemTextBlock[];
+      messages: AnthropicMessage[];
+      tools: AnthropicFunctionTool[];
+      lane: { sourceId: string; baseUrl: string };
+    };
   }): PromptCacheDiagnostics {
+    if (input.anthropic) {
+      return {
+        systemPromptHash: hashStableText(JSON.stringify(input.anthropic.system)),
+        toolsSchemaHash: hashStableText(JSON.stringify(input.anthropic.tools)),
+        historyPrefixHash: hashStableText(JSON.stringify(input.anthropic.messages)),
+        modelId: input.request.model.id,
+        protocol: 'anthropic-messages',
+        sourceId: input.anthropic.lane.sourceId,
+        baseUrl: input.anthropic.lane.baseUrl,
+        historyCompacted: input.historyCompacted,
+        historyRewriteReason: input.request.historyRewriteReason,
+        updatedAt: new Date().toISOString()
+      };
+    }
     if (input.responses) {
       const systemItems = input.responses.input.filter((item) => item.role === 'system');
       const historyItems = input.responses.input.filter((item) => item.role !== 'system');
@@ -1820,6 +2001,7 @@ export class AgentRunner {
         toolsSchemaHash: hashStableText(JSON.stringify(input.responses.tools)),
         historyPrefixHash: hashStableText(JSON.stringify(historyItems)),
         modelId: input.request.model.id,
+        protocol: 'openai-responses',
         historyCompacted: input.historyCompacted,
         historyRewriteReason: input.request.historyRewriteReason,
         updatedAt: new Date().toISOString()
@@ -2557,19 +2739,31 @@ export class AgentRunner {
     messages: DeepSeekMessage[],
     tools: DeepSeekFunctionTool[],
     outputReserveTokens: number,
-    responsesRunState?: OpenAiResponsesRunState,
-    pendingResponseFunctionOutputs: OpenAiResponsesItem[] = []
+    providerRunState?: ProviderNativeRunState,
+    pendingResponseFunctionOutputs: OpenAiResponsesItem[] = [],
+    pendingAnthropicToolResults: AnthropicUserContentBlock[] = []
   ): boolean {
     const settings = getDeepSeekV4RuntimeProfile(request.model, request.settings).contextCompression;
-    const usage = responsesRunState
+    const usage = providerRunState?.protocol === 'openai-responses'
       ? createContextUsageEstimateFromResponses({
           model: request.model,
-          input: [...responsesRunState.input, ...pendingResponseFunctionOutputs],
-          tools: responsesRunState.tools,
+          input: [...providerRunState.input, ...pendingResponseFunctionOutputs],
+          tools: providerRunState.tools,
           outputReserveTokens,
           safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
         })
-      : createContextUsageEstimateFromMessages({
+      : providerRunState?.protocol === 'anthropic-messages'
+        ? createContextUsageEstimateFromAnthropic({
+            model: request.model,
+            system: providerRunState.system,
+            messages: pendingAnthropicToolResults.length
+              ? [...providerRunState.messages, { role: 'user', content: pendingAnthropicToolResults }]
+              : providerRunState.messages,
+            tools: providerRunState.tools,
+            outputReserveTokens,
+            safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+          })
+        : createContextUsageEstimateFromMessages({
           model: request.model,
           messages,
           tools,
@@ -2796,18 +2990,33 @@ export class AgentRunner {
     messages: DeepSeekMessage[],
     tools: DeepSeekFunctionTool[],
     outputReserveTokens: number,
-    responsesRunState?: OpenAiResponsesRunState,
-    additionalResponsesItems: OpenAiResponsesItem[] = []
+    providerRunState?: ProviderNativeRunState,
+    additionalResponsesItems: OpenAiResponsesItem[] = [],
+    additionalAnthropicToolResults: AnthropicUserContentBlock[] = []
   ): AgentBudgetFinishReason | undefined {
-    const usage = responsesRunState
+    const usage = providerRunState?.protocol === 'openai-responses'
       ? createContextUsageEstimateFromResponses({
           model: request.model,
-          input: [...responsesRunState.input, ...additionalResponsesItems],
-          tools: responsesRunState.tools,
+          input: [...providerRunState.input, ...additionalResponsesItems],
+          tools: providerRunState.tools,
           outputReserveTokens,
           safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
         })
-      : createContextUsageEstimateFromMessages({
+      : providerRunState?.protocol === 'anthropic-messages'
+        ? createContextUsageEstimateFromAnthropic({
+            model: request.model,
+            system: providerRunState.system,
+            messages: additionalAnthropicToolResults.length
+              ? [...providerRunState.messages, {
+                  role: 'user',
+                  content: additionalAnthropicToolResults
+                }]
+              : providerRunState.messages,
+            tools: providerRunState.tools,
+            outputReserveTokens,
+            safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
+          })
+        : createContextUsageEstimateFromMessages({
           model: request.model,
           messages,
           tools,
@@ -2989,7 +3198,8 @@ export class AgentRunner {
 
   private normalizeAssistantToolCalls(
     assistant: DeepSeekAssistantMessage,
-    allowToolCalls: boolean
+    allowToolCalls: boolean,
+    allowDsml = true
   ): NormalizedAssistantToolCalls {
     const displayReasoningContent = assistant.reasoning_content;
 
@@ -3006,6 +3216,10 @@ export class AgentRunner {
 
     const structuredToolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
     if (structuredToolCalls.length) {
+      return { assistant, displayReasoningContent, source: 'native' };
+    }
+
+    if (!allowDsml) {
       return { assistant, displayReasoningContent, source: 'native' };
     }
 
@@ -3058,6 +3272,63 @@ export class AgentRunner {
     return [header, ...blocks].join('\n\n');
   }
 
+  private appendProviderUserText(state: ProviderNativeRunState | undefined, content: string): void {
+    if (state?.protocol === 'openai-responses') {
+      const item: OpenAiResponsesItem = { role: 'user', content };
+      state.input.push(item);
+      state.replayItems.push(item);
+    } else if (state?.protocol === 'anthropic-messages') {
+      const message: AnthropicMessage = {
+        role: 'user',
+        content: [{ type: 'text', text: content }]
+      };
+      state.messages.push(message);
+      state.replayMessages.push(message);
+    }
+  }
+
+  private isToolResultError(content: string): boolean {
+    try {
+      const parsed: unknown = JSON.parse(content);
+      return this.isRecord(parsed) && parsed.ok === false;
+    } catch {
+      return false;
+    }
+  }
+
+  private createAnthropicThinkingConfig(
+    request: AgentRequest,
+    maxTokens: number
+  ): Pick<AnthropicMessagesRunState, 'thinking' | 'outputConfig'> {
+    if (!request.settings.thinkingEnabled) {
+      return {};
+    }
+    const capabilities = request.model.anthropicCapabilities;
+    if (capabilities?.thinking === 'adaptive') {
+      return {
+        thinking: { type: 'adaptive', display: 'summarized' },
+        outputConfig: request.settings.reasoningEffort === 'max'
+          && capabilities.effort?.includes('max')
+          ? { effort: 'max' }
+          : undefined
+      };
+    }
+    if (capabilities?.thinking === 'enabled') {
+      const maximumBudget = Math.floor(maxTokens) - 1;
+      if (maximumBudget < 1_024) {
+        return {};
+      }
+      const target = request.settings.reasoningEffort === 'max' ? 32_768 : 8_192;
+      return {
+        thinking: {
+          type: 'enabled',
+          budget_tokens: Math.min(target, maximumBudget)
+        }
+      };
+    }
+    return {};
+  }
+
   private async getRuntimeConfig(request: AgentRequest): Promise<AgentRuntimeConfig> {
     const sourceConfig = request.sourceConfig ?? await resolveModelSourceConfig(
       request.model.sourceId,
@@ -3067,8 +3338,9 @@ export class AgentRunner {
         requireApiKey: false
       }
     );
-    // Ollama 等本地 OpenAI 兼容端点不需要 API Key；只有 DeepSeek 保留预检提示。
-    if (!sourceConfig.apiKey.trim() && sourceConfig.provider === 'deepseek') {
+    // Local/private compatible endpoints may omit keys. Canonical hosted APIs do not.
+    if (!sourceConfig.apiKey.trim() && (sourceConfig.provider === 'deepseek'
+      || isOfficialAnthropicSource(sourceConfig))) {
       throw new MissingModelSourceApiKeyError(request.language);
     }
     const profile = getDeepSeekV4RuntimeProfile(request.model, request.settings);
@@ -3079,7 +3351,12 @@ export class AgentRunner {
       apiKey: sourceConfig.apiKey,
       baseUrl: sourceConfig.baseUrl,
       supportsBilling: sourceConfig.supportsBilling,
-      maxTokens: profile.maxTokens,
+      maxTokens: sourceConfig.provider === 'anthropic-compatible'
+        ? Math.max(1, Math.min(
+            profile.maxTokens,
+            request.model.maxOutputTokens ?? DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS
+          ))
+        : profile.maxTokens,
       maxToolIterations: clampRunLimit(profile.maxToolIterations, request.executionLimits?.maxToolIterations),
       maxToolCalls: clampRunLimit(profile.maxToolCalls, request.executionLimits?.maxToolCalls),
       maxRunMs: clampRunLimit(profile.maxRunMs, request.executionLimits?.maxRunMs),
@@ -3273,9 +3550,37 @@ function formatMessagesForTrace(
 }
 
 function formatRequestBodyForTrace(
-  body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody,
+  body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody,
   includeRequestPayload: boolean
-): DeepSeekChatRequestBody | OpenAiResponsesRequestBody | Record<string, unknown> {
+): DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody | Record<string, unknown> {
+  if ('system' in body) {
+    return {
+      model: body.model,
+      protocol: 'anthropic-messages',
+      systemBlockCount: body.system.length,
+      systemCharacters: body.system.reduce((total, block) => total + block.text.length, 0),
+      messageCount: body.messages.length,
+      messages: body.messages.map((message) => ({
+        role: message.role,
+        blocks: message.content.map((block) => ({
+          type: block.type,
+          length: block.type === 'text' ? block.text.length
+            : block.type === 'thinking' ? block.thinking.length
+            : block.type === 'redacted_thinking' ? block.data.length
+            : block.type === 'tool_use' ? JSON.stringify(block.input).length
+            : block.content.length
+        }))
+      })),
+      stream: body.stream,
+      toolCount: body.tools?.length ?? 0,
+      toolChoice: body.tool_choice,
+      maxOutputTokens: body.max_tokens,
+      thinking: body.thinking ? { type: body.thinking.type } : undefined,
+      outputConfig: body.output_config,
+      cacheControl: body.cache_control,
+      payloadIncluded: includeRequestPayload
+    };
+  }
   if ('input' in body) {
     return includeRequestPayload
       ? body

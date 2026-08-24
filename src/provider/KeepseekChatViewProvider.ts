@@ -46,7 +46,7 @@ import {
   createSessionTitle,
   getCurrentWorkspaceSessionScope,
   getVisibleMessages,
-  normalizeOpenAiResponsesReplay
+  normalizeProviderReplay
 } from '../sessions/chatSessionStore';
 import {
   createDisplayedSessionContextUsageEstimate,
@@ -1118,7 +1118,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     };
 
     if (cacheMissPossibleReasons.length) {
-      console.debug('[KeepSeek] DeepSeek prefix cache hit rate dropped.', {
+      console.debug('[KeepSeek] Provider prefix cache hit rate dropped.', {
         reasons: cacheMissPossibleReasons,
         previousDiagnostics,
         diagnostics,
@@ -1143,7 +1143,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         ? activeSession.requestProtocol.toolNames
         : this.slimToolNamesBySession.get(activeSession.id),
       requestProtocolVersion: activeSession.requestProtocol?.version,
-      provider: model.provider === 'openai-responses' ? 'openai-responses' : undefined,
+      provider: model.provider === 'openai-responses' || model.provider === 'anthropic-compatible'
+        ? model.provider
+        : undefined,
       sourceId: activeSession.requestProtocol?.sourceId ?? model.sourceId,
       baseUrl: activeSession.requestProtocol?.baseUrl
     });
@@ -3122,7 +3124,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (response.toolRounds?.length) {
           assistantMessage.toolRounds = response.toolRounds;
         }
-        const providerReplay = normalizeOpenAiResponsesReplay(response.providerReplay);
+        const providerReplay = normalizeProviderReplay(response.providerReplay);
         if (providerReplay) {
           assistantMessage.providerReplay = providerReplay;
         }
@@ -3348,7 +3350,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       language: this.language,
       slimToolNames: activeSession.requestProtocol?.toolNames,
       requestProtocolVersion: activeSession.requestProtocol?.version,
-      provider: selectedModel.provider === 'openai-responses' ? 'openai-responses' : undefined,
+      provider: selectedModel.provider === 'openai-responses' || selectedModel.provider === 'anthropic-compatible'
+        ? selectedModel.provider
+        : undefined,
       sourceId: activeSession.requestProtocol?.sourceId ?? selectedModel.sourceId,
       baseUrl: activeSession.requestProtocol?.baseUrl
     });

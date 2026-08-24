@@ -3,6 +3,7 @@ import { DeepSeekClient } from './deepseekClient';
 import { OllamaClient } from './ollamaClient';
 import { OpenAICompatibleClient } from './openAiCompatibleClient';
 import { OpenAiResponsesClient } from './openAiResponsesClient';
+import { AnthropicMessagesClient } from './anthropicMessagesClient';
 import type { ProviderClient } from './types';
 
 // 客户端是无状态的，按 provider 复用单例。
@@ -10,6 +11,7 @@ const deepSeekClient = new DeepSeekClient();
 const ollamaClient = new OllamaClient();
 const openAiCompatibleClient = new OpenAICompatibleClient({ displayName: 'OpenAI Compatible' });
 const openAiResponsesClient = new OpenAiResponsesClient();
+const anthropicMessagesClient = new AnthropicMessagesClient();
 
 /**
  * 按账号类型返回对应的上游客户端实现：
@@ -17,6 +19,7 @@ const openAiResponsesClient = new OpenAiResponsesClient();
  * - ollama → Ollama 分支（免 API Key、/v1 端点补全）
  * - openai-compatible → Chat Completions 兼容分支
  * - openai-responses → Responses API 兼容分支
+ * - anthropic-compatible → Anthropic Messages 兼容分支
  */
 export function createProviderClient(provider: AccountApiType): ProviderClient {
   switch (provider) {
@@ -28,6 +31,8 @@ export function createProviderClient(provider: AccountApiType): ProviderClient {
       return openAiCompatibleClient;
     case 'openai-responses':
       return openAiResponsesClient;
+    case 'anthropic-compatible':
+      return anthropicMessagesClient;
     default:
       return openAiCompatibleClient;
   }

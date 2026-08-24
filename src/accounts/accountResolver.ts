@@ -92,8 +92,22 @@ function createResolvedStoredSource(
 
 function cloneCache(cache: ModelDiscoveryCache | undefined): ModelDiscoveryCache | undefined {
   return cache
-    ? { fetchedAt: cache.fetchedAt, models: cache.models.map((model) => ({ ...model })) }
+    ? { fetchedAt: cache.fetchedAt, models: cache.models.map(cloneDiscoveredModel) }
     : undefined;
+}
+
+function cloneDiscoveredModel(model: ModelDiscoveryCache['models'][number]): ModelDiscoveryCache['models'][number] {
+  return model.anthropicCapabilities
+    ? {
+        ...model,
+        anthropicCapabilities: {
+          ...model.anthropicCapabilities,
+          effort: model.anthropicCapabilities.effort
+            ? [...model.anthropicCapabilities.effort]
+            : undefined
+        }
+      }
+    : { ...model };
 }
 
 function cloneSource(source: ModelSource): ModelSource {

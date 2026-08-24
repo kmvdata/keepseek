@@ -1,6 +1,10 @@
 import { DEFAULT_DEEPSEEK_BASE_URL } from '../shared/config';
-import { ModelSourceStore } from './accountStore';
-import { isOfficialDeepSeekSource } from './sourceCapabilities';
+import {
+  MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS,
+  MAX_DISCOVERED_OUTPUT_TOKENS,
+  ModelSourceStore
+} from './accountStore';
+import { isOfficialAnthropicSource, isOfficialDeepSeekSource } from './sourceCapabilities';
 import type {
   DiscoveredModelInfo,
   ModelDiscoveryCache,
@@ -54,11 +58,14 @@ export function getSourceModelsEndpointUrl(
 
   const completionsSuffix = '/chat/completions';
   const responsesSuffix = '/responses';
+  const messagesSuffix = '/messages';
   const withoutProtocolEndpoint = cleanPath.endsWith(completionsSuffix)
     ? cleanPath.slice(0, -completionsSuffix.length)
     : cleanPath.endsWith(responsesSuffix)
       ? cleanPath.slice(0, -responsesSuffix.length)
-      : cleanPath;
+      : cleanPath.endsWith(messagesSuffix)
+        ? cleanPath.slice(0, -messagesSuffix.length)
+        : cleanPath;
   url.pathname = withoutProtocolEndpoint.endsWith('/models')
     ? withoutProtocolEndpoint
     : `${withoutProtocolEndpoint || ''}/models`;
@@ -66,7 +73,10 @@ export function getSourceModelsEndpointUrl(
   return url.toString();
 }
 
-export function parseSourceModelsResponse(value: unknown): DiscoveredModelInfo[] | undefined {
+export function parseSourceModelsResponse(
+  value: unknown,
+  provider?: ModelSourceProvider
+): DiscoveredModelInfo[] | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
@@ -80,7 +90,7 @@ export function parseSourceModelsResponse(value: unknown): DiscoveredModelInfo[]
   const models: DiscoveredModelInfo[] = [];
   const seenIds = new Set<string>();
   for (const rawModel of rawModels) {
-    const model = parseSourceModel(rawModel);
+    const model = parseSourceModel(rawModel, provider);
     if (!model || seenIds.has(model.id)) {
       continue;
     }
@@ -119,10 +129,7 @@ export async function discoverSourceModels(
 
     const endpointUrl = getSourceModelsEndpointUrl(source.baseUrl, source.provider);
     const fetchImpl: ModelsFetch = options.fetchImpl ?? fetch;
-    const headers: Record<string, string> = { Accept: 'application/json' };
-    if (apiKey) {
-      headers.Authorization = `Bearer ${apiKey}`;
-    }
+    const headers = createModelDiscoveryHeaders(source.provider, apiKey);
     const response = await fetchImpl(endpointUrl, {
       method: 'GET',
       headers,
@@ -136,7 +143,7 @@ export async function discoverSourceModels(
       return undefined;
     }
     const parsed: unknown = JSON.parse(responseText);
-    const models = parseSourceModelsResponse(parsed);
+    const models = parseSourceModelsResponse(parsed, source.provider);
     if (!models) {
       return undefined;
     }
@@ -180,6 +187,9 @@ export async function probeSourceConnection(
     return { ok: false, error: 'Base URL is required.' };
   }
   const apiKey = source.apiKey.trim();
+  if (!apiKey && isOfficialAnthropicSource(source)) {
+    return { ok: false, error: 'An API Key is required for the official Anthropic endpoint.' };
+  }
 
   const controller = new AbortController();
   const abortFromParent = () => controller.abort();
@@ -200,21 +210,27 @@ export async function probeSourceConnection(
 
     const endpointUrl = getSourceModelsEndpointUrl(baseUrl, source.provider);
     const fetchImpl: ModelsFetch = options.fetchImpl ?? fetch;
-    const headers: Record<string, string> = { Accept: 'application/json' };
-    if (apiKey) {
-      headers.Authorization = `Bearer ${apiKey}`;
-    }
+    const headers = createModelDiscoveryHeaders(source.provider, apiKey);
     const response = await fetchImpl(endpointUrl, {
       method: 'GET',
       headers,
       signal: controller.signal
     });
     if (!response.ok) {
-      if (source.provider === 'openai-responses' && response.status === 404) {
+      if ((source.provider === 'openai-responses' || source.provider === 'anthropic-compatible')
+        && response.status === 404) {
         return {
           ok: false,
           status: response.status,
-          error: 'KeepSeek Responses accounts require a compatible GET /models endpoint for account discovery.'
+          error: `${source.provider === 'anthropic-compatible' ? 'Anthropic Messages' : 'KeepSeek Responses'} accounts require a compatible GET /models endpoint for account discovery.`
+        };
+      }
+      if (source.provider === 'anthropic-compatible'
+        && (response.status === 401 || response.status === 403)) {
+        return {
+          ok: false,
+          status: response.status,
+          error: `Authentication failed (HTTP ${response.status}). Check the API Key and Base URL.`
         };
       }
       if (!apiKey) {
@@ -230,6 +246,12 @@ export async function probeSourceConnection(
     }
     return { ok: true, status: response.status };
   } catch (error) {
+    if (controller.signal.aborted && !options.signal?.aborted) {
+      return {
+        ok: false,
+        error: `Model discovery timed out after ${normalizeNonNegativeInteger(options.timeoutMs, DEFAULT_MODEL_DISCOVERY_TIMEOUT_MS)} ms.`
+      };
+    }
     return {
       ok: false,
       error: `Cannot reach the Base URL: ${error instanceof Error ? error.message : String(error)}`
@@ -297,7 +319,26 @@ export async function refreshSourceModelCache(
   return { cache: cloneCache(discovered), status: 'fresh' };
 }
 
-function parseSourceModel(value: unknown): DiscoveredModelInfo | undefined {
+export function createModelDiscoveryHeaders(
+  provider: ModelSourceProvider,
+  apiKey: string
+): Record<string, string> {
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (provider === 'anthropic-compatible') {
+    headers['anthropic-version'] = '2023-06-01';
+    if (apiKey) {
+      headers['x-api-key'] = apiKey;
+    }
+  } else if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+  return headers;
+}
+
+function parseSourceModel(
+  value: unknown,
+  provider?: ModelSourceProvider
+): DiscoveredModelInfo | undefined {
   if (typeof value === 'string') {
     const id = value.trim();
     return id ? { id } : undefined;
@@ -313,13 +354,88 @@ function parseSourceModel(value: unknown): DiscoveredModelInfo | undefined {
     ?? readNonEmptyString(value.display_name)
     ?? readNonEmptyString(value.displayName)
     ?? readNonEmptyString(value.label);
-  return name ? { id, name } : { id };
+  if (provider !== 'anthropic-compatible') {
+    return name ? { id, name } : { id };
+  }
+  const contextWindowTokens = readBoundedPositiveInteger(
+    value.max_input_tokens,
+    MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS
+  );
+  const maxOutputTokens = readBoundedPositiveInteger(
+    value.max_tokens,
+    MAX_DISCOVERED_OUTPUT_TOKENS
+  );
+  const anthropicCapabilities = parseAnthropicCapabilities(value.capabilities);
+  return {
+    id,
+    ...(name ? { name } : {}),
+    ...(contextWindowTokens ? { contextWindowTokens } : {}),
+    ...(maxOutputTokens ? { maxOutputTokens } : {}),
+    ...(anthropicCapabilities ? { anthropicCapabilities } : {})
+  };
+}
+
+function parseAnthropicCapabilities(
+  value: unknown
+): DiscoveredModelInfo['anthropicCapabilities'] {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const rawThinking = value.thinking;
+  let thinking: 'adaptive' | 'enabled' | undefined;
+  if (rawThinking === 'adaptive') {
+    thinking = 'adaptive';
+  } else if (rawThinking === true || rawThinking === 'enabled') {
+    thinking = 'enabled';
+  } else if (isRecord(rawThinking)) {
+    const modes = Array.isArray(rawThinking.modes) ? rawThinking.modes : [];
+    if (rawThinking.adaptive === true || modes.includes('adaptive') || rawThinking.type === 'adaptive') {
+      thinking = 'adaptive';
+    } else if (rawThinking.enabled === true || modes.includes('enabled') || rawThinking.type === 'enabled') {
+      thinking = 'enabled';
+    }
+  }
+
+  const rawEffort = value.effort;
+  const effort: Array<'high' | 'max'> = [];
+  const addEffort = (level: 'high' | 'max') => {
+    if (!effort.includes(level)) {
+      effort.push(level);
+    }
+  };
+  if (rawEffort === true) {
+    addEffort('high');
+  } else if (typeof rawEffort === 'string') {
+    if (rawEffort === 'high' || rawEffort === 'max') {
+      addEffort(rawEffort);
+    }
+  } else if (Array.isArray(rawEffort)) {
+    if (rawEffort.includes('high')) addEffort('high');
+    if (rawEffort.includes('max')) addEffort('max');
+  } else if (isRecord(rawEffort)) {
+    const levels = Array.isArray(rawEffort.levels) ? rawEffort.levels : [];
+    if (rawEffort.high === true || levels.includes('high')) addEffort('high');
+    if (rawEffort.max === true || levels.includes('max')) addEffort('max');
+  }
+  return thinking || effort.length
+    ? { ...(thinking ? { thinking } : {}), ...(effort.length ? { effort } : {}) }
+    : undefined;
 }
 
 function cloneCache(cache: ModelDiscoveryCache): ModelDiscoveryCache {
   return {
     fetchedAt: cache.fetchedAt,
-    models: cache.models.map((model) => ({ ...model }))
+    models: cache.models.map((model) => model.anthropicCapabilities
+      ? {
+          ...model,
+          anthropicCapabilities: {
+            ...model.anthropicCapabilities,
+            effort: model.anthropicCapabilities.effort
+              ? [...model.anthropicCapabilities.effort]
+              : undefined
+          }
+        }
+      : { ...model })
   };
 }
 
@@ -337,6 +453,12 @@ function normalizeNonNegativeInteger(value: unknown, fallback: number): number {
 
 function readNonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function readBoundedPositiveInteger(value: unknown, max: number): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= max
+    ? Math.floor(value)
+    : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

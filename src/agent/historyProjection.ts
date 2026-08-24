@@ -167,8 +167,15 @@ function estimateProjectedChatMessageTokens(
       tokens += estimateTokenCount(`tool\n${result.toolCallId}\n${result.content}`) + 4;
     }
   }
-  const replayTokens = includeProviderReplay && message.providerReplay?.items.length
-    ? estimateTokenCount(JSON.stringify(message.providerReplay.items)) + message.providerReplay.items.length * 4
+  const replayPayload = includeProviderReplay
+    ? message.providerReplay?.protocol === 'openai-responses'
+      ? message.providerReplay.items
+      : message.providerReplay?.protocol === 'anthropic-messages'
+        ? message.providerReplay.messages
+        : undefined
+    : undefined;
+  const replayTokens = replayPayload?.length
+    ? estimateTokenCount(JSON.stringify(replayPayload)) + replayPayload.length * 4
     : 0;
   return Math.max(tokens, replayTokens);
 }

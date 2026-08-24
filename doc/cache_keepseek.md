@@ -215,6 +215,7 @@ messages = [
 
 - **user 消息**：一律取 `(expandedContent ?? content).trim()`（`src/agent/protocol.ts` 的 `getMessageContentForAgent`）。引用展开（`<path#L1-L5>`）在首次发送时就写进 `expandedContent` 并原样保存，重发时不再重新展开——否则「首次以 prompt 身份发送、之后以历史身份重发」会得到不同字节。
 - **assistant 消息**：按 `toolRounds` 还原为 `assistant(tool_calls) → tool → assistant(最终文本)` 的完整序列（`appendHistoryMessage`，`protocol.ts:128-160`），`reasoning_content` 与 `tool_call_id` 一并保留。上一轮请求中「模型发起的工具调用 + 工具结果」在下一轮必须以完全相同的字节重现。
+- **Provider 原生回放**：Responses Items 与 Anthropic Messages 使用可辨别 `providerReplay`。Anthropic 同 lane 原样追加 Thinking/signature/redacted data/`tool_use`/`tool_result`；跨 protocol、sourceId 或规范化 endpoint 时只保留可见文本。工具耗尽不删除 tools，只切换 `tool_choice`。
 - **当前 prompt 去重**：若当前 prompt 与历史最后一条 user 消息内容相同，则不重复追加（`findCurrentPromptMessage`，`protocol.ts:779-791`）——否则「上轮刚问过、这轮再点一次发送」会白白追加一条重复 user 消息，且字节上还会多出这条消息导致其后内容错位。
 
 **原理**：缓存命中的前提是「上一轮的请求字节 ⊑ 这一轮的请求字节」。如果历史消息在重发时经过不同的处理路径（比如首次发送时做了引用展开、重发时没做），同一逻辑消息就会产生不同字节，前缀在第一条历史消息处就断了。B1/B4 契约的本质是：**每一条消息只允许有一种字节形态**。
@@ -227,7 +228,9 @@ messages = [
 
 ### 4.1 usage 归一化与命中率
 
-`normalizeDeepSeekUsage`（`src/agent/usageStats.ts:14-43`）兼容两类计数字段：新版 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 与旧版 `prompt_tokens_details.cached_tokens`，归一化为 `cacheHitTokens / cacheMissTokens`，并据此计算命中率（`calculateCacheHitRate`）与成本（`calculateUsageCost` 使用 `cacheHitPrice`）。命中率与成本在会话/轮次粒度持久化，webview 展示命中率百分比。
+`normalizeDeepSeekUsage` 兼容 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 与 `prompt_tokens_details.cached_tokens`，归一化为 `cacheHitTokens / cacheMissTokens`。Anthropic parser 将 prompt 计算为 `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`，hit 为 cache read，miss 为 uncached input + cache creation，不虚构 reasoning tokens。命中率与成本在会话/轮次粒度持久化。
+
+官方 Anthropic host 默认使用稳定顶层 `cache_control: {type:"ephemeral"}`；自定义 compatible endpoint 默认不发送，且不会在失败后删字段重试。其 tools、system、messages 与 Thinking 配置在同一 run 内冻结。
 
 ### 4.2 请求前缀指纹
 
@@ -236,6 +239,8 @@ messages = [
 - `systemPromptHash`：所有 system 消息拼接的 sha256；
 - `toolsSchemaHash`：tools JSON 的 sha256；
 - `historyPrefixHash`：system 段之后全部消息（含 `tool_calls` / `reasoning_content`）的 sha256。
+
+Anthropic 对应指纹直接消费权威原生投影：top-level system、Anthropic tools、Messages/history prefix，并附 protocol/source/lane 信息；普通 trace 只记录 opaque block 类型与长度，不记录完整 signature。
 
 指纹跨轮不变即前缀缓存可命中；指纹变化则说明是 KeepSeek 自己改了前缀。
 
@@ -267,6 +272,7 @@ messages = [
 | slim 冻结 | `protocolCache.test.ts` | 冻结后同一工具集 schema 跨轮一致 |
 | 压缩低频 | `historyCompressor.test.ts` | 低于比率不刷新（`fresh_enough`）、超强制比率同步刷新 |
 | 投影 append-only | `historyProjection.test.ts` | 无摘要时全量保留、前缀只增长 |
+| Anthropic 原生缓存与 replay | `anthropicMessages.test.ts` | 官方 cache_control、tools 冻结、lane 隔离、Thinking/signature 与工具结果原样有序回放 |
 
 这些测试用 `JSON.stringify` 级别的字节比较而不是语义比较——因为它们守护的正是「字节」这个缓存命中的唯一契约。
 

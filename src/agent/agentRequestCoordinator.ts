@@ -237,7 +237,13 @@ function cloneChatMessage(message: ChatMessage): ChatMessage {
   return {
     ...message,
     contextMeta: message.contextMeta ? { ...message.contextMeta } : undefined,
-    usedSkills: message.usedSkills?.map((skill) => ({ ...skill }))
+    usedSkills: message.usedSkills?.map((skill) => ({ ...skill })),
+    toolRounds: message.toolRounds?.map((round) => ({
+      ...round,
+      toolCalls: round.toolCalls.map((call) => ({ ...call, function: { ...call.function } })),
+      toolResults: round.toolResults.map((result) => ({ ...result }))
+    })),
+    providerReplay: message.providerReplay ? structuredClone(message.providerReplay) : undefined
   };
 }
 

@@ -12,7 +12,7 @@ KeepSeek 的 Agent 链路可以分成四层。
 |---|---|---|
 | Webview 表现层 | `src/webview/*`、`src/webview/input/*` | 输入框、消息列表、引用 chip、设置弹窗、活动状态文案、发送/停止交互 |
 | Provider 编排层 | `src/provider/KeepseekChatViewProvider.ts` | 接收 Webview 消息、维护 busy 状态、会话接线、引用授权、调用业务服务和 Agent Runtime |
-| Agent Runtime 层 | `src/agent/agentRequestCoordinator.ts`、`src/agent/runner.ts`、`src/agent/protocol.ts`、`src/agent/historyProjection.ts`、`src/agent/historyCompressor.ts`、`src/agent/contextUsage.ts`、`src/agent/deepseek/*` | 构造请求、上下文压缩与历史投影、上下文用量估算、流式调用 DeepSeek/OpenAI-compatible API、执行工具循环、自动档位预算控制、结果整理 |
+| Agent Runtime 层 | `src/agent/agentRequestCoordinator.ts`、`src/agent/runner.ts`、`src/agent/providerRequestProjection.ts`、`src/agent/providers/*`、`src/agent/historyProjection.ts`、`src/agent/historyCompressor.ts`、`src/agent/contextUsage.ts` | 构造权威协议投影、上下文压缩与用量估算，流式调用 Chat Completions / Responses / Anthropic Messages，执行工具循环并整理结果 |
 | 本地能力层 | `src/agent/tools/workspaceTools.ts`、`src/edits/*`、`src/context/*`、`src/sessions/*` | 只读工作区工具、引用展开、DraftEdit 安全写入、上下文文件、会话和压缩状态持久化 |
 
 几个边界很重要：
@@ -104,7 +104,7 @@ Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节
 3. 未被摘要覆盖（`coveredMessageIds`）的其余 user/assistant 消息——**append-only**：消息只追加、内容冻结（始终以 `expandedContent ?? content` 原样发送），只有摘要刷新覆盖时才成批移除，这是低频缓存失效点。recent 窗口（`keepRecentTurns`）只用于判定哪些消息可压缩。
 4. 当前展开后的用户 prompt。
 
-之后 `src/agent/protocol.ts` 的 `buildInitialAgentMessages()` 会把 projection 组装成 DeepSeek/OpenAI-compatible messages：
+之后 `providerRequestProjection.ts` 以 `buildInitialAgentMessages()` 的通用结果为唯一输入，再投影到具体协议。Chat Completions 保留原 messages；Responses 生成原生 Items；Anthropic 把全部 system/context/summary 按原顺序放到顶层 `system` text blocks，只在 `messages` 中保留 user/assistant：
 
 1. system prompt，包含 Agent 规则和用户显式加入的 context files。
 2. synthetic summary system message。
@@ -122,16 +122,16 @@ system prompt 会告诉模型：
 
 ### 3.2 调用模型
 
-`createChatCompletion()` 负责发送 DeepSeek/OpenAI-compatible Chat Completions 请求。
+`providers/factory.ts` 按账号冻结的 provider 分派三条独立协议路径。DeepSeek、Ollama 与 OpenAI compatible 使用 Chat Completions；`openai-responses` 使用 Responses；`anthropic-compatible` 使用原生 Messages，不做 OpenAI→Anthropic 转换。
 
 请求特征：
 
 - 使用 streaming。
-- 仅支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`。
+- DeepSeek 内置 profile 支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`；其它账号的模型来自各自 `/models` 或手动模型 ID。
 - Thinking 开关和 `high` / `max` reasoning effort 由输入区选择。
 - `max_tokens`、工具上限、运行时长来自 `src/shared/modelProfiles.ts` 中对应的模型 / Thinking 自动档位。
 - 自动压缩阈值由命令菜单中的用户档位覆盖 profile 的 `triggerRatio / forceRatio`：提前清理 `0.70 / 0.85`、默认平衡 `0.80 / 0.92`、缓存优先 `0.85 / 0.95`；其他压缩参数仍保留 profile 原值。
-- 固定使用 DeepSeek V4 推荐的 `temperature=1.0`、`top_p=1.0`。
+- DeepSeek Chat Completions 固定使用 V4 推荐的 `temperature=1.0`、`top_p=1.0`。
 - `stream_options.include_usage = true`，用于获取服务商真实 usage。
 - 有工具预算时发送 function tools 和 `tool_choice: "auto"`。
 
@@ -144,6 +144,10 @@ system prompt 会告诉模型：
 - `usage`。
 
 如果请求在已有 partial output 后失败，Runner 会尝试发起续写恢复。如果模型返回 `finish_reason=length` 且满足条件，Runner 会请求一次受限续写。
+
+Anthropic Messages 使用 `POST <base>/messages`、`x-api-key` 和 `anthropic-version: 2023-06-01`，不发送 Bearer、`stream_options`、`reasoning_effort` 或 Responses 字段。专用 SSE parser 处理任意分块、CRLF、ping、Thinking/signature、redacted thinking、并行 `tool_use` 与 cache usage。模型能力来自 `/models` 元数据：只有明确声明 adaptive/enabled 时才发送 Thinking 参数；手动模型的输出上限保守回退为 8192。
+
+官方 `api.anthropic.com` 默认发送顶层 `cache_control: {"type":"ephemeral"}`。自定义兼容端点默认不发送，不做失败后删字段重试。Anthropic 摘要请求复用同一不可变 source snapshot，关闭 tools/Thinking，`temperature=0`，并受模型输出上限约束。
 
 ### 3.3 工具调用循环
 
@@ -161,6 +165,8 @@ system prompt 会告诉模型：
 
 循环上限由 `src/shared/modelProfiles.ts` 的 6 个自动档位控制（Flash / Pro × 非思考 / High / Max）。更强的模型和推理档位允许更多工具轮次、调用数、运行时间及工具结果；这些值不暴露为用户配置。两款模型的上下文窗口都固定按 1M tokens 估算。
 
+Anthropic 工具轮使用原生消息顺序：assistant 的 Thinking/text/`tool_use` blocks 后紧跟一个 user message；同轮全部 `tool_result` 集中在该 message 开头并保持 `tool_use` 顺序。下一请求原样回放 opaque signature/redacted data，工具预算耗尽时 tools 字节不变，仅把 `tool_choice` 改为 `{ "type": "none" }`。
+
 上下文投影上限按 `maxProjectionTokens = contextWindow × forceRatio` 计算。选择 85% 缓存优先档时，`forceRatio=0.95` 会让投影上限增大，从而保留更多原始历史、尽量延后会破坏前缀缓存的摘要刷新；这是预期行为。
 
 如果自动安全上限耗尽，Runner 会追加一条本地用户消息，要求模型停止调用工具，基于已获得的信息给出最终回答并说明缺口。
@@ -169,7 +175,7 @@ system prompt 会告诉模型：
 
 如果模型没有返回原生 `tool_calls`，但在文本里输出了 DSML 风格的工具调用块，`DsmlToolParser` 会尝试解析并模拟成 function tool call 执行。
 
-这只是兼容兜底，不是 MCP，也不是外部工具运行时。优先路径仍然是 OpenAI-compatible function calling。
+这只是 Chat Completions 的兼容兜底，不是 MCP，也不是外部工具运行时。Anthropic 原生 `tool_use` 不走 DSML。
 
 ## 4. 当前可用工具
 
@@ -417,7 +423,7 @@ Runner 内部维护第一版 `toolResultLedger`。它不改变对外 `AgentRespo
 
 这用于调试和后续校准工具结果预算。
 
-真实 usage 也只做小步接入。因为请求已设置 `stream_options.include_usage = true`，Parser 能拿到 provider 返回的 usage。Runner 会汇总：
+真实 usage 由各协议 parser 归一化。Chat Completions 请求使用 `stream_options.include_usage`；Anthropic 从 `message_start/message_delta` 获取 usage，并按 `input + cache_creation + cache_read` 计算 prompt，cache read 计 hit，`input + cache_creation` 计 miss。Runner 会汇总：
 
 - request count
 - prompt tokens
@@ -426,6 +432,8 @@ Runner 内部维护第一版 `toolResultLedger`。它不改变对外 `AgentRespo
 - 原始 usage records
 
 这些记录只进入 trace，不改变 Webview 的上下文估算模型。当前上下文 UI 仍使用本地轻量估算，不引入 `tiktoken`。
+
+Anthropic 原生回放只保存在 session 内，不发送到 Webview。lane 必须同时匹配 protocol、sourceId 和规范化 Messages endpoint；换账号、Base URL 或 Provider 时只降级为可见 assistant 文本。Bedrock、Vertex、OAuth、Files、图片/PDF、server tools 和 Messages Batches 不在此实现范围。
 
 ## 7. DraftEdit 安全写入流程
 

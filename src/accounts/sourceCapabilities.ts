@@ -16,3 +16,15 @@ export function isOfficialDeepSeekSource(source: ModelSourceCapabilityInput): bo
     return false;
   }
 }
+
+/** Prompt caching and required-key preflight apply only to Anthropic's canonical host. */
+export function isOfficialAnthropicSource(source: ModelSourceCapabilityInput): boolean {
+  if (source.provider !== 'anthropic-compatible') {
+    return false;
+  }
+  try {
+    return new URL(source.baseUrl).host === 'api.anthropic.com';
+  } catch {
+    return false;
+  }
+}

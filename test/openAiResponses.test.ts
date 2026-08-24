@@ -49,9 +49,9 @@ const SETTINGS = {
 };
 
 describe('OpenAI Responses account protocol', () => {
-  it('registers the fourth provider with immutable protocol defaults and factory dispatch', () => {
+  it('keeps Responses protocol defaults and factory dispatch in the expanded provider registry', () => {
     assert.deepEqual(MODEL_SOURCE_PROVIDERS, [
-      'deepseek', 'ollama', 'openai-compatible', 'openai-responses'
+      'deepseek', 'ollama', 'openai-compatible', 'openai-responses', 'anthropic-compatible'
     ]);
     assert.equal(getDefaultModelSourceName('openai-responses'), 'OpenAI Responses compatible');
     assert.equal(getDefaultModelSourceBaseUrl('openai-responses'), 'https://api.openai.com/v1');
@@ -410,13 +410,14 @@ describe('OpenAI Responses account protocol', () => {
       assert.ok(callIndexes[1] < outputIndexes[0]);
       assert.ok(outputIndexes[0] < outputIndexes[1]);
 
-      assert.deepEqual(response.providerReplay?.items.map((item) => item.type), [
+      const replay = getResponsesReplay(response.providerReplay);
+      assert.deepEqual(replay.items.map((item) => item.type), [
         'reasoning', 'function_call', 'function_call',
         'function_call_output', 'function_call_output', undefined, 'message'
       ]);
-      assert.equal(response.providerReplay?.items[5].role, 'user');
-      assert.equal(response.providerReplay?.sourceId, 'responses-source');
-      assert.equal(response.providerReplay?.baseUrl, 'https://proxy.example/v1/responses');
+      assert.equal(replay.items[5].role, 'user');
+      assert.equal(replay.sourceId, 'responses-source');
+      assert.equal(replay.baseUrl, 'https://proxy.example/v1/responses');
       assert.equal(response.toolRounds?.[0]?.toolResults.length, 2);
     } finally {
       globalThis.fetch = originalFetch;
@@ -442,7 +443,7 @@ describe('OpenAI Responses account protocol', () => {
         && typeof item.content === 'string'
         && item.content.startsWith('Continue the previous answer'));
       assert.ok(nativeMessageIndex >= 0 && nativeMessageIndex < instructionIndex);
-      assert.deepEqual(response.providerReplay?.items.map((item) => item.type), [
+      assert.deepEqual(getResponsesReplay(response.providerReplay).items.map((item) => item.type), [
         'message', undefined, 'message'
       ]);
     } finally {
@@ -469,7 +470,7 @@ describe('OpenAI Responses account protocol', () => {
       const secondInput = bodies[1].input as OpenAiResponsesItem[];
       assert.equal(secondInput.some((item) => item.type === 'reasoning' || typeof item.id === 'string'), false);
       assert.equal(secondInput.some((item) => item.role === 'assistant' && item.content === 'hel'), true);
-      assert.deepEqual(response.providerReplay?.items.map((item) => item.type), [
+      assert.deepEqual(getResponsesReplay(response.providerReplay).items.map((item) => item.type), [
         undefined, undefined, 'message'
       ]);
     } finally {
@@ -619,6 +620,13 @@ function projectionInput(history: ChatMessage[]) {
     baseUrl: 'https://proxy.example/v1',
     includeTools: true
   };
+}
+
+function getResponsesReplay(replay: AgentRequest['history'][number]['providerReplay']) {
+  if (replay?.protocol !== 'openai-responses') {
+    assert.fail('Expected an OpenAI Responses replay.');
+  }
+  return replay;
 }
 
 function buildProjection(history: ChatMessage[]) {

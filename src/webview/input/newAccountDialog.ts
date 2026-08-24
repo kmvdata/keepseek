@@ -31,6 +31,7 @@ export function getNewAccountDialogTemplate(): string {
               <option value="ollama">Ollama</option>
               <option value="openai-compatible">OpenAI compatible</option>
               <option value="openai-responses" data-i18n="openAiResponsesCompatible">OpenAI Responses compatible</option>
+              <option value="anthropic-compatible" data-i18n="anthropicMessagesCompatible">Anthropic compatible</option>
             </select>
           </label>
           <label class="new-account-field">
@@ -274,7 +275,7 @@ export function getNewAccountDialogScript(): string {
       var apiKeyVisible = false;
 
       function normalizeProvider(value) {
-        return value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses'
+        return value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses' || value === 'anthropic-compatible'
           ? value
           : 'deepseek';
       }
@@ -387,6 +388,7 @@ export function getNewAccountDialogScript(): string {
         if (!baseUrl && provider === 'deepseek') { baseUrl = 'https://api.deepseek.com'; }
         if (!baseUrl && provider === 'ollama') { baseUrl = 'http://localhost:11434/v1'; }
         if (!baseUrl && provider === 'openai-responses') { baseUrl = 'https://api.openai.com/v1'; }
+        if (!baseUrl && provider === 'anthropic-compatible') { baseUrl = 'https://api.anthropic.com/v1'; }
         if (!baseUrl) {
           setStatus(t('baseUrlRequired'));
           if (baseUrlInput) { baseUrlInput.focus(); }
@@ -415,6 +417,7 @@ export function getNewAccountDialogScript(): string {
         if (!baseUrl && provider === 'deepseek') { baseUrl = 'https://api.deepseek.com'; }
         if (!baseUrl && provider === 'ollama') { baseUrl = 'http://localhost:11434/v1'; }
         if (!baseUrl && provider === 'openai-responses') { baseUrl = 'https://api.openai.com/v1'; }
+        if (!baseUrl && provider === 'anthropic-compatible') { baseUrl = 'https://api.anthropic.com/v1'; }
         if (!baseUrl) {
           setStatus(t('baseUrlRequired'));
           if (baseUrlInput) { baseUrlInput.focus(); }
@@ -472,6 +475,8 @@ export function getNewAccountDialogScript(): string {
                 ? 'http://localhost:11434/v1'
                 : selectedProvider === 'openai-responses'
                   ? 'https://api.openai.com/v1'
+                  : selectedProvider === 'anthropic-compatible'
+                    ? 'https://api.anthropic.com/v1'
                   : '';
           }
           if (apiKeyInput && selectedProvider === 'ollama') {

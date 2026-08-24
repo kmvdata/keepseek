@@ -1,12 +1,15 @@
 import type { KeepseekLanguage } from './i18n';
 import type { ModelSourceConfigSnapshot } from '../accounts/types';
+import type { AnthropicModelCapabilities } from '../accounts/types';
 
 export interface KeepseekModel {
   id: string;
   label: string;
   provider: string;
   contextWindowTokens?: number;
-  /** Display name returned by the provider's OpenAI-compatible /models endpoint. */
+  maxOutputTokens?: number;
+  anthropicCapabilities?: AnthropicModelCapabilities;
+  /** Display name returned by the selected provider's /models endpoint. */
   fetchedName?: string;
   /** Every selectable catalog model has these fields; profile-only fixtures may omit them. */
   sourceId?: string;
@@ -158,6 +161,9 @@ export interface PromptCacheDiagnostics {
   /** 历史消息（非 system 段）序列的指纹；变化即该段之后的前缀缓存全部失效 */
   historyPrefixHash?: string;
   modelId?: string;
+  protocol?: string;
+  sourceId?: string;
+  baseUrl?: string;
   historyCompacted?: boolean;
   historyRewriteReason?: string;
   cacheMissPossibleReasons?: string[];
@@ -192,8 +198,8 @@ export interface ChatMessage {
    * 只对 native 工具协议收集；DSML 兑底路径不收集。
    */
   toolRounds?: AgentToolRound[];
-  /** Provider-native Responses Items, valid only inside the recorded source/Base URL lane. */
-  providerReplay?: OpenAiResponsesReplayState;
+  /** Provider-native replay, valid only inside the recorded protocol/source/endpoint lane. */
+  providerReplay?: ProviderReplayState;
 }
 
 export type OpenAiResponsesReplayJsonValue =
@@ -216,6 +222,36 @@ export interface OpenAiResponsesReplayState {
   baseUrl: string;
   items: OpenAiResponsesReplayItem[];
 }
+
+export type AnthropicReplayJsonValue = OpenAiResponsesReplayJsonValue;
+
+export type AnthropicReplayContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'thinking'; thinking: string; signature: string }
+  | { type: 'redacted_thinking'; data: string }
+  | { type: 'tool_use'; id: string; name: string; input: { [key: string]: AnthropicReplayJsonValue } }
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
+
+export type AnthropicReplayAssistantContentBlock = Exclude<
+  AnthropicReplayContentBlock,
+  { type: 'tool_result' }
+>;
+export type AnthropicReplayUserContentBlock = Extract<
+  AnthropicReplayContentBlock,
+  { type: 'text' | 'tool_result' }
+>;
+export type AnthropicReplayMessage =
+  | { role: 'assistant'; content: AnthropicReplayAssistantContentBlock[] }
+  | { role: 'user'; content: AnthropicReplayUserContentBlock[] };
+
+export interface AnthropicMessagesReplayState {
+  protocol: 'anthropic-messages';
+  sourceId: string;
+  baseUrl: string;
+  messages: AnthropicReplayMessage[];
+}
+
+export type ProviderReplayState = OpenAiResponsesReplayState | AnthropicMessagesReplayState;
 
 export interface AgentToolCall {
   id: string;
@@ -829,7 +865,7 @@ export interface AgentResponse {
   promptCacheDiagnostics?: PromptCacheDiagnostics;
   /** 本 run 内工具轮的原样字节快照，调用方持久化到 assistant 消息后跨轮还原 */
   toolRounds?: AgentToolRound[];
-  providerReplay?: OpenAiResponsesReplayState;
+  providerReplay?: ProviderReplayState;
   traceLog?: AgentTraceLogInfo;
   runDetails: RunDetailsSummary;
 }

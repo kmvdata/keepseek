@@ -1,6 +1,6 @@
 # KeepSeek 架构与维护指南
 
-KeepSeek 是一个 VS Code 扩展：在 Secondary Sidebar 提供 AI 对话面板，负责会话、上下文文件、文件/目录引用展开、DeepSeek/OpenAI 兼容流式请求、只读工作区工具，以及用户确认后的 DraftEdit 写入。本文档是仓库内 Agent/维护者约定的唯一来源，旧版约定若与本文冲突，以当前源码和本文为准。
+KeepSeek 是一个 VS Code 扩展：在 Secondary Sidebar 提供 AI 对话面板，负责会话、上下文文件、文件/目录引用展开、DeepSeek/OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 独立流式协议、只读工作区工具，以及用户确认后的 DraftEdit 写入。本文档是仓库内 Agent/维护者约定的唯一来源，旧版约定若与本文冲突，以当前源码和本文为准。
 
 > **给维护 Agent 的说明**：本文件作为 project instructions 注入每个 Agent run，默认受 `keepseek.projectInstructions.contextBudgetTokens`（4000 token）预算约束。**保持精简是为了完整加载、不被截断**；详细设计在 `doc/` 下，需要时用只读工具按需读取。
 > **模型画像**：主力模型 DeepSeek V4 Flash（1M 上下文窗口、Thinking high/max）。1M 窗口让"投影 + 摘要"取代硬裁剪可行；前缀缓存命中价低至 1/30，是产品的经济命脉——因此"字节冻结"是本文档最高优先级不变式。本文档用结构化中文编写，便于逐条引用。
@@ -40,6 +40,7 @@ src/
 │   ├── historyCompressor.ts     # 会话摘要刷新与失败回退 ★压缩核心
 │   ├── contextUsage.ts          # 用量估算（必须与真实请求共用同一 projection）
 │   ├── currentRunContext.ts     # 项目指令/Skills/Legacy 统一投影入口
+│   ├── providers/               # Chat Completions / Responses / Anthropic Messages 客户端与 SSE parser
 │   └── tools/                   # workspace / semantic / validation / git / toolAuthorization
 ├── accounts/                    # 来源 CRUD、accountResolver（凭据唯一入口）、modelDiscovery
 ├── context/references/          # <path> / <path#Lx-Ly> / <keepseek-dir:> 展开、授权、@ 补全
@@ -57,7 +58,7 @@ src/
 
 - **system 段纯静态**：`getAgentSystemPrompt()` 不随轮次变化。`contextInstructions`（AGENTS.md / Skills / Legacy Memory / Context Files 的格式化结果）持久化在 `ChatSession.contextInstructions`——字节未变就逐字节复用，禁止每轮重新生成；变化即整体重写（一次可接受的缓存代价）。
 - **user 消息"发送字节 == 持久化字节"**：一律以 `(expandedContent ?? content).trim()` 发送，禁止发送时再包装/拼接。动态内容（goal、临时指令、后台任务状态）只追加在 user 消息尾部，绝不改写已发送历史。
-- **assistant 消息原样持久化**：工具轮（tool_calls / tool 结果）经 `ChatMessage.toolRounds` 逐字节还原；`reasoning_content` 原样保存。
+- **assistant 消息原样持久化**：通用工具轮经 `ChatMessage.toolRounds` 还原；Responses/Anthropic 同 lane 另存可辨别 `providerReplay`。Anthropic Thinking、signature、redacted data、`tool_use`/`tool_result` block 必须原样有序回放，跨 lane 只保留可见文本。
 - **历史投影 append-only**：只追加，不重写、不 trim、不重排；摘要刷新是受控低频缓存重置点（`SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD` 故意调高）。
 - **工具 schema 按会话冻结**：集合与顺序跨轮不变；禁用工具用 `tool_choice: none` 而非移除 tools；slim mode 默认关闭。
 
@@ -75,7 +76,8 @@ src/
 ### 4.3 账户与模型来源
 
 - `accounts/accountResolver.ts` 是按来源解析凭证的唯一入口；删除、模型切换、摘要、主请求、余额的来源语义必须一致；密钥不得写入 workspace 或 trace。
-- 仅官网 DeepSeek（`provider === 'deepseek' && baseUrl.host === 'api.deepseek.com'`）保留余额/费用能力；其余来源只走 chat completions / SSE / 工具调用 / token 统计。
+- 仅官网 DeepSeek（`provider === 'deepseek' && baseUrl.host === 'api.deepseek.com'`）保留余额/费用能力；其余来源只走各自的对话/SSE/工具调用/token 统计，不启用余额和费用。
+- `anthropic-compatible` 是独立 Messages 协议：`x-api-key` + `anthropic-version: 2023-06-01`，不得发送 Bearer 或 OpenAI 请求字段；仅官方 `api.anthropic.com` 默认启用顶层 ephemeral Prompt Caching，自定义网关默认不启用。
 - 来源持久化在 `globalStorageUri/accounts/<provider>/`；旧 `keepseek.apiKey` / `keepseek.baseUrl` 只复制迁移、不修改；`.initialized` 不含密钥。
 
 ### 4.4 安全写入与删除

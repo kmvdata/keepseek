@@ -1,6 +1,6 @@
 # KeepSeek Agent 底层 API 通信详解：引用展开与真实 payload
 
-本文档面向希望理解 KeepSeek Agent 底层工作方式的开发者和高级用户。文档会详细说明 KeepSeek 如何处理用户输入中的各类引用、上下文文件、项目指令和 Skill，以及最终向 LLM API（DeepSeek / OpenAI-compatible Chat Completions）发送的真实 JSON payload 结构。读完本文后，你将能追踪从「用户在输入框里写 prompt + 引用」到「模型收到 JSON 请求」的完整链路。
+本文档面向希望理解 KeepSeek Agent 底层工作方式的开发者和高级用户。文档说明引用、上下文、项目指令和 Skill 如何进入权威请求投影，以及 Chat Completions、OpenAI Responses、Anthropic Messages 三种独立协议的真实 payload。Anthropic 是原生 Messages 客户端，不是 OpenAI→Anthropic 转换器。
 
 ## 1. 总体数据流
 
@@ -39,8 +39,8 @@
 │ AgentRunner.run():                                   │
 │   1. buildHistoryProjection() → 历史投影              │
 │   2. buildInitialAgentMessages() → 组装 messages[]   │
-│   3. 构造 DeepSeekChatRequestBody                    │
-│   4. POST /chat/completions（streaming）              │
+│   3. providerRequestProjection → 协议原生 body       │
+│   4. POST /chat/completions、/responses 或 /messages  │
 │   5. 工具调用循环（如有）                              │
 └──────────────────────────────────────────────────────┘
            │
@@ -64,7 +64,7 @@
 
 ## 2. API 请求的完整 JSON 结构
 
-KeepSeek 发送的是标准 DeepSeek/OpenAI-compatible Chat Completions 请求。一次完整请求的顶层结构为：
+以下是 DeepSeek/OpenAI-compatible Chat Completions 的完整结构；Responses 与 Anthropic 不复用该 body：
 
 ```json
 {
@@ -98,6 +98,32 @@ KeepSeek 发送的是标准 DeepSeek/OpenAI-compatible Chat Completions 请求�
 ```
 
 下面我们逐层拆解 `messages` 数组的组装过程，尤其是当前用户 prompt 如何被构建。
+
+### 2.1 Anthropic Messages 原生结构
+
+Anthropic 账号请求 `POST <normalized-base>/messages`，请求头为 `x-api-key`、`anthropic-version: 2023-06-01`、JSON 与 SSE Accept；空 Key 只允许自定义兼容端点。请求不会包含 Bearer、`chat/completions`、`stream_options`、`reasoning_effort` 或 Responses 字段：
+
+```json
+{
+  "model": "claude-model-id",
+  "system": [
+    { "type": "text", "text": "<KeepSeek system>" },
+    { "type": "text", "text": "<stable context / summary>" }
+  ],
+  "messages": [
+    { "role": "user", "content": [{ "type": "text", "text": "<providerContent 或展开后的 prompt>" }] }
+  ],
+  "tools": [
+    { "name": "keepseek_search_workspace", "description": "...", "input_schema": { "type": "object", "properties": {} }, "strict": true }
+  ],
+  "tool_choice": { "type": "auto" },
+  "stream": true,
+  "max_tokens": 8192,
+  "cache_control": { "type": "ephemeral" }
+}
+```
+
+`cache_control` 只在 host 精确为 `api.anthropic.com` 时默认加入；代理/内网 compatible endpoint 默认省略。`max_tokens` 不超过发现的 `maxOutputTokens`，手动模型缺少元数据时使用集中定义的 8192。Thinking 参数只由 `/models` 声明的能力启用。
 
 ## 3. 当前用户 prompt 的组装（formatCurrentUserPromptForAgent）
 
@@ -473,6 +499,8 @@ Skill scripts 只展示存在状态，绝不能执行。
 
 shaping 后的 tool result 仍保留截断元数据（`truncated`、`limit`、`totalLines` 等），让模型知道结果可能不完整，可以继续调用工具。
 
+Anthropic 使用不同的原生结构：assistant content 中可依次含 `thinking`（完整 thinking + opaque signature）、`redacted_thinking`（opaque data）、`text`、多个 `tool_use`；随后一个 user content 数组先放同序的全部 `tool_result`。这些 blocks 在同 protocol/source/endpoint lane 内由 `providerReplay` 原样持久化和回放，不能从通用 `toolRounds` 或摘要字符串重建。跨 lane 只保留用户可见文本。
+
 ## 6. 完整示例：一次请求的真实 payload
 
 以下是一个完整示例。假设用户：
@@ -744,6 +772,26 @@ export async function loginUser(
 }
 ```
 
+### 7.4 Anthropic 的工具结果回传
+
+```json
+{
+  "messages": [
+    { "role": "assistant", "content": [
+      { "type": "thinking", "thinking": "...", "signature": "<opaque>" },
+      { "type": "tool_use", "id": "call_1", "name": "keepseek_list_workspace_directory", "input": { "path": "doc" } },
+      { "type": "tool_use", "id": "call_2", "name": "keepseek_search_workspace", "input": { "query": "providerReplay" } }
+    ] },
+    { "role": "user", "content": [
+      { "type": "tool_result", "tool_use_id": "call_1", "content": "{...}" },
+      { "type": "tool_result", "tool_use_id": "call_2", "content": "{...}" }
+    ] }
+  ]
+}
+```
+
+`input_json_delta` 只在 content block 完成后解析；不完整 JSON 不会执行。流中断只允许用已确认的可见 text 续写，未完成 Thinking/signature/tool call 一律不回放。`pause_turn` 则带原生 assistant blocks 安全 continuation，不伪造 `tool_result`。
+
 模型收到 tool 结果后继续推理，可能接着调用 `keepseek_read_workspace_file_range` 读取文档，或直接基于已获得的信息给出回答。
 
 ## 8. 关键设计决策与 trade-off
@@ -819,4 +867,4 @@ messages[] → POST /chat/completions
 
 LLM 看到的始终是「纯文本消息 + 工具定义」，不知道 VS Code Webview、引用 chip、富文本编辑器等 UI 细节。所有引用展开、上下文组装、工具路由和结果 shaping 都在 KeepSeek 扩展端完成，对模型透明。
 
-这种设计让 KeepSeek 能适配任何支持 OpenAI-compatible function calling 的模型，不需要模型理解任何 KeepSeek 特有的引用语法或 UI 概念。
+这种设计让 KeepSeek 可同时适配 OpenAI-compatible function calling、Responses Items 与 Anthropic `tool_use`，模型不需要理解 KeepSeek 的引用语法或 UI。Anthropic 的 Bedrock/Vertex 专用认证、OAuth、Files、图片/PDF、server tools 与 Messages Batches 不在当前范围。

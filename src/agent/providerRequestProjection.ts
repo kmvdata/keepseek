@@ -16,6 +16,12 @@ import type {
   OpenAiResponsesItem
 } from './providers/responsesTypes';
 import { getOpenAiResponsesEndpointUrl } from './providers/openAiResponsesClient';
+import { getAnthropicMessagesEndpointUrl } from './providers/anthropicMessagesClient';
+import type {
+  AnthropicFunctionTool,
+  AnthropicMessage,
+  AnthropicSystemTextBlock
+} from './providers/anthropicTypes';
 import { buildHistoryProjection, type HistoryProjectionResult } from './historyProjection';
 import {
   buildInitialAgentMessages,
@@ -56,6 +62,16 @@ export interface OpenAiResponsesRequestProjection {
   };
 }
 
+export interface AnthropicMessagesRequestProjection {
+  system: AnthropicSystemTextBlock[];
+  messages: AnthropicMessage[];
+  tools: AnthropicFunctionTool[];
+  lane: {
+    sourceId: string;
+    baseUrl: string;
+  };
+}
+
 export interface ProviderRequestProjection {
   messages: DeepSeekMessage[];
   tools: DeepSeekFunctionTool[];
@@ -63,6 +79,7 @@ export interface ProviderRequestProjection {
   historyProjection: HistoryProjectionResult;
   requestProtocolVersion: number;
   responses?: OpenAiResponsesRequestProjection;
+  anthropic?: AnthropicMessagesRequestProjection;
 }
 
 /**
@@ -76,9 +93,11 @@ export function buildProviderRequestProjection(
 ): ProviderRequestProjection {
   const profile = getDeepSeekV4RuntimeProfile(input.model, input.agentSettings);
   const requestProtocolVersion = normalizeRequestProtocolVersion(input.requestProtocolVersion);
-  const provider = input.provider ?? (input.model.provider === 'openai-responses'
-    ? 'openai-responses'
-    : undefined);
+  const provider = input.provider ?? (
+    input.model.provider === 'openai-responses' || input.model.provider === 'anthropic-compatible'
+      ? input.model.provider
+      : undefined
+  );
   const historyProjection = buildHistoryProjection({
     history: input.history,
     prompt: input.prompt,
@@ -87,7 +106,7 @@ export function buildProviderRequestProjection(
     settings: profile.contextCompression,
     requestProtocolVersion,
     maxProjectionTokens: input.maxProjectionTokens,
-    includeProviderReplay: provider === 'openai-responses'
+    includeProviderReplay: provider === 'openai-responses' || provider === 'anthropic-compatible'
   });
   const messages = buildInitialAgentMessages({
     prompt: input.prompt,
@@ -118,6 +137,16 @@ export function buildProviderRequestProjection(
         baseUrl: input.baseUrl ?? ''
       })
     : undefined;
+  const anthropic = provider === 'anthropic-compatible'
+    ? buildAnthropicMessagesRequestProjection({
+        messages,
+        tools,
+        history: historyProjection.history,
+        prompt: input.prompt,
+        sourceId: input.sourceId ?? input.model.sourceId ?? '',
+        baseUrl: input.baseUrl ?? ''
+      })
+    : undefined;
 
   return {
     messages,
@@ -125,7 +154,70 @@ export function buildProviderRequestProjection(
     toolNames,
     historyProjection,
     requestProtocolVersion,
-    responses
+    responses,
+    anthropic
+  };
+}
+
+function buildAnthropicMessagesRequestProjection(input: {
+  messages: DeepSeekMessage[];
+  tools: DeepSeekFunctionTool[];
+  history: ChatMessage[];
+  prompt: string;
+  sourceId: string;
+  baseUrl: string;
+}): AnthropicMessagesRequestProjection {
+  const lane = {
+    sourceId: input.sourceId,
+    baseUrl: normalizeAnthropicMessagesLaneBaseUrl(input.baseUrl)
+  };
+  const system: AnthropicSystemTextBlock[] = [];
+  for (const message of input.messages) {
+    if (message.role === 'system' && typeof message.content === 'string' && message.content) {
+      system.push({ type: 'text', text: message.content });
+    }
+  }
+  const messages: AnthropicMessage[] = [];
+  const normalizedPrompt = input.prompt.trim();
+  let currentPromptIncluded = false;
+
+  for (const message of input.history) {
+    if (message.role === 'user') {
+      const content = getMessageContentForAgent(message);
+      if (!content) continue;
+      messages.push({ role: 'user', content: [{ type: 'text', text: content }] });
+      const originalContent = (message.expandedContent ?? message.content).trim();
+      currentPromptIncluded = currentPromptIncluded || Boolean(normalizedPrompt
+        && (content === normalizedPrompt
+          || originalContent === normalizedPrompt
+          || message.content.trim() === normalizedPrompt));
+      continue;
+    }
+
+    if (isAnthropicReplayInLane(message, lane)) {
+      if (message.providerReplay?.protocol === 'anthropic-messages') {
+        for (const replayMessage of message.providerReplay.messages) {
+          messages.push(replayMessage.role === 'assistant'
+            ? { role: 'assistant', content: replayMessage.content }
+            : { role: 'user', content: replayMessage.content });
+        }
+      }
+      continue;
+    }
+
+    const visibleContent = getMessageContentForAgent(message);
+    if (visibleContent) {
+      messages.push({ role: 'assistant', content: [{ type: 'text', text: visibleContent }] });
+    }
+  }
+  if (normalizedPrompt && !currentPromptIncluded) {
+    messages.push({ role: 'user', content: [{ type: 'text', text: normalizedPrompt }] });
+  }
+  return {
+    system,
+    messages,
+    tools: toAnthropicTools(input.tools),
+    lane
   };
 }
 
@@ -172,7 +264,9 @@ function buildOpenAiResponsesRequestProjection(input: {
 
     if (isReplayInLane(message, lane)) {
       // Persisted objects are appended without rebuilding or key reordering.
-      responseInput.push(...message.providerReplay?.items ?? []);
+      responseInput.push(...message.providerReplay?.protocol === 'openai-responses'
+        ? message.providerReplay.items
+        : []);
       continue;
     }
 
@@ -207,6 +301,24 @@ export function toOpenAiResponsesTools(
     }));
 }
 
+export function toAnthropicTools(tools: DeepSeekFunctionTool[]): AnthropicFunctionTool[] {
+  return tools.map((tool) => ({
+    name: tool.function.name,
+    description: tool.function.description,
+    input_schema: tool.function.parameters,
+    ...(tool.function.strict === undefined ? {} : { strict: tool.function.strict })
+  }));
+}
+
+function isAnthropicReplayInLane(
+  message: ChatMessage,
+  lane: AnthropicMessagesRequestProjection['lane']
+): boolean {
+  return message.providerReplay?.protocol === 'anthropic-messages'
+    && message.providerReplay.sourceId === lane.sourceId
+    && normalizeAnthropicMessagesLaneBaseUrl(message.providerReplay.baseUrl) === lane.baseUrl;
+}
+
 function isReplayInLane(
   message: ChatMessage,
   lane: OpenAiResponsesRequestProjection['lane']
@@ -219,6 +331,14 @@ function isReplayInLane(
 export function normalizeOpenAiResponsesLaneBaseUrl(rawBaseUrl: string): string {
   try {
     return getOpenAiResponsesEndpointUrl(rawBaseUrl).replace(/#.*$/u, '');
+  } catch {
+    return rawBaseUrl.trim().replace(/\/+$/u, '');
+  }
+}
+
+export function normalizeAnthropicMessagesLaneBaseUrl(rawBaseUrl: string): string {
+  try {
+    return getAnthropicMessagesEndpointUrl(rawBaseUrl).replace(/#.*$/u, '');
   } catch {
     return rawBaseUrl.trim().replace(/\/+$/u, '');
   }

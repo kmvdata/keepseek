@@ -3,7 +3,8 @@
  *
  * 每个账号属于且仅属于一种 API 类型：deepseek（DeepSeek 官方协议）、
  * ollama（Ollama 本地端点）、openai-compatible（Chat Completions 兼容端点）、
- * openai-responses（Responses API 兼容端点）。
+ * openai-responses（Responses API 兼容端点）、anthropic-compatible
+ *（Anthropic Messages 兼容端点）。
  * API 类型决定默认 Base URL、模型发现端点、请求客户端分派与余额能力；
  * 账号本身只保存名称、凭证与已挂载模型。
  *
@@ -14,7 +15,8 @@ export const MODEL_SOURCE_PROVIDERS = [
   'deepseek',
   'ollama',
   'openai-compatible',
-  'openai-responses'
+  'openai-responses',
+  'anthropic-compatible'
 ] as const;
 
 export type ModelSourceProvider = typeof MODEL_SOURCE_PROVIDERS[number];
@@ -22,10 +24,22 @@ export type ModelSourceProvider = typeof MODEL_SOURCE_PROVIDERS[number];
 /** 账号所属的 API 类型（account → api type）。 */
 export type AccountApiType = ModelSourceProvider;
 
-/** Model metadata returned by a provider's OpenAI-compatible /models endpoint. */
+export type AnthropicThinkingCapability = 'adaptive' | 'enabled';
+export type AnthropicEffortCapability = 'high' | 'max';
+
+/** Compact, JSON-safe Anthropic capability metadata returned by /models. */
+export interface AnthropicModelCapabilities {
+  thinking?: AnthropicThinkingCapability;
+  effort?: AnthropicEffortCapability[];
+}
+
+/** Model metadata returned by a provider's /models endpoint. */
 export interface DiscoveredModelInfo {
   id: string;
   name?: string;
+  contextWindowTokens?: number;
+  maxOutputTokens?: number;
+  anthropicCapabilities?: AnthropicModelCapabilities;
 }
 
 export interface ModelDiscoveryCache {

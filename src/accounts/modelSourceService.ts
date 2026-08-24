@@ -6,7 +6,7 @@ import {
   type RefreshSourceModelCacheResult,
   type SourceConnectionProber
 } from './modelDiscovery';
-import { isOfficialDeepSeekSource } from './sourceCapabilities';
+import { isOfficialAnthropicSource, isOfficialDeepSeekSource } from './sourceCapabilities';
 import type { ModelSource, ModelSourceModel, ModelSourceProvider } from './types';
 
 export interface AddModelInput {
@@ -53,6 +53,7 @@ export class ModelSourceService {
       await this.assertUniqueSourceName(name);
       const apiKey = input.apiKey.trim();
       const baseUrl = normalizeRequiredBaseUrl(input.baseUrl);
+      assertOfficialAnthropicApiKey(input.provider, baseUrl, apiKey);
       source = await this.findReusableSource(input.provider, apiKey, baseUrl);
       reusedSource = Boolean(source);
       if (!source) {
@@ -115,6 +116,7 @@ export class ModelSourceService {
     await this.assertUniqueSourceName(name, source.id);
     const apiKey = input.apiKey.trim();
     const baseUrl = normalizeRequiredBaseUrl(input.baseUrl);
+    assertOfficialAnthropicApiKey(source.provider, baseUrl, apiKey);
     const connectionChanged = source.apiKey !== apiKey || source.baseUrl !== baseUrl;
     const updated = await this.sourceStore.updateSource(source.id, {
       name,
@@ -181,7 +183,19 @@ export class ModelSourceService {
 }
 
 function shouldRefreshAfterSave(source: Pick<ModelSource, 'provider' | 'baseUrl'>): boolean {
-  return isOfficialDeepSeekSource(source) || source.provider === 'openai-responses';
+  return isOfficialDeepSeekSource(source)
+    || source.provider === 'openai-responses'
+    || source.provider === 'anthropic-compatible';
+}
+
+function assertOfficialAnthropicApiKey(
+  provider: ModelSourceProvider,
+  baseUrl: string,
+  apiKey: string
+): void {
+  if (!apiKey && isOfficialAnthropicSource({ provider, baseUrl })) {
+    throw new Error('Official Anthropic accounts require an API Key.');
+  }
 }
 
 function normalizeRequiredBaseUrl(rawBaseUrl: string): string {

@@ -7,6 +7,7 @@ import type {
   DeepSeekUsage
 } from '../deepseek/types';
 import type { OpenAiResponsesItem, OpenAiResponsesRequestBody } from './responsesTypes';
+import type { AnthropicAssistantContentBlock, AnthropicMessagesRequestBody } from './anthropicTypes';
 
 export type ProviderClientFailureKind =
   | 'http'
@@ -27,7 +28,7 @@ export interface ProviderClientConfig {
 }
 
 export interface ProviderClientRequest {
-  body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody;
+  body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody;
   language: KeepseekLanguage;
   signal?: AbortSignal;
   callbacks?: AgentRunCallbacks;
@@ -49,11 +50,12 @@ export interface ProviderClientResult {
   attemptCount?: number;
   retryCount?: number;
   nativeOutputItems?: OpenAiResponsesItem[];
+  nativeAnthropicContentBlocks?: AnthropicAssistantContentBlock[];
 }
 
 /**
  * 上游模型客户端的统一协议边界。每种账号类型（deepseek / ollama /
- * openai-compatible / openai-responses）由 providers/factory 按类型分发。
+ * openai-compatible / openai-responses / anthropic-compatible）由 factory 分发。
  */
 export interface ProviderClient {
   createModelResponse(

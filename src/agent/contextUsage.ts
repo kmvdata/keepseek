@@ -17,6 +17,8 @@ import { AgentSettings, ChatMessage, ContextCompressionState, ContextFile, Conte
 import { buildProviderRequestProjection } from './providerRequestProjection';
 import type { ModelSourceProvider } from '../accounts/types';
 import type { OpenAiResponsesFunctionTool, OpenAiResponsesItem } from './providers/responsesTypes';
+import type { AnthropicFunctionTool, AnthropicMessage, AnthropicSystemTextBlock } from './providers/anthropicTypes';
+import { DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS } from './providers/anthropicTypes';
 import { estimateTokenCount } from './tokenEstimate';
 
 type ContextUsageBreakdown = ContextUsageEstimate['breakdown'];
@@ -62,7 +64,12 @@ export function createContextUsageEstimate(input: {
   const messages = providerProjection.messages;
   const tools = providerProjection.tools;
   const outputReserveTokens = input.outputReserveTokens ?? resolveOutputReserveTokens(
-    getDeepSeekV4RuntimeProfile(input.model, input.agentSettings).maxTokens
+    providerProjection.anthropic
+      ? Math.min(
+          input.model.maxOutputTokens ?? DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS,
+          getDeepSeekV4RuntimeProfile(input.model, input.agentSettings).maxTokens
+        )
+      : getDeepSeekV4RuntimeProfile(input.model, input.agentSettings).maxTokens
   );
   const breakdown = estimateInitialBreakdown({
     messages,
@@ -74,6 +81,18 @@ export function createContextUsageEstimate(input: {
     outputReserveTokens,
     safetyReserveTokens: input.safetyReserveTokens ?? 0
   });
+
+  if (providerProjection.anthropic) {
+    return createContextUsageEstimateFromAnthropic({
+      model: input.model,
+      system: providerProjection.anthropic.system,
+      messages: providerProjection.anthropic.messages,
+      tools: providerProjection.anthropic.tools,
+      outputReserveTokens,
+      safetyReserveTokens: input.safetyReserveTokens,
+      breakdown
+    });
+  }
 
   if (providerProjection.responses) {
     return createContextUsageEstimateFromResponses({
@@ -92,6 +111,42 @@ export function createContextUsageEstimate(input: {
     tools,
     outputReserveTokens,
     safetyReserveTokens: input.safetyReserveTokens,
+    breakdown
+  });
+}
+
+export function createContextUsageEstimateFromAnthropic(input: {
+  model: KeepseekModel;
+  system: AnthropicSystemTextBlock[];
+  messages: AnthropicMessage[];
+  tools?: AnthropicFunctionTool[];
+  outputReserveTokens?: number;
+  safetyReserveTokens?: number;
+  breakdown?: Partial<ContextUsageBreakdown>;
+}): ContextUsageEstimate {
+  const maxTokensEstimate = getConfiguredContextWindowTokens(input.model);
+  const nativeInputTokensEstimate = estimateTokenCount(JSON.stringify({
+    system: input.system,
+    messages: input.messages
+  })) + (input.system.length + input.messages.length) * 4;
+  const toolSchemaTokensEstimate = input.tools?.length
+    ? estimateTokenCount(JSON.stringify(input.tools))
+    : 0;
+  const outputReserveTokensEstimate = Math.max(0, Math.floor(input.outputReserveTokens ?? 0));
+  const safetyReserveTokensEstimate = Math.max(0, Math.floor(input.safetyReserveTokens ?? 0));
+  const breakdown = scaleProviderInputBreakdown(
+    input.breakdown,
+    nativeInputTokensEstimate,
+    toolSchemaTokensEstimate,
+    outputReserveTokensEstimate,
+    safetyReserveTokensEstimate
+  );
+  return normalizeContextUsageEstimate({
+    maxTokensEstimate,
+    usedTokensEstimate: nativeInputTokensEstimate
+      + toolSchemaTokensEstimate
+      + outputReserveTokensEstimate
+      + safetyReserveTokensEstimate,
     breakdown
   });
 }
@@ -168,9 +223,33 @@ export function createContextUsageEstimateFromResponses(input: {
     : 0;
   const outputReserveTokensEstimate = Math.max(0, Math.floor(input.outputReserveTokens ?? 0));
   const safetyReserveTokensEstimate = Math.max(0, Math.floor(input.safetyReserveTokens ?? 0));
+  const breakdown = scaleProviderInputBreakdown(
+    input.breakdown,
+    inputTokensEstimate,
+    toolSchemaTokensEstimate,
+    outputReserveTokensEstimate,
+    safetyReserveTokensEstimate
+  );
+  return normalizeContextUsageEstimate({
+    maxTokensEstimate,
+    usedTokensEstimate: inputTokensEstimate
+      + toolSchemaTokensEstimate
+      + outputReserveTokensEstimate
+      + safetyReserveTokensEstimate,
+    breakdown
+  });
+}
+
+function scaleProviderInputBreakdown(
+  inputBreakdown: Partial<ContextUsageBreakdown> | undefined,
+  inputTokensEstimate: number,
+  toolSchemaTokensEstimate: number,
+  outputReserveTokensEstimate: number,
+  safetyReserveTokensEstimate: number
+): ContextUsageBreakdown {
   const breakdown = normalizeBreakdown({
     ...createEmptyBreakdown(),
-    ...input.breakdown,
+    ...inputBreakdown,
     toolSchemaTokensEstimate,
     outputReserveTokensEstimate,
     safetyReserveTokensEstimate
@@ -194,14 +273,7 @@ export function createContextUsageEstimateFromResponses(input: {
     0,
     breakdown.historyTokensEstimate + inputTokensEstimate - scaledInput
   );
-  return normalizeContextUsageEstimate({
-    maxTokensEstimate,
-    usedTokensEstimate: inputTokensEstimate
-      + toolSchemaTokensEstimate
-      + outputReserveTokensEstimate
-      + safetyReserveTokensEstimate,
-    breakdown
-  });
+  return breakdown;
 }
 
 /**
@@ -454,6 +526,7 @@ function normalizeKnownProvider(value: string): ModelSourceProvider | undefined 
     || value === 'ollama'
     || value === 'openai-compatible'
     || value === 'openai-responses'
+    || value === 'anthropic-compatible'
     ? value
     : undefined;
 }

@@ -38,7 +38,16 @@ export function createModelCatalog(sources: readonly ModelSource[]): KeepseekMod
         id: modelId,
         label: builtIn?.label ?? modelId,
         provider: source.provider,
-        contextWindowTokens: builtIn?.contextWindowTokens,
+        contextWindowTokens: fetched?.contextWindowTokens ?? builtIn?.contextWindowTokens,
+        maxOutputTokens: fetched?.maxOutputTokens,
+        anthropicCapabilities: fetched?.anthropicCapabilities
+          ? {
+              ...fetched.anthropicCapabilities,
+              effort: fetched.anthropicCapabilities.effort
+                ? [...fetched.anthropicCapabilities.effort]
+                : undefined
+            }
+          : undefined,
         fetchedName: fetched?.name,
         sourceId: source.id,
         sourceName: source.name,

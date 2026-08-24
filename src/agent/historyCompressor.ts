@@ -29,6 +29,9 @@ import { createProviderClient } from './providers/factory';
 import type { ProviderClientConfig } from './providers/types';
 import type { DeepSeekChatRequestBody, DeepSeekMessage } from './deepseek/types';
 import type { OpenAiResponsesRequestBody } from './providers/responsesTypes';
+import type { AnthropicMessagesRequestBody } from './providers/anthropicTypes';
+import { DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS } from './providers/anthropicTypes';
+import { isOfficialAnthropicSource } from '../accounts/sourceCapabilities';
 import {
   CONTEXT_COMPRESSION_VERSION,
   buildHistoryProjection,
@@ -381,7 +384,7 @@ export class HistoryCompressor {
         input.sourceConfig,
         input.model.sourceId
       );
-      const body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody = clientConfig.provider === 'openai-responses'
+      const body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody = clientConfig.provider === 'openai-responses'
         ? {
             model: input.model.id,
             input: input.messages.map((message) => ({
@@ -395,7 +398,29 @@ export class HistoryCompressor {
             temperature: 0,
             max_output_tokens: input.maxTokens
           }
-        : {
+        : clientConfig.provider === 'anthropic-compatible'
+          ? {
+              model: input.model.id,
+              system: input.messages
+                .filter((message) => message.role === 'system' && typeof message.content === 'string')
+                .map((message) => ({ type: 'text', text: message.content ?? '' })),
+              messages: input.messages
+                .filter((message) => message.role === 'user' && typeof message.content === 'string')
+                .map((message) => ({
+                  role: 'user' as const,
+                  content: [{ type: 'text' as const, text: message.content ?? '' }]
+                })),
+              stream: true,
+              max_tokens: Math.max(1, Math.min(
+                input.maxTokens,
+                input.model.maxOutputTokens ?? DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS
+              )),
+              temperature: 0,
+              cache_control: isOfficialAnthropicSource(clientConfig)
+                ? { type: 'ephemeral' }
+                : undefined
+            }
+          : {
             model: input.model.id,
             messages: input.messages,
             stream: true,
@@ -491,12 +516,17 @@ function estimateRawConversationTokens(input: HistoryCompressionRefreshInput): n
     sourceId: input.sourceConfig?.sourceId ?? input.model.sourceId,
     baseUrl: input.sourceConfig?.baseUrl
   });
-  return projection.responses
-    ? estimateTokenCount(JSON.stringify(projection.responses.input))
+  return projection.anthropic
+    ? estimateTokenCount(JSON.stringify({
+        system: projection.anthropic.system,
+        messages: projection.anthropic.messages
+      })) + estimateTokenCount(JSON.stringify(projection.anthropic.tools))
+    : projection.responses
+      ? estimateTokenCount(JSON.stringify(projection.responses.input))
       + estimateTokenCount(JSON.stringify(projection.responses.tools))
       + projection.responses.input.length * 4
-    : projection.messages.reduce((total, message) => total + estimateDeepSeekMessageTokens(message), 0)
-      + estimateDeepSeekToolsTokens(projection.tools);
+      : projection.messages.reduce((total, message) => total + estimateDeepSeekMessageTokens(message), 0)
+        + estimateDeepSeekToolsTokens(projection.tools);
 }
 
 function estimateRawConversationRatio(input: HistoryCompressionRefreshInput): number {
@@ -650,7 +680,8 @@ async function getSummaryClientConfig(
     requireApiKey: false
   });
   // Ollama 等本地 OpenAI 兼容端点不需要 API Key；只有 DeepSeek 保留预检提示。
-  if (!resolvedSource.apiKey.trim() && resolvedSource.provider === 'deepseek') {
+  if (!resolvedSource.apiKey.trim() && (resolvedSource.provider === 'deepseek'
+    || isOfficialAnthropicSource(resolvedSource))) {
     throw new MissingModelSourceApiKeyError(language);
   }
   return {

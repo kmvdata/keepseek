@@ -309,6 +309,9 @@ export function normalizePromptCacheDiagnosticsValue(value: unknown): PromptCach
     toolsSchemaHash: normalizeOptionalString(value.toolsSchemaHash),
     historyPrefixHash: normalizeOptionalString(value.historyPrefixHash),
     modelId: normalizeOptionalString(value.modelId),
+    protocol: normalizeOptionalString(value.protocol),
+    sourceId: normalizeOptionalString(value.sourceId),
+    baseUrl: normalizeOptionalString(value.baseUrl),
     historyCompacted: typeof value.historyCompacted === 'boolean' ? value.historyCompacted : undefined,
     historyRewriteReason: normalizeOptionalString(value.historyRewriteReason),
     cacheMissPossibleReasons: Array.isArray(value.cacheMissPossibleReasons)
