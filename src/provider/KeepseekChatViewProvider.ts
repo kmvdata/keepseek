@@ -781,7 +781,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           type: 'sourceConnectionTestResult',
           ok: probeResult.ok,
           status: probeResult.status,
-          error: probeResult.error
+          error: probeResult.error,
+          modelDiscoveryUnavailable: probeResult.modelDiscoveryUnavailable === true
         });
         return;
       }
@@ -1854,7 +1855,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         ok: true,
         reusedSource: result.reusedSource
       });
-      if (result.discovery?.status === 'failed') {
+      if (result.modelDiscoveryUnavailable) {
+        vscode.window.showWarningMessage(this.language === 'en'
+          ? 'The account was saved, but this Anthropic-compatible endpoint does not provide a model list. Add a model ID manually in account settings.'
+          : '账号已保存，但此 Anthropic 兼容端点不提供模型列表。请在账号设置中手动添加模型 ID。');
+      } else if (result.discovery?.status === 'failed') {
         vscode.window.showWarningMessage(this.language === 'en'
           ? 'The model was saved, but automatic model discovery failed. You can refresh it manually.'
           : '模型已保存，但自动获取模型失败；可稍后手动刷新。');

@@ -56,6 +56,25 @@ export function getSourceModelsEndpointUrl(
     return url.toString();
   }
 
+  // Accept the canonical Anthropic host both with and without its documented
+  // /v1 prefix. Custom gateways are left untouched because their routing
+  // prefix is part of the account identity and may intentionally be empty.
+  if (provider === 'anthropic-compatible'
+    && url.host === 'api.anthropic.com'
+    && !cleanPath) {
+    url.pathname = '/v1/models';
+    url.hash = '';
+    return url.toString();
+  }
+
+  // Anthropic-compatible gateways such as Alibaba Cloud Model Studio expose
+  // the SDK base at /apps/anthropic and append the native /v1 resource path.
+  if (provider === 'anthropic-compatible' && cleanPath.endsWith('/apps/anthropic')) {
+    url.pathname = `${cleanPath}/v1/models`;
+    url.hash = '';
+    return url.toString();
+  }
+
   const completionsSuffix = '/chat/completions';
   const responsesSuffix = '/responses';
   const messagesSuffix = '/messages';
@@ -165,6 +184,7 @@ export interface ProbeSourceConnectionResult {
   ok: boolean;
   status?: number;
   error?: string;
+  modelDiscoveryUnavailable?: boolean;
 }
 
 export type SourceConnectionProber = (
@@ -189,6 +209,12 @@ export async function probeSourceConnection(
   const apiKey = source.apiKey.trim();
   if (!apiKey && isOfficialAnthropicSource(source)) {
     return { ok: false, error: 'An API Key is required for the official Anthropic endpoint.' };
+  }
+  if (source.provider !== 'anthropic-compatible' && isCanonicalAnthropicHost(baseUrl)) {
+    return {
+      ok: false,
+      error: 'Provider mismatch: api.anthropic.com requires the Anthropic Messages compatible protocol. Create a new Anthropic account because an existing account protocol cannot be changed.'
+    };
   }
 
   const controller = new AbortController();
@@ -217,12 +243,29 @@ export async function probeSourceConnection(
       signal: controller.signal
     });
     if (!response.ok) {
-      if ((source.provider === 'openai-responses' || source.provider === 'anthropic-compatible')
-        && response.status === 404) {
+      if (source.provider === 'anthropic-compatible' && response.status === 404) {
+        if (!isOfficialAnthropicSource(source)) {
+          // Some native-compatible gateways intentionally expose only
+          // /v1/messages. Reaching their missing model route proves the host is
+          // reachable, but cannot validate the key; account creation must fall
+          // back to a manually entered model ID.
+          return {
+            ok: true,
+            status: response.status,
+            modelDiscoveryUnavailable: true
+          };
+        }
         return {
           ok: false,
           status: response.status,
-          error: `${source.provider === 'anthropic-compatible' ? 'Anthropic Messages' : 'KeepSeek Responses'} accounts require a compatible GET /models endpoint for account discovery.`
+          error: 'Anthropic Messages accounts require a compatible GET /models endpoint for account discovery.'
+        };
+      }
+      if (source.provider === 'openai-responses' && response.status === 404) {
+        return {
+          ok: false,
+          status: response.status,
+          error: 'KeepSeek Responses accounts require a compatible GET /models endpoint for account discovery.'
         };
       }
       if (source.provider === 'anthropic-compatible'
@@ -261,6 +304,14 @@ export async function probeSourceConnection(
       clearTimeout(timeout);
     }
     options.signal?.removeEventListener('abort', abortFromParent);
+  }
+}
+
+function isCanonicalAnthropicHost(rawBaseUrl: string): boolean {
+  try {
+    return new URL(rawBaseUrl).host === 'api.anthropic.com';
+  } catch {
+    return false;
   }
 }
 

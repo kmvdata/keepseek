@@ -22,6 +22,7 @@ export interface AddModelResult {
   source: ModelSource;
   reusedSource: boolean;
   discovery?: RefreshSourceModelCacheResult;
+  modelDiscoveryUnavailable?: boolean;
 }
 
 export type SourceModelCacheRefresher = (
@@ -44,6 +45,7 @@ export class ModelSourceService {
       : undefined;
     let source = existingById;
     let reusedSource = Boolean(source);
+    let modelDiscoveryUnavailable = false;
     if (source && source.provider !== input.provider) {
       throw new Error('An account API protocol cannot be changed. Create a new account for the other protocol.');
     }
@@ -61,6 +63,7 @@ export class ModelSourceService {
         if (!probe.ok) {
           throw new Error(probe.error || 'The Base URL is unreachable or authentication failed.');
         }
+        modelDiscoveryUnavailable = probe.modelDiscoveryUnavailable === true;
         source = await this.sourceStore.createSource({
           provider: input.provider,
           name,
@@ -78,13 +81,16 @@ export class ModelSourceService {
       source = await this.upsertModel(source, modelId);
     }
 
-    const discovery = shouldRefreshAfterSave(source)
-      ? await this.refreshModelCache(this.sourceStore, source.id, { force: true })
-      : undefined;
+    const discovery = modelDiscoveryUnavailable
+      ? { status: 'failed' as const }
+      : !modelId && shouldRefreshAfterSave(source)
+        ? await this.refreshModelCache(this.sourceStore, source.id, { force: true })
+        : undefined;
     return {
       source: await this.sourceStore.getSource(source.id) ?? source,
       reusedSource,
-      discovery
+      discovery,
+      ...(modelDiscoveryUnavailable ? { modelDiscoveryUnavailable: true } : {})
     };
   }
 

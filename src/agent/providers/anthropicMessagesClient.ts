@@ -52,6 +52,16 @@ export class AnthropicMessagesClient extends OpenAICompatibleClient {
 export function getAnthropicMessagesEndpointUrl(rawBaseUrl: string): string {
   const url = new URL(rawBaseUrl || DEFAULT_ANTHROPIC_COMPATIBLE_BASE_URL);
   const cleanPath = url.pathname.replace(/\/+$/u, '');
+  if (url.host === 'api.anthropic.com' && !cleanPath) {
+    url.pathname = '/v1/messages';
+    url.hash = '';
+    return url.toString();
+  }
+  if (cleanPath.endsWith('/apps/anthropic')) {
+    url.pathname = `${cleanPath}/v1/messages`;
+    url.hash = '';
+    return url.toString();
+  }
   url.pathname = cleanPath.endsWith('/messages')
     ? cleanPath
     : `${cleanPath || ''}/messages`;

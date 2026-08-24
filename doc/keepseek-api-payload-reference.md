@@ -101,7 +101,7 @@
 
 ### 2.1 Anthropic Messages 原生结构
 
-Anthropic 账号请求 `POST <normalized-base>/messages`，请求头为 `x-api-key`、`anthropic-version: 2023-06-01`、JSON 与 SSE Accept；空 Key 只允许自定义兼容端点。请求不会包含 Bearer、`chat/completions`、`stream_options`、`reasoning_effort` 或 Responses 字段：
+Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使用 `/v1/messages`，以 `/apps/anthropic` 结尾的 SDK base 使用 `/apps/anthropic/v1/messages`。请求头为 `x-api-key`、`anthropic-version: 2023-06-01`、JSON 与 SSE Accept；空 Key 只允许自定义兼容端点。请求不会包含 Bearer、`chat/completions`、`stream_options`、`reasoning_effort` 或 Responses 字段：
 
 ```json
 {
@@ -123,7 +123,7 @@ Anthropic 账号请求 `POST <normalized-base>/messages`，请求头为 `x-api-k
 }
 ```
 
-`cache_control` 只在 host 精确为 `api.anthropic.com` 时默认加入；代理/内网 compatible endpoint 默认省略。`max_tokens` 不超过发现的 `maxOutputTokens`，手动模型缺少元数据时使用集中定义的 8192。Thinking 参数只由 `/models` 声明的能力启用。
+`cache_control` 只在 host 精确为 `api.anthropic.com` 时默认加入；代理/内网 compatible endpoint 默认省略。`max_tokens` 不超过发现的 `maxOutputTokens`，手动模型缺少元数据时使用集中定义的 8192。Thinking 参数只由 `/models` 声明的能力启用。若自定义兼容端点只实现 Messages、没有模型列表，404 探测会降级为“服务可达但 Key 未验证”，账号仍可保存，模型 ID 必须手动添加；手动添加是终态操作，不会紧接着再次请求模型列表。
 
 ## 3. 当前用户 prompt 的组装（formatCurrentUserPromptForAgent）
 

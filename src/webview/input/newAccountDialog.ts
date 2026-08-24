@@ -441,7 +441,9 @@ export function getNewAccountDialogScript(): string {
           clearBusy();
           render();
           if (message.ok) {
-            setStatus(t('connectionTestSucceeded'));
+            setStatus(message.modelDiscoveryUnavailable === true
+              ? t('connectionTestSucceededWithoutDiscovery')
+              : t('connectionTestSucceeded'));
           } else {
             var reason = typeof message.error === 'string' ? message.error : '';
             setStatus(t('connectionTestFailed', { message: reason || t('connectionTestUnknownReason') }));

@@ -112,12 +112,24 @@ describe('Anthropic Messages compatible protocol', () => {
       'https://api.anthropic.com/v1/messages'
     );
     assert.equal(
+      getAnthropicMessagesEndpointUrl('https://api.anthropic.com?region=global#fragment'),
+      'https://api.anthropic.com/v1/messages?region=global'
+    );
+    assert.equal(
       getAnthropicMessagesEndpointUrl('https://proxy.example/anthropic/v1/messages/?tenant=a#fragment'),
       'https://proxy.example/anthropic/v1/messages?tenant=a'
     );
     assert.equal(
+      getAnthropicMessagesEndpointUrl('https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic'),
+      'https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1/messages'
+    );
+    assert.equal(
       getSourceModelsEndpointUrl('https://api.anthropic.com/v1', 'anthropic-compatible'),
       'https://api.anthropic.com/v1/models'
+    );
+    assert.equal(
+      getSourceModelsEndpointUrl('https://api.anthropic.com?region=global#fragment', 'anthropic-compatible'),
+      'https://api.anthropic.com/v1/models?region=global'
     );
     assert.equal(
       getSourceModelsEndpointUrl('https://proxy.example/anthropic/v1/messages?tenant=a#fragment', 'anthropic-compatible'),
@@ -126,6 +138,13 @@ describe('Anthropic Messages compatible protocol', () => {
     assert.equal(
       getSourceModelsEndpointUrl('https://proxy.example/anthropic/v1/models?tenant=a', 'anthropic-compatible'),
       'https://proxy.example/anthropic/v1/models?tenant=a'
+    );
+    assert.equal(
+      getSourceModelsEndpointUrl(
+        'https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic',
+        'anthropic-compatible'
+      ),
+      'https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1/models'
     );
   });
 
@@ -237,6 +256,15 @@ describe('Anthropic Messages compatible protocol', () => {
     assert.equal((await probeSourceConnection({
       provider: 'anthropic-compatible', apiKey: '', baseUrl: DEFAULT_ANTHROPIC_COMPATIBLE_BASE_URL
     })).ok, false);
+    const mismatch = await probeSourceConnection({
+      provider: 'openai-compatible', apiKey: 'key', baseUrl: 'https://api.anthropic.com/v1'
+    }, {
+      fetchImpl: async () => {
+        throw new Error('Provider mismatch must fail before the network request.');
+      }
+    });
+    assert.equal(mismatch.ok, false);
+    assert.match(mismatch.error ?? '', /Provider mismatch.*Anthropic Messages compatible/iu);
 
     const store = new ModelSourceStore(vscode.Uri.file(storageRoot));
     let probes = 0;
@@ -286,6 +314,66 @@ describe('Anthropic Messages compatible protocol', () => {
       modelId: 'wrong-protocol'
     }), /protocol cannot be changed/iu);
     assert.equal((await store.deleteSource(first.source.id))?.provider, 'anthropic-compatible');
+  });
+
+  it('saves a Messages-only compatible gateway when model discovery returns 404', async () => {
+    const gatewayBaseUrl = 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic';
+    const probe = await probeSourceConnection({
+      provider: 'anthropic-compatible', apiKey: 'key', baseUrl: gatewayBaseUrl
+    }, {
+      timeoutMs: 0,
+      fetchImpl: async (url) => {
+        assert.equal(url, `${gatewayBaseUrl}/v1/models`);
+        return { ok: false, status: 404, text: async () => '' };
+      }
+    });
+    assert.deepEqual(probe, {
+      ok: true,
+      status: 404,
+      modelDiscoveryUnavailable: true
+    });
+
+    const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { createId: () => 'messages-only' });
+    let refreshes = 0;
+    const service = new ModelSourceService(
+      store,
+      async () => {
+        refreshes += 1;
+        return { status: 'failed' };
+      },
+      async () => probe
+    );
+    const added = await service.addModel({
+      provider: 'anthropic-compatible',
+      name: 'Alibaba Token Plan',
+      apiKey: 'key',
+      baseUrl: gatewayBaseUrl
+    });
+    assert.equal(added.modelDiscoveryUnavailable, true);
+    assert.equal(added.discovery?.status, 'failed');
+    assert.equal(refreshes, 0);
+    assert.equal(added.source.provider, 'anthropic-compatible');
+    assert.deepEqual(added.source.models, []);
+
+    const manual = await service.addModel({
+      sourceId: added.source.id,
+      provider: 'anthropic-compatible',
+      name: added.source.name,
+      apiKey: added.source.apiKey,
+      baseUrl: gatewayBaseUrl,
+      modelId: 'qwen3.7-max'
+    });
+    assert.equal(manual.discovery, undefined);
+    assert.equal(manual.modelDiscoveryUnavailable, undefined);
+    assert.equal(refreshes, 0);
+    assert.deepEqual(manual.source.models, [{ id: 'qwen3.7-max' }]);
+
+    const dialog = getNewAccountDialogScript();
+    assert.match(dialog, /modelDiscoveryUnavailable/iu);
+    assert.match(
+      WEBVIEW_TRANSLATIONS['zh-CN'].connectionTestSucceededWithoutDiscovery,
+      /手动添加模型 ID/u
+    );
   });
 
   it('builds one stable authoritative projection with top-level system, exact providerContent, tools, and lane isolation', () => {

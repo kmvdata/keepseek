@@ -145,7 +145,7 @@ system prompt 会告诉模型：
 
 如果请求在已有 partial output 后失败，Runner 会尝试发起续写恢复。如果模型返回 `finish_reason=length` 且满足条件，Runner 会请求一次受限续写。
 
-Anthropic Messages 使用 `POST <base>/messages`、`x-api-key` 和 `anthropic-version: 2023-06-01`，不发送 Bearer、`stream_options`、`reasoning_effort` 或 Responses 字段。专用 SSE parser 处理任意分块、CRLF、ping、Thinking/signature、redacted thinking、并行 `tool_use` 与 cache usage。模型能力来自 `/models` 元数据：只有明确声明 adaptive/enabled 时才发送 Thinking 参数；手动模型的输出上限保守回退为 8192。
+Anthropic Messages 使用规范化的原生 Messages endpoint、`x-api-key` 和 `anthropic-version: 2023-06-01`，不发送 Bearer、`stream_options`、`reasoning_effort` 或 Responses 字段。常规 `/v1` base 追加 `/messages`；以 `/apps/anthropic` 结尾的 SDK base 追加 `/v1/messages`。专用 SSE parser 处理任意分块、CRLF、ping、Thinking/signature、redacted thinking、并行 `tool_use` 与 cache usage。模型能力来自 `/models` 元数据：只有明确声明 adaptive/enabled 时才发送 Thinking 参数；不提供模型列表的兼容网关允许保存账号并手动添加模型 ID，手动添加成功后不再触发自动发现，输出上限保守回退为 8192。
 
 官方 `api.anthropic.com` 默认发送顶层 `cache_control: {"type":"ephemeral"}`。自定义兼容端点默认不发送，不做失败后删字段重试。Anthropic 摘要请求复用同一不可变 source snapshot，关闭 tools/Thinking，`temperature=0`，并受模型输出上限约束。
 
