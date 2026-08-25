@@ -6,6 +6,10 @@ import {
   type StoredWorkspaceSessionState,
   type WorkspaceSessionScope
 } from '../src/sessions/chatSessionStore';
+import {
+  CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
+  CURRENT_PROVIDER_TOOL_SCHEMA_VERSION
+} from '../src/agent/providerRequestProjection';
 import type { ChatMessage, ChatSession, WorkspaceSummary } from '../src/shared/types';
 
 test('trimActiveHistory preserves persisted active session messages', async () => {
@@ -55,6 +59,13 @@ test('trimActiveHistory preserves persisted active session messages', async () =
   assert.equal(storage.saved?.sessions[0]?.historyArchive?.[0]?.content, 'complete archived result');
   assert.deepEqual(storage.saved?.sessions[0]?.requestProtocol?.toolNames, ['keepseek_read_workspace_file_range']);
   assert.equal(storage.saved?.sessions[0]?.requestProtocol?.sourceId, 'source-a');
+  assert.equal(storage.saved?.sessions[0]?.requestProtocol?.version, 2);
+  assert.equal(storage.saved?.sessions[0]?.requestProtocol?.serializationStrategy, 'provider-projection-v2');
+
+  const next = await store.createNewSession('en');
+  assert.equal(next.requestProtocol?.version, CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION);
+  assert.equal(next.requestProtocol?.toolSchemaVersion, CURRENT_PROVIDER_TOOL_SCHEMA_VERSION);
+  assert.equal(next.requestProtocol?.serializationStrategy, 'provider-projection-v2');
 });
 
 class MemorySessionStorage implements ChatSessionStorageAdapter {

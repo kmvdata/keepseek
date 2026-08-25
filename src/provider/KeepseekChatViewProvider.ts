@@ -123,7 +123,8 @@ import { getAvailableSafeValidationScripts } from '../agent/tools/validationTool
 import {
   CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
   CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
-  LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION
+  LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION,
+  PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION
 } from '../agent/providerRequestProjection';
 import {
   ModelSourceStore
@@ -3042,7 +3043,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       activeSession.lastTraceLogUri = undefined;
       this.sessionTraceLogUris.delete(activeSession.id);
       this.messages.push(userMessage);
-      if ((activeSession.requestProtocol?.version ?? 1) >= CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION) {
+      if ((activeSession.requestProtocol?.version ?? 1) >= PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION) {
         capOversizedFirstUserProviderContent(activeSession);
       }
       activeSession.updatedAt = now;

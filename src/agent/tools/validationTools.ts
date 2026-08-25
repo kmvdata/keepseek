@@ -56,16 +56,19 @@ export class ValidationToolService implements ValidationToolAdapter {
 
     if (!SAFE_NPM_SCRIPTS.has(input.script)) {
       return JSON.stringify(createResult({
+        errorType: 'unsupported_script',
         error: localizeValidation(input.language, 'unsupportedScript', input.script)
       }));
     }
     if (!vscode.workspace.isTrusted) {
       return JSON.stringify(createResult({
+        errorType: 'untrusted_workspace',
         error: localizeValidation(input.language, 'untrusted')
       }));
     }
     if (input.signal?.aborted) {
       return JSON.stringify(createResult({
+        errorType: 'validation_stopped',
         error: localizeValidation(input.language, 'stopped')
       }));
     }
@@ -73,6 +76,7 @@ export class ValidationToolService implements ValidationToolAdapter {
     const workspaceFolder = findWorkspaceFolder(input.workspaceFolder);
     if (!workspaceFolder) {
       return JSON.stringify(createResult({
+        errorType: 'workspace_missing',
         error: localizeValidation(input.language, 'workspaceMissing')
       }));
     }
@@ -81,12 +85,14 @@ export class ValidationToolService implements ValidationToolAdapter {
     if (!scriptDefinition) {
       return JSON.stringify(createResult({
         workspaceFolder: workspaceFolder.name,
+        errorType: 'script_missing',
         error: localizeValidation(input.language, 'scriptMissing', input.script)
       }));
     }
     if (HIGH_RISK_SCRIPT_PATTERN.test(scriptDefinition)) {
       return JSON.stringify(createResult({
         workspaceFolder: workspaceFolder.name,
+        errorType: 'unsafe_script',
         error: localizeValidation(input.language, 'scriptUnsafe', input.script)
       }));
     }
@@ -99,6 +105,7 @@ export class ValidationToolService implements ValidationToolAdapter {
       return JSON.stringify(createResult({
         workspaceFolder: workspaceFolder.name,
         authorization: input.authorization,
+        errorType: 'authorization_denied',
         error: localizeValidation(input.language, 'notAuthorized')
       }));
     }
@@ -113,6 +120,7 @@ export class ValidationToolService implements ValidationToolAdapter {
         workspaceFolder: workspaceFolder.name,
         authorized: true,
         timedOut: true,
+        errorType: 'validation_timeout',
         error: localizeValidation(input.language, 'timedOut')
       }));
     }
@@ -131,6 +139,13 @@ export class ValidationToolService implements ValidationToolAdapter {
         durationMs: Date.now() - startedAt,
         timedOut: outcome.timedOut,
         diagnostics,
+        errorType: ok
+          ? undefined
+          : outcome.aborted
+            ? 'validation_stopped'
+            : outcome.timedOut
+              ? 'validation_timeout'
+              : 'validation_failed',
         error: ok
           ? undefined
           : outcome.aborted
@@ -144,6 +159,7 @@ export class ValidationToolService implements ValidationToolAdapter {
         workspaceFolder: workspaceFolder.name,
         authorized: true,
         durationMs: Date.now() - startedAt,
+        errorType: 'validation_execution_failed',
         error: error instanceof Error ? error.message : String(error)
       }));
     }

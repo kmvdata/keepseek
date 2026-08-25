@@ -33,9 +33,10 @@ import {
   getAgentTools
 } from './protocol';
 
-export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 2;
+export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 3;
 export const LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION = 1;
-export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 2;
+export const PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION = 2;
+export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 3;
 
 export interface ProviderRequestProjectionInput {
   model: KeepseekModel;
@@ -130,7 +131,7 @@ export function buildProviderRequestProjection(
         requestProtocolVersion
       ))]
     : [];
-  const tools = includeTools ? getAgentTools({ toolNames }) : [];
+  const tools = includeTools ? getAgentTools({ toolNames, requestProtocolVersion }) : [];
   const responses = provider === 'openai-responses'
     ? buildOpenAiResponsesRequestProjection({
         messages,
@@ -350,7 +351,11 @@ export function normalizeAnthropicMessagesLaneBaseUrl(rawBaseUrl: string): strin
 }
 
 function normalizeRequestProtocolVersion(value: number | undefined): number {
-  return Number.isFinite(value) && Number(value) >= CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION
-    ? CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION
+  const normalized = Number.isFinite(value) ? Math.floor(Number(value)) : LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION;
+  if (normalized >= CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION) {
+    return CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION;
+  }
+  return normalized >= PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION
+    ? PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION
     : LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION;
 }

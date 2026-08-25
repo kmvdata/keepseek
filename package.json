@@ -290,6 +290,8 @@
     "lint": "eslint src/",
     "build:test": "tsc -p tsconfig.test.json",
     "test": "node out-test/test/runTests.js",
+    "eval:agent:live": "node scripts/run-agent-behavior-live.js",
+    "eval:agent:score": "node scripts/score-agent-behavior.js",
     "package": "vsce package --dependencies --out keepseek-${npm_package_version}.vsix && node scripts/verify-vsix.js keepseek-${npm_package_version}.vsix",
     "package:market": "node scripts/package-market.js",
     "reinstall:vsix": "node scripts/reinstall-vsix.js"

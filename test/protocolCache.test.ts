@@ -162,6 +162,9 @@ test('validation tool exposes only the fixed safe npm scripts', () => {
   assert.equal(tool.function.name, RUN_VALIDATION_TOOL_NAME);
   assert.deepEqual(properties.script?.enum, ['compile', 'lint', 'test']);
   assert.equal(properties.command, undefined);
+  assert.match(tool.function.description, /current on-disk workspace/u);
+  assert.match(tool.function.description, /after any DraftEdit succeeds/u);
+  assert.match(tool.function.description, /blocked until the user applies/u);
 });
 
 test('delete tool is always exposed and only prepares a non-recursive pending file deletion', () => {
@@ -185,9 +188,39 @@ test('system prompts explain safe pending file deletion in both languages', () =
   const chinese = getAgentSystemPrompt({ language: 'zh-CN' });
 
   assert.match(english, /keepseek_delete_workspace_file/u);
-  assert.match(english, /never deletes immediately/u);
+  assert.match(english, /deletion occurs only after the user applies/u);
   assert.match(chinese, /keepseek_delete_workspace_file/u);
-  assert.match(chinese, /不会立即删除/u);
+  assert.match(chinese, /用户应用 ChangeSet 后才真正删除/u);
+});
+
+test('system prompts define adaptive read-only intent, evidence, edit, archive, and validation contracts', () => {
+  const english = getAgentSystemPrompt({ language: 'en' });
+  const chinese = getAgentSystemPrompt({ language: 'zh-CN' });
+
+  for (const prompt of [english, chinese]) {
+    assert.match(prompt, /DraftEdit/u);
+    assert.match(prompt, /keepseek_create_incremental_draft_edit/u);
+    assert.match(prompt, /keepseek_create_draft_edit/u);
+    assert.match(prompt, /keepseek_search_session_archive/u);
+    assert.match(prompt, /Git/u);
+    assert.match(prompt, /Skill scripts/u);
+  }
+  assert.match(english, /Treat answering, understanding, diagnosis, and review as read-only tasks by default/u);
+  assert.match(english, /strongest clue already supplied/u);
+  assert.match(english, /next important uncertainty/u);
+  assert.match(english, /Validation checks only the current on-disk workspace/u);
+  assert.match(english, /pre-change baseline/u);
+  assert.match(english, /post-Apply validation/u);
+  assert.match(english, /facts directly observed in tool results from inference/u);
+  assert.match(english, /ambiguity would materially change/u);
+  assert.match(chinese, /回答、理解、诊断和审查默认都是只读任务/u);
+  assert.match(chinese, /最强线索/u);
+  assert.match(chinese, /下一个关键不确定性/u);
+  assert.match(chinese, /验证只能检查当前已经落盘的工作区/u);
+  assert.match(chinese, /修改前的基线/u);
+  assert.match(chinese, /Apply 后验证/u);
+  assert.match(chinese, /工具直接观察到的事实与推断/u);
+  assert.match(chinese, /歧义会实质改变/u);
 });
 
 test('classifies both file-changing tools as DraftEdit preparation tools', () => {
@@ -197,14 +230,36 @@ test('classifies both file-changing tools as DraftEdit preparation tools', () =>
   assert.equal(isDraftEditPreparationTool(SEARCH_WORKSPACE_TOOL_NAME), false);
 });
 
-test('protocol v1 keeps the legacy schema while v2 freezes the new archive and incremental tools', () => {
+test('protocol v1 keeps the legacy set while v2 and v3 freeze archive and incremental tools', () => {
   const legacy = getAgentToolNamesForPrompt('edit this', false, 1);
-  const current = getAgentToolNamesForPrompt('edit this', false, 2);
+  const version2 = getAgentToolNamesForPrompt('edit this', false, 2);
+  const current = getAgentToolNamesForPrompt('edit this', false, 3);
   assert.equal(legacy.includes(SEARCH_SESSION_ARCHIVE_TOOL_NAME), false);
   assert.equal(legacy.includes(CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME), false);
+  assert.deepEqual(version2, current);
   assert.equal(current.includes(SEARCH_SESSION_ARCHIVE_TOOL_NAME), true);
   assert.equal(current.includes(CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME), true);
   assert.equal(JSON.stringify(getAgentTools({ toolNames: current })), JSON.stringify(getAgentTools({ toolNames: [...current] })));
+});
+
+test('protocol v2 preserves validation schema bytes while v3 adds the pending-change precondition', () => {
+  const version2 = getAgentTools({
+    toolNames: [RUN_VALIDATION_TOOL_NAME],
+    requestProtocolVersion: 2
+  });
+  const version2Again = getAgentTools({
+    toolNames: [RUN_VALIDATION_TOOL_NAME],
+    requestProtocolVersion: 2
+  });
+  const version3 = getAgentTools({
+    toolNames: [RUN_VALIDATION_TOOL_NAME],
+    requestProtocolVersion: 3
+  });
+
+  assert.equal(JSON.stringify(version2), JSON.stringify(version2Again));
+  assert.doesNotMatch(version2[0].function.description, /pending ChangeSet/u);
+  assert.match(version3[0].function.description, /pending ChangeSet/u);
+  assert.notEqual(JSON.stringify(version2), JSON.stringify(version3));
 });
 
 test('project rules, skills, legacy memory, and attachments share one deterministic context budget', () => {

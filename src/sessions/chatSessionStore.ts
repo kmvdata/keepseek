@@ -23,7 +23,8 @@ import {
 } from '../shared/types';
 import {
   CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
-  CURRENT_PROVIDER_TOOL_SCHEMA_VERSION
+  CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
+  PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION
 } from '../agent/providerRequestProjection';
 import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from '../shared/i18n';
 import { isRecord } from '../shared/errors';
@@ -876,7 +877,7 @@ function normalizeSessionRequestProtocol(value: unknown): SessionRequestProtocol
   const version = normalizePositiveInteger(value.version, 1);
   return {
     version,
-    serializationStrategy: version >= CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION
+    serializationStrategy: version >= PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION
       ? 'provider-projection-v2'
       : 'legacy-v1',
     toolSchemaVersion: normalizePositiveInteger(value.toolSchemaVersion, 1),

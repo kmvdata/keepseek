@@ -144,14 +144,14 @@ messages = [
 
 缓存优先档会把投影上限 `maxProjectionTokens = contextWindow × forceRatio` 提高到上下文窗口的 95%，因此能保留更多原始历史并延后摘要刷新；这是保护 DeepSeek 前缀缓存的预期取舍。提前清理档则更早释放上下文空间。
 
-模型、来源、provider 或 base URL 变化会迁移 `requestProtocol` cache lane，因为旧 provider 缓存前缀本来就不能复用；它**不会删除或强制重建** `contextCompression.summaries`。摘要是模型无关的语义文本，`HistorySummary.modelId` 只记录 provenance，新模型继续在 projection 中读取既有摘要。`requestProtocolVersion` 仅表示序列化与工具 schema 的兼容版本，不表示模型能力等级。
+模型、来源、provider 或 base URL 变化会迁移 `requestProtocol` cache lane，因为旧 provider 缓存前缀本来就不能复用；它**不会删除或强制重建** `contextCompression.summaries`。摘要是模型无关的语义文本，`HistorySummary.modelId` 只记录 provenance，新模型继续在 projection 中读取既有摘要。`requestProtocolVersion` 仅表示序列化与工具 schema 的兼容版本，不表示模型能力等级。v3 更新了 validation 的 schema 说明，但没有增加、删除或重排工具；新会话直接使用 v3，热 v2 会话保持原 schema 字节，只有 cache lane 已经自然失效时才升级，缺失版本的旧会话仍按 v1 回放。
 
 ### 3.6 工具集 schema 稳定性
 
 **做什么**：工具定义（`tools` 段）位于请求前缀的中前部，其 JSON 字节必须跨轮一致。KeepSeek 用三层手段保证：
 
 1. **完整工具集固定**：默认暴露的 `ALL_AGENT_TOOL_NAMES` 是常量列表（`src/agent/protocol.ts:44-63`），不随 prompt 变化。只要用户不开 slim 模式，每轮请求的工具集完全相同。
-2. **schema 规范化**：`getAgentTools` 输出的 tools 经 `canonicalizeDeepSeekTool` 处理（`src/agent/protocol.ts:805-834`）——对象 key 递归排序、`required` 数组排序、补全空 `properties`，保证同一工具集生成的 JSON 逐字节相同（即使内部构造顺序不同）。
+2. **schema 规范化与版本冻结**：`getAgentTools` 输出的 tools 经 `canonicalizeDeepSeekTool` 处理——对象 key 递归排序、`required` 数组排序、补全空 `properties`，保证同一工具集生成的 JSON 逐字节相同（即使内部构造顺序不同）。工具说明按会话的 `requestProtocolVersion` 生成，不能在热会话中途漂移。
 3. **slim 模式默认关闭 + per-session 冻结**：`DEFAULT_SLIM_TOOL_MODE_ENABLED = false`（`src/shared/config.ts:23-27`）。slim 模式按 prompt 关键词裁剪工具集（如出现 git 字样才暴露 git 工具），会让 tools 段随 prompt 变化而失效，因此默认关闭。若用户显式开启，工具集在**首次真实请求时确定并冻结**（`slimToolNamesBySession`，`src/provider/KeepseekChatViewProvider.ts:2354-2356`），后续轮次不再按关键词变化；编辑重发时删除冻结、按新 prompt 重新确定（`KeepseekChatViewProvider.ts:2336-2340`）。
 
 **原理**：tools 段是一段很大的 JSON（每个工具的 description、parameters 都很长），位于前缀中部。它一变，其后所有历史消息 + 当前 prompt 全部 miss。工具集「固定 + 规范化」确保：无论模型调用多少次工具、无论代码内部以什么顺序构造工具列表，发出的 JSON 字节都一样。slim 模式本质上是在「更小的 prompt（更少 token，但缓存更容易失效）」和「更大的固定 schema（更多 token，但缓存稳定）」之间做取舍，KeepSeek 默认选择后者。
@@ -270,7 +270,7 @@ Anthropic 对应指纹直接消费权威原生投影：top-level system、Anthro
 | system 稳定 | `cacheByteStability.test.ts` | system[0] 不随上下文/历史变化 |
 | 冻结 + append-only | `cacheByteStability.test.ts` | Skills 冻结后块字节稳定，请求序列保持字节前缀 |
 | context files 位置 | `protocolCache.test.ts` | context files 只进稳定 system 块，user 消息是纯 prompt |
-| 工具 schema 规范化 | `protocolCache.test.ts` | tools 按名排序、JSON 相等 |
+| 工具 schema 规范化/版本冻结 | `protocolCache.test.ts` | tools 按名排序、JSON 相等；v2 字节保持不变，v3 只在安全边界启用 |
 | slim 冻结 | `protocolCache.test.ts` | 冻结后同一工具集 schema 跨轮一致 |
 | 压缩低频 | `historyCompressor.test.ts` | 低于比率不刷新（`fresh_enough`）、超强制比率同步刷新 |
 | 投影 append-only | `historyProjection.test.ts` | 无摘要时全量保留、前缀只增长 |

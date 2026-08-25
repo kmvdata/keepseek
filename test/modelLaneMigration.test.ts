@@ -2,7 +2,10 @@ import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ModelSourceConfigSnapshot } from '../src/accounts/types';
-import { buildProviderRequestProjection } from '../src/agent/providerRequestProjection';
+import {
+  buildProviderRequestProjection,
+  CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION
+} from '../src/agent/providerRequestProjection';
 import { getCacheMissPossibleReasons } from '../src/agent/usageStats';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import type { ChatSession, KeepseekModel } from '../src/shared/types';
@@ -15,6 +18,51 @@ interface SessionToolResolver {
     sourceConfig: ModelSourceConfigSnapshot
   ): string[];
 }
+
+test('a hot v2 session keeps its frozen schema until a cache-safe migration boundary', () => {
+  const now = new Date().toISOString();
+  const session: ChatSession = {
+    id: 'session-hot-v2',
+    title: 'Hot v2 lane',
+    messages: [{ id: 'u1', role: 'user', content: 'first', createdAt: now }],
+    requestProtocol: {
+      version: 2,
+      serializationStrategy: 'provider-projection-v2',
+      toolSchemaVersion: 2,
+      toolNames: ['keepseek_run_validation'],
+      modelId: 'same-model',
+      sourceId: 'source',
+      providerId: 'openai-compatible',
+      baseUrl: 'https://proxy.example/v1',
+      createdAt: now,
+      lastProviderRequestAt: now
+    },
+    createdAt: now,
+    updatedAt: now,
+    workspaceKey: 'workspace:test',
+    workspaceName: 'Test',
+    workspaceFolders: [],
+    isFavorite: false
+  };
+  const model: KeepseekModel = {
+    id: 'same-model',
+    label: 'Same model',
+    provider: 'openai-compatible',
+    sourceId: 'source'
+  };
+  const sourceConfig: ModelSourceConfigSnapshot = {
+    sourceId: 'source',
+    provider: 'openai-compatible',
+    apiKey: '',
+    baseUrl: 'https://proxy.example/v1',
+    supportsBilling: false
+  };
+  const resolver = Object.create(KeepseekChatViewProvider.prototype) as SessionToolResolver;
+
+  assert.deepEqual(resolver.resolveSessionToolNames(session, 'next', model, sourceConfig), ['keepseek_run_validation']);
+  assert.equal(session.requestProtocol?.version, 2);
+  assert.equal(session.requestProtocol?.toolSchemaVersion, 2);
+});
 
 test('model changes migrate the cache lane while preserving semantic summaries', () => {
   const summary = {
@@ -77,7 +125,7 @@ test('model changes migrate the cache lane while preserving semantic summaries',
   resolver.resolveSessionToolNames(session, 'next', model, sourceConfig);
 
   assert.equal(session.requestProtocol?.modelId, 'new-model');
-  assert.equal(session.requestProtocol?.version, 2);
+  assert.equal(session.requestProtocol?.version, CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION);
   assert.strictEqual(session.contextCompression?.summaries[0], summary);
   assert.equal(session.contextCompression?.summaries[0]?.modelId, 'old-model');
 

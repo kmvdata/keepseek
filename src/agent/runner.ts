@@ -128,7 +128,7 @@ import {
 } from './usageStats';
 import { TaskPlanTracker } from './taskPlan';
 import { createChangeSet } from '../edits/changeSet';
-import { RepairLoopTracker } from './repairLoop';
+import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
 import { RunDetailsBuilder } from './logging/runDetails';
 
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;
@@ -319,6 +319,12 @@ export class AgentRunner {
       (event) => trace.record(event),
       request.repairLoop
     );
+    const validationState = new RunValidationStateTracker(
+      request.repairLoop?.status === 'running_validation' && request.repairLoop.iteration > 0
+        ? 'post_apply'
+        : 'workspace_baseline',
+      request.repairLoop?.pendingDraftEditIds
+    );
     const runAuthorizationPolicy = this.toolAuthorization.createRunPolicy(trace.runId);
     const toolResultLedger: ToolResultLedgerEntry[] = [];
     // 本 run 内 native 工具轮的原样字节快照（assistant tool_calls + tool 结果），
@@ -417,7 +423,10 @@ export class AgentRunner {
         taskPlan.addBlocker(this.getBudgetToolError(finishReason as AgentBudgetFinishReason, request.language));
       }
       const repairState = repairLoop.getState();
-      const finalMessage = this.decorateRepairMessage(response.message, repairState, request.language);
+      const finalMessage = validationState.decorateFinalMessage(
+        this.decorateRepairMessage(response.message, repairState, request.language),
+        request.language
+      );
       const completedPlan = taskPlan.complete(finalMessage, isBlocked);
       const changeSet = createChangeSet({
         runId: trace.runId,
@@ -444,6 +453,7 @@ export class AgentRunner {
         ...details,
         upstreamUsage: this.summarizeUpstreamUsageTotals(upstreamUsageTotals),
         toolResultLedger,
+        validationState: validationState.getState(),
         response: trace.includesPayload('request')
           ? responseWithUsage
           : {
@@ -505,6 +515,7 @@ export class AgentRunner {
     const draftEdit = await this.tryCreateDraftEdit(request.prompt, request.language);
     this.throwIfAborted(request.signal, request.language);
     if (draftEdit) {
+      validationState.recordDraftEdit(draftEdit.id);
       taskPlan.beginExecution();
       taskPlan.startTool(CREATE_DRAFT_EDIT_TOOL_NAME);
       emitStatus({
@@ -896,18 +907,12 @@ export class AgentRunner {
         let rawToolResult: string;
         let toolArgs: Record<string, unknown> = {};
         let authorizationDecision: ToolAuthorizationDecision | undefined;
+        let validationExecuted = false;
         try {
           toolArgs = this.parseToolArguments(toolCall.function.arguments);
           runDetailsBuilderRef.current?.recordToolArguments(toolCall.id, toolCall.function.name, toolArgs);
-          if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && repairLoop.hasPendingRepair()) {
-            rawToolResult = JSON.stringify({
-              ok: false,
-              errorType: 'pending_changes_require_apply',
-              pendingDraftEditIds: repairLoop.getState().pendingDraftEditIds,
-              error: request.language === 'en'
-                ? 'Validation paused: apply the pending repair ChangeSet before running validation again.'
-                : '验证已暂停：请先应用待确认的修复 ChangeSet，再次运行验证。'
-            });
+          if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && validationState.hasPendingDraftEdit()) {
+            rawToolResult = validationState.createBlockedValidationResult(request.language);
           } else if (isDraftEditPreparationTool(toolCall.function.name) && !repairLoop.beginRepair()) {
             const state = repairLoop.getState();
             const detail = request.language === 'en'
@@ -948,6 +953,7 @@ export class AgentRunner {
             } else if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && validationRunCount >= runtimeConfig.maxValidationRuns) {
               rawToolResult = JSON.stringify({
                 ok: false,
+                errorType: 'validation_run_limit_exhausted',
                 error: request.language === 'en'
                   ? `The controlled validation budget of ${runtimeConfig.maxValidationRuns} run(s) was reached.`
                   : `本轮受控验证预算已达到 ${runtimeConfig.maxValidationRuns} 次上限。`,
@@ -955,6 +961,7 @@ export class AgentRunner {
               });
             } else {
               if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME) {
+                validationExecuted = true;
                 validationRunCount += 1;
                 const script = this.readSafeNpmScript(toolArgs, 'script');
                 repairLoop.startValidation(script);
@@ -977,12 +984,17 @@ export class AgentRunner {
         } catch (error) {
           rawToolResult = JSON.stringify({
             ok: false,
+            errorType: 'tool_execution_failed',
             error: error instanceof Error ? error.message : String(error)
           });
         }
+        rawToolResult = this.normalizeToolResultFeedback(toolCall.function.name, rawToolResult);
         runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, rawToolResult);
         taskPlan.finishTool(toolCall.function.name, rawToolResult);
         if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME) {
+          if (validationExecuted) {
+            validationState.recordValidationResult(rawToolResult);
+          }
           const repairOutcome = repairLoop.recordValidationResult(rawToolResult);
           if (repairOutcome.failed && repairOutcome.limitReached) {
             taskPlan.markRepairLimitReached(repairOutcome.summary ?? 'Repair iteration limit reached.');
@@ -995,13 +1007,16 @@ export class AgentRunner {
           taskPlan.markProblemsRead();
         } else if (isDraftEditPreparationTool(toolCall.function.name)) {
           const draftEditId = readDraftEditId(rawToolResult);
-          if (draftEditId && repairLoop.getState().status === 'generating_repair') {
-            repairLoop.recordDraftEdit(draftEditId);
-            const detail = request.language === 'en'
-              ? 'Repair prepared. Apply the pending ChangeSet before validation can continue.'
-              : '修复已准备。请先应用待确认 ChangeSet，之后才能继续验证。';
-            taskPlan.markWaitingForApply(detail);
-            emitStatus({ base: 'waiting', phase: 'waiting_for_apply', toolName: toolCall.function.name, detail });
+          if (draftEditId) {
+            validationState.recordDraftEdit(draftEditId);
+            if (repairLoop.getState().status === 'generating_repair') {
+              repairLoop.recordDraftEdit(draftEditId);
+              const detail = request.language === 'en'
+                ? 'Repair prepared. Apply the pending ChangeSet before validation can continue.'
+                : '修复已准备。请先应用待确认 ChangeSet，之后才能继续验证。';
+              taskPlan.markWaitingForApply(detail);
+              emitStatus({ base: 'waiting', phase: 'waiting_for_apply', toolName: toolCall.function.name, detail });
+            }
           }
         }
         if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME || toolCall.function.name === READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME) {
@@ -2734,6 +2749,19 @@ export class AgentRunner {
       compressible: this.isCompressibleToolResult(toolName),
       truncated: shapedMetadata.truncated || shapedContent.length < rawContent.length
     };
+  }
+
+  private normalizeToolResultFeedback(toolName: string, rawContent: string): string {
+    const parsed = this.parseToolResultObject(rawContent);
+    if (!parsed || parsed.ok !== false || typeof parsed.errorType === 'string') {
+      return rawContent;
+    }
+    const budgetReason = typeof parsed.budgetReason === 'string' ? parsed.budgetReason : undefined;
+    return JSON.stringify({
+      ...parsed,
+      errorType: budgetReason
+        ?? (toolName === RUN_VALIDATION_TOOL_NAME ? 'validation_failed' : 'tool_execution_failed')
+    });
   }
 
   private shouldSnipToolResult(

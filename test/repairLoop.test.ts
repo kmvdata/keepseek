@@ -1,6 +1,51 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { RepairLoopTracker } from '../src/agent/repairLoop';
+import { RepairLoopTracker, RunValidationStateTracker } from '../src/agent/repairLoop';
+
+test('allows validation before a DraftEdit and blocks it after any ordinary pending DraftEdit', () => {
+  const tracker = new RunValidationStateTracker('workspace_baseline');
+  assert.equal(tracker.hasPendingDraftEdit(), false);
+
+  tracker.recordValidationResult(JSON.stringify({ ok: true }));
+  tracker.recordDraftEdit('ordinary-edit');
+
+  assert.equal(tracker.hasPendingDraftEdit(), true);
+  const blocked = JSON.parse(tracker.createBlockedValidationResult('en')) as Record<string, unknown>;
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.errorType, 'pending_changes_require_apply');
+  assert.deepEqual(blocked.pendingDraftEditIds, ['ordinary-edit']);
+  assert.equal(blocked.suggestedAction, 'apply_pending_changes');
+  const english = tracker.decorateFinalMessage('Changes are ready and tests passed.', 'en');
+  assert.doesNotMatch(english, /tests passed/u);
+  assert.match(english, /covered only the pre-change workspace baseline/u);
+  assert.match(tracker.decorateFinalMessage('修改已准备并且测试通过。', 'zh-CN'), /只覆盖修改前的工作区基线/u);
+});
+
+test('reports post-Apply validation separately from pending follow-up repairs', () => {
+  const tracker = new RunValidationStateTracker('post_apply');
+  tracker.recordValidationResult(JSON.stringify({ ok: false }));
+  assert.match(tracker.decorateFinalMessage('Still failing.', 'en'), /post-Apply validation failed/u);
+
+  tracker.recordDraftEdit('repair-2');
+  const message = tracker.decorateFinalMessage('Prepared another repair.', 'en');
+  assert.match(message, /post-Apply validation failed/u);
+  assert.match(message, /newly prepared repair DraftEdits remain unapplied and unvalidated/u);
+});
+
+test('removes unsupported validation claims when a pending DraftEdit has never been validated', () => {
+  const tracker = new RunValidationStateTracker('workspace_baseline');
+  tracker.recordDraftEdit('unvalidated-edit');
+
+  const message = tracker.decorateFinalMessage('The edit is ready and all tests passed.', 'en');
+  assert.doesNotMatch(message, /tests passed/u);
+  assert.match(message, /they are not written or validated/u);
+});
+
+test('ordinary DraftEdits do not consume or require automatic repair iterations', () => {
+  const tracker = new RepairLoopTracker(0);
+  assert.equal(tracker.beginRepair(), true);
+  assert.equal(tracker.getState().status, 'idle');
+});
 
 test('pauses repair validation until the generated DraftEdit is applied', () => {
   const events: string[] = [];

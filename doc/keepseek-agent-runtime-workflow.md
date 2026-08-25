@@ -106,19 +106,15 @@ Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节
 
 之后 `providerRequestProjection.ts` 以 `buildInitialAgentMessages()` 的通用结果为唯一输入，再投影到具体协议。Chat Completions 保留原 messages；Responses 生成原生 Items；Anthropic 把全部 system/context/summary 按原顺序放到顶层 `system` text blocks，只在 `messages` 中保留 user/assistant：
 
-1. system prompt，包含 Agent 规则和用户显式加入的 context files。
-2. synthetic summary system message。
-3. projection 选中的历史消息。
-4. 当前展开后的用户 prompt，如果它还没有作为最后一条 user message 出现在 projection 中。
+1. 纯静态 system prompt，只依赖界面语言。
+2. 会话冻结的 `contextInstructions` system message，包含 AGENTS.md、Skills、Legacy Memory 与 Context Files。
+3. synthetic summary system message。
+4. projection 选中的历史消息。
+5. 当前展开后的用户 prompt，如果它还没有作为最后一条 user message 出现在 projection 中。
 
-system prompt 会告诉模型：
+system prompt 的职责按固定顺序覆盖：身份与语言、安全和修改授权边界、自适应工作循环、任务类型分支、按证据选择工具、DraftEdit/validation 状态语义、证据/澄清/停止/最终回答契约，以及项目上下文优先级。它不注入模型名、Provider、时间、路径、UUID、上下文窗口或运行时能力。
 
-- KeepSeek 是 VS Code 侧边栏 coding agent。
-- 可以使用只读工作区工具查看项目。
-- 推荐低成本探索：先 search/list 定位，再 range read 读取片段。
-- 只有小文件或确实需要完整上下文时才全文 read。
-- 修改文件必须调用 DraftEdit 工具。
-- 工具只创建待确认修改，不能声称已经写盘。
+`TaskPlanTracker` 只跟踪宿主可见的运行状态和 UI 步骤，不会作为消息发给模型，也不能替代 system prompt 中的决策策略。
 
 ### 3.2 调用模型
 
@@ -193,7 +189,21 @@ Anthropic 工具轮使用原生消息顺序：assistant 的 Thinking/text/`tool_
 | `keepseek_list_workspace_directory` | 只读 | 列出指定工作区目录，可选递归 |
 | `keepseek_read_workspace_file_range` | 只读 | 按 1-based inclusive 行号读取文件片段 |
 | `keepseek_read_workspace_file` | 只读 | 读取小文件全文 |
-| `keepseek_create_draft_edit` | 待确认修改 | 创建 DraftEdit，不直接写磁盘 |
+| `keepseek_find_symbol` | 只读 | 用 document/workspace symbol provider 定位声明，必要时退化文本搜索 |
+| `keepseek_find_references` | 只读 | 用 reference provider 查引用，必要时退化文本搜索 |
+| `keepseek_get_document_symbols` | 只读 | 返回单文档语义符号树 |
+| `keepseek_get_workspace_symbols` | 只读 | 查询工作区语义符号 |
+| `keepseek_search_session_archive` | 只读 | 在本地会话归档中找回被投影省略的完整旧工具结果 |
+| `keepseek_read_workspace_diagnostics` | 只读 | 读取当前 VS Code Problems |
+| `keepseek_run_validation` | 受控验证 | 只运行 allowlist 中的 compile/lint/test，且只验证已落盘工作区 |
+| `keepseek_git_status` | 只读 | 读取 Git 状态 |
+| `keepseek_git_current_branch` | 只读 | 读取当前分支和 upstream 元数据 |
+| `keepseek_git_diff` | 只读 | 读取受限 Git diff |
+| `keepseek_git_create_patch` | 只读 | 返回 patch 内容，不写入也不应用 |
+| `keepseek_git_suggest_commit_message` | 只读 | 基于当前变更建议 commit message，不创建 commit |
+| `keepseek_create_incremental_draft_edit` | 待确认修改 | 对现有文本文件组合精确小范围修改，生成一个 pending DraftEdit |
+| `keepseek_create_draft_edit` | 待确认修改 | 为新/小文件、整体重写或不适合 incremental 的修改创建 DraftEdit |
+| `keepseek_delete_workspace_file` | 待确认修改 | 为一个普通可读文件准备非递归 pending delete，不立即删除 |
 
 ### 4.1 `keepseek_search_workspace`
 
@@ -346,19 +356,25 @@ Anthropic 工具轮使用原生消息顺序：assistant 的 Thinking/text/`tool_
 - 跳过 `.git`、`node_modules`、`dist` 等目录。
 - 返回文件和目录两类 entry。
 
-### 4.6 `keepseek_create_draft_edit`
+### 4.6 DraftEdit 工具选择
 
-DraftEdit 工具是唯一和“写文件”相关的模型工具，但它本身不写磁盘。
+现有大文件的小范围修改优先走 `keepseek_create_incremental_draft_edit`：每个精确 search 必须唯一命中，多个不重叠 edit 在本地组合成一个完整 DraftEdit，继续复用现有 review/checkpoint 安全链。新文件、小文件、整体重写或 incremental 无法安全表达时才用 `keepseek_create_draft_edit`。删除只走 `keepseek_delete_workspace_file`，并保留删除前基线与 Apply 二次确认。
 
-模型需要提供：
+三个工具都只把 pending DraftEdit 交给 ChangeSet/Webview；Apply 前工作区不会变化。
 
-| 参数 | 说明 |
-|---|---|
-| `path` | 目标文件路径 |
-| `content` | 完整的新文件内容 |
-| `reason` | 展示给用户的简短原因 |
+### 4.7 会话归档恢复
 
-Runner 创建 DraftEdit 后，会把它交给 Provider/Webview 展示。用户点击 Apply 前，本地文件不会被修改。
+历史维护会把较早的超大工具结果保存在 `ChatSession.historyArchive`，投影中只留稳定引用。`keepseek_search_session_archive` 用本地词法/BM25 排名返回受限 excerpt 和稳定 archive id，不联网、不调用模型。旧证据足以回答时避免重新扫描；代码新鲜度重要时仍要重读当前文件。
+
+### 4.8 validation 的落盘边界
+
+`keepseek_run_validation` 只能看到当前已经落盘的工作区。创建 DraftEdit 前可以验证，用于复现或建立基线；本 run 任一 DraftEdit 成功后，`RunValidationStateTracker` 会在授权和任务启动前硬性阻止后续 validation，不区分普通 edit 与 repair edit。
+
+Runner 的最终状态装饰会区分未验证、修改前基线、pending/unapplied edit 与 Apply 后验证；没有限定语的虚假“验证通过/失败”段落不会在 pending 状态下保留。repair ChangeSet 全部 Apply 后，Provider 把 repair 状态迁到 `ready_for_validation`，现有“继续验证修复”流程再对真实更新后的工作区运行验证。
+
+### 4.9 工具反馈契约
+
+主要工具结果使用紧凑 JSON：`ok` 表示成功，失败包含稳定 `errorType`，长结果保留 `truncated`，语义/Git/搜索退化保留 `fallback` 或 engine 信息，必要时返回 `suggestedTool` 和最小建议参数。运行时能硬性执行的约束不依赖模型遵守 description。
 
 ## 5. 工具结果控制
 
@@ -463,7 +479,7 @@ KeepSeek 的写入安全边界是它区别于普通自动写文件 agent 的关�
 
 ### 7.2 用户确认 Apply
 
-用户点击 Apply 后，Provider 调用 `DraftEditStore`，再由 `SafeFileEditor` 执行写入。
+用户点击 Apply 后，Provider 调用 `ChangeSetStore`，再由 `SafeFileEditor` 执行写入。
 
 写入前会检查：
 
@@ -471,7 +487,7 @@ KeepSeek 的写入安全边界是它区别于普通自动写文件 agent 的关�
 - 目标 URI 是否可写。
 - DraftEdit action 是 create/modify/delete/move 中的哪一种。
 
-当前主要行为是确认后的整文件写入。未来如果要做 diff、冲突检测、备份或权限确认，应优先扩展 `edits/safeFileEditor.ts` 和 `edits/draftEditStore.ts`，不要把写入逻辑放进 `AgentRunner`。
+确认后的 create/modify/delete 都由 ChangeSet checkpoint 和 `SafeFileEditor` 保护。后续写入行为应优先扩展 `edits/changeSetStore.ts` 与 `edits/safeFileEditor.ts`，不要把应用逻辑放进 `AgentRunner`。
 
 ### 7.3 用户可见语义
 
@@ -533,40 +549,37 @@ trace level 控制 payload 细节：
 
 ## 10. 推荐的 Agent 工作方式
 
-重构后的 KeepSeek 更适合采用“先定位、再读取、再修改”的工作模式。
+KeepSeek 使用“识别任务类型 → 解决下一个关键不确定性 → 根据证据调整”的自适应工作模式，而不是固定菜谱。
 
 ### 10.1 理想探索流程
 
 ```text
 用户提出任务
-  -> search_workspace 搜关键词/符号/文件名线索
-  -> list_workspace_directory 查看相关目录结构
-  -> read_workspace_file_range 读取命中片段和附近实现
-  -> 必要时读取小文件全文
-  -> 生成解释、方案或 DraftEdit
+  -> 不依赖工作区：直接回答
+  -> 已知路径/符号/错误/diff：从该强线索开始
+  -> 选择能解决下一个关键不确定性的最窄工具
+  -> 证据仍不足时才扩大范围
+  -> 按只读或修改授权完成，并准确汇报修改/验证状态
 ```
 
 这比“列出全项目文件，再读取一堆完整文件”更省 token，也更不容易触发上下文或工具结果预算。
 
-### 10.2 适合 search 的场景
+### 10.2 工具选择提示
 
-- 查函数、类、配置 key、错误文案。
-- 查某个 message type 或工具名。
-- 查 CSS class、DOM id、命令 id。
-- 查 TODO、测试名、导出符号。
+- 已知声明/符号关系：semantic tool。
+- 已知精确字符串、错误文案、配置 key：限定范围 search。
+- 已知路径：直接 range/full read，不先列全仓库。
+- 本地变更审查：优先 Git diff，再读必要上下文。
+- 较早工具证据被省略：优先 session archive。
 
-### 10.3 适合 range read 的场景
+### 10.3 读取与修改粒度
 
 - search 命中后读取上下文。
 - 大文件中只需要某个函数或配置段。
 - 模型需要继续读取某段之前或之后的内容。
 - 全文 read 返回 `suggestedTool` 时。
-
-### 10.4 适合 full read 的场景
-
-- 小文件。
-- 修改时确实需要完整文件内容。
-- 生成完整 DraftEdit 前需要完整原文。
+- 小文件或真正的整体问题才全文读取。
+- 大文件局部改动用 incremental DraftEdit；新/小文件或整体重写用完整 DraftEdit。
 
 ## 11. 当前边界和后续扩展方向
 
@@ -576,18 +589,23 @@ trace level 控制 payload 细节：
 - 工具调用循环。
 - 只读工作区工具。
 - 搜索和范围读取。
+- semantic、Git、diagnostics、validation 与 session archive 只读能力。
 - 自动模型 / Thinking 档位预算和工具结果 shaping。
 - 历史投影、会话摘要和后台上下文压缩刷新。
-- DraftEdit 安全写入。
+- incremental/full/delete DraftEdit、ChangeSet 与 Apply 后安全写入。
+- 普通/repair pending DraftEdit 的统一 validation 硬阻断与 Apply 后继续验证。
 - trace 和 usage 记录。
+- 离线行为评测契约和显式 opt-in live runner。
 
 仍未覆盖的方向：
 
 - 队列 prompt。
 - MCP。
-- shell/test/lint/git 工具。
-- 局部 diff/patch 写入。
-- 自动测试验证循环。
-- 更细的 provider capability profile。
+- 任意 shell 或非 allowlist 命令执行。
+- Git commit/push/remote 修改。
+- MCP 与外部 server tools。
+- 更丰富的 provider capability 元数据与多模态输入。
 
 这些能力后续可以逐步扩展，但应继续遵守当前分层：Provider 只编排，AgentRunner 管请求循环，工作区工具保持只读，写入仍只走 DraftEdit。
+
+模型/Provider、Thinking、上下文窗口和最大输出继续由模型选择器与设置页展示和配置；这些运行时事实不进入静态 system prompt，也没有为此新增会改变工具集合的 runtime-info 工具。预算由 Runner 和 model profile 强制执行。

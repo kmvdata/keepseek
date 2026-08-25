@@ -316,7 +316,7 @@ test('model/provider capability changes do not alter system prompt or frozen too
     history: [userMessage('u1', 'hello')],
     language: 'en' as const,
     prompt: 'hello',
-    requestProtocolVersion: 2,
+    requestProtocolVersion: 3,
     slimToolNames: ['keepseek_list_workspace_files'],
     includeTools: true
   };

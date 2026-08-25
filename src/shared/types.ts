@@ -457,7 +457,7 @@ export interface HistoryArchiveEntry {
 }
 
 export interface SessionRequestProtocol {
-  /** v1 replays ordinary final-answer reasoning; v2 keeps it local-only. */
+  /** v1 replays ordinary final-answer reasoning; v2+ keeps it local-only. */
   version: number;
   serializationStrategy: 'legacy-v1' | 'provider-projection-v2';
   toolSchemaVersion: number;
@@ -774,6 +774,7 @@ export interface WorkspaceDiagnosticSummary {
 
 export interface ValidationToolResult {
   ok: boolean;
+  errorType?: string;
   kind: 'npm_script';
   script: SafeNpmScript;
   workspaceFolder?: string;
