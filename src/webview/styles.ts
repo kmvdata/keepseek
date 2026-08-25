@@ -1636,6 +1636,45 @@ export function getStyles(): string {
       gap: 6px;
     }
 
+    .command-model-status {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 2px 8px 5px 18px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .command-model-status > span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .command-model-cancel {
+      flex: 0 0 auto;
+      padding: 1px 5px;
+      border: 1px solid var(--vscode-button-border, var(--vscode-widget-border));
+      border-radius: 4px;
+      color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+      background: var(--vscode-button-secondaryBackground, transparent);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .command-model-cancel:hover,
+    .command-model-cancel:focus-visible {
+      background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 1px;
+    }
+
+    .command-model-option.is-pending .command-model-name {
+      color: var(--vscode-textLink-foreground);
+      font-weight: 600;
+    }
+
     .message-action-btn {
       display: inline-flex;
       align-items: center;

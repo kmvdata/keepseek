@@ -1,5 +1,6 @@
 import type {
   ChangeSet,
+  HistorySummary,
   RepairLoopState,
   RunDetailsChangeSetSummary,
   RunDetailsStatus,
@@ -23,6 +24,9 @@ export interface RunDetailsBuilderInput {
   assistantMessageId?: string;
   backgroundRunId?: string;
   modelId: string;
+  sourceId?: string;
+  provider?: string;
+  protocol?: string;
   thinkingEnabled: boolean;
   traceLogUri?: string;
   startedAt?: string;
@@ -143,6 +147,9 @@ export class RunDetailsBuilder {
       assistantMessageId: this.input.assistantMessageId,
       backgroundRunId: this.input.backgroundRunId,
       modelId: this.input.modelId,
+      sourceId: this.input.sourceId,
+      provider: this.input.provider,
+      protocol: this.input.protocol,
       status,
       startedAt: this.startedAt,
       endedAt,
@@ -172,6 +179,7 @@ export class RunDetailsBuilder {
       contextSources: this.contextSources.map((source) => ({ ...source })),
       contextDiscarded: this.contextDiscarded.map((source) => ({ ...source })),
       contextDeduplication: this.contextDeduplication ? { ...this.contextDeduplication } : undefined,
+      historySummaries: this.historySummaries.map((summary) => ({ ...summary })),
       budgetStopReason: this.budgetStopReason,
       failureReason: this.failureReason,
       traceLogUri: this.input.traceLogUri,
@@ -183,6 +191,16 @@ export class RunDetailsBuilder {
   private contextSources: RunDetailsSummary['contextSources'] = [];
   private contextDiscarded: RunDetailsSummary['contextDiscarded'] = [];
   private contextDeduplication: RunDetailsSummary['contextDeduplication'];
+  private historySummaries: NonNullable<RunDetailsSummary['historySummaries']> = [];
+
+  public setHistorySummaries(summaries: readonly HistorySummary[]): void {
+    this.historySummaries = summaries.map((summary) => ({
+      modelId: summary.modelId,
+      sourceId: summary.sourceId,
+      provider: summary.provider,
+      createdAt: summary.createdAt
+    }));
+  }
 
   public setRunContext(metadata: RunContextProjectionMetadata | undefined): void {
     if (!metadata) {

@@ -87,6 +87,63 @@ export interface ProviderRequestProjection {
   anthropic?: AnthropicMessagesRequestProjection;
 }
 
+export type ProviderRequestProtocolLane = 'chat-completions' | 'openai-responses' | 'anthropic-messages';
+
+export interface ProviderRequestLane {
+  protocol: ProviderRequestProtocolLane;
+  sourceId: string;
+  endpointLane: string;
+  modelId: string;
+}
+
+export function getProviderRequestLane(input: {
+  provider: ModelSourceProvider;
+  sourceId: string;
+  baseUrl: string;
+  modelId: string;
+}): ProviderRequestLane {
+  const protocol: ProviderRequestProtocolLane = input.provider === 'openai-responses'
+    ? 'openai-responses'
+    : input.provider === 'anthropic-compatible'
+      ? 'anthropic-messages'
+      : 'chat-completions';
+  return {
+    protocol,
+    sourceId: input.sourceId.trim(),
+    endpointLane: protocol === 'openai-responses'
+      ? normalizeOpenAiResponsesLaneBaseUrl(input.baseUrl)
+      : protocol === 'anthropic-messages'
+        ? normalizeAnthropicMessagesLaneBaseUrl(input.baseUrl)
+        : normalizeChatCompletionsLaneBaseUrl(input.baseUrl),
+    modelId: input.modelId.trim()
+  };
+}
+
+/**
+ * Mirrors the native replay checks used by the request projection. Ordinary
+ * Chat Completions toolRounds are intentionally ignored because they remain
+ * replayable through the shared message projection.
+ */
+export function hasProviderNativeReplayFidelityRisk(
+  messages: readonly ChatMessage[],
+  targetLane: ProviderRequestLane
+): boolean {
+  return messages.some((message) => {
+    const replay = message.providerReplay;
+    if (!replay) {
+      return false;
+    }
+    if (replay.protocol === 'openai-responses') {
+      return targetLane.protocol !== 'openai-responses'
+        || replay.sourceId !== targetLane.sourceId
+        || normalizeOpenAiResponsesLaneBaseUrl(replay.baseUrl) !== targetLane.endpointLane;
+    }
+    return targetLane.protocol !== 'anthropic-messages'
+      || replay.sourceId !== targetLane.sourceId
+      || normalizeAnthropicMessagesLaneBaseUrl(replay.baseUrl) !== targetLane.endpointLane;
+  });
+}
+
 /**
  * The one authoritative projection of persisted KeepSeek state into a provider
  * request. Runner, context accounting, compaction decisions, hard limits and
@@ -348,6 +405,10 @@ export function normalizeAnthropicMessagesLaneBaseUrl(rawBaseUrl: string): strin
   } catch {
     return rawBaseUrl.trim().replace(/\/+$/u, '');
   }
+}
+
+export function normalizeChatCompletionsLaneBaseUrl(rawBaseUrl: string): string {
+  return rawBaseUrl.trim().replace(/\/+$/u, '').replace(/#.*$/u, '');
 }
 
 function normalizeRequestProtocolVersion(value: number | undefined): number {

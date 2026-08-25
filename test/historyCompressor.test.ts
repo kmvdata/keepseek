@@ -59,10 +59,21 @@ test('summary character cap covers only message ids actually included in the suc
     agentSettings: { thinkingEnabled: true, reasoningEffort: 'high', compressionThreshold: 'balanced' },
     contextFiles: [],
     language: 'en',
+    sourceConfig: {
+      sourceId: 'summary-source',
+      provider: 'openai-compatible',
+      apiKey: '',
+      baseUrl: 'https://summary.example/v1',
+      supportsBilling: false
+    },
     settings: { ...createCompressionSettings(), keepRecentTurns: 1, triggerRatio: 0.01, forceRatio: 0.02 }
   });
 
-  const covered = new Set(result.state.summaries.at(-1)?.coveredMessageIds ?? []);
+  const createdSummary = result.state.summaries.at(-1);
+  const covered = new Set(createdSummary?.coveredMessageIds ?? []);
+  assert.equal(createdSummary?.modelId, 'test-model');
+  assert.equal(createdSummary?.sourceId, 'summary-source');
+  assert.equal(createdSummary?.provider, 'openai-compatible');
   assert.ok(covered.size > 0);
   assert.ok(covered.size < messages.length - 2);
   for (const message of messages) {

@@ -12,6 +12,13 @@ export function getInputScript(): string {
       var commandModelSwitch = document.getElementById('commandModelSwitch');
       var commandModelValue = document.getElementById('commandModelValue');
       var commandModelList = document.getElementById('commandModelList');
+      var commandModelDescription = document.getElementById('commandModelDescription');
+      var commandModelStatus = document.getElementById('commandModelStatus');
+      var commandModelStatusText = document.getElementById('commandModelStatusText');
+      var commandModelCancelPending = document.getElementById('commandModelCancelPending');
+      var composerModelStatus = document.getElementById('composerModelStatus');
+      var composerModelStatusText = document.getElementById('composerModelStatusText');
+      var composerModelCancelPending = document.getElementById('composerModelCancelPending');
       var commandCompressionTabs = document.getElementById('commandCompressionTabs');
       var commandCompressionDescription = document.getElementById('commandCompressionDescription');
       var commandSkillsButton = document.getElementById('commandSkillsButton');
@@ -52,6 +59,7 @@ export function getInputScript(): string {
       var referenceResourcesError = '';
       var referenceResourceRequestSequence = 0;
       var referenceResourceRequestId = '';
+      var modelSelectionRequestSequence = 0;
       var effortLabels = {
         high: 'High',
         max: 'Max'
@@ -115,17 +123,6 @@ export function getInputScript(): string {
           closeReferenceMenu(false);
           vscode.postMessage({ type: 'abortPrompt' });
           setComposerStatus(t('stoppingTask'));
-        });
-      }
-
-      if (contextProgress) {
-        // 用量统计界面(popover)通过 hover/focus 弹出;弹出时请求一次余额,
-        // 由扩展端 60s 限流保证 1 分钟内只真正发起一次请求。
-        contextProgress.addEventListener('mouseenter', function() {
-          vscode.postMessage({ type: 'refreshBalance' });
-        });
-        contextProgress.addEventListener('focus', function() {
-          vscode.postMessage({ type: 'refreshBalance' });
         });
       }
 
@@ -235,7 +232,10 @@ export function getInputScript(): string {
         commandModelSwitch.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
-          if (state.isBusy) { return; }
+          if (isModelSelectionLocked()) {
+            setComposerStatus(t('modelSelectionLockedByBackground'));
+            return;
+          }
           commandModelListOpen = !commandModelListOpen;
           renderCommandMenu();
         });
@@ -245,19 +245,43 @@ export function getInputScript(): string {
         commandModelList.addEventListener('click', function(event) {
           var target = event.target instanceof Element ? event.target : null;
           var button = target?.closest('button[data-model-id]');
-          if (!button || state.isBusy) { return; }
+          if (!button || isModelSelectionLocked()) { return; }
           event.preventDefault();
           event.stopPropagation();
           var modelId = button.dataset.modelId || '';
           var sourceId = button.dataset.sourceId || '';
           if (sourceId && modelId) {
-            state.selectedSourceId = sourceId;
-            state.selectedModelId = modelId;
-            vscode.postMessage({ type: 'setSelectedModel', sourceId: sourceId, modelId: modelId });
+            vscode.postMessage({
+              type: 'setSelectedModel',
+              requestId: nextModelSelectionRequestId(),
+              sourceId: sourceId,
+              modelId: modelId
+            });
           }
           commandModelListOpen = false;
           renderCommandMenu();
-          setComposerStatus(t('modelSwitched'));
+          setComposerStatus(t('modelSwitchValidating'));
+        });
+      }
+
+      if (commandModelCancelPending) {
+        commandModelCancelPending.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          vscode.postMessage({
+            type: 'cancelPendingModelSelection',
+            requestId: nextModelSelectionRequestId()
+          });
+        });
+      }
+
+      if (composerModelCancelPending) {
+        composerModelCancelPending.addEventListener('click', function(event) {
+          event.preventDefault();
+          vscode.postMessage({
+            type: 'cancelPendingModelSelection',
+            requestId: nextModelSelectionRequestId()
+          });
         });
       }
 
@@ -651,7 +675,7 @@ export function getInputScript(): string {
       }
 
       function openCommandModelListAndFocus() {
-        if (!commandModelSwitch || state.isBusy) { return; }
+        if (!commandModelSwitch || isModelSelectionLocked()) { return; }
         commandModelListOpen = true;
         commandSkillListOpen = false;
         renderCommandMenu();
@@ -1314,32 +1338,64 @@ export function getInputScript(): string {
       function renderContextProgress() {
         if (!contextProgress) { return; }
         var metrics = normalizeUsageMetrics(state.usageMetrics);
+        var sessionUsage = metrics.sessionUsageStats;
+        var usageGroups = sessionUsage && Array.isArray(sessionUsage.byModelSource)
+          ? sessionUsage.byModelSource
+          : [];
+        var currentUsageGroup = findCurrentUsageGroup(usageGroups);
+        var cacheRateUsage = usageGroups.length > 1
+          ? currentUsageGroup
+          : usageGroups.length === 1 ? usageGroups[0] : sessionUsage;
         var usedPercent = clampNumber(metrics.contextPercent, 0, 100);
         var angle = usedPercent * 3.6;
         var title = t('usageStatsTitle');
         var contextLine = ['usageMetricContextPercent', formatMetricPercent(usedPercent)];
-        var primaryLine = metrics.supportsBilling
-          ? ['usageMetricSessionCost', formatMetricCost(
-              metrics.sessionUsageStats && metrics.sessionUsageStats.sessionCost,
-              getUsageCurrency(metrics.sessionUsageStats, metrics.lastTurnUsage),
-              hasUsageData(metrics.sessionUsageStats)
-            )]
-          : ['usageMetricSessionTokens', formatMetricTokens(
-              metrics.sessionUsageStats && metrics.sessionUsageStats.totalTokens,
-              hasUsageData(metrics.sessionUsageStats)
-            )];
+        var primaryLine = ['usageMetricSessionTokens', formatMetricTokens(
+          sessionUsage && sessionUsage.totalTokens,
+          hasUsageData(sessionUsage)
+        )];
+        var turnCacheAvailable = hasCacheUsageData(metrics.lastTurnUsage);
         var items = [
-          ['usageMetricTurnHit', formatMetricPercent(calculateHitRate(metrics.lastTurnUsage))],
-          ['usageMetricAverageHit', formatMetricPercent(calculateHitRate(metrics.sessionUsageStats))],
+          [turnCacheAvailable ? 'usageMetricTurnHit' : 'usageMetricCacheUnavailable', turnCacheAvailable
+            ? formatCacheHitRate(metrics.lastTurnUsage)
+            : t('usageMetricCacheUnavailableValue')],
+          [usageGroups.length > 1 ? 'usageMetricCurrentModelHit' : 'usageMetricAverageHit', formatCacheHitRate(cacheRateUsage)],
           ['usageMetricTurnTokens', formatMetricTokens(metrics.lastTurnUsage && metrics.lastTurnUsage.totalTokens, hasUsageData(metrics.lastTurnUsage))],
           ['usageMetricTurnCount', metrics.turnCount > 0 ? formatMetricInteger(metrics.turnCount) : '-'],
           ['usageMetricCompactThreshold', formatMetricPercent(metrics.contextCompressionTriggerRatio * 100)]
         ];
-        if (metrics.supportsBilling) {
+        if (turnCacheAvailable) {
           items.splice(2, 0,
-            ['usageMetricSessionTokens', formatMetricTokens(metrics.sessionUsageStats && metrics.sessionUsageStats.totalTokens, hasUsageData(metrics.sessionUsageStats))],
-            ['usageMetricTurnCost', formatMetricCost(metrics.lastTurnUsage && metrics.lastTurnUsage.cost, getUsageCurrency(metrics.lastTurnUsage, metrics.sessionUsageStats), hasUsageData(metrics.lastTurnUsage))]
+            ['usageMetricCacheHitTokens', formatMetricTokens(metrics.lastTurnUsage.cacheHitTokens, true)],
+            ['usageMetricCacheMissTokens', formatMetricTokens(metrics.lastTurnUsage.cacheMissTokens, true)]
           );
+        }
+        var costDisplay = formatAccountedCosts(sessionUsage);
+        items.splice(turnCacheAvailable ? 4 : 2, 0, [
+          costDisplay.available
+            ? costDisplay.partial ? 'usageMetricAccountedCost' : 'usageMetricSessionCost'
+            : 'usageMetricCostUnavailable',
+          costDisplay.available ? costDisplay.text : t('usageMetricCostUnavailableValue')
+        ]);
+        var reasons = normalizeCacheReasonList(metrics.promptCacheDiagnostics && metrics.promptCacheDiagnostics.cacheMissPossibleReasons);
+        if (reasons.length) {
+          items.push(['usageMetricCacheReasons', reasons.map(formatCacheReason).join(' · ')]);
+        }
+        if (usageGroups.length > 1) {
+          usageGroups.forEach(function(group, index) {
+            var groupCost = formatAccountedCosts(group);
+            var values = [
+              formatMetricTokens(group.totalTokens, hasUsageData(group)),
+              formatCacheHitRate(group),
+              groupCost.available ? groupCost.text : t('usageMetricCostUnavailableValue')
+            ];
+            items.push([index === 0 ? 'usageMetricUsageGroups' : '', getUsageGroupLabel(group) + ' · ' + values.join(' · ')]);
+          });
+        }
+        if (sessionUsage && sessionUsage.legacyUnattributed) {
+          items.push(['usageMetricUsageGroups', t('usageMetricLegacyUnattributed')]);
+        }
+        if (metrics.supportsBilling) {
           items.push(['usageMetricBalance', formatMetricBalance(metrics.balance)]);
         }
         var label = title + '。' + [contextLine, primaryLine].concat(items).map(function(item) {
@@ -1409,17 +1465,52 @@ export function getInputScript(): string {
         if (!value || typeof value !== 'object') {
           return null;
         }
-        return {
+        var normalized = {
           promptTokens: readNonNegativeNumber(value.promptTokens, 0),
           completionTokens: readNonNegativeNumber(value.completionTokens, 0),
           totalTokens: readNonNegativeNumber(value.totalTokens, 0),
           cacheHitTokens: readNonNegativeNumber(value.cacheHitTokens, 0),
           cacheMissTokens: readNonNegativeNumber(value.cacheMissTokens, 0),
+          cacheDataStatus: value.cacheDataStatus === 'reported' || value.cacheDataStatus === 'partial'
+            ? value.cacheDataStatus
+            : 'unavailable',
+          cacheDataRequestCount: readNonNegativeNumber(value.cacheDataRequestCount, 0),
+          cacheDataMissingRequestCount: readNonNegativeNumber(value.cacheDataMissingRequestCount, 0),
           requestCount: readNonNegativeNumber(value.requestCount, 0),
           cost: readNonNegativeNumber(value[costKey], 0),
           sessionCost: readNonNegativeNumber(value.sessionCost, 0),
-          currency: typeof value.currency === 'string' && value.currency.trim() ? value.currency.trim() : '¥'
+          currency: typeof value.currency === 'string' ? value.currency.trim() : '',
+          pricingStatus: value.pricingStatus === 'priced' || value.pricingStatus === 'partial'
+            ? value.pricingStatus
+            : 'unavailable',
+          pricedRequestCount: readNonNegativeNumber(value.pricedRequestCount, 0),
+          unpricedRequestCount: readNonNegativeNumber(value.unpricedRequestCount, 0),
+          costByCurrency: normalizeCostByCurrency(value.costByCurrency),
+          sourceId: typeof value.sourceId === 'string' ? value.sourceId : '',
+          modelId: typeof value.modelId === 'string' ? value.modelId : '',
+          provider: typeof value.provider === 'string' ? value.provider : '',
+          protocol: typeof value.protocol === 'string' ? value.protocol : '',
+          legacyUnattributed: value.legacyUnattributed === true,
+          byModelSource: []
         };
+        normalized.byModelSource = Array.isArray(value.byModelSource)
+          ? value.byModelSource.map(function(group) { return normalizeUsageStats(group, 'cost'); }).filter(Boolean)
+          : [];
+        return normalized;
+      }
+
+      function normalizeCostByCurrency(value) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          return {};
+        }
+        var result = {};
+        Object.keys(value).forEach(function(currency) {
+          var cost = Number(value[currency]);
+          if (currency.trim() && Number.isFinite(cost) && cost >= 0) {
+            result[currency.trim()] = cost;
+          }
+        });
+        return result;
       }
 
       function normalizeBalance(value) {
@@ -1439,11 +1530,95 @@ export function getInputScript(): string {
       }
 
       function calculateHitRate(usage) {
-        if (!usage) {
+        if (!hasCacheUsageData(usage)) {
           return null;
         }
         var denominator = Math.max(0, usage.cacheHitTokens) + Math.max(0, usage.cacheMissTokens);
         return denominator > 0 ? (Math.max(0, usage.cacheHitTokens) / denominator) * 100 : null;
+      }
+
+      function formatCacheHitRate(usage) {
+        if (!hasCacheUsageData(usage)) {
+          return t('usageMetricCacheUnavailableValue');
+        }
+        var rate = formatMetricPercent(calculateHitRate(usage));
+        return usage.cacheDataStatus === 'partial'
+          ? rate + ' · ' + t('usageMetricCachePartialValue')
+          : rate;
+      }
+
+      function hasCacheUsageData(usage) {
+        return Boolean(usage && (
+          usage.cacheDataStatus === 'reported'
+          || usage.cacheDataStatus === 'partial'
+          || usage.cacheDataRequestCount > 0
+        ));
+      }
+
+      function findCurrentUsageGroup(groups) {
+        for (var i = 0; i < groups.length; i++) {
+          if (groups[i].sourceId === state.selectedSourceId && groups[i].modelId === state.selectedModelId) {
+            return groups[i];
+          }
+        }
+        return null;
+      }
+
+      function getUsageGroupLabel(group) {
+        var models = Array.isArray(state.models) ? state.models : [];
+        var model = findModelForSelection(models, group.sourceId, group.modelId);
+        if (model) {
+          return getModelSourceLabel(model) + ' / ' + getModelDisplayLabel(model);
+        }
+        return [group.sourceId || t('summarySourceUnknown'), group.modelId || 'Model'].join(' / ');
+      }
+
+      function formatAccountedCosts(usage) {
+        if (!usage) {
+          return { available: false, partial: false, text: '' };
+        }
+        var costs = usage.costByCurrency && typeof usage.costByCurrency === 'object'
+          ? usage.costByCurrency
+          : {};
+        var currencies = Object.keys(costs).filter(function(currency) {
+          return Number.isFinite(Number(costs[currency]));
+        });
+        if (!currencies.length && usage.pricingStatus === 'priced' && Number.isFinite(Number(usage.cost))) {
+          currencies = usage.currency ? [usage.currency] : [];
+          if (currencies.length) { costs = { [usage.currency]: Number(usage.cost) }; }
+        }
+        if (!currencies.length) {
+          return { available: false, partial: false, text: '' };
+        }
+        var partial = usage.pricingStatus === 'partial' || usage.unpricedRequestCount > 0;
+        var textValue = currencies.map(function(currency) {
+          return formatMetricCost(costs[currency], currency, true);
+        }).join(' + ');
+        if (partial) {
+          textValue += ' · ' + t('usageMetricCostExcludesUnpriced');
+        }
+        return { available: true, partial: partial, text: textValue };
+      }
+
+      function normalizeCacheReasonList(value) {
+        return Array.isArray(value)
+          ? value.filter(function(reason) { return typeof reason === 'string' && Boolean(reason.trim()); }).slice(0, 12)
+          : [];
+      }
+
+      function formatCacheReason(reason) {
+        var normalized = String(reason || '');
+        if (normalized.indexOf('history_rewrite:') === 0) {
+          var rewriteReason = normalized.slice('history_rewrite:'.length);
+          var rewriteKey = 'cacheReason_history_rewrite_' + rewriteReason;
+          var rewriteLabel = t(rewriteKey);
+          return rewriteLabel === rewriteKey
+            ? t('cacheReason_history_rewrite')
+            : t('cacheReason_history_rewrite') + ' (' + rewriteLabel + ')';
+        }
+        var key = 'cacheReason_' + normalized;
+        var localized = t(key);
+        return localized === key ? normalized : localized;
       }
 
       function formatMetricPercent(value) {
@@ -1520,6 +1695,7 @@ export function getInputScript(): string {
       function renderCommandMenu() {
         if (!commandMenu) { return; }
         commandMenu.classList.toggle('is-readonly', Boolean(state.isBusy));
+        commandMenu.classList.toggle('allows-model-selection', Boolean(state.isBusy && !isModelSelectionLocked()));
         renderCommandModel();
         renderCompressionThreshold();
         renderCommandSkills();
@@ -1551,6 +1727,16 @@ export function getInputScript(): string {
       function renderCommandModel() {
         var models = Array.isArray(state.models) ? state.models : [];
         var selected = getSelectedModel(models);
+        var selectionState = state.modelSelection && typeof state.modelSelection === 'object'
+          ? state.modelSelection
+          : {};
+        var pending = selectionState.pending && typeof selectionState.pending === 'object'
+          ? selectionState.pending
+          : null;
+        var currentRun = selectionState.currentRun && typeof selectionState.currentRun === 'object'
+          ? selectionState.currentRun
+          : null;
+        var locked = selectionState.lockedByBackground === true;
         if (commandModelValue) {
           commandModelValue.textContent = selected
             ? getModelSourceLabel(selected.model) + ' / ' + getModelDisplayLabel(selected.model)
@@ -1559,8 +1745,43 @@ export function getInputScript(): string {
         }
 
         if (commandModelSwitch) {
-          commandModelSwitch.disabled = Boolean(state.isBusy);
+          commandModelSwitch.disabled = locked;
+          commandModelSwitch.title = locked ? t('modelSelectionLockedByBackground') : t('switchModelDescription');
+          commandModelSwitch.setAttribute('aria-disabled', locked ? 'true' : 'false');
           commandModelSwitch.setAttribute('aria-expanded', commandModelListOpen ? 'true' : 'false');
+        }
+        if (commandModelDescription) {
+          commandModelDescription.textContent = locked
+            ? t('modelSelectionLockedByBackground')
+            : state.isBusy ? t('modelSelectForNextTurn') : t('switchModelDescription');
+        }
+        if (commandModelStatus && commandModelStatusText && commandModelCancelPending) {
+          var pendingModel = pending ? findModelForSelection(models, pending.sourceId, pending.modelId) : null;
+          var currentRunModel = currentRun ? findModelForSelection(models, currentRun.sourceId, currentRun.modelId) : selected?.model;
+          var pendingText = pending
+            ? t('modelPendingStatus', {
+                current: getModelDisplayLabel(currentRunModel),
+                target: pendingModel ? getModelDisplayLabel(pendingModel) : String(pending.modelId || '')
+              })
+            : locked ? t('modelSelectionLockedByBackground') : '';
+          commandModelStatus.classList.toggle('hidden', !pendingText);
+          commandModelStatusText.textContent = pendingText;
+          commandModelCancelPending.classList.toggle('hidden', !pending || locked);
+          commandModelCancelPending.disabled = !pending || locked;
+        }
+        if (composerModelStatus && composerModelStatusText && composerModelCancelPending) {
+          var composerPendingModel = pending ? findModelForSelection(models, pending.sourceId, pending.modelId) : null;
+          var composerCurrentRunModel = currentRun ? findModelForSelection(models, currentRun.sourceId, currentRun.modelId) : selected?.model;
+          var composerPendingText = pending
+            ? t('modelPendingStatus', {
+                current: getModelDisplayLabel(composerCurrentRunModel),
+                target: composerPendingModel ? getModelDisplayLabel(composerPendingModel) : String(pending.modelId || '')
+              })
+            : '';
+          composerModelStatus.classList.toggle('hidden', !composerPendingText);
+          composerModelStatusText.textContent = composerPendingText;
+          composerModelStatus.title = composerPendingText;
+          composerModelCancelPending.disabled = !pending || locked;
         }
         if (!commandModelList) { return; }
 
@@ -1587,27 +1808,52 @@ export function getInputScript(): string {
           var option = document.createElement('button');
           var isSelected = model.sourceId === state.selectedSourceId
             && model.id === state.selectedModelId;
+          var isPending = Boolean(pending && model.sourceId === pending.sourceId && model.id === pending.modelId);
           option.type = 'button';
           option.className = 'command-model-option';
           option.dataset.sourceId = model.sourceId || '';
           option.dataset.modelId = model.id;
-          option.disabled = Boolean(state.isBusy);
+          option.disabled = locked;
           option.setAttribute('role', 'menuitemradio');
           option.setAttribute('aria-checked', isSelected ? 'true' : 'false');
+          option.setAttribute('aria-label', isPending
+            ? t('modelPendingOption', { model: getModelDisplayLabel(model) })
+            : getModelDisplayLabel(model));
+          option.classList.toggle('is-pending', isPending);
 
           var check = document.createElement('span');
           check.className = 'command-model-check';
-          check.textContent = isSelected ? '\\u2713' : '';
+          check.textContent = isSelected ? '\\u2713' : isPending ? '\\u2192' : '';
 
           var label = document.createElement('span');
           label.className = 'command-model-name';
           label.textContent = getModelDisplayLabel(model);
           label.title = model.id || getModelDisplayLabel(model);
-          option.title = model.id || getModelDisplayLabel(model);
+          option.title = locked
+            ? t('modelSelectionLockedByBackground')
+            : isPending ? t('modelPendingOption', { model: getModelDisplayLabel(model) }) : model.id || getModelDisplayLabel(model);
 
           option.append(check, label);
           commandModelList.append(option);
         }
+      }
+
+      function nextModelSelectionRequestId() {
+        modelSelectionRequestSequence += 1;
+        return 'model-selection-' + String(modelSelectionRequestSequence);
+      }
+
+      function isModelSelectionLocked() {
+        return Boolean(state.modelSelection && state.modelSelection.lockedByBackground === true);
+      }
+
+      function findModelForSelection(models, sourceId, modelId) {
+        for (var i = 0; i < models.length; i++) {
+          if (models[i].sourceId === sourceId && models[i].id === modelId) {
+            return models[i];
+          }
+        }
+        return null;
       }
 
       function renderCompressionThreshold() {
@@ -3715,9 +3961,11 @@ export function getInputScript(): string {
       }
 
       function blockAccountSettingsWhileRunBusy() {
-        if (!state.isBusy) { return false; }
+        if (!state.isBusy && !isModelSelectionLocked()) { return false; }
         settingsRunBusyStatusVisible = true;
-        setSettingsDialogStatus(t('modelSettingsReadonlyWhileBusy'));
+        setSettingsDialogStatus(t(isModelSelectionLocked()
+          ? 'modelSelectionLockedByBackground'
+          : 'modelSettingsReadonlyWhileBusy'));
         if (settingsDialogStatus) { settingsDialogStatus.focus(); }
         return true;
       }
@@ -3725,7 +3973,9 @@ export function getInputScript(): string {
       function syncAccountSettingsRunBusyStatus(runBusy, operationBusy) {
         if (runBusy && !operationBusy) {
           settingsRunBusyStatusVisible = true;
-          setSettingsDialogStatus(t('modelSettingsReadonlyWhileBusy'));
+          setSettingsDialogStatus(t(isModelSelectionLocked()
+            ? 'modelSelectionLockedByBackground'
+            : 'modelSettingsReadonlyWhileBusy'));
           return;
         }
         if (settingsRunBusyStatusVisible) {
@@ -4125,7 +4375,7 @@ export function getInputScript(): string {
       function renderAccountSettings() {
         var account = getSettingsActiveAccount();
         var operationBusy = Boolean(settingsDialogBusyAction);
-        var runBusy = Boolean(state.isBusy);
+        var runBusy = Boolean(state.isBusy || isModelSelectionLocked());
         var controlsDisabled = operationBusy || runBusy;
         if (settingsDialog) {
           settingsDialog.setAttribute('aria-busy', operationBusy ? 'true' : 'false');
@@ -4807,6 +5057,7 @@ export function getInputScript(): string {
         showHistorySettingsDialog: showHistorySettingsDialog,
         showAboutDialog: showAboutDialog,
         onSkillDraftCreated: onSkillDraftCreated,
+        showStatus: setComposerStatus,
         isPromptSubmittableEmpty: isPromptSubmittableEmpty,
         clearPrompt: clearPrompt
       };

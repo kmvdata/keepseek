@@ -102,7 +102,12 @@ export interface Usage {
   cacheHitTokens: number;
   cacheMissTokens: number;
   reasoningTokens?: number;
+  /** Whether cache token fields were actually returned by the provider. */
+  cacheDataStatus?: UsageCacheDataStatus;
 }
+
+export type UsageCacheDataStatus = 'reported' | 'partial' | 'unavailable';
+export type UsagePricingStatus = 'priced' | 'unavailable';
 
 export interface UsageCostRates {
   // 空闲时段(或单一档)价格,兼容旧配置;旧配置缺省峰谷时段时按此档计费
@@ -120,7 +125,11 @@ export interface UsageEvent {
   usage: Usage;
   cost: number;
   currency: string;
+  sourceId?: string;
   modelId: string;
+  provider?: string;
+  protocol?: string;
+  pricingStatus?: UsagePricingStatus;
   requestId?: string;
   source: UsageSource;
   /** Physical provider attempts represented by this event. Defaults to one. */
@@ -139,13 +148,38 @@ export type UsageSource =
 export interface UsageSourceStats extends Usage {
   requestCount: number;
   cost: number;
+  pricedRequestCount?: number;
+  unpricedRequestCount?: number;
+}
+
+export interface UsageModelGroupStats extends Usage {
+  sourceId: string;
+  modelId: string;
+  provider?: string;
+  protocol?: string;
+  requestCount: number;
+  pricedRequestCount: number;
+  unpricedRequestCount: number;
+  cacheDataRequestCount: number;
+  cacheDataMissingRequestCount: number;
+  costByCurrency?: Record<string, number>;
+  bySource?: Partial<Record<UsageSource, UsageSourceStats>>;
 }
 
 export interface TurnUsageStats extends Usage {
   requestCount: number;
   cost: number;
   currency: string;
+  sourceId?: string;
   modelId?: string;
+  provider?: string;
+  protocol?: string;
+  pricingStatus?: 'priced' | 'unavailable' | 'partial';
+  pricedRequestCount?: number;
+  unpricedRequestCount?: number;
+  cacheDataRequestCount?: number;
+  cacheDataMissingRequestCount?: number;
+  costByCurrency?: Record<string, number>;
   updatedAt?: string;
   bySource?: Partial<Record<UsageSource, UsageSourceStats>>;
 }
@@ -154,6 +188,15 @@ export interface SessionUsageStats extends Usage {
   requestCount: number;
   sessionCost: number;
   currency: string;
+  pricingStatus?: 'priced' | 'unavailable' | 'partial';
+  pricedRequestCount?: number;
+  unpricedRequestCount?: number;
+  cacheDataRequestCount?: number;
+  cacheDataMissingRequestCount?: number;
+  costByCurrency?: Record<string, number>;
+  byModelSource?: UsageModelGroupStats[];
+  /** Persisted aggregate from an older version that cannot be attributed safely. */
+  legacyUnattributed?: boolean;
   updatedAt?: string;
   bySource?: Partial<Record<UsageSource, UsageSourceStats>>;
 }
@@ -310,6 +353,8 @@ export interface HistorySummary {
   updatedAt: string;
   tokenEstimate: number;
   modelId?: string;
+  sourceId?: string;
+  provider?: string;
   version: number;
 }
 
@@ -687,6 +732,9 @@ export interface RunDetailsSummary {
   assistantMessageId?: string;
   backgroundRunId?: string;
   modelId: string;
+  sourceId?: string;
+  provider?: string;
+  protocol?: string;
   status: RunDetailsStatus;
   startedAt: string;
   endedAt?: string;
@@ -706,10 +754,28 @@ export interface RunDetailsSummary {
     discarded: number;
     truncated: boolean;
   };
+  cache?: RunDetailsCacheSummary;
+  historySummaries?: RunDetailsHistorySummaryProvenance[];
   budgetStopReason?: string;
   failureReason?: string;
   traceLogUri?: string;
   truncated: boolean;
+}
+
+export interface RunDetailsCacheSummary {
+  cacheHitTokens?: number;
+  cacheMissTokens?: number;
+  hitRate?: number;
+  providerDataStatus: UsageCacheDataStatus;
+  cacheLaneChanged: boolean;
+  cacheMissPossibleReasons: string[];
+}
+
+export interface RunDetailsHistorySummaryProvenance {
+  modelId?: string;
+  sourceId?: string;
+  provider?: string;
+  createdAt: string;
 }
 
 export type ValidationAuthorizationPolicy = 'never' | 'ask' | 'always';
@@ -941,6 +1007,7 @@ export interface AgentRunCallbacks {
   onStatus?: (status: AgentActivityInput) => void;
   onUsageEstimate?: (usage: ContextUsageEstimate) => void;
   onUsage?: (event: UsageEvent) => void;
+  onPromptCacheDiagnostics?: (diagnostics: PromptCacheDiagnostics) => void;
   onTraceLog?: (traceLog: AgentTraceLogInfo) => void;
   onTaskPlan?: (taskPlan: TaskPlan) => void;
   onRunDetails?: (runDetails: RunDetailsSummary) => void;

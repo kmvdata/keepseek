@@ -241,6 +241,8 @@ export class HistoryCompressor {
         updatedAt: now,
         tokenEstimate: estimateTokenCount(content),
         modelId: input.model.id,
+        sourceId: input.sourceConfig?.sourceId ?? input.model.sourceId,
+        provider: input.sourceConfig?.provider ?? input.model.provider,
         version: CONTEXT_COMPRESSION_VERSION
       };
       return {
@@ -459,14 +461,23 @@ export class HistoryCompressor {
       const pricing = clientConfig.supportsBilling
         ? getConfiguredModelUsagePricing(input.model.id)
         : undefined;
+      const canPriceUsage = Boolean(pricing && normalizedUsage?.cacheDataStatus === 'reported');
       return {
         content: response.message?.content ?? '',
         usageEvent: normalizedUsage
           ? createUsageEvent({
               usage: normalizedUsage,
-              cost: pricing ? calculateUsageCost(normalizedUsage, pricing) : 0,
-              currency: pricing?.currency ?? '',
+              cost: canPriceUsage && pricing ? calculateUsageCost(normalizedUsage, pricing) : 0,
+              currency: canPriceUsage ? pricing?.currency ?? '' : '',
+              sourceId: clientConfig.sourceId,
               modelId: input.model.id,
+              provider: clientConfig.provider,
+              protocol: clientConfig.provider === 'openai-responses'
+                ? 'openai-responses'
+                : clientConfig.provider === 'anthropic-compatible'
+                  ? 'anthropic-messages'
+                  : 'chat-completions',
+              pricingStatus: canPriceUsage ? 'priced' : 'unavailable',
               requestId: randomUUID(),
               source: input.usageSource
             })

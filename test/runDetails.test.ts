@@ -59,6 +59,18 @@ describe('RunDetailsBuilder', () => {
       }],
       possibleConflicts: []
     });
+    builder.setHistorySummaries([{
+      id: 'summary-1',
+      content: 'not exposed in Run Details',
+      coveredMessageIds: ['older-message'],
+      createdAt: '2026-08-25T00:00:00.000Z',
+      updatedAt: '2026-08-25T00:00:00.000Z',
+      tokenEstimate: 20,
+      modelId: 'summary-model',
+      sourceId: 'summary-source',
+      provider: 'openai-compatible',
+      version: 1
+    }]);
     const plan = createPlan('blocked');
     const repairLoop: RepairLoopState = {
       status: 'waiting_for_apply',
@@ -77,6 +89,13 @@ describe('RunDetailsBuilder', () => {
     assert.equal(summary.contextSources[0]?.activation, 'implicit');
     assert.equal(summary.contextSources[0]?.scriptsPresent, true);
     assert.equal(summary.contextDiscarded[0]?.reason, 'duplicate_skill');
+    assert.deepEqual(summary.historySummaries, [{
+      modelId: 'summary-model',
+      sourceId: 'summary-source',
+      provider: 'openai-compatible',
+      createdAt: '2026-08-25T00:00:00.000Z'
+    }]);
+    assert.equal(JSON.stringify(summary).includes('not exposed in Run Details'), false);
   });
 
   it('updates persisted ChangeSet summaries after apply', () => {

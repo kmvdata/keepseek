@@ -16,7 +16,8 @@ import {
   TaskPlan,
   ToolAuthorizationDecision,
   TurnUsageStats,
-  UsageEvent
+  UsageEvent,
+  UsageSource
 } from '../shared/types';
 import type { ProviderReplayState } from '../shared/types';
 import {
@@ -65,7 +66,7 @@ import {
   isDraftEditPreparationTool
 } from './protocol';
 import { searchHistoryArchive } from './historyArchive';
-import { buildProviderRequestProjection } from './providerRequestProjection';
+import { buildProviderRequestProjection, getProviderRequestLane } from './providerRequestProjection';
 import {
   calibrateContextUsageEstimate,
   createContextUsageEstimate,
@@ -302,6 +303,16 @@ export class AgentRunner {
       assistantMessageId: request.assistantMessageId,
       backgroundRunId: request.backgroundRunId,
       modelId: request.model.id,
+      sourceId: request.sourceConfig?.sourceId ?? request.model.sourceId,
+      provider: request.sourceConfig?.provider ?? request.model.provider,
+      protocol: request.sourceConfig
+        ? getProviderRequestLane({
+            provider: request.sourceConfig.provider,
+            sourceId: request.sourceConfig.sourceId,
+            baseUrl: request.sourceConfig.baseUrl,
+            modelId: request.model.id
+          }).protocol
+        : undefined,
       thinkingEnabled: request.settings.thinkingEnabled,
       traceLogUri: traceLog?.uri
     });
@@ -564,6 +575,11 @@ export class AgentRunner {
       baseUrl: runtimeConfig.baseUrl
     });
     const projection = providerProjection.historyProjection;
+    runDetailsBuilderRef.current?.setHistorySummaries(
+      (request.contextCompression?.summaries ?? []).filter((summary) => (
+        projection.usedSummaryIds.includes(summary.id)
+      ))
+    );
     const messages = providerProjection.messages;
     providerRunState = providerProjection.responses
       ? {
@@ -628,9 +644,11 @@ export class AgentRunner {
       messages,
       tools,
       historyCompacted: projection.metadata.usedSummary,
+      runtimeConfig,
       responses: providerProjection.responses,
       anthropic: providerProjection.anthropic
     });
+    callbacks.onPromptCacheDiagnostics?.(promptCacheDiagnostics);
     trace.record({
       type: 'prompt_cache_diagnostics',
       ...promptCacheDiagnostics,
@@ -770,6 +788,7 @@ export class AgentRunner {
       const response = await this.createModelResponse(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, {
         trace,
         usageTotals: upstreamUsageTotals,
+        usageSource: request.backgroundRunId ? 'background' : 'executor',
         toolChoice: allowToolCalls ? 'auto' : 'none',
         providerRunState
       });
@@ -1341,7 +1360,7 @@ export class AgentRunner {
       trace?: AgentInteractionTrace;
       usageTotals?: UpstreamUsageTotals;
       toolChoice?: 'auto' | 'none';
-      usageSource?: 'executor' | 'continuation';
+      usageSource?: UsageSource;
       providerRunState?: ProviderNativeRunState;
     } = {}
   ): Promise<DeepSeekStreamResult> {
@@ -1453,10 +1472,17 @@ export class AgentRunner {
           cacheMissTokens: 0
         },
         cost: 0,
-        currency: runtimeConfig.supportsBilling
-          ? getConfiguredModelUsagePricing(request.model.id)?.currency ?? ''
-          : '',
+        currency: '',
+        sourceId: runtimeConfig.sourceId,
         modelId: request.model.id,
+        provider: runtimeConfig.provider,
+        protocol: getProviderRequestLane({
+          provider: runtimeConfig.provider,
+          sourceId: runtimeConfig.sourceId,
+          baseUrl: runtimeConfig.baseUrl,
+          modelId: request.model.id
+        }).protocol,
+        pricingStatus: 'unavailable',
         requestId: upstreamRequestId,
         source: 'retry',
         requestCount: retryCount
@@ -1475,6 +1501,9 @@ export class AgentRunner {
         trace,
         upstreamRequestId,
         request.model.id,
+        runtimeConfig.sourceId,
+        runtimeConfig.provider,
+        runtimeConfig.baseUrl,
         runtimeConfig.supportsBilling,
         options.usageSource ?? 'executor'
       );
@@ -1921,8 +1950,11 @@ export class AgentRunner {
     trace: AgentInteractionTrace,
     requestId: string,
     modelId: string,
+    sourceId: string,
+    provider: ModelSourceProvider,
+    baseUrl: string,
     supportsBilling: boolean,
-    source: 'executor' | 'continuation'
+    source: UsageSource
   ): UsageEvent | undefined {
     if (!usage || !totals) {
       return undefined;
@@ -1936,11 +1968,16 @@ export class AgentRunner {
     const pricing = supportsBilling
       ? getConfiguredModelUsagePricing(modelId)
       : undefined;
+    const canPriceUsage = Boolean(pricing && normalizedUsage.cacheDataStatus === 'reported');
     const usageEvent = createUsageEvent({
       usage: normalizedUsage,
-      cost: pricing ? calculateUsageCost(normalizedUsage, pricing) : 0,
-      currency: pricing?.currency ?? '',
+      cost: canPriceUsage && pricing ? calculateUsageCost(normalizedUsage, pricing) : 0,
+      currency: canPriceUsage ? pricing?.currency ?? '' : '',
+      sourceId,
       modelId,
+      provider,
+      protocol: getProviderRequestLane({ provider, sourceId, baseUrl, modelId }).protocol,
+      pricingStatus: canPriceUsage ? 'priced' : 'unavailable',
       requestId,
       source
     });
@@ -1985,9 +2022,11 @@ export class AgentRunner {
     messages: DeepSeekMessage[];
     tools: DeepSeekFunctionTool[];
     historyCompacted: boolean;
+    runtimeConfig: AgentRuntimeConfig;
     responses?: {
       input: OpenAiResponsesItem[];
       tools: OpenAiResponsesFunctionTool[];
+      lane: { sourceId: string; baseUrl: string };
     };
     anthropic?: {
       system: AnthropicSystemTextBlock[];
@@ -2019,6 +2058,8 @@ export class AgentRunner {
         historyPrefixHash: hashStableText(JSON.stringify(historyItems)),
         modelId: input.request.model.id,
         protocol: 'openai-responses',
+        sourceId: input.responses.lane.sourceId,
+        baseUrl: input.responses.lane.baseUrl,
         historyCompacted: input.historyCompacted,
         historyRewriteReason: input.request.historyRewriteReason,
         updatedAt: new Date().toISOString()
@@ -2045,6 +2086,19 @@ export class AgentRunner {
       toolsSchemaHash: hashStableText(toolsSchema),
       historyPrefixHash,
       modelId: input.request.model.id,
+      protocol: getProviderRequestLane({
+        provider: input.runtimeConfig.provider,
+        sourceId: input.runtimeConfig.sourceId,
+        baseUrl: input.runtimeConfig.baseUrl,
+        modelId: input.request.model.id
+      }).protocol,
+      sourceId: input.runtimeConfig.sourceId,
+      baseUrl: getProviderRequestLane({
+        provider: input.runtimeConfig.provider,
+        sourceId: input.runtimeConfig.sourceId,
+        baseUrl: input.runtimeConfig.baseUrl,
+        modelId: input.request.model.id
+      }).endpointLane,
       historyCompacted: input.historyCompacted,
       historyRewriteReason: input.request.historyRewriteReason,
       updatedAt: new Date().toISOString()

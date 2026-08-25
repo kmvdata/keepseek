@@ -122,13 +122,15 @@ KeepSeek 的工具集在会话内保持不变——工具 schema 集合和顺序
 
 KeepSeek 不让你在黑盒里猜花了多少钱：
 
-- **场景级用量统计**（0.2.2）：按执行、摘要、重试、续接、后台等场景分类，覆盖缓存命中/未命中的输入、输出/推理 Token、请求次数与来源成本——每一分钱花在哪都清清楚楚；
+- **来源 + 模型级用量统计**：先按账号与模型归属，再在每组内按执行、摘要、重试、续接、后台等场景分类；未计价来源明确显示“费用不可用”，不同币种不会直接相加；
 - **统一 Provider 请求投影**（0.2.2)：实际请求、上下文/Token 估算、越界防护、压缩决策、UI 用量与缓存测试使用**同一套投影**——显示用量与实际发送完全一致；
 - **费用估算**：按本地价格表（`keepseek.usagePricing` 可自定义）实时折算估算费用；
 - **上下文占用**：当前上下文占模型窗口的百分比、压缩触发阈值，快到压缩线时会提前告诉你；
 - **DeepSeek 余额**：自动查询并展示账户余额，心里有数；
-- **前缀指纹**：`systemPromptHash`、`toolsSchemaHash`、`historyPrefixHash`——每次请求记录，跨轮对比即可确认前缀是否稳定；
-- **失效归因**：当命中率显著下跌时，KeepSeek 自动给出候选原因——`system_prompt_changed`、`tools_schema_changed`、`model_changed`、`history_compacted`、`history_prefix_changed`、`prefix_changed_or_provider_cache_evicted`——让你知道缓存是被谁打碎的。
+- **逐轮缓存快照**：每条已完成回复的 Run Details 保存服务端真实返回的命中/未命中 Token、命中率、数据可用性与缓存通道变化；原始 endpoint 与内部哈希不暴露到 Webview；
+- **失效归因**：用量浮层和逐轮 Run Details 会展示模型、来源、协议、endpoint/cache lane、system prompt、tools schema、历史压缩/改写与服务端缓存逐出候选；只有服务端真实返回 miss 数据时才显示本轮未命中。
+
+模型选择由扩展端确认后才生效。前台回复生成中可排队“下一轮模型”并取消；后台任务未终止时模型会锁定。切到更小上下文窗口或跨越无法保真回放的 provider-native lane 时，KeepSeek 会用目标模型的真实窗口与当前投影占用给出一次本地确认，不会为提示或统计额外请求模型。
 
 > 其他客户端：命中率是个黑盒，降了也不知道为什么。
 > KeepSeek：命中率是仪表盘，降了直接告诉你哪个零件换了。

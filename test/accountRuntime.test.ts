@@ -100,6 +100,9 @@ interface UsageInvoker {
     trace: ReturnType<typeof createNoopInteractionTrace>,
     requestId: string,
     modelId: string,
+    sourceId: string,
+    provider: 'openai-compatible',
+    baseUrl: string,
     supportsBilling: boolean,
     source: 'executor'
   ): UsageEvent | undefined;
@@ -479,6 +482,9 @@ test('non-official sources record tokens but force cost and currency to empty va
     createNoopInteractionTrace(),
     'request-1',
     'deepseek-v4-flash',
+    'compatible-source',
+    'openai-compatible',
+    'https://compatible.example/v1',
     false,
     'executor'
   );

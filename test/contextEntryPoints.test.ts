@@ -137,6 +137,21 @@ test('command menu exposes an accessible persisted compression threshold tab sel
   assert.match(styles, /\.command-menu\.is-readonly \.command-compression-tab/u);
 });
 
+test('model picker waits for authoritative extension state and exposes pending cancellation', () => {
+  const inputTemplate = getInputTemplate();
+  const inputScript = getInputScript();
+
+  assert.match(inputTemplate, /id="commandModelStatus"[\s\S]*?role="status"[\s\S]*?aria-live="polite"/u);
+  assert.match(inputTemplate, /id="commandModelCancelPending"/u);
+  assert.match(inputTemplate, /id="composerModelStatus"[\s\S]*?role="status"[\s\S]*?aria-live="polite"/u);
+  assert.match(inputTemplate, /id="composerModelCancelPending"/u);
+  assert.match(inputScript, /type: 'setSelectedModel',[\s\S]*?requestId: nextModelSelectionRequestId\(\)/u);
+  assert.match(inputScript, /type: 'cancelPendingModelSelection'/u);
+  assert.doesNotMatch(inputScript, /state\.selectedSourceId = sourceId;[\s\S]*?state\.selectedModelId = modelId;/u);
+  assert.doesNotMatch(inputScript, /type: 'refreshBalance'/u);
+  assert.match(inputScript, /commandModelSwitch\.disabled = locked/u);
+});
+
 test('model settings dialog manages flat logo-led accounts and per-source models', async () => {
   const inputTemplate = getInputTemplate();
   const inputScript = getInputScript();
@@ -211,11 +226,12 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(inputScript, /function blockAccountSettingsWhileRunBusy/u);
   assert.match(inputScript, /function syncAccountSettingsRunBusyStatus/u);
   assert.match(inputScript, /function trapSettingsDialogFocus/u);
-  assert.match(inputScript, /var runBusy = Boolean\(state\.isBusy\)/u);
+  assert.match(inputScript, /var runBusy = Boolean\(state\.isBusy \|\| isModelSelectionLocked\(\)\)/u);
   assert.match(inputScript, /var controlsDisabled = operationBusy \|\| runBusy/u);
   assert.match(inputScript, /button\.disabled = controlsDisabled \|\| !account\.enabled/u);
   assert.match(inputScript, /settingsCancelBtn\.disabled = operationBusy/u);
-  assert.match(inputScript, /t\('modelSettingsReadonlyWhileBusy'\)/u);
+  assert.match(inputScript, /modelSettingsReadonlyWhileBusy/u);
+  assert.match(inputScript, /modelSelectionLockedByBackground/u);
   assert.ok((inputScript.match(/blockAccountSettingsWhileRunBusy\(\)/gu) ?? []).length >= 9);
   assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: '正在生成回复；完成或停止后才能修改模型设置。'/u);
   assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: 'Model settings are read-only while a response is being generated\. Finish or stop it first\.'/u);
@@ -256,7 +272,10 @@ test('command model labels prefer fetched names while hover keeps the model id',
     /return model\.fetchedName \|\| model\.label \|\| model\.id \|\| 'Model'/u
   );
   assert.match(inputScript, /label\.title = model\.id \|\| getModelDisplayLabel\(model\)/u);
-  assert.match(inputScript, /option\.title = model\.id \|\| getModelDisplayLabel\(model\)/u);
+  assert.match(
+    inputScript,
+    /option\.title = locked[\s\S]*?: isPending[\s\S]*?: model\.id \|\| getModelDisplayLabel\(model\)/u
+  );
 });
 
 test('rich prompt script exposes reference, skill, and external drop entry points', () => {

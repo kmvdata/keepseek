@@ -313,6 +313,28 @@ export function getInputStyles(): string {
       padding: var(--keepseek-toolbar-padding, 0 4px 4px);
     }
 
+    .composer-model-selection-status {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+      margin: 0 4px 3px;
+      padding: 4px 6px;
+      border-radius: 5px;
+      color: var(--vscode-descriptionForeground);
+      background: var(--vscode-textBlockQuote-background, var(--vscode-sideBar-background));
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .composer-model-selection-status > span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .composer-toolbar-left {
       display: flex;
       align-items: center;
@@ -660,6 +682,22 @@ export function getInputStyles(): string {
     .command-menu.is-readonly .command-row:disabled,
     .command-menu.is-readonly .command-control-row:disabled {
       color: var(--vscode-descriptionForeground);
+    }
+
+    .command-menu.is-readonly.allows-model-selection #commandModelSwitch:not(:disabled),
+    .command-menu.is-readonly.allows-model-selection .command-model-option:not(:disabled) {
+      cursor: pointer;
+    }
+
+    .command-menu.is-readonly.allows-model-selection #commandModelSwitch:not(:disabled):hover,
+    .command-menu.is-readonly.allows-model-selection #commandModelSwitch:not(:disabled):focus-visible,
+    .command-menu.is-readonly.allows-model-selection .command-model-option:not(:disabled):hover,
+    .command-menu.is-readonly.allows-model-selection .command-model-option:not(:disabled):focus-visible,
+    .command-menu.is-readonly.allows-model-selection .command-model-option.is-pending:not(:disabled) {
+      color: var(--vscode-list-hoverForeground, var(--vscode-foreground));
+      background: var(--vscode-list-hoverBackground);
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
     }
 
     .reference-menu {

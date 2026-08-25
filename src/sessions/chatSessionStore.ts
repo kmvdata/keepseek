@@ -1000,6 +1000,9 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
     assistantMessageId: typeof value.assistantMessageId === 'string' ? value.assistantMessageId : undefined,
     backgroundRunId: typeof value.backgroundRunId === 'string' ? value.backgroundRunId : undefined,
     modelId: value.modelId,
+    sourceId: typeof value.sourceId === 'string' ? value.sourceId : undefined,
+    provider: typeof value.provider === 'string' ? value.provider : undefined,
+    protocol: typeof value.protocol === 'string' ? value.protocol : undefined,
     status,
     startedAt: normalizeSessionTimestamp(value.startedAt, new Date().toISOString()),
     endedAt: normalizeOptionalTimestamp(value.endedAt),
@@ -1109,12 +1112,50 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
           after: normalizeNonNegativeInteger(value.contextDeduplication.after),
           discarded: normalizeNonNegativeInteger(value.contextDeduplication.discarded),
           truncated: value.contextDeduplication.truncated === true
-        }
+      }
+      : undefined,
+    cache: normalizeRunDetailsCache(value.cache),
+    historySummaries: Array.isArray(value.historySummaries)
+      ? value.historySummaries.filter(isRecord).slice(0, 32).map((summary) => ({
+          modelId: typeof summary.modelId === 'string' && summary.modelId.trim() ? summary.modelId.trim() : undefined,
+          sourceId: typeof summary.sourceId === 'string' && summary.sourceId.trim() ? summary.sourceId.trim() : undefined,
+          provider: typeof summary.provider === 'string' && summary.provider.trim() ? summary.provider.trim() : undefined,
+          createdAt: normalizeSessionTimestamp(summary.createdAt, new Date().toISOString())
+        }))
       : undefined,
     budgetStopReason: typeof value.budgetStopReason === 'string' ? value.budgetStopReason.slice(0, 120) : undefined,
     failureReason: typeof value.failureReason === 'string' ? value.failureReason.slice(0, 500) : undefined,
     traceLogUri: typeof value.traceLogUri === 'string' ? value.traceLogUri : undefined,
     truncated: value.truncated === true
+  };
+}
+
+function normalizeRunDetailsCache(
+  value: unknown
+): NonNullable<ChatMessage['runDetails']>['cache'] {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const providerDataStatus = value.providerDataStatus === 'reported'
+    || value.providerDataStatus === 'partial'
+    || value.providerDataStatus === 'unavailable'
+    ? value.providerDataStatus
+    : 'unavailable';
+  return {
+    cacheHitTokens: typeof value.cacheHitTokens === 'number' && value.cacheHitTokens >= 0
+      ? Math.floor(value.cacheHitTokens)
+      : undefined,
+    cacheMissTokens: typeof value.cacheMissTokens === 'number' && value.cacheMissTokens >= 0
+      ? Math.floor(value.cacheMissTokens)
+      : undefined,
+    hitRate: typeof value.hitRate === 'number' && value.hitRate >= 0
+      ? Math.min(100, value.hitRate)
+      : undefined,
+    providerDataStatus,
+    cacheLaneChanged: value.cacheLaneChanged === true,
+    cacheMissPossibleReasons: Array.isArray(value.cacheMissPossibleReasons)
+      ? value.cacheMissPossibleReasons.filter((reason): reason is string => typeof reason === 'string' && Boolean(reason.trim())).slice(0, 16)
+      : []
   };
 }
 
@@ -1353,6 +1394,8 @@ function normalizeHistorySummary(value: unknown): HistorySummary | undefined {
     updatedAt: normalizeSessionTimestamp(value.updatedAt, normalizeSessionTimestamp(value.createdAt, now)),
     tokenEstimate: normalizePositiveInteger(value.tokenEstimate, 0),
     modelId: typeof value.modelId === 'string' && value.modelId.trim() ? value.modelId.trim() : undefined,
+    sourceId: typeof value.sourceId === 'string' && value.sourceId.trim() ? value.sourceId.trim() : undefined,
+    provider: typeof value.provider === 'string' && value.provider.trim() ? value.provider.trim() : undefined,
     version: normalizePositiveInteger(value.version, 1)
   };
 }

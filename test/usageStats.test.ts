@@ -2,13 +2,15 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PromptCacheDiagnostics, TurnUsageStats } from '../src/shared/types';
 import {
+  addTurnUsageToSessionStats,
   addUsageEventToSessionStats,
   calculateCacheHitRate,
   calculateUsageCost,
   createUsageEvent,
   getCacheMissPossibleReasons,
   normalizeBalanceStateValue,
-  normalizeDeepSeekUsage
+  normalizeDeepSeekUsage,
+  normalizeSessionUsageStatsValue
 } from '../src/agent/usageStats';
 
 test('normalizes Kimi balance details without breaking legacy total-only records', () => {
@@ -57,6 +59,7 @@ test('normalizes DeepSeek cache hit and miss usage fields', () => {
     totalTokens: 1200,
     cacheHitTokens: 700,
     cacheMissTokens: 300,
+    cacheDataStatus: 'reported',
     reasoningTokens: 80
   });
   assert.equal(calculateCacheHitRate(usage!), 70);
@@ -76,7 +79,8 @@ test('uses cached_tokens fallback and derives miss tokens', () => {
     completionTokens: 100,
     totalTokens: 1000,
     cacheHitTokens: 450,
-    cacheMissTokens: 450
+    cacheMissTokens: 450,
+    cacheDataStatus: 'reported'
   });
 });
 
@@ -90,8 +94,21 @@ test('uses the Kimi-compatible top-level cached_tokens field for cost accounting
     completionTokens: 100,
     totalTokens: 1_100,
     cacheHitTokens: 600,
-    cacheMissTokens: 400
+    cacheMissTokens: 400,
+    cacheDataStatus: 'reported'
   });
+});
+
+test('marks absent provider cache fields unavailable instead of presenting a zero hit rate', () => {
+  const usage = normalizeDeepSeekUsage({
+    prompt_tokens: 900,
+    completion_tokens: 100,
+    total_tokens: 1_000
+  });
+  assert.equal(usage?.cacheDataStatus, 'unavailable');
+  assert.equal(usage?.cacheHitTokens, 0);
+  assert.equal(usage?.cacheMissTokens, 0);
+  assert.equal(calculateCacheHitRate(usage!), undefined);
 });
 
 test('calculates turn cost and cumulative average hit rate', () => {
@@ -163,6 +180,127 @@ test('classifies hidden calls by source without dropping their cost', () => {
   assert.equal(stats.bySource?.summary?.promptTokens, 500);
   assert.equal(stats.bySource?.summary?.reasoningTokens, 40);
   assert.equal(stats.bySource?.executor, undefined);
+});
+
+test('groups identical model IDs by source and keeps unpriced requests out of accounted cost', () => {
+  const usage = {
+    promptTokens: 100,
+    completionTokens: 20,
+    totalTokens: 120,
+    cacheHitTokens: 60,
+    cacheMissTokens: 40,
+    cacheDataStatus: 'reported' as const
+  };
+  const priced = createUsageEvent({
+    usage,
+    cost: 0.01,
+    currency: '¥',
+    sourceId: 'account-a',
+    modelId: 'same-model',
+    provider: 'deepseek',
+    protocol: 'chat-completions',
+    pricingStatus: 'priced'
+  });
+  const unpriced = createUsageEvent({
+    usage,
+    cost: 0,
+    currency: '',
+    sourceId: 'account-b',
+    modelId: 'same-model',
+    provider: 'openai-compatible',
+    protocol: 'chat-completions',
+    pricingStatus: 'unavailable'
+  });
+  const stats = addUsageEventToSessionStats(addUsageEventToSessionStats(undefined, priced), unpriced);
+
+  assert.equal(stats.byModelSource?.length, 2);
+  assert.equal(stats.byModelSource?.find((group) => group.sourceId === 'account-a')?.pricedRequestCount, 1);
+  assert.equal(stats.byModelSource?.find((group) => group.sourceId === 'account-b')?.unpricedRequestCount, 1);
+  assert.equal(stats.pricingStatus, 'partial');
+  assert.equal(stats.sessionCost, 0.01);
+  assert.deepEqual(stats.costByCurrency, { '¥': 0.01 });
+});
+
+test('does not add different currencies into one misleading session total', () => {
+  const usage = {
+    promptTokens: 10,
+    completionTokens: 1,
+    totalTokens: 11,
+    cacheHitTokens: 5,
+    cacheMissTokens: 5,
+    cacheDataStatus: 'reported' as const
+  };
+  const yuan = createUsageEvent({ usage, cost: 1, currency: '¥', sourceId: 'a', modelId: 'm', pricingStatus: 'priced' });
+  const dollars = createUsageEvent({ usage, cost: 2, currency: '$', sourceId: 'a', modelId: 'm', pricingStatus: 'priced' });
+  const stats = addUsageEventToSessionStats(addUsageEventToSessionStats(undefined, yuan), dollars);
+  assert.equal(stats.sessionCost, 0);
+  assert.equal(stats.currency, '$');
+  assert.deepEqual(stats.costByCurrency, { '¥': 1, '$': 2 });
+});
+
+test('keeps accounted cost and request attribution when a completed turn has mixed pricing availability', () => {
+  const turn: TurnUsageStats = {
+    promptTokens: 200,
+    completionTokens: 20,
+    totalTokens: 220,
+    cacheHitTokens: 80,
+    cacheMissTokens: 20,
+    cacheDataStatus: 'partial',
+    requestCount: 2,
+    cost: 0.02,
+    currency: '¥',
+    sourceId: 'account-a',
+    modelId: 'same-model',
+    provider: 'deepseek',
+    protocol: 'chat-completions',
+    pricingStatus: 'partial',
+    pricedRequestCount: 1,
+    unpricedRequestCount: 1,
+    cacheDataRequestCount: 1,
+    cacheDataMissingRequestCount: 1,
+    costByCurrency: { '¥': 0.02 },
+    bySource: {
+      executor: {
+        promptTokens: 200,
+        completionTokens: 20,
+        totalTokens: 220,
+        cacheHitTokens: 80,
+        cacheMissTokens: 20,
+        cacheDataStatus: 'partial',
+        requestCount: 2,
+        cost: 0.02,
+        pricedRequestCount: 1,
+        unpricedRequestCount: 1
+      }
+    }
+  };
+  const stats = addTurnUsageToSessionStats(undefined, turn);
+  const group = stats.byModelSource?.[0];
+
+  assert.equal(stats.pricingStatus, 'partial');
+  assert.equal(stats.sessionCost, 0.02);
+  assert.deepEqual(stats.costByCurrency, { '¥': 0.02 });
+  assert.equal(stats.pricedRequestCount, 1);
+  assert.equal(stats.unpricedRequestCount, 1);
+  assert.equal(group?.pricedRequestCount, 1);
+  assert.equal(group?.unpricedRequestCount, 1);
+  assert.equal(group?.bySource?.executor?.requestCount, 2);
+});
+
+test('normalizes old aggregate usage without inventing model attribution', () => {
+  const stats = normalizeSessionUsageStatsValue({
+    promptTokens: 100,
+    completionTokens: 10,
+    totalTokens: 110,
+    cacheHitTokens: 50,
+    cacheMissTokens: 50,
+    requestCount: 1,
+    sessionCost: 0,
+    currency: '¥'
+  });
+  assert.equal(stats?.legacyUnattributed, true);
+  assert.equal(stats?.byModelSource, undefined);
+  assert.equal(stats?.pricingStatus, 'unavailable');
 });
 
 function createTurnUsage(cacheHitTokens: number, cacheMissTokens: number): TurnUsageStats {
@@ -238,7 +376,25 @@ test('reports provider cache eviction when nothing locally changed but hit rate 
     previousTurnUsage: createTurnUsage(900, 100),
     currentTurnUsage: createTurnUsage(300, 700)
   });
-  assert.deepEqual(reasons, ['prefix_changed_or_provider_cache_evicted']);
+  assert.deepEqual(reasons, ['provider_cache_eviction_possible']);
+});
+
+test('attributes source, protocol, and endpoint cache-lane changes independently', () => {
+  const reasons = getCacheMissPossibleReasons({
+    previousDiagnostics: createDiagnostics({
+      sourceId: 'source-a',
+      protocol: 'chat-completions',
+      baseUrl: 'https://a.example/v1'
+    }),
+    diagnostics: createDiagnostics({
+      sourceId: 'source-b',
+      protocol: 'openai-responses',
+      baseUrl: 'https://b.example/v1/responses'
+    }),
+    previousTurnUsage: undefined,
+    currentTurnUsage: undefined
+  });
+  assert.deepEqual(reasons, ['source_changed', 'protocol_changed', 'endpoint_lane_changed']);
 });
 
 test('reports model change, compaction and rewrite reasons directly', () => {

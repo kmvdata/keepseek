@@ -14,6 +14,12 @@ export function getScript(): string {
       models: [],
       selectedSourceId: '',
       selectedModelId: '',
+      modelSelection: {
+        generation: 0,
+        currentRun: null,
+        pending: null,
+        lockedByBackground: false
+      },
       agentSettings: {
         thinkingEnabled: true,
         reasoningEffort: 'high',
@@ -1097,6 +1103,11 @@ export function getScript(): string {
       } else if (message.type === 'sessionChanged') {
         resetLocalContextUsageEstimate();
         clearPromptDraft();
+      } else if (message.type === 'modelSelectionFeedback') {
+        var feedbackMessage = String(message.message || '');
+        if (window.keepseekInputControls && window.keepseekInputControls.showStatus) {
+          window.keepseekInputControls.showStatus(feedbackMessage);
+        }
       } else if (message.type === 'showSettingsDialog') {
         if (window.keepseekInputControls && window.keepseekInputControls.showSettingsDialog) {
           window.keepseekInputControls.showSettingsDialog(message);
@@ -3225,6 +3236,8 @@ export function getScript(): string {
       var grid = document.createElement('div');
       grid.className = 'run-details-grid';
       appendRunDetailRow(grid, t('runDetailsModel'), details.modelId || '—');
+      appendRunDetailRow(grid, t('runDetailsSource'), getRunSourceLabel(details.sourceId, details.modelId));
+      appendRunDetailRow(grid, t('runDetailsProtocol'), details.protocol || details.provider || '—');
       appendRunDetailRow(grid, t('runDetailsStarted'), formatDateTime(details.startedAt));
       appendRunDetailRow(grid, t('runDetailsEnded'), formatDateTime(details.endedAt));
       appendRunDetailRow(grid, t('runDetailsStatus'), getRunStatusLabel(details.status));
@@ -3236,6 +3249,47 @@ export function getScript(): string {
       ].filter(Boolean).join(' · '));
       appendRunDetailRow(grid, t('runDetailsTools'), String(Number(details.toolCallCount) || (Array.isArray(details.toolCalls) ? details.toolCalls.length : 0)));
       body.append(grid);
+
+      if (details.cache) {
+        var cacheLines = [];
+        if (details.cache.providerDataStatus === 'unavailable') {
+          cacheLines.push(t('runDetailsCacheUnavailable'));
+        } else {
+          if (details.cache.providerDataStatus === 'partial') {
+            cacheLines.push(t('runDetailsCachePartial'));
+          }
+          if (typeof details.cache.cacheHitTokens === 'number') {
+            cacheLines.push(t('runDetailsCacheHit', { tokens: formatRunTokenCount(details.cache.cacheHitTokens) }));
+          }
+          if (typeof details.cache.cacheMissTokens === 'number') {
+            cacheLines.push(t('runDetailsCacheMiss', { tokens: formatRunTokenCount(details.cache.cacheMissTokens) }));
+          }
+          if (typeof details.cache.hitRate === 'number') {
+            cacheLines.push(t('runDetailsCacheRate', { percent: Number(details.cache.hitRate).toFixed(2) + '%' }));
+          }
+        }
+        if (details.cache.cacheLaneChanged) {
+          cacheLines.push(t('runDetailsCacheLaneChanged'));
+        }
+        var cacheReasons = Array.isArray(details.cache.cacheMissPossibleReasons)
+          ? details.cache.cacheMissPossibleReasons.map(formatCacheReasonForView)
+          : [];
+        if (cacheReasons.length) {
+          cacheLines.push(t('runDetailsCacheReasons') + ': ' + cacheReasons.join(' · '));
+        }
+        body.append(createRunTextSection(t('runDetailsCache'), cacheLines));
+      }
+
+      if (Array.isArray(details.historySummaries) && details.historySummaries.length) {
+        body.append(createRunTextSection(t('runDetailsHistorySummaries'), details.historySummaries.map(function(summary) {
+          return t('runDetailsSummaryProvenance', {
+            model: summary.modelId || '—',
+            source: summary.sourceId || t('summarySourceUnknown'),
+            provider: summary.provider || '—',
+            createdAt: formatDateTime(summary.createdAt)
+          });
+        })));
+      }
 
       var contextSources = Array.isArray(details.contextSources) ? details.contextSources : [];
       var projectInstructions = contextSources.filter(function(source) { return source.kind === 'project-instructions'; });
@@ -3396,6 +3450,38 @@ export function getScript(): string {
       return button;
     }
 
+    function getRunSourceLabel(sourceId, modelId) {
+      var models = Array.isArray(state.models) ? state.models : [];
+      for (var i = 0; i < models.length; i++) {
+        if (models[i].sourceId === sourceId && models[i].id === modelId) {
+          return models[i].sourceName || sourceId || t('summarySourceUnknown');
+        }
+      }
+      return sourceId || t('summarySourceUnknown');
+    }
+
+    function formatRunTokenCount(value) {
+      var tokens = Math.max(0, Math.floor(Number(value) || 0));
+      if (tokens >= 1000000) return (tokens / 1000000).toFixed(2).replace(/\\.?0+$/u, '') + 'M';
+      if (tokens >= 1000) return (tokens / 1000).toFixed(1).replace(/\\.?0+$/u, '') + 'K';
+      return String(tokens);
+    }
+
+    function formatCacheReasonForView(reason) {
+      var normalized = String(reason || '');
+      if (normalized.indexOf('history_rewrite:') === 0) {
+        var rewriteReason = normalized.slice('history_rewrite:'.length);
+        var rewriteKey = 'cacheReason_history_rewrite_' + rewriteReason;
+        var rewriteLabel = t(rewriteKey);
+        return rewriteLabel === rewriteKey
+          ? t('cacheReason_history_rewrite')
+          : t('cacheReason_history_rewrite') + ' (' + rewriteLabel + ')';
+      }
+      var key = 'cacheReason_' + normalized;
+      var localized = t(key);
+      return localized === key ? normalized : localized;
+    }
+
     function getRunStatusLabel(statusValue) {
       var key = 'runStatus_' + String(statusValue || 'failed');
       var value = t(key);
@@ -3424,11 +3510,30 @@ export function getScript(): string {
       var lines = [
         'KeepSeek Run ' + String(details.runId || ''),
         t('runDetailsModel') + ': ' + String(details.modelId || ''),
+        t('runDetailsSource') + ': ' + getRunSourceLabel(details.sourceId, details.modelId),
+        t('runDetailsProtocol') + ': ' + String(details.protocol || details.provider || '—'),
         t('runDetailsStatus') + ': ' + getRunStatusLabel(details.status),
         t('runDetailsStarted') + ': ' + formatDateTime(details.startedAt),
         t('runDetailsEnded') + ': ' + formatDateTime(details.endedAt),
         t('runDetailsTools') + ': ' + String(Number(details.toolCallCount) || (Array.isArray(details.toolCalls) ? details.toolCalls.length : 0))
       ];
+      if (details.cache) {
+        lines.push(t('runDetailsCache') + ': ' + [
+          details.cache.providerDataStatus === 'unavailable' ? t('runDetailsCacheUnavailable') : '',
+          typeof details.cache.cacheHitTokens === 'number' ? t('runDetailsCacheHit', { tokens: formatRunTokenCount(details.cache.cacheHitTokens) }) : '',
+          typeof details.cache.cacheMissTokens === 'number' ? t('runDetailsCacheMiss', { tokens: formatRunTokenCount(details.cache.cacheMissTokens) }) : '',
+          details.cache.cacheLaneChanged ? t('runDetailsCacheLaneChanged') : '',
+          ...(Array.isArray(details.cache.cacheMissPossibleReasons) ? details.cache.cacheMissPossibleReasons.map(formatCacheReasonForView) : [])
+        ].filter(Boolean).join(' · '));
+      }
+      (details.historySummaries || []).forEach(function(summary) {
+        lines.push(t('runDetailsHistorySummaries') + ': ' + t('runDetailsSummaryProvenance', {
+          model: summary.modelId || '—',
+          source: summary.sourceId || t('summarySourceUnknown'),
+          provider: summary.provider || '—',
+          createdAt: formatDateTime(summary.createdAt)
+        }));
+      });
       if (details.taskPlan?.goal) lines.push(t('runDetailsTaskPlan') + ': ' + details.taskPlan.goal);
       var contextSources = Array.isArray(details.contextSources) ? details.contextSources : [];
       contextSources.forEach(function(source) {

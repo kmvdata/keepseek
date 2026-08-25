@@ -18,6 +18,10 @@ export function getInputTemplate(): string {
             data-placeholder="描述要构建的内容"
             data-i18n-placeholder="promptPlaceholder"
           ></div>
+          <div id="composerModelStatus" class="composer-model-selection-status hidden" role="status" aria-live="polite">
+            <span id="composerModelStatusText"></span>
+            <button id="composerModelCancelPending" type="button" class="command-model-cancel" data-i18n="cancelPendingModel">取消待切换</button>
+          </div>
           <div class="composer-toolbar" aria-label="Chat input toolbar" data-i18n-aria-label="chatInputToolbar">
             <div class="composer-toolbar-left">
               <button
@@ -156,11 +160,15 @@ export function getInputTemplate(): string {
             >
               <span class="command-row-main">
                 <span class="command-row-title" data-i18n="switchModel">Switch model...</span>
-                <span class="command-row-description" data-i18n="switchModelDescription">切换 AI 模型</span>
+                <span id="commandModelDescription" class="command-row-description" data-i18n="switchModelDescription">切换 AI 模型</span>
               </span>
               <span id="commandModelValue" class="command-row-value">DeepSeek-V4-Flash</span>
             </button>
             <div id="commandModelList" class="command-model-list hidden" role="group" aria-label="模型列表" data-i18n-aria-label="modelList"></div>
+            <div id="commandModelStatus" class="command-model-status hidden" role="status" aria-live="polite">
+              <span id="commandModelStatusText"></span>
+              <button id="commandModelCancelPending" type="button" class="command-model-cancel hidden" data-i18n="cancelPendingModel">取消待切换</button>
+            </div>
             <div class="command-control-row command-compression-row">
               <span class="command-row-main">
                 <span class="command-row-title" data-i18n="compressionThreshold">自动压缩阈值</span>

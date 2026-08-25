@@ -32,6 +32,7 @@ import {
   KeepseekModel,
   LegacyProjectMemoryMigrationStateView,
   PromptCacheDiagnostics,
+  RunDetailsCacheSummary,
   RepairLoopState,
   SafeNpmScript,
   TaskPlan,
@@ -121,6 +122,7 @@ import { BackgroundRunCoordinator } from '../agent/backgroundRunCoordinator';
 import { BackgroundRunStatusBar } from './backgroundRunStatusBar';
 import { getAvailableSafeValidationScripts } from '../agent/tools/validationTools';
 import {
+  buildProviderRequestProjection,
   CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
   CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
   LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION,
@@ -129,16 +131,23 @@ import {
 import {
   ModelSourceStore
 } from '../accounts/accountStore';
-import { resolveModelSourceConfig } from '../accounts/accountResolver';
+import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
 import { probeSourceConnection, refreshSourceModelCache } from '../accounts/modelDiscovery';
 import { createModelCatalog, findModelBySelection } from '../accounts/modelCatalog';
 import { ModelSourceService } from '../accounts/modelSourceService';
-import { isOfficialDeepSeekSource } from '../accounts/sourceCapabilities';
+import { isOfficialDeepSeekSource, requiresModelSourceApiKey } from '../accounts/sourceCapabilities';
 import type {
   ModelSource,
   ModelSourceConfigSnapshot,
   ModelSourceProvider
 } from '../accounts/types';
+import {
+  analyzeModelSwitchImpact,
+  isBackgroundModelSelectionLocked,
+  ModelSelectionTransactionCoordinator,
+  type ModelSwitchImpact,
+  type PendingModelSelection
+} from './modelSelection';
 
 const CHAT_CONTAINER_ID = 'keepseek-sidebar';
 const CHAT_VIEW_TYPE = 'keepseek.chat';
@@ -177,6 +186,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private availableModels: KeepseekModel[] = [];
   private selectedSourceId = '';
   private selectedModelId = '';
+  private modelSelectionPersistenceDepth = 0;
+  private readonly modelSelectionTransactions = new ModelSelectionTransactionCoordinator();
+  private modelSelectionMutationPromise: Promise<void> = Promise.resolve();
+  private readonly backgroundRunModelSelections = new Map<string, { sourceId: string; modelId: string }>();
   private agentSettings = getConfiguredAgentSettings();
   private language = getConfiguredKeepseekLanguage();
   private isBusy = false;
@@ -218,6 +231,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       () => this.sessionStore.workspaceKey
     );
     this.backgroundRunCoordinator = new BackgroundRunCoordinator((run) => {
+      if (run && (run.status === 'completed' || run.status === 'failed' || run.status === 'stopped')) {
+        this.backgroundRunModelSelections.delete(run.id);
+      }
       this.backgroundRunStatusBar.update(run);
       this.postState();
     });
@@ -260,6 +276,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public refreshConfiguration(): void {
+    if (this.modelSelectionPersistenceDepth > 0) {
+      return;
+    }
     this.syncConfiguredState();
     void this.cleanupExpiredSessions();
     this.postState();
@@ -275,6 +294,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.clearSessionTransientState();
     this.abortPrompt();
     this.backgroundRunCoordinator.clear();
+    this.backgroundRunModelSelections.clear();
     this.currentRunContextsBySession.clear();
     this.slimToolNamesBySession.clear();
     await this.legacyMemoryMigration.refresh();
@@ -704,7 +724,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.deleteOtherWorkspace(message.workspaceKey);
         return;
       case 'setSelectedModel':
-        await this.setSelectedModel(message.sourceId, message.modelId);
+        await this.setSelectedModel(message.requestId, message.sourceId, message.modelId);
+        return;
+      case 'cancelPendingModelSelection':
+        this.cancelPendingModelSelection(message.requestId);
         return;
       case 'setAgentSettings':
         await this.setAgentSettings(message.settings);
@@ -1114,9 +1137,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     previousDiagnostics: PromptCacheDiagnostics | undefined,
     previousTurnUsage: TurnUsageStats | undefined,
     currentTurnUsage: TurnUsageStats | undefined
-  ): void {
+  ): string[] {
     if (!diagnostics) {
-      return;
+      return [];
     }
 
     const cacheMissPossibleReasons = getCacheMissPossibleReasons({
@@ -1139,10 +1162,34 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         currentHitRate: currentTurnUsage ? calculateCacheHitRate(currentTurnUsage) : undefined
       });
     }
+    return cacheMissPossibleReasons;
+  }
+
+  private createRunCacheSummary(
+    currentTurnUsage: TurnUsageStats | undefined,
+    cacheMissPossibleReasons: string[]
+  ): RunDetailsCacheSummary {
+    const providerDataStatus = currentTurnUsage?.cacheDataStatus ?? 'unavailable';
+    return {
+      ...(providerDataStatus === 'unavailable' ? {} : {
+        cacheHitTokens: currentTurnUsage?.cacheHitTokens,
+        cacheMissTokens: currentTurnUsage?.cacheMissTokens,
+        hitRate: currentTurnUsage ? calculateCacheHitRate(currentTurnUsage) : undefined
+      }),
+      providerDataStatus,
+      cacheLaneChanged: cacheMissPossibleReasons.some((reason) => (
+        reason === 'model_changed'
+        || reason === 'source_changed'
+        || reason === 'protocol_changed'
+        || reason === 'endpoint_lane_changed'
+      )),
+      cacheMissPossibleReasons
+    };
   }
 
   private createCurrentSessionContextUsage(model = this.getSelectedModel()): ContextUsageEstimate {
     const activeSession = this.sessionStore.getActiveSession();
+    const modelSource = this.modelSources.find((source) => source.id === model.sourceId);
     return createDisplayedSessionContextUsageEstimate({
       model,
       agentSettings: this.agentSettings,
@@ -1156,11 +1203,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         ? activeSession.requestProtocol.toolNames
         : this.slimToolNamesBySession.get(activeSession.id),
       requestProtocolVersion: activeSession.requestProtocol?.version,
-      provider: model.provider === 'openai-responses' || model.provider === 'anthropic-compatible'
-        ? model.provider
-        : undefined,
-      sourceId: activeSession.requestProtocol?.sourceId ?? model.sourceId,
-      baseUrl: activeSession.requestProtocol?.baseUrl
+      provider: modelSource?.provider,
+      sourceId: model.sourceId,
+      baseUrl: modelSource?.baseUrl
     });
   }
 
@@ -1750,12 +1795,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async refreshModelSourceState(): Promise<void> {
+  private async refreshModelSourceState(options: { preserveAuthoritativeSelection?: boolean } = {}): Promise<void> {
     const generation = ++this.modelSourceStateRefreshGeneration;
     const refreshPromise = (async () => {
       const modelSources = await this.sourceStore.listSources();
       const availableModels = createModelCatalog(modelSources);
-      const selection = getConfiguredModelSelection(availableModels);
+      const selection = options.preserveAuthoritativeSelection
+        ? { sourceId: this.selectedSourceId, modelId: this.selectedModelId }
+        : getConfiguredModelSelection(availableModels);
       const selectedModel = findModelBySelection(availableModels, selection);
       if (selectedModel?.sourceId && selectedModel.supportsBilling) {
         await this.balanceStore.refreshFromDisk(this.getBalanceSourceScope(selectedModel.sourceId));
@@ -1837,10 +1884,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private rejectModelSourceMutationWhileBusy(): boolean {
-    if (!this.isBusy) {
+    if (!this.isBusy && !this.hasActiveBackgroundRun()) {
       return false;
     }
-    void vscode.window.showInformationMessage(this.t('modelSettingsReadonlyWhileBusy'));
+    void vscode.window.showInformationMessage(this.t(
+      this.hasActiveBackgroundRun() ? 'modelSelectionLockedByBackground' : 'modelSettingsReadonlyWhileBusy'
+    ));
     this.postModelSettingsDialog();
     return true;
   }
@@ -2109,28 +2158,328 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async setSelectedModel(sourceId: string, modelId: string): Promise<void> {
-    if (this.isBusy) {
+  private async setSelectedModel(requestId: string, sourceId: string, modelId: string): Promise<void> {
+    const generation = this.modelSelectionTransactions.beginRequest();
+    const operation = this.modelSelectionMutationPromise.then(() => (
+      this.processSelectedModelRequest(requestId, sourceId, modelId, generation)
+    ));
+    this.modelSelectionMutationPromise = operation.catch(() => undefined);
+    await operation;
+  }
+
+  private async processSelectedModelRequest(
+    requestId: string,
+    sourceId: string,
+    modelId: string,
+    generation: number
+  ): Promise<void> {
+    if (!this.modelSelectionTransactions.isCurrent(generation)) {
+      return;
+    }
+    if (this.hasActiveBackgroundRun()) {
+      this.postModelSelectionFeedback(requestId, 'locked', this.t('modelSelectionLockedByBackground'));
+      this.postState();
+      return;
+    }
+
+    await this.refreshModelSourceState({ preserveAuthoritativeSelection: true });
+    if (!this.modelSelectionTransactions.isCurrent(generation)) {
       return;
     }
     const model = findModelBySelection(this.availableModels, { sourceId, modelId });
     if (!model?.sourceId) {
+      this.modelSelectionTransactions.clearPending(generation);
+      this.postModelSelectionFeedback(requestId, 'failed', this.t('modelSelectionUnavailable'));
+      this.postState();
       return;
     }
-    await this.persistModelSelection(model.sourceId, model.id);
-    this.balanceStore.selectSource(this.getBalanceSourceScope(model.sourceId));
-    void this.refreshBalance({ force: false });
+
+    const currentIsTarget = model.sourceId === this.selectedSourceId && model.id === this.selectedModelId;
+    if (currentIsTarget) {
+      const hadPendingSelection = Boolean(this.modelSelectionTransactions.getSnapshot().pending);
+      this.modelSelectionTransactions.clearPending(generation);
+      this.postModelSelectionFeedback(requestId, 'cancelled', hadPendingSelection
+        ? this.t('modelPendingCancelled')
+        : this.t('modelAlreadySelected', { model: this.getModelLabel(model) }));
+      this.postState();
+      return;
+    }
+
+    let sourceConfig: ModelSourceConfigSnapshot;
+    let impact: ModelSwitchImpact;
+    try {
+      sourceConfig = await this.resolveModelSelectionSource(model);
+      impact = this.createModelSwitchImpact(model, sourceConfig);
+    } catch (error) {
+      if (!this.modelSelectionTransactions.isCurrent(generation)) {
+        return;
+      }
+      this.modelSelectionTransactions.clearPending(generation);
+      this.postModelSelectionFeedback(requestId, 'failed', this.t('modelOperationFailed', {
+        message: getErrorMessage(error)
+      }));
+      this.postState();
+      return;
+    }
+
+    if (impact.confirmationRiskKeys.length && !(await this.confirmModelSwitch(model, impact))) {
+      if (this.modelSelectionTransactions.isCurrent(generation)) {
+        this.modelSelectionTransactions.clearPending(generation);
+        this.postModelSelectionFeedback(requestId, 'cancelled', this.t('modelSwitchCancelled'));
+        this.postState();
+      }
+      return;
+    }
+    if (!this.modelSelectionTransactions.isCurrent(generation)) {
+      return;
+    }
+
+    if (this.isBusy) {
+      this.modelSelectionTransactions.queuePending({
+        sourceId: model.sourceId,
+        modelId: model.id,
+        requestedAt: new Date().toISOString(),
+        confirmedRiskKeys: impact.confirmationRiskKeys
+      }, generation);
+      this.postModelSelectionFeedback(requestId, 'pending', this.t('modelPendingQueued', {
+        current: this.getModelLabelBySelection(this.selectedSourceId, this.selectedModelId),
+        target: this.getModelLabel(model)
+      }));
+      this.postState();
+      return;
+    }
+
+    await this.applyValidatedModelSelection(requestId, generation, model, sourceConfig, impact);
+  }
+
+  private cancelPendingModelSelection(requestId: string): void {
+    const generation = this.modelSelectionTransactions.beginRequest();
+    this.modelSelectionTransactions.clearPending(generation);
+    this.postModelSelectionFeedback(requestId, 'cancelled', this.t('modelPendingCancelled'));
+    this.postState();
+  }
+
+  private async applyPendingModelSelectionAfterRun(): Promise<void> {
+    const pending = this.modelSelectionTransactions.finishRun();
+    if (!pending) {
+      return;
+    }
+    const operation = this.modelSelectionMutationPromise.then(() => this.processPendingModelSelection(pending));
+    this.modelSelectionMutationPromise = operation.catch(() => undefined);
+    await operation;
+  }
+
+  private async processPendingModelSelection(pending: PendingModelSelection): Promise<void> {
+    const requestId = `pending-${pending.requestGeneration}`;
+    try {
+      await this.refreshModelSourceState({ preserveAuthoritativeSelection: true });
+      if (!this.modelSelectionTransactions.isCurrent(pending.requestGeneration)) {
+        return;
+      }
+      const model = findModelBySelection(this.availableModels, pending);
+      if (!model?.sourceId) {
+        this.modelSelectionTransactions.clearPending(pending.requestGeneration);
+        this.postModelSelectionFeedback(requestId, 'failed', this.t('modelPendingUnavailable'));
+        return;
+      }
+      const sourceConfig = await this.resolveModelSelectionSource(model);
+      const impact = this.createModelSwitchImpact(model, sourceConfig);
+      const newlyIntroducedRisk = impact.confirmationRiskKeys.some((risk) => !pending.confirmedRiskKeys.includes(risk));
+      if (newlyIntroducedRisk && !(await this.confirmModelSwitch(model, impact))) {
+        this.modelSelectionTransactions.clearPending(pending.requestGeneration);
+        this.postModelSelectionFeedback(requestId, 'cancelled', this.t('modelSwitchCancelled'));
+        return;
+      }
+      await this.applyValidatedModelSelection(requestId, pending.requestGeneration, model, sourceConfig, impact);
+    } catch (error) {
+      if (this.modelSelectionTransactions.isCurrent(pending.requestGeneration)) {
+        this.modelSelectionTransactions.clearPending(pending.requestGeneration);
+        this.postModelSelectionFeedback(requestId, 'failed', this.t('modelOperationFailed', {
+          message: getErrorMessage(error)
+        }));
+      }
+    }
+  }
+
+  private async applyValidatedModelSelection(
+    requestId: string,
+    generation: number,
+    model: KeepseekModel,
+    sourceConfig: ModelSourceConfigSnapshot,
+    impact: ModelSwitchImpact
+  ): Promise<void> {
+    if (!this.modelSelectionTransactions.isCurrent(generation)) {
+      return;
+    }
+    const previousSelection = {
+      sourceId: this.selectedSourceId,
+      modelId: this.selectedModelId
+    };
+    try {
+      await this.persistModelSelection(model.sourceId ?? sourceConfig.sourceId, model.id);
+    } catch (error) {
+      if (this.modelSelectionTransactions.isCurrent(generation)) {
+        this.modelSelectionTransactions.clearPending(generation);
+        this.postModelSelectionFeedback(requestId, 'failed', this.t('modelOperationFailed', {
+          message: getErrorMessage(error)
+        }));
+        this.postState();
+      }
+      return;
+    }
+    if (!this.modelSelectionTransactions.commit(generation)) {
+      try {
+        await this.persistModelSelection(previousSelection.sourceId, previousSelection.modelId);
+      } catch (error) {
+        this.selectedSourceId = previousSelection.sourceId;
+        this.selectedModelId = previousSelection.modelId;
+        console.warn('[KeepSeek] Failed to roll back a superseded model selection:', getErrorMessage(error));
+      }
+      return;
+    }
+    const activeSession = this.sessionStore.getActiveSession();
+    activeSession.contextUsage = impact.targetContextUsage;
+    this.liveContextUsage = undefined;
+    this.balanceStore.selectSource(this.getBalanceSourceScope(sourceConfig.sourceId));
+    this.postModelSelectionFeedback(requestId, 'applied', impact.cacheLaneChanged
+      ? this.t('modelSwitchedCacheLane', { model: this.getModelLabel(model) })
+      : this.t('modelSwitchedTo', { model: this.getModelLabel(model) }));
     this.postState();
   }
 
   private async persistModelSelection(sourceId: string, modelId: string): Promise<void> {
+    const previousSourceId = this.selectedSourceId;
+    const previousModelId = this.selectedModelId;
+    const config = vscode.workspace.getConfiguration('keepseek');
+    this.modelSelectionPersistenceDepth += 1;
+    try {
+      await config.update('selectedSourceId', sourceId, vscode.ConfigurationTarget.Workspace);
+      await config.update('selectedModelId', modelId, vscode.ConfigurationTarget.Workspace);
+    } catch (error) {
+      try {
+        await config.update('selectedSourceId', previousSourceId, vscode.ConfigurationTarget.Workspace);
+        await config.update('selectedModelId', previousModelId, vscode.ConfigurationTarget.Workspace);
+      } catch {
+        // The in-memory authoritative selection remains unchanged; the next
+        // configuration refresh will reconcile any partial external write.
+      }
+      throw error;
+    } finally {
+      this.modelSelectionPersistenceDepth = Math.max(0, this.modelSelectionPersistenceDepth - 1);
+    }
     this.selectedSourceId = sourceId;
     this.selectedModelId = modelId;
-    const config = vscode.workspace.getConfiguration('keepseek');
-    await Promise.all([
-      config.update('selectedSourceId', sourceId, vscode.ConfigurationTarget.Workspace),
-      config.update('selectedModelId', modelId, vscode.ConfigurationTarget.Workspace)
-    ]);
+  }
+
+  private async resolveModelSelectionSource(model: KeepseekModel): Promise<ModelSourceConfigSnapshot> {
+    const resolved = await resolveModelSourceConfig(model.sourceId, this.globalStorageUri, {
+      sourceStore: this.sourceStore,
+      language: this.language,
+      requireApiKey: false
+    });
+    if (!resolved.apiKey.trim() && requiresModelSourceApiKey(resolved)) {
+      throw new MissingModelSourceApiKeyError(this.language);
+    }
+    return Object.freeze({
+      sourceId: resolved.sourceId,
+      provider: resolved.provider,
+      apiKey: resolved.apiKey,
+      baseUrl: resolved.baseUrl,
+      supportsBilling: resolved.supportsBilling
+    });
+  }
+
+  private createModelSwitchImpact(
+    model: KeepseekModel,
+    sourceConfig: ModelSourceConfigSnapshot
+  ): ModelSwitchImpact {
+    const activeSession = this.sessionStore.getActiveSession();
+    const targetProfile = getAgentRuntimeProfile(model, this.agentSettings);
+    const targetContextUsage = createDisplayedSessionContextUsageEstimate({
+      model,
+      agentSettings: this.agentSettings,
+      contextFiles: this.fileContext.getAll(),
+      currentRunContext: this.currentRunContextsBySession.get(activeSession.id),
+      contextInstructions: activeSession.contextInstructions,
+      messages: this.messages,
+      contextCompression: activeSession.contextCompression,
+      language: this.language,
+      slimToolNames: activeSession.requestProtocol?.toolNames,
+      requestProtocolVersion: activeSession.requestProtocol?.version,
+      provider: sourceConfig.provider,
+      sourceId: sourceConfig.sourceId,
+      baseUrl: sourceConfig.baseUrl
+    });
+    const targetProjection = buildProviderRequestProjection({
+      model,
+      agentSettings: this.agentSettings,
+      contextFiles: this.fileContext.getAll(),
+      currentRunContext: this.currentRunContextsBySession.get(activeSession.id),
+      contextInstructions: activeSession.contextInstructions,
+      history: this.messages,
+      contextCompression: activeSession.contextCompression,
+      language: this.language,
+      prompt: '',
+      slimToolNames: activeSession.requestProtocol?.toolNames,
+      requestProtocolVersion: activeSession.requestProtocol?.version,
+      maxProjectionTokens: targetProfile.contextWindowTokens * targetProfile.contextCompression.forceRatio,
+      provider: sourceConfig.provider,
+      sourceId: sourceConfig.sourceId,
+      baseUrl: sourceConfig.baseUrl
+    });
+    return analyzeModelSwitchImpact({
+      session: activeSession,
+      targetModel: model,
+      targetProvider: sourceConfig.provider,
+      targetSourceId: sourceConfig.sourceId,
+      targetBaseUrl: sourceConfig.baseUrl,
+      settings: this.agentSettings,
+      targetContextUsage,
+      targetProjectedHistory: targetProjection.historyProjection.history
+    });
+  }
+
+  private async confirmModelSwitch(model: KeepseekModel, impact: ModelSwitchImpact): Promise<boolean> {
+    const confirmAction = this.t('modelSwitchConfirmAction');
+    const hasContextRisk = impact.confirmationRiskKeys.some((risk) => risk.startsWith('context_'));
+    const details = [
+      hasContextRisk
+        ? this.t('modelSwitchContextRisk', {
+            model: this.getModelLabel(model),
+            window: formatTokenCount(impact.contextWindowTokens),
+            percent: impact.usedPercent.toFixed(2)
+          })
+        : '',
+      impact.providerReplayFidelityRisk ? this.t('modelSwitchReplayRisk') : ''
+    ].filter(Boolean).join('\n\n');
+    const selected = await vscode.window.showWarningMessage(
+      this.t('modelSwitchRiskTitle', { model: this.getModelLabel(model) }),
+      { modal: true, detail: details },
+      confirmAction
+    );
+    return selected === confirmAction;
+  }
+
+  private getModelLabel(model: KeepseekModel): string {
+    return model.fetchedName?.trim() || model.label?.trim() || model.id;
+  }
+
+  private getModelLabelBySelection(sourceId: string, modelId: string): string {
+    const model = findModelBySelection(this.availableModels, { sourceId, modelId });
+    return model ? this.getModelLabel(model) : modelId;
+  }
+
+  private postModelSelectionFeedback(
+    requestId: string,
+    status: 'applied' | 'pending' | 'failed' | 'cancelled' | 'locked',
+    message: string
+  ): void {
+    this.postToWebview({
+      type: 'modelSelectionFeedback',
+      requestId,
+      status,
+      message
+    });
   }
 
   private syncConfiguredState(): void {
@@ -2613,7 +2962,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const configuredMaxRounds = getConfiguredBackgroundMaxRounds();
     const maxRounds = normalizeIntegerInRange(requestedMaxRounds, 1, configuredMaxRounds, configuredMaxRounds);
     try {
-      this.backgroundRunCoordinator.start({
+      const backgroundRun = this.backgroundRunCoordinator.start({
         sessionId: this.sessionStore.activeSessionId,
         workspaceKey: this.sessionStore.workspaceKey,
         goal: {
@@ -2629,6 +2978,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           maxToolCalls: getConfiguredBackgroundMaxToolCalls()
         }
       });
+      this.backgroundRunModelSelections.set(backgroundRun.id, {
+        sourceId: this.selectedSourceId,
+        modelId: this.selectedModelId
+      });
       await this.executeBackgroundRound(false);
     } catch (error) {
       vscode.window.showErrorMessage(getErrorMessage(error));
@@ -2637,7 +2990,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private hasActiveBackgroundRun(): boolean {
     const status = this.backgroundRunCoordinator.getActiveRun()?.status;
-    return status === 'running' || status === 'waiting_for_apply' || status === 'waiting_for_authorization';
+    return isBackgroundModelSelectionLocked(status);
   }
 
   private async resumeBackgroundRun(): Promise<void> {
@@ -2686,10 +3039,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       : this.language === 'en'
         ? `Start a controlled background repair task. Run keepseek_run_validation with script "${script}". If it fails, read Problems and prepare one reviewed repair ChangeSet. Stop when validation passes or user review is required. Never bypass authorization or apply edits automatically.`
         : `启动受控后台修复任务。运行 keepseek_run_validation，script 为“${script}”。若失败，读取 Problems 并准备一个需审核的修复 ChangeSet。验证通过或需要用户审核时停止。不得绕过授权或自动应用修改。`;
-    const response = await this.sendPrompt(prompt, this.selectedSourceId, this.selectedModelId, this.agentSettings, {
+    const frozenSelection = this.backgroundRunModelSelections.get(started.id);
+    if (!frozenSelection) {
+      const failed = this.backgroundRunCoordinator.fail(this.t('backgroundModelUnavailable'));
+      await this.appendBackgroundOutcomeMessage(failed.stopReason ?? this.t('backgroundModelUnavailable'));
+      return;
+    }
+    const response = await this.sendPrompt(prompt, frozenSelection.sourceId, frozenSelection.modelId, this.agentSettings, {
       repairLoop,
       executionLimits: this.backgroundRunCoordinator.getRemainingExecutionLimits(),
-      backgroundRunId: started.id
+      backgroundRunId: started.id,
+      strictModelSelection: true
     });
     const current = this.backgroundRunCoordinator.getActiveRun();
     if (!current || current.status === 'stopped') {
@@ -2812,6 +3172,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       repairLoop?: RepairLoopState;
       executionLimits?: AgentExecutionLimits;
       backgroundRunId?: string;
+      strictModelSelection?: boolean;
     }
   ): Promise<AgentResponse | undefined> {
     const trimmedPrompt = prompt.trim();
@@ -2842,12 +3203,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     await this.refreshModelSourceState();
     this.agentSettings = normalizeAgentSettings(settings, this.agentSettings);
     const models = this.availableModels;
-    const model = findModelBySelection(models, { sourceId, modelId })
-      ?? findModelBySelection(models, {
+    const requestedModel = findModelBySelection(models, { sourceId, modelId });
+    const model = requestedModel
+      ?? (options?.strictModelSelection ? undefined : findModelBySelection(models, {
         sourceId: this.selectedSourceId,
         modelId: this.selectedModelId
-      })
-      ?? models[0];
+      }))
+      ?? (options?.strictModelSelection ? undefined : models[0]);
     if (!model?.sourceId) {
       vscode.window.showWarningMessage(this.t('modelRequired'));
       return;
@@ -2866,6 +3228,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       baseUrl: resolvedSource.baseUrl,
       supportsBilling: resolvedSource.supportsBilling
     });
+    this.modelSelectionTransactions.beginRun({ sourceId: model.sourceId, modelId: model.id });
 
     const abortController = new AbortController();
     this.currentRunAbortController = abortController;
@@ -2881,6 +3244,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     let currentTurnUsage: TurnUsageStats | undefined;
     let previousTurnUsage: TurnUsageStats | undefined;
     let previousPromptCacheDiagnostics: PromptCacheDiagnostics | undefined;
+    let currentPromptCacheDiagnostics: PromptCacheDiagnostics | undefined;
     let completedResponse: AgentResponse | undefined;
     let liveStateTimer: ReturnType<typeof setTimeout> | undefined;
     const scheduleLiveState = () => {
@@ -3146,6 +3510,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.liveTurnUsage = currentTurnUsage;
           scheduleLiveState();
         },
+        onPromptCacheDiagnostics: (diagnostics) => {
+          currentPromptCacheDiagnostics = diagnostics;
+        },
         onTraceLog: (traceLog) => {
           activeSession.lastTraceLogUri = traceLog.uri;
           this.sessionTraceLogUris.set(activeSession.id, traceLog.uri);
@@ -3195,13 +3562,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         currentTurnUsage = this.applyTurnUsage(activeSession, response.usage);
         this.liveTurnUsage = currentTurnUsage;
       }
-      this.applyPromptCacheDiagnostics(
+      const cacheMissPossibleReasons = this.applyPromptCacheDiagnostics(
         activeSession,
         response.promptCacheDiagnostics,
         previousPromptCacheDiagnostics,
         previousTurnUsage,
         currentTurnUsage
       );
+      response.runDetails = {
+        ...response.runDetails,
+        cache: this.createRunCacheSummary(currentTurnUsage, cacheMissPossibleReasons)
+      };
 
       if (assistantMessage) {
         assistantMessage.content = response.message;
@@ -3227,6 +3598,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         phase: 'finalizing'
       }, { post: false });
     } catch (error) {
+      const failedSession = this.sessionStore.getActiveSession();
+      const failedCacheReasons = this.applyPromptCacheDiagnostics(
+        failedSession,
+        currentPromptCacheDiagnostics,
+        previousPromptCacheDiagnostics,
+        previousTurnUsage,
+        currentTurnUsage
+      );
+      if (assistantMessage?.runDetails) {
+        assistantMessage.runDetails = {
+          ...assistantMessage.runDetails,
+          cache: this.createRunCacheSummary(currentTurnUsage, failedCacheReasons)
+        };
+      }
       if (error instanceof AgentRunAbortedError || abortController.signal.aborted) {
         if (assistantMessage) {
           const hasPartialOutput = Boolean(assistantMessage.content.trim() || assistantMessage.reasoningContent?.trim());
@@ -3289,6 +3674,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.liveTurnUsage = undefined;
       this.sessionStore.getActiveSession().updatedAt = new Date().toISOString();
       this.isBusy = false;
+      await this.applyPendingModelSelectionAfterRun();
       // Push UI state (changeSets, idle status) before session persistence so a
       // slow or failing persist() can never leave the webview stuck on
       // "finalizing" without showing the pending changes.
@@ -3428,6 +3814,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const contextFiles = this.fileContext.getAll();
     const activeSession = this.sessionStore.getActiveSession();
     const currentRunContext = this.currentRunContextsBySession.get(activeSession.id);
+    const selectedModelSource = this.modelSources.find((source) => source.id === selectedModel.sourceId);
     const computedContextUsage = createDisplayedSessionContextUsageEstimate({
       model: selectedModel,
       agentSettings: this.agentSettings,
@@ -3439,15 +3826,19 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       language: this.language,
       slimToolNames: activeSession.requestProtocol?.toolNames,
       requestProtocolVersion: activeSession.requestProtocol?.version,
-      provider: selectedModel.provider === 'openai-responses' || selectedModel.provider === 'anthropic-compatible'
-        ? selectedModel.provider
-        : undefined,
-      sourceId: activeSession.requestProtocol?.sourceId ?? selectedModel.sourceId,
-      baseUrl: activeSession.requestProtocol?.baseUrl
+      provider: selectedModelSource?.provider,
+      sourceId: selectedModel.sourceId,
+      baseUrl: selectedModelSource?.baseUrl
     });
+    const storedContextUsage = activeSession.contextUsage?.maxTokensEstimate === computedContextUsage.maxTokensEstimate
+      ? activeSession.contextUsage
+      : undefined;
+    const liveContextUsage = this.liveContextUsage?.maxTokensEstimate === computedContextUsage.maxTokensEstimate
+      ? this.liveContextUsage
+      : undefined;
     const contextUsage = pickLargerContextUsageEstimate(
-      pickLargerContextUsageEstimate(activeSession.contextUsage, computedContextUsage),
-      this.isBusy ? this.liveContextUsage : undefined
+      pickLargerContextUsageEstimate(storedContextUsage, computedContextUsage),
+      this.isBusy ? liveContextUsage : undefined
     ) ?? computedContextUsage;
     const contextCompression = getAgentRuntimeProfile(selectedModel, this.agentSettings).contextCompression;
     const lastTurnUsage = this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage;
@@ -3460,6 +3851,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         models,
         selectedSourceId: this.selectedSourceId,
         selectedModelId: this.selectedModelId,
+        modelSelection: {
+          ...this.modelSelectionTransactions.getSnapshot(),
+          lockedByBackground: this.hasActiveBackgroundRun()
+        },
         agentSettings: this.agentSettings,
         messages: getVisibleMessages(this.messages),
         activeSessionId: this.sessionStore.activeSessionId,
@@ -3484,7 +3879,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           balance: selectedCatalogModel?.supportsBilling && selectedCatalogModel.sourceId
             ? this.balanceStore.getBalance(this.getBalanceSourceScope(selectedCatalogModel.sourceId))
             : undefined,
-          promptCacheDiagnostics: activeSession.promptCacheDiagnostics,
+          promptCacheDiagnostics: activeSession.promptCacheDiagnostics
+            ? {
+                modelId: activeSession.promptCacheDiagnostics.modelId,
+                protocol: activeSession.promptCacheDiagnostics.protocol,
+                sourceId: activeSession.promptCacheDiagnostics.sourceId,
+                historyCompacted: activeSession.promptCacheDiagnostics.historyCompacted,
+                historyRewriteReason: activeSession.promptCacheDiagnostics.historyRewriteReason,
+                cacheMissPossibleReasons: activeSession.promptCacheDiagnostics.cacheMissPossibleReasons,
+                updatedAt: activeSession.promptCacheDiagnostics.updatedAt
+              }
+            : undefined,
           turnCount: activeSession.messages.filter((message) => message.role === 'user').length,
           contextPercent,
           contextCompressionTriggerRatio: contextCompression.triggerRatio,
@@ -3539,6 +3944,17 @@ function getWorkspaceSummaryTimestamp(workspace: WorkspaceSummary): number {
 
 function hashContextInstructions(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function formatTokenCount(value: number): string {
+  const tokens = Math.max(0, Math.floor(value));
+  if (tokens >= 1_000_000) {
+    return `${Number((tokens / 1_000_000).toFixed(2))}M`;
+  }
+  if (tokens >= 1_000) {
+    return `${Number((tokens / 1_000).toFixed(1))}K`;
+  }
+  return String(tokens);
 }
 
 function formatDynamicContextTail(value: string, language: 'en' | 'zh-CN'): string {

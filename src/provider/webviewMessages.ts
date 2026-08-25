@@ -36,7 +36,8 @@ export type WebviewMessage =
   | { type: 'copyOtherWorkspaceSession'; workspaceKey: string; sessionId: string }
   | { type: 'deleteOtherWorkspaceSessions'; workspaceKey: string; sessionIds: string[] }
   | { type: 'deleteOtherWorkspace'; workspaceKey: string }
-  | { type: 'setSelectedModel'; sourceId: string; modelId: string }
+  | { type: 'setSelectedModel'; requestId: string; sourceId: string; modelId: string }
+  | { type: 'cancelPendingModelSelection'; requestId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
   | { type: 'setDebugMode'; enabled: boolean }
   | { type: 'openCurrentSessionLog' }

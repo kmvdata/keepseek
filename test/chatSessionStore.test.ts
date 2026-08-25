@@ -44,6 +44,20 @@ test('trimActiveHistory preserves persisted active session messages', async () =
     toolNames: ['keepseek_read_workspace_file_range'], sourceId: 'source-a', createdAt: '2026-01-01T00:00:00.000Z',
     lastProviderRequestAt: '2026-01-01T00:01:00.000Z'
   };
+  session.contextCompression = {
+    version: 1,
+    protectedMessageIds: [],
+    summaries: [{
+      id: 'legacy-summary',
+      content: 'legacy summary content',
+      coveredMessageIds: ['m1'],
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      tokenEstimate: 10,
+      modelId: 'legacy-model',
+      version: 1
+    }]
+  };
   const store = new ChatSessionStore(storage, 'en', workspaceScope);
 
   await store.initialize();
@@ -51,6 +65,8 @@ test('trimActiveHistory preserves persisted active session messages', async () =
   await store.persist();
 
   assert.equal(store.messages.length, 100);
+  assert.equal(store.getActiveSession().contextCompression?.summaries[0]?.modelId, 'legacy-model');
+  assert.equal(store.getActiveSession().contextCompression?.summaries[0]?.sourceId, undefined);
   assert.equal(store.messages[0].id, 'm0');
   assert.equal(store.messages[99].id, 'm99');
   assert.equal(storage.saved?.sessions[0]?.messages.length, 100);

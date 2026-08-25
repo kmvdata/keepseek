@@ -252,7 +252,9 @@ Anthropic 对应指纹直接消费权威原生投影：top-level system、Anthro
 
 - **无条件归因**：system 提示变化、tools schema 变化、模型切换——这是前缀整段失效的直接证据，不依赖命中率门槛；
 - **历史重写**：`historyCompacted`（用了摘要）、`historyRewriteReason`（如编辑重发）直接上报；
-- **带门槛归因**：history 段在 append-only 投影下每轮追加新消息、`historyPrefixHash` 逐轮变化是**预期行为**；只有当命中率从 ≥60% 跌 ≥30 个百分点时，才把 history 变化（`history_prefix_changed`）或 provider 缓存逐出（`prefix_changed_or_provider_cache_evicted`）列为候选原因。
+- **直接 lane 归因**：模型、来源、协议或规范化 endpoint/cache lane 变化会直接记录为候选原因；Webview 只接收可读原因，不接收完整 Base URL 或原始哈希。
+- **带门槛归因**：history 段在 append-only 投影下每轮追加新消息、`historyPrefixHash` 逐轮变化是**预期行为**；只有当命中率从 ≥60% 跌 ≥30 个百分点时，才把 history 变化（`history_prefix_changed`）或 provider 缓存逐出（`provider_cache_eviction_possible`）列为候选原因。
+- **真实数据边界**：只有 provider 返回缓存字段时才展示 hit/miss 与命中率；字段缺失显示“不可用”。缓存通道变化是本地证据，不能被描述成已经归零或必然全量 miss。
 
 归因结果写入会话的 `promptCacheDiagnostics` 并在扩展侧 `console.debug` 告警，用于判断「是 KeepSeek 改了前缀还是服务端逐出了缓存」。
 

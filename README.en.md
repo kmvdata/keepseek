@@ -122,13 +122,15 @@ Since 0.2.2, the compression pipeline is upgraded to a **cache-safe Snip → Pru
 
 KeepSeek doesn't make you guess what you spent in a black box:
 
-- **Scenario-level usage stats (0.2.2)**: categorized by execution, summary, retry, continuation, and background — covering cached/missed input, output/reasoning tokens, request counts, and per-source cost. Every cent is accounted for;
+- **Source + model usage attribution**: usage is grouped by account and model first, then by execution, summary, retry, continuation, background, and other sources inside each group. Unpriced requests say “Cost unavailable,” and different currencies are never added together;
 - **Unified Provider request projection (0.2.2)**: the actual request, context/token estimation, overflow guard, compression decisions, UI usage, and cache tests all use **the same projection** — what you see is exactly what gets sent;
 - **Cost estimation**: estimated in real time from the local price table (`keepseek.usagePricing` is customizable);
 - **Context usage**: current context as a percentage of the model window, compression trigger thresholds, and early warnings before you hit the compression line;
 - **DeepSeek balance**: auto-queried and displayed, so you always know where you stand;
-- **Prefix fingerprints**: `systemPromptHash`, `toolsSchemaHash`, `historyPrefixHash` — recorded per request; compare across turns to confirm prefix stability;
-- **Miss attribution**: when hit rate drops significantly, KeepSeek suggests candidate causes — `system_prompt_changed`, `tools_schema_changed`, `model_changed`, `history_compacted`, `history_prefix_changed`, `prefix_changed_or_provider_cache_evicted` — so you know which part broke the cache.
+- **Per-run cache snapshots**: every completed assistant Run Details records provider-reported hit/miss tokens, hit rate, data availability, and cache-lane changes. Raw endpoints and internal hashes are not exposed to the Webview;
+- **Miss attribution**: the usage popover and per-run details explain model, source, protocol, endpoint/cache lane, system prompt, tool schema, history compaction/rewrite, and possible provider eviction. A turn is called a miss only when real provider miss data exists.
+
+Model selection becomes effective only after extension-side validation. A foreground response can queue and cancel a “next-turn model”; non-terminal background tasks lock the model. Switching to a smaller context window or across a provider-native replay boundary shows one local confirmation based on the target model’s real window and the authoritative context projection, without making an extra model request for preview or statistics.
 
 > Other clients: hit rate is a black box; when it drops, you have no idea why.
 > KeepSeek: hit rate is a dashboard; when it drops, it tells you exactly which component changed.
