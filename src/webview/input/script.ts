@@ -3637,15 +3637,7 @@ export function getInputScript(): string {
       }
 
       function setComposerStatus(message) {
-        transientStatus = message;
-        renderStatus();
-        if (transientStatusTimer) {
-          clearTimeout(transientStatusTimer);
-        }
-        transientStatusTimer = setTimeout(function() {
-          transientStatus = '';
-          renderStatus();
-        }, 2200);
+        setTransientStatus(message);
       }
 
       function clearPrompt() {

@@ -417,6 +417,8 @@ export function getScript(): string {
     const editReferenceMenu = document.createElement('div');
     let transientStatus = '';
     let transientStatusTimer = 0;
+    let transientStatusClearTimer = 0;
+    let transientStatusSequence = 0;
     let agentStatusRotationTimer = 0;
     let agentStatusRotationIndex = 0;
     let agentStatusRotationKey = '';
@@ -467,6 +469,8 @@ export function getScript(): string {
       onSelectionChanged: function(editor) { syncEditReferenceMenuFromEditor(editor); },
       onEdited: function(editor) { refreshInlineEditorAfterEdit(editor); }
     });
+    const STATUS_MESSAGE_DURATION_MS = 8000;
+    const STATUS_MESSAGE_FADE_MS = 120;
     const AGENT_STATUS_ROTATION_MS = 2600;
     const agentStatusPools = {
       preparing: ['agentStatusPreparingContext', 'agentStatusPreparingRequest'],
@@ -1988,9 +1992,6 @@ export function getScript(): string {
       if (!state.isBusy) {
         stopAgentStatusRotation();
         agentStatusRotationKey = '';
-        status.textContent = transientStatus;
-        status.title = transientStatus;
-        status.classList.toggle('is-active', Boolean(transientStatus));
         return;
       }
 
@@ -1999,25 +2000,48 @@ export function getScript(): string {
       if (activityKey !== agentStatusRotationKey) {
         agentStatusRotationKey = activityKey;
         agentStatusRotationIndex = 0;
+        setTransientStatus(getAgentActivityStatusText(activity) || t('processing'));
       }
       startAgentStatusRotation();
-
-      var statusText = getAgentActivityStatusText(activity) || t('processing');
-      status.textContent = statusText;
-      status.title = statusText;
-      status.classList.toggle('is-active', Boolean(statusText));
     }
 
-    function setTransientStatus(message, durationMs) {
-      transientStatus = message;
-      renderStatus();
+    function setTransientStatus(message) {
+      transientStatus = String(message || '');
+      transientStatusSequence += 1;
+      var sequence = transientStatusSequence;
       if (transientStatusTimer) {
         clearTimeout(transientStatusTimer);
+        transientStatusTimer = 0;
+      }
+      if (transientStatusClearTimer) {
+        clearTimeout(transientStatusClearTimer);
+        transientStatusClearTimer = 0;
+      }
+      status.classList.remove('is-fading');
+      status.textContent = transientStatus;
+      status.title = transientStatus;
+      status.classList.toggle('is-active', Boolean(transientStatus));
+      if (!transientStatus) {
+        return;
       }
       transientStatusTimer = setTimeout(function() {
-        transientStatus = '';
-        renderStatus();
-      }, durationMs || 2200);
+        if (sequence !== transientStatusSequence) {
+          return;
+        }
+        transientStatusTimer = 0;
+        status.classList.remove('is-active');
+        status.classList.add('is-fading');
+        transientStatusClearTimer = setTimeout(function() {
+          if (sequence !== transientStatusSequence) {
+            return;
+          }
+          transientStatusClearTimer = 0;
+          transientStatus = '';
+          status.textContent = '';
+          status.title = '';
+          status.classList.remove('is-fading');
+        }, STATUS_MESSAGE_FADE_MS);
+      }, STATUS_MESSAGE_DURATION_MS);
     }
 
     function normalizeAgentActivity(activity) {
@@ -2045,8 +2069,7 @@ export function getScript(): string {
       }
       terminalAgentStatusKey = key;
       setTransientStatus(
-        t(normalized.base === 'error' ? 'agentStatusError' : normalized.base === 'stopped' ? 'agentStatusStopped' : 'agentStatusComplete'),
-        2600
+        t(normalized.base === 'error' ? 'agentStatusError' : normalized.base === 'stopped' ? 'agentStatusStopped' : 'agentStatusComplete')
       );
     }
 
@@ -2065,8 +2088,13 @@ export function getScript(): string {
         return;
       }
       agentStatusRotationTimer = setInterval(function() {
+        var activity = normalizeAgentActivity(state.agentActivity);
+        var previousStatusText = getAgentActivityStatusText(activity) || t('processing');
         agentStatusRotationIndex += 1;
-        renderStatus();
+        var nextStatusText = getAgentActivityStatusText(activity) || t('processing');
+        if (nextStatusText !== previousStatusText) {
+          setTransientStatus(nextStatusText);
+        }
       }, AGENT_STATUS_ROTATION_MS);
     }
 

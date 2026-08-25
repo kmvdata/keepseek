@@ -451,6 +451,18 @@ test('generated Webview JavaScript passes syntax compilation', () => {
   assert.doesNotThrow(() => new Function(getScript()));
 });
 
+test('composer status always shows the latest message for eight seconds before fading', () => {
+  const inputScript = getInputScript();
+  const script = getScript();
+
+  assert.match(script, /const STATUS_MESSAGE_DURATION_MS = 8000/u);
+  assert.match(script, /status\.classList\.add\('is-fading'\)/u);
+  assert.match(script, /setTransientStatus\(getAgentActivityStatusText\(activity\) \|\| t\('processing'\)\)/u);
+  assert.match(inputScript, /function setComposerStatus\(message\) \{\s*setTransientStatus\(message\);\s*\}/u);
+  assert.doesNotMatch(script, /durationMs \|\| 2200/u);
+  assert.doesNotMatch(inputScript, /\}, 2200\);/u);
+});
+
 test('ChangeSets render in their assistant timeline entry with an unlinked actionable fallback', () => {
   const template = getTemplate();
   const script = getScript();

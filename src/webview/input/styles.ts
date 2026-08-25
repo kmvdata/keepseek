@@ -622,6 +622,12 @@ export function getInputStyles(): string {
       animation: keepseek-status-breathe 2.6s ease-in-out infinite;
     }
 
+    .composer-status.is-fading,
+    #status.is-fading {
+      opacity: 0;
+      animation: none;
+    }
+
     @keyframes keepseek-status-breathe {
       0%,
       100% {
