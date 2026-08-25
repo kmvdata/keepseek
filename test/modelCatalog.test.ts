@@ -78,6 +78,32 @@ describe('model source catalog', () => {
       ['enabled-model', 'disabled-model']
     );
   });
+
+  it('merges manual capability overrides before discovery and built-in metadata', () => {
+    const catalog = createModelCatalog([createSource({
+      id: 'compatible',
+      provider: 'openai-compatible',
+      models: [{ id: 'shared', contextWindowTokens: 96_000, maxOutputTokens: 7_000 }],
+      modelCache: {
+        fetchedAt: NOW,
+        models: [{ id: 'shared', contextWindowTokens: 128_000, maxOutputTokens: 12_000 }]
+      }
+    })]);
+
+    assert.equal(catalog[0]?.contextWindowTokens, 96_000);
+    assert.equal(catalog[0]?.maxOutputTokens, 7_000);
+  });
+
+  it('does not grant DeepSeek built-in metadata to a compatible lookalike model id', () => {
+    const catalog = createModelCatalog([createSource({
+      id: 'compatible',
+      provider: 'openai-compatible',
+      models: [{ id: 'deepseek-v4-pro' }]
+    })]);
+
+    assert.equal(catalog[0]?.contextWindowTokens, undefined);
+    assert.equal(catalog[0]?.maxOutputTokens, undefined);
+  });
 });
 
 describe('ModelSourceService', () => {
@@ -182,13 +208,20 @@ describe('ModelSourceService', () => {
       provider: 'openai-compatible',
       apiKey: '',
       baseUrl: 'https://proxy.example/v1',
-      modelId: 'model-one'
+      modelId: 'model-one',
+      contextWindowTokens: 64_000,
+      maxOutputTokens: 4_000
     });
     assert.deepEqual(readded.source.disabledModelIds, []);
     assert.deepEqual(
       createModelCatalog([readded.source]).map((model) => model.id),
       ['model-one', 'model-two']
     );
+    assert.deepEqual(readded.source.models[0], {
+      id: 'model-one',
+      contextWindowTokens: 64_000,
+      maxOutputTokens: 4_000
+    });
   });
 
   it('rejects account creation when the Base URL probe fails', async () => {

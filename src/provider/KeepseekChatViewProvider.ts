@@ -84,7 +84,7 @@ import {
   normalizeAgentSettings,
   normalizeIntegerInRange
 } from '../shared/config';
-import { getDeepSeekV4RuntimeProfile } from '../shared/modelProfiles';
+import { getAgentRuntimeProfile } from '../shared/modelProfiles';
 import { getErrorMessage } from '../shared/errors';
 import { formatBytes } from '../shared/format';
 import { expandPromptReferencesInPrompt } from '../context/references/promptReferences';
@@ -1809,6 +1809,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         availableModels: createModelCatalog([source], { includeDisabledModels: true }).map((model) => ({
           id: model.id,
           name: model.fetchedName ?? model.label,
+          contextWindowTokens: model.contextWindowTokens,
+          maxOutputTokens: model.maxOutputTokens,
           supportsBilling: model.supportsBilling === true
         })),
         isOfficialDeepSeek: isOfficialDeepSeekSource(source)
@@ -1838,6 +1840,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     apiKey: string;
     baseUrl: string;
     modelId?: string;
+    contextWindowTokens?: number;
+    maxOutputTokens?: number;
   }): Promise<void> {
     if (this.rejectModelSourceMutationWhileBusy()) {
       return;
@@ -3395,7 +3399,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       pickLargerContextUsageEstimate(activeSession.contextUsage, computedContextUsage),
       this.isBusy ? this.liveContextUsage : undefined
     ) ?? computedContextUsage;
-    const contextCompression = getDeepSeekV4RuntimeProfile(selectedModel, this.agentSettings).contextCompression;
+    const contextCompression = getAgentRuntimeProfile(selectedModel, this.agentSettings).contextCompression;
     const lastTurnUsage = this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage;
     const contextPercent = contextUsage.usedPercent;
 

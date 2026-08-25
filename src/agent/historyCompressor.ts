@@ -1,14 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
-  getConfiguredContextWindowTokens,
   getConfiguredModelUsagePricing,
   getConfiguredRequestRetryBaseMs
 } from '../shared/config';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
 import type { ModelSourceConfigSnapshot, ModelSourceProvider } from '../accounts/types';
 import {
-  getDeepSeekV4ContextCompressionSettings,
+  getAgentContextCompressionSettings,
+  getAgentRuntimeProfile,
+  getEffectiveContextWindowTokens,
   type ContextCompressionSettings
 } from '../shared/modelProfiles';
 import { getErrorMessage } from '../shared/errors';
@@ -30,7 +31,6 @@ import type { ProviderClientConfig } from './providers/types';
 import type { DeepSeekChatRequestBody, DeepSeekMessage } from './deepseek/types';
 import type { OpenAiResponsesRequestBody } from './providers/responsesTypes';
 import type { AnthropicMessagesRequestBody } from './providers/anthropicTypes';
-import { DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS } from './providers/anthropicTypes';
 import { isOfficialAnthropicSource } from '../accounts/sourceCapabilities';
 import {
   CONTEXT_COMPRESSION_VERSION,
@@ -111,7 +111,7 @@ export class HistoryCompressor {
   ) {}
 
   public planRefresh(input: HistoryCompressionRefreshInput): HistoryCompressionRefreshPlan {
-    const settings = input.settings ?? getDeepSeekV4ContextCompressionSettings(input.model, input.agentSettings);
+    const settings = input.settings ?? getAgentContextCompressionSettings(input.model, input.agentSettings);
     const protectedState = this.createProtectedState(input.session);
 
     if (input.signal?.aborted) {
@@ -174,7 +174,7 @@ export class HistoryCompressor {
   }
 
   public async refresh(input: HistoryCompressionRefreshInput): Promise<HistoryCompressionRefreshResult> {
-    const settings = input.settings ?? getDeepSeekV4ContextCompressionSettings(input.model, input.agentSettings);
+    const settings = input.settings ?? getAgentContextCompressionSettings(input.model, input.agentSettings);
     const protectedState = this.createProtectedState(input.session);
 
     if (input.signal?.aborted) {
@@ -370,8 +370,17 @@ export class HistoryCompressor {
     usageSource: Extract<UsageSource, 'summary' | 'background'>;
     sourceConfig?: ModelSourceConfigSnapshot;
   }): Promise<HistorySummaryCompletionResult> {
+    const runtimeProfile = getAgentRuntimeProfile(input.model, {
+      thinkingEnabled: false,
+      reasoningEffort: 'high',
+      compressionThreshold: 'balanced'
+    });
+    const requestedMaxTokens = Number.isFinite(input.maxTokens) && input.maxTokens > 0
+      ? Math.floor(input.maxTokens)
+      : runtimeProfile.maxTokens;
+    const maxTokens = Math.max(1, Math.min(requestedMaxTokens, runtimeProfile.maxTokens));
     if (this.completion) {
-      const result = await this.completion(input);
+      const result = await this.completion({ ...input, maxTokens });
       return typeof result === 'string' ? { content: result } : result;
     }
 
@@ -396,7 +405,7 @@ export class HistoryCompressor {
             // Deterministic summaries reduce unrelated byte drift at the
             // unavoidable summary cache-reset boundary.
             temperature: 0,
-            max_output_tokens: input.maxTokens
+            max_output_tokens: maxTokens
           }
         : clientConfig.provider === 'anthropic-compatible'
           ? {
@@ -411,10 +420,7 @@ export class HistoryCompressor {
                   content: [{ type: 'text' as const, text: message.content ?? '' }]
                 })),
               stream: true,
-              max_tokens: Math.max(1, Math.min(
-                input.maxTokens,
-                input.model.maxOutputTokens ?? DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS
-              )),
+              max_tokens: maxTokens,
               temperature: 0,
               cache_control: isOfficialAnthropicSource(clientConfig)
                 ? { type: 'ephemeral' }
@@ -428,7 +434,7 @@ export class HistoryCompressor {
             // Deterministic summaries: a stable completion reduces unrelated byte drift
             // between refreshes (the covered-message change is the unavoidable part).
             temperature: 0,
-            max_tokens: input.maxTokens,
+            max_tokens: maxTokens,
             stream_options: {
               include_usage: true
             }
@@ -530,7 +536,7 @@ function estimateRawConversationTokens(input: HistoryCompressionRefreshInput): n
 }
 
 function estimateRawConversationRatio(input: HistoryCompressionRefreshInput): number {
-  const maxTokens = getConfiguredContextWindowTokens(input.model);
+  const maxTokens = getEffectiveContextWindowTokens(input.model);
   return estimateRawConversationTokens(input) / maxTokens;
 }
 

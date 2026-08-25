@@ -127,9 +127,10 @@ system prompt 会告诉模型：
 请求特征：
 
 - 使用 streaming。
-- DeepSeek 内置 profile 支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`；其它账号的模型来自各自 `/models` 或手动模型 ID。
+- DeepSeek 内置 profile 支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`，保留 Flash / Pro × 非思考 / High / Max 的既有预算；其它账号的模型来自各自 `/models` 或手动模型 ID，并使用 metadata-first 通用画像。
 - Thinking 开关和 `high` / `max` reasoning effort 由输入区选择。
-- `max_tokens`、工具上限、运行时长来自 `src/shared/modelProfiles.ts` 中对应的模型 / Thinking 自动档位。
+- `src/shared/modelProfiles.ts` 是运行画像唯一解析入口。能力优先级为：手动模型显式覆盖 > 最新发现元数据 > DeepSeek 内置元数据 > 保守 fallback。未知模型 fallback 为 32768 context tokens / 8192 output tokens；`max` 不会把未知兼容模型放大到 DeepSeek 的六位数输出预算。
+- 最终输出上限不超过有效 context window，摘要预算不超过最终输出上限。Chat Completions、Ollama、Responses、Anthropic 与摘要请求都消费同一画像，但各协议只发送自己支持的字段。
 - 自动压缩阈值由命令菜单中的用户档位覆盖 profile 的 `triggerRatio / forceRatio`：提前清理 `0.70 / 0.85`、默认平衡 `0.80 / 0.92`、缓存优先 `0.85 / 0.95`；其他压缩参数仍保留 profile 原值。
 - DeepSeek Chat Completions 固定使用 V4 推荐的 `temperature=1.0`、`top_p=1.0`。
 - `stream_options.include_usage = true`，用于获取服务商真实 usage。
@@ -145,7 +146,7 @@ system prompt 会告诉模型：
 
 如果请求在已有 partial output 后失败，Runner 会尝试发起续写恢复。如果模型返回 `finish_reason=length` 且满足条件，Runner 会请求一次受限续写。
 
-Anthropic Messages 使用规范化的原生 Messages endpoint、`x-api-key` 和 `anthropic-version: 2023-06-01`，不发送 Bearer、`stream_options`、`reasoning_effort` 或 Responses 字段。常规 `/v1` base 追加 `/messages`；以 `/apps/anthropic` 结尾的 SDK base 追加 `/v1/messages`。专用 SSE parser 处理任意分块、CRLF、ping、Thinking/signature、redacted thinking、并行 `tool_use` 与 cache usage。模型能力来自 `/models` 元数据：只有明确声明 adaptive/enabled 时才发送 Thinking 参数；不提供模型列表的兼容网关允许保存账号并手动添加模型 ID，手动添加成功后不再触发自动发现，输出上限保守回退为 8192。
+Anthropic Messages 使用规范化的原生 Messages endpoint、`x-api-key` 和 `anthropic-version: 2023-06-01`，不发送 Bearer、`stream_options`、`reasoning_effort` 或 Responses 字段。常规 `/v1` base 追加 `/messages`；以 `/apps/anthropic` 结尾的 SDK base 追加 `/v1/messages`。专用 SSE parser 处理任意分块、CRLF、ping、Thinking/signature、redacted thinking、并行 `tool_use` 与 cache usage。模型能力来自 `/models` 元数据：只有明确声明 adaptive/enabled 时才发送 Thinking 参数；不提供模型列表的兼容网关允许保存账号并手动添加模型 ID，其能力可在账号设置中手动填写，否则使用通用保守 fallback。
 
 官方 `api.anthropic.com` 默认发送顶层 `cache_control: {"type":"ephemeral"}`。自定义兼容端点默认不发送，不做失败后删字段重试。Anthropic 摘要请求复用同一不可变 source snapshot，关闭 tools/Thinking，`temperature=0`，并受模型输出上限约束。
 
@@ -163,11 +164,13 @@ Anthropic Messages 使用规范化的原生 Messages endpoint、`x-api-key` 和 
   -> 再次请求模型
 ```
 
-循环上限由 `src/shared/modelProfiles.ts` 的 6 个自动档位控制（Flash / Pro × 非思考 / High / Max）。更强的模型和推理档位允许更多工具轮次、调用数、运行时间及工具结果；这些值不暴露为用户配置。两款模型的上下文窗口都固定按 1M tokens 估算。
+DeepSeek 循环上限由 `src/shared/modelProfiles.ts` 的 6 个自动档位控制（Flash / Pro × 非思考 / High / Max）。其它模型使用固定的保守通用工具/运行预算，Thinking 只影响协议明确支持的推理字段，不放大未知能力。两款 DeepSeek 内置模型的上下文窗口仍按 1M tokens 估算；其它模型优先使用发现或人工配置的窗口。
 
 Anthropic 工具轮使用原生消息顺序：assistant 的 Thinking/text/`tool_use` blocks 后紧跟一个 user message；同轮全部 `tool_result` 集中在该 message 开头并保持 `tool_use` 顺序。下一请求原样回放 opaque signature/redacted data，工具预算耗尽时 tools 字节不变，仅把 `tool_choice` 改为 `{ "type": "none" }`。
 
 上下文投影上限按 `maxProjectionTokens = contextWindow × forceRatio` 计算。选择 85% 缓存优先档时，`forceRatio=0.95` 会让投影上限增大，从而保留更多原始历史、尽量延后会破坏前缀缓存的摘要刷新；这是预期行为。
+
+模型、来源、provider 或 base URL 切换只迁移 provider/cache lane，并在这个本来就冷启动的边界升级请求序列化；既有 `contextCompression.summaries` 保留并继续参与 projection，`HistorySummary.modelId` 只作为生成来源记录。`requestProtocolVersion` 是序列化策略和工具 schema 的兼容版本，不是模型能力等级，也不会驱动摘要淘汰。
 
 如果自动安全上限耗尽，Runner 会追加一条本地用户消息，要求模型停止调用工具，基于已获得的信息给出最终回答并说明缺口。
 

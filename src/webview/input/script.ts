@@ -3437,6 +3437,10 @@ export function getInputScript(): string {
       var settingsModelEmpty = document.getElementById('settingsModelEmpty');
       var settingsManualModelIdLabel = document.getElementById('settingsManualModelIdLabel');
       var settingsManualModelId = document.getElementById('settingsManualModelId');
+      var settingsManualContextWindowLabel = document.getElementById('settingsManualContextWindowLabel');
+      var settingsManualContextWindow = document.getElementById('settingsManualContextWindow');
+      var settingsManualMaxOutputLabel = document.getElementById('settingsManualMaxOutputLabel');
+      var settingsManualMaxOutput = document.getElementById('settingsManualMaxOutput');
       var settingsAddModelBtn = document.getElementById('settingsAddModelBtn');
       var settingsConfirmAddModelBtn = document.getElementById('settingsConfirmAddModelBtn');
       var settingsManualModelBox = document.querySelector('.settings-manual-model');
@@ -3497,6 +3501,13 @@ export function getInputScript(): string {
 
       function readSettingsString(value, fallback) {
         return typeof value === 'string' ? value : fallback;
+      }
+
+      function readOptionalCapabilityInput(input, max) {
+        var raw = input ? input.value.trim() : '';
+        if (!raw) { return undefined; }
+        var value = Number(raw);
+        return Number.isInteger(value) && value > 0 && value <= max ? value : null;
       }
 
       function normalizeSettingsProvider(value) {
@@ -3572,6 +3583,12 @@ export function getInputScript(): string {
           var model = modelsById[id];
           model.fetchedName = readSettingsString(source.fetchedName || source.name, model.fetchedName);
           model.label = readSettingsString(source.label, model.label);
+          if (Number.isInteger(source.contextWindowTokens) && source.contextWindowTokens > 0) {
+            model.contextWindowTokens = source.contextWindowTokens;
+          }
+          if (Number.isInteger(source.maxOutputTokens) && source.maxOutputTokens > 0) {
+            model.maxOutputTokens = source.maxOutputTokens;
+          }
         }
         var cachedModels = account.modelCache && Array.isArray(account.modelCache.models)
           ? account.modelCache.models
@@ -3678,6 +3695,8 @@ export function getInputScript(): string {
             : 'https://api.deepseek.com';
         }
         if (settingsManualModelId) { settingsManualModelId.value = ''; }
+        if (settingsManualContextWindow) { settingsManualContextWindow.value = ''; }
+        if (settingsManualMaxOutput) { settingsManualMaxOutput.value = ''; }
         if (settingsManualModelBox) { settingsManualModelBox.classList.add('hidden'); }
         settingsOriginalFormSignature = getSettingsFormSignature();
         settingsDialogDirty = false;
@@ -3742,6 +3761,19 @@ export function getInputScript(): string {
           name.className = 'settings-model-name';
           name.textContent = model.id;
           identity.append(name);
+          var capabilityParts = [];
+          if (model.contextWindowTokens) {
+            capabilityParts.push(t('manualContextWindowTokens') + ': ' + String(model.contextWindowTokens));
+          }
+          if (model.maxOutputTokens) {
+            capabilityParts.push(t('manualMaxOutputTokens') + ': ' + String(model.maxOutputTokens));
+          }
+          if (capabilityParts.length) {
+            var capabilities = document.createElement('span');
+            capabilities.className = 'settings-field-hint';
+            capabilities.textContent = capabilityParts.join(' · ');
+            identity.append(capabilities);
+          }
           row.append(identity);
           row.classList.toggle('is-disabled', model.enabled === false);
           var actions = document.createElement('div');
@@ -3878,13 +3910,15 @@ export function getInputScript(): string {
         }
         if (settingsModelEmpty) { settingsModelEmpty.textContent = t('modelsEmpty'); }
         if (settingsManualModelIdLabel) { settingsManualModelIdLabel.textContent = t('manualModelId'); }
+        if (settingsManualContextWindowLabel) { settingsManualContextWindowLabel.textContent = t('manualContextWindowTokens'); }
+        if (settingsManualMaxOutputLabel) { settingsManualMaxOutputLabel.textContent = t('manualMaxOutputTokens'); }
         if (settingsAddModelBtn) {
           settingsAddModelBtn.disabled = !account || controlsDisabled;
         }
         if (settingsConfirmAddModelBtn) {
           settingsConfirmAddModelBtn.disabled = !account || controlsDisabled;
         }
-        [settingsAccountName, settingsApiKey, settingsBaseUrl, settingsApiKeyVisibilityBtn, settingsSaveBtn, settingsManualModelId, settingsConfirmAddModelBtn].forEach(function(control) {
+        [settingsAccountName, settingsApiKey, settingsBaseUrl, settingsApiKeyVisibilityBtn, settingsSaveBtn, settingsManualModelId, settingsManualContextWindow, settingsManualMaxOutput, settingsConfirmAddModelBtn].forEach(function(control) {
           if (control) { control.disabled = controlsDisabled; }
         });
         if (settingsSaveBtn) { settingsSaveBtn.textContent = account ? t('save') : t('addAccount'); }
@@ -4240,20 +4274,29 @@ export function getInputScript(): string {
             if (settingsManualModelId) { settingsManualModelId.focus(); }
             return;
           }
+          var contextWindowTokens = readOptionalCapabilityInput(settingsManualContextWindow, 10000000);
+          var maxOutputTokens = readOptionalCapabilityInput(settingsManualMaxOutput, 1000000);
+          if (contextWindowTokens === null || maxOutputTokens === null) {
+            setSettingsDialogStatus(t('manualModelCapabilityInvalid'));
+            (contextWindowTokens === null ? settingsManualContextWindow : settingsManualMaxOutput)?.focus();
+            return;
+          }
           vscode.postMessage({
             type: 'addModel',
             sourceId: source.id,
             provider: source.provider,
             apiKey: source.apiKey,
             baseUrl: source.baseUrl,
-            modelId: modelId
+            modelId: modelId,
+            contextWindowTokens: contextWindowTokens,
+            maxOutputTokens: maxOutputTokens
           });
           if (settingsManualModelBox) { settingsManualModelBox.classList.add('hidden'); }
           beginSettingsDialogAction('add-model', t('savingModelSource'));
         });
       }
 
-      [settingsManualModelId].forEach(function(input) {
+      [settingsManualModelId, settingsManualContextWindow, settingsManualMaxOutput].forEach(function(input) {
         if (!input) { return; }
         input.addEventListener('keydown', function(event) {
           if (event.key !== 'Enter' || event.metaKey || event.ctrlKey) { return; }

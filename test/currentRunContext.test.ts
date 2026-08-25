@@ -4,7 +4,8 @@ import { deduplicateContextSources } from '../src/agent/contextDeduplication';
 import {
   calibrateContextUsageEstimate,
   createContextUsageEstimate,
-  createContextUsageEstimateFromMessages
+  createContextUsageEstimateFromMessages,
+  createDisplayedSessionContextUsageEstimate
 } from '../src/agent/contextUsage';
 import { buildCurrentRunContext } from '../src/agent/currentRunContext';
 import { hashContent } from '../src/agent/projectInstructions';
@@ -160,6 +161,32 @@ test('provider prompt_tokens calibrate the local estimate without another model 
     .reduce((total, [, value]) => total + value, 0);
   assert.equal(promptBreakdown, 1_234);
   assert.equal(calibrated.usedTokensEstimate, 1_834);
+});
+
+test('metadata-backed context and output limits drive request and displayed usage estimates', () => {
+  const model = {
+    id: 'manual-compatible',
+    label: 'Manual Compatible',
+    provider: 'openai-compatible',
+    contextWindowTokens: 64_000,
+    maxOutputTokens: 4_096
+  };
+  const input = {
+    model,
+    agentSettings: { thinkingEnabled: true, reasoningEffort: 'max' as const, compressionThreshold: 'balanced' as const },
+    contextFiles: [],
+    messages: [],
+    language: 'en' as const,
+    prompt: 'hello',
+    includeTools: false
+  };
+  const requestUsage = createContextUsageEstimate(input);
+  const displayedUsage = createDisplayedSessionContextUsageEstimate(input);
+
+  assert.equal(requestUsage.maxTokensEstimate, 64_000);
+  assert.equal(requestUsage.breakdown.outputReserveTokensEstimate, 4_096);
+  assert.equal(displayedUsage.maxTokensEstimate, 64_000);
+  assert.equal(displayedUsage.breakdown.outputReserveTokensEstimate, 0);
 });
 
 function candidate(id: string, uri: string, content: string, priority: number) {

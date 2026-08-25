@@ -42,7 +42,7 @@ KeepSeek 的请求组装遵循三个互相配合的原则（实现核心在 `src
 
 1. **分层前缀（base-first）**：请求被拆成「极少变化的段」和「只增长的段」。system 系统提示、稳定上下文块、工具定义放在最前；历史消息按追加顺序居中；当前用户 prompt 放在最后。变化频率越低的段越靠前，保证任意一段变化时，被它「带失效」的后续内容尽量少。
 2. **Append-only 历史（只增不改）**：历史消息一旦进入投影就只增不改。任何「滑动窗口」「逐轮重打包」机制都会删除或重写中间消息，使第一个变化消息之后的所有内容 miss。
-3. **低频失效点（low-frequency invalidation）**：一切需要改写前缀的操作（摘要压缩、技能重激活、上下文块重算、工具集裁剪）都被刻意压低频率，或者做成「字节不变则复用」，把前缀失效的次数压到最少。
+3. **低频失效点（low-frequency invalidation）**：一切需要改写前缀的操作（摘要压缩、技能重激活、工具集裁剪）都被刻意压低频率；运行中变化的上下文则追加到新 user 消息尾部，不回写旧前缀。
 
 请求的最终形态（`buildInitialAgentMessages`，`src/agent/protocol.ts:80-126`）：
 
@@ -70,19 +70,19 @@ messages = [
 
 **测试守护**：`test/cacheByteStability.test.ts` 断言 system prompt 不随 contextInstructions/历史变化。
 
-### 3.2 稳定上下文块 contextInstructions（字节不变则复用）
+### 3.2 稳定上下文块 contextInstructions（初始冻结，变化只追加）
 
 **做什么**：AGENTS.md 项目指令、激活的 Skills、Legacy Project Memory、Context Files 这些「动态上下文」统一由 `formatCurrentRunContextForAgent`（`src/agent/protocol.ts:212-243`）格式化为**第二条 system 消息**，而不是塞进 user 消息。
 
-在 Provider 侧，格式化结果被持久化为 `ChatSession.contextInstructions`：**每一轮重算一次格式化结果，只有输出字节真的变化（AGENTS.md / Skills / Legacy Memory / Context Files 任一改变）才整体重写会话字段**（`src/provider/KeepseekChatViewProvider.ts:2362-2371`）；字节不变时跨轮复用，缓存代价为零。
+在 Provider 侧，首轮格式化结果被持久化为 `ChatSession.contextInstructions` 并冻结为第二条 system 消息。后续每轮仍计算内容 hash：字节未变时直接复用；AGENTS.md / Skills / Legacy Memory / Context Files 真正变化时，**不会重写已经发送过的 `contextInstructions`**，而是把新的上下文 envelope 只追加到本轮 user 消息尾部，并通过 `providerContent` 原样持久化。下一轮它作为历史消息重放，因此新事实仍然可见，同时旧前缀没有任何字节漂移。
 
 **原理**：
 
 - 这些内容放进独立的 system 块，使 system[0] 完全不受它们影响；
 - user 消息保持「纯 prompt」，跨轮字节一致——如果把这些内容塞进 user 消息，user 消息的字节会随上下文变化，历史重放时全部 miss；
-- 「重算但字节不变则不写」是一个精妙的机制：**计算**是廉价的（每轮做一次字符串格式化），**写入会话**才是昂贵的（会改变后续请求的字节）。把「计算」和「提交」分离，让缓存只在不变量被破坏时才失效。
+- 「重算 hash、变化时只在尾部追加」把**内容更新**与**历史重写**分离：旧 system 与历史保持冻结，新上下文从当前轮末尾开始生效。
 
-**失效时机**：仅当 AGENTS.md / Skills / Legacy Memory / Context Files 的真实内容发生变化（此时前缀本来就会在该点之后失效，顺势重写）。
+**失效时机**：初始 `contextInstructions` 建立时。后续真实内容变化只增加新的 miss 尾部，不使既有前缀失效；编辑重发属于另一个显式历史重写边界。
 
 **测试守护**：`test/cacheByteStability.test.ts`（相同输入必得相同输出、不同输入必得不同输出）、`test/protocolCache.test.ts`（context files 只进 system 块、user 消息无包装）。
 
@@ -125,7 +125,7 @@ messages = [
 
 ### 3.5 低频历史压缩（historyCompressor）——失效点管理的关键
 
-**做什么**：历史压缩（把旧消息替换成一条摘要）是**必须的**——否则会话无限增长会撑爆 100 万 token 的上下文窗口。但每次摘要刷新都会：
+**做什么**：历史压缩（把旧消息替换成一条摘要）是**必须的**——否则会话无限增长会撑爆当前模型的有效上下文窗口。但每次摘要刷新都会：
 
 - 重写 synthetic summary system 消息（字节变化）；
 - 把被覆盖的消息从投影中删除（历史段被改写）。
@@ -133,16 +133,18 @@ messages = [
 这两件事都会让前缀从摘要处起全部失效。因此压缩被设计成**低频失效点**（`src/agent/historyCompressor.ts:34-38` 注释：「Deliberately high: every summary refresh rewrites the synthetic summary message and drops covered messages from the projection... Keep refreshes rare (a low-frequency cache-invalidation point) instead of sliding the recent-turn window every turn」）。具体手段：
 
 1. **增量阈值**：已有摘要时，新增可压缩消息 ≥ 48 条（`SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD = 48`，`historyCompressor.ts:38`）且占用比超过 `triggerRatio` 才刷新。普通对话几轮内不会触发。
-2. **比率闸门**：原始会话 token 占上下文窗口比例低于 `triggerRatio` 时直接 `fresh_enough` 跳过（`shouldRefreshSummary`）。`triggerRatio / forceRatio` 由用户在命令菜单中选择的三档自动压缩阈值覆盖：提前清理为 `0.70 / 0.85`，默认平衡为 `0.80 / 0.92`，缓存优先为 `0.85 / 0.95`。`summaryBudgetTokens` 等其余参数仍取 `src/shared/modelProfiles.ts` 中对应的模型 / Thinking profile。
+2. **比率闸门**：原始会话 token 占有效上下文窗口的比例低于 `triggerRatio` 时直接 `fresh_enough` 跳过（`shouldRefreshSummary`）。`triggerRatio / forceRatio` 由用户在命令菜单中选择的三档自动压缩阈值覆盖：提前清理为 `0.70 / 0.85`，默认平衡为 `0.80 / 0.92`，缓存优先为 `0.85 / 0.95`。DeepSeek V4 内置模型保留专用参数；其它模型使用 metadata-first 通用画像，摘要预算还会被最终输出上限收紧。
 3. **确定性摘要**：摘要请求 `temperature: 0`、关闭 thinking、限制输出 token、短超时（`historyCompressor.ts:347-349`）。摘要刷新时「被覆盖消息的变化」是不可避免的成本，**不能再叠加模型输出的随机字节漂移**——温度 0 保证同一输入得到同一摘要，后续增量刷新时摘要本身不再无故变化。
 4. **C3 失败自锁**：上次刷新失败时暂停自动刷新（`shouldRefreshSummary` 中的 `lastFailureReason` 检查），避免「缓存已经受伤」的情况下反复触发可能再次失败的刷新；只有接近/超过强制上限（`forceRatio`）时才允许重试，保护上下文窗口。
 5. **分级执行**：超过 `forceRatio` 同步强制压缩（`force_context_limit`）、无摘要且接近上下文上限时同步创建（`missing_summary_near_context_limit`），其余情况走后台刷新（`planRefresh`）——前台请求不被压缩延迟阻塞。
 
-**原理**：压缩是「用一次大的缓存失效，换取未来很多轮的小前缀」。如果每轮都压缩，等于每轮都失效；如果把压缩推迟到增量 48 条或占用比 58% 才做，那么两次压缩之间可能间隔几十轮请求，期间每一轮都几乎全量命中。这是典型的「批量失效」思想：**让失效次数最小化，而不是让失效内容最小化**。
+**原理**：压缩是「用一次大的缓存失效，换取未来很多轮的小前缀」。如果每轮都压缩，等于每轮都失效；如果把压缩推迟到增量 48 条或用户选择的占用比阈值才做，那么两次压缩之间可能间隔几十轮请求，期间每一轮都几乎全量命中。这是典型的「批量失效」思想：**让失效次数最小化，而不是让失效内容最小化**。
 
 **失效时机**：每 ≥48 条可压缩消息且超比率（后台）/ 超强制比率（同步）。
 
 缓存优先档会把投影上限 `maxProjectionTokens = contextWindow × forceRatio` 提高到上下文窗口的 95%，因此能保留更多原始历史并延后摘要刷新；这是保护 DeepSeek 前缀缓存的预期取舍。提前清理档则更早释放上下文空间。
+
+模型、来源、provider 或 base URL 变化会迁移 `requestProtocol` cache lane，因为旧 provider 缓存前缀本来就不能复用；它**不会删除或强制重建** `contextCompression.summaries`。摘要是模型无关的语义文本，`HistorySummary.modelId` 只记录 provenance，新模型继续在 projection 中读取既有摘要。`requestProtocolVersion` 仅表示序列化与工具 schema 的兼容版本，不表示模型能力等级。
 
 ### 3.6 工具集 schema 稳定性
 
@@ -281,7 +283,7 @@ Anthropic 对应指纹直接消费权威原生投影：top-level system、Anthro
 | 机制 | 缓存收益 | 代价 | 失效点频率 |
 |---|---|---|---|
 | system 提示分层 | system[0] 永不变 | 代码结构约束 | 从不 |
-| contextInstructions 字节复用 | 上下文块只在真实变化时重写 | 每轮重算一次格式化 | 内容变化时 |
+| contextInstructions 初始冻结 | 旧 system 块不重写；变化内容追加到新 user 尾部 | 每轮计算一次 hash | 初始建立 / 显式历史重写 |
 | append-only 历史投影 | 前缀只增长不重写 | 无法逐轮裁剪中间消息（靠压缩兜底） | 从不（正常路径） |
 | 受保护消息 | 防止重要消息被压缩删除 | 保护消息占用上下文 | 从不 |
 | 低频摘要压缩 | 摘要刷新次数被压到最低（≥48 条/超比率） | 旧消息以摘要形式驻留，丢失细节 | 每 ≥48 条可压缩消息 / 超比率 |

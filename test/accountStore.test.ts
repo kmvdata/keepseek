@@ -31,7 +31,11 @@ describe('ModelSourceStore', () => {
       provider: 'deepseek',
       apiKey: ' sk-secret ',
       baseUrl: ' https://proxy.example.com/v1 ',
-      models: [{ id: ' model-a ' }, { id: 'model-a' }],
+      models: [{
+        id: ' model-a ',
+        contextWindowTokens: 128_000,
+        maxOutputTokens: 16_000
+      }, { id: 'model-a' }],
       disabledModelIds: [' model-b ', 'model-b', '', 1],
       modelCache: {
         models: [{ id: ' model-a ', name: ' Model A ' }, { id: 'model-b' }],
@@ -48,7 +52,7 @@ describe('ModelSourceStore', () => {
       provider: 'deepseek',
       apiKey: 'sk-secret',
       baseUrl: 'https://proxy.example.com/v1',
-      models: [{ id: 'model-a' }],
+      models: [{ id: 'model-a', contextWindowTokens: 128_000, maxOutputTokens: 16_000 }],
       disabledModelIds: ['model-b'],
       modelCache: {
         models: [{ id: 'model-a', name: 'Model A' }, { id: 'model-b' }],
@@ -61,6 +65,22 @@ describe('ModelSourceStore', () => {
     assert.equal(normalizeModelSource({ id: '../escape', provider: 'deepseek' }, { now: NOW }), undefined);
     assert.equal(normalizeModelSource({ id: 'a', provider: 'anthropic' }, { now: NOW }), undefined);
     assert.equal(normalizeModelDiscoveryCache({ models: 'invalid' }), undefined);
+  });
+
+  it('drops invalid manual capability metadata at persistence boundaries', () => {
+    const source = normalizeModelSource({
+      id: 'manual',
+      provider: 'openai-compatible',
+      models: [
+        { id: 'valid', contextWindowTokens: 64_000, maxOutputTokens: 4_000 },
+        { id: 'invalid', contextWindowTokens: -1, maxOutputTokens: 2_000_000 }
+      ]
+    }, { now: NOW });
+
+    assert.deepEqual(source?.models, [
+      { id: 'valid', contextWindowTokens: 64_000, maxOutputTokens: 4_000 },
+      { id: 'invalid' }
+    ]);
   });
 
   it('creates, lists, updates, and physically deletes provider-scoped source files', async () => {

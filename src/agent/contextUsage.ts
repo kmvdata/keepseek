@@ -1,5 +1,4 @@
-import { getConfiguredContextWindowTokens } from '../shared/config';
-import { getDeepSeekV4RuntimeProfile } from '../shared/modelProfiles';
+import { getEffectiveContextWindowTokens } from '../shared/modelProfiles';
 import { DeepSeekFunctionTool, DeepSeekMessage } from './deepseek/types';
 import { isRecord } from '../shared/errors';
 import {
@@ -18,7 +17,6 @@ import { buildProviderRequestProjection } from './providerRequestProjection';
 import type { ModelSourceProvider } from '../accounts/types';
 import type { OpenAiResponsesFunctionTool, OpenAiResponsesItem } from './providers/responsesTypes';
 import type { AnthropicFunctionTool, AnthropicMessage, AnthropicSystemTextBlock } from './providers/anthropicTypes';
-import { DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS } from './providers/anthropicTypes';
 import { estimateTokenCount } from './tokenEstimate';
 
 type ContextUsageBreakdown = ContextUsageEstimate['breakdown'];
@@ -64,12 +62,7 @@ export function createContextUsageEstimate(input: {
   const messages = providerProjection.messages;
   const tools = providerProjection.tools;
   const outputReserveTokens = input.outputReserveTokens ?? resolveOutputReserveTokens(
-    providerProjection.anthropic
-      ? Math.min(
-          input.model.maxOutputTokens ?? DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS,
-          getDeepSeekV4RuntimeProfile(input.model, input.agentSettings).maxTokens
-        )
-      : getDeepSeekV4RuntimeProfile(input.model, input.agentSettings).maxTokens
+    providerProjection.runtimeProfile.maxTokens
   );
   const breakdown = estimateInitialBreakdown({
     messages,
@@ -124,7 +117,7 @@ export function createContextUsageEstimateFromAnthropic(input: {
   safetyReserveTokens?: number;
   breakdown?: Partial<ContextUsageBreakdown>;
 }): ContextUsageEstimate {
-  const maxTokensEstimate = getConfiguredContextWindowTokens(input.model);
+  const maxTokensEstimate = getEffectiveContextWindowTokens(input.model);
   const nativeInputTokensEstimate = estimateTokenCount(JSON.stringify({
     system: input.system,
     messages: input.messages
@@ -182,7 +175,7 @@ export function createContextUsageEstimateFromMessages(input: {
   safetyReserveTokens?: number;
   breakdown?: Partial<ContextUsageBreakdown>;
 }): ContextUsageEstimate {
-  const maxTokensEstimate = getConfiguredContextWindowTokens(input.model);
+  const maxTokensEstimate = getEffectiveContextWindowTokens(input.model);
   const messageTokensEstimate = input.messages.reduce(
     (total, message) => total + estimateDeepSeekMessageTokens(message),
     0
@@ -216,7 +209,7 @@ export function createContextUsageEstimateFromResponses(input: {
   safetyReserveTokens?: number;
   breakdown?: Partial<ContextUsageBreakdown>;
 }): ContextUsageEstimate {
-  const maxTokensEstimate = getConfiguredContextWindowTokens(input.model);
+  const maxTokensEstimate = getEffectiveContextWindowTokens(input.model);
   const inputTokensEstimate = estimateTokenCount(JSON.stringify(input.input)) + input.input.length * 4;
   const toolSchemaTokensEstimate = input.tools?.length
     ? estimateTokenCount(JSON.stringify(input.tools))

@@ -1469,6 +1469,11 @@ export function getInputStyles(): string {
       min-width: 0;
     }
 
+    .settings-model-identity .settings-field-hint {
+      display: block;
+      margin-top: 2px;
+    }
+
     .settings-model-name {
       display: block;
       overflow: hidden;
@@ -1541,7 +1546,7 @@ export function getInputStyles(): string {
 
     .settings-manual-model {
       display: grid;
-      grid-template-columns: minmax(100px, 1fr) auto;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       align-items: end;
       gap: 6px;
       margin-top: 10px;
@@ -1551,6 +1556,15 @@ export function getInputStyles(): string {
 
     .settings-manual-model .settings-field {
       margin: 0;
+    }
+
+    .settings-manual-model-id {
+      grid-column: 1 / -1;
+    }
+
+    .settings-manual-model button {
+      grid-column: 2;
+      justify-self: end;
     }
 
     .about-details {
@@ -1778,6 +1792,11 @@ export function getInputStyles(): string {
 
       .settings-manual-model {
         grid-template-columns: minmax(0, 1fr);
+      }
+
+      .settings-manual-model-id,
+      .settings-manual-model button {
+        grid-column: 1;
       }
 
       .settings-model-row button,

@@ -20,7 +20,6 @@ import {
 } from '../shared/types';
 import type { ProviderReplayState } from '../shared/types';
 import {
-  getConfiguredContextWindowTokens,
   getConfiguredMaxRequestRetries,
   getConfiguredMaxRepairIterations,
   getConfiguredMaxValidationRuns,
@@ -34,7 +33,7 @@ import { isOfficialAnthropicSource } from '../accounts/sourceCapabilities';
 import { formatBytes } from '../shared/format';
 import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
 import {
-  getDeepSeekV4RuntimeProfile,
+  getAgentRuntimeProfile,
   type ContextCompressionSettings
 } from '../shared/modelProfiles';
 import {
@@ -99,7 +98,6 @@ import type {
   AnthropicSystemTextBlock,
   AnthropicUserContentBlock
 } from './providers/anthropicTypes';
-import { DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS } from './providers/anthropicTypes';
 import {
   AgentInteractionTrace,
   createNoopInteractionTrace,
@@ -149,6 +147,7 @@ interface AgentRuntimeConfig {
   apiKey: string;
   baseUrl: string;
   supportsBilling: boolean;
+  contextWindowTokens: number;
   maxTokens: number;
   maxToolIterations: number;
   maxToolCalls: number;
@@ -544,7 +543,7 @@ export class AgentRunner {
       slimToolNames: request.slimToolNames,
       requestProtocolVersion: request.requestProtocolVersion,
       includeTools: runtimeConfig.maxToolIterations > 0,
-      maxProjectionTokens: getConfiguredContextWindowTokens(request.model)
+      maxProjectionTokens: runtimeConfig.contextWindowTokens
         * runtimeConfig.contextCompression.forceRatio,
       provider: runtimeConfig.provider,
       sourceId: runtimeConfig.sourceId,
@@ -2743,7 +2742,7 @@ export class AgentRunner {
     pendingResponseFunctionOutputs: OpenAiResponsesItem[] = [],
     pendingAnthropicToolResults: AnthropicUserContentBlock[] = []
   ): boolean {
-    const settings = getDeepSeekV4RuntimeProfile(request.model, request.settings).contextCompression;
+    const settings = getAgentRuntimeProfile(request.model, request.settings).contextCompression;
     const usage = providerRunState?.protocol === 'openai-responses'
       ? createContextUsageEstimateFromResponses({
           model: request.model,
@@ -3343,7 +3342,7 @@ export class AgentRunner {
       || isOfficialAnthropicSource(sourceConfig))) {
       throw new MissingModelSourceApiKeyError(request.language);
     }
-    const profile = getDeepSeekV4RuntimeProfile(request.model, request.settings);
+    const profile = getAgentRuntimeProfile(request.model, request.settings);
 
     return {
       sourceId: sourceConfig.sourceId,
@@ -3351,12 +3350,8 @@ export class AgentRunner {
       apiKey: sourceConfig.apiKey,
       baseUrl: sourceConfig.baseUrl,
       supportsBilling: sourceConfig.supportsBilling,
-      maxTokens: sourceConfig.provider === 'anthropic-compatible'
-        ? Math.max(1, Math.min(
-            profile.maxTokens,
-            request.model.maxOutputTokens ?? DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS
-          ))
-        : profile.maxTokens,
+      contextWindowTokens: profile.contextWindowTokens,
+      maxTokens: profile.maxTokens,
       maxToolIterations: clampRunLimit(profile.maxToolIterations, request.executionLimits?.maxToolIterations),
       maxToolCalls: clampRunLimit(profile.maxToolCalls, request.executionLimits?.maxToolCalls),
       maxRunMs: clampRunLimit(profile.maxRunMs, request.executionLimits?.maxRunMs),

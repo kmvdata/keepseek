@@ -52,6 +52,24 @@ interface RuntimeConfigInvoker {
   getRuntimeConfig(request: AgentRequest): Promise<TestRuntimeConfig>;
 }
 
+interface ContextBudgetInvoker {
+  getContextWindowBudgetStopReason(
+    request: AgentRequest,
+    messages: DeepSeekMessage[],
+    tools: DeepSeekFunctionTool[],
+    outputReserveTokens: number
+  ): string | undefined;
+}
+
+interface ToolSnipInvoker {
+  shouldSnipToolResult(
+    request: AgentRequest,
+    messages: DeepSeekMessage[],
+    tools: DeepSeekFunctionTool[],
+    outputReserveTokens: number
+  ): boolean;
+}
+
 interface SummaryInvoker {
   completeSummary(input: {
     model: AgentRequest['model'];
@@ -188,6 +206,7 @@ test('openai-compatible runtime sends the actual model id without DeepSeek-only 
     assert.equal('reasoning_effort' in body, false);
     assert.equal(body.stream, true);
     assert.equal(body.tool_choice, 'auto');
+    assert.equal(body.max_tokens, 1_000);
     assert.deepEqual(body.tools, [TEST_TOOL]);
     const messages = body.messages as Array<Record<string, unknown>>;
     assert.equal('reasoning_content' in messages[1], false);
@@ -224,9 +243,42 @@ test('main runtime resolves credentials from the model source bound to the selec
     assert.equal(runtime.provider, 'openai-compatible');
     assert.equal(runtime.apiKey, 'compatible-key');
     assert.equal(runtime.baseUrl, 'https://compatible.example/v1');
-    assert.equal(runtime.maxTokens, 192_000, 'unknown models retain the conservative Flash profile');
+    assert.equal(runtime.maxTokens, 8_192, 'unknown models use the generic conservative output fallback');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Chat Completions and Ollama clamp max_tokens through manual model metadata', async () => {
+  const captured: CapturedRequest[] = [];
+  const restore = mockFetchCapturing(captured, 'ok');
+  try {
+    for (const provider of ['openai-compatible', 'ollama'] as const) {
+      const runner = new AgentRunner() as unknown as RuntimeInvoker & RuntimeConfigInvoker;
+      const request = createRequest(`${provider}-model`, provider);
+      request.model.contextWindowTokens = 2_000;
+      request.model.maxOutputTokens = 777;
+      request.sourceConfig = {
+        sourceId: provider,
+        provider,
+        apiKey: '',
+        baseUrl: provider === 'ollama' ? 'http://localhost:11434/v1' : 'https://proxy.example/v1',
+        supportsBilling: false
+      };
+      const runtime = await runner.getRuntimeConfig(request);
+      assert.equal(runtime.maxTokens, 777);
+      await runner.createModelResponse(request, runtime, [{ role: 'user', content: 'hello' }], [], {});
+    }
+
+    assert.deepEqual(captured.map((item) => parseRequestBody(item.body).max_tokens), [777, 777]);
+    for (const item of captured) {
+      const body = parseRequestBody(item.body);
+      assert.equal('thinking' in body, false);
+      assert.equal('reasoning_effort' in body, false);
+      assert.equal('max_output_tokens' in body, false);
+    }
+  } finally {
+    restore();
   }
 });
 
@@ -246,6 +298,37 @@ test('main runtime uses the immutable per-run source snapshot', async () => {
   assert.equal(runtime.provider, 'openai-compatible');
   assert.equal(runtime.apiKey, 'snapshot-key');
   assert.equal(runtime.baseUrl, 'https://snapshot.example/v1');
+});
+
+test('hard-limit checks use the model metadata context window', () => {
+  const runner = new AgentRunner() as unknown as ContextBudgetInvoker;
+  const constrained = createRequest('manual-small-window', 'openai-compatible');
+  constrained.model.contextWindowTokens = 8_000;
+  constrained.model.maxOutputTokens = 1_000;
+  const roomy = createRequest('manual-roomy-window', 'openai-compatible');
+  roomy.model.contextWindowTokens = 64_000;
+  roomy.model.maxOutputTokens = 1_000;
+  const messages: DeepSeekMessage[] = [{ role: 'user', content: 'hello' }];
+
+  assert.equal(
+    runner.getContextWindowBudgetStopReason(constrained, messages, [], 1_000),
+    'tool_result_budget_exhausted'
+  );
+  assert.equal(runner.getContextWindowBudgetStopReason(roomy, messages, [], 1_000), undefined);
+});
+
+test('tool-result snip pressure uses the same metadata-backed runtime profile', () => {
+  const runner = new AgentRunner() as unknown as ToolSnipInvoker;
+  const constrained = createRequest('manual-small-window', 'openai-compatible');
+  constrained.model.contextWindowTokens = 20_000;
+  constrained.model.maxOutputTokens = 1_000;
+  const roomy = createRequest('manual-roomy-window', 'openai-compatible');
+  roomy.model.contextWindowTokens = 100_000;
+  roomy.model.maxOutputTokens = 1_000;
+  const messages: DeepSeekMessage[] = [{ role: 'user', content: 'hello' }];
+
+  assert.equal(runner.shouldSnipToolResult(constrained, messages, [], 1_000), true);
+  assert.equal(runner.shouldSnipToolResult(roomy, messages, [], 1_000), false);
 });
 
 test('Responses runtime uses its immutable non-billing source snapshot', async () => {
@@ -315,7 +398,8 @@ test('context summaries resolve the selected source and omit DeepSeek-only field
           id: 'summary-model',
           label: 'Summary Model',
           provider: 'openai-compatible',
-          sourceId: 'compatible'
+          sourceId: 'compatible',
+          maxOutputTokens: 50
         },
         messages: [{ role: 'user', content: 'summarize' }],
         maxTokens: 100,
@@ -329,6 +413,7 @@ test('context summaries resolve the selected source and omit DeepSeek-only field
       const body = parseRequestBody(captured[0].body);
       assert.equal(body.model, 'summary-model');
       assert.equal('thinking' in body, false);
+      assert.equal(body.max_tokens, 50);
     } finally {
       restore();
     }

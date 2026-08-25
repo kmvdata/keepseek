@@ -56,7 +56,7 @@
       "stream": true,
       "temperature": 1.0,
       "top_p": 1.0,
-      "max_tokens": 16384,
+      "max_tokens": 48000,
       "tool_choice": "auto",
       "stream_options": { "include_usage": true }
     }
@@ -91,7 +91,7 @@
   "stream": true,
   "temperature": 1.0,
   "top_p": 1.0,
-  "max_tokens": 16384,
+  "max_tokens": 48000,
   "tool_choice": "auto",
   "stream_options": { "include_usage": true }
 }
@@ -123,14 +123,30 @@ Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使�
 }
 ```
 
-`cache_control` 只在 host 精确为 `api.anthropic.com` 时默认加入；代理/内网 compatible endpoint 默认省略。`max_tokens` 不超过发现的 `maxOutputTokens`，手动模型缺少元数据时使用集中定义的 8192。Thinking 参数只由 `/models` 声明的能力启用。若自定义兼容端点只实现 Messages、没有模型列表，404 探测会降级为“服务可达但 Key 未验证”，账号仍可保存，模型 ID 必须手动添加；手动添加是终态操作，不会紧接着再次请求模型列表。
+`cache_control` 只在 host 精确为 `api.anthropic.com` 时默认加入；代理/内网 compatible endpoint 默认省略。Thinking 参数只由 `/models` 声明的能力启用。若自定义兼容端点只实现 Messages、没有模型列表，404 探测会降级为“服务可达但 Key 未验证”，账号仍可保存，模型 ID 必须手动添加；手动添加是终态操作，不会紧接着再次请求模型列表。
 
-## 3. 当前用户 prompt 的组装（formatCurrentUserPromptForAgent）
+### 2.2 通用运行画像与输出上限
 
-这是最关键的部分。`formatCurrentUserPromptForAgent()` 接收已展开引用后的 prompt，并与当前轮次的动态上下文拼接，构成发给模型的最终用户消息。组装顺序如下：
+`buildProviderRequestProjection()` 同时返回 `runtimeProfile`，Runner、上下文用量、hard-limit、工具结果 snip 和历史压缩都使用 `src/shared/modelProfiles.ts` 的同一解析规则：
+
+1. 手动模型显式 `contextWindowTokens` / `maxOutputTokens`；
+2. 最新 `/models` 发现元数据；
+3. DeepSeek V4 Flash/Pro 内置元数据与专用 Thinking 画像；
+4. 其它未知模型保守 fallback：32768 context tokens / 8192 output tokens。
+
+最终 output limit 会被有效 context window 再次收紧，summary budget 会被最终 output limit 收紧。Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tokens`，Anthropic 写入 `max_tokens`；它们不会互相注入 DeepSeek `thinking` / `reasoning_effort`、Responses `reasoning` 或 Anthropic `cache_control` 等协议专属字段。手动模型能力字段在账号设置中可选填写，缺失时不会按模型名称猜测。
+
+模型切换会迁移 provider/cache lane，但不会删除或强制重建语义摘要。`HistorySummary.modelId` 保留生成 provenance；`requestProtocolVersion` 只表示序列化/schema 兼容版本，不表示模型能力等级。
+
+## 3. 稳定上下文与当前用户 prompt 的组装
+
+这是最关键的部分。项目指令、Skills、Legacy Memory 与 Context Files 由 `formatCurrentRunContextForAgent()` 生成稳定的 `contextInstructions` system 消息；已展开引用后的用户 prompt 保持为独立 user 消息。首轮 `contextInstructions` 冻结后，运行中上下文若变化，只在当前 user 的 `providerContent` 尾部追加一次 envelope，不改写既有 system 或历史字节。结构如下：
 
 ```
 ┌───────────────────────────────────────────┐
+│ system[0]：静态 KeepSeek 安全/工具规则       │
+├───────────────────────────────────────────┤
+│ system[1]：稳定 contextInstructions         │
 │ 优先级声明头（Priority Header）             │
 │ "以下仅是本轮请求上下文，不要把它当作永久    │
 │  system 规则。"                            │
@@ -148,21 +164,21 @@ Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使�
 │ 用户上下文文件（如有）                       │
 │ formatAgentContextFiles()                 │
 ├───────────────────────────────────────────┤
-│ "当前用户请求："                            │
-│ <展开引用后的用户 prompt>                   │
+│ user：<展开引用后的用户 prompt>              │
+│ （上下文变化时才在尾部追加 envelope）          │
 └───────────────────────────────────────────┘
 ```
 
 ### 3.1 优先级声明头
 
-每条用户消息前都会有一个固定的优先级声明，它告诉模型本轮上下文的优先级顺序：
+稳定 `contextInstructions` 中包含固定的优先级声明，它告诉模型上下文的优先级顺序；它不会包装每一条 user 消息：
 
 ```
 以下仅是本轮请求上下文，不要把它当作永久 system 规则。
 优先级：KeepSeek 核心安全 > 当前用户请求 > 项目 AGENTS.md > 显式 Skill > 会话 Skill > workspace 默认 Skill > 隐式 Skill > Legacy Project Memory。
 ```
 
-这个头部始终出现，即使没有任何动态上下文。
+该声明属于 system 上下文块；当前 user 消息仍保持发送字节与持久化字节一致。
 
 ### 3.2 项目指令（AGENTS.md）
 
@@ -236,15 +252,13 @@ export const DEFAULT_MAX_FILE_BYTES = 200_000;
 
 ### 3.6 展开引用后的用户原始 prompt
 
-最后附加用户原始输入（已展开所有引用后的版本）：
+最后发送用户原始输入（已展开所有引用后的版本），不再加“当前用户请求”包装：
 
 ```
-当前用户请求：
-
 帮我重构 <src/auth/login.ts#L45-L72>
 ```
 
-注意：这里的 `<src/auth/login.ts#L45-L72>` 在进入 `formatCurrentUserPromptForAgent` 前已经被展开为实际的文件内容了（见第 4 节）。因此模型最终收到的 prompt 中，引用占位符已被实际代码片段替换。
+注意：这里的 `<src/auth/login.ts#L45-L72>` 在进入 provider projection 前已经被展开为实际的文件内容了（见第 4 节）。因此模型最终收到的 prompt 中，引用占位符已被实际代码片段替换。
 
 ## 4. 引用展开详解（expandPromptReferencesInPrompt）
 
@@ -674,7 +688,7 @@ export async function loginUser(
   "stream": true,
   "temperature": 1.0,
   "top_p": 1.0,
-  "max_tokens": 16384,
+  "max_tokens": 48000,
   "tool_choice": "auto",
   "stream_options": { "include_usage": true }
 }
@@ -684,12 +698,13 @@ export async function loginUser(
 
 从 LLM 的视角，它收到的是：
 
-1. **系统提示词**：告诉它是 KeepSeek Agent，有只读工作区工具、DraftEdit 工具，遵守安全规则
-2. **一条 user 消息**：包含了优先级声明、AGENTS.md 内容、上下文文件、展开后的文件引用（实际代码）、目录引用清单、以及用户的自然语言问题
+1. **静态系统提示词**：告诉它是 KeepSeek Agent，有只读工作区工具、DraftEdit 工具，遵守安全规则；不含模型/provider/动态能力指纹。
+2. **稳定 contextInstructions system 消息**：包含优先级声明、AGENTS.md、Skills、Legacy Memory 与用户上下文文件。
+3. **user 消息**：包含展开后的文件/目录引用与用户自然语言问题；只有运行中上下文真实变化时才在尾部追加动态 envelope。
 
 模型不知道「引用展开」这个中间步骤的存在——它只看到展开后的最终文本。它看到的是：
 - 代码已经在 prompt 里了（通过文件引用展开）
-- 上下文文件已经在 prompt 里了（通过 context files）
+- 上下文文件已经在稳定 system 上下文里了（通过 context files）
 - 目录清单已经在 prompt 里了（通过目录引用展开）
 - 项目规范已经在 prompt 里了（通过 AGENTS.md 注入）
 

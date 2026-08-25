@@ -379,7 +379,11 @@ describe('OpenAI Responses account protocol', () => {
     try {
       const request = createAgentRequest();
       request.settings = { ...request.settings, reasoningEffort: 'max' };
-      request.model = { ...request.model, contextWindowTokens: 1_000_000 };
+      request.model = {
+        ...request.model,
+        contextWindowTokens: 1_000_000,
+        maxOutputTokens: 6_000
+      };
       const response = await new AgentRunner().run(request);
       assert.equal(response.message, 'done');
       assert.equal(bodies.length, 2);
@@ -391,7 +395,7 @@ describe('OpenAI Responses account protocol', () => {
       assert.equal('stream_options' in first, false);
       assert.equal('thinking' in first, false);
       assert.equal('previous_response_id' in first, false);
-      assert.equal(first.max_output_tokens, 192_000);
+      assert.equal(first.max_output_tokens, 6_000);
       assert.deepEqual(first.include, ['reasoning.encrypted_content']);
       assert.deepEqual(first.reasoning, { effort: 'high' });
       const flatTool = (first.tools as Array<Record<string, unknown>>)[0];
@@ -518,7 +522,7 @@ describe('OpenAI Responses account protocol', () => {
     try {
       const compressor = new HistoryCompressor() as unknown as {
         completeSummary(input: {
-          model: typeof MODEL;
+          model: AgentRequest['model'];
           messages: Array<{ role: 'system' | 'user'; content: string }>;
           maxTokens: number;
           timeoutMs: number;
@@ -528,7 +532,7 @@ describe('OpenAI Responses account protocol', () => {
         }): Promise<{ content: string }>;
       };
       const result = await compressor.completeSummary({
-        model: MODEL,
+        model: { ...MODEL, maxOutputTokens: 200 },
         messages: [{ role: 'system', content: 'summarize' }, { role: 'user', content: 'history' }],
         maxTokens: 321,
         timeoutMs: 1_000,
@@ -539,7 +543,7 @@ describe('OpenAI Responses account protocol', () => {
       assert.equal(result.content, 'summary');
       assert.equal(capturedUrl, 'https://proxy.example/v1/responses');
       assert.equal(capturedBody.store, false);
-      assert.equal(capturedBody.max_output_tokens, 321);
+      assert.equal(capturedBody.max_output_tokens, 200);
       assert.ok(Array.isArray(capturedBody.input));
       assert.equal('messages' in capturedBody, false);
       assert.equal('tools' in capturedBody, false);

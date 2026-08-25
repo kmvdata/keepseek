@@ -3,6 +3,10 @@ import * as vscode from 'vscode';
 import { DEFAULT_DEEPSEEK_BASE_URL } from '../shared/config';
 import { isRecord } from '../shared/errors';
 import {
+  MAX_MODEL_CONTEXT_WINDOW_TOKENS,
+  MAX_MODEL_OUTPUT_TOKENS
+} from '../shared/modelProfiles';
+import {
   MODEL_SOURCE_PROVIDERS,
   type AnthropicModelCapabilities,
   type CreateModelSourceInput,
@@ -25,8 +29,8 @@ const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MAX_ACCOUNT_NAME_LENGTH = 200;
 const MAX_MODEL_ID_LENGTH = 512;
 const MAX_MODEL_NAME_LENGTH = 512;
-export const MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS = 10_000_000;
-export const MAX_DISCOVERED_OUTPUT_TOKENS = 1_000_000;
+export const MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS = MAX_MODEL_CONTEXT_WINDOW_TOKENS;
+export const MAX_DISCOVERED_OUTPUT_TOKENS = MAX_MODEL_OUTPUT_TOKENS;
 
 export interface ModelSourceStoreOptions {
   now?: () => number;
@@ -348,7 +352,19 @@ export function normalizeSourceModels(value: unknown): ModelSourceModel[] {
       continue;
     }
     seenIds.add(id);
-    models.push({ id });
+    const contextWindowTokens = normalizeBoundedPositiveInteger(
+      item.contextWindowTokens,
+      MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS
+    );
+    const maxOutputTokens = normalizeBoundedPositiveInteger(
+      item.maxOutputTokens,
+      MAX_DISCOVERED_OUTPUT_TOKENS
+    );
+    models.push({
+      id,
+      ...(contextWindowTokens ? { contextWindowTokens } : {}),
+      ...(maxOutputTokens ? { maxOutputTokens } : {})
+    });
   }
   return models;
 }

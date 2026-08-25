@@ -169,6 +169,8 @@ test('model settings dialog manages flat logo-led accounts and per-source models
     'settingsRefreshModelsBtn',
     'settingsModelList',
     'settingsManualModelId',
+    'settingsManualContextWindow',
+    'settingsManualMaxOutput',
     'settingsAddModelBtn'
   ]) {
     assert.match(inputTemplate, new RegExp(`id="${accountId}"`, 'u'));
@@ -214,6 +216,8 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(inputScript, /disabledModelIds/u);
   assert.match(styles, /@media \(max-width: 540px\)/u);
   assert.match(messageSource, /type: 'addModel'/u);
+  assert.match(messageSource, /contextWindowTokens\?: number/u);
+  assert.match(messageSource, /maxOutputTokens\?: number/u);
   assert.match(messageSource, /type: 'saveModelSource'/u);
   assert.match(messageSource, /type: 'deleteModel'/u);
   assert.match(messageSource, /type: 'setModelEnabled'/u);

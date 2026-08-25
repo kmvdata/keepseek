@@ -35,7 +35,6 @@ import {
 import { AnthropicMessagesClient, getAnthropicMessagesEndpointUrl } from '../src/agent/providers/anthropicMessagesClient';
 import { AnthropicStreamParser } from '../src/agent/providers/anthropicStreamParser';
 import type { AnthropicMessagesRequestBody } from '../src/agent/providers/anthropicTypes';
-import { DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS } from '../src/agent/providers/anthropicTypes';
 import { createProviderClient } from '../src/agent/providers/factory';
 import { AgentRunner } from '../src/agent/runner';
 import {
@@ -45,6 +44,7 @@ import {
   normalizeStoredSessions
 } from '../src/sessions/chatSessionStore';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
+import { DEFAULT_GENERIC_MAX_OUTPUT_TOKENS } from '../src/shared/modelProfiles';
 import type { AgentRequest, ChatMessage, KeepseekModel, ProviderReplayState } from '../src/shared/types';
 import { getNewAccountDialogScript, getNewAccountDialogTemplate } from '../src/webview/input/newAccountDialog';
 import { getInputScript } from '../src/webview/input/script';
@@ -692,7 +692,7 @@ describe('Anthropic Messages compatible protocol', () => {
       assert.equal('thinking' in captures[2], false);
       assert.equal('output_config' in captures[2], false);
       assert.equal('cache_control' in captures[2], false);
-      assert.equal(captures[2].max_tokens, DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS);
+      assert.equal(captures[2].max_tokens, DEFAULT_GENERIC_MAX_OUTPUT_TOKENS);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -720,7 +720,7 @@ describe('Anthropic Messages compatible protocol', () => {
         }): Promise<{ content: string }>;
       };
       const result = await compressor.completeSummary({
-        model: MODEL,
+        model: { ...MODEL, maxOutputTokens: 200 },
         messages: [{ role: 'system', content: 'summarize' }, { role: 'user', content: 'history' }],
         maxTokens: 321,
         timeoutMs: 1_000,
@@ -731,7 +731,7 @@ describe('Anthropic Messages compatible protocol', () => {
       assert.equal(result.content, 'summary');
       assert.equal(capturedUrl, 'https://api.anthropic.com/v1/messages');
       assert.equal(capturedBody?.temperature, 0);
-      assert.equal(capturedBody?.max_tokens, 321);
+      assert.equal(capturedBody?.max_tokens, 200);
       assert.equal(capturedBody?.system[0].text, 'summarize');
       assert.equal(readText(capturedBody?.messages[0].content[0]), 'history');
       assert.equal('tools' in (capturedBody ?? {}), false);

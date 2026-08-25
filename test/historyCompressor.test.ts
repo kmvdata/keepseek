@@ -128,6 +128,29 @@ test('new compression appends an immutable summary segment without rewriting the
   )), false);
 });
 
+test('summary completion budget never exceeds the model runtime output limit', async () => {
+  let capturedMaxTokens = 0;
+  const compressor = new HistoryCompressor(async (input) => {
+    capturedMaxTokens = input.maxTokens;
+    return 'bounded';
+  });
+  const messages = Array.from({ length: 12 }, (_value, index) => (
+    createMessage(index, `payload ${index} `.repeat(500))
+  ));
+  const result = await compressor.refresh({
+    session: createSession(messages),
+    prompt: 'current request',
+    model: { ...createModel(20_000), maxOutputTokens: 500 },
+    agentSettings: { thinkingEnabled: true, reasoningEffort: 'max', compressionThreshold: 'balanced' },
+    contextFiles: [],
+    language: 'en',
+    settings: { ...createCompressionSettings(), keepRecentTurns: 1, triggerRatio: 0.01, forceRatio: 0.02 }
+  });
+
+  assert.equal(result.reason, 'created');
+  assert.equal(capturedMaxTokens, 500);
+});
+
 function createCompressionSettings() {
   return {
     keepRecentTurns: 2,

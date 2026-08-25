@@ -345,9 +345,17 @@ export function getInputTemplate(): string {
                   <div id="settingsModelList" class="settings-model-list"></div>
                   <div id="settingsModelEmpty" class="settings-empty-state hidden" data-i18n="modelsEmpty">没有可用模型；非官网来源请手动添加模型 ID。</div>
                   <div class="settings-manual-model hidden">
-                    <label class="settings-field">
+                    <label class="settings-field settings-manual-model-id">
                       <span id="settingsManualModelIdLabel" class="settings-field-label" data-i18n="manualModelId">模型 ID</span>
                       <input id="settingsManualModelId" class="settings-input" type="text" placeholder="model-id" autocomplete="off" />
+                    </label>
+                    <label class="settings-field">
+                      <span id="settingsManualContextWindowLabel" class="settings-field-label" data-i18n="manualContextWindowTokens">上下文窗口（可选）</span>
+                      <input id="settingsManualContextWindow" class="settings-input" type="number" min="1" max="10000000" step="1" placeholder="32768" autocomplete="off" />
+                    </label>
+                    <label class="settings-field">
+                      <span id="settingsManualMaxOutputLabel" class="settings-field-label" data-i18n="manualMaxOutputTokens">最大输出（可选）</span>
+                      <input id="settingsManualMaxOutput" class="settings-input" type="number" min="1" max="1000000" step="1" placeholder="8192" autocomplete="off" />
                     </label>
                     <button id="settingsConfirmAddModelBtn" type="button" class="secondary" data-i18n="confirmAddModel">添加</button>
                   </div>

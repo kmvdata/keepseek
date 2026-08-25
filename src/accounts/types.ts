@@ -50,6 +50,9 @@ export interface ModelDiscoveryCache {
 /** A model explicitly attached to a source. */
 export interface ModelSourceModel {
   id: string;
+  /** Explicit capability overrides for manually attached models. */
+  contextWindowTokens?: number;
+  maxOutputTokens?: number;
 }
 
 /** Persisted model-source schema stored below the extension's globalStorageUri. */

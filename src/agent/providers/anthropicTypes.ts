@@ -1,7 +1,5 @@
 import type { DeepSeekStreamResult } from '../deepseek/types';
 
-export const DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS = 8_192;
-
 export type AnthropicJsonValue =
   | string
   | number

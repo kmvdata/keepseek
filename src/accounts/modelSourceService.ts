@@ -1,4 +1,8 @@
-import { ModelSourceStore } from './accountStore';
+import {
+  MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS,
+  MAX_DISCOVERED_OUTPUT_TOKENS,
+  ModelSourceStore
+} from './accountStore';
 import { createModelCatalog } from './modelCatalog';
 import {
   probeSourceConnection,
@@ -17,6 +21,8 @@ export interface AddModelInput {
   apiKey: string;
   baseUrl: string;
   modelId?: string;
+  contextWindowTokens?: number;
+  maxOutputTokens?: number;
 }
 
 export interface AddModelResult {
@@ -53,13 +59,13 @@ export class ModelSourceService {
 
     if (!source) {
       const name = normalizeRequiredSourceName(input.name);
-      await this.assertUniqueSourceName(name);
       const apiKey = input.apiKey.trim();
       const baseUrl = normalizeRequiredBaseUrl(input.baseUrl);
       assertOfficialAnthropicApiKey(input.provider, baseUrl, apiKey);
       source = await this.findReusableSource(input.provider, apiKey, baseUrl);
       reusedSource = Boolean(source);
       if (!source) {
+        await this.assertUniqueSourceName(name);
         const probe = await this.probeConnection({ provider: input.provider, apiKey, baseUrl });
         if (!probe.ok) {
           throw new Error(probe.error || 'The Base URL is unreachable or authentication failed.');
@@ -79,7 +85,18 @@ export class ModelSourceService {
       throw new Error('The selected model source is disabled.');
     }
     if (modelId) {
-      source = await this.upsertModel(source, modelId);
+      source = await this.upsertModel(source, modelId, {
+        contextWindowTokens: normalizeOptionalCapabilityTokens(
+          input.contextWindowTokens,
+          MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS,
+          'contextWindowTokens'
+        ),
+        maxOutputTokens: normalizeOptionalCapabilityTokens(
+          input.maxOutputTokens,
+          MAX_DISCOVERED_OUTPUT_TOKENS,
+          'maxOutputTokens'
+        )
+      });
     }
 
     const discovery = modelDiscoveryUnavailable
@@ -202,11 +219,17 @@ export class ModelSourceService {
 
   private async upsertModel(
     source: ModelSource,
-    modelId: string
+    modelId: string,
+    capabilities: Pick<ModelSourceModel, 'contextWindowTokens' | 'maxOutputTokens'>
   ): Promise<ModelSource> {
     const models: ModelSourceModel[] = source.models.map((model) => ({ ...model }));
     const index = models.findIndex((model) => model.id === modelId);
-    const next = { id: modelId };
+    const current = index >= 0 ? models[index] : undefined;
+    const next: ModelSourceModel = {
+      id: modelId,
+      contextWindowTokens: capabilities.contextWindowTokens ?? current?.contextWindowTokens,
+      maxOutputTokens: capabilities.maxOutputTokens ?? current?.maxOutputTokens
+    };
     if (index >= 0) {
       models[index] = next;
     } else {
@@ -221,6 +244,20 @@ export class ModelSourceService {
     }
     return updated;
   }
+}
+
+function normalizeOptionalCapabilityTokens(
+  value: number | undefined,
+  max: number,
+  field: string
+): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Number.isFinite(value) || value <= 0 || value > max || !Number.isInteger(value)) {
+    throw new Error(`${field} must be a positive integer no greater than ${max}.`);
+  }
+  return value;
 }
 
 function shouldRefreshAfterSave(source: Pick<ModelSource, 'provider' | 'baseUrl'>): boolean {

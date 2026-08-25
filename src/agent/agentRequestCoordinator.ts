@@ -15,7 +15,7 @@ import {
 } from './historyCompressor';
 import { capOversizedFirstUserProviderContent, maintainArchivedToolResults } from './historyArchive';
 import { getConfiguredPromptCacheTtlMs } from '../shared/config';
-import { getDeepSeekV4ContextCompressionSettings } from '../shared/modelProfiles';
+import { getAgentContextCompressionSettings } from '../shared/modelProfiles';
 
 export interface AgentRequestCoordinatorInput {
   prompt: string;
@@ -126,7 +126,7 @@ export class AgentRequestCoordinator {
     }
 
     const keepRecentTurns = (input.settings
-      ?? getDeepSeekV4ContextCompressionSettings(input.model, input.agentSettings)).keepRecentTurns;
+      ?? getAgentContextCompressionSettings(input.model, input.agentSettings)).keepRecentTurns;
     capOversizedFirstUserProviderContent(input.session);
     const snipResult = maintainArchivedToolResults(input.session, 'snip', keepRecentTurns);
     if (snipResult.changed) {

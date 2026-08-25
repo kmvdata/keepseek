@@ -5,6 +5,7 @@ import {
   formatCurrentRunContextForAgent,
   getAgentSystemPrompt
 } from '../src/agent/protocol';
+import { buildProviderRequestProjection } from '../src/agent/providerRequestProjection';
 import type {
   ActivatedSkill,
   AgentToolCall,
@@ -302,6 +303,45 @@ test('system prompt 不随 contextInstructions 或历史变化（base-first 分�
 
   assert.equal(withHistory[0]?.role, 'system');
   assert.equal(withHistory[0]?.content, baseline);
+});
+
+test('model/provider capability changes do not alter system prompt or frozen tool schema bytes', () => {
+  const base = {
+    agentSettings: {
+      thinkingEnabled: true,
+      reasoningEffort: 'max' as const,
+      compressionThreshold: 'balanced' as const
+    },
+    contextFiles: [],
+    history: [userMessage('u1', 'hello')],
+    language: 'en' as const,
+    prompt: 'hello',
+    requestProtocolVersion: 2,
+    slimToolNames: ['keepseek_list_workspace_files'],
+    includeTools: true
+  };
+  const deepseek = buildProviderRequestProjection({
+    ...base,
+    model: {
+      id: 'deepseek-v4-flash', label: 'Flash', provider: 'deepseek',
+      contextWindowTokens: 1_000_000
+    },
+    provider: 'deepseek'
+  });
+  const compatible = buildProviderRequestProjection({
+    ...base,
+    model: {
+      id: 'vendor-model', label: 'Vendor', provider: 'openai-compatible',
+      contextWindowTokens: 64_000, maxOutputTokens: 4_000
+    },
+    provider: 'openai-compatible'
+  });
+
+  assert.equal(deepseek.messages[0]?.content, compatible.messages[0]?.content);
+  assert.equal(deepseek.messages[0]?.content, getAgentSystemPrompt({ language: 'en' }));
+  assert.equal(JSON.stringify(deepseek.tools), JSON.stringify(compatible.tools));
+  assert.equal(compatible.runtimeProfile.contextWindowTokens, 64_000);
+  assert.equal(compatible.runtimeProfile.maxTokens, 4_000);
 });
 
 test('会话冻结后（skills 块不变）轮次请求序列保持字节前缀', () => {

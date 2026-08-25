@@ -9,7 +9,10 @@ import type {
   KeepseekModel
 } from '../shared/types';
 import { getConfiguredSlimToolModeEnabled } from '../shared/config';
-import { getDeepSeekV4RuntimeProfile } from '../shared/modelProfiles';
+import {
+  getAgentRuntimeProfile,
+  type AgentRuntimeProfile
+} from '../shared/modelProfiles';
 import type { DeepSeekFunctionTool, DeepSeekMessage } from './deepseek/types';
 import type {
   OpenAiResponsesFunctionTool,
@@ -73,6 +76,7 @@ export interface AnthropicMessagesRequestProjection {
 }
 
 export interface ProviderRequestProjection {
+  runtimeProfile: AgentRuntimeProfile;
   messages: DeepSeekMessage[];
   tools: DeepSeekFunctionTool[];
   toolNames: string[];
@@ -91,7 +95,7 @@ export interface ProviderRequestProjection {
 export function buildProviderRequestProjection(
   input: ProviderRequestProjectionInput
 ): ProviderRequestProjection {
-  const profile = getDeepSeekV4RuntimeProfile(input.model, input.agentSettings);
+  const profile = getAgentRuntimeProfile(input.model, input.agentSettings);
   const requestProtocolVersion = normalizeRequestProtocolVersion(input.requestProtocolVersion);
   const provider = input.provider ?? (
     input.model.provider === 'openai-responses' || input.model.provider === 'anthropic-compatible'
@@ -149,6 +153,7 @@ export function buildProviderRequestProjection(
     : undefined;
 
   return {
+    runtimeProfile: profile,
     messages,
     tools,
     toolNames,

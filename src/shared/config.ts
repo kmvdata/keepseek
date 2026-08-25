@@ -9,7 +9,7 @@ import {
 } from './types';
 import { SESSION_HARD_RETENTION_DAYS } from '../sessions/sessionRetention';
 import {
-  DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
+  getEffectiveContextWindowTokens,
   getSupportedDeepSeekV4Models
 } from './modelProfiles';
 import { isOfficialDeepSeekSource } from '../accounts/sourceCapabilities';
@@ -133,8 +133,9 @@ export function getConfiguredMaxFileBytes(): number {
 }
 
 export function getConfiguredContextWindowTokens(model?: KeepseekModel): number {
-  const modelLimit = normalizePositiveInteger(model?.contextWindowTokens);
-  return modelLimit ?? DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS;
+  // Backward-compatible entry point. Capability fallback is owned by the
+  // centralized runtime profile resolver, never by configuration callers.
+  return getEffectiveContextWindowTokens(model);
 }
 
 export function getConfiguredUsagePricingMap(): Record<string, UsageCostRates> {

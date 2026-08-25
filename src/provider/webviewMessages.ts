@@ -58,6 +58,8 @@ export type WebviewMessage =
       apiKey: string;
       baseUrl: string;
       modelId?: string;
+      contextWindowTokens?: number;
+      maxOutputTokens?: number;
     }
   | { type: 'deleteModel'; sourceId: string; modelId: string }
   | { type: 'setModelEnabled'; sourceId: string; modelId: string; enabled: boolean }

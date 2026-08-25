@@ -43,14 +43,24 @@ export function createModelCatalog(
       if (!options.includeDisabledModels && disabledModelIds.has(modelId)) {
         continue;
       }
-      const builtIn = builtIns.find((model) => model.id === modelId);
+      const builtIn = source.provider === 'deepseek'
+        ? builtIns.find((model) => model.id === modelId)
+        : undefined;
       const fetched = source.modelCache?.models.find((model) => model.id === modelId);
+      const manual = source.models.find((model) => model.id === modelId);
       catalog.push({
         id: modelId,
         label: builtIn?.label ?? modelId,
         provider: source.provider,
-        contextWindowTokens: fetched?.contextWindowTokens ?? builtIn?.contextWindowTokens,
-        maxOutputTokens: fetched?.maxOutputTokens,
+        // Explicit per-source overrides win over current discovery metadata;
+        // discovery wins over built-in metadata. Runtime fallback is applied only
+        // after this catalog merge has exhausted all available evidence.
+        contextWindowTokens: manual?.contextWindowTokens
+          ?? fetched?.contextWindowTokens
+          ?? builtIn?.contextWindowTokens,
+        maxOutputTokens: manual?.maxOutputTokens
+          ?? fetched?.maxOutputTokens
+          ?? builtIn?.maxOutputTokens,
         anthropicCapabilities: fetched?.anthropicCapabilities
           ? {
               ...fetched.anthropicCapabilities,
