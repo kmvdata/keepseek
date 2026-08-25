@@ -1474,6 +1474,95 @@ export function getInputStyles(): string {
       margin-top: 2px;
     }
 
+    .settings-model-capabilities {
+      display: flex !important;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 2px 8px;
+    }
+
+    .settings-model-capability {
+      display: inline-flex;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .settings-model-context-value {
+      min-width: 0;
+      padding: 0 1px;
+      border: 0;
+      border-bottom: 1px dotted currentColor;
+      border-radius: 0;
+      color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+      background: transparent;
+      font: inherit;
+      line-height: inherit;
+      cursor: pointer;
+    }
+
+    .settings-model-context-value:hover {
+      color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+      border-bottom-style: solid;
+      background: transparent;
+    }
+
+    .settings-model-context-value:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 2px;
+    }
+
+    .settings-model-context-value:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+
+    .settings-model-context-capability.is-editing {
+      display: inline-grid;
+      grid-template-columns: minmax(56px, 82px) auto auto auto;
+      align-items: center;
+      gap: 3px;
+    }
+
+    .settings-model-context-input {
+      width: 100%;
+      min-width: 0;
+      height: 22px;
+      padding: 1px 4px;
+      border: 1px solid var(--vscode-focusBorder, var(--vscode-input-border));
+      color: var(--vscode-input-foreground);
+      background: var(--vscode-input-background);
+      font: inherit;
+    }
+
+    .settings-model-context-unit {
+      color: var(--vscode-descriptionForeground);
+    }
+
+    .settings-model-context-edit-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      border: 0;
+      border-radius: 3px;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+      font-size: 13px;
+      line-height: 1;
+    }
+
+    .settings-model-context-edit-action:hover,
+    .settings-model-context-edit-action:focus-visible {
+      color: var(--vscode-foreground);
+      background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.2));
+    }
+
+    .settings-model-context-edit-action.is-save {
+      color: var(--vscode-testing-iconPassed, var(--vscode-foreground));
+    }
+
     .settings-model-name {
       display: block;
       overflow: hidden;

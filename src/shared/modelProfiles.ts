@@ -1,4 +1,5 @@
 import type { AgentSettings, CompressionThreshold, KeepseekModel } from './types';
+import { getGuessedContextWindowTokens } from './modelContextWindowGuesses';
 
 export const DEEPSEEK_V4_FLASH_MODEL_ID = 'deepseek-v4-flash';
 export const DEEPSEEK_V4_PRO_MODEL_ID = 'deepseek-v4-pro';
@@ -217,7 +218,7 @@ export function getEffectiveContextWindowTokens(
   }
   return model && isDeepSeekV4Model(model)
     ? DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
-    : DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS;
+    : getGuessedContextWindowTokens(model?.id) ?? DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS;
 }
 
 /**

@@ -7,6 +7,8 @@ export interface KeepseekModel {
   label: string;
   provider: string;
   contextWindowTokens?: number;
+  /** Provenance for the effective context window shown in model settings. */
+  contextWindowSource?: 'manual' | 'discovered' | 'built-in' | 'guessed' | 'fallback';
   maxOutputTokens?: number;
   anthropicCapabilities?: AnthropicModelCapabilities;
   /** Display name returned by the selected provider's /models endpoint. */

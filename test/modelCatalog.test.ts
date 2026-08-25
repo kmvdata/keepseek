@@ -91,18 +91,31 @@ describe('model source catalog', () => {
     })]);
 
     assert.equal(catalog[0]?.contextWindowTokens, 96_000);
+    assert.equal(catalog[0]?.contextWindowSource, 'manual');
     assert.equal(catalog[0]?.maxOutputTokens, 7_000);
   });
 
-  it('does not grant DeepSeek built-in metadata to a compatible lookalike model id', () => {
+  it('marks compatible DeepSeek lookalikes as guessed without granting the dedicated output profile', () => {
     const catalog = createModelCatalog([createSource({
       id: 'compatible',
       provider: 'openai-compatible',
       models: [{ id: 'deepseek-v4-pro' }]
     })]);
 
-    assert.equal(catalog[0]?.contextWindowTokens, undefined);
+    assert.equal(catalog[0]?.contextWindowTokens, 1_000_000);
+    assert.equal(catalog[0]?.contextWindowSource, 'guessed');
     assert.equal(catalog[0]?.maxOutputTokens, undefined);
+  });
+
+  it('shows the conservative fallback for unknown model IDs', () => {
+    const catalog = createModelCatalog([createSource({
+      id: 'compatible',
+      provider: 'openai-compatible',
+      models: [{ id: 'vendor-model' }]
+    })]);
+
+    assert.equal(catalog[0]?.contextWindowTokens, 32_768);
+    assert.equal(catalog[0]?.contextWindowSource, 'fallback');
   });
 });
 
@@ -222,6 +235,30 @@ describe('ModelSourceService', () => {
       contextWindowTokens: 64_000,
       maxOutputTokens: 4_000
     });
+
+    const disabledAgain = await service.setModelEnabled(source.id, 'model-two', false);
+    const contextUpdated = await service.setModelContextWindowTokens(
+      disabledAgain.id,
+      'model-two',
+      250_000
+    );
+    assert.deepEqual(contextUpdated.disabledModelIds, ['model-two']);
+    assert.deepEqual(contextUpdated.models[1], {
+      id: 'model-two',
+      contextWindowTokens: 250_000
+    });
+    assert.equal(
+      createModelCatalog([contextUpdated], { includeDisabledModels: true })[1]?.contextWindowSource,
+      'manual'
+    );
+    await assert.rejects(
+      service.setModelContextWindowTokens(source.id, 'unknown-model', 64_000),
+      /Model not found/u
+    );
+    await assert.rejects(
+      service.setModelContextWindowTokens(source.id, 'model-one', 10_000_001),
+      /contextWindowTokens/u
+    );
   });
 
   it('rejects account creation when the Base URL probe fails', async () => {

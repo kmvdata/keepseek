@@ -767,6 +767,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.setModelEnabled(message);
         return;
       }
+      case 'setModelContextWindow': {
+        await this.setModelContextWindow(message);
+        return;
+      }
       case 'deleteModelSource': {
         await this.deleteModelSource(message.sourceId);
         return;
@@ -1810,6 +1814,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           id: model.id,
           name: model.fetchedName ?? model.label,
           contextWindowTokens: model.contextWindowTokens,
+          contextWindowSource: model.contextWindowSource,
           maxOutputTokens: model.maxOutputTokens,
           supportsBilling: model.supportsBilling === true
         })),
@@ -1929,6 +1934,30 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       );
       await this.refreshModelSourceState();
       await this.persistModelSelection(this.selectedSourceId, this.selectedModelId);
+      this.postState();
+      this.postModelSettingsDialog();
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
+      this.postModelSettingsDialog();
+    }
+  }
+
+  private async setModelContextWindow(input: {
+    sourceId: string;
+    modelId: string;
+    contextWindowTokens: number;
+  }): Promise<void> {
+    if (this.rejectModelSourceMutationWhileBusy()) {
+      return;
+    }
+    try {
+      await this.waitForBalanceRefresh();
+      await this.modelSourceService.setModelContextWindowTokens(
+        input.sourceId,
+        input.modelId,
+        input.contextWindowTokens
+      );
+      await this.refreshModelSourceState();
       this.postState();
       this.postModelSettingsDialog();
     } catch (error) {

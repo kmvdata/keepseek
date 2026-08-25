@@ -185,6 +185,17 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(inputScript, /type: 'deleteModelSource'/u);
   assert.match(inputScript, /type: 'deleteModel'/u);
   assert.match(inputScript, /type: 'setModelEnabled'/u);
+  assert.match(inputScript, /type: 'setModelContextWindow'/u);
+  assert.match(inputScript, /formatContextWindowTokens/u);
+  assert.match(inputScript, /tokenCount === 1048576/u);
+  assert.match(inputScript, /return '1M tokens'/u);
+  assert.match(inputScript, /return String\(tokenCount \/ 1024\) \+ 'K tokens'/u);
+  assert.match(inputScript, /binaryKVariants = \[8, 16, 32, 64\]/u);
+  assert.match(inputScript, /kiloTokens \* 1024/u);
+  assert.match(inputScript, /Math\.round\(kiloTokens \* 1000\)/u);
+  assert.match(inputScript, /renderSettingsModelContextEditor/u);
+  assert.match(inputScript, /contextWindowSource === 'guessed'/u);
+  assert.match(inputTemplate, /max="10000" step="0\.001" placeholder="32"/u);
   assert.match(inputScript, /type: 'refreshSourceModels'/u);
   assert.doesNotMatch(inputScript, /type: 'selectAccount'/u);
   assert.match(inputScript, /function beginSettingsDialogAction/u);
@@ -212,6 +223,8 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(styles, /\.settings-account-item-logo-box/u);
   assert.match(styles, /\.settings-account-item-logo\[data-provider="deepseek"\]/u);
   assert.match(styles, /\.settings-model-enable/u);
+  assert.match(styles, /\.settings-model-context-value/u);
+  assert.match(styles, /\.settings-model-context-input/u);
   assert.match(inputScript, /enableCheckbox\.type = 'checkbox'/u);
   assert.match(inputScript, /disabledModelIds/u);
   assert.match(styles, /@media \(max-width: 540px\)/u);
@@ -221,6 +234,7 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(messageSource, /type: 'saveModelSource'/u);
   assert.match(messageSource, /type: 'deleteModel'/u);
   assert.match(messageSource, /type: 'setModelEnabled'/u);
+  assert.match(messageSource, /type: 'setModelContextWindow'/u);
   assert.doesNotMatch(inputScript, /window\.(?:prompt|alert|confirm)\s*\(/u);
 });
 

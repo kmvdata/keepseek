@@ -337,7 +337,7 @@ export function getInputTemplate(): string {
                   <div class="settings-account-section-header settings-model-header">
                     <div>
                       <span id="settingsModelsTitle" class="settings-section-heading" data-i18n="modelListTitle">模型</span>
-                      <span id="settingsModelsHint" class="settings-field-hint" data-i18n="modelListHint">模型名称取自服务商返回的名称，其次为内置标签与模型 ID。</span>
+                      <span id="settingsModelsHint" class="settings-field-hint" data-i18n="modelListHint">仅勾选的模型会出现在“切换模型”列表中；上下文用 K/M tokens 表示，点击数值可修改。</span>
                     </div>
                     <button id="settingsRefreshModelsBtn" type="button" class="secondary" data-i18n="refreshModels">刷新模型</button>
                     <button id="settingsAddModelBtn" type="button" class="secondary" data-i18n="addModel">添加模型</button>
@@ -350,8 +350,8 @@ export function getInputTemplate(): string {
                       <input id="settingsManualModelId" class="settings-input" type="text" placeholder="model-id" autocomplete="off" />
                     </label>
                     <label class="settings-field">
-                      <span id="settingsManualContextWindowLabel" class="settings-field-label" data-i18n="manualContextWindowTokens">上下文窗口（可选）</span>
-                      <input id="settingsManualContextWindow" class="settings-input" type="number" min="1" max="10000000" step="1" placeholder="32768" autocomplete="off" />
+                      <span id="settingsManualContextWindowLabel" class="settings-field-label" data-i18n="manualContextWindowTokens">上下文窗口 K tokens（可选）</span>
+                      <input id="settingsManualContextWindow" class="settings-input" type="number" min="0.001" max="10000" step="0.001" placeholder="32" autocomplete="off" />
                     </label>
                     <label class="settings-field">
                       <span id="settingsManualMaxOutputLabel" class="settings-field-label" data-i18n="manualMaxOutputTokens">最大输出（可选）</span>

@@ -1,5 +1,9 @@
 import type { KeepseekModel, ModelSelection } from '../shared/types';
-import { getSupportedDeepSeekV4Models } from '../shared/modelProfiles';
+import { getGuessedContextWindowTokens } from '../shared/modelContextWindowGuesses';
+import {
+  DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS,
+  getSupportedDeepSeekV4Models
+} from '../shared/modelProfiles';
 import { isOfficialDeepSeekSource } from './sourceCapabilities';
 import type { ModelSource } from './types';
 
@@ -48,16 +52,29 @@ export function createModelCatalog(
         : undefined;
       const fetched = source.modelCache?.models.find((model) => model.id === modelId);
       const manual = source.models.find((model) => model.id === modelId);
+      const guessedContextWindowTokens = getGuessedContextWindowTokens(modelId);
+      const contextWindowTokens = manual?.contextWindowTokens
+        ?? fetched?.contextWindowTokens
+        ?? builtIn?.contextWindowTokens
+        ?? guessedContextWindowTokens
+        ?? DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS;
+      const contextWindowSource: KeepseekModel['contextWindowSource'] = manual?.contextWindowTokens
+        ? 'manual'
+        : fetched?.contextWindowTokens
+          ? 'discovered'
+          : builtIn?.contextWindowTokens
+            ? 'built-in'
+            : guessedContextWindowTokens
+              ? 'guessed'
+              : 'fallback';
       catalog.push({
         id: modelId,
         label: builtIn?.label ?? modelId,
         provider: source.provider,
-        // Explicit per-source overrides win over current discovery metadata;
-        // discovery wins over built-in metadata. Runtime fallback is applied only
-        // after this catalog merge has exhausted all available evidence.
-        contextWindowTokens: manual?.contextWindowTokens
-          ?? fetched?.contextWindowTokens
-          ?? builtIn?.contextWindowTokens,
+        // Explicit per-source overrides win over discovery and built-in facts;
+        // only then do low-trust family guesses and the generic fallback apply.
+        contextWindowTokens,
+        contextWindowSource,
         maxOutputTokens: manual?.maxOutputTokens
           ?? fetched?.maxOutputTokens
           ?? builtIn?.maxOutputTokens,

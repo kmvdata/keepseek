@@ -157,6 +157,49 @@ export class ModelSourceService {
     return updated;
   }
 
+  public async setModelContextWindowTokens(
+    sourceId: string,
+    modelId: string,
+    contextWindowTokens: number
+  ): Promise<ModelSource> {
+    const trimmedModelId = modelId.trim();
+    const normalizedContextWindowTokens = normalizeOptionalCapabilityTokens(
+      contextWindowTokens,
+      MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS,
+      'contextWindowTokens'
+    );
+    const source = await this.sourceStore.getSource(sourceId);
+    if (!source) {
+      throw new Error('Model source not found.');
+    }
+    const knownModel = createModelCatalog([source], { includeDisabledModels: true })
+      .some((model) => model.id === trimmedModelId);
+    if (!knownModel) {
+      throw new Error('Model not found in this source.');
+    }
+
+    const models: ModelSourceModel[] = source.models.map((model) => ({ ...model }));
+    const index = models.findIndex((model) => model.id === trimmedModelId);
+    const current = index >= 0 ? models[index] : undefined;
+    const next: ModelSourceModel = {
+      id: trimmedModelId,
+      ...(normalizedContextWindowTokens
+        ? { contextWindowTokens: normalizedContextWindowTokens }
+        : {}),
+      ...(current?.maxOutputTokens ? { maxOutputTokens: current.maxOutputTokens } : {})
+    };
+    if (index >= 0) {
+      models[index] = next;
+    } else {
+      models.push(next);
+    }
+    const updated = await this.sourceStore.updateSource(source.id, { models });
+    if (!updated) {
+      throw new Error('Model source not found.');
+    }
+    return updated;
+  }
+
   public async saveSource(input: {
     sourceId: string;
     apiKey: string;

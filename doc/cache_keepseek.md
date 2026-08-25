@@ -133,7 +133,7 @@ messages = [
 这两件事都会让前缀从摘要处起全部失效。因此压缩被设计成**低频失效点**（`src/agent/historyCompressor.ts:34-38` 注释：「Deliberately high: every summary refresh rewrites the synthetic summary message and drops covered messages from the projection... Keep refreshes rare (a low-frequency cache-invalidation point) instead of sliding the recent-turn window every turn」）。具体手段：
 
 1. **增量阈值**：已有摘要时，新增可压缩消息 ≥ 48 条（`SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD = 48`，`historyCompressor.ts:38`）且占用比超过 `triggerRatio` 才刷新。普通对话几轮内不会触发。
-2. **比率闸门**：原始会话 token 占有效上下文窗口的比例低于 `triggerRatio` 时直接 `fresh_enough` 跳过（`shouldRefreshSummary`）。`triggerRatio / forceRatio` 由用户在命令菜单中选择的三档自动压缩阈值覆盖：提前清理为 `0.70 / 0.85`，默认平衡为 `0.80 / 0.92`，缓存优先为 `0.85 / 0.95`。DeepSeek V4 内置模型保留专用参数；其它模型使用 metadata-first 通用画像，摘要预算还会被最终输出上限收紧。
+2. **比率闸门**：原始会话 token 占有效上下文窗口的比例低于 `triggerRatio` 时直接 `fresh_enough` 跳过（`shouldRefreshSummary`）。`triggerRatio / forceRatio` 由用户在命令菜单中选择的三档自动压缩阈值覆盖：提前清理为 `0.70 / 0.85`，默认平衡为 `0.80 / 0.92`，缓存优先为 `0.85 / 0.95`。DeepSeek V4 内置模型保留专用参数；其它模型按“手动 > 发现 > 受控名称猜测 > 32768 fallback”解析上下文窗口，摘要预算还会被最终输出上限收紧。猜测和 `K/M tokens` 展示只影响请求 envelope/预算，不进入 system、历史消息或工具 schema。
 3. **确定性摘要**：摘要请求 `temperature: 0`、关闭 thinking、限制输出 token、短超时（`historyCompressor.ts:347-349`）。摘要刷新时「被覆盖消息的变化」是不可避免的成本，**不能再叠加模型输出的随机字节漂移**——温度 0 保证同一输入得到同一摘要，后续增量刷新时摘要本身不再无故变化。
 4. **C3 失败自锁**：上次刷新失败时暂停自动刷新（`shouldRefreshSummary` 中的 `lastFailureReason` 检查），避免「缓存已经受伤」的情况下反复触发可能再次失败的刷新；只有接近/超过强制上限（`forceRatio`）时才允许重试，保护上下文窗口。
 5. **分级执行**：超过 `forceRatio` 同步强制压缩（`force_context_limit`）、无摘要且接近上下文上限时同步创建（`missing_summary_near_context_limit`），其余情况走后台刷新（`planRefresh`）——前台请求不被压缩延迟阻塞。

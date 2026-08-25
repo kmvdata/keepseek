@@ -27,6 +27,7 @@ import './historyCompressor.test';
 import './historyArchive.test';
 import './historyProjection.test';
 import './modelProfiles.test';
+import './modelContextWindowGuesses.test';
 import './modelLaneMigration.test';
 import './protocolCache.test';
 import './projectInstructions.test';

@@ -3510,6 +3510,47 @@ export function getInputScript(): string {
         return Number.isInteger(value) && value > 0 && value <= max ? value : null;
       }
 
+      function readOptionalContextWindowKTokens(input) {
+        var raw = input ? input.value.trim() : '';
+        if (!raw) { return undefined; }
+        var kiloTokens = Number(raw);
+        if (!Number.isFinite(kiloTokens) || kiloTokens <= 0 || kiloTokens > 10000) {
+          return null;
+        }
+        var binaryKVariants = [8, 16, 32, 64];
+        var tokens = Number.isInteger(kiloTokens) && binaryKVariants.indexOf(kiloTokens) >= 0
+          ? kiloTokens * 1024
+          : Math.round(kiloTokens * 1000);
+        return tokens > 0 && tokens <= 10000000 ? tokens : null;
+      }
+
+      function getEditableContextWindowKTokens(tokens) {
+        var tokenCount = Math.max(1, Math.round(Number(tokens) || 0));
+        var binaryKVariants = [8192, 16384, 32768, 65536];
+        var kiloTokens = binaryKVariants.indexOf(tokenCount) >= 0
+          ? tokenCount / 1024
+          : tokenCount / 1000;
+        return String(Math.round(kiloTokens * 1000) / 1000);
+      }
+
+      function formatContextWindowTokens(tokens) {
+        var tokenCount = Math.max(1, Math.round(Number(tokens) || 0));
+        if (tokenCount === 1048576) { return '1M tokens'; }
+        if (tokenCount >= 1000000) {
+          var millions = Math.round((tokenCount / 1000000) * 1000) / 1000;
+          return millions.toLocaleString() + 'M tokens';
+        }
+        var binaryKVariants = [8192, 16384, 32768, 65536];
+        if (binaryKVariants.indexOf(tokenCount) >= 0) {
+          return String(tokenCount / 1024) + 'K tokens';
+        }
+        if (tokenCount >= 1000) {
+          var thousands = Math.round((tokenCount / 1000) * 1000) / 1000;
+          return thousands.toLocaleString() + 'K tokens';
+        }
+        return tokenCount.toLocaleString() + ' tokens';
+      }
+
       function normalizeSettingsProvider(value) {
         return value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses' || value === 'anthropic-compatible'
           ? value
@@ -3585,6 +3626,13 @@ export function getInputScript(): string {
           model.label = readSettingsString(source.label, model.label);
           if (Number.isInteger(source.contextWindowTokens) && source.contextWindowTokens > 0) {
             model.contextWindowTokens = source.contextWindowTokens;
+          }
+          if (source.contextWindowSource === 'manual'
+            || source.contextWindowSource === 'discovered'
+            || source.contextWindowSource === 'built-in'
+            || source.contextWindowSource === 'guessed'
+            || source.contextWindowSource === 'fallback') {
+            model.contextWindowSource = source.contextWindowSource;
           }
           if (Number.isInteger(source.maxOutputTokens) && source.maxOutputTokens > 0) {
             model.maxOutputTokens = source.maxOutputTokens;
@@ -3745,6 +3793,76 @@ export function getInputScript(): string {
         });
       }
 
+      function renderSettingsModelContextEditor(container, model) {
+        container.innerHTML = '';
+        container.classList.add('is-editing');
+        var input = document.createElement('input');
+        input.type = 'number';
+        input.className = 'settings-model-context-input';
+        input.min = '0.004';
+        input.max = '10000';
+        input.step = '0.001';
+        input.value = getEditableContextWindowKTokens(model.contextWindowTokens);
+        input.setAttribute('aria-label', t('editContextWindowKTokens', { modelId: model.id }));
+        var unit = document.createElement('span');
+        unit.className = 'settings-model-context-unit';
+        unit.textContent = 'K tokens';
+        var saveBtn = document.createElement('button');
+        saveBtn.type = 'button';
+        saveBtn.className = 'settings-model-context-edit-action is-save';
+        saveBtn.textContent = '\u2713';
+        saveBtn.title = t('saveContextWindow');
+        saveBtn.setAttribute('aria-label', t('saveContextWindow'));
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'settings-model-context-edit-action';
+        cancelBtn.textContent = '\u00d7';
+        cancelBtn.title = t('cancel');
+        cancelBtn.setAttribute('aria-label', t('cancel'));
+
+        function cancelEdit() {
+          renderAccountSettings();
+        }
+
+        function saveEdit() {
+          if (blockAccountSettingsWhileRunBusy()) { return; }
+          var source = getSettingsActiveAccount();
+          if (!source || settingsDialogBusyAction) { return; }
+          if (blockSettingsActionForUnsavedChanges()) { return; }
+          var contextWindowTokens = readOptionalContextWindowKTokens(input);
+          if (contextWindowTokens === undefined || contextWindowTokens === null) {
+            setSettingsDialogStatus(t('contextWindowKTokensInvalid'));
+            input.focus();
+            input.select();
+            return;
+          }
+          vscode.postMessage({
+            type: 'setModelContextWindow',
+            sourceId: source.id,
+            modelId: model.id,
+            contextWindowTokens: contextWindowTokens
+          });
+          beginSettingsDialogAction('set-model-context-window', t('updatingContextWindow'));
+        }
+
+        saveBtn.addEventListener('click', saveEdit);
+        cancelBtn.addEventListener('click', cancelEdit);
+        input.addEventListener('keydown', function(event) {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            cancelEdit();
+            return;
+          }
+          if (event.key === 'Enter' && !event.metaKey && !event.ctrlKey) {
+            event.preventDefault();
+            saveEdit();
+          }
+        });
+        container.append(input, unit, saveBtn, cancelBtn);
+        input.focus();
+        input.select();
+      }
+
       function renderSettingsModelList(account, controlsDisabled) {
         if (!settingsModelList) { return; }
         var models = getSettingsAccountModels(account);
@@ -3761,17 +3879,39 @@ export function getInputScript(): string {
           name.className = 'settings-model-name';
           name.textContent = model.id;
           identity.append(name);
-          var capabilityParts = [];
+          var capabilities = document.createElement('span');
+          capabilities.className = 'settings-model-capabilities settings-field-hint';
           if (model.contextWindowTokens) {
-            capabilityParts.push(t('manualContextWindowTokens') + ': ' + String(model.contextWindowTokens));
+            var contextCapability = document.createElement('span');
+            contextCapability.className = 'settings-model-capability settings-model-context-capability';
+            var contextLabel = document.createElement('span');
+            var isEstimated = model.contextWindowSource === 'guessed' || model.contextWindowSource === 'fallback';
+            contextLabel.textContent = t('contextWindowTokens')
+              + (isEstimated ? ' (' + t('estimatedValue') + ')' : '')
+              + ': ';
+            var contextValue = document.createElement('button');
+            contextValue.type = 'button';
+            contextValue.className = 'settings-model-context-value';
+            contextValue.textContent = formatContextWindowTokens(model.contextWindowTokens);
+            contextValue.disabled = controlsDisabled;
+            contextValue.title = t('editContextWindowKTokens', { modelId: model.id });
+            contextValue.setAttribute('aria-label', contextValue.title);
+            contextValue.addEventListener('click', function() {
+              if (blockAccountSettingsWhileRunBusy()) { return; }
+              if (settingsDialogBusyAction) { return; }
+              if (blockSettingsActionForUnsavedChanges()) { return; }
+              renderSettingsModelContextEditor(contextCapability, model);
+            });
+            contextCapability.append(contextLabel, contextValue);
+            capabilities.append(contextCapability);
           }
           if (model.maxOutputTokens) {
-            capabilityParts.push(t('manualMaxOutputTokens') + ': ' + String(model.maxOutputTokens));
+            var outputCapability = document.createElement('span');
+            outputCapability.className = 'settings-model-capability';
+            outputCapability.textContent = t('manualMaxOutputTokens') + ': ' + String(model.maxOutputTokens);
+            capabilities.append(outputCapability);
           }
-          if (capabilityParts.length) {
-            var capabilities = document.createElement('span');
-            capabilities.className = 'settings-field-hint';
-            capabilities.textContent = capabilityParts.join(' · ');
+          if (capabilities.childNodes.length) {
             identity.append(capabilities);
           }
           row.append(identity);
@@ -4274,7 +4414,7 @@ export function getInputScript(): string {
             if (settingsManualModelId) { settingsManualModelId.focus(); }
             return;
           }
-          var contextWindowTokens = readOptionalCapabilityInput(settingsManualContextWindow, 10000000);
+          var contextWindowTokens = readOptionalContextWindowKTokens(settingsManualContextWindow);
           var maxOutputTokens = readOptionalCapabilityInput(settingsManualMaxOutput, 1000000);
           if (contextWindowTokens === null || maxOutputTokens === null) {
             setSettingsDialogStatus(t('manualModelCapabilityInvalid'));
