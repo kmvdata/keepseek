@@ -3513,6 +3513,10 @@ export function getInputScript(): string {
           : 'DeepSeek';
       }
 
+      function getSettingsProviderLogoUri(provider) {
+        return readSettingsString(modelProtocolLogoUris[normalizeSettingsProvider(provider)], '');
+      }
+
       function normalizeSettingsSource(rawSource, index) {
         if (!rawSource || typeof rawSource !== 'object') { return null; }
         var id = readSettingsString(rawSource.id, '').trim();
@@ -3671,39 +3675,43 @@ export function getInputScript(): string {
       function renderSettingsAccountList(controlsDisabled) {
         if (!settingsAccountList) { return; }
         settingsAccountList.innerHTML = '';
-        var providerOrder = ['deepseek', 'ollama', 'openai-compatible', 'openai-responses', 'anthropic-compatible'];
-        providerOrder.forEach(function(provider) {
-          var sources = settingsSources.filter(function(source) { return source.provider === provider; });
-          if (!sources.length) { return; }
-          var group = document.createElement('div');
-          group.className = 'settings-account-group';
-          group.setAttribute('role', 'group');
-          group.setAttribute('aria-label', getSettingsProviderLabel(provider));
-          var groupLabel = document.createElement('div');
-          groupLabel.className = 'settings-account-group-label';
-          groupLabel.textContent = getSettingsProviderLabel(provider);
-          group.append(groupLabel);
-          sources.forEach(function(account) {
-            var button = document.createElement('button');
-            var selected = account.id === settingsSelectedSourceId;
-            button.type = 'button';
-            button.className = 'settings-account-item';
-            button.dataset.sourceId = account.id;
-            button.setAttribute('role', 'option');
-            button.setAttribute('aria-selected', selected ? 'true' : 'false');
-            button.disabled = controlsDisabled || !account.enabled;
-            button.title = account.name + ' · ' + account.id;
-            var name = document.createElement('span');
-            name.className = 'settings-account-item-name';
-            name.textContent = account.name + (account.enabled ? '' : ' (' + t('modelSourceDisabled') + ')');
-            var check = document.createElement('span');
-            check.className = 'settings-account-item-check';
-            check.setAttribute('aria-hidden', 'true');
-            check.textContent = selected ? '\\u2713' : '';
-            button.append(name, check);
-            group.append(button);
-          });
-          settingsAccountList.append(group);
+        settingsSources.forEach(function(account) {
+          var button = document.createElement('button');
+          var selected = account.id === settingsSelectedSourceId;
+          var providerLabel = getSettingsProviderLabel(account.provider);
+          button.type = 'button';
+          button.className = 'settings-account-item';
+          button.dataset.sourceId = account.id;
+          button.setAttribute('role', 'option');
+          button.setAttribute('aria-selected', selected ? 'true' : 'false');
+          button.setAttribute('aria-label', account.name + ', ' + providerLabel);
+          button.disabled = controlsDisabled || !account.enabled;
+          button.title = account.name + ' · ' + providerLabel;
+          var identity = document.createElement('span');
+          identity.className = 'settings-account-item-identity';
+          var logoBox = document.createElement('span');
+          logoBox.className = 'settings-account-item-logo-box';
+          logoBox.setAttribute('aria-hidden', 'true');
+          var logoUri = getSettingsProviderLogoUri(account.provider);
+          if (logoUri) {
+            var logo = document.createElement('img');
+            logo.className = 'settings-account-item-logo';
+            logo.dataset.provider = account.provider;
+            logo.src = logoUri;
+            logo.alt = '';
+            logo.draggable = false;
+            logoBox.append(logo);
+          }
+          var name = document.createElement('span');
+          name.className = 'settings-account-item-name';
+          name.textContent = account.name + (account.enabled ? '' : ' (' + t('modelSourceDisabled') + ')');
+          identity.append(logoBox, name);
+          var check = document.createElement('span');
+          check.className = 'settings-account-item-check';
+          check.setAttribute('aria-hidden', 'true');
+          check.textContent = selected ? '\\u2713' : '';
+          button.append(identity, check);
+          settingsAccountList.append(button);
         });
       }
 

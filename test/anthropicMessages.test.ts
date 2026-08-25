@@ -98,10 +98,13 @@ describe('Anthropic Messages compatible protocol', () => {
 
     const dialog = getNewAccountDialogTemplate() + getNewAccountDialogScript();
     const settings = getInputScript();
+    const htmlSource = await readFile(path.resolve(process.cwd(), 'src/webview/html.ts'), 'utf8');
     assert.match(dialog, /value="anthropic-compatible"/u);
     assert.match(dialog, /https:\/\/api\.anthropic\.com\/v1/u);
     assert.match(settings, /'anthropic-compatible'/u);
-    assert.match(settings, /\['deepseek', 'ollama', 'openai-compatible', 'openai-responses', 'anthropic-compatible'\]/u);
+    assert.match(settings, /getSettingsProviderLogoUri/u);
+    assert.match(htmlSource, /MODEL_SOURCE_PROVIDERS\.map/u);
+    assert.match(htmlSource, /`\$\{provider\}\.svg`/u);
     assert.equal(WEBVIEW_TRANSLATIONS['zh-CN'].anthropicMessagesCompatible, 'Anthropic compatible');
     assert.equal(WEBVIEW_TRANSLATIONS.en.anthropicMessagesCompatible, 'Anthropic compatible');
   });

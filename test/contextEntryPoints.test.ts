@@ -137,7 +137,7 @@ test('command menu exposes an accessible persisted compression threshold tab sel
   assert.match(styles, /\.command-menu\.is-readonly \.command-compression-tab/u);
 });
 
-test('model settings dialog manages grouped sources and per-source models', async () => {
+test('model settings dialog manages flat logo-led accounts and per-source models', async () => {
   const inputTemplate = getInputTemplate();
   const inputScript = getInputScript();
   const styles = getStyles();
@@ -201,8 +201,13 @@ test('model settings dialog manages grouped sources and per-source models', asyn
     inputScript,
     /settingsDialogBusyTimer = setTimeout\(function\(\) \{[\s\S]*?setSettingsDialogStatus\(t\('modelOperationStillPending'\)\)[\s\S]*?\}, 15000\)/u
   );
-  assert.match(inputScript, /settings-account-group/u);
-  assert.match(styles, /\.settings-account-group/u);
+  assert.doesNotMatch(inputScript, /settings-account-group/u);
+  assert.doesNotMatch(styles, /\.settings-account-group/u);
+  assert.match(inputScript, /settingsSources\.forEach\(function\(account\)/u);
+  assert.match(inputScript, /getSettingsProviderLogoUri\(account\.provider\)/u);
+  assert.match(inputScript, /settings-account-item-logo/u);
+  assert.match(styles, /\.settings-account-item-logo-box/u);
+  assert.match(styles, /\.settings-account-item-logo\[data-provider="deepseek"\]/u);
   assert.match(styles, /@media \(max-width: 540px\)/u);
   assert.match(messageSource, /type: 'addModel'/u);
   assert.match(messageSource, /type: 'saveModelSource'/u);

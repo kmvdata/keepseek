@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { MODEL_SOURCE_PROVIDERS } from '../accounts/types';
 import type { KeepseekLanguage } from '../shared/i18n';
 import type { KeepseekExtensionInfo } from '../shared/types';
 import { getScript } from './script';
@@ -15,6 +16,10 @@ export function getHtmlForWebview(input: {
   const keepseekLogoUri = input.webview.asWebviewUri(vscode.Uri.joinPath(input.extensionUri, 'resources', 'keepseek.svg'));
   // 该图标仅用于 Skill 引用 chip；资源文件保留历史名称 plugin.svg。
   const skillIconUri = input.webview.asWebviewUri(vscode.Uri.joinPath(input.extensionUri, 'resources', 'plugin.svg'));
+  const modelProtocolLogoUris = Object.fromEntries(MODEL_SOURCE_PROVIDERS.map((provider) => [
+    provider,
+    String(input.webview.asWebviewUri(vscode.Uri.joinPath(input.extensionUri, 'resources', `${provider}.svg`)))
+  ]));
   return `<!DOCTYPE html>
 <html lang="${input.language === 'en' ? 'en' : 'zh-CN'}">
 <head>
@@ -31,6 +36,7 @@ ${getTemplate(input.extensionInfo)}
   <script nonce="${nonce}">
 window.keepseekLogoUri = ${JSON.stringify(String(keepseekLogoUri))};
 window.keepseekSkillIconUri = ${JSON.stringify(String(skillIconUri))};
+window.keepseekModelProtocolLogoUris = ${JSON.stringify(modelProtocolLogoUris)};
 ${getScript()}
   </script>
 </body>

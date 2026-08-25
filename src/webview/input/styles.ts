@@ -1333,24 +1333,9 @@ export function getInputStyles(): string {
     .settings-account-list {
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 3px;
       max-height: 330px;
       overflow-y: auto;
-    }
-
-    .settings-account-group {
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-    }
-
-    .settings-account-group-label {
-      padding: 2px 4px;
-      color: var(--vscode-descriptionForeground);
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.02em;
-      text-transform: uppercase;
     }
 
     .settings-account-item {
@@ -1375,6 +1360,47 @@ export function getInputStyles(): string {
       border-color: var(--vscode-focusBorder, var(--vscode-inputOption-activeBorder));
       background: var(--vscode-list-activeSelectionBackground, var(--vscode-editor-selectionBackground));
       color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+    }
+
+    .settings-account-item-identity {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .settings-account-item-logo-box {
+      display: inline-flex;
+      position: relative;
+      flex: 0 0 24px;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      height: 24px;
+      overflow: hidden;
+      border: 1px solid rgba(0, 0, 0, 0.12);
+      border-radius: 5px;
+      background: #fff;
+      box-sizing: border-box;
+    }
+
+    .settings-account-item-logo {
+      display: block;
+      width: 18px;
+      height: 18px;
+      object-fit: contain;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    .settings-account-item-logo[data-provider="deepseek"] {
+      position: absolute;
+      top: 50%;
+      left: 0;
+      width: auto;
+      max-width: none;
+      height: 18px;
+      transform: translateY(-50%);
     }
 
     .settings-account-item-name {

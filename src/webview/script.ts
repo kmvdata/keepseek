@@ -8,6 +8,7 @@ export function getScript(): string {
     const vscode = acquireVsCodeApi();
     const keepseekLogoUri = window.keepseekLogoUri || '';
     const keepseekPluginIconUri = window.keepseekSkillIconUri || '';
+    const modelProtocolLogoUris = window.keepseekModelProtocolLogoUris || {};
     const translations = ${JSON.stringify(WEBVIEW_TRANSLATIONS)};
     const state = {
       models: [],
