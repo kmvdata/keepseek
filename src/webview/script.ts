@@ -413,6 +413,8 @@ export function getScript(): string {
     const composer = document.getElementById('composer');
     const promptInput = document.getElementById('promptInput');
     const status = document.getElementById('status');
+    const statusText = document.getElementById('statusText');
+    const statusTooltip = document.getElementById('statusTooltip');
     const sendButton = document.getElementById('sendButton');
     const editReferenceMenu = document.createElement('div');
     let transientStatus = '';
@@ -471,6 +473,7 @@ export function getScript(): string {
     });
     const STATUS_MESSAGE_DURATION_MS = 8000;
     const STATUS_MESSAGE_FADE_MS = 120;
+    const STATUS_TOOLTIP_MIN_BYTES = 24;
     const AGENT_STATUS_ROTATION_MS = 2600;
     const agentStatusPools = {
       preparing: ['agentStatusPreparingContext', 'agentStatusPreparingRequest'],
@@ -2018,8 +2021,10 @@ export function getScript(): string {
         transientStatusClearTimer = 0;
       }
       status.classList.remove('is-fading');
-      status.textContent = transientStatus;
-      status.title = transientStatus;
+      statusText.textContent = transientStatus;
+      var showTooltip = getUtf8ByteLength(transientStatus) > STATUS_TOOLTIP_MIN_BYTES;
+      statusTooltip.textContent = showTooltip ? transientStatus : '';
+      statusTooltip.classList.toggle('hidden', !showTooltip);
       status.classList.toggle('is-active', Boolean(transientStatus));
       if (!transientStatus) {
         return;
@@ -2037,11 +2042,16 @@ export function getScript(): string {
           }
           transientStatusClearTimer = 0;
           transientStatus = '';
-          status.textContent = '';
-          status.title = '';
+          statusText.textContent = '';
+          statusTooltip.textContent = '';
+          statusTooltip.classList.add('hidden');
           status.classList.remove('is-fading');
         }, STATUS_MESSAGE_FADE_MS);
       }, STATUS_MESSAGE_DURATION_MS);
+    }
+
+    function getUtf8ByteLength(value) {
+      return new TextEncoder().encode(String(value || '')).length;
     }
 
     function normalizeAgentActivity(activity) {

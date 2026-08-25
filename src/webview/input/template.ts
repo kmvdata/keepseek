@@ -50,7 +50,10 @@ export function getInputTemplate(): string {
               >
                 <span class="composer-trigger-glyph command-trigger-glyph" aria-hidden="true">/</span>
               </button>
-              <span id="status" class="composer-status"></span>
+              <span id="status" class="composer-status" aria-describedby="statusTooltip">
+                <span id="statusText" class="composer-status-text"></span>
+                <span id="statusTooltip" class="composer-status-tooltip hidden" role="tooltip"></span>
+              </span>
             </div>
             <div class="composer-toolbar-right">
               <div id="contextProgress" class="context-progress" role="status" tabindex="0" aria-describedby="contextProgressTooltip" aria-label="背景信息窗口：用量统计">

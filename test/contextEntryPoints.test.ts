@@ -451,14 +451,26 @@ test('generated Webview JavaScript passes syntax compilation', () => {
   assert.doesNotThrow(() => new Function(getScript()));
 });
 
-test('composer status always shows the latest message for eight seconds before fading', () => {
+test('composer status fades after eight seconds and reveals a tooltip only above 24 UTF-8 bytes', () => {
+  const inputTemplate = getInputTemplate();
   const inputScript = getInputScript();
   const script = getScript();
+  const styles = getStyles();
 
   assert.match(script, /const STATUS_MESSAGE_DURATION_MS = 8000/u);
+  assert.match(script, /const STATUS_TOOLTIP_MIN_BYTES = 24/u);
   assert.match(script, /status\.classList\.add\('is-fading'\)/u);
+  assert.match(script, /statusText\.textContent = transientStatus/u);
+  assert.match(script, /getUtf8ByteLength\(transientStatus\) > STATUS_TOOLTIP_MIN_BYTES/u);
+  assert.match(script, /new TextEncoder\(\)\.encode\(String\(value \|\| ''\)\)\.length/u);
+  assert.match(script, /statusTooltip\.textContent = showTooltip \? transientStatus : ''/u);
+  assert.match(script, /statusTooltip\.classList\.toggle\('hidden', !showTooltip\)/u);
   assert.match(script, /setTransientStatus\(getAgentActivityStatusText\(activity\) \|\| t\('processing'\)\)/u);
   assert.match(inputScript, /function setComposerStatus\(message\) \{\s*setTransientStatus\(message\);\s*\}/u);
+  assert.match(inputTemplate, /id="statusText" class="composer-status-text"/u);
+  assert.match(inputTemplate, /id="statusTooltip" class="composer-status-tooltip hidden" role="tooltip"/u);
+  assert.match(styles, /\.composer-status:hover \.composer-status-tooltip\s*\{[\s\S]*?visibility:\s*visible/u);
+  assert.match(styles, /\.composer-status-tooltip\s*\{[\s\S]*?white-space:\s*pre-wrap/u);
   assert.doesNotMatch(script, /durationMs \|\| 2200/u);
   assert.doesNotMatch(inputScript, /\}, 2200\);/u);
 });

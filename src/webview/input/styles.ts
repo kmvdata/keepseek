@@ -305,6 +305,7 @@ export function getInputStyles(): string {
     }
 
     .composer-toolbar {
+      position: relative;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -605,27 +606,64 @@ export function getInputStyles(): string {
       min-width: 0;
       height: 26px;
       margin-left: 6px;
+      font-size: 11px;
+      line-height: 26px;
+    }
+
+    .composer-status-text {
+      display: block;
+      width: 100%;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      font-size: 11px;
-      line-height: 26px;
       color: var(--vscode-descriptionForeground);
       opacity: 0.82;
       transition: opacity 120ms ease;
     }
 
-    .composer-status.is-active,
-    #status.is-active {
+    .composer-status.is-active .composer-status-text,
+    #status.is-active .composer-status-text {
       color: var(--vscode-descriptionForeground);
       opacity: 1;
       animation: keepseek-status-breathe 2.6s ease-in-out infinite;
     }
 
-    .composer-status.is-fading,
-    #status.is-fading {
+    .composer-status.is-fading .composer-status-text,
+    #status.is-fading .composer-status-text {
       opacity: 0;
       animation: none;
+    }
+
+    .composer-status-tooltip {
+      position: absolute;
+      left: 4px;
+      right: 4px;
+      bottom: calc(100% + 4px);
+      z-index: 40;
+      padding: 7px 8px;
+      border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border));
+      border-radius: 6px;
+      background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
+      box-shadow: 0 3px 10px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.24));
+      color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+      font-size: 11px;
+      font-weight: 400;
+      line-height: 1.45;
+      text-align: left;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(2px);
+      pointer-events: none;
+      transition: opacity 100ms ease, transform 100ms ease, visibility 0s linear 100ms;
+    }
+
+    .composer-status:hover .composer-status-tooltip {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+      transition-delay: 80ms;
     }
 
     @keyframes keepseek-status-breathe {
