@@ -22,11 +22,11 @@ export function getNewAccountDialogTemplate(): string {
           <span class="new-account-dialog-title" data-i18n="newAccountDialogTitle">添加账号</span>
         </div>
         <div class="new-account-dialog-body">
-          <p class="new-account-dialog-desc" data-i18n="newAccountDialogDesc">填写服务商、API Key 与 Base URL；保存后账号与第一个模型会一起创建。</p>
+          <p class="new-account-dialog-desc" data-i18n="newAccountDialogDesc">选择模型协议，填写 API Key 与 Base URL；保存后账号与第一个模型会一起创建。</p>
           <div id="newAccountDialogStatus" class="new-account-dialog-status hidden" role="status" aria-live="polite" tabindex="-1"></div>
           <label class="new-account-field">
-            <span class="new-account-field-label" data-i18n="modelProviderLabel">模型服务商</span>
-            <select id="newAccountProvider" class="new-account-input" aria-label="模型服务商" data-i18n-aria-label="modelProviderLabel">
+            <span class="new-account-field-label" data-i18n="modelProviderLabel">模型协议</span>
+            <select id="newAccountProvider" class="new-account-input" aria-label="模型协议" data-i18n-aria-label="modelProviderLabel">
               <option value="deepseek">DeepSeek</option>
               <option value="ollama">Ollama</option>
               <option value="openai-compatible">OpenAI compatible</option>
