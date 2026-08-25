@@ -1868,6 +1868,8 @@ export function getInputScript(): string {
         if (!model) { return 'Model'; }
         return model.sourceName || (model.provider === 'anthropic-compatible' ? t('anthropicMessagesCompatible')
           : model.provider === 'openai-responses' ? t('openAiResponsesCompatible')
+          : model.provider === 'kimi' ? t('kimiOfficial')
+          : model.provider === 'glm' ? t('glmOfficial')
           : model.provider === 'openai-compatible' ? 'OpenAI Compatible'
           : model.provider === 'ollama' ? 'Ollama'
           : 'DeepSeek');
@@ -3552,7 +3554,7 @@ export function getInputScript(): string {
       }
 
       function normalizeSettingsProvider(value) {
-        return value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses' || value === 'anthropic-compatible'
+        return value === 'kimi' || value === 'glm' || value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses' || value === 'anthropic-compatible'
           ? value
           : 'deepseek';
       }
@@ -3560,6 +3562,8 @@ export function getInputScript(): string {
       function getSettingsProviderLabel(provider) {
         return provider === 'anthropic-compatible' ? t('anthropicMessagesCompatible')
           : provider === 'openai-responses' ? t('openAiResponsesCompatible')
+          : provider === 'kimi' ? t('kimiOfficial')
+          : provider === 'glm' ? t('glmOfficial')
           : provider === 'openai-compatible' ? 'OpenAI compatible'
           : provider === 'ollama' ? 'Ollama'
           : 'DeepSeek';
@@ -3567,6 +3571,16 @@ export function getInputScript(): string {
 
       function getSettingsProviderLogoUri(provider) {
         return readSettingsString(modelProtocolLogoUris[normalizeSettingsProvider(provider)], '');
+      }
+
+      function getSettingsDefaultBaseUrl(provider) {
+        return provider === 'deepseek' ? 'https://api.deepseek.com'
+          : provider === 'kimi' ? 'https://api.moonshot.cn/v1'
+          : provider === 'glm' ? 'https://open.bigmodel.cn/api/paas/v4'
+          : provider === 'ollama' ? 'http://localhost:11434/v1'
+          : provider === 'openai-responses' ? 'https://api.openai.com/v1'
+          : provider === 'anthropic-compatible' ? 'https://api.anthropic.com/v1'
+          : '';
       }
 
       function normalizeSettingsSource(rawSource, index) {
@@ -3736,10 +3750,7 @@ export function getInputScript(): string {
         }
         if (settingsBaseUrl) {
           settingsBaseUrl.value = account
-            ? account.baseUrl || (account.provider === 'deepseek'
-              ? 'https://api.deepseek.com'
-              : account.provider === 'openai-responses' ? 'https://api.openai.com/v1'
-              : account.provider === 'anthropic-compatible' ? 'https://api.anthropic.com/v1' : '')
+            ? account.baseUrl || getSettingsDefaultBaseUrl(account.provider)
             : 'https://api.deepseek.com';
         }
         if (settingsManualModelId) { settingsManualModelId.value = ''; }
@@ -4302,18 +4313,7 @@ export function getInputScript(): string {
             if (settingsAccountName) { settingsAccountName.focus(); }
             return;
           }
-          if (!baseUrl && provider === 'deepseek') {
-            baseUrl = 'https://api.deepseek.com';
-          }
-          if (!baseUrl && provider === 'ollama') {
-            baseUrl = 'http://localhost:11434/v1';
-          }
-          if (!baseUrl && provider === 'openai-responses') {
-            baseUrl = 'https://api.openai.com/v1';
-          }
-          if (!baseUrl && provider === 'anthropic-compatible') {
-            baseUrl = 'https://api.anthropic.com/v1';
-          }
+          if (!baseUrl) { baseUrl = getSettingsDefaultBaseUrl(provider); }
           if (!baseUrl) {
             setSettingsDialogStatus(t('baseUrlRequired'));
             if (settingsBaseUrl) { settingsBaseUrl.focus(); }

@@ -53,6 +53,12 @@ test('compression threshold configuration defaults to balanced and normalizes in
 test('usage pricing has no unknown-model fallback', () => {
   assert.equal(getConfiguredModelUsagePricing('unknown-vendor-model'), undefined);
   assert.equal(getConfiguredModelUsagePricing('deepseek-v4-flash')?.currency, '¥');
+  assert.deepEqual(getConfiguredModelUsagePricing('kimi-k2.7-code'), {
+    cacheHitPrice: 1.3,
+    inputPrice: 6.5,
+    outputPrice: 27,
+    currency: '¥'
+  });
 });
 
 test('partial agent settings preserve the fallback compression threshold', () => {

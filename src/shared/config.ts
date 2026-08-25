@@ -68,6 +68,25 @@ export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
     peakInputPrice: 9.0,
     peakOutputPrice: 27.0,
     currency: '¥'
+  },
+  // Kimi 国内开放平台按百万 tokens 计费（官方公开价）。
+  'kimi-k3': {
+    cacheHitPrice: 2,
+    inputPrice: 20,
+    outputPrice: 100,
+    currency: '¥'
+  },
+  'kimi-k2.7-code': {
+    cacheHitPrice: 1.3,
+    inputPrice: 6.5,
+    outputPrice: 27,
+    currency: '¥'
+  },
+  'kimi-k2.6': {
+    cacheHitPrice: 1.1,
+    inputPrice: 6.5,
+    outputPrice: 27,
+    currency: '¥'
   }
 };
 export const MIN_HISTORY_RETENTION_DAYS = 1;

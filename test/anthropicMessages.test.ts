@@ -79,9 +79,9 @@ describe('Anthropic Messages compatible protocol', () => {
     await rm(storageRoot, { recursive: true, force: true });
   });
 
-  it('registers the fifth provider, defaults, isolated storage directory, factory, and UI translations', async () => {
+  it('registers the Anthropic provider, defaults, isolated storage directory, factory, and UI translations', async () => {
     assert.deepEqual(MODEL_SOURCE_PROVIDERS, [
-      'deepseek', 'ollama', 'openai-compatible', 'openai-responses', 'anthropic-compatible'
+      'deepseek', 'kimi', 'glm', 'ollama', 'openai-compatible', 'openai-responses', 'anthropic-compatible'
     ]);
     assert.equal(getDefaultModelSourceName('anthropic-compatible'), 'Anthropic compatible');
     assert.equal(getDefaultModelSourceBaseUrl('anthropic-compatible'), DEFAULT_ANTHROPIC_COMPATIBLE_BASE_URL);

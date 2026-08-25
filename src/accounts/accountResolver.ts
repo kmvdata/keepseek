@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { DEFAULT_DEEPSEEK_BASE_URL } from '../shared/config';
 import type { KeepseekLanguage } from '../shared/i18n';
 import { ModelSourceStore } from './accountStore';
-import { isOfficialDeepSeekSource } from './sourceCapabilities';
+import { supportsOfficialBillingSource } from './sourceCapabilities';
 import type {
   ModelDiscoveryCache,
   ModelSource,
@@ -86,7 +86,7 @@ function createResolvedStoredSource(
     modelSource: cloneSource(source),
     source: 'source',
     unconfigured: false,
-    supportsBilling: isOfficialDeepSeekSource(source)
+    supportsBilling: supportsOfficialBillingSource(source)
   };
 }
 

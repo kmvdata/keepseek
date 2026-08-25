@@ -29,7 +29,10 @@ import {
 } from '../shared/config';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
 import type { ModelSourceProvider } from '../accounts/types';
-import { isOfficialAnthropicSource } from '../accounts/sourceCapabilities';
+import {
+  isOfficialAnthropicSource,
+  requiresModelSourceApiKey
+} from '../accounts/sourceCapabilities';
 import { formatBytes } from '../shared/format';
 import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
 import {
@@ -3338,8 +3341,7 @@ export class AgentRunner {
       }
     );
     // Local/private compatible endpoints may omit keys. Canonical hosted APIs do not.
-    if (!sourceConfig.apiKey.trim() && (sourceConfig.provider === 'deepseek'
-      || isOfficialAnthropicSource(sourceConfig))) {
+    if (!sourceConfig.apiKey.trim() && requiresModelSourceApiKey(sourceConfig)) {
       throw new MissingModelSourceApiKeyError(request.language);
     }
     const profile = getAgentRuntimeProfile(request.model, request.settings);

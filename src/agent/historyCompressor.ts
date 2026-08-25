@@ -31,7 +31,10 @@ import type { ProviderClientConfig } from './providers/types';
 import type { DeepSeekChatRequestBody, DeepSeekMessage } from './deepseek/types';
 import type { OpenAiResponsesRequestBody } from './providers/responsesTypes';
 import type { AnthropicMessagesRequestBody } from './providers/anthropicTypes';
-import { isOfficialAnthropicSource } from '../accounts/sourceCapabilities';
+import {
+  isOfficialAnthropicSource,
+  requiresModelSourceApiKey
+} from '../accounts/sourceCapabilities';
 import {
   CONTEXT_COMPRESSION_VERSION,
   buildHistoryProjection,
@@ -685,9 +688,8 @@ async function getSummaryClientConfig(
     language,
     requireApiKey: false
   });
-  // Ollama 等本地 OpenAI 兼容端点不需要 API Key；只有 DeepSeek 保留预检提示。
-  if (!resolvedSource.apiKey.trim() && (resolvedSource.provider === 'deepseek'
-    || isOfficialAnthropicSource(resolvedSource))) {
+  // Local/private compatible endpoints may omit keys; canonical hosted APIs may not.
+  if (!resolvedSource.apiKey.trim() && requiresModelSourceApiKey(resolvedSource)) {
     throw new MissingModelSourceApiKeyError(language);
   }
   return {

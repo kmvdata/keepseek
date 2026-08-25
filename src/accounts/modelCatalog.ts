@@ -4,7 +4,10 @@ import {
   DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS,
   getSupportedDeepSeekV4Models
 } from '../shared/modelProfiles';
-import { isOfficialDeepSeekSource } from './sourceCapabilities';
+import {
+  isOfficialDeepSeekSource,
+  supportsOfficialBillingSource
+} from './sourceCapabilities';
 import type { ModelSource } from './types';
 
 export interface CreateModelCatalogOptions {
@@ -22,7 +25,8 @@ export function createModelCatalog(
     if (!source.enabled) {
       continue;
     }
-    const official = isOfficialDeepSeekSource(source);
+    const officialDeepSeek = isOfficialDeepSeekSource(source);
+    const supportsBilling = supportsOfficialBillingSource(source);
     const disabledModelIds = new Set(source.disabledModelIds ?? []);
     const hasSuccessfulDiscovery = Boolean(source.modelCache && source.modelCache.fetchedAt > 0);
     const orderedIds: string[] = [];
@@ -36,7 +40,7 @@ export function createModelCatalog(
       orderedIds.push(id);
     };
 
-    if (official && !hasSuccessfulDiscovery) {
+    if (officialDeepSeek && !hasSuccessfulDiscovery) {
       builtIns.forEach((model) => addId(model.id));
     } else {
       source.modelCache?.models.forEach((model) => addId(model.id));
@@ -89,7 +93,7 @@ export function createModelCatalog(
         fetchedName: fetched?.name,
         sourceId: source.id,
         sourceName: source.name,
-        supportsBilling: official
+        supportsBilling
       });
     }
   }

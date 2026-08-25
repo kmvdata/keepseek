@@ -4,7 +4,13 @@ import {
   MAX_DISCOVERED_OUTPUT_TOKENS,
   ModelSourceStore
 } from './accountStore';
-import { isOfficialAnthropicSource, isOfficialDeepSeekSource } from './sourceCapabilities';
+import {
+  isOfficialAnthropicSource,
+  isOfficialDeepSeekSource,
+  isOfficialGlmSource,
+  isOfficialKimiSource,
+  requiresModelSourceApiKey
+} from './sourceCapabilities';
 import type {
   DiscoveredModelInfo,
   ModelDiscoveryCache,
@@ -51,6 +57,20 @@ export function getSourceModelsEndpointUrl(
   // endpoint is rooted at /models. Proxies retain their routing prefix.
   if (isOfficialDeepSeekSource({ provider, baseUrl: url.toString() })) {
     url.pathname = '/models';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  }
+
+  if (isOfficialKimiSource({ provider, baseUrl: url.toString() })) {
+    url.pathname = '/v1/models';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  }
+
+  if (isOfficialGlmSource({ provider, baseUrl: url.toString() })) {
+    url.pathname = '/api/paas/v4/models';
     url.search = '';
     url.hash = '';
     return url.toString();
@@ -207,8 +227,8 @@ export async function probeSourceConnection(
     return { ok: false, error: 'Base URL is required.' };
   }
   const apiKey = source.apiKey.trim();
-  if (!apiKey && isOfficialAnthropicSource(source)) {
-    return { ok: false, error: 'An API Key is required for the official Anthropic endpoint.' };
+  if (!apiKey && requiresModelSourceApiKey(source)) {
+    return { ok: false, error: 'An API Key is required for this official model endpoint.' };
   }
   if (source.provider !== 'anthropic-compatible' && isCanonicalAnthropicHost(baseUrl)) {
     return {
@@ -266,6 +286,18 @@ export async function probeSourceConnection(
           ok: false,
           status: response.status,
           error: 'KeepSeek Responses accounts require a compatible GET /models endpoint for account discovery.'
+        };
+      }
+      if ((isOfficialKimiSource(source) || isOfficialGlmSource(source))
+        && response.status !== 401
+        && response.status !== 403) {
+        // Model discovery is optional for these presets. Their chat transport
+        // remains usable with a manually entered model even if /models is not
+        // deployed, temporarily unavailable, or returns a provider-specific error.
+        return {
+          ok: true,
+          status: response.status,
+          modelDiscoveryUnavailable: true
         };
       }
       if (source.provider === 'anthropic-compatible'
@@ -406,7 +438,17 @@ function parseSourceModel(
     ?? readNonEmptyString(value.displayName)
     ?? readNonEmptyString(value.label);
   if (provider !== 'anthropic-compatible') {
-    return name ? { id, name } : { id };
+    const contextWindowTokens = provider === 'kimi'
+      ? readBoundedPositiveInteger(
+          value.context_length,
+          MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS
+        )
+      : undefined;
+    return {
+      id,
+      ...(name ? { name } : {}),
+      ...(contextWindowTokens ? { contextWindowTokens } : {})
+    };
   }
   const contextWindowTokens = readBoundedPositiveInteger(
     value.max_input_tokens,

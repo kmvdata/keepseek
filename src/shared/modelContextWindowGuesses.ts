@@ -59,6 +59,7 @@ const MODEL_CONTEXT_WINDOW_GUESS_RULES: readonly ModelContextWindowGuessRule[] =
       'claude-4-5-haiku',
       'glm-5-1',
       'glm-5',
+      'glm-4-7',
       'glm-4-6'
     ],
     tokens: 200_000

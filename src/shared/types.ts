@@ -149,13 +149,18 @@ export interface SessionUsageStats extends Usage {
   bySource?: Partial<Record<UsageSource, UsageSourceStats>>;
 }
 
-export interface DeepSeekBalanceState {
+export interface ModelSourceBalanceState {
   totalBalance?: number;
+  cashBalance?: number;
+  voucherBalance?: number;
   currency: string;
   isAvailable?: boolean;
   updatedAt?: string;
   error?: string;
 }
+
+/** Backward-compatible name retained for persisted sessions and existing callers. */
+export type DeepSeekBalanceState = ModelSourceBalanceState;
 
 export interface PromptCacheDiagnostics {
   systemPromptHash?: string;
@@ -418,7 +423,7 @@ export interface ChatSession {
   contextUsage?: ContextUsageEstimate;
   usageStats?: SessionUsageStats;
   lastTurnUsage?: TurnUsageStats;
-  balance?: DeepSeekBalanceState;
+  balance?: ModelSourceBalanceState;
   promptCacheDiagnostics?: PromptCacheDiagnostics;
   lastTraceLogUri?: string;
   repairLoop?: RepairLoopState;

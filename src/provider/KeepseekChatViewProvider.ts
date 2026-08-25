@@ -65,7 +65,6 @@ import {
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_HISTORY_RETENTION_DAYS,
   getConfiguredAgentSettings,
-  getConfiguredBalanceEndpointUrl,
   getConfiguredBalanceRefreshIntervalMs,
   getConfiguredBackgroundMaxDurationMs,
   getConfiguredBackgroundMaxRounds,
@@ -94,7 +93,7 @@ import { focusView } from './focusView';
 import type { DroppedFileReferenceInput, PromptReferenceInput, WebviewMessage } from './webviewMessages';
 import { InteractionTraceLogService } from '../agent/logging/interactionTrace';
 import { applyChangeSetEventToRunDetails } from '../agent/logging/runDetails';
-import { fetchDeepSeekBalance } from '../agent/deepseek/balance';
+import { fetchModelSourceBalance } from '../agent/balance';
 import { GlobalBalanceStore, type BalanceSourceScope } from '../agent/deepseek/balanceStore';
 import {
   addUsageEventToSessionStats,
@@ -2235,21 +2234,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     try {
-      let endpointUrl: string;
-      try {
-        endpointUrl = getConfiguredBalanceEndpointUrl(source.baseUrl);
-      } catch (error) {
-        await this.balanceStore.update({
-          currency: '¥',
-          error: getErrorMessage(error),
-          updatedAt: new Date().toISOString()
-        }, Date.now(), scope);
-        if (options.post !== false) {
-          this.postState();
-        }
-        return;
-      }
-      const balance = await fetchDeepSeekBalance({ apiKey, endpointUrl });
+      const balance = await fetchModelSourceBalance({
+        provider: source.provider,
+        apiKey,
+        baseUrl: source.baseUrl
+      });
       await this.balanceStore.update(balance, Date.now(), scope);
       if (options.post !== false) {
         this.postState();

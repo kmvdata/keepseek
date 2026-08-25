@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { DeepSeekBalanceState } from '../../shared/types';
+import type { ModelSourceBalanceState } from '../../shared/types';
 import { isRecord } from '../../shared/errors';
 import { isModelSourceProvider } from '../../accounts/accountStore';
 import type { ModelSourceProvider } from '../../accounts/types';
@@ -17,7 +17,7 @@ export interface BalanceSourceScope {
  */
 export interface GlobalBalanceRecord {
   /** 最近一次成功（或失败）刷新得到的余额快照；无记录时为 undefined。 */
-  balance?: DeepSeekBalanceState;
+  balance?: ModelSourceBalanceState;
   /** 上次真正发起余额请求的时刻（epoch ms）；0 表示从未请求过。 */
   lastRefreshAt: number;
 }
@@ -83,7 +83,7 @@ export class GlobalBalanceStore {
   }
 
   /** 当前来源在内存中的全局余额快照（同步读取，供 UI 立即展示）。 */
-  public getBalance(scope?: BalanceSourceScope): DeepSeekBalanceState | undefined {
+  public getBalance(scope?: BalanceSourceScope): ModelSourceBalanceState | undefined {
     return this.records.get(this.getScopeKey(scope))?.balance;
   }
 
@@ -169,7 +169,7 @@ export class GlobalBalanceStore {
 
   /** 写入该来源最新余额快照并推进其全局限流时间戳。 */
   public async update(
-    balance: DeepSeekBalanceState,
+    balance: ModelSourceBalanceState,
     now: number,
     scope?: BalanceSourceScope
   ): Promise<void> {

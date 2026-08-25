@@ -51,7 +51,7 @@ const SETTINGS = {
 describe('OpenAI Responses account protocol', () => {
   it('keeps Responses protocol defaults and factory dispatch in the expanded provider registry', () => {
     assert.deepEqual(MODEL_SOURCE_PROVIDERS, [
-      'deepseek', 'ollama', 'openai-compatible', 'openai-responses', 'anthropic-compatible'
+      'deepseek', 'kimi', 'glm', 'ollama', 'openai-compatible', 'openai-responses', 'anthropic-compatible'
     ]);
     assert.equal(getDefaultModelSourceName('openai-responses'), 'OpenAI Responses compatible');
     assert.equal(getDefaultModelSourceBaseUrl('openai-responses'), 'https://api.openai.com/v1');

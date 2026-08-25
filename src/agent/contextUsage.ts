@@ -516,6 +516,8 @@ function sumSessionBreakdownTokens(breakdown: ContextUsageBreakdown): number {
 
 function normalizeKnownProvider(value: string): ModelSourceProvider | undefined {
   return value === 'deepseek'
+    || value === 'kimi'
+    || value === 'glm'
     || value === 'ollama'
     || value === 'openai-compatible'
     || value === 'openai-responses'

@@ -7,8 +7,37 @@ import {
   calculateUsageCost,
   createUsageEvent,
   getCacheMissPossibleReasons,
+  normalizeBalanceStateValue,
   normalizeDeepSeekUsage
 } from '../src/agent/usageStats';
+
+test('normalizes Kimi balance details without breaking legacy total-only records', () => {
+  assert.deepEqual(normalizeBalanceStateValue({
+    totalBalance: 12.5,
+    cashBalance: -1,
+    voucherBalance: 13.5,
+    currency: '¥',
+    isAvailable: true,
+    updatedAt: '2026-08-25T00:00:00.000Z'
+  }), {
+    totalBalance: 12.5,
+    cashBalance: -1,
+    voucherBalance: 13.5,
+    currency: '¥',
+    isAvailable: true,
+    updatedAt: '2026-08-25T00:00:00.000Z',
+    error: undefined
+  });
+  assert.deepEqual(normalizeBalanceStateValue({ totalBalance: 3, currency: '¥' }), {
+    totalBalance: 3,
+    cashBalance: undefined,
+    voucherBalance: undefined,
+    currency: '¥',
+    isAvailable: undefined,
+    updatedAt: undefined,
+    error: undefined
+  });
+});
 
 test('normalizes DeepSeek cache hit and miss usage fields', () => {
   const usage = normalizeDeepSeekUsage({
@@ -48,6 +77,20 @@ test('uses cached_tokens fallback and derives miss tokens', () => {
     totalTokens: 1000,
     cacheHitTokens: 450,
     cacheMissTokens: 450
+  });
+});
+
+test('uses the Kimi-compatible top-level cached_tokens field for cost accounting', () => {
+  assert.deepEqual(normalizeDeepSeekUsage({
+    prompt_tokens: 1_000,
+    completion_tokens: 100,
+    cached_tokens: 600
+  }), {
+    promptTokens: 1_000,
+    completionTokens: 100,
+    totalTokens: 1_100,
+    cacheHitTokens: 600,
+    cacheMissTokens: 400
   });
 });
 

@@ -71,6 +71,8 @@ export interface DeepSeekUsage {
   total_tokens?: number;
   prompt_cache_hit_tokens?: number;
   prompt_cache_miss_tokens?: number;
+  /** Kimi/OpenAI-compatible top-level cache-hit token field. */
+  cached_tokens?: number;
   prompt_tokens_details?: {
     cached_tokens?: number;
     [key: string]: unknown;

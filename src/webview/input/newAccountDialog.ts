@@ -28,6 +28,8 @@ export function getNewAccountDialogTemplate(): string {
             <span class="new-account-field-label" data-i18n="modelProviderLabel">模型协议</span>
             <select id="newAccountProvider" class="new-account-input" aria-label="模型协议" data-i18n-aria-label="modelProviderLabel">
               <option value="deepseek">DeepSeek</option>
+              <option value="kimi" data-i18n="kimiOfficial">Kimi (Moonshot) official</option>
+              <option value="glm" data-i18n="glmOfficial">GLM (Zhipu) official</option>
               <option value="ollama">Ollama</option>
               <option value="openai-compatible">OpenAI compatible</option>
               <option value="openai-responses" data-i18n="openAiResponsesCompatible">OpenAI Responses compatible</option>
@@ -275,9 +277,41 @@ export function getNewAccountDialogScript(): string {
       var apiKeyVisible = false;
 
       function normalizeProvider(value) {
-        return value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses' || value === 'anthropic-compatible'
+        return value === 'kimi' || value === 'glm' || value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses' || value === 'anthropic-compatible'
           ? value
           : 'deepseek';
+      }
+
+      function getDefaultBaseUrl(provider) {
+        return provider === 'deepseek' ? 'https://api.deepseek.com'
+          : provider === 'kimi' ? 'https://api.moonshot.cn/v1'
+          : provider === 'glm' ? 'https://open.bigmodel.cn/api/paas/v4'
+          : provider === 'ollama' ? 'http://localhost:11434/v1'
+          : provider === 'openai-responses' ? 'https://api.openai.com/v1'
+          : provider === 'anthropic-compatible' ? 'https://api.anthropic.com/v1'
+          : '';
+      }
+
+      function getDefaultSourceName(provider) {
+        return provider === 'kimi' ? 'Kimi'
+          : provider === 'glm' ? 'GLM'
+          : provider === 'ollama' ? 'Ollama'
+          : provider === 'openai-responses' ? 'OpenAI Responses compatible'
+          : provider === 'anthropic-compatible' ? 'Anthropic compatible'
+          : provider === 'openai-compatible' ? 'OpenAI compatible'
+          : 'DeepSeek';
+      }
+
+      function applyProviderPreset(provider, updateValue) {
+        var defaultBaseUrl = getDefaultBaseUrl(provider);
+        if (baseUrlInput) {
+          baseUrlInput.placeholder = defaultBaseUrl || 'https://api.example.com/v1';
+          if (updateValue) { baseUrlInput.value = defaultBaseUrl; }
+        }
+        if (nameInput) { nameInput.placeholder = getDefaultSourceName(provider); }
+        if (apiKeyInput) {
+          apiKeyInput.placeholder = provider === 'glm' ? 'your GLM API Key' : 'sk-...';
+        }
       }
 
       function setStatus(message) {
@@ -365,7 +399,7 @@ export function getNewAccountDialogScript(): string {
         if (providerSelect) { providerSelect.value = 'deepseek'; }
         if (nameInput) { nameInput.value = ''; }
         if (apiKeyInput) { apiKeyInput.value = ''; }
-        if (baseUrlInput) { baseUrlInput.value = 'https://api.deepseek.com'; }
+        applyProviderPreset('deepseek', true);
         setApiKeyVisible(false, false);
         setStatus('');
         render();
@@ -385,10 +419,7 @@ export function getNewAccountDialogScript(): string {
         var apiKey = apiKeyInput ? apiKeyInput.value.trim() : '';
         var baseUrl = baseUrlInput ? baseUrlInput.value.trim() : '';
         var provider = normalizeProvider(providerSelect ? providerSelect.value : 'deepseek');
-        if (!baseUrl && provider === 'deepseek') { baseUrl = 'https://api.deepseek.com'; }
-        if (!baseUrl && provider === 'ollama') { baseUrl = 'http://localhost:11434/v1'; }
-        if (!baseUrl && provider === 'openai-responses') { baseUrl = 'https://api.openai.com/v1'; }
-        if (!baseUrl && provider === 'anthropic-compatible') { baseUrl = 'https://api.anthropic.com/v1'; }
+        if (!baseUrl) { baseUrl = getDefaultBaseUrl(provider); }
         if (!baseUrl) {
           setStatus(t('baseUrlRequired'));
           if (baseUrlInput) { baseUrlInput.focus(); }
@@ -414,10 +445,7 @@ export function getNewAccountDialogScript(): string {
           if (nameInput) { nameInput.focus(); }
           return;
         }
-        if (!baseUrl && provider === 'deepseek') { baseUrl = 'https://api.deepseek.com'; }
-        if (!baseUrl && provider === 'ollama') { baseUrl = 'http://localhost:11434/v1'; }
-        if (!baseUrl && provider === 'openai-responses') { baseUrl = 'https://api.openai.com/v1'; }
-        if (!baseUrl && provider === 'anthropic-compatible') { baseUrl = 'https://api.anthropic.com/v1'; }
+        if (!baseUrl) { baseUrl = getDefaultBaseUrl(provider); }
         if (!baseUrl) {
           setStatus(t('baseUrlRequired'));
           if (baseUrlInput) { baseUrlInput.focus(); }
@@ -470,17 +498,7 @@ export function getNewAccountDialogScript(): string {
         providerSelect.addEventListener('change', function() {
           if (busyAction) { return; }
           var selectedProvider = normalizeProvider(providerSelect.value);
-          if (baseUrlInput) {
-            baseUrlInput.value = selectedProvider === 'deepseek'
-              ? 'https://api.deepseek.com'
-              : selectedProvider === 'ollama'
-                ? 'http://localhost:11434/v1'
-                : selectedProvider === 'openai-responses'
-                  ? 'https://api.openai.com/v1'
-                  : selectedProvider === 'anthropic-compatible'
-                    ? 'https://api.anthropic.com/v1'
-                  : '';
-          }
+          applyProviderPreset(selectedProvider, true);
           if (apiKeyInput && selectedProvider === 'ollama') {
             apiKeyInput.value = '';
           }

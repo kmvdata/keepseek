@@ -11,7 +11,12 @@ import {
   type RefreshSourceModelCacheResult,
   type SourceConnectionProber
 } from './modelDiscovery';
-import { isOfficialAnthropicSource, isOfficialDeepSeekSource } from './sourceCapabilities';
+import {
+  isOfficialDeepSeekSource,
+  isOfficialGlmSource,
+  isOfficialKimiSource,
+  requiresModelSourceApiKey
+} from './sourceCapabilities';
 import type { ModelSource, ModelSourceModel, ModelSourceProvider } from './types';
 
 export interface AddModelInput {
@@ -61,7 +66,7 @@ export class ModelSourceService {
       const name = normalizeRequiredSourceName(input.name);
       const apiKey = input.apiKey.trim();
       const baseUrl = normalizeRequiredBaseUrl(input.baseUrl);
-      assertOfficialAnthropicApiKey(input.provider, baseUrl, apiKey);
+      assertRequiredHostedApiKey(input.provider, baseUrl, apiKey);
       source = await this.findReusableSource(input.provider, apiKey, baseUrl);
       reusedSource = Boolean(source);
       if (!source) {
@@ -214,7 +219,7 @@ export class ModelSourceService {
     await this.assertUniqueSourceName(name, source.id);
     const apiKey = input.apiKey.trim();
     const baseUrl = normalizeRequiredBaseUrl(input.baseUrl);
-    assertOfficialAnthropicApiKey(source.provider, baseUrl, apiKey);
+    assertRequiredHostedApiKey(source.provider, baseUrl, apiKey);
     const connectionChanged = source.apiKey !== apiKey || source.baseUrl !== baseUrl;
     const updated = await this.sourceStore.updateSource(source.id, {
       name,
@@ -305,17 +310,19 @@ function normalizeOptionalCapabilityTokens(
 
 function shouldRefreshAfterSave(source: Pick<ModelSource, 'provider' | 'baseUrl'>): boolean {
   return isOfficialDeepSeekSource(source)
+    || isOfficialKimiSource(source)
+    || isOfficialGlmSource(source)
     || source.provider === 'openai-responses'
     || source.provider === 'anthropic-compatible';
 }
 
-function assertOfficialAnthropicApiKey(
+function assertRequiredHostedApiKey(
   provider: ModelSourceProvider,
   baseUrl: string,
   apiKey: string
 ): void {
-  if (!apiKey && isOfficialAnthropicSource({ provider, baseUrl })) {
-    throw new Error('Official Anthropic accounts require an API Key.');
+  if (!apiKey && requiresModelSourceApiKey({ provider, baseUrl })) {
+    throw new Error('Official hosted accounts require an API Key.');
   }
 }
 

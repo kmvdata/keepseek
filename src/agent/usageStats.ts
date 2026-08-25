@@ -1,6 +1,6 @@
 import type { DeepSeekUsage } from './deepseek/types';
 import type {
-  DeepSeekBalanceState,
+  ModelSourceBalanceState,
   PromptCacheDiagnostics,
   SessionUsageStats,
   TurnUsageStats,
@@ -22,11 +22,12 @@ export function normalizeDeepSeekUsage(usage: DeepSeekUsage | null | undefined):
   const completionTokens = readNonNegativeInteger(usage.completion_tokens);
   const totalTokens = readOptionalNonNegativeInteger(usage.total_tokens) ?? promptTokens + completionTokens;
   const directHitTokens = readOptionalNonNegativeInteger(usage.prompt_cache_hit_tokens);
+  const compatibleHitTokens = readOptionalNonNegativeInteger(usage.cached_tokens);
   const detailsHitTokens = readOptionalNonNegativeInteger(readNestedUsageNumber(
     usage.prompt_tokens_details,
     'cached_tokens'
   ));
-  const cacheHitTokens = directHitTokens ?? detailsHitTokens ?? 0;
+  const cacheHitTokens = directHitTokens ?? compatibleHitTokens ?? detailsHitTokens ?? 0;
   const directMissTokens = readOptionalNonNegativeInteger(usage.prompt_cache_miss_tokens);
   const cacheMissTokens = directMissTokens ?? Math.max(0, promptTokens - cacheHitTokens);
   const reasoningTokens = readOptionalNonNegativeInteger(readNestedUsageNumber(
@@ -282,17 +283,21 @@ export function normalizeTurnUsageStatsValue(value: unknown): TurnUsageStats | u
   return hasAnyUsage(stats) || stats.requestCount > 0 || stats.cost > 0 ? stats : undefined;
 }
 
-export function normalizeBalanceStateValue(value: unknown): DeepSeekBalanceState | undefined {
+export function normalizeBalanceStateValue(value: unknown): ModelSourceBalanceState | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
   const totalBalance = readOptionalFiniteNumber(value.totalBalance);
+  const cashBalance = readOptionalFiniteNumber(value.cashBalance);
+  const voucherBalance = readOptionalFiniteNumber(value.voucherBalance);
   const error = normalizeOptionalString(value.error);
-  if (totalBalance === undefined && !error) {
+  if (totalBalance === undefined && cashBalance === undefined && voucherBalance === undefined && !error) {
     return undefined;
   }
   return {
     totalBalance,
+    cashBalance,
+    voucherBalance,
     currency: normalizeCurrency(value.currency),
     isAvailable: typeof value.isAvailable === 'boolean' ? value.isAvailable : undefined,
     updatedAt: normalizeOptionalString(value.updatedAt),

@@ -113,6 +113,41 @@ describe('resolveModelSourceConfig', () => {
     assert.equal(resolved.supportsBilling, true);
   });
 
+  it('enables billing only for the documented official Kimi host, not GLM or gateways', async () => {
+    const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { now: () => NOW });
+    await store.createSource({
+      id: 'kimi-official',
+      provider: 'kimi',
+      apiKey: 'kimi-key',
+      baseUrl: 'https://api.moonshot.cn/v1'
+    });
+    await store.createSource({
+      id: 'kimi-gateway',
+      provider: 'kimi',
+      apiKey: 'gateway-key',
+      baseUrl: 'https://gateway.example/v1'
+    });
+    await store.createSource({
+      id: 'glm-official',
+      provider: 'glm',
+      apiKey: 'glm-key',
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4'
+    });
+
+    const officialKimi = await resolveModelSourceConfig('kimi-official', vscode.Uri.file(storageRoot), {
+      sourceStore: store
+    });
+    const gatewayKimi = await resolveModelSourceConfig('kimi-gateway', vscode.Uri.file(storageRoot), {
+      sourceStore: store
+    });
+    const officialGlm = await resolveModelSourceConfig('glm-official', vscode.Uri.file(storageRoot), {
+      sourceStore: store
+    });
+    assert.equal(officialKimi.supportsBilling, true);
+    assert.equal(gatewayKimi.supportsBilling, false);
+    assert.equal(officialGlm.supportsBilling, false);
+  });
+
   it('resolves Responses credentials without enabling DeepSeek billing', async () => {
     const store = new ModelSourceStore(vscode.Uri.file(storageRoot), { now: () => NOW });
     await store.createSource({

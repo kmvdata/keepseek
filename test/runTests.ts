@@ -5,6 +5,7 @@ import './accountStore.test';
 import './modelAlias.test';
 import './modelDiscovery.test';
 import './modelCatalog.test';
+import './kimiGlmProviders.test';
 import './openAiResponses.test';
 import './anthropicMessages.test';
 import './agentRequestCoordinator.test';
