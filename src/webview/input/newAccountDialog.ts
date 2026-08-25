@@ -26,15 +26,25 @@ export function getNewAccountDialogTemplate(): string {
           <div id="newAccountDialogStatus" class="new-account-dialog-status hidden" role="status" aria-live="polite" tabindex="-1"></div>
           <label class="new-account-field">
             <span class="new-account-field-label" data-i18n="modelProviderLabel">模型协议</span>
-            <select id="newAccountProvider" class="new-account-input" aria-label="模型协议" data-i18n-aria-label="modelProviderLabel">
-              <option value="deepseek">DeepSeek</option>
-              <option value="kimi" data-i18n="kimiOfficial">Kimi (Moonshot) official</option>
-              <option value="glm" data-i18n="glmOfficial">GLM (Zhipu) official</option>
-              <option value="ollama">Ollama</option>
-              <option value="openai-compatible">OpenAI compatible</option>
-              <option value="openai-responses" data-i18n="openAiResponsesCompatible">OpenAI Responses compatible</option>
-              <option value="anthropic-compatible" data-i18n="anthropicMessagesCompatible">Anthropic compatible</option>
-            </select>
+            <div class="new-account-provider-control">
+              <button id="newAccountProviderTrigger" type="button" class="new-account-input new-account-provider-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="模型协议" data-i18n-aria-label="modelProviderLabel">
+                <img id="newAccountProviderTriggerIcon" class="new-account-provider-icon" alt="" aria-hidden="true" draggable="false" />
+                <span id="newAccountProviderTriggerLabel" class="new-account-provider-trigger-label"></span>
+                <svg class="new-account-provider-chevron" width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M3.5 6.2l4.5 4 4.5-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <div id="newAccountProviderMenu" class="new-account-provider-menu hidden" role="listbox" aria-label="模型协议" data-i18n-aria-label="modelProviderLabel"></div>
+              <select id="newAccountProvider" class="new-account-provider-native-select" aria-hidden="true" tabindex="-1">
+                <option value="deepseek">DeepSeek</option>
+                <option value="kimi" data-i18n="kimiOfficial">Kimi (Moonshot) official</option>
+                <option value="glm" data-i18n="glmOfficial">GLM (Zhipu) official</option>
+                <option value="ollama">Ollama</option>
+                <option value="openai-compatible">OpenAI compatible</option>
+                <option value="openai-responses" data-i18n="openAiResponsesCompatible">OpenAI Responses compatible</option>
+                <option value="anthropic-compatible" data-i18n="anthropicMessagesCompatible">Anthropic compatible</option>
+              </select>
+            </div>
           </label>
           <label class="new-account-field">
             <span class="new-account-field-label" data-i18n="modelSourceName">账号名称</span>
@@ -168,6 +178,101 @@ export function getNewAccountDialogStyles(): string {
       opacity: 0.55;
     }
 
+    .new-account-provider-control {
+      position: relative;
+    }
+
+    .new-account-provider-trigger {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      width: 100%;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .new-account-provider-trigger.is-open {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+
+    .new-account-provider-icon {
+      display: block;
+      width: 16px;
+      height: 16px;
+      flex: 0 0 16px;
+      object-fit: contain;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    .new-account-provider-trigger-label {
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .new-account-provider-chevron {
+      flex: 0 0 auto;
+      color: var(--vscode-descriptionForeground);
+      transition: transform 0.12s ease;
+    }
+
+    .new-account-provider-trigger.is-open .new-account-provider-chevron {
+      transform: rotate(180deg);
+    }
+
+    .new-account-provider-menu {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      z-index: 130;
+      max-height: 240px;
+      overflow-y: auto;
+      padding: 4px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 6px;
+      background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-sideBar-background)));
+      color: var(--vscode-quickInput-foreground, var(--vscode-foreground));
+      box-shadow: 0 8px 20px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.28));
+    }
+
+    .new-account-provider-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 6px;
+      border-radius: 4px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .new-account-provider-menu-item:hover,
+    .new-account-provider-menu-item.is-selected {
+      background: var(--vscode-list-activeSelectionBackground, var(--vscode-editor-selectionBackground));
+      color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+    }
+
+    .new-account-provider-menu-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .new-account-provider-native-select {
+      position: absolute;
+      left: -10000px;
+      top: 0;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+
     .new-account-field-hint {
       font-size: 11px;
       color: var(--vscode-descriptionForeground);
@@ -265,6 +370,11 @@ export function getNewAccountDialogScript(): string {
       var dialog = overlay ? overlay.querySelector('.new-account-dialog') : null;
       var statusEl = document.getElementById('newAccountDialogStatus');
       var providerSelect = document.getElementById('newAccountProvider');
+      var providerTrigger = document.getElementById('newAccountProviderTrigger');
+      var providerTriggerIcon = document.getElementById('newAccountProviderTriggerIcon');
+      var providerTriggerLabel = document.getElementById('newAccountProviderTriggerLabel');
+      var providerMenu = document.getElementById('newAccountProviderMenu');
+      var providerMenuOpen = false;
       var nameInput = document.getElementById('newAccountName');
       var apiKeyInput = document.getElementById('newAccountApiKey');
       var apiKeyVisibilityBtn = document.getElementById('newAccountApiKeyVisibilityBtn');
@@ -275,6 +385,101 @@ export function getNewAccountDialogScript(): string {
       var busyAction = '';
       var busyTimer = null;
       var apiKeyVisible = false;
+
+      function getProviderLabel(provider) {
+        return provider === 'anthropic-compatible' ? t('anthropicMessagesCompatible')
+          : provider === 'openai-responses' ? t('openAiResponsesCompatible')
+          : provider === 'kimi' ? t('kimiOfficial')
+          : provider === 'glm' ? t('glmOfficial')
+          : provider === 'openai-compatible' ? 'OpenAI compatible'
+          : provider === 'ollama' ? 'Ollama'
+          : 'DeepSeek';
+      }
+
+      function syncProviderTrigger() {
+        if (!providerSelect) { return; }
+        var value = providerSelect.value || 'deepseek';
+        var uri = modelProtocolLogoUris[value] || '';
+        if (providerTriggerIcon) {
+          providerTriggerIcon.src = uri;
+          providerTriggerIcon.style.display = uri ? '' : 'none';
+        }
+        if (providerTriggerLabel) { providerTriggerLabel.textContent = getProviderLabel(value); }
+        if (providerTrigger) { providerTrigger.setAttribute('aria-expanded', providerMenuOpen ? 'true' : 'false'); }
+      }
+
+      function updateSelectedMenuItem() {
+        if (!providerMenu || !providerSelect) { return; }
+        var items = providerMenu.querySelectorAll('.new-account-provider-menu-item');
+        var current = providerSelect.value;
+        for (var i = 0; i < items.length; i++) {
+          var isSelected = items[i].getAttribute('data-value') === current;
+          items[i].classList.toggle('is-selected', isSelected);
+          items[i].setAttribute('aria-selected', isSelected ? 'true' : 'false');
+        }
+      }
+
+      function buildProviderMenu() {
+        if (!providerMenu) { return; }
+        providerMenu.innerHTML = '';
+        var order = ['deepseek', 'kimi', 'glm', 'ollama', 'openai-compatible', 'openai-responses', 'anthropic-compatible'];
+        var selectedValue = providerSelect ? providerSelect.value : 'deepseek';
+        for (var i = 0; i < order.length; i++) {
+          var value = order[i];
+          var item = document.createElement('div');
+          item.className = 'new-account-provider-menu-item';
+          item.setAttribute('role', 'option');
+          item.setAttribute('data-value', value);
+          item.setAttribute('aria-selected', value === selectedValue ? 'true' : 'false');
+          var uri = modelProtocolLogoUris[value] || '';
+          if (uri) {
+            var img = document.createElement('img');
+            img.className = 'new-account-provider-icon';
+            img.src = uri;
+            img.alt = '';
+            img.setAttribute('aria-hidden', 'true');
+            img.draggable = false;
+            item.appendChild(img);
+          }
+          var label = document.createElement('span');
+          label.className = 'new-account-provider-menu-label';
+          label.textContent = getProviderLabel(value);
+          item.appendChild(label);
+          (function(selected) {
+            item.addEventListener('click', function() {
+              setProviderValue(selected);
+              closeProviderMenu();
+            });
+          })(value);
+          providerMenu.appendChild(item);
+        }
+      }
+
+      function setProviderValue(value) {
+        if (!providerSelect) { return; }
+        providerSelect.value = value;
+        providerSelect.dispatchEvent(new Event('change'));
+        syncProviderTrigger();
+        updateSelectedMenuItem();
+      }
+
+      function openProviderMenu() {
+        if (busyAction || !providerMenu || !providerTrigger) { return; }
+        providerMenuOpen = true;
+        providerMenu.classList.remove('hidden');
+        providerTrigger.classList.add('is-open');
+        providerTrigger.setAttribute('aria-expanded', 'true');
+        updateSelectedMenuItem();
+      }
+
+      function closeProviderMenu() {
+        providerMenuOpen = false;
+        if (providerMenu) { providerMenu.classList.add('hidden'); }
+        if (providerTrigger) {
+          providerTrigger.classList.remove('is-open');
+          providerTrigger.setAttribute('aria-expanded', 'false');
+        }
+      }
 
       function normalizeProvider(value) {
         return value === 'kimi' || value === 'glm' || value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses' || value === 'anthropic-compatible'
@@ -345,6 +550,7 @@ export function getNewAccountDialogScript(): string {
         [providerSelect, nameInput, apiKeyInput, apiKeyVisibilityBtn, baseUrlInput].forEach(function(control) {
           if (control) { control.disabled = busy; }
         });
+        if (providerTrigger) { providerTrigger.disabled = busy; }
         if (testBtn) {
           testBtn.textContent = busyAction === 'test-connection' ? t('testingConnection') : t('testConnection');
           testBtn.disabled = busy;
@@ -396,7 +602,10 @@ export function getNewAccountDialogScript(): string {
       function open() {
         if (!overlay) { return; }
         clearBusy();
+        buildProviderMenu();
         if (providerSelect) { providerSelect.value = 'deepseek'; }
+        closeProviderMenu();
+        syncProviderTrigger();
         if (nameInput) { nameInput.value = ''; }
         if (apiKeyInput) { apiKeyInput.value = ''; }
         applyProviderPreset('deepseek', true);
@@ -540,6 +749,28 @@ export function getNewAccountDialogScript(): string {
         });
       });
 
+      if (providerTrigger) {
+        providerTrigger.addEventListener('click', function() {
+          if (busyAction) { return; }
+          if (providerMenuOpen) {
+            closeProviderMenu();
+          } else {
+            openProviderMenu();
+          }
+        });
+      }
+
+      document.addEventListener('click', function(event) {
+        if (providerMenuOpen && providerTrigger && providerMenu &&
+            event.target !== providerTrigger && !providerTrigger.contains(event.target) &&
+            event.target !== providerMenu && !providerMenu.contains(event.target)) {
+          closeProviderMenu();
+        }
+      });
+
+      buildProviderMenu();
+      syncProviderTrigger();
+
       if (overlay) {
         overlay.addEventListener('click', function(event) {
           if (event.target === overlay) { close(); }
@@ -547,7 +778,11 @@ export function getNewAccountDialogScript(): string {
         overlay.addEventListener('keydown', function(event) {
           if (event.key === 'Escape') {
             event.preventDefault();
-            close();
+            if (providerMenuOpen) {
+              closeProviderMenu();
+            } else {
+              close();
+            }
           } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
             if (saveBtn) { saveBtn.click(); }
