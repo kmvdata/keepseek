@@ -8,8 +8,13 @@ export interface KeepseekModel {
   provider: string;
   contextWindowTokens?: number;
   /** Provenance for the effective context window shown in model settings. */
-  contextWindowSource?: 'manual' | 'discovered' | 'built-in' | 'guessed' | 'fallback';
+  contextWindowSource?: ModelCapabilitySource;
   maxOutputTokens?: number;
+  /** Provenance for the effective max output shown in model settings. */
+  maxOutputSource?: ModelCapabilitySource;
+  /** False for known image-generation or speech-synthesis resources that the text Agent cannot call. */
+  agentCompatible?: boolean;
+  nonTextModelKind?: NonTextModelKind;
   anthropicCapabilities?: AnthropicModelCapabilities;
   /** Display name returned by the selected provider's /models endpoint. */
   fetchedName?: string;
@@ -18,6 +23,10 @@ export interface KeepseekModel {
   sourceName?: string;
   supportsBilling?: boolean;
 }
+
+export type ModelCapabilitySource = 'manual' | 'discovered' | 'built-in' | 'guessed' | 'fallback';
+
+export type NonTextModelKind = 'image-generation' | 'speech-synthesis';
 
 export interface ModelSelection {
   sourceId: string;

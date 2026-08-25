@@ -1,7 +1,12 @@
 import type { KeepseekModel, ModelSelection } from '../shared/types';
-import { getGuessedContextWindowTokens } from '../shared/modelContextWindowGuesses';
+import {
+  getGuessedContextWindowTokens,
+  getGuessedMaxOutputTokens,
+  getKnownNonTextModelKind
+} from '../shared/modelContextWindowGuesses';
 import {
   DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS,
+  DEFAULT_GENERIC_MAX_OUTPUT_TOKENS,
   getSupportedDeepSeekV4Models
 } from '../shared/modelProfiles';
 import {
@@ -56,7 +61,26 @@ export function createModelCatalog(
         : undefined;
       const fetched = source.modelCache?.models.find((model) => model.id === modelId);
       const manual = source.models.find((model) => model.id === modelId);
+      const nonTextModelKind = getKnownNonTextModelKind(modelId);
+      if (nonTextModelKind) {
+        if (!options.includeDisabledModels) {
+          continue;
+        }
+        catalog.push({
+          id: modelId,
+          label: modelId,
+          provider: source.provider,
+          agentCompatible: false,
+          nonTextModelKind,
+          fetchedName: fetched?.name,
+          sourceId: source.id,
+          sourceName: source.name,
+          supportsBilling
+        });
+        continue;
+      }
       const guessedContextWindowTokens = getGuessedContextWindowTokens(modelId);
+      const guessedMaxOutputTokens = getGuessedMaxOutputTokens(modelId);
       const contextWindowTokens = manual?.contextWindowTokens
         ?? fetched?.contextWindowTokens
         ?? builtIn?.contextWindowTokens
@@ -71,6 +95,20 @@ export function createModelCatalog(
             : guessedContextWindowTokens
               ? 'guessed'
               : 'fallback';
+      const maxOutputTokens = manual?.maxOutputTokens
+        ?? fetched?.maxOutputTokens
+        ?? builtIn?.maxOutputTokens
+        ?? guessedMaxOutputTokens
+        ?? DEFAULT_GENERIC_MAX_OUTPUT_TOKENS;
+      const maxOutputSource: KeepseekModel['maxOutputSource'] = manual?.maxOutputTokens
+        ? 'manual'
+        : fetched?.maxOutputTokens
+          ? 'discovered'
+          : builtIn?.maxOutputTokens
+            ? 'built-in'
+            : guessedMaxOutputTokens
+              ? 'guessed'
+              : 'fallback';
       catalog.push({
         id: modelId,
         label: builtIn?.label ?? modelId,
@@ -79,9 +117,9 @@ export function createModelCatalog(
         // only then do low-trust family guesses and the generic fallback apply.
         contextWindowTokens,
         contextWindowSource,
-        maxOutputTokens: manual?.maxOutputTokens
-          ?? fetched?.maxOutputTokens
-          ?? builtIn?.maxOutputTokens,
+        maxOutputTokens,
+        maxOutputSource,
+        agentCompatible: true,
         anthropicCapabilities: fetched?.anthropicCapabilities
           ? {
               ...fetched.anthropicCapabilities,

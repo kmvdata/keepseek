@@ -1516,7 +1516,8 @@ export function getInputStyles(): string {
       cursor: default;
     }
 
-    .settings-model-context-capability.is-editing {
+    .settings-model-context-capability.is-editing,
+    .settings-model-output-capability.is-editing {
       display: inline-grid;
       grid-template-columns: minmax(56px, 82px) auto auto auto;
       align-items: center;
@@ -1576,6 +1577,10 @@ export function getInputStyles(): string {
     .settings-model-row.is-disabled .settings-model-name {
       color: var(--vscode-descriptionForeground);
       font-weight: 400;
+    }
+
+    .settings-model-row.is-disabled .settings-model-capabilities {
+      opacity: 0.8;
     }
 
     .settings-model-actions {

@@ -14,7 +14,7 @@ export const DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS = 32_768;
 export const DEFAULT_GENERIC_MAX_OUTPUT_TOKENS = 8_192;
 export const DEFAULT_GENERIC_SUMMARY_BUDGET_TOKENS = 4_000;
 export const MAX_MODEL_CONTEXT_WINDOW_TOKENS = 10_000_000;
-export const MAX_MODEL_OUTPUT_TOKENS = 1_000_000;
+export const MAX_MODEL_OUTPUT_TOKENS = 1_048_576;
 
 export type DeepSeekV4ModelId =
   | typeof DEEPSEEK_V4_FLASH_MODEL_ID
@@ -68,13 +68,15 @@ const SUPPORTED_MODELS: readonly KeepseekModel[] = [
     id: DEEPSEEK_V4_FLASH_MODEL_ID,
     label: 'DeepSeek-V4-Flash',
     provider: 'deepseek',
-    contextWindowTokens: DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+    contextWindowTokens: DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
+    maxOutputTokens: 384_000
   },
   {
     id: DEEPSEEK_V4_PRO_MODEL_ID,
     label: 'DeepSeek-V4-Pro',
     provider: 'deepseek',
-    contextWindowTokens: DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+    contextWindowTokens: DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
+    maxOutputTokens: 384_000
   }
 ];
 

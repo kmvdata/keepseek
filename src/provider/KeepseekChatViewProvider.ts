@@ -770,6 +770,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.setModelContextWindow(message);
         return;
       }
+      case 'setModelMaxOutput': {
+        await this.setModelMaxOutput(message);
+        return;
+      }
       case 'deleteModelSource': {
         await this.deleteModelSource(message.sourceId);
         return;
@@ -1815,6 +1819,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           contextWindowTokens: model.contextWindowTokens,
           contextWindowSource: model.contextWindowSource,
           maxOutputTokens: model.maxOutputTokens,
+          maxOutputSource: model.maxOutputSource,
+          agentCompatible: model.agentCompatible !== false,
+          nonTextModelKind: model.nonTextModelKind,
           supportsBilling: model.supportsBilling === true
         })),
         isOfficialDeepSeek: isOfficialDeepSeekSource(source)
@@ -1955,6 +1962,30 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         input.sourceId,
         input.modelId,
         input.contextWindowTokens
+      );
+      await this.refreshModelSourceState();
+      this.postState();
+      this.postModelSettingsDialog();
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
+      this.postModelSettingsDialog();
+    }
+  }
+
+  private async setModelMaxOutput(input: {
+    sourceId: string;
+    modelId: string;
+    maxOutputTokens: number;
+  }): Promise<void> {
+    if (this.rejectModelSourceMutationWhileBusy()) {
+      return;
+    }
+    try {
+      await this.waitForBalanceRefresh();
+      await this.modelSourceService.setModelMaxOutputTokens(
+        input.sourceId,
+        input.modelId,
+        input.maxOutputTokens
       );
       await this.refreshModelSourceState();
       this.postState();

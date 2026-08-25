@@ -103,7 +103,7 @@ test('declared capabilities clamp output and summary budgets to the effective co
     thinkingEnabled: true,
     reasoningEffort: 'max'
   });
-  assert.equal(lookalike.profileKind, 'generic', 'model names never grant DeepSeek capabilities across providers');
+  assert.equal(lookalike.profileKind, 'generic', 'compatible models never enter the dedicated DeepSeek profile');
   assert.equal(lookalike.maxTokens, DEFAULT_GENERIC_MAX_OUTPUT_TOKENS);
 });
 

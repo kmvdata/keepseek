@@ -64,6 +64,7 @@ export type WebviewMessage =
   | { type: 'deleteModel'; sourceId: string; modelId: string }
   | { type: 'setModelEnabled'; sourceId: string; modelId: string; enabled: boolean }
   | { type: 'setModelContextWindow'; sourceId: string; modelId: string; contextWindowTokens: number }
+  | { type: 'setModelMaxOutput'; sourceId: string; modelId: string; maxOutputTokens: number }
   | { type: 'saveModelSource'; sourceId: string; name?: string; apiKey: string; baseUrl: string }
   | { type: 'deleteModelSource'; sourceId: string }
   | { type: 'refreshSourceModels'; sourceId: string }

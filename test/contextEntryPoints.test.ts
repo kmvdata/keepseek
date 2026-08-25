@@ -186,6 +186,7 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(inputScript, /type: 'deleteModel'/u);
   assert.match(inputScript, /type: 'setModelEnabled'/u);
   assert.match(inputScript, /type: 'setModelContextWindow'/u);
+  assert.match(inputScript, /type: 'setModelMaxOutput'/u);
   assert.match(inputScript, /formatContextWindowTokens/u);
   assert.match(inputScript, /tokenCount === 1048576/u);
   assert.match(inputScript, /return '1M tokens'/u);
@@ -194,8 +195,15 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(inputScript, /kiloTokens \* 1024/u);
   assert.match(inputScript, /Math\.round\(kiloTokens \* 1000\)/u);
   assert.match(inputScript, /renderSettingsModelContextEditor/u);
+  assert.match(inputScript, /renderSettingsModelMaxOutputEditor/u);
   assert.match(inputScript, /contextWindowSource === 'guessed'/u);
+  assert.match(inputScript, /maxOutputSource === 'guessed'/u);
+  assert.match(inputScript, /model\.agentCompatible === false/u);
+  assert.match(inputScript, /t\('notApplicable'\)/u);
+  assert.match(inputScript, /t\('imageGenerationResource'\)/u);
+  assert.match(inputScript, /t\('speechSynthesisResource'\)/u);
   assert.match(inputTemplate, /max="10000" step="0\.001" placeholder="32"/u);
+  assert.match(inputTemplate, /max="1048576" step="1" placeholder="8192"/u);
   assert.match(inputScript, /type: 'refreshSourceModels'/u);
   assert.doesNotMatch(inputScript, /type: 'selectAccount'/u);
   assert.match(inputScript, /function beginSettingsDialogAction/u);
@@ -226,6 +234,7 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(styles, /\.settings-model-context-value/u);
   assert.match(styles, /\.settings-model-context-input/u);
   assert.match(inputScript, /enableCheckbox\.type = 'checkbox'/u);
+  assert.match(inputScript, /controlsDisabled \|\| model\.agentCompatible === false/u);
   assert.match(inputScript, /disabledModelIds/u);
   assert.match(styles, /@media \(max-width: 540px\)/u);
   assert.match(messageSource, /type: 'addModel'/u);
@@ -235,6 +244,7 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(messageSource, /type: 'deleteModel'/u);
   assert.match(messageSource, /type: 'setModelEnabled'/u);
   assert.match(messageSource, /type: 'setModelContextWindow'/u);
+  assert.match(messageSource, /type: 'setModelMaxOutput'/u);
   assert.doesNotMatch(inputScript, /window\.(?:prompt|alert|confirm)\s*\(/u);
 });
 

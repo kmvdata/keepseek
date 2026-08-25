@@ -142,9 +142,12 @@ export class ModelSourceService {
       throw new Error('Model source not found.');
     }
     const knownModel = createModelCatalog([source], { includeDisabledModels: true })
-      .some((model) => model.id === trimmedModelId);
+      .find((model) => model.id === trimmedModelId);
     if (!knownModel) {
       throw new Error('Model not found in this source.');
+    }
+    if (enabled && knownModel.agentCompatible === false) {
+      throw new Error('This resource is not compatible with the text Agent.');
     }
 
     const disabledModelIds = new Set(source.disabledModelIds ?? []);
@@ -178,9 +181,12 @@ export class ModelSourceService {
       throw new Error('Model source not found.');
     }
     const knownModel = createModelCatalog([source], { includeDisabledModels: true })
-      .some((model) => model.id === trimmedModelId);
+      .find((model) => model.id === trimmedModelId);
     if (!knownModel) {
       throw new Error('Model not found in this source.');
+    }
+    if (knownModel.agentCompatible === false) {
+      throw new Error('Token capabilities do not apply to this resource.');
     }
 
     const models: ModelSourceModel[] = source.models.map((model) => ({ ...model }));
@@ -192,6 +198,50 @@ export class ModelSourceService {
         ? { contextWindowTokens: normalizedContextWindowTokens }
         : {}),
       ...(current?.maxOutputTokens ? { maxOutputTokens: current.maxOutputTokens } : {})
+    };
+    if (index >= 0) {
+      models[index] = next;
+    } else {
+      models.push(next);
+    }
+    const updated = await this.sourceStore.updateSource(source.id, { models });
+    if (!updated) {
+      throw new Error('Model source not found.');
+    }
+    return updated;
+  }
+
+  public async setModelMaxOutputTokens(
+    sourceId: string,
+    modelId: string,
+    maxOutputTokens: number
+  ): Promise<ModelSource> {
+    const trimmedModelId = modelId.trim();
+    const normalizedMaxOutputTokens = normalizeOptionalCapabilityTokens(
+      maxOutputTokens,
+      MAX_DISCOVERED_OUTPUT_TOKENS,
+      'maxOutputTokens'
+    );
+    const source = await this.sourceStore.getSource(sourceId);
+    if (!source) {
+      throw new Error('Model source not found.');
+    }
+    const knownModel = createModelCatalog([source], { includeDisabledModels: true })
+      .find((model) => model.id === trimmedModelId);
+    if (!knownModel) {
+      throw new Error('Model not found in this source.');
+    }
+    if (knownModel.agentCompatible === false) {
+      throw new Error('Token capabilities do not apply to this resource.');
+    }
+
+    const models: ModelSourceModel[] = source.models.map((model) => ({ ...model }));
+    const index = models.findIndex((model) => model.id === trimmedModelId);
+    const current = index >= 0 ? models[index] : undefined;
+    const next: ModelSourceModel = {
+      id: trimmedModelId,
+      ...(current?.contextWindowTokens ? { contextWindowTokens: current.contextWindowTokens } : {}),
+      ...(normalizedMaxOutputTokens ? { maxOutputTokens: normalizedMaxOutputTokens } : {})
     };
     if (index >= 0) {
       models[index] = next;

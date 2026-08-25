@@ -132,10 +132,10 @@ Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使�
 1. 手动模型显式 `contextWindowTokens` / `maxOutputTokens`；
 2. 最新 `/models` 发现元数据；
 3. DeepSeek V4 Flash/Pro 内置元数据与专用 Thinking 画像；
-4. `modelContextWindowGuesses.ts` 中受控、可测试的模型家族上下文猜测；
+4. `modelContextWindowGuesses.ts` 中受控、可测试的模型家族上下文窗口与最大输出猜测；
 5. 其它未知模型保守 fallback：32768 context tokens / 8192 output tokens。
 
-最终 output limit 会被有效 context window 再次收紧，summary budget 会被最终 output limit 收紧。Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tokens`，Anthropic 写入 `max_tokens`；它们不会互相注入 DeepSeek `thinking` / `reasoning_effort`、Responses `reasoning` 或 Anthropic `cache_control` 等协议专属字段。猜测只补充 context window，不猜输出上限，也不会持久化为 provider 事实。账号设置用模型领域惯用的 `K/M tokens` 表达上下文，例如 `32768 → 32K tokens`、`1000000 → 1M tokens`；点击数字后以 `K tokens` 编辑并写入精确 token 覆盖，之后优先于发现值和猜测值。
+最终 output limit 会被有效 context window 再次收紧，summary budget 会被最终 output limit 收紧。Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tokens`，Anthropic 写入 `max_tokens`；它们不会互相注入 DeepSeek `thinking` / `reasoning_effort`、Responses `reasoning` 或 Anthropic `cache_control` 等协议专属字段。名称猜测同时覆盖已知模型的 context window 与 max output，但不会持久化为 provider 事实；没有公开输出上限的文本模型继续使用 8192 output fallback。已知图像生成/语音合成资源不使用 token fallback：它们在账号清单中显示“不适用”，并从文本 Agent 模型目录排除。账号设置用模型领域惯用的 `K/M tokens` 表达两个能力，例如 `32768 → 32K tokens`、`1000000 → 1M tokens`；上下文窗口按 `K tokens` 编辑，最大输出按精确 tokens 编辑，保存后均成为优先于发现值和猜测值的账号级覆盖。
 
 模型切换会迁移 provider/cache lane，但不会删除或强制重建语义摘要。`HistorySummary.modelId` 保留生成 provenance；`requestProtocolVersion` 只表示序列化/schema 兼容版本，不表示模型能力等级。
 

@@ -129,8 +129,9 @@ system prompt 会告诉模型：
 - 使用 streaming。
 - DeepSeek 内置 profile 支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`，保留 Flash / Pro × 非思考 / High / Max 的既有预算；其它账号的模型来自各自 `/models` 或手动模型 ID，并使用 metadata-first 通用画像。
 - Thinking 开关和 `high` / `max` reasoning effort 由输入区选择。
-- `src/shared/modelProfiles.ts` 是运行画像唯一解析入口。能力优先级为：手动模型显式覆盖 > 最新发现元数据 > DeepSeek 内置元数据 > `modelContextWindowGuesses.ts` 的受控模型家族猜测 > 保守 fallback。未知模型 fallback 为 32768 context tokens / 8192 output tokens；上下文猜测不扩大 output limit，`max` 也不会把未知兼容模型放大到 DeepSeek 的六位数输出预算。
-- 账号设置中的上下文窗口使用模型领域惯用的紧凑 token 表达，例如 `32768 → 32K tokens`、`1000000 → 1M tokens`。猜测/fallback 会显式标注，点击数字可按 `K tokens` 原位编辑（例如 1M 输入 `1000`）；保存后写入账号下的精确 token 覆盖，刷新 `/models` 不会覆盖它。
+- `src/shared/modelProfiles.ts` 是运行画像唯一解析入口。能力优先级为：手动模型显式覆盖 > 最新发现元数据 > DeepSeek 内置元数据 > `modelContextWindowGuesses.ts` 的受控模型家族猜测 > 保守 fallback。已知模型名称可分别猜测 context 与 output；没有公开输出上限或名称未知的模型仍使用 32768 context tokens / 8192 output tokens fallback。
+- 账号设置中的上下文窗口与最大输出使用模型领域惯用的紧凑 token 表达，例如 `32768 → 32K tokens`、`1000000 → 1M tokens`。猜测/fallback 会显式标注；点击上下文数值可按 `K tokens` 编辑（例如 1M 输入 `1000`），点击最大输出可按精确 tokens 编辑。保存后写入账号下的精确覆盖，刷新 `/models` 不会覆盖它。
+- 名称猜测覆盖 Qwen 3.6/3.7/3.8、GLM 4.5–5.3、DeepSeek V4 与 Qwen Audio Realtime 等已知文本/实时模型。`wan2.7-image`、`wan2.7-image-pro`、`qwen-audio-3.0-tts-plus` 会作为非文本资源保留在账号清单并显示“不适用”，但不会进入文本 Agent 的模型目录，也不能编辑 token 能力。
 - 最终输出上限不超过有效 context window，摘要预算不超过最终输出上限。Chat Completions、Ollama、Responses、Anthropic 与摘要请求都消费同一画像，但各协议只发送自己支持的字段。
 - 自动压缩阈值由命令菜单中的用户档位覆盖 profile 的 `triggerRatio / forceRatio`：提前清理 `0.70 / 0.85`、默认平衡 `0.80 / 0.92`、缓存优先 `0.85 / 0.95`；其他压缩参数仍保留 profile 原值。
 - DeepSeek Chat Completions 固定使用 V4 推荐的 `temperature=1.0`、`top_p=1.0`。

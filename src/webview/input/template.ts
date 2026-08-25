@@ -337,7 +337,7 @@ export function getInputTemplate(): string {
                   <div class="settings-account-section-header settings-model-header">
                     <div>
                       <span id="settingsModelsTitle" class="settings-section-heading" data-i18n="modelListTitle">模型</span>
-                      <span id="settingsModelsHint" class="settings-field-hint" data-i18n="modelListHint">仅勾选的模型会出现在“切换模型”列表中；上下文用 K/M tokens 表示，点击数值可修改。</span>
+                      <span id="settingsModelsHint" class="settings-field-hint" data-i18n="modelListHint">仅勾选的文本模型会出现在“切换模型”列表中；上下文窗口与最大输出用 K/M tokens 表示，点击数值可修改。图像生成、语音合成资源会保留在清单中，但不适用于文本 Agent。</span>
                     </div>
                     <button id="settingsRefreshModelsBtn" type="button" class="secondary" data-i18n="refreshModels">刷新模型</button>
                     <button id="settingsAddModelBtn" type="button" class="secondary" data-i18n="addModel">添加模型</button>
@@ -355,7 +355,7 @@ export function getInputTemplate(): string {
                     </label>
                     <label class="settings-field">
                       <span id="settingsManualMaxOutputLabel" class="settings-field-label" data-i18n="manualMaxOutputTokens">最大输出（可选）</span>
-                      <input id="settingsManualMaxOutput" class="settings-input" type="number" min="1" max="1000000" step="1" placeholder="8192" autocomplete="off" />
+                      <input id="settingsManualMaxOutput" class="settings-input" type="number" min="1" max="1048576" step="1" placeholder="8192" autocomplete="off" />
                     </label>
                     <button id="settingsConfirmAddModelBtn" type="button" class="secondary" data-i18n="confirmAddModel">添加</button>
                   </div>

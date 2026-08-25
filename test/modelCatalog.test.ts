@@ -9,6 +9,7 @@ import { createModelCatalog, findModelBySelection } from '../src/accounts/modelC
 import { ModelSourceService } from '../src/accounts/modelSourceService';
 import { ModelSourceStore } from '../src/accounts/accountStore';
 import { isOfficialDeepSeekSource } from '../src/accounts/sourceCapabilities';
+import { getAgentRuntimeProfile } from '../src/shared/modelProfiles';
 import type { ModelSource } from '../src/accounts/types';
 
 const NOW = 1_710_000_000_000;
@@ -79,6 +80,62 @@ describe('model source catalog', () => {
     );
   });
 
+  it('keeps non-text resources in settings without exposing them to the text Agent', () => {
+    const source = createSource({
+      id: 'compatible',
+      provider: 'openai-compatible',
+      models: [
+        { id: 'qwen3.7-max' },
+        { id: 'wan2.7-image' },
+        { id: 'wan2.7-image-pro' },
+        { id: 'qwen-audio-3.0-tts-plus' }
+      ]
+    });
+
+    assert.deepEqual(createModelCatalog([source]).map((model) => model.id), ['qwen3.7-max']);
+    const inventory = createModelCatalog([source], { includeDisabledModels: true });
+    assert.deepEqual(inventory.map((model) => model.id), [
+      'qwen3.7-max',
+      'wan2.7-image',
+      'wan2.7-image-pro',
+      'qwen-audio-3.0-tts-plus'
+    ]);
+    assert.equal(inventory[0]?.contextWindowTokens, 1_000_000);
+    assert.equal(inventory[0]?.maxOutputTokens, 131_072);
+    assert.deepEqual(
+      inventory.slice(1).map((model) => ({
+        id: model.id,
+        agentCompatible: model.agentCompatible,
+        kind: model.nonTextModelKind,
+        contextWindowTokens: model.contextWindowTokens,
+        maxOutputTokens: model.maxOutputTokens
+      })),
+      [
+        {
+          id: 'wan2.7-image',
+          agentCompatible: false,
+          kind: 'image-generation',
+          contextWindowTokens: undefined,
+          maxOutputTokens: undefined
+        },
+        {
+          id: 'wan2.7-image-pro',
+          agentCompatible: false,
+          kind: 'image-generation',
+          contextWindowTokens: undefined,
+          maxOutputTokens: undefined
+        },
+        {
+          id: 'qwen-audio-3.0-tts-plus',
+          agentCompatible: false,
+          kind: 'speech-synthesis',
+          contextWindowTokens: undefined,
+          maxOutputTokens: undefined
+        }
+      ]
+    );
+  });
+
   it('merges manual capability overrides before discovery and built-in metadata', () => {
     const catalog = createModelCatalog([createSource({
       id: 'compatible',
@@ -93,9 +150,10 @@ describe('model source catalog', () => {
     assert.equal(catalog[0]?.contextWindowTokens, 96_000);
     assert.equal(catalog[0]?.contextWindowSource, 'manual');
     assert.equal(catalog[0]?.maxOutputTokens, 7_000);
+    assert.equal(catalog[0]?.maxOutputSource, 'manual');
   });
 
-  it('marks compatible DeepSeek lookalikes as guessed without granting the dedicated output profile', () => {
+  it('marks compatible named-model capabilities as low-trust guesses', () => {
     const catalog = createModelCatalog([createSource({
       id: 'compatible',
       provider: 'openai-compatible',
@@ -104,7 +162,12 @@ describe('model source catalog', () => {
 
     assert.equal(catalog[0]?.contextWindowTokens, 1_000_000);
     assert.equal(catalog[0]?.contextWindowSource, 'guessed');
-    assert.equal(catalog[0]?.maxOutputTokens, undefined);
+    assert.equal(catalog[0]?.maxOutputTokens, 384_000);
+    assert.equal(catalog[0]?.maxOutputSource, 'guessed');
+    assert.equal(getAgentRuntimeProfile(catalog[0]!, {
+      thinkingEnabled: true,
+      reasoningEffort: 'high'
+    }).maxTokens, 384_000);
   });
 
   it('shows the conservative fallback for unknown model IDs', () => {
@@ -116,6 +179,8 @@ describe('model source catalog', () => {
 
     assert.equal(catalog[0]?.contextWindowTokens, 32_768);
     assert.equal(catalog[0]?.contextWindowSource, 'fallback');
+    assert.equal(catalog[0]?.maxOutputTokens, 8_192);
+    assert.equal(catalog[0]?.maxOutputSource, 'fallback');
   });
 });
 
@@ -251,6 +316,20 @@ describe('ModelSourceService', () => {
       createModelCatalog([contextUpdated], { includeDisabledModels: true })[1]?.contextWindowSource,
       'manual'
     );
+    const maxOutputUpdated = await service.setModelMaxOutputTokens(
+      contextUpdated.id,
+      'model-two',
+      128_000
+    );
+    assert.deepEqual(maxOutputUpdated.models[1], {
+      id: 'model-two',
+      contextWindowTokens: 250_000,
+      maxOutputTokens: 128_000
+    });
+    assert.equal(
+      createModelCatalog([maxOutputUpdated], { includeDisabledModels: true })[1]?.maxOutputSource,
+      'manual'
+    );
     await assert.rejects(
       service.setModelContextWindowTokens(source.id, 'unknown-model', 64_000),
       /Model not found/u
@@ -258,6 +337,42 @@ describe('ModelSourceService', () => {
     await assert.rejects(
       service.setModelContextWindowTokens(source.id, 'model-one', 10_000_001),
       /contextWindowTokens/u
+    );
+    await assert.rejects(
+      service.setModelMaxOutputTokens(source.id, 'unknown-model', 64_000),
+      /Model not found/u
+    );
+    await assert.rejects(
+      service.setModelMaxOutputTokens(source.id, 'model-one', 1_048_577),
+      /maxOutputTokens/u
+    );
+  });
+
+  it('rejects token capability edits and text-Agent enabling for non-text resources', async () => {
+    const store = new ModelSourceStore(vscode.Uri.file(storageRoot), {
+      now: () => NOW,
+      createId: () => 'compatible'
+    });
+    const source = await store.createSource({
+      provider: 'openai-compatible',
+      name: 'Compatible',
+      apiKey: '',
+      baseUrl: 'https://proxy.example/v1',
+      models: [{ id: 'wan2.7-image' }]
+    });
+    const service = new ModelSourceService(store);
+
+    await assert.rejects(
+      service.setModelEnabled(source.id, 'wan2.7-image', true),
+      /not compatible with the text Agent/u
+    );
+    await assert.rejects(
+      service.setModelContextWindowTokens(source.id, 'wan2.7-image', 32_768),
+      /do not apply/u
+    );
+    await assert.rejects(
+      service.setModelMaxOutputTokens(source.id, 'wan2.7-image', 8_192),
+      /do not apply/u
     );
   });
 
