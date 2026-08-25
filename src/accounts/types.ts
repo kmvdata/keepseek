@@ -60,6 +60,8 @@ export interface ModelSource {
   apiKey: string;
   baseUrl: string;
   models: ModelSourceModel[];
+  /** Model IDs hidden from model pickers. Missing means every model is enabled. */
+  disabledModelIds?: string[];
   modelCache?: ModelDiscoveryCache;
   enabled: boolean;
   createdAt: number;
@@ -73,6 +75,7 @@ export interface CreateModelSourceInput {
   apiKey?: string;
   baseUrl?: string;
   models?: ModelSourceModel[];
+  disabledModelIds?: string[];
   modelCache?: ModelDiscoveryCache;
   enabled?: boolean;
 }
@@ -82,6 +85,7 @@ export interface UpdateModelSourceInput {
   apiKey?: string;
   baseUrl?: string;
   models?: ModelSourceModel[];
+  disabledModelIds?: string[];
   modelCache?: ModelDiscoveryCache;
   enabled?: boolean;
 }

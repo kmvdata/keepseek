@@ -1,4 +1,5 @@
 import { ModelSourceStore } from './accountStore';
+import { createModelCatalog } from './modelCatalog';
 import {
   probeSourceConnection,
   refreshSourceModelCache,
@@ -108,6 +109,37 @@ export class ModelSourceService {
     return updated;
   }
 
+  public async setModelEnabled(
+    sourceId: string,
+    modelId: string,
+    enabled: boolean
+  ): Promise<ModelSource> {
+    const trimmedModelId = modelId.trim();
+    const source = await this.sourceStore.getSource(sourceId);
+    if (!source) {
+      throw new Error('Model source not found.');
+    }
+    const knownModel = createModelCatalog([source], { includeDisabledModels: true })
+      .some((model) => model.id === trimmedModelId);
+    if (!knownModel) {
+      throw new Error('Model not found in this source.');
+    }
+
+    const disabledModelIds = new Set(source.disabledModelIds ?? []);
+    if (enabled) {
+      disabledModelIds.delete(trimmedModelId);
+    } else {
+      disabledModelIds.add(trimmedModelId);
+    }
+    const updated = await this.sourceStore.updateSource(sourceId, {
+      disabledModelIds: [...disabledModelIds]
+    });
+    if (!updated) {
+      throw new Error('Model source not found.');
+    }
+    return updated;
+  }
+
   public async saveSource(input: {
     sourceId: string;
     apiKey: string;
@@ -180,7 +212,10 @@ export class ModelSourceService {
     } else {
       models.push(next);
     }
-    const updated = await this.sourceStore.updateSource(source.id, { models });
+    const updated = await this.sourceStore.updateSource(source.id, {
+      models,
+      disabledModelIds: (source.disabledModelIds ?? []).filter((id) => id !== modelId)
+    });
     if (!updated) {
       throw new Error('Model source not found.');
     }

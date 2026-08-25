@@ -110,6 +110,7 @@ export class ModelSourceStore {
       apiKey: input.apiKey,
       baseUrl: input.baseUrl,
       models: input.models ?? [],
+      disabledModelIds: input.disabledModelIds,
       modelCache: input.modelCache,
       enabled: input.enabled,
       createdAt: timestamp,
@@ -154,6 +155,7 @@ export class ModelSourceStore {
       apiKey: patch.apiKey ?? current.apiKey,
       baseUrl: patch.baseUrl ?? current.baseUrl,
       models: patch.models ?? current.models,
+      disabledModelIds: patch.disabledModelIds ?? current.disabledModelIds,
       modelCache: Object.prototype.hasOwnProperty.call(patch, 'modelCache')
         ? patch.modelCache
         : current.modelCache,
@@ -277,6 +279,7 @@ export function normalizeModelSource(
     apiKey: typeof value.apiKey === 'string' ? value.apiKey.trim() : '',
     baseUrl: readNonEmptyString(value.baseUrl) || getDefaultModelSourceBaseUrl(provider),
     models: normalizePersistedSourceModels(value),
+    disabledModelIds: normalizeModelIds(value.disabledModelIds),
     modelCache: normalizeModelDiscoveryCache(value.modelCache),
     enabled: value.enabled !== false,
     createdAt,
@@ -348,6 +351,23 @@ export function normalizeSourceModels(value: unknown): ModelSourceModel[] {
     models.push({ id });
   }
   return models;
+}
+
+export function normalizeModelIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const modelIds: string[] = [];
+  const seenIds = new Set<string>();
+  for (const item of value) {
+    const id = normalizeBoundedString(item, MAX_MODEL_ID_LENGTH);
+    if (!id || seenIds.has(id)) {
+      continue;
+    }
+    seenIds.add(id);
+    modelIds.push(id);
+  }
+  return modelIds;
 }
 
 function normalizePersistedSourceModels(value: Record<string, unknown>): ModelSourceModel[] {

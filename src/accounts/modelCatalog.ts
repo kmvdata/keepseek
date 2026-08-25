@@ -3,7 +3,14 @@ import { getSupportedDeepSeekV4Models } from '../shared/modelProfiles';
 import { isOfficialDeepSeekSource } from './sourceCapabilities';
 import type { ModelSource } from './types';
 
-export function createModelCatalog(sources: readonly ModelSource[]): KeepseekModel[] {
+export interface CreateModelCatalogOptions {
+  includeDisabledModels?: boolean;
+}
+
+export function createModelCatalog(
+  sources: readonly ModelSource[],
+  options: CreateModelCatalogOptions = {}
+): KeepseekModel[] {
   const builtIns = getSupportedDeepSeekV4Models();
   const catalog: KeepseekModel[] = [];
 
@@ -12,6 +19,7 @@ export function createModelCatalog(sources: readonly ModelSource[]): KeepseekMod
       continue;
     }
     const official = isOfficialDeepSeekSource(source);
+    const disabledModelIds = new Set(source.disabledModelIds ?? []);
     const hasSuccessfulDiscovery = Boolean(source.modelCache && source.modelCache.fetchedAt > 0);
     const orderedIds: string[] = [];
     const seenIds = new Set<string>();
@@ -32,6 +40,9 @@ export function createModelCatalog(sources: readonly ModelSource[]): KeepseekMod
     source.models.forEach((model) => addId(model.id));
 
     for (const modelId of orderedIds) {
+      if (!options.includeDisabledModels && disabledModelIds.has(modelId)) {
+        continue;
+      }
       const builtIn = builtIns.find((model) => model.id === modelId);
       const fetched = source.modelCache?.models.find((model) => model.id === modelId);
       catalog.push({

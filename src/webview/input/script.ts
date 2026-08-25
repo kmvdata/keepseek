@@ -3526,6 +3526,11 @@ export function getInputScript(): string {
         var explicitModelIds = explicitModels.map(function(model) {
           return typeof model === 'string' ? model.trim() : readSettingsString(model.id, '').trim();
         }).filter(Boolean);
+        var disabledModelIds = (Array.isArray(rawSource.disabledModelIds) ? rawSource.disabledModelIds : [])
+          .map(function(modelId) { return readSettingsString(modelId, '').trim(); })
+          .filter(function(modelId, modelIndex, modelIds) {
+            return Boolean(modelId) && modelIds.indexOf(modelId) === modelIndex;
+          });
         return {
           id: id,
           name: readSettingsString(rawSource.name, '').trim() || getSettingsProviderLabel(provider),
@@ -3535,6 +3540,7 @@ export function getInputScript(): string {
           modelCache: rawSource.modelCache && typeof rawSource.modelCache === 'object' ? rawSource.modelCache : null,
           models: Array.isArray(rawSource.availableModels) ? rawSource.availableModels : explicitModels,
           manualModelIds: explicitModelIds,
+          disabledModelIds: disabledModelIds,
           enabled: rawSource.enabled !== false,
           isOfficialDeepSeek: rawSource.isOfficialDeepSeek === true,
           sortIndex: index
@@ -3579,7 +3585,12 @@ export function getInputScript(): string {
             addModel(model);
           });
         }
-        return modelOrder.map(function(modelId) { return modelsById[modelId]; });
+        var disabledModelIds = Array.isArray(account.disabledModelIds) ? account.disabledModelIds : [];
+        return modelOrder.map(function(modelId) {
+          var model = modelsById[modelId];
+          model.enabled = disabledModelIds.indexOf(modelId) < 0;
+          return model;
+        });
       }
 
       function getSettingsFormSignature() {
@@ -3732,10 +3743,60 @@ export function getInputScript(): string {
           name.textContent = model.id;
           identity.append(name);
           row.append(identity);
+          row.classList.toggle('is-disabled', model.enabled === false);
+          var actions = document.createElement('div');
+          actions.className = 'settings-model-actions';
+          var enableLabel = document.createElement('label');
+          enableLabel.className = 'settings-model-enable';
+          enableLabel.title = t('enableModel', { modelId: model.id });
+          var enableCheckbox = document.createElement('input');
+          enableCheckbox.type = 'checkbox';
+          enableCheckbox.checked = model.enabled !== false;
+          enableCheckbox.disabled = controlsDisabled;
+          enableCheckbox.setAttribute('aria-label', t('enableModel', { modelId: model.id }));
+          enableCheckbox.addEventListener('change', function() {
+            var nextEnabled = enableCheckbox.checked;
+            function restoreCheckedState() {
+              enableCheckbox.checked = !nextEnabled;
+            }
+            if (blockAccountSettingsWhileRunBusy()) {
+              restoreCheckedState();
+              return;
+            }
+            var source = getSettingsActiveAccount();
+            if (!source || settingsDialogBusyAction) {
+              restoreCheckedState();
+              return;
+            }
+            if (blockSettingsActionForUnsavedChanges()) {
+              restoreCheckedState();
+              return;
+            }
+            var disabledModelIds = Array.isArray(source.disabledModelIds)
+              ? source.disabledModelIds.slice()
+              : [];
+            var disabledIndex = disabledModelIds.indexOf(model.id);
+            if (nextEnabled && disabledIndex >= 0) {
+              disabledModelIds.splice(disabledIndex, 1);
+            } else if (!nextEnabled && disabledIndex < 0) {
+              disabledModelIds.push(model.id);
+            }
+            source.disabledModelIds = disabledModelIds;
+            vscode.postMessage({
+              type: 'setModelEnabled',
+              sourceId: source.id,
+              modelId: model.id,
+              enabled: nextEnabled
+            });
+            beginSettingsDialogAction('set-model-enabled', t('updatingModelAvailability'));
+          });
+          enableLabel.append(enableCheckbox);
+          actions.append(enableLabel);
           if (manualModelIds.indexOf(model.id) >= 0) {
             var removeBtn = document.createElement('button');
             removeBtn.type = 'button';
             removeBtn.className = 'settings-model-delete';
+            removeBtn.disabled = controlsDisabled;
             removeBtn.setAttribute('aria-label', t('deleteModel') + ' ' + model.id);
             removeBtn.title = t('deleteModel');
             removeBtn.textContent = '×';
@@ -3751,8 +3812,9 @@ export function getInputScript(): string {
               });
               beginSettingsDialogAction('delete-model', t('deletingModel'));
             });
-            row.append(removeBtn);
+            actions.append(removeBtn);
           }
+          row.append(actions);
           settingsModelList.append(row);
         });
         if (settingsModelEmpty) {

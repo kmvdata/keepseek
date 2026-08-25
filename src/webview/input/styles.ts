@@ -1479,6 +1479,39 @@ export function getInputStyles(): string {
       font-weight: 500;
     }
 
+    .settings-model-row.is-disabled .settings-model-name {
+      color: var(--vscode-descriptionForeground);
+      font-weight: 400;
+    }
+
+    .settings-model-actions {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 6px;
+    }
+
+    .settings-model-enable {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      cursor: pointer;
+    }
+
+    .settings-model-enable input {
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      accent-color: var(--vscode-focusBorder);
+      cursor: pointer;
+    }
+
+    .settings-model-enable input:disabled {
+      cursor: default;
+    }
+
     .settings-model-delete {
       flex: none;
       display: inline-flex;
@@ -1743,7 +1776,6 @@ export function getInputStyles(): string {
         max-height: 156px;
       }
 
-      .settings-model-row,
       .settings-manual-model {
         grid-template-columns: minmax(0, 1fr);
       }

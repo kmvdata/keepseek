@@ -114,6 +114,7 @@ function cloneSource(source: ModelSource): ModelSource {
   return {
     ...source,
     models: source.models.map((model) => ({ ...model })),
+    disabledModelIds: source.disabledModelIds ? [...source.disabledModelIds] : [],
     modelCache: cloneCache(source.modelCache)
   };
 }

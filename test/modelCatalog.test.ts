@@ -60,6 +60,24 @@ describe('model source catalog', () => {
     assert.deepEqual(catalog.map((model) => model.id), ['discovered-model', 'manual-model']);
     assert.equal(catalog.some((model) => model.id === 'deepseek-v4-flash'), false);
   });
+
+  it('hides disabled model IDs from normal catalogs while keeping the full settings inventory', () => {
+    const source = createSource({
+      id: 'compatible',
+      provider: 'openai-compatible',
+      models: [{ id: 'enabled-model' }, { id: 'disabled-model' }],
+      disabledModelIds: ['disabled-model']
+    });
+
+    assert.deepEqual(
+      createModelCatalog([source]).map((model) => model.id),
+      ['enabled-model']
+    );
+    assert.deepEqual(
+      createModelCatalog([source], { includeDisabledModels: true }).map((model) => model.id),
+      ['enabled-model', 'disabled-model']
+    );
+  });
 });
 
 describe('ModelSourceService', () => {
@@ -135,6 +153,42 @@ describe('ModelSourceService', () => {
     assert.equal((await store.listSources()).length, 1);
     assert.equal(refreshCount, 0);
     assert.equal(probeCount, 1);
+  });
+
+  it('persists per-model availability and re-enables a model when it is added again', async () => {
+    const store = new ModelSourceStore(vscode.Uri.file(storageRoot), {
+      now: () => NOW,
+      createId: () => 'compatible'
+    });
+    const source = await store.createSource({
+      provider: 'openai-compatible',
+      name: 'Compatible',
+      apiKey: '',
+      baseUrl: 'https://proxy.example/v1',
+      models: [{ id: 'model-one' }, { id: 'model-two' }]
+    });
+    const service = new ModelSourceService(store);
+
+    const disabled = await service.setModelEnabled(source.id, 'model-one', false);
+    assert.deepEqual(disabled.disabledModelIds, ['model-one']);
+    assert.deepEqual(createModelCatalog([disabled]).map((model) => model.id), ['model-two']);
+    await assert.rejects(
+      service.setModelEnabled(source.id, 'unknown-model', false),
+      /Model not found/u
+    );
+
+    const readded = await service.addModel({
+      sourceId: source.id,
+      provider: 'openai-compatible',
+      apiKey: '',
+      baseUrl: 'https://proxy.example/v1',
+      modelId: 'model-one'
+    });
+    assert.deepEqual(readded.source.disabledModelIds, []);
+    assert.deepEqual(
+      createModelCatalog([readded.source]).map((model) => model.id),
+      ['model-one', 'model-two']
+    );
   });
 
   it('rejects account creation when the Base URL probe fails', async () => {

@@ -32,6 +32,7 @@ describe('ModelSourceStore', () => {
       apiKey: ' sk-secret ',
       baseUrl: ' https://proxy.example.com/v1 ',
       models: [{ id: ' model-a ' }, { id: 'model-a' }],
+      disabledModelIds: [' model-b ', 'model-b', '', 1],
       modelCache: {
         models: [{ id: ' model-a ', name: ' Model A ' }, { id: 'model-b' }],
         fetchedAt: NOW - 100
@@ -48,6 +49,7 @@ describe('ModelSourceStore', () => {
       apiKey: 'sk-secret',
       baseUrl: 'https://proxy.example.com/v1',
       models: [{ id: 'model-a' }],
+      disabledModelIds: ['model-b'],
       modelCache: {
         models: [{ id: 'model-a', name: 'Model A' }, { id: 'model-b' }],
         fetchedAt: NOW - 100
@@ -81,10 +83,12 @@ describe('ModelSourceStore', () => {
 
     const updated = await store.updateSource('generated-id', {
       name: 'Renamed',
-      models: [{ id: 'proxy-model' }]
+      models: [{ id: 'proxy-model' }],
+      disabledModelIds: ['proxy-model']
     });
     assert.equal(updated?.name, 'Renamed');
     assert.deepEqual(updated?.models, [{ id: 'proxy-model' }]);
+    assert.deepEqual(updated?.disabledModelIds, ['proxy-model']);
 
     assert.equal((await store.deleteSource('generated-id'))?.id, 'generated-id');
     await assert.rejects(access(storedPath));

@@ -182,6 +182,7 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(inputScript, /type: 'saveModelSource'/u);
   assert.match(inputScript, /type: 'deleteModelSource'/u);
   assert.match(inputScript, /type: 'deleteModel'/u);
+  assert.match(inputScript, /type: 'setModelEnabled'/u);
   assert.match(inputScript, /type: 'refreshSourceModels'/u);
   assert.doesNotMatch(inputScript, /type: 'selectAccount'/u);
   assert.match(inputScript, /function beginSettingsDialogAction/u);
@@ -208,10 +209,14 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(inputScript, /settings-account-item-logo/u);
   assert.match(styles, /\.settings-account-item-logo-box/u);
   assert.match(styles, /\.settings-account-item-logo\[data-provider="deepseek"\]/u);
+  assert.match(styles, /\.settings-model-enable/u);
+  assert.match(inputScript, /enableCheckbox\.type = 'checkbox'/u);
+  assert.match(inputScript, /disabledModelIds/u);
   assert.match(styles, /@media \(max-width: 540px\)/u);
   assert.match(messageSource, /type: 'addModel'/u);
   assert.match(messageSource, /type: 'saveModelSource'/u);
   assert.match(messageSource, /type: 'deleteModel'/u);
+  assert.match(messageSource, /type: 'setModelEnabled'/u);
   assert.doesNotMatch(inputScript, /window\.(?:prompt|alert|confirm)\s*\(/u);
 });
 
