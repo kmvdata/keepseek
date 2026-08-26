@@ -165,7 +165,7 @@ export function getInputTemplate(): string {
                 <span class="command-row-title" data-i18n="switchModel">Switch model...</span>
                 <span id="commandModelDescription" class="command-row-description" data-i18n="switchModelDescription">切换 AI 模型</span>
               </span>
-              <span id="commandModelValue" class="command-row-value">DeepSeek-V4-Flash</span>
+              <span id="commandModelValue" class="command-row-value command-model-current">DeepSeek-V4-Flash</span>
             </button>
             <div id="commandModelList" class="command-model-list hidden" role="group" aria-label="模型列表" data-i18n-aria-label="modelList"></div>
             <div id="commandModelStatus" class="command-model-status hidden" role="status" aria-live="polite">

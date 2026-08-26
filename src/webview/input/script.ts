@@ -1738,9 +1738,20 @@ export function getInputScript(): string {
           : null;
         var locked = selectionState.lockedByBackground === true;
         if (commandModelValue) {
-          commandModelValue.textContent = selected
+          var currentModelValue = selected
             ? getModelSourceLabel(selected.model) + ' / ' + getModelDisplayLabel(selected.model)
             : t('addModel');
+          commandModelValue.innerHTML = '';
+          if (selected) {
+            var currentLogo = createCommandModelProtocolLogo(selected.model.provider);
+            if (currentLogo) {
+              commandModelValue.append(currentLogo);
+            }
+          }
+          var currentModelText = document.createElement('span');
+          currentModelText.className = 'command-model-current-text';
+          currentModelText.textContent = currentModelValue;
+          commandModelValue.append(currentModelText);
           commandModelValue.title = selected && selected.model.id ? selected.model.id : commandModelValue.textContent;
         }
 
@@ -1800,8 +1811,15 @@ export function getInputScript(): string {
           var model = models[i];
           if (model.sourceId !== previousSourceId) {
             var groupLabel = document.createElement('div');
-            groupLabel.className = 'command-model-option command-model-empty';
-            groupLabel.textContent = getModelSourceLabel(model);
+            groupLabel.className = 'command-model-source';
+            var groupLogo = createCommandModelProtocolLogo(model.provider);
+            if (groupLogo) {
+              groupLabel.append(groupLogo);
+            }
+            var groupName = document.createElement('span');
+            groupName.className = 'command-model-source-name';
+            groupName.textContent = getModelSourceLabel(model);
+            groupLabel.append(groupName);
             commandModelList.append(groupLabel);
             previousSourceId = model.sourceId || '';
           }
@@ -2119,6 +2137,23 @@ export function getInputScript(): string {
           : model.provider === 'openai-compatible' ? 'OpenAI Compatible'
           : model.provider === 'ollama' ? 'Ollama'
           : 'DeepSeek');
+      }
+
+      function createCommandModelProtocolLogo(provider) {
+        var normalizedProvider = normalizeSettingsProvider(provider);
+        var logoUri = getModelProtocolLogoUri(normalizedProvider);
+        if (!logoUri) { return null; }
+        var logoBox = document.createElement('span');
+        logoBox.className = 'command-model-protocol-logo-box';
+        logoBox.setAttribute('aria-hidden', 'true');
+        var logo = document.createElement('img');
+        logo.className = 'command-model-protocol-logo';
+        logo.dataset.provider = normalizedProvider;
+        logo.src = logoUri;
+        logo.alt = '';
+        logo.draggable = false;
+        logoBox.append(logo);
+        return logoBox;
       }
 
       function renderEffort() {
@@ -3807,8 +3842,12 @@ export function getInputScript(): string {
           : 'DeepSeek';
       }
 
-      function getSettingsProviderLogoUri(provider) {
+      function getModelProtocolLogoUri(provider) {
         return readSettingsString(modelProtocolLogoUris[normalizeSettingsProvider(provider)], '');
+      }
+
+      function getSettingsProviderLogoUri(provider) {
+        return getModelProtocolLogoUri(provider);
       }
 
       function getSettingsDefaultBaseUrl(provider) {

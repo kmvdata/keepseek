@@ -278,6 +278,30 @@ test('command model labels prefer fetched names while hover keeps the model id',
   );
 });
 
+test('command model picker shows protocol logos when collapsed and beside expanded account names', () => {
+  const inputTemplate = getInputTemplate();
+  const inputScript = getInputScript();
+  const styles = getStyles();
+
+  assert.match(
+    inputTemplate,
+    /id="commandModelValue" class="command-row-value command-model-current"/u
+  );
+  assert.match(inputScript, /function createCommandModelProtocolLogo\(provider\)/u);
+  assert.match(
+    inputScript,
+    /var currentLogo = createCommandModelProtocolLogo\(selected\.model\.provider\)/u
+  );
+  assert.match(
+    inputScript,
+    /groupLabel\.className = 'command-model-source'[\s\S]*?createCommandModelProtocolLogo\(model\.provider\)[\s\S]*?groupName\.textContent = getModelSourceLabel\(model\)/u
+  );
+  assert.match(inputScript, /logo\.dataset\.provider = normalizedProvider/u);
+  assert.match(styles, /\.command-model-current \{/u);
+  assert.match(styles, /\.command-model-source \{/u);
+  assert.match(styles, /\.command-model-protocol-logo-box \{/u);
+});
+
 test('rich prompt script exposes reference, skill, and external drop entry points', () => {
   const script = getInputScript();
 

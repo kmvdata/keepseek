@@ -1012,10 +1012,62 @@ export function getInputStyles(): string {
       text-align: right;
     }
 
+    .command-model-current {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 5px;
+      min-width: 0;
+    }
+
+    .command-model-current-text,
+    .command-model-source-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .command-model-list {
       display: grid;
       gap: 2px;
       padding: 2px 0 4px 12px;
+    }
+
+    .command-model-source {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      min-height: 26px;
+      padding: 4px 8px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.25;
+    }
+
+    .command-model-protocol-logo-box {
+      display: inline-flex;
+      flex: 0 0 18px;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      overflow: hidden;
+      border: 1px solid rgba(0, 0, 0, 0.12);
+      border-radius: 4px;
+      background: #fff;
+      box-sizing: border-box;
+    }
+
+    .command-model-protocol-logo {
+      display: block;
+      width: 14px;
+      height: 14px;
+      object-fit: contain;
+      pointer-events: none;
+      user-select: none;
     }
 
     .command-skill-list {
