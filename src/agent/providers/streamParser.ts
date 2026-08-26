@@ -74,8 +74,8 @@ class StreamingDsmlDisplayFilter {
 }
 
 /**
- * OpenAI 兼容 SSE 流解析器。deepseek / kimi / glm / ollama / openai-compatible
- * 三种账号类型共享同一套流式协议解析，属于协议层而不是某一家服务商。
+ * OpenAI 兼容 SSE 流解析器。deepseek / kimi / glm / qwencloud / ollama /
+ * openai-compatible 共享同一套流式协议解析，属于协议层而不是某一家服务商。
  */
 export class StreamParser {
   public async parse(

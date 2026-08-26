@@ -3,6 +3,7 @@
  *
  * 每个账号属于且仅属于一种 API 类型：deepseek（DeepSeek 官方协议）、
  * kimi（Kimi 国内官方端点）、glm（智谱 GLM 官方端点）、
+ * qwencloud（Qwen Cloud OpenAI 兼容端点）、
  * ollama（Ollama 本地端点）、openai-compatible（Chat Completions 兼容端点）、
  * openai-responses（Responses API 兼容端点）、anthropic-compatible
  *（Anthropic Messages 兼容端点）。
@@ -16,6 +17,7 @@ export const MODEL_SOURCE_PROVIDERS = [
   'deepseek',
   'kimi',
   'glm',
+  'qwencloud',
   'ollama',
   'openai-compatible',
   'openai-responses',

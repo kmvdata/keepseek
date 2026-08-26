@@ -362,6 +362,7 @@ function shouldRefreshAfterSave(source: Pick<ModelSource, 'provider' | 'baseUrl'
   return isOfficialDeepSeekSource(source)
     || isOfficialKimiSource(source)
     || isOfficialGlmSource(source)
+    || source.provider === 'qwencloud'
     || source.provider === 'openai-responses'
     || source.provider === 'anthropic-compatible';
 }

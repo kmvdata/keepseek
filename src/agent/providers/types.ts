@@ -54,8 +54,9 @@ export interface ProviderClientResult {
 }
 
 /**
- * 上游模型客户端的统一协议边界。每种账号类型（deepseek / kimi / glm / ollama /
- * openai-compatible / openai-responses / anthropic-compatible）由 factory 分发。
+ * 上游模型客户端的统一协议边界。每种账号类型（deepseek / kimi / glm /
+ * qwencloud / ollama / openai-compatible / openai-responses / anthropic-compatible）
+ * 由 factory 分发。
  */
 export interface ProviderClient {
   createModelResponse(

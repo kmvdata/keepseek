@@ -61,6 +61,7 @@ export function isOfficialAnthropicSource(source: ModelSourceCapabilityInput): b
 /** Canonical hosted endpoints require credentials; local/private compatible gateways may not. */
 export function requiresModelSourceApiKey(source: ModelSourceCapabilityInput): boolean {
   return source.provider === 'deepseek'
+    || source.provider === 'qwencloud'
     || isOfficialKimiSource(source)
     || isOfficialGlmSource(source)
     || isOfficialAnthropicSource(source);

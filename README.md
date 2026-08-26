@@ -260,7 +260,7 @@ KeepSeek: Open Agent Chat
 ```
 
 ```text
-# 3. 打开 KeepSeek 设置中的“账号管理”，添加账号（DeepSeek / Ollama / OpenAI 兼容）并填写 API Key / Base URL
+# 3. 打开 KeepSeek 设置中的“账号管理”，添加账号（DeepSeek / Kimi / GLM / QwenCloud / Ollama / OpenAI 兼容等）并填写 API Key / Base URL
 # 旧版配置（keepseek.apiKey / keepseek.baseUrl / DEEPSEEK_API_KEY 环境变量）不再支持，读取时直接舍弃
 ```
 

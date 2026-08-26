@@ -25,6 +25,7 @@ export const DEFAULT_ANTHROPIC_COMPATIBLE_BASE_URL = 'https://api.anthropic.com/
 export const DEFAULT_OLLAMA_BASE_URL = 'http://localhost:11434/v1';
 export const DEFAULT_KIMI_BASE_URL = 'https://api.moonshot.cn/v1';
 export const DEFAULT_GLM_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
+export const DEFAULT_QWEN_CLOUD_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
 const ACCOUNT_FILE_EXTENSION = '.json';
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -409,6 +410,7 @@ export function getDefaultModelSourceName(provider: ModelSourceProvider): string
   return provider === 'deepseek' ? 'DeepSeek'
     : provider === 'kimi' ? 'Kimi'
     : provider === 'glm' ? 'GLM'
+    : provider === 'qwencloud' ? 'QwenCloud'
     : provider === 'ollama' ? 'Ollama'
     : provider === 'openai-responses' ? 'OpenAI Responses compatible'
     : provider === 'anthropic-compatible' ? 'Anthropic compatible'
@@ -422,13 +424,15 @@ export function getDefaultModelSourceBaseUrl(provider: ModelSourceProvider): str
       ? DEFAULT_KIMI_BASE_URL
       : provider === 'glm'
         ? DEFAULT_GLM_BASE_URL
-        : provider === 'ollama'
-          ? DEFAULT_OLLAMA_BASE_URL
-          : provider === 'openai-responses'
-            ? DEFAULT_OPENAI_RESPONSES_BASE_URL
-            : provider === 'anthropic-compatible'
-              ? DEFAULT_ANTHROPIC_COMPATIBLE_BASE_URL
-              : DEFAULT_OPENAI_COMPATIBLE_BASE_URL;
+        : provider === 'qwencloud'
+          ? DEFAULT_QWEN_CLOUD_BASE_URL
+          : provider === 'ollama'
+            ? DEFAULT_OLLAMA_BASE_URL
+            : provider === 'openai-responses'
+              ? DEFAULT_OPENAI_RESPONSES_BASE_URL
+              : provider === 'anthropic-compatible'
+                ? DEFAULT_ANTHROPIC_COMPATIBLE_BASE_URL
+                : DEFAULT_OPENAI_COMPATIBLE_BASE_URL;
 }
 
 export function normalizeAnthropicModelCapabilities(

@@ -22,23 +22,24 @@ export function getNewAccountDialogTemplate(): string {
           <span class="new-account-dialog-title" data-i18n="newAccountDialogTitle">添加账号</span>
         </div>
         <div class="new-account-dialog-body">
-          <p class="new-account-dialog-desc" data-i18n="newAccountDialogDesc">选择模型协议，填写 API Key 与 Base URL；保存后账号与第一个模型会一起创建。</p>
+          <p class="new-account-dialog-desc" data-i18n="newAccountDialogDesc">选择模型协议或服务商，填写 API Key 与 Base URL；保存后账号与第一个模型会一起创建。</p>
           <div id="newAccountDialogStatus" class="new-account-dialog-status hidden" role="status" aria-live="polite" tabindex="-1"></div>
           <label class="new-account-field">
-            <span class="new-account-field-label" data-i18n="modelProviderLabel">模型协议</span>
+            <span class="new-account-field-label" data-i18n="modelProviderLabel">模型协议或服务商</span>
             <div class="new-account-provider-control">
-              <button id="newAccountProviderTrigger" type="button" class="new-account-input new-account-provider-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="模型协议" data-i18n-aria-label="modelProviderLabel">
+              <button id="newAccountProviderTrigger" type="button" class="new-account-input new-account-provider-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="模型协议或服务商" data-i18n-aria-label="modelProviderLabel">
                 <img id="newAccountProviderTriggerIcon" class="new-account-provider-icon" alt="" aria-hidden="true" draggable="false" />
                 <span id="newAccountProviderTriggerLabel" class="new-account-provider-trigger-label"></span>
                 <svg class="new-account-provider-chevron" width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3.5 6.2l4.5 4 4.5-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </button>
-              <div id="newAccountProviderMenu" class="new-account-provider-menu hidden" role="listbox" aria-label="模型协议" data-i18n-aria-label="modelProviderLabel"></div>
+              <div id="newAccountProviderMenu" class="new-account-provider-menu hidden" role="listbox" aria-label="模型协议或服务商" aria-hidden="true" data-i18n-aria-label="modelProviderLabel" hidden></div>
               <select id="newAccountProvider" class="new-account-provider-native-select" aria-hidden="true" tabindex="-1">
                 <option value="deepseek">DeepSeek</option>
                 <option value="kimi" data-i18n="kimiOfficial">Kimi (Moonshot) official</option>
                 <option value="glm" data-i18n="glmOfficial">GLM (Zhipu) official</option>
+                <option value="qwencloud" data-i18n="qwenCloud">QwenCloud</option>
                 <option value="ollama">Ollama</option>
                 <option value="openai-compatible">OpenAI compatible</option>
                 <option value="openai-responses" data-i18n="openAiResponsesCompatible">OpenAI Responses compatible</option>
@@ -391,6 +392,7 @@ export function getNewAccountDialogScript(): string {
           : provider === 'openai-responses' ? t('openAiResponsesCompatible')
           : provider === 'kimi' ? t('kimiOfficial')
           : provider === 'glm' ? t('glmOfficial')
+          : provider === 'qwencloud' ? t('qwenCloud')
           : provider === 'openai-compatible' ? 'OpenAI compatible'
           : provider === 'ollama' ? 'Ollama'
           : 'DeepSeek';
@@ -422,7 +424,7 @@ export function getNewAccountDialogScript(): string {
       function buildProviderMenu() {
         if (!providerMenu) { return; }
         providerMenu.innerHTML = '';
-        var order = ['deepseek', 'kimi', 'glm', 'ollama', 'openai-compatible', 'openai-responses', 'anthropic-compatible'];
+        var order = ['deepseek', 'kimi', 'glm', 'qwencloud', 'ollama', 'openai-compatible', 'openai-responses', 'anthropic-compatible'];
         var selectedValue = providerSelect ? providerSelect.value : 'deepseek';
         for (var i = 0; i < order.length; i++) {
           var value = order[i];
@@ -446,9 +448,11 @@ export function getNewAccountDialogScript(): string {
           label.textContent = getProviderLabel(value);
           item.appendChild(label);
           (function(selected) {
-            item.addEventListener('click', function() {
+            item.addEventListener('click', function(event) {
+              event.preventDefault();
+              event.stopPropagation();
+              closeProviderMenu(true);
               setProviderValue(selected);
-              closeProviderMenu();
             });
           })(value);
           providerMenu.appendChild(item);
@@ -466,23 +470,30 @@ export function getNewAccountDialogScript(): string {
       function openProviderMenu() {
         if (busyAction || !providerMenu || !providerTrigger) { return; }
         providerMenuOpen = true;
+        providerMenu.hidden = false;
         providerMenu.classList.remove('hidden');
+        providerMenu.setAttribute('aria-hidden', 'false');
         providerTrigger.classList.add('is-open');
         providerTrigger.setAttribute('aria-expanded', 'true');
         updateSelectedMenuItem();
       }
 
-      function closeProviderMenu() {
+      function closeProviderMenu(restoreFocus) {
         providerMenuOpen = false;
-        if (providerMenu) { providerMenu.classList.add('hidden'); }
+        if (providerMenu) {
+          providerMenu.hidden = true;
+          providerMenu.classList.add('hidden');
+          providerMenu.setAttribute('aria-hidden', 'true');
+        }
         if (providerTrigger) {
           providerTrigger.classList.remove('is-open');
           providerTrigger.setAttribute('aria-expanded', 'false');
+          if (restoreFocus && !providerTrigger.disabled) { providerTrigger.focus(); }
         }
       }
 
       function normalizeProvider(value) {
-        return value === 'kimi' || value === 'glm' || value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses' || value === 'anthropic-compatible'
+        return value === 'kimi' || value === 'glm' || value === 'qwencloud' || value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses' || value === 'anthropic-compatible'
           ? value
           : 'deepseek';
       }
@@ -491,6 +502,7 @@ export function getNewAccountDialogScript(): string {
         return provider === 'deepseek' ? 'https://api.deepseek.com'
           : provider === 'kimi' ? 'https://api.moonshot.cn/v1'
           : provider === 'glm' ? 'https://open.bigmodel.cn/api/paas/v4'
+          : provider === 'qwencloud' ? 'https://dashscope.aliyuncs.com/compatible-mode/v1'
           : provider === 'ollama' ? 'http://localhost:11434/v1'
           : provider === 'openai-responses' ? 'https://api.openai.com/v1'
           : provider === 'anthropic-compatible' ? 'https://api.anthropic.com/v1'
@@ -500,6 +512,7 @@ export function getNewAccountDialogScript(): string {
       function getDefaultSourceName(provider) {
         return provider === 'kimi' ? 'Kimi'
           : provider === 'glm' ? 'GLM'
+          : provider === 'qwencloud' ? 'QwenCloud'
           : provider === 'ollama' ? 'Ollama'
           : provider === 'openai-responses' ? 'OpenAI Responses compatible'
           : provider === 'anthropic-compatible' ? 'Anthropic compatible'
@@ -779,7 +792,7 @@ export function getNewAccountDialogScript(): string {
           if (event.key === 'Escape') {
             event.preventDefault();
             if (providerMenuOpen) {
-              closeProviderMenu();
+              closeProviderMenu(true);
             } else {
               close();
             }

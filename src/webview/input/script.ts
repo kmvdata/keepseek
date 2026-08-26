@@ -2134,6 +2134,7 @@ export function getInputScript(): string {
           : model.provider === 'openai-responses' ? t('openAiResponsesCompatible')
           : model.provider === 'kimi' ? t('kimiOfficial')
           : model.provider === 'glm' ? t('glmOfficial')
+          : model.provider === 'qwencloud' ? t('qwenCloud')
           : model.provider === 'openai-compatible' ? 'OpenAI Compatible'
           : model.provider === 'ollama' ? 'Ollama'
           : 'DeepSeek');
@@ -3827,7 +3828,7 @@ export function getInputScript(): string {
       }
 
       function normalizeSettingsProvider(value) {
-        return value === 'kimi' || value === 'glm' || value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses' || value === 'anthropic-compatible'
+        return value === 'kimi' || value === 'glm' || value === 'qwencloud' || value === 'ollama' || value === 'openai-compatible' || value === 'openai-responses' || value === 'anthropic-compatible'
           ? value
           : 'deepseek';
       }
@@ -3837,6 +3838,7 @@ export function getInputScript(): string {
           : provider === 'openai-responses' ? t('openAiResponsesCompatible')
           : provider === 'kimi' ? t('kimiOfficial')
           : provider === 'glm' ? t('glmOfficial')
+          : provider === 'qwencloud' ? t('qwenCloud')
           : provider === 'openai-compatible' ? 'OpenAI compatible'
           : provider === 'ollama' ? 'Ollama'
           : 'DeepSeek';
@@ -3854,6 +3856,7 @@ export function getInputScript(): string {
         return provider === 'deepseek' ? 'https://api.deepseek.com'
           : provider === 'kimi' ? 'https://api.moonshot.cn/v1'
           : provider === 'glm' ? 'https://open.bigmodel.cn/api/paas/v4'
+          : provider === 'qwencloud' ? 'https://dashscope.aliyuncs.com/compatible-mode/v1'
           : provider === 'ollama' ? 'http://localhost:11434/v1'
           : provider === 'openai-responses' ? 'https://api.openai.com/v1'
           : provider === 'anthropic-compatible' ? 'https://api.anthropic.com/v1'

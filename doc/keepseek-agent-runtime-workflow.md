@@ -118,7 +118,7 @@ system prompt 的职责按固定顺序覆盖：身份与语言、安全和修改
 
 ### 3.2 调用模型
 
-`providers/factory.ts` 按账号冻结的 provider 分派三条独立协议路径。DeepSeek、Ollama 与 OpenAI compatible 使用 Chat Completions；`openai-responses` 使用 Responses；`anthropic-compatible` 使用原生 Messages，不做 OpenAI→Anthropic 转换。
+`providers/factory.ts` 按账号冻结的 provider 分派三条独立协议路径。DeepSeek、Kimi、GLM、QwenCloud、Ollama 与 OpenAI compatible 使用 Chat Completions；`openai-responses` 使用 Responses；`anthropic-compatible` 使用原生 Messages，不做 OpenAI→Anthropic 转换。
 
 请求特征：
 
