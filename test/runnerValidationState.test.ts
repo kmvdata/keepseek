@@ -9,6 +9,7 @@ import { AgentRunner } from '../src/agent/runner';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
   READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
+  RUN_DRAFT_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME
 } from '../src/agent/protocol';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
@@ -108,6 +109,36 @@ test('Runner preserves the Apply-then-continue validation flow', async () => {
   assert.match(response.message, /post-Apply validation passed on the updated on-disk workspace/u);
 });
 
+test('Runner turns keepseek_run_draft into a pending proposal without executing it', async () => {
+  const validation = new FakeValidationTools([]);
+  const request = createRequest('Run a command after I approve it.');
+  request.requestProtocolVersion = 4;
+  const response = await withResponses([
+    toolResponse([toolCall('draft-run', RUN_DRAFT_TOOL_NAME, {
+      executable: 'printf',
+      args: ['%s', 'literal; argument'],
+      reason: 'Print one literal argument.',
+      cwd: '.',
+      timeoutMs: 20_000
+    })]),
+    textResponse('The command is pending your approval.')
+  ], async () => await createRunner(validation).run(request));
+
+  assert.equal(validation.runCount, 0);
+  assert.equal(response.draftRuns?.length, 1);
+  assert.equal(response.draftRuns?.[0]?.spec.executable, 'printf');
+  assert.deepEqual(response.draftRuns?.[0]?.spec.args, ['%s', 'literal; argument']);
+  assert.equal(response.draftRuns?.[0]?.spec.cwdUri, vscode.Uri.file(workspaceRoot).toString());
+  const result = JSON.parse(response.toolRounds?.[0]?.toolResults[0]?.content ?? '{}') as {
+    ok?: boolean;
+    draftRun?: { status?: string };
+    message?: string;
+  };
+  assert.equal(result.ok, true);
+  assert.equal(result.draftRun?.status, 'pending');
+  assert.match(result.message ?? '', /no process was started/u);
+});
+
 class FakeValidationTools implements ValidationToolAdapter {
   public runCount = 0;
 
@@ -148,13 +179,14 @@ class AllowAllToolAuthorization implements ToolAuthorizationAdapter {
     policy: RunAuthorizationPolicy;
   }): Promise<ToolAuthorizationDecision> {
     const validation = input.toolName === RUN_VALIDATION_TOOL_NAME;
+    const draftRun = input.toolName === RUN_DRAFT_TOOL_NAME;
     return {
       allowed: true,
       toolName: input.toolName,
       riskLevel: validation ? 'medium' : 'low',
       scope: validation
         ? input.args.script === 'test' ? 'validation_test' : 'validation_compile_lint'
-        : 'draft_edit_prepare',
+        : draftRun ? 'draft_run_prepare' : 'draft_edit_prepare',
       source: validation ? 'configuration' : 'low_risk',
       requiresExplicitConfirmation: false
     };

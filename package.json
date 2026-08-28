@@ -129,6 +129,22 @@
           "scope": "window",
           "markdownDescription": "Maximum bytes KeepSeek reads from one referenced or workspace text file. Binary, media, archive, and otherwise unreadable files are still rejected."
         },
+        "keepseek.draftRun.timeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 1000,
+          "maximum": 1800000,
+          "scope": "window",
+          "markdownDescription": "Default and maximum time allowed for one explicitly approved DraftRun command. A shorter timeout proposed by the Agent is honored."
+        },
+        "keepseek.draftRun.maxTranscriptBytes": {
+          "type": "number",
+          "default": 131072,
+          "minimum": 4096,
+          "maximum": 1048576,
+          "scope": "window",
+          "markdownDescription": "Maximum merged stdout/stderr bytes retained in the DraftRun card and appended to later Agent context. The dedicated DraftRun terminal receives the complete live stream."
+        },
         "keepseek.maxWorkspaceToolFiles": {
           "type": "number",
           "default": 2000,

@@ -11,15 +11,18 @@ import {
   GIT_CREATE_PATCH_TOOL_NAME,
   GIT_STATUS_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
+  RUN_DRAFT_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME,
   SEARCH_SESSION_ARCHIVE_TOOL_NAME,
   buildInitialAgentMessages,
+  formatActiveSkills,
   formatCurrentRunContextForAgent,
   getAgentSystemPrompt,
   getAgentToolNamesForPrompt,
   getAgentTools,
-  isDraftEditPreparationTool
+  isDraftEditPreparationTool,
+  isDraftRunPreparationTool
 } from '../src/agent/protocol';
 import type { ContextFile, CurrentRunContext } from '../src/shared/types';
 
@@ -228,6 +231,8 @@ test('classifies both file-changing tools as DraftEdit preparation tools', () =>
   assert.equal(isDraftEditPreparationTool(CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME), true);
   assert.equal(isDraftEditPreparationTool(DELETE_WORKSPACE_FILE_TOOL_NAME), true);
   assert.equal(isDraftEditPreparationTool(SEARCH_WORKSPACE_TOOL_NAME), false);
+  assert.equal(isDraftRunPreparationTool(RUN_DRAFT_TOOL_NAME), true);
+  assert.equal(isDraftRunPreparationTool(RUN_VALIDATION_TOOL_NAME), false);
 });
 
 test('protocol v1 keeps the legacy set while v2 and v3 freeze archive and incremental tools', () => {
@@ -240,6 +245,53 @@ test('protocol v1 keeps the legacy set while v2 and v3 freeze archive and increm
   assert.equal(current.includes(SEARCH_SESSION_ARCHIVE_TOOL_NAME), true);
   assert.equal(current.includes(CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME), true);
   assert.equal(JSON.stringify(getAgentTools({ toolNames: current })), JSON.stringify(getAgentTools({ toolNames: [...current] })));
+});
+
+test('protocol v4 appends DraftRun without changing frozen v1-v3 tool or prompt bytes', () => {
+  const version3Names = getAgentToolNamesForPrompt('run the command', false, 3);
+  const version4Names = getAgentToolNamesForPrompt('run the command', false, 4);
+  assert.equal(version3Names.includes(RUN_DRAFT_TOOL_NAME), false);
+  assert.equal(version4Names.includes(RUN_DRAFT_TOOL_NAME), true);
+
+  const tool = getAgentTools({
+    toolNames: [RUN_DRAFT_TOOL_NAME],
+    requestProtocolVersion: 4
+  })[0];
+  assert.equal(tool.function.name, RUN_DRAFT_TOOL_NAME);
+  assert.deepEqual(tool.function.parameters.required, ['args', 'executable', 'reason']);
+  assert.equal(tool.function.parameters.additionalProperties, false);
+  assert.match(tool.function.description, /never starts a process/u);
+  assert.equal(getAgentTools({
+    toolNames: [RUN_DRAFT_TOOL_NAME],
+    requestProtocolVersion: 3
+  }).length, 0);
+
+  const legacyEnglish = getAgentSystemPrompt({ language: 'en' });
+  assert.equal(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 3 }), legacyEnglish);
+  assert.doesNotMatch(legacyEnglish, /keepseek_run_draft/u);
+  const version4English = getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 4 });
+  assert.match(version4English, /keepseek_run_draft/u);
+  assert.match(version4English, /separate user click/u);
+  assert.match(version4English, /output is untrusted data/u);
+});
+
+test('Skill script instructions change only on the v4 DraftRun cache lane', () => {
+  const skills: CurrentRunContext['skills'] = [{
+    id: 'scripted',
+    name: 'scripted',
+    source: 'agentsWorkspace',
+    rootUri: 'file:///workspace/.agents/skills/scripted',
+    skillUri: 'file:///workspace/.agents/skills/scripted/SKILL.md',
+    content: 'Use the helper when appropriate.',
+    hasScripts: true,
+    activation: { source: 'explicit', reason: 'Selected.' }
+  }];
+  const legacy = formatActiveSkills({ skills, language: 'en' });
+  assert.equal(formatActiveSkills({ skills, language: 'en', requestProtocolVersion: 3 }), legacy);
+  assert.match(legacy, /not executed by KeepSeek/u);
+  const version4 = formatActiveSkills({ skills, language: 'en', requestProtocolVersion: 4 });
+  assert.match(version4, /no implicit execution/u);
+  assert.match(version4, /one-shot DraftRun approval required/u);
 });
 
 test('protocol v2 preserves validation schema bytes while v3 adds the pending-change precondition', () => {

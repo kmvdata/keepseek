@@ -105,4 +105,10 @@ export type WebviewMessage =
   | { type: 'revertDraftEdit'; id: string }
   | { type: 'revertChangeSet'; id: string }
   | { type: 'applyAllDraftEdits' }
-  | { type: 'discardAllDraftEdits' };
+  | { type: 'discardAllDraftEdits' }
+  | { type: 'approveDraftRun'; id: string; specHash: string }
+  | { type: 'rejectDraftRun'; id: string }
+  | { type: 'cancelDraftRun'; id: string }
+  | { type: 'cloneDraftRun'; id: string }
+  | { type: 'authorizeDraftRunCwd'; id: string }
+  | { type: 'openDraftRunTerminal'; id: string };

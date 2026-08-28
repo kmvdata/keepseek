@@ -86,6 +86,9 @@ export function getScript(): string {
       taskPlan: null,
       repairLoop: null,
       changeSets: [],
+      draftRuns: [],
+      activeDraftRunId: '',
+      authorizedExternalReferenceUris: [],
       isBusy: false,
       agentActivity: {
         base: 'idle',
@@ -488,6 +491,7 @@ export function getScript(): string {
       listing_files: ['agentStatusScanningWorkspace', 'agentStatusListingFiles'],
       listing_directory: ['agentStatusListingDirectory', 'agentStatusScanningWorkspace'],
       creating_draft_edit: ['agentStatusPreparingDraftEdit'],
+      creating_draft_run: ['agentStatusPreparingDraftRun'],
       reading_diagnostics: ['agentStatusReadingDiagnostics'],
       reading_semantic_context: ['agentStatusReadingSemanticContext'],
       reading_git_state: ['agentStatusReadingGitState'],
@@ -495,6 +499,7 @@ export function getScript(): string {
       generating_repair: ['agentStatusGeneratingRepair'],
       waiting_for_apply: ['agentStatusWaitingForApply'],
       running_validation: ['agentStatusRunningValidation'],
+      running_draft_run: ['agentStatusRunningDraftRun'],
       reviewing_tool_result: ['agentStatusReviewingToolResults', 'agentStatusContinuingReasoning'],
       generating: ['agentStatusGenerating', 'agentStatusOrganizingResult', 'agentStatusWritingReply'],
       finalizing: ['agentStatusFinalizingResponse'],
@@ -731,6 +736,23 @@ export function getScript(): string {
 
     transcript.addEventListener('click', handleChangeSetActionClick);
     unlinkedChangeSetList.addEventListener('click', handleChangeSetActionClick);
+
+    function handleDraftRunActionClick(event) {
+      var target = event.target instanceof Element ? event.target : null;
+      var button = target?.closest('button[data-draft-run-id]');
+      if (!button || button.disabled) return;
+      var id = String(button.dataset.draftRunId || '');
+      var action = String(button.dataset.draftRunAction || '');
+      if (!id || !action) return;
+      var payload = { type: action, id: id };
+      if (action === 'approveDraftRun') {
+        payload.specHash = String(button.dataset.specHash || '');
+      }
+      vscode.postMessage(payload);
+    }
+
+    transcript.addEventListener('click', handleDraftRunActionClick);
+    unlinkedChangeSetList.addEventListener('click', handleDraftRunActionClick);
 
     if (planToggle) {
       planToggle.addEventListener('click', function() {
@@ -1107,6 +1129,9 @@ export function getScript(): string {
         }
         rememberTerminalAgentActivity(state.agentActivity);
         render();
+      } else if (message.type === 'draftRunStateChanged' || message.type === 'draftRunOutput') {
+        upsertDraftRun(message.draftRun);
+        render();
       } else if (message.type === 'sessionChanged') {
         resetLocalContextUsageEstimate();
         clearPromptDraft();
@@ -1178,8 +1203,9 @@ export function getScript(): string {
       renderContextChips();
       renderTaskPlan();
       var changeSetProjection = buildChangeSetTimelineProjection();
-      renderTranscript(changeSetProjection);
-      renderUnlinkedChangeSets(changeSetProjection.unlinked);
+      var draftRunProjection = buildDraftRunTimelineProjection();
+      renderTranscript(changeSetProjection, draftRunProjection);
+      renderUnlinkedChangeSets(changeSetProjection.unlinked, draftRunProjection.unlinked);
       renderStatus();
       if (window.keepseekInputControls) {
         window.keepseekInputControls.render();
@@ -1189,6 +1215,15 @@ export function getScript(): string {
           ? window.keepseekInputControls.isPromptSubmittableEmpty()
           : promptInput.classList.contains('is-empty')
       );
+    }
+
+    function upsertDraftRun(draftRun) {
+      if (!draftRun || !draftRun.id) return;
+      var list = Array.isArray(state.draftRuns) ? state.draftRuns : [];
+      var index = list.findIndex(function(item) { return String(item?.id || '') === String(draftRun.id); });
+      if (index >= 0) list[index] = draftRun;
+      else list.push(draftRun);
+      state.draftRuns = list;
     }
 
     function renderCurrentSessionTitle() {
@@ -2950,6 +2985,27 @@ export function getScript(): string {
       return { byMessageId: byMessageId, unlinked: unlinked };
     }
 
+    function buildDraftRunTimelineProjection() {
+      var byMessageId = Object.create(null);
+      var unlinked = [];
+      var messagesById = Object.create(null);
+      (Array.isArray(state.messages) ? state.messages : []).forEach(function(message) {
+        if (message?.id) messagesById[String(message.id)] = message;
+      });
+      (Array.isArray(state.draftRuns) ? state.draftRuns : []).forEach(function(draftRun) {
+        if (!draftRun?.id) return;
+        var messageId = String(draftRun.messageId || '');
+        var message = messageId ? messagesById[messageId] : null;
+        if (message?.role === 'assistant' && !message.isStreaming) {
+          if (!byMessageId[messageId]) byMessageId[messageId] = [];
+          byMessageId[messageId].push(draftRun);
+        } else {
+          unlinked.push(draftRun);
+        }
+      });
+      return { byMessageId: byMessageId, unlinked: unlinked };
+    }
+
     function createHistoricalChangeSet(summary, messageId) {
       var statusValue = String(summary.status || 'pending');
       var files = Array.isArray(summary.files) && summary.files.length
@@ -2992,13 +3048,151 @@ export function getScript(): string {
       return 'pending';
     }
 
-    function renderUnlinkedChangeSets(changeSets) {
+    function renderUnlinkedChangeSets(changeSets, draftRuns) {
       unlinkedChangeSetList.innerHTML = '';
       var actionable = (Array.isArray(changeSets) ? changeSets : []).filter(isChangeSetActionable);
-      unlinkedChangeSetRegion.classList.toggle('hidden', actionable.length === 0);
+      var runItems = Array.isArray(draftRuns) ? draftRuns : [];
+      unlinkedChangeSetRegion.classList.toggle('hidden', actionable.length === 0 && runItems.length === 0);
       actionable.forEach(function(changeSet) {
         unlinkedChangeSetList.append(createChangeSetCard(changeSet));
       });
+      runItems.forEach(function(draftRun) {
+        unlinkedChangeSetList.append(createDraftRunCard(draftRun));
+      });
+    }
+
+    function createDraftRunCard(draftRun) {
+      var statusValue = String(draftRun.status || 'pending');
+      var spec = draftRun.spec || {};
+      var card = document.createElement('section');
+      card.className = 'draft-run-card draft-run-' + statusValue;
+      card.dataset.draftRunId = String(draftRun.id || '');
+
+      var header = document.createElement('div');
+      header.className = 'draft-run-header';
+      var heading = document.createElement('div');
+      heading.className = 'draft-run-heading';
+      var title = document.createElement('div');
+      title.className = 'draft-run-title';
+      title.textContent = t('draftRunTitle');
+      var meta = document.createElement('div');
+      meta.className = 'draft-run-meta';
+      meta.textContent = getDraftRunStatusLabel(statusValue) + ' · ' + String(spec.reason || '');
+      heading.append(title, meta);
+      var actions = document.createElement('div');
+      actions.className = 'draft-run-actions';
+      appendDraftRunActions(actions, draftRun);
+      header.append(heading, actions);
+
+      var fields = document.createElement('div');
+      fields.className = 'draft-run-fields';
+      appendDraftRunField(fields, t('draftRunExecutable'), String(spec.executable || ''), true);
+      appendDraftRunField(fields, t('draftRunArguments'), JSON.stringify(Array.isArray(spec.args) ? spec.args : []), true);
+      var cwdDisplay = String(spec.cwdLabel || '');
+      var cwdUri = String(spec.cwdUri || '');
+      appendDraftRunField(fields, t('draftRunCwd'), cwdUri && cwdUri !== cwdDisplay
+        ? cwdDisplay + String.fromCharCode(10) + cwdUri
+        : cwdDisplay || cwdUri, true);
+      appendDraftRunField(fields, t('draftRunTimeout'), formatDuration(Number(spec.timeoutMs) || 0), false);
+      appendDraftRunField(fields, t('draftRunEnvironment'), JSON.stringify(Array.isArray(spec.env) ? spec.env : []), true);
+
+      var assessment = draftRun.effectAssessment || {};
+      var risk = document.createElement('div');
+      risk.className = 'draft-run-risk draft-run-risk-' + String(assessment.verdict || 'unknown');
+      var effects = Array.isArray(assessment.effects)
+        ? assessment.effects.map(getDraftRunEffectLabel).join(', ')
+        : getDraftRunEffectLabel('unknown');
+      var evidence = Array.isArray(assessment.evidence) ? assessment.evidence.join(' ') : '';
+      var verdictKey = assessment.verdict === 'likely_readonly'
+        ? 'draftRunRiskLikelyReadonly'
+        : assessment.verdict === 'mutating_or_sensitive'
+          ? 'draftRunRiskSensitive'
+          : 'draftRunRiskUnknown';
+      risk.textContent = t('draftRunRisk', { effects: effects }) + ' · ' + t(verdictKey);
+      if (evidence) risk.title = evidence;
+
+      card.append(header, fields, risk);
+      if (draftRun.output || draftRun.error) {
+        var output = document.createElement('pre');
+        output.className = 'draft-run-output';
+        output.textContent = [draftRun.output, draftRun.error ? '[KeepSeek] ' + draftRun.error : '']
+          .filter(Boolean)
+          .join(String.fromCharCode(10));
+        card.append(output);
+      }
+      if (draftRun.outputTruncated) {
+        var notice = document.createElement('div');
+        notice.className = 'draft-run-output-notice';
+        notice.textContent = t('draftRunOutputTruncated', { count: Number(draftRun.omittedOutputBytes) || 0 });
+        card.append(notice);
+      }
+      return card;
+    }
+
+    function appendDraftRunActions(container, draftRun) {
+      var statusValue = String(draftRun.status || 'pending');
+      var isOwnRunning = String(state.activeDraftRunId || '') === String(draftRun.id || '');
+      var externalAuthorized = !draftRun.spec?.externalCwd
+        || (Array.isArray(state.authorizedExternalReferenceUris)
+          && state.authorizedExternalReferenceUris.includes(String(draftRun.spec?.cwdUri || '')));
+      if (statusValue === 'pending') {
+        if (!externalAuthorized) {
+          container.append(createDraftRunActionButton(t('draftRunAuthorizeCwd'), 'authorizeDraftRunCwd', draftRun, false));
+        } else {
+          container.append(createDraftRunActionButton(t('draftRunApproveOnce'), 'approveDraftRun', draftRun, false));
+        }
+        container.append(createDraftRunActionButton(t('draftRunReject'), 'rejectDraftRun', draftRun, true));
+      } else if (statusValue === 'running') {
+        container.append(createDraftRunActionButton(t('draftRunCancel'), 'cancelDraftRun', draftRun, true, !isOwnRunning));
+        container.append(createDraftRunActionButton(t('draftRunOpenTerminal'), 'openDraftRunTerminal', draftRun, true, false));
+      } else if (statusValue !== 'approved') {
+        if (draftRun.startedAt) {
+          container.append(createDraftRunActionButton(t('draftRunOpenTerminal'), 'openDraftRunTerminal', draftRun, true, false));
+        }
+        container.append(createDraftRunActionButton(t('draftRunClone'), 'cloneDraftRun', draftRun, true));
+      }
+    }
+
+    function createDraftRunActionButton(label, action, draftRun, secondary, forceDisabled) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.className = secondary ? 'secondary' : '';
+      button.dataset.draftRunId = String(draftRun.id || '');
+      button.dataset.draftRunAction = action;
+      if (action === 'approveDraftRun') button.dataset.specHash = String(draftRun.specHash || '');
+      var allowWhileBusy = action === 'cancelDraftRun' || action === 'openDraftRunTerminal';
+      button.disabled = Boolean(forceDisabled) || (Boolean(state.isBusy) && !allowWhileBusy);
+      return button;
+    }
+
+    function appendDraftRunField(container, labelText, value, code) {
+      var row = document.createElement('div');
+      row.className = 'draft-run-field';
+      var label = document.createElement('span');
+      label.className = 'draft-run-field-label';
+      label.textContent = labelText;
+      var content = document.createElement(code ? 'code' : 'span');
+      content.className = 'draft-run-field-value';
+      content.textContent = value || '—';
+      row.append(label, content);
+      container.append(row);
+    }
+
+    function getDraftRunStatusLabel(statusValue) {
+      switch (statusValue) {
+        case 'approved': return t('draftRunStatusApproved');
+        case 'rejected': return t('draftRunStatusRejected');
+        case 'running': return t('draftRunStatusRunning');
+        case 'done': return t('draftRunStatusDone');
+        case 'cancelled': return t('draftRunStatusCancelled');
+        case 'failed': return t('draftRunStatusFailed');
+        default: return t('draftRunStatusPending');
+      }
+    }
+
+    function getDraftRunEffectLabel(effect) {
+      return t('draftRunEffect_' + String(effect || 'unknown'));
     }
 
     function isChangeSetActionable(changeSet) {
@@ -3158,7 +3352,7 @@ export function getScript(): string {
       }
     }
 
-    function renderTranscript(changeSetProjection) {
+    function renderTranscript(changeSetProjection, draftRunProjection) {
       var shouldStick = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 24;
       transcript.innerHTML = '';
 
@@ -3248,6 +3442,10 @@ export function getScript(): string {
           var messageChangeSets = changeSetProjection.byMessageId[String(message.id)] || [];
           messageChangeSets.forEach(function(changeSet) {
             body.append(createChangeSetCard(changeSet));
+          });
+          var messageDraftRuns = draftRunProjection.byMessageId[String(message.id)] || [];
+          messageDraftRuns.forEach(function(draftRun) {
+            body.append(createDraftRunCard(draftRun));
           });
         }
 

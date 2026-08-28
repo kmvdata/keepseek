@@ -30,6 +30,24 @@ export class Position {
   ) {}
 }
 
+export class EventEmitter<T> {
+  private readonly listeners = new Set<(value: T) => unknown>();
+  public readonly event = (listener: (value: T) => unknown) => {
+    this.listeners.add(listener);
+    return { dispose: () => this.listeners.delete(listener) };
+  };
+
+  public fire(value: T): void {
+    for (const listener of this.listeners) {
+      listener(value);
+    }
+  }
+
+  public dispose(): void {
+    this.listeners.clear();
+  }
+}
+
 export class Range {
   public readonly start: Position;
   public readonly end: Position;
@@ -160,6 +178,14 @@ export interface TestTabGroup {
 }
 
 export const window = {
+  createTerminal(options: { name: string; pty?: { open(): void; close(): void } }) {
+    options.pty?.open();
+    return {
+      name: options.name,
+      show() { return undefined; },
+      dispose() { options.pty?.close(); }
+    };
+  },
   tabGroups: {
     all: [] as TestTabGroup[],
     async close(tabs: readonly TestTab[]): Promise<boolean> {

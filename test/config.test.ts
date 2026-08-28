@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import {
   getConfiguredAgentSettings,
   getConfiguredBalanceEndpointUrl,
+  getConfiguredDraftRunMaxTranscriptBytes,
+  getConfiguredDraftRunTimeoutMs,
   getConfiguredModelUsagePricing,
   normalizeAgentSettings,
   normalizeCompressionThreshold
@@ -70,4 +72,9 @@ test('partial agent settings preserve the fallback compression threshold', () =>
     reasoningEffort: 'max',
     compressionThreshold: 'cache'
   });
+});
+
+test('DraftRun uses bounded timeout and transcript defaults', () => {
+  assert.equal(getConfiguredDraftRunTimeoutMs(), 120_000);
+  assert.equal(getConfiguredDraftRunMaxTranscriptBytes(), 131_072);
 });

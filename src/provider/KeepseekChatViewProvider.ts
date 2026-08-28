@@ -56,6 +56,7 @@ import {
   toSessionContextUsageEstimate
 } from '../agent/contextUsage';
 import { ChangeSetStore, type PendingDeleteTarget } from '../edits/changeSetStore';
+import { DraftRunStore, type DraftRunStoreEvent } from '../runs/draftRunStore';
 import { DraftDiffService } from '../edits/draftDiffService';
 import {
   openDirectoryReferenceUri,
@@ -164,6 +165,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly modelSourceService: ModelSourceService;
   private readonly traceLogService: InteractionTraceLogService;
   private readonly changeSets: ChangeSetStore;
+  private readonly draftRuns: DraftRunStore;
   private readonly draftDiffService: DraftDiffService;
   private readonly skillStore: SkillStore;
   private readonly skillCreator = new SkillCreator();
@@ -194,6 +196,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private language = getConfiguredKeepseekLanguage();
   private isBusy = false;
   private currentRunAbortController: AbortController | undefined;
+  private activeDraftRunId: string | undefined;
+  private draftRunOutputPostTimer: ReturnType<typeof setTimeout> | undefined;
+  private pendingDraftRunOutputEvent: DraftRunStoreEvent | undefined;
   private liveContextUsage: ContextUsageEstimate | undefined;
   private liveTurnUsage: TurnUsageStats | undefined;
   /** 防并发：同一 Provider 同时只允许一个余额刷新流程；限流按来源全局共享。 */
@@ -263,6 +268,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         );
       }
     );
+    this.draftRuns = new DraftRunStore(
+      this.globalStorageUri,
+      undefined,
+      undefined,
+      (event) => this.handleDraftRunStoreEvent(event)
+    );
     void this.cleanupExpiredSessions({ post: false });
     this.sessionCleanupTimer = setInterval(() => {
       void this.cleanupExpiredSessions();
@@ -271,6 +282,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   public dispose(): void {
     clearInterval(this.sessionCleanupTimer);
+    if (this.draftRunOutputPostTimer) {
+      clearTimeout(this.draftRunOutputPostTimer);
+    }
+    this.draftRuns.dispose();
     this.draftDiffService.dispose();
     this.backgroundRunStatusBar.dispose();
   }
@@ -664,6 +679,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     switch (message.type) {
       case 'ready':
         await this.changeSets.initialize();
+        await this.draftRuns.initialize();
         await this.legacyMemoryMigration.refresh();
         await this.refreshModelSourceState();
         this.syncConfiguredState();
@@ -918,6 +934,54 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'clearContext':
         this.fileContext.clear();
         this.postState();
+        return;
+      case 'approveDraftRun':
+        if (this.isBusy || this.activeDraftRunId) {
+          return;
+        }
+        {
+          const draftRun = this.draftRuns.get(message.id);
+          if (!draftRun || draftRun.specHash !== message.specHash) {
+            vscode.window.showErrorMessage(this.language === 'en'
+              ? 'The DraftRun command changed or is no longer pending.'
+              : 'DraftRun 命令已变化或已不再待确认。');
+            return;
+          }
+          this.activeDraftRunId = draftRun.id;
+          this.isBusy = true;
+          this.setAgentActivity({
+            base: 'executing',
+            phase: 'running_draft_run',
+            toolName: 'keepseek_run_draft',
+            detail: draftRun.spec.reason
+          });
+          this.postState();
+          void this.executeApprovedDraftRun(draftRun.id);
+        }
+        return;
+      case 'rejectDraftRun':
+        if (!this.isBusy && !this.activeDraftRunId) {
+          this.draftRuns.reject(message.id);
+          this.postState();
+        }
+        return;
+      case 'cancelDraftRun':
+        this.draftRuns.cancel(message.id);
+        return;
+      case 'cloneDraftRun':
+        if (!this.isBusy && !this.activeDraftRunId) {
+          this.draftRuns.cloneAsPending(message.id);
+          this.postState();
+        }
+        return;
+      case 'authorizeDraftRunCwd':
+        if (this.isBusy || this.activeDraftRunId) {
+          return;
+        }
+        await this.authorizeDraftRunWorkingDirectory(message.id);
+        return;
+      case 'openDraftRunTerminal':
+        this.draftRuns.showTerminal(message.id);
         return;
       case 'applyDraftEdit':
         {
@@ -1367,6 +1431,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     for (const sessionId of uniqueSessionIds) {
       this.changeSets.clearSession(sessionId);
+      this.draftRuns.clearSession(sessionId);
       this.taskPlansBySession.delete(sessionId);
     }
 
@@ -2706,6 +2771,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private abortPrompt(): void {
+    if (this.activeDraftRunId) {
+      this.draftRuns.cancel(this.activeDraftRunId);
+      return;
+    }
     if (!this.isBusy || !this.currentRunAbortController || this.currentRunAbortController.signal.aborted) {
       return;
     }
@@ -2713,6 +2782,79 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.setAgentActivity({
       base: 'waiting',
       phase: 'finalizing'
+    });
+  }
+
+  private async executeApprovedDraftRun(id: string): Promise<void> {
+    try {
+      await this.draftRuns.approveAndRun(id, this.authorizedExternalReferenceUris);
+    } finally {
+      if (this.activeDraftRunId === id) {
+        this.activeDraftRunId = undefined;
+      }
+      this.isBusy = false;
+      this.setAgentActivity({
+        base: 'idle',
+        phase: 'idle'
+      }, { post: false });
+      this.postState();
+    }
+  }
+
+  private async authorizeDraftRunWorkingDirectory(id: string): Promise<void> {
+    const draftRun = this.draftRuns.get(id);
+    if (!draftRun || draftRun.status !== 'pending' || !draftRun.spec.externalCwd) {
+      return;
+    }
+    const expected = vscode.Uri.parse(draftRun.spec.cwdUri);
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      defaultUri: expected,
+      openLabel: this.language === 'en' ? 'Authorize this working directory' : '授权此工作目录'
+    });
+    const selected = picked?.[0];
+    if (!selected) {
+      return;
+    }
+    if (getFileReferenceAuthorizationKey(selected) !== getFileReferenceAuthorizationKey(expected)) {
+      vscode.window.showWarningMessage(this.language === 'en'
+        ? 'Select the exact working directory shown on the DraftRun card.'
+        : '请选择 DraftRun 卡片上显示的精确工作目录。');
+      return;
+    }
+    this.authorizedExternalReferenceUris.add(getFileReferenceAuthorizationKey(selected));
+    this.postState();
+  }
+
+  private handleDraftRunStoreEvent(event: DraftRunStoreEvent): void {
+    if (event.type === 'output') {
+      this.pendingDraftRunOutputEvent = event;
+      if (!this.draftRunOutputPostTimer) {
+        this.draftRunOutputPostTimer = setTimeout(() => this.flushDraftRunOutputEvent(), 80);
+      }
+      return;
+    }
+    this.flushDraftRunOutputEvent();
+    this.postToWebview({ type: 'draftRunStateChanged', draftRun: event.draftRun });
+  }
+
+  private flushDraftRunOutputEvent(): void {
+    if (this.draftRunOutputPostTimer) {
+      clearTimeout(this.draftRunOutputPostTimer);
+      this.draftRunOutputPostTimer = undefined;
+    }
+    const event = this.pendingDraftRunOutputEvent;
+    this.pendingDraftRunOutputEvent = undefined;
+    if (!event) {
+      return;
+    }
+    this.postToWebview({
+      type: 'draftRunOutput',
+      draftRun: event.draftRun,
+      delta: event.delta,
+      stream: event.stream
     });
   }
 
@@ -3176,7 +3318,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   ): Promise<AgentResponse | undefined> {
     const trimmedPrompt = prompt.trim();
-    if (!trimmedPrompt || this.isBusy) {
+    if (!trimmedPrompt || this.isBusy || this.activeDraftRunId) {
       return;
     }
     const backgroundRun = this.backgroundRunCoordinator.getActiveRun();
@@ -3347,6 +3489,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         contextFiles,
         currentRunContext,
         language: this.language,
+        requestProtocolVersion: activeSession.requestProtocol?.version,
         totalBudgetCharacters: totalContextBudgetCharacters
       });
       let dynamicContextTail = '';
@@ -3376,6 +3519,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSession.contextUsage = undefined;
         activeSession.contextCompression = undefined;
         this.changeSets.discardPendingForSession(activeSession.id);
+        this.draftRuns.rejectPendingForSession(activeSession.id);
         this.taskPlansBySession.delete(activeSession.id);
         if (replacementIndex === 0 && !activeSession.customTitle) {
           activeSession.title = createSessionTitle(trimmedPrompt, this.language);
@@ -3387,6 +3531,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSession.createdAt = now;
       }
 
+      const draftRunTail = this.draftRuns.getPendingProviderTail(activeSession.id, this.language);
+      const providerTails = [dynamicContextTail, draftRunTail?.content ?? ''].filter(Boolean);
+
       const userMessage: ChatMessage = {
         id: randomUUID(),
         role: 'user',
@@ -3394,19 +3541,24 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         createdAt: now,
         modelId: model.id,
         usedSkills: toChatMessageSkills(activeSkills),
-        contextMeta: activeSession.messages.some((message) => message.role === 'user')
-          ? undefined
-          : createProtectedContextMeta('first_user_request')
+        contextMeta: draftRunTail
+          ? createProtectedContextMeta('draft_run_result')
+          : activeSession.messages.some((message) => message.role === 'user')
+            ? undefined
+            : createProtectedContextMeta('first_user_request')
       };
       if (expandedPrompt !== trimmedPrompt) {
         userMessage.expandedContent = expandedPrompt;
       }
-      if (dynamicContextTail) {
-        userMessage.providerContent = `${expandedPrompt.trim()}\n\n${dynamicContextTail}`;
+      if (providerTails.length) {
+        userMessage.providerContent = `${expandedPrompt.trim()}\n\n${providerTails.join('\n\n')}`;
       }
       activeSession.lastTraceLogUri = undefined;
       this.sessionTraceLogUris.delete(activeSession.id);
       this.messages.push(userMessage);
+      if (draftRunTail) {
+        this.draftRuns.bindResultsToMessage(draftRunTail.draftRunIds, userMessage.id);
+      }
       if ((activeSession.requestProtocol?.version ?? 1) >= PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION) {
         capOversizedFirstUserProviderContent(activeSession);
       }
@@ -3558,6 +3710,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           traceLogUri
         });
       }
+      if (response.draftRuns?.length) {
+        this.draftRuns.addProposals({
+          proposals: response.draftRuns,
+          agentRunId: response.runId,
+          sessionId: activeSession.id,
+          messageId: assistantMessage?.id
+        });
+      }
       if (!currentTurnUsage && response.usage) {
         currentTurnUsage = this.applyTurnUsage(activeSession, response.usage);
         this.liveTurnUsage = currentTurnUsage;
@@ -3577,8 +3737,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (assistantMessage) {
         assistantMessage.content = response.message;
         assistantMessage.reasoningContent = response.reasoningContent;
-        if (response.draftEdits.length) {
-          assistantMessage.contextMeta = createProtectedContextMeta('draft_edit_result');
+        if (response.draftEdits.length || response.draftRuns?.length) {
+          assistantMessage.contextMeta = createProtectedContextMeta(
+            response.draftRuns?.length ? 'draft_run_proposal' : 'draft_edit_result'
+          );
         }
         // 持久化工具轮原样字节，跨轮重建时逐字节还原（缓存前缀稳定）。
         if (response.toolRounds?.length) {
@@ -3845,6 +4007,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const contextPercent = contextUsage.usedPercent;
 
     const webviewChangeSets = this.changeSets.toWebviewState(activeSession.id);
+    const webviewDraftRuns = this.draftRuns.toWebviewState(activeSession.id);
     this.postToWebview({
       type: 'state',
       state: {
@@ -3901,7 +4064,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         taskPlan: this.taskPlansBySession.get(activeSession.id),
         repairLoop: this.repairLoopsBySession.get(activeSession.id) ?? activeSession.repairLoop,
         changeSets: webviewChangeSets,
-        isBusy: this.isBusy,
+        draftRuns: webviewDraftRuns,
+        activeDraftRunId: this.activeDraftRunId,
+        authorizedExternalReferenceUris: [...this.authorizedExternalReferenceUris],
+        isBusy: this.isBusy || Boolean(this.activeDraftRunId),
         agentActivity: this.agentActivity,
         maxFileBytes: getConfiguredMaxFileBytes(),
         historyRetentionDays: getConfiguredHistoryRetentionDays(),

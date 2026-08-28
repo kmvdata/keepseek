@@ -979,6 +979,127 @@ export function getStyles(): string {
       background: var(--vscode-editor-background);
     }
 
+    .draft-run-card {
+      display: grid;
+      gap: 8px;
+      width: 100%;
+      min-width: 0;
+      margin-top: 10px;
+      padding: 9px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editor-background);
+    }
+
+    .draft-run-running {
+      border-color: var(--vscode-focusBorder);
+    }
+
+    .draft-run-failed {
+      border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+    }
+
+    .draft-run-rejected,
+    .draft-run-done,
+    .draft-run-cancelled {
+      background: color-mix(in srgb, var(--vscode-editor-background) 96%, var(--vscode-descriptionForeground));
+    }
+
+    .draft-run-header {
+      display: grid;
+      gap: 7px;
+    }
+
+    .draft-run-heading {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .draft-run-title {
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .draft-run-meta,
+    .draft-run-output-notice {
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .draft-run-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 4px;
+    }
+
+    .draft-run-actions button {
+      min-height: 21px;
+      padding: 2px 7px;
+      font-size: 10px;
+    }
+
+    .draft-run-fields {
+      display: grid;
+      gap: 5px;
+    }
+
+    .draft-run-field {
+      display: grid;
+      grid-template-columns: 86px minmax(0, 1fr);
+      gap: 7px;
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .draft-run-field-label {
+      color: var(--vscode-descriptionForeground);
+    }
+
+    .draft-run-field-value {
+      min-width: 0;
+      margin: 0;
+      color: var(--vscode-editor-foreground);
+      background: transparent;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+    }
+
+    .draft-run-risk {
+      padding: 6px 7px;
+      border-radius: 4px;
+      color: var(--vscode-descriptionForeground);
+      background: var(--vscode-textBlockQuote-background);
+      font-size: 10px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .draft-run-risk-mutating_or_sensitive,
+    .draft-run-risk-unknown {
+      color: var(--vscode-inputValidation-warningForeground, var(--vscode-editorWarning-foreground));
+      background: var(--vscode-inputValidation-warningBackground, var(--vscode-textBlockQuote-background));
+    }
+
+    .draft-run-output {
+      max-height: 260px;
+      margin: 0;
+      padding: 7px;
+      overflow: auto;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 4px;
+      color: var(--vscode-terminal-foreground, var(--vscode-editor-foreground));
+      background: var(--vscode-terminal-background, var(--vscode-editor-background));
+      font-family: var(--vscode-editor-font-family);
+      font-size: 10px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
     .change-set-partially_failed {
       border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
       background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-inputValidation-errorBackground, transparent));
@@ -1161,6 +1282,11 @@ export function getStyles(): string {
       }
 
       .change-set-header {
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
+      }
+
+      .draft-run-header {
         grid-template-columns: minmax(0, 1fr) auto;
         align-items: start;
       }

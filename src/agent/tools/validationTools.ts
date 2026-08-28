@@ -11,11 +11,11 @@ import type {
   WorkspaceDiagnosticSummary
 } from '../../shared/types';
 import { RUN_VALIDATION_TOOL_NAME } from '../protocol';
+import { hasValidationBlockingRisk } from '../../runs/commandRisk';
 
 const MAX_DIAGNOSTIC_ITEMS = 200;
 const SAFE_NPM_SCRIPT_ORDER: SafeNpmScript[] = ['compile', 'lint', 'test'];
 const SAFE_NPM_SCRIPTS = new Set<SafeNpmScript>(SAFE_NPM_SCRIPT_ORDER);
-const HIGH_RISK_SCRIPT_PATTERN = /(?:\b(?:npm|pnpm|yarn)\s+(?:install|add|publish|deploy)\b|\bgit\s+push\b|\brm\s+(?:-[^\s]+\s+)*|\b(?:curl|wget)\b|\b(?:deploy|publish)\b)/iu;
 
 export interface ValidationToolAdapter {
   readWorkspaceDiagnostics(language: KeepseekLanguage): Promise<string>;
@@ -89,7 +89,7 @@ export class ValidationToolService implements ValidationToolAdapter {
         error: localizeValidation(input.language, 'scriptMissing', input.script)
       }));
     }
-    if (HIGH_RISK_SCRIPT_PATTERN.test(scriptDefinition)) {
+    if (hasValidationBlockingRisk(scriptDefinition)) {
       return JSON.stringify(createResult({
         workspaceFolder: workspaceFolder.name,
         errorType: 'unsafe_script',
@@ -180,7 +180,7 @@ export async function getAvailableSafeValidationScripts(): Promise<SafeNpmScript
   })));
   return definitions
     .filter((entry): entry is { script: SafeNpmScript; definition: string } =>
-      typeof entry.definition === 'string' && !HIGH_RISK_SCRIPT_PATTERN.test(entry.definition)
+      typeof entry.definition === 'string' && !hasValidationBlockingRisk(entry.definition)
     )
     .map(({ script }) => script);
 }

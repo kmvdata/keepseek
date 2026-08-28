@@ -71,6 +71,7 @@ export function createContextUsageEstimate(input: {
     language: input.language,
     prompt,
     tools,
+    requestProtocolVersion: providerProjection.requestProtocolVersion,
     outputReserveTokens,
     safetyReserveTokens: input.safetyReserveTokens ?? 0
   });
@@ -383,6 +384,7 @@ function estimateInitialBreakdown(input: {
   language: KeepseekLanguage;
   prompt: string;
   tools: DeepSeekFunctionTool[];
+  requestProtocolVersion: number;
   outputReserveTokens: number;
   safetyReserveTokens: number;
 }): ContextUsageBreakdown {
@@ -392,7 +394,8 @@ function estimateInitialBreakdown(input: {
   const systemOnlyTokens = estimateChatMessageTokens(
     'system',
     getAgentSystemPrompt({
-      language: input.language
+      language: input.language,
+      requestProtocolVersion: input.requestProtocolVersion
     })
   );
 
@@ -403,7 +406,8 @@ function estimateInitialBreakdown(input: {
     }),
     formatActiveSkills({
       skills: input.currentRunContext?.skills,
-      language: input.language
+      language: input.language,
+      requestProtocolVersion: input.requestProtocolVersion
     }),
     formatProjectInstructionsForAgent(input.currentRunContext, input.language),
     formatLegacyMemoryForAgent(input.currentRunContext?.legacyMemory, input.language)

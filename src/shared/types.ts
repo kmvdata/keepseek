@@ -236,6 +236,95 @@ export interface ChatMessageContextMeta {
   protectedReason?: string;
 }
 
+export type DraftRunStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'running'
+  | 'done'
+  | 'cancelled'
+  | 'failed';
+
+export type DraftRunEffect =
+  | 'workspace_read'
+  | 'workspace_write'
+  | 'external_write'
+  | 'network'
+  | 'package_install'
+  | 'git_mutation'
+  | 'publish_or_deploy'
+  | 'credential_access'
+  | 'privilege_escalation'
+  | 'shell_interpreter'
+  | 'arbitrary_code'
+  | 'long_running'
+  | 'unknown';
+
+export interface DraftRunEnvironmentEntry {
+  name: string;
+  value: string;
+}
+
+export interface DraftRunSpec {
+  executable: string;
+  args: string[];
+  reason: string;
+  workspaceFolder?: string;
+  /** Exact resolved working-directory URI used for approval and execution. */
+  cwdUri: string;
+  cwdLabel: string;
+  externalCwd: boolean;
+  timeoutMs: number;
+  env: DraftRunEnvironmentEntry[];
+}
+
+export interface DraftRunEffectAssessment {
+  version: number;
+  verdict: 'enforced_readonly' | 'likely_readonly' | 'mutating_or_sensitive' | 'unknown';
+  effects: DraftRunEffect[];
+  evidence: string[];
+}
+
+export interface DraftRunProposal {
+  id: string;
+  spec: DraftRunSpec;
+  specHash: string;
+  effectAssessment: DraftRunEffectAssessment;
+}
+
+export interface ExecutionPermit {
+  draftRunId: string;
+  specHash: string;
+  source: 'user_click' | 'readonly_policy' | 'delegated_approver';
+  allowedEffects: DraftRunEffect[];
+  policyVersion: number;
+  expiresAt: number;
+  nonce: string;
+}
+
+export interface DraftRun extends DraftRunProposal {
+  agentRunId: string;
+  sessionId: string;
+  messageId: string;
+  status: DraftRunStatus;
+  authorizationSource?: ExecutionPermit['source'];
+  approvedAt?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  exitCode?: number;
+  signal?: string;
+  timedOut?: boolean;
+  outputHead: string;
+  outputTail: string;
+  outputBytes: number;
+  outputTruncated: boolean;
+  omittedOutputBytes: number;
+  error?: string;
+  resultBoundMessageId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
@@ -789,6 +878,8 @@ export type AuthorizedToolScope =
   | 'validation_compile_lint'
   | 'validation_test'
   | 'draft_edit_prepare'
+  | 'draft_run_prepare'
+  | 'draft_run_execute'
   | 'workspace_write'
   | 'git_read'
   | 'git_patch_create'
@@ -941,6 +1032,7 @@ export interface AgentResponse {
   message: string;
   reasoningContent?: string;
   draftEdits: DraftEdit[];
+  draftRuns?: DraftRunProposal[];
   taskPlan: TaskPlan;
   repairLoop: RepairLoopState;
   changeSet?: ChangeSet;
@@ -969,6 +1061,8 @@ export type AgentActivityPhase =
   | 'listing_files'
   | 'listing_directory'
   | 'creating_draft_edit'
+  | 'creating_draft_run'
+  | 'running_draft_run'
   | 'reading_diagnostics'
   | 'reading_semantic_context'
   | 'reading_git_state'

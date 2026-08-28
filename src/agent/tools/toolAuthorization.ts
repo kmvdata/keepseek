@@ -26,6 +26,7 @@ import {
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
+  RUN_DRAFT_TOOL_NAME,
   SEARCH_SESSION_ARCHIVE_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME
 } from '../protocol';
@@ -60,6 +61,7 @@ const LOW_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
   [GET_WORKSPACE_SYMBOLS_TOOL_NAME, 'semantic_read'],
   [CREATE_DRAFT_EDIT_TOOL_NAME, 'draft_edit_prepare'],
   [CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME, 'draft_edit_prepare'],
+  [RUN_DRAFT_TOOL_NAME, 'draft_run_prepare'],
   [GIT_STATUS_TOOL_NAME, 'git_read'],
   [GIT_DIFF_TOOL_NAME, 'git_read'],
   [GIT_CURRENT_BRANCH_TOOL_NAME, 'git_read'],

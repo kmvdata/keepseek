@@ -17,6 +17,8 @@ import { isOfficialDeepSeekSource } from '../accounts/sourceCapabilities';
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
 export const DEFAULT_MAX_FILE_BYTES = 200_000;
+export const DEFAULT_DRAFT_RUN_TIMEOUT_MS = 120_000;
+export const DEFAULT_DRAFT_RUN_MAX_TRANSCRIPT_BYTES = 131_072;
 export const DEFAULT_MAX_REQUEST_RETRIES = 2;
 export const DEFAULT_REQUEST_RETRY_BASE_MS = 1_000;
 export const DEFAULT_SELECTED_MODEL_ID = '';
@@ -269,6 +271,20 @@ export function getConfiguredValidationTimeoutMs(): number {
     .getConfiguration('keepseek')
     .get<number>('validation.timeoutMs', DEFAULT_VALIDATION_TIMEOUT_MS);
   return normalizeIntegerInRange(configured, 1_000, 600_000, DEFAULT_VALIDATION_TIMEOUT_MS);
+}
+
+export function getConfiguredDraftRunTimeoutMs(): number {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('draftRun.timeoutMs', DEFAULT_DRAFT_RUN_TIMEOUT_MS);
+  return normalizeIntegerInRange(configured, 1_000, 1_800_000, DEFAULT_DRAFT_RUN_TIMEOUT_MS);
+}
+
+export function getConfiguredDraftRunMaxTranscriptBytes(): number {
+  const configured = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('draftRun.maxTranscriptBytes', DEFAULT_DRAFT_RUN_MAX_TRANSCRIPT_BYTES);
+  return normalizeIntegerInRange(configured, 4_096, 1_048_576, DEFAULT_DRAFT_RUN_MAX_TRANSCRIPT_BYTES);
 }
 
 export function getConfiguredProjectInstructionsContextBudgetTokens(): number {

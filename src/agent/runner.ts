@@ -10,6 +10,8 @@ import {
   AgentToolRound,
   ContextUsageEstimate,
   DraftEdit,
+  DraftRunEnvironmentEntry,
+  DraftRunProposal,
   PromptCacheDiagnostics,
   RunDetailsSummary,
   SafeNpmScript,
@@ -60,10 +62,12 @@ import {
   READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
+  RUN_DRAFT_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_SESSION_ARCHIVE_TOOL_NAME,
   SEARCH_WORKSPACE_TOOL_NAME,
-  isDraftEditPreparationTool
+  isDraftEditPreparationTool,
+  isDraftRunPreparationTool
 } from './protocol';
 import { searchHistoryArchive } from './historyArchive';
 import { buildProviderRequestProjection, getProviderRequestLane } from './providerRequestProjection';
@@ -131,6 +135,7 @@ import { TaskPlanTracker } from './taskPlan';
 import { createChangeSet } from '../edits/changeSet';
 import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
 import { RunDetailsBuilder } from './logging/runDetails';
+import { createDraftRunProposal } from '../runs/draftRunProposal';
 
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;
 const MAX_LENGTH_CONTINUATION_REQUESTS = 1;
@@ -450,6 +455,7 @@ export class AgentRunner {
       const responseWithUsage = {
         runId: trace.runId,
         ...response,
+        draftRuns: response.draftRuns ?? [],
         message: finalMessage,
         taskPlan: completedPlan,
         repairLoop: repairState,
@@ -479,6 +485,13 @@ export class AgentRunner {
                 action: edit.action,
                 reason: edit.reason,
                 newText: summarizeText(edit.newText)
+              })),
+              draftRuns: responseWithUsage.draftRuns.map((draftRun) => ({
+                id: draftRun.id,
+                executable: draftRun.spec.executable,
+                args: draftRun.spec.args,
+                cwd: draftRun.spec.cwdLabel,
+                verdict: draftRun.effectAssessment.verdict
               }))
             }
       });
@@ -656,6 +669,7 @@ export class AgentRunner {
       projectionMetadata: projection.metadata
     });
     const draftEdits: DraftEdit[] = [];
+    const draftRuns: DraftRunProposal[] = [];
     const reasoningParts: string[] = [];
     const maxIterations = Math.max(0, runtimeConfig.maxToolIterations);
     const runStartedAt = Date.now();
@@ -770,7 +784,8 @@ export class AgentRunner {
         return finishRun({
           message: this.getFinalMessage(null, draftEdits, runTimeStopReason, request.language, runtimeConfig),
           reasoningContent: this.formatReasoning(reasoningParts),
-          draftEdits
+          draftEdits,
+          draftRuns
         }, { finishReason: runTimeStopReason });
       }
 
@@ -843,7 +858,8 @@ export class AgentRunner {
           return finishRun({
             message: this.getFinalMessage(continuedResponse.content, draftEdits, continuedResponse.finishReason, request.language, runtimeConfig),
             reasoningContent: this.formatReasoning(reasoningParts),
-            draftEdits
+            draftEdits,
+            draftRuns
           }, { finishReason: continuedResponse.finishReason, continued: true });
         }
 
@@ -857,7 +873,8 @@ export class AgentRunner {
         return finishRun({
           message: this.getFinalMessage(assistant.content, draftEdits, finalFinishReason, request.language, runtimeConfig),
           reasoningContent: this.formatReasoning(reasoningParts),
-          draftEdits
+          draftEdits,
+          draftRuns
         }, { finishReason: finalFinishReason });
       }
 
@@ -877,7 +894,8 @@ export class AgentRunner {
         if (budgetStopReason) {
           const allowBudgetedDraftEdit = budgetStopReason === 'tool_iterations_exhausted'
             && allowTerminalDraftEdit
-            && isDraftEditPreparationTool(toolCall.function.name);
+            && (isDraftEditPreparationTool(toolCall.function.name)
+              || isDraftRunPreparationTool(toolCall.function.name));
           if (allowBudgetedDraftEdit) {
             trace.record({
               type: 'tool_budget_terminal_draft_edit',
@@ -992,7 +1010,7 @@ export class AgentRunner {
                   repairIteration: repairLoop.getState().iteration
                 });
               }
-              rawToolResult = await this.handleToolCall(toolCall, draftEdits, request.language, {
+              rawToolResult = await this.handleToolCall(toolCall, draftEdits, draftRuns, request.language, {
                 signal: request.signal,
                 runDeadlineAt,
                 authorization: authorizationDecision,
@@ -1323,7 +1341,8 @@ export class AgentRunner {
     return finishRun({
       message: this.getFinalMessage(null, draftEdits, 'tool_iterations_exhausted', request.language, runtimeConfig),
       reasoningContent: this.formatReasoning(reasoningParts),
-      draftEdits
+      draftEdits,
+      draftRuns
     }, { finishReason: 'tool_iterations_exhausted' });
     } catch (error) {
       let failedPlan;
@@ -2156,6 +2175,8 @@ export class AgentRunner {
       case CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME:
       case DELETE_WORKSPACE_FILE_TOOL_NAME:
         return 'creating_draft_edit';
+      case RUN_DRAFT_TOOL_NAME:
+        return 'creating_draft_run';
       case READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME:
         return 'reading_diagnostics';
       case FIND_SYMBOL_TOOL_NAME:
@@ -2179,6 +2200,7 @@ export class AgentRunner {
   private async handleToolCall(
     toolCall: DeepSeekToolCall,
     draftEdits: DraftEdit[],
+    draftRuns: DraftRunProposal[],
     language: KeepseekLanguage,
     options: {
       signal?: AbortSignal;
@@ -2294,6 +2316,8 @@ export class AgentRunner {
             runDeadlineAt: options.runDeadlineAt,
             authorization: options.authorization
           });
+        case RUN_DRAFT_TOOL_NAME:
+          return await this.createDraftRun(args, draftRuns);
         case CREATE_DRAFT_EDIT_TOOL_NAME:
           return await this.createDraftEdit(args, draftEdits, language);
         case CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME:
@@ -2312,6 +2336,54 @@ export class AgentRunner {
         error: error instanceof Error ? error.message : String(error)
       });
     }
+  }
+
+  private async createDraftRun(
+    args: Record<string, unknown>,
+    draftRuns: DraftRunProposal[]
+  ): Promise<string> {
+    const rawArgs = args.args;
+    if (!Array.isArray(rawArgs) || !rawArgs.every((value) => typeof value === 'string')) {
+      throw new Error('Tool argument "args" must be an array of strings.');
+    }
+    const rawEnv = args.env;
+    let env: DraftRunEnvironmentEntry[] | undefined;
+    if (rawEnv !== undefined) {
+      if (!Array.isArray(rawEnv)) {
+        throw new Error('Tool argument "env" must be an array.');
+      }
+      env = rawEnv.map((value, index) => {
+        if (!this.isRecord(value) || typeof value.name !== 'string' || typeof value.value !== 'string') {
+          throw new Error(`Tool argument "env[${index}]" must contain string name and value fields.`);
+        }
+        return { name: value.name, value: value.value };
+      });
+    }
+    const draftRun = await createDraftRunProposal({
+      executable: this.readRequiredString(args, 'executable'),
+      args: rawArgs,
+      reason: this.readRequiredString(args, 'reason'),
+      workspaceFolder: this.readOptionalString(args, 'workspaceFolder'),
+      cwd: this.readOptionalString(args, 'cwd'),
+      timeoutMs: this.readOptionalNumber(args, 'timeoutMs'),
+      env
+    });
+    draftRuns.push(draftRun);
+    return JSON.stringify({
+      ok: true,
+      draftRun: {
+        id: draftRun.id,
+        status: 'pending',
+        executable: draftRun.spec.executable,
+        args: draftRun.spec.args,
+        cwd: draftRun.spec.cwdLabel,
+        timeoutMs: draftRun.spec.timeoutMs,
+        env: draftRun.spec.env,
+        reason: draftRun.spec.reason,
+        effectAssessment: draftRun.effectAssessment
+      },
+      message: 'DraftRun prepared only; no process was started. The user must review and explicitly approve this single execution in the KeepSeek panel.'
+    });
   }
 
   private async createDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[], language: KeepseekLanguage): Promise<string> {
@@ -2988,7 +3060,9 @@ export class AgentRunner {
   }
 
   private isCompressibleToolResult(toolName: string): boolean {
-    return toolName !== READ_WORKSPACE_FILE_TOOL_NAME && !isDraftEditPreparationTool(toolName);
+    return toolName !== READ_WORKSPACE_FILE_TOOL_NAME
+      && !isDraftEditPreparationTool(toolName)
+      && !isDraftRunPreparationTool(toolName);
   }
 
   private parseToolArguments(rawArguments: string): Record<string, unknown> {
