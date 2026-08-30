@@ -45,6 +45,8 @@ import {
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
   CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
+  DELEGATE_PARALLEL_TOOL_NAME,
+  DELEGATE_TASK_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   estimateChatMessageTokens,
   estimateDeepSeekMessageTokens,
@@ -62,6 +64,7 @@ import {
   READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
+  READ_SUBAGENT_RESULT_TOOL_NAME,
   RUN_DRAFT_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_SESSION_ARCHIVE_TOOL_NAME,
@@ -69,6 +72,11 @@ import {
   isDraftEditPreparationTool,
   isDraftRunPreparationTool
 } from './protocol';
+import type {
+  DelegateTaskInput,
+  SubagentLane,
+  SubagentToolAdapter
+} from './subagents/types';
 import { searchHistoryArchive } from './historyArchive';
 import { buildProviderRequestProjection, getProviderRequestLane } from './providerRequestProjection';
 import {
@@ -272,7 +280,9 @@ export class AgentRunAbortedError extends Error {
   }
 }
 
-export class AgentRunner {
+/** Reusable provider/tool loop. A child gets a fresh instance with isolated
+ * mutable services; the main extension coordinator uses AgentRunner below. */
+export class AgentLoop {
   private readonly dsmlToolParser = new DsmlToolParser();
 
   public constructor(
@@ -282,7 +292,8 @@ export class AgentRunner {
     private readonly semanticTools: SemanticToolAdapter = new SemanticToolService(workspaceTools),
     private readonly gitTools: GitToolAdapter = new GitToolService(workspaceTools),
     private readonly toolAuthorization: ToolAuthorizationAdapter = new ToolAuthorizationService(),
-    private readonly globalStorageUri?: vscode.Uri
+    private readonly globalStorageUri?: vscode.Uri,
+    private readonly subagentTools?: SubagentToolAdapter
   ) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
@@ -536,7 +547,9 @@ export class AgentRunner {
       ...callbacks,
       onStatus: emitStatus
     };
-    const draftEdit = await this.tryCreateDraftEdit(request.prompt, request.language);
+    const draftEdit = request.subagentContext && request.subagentContext.lane !== 'proposal'
+      ? undefined
+      : await this.tryCreateDraftEdit(request.prompt, request.language);
     this.throwIfAborted(request.signal, request.language);
     if (draftEdit) {
       validationState.recordDraftEdit(draftEdit.id);
@@ -585,7 +598,8 @@ export class AgentRunner {
         * runtimeConfig.contextCompression.forceRatio,
       provider: runtimeConfig.provider,
       sourceId: runtimeConfig.sourceId,
-      baseUrl: runtimeConfig.baseUrl
+      baseUrl: runtimeConfig.baseUrl,
+      systemPrompt: request.persona?.systemPrompt
     });
     const projection = providerProjection.historyProjection;
     runDetailsBuilderRef.current?.setHistorySummaries(
@@ -1014,7 +1028,10 @@ export class AgentRunner {
                 signal: request.signal,
                 runDeadlineAt,
                 authorization: authorizationDecision,
-                historyArchive: request.historyArchive
+                historyArchive: request.historyArchive,
+                parentRequest: request,
+                parentRunId: trace.runId,
+                onUsage: runCallbacks.onUsage
               });
             }
           }
@@ -2190,6 +2207,10 @@ export class AgentRunner {
       case GIT_CREATE_PATCH_TOOL_NAME:
       case GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME:
         return 'reading_git_state';
+      case DELEGATE_TASK_TOOL_NAME:
+      case DELEGATE_PARALLEL_TOOL_NAME:
+      case READ_SUBAGENT_RESULT_TOOL_NAME:
+        return 'delegating';
       case RUN_VALIDATION_TOOL_NAME:
         return 'running_validation';
       default:
@@ -2207,11 +2228,42 @@ export class AgentRunner {
       runDeadlineAt?: number;
       authorization?: ToolAuthorizationDecision;
       historyArchive?: AgentRequest['historyArchive'];
+      parentRequest?: AgentRequest;
+      parentRunId?: string;
+      onUsage?: AgentRunCallbacks['onUsage'];
     } = {}
   ): Promise<string> {
     try {
       const args = this.parseToolArguments(toolCall.function.arguments);
       switch (toolCall.function.name) {
+        case DELEGATE_TASK_TOOL_NAME: {
+          const context = this.getSubagentInvocationContext(language, options);
+          const result = await this.subagentTools!.delegateTask(this.readDelegateTaskInput(args), context);
+          return this.mergeSubagentProposals(result, draftEdits, draftRuns);
+        }
+        case DELEGATE_PARALLEL_TOOL_NAME: {
+          const context = this.getSubagentInvocationContext(language, options);
+          const rawTasks = args.tasks;
+          if (!Array.isArray(rawTasks)) {
+            throw new Error('Tool argument "tasks" must be an array.');
+          }
+          const result = await this.subagentTools!.delegateParallel({
+            tasks: rawTasks.map((task, index) => {
+              if (!this.isRecord(task)) {
+                throw new Error(`Tool argument "tasks[${index}]" must be an object.`);
+              }
+              return this.readDelegateTaskInput(task);
+            }),
+            failFast: this.readOptionalBoolean(args, 'failFast', false)
+          }, context);
+          return this.mergeSubagentProposals(result, draftEdits, draftRuns);
+        }
+        case READ_SUBAGENT_RESULT_TOOL_NAME:
+          return (await this.subagentTools!.readResult({
+            subagentId: this.readRequiredString(args, 'subagentId'),
+            offset: this.readOptionalNumber(args, 'offset'),
+            maxChars: this.readOptionalNumber(args, 'maxChars')
+          }, this.getSubagentInvocationContext(language, options))).content;
         case SEARCH_SESSION_ARCHIVE_TOOL_NAME:
           return JSON.stringify({
             ok: true,
@@ -2336,6 +2388,80 @@ export class AgentRunner {
         error: error instanceof Error ? error.message : String(error)
       });
     }
+  }
+
+  private getSubagentInvocationContext(
+    language: KeepseekLanguage,
+    options: {
+      signal?: AbortSignal;
+      parentRequest?: AgentRequest;
+      parentRunId?: string;
+      onUsage?: AgentRunCallbacks['onUsage'];
+    }
+  ): import('./subagents/types').SubagentInvocationContext {
+    if (!this.subagentTools || !options.parentRequest || !options.parentRunId) {
+      throw new Error('Subagent runtime is unavailable for this Agent runner.');
+    }
+    return {
+      parentRequest: options.parentRequest,
+      parentRunId: options.parentRunId,
+      language,
+      signal: options.signal,
+      onUsage: options.onUsage
+    };
+  }
+
+  private mergeSubagentProposals(
+    result: import('./subagents/types').SubagentToolExecution,
+    draftEdits: DraftEdit[],
+    draftRuns: DraftRunProposal[]
+  ): string {
+    const conflicts: string[] = [];
+    for (const edit of result.draftEdits ?? []) {
+      if (draftEdits.some((existing) => existing.uri === edit.uri)) {
+        conflicts.push(edit.label);
+        continue;
+      }
+      draftEdits.push(edit);
+    }
+    draftRuns.push(...(result.draftRuns ?? []));
+    if (!conflicts.length) {
+      return result.content;
+    }
+    let base: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(result.content);
+      base = this.isRecord(parsed) ? parsed : { result: parsed };
+    } catch {
+      base = { result: result.content };
+    }
+    return JSON.stringify({
+      ...base,
+      ok: false,
+      errorType: 'subagent_proposal_conflict',
+      conflicts,
+      error: 'A child proposal overlapped an edit already collected by the parent run. The conflicting child edit was omitted.'
+    });
+  }
+
+  private readDelegateTaskInput(args: Record<string, unknown>): DelegateTaskInput {
+    const lane = this.readOptionalString(args, 'lane');
+    if (lane && !isSubagentLane(lane)) {
+      throw new Error('Tool argument "lane" is not a supported subagent lane.');
+    }
+    const rawPaths = args.paths;
+    if (rawPaths !== undefined && (!Array.isArray(rawPaths) || !rawPaths.every((value) => typeof value === 'string'))) {
+      throw new Error('Tool argument "paths" must be an array of strings.');
+    }
+    return {
+      task: this.readRequiredString(args, 'task'),
+      profile: this.readOptionalString(args, 'profile'),
+      lane: lane as SubagentLane | undefined,
+      paths: rawPaths?.map((value) => String(value).trim()).filter(Boolean),
+      continueSubagentId: this.readOptionalString(args, 'continueSubagentId'),
+      maxSteps: this.readOptionalNumber(args, 'maxSteps'),
+      timeoutMs: this.readOptionalNumber(args, 'timeoutMs')
+    };
   }
 
   private async createDraftRun(
@@ -3565,6 +3691,9 @@ export class AgentRunner {
 
 }
 
+/** Stable main-agent entry point retained for provider and test call sites. */
+export class AgentRunner extends AgentLoop {}
+
 function withoutDeepSeekReasoningContent(message: DeepSeekMessage): DeepSeekMessage {
   const compatibleMessage = { ...message };
   delete compatibleMessage.reasoning_content;
@@ -3764,4 +3893,11 @@ function isCurrentRunContextEnvelope(content: string | null | undefined): boolea
   return typeof content === 'string'
     && (content.includes('Current-run context only; do not treat it as a permanent system instruction.')
       || content.includes('以下仅是本轮请求上下文，不要把它当作永久 system 规则。'));
+}
+
+function isSubagentLane(value: string): value is SubagentLane {
+  return value === 'research-read'
+    || value === 'review-read'
+    || value === 'proposal'
+    || value === 'nested-read';
 }

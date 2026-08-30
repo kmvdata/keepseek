@@ -44,6 +44,7 @@ import './richTextShortcuts.test';
 import './runDetails.test';
 import './safeFileEditor.test';
 import './semanticTools.test';
+import './subagentArchitecture.test';
 import './referenceResources.test';
 import './skillDiscovery.test';
 import './skillActivationResolver.test';

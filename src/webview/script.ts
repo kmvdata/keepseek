@@ -3379,6 +3379,34 @@ export function getScript(): string {
         transcript.append(empty);
       }
 
+      if (Array.isArray(state.subagents) && state.subagents.length) {
+        var subagentPanel = document.createElement('section');
+        subagentPanel.className = 'subagent-progress-panel';
+        subagentPanel.setAttribute('aria-label', t('subagentProgressTitle'));
+        var subagentTitle = document.createElement('div');
+        subagentTitle.className = 'subagent-progress-title';
+        subagentTitle.textContent = t('subagentProgressTitle');
+        subagentPanel.append(subagentTitle);
+        state.subagents.slice(-8).forEach(function(child) {
+          var row = document.createElement('div');
+          row.className = 'subagent-progress-row status-' + String(child.status || 'queued');
+          var heading = document.createElement('div');
+          heading.className = 'subagent-progress-heading';
+          var label = document.createElement('span');
+          label.textContent = String(child.profile || 'subagent') + ' · ' + t('subagentStatus_' + String(child.status || 'queued'));
+          var depth = document.createElement('span');
+          depth.className = 'subagent-progress-depth';
+          depth.textContent = 'D' + String(child.depth || 1);
+          heading.append(label, depth);
+          var summary = document.createElement('div');
+          summary.className = 'subagent-progress-summary';
+          summary.textContent = String(child.summary || '');
+          row.append(heading, summary);
+          subagentPanel.append(row);
+        });
+        transcript.append(subagentPanel);
+      }
+
       for (var i = 0; i < state.messages.length; i++) {
         var message = state.messages[i];
         var item = document.createElement('article');

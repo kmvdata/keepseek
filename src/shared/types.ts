@@ -142,6 +142,7 @@ export type UsageSource =
   | 'retry'
   | 'continuation'
   | 'background'
+  | 'subagent'
   | 'retrieval'
   | 'router';
 
@@ -883,6 +884,7 @@ export type AuthorizedToolScope =
   | 'workspace_write'
   | 'git_read'
   | 'git_patch_create'
+  | 'subagent_delegate'
   | 'git_commit'
   | 'git_push';
 
@@ -1004,6 +1006,23 @@ export interface AgentRequest {
   backgroundRunId?: string;
   /** Credentials frozen once at run start so summaries and the main request cannot diverge. */
   sourceConfig?: ModelSourceConfigSnapshot;
+  /** Undefined preserves the byte-stable main-agent system prompt. */
+  persona?: {
+    kind: 'subagent';
+    systemPrompt: string;
+  };
+  /** Runtime-only child lineage. It is stored by the subagent store, not in the
+   * parent chat transcript or provider-visible parent context. */
+  subagentContext?: {
+    id: string;
+    treeId: string;
+    parentSessionId: string;
+    parentRunId: string;
+    rootRunId: string;
+    depth: number;
+    profile: string;
+    lane: 'research-read' | 'review-read' | 'proposal' | 'nested-read';
+  };
   signal?: AbortSignal;
 }
 
@@ -1025,6 +1044,17 @@ export interface ActivatedSkill {
   activation?: SkillActivationInfo;
   description?: string;
   hasScripts?: boolean;
+  /** Full instructions for these skills are omitted from the parent context and
+   * loaded only in an isolated child run. */
+  runAs?: 'subagent';
+  subagentProfile?: {
+    id: string;
+    tools?: string[];
+    maxSteps?: number;
+    timeoutMs?: number;
+    canDelegate?: boolean;
+    resultMaxChars?: number;
+  };
 }
 
 export interface AgentResponse {
@@ -1072,6 +1102,8 @@ export type AgentActivityPhase =
   | 'running_validation'
   | 'reviewing_tool_result'
   | 'generating'
+  | 'delegating'
+  | 'waiting_for_subagent'
   | 'finalizing'
   | 'failed';
 

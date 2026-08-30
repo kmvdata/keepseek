@@ -488,6 +488,7 @@ const USAGE_SOURCES: UsageSource[] = [
   'retry',
   'continuation',
   'background',
+  'subagent',
   'retrieval',
   'router'
 ];

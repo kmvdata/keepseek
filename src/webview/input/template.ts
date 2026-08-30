@@ -288,6 +288,13 @@ export function getInputTemplate(): string {
         </div>
         <div class="settings-dialog-body">
           <p id="settingsDialogDesc" class="settings-dialog-desc" data-i18n="modelSettingsDialogDesc">添加账号并管理其 API 连接；同一账号的凭证只保存一次。</p>
+          <section class="settings-subagent-card" aria-labelledby="settingsSubagentModelTitle">
+            <div>
+              <span id="settingsSubagentModelTitle" class="settings-section-heading" data-i18n="subagentModelTitle">全局子代理模型</span>
+              <span id="settingsSubagentModelHint" class="settings-field-hint" data-i18n="subagentModelHint">子代理默认长期使用此模型；每个子会话启动时会冻结具体账号和模型。</span>
+            </div>
+            <select id="settingsSubagentModelSelect" class="settings-input" aria-label="全局子代理模型" data-i18n-aria-label="subagentModelTitle"></select>
+          </section>
           <div class="settings-account-workspace">
             <aside class="settings-account-sidebar" aria-labelledby="settingsAccountsTitle">
               <div class="settings-account-section-header">

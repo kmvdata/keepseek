@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
 import { AgentRunAbortedError, AgentRunner } from '../agent/runner';
+import { SubagentRuntime } from '../agent/subagents/runtime';
+import type { SubagentModelSetting, SubagentProgressState } from '../agent/subagents/types';
 import { AgentRequestCoordinator, type BackgroundContextCompressionRefreshUpdate } from '../agent/agentRequestCoordinator';
 import { HistoryCompressor, type HistoryCompressionRefreshResult } from '../agent/historyCompressor';
 import { createProtectedContextMeta } from '../agent/historyProjection';
@@ -132,6 +134,10 @@ import {
 import {
   ModelSourceStore
 } from '../accounts/accountStore';
+import {
+  createDefaultSubagentModelSetting,
+  SubagentSettingsStore
+} from '../accounts/subagentSettingsStore';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
 import { probeSourceConnection, refreshSourceModelCache } from '../accounts/modelDiscovery';
 import { createModelCatalog, findModelBySelection } from '../accounts/modelCatalog';
@@ -163,6 +169,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly agentRequestCoordinator: AgentRequestCoordinator;
   private readonly sourceStore: ModelSourceStore;
   private readonly modelSourceService: ModelSourceService;
+  private readonly subagentSettingsStore: SubagentSettingsStore;
+  private readonly subagentRuntime: SubagentRuntime;
   private readonly traceLogService: InteractionTraceLogService;
   private readonly changeSets: ChangeSetStore;
   private readonly draftRuns: DraftRunStore;
@@ -188,6 +196,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private availableModels: KeepseekModel[] = [];
   private selectedSourceId = '';
   private selectedModelId = '';
+  private subagentModelSetting: SubagentModelSetting = createDefaultSubagentModelSetting();
+  private subagentProgress: SubagentProgressState[] = [];
   private modelSelectionPersistenceDepth = 0;
   private readonly modelSelectionTransactions = new ModelSelectionTransactionCoordinator();
   private modelSelectionMutationPromise: Promise<void> = Promise.resolve();
@@ -225,6 +235,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.skillStore = new SkillStore(skillState);
     this.sourceStore = new ModelSourceStore(this.globalStorageUri);
     this.modelSourceService = new ModelSourceService(this.sourceStore);
+    this.subagentSettingsStore = new SubagentSettingsStore(this.globalStorageUri);
     this.agentRequestCoordinator = new AgentRequestCoordinator(
       new HistoryCompressor(undefined, this.globalStorageUri)
     );
@@ -242,6 +253,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.backgroundRunStatusBar.update(run);
       this.postState();
     });
+    this.subagentRuntime = new SubagentRuntime({
+      globalStorageUri: this.globalStorageUri,
+      workspaceKey: this.sessionStore.workspaceKey,
+      sourceStore: this.sourceStore,
+      traceLogService: this.traceLogService,
+      onProgress: (states) => {
+        this.subagentProgress = states;
+        this.postState();
+      }
+    });
     this.agentRunner = new AgentRunner(
       undefined,
       this.traceLogService,
@@ -249,8 +270,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       undefined,
       undefined,
       undefined,
-      this.globalStorageUri
+      this.globalStorageUri,
+      this.subagentRuntime
     );
+    void this.subagentSettingsStore.load().then((setting) => {
+      this.subagentModelSetting = setting;
+      this.postState();
+    }).catch(() => undefined);
     this.draftDiffService = new DraftDiffService();
     this.changeSets = new ChangeSetStore(
       new SafeFileEditor((key, values) => this.t(key, values)),
@@ -741,6 +767,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'setSelectedModel':
         await this.setSelectedModel(message.requestId, message.sourceId, message.modelId);
+        return;
+      case 'setSubagentModel':
+        await this.setSubagentModel(message.mode, message.sourceId, message.modelId);
         return;
       case 'cancelPendingModelSelection':
         this.cancelPendingModelSelection(message.requestId);
@@ -1916,6 +1945,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postToWebview({
       type: 'showSettingsDialog',
       selectedSourceId: this.selectedSourceId,
+      subagentModelSetting: this.subagentModelSetting,
+      subagentModels: this.availableModels.map((model) => ({
+        sourceId: model.sourceId,
+        sourceName: model.sourceName,
+        modelId: model.id,
+        label: model.label
+      })),
       sources: this.modelSources.map((source) => ({
         ...source,
         models: source.models.map((model) => ({ ...model })),
@@ -1940,6 +1976,35 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         isOfficialDeepSeek: isOfficialDeepSeekSource(source)
       }))
     });
+  }
+
+  private async setSubagentModel(
+    mode: 'follow-main' | 'fixed',
+    sourceId?: string,
+    modelId?: string
+  ): Promise<void> {
+    if (this.rejectModelSourceMutationWhileBusy()) {
+      return;
+    }
+    if (mode === 'fixed') {
+      const model = findModelBySelection(this.availableModels, { sourceId, modelId });
+      if (!model || model.agentCompatible === false || model.sourceId !== sourceId || model.id !== modelId) {
+        vscode.window.showErrorMessage(this.language === 'en'
+          ? 'The selected subagent model is unavailable or disabled.'
+          : '所选子代理模型不可用或已禁用。');
+        this.postModelSettingsDialog();
+        return;
+      }
+      this.subagentModelSetting = await this.subagentSettingsStore.save({
+        mode: 'fixed',
+        sourceId: model.sourceId,
+        modelId: model.id
+      });
+    } else {
+      this.subagentModelSetting = await this.subagentSettingsStore.save({ mode: 'follow-main' });
+    }
+    this.postModelSettingsDialog();
+    this.postState();
   }
 
   private async waitForBalanceRefresh(): Promise<void> {
@@ -4025,6 +4090,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         sessionSummaries: this.sessionStore.getSessionSummaries(),
         contextFiles: contextFiles.map(({ content: _content, ...file }) => file),
         skills: this.skillStore.getStateView(activeSession),
+        subagents: this.subagentProgress.filter((item) => item.parentSessionId === activeSession.id),
+        subagentModelSetting: this.subagentModelSetting,
         legacyMemoryMigration: this.getLegacyMemoryMigrationStateView(),
         backgroundRun: this.backgroundRunCoordinator.getActiveRun(),
         backgroundAvailableScripts: this.backgroundAvailableScripts,

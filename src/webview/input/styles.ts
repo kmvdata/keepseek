@@ -1383,6 +1383,64 @@ export function getInputStyles(): string {
       line-height: 1.45;
     }
 
+    .settings-subagent-card {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(190px, 0.8fr);
+      align-items: center;
+      gap: 12px;
+      margin: 0 0 12px;
+      padding: 10px;
+      border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+      border-radius: 6px;
+      background: var(--vscode-editor-background, transparent);
+    }
+
+    .settings-subagent-card > div {
+      display: grid;
+      gap: 4px;
+    }
+
+    .subagent-progress-panel {
+      display: grid;
+      gap: 6px;
+      margin: 8px var(--keepseek-edge-padding, 0px);
+      padding: 8px;
+      border: 1px solid var(--vscode-panel-border, transparent);
+      border-radius: 6px;
+      background: var(--vscode-editor-background, transparent);
+    }
+
+    .subagent-progress-title,
+    .subagent-progress-heading {
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .subagent-progress-row {
+      display: grid;
+      gap: 2px;
+      padding: 5px 6px;
+      border-left: 2px solid var(--vscode-progressBar-background, var(--vscode-focusBorder));
+      background: var(--vscode-list-hoverBackground, transparent);
+    }
+
+    .subagent-progress-heading {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .subagent-progress-depth,
+    .subagent-progress-summary {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+    }
+
+    .subagent-progress-row.status-failed,
+    .subagent-progress-row.status-stopped {
+      border-left-color: var(--vscode-errorForeground);
+    }
+
     .settings-dialog-status {
       flex: 1 1 160px;
       min-width: 0;
@@ -2010,6 +2068,10 @@ export function getInputStyles(): string {
     }
 
     @media (max-width: 540px) {
+      .settings-subagent-card {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
       .settings-account-workspace {
         grid-template-columns: minmax(0, 1fr);
       }

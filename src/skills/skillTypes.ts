@@ -17,6 +17,15 @@ export interface SkillManifest {
   hasReferences: boolean;
   hasAssets: boolean;
   hasScripts: boolean;
+  runAs?: 'subagent';
+  subagentProfile?: {
+    id: string;
+    tools?: string[];
+    maxSteps?: number;
+    timeoutMs?: number;
+    canDelegate?: boolean;
+    resultMaxChars?: number;
+  };
   unavailableReason?: string;
 }
 
@@ -36,6 +45,8 @@ export interface SkillManifestView {
   hasReferences: boolean;
   hasAssets: boolean;
   hasScripts: boolean;
+  runAs?: 'subagent';
+  subagentProfile?: SkillManifest['subagentProfile'];
   unavailableReason?: string;
   active?: boolean;
   loadError?: string;
@@ -66,6 +77,10 @@ export function toActivatedSkill(manifest: SkillManifest, content: string): Acti
     content,
     description: manifest.description,
     hasScripts: manifest.hasScripts,
+    runAs: manifest.runAs,
+    subagentProfile: manifest.subagentProfile
+      ? { ...manifest.subagentProfile, tools: manifest.subagentProfile.tools ? [...manifest.subagentProfile.tools] : undefined }
+      : undefined,
     loadedResourceUris: [manifest.skillUri.toString()]
   };
 }
@@ -90,6 +105,10 @@ export function toSkillManifestView(
     hasReferences: manifest.hasReferences,
     hasAssets: manifest.hasAssets,
     hasScripts: manifest.hasScripts,
+    runAs: manifest.runAs,
+    subagentProfile: manifest.subagentProfile
+      ? { ...manifest.subagentProfile, tools: manifest.subagentProfile.tools ? [...manifest.subagentProfile.tools] : undefined }
+      : undefined,
     unavailableReason: manifest.unavailableReason,
     active: options.active,
     loadError: options.loadError,

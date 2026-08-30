@@ -33,10 +33,10 @@ import {
   getAgentTools
 } from './protocol';
 
-export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 4;
+export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 5;
 export const LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION = 1;
 export const PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION = 2;
-export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 4;
+export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 5;
 
 export interface ProviderRequestProjectionInput {
   model: KeepseekModel;
@@ -50,6 +50,7 @@ export interface ProviderRequestProjectionInput {
   prompt: string;
   slimToolNames?: string[];
   requestProtocolVersion?: number;
+  systemPrompt?: string;
   includeTools?: boolean;
   maxProjectionTokens?: number;
   provider?: ModelSourceProvider;
@@ -178,7 +179,8 @@ export function buildProviderRequestProjection(
     history: input.history,
     language: input.language,
     projection: historyProjection,
-    requestProtocolVersion
+    requestProtocolVersion,
+    systemPrompt: input.systemPrompt
   });
   const includeTools = input.includeTools ?? profile.maxToolIterations > 0;
   const toolNames = includeTools
@@ -415,6 +417,9 @@ function normalizeRequestProtocolVersion(value: number | undefined): number {
   const normalized = Number.isFinite(value) ? Math.floor(Number(value)) : LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION;
   if (normalized >= CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION) {
     return CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION;
+  }
+  if (normalized >= 4) {
+    return 4;
   }
   if (normalized >= 3) {
     return 3;

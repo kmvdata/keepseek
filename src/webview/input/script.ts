@@ -3690,6 +3690,9 @@ export function getInputScript(): string {
       var settingsDialogTitle = document.getElementById('settingsDialogTitle');
       var settingsDialogDesc = document.getElementById('settingsDialogDesc');
       var settingsDialogStatus = document.getElementById('settingsDialogStatus');
+      var settingsSubagentModelTitle = document.getElementById('settingsSubagentModelTitle');
+      var settingsSubagentModelHint = document.getElementById('settingsSubagentModelHint');
+      var settingsSubagentModelSelect = document.getElementById('settingsSubagentModelSelect');
       var settingsAccountSidebar = settingsOverlay ? settingsOverlay.querySelector('.settings-account-sidebar') : null;
       var settingsAccountEditor = document.getElementById('settingsAccountEditor');
       var settingsAccountsTitle = document.getElementById('settingsAccountsTitle');
@@ -3744,6 +3747,8 @@ export function getInputScript(): string {
       var createSkillCancelBtn = document.getElementById('createSkillCancelBtn');
       var apiKeyVisible = false;
       var settingsSources = [];
+      var settingsSubagentModels = [];
+      var settingsSubagentModelSetting = { mode: 'follow-main' };
       var settingsSelectedSourceId = '';
       var settingsDialogBusyAction = '';
       var settingsDialogBusyTimer = null;
@@ -4425,6 +4430,12 @@ export function getInputScript(): string {
         syncAccountSettingsRunBusyStatus(runBusy, operationBusy);
         if (settingsDialogTitle) { settingsDialogTitle.textContent = t('modelSettingsDialogTitle'); }
         if (settingsDialogDesc) { settingsDialogDesc.textContent = t('modelSettingsDialogDesc'); }
+        if (settingsSubagentModelTitle) { settingsSubagentModelTitle.textContent = t('subagentModelTitle'); }
+        if (settingsSubagentModelHint) { settingsSubagentModelHint.textContent = t('subagentModelHint'); }
+        if (settingsSubagentModelSelect) {
+          settingsSubagentModelSelect.setAttribute('aria-label', t('subagentModelTitle'));
+          settingsSubagentModelSelect.disabled = controlsDisabled;
+        }
         if (settingsOverlay) { settingsOverlay.querySelector('.settings-dialog')?.setAttribute('aria-label', t('modelSettingsDialogLabel')); }
         if (settingsAccountsTitle) { settingsAccountsTitle.textContent = t('modelsTitle'); }
         if (settingsCreateAccountBtn) {
@@ -4479,12 +4490,61 @@ export function getInputScript(): string {
         renderSettingsModelList(account, controlsDisabled);
       }
 
+      function renderSubagentModelSetting() {
+        if (!settingsSubagentModelSelect) { return; }
+        settingsSubagentModelSelect.innerHTML = '';
+        var follow = document.createElement('option');
+        follow.value = 'follow-main';
+        follow.textContent = t('subagentModelFollowMain');
+        settingsSubagentModelSelect.append(follow);
+        settingsSubagentModels.forEach(function(model) {
+          var option = document.createElement('option');
+          option.value = 'fixed:' + encodeURIComponent(model.sourceId) + ':' + encodeURIComponent(model.modelId);
+          option.dataset.sourceId = model.sourceId;
+          option.dataset.modelId = model.modelId;
+          option.textContent = (model.sourceName ? model.sourceName + ' / ' : '') + (model.label || model.modelId);
+          settingsSubagentModelSelect.append(option);
+        });
+        var selectedValue = 'follow-main';
+        if (settingsSubagentModelSetting.mode === 'fixed') {
+          var sourceId = readSettingsString(settingsSubagentModelSetting.sourceId, '');
+          var modelId = readSettingsString(settingsSubagentModelSetting.modelId, '');
+          selectedValue = 'fixed:' + encodeURIComponent(sourceId) + ':' + encodeURIComponent(modelId);
+          var exists = Array.from(settingsSubagentModelSelect.options).some(function(option) { return option.value === selectedValue; });
+          if (!exists) {
+            var unavailable = document.createElement('option');
+            unavailable.value = selectedValue;
+            unavailable.dataset.sourceId = sourceId;
+            unavailable.dataset.modelId = modelId;
+            unavailable.textContent = t('subagentModelUnavailable') + ': ' + sourceId + ' / ' + modelId;
+            unavailable.disabled = true;
+            settingsSubagentModelSelect.append(unavailable);
+          }
+        }
+        settingsSubagentModelSelect.value = selectedValue;
+      }
+
       function showSettingsDialog(settings) {
         if (!settingsOverlay || !settingsApiKey || !settingsBaseUrl) { return; }
         var values = settings && typeof settings === 'object' ? settings : {};
         var rawSources = Array.isArray(values.sources) ? values.sources : [];
         var rawSources = Array.isArray(values.sources) ? values.sources : [];
         settingsSources = rawSources.map(normalizeSettingsSource).filter(Boolean);
+        settingsSubagentModels = Array.isArray(values.subagentModels) ? values.subagentModels.map(function(model) {
+          return {
+            sourceId: readSettingsString(model && model.sourceId, '').trim(),
+            sourceName: readSettingsString(model && model.sourceName, '').trim(),
+            modelId: readSettingsString(model && model.modelId, '').trim(),
+            label: readSettingsString(model && model.label, '').trim()
+          };
+        }).filter(function(model) { return model.sourceId && model.modelId; }) : [];
+        settingsSubagentModelSetting = values.subagentModelSetting && values.subagentModelSetting.mode === 'fixed'
+          ? {
+              mode: 'fixed',
+              sourceId: readSettingsString(values.subagentModelSetting.sourceId, ''),
+              modelId: readSettingsString(values.subagentModelSetting.modelId, '')
+            }
+          : { mode: 'follow-main' };
         var requestedSourceId = readSettingsString(values.selectedSourceId, '').trim();
         if (settingsOverlay.classList.contains('hidden')) {
           settingsSelectedSourceId = settingsSources.some(function(source) { return source.id === requestedSourceId; })
@@ -4499,6 +4559,7 @@ export function getInputScript(): string {
         populateSettingsAccount(getSettingsActiveAccount());
         if (settingsModelList) { settingsModelList.innerHTML = ''; }
         setApiKeyVisible(false, false);
+        renderSubagentModelSetting();
         renderAccountSettings();
         settingsOverlay.classList.remove('hidden');
         if (state.isBusy && settingsDialogStatus) {
@@ -4740,6 +4801,30 @@ export function getInputScript(): string {
             });
             beginSettingsDialogAction('add-model', t('savingModelSource'));
           }
+        });
+      }
+
+      if (settingsSubagentModelSelect) {
+        settingsSubagentModelSelect.addEventListener('change', function() {
+          if (blockAccountSettingsWhileRunBusy() || settingsDialogBusyAction) {
+            renderSubagentModelSetting();
+            return;
+          }
+          var option = settingsSubagentModelSelect.selectedOptions[0];
+          if (!option || option.value === 'follow-main') {
+            settingsSubagentModelSetting = { mode: 'follow-main' };
+            vscode.postMessage({ type: 'setSubagentModel', mode: 'follow-main' });
+          } else {
+            var sourceId = readSettingsString(option.dataset.sourceId, '');
+            var modelId = readSettingsString(option.dataset.modelId, '');
+            if (!sourceId || !modelId) {
+              renderSubagentModelSetting();
+              return;
+            }
+            settingsSubagentModelSetting = { mode: 'fixed', sourceId: sourceId, modelId: modelId };
+            vscode.postMessage({ type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId });
+          }
+          beginSettingsDialogAction('set-subagent-model', t('subagentModelTitle'));
         });
       }
 

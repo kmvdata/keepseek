@@ -1,6 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, test } from 'node:test';
@@ -128,7 +128,7 @@ test('Runner turns keepseek_run_draft into a pending proposal without executing 
   assert.equal(response.draftRuns?.length, 1);
   assert.equal(response.draftRuns?.[0]?.spec.executable, 'printf');
   assert.deepEqual(response.draftRuns?.[0]?.spec.args, ['%s', 'literal; argument']);
-  assert.equal(response.draftRuns?.[0]?.spec.cwdUri, vscode.Uri.file(workspaceRoot).toString());
+  assert.equal(response.draftRuns?.[0]?.spec.cwdUri, vscode.Uri.file(await realpath(workspaceRoot)).toString());
   const result = JSON.parse(response.toolRounds?.[0]?.toolResults[0]?.content ?? '{}') as {
     ok?: boolean;
     draftRun?: { status?: string };

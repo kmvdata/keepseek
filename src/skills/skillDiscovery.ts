@@ -20,6 +20,13 @@ export interface ParsedSkillFrontmatter {
   description?: string;
   allowImplicit?: boolean;
   userInvocable?: boolean;
+  runAs?: 'subagent';
+  profile?: string;
+  tools?: string[];
+  maxSteps?: number;
+  timeoutMs?: number;
+  canDelegate?: boolean;
+  resultMaxChars?: number;
 }
 
 const DEFAULT_WORKSPACE_SKILL_DESCRIPTION = 'Project skill disabled because the workspace is not trusted.';
@@ -204,6 +211,7 @@ export class SkillDiscovery {
     }
 
     const parsed = parseSkillFrontmatter(readResult.content);
+    const runAs = parsed.runAs;
     return {
       id,
       name: parsed.name || fallbackName,
@@ -217,7 +225,18 @@ export class SkillDiscovery {
       userInvocable: parsed.userInvocable ?? true,
       hasReferences,
       hasAssets,
-      hasScripts
+      hasScripts,
+      ...(runAs === 'subagent' ? {
+        runAs,
+        subagentProfile: {
+          id: parsed.profile || normalizeProfileId(parsed.name || fallbackName),
+          tools: parsed.tools,
+          maxSteps: parsed.maxSteps,
+          timeoutMs: parsed.timeoutMs,
+          canDelegate: parsed.canDelegate,
+          resultMaxChars: parsed.resultMaxChars
+        }
+      } : {})
     };
   }
 
@@ -325,8 +344,19 @@ export function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
 
   const parsed: ParsedSkillFrontmatter = {};
   const keyPathByIndent: string[] = [];
+  let activeList: { path: string; indent: number } | undefined;
   for (let index = 1; index < closingIndex; index += 1) {
     const line = lines[index];
+    const listMatch = /^(\s*)-\s*(.+)$/u.exec(line);
+    if (listMatch && activeList && listMatch[1].length > activeList.indent) {
+      if (activeList.path === 'metadata.keepseek.tools') {
+        const item = normalizeScalar(listMatch[2]);
+        if (item && !(parsed.tools ?? []).includes(item)) {
+          parsed.tools = [...(parsed.tools ?? []), item];
+        }
+      }
+      continue;
+    }
     const match = /^(\s*)([A-Za-z0-9_.-]+)\s*:\s*(.*)$/u.exec(line);
     if (!match) {
       continue;
@@ -338,8 +368,10 @@ export function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
     const pathKey = keyPathByIndent.slice(0, indent + 1).join('.');
     const value = normalizeScalar(match[3]);
     if (!value) {
+      activeList = { path: pathKey, indent: match[1].length };
       continue;
     }
+    activeList = undefined;
 
     switch (pathKey) {
       case 'name':
@@ -353,6 +385,29 @@ export function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
         break;
       case 'metadata.keepseek.userInvocable':
         parsed.userInvocable = parseBoolean(value);
+        break;
+      case 'metadata.keepseek.runAs':
+      case 'runAs':
+        parsed.runAs = value.toLowerCase() === 'subagent' ? 'subagent' : undefined;
+        break;
+      case 'metadata.keepseek.profile':
+      case 'profile':
+        parsed.profile = normalizeProfileId(value);
+        break;
+      case 'metadata.keepseek.tools':
+        parsed.tools = parseStringList(value);
+        break;
+      case 'metadata.keepseek.maxSteps':
+        parsed.maxSteps = parseBoundedInteger(value, 1, 32);
+        break;
+      case 'metadata.keepseek.timeoutMs':
+        parsed.timeoutMs = parseBoundedInteger(value, 1_000, 900_000);
+        break;
+      case 'metadata.keepseek.canDelegate':
+        parsed.canDelegate = parseBoolean(value);
+        break;
+      case 'metadata.keepseek.resultMaxChars':
+        parsed.resultMaxChars = parseBoundedInteger(value, 1_000, 500_000);
         break;
     }
   }
@@ -380,6 +435,27 @@ function parseBoolean(value: string): boolean | undefined {
     return false;
   }
   return undefined;
+}
+
+function parseStringList(value: string): string[] | undefined {
+  const normalized = value.trim().replace(/^\[/u, '').replace(/\]$/u, '');
+  const values = normalized.split(',')
+    .map((item) => normalizeScalar(item))
+    .map((item) => item.trim())
+    .filter((item, index, items) => Boolean(item) && items.indexOf(item) === index);
+  return values.length ? values : undefined;
+}
+
+function parseBoundedInteger(value: string, min: number, max: number): number | undefined {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : undefined;
+}
+
+function normalizeProfileId(value: string): string {
+  return value.trim().toLocaleLowerCase()
+    .replace(/[^a-z0-9._-]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .slice(0, 80) || 'subagent-profile';
 }
 
 function deriveDescription(content: string): string {
