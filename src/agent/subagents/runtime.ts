@@ -8,9 +8,12 @@ import type { ModelSourceConfigSnapshot } from '../../accounts/types';
 import type {
   AgentRequest,
   ChatMessage,
+  ContextUsageEstimate,
   DraftEdit,
   DraftRunProposal,
-  KeepseekModel
+  KeepseekModel,
+  TurnUsageStats,
+  UsageEvent
 } from '../../shared/types';
 import type { InteractionTraceLogService } from '../logging/interactionTrace';
 import {
@@ -20,6 +23,10 @@ import {
   READ_SUBAGENT_RESULT_TOOL_NAME
 } from '../protocol';
 import { AgentLoop } from '../runner';
+import { addUsageEventToTurnStats } from '../usageStats';
+import {
+  createSubagentRunUsageSummary
+} from '../subagentUsageStats';
 import { resolveSubagentProfile } from './profiles';
 import { SubagentScheduler } from './scheduler';
 import { SubagentStore, DEFAULT_SUBAGENT_RESULT_PAGE_CHARS } from './store';
@@ -228,6 +235,20 @@ export class SubagentRuntime implements SubagentToolAdapter {
       const message = error instanceof Error ? error.message : String(error);
       const fallbackModel = context.parentRequest.model;
       const fallbackSource = context.parentRequest.sourceConfig;
+      const stats = createSubagentRunUsageSummary({
+        subagentId: id,
+        parentRunId: context.parentRunId,
+        rootRunId,
+        depth,
+        profile: profile.id,
+        lane,
+        status: context.signal?.aborted ? 'stopped' : 'failed',
+        sourceId: fallbackSource?.sourceId ?? fallbackModel.sourceId ?? '',
+        modelId: fallbackModel.id,
+        provider: fallbackSource?.provider ?? fallbackModel.provider,
+        startedAt: now,
+        completedAt
+      });
       await this.store.save({
         version: 1,
         id,
@@ -249,6 +270,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         toolSchemaHash: '',
         profileHash: hashText(JSON.stringify({ id: profile.id, lane })),
         projectInstructionsHash: hashText(formatProjectInstructions(context.parentRequest)),
+        stats,
         error: message,
         createdAt: now,
         updatedAt: completedAt,
@@ -260,6 +282,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         messages: [],
         result: ''
       }).catch(() => undefined);
+      context.onRunSummary?.(stats);
       this.setProgress({
         ...this.progress.get(id)!,
         status: context.signal?.aborted ? 'stopped' : 'failed',
@@ -310,6 +333,21 @@ export class SubagentRuntime implements SubagentToolAdapter {
       ...compatibility
     })) {
       const completedAt = new Date().toISOString();
+      const stats = createSubagentRunUsageSummary({
+        subagentId: input.id,
+        parentRunId: input.context.parentRunId,
+        rootRunId: input.rootRunId,
+        depth: input.depth,
+        profile: input.profile.id,
+        lane: input.profile.lane,
+        status: 'failed',
+        sourceId: sourceConfig.sourceId,
+        modelId: model.id,
+        provider: sourceConfig.provider,
+        startedAt: this.progress.get(input.id)?.updatedAt ?? completedAt,
+        completedAt
+      });
+      input.context.onRunSummary?.(stats);
       this.setProgress({
         ...this.progress.get(input.id)!,
         status: 'failed',
@@ -381,6 +419,13 @@ export class SubagentRuntime implements SubagentToolAdapter {
       ...compatibility,
       createdAt: startedAt
     };
+    let childUsage: TurnUsageStats | undefined;
+    let lastUsageEstimate: ContextUsageEstimate | undefined;
+    const recordChildUsage = (event: UsageEvent): void => {
+      const childEvent: UsageEvent = { ...event, source: 'subagent' };
+      childUsage = addUsageEventToTurnStats(childUsage, childEvent);
+      input.context.onUsage?.(childEvent);
+    };
     try {
       const runner = new AgentLoop(
         undefined,
@@ -433,10 +478,24 @@ export class SubagentRuntime implements SubagentToolAdapter {
             this.setProgress({ ...current, summary: status.detail ?? status.toolName ?? current.summary, updatedAt: new Date().toISOString() });
           }
         },
-        onUsage: (event) => input.context.onUsage?.({ ...event, source: 'subagent' })
+        onUsage: recordChildUsage,
+        onUsageEstimate: (usage) => {
+          const currentIntermediate = lastUsageEstimate
+            ? lastUsageEstimate.breakdown.toolCallTokensEstimate
+              + lastUsageEstimate.breakdown.toolResultTokensEstimate
+              + lastUsageEstimate.breakdown.reasoningTokensEstimate
+            : -1;
+          const nextIntermediate = usage.breakdown.toolCallTokensEstimate
+            + usage.breakdown.toolResultTokensEstimate
+            + usage.breakdown.reasoningTokensEstimate;
+          if (nextIntermediate >= currentIntermediate) {
+            lastUsageEstimate = usage;
+          }
+        },
+        onSubagentRunSummary: input.context.onRunSummary
       });
       const fullResult = capResult(response.message, input.profile.resultMaxChars);
-      const childUsage = response.usage ? relabelTurnUsageAsSubagent(response.usage) : undefined;
+      childUsage = childUsage ?? (response.usage ? relabelTurnUsageAsSubagent(response.usage) : undefined);
       const resultHash = hashText(fullResult.content);
       const assistantMessage: ChatMessage = {
         id: input.id,
@@ -449,6 +508,22 @@ export class SubagentRuntime implements SubagentToolAdapter {
         providerReplay: response.providerReplay
       };
       const completedAt = new Date().toISOString();
+      const stats = createSubagentRunUsageSummary({
+        subagentId: input.id,
+        parentRunId: input.context.parentRunId,
+        rootRunId: input.rootRunId,
+        depth: input.depth,
+        profile: input.profile.id,
+        lane: input.profile.lane,
+        status: 'completed',
+        sourceId: sourceConfig.sourceId,
+        modelId: model.id,
+        provider: sourceConfig.provider,
+        startedAt,
+        completedAt,
+        usage: childUsage,
+        lastUsageEstimate
+      });
       await this.store.save({
         ...metadataBase,
         status: 'completed',
@@ -457,7 +532,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         resultHash,
         resultChars: fullResult.content.length,
         resultTruncated: fullResult.truncated,
-        usage: childUsage
+        usage: childUsage,
+        stats
       }, {
         version: 1,
         metadataId: input.id,
@@ -465,6 +541,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         messages: [...history, assistantMessage],
         result: fullResult.content
       });
+      input.context.onRunSummary?.(stats);
       this.setProgress({
         ...this.progress.get(input.id)!,
         status: 'completed',
@@ -498,9 +575,27 @@ export class SubagentRuntime implements SubagentToolAdapter {
       const stopped = abort.signal.aborted;
       const completedAt = new Date().toISOString();
       const message = error instanceof Error ? error.message : String(error);
+      const stats = createSubagentRunUsageSummary({
+        subagentId: input.id,
+        parentRunId: input.context.parentRunId,
+        rootRunId: input.rootRunId,
+        depth: input.depth,
+        profile: input.profile.id,
+        lane: input.profile.lane,
+        status: stopped ? 'stopped' : 'failed',
+        sourceId: sourceConfig.sourceId,
+        modelId: model.id,
+        provider: sourceConfig.provider,
+        startedAt,
+        completedAt,
+        usage: childUsage,
+        lastUsageEstimate
+      });
       await this.store.save({
         ...metadataBase,
         status: stopped ? 'stopped' : 'failed',
+        usage: childUsage,
+        stats,
         error: message,
         updatedAt: completedAt,
         completedAt
@@ -510,7 +605,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         contextInstructions,
         messages: history,
         result: ''
-      });
+      }).catch(() => undefined);
+      input.context.onRunSummary?.(stats);
       this.setProgress({
         ...this.progress.get(input.id)!,
         status: stopped ? 'stopped' : 'failed',
@@ -748,7 +844,10 @@ function relabelTurnUsageAsSubagent(
         requestCount: usage.requestCount,
         cost: usage.cost,
         pricedRequestCount: usage.pricedRequestCount,
-        unpricedRequestCount: usage.unpricedRequestCount
+        unpricedRequestCount: usage.unpricedRequestCount,
+        costByCurrency: usage.costByCurrency ? { ...usage.costByCurrency } : undefined,
+        cacheDataRequestCount: usage.cacheDataRequestCount,
+        cacheDataMissingRequestCount: usage.cacheDataMissingRequestCount
       }
     }
   };

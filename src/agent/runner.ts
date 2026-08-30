@@ -78,6 +78,7 @@ import type {
   SubagentToolAdapter
 } from './subagents/types';
 import { searchHistoryArchive } from './historyArchive';
+import { createAcceptedRootSubagentHandoffEstimate, getSubagentHandoffKind } from './subagentUsageStats';
 import { buildProviderRequestProjection, getProviderRequestLane } from './providerRequestProjection';
 import {
   calibrateContextUsageEstimate,
@@ -899,6 +900,7 @@ export class AgentLoop {
 
       const responseFunctionOutputs: OpenAiResponsesItem[] = [];
       const anthropicToolResults: AnthropicUserContentBlock[] = [];
+      const acceptedEmulatedHandoffs: Array<{ toolCallId: string; toolName: string }> = [];
       const executeToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
         this.throwIfAborted(request.signal, request.language);
         trace.record({
@@ -1031,7 +1033,8 @@ export class AgentLoop {
                 historyArchive: request.historyArchive,
                 parentRequest: request,
                 parentRunId: trace.runId,
-                onUsage: runCallbacks.onUsage
+                onUsage: runCallbacks.onUsage,
+                onSubagentRunSummary: runCallbacks.onSubagentRunSummary
               });
             }
           }
@@ -1205,6 +1208,36 @@ export class AgentLoop {
         }
 
         toolResultTokens += nextToolResultTokens;
+        if (getSubagentHandoffKind(toolCall.function.name) && !request.subagentContext) {
+          if (normalizedAssistant.source === 'native') {
+            const handoff = createAcceptedRootSubagentHandoffEstimate({
+              toolName: toolCall.function.name,
+              handoffId: `${trace.runId}:${toolCall.id}`,
+              rootRunId: trace.runId,
+              tokensEstimate: this.estimateNativeProviderToolResultTokens({
+                request,
+                messages,
+                tools: nextToolsForRequest,
+                providerRunState,
+                shapedToolMessage,
+                prospectiveResponseOutput,
+                responseFunctionOutputs,
+                anthropicToolResults,
+                outputReserveTokens
+              }),
+              accepted: true,
+              nested: false
+            });
+            if (handoff) {
+              callbacks.onSubagentHandoffEstimate?.(handoff);
+            }
+          } else {
+            acceptedEmulatedHandoffs.push({
+              toolCallId: toolCall.id,
+              toolName: toolCall.function.name
+            });
+          }
+        }
         const ledgerEntry: ToolResultLedgerEntry = {
           toolName: toolCall.function.name,
           path: shapedToolResult.path,
@@ -1338,6 +1371,37 @@ export class AgentLoop {
           content: this.formatEmulatedDsmlToolResults(emulatedResults, request.language)
         };
         messages.push(emulatedToolResultMessage);
+        if (acceptedEmulatedHandoffs.length && !request.subagentContext) {
+          const acceptedIds = new Set(acceptedEmulatedHandoffs.map((item) => item.toolCallId));
+          const acceptedResults = emulatedResults.filter((item) => acceptedIds.has(item.toolCall.id));
+          const weights = acceptedResults.map((item) => Math.max(1, estimateDeepSeekMessageTokens({
+            role: 'user',
+            content: this.formatEmulatedDsmlToolResults([item], request.language)
+          })));
+          const acceptedTokens = estimateDeepSeekMessageTokens({
+            role: 'user',
+            content: this.formatEmulatedDsmlToolResults(acceptedResults, request.language)
+          });
+          const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+          let allocated = 0;
+          acceptedEmulatedHandoffs.forEach((item, index) => {
+            const tokensEstimate = index === acceptedEmulatedHandoffs.length - 1
+              ? Math.max(0, acceptedTokens - allocated)
+              : Math.max(0, Math.floor(acceptedTokens * (weights[index] ?? 0) / Math.max(1, totalWeight)));
+            allocated += tokensEstimate;
+            const handoff = createAcceptedRootSubagentHandoffEstimate({
+              toolName: item.toolName,
+              handoffId: `${trace.runId}:${item.toolCallId}`,
+              rootRunId: trace.runId,
+              tokensEstimate,
+              accepted: true,
+              nested: false
+            });
+            if (handoff) {
+              callbacks.onSubagentHandoffEstimate?.(handoff);
+            }
+          });
+        }
         this.appendProviderUserText(providerRunState, emulatedToolResultMessage.content ?? '');
         trace.record({
           type: 'agent_message_appended',
@@ -2231,6 +2295,7 @@ export class AgentLoop {
       parentRequest?: AgentRequest;
       parentRunId?: string;
       onUsage?: AgentRunCallbacks['onUsage'];
+      onSubagentRunSummary?: AgentRunCallbacks['onSubagentRunSummary'];
     } = {}
   ): Promise<string> {
     try {
@@ -2397,6 +2462,7 @@ export class AgentLoop {
       parentRequest?: AgentRequest;
       parentRunId?: string;
       onUsage?: AgentRunCallbacks['onUsage'];
+      onSubagentRunSummary?: AgentRunCallbacks['onSubagentRunSummary'];
     }
   ): import('./subagents/types').SubagentInvocationContext {
     if (!this.subagentTools || !options.parentRequest || !options.parentRunId) {
@@ -2407,7 +2473,8 @@ export class AgentLoop {
       parentRunId: options.parentRunId,
       language,
       signal: options.signal,
-      onUsage: options.onUsage
+      onUsage: options.onUsage,
+      onRunSummary: options.onSubagentRunSummary
     };
   }
 
@@ -2977,6 +3044,65 @@ export class AgentLoop {
       return 0;
     }
     return content.endsWith('\n') ? Math.max(1, lineStarts.length - 1) : lineStarts.length;
+  }
+
+  private estimateNativeProviderToolResultTokens(input: {
+    request: AgentRequest;
+    messages: DeepSeekMessage[];
+    tools: DeepSeekFunctionTool[];
+    providerRunState?: ProviderNativeRunState;
+    shapedToolMessage: DeepSeekMessage;
+    prospectiveResponseOutput: OpenAiResponsesItem;
+    responseFunctionOutputs: OpenAiResponsesItem[];
+    anthropicToolResults: AnthropicUserContentBlock[];
+    outputReserveTokens: number;
+  }): number {
+    if (input.providerRunState?.protocol === 'openai-responses') {
+      const before = createContextUsageEstimateFromResponses({
+        model: input.request.model,
+        input: [...input.providerRunState.input, ...input.responseFunctionOutputs],
+        outputReserveTokens: 0,
+        safetyReserveTokens: 0
+      });
+      const after = createContextUsageEstimateFromResponses({
+        model: input.request.model,
+        input: [...input.providerRunState.input, ...input.responseFunctionOutputs, input.prospectiveResponseOutput],
+        outputReserveTokens: 0,
+        safetyReserveTokens: 0
+      });
+      return Math.max(0, after.usedTokensEstimate - before.usedTokensEstimate);
+    }
+    if (input.providerRunState?.protocol === 'anthropic-messages') {
+      const beforeMessages: AnthropicMessage[] = input.anthropicToolResults.length
+        ? [...input.providerRunState.messages, { role: 'user', content: input.anthropicToolResults }]
+        : input.providerRunState.messages;
+      const nextBlock: AnthropicUserContentBlock = {
+        type: 'tool_result',
+        tool_use_id: input.shapedToolMessage.tool_call_id ?? '',
+        content: input.shapedToolMessage.content ?? '',
+        ...(this.isToolResultError(input.shapedToolMessage.content ?? '') ? { is_error: true } : {})
+      };
+      const afterMessages: AnthropicMessage[] = [
+        ...input.providerRunState.messages,
+        { role: 'user', content: [...input.anthropicToolResults, nextBlock] }
+      ];
+      const before = createContextUsageEstimateFromAnthropic({
+        model: input.request.model,
+        system: input.providerRunState.system,
+        messages: beforeMessages,
+        outputReserveTokens: 0,
+        safetyReserveTokens: 0
+      });
+      const after = createContextUsageEstimateFromAnthropic({
+        model: input.request.model,
+        system: input.providerRunState.system,
+        messages: afterMessages,
+        outputReserveTokens: 0,
+        safetyReserveTokens: 0
+      });
+      return Math.max(0, after.usedTokensEstimate - before.usedTokensEstimate);
+    }
+    return estimateDeepSeekMessageTokens(input.shapedToolMessage);
   }
 
   private shapeToolResult(toolName: string, rawContent: string, snipForContextPressure: boolean): ShapedToolResult {

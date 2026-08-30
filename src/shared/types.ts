@@ -151,6 +151,12 @@ export interface UsageSourceStats extends Usage {
   cost: number;
   pricedRequestCount?: number;
   unpricedRequestCount?: number;
+  /** Accounted provider cost split by currency. Different currencies are never summed. */
+  costByCurrency?: Record<string, number>;
+  /** Requests for which the provider returned cache token fields. */
+  cacheDataRequestCount?: number;
+  /** Requests for which provider cache token fields were absent. */
+  cacheDataMissingRequestCount?: number;
 }
 
 export interface UsageModelGroupStats extends Usage {
@@ -200,6 +206,72 @@ export interface SessionUsageStats extends Usage {
   legacyUnattributed?: boolean;
   updatedAt?: string;
   bySource?: Partial<Record<UsageSource, UsageSourceStats>>;
+}
+
+export type SubagentTerminalStatus = 'completed' | 'failed' | 'stopped';
+export type SubagentHandoffKind = 'delegate' | 'parallel' | 'read-result';
+
+/** Numeric-only summary of one isolated child run. No task, result, reasoning, or tool content is stored here. */
+export interface SubagentRunUsageSummary {
+  subagentId: string;
+  parentRunId: string;
+  rootRunId: string;
+  depth: number;
+  profile: string;
+  lane: string;
+  status: SubagentTerminalStatus;
+  sourceId: string;
+  modelId: string;
+  provider: string;
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  usage?: TurnUsageStats;
+  toolCallTokensEstimate: number;
+  toolResultTokensEstimate: number;
+  reasoningTokensEstimate: number;
+  isolatedIntermediateTokensEstimate: number;
+  estimatorVersion: string;
+}
+
+export interface SubagentUsageGroup {
+  sourceId?: string;
+  modelId?: string;
+  provider?: string;
+  profile?: string;
+  lane?: string;
+  taskCount: number;
+  completedCount: number;
+  failedCount: number;
+  stoppedCount: number;
+  usage?: TurnUsageStats;
+}
+
+export interface SubagentHandoffEstimate {
+  handoffId: string;
+  rootRunId: string;
+  kind: SubagentHandoffKind;
+  tokensEstimate: number;
+  createdAt: string;
+}
+
+export interface SubagentSessionUsageStats {
+  schemaVersion: 1;
+  totalCount: number;
+  completedCount: number;
+  failedCount: number;
+  stoppedCount: number;
+  byModel: SubagentUsageGroup[];
+  byProfileLane: SubagentUsageGroup[];
+  recentRuns: SubagentRunUsageSummary[];
+  /** Minimal idempotency ledger; unlike recentRuns it is not a user-facing detail list. */
+  countedSubagentIds: string[];
+  isolatedIntermediateTokensEstimate: number;
+  rootHandoffTokensEstimate: number;
+  rootHandoffCount: number;
+  handoffCountByKind: Record<SubagentHandoffKind, number>;
+  countedHandoffIds: string[];
+  updatedAt: string;
 }
 
 export interface ModelSourceBalanceState {
@@ -567,6 +639,7 @@ export interface ChatSession {
   contextUsage?: ContextUsageEstimate;
   usageStats?: SessionUsageStats;
   lastTurnUsage?: TurnUsageStats;
+  subagentUsageStats?: SubagentSessionUsageStats;
   balance?: ModelSourceBalanceState;
   promptCacheDiagnostics?: PromptCacheDiagnostics;
   lastTraceLogUri?: string;
@@ -1133,6 +1206,8 @@ export interface AgentRunCallbacks {
   onStatus?: (status: AgentActivityInput) => void;
   onUsageEstimate?: (usage: ContextUsageEstimate) => void;
   onUsage?: (event: UsageEvent) => void;
+  onSubagentRunSummary?: (summary: SubagentRunUsageSummary) => void;
+  onSubagentHandoffEstimate?: (estimate: SubagentHandoffEstimate) => void;
   onPromptCacheDiagnostics?: (diagnostics: PromptCacheDiagnostics) => void;
   onTraceLog?: (traceLog: AgentTraceLogInfo) => void;
   onTaskPlan?: (taskPlan: TaskPlan) => void;

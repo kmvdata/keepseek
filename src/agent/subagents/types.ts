@@ -2,6 +2,7 @@ import type {
   AgentRequest,
   DraftEdit,
   DraftRunProposal,
+  SubagentRunUsageSummary,
   UsageEvent
 } from '../../shared/types';
 import type { KeepseekLanguage } from '../../shared/i18n';
@@ -58,6 +59,7 @@ export interface SubagentInvocationContext {
   language: KeepseekLanguage;
   signal?: AbortSignal;
   onUsage?: (event: UsageEvent) => void;
+  onRunSummary?: (summary: SubagentRunUsageSummary) => void;
 }
 
 export interface SubagentToolExecution {
@@ -111,6 +113,7 @@ export interface StoredSubagentMetadata {
   resultChars?: number;
   resultTruncated?: boolean;
   usage?: import('../../shared/types').TurnUsageStats;
+  stats?: SubagentRunUsageSummary;
   error?: string;
   createdAt: string;
   updatedAt: string;

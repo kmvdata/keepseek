@@ -106,6 +106,11 @@ import {
   calculateCacheHitRate,
   getCacheMissPossibleReasons
 } from '../agent/usageStats';
+import {
+  addSubagentHandoffEstimate,
+  createUsageDetailsViewModel,
+  upsertSubagentRunUsageSummary
+} from '../agent/subagentUsageStats';
 import { SkillStore } from '../skills/skillStore';
 import { SkillCreator } from '../skills/skillCreator';
 import {
@@ -3727,6 +3732,22 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.liveTurnUsage = currentTurnUsage;
           scheduleLiveState();
         },
+        onSubagentRunSummary: (summary) => {
+          activeSession.subagentUsageStats = upsertSubagentRunUsageSummary(
+            activeSession.subagentUsageStats,
+            summary
+          );
+          activeSession.updatedAt = summary.completedAt;
+          scheduleLiveState();
+        },
+        onSubagentHandoffEstimate: (estimate) => {
+          activeSession.subagentUsageStats = addSubagentHandoffEstimate(
+            activeSession.subagentUsageStats,
+            estimate
+          );
+          activeSession.updatedAt = estimate.createdAt;
+          scheduleLiveState();
+        },
         onPromptCacheDiagnostics: (diagnostics) => {
           currentPromptCacheDiagnostics = diagnostics;
         },
@@ -4105,6 +4126,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         usageMetrics: {
           sessionUsageStats: activeSession.usageStats,
           lastTurnUsage,
+          usageDetails: createUsageDetailsViewModel({
+            sessionUsageStats: activeSession.usageStats,
+            lastTurnUsage,
+            subagentUsageStats: activeSession.subagentUsageStats
+          }),
           supportsBilling: selectedCatalogModel?.supportsBilling === true,
           balance: selectedCatalogModel?.supportsBilling && selectedCatalogModel.sourceId
             ? this.balanceStore.getBalance(this.getBalanceSourceScope(selectedCatalogModel.sourceId))
