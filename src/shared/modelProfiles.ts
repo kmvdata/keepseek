@@ -38,6 +38,7 @@ export interface AgentRuntimeProfile {
   maxTokens: number;
   maxToolIterations: number;
   maxToolCalls: number;
+  /** Compatibility field, always 0. User execution policy lives outside model capabilities. */
   maxRunMs: number;
   toolResultTokenBudget: number;
   streamIdleTimeoutMs: number;
@@ -85,7 +86,7 @@ const FLASH_PROFILES = {
     maxTokens: 48_000,
     maxToolIterations: 16,
     maxToolCalls: 48,
-    maxRunMs: 600_000,
+    maxRunMs: 0,
     toolResultTokenBudget: 160_000,
     contextCompression: {
       keepRecentTurns: 14,
@@ -101,7 +102,7 @@ const FLASH_PROFILES = {
     maxTokens: 96_000,
     maxToolIterations: 24,
     maxToolCalls: 72,
-    maxRunMs: 1_200_000,
+    maxRunMs: 0,
     toolResultTokenBudget: 240_000,
     contextCompression: {
       keepRecentTurns: 12,
@@ -117,7 +118,7 @@ const FLASH_PROFILES = {
     maxTokens: 192_000,
     maxToolIterations: 32,
     maxToolCalls: 96,
-    maxRunMs: 1_800_000,
+    maxRunMs: 0,
     toolResultTokenBudget: 320_000,
     contextCompression: {
       keepRecentTurns: 10,
@@ -136,7 +137,7 @@ const PRO_PROFILES = {
     maxTokens: 64_000,
     maxToolIterations: 20,
     maxToolCalls: 64,
-    maxRunMs: 900_000,
+    maxRunMs: 0,
     toolResultTokenBudget: 200_000,
     contextCompression: {
       keepRecentTurns: 18,
@@ -152,7 +153,7 @@ const PRO_PROFILES = {
     maxTokens: 128_000,
     maxToolIterations: 32,
     maxToolCalls: 96,
-    maxRunMs: 1_800_000,
+    maxRunMs: 0,
     toolResultTokenBudget: 320_000,
     contextCompression: {
       keepRecentTurns: 16,
@@ -168,7 +169,7 @@ const PRO_PROFILES = {
     maxTokens: 256_000,
     maxToolIterations: 48,
     maxToolCalls: 144,
-    maxRunMs: 3_600_000,
+    maxRunMs: 0,
     toolResultTokenBudget: 400_000,
     contextCompression: {
       keepRecentTurns: 12,
@@ -185,7 +186,7 @@ const PRO_PROFILES = {
 const GENERIC_PROFILE = {
   maxToolIterations: 16,
   maxToolCalls: 48,
-  maxRunMs: 600_000,
+  maxRunMs: 0,
   maxToolResultTokenBudget: 64_000,
   streamIdleTimeoutMs: 0,
   temperature: 1,

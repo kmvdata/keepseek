@@ -1,3 +1,4 @@
+import { normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
@@ -263,12 +264,13 @@ export class ChatSessionStore {
     return changed;
   }
 
+  private persistenceQueue: Promise<void> = Promise.resolve();
   public async persist(): Promise<void> {
     this.compact();
-    await this.sessionStorage.saveWorkspace(this.workspaceScope, {
-      activeSessionId: this.activeSessionIdValue,
-      sessions: this.sessions
-    });
+    const snapshot = structuredClone({ activeSessionId: this.activeSessionIdValue, sessions: this.sessions });
+    const write = this.persistenceQueue.catch(() => undefined).then(() => this.sessionStorage.saveWorkspace(this.workspaceScope, snapshot));
+    this.persistenceQueue = write;
+    await write;
   }
 
   public async relocalizeEmptySessionTitles(language: KeepseekLanguage): Promise<void> {
@@ -470,18 +472,29 @@ function copyMessage(message: ChatMessage): ChatMessage {
     ...message,
     id: randomUUID(),
     isStreaming: undefined,
+    runCheckpoint: undefined,
     runDetails: message.runDetails ? cloneRunDetails(message.runDetails) : undefined
   };
 }
 
 export function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
   return messages.map(({
+    runCheckpoint,
     expandedContent: _expandedContent,
     providerReplay: _providerReplay,
     toolRounds: _toolRounds,
     ...message
   }) => ({
     ...message,
+    runState: runCheckpoint ? {
+      taskId: runCheckpoint.taskId, status: runCheckpoint.status, stopReason: runCheckpoint.stopReason,
+      usedMs: runCheckpoint.usedMs, maxExecutionMs: runCheckpoint.maxExecutionMs, limitSource: runCheckpoint.limitSource,
+      attempt: runCheckpoint.attempt, modelRequests: runCheckpoint.modelRequests, retries: runCheckpoint.retries,
+      lastNetworkAt: runCheckpoint.lastNetworkAt, lastEventAt: runCheckpoint.lastEventAt, lastContentAt: runCheckpoint.lastContentAt,
+      requestStartedAt: runCheckpoint.requestStartedAt, lastStepAt: runCheckpoint.lastStepAt, steps: (runCheckpoint.state?.toolRounds.reduce((count, round) => count + round.toolResults.length, 0) ?? 0) + Object.keys(runCheckpoint.state?.pending?.results ?? {}).length,
+      canResume: runCheckpoint.status !== 'running' && !recoveryBlocker(runCheckpoint),
+      blocker: recoveryBlocker(runCheckpoint), error: runCheckpoint.error
+    } : undefined,
     ...(message.runDetails ? { runDetails: {
       ...message.runDetails,
       toolCalls: message.runDetails.toolCalls.map((tool) => {
@@ -632,6 +645,7 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     providerContent: typeof value.providerContent === 'string' ? value.providerContent : undefined,
     contextMeta: normalizeMessageContextMeta(value.contextMeta),
     usedSkills: normalizeMessageUsedSkills(value.usedSkills),
+    runCheckpoint: normalizeRunCheckpoint(value.runCheckpoint),
     runDetails: normalizeRunDetails(value.runDetails),
     toolRounds: normalizeAgentToolRounds(value.toolRounds),
     providerReplay: normalizeProviderReplay(value.providerReplay)

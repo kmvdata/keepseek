@@ -1,3 +1,6 @@
+import { ExecutionClock, ExecutionBudgetError, abortable, mergeDurations } from './executionPolicy';
+import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, recoveryBlocker, endpointHash, MAX_LENGTH_CONTINUATION_REQUESTS } from './runCheckpoint';
+import { getConfiguredAgentMaxExecutionMs, getConfiguredStreamIdleTimeoutMs } from '../shared/config';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
@@ -147,7 +150,6 @@ import { RunDetailsBuilder } from './logging/runDetails';
 import { createDraftRunProposal } from '../runs/draftRunProposal';
 
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;
-const MAX_LENGTH_CONTINUATION_REQUESTS = 1;
 const SEARCH_SHAPED_RESULT_LIMIT = 120;
 const SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT = 12;
 const SEARCH_SHAPED_TOTAL_CHARS = 50_000;
@@ -207,7 +209,7 @@ interface AnthropicMessagesRunState {
   cacheControl?: AnthropicMessagesRequestBody['cache_control'];
 }
 
-type ProviderNativeRunState = OpenAiResponsesRunState | AnthropicMessagesRunState;
+export type ProviderNativeRunState = OpenAiResponsesRunState | AnthropicMessagesRunState;
 
 type AgentBudgetFinishReason =
   | 'tool_iterations_exhausted'
@@ -298,13 +300,104 @@ export class AgentLoop {
   ) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
+    if (request.checkpoint) {
+      const blocker = recoveryBlocker(request.checkpoint);
+      if (blocker) throw new AgentInterruptedError('waiting_for_user', blocker);
+      const source = request.checkpoint.source;
+      if (request.model.id !== source.modelId || (request.sourceConfig && (
+        request.sourceConfig.sourceId !== source.sourceId || request.sourceConfig.provider !== source.provider
+        || endpointHash(request.sourceConfig.baseUrl) !== source.endpointHash))) throw new Error('Recovery source/model mismatch / 恢复来源或模型不匹配');
+      request = { ...request, executionLimits: request.checkpoint.request.executionLimits };
+    }
+    const limit = request.checkpoint?.maxExecutionMs ?? mergeDurations(getConfiguredAgentMaxExecutionMs(), request.executionLimits?.maxRunMs);
+    const cp = request.checkpoint ? checkpointCopy(request.checkpoint) : createRunCheckpoint(request, limit,
+      request.executionLimits?.timeLimitSource ?? (request.executionLimits?.maxRunMs ? 'explicit invocation + agent.maxExecutionMs' : 'agent.maxExecutionMs (0 = unlimited)'),
+      (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString()));
+    if (!request.subagentContext && cp.delegationBudget) this.subagentTools?.restoreTree?.(cp.taskId, cp.delegationBudget);
+    cp.attempt++; cp.status = 'running'; cp.stopReason = undefined; cp.error = undefined;
+    const ownClock = new ExecutionClock(limit, cp.usedMs);
+    const clocks = request.taskClock ? [ownClock, request.taskClock] : [ownClock];
+    let releases: Array<() => void> = [];
+    const resumeClock = () => { if (!releases.length) releases = clocks.map((clock) => clock.enter()); };
+    const suspendClock = () => { releases.forEach((release) => release()); releases = []; };
+    const controller = new AbortController();
+    const signals = [request.signal, ...clocks.map((clock) => clock.signal)].filter((signal): signal is AbortSignal => Boolean(signal));
+    const abort = () => controller.abort(signals.find((signal) => signal.aborted)?.reason);
+    signals.forEach((signal) => signal.addEventListener('abort', abort, { once: true }));
+    if (signals.some((signal) => signal.aborted)) abort();
+    const persist = async () => {
+      if (!request.subagentContext) cp.delegationBudget = this.subagentTools?.snapshotTree?.(cp.taskId) ?? cp.delegationBudget;
+      cp.usedMs = ownClock.usedMs; cp.updatedAt = new Date().toISOString();
+      try { await callbacks.onCheckpoint?.(checkpointCopy(cp)); }
+      catch (error) { cp.status = 'blocked'; cp.stopReason = String(error).includes('resource limit') ? 'resource_limit' : 'storage_failure'; cp.error = String(error); controller.abort(error); throw error; }
+    };
+    resumeClock();
+    let checkpointBusy = false;
+    const checkpointTimer = setInterval(() => {
+      if (checkpointBusy || controller.signal.aborted) return;
+      checkpointBusy = true;
+      void persist().catch(() => undefined).finally(() => { checkpointBusy = false; });
+    }, 15_000);
+    checkpointTimer.unref?.();
+    try {
+      await persist();
+      const response = await this.runLoop({ ...request, checkpoint: cp, taskClock: request.taskClock ?? ownClock, signal: controller.signal }, {
+        ...callbacks,
+        beforeModelRequest: async () => {
+          cp.modelRequests++; cp.requestStartedAt = new Date().toISOString();
+          cp.lastNetworkAt = undefined; cp.lastEventAt = undefined; cp.lastContentAt = undefined;
+          await persist();
+        },
+        beforeRetry: async () => { cp.retries++; cp.modelStepRetries = (cp.modelStepRetries ?? 0) + 1; await persist(); },
+        onTaskPlan: (plan) => { cp.taskPlan = plan; callbacks.onTaskPlan?.(plan); },
+        onCheckpoint: async (next) => { cp.state = next.state; await persist(); },
+        onActivity: (kind) => {
+          const now = new Date().toISOString();
+          if (kind === 'network') cp.lastNetworkAt = now;
+          if (kind === 'event') cp.lastEventAt = now;
+          if (kind === 'content') cp.lastContentAt = now;
+          callbacks.onActivity?.(kind);
+        },
+        onStatus: (status) => {
+          if (status.phase === 'awaiting_authorization' || status.phase === 'waiting_for_apply' || status.phase === 'waiting_for_subagent') suspendClock();
+          else resumeClock();
+          callbacks.onStatus?.(status);
+        }
+      });
+      cp.finalResponse = response;
+      cp.status = response.runDetails.budgetStopReason ? 'blocked' : 'completed';
+      cp.stopReason = response.runDetails.budgetStopReason || response.runDetails.status === 'waiting'
+        || response.repairLoop.status === 'waiting_for_apply' ? 'waiting_for_user' : 'completed';
+      await persist();
+      return response;
+    } catch (error) {
+      cp.status = ['storage_failure', 'resource_limit'].includes(cp.stopReason ?? '') ? 'blocked' : 'interrupted';
+      cp.stopReason ??= clocks.some((clock) => clock.signal.aborted) ? 'time_budget'
+        : request.signal?.aborted ? 'user_stop' : error instanceof AgentInterruptedError ? error.reason : 'connection_interrupted';
+      cp.error = error instanceof Error ? error.message : String(error);
+      await persist();
+      if (cp.stopReason === 'time_budget') throw new ExecutionBudgetError();
+      throw error;
+    } finally {
+      if (!request.subagentContext) this.subagentTools?.releaseTree?.(cp.taskId);
+      clearInterval(checkpointTimer);
+      suspendClock(); ownClock.dispose();
+      signals.forEach((signal) => signal.removeEventListener('abort', abort));
+    }
+  }
+
+  private async runLoop(request: AgentRequest, callbacks: AgentRunCallbacks): Promise<AgentResponse> {
     this.workspaceTools.setAuthorizedExternalReferenceUris(request.authorizedExternalReferenceUris);
+    const checkpoint = request.checkpoint!;
+    const restored = checkpoint.state;
+    let saveStep: (() => Promise<void>) | undefined;
     const runDetailsBuilderRef: { current?: RunDetailsBuilder } = {};
     const trace = this.traceLogService?.createRunTrace((event, timestamp) => {
       runDetailsBuilderRef.current?.record(event, timestamp);
     }) ?? createNoopInteractionTrace((event, timestamp) => {
       runDetailsBuilderRef.current?.record(event, timestamp);
     });
+    checkpoint.attemptIds.push(trace.runId);
     const traceLog = trace.enabled && trace.logUri
       ? {
           runId: trace.runId,
@@ -336,6 +429,7 @@ export class AgentLoop {
     runDetailsBuilderRef.current.setRunContext(request.currentRunContext?.metadata);
     const taskPlan = new TaskPlanTracker({
       runId: trace.runId,
+      initialPlan: checkpoint.taskPlan,
       sessionId: request.sessionId,
       prompt: request.prompt,
       language: request.language,
@@ -345,19 +439,20 @@ export class AgentLoop {
     const repairLoop = new RepairLoopTracker(
       normalizeRepairIterationLimit(request.executionLimits?.maxRepairIterations),
       (event) => trace.record(event),
-      request.repairLoop
+      restored?.repairLoop ?? request.repairLoop
     );
     const validationState = new RunValidationStateTracker(
       request.repairLoop?.status === 'running_validation' && request.repairLoop.iteration > 0
         ? 'post_apply'
         : 'workspace_baseline',
-      request.repairLoop?.pendingDraftEditIds
+      restored?.validationState?.pendingDraftEditIds ?? request.repairLoop?.pendingDraftEditIds,
+      restored?.validationState?.validations
     );
     const runAuthorizationPolicy = this.toolAuthorization.createRunPolicy(trace.runId);
     const toolResultLedger: ToolResultLedgerEntry[] = [];
     // 本 run 内 native 工具轮的原样字节快照（assistant tool_calls + tool 结果），
     // 由调用方持久化到 assistant 消息，跨轮重建时逐字节还原。
-    const toolRounds: AgentToolRound[] = [];
+    const toolRounds: AgentToolRound[] = structuredClone(restored?.toolRounds ?? []);
     const supportsBilling = request.sourceConfig?.supportsBilling ?? request.model.supportsBilling === true;
     const usagePricing = supportsBilling
       ? getConfiguredModelUsagePricing(request.model.id)
@@ -553,6 +648,7 @@ export class AgentLoop {
       : await this.tryCreateDraftEdit(request.prompt, request.language);
     this.throwIfAborted(request.signal, request.language);
     if (draftEdit) {
+      await this.captureDraftBaseline(draftEdit);
       validationState.recordDraftEdit(draftEdit.id);
       taskPlan.beginExecution();
       taskPlan.startTool(CREATE_DRAFT_EDIT_TOOL_NAME);
@@ -581,6 +677,10 @@ export class AgentLoop {
     }
 
     const runtimeConfig = await this.getRuntimeConfig(request);
+    if (!restored) checkpoint.request.executionLimits = {
+      ...request.executionLimits, maxToolIterations: runtimeConfig.maxToolIterations,
+      maxToolCalls: runtimeConfig.maxToolCalls, maxRepairIterations: repairLoop.getState().maxIterations, maxValidationRuns: runtimeConfig.maxValidationRuns
+    };
     taskPlan.beginExecution();
     const providerProjection = buildProviderRequestProjection({
       model: request.model,
@@ -608,7 +708,7 @@ export class AgentLoop {
         projection.usedSummaryIds.includes(summary.id)
       ))
     );
-    const messages = providerProjection.messages;
+    const messages = structuredClone(restored?.messages ?? providerProjection.messages);
     providerRunState = providerProjection.responses
       ? {
           protocol: 'openai-responses',
@@ -632,6 +732,7 @@ export class AgentLoop {
             }) ? { type: 'ephemeral' } : undefined
           }
         : undefined;
+    if (restored?.provider) providerRunState = structuredClone(restored.provider);
     trace.record({
       type: 'context_projection',
       metadata: projection.metadata,
@@ -667,6 +768,9 @@ export class AgentLoop {
       messages: formatMessagesForTrace(messages, trace.includesPayload('request'))
     });
     const tools = providerProjection.tools;
+    const schemaHash = hashText(JSON.stringify(tools));
+    if (checkpoint.toolSchemaHash && checkpoint.toolSchemaHash !== schemaHash) throw new Error('Tool schema changed; recovery refused / 工具协议变化，不能继续旧任务');
+    checkpoint.toolSchemaHash = schemaHash;
     promptCacheDiagnostics = this.createPromptCacheDiagnostics({
       request,
       messages,
@@ -683,12 +787,12 @@ export class AgentLoop {
       exposedToolNames: tools.map((tool) => tool.function.name),
       projectionMetadata: projection.metadata
     });
-    const draftEdits: DraftEdit[] = [];
-    const draftRuns: DraftRunProposal[] = [];
-    const reasoningParts: string[] = [];
+    const draftEdits: DraftEdit[] = structuredClone(restored?.draftEdits ?? []);
+    const draftRuns: DraftRunProposal[] = structuredClone(restored?.draftRuns ?? []);
+    const reasoningParts: string[] = [...(restored?.reasoningParts ?? [])];
+    draftEdits.forEach((edit) => validationState.recordDraftEdit(edit.id));
     const maxIterations = Math.max(0, runtimeConfig.maxToolIterations);
-    const runStartedAt = Date.now();
-    const runDeadlineAt = runtimeConfig.maxRunMs > 0 ? runStartedAt + runtimeConfig.maxRunMs : undefined;
+    const runDeadlineAt: number | undefined = undefined; // Effective clock owns cancellation; never a wall-clock deadline.
     const maxToolResultTokens = runtimeConfig.toolResultTokenBudget > 0
       ? runtimeConfig.toolResultTokenBudget
       : Number.POSITIVE_INFINITY;
@@ -758,11 +862,11 @@ export class AgentLoop {
             breakdown
           }));
     };
-    let toolCallCount = 0;
-    let validationRunCount = 0;
-    let toolResultTokens = 0;
-    let budgetStopReason: AgentBudgetFinishReason | undefined;
-    let budgetStopInstructionQueued = false;
+    let toolCallCount = restored?.toolCallCount ?? 0;
+    let validationRunCount = restored?.validationRunCount ?? 0;
+    let toolResultTokens = restored?.toolResultTokens ?? 0;
+    let budgetStopReason: AgentBudgetFinishReason | undefined = restored?.budgetStopReason;
+    let budgetStopInstructionQueued = restored?.budgetStopInstructionQueued ?? false;
     const queueBudgetStopInstruction = () => {
       if (!budgetStopReason || budgetStopInstructionQueued) {
         return;
@@ -799,7 +903,25 @@ export class AgentLoop {
         : '首次 API 调用前的 Provider 请求将超过模型上下文窗口。请减少附件上下文，或等待历史压缩完成。');
     }
 
-    for (let turn = 0; turn <= maxIterations; turn += 1) {
+    let nextTurn = restored?.turn ?? 0;
+    let pending = restored?.pending;
+    // Committed projection stays at the start of the current model step. During
+    // a tool round only its result journal changes, so replay cannot duplicate
+    // already appended tool messages after an interruption.
+    let completedReplay = restored?.completedReplay;
+    let committedMessages = structuredClone(messages);
+    let committedProvider = structuredClone(providerRunState);
+    saveStep = async () => {
+      for (const edit of draftEdits) await this.captureDraftBaseline(edit);
+      checkpoint.state = {
+        messages: committedMessages, provider: committedProvider, completedReplay, toolRounds, draftEdits, draftRuns,
+        reasoningParts, turn: nextTurn, toolCallCount, validationRunCount, toolResultTokens,
+        validationState: validationState.getState(), repairLoop: repairLoop.getState(), budgetStopReason, budgetStopInstructionQueued, pending
+      };
+      await callbacks.onCheckpoint?.(checkpoint);
+    };
+    await saveStep();
+    for (let turn = nextTurn; turn <= maxIterations; turn += 1) {
       this.throwIfAborted(request.signal, request.language);
       const runTimeStopReason = this.getRunTimeStopReason(runDeadlineAt);
       if (runTimeStopReason) {
@@ -826,14 +948,13 @@ export class AgentLoop {
       const toolsForTurn = tools;
       const allowTerminalDraftEdit = maxIterations > 0 && budgetStopReason === 'tool_iterations_exhausted';
       emitUsageEstimate(toolsForTurn);
-      const response = await this.createModelResponse(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, {
+      const response = pending?.response ?? await this.createModelResponse(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, {
         trace,
         usageTotals: upstreamUsageTotals,
         usageSource: request.backgroundRunId ? 'background' : 'executor',
         toolChoice: allowToolCalls ? 'auto' : 'none',
         providerRunState
       });
-      this.throwIfAborted(request.signal, request.language);
       const normalizedAssistant = this.normalizeAssistantToolCalls(
         response.message,
         allowToolCalls || allowTerminalDraftEdit,
@@ -846,7 +967,7 @@ export class AgentLoop {
           : 'Provider API 没有返回可用的 assistant message。');
       }
 
-      if (normalizedAssistant.displayReasoningContent) {
+      if (normalizedAssistant.displayReasoningContent && !pending) {
         reasoningParts.push(normalizedAssistant.displayReasoningContent);
       }
 
@@ -863,6 +984,9 @@ export class AgentLoop {
         });
       }
       if (!toolCalls.length) {
+        pending ??= { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {} };
+        committedProvider = structuredClone(providerRunState);
+        await saveStep();
         const continuedResponse = await this.tryContinueLengthLimitedResponse({
           request,
           runtimeConfig,
@@ -909,16 +1033,17 @@ export class AgentLoop {
         }, { finishReason: finalFinishReason });
       }
 
-      emitStatus({
-        base: 'thinking',
-        phase: 'planning_tool'
-      });
+      pending ??= { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {} };
+      committedProvider = structuredClone(providerRunState);
+      await saveStep();
+      emitStatus({ base: 'thinking', phase: 'planning_tool' });
 
       const responseFunctionOutputs: OpenAiResponsesItem[] = [];
       const anthropicToolResults: AnthropicUserContentBlock[] = [];
       const acceptedEmulatedHandoffs: Array<{ toolCallId: string; toolName: string }> = [];
-      const executeToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
+      const performToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
         this.throwIfAborted(request.signal, request.language);
+        if (Object.hasOwn(pending!.results, toolCall.id)) return pending!.results[toolCall.id];
         trace.record({
           type: 'tool_call',
           toolCall: trace.includesPayload('request') ? toolCall : summarizeDeepSeekToolCall(toolCall)
@@ -1004,12 +1129,14 @@ export class AgentLoop {
                 detail: authorizationMetadata.scope
               });
             }
-            authorizationDecision = await this.toolAuthorization.authorize({
+            authorizationDecision = await abortable(this.toolAuthorization.authorize({
               toolName: toolCall.function.name,
               args: toolArgs,
               language: request.language,
               policy: runAuthorizationPolicy
-            });
+            }), request.signal);
+            this.throwIfAborted(request.signal, request.language);
+            emitStatus({ base: 'executing', phase: this.getToolActivityPhase(toolCall.function.name), toolName: toolCall.function.name });
             trace.record({
               type: 'tool_authorization_decision',
               toolCallId: toolCall.id,
@@ -1042,7 +1169,11 @@ export class AgentLoop {
                   repairIteration: repairLoop.getState().iteration
                 });
               }
-              rawToolResult = await this.handleToolCall(toolCall, draftEdits, draftRuns, request.language, {
+              pending!.executing = { id: toolCall.id, name: toolCall.function.name };
+              await saveStep!(); // A durable intent is required before validation/delegation or any proposal.
+              this.throwIfAborted(request.signal, request.language);
+              if (getSubagentHandoffKind(toolCall.function.name)) emitStatus({ base: 'waiting', phase: 'waiting_for_subagent', toolName: toolCall.function.name });
+              const execution = this.handleToolCall(toolCall, draftEdits, draftRuns, request.language, {
                 signal: request.signal,
                 runDeadlineAt,
                 authorization: authorizationDecision,
@@ -1052,9 +1183,22 @@ export class AgentLoop {
                 onUsage: runCallbacks.onUsage,
                 onSubagentRunSummary: runCallbacks.onSubagentRunSummary
               });
+              const cancellableRead = !isDraftEditPreparationTool(toolCall.function.name)
+                && !isDraftRunPreparationTool(toolCall.function.name)
+                && toolCall.function.name !== RUN_VALIDATION_TOOL_NAME
+                && !getSubagentHandoffKind(toolCall.function.name);
+              try { rawToolResult = await (cancellableRead ? abortable(execution, request.signal) : execution); }
+              catch (error) {
+                if (cancellableRead && request.signal?.aborted) {
+                  pending!.executing = undefined; // No effects to reconcile; explicit recovery may re-read.
+                  await saveStep!();
+                }
+                throw error;
+              }
             }
           }
         } catch (error) {
+          if (request.signal?.aborted || checkpoint.stopReason === 'storage_failure' || checkpoint.stopReason === 'resource_limit') throw error;
           rawToolResult = JSON.stringify({
             ok: false,
             errorType: 'tool_execution_failed',
@@ -1274,6 +1418,16 @@ export class AgentLoop {
         return shapedToolResult.content;
       };
 
+      const executeToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
+        const result = await performToolCall(toolCall);
+        pending!.results[toolCall.id] = result;
+        pending!.executing = undefined;
+        checkpoint.lastStepAt = new Date().toISOString();
+        await saveStep!();
+        this.throwIfAborted(request.signal, request.language);
+        return result;
+      };
+
       if (normalizedAssistant.source === 'native') {
         const assistantToolCallMessage: DeepSeekMessage = {
           role: 'assistant',
@@ -1415,6 +1569,14 @@ export class AgentLoop {
       }
 
       queueBudgetStopInstruction();
+      pending = undefined;
+      checkpoint.modelStepRetries = 0;
+      completedReplay = this.createProviderReplayState(providerRunState);
+      nextTurn = turn + 1;
+      committedMessages = structuredClone(messages);
+      committedProvider = structuredClone(providerRunState);
+      checkpoint.lastStepAt = new Date().toISOString();
+      await saveStep();
     }
 
     emitStatus({
@@ -1694,22 +1856,6 @@ export class AgentLoop {
       });
       throw new Error(this.getRunTimeLimitError(runtimeConfig.maxRunMs, request.language));
     }
-    if (options.allowPartialRecovery !== false && response.hadPartialOutput && response.message?.content?.trim()) {
-      return await this.createContinuationAfterPartialFailure({
-        request,
-        runtimeConfig,
-        messages,
-        partialAssistant: response.message,
-        failureError: response.error,
-        callbacks,
-        runDeadlineAt,
-        trace,
-        usageTotals: options.usageTotals,
-        tools,
-        providerRunState: options.providerRunState
-      });
-    }
-
     trace.record({
       type: 'upstream_request_failed',
       requestId: upstreamRequestId,
@@ -1720,7 +1866,7 @@ export class AgentLoop {
       error: response.error
     });
 
-    throw new Error(response.error ?? (request.language === 'en'
+    throw new AgentInterruptedError(response.error?.includes('resource limit') ? 'resource_limit' : response.failureKind === 'http' ? 'provider_error' : 'connection_interrupted', response.error ?? (request.language === 'en'
       ? 'The provider API request failed.'
       : 'Provider API 请求失败。'));
   }
@@ -1746,9 +1892,10 @@ export class AgentLoop {
       return undefined;
     }
 
-    let content = input.assistant.content ?? '';
-    let finishReason = input.response.finishReason;
-    for (let continuationIndex = 0; continuationIndex < MAX_LENGTH_CONTINUATION_REQUESTS; continuationIndex += 1) {
+    const saved = input.request.checkpoint?.state;
+    let content = saved?.continuation?.content ?? input.assistant.content ?? '';
+    let finishReason = saved?.continuation?.finishReason ?? input.response.finishReason;
+    for (let continuationIndex = saved?.continuation?.requests ?? 0; continuationIndex < MAX_LENGTH_CONTINUATION_REQUESTS; continuationIndex += 1) {
       const assistantMessage: DeepSeekMessage = {
         role: 'assistant',
         content
@@ -1787,6 +1934,7 @@ export class AgentLoop {
         return continuationIndex > 0 ? { content, finishReason } : undefined;
       }
 
+      if (!saved?.continuation?.inFlight) {
       input.messages.push(assistantMessage, instructionMessage);
       if (input.providerRunState?.protocol === 'openai-responses') {
         const responseInstruction: OpenAiResponsesItem = {
@@ -1811,6 +1959,14 @@ export class AgentLoop {
       });
       input.runtimeUsageBreakdown.inputTokensEstimate +=
         estimateDeepSeekMessageTokens(assistantMessage) + estimateDeepSeekMessageTokens(instructionMessage);
+      }
+      if (saved) {
+        saved.messages = structuredClone(input.messages);
+        saved.provider = structuredClone(input.providerRunState);
+        saved.continuation = { content, finishReason, requests: continuationIndex + 1, inFlight: true };
+        await input.callbacks.onCheckpoint?.(input.request.checkpoint!);
+      }
+
 
       const continuationResponse = await this.createModelResponse(
         input.request,
@@ -1836,6 +1992,12 @@ export class AgentLoop {
       const continuationContent = normalizedContinuation.assistant.content ?? '';
       content = this.joinContinuationContent(content, continuationContent);
       finishReason = continuationResponse.finishReason;
+      if (saved) {
+        saved.continuation = { content, finishReason, requests: continuationIndex + 1, inFlight: false };
+        saved.provider = structuredClone(input.providerRunState);
+        saved.pending = { response: { message: { ...normalizedContinuation.assistant, content }, finishReason }, results: {} };
+        await input.callbacks.onCheckpoint?.(input.request.checkpoint!);
+      }
 
       if ((finishReason !== 'length' && finishReason !== 'pause_turn') || (!continuationContent.trim() && finishReason !== 'pause_turn')) {
         break;
@@ -2583,6 +2745,18 @@ export class AgentLoop {
       },
       message: 'DraftRun prepared only; no process was started. The user must review and explicitly approve this single execution in the KeepSeek panel.'
     });
+  }
+
+  private async captureDraftBaseline(edit: DraftEdit): Promise<void> {
+    if (edit.action === 'create' || edit.expectedOriginalTextHash) return;
+    const uri = vscode.Uri.parse(edit.uri);
+    const stat = await vscode.workspace.fs.stat(uri);
+    const limit = getConfiguredWorkspaceReadMaxBytes();
+    if (stat.type !== vscode.FileType.File || stat.size > limit) throw new AgentInterruptedError('resource_limit', 'Draft baseline is not a bounded text file / 草案基线不是允许大小内的文本文件');
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    if (bytes.byteLength > limit) throw new AgentInterruptedError('resource_limit', 'Draft baseline resource limit / 草案基线超出资源上限');
+    edit.expectedOriginalTextHash = hashText(new TextDecoder().decode(bytes));
+    edit.expectedOriginalSize = bytes.byteLength;
   }
 
   private async createDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[], language: KeepseekLanguage): Promise<string> {
@@ -3767,15 +3941,15 @@ export class AgentLoop {
       maxTokens: profile.maxTokens,
       maxToolIterations: clampRunLimit(profile.maxToolIterations, request.executionLimits?.maxToolIterations),
       maxToolCalls: clampRunLimit(profile.maxToolCalls, request.executionLimits?.maxToolCalls),
-      maxRunMs: clampRunLimit(profile.maxRunMs, request.executionLimits?.maxRunMs),
+      maxRunMs: request.checkpoint?.maxExecutionMs ?? mergeDurations(getConfiguredAgentMaxExecutionMs(), request.executionLimits?.maxRunMs),
       toolResultTokenBudget: profile.toolResultTokenBudget,
-      streamIdleTimeoutMs: profile.streamIdleTimeoutMs,
+      streamIdleTimeoutMs: getConfiguredStreamIdleTimeoutMs(),
       temperature: profile.temperature,
       topP: profile.topP,
       contextCompression: profile.contextCompression,
-      maxRequestRetries: getConfiguredMaxRequestRetries(),
+      maxRequestRetries: Math.max(0, getConfiguredMaxRequestRetries() - (request.checkpoint?.modelStepRetries ?? 0)),
       requestRetryBaseMs: getConfiguredRequestRetryBaseMs(),
-      maxValidationRuns: getConfiguredMaxValidationRuns(),
+      maxValidationRuns: clampRunLimit(getConfiguredMaxValidationRuns(), request.executionLimits?.maxValidationRuns),
       maxRepairIterations: getConfiguredMaxRepairIterations()
     };
   }

@@ -508,7 +508,7 @@ describe('Anthropic Messages compatible protocol', () => {
     ]), /context window was exceeded/u);
   });
 
-  it('keeps shared abort, deadline, idle timeout and empty-stream retry behavior', async () => {
+  it('keeps shared abort, deadline, idle timeout and empty-stream uncertainty behavior', async () => {
     const client = new AnthropicMessagesClient();
     const originalFetch = globalThis.fetch;
     try {
@@ -540,9 +540,9 @@ describe('Anthropic Messages compatible protocol', () => {
       const retried = await client.createModelResponse({ ...clientConfig(), maxRequestRetries: 1 }, {
         body: minimalAnthropicBody(), language: 'en'
       });
-      assert.equal(retried.ok, true);
-      assert.equal(retried.retryCount, 1);
-      assert.equal(retried.message?.content, 'retried');
+      assert.equal(retried.ok, false);
+      assert.equal(retried.retryCount, 0);
+      assert.equal(attempts, 1);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -611,7 +611,7 @@ describe('Anthropic Messages compatible protocol', () => {
     }
   });
 
-  it('continues length, pause_turn and partial failures with only safe native state', async () => {
+  it('continues completed length and pause_turn but interrupts partial failures', async () => {
     await exerciseContinuation('max_tokens', 'hel', (bodies) => {
       const second = bodies[1].messages;
       const assistantIndex = second.findIndex((message) => message.role === 'assistant');
@@ -640,13 +640,8 @@ describe('Anthropic Messages compatible protocol', () => {
       return anthropicTextResponse('lo');
     }) as typeof fetch;
     try {
-      const response = await new AgentRunner().run(createAgentRequest());
-      assert.equal(response.message, 'hello');
-      assert.equal(bodies.length, 2);
-      const second = bodies[1].messages;
-      assert.equal(JSON.stringify(second).includes('opaque-signature'), false);
-      assert.equal(second.some((message) => message.role === 'assistant'
-        && message.content.some((block) => block.type === 'text' && block.text === 'hel')), true);
+      await assert.rejects(new AgentRunner().run(createAgentRequest()), /Cannot parse/u);
+      assert.equal(bodies.length, 1);
     } finally {
       globalThis.fetch = originalFetch;
     }

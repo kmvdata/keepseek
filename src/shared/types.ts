@@ -399,6 +399,12 @@ export interface DraftRun extends DraftRunProposal {
 }
 
 export interface ChatMessage {
+  runCheckpoint?: import('../agent/runCheckpoint').RunCheckpoint;
+  runState?: {
+    taskId: string; status: string; stopReason?: string; usedMs: number; maxExecutionMs: number; limitSource: string;
+    attempt: number; modelRequests: number; retries: number; lastNetworkAt?: string; lastEventAt?: string;
+    requestStartedAt?: string; lastContentAt?: string; lastStepAt?: string; steps: number; canResume: boolean; blocker?: string; error?: string;
+  };
   id: string;
   role: ChatRole;
   content: string;
@@ -1051,6 +1057,8 @@ export interface ReferenceResource {
 }
 
 export interface AgentRequest {
+  checkpoint?: import('../agent/runCheckpoint').RunCheckpoint;
+  taskClock?: import('../agent/executionPolicy').ExecutionClock;
   prompt: string;
   model: KeepseekModel;
   settings: AgentSettings;
@@ -1100,9 +1108,11 @@ export interface AgentRequest {
 }
 
 export interface AgentExecutionLimits {
+  maxValidationRuns?: number;
   maxToolIterations?: number;
   maxToolCalls?: number;
   maxRunMs?: number;
+  timeLimitSource?: string;
   maxRepairIterations?: number;
 }
 
@@ -1202,6 +1212,10 @@ export interface AgentTraceLogInfo {
 }
 
 export interface AgentRunCallbacks {
+  beforeModelRequest?: () => Promise<void>;
+  beforeRetry?: () => Promise<void>;
+  onCheckpoint?: (checkpoint: import('../agent/runCheckpoint').RunCheckpoint) => Promise<void>;
+  onActivity?: (kind: 'network' | 'event' | 'content' | 'request' | 'retry') => void;
   onDelta?: (event: AgentProgressEvent) => void;
   onStatus?: (status: AgentActivityInput) => void;
   onUsageEstimate?: (usage: ContextUsageEstimate) => void;
@@ -1235,6 +1249,7 @@ export interface BackgroundRunLimits {
 }
 
 export interface BackgroundRunProgress {
+  usedMs?: number;
   round: number;
   toolCalls: number;
   runIds: string[];

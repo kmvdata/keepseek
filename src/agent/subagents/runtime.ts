@@ -1,3 +1,5 @@
+import { recoveryBlocker, type RunCheckpoint } from '../runCheckpoint';
+import { mergeDurations } from '../executionPolicy';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { resolveModelSourceConfig } from '../../accounts/accountResolver';
@@ -44,8 +46,6 @@ import type {
 } from './types';
 
 const SUBAGENT_PROTOCOL_VERSION = 5;
-const DEFAULT_CHILD_MAX_RUN_MS = 5 * 60 * 1000;
-const MAX_CHILD_MAX_RUN_MS = 15 * 60 * 1000;
 const MAX_INLINE_RESULT_CHARS = DEFAULT_SUBAGENT_RESULT_PAGE_CHARS;
 const MAX_PARALLEL_TASKS = 8;
 
@@ -67,6 +67,10 @@ export class SubagentRuntime implements SubagentToolAdapter {
     this.settingsStore = new SubagentSettingsStore(options.globalStorageUri);
     this.store = new SubagentStore(options.globalStorageUri, options.workspaceKey);
   }
+
+  public snapshotTree(treeId: string) { return this.scheduler.snapshotTree(treeId); }
+  public restoreTree(treeId: string, budget: import('./types').SubagentTreeBudget): void { this.scheduler.restoreTree(treeId, budget); }
+  public releaseTree(treeId: string): void { this.scheduler.releaseTree(treeId); }
 
   public getProgressStates(parentSessionId?: string): SubagentProgressState[] {
     return [...this.progress.values()]
@@ -171,7 +175,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
     const parentChild = parentRequest.subagentContext;
     const depth = (parentChild?.depth ?? 0) + 1;
     const id = `sa_${randomUUID()}`;
-    const treeId = parentChild?.treeId ?? context.parentRunId;
+    const treeId = parentChild?.treeId ?? parentRequest.checkpoint?.taskId ?? context.parentRunId;
     const rootRunId = parentChild?.rootRunId ?? context.parentRunId;
     const prior = input.continueSubagentId
       ? await this.store.read(parentSessionId, input.continueSubagentId)
@@ -191,7 +195,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
     const lane = profile.lane;
     const reserved = this.scheduler.reserve({
       treeId,
-      parentRunId: context.parentRunId,
+      parentRunId: parentRequest.checkpoint?.taskId ?? context.parentRunId,
       ownerId: id,
       depth,
       proposal: lane === 'proposal',
@@ -388,13 +392,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
       ...(input.prior?.transcript.messages ?? []).map(cloneMessage),
       userMessage
     ];
-    const timeoutMs = clampInteger(
-      input.input.timeoutMs ?? input.profile.timeoutMs,
-      1_000,
-      MAX_CHILD_MAX_RUN_MS,
-      DEFAULT_CHILD_MAX_RUN_MS
-    );
-    const abort = createChildAbortSignal(input.context.signal, timeoutMs);
+    const timeoutMs = mergeDurations(input.input.timeoutMs, input.profile.timeoutMs);
+    const abort = createChildAbortSignal(input.context.signal);
     const parentMaxSteps = input.context.parentRequest.executionLimits?.maxToolIterations
       ?? 10;
     const inheritedMaxSteps = Math.max(5, Math.floor(parentMaxSteps / 2));
@@ -422,6 +421,11 @@ export class SubagentRuntime implements SubagentToolAdapter {
       ...compatibility,
       createdAt: startedAt
     };
+    let savedCheckpoint: RunCheckpoint | undefined = input.prior?.transcript.checkpoint;
+    const resumeCheckpoint = savedCheckpoint?.status !== 'completed' ? savedCheckpoint : undefined;
+    if (resumeCheckpoint && (recoveryBlocker(resumeCheckpoint) || input.input.task !== input.prior?.metadata.task)) {
+      return toolError('subagent_recovery_blocked', recoveryBlocker(resumeCheckpoint) ?? 'Continue using the original task text.');
+    }
     let childUsage: TurnUsageStats | undefined;
     let receivedUsageEvent = false;
     let lastUsageEstimate: ContextUsageEstimate | undefined;
@@ -447,6 +451,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         this
       );
       const response = await runner.run({
+        ...(resumeCheckpoint?.request ?? {}),
+        checkpoint: resumeCheckpoint,
         prompt: input.input.task,
         model,
         settings: { ...input.context.parentRequest.settings },
@@ -465,6 +471,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
           maxToolIterations: maxSteps,
           maxToolCalls: Math.max(maxSteps, maxSteps * 2),
           maxRunMs: timeoutMs,
+          timeLimitSource: input.profile.timeoutMs ? `Skill ${input.profile.id} + invocation` : 'explicit subagent invocation + agent.maxExecutionMs',
           maxRepairIterations: 1
         },
         sourceConfig,
@@ -479,8 +486,15 @@ export class SubagentRuntime implements SubagentToolAdapter {
           profile: input.profile.id,
           lane: input.profile.lane
         },
+        taskClock: input.context.parentRequest.taskClock,
         signal: abort.signal
       }, {
+        onCheckpoint: async (checkpoint) => {
+          savedCheckpoint = checkpoint;
+          await this.store.save({ ...metadataBase, status: checkpoint.status === 'running' ? 'running' : checkpoint.status === 'completed' ? 'completed' : 'stopped', updatedAt: checkpoint.updatedAt }, {
+            version: 1, metadataId: input.id, contextInstructions, messages: history, result: '', checkpoint
+          });
+        },
         onStatus: (status) => {
           const current = this.progress.get(input.id);
           if (current && current.status === 'running') {
@@ -545,7 +559,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         metadataId: input.id,
         contextInstructions,
         messages: [...history, assistantMessage],
-        result: fullResult.content
+        result: fullResult.content,
+        checkpoint: savedCheckpoint
       });
       input.context.onRunSummary?.(stats);
       this.setProgress({
@@ -609,7 +624,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         metadataId: input.id,
         contextInstructions,
         messages: history,
-        result: ''
+        result: '',
+        checkpoint: savedCheckpoint
       }).catch(() => undefined);
       input.context.onRunSummary?.(stats);
       this.setProgress({
@@ -619,7 +635,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         updatedAt: completedAt,
         completedAt
       });
-      return toolError(stopped ? 'subagent_stopped' : 'subagent_failed', message, { subagentId: input.id });
+      return { ...toolError(stopped ? 'subagent_stopped' : 'subagent_failed', message, { subagentId: input.id }), draftEdits: savedCheckpoint?.state?.draftEdits, draftRuns: savedCheckpoint?.state?.draftRuns };
     } finally {
       abort.dispose();
     }
@@ -763,7 +779,7 @@ function isContinuationCompatible(metadata: StoredSubagentMetadata, input: {
     && metadata.projectInstructionsHash === input.projectInstructionsHash;
 }
 
-function createChildAbortSignal(parentSignal: AbortSignal | undefined, timeoutMs: number): {
+function createChildAbortSignal(parentSignal: AbortSignal | undefined): {
   signal: AbortSignal;
   dispose(): void;
 } {
@@ -774,11 +790,9 @@ function createChildAbortSignal(parentSignal: AbortSignal | undefined, timeoutMs
   } else {
     parentSignal?.addEventListener('abort', abort, { once: true });
   }
-  const timer = setTimeout(abort, timeoutMs);
   return {
     signal: controller.signal,
     dispose: () => {
-      clearTimeout(timer);
       parentSignal?.removeEventListener('abort', abort);
     }
   };

@@ -33,6 +33,7 @@ export class TaskPlanTracker {
 
   public constructor(input: {
     runId: string;
+    initialPlan?: TaskPlan;
     sessionId?: string;
     prompt: string;
     language: KeepseekLanguage;
@@ -58,6 +59,7 @@ export class TaskPlanTracker {
       createdAt: now,
       updatedAt: now
     };
+    if (input.initialPlan) this.plan = { ...structuredClone(input.initialPlan), runId: input.runId, status: 'running' };
     this.emit('created');
   }
 

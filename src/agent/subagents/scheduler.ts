@@ -1,3 +1,4 @@
+import type { SubagentTreeBudget } from './types';
 import { AgentRunAbortedError } from '../runner';
 import type { KeepseekLanguage } from '../../shared/i18n';
 
@@ -10,6 +11,7 @@ export const DEFAULT_SUBAGENT_MAX_CHILDREN_PER_TREE = 12;
 
 interface TreeBudget {
   count: number;
+  parents: Set<string>;
   updatedAt: number;
   pathClaims: Map<string, string>;
 }
@@ -29,7 +31,7 @@ export class SubagentScheduler {
     proposal: boolean;
     paths?: readonly string[];
   }): { ok: true } | { ok: false; reason: string } {
-    this.prune();
+
     if (input.depth < 1 || input.depth > DEFAULT_SUBAGENT_MAX_DEPTH) {
       return { ok: false, reason: `Subagent depth ${input.depth} exceeds the supported range 1-${DEFAULT_SUBAGENT_MAX_DEPTH}.` };
     }
@@ -39,6 +41,7 @@ export class SubagentScheduler {
     }
     const tree = this.treeBudgets.get(input.treeId) ?? {
       count: 0,
+      parents: new Set<string>(),
       updatedAt: Date.now(),
       pathClaims: new Map<string, string>()
     };
@@ -61,6 +64,7 @@ export class SubagentScheduler {
       }
     }
     tree.count += 1;
+    tree.parents.add(input.parentRunId);
     tree.updatedAt = Date.now();
     this.treeBudgets.set(input.treeId, tree);
     this.parentCounts.set(input.parentRunId, parentCount + 1);
@@ -74,10 +78,10 @@ export class SubagentScheduler {
     language: KeepseekLanguage;
   }, task: () => Promise<T>): Promise<T> {
     const releaseDepth = await (input.depth === 1 ? this.rootSlots : this.nestedSlots).acquire(input.signal, input.language);
-    const releaseProposal = input.proposal
-      ? await this.proposalSlots.acquire(input.signal, input.language)
-      : undefined;
+    let releaseProposal: (() => void) | undefined;
     try {
+      releaseProposal = input.proposal ? await this.proposalSlots.acquire(input.signal, input.language) : undefined;
+      if (input.signal?.aborted) throw new AgentRunAbortedError(input.language);
       return await task();
     } finally {
       releaseProposal?.();
@@ -85,17 +89,22 @@ export class SubagentScheduler {
     }
   }
 
-  private prune(): void {
-    const cutoff = Date.now() - 30 * 60 * 1000;
-    for (const [treeId, tree] of this.treeBudgets) {
-      if (tree.updatedAt < cutoff) {
-        this.treeBudgets.delete(treeId);
-      }
-    }
-    if (this.parentCounts.size > 1_000) {
-      this.parentCounts.clear();
-    }
+  /** Explicit lifecycle cleanup only. Interrupted trees retain their count and
+   * path claims until their logical task is completed/abandoned. */
+  public snapshotTree(treeId: string): SubagentTreeBudget | undefined {
+    const tree = this.treeBudgets.get(treeId);
+    return tree ? { count: tree.count, paths: [...tree.pathClaims], parents: [...tree.parents].map((id) => [id, this.parentCounts.get(id) ?? 0]) } : undefined;
   }
+  public restoreTree(treeId: string, budget: SubagentTreeBudget): void {
+    if (this.treeBudgets.has(treeId)) return;
+    this.treeBudgets.set(treeId, { count: budget.count, pathClaims: new Map(budget.paths), parents: new Set(budget.parents.map(([id]) => id)), updatedAt: Date.now() });
+    budget.parents.forEach(([id, count]) => this.parentCounts.set(id, count));
+  }
+  public releaseTree(treeId: string): void {
+    this.treeBudgets.get(treeId)?.parents.forEach((id) => this.parentCounts.delete(id));
+    this.treeBudgets.delete(treeId);
+  }
+
 }
 
 class Semaphore {
@@ -105,6 +114,7 @@ class Semaphore {
     reject: (error: Error) => void;
     signal?: AbortSignal;
     language: KeepseekLanguage;
+    cleanup: () => void;
   }> = [];
 
   public constructor(private readonly capacity: number) {}
@@ -118,15 +128,16 @@ class Semaphore {
       return this.createRelease();
     }
     return await new Promise<() => void>((resolve, reject) => {
-      const waiter = { resolve, reject, signal, language };
-      this.waiters.push(waiter);
-      signal?.addEventListener('abort', () => {
+      const waiter = { resolve, reject, signal, language, cleanup: () => signal?.removeEventListener('abort', abort) };
+      const abort = () => {
         const index = this.waiters.indexOf(waiter);
         if (index >= 0) {
           this.waiters.splice(index, 1);
           reject(new AgentRunAbortedError(language));
         }
-      }, { once: true });
+      };
+      this.waiters.push(waiter);
+      signal?.addEventListener('abort', abort, { once: true });
     });
   }
 
@@ -139,6 +150,7 @@ class Semaphore {
       released = true;
       while (this.waiters.length) {
         const waiter = this.waiters.shift();
+        waiter?.cleanup();
         if (!waiter || waiter.signal?.aborted) {
           continue;
         }

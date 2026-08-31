@@ -129,6 +129,18 @@
           "scope": "window",
           "markdownDescription": "Maximum bytes KeepSeek reads from one referenced or workspace text file. Binary, media, archive, and otherwise unreadable files are still rejected."
         },
+        "keepseek.agent.maxExecutionMs": {
+          "type": "number", "default": 0, "minimum": 0, "scope": "window",
+          "markdownDescription": "Maximum effective execution time per logical Agent task (including children and recovery). 0 = unlimited. Authorization, Apply, queue and host suspension time are excluded. / 每项 Agent 任务的有效执行时间上限；0 不限时，恢复不清零。"
+        },
+        "keepseek.agent.streamIdleTimeoutMs": {
+          "type": "number", "default": 0, "minimum": 0, "maximum": 2147483647, "scope": "window",
+          "markdownDescription": "Opt-in automatic disconnect after no network data, including while waiting for response headers. 0 waits conservatively. Silence does not prove failure. / 显式开启静默断开；0 保守等待，静默不等于失联。"
+        },
+        "keepseek.background.maxDurationMs": {
+          "type": "number", "default": 0, "minimum": 0, "scope": "window",
+          "markdownDescription": "Legacy explicit background execution budget. Combined with agent.maxExecutionMs using the smaller positive value; 0 unlimited. / 兼容旧版显式后台时间预算。"
+        },
         "keepseek.draftRun.timeoutMs": {
           "type": "number",
           "default": 120000,

@@ -1,3 +1,4 @@
+import { normalizeDuration } from './executionPolicy';
 import { randomUUID } from 'node:crypto';
 import type {
   AgentExecutionLimits,
@@ -59,13 +60,18 @@ export class BackgroundRunCoordinator {
 
   public recordRun(details: RunDetailsSummary): BackgroundRun {
     const run = this.requireRun();
-    if (!run.progress.runIds.includes(details.runId)) {
-      run.progress.runIds.push(details.runId);
-    }
+    if (run.progress.runIds.includes(details.runId)) return this.getActiveRun() as BackgroundRun;
+    run.progress.runIds.push(details.runId);
     run.progress.lastRunId = details.runId;
     run.progress.toolCalls += details.toolCallCount;
     this.touch();
     return this.getActiveRun() as BackgroundRun;
+  }
+
+  public recordExecutionTime(usedMs: number): void {
+    const run = this.requireRun();
+    run.progress.usedMs = (run.progress.usedMs ?? 0) + normalizeDuration(usedMs);
+    this.touch();
   }
 
   public markRunning(): BackgroundRun {
@@ -122,13 +128,14 @@ export class BackgroundRunCoordinator {
 
   public getRemainingExecutionLimits(): AgentExecutionLimits {
     const run = this.requireRun();
-    const elapsedMs = Math.max(0, Date.now() - Date.parse(run.startedAt));
+    const elapsedMs = run.progress.usedMs ?? 0;
     const remainingToolCalls = Math.max(1, run.limits.maxToolCalls - run.progress.toolCalls);
-    const remainingDurationMs = Math.max(1, run.limits.maxDurationMs - elapsedMs);
+    const remainingDurationMs = run.limits.maxDurationMs > 0 ? Math.max(1, run.limits.maxDurationMs - elapsedMs) : 0;
     return {
       maxToolIterations: remainingToolCalls,
       maxToolCalls: remainingToolCalls,
       maxRunMs: remainingDurationMs,
+      timeLimitSource: 'background.maxDurationMs + agent.maxExecutionMs (remaining active time)',
       maxRepairIterations: run.limits.maxRounds
     };
   }
@@ -137,7 +144,7 @@ export class BackgroundRunCoordinator {
     if (!run) return 'Background task is unavailable.';
     if (run.progress.round >= run.limits.maxRounds) return `Maximum background rounds reached (${run.limits.maxRounds}).`;
     if (run.progress.toolCalls >= run.limits.maxToolCalls) return `Maximum background tool calls reached (${run.limits.maxToolCalls}).`;
-    if (Date.now() - Date.parse(run.startedAt) >= run.limits.maxDurationMs) return `Maximum background duration reached (${run.limits.maxDurationMs} ms).`;
+    if (run.limits.maxDurationMs > 0 && (run.progress.usedMs ?? 0) >= run.limits.maxDurationMs) return `Maximum background duration reached (${run.limits.maxDurationMs} ms).`;
     return undefined;
   }
 
@@ -183,7 +190,7 @@ export class BackgroundRunCoordinator {
 function normalizeLimits(limits: BackgroundRunLimits): BackgroundRunLimits {
   return {
     maxRounds: clamp(limits.maxRounds, 1, 10),
-    maxDurationMs: clamp(limits.maxDurationMs, 60_000, 3_600_000),
+    maxDurationMs: normalizeDuration(limits.maxDurationMs),
     maxToolCalls: clamp(limits.maxToolCalls, 1, 256)
   };
 }

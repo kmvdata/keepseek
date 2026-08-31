@@ -238,6 +238,9 @@ export const workspace = {
       await fs.mkdir(path.dirname(uri.fsPath), { recursive: true });
       await fs.writeFile(uri.fsPath, content);
     },
+    async rename(source: Uri, target: Uri, _options?: { overwrite?: boolean }): Promise<void> {
+      await fs.rename(source.fsPath, target.fsPath);
+    },
     async delete(uri: Uri, options?: { recursive?: boolean }): Promise<void> {
       await fs.rm(uri.fsPath, {
         recursive: options?.recursive === true,

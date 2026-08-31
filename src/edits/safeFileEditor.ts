@@ -38,9 +38,7 @@ export class SafeFileEditor {
       requireSafeDeleteText: edit.action === 'delete'
     });
     this.assertActionMatchesSnapshot(edit, original);
-    if (edit.action === 'delete') {
-      this.assertDeleteBaselineMatches(edit, original);
-    }
+    this.assertDeleteBaselineMatches(edit, original);
 
     const checkpoint: ChangeCheckpoint = {
       id: randomUUID(),
@@ -128,7 +126,7 @@ export class SafeFileEditor {
       return;
     }
 
-    throw new Error(this.t('cannotApplyChangedDeleteTarget', { label: edit.label }));
+    throw new Error(this.t(edit.action === 'delete' ? 'cannotApplyChangedDeleteTarget' : 'cannotApplyChangedDraftTarget', { label: edit.label }));
   }
 
   private assertSnapshotMatchesAppliedChange(checkpoint: ChangeCheckpoint, current: FileSnapshot): void {

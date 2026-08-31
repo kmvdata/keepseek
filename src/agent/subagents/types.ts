@@ -68,7 +68,16 @@ export interface SubagentToolExecution {
   draftRuns?: DraftRunProposal[];
 }
 
+export interface SubagentTreeBudget {
+  count: number;
+  parents: Array<[string, number]>;
+  paths: Array<[string, string]>;
+}
+
 export interface SubagentToolAdapter {
+  snapshotTree?(treeId: string): SubagentTreeBudget | undefined;
+  restoreTree?(treeId: string, budget: SubagentTreeBudget): void;
+  releaseTree?(treeId: string): void;
   delegateTask(input: DelegateTaskInput, context: SubagentInvocationContext): Promise<SubagentToolExecution>;
   delegateParallel(input: DelegateParallelInput, context: SubagentInvocationContext): Promise<SubagentToolExecution>;
   readResult(input: ReadSubagentResultInput, context: SubagentInvocationContext): Promise<SubagentToolExecution>;
@@ -121,6 +130,7 @@ export interface StoredSubagentMetadata {
 }
 
 export interface StoredSubagentTranscript {
+  checkpoint?: import('../runCheckpoint').RunCheckpoint;
   version: 1;
   metadataId: string;
   contextInstructions: string;

@@ -1,3 +1,4 @@
+import { checkpointCopy, endpointHash, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
@@ -211,6 +212,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private agentSettings = getConfiguredAgentSettings();
   private language = getConfiguredKeepseekLanguage();
   private isBusy = false;
+  private isStartingRun = false;
+  private activeRunSettled?: Promise<void>;
   private currentRunAbortController: AbortController | undefined;
   private activeDraftRunId: string | undefined;
   private draftRunOutputPostTimer: ReturnType<typeof setTimeout> | undefined;
@@ -313,6 +316,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public dispose(): void {
+    this.currentRunAbortController?.abort();
     clearInterval(this.sessionCleanupTimer);
     if (this.draftRunOutputPostTimer) {
       clearTimeout(this.draftRunOutputPostTimer);
@@ -334,6 +338,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async refreshWorkspaceScope(): Promise<void> {
+    this.currentRunAbortController?.abort();
+    await this.activeRunSettled;
     if (!(await this.sessionStore.setWorkspaceScope(getCurrentWorkspaceSessionScope()))) {
       return;
     }
@@ -734,6 +740,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'abortPrompt':
         this.abortPrompt();
         return;
+      case 'continueAgentTask':
+        await this.continueAgentTask(message.messageId);
+        return;
       case 'continueRepair':
         await this.continueRepair();
         return;
@@ -971,7 +980,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.postState();
         return;
       case 'approveDraftRun':
-        if (this.isBusy || this.activeDraftRunId) {
+        if (this.isBusy || this.isStartingRun || this.activeDraftRunId) {
           return;
         }
         {
@@ -1010,7 +1019,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       case 'authorizeDraftRunCwd':
-        if (this.isBusy || this.activeDraftRunId) {
+        if (this.isBusy || this.isStartingRun || this.activeDraftRunId) {
           return;
         }
         await this.authorizeDraftRunWorkingDirectory(message.id);
@@ -1020,7 +1029,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'applyDraftEdit':
         {
-          if (this.isBusy) {
+          if (this.isBusy || this.isStartingRun) {
             return;
           }
           const deleteTargets = this.changeSets.getPendingDeleteTargetsForEdit(message.id);
@@ -1037,7 +1046,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       case 'discardDraftEdit':
-        if (this.isBusy) {
+        if (this.isBusy || this.isStartingRun) {
           return;
         }
         this.changeSets.discardEdit(message.id);
@@ -1060,7 +1069,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'applyChangeSet':
         {
-          if (this.isBusy) {
+          if (this.isBusy || this.isStartingRun) {
             return;
           }
           const deleteTargets = this.changeSets.getPendingDeleteTargetsForChangeSet(message.id);
@@ -1077,7 +1086,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       case 'discardChangeSet':
-        if (this.isBusy) {
+        if (this.isBusy || this.isStartingRun) {
           return;
         }
         this.changeSets.discardAll(message.id);
@@ -1086,7 +1095,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'revertDraftEdit':
         {
-          if (this.isBusy) {
+          if (this.isBusy || this.isStartingRun) {
             return;
           }
           const result = await this.changeSets.revertEdit(message.id);
@@ -1099,7 +1108,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'revertChangeSet':
         {
-          if (this.isBusy) {
+          if (this.isBusy || this.isStartingRun) {
             return;
           }
           const result = await this.changeSets.revertAll(message.id);
@@ -1111,7 +1120,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       case 'applyAllDraftEdits': {
-        if (this.isBusy) {
+        if (this.isBusy || this.isStartingRun) {
           return;
         }
         const changeSetId = this.changeSets.getLatestChangeSetId(this.sessionStore.activeSessionId);
@@ -1132,7 +1141,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       case 'discardAllDraftEdits':
         {
-          if (this.isBusy) {
+          if (this.isBusy || this.isStartingRun) {
             return;
           }
           const changeSetId = this.changeSets.getLatestChangeSetId(this.sessionStore.activeSessionId);
@@ -1393,7 +1402,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async createNewSession(): Promise<void> {
-    if (this.isBusy || this.hasActiveBackgroundRun()) {
+    if (this.isBusy || this.isStartingRun || this.hasActiveBackgroundRun()) {
       return;
     }
 
@@ -1406,7 +1415,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async selectSession(sessionId: string): Promise<void> {
-    if (this.isBusy || this.hasActiveBackgroundRun()) {
+    if (this.isBusy || this.isStartingRun || this.hasActiveBackgroundRun()) {
       return;
     }
 
@@ -1425,7 +1434,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async copyOtherWorkspaceSession(workspaceKey: string, sessionId: string): Promise<void> {
-    if (this.isBusy || this.hasActiveBackgroundRun()) {
+    if (this.isBusy || this.isStartingRun || this.hasActiveBackgroundRun()) {
       return;
     }
 
@@ -1441,7 +1450,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async deleteSessions(sessionIds: string[]): Promise<void> {
-    if (this.isBusy || this.hasActiveBackgroundRun()) {
+    if (this.isBusy || this.isStartingRun || this.hasActiveBackgroundRun()) {
       return;
     }
 
@@ -1515,7 +1524,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async deleteOtherWorkspaceSessions(workspaceKey: string, sessionIds: string[]): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       return;
     }
 
@@ -1556,7 +1565,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async deleteOtherWorkspace(workspaceKey: string): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       return;
     }
 
@@ -1676,7 +1685,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async useSkill(skillId: string): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       return;
     }
     const activeSession = this.sessionStore.getActiveSession();
@@ -1693,7 +1702,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async removeActiveSkill(skillId: string): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       return;
     }
     const activeSession = this.sessionStore.getActiveSession();
@@ -1730,7 +1739,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async setSkillEnabled(skillId: string, enabled: boolean): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       return;
     }
     const activeSession = this.sessionStore.getActiveSession();
@@ -1745,7 +1754,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async setSkillAllowImplicit(skillId: string, allowImplicit: boolean): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       return;
     }
     if (!(await this.skillStore.setSkillAllowImplicit(skillId, allowImplicit))) {
@@ -1756,7 +1765,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async setSkillWorkspaceDefault(skillId: string, enabled: boolean): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       return;
     }
     if (!(await this.skillStore.setSkillWorkspaceDefault(skillId, enabled))) {
@@ -2370,7 +2379,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       this.modelSelectionTransactions.queuePending({
         sourceId: model.sourceId,
         modelId: model.id,
@@ -2639,7 +2648,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async setDebugMode(enabled: boolean): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       return;
     }
 
@@ -2846,7 +2855,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.draftRuns.cancel(this.activeDraftRunId);
       return;
     }
-    if (!this.isBusy || !this.currentRunAbortController || this.currentRunAbortController.signal.aborted) {
+    if ((!this.isBusy && !this.isStartingRun) || !this.currentRunAbortController || this.currentRunAbortController.signal.aborted) {
       return;
     }
     this.currentRunAbortController.abort();
@@ -3008,7 +3017,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async continueRepair(): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       return;
     }
     const sessionId = this.sessionStore.activeSessionId;
@@ -3063,7 +3072,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async createLegacyMemoryMigrationDraft(): Promise<void> {
-    if (this.isBusy || !this.legacyMemoryMigration.getStateView().canCreateDraft) {
+    if (this.isBusy || this.isStartingRun || !this.legacyMemoryMigration.getStateView().canCreateDraft) {
       return;
     }
     try {
@@ -3160,7 +3169,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async startBackgroundRun(script: SafeNpmScript, requestedMaxRounds: number): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       return;
     }
     const safeScript: SafeNpmScript = script === 'test' || script === 'lint' ? script : 'compile';
@@ -3207,7 +3216,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async resumeBackgroundRun(): Promise<void> {
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       return;
     }
     const run = this.backgroundRunCoordinator.getActiveRun();
@@ -3270,7 +3279,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     if (!response) {
       const failed = this.backgroundRunCoordinator.fail('The background Agent run ended without a result.');
-      await this.appendBackgroundOutcomeMessage(failed.stopReason ?? 'Background Agent run failed.');
+      vscode.window.showWarningMessage(failed.stopReason ?? 'Background Agent run failed.');
       return;
     }
     this.backgroundRunCoordinator.recordRun(response.runDetails);
@@ -3307,7 +3316,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (!run || run.status === 'completed' || run.status === 'failed' || run.status === 'stopped') {
       return;
     }
-    if (this.isBusy) {
+    if (this.isBusy || this.isStartingRun) {
       this.abortPrompt();
     }
     const stopped = this.backgroundRunCoordinator.stop(this.language === 'en'
@@ -3373,7 +3382,181 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
-  private async sendPrompt(
+  private createRunStreamPublisher(sessionId: string, message: ChatMessage): { schedule(): void; dispose(): void } {
+    let contentOffset = message.content.length;
+    let reasoningOffset = (message.reasoningContent ?? '').length;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return {
+      schedule: () => {
+        if (timer) return;
+        timer = setTimeout(() => {
+          timer = undefined;
+          if (!message.isStreaming) return;
+          const visible = getVisibleMessages([message])[0];
+          this.postToWebview({ type: 'agentRunDelta', sessionId, messageId: message.id, attempt: message.runCheckpoint?.attempt,
+            contentOffset, contentDelta: message.content.slice(contentOffset),
+            reasoningOffset, reasoningDelta: (message.reasoningContent ?? '').slice(reasoningOffset),
+            runState: visible.runState, activity: this.agentActivity });
+          contentOffset = message.content.length;
+          reasoningOffset = (message.reasoningContent ?? '').length;
+        }, 100);
+      },
+      dispose: () => { if (timer) clearTimeout(timer); timer = undefined; }
+    };
+  }
+
+  private observeRunActivity(message: ChatMessage, kind: 'network' | 'event' | 'content' | 'request' | 'retry'): void {
+    const cp = message.runCheckpoint;
+    if (!cp) return;
+    const now = new Date().toISOString();
+    if (kind === 'network') cp.lastNetworkAt = now;
+    if (kind === 'event') cp.lastEventAt = now;
+    if (kind === 'content') cp.lastContentAt = now;
+
+  }
+
+  private async saveAgentCheckpoint(session: ChatSession, message: ChatMessage, checkpoint: RunCheckpoint): Promise<void> {
+    message.runCheckpoint = checkpointCopy(checkpoint);
+    // Only complete rounds are visible to future history projection. Incomplete
+    // native blocks stay exclusively in the display text, never providerReplay.
+    if (checkpoint.state) {
+      message.toolRounds = structuredClone(checkpoint.state.toolRounds);
+      message.providerReplay = normalizeProviderReplay(checkpoint.state.completedReplay);
+    }
+    if (checkpoint.finalResponse) {
+      message.content = checkpoint.finalResponse.message;
+      message.reasoningContent = checkpoint.finalResponse.reasoningContent;
+      message.toolRounds = checkpoint.finalResponse.toolRounds;
+      message.providerReplay = normalizeProviderReplay(checkpoint.finalResponse.providerReplay);
+      message.runDetails = checkpoint.finalResponse.runDetails;
+    }
+    session.updatedAt = checkpoint.updatedAt;
+    const draftEdits = checkpoint.finalResponse?.draftEdits ?? checkpoint.state?.draftEdits ?? [];
+    const draftRuns = checkpoint.finalResponse?.draftRuns ?? checkpoint.state?.draftRuns ?? [];
+    if (draftEdits.length) this.changeSets.addDraftEdits({
+      edits: draftEdits, runId: checkpoint.taskId, sessionId: session.id, messageId: message.id
+    });
+    if (draftRuns.length) this.draftRuns.addProposals({
+      proposals: draftRuns, agentRunId: checkpoint.taskId, sessionId: session.id, messageId: message.id
+    });
+    if (draftEdits.length) await this.changeSets.flush();
+    if (draftRuns.length) await this.draftRuns.flush();
+    // Proposals are durable before the task can be marked completed.
+    await this.sessionStore.persist();
+    this.postState();
+  }
+
+  private async continueAgentTask(messageId: string): Promise<void> {
+    if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.hasActiveBackgroundRun()) return;
+    const session = this.sessionStore.getActiveSession();
+    const message = session.messages.find((item) => item.id === messageId);
+    const cp = message?.runCheckpoint;
+    if (!message || !cp) return;
+    // Lock synchronously, before any await: duplicate clicks cannot start twice.
+    this.isBusy = true;
+    const controller = new AbortController();
+    this.currentRunAbortController = controller;
+    let settled!: () => void;
+    this.activeRunSettled = new Promise<void>((resolve) => { settled = resolve; });
+    const streamPublisher = this.createRunStreamPublisher(session.id, message);
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = () => { if (!refreshTimer) refreshTimer = setTimeout(() => { refreshTimer = undefined; this.postState(); }, 100); };
+    try {
+      const blocker = recoveryBlocker(cp);
+      if (blocker) throw new Error(blocker);
+      if (session.messages[session.messages.length - 1]?.id !== messageId) throw new Error(this.t('runRecoveryHistoryChanged'));
+      const folders = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString());
+      if (!vscode.workspace.isTrusted || JSON.stringify(folders) !== JSON.stringify(cp.workspaceFolders)) throw new Error(this.t('runRecoveryWorkspaceChanged'));
+      const source = await resolveModelSourceConfig(cp.source.sourceId, this.globalStorageUri, { sourceStore: this.sourceStore, language: this.language, requireApiKey: false });
+      if (source.provider !== cp.source.provider || endpointHash(source.baseUrl) !== cp.source.endpointHash
+        || this.selectedSourceId !== cp.source.sourceId || this.selectedModelId !== cp.source.modelId) throw new Error(this.t('runRecoverySourceChanged'));
+      const currentModel = findModelBySelection(this.availableModels, { sourceId: cp.source.sourceId, modelId: cp.source.modelId });
+      if (!currentModel || JSON.stringify(getAgentRuntimeProfile(currentModel, cp.request.settings)) !== JSON.stringify(getAgentRuntimeProfile(cp.request.model, cp.request.settings))) throw new Error(this.t('runRecoverySourceChanged'));
+      // Do not revive previous external-file permission grants after restart.
+      if (cp.request.authorizedExternalReferenceUris?.some((uri) => !this.authorizedExternalReferenceUris.has(uri))) throw new Error(this.t('runRecoveryWorkspaceChanged'));
+      for (const edit of cp.state?.draftEdits ?? []) {
+        const storedFile = this.changeSets.toWebviewState(session.id).flatMap((set) => set.files).find((file) => file.id === edit.id);
+        if (storedFile && storedFile.status !== 'pending' && storedFile.status !== 'apply_failed') throw new Error(this.t('runRecoveryFileChanged', { label: edit.label }));
+        if (edit.action === 'create') {
+          let exists = false;
+          try { await vscode.workspace.fs.stat(vscode.Uri.parse(edit.uri)); exists = true; }
+          catch (error) { if (!error || typeof error !== 'object' || !('code' in error) || !['FileNotFound', 'ENOENT'].includes(String(error.code))) throw error; }
+          if (exists) throw new Error(this.t('runRecoveryFileChanged', { label: edit.label }));
+        }
+        if (edit.expectedOriginalTextHash && edit.action !== 'create') {
+          const current = await vscode.workspace.fs.readFile(vscode.Uri.parse(edit.uri));
+          if (endpointHash(new TextDecoder().decode(current)) !== edit.expectedOriginalTextHash) throw new Error(this.t('runRecoveryFileChanged', { label: edit.label }));
+        }
+      }
+      // All compatibility checks complete before changing the visible run.
+      this.modelSelectionTransactions.beginRun({ sourceId: cp.source.sourceId, modelId: cp.source.modelId });
+      message.isStreaming = true;
+      this.setAgentActivity({ base: 'thinking', phase: 'requesting_model', detail: this.t('runRecoveryNotice') });
+      let usage: TurnUsageStats | undefined;
+      const response = await this.agentRunner.run({
+        ...cp.request, model: { ...cp.request.model }, checkpoint: cp,
+        sourceConfig: { sourceId: source.sourceId, provider: source.provider, apiKey: source.apiKey, baseUrl: source.baseUrl, supportsBilling: source.supportsBilling },
+        signal: controller.signal
+      }, {
+        onCheckpoint: async (next) => {
+          if (this.currentRunAbortController === controller) await this.saveAgentCheckpoint(session, message, next);
+        },
+        onStatus: (status) => { if (!controller.signal.aborted) this.setAgentActivity(status); },
+        onActivity: (kind) => { this.observeRunActivity(message, kind); streamPublisher.schedule(); },
+        onDelta: (event) => {
+          if (controller.signal.aborted || this.currentRunAbortController !== controller) return;
+          if (event.type === 'reasoning') message.reasoningContent = (message.reasoningContent ?? '') + event.delta;
+          else message.content += event.delta;
+          streamPublisher.schedule();
+        },
+        onUsage: (event) => { usage = this.applyUsageEvent(session, usage, event); this.liveTurnUsage = usage; refresh(); },
+        onUsageEstimate: (estimate) => { this.liveContextUsage = toSessionContextUsageEstimate(estimate); refresh(); },
+        onTaskPlan: (plan) => { this.taskPlansBySession.set(session.id, plan); refresh(); },
+        onRunDetails: (details) => { message.runDetails = details; refresh(); },
+        onSubagentRunSummary: (summary) => { session.subagentUsageStats = upsertSubagentRunUsageSummary(session.subagentUsageStats, summary); },
+        onSubagentHandoffEstimate: (estimate) => { session.subagentUsageStats = addSubagentHandoffEstimate(session.subagentUsageStats, estimate); }
+      });
+      message.content = response.message;
+      message.reasoningContent = response.reasoningContent;
+      message.toolRounds = response.toolRounds;
+      message.providerReplay = normalizeProviderReplay(response.providerReplay);
+      message.runDetails = response.runDetails;
+      session.repairLoop = response.repairLoop;
+      this.repairLoopsBySession.set(session.id, response.repairLoop);
+      if (response.changeSet) this.changeSets.add(response.changeSet);
+      if (response.draftRuns?.length) this.draftRuns.addProposals({ proposals: response.draftRuns, agentRunId: cp.taskId, sessionId: session.id, messageId });
+    } catch (error) {
+      vscode.window.showWarningMessage(getErrorMessage(error));
+    } finally {
+      streamPublisher.dispose();
+      if (refreshTimer) clearTimeout(refreshTimer);
+      delete message.isStreaming;
+      if (this.currentRunAbortController === controller) this.currentRunAbortController = undefined;
+      this.isBusy = false; this.liveTurnUsage = undefined; this.liveContextUsage = undefined;
+      await this.applyPendingModelSelectionAfterRun();
+      this.setAgentActivity({ base: 'idle', phase: 'idle' });
+      try { await this.sessionStore.persist(); } catch (error) { vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error)); }
+      this.postState();
+      settled(); this.activeRunSettled = undefined;
+    }
+  }
+
+  private async sendPrompt(...args: Parameters<KeepseekChatViewProvider['sendPromptImpl']>): Promise<AgentResponse | undefined> {
+    if (this.isBusy || this.isStartingRun) return;
+    this.isStartingRun = true;
+    const preparationController = new AbortController();
+    this.currentRunAbortController = preparationController;
+    let settled!: () => void;
+    this.activeRunSettled = new Promise<void>((resolve) => { settled = resolve; });
+    try { return await this.sendPromptImpl(...args); }
+    finally {
+      this.isStartingRun = false;
+      if (this.currentRunAbortController === preparationController) this.currentRunAbortController = undefined;
+      settled(); this.activeRunSettled = undefined;
+    }
+  }
+
+  private async sendPromptImpl(
     prompt: string,
     sourceId: string,
     modelId: string,
@@ -3441,9 +3624,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       baseUrl: resolvedSource.baseUrl,
       supportsBilling: resolvedSource.supportsBilling
     });
+    if (this.currentRunAbortController?.signal.aborted) return;
     this.modelSelectionTransactions.beginRun({ sourceId: model.sourceId, modelId: model.id });
 
-    const abortController = new AbortController();
+    const abortController = this.currentRunAbortController ?? new AbortController();
     this.currentRunAbortController = abortController;
     this.isBusy = true;
     this.liveContextUsage = undefined;
@@ -3454,6 +3638,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     });
 
     let assistantMessage: ChatMessage | undefined;
+    let streamPublisher: ReturnType<KeepseekChatViewProvider['createRunStreamPublisher']> | undefined;
     let currentTurnUsage: TurnUsageStats | undefined;
     let previousTurnUsage: TurnUsageStats | undefined;
     let previousPromptCacheDiagnostics: PromptCacheDiagnostics | undefined;
@@ -3664,6 +3849,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         isStreaming: true
       };
       this.messages.push(assistantMessage);
+      streamPublisher = this.createRunStreamPublisher(activeSession.id, assistantMessage);
       this.setAgentActivity({
         base: 'thinking',
         phase: 'requesting_model'
@@ -3693,6 +3879,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         sourceConfig,
         signal: abortController.signal
       }), {
+        onCheckpoint: async (checkpoint) => {
+          if (assistantMessage && this.currentRunAbortController === abortController) {
+            await this.saveAgentCheckpoint(activeSession, assistantMessage, checkpoint);
+          }
+        },
+        onActivity: (kind) => {
+          if (!assistantMessage || this.currentRunAbortController !== abortController) return;
+          this.observeRunActivity(assistantMessage, kind);
+          streamPublisher?.schedule();
+        },
         onStatus: (activity) => {
           if (options?.backgroundRunId) {
             if (activity.phase === 'awaiting_authorization') {
@@ -3704,24 +3900,24 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.setAgentActivity(activity);
         },
         onDelta: (event) => {
-          if (!assistantMessage) {
+          if (!assistantMessage || this.currentRunAbortController !== abortController || abortController.signal.aborted) {
             return;
           }
           if (event.type === 'reasoning') {
             this.setAgentActivity({
               base: 'thinking',
               phase: 'reasoning'
-            }, { schedulePost: scheduleLiveState });
+            }, { post: false });
             assistantMessage.reasoningContent = `${assistantMessage.reasoningContent ?? ''}${event.delta}`;
           } else {
             this.setAgentActivity({
               base: 'thinking',
               phase: 'generating'
-            }, { schedulePost: scheduleLiveState });
+            }, { post: false });
             assistantMessage.content = `${assistantMessage.content}${event.delta}`;
           }
           activeSession.updatedAt = new Date().toISOString();
-          scheduleLiveState();
+          streamPublisher?.schedule();
         },
         onUsageEstimate: (usage) => {
           this.liveContextUsage = toSessionContextUsageEstimate(usage);
@@ -3770,6 +3966,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
       });
       completedResponse = response;
+
       if (activeSession.requestProtocol) {
         activeSession.requestProtocol.lastProviderRequestAt = new Date().toISOString();
       }
@@ -3894,7 +4091,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSession.createdAt = now;
       }
       if (assistantMessage) {
-        const errorText = `${this.t('errorPrefix')}: ${getErrorMessage(error)}`;
+        const reason = assistantMessage.runCheckpoint?.stopReason;
+        const errorText = `${reason ? this.t('runStopped_' + reason) : this.t('errorPrefix')}: ${getErrorMessage(error)}`;
         const hasPartialOutput = Boolean(assistantMessage.content.trim() || assistantMessage.reasoningContent?.trim());
         assistantMessage.content = hasPartialOutput
           ? [assistantMessage.content.trimEnd(), errorText].filter(Boolean).join('\n\n')
@@ -3915,6 +4113,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         phase: 'failed'
       }, { post: false });
     } finally {
+      streamPublisher?.dispose();
+      if (options?.backgroundRunId && assistantMessage?.runCheckpoint) this.backgroundRunCoordinator.recordExecutionTime(assistantMessage.runCheckpoint.usedMs);
       if (this.currentRunAbortController === abortController) {
         this.currentRunAbortController = undefined;
       }
@@ -4156,7 +4356,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           contextCompactForceRatio: contextCompression.forceRatio,
           slimToolModeEnabled: getConfiguredSlimToolModeEnabled()
         },
-        taskPlan: this.taskPlansBySession.get(activeSession.id),
+        taskPlan: this.taskPlansBySession.get(activeSession.id) ?? activeSession.messages.at(-1)?.runCheckpoint?.taskPlan,
         repairLoop: this.repairLoopsBySession.get(activeSession.id) ?? activeSession.repairLoop,
         changeSets: webviewChangeSets,
         draftRuns: webviewDraftRuns,

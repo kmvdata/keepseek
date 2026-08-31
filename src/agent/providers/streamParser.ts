@@ -9,6 +9,7 @@ interface StreamingToolCallAccumulator {
   function: {
     name: string;
     arguments: string;
+
   };
 }
 
@@ -85,27 +86,66 @@ export class StreamParser {
     options: StreamParseOptions = {}
   ): Promise<DeepSeekStreamResult> {
     const reader = body.getReader();
-    const decoder = new TextDecoder();
-    const contentParts: string[] = [];
-    const reasoningParts: string[] = [];
-    const toolCallParts = new Map<number, StreamingToolCallAccumulator>();
-    const contentDisplayFilter = new StreamingDsmlDisplayFilter();
-    const reasoningDisplayFilter = new StreamingDsmlDisplayFilter();
-    let buffer = '';
-    let finishReason: string | null | undefined;
-    let usage: DeepSeekStreamResult['usage'];
-    let streamDone = false;
-    let sawChunk = false;
+    try {
+      const decoder = new TextDecoder();
+      const contentParts: string[] = [];
+      const reasoningParts: string[] = [];
+      const toolCallParts = new Map<number, StreamingToolCallAccumulator>();
+      const contentDisplayFilter = new StreamingDsmlDisplayFilter();
+      const reasoningDisplayFilter = new StreamingDsmlDisplayFilter();
+      let buffer = '';
+      let finishReason: string | null | undefined;
+      let usage: DeepSeekStreamResult['usage'];
+      let streamDone = false;
+      let sawChunk = false;
 
-    const normalizeAndConsumeBuffer = () => {
-      buffer = buffer.replace(/\r\n?/gu, '\n');
+      const normalizeAndConsumeBuffer = () => {
+        const trailingCr = buffer.endsWith('\r');
+        buffer = (trailingCr ? buffer.slice(0, -1) : buffer).replace(/\r\n?/gu, '\n') + (trailingCr ? '\r' : '');
 
-      let separatorIndex = buffer.indexOf('\n\n');
-      while (separatorIndex >= 0) {
-        const rawEvent = buffer.slice(0, separatorIndex);
-        buffer = buffer.slice(separatorIndex + 2);
+        let separatorIndex = buffer.indexOf('\n\n');
+        while (separatorIndex >= 0) {
+          const rawEvent = buffer.slice(0, separatorIndex);
+          buffer = buffer.slice(separatorIndex + 2);
+          const eventResult = this.consumeSseEvent(
+            rawEvent,
+            language,
+            contentParts,
+            reasoningParts,
+            toolCallParts,
+            contentDisplayFilter,
+            reasoningDisplayFilter,
+            callbacks,
+            options
+          );
+          sawChunk = sawChunk || eventResult.sawChunk;
+          finishReason = eventResult.finishReason ?? finishReason;
+          usage = eventResult.usage ?? usage;
+          streamDone = eventResult.done;
+          if (streamDone) {
+            break;
+          }
+          separatorIndex = buffer.indexOf('\n\n');
+        }
+      };
+
+      while (!streamDone) {
+        const { done, value } = await reader.read();
+        if (done) {
+          buffer += decoder.decode();
+          normalizeAndConsumeBuffer();
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        options.onStreamActivity?.();
+        normalizeAndConsumeBuffer();
+      }
+
+      const remaining = buffer.trim();
+      if (remaining && !streamDone) {
         const eventResult = this.consumeSseEvent(
-          rawEvent,
+          remaining,
           language,
           contentParts,
           reasoningParts,
@@ -118,64 +158,30 @@ export class StreamParser {
         sawChunk = sawChunk || eventResult.sawChunk;
         finishReason = eventResult.finishReason ?? finishReason;
         usage = eventResult.usage ?? usage;
-        streamDone = eventResult.done;
-        if (streamDone) {
-          break;
-        }
-        separatorIndex = buffer.indexOf('\n\n');
-      }
-    };
-
-    while (!streamDone) {
-      const { done, value } = await reader.read();
-      if (done) {
-        buffer += decoder.decode();
-        normalizeAndConsumeBuffer();
-        break;
       }
 
-      buffer += decoder.decode(value, { stream: true });
-      options.onStreamActivity?.();
-      normalizeAndConsumeBuffer();
-    }
+      if (!streamDone && !finishReason) throw new Error(language === 'en' ? 'Stream ended before completion.' : '流在完成前中断。');
+      if (!sawChunk || (!contentParts.length && !reasoningParts.length && !toolCallParts.size)) {
+        throw new Error(language === 'en'
+          ? 'The model API did not return any streaming chunks.'
+          : '模型 API 未返回任何流式数据块。');
+      }
 
-    const remaining = buffer.trim();
-    if (remaining && !streamDone) {
-      const eventResult = this.consumeSseEvent(
-        remaining,
-        language,
-        contentParts,
-        reasoningParts,
-        toolCallParts,
-        contentDisplayFilter,
-        reasoningDisplayFilter,
-        callbacks,
-        options
-      );
-      sawChunk = sawChunk || eventResult.sawChunk;
-      finishReason = eventResult.finishReason ?? finishReason;
-      usage = eventResult.usage ?? usage;
-    }
+      if (toolCallParts.size && finishReason !== 'tool_calls' && finishReason !== 'stop') throw new Error('Incomplete tool response / 工具响应未完成');
+      this.flushDisplayFilter(reasoningDisplayFilter, callbacks, 'reasoning');
+      this.flushDisplayFilter(contentDisplayFilter, callbacks, 'content');
 
-    if (!sawChunk) {
-      throw new Error(language === 'en'
-        ? 'The model API did not return any streaming chunks.'
-        : '模型 API 未返回任何流式数据块。');
-    }
-
-    this.flushDisplayFilter(reasoningDisplayFilter, callbacks, 'reasoning');
-    this.flushDisplayFilter(contentDisplayFilter, callbacks, 'content');
-
-    return {
-      message: {
-        role: 'assistant',
-        content: contentParts.join(''),
-        reasoning_content: reasoningParts.join(''),
-        tool_calls: this.buildStreamingToolCalls(toolCallParts)
-      },
-      finishReason,
-      usage
-    };
+      return {
+        message: {
+          role: 'assistant',
+          content: contentParts.join(''),
+          reasoning_content: reasoningParts.join(''),
+          tool_calls: this.buildStreamingToolCalls(toolCallParts)
+        },
+        finishReason,
+        usage
+      };
+    } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
   }
 
   private consumeSseEvent(
@@ -189,17 +195,18 @@ export class StreamParser {
     callbacks: AgentRunCallbacks,
     options: StreamParseOptions
   ): { done: boolean; sawChunk: boolean; finishReason?: string | null; usage?: DeepSeekStreamResult['usage'] } {
+    if (rawEvent.split('\n').some((line) => line.startsWith(':'))) callbacks.onActivity?.('event');
     const dataLines = rawEvent
       .split('\n')
       .map((line) => line.trimEnd())
       .filter((line) => line.startsWith('data:'))
-      .map((line) => line.slice('data:'.length).trimStart());
+      .map((line) => line.slice('data:'.length).trimStart()).join('\n');
 
     let finishReason: string | null | undefined;
     let usage: DeepSeekStreamResult['usage'];
     let sawChunk = false;
 
-    for (const data of dataLines) {
+    for (const data of [dataLines]) {
       if (data.trim() === '[DONE]') {
         this.recordRawSseData(data, options);
         return { done: true, sawChunk, finishReason };
@@ -211,6 +218,8 @@ export class StreamParser {
 
       this.recordRawSseData(data, options);
       const chunk = this.parseStreamChunk(data, language);
+      callbacks.onActivity?.('event');
+      if ((chunk as unknown as { error?: unknown }).error) throw new Error(JSON.stringify((chunk as unknown as { error: unknown }).error));
       sawChunk = true;
       usage = chunk.usage ?? usage;
       finishReason = this.applyStreamChunk(
@@ -294,6 +303,7 @@ export class StreamParser {
     if (typeof delta !== 'string' || !delta) {
       return;
     }
+    callbacks.onActivity?.('content');
     parts.push(delta);
     callbacks.onStatus?.({
       base: 'thinking',
@@ -322,6 +332,7 @@ export class StreamParser {
     callbacks: AgentRunCallbacks
   ): void {
     if (toolCallDeltas.length) {
+      callbacks.onActivity?.('content');
       callbacks.onStatus?.({
         base: 'thinking',
         phase: 'planning_tool'
@@ -370,6 +381,10 @@ export class StreamParser {
       }))
       .filter((toolCall) => Boolean(toolCall.function.name));
 
+    for (const call of toolCalls) {
+      const args: unknown = JSON.parse(call.function.arguments);
+      if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Incomplete tool arguments / 工具参数不完整');
+    }
     return toolCalls.length ? toolCalls : null;
   }
 

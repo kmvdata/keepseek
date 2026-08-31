@@ -1,3 +1,4 @@
+import { writeJsonAtomic } from '../shared/atomicStorage';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ChatSessionStore } from '../sessions/chatSessionStore';
@@ -39,6 +40,7 @@ export class ChangeSetStore {
   private readonly historicalChangeSets = new Map<string, WebviewChangeSet>();
   private readonly checkpoints = new Map<string, ChangeCheckpoint>();
   private readonly storageUri: vscode.Uri;
+  private persistenceError?: unknown;
   private persistenceQueue: Promise<void> = Promise.resolve();
   private initialized = false;
 
@@ -91,7 +93,17 @@ export class ChangeSetStore {
     }
   }
 
+  public async flush(): Promise<void> {
+    await this.persistenceQueue;
+    if (this.persistenceError) throw this.persistenceError;
+  }
+
   public add(changeSet: ChangeSet): void {
+    const known = new Set([...this.changeSets.values(), ...this.historicalChangeSets.values()]
+      .filter((existing) => existing.id !== changeSet.id).flatMap((existing) => existing.files.map((file) => file.id)));
+    const files = changeSet.files.filter((file) => !known.has(file.id));
+    if (!files.length) return;
+    changeSet = { ...changeSet, files, fileCount: files.length };
     this.changeSets.set(changeSet.id, cloneChangeSet(changeSet));
     this.historicalChangeSets.delete(changeSet.id);
     this.recordTrace(changeSet, {
@@ -568,10 +580,11 @@ export class ChangeSetStore {
     this.persistenceQueue = this.persistenceQueue
       .then(async () => {
         await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.storageUri, '..'));
-        await vscode.workspace.fs.writeFile(this.storageUri, bytes);
+        await writeJsonAtomic(this.storageUri, JSON.parse(new TextDecoder().decode(bytes)));
+        this.persistenceError = undefined;
       })
-      .catch(() => {
-        // Checkpoint persistence is best-effort; in-memory apply/revert remains available.
+      .catch((error: unknown) => {
+        this.persistenceError = error; // Critical callers observe this through flush().
       });
   }
 }

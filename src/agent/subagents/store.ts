@@ -1,3 +1,5 @@
+import { writeJsonAtomic } from '../../shared/atomicStorage';
+import { normalizeRunCheckpoint } from '../runCheckpoint';
 import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import { isRecord } from '../../shared/errors';
@@ -12,6 +14,7 @@ export const DEFAULT_SUBAGENT_RESULT_PAGE_CHARS = 12_000;
 export const MAX_SUBAGENT_RESULT_PAGE_CHARS = 24_000;
 
 export class SubagentStore {
+  private persistenceQueue: Promise<void> = Promise.resolve();
   private readonly rootUri: vscode.Uri;
   private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder();
@@ -30,16 +33,10 @@ export class SubagentStore {
   public async save(metadata: StoredSubagentMetadata, transcript: StoredSubagentTranscript): Promise<void> {
     const directory = this.getParentDirectory(metadata.parentSessionId);
     await vscode.workspace.fs.createDirectory(directory);
-    await Promise.all([
-      vscode.workspace.fs.writeFile(
-        this.getMetadataUri(metadata.parentSessionId, metadata.id),
-        this.encoder.encode(`${JSON.stringify(metadata, null, 2)}\n`)
-      ),
-      vscode.workspace.fs.writeFile(
-        this.getTranscriptUri(metadata.parentSessionId, metadata.id),
-        this.encoder.encode(`${JSON.stringify(transcript, null, 2)}\n`)
-      )
-    ]);
+    const snapshot = structuredClone({ version: 1, metadata, transcript });
+    const write = this.persistenceQueue.catch(() => undefined).then(() => writeJsonAtomic(vscode.Uri.joinPath(directory, `${metadata.id}.run.json`), snapshot));
+    this.persistenceQueue = write;
+    await write;
   }
 
   public async read(parentSessionId: string, subagentId: string): Promise<{
@@ -50,6 +47,17 @@ export class SubagentStore {
       return undefined;
     }
     try {
+      try {
+        const data = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(
+          vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.run.json`)
+        ))) as { metadata?: unknown; transcript?: unknown };
+        const metadata = normalizeMetadata(data.metadata);
+        const transcript = normalizeTranscript(data.transcript);
+        if (metadata && transcript && transcript.metadataId === metadata.id) return { metadata, transcript };
+        return undefined;
+      } catch (error) {
+        if (!(error instanceof Error) || !('code' in error) || !['FileNotFound', 'ENOENT'].includes(String(error.code))) return undefined;
+      }
       const [metadataBytes, transcriptBytes] = await Promise.all([
         vscode.workspace.fs.readFile(this.getMetadataUri(parentSessionId, subagentId)),
         vscode.workspace.fs.readFile(this.getTranscriptUri(parentSessionId, subagentId))
@@ -131,7 +139,7 @@ function normalizeMetadata(value: unknown): StoredSubagentMetadata | undefined {
     || typeof value.status !== 'string') {
     return undefined;
   }
-  return { ...value, stats: normalizeSubagentRunUsageSummaryValue(value.stats) } as unknown as StoredSubagentMetadata;
+  return { ...value, status: value.status === 'running' || value.status === 'queued' ? 'stopped' : value.status, stats: normalizeSubagentRunUsageSummaryValue(value.stats) } as unknown as StoredSubagentMetadata;
 }
 
 function normalizeTranscript(value: unknown): StoredSubagentTranscript | undefined {
@@ -143,7 +151,7 @@ function normalizeTranscript(value: unknown): StoredSubagentTranscript | undefin
     || typeof value.result !== 'string') {
     return undefined;
   }
-  return value as unknown as StoredSubagentTranscript;
+  return { ...value, checkpoint: normalizeRunCheckpoint(value.checkpoint) } as unknown as StoredSubagentTranscript;
 }
 
 function isSafeId(value: string): boolean {

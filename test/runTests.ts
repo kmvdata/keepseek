@@ -56,3 +56,5 @@ import './toolAuthorization.test';
 import './usageStats.test';
 import './validationAvailability.test';
 import './workspaceToolsSearch.test';
+
+import './longRunningAgent.test';

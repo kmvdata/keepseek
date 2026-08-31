@@ -250,7 +250,7 @@ describe('OpenAI Responses account protocol', () => {
     assert.equal(incomplete.message.content, 'partial');
   });
 
-  it('accumulates multiple function calls and arguments without a completed fixture', async () => {
+  it('requires a terminal response before executing accumulated function arguments', async () => {
     const events = [
       { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'fc1', call_id: 'call-1', name: 'one', arguments: '' } },
       { type: 'response.function_call_arguments.delta', output_index: 0, item_id: 'fc1', delta: '{"a"' },
@@ -258,6 +258,8 @@ describe('OpenAI Responses account protocol', () => {
       { type: 'response.output_item.added', output_index: 1, item: { type: 'function_call', id: 'fc2', call_id: 'call-2', name: 'two', arguments: '' } },
       { type: 'response.function_call_arguments.done', output_index: 1, call_id: 'call-2', arguments: '{"b":2}' }
     ];
+    await assert.rejects(parseEvents(events, true), /terminal response/u);
+    events.push({ type: 'response.completed', response: { status: 'completed' } } as unknown as typeof events[number]);
     const result = await parseEvents(events, true);
     assert.equal(result.finishReason, 'tool_calls');
     assert.deepEqual(result.message.tool_calls?.map((call) => [call.id, call.function.name, call.function.arguments]), [
@@ -294,12 +296,12 @@ describe('OpenAI Responses account protocol', () => {
     const multiLine = await new ResponsesStreamParser().parse(streamFromCharacters(
       'data: {"type":"response.output_text.done",\n' +
       'data: "text":"multi-line"}\n\n' +
-      'data: [DONE]\n\n'
+      'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
     ), 'en', {});
     assert.equal(multiLine.message.content, 'multi-line');
   });
 
-  it('keeps shared abort, deadline, idle timeout, and empty-stream retry behavior', async () => {
+  it('keeps shared abort, deadline, idle timeout, and empty-stream uncertainty behavior', async () => {
     const client = new OpenAiResponsesClient();
     const originalFetch = globalThis.fetch;
     try {
@@ -340,9 +342,9 @@ describe('OpenAI Responses account protocol', () => {
         body: minimalResponsesBody(),
         language: 'en'
       });
-      assert.equal(retried.ok, true);
-      assert.equal(retried.retryCount, 1);
-      assert.equal(retried.message?.content, 'retried');
+      assert.equal(retried.ok, false);
+      assert.equal(retried.retryCount, 0);
+      assert.equal(attempts, 1);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -455,7 +457,7 @@ describe('OpenAI Responses account protocol', () => {
     }
   });
 
-  it('continues a broken partial stream with local visible Items only', async () => {
+  it('interrupts a broken partial stream without silently issuing another request', async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_input, init) => {
@@ -468,15 +470,8 @@ describe('OpenAI Responses account protocol', () => {
       return completedResponse('lo');
     }) as typeof fetch;
     try {
-      const response = await new AgentRunner().run(createAgentRequest());
-      assert.equal(response.message, 'hello');
-      assert.equal(bodies.length, 2);
-      const secondInput = bodies[1].input as OpenAiResponsesItem[];
-      assert.equal(secondInput.some((item) => item.type === 'reasoning' || typeof item.id === 'string'), false);
-      assert.equal(secondInput.some((item) => item.role === 'assistant' && item.content === 'hel'), true);
-      assert.deepEqual(getResponsesReplay(response.providerReplay).items.map((item) => item.type), [
-        undefined, undefined, 'message'
-      ]);
+      await assert.rejects(new AgentRunner().run(createAgentRequest()), /Cannot parse/u);
+      assert.equal(bodies.length, 1);
     } finally {
       globalThis.fetch = originalFetch;
     }

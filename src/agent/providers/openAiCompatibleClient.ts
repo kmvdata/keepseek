@@ -45,9 +45,13 @@ export class OpenAICompatibleClient implements ProviderClient {
     config: ProviderClientConfig,
     request: ProviderClientRequest
   ): Promise<ProviderClientResult> {
-    const maxRetries = Math.max(0, Math.floor(config.maxRequestRetries));
+    const maxRetries = Math.min(5, Math.max(0, Math.floor(config.maxRequestRetries) || 0));
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      if (request.signal?.aborted) return { ok: false, hadPartialOutput: false, retryable: false, failureKind: 'external_abort', attemptCount: attempt, retryCount: Math.max(0, attempt - 1) };
+      await request.callbacks?.beforeModelRequest?.();
+      if (request.signal?.aborted) continue;
+      request.callbacks?.onActivity?.('request');
       const result = await this.createModelResponseAttempt(config, request, attempt);
       if (result.ok || !this.shouldRetry(result, attempt, maxRetries)) {
         return {
@@ -67,6 +71,8 @@ export class OpenAICompatibleClient implements ProviderClient {
         status: result.status,
         error: result.error
       });
+      await request.callbacks?.beforeRetry?.();
+      request.callbacks?.onActivity?.('retry');
       await this.sleepBeforeRetry(config.requestRetryBaseMs, attempt, request.signal, request.runDeadlineAt);
     }
 
@@ -90,6 +96,7 @@ export class OpenAICompatibleClient implements ProviderClient {
     const controller = new AbortController();
     let idleTimeout: ReturnType<typeof setTimeout> | undefined;
     let runTimeout: ReturnType<typeof setTimeout> | undefined;
+    let observedBody: ReadableStream<Uint8Array> | undefined;
     let abortedByStreamIdleTimeout = false;
     let abortedByRunTimeLimit = false;
     let abortedByExternalSignal = false;
@@ -122,7 +129,7 @@ export class OpenAICompatibleClient implements ProviderClient {
       }
     };
     const setRunTimeout = () => {
-      if (typeof request.runDeadlineAt !== 'number') {
+      if (typeof request.runDeadlineAt !== 'number' || !Number.isFinite(request.runDeadlineAt)) {
         return;
       }
       const remainingMs = request.runDeadlineAt - Date.now();
@@ -131,10 +138,7 @@ export class OpenAICompatibleClient implements ProviderClient {
         controller.abort();
         return;
       }
-      runTimeout = setTimeout(() => {
-        abortedByRunTimeLimit = true;
-        controller.abort();
-      }, remainingMs);
+      runTimeout = setTimeout(setRunTimeout, Math.min(remainingMs, 2_147_483_647));
     };
     const clearRunTimeout = () => {
       if (runTimeout) {
@@ -204,7 +208,7 @@ export class OpenAICompatibleClient implements ProviderClient {
       });
 
       if (!response.ok) {
-        const responseText = await response.text();
+        const responseText = await this.readErrorBody(response);
         trace?.record({
           type: 'upstream_http_error',
           requestId: request.requestId,
@@ -244,8 +248,27 @@ export class OpenAICompatibleClient implements ProviderClient {
       }
 
       resetStreamIdleTimeout();
+      // Bound accumulated response bytes for all parsers, including unknown
+      // events and parameter fragments. No replay data is silently truncated.
+      let responseBytes = 0;
+      const reader = response.body.getReader();
+      observedBody = new ReadableStream<Uint8Array>({
+        pull: async (target) => {
+          try {
+            const chunk = await reader.read();
+            if (chunk.done) { target.close(); reader.releaseLock(); return; }
+            hadStreamActivity = true;
+            request.callbacks?.onActivity?.('network');
+            resetStreamIdleTimeout();
+            responseBytes += chunk.value.byteLength;
+            if (responseBytes > 32 * 1024 * 1024) throw new Error('Streaming resource limit (32 MiB) / 流响应资源上限（32 MiB）');
+            target.enqueue(chunk.value);
+          } catch (error) { target.error(error); void reader.cancel().catch(() => undefined); }
+        },
+        cancel: async () => { await reader.cancel().catch(() => undefined); }
+      });
       const result = await this.parseStream(
-        response.body,
+        observedBody,
         language,
         callbacks,
         {
@@ -360,7 +383,7 @@ export class OpenAICompatibleClient implements ProviderClient {
         };
       }
 
-      const retryable = !hadPartialOutput && !hadStreamActivity && this.isRetryableTransportError(error);
+      const retryable = false; // A transport error cannot prove that the POST was not accepted.
       const isEmptyStream = error instanceof Error && (
         error.message.includes('did not return any streaming chunks') ||
         error.message.includes('未返回任何流式数据块') ||
@@ -373,7 +396,7 @@ export class OpenAICompatibleClient implements ProviderClient {
         attempt,
         ok: false,
         failureKind: this.isRetryableTransportError(error) ? 'network' : isEmptyStream ? 'empty_stream' : 'stream',
-        retryable: retryable || isEmptyStream,
+        retryable,
         hadPartialOutput,
         hadStreamActivity,
         error: formatUnknownError(error),
@@ -384,7 +407,7 @@ export class OpenAICompatibleClient implements ProviderClient {
         message: partialMessage(),
         hadPartialOutput,
         hadStreamActivity,
-        retryable: retryable || isEmptyStream,
+        retryable,
         failureKind: this.isRetryableTransportError(error) ? 'network' : isEmptyStream ? 'empty_stream' : 'stream',
         error: this.formatStreamingError(error, config, language, hadPartialOutput)
       };
@@ -392,7 +415,25 @@ export class OpenAICompatibleClient implements ProviderClient {
       request.signal?.removeEventListener('abort', abortByExternalSignal);
       clearStreamIdleTimeout();
       clearRunTimeout();
+      controller.abort();
+      if (observedBody && !observedBody.locked) await observedBody.cancel().catch(() => undefined);
     }
+  }
+
+  private async readErrorBody(response: Response): Promise<string> {
+    if (!response.body) return '';
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    try {
+      while (bytes < 65_536) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        const part = chunk.value.subarray(0, 65_536 - bytes);
+        chunks.push(part); bytes += part.byteLength;
+      }
+      return Buffer.concat(chunks).toString('utf8');
+    } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
   }
 
   private shouldRetry(result: ClientAttemptResult, attempt: number, maxRetries: number): boolean {
@@ -405,7 +446,8 @@ export class OpenAICompatibleClient implements ProviderClient {
     signal: AbortSignal | undefined,
     runDeadlineAt: number | undefined
   ): Promise<void> {
-    const rawDelayMs = Math.max(0, Math.floor(baseMs)) * (2 ** attempt);
+    if (signal?.aborted) return;
+    const rawDelayMs = Math.min(60_000, Math.max(0, Math.floor(baseMs) || 0) * (2 ** attempt));
     const deadlineDelayMs = typeof runDeadlineAt === 'number'
       ? Math.max(0, runDeadlineAt - Date.now())
       : rawDelayMs;
@@ -428,7 +470,7 @@ export class OpenAICompatibleClient implements ProviderClient {
   }
 
   private isRetryableStatus(status: number): boolean {
-    return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+    return status === 429; // Explicit rate-limit rejection is safe; gateway 5xx acceptance is uncertain.
   }
 
   private isRetryableTransportError(error: unknown): boolean {

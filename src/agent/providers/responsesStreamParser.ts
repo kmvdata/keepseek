@@ -33,25 +33,56 @@ export class ResponsesStreamParser {
     options: ResponsesStreamParseOptions = {}
   ): Promise<OpenAiResponsesStreamResult> {
     const reader = body.getReader();
-    const decoder = new TextDecoder();
-    const streamedText: string[] = [];
-    const streamedReasoningSummary: string[] = [];
-    const outputItems = new Map<number, OpenAiResponsesItem>();
-    const functionArguments = new Map<string, string>();
-    let buffer = '';
-    let sawEvent = false;
-    let done = false;
-    let terminalResponse: CompletedResponse | undefined;
+    try {
+      const decoder = new TextDecoder();
+      const streamedText: string[] = [];
+      const streamedReasoningSummary: string[] = [];
+      const outputItems = new Map<number, OpenAiResponsesItem>();
+      const functionArguments = new Map<string, string>();
+      let buffer = '';
+      let sawEvent = false;
+      let done = false;
+      let terminalResponse: CompletedResponse | undefined;
 
-    const consumeBufferedEvents = (final = false) => {
-      const trailingCarriageReturn = !final && buffer.endsWith('\r');
-      const normalizable = trailingCarriageReturn ? buffer.slice(0, -1) : buffer;
-      buffer = normalizable.replace(/\r\n?/gu, '\n') + (trailingCarriageReturn ? '\r' : '');
-      let separatorIndex = buffer.indexOf('\n\n');
-      while (separatorIndex >= 0) {
-        const rawEvent = buffer.slice(0, separatorIndex);
-        buffer = buffer.slice(separatorIndex + 2);
-        const result = this.consumeEvent(rawEvent, language, callbacks, {
+      const consumeBufferedEvents = (final = false) => {
+        const trailingCarriageReturn = !final && buffer.endsWith('\r');
+        const normalizable = trailingCarriageReturn ? buffer.slice(0, -1) : buffer;
+        buffer = normalizable.replace(/\r\n?/gu, '\n') + (trailingCarriageReturn ? '\r' : '');
+        let separatorIndex = buffer.indexOf('\n\n');
+        while (separatorIndex >= 0) {
+          const rawEvent = buffer.slice(0, separatorIndex);
+          buffer = buffer.slice(separatorIndex + 2);
+          const result = this.consumeEvent(rawEvent, language, callbacks, {
+            streamedText,
+            streamedReasoningSummary,
+            outputItems,
+            functionArguments,
+            options
+          });
+          sawEvent = sawEvent || result.sawEvent;
+          done = done || result.done;
+          terminalResponse = result.response ?? terminalResponse;
+          if (done) {
+            break;
+          }
+          separatorIndex = buffer.indexOf('\n\n');
+        }
+      };
+
+      while (!done) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          buffer += decoder.decode();
+          consumeBufferedEvents(true);
+          break;
+        }
+        buffer += decoder.decode(chunk.value, { stream: true });
+        options.onStreamActivity?.();
+        consumeBufferedEvents();
+      }
+
+      if (buffer.trim() && !done) {
+        const result = this.consumeEvent(buffer, language, callbacks, {
           streamedText,
           streamedReasoningSummary,
           outputItems,
@@ -59,80 +90,58 @@ export class ResponsesStreamParser {
           options
         });
         sawEvent = sawEvent || result.sawEvent;
-        done = done || result.done;
         terminalResponse = result.response ?? terminalResponse;
-        if (done) {
-          break;
-        }
-        separatorIndex = buffer.indexOf('\n\n');
       }
-    };
 
-    while (!done) {
-      const chunk = await reader.read();
-      if (chunk.done) {
-        buffer += decoder.decode();
-        consumeBufferedEvents(true);
-        break;
+      if (!sawEvent) {
+        throw new Error(language === 'en'
+          ? 'The Responses API did not return any streaming events.'
+          : 'Responses API 未返回任何流式事件。');
       }
-      buffer += decoder.decode(chunk.value, { stream: true });
-      options.onStreamActivity?.();
-      consumeBufferedEvents();
-    }
 
-    if (buffer.trim() && !done) {
-      const result = this.consumeEvent(buffer, language, callbacks, {
-        streamedText,
-        streamedReasoningSummary,
-        outputItems,
-        functionArguments,
-        options
-      });
-      sawEvent = sawEvent || result.sawEvent;
-      terminalResponse = result.response ?? terminalResponse;
-    }
+      if (!terminalResponse) throw new Error(language === 'en' ? 'Responses stream ended before a terminal response.' : 'Responses 流未收到完整终态响应。');
+      const authoritativeItems = this.readReplayableItems(terminalResponse?.output);
+      let replayItems = authoritativeItems.length
+        ? authoritativeItems
+        : Array.from(outputItems.entries())
+            .sort(([left], [right]) => left - right)
+            .map(([index, item]) => this.applyAccumulatedArguments(item, functionArguments, index))
+            .filter((item) => REPLAYABLE_OUTPUT_TYPES.has(item.type ?? ''));
+      if (streamedText.length && !this.buildMessage(replayItems).content) {
+        replayItems = this.applyAccumulatedOutputText(replayItems, streamedText.join(''));
+      }
+      const message = this.buildMessage(replayItems);
+      const finalVisibleText = message.content ?? '';
+      if (!streamedText.length && finalVisibleText) {
+        callbacks.onStatus?.({ base: 'thinking', phase: 'generating' });
+        callbacks.onDelta?.({ type: 'content', delta: finalVisibleText });
+      }
 
-    if (!sawEvent) {
-      throw new Error(language === 'en'
-        ? 'The Responses API did not return any streaming events.'
-        : 'Responses API 未返回任何流式事件。');
-    }
+      const status = terminalResponse?.status;
+      const incompleteReason = this.readNestedString(terminalResponse?.incomplete_details, 'reason');
+      if ((status === 'incomplete' || incompleteReason) && incompleteReason !== 'max_output_tokens') {
+        throw new Error(this.formatTerminalError('incomplete', terminalResponse ?? {}, language));
+      }
+      if (status === 'failed') {
+        throw new Error(this.formatTerminalError('failed', terminalResponse ?? {}, language));
+      }
 
-    const authoritativeItems = this.readReplayableItems(terminalResponse?.output);
-    let replayItems = authoritativeItems.length
-      ? authoritativeItems
-      : Array.from(outputItems.entries())
-          .sort(([left], [right]) => left - right)
-          .map(([index, item]) => this.applyAccumulatedArguments(item, functionArguments, index))
-          .filter((item) => REPLAYABLE_OUTPUT_TYPES.has(item.type ?? ''));
-    if (streamedText.length && !this.buildMessage(replayItems).content) {
-      replayItems = this.applyAccumulatedOutputText(replayItems, streamedText.join(''));
-    }
-    const message = this.buildMessage(replayItems);
-    const finalVisibleText = message.content ?? '';
-    if (!streamedText.length && finalVisibleText) {
-      callbacks.onStatus?.({ base: 'thinking', phase: 'generating' });
-      callbacks.onDelta?.({ type: 'content', delta: finalVisibleText });
-    }
+      const toolCalls = message.tool_calls ?? [];
+      if (status === 'incomplete' && toolCalls.length) throw new Error('Incomplete Responses tool call / Responses 工具调用不完整');
+      for (const call of toolCalls) {
+        const args: unknown = JSON.parse(call.function.arguments);
+        if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Invalid tool arguments');
+      }
+      return {
+        message,
+        finishReason: toolCalls.length
+          ? 'tool_calls'
+          : incompleteReason === 'max_output_tokens' ? 'length' : 'stop',
+        usage: this.normalizeUsage(terminalResponse?.usage),
+        outputItems: replayItems
+      };
+    } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
 
-    const status = terminalResponse?.status;
-    const incompleteReason = this.readNestedString(terminalResponse?.incomplete_details, 'reason');
-    if (status === 'incomplete' && incompleteReason !== 'max_output_tokens') {
-      throw new Error(this.formatTerminalError('incomplete', terminalResponse ?? {}, language));
-    }
-    if (status === 'failed') {
-      throw new Error(this.formatTerminalError('failed', terminalResponse ?? {}, language));
-    }
-
-    const toolCalls = message.tool_calls ?? [];
-    return {
-      message,
-      finishReason: toolCalls.length
-        ? 'tool_calls'
-        : incompleteReason === 'max_output_tokens' ? 'length' : 'stop',
-      usage: this.normalizeUsage(terminalResponse?.usage),
-      outputItems: replayItems
-    };
   }
 
   private consumeEvent(
@@ -147,6 +156,7 @@ export class ResponsesStreamParser {
       options: ResponsesStreamParseOptions;
     }
   ): { sawEvent: boolean; done: boolean; response?: CompletedResponse } {
+    if (rawEvent.split('\n').some((line) => line.startsWith(':'))) callbacks.onActivity?.('event');
     const data = rawEvent
       .split('\n')
       .filter((line) => line.startsWith('data:'))
@@ -173,7 +183,9 @@ export class ResponsesStreamParser {
         : `无法解析 Responses 流式事件：${error instanceof Error ? error.message : String(error)}`);
     }
 
+    callbacks.onActivity?.('event');
     const type = typeof event.type === 'string' ? event.type : '';
+    if (type.endsWith('.delta')) callbacks.onActivity?.('content');
     switch (type) {
       case 'response.output_text.delta': {
         const delta = typeof event.delta === 'string' ? event.delta : '';

@@ -1,3 +1,4 @@
+import { writeJsonAtomic } from '../shared/atomicStorage';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getConfiguredDraftRunMaxTranscriptBytes } from '../shared/config';
@@ -47,6 +48,7 @@ export class DraftRunStore {
   private persistenceQueue: Promise<void> = Promise.resolve();
   private persistenceTimer: ReturnType<typeof setTimeout> | undefined;
   private initialized = false;
+  private readonly approving = new Set<string>();
 
   public constructor(
     globalStorageUri: vscode.Uri,
@@ -96,7 +98,7 @@ export class DraftRunStore {
     messageId?: string;
   }): DraftRun[] {
     const now = new Date().toISOString();
-    const added = input.proposals.map((proposal): DraftRun => ({
+    const added = input.proposals.filter((proposal) => !this.draftRuns.has(proposal.id)).map((proposal): DraftRun => ({
       ...cloneProposal(proposal),
       agentRunId: input.agentRunId,
       sessionId: input.sessionId ?? '',
@@ -150,9 +152,10 @@ export class DraftRunStore {
     authorizedExternalReferenceUris: ReadonlySet<string>
   ): Promise<DraftRun | undefined> {
     const draftRun = this.draftRuns.get(id);
-    if (!draftRun || draftRun.status !== 'pending') {
+    if (!draftRun || draftRun.status !== 'pending' || this.approving.has(id)) {
       return undefined;
     }
+    this.approving.add(id);
     try {
       await this.validateBeforeApproval(draftRun, authorizedExternalReferenceUris);
       draftRun.status = 'approved';
@@ -201,6 +204,7 @@ export class DraftRunStore {
       draftRun.status = 'failed';
       draftRun.error = error instanceof Error ? error.message : String(error);
     }
+    this.approving.delete(id);
     this.abortControllers.delete(draftRun.id);
     this.cancelRequests.delete(draftRun.id);
     draftRun.finishedAt = new Date().toISOString();
@@ -399,7 +403,7 @@ export class DraftRunStore {
     }
     this.persistenceTimer = setTimeout(() => {
       this.persistenceTimer = undefined;
-      void this.persistNow();
+      void this.persistNow().catch(() => undefined);
     }, 250);
     this.persistenceTimer.unref?.();
   }
@@ -413,14 +417,10 @@ export class DraftRunStore {
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       .slice(0, MAX_DRAFT_RUN_HISTORY)
       .map(cloneDraftRun);
-    const bytes = new TextEncoder().encode(JSON.stringify({ version: 1, draftRuns }));
-    this.persistenceQueue = this.persistenceQueue.then(async () => {
-      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.storageUri, '..'));
-      await vscode.workspace.fs.writeFile(this.storageUri, bytes);
-    }).catch(() => {
-      // Best-effort persistence; the in-memory one-shot state remains authoritative.
-    });
-    await this.persistenceQueue;
+    const write = this.persistenceQueue.catch(() => undefined).then(() => writeJsonAtomic(this.storageUri, { version: 1, draftRuns }));
+    this.persistenceQueue = write;
+    await write; // In particular, approval persistence failure must prevent spawn.
+
   }
 }
 

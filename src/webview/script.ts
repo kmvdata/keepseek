@@ -481,7 +481,7 @@ export function getScript(): string {
     const agentStatusPools = {
       preparing: ['agentStatusPreparingContext', 'agentStatusPreparingRequest'],
       expanding_references: ['agentStatusExpandingReferences', 'agentStatusPreparingRequest'],
-      requesting_model: ['agentStatusWaitingModel', 'agentStatusDeepSeekReasoning', 'agentStatusWaitingStream'],
+      requesting_model: ['runWaitingHeaders'],
       reasoning: ['agentStatusThinking', 'agentStatusReasoning', 'agentStatusPondering', 'agentStatusSynthesizingClues'],
       planning_tool: ['agentStatusChoosingTools', 'agentStatusPlanningNextStep'],
       executing_tool: ['agentStatusExecutingTool'],
@@ -518,7 +518,13 @@ export function getScript(): string {
         event.preventDefault();
         event.stopPropagation();
         var runMessage = state.messages.find(function(message) { return message.id === runButton.dataset.messageId; });
-        if (!runMessage?.runDetails) return;
+        if (!runMessage) return;
+        if (runButton.dataset.runAction === 'continueTask') {
+          runButton.disabled = true;
+          vscode.postMessage({ type: 'continueAgentTask', messageId: runMessage.id });
+          return;
+        }
+        if (!runMessage.runDetails) return;
         if (runButton.dataset.runAction === 'openTrace') {
           vscode.postMessage({ type: 'openRunTrace', messageId: runMessage.id });
         } else if (runButton.dataset.runAction === 'copySummary') {
@@ -1129,7 +1135,48 @@ export function getScript(): string {
         }
         rememberTerminalAgentActivity(state.agentActivity);
         render();
-      } else if (message.type === 'draftRunStateChanged' || message.type === 'draftRunOutput') {
+      } else if (message.type === 'agentRunDelta') {
+        if (message.sessionId !== state.activeSessionId) return;
+        var targetMessage = state.messages.find(function(item) { return item.id === message.messageId; });
+        if (!targetMessage?.isStreaming || targetMessage.runState?.attempt !== message.attempt) return;
+        // Full-state messages may already include some/all of this patch.
+        function suffix(existing, offset, delta) {
+          return typeof delta === 'string' && existing.length >= offset
+            ? delta.slice(Math.max(0, existing.length - offset)) : '';
+        }
+        var contentTail = suffix(targetMessage.content || '', message.contentOffset, message.contentDelta);
+        var reasoningTail = suffix(targetMessage.reasoningContent || '', message.reasoningOffset, message.reasoningDelta);
+        targetMessage.content = (targetMessage.content || '') + contentTail;
+        targetMessage.reasoningContent = (targetMessage.reasoningContent || '') + reasoningTail;
+        targetMessage.runState = message.runState;
+        state.agentActivity = message.activity;
+        var row = Array.from(transcript.querySelectorAll('[data-message-id]')).find(function(item) { return item.dataset.messageId === message.messageId && item.classList.contains('message'); });
+        if (!row) return;
+        var stick = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 24;
+        var body = row.querySelector('.message-body');
+        var reasoning = row.querySelector('.reasoning-block pre');
+        if (reasoningTail && !reasoning) {
+          var details = document.createElement('details'); details.className = 'reasoning-block'; details.open = true;
+          var summary = document.createElement('summary'); summary.textContent = t('thinkingLive');
+          reasoning = document.createElement('pre'); details.append(summary, reasoning); body.append(details);
+        }
+        if (reasoningTail) reasoning.append(document.createTextNode(reasoningTail));
+        if (contentTail) {
+          var content = row.querySelector('.message-content');
+          if (!content) { content = document.createElement('div'); content.className = 'message-content'; body.append(content); }
+          if (content.classList.contains('is-placeholder')) { content.textContent = ''; content.classList.remove('is-placeholder'); }
+          // Stream as text nodes; render Markdown once the complete state arrives.
+          content.classList.add('is-stream-text');
+          content.append(document.createTextNode(contentTail));
+        }
+        var oldPanel = row.querySelector('.run-state-panel');
+        if (targetMessage.runState) {
+          var newPanel = createRunStatePanel(targetMessage);
+          if (oldPanel) oldPanel.replaceWith(newPanel); else body.append(newPanel);
+        }
+        renderStatus();
+        if (stick) transcript.scrollTop = transcript.scrollHeight;
+      } else if (message.type === 'draftRunStateChanged'  || message.type === 'draftRunOutput') {
         upsertDraftRun(message.draftRun);
         render();
       } else if (message.type === 'sessionChanged') {
@@ -2137,7 +2184,7 @@ export function getScript(): string {
         var previousStatusText = getAgentActivityStatusText(activity) || t('processing');
         agentStatusRotationIndex += 1;
         var nextStatusText = getAgentActivityStatusText(activity) || t('processing');
-        if (nextStatusText !== previousStatusText) {
+        if (nextStatusText !== previousStatusText || nextStatusText !== transientStatus) {
           setTransientStatus(nextStatusText);
         }
       }, AGENT_STATUS_ROTATION_MS);
@@ -2153,6 +2200,14 @@ export function getScript(): string {
     }
 
     function getAgentActivityStatusText(activity) {
+      var current = state.messages.find(function(message) { return message.runState?.status === 'running'; });
+      if (current && ['requesting_model', 'reasoning', 'generating', 'planning_tool'].includes(activity.phase)) {
+        var networkAt = Date.parse(current.runState.lastNetworkAt || '');
+        var contentAt = Date.parse(current.runState.lastContentAt || '');
+        if (!Number.isFinite(networkAt)) return t(Date.now() - Date.parse(current.runState.requestStartedAt || '') > 60000 ? 'runConnectionSilent' : 'runWaitingHeaders');
+        if (Date.now() - networkAt > 60000) return t('runConnectionSilent');
+        if (!Number.isFinite(contentAt) || Date.now() - contentAt > 30000) return t('runHeartbeatOnly');
+      }
       var keys = getAgentActivityStatusKeys(activity);
       if (!keys.length) {
         return '';
@@ -3408,6 +3463,7 @@ export function getScript(): string {
         var message = state.messages[i];
         var item = document.createElement('article');
         var isEditing = message.role === 'user' && message.id === editingMessageId;
+        item.dataset.messageId = message.id;
         item.className = 'message ' + message.role + (isEditing ? ' is-editing' : '') + (message.isStreaming ? ' is-streaming' : '');
         item.dataset.messageId = message.id;
 
@@ -3445,6 +3501,9 @@ export function getScript(): string {
             content.className = 'message-content' + (shouldShowStreamingPlaceholder ? ' is-placeholder' : '');
             if (shouldShowStreamingPlaceholder) {
               content.textContent = t('processing');
+            } else if (message.isStreaming) {
+              content.classList.add('is-stream-text');
+              content.textContent = message.content;
             } else {
               renderMarkdownContent(content, message.content, message.role !== 'assistant', {
                 compactReferenceLinks: message.role === 'user'
@@ -3459,6 +3518,7 @@ export function getScript(): string {
           }
         }
 
+        if (message.role === 'assistant' && message.runState) body.append(createRunStatePanel(message));
         if (message.role === 'assistant' && !message.isStreaming && message.runDetails) {
           body.append(createRunDetailsPanel(message));
         }
@@ -3482,6 +3542,57 @@ export function getScript(): string {
         transcript.scrollTop = transcript.scrollHeight;
       }
     }
+
+    function createRunStatePanel(message) {
+      var run = message.runState;
+      var panel = document.createElement('div');
+      panel.className = 'run-state-panel';
+      panel.dataset.runStateMessage = message.id;
+      var progress = document.createElement('div');
+      progress.textContent = t('runExecution', { seconds: Math.floor(run.usedMs / 1000), steps: run.steps, attempt: run.attempt });
+      var limit = document.createElement('div');
+      limit.textContent = t('runLimit', { limit: run.maxExecutionMs ? Math.round(run.maxExecutionMs / 1000) + 's' : t('runUnlimited'), source: run.limitSource });
+      var activity = document.createElement('div');
+      activity.textContent = t('runLastActivity', { network: formatDateTime(run.lastNetworkAt), event: formatDateTime(run.lastEventAt), content: formatDateTime(run.lastContentAt), step: formatDateTime(run.lastStepAt) });
+      var calls = document.createElement('div');
+      calls.textContent = t('runCalls', { requests: run.modelRequests, retries: run.retries });
+      var notice = document.createElement('div');
+      notice.className = 'run-connection-notice';
+      notice.textContent = run.stopReason ? t('runStopped_' + run.stopReason) : '';
+      panel.append(progress, limit, activity, calls, notice);
+      if (run.status !== 'running' && run.status !== 'completed') {
+        var detail = document.createElement('div');
+        detail.textContent = run.blocker || t('runRecoveryNotice');
+        panel.append(detail);
+        if (run.canResume) {
+          var button = document.createElement('button');
+          button.type = 'button'; button.textContent = t('runContinue');
+          button.dataset.runAction = 'continueTask'; button.dataset.messageId = message.id;
+          button.disabled = Boolean(state.isBusy);
+          panel.append(button);
+        }
+      }
+      return panel;
+    }
+
+    // This clock only changes the uncertainty hint. It is never recorded as
+    // server activity, never sends a request and never disconnects a stream.
+    setInterval(function() {
+      state.messages.forEach(function(message) {
+        var run = message.runState;
+        if (!run || run.status !== 'running') return;
+        var panel = Array.from(document.querySelectorAll('[data-run-state-message]')).find(function(node) { return node.dataset.runStateMessage === message.id; });
+        var notice = panel?.querySelector('.run-connection-notice');
+        if (!notice) return;
+        var lastNetwork = Date.parse(run.lastNetworkAt || '');
+        var lastContent = Date.parse(run.lastContentAt || '');
+        var phase = state.agentActivity?.phase;
+        if (!['requesting_model', 'reasoning', 'generating', 'planning_tool'].includes(phase)) { notice.textContent = ''; return; }
+        notice.textContent = !Number.isFinite(lastNetwork) ? t(Date.now() - Date.parse(run.requestStartedAt || '') > 60000 ? 'runConnectionSilent' : 'runWaitingHeaders')
+          : Date.now() - lastNetwork > 60000 ? t('runConnectionSilent')
+          : (!Number.isFinite(lastContent) || Date.now() - lastContent > 30000) ? t('runHeartbeatOnly') : '';
+      });
+    }, 1000);
 
     function createRunDetailsPanel(message) {
       var details = message.runDetails || {};

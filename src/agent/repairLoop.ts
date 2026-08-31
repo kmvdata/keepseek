@@ -23,8 +23,10 @@ export class RunValidationStateTracker {
 
   public constructor(
     private readonly scope: ValidationWorkspaceScope,
-    initialPendingDraftEditIds: readonly string[] = []
+    initialPendingDraftEditIds: readonly string[] = [],
+    initialValidations: RunValidationState['validations'] = []
   ) {
+    this.validations.push(...structuredClone(initialValidations));
     for (const id of initialPendingDraftEditIds) {
       if (id) {
         this.pendingDraftEditIds.add(id);

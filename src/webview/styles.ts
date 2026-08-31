@@ -1929,5 +1929,10 @@ export function getStyles(): string {
     .hidden {
       display: none !important;
     }
+
+.run-state-panel { margin: 8px 0; padding: 8px; border: 1px solid var(--vscode-widget-border); border-radius: 6px; font-size: 11px; color: var(--vscode-descriptionForeground); overflow-wrap: anywhere; }
+.run-state-panel > div + div { margin-top: 4px; }
+.run-state-panel button { margin-top: 8px; }
+.is-stream-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 `;
 }

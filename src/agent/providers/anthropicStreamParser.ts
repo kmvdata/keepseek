@@ -43,142 +43,147 @@ export class AnthropicStreamParser {
     options: AnthropicStreamParseOptions = {}
   ): Promise<AnthropicMessagesStreamResult> {
     const reader = body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let sawEvent = false;
-    let sawMessageStart = false;
-    let sawMessageStop = false;
-    let stopReason: string | null | undefined;
-    const blocks = new Map<number, BlockAccumulator>();
-    const usage: UsageAccumulator = {
-      inputTokens: 0,
-      cacheCreationInputTokens: 0,
-      cacheReadInputTokens: 0,
-      outputTokens: 0
-    };
+    try {
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let sawEvent = false;
+      let sawMessageStart = false;
+      let sawMessageStop = false;
+      let stopReason: string | null | undefined;
+      const blocks = new Map<number, BlockAccumulator>();
+      const usage: UsageAccumulator = {
+        inputTokens: 0,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+        outputTokens: 0
+      };
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        buffer += decoder.decode();
-        break;
+      while (!sawMessageStop) {
+        const { value, done } = await reader.read();
+        if (done) {
+          buffer += decoder.decode();
+          break;
+        }
+        options.onStreamActivity?.();
+        buffer += decoder.decode(value, { stream: true });
+        buffer = this.consumeFrames(buffer, (frame) => {
+          sawEvent = true;
+          callbacks.onActivity?.('event');
+          this.recordRawSseData(frame.data, options);
+          const event = this.parseData(frame.data, language);
+          const type = typeof event.type === 'string' ? event.type : frame.event;
+          if (type === 'content_block_delta') callbacks.onActivity?.('content');
+          switch (type) {
+            case 'message_start':
+              sawMessageStart = true;
+              if (this.isRecord(event.message)) {
+                this.mergeUsage(usage, event.message.usage);
+              }
+              break;
+            case 'content_block_start':
+              this.startBlock(blocks, event);
+              break;
+            case 'content_block_delta':
+              this.applyDelta(blocks, event, callbacks);
+              break;
+            case 'content_block_stop':
+              this.stopBlock(blocks, event);
+              break;
+            case 'message_delta':
+              if (this.isRecord(event.delta) && typeof event.delta.stop_reason === 'string') {
+                stopReason = event.delta.stop_reason;
+              }
+              this.mergeUsage(usage, event.usage);
+              break;
+            case 'message_stop':
+              sawMessageStop = true;
+              break;
+            case 'error':
+              throw new Error(this.formatError(event, language));
+            case 'ping':
+            default:
+              // Unknown future event types are activity but do not change state.
+              break;
+          }
+        });
       }
-      buffer += decoder.decode(value, { stream: true });
-      buffer = this.consumeFrames(buffer, (frame) => {
-        sawEvent = true;
-        options.onStreamActivity?.();
-        this.recordRawSseData(frame.data, options);
-        const event = this.parseData(frame.data, language);
-        const type = typeof event.type === 'string' ? event.type : frame.event;
-        switch (type) {
-          case 'message_start':
-            sawMessageStart = true;
-            if (this.isRecord(event.message)) {
-              this.mergeUsage(usage, event.message.usage);
-            }
-            break;
-          case 'content_block_start':
-            this.startBlock(blocks, event);
-            break;
-          case 'content_block_delta':
-            this.applyDelta(blocks, event, callbacks);
-            break;
-          case 'content_block_stop':
-            this.stopBlock(blocks, event);
-            break;
-          case 'message_delta':
-            if (this.isRecord(event.delta) && typeof event.delta.stop_reason === 'string') {
-              stopReason = event.delta.stop_reason;
-            }
-            this.mergeUsage(usage, event.usage);
-            break;
-          case 'message_stop':
-            sawMessageStop = true;
-            break;
-          case 'error':
+
+      if (buffer.trim()) {
+        this.consumeFrames(`${buffer}\n\n`, (frame) => {
+          sawEvent = true;
+          options.onStreamActivity?.();
+          const event = this.parseData(frame.data, language);
+          if (event.type === 'error') {
             throw new Error(this.formatError(event, language));
-          case 'ping':
-          default:
-            // Unknown future event types are activity but do not change state.
-            break;
-        }
-      });
-    }
-
-    if (buffer.trim()) {
-      this.consumeFrames(`${buffer}\n\n`, (frame) => {
-        sawEvent = true;
-        options.onStreamActivity?.();
-        const event = this.parseData(frame.data, language);
-        if (event.type === 'error') {
-          throw new Error(this.formatError(event, language));
-        }
+          }
+          throw new Error(language === 'en'
+            ? 'Anthropic Messages stream ended with an incomplete SSE event.'
+            : 'Anthropic Messages 流以不完整的 SSE 事件结束。');
+        });
+      }
+      if (!sawEvent) {
         throw new Error(language === 'en'
-          ? 'Anthropic Messages stream ended with an incomplete SSE event.'
-          : 'Anthropic Messages 流以不完整的 SSE 事件结束。');
-      });
-    }
-    if (!sawEvent) {
-      throw new Error(language === 'en'
-        ? 'Anthropic Messages API did not return any streaming events.'
-        : 'Anthropic Messages API 未返回任何流式事件。');
-    }
-    if (!sawMessageStart || !sawMessageStop) {
-      throw new Error(language === 'en'
-        ? 'Anthropic Messages stream ended before the message completed.'
-        : 'Anthropic Messages 流在消息完成前结束。');
-    }
-    if ([...blocks.values()].some((block) => !block.stopped)) {
-      throw new Error(language === 'en'
-        ? 'Anthropic Messages stream ended with an unfinished content block.'
-        : 'Anthropic Messages 流包含未完成的内容块。');
-    }
+          ? 'Anthropic Messages API did not return any streaming events.'
+          : 'Anthropic Messages API 未返回任何流式事件。');
+      }
+      if (!sawMessageStart || !sawMessageStop) {
+        throw new Error(language === 'en'
+          ? 'Anthropic Messages stream ended before the message completed.'
+          : 'Anthropic Messages 流在消息完成前结束。');
+      }
+      if ([...blocks.values()].some((block) => !block.stopped)) {
+        throw new Error(language === 'en'
+          ? 'Anthropic Messages stream ended with an unfinished content block.'
+          : 'Anthropic Messages 流包含未完成的内容块。');
+      }
 
-    const contentBlocks = [...blocks.entries()]
-      .sort(([left], [right]) => left - right)
-      .map(([, block]) => this.finalizeBlock(block, language));
-    if (stopReason === 'model_context_window_exceeded') {
-      throw new Error(language === 'en'
-        ? 'Anthropic reported that the model context window was exceeded.'
-        : 'Anthropic 报告模型上下文窗口已超限。');
-    }
-    if (!contentBlocks.length) {
-      throw new Error(language === 'en'
-        ? 'Anthropic Messages API returned an empty stream.'
-        : 'Anthropic Messages API 返回了空流。');
-    }
+      const contentBlocks = [...blocks.entries()]
+        .sort(([left], [right]) => left - right)
+        .map(([, block]) => this.finalizeBlock(block, language));
+      if (stopReason === 'model_context_window_exceeded') {
+        throw new Error(language === 'en'
+          ? 'Anthropic reported that the model context window was exceeded.'
+          : 'Anthropic 报告模型上下文窗口已超限。');
+      }
+      if (!contentBlocks.length) {
+        throw new Error(language === 'en'
+          ? 'Anthropic Messages API returned an empty stream.'
+          : 'Anthropic Messages API 返回了空流。');
+      }
 
-    const toolCalls: DeepSeekToolCall[] = contentBlocks
-      .filter((block): block is Extract<AnthropicAssistantContentBlock, { type: 'tool_use' }> => block.type === 'tool_use')
-      .map((block) => ({
-        id: block.id,
-        type: 'function',
-        function: {
-          name: block.name,
-          arguments: JSON.stringify(block.input)
-        }
-      }));
-    const text = contentBlocks
-      .filter((block): block is Extract<AnthropicAssistantContentBlock, { type: 'text' }> => block.type === 'text')
-      .map((block) => block.text)
-      .join('');
-    const thinking = contentBlocks
-      .filter((block): block is Extract<AnthropicAssistantContentBlock, { type: 'thinking' }> => block.type === 'thinking')
-      .map((block) => block.thinking)
-      .join('');
-    const mappedFinishReason = this.mapStopReason(stopReason, toolCalls.length);
-    return {
-      message: {
-        role: 'assistant',
-        content: text,
-        reasoning_content: thinking || null,
-        tool_calls: toolCalls.length ? toolCalls : null
-      },
-      finishReason: mappedFinishReason,
-      stopReason,
-      usage: this.normalizeUsage(usage),
-      contentBlocks
-    };
+      const toolCalls: DeepSeekToolCall[] = contentBlocks
+        .filter((block): block is Extract<AnthropicAssistantContentBlock, { type: 'tool_use' }> => block.type === 'tool_use')
+        .map((block) => ({
+          id: block.id,
+          type: 'function',
+          function: {
+            name: block.name,
+            arguments: JSON.stringify(block.input)
+          }
+        }));
+      const text = contentBlocks
+        .filter((block): block is Extract<AnthropicAssistantContentBlock, { type: 'text' }> => block.type === 'text')
+        .map((block) => block.text)
+        .join('');
+      const thinking = contentBlocks
+        .filter((block): block is Extract<AnthropicAssistantContentBlock, { type: 'thinking' }> => block.type === 'thinking')
+        .map((block) => block.thinking)
+        .join('');
+      const mappedFinishReason = this.mapStopReason(stopReason, toolCalls.length);
+      return {
+        message: {
+          role: 'assistant',
+          content: text,
+          reasoning_content: thinking || null,
+          tool_calls: toolCalls.length ? toolCalls : null
+        },
+        finishReason: mappedFinishReason,
+        stopReason,
+        usage: this.normalizeUsage(usage),
+        contentBlocks
+      };
+    } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+
   }
 
   private consumeFrames(
@@ -214,6 +219,8 @@ export class AnthropicStreamParser {
       }
       if (data.length) {
         visit({ event, data: data.join('\n') });
+      } else if (rawFrame.split('\n').some((line) => line.startsWith(':'))) {
+        visit({ event: 'ping', data: '{"type":"ping"}' });
       }
     }
   }

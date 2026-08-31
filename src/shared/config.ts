@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { mergeDurations, normalizeDuration } from '../agent/executionPolicy';
 import {
   AgentSettings,
   CompressionThreshold,
@@ -48,7 +49,7 @@ export const DEFAULT_PROJECT_INSTRUCTIONS_CONTEXT_BUDGET_TOKENS = 4_000;
 export const DEFAULT_SKILL_CONTEXT_BUDGET_CHARS = 72_000;
 export const DEFAULT_MAX_IMPLICIT_SKILLS = 3;
 export const DEFAULT_BACKGROUND_MAX_ROUNDS = 5;
-export const DEFAULT_BACKGROUND_MAX_DURATION_MS = 30 * 60 * 1_000;
+export const DEFAULT_BACKGROUND_MAX_DURATION_MS = 0;
 export const DEFAULT_BACKGROUND_MAX_TOOL_CALLS = 60;
 export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
   // DeepSeek 峰谷定价(自 2026-08-17 北京时间 00:00 起生效)。
@@ -315,11 +316,19 @@ export function getConfiguredBackgroundMaxRounds(): number {
   return normalizeIntegerInRange(configured, 1, 10, DEFAULT_BACKGROUND_MAX_ROUNDS);
 }
 
+export function getConfiguredAgentMaxExecutionMs(): number {
+  return normalizeDuration(vscode.workspace.getConfiguration('keepseek').get('agent.maxExecutionMs', 0));
+}
+
+export function getConfiguredStreamIdleTimeoutMs(): number {
+  return Math.min(2_147_483_647, normalizeDuration(vscode.workspace.getConfiguration('keepseek').get('agent.streamIdleTimeoutMs', 0)));
+}
+
 export function getConfiguredBackgroundMaxDurationMs(): number {
-  const configured = vscode.workspace
-    .getConfiguration('keepseek')
-    .get<number>('background.maxDurationMs', DEFAULT_BACKGROUND_MAX_DURATION_MS);
-  return normalizeIntegerInRange(configured, 60_000, 3_600_000, DEFAULT_BACKGROUND_MAX_DURATION_MS);
+  // The old 30-minute constant was never a user setting. Only stored overrides
+  // survive migration; absence uses the new zero default.
+  return mergeDurations(getConfiguredAgentMaxExecutionMs(),
+    vscode.workspace.getConfiguration('keepseek').get('background.maxDurationMs', 0));
 }
 
 export function getConfiguredBackgroundMaxToolCalls(): number {
