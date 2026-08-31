@@ -6219,7 +6219,18 @@ export function getScript(): string {
       var targetPath = reference.kind === 'directory'
         ? stripTrailingReferenceSlashes(normalizeReferencePath(displayPath))
         : normalizeReferencePath(displayPath);
-      return getMessageFileName(targetPath);
+      var name = getMessageFileName(targetPath);
+      if (reference.kind !== 'directory' && reference.startLine > 0) {
+        // Visible chips show lines only; title, dataset and href retain columns.
+        name += ':' + formatLineReferenceLabel(
+          reference.startLine,
+          reference.endLine,
+          0,
+          0,
+          getLanguage()
+        ).slice(1);
+      }
+      return name;
     }
 
     function getReferenceChipAriaLabel(kind, pathLabel) {

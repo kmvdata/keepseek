@@ -380,6 +380,72 @@ test('reference chips use type icons, one-line names, and full-path hover labels
   assert.match(transcriptScript, /function formatFileReferenceLabelContents\(reference\)[\s\S]*?getReferenceChipLabel\(reference\)/u);
 });
 
+test('reference chip display names distinguish whole files, lines, ranges, columns, and directories', () => {
+  const displayName = new Function('reference', 'language', `
+    const state = { workspaceFolders: [] };
+    const getLanguage = () => language;
+    ${getGeneratedSection(getScript(), 'function makeMessageFileHref', 'function isLikelyMessageFilePath')}
+    return getReferenceChipDisplayName(reference);
+  `);
+  const base = { kind: 'file', path: 'src/config.ts', startLine: 0, endLine: 0, startColumn: 0, endColumn: 0 };
+  const cases = [
+    { input: base, expected: 'config.ts' },
+    { input: { ...base, startLine: 52, endLine: 52 }, expected: 'config.ts:52' },
+    { input: { ...base, startLine: 52 }, expected: 'config.ts:52' },
+    { input: { ...base, startLine: 52, endLine: -1 }, expected: 'config.ts:52' },
+    { input: { ...base, startLine: 81, endLine: 87 }, expected: 'config.ts:81-87' },
+    { input: { ...base, path: 'src/utils.ts', startLine: 10, endLine: 10, startColumn: 5, endColumn: 20 }, expected: 'utils.ts:10' },
+    { input: { ...base, startLine: 81, endLine: 87, startColumn: 5, endColumn: 20 }, expected: 'config.ts:81-87' },
+    { input: { ...base, kind: 'directory', path: 'src/agent/' }, expected: 'agent' }
+  ];
+
+  for (const language of ['zh-CN', 'en']) {
+    for (const { input, expected } of cases) {
+      const before = { ...input };
+      assert.equal(displayName(input, language), expected);
+      assert.deepEqual(input, before);
+    }
+  }
+});
+
+test('line-only chip display preserves column datasets, hrefs, hover labels, and serialized bytes', () => {
+  const script = getScript();
+  const inputScript = getInputScript();
+  const inspectReference = new Function(`
+    const state = { workspaceFolders: [] };
+    const getLanguage = () => 'en';
+    const t = key => key;
+    ${getGeneratedSection(script, 'function makeMessageFileHref', 'function isLikelyMessageFilePath')}
+    ${getGeneratedSection(script, 'function isMessageWindowsDrivePath', 'function readReferenceInteger')}
+    ${getGeneratedSection(inputScript, 'function makeFileHref', 'function insertFileReferences')}
+    ${getGeneratedSection(inputScript, 'function fileReferenceLinkToText', 'function skillLinkToText')}
+    ${getGeneratedSection(inputScript, 'function makeStandaloneReferenceText', 'function collectPromptFileReferences')}
+    ${getGeneratedSection(inputScript, 'function readFileReferenceLink', 'function isBlockElement')}
+    ${getGeneratedSection(inputScript, 'function readPositiveInteger', 'function sanitizePromptContent')}
+    const reference = normalizeReferenceLinkInput({
+      kind: 'file', path: 'src/utils.ts', startLine: 10, endLine: 10, startColumn: 5, endColumn: 20
+    });
+    const link = { dataset: {}, textContent: getReferenceChipDisplayName(reference) };
+    writeReferenceLinkDataset(link, reference);
+    const title = getReferenceChipTitle(reference);
+    return {
+      text: link.textContent, dataset: link.dataset, href: makeFileReferenceHref(reference),
+      title, ariaLabel: getReferenceChipAriaLabel(reference.kind, title),
+      serialized: fileReferenceLinkToText(link)
+    };
+  `);
+  const result = inspectReference();
+
+  assert.equal(result.text, 'utils.ts:10');
+  assert.deepEqual(result.dataset, {
+    kind: 'file', path: 'src/utils.ts', startLine: '10', endLine: '10', startColumn: '5', endColumn: '20'
+  });
+  assert.equal(result.href, 'src/utils.ts#L10C5-L10C20');
+  assert.equal(result.title, 'src/utils.ts (L10#C5-L10#C20)');
+  assert.equal(result.ariaLabel, 'fileReferenceType: src/utils.ts (L10#C5-L10#C20)');
+  assert.equal(result.serialized, '\n[utils.ts (L10#C5-L10#C20) - src]\n<src/utils.ts#L10C5-L10C20>\n');
+});
+
 test('Skill reference chips reuse plugin.svg and hide the protocol dollar prefix', async () => {
   const inputScript = getInputScript();
   const transcriptScript = getScript();
