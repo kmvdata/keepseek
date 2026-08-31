@@ -78,7 +78,7 @@ import type {
   SubagentToolAdapter
 } from './subagents/types';
 import { searchHistoryArchive } from './historyArchive';
-import { createAcceptedRootSubagentHandoffEstimate, getSubagentHandoffKind } from './subagentUsageStats';
+import { allocateSharedMessageTokens, createAcceptedRootSubagentHandoffEstimate, getSubagentHandoffKind } from './subagentUsageStats';
 import { buildProviderRequestProjection, getProviderRequestLane } from './providerRequestProjection';
 import {
   calibrateContextUsageEstimate,
@@ -714,6 +714,17 @@ export class AgentLoop {
         baseUrl: runtimeConfig.baseUrl
       }).breakdown
     };
+    // Provider calibration changes the prompt total, not the work already done
+    // in this run. Preserve these local-only categories in every notification.
+    runCallbacks.onUsageEstimate = (estimate) => callbacks.onUsageEstimate?.({
+      ...estimate,
+      breakdown: {
+        ...estimate.breakdown,
+        toolCallTokensEstimate: runtimeUsageBreakdown.toolCallTokensEstimate,
+        toolResultTokensEstimate: runtimeUsageBreakdown.toolResultTokensEstimate,
+        reasoningTokensEstimate: runtimeUsageBreakdown.reasoningTokensEstimate
+      }
+    });
     const emitUsageEstimate = (toolsForNextRequest: DeepSeekFunctionTool[]) => {
       const breakdown = {
         ...runtimeUsageBreakdown,
@@ -840,6 +851,10 @@ export class AgentLoop {
       }
 
       const toolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
+      if (normalizedAssistant.displayReasoningContent) {
+        runtimeUsageBreakdown.reasoningTokensEstimate += estimateChatMessageTokens('assistant', normalizedAssistant.displayReasoningContent);
+        emitUsageEstimate(toolsForTurn);
+      }
       if (toolCalls.length) {
         trace.record({
           type: 'assistant_tool_calls_normalized',
@@ -866,6 +881,7 @@ export class AgentLoop {
           providerRunState
         });
         if (continuedResponse) {
+          emitUsageEstimate(toolsForTurn);
           emitStatus({
             base: 'thinking',
             phase: 'finalizing'
@@ -1216,14 +1232,11 @@ export class AgentLoop {
               rootRunId: trace.runId,
               tokensEstimate: this.estimateNativeProviderToolResultTokens({
                 request,
-                messages,
-                tools: nextToolsForRequest,
                 providerRunState,
                 shapedToolMessage,
                 prospectiveResponseOutput,
                 responseFunctionOutputs,
-                anthropicToolResults,
-                outputReserveTokens
+                anthropicToolResults
               }),
               accepted: true,
               nested: false
@@ -1278,9 +1291,6 @@ export class AgentLoop {
           assistant.content ?? '',
           JSON.stringify(toolCalls)
         ].join('\n'));
-        if (assistant.reasoning_content) {
-          runtimeUsageBreakdown.reasoningTokensEstimate += estimateChatMessageTokens('assistant', assistant.reasoning_content);
-        }
         emitUsageEstimate(toolsForTurn);
 
         const roundToolResults: AgentToolResult[] = [];
@@ -1341,6 +1351,7 @@ export class AgentLoop {
           toolResults: roundToolResults
         });
       } else {
+        runtimeUsageBreakdown.toolCallTokensEstimate += estimateChatMessageTokens('assistant', JSON.stringify(toolCalls));
         if (assistant.content?.trim()) {
           const assistantTextMessage: DeepSeekMessage = {
             role: 'assistant',
@@ -1373,27 +1384,18 @@ export class AgentLoop {
         messages.push(emulatedToolResultMessage);
         if (acceptedEmulatedHandoffs.length && !request.subagentContext) {
           const acceptedIds = new Set(acceptedEmulatedHandoffs.map((item) => item.toolCallId));
-          const acceptedResults = emulatedResults.filter((item) => acceptedIds.has(item.toolCall.id));
-          const weights = acceptedResults.map((item) => Math.max(1, estimateDeepSeekMessageTokens({
+          const weights = emulatedResults.map((item) => estimateDeepSeekMessageTokens({
             role: 'user',
             content: this.formatEmulatedDsmlToolResults([item], request.language)
-          })));
-          const acceptedTokens = estimateDeepSeekMessageTokens({
-            role: 'user',
-            content: this.formatEmulatedDsmlToolResults(acceptedResults, request.language)
-          });
-          const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-          let allocated = 0;
-          acceptedEmulatedHandoffs.forEach((item, index) => {
-            const tokensEstimate = index === acceptedEmulatedHandoffs.length - 1
-              ? Math.max(0, acceptedTokens - allocated)
-              : Math.max(0, Math.floor(acceptedTokens * (weights[index] ?? 0) / Math.max(1, totalWeight)));
-            allocated += tokensEstimate;
+          }));
+          const allocations = allocateSharedMessageTokens(estimateDeepSeekMessageTokens(emulatedToolResultMessage), weights);
+          emulatedResults.forEach((item, index) => {
+            if (!acceptedIds.has(item.toolCall.id)) { return; }
             const handoff = createAcceptedRootSubagentHandoffEstimate({
-              toolName: item.toolName,
-              handoffId: `${trace.runId}:${item.toolCallId}`,
+              toolName: item.toolCall.function.name,
+              handoffId: `${trace.runId}:${item.toolCall.id}`,
               rootRunId: trace.runId,
-              tokensEstimate,
+              tokensEstimate: allocations[index],
               accepted: true,
               nested: false
             });
@@ -1591,24 +1593,27 @@ export class AgentLoop {
       if (options.usageTotals) {
         options.usageTotals.requestCount += retryCount;
       }
-      callbacks.onUsage?.(retryEvent);
+      // Keep retry-attempt bookkeeping in the historic response/trace, but an
+      // attempt without Provider usage is not an actual-usage observation.
     }
 
+    // Usage can be reported before a failed/stopped stream. Observe it even
+    // when no usable final assistant message is available.
+    const usageEvent = this.recordUpstreamUsage(
+      response.usage,
+      options.usageTotals,
+      trace,
+      upstreamRequestId,
+      request.model.id,
+      runtimeConfig.sourceId,
+      runtimeConfig.provider,
+      runtimeConfig.baseUrl,
+      runtimeConfig.supportsBilling,
+      options.usageSource ?? 'executor'
+    );
+    if (usageEvent) { callbacks.onUsage?.(usageEvent); }
     if (response.ok && response.message) {
-      const usageEvent = this.recordUpstreamUsage(
-        response.usage,
-        options.usageTotals,
-        trace,
-        upstreamRequestId,
-        request.model.id,
-        runtimeConfig.sourceId,
-        runtimeConfig.provider,
-        runtimeConfig.baseUrl,
-        runtimeConfig.supportsBilling,
-        options.usageSource ?? 'executor'
-      );
       if (usageEvent) {
-        callbacks.onUsage?.(usageEvent);
         callbacks.onUsageEstimate?.(calibrateContextUsageEstimate(
           options.providerRunState?.protocol === 'openai-responses'
             ? createContextUsageEstimateFromResponses({
@@ -1826,6 +1831,7 @@ export class AgentLoop {
       const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false, false);
       if (normalizedContinuation.displayReasoningContent) {
         input.reasoningParts.push(normalizedContinuation.displayReasoningContent);
+        input.runtimeUsageBreakdown.reasoningTokensEstimate += estimateChatMessageTokens('assistant', normalizedContinuation.displayReasoningContent);
       }
       const continuationContent = normalizedContinuation.assistant.content ?? '';
       content = this.joinContinuationContent(content, continuationContent);
@@ -3048,14 +3054,11 @@ export class AgentLoop {
 
   private estimateNativeProviderToolResultTokens(input: {
     request: AgentRequest;
-    messages: DeepSeekMessage[];
-    tools: DeepSeekFunctionTool[];
     providerRunState?: ProviderNativeRunState;
     shapedToolMessage: DeepSeekMessage;
     prospectiveResponseOutput: OpenAiResponsesItem;
     responseFunctionOutputs: OpenAiResponsesItem[];
     anthropicToolResults: AnthropicUserContentBlock[];
-    outputReserveTokens: number;
   }): number {
     if (input.providerRunState?.protocol === 'openai-responses') {
       const before = createContextUsageEstimateFromResponses({

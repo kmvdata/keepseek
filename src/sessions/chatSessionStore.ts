@@ -29,6 +29,7 @@ import {
 import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from '../shared/i18n';
 import { isRecord } from '../shared/errors';
 import { normalizeContextUsageEstimateValue } from '../agent/contextUsage';
+import { normalizeSubagentSessionUsageStatsValue } from '../agent/subagentUsageStats';
 import {
   normalizeBalanceStateValue,
   normalizePromptCacheDiagnosticsValue,
@@ -477,8 +478,24 @@ export function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
   return messages.map(({
     expandedContent: _expandedContent,
     providerReplay: _providerReplay,
+    toolRounds: _toolRounds,
     ...message
-  }) => message);
+  }) => ({
+    ...message,
+    ...(message.runDetails ? { runDetails: {
+      ...message.runDetails,
+      toolCalls: message.runDetails.toolCalls.map((tool) => {
+        if (!['keepseek_delegate_task', 'keepseek_delegate_parallel', 'keepseek_read_subagent_result'].includes(tool.name)) {
+          return tool;
+        }
+        return {
+          id: tool.id, name: tool.name, status: tool.status,
+          startedAt: tool.startedAt, endedAt: tool.endedAt, durationMs: tool.durationMs,
+          riskLevel: tool.riskLevel, scope: tool.scope, truncated: tool.truncated
+        };
+      })
+    } } : {})
+  }));
 }
 
 export function getCurrentWorkspaceSessionScope(): WorkspaceSessionScope {
@@ -560,6 +577,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
       usageStats: normalizeSessionUsageStatsValue(item.usageStats),
       lastTurnUsage: normalizeTurnUsageStatsValue(item.lastTurnUsage),
+      subagentUsageStats: normalizeSubagentSessionUsageStatsValue(item.subagentUsageStats),
       balance: normalizeBalanceStateValue(item.balance),
       promptCacheDiagnostics: normalizePromptCacheDiagnosticsValue(item.promptCacheDiagnostics),
       lastTraceLogUri: typeof item.lastTraceLogUri === 'string' && item.lastTraceLogUri.trim()

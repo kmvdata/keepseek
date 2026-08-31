@@ -56,7 +56,7 @@ export function getInputTemplate(): string {
               </span>
             </div>
             <div class="composer-toolbar-right">
-              <div id="contextProgress" class="context-progress" role="status" tabindex="0" aria-describedby="contextProgressTooltip" aria-label="背景信息窗口：用量统计">
+              <button id="contextProgress" type="button" class="context-progress" aria-describedby="contextProgressTooltip" aria-label="用量统计" data-i18n-aria-label="usageStatsTitle" aria-haspopup="dialog" aria-controls="usageDetailsDialog" aria-expanded="false">
                 <span class="context-progress-ring" aria-hidden="true"></span>
                 <span id="contextProgressTooltip" class="context-progress-tooltip" role="tooltip">
                   <span id="contextProgressTitle">背景信息窗口</span>
@@ -64,7 +64,7 @@ export function getInputTemplate(): string {
                   <span id="contextProgressTokens">本次 tokens：-</span>
                   <span id="contextProgressBreakdown" class="context-progress-breakdown"></span>
                 </span>
-              </div>
+              </button>
               <button id="sendButton" type="submit" class="composer-send-btn" title="发送" aria-label="发送" data-i18n-title="send" data-i18n-aria-label="send" disabled>
                 <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M8 12.75V3.75M4.75 7 8 3.75 11.25 7" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>
@@ -256,6 +256,17 @@ export function getInputTemplate(): string {
         <div id="referenceMenu" class="reference-menu hidden" role="listbox" aria-label="引用工程文件" data-i18n-aria-label="referenceWorkspaceFiles"></div>
       </div>
     </form>
+
+    <dialog id="usageDetailsDialog" class="usage-details-dialog" aria-labelledby="usageDetailsTitle" aria-describedby="usageDetailsDescription">
+      <div class="usage-details-header">
+        <div>
+          <h2 id="usageDetailsTitle" data-i18n="usageDetailsTitle">用量详情</h2>
+          <p id="usageDetailsDescription" data-i18n="usageDetailsDescription">分别查看 Provider 实际用量与本地上下文估算。</p>
+        </div>
+        <button id="usageDetailsClose" type="button" class="secondary" data-i18n="close">关闭</button>
+      </div>
+      <div id="usageDetailsBody" class="usage-details-body" tabindex="0"></div>
+    </dialog>
 
     <div id="backgroundRunDialogOverlay" class="settings-overlay hidden">
       <div class="settings-dialog background-run-dialog" role="dialog" aria-modal="true" aria-label="启动后台任务" data-i18n-aria-label="backgroundDialogLabel">

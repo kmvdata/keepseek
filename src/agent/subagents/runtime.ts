@@ -37,7 +37,6 @@ import type {
   StoredSubagentMetadata,
   StoredSubagentTranscript,
   SubagentInvocationContext,
-  SubagentLane,
   SubagentProgressState,
   SubagentProfile,
   SubagentToolAdapter,
@@ -235,6 +234,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
       const message = error instanceof Error ? error.message : String(error);
       const fallbackModel = context.parentRequest.model;
       const fallbackSource = context.parentRequest.sourceConfig;
+      const requestedSetting = await this.settingsStore.load().catch(() => undefined);
+      const fixedSelection = requestedSetting?.mode === 'fixed';
       const stats = createSubagentRunUsageSummary({
         subagentId: id,
         parentRunId: context.parentRunId,
@@ -243,9 +244,11 @@ export class SubagentRuntime implements SubagentToolAdapter {
         profile: profile.id,
         lane,
         status: context.signal?.aborted ? 'stopped' : 'failed',
-        sourceId: fallbackSource?.sourceId ?? fallbackModel.sourceId ?? '',
-        modelId: fallbackModel.id,
-        provider: fallbackSource?.provider ?? fallbackModel.provider,
+        // Resolution failed before a Provider call: retain the requested fixed
+        // identity, not an apparent fallback to the parent's model.
+        sourceId: fixedSelection ? requestedSetting.sourceId ?? '' : fallbackSource?.sourceId ?? fallbackModel.sourceId ?? '',
+        modelId: fixedSelection ? requestedSetting.modelId ?? '' : fallbackModel.id,
+        provider: fixedSelection ? '' : fallbackSource?.provider ?? fallbackModel.provider,
         startedAt: now,
         completedAt
       });
@@ -420,10 +423,16 @@ export class SubagentRuntime implements SubagentToolAdapter {
       createdAt: startedAt
     };
     let childUsage: TurnUsageStats | undefined;
+    let receivedUsageEvent = false;
     let lastUsageEstimate: ContextUsageEstimate | undefined;
     const recordChildUsage = (event: UsageEvent): void => {
+      receivedUsageEvent = true;
       const childEvent: UsageEvent = { ...event, source: 'subagent' };
-      childUsage = addUsageEventToTurnStats(childUsage, childEvent);
+      // Nested children report their own summaries. Forward their events to the
+      // root exactly once, but do not count them again as this child's usage.
+      if (event.source !== 'subagent') {
+        childUsage = addUsageEventToTurnStats(childUsage, childEvent);
+      }
       input.context.onUsage?.(childEvent);
     };
     try {
@@ -480,22 +489,19 @@ export class SubagentRuntime implements SubagentToolAdapter {
         },
         onUsage: recordChildUsage,
         onUsageEstimate: (usage) => {
-          const currentIntermediate = lastUsageEstimate
-            ? lastUsageEstimate.breakdown.toolCallTokensEstimate
-              + lastUsageEstimate.breakdown.toolResultTokensEstimate
-              + lastUsageEstimate.breakdown.reasoningTokensEstimate
-            : -1;
-          const nextIntermediate = usage.breakdown.toolCallTokensEstimate
-            + usage.breakdown.toolResultTokensEstimate
-            + usage.breakdown.reasoningTokensEstimate;
-          if (nextIntermediate >= currentIntermediate) {
+          const categories = [usage.breakdown.toolCallTokensEstimate,
+            usage.breakdown.toolResultTokensEstimate, usage.breakdown.reasoningTokensEstimate];
+          if (categories.every((value) => Number.isFinite(value) && value >= 0)) {
             lastUsageEstimate = usage;
           }
         },
         onSubagentRunSummary: input.context.onRunSummary
       });
       const fullResult = capResult(response.message, input.profile.resultMaxChars);
-      childUsage = childUsage ?? (response.usage ? relabelTurnUsageAsSubagent(response.usage) : undefined);
+      // Keep the pre-existing tool-visible usage serialization unchanged. Richer
+      // statistics belong only to metadata.stats and the session/UI observer.
+      const toolVisibleUsage = response.usage ? relabelTurnUsageAsSubagent(response.usage) : undefined;
+      if (!receivedUsageEvent) { childUsage = toolVisibleUsage; }
       const resultHash = hashText(fullResult.content);
       const assistantMessage: ChatMessage = {
         id: input.id,
@@ -532,7 +538,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         resultHash,
         resultChars: fullResult.content.length,
         resultTruncated: fullResult.truncated,
-        usage: childUsage,
+        usage: toolVisibleUsage,
         stats
       }, {
         version: 1,
@@ -566,7 +572,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
           ...(inline.length < fullResult.content.length ? { nextOffset: inline.length } : {}),
           draftEditCount: response.draftEdits.length,
           draftRunCount: response.draftRuns?.length ?? 0,
-          usage: childUsage
+          usage: toolVisibleUsage
         }),
         draftEdits: response.draftEdits,
         draftRuns: response.draftRuns
@@ -594,7 +600,6 @@ export class SubagentRuntime implements SubagentToolAdapter {
       await this.store.save({
         ...metadataBase,
         status: stopped ? 'stopped' : 'failed',
-        usage: childUsage,
         stats,
         error: message,
         updatedAt: completedAt,
@@ -844,10 +849,7 @@ function relabelTurnUsageAsSubagent(
         requestCount: usage.requestCount,
         cost: usage.cost,
         pricedRequestCount: usage.pricedRequestCount,
-        unpricedRequestCount: usage.unpricedRequestCount,
-        costByCurrency: usage.costByCurrency ? { ...usage.costByCurrency } : undefined,
-        cacheDataRequestCount: usage.cacheDataRequestCount,
-        cacheDataMissingRequestCount: usage.cacheDataMissingRequestCount
+        unpricedRequestCount: usage.unpricedRequestCount
       }
     }
   };

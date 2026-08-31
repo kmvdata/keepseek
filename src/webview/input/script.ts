@@ -42,6 +42,12 @@ export function getInputScript(): string {
       var contextProgressPercent = document.getElementById('contextProgressPercent');
       var contextProgressTokens = document.getElementById('contextProgressTokens');
       var contextProgressBreakdown = document.getElementById('contextProgressBreakdown');
+      var usageDetailsDialog = document.getElementById('usageDetailsDialog');
+      var usageDetailsBody = document.getElementById('usageDetailsBody');
+      var usageDetailsClose = document.getElementById('usageDetailsClose');
+      var usageDetailsScope = 'session';
+      var usageDetailsRenderKey = '';
+      var usageDetailsPreviousFocus = null;
       var referenceMenu = document.getElementById('referenceMenu');
       var skillsBar = document.getElementById('skillsBar');
       var skillsBarList = document.getElementById('skillsBarList');
@@ -83,6 +89,55 @@ export function getInputScript(): string {
           syncReferenceMenuFromPrompt();
         }
       });
+
+      if (contextProgress && usageDetailsDialog) {
+        contextProgress.addEventListener('keydown', function(event) {
+          if ((event.key === 'Enter' || event.key === ' ') && !event.repeat) {
+            event.preventDefault();
+            contextProgress.click();
+          }
+        });
+        contextProgress.addEventListener('click', function() {
+          closeCommandMenu();
+          closeReferenceMenu(false);
+          usageDetailsPreviousFocus = document.activeElement;
+          usageDetailsRenderKey = '';
+          renderUsageDetails();
+          if (!usageDetailsDialog.open) { usageDetailsDialog.showModal(); }
+          contextProgress.setAttribute('aria-expanded', 'true');
+          if (usageDetailsClose) { usageDetailsClose.focus(); }
+        });
+        usageDetailsDialog.addEventListener('cancel', function(event) {
+          event.preventDefault();
+          usageDetailsDialog.close();
+        });
+        usageDetailsDialog.addEventListener('keydown', function(event) {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            usageDetailsDialog.close();
+          }
+        });
+        usageDetailsDialog.addEventListener('close', function() {
+          contextProgress.setAttribute('aria-expanded', 'false');
+          var target = usageDetailsPreviousFocus && usageDetailsPreviousFocus.isConnected
+            ? usageDetailsPreviousFocus : contextProgress;
+          target.focus();
+        });
+      }
+      if (usageDetailsClose) {
+        usageDetailsClose.addEventListener('click', function() { usageDetailsDialog.close(); });
+      }
+      if (usageDetailsBody) {
+        usageDetailsBody.addEventListener('click', function(event) {
+          var target = event.target instanceof Element ? event.target.closest('button[data-usage-scope]') : null;
+          if (!target || target.disabled) { return; }
+          usageDetailsScope = target.dataset.usageScope === 'turn' ? 'turn' : 'session';
+          renderUsageDetails();
+          var selected = usageDetailsBody.querySelector('button[data-usage-scope="' + usageDetailsScope + '"]');
+          if (selected) { selected.focus(); }
+        });
+      }
 
       composer.addEventListener('submit', function(event) {
         event.preventDefault();
@@ -1338,6 +1393,8 @@ export function getInputScript(): string {
       function renderContextProgress() {
         if (!contextProgress) { return; }
         var metrics = normalizeUsageMetrics(state.usageMetrics);
+        var details = metrics.usageDetails;
+        var subagents = details && details.subagents;
         var sessionUsage = metrics.sessionUsageStats;
         var usageGroups = sessionUsage && Array.isArray(sessionUsage.byModelSource)
           ? sessionUsage.byModelSource
@@ -1398,14 +1455,21 @@ export function getInputScript(): string {
         if (metrics.supportsBilling) {
           items.push(['usageMetricBalance', formatMetricBalance(metrics.balance)]);
         }
-        var label = title + '。' + [contextLine, primaryLine].concat(items).map(function(item) {
-          return t(item[0]) + item[1];
-        }).join('；');
-
+        if (subagents && details.session) {
+          items = [
+            ['usageMainSession', formatMetricTokens(details.session.mainSession.totalTokens, true)],
+            ['usageMetricSubagentTokens', formatMetricTokens(details.session.subagent.totalTokens, true)],
+            ['usageSubagentTaskCount', subagents.estimatesAvailable ? formatMetricInteger(subagents.totalCount) : t('usageNotRecorded')],
+            ['usageIsolatedEstimate', subagents.estimatesAvailable
+              ? '≈ ' + formatCompactTokenCount(subagents.isolatedIntermediateTokensEstimate) : t('usageNotRecorded')],
+            ['usageMetricSessionCost', costDisplay.available ? costDisplay.text : t('usageMetricCostUnavailableValue')]
+          ];
+        }
+        items.push(['', t('usageOpenDetails')]);
         contextProgress.style.setProperty('--context-progress-angle', angle + 'deg');
         contextProgress.classList.toggle('is-warning', usedPercent >= metrics.contextSoftCompactRatio * 100 && usedPercent < metrics.contextCompactForceRatio * 100);
         contextProgress.classList.toggle('is-danger', usedPercent >= metrics.contextCompactForceRatio * 100);
-        contextProgress.setAttribute('aria-label', label);
+        contextProgress.setAttribute('aria-label', title);
         if (contextProgressTitle) { contextProgressTitle.textContent = title; }
         if (contextProgressPercent) {
           renderMetricLineInto(contextProgressPercent, t(contextLine[0]), contextLine[1]);
@@ -1420,6 +1484,237 @@ export function getInputScript(): string {
           });
           contextProgressBreakdown.classList.remove('hidden');
         }
+        if (usageDetailsDialog && usageDetailsDialog.open) { renderUsageDetails(); }
+      }
+
+      function renderUsageDetails() {
+        if (!usageDetailsBody) { return; }
+        var metrics = normalizeUsageMetrics(state.usageMetrics);
+        var details = metrics.usageDetails;
+        if (!details || !details.lastTurn) { usageDetailsScope = 'session'; }
+        var renderKey = JSON.stringify([details, usageDetailsScope, getLanguage()]);
+        if (renderKey === usageDetailsRenderKey) { return; }
+        usageDetailsRenderKey = renderKey;
+        var scrollTop = usageDetailsBody.scrollTop;
+        var focusedScope = document.activeElement && document.activeElement.dataset
+          ? document.activeElement.dataset.usageScope : '';
+        usageDetailsBody.replaceChildren();
+        if (!details || !details.session) {
+          usageDetailsBody.append(usageNode('p', 'usage-note', t('usageNoProviderData')));
+          return;
+        }
+
+        var actual = createUsageSection('usageActualTitle', 'usageProviderActual');
+        var scopeControls = usageNode('div', 'usage-scope-controls');
+        scopeControls.setAttribute('role', 'group');
+        scopeControls.setAttribute('aria-label', t('usageScope'));
+        ['session', 'turn'].forEach(function(scope) {
+          var button = usageNode('button', 'secondary', t(scope === 'session' ? 'usageSessionCumulative' : 'usageThisTurn'));
+          button.type = 'button';
+          button.dataset.usageScope = scope;
+          button.disabled = scope === 'turn' && !details.lastTurn;
+          button.setAttribute('aria-pressed', usageDetailsScope === scope ? 'true' : 'false');
+          scopeControls.append(button);
+        });
+        actual.append(scopeControls);
+        var selected = usageDetailsScope === 'turn' && details.lastTurn ? details.lastTurn : details.session;
+        var cards = usageNode('div', 'usage-actual-grid');
+        cards.append(createActualUsageCard(usageDetailsScope === 'turn' ? 'usageTurnTotal' : 'usageSessionTotal', selected.total, 'is-total'));
+        cards.append(createActualUsageCard('usageMainSession', selected.mainSession, 'is-main'));
+        if (details.subagents || hasActualUsage(selected.subagent)) {
+          cards.append(createActualUsageCard('usageSubagentLabel', selected.subagent, 'is-subagent'));
+        }
+        if (hasActualUsage(selected.unattributed)) {
+          cards.append(createActualUsageCard('usageHistoricalUnattributed', selected.unattributed, 'is-unattributed'));
+        }
+        actual.append(cards);
+        if (selected.total.totalTokens > 0) {
+          var share = usageNode('div', 'usage-share');
+          var bar = usageNode('div', 'usage-share-bar');
+          bar.setAttribute('aria-hidden', 'true');
+          var legend = usageNode('div', 'usage-share-legend');
+          [
+            ['usageMainSession', 'main', selected.mainPercent],
+            ['usageSubagentLabel', 'subagent', selected.subagentPercent],
+            ['usageHistoricalUnattributed', 'unattributed', selected.unattributedPercent]
+          ].forEach(function(item) {
+            if (!(item[2] > 0)) { return; }
+            var segment = usageNode('span', 'usage-share-' + item[1]);
+            segment.style.width = clampNumber(item[2], 0, 100) + '%';
+            bar.append(segment);
+            legend.append(usageNode('span', 'usage-share-' + item[1], t(item[0]) + ' ' + formatMetricPercent(item[2])));
+          });
+          share.append(bar, legend);
+          actual.append(share);
+        }
+        actual.append(usageNode('p', 'usage-note', t('usageAttributionExplanation')));
+        actual.append(usageNode('p', 'usage-note', t('usageCurrencyExplanation')));
+        if (selected.total.unpricedRequestCount > 0) {
+          actual.append(usageNode('p', 'usage-warning', t(selected.total.pricedRequestCount > 0
+            ? 'usagePartialPricing' : 'usageAllUnpriced', { count: selected.total.unpricedRequestCount })));
+        }
+        if (!selected.total.requestCount) { actual.append(usageNode('p', 'usage-note', t('usageNoProviderData'))); }
+        usageDetailsBody.append(actual);
+
+        var subagents = details.subagents;
+        var isolation = createUsageSection('usageIsolationTitle', 'usageLocalEstimate');
+        if (!subagents) {
+          isolation.append(usageNode('p', 'usage-note', t('usageNoSubagents')));
+          usageDetailsBody.append(isolation);
+          usageDetailsBody.scrollTop = scrollTop;
+          if (focusedScope) {
+            var noChildScopeButton = usageDetailsBody.querySelector('button[data-usage-scope="' + focusedScope + '"]');
+            if (noChildScopeButton) { noChildScopeButton.focus({ preventScroll: true }); }
+          }
+          return;
+        }
+        isolation.append(usageNode('p', 'usage-note', t('usageIsolationExplanation')));
+        if (subagents.estimatesAvailable) {
+          var estimates = usageNode('div', 'usage-estimate-grid');
+          [
+            ['usageIsolatedEstimate', '≈ ' + formatMetricInteger(subagents.isolatedIntermediateTokensEstimate) + ' Tokens'],
+            ['usageHandoffEstimate', '≈ ' + formatMetricInteger(subagents.rootHandoffTokensEstimate) + ' Tokens'],
+            ['usageIsolationRate', Number.isFinite(subagents.contextIsolationRate)
+              ? '≈ ' + formatMetricPercent(subagents.contextIsolationRate) : t('usageNoRatio')]
+          ].forEach(function(item) {
+            var card = usageNode('div', 'usage-estimate-card');
+            card.append(usageNode('span', 'usage-card-label', t(item[0])), usageNode('strong', 'usage-estimate-value', item[1]));
+            estimates.append(card);
+          });
+          isolation.append(estimates);
+          isolation.append(usageNode('p', 'usage-status-summary', formatSubagentCounts(subagents.totalCount, subagents)));
+          if (subagents.summariesIncomplete) { isolation.append(usageNode('p', 'usage-warning', t('usagePartialRunCoverage'))); }
+          isolation.append(usageNode('p', 'usage-note', t('usageHandoffCounts', {
+            total: subagents.rootHandoffCount,
+            delegate: subagents.handoffCountByKind.delegate,
+            parallel: subagents.handoffCountByKind.parallel,
+            read: subagents.handoffCountByKind['read-result']
+          })));
+        } else {
+          isolation.append(usageNode('p', 'usage-note', t('usageHistoricalEstimateUnavailable')));
+        }
+        isolation.append(usageNode('p', 'usage-estimate-disclaimer', t('usageEstimateDisclaimer')));
+        usageDetailsBody.append(isolation);
+
+        var breakdown = createUsageSection('usageSubagentDetailsTitle', 'usageProviderActual');
+        breakdown.append(usageNode('p', 'usage-note', t('usageSubagentPrivacy')));
+        breakdown.append(usageNode('h4', 'usage-group-title', t('usageSubagentModels')));
+        var modelGroups = usageNode('div', 'usage-group-list');
+        (subagents.byModel || []).forEach(function(group) {
+          modelGroups.append(createSubagentGroupCard(getUsageGroupLabel(group), group));
+        });
+        if (!modelGroups.childElementCount) { modelGroups.append(usageNode('p', 'usage-note', t('usageNotRecorded'))); }
+        breakdown.append(modelGroups);
+        breakdown.append(usageNode('h4', 'usage-group-title', t('usageSubagentWorkTypes')));
+        var profileGroups = usageNode('div', 'usage-group-list');
+        (subagents.byProfileLane || []).forEach(function(group) {
+          profileGroups.append(createSubagentGroupCard(formatSubagentWorkType(group), group));
+        });
+        if (!profileGroups.childElementCount) { profileGroups.append(usageNode('p', 'usage-note', t('usageNotRecorded'))); }
+        breakdown.append(profileGroups);
+        breakdown.append(usageNode('h4', 'usage-group-title', t('usageSubagentRecentRun')));
+        var recent = usageNode('ol', 'usage-recent-runs');
+        (subagents.recentRuns || []).forEach(function(run) {
+          var row = usageNode('li', 'usage-run-card');
+          var heading = usageNode('div', 'usage-run-heading');
+          heading.append(usageNode('span', 'usage-status usage-status-' + run.status, t('subagentStatus_' + run.status)));
+          heading.append(usageNode('span', 'usage-run-model', getUsageGroupLabel(run)));
+          row.append(heading);
+          row.append(usageNode('p', 'usage-note', formatSubagentWorkType(run)));
+          row.append(usageNode('p', 'usage-run-metrics', formatMetricInteger(run.usage.totalTokens) + ' Tokens · '
+            + formatUsageCost(run.usage) + ' · ' + formatDuration(run.durationMs)));
+          row.append(usageNode('p', 'usage-note', formatDateTime(run.completedAt)));
+          if (!hasActualUsage(run.usage)) { row.append(usageNode('p', 'usage-note', t('usageNoProviderData'))); }
+          recent.append(row);
+        });
+        if (!recent.childElementCount) { breakdown.append(usageNode('p', 'usage-note', t('usageNotRecorded'))); }
+        breakdown.append(recent);
+        breakdown.append(usageNode('p', 'usage-note', t('usageRecentLimit')));
+        usageDetailsBody.append(breakdown);
+        usageDetailsBody.scrollTop = scrollTop;
+        if (focusedScope) {
+          var scopeButton = usageDetailsBody.querySelector('button[data-usage-scope="' + focusedScope + '"]');
+          if (scopeButton) { scopeButton.focus({ preventScroll: true }); }
+        }
+      }
+
+      function createUsageSection(titleKey, badgeKey) {
+        var section = usageNode('section', 'usage-section');
+        var header = usageNode('div', 'usage-section-heading');
+        header.append(usageNode('h3', '', t(titleKey)), usageNode('span', 'usage-data-badge', t(badgeKey)));
+        section.append(header);
+        return section;
+      }
+
+      function createActualUsageCard(labelKey, usage, className) {
+        var card = usageNode('div', 'usage-actual-card ' + className);
+        card.append(usageNode('h4', 'usage-card-label', t(labelKey)));
+        card.append(usageNode('strong', 'usage-token-value', formatMetricInteger(usage.totalTokens) + ' Tokens'));
+        var fields = usageNode('dl', 'usage-card-fields');
+        [
+          ['usageRequestCount', formatMetricInteger(usage.requestCount)],
+          ['usageCacheHitRate', formatActualCache(usage)],
+          ['usageCostLabel', formatUsageCost(usage)]
+        ].forEach(function(item) {
+          fields.append(usageNode('dt', '', t(item[0])), usageNode('dd', '', item[1]));
+        });
+        card.append(fields);
+        return card;
+      }
+
+      function createSubagentGroupCard(label, group) {
+        var card = usageNode('div', 'usage-group-card');
+        card.append(usageNode('h5', '', label));
+        card.append(usageNode('p', 'usage-status-summary', group.taskCountsAvailable === false
+          ? t('usageNotRecorded') + ' · ' + t('usageSubagentTaskCount') : formatSubagentCounts(group.taskCount, group)));
+        card.append(usageNode('p', 'usage-run-metrics', formatMetricInteger(group.usage.totalTokens) + ' Tokens · ' + formatUsageCost(group.usage)));
+        card.append(usageNode('p', 'usage-note', t('usageCacheHitRate') + ' ' + formatActualCache(group.usage)));
+        return card;
+      }
+
+      function formatSubagentCounts(count, value) {
+        return t('usageSubagentStatusCounts', {
+          total: count, completed: value.completedCount, failed: value.failedCount, stopped: value.stoppedCount
+        });
+      }
+
+      function formatSubagentWorkType(value) {
+        var profiles = { research: 'usageProfileResearch', review: 'usageProfileReview', proposal: 'usageProfileProposal' };
+        var lanes = {
+          'research-read': 'usageLaneResearch', 'review-read': 'usageLaneReview',
+          'proposal': 'usageLaneProposal', 'nested-read': 'usageLaneNested'
+        };
+        var profile = profiles[value.profile] ? t(profiles[value.profile]) : String(value.profile || '');
+        var lane = lanes[value.lane] ? t(lanes[value.lane]) : String(value.lane || '');
+        return profile + ' / ' + lane;
+      }
+
+      function formatActualCache(usage) {
+        if (!usage || !(usage.cacheDataRequestCount > 0)) {
+          return t('usageCacheUnavailableCoverage', { missing: usage ? usage.cacheDataMissingRequestCount : 0 });
+        }
+        var rate = Number.isFinite(usage.cacheHitRate) ? formatMetricPercent(usage.cacheHitRate) : '—';
+        return rate + ' · ' + t('usageCacheCoverage', {
+          reported: usage.cacheDataRequestCount, missing: usage.cacheDataMissingRequestCount
+        });
+      }
+
+      function formatUsageCost(usage) {
+        var value = formatAccountedCosts(usage);
+        return value.available ? value.text : usage && usage.unpricedRequestCount > 0
+          ? t('usageUnpriced', { count: usage.unpricedRequestCount }) : t('usageMetricCostUnavailableValue');
+      }
+
+      function hasActualUsage(usage) {
+        return Boolean(usage && (usage.totalTokens > 0 || usage.requestCount > 0
+          || Object.keys(usage.costByCurrency || {}).some(function(currency) { return usage.costByCurrency[currency] > 0; })));
+      }
+
+      function usageNode(tag, className, text) {
+        var element = document.createElement(tag);
+        if (className) { element.className = className; }
+        if (text !== undefined) { element.textContent = text; }
+        return element;
       }
 
       function createMetricLine(labelText, valueText) {
@@ -1448,6 +1743,7 @@ export function getInputScript(): string {
         return {
           sessionUsageStats: normalizeUsageStats(metrics.sessionUsageStats, 'sessionCost'),
           lastTurnUsage: normalizeUsageStats(metrics.lastTurnUsage, 'cost'),
+          usageDetails: metrics.usageDetails && typeof metrics.usageDetails === 'object' ? metrics.usageDetails : null,
           supportsBilling: metrics.supportsBilling === true,
           balance: normalizeBalance(metrics.balance),
           promptCacheDiagnostics: metrics.promptCacheDiagnostics || null,
@@ -1593,9 +1889,9 @@ export function getInputScript(): string {
         var partial = usage.pricingStatus === 'partial' || usage.unpricedRequestCount > 0;
         var textValue = currencies.map(function(currency) {
           return formatMetricCost(costs[currency], currency, true);
-        }).join(' + ');
+        }).join(' · ');
         if (partial) {
-          textValue += ' · ' + t('usageMetricCostExcludesUnpriced');
+          textValue += ' · ' + t('usagePartialPricing', { count: usage.unpricedRequestCount || 0 });
         }
         return { available: true, partial: partial, text: textValue };
       }
@@ -1657,10 +1953,10 @@ export function getInputScript(): string {
         if (!Number.isFinite(number)) {
           return '-';
         }
-        var truncated = Math.trunc(number * 100) / 100;
-        return (currency || '¥') + truncated.toLocaleString(undefined, {
+        if (number > 0 && number < 0.000001) { return (currency || '') + '<0.000001'; }
+        return (currency || '') + number.toLocaleString(undefined, {
           minimumFractionDigits: 2,
-          maximumFractionDigits: 2
+          maximumFractionDigits: 6
         });
       }
 

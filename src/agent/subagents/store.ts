@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import { isRecord } from '../../shared/errors';
+import { normalizeSubagentRunUsageSummaryValue } from '../subagentUsageStats';
 import type {
   StoredSubagentMetadata,
   StoredSubagentTranscript
@@ -20,7 +21,7 @@ export class SubagentStore {
     this.rootUri = vscode.Uri.joinPath(
       globalStorageUri,
       'chat-sessions',
-      'v1',
+      SUBAGENT_STORAGE_VERSION,
       'subagents',
       workspaceHash
     );
@@ -130,7 +131,7 @@ function normalizeMetadata(value: unknown): StoredSubagentMetadata | undefined {
     || typeof value.status !== 'string') {
     return undefined;
   }
-  return value as unknown as StoredSubagentMetadata;
+  return { ...value, stats: normalizeSubagentRunUsageSummaryValue(value.stats) } as unknown as StoredSubagentMetadata;
 }
 
 function normalizeTranscript(value: unknown): StoredSubagentTranscript | undefined {

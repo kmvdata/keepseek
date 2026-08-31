@@ -3398,10 +3398,7 @@ export function getScript(): string {
           depth.className = 'subagent-progress-depth';
           depth.textContent = 'D' + String(child.depth || 1);
           heading.append(label, depth);
-          var summary = document.createElement('div');
-          summary.className = 'subagent-progress-summary';
-          summary.textContent = String(child.summary || '');
-          row.append(heading, summary);
+          row.append(heading);
           subagentPanel.append(row);
         });
         transcript.append(subagentPanel);

@@ -84,4 +84,14 @@ Child data is stored below:
 
 Each child has a metadata file and a transcript file. Metadata records lineage, status, profile/lane, source/model, usage, and compatibility hashes for the source lane, system prompt, tool schema, profile, and project instructions. Continuation is allowed only inside the same parent session and only when all compatibility hashes still match. Otherwise it fails closed and the caller must start a new child.
 
-Provider usage emitted by children is attributed to the `subagent` usage source in the parent turn, while each child also stores its own aggregate usage. This makes the parent-context savings and child-call cost independently measurable.
+Provider usage emitted by children is attributed to the `subagent` usage source in the parent turn. Each child accumulates its own Provider events during execution, including usage incurred before failure or cancellation; nested events are forwarded once and attributed to their own child summaries, not counted again in their ancestors.
+
+## Usage details and context isolation
+
+Hover/focus the context ring for a compact usage summary; click it or press Enter/Space for the accessible **Usage details** dialog. Escape closes it and returns focus. The dialog separates Provider actual usage (session or last turn), local context-isolation estimates, and child model/account, profile/lane, and recent-run statistics. Failed/stopped runs remain visible. No child task, result, reasoning, tool trace, or error details are sent in the statistics or progress state.
+
+`ChatSession.subagentUsageStats` is an optional, strictly normalized schema-v1 statistics record. Runs are updated idempotently by `subagentId`; the latest 50 detailed summaries are retained, with cumulative totals and minimal ID-only deduplication ledgers preserved beyond that limit. Child metadata optionally stores the same numeric summary for recovery. Old protocol v1-v5 sessions remain readable; missing historical estimates are shown as unavailable, never reconstructed from prompt tokens.
+
+The isolated-intermediate estimate is the sum of each child's **new** internal tool-call, tool-result, and reasoning estimates. Returned-context estimates observe only the three root subagent tool results after shaping and both budget checks, including parallel wrappers and paginated reads. The isolation rate is `isolated / (isolated + returned)`; a zero denominator has no percentage. These local estimates are **not billed Token savings** and do not predict what a run without subagents would have cost.
+
+See [Usage statistics measurement and validation](doc/subagent-usage-statistics.md) for attribution, currency/cache completeness, limitations, and test coverage. These observers do not change Provider requests, tool schemas, prompts, the global child-model setting, or protocol version 5.

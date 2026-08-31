@@ -469,7 +469,10 @@ export function getInputStyles(): string {
       border-radius: 50%;
       color: var(--vscode-foreground);
       outline: none;
-      cursor: default;
+      border: 0;
+      padding: 0;
+      background: transparent;
+      cursor: pointer;
     }
 
     .context-progress.is-warning {
@@ -587,16 +590,14 @@ export function getInputStyles(): string {
       white-space: nowrap;
     }
 
-    @media (min-width: 360px) {
-      .context-progress-breakdown {
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      }
-    }
-
     .context-progress:hover .context-progress-tooltip,
     .context-progress:focus-visible .context-progress-tooltip {
       opacity: 1;
       transform: translateY(0);
+    }
+
+    .context-progress[aria-expanded="true"] .context-progress-tooltip {
+      opacity: 0;
     }
 
     .composer-status,
@@ -1332,6 +1333,66 @@ export function getInputStyles(): string {
     .command-toggle-input:focus-visible + .command-toggle-track {
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: 2px;
+    }
+
+    .usage-details-dialog {
+      width: min(760px, calc(100vw - 16px));
+      max-width: calc(100vw - 16px);
+      max-height: calc(100vh - 24px);
+      padding: 0;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 10px;
+      color: var(--vscode-foreground);
+      background: var(--vscode-quickInput-background, var(--vscode-editor-background));
+      box-shadow: 0 12px 32px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+    }
+
+    .usage-details-dialog[open] { display: flex; flex-direction: column; }
+    .usage-details-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+    .usage-details-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px; }
+    .usage-details-header h2 { margin: 0; font-size: 16px; }
+    .usage-details-header p { margin: 5px 0 0; color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.5; }
+    .usage-details-header button { flex: none; }
+    .usage-details-body { min-height: 0; overflow-y: auto; padding: 0 16px 16px; }
+    .usage-details-body:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+    .usage-section { padding: 14px 0; border-top: 1px solid var(--vscode-panel-border); }
+    .usage-section-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+    .usage-section-heading h3 { margin: 0; font-size: 14px; }
+    .usage-data-badge { border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 2px 6px; color: var(--vscode-descriptionForeground); font-size: 10px; }
+    .usage-scope-controls { display: flex; gap: 5px; margin-bottom: 10px; }
+    .usage-scope-controls button[aria-pressed="true"] { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; font-weight: 600; }
+    .usage-actual-grid, .usage-estimate-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .usage-actual-card, .usage-estimate-card, .usage-group-card, .usage-run-card { min-width: 0; padding: 12px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; background: var(--vscode-editor-background, transparent); }
+    .usage-actual-card.is-total { grid-column: 1 / -1; border-left: 3px solid var(--vscode-focusBorder); }
+    .usage-card-label { display: block; margin: 0 0 7px; font-size: 11px; font-weight: 500; color: var(--vscode-descriptionForeground); }
+    .usage-token-value, .usage-estimate-value { display: block; font-size: 18px; line-height: 1.35; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+    .usage-card-fields { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 10px; margin: 10px 0 0; font-size: 11px; line-height: 1.5; }
+    .usage-card-fields dt { color: var(--vscode-descriptionForeground); }
+    .usage-card-fields dd { margin: 0; text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+    .usage-share { margin: 12px 0; }
+    .usage-share-bar { display: flex; height: 7px; overflow: hidden; border-radius: 4px; background: var(--vscode-panel-border); }
+    .usage-share-bar .usage-share-main { background: var(--vscode-focusBorder, #3794ff); }
+    .usage-share-bar .usage-share-subagent { background: var(--vscode-charts-green, #4ec9b0); }
+    .usage-share-bar .usage-share-unattributed { background: var(--vscode-descriptionForeground, #999); }
+    .usage-share-legend { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin-top: 6px; font-size: 11px; }
+    .usage-note { margin: 7px 0; color: var(--vscode-descriptionForeground); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+    .usage-warning { margin: 8px 0; color: var(--vscode-editorWarning-foreground, #cca700); font-size: 11px; line-height: 1.5; }
+    .usage-estimate-disclaimer { margin: 10px 0 0; padding: 9px; border-left: 2px solid var(--vscode-descriptionForeground); background: var(--vscode-textBlockQuote-background, transparent); font-size: 11px; line-height: 1.6; }
+    .usage-group-title { margin: 15px 0 8px; font-size: 12px; }
+    .usage-group-list, .usage-recent-runs { display: grid; gap: 7px; }
+    .usage-group-card h5 { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+    .usage-status-summary, .usage-run-metrics { margin: 7px 0 0; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+    .usage-recent-runs { margin: 0; padding: 0; list-style: none; }
+    .usage-run-heading { display: flex; align-items: baseline; gap: 8px; }
+    .usage-run-model { min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+    .usage-status { flex: none; padding: 2px 5px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; font-size: 10px; }
+    .usage-status-failed { color: var(--vscode-errorForeground, #f14c4c); }
+    .usage-status-stopped { color: var(--vscode-editorWarning-foreground, #cca700); }
+    @media (max-width: 420px) {
+      .usage-details-header { padding: 12px; }
+      .usage-details-body { padding: 0 12px 12px; }
+      .usage-actual-grid, .usage-estimate-grid { grid-template-columns: minmax(0, 1fr); }
+      .usage-token-value, .usage-estimate-value { font-size: 16px; }
     }
 
     .settings-overlay {

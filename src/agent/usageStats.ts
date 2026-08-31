@@ -129,7 +129,7 @@ export function addUsageEventToTurnStats(
   event: UsageEvent,
   now = new Date().toISOString()
 ): TurnUsageStats {
-  const base = current ?? createEmptyTurnUsageStats(event.currency, event.modelId);
+  const base = normalizeTurnUsageStatsValue(current) ?? createEmptyTurnUsageStats(event.currency, event.modelId);
   const requestCount = normalizeRequestCount(event.requestCount);
   const pricedRequestCount = (base.pricedRequestCount ?? 0)
     + (event.pricingStatus === 'priced' ? requestCount : 0);
@@ -169,7 +169,7 @@ export function addUsageEventToSessionStats(
   event: UsageEvent,
   now = new Date().toISOString()
 ): SessionUsageStats {
-  const base = current ?? createEmptySessionUsageStats(event.currency);
+  const base = normalizeSessionUsageStatsValue(current) ?? createEmptySessionUsageStats(event.currency);
   const requestCount = normalizeRequestCount(event.requestCount);
   const pricedRequestCount = (base.pricedRequestCount ?? 0)
     + (event.pricingStatus === 'priced' ? requestCount : 0);
@@ -207,7 +207,8 @@ export function addTurnUsageToSessionStats(
   turn: TurnUsageStats,
   now = new Date().toISOString()
 ): SessionUsageStats {
-  const base = current ?? createEmptySessionUsageStats(turn.currency);
+  turn = normalizeTurnUsageStatsValue(turn) ?? turn;
+  const base = normalizeSessionUsageStatsValue(current) ?? createEmptySessionUsageStats(turn.currency);
   const requestCount = Math.max(1, turn.requestCount);
   const pricedRequestCount = (base.pricedRequestCount ?? 0)
     + (turn.pricedRequestCount ?? (turn.pricingStatus === 'priced' ? requestCount : 0));
@@ -391,12 +392,12 @@ export function normalizeSessionUsageStatsValue(value: unknown): SessionUsageSta
     cacheDataMissingRequestCount: readOptionalNonNegativeInteger(value.cacheDataMissingRequestCount)
       ?? (usage.cacheDataStatus === 'reported' ? 0 : requestCount),
     costByCurrency: normalizeCostByCurrency(value.costByCurrency, value.sessionCost, value.currency),
-    byModelSource: normalizeUsageModelGroups(value.byModelSource, value.currency),
+    byModelSource: normalizeUsageModelGroups(value.byModelSource, getLegacySourceCurrency(value.costByCurrency, value.currency)),
     legacyUnattributed: typeof value.legacyUnattributed === 'boolean'
       ? value.legacyUnattributed
       : !Array.isArray(value.byModelSource),
     updatedAt: normalizeOptionalString(value.updatedAt),
-    bySource: normalizeUsageSourceStatsMap(value.bySource, value.currency)
+    bySource: normalizeUsageSourceStatsMap(value.bySource, getLegacySourceCurrency(value.costByCurrency, value.currency))
   };
   return hasAnyUsage(stats) || stats.requestCount > 0 || stats.sessionCost > 0 ? stats : undefined;
 }
@@ -430,7 +431,7 @@ export function normalizeTurnUsageStatsValue(value: unknown): TurnUsageStats | u
       ?? (usage.cacheDataStatus === 'reported' ? 0 : requestCount),
     costByCurrency: normalizeCostByCurrency(value.costByCurrency, value.cost, value.currency),
     updatedAt: normalizeOptionalString(value.updatedAt),
-    bySource: normalizeUsageSourceStatsMap(value.bySource, value.currency)
+    bySource: normalizeUsageSourceStatsMap(value.bySource, getLegacySourceCurrency(value.costByCurrency, value.currency))
   };
   return hasAnyUsage(stats) || stats.requestCount > 0 || stats.cost > 0 ? stats : undefined;
 }
@@ -799,7 +800,7 @@ function normalizeUsageModelGroups(value: unknown, fallbackCurrency?: unknown): 
       cacheDataRequestCount: readNonNegativeInteger(item.cacheDataRequestCount),
       cacheDataMissingRequestCount: readNonNegativeInteger(item.cacheDataMissingRequestCount),
       costByCurrency: normalizeCostByCurrency(item.costByCurrency),
-      bySource: normalizeUsageSourceStatsMap(item.bySource, getOnlyCostCurrency(item.costByCurrency) ?? fallbackCurrency)
+      bySource: normalizeUsageSourceStatsMap(item.bySource, getLegacySourceCurrency(item.costByCurrency, fallbackCurrency))
     });
   }
   return groups.length ? groups : [];
@@ -878,9 +879,12 @@ function getSingleCurrency(costs: Record<string, number>): string | undefined {
   return currencies.length === 1 ? currencies[0] : undefined;
 }
 
-function getOnlyCostCurrency(value: unknown): string | undefined {
+function getLegacySourceCurrency(value: unknown, fallback: unknown): string {
   const costs = normalizeCostByCurrency(value);
-  return costs ? getSingleCurrency(costs) : undefined;
+  const currencies = Object.keys(costs ?? {});
+  // Old per-source scalar costs cannot be assigned to a currency when the
+  // containing aggregate already includes multiple currencies.
+  return currencies.length > 1 ? '' : currencies[0] ?? normalizeCurrency(fallback);
 }
 
 function getSingleCurrencyCost(costs: Record<string, number>): number {

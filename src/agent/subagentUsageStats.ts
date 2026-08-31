@@ -9,13 +9,21 @@ import type {
   SubagentUsageGroup,
   TurnUsageStats,
   Usage,
-  UsageSource,
-  UsageSourceStats
+  UsageSource
 } from '../shared/types';
-import { normalizeTurnUsageStatsValue } from './usageStats';
+import { normalizeSessionUsageStatsValue, normalizeTurnUsageStatsValue } from './usageStats';
+import type { SubagentProgressState } from './subagents/types';
 
 export const SUBAGENT_USAGE_ESTIMATOR_VERSION = 'local-context-v1';
 export const MAX_RECENT_SUBAGENT_RUNS = 50;
+
+/** Progress summaries may contain child tasks, output, or errors. Never send them to the Webview. */
+export function toSubagentProgressViewModel(value: SubagentProgressState) {
+  return {
+    id: value.id, profile: value.profile, lane: value.lane, depth: value.depth,
+    status: value.status, updatedAt: value.updatedAt, completedAt: value.completedAt
+  };
+}
 
 const USAGE_SOURCES: UsageSource[] = [
   'executor',
@@ -37,6 +45,7 @@ export interface ActualUsageSlice extends Usage {
   cacheDataMissingRequestCount: number;
   pricingStatus: 'priced' | 'partial' | 'unavailable';
   costByCurrency: Record<string, number>;
+  cacheHitRate?: number;
 }
 
 export interface ActualUsageBreakdown {
@@ -62,9 +71,11 @@ export interface UsageDetailsViewModel {
     contextIsolationRate?: number;
     rootHandoffCount: number;
     handoffCountByKind: Record<SubagentHandoffKind, number>;
-    byModel: SubagentUsageGroup[];
-    byProfileLane: SubagentUsageGroup[];
-    recentRuns: SubagentRunUsageSummary[];
+    estimatesAvailable: boolean;
+    summariesIncomplete: boolean;
+    byModel: Array<Omit<SubagentUsageGroup, 'usage'> & { usage: ActualUsageSlice; taskCountsAvailable?: boolean }>;
+    byProfileLane: Array<Omit<SubagentUsageGroup, 'usage'> & { usage: ActualUsageSlice }>;
+    recentRuns: Array<Omit<SubagentRunUsageSummary, 'usage'> & { usage: ActualUsageSlice }>;
     estimatorVersion: string;
   };
 }
@@ -158,6 +169,9 @@ export function upsertSubagentRunUsageSummary(
     ?? createEmptySubagentSessionUsageStats(normalizedSummary.completedAt);
   const previousIndex = base.recentRuns.findIndex((item) => item.subagentId === normalizedSummary.subagentId);
   const alreadyCounted = base.countedSubagentIds.includes(normalizedSummary.subagentId);
+  if (previousIndex >= 0 && JSON.stringify(base.recentRuns[previousIndex]) === JSON.stringify(normalizedSummary)) {
+    return base;
+  }
   if (alreadyCounted && previousIndex < 0) {
     // The detail was intentionally trimmed. Terminal callbacks are immutable, so
     // ignoring a late duplicate preserves exact cumulative totals without growing
@@ -176,7 +190,7 @@ export function upsertSubagentRunUsageSummary(
   next.recentRuns.push(normalizedSummary);
   next.recentRuns.sort((left, right) => right.completedAt.localeCompare(left.completedAt));
   next.recentRuns = next.recentRuns.slice(0, MAX_RECENT_SUBAGENT_RUNS);
-  next.updatedAt = normalizedSummary.completedAt;
+  next.updatedAt = latestTimestamp(base.updatedAt, normalizedSummary.completedAt);
   return normalizeSubagentSessionUsageStatsValue(next) ?? next;
 }
 
@@ -201,7 +215,7 @@ export function addSubagentHandoffEstimate(
       [kind]: base.handoffCountByKind[kind] + 1
     },
     countedHandoffIds: [...base.countedHandoffIds, handoffId],
-    updatedAt: normalizeTimestamp(estimate.createdAt)
+    updatedAt: latestTimestamp(base.updatedAt, estimate.createdAt)
   };
 }
 
@@ -226,8 +240,22 @@ export function createAcceptedRootSubagentHandoffEstimate(input: {
     rootRunId: normalizeString(input.rootRunId),
     kind,
     tokensEstimate: safeInteger(input.tokensEstimate),
-    createdAt: normalizeTimestamp(input.createdAt)
+    createdAt: normalizeTimestamp(input.createdAt ?? new Date().toISOString())
   };
+}
+
+/** Allocate a shared, already-serialized message once; never count its wrapper twice. */
+export function allocateSharedMessageTokens(total: number, weights: number[]): number[] {
+  const normalizedWeights = weights.map((weight) => Math.max(1, safeInteger(weight)));
+  const weightSum = normalizedWeights.reduce((sum, weight) => sum + weight, 0);
+  const tokenTotal = safeInteger(total);
+  let allocated = 0;
+  return normalizedWeights.map((weight, index) => {
+    const count = index === normalizedWeights.length - 1 ? tokenTotal - allocated
+      : Math.floor(tokenTotal * (weight / weightSum));
+    allocated += count;
+    return count;
+  });
 }
 
 export function getSubagentHandoffKind(toolName: string): SubagentHandoffKind | undefined {
@@ -246,6 +274,7 @@ export function getSubagentHandoffKind(toolName: string): SubagentHandoffKind | 
 export function splitActualUsage(
   stats: SessionUsageStats | TurnUsageStats | undefined
 ): ActualUsageBreakdown {
+  stats = stats ? 'sessionCost' in stats ? normalizeSessionUsageStatsValue(stats) : normalizeTurnUsageStatsValue(stats) : undefined;
   const total = toActualUsageSlice(stats);
   const sourceStats = stats?.bySource;
   const mainSession = sumActualUsageSlices(USAGE_SOURCES
@@ -273,8 +302,9 @@ export function createUsageDetailsViewModel(input: {
   lastTurnUsage?: TurnUsageStats;
   subagentUsageStats?: SubagentSessionUsageStats;
 }): UsageDetailsViewModel {
-  const session = splitActualUsage(input.sessionUsageStats);
-  const lastTurn = input.lastTurnUsage ? splitActualUsage(input.lastTurnUsage) : undefined;
+  const normalizedSession = normalizeSessionUsageStatsValue(input.sessionUsageStats);
+  const session = splitActualUsage(normalizedSession);
+  const lastTurn = input.lastTurnUsage ? splitActualUsage(normalizeTurnUsageStatsValue(input.lastTurnUsage)) : undefined;
   const subagentStats = normalizeSubagentSessionUsageStatsValue(input.subagentUsageStats);
   const hasSubagentActualUsage = session.subagent.requestCount > 0 || session.subagent.totalTokens > 0;
   const hasSubagents = Boolean(subagentStats?.totalCount || hasSubagentActualUsage);
@@ -297,9 +327,23 @@ export function createUsageDetailsViewModel(input: {
       ...(denominator > 0 ? { contextIsolationRate: safePercent(isolated, denominator) } : {}),
       rootHandoffCount: subagentStats?.rootHandoffCount ?? 0,
       handoffCountByKind: subagentStats?.handoffCountByKind ?? createEmptyHandoffCounts(),
-      byModel: (subagentStats?.byModel ?? []).map(cloneSubagentUsageGroup),
-      byProfileLane: (subagentStats?.byProfileLane ?? []).map(cloneSubagentUsageGroup),
-      recentRuns: (subagentStats?.recentRuns ?? []).map(cloneSubagentRunUsageSummary),
+      estimatesAvailable: Boolean(subagentStats?.totalCount),
+      summariesIncomplete: (subagentStats?.byModel ?? []).reduce((sum, group) => sum + (group.usage?.requestCount ?? 0), 0)
+        < session.subagent.requestCount,
+      byModel: subagentStats?.byModel.length ? subagentStats.byModel.map((group) => ({
+        ...cloneSubagentUsageGroup(group), usage: toActualUsageSlice(group.usage)
+      })) : (normalizedSession?.byModelSource ?? []).filter((group) => group.bySource?.subagent)
+        .map((group) => ({
+          sourceId: group.sourceId, modelId: group.modelId, provider: group.provider,
+          taskCount: 0, completedCount: 0, failedCount: 0, stoppedCount: 0, taskCountsAvailable: false,
+          usage: toActualUsageSlice(group.bySource!.subagent)
+        })),
+      byProfileLane: (subagentStats?.byProfileLane ?? []).map((group) => ({
+        ...cloneSubagentUsageGroup(group), usage: toActualUsageSlice(group.usage)
+      })),
+      recentRuns: (subagentStats?.recentRuns ?? []).map((run) => ({
+        ...cloneSubagentRunUsageSummary(run), usage: toActualUsageSlice(run.usage)
+      })),
       estimatorVersion: SUBAGENT_USAGE_ESTIMATOR_VERSION
     }
   };
@@ -366,7 +410,7 @@ function applyGroupContribution(
 ): SubagentUsageGroup[] {
   const next = groups.map(cloneSubagentUsageGroup);
   const index = next.findIndex((group) => kind === 'model'
-    ? group.sourceId === run.sourceId && group.modelId === run.modelId
+    ? (group.sourceId ?? '') === run.sourceId && group.modelId === run.modelId
     : group.profile === run.profile && group.lane === run.lane);
   const base = index >= 0 ? next[index] : {
     ...(kind === 'model'
@@ -485,7 +529,8 @@ function toActualUsageSlice(value: (Usage & {
     cacheDataRequestCount,
     cacheDataMissingRequestCount,
     pricingStatus: pricingStatus(pricedRequestCount, unpricedRequestCount),
-    costByCurrency
+    costByCurrency,
+    cacheHitRate: cacheRate(value.cacheHitTokens, value.cacheMissTokens, cacheDataRequestCount)
   };
 }
 
@@ -510,7 +555,8 @@ function sumActualUsageSlices(values: ActualUsageSlice[]): ActualUsageSlice {
       cacheDataRequestCount,
       cacheDataMissingRequestCount,
       pricingStatus: pricingStatus(pricedRequestCount, unpricedRequestCount),
-      costByCurrency: mergeCurrencyCosts(total.costByCurrency, value.costByCurrency, 1)
+      costByCurrency: mergeCurrencyCosts(total.costByCurrency, value.costByCurrency, 1),
+      cacheHitRate: cacheRate(total.cacheHitTokens + value.cacheHitTokens, total.cacheMissTokens + value.cacheMissTokens, cacheDataRequestCount)
     };
   }, createEmptyActualUsageSlice());
 }
@@ -535,7 +581,8 @@ function subtractActualUsageSlice(total: ActualUsageSlice, known: ActualUsageSli
     cacheDataRequestCount,
     cacheDataMissingRequestCount,
     pricingStatus: pricingStatus(pricedRequestCount, unpricedRequestCount),
-    costByCurrency: subtractCurrencyCosts(total.costByCurrency, known.costByCurrency)
+    costByCurrency: subtractCurrencyCosts(total.costByCurrency, known.costByCurrency),
+    cacheHitRate: cacheRate(total.cacheHitTokens - known.cacheHitTokens, total.cacheMissTokens - known.cacheMissTokens, cacheDataRequestCount)
   };
 }
 
@@ -585,7 +632,7 @@ function normalizeSubagentRunUsageSummary(value: SubagentRunUsageSummary): Subag
     });
 }
 
-function normalizeSubagentRunUsageSummaryValue(value: unknown): SubagentRunUsageSummary | undefined {
+export function normalizeSubagentRunUsageSummaryValue(value: unknown): SubagentRunUsageSummary | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
@@ -721,6 +768,11 @@ function cacheStatus(reported: number, missing: number): Usage['cacheDataStatus'
   return reported > 0 && missing > 0 ? 'partial' : reported > 0 ? 'reported' : 'unavailable';
 }
 
+function cacheRate(hit: number, miss: number, reported: number): number | undefined {
+  const denominator = safeInteger(hit) + safeInteger(miss);
+  return reported > 0 && denominator > 0 ? safePercent(safeInteger(hit), denominator) : undefined;
+}
+
 function normalizeCurrencyCosts(
   value: unknown,
   legacyCost?: unknown,
@@ -751,8 +803,11 @@ function mergeCurrencyCosts(
 ): Record<string, number> {
   const result = normalizeCurrencyCosts(left);
   for (const [currency, cost] of Object.entries(normalizeCurrencyCosts(right))) {
-    const next = Math.max(0, (result[currency] ?? 0) + direction * cost);
-    if (next > 0) {
+    const previous = result[currency] ?? 0;
+    const difference = previous + direction * cost;
+    const roundoff = Number.EPSILON * Math.max(previous, cost) * 8;
+    const next = direction < 0 && Math.abs(difference) <= roundoff ? 0 : Math.max(0, difference);
+    if (direction > 0 || next > 0) {
       result[currency] = next;
     } else {
       delete result[currency];
@@ -783,12 +838,12 @@ function safePercent(numerator: number, denominator: number): number {
 }
 
 function clampCount(value: number): number {
-  return Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.floor(Number.isFinite(value) ? value : 0)));
 }
 
 function safeInteger(value: unknown): number {
   const number = Number(value);
-  return Math.max(0, Math.floor(Number.isFinite(number) ? number : 0));
+  return clampCount(number);
 }
 
 function safeNumber(value: unknown): number {
@@ -806,6 +861,10 @@ function normalizeTimestamp(value: unknown): string {
     return new Date(Date.parse(value)).toISOString();
   }
   return new Date(0).toISOString();
+}
+
+function latestTimestamp(left: string, right: string): string {
+  return normalizeTimestamp(left) > normalizeTimestamp(right) ? normalizeTimestamp(left) : normalizeTimestamp(right);
 }
 
 function normalizeString(value: unknown): string {

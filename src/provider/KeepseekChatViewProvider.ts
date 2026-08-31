@@ -109,6 +109,7 @@ import {
 import {
   addSubagentHandoffEstimate,
   createUsageDetailsViewModel,
+  toSubagentProgressViewModel,
   upsertSubagentRunUsageSummary
 } from '../agent/subagentUsageStats';
 import { SkillStore } from '../skills/skillStore';
@@ -4111,7 +4112,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         sessionSummaries: this.sessionStore.getSessionSummaries(),
         contextFiles: contextFiles.map(({ content: _content, ...file }) => file),
         skills: this.skillStore.getStateView(activeSession),
-        subagents: this.subagentProgress.filter((item) => item.parentSessionId === activeSession.id),
+        subagents: this.subagentProgress.filter((item) => item.parentSessionId === activeSession.id)
+          .map(toSubagentProgressViewModel),
         subagentModelSetting: this.subagentModelSetting,
         legacyMemoryMigration: this.getLegacyMemoryMigrationStateView(),
         backgroundRun: this.backgroundRunCoordinator.getActiveRun(),
