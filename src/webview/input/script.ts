@@ -45,7 +45,7 @@ export function getInputScript(): string {
       var usageDetailsDialog = document.getElementById('usageDetailsDialog');
       var usageDetailsBody = document.getElementById('usageDetailsBody');
       var usageDetailsClose = document.getElementById('usageDetailsClose');
-      var usageDetailsScope = 'session';
+      var usageAnalysisMode = 'source';
       var usageDetailsRenderKey = '';
       var usageDetailsPreviousFocus = null;
       var referenceMenu = document.getElementById('referenceMenu');
@@ -130,11 +130,14 @@ export function getInputScript(): string {
       }
       if (usageDetailsBody) {
         usageDetailsBody.addEventListener('click', function(event) {
-          var target = event.target instanceof Element ? event.target.closest('button[data-usage-scope]') : null;
+          var target = event.target instanceof Element
+            ? event.target.closest('button[data-usage-analysis]') : null;
           if (!target || target.disabled) { return; }
-          usageDetailsScope = target.dataset.usageScope === 'turn' ? 'turn' : 'session';
+          if (target.dataset.usageAnalysis) {
+            usageAnalysisMode = target.dataset.usageAnalysis === 'type' ? 'type' : 'source';
+          }
           renderUsageDetails();
-          var selected = usageDetailsBody.querySelector('button[data-usage-scope="' + usageDetailsScope + '"]');
+          var selected = usageDetailsBody.querySelector('button[data-usage-analysis="' + usageAnalysisMode + '"]');
           if (selected) { selected.focus(); }
         });
       }
@@ -1449,7 +1452,6 @@ export function getInputScript(): string {
             })
           ]);
         }
-        items.push(['', t('usageOpenDetails')]);
         contextProgress.style.setProperty('--context-progress-angle', angle + 'deg');
         contextProgress.classList.toggle('is-warning', usedPercent >= metrics.contextSoftCompactRatio * 100 && usedPercent < metrics.contextCompactForceRatio * 100);
         contextProgress.classList.toggle('is-danger', usedPercent >= metrics.contextCompactForceRatio * 100);
@@ -1490,243 +1492,420 @@ export function getInputScript(): string {
         var usageGroups = sessionUsage && Array.isArray(sessionUsage.byModelSource)
           ? sessionUsage.byModelSource
           : [];
-        if (!details || !details.lastTurn) { usageDetailsScope = 'session'; }
         var renderKey = JSON.stringify([
           details,
-          usageDetailsScope,
+          usageAnalysisMode,
           sessionUsage,
+          state.contextUsage,
           metrics.promptCacheDiagnostics,
           metrics.contextCompressionTriggerRatio,
+          getLatestRunState(),
           getLanguage()
         ]);
         if (renderKey === usageDetailsRenderKey) { return; }
         usageDetailsRenderKey = renderKey;
         var scrollTop = usageDetailsBody.scrollTop;
-        var focusedScope = document.activeElement && document.activeElement.dataset
-          ? document.activeElement.dataset.usageScope : '';
+        var focusedControl = document.activeElement && document.activeElement.dataset
+          ? document.activeElement.dataset.usageAnalysis || ''
+          : '';
         usageDetailsBody.replaceChildren();
         if (!details || !details.session) {
           usageDetailsBody.append(usageNode('p', 'usage-note', t('usageNoProviderData')));
           return;
         }
 
-        var actual = createUsageSection('usageActualTitle', 'usageProviderActual');
-        var scopeControls = usageNode('div', 'usage-scope-controls');
-        scopeControls.setAttribute('role', 'group');
-        scopeControls.setAttribute('aria-label', t('usageScope'));
-        ['session', 'turn'].forEach(function(scope) {
-          var button = usageNode('button', 'secondary', t(scope === 'session' ? 'usageSessionCumulative' : 'usageThisTurn'));
-          button.type = 'button';
-          button.dataset.usageScope = scope;
-          button.disabled = scope === 'turn' && !details.lastTurn;
-          button.setAttribute('aria-pressed', usageDetailsScope === scope ? 'true' : 'false');
-          scopeControls.append(button);
-        });
-        actual.append(scopeControls);
-        var selected = usageDetailsScope === 'turn' && details.lastTurn ? details.lastTurn : details.session;
-        var mainSessionOnly = selected.total.totalTokens > 0 && selected.mainPercent >= 100;
-        var cards = usageNode('div', 'usage-actual-grid');
-        cards.append(createActualUsageCard(usageDetailsScope === 'turn' ? 'usageTurnTotal' : 'usageSessionTotal', selected.total, 'is-total'));
-        if (!mainSessionOnly) {
-          cards.append(createActualUsageCard('usageMainSession', selected.mainSession, 'is-main'));
-        }
-        if (details.subagents || hasActualUsage(selected.subagent)) {
-          cards.append(createActualUsageCard('usageSubagentLabel', selected.subagent, 'is-subagent'));
-        }
-        if (hasActualUsage(selected.unattributed)) {
-          cards.append(createActualUsageCard('usageHistoricalUnattributed', selected.unattributed, 'is-unattributed'));
-        }
-        actual.append(cards);
-        if (!mainSessionOnly && selected.total.totalTokens > 0) {
-          var share = usageNode('div', 'usage-share');
-          var bar = usageNode('div', 'usage-share-bar');
-          bar.setAttribute('aria-hidden', 'true');
-          var legend = usageNode('div', 'usage-share-legend');
-          [
-            ['usageMainSession', 'main', selected.mainPercent],
-            ['usageSubagentLabel', 'subagent', selected.subagentPercent],
-            ['usageHistoricalUnattributed', 'unattributed', selected.unattributedPercent]
-          ].forEach(function(item) {
-            if (!(item[2] > 0)) { return; }
-            var segment = usageNode('span', 'usage-share-' + item[1]);
-            segment.style.width = clampNumber(item[2], 0, 100) + '%';
-            bar.append(segment);
-            legend.append(usageNode('span', 'usage-share-' + item[1], t(item[0]) + ' ' + formatMetricPercent(item[2])));
-          });
-          share.append(bar, legend);
-          actual.append(share);
-        }
-        if (!mainSessionOnly) {
-          actual.append(usageNode('p', 'usage-note', t('usageAttributionExplanation')));
-        }
-        actual.append(usageNode('p', 'usage-note', t('usageCurrencyExplanation')));
-        if (selected.total.unpricedRequestCount > 0) {
-          actual.append(usageNode('p', 'usage-warning', t(selected.total.pricedRequestCount > 0
-            ? 'usagePartialPricing' : 'usageAllUnpriced', { count: selected.total.unpricedRequestCount })));
-        }
-        if (!selected.total.requestCount) { actual.append(usageNode('p', 'usage-note', t('usageNoProviderData'))); }
-        usageDetailsBody.append(actual);
+        var toolbar = usageNode('div', 'usage-details-toolbar');
+        toolbar.append(usageNode('span', 'usage-details-eyebrow', t('usageDetailsTitle')));
+        usageDetailsBody.append(toolbar);
 
-        if (usageGroups.length > 1 || (sessionUsage && sessionUsage.legacyUnattributed)) {
-          var sourceModels = createUsageSection('usageSourceModelTitle', 'usageSessionCumulative');
-          var sourceModelGroups = usageNode('div', 'usage-group-list');
-          usageGroups.forEach(function(group) {
-            sourceModelGroups.append(createSourceModelUsageCard(group));
-          });
-          if (sourceModelGroups.childElementCount) {
-            sourceModels.append(sourceModelGroups);
-          }
-          if (sessionUsage && sessionUsage.legacyUnattributed) {
-            sourceModels.append(usageNode('p', 'usage-note', t('usageMetricLegacyUnattributed')));
-          }
-          usageDetailsBody.append(sourceModels);
-        }
-
-        var diagnostics = createUsageSection('usageCacheContextTitle', 'usageLocalRuntime');
-        var diagnosticFields = usageNode('dl', 'usage-card-fields usage-diagnostic-fields');
-        var cacheReasons = normalizeCacheReasonList(metrics.promptCacheDiagnostics && metrics.promptCacheDiagnostics.cacheMissPossibleReasons);
-        if (cacheReasons.length) {
-          diagnosticFields.append(
-            usageNode('dt', '', t('usageMetricCacheReasons')),
-            usageNode('dd', '', cacheReasons.map(formatCacheReason).join(' · '))
-          );
-        }
-        diagnosticFields.append(
-          usageNode('dt', '', t('usageMetricCompactThreshold')),
-          usageNode('dd', '', formatMetricPercent(metrics.contextCompressionTriggerRatio * 100))
-        );
-        diagnostics.append(diagnosticFields);
-        usageDetailsBody.append(diagnostics);
-
-        var subagents = details.subagents;
-        var isolation = createUsageSection('usageIsolationTitle', 'usageLocalEstimate');
-        if (!subagents) {
-          isolation.append(usageNode('p', 'usage-note', t('usageNoSubagents')));
-          usageDetailsBody.append(isolation);
-          usageDetailsBody.scrollTop = scrollTop;
-          if (focusedScope) {
-            var noChildScopeButton = usageDetailsBody.querySelector('button[data-usage-scope="' + focusedScope + '"]');
-            if (noChildScopeButton) { noChildScopeButton.focus({ preventScroll: true }); }
-          }
-          return;
-        }
-        isolation.append(usageNode('p', 'usage-note', t('usageIsolationExplanation')));
-        if (subagents.estimatesAvailable) {
-          var estimates = usageNode('div', 'usage-estimate-grid');
-          [
-            ['usageIsolatedEstimate', '≈ ' + formatMetricInteger(subagents.isolatedIntermediateTokensEstimate) + ' Tokens'],
-            ['usageHandoffEstimate', '≈ ' + formatMetricInteger(subagents.rootHandoffTokensEstimate) + ' Tokens'],
-            ['usageIsolationRate', Number.isFinite(subagents.contextIsolationRate)
-              ? '≈ ' + formatMetricPercent(subagents.contextIsolationRate) : t('usageNoRatio')]
-          ].forEach(function(item) {
-            var card = usageNode('div', 'usage-estimate-card');
-            card.append(usageNode('span', 'usage-card-label', t(item[0])), usageNode('strong', 'usage-estimate-value', item[1]));
-            estimates.append(card);
-          });
-          isolation.append(estimates);
-          isolation.append(usageNode('p', 'usage-status-summary', formatSubagentCounts(subagents.totalCount, subagents)));
-          if (subagents.summariesIncomplete) { isolation.append(usageNode('p', 'usage-warning', t('usagePartialRunCoverage'))); }
-          isolation.append(usageNode('p', 'usage-note', t('usageHandoffCounts', {
-            total: subagents.rootHandoffCount,
-            delegate: subagents.handoffCountByKind.delegate,
-            parallel: subagents.handoffCountByKind.parallel,
-            read: subagents.handoffCountByKind['read-result']
-          })));
-        } else {
-          isolation.append(usageNode('p', 'usage-note', t('usageHistoricalEstimateUnavailable')));
-        }
-        isolation.append(usageNode('p', 'usage-estimate-disclaimer', t('usageEstimateDisclaimer')));
-        usageDetailsBody.append(isolation);
-
-        var breakdown = createUsageSection('usageSubagentDetailsTitle', 'usageProviderActual');
-        breakdown.append(usageNode('p', 'usage-note', t('usageSubagentPrivacy')));
-        breakdown.append(usageNode('h4', 'usage-group-title', t('usageSubagentModels')));
-        var modelGroups = usageNode('div', 'usage-group-list');
-        (subagents.byModel || []).forEach(function(group) {
-          modelGroups.append(createSubagentGroupCard(getUsageGroupLabel(group), group));
-        });
-        if (!modelGroups.childElementCount) { modelGroups.append(usageNode('p', 'usage-note', t('usageNotRecorded'))); }
-        breakdown.append(modelGroups);
-        breakdown.append(usageNode('h4', 'usage-group-title', t('usageSubagentWorkTypes')));
-        var profileGroups = usageNode('div', 'usage-group-list');
-        (subagents.byProfileLane || []).forEach(function(group) {
-          profileGroups.append(createSubagentGroupCard(formatSubagentWorkType(group), group));
-        });
-        if (!profileGroups.childElementCount) { profileGroups.append(usageNode('p', 'usage-note', t('usageNotRecorded'))); }
-        breakdown.append(profileGroups);
-        breakdown.append(usageNode('h4', 'usage-group-title', t('usageSubagentRecentRun')));
-        var recent = usageNode('ol', 'usage-recent-runs');
-        (subagents.recentRuns || []).forEach(function(run) {
-          var row = usageNode('li', 'usage-run-card');
-          var heading = usageNode('div', 'usage-run-heading');
-          heading.append(usageNode('span', 'usage-status usage-status-' + run.status, t('subagentStatus_' + run.status)));
-          heading.append(usageNode('span', 'usage-run-model', getUsageGroupLabel(run)));
-          row.append(heading);
-          row.append(usageNode('p', 'usage-note', formatSubagentWorkType(run)));
-          row.append(usageNode('p', 'usage-run-metrics', formatMetricInteger(run.usage.totalTokens) + ' Tokens · '
-            + formatUsageCost(run.usage) + ' · ' + formatDuration(run.durationMs)));
-          row.append(usageNode('p', 'usage-note', formatDateTime(run.completedAt)));
-          if (!hasActualUsage(run.usage)) { row.append(usageNode('p', 'usage-note', t('usageNoProviderData'))); }
-          recent.append(row);
-        });
-        if (!recent.childElementCount) { breakdown.append(usageNode('p', 'usage-note', t('usageNotRecorded'))); }
-        breakdown.append(recent);
-        breakdown.append(usageNode('p', 'usage-note', t('usageRecentLimit')));
-        usageDetailsBody.append(breakdown);
+        var selected = details.session;
+        usageDetailsBody.append(createContextWindowSection(metrics));
+        usageDetailsBody.append(createSessionMetricsSection(metrics, selected));
+        usageDetailsBody.append(createUsageAnalysisSection(selected, usageGroups, sessionUsage, details.subagents));
         usageDetailsBody.scrollTop = scrollTop;
-        if (focusedScope) {
-          var scopeButton = usageDetailsBody.querySelector('button[data-usage-scope="' + focusedScope + '"]');
-          if (scopeButton) { scopeButton.focus({ preventScroll: true }); }
+        if (focusedControl) {
+          var control = usageDetailsBody.querySelector('button[data-usage-analysis="' + focusedControl + '"]');
+          if (control) { control.focus({ preventScroll: true }); }
         }
       }
 
-      function createUsageSection(titleKey, badgeKey) {
+      function createContextWindowSection(metrics) {
+        var contextUsage = state.contextUsage && typeof state.contextUsage === 'object' ? state.contextUsage : {};
+        var breakdown = contextUsage.breakdown && typeof contextUsage.breakdown === 'object'
+          ? contextUsage.breakdown : {};
+        var maxTokens = Math.max(1, readNonNegativeNumber(contextUsage.maxTokensEstimate, 1));
+        var usedTokens = clampNumber(readNonNegativeNumber(contextUsage.usedTokensEstimate, 0), 0, maxTokens);
+        var remainingTokens = readNonNegativeNumber(contextUsage.remainingTokensEstimate, maxTokens - usedTokens);
+        var usedPercent = clampNumber(readNonNegativeNumber(contextUsage.usedPercent, metrics.contextPercent), 0, 100);
+        var compactPercent = clampNumber(metrics.contextCompressionTriggerRatio * 100, 0, 100);
+        var compactTokens = Math.floor(maxTokens * metrics.contextCompressionTriggerRatio);
+        var distanceToCompact = Math.max(0, compactTokens - usedTokens);
+        var outputReserve = readNonNegativeNumber(breakdown.outputReserveTokensEstimate, 0);
+        var safetyReserve = readNonNegativeNumber(breakdown.safetyReserveTokensEstimate, 0);
+        var requestContext = Math.max(0, usedTokens - outputReserve - safetyReserve);
+        var statusKey = usedPercent >= metrics.contextCompactForceRatio * 100
+          ? 'usageContextCritical'
+          : usedPercent >= compactPercent ? 'usageContextApproaching' : 'usageContextHealthy';
+        var section = createUsageSection('usageContextWindowTitle');
+        var panel = usageNode('div', 'usage-context-panel');
+        var topline = usageNode('div', 'usage-context-topline');
+        topline.append(
+          usageNode('span', 'usage-context-status ' + (statusKey === 'usageContextHealthy' ? 'is-healthy' : 'is-warning'), t(statusKey)),
+          usageNode('strong', 'usage-context-total', formatUsageCompactTokens(usedTokens) + '/' + formatUsageCompactTokens(maxTokens))
+        );
+        panel.append(topline);
+
+        var progress = usageNode('div', 'usage-context-progress');
+        progress.setAttribute('role', 'progressbar');
+        progress.setAttribute('aria-valuemin', '0');
+        progress.setAttribute('aria-valuemax', '100');
+        progress.setAttribute('aria-valuenow', String(Math.round(usedPercent)));
+        progress.setAttribute('aria-label', t('usageMetricContextPercent') + ' ' + formatMetricPercent(usedPercent));
+        var currentMarker = usageNode('span', 'usage-context-marker usage-context-current-marker', formatRoundedPercent(usedPercent));
+        currentMarker.style.left = usedPercent + '%';
+        var thresholdMarker = usageNode('span', 'usage-context-marker usage-context-threshold-marker', formatRoundedPercent(compactPercent));
+        thresholdMarker.style.left = compactPercent + '%';
+        var track = usageNode('div', 'usage-context-track');
+        var fill = usageNode('span', 'usage-context-fill');
+        fill.style.width = usedPercent + '%';
+        var thresholdLine = usageNode('span', 'usage-context-threshold-line');
+        thresholdLine.style.left = compactPercent + '%';
+        track.append(fill, thresholdLine);
+        progress.append(currentMarker, thresholdMarker, track);
+        panel.append(progress);
+
+        var progressLabels = usageNode('div', 'usage-context-progress-labels');
+        progressLabels.append(
+          usageNode('span', '', t('usageContextUsed')),
+          usageNode('span', '', t('usageDistanceToCompact') + ' ' + formatUsageCompactTokens(distanceToCompact))
+        );
+        panel.append(progressLabels);
+        section.append(panel);
+
+        var budget = usageNode('div', 'usage-context-budget');
+        budget.append(usageNode('h4', 'usage-context-budget-title', t('usageContextBudgetTitle')));
+        var budgetGrid = usageNode('div', 'usage-context-budget-grid');
+        [
+          ['usageRequestContext', requestContext],
+          ['usageOutputReserve', outputReserve],
+          ['usagePhysicalRemaining', remainingTokens]
+        ].forEach(function(item) {
+          var metric = usageNode('div', 'usage-context-budget-metric');
+          metric.append(
+            usageNode('span', '', t(item[0])),
+            usageNode('strong', '', formatUsageCompactTokens(item[1]))
+          );
+          budgetGrid.append(metric);
+        });
+        budget.append(budgetGrid);
+        var sourceText = t('usageCompactSource') + ' ' + t('usageCurrentModelConfig');
+        if (safetyReserve > 0) {
+          sourceText += ' · ' + t('usageSafetyReserve') + ' ' + formatUsageCompactTokens(safetyReserve);
+        }
+        budget.append(usageNode('p', 'usage-context-budget-source', sourceText));
+        section.append(budget);
+
+        var cacheReasons = normalizeCacheReasonList(metrics.promptCacheDiagnostics && metrics.promptCacheDiagnostics.cacheMissPossibleReasons);
+        if (cacheReasons.length) {
+          var diagnostic = usageNode('p', 'usage-context-diagnostic');
+          diagnostic.append(
+            usageNode('span', '', t('usageCacheAttribution')),
+            document.createTextNode(' ' + cacheReasons.map(formatCacheReason).join(' · '))
+          );
+          section.append(diagnostic);
+        }
+        return section;
+      }
+
+      function createSessionMetricsSection(metrics, selected) {
+        var section = createUsageSection('usageSessionMetricsTitle');
+        var grid = usageNode('div', 'usage-session-metrics-grid');
+        var cost = formatAccountedCosts(selected.total);
+        var latestRunState = getLatestRunState();
+        var metricsList = [
+          ['usageAverageHit', formatActualCacheRateOnly(selected.total), 'is-positive'],
+          ['usageCostLabel', cost.available ? cost.amountText : t('usageMetricCostUnavailableValue'), ''],
+          ['usageEffectiveRuntime', latestRunState ? formatUsageRuntime(latestRunState.usedMs) : '—', ''],
+          ['usageRequestCount', formatMetricInteger(selected.total.requestCount), ''],
+          ['usageCumulativeTokens', formatMetricInteger(selected.total.totalTokens), 'is-wide']
+        ];
+        if (metrics.supportsBilling) {
+          metricsList.push(['usageMetricBalance', formatMetricBalance(metrics.balance), '']);
+        }
+        metricsList.forEach(function(item) {
+          var metric = usageNode('div', 'usage-session-metric ' + item[2]);
+          metric.append(usageNode('span', '', t(item[0])), usageNode('strong', '', item[1]));
+          grid.append(metric);
+        });
+        section.append(grid);
+        var notes = usageNode('div', 'usage-session-notes');
+        if (selected.total.unpricedRequestCount > 0) {
+          notes.append(usageNode('p', 'usage-warning', t(selected.total.pricedRequestCount > 0
+            ? 'usagePartialPricing' : 'usageAllUnpriced', { count: selected.total.unpricedRequestCount })));
+        }
+        if (!selected.total.requestCount) {
+          notes.append(usageNode('p', '', t('usageNoProviderData')));
+        }
+        section.append(notes);
+        return section;
+      }
+
+      function createUsageAnalysisSection(selected, usageGroups, sessionUsage, subagents) {
+        var section = createUsageSection('usageAnalysisTitle');
+        var controls = usageNode('div', 'usage-segmented-control usage-analysis-controls');
+        controls.setAttribute('role', 'group');
+        controls.setAttribute('aria-label', t('usageAnalysisTitle'));
+        ['source', 'type'].forEach(function(mode) {
+          var button = usageNode('button', '', t(mode === 'source' ? 'usageBySource' : 'usageByType'));
+          button.type = 'button';
+          button.dataset.usageAnalysis = mode;
+          button.setAttribute('aria-pressed', usageAnalysisMode === mode ? 'true' : 'false');
+          controls.append(button);
+        });
+        section.querySelector('.usage-section-heading').append(controls);
+        if (usageAnalysisMode === 'type') {
+          appendTypeAnalysis(section, selected, subagents);
+        } else {
+          appendSourceAnalysis(section, usageGroups, sessionUsage);
+        }
+        return section;
+      }
+
+      function appendSourceAnalysis(section, groups, sessionUsage) {
+        var visibleGroups = (groups || []).filter(hasUsageData);
+        if (!visibleGroups.length) {
+          section.append(usageNode('p', 'usage-note', t('usageNoProviderData')));
+          return;
+        }
+        var shareItems = visibleGroups.map(function(group, index) {
+          return {
+            label: getUsageGroupLabel(group),
+            value: group.totalTokens,
+            color: 'color-' + (index % 5)
+          };
+        });
+        section.append(createUsageSharePanel('usageSourceShare', shareItems));
+        var list = usageNode('div', 'usage-analysis-list');
+        visibleGroups.forEach(function(group, index) {
+          list.append(createSourceAnalysisCard(group, 'color-' + (index % 5)));
+        });
+        section.append(list);
+        if (sessionUsage && sessionUsage.legacyUnattributed) {
+          section.append(usageNode('p', 'usage-note', t('usageMetricLegacyUnattributed')));
+        }
+      }
+
+      function appendTypeAnalysis(section, selected, subagents) {
+        var mainSessionOnly = selected.total.totalTokens > 0 && selected.mainPercent >= 100;
+        var typeItems = [
+          { key: 'usageMainSession', usage: selected.mainSession, percent: selected.mainPercent, color: 'color-0' },
+          { key: 'usageSubagentLabel', usage: selected.subagent, percent: selected.subagentPercent, color: 'color-1' },
+          { key: 'usageHistoricalUnattributed', usage: selected.unattributed, percent: selected.unattributedPercent, color: 'color-2' }
+        ].filter(function(item) { return hasActualUsage(item.usage); });
+        if (!mainSessionOnly && typeItems.length > 1) {
+          section.append(createUsageSharePanel('usageTypeShare', typeItems.map(function(item) {
+            return { label: t(item.key), value: item.usage.totalTokens, color: item.color };
+          })));
+        }
+        var list = usageNode('div', 'usage-analysis-list');
+        if (mainSessionOnly) {
+          list.append(createActualAnalysisCard('usageSessionTotal', selected.total, 'color-0'));
+        } else {
+          typeItems.forEach(function(item) {
+            list.append(createActualAnalysisCard(item.key, item.usage, item.color));
+          });
+        }
+        section.append(list);
+        if (subagents) {
+          section.append(createSubagentAnalysisDetails(subagents));
+        }
+      }
+
+      function createUsageSharePanel(titleKey, items) {
+        var panel = usageNode('div', 'usage-analysis-share');
+        panel.append(usageNode('h4', '', t(titleKey)));
+        var total = items.reduce(function(sum, item) { return sum + readNonNegativeNumber(item.value, 0); }, 0);
+        var bar = usageNode('div', 'usage-analysis-share-bar');
+        bar.setAttribute('aria-hidden', 'true');
+        var legend = usageNode('div', 'usage-analysis-share-legend');
+        items.forEach(function(item) {
+          var percent = total > 0 ? item.value / total * 100 : 0;
+          if (!(percent > 0)) { return; }
+          var segment = usageNode('span', item.color);
+          segment.style.width = percent + '%';
+          bar.append(segment);
+          var legendItem = usageNode('span', 'usage-analysis-legend-item');
+          legendItem.append(
+            usageNode('i', 'usage-analysis-dot ' + item.color),
+            document.createTextNode(item.label + ' ' + formatUsageSharePercent(percent))
+          );
+          legend.append(legendItem);
+        });
+        panel.append(bar, legend);
+        return panel;
+      }
+
+      function createSourceAnalysisCard(group, colorClass) {
+        return createUsageAnalysisCard(getUsageGroupLabel(group), group, colorClass, group.requestCount);
+      }
+
+      function createActualAnalysisCard(labelKey, usage, colorClass) {
+        return createUsageAnalysisCard(t(labelKey), usage, colorClass, usage.requestCount);
+      }
+
+      function createUsageAnalysisCard(label, usage, colorClass, requestCount) {
+        var details = usageNode('details', 'usage-analysis-card');
+        var summary = usageNode('summary', 'usage-analysis-summary');
+        var title = usageNode('div', 'usage-analysis-card-title');
+        title.append(usageNode('i', 'usage-analysis-dot ' + colorClass), usageNode('strong', '', label));
+        summary.append(title, usageNode('span', 'usage-analysis-request-count', t('usageRequestCountValue', {
+          count: formatMetricInteger(requestCount)
+        })));
+        var metricGrid = usageNode('div', 'usage-analysis-card-grid');
+        [
+          ['usageTotalTokensLabel', formatMetricInteger(usage.totalTokens)],
+          ['usageCacheHitRate', formatActualCacheRateOnly(usage)],
+          ['usageCostLabel', formatAccountedCosts(usage).available
+            ? formatAccountedCosts(usage).amountText : t('usageMetricCostUnavailableValue')]
+        ].forEach(function(item) {
+          var metric = usageNode('div', 'usage-analysis-card-metric');
+          metric.append(usageNode('span', '', t(item[0])), usageNode('strong', '', item[1]));
+          metricGrid.append(metric);
+        });
+        summary.append(metricGrid, usageNode('span', 'usage-analysis-expand', t('usageAnalysisExpand')));
+        details.append(summary);
+        var body = usageNode('div', 'usage-analysis-card-body');
+        body.append(usageNode('p', '', t('usageCacheCoverage', {
+          reported: usage.cacheDataRequestCount || 0,
+          missing: usage.cacheDataMissingRequestCount || 0
+        })));
+        var cost = formatAccountedCosts(usage);
+        if (cost.partial) {
+          body.append(usageNode('p', 'usage-warning', t('usagePartialPricing', {
+            count: usage.unpricedRequestCount || 0
+          })));
+        }
+        body.append(usageNode('p', '', t('usageCurrencyExplanation')));
+        details.append(body);
+        return details;
+      }
+
+      function createSubagentAnalysisDetails(subagents) {
+        var details = usageNode('details', 'usage-subagent-analysis');
+        var summary = usageNode('summary', '', t('usageIsolationTitle'));
+        details.append(summary);
+        var body = usageNode('div', 'usage-subagent-analysis-body');
+        body.append(usageNode('p', 'usage-note', t('usageIsolationExplanation')));
+        if (subagents.estimatesAvailable) {
+          var grid = usageNode('div', 'usage-subagent-estimate-grid');
+          [
+            ['usageIsolatedEstimate', '≈ ' + formatMetricInteger(subagents.isolatedIntermediateTokensEstimate)],
+            ['usageHandoffEstimate', '≈ ' + formatMetricInteger(subagents.rootHandoffTokensEstimate)],
+            ['usageIsolationRate', Number.isFinite(subagents.contextIsolationRate)
+              ? '≈ ' + formatMetricPercent(subagents.contextIsolationRate) : t('usageNoRatio')]
+          ].forEach(function(item) {
+            var metric = usageNode('div', 'usage-analysis-card-metric');
+            metric.append(usageNode('span', '', t(item[0])), usageNode('strong', '', item[1]));
+            grid.append(metric);
+          });
+          body.append(grid, usageNode('p', 'usage-note', formatSubagentCounts(subagents.totalCount, subagents)));
+        } else {
+          body.append(usageNode('p', 'usage-note', t('usageHistoricalEstimateUnavailable')));
+        }
+        if ((subagents.byModel || []).length) {
+          body.append(usageNode('h5', 'usage-subagent-group-title', t('usageSubagentModels')));
+          var modelList = usageNode('div', 'usage-analysis-list');
+          subagents.byModel.forEach(function(group, index) {
+            modelList.append(createUsageAnalysisCard(
+              getUsageGroupLabel(group), group.usage, 'color-' + (index % 5), group.taskCount
+            ));
+          });
+          body.append(modelList);
+        }
+        if ((subagents.byProfileLane || []).length) {
+          body.append(usageNode('h5', 'usage-subagent-group-title', t('usageSubagentWorkTypes')));
+          var workTypeList = usageNode('div', 'usage-analysis-list');
+          subagents.byProfileLane.forEach(function(group, index) {
+            workTypeList.append(createUsageAnalysisCard(
+              formatSubagentWorkType(group), group.usage, 'color-' + ((index + 1) % 5), group.taskCount
+            ));
+          });
+          body.append(workTypeList);
+        }
+        if ((subagents.recentRuns || []).length) {
+          body.append(usageNode('h5', 'usage-subagent-group-title', t('usageSubagentRecentRun')));
+          var recentRuns = usageNode('div', 'usage-subagent-run-list');
+          subagents.recentRuns.forEach(function(run) {
+            var row = usageNode('div', 'usage-subagent-run');
+            var heading = usageNode('div', 'usage-subagent-run-heading');
+            heading.append(
+              usageNode('span', 'usage-status usage-status-' + run.status, t('subagentStatus_' + run.status)),
+              usageNode('strong', '', getUsageGroupLabel(run))
+            );
+            row.append(
+              heading,
+              usageNode('p', '', formatSubagentWorkType(run)),
+              usageNode('p', '', formatMetricInteger(run.usage.totalTokens) + ' Tokens · '
+                + formatUsageCost(run.usage) + ' · ' + formatDuration(run.durationMs))
+            );
+            recentRuns.append(row);
+          });
+          body.append(recentRuns, usageNode('p', 'usage-note', t('usageRecentLimit')));
+        }
+        body.append(usageNode('p', 'usage-note', t('usageSubagentPrivacy')));
+        body.append(usageNode('p', 'usage-estimate-disclaimer', t('usageEstimateDisclaimer')));
+        details.append(body);
+        return details;
+      }
+
+      function createUsageSection(titleKey) {
         var section = usageNode('section', 'usage-section');
         var header = usageNode('div', 'usage-section-heading');
-        header.append(usageNode('h3', '', t(titleKey)), usageNode('span', 'usage-data-badge', t(badgeKey)));
+        header.append(usageNode('h3', '', t(titleKey)));
         section.append(header);
         return section;
       }
 
-      function createActualUsageCard(labelKey, usage, className) {
-        var card = usageNode('div', 'usage-actual-card ' + className);
-        card.append(usageNode('h4', 'usage-card-label', t(labelKey)));
-        card.append(usageNode('strong', 'usage-token-value', formatMetricInteger(usage.totalTokens) + ' Tokens'));
-        var fields = usageNode('dl', 'usage-card-fields');
-        [
-          ['usageRequestCount', formatMetricInteger(usage.requestCount)],
-          ['usageCacheHitRate', formatActualCache(usage)],
-          ['usageCostLabel', formatUsageCost(usage)]
-        ].forEach(function(item) {
-          fields.append(usageNode('dt', '', t(item[0])), usageNode('dd', '', item[1]));
-        });
-        card.append(fields);
-        return card;
+      function formatActualCacheRateOnly(usage) {
+        if (!usage || !(usage.cacheDataRequestCount > 0 || hasCacheUsageData(usage))) {
+          return t('usageMetricCacheUnavailableValue');
+        }
+        var rate = Number.isFinite(usage.cacheHitRate) ? usage.cacheHitRate : calculateHitRate(usage);
+        return Number.isFinite(rate) ? formatMetricPercent(rate) : '—';
       }
 
-      function createSubagentGroupCard(label, group) {
-        var card = usageNode('div', 'usage-group-card');
-        card.append(usageNode('h5', '', label));
-        card.append(usageNode('p', 'usage-status-summary', group.taskCountsAvailable === false
-          ? t('usageNotRecorded') + ' · ' + t('usageSubagentTaskCount') : formatSubagentCounts(group.taskCount, group)));
-        card.append(usageNode('p', 'usage-run-metrics', formatMetricInteger(group.usage.totalTokens) + ' Tokens · ' + formatUsageCost(group.usage)));
-        card.append(usageNode('p', 'usage-note', t('usageCacheHitRate') + ' ' + formatActualCache(group.usage)));
-        return card;
+      function formatRoundedPercent(value) {
+        var number = Number(value);
+        return Number.isFinite(number) ? Math.round(number) + '%' : '—';
       }
 
-      function createSourceModelUsageCard(group) {
-        var card = usageNode('div', 'usage-group-card');
-        card.append(usageNode('h5', '', getUsageGroupLabel(group)));
-        var fields = usageNode('dl', 'usage-card-fields');
-        [
-          ['usageTokensLabel', formatMetricTokens(group.totalTokens, hasUsageData(group))],
-          ['usageCacheHitRate', formatActualCache(group)],
-          ['usageCostLabel', formatUsageCost(group)]
-        ].forEach(function(item) {
-          fields.append(usageNode('dt', '', t(item[0])), usageNode('dd', '', item[1]));
-        });
-        card.append(fields);
-        return card;
+      function formatUsageSharePercent(value) {
+        var number = Number(value);
+        if (!Number.isFinite(number)) { return '—'; }
+        return number > 0 && number < 1 ? '<1%' : Math.round(number) + '%';
+      }
+
+      function formatUsageRuntime(value) {
+        var totalSeconds = Math.max(0, Math.floor(Number(value) / 1000));
+        if (!Number.isFinite(totalSeconds)) { return '—'; }
+        var minutes = Math.floor(totalSeconds / 60);
+        var seconds = totalSeconds % 60;
+        return minutes > 0
+          ? t('usageRuntimeMinutesSeconds', { minutes: minutes, seconds: seconds })
+          : t('usageRuntimeSeconds', { seconds: seconds });
+      }
+
+      function formatUsageCompactTokens(value) {
+        var tokens = Math.max(0, Math.floor(Number(value) || 0));
+        if (tokens >= 1000000) {
+          var millions = tokens / 1000000;
+          return (millions >= 10 || Number.isInteger(millions) ? millions.toFixed(0) : millions.toFixed(1)) + 'M';
+        }
+        if (tokens >= 1000) {
+          var thousands = tokens / 1000;
+          return (thousands >= 100 || Number.isInteger(thousands) ? thousands.toFixed(0) : thousands.toFixed(1)) + 'K';
+        }
+        return String(tokens);
       }
 
       function formatSubagentCounts(count, value) {
