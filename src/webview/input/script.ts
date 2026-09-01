@@ -1431,22 +1431,8 @@ export function getInputScript(): string {
           costDisplay.available
             ? costDisplay.partial ? 'usageMetricAccountedCost' : 'usageMetricSessionCost'
             : 'usageMetricCostUnavailable',
-          costDisplay.available ? costDisplay.text : t('usageMetricCostUnavailableValue')
+          costDisplay.available ? costDisplay.amountText : t('usageMetricCostUnavailableValue')
         ]);
-        if (usageGroups.length > 1) {
-          usageGroups.forEach(function(group, index) {
-            var groupCost = formatAccountedCosts(group);
-            var values = [
-              formatMetricTokens(group.totalTokens, hasUsageData(group)),
-              formatCacheHitRate(group),
-              groupCost.available ? groupCost.text : t('usageMetricCostUnavailableValue')
-            ];
-            items.push([index === 0 ? 'usageMetricUsageGroups' : '', getUsageGroupLabel(group) + ' · ' + values.join(' · ')]);
-          });
-        }
-        if (sessionUsage && sessionUsage.legacyUnattributed) {
-          items.push(['usageMetricUsageGroups', t('usageMetricLegacyUnattributed')]);
-        }
         if (metrics.supportsBilling) {
           items.push(['usageMetricBalance', formatMetricBalance(metrics.balance)]);
         }
@@ -1457,7 +1443,7 @@ export function getInputScript(): string {
             ['usageSubagentTaskCount', subagents.estimatesAvailable ? formatMetricInteger(subagents.totalCount) : t('usageNotRecorded')],
             ['usageIsolatedEstimate', subagents.estimatesAvailable
               ? '≈ ' + formatCompactTokenCount(subagents.isolatedIntermediateTokensEstimate) : t('usageNotRecorded')],
-            ['usageMetricSessionCost', costDisplay.available ? costDisplay.text : t('usageMetricCostUnavailableValue')]
+            ['usageMetricSessionCost', costDisplay.available ? costDisplay.amountText : t('usageMetricCostUnavailableValue')]
           ];
         }
         var latestRunState = getLatestRunState();
@@ -1506,10 +1492,15 @@ export function getInputScript(): string {
         if (!usageDetailsBody) { return; }
         var metrics = normalizeUsageMetrics(state.usageMetrics);
         var details = metrics.usageDetails;
+        var sessionUsage = metrics.sessionUsageStats;
+        var usageGroups = sessionUsage && Array.isArray(sessionUsage.byModelSource)
+          ? sessionUsage.byModelSource
+          : [];
         if (!details || !details.lastTurn) { usageDetailsScope = 'session'; }
         var renderKey = JSON.stringify([
           details,
           usageDetailsScope,
+          sessionUsage,
           metrics.promptCacheDiagnostics,
           metrics.contextCompressionTriggerRatio,
           getLanguage()
@@ -1581,6 +1572,21 @@ export function getInputScript(): string {
         }
         if (!selected.total.requestCount) { actual.append(usageNode('p', 'usage-note', t('usageNoProviderData'))); }
         usageDetailsBody.append(actual);
+
+        if (usageGroups.length > 1 || (sessionUsage && sessionUsage.legacyUnattributed)) {
+          var sourceModels = createUsageSection('usageSourceModelTitle', 'usageSessionCumulative');
+          var sourceModelGroups = usageNode('div', 'usage-group-list');
+          usageGroups.forEach(function(group) {
+            sourceModelGroups.append(createSourceModelUsageCard(group));
+          });
+          if (sourceModelGroups.childElementCount) {
+            sourceModels.append(sourceModelGroups);
+          }
+          if (sessionUsage && sessionUsage.legacyUnattributed) {
+            sourceModels.append(usageNode('p', 'usage-note', t('usageMetricLegacyUnattributed')));
+          }
+          usageDetailsBody.append(sourceModels);
+        }
 
         var diagnostics = createUsageSection('usageCacheContextTitle', 'usageLocalRuntime');
         var diagnosticFields = usageNode('dl', 'usage-card-fields usage-diagnostic-fields');
@@ -1711,6 +1717,21 @@ export function getInputScript(): string {
           ? t('usageNotRecorded') + ' · ' + t('usageSubagentTaskCount') : formatSubagentCounts(group.taskCount, group)));
         card.append(usageNode('p', 'usage-run-metrics', formatMetricInteger(group.usage.totalTokens) + ' Tokens · ' + formatUsageCost(group.usage)));
         card.append(usageNode('p', 'usage-note', t('usageCacheHitRate') + ' ' + formatActualCache(group.usage)));
+        return card;
+      }
+
+      function createSourceModelUsageCard(group) {
+        var card = usageNode('div', 'usage-group-card');
+        card.append(usageNode('h5', '', getUsageGroupLabel(group)));
+        var fields = usageNode('dl', 'usage-card-fields');
+        [
+          ['usageTokensLabel', formatMetricTokens(group.totalTokens, hasUsageData(group))],
+          ['usageCacheHitRate', formatActualCache(group)],
+          ['usageCostLabel', formatUsageCost(group)]
+        ].forEach(function(item) {
+          fields.append(usageNode('dt', '', t(item[0])), usageNode('dd', '', item[1]));
+        });
+        card.append(fields);
         return card;
       }
 
@@ -1913,7 +1934,7 @@ export function getInputScript(): string {
 
       function formatAccountedCosts(usage) {
         if (!usage) {
-          return { available: false, partial: false, text: '' };
+          return { available: false, partial: false, amountText: '', text: '' };
         }
         var costs = usage.costByCurrency && typeof usage.costByCurrency === 'object'
           ? usage.costByCurrency
@@ -1926,16 +1947,17 @@ export function getInputScript(): string {
           if (currencies.length) { costs = { [usage.currency]: Number(usage.cost) }; }
         }
         if (!currencies.length) {
-          return { available: false, partial: false, text: '' };
+          return { available: false, partial: false, amountText: '', text: '' };
         }
         var partial = usage.pricingStatus === 'partial' || usage.unpricedRequestCount > 0;
-        var textValue = currencies.map(function(currency) {
+        var amountText = currencies.map(function(currency) {
           return formatMetricCost(costs[currency], currency, true);
         }).join(' · ');
+        var textValue = amountText;
         if (partial) {
           textValue += ' · ' + t('usagePartialPricing', { count: usage.unpricedRequestCount || 0 });
         }
-        return { available: true, partial: partial, text: textValue };
+        return { available: true, partial: partial, amountText: amountText, text: textValue };
       }
 
       function normalizeCacheReasonList(value) {
