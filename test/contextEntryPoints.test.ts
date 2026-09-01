@@ -58,9 +58,13 @@ test('DraftRun interactions settle visibly and edit-resend requeues removed resu
   assert.match(script, /draftRunResultPendingNextMessage/u);
   assert.match(script, /draftRunRunAndContinue/u);
   assert.match(script, /payload\.autoContinue/u);
+  assert.match(script, /getDraftRunTitle/u);
+  assert.match(script, /draftRunCloneFeedback/u);
+  assert.match(script, /draftRunCloneCreating/u);
   assert.match(providerSource, /isBusy: this\.isBusy \|\| this\.isStartingRun \|\| Boolean\(this\.activeDraftRunId\)/u);
   assert.match(providerSource, /claimReadyAutoContinuation/u);
   assert.match(providerSource, /displayKind: 'draft_run_auto_continue'/u);
+  assert.match(providerSource, /type: 'draftRunCloneFeedback'/u);
   assert.match(
     providerSource,
     /activeSession\.messages[\s\S]*?slice\(replacementIndex\)[\s\S]*?releaseResultBindingsForMessages/u

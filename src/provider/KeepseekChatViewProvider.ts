@@ -1025,8 +1025,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'cloneDraftRun':
         if (!this.isBusy && !this.activeDraftRunId) {
-          this.draftRuns.cloneAsPending(message.id);
+          const clone = this.draftRuns.cloneAsPending(message.id);
           this.postState();
+          this.postToWebview({
+            type: 'draftRunCloneFeedback',
+            success: Boolean(clone),
+            draftRunId: clone?.id
+          });
         }
         return;
       case 'authorizeDraftRunCwd':

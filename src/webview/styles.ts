@@ -991,6 +991,11 @@ export function getStyles(): string {
       background: var(--vscode-editor-background);
     }
 
+    .draft-run-card.is-newly-created {
+      outline: 2px solid var(--vscode-focusBorder);
+      outline-offset: 2px;
+    }
+
     .draft-run-running {
       border-color: var(--vscode-focusBorder);
     }

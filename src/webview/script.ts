@@ -431,6 +431,7 @@ export function getScript(): string {
     let planExpanded = false;
     const pendingChangeActions = new Set();
     const pendingDraftRunApprovals = new Set();
+    const pendingDraftRunActions = new Set();
     let settingsMenuOpen = false;
     let backgroundRunDialogOpen = false;
     let dismissedBackgroundRunId = '';
@@ -757,12 +758,31 @@ export function getScript(): string {
         payload.autoContinue = button.dataset.autoContinue === 'true';
         pendingDraftRunApprovals.add(id);
         render();
+      } else if (action === 'cloneDraftRun') {
+        pendingDraftRunActions.add(action + ':' + id);
+        setTransientStatus(t('draftRunCloneCreating'));
+        render();
       }
       vscode.postMessage(payload);
     }
 
     transcript.addEventListener('click', handleDraftRunActionClick);
     unlinkedChangeSetList.addEventListener('click', handleDraftRunActionClick);
+
+    function focusDraftRunCard(draftRunId) {
+      setTimeout(function() {
+        var cards = document.querySelectorAll('.draft-run-card[data-draft-run-id]');
+        var card = Array.from(cards).find(function(item) {
+          return item.dataset.draftRunId === draftRunId;
+        });
+        if (!card) return;
+        card.classList.add('is-newly-created');
+        card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        var primaryAction = card.querySelector('button:not(:disabled)');
+        primaryAction?.focus();
+        setTimeout(function() { card.classList.remove('is-newly-created'); }, 1800);
+      }, 0);
+    }
 
     if (planToggle) {
       planToggle.addEventListener('click', function() {
@@ -1135,6 +1155,7 @@ export function getScript(): string {
         Object.assign(state, message.state);
         pendingChangeActions.clear();
         pendingDraftRunApprovals.clear();
+        pendingDraftRunActions.clear();
         if (previousActiveSessionId && previousActiveSessionId !== state.activeSessionId) {
           planExpanded = false;
         }
@@ -1192,6 +1213,13 @@ export function getScript(): string {
         pendingDraftRunApprovals.delete(String(message.draftRun?.id || ''));
         upsertDraftRun(message.draftRun);
         render();
+      } else if (message.type === 'draftRunCloneFeedback') {
+        if (message.success && message.draftRunId) {
+          setTransientStatus(t('draftRunCloneCreated'));
+          focusDraftRunCard(String(message.draftRunId));
+        } else {
+          setTransientStatus(t('draftRunCloneUnavailable'));
+        }
       } else if (message.type === 'sessionChanged') {
         resetLocalContextUsageEstimate();
         clearPromptDraft();
@@ -3150,7 +3178,7 @@ export function getScript(): string {
       heading.className = 'draft-run-heading';
       var title = document.createElement('div');
       title.className = 'draft-run-title';
-      title.textContent = t('draftRunTitle');
+      title.textContent = getDraftRunTitle(statusValue);
       var meta = document.createElement('div');
       meta.className = 'draft-run-meta';
       meta.textContent = getDraftRunStatusLabel(statusValue) + ' · ' + String(spec.reason || '');
@@ -3242,7 +3270,11 @@ export function getScript(): string {
     function createDraftRunActionButton(label, action, draftRun, secondary, forceDisabled, autoContinue) {
       var button = document.createElement('button');
       button.type = 'button';
-      button.textContent = label;
+      var actionKey = action + ':' + String(draftRun.id || '');
+      var actionPending = pendingDraftRunActions.has(actionKey);
+      button.textContent = action === 'cloneDraftRun' && actionPending
+        ? t('draftRunCloneCreating')
+        : label;
       button.className = secondary ? 'secondary' : '';
       button.dataset.draftRunId = String(draftRun.id || '');
       button.dataset.draftRunAction = action;
@@ -3250,11 +3282,27 @@ export function getScript(): string {
         button.dataset.specHash = String(draftRun.specHash || '');
         button.dataset.autoContinue = autoContinue === true ? 'true' : 'false';
       }
+      if (action === 'cloneDraftRun') {
+        button.title = t('draftRunCloneHint');
+      }
       var allowWhileBusy = action === 'cancelDraftRun' || action === 'openDraftRunTerminal';
       button.disabled = Boolean(forceDisabled)
         || (Boolean(state.isBusy) && !allowWhileBusy)
+        || actionPending
         || (action === 'approveDraftRun' && pendingDraftRunApprovals.has(String(draftRun.id || '')));
       return button;
+    }
+
+    function getDraftRunTitle(statusValue) {
+      switch (statusValue) {
+        case 'approved':
+        case 'running': return t('draftRunTitleRunning');
+        case 'done': return t('draftRunTitleDone');
+        case 'failed': return t('draftRunTitleFailed');
+        case 'cancelled': return t('draftRunTitleCancelled');
+        case 'rejected': return t('draftRunTitleRejected');
+        default: return t('draftRunTitle');
+      }
     }
 
     function appendDraftRunField(container, labelText, value, code) {
