@@ -13,6 +13,10 @@ export function getInputScript(): string {
       var commandModelValue = document.getElementById('commandModelValue');
       var commandModelList = document.getElementById('commandModelList');
       var commandModelDescription = document.getElementById('commandModelDescription');
+      var commandSubagentModelSwitch = document.getElementById('commandSubagentModelSwitch');
+      var commandSubagentModelValue = document.getElementById('commandSubagentModelValue');
+      var commandSubagentModelList = document.getElementById('commandSubagentModelList');
+      var commandSubagentModelDescription = document.getElementById('commandSubagentModelDescription');
       var commandModelStatus = document.getElementById('commandModelStatus');
       var commandModelStatusText = document.getElementById('commandModelStatusText');
       var commandModelCancelPending = document.getElementById('commandModelCancelPending');
@@ -36,7 +40,6 @@ export function getInputScript(): string {
       var commandBackgroundRunValue = document.getElementById('commandBackgroundRunValue');
       var commandEffortSlider = document.getElementById('commandEffortSlider');
       var commandEffortValue = document.getElementById('commandEffortValue');
-      var commandThinkingToggle = document.getElementById('commandThinkingToggle');
       var contextProgress = document.getElementById('contextProgress');
       var contextProgressTitle = document.getElementById('contextProgressTitle');
       var contextProgressPercent = document.getElementById('contextProgressPercent');
@@ -53,6 +56,7 @@ export function getInputScript(): string {
       var skillsBarList = document.getElementById('skillsBarList');
       var commandMenuOpen = false;
       var commandModelListOpen = false;
+      var commandSubagentModelListOpen = false;
       var commandSkillListOpen = false;
       var referenceMenuOpen = false;
       var referenceMenuSource = '';
@@ -295,6 +299,10 @@ export function getInputScript(): string {
             return;
           }
           commandModelListOpen = !commandModelListOpen;
+          if (commandModelListOpen) {
+            commandSubagentModelListOpen = false;
+            commandSkillListOpen = false;
+          }
           renderCommandMenu();
         });
       }
@@ -319,6 +327,48 @@ export function getInputScript(): string {
           commandModelListOpen = false;
           renderCommandMenu();
           setComposerStatus(t('modelSwitchValidating'));
+        });
+      }
+
+      if (commandSubagentModelSwitch) {
+        commandSubagentModelSwitch.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (isSubagentModelSelectionLocked()) {
+            setComposerStatus(getSubagentModelLockText());
+            return;
+          }
+          commandSubagentModelListOpen = !commandSubagentModelListOpen;
+          if (commandSubagentModelListOpen) {
+            commandModelListOpen = false;
+            commandSkillListOpen = false;
+          }
+          renderCommandMenu();
+        });
+      }
+
+      if (commandSubagentModelList) {
+        commandSubagentModelList.addEventListener('click', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          var button = target?.closest('button[data-subagent-model-mode]');
+          if (!button || isSubagentModelSelectionLocked()) { return; }
+          event.preventDefault();
+          event.stopPropagation();
+          var mode = button.dataset.subagentModelMode || 'follow-main';
+          var statusValue = t('subagentModelFollowMain');
+          if (mode === 'fixed') {
+            var sourceId = button.dataset.sourceId || '';
+            var modelId = button.dataset.modelId || '';
+            if (!sourceId || !modelId) { return; }
+            vscode.postMessage({ type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId });
+            var model = findModelForSelection(Array.isArray(state.models) ? state.models : [], sourceId, modelId);
+            statusValue = getModelDisplayLabel(model);
+          } else {
+            vscode.postMessage({ type: 'setSubagentModel', mode: 'follow-main' });
+          }
+          commandSubagentModelListOpen = false;
+          renderCommandMenu();
+          setComposerStatus(t('subagentModelTitle') + ': ' + statusValue);
         });
       }
 
@@ -368,6 +418,7 @@ export function getInputScript(): string {
           commandSkillListOpen = !commandSkillListOpen;
           if (commandSkillListOpen) {
             commandModelListOpen = false;
+            commandSubagentModelListOpen = false;
             vscode.postMessage({ type: 'requestSkills' });
           }
           renderCommandMenu();
@@ -497,17 +548,10 @@ export function getInputScript(): string {
       if (commandEffortSlider) {
         commandEffortSlider.addEventListener('input', function() {
           if (state.isBusy) { return; }
+          var effortValue = Number(commandEffortSlider.value);
           updateAgentSettingsFromControls();
           renderCommandMenu();
-        });
-      }
-
-      if (commandThinkingToggle) {
-        commandThinkingToggle.addEventListener('change', function() {
-          if (state.isBusy) { return; }
-          updateAgentSettingsFromControls();
-          renderCommandMenu();
-          setComposerStatus(commandThinkingToggle.checked ? t('thinkingOn') : t('thinkingOff'));
+          setComposerStatus(effortValue <= 0 ? t('thinkingOff') : effortLabels[effortValue >= 2 ? 'max' : 'high']);
         });
       }
 
@@ -650,6 +694,7 @@ export function getInputScript(): string {
         if (!commandMenu || !commandMenuButton) { return; }
         commandMenuOpen = false;
         commandModelListOpen = false;
+        commandSubagentModelListOpen = false;
         commandSkillListOpen = false;
         commandMenu.classList.add('hidden');
         commandMenuButton.classList.remove('is-active');
@@ -683,6 +728,11 @@ export function getInputScript(): string {
             openCommandModelListAndFocus();
             return;
           }
+          if (target === commandSubagentModelSwitch) {
+            event.preventDefault();
+            openCommandSubagentModelListAndFocus();
+            return;
+          }
           if (target === commandSkillsButton) {
             event.preventDefault();
             openCommandSkillListAndFocus();
@@ -696,6 +746,13 @@ export function getInputScript(): string {
             commandModelListOpen = false;
             renderCommandMenu();
             if (commandModelSwitch) { commandModelSwitch.focus(); }
+            return;
+          }
+          if (commandSubagentModelListOpen && commandSubagentModelList && (commandSubagentModelList.contains(target) || target === commandSubagentModelSwitch)) {
+            event.preventDefault();
+            commandSubagentModelListOpen = false;
+            renderCommandMenu();
+            if (commandSubagentModelSwitch) { commandSubagentModelSwitch.focus(); }
             return;
           }
           if (commandSkillListOpen && commandSkillList && (commandSkillList.contains(target) || target === commandSkillsButton)) {
@@ -735,15 +792,26 @@ export function getInputScript(): string {
       function openCommandModelListAndFocus() {
         if (!commandModelSwitch || isModelSelectionLocked()) { return; }
         commandModelListOpen = true;
+        commandSubagentModelListOpen = false;
         commandSkillListOpen = false;
         renderCommandMenu();
         focusFirstCommandMenuControl(commandModelList);
+      }
+
+      function openCommandSubagentModelListAndFocus() {
+        if (!commandSubagentModelSwitch || isSubagentModelSelectionLocked()) { return; }
+        commandSubagentModelListOpen = true;
+        commandModelListOpen = false;
+        commandSkillListOpen = false;
+        renderCommandMenu();
+        focusFirstCommandMenuControl(commandSubagentModelList);
       }
 
       function openCommandSkillListAndFocus() {
         if (!commandSkillsButton || state.isBusy) { return; }
         commandSkillListOpen = true;
         commandModelListOpen = false;
+        commandSubagentModelListOpen = false;
         vscode.postMessage({ type: 'requestSkills' });
         renderCommandMenu();
         focusFirstCommandMenuControl(commandSkillList);
@@ -2230,6 +2298,7 @@ export function getInputScript(): string {
         commandMenu.classList.toggle('is-readonly', Boolean(state.isBusy));
         commandMenu.classList.toggle('allows-model-selection', Boolean(state.isBusy && !isModelSelectionLocked()));
         renderCommandModel();
+        renderCommandSubagentModel();
         renderCompressionThreshold();
         renderCommandSkills();
         renderCreateSkillCommand();
@@ -2389,6 +2458,110 @@ export function getInputScript(): string {
         }
       }
 
+      function renderCommandSubagentModel() {
+        var models = Array.isArray(state.models) ? state.models : [];
+        var rawSetting = state.subagentModelSetting && typeof state.subagentModelSetting === 'object'
+          ? state.subagentModelSetting
+          : { mode: 'follow-main' };
+        var isFixed = rawSetting.mode === 'fixed';
+        var sourceId = isFixed && typeof rawSetting.sourceId === 'string' ? rawSetting.sourceId : '';
+        var modelId = isFixed && typeof rawSetting.modelId === 'string' ? rawSetting.modelId : '';
+        var selectedModel = isFixed ? findModelForSelection(models, sourceId, modelId) : null;
+        var locked = isSubagentModelSelectionLocked();
+        var lockText = locked ? getSubagentModelLockText() : '';
+        var currentText = isFixed
+          ? selectedModel
+            ? getModelSourceLabel(selectedModel) + ' / ' + getModelDisplayLabel(selectedModel)
+            : t('subagentModelUnavailable')
+          : t('subagentModelFollowMain');
+
+        if (commandSubagentModelValue) {
+          commandSubagentModelValue.innerHTML = '';
+          if (selectedModel) {
+            var currentLogo = createCommandModelProtocolLogo(selectedModel.provider);
+            if (currentLogo) {
+              commandSubagentModelValue.append(currentLogo);
+            }
+          }
+          var currentModelText = document.createElement('span');
+          currentModelText.className = 'command-model-current-text';
+          currentModelText.textContent = currentText;
+          commandSubagentModelValue.append(currentModelText);
+          commandSubagentModelValue.title = isFixed ? sourceId + ' / ' + modelId : currentText;
+        }
+        if (commandSubagentModelSwitch) {
+          commandSubagentModelSwitch.disabled = locked;
+          commandSubagentModelSwitch.title = lockText || t('subagentModelHint');
+          commandSubagentModelSwitch.setAttribute('aria-disabled', locked ? 'true' : 'false');
+          commandSubagentModelSwitch.setAttribute('aria-expanded', commandSubagentModelListOpen ? 'true' : 'false');
+        }
+        if (commandSubagentModelDescription) {
+          commandSubagentModelDescription.textContent = lockText || t('subagentModelHint');
+        }
+        if (!commandSubagentModelList) { return; }
+
+        commandSubagentModelList.classList.toggle('hidden', !commandSubagentModelListOpen);
+        commandSubagentModelList.innerHTML = '';
+
+        var followOption = document.createElement('button');
+        followOption.type = 'button';
+        followOption.className = 'command-model-option';
+        followOption.dataset.subagentModelMode = 'follow-main';
+        followOption.disabled = locked;
+        followOption.setAttribute('role', 'menuitemradio');
+        followOption.setAttribute('aria-checked', isFixed ? 'false' : 'true');
+        followOption.title = lockText || t('subagentModelFollowMain');
+        var followCheck = document.createElement('span');
+        followCheck.className = 'command-model-check';
+        followCheck.textContent = isFixed ? '' : '\u2713';
+        var followLabel = document.createElement('span');
+        followLabel.className = 'command-model-name';
+        followLabel.textContent = t('subagentModelFollowMain');
+        followOption.append(followCheck, followLabel);
+        commandSubagentModelList.append(followOption);
+
+        var previousSourceId = '';
+        for (var i = 0; i < models.length; i++) {
+          var model = models[i];
+          if (model.sourceId !== previousSourceId) {
+            var groupLabel = document.createElement('div');
+            groupLabel.className = 'command-model-source';
+            var groupLogo = createCommandModelProtocolLogo(model.provider);
+            if (groupLogo) {
+              groupLabel.append(groupLogo);
+            }
+            var groupName = document.createElement('span');
+            groupName.className = 'command-model-source-name';
+            groupName.textContent = getModelSourceLabel(model);
+            groupLabel.append(groupName);
+            commandSubagentModelList.append(groupLabel);
+            previousSourceId = model.sourceId || '';
+          }
+          var option = document.createElement('button');
+          var isSelected = isFixed && model.sourceId === sourceId && model.id === modelId;
+          option.type = 'button';
+          option.className = 'command-model-option';
+          option.dataset.subagentModelMode = 'fixed';
+          option.dataset.sourceId = model.sourceId || '';
+          option.dataset.modelId = model.id;
+          option.disabled = locked;
+          option.setAttribute('role', 'menuitemradio');
+          option.setAttribute('aria-checked', isSelected ? 'true' : 'false');
+          option.setAttribute('aria-label', getModelDisplayLabel(model));
+          option.title = lockText || model.id || getModelDisplayLabel(model);
+
+          var check = document.createElement('span');
+          check.className = 'command-model-check';
+          check.textContent = isSelected ? '\u2713' : '';
+          var label = document.createElement('span');
+          label.className = 'command-model-name';
+          label.textContent = getModelDisplayLabel(model);
+          label.title = model.id || getModelDisplayLabel(model);
+          option.append(check, label);
+          commandSubagentModelList.append(option);
+        }
+      }
+
       function nextModelSelectionRequestId() {
         modelSelectionRequestSequence += 1;
         return 'model-selection-' + String(modelSelectionRequestSequence);
@@ -2396,6 +2569,14 @@ export function getInputScript(): string {
 
       function isModelSelectionLocked() {
         return Boolean(state.modelSelection && state.modelSelection.lockedByBackground === true);
+      }
+
+      function isSubagentModelSelectionLocked() {
+        return Boolean(state.isBusy || isModelSelectionLocked());
+      }
+
+      function getSubagentModelLockText() {
+        return t(isModelSelectionLocked() ? 'modelSelectionLockedByBackground' : 'modelSettingsReadonlyWhileBusy');
       }
 
       function findModelForSelection(models, sourceId, modelId) {
@@ -2692,16 +2873,15 @@ export function getInputScript(): string {
 
       function renderEffort() {
         var settings = getAgentSettings();
-        if (commandThinkingToggle) {
-          commandThinkingToggle.checked = settings.thinkingEnabled;
-          commandThinkingToggle.disabled = Boolean(state.isBusy);
-        }
+        var effortValue = settings.thinkingEnabled ? (settings.reasoningEffort === 'max' ? '2' : '1') : '0';
+        var effortText = settings.thinkingEnabled ? effortLabels[settings.reasoningEffort] : t('off');
         if (commandEffortSlider) {
-          commandEffortSlider.value = settings.reasoningEffort === 'max' ? '2' : '1';
-          commandEffortSlider.disabled = Boolean(state.isBusy) || !settings.thinkingEnabled;
+          commandEffortSlider.value = effortValue;
+          commandEffortSlider.disabled = Boolean(state.isBusy);
+          commandEffortSlider.setAttribute('aria-valuetext', effortText);
         }
         if (commandEffortValue) {
-          commandEffortValue.textContent = settings.thinkingEnabled ? effortLabels[settings.reasoningEffort] : t('off');
+          commandEffortValue.textContent = effortText;
         }
       }
 
@@ -2715,9 +2895,10 @@ export function getInputScript(): string {
         var selectedCompressionTab = commandCompressionTabs
           ? commandCompressionTabs.querySelector('button[data-threshold][aria-selected="true"]')
           : null;
+        var effortValue = commandEffortSlider ? Number(commandEffortSlider.value) : 1;
         return {
-          thinkingEnabled: commandThinkingToggle ? commandThinkingToggle.checked : getAgentSettings().thinkingEnabled,
-          reasoningEffort: commandEffortSlider && Number(commandEffortSlider.value) >= 2 ? 'max' : 'high',
+          thinkingEnabled: effortValue > 0,
+          reasoningEffort: effortValue >= 2 ? 'max' : 'high',
           compressionThreshold: normalizeCompressionThreshold(
             selectedCompressionTab?.dataset.threshold || getAgentSettings().compressionThreshold
           )
@@ -4223,9 +4404,6 @@ export function getInputScript(): string {
       var settingsDialogTitle = document.getElementById('settingsDialogTitle');
       var settingsDialogDesc = document.getElementById('settingsDialogDesc');
       var settingsDialogStatus = document.getElementById('settingsDialogStatus');
-      var settingsSubagentModelTitle = document.getElementById('settingsSubagentModelTitle');
-      var settingsSubagentModelHint = document.getElementById('settingsSubagentModelHint');
-      var settingsSubagentModelSelect = document.getElementById('settingsSubagentModelSelect');
       var settingsAccountSidebar = settingsOverlay ? settingsOverlay.querySelector('.settings-account-sidebar') : null;
       var settingsAccountEditor = document.getElementById('settingsAccountEditor');
       var settingsAccountsTitle = document.getElementById('settingsAccountsTitle');
@@ -4280,8 +4458,6 @@ export function getInputScript(): string {
       var createSkillCancelBtn = document.getElementById('createSkillCancelBtn');
       var apiKeyVisible = false;
       var settingsSources = [];
-      var settingsSubagentModels = [];
-      var settingsSubagentModelSetting = { mode: 'follow-main' };
       var settingsSelectedSourceId = '';
       var settingsDialogBusyAction = '';
       var settingsDialogBusyTimer = null;
@@ -4963,12 +5139,6 @@ export function getInputScript(): string {
         syncAccountSettingsRunBusyStatus(runBusy, operationBusy);
         if (settingsDialogTitle) { settingsDialogTitle.textContent = t('modelSettingsDialogTitle'); }
         if (settingsDialogDesc) { settingsDialogDesc.textContent = t('modelSettingsDialogDesc'); }
-        if (settingsSubagentModelTitle) { settingsSubagentModelTitle.textContent = t('subagentModelTitle'); }
-        if (settingsSubagentModelHint) { settingsSubagentModelHint.textContent = t('subagentModelHint'); }
-        if (settingsSubagentModelSelect) {
-          settingsSubagentModelSelect.setAttribute('aria-label', t('subagentModelTitle'));
-          settingsSubagentModelSelect.disabled = controlsDisabled;
-        }
         if (settingsOverlay) { settingsOverlay.querySelector('.settings-dialog')?.setAttribute('aria-label', t('modelSettingsDialogLabel')); }
         if (settingsAccountsTitle) { settingsAccountsTitle.textContent = t('modelsTitle'); }
         if (settingsCreateAccountBtn) {
@@ -5023,61 +5193,12 @@ export function getInputScript(): string {
         renderSettingsModelList(account, controlsDisabled);
       }
 
-      function renderSubagentModelSetting() {
-        if (!settingsSubagentModelSelect) { return; }
-        settingsSubagentModelSelect.innerHTML = '';
-        var follow = document.createElement('option');
-        follow.value = 'follow-main';
-        follow.textContent = t('subagentModelFollowMain');
-        settingsSubagentModelSelect.append(follow);
-        settingsSubagentModels.forEach(function(model) {
-          var option = document.createElement('option');
-          option.value = 'fixed:' + encodeURIComponent(model.sourceId) + ':' + encodeURIComponent(model.modelId);
-          option.dataset.sourceId = model.sourceId;
-          option.dataset.modelId = model.modelId;
-          option.textContent = (model.sourceName ? model.sourceName + ' / ' : '') + (model.label || model.modelId);
-          settingsSubagentModelSelect.append(option);
-        });
-        var selectedValue = 'follow-main';
-        if (settingsSubagentModelSetting.mode === 'fixed') {
-          var sourceId = readSettingsString(settingsSubagentModelSetting.sourceId, '');
-          var modelId = readSettingsString(settingsSubagentModelSetting.modelId, '');
-          selectedValue = 'fixed:' + encodeURIComponent(sourceId) + ':' + encodeURIComponent(modelId);
-          var exists = Array.from(settingsSubagentModelSelect.options).some(function(option) { return option.value === selectedValue; });
-          if (!exists) {
-            var unavailable = document.createElement('option');
-            unavailable.value = selectedValue;
-            unavailable.dataset.sourceId = sourceId;
-            unavailable.dataset.modelId = modelId;
-            unavailable.textContent = t('subagentModelUnavailable') + ': ' + sourceId + ' / ' + modelId;
-            unavailable.disabled = true;
-            settingsSubagentModelSelect.append(unavailable);
-          }
-        }
-        settingsSubagentModelSelect.value = selectedValue;
-      }
-
       function showSettingsDialog(settings) {
         if (!settingsOverlay || !settingsApiKey || !settingsBaseUrl) { return; }
         var values = settings && typeof settings === 'object' ? settings : {};
         var rawSources = Array.isArray(values.sources) ? values.sources : [];
         var rawSources = Array.isArray(values.sources) ? values.sources : [];
         settingsSources = rawSources.map(normalizeSettingsSource).filter(Boolean);
-        settingsSubagentModels = Array.isArray(values.subagentModels) ? values.subagentModels.map(function(model) {
-          return {
-            sourceId: readSettingsString(model && model.sourceId, '').trim(),
-            sourceName: readSettingsString(model && model.sourceName, '').trim(),
-            modelId: readSettingsString(model && model.modelId, '').trim(),
-            label: readSettingsString(model && model.label, '').trim()
-          };
-        }).filter(function(model) { return model.sourceId && model.modelId; }) : [];
-        settingsSubagentModelSetting = values.subagentModelSetting && values.subagentModelSetting.mode === 'fixed'
-          ? {
-              mode: 'fixed',
-              sourceId: readSettingsString(values.subagentModelSetting.sourceId, ''),
-              modelId: readSettingsString(values.subagentModelSetting.modelId, '')
-            }
-          : { mode: 'follow-main' };
         var requestedSourceId = readSettingsString(values.selectedSourceId, '').trim();
         if (settingsOverlay.classList.contains('hidden')) {
           settingsSelectedSourceId = settingsSources.some(function(source) { return source.id === requestedSourceId; })
@@ -5092,7 +5213,6 @@ export function getInputScript(): string {
         populateSettingsAccount(getSettingsActiveAccount());
         if (settingsModelList) { settingsModelList.innerHTML = ''; }
         setApiKeyVisible(false, false);
-        renderSubagentModelSetting();
         renderAccountSettings();
         settingsOverlay.classList.remove('hidden');
         if (state.isBusy && settingsDialogStatus) {
@@ -5334,30 +5454,6 @@ export function getInputScript(): string {
             });
             beginSettingsDialogAction('add-model', t('savingModelSource'));
           }
-        });
-      }
-
-      if (settingsSubagentModelSelect) {
-        settingsSubagentModelSelect.addEventListener('change', function() {
-          if (blockAccountSettingsWhileRunBusy() || settingsDialogBusyAction) {
-            renderSubagentModelSetting();
-            return;
-          }
-          var option = settingsSubagentModelSelect.selectedOptions[0];
-          if (!option || option.value === 'follow-main') {
-            settingsSubagentModelSetting = { mode: 'follow-main' };
-            vscode.postMessage({ type: 'setSubagentModel', mode: 'follow-main' });
-          } else {
-            var sourceId = readSettingsString(option.dataset.sourceId, '');
-            var modelId = readSettingsString(option.dataset.modelId, '');
-            if (!sourceId || !modelId) {
-              renderSubagentModelSetting();
-              return;
-            }
-            settingsSubagentModelSetting = { mode: 'fixed', sourceId: sourceId, modelId: modelId };
-            vscode.postMessage({ type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId });
-          }
-          beginSettingsDialogAction('set-subagent-model', t('subagentModelTitle'));
         });
       }
 

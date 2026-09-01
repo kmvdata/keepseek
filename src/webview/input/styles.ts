@@ -1329,9 +1329,19 @@ export function getInputStyles(): string {
       cursor: default;
     }
 
+    .command-effort-control {
+      display: grid;
+      gap: 2px;
+      width: 132px;
+      min-width: 120px;
+    }
+
     .command-effort-slider {
-      width: 88px;
-      min-width: 72px;
+      width: 100%;
+      min-width: 0;
+      height: 22px;
+      margin: 0;
+      padding: 0;
       accent-color: var(--vscode-progressBar-background, var(--vscode-textLink-foreground));
       cursor: pointer;
     }
@@ -1341,55 +1351,15 @@ export function getInputStyles(): string {
       opacity: 0.45;
     }
 
-    .command-toggle-row {
-      position: relative;
-      grid-template-columns: minmax(0, 1fr) 34px;
-      cursor: pointer;
-    }
-
-    .command-toggle-input {
-      position: absolute;
-      inline-size: 1px;
-      block-size: 1px;
-      opacity: 0;
+    .command-effort-scale {
+      display: flex;
+      justify-content: space-between;
+      padding: 0 2px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 9px;
+      line-height: 1;
       pointer-events: none;
-    }
-
-    .command-toggle-track {
-      position: relative;
-      width: 34px;
-      height: 18px;
-      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
-      border-radius: 999px;
-      background: var(--vscode-input-background);
-      transition: background 120ms ease, border-color 120ms ease;
-    }
-
-    .command-toggle-track::after {
-      content: "";
-      position: absolute;
-      top: 2px;
-      left: 2px;
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      background: var(--vscode-descriptionForeground);
-      transition: transform 120ms ease, background 120ms ease;
-    }
-
-    .command-toggle-input:checked + .command-toggle-track {
-      border-color: var(--vscode-textLink-foreground);
-      background: var(--vscode-textLink-foreground);
-    }
-
-    .command-toggle-input:checked + .command-toggle-track::after {
-      transform: translateX(16px);
-      background: var(--vscode-button-foreground);
-    }
-
-    .command-toggle-input:focus-visible + .command-toggle-track {
-      outline: 1px solid var(--vscode-focusBorder);
-      outline-offset: 2px;
+      user-select: none;
     }
 
     .usage-details-dialog {
@@ -1733,23 +1703,6 @@ export function getInputStyles(): string {
       font-size: 12px;
       color: var(--vscode-descriptionForeground);
       line-height: 1.45;
-    }
-
-    .settings-subagent-card {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(190px, 0.8fr);
-      align-items: center;
-      gap: 12px;
-      margin: 0 0 12px;
-      padding: 10px;
-      border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
-      border-radius: 6px;
-      background: var(--vscode-editor-background, transparent);
-    }
-
-    .settings-subagent-card > div {
-      display: grid;
-      gap: 4px;
     }
 
     .subagent-progress-panel {
@@ -2420,10 +2373,6 @@ export function getInputStyles(): string {
     }
 
     @media (max-width: 540px) {
-      .settings-subagent-card {
-        grid-template-columns: minmax(0, 1fr);
-      }
-
       .settings-account-workspace {
         grid-template-columns: minmax(0, 1fr);
       }

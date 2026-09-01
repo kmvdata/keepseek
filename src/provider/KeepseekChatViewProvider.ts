@@ -244,7 +244,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.skillStore = new SkillStore(skillState);
     this.sourceStore = new ModelSourceStore(this.globalStorageUri);
     this.modelSourceService = new ModelSourceService(this.sourceStore);
-    this.subagentSettingsStore = new SubagentSettingsStore(this.globalStorageUri);
+    this.subagentSettingsStore = new SubagentSettingsStore(
+      this.globalStorageUri,
+      this.sessionStore.workspaceKey
+    );
     this.agentRequestCoordinator = new AgentRequestCoordinator(
       new HistoryCompressor(undefined, this.globalStorageUri)
     );
@@ -1960,13 +1963,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postToWebview({
       type: 'showSettingsDialog',
       selectedSourceId: this.selectedSourceId,
-      subagentModelSetting: this.subagentModelSetting,
-      subagentModels: this.availableModels.map((model) => ({
-        sourceId: model.sourceId,
-        sourceName: model.sourceName,
-        modelId: model.id,
-        label: model.label
-      })),
       sources: this.modelSources.map((source) => ({
         ...source,
         models: source.models.map((model) => ({ ...model })),
@@ -2007,7 +2003,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         vscode.window.showErrorMessage(this.language === 'en'
           ? 'The selected subagent model is unavailable or disabled.'
           : '所选子代理模型不可用或已禁用。');
-        this.postModelSettingsDialog();
+        this.postState();
         return;
       }
       this.subagentModelSetting = await this.subagentSettingsStore.save({
@@ -2018,7 +2014,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     } else {
       this.subagentModelSetting = await this.subagentSettingsStore.save({ mode: 'follow-main' });
     }
-    this.postModelSettingsDialog();
     this.postState();
   }
 

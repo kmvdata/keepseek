@@ -1,17 +1,27 @@
 import * as vscode from 'vscode';
 import { isRecord } from '../shared/errors';
 import type { SubagentModelSetting } from '../agent/subagents/types';
-import { ACCOUNTS_STORAGE_DIRECTORY } from './accountStore';
+import { getWorkspaceHash } from '../sessions/globalSessionStorage';
 
-export const SUBAGENT_SETTINGS_FILE_NAME = 'settings.v1.json';
+const SUBAGENT_SETTINGS_DIRECTORY = 'subagent-settings';
+const SUBAGENT_SETTINGS_VERSION_DIRECTORY = 'v1';
 
 export class SubagentSettingsStore {
+  private readonly directoryUri: vscode.Uri;
   private readonly uri: vscode.Uri;
   private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder();
 
-  public constructor(private readonly globalStorageUri: vscode.Uri) {
-    this.uri = vscode.Uri.joinPath(globalStorageUri, ACCOUNTS_STORAGE_DIRECTORY, SUBAGENT_SETTINGS_FILE_NAME);
+  public constructor(globalStorageUri: vscode.Uri, workspaceKey: string) {
+    this.directoryUri = vscode.Uri.joinPath(
+      globalStorageUri,
+      SUBAGENT_SETTINGS_DIRECTORY,
+      SUBAGENT_SETTINGS_VERSION_DIRECTORY
+    );
+    this.uri = vscode.Uri.joinPath(
+      this.directoryUri,
+      `${getWorkspaceHash(workspaceKey.trim() || 'workspace:empty')}.json`
+    );
   }
 
   public async load(): Promise<SubagentModelSetting> {
@@ -29,7 +39,7 @@ export class SubagentSettingsStore {
       version: 1,
       updatedAt: new Date().toISOString()
     });
-    await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.globalStorageUri, ACCOUNTS_STORAGE_DIRECTORY));
+    await vscode.workspace.fs.createDirectory(this.directoryUri);
     await vscode.workspace.fs.writeFile(this.uri, this.encoder.encode(`${JSON.stringify(setting, null, 2)}\n`));
     return setting;
   }

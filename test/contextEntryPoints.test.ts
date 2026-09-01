@@ -137,6 +137,43 @@ test('command menu exposes an accessible persisted compression threshold tab sel
   assert.match(styles, /\.command-menu\.is-readonly \.command-compression-tab/u);
 });
 
+test('command menu owns project-scoped main and subagent model selection', async () => {
+  const inputTemplate = getInputTemplate();
+  const inputScript = getInputScript();
+  const styles = getStyles();
+  const providerSource = await readFile(
+    path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
+    'utf8'
+  );
+  const settingsStoreSource = await readFile(
+    path.resolve(process.cwd(), 'src/accounts/subagentSettingsStore.ts'),
+    'utf8'
+  );
+  const runtimeSource = await readFile(
+    path.resolve(process.cwd(), 'src/agent/subagents/runtime.ts'),
+    'utf8'
+  );
+  const mainModelIndex = inputTemplate.indexOf('id="commandModelSwitch"');
+  const subagentModelIndex = inputTemplate.indexOf('id="commandSubagentModelSwitch"');
+  const compressionIndex = inputTemplate.indexOf('id="commandCompressionTabs"');
+
+  assert.ok(mainModelIndex >= 0 && subagentModelIndex > mainModelIndex);
+  assert.ok(compressionIndex > subagentModelIndex);
+  assert.match(inputTemplate, /data-i18n="switchModel">主模型</u);
+  assert.match(inputTemplate, /data-i18n="subagentModelTitle">子代理模型</u);
+  assert.match(inputTemplate, /id="commandSubagentModelList"[\s\S]*?role="group"/u);
+  assert.doesNotMatch(inputTemplate, /settingsSubagentModel|settings-subagent-card/u);
+  assert.doesNotMatch(inputScript, /settingsSubagentModel/u);
+  assert.doesNotMatch(styles, /settings-subagent-card/u);
+  assert.match(inputScript, /type: 'setSubagentModel', mode: 'follow-main'/u);
+  assert.match(inputScript, /type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId/u);
+  assert.match(inputScript, /function renderCommandSubagentModel\(\)/u);
+  assert.match(inputScript, /function isSubagentModelSelectionLocked\(\)/u);
+  assert.match(settingsStoreSource, /getWorkspaceHash\(workspaceKey\.trim\(\) \|\| 'workspace:empty'\)/u);
+  assert.match(providerSource, /new SubagentSettingsStore\([\s\S]*?this\.sessionStore\.workspaceKey/u);
+  assert.doesNotMatch(runtimeSource, /global subagent|Global subagent|全局子代理|Account management/u);
+});
+
 test('model picker waits for authoritative extension state and exposes pending cancellation', () => {
   const inputTemplate = getInputTemplate();
   const inputScript = getInputScript();

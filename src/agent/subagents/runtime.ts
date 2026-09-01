@@ -64,7 +64,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
   private readonly progress = new Map<string, SubagentProgressState>();
 
   public constructor(private readonly options: SubagentRuntimeOptions) {
-    this.settingsStore = new SubagentSettingsStore(options.globalStorageUri);
+    this.settingsStore = new SubagentSettingsStore(options.globalStorageUri, options.workspaceKey);
     this.store = new SubagentStore(options.globalStorageUri, options.workspaceKey);
   }
 
@@ -656,8 +656,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
     }
     if (!setting.sourceId || !setting.modelId) {
       throw new Error(language === 'en'
-        ? 'The fixed global subagent model setting is incomplete. Update it in Account management; KeepSeek will not silently fall back.'
-        : '固定的全局子代理模型设置不完整。请在“账号管理”中重新选择；KeepSeek 不会静默回退。');
+        ? 'The fixed subagent model setting is incomplete. Choose it again in the command menu; KeepSeek will not silently fall back.'
+        : '固定的子代理模型设置不完整。请在命令菜单中重新选择；KeepSeek 不会静默回退。');
     }
     const sources = await this.options.sourceStore.listSources();
     const model = findModelBySelection(createModelCatalog(sources), {
@@ -666,8 +666,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
     });
     if (!model || model.agentCompatible === false) {
       throw new Error(language === 'en'
-        ? 'The globally selected subagent model is missing, disabled, or unavailable. Update it in Account management; KeepSeek will not silently fall back.'
-        : '全局子代理模型已缺失、被禁用或不可用。请在“账号管理”中重新选择；KeepSeek 不会静默回退。');
+        ? 'The selected subagent model is missing, disabled, or unavailable. Choose it again in the command menu; KeepSeek will not silently fall back.'
+        : '子代理模型已缺失、被禁用或不可用。请在命令菜单中重新选择；KeepSeek 不会静默回退。');
     }
     const resolved = await resolveModelSourceConfig(model.sourceId, this.options.globalStorageUri, {
       sourceStore: this.options.sourceStore,

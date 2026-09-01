@@ -119,13 +119,16 @@ test('subagent frontmatter parses typed profile policy including block-list tool
   assert.equal(parsed.resultMaxChars, 64_000);
 });
 
-test('global subagent model setting persists fixed identity and defaults safely', async () => {
+test('workspace subagent model settings persist independently and default safely', async () => {
   const storageRoot = await createTemporaryDirectory('keepseek-subagent-settings-');
-  const store = new SubagentSettingsStore(vscode.Uri.file(storageRoot));
+  const uri = vscode.Uri.file(storageRoot);
+  const store = new SubagentSettingsStore(uri, 'workspace-a');
+  const otherWorkspaceStore = new SubagentSettingsStore(uri, 'workspace-b');
   assert.equal((await store.load()).mode, 'follow-main');
   const fixed = await store.save({ mode: 'fixed', sourceId: 'source-a', modelId: 'model-a' });
   assert.equal(fixed.mode, 'fixed');
   assert.deepEqual(await store.load(), fixed);
+  assert.equal((await otherWorkspaceStore.load()).mode, 'follow-main');
   const follow = await store.save({ mode: 'follow-main' });
   assert.equal(follow.mode, 'follow-main');
   assert.equal(follow.sourceId, undefined);

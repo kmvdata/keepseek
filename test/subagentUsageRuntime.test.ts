@@ -30,7 +30,7 @@ test('fixed-model resolution failures show the requested model, never an apparen
   const summaries: SubagentRunUsageSummary[] = [];
   try {
     const uri = vscode.Uri.file(directory);
-    await new SubagentSettingsStore(uri).save({ mode: 'fixed', sourceId: 'missing-account', modelId: 'fixed-child-model' });
+    await new SubagentSettingsStore(uri, 'test').save({ mode: 'fixed', sourceId: 'missing-account', modelId: 'fixed-child-model' });
     await new SubagentRuntime({ globalStorageUri: uri, workspaceKey: 'test', sourceStore: new ModelSourceStore(uri) })
       .delegateTask({ task: 'Research' }, { parentRequest: parentRequest(), parentRunId: 'root', language: 'en',
         onRunSummary: (summary) => summaries.push(summary) });

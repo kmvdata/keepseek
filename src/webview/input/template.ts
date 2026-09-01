@@ -162,8 +162,8 @@ export function getInputTemplate(): string {
               aria-expanded="false"
             >
               <span class="command-row-main">
-                <span class="command-row-title" data-i18n="switchModel">Switch model...</span>
-                <span id="commandModelDescription" class="command-row-description" data-i18n="switchModelDescription">切换 AI 模型</span>
+                <span class="command-row-title" data-i18n="switchModel">主模型</span>
+                <span id="commandModelDescription" class="command-row-description" data-i18n="switchModelDescription">切换当前项目的主模型</span>
               </span>
               <span id="commandModelValue" class="command-row-value command-model-current">DeepSeek-V4-Flash</span>
             </button>
@@ -172,6 +172,20 @@ export function getInputTemplate(): string {
               <span id="commandModelStatusText"></span>
               <button id="commandModelCancelPending" type="button" class="command-model-cancel hidden" data-i18n="cancelPendingModel">取消待切换</button>
             </div>
+            <button
+              id="commandSubagentModelSwitch"
+              type="button"
+              class="command-row"
+              role="menuitem"
+              aria-expanded="false"
+            >
+              <span class="command-row-main">
+                <span class="command-row-title" data-i18n="subagentModelTitle">子代理模型</span>
+                <span id="commandSubagentModelDescription" class="command-row-description" data-i18n="subagentModelHint">默认跟随主模型，可为当前项目单独选择</span>
+              </span>
+              <span id="commandSubagentModelValue" class="command-row-value command-model-current">跟随主模型</span>
+            </button>
+            <div id="commandSubagentModelList" class="command-model-list hidden" role="group" aria-label="子代理模型" data-i18n-aria-label="subagentModelTitle"></div>
             <div class="command-control-row command-compression-row">
               <span class="command-row-main">
                 <span class="command-row-title" data-i18n="compressionThreshold">自动压缩阈值</span>
@@ -229,27 +243,26 @@ export function getInputTemplate(): string {
             <label class="command-control-row" for="commandEffortSlider">
               <span class="command-row-main">
                 <span class="command-row-title">Effort (<span id="commandEffortValue">High</span>)</span>
-                <span class="command-row-description" data-i18n="effortDescription">调整生成内容的深度 / 复杂度</span>
+                <span class="command-row-description" data-i18n="effortDescription">控制深度思考的开关与强度</span>
               </span>
-              <input
-                id="commandEffortSlider"
-                class="command-effort-slider"
-                type="range"
-                min="1"
-                max="2"
-                step="1"
-                value="1"
-                aria-label="Effort"
-              />
-            </label>
-
-            <label class="command-control-row command-toggle-row">
-              <span class="command-row-main">
-                <span class="command-row-title">Thinking</span>
-                <span class="command-row-description" data-i18n="thinkingDescription">提升复杂问题的推理质量</span>
+              <span class="command-effort-control">
+                <input
+                  id="commandEffortSlider"
+                  class="command-effort-slider"
+                  type="range"
+                  min="0"
+                  max="2"
+                  step="1"
+                  value="1"
+                  aria-label="Effort"
+                  aria-valuetext="High"
+                />
+                <span class="command-effort-scale" aria-hidden="true">
+                  <span>Off</span>
+                  <span>High</span>
+                  <span>Max</span>
+                </span>
               </span>
-              <input id="commandThinkingToggle" class="command-toggle-input" type="checkbox" checked aria-label="Thinking" />
-              <span class="command-toggle-track" aria-hidden="true"></span>
             </label>
           </section>
         </div>
@@ -299,13 +312,6 @@ export function getInputTemplate(): string {
         </div>
         <div class="settings-dialog-body">
           <p id="settingsDialogDesc" class="settings-dialog-desc" data-i18n="modelSettingsDialogDesc">添加账号并管理其 API 连接；同一账号的凭证只保存一次。</p>
-          <section class="settings-subagent-card" aria-labelledby="settingsSubagentModelTitle">
-            <div>
-              <span id="settingsSubagentModelTitle" class="settings-section-heading" data-i18n="subagentModelTitle">全局子代理模型</span>
-              <span id="settingsSubagentModelHint" class="settings-field-hint" data-i18n="subagentModelHint">子代理默认长期使用此模型；每个子会话启动时会冻结具体账号和模型。</span>
-            </div>
-            <select id="settingsSubagentModelSelect" class="settings-input" aria-label="全局子代理模型" data-i18n-aria-label="subagentModelTitle"></select>
-          </section>
           <div class="settings-account-workspace">
             <aside class="settings-account-sidebar" aria-labelledby="settingsAccountsTitle">
               <div class="settings-account-section-header">
