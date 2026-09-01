@@ -1420,14 +1420,8 @@ export function getInputScript(): string {
           ['usageMetricTurnTokens', formatMetricTokens(metrics.lastTurnUsage && metrics.lastTurnUsage.totalTokens, hasUsageData(metrics.lastTurnUsage))],
           ['usageMetricTurnCount', metrics.turnCount > 0 ? formatMetricInteger(metrics.turnCount) : '-']
         ];
-        if (turnCacheAvailable) {
-          items.splice(2, 0,
-            ['usageMetricCacheHitTokens', formatMetricTokens(metrics.lastTurnUsage.cacheHitTokens, true)],
-            ['usageMetricCacheMissTokens', formatMetricTokens(metrics.lastTurnUsage.cacheMissTokens, true)]
-          );
-        }
         var costDisplay = formatAccountedCosts(sessionUsage);
-        items.splice(turnCacheAvailable ? 4 : 2, 0, [
+        items.splice(2, 0, [
           costDisplay.available
             ? costDisplay.partial ? 'usageMetricAccountedCost' : 'usageMetricSessionCost'
             : 'usageMetricCostUnavailable',

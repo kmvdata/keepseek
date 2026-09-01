@@ -210,7 +210,7 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.match(script, /usageMetricEffectiveExecution/u);
   assert.match(script, /function getLatestRunState\(\)/u);
   const tooltipRenderer = script.slice(script.indexOf('function renderContextProgress()'), script.indexOf('function getLatestRunState()'));
-  assert.doesNotMatch(tooltipRenderer, /usageMetric(?:CacheReasons|CompactThreshold)/u);
+  assert.doesNotMatch(tooltipRenderer, /usageMetric(?:CacheReasons|CompactThreshold|CacheHitTokens|CacheMissTokens)/u);
   assert.doesNotMatch(tooltipRenderer, /usageMetric(?:UsageGroups|LegacyUnattributed)/u);
   assert.match(tooltipRenderer, /costDisplay\.available \? costDisplay\.amountText/u);
   assert.doesNotMatch(tooltipRenderer, /costDisplay\.available \? costDisplay\.text/u);
