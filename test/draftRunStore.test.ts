@@ -110,6 +110,49 @@ test('results bound to removed history become available for the replacement user
   });
 });
 
+test('automatic continuation claims one settled agent batch only after every pending command is resolved', async () => {
+  await withDraftRunFixture(async ({ workspaceRoot, store }) => {
+    const first = createProposal(workspaceRoot, { id: 'auto-batch-first' });
+    const second = createProposal(workspaceRoot, { id: 'auto-batch-second' });
+    store.addProposals({
+      proposals: [first, second],
+      agentRunId: 'agent-auto-batch',
+      sessionId: 'session-auto-batch',
+      messageId: 'assistant-auto-batch'
+    });
+
+    await store.approveAndRun(first.id, new Set(), { autoContinue: true });
+    assert.equal(store.get(first.id)?.autoContinueRequested, true);
+    assert.equal(store.claimReadyAutoContinuation('session-auto-batch'), undefined);
+
+    await store.approveAndRun(second.id, new Set(), { autoContinue: false });
+    const claim = store.claimReadyAutoContinuation('session-auto-batch');
+    assert.equal(claim?.agentRunId, 'agent-auto-batch');
+    assert.deepEqual(claim?.draftRunIds, [first.id, second.id]);
+    await claim?.persisted;
+    assert.ok(store.get(first.id)?.autoContinueClaimedAt);
+    assert.ok(store.get(second.id)?.autoContinueClaimedAt);
+    assert.equal(store.claimReadyAutoContinuation('session-auto-batch'), undefined);
+  });
+});
+
+test('cancelling an explicitly continued DraftRun suppresses automatic continuation', async () => {
+  await withDraftRunFixture(async ({ workspaceRoot, store, executor }) => {
+    executor.outcome = { timedOut: false, cancelled: true };
+    const proposal = createProposal(workspaceRoot, { id: 'auto-cancelled' });
+    store.addProposals({
+      proposals: [proposal],
+      agentRunId: 'agent-auto-cancelled',
+      sessionId: 'session-auto-cancelled',
+      messageId: 'assistant-auto-cancelled'
+    });
+
+    const completed = await store.approveAndRun(proposal.id, new Set(), { autoContinue: true });
+    assert.equal(completed?.status, 'cancelled');
+    assert.equal(store.claimReadyAutoContinuation('session-auto-cancelled'), undefined);
+  });
+});
+
 test('external cwd requires its exact URI authorization key', async () => {
   await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
     const externalRoot = path.join(root, 'external');

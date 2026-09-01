@@ -1325,10 +1325,14 @@ function normalizeMessageContextMeta(value: unknown): ChatMessageContextMeta | u
   const protectedReason = typeof value.protectedReason === 'string' && value.protectedReason.trim()
     ? value.protectedReason.trim()
     : undefined;
-  return isProtected || protectedReason
+  const displayKind = value.displayKind === 'draft_run_auto_continue'
+    ? value.displayKind
+    : undefined;
+  return isProtected || protectedReason || displayKind
     ? {
         isProtected,
-        protectedReason
+        protectedReason,
+        displayKind
       }
     : undefined;
 }

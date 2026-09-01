@@ -307,6 +307,7 @@ export type ChatRole = 'user' | 'assistant' | 'system';
 export interface ChatMessageContextMeta {
   isProtected?: boolean;
   protectedReason?: string;
+  displayKind?: 'draft_run_auto_continue';
 }
 
 export type DraftRunStatus =
@@ -394,6 +395,10 @@ export interface DraftRun extends DraftRunProposal {
   omittedOutputBytes: number;
   error?: string;
   resultBoundMessageId?: string;
+  /** Set only by the explicit "run and continue" user action. */
+  autoContinueRequested?: boolean;
+  /** Persisted before dispatch so an extension restart cannot duplicate a model request. */
+  autoContinueClaimedAt?: string;
   createdAt: string;
   updatedAt: string;
 }

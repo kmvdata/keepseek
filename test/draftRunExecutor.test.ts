@@ -8,8 +8,10 @@ import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization'
 import { SpawnDraftRunExecutor } from '../src/runs/draftRunExecutor';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import type { DraftRun, DraftRunSpec } from '../src/shared/types';
+import { clearCreatedTerminals, createdTerminals } from './stubs/vscode';
 
 test('SpawnDraftRunExecutor passes a literal argv with shell disabled and consumes the permit once', async () => {
+  clearCreatedTerminals();
   const executor = new SpawnDraftRunExecutor();
   const literal = 'literal; echo must-not-run && $(must-not-expand)';
   const draftRun = createDraftRun([
@@ -29,11 +31,46 @@ test('SpawnDraftRunExecutor passes a literal argv with shell disabled and consum
   assert.equal(outcome.exitCode, 0);
   assert.equal(outcome.timedOut, false);
   assert.equal(output, literal);
+  assert.equal(createdTerminals.length, 1);
+  assert.equal(createdTerminals[0]?.showCount, 0);
   assert.equal(executor.showTerminal(draftRun.id), true);
+  assert.equal(createdTerminals[0]?.showCount, 1);
   await assert.rejects(
     executor.execute({ draftRun, permit, onOutput: () => undefined }),
     /permit was already consumed/u
   );
+});
+
+test('SpawnDraftRunExecutor reuses one hidden terminal for consecutive runs in the same session', async () => {
+  clearCreatedTerminals();
+  const executor = new SpawnDraftRunExecutor();
+  try {
+    const first = createDraftRun(['-e', 'process.stdout.write("first")']);
+    first.id = 'executor-shared-terminal-first';
+    const second = createDraftRun(['-e', 'process.stdout.write("second")']);
+    second.id = 'executor-shared-terminal-second';
+    const authorization = new DraftRunAuthorizationService();
+
+    await executor.execute({
+      draftRun: first,
+      permit: authorization.createUserClickPermit(first),
+      onOutput: () => undefined
+    });
+    await executor.execute({
+      draftRun: second,
+      permit: authorization.createUserClickPermit(second),
+      onOutput: () => undefined
+    });
+
+    assert.equal(createdTerminals.length, 1);
+    assert.equal(createdTerminals[0]?.name, 'KeepSeek DraftRuns');
+    assert.equal(createdTerminals[0]?.showCount, 0);
+    assert.equal(executor.showTerminal(first.id), true);
+    assert.equal(executor.showTerminal(second.id), true);
+    assert.equal(createdTerminals[0]?.showCount, 2);
+  } finally {
+    executor.dispose();
+  }
 });
 
 test('SpawnDraftRunExecutor stops a process at the approved timeout', async () => {

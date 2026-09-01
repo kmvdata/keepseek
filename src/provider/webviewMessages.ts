@@ -108,7 +108,7 @@ export type WebviewMessage =
   | { type: 'revertChangeSet'; id: string }
   | { type: 'applyAllDraftEdits' }
   | { type: 'discardAllDraftEdits' }
-  | { type: 'approveDraftRun'; id: string; specHash: string }
+  | { type: 'approveDraftRun'; id: string; specHash: string; autoContinue?: boolean }
   | { type: 'rejectDraftRun'; id: string }
   | { type: 'cancelDraftRun'; id: string }
   | { type: 'cloneDraftRun'; id: string }

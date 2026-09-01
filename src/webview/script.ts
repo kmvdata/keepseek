@@ -754,6 +754,7 @@ export function getScript(): string {
       var payload = { type: action, id: id };
       if (action === 'approveDraftRun') {
         payload.specHash = String(button.dataset.specHash || '');
+        payload.autoContinue = button.dataset.autoContinue === 'true';
         pendingDraftRunApprovals.add(id);
         render();
       }
@@ -3205,7 +3206,9 @@ export function getScript(): string {
         && !draftRun.resultBoundMessageId) {
         var resultNotice = document.createElement('div');
         resultNotice.className = 'draft-run-output-notice';
-        resultNotice.textContent = t('draftRunResultPendingNextMessage');
+        resultNotice.textContent = draftRun.autoContinueRequested && !draftRun.autoContinueClaimedAt
+          ? t('draftRunResultWaitingForBatch')
+          : t('draftRunResultPendingNextMessage');
         card.append(resultNotice);
       }
       return card;
@@ -3221,7 +3224,8 @@ export function getScript(): string {
         if (!externalAuthorized) {
           container.append(createDraftRunActionButton(t('draftRunAuthorizeCwd'), 'authorizeDraftRunCwd', draftRun, false));
         } else {
-          container.append(createDraftRunActionButton(t('draftRunApproveOnce'), 'approveDraftRun', draftRun, false));
+          container.append(createDraftRunActionButton(t('draftRunRunAndContinue'), 'approveDraftRun', draftRun, false, false, true));
+          container.append(createDraftRunActionButton(t('draftRunRunOnly'), 'approveDraftRun', draftRun, true, false, false));
         }
         container.append(createDraftRunActionButton(t('draftRunReject'), 'rejectDraftRun', draftRun, true));
       } else if (statusValue === 'running') {
@@ -3235,14 +3239,17 @@ export function getScript(): string {
       }
     }
 
-    function createDraftRunActionButton(label, action, draftRun, secondary, forceDisabled) {
+    function createDraftRunActionButton(label, action, draftRun, secondary, forceDisabled, autoContinue) {
       var button = document.createElement('button');
       button.type = 'button';
       button.textContent = label;
       button.className = secondary ? 'secondary' : '';
       button.dataset.draftRunId = String(draftRun.id || '');
       button.dataset.draftRunAction = action;
-      if (action === 'approveDraftRun') button.dataset.specHash = String(draftRun.specHash || '');
+      if (action === 'approveDraftRun') {
+        button.dataset.specHash = String(draftRun.specHash || '');
+        button.dataset.autoContinue = autoContinue === true ? 'true' : 'false';
+      }
       var allowWhileBusy = action === 'cancelDraftRun' || action === 'openDraftRunTerminal';
       button.disabled = Boolean(forceDisabled)
         || (Boolean(state.isBusy) && !allowWhileBusy)
@@ -3493,9 +3500,14 @@ export function getScript(): string {
       for (var i = 0; i < state.messages.length; i++) {
         var message = state.messages[i];
         var item = document.createElement('article');
-        var isEditing = message.role === 'user' && message.id === editingMessageId;
+        var isDraftRunAutoContinuation = message.role === 'user'
+          && message.contextMeta?.displayKind === 'draft_run_auto_continue';
+        var isEditing = message.role === 'user' && !isDraftRunAutoContinuation && message.id === editingMessageId;
         item.dataset.messageId = message.id;
-        item.className = 'message ' + message.role + (isEditing ? ' is-editing' : '') + (message.isStreaming ? ' is-streaming' : '');
+        item.className = 'message ' + message.role
+          + (isDraftRunAutoContinuation ? ' is-auto-continuation' : '')
+          + (isEditing ? ' is-editing' : '')
+          + (message.isStreaming ? ' is-streaming' : '');
         item.dataset.messageId = message.id;
 
         var body = document.createElement('div');
@@ -3503,7 +3515,7 @@ export function getScript(): string {
 
         var role = document.createElement('div');
         role.className = 'message-role';
-        role.textContent = message.role === 'user' ? t('you') : 'KeepSeek';
+        role.textContent = message.role === 'user' && !isDraftRunAutoContinuation ? t('you') : 'KeepSeek';
 
         body.append(role);
         if (message.role === 'assistant' && message.reasoningContent) {
@@ -3542,7 +3554,7 @@ export function getScript(): string {
             }
             body.append(content);
           }
-          if (message.role === 'user') {
+          if (message.role === 'user' && !isDraftRunAutoContinuation) {
             body.append(createUserMessageActions(message));
           } else if (message.role === 'assistant' && !message.isStreaming && String(message.content || '').length > 0) {
             body.append(createAssistantMessageActions(message));

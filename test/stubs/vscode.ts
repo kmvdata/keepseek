@@ -177,13 +177,34 @@ export interface TestTabGroup {
   tabs: TestTab[];
 }
 
+export interface TestTerminalRecord {
+  name: string;
+  showCount: number;
+  disposeCount: number;
+}
+
+export const createdTerminals: TestTerminalRecord[] = [];
+
+export function clearCreatedTerminals(): void {
+  createdTerminals.splice(0, createdTerminals.length);
+}
+
 export const window = {
   createTerminal(options: { name: string; pty?: { open(): void; close(): void } }) {
+    const record: TestTerminalRecord = {
+      name: options.name,
+      showCount: 0,
+      disposeCount: 0
+    };
+    createdTerminals.push(record);
     options.pty?.open();
     return {
       name: options.name,
-      show() { return undefined; },
-      dispose() { options.pty?.close(); }
+      show() { record.showCount += 1; },
+      dispose() {
+        record.disposeCount += 1;
+        options.pty?.close();
+      }
     };
   },
   tabGroups: {

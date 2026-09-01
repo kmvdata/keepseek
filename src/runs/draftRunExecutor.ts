@@ -41,9 +41,15 @@ interface RunningProcess {
   terminateAndSettle?: () => void;
 }
 
+interface SessionTerminal {
+  terminal: vscode.Terminal;
+  pty: DraftRunPseudoterminal;
+}
+
 export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
   private readonly running = new Map<string, RunningProcess>();
-  private readonly terminals = new Map<string, vscode.Terminal>();
+  private readonly sessionTerminals = new Map<string, SessionTerminal>();
+  private readonly runTerminalSessions = new Map<string, string>();
   private readonly consumedPermitNonces = new Map<string, number>();
 
   public async execute(input: {
@@ -69,13 +75,9 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       return { timedOut: false, cancelled: true };
     }
 
-    const pty = new DraftRunPseudoterminal(() => this.cancel(input.draftRun.id));
-    const terminal = vscode.window.createTerminal({
-      name: `KeepSeek DraftRun: ${shortExecutable(input.draftRun.spec.executable)}`,
-      pty
-    });
-    this.terminals.set(input.draftRun.id, terminal);
-    terminal.show(true);
+    const { pty, terminal } = this.getOrCreateSessionTerminal(input.draftRun.sessionId);
+    pty.setActiveRun(() => this.cancel(input.draftRun.id));
+    this.runTerminalSessions.set(input.draftRun.id, input.draftRun.sessionId);
     pty.write(formatTerminalHeader(input.draftRun));
 
     const child = spawn(input.draftRun.spec.executable, input.draftRun.spec.args, {
@@ -125,7 +127,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         emit('stderr', stderrDecoder.end());
         this.running.delete(input.draftRun.id);
         pty.write(`\r\n[KeepSeek DraftRun ${formatOutcomeLabel(outcome)}]\r\n`);
-        pty.finish();
+        pty.finishRun();
         resolve(outcome);
       };
       const currentOutcome = (error?: string): DraftRunExecutionOutcome => ({
@@ -213,11 +215,12 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
   }
 
   public showTerminal(draftRunId: string): boolean {
-    const terminal = this.terminals.get(draftRunId);
-    if (!terminal) {
+    const sessionId = this.runTerminalSessions.get(draftRunId);
+    const shared = sessionId ? this.sessionTerminals.get(sessionId) : undefined;
+    if (!shared || shared.pty.isClosed) {
       return false;
     }
-    terminal.show(true);
+    shared.terminal.show(true);
     return true;
   }
 
@@ -226,10 +229,36 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       running.cancelRequested = true;
       terminateProcessTree(running.child);
     }
-    for (const terminal of this.terminals.values()) {
-      terminal.dispose();
+    for (const shared of this.sessionTerminals.values()) {
+      shared.terminal.dispose();
     }
-    this.terminals.clear();
+    this.sessionTerminals.clear();
+    this.runTerminalSessions.clear();
+  }
+
+  private getOrCreateSessionTerminal(sessionId: string): SessionTerminal {
+    const existing = this.sessionTerminals.get(sessionId);
+    if (existing && !existing.pty.isClosed) {
+      return existing;
+    }
+    const pty = new DraftRunPseudoterminal(() => {
+      const current = this.sessionTerminals.get(sessionId);
+      if (current?.pty === pty) {
+        this.sessionTerminals.delete(sessionId);
+      }
+      for (const [draftRunId, terminalSessionId] of this.runTerminalSessions) {
+        if (terminalSessionId === sessionId) {
+          this.runTerminalSessions.delete(draftRunId);
+        }
+      }
+    });
+    const terminal = vscode.window.createTerminal({
+      name: 'KeepSeek DraftRuns',
+      pty
+    });
+    const created = { terminal, pty };
+    this.sessionTerminals.set(sessionId, created);
+    return created;
   }
 }
 
@@ -238,23 +267,32 @@ class DraftRunPseudoterminal implements vscode.Pseudoterminal {
   private readonly closeEmitter = new vscode.EventEmitter<void>();
   public readonly onDidWrite = this.writeEmitter.event;
   public readonly onDidClose = this.closeEmitter.event;
-  private completed = false;
+  private activeRunCancel: (() => void) | undefined;
+  private closed = false;
 
-  public constructor(private readonly onCancel: () => void) {}
+  public constructor(private readonly onClosed: () => void) {}
+
+  public get isClosed(): boolean {
+    return this.closed;
+  }
 
   public open(): void {}
 
   public close(): void {
-    if (!this.completed) {
-      this.onCancel();
+    if (this.closed) {
+      return;
     }
+    this.closed = true;
+    this.activeRunCancel?.();
+    this.activeRunCancel = undefined;
+    this.onClosed();
     this.writeEmitter.dispose();
     this.closeEmitter.dispose();
   }
 
   public handleInput(data: string): void {
     if (data.includes('\u0003')) {
-      this.onCancel();
+      this.activeRunCancel?.();
       this.write('^C\r\n');
     }
   }
@@ -264,8 +302,12 @@ class DraftRunPseudoterminal implements vscode.Pseudoterminal {
     this.writeEmitter.fire(normalized);
   }
 
-  public finish(): void {
-    this.completed = true;
+  public setActiveRun(onCancel: () => void): void {
+    this.activeRunCancel = onCancel;
+  }
+
+  public finishRun(): void {
+    this.activeRunCancel = undefined;
   }
 }
 
@@ -332,6 +374,8 @@ function terminateProcessTree(child: ChildProcess): void {
 
 function formatTerminalHeader(draftRun: DraftRun): string {
   return [
+    '',
+    `======== DraftRun ${draftRun.id} · ${shortExecutable(draftRun.spec.executable)} ========`,
     'KeepSeek DraftRun (explicitly approved once)',
     `Executable: ${draftRun.spec.executable}`,
     `Arguments: ${JSON.stringify(draftRun.spec.args)}`,

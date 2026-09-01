@@ -1344,6 +1344,10 @@ export function getStyles(): string {
       align-items: flex-end;
     }
 
+    .message.user.is-auto-continuation {
+      align-items: flex-start;
+    }
+
     .message:last-child {
       margin-bottom: 0;
     }
@@ -1363,6 +1367,11 @@ export function getStyles(): string {
 
     .message.user .message-body {
       align-items: flex-end;
+    }
+
+    .message.user.is-auto-continuation .message-body {
+      align-items: flex-start;
+      max-width: min(92%, 760px);
     }
 
     .message.assistant .message-role,
@@ -1389,6 +1398,23 @@ export function getStyles(): string {
     .message.user .message-role {
       color: var(--vscode-chat-requestColor, var(--vscode-textLink-foreground));
       text-align: right;
+    }
+
+    .message.user.is-auto-continuation .message-role {
+      color: var(--vscode-descriptionForeground);
+      text-align: left;
+    }
+
+    .message.user.is-auto-continuation .message-content {
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+      border: 0;
+      border-left: 2px solid var(--vscode-chat-requestBorder, var(--vscode-panel-border));
+      border-radius: 0;
+      padding-top: 2px;
+      padding-right: 2px;
+      padding-bottom: 2px;
+      padding-left: 10px;
     }
 
     .message-content {

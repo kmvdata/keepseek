@@ -40,6 +40,13 @@ export interface DraftRunStoreEvent {
   stream?: DraftRunOutputChunk['stream'];
 }
 
+export interface DraftRunAutoContinuationClaim {
+  sessionId: string;
+  agentRunId: string;
+  draftRunIds: string[];
+  persisted: Promise<void>;
+}
+
 export class DraftRunStore {
   private readonly draftRuns = new Map<string, DraftRun>();
   private readonly cancelRequests = new Set<string>();
@@ -149,13 +156,15 @@ export class DraftRunStore {
 
   public async approveAndRun(
     id: string,
-    authorizedExternalReferenceUris: ReadonlySet<string>
+    authorizedExternalReferenceUris: ReadonlySet<string>,
+    options: { autoContinue?: boolean } = {}
   ): Promise<DraftRun | undefined> {
     const draftRun = this.draftRuns.get(id);
     if (!draftRun || draftRun.status !== 'pending' || this.approving.has(id)) {
       return undefined;
     }
     this.approving.add(id);
+    draftRun.autoContinueRequested = options.autoContinue === true || undefined;
     try {
       await this.validateBeforeApproval(draftRun, authorizedExternalReferenceUris);
       draftRun.status = 'approved';
@@ -264,6 +273,8 @@ export class DraftRunStore {
       omittedOutputBytes: 0,
       error: undefined,
       resultBoundMessageId: undefined,
+      autoContinueRequested: undefined,
+      autoContinueClaimedAt: undefined,
       createdAt: now,
       updatedAt: now
     };
@@ -275,6 +286,46 @@ export class DraftRunStore {
 
   public showTerminal(id: string): boolean {
     return this.executor.showTerminal(id);
+  }
+
+  /**
+   * Claims exactly one settled DraftRun batch for automatic continuation.
+   * The in-memory claim happens synchronously; callers must await `persisted`
+   * before starting a model request. A stored claim is fail-closed after restart.
+   */
+  public claimReadyAutoContinuation(sessionId: string): DraftRunAutoContinuationClaim | undefined {
+    const sessionRuns = Array.from(this.draftRuns.values())
+      .filter((draftRun) => draftRun.sessionId === sessionId);
+    if (sessionRuns.some((draftRun) => !TERMINAL_STATUSES.has(draftRun.status))) {
+      return undefined;
+    }
+    const batches = new Map<string, DraftRun[]>();
+    for (const draftRun of sessionRuns) {
+      const batch = batches.get(draftRun.agentRunId) ?? [];
+      batch.push(draftRun);
+      batches.set(draftRun.agentRunId, batch);
+    }
+    const readyBatch = Array.from(batches.values())
+      .filter((batch) => batch.some((draftRun) => draftRun.autoContinueRequested === true)
+        && batch.every((draftRun) => TERMINAL_STATUSES.has(draftRun.status))
+        && batch.every((draftRun) => !draftRun.autoContinueClaimedAt)
+        && batch.every((draftRun) => draftRun.status !== 'cancelled')
+        && batch.some((draftRun) => !draftRun.resultBoundMessageId))
+      .sort((left, right) => left[0]!.createdAt.localeCompare(right[0]!.createdAt))[0];
+    if (!readyBatch) {
+      return undefined;
+    }
+    const claimedAt = new Date().toISOString();
+    for (const draftRun of readyBatch) {
+      draftRun.autoContinueClaimedAt = claimedAt;
+      draftRun.updatedAt = claimedAt;
+    }
+    return {
+      sessionId,
+      agentRunId: readyBatch[0]!.agentRunId,
+      draftRunIds: readyBatch.map((draftRun) => draftRun.id),
+      persisted: this.persistNow()
+    };
   }
 
   public getPendingProviderTail(sessionId: string, language: KeepseekLanguage): {
@@ -556,6 +607,10 @@ function normalizeStoredDraftRun(value: unknown): DraftRun | undefined {
     outputTail: typeof record.outputTail === 'string' ? record.outputTail : '',
     outputBytes: Number.isFinite(record.outputBytes) ? Number(record.outputBytes) : 0,
     outputTruncated: record.outputTruncated === true,
-    omittedOutputBytes: Number.isFinite(record.omittedOutputBytes) ? Number(record.omittedOutputBytes) : 0
+    omittedOutputBytes: Number.isFinite(record.omittedOutputBytes) ? Number(record.omittedOutputBytes) : 0,
+    autoContinueRequested: record.autoContinueRequested === true || undefined,
+    autoContinueClaimedAt: typeof record.autoContinueClaimedAt === 'string'
+      ? record.autoContinueClaimedAt
+      : undefined
   } as DraftRun);
 }

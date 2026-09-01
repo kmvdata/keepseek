@@ -248,6 +248,12 @@ export class ChangeSetStore {
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
+  public hasPendingForSession(sessionId: string): boolean {
+    return Array.from(this.changeSets.values()).some((changeSet) =>
+      changeSet.sessionId === sessionId && changeSet.files.some(isApplicable)
+    );
+  }
+
   public getLatestChangeSetId(sessionId: string): string | undefined {
     return Array.from(this.changeSets.values())
       .filter((changeSet) => changeSet.sessionId === sessionId)
