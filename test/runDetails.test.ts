@@ -130,6 +130,27 @@ describe('RunDetailsBuilder', () => {
     assert.deepEqual(updated.changeSets[0].files?.map((file) => file.status), ['discarded', 'pending']);
   });
 
+  it('rekeys the final Run Details summary to the canonical checkpoint ChangeSet', () => {
+    const finalChangeSet = createTwoFileChangeSet();
+    const summary = createSummaryWithChangeSet(finalChangeSet);
+    const canonicalChangeSet: ChangeSet = {
+      ...finalChangeSet,
+      id: 'checkpoint-change-set',
+      files: finalChangeSet.files.map((file) => ({ ...file }))
+    };
+
+    const updated = applyChangeSetEventToRunDetails(summary, {
+      type: 'change_set_merged',
+      changeSetId: canonicalChangeSet.id,
+      incomingChangeSetId: finalChangeSet.id,
+      addedEditIds: []
+    }, canonicalChangeSet);
+
+    assert.equal(updated.changeSets.length, 1);
+    assert.equal(updated.changeSets[0]?.id, canonicalChangeSet.id);
+    assert.deepEqual(updated.changeSets[0]?.files?.map((file) => file.id), ['edit-a', 'edit-b']);
+  });
+
   it('uses the current ChangeSet snapshot for partial apply and failed revert outcomes', () => {
     const changeSet = createTwoFileChangeSet();
     const summary = createSummaryWithChangeSet(changeSet);

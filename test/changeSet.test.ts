@@ -41,6 +41,79 @@ test('creates one structured ChangeSet for multiple draft edits', () => {
   assert.match(changeSet.operationSummary, /Update A/u);
 });
 
+test('merges cumulative checkpoint DraftEdits and the final response into one ChangeSet', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-checkpoint-merge-'));
+  const fixture = createStoreFixture(root);
+  const scope = {
+    runId: 'run-checkpoint',
+    sessionId: 'session-1',
+    messageId: 'assistant-checkpoint'
+  };
+  const editA = draft('a', 'a.ts');
+  const editB = draft('b', 'b.ts');
+  const editC = draft('c', 'c.ts');
+
+  const first = fixture.store.addDraftEdits({ ...scope, edits: [editA] });
+  const second = fixture.store.addDraftEdits({ ...scope, edits: [editA, editB] });
+  const third = fixture.store.addDraftEdits({ ...scope, edits: [editA, editB, editC] });
+  assert.ok(first && second && third);
+  assert.equal(second.id, first.id);
+  assert.equal(third.id, first.id);
+
+  const finalResponse = createChangeSet({
+    ...scope,
+    edits: [editA, editB, editC],
+    operationSummary: 'Final grouped change'
+  });
+  assert.ok(finalResponse);
+  const registeredFinal = fixture.store.add(finalResponse);
+  assert.equal(registeredFinal?.id, first.id);
+
+  const state = fixture.store.toWebviewState('session-1');
+  assert.equal(state.length, 1);
+  assert.equal(state[0]?.fileCount, 3);
+  assert.equal(state[0]?.operationSummary, 'Final grouped change');
+  assert.deepEqual(state[0]?.files.map((file) => file.id), ['a', 'b', 'c']);
+
+  const result = await fixture.store.applyAll(first.id);
+  assert.equal(result?.attempted, 3);
+  assert.deepEqual(result?.appliedEditIds, ['a', 'b', 'c']);
+});
+
+test('consolidates previously persisted split ChangeSets for one Agent run', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-stored-merge-'));
+  const scope = {
+    runId: 'run-stored',
+    sessionId: 'session-1',
+    messageId: 'assistant-stored'
+  };
+  const first = createChangeSet({ ...scope, edits: [draft('a', 'a.ts')] });
+  const second = createChangeSet({ ...scope, edits: [draft('b', 'b.ts')] });
+  assert.ok(first && second);
+  second.createdAt = new Date(Date.parse(first.createdAt) + 1_000).toISOString();
+  second.updatedAt = second.createdAt;
+  await writeFile(path.join(root, 'change-sets.json'), JSON.stringify({
+    version: 2,
+    changeSets: [second, first],
+    history: [],
+    checkpoints: []
+  }));
+
+  const fixture = createStoreFixture(root);
+  await fixture.store.initialize();
+  const state = fixture.store.toWebviewState('session-1');
+  assert.equal(state.length, 1);
+  assert.equal(state[0]?.id, first.id);
+  assert.equal(state[0]?.fileCount, 2);
+  assert.deepEqual(state[0]?.files.map((file) => file.id), ['a', 'b']);
+
+  await fixture.store.flush();
+  const persisted = JSON.parse(await readFile(path.join(root, 'change-sets.json'), 'utf8')) as {
+    changeSets?: unknown[];
+  };
+  assert.equal(persisted.changeSets?.length, 1);
+});
+
 test('keeps multiple rounds associated with their assistant message and omits newText from Webview state', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-association-'));
   const fixture = createStoreFixture(root);

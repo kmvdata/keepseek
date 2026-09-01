@@ -381,13 +381,22 @@ export function applyChangeSetEventToRunDetails(
     return summary;
   }
   const changeSets = summary.changeSets.map(cloneChangeSetSummary);
-  const target = changeSets.find((item) => item.id === changeSetId);
+  const incomingChangeSetId = event.type === 'change_set_merged' && typeof event.incomingChangeSetId === 'string'
+    ? event.incomingChangeSetId
+    : undefined;
+  const target = changeSets.find((item) => item.id === changeSetId)
+    ?? (incomingChangeSetId ? changeSets.find((item) => item.id === incomingChangeSetId) : undefined);
   if (!target) {
     return summary;
   }
   if (changeSet?.id === changeSetId) {
-    changeSets[changeSets.indexOf(target)] = toChangeSetSummary(changeSet);
-    return { ...summary, changeSets };
+    const targetIndex = changeSets.indexOf(target);
+    changeSets[targetIndex] = toChangeSetSummary(changeSet);
+    return {
+      ...summary,
+      changeSets: changeSets.filter((item, index) => index === targetIndex
+        || (item.id !== changeSetId && item.id !== incomingChangeSetId))
+    };
   }
   const result = isRecord(event.result) ? event.result : undefined;
   const applied = Array.isArray(result?.appliedEditIds) ? result.appliedEditIds.length : undefined;

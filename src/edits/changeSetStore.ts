@@ -85,9 +85,11 @@ export class ChangeSetStore {
           this.changeSets.set(changeSet.id, changeSet);
           continue;
         }
-        const result = this.mergeIntoActiveChangeSet(existing, changeSet);
+        this.mergeIntoActiveChangeSet(existing, changeSet);
         mergedChangeSetIds.set(changeSet.id, existing.id);
-        consolidatedStoredChangeSets = consolidatedStoredChangeSets || result.changed;
+        // Even an identical cumulative snapshot must be persisted away: it was
+        // a second stored ChangeSet for the same logical Agent run.
+        consolidatedStoredChangeSets = true;
       }
       for (const changeSet of parsed.history ?? []) {
         if (isStoredHistoricalChangeSet(changeSet)) {
@@ -119,7 +121,8 @@ export class ChangeSetStore {
     const existing = this.findActiveChangeSetForRun(changeSet);
     if (existing) {
       const result = this.mergeIntoActiveChangeSet(existing, changeSet);
-      if (result.changed) {
+      const mergedIdentity = existing.id !== changeSet.id;
+      if (result.changed || mergedIdentity) {
         this.recordTrace(existing, {
           type: 'change_set_merged',
           changeSetId: existing.id,
@@ -128,6 +131,8 @@ export class ChangeSetStore {
           fileCount: existing.fileCount,
           operationSummary: existing.operationSummary
         });
+      }
+      if (result.changed) {
         this.schedulePersist();
       }
       return cloneChangeSet(existing);
@@ -174,7 +179,8 @@ export class ChangeSetStore {
       return byId;
     }
     return Array.from(this.changeSets.values()).find((existing) => (
-      existing.runId === changeSet.runId
+      Boolean(changeSet.runId)
+      && existing.runId === changeSet.runId
       && existing.sessionId === changeSet.sessionId
       && existing.messageId === changeSet.messageId
     ));
@@ -705,6 +711,29 @@ function cloneChangeSet(changeSet: ChangeSet): ChangeSet {
         }
       : undefined
   };
+}
+
+function refreshStoredDraftEdit(target: ChangeSetFile, incoming: ChangeSetFile): boolean {
+  const next = {
+    uri: incoming.uri,
+    label: incoming.label,
+    action: incoming.action,
+    newText: incoming.newText,
+    reason: incoming.reason,
+    expectedOriginalTextHash: incoming.expectedOriginalTextHash ?? target.expectedOriginalTextHash,
+    expectedOriginalSize: incoming.expectedOriginalSize ?? target.expectedOriginalSize
+  };
+  const changed = target.uri !== next.uri
+    || target.label !== next.label
+    || target.action !== next.action
+    || target.newText !== next.newText
+    || target.reason !== next.reason
+    || target.expectedOriginalTextHash !== next.expectedOriginalTextHash
+    || target.expectedOriginalSize !== next.expectedOriginalSize;
+  if (changed) {
+    Object.assign(target, next);
+  }
+  return changed;
 }
 
 function normalizeStoredChangeSet(changeSet: ChangeSet): ChangeSet {

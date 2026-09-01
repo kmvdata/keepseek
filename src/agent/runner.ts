@@ -2786,7 +2786,7 @@ export class AgentLoop {
         label: draftEdit.label,
         replaceRange: input.replaceRange
       },
-      message: 'Draft edit created. Tell the user they can review and apply it from the KeepSeek panel.'
+      message: 'DraftEdit added to this run. KeepSeek groups all DraftEdits from the same Agent run into one pending ChangeSet, where the user can review files separately or use Accept all after the run finishes.'
     });
   }
 
@@ -2831,7 +2831,7 @@ export class AgentLoop {
     return JSON.stringify({
       ok: true,
       draftEdit: { id: draftEdit.id, label: draftEdit.label, editCount: edits.length },
-      message: 'Incremental edits were combined into one pending full-file DraftEdit for review and checkpoint safety.'
+      message: 'Incremental edits were combined into one pending full-file DraftEdit. KeepSeek groups it with every other DraftEdit from this Agent run in one ChangeSet for individual review or Accept all.'
     });
   }
 
@@ -3012,8 +3012,8 @@ export class AgentLoop {
         action: draftEdit.action
       },
       message: language === 'en'
-        ? 'Pending deletion created. The file has not been deleted; the user must review and apply it in KeepSeek.'
-        : '已创建待确认删除；文件尚未删除，用户必须在 KeepSeek 中审核并应用。'
+        ? 'Pending deletion added to this run. The file has not been deleted. KeepSeek groups it with the run\'s other DraftEdits in one ChangeSet for individual review or Accept all.'
+        : '待确认删除已加入本轮修改，文件尚未删除。KeepSeek 会把它与本轮其它 DraftEdit 合并到同一个 ChangeSet，可逐个审核或全部采纳。'
     });
   }
 
@@ -3682,14 +3682,14 @@ export class AgentLoop {
         }
         return draftEdits.length === 1
           ? `Prepared a pending change for ${draftEdits[0].label}.`
-          : `Prepared ${draftEdits.length} pending changes.`;
+          : `Prepared ${draftEdits.length} pending changes in one ChangeSet. Review files separately or use Accept all.`;
       }
       if (draftEdits.length === 1 && draftEdits[0].action === 'delete') {
         return `已为 ${draftEdits[0].label} 准备待确认删除，文件尚未删除。`;
       }
       return draftEdits.length === 1
         ? `已准备 ${draftEdits[0].label} 的待确认修改。`
-        : `已准备 ${draftEdits.length} 个待确认修改。`;
+        : `已准备 ${draftEdits.length} 个待确认修改，并已合并到同一个 ChangeSet；可逐个审核或全部采纳。`;
     }
 
     if (finishReason === 'content_filter') {

@@ -62,7 +62,9 @@ test('creates a full-file DraftEdit from targetPath/newContent/replaceRange alia
     replaceRange: '2-3'
   }, draftEdits, 'en');
 
-  assert.equal(JSON.parse(result).ok, true);
+  const parsedResult = JSON.parse(result) as { ok?: boolean; message?: string };
+  assert.equal(parsedResult.ok, true);
+  assert.match(parsedResult.message ?? '', /one pending ChangeSet/u);
   assert.equal(draftEdits.length, 1);
   assert.equal(draftEdits[0].label, 'src/sample.ts');
   assert.equal(draftEdits[0].newText, 'one\ndeux\ntrois\nfour\n');
@@ -93,8 +95,10 @@ test('combines multiple exact incremental edits into one safe full-file DraftEdi
     ]
   }, draftEdits, 'en');
 
-  assert.equal(JSON.parse(result).ok, true);
-  assert.equal(JSON.parse(result).draftEdit.editCount, 2);
+  const parsedResult = JSON.parse(result) as { ok?: boolean; message?: string; draftEdit?: { editCount?: number } };
+  assert.equal(parsedResult.ok, true);
+  assert.equal(parsedResult.draftEdit?.editCount, 2);
+  assert.match(parsedResult.message ?? '', /one ChangeSet/u);
   assert.equal(draftEdits.length, 1);
   assert.equal(draftEdits[0].newText, ['const alpha = 10;', 'const untouched = 2;', 'const omega = 30;', ''].join('\n'));
   assert.equal(await fs.readFile(targetPath, 'utf8'), originalContent);

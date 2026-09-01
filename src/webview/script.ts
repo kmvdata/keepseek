@@ -3014,6 +3014,7 @@ export function getScript(): string {
       var unlinked = [];
       var messagesById = Object.create(null);
       var liveChangeSetIds = new Set();
+      var liveChangeSetFileIds = new Set();
       var messages = Array.isArray(state.messages) ? state.messages : [];
       messages.forEach(function(message) {
         if (message && message.id) messagesById[String(message.id)] = message;
@@ -3023,6 +3024,9 @@ export function getScript(): string {
       changeSets.forEach(function(changeSet) {
         if (!changeSet || !changeSet.id) return;
         liveChangeSetIds.add(String(changeSet.id));
+        (Array.isArray(changeSet.files) ? changeSet.files : []).forEach(function(file) {
+          if (file?.id) liveChangeSetFileIds.add(String(file.id));
+        });
         var messageId = String(changeSet.messageId || '');
         var message = messageId ? messagesById[messageId] : null;
         if (message?.role === 'assistant' && !message.isStreaming) {
@@ -3038,6 +3042,10 @@ export function getScript(): string {
         var summaries = Array.isArray(message.runDetails?.changeSets) ? message.runDetails.changeSets : [];
         summaries.forEach(function(summary) {
           if (!summary?.id || liveChangeSetIds.has(String(summary.id))) return;
+          var summaryFiles = Array.isArray(summary.files) ? summary.files : [];
+          if (summaryFiles.length && summaryFiles.every(function(file) {
+            return file?.id && liveChangeSetFileIds.has(String(file.id));
+          })) return;
           var messageId = String(message.id || '');
           if (!byMessageId[messageId]) byMessageId[messageId] = [];
           byMessageId[messageId].push(createHistoricalChangeSet(summary, messageId));
@@ -3283,20 +3291,22 @@ export function getScript(): string {
       title.className = 'change-set-title';
       title.textContent = String(changeSet.operationSummary || t('changeSets'));
       title.title = title.textContent;
+      var files = Array.isArray(changeSet.files) ? changeSet.files : [];
+      var applicableFiles = historical ? [] : files.filter(function(file) { return file.status === 'pending' || file.status === 'apply_failed'; });
+      var revertibleFiles = historical ? [] : files.filter(function(file) { return file.status === 'applied' || file.status === 'revert_failed'; });
       var meta = document.createElement('div');
       meta.className = 'change-set-meta';
-      meta.textContent = t('changeSetFiles', { count: Number(changeSet.fileCount) || 0 }) + ' · ' + getChangeSetStatusLabel(statusValue);
+      meta.textContent = t('changeSetFiles', { count: files.length || Number(changeSet.fileCount) || 0 })
+        + ' · ' + getChangeSetStatusLabel(statusValue)
+        + (applicableFiles.length > 1 ? ' · ' + t('changeSetBatchHint') : '');
       heading.append(title, meta);
 
       var setActions = document.createElement('div');
       setActions.className = 'change-set-actions';
-      var files = Array.isArray(changeSet.files) ? changeSet.files : [];
       if (!historical) {
-        var applicableFiles = files.filter(function(file) { return file.status === 'pending' || file.status === 'apply_failed'; });
-        var revertibleFiles = files.filter(function(file) { return file.status === 'applied' || file.status === 'revert_failed'; });
         if (applicableFiles.length) {
           setActions.append(
-            createChangeSetActionButton(t('changeSetApplyAll'), 'applyChangeSet', changeSet.id, false),
+            createChangeSetActionButton(t('changeSetApplyAll', { count: applicableFiles.length }), 'applyChangeSet', changeSet.id, false),
             createChangeSetActionButton(t('changeSetDiscardAll'), 'discardChangeSet', changeSet.id, true)
           );
         }

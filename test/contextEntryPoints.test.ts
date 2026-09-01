@@ -612,6 +612,9 @@ test('ChangeSets render in their assistant timeline entry with an unlinked actio
   assert.match(script, /changeSet\.messageId/u);
   assert.match(script, /body\.append\(createChangeSetCard\(changeSet\)\)/u);
   assert.match(script, /message\.role === 'assistant' && !message\.isStreaming/u);
+  assert.match(script, /liveChangeSetFileIds\.has\(String\(file\.id\)\)/u);
+  assert.match(script, /t\('changeSetBatchHint'\)/u);
+  assert.match(script, /t\('changeSetApplyAll', \{ count: applicableFiles\.length \}\)/u);
   assert.doesNotMatch(script, /function renderDraftEdits/u);
 });
 
