@@ -76,6 +76,147 @@ test('SpawnDraftRunExecutor honors a pre-aborted signal without opening a proces
   assert.equal(executor.showTerminal(draftRun.id), false);
 });
 
+test('SpawnDraftRunExecutor settles when a detached descendant keeps inherited output open', {
+  skip: process.platform === 'win32',
+  timeout: 8_000
+}, async () => {
+  const executor = new SpawnDraftRunExecutor();
+  const childCode = [
+    'const { spawn } = require("node:child_process");',
+    'const descendant = spawn(process.execPath, ["-e", "setTimeout(() => undefined, 10000)"],',
+    '  { detached: true, stdio: "inherit" });',
+    'process.stdout.write(String(descendant.pid) + "\\n");',
+    'descendant.unref();'
+  ].join('\n');
+  const draftRun = createDraftRun(['-e', childCode], 4_000);
+  const permit = new DraftRunAuthorizationService().createUserClickPermit(draftRun);
+  let output = '';
+  let descendantPid = 0;
+  const emergencyCleanup = setTimeout(() => {
+    descendantPid = Number(output.trim());
+    stopProcess(descendantPid);
+  }, 5_000);
+
+  const startedAt = Date.now();
+  try {
+    const outcome = await executor.execute({
+      draftRun,
+      permit,
+      onOutput: (chunk) => { output += chunk.text; }
+    });
+    descendantPid = Number(output.trim());
+
+    assert.ok(Date.now() - startedAt < 3_000);
+    assert.equal(outcome.exitCode, 0);
+    assert.equal(outcome.timedOut, false);
+    assert.equal(outcome.cancelled, false);
+    assert.match(outcome.error ?? '', /output streams did not close/u);
+  } finally {
+    clearTimeout(emergencyCleanup);
+    stopProcess(descendantPid || Number(output.trim()));
+    executor.dispose();
+  }
+});
+
+test('SpawnDraftRunExecutor force-settles a timeout when escaped output holders survive termination', {
+  skip: process.platform === 'win32',
+  timeout: 6_000
+}, async () => {
+  const executor = new SpawnDraftRunExecutor();
+  const childCode = [
+    'const { spawn } = require("node:child_process");',
+    'const descendant = spawn(process.execPath, ["-e", "setTimeout(() => undefined, 10000)"],',
+    '  { detached: true, stdio: "inherit" });',
+    'process.stdout.write(String(descendant.pid) + "\\n");',
+    'descendant.unref();',
+    'setInterval(() => undefined, 10000);'
+  ].join('\n');
+  const draftRun = createDraftRun(['-e', childCode], 300);
+  const permit = new DraftRunAuthorizationService().createUserClickPermit(draftRun);
+  let output = '';
+  let descendantPid = 0;
+  const emergencyCleanup = setTimeout(() => {
+    descendantPid = Number(output.trim());
+    stopProcess(descendantPid);
+  }, 3_500);
+
+  const startedAt = Date.now();
+  try {
+    const outcome = await executor.execute({
+      draftRun,
+      permit,
+      onOutput: (chunk) => { output += chunk.text; }
+    });
+    descendantPid = Number(output.trim());
+
+    assert.ok(Date.now() - startedAt < 3_000);
+    assert.equal(outcome.timedOut, true);
+    assert.equal(outcome.cancelled, false);
+  } finally {
+    clearTimeout(emergencyCleanup);
+    stopProcess(descendantPid || Number(output.trim()));
+    executor.dispose();
+  }
+});
+
+test('SpawnDraftRunExecutor force-settles direct terminal cancellation', {
+  skip: process.platform === 'win32',
+  timeout: 6_000
+}, async () => {
+  const executor = new SpawnDraftRunExecutor();
+  const childCode = [
+    'const { spawn } = require("node:child_process");',
+    'const descendant = spawn(process.execPath, ["-e", "setTimeout(() => undefined, 10000)"],',
+    '  { detached: true, stdio: "inherit" });',
+    'process.stdout.write(String(descendant.pid) + "\\n");',
+    'descendant.unref();',
+    'setInterval(() => undefined, 10000);'
+  ].join('\n');
+  const draftRun = createDraftRun(['-e', childCode], 5_000);
+  const permit = new DraftRunAuthorizationService().createUserClickPermit(draftRun);
+  let output = '';
+  let descendantPid = 0;
+  let ready!: () => void;
+  const outputReady = new Promise<void>((resolve) => { ready = resolve; });
+  const emergencyCleanup = setTimeout(() => {
+    descendantPid = Number(output.trim());
+    stopProcess(descendantPid);
+  }, 3_500);
+
+  try {
+    const execution = executor.execute({
+      draftRun,
+      permit,
+      onOutput: (chunk) => {
+        output += chunk.text;
+        if (Number.isInteger(Number(output.trim()))) ready();
+      }
+    });
+    await outputReady;
+    assert.equal(executor.cancel(draftRun.id), true);
+    const outcome = await execution;
+    descendantPid = Number(output.trim());
+
+    assert.equal(outcome.cancelled, true);
+    assert.equal(outcome.timedOut, false);
+  } finally {
+    clearTimeout(emergencyCleanup);
+    stopProcess(descendantPid || Number(output.trim()));
+    executor.dispose();
+  }
+});
+
+function stopProcess(pid: number): void {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return;
+  }
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch {
+    // The detached test descendant already exited.
+  }
+}
+
 function createDraftRun(args: string[], timeoutMs = 5_000): DraftRun {
   const spec: DraftRunSpec = {
     executable: process.execPath,

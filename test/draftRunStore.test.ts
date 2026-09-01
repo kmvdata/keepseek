@@ -87,6 +87,29 @@ test('reject and failed integrity checks never call the executor, while cloning 
   });
 });
 
+test('results bound to removed history become available for the replacement user message', async () => {
+  await withDraftRunFixture(async ({ workspaceRoot, store }) => {
+    const proposal = createProposal(workspaceRoot, { id: 'rebind-after-edit' });
+    store.addProposals({
+      proposals: [proposal],
+      agentRunId: 'agent-rebind',
+      sessionId: 'session-rebind',
+      messageId: 'assistant-rebind'
+    });
+    assert.equal((await store.approveAndRun(proposal.id, new Set()))?.status, 'done');
+
+    const originalTail = store.getPendingProviderTail('session-rebind', 'en');
+    store.bindResultsToMessage(originalTail?.draftRunIds ?? [], 'user-removed');
+    assert.equal(store.getPendingProviderTail('session-rebind', 'en'), undefined);
+
+    store.releaseResultBindingsForMessages('session-rebind', ['user-removed']);
+    const replacementTail = store.getPendingProviderTail('session-rebind', 'en');
+    assert.equal(replacementTail?.content, originalTail?.content);
+    store.bindResultsToMessage(replacementTail?.draftRunIds ?? [], 'user-replacement');
+    assert.equal(store.getPendingProviderTail('session-rebind', 'en'), undefined);
+  });
+});
+
 test('external cwd requires its exact URI authorization key', async () => {
   await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
     const externalRoot = path.join(root, 'external');

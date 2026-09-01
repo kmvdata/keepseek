@@ -984,6 +984,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'approveDraftRun':
         if (this.isBusy || this.isStartingRun || this.activeDraftRunId) {
+          vscode.window.showInformationMessage(this.t('draftRunApprovalBusy'));
+          this.postState();
           return;
         }
         {
@@ -992,6 +994,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             vscode.window.showErrorMessage(this.language === 'en'
               ? 'The DraftRun command changed or is no longer pending.'
               : 'DraftRun 命令已变化或已不再待确认。');
+            this.postState();
             return;
           }
           this.activeDraftRunId = draftRun.id;
@@ -3539,6 +3542,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private async sendPrompt(...args: Parameters<KeepseekChatViewProvider['sendPromptImpl']>): Promise<AgentResponse | undefined> {
     if (this.isBusy || this.isStartingRun) return;
     this.isStartingRun = true;
+    this.postState();
     const preparationController = new AbortController();
     this.currentRunAbortController = preparationController;
     let settled!: () => void;
@@ -3548,6 +3552,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.isStartingRun = false;
       if (this.currentRunAbortController === preparationController) this.currentRunAbortController = undefined;
       settled(); this.activeRunSettled = undefined;
+      this.postState();
     }
   }
 
@@ -3766,7 +3771,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (replacementIndex < 0) {
           return;
         }
+        const removedMessageIds = activeSession.messages
+          .slice(replacementIndex)
+          .map((message) => message.id);
         activeSession.messages.splice(replacementIndex);
+        this.draftRuns.releaseResultBindingsForMessages(activeSession.id, removedMessageIds);
         activeSession.contextUsage = undefined;
         activeSession.contextCompression = undefined;
         this.changeSets.discardPendingForSession(activeSession.id);
@@ -4357,7 +4366,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         draftRuns: webviewDraftRuns,
         activeDraftRunId: this.activeDraftRunId,
         authorizedExternalReferenceUris: [...this.authorizedExternalReferenceUris],
-        isBusy: this.isBusy || Boolean(this.activeDraftRunId),
+        isBusy: this.isBusy || this.isStartingRun || Boolean(this.activeDraftRunId),
         agentActivity: this.agentActivity,
         maxFileBytes: getConfiguredMaxFileBytes(),
         historyRetentionDays: getConfiguredHistoryRetentionDays(),

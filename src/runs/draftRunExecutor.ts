@@ -3,6 +3,10 @@ import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
 import type { DraftRun, ExecutionPermit } from '../shared/types';
 
+const EXIT_STREAM_CLOSE_GRACE_MS = 1_500;
+const TERMINATION_SETTLE_GRACE_MS = 1_750;
+const OUTPUT_STREAM_CLOSE_ERROR = 'DraftRun process exited, but inherited output streams did not close.';
+
 export interface DraftRunOutputChunk {
   stream: 'stdout' | 'stderr';
   text: string;
@@ -34,6 +38,7 @@ interface RunningProcess {
   pty: DraftRunPseudoterminal;
   cancelRequested: boolean;
   timedOut: boolean;
+  terminateAndSettle?: () => void;
 }
 
 export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
@@ -89,16 +94,12 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       timedOut: false
     };
     this.running.set(input.draftRun.id, running);
-    const abortExecution = () => {
-      if (!running.cancelRequested) {
-        running.cancelRequested = true;
-        terminateProcessTree(child);
-      }
-    };
-    input.signal?.addEventListener('abort', abortExecution, { once: true });
-
     return await new Promise<DraftRunExecutionOutcome>((resolve) => {
       let settled = false;
+      let exitCloseTimer: ReturnType<typeof setTimeout> | undefined;
+      let terminationSettleTimer: ReturnType<typeof setTimeout> | undefined;
+      let exitCode: number | undefined;
+      let exitSignal: string | undefined;
       const stdoutDecoder = new StringDecoder('utf8');
       const stderrDecoder = new StringDecoder('utf8');
       const emit = (stream: DraftRunOutputChunk['stream'], text: string) => {
@@ -111,16 +112,14 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       child.stdout?.on('data', (chunk: Buffer) => emit('stdout', stdoutDecoder.write(chunk)));
       child.stderr?.on('data', (chunk: Buffer) => emit('stderr', stderrDecoder.write(chunk)));
 
-      const timer = setTimeout(() => {
-        running.timedOut = true;
-        terminateProcessTree(child);
-      }, input.draftRun.spec.timeoutMs);
       const finish = (outcome: DraftRunExecutionOutcome) => {
         if (settled) {
           return;
         }
         settled = true;
-        clearTimeout(timer);
+        clearTimeout(executionTimer);
+        if (exitCloseTimer) clearTimeout(exitCloseTimer);
+        if (terminationSettleTimer) clearTimeout(terminationSettleTimer);
         input.signal?.removeEventListener('abort', abortExecution);
         emit('stdout', stdoutDecoder.end());
         emit('stderr', stderrDecoder.end());
@@ -129,11 +128,67 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         pty.finish();
         resolve(outcome);
       };
+      const currentOutcome = (error?: string): DraftRunExecutionOutcome => ({
+        exitCode,
+        signal: exitSignal,
+        timedOut: running.timedOut,
+        cancelled: running.cancelRequested,
+        error
+      });
+      const destroyOutputStreams = () => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      };
+      const terminateAndBoundSettlement = () => {
+        terminateProcessTree(child);
+        if (terminationSettleTimer) {
+          return;
+        }
+        terminationSettleTimer = setTimeout(() => {
+          destroyOutputStreams();
+          finish(currentOutcome());
+        }, TERMINATION_SETTLE_GRACE_MS);
+        terminationSettleTimer.unref?.();
+      };
+      const abortExecution = () => {
+        if (!running.cancelRequested) {
+          running.cancelRequested = true;
+          terminateAndBoundSettlement();
+        }
+      };
+      running.terminateAndSettle = terminateAndBoundSettlement;
+
+      const executionTimer = setTimeout(() => {
+        running.timedOut = true;
+        terminateAndBoundSettlement();
+      }, input.draftRun.spec.timeoutMs);
+      input.signal?.addEventListener('abort', abortExecution, { once: true });
+      if (input.signal?.aborted) {
+        abortExecution();
+      }
       child.once('error', (error) => finish({
         timedOut: running.timedOut,
         cancelled: running.cancelRequested,
         error: error.message
       }));
+      child.once('exit', (code, signal) => {
+        if (settled) {
+          return;
+        }
+        exitCode = typeof code === 'number' ? code : undefined;
+        exitSignal = signal ?? undefined;
+        exitCloseTimer = setTimeout(() => {
+          // A descendant may keep inherited stdout/stderr descriptors open after
+          // the approved executable exits. Do not let that pin the DraftRun and
+          // the whole chat view indefinitely.
+          terminateProcessTree(child);
+          destroyOutputStreams();
+          finish(currentOutcome(
+            running.timedOut || running.cancelRequested ? undefined : OUTPUT_STREAM_CLOSE_ERROR
+          ));
+        }, EXIT_STREAM_CLOSE_GRACE_MS);
+        exitCloseTimer.unref?.();
+      });
       child.once('close', (code, signal) => finish({
         exitCode: typeof code === 'number' ? code : undefined,
         signal: signal ?? undefined,
@@ -149,7 +204,11 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       return false;
     }
     running.cancelRequested = true;
-    terminateProcessTree(running.child);
+    if (running.terminateAndSettle) {
+      running.terminateAndSettle();
+    } else {
+      terminateProcessTree(running.child);
+    }
     return true;
   }
 

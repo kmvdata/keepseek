@@ -47,6 +47,22 @@ test('provider focuses the contributed KeepSeek view container before inserting 
   assert.ok(match?.[1] && containerIds.includes(match[1]));
 });
 
+test('DraftRun interactions settle visibly and edit-resend requeues removed result bindings', async () => {
+  const script = getScript();
+  const providerSource = await readFile(
+    path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
+    'utf8'
+  );
+
+  assert.match(script, /pendingDraftRunApprovals\.add\(id\)[\s\S]*?vscode\.postMessage\(payload\)/u);
+  assert.match(script, /draftRunResultPendingNextMessage/u);
+  assert.match(providerSource, /isBusy: this\.isBusy \|\| this\.isStartingRun \|\| Boolean\(this\.activeDraftRunId\)/u);
+  assert.match(
+    providerSource,
+    /activeSession\.messages[\s\S]*?slice\(replacementIndex\)[\s\S]*?releaseResultBindingsForMessages/u
+  );
+});
+
 test('command menu model settings are registered and persisted for the current workspace', async () => {
   const packagePath = path.resolve(process.cwd(), 'package.json');
   const providerPath = path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts');

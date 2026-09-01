@@ -430,6 +430,7 @@ export function getScript(): string {
     let terminalAgentStatusKey = '';
     let planExpanded = false;
     const pendingChangeActions = new Set();
+    const pendingDraftRunApprovals = new Set();
     let settingsMenuOpen = false;
     let backgroundRunDialogOpen = false;
     let dismissedBackgroundRunId = '';
@@ -753,6 +754,8 @@ export function getScript(): string {
       var payload = { type: action, id: id };
       if (action === 'approveDraftRun') {
         payload.specHash = String(button.dataset.specHash || '');
+        pendingDraftRunApprovals.add(id);
+        render();
       }
       vscode.postMessage(payload);
     }
@@ -1130,6 +1133,7 @@ export function getScript(): string {
         var previousActiveSessionId = state.activeSessionId || '';
         Object.assign(state, message.state);
         pendingChangeActions.clear();
+        pendingDraftRunApprovals.clear();
         if (previousActiveSessionId && previousActiveSessionId !== state.activeSessionId) {
           planExpanded = false;
         }
@@ -1184,6 +1188,7 @@ export function getScript(): string {
         renderStatus();
         if (stick) transcript.scrollTop = transcript.scrollHeight;
       } else if (message.type === 'draftRunStateChanged'  || message.type === 'draftRunOutput') {
+        pendingDraftRunApprovals.delete(String(message.draftRun?.id || ''));
         upsertDraftRun(message.draftRun);
         render();
       } else if (message.type === 'sessionChanged') {
@@ -3196,6 +3201,13 @@ export function getScript(): string {
         notice.textContent = t('draftRunOutputTruncated', { count: Number(draftRun.omittedOutputBytes) || 0 });
         card.append(notice);
       }
+      if ((statusValue === 'rejected' || statusValue === 'done' || statusValue === 'cancelled' || statusValue === 'failed')
+        && !draftRun.resultBoundMessageId) {
+        var resultNotice = document.createElement('div');
+        resultNotice.className = 'draft-run-output-notice';
+        resultNotice.textContent = t('draftRunResultPendingNextMessage');
+        card.append(resultNotice);
+      }
       return card;
     }
 
@@ -3232,7 +3244,9 @@ export function getScript(): string {
       button.dataset.draftRunAction = action;
       if (action === 'approveDraftRun') button.dataset.specHash = String(draftRun.specHash || '');
       var allowWhileBusy = action === 'cancelDraftRun' || action === 'openDraftRunTerminal';
-      button.disabled = Boolean(forceDisabled) || (Boolean(state.isBusy) && !allowWhileBusy);
+      button.disabled = Boolean(forceDisabled)
+        || (Boolean(state.isBusy) && !allowWhileBusy)
+        || (action === 'approveDraftRun' && pendingDraftRunApprovals.has(String(draftRun.id || '')));
       return button;
     }
 

@@ -327,6 +327,28 @@ export class DraftRunStore {
     }
   }
 
+  public releaseResultBindingsForMessages(sessionId: string, messageIds: readonly string[]): void {
+    const removedMessageIds = new Set(messageIds);
+    if (!removedMessageIds.size) {
+      return;
+    }
+    let changed = false;
+    const now = new Date().toISOString();
+    for (const draftRun of this.draftRuns.values()) {
+      if (draftRun.sessionId !== sessionId
+        || !draftRun.resultBoundMessageId
+        || !removedMessageIds.has(draftRun.resultBoundMessageId)) {
+        continue;
+      }
+      draftRun.resultBoundMessageId = undefined;
+      draftRun.updatedAt = now;
+      changed = true;
+    }
+    if (changed) {
+      this.schedulePersist();
+    }
+  }
+
   public rejectPendingForSession(sessionId: string): void {
     let changed = false;
     for (const draftRun of this.draftRuns.values()) {
