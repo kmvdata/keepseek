@@ -1418,8 +1418,7 @@ export function getInputScript(): string {
             : t('usageMetricCacheUnavailableValue')],
           [usageGroups.length > 1 ? 'usageMetricCurrentModelHit' : 'usageMetricAverageHit', formatCacheHitRate(cacheRateUsage)],
           ['usageMetricTurnTokens', formatMetricTokens(metrics.lastTurnUsage && metrics.lastTurnUsage.totalTokens, hasUsageData(metrics.lastTurnUsage))],
-          ['usageMetricTurnCount', metrics.turnCount > 0 ? formatMetricInteger(metrics.turnCount) : '-'],
-          ['usageMetricCompactThreshold', formatMetricPercent(metrics.contextCompressionTriggerRatio * 100)]
+          ['usageMetricTurnCount', metrics.turnCount > 0 ? formatMetricInteger(metrics.turnCount) : '-']
         ];
         if (turnCacheAvailable) {
           items.splice(2, 0,
@@ -1434,10 +1433,6 @@ export function getInputScript(): string {
             : 'usageMetricCostUnavailable',
           costDisplay.available ? costDisplay.text : t('usageMetricCostUnavailableValue')
         ]);
-        var reasons = normalizeCacheReasonList(metrics.promptCacheDiagnostics && metrics.promptCacheDiagnostics.cacheMissPossibleReasons);
-        if (reasons.length) {
-          items.push(['usageMetricCacheReasons', reasons.map(formatCacheReason).join(' · ')]);
-        }
         if (usageGroups.length > 1) {
           usageGroups.forEach(function(group, index) {
             var groupCost = formatAccountedCosts(group);
@@ -1512,7 +1507,13 @@ export function getInputScript(): string {
         var metrics = normalizeUsageMetrics(state.usageMetrics);
         var details = metrics.usageDetails;
         if (!details || !details.lastTurn) { usageDetailsScope = 'session'; }
-        var renderKey = JSON.stringify([details, usageDetailsScope, getLanguage()]);
+        var renderKey = JSON.stringify([
+          details,
+          usageDetailsScope,
+          metrics.promptCacheDiagnostics,
+          metrics.contextCompressionTriggerRatio,
+          getLanguage()
+        ]);
         if (renderKey === usageDetailsRenderKey) { return; }
         usageDetailsRenderKey = renderKey;
         var scrollTop = usageDetailsBody.scrollTop;
@@ -1538,9 +1539,12 @@ export function getInputScript(): string {
         });
         actual.append(scopeControls);
         var selected = usageDetailsScope === 'turn' && details.lastTurn ? details.lastTurn : details.session;
+        var mainSessionOnly = selected.total.totalTokens > 0 && selected.mainPercent >= 100;
         var cards = usageNode('div', 'usage-actual-grid');
         cards.append(createActualUsageCard(usageDetailsScope === 'turn' ? 'usageTurnTotal' : 'usageSessionTotal', selected.total, 'is-total'));
-        cards.append(createActualUsageCard('usageMainSession', selected.mainSession, 'is-main'));
+        if (!mainSessionOnly) {
+          cards.append(createActualUsageCard('usageMainSession', selected.mainSession, 'is-main'));
+        }
         if (details.subagents || hasActualUsage(selected.subagent)) {
           cards.append(createActualUsageCard('usageSubagentLabel', selected.subagent, 'is-subagent'));
         }
@@ -1548,7 +1552,7 @@ export function getInputScript(): string {
           cards.append(createActualUsageCard('usageHistoricalUnattributed', selected.unattributed, 'is-unattributed'));
         }
         actual.append(cards);
-        if (selected.total.totalTokens > 0) {
+        if (!mainSessionOnly && selected.total.totalTokens > 0) {
           var share = usageNode('div', 'usage-share');
           var bar = usageNode('div', 'usage-share-bar');
           bar.setAttribute('aria-hidden', 'true');
@@ -1567,7 +1571,9 @@ export function getInputScript(): string {
           share.append(bar, legend);
           actual.append(share);
         }
-        actual.append(usageNode('p', 'usage-note', t('usageAttributionExplanation')));
+        if (!mainSessionOnly) {
+          actual.append(usageNode('p', 'usage-note', t('usageAttributionExplanation')));
+        }
         actual.append(usageNode('p', 'usage-note', t('usageCurrencyExplanation')));
         if (selected.total.unpricedRequestCount > 0) {
           actual.append(usageNode('p', 'usage-warning', t(selected.total.pricedRequestCount > 0
@@ -1575,6 +1581,22 @@ export function getInputScript(): string {
         }
         if (!selected.total.requestCount) { actual.append(usageNode('p', 'usage-note', t('usageNoProviderData'))); }
         usageDetailsBody.append(actual);
+
+        var diagnostics = createUsageSection('usageCacheContextTitle', 'usageLocalRuntime');
+        var diagnosticFields = usageNode('dl', 'usage-card-fields usage-diagnostic-fields');
+        var cacheReasons = normalizeCacheReasonList(metrics.promptCacheDiagnostics && metrics.promptCacheDiagnostics.cacheMissPossibleReasons);
+        if (cacheReasons.length) {
+          diagnosticFields.append(
+            usageNode('dt', '', t('usageMetricCacheReasons')),
+            usageNode('dd', '', cacheReasons.map(formatCacheReason).join(' · '))
+          );
+        }
+        diagnosticFields.append(
+          usageNode('dt', '', t('usageMetricCompactThreshold')),
+          usageNode('dd', '', formatMetricPercent(metrics.contextCompressionTriggerRatio * 100))
+        );
+        diagnostics.append(diagnosticFields);
+        usageDetailsBody.append(diagnostics);
 
         var subagents = details.subagents;
         var isolation = createUsageSection('usageIsolationTitle', 'usageLocalEstimate');

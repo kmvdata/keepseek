@@ -1369,6 +1369,8 @@ export function getInputStyles(): string {
     .usage-card-fields { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 5px 10px; margin: 10px 0 0; font-size: 11px; line-height: 1.5; }
     .usage-card-fields dt { color: var(--vscode-descriptionForeground); }
     .usage-card-fields dd { margin: 0; text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+    .usage-diagnostic-fields { margin: 0; padding: 12px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; background: var(--vscode-editor-background, transparent); }
+    .usage-diagnostic-fields dd { text-align: left; }
     .usage-share { margin: 12px 0; }
     .usage-share-bar { display: flex; height: 7px; overflow: hidden; border-radius: 4px; background: var(--vscode-panel-border); }
     .usage-share-bar .usage-share-main { background: var(--vscode-focusBorder, #3794ff); }

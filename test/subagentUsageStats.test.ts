@@ -209,6 +209,13 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.match(script, /details\.session\.subagent\.totalTokens/u);
   assert.match(script, /usageMetricEffectiveExecution/u);
   assert.match(script, /function getLatestRunState\(\)/u);
+  const tooltipRenderer = script.slice(script.indexOf('function renderContextProgress()'), script.indexOf('function getLatestRunState()'));
+  assert.doesNotMatch(tooltipRenderer, /usageMetric(?:CacheReasons|CompactThreshold)/u);
+  const detailsRenderer = script.slice(script.indexOf('function renderUsageDetails()'), script.indexOf('function createUsageSection('));
+  assert.match(detailsRenderer, /usageMetricCacheReasons/u);
+  assert.match(detailsRenderer, /usageMetricCompactThreshold/u);
+  assert.match(detailsRenderer, /var mainSessionOnly = selected\.total\.totalTokens > 0 && selected\.mainPercent >= 100/u);
+  assert.match(detailsRenderer, /if \(!mainSessionOnly\) \{\s*cards\.append\(createActualUsageCard\('usageMainSession'/u);
   assert.doesNotThrow(() => new Function(script));
   const webviewScript = getScript();
   assert.doesNotThrow(() => new Function(webviewScript));
