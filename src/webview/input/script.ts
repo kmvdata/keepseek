@@ -1465,6 +1465,15 @@ export function getInputScript(): string {
             ['usageMetricSessionCost', costDisplay.available ? costDisplay.text : t('usageMetricCostUnavailableValue')]
           ];
         }
+        var latestRunState = getLatestRunState();
+        if (latestRunState) {
+          items.unshift([
+            'usageMetricEffectiveExecution',
+            t('usageMetricEffectiveExecutionValue', {
+              seconds: formatMetricInteger(Math.floor(latestRunState.usedMs / 1000))
+            })
+          ]);
+        }
         items.push(['', t('usageOpenDetails')]);
         contextProgress.style.setProperty('--context-progress-angle', angle + 'deg');
         contextProgress.classList.toggle('is-warning', usedPercent >= metrics.contextSoftCompactRatio * 100 && usedPercent < metrics.contextCompactForceRatio * 100);
@@ -1485,6 +1494,17 @@ export function getInputScript(): string {
           contextProgressBreakdown.classList.remove('hidden');
         }
         if (usageDetailsDialog && usageDetailsDialog.open) { renderUsageDetails(); }
+      }
+
+      function getLatestRunState() {
+        var messages = Array.isArray(state.messages) ? state.messages : [];
+        for (var index = messages.length - 1; index >= 0; index -= 1) {
+          var runState = messages[index] && messages[index].runState;
+          if (runState && Number.isFinite(Number(runState.usedMs)) && Number(runState.usedMs) >= 0) {
+            return runState;
+          }
+        }
+        return null;
       }
 
       function renderUsageDetails() {
@@ -5468,6 +5488,7 @@ export function getInputScript(): string {
 
       window.keepseekInputControls = {
         render: renderInputControls,
+        renderUsage: renderContextProgress,
         showSettingsDialog: showSettingsDialog,
         showHistorySettingsDialog: showHistorySettingsDialog,
         showAboutDialog: showAboutDialog,

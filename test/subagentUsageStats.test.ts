@@ -207,8 +207,13 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.match(script, /usageDetailsDialog\.addEventListener\('close'[\s\S]*?target\.focus\(\)/u);
   assert.match(script, /subagents\.recentRuns/u);
   assert.match(script, /details\.session\.subagent\.totalTokens/u);
+  assert.match(script, /usageMetricEffectiveExecution/u);
+  assert.match(script, /function getLatestRunState\(\)/u);
   assert.doesNotThrow(() => new Function(script));
-  assert.doesNotThrow(() => new Function(getScript()));
+  const webviewScript = getScript();
+  assert.doesNotThrow(() => new Function(webviewScript));
+  assert.match(webviewScript, /if \(run\.status === 'running' \|\| run\.status === 'completed'\) return null/u);
+  assert.doesNotMatch(webviewScript, /t\('run(?:Execution|Limit|LastActivity|Calls)'/u);
   const keys = new Set([...script.matchAll(/['"](usage[A-Z][A-Za-z]+)['"]/gu)].map((match) => match[1]));
   for (const key of keys) {
     // DOM ids and CSS-independent state keys are not translation keys.

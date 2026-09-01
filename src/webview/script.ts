@@ -1150,6 +1150,9 @@ export function getScript(): string {
         targetMessage.reasoningContent = (targetMessage.reasoningContent || '') + reasoningTail;
         targetMessage.runState = message.runState;
         state.agentActivity = message.activity;
+        if (window.keepseekInputControls?.renderUsage) {
+          window.keepseekInputControls.renderUsage();
+        }
         var row = Array.from(transcript.querySelectorAll('[data-message-id]')).find(function(item) { return item.dataset.messageId === message.messageId && item.classList.contains('message'); });
         if (!row) return;
         var stick = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 24;
@@ -1172,7 +1175,11 @@ export function getScript(): string {
         var oldPanel = row.querySelector('.run-state-panel');
         if (targetMessage.runState) {
           var newPanel = createRunStatePanel(targetMessage);
-          if (oldPanel) oldPanel.replaceWith(newPanel); else body.append(newPanel);
+          if (newPanel) {
+            if (oldPanel) oldPanel.replaceWith(newPanel); else body.append(newPanel);
+          } else if (oldPanel) {
+            oldPanel.remove();
+          }
         }
         renderStatus();
         if (stick) transcript.scrollTop = transcript.scrollHeight;
@@ -3518,7 +3525,10 @@ export function getScript(): string {
           }
         }
 
-        if (message.role === 'assistant' && message.runState) body.append(createRunStatePanel(message));
+        if (message.role === 'assistant' && message.runState) {
+          var runStatePanel = createRunStatePanel(message);
+          if (runStatePanel) body.append(runStatePanel);
+        }
         if (message.role === 'assistant' && !message.isStreaming && message.runDetails) {
           body.append(createRunDetailsPanel(message));
         }
@@ -3545,54 +3555,26 @@ export function getScript(): string {
 
     function createRunStatePanel(message) {
       var run = message.runState;
+      if (run.status === 'running' || run.status === 'completed') return null;
       var panel = document.createElement('div');
       panel.className = 'run-state-panel';
       panel.dataset.runStateMessage = message.id;
-      var progress = document.createElement('div');
-      progress.textContent = t('runExecution', { seconds: Math.floor(run.usedMs / 1000), steps: run.steps, attempt: run.attempt });
-      var limit = document.createElement('div');
-      limit.textContent = t('runLimit', { limit: run.maxExecutionMs ? Math.round(run.maxExecutionMs / 1000) + 's' : t('runUnlimited'), source: run.limitSource });
-      var activity = document.createElement('div');
-      activity.textContent = t('runLastActivity', { network: formatDateTime(run.lastNetworkAt), event: formatDateTime(run.lastEventAt), content: formatDateTime(run.lastContentAt), step: formatDateTime(run.lastStepAt) });
-      var calls = document.createElement('div');
-      calls.textContent = t('runCalls', { requests: run.modelRequests, retries: run.retries });
       var notice = document.createElement('div');
       notice.className = 'run-connection-notice';
       notice.textContent = run.stopReason ? t('runStopped_' + run.stopReason) : '';
-      panel.append(progress, limit, activity, calls, notice);
-      if (run.status !== 'running' && run.status !== 'completed') {
-        var detail = document.createElement('div');
-        detail.textContent = run.blocker || t('runRecoveryNotice');
-        panel.append(detail);
-        if (run.canResume) {
-          var button = document.createElement('button');
-          button.type = 'button'; button.textContent = t('runContinue');
-          button.dataset.runAction = 'continueTask'; button.dataset.messageId = message.id;
-          button.disabled = Boolean(state.isBusy);
-          panel.append(button);
-        }
+      if (notice.textContent) panel.append(notice);
+      var detail = document.createElement('div');
+      detail.textContent = run.blocker || t('runRecoveryNotice');
+      panel.append(detail);
+      if (run.canResume) {
+        var button = document.createElement('button');
+        button.type = 'button'; button.textContent = t('runContinue');
+        button.dataset.runAction = 'continueTask'; button.dataset.messageId = message.id;
+        button.disabled = Boolean(state.isBusy);
+        panel.append(button);
       }
       return panel;
     }
-
-    // This clock only changes the uncertainty hint. It is never recorded as
-    // server activity, never sends a request and never disconnects a stream.
-    setInterval(function() {
-      state.messages.forEach(function(message) {
-        var run = message.runState;
-        if (!run || run.status !== 'running') return;
-        var panel = Array.from(document.querySelectorAll('[data-run-state-message]')).find(function(node) { return node.dataset.runStateMessage === message.id; });
-        var notice = panel?.querySelector('.run-connection-notice');
-        if (!notice) return;
-        var lastNetwork = Date.parse(run.lastNetworkAt || '');
-        var lastContent = Date.parse(run.lastContentAt || '');
-        var phase = state.agentActivity?.phase;
-        if (!['requesting_model', 'reasoning', 'generating', 'planning_tool'].includes(phase)) { notice.textContent = ''; return; }
-        notice.textContent = !Number.isFinite(lastNetwork) ? t(Date.now() - Date.parse(run.requestStartedAt || '') > 60000 ? 'runConnectionSilent' : 'runWaitingHeaders')
-          : Date.now() - lastNetwork > 60000 ? t('runConnectionSilent')
-          : (!Number.isFinite(lastContent) || Date.now() - lastContent > 30000) ? t('runHeartbeatOnly') : '';
-      });
-    }, 1000);
 
     function createRunDetailsPanel(message) {
       var details = message.runDetails || {};
