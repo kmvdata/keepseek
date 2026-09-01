@@ -95,7 +95,7 @@ The result: a long conversation can keep accumulating useful context without tok
 
 ### Visible usage and cache health
 
-- Usage is attributed to an **account + model** first, then split into main requests, summaries, retries, continuations, and background work;
+- Usage is attributed to an **account + model** first, then split into main requests, summaries, retries, continuations, subagents, and background work;
 - The actual request, token estimate, context-window guard, compaction decision, and UI all share the same provider projection;
 - Pricing or balance is shown when a provider offers reliable support; otherwise KeepSeek clearly says “Cost unavailable”;
 - Per-run details can record real provider-reported cache-hit / miss tokens, hit rate, and data availability;
@@ -157,6 +157,18 @@ KeepSeek discovers Codex-compatible Skills in workspace `.agents` directories an
 - Save sessions per project, with bookmarks, rename, filters, copy-to-current-project, and batch deletion;
 - Serialize background work per session so history and cache prefixes are not rewritten concurrently;
 - Check the target context window and native replay boundary when switching models, with a local confirmation when needed.
+
+### Subagents and parallel delegation
+
+The main model can hand independent investigations, reviews, or proposals to restricted subagents running in parallel. Each subagent runs in an isolated session: it receives only a self-contained task, a profile, the applicable project `AGENTS.md`, and a restricted tool set. Its intermediate reasoning and tool traces stay in the isolated session, and only a distilled conclusion returns to the main context.
+
+- **Built-in profiles**: `research` (read-only investigation), `review` (read-only review), and `proposal` (preparing pending DraftEdits or DraftRuns); a Skill can also define a dedicated subagent profile;
+- **Same safety boundary**: read-only subagents stay inside the workspace; proposal subagents can only prepare DraftEdits / DraftRuns—they cannot apply changes, approve commands, or execute them. Parallel proposals must declare paths up front, conflicts are detected, and produced URIs are verified before merging;
+- **Pinnable models**: the subagent model is set globally in the account manager, following the main model by default or pinned to a fixed model; if the pinned model is missing or unavailable, delegation fails visibly instead of silently falling back;
+- **Separate usage accounting**: subagent token usage is attributed to the `subagent` source and shown in Usage details, including context-isolation estimates and recent-run statistics;
+- **Controlled scheduling**: concurrency, depth, and per-run child counts are hard-limited; stopping the main run cascades to queued and running subagents.
+
+See [SUBAGENTS.md](SUBAGENTS.md) for architecture, safety boundaries, profile formats, and limits.
 
 ### Controlled validation and repair
 
