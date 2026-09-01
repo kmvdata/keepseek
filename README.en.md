@@ -125,6 +125,8 @@ KeepSeek lives in the VS Code sidebar. You can inspect code and hand the model o
 
 As AI writes code faster, KeepSeek helps you retain control of architecture, dependencies, and change boundaries: let the model work while keeping the full picture visible to the human responsible for it.
 
+When the work piles up, let the AI learn to delegate. KeepSeek supports an isolated “main model + subagents” mode: the main model can hand independent investigations, reviews, or proposed edits to several restricted subagents running in parallel. Each subagent starts with one focused task and returns only a distilled result—its intermediate reasoning and tool traces stay in an isolated session instead of flooding the main context. The payoff: long conversations spend fewer tokens, finish faster, and the main model keeps its attention on the hard problems. Subagent models can be pinned globally in the account manager and follow the main model by default; everything subagents propose still passes through your review before Apply, so the safety boundary never moves. See [SUBAGENTS.md](SUBAGENTS.md) for architecture, safety boundaries, and profile formats.
+
 ---
 
 ## 4. Safe Edits: The Agent Proposes, You Decide

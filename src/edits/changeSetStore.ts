@@ -73,10 +73,21 @@ export class ChangeSetStore {
       if (parsed.version !== 1 && parsed.version !== 2) {
         return;
       }
-      for (const changeSet of parsed.changeSets ?? []) {
-        if (isStoredChangeSet(changeSet)) {
-          this.changeSets.set(changeSet.id, normalizeStoredChangeSet(changeSet));
+      let consolidatedStoredChangeSets = false;
+      const mergedChangeSetIds = new Map<string, string>();
+      const storedChangeSets = (parsed.changeSets ?? [])
+        .filter(isStoredChangeSet)
+        .map(normalizeStoredChangeSet)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      for (const changeSet of storedChangeSets) {
+        const existing = this.findActiveChangeSetForRun(changeSet);
+        if (!existing) {
+          this.changeSets.set(changeSet.id, changeSet);
+          continue;
         }
+        const result = this.mergeIntoActiveChangeSet(existing, changeSet);
+        mergedChangeSetIds.set(changeSet.id, existing.id);
+        consolidatedStoredChangeSets = consolidatedStoredChangeSets || result.changed;
       }
       for (const changeSet of parsed.history ?? []) {
         if (isStoredHistoricalChangeSet(changeSet)) {
@@ -85,8 +96,14 @@ export class ChangeSetStore {
       }
       for (const checkpoint of parsed.checkpoints ?? []) {
         if (isStoredCheckpoint(checkpoint)) {
-          this.checkpoints.set(checkpoint.id, { ...checkpoint });
+          this.checkpoints.set(checkpoint.id, {
+            ...checkpoint,
+            changeSetId: mergedChangeSetIds.get(checkpoint.changeSetId) ?? checkpoint.changeSetId
+          });
         }
+      }
+      if (consolidatedStoredChangeSets) {
+        this.schedulePersist();
       }
     } catch {
       // Missing or malformed checkpoint storage must not block the chat view.
@@ -98,21 +115,38 @@ export class ChangeSetStore {
     if (this.persistenceError) throw this.persistenceError;
   }
 
-  public add(changeSet: ChangeSet): void {
-    const known = new Set([...this.changeSets.values(), ...this.historicalChangeSets.values()]
-      .filter((existing) => existing.id !== changeSet.id).flatMap((existing) => existing.files.map((file) => file.id)));
+  public add(changeSet: ChangeSet): ChangeSet | undefined {
+    const existing = this.findActiveChangeSetForRun(changeSet);
+    if (existing) {
+      const result = this.mergeIntoActiveChangeSet(existing, changeSet);
+      if (result.changed) {
+        this.recordTrace(existing, {
+          type: 'change_set_merged',
+          changeSetId: existing.id,
+          incomingChangeSetId: changeSet.id,
+          addedEditIds: result.addedEditIds,
+          fileCount: existing.fileCount,
+          operationSummary: existing.operationSummary
+        });
+        this.schedulePersist();
+      }
+      return cloneChangeSet(existing);
+    }
+
+    const known = this.collectKnownEditIds(changeSet.id);
     const files = changeSet.files.filter((file) => !known.has(file.id));
-    if (!files.length) return;
-    changeSet = { ...changeSet, files, fileCount: files.length };
-    this.changeSets.set(changeSet.id, cloneChangeSet(changeSet));
-    this.historicalChangeSets.delete(changeSet.id);
-    this.recordTrace(changeSet, {
+    if (!files.length) return undefined;
+    const registered = cloneChangeSet({ ...changeSet, files, fileCount: files.length });
+    this.changeSets.set(registered.id, registered);
+    this.historicalChangeSets.delete(registered.id);
+    this.recordTrace(registered, {
       type: 'change_set_registered',
-      changeSetId: changeSet.id,
-      fileCount: changeSet.fileCount,
-      operationSummary: changeSet.operationSummary
+      changeSetId: registered.id,
+      fileCount: registered.fileCount,
+      operationSummary: registered.operationSummary
     });
     this.schedulePersist();
+    return cloneChangeSet(registered);
   }
 
   public addDraftEdits(input: {
@@ -131,10 +165,68 @@ export class ChangeSetStore {
       edits: input.edits,
       operationSummary: input.operationSummary
     });
-    if (changeSet) {
-      this.add(changeSet);
+    return changeSet ? this.add(changeSet) : undefined;
+  }
+
+  private findActiveChangeSetForRun(changeSet: ChangeSet): ChangeSet | undefined {
+    const byId = this.changeSets.get(changeSet.id);
+    if (byId) {
+      return byId;
     }
-    return changeSet;
+    return Array.from(this.changeSets.values()).find((existing) => (
+      existing.runId === changeSet.runId
+      && existing.sessionId === changeSet.sessionId
+      && existing.messageId === changeSet.messageId
+    ));
+  }
+
+  private collectKnownEditIds(excludedChangeSetId: string): Set<string> {
+    return new Set([...this.changeSets.values(), ...this.historicalChangeSets.values()]
+      .filter((existing) => existing.id !== excludedChangeSetId)
+      .flatMap((existing) => existing.files.map((file) => file.id)));
+  }
+
+  private mergeIntoActiveChangeSet(
+    target: ChangeSet,
+    incoming: ChangeSet
+  ): { changed: boolean; addedEditIds: string[] } {
+    const knownElsewhere = this.collectKnownEditIds(target.id);
+    const targetFilesById = new Map(target.files.map((file) => [file.id, file]));
+    const addedEditIds: string[] = [];
+    let changed = false;
+
+    for (const incomingFile of incoming.files) {
+      const existingFile = targetFilesById.get(incomingFile.id);
+      if (existingFile) {
+        changed = refreshStoredDraftEdit(existingFile, incomingFile) || changed;
+        continue;
+      }
+      if (knownElsewhere.has(incomingFile.id)) {
+        continue;
+      }
+      const nextFile = { ...incomingFile };
+      target.files.push(nextFile);
+      targetFilesById.set(nextFile.id, nextFile);
+      addedEditIds.push(nextFile.id);
+      changed = true;
+    }
+
+    if (incoming.operationSummary.trim() && incoming.operationSummary !== target.operationSummary) {
+      target.operationSummary = incoming.operationSummary;
+      changed = true;
+    }
+    if (incoming.traceLogUri && incoming.traceLogUri !== target.traceLogUri) {
+      target.traceLogUri = incoming.traceLogUri;
+      changed = true;
+    }
+    if (target.fileCount !== target.files.length) {
+      target.fileCount = target.files.length;
+      changed = true;
+    }
+    if (changed) {
+      this.updateChangeSetStatus(target);
+    }
+    return { changed, addedEditIds };
   }
 
   public toWebviewState(sessionId: string): WebviewChangeSet[] {
