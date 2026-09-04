@@ -1,4 +1,4 @@
-import { checkpointCopy, endpointHash, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
+import { canContinueBudgetInNewTurn, checkpointCopy, endpointHash, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
@@ -750,6 +750,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'continueAgentTask':
         await this.continueAgentTask(message.messageId);
+        return;
+      case 'continueAgentTaskInNewTurn':
+        await this.continueAgentTaskInNewTurn(message.messageId);
         return;
       case 'continueRepair':
         await this.continueRepair();
@@ -3452,6 +3455,23 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     // Proposals are durable before the task can be marked completed.
     await this.sessionStore.persist();
     this.postState();
+  }
+
+  private async continueAgentTaskInNewTurn(messageId: string): Promise<void> {
+    if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.hasActiveBackgroundRun()) return;
+    const session = this.sessionStore.getActiveSession();
+    const message = session.messages.at(-1);
+    const cp = message?.runCheckpoint;
+    if (message?.id !== messageId || !cp || !canContinueBudgetInNewTurn(cp)) return;
+    // A visible, ordinary user message starts a new run. Do not mutate the old
+    // checkpoint, reuse its execution permits, or reset a pending repair loop.
+    const prompt = this.language === 'en'
+      ? 'Continue the unfinished work from the previous turn in a new turn. Reuse the progress already recorded, read only the specific files or directories still needed, and avoid listing the entire workspace again. Pending edits and commands still require my separate approval.'
+      : '请在新一轮中继续上一轮尚未完成的工作。沿用已有进度，只读取仍需核实的具体文件或目录，避免重复列出整个工作区。待确认修改和命令仍需我另行批准。';
+    await this.sendPrompt(prompt, this.selectedSourceId, this.selectedModelId, this.agentSettings, {
+      repairLoop: this.repairLoopsBySession.get(session.id) ?? session.repairLoop ?? cp.finalResponse?.repairLoop,
+      strictModelSelection: true
+    });
   }
 
   private async continueAgentTask(messageId: string): Promise<void> {

@@ -3,6 +3,7 @@ import type { Dirent } from 'node:fs';
 import { appendFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { formatLocalTimestamp } from '../../shared/format';
 import {
   getConfiguredInteractionTraceSettings,
   type InteractionTraceLevel,
@@ -51,7 +52,7 @@ export class InteractionTraceLogService {
 
     const runId = randomUUID();
     const now = new Date();
-    const day = now.toISOString().slice(0, 10);
+    const day = formatLocalTimestamp(now).slice(0, 10);
     const fileName = `run-${formatTimestampForFile(now)}-${runId}.jsonl`;
     const fileUri = vscode.Uri.joinPath(this.globalStorageUri, TRACE_ROOT_DIR, day, fileName);
     void this.cleanupExpiredLogs(settings);
@@ -83,7 +84,7 @@ export class InteractionTraceLogService {
       return;
     }
     const line = `${safeJsonStringify({
-      ts: new Date().toISOString(),
+      ts: formatLocalTimestamp(),
       runId: traceLog.runId,
       external: true,
       ...event
@@ -129,7 +130,7 @@ export class InteractionTraceLogService {
       const entryPath = path.join(rootPath, entry.name);
       try {
         if (entry.isDirectory()) {
-          const parsedDay = Date.parse(`${entry.name}T23:59:59.999Z`);
+          const parsedDay = traceDayEndMs(entry.name);
           if (Number.isFinite(parsedDay) && parsedDay < cutoffMs) {
             await rm(entryPath, { recursive: true, force: true });
           }
@@ -165,7 +166,7 @@ export class InteractionTraceLogService {
       const entryUri = vscode.Uri.joinPath(rootUri, name);
       try {
         if (type === vscode.FileType.Directory) {
-          const parsedDay = Date.parse(`${name}T23:59:59.999Z`);
+          const parsedDay = traceDayEndMs(name);
           if (Number.isFinite(parsedDay) && parsedDay < cutoffMs) {
             await vscode.workspace.fs.delete(entryUri, { recursive: true, useTrash: false });
           }
@@ -218,13 +219,14 @@ class JsonlInteractionTrace implements AgentInteractionTrace {
   }
 
   public record(event: InteractionTraceEvent): void {
-    this.eventSink?.(event, new Date().toISOString());
+    const timestamp = formatLocalTimestamp();
+    this.eventSink?.(event, timestamp);
     if (this.stopped) {
       return;
     }
 
     const envelope = {
-      ts: new Date().toISOString(),
+      ts: timestamp,
       runId: this.runId,
       seq: ++this.sequence,
       ...event
@@ -260,7 +262,7 @@ class JsonlInteractionTrace implements AgentInteractionTrace {
 
   private async writeTruncationMarker(): Promise<void> {
     const marker = `${safeJsonStringify({
-      ts: new Date().toISOString(),
+      ts: formatLocalTimestamp(),
       runId: this.runId,
       seq: ++this.sequence,
       type: 'trace_truncated',
@@ -306,13 +308,14 @@ class WorkspaceFsJsonlInteractionTrace implements AgentInteractionTrace {
   }
 
   public record(event: InteractionTraceEvent): void {
-    this.eventSink?.(event, new Date().toISOString());
+    const timestamp = formatLocalTimestamp();
+    this.eventSink?.(event, timestamp);
     if (this.stopped) {
       return;
     }
 
     const envelope = {
-      ts: new Date().toISOString(),
+      ts: timestamp,
       runId: this.runId,
       seq: ++this.sequence,
       ...event
@@ -370,7 +373,7 @@ class WorkspaceFsJsonlInteractionTrace implements AgentInteractionTrace {
 
   private recordTruncationMarker(): void {
     const marker = `${safeJsonStringify({
-      ts: new Date().toISOString(),
+      ts: formatLocalTimestamp(),
       runId: this.runId,
       seq: ++this.sequence,
       type: 'trace_truncated',
@@ -403,7 +406,7 @@ class NoopInteractionTrace implements AgentInteractionTrace {
   }
 
   public record(event: InteractionTraceEvent): void {
-    this.eventSink?.(event, new Date().toISOString());
+    this.eventSink?.(event, formatLocalTimestamp());
   }
 
   public async flush(): Promise<void> {
@@ -483,6 +486,7 @@ export function formatUnknownError(error: unknown): Record<string, unknown> {
     return {
       name: error.name,
       message: error.message,
+      ...('code' in error && typeof error.code === 'string' ? { code: error.code } : {}),
       stack: error.stack
     };
   }
@@ -524,5 +528,12 @@ function redactSensitiveTraceText(value: string): string {
 }
 
 function formatTimestampForFile(date: Date): string {
-  return date.toISOString().replace(/[:.]/gu, '-');
+  return formatLocalTimestamp(date).replace(/[:.]/gu, '-');
+}
+
+function traceDayEndMs(day: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(day)) return NaN;
+  // Older folders were UTC-based. Use the later boundary so moving to local
+  // dates cannot shorten their retention period.
+  return Math.max(Date.parse(`${day}T23:59:59.999`), Date.parse(`${day}T23:59:59.999Z`));
 }

@@ -526,6 +526,11 @@ export function getScript(): string {
           vscode.postMessage({ type: 'continueAgentTask', messageId: runMessage.id });
           return;
         }
+        if (runButton.dataset.runAction === 'continueTaskInNewTurn') {
+          runButton.disabled = true;
+          vscode.postMessage({ type: 'continueAgentTaskInNewTurn', messageId: runMessage.id });
+          return;
+        }
         if (!runMessage.runDetails) return;
         if (runButton.dataset.runAction === 'openTrace') {
           vscode.postMessage({ type: 'openRunTrace', messageId: runMessage.id });
@@ -3656,6 +3661,16 @@ export function getScript(): string {
         button.dataset.runAction = 'continueTask'; button.dataset.messageId = message.id;
         button.disabled = Boolean(state.isBusy);
         panel.append(button);
+      } else if (run.canContinueInNewTurn) {
+        var nextTurnButton = document.createElement('button');
+        nextTurnButton.type = 'button'; nextTurnButton.textContent = t('runContinueInNewTurn');
+        nextTurnButton.title = t('runNewTurnNotice');
+        nextTurnButton.dataset.runAction = 'continueTaskInNewTurn'; nextTurnButton.dataset.messageId = message.id;
+        nextTurnButton.disabled = Boolean(state.isBusy);
+        panel.append(nextTurnButton);
+        var nextTurnNotice = document.createElement('div');
+        nextTurnNotice.textContent = t('runNewTurnNotice');
+        panel.append(nextTurnNotice);
       }
       return panel;
     }

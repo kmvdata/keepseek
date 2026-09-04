@@ -26,6 +26,7 @@ export type WebviewMessage =
   | { type: 'editUserPrompt'; messageId: string; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'abortPrompt' }
   | { type: 'continueAgentTask'; messageId: string }
+  | { type: 'continueAgentTaskInNewTurn'; messageId: string }
   | { type: 'continueRepair' }
   | { type: 'newSession' }
   | { type: 'selectSession'; sessionId: string }

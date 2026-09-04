@@ -527,6 +527,15 @@ Webview 会把 phase 映射成中英文状态文案，例如“搜索工作区..
 
 开启 `keepseek.trace.enabled` 后，`InteractionTraceLogService` 会在全局存储下写 JSONL 日志。
 
+日志事件的 `ts` 使用扩展运行所在操作系统的本地时区，格式为带毫秒与明确偏移的 ISO 8601，例如 `2026-09-04T16:04:03.123+08:00`。日期目录、文件名、后续追加事件和截断标记使用同一规则；夏令时按事件发生时间计算。旧日志不回写，嵌套的请求/响应 payload 与历史消息时间字段保持原样，避免破坏原始证据和请求缓存字节。
+
+预算诊断使用不同错误码，工具返回的 `errorType` / `budgetReason` 与运行摘要的 `budgetStopReason` 对齐：
+
+- `tool_result_budget_exhausted`：本轮累计工具结果超限。`usedTokens + nextTokens > maxTokens`；与模型上下文容量不同。
+- `context_window_exhausted`：预计 Provider 请求超出模型上下文容量。`usedTokens` 是包含待加入结果、输出预留和安全预留后的预计总量，`maxTokens` 是上下文上限；不要再次加上 `nextTokens`。首次 API 请求前发现超限时，`run_error.error.code` 也使用此码，且不发送请求。
+
+工具结果超限事件在 `metadata` 级别也保留错误码和上述数量，调试无需打开完整 payload。
+
 trace 记录包括：
 
 - run start / finish / error。

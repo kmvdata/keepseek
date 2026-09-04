@@ -5,6 +5,18 @@ import { createChangeSet } from '../src/edits/changeSet';
 import type { ChangeSet, RepairLoopState, TaskPlan } from '../src/shared/types';
 
 describe('RunDetailsBuilder', () => {
+  it('records budget rejection without duplicating or changing actual validation evidence', () => {
+    const builder = new RunDetailsBuilder({ runId: 'run-budget', modelId: 'model', thinkingEnabled: false });
+    builder.recordToolResult('validation', 'keepseek_run_validation', JSON.stringify({ ok: true, script: 'test', exitCode: 0 }));
+    builder.recordToolResult('validation', 'keepseek_run_validation', JSON.stringify({ ok: false, budgetReason: 'tool_result_budget_exhausted',
+      usedTokens: 60000, nextTokens: 8000, maxTokens: 64000 }), { deliveryOnly: true });
+    const summary = builder.build();
+    assert.equal(summary.validations.length, 1);
+    assert.equal(summary.validations[0].ok, true);
+    assert.equal(summary.toolCalls[0].status, 'failed');
+    assert.equal(JSON.parse(summary.toolCalls[0].resultSummary!).maxTokens, 64000);
+  });
+
   it('redacts sensitive arguments and summarizes tools, validation, and waiting state', () => {
     const builder = new RunDetailsBuilder({
       runId: 'run-1',

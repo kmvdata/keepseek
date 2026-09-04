@@ -58,3 +58,5 @@ import './validationAvailability.test';
 import './workspaceToolsSearch.test';
 
 import './longRunningAgent.test';
+import './toolResultBudget.test';
+import './interactionTrace.test';

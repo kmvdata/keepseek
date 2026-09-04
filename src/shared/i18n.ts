@@ -10,6 +10,9 @@ type TranslationCatalog = Record<string, string>;
 export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
     runContinue: '继续任务',
+    runContinueInNewTurn: '继续（新一轮）',
+    runNewTurnNotice: '将发送一条继续请求，开启新一轮预算并产生新的模型用量；不会自动应用修改或批准命令。',
+    runStopped_budget_exhausted: '本轮预算已达上限',
     runRecoveryNotice: '将从已保存步骤继续；未完成的模型步骤会重新请求，可能产生新用量，不会恢复供应商内部思考。',
     runRecoveryHistoryChanged: '此任务之后已有新消息，无法原位继续。请查看保存进度后发起新请求。',
     runRecoveryWorkspaceChanged: '工作区、信任或外部文件授权已变化，请重新核实后继续。',
@@ -656,6 +659,9 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
   },
   en: {
     runContinue: 'Continue task',
+    runContinueInNewTurn: 'Continue in a new turn',
+    runNewTurnNotice: 'Sends a follow-up request with a fresh per-run budget and new model usage. Does not apply edits or approve commands.',
+    runStopped_budget_exhausted: 'Per-run budget reached',
     runRecoveryNotice: 'Continue from saved steps. An unfinished model step starts a new request and may incur usage; provider internal thinking is not restored.',
     runRecoveryHistoryChanged: 'New messages follow this task. Review saved progress and start a new request.',
     runRecoveryWorkspaceChanged: 'Workspace, trust or external-file permissions changed. Review access before continuing.',

@@ -1,4 +1,4 @@
-import { normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
+import { canContinueBudgetInNewTurn, normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
@@ -484,15 +484,19 @@ export function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
     providerReplay: _providerReplay,
     toolRounds: _toolRounds,
     ...message
-  }) => ({
+  }, index) => ({
     ...message,
     runState: runCheckpoint ? {
-      taskId: runCheckpoint.taskId, status: runCheckpoint.status, stopReason: runCheckpoint.stopReason,
+      taskId: runCheckpoint.taskId, status: runCheckpoint.status,
+      // Older checkpoints used waiting_for_user for budget stops as well.
+      stopReason: runCheckpoint.stopReason === 'waiting_for_user' && runCheckpoint.finalResponse?.runDetails.budgetStopReason
+        ? 'budget_exhausted' : runCheckpoint.stopReason,
       usedMs: runCheckpoint.usedMs, maxExecutionMs: runCheckpoint.maxExecutionMs, limitSource: runCheckpoint.limitSource,
       attempt: runCheckpoint.attempt, modelRequests: runCheckpoint.modelRequests, retries: runCheckpoint.retries,
       lastNetworkAt: runCheckpoint.lastNetworkAt, lastEventAt: runCheckpoint.lastEventAt, lastContentAt: runCheckpoint.lastContentAt,
       requestStartedAt: runCheckpoint.requestStartedAt, lastStepAt: runCheckpoint.lastStepAt, steps: (runCheckpoint.state?.toolRounds.reduce((count, round) => count + round.toolResults.length, 0) ?? 0) + Object.keys(runCheckpoint.state?.pending?.results ?? {}).length,
       canResume: runCheckpoint.status !== 'running' && !recoveryBlocker(runCheckpoint),
+      canContinueInNewTurn: index === messages.length - 1 && canContinueBudgetInNewTurn(runCheckpoint),
       blocker: recoveryBlocker(runCheckpoint), error: runCheckpoint.error
     } : undefined,
     ...(message.runDetails ? { runDetails: {

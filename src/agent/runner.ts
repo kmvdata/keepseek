@@ -1,5 +1,6 @@
 import { ExecutionClock, ExecutionBudgetError, abortable, mergeDurations } from './executionPolicy';
-import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, recoveryBlocker, endpointHash, MAX_LENGTH_CONTINUATION_REQUESTS } from './runCheckpoint';
+import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, AgentBudgetExceededError, recoveryBlocker, endpointHash, MAX_LENGTH_CONTINUATION_REQUESTS, type AgentBudgetFinishReason } from './runCheckpoint';
+import { shapeWorkspaceListingResult } from './toolResultShaping';
 import { getConfiguredAgentMaxExecutionMs, getConfiguredStreamIdleTimeoutMs } from '../shared/config';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
@@ -211,12 +212,6 @@ interface AnthropicMessagesRunState {
 
 export type ProviderNativeRunState = OpenAiResponsesRunState | AnthropicMessagesRunState;
 
-type AgentBudgetFinishReason =
-  | 'tool_iterations_exhausted'
-  | 'tool_call_limit_exhausted'
-  | 'tool_result_budget_exhausted'
-  | 'run_time_limit_exhausted';
-
 interface NormalizedAssistantToolCalls {
   assistant: DeepSeekAssistantMessage;
   displayReasoningContent?: string | null;
@@ -366,12 +361,13 @@ export class AgentLoop {
       });
       cp.finalResponse = response;
       cp.status = response.runDetails.budgetStopReason ? 'blocked' : 'completed';
-      cp.stopReason = response.runDetails.budgetStopReason || response.runDetails.status === 'waiting'
-        || response.repairLoop.status === 'waiting_for_apply' ? 'waiting_for_user' : 'completed';
+      cp.stopReason = response.runDetails.budgetStopReason ? 'budget_exhausted'
+        : response.runDetails.status === 'waiting' || response.repairLoop.status === 'waiting_for_apply'
+          ? 'waiting_for_user' : 'completed';
       await persist();
       return response;
     } catch (error) {
-      cp.status = ['storage_failure', 'resource_limit'].includes(cp.stopReason ?? '') ? 'blocked' : 'interrupted';
+      cp.status = error instanceof AgentBudgetExceededError || ['storage_failure', 'resource_limit'].includes(cp.stopReason ?? '') ? 'blocked' : 'interrupted';
       cp.stopReason ??= clocks.some((clock) => clock.signal.aborted) ? 'time_budget'
         : request.signal?.aborted ? 'user_stop' : error instanceof AgentInterruptedError ? error.reason : 'connection_interrupted';
       cp.error = error instanceof Error ? error.message : String(error);
@@ -541,6 +537,7 @@ export class AgentLoop {
       const isBlocked = finishReason === 'tool_iterations_exhausted'
         || finishReason === 'tool_call_limit_exhausted'
         || finishReason === 'tool_result_budget_exhausted'
+        || finishReason === 'context_window_exhausted'
         || finishReason === 'run_time_limit_exhausted';
       if (isBlocked && finishReason) {
         taskPlan.addBlocker(this.getBudgetToolError(finishReason as AgentBudgetFinishReason, request.language));
@@ -898,7 +895,7 @@ export class AgentLoop {
       providerRunState
     );
     if (initialBudgetStopReason) {
-      throw new Error(request.language === 'en'
+      throw new AgentBudgetExceededError(initialBudgetStopReason, request.language === 'en'
         ? 'The provider request would exceed the model context window before the first API call. Reduce attached context or allow history compression to complete.'
         : '首次 API 调用前的 Provider 请求将超过模型上下文窗口。请减少附件上下文，或等待历史压缩完成。');
     }
@@ -1085,6 +1082,8 @@ export class AgentLoop {
             toolCallId: toolCall.id,
             toolName: toolCall.function.name,
             budgetStopReason,
+            toolCallCount,
+            maxToolCalls: runtimeConfig.maxToolCalls,
             content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
           });
           runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, budgetToolResult);
@@ -1291,8 +1290,12 @@ export class AgentLoop {
             toolCallId: toolCall.id,
             toolName: toolCall.function.name,
             budgetStopReason,
+            usedTokens: toolResultTokens,
+            nextTokens: nextToolResultTokens,
+            maxTokens: maxToolResultTokens,
             content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
           });
+          runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, budgetToolResult, { deliveryOnly: true });
           return budgetToolResult;
         }
 
@@ -1319,7 +1322,7 @@ export class AgentLoop {
               }]
             : []
         )) {
-          budgetStopReason = 'tool_result_budget_exhausted';
+          budgetStopReason = 'context_window_exhausted';
           const projectedUsage = providerRunState?.protocol === 'openai-responses'
             ? createContextUsageEstimateFromResponses({
                 model: request.model,
@@ -1362,12 +1365,19 @@ export class AgentLoop {
             toolCallId: toolCall.id,
             toolName: toolCall.function.name,
             budgetStopReason,
+            usedTokens: projectedUsage.usedTokensEstimate,
+            nextTokens: nextToolResultTokens,
+            maxTokens: projectedUsage.maxTokensEstimate,
             content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
           });
+          runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, budgetToolResult, { deliveryOnly: true });
           return budgetToolResult;
         }
 
         toolResultTokens += nextToolResultTokens;
+        if (shapedToolResult.content !== rawToolResult) {
+          runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, shapedToolResult.content, { deliveryOnly: true });
+        }
         if (getSubagentHandoffKind(toolCall.function.name) && !request.subagentContext) {
           if (normalizedAssistant.source === 'native') {
             const handoff = createAcceptedRootSubagentHandoffEstimate({
@@ -1603,6 +1613,7 @@ export class AgentLoop {
       callbacks.onRunDetails?.(runDetailsBuilderRef.current?.finish({
         taskPlan: failedPlan,
         repairLoop: repairLoop.getState(),
+        finishReason: error instanceof AgentBudgetExceededError ? error.code : undefined,
         failureReason: error instanceof Error ? error.message : String(error),
         stopped: error instanceof AgentRunAbortedError || request.signal?.aborted
       }) ?? createFallbackRunDetails(trace.runId, request, failedPlan, traceLog?.uri, error));
@@ -3287,7 +3298,9 @@ export class AgentLoop {
     const parsed = this.parseToolResultObject(rawContent);
     let shapedContent = rawContent;
 
-    if (toolName === SEARCH_WORKSPACE_TOOL_NAME && parsed) {
+    if ((toolName === LIST_WORKSPACE_FILES_TOOL_NAME || toolName === LIST_WORKSPACE_DIRECTORY_TOOL_NAME) && parsed) {
+      shapedContent = shapeWorkspaceListingResult(parsed, snipForContextPressure);
+    } else if (toolName === SEARCH_WORKSPACE_TOOL_NAME && parsed) {
       shapedContent = this.shapeSearchToolResult(parsed, snipForContextPressure);
     } else if (toolName === READ_WORKSPACE_FILE_RANGE_TOOL_NAME && parsed) {
       shapedContent = this.shapeRangeReadToolResult(parsed, snipForContextPressure);
@@ -3610,7 +3623,7 @@ export class AgentLoop {
           outputReserveTokens,
           safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
         });
-    return usage.usedTokensEstimate > usage.maxTokensEstimate ? 'tool_result_budget_exhausted' : undefined;
+    return usage.usedTokensEstimate > usage.maxTokensEstimate ? 'context_window_exhausted' : undefined;
   }
 
   private getRunTimeStopReason(runDeadlineAt: number | undefined): AgentBudgetFinishReason | undefined {
@@ -3626,6 +3639,7 @@ export class AgentLoop {
   ): string {
     return JSON.stringify({
       ok: false,
+      errorType: reason,
       error: this.getBudgetToolError(reason, language),
       budgetReason: reason,
       ...details
@@ -3642,6 +3656,10 @@ export class AgentLoop {
         return language === 'en'
           ? 'The KeepSeek tool-result token budget was reached. Stop calling tools and answer from the available context.'
           : 'KeepSeek 工具结果 token 预算已达上限。请停止调用工具，并基于已有上下文回答。';
+      case 'context_window_exhausted':
+        return language === 'en'
+          ? 'The model context window would be exceeded. Stop calling tools and summarize progress; reduce attached context or compact history before starting a new turn.'
+          : '工具结果会超出模型上下文容量。请停止调用工具并总结进度；减少附件上下文或压缩历史后再开始新一轮。';
       case 'run_time_limit_exhausted':
         return language === 'en'
           ? 'The KeepSeek total run-time budget was reached. Stop calling tools and answer from the available context.'
@@ -3716,8 +3734,14 @@ export class AgentLoop {
 
     if (finishReason === 'tool_result_budget_exhausted') {
       return language === 'en'
-        ? 'The agent reached the automatic context safety limit and stopped this run. Narrow the scope or start a follow-up turn so context compression can compact the completed work.'
-        : 'Agent 达到自动上下文安全上限，已停止本次执行。请缩小任务范围，或发起后续轮次，让上下文压缩先整理已完成的工作。';
+        ? 'The per-run tool-result token limit was reached. Choose Continue in a new turn or send a follow-up message to continue the unfinished work.'
+        : '本轮工具结果的累计 token 数达到上限。可点击“继续（新一轮）”或发送新消息，继续未完成的工作。';
+    }
+
+    if (finishReason === 'context_window_exhausted') {
+      return language === 'en'
+        ? 'The model context window is full. Reduce attached context or compact history before starting a follow-up turn.'
+        : '模型上下文容量已满。请减少附件上下文或压缩历史后，再发起后续轮次。';
     }
 
     if (finishReason === 'run_time_limit_exhausted') {

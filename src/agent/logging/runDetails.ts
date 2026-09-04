@@ -95,7 +95,7 @@ export class RunDetailsBuilder {
     tool.argumentsSummary = summarizeToolArguments(args);
   }
 
-  public recordToolResult(toolCallId: string, toolName: string, rawResult: string): void {
+  public recordToolResult(toolCallId: string, toolName: string, rawResult: string, options: { deliveryOnly?: boolean } = {}): void {
     const tool = this.ensureTool(toolCallId, toolName);
     const parsed = parseRecord(rawResult);
     tool.endedAt = new Date().toISOString();
@@ -107,7 +107,9 @@ export class RunDetailsBuilder {
     } else {
       tool.status = parsed?.ok === false ? 'failed' : 'succeeded';
     }
-    if (toolName === 'keepseek_run_validation') {
+    // A shaping/budget decision changes what reached the model, not whether a
+    // validation actually ran or what its on-disk result was.
+    if (toolName === 'keepseek_run_validation' && !options.deliveryOnly) {
       this.validations.push({
         script: isSafeNpmScript(parsed?.script) ? parsed.script : undefined,
         ok: typeof parsed?.ok === 'boolean' ? parsed.ok : undefined,
@@ -348,7 +350,7 @@ export function summarizeToolResult(rawResult: string): string {
     return redactSensitiveText(rawResult).replace(/\s+/gu, ' ').slice(0, MAX_SUMMARY_CHARS);
   }
   const summary: Record<string, unknown> = {};
-  for (const key of ['ok', 'errorType', 'error', 'path', 'script', 'exitCode', 'durationMs', 'timedOut', 'total', 'count', 'truncated']) {
+  for (const key of ['ok', 'budgetReason', 'usedTokens', 'nextTokens', 'maxTokens', 'errorType', 'error', 'path', 'script', 'exitCode', 'durationMs', 'timedOut', 'total', 'count', 'totalListed', 'truncated']) {
     const value = parsed[key];
     if (typeof value === 'string') summary[key] = redactSensitiveText(value).slice(0, 240);
     else if (typeof value === 'number' || typeof value === 'boolean') summary[key] = value;

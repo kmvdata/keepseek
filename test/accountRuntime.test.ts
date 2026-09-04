@@ -315,7 +315,7 @@ test('hard-limit checks use the model metadata context window', () => {
 
   assert.equal(
     runner.getContextWindowBudgetStopReason(constrained, messages, [], 1_000),
-    'tool_result_budget_exhausted'
+    'context_window_exhausted'
   );
   assert.equal(runner.getContextWindowBudgetStopReason(roomy, messages, [], 1_000), undefined);
 });

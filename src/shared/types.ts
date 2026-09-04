@@ -408,7 +408,7 @@ export interface ChatMessage {
   runState?: {
     taskId: string; status: string; stopReason?: string; usedMs: number; maxExecutionMs: number; limitSource: string;
     attempt: number; modelRequests: number; retries: number; lastNetworkAt?: string; lastEventAt?: string;
-    requestStartedAt?: string; lastContentAt?: string; lastStepAt?: string; steps: number; canResume: boolean; blocker?: string; error?: string;
+    requestStartedAt?: string; lastContentAt?: string; lastStepAt?: string; steps: number; canResume: boolean; canContinueInNewTurn?: boolean; blocker?: string; error?: string;
   };
   id: string;
   role: ChatRole;

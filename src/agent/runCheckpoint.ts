@@ -4,7 +4,10 @@ import type { DeepSeekAssistantMessage, DeepSeekMessage, DeepSeekUsage } from '.
 import type { ProviderNativeRunState } from './runner';
 
 export type StopReason = 'user_stop' | 'time_budget' | 'tool_timeout' | 'connection_interrupted'
-  | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'completed' | 'storage_failure' | 'resource_limit';
+  | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'budget_exhausted' | 'completed' | 'storage_failure' | 'resource_limit';
+
+export type AgentBudgetFinishReason = 'tool_iterations_exhausted' | 'tool_call_limit_exhausted'
+  | 'tool_result_budget_exhausted' | 'context_window_exhausted' | 'run_time_limit_exhausted';
 
 export interface RunCheckpoint {
   version: 1;
@@ -49,7 +52,7 @@ export interface RunCheckpoint {
     toolResultTokens: number;
     validationState?: import('./repairLoop').RunValidationState;
     repairLoop: RepairLoopState;
-    budgetStopReason?: 'tool_iterations_exhausted' | 'tool_call_limit_exhausted' | 'tool_result_budget_exhausted' | 'run_time_limit_exhausted';
+    budgetStopReason?: AgentBudgetFinishReason;
     budgetStopInstructionQueued: boolean;
     /** Complete response plus individual completed tool results. Never a delta. */
     pending?: {
@@ -62,6 +65,13 @@ export interface RunCheckpoint {
 
 export class AgentInterruptedError extends Error {
   public constructor(public readonly reason: StopReason, message: string) { super(message); }
+}
+
+export class AgentBudgetExceededError extends AgentInterruptedError {
+  public constructor(public readonly code: AgentBudgetFinishReason, message: string) {
+    super('budget_exhausted', message);
+    this.name = 'AgentBudgetExceededError';
+  }
 }
 
 export const MAX_LENGTH_CONTINUATION_REQUESTS = 1;
@@ -127,12 +137,41 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
 }
 
 export function recoveryBlocker(cp: RunCheckpoint): string | undefined {
+  if (cp.stopReason === 'storage_failure' || cp.stopReason === 'resource_limit') return cp.error ?? cp.stopReason;
+  if (cp.state?.pending?.executing) return `Uncertain tool result: ${cp.state.pending.executing.name}. Verify before starting another task. / 工具结果未知，请先核实实际状态。`;
   if (cp.state?.continuation && cp.state.continuation.requests >= MAX_LENGTH_CONTINUATION_REQUESTS && cp.state.continuation.inFlight) return 'Continuation request budget exhausted / 续写请求预算已用尽';
-  if (cp.finalResponse?.runDetails.budgetStopReason) return 'Declared safety budget exhausted / 已声明的安全预算已用尽';
+  if (cp.finalResponse?.runDetails.budgetStopReason) return budgetRecoveryMessage(cp);
   if (cp.status === 'completed') return 'Task already completed / 任务已完成';
   if (cp.maxExecutionMs > 0 && cp.usedMs >= cp.maxExecutionMs) return 'Time budget exhausted / 时间预算已用尽';
-  if (cp.state?.pending?.executing) return `Uncertain tool result: ${cp.state.pending.executing.name}. Verify before starting another task. / 工具结果未知，请先核实实际状态。`;
-  if (cp.state?.budgetStopReason) return 'Declared safety budget exhausted / 已声明的安全预算已用尽';
-  if (cp.stopReason === 'storage_failure' || cp.stopReason === 'resource_limit') return cp.error ?? cp.stopReason;
+  if (cp.state?.budgetStopReason) return budgetRecoveryMessage(cp);
+  if (cp.stopReason === 'budget_exhausted') return cp.error ?? 'Run budget exhausted / 运行预算已用尽';
   return undefined;
+}
+
+/** A fresh, user-requested turn is not checkpoint recovery. Never use this to
+ * reset a logical task's immutable budgets, replay a tool, or resume children. */
+export function canContinueBudgetInNewTurn(cp: RunCheckpoint): boolean {
+  return cp.status === 'blocked' && Boolean(cp.finalResponse?.runDetails.budgetStopReason)
+    // A saved final text response also occupies pending; only unfinished tool
+    // execution prevents starting a fresh turn after the run has finalized.
+    && !cp.state?.pending?.executing && !cp.state?.pending?.response.message.tool_calls?.length
+    && !cp.request.backgroundRunId && !cp.request.subagentContext
+    && cp.stopReason !== 'storage_failure' && cp.stopReason !== 'resource_limit';
+}
+
+function budgetRecoveryMessage(cp: RunCheckpoint): string {
+  const reason = cp.finalResponse?.runDetails.budgetStopReason ?? cp.state?.budgetStopReason;
+  const english = cp.request.language === 'en';
+  const label = reason === 'tool_result_budget_exhausted'
+    ? english ? 'The per-run tool-result token limit was reached.' : '本轮工具结果的累计 token 数达到上限。'
+    : reason === 'context_window_exhausted'
+      ? english ? 'The model context window is full. Reduce attached context or compact history before continuing.' : '模型上下文容量已满，请减少附件上下文或压缩历史后继续。'
+      : reason === 'tool_call_limit_exhausted'
+        ? english ? 'The per-run tool-call limit was reached.' : '本轮工具调用次数达到上限。'
+        : reason === 'tool_iterations_exhausted'
+          ? english ? 'The per-run tool-round limit was reached.' : '本轮工具调用轮次达到上限。'
+          : english ? 'The run execution budget was reached.' : '本轮执行预算达到上限。';
+  return label + (english
+    ? ' This is not an approval request. Send a new message to continue the unfinished work in a new turn; the old task cannot be resumed in place.'
+    : '这不是审批请求。可发送新消息，在新一轮中继续未完成的工作；旧任务不能原位恢复。');
 }
