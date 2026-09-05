@@ -3187,6 +3187,7 @@ export function getScript(): string {
       var meta = document.createElement('div');
       meta.className = 'draft-run-meta';
       meta.textContent = getDraftRunStatusLabel(statusValue) + ' · ' + String(spec.reason || '');
+      if (draftRun.authorizationSource === 'delegated_approver') meta.textContent += ' · ' + t('approvalDelegate');
       heading.append(title, meta);
       var actions = document.createElement('div');
       actions.className = 'draft-run-actions';
@@ -3554,7 +3555,7 @@ export function getScript(): string {
         var message = state.messages[i];
         var item = document.createElement('article');
         var isDraftRunAutoContinuation = message.role === 'user'
-          && message.contextMeta?.displayKind === 'draft_run_auto_continue';
+          && (message.contextMeta?.displayKind === 'draft_run_auto_continue' || message.contextMeta?.displayKind === 'delegated_auto_continue');
         var isEditing = message.role === 'user' && !isDraftRunAutoContinuation && message.id === editingMessageId;
         item.dataset.messageId = message.id;
         item.className = 'message ' + message.role

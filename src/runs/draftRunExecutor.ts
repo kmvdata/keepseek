@@ -312,8 +312,11 @@ class DraftRunPseudoterminal implements vscode.Pseudoterminal {
 }
 
 function validatePermit(draftRun: DraftRun, permit: ExecutionPermit): void {
-  if (permit.source !== 'user_click') {
-    throw new Error('This KeepSeek version only accepts user-click DraftRun permits.');
+  if (permit.source !== 'user_click' && permit.source !== 'delegated_approver') {
+    throw new Error('DraftRun requires a user-click or delegated approval permit.');
+  }
+  if (permit.source === 'delegated_approver' && draftRun.authorizationSource !== permit.source) {
+    throw new Error('Delegated permit requires a delegated approval record.');
   }
   if (permit.draftRunId !== draftRun.id || permit.specHash !== draftRun.specHash) {
     throw new Error('DraftRun execution permit does not match the immutable command.');

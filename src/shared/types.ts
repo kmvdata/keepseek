@@ -307,7 +307,7 @@ export type ChatRole = 'user' | 'assistant' | 'system';
 export interface ChatMessageContextMeta {
   isProtected?: boolean;
   protectedReason?: string;
-  displayKind?: 'draft_run_auto_continue';
+  displayKind?: 'draft_run_auto_continue' | 'delegated_auto_continue';
 }
 
 export type DraftRunStatus =
@@ -626,7 +626,10 @@ export interface LegacyProjectMemoryMigrationStateView {
   error?: string;
 }
 
+export type ApprovalMode = 'ask' | 'delegate';
+
 export interface ChatSession {
+  approvalMode?: ApprovalMode;
   id: string;
   title: string;
   messages: ChatMessage[];
@@ -796,6 +799,8 @@ export interface ChangeSetRevertResult {
 }
 
 export interface ChangeCheckpoint {
+  /** Exact external target explicitly authorized when this checkpoint was applied. */
+  authorizedExternalUri?: string;
   id: string;
   changeSetId: string;
   editId: string;
@@ -973,6 +978,7 @@ export type AuthorizedToolScope =
   | 'git_push';
 
 export interface RunAuthorizationPolicy {
+  approvalMode?: ApprovalMode;
   runId: string;
   mediumRiskPolicy: ValidationAuthorizationPolicy;
   authorizedScopes: AuthorizedToolScope[];
@@ -984,7 +990,7 @@ export interface ToolAuthorizationDecision {
   toolName: string;
   riskLevel: ToolRiskLevel;
   scope: AuthorizedToolScope;
-  source: 'low_risk' | 'run_policy' | 'configuration' | 'explicit_confirmation' | 'user_denied';
+  source: 'low_risk' | 'run_policy' | 'configuration' | 'explicit_confirmation' | 'delegated_approver' | 'user_denied';
   requiresExplicitConfirmation: boolean;
   reason?: string;
 }
@@ -1062,6 +1068,7 @@ export interface ReferenceResource {
 }
 
 export interface AgentRequest {
+  approvalMode?: ApprovalMode;
   checkpoint?: import('../agent/runCheckpoint').RunCheckpoint;
   taskClock?: import('../agent/executionPolicy').ExecutionClock;
   prompt: string;

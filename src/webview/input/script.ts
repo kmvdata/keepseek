@@ -17,6 +17,10 @@ export function getInputScript(): string {
       var commandSubagentModelValue = document.getElementById('commandSubagentModelValue');
       var commandSubagentModelList = document.getElementById('commandSubagentModelList');
       var commandSubagentModelDescription = document.getElementById('commandSubagentModelDescription');
+      var commandApprovalModeSwitch = document.getElementById('commandApprovalModeSwitch');
+      var commandApprovalModeValue = document.getElementById('commandApprovalModeValue');
+      var commandApprovalModeList = document.getElementById('commandApprovalModeList');
+      var commandApprovalModeDescription = document.getElementById('commandApprovalModeDescription');
       var commandModelStatus = document.getElementById('commandModelStatus');
       var commandModelStatusText = document.getElementById('commandModelStatusText');
       var commandModelCancelPending = document.getElementById('commandModelCancelPending');
@@ -57,6 +61,7 @@ export function getInputScript(): string {
       var commandMenuOpen = false;
       var commandModelListOpen = false;
       var commandSubagentModelListOpen = false;
+      var commandApprovalModeListOpen = false;
       var commandSkillListOpen = false;
       var referenceMenuOpen = false;
       var referenceMenuSource = '';
@@ -301,6 +306,7 @@ export function getInputScript(): string {
           commandModelListOpen = !commandModelListOpen;
           if (commandModelListOpen) {
             commandSubagentModelListOpen = false;
+            commandApprovalModeListOpen = false;
             commandSkillListOpen = false;
           }
           renderCommandMenu();
@@ -341,9 +347,43 @@ export function getInputScript(): string {
           commandSubagentModelListOpen = !commandSubagentModelListOpen;
           if (commandSubagentModelListOpen) {
             commandModelListOpen = false;
+            commandApprovalModeListOpen = false;
             commandSkillListOpen = false;
           }
           renderCommandMenu();
+        });
+      }
+
+      if (commandApprovalModeSwitch) {
+        commandApprovalModeSwitch.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (isApprovalModeSelectionLocked()) {
+            setComposerStatus(t('modelSettingsReadonlyWhileBusy'));
+            return;
+          }
+          commandApprovalModeListOpen = !commandApprovalModeListOpen;
+          if (commandApprovalModeListOpen) {
+            commandModelListOpen = false;
+            commandSubagentModelListOpen = false;
+            commandSkillListOpen = false;
+          }
+          renderCommandMenu();
+        });
+      }
+
+      if (commandApprovalModeList) {
+        commandApprovalModeList.addEventListener('click', function(event) {
+          var target = event.target instanceof Element ? event.target : null;
+          var button = target?.closest('button[data-approval-mode]');
+          if (!button || button.disabled) { return; }
+          event.preventDefault();
+          event.stopPropagation();
+          var mode = button.dataset.approvalMode === 'delegate' ? 'delegate' : 'ask';
+          vscode.postMessage({ type: 'setApprovalMode', mode: mode });
+          commandApprovalModeListOpen = false;
+          renderCommandMenu();
+          setComposerStatus(t('approvalMode') + ': ' + t(mode === 'delegate' ? 'approvalDelegate' : 'approvalAsk'));
         });
       }
 
@@ -419,6 +459,7 @@ export function getInputScript(): string {
           if (commandSkillListOpen) {
             commandModelListOpen = false;
             commandSubagentModelListOpen = false;
+            commandApprovalModeListOpen = false;
             vscode.postMessage({ type: 'requestSkills' });
           }
           renderCommandMenu();
@@ -695,6 +736,7 @@ export function getInputScript(): string {
         commandMenuOpen = false;
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
+        commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
         commandMenu.classList.add('hidden');
         commandMenuButton.classList.remove('is-active');
@@ -733,6 +775,11 @@ export function getInputScript(): string {
             openCommandSubagentModelListAndFocus();
             return;
           }
+          if (target === commandApprovalModeSwitch) {
+            event.preventDefault();
+            openCommandApprovalModeListAndFocus();
+            return;
+          }
           if (target === commandSkillsButton) {
             event.preventDefault();
             openCommandSkillListAndFocus();
@@ -753,6 +800,13 @@ export function getInputScript(): string {
             commandSubagentModelListOpen = false;
             renderCommandMenu();
             if (commandSubagentModelSwitch) { commandSubagentModelSwitch.focus(); }
+            return;
+          }
+          if (commandApprovalModeListOpen && commandApprovalModeList && (commandApprovalModeList.contains(target) || target === commandApprovalModeSwitch)) {
+            event.preventDefault();
+            commandApprovalModeListOpen = false;
+            renderCommandMenu();
+            if (commandApprovalModeSwitch) { commandApprovalModeSwitch.focus(); }
             return;
           }
           if (commandSkillListOpen && commandSkillList && (commandSkillList.contains(target) || target === commandSkillsButton)) {
@@ -793,6 +847,7 @@ export function getInputScript(): string {
         if (!commandModelSwitch || isModelSelectionLocked()) { return; }
         commandModelListOpen = true;
         commandSubagentModelListOpen = false;
+        commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
         renderCommandMenu();
         focusFirstCommandMenuControl(commandModelList);
@@ -802,9 +857,20 @@ export function getInputScript(): string {
         if (!commandSubagentModelSwitch || isSubagentModelSelectionLocked()) { return; }
         commandSubagentModelListOpen = true;
         commandModelListOpen = false;
+        commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
         renderCommandMenu();
         focusFirstCommandMenuControl(commandSubagentModelList);
+      }
+
+      function openCommandApprovalModeListAndFocus() {
+        if (!commandApprovalModeSwitch || isApprovalModeSelectionLocked()) { return; }
+        commandApprovalModeListOpen = true;
+        commandModelListOpen = false;
+        commandSubagentModelListOpen = false;
+        commandSkillListOpen = false;
+        renderCommandMenu();
+        focusFirstCommandMenuControl(commandApprovalModeList);
       }
 
       function openCommandSkillListAndFocus() {
@@ -812,6 +878,7 @@ export function getInputScript(): string {
         commandSkillListOpen = true;
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
+        commandApprovalModeListOpen = false;
         vscode.postMessage({ type: 'requestSkills' });
         renderCommandMenu();
         focusFirstCommandMenuControl(commandSkillList);
@@ -2295,10 +2362,15 @@ export function getInputScript(): string {
 
       function renderCommandMenu() {
         if (!commandMenu) { return; }
+        if (commandMenuButton) {
+          commandMenuButton.title = t('showCommandMenuTitle') + ' · ' + t(state.approvalMode === 'delegate' ? 'approvalDelegate' : 'approvalAsk');
+        }
         commandMenu.classList.toggle('is-readonly', Boolean(state.isBusy));
         commandMenu.classList.toggle('allows-model-selection', Boolean(state.isBusy && !isModelSelectionLocked()));
+        commandMenu.classList.toggle('allows-approval-selection', Boolean(state.isBusy && !isApprovalModeSelectionLocked()));
         renderCommandModel();
         renderCommandSubagentModel();
+        renderCommandApprovalMode();
         renderCompressionThreshold();
         renderCommandSkills();
         renderCreateSkillCommand();
@@ -2562,6 +2634,56 @@ export function getInputScript(): string {
         }
       }
 
+      function renderCommandApprovalMode() {
+        var currentMode = state.approvalMode === 'delegate' ? 'delegate' : 'ask';
+        var locked = isApprovalModeSelectionLocked();
+        var currentLabelKey = currentMode === 'delegate' ? 'approvalDelegate' : 'approvalAsk';
+
+        if (commandApprovalModeValue) {
+          commandApprovalModeValue.textContent = t(currentLabelKey);
+          commandApprovalModeValue.title = t(currentLabelKey);
+        }
+        if (commandApprovalModeSwitch) {
+          commandApprovalModeSwitch.disabled = locked;
+          commandApprovalModeSwitch.title = locked ? t('modelSettingsReadonlyWhileBusy') : t('approvalModeDescription');
+          commandApprovalModeSwitch.setAttribute('aria-disabled', locked ? 'true' : 'false');
+          commandApprovalModeSwitch.setAttribute('aria-expanded', commandApprovalModeListOpen ? 'true' : 'false');
+        }
+        if (commandApprovalModeDescription) {
+          commandApprovalModeDescription.textContent = locked
+            ? t('modelSettingsReadonlyWhileBusy')
+            : t('approvalModeDescription');
+        }
+        if (!commandApprovalModeList) { return; }
+
+        commandApprovalModeList.classList.toggle('hidden', !commandApprovalModeListOpen);
+        commandApprovalModeList.innerHTML = '';
+        [
+          { mode: 'ask', labelKey: 'approvalAsk', descriptionKey: 'approvalAskDescription' },
+          { mode: 'delegate', labelKey: 'approvalDelegate', descriptionKey: 'approvalDelegateDescription' }
+        ].forEach(function(item) {
+          var isSelected = item.mode === currentMode;
+          var option = document.createElement('button');
+          option.type = 'button';
+          option.className = 'command-model-option';
+          option.dataset.approvalMode = item.mode;
+          option.disabled = locked || (item.mode === 'delegate' && Boolean(state.isBusy));
+          option.setAttribute('role', 'menuitemradio');
+          option.setAttribute('aria-checked', isSelected ? 'true' : 'false');
+          option.setAttribute('aria-label', t(item.labelKey));
+          option.title = t(item.descriptionKey);
+
+          var check = document.createElement('span');
+          check.className = 'command-model-check';
+          check.textContent = isSelected ? '\\u2713' : '';
+          var label = document.createElement('span');
+          label.className = 'command-model-name';
+          label.textContent = t(item.labelKey);
+          option.append(check, label);
+          commandApprovalModeList.append(option);
+        });
+      }
+
       function nextModelSelectionRequestId() {
         modelSelectionRequestSequence += 1;
         return 'model-selection-' + String(modelSelectionRequestSequence);
@@ -2573,6 +2695,10 @@ export function getInputScript(): string {
 
       function isSubagentModelSelectionLocked() {
         return Boolean(state.isBusy || isModelSelectionLocked());
+      }
+
+      function isApprovalModeSelectionLocked() {
+        return Boolean(state.isBusy && state.approvalMode !== 'delegate');
       }
 
       function getSubagentModelLockText() {

@@ -169,6 +169,7 @@ export class ChatSessionStore {
     const now = new Date().toISOString();
     const copied: ChatSession = {
       ...source,
+      approvalMode: 'ask',
       id: randomUUID(),
       messages: source.messages.map(copyMessage),
       contextCompression: undefined,
@@ -582,6 +583,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       id: item.id,
       title,
       messages,
+      approvalMode: item.approvalMode === 'delegate' ? 'delegate' : 'ask',
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
       frozenImplicitSkillIds: normalizeStringArray(item.frozenImplicitSkillIds),
       requestProtocol: normalizeSessionRequestProtocol(item.requestProtocol),
@@ -1240,6 +1242,7 @@ function normalizeAuthorizationSource(value: unknown): NonNullable<ChatMessage['
   return value === 'low_risk'
     || value === 'run_policy'
     || value === 'configuration'
+    || value === 'delegated_approver'
     || value === 'explicit_confirmation'
     || value === 'user_denied'
     ? value
@@ -1329,7 +1332,7 @@ function normalizeMessageContextMeta(value: unknown): ChatMessageContextMeta | u
   const protectedReason = typeof value.protectedReason === 'string' && value.protectedReason.trim()
     ? value.protectedReason.trim()
     : undefined;
-  const displayKind = value.displayKind === 'draft_run_auto_continue'
+  const displayKind = value.displayKind === 'draft_run_auto_continue' || value.displayKind === 'delegated_auto_continue'
     ? value.displayKind
     : undefined;
   return isProtected || protectedReason || displayKind

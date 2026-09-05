@@ -10,6 +10,20 @@ import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import type { DraftRun, DraftRunSpec } from '../src/shared/types';
 import { clearCreatedTerminals, createdTerminals } from './stubs/vscode';
 
+test('delegated execution requires its matching approval record and remains single-use', async () => {
+  const executor = new SpawnDraftRunExecutor();
+  const draftRun = createDraftRun(['-e', 'process.stdout.write("delegated")']);
+  const authorization = new DraftRunAuthorizationService();
+  assert.throws(() => authorization.createDelegatedPermit(draftRun, () => false), /no longer authorized/u);
+  const permit = authorization.createDelegatedPermit(draftRun, () => true);
+  await assert.rejects(executor.execute({ draftRun, permit, onOutput: () => {} }), /approval record/u);
+  draftRun.authorizationSource = 'delegated_approver';
+  const result = await executor.execute({ draftRun, permit, onOutput: () => {} });
+  assert.equal(result.exitCode, 0);
+  await assert.rejects(executor.execute({ draftRun, permit, onOutput: () => {} }), /already consumed/u);
+  executor.dispose();
+});
+
 test('SpawnDraftRunExecutor passes a literal argv with shell disabled and consumes the permit once', async () => {
   clearCreatedTerminals();
   const executor = new SpawnDraftRunExecutor();

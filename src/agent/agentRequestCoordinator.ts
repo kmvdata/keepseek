@@ -18,6 +18,7 @@ import { getConfiguredPromptCacheTtlMs } from '../shared/config';
 import { getAgentContextCompressionSettings } from '../shared/modelProfiles';
 
 export interface AgentRequestCoordinatorInput {
+  approvalMode?: AgentRequest['approvalMode'];
   prompt: string;
   model: KeepseekModel;
   settings: AgentSettings;
@@ -60,6 +61,7 @@ export class AgentRequestCoordinator {
 
   public createAgentRequest(input: AgentRequestCoordinatorInput): AgentRequest {
     return {
+      approvalMode: input.approvalMode,
       prompt: input.prompt,
       model: { ...input.model },
       settings: { ...input.settings },

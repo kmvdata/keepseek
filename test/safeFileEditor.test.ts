@@ -9,6 +9,33 @@ import { SafeFileEditor } from '../src/edits/safeFileEditor';
 import type { DraftEdit } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
 
+test('delegated file application rechecks approval after reading and preserves the file on revocation', async (t) => {
+  const root = await configureWorkspace(t, 'keepseek-revoked-edit-');
+  const targetPath = path.join(root, 'file.txt');
+  await fs.writeFile(targetPath, 'original');
+  const edit = { ...createDeleteEdit(targetPath), action: 'modify' as const, newText: 'changed' };
+  let checks = 0;
+  await assert.rejects(new SafeFileEditor().applyDraftEdit(edit, 'set', {
+    authorizedUri: edit.uri, isAuthorized: () => ++checks < 2
+  }), /revoked/u);
+  assert.equal(await fs.readFile(targetPath, 'utf8'), 'original');
+});
+
+test('delegated external edit requires the exact URI and retains a usable revert checkpoint', async (t) => {
+  const root = await configureWorkspace(t, 'keepseek-external-edit-');
+  const outside = path.join(root, 'external.txt');
+  await fs.writeFile(outside, 'original');
+  vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(path.join(root, 'workspace')), name: 'workspace' }];
+  const editor = new SafeFileEditor();
+  const edit = { ...createDeleteEdit(outside), action: 'modify' as const, newText: 'changed' };
+  await assert.rejects(editor.applyDraftEdit(edit), /cannotApplyOutsideWorkspace/u);
+  await assert.rejects(editor.applyDraftEdit(edit, 'set', { authorizedUri: 'file:///other', isAuthorized: () => true }), /revoked/u);
+  const checkpoint = await editor.applyDraftEdit(edit, 'set', { authorizedUri: edit.uri, isAuthorized: () => true });
+  assert.equal(await fs.readFile(outside, 'utf8'), 'changed');
+  await editor.revertCheckpoint(checkpoint);
+  assert.equal(await fs.readFile(outside, 'utf8'), 'original');
+});
+
 test('deletes a bounded UTF-8 text file and restores its exact bytes from the checkpoint', async (t) => {
   const root = await configureWorkspace(t, 'keepseek-safe-delete-');
   const targetPath = path.join(root, 'src', 'remove.ts');

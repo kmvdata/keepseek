@@ -157,7 +157,7 @@ export class DraftRunStore {
   public async approveAndRun(
     id: string,
     authorizedExternalReferenceUris: ReadonlySet<string>,
-    options: { autoContinue?: boolean } = {}
+    options: { autoContinue?: boolean; delegatedApproval?: () => boolean; signal?: AbortSignal } = {}
   ): Promise<DraftRun | undefined> {
     const draftRun = this.draftRuns.get(id);
     if (!draftRun || draftRun.status !== 'pending' || this.approving.has(id)) {
@@ -165,10 +165,17 @@ export class DraftRunStore {
     }
     this.approving.add(id);
     draftRun.autoContinueRequested = options.autoContinue === true || undefined;
+    const assertAuthorized = () => {
+      if (options.signal?.aborted || (options.delegatedApproval && !options.delegatedApproval())) {
+        throw new Error('DraftRun approval was cancelled or revoked.');
+      }
+    };
     try {
+      assertAuthorized();
       await this.validateBeforeApproval(draftRun, authorizedExternalReferenceUris);
+      assertAuthorized();
       draftRun.status = 'approved';
-      draftRun.authorizationSource = 'user_click';
+      draftRun.authorizationSource = options.delegatedApproval ? 'delegated_approver' : 'user_click';
       draftRun.approvedAt = new Date().toISOString();
       draftRun.updatedAt = draftRun.approvedAt;
       this.emitState(draftRun);
@@ -180,9 +187,14 @@ export class DraftRunStore {
       this.emitState(draftRun);
       await this.persistNow();
 
-      const permit = this.authorization.createUserClickPermit(draftRun);
+      assertAuthorized();
+      const permit = options.delegatedApproval
+        ? this.authorization.createDelegatedPermit(draftRun, options.delegatedApproval)
+        : this.authorization.createUserClickPermit(draftRun);
       const abortController = new AbortController();
       this.abortControllers.set(draftRun.id, abortController);
+      const abort = () => abortController.abort();
+      options.signal?.addEventListener('abort', abort, { once: true });
       if (this.cancelRequests.delete(draftRun.id)) {
         abortController.abort();
       }
@@ -195,7 +207,7 @@ export class DraftRunStore {
       if (abortController.signal.aborted) {
         this.executor.cancel(draftRun.id);
       }
-      const outcome = await execution;
+      const outcome = await execution.finally(() => options.signal?.removeEventListener('abort', abort));
       draftRun.exitCode = outcome.exitCode;
       draftRun.signal = outcome.signal;
       draftRun.timedOut = outcome.timedOut;

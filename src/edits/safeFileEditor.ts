@@ -21,6 +21,11 @@ interface SnapshotReadOptions {
   requireSafeDeleteText?: boolean;
 }
 
+export interface DelegatedEditApproval {
+  authorizedUri: string;
+  isAuthorized: () => boolean;
+}
+
 export class SafeFileEditor {
   private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
@@ -29,9 +34,15 @@ export class SafeFileEditor {
     private readonly t: Translator = (key) => key
   ) {}
 
-  public async applyDraftEdit(edit: DraftEdit, changeSetId = 'legacy'): Promise<ChangeCheckpoint> {
+  public async applyDraftEdit(edit: DraftEdit, changeSetId = 'legacy', approval?: DelegatedEditApproval): Promise<ChangeCheckpoint> {
     const uri = vscode.Uri.parse(edit.uri);
-    this.assertWorkspaceTarget(uri, edit.label);
+    const checkApproval = () => {
+      if (approval && (!vscode.workspace.isTrusted || approval.authorizedUri !== edit.uri || !approval.isAuthorized())) {
+        throw new Error('Delegated file approval was cancelled or revoked.');
+      }
+    };
+    checkApproval();
+    this.assertWorkspaceTarget(uri, edit.label, approval?.authorizedUri);
     this.assertNoDirtyOpenEditor(uri, edit.label);
     const original = await this.readSnapshot(uri, {
       label: edit.label,
@@ -41,6 +52,7 @@ export class SafeFileEditor {
     this.assertDeleteBaselineMatches(edit, original);
 
     const checkpoint: ChangeCheckpoint = {
+      authorizedExternalUri: approval && !vscode.workspace.getWorkspaceFolder(uri) ? uri.toString() : undefined,
       id: randomUUID(),
       changeSetId,
       editId: edit.id,
@@ -56,19 +68,21 @@ export class SafeFileEditor {
       appliedAt: new Date().toISOString()
     };
 
+    checkApproval();
+    this.assertNoDirtyOpenEditor(uri, edit.label);
     if (edit.action === 'delete') {
       await vscode.workspace.fs.delete(uri, { recursive: false, useTrash: false });
       await this.closeOpenTabs(uri);
       return checkpoint;
     }
 
-    await this.writeTextFile(uri, edit.newText, edit.action === 'create');
+    await this.writeTextFile(uri, edit.newText, edit.action === 'create', checkApproval);
     return checkpoint;
   }
 
   public async revertCheckpoint(checkpoint: ChangeCheckpoint): Promise<ChangeCheckpoint> {
     const uri = vscode.Uri.parse(checkpoint.uri);
-    this.assertWorkspaceTarget(uri, checkpoint.label);
+    this.assertWorkspaceTarget(uri, checkpoint.label, checkpoint.authorizedExternalUri);
     this.assertNoDirtyOpenEditor(uri, checkpoint.label);
     const current = await this.readSnapshot(uri, {
       label: checkpoint.label,
@@ -101,7 +115,8 @@ export class SafeFileEditor {
     throw new Error(this.t('cannotApplyDirtyDraftEdit', { label }));
   }
 
-  private assertWorkspaceTarget(uri: vscode.Uri, label: string): void {
+  private assertWorkspaceTarget(uri: vscode.Uri, label: string, authorizedUri?: string): void {
+    if (authorizedUri === uri.toString() && uri.scheme === 'file' && vscode.workspace.isTrusted) return;
     if (vscode.workspace.getWorkspaceFolder(uri)) {
       return;
     }
@@ -198,11 +213,12 @@ export class SafeFileEditor {
     throw new Error(this.t('cannotDeleteUnreadableFile', { label }));
   }
 
-  private async writeTextFile(uri: vscode.Uri, text: string, createParent: boolean): Promise<void> {
+  private async writeTextFile(uri: vscode.Uri, text: string, createParent: boolean, checkApproval?: () => void): Promise<void> {
     const hasActiveTextTab = this.findOpenTextTabs(uri).some((tab) => tab.isActive);
     if (createParent) {
       await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
     }
+    checkApproval?.();
     await vscode.workspace.fs.writeFile(uri, this.encoder.encode(text));
     if (hasActiveTextTab) {
       const document = await vscode.workspace.openTextDocument(uri);

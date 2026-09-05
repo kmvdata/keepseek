@@ -1,5 +1,5 @@
 import type { KeepseekLanguage } from '../shared/i18n';
-import type { AgentSettings, SafeNpmScript } from '../shared/types';
+import type { AgentSettings, ApprovalMode, SafeNpmScript } from '../shared/types';
 import type { ModelSourceProvider } from '../accounts/types';
 
 export interface PromptReferenceInput {
@@ -20,6 +20,7 @@ export interface DroppedFileReferenceInput {
 }
 
 export type WebviewMessage =
+  | { type: 'setApprovalMode'; mode: ApprovalMode }
   | { type: 'ready' }
   | { type: 'refreshBalance' }
   | { type: 'sendPrompt'; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }

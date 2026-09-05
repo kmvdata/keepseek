@@ -8,8 +8,8 @@ KeepSeek 是一个 VS Code 扩展：在 Secondary Sidebar 提供 AI 对话面板
 ## 一、最高优先级不变式（不可违反）
 
 1. **缓存命中率是第一位的产品行为**（与安全同级，高于"实现简洁性"）：DeepSeek 前缀缓存从请求第 0 个 token 起逐字节匹配，任何历史字节漂移都会使该点之后整段缓存失效。改动若可能改变请求前缀字节，必须证明前缀仍稳定，或明确标注为可接受的缓存代价。
-2. **Agent 永不隐式写盘或执行命令**：create/modify/delete 只能生成待确认 DraftEdit → ChangeSet，用户 Apply 后才由 `SafeFileEditor` 落盘；任意命令只能生成不可变 DraftRun，用户逐次点击批准并取得一次性 permit 后才可 spawn。不要提前声称文件或命令结果已发生。
-3. **只读与 Git 边界**：内建 Agent 只读工具不出工作区，Git 工具仍只有 status/diff/branch/patch/commit message 建议；commit/push 等 mutation 只能作为完整可见的 DraftRun 经用户本次明确批准，绝不自动执行。
+2. **写盘与执行必须经审批管线**：create/modify/delete 只能生成 DraftEdit → ChangeSet，再由 `SafeFileEditor` 落盘；任意命令只能生成不可变 DraftRun，取得一次性 permit 后才可 spawn。默认“请求批准”由用户逐项批准；用户显式选择本会话“帮我批准”时，由宿主按委托策略自动批准（见 4.5）。不要提前声称文件或命令结果已发生。
+3. **只读与 Git 边界**：只读工具仅访问工作区或已授权外部路径，Git 工具仍只有 status/diff/branch/patch/commit message 建议；commit/push 等 mutation 只能作为完整可见的 DraftRun 经当前审批模式授权，不能直接执行。
 4. **受控验证与任意执行分离**：`keepseek_run_validation` 只运行固定 `compile` / `lint` / `test`；任意命令只能走 DraftRun，不得借验证/修复循环绕过逐次确认。验证失败后的 DraftEdit/`waiting_for_apply`/修复轮次约束保持不变。
 
 ## 二、常用命令（bun）
@@ -91,9 +91,11 @@ src/
 ### 4.5 DraftRun 与一次性执行
 
 - `keepseek_run_draft` 只生成不可变 pending DraftRun，不 spawn；审核面必须完整显示 executable、argv、cwd、env、用途和风险，拒绝不能改写命令。
-- `DraftRunExecutor` 只接受绑定 `draftRunId + specHash`、短时有效且单次消费的 `ExecutionPermit`。当前版本仅 `user_click` 可签发；AI 风险分析只是证据，不能授权。
+- `DraftRunExecutor` 只接受绑定 `draftRunId + specHash`、短时有效且单次消费的 `ExecutionPermit`，来源仅 `user_click` 或 `delegated_approver`；后者必须有匹配审批记录。AI 风险分析不能自行改变审批模式。
 - 执行使用 `spawn(executable, args, { shell: false })`；需要 shell 语法时必须显式选择 shell executable 并把原始脚本作为 argv 展示。未受信任工作区、未授权外部 cwd、状态/specHash 不匹配均硬拒绝。
 - 取消、超时、输出截断、扩展重启中断均进入持久化状态；`approved/running` 重启后只能标记 interrupted，绝不自动重跑。完成项复用必须克隆为新的 pending 并再次确认。
+
+**会话审批模式**：命令菜单提供 `ask`（请求批准，默认）和 `delegate`（帮我批准）。只有 Webview 用户操作可切换，不能通过模型工具、项目文件或 Skill 提权；跨工作区复制恢复 `ask`。下文所有“用户逐次批准 / Apply”在 `delegate` 下由宿主委托策略代办，仍经相同 Store/Editor/Executor。每轮完成后逐项应用草稿、执行命令，将真实结果追加到新 user 消息，再续跑；失败修改/命令阻止后续依赖命令。停止或切回 `ask` 撤销队列和未执行授权；重启不恢复自动执行队列。外部文件/cwd 按精确 URI 授权，保留工作区信任、冲突/脏编辑器、单次 permit 与取消检查。V6 system/schema 同时静态描述两种模式；当前模式只追加新 user 尾部，V1–V5 字节不变。旧会话首次显式启用 delegate 升级 V6，是一次可接受缓存重置。
 
 ### 4.6 Skills 与项目指令
 

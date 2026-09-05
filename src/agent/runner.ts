@@ -384,6 +384,7 @@ export class AgentLoop {
 
   private async runLoop(request: AgentRequest, callbacks: AgentRunCallbacks): Promise<AgentResponse> {
     this.workspaceTools.setAuthorizedExternalReferenceUris(request.authorizedExternalReferenceUris);
+    this.workspaceTools.setDelegatedFileAuthorization?.(request.approvalMode === 'delegate' && !request.persona);
     const checkpoint = request.checkpoint!;
     const restored = checkpoint.state;
     let saveStep: (() => Promise<void>) | undefined;
@@ -445,6 +446,7 @@ export class AgentLoop {
       restored?.validationState?.validations
     );
     const runAuthorizationPolicy = this.toolAuthorization.createRunPolicy(trace.runId);
+    runAuthorizationPolicy.approvalMode = request.persona ? 'ask' : request.approvalMode;
     const toolResultLedger: ToolResultLedgerEntry[] = [];
     // 本 run 内 native 工具轮的原样字节快照（assistant tool_calls + tool 结果），
     // 由调用方持久化到 assistant 消息，跨轮重建时逐字节还原。

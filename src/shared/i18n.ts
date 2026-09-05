@@ -9,6 +9,14 @@ type TranslationCatalog = Record<string, string>;
 
 export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
+    approvalMode: '审批模式',
+    approvalModeDescription: '选择写入文件和运行命令的审批方式',
+    approvalAsk: '请求批准',
+    approvalDelegate: '帮我批准',
+    approvalAskDescription: '写入文件和运行命令前，逐项由你批准',
+    approvalDelegateDescription: '本会话自动批准文件访问、修改、删除和命令，并继续任务',
+    approvalRequiresTrust: '请先信任当前工作区，再启用“帮我批准”。',
+    delegatedApprovalFailed: '自动批准未完成：{error}',
     runContinue: '继续任务',
     runContinueInNewTurn: '继续（新一轮）',
     runNewTurnNotice: '将发送一条继续请求，开启新一轮预算并产生新的模型用量；不会自动应用修改或批准命令。',
@@ -658,6 +666,14 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     stopShortcutHintMac: '按 Ctrl+Enter 或 Command+Enter 中止'
   },
   en: {
+    approvalMode: 'Approvals',
+    approvalModeDescription: 'Choose how file writes and commands are approved',
+    approvalAsk: 'Ask for approval',
+    approvalDelegate: 'Approve for me',
+    approvalAskDescription: 'Ask before each file write or command execution',
+    approvalDelegateDescription: 'Automatically approve file access, edits, deletions and commands for this session, then continue the task',
+    approvalRequiresTrust: 'Trust the current workspace before enabling Approve for me.',
+    delegatedApprovalFailed: 'Automatic approval did not finish: {error}',
     runContinue: 'Continue task',
     runContinueInNewTurn: 'Continue in a new turn',
     runNewTurnNotice: 'Sends a follow-up request with a fresh per-run budget and new model usage. Does not apply edits or approve commands.',

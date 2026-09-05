@@ -787,7 +787,9 @@ export function getInputStyles(): string {
     }
 
     .command-menu.is-readonly.allows-model-selection #commandModelSwitch:not(:disabled),
-    .command-menu.is-readonly.allows-model-selection .command-model-option:not(:disabled) {
+    .command-menu.is-readonly.allows-model-selection .command-model-option:not(:disabled),
+    .command-menu.is-readonly.allows-approval-selection #commandApprovalModeSwitch:not(:disabled),
+    .command-menu.is-readonly.allows-approval-selection #commandApprovalModeList .command-model-option:not(:disabled) {
       cursor: pointer;
     }
 
@@ -795,7 +797,12 @@ export function getInputStyles(): string {
     .command-menu.is-readonly.allows-model-selection #commandModelSwitch:not(:disabled):focus-visible,
     .command-menu.is-readonly.allows-model-selection .command-model-option:not(:disabled):hover,
     .command-menu.is-readonly.allows-model-selection .command-model-option:not(:disabled):focus-visible,
-    .command-menu.is-readonly.allows-model-selection .command-model-option.is-pending:not(:disabled) {
+    .command-menu.is-readonly.allows-model-selection .command-model-option.is-pending:not(:disabled),
+    .command-menu.is-readonly.allows-approval-selection #commandApprovalModeSwitch:not(:disabled):hover,
+    .command-menu.is-readonly.allows-approval-selection #commandApprovalModeSwitch:not(:disabled):focus-visible,
+    .command-menu.is-readonly.allows-approval-selection #commandApprovalModeSwitch[aria-expanded="true"]:not(:disabled),
+    .command-menu.is-readonly.allows-approval-selection #commandApprovalModeList .command-model-option:not(:disabled):hover,
+    .command-menu.is-readonly.allows-approval-selection #commandApprovalModeList .command-model-option:not(:disabled):focus-visible {
       color: var(--vscode-list-hoverForeground, var(--vscode-foreground));
       background: var(--vscode-list-hoverBackground);
       outline: 1px solid var(--vscode-focusBorder);

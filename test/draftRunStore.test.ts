@@ -15,6 +15,30 @@ import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import { DraftRunStore } from '../src/runs/draftRunStore';
 import type { DraftRun, DraftRunProposal, DraftRunSpec, ExecutionPermit } from '../src/shared/types';
 
+test('delegated DraftRun records its approval source and consumes a single immutable proposal', async () => {
+  await withDraftRunFixture(async ({ workspaceRoot, store, executor }) => {
+    const proposal = createProposal(workspaceRoot);
+    store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
+    await store.approveAndRun(proposal.id, new Set(), { delegatedApproval: () => true });
+    await store.approveAndRun(proposal.id, new Set(), { delegatedApproval: () => true });
+    assert.equal(executor.executeCount, 1);
+    assert.equal(executor.lastPermit?.source, 'delegated_approver');
+    assert.equal(store.get(proposal.id)?.authorizationSource, 'delegated_approver');
+  });
+});
+
+test('revoking delegation while persisting approval prevents process creation', async () => {
+  await withDraftRunFixture(async ({ workspaceRoot, store, executor }) => {
+    const proposal = createProposal(workspaceRoot);
+    store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
+    let checks = 0;
+    const result = await store.approveAndRun(proposal.id, new Set(), { delegatedApproval: () => ++checks < 3 });
+    assert.equal(executor.executeCount, 0);
+    assert.equal(result?.status, 'failed');
+    assert.match(result?.error ?? '', /revoked/u);
+  });
+});
+
 test('DraftRun stays pending until a one-shot click permit executes its immutable argv', async () => {
   await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
     executor.output = [

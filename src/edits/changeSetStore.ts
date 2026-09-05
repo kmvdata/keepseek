@@ -13,7 +13,7 @@ import type {
 } from '../shared/types';
 import { getErrorMessage } from '../shared/errors';
 import type { DraftDiffService } from './draftDiffService';
-import type { SafeFileEditor } from './safeFileEditor';
+import type { DelegatedEditApproval, SafeFileEditor } from './safeFileEditor';
 import { createChangeSet } from './changeSet';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
@@ -316,12 +316,12 @@ export class ChangeSetStore {
     return true;
   }
 
-  public async applyEdit(editId: string): Promise<ChangeSetApplyResult | undefined> {
+  public async applyEdit(editId: string, approval?: DelegatedEditApproval): Promise<ChangeSetApplyResult | undefined> {
     const found = this.findEdit(editId);
     if (!found || !isApplicable(found.edit)) {
       return undefined;
     }
-    const result = await this.applyFiles(found.changeSet, [found.edit]);
+    const result = await this.applyFiles(found.changeSet, [found.edit], approval);
     if (result.appliedEditIds.length) {
       await this.recordAppliedResult(found.changeSet, result).catch(() => undefined);
     }
@@ -476,12 +476,12 @@ export class ChangeSetStore {
     this.schedulePersist();
   }
 
-  private async applyFiles(changeSet: ChangeSet, files: ChangeSetFile[]): Promise<ChangeSetApplyResult> {
+  private async applyFiles(changeSet: ChangeSet, files: ChangeSetFile[], approval?: DelegatedEditApproval): Promise<ChangeSetApplyResult> {
     const appliedEditIds: string[] = [];
     const failed: ChangeSetApplyFailure[] = [];
     for (const file of files) {
       try {
-        const checkpoint = await this.safeFileEditor.applyDraftEdit(file, changeSet.id);
+        const checkpoint = await this.safeFileEditor.applyDraftEdit(file, changeSet.id, approval);
         this.checkpoints.set(checkpoint.id, checkpoint);
         file.checkpointId = checkpoint.id;
         file.status = 'applied';

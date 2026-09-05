@@ -166,12 +166,18 @@ export interface WorkspaceToolAdapter {
   getLabel(uri: vscode.Uri): string;
   /** 设置本轮 Agent run 中用户显式引用、已授权的外部文件/目录 URI 集合（uri.toString()）。 */
   setAuthorizedExternalReferenceUris(uris?: Iterable<string>): void;
+  setDelegatedFileAuthorization?(enabled: boolean): void;
 }
 
 export class WorkspaceToolService implements WorkspaceToolAdapter {
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
   private readonly encoder = new TextEncoder();
   private readonly authorizedExternalReferenceUris = new Set<string>();
+  private delegatedFileAuthorization = false;
+
+  public setDelegatedFileAuthorization(enabled: boolean): void {
+    this.delegatedFileAuthorization = enabled;
+  }
 
   public setAuthorizedExternalReferenceUris(uris?: Iterable<string>): void {
     this.authorizedExternalReferenceUris.clear();
@@ -772,6 +778,9 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     }
 
     const uri = this.resolveWorkspaceFileUriCandidate(rawPath, folders);
+    if (this.delegatedFileAuthorization && vscode.workspace.isTrusted && uri.scheme === 'file') {
+      this.authorizedExternalReferenceUris.add(uri.toString());
+    }
     if (!this.isUriInsideWorkspace(uri) && !this.authorizedExternalReferenceUris.has(uri.toString())) {
       throw new Error(
         'The requested file must be inside the currently open workspace or an explicitly referenced external file.'

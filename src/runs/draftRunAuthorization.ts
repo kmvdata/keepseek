@@ -4,6 +4,11 @@ import type { DraftRun, ExecutionPermit } from '../shared/types';
 const PERMIT_TTL_MS = 30_000;
 
 export class DraftRunAuthorizationService {
+  public createDelegatedPermit(draftRun: DraftRun, isAuthorized: () => boolean): ExecutionPermit {
+    if (!isAuthorized()) throw new Error('Delegated approval is no longer authorized.');
+    return { ...this.createUserClickPermit(draftRun), source: 'delegated_approver' };
+  }
+
   public createUserClickPermit(draftRun: DraftRun): ExecutionPermit {
     return {
       draftRunId: draftRun.id,
