@@ -1594,17 +1594,18 @@ export function getInputScript(): string {
         var items = [
           [turnCacheAvailable ? 'usageMetricTurnHit' : 'usageMetricCacheUnavailable', turnCacheAvailable
             ? formatCacheHitRate(metrics.lastTurnUsage)
-            : t('usageMetricCacheUnavailableValue')],
+            : formatUsageAvailabilityValue(metrics.lastTurnUsage, 'usageMetricCacheUnavailableValue')],
           [usageGroups.length > 1 ? 'usageMetricCurrentModelHit' : 'usageMetricAverageHit', formatCacheHitRate(cacheRateUsage)],
           ['usageMetricTurnTokens', formatMetricTokens(metrics.lastTurnUsage && metrics.lastTurnUsage.totalTokens, hasUsageData(metrics.lastTurnUsage))],
-          ['usageMetricTurnCount', metrics.turnCount > 0 ? formatMetricInteger(metrics.turnCount) : '-']
+          ['usageMetricTurnCount', metrics.turnCount > 0 ? formatMetricInteger(metrics.turnCount) : t('usagePendingValue')]
         ];
         var costDisplay = formatAccountedCosts(sessionUsage);
         items.splice(2, 0, [
           costDisplay.available
             ? costDisplay.partial ? 'usageMetricAccountedCost' : 'usageMetricSessionCost'
             : 'usageMetricCostUnavailable',
-          costDisplay.available ? costDisplay.amountText : t('usageMetricCostUnavailableValue')
+          costDisplay.available ? costDisplay.amountText
+            : formatUsageAvailabilityValue(sessionUsage, 'usageMetricCostUnavailableValue')
         ]);
         if (metrics.supportsBilling) {
           items.push(['usageMetricBalance', formatMetricBalance(metrics.balance)]);
@@ -1616,7 +1617,8 @@ export function getInputScript(): string {
             ['usageSubagentTaskCount', subagents.estimatesAvailable ? formatMetricInteger(subagents.totalCount) : t('usageNotRecorded')],
             ['usageIsolatedEstimate', subagents.estimatesAvailable
               ? '≈ ' + formatCompactTokenCount(subagents.isolatedIntermediateTokensEstimate) : t('usageNotRecorded')],
-            ['usageMetricSessionCost', costDisplay.available ? costDisplay.amountText : t('usageMetricCostUnavailableValue')]
+            ['usageMetricSessionCost', costDisplay.available ? costDisplay.amountText
+              : formatUsageAvailabilityValue(sessionUsage, 'usageMetricCostUnavailableValue')]
           ];
         }
         var latestRunState = getLatestRunState();
@@ -1798,12 +1800,15 @@ export function getInputScript(): string {
         var grid = usageNode('div', 'usage-session-metrics-grid');
         var cost = formatAccountedCosts(selected.total);
         var latestRunState = getLatestRunState();
+        var hasSessionUsage = hasUsageData(selected.total);
         var metricsList = [
           ['usageAverageHit', formatActualCacheRateOnly(selected.total), 'is-positive'],
-          ['usageCostLabel', cost.available ? cost.amountText : t('usageMetricCostUnavailableValue'), ''],
-          ['usageEffectiveRuntime', latestRunState ? formatUsageRuntime(latestRunState.usedMs) : '—', ''],
-          ['usageRequestCount', formatMetricInteger(selected.total.requestCount), ''],
-          ['usageCumulativeTokens', formatMetricInteger(selected.total.totalTokens), 'is-wide']
+          ['usageCostLabel', cost.available ? cost.amountText
+            : formatUsageAvailabilityValue(selected.total, 'usageMetricCostUnavailableValue'), ''],
+          ['usageEffectiveRuntime', latestRunState ? formatUsageRuntime(latestRunState.usedMs)
+            : t(hasSessionUsage ? 'usageMetricUnavailableValue' : 'usagePendingValue'), ''],
+          ['usageRequestCount', hasSessionUsage ? formatMetricInteger(selected.total.requestCount) : t('usagePendingValue'), ''],
+          ['usageCumulativeTokens', hasSessionUsage ? formatMetricInteger(selected.total.totalTokens) : t('usagePendingValue'), 'is-wide']
         ];
         if (metrics.supportsBilling) {
           metricsList.push(['usageMetricBalance', formatMetricBalance(metrics.balance), '']);
@@ -1943,7 +1948,8 @@ export function getInputScript(): string {
           ['usageTotalTokensLabel', formatMetricInteger(usage.totalTokens)],
           ['usageCacheHitRate', formatActualCacheRateOnly(usage)],
           ['usageCostLabel', formatAccountedCosts(usage).available
-            ? formatAccountedCosts(usage).amountText : t('usageMetricCostUnavailableValue')]
+            ? formatAccountedCosts(usage).amountText
+            : formatUsageAvailabilityValue(usage, 'usageMetricCostUnavailableValue')]
         ].forEach(function(item) {
           var metric = usageNode('div', 'usage-analysis-card-metric');
           metric.append(usageNode('span', '', t(item[0])), usageNode('strong', '', item[1]));
@@ -2044,27 +2050,30 @@ export function getInputScript(): string {
       }
 
       function formatActualCacheRateOnly(usage) {
-        if (!usage || !(usage.cacheDataRequestCount > 0 || hasCacheUsageData(usage))) {
+        if (!hasUsageData(usage)) {
+          return t('usagePendingValue');
+        }
+        if (!(usage.cacheDataRequestCount > 0 || hasCacheUsageData(usage))) {
           return t('usageMetricCacheUnavailableValue');
         }
         var rate = Number.isFinite(usage.cacheHitRate) ? usage.cacheHitRate : calculateHitRate(usage);
-        return Number.isFinite(rate) ? formatMetricPercent(rate) : '—';
+        return Number.isFinite(rate) ? formatMetricPercent(rate) : t('usageMetricCacheUnavailableValue');
       }
 
       function formatRoundedPercent(value) {
         var number = Number(value);
-        return Number.isFinite(number) ? Math.round(number) + '%' : '—';
+        return Number.isFinite(number) ? Math.round(number) + '%' : t('usagePendingValue');
       }
 
       function formatUsageSharePercent(value) {
         var number = Number(value);
-        if (!Number.isFinite(number)) { return '—'; }
+        if (!Number.isFinite(number)) { return t('usagePendingValue'); }
         return number > 0 && number < 1 ? '<1%' : Math.round(number) + '%';
       }
 
       function formatUsageRuntime(value) {
         var totalSeconds = Math.max(0, Math.floor(Number(value) / 1000));
-        if (!Number.isFinite(totalSeconds)) { return '—'; }
+        if (!Number.isFinite(totalSeconds)) { return t('usagePendingValue'); }
         var minutes = Math.floor(totalSeconds / 60);
         var seconds = totalSeconds % 60;
         return minutes > 0
@@ -2103,10 +2112,14 @@ export function getInputScript(): string {
       }
 
       function formatActualCache(usage) {
-        if (!usage || !(usage.cacheDataRequestCount > 0)) {
+        if (!hasUsageData(usage)) {
+          return t('usagePendingValue');
+        }
+        if (!(usage.cacheDataRequestCount > 0)) {
           return t('usageCacheUnavailableCoverage', { missing: usage ? usage.cacheDataMissingRequestCount : 0 });
         }
-        var rate = Number.isFinite(usage.cacheHitRate) ? formatMetricPercent(usage.cacheHitRate) : '—';
+        var rate = Number.isFinite(usage.cacheHitRate)
+          ? formatMetricPercent(usage.cacheHitRate) : t('usageMetricCacheUnavailableValue');
         return rate + ' · ' + t('usageCacheCoverage', {
           reported: usage.cacheDataRequestCount, missing: usage.cacheDataMissingRequestCount
         });
@@ -2114,8 +2127,14 @@ export function getInputScript(): string {
 
       function formatUsageCost(usage) {
         var value = formatAccountedCosts(usage);
-        return value.available ? value.text : usage && usage.unpricedRequestCount > 0
+        if (value.available) { return value.text; }
+        if (!hasUsageData(usage)) { return t('usagePendingValue'); }
+        return usage.unpricedRequestCount > 0
           ? t('usageUnpriced', { count: usage.unpricedRequestCount }) : t('usageMetricCostUnavailableValue');
+      }
+
+      function formatUsageAvailabilityValue(usage, unavailableKey) {
+        return hasUsageData(usage) ? t(unavailableKey) : t('usagePendingValue');
       }
 
       function hasActualUsage(usage) {
@@ -2247,6 +2266,9 @@ export function getInputScript(): string {
       }
 
       function formatCacheHitRate(usage) {
+        if (!hasUsageData(usage)) {
+          return t('usagePendingValue');
+        }
         if (!hasCacheUsageData(usage)) {
           return t('usageMetricCacheUnavailableValue');
         }
@@ -2332,13 +2354,16 @@ export function getInputScript(): string {
       }
 
       function formatMetricPercent(value) {
+        if (value === null || value === undefined || value === '') {
+          return t('usagePendingValue');
+        }
         var number = Number(value);
-        return Number.isFinite(number) ? number.toFixed(2) + '%' : '-';
+        return Number.isFinite(number) ? number.toFixed(2) + '%' : t('usagePendingValue');
       }
 
       function formatMetricTokens(value, hasData) {
         if (!hasData) {
-          return '-';
+          return t('usagePendingValue');
         }
         return formatCompactTokenCount(readNonNegativeNumber(value, 0));
       }
@@ -2361,11 +2386,11 @@ export function getInputScript(): string {
 
       function formatMetricCost(value, currency, hasData) {
         if (!hasData) {
-          return '-';
+          return t('usagePendingValue');
         }
         var number = Number(value);
         if (!Number.isFinite(number)) {
-          return '-';
+          return t('usagePendingValue');
         }
         if (number > 0 && number < 0.000001) { return (currency || '') + '<0.000001'; }
         return (currency || '') + number.toLocaleString(undefined, {
@@ -2376,7 +2401,8 @@ export function getInputScript(): string {
 
       function formatMetricBalance(balance) {
         if (!balance || balance.totalBalance === null) {
-          return '-';
+          return balance && balance.error
+            ? t('usageMetricUnavailableValue') : t('usagePendingValue');
         }
         return (balance.currency || '¥') + Number(balance.totalBalance).toLocaleString(undefined, {
           minimumFractionDigits: 2,
