@@ -45,15 +45,16 @@
       },
       {
         "command": "keepseek.addSelectionToContext",
-        "title": "KeepSeek: Add Selection to Context"
+        "title": "KeepSeek: Add to Context"
       },
       {
         "command": "keepseek.addTerminalSelectionToContext",
-        "title": "KeepSeek: Add Terminal Selection to Context"
+        "title": "KeepSeek: Add to Context",
+        "icon": "$(add)"
       },
       {
         "command": "keepseek.addDebugConsoleSelectionToContext",
-        "title": "KeepSeek: Add Debug Console Selection to Context"
+        "title": "KeepSeek: Add to Context"
       },
       {
         "command": "keepseek.addExplorerFileToContext",
@@ -256,7 +257,20 @@
       {
         "command": "keepseek.addSelectionToContext",
         "key": "ctrl+shift+l",
-        "mac": "cmd+shift+l"
+        "mac": "cmd+shift+l",
+        "when": "editorHasSelection && editorTextFocus && !inDebugRepl"
+      },
+      {
+        "command": "keepseek.addTerminalSelectionToContext",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l",
+        "when": "terminalFocus && terminalTextSelectedInFocused"
+      },
+      {
+        "command": "keepseek.addDebugConsoleSelectionToContext",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l",
+        "when": "inDebugRepl"
       },
       {
         "command": "keepseek.addExplorerFileToContext",
@@ -288,7 +302,14 @@
         {
           "command": "keepseek.addTerminalSelectionToContext",
           "when": "terminalTextSelected",
-          "group": "keepseek@1"
+          "group": "3_edit@10"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "keepseek.addTerminalSelectionToContext",
+          "when": "view == terminal && isWindows && terminalTextSelected",
+          "group": "navigation@99"
         }
       ]
     },

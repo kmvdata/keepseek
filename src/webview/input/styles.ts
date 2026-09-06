@@ -1123,6 +1123,60 @@ export function getInputStyles(): string {
       gap: 2px;
     }
 
+    .command-skill-filter-control {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      max-width: 26px;
+      overflow: hidden;
+      transition: max-width 140ms ease;
+    }
+
+    .command-skill-filter-control.is-open {
+      max-width: calc(clamp(88px, 34vw, 140px) + 28px);
+    }
+
+    .command-skill-filter-input {
+      flex: 0 0 auto;
+      width: 0;
+      min-width: 0;
+      height: 24px;
+      min-height: 24px;
+      margin: 0;
+      padding: 0;
+      border: 0 solid transparent;
+      border-radius: 4px;
+      opacity: 0;
+      color: var(--vscode-input-foreground);
+      background: var(--vscode-input-background);
+      font-size: 11px;
+      line-height: 22px;
+      pointer-events: none;
+      transform: translateX(4px);
+      transition: width 140ms ease, padding 140ms ease, opacity 100ms ease, transform 140ms ease;
+    }
+
+    .command-skill-filter-control.is-open .command-skill-filter-input {
+      width: clamp(88px, 34vw, 140px);
+      margin-right: 2px;
+      padding: 1px 6px;
+      border-width: 1px;
+      border-color: var(--vscode-input-border, transparent);
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateX(0);
+    }
+
+    .command-skill-filter-input:focus {
+      border-color: var(--vscode-focusBorder);
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: -1px;
+    }
+
+    .command-skill-filter-button[aria-expanded="true"] {
+      color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+    }
+
     .command-skill-icon-button {
       display: inline-flex;
       flex: 0 0 26px;

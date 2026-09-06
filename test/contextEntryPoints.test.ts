@@ -8,15 +8,18 @@ import { getScript } from '../src/webview/script';
 import { getStyles } from '../src/webview/styles';
 import { getTemplate } from '../src/webview/template';
 
-test('contributes editor, Explorer, and terminal context commands', async () => {
+test('contributes concise English editor, Explorer, and Windows-friendly terminal context commands', async () => {
   const packagePath = path.resolve(process.cwd(), 'package.json');
   const packageJson = JSON.parse(await readFile(packagePath, 'utf8')) as {
     contributes?: {
-      commands?: Array<{ command?: string }>;
+      commands?: Array<{ command?: string; title?: string; icon?: string }>;
+      keybindings?: Array<{ command?: string; key?: string; when?: string }>;
       menus?: Record<string, Array<{ command?: string; when?: string }>>;
     };
   };
+  const commands = packageJson.contributes?.commands ?? [];
   const commandIds = new Set((packageJson.contributes?.commands ?? []).map((command) => command.command));
+  const keybindings = packageJson.contributes?.keybindings ?? [];
   const menus = packageJson.contributes?.menus ?? {};
 
   assert.ok(commandIds.has('keepseek.addSelectionToContext'));
@@ -31,6 +34,33 @@ test('contributes editor, Explorer, and terminal context commands', async () => 
   );
   assert.ok(terminalSelectionMenu);
   assert.equal(terminalSelectionMenu?.when, 'terminalTextSelected');
+  assert.equal(
+    commands.find((command) => command.command === 'keepseek.addSelectionToContext')?.title,
+    'KeepSeek: Add to Context'
+  );
+  assert.equal(
+    commands.find((command) => command.command === 'keepseek.addTerminalSelectionToContext')?.title,
+    'KeepSeek: Add to Context'
+  );
+  assert.equal(
+    commands.find((command) => command.command === 'keepseek.addDebugConsoleSelectionToContext')?.title,
+    'KeepSeek: Add to Context'
+  );
+  assert.equal(
+    commands.find((command) => command.command === 'keepseek.addExplorerFileToContext')?.title,
+    'KeepSeek: Add File to Context'
+  );
+
+  const terminalKeybinding = keybindings.find(
+    (binding) => binding.command === 'keepseek.addTerminalSelectionToContext'
+  );
+  assert.equal(terminalKeybinding?.key, 'ctrl+shift+l');
+  assert.equal(terminalKeybinding?.when, 'terminalFocus && terminalTextSelectedInFocused');
+
+  const windowsTerminalTitleAction = menus['view/title']?.find(
+    (item) => item.command === 'keepseek.addTerminalSelectionToContext'
+  );
+  assert.equal(windowsTerminalTitleAction?.when, 'view == terminal && isWindows && terminalTextSelected');
 });
 
 test('provider focuses the contributed KeepSeek view container before inserting references', async () => {
@@ -167,6 +197,7 @@ test('command menu nests low-frequency Skill creation under the expanded Skills 
   const styles = getStyles();
   const titleIndex = inputTemplate.indexOf('data-i18n="skillsCommandTitle"');
   const mainButtonIndex = inputTemplate.indexOf('id="commandSkillsMainButton"');
+  const filterButtonIndex = inputTemplate.indexOf('id="commandSkillFilterButton"');
   const createButtonIndex = inputTemplate.indexOf('id="commandCreateSkillButton"');
   const skillsButtonIndex = inputTemplate.indexOf('id="commandSkillsButton"');
   const skillActionHandler = getGeneratedSection(
@@ -175,11 +206,11 @@ test('command menu nests low-frequency Skill creation under the expanded Skills 
     'function getSelectedModel(models)'
   );
 
-  assert.ok(mainButtonIndex >= 0 && titleIndex > mainButtonIndex && createButtonIndex > titleIndex && skillsButtonIndex > createButtonIndex);
+  assert.ok(mainButtonIndex >= 0 && titleIndex > mainButtonIndex && filterButtonIndex > titleIndex && createButtonIndex > filterButtonIndex && skillsButtonIndex > createButtonIndex);
   assert.match(inputTemplate, /id="commandCreateSkillButton"[\s\S]*?class="command-skill-icon-button command-skill-create-button hidden"/u);
   assert.match(inputTemplate, /id="commandSkillsButton"[\s\S]*?aria-controls="commandSkillList"/u);
   assert.match(inputTemplate, /data-i18n="skillsCommandTitle">使用 Skills</u);
-  assert.match(inputTemplate, /data-i18n="skillsDescription">[^<]*@[^<]*Skills 选择器</u);
+  assert.match(inputTemplate, /data-i18n="skillsDescription">[^<]*\$[^<]*Skills 选择器</u);
   assert.doesNotMatch(inputTemplate, />\/create-skill</u);
   assert.doesNotMatch(inputTemplate, /id="commandSkillsValue"/u);
   assert.doesNotMatch(inputScript, /commandSkillsValue/u);
@@ -189,6 +220,41 @@ test('command menu nests low-frequency Skill creation under the expanded Skills 
   assert.doesNotMatch(skillActionHandler, /closeCommandMenu\(\)/u);
   assert.match(styles, /\.command-skills-row\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto/u);
   assert.match(styles, /\.command-skills-toggle-button\[aria-expanded="true"\] \.command-skills-chevron[\s\S]*?rotate\(90deg\)/u);
+});
+
+test('command Skills filter expands leftward and shares name filtering with the dollar picker', () => {
+  const inputTemplate = getInputTemplate();
+  const inputScript = getInputScript();
+  const styles = getStyles();
+  const commandOrdering = getGeneratedSection(
+    inputScript,
+    'function getCommandSkillItems()',
+    'function getFilteredSkillMenuItems()'
+  );
+  const dollarFiltering = getGeneratedSection(
+    inputScript,
+    'function getFilteredSkillMenuItems()',
+    'function isSkillUserSelectable(skill)'
+  );
+  const sharedFiltering = getGeneratedSection(
+    inputScript,
+    'function filterSkillItemsByName(skills, query)',
+    'function getActiveSkillIds()'
+  );
+
+  assert.match(inputTemplate, /id="commandSkillFilterControl" class="command-skill-filter-control hidden"/u);
+  assert.match(inputTemplate, /id="commandSkillFilterInput"[\s\S]*?data-i18n-placeholder="skillsFilterPlaceholder"/u);
+  assert.match(inputTemplate, /id="commandSkillFilterButton"[\s\S]*?aria-controls="commandSkillFilterInput commandSkillList"/u);
+  assert.match(inputScript, /commandSkillFilterButton\.addEventListener\('click'[\s\S]*?setCommandSkillFilterOpen\(!commandSkillFilterOpen, true\)/u);
+  assert.match(inputScript, /commandSkillFilterInput\.addEventListener\('input'[\s\S]*?commandSkillFilterQuery = commandSkillFilterInput\.value[\s\S]*?renderCommandSkills\(\)/u);
+  assert.match(inputScript, /commandSkillFilterControl\.classList\.toggle\('hidden', !commandSkillListOpen\)/u);
+  assert.match(inputScript, /commandSkillFilterControl\.classList\.toggle\('is-open', commandSkillFilterOpen\)/u);
+  assert.match(commandOrdering, /filterSkillItemsByName\(orderedSkills, commandSkillFilterQuery\)/u);
+  assert.match(dollarFiltering, /filterSkillItemsByName\(getSkillItems\(\)\.filter\(isSkillUserSelectable\), activeMentionQuery\)/u);
+  assert.match(sharedFiltering, /normalizeReferenceQuery\(query\)[\s\S]*?skillNameMatchesQuery\(skill, normalizedQuery\)/u);
+  assert.doesNotMatch(sharedFiltering, /skill\.description|skill\.sourceLabel|skill\.source/u);
+  assert.match(styles, /\.command-skill-filter-control\s*\{[\s\S]*?max-width:\s*26px[\s\S]*?transition:\s*max-width/u);
+  assert.match(styles, /\.command-skill-filter-control\.is-open \.command-skill-filter-input\s*\{[\s\S]*?width:\s*clamp/u);
 });
 
 test('Skills picker uses checkboxes and keeps selected Skills in activation order before name-sorted items', () => {

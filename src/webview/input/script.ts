@@ -32,6 +32,9 @@ export function getInputScript(): string {
       var commandSkillsMainButton = document.getElementById('commandSkillsMainButton');
       var commandSkillsButton = document.getElementById('commandSkillsButton');
       var commandSkillList = document.getElementById('commandSkillList');
+      var commandSkillFilterControl = document.getElementById('commandSkillFilterControl');
+      var commandSkillFilterButton = document.getElementById('commandSkillFilterButton');
+      var commandSkillFilterInput = document.getElementById('commandSkillFilterInput');
       var commandCreateSkillButton = document.getElementById('commandCreateSkillButton');
       var commandLegacyMemorySection = document.getElementById('commandLegacyMemorySection');
       var commandLegacyMemoryMigrateButton = document.getElementById('commandLegacyMemoryMigrateButton');
@@ -63,6 +66,8 @@ export function getInputScript(): string {
       var commandSubagentModelListOpen = false;
       var commandApprovalModeListOpen = false;
       var commandSkillListOpen = false;
+      var commandSkillFilterOpen = false;
+      var commandSkillFilterQuery = '';
       var referenceMenuOpen = false;
       var referenceMenuSource = '';
       var activeMentionRange = null;
@@ -468,6 +473,28 @@ export function getInputScript(): string {
           renderCommandMenu();
         });
       });
+
+      if (commandSkillFilterButton) {
+        commandSkillFilterButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (state.isBusy || !commandSkillListOpen) { return; }
+          setCommandSkillFilterOpen(!commandSkillFilterOpen, true);
+        });
+      }
+
+      if (commandSkillFilterInput) {
+        commandSkillFilterInput.addEventListener('input', function() {
+          commandSkillFilterQuery = commandSkillFilterInput.value;
+          renderCommandSkills();
+        });
+        commandSkillFilterInput.addEventListener('keydown', function(event) {
+          if (event.key !== 'Escape') { return; }
+          event.preventDefault();
+          event.stopPropagation();
+          setCommandSkillFilterOpen(false, true);
+        });
+      }
 
       if (commandSkillList) {
         commandSkillList.addEventListener('mousedown', function(event) {
@@ -2387,6 +2414,7 @@ export function getInputScript(): string {
         renderCommandSubagentModel();
         renderCommandApprovalMode();
         renderCompressionThreshold();
+        renderCommandSkillFilter();
         renderCommandSkills();
         renderCreateSkillCommand();
         renderLegacyMemoryCommand();
@@ -2795,6 +2823,48 @@ export function getInputScript(): string {
             : 'compressionBalancedDescription';
       }
 
+      function setCommandSkillFilterOpen(open, shouldFocus) {
+        commandSkillFilterOpen = Boolean(open && commandSkillListOpen);
+        if (!commandSkillFilterOpen) {
+          commandSkillFilterQuery = '';
+        }
+        renderCommandSkillFilter();
+        renderCommandSkills();
+        if (!shouldFocus) { return; }
+        if (commandSkillFilterOpen && commandSkillFilterInput) {
+          commandSkillFilterInput.focus();
+          commandSkillFilterInput.select();
+        } else if (commandSkillFilterButton) {
+          commandSkillFilterButton.focus();
+        }
+      }
+
+      function renderCommandSkillFilter() {
+        if (!commandSkillListOpen) {
+          commandSkillFilterOpen = false;
+          commandSkillFilterQuery = '';
+        }
+        if (commandSkillFilterControl) {
+          commandSkillFilterControl.classList.toggle('hidden', !commandSkillListOpen);
+          commandSkillFilterControl.classList.toggle('is-open', commandSkillFilterOpen);
+        }
+        if (commandSkillFilterButton) {
+          var filterButtonLabel = t(commandSkillFilterOpen ? 'skillsFilterClose' : 'skillsFilter');
+          commandSkillFilterButton.disabled = Boolean(state.isBusy) || !commandSkillListOpen;
+          commandSkillFilterButton.setAttribute('aria-expanded', commandSkillFilterOpen ? 'true' : 'false');
+          commandSkillFilterButton.setAttribute('aria-label', filterButtonLabel);
+          commandSkillFilterButton.title = state.isBusy ? t('commandMenuReadonlyWhileBusy') : filterButtonLabel;
+        }
+        if (commandSkillFilterInput) {
+          if (commandSkillFilterInput.value !== commandSkillFilterQuery) {
+            commandSkillFilterInput.value = commandSkillFilterQuery;
+          }
+          commandSkillFilterInput.disabled = Boolean(state.isBusy) || !commandSkillListOpen || !commandSkillFilterOpen;
+          commandSkillFilterInput.tabIndex = commandSkillFilterOpen ? 0 : -1;
+          commandSkillFilterInput.setAttribute('aria-hidden', commandSkillFilterOpen ? 'false' : 'true');
+        }
+      }
+
       function renderCommandSkills() {
         var skills = getCommandSkillItems();
         var toggleLabel = t(commandSkillListOpen ? 'skillsCollapse' : 'skillsExpand');
@@ -2815,7 +2885,7 @@ export function getInputScript(): string {
         if (!skills.length) {
           var empty = document.createElement('div');
           empty.className = 'reference-menu-empty';
-          empty.textContent = t('skillsNone');
+          empty.textContent = commandSkillFilterQuery.trim() ? t('noMatchingSkills') : t('skillsNone');
           commandSkillList.append(empty);
           return;
         }
@@ -3897,7 +3967,7 @@ export function getInputScript(): string {
         getActiveSkillIds().forEach(function(skillId, index) {
           activeOrder.set(skillId, index);
         });
-        return getSkillItems().slice().sort(function(left, right) {
+        var orderedSkills = getSkillItems().slice().sort(function(left, right) {
           var leftActive = activeOrder.has(left.id);
           var rightActive = activeOrder.has(right.id);
           if (leftActive && rightActive) {
@@ -3911,28 +3981,31 @@ export function getInputScript(): string {
           var nameOrder = leftName.localeCompare(rightName, undefined, { sensitivity: 'base', numeric: true });
           return nameOrder || String(left.id || '').localeCompare(String(right.id || ''), undefined, { sensitivity: 'base' });
         });
+        return filterSkillItemsByName(orderedSkills, commandSkillFilterQuery);
       }
 
       function getFilteredSkillMenuItems() {
-        var query = normalizeReferenceQuery(activeMentionQuery);
-        return getSkillItems().filter(function(skill) {
-          if (!isSkillUserSelectable(skill)) { return false; }
-          if (!query) { return true; }
-          return skillMatchesQuery(skill, query);
-        });
+        return filterSkillItemsByName(getSkillItems().filter(isSkillUserSelectable), activeMentionQuery);
       }
 
       function isSkillUserSelectable(skill) {
         return Boolean(skill && skill.enabled && skill.userInvocable && !skill.unavailableReason);
       }
 
-      function skillMatchesQuery(skill, query) {
+      function filterSkillItemsByName(skills, query) {
+        var normalizedQuery = normalizeReferenceQuery(query);
+        if (!normalizedQuery) {
+          return skills.slice();
+        }
+        return skills.filter(function(skill) {
+          return skillNameMatchesQuery(skill, normalizedQuery);
+        });
+      }
+
+      function skillNameMatchesQuery(skill, query) {
         var fields = [
           getSkillMentionName(skill),
-          skill.name || '',
-          skill.description || '',
-          skill.sourceLabel || '',
-          skill.source || ''
+          skill.name || ''
         ];
         for (var i = 0; i < fields.length; i++) {
           if (normalizeReferenceQuery(fields[i]).indexOf(query) >= 0) {

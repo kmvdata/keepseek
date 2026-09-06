@@ -95,6 +95,36 @@ export function getInputTemplate(): string {
                 </span>
               </button>
               <span class="command-skills-actions">
+                <span id="commandSkillFilterControl" class="command-skill-filter-control hidden">
+                  <input
+                    id="commandSkillFilterInput"
+                    class="command-skill-filter-input"
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="按名称筛选 Skills"
+                    data-i18n-placeholder="skillsFilterPlaceholder"
+                    aria-label="按名称筛选 Skills"
+                    data-i18n-aria-label="skillsFilterLabel"
+                    disabled
+                  />
+                  <button
+                    id="commandSkillFilterButton"
+                    type="button"
+                    class="command-skill-icon-button command-skill-filter-button"
+                    role="menuitem"
+                    aria-label="筛选 Skills"
+                    data-i18n-aria-label="skillsFilter"
+                    title="筛选 Skills"
+                    data-i18n-title="skillsFilter"
+                    aria-expanded="false"
+                    aria-controls="commandSkillFilterInput commandSkillList"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M2.75 4h10.5L9.25 8.5v3.25l-2.5 1.25V8.5L2.75 4Z" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/>
+                    </svg>
+                  </button>
+                </span>
                 <button
                   id="commandCreateSkillButton"
                   type="button"
