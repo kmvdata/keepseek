@@ -68,23 +68,27 @@ test('old source usage inherits only an unambiguous currency and missing cache d
   assert.deepEqual(splitActualUsage(mixed).unattributed.costByCurrency, { CNY: 1, USD: 2 });
 });
 
-test('main-session attribution excludes subagents and does not absorb unclassified history', () => {
+test('main-session attribution keeps reviewer and subagent calls separate and does not absorb unclassified history', () => {
   let stats = normalizeSessionUsageStatsValue({
     promptTokens: 80, completionTokens: 20, totalTokens: 100, cacheHitTokens: 0, cacheMissTokens: 0,
     requestCount: 1, sessionCost: 0.25, currency: 'CNY'
   });
   const mainSources: UsageSource[] = ['executor', 'retry', 'continuation', 'summary', 'background', 'retrieval', 'router'];
   for (const source of mainSources) { stats = addUsageEventToSessionStats(stats, event(source, 10, 'CNY', 0.01)); }
+  stats = addUsageEventToSessionStats(stats, event('reviewer', 15, 'USD', 0.03));
   stats = addUsageEventToSessionStats(stats, event('subagent', 30, 'USD', 0.02));
   const split = splitActualUsage(stats);
-  assert.equal(split.total.totalTokens, 200);
+  assert.equal(split.total.totalTokens, 215);
   assert.equal(split.mainSession.totalTokens, 70);
+  assert.equal(split.reviewer.totalTokens, 15);
   assert.equal(split.subagent.totalTokens, 30);
   assert.equal(split.unattributed.totalTokens, 100);
   assert.equal(split.mainSession.requestCount, 7);
+  assert.equal(split.reviewer.requestCount, 1);
   assert.equal(split.subagent.requestCount, 1);
   assert.equal(split.unattributed.requestCount, 1);
-  assert.equal(split.mainPercent, 35);
+  assert.ok((split.reviewerPercent ?? 0) > 0);
+  assert.deepEqual(split.reviewer.costByCurrency, { USD: 0.03 });
   assert.deepEqual(split.subagent.costByCurrency, { USD: 0.02 });
   assert.ok(Math.abs(split.unattributed.costByCurrency.CNY - 0.25) < 1e-12);
 });

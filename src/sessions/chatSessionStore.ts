@@ -583,7 +583,9 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       id: item.id,
       title,
       messages,
-      approvalMode: item.approvalMode === 'delegate' ? 'delegate' : 'ask',
+      approvalMode: item.approvalMode === 'delegate' || item.approvalMode === 'model_review'
+        ? item.approvalMode
+        : 'ask',
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
       frozenImplicitSkillIds: normalizeStringArray(item.frozenImplicitSkillIds),
       requestProtocol: normalizeSessionRequestProtocol(item.requestProtocol),
@@ -1079,6 +1081,27 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
           reason: typeof authorization.reason === 'string' ? authorization.reason.slice(0, 240) : undefined
         }))
       : [],
+    approvalReviews: Array.isArray(value.approvalReviews)
+      ? value.approvalReviews.filter(isRecord).slice(0, 100).map((review) => ({
+          reviewId: typeof review.reviewId === 'string' ? review.reviewId : '',
+          sessionId: typeof review.sessionId === 'string' ? review.sessionId : '',
+          rootTaskId: typeof review.rootTaskId === 'string' ? review.rootTaskId : '',
+          agentRunId: typeof review.agentRunId === 'string' ? review.agentRunId : '',
+          targetId: typeof review.targetId === 'string' ? review.targetId : '',
+          actionKind: review.actionKind as import('../approvals/approvalReviewTypes').ApprovalActionKind,
+          policyVersion: normalizeNonNegativeInteger(review.policyVersion),
+          approvalSource: review.approvalSource as import('../approvals/approvalReviewTypes').ApprovalReviewSource,
+          reviewerSourceId: typeof review.reviewerSourceId === 'string' ? review.reviewerSourceId : '',
+          reviewerModelId: typeof review.reviewerModelId === 'string' ? review.reviewerModelId : '',
+          reviewerProvider: typeof review.reviewerProvider === 'string' ? review.reviewerProvider : '',
+          decision: (review.decision === 'approve' || review.decision === 'deny' ? review.decision : 'unavailable') as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['decision'],
+          risk: (review.risk === 'low' || review.risk === 'medium' || review.risk === 'critical' ? review.risk : 'high') as import('../approvals/approvalReviewTypes').ApprovalReviewRisk,
+          rationale: typeof review.rationale === 'string' ? review.rationale.slice(0, 800) : '',
+          saferAlternative: typeof review.saferAlternative === 'string' ? review.saferAlternative.slice(0, 1200) : undefined,
+          createdAt: normalizeSessionTimestamp(review.createdAt, new Date().toISOString()),
+          consumedAt: normalizeOptionalTimestamp(review.consumedAt)
+        })).filter((review) => Boolean(review.reviewId))
+      : undefined,
     changeSets: Array.isArray(value.changeSets)
       ? value.changeSets.filter(isRecord).slice(0, 20).map((changeSet) => ({
           id: typeof changeSet.id === 'string' ? changeSet.id : '',
@@ -1242,6 +1265,7 @@ function normalizeAuthorizationSource(value: unknown): NonNullable<ChatMessage['
   return value === 'low_risk'
     || value === 'run_policy'
     || value === 'configuration'
+    || value === 'model_reviewer'
     || value === 'delegated_approver'
     || value === 'explicit_confirmation'
     || value === 'user_denied'

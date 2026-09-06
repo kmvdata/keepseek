@@ -379,11 +379,13 @@ export function getInputScript(): string {
           if (!button || button.disabled) { return; }
           event.preventDefault();
           event.stopPropagation();
-          var mode = button.dataset.approvalMode === 'delegate' ? 'delegate' : 'ask';
+          var mode = button.dataset.approvalMode === 'delegate'
+            ? 'delegate'
+            : button.dataset.approvalMode === 'model_review' ? 'model_review' : 'ask';
           vscode.postMessage({ type: 'setApprovalMode', mode: mode });
           commandApprovalModeListOpen = false;
           renderCommandMenu();
-          setComposerStatus(t('approvalMode') + ': ' + t(mode === 'delegate' ? 'approvalDelegate' : 'approvalAsk'));
+          setComposerStatus(t('approvalMode') + ': ' + t(getApprovalModeLabelKey(mode)));
         });
       }
 
@@ -1834,8 +1836,9 @@ export function getInputScript(): string {
         var mainSessionOnly = selected.total.totalTokens > 0 && selected.mainPercent >= 100;
         var typeItems = [
           { key: 'usageMainSession', usage: selected.mainSession, percent: selected.mainPercent, color: 'color-0' },
-          { key: 'usageSubagentLabel', usage: selected.subagent, percent: selected.subagentPercent, color: 'color-1' },
-          { key: 'usageHistoricalUnattributed', usage: selected.unattributed, percent: selected.unattributedPercent, color: 'color-2' }
+          { key: 'usageReviewerLabel', usage: selected.reviewer, percent: selected.reviewerPercent, color: 'color-1' },
+          { key: 'usageSubagentLabel', usage: selected.subagent, percent: selected.subagentPercent, color: 'color-2' },
+          { key: 'usageHistoricalUnattributed', usage: selected.unattributed, percent: selected.unattributedPercent, color: 'color-3' }
         ].filter(function(item) { return hasActualUsage(item.usage); });
         if (!mainSessionOnly && typeItems.length > 1) {
           section.append(createUsageSharePanel('usageTypeShare', typeItems.map(function(item) {
@@ -2363,7 +2366,7 @@ export function getInputScript(): string {
       function renderCommandMenu() {
         if (!commandMenu) { return; }
         if (commandMenuButton) {
-          commandMenuButton.title = t('showCommandMenuTitle') + ' · ' + t(state.approvalMode === 'delegate' ? 'approvalDelegate' : 'approvalAsk');
+          commandMenuButton.title = t('showCommandMenuTitle') + ' · ' + t(getApprovalModeLabelKey(state.approvalMode));
         }
         commandMenu.classList.toggle('is-readonly', Boolean(state.isBusy));
         commandMenu.classList.toggle('allows-model-selection', Boolean(state.isBusy && !isModelSelectionLocked()));
@@ -2635,9 +2638,12 @@ export function getInputScript(): string {
       }
 
       function renderCommandApprovalMode() {
-        var currentMode = state.approvalMode === 'delegate' ? 'delegate' : 'ask';
+        var currentMode = state.approvalMode === 'delegate'
+          ? 'delegate'
+          : state.approvalMode === 'model_review' ? 'model_review' : 'ask';
         var locked = isApprovalModeSelectionLocked();
-        var currentLabelKey = currentMode === 'delegate' ? 'approvalDelegate' : 'approvalAsk';
+        var currentLabelKey = getApprovalModeLabelKey(currentMode);
+        var currentDescriptionKey = getApprovalModeDescriptionKey(currentMode);
 
         if (commandApprovalModeValue) {
           commandApprovalModeValue.textContent = t(currentLabelKey);
@@ -2645,14 +2651,14 @@ export function getInputScript(): string {
         }
         if (commandApprovalModeSwitch) {
           commandApprovalModeSwitch.disabled = locked;
-          commandApprovalModeSwitch.title = locked ? t('modelSettingsReadonlyWhileBusy') : t('approvalModeDescription');
+          commandApprovalModeSwitch.title = locked ? t('modelSettingsReadonlyWhileBusy') : t(currentDescriptionKey);
           commandApprovalModeSwitch.setAttribute('aria-disabled', locked ? 'true' : 'false');
           commandApprovalModeSwitch.setAttribute('aria-expanded', commandApprovalModeListOpen ? 'true' : 'false');
         }
         if (commandApprovalModeDescription) {
           commandApprovalModeDescription.textContent = locked
             ? t('modelSettingsReadonlyWhileBusy')
-            : t('approvalModeDescription');
+            : t(currentDescriptionKey);
         }
         if (!commandApprovalModeList) { return; }
 
@@ -2660,6 +2666,7 @@ export function getInputScript(): string {
         commandApprovalModeList.innerHTML = '';
         [
           { mode: 'ask', labelKey: 'approvalAsk', descriptionKey: 'approvalAskDescription' },
+          { mode: 'model_review', labelKey: 'approvalModelReview', descriptionKey: 'approvalModelReviewDescription' },
           { mode: 'delegate', labelKey: 'approvalDelegate', descriptionKey: 'approvalDelegateDescription' }
         ].forEach(function(item) {
           var isSelected = item.mode === currentMode;
@@ -2667,7 +2674,7 @@ export function getInputScript(): string {
           option.type = 'button';
           option.className = 'command-model-option';
           option.dataset.approvalMode = item.mode;
-          option.disabled = locked || (item.mode === 'delegate' && Boolean(state.isBusy));
+          option.disabled = locked || (item.mode !== 'ask' && Boolean(state.isBusy));
           option.setAttribute('role', 'menuitemradio');
           option.setAttribute('aria-checked', isSelected ? 'true' : 'false');
           option.setAttribute('aria-label', t(item.labelKey));
@@ -2679,9 +2686,27 @@ export function getInputScript(): string {
           var label = document.createElement('span');
           label.className = 'command-model-name';
           label.textContent = t(item.labelKey);
-          option.append(check, label);
+          var description = document.createElement('span');
+          description.className = 'command-approval-option-description';
+          description.textContent = t(item.descriptionKey);
+          var copy = document.createElement('span');
+          copy.className = 'command-approval-option-copy';
+          copy.append(label, description);
+          option.title = t(item.descriptionKey);
+          option.setAttribute('aria-label', t(item.labelKey) + '. ' + t(item.descriptionKey));
+          option.append(check, copy);
           commandApprovalModeList.append(option);
         });
+      }
+
+      function getApprovalModeLabelKey(mode) {
+        return mode === 'delegate' ? 'approvalDelegate' : mode === 'model_review' ? 'approvalModelReview' : 'approvalAsk';
+      }
+
+      function getApprovalModeDescriptionKey(mode) {
+        return mode === 'delegate'
+          ? 'approvalDelegateDescription'
+          : mode === 'model_review' ? 'approvalModelReviewDescription' : 'approvalAskDescription';
       }
 
       function nextModelSelectionRequestId() {
@@ -2698,7 +2723,7 @@ export function getInputScript(): string {
       }
 
       function isApprovalModeSelectionLocked() {
-        return Boolean(state.isBusy && state.approvalMode !== 'delegate');
+        return Boolean(state.isBusy && state.approvalMode === 'ask');
       }
 
       function getSubagentModelLockText() {

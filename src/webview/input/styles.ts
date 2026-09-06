@@ -1279,6 +1279,20 @@ export function getInputStyles(): string {
       font-weight: 600;
     }
 
+    .command-approval-option-copy {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      gap: 1px;
+    }
+
+    .command-approval-option-description {
+      color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+      line-height: 1.25;
+      white-space: normal;
+    }
+
     .command-compression-row {
       display: flex;
       flex-direction: column;

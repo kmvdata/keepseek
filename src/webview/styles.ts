@@ -1034,6 +1034,22 @@ export function getStyles(): string {
       overflow-wrap: anywhere;
     }
 
+    .approval-review-summary {
+      margin-top: 6px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .approval-review-deny {
+      color: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground));
+    }
+
+    .approval-review-unavailable {
+      color: var(--vscode-errorForeground);
+    }
+
     .draft-run-actions {
       display: flex;
       flex-wrap: wrap;
@@ -1783,9 +1799,12 @@ export function getStyles(): string {
       overflow-wrap: anywhere;
     }
 
-    .run-details-error,
-    .run-details-denied {
+    .run-details-error {
       color: var(--vscode-errorForeground);
+    }
+
+    .run-details-denied {
+      color: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground));
     }
 
     .run-details-actions {

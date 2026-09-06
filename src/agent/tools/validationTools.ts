@@ -185,6 +185,39 @@ export async function getAvailableSafeValidationScripts(): Promise<SafeNpmScript
     .map(({ script }) => script);
 }
 
+export interface ValidationPreflightResult {
+  ok: boolean;
+  workspaceRootId?: string;
+  error?: string;
+}
+
+/** Hard checks that must pass before a validation request reaches a model reviewer. */
+export async function preflightSafeValidation(input: {
+  script: SafeNpmScript;
+  workspaceFolder?: string;
+  language: KeepseekLanguage;
+}): Promise<ValidationPreflightResult> {
+  if (!SAFE_NPM_SCRIPTS.has(input.script)) {
+    return { ok: false, error: localizeValidation(input.language, 'unsupportedScript', input.script) };
+  }
+  if (!vscode.workspace.isTrusted) {
+    return { ok: false, error: localizeValidation(input.language, 'untrusted') };
+  }
+  const workspaceFolder = findWorkspaceFolder(input.workspaceFolder);
+  if (!workspaceFolder) {
+    return { ok: false, error: localizeValidation(input.language, 'workspaceMissing') };
+  }
+  const definition = await readNpmScript(workspaceFolder, input.script);
+  if (!definition) {
+    return { ok: false, error: localizeValidation(input.language, 'scriptMissing', input.script) };
+  }
+  if (hasValidationBlockingRisk(definition)) {
+    return { ok: false, error: localizeValidation(input.language, 'scriptUnsafe', input.script) };
+  }
+  const index = (vscode.workspace.workspaceFolders ?? []).findIndex((folder) => folder.uri.toString() === workspaceFolder.uri.toString());
+  return { ok: true, workspaceRootId: `root-${index + 1}:${workspaceFolder.name}` };
+}
+
 function createWorkspaceDiagnosticSummary(): WorkspaceDiagnosticSummary {
   const items: WorkspaceDiagnosticItem[] = [];
   const counts = {

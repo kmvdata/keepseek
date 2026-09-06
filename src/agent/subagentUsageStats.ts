@@ -31,6 +31,7 @@ const USAGE_SOURCES: UsageSource[] = [
   'retry',
   'continuation',
   'background',
+  'reviewer',
   'subagent',
   'retrieval',
   'router'
@@ -51,9 +52,11 @@ export interface ActualUsageSlice extends Usage {
 export interface ActualUsageBreakdown {
   total: ActualUsageSlice;
   mainSession: ActualUsageSlice;
+  reviewer: ActualUsageSlice;
   subagent: ActualUsageSlice;
   unattributed: ActualUsageSlice;
   mainPercent?: number;
+  reviewerPercent?: number;
   subagentPercent?: number;
   unattributedPercent?: number;
 }
@@ -278,19 +281,22 @@ export function splitActualUsage(
   const total = toActualUsageSlice(stats);
   const sourceStats = stats?.bySource;
   const mainSession = sumActualUsageSlices(USAGE_SOURCES
-    .filter((source) => source !== 'subagent')
+    .filter((source) => source !== 'subagent' && source !== 'reviewer')
     .map((source) => toActualUsageSlice(sourceStats?.[source])));
+  const reviewer = toActualUsageSlice(sourceStats?.reviewer);
   const subagent = toActualUsageSlice(sourceStats?.subagent);
-  const known = sumActualUsageSlices([mainSession, subagent]);
+  const known = sumActualUsageSlices([mainSession, reviewer, subagent]);
   const unattributed = subtractActualUsageSlice(total, known);
   const denominator = total.totalTokens;
   return {
     total,
     mainSession,
+    reviewer,
     subagent,
     unattributed,
     ...(denominator > 0 ? {
       mainPercent: safePercent(mainSession.totalTokens, denominator),
+      reviewerPercent: safePercent(reviewer.totalTokens, denominator),
       subagentPercent: safePercent(subagent.totalTokens, denominator),
       unattributedPercent: safePercent(unattributed.totalTokens, denominator)
     } : {})

@@ -1,5 +1,6 @@
 import './registerVscodeStub';
 import './approvalMode.test';
+import './approvalReviewer.test';
 import './accountResolver.test';
 import './accountRuntime.test';
 import './accountStore.test';

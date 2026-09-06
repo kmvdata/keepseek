@@ -14,6 +14,9 @@ import type {
 import { getErrorMessage } from '../shared/errors';
 import type { DraftDiffService } from './draftDiffService';
 import type { DelegatedEditApproval, SafeFileEditor } from './safeFileEditor';
+import type { DraftEditPreflight } from './safeFileEditor';
+import type { ApprovalReviewRecord } from '../approvals/approvalReviewTypes';
+import { toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
 import { createChangeSet } from './changeSet';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
@@ -271,6 +274,30 @@ export class ChangeSetStore {
       : [];
   }
 
+  public getPendingEdit(editId: string): { edit: DraftEdit; runId: string; sessionId: string } | undefined {
+    const found = this.findEdit(editId);
+    if (!found || !isApplicable(found.edit)) return undefined;
+    return {
+      edit: structuredClone(found.edit),
+      runId: found.changeSet.runId,
+      sessionId: found.changeSet.sessionId
+    };
+  }
+
+  public async preflightEdit(editId: string, approval?: DelegatedEditApproval): Promise<DraftEditPreflight> {
+    const found = this.findEdit(editId);
+    if (!found || !isApplicable(found.edit)) throw new Error('Pending DraftEdit was not found.');
+    return await this.safeFileEditor.preflightDraftEdit(found.edit, approval);
+  }
+
+  public attachApprovalReview(editId: string, record: ApprovalReviewRecord): boolean {
+    const found = this.findEdit(editId);
+    if (!found || !isApplicable(found.edit)) return false;
+    found.edit.approvalReview = toApprovalReviewDisplay(record);
+    this.schedulePersist();
+    return true;
+  }
+
   public getPendingDeleteTargetsForChangeSet(changeSetId: string): PendingDeleteTarget[] {
     const changeSet = this.changeSets.get(changeSetId);
     return changeSet
@@ -480,6 +507,7 @@ export class ChangeSetStore {
     const appliedEditIds: string[] = [];
     const failed: ChangeSetApplyFailure[] = [];
     for (const file of files) {
+      file.approvalSource = approval?.source ?? 'user_click';
       try {
         const checkpoint = await this.safeFileEditor.applyDraftEdit(file, changeSet.id, approval);
         this.checkpoints.set(checkpoint.id, checkpoint);
@@ -787,6 +815,8 @@ function cloneWebviewChangeSet(changeSet: WebviewChangeSet): WebviewChangeSet {
       action: file.action,
       reason: file.reason,
       status: file.status,
+      approvalReview: file.approvalReview ? { ...file.approvalReview } : undefined,
+      approvalSource: file.approvalSource,
       error: file.error,
       checkpointId: file.checkpointId
     })),

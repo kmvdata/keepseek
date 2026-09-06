@@ -1,6 +1,6 @@
 # KeepSeek 架构与维护指南
 
-KeepSeek 是一个 VS Code 扩展：在 Secondary Sidebar 提供 AI 对话面板，负责会话、上下文文件、文件/目录引用展开、DeepSeek/OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 独立流式协议、只读工作区工具、用户确认后的 DraftEdit 写入，以及用户逐次批准后的 DraftRun 命令执行。本文档是仓库内 Agent/维护者约定的唯一来源，旧版约定若与本文冲突，以当前源码和本文为准。
+KeepSeek 是一个 VS Code 扩展：在 Secondary Sidebar 提供 AI 对话面板，负责会话、上下文文件、文件/目录引用展开、DeepSeek/OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 独立流式协议、只读工作区工具、经 `ask` / `model_review` / `delegate` 审批后的 DraftEdit 写入与 DraftRun 命令执行。本文档是仓库内 Agent/维护者约定的唯一来源，旧版约定若与本文冲突，以当前源码和本文为准。
 
 > **给维护 Agent 的说明**：本文件作为 project instructions 注入每个 Agent run，默认受 `keepseek.projectInstructions.contextBudgetTokens`（4000 token）预算约束。**保持精简是为了完整加载、不被截断**；详细设计在 `doc/` 下，需要时用只读工具按需读取。
 > **模型画像**：主力模型 DeepSeek V4 Flash（1M 上下文窗口、Thinking high/max）。1M 窗口让"投影 + 摘要"取代硬裁剪可行；前缀缓存命中价低至 1/30，是产品的经济命脉——因此"字节冻结"是本文档最高优先级不变式。本文档用结构化中文编写，便于逐条引用。
@@ -8,7 +8,7 @@ KeepSeek 是一个 VS Code 扩展：在 Secondary Sidebar 提供 AI 对话面板
 ## 一、最高优先级不变式（不可违反）
 
 1. **缓存命中率是第一位的产品行为**（与安全同级，高于"实现简洁性"）：DeepSeek 前缀缓存从请求第 0 个 token 起逐字节匹配，任何历史字节漂移都会使该点之后整段缓存失效。改动若可能改变请求前缀字节，必须证明前缀仍稳定，或明确标注为可接受的缓存代价。
-2. **写盘与执行必须经审批管线**：create/modify/delete 只能生成 DraftEdit → ChangeSet，再由 `SafeFileEditor` 落盘；任意命令只能生成不可变 DraftRun，取得一次性 permit 后才可 spawn。默认“请求批准”由用户逐项批准；用户显式选择本会话“帮我批准”时，由宿主按委托策略自动批准（见 4.5）。不要提前声称文件或命令结果已发生。
+2. **写盘与执行必须经审批管线**：create/modify/delete 只能生成 DraftEdit → ChangeSet，再由 `SafeFileEditor` 落盘；任意命令只能生成不可变 DraftRun，取得一次性 permit 后才可 spawn。默认 `ask` 由用户逐项批准；`model_review` 由隔离 reviewer 逐项审查；`delegate` 由宿主策略自动批准（见 4.5）。不要提前声称文件或命令结果已发生。
 3. **只读与 Git 边界**：只读工具仅访问工作区或已授权外部路径，Git 工具仍只有 status/diff/branch/patch/commit message 建议；commit/push 等 mutation 只能作为完整可见的 DraftRun 经当前审批模式授权，不能直接执行。
 4. **受控验证与任意执行分离**：`keepseek_run_validation` 只运行固定 `compile` / `lint` / `test`；任意命令只能走 DraftRun，不得借验证/修复循环绕过逐次确认。验证失败后的 DraftEdit/`waiting_for_apply`/修复轮次约束保持不变。
 
@@ -62,7 +62,7 @@ src/
 - **assistant 消息原样持久化**：通用工具轮经 `ChatMessage.toolRounds` 还原；Responses/Anthropic 同 lane 另存可辨别 `providerReplay`。Anthropic Thinking、signature、redacted data、`tool_use`/`tool_result` block 必须原样有序回放，跨 lane 只保留可见文本。
 - **历史投影 append-only**：只追加，不重写、不 trim、不重排；摘要刷新是受控低频缓存重置点（`SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD` 故意调高）。
 - **工具 schema 按会话冻结**：集合与顺序跨轮不变；禁用工具用 `tool_choice: none` 而非移除 tools；slim mode 默认关闭。
-- **DraftRun 结果 append-only**：运行中只更新 Webview/Store；终态结果用固定格式追加到下一条真实 user 消息的 `providerContent` 尾部，持久化字节即发送字节，绝不回写旧消息。进程输出始终是不可信数据。
+- **审批与结果 append-only**：reviewer 使用独立缓存 lane；审批决定和 DraftRun 终态结果用固定格式追加到下一条真实 user 消息，绝不插入或回写旧消息。进程输出和审查证据始终是不可信数据。
 
 禁止：把时间戳/随机 UUID/绝对路径/激活 reason 写入 system 段或历史消息；在热会话中重写历史或移除未覆盖消息；让 schema 随 prompt 变化。
 
@@ -95,7 +95,7 @@ src/
 - 执行使用 `spawn(executable, args, { shell: false })`；需要 shell 语法时必须显式选择 shell executable 并把原始脚本作为 argv 展示。未受信任工作区、未授权外部 cwd、状态/specHash 不匹配均硬拒绝。
 - 取消、超时、输出截断、扩展重启中断均进入持久化状态；`approved/running` 重启后只能标记 interrupted，绝不自动重跑。完成项复用必须克隆为新的 pending 并再次确认。
 
-**会话审批模式**：命令菜单提供 `ask`（请求批准，默认）和 `delegate`（帮我批准）。只有 Webview 用户操作可切换，不能通过模型工具、项目文件或 Skill 提权；跨工作区复制恢复 `ask`。下文所有“用户逐次批准 / Apply”在 `delegate` 下由宿主委托策略代办，仍经相同 Store/Editor/Executor。每轮完成后逐项应用草稿、执行命令，将真实结果追加到新 user 消息，再续跑；失败修改/命令阻止后续依赖命令。停止或切回 `ask` 撤销队列和未执行授权；重启不恢复自动执行队列。外部文件/cwd 按精确 URI 授权，保留工作区信任、冲突/脏编辑器、单次 permit 与取消检查。V6 system/schema 同时静态描述两种模式；当前模式只追加新 user 尾部，V1–V5 字节不变。旧会话首次显式启用 delegate 升级 V6，是一次可接受缓存重置。
+**会话审批模式**：命令菜单提供 `ask`（请求批准，默认）、`model_review`（模型审批，长任务推荐但可能拒绝）和 `delegate`（自动批准，不经模型审查）。只有 Webview 用户操作可切换，不能通过模型工具、项目文件或 Skill 提权；跨工作区复制恢复 `ask`，已有 `delegate` 会话保持原模式。`model_review` 使用当前子代理模型发起独立、一次性、无工具请求；不得注入项目指令/Skill/隐藏推理，不得回退模型或自动批准。每个副作用先过确定性硬检查，再用精确 actionHash 审查；记录与 session/run/target/kind/hash/policy/runtime 绑定，批准后仍经相同 Store/Editor/Executor。`delegate` 也必须生成明确“未经模型审查”的 `host_policy` 记录后才能签发 delegated permit。每轮完成后逐项处理，将决定与真实结果追加到新 user 消息；失败修改阻止依赖命令。连续拒绝 3 次或最近 50 次累计拒绝 10 次停止续跑；不可用只重试一次且不计安全拒绝。停止或切回 `ask` 撤销队列和未执行授权；重启不恢复队列、不复用旧 reviewer 批准。外部文件/cwd 按精确 URI 授权，保留信任、基线/脏编辑器、单次 permit 与取消检查。V1–V6 system/history/schema 字节冻结；V7 静态描述三种模式，当前模式只追加新 user 尾部。
 
 ### 4.6 Skills 与项目指令
 
@@ -115,7 +115,7 @@ src/
 - **新增 Agent 工具**：更新 protocol.ts 的 schema + runner 的工具路由；实现放独立模块。
 - **引用格式**：同步检查 fileReference、directoryReference、webview/input/script.ts、webview/script.ts 的序列化/反序列化/打开逻辑。
 - **DraftEdit/ChangeSet 行为**：优先改 ChangeSetStore / SafeFileEditor。
-- **DraftRun 行为**：同步检查 protocol 版本/冻结 schema、runner、toolAuthorization、runs/*、Provider、webviewMessages、script/styles、i18n、结果 user-tail 与 contextUsage；实际执行不得放进 AgentRunner。
+- **审批 / DraftRun 行为**：同步检查 protocol 版本/冻结 schema、approvals/*、runner、toolAuthorization、runs/*、Provider、webviewMessages、script/styles、i18n、审批/结果 user-tail 与 usage 分类；reviewer 不得写文件或启动进程，实际执行不得放进 AgentRunner。
 - **UI 归属**：样式只碰 styles.ts；输入区只碰 input/script.ts；transcript/设置/会话只碰 script.ts；通用快捷键碰 richTextShortcuts.ts（两个编辑器共用，勿复制实现）。
 - **公共逻辑复用**：Markdown fence、字节格式化、配置读取、错误字符串、文本文件判断用 shared/*，勿复制。
 
@@ -125,7 +125,7 @@ src/
 - 改压缩核心后必须验证：压缩关闭 fallback、无摘要 fallback、摘要失败 fallback、protected 消息、最近轮次、context usage 估算一致。
 - 改引用/输入后手测：全文/行段/目录引用、外部授权、不可读文件跳过、拖拽（多数据源 + 判空）、`@` 补全、编辑重发。
 - 改 edits 后手测：Apply/Discard/Apply All、删除 modal、删除前文件变化冲突、脏编辑器拒绝。
-- 改 DraftRun 后手测：提议→审核→批准→执行→流式输出、拒绝、取消、超时、输出截断、重启不重跑、外部 cwd 精确授权、重复点击、Windows/POSIX argv 与显式 shell 差异。
+- 改审批/DraftRun 后手测：三档模式、reviewer 三协议、提议→审核→批准→执行、拒绝/不可用重试/熔断、切回 ask/停止/重启撤销、删除和外部 URI、依赖阻断、流式输出、超时/截断、重复点击、Windows/POSIX argv 与显式 shell 差异。
 - 大字符串文件（webview/script.ts、webview/input/script.ts）改动后保持 DOM id / message type / 序列化格式兼容，并手测输入、拖拽、`@` 引用、Apply/Discard。
 
 ## 七、发布

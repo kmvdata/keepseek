@@ -505,6 +505,7 @@ const USAGE_SOURCES: UsageSource[] = [
   'retry',
   'continuation',
   'background',
+  'reviewer',
   'subagent',
   'retrieval',
   'router'

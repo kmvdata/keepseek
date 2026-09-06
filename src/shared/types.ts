@@ -142,6 +142,7 @@ export type UsageSource =
   | 'retry'
   | 'continuation'
   | 'background'
+  | 'reviewer'
   | 'subagent'
   | 'retrieval'
   | 'router';
@@ -382,6 +383,7 @@ export interface DraftRun extends DraftRunProposal {
   messageId: string;
   status: DraftRunStatus;
   authorizationSource?: ExecutionPermit['source'];
+  approvalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
   approvedAt?: string;
   startedAt?: string;
   finishedAt?: string;
@@ -626,7 +628,7 @@ export interface LegacyProjectMemoryMigrationStateView {
   error?: string;
 }
 
-export type ApprovalMode = 'ask' | 'delegate';
+export type ApprovalMode = 'ask' | 'model_review' | 'delegate';
 
 export interface ChatSession {
   approvalMode?: ApprovalMode;
@@ -772,6 +774,8 @@ export type ChangeSetFileStatus =
 
 export interface ChangeSetFile extends DraftEdit {
   status: ChangeSetFileStatus;
+  approvalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
+  approvalSource?: 'user_click' | 'model_reviewer' | 'delegated_approver';
   error?: string;
   checkpointId?: string;
 }
@@ -923,6 +927,7 @@ export interface RunDetailsSummary {
   toolCallCount: number;
   toolCalls: RunDetailsToolCallSummary[];
   authorizations: RunDetailsAuthorizationRecord[];
+  approvalReviews?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay[];
   changeSets: RunDetailsChangeSetSummary[];
   validations: RunDetailsValidationSummary[];
   contextSources: RunDetailsContextSourceSummary[];
@@ -990,9 +995,11 @@ export interface ToolAuthorizationDecision {
   toolName: string;
   riskLevel: ToolRiskLevel;
   scope: AuthorizedToolScope;
-  source: 'low_risk' | 'run_policy' | 'configuration' | 'explicit_confirmation' | 'delegated_approver' | 'user_denied';
+  source: 'low_risk' | 'run_policy' | 'configuration' | 'explicit_confirmation' | 'model_reviewer' | 'delegated_approver' | 'user_denied';
   requiresExplicitConfirmation: boolean;
   reason?: string;
+  approvalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
+  approvalCircuitBreakReason?: 'consecutive_denials' | 'recent_denials';
 }
 
 export type SafeNpmScript = 'compile' | 'lint' | 'test';
@@ -1069,6 +1076,8 @@ export interface ReferenceResource {
 
 export interface AgentRequest {
   approvalMode?: ApprovalMode;
+  /** Runtime root used only for model-approval refusal-fuse accounting. */
+  approvalRootTaskId?: string;
   checkpoint?: import('../agent/runCheckpoint').RunCheckpoint;
   taskClock?: import('../agent/executionPolicy').ExecutionClock;
   prompt: string;
@@ -1166,6 +1175,16 @@ export interface AgentResponse {
   /** 本 run 内工具轮的原样字节快照，调用方持久化到 assistant 消息后跨轮还原 */
   toolRounds?: AgentToolRound[];
   providerReplay?: ProviderReplayState;
+  /** A reviewed in-loop effect reached an append-only user-message boundary. */
+  approvalContinuationRequired?: boolean;
+  /** Present only when reviewer unavailability or a refusal fuse stops continuation. */
+  approvalContinuationStopReason?: string;
+  approvalToolResults?: Array<{
+    toolCallId: string;
+    toolName: string;
+    status: 'succeeded' | 'denied' | 'failed';
+    result: import('../approvals/approvalReviewTypes').BoundedReviewText;
+  }>;
   traceLog?: AgentTraceLogInfo;
   runDetails: RunDetailsSummary;
 }

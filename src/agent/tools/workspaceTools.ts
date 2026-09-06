@@ -167,6 +167,8 @@ export interface WorkspaceToolAdapter {
   /** 设置本轮 Agent run 中用户显式引用、已授权的外部文件/目录 URI 集合（uri.toString()）。 */
   setAuthorizedExternalReferenceUris(uris?: Iterable<string>): void;
   setDelegatedFileAuthorization?(enabled: boolean): void;
+  getReviewableExternalUri?(rawPath: string): string | undefined;
+  authorizeReviewedExternalUri?(uri: string): void;
 }
 
 export class WorkspaceToolService implements WorkspaceToolAdapter {
@@ -188,6 +190,23 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
         }
       }
     }
+  }
+
+  public getReviewableExternalUri(rawPath: string): string | undefined {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (!folders.length) return undefined;
+    const uri = this.resolveWorkspaceFileUriCandidate(rawPath, folders);
+    return !this.isUriInsideWorkspace(uri) && !this.authorizedExternalReferenceUris.has(uri.toString())
+      ? uri.toString()
+      : undefined;
+  }
+
+  public authorizeReviewedExternalUri(uri: string): void {
+    const parsed = vscode.Uri.parse(uri);
+    if (parsed.scheme !== 'file' || !vscode.workspace.isTrusted || vscode.workspace.getWorkspaceFolder(parsed)) {
+      throw new Error('Only one exact external file URI may be authorized by model review.');
+    }
+    this.authorizedExternalReferenceUris.add(parsed.toString());
   }
 
   public async listWorkspaceFiles(language: KeepseekLanguage): Promise<string> {

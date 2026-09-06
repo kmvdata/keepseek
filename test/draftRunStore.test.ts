@@ -13,14 +13,18 @@ import type {
 } from '../src/runs/draftRunExecutor';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import { DraftRunStore } from '../src/runs/draftRunStore';
+import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
+import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
+import type { ApprovalRecordMatch } from '../src/approvals/approvalReviewTypes';
 import type { DraftRun, DraftRunProposal, DraftRunSpec, ExecutionPermit } from '../src/shared/types';
 
 test('delegated DraftRun records its approval source and consumes a single immutable proposal', async () => {
-  await withDraftRunFixture(async ({ workspaceRoot, store, executor }) => {
+  await withDraftRunFixture(async ({ workspaceRoot, store, executor, approvalReviews }) => {
     const proposal = createProposal(workspaceRoot);
     store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
-    await store.approveAndRun(proposal.id, new Set(), { delegatedApproval: () => true });
-    await store.approveAndRun(proposal.id, new Set(), { delegatedApproval: () => true });
+    const approvalRecord = await addHostApproval(approvalReviews, proposal, 's', 'r');
+    await store.approveAndRun(proposal.id, new Set(), { delegatedApproval: () => true, approvalRecord });
+    await store.approveAndRun(proposal.id, new Set(), { delegatedApproval: () => true, approvalRecord });
     assert.equal(executor.executeCount, 1);
     assert.equal(executor.lastPermit?.source, 'delegated_approver');
     assert.equal(store.get(proposal.id)?.authorizationSource, 'delegated_approver');
@@ -28,11 +32,15 @@ test('delegated DraftRun records its approval source and consumes a single immut
 });
 
 test('revoking delegation while persisting approval prevents process creation', async () => {
-  await withDraftRunFixture(async ({ workspaceRoot, store, executor }) => {
+  await withDraftRunFixture(async ({ workspaceRoot, store, executor, approvalReviews }) => {
     const proposal = createProposal(workspaceRoot);
     store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
+    const approvalRecord = await addHostApproval(approvalReviews, proposal, 's', 'r');
     let checks = 0;
-    const result = await store.approveAndRun(proposal.id, new Set(), { delegatedApproval: () => ++checks < 3 });
+    const result = await store.approveAndRun(proposal.id, new Set(), {
+      delegatedApproval: () => ++checks < 3,
+      approvalRecord
+    });
     assert.equal(executor.executeCount, 0);
     assert.equal(result?.status, 'failed');
     assert.match(result?.error ?? '', /revoked/u);
@@ -365,6 +373,7 @@ async function withDraftRunFixture(run: (fixture: {
   workspaceRoot: string;
   store: DraftRunStore;
   executor: FakeDraftRunExecutor;
+  approvalReviews: ApprovalReviewStore;
 }) => Promise<void>): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-draft-run-store-'));
   const workspaceRoot = path.join(root, 'workspace');
@@ -372,15 +381,54 @@ async function withDraftRunFixture(run: (fixture: {
   vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspaceRoot), name: 'workspace' }];
   vscode.workspace.isTrusted = true;
   const executor = new FakeDraftRunExecutor();
-  const store = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+  const storageUri = vscode.Uri.file(path.join(root, 'storage')) as never;
+  const approvalReviews = new ApprovalReviewStore(storageUri);
+  await approvalReviews.initialize();
+  const store = new DraftRunStore(storageUri, executor, new DraftRunAuthorizationService(approvalReviews));
   await store.initialize();
   try {
-    await run({ root, workspaceRoot, store, executor });
+    await run({ root, workspaceRoot, store, executor, approvalReviews });
   } finally {
     await store.flush();
     vscode.workspace.workspaceFolders = [];
     await rm(root, { recursive: true, force: true });
   }
+}
+
+async function addHostApproval(
+  store: ApprovalReviewStore,
+  proposal: DraftRunProposal,
+  sessionId: string,
+  agentRunId: string
+): Promise<ApprovalRecordMatch> {
+  const record = await store.add({
+    sessionId,
+    rootTaskId: agentRunId,
+    agentRunId,
+    targetId: proposal.id,
+    actionKind: 'draft_run_execute',
+    actionHash: proposal.specHash,
+    policyVersion: 1,
+    approvalSource: 'host_policy',
+    reviewerSourceId: '',
+    reviewerModelId: '',
+    reviewerProvider: 'host_policy',
+    decision: 'approve',
+    risk: 'high',
+    rationale: 'Automatically approved without model review.',
+    policyRules: ['host_auto_approval']
+  });
+  return {
+    reviewId: record.reviewId,
+    sessionId,
+    agentRunId,
+    targetId: proposal.id,
+    actionKind: 'draft_run_execute',
+    actionHash: proposal.specHash,
+    policyVersion: 1,
+    approvalMode: 'delegate',
+    workspaceTrusted: true
+  };
 }
 
 function createProposal(workspaceRoot: string, options: {

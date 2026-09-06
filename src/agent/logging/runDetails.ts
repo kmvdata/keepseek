@@ -176,6 +176,7 @@ export class RunDetailsBuilder {
       toolCallCount: this.toolCallCount,
       toolCalls: this.toolCalls.map((tool) => ({ ...tool })),
       authorizations: this.authorizations.map((authorization) => ({ ...authorization })),
+      approvalReviews: this.approvalReviews.map((review) => ({ ...review })),
       changeSets: this.changeSets.map(cloneChangeSetSummary),
       validations: this.validations.map((validation) => ({ ...validation })),
       contextSources: this.contextSources.map((source) => ({ ...source })),
@@ -194,6 +195,7 @@ export class RunDetailsBuilder {
   private contextDiscarded: RunDetailsSummary['contextDiscarded'] = [];
   private contextDeduplication: RunDetailsSummary['contextDeduplication'];
   private historySummaries: NonNullable<RunDetailsSummary['historySummaries']> = [];
+  private approvalReviews: NonNullable<RunDetailsSummary['approvalReviews']> = [];
 
   public setHistorySummaries(summaries: readonly HistorySummary[]): void {
     this.historySummaries = summaries.map((summary) => ({
@@ -282,6 +284,12 @@ export class RunDetailsBuilder {
       source: decision.source,
       reason: decision.reason ? redactSensitiveText(decision.reason).slice(0, 240) : undefined
     });
+    if (decision.approvalReview) {
+      this.approvalReviews = [
+        ...this.approvalReviews.filter((review) => review.reviewId !== decision.approvalReview!.reviewId),
+        { ...decision.approvalReview }
+      ].slice(-100);
+    }
     const tool = [...this.toolCalls].reverse().find((item) => item.name === decision.toolName && item.status === 'running');
     if (tool) {
       tool.riskLevel = decision.riskLevel;

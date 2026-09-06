@@ -12,7 +12,7 @@ const WORKSPACE_WRITE_PATTERN = /\b(?:cp|mv|mkdir|touch|install|tee|patch)\b/iu;
 const GIT_MUTATION_PATTERN = /\bgit\s+(?:add|apply|am|branch|checkout|clean|clone|commit|fetch|gc|init|merge|mv|pull|push|rebase|remote|reset|restore|revert|rm|stash|switch|tag|worktree)\b/iu;
 const PUBLISH_PATTERN = /\b(?:publish|deploy|release)\b/iu;
 const PRIVILEGE_PATTERN = /\b(?:sudo|doas|runas|pkexec)\b/iu;
-const CREDENTIAL_PATTERN = /(?:\b(?:printenv|env|set)\b|\.ssh|\.aws|\.npmrc|\.pypirc|keychain|credential|password|secret|token)/iu;
+const CREDENTIAL_PATTERN = /(?:\b(?:printenv|env|set)\b|\.ssh|\.aws|\.npmrc|\.pypirc|keychain|\b(?:api[ _-]?key|auth(?:entication|orization)?|cookie|credential|password|secret|token)\b)/iu;
 const INTERPRETER_PATTERN = /(?:^|[/\\])(?:ba|z|fi|k|c)?sh(?:\.exe)?$|(?:^|[/\\])(?:cmd|powershell|pwsh|python\d*|node|ruby|perl)(?:\.exe)?$/iu;
 const LONG_RUNNING_PATTERN = /\b(?:watch|serve|server|dev|start)\b/iu;
 
@@ -27,6 +27,7 @@ export function hasValidationBlockingRisk(command: string): boolean {
 
 export function analyzeDraftRunEffects(spec: DraftRunSpec): DraftRunEffectAssessment {
   const commandText = [spec.executable, ...spec.args].join(' ');
+  const environmentNames = spec.env.map((entry) => entry.name.replace(/_/gu, ' ')).join(' ');
   const effects = new Set<DraftRunEffect>(['workspace_read']);
   const evidence: string[] = [];
   const add = (effect: DraftRunEffect, message: string) => {
@@ -58,7 +59,7 @@ export function analyzeDraftRunEffects(spec: DraftRunSpec): DraftRunEffectAssess
   if (PRIVILEGE_PATTERN.test(commandText)) {
     add('privilege_escalation', 'The command requests elevated privileges.');
   }
-  if (CREDENTIAL_PATTERN.test(commandText)) {
+  if (CREDENTIAL_PATTERN.test(commandText) || CREDENTIAL_PATTERN.test(environmentNames)) {
     add('credential_access', 'The command may read or expose environment variables or credentials.');
   }
   if (INTERPRETER_PATTERN.test(path.basename(spec.executable))) {

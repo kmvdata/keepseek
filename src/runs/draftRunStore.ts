@@ -11,6 +11,8 @@ import type {
 import { getFileReferenceAuthorizationKey } from '../context/references/fileReference';
 import { hashDraftRunSpec } from './draftRunProposal';
 import { DraftRunAuthorizationService } from './draftRunAuthorization';
+import type { ApprovalRecordMatch, ApprovalReviewRecord } from '../approvals/approvalReviewTypes';
+import { toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
 import {
   SpawnDraftRunExecutor,
   type DraftRunExecutorAdapter,
@@ -139,6 +141,23 @@ export class DraftRunStore {
     return draftRun ? cloneDraftRun(draftRun) : undefined;
   }
 
+  public attachApprovalReview(id: string, record: ApprovalReviewRecord): boolean {
+    const draftRun = this.draftRuns.get(id);
+    if (!draftRun) return false;
+    draftRun.approvalReview = toApprovalReviewDisplay(record);
+    this.emitState(draftRun);
+    this.schedulePersist();
+    return true;
+  }
+
+  /** Reusable hard checks that run before model review and again before execution. */
+  public async preflightApproval(id: string, authorizedExternalReferenceUris: ReadonlySet<string>): Promise<DraftRun> {
+    const draftRun = this.draftRuns.get(id);
+    if (!draftRun || draftRun.status !== 'pending') throw new Error('Pending DraftRun was not found.');
+    await this.validateBeforeApproval(draftRun, authorizedExternalReferenceUris);
+    return cloneDraftRun(draftRun);
+  }
+
   public async flush(): Promise<void> {
     await this.persistNow();
   }
@@ -157,7 +176,12 @@ export class DraftRunStore {
   public async approveAndRun(
     id: string,
     authorizedExternalReferenceUris: ReadonlySet<string>,
-    options: { autoContinue?: boolean; delegatedApproval?: () => boolean; signal?: AbortSignal } = {}
+    options: {
+      autoContinue?: boolean;
+      delegatedApproval?: () => boolean;
+      approvalRecord?: ApprovalRecordMatch;
+      signal?: AbortSignal;
+    } = {}
   ): Promise<DraftRun | undefined> {
     const draftRun = this.draftRuns.get(id);
     if (!draftRun || draftRun.status !== 'pending' || this.approving.has(id)) {
@@ -174,6 +198,9 @@ export class DraftRunStore {
       assertAuthorized();
       await this.validateBeforeApproval(draftRun, authorizedExternalReferenceUris);
       assertAuthorized();
+      const permit = options.delegatedApproval
+        ? await this.authorization.createDelegatedPermit(draftRun, options.delegatedApproval, options.approvalRecord)
+        : this.authorization.createUserClickPermit(draftRun);
       draftRun.status = 'approved';
       draftRun.authorizationSource = options.delegatedApproval ? 'delegated_approver' : 'user_click';
       draftRun.approvedAt = new Date().toISOString();
@@ -188,9 +215,6 @@ export class DraftRunStore {
       await this.persistNow();
 
       assertAuthorized();
-      const permit = options.delegatedApproval
-        ? this.authorization.createDelegatedPermit(draftRun, options.delegatedApproval)
-        : this.authorization.createUserClickPermit(draftRun);
       const abortController = new AbortController();
       this.abortControllers.set(draftRun.id, abortController);
       const abort = () => abortController.abort();

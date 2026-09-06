@@ -33,10 +33,10 @@ import {
   getAgentTools
 } from './protocol';
 
-export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 6;
+export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 7;
 export const LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION = 1;
 export const PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION = 2;
-export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 6;
+export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 7;
 
 export interface ProviderRequestProjectionInput {
   model: KeepseekModel;

@@ -1,6 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, test } from 'node:test';
@@ -21,6 +21,8 @@ import type {
   SafeNpmScript,
   ToolAuthorizationDecision
 } from '../src/shared/types';
+import type { ApprovalReviewerAdapter } from '../src/approvals/approvalReviewer';
+import type { ApprovalReviewRecord, ApprovalReviewRequest } from '../src/approvals/approvalReviewTypes';
 
 let workspaceRoot = '';
 
@@ -139,6 +141,50 @@ test('Runner turns keepseek_run_draft into a pending proposal without executing 
   assert.match(result.message ?? '', /no process was started/u);
 });
 
+test('model-reviewed validation persists a neutral tool placeholder and requires a new user-message boundary', async () => {
+  await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { compile: 'tsc -p .' } }));
+  const validation = new FakeValidationTools([validationResult(true)]);
+  const reviewer = new FakeApprovalReviewer('approve');
+  const request = createRequest('Compile the project under model review.');
+  request.approvalMode = 'model_review';
+  request.sessionId = 'session-review';
+  const response = await withResponses([
+    toolResponse([toolCall('reviewed-validation', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })])
+  ], async () => await createRunner(validation, reviewer).run(request));
+
+  assert.equal(validation.runCount, 1);
+  assert.equal(reviewer.calls, 1);
+  assert.equal(response.approvalContinuationRequired, true);
+  const providerResult = JSON.parse(response.toolRounds?.[0]?.toolResults[0]?.content ?? '{}');
+  assert.equal(providerResult.status, 'approval_result_pending');
+  assert.doesNotMatch(response.toolRounds?.[0]?.toolResults[0]?.content ?? '', /Scoped model approval|durationMs/u);
+  assert.equal(response.runDetails.approvalReviews?.[0]?.decision, 'approve');
+  assert.match(response.approvalToolResults?.[0]?.result.content ?? '', /durationMs/u);
+});
+
+test('model-reviewed validation denial does not execute and still crosses the new user-message boundary', async () => {
+  await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { compile: 'tsc -p .' } }));
+  const validation = new FakeValidationTools([]);
+  const reviewer = new FakeApprovalReviewer('deny');
+  const request = createRequest('Compile the project under model review.');
+  request.approvalMode = 'model_review';
+  request.sessionId = 'session-review';
+  const response = await withResponses([
+    toolResponse([toolCall('denied-validation', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })])
+  ], async () => await createRunner(validation, reviewer).run(request));
+
+  assert.equal(validation.runCount, 0);
+  assert.equal(response.approvalContinuationRequired, true);
+  assert.equal(response.runDetails.approvalReviews?.[0]?.decision, 'deny');
+  assert.doesNotMatch(response.toolRounds?.[0]?.toolResults[0]?.content ?? '', /Denied by reviewer/u);
+  assert.equal(response.approvalToolResults?.[0]?.status, 'denied');
+  const deniedResult = JSON.parse(response.approvalToolResults?.[0]?.result.content ?? '{}');
+  assert.equal(deniedResult.ok, true);
+  assert.equal(deniedResult.status, 'approval_denied');
+  assert.equal(deniedResult.executed, false);
+  assert.equal(Object.hasOwn(deniedResult, 'errorType'), false);
+});
+
 class FakeValidationTools implements ValidationToolAdapter {
   public runCount = 0;
 
@@ -193,15 +239,58 @@ class AllowAllToolAuthorization implements ToolAuthorizationAdapter {
   }
 }
 
-function createRunner(validation: ValidationToolAdapter): AgentRunner {
+function createRunner(validation: ValidationToolAdapter, reviewer?: ApprovalReviewerAdapter): AgentRunner {
   return new AgentRunner(
     new WorkspaceToolService(),
     undefined,
     validation,
     undefined,
     undefined,
-    new AllowAllToolAuthorization()
+    new AllowAllToolAuthorization(),
+    undefined,
+    undefined,
+    reviewer
   );
+}
+
+class FakeApprovalReviewer implements ApprovalReviewerAdapter {
+  public calls = 0;
+
+  public constructor(private readonly decision: 'approve' | 'deny') {}
+
+  public async review(request: ApprovalReviewRequest): Promise<{ status: 'reviewed'; record: ApprovalReviewRecord }> {
+    this.calls += 1;
+    return { status: 'reviewed', record: this.createRecord(request, 'model_review') };
+  }
+
+  public async createHostPolicyApproval(request: ApprovalReviewRequest): Promise<{ status: 'reviewed'; record: ApprovalReviewRecord }> {
+    return { status: 'reviewed', record: this.createRecord(request, 'host_policy') };
+  }
+
+  public async consumeApproval(): Promise<void> {}
+
+  private createRecord(request: ApprovalReviewRequest, source: 'model_review' | 'host_policy'): ApprovalReviewRecord {
+    return {
+      reviewId: `review-${this.calls}`,
+      runtimeId: 'runtime',
+      sessionId: request.sessionId,
+      rootTaskId: request.rootTaskId,
+      agentRunId: request.agentRunId,
+      targetId: request.targetId,
+      actionKind: request.actionKind,
+      actionHash: request.actionHash,
+      policyVersion: 1,
+      approvalSource: source,
+      reviewerSourceId: source === 'model_review' ? 'review-source' : '',
+      reviewerModelId: source === 'model_review' ? 'review-model' : '',
+      reviewerProvider: source === 'model_review' ? 'openai-responses' : 'host_policy',
+      decision: this.decision,
+      risk: this.decision === 'approve' ? 'low' : 'high',
+      rationale: this.decision === 'approve' ? 'Scoped model approval.' : 'Denied by reviewer.',
+      policyRules: ['least_privilege'],
+      createdAt: '2026-01-01T00:00:00.000Z'
+    };
+  }
 }
 
 function createRequest(prompt: string): AgentRequest {

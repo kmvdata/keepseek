@@ -3187,7 +3187,11 @@ export function getScript(): string {
       var meta = document.createElement('div');
       meta.className = 'draft-run-meta';
       meta.textContent = getDraftRunStatusLabel(statusValue) + ' · ' + String(spec.reason || '');
-      if (draftRun.authorizationSource === 'delegated_approver') meta.textContent += ' · ' + t('approvalDelegate');
+      if (draftRun.authorizationSource === 'delegated_approver') {
+        meta.textContent += ' · ' + t('approvalSourceLabel') + ': ' + getApprovalSourceLabel(draftRun.approvalReview);
+      } else if (draftRun.authorizationSource === 'user_click') {
+        meta.textContent += ' · ' + t('approvalSourceLabel') + ': ' + t('approvalSourceUser');
+      }
       heading.append(title, meta);
       var actions = document.createElement('div');
       actions.className = 'draft-run-actions';
@@ -3222,6 +3226,9 @@ export function getScript(): string {
       if (evidence) risk.title = evidence;
 
       card.append(header, fields, risk);
+      if (draftRun.approvalReview) {
+        card.append(createApprovalReviewSummary(draftRun.approvalReview));
+      }
       if (draftRun.output || draftRun.error) {
         var output = document.createElement('pre');
         output.className = 'draft-run-output';
@@ -3416,6 +3423,13 @@ export function getScript(): string {
       details.className = 'draft-chip-details';
       details.textContent = getChangeFileStatusLabel(edit.status) + (edit.reason ? ' · ' + edit.reason : '');
       content.append(main, details);
+      if (edit.approvalReview) {
+        content.append(createApprovalReviewSummary(edit.approvalReview));
+      }
+      if ((edit.status === 'applied' || edit.status === 'apply_failed')
+        && (!edit.approvalReview || edit.approvalSource === 'user_click')) {
+        content.append(createApprovalSourceSummary(getEditApprovalSourceLabel(edit.approvalSource)));
+      }
       if (edit.error) {
         var error = document.createElement('div');
         error.className = 'draft-chip-error';
@@ -3441,6 +3455,90 @@ export function getScript(): string {
       }
       chip.append(content, actions);
       return chip;
+    }
+
+    function createApprovalReviewSummary(review) {
+      var summary = document.createElement('div');
+      summary.className = 'approval-review-summary approval-review-' + String(review.decision || 'unavailable');
+      var source = getApprovalSourceLabel(review);
+      summary.textContent = [
+        t('approvalSourceLabel') + ': ' + source,
+        review.reviewerModelId ? t('approvalReviewerModel') + ': ' + review.reviewerModelId : '',
+        t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision),
+        t('approvalReviewRisk') + ': ' + getApprovalRiskLabel(review.risk),
+        t('approvalReviewReason') + ': ' + String(review.rationale || ''),
+        t('approvalReviewId') + ': ' + String(review.reviewId || '')
+      ].filter(Boolean).join(' · ');
+      return summary;
+    }
+
+    function createApprovalSourceSummary(source) {
+      var summary = document.createElement('div');
+      summary.className = 'approval-review-summary';
+      summary.textContent = t('approvalSourceLabel') + ': ' + source;
+      return summary;
+    }
+
+    function getApprovalSourceLabel(review) {
+      return review && review.approvalSource === 'host_policy'
+        ? t('approvalSourceHost')
+        : review && (review.approvalSource === 'model_review' || review.approvalSource === 'local_policy')
+          ? t('approvalSourceModel')
+          : t('approvalSourceUser');
+    }
+
+    function getAuthorizationSourceLabel(source) {
+      return source === 'explicit_confirmation'
+        ? t('approvalSourceUser')
+        : source === 'model_reviewer'
+          ? t('approvalSourceModel')
+          : source === 'delegated_approver'
+            ? t('approvalSourceHost')
+            : String(source || '');
+    }
+
+    function getEditApprovalSourceLabel(source) {
+      return source === 'model_reviewer'
+        ? t('approvalSourceModel')
+        : source === 'delegated_approver'
+          ? t('approvalSourceHost')
+          : t('approvalSourceUser');
+    }
+
+    function getApprovalDecisionLabel(decision) {
+      return decision === 'approve'
+        ? t('approvalDecisionApprove')
+        : decision === 'deny'
+          ? t('approvalDecisionDeny')
+          : decision === 'unavailable'
+            ? t('approvalDecisionUnavailable')
+            : String(decision || '');
+    }
+
+    function getApprovalRiskLabel(risk) {
+      return risk === 'low'
+        ? t('approvalRiskLow')
+        : risk === 'medium'
+          ? t('approvalRiskMedium')
+          : risk === 'high'
+            ? t('approvalRiskHigh')
+            : risk === 'critical'
+              ? t('approvalRiskCritical')
+              : String(risk || '');
+    }
+
+    function getApprovalActionLabel(actionKind) {
+      return actionKind === 'external_file_access'
+        ? t('approvalActionExternalFileAccess')
+        : actionKind === 'validation_run'
+          ? t('approvalActionValidationRun')
+          : actionKind === 'draft_edit_apply'
+            ? t('approvalActionDraftEditApply')
+            : actionKind === 'draft_delete_apply'
+              ? t('approvalActionDraftDeleteApply')
+              : actionKind === 'draft_run_execute'
+                ? t('approvalActionDraftRunExecute')
+                : String(actionKind || '');
     }
 
     function createEditActionButton(label, action, id, secondary) {
@@ -3820,10 +3918,28 @@ export function getScript(): string {
 
       if (Array.isArray(details.authorizations) && details.authorizations.length) {
         var authorizations = details.authorizations.map(function(record) {
-          return [record.toolName, record.allowed ? t('allowed') : t('denied'), record.scope, record.source, record.reason].filter(Boolean).join(' · ');
+          return [record.toolName, record.allowed ? t('allowed') : t('denied'), record.scope,
+            t('approvalSourceLabel') + ': ' + getAuthorizationSourceLabel(record.source), record.reason].filter(Boolean).join(' · ');
         });
         body.append(createRunTextSection(t('runDetailsAuthorization'), authorizations,
           details.authorizations.some(function(record) { return !record.allowed; }) ? 'run-details-denied' : ''));
+      }
+
+      if (Array.isArray(details.approvalReviews) && details.approvalReviews.length) {
+        var reviews = details.approvalReviews.map(function(review) {
+          return [getApprovalActionLabel(review.actionKind), review.targetId, t('approvalSourceLabel') + ': ' + getApprovalSourceLabel(review),
+            review.reviewerModelId ? t('approvalReviewerModel') + ': ' + review.reviewerModelId : '',
+            t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision),
+            t('approvalReviewRisk') + ': ' + getApprovalRiskLabel(review.risk),
+            t('approvalReviewReason') + ': ' + review.rationale,
+            t('approvalReviewId') + ': ' + review.reviewId].filter(Boolean).join(' · ');
+        });
+        body.append(createRunTextSection(t('runDetailsApprovalReviews'), reviews,
+          details.approvalReviews.some(function(review) { return review.decision === 'unavailable'; })
+            ? 'run-details-error'
+            : details.approvalReviews.some(function(review) { return review.decision === 'deny'; })
+              ? 'run-details-denied'
+              : ''));
       }
 
       if (Array.isArray(details.changeSets) && details.changeSets.length) {

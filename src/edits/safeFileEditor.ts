@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import { getConfiguredWorkspaceReadMaxBytes } from '../shared/config';
 import { formatBytes } from '../shared/format';
 import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
-import { shouldSkipTextUri } from '../shared/textFileGuards';
+import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
 import type { ChangeCheckpoint, DraftEdit } from '../shared/types';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
@@ -18,12 +18,19 @@ interface FileSnapshot {
 interface SnapshotReadOptions {
   label?: string;
   readContent?: boolean;
-  requireSafeDeleteText?: boolean;
+  requireSafeTextFor?: 'write' | 'delete';
 }
 
 export interface DelegatedEditApproval {
   authorizedUri: string;
   isAuthorized: () => boolean;
+  source?: 'model_reviewer' | 'delegated_approver';
+}
+
+export interface DraftEditPreflight {
+  originalText: string;
+  originalTextHash?: string;
+  originalSize?: number;
 }
 
 export class SafeFileEditor {
@@ -34,6 +41,29 @@ export class SafeFileEditor {
     private readonly t: Translator = (key) => key
   ) {}
 
+  /** Deterministic hard checks used before a model review. No write occurs. */
+  public async preflightDraftEdit(edit: DraftEdit, approval?: DelegatedEditApproval): Promise<DraftEditPreflight> {
+    const uri = vscode.Uri.parse(edit.uri);
+    if (!vscode.workspace.isTrusted) throw new Error('DraftEdit requires a trusted workspace.');
+    if (approval && (approval.authorizedUri !== edit.uri || !approval.isAuthorized())) {
+      throw new Error('Delegated file approval was cancelled or revoked.');
+    }
+    this.assertWorkspaceTarget(uri, edit.label, approval?.authorizedUri);
+    this.assertNoDirtyOpenEditor(uri, edit.label);
+    this.assertSafeDraftOutput(uri, edit);
+    const original = await this.readSnapshot(uri, {
+      label: edit.label,
+      requireSafeTextFor: edit.action === 'delete' ? 'delete' : 'write'
+    });
+    this.assertActionMatchesSnapshot(edit, original);
+    this.assertDeleteBaselineMatches(edit, original);
+    return {
+      originalText: original.text ?? '',
+      originalTextHash: original.hash,
+      originalSize: original.sizeBytes
+    };
+  }
+
   public async applyDraftEdit(edit: DraftEdit, changeSetId = 'legacy', approval?: DelegatedEditApproval): Promise<ChangeCheckpoint> {
     const uri = vscode.Uri.parse(edit.uri);
     const checkApproval = () => {
@@ -42,11 +72,13 @@ export class SafeFileEditor {
       }
     };
     checkApproval();
+    if (!vscode.workspace.isTrusted) throw new Error('DraftEdit requires a trusted workspace.');
     this.assertWorkspaceTarget(uri, edit.label, approval?.authorizedUri);
     this.assertNoDirtyOpenEditor(uri, edit.label);
+    this.assertSafeDraftOutput(uri, edit);
     const original = await this.readSnapshot(uri, {
       label: edit.label,
-      requireSafeDeleteText: edit.action === 'delete'
+      requireSafeTextFor: edit.action === 'delete' ? 'delete' : 'write'
     });
     this.assertActionMatchesSnapshot(edit, original);
     this.assertDeleteBaselineMatches(edit, original);
@@ -144,6 +176,22 @@ export class SafeFileEditor {
     throw new Error(this.t(edit.action === 'delete' ? 'cannotApplyChangedDeleteTarget' : 'cannotApplyChangedDraftTarget', { label: edit.label }));
   }
 
+  private assertSafeDraftOutput(uri: vscode.Uri, edit: DraftEdit): void {
+    if (edit.action === 'delete') return;
+    const sizeBytes = this.encoder.encode(edit.newText).byteLength;
+    const maxBytes = getConfiguredWorkspaceReadMaxBytes();
+    // The context reader skips some valid text formats (for example SVG) for
+    // prompt-economy reasons. SafeFileEditor only needs the bytes to be a
+    // bounded, rollback-safe text snapshot, so do not apply that extension
+    // deny-list to writes.
+    if (!isReadableTextContent(edit.newText)) {
+      throw new Error(this.t('cannotWriteUnreadableFile', { label: edit.label }));
+    }
+    if (sizeBytes > maxBytes) {
+      throw new Error(this.t('cannotWriteOversizedFile', { label: edit.label, limit: formatBytes(maxBytes) }));
+    }
+  }
+
   private assertSnapshotMatchesAppliedChange(checkpoint: ChangeCheckpoint, current: FileSnapshot): void {
     if (checkpoint.appliedExists !== current.exists) {
       throw new Error(this.t('cannotRevertChangedAgentFile', { label: checkpoint.label }));
@@ -160,8 +208,8 @@ export class SafeFileEditor {
       if (stat.type !== vscode.FileType.File) {
         throw new Error(this.t('draftTargetNotFile', { label }));
       }
-      if (options.requireSafeDeleteText) {
-        this.assertSafeDeleteFileMetadata(uri, label, stat.size);
+      if (options.requireSafeTextFor) {
+        this.assertSafeTextFileMetadata(uri, label, stat.size, options.requireSafeTextFor);
       }
       if (options.readContent === false) {
         return {
@@ -170,13 +218,13 @@ export class SafeFileEditor {
         };
       }
       const bytes = await vscode.workspace.fs.readFile(uri);
-      if (options.requireSafeDeleteText) {
+      if (options.requireSafeTextFor) {
         // Re-check the bytes actually read so a target swapped after stat cannot
         // bypass the rollback snapshot limit.
-        this.assertSafeDeleteFileMetadata(uri, label, bytes.byteLength);
+        this.assertSafeTextFileMetadata(uri, label, bytes.byteLength, options.requireSafeTextFor);
       }
-      const text = options.requireSafeDeleteText
-        ? this.decodeSafeDeleteText(bytes, label)
+      const text = options.requireSafeTextFor
+        ? this.decodeSafeText(bytes, label, options.requireSafeTextFor)
         : this.decoder.decode(bytes);
       return {
         exists: true,
@@ -192,25 +240,25 @@ export class SafeFileEditor {
     }
   }
 
-  private assertSafeDeleteFileMetadata(uri: vscode.Uri, label: string, sizeBytes: number): void {
-    if (shouldSkipTextUri(uri)) {
-      throw new Error(this.t('cannotDeleteUnreadableFile', { label }));
+  private assertSafeTextFileMetadata(uri: vscode.Uri, label: string, sizeBytes: number, operation: 'write' | 'delete'): void {
+    if (operation === 'delete' && shouldSkipTextUri(uri)) {
+      throw new Error(this.t(operation === 'delete' ? 'cannotDeleteUnreadableFile' : 'cannotWriteUnreadableFile', { label }));
     }
     const maxBytes = getConfiguredWorkspaceReadMaxBytes();
     if (sizeBytes > maxBytes) {
-      throw new Error(this.t('cannotDeleteOversizedFile', {
+      throw new Error(this.t(operation === 'delete' ? 'cannotDeleteOversizedFile' : 'cannotWriteOversizedFile', {
         label,
         limit: formatBytes(maxBytes)
       }));
     }
   }
 
-  private decodeSafeDeleteText(bytes: Uint8Array, label: string): string {
+  private decodeSafeText(bytes: Uint8Array, label: string, operation: 'write' | 'delete'): string {
     const text = decodeRollbackSafeUtf8Text(bytes);
     if (text !== undefined) {
       return text;
     }
-    throw new Error(this.t('cannotDeleteUnreadableFile', { label }));
+    throw new Error(this.t(operation === 'delete' ? 'cannotDeleteUnreadableFile' : 'cannotWriteUnreadableFile', { label }));
   }
 
   private async writeTextFile(uri: vscode.Uri, text: string, createParent: boolean, checkApproval?: () => void): Promise<void> {

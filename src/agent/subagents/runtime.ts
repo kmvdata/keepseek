@@ -2,10 +2,9 @@ import { recoveryBlocker, type RunCheckpoint } from '../runCheckpoint';
 import { mergeDurations } from '../executionPolicy';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
-import { resolveModelSourceConfig } from '../../accounts/accountResolver';
-import { createModelCatalog, findModelBySelection } from '../../accounts/modelCatalog';
 import { ModelSourceStore } from '../../accounts/accountStore';
 import { SubagentSettingsStore } from '../../accounts/subagentSettingsStore';
+import { resolveConfiguredSubagentModel } from '../../accounts/subagentModelResolver';
 import type { ModelSourceConfigSnapshot } from '../../accounts/types';
 import type {
   AgentRequest,
@@ -645,44 +644,14 @@ export class SubagentRuntime implements SubagentToolAdapter {
     model: KeepseekModel;
     sourceConfig: ModelSourceConfigSnapshot;
   }> {
-    const setting = await this.settingsStore.load();
-    if (setting.mode === 'follow-main') {
-      const sourceConfig = parentRequest.sourceConfig ?? await resolveModelSourceConfig(
-        parentRequest.model.sourceId,
-        this.options.globalStorageUri,
-        { sourceStore: this.options.sourceStore, language }
-      );
-      return { model: { ...parentRequest.model }, sourceConfig: { ...sourceConfig } };
-    }
-    if (!setting.sourceId || !setting.modelId) {
-      throw new Error(language === 'en'
-        ? 'The fixed subagent model setting is incomplete. Choose it again in the command menu; KeepSeek will not silently fall back.'
-        : '固定的子代理模型设置不完整。请在命令菜单中重新选择；KeepSeek 不会静默回退。');
-    }
-    const sources = await this.options.sourceStore.listSources();
-    const model = findModelBySelection(createModelCatalog(sources), {
-      sourceId: setting.sourceId,
-      modelId: setting.modelId
-    });
-    if (!model || model.agentCompatible === false) {
-      throw new Error(language === 'en'
-        ? 'The selected subagent model is missing, disabled, or unavailable. Choose it again in the command menu; KeepSeek will not silently fall back.'
-        : '子代理模型已缺失、被禁用或不可用。请在命令菜单中重新选择；KeepSeek 不会静默回退。');
-    }
-    const resolved = await resolveModelSourceConfig(model.sourceId, this.options.globalStorageUri, {
+    return await resolveConfiguredSubagentModel({
+      globalStorageUri: this.options.globalStorageUri,
+      workspaceKey: this.options.workspaceKey,
       sourceStore: this.options.sourceStore,
-      language
+      parentRequest,
+      language,
+      settingsStore: this.settingsStore
     });
-    return {
-      model: { ...model },
-      sourceConfig: {
-        sourceId: resolved.sourceId,
-        provider: resolved.provider,
-        apiKey: resolved.apiKey,
-        baseUrl: resolved.baseUrl,
-        supportsBilling: resolved.supportsBilling
-      }
-    };
   }
 
   private setProgress(state: SubagentProgressState): void {

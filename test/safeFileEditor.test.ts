@@ -93,6 +93,43 @@ test('refuses binary, skipped, and oversized deletion targets without removing t
   }));
 });
 
+test('write preflight rejects binary baselines and oversized or unreadable output without changing files', async (t) => {
+  const root = await configureWorkspace(t, 'keepseek-safe-write-guards-');
+  const binaryPath = path.join(root, 'binary.txt');
+  const existingPath = path.join(root, 'existing.ts');
+  const createPath = path.join(root, 'oversized.ts');
+  await fs.writeFile(binaryPath, Uint8Array.from([0, 1, 2, 3]));
+  await fs.writeFile(existingPath, 'before', 'utf8');
+  const editor = new SafeFileEditor((key) => key);
+
+  await assert.rejects(editor.preflightDraftEdit({
+    ...createModifyEdit(binaryPath), newText: 'safe replacement'
+  }), /cannotWriteUnreadableFile/u);
+  await assert.rejects(editor.preflightDraftEdit({
+    ...createModifyEdit(existingPath), newText: 'x'.repeat(DEFAULT_MAX_FILE_BYTES + 1)
+  }), /cannotWriteOversizedFile/u);
+  await assert.rejects(editor.preflightDraftEdit({
+    id: 'create-unreadable', uri: vscode.Uri.file(createPath).toString(), label: 'oversized.ts',
+    action: 'create', newText: 'prefix\0suffix', reason: 'invalid output'
+  }), /cannotWriteUnreadableFile/u);
+
+  assert.deepEqual(await fs.readFile(binaryPath), Buffer.from([0, 1, 2, 3]));
+  assert.equal(await fs.readFile(existingPath, 'utf8'), 'before');
+  await assert.rejects(fs.stat(createPath), { code: 'ENOENT' });
+});
+
+test('safe write checks keep valid text formats such as SVG writable', async (t) => {
+  const root = await configureWorkspace(t, 'keepseek-safe-svg-write-');
+  const targetPath = path.join(root, 'image.svg');
+  await fs.writeFile(targetPath, '<svg></svg>', 'utf8');
+  const editor = new SafeFileEditor((key) => key);
+  await editor.applyDraftEdit({
+    id: 'modify-svg', uri: vscode.Uri.file(targetPath).toString(), label: 'image.svg',
+    action: 'modify', newText: '<svg><path /></svg>', reason: 'Update vector asset'
+  });
+  assert.equal(await fs.readFile(targetPath, 'utf8'), '<svg><path /></svg>');
+});
+
 test('keeps the existing dirty-editor protection for deletion targets', async (t) => {
   const root = await configureWorkspace(t, 'keepseek-safe-delete-dirty-');
   const targetPath = path.join(root, 'dirty.ts');
@@ -210,14 +247,17 @@ async function configureWorkspace(
   const previousWorkspaceFolders = vscode.workspace.workspaceFolders;
   const previousTextDocuments = vscode.workspace.textDocuments;
   const previousTabGroups = vscode.window.tabGroups.all;
+  const previousTrusted = vscode.workspace.isTrusted;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(root), name: 'keepseek-test' }];
   vscode.workspace.textDocuments = [];
   vscode.window.tabGroups.all = [];
+  vscode.workspace.isTrusted = true;
   t.after(async () => {
     vscode.workspace.workspaceFolders = previousWorkspaceFolders;
     vscode.workspace.textDocuments = previousTextDocuments;
     vscode.window.tabGroups.all = previousTabGroups;
+    vscode.workspace.isTrusted = previousTrusted;
     await fs.rm(root, { recursive: true, force: true });
   });
   return root;
