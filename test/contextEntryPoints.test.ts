@@ -161,6 +161,67 @@ test('command menu exposes an accessible persisted compression threshold tab sel
   assert.match(styles, /\.command-menu\.is-readonly \.command-compression-tab/u);
 });
 
+test('command menu nests low-frequency Skill creation under the expanded Skills picker', () => {
+  const inputTemplate = getInputTemplate();
+  const inputScript = getInputScript();
+  const styles = getStyles();
+  const titleIndex = inputTemplate.indexOf('data-i18n="skillsCommandTitle"');
+  const mainButtonIndex = inputTemplate.indexOf('id="commandSkillsMainButton"');
+  const createButtonIndex = inputTemplate.indexOf('id="commandCreateSkillButton"');
+  const skillsButtonIndex = inputTemplate.indexOf('id="commandSkillsButton"');
+  const skillActionHandler = getGeneratedSection(
+    inputScript,
+    'function handleSkillAction(action, skillId, selected)',
+    'function getSelectedModel(models)'
+  );
+
+  assert.ok(mainButtonIndex >= 0 && titleIndex > mainButtonIndex && createButtonIndex > titleIndex && skillsButtonIndex > createButtonIndex);
+  assert.match(inputTemplate, /id="commandCreateSkillButton"[\s\S]*?class="command-skill-icon-button command-skill-create-button hidden"/u);
+  assert.match(inputTemplate, /id="commandSkillsButton"[\s\S]*?aria-controls="commandSkillList"/u);
+  assert.match(inputTemplate, /data-i18n="skillsCommandTitle">使用 Skills</u);
+  assert.match(inputTemplate, /data-i18n="skillsDescription">[^<]*@[^<]*Skills 选择器</u);
+  assert.doesNotMatch(inputTemplate, />\/create-skill</u);
+  assert.doesNotMatch(inputTemplate, /id="commandSkillsValue"/u);
+  assert.doesNotMatch(inputScript, /commandSkillsValue/u);
+  assert.match(inputScript, /commandCreateSkillButton\.classList\.toggle\('hidden', !commandSkillListOpen\)/u);
+  assert.match(inputScript, /commandCreateSkillButton[\s\S]*?showCreateSkillDialog\(\)/u);
+  assert.match(inputScript, /\[commandSkillsMainButton, commandSkillsButton\]\.forEach\(function\(toggleButton\)/u);
+  assert.doesNotMatch(skillActionHandler, /closeCommandMenu\(\)/u);
+  assert.match(styles, /\.command-skills-row\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto/u);
+  assert.match(styles, /\.command-skills-toggle-button\[aria-expanded="true"\] \.command-skills-chevron[\s\S]*?rotate\(90deg\)/u);
+});
+
+test('Skills picker uses checkboxes and keeps selected Skills in activation order before name-sorted items', () => {
+  const inputScript = getInputScript();
+  const styles = getStyles();
+  const skillItemRenderer = getGeneratedSection(
+    inputScript,
+    'function createCommandSkillItem(skill)',
+    'function createSkillActionButton(skill, action, label, disabled)'
+  );
+  const skillOrdering = getGeneratedSection(
+    inputScript,
+    'function getCommandSkillItems()',
+    'function getFilteredSkillMenuItems()'
+  );
+  const skillActionHandler = getGeneratedSection(
+    inputScript,
+    'function handleSkillAction(action, skillId, selected)',
+    'function getSelectedModel(models)'
+  );
+
+  assert.match(skillItemRenderer, /checkbox\.type = 'checkbox'/u);
+  assert.match(skillItemRenderer, /checkbox\.checked = active/u);
+  assert.match(skillItemRenderer, /checkbox\.dataset\.skillAction = 'toggle-use'/u);
+  assert.doesNotMatch(skillItemRenderer, /skillsActive|skillsUse|command-skill-status/u);
+  assert.match(skillActionHandler, /if \(selected\)[\s\S]*?type: 'useSkill'[\s\S]*?type: 'removeActiveSkill'/u);
+  assert.match(skillOrdering, /getActiveSkillIds\(\)\.forEach[\s\S]*?activeOrder\.set\(skillId, index\)/u);
+  assert.match(skillOrdering, /if \(leftActive && rightActive\)[\s\S]*?activeOrder\.get\(left\.id\) - activeOrder\.get\(right\.id\)/u);
+  assert.match(skillOrdering, /leftActive \? -1 : 1[\s\S]*?leftName\.localeCompare\(rightName/u);
+  assert.match(styles, /\.command-skill-checkbox\s*\{/u);
+  assert.doesNotMatch(styles, /\.command-skill-status/u);
+});
+
 test('command menu owns project-scoped main and subagent model selection', async () => {
   const inputTemplate = getInputTemplate();
   const inputScript = getInputScript();

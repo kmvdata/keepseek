@@ -80,31 +80,56 @@ export function getInputTemplate(): string {
 
           <section class="command-section" aria-label="Skills">
             <div class="command-section-label">Skills</div>
-            <button
-              id="commandSkillsButton"
-              type="button"
-              class="command-row"
-              role="menuitem"
-              aria-expanded="false"
-            >
-              <span class="command-row-main">
-                <span class="command-row-title">/skills</span>
-                <span class="command-row-description" data-i18n="skillsDescription">选择可复用工作流</span>
+            <div class="command-skills-row">
+              <button
+                id="commandSkillsMainButton"
+                type="button"
+                class="command-skills-main-button"
+                role="menuitem"
+                aria-expanded="false"
+                aria-controls="commandSkillList"
+              >
+                <span class="command-row-main">
+                  <span class="command-row-title" data-i18n="skillsCommandTitle">使用 Skills</span>
+                  <span class="command-row-description" data-i18n="skillsDescription">输入 $ 快捷调出 Skills 选择器</span>
+                </span>
+              </button>
+              <span class="command-skills-actions">
+                <button
+                  id="commandCreateSkillButton"
+                  type="button"
+                  class="command-skill-icon-button command-skill-create-button hidden"
+                  role="menuitem"
+                  aria-label="创建 Skill"
+                  data-i18n-aria-label="createSkill"
+                  title="创建 Skill"
+                  data-i18n-title="createSkill"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M8 3.25v9.5M3.25 8h9.5" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round"/>
+                  </svg>
+                </button>
+                <button
+                  id="commandSkillsButton"
+                  type="button"
+                  class="command-skill-icon-button command-skills-toggle-button"
+                  role="menuitem"
+                  aria-expanded="false"
+                  aria-controls="commandSkillList"
+                  aria-label="展开 Skills 列表"
+                  data-i18n-aria-label="skillsExpand"
+                  title="展开 Skills 列表"
+                  data-i18n-title="skillsExpand"
+                >
+                  <span class="command-skills-chevron" aria-hidden="true">
+                    <svg width="14" height="14" viewBox="0 0 16 16">
+                      <path d="m6 3.75 4.25 4.25L6 12.25" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </span>
+                </button>
               </span>
-              <span id="commandSkillsValue" class="command-row-value">0</span>
-            </button>
+            </div>
             <div id="commandSkillList" class="command-skill-list hidden" role="group" aria-label="Skills 列表" data-i18n-aria-label="skillsList"></div>
-            <button
-              id="commandCreateSkillButton"
-              type="button"
-              class="command-row"
-              role="menuitem"
-            >
-              <span class="command-row-main">
-                <span class="command-row-title" data-i18n="createSkill">/create-skill</span>
-                <span class="command-row-description" data-i18n="createSkillDescription">通过 DraftEdit 创建 workspace skill</span>
-              </span>
-            </button>
           </section>
 
           <section id="commandLegacyMemorySection" class="command-section hidden" aria-label="Legacy memory migration" data-i18n-aria-label="legacyMemoryMigration">

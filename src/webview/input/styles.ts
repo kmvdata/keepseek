@@ -760,6 +760,7 @@ export function getInputStyles(): string {
     }
 
     .command-menu.is-readonly .command-row,
+    .command-menu.is-readonly .command-skill-create-button,
     .command-menu.is-readonly .command-control-row,
     .command-menu.is-readonly .command-model-option,
     .command-menu.is-readonly .command-compression-tab {
@@ -769,6 +770,8 @@ export function getInputStyles(): string {
     .command-menu.is-readonly .command-row:hover,
     .command-menu.is-readonly .command-row:focus-visible,
     .command-menu.is-readonly .command-row[aria-expanded="true"],
+    .command-menu.is-readonly .command-skill-create-button:hover,
+    .command-menu.is-readonly .command-skill-create-button:focus-visible,
     .command-menu.is-readonly .command-control-row:hover,
     .command-menu.is-readonly .command-control-row:focus-within,
     .command-menu.is-readonly .command-model-option:hover,
@@ -1077,6 +1080,85 @@ export function getInputStyles(): string {
       text-align: right;
     }
 
+    .command-skills-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      min-height: 38px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      min-width: 0;
+    }
+
+    .command-skills-row:focus-within {
+      color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
+      background: var(--vscode-quickInputList-focusBackground, var(--vscode-list-hoverBackground));
+    }
+
+    .command-skills-main-button {
+      display: flex;
+      align-self: stretch;
+      align-items: center;
+      min-width: 0;
+      padding: 0;
+      border: none;
+      color: inherit;
+      background: transparent;
+      text-align: left;
+    }
+
+    .command-skills-main-button:hover:not(:disabled),
+    .command-skills-main-button:focus-visible:not(:disabled) {
+      color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
+      background: transparent;
+      outline: none;
+    }
+
+    .command-skills-actions {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 2px;
+    }
+
+    .command-skill-icon-button {
+      display: inline-flex;
+      flex: 0 0 26px;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      border: none;
+      border-radius: 5px;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .command-skill-icon-button:hover:not(:disabled),
+    .command-skill-icon-button:focus-visible:not(:disabled) {
+      color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
+      background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+      outline: none;
+    }
+
+    .command-skills-chevron {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      color: var(--vscode-descriptionForeground);
+      transition: transform 120ms ease;
+    }
+
+    .command-skills-toggle-button[aria-expanded="true"] .command-skills-chevron {
+      transform: rotate(90deg);
+    }
+
     .command-model-current {
       display: inline-flex;
       align-items: center;
@@ -1171,8 +1253,8 @@ export function getInputStyles(): string {
       text-align: left;
     }
 
-    .command-skill-main:hover:not(:disabled),
-    .command-skill-main:focus-visible:not(:disabled) {
+    .command-skill-main:hover,
+    .command-skill-main:focus-within {
       color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
       background: transparent;
       outline: none;
@@ -1200,17 +1282,17 @@ export function getInputStyles(): string {
       line-height: 1.25;
     }
 
-    .command-skill-status {
-      color: var(--vscode-descriptionForeground);
-      font-size: 11px;
-      line-height: 1.25;
-      text-align: right;
-      white-space: nowrap;
+    .command-skill-checkbox {
+      flex: 0 0 auto;
+      width: 16px;
+      height: 16px;
+      margin: 0;
+      accent-color: var(--vscode-focusBorder);
+      cursor: pointer;
     }
 
-    .command-skill-item.is-active .command-skill-status {
-      color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
-      font-weight: 600;
+    .command-skill-checkbox:disabled {
+      cursor: default;
     }
 
     .command-skill-actions {

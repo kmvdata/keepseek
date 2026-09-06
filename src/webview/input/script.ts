@@ -29,8 +29,8 @@ export function getInputScript(): string {
       var composerModelCancelPending = document.getElementById('composerModelCancelPending');
       var commandCompressionTabs = document.getElementById('commandCompressionTabs');
       var commandCompressionDescription = document.getElementById('commandCompressionDescription');
+      var commandSkillsMainButton = document.getElementById('commandSkillsMainButton');
       var commandSkillsButton = document.getElementById('commandSkillsButton');
-      var commandSkillsValue = document.getElementById('commandSkillsValue');
       var commandSkillList = document.getElementById('commandSkillList');
       var commandCreateSkillButton = document.getElementById('commandCreateSkillButton');
       var commandLegacyMemorySection = document.getElementById('commandLegacyMemorySection');
@@ -452,8 +452,9 @@ export function getInputScript(): string {
         });
       }
 
-      if (commandSkillsButton) {
-        commandSkillsButton.addEventListener('click', function(event) {
+      [commandSkillsMainButton, commandSkillsButton].forEach(function(toggleButton) {
+        if (!toggleButton) { return; }
+        toggleButton.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
           if (state.isBusy) { return; }
@@ -466,23 +467,30 @@ export function getInputScript(): string {
           }
           renderCommandMenu();
         });
-      }
+      });
 
       if (commandSkillList) {
         commandSkillList.addEventListener('mousedown', function(event) {
           var target = event.target instanceof Element ? event.target : null;
-          if (target?.closest('[data-skill-action]')) {
+          if (target?.closest('button[data-skill-action]')) {
             event.preventDefault();
           }
         });
 
         commandSkillList.addEventListener('click', function(event) {
           var target = event.target instanceof Element ? event.target : null;
-          var control = target?.closest('[data-skill-action][data-skill-id]');
+          var control = target?.closest('button[data-skill-action][data-skill-id]');
           if (!control) { return; }
           event.preventDefault();
           event.stopPropagation();
           handleSkillAction(control.dataset.skillAction || '', control.dataset.skillId || '');
+        });
+
+        commandSkillList.addEventListener('change', function(event) {
+          var target = event.target instanceof HTMLInputElement ? event.target : null;
+          if (!target || target.type !== 'checkbox' || target.dataset.skillAction !== 'toggle-use') { return; }
+          event.stopPropagation();
+          handleSkillAction('toggle-use', target.dataset.skillId || '', target.checked);
         });
       }
 
@@ -782,7 +790,7 @@ export function getInputScript(): string {
             openCommandApprovalModeListAndFocus();
             return;
           }
-          if (target === commandSkillsButton) {
+          if (target === commandSkillsMainButton || target === commandSkillsButton) {
             event.preventDefault();
             openCommandSkillListAndFocus();
             return;
@@ -811,11 +819,15 @@ export function getInputScript(): string {
             if (commandApprovalModeSwitch) { commandApprovalModeSwitch.focus(); }
             return;
           }
-          if (commandSkillListOpen && commandSkillList && (commandSkillList.contains(target) || target === commandSkillsButton)) {
+          if (commandSkillListOpen && commandSkillList && (commandSkillList.contains(target) || target === commandSkillsMainButton || target === commandSkillsButton || target === commandCreateSkillButton)) {
             event.preventDefault();
             commandSkillListOpen = false;
             renderCommandMenu();
-            if (commandSkillsButton) { commandSkillsButton.focus(); }
+            if (commandSkillsMainButton) {
+              commandSkillsMainButton.focus();
+            } else if (commandSkillsButton) {
+              commandSkillsButton.focus();
+            }
             return;
           }
         }
@@ -876,7 +888,7 @@ export function getInputScript(): string {
       }
 
       function openCommandSkillListAndFocus() {
-        if (!commandSkillsButton || state.isBusy) { return; }
+        if ((!commandSkillsMainButton && !commandSkillsButton) || state.isBusy) { return; }
         commandSkillListOpen = true;
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
@@ -2784,15 +2796,17 @@ export function getInputScript(): string {
       }
 
       function renderCommandSkills() {
-        var skills = getSkillItems();
-        var activeIds = getActiveSkillIds();
-        if (commandSkillsValue) {
-          commandSkillsValue.textContent = String(activeIds.length);
-        }
-        if (commandSkillsButton) {
-          commandSkillsButton.disabled = Boolean(state.isBusy);
-          commandSkillsButton.setAttribute('aria-expanded', commandSkillListOpen ? 'true' : 'false');
-        }
+        var skills = getCommandSkillItems();
+        var toggleLabel = t(commandSkillListOpen ? 'skillsCollapse' : 'skillsExpand');
+        [commandSkillsMainButton, commandSkillsButton].forEach(function(toggleButton) {
+          if (!toggleButton) { return; }
+          toggleButton.disabled = Boolean(state.isBusy);
+          toggleButton.setAttribute('aria-expanded', commandSkillListOpen ? 'true' : 'false');
+          toggleButton.setAttribute('aria-label', toggleButton === commandSkillsMainButton
+            ? t('skillsCommandToggle', { action: toggleLabel })
+            : toggleLabel);
+          toggleButton.title = state.isBusy ? t('commandMenuReadonlyWhileBusy') : toggleLabel;
+        });
         if (!commandSkillList) { return; }
 
         commandSkillList.classList.toggle('hidden', !commandSkillListOpen);
@@ -2814,8 +2828,11 @@ export function getInputScript(): string {
       function renderCreateSkillCommand() {
         if (!commandCreateSkillButton) { return; }
         var disabledReason = getCreateSkillDisabledReason();
+        commandCreateSkillButton.classList.toggle('hidden', !commandSkillListOpen);
         commandCreateSkillButton.disabled = Boolean(state.isBusy) || Boolean(disabledReason);
-        commandCreateSkillButton.title = state.isBusy ? t('commandMenuReadonlyWhileBusy') : (disabledReason || '');
+        commandCreateSkillButton.title = state.isBusy
+          ? t('commandMenuReadonlyWhileBusy')
+          : (disabledReason || t('createSkill'));
       }
 
       function renderLegacyMemoryCommand() {
@@ -2859,12 +2876,8 @@ export function getInputScript(): string {
         var item = document.createElement('div');
         item.className = 'command-skill-item' + (active ? ' is-active' : '') + (!canUse ? ' is-disabled' : '');
 
-        var main = document.createElement('button');
-        main.type = 'button';
+        var main = document.createElement('label');
         main.className = 'command-skill-main';
-        main.dataset.skillAction = 'use';
-        main.dataset.skillId = skill.id;
-        main.disabled = !canUse || Boolean(state.isBusy);
 
         var copy = document.createElement('span');
         copy.className = 'command-row-main';
@@ -2886,13 +2899,21 @@ export function getInputScript(): string {
 
         copy.append(name, description, meta);
 
-        var status = document.createElement('span');
-        status.className = 'command-skill-status';
-        status.textContent = active
-          ? t('skillsActive')
-          : canUse ? t('skillsUse') : getSkillUnavailableText(skill);
+        var checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'command-skill-checkbox';
+        checkbox.dataset.skillAction = 'toggle-use';
+        checkbox.dataset.skillId = skill.id;
+        checkbox.checked = active;
+        checkbox.disabled = !canUse || Boolean(state.isBusy);
+        checkbox.setAttribute('aria-label', t(active ? 'skillsDeselect' : 'skillsSelect', {
+          name: skill.name || skill.id
+        }));
+        checkbox.title = canUse
+          ? t(active ? 'skillsDeselect' : 'skillsSelect', { name: skill.name || skill.id })
+          : getSkillUnavailableText(skill);
 
-        main.append(copy, status);
+        main.append(copy, checkbox);
 
         var actions = document.createElement('div');
         actions.className = 'command-skill-actions';
@@ -2946,19 +2967,21 @@ export function getInputScript(): string {
         return t('skillsUnavailable');
       }
 
-      function handleSkillAction(action, skillId) {
+      function handleSkillAction(action, skillId, selected) {
         if (state.isBusy) { return; }
         var skill = getSkillById(skillId);
         if (!skill) { return; }
-        if (action === 'use') {
+        if (action === 'toggle-use') {
           if (!skill.enabled || !skill.userInvocable || skill.unavailableReason) {
             return;
           }
-          if (!isSkillActive(skillId)) {
+          if (selected) {
             vscode.postMessage({ type: 'useSkill', skillId: skillId });
+            setComposerStatus(t('skillInserted', { name: skill.name || skillId }));
+          } else {
+            vscode.postMessage({ type: 'removeActiveSkill', skillId: skillId });
+            setComposerStatus(t('skillRemoved', { name: skill.name || skillId }));
           }
-          setComposerStatus(t('skillInserted', { name: skill.name || skillId }));
-          closeCommandMenu();
           return;
         }
         if (action === 'open') {
@@ -3867,6 +3890,27 @@ export function getInputScript(): string {
 
       function getSkillItems() {
         return getSkillsState().items;
+      }
+
+      function getCommandSkillItems() {
+        var activeOrder = new Map();
+        getActiveSkillIds().forEach(function(skillId, index) {
+          activeOrder.set(skillId, index);
+        });
+        return getSkillItems().slice().sort(function(left, right) {
+          var leftActive = activeOrder.has(left.id);
+          var rightActive = activeOrder.has(right.id);
+          if (leftActive && rightActive) {
+            return activeOrder.get(left.id) - activeOrder.get(right.id);
+          }
+          if (leftActive !== rightActive) {
+            return leftActive ? -1 : 1;
+          }
+          var leftName = String(left.name || left.id || '');
+          var rightName = String(right.name || right.id || '');
+          var nameOrder = leftName.localeCompare(rightName, undefined, { sensitivity: 'base', numeric: true });
+          return nameOrder || String(left.id || '').localeCompare(String(right.id || ''), undefined, { sensitivity: 'base' });
+        });
       }
 
       function getFilteredSkillMenuItems() {
