@@ -148,7 +148,7 @@ export function recoveryBlocker(cp: RunCheckpoint): string | undefined {
   return undefined;
 }
 
-/** A fresh, user-requested turn is not checkpoint recovery. Never use this to
+/** A fresh manual or host-scheduled turn is not checkpoint recovery. Never use this to
  * reset a logical task's immutable budgets, replay a tool, or resume children. */
 export function canContinueBudgetInNewTurn(cp: RunCheckpoint): boolean {
   return cp.status === 'blocked' && Boolean(cp.finalResponse?.runDetails.budgetStopReason)

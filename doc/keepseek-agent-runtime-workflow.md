@@ -531,10 +531,15 @@ Webview 会把 phase 映射成中英文状态文案，例如“搜索工作区..
 
 预算诊断使用不同错误码，工具返回的 `errorType` / `budgetReason` 与运行摘要的 `budgetStopReason` 对齐：
 
+- `tool_iterations_exhausted` / `tool_call_limit_exhausted`：单轮工具轮次/次数耗尽。通用模型默认 16 轮/48 次，官网 Flash High 为 24 轮/72 次。前台在有成功工具操作、无待审批事项、无阻塞修复状态时自动发送新一轮继续请求，三档审批模式均适用；`keepseek.agent.maxAutoContinueTurns` 默认 8，范围 0–100，0 关闭。连续两轮工具名称/参数/结果完全相同时停止续跑，拒绝记录也会停止纯预算续跑。含草案或审批结果的轮次仍由原审批队列处理。
 - `tool_result_budget_exhausted`：本轮累计工具结果超限。`usedTokens + nextTokens > maxTokens`；与模型上下文容量不同。
 - `context_window_exhausted`：预计 Provider 请求超出模型上下文容量。`usedTokens` 是包含待加入结果、输出预留和安全预留后的预计总量，`maxTokens` 是上下文上限；不要再次加上 `nextTokens`。首次 API 请求前发现超限时，`run_error.error.code` 也使用此码，且不发送请求。
 
 工具结果超限事件在 `metadata` 级别也保留错误码和上述数量，调试无需打开完整 payload。
+
+预算自动续跑是新的可见 user 消息（UI 标为 KeepSeek），会产生新用量，沿用普通请求的历史投影、压缩和用量统计。它不恢复旧 checkpoint、不重置旧预算、不复用 permit；修复次数与状态保留。队列只存在于内存，停止、切换会话/审批模式或发送新消息会撤销；来源/模型变化时不自动发送。扩展重启后仍需手动继续。上下文容量、工具结果 token 和时间预算耗尽不自动续跑。
+
+缓存边界：system、工具 schema 和已记录的历史/工具结果均不改写；自动继续文本只追加到新 user 消息。Chat Completions 的临时预算收尾指令沿用现有行为，不进入持久化工具轮，跨新轮最多从该收尾指令处失配，此前全部工具轮前缀仍稳定；Responses/Anthropic 沿用原生 replay。正常触发历史压缩仍是受控缓存重置点。
 
 trace 记录包括：
 
@@ -618,3 +623,13 @@ KeepSeek 使用“识别任务类型 → 解决下一个关键不确定性 → �
 这些能力后续可以逐步扩展，但应继续遵守当前分层：Provider 只编排，AgentRunner 管请求循环，工作区工具保持只读，写入仍只走 DraftEdit。
 
 模型/Provider、Thinking、上下文窗口和最大输出继续由模型选择器与设置页展示和配置；这些运行时事实不进入静态 system prompt，也没有为此新增会改变工具集合的 runtime-info 工具。预算由 Runner 和 model profile 强制执行。
+
+## Ask 模式下的有限命令批量批准
+
+- 同一 `sessionId + agentRunId` 至少有两条 pending DraftRun 时，首张相关命令卡片提供“全部批准（N）”；展示顺序沿用 Store 顺序，不按 UUID 排序。Transcript 与未关联回复区域复用同一渲染入口。
+- `DraftRunBatchCoordinator` 保存宿主展示快照和独立 operationId；点击只提交 snapshotId、会话/来源批次及有序 ID/hash。接收时消费快照，首次持久化后再次比对完整列表。后续新增/克隆命令不加入授权。
+- 整批运行保持 Provider 忙碌锁；逐条走 Store → Authorization → Executor，前一条结果保存后才执行下一条。每条命令在自己的最终检查、审批状态持久化完成后签发 30 秒单次 user_click permit。首次仅检查全部命令的信任/哈希/精确 cwd 授权边界，逐条执行前才检查 cwd 实际存在。
+- 失败或停止撤销余下授权，剩余命令仍 pending。全局停止、当前命令停止及“停止本批”均取消整批续跑；进度、快照和续跑意图只存在当前宿主内存，重启不恢复。
+- 全部成功后独立认领一次续跑，沿用新 user 消息、结果 user-tail、保护消息及请求投影。待确认修改、其他未终结命令、修复流程及后台任务继续阻塞并显示原因；停止、新用户输入、会话/审批模式/信任变化取消旧意图，来源或模型不匹配则明确停止续跑，不回退模型。
+- DraftEdit 的“全部采纳”仅在该 ChangeSet 实际可采纳项（pending / apply_failed，与既有 Apply All 范围相同）至少两条时显示；不改变采纳、删除确认、冲突检查或回滚流程。命令与修改分别计数，单条动作继续可用。
+- 未改动 system prompt、协议版本、工具 schema 或已发送消息字节；批量进度不写入模型历史。

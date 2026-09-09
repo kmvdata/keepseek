@@ -23,7 +23,6 @@ export interface DelegatedApprovalBatch {
   rootTaskId?: string;
   editIds: string[];
   draftRunIds: string[];
-  continueAfterBudget?: boolean;
   continueAfterApprovalReview?: boolean;
   approvalReviews?: ApprovalReviewDisplay[];
   approvalToolResults?: Array<{
@@ -41,7 +40,7 @@ export class DelegatedApprovalQueue {
   private active?: AbortController;
 
   public enqueue(batch: DelegatedApprovalBatch): void {
-    if (batch.editIds.length || batch.draftRunIds.length || batch.continueAfterBudget || batch.continueAfterApprovalReview) {
+    if (batch.editIds.length || batch.draftRunIds.length || batch.continueAfterApprovalReview) {
       this.pending = structuredClone(batch);
     }
   }

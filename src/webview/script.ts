@@ -87,6 +87,8 @@ export function getScript(): string {
       repairLoop: null,
       changeSets: [],
       draftRuns: [],
+      draftRunBatchSnapshots: [],
+      draftRunBatch: null,
       activeDraftRunId: '',
       authorizedExternalReferenceUris: [],
       isBusy: false,
@@ -432,6 +434,7 @@ export function getScript(): string {
     const pendingChangeActions = new Set();
     const pendingDraftRunApprovals = new Set();
     const pendingDraftRunActions = new Set();
+    let pendingDraftRunBatchSnapshot = '';
     let settingsMenuOpen = false;
     let backgroundRunDialogOpen = false;
     let dismissedBackgroundRunId = '';
@@ -758,7 +761,13 @@ export function getScript(): string {
       var action = String(button.dataset.draftRunAction || '');
       if (!id || !action) return;
       var payload = { type: action, id: id };
-      if (action === 'approveDraftRun') {
+      if (action === 'approveDraftRunBatch') {
+        payload = { type: action, snapshot: JSON.parse(button.dataset.batchSnapshot) };
+        pendingDraftRunBatchSnapshot = payload.snapshot.snapshotId;
+        render();
+      } else if (action === 'cancelDraftRunBatch') {
+        payload = { type: action, operationId: button.dataset.operationId };
+      } else if (action === 'approveDraftRun') {
         payload.specHash = String(button.dataset.specHash || '');
         payload.autoContinue = button.dataset.autoContinue === 'true';
         pendingDraftRunApprovals.add(id);
@@ -1161,6 +1170,7 @@ export function getScript(): string {
         pendingChangeActions.clear();
         pendingDraftRunApprovals.clear();
         pendingDraftRunActions.clear();
+        pendingDraftRunBatchSnapshot = '';
         if (previousActiveSessionId && previousActiveSessionId !== state.activeSessionId) {
           planExpanded = false;
         }
@@ -1217,6 +1227,9 @@ export function getScript(): string {
       } else if (message.type === 'draftRunStateChanged'  || message.type === 'draftRunOutput') {
         pendingDraftRunApprovals.delete(String(message.draftRun?.id || ''));
         upsertDraftRun(message.draftRun);
+        render();
+      } else if (message.type === 'draftRunBatchFeedback') {
+        pendingDraftRunBatchSnapshot = '';
         render();
       } else if (message.type === 'draftRunCloneFeedback') {
         if (message.success && message.draftRunId) {
@@ -1287,6 +1300,9 @@ export function getScript(): string {
     });
 
     function render() {
+      var focusedAction = document.activeElement instanceof HTMLElement
+        && (transcript.contains(document.activeElement) || unlinkedChangeSetList.contains(document.activeElement))
+        ? { ...document.activeElement.dataset } : null;
       applyStaticTranslations();
       renderCurrentSessionTitle();
       syncEditingState();
@@ -1299,6 +1315,20 @@ export function getScript(): string {
       var draftRunProjection = buildDraftRunTimelineProjection();
       renderTranscript(changeSetProjection, draftRunProjection);
       renderUnlinkedChangeSets(changeSetProjection.unlinked, draftRunProjection.unlinked);
+      if (focusedAction?.draftRunId || focusedAction?.editId || focusedAction?.changeSetId) {
+        var actionButtons = Array.from(document.querySelectorAll('.draft-run-card button, .change-set-card button'));
+        var sameTarget = function(button) {
+          return !button.disabled && ['draftRunId', 'editId', 'changeSetId'].some(function(key) {
+            return focusedAction[key] && button.dataset[key] === focusedAction[key];
+          });
+        };
+        var nextFocus = actionButtons.find(function(button) {
+          return sameTarget(button) && ['draftRunAction', 'editAction', 'changeSetAction'].some(function(key) {
+            return focusedAction[key] && button.dataset[key] === focusedAction[key];
+          });
+        }) || actionButtons.find(sameTarget);
+        if (nextFocus) nextFocus.focus({ preventScroll: true });
+      }
       renderStatus();
       if (window.keepseekInputControls) {
         window.keepseekInputControls.render();
@@ -3176,6 +3206,7 @@ export function getScript(): string {
       var card = document.createElement('section');
       card.className = 'draft-run-card draft-run-' + statusValue;
       card.dataset.draftRunId = String(draftRun.id || '');
+      appendDraftRunBatchControls(card, draftRun);
 
       var header = document.createElement('div');
       header.className = 'draft-run-header';
@@ -3255,6 +3286,61 @@ export function getScript(): string {
       return card;
     }
 
+    function appendDraftRunBatchControls(card, draftRun) {
+      var batch = state.draftRunBatch;
+      var ownBatch = batch?.sessionId === draftRun.sessionId && batch?.agentRunId === draftRun.agentRunId;
+      var active = ownBatch && ['queued', 'running', 'waiting', 'continuing'].includes(batch.phase);
+      var progress = ownBatch && batch.entries?.[0]?.draftRunId === draftRun.id;
+      var snapshot = state.approvalMode === 'ask' && !active
+        ? (state.draftRunBatchSnapshots || []).find(function(item) {
+            if (item.sessionId !== draftRun.sessionId || item.agentRunId !== draftRun.agentRunId
+              || item.entries?.[0]?.draftRunId !== draftRun.id || item.entries.length < 2) return false;
+            var pending = (state.draftRuns || []).filter(function(run) {
+              return run.sessionId === item.sessionId && run.agentRunId === item.agentRunId && run.status === 'pending';
+            });
+            return pending.length === item.entries.length && pending.every(function(run, index) {
+              return run.id === item.entries[index].draftRunId && run.specHash === item.entries[index].specHash;
+            });
+          }) : null;
+      if (!progress && !snapshot) return;
+      var region = document.createElement('div');
+      region.className = 'draft-run-batch';
+      if (progress) {
+        var status = document.createElement('div');
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        status.textContent = t('draftRunBatch_' + batch.phase, {
+          index: batch.currentIndex, count: batch.entries.length, remaining: batch.remaining,
+          command: batch.currentCommand || '', reason: batch.reason || t('draftRunBatchWaitHandoff'),
+          location: batch.failureStage === 'continuation' ? t('draftRunBatchFailureContinuation')
+            : batch.currentIndex ? t('draftRunBatchFailureCommand', { index: batch.currentIndex, count: batch.entries.length })
+            : t('draftRunBatchFailureValidation')
+        });
+        region.append(status);
+        if (active) {
+          var stop = createDraftRunActionButton(t('draftRunBatchStop'), 'cancelDraftRunBatch', draftRun, true);
+          stop.dataset.operationId = batch.operationId;
+          region.append(stop);
+        }
+      }
+      if (snapshot) {
+        var approve = createDraftRunActionButton(t('draftRunBatchApprove', { count: snapshot.entries.length }), 'approveDraftRunBatch', draftRun, false);
+        approve.dataset.batchSnapshot = JSON.stringify(snapshot);
+        var unauthorized = snapshot.entries.map(function(entry) {
+          return state.draftRuns.find(function(run) { return run.id === entry.draftRunId; });
+        }).filter(function(run) {
+          return run?.spec?.externalCwd && !(state.authorizedExternalReferenceUris || []).includes(run.spec.cwdUri);
+        });
+        approve.disabled = approve.disabled || Boolean(pendingDraftRunBatchSnapshot) || unauthorized.length > 0;
+        var hint = document.createElement('div');
+        hint.className = 'draft-run-batch-hint';
+        hint.textContent = t('draftRunBatchHint') + (unauthorized.length
+          ? ' ' + t('draftRunBatchAuthorize', { commands: unauthorized.map(function(run) { return run.spec.executable + ' (' + run.spec.cwdLabel + ')'; }).join(', ') }) : '');
+        region.append(approve, hint);
+      }
+      card.append(region);
+    }
+
     function appendDraftRunActions(container, draftRun) {
       var statusValue = String(draftRun.status || 'pending');
       var isOwnRunning = String(state.activeDraftRunId || '') === String(draftRun.id || '');
@@ -3298,7 +3384,7 @@ export function getScript(): string {
       if (action === 'cloneDraftRun') {
         button.title = t('draftRunCloneHint');
       }
-      var allowWhileBusy = action === 'cancelDraftRun' || action === 'openDraftRunTerminal';
+      var allowWhileBusy = action === 'cancelDraftRun' || action === 'cancelDraftRunBatch' || action === 'openDraftRunTerminal';
       button.disabled = Boolean(forceDisabled)
         || (Boolean(state.isBusy) && !allowWhileBusy)
         || actionPending
@@ -3386,17 +3472,18 @@ export function getScript(): string {
       var setActions = document.createElement('div');
       setActions.className = 'change-set-actions';
       if (!historical) {
+        if (applicableFiles.length >= 2) {
+          setActions.append(createChangeSetActionButton(t('changeSetApplyAll', { count: applicableFiles.length }), 'applyChangeSet', changeSet.id, false));
+        }
         if (applicableFiles.length) {
-          setActions.append(
-            createChangeSetActionButton(t('changeSetApplyAll', { count: applicableFiles.length }), 'applyChangeSet', changeSet.id, false),
-            createChangeSetActionButton(t('changeSetDiscardAll'), 'discardChangeSet', changeSet.id, true)
-          );
+          setActions.append(createChangeSetActionButton(t('changeSetDiscardAll'), 'discardChangeSet', changeSet.id, true));
         }
         if (revertibleFiles.length) {
           setActions.append(createChangeSetActionButton(t('revertAgentChange'), 'revertChangeSet', changeSet.id, true));
         }
       }
-      header.append(heading, setActions);
+      header.append(heading);
+      if (setActions.childElementCount) header.append(setActions);
 
       var fileList = document.createElement('div');
       fileList.className = 'change-set-files';
@@ -3653,7 +3740,7 @@ export function getScript(): string {
         var message = state.messages[i];
         var item = document.createElement('article');
         var isDraftRunAutoContinuation = message.role === 'user'
-          && (message.contextMeta?.displayKind === 'draft_run_auto_continue' || message.contextMeta?.displayKind === 'delegated_auto_continue');
+          && (message.contextMeta?.displayKind === 'draft_run_auto_continue' || message.contextMeta?.displayKind === 'delegated_auto_continue' || message.contextMeta?.displayKind === 'budget_auto_continue');
         var isEditing = message.role === 'user' && !isDraftRunAutoContinuation && message.id === editingMessageId;
         item.dataset.messageId = message.id;
         item.className = 'message ' + message.role

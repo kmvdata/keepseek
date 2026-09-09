@@ -308,7 +308,7 @@ export type ChatRole = 'user' | 'assistant' | 'system';
 export interface ChatMessageContextMeta {
   isProtected?: boolean;
   protectedReason?: string;
-  displayKind?: 'draft_run_auto_continue' | 'delegated_auto_continue';
+  displayKind?: 'draft_run_auto_continue' | 'delegated_auto_continue' | 'budget_auto_continue';
 }
 
 export type DraftRunStatus =
@@ -375,6 +375,28 @@ export interface ExecutionPermit {
   policyVersion: number;
   expiresAt: number;
   nonce: string;
+}
+
+/** UI review snapshot; never contains an executable command body. */
+export interface DraftRunBatchSnapshot {
+  snapshotId: string;
+  sessionId: string;
+  agentRunId: string;
+  entries: Array<{ draftRunId: string; specHash: string }>;
+}
+
+/** Volatile host state. Neither approval nor continuation survives restart. */
+export interface DraftRunBatchState extends DraftRunBatchSnapshot {
+  operationId: string;
+  sourceId: string;
+  modelId: string;
+  phase: 'queued' | 'running' | 'waiting' | 'continuing' | 'completed' | 'failed' | 'cancelled';
+  completed: number;
+  currentIndex: number;
+  remaining: number;
+  currentCommand?: string;
+  reason?: string;
+  failureStage?: 'continuation';
 }
 
 export interface DraftRun extends DraftRunProposal {

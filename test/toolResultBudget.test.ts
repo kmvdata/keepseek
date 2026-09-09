@@ -4,6 +4,9 @@ import { test } from 'node:test';
 import { Script } from 'node:vm';
 import { AgentRunner } from '../src/agent/runner';
 import { canContinueBudgetInNewTurn, checkpointCopy, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
+import { getBudgetContinuationPrompt, nextBudgetContinuation, type BudgetContinuationProgress } from '../src/agent/budgetContinuation';
+import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
+import { getConfiguredAgentMaxAutoContinueTurns } from '../src/shared/config';
 import { shapeWorkspaceListingResult } from '../src/agent/toolResultShaping';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import { estimateDeepSeekMessageTokens } from '../src/agent/protocol';
@@ -13,7 +16,7 @@ import { getScript } from '../src/webview/script';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { createNoopInteractionTrace, InteractionTraceLogService, type InteractionTraceEvent } from '../src/agent/logging/interactionTrace';
 import * as vscode from './stubs/vscode';
-import type { AgentRequest, ChatMessage, RepairLoopState, RunDetailsSummary } from '../src/shared/types';
+import type { AgentRequest, AgentResponse, ApprovalMode, ChatMessage, RepairLoopState, RunDetailsSummary } from '../src/shared/types';
 
 const files = Array.from({ length: 1842 }, (_, index) => ({
   path: `src/app/market/market-today-action/components/nested-directory/market-component-${index}.tsx`,
@@ -180,12 +183,179 @@ test('budget panel renders a new-turn button and keeps the native resume button 
   assert.match(source, /type: 'continueAgentTaskInNewTurn', messageId: runMessage.id/u);
 });
 
+test('budget continuation preserves recorded history, tool schemas and native prefixes across all three protocols', async () => {
+  for (const provider of ['openai-compatible', 'openai-responses', 'anthropic-compatible'] as const) {
+    const result = await runScenario(provider, 'tool-rounds');
+    assert.equal(result.response.runDetails.budgetStopReason, 'tool_iterations_exhausted');
+    const progress = nextBudgetContinuation(result.checkpoint, result.response, 8);
+    assert.equal(progress?.turns, 1, provider);
+    const message = { ...asMessage(result.checkpoint), toolRounds: result.response.toolRounds, providerReplay: result.response.providerReplay };
+    const history: ChatMessage[] = [
+      { id: 'user', role: 'user', content: result.input.prompt, createdAt: '2026-01-01' }, message,
+      { id: 'continue', role: 'user', content: getBudgetContinuationPrompt('en', 'ask', true), createdAt: '2026-01-02',
+        contextMeta: { displayKind: 'budget_auto_continue' } }
+    ];
+    const frozen = JSON.stringify(history);
+    const frozenCheckpoint = JSON.stringify(result.checkpoint);
+    let nextBody = '';
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url, init) => {
+      nextBody = String(init?.body);
+      return modelResponse(provider);
+    }) as typeof fetch;
+    try {
+      const response = await new AgentRunner().run({ ...result.input, history, prompt: history.at(-1)!.content });
+      assert.equal(response.runDetails.budgetStopReason, undefined);
+      assert.equal(JSON.stringify(history), frozen);
+      assert.equal(JSON.stringify(result.checkpoint), frozenCheckpoint);
+      const prior = JSON.parse(result.bodies.at(-1)!);
+      const next = JSON.parse(nextBody);
+      assert.equal(JSON.stringify(next.tools), JSON.stringify(prior.tools));
+      const key = provider === 'openai-responses' ? 'input' : 'messages';
+      // Chat Completions does not persist the temporary terminal budget user
+      // instruction. The entire prefix before it (including all tool results)
+      // remains byte-identical; native protocols retain their full replay.
+      const prefix = provider === 'openai-compatible' ? prior[key].slice(0, -1) : prior[key];
+      assert.equal(JSON.stringify(next[key].slice(0, prefix.length)), JSON.stringify(prefix), provider);
+    } finally { globalThis.fetch = originalFetch; }
+  }
+});
+
+test('automatic new-turn policy stops at limits, repeated work, approvals and non-renewable budgets', async () => {
+  const { response, checkpoint } = await runScenario('openai-compatible', 'tool-rounds');
+  const callLimit = await runScenario('openai-compatible', 'tool-calls');
+  assert.equal(callLimit.response.runDetails.budgetStopReason, 'tool_call_limit_exhausted');
+  assert.equal(nextBudgetContinuation(callLimit.checkpoint, callLimit.response, 8)?.turns, 1);
+  const first = nextBudgetContinuation(checkpoint, response, 8)!;
+  assert.equal(getConfiguredAgentMaxAutoContinueTurns(), 8);
+  assert.equal(nextBudgetContinuation(checkpoint, response, 0), undefined);
+  assert.equal(nextBudgetContinuation(checkpoint, response, 8, { turns: 8, workHash: 'different' }), undefined);
+  const repeated = structuredClone(response);
+  for (const round of repeated.toolRounds!) {
+    round.toolCalls.forEach((call) => { call.id += '-new'; });
+    round.toolResults.forEach((result) => { result.toolCallId += '-new'; });
+  }
+  assert.equal(nextBudgetContinuation(checkpoint, repeated, 8, first), undefined, 'new IDs do not prove new progress');
+  repeated.toolRounds![0].toolCalls[0].function.arguments = '{"path":"different"}';
+  assert.equal(nextBudgetContinuation(checkpoint, repeated, 8, first)?.turns, 2);
+  for (const reason of ['context_window_exhausted', 'tool_result_budget_exhausted', 'run_time_limit_exhausted'] as const) {
+    assert.equal(nextBudgetContinuation(checkpoint, { ...response, runDetails: { ...response.runDetails, budgetStopReason: reason } }, 8), undefined);
+  }
+  for (const override of [
+    { approvalContinuationRequired: true }, { approvalContinuationStopReason: 'denied' },
+    { draftEdits: [{ id: 'pending-edit' }] }, { draftRuns: [{ id: 'pending-run' }] },
+    { repairLoop: { ...response.repairLoop, status: 'waiting_for_apply', pendingDraftEditIds: ['edit'] } },
+    { repairLoop: { ...response.repairLoop, status: 'blocked' } },
+    { runDetails: { ...response.runDetails, toolCalls: response.runDetails.toolCalls.map((call) => ({ ...call, status: 'failed' })) } },
+    { runDetails: { ...response.runDetails, toolCalls: [...response.runDetails.toolCalls, { status: 'denied' }] } }
+  ]) assert.equal(nextBudgetContinuation(checkpoint, { ...response, ...override } as AgentResponse, 8), undefined);
+  for (const mutate of [
+    (cp: RunCheckpoint) => { cp.request.backgroundRunId = 'background'; },
+    (cp: RunCheckpoint) => { cp.request.subagentContext = {} as NonNullable<AgentRequest['subagentContext']>; },
+    (cp: RunCheckpoint) => { cp.stopReason = 'storage_failure'; },
+    (cp: RunCheckpoint) => { cp.state!.pending!.executing = { id: 'uncertain', name: 'tool' }; }
+  ]) {
+    const changed = checkpointCopy(checkpoint); mutate(changed);
+    assert.equal(nextBudgetContinuation(changed, response, 8), undefined);
+  }
+});
+
+test('host scheduler automatically starts ordinary turns in every approval mode, locks duplicates and respects the chain cap', async () => {
+  const seed = await runScenario('openai-compatible', 'tool-rounds');
+  for (const mode of ['ask', 'model_review', 'delegate'] as const) {
+    const fixture = budgetHost(seed, mode);
+    await fixture.host.sendPrompt('Start', 'gateway', request().model.id);
+    assert.equal(fixture.host.pendingBudgetContinuation?.progress.turns, 1);
+    for (let turn = 1; turn <= 8; turn++) {
+      const results = await Promise.all([fixture.host.maybeAutoContinueBudget(), fixture.host.maybeAutoContinueBudget()]);
+      assert.deepEqual(results, [true, false]);
+      assert.equal(fixture.calls.length, turn + 1);
+      assert.equal(fixture.calls.at(-1)!.options?.budgetContinuation?.turns, turn);
+      assert.equal(fixture.calls.at(-1)!.options?.strictModelSelection, true);
+      assert.equal(fixture.calls.at(-1)!.options?.approvalRootTaskId, seed.checkpoint.taskId, 'approval circuit keeps its root across budget turns');
+      assert.deepEqual(fixture.calls.at(-1)!.options?.repairLoop, seed.response.repairLoop);
+      assert.match(fixture.calls.at(-1)!.prompt, /自动开启新一轮/u);
+      if (mode === 'ask') assert.match(fixture.calls.at(-1)!.prompt, /另行批准/u);
+      else assert.match(fixture.calls.at(-1)!.prompt, /当前审批模式/u);
+    }
+    assert.equal(fixture.host.pendingBudgetContinuation, undefined);
+    assert.equal(await fixture.host.maybeAutoContinueBudget(), false);
+    assert.equal(fixture.session.approvalMode, mode);
+    assert.equal(fixture.queue.take('session'), undefined, 'budget continuation never enters effect approval queue');
+  }
+});
+
+test('queued continuation is discarded after Stop, history/session/model changes, approval waits, config disable or loss of trust', async () => {
+  const seed = await runScenario('openai-compatible', 'tool-rounds');
+  for (const stop of ['stop', 'history', 'session', 'model', 'mode', 'edit', 'run', 'repair', 'config', 'trust', 'restart'] as const) {
+    const fixture = budgetHost(seed, 'ask');
+    await fixture.host.sendPrompt('Start', 'gateway', request().model.id);
+    const originalConfig = vscode.workspace.getConfiguration;
+    try {
+      if (stop === 'stop') fixture.host.abortPrompt();
+      if (stop === 'history') fixture.session.messages.push({ id: 'newer', role: 'user', content: 'Stop', createdAt: '' });
+      if (stop === 'session') fixture.session.id = 'different';
+      if (stop === 'model') fixture.host.selectedModelId = 'different';
+      if (stop === 'mode') fixture.session.approvalMode = 'delegate';
+      if (stop === 'edit') fixture.pendingEdit = true;
+      if (stop === 'run') fixture.pendingRun = true;
+      if (stop === 'repair') fixture.host.repairLoopsBySession.set('session', { ...seed.response.repairLoop, status: 'blocked' });
+      if (stop === 'config') vscode.workspace.getConfiguration = () => ({ ...originalConfig(), get: <T>(key: string, fallback: T): T => key === 'agent.maxAutoContinueTurns' ? 0 as T : fallback });
+      if (stop === 'trust') vscode.workspace.isTrusted = false;
+      if (stop === 'restart') fixture.host.pendingBudgetContinuation = undefined;
+      assert.equal(await fixture.host.maybeAutoContinueBudget(), false, stop);
+      assert.equal(fixture.calls.length, 1, stop);
+      assert.equal(fixture.host.pendingBudgetContinuation, undefined, stop);
+    } finally { vscode.workspace.getConfiguration = originalConfig; vscode.workspace.isTrusted = true; }
+  }
+  const fixture = budgetHost(seed, 'ask');
+  fixture.beforeReturn = () => fixture.host.abortPrompt();
+  await fixture.host.sendPrompt('Start', 'gateway', request().model.id);
+  assert.equal(fixture.host.pendingBudgetContinuation, undefined, 'Stop during final persistence must not enqueue another turn');
+});
+
+function budgetHost(seed: { response: AgentResponse; checkpoint: RunCheckpoint }, mode: ApprovalMode) {
+  type Options = { budgetContinuation?: BudgetContinuationProgress; strictModelSelection?: boolean; repairLoop?: RepairLoopState; approvalRootTaskId?: string };
+  const session = { id: 'session', approvalMode: mode, messages: [] as ChatMessage[], repairLoop: seed.response.repairLoop };
+  const calls: Array<{ prompt: string; options?: Options }> = [];
+  const queue = new DelegatedApprovalQueue();
+  const fixture = { pendingEdit: false, pendingRun: false, beforeReturn: () => {}, session, calls, queue, host: undefined as unknown as {
+    sendPrompt(prompt: string, sourceId: string, modelId: string): Promise<AgentResponse | undefined>;
+    maybeAutoContinueBudget(): Promise<boolean>; abortPrompt(): void;
+    pendingBudgetContinuation?: { progress: BudgetContinuationProgress };
+    selectedModelId: string; repairLoopsBySession: Map<string, RepairLoopState>;
+  } };
+  fixture.host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    language: 'zh-CN', isBusy: false, isStartingRun: false, selectedSourceId: 'gateway', selectedModelId: request().model.id,
+    agentSettings: request().settings, delegatedApprovals: queue, repairLoopsBySession: new Map(),
+    sessionStore: { activeSessionId: 'session', getActiveSession: () => session },
+    changeSets: { hasPendingForSession: () => fixture.pendingEdit },
+    draftRuns: { toWebviewState: () => fixture.pendingRun ? [{ status: 'pending' }] : [] },
+    hasActiveBackgroundRun: () => false, postState: () => {},
+    sendPromptImpl: async (prompt: string, _sourceId: string, _modelId: string, _settings: unknown, options?: Options) => {
+      calls.push({ prompt, options });
+      const response = structuredClone(seed.response);
+      response.toolRounds![0].toolCalls[0].function.arguments = JSON.stringify({ path: 'step-' + calls.length });
+      const cp = checkpointCopy(seed.checkpoint);
+      cp.finalResponse = response;
+      session.messages.push({ ...asMessage(cp), id: 'assistant-' + calls.length });
+      await Promise.resolve();
+      fixture.beforeReturn();
+      return response;
+    }
+  });
+  return fixture;
+}
+
 async function runScenario(provider: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible',
-  budget?: 'tool-result' | 'context-window') {
+  budget?: 'tool-result' | 'context-window' | 'tool-rounds' | 'tool-calls') {
   const input = request();
   input.model.provider = provider;
   input.sourceConfig = { ...input.sourceConfig!, provider };
   if (budget === 'context-window') { input.model.contextWindowTokens = 32_000; input.model.maxOutputTokens = 1000; }
+  if (budget === 'tool-rounds') input.executionLimits = { maxToolIterations: 2 };
+  if (budget === 'tool-calls') input.executionLimits = { maxToolIterations: 4, maxToolCalls: 1 };
+  const oversizedResult = budget === 'tool-result' || budget === 'context-window';
   const workspace = new WorkspaceToolService();
   let searchCount = 0;
   workspace.listWorkspaceFiles = async () => JSON.stringify(listing);
@@ -202,13 +372,13 @@ async function runScenario(provider: 'openai-compatible' | 'openai-responses' | 
   globalThis.fetch = (async (_url, init) => {
     bodies.push(String(init?.body));
     const step = bodies.length;
-    const name = step === 1 ? budget ? 'keepseek_read_workspace_file' : 'keepseek_list_workspace_files' : 'keepseek_search_workspace';
-    const args = step === 1 ? budget ? '{"path":"large.ts"}' : '{}' : '{"query":"market-today-action","maxResults":30}';
-    return modelResponse(provider, step <= (budget ? 1 : 2) ? { name, args, id: 'call-' + step } : undefined);
+    const name = step === 1 ? oversizedResult ? 'keepseek_read_workspace_file' : 'keepseek_list_workspace_files' : 'keepseek_search_workspace';
+    const args = step === 1 ? oversizedResult ? '{"path":"large.ts"}' : '{}' : '{"query":"market-today-action","maxResults":30}';
+    return modelResponse(provider, step <= (oversizedResult ? 1 : 2) ? { name, args, id: 'call-' + step } : undefined);
   }) as typeof fetch;
   try {
     const response = await new AgentRunner(workspace, collectingTrace(traceEvents)).run(input, { onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); } });
-    return { response, checkpoint, bodies, searchCount, traceEvents };
+    return { response, checkpoint, bodies, searchCount, traceEvents, input };
   } finally { globalThis.fetch = originalFetch; }
 }
 

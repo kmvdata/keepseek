@@ -181,6 +181,9 @@ export class DraftRunStore {
       delegatedApproval?: () => boolean;
       approvalRecord?: ApprovalRecordMatch;
       signal?: AbortSignal;
+      /** Finite batch click authority, rechecked after every asynchronous boundary. */
+      userApproval?: () => boolean;
+      expectedSpecHash?: string;
     } = {}
   ): Promise<DraftRun | undefined> {
     const draftRun = this.draftRuns.get(id);
@@ -188,19 +191,22 @@ export class DraftRunStore {
       return undefined;
     }
     this.approving.add(id);
+    let executionStarted = false;
     draftRun.autoContinueRequested = options.autoContinue === true || undefined;
     const assertAuthorized = () => {
-      if (options.signal?.aborted || (options.delegatedApproval && !options.delegatedApproval())) {
+      if (options.signal?.aborted || (options.delegatedApproval && !options.delegatedApproval())
+        || (options.userApproval && !options.userApproval())) {
         throw new Error('DraftRun approval was cancelled or revoked.');
       }
+      if (this.draftRuns.get(id) !== draftRun || !['pending', 'approved', 'running'].includes(draftRun.status)) {
+        throw new Error('DraftRun state changed during approval.');
+      }
+      this.checkApprovalBoundary(draftRun, authorizedExternalReferenceUris, options.expectedSpecHash);
     };
     try {
       assertAuthorized();
       await this.validateBeforeApproval(draftRun, authorizedExternalReferenceUris);
       assertAuthorized();
-      const permit = options.delegatedApproval
-        ? await this.authorization.createDelegatedPermit(draftRun, options.delegatedApproval, options.approvalRecord)
-        : this.authorization.createUserClickPermit(draftRun);
       draftRun.status = 'approved';
       draftRun.authorizationSource = options.delegatedApproval ? 'delegated_approver' : 'user_click';
       draftRun.approvedAt = new Date().toISOString();
@@ -208,12 +214,18 @@ export class DraftRunStore {
       this.emitState(draftRun);
       await this.persistNow();
 
+      assertAuthorized();
       draftRun.status = 'running';
       draftRun.startedAt = new Date().toISOString();
       draftRun.updatedAt = draftRun.startedAt;
       this.emitState(draftRun);
       await this.persistNow();
 
+      await this.validateBeforeApproval(draftRun, authorizedExternalReferenceUris);
+      assertAuthorized();
+      const permit = options.delegatedApproval
+        ? await this.authorization.createDelegatedPermit(draftRun, options.delegatedApproval, options.approvalRecord)
+        : this.authorization.createUserClickPermit(draftRun);
       assertAuthorized();
       const abortController = new AbortController();
       this.abortControllers.set(draftRun.id, abortController);
@@ -222,6 +234,7 @@ export class DraftRunStore {
       if (this.cancelRequests.delete(draftRun.id)) {
         abortController.abort();
       }
+      executionStarted = true;
       const execution = this.executor.execute({
         draftRun: cloneDraftRun(draftRun),
         permit,
@@ -246,14 +259,24 @@ export class DraftRunStore {
           ? 'failed'
           : 'done';
     } catch (error) {
-      draftRun.status = 'failed';
-      draftRun.error = error instanceof Error ? error.message : String(error);
+      if (options.userApproval && options.signal?.aborted && !executionStarted) {
+        // A revoked batch click does not turn a never-started command into a
+        // failure or rejection. A future click must authorize it anew.
+        draftRun.status = 'pending';
+        draftRun.authorizationSource = undefined;
+        draftRun.approvedAt = undefined;
+        draftRun.startedAt = undefined;
+        draftRun.error = undefined;
+      } else {
+        draftRun.status = 'failed';
+        draftRun.error = error instanceof Error ? error.message : String(error);
+      }
     }
     this.approving.delete(id);
     this.abortControllers.delete(draftRun.id);
     this.cancelRequests.delete(draftRun.id);
-    draftRun.finishedAt = new Date().toISOString();
-    draftRun.updatedAt = draftRun.finishedAt;
+    draftRun.finishedAt = draftRun.status === 'pending' ? undefined : new Date().toISOString();
+    draftRun.updatedAt = new Date().toISOString();
     this.emitState(draftRun);
     await this.persistNow();
     return cloneDraftRun(draftRun);
@@ -261,7 +284,7 @@ export class DraftRunStore {
 
   public reject(id: string): boolean {
     const draftRun = this.draftRuns.get(id);
-    if (!draftRun || draftRun.status !== 'pending') {
+    if (!draftRun || draftRun.status !== 'pending' || this.approving.has(id)) {
       return false;
     }
     draftRun.status = 'rejected';
@@ -322,6 +345,20 @@ export class DraftRunStore {
 
   public showTerminal(id: string): boolean {
     return this.executor.showTerminal(id);
+  }
+
+  public cancelAutoContinuations(sessionId: string): void {
+    for (const run of this.draftRuns.values()) {
+      if (run.sessionId === sessionId) run.autoContinueRequested = undefined;
+    }
+    this.schedulePersist();
+  }
+
+  public validateApprovalBoundary(id: string, authorizedUris: ReadonlySet<string>, expectedSpecHash: string): DraftRun {
+    const run = this.draftRuns.get(id);
+    if (!run || run.status !== 'pending' || this.approving.has(id)) throw new Error('Pending DraftRun was not found.');
+    this.checkApprovalBoundary(run, authorizedUris, expectedSpecHash);
+    return cloneDraftRun(run);
   }
 
   /**
@@ -466,20 +503,27 @@ export class DraftRunStore {
     draftRun: DraftRun,
     authorizedExternalReferenceUris: ReadonlySet<string>
   ): Promise<void> {
-    if (!vscode.workspace.isTrusted) {
-      throw new Error('DraftRun is disabled because the workspace is not trusted.');
-    }
-    if (hashDraftRunSpec(draftRun.spec) !== draftRun.specHash) {
-      throw new Error('DraftRun command changed after review and cannot be executed.');
-    }
+    this.checkApprovalBoundary(draftRun, authorizedExternalReferenceUris);
     const cwdUri = vscode.Uri.parse(draftRun.spec.cwdUri);
     const stat = await vscode.workspace.fs.stat(cwdUri);
     if (stat.type !== vscode.FileType.Directory || cwdUri.scheme !== 'file') {
       throw new Error('DraftRun working directory is no longer an executable local directory.');
     }
+    this.checkApprovalBoundary(draftRun, authorizedExternalReferenceUris);
+  }
+
+  private checkApprovalBoundary(draftRun: DraftRun, authorizedExternalReferenceUris: ReadonlySet<string>, expectedSpecHash?: string): void {
+    if (!vscode.workspace.isTrusted) {
+      throw new Error('DraftRun is disabled because the workspace is not trusted.');
+    }
+    if (hashDraftRunSpec(draftRun.spec) !== draftRun.specHash || (expectedSpecHash !== undefined && expectedSpecHash !== draftRun.specHash)) {
+      throw new Error('DraftRun command changed after review and cannot be executed.');
+    }
+    const cwdUri = vscode.Uri.parse(draftRun.spec.cwdUri);
+    if (cwdUri.scheme !== 'file') throw new Error('DraftRun requires a local working directory.');
     if (!vscode.workspace.getWorkspaceFolder(cwdUri)
       && !authorizedExternalReferenceUris.has(getFileReferenceAuthorizationKey(cwdUri))) {
-      throw new Error('Authorize the exact external working directory before running this DraftRun.');
+      throw new Error(`Authorize the exact external working directory before running this DraftRun: ${draftRun.spec.cwdLabel}`);
     }
   }
 
@@ -522,10 +566,12 @@ export class DraftRunStore {
       clearTimeout(this.persistenceTimer);
       this.persistenceTimer = undefined;
     }
-    const draftRuns = Array.from(this.draftRuns.values())
+    const retainedIds = new Set(Array.from(this.draftRuns.values())
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       .slice(0, MAX_DRAFT_RUN_HISTORY)
-      .map(cloneDraftRun);
+      .map((run) => run.id));
+    // Preserve insertion order through persistence, including equal createdAt values.
+    const draftRuns = Array.from(this.draftRuns.values()).filter((run) => retainedIds.has(run.id)).map(cloneDraftRun);
     const write = this.persistenceQueue.catch(() => undefined).then(() => writeJsonAtomic(this.storageUri, { version: 1, draftRuns }));
     this.persistenceQueue = write;
     await write; // In particular, approval persistence failure must prevent spawn.

@@ -2,6 +2,21 @@ import { getInputStyles } from './input/styles';
 
 export function getStyles(): string {
   return `
+    .draft-run-batch {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      padding-bottom: 10px;
+      margin-bottom: 10px;
+      border-bottom: 1px solid var(--vscode-widget-border);
+      overflow-wrap: anywhere;
+    }
+    .draft-run-batch-hint {
+      flex-basis: 100%;
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+    }
     :root {
       color-scheme: light dark;
 

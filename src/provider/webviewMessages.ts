@@ -1,5 +1,5 @@
 import type { KeepseekLanguage } from '../shared/i18n';
-import type { AgentSettings, ApprovalMode, SafeNpmScript } from '../shared/types';
+import type { AgentSettings, ApprovalMode, SafeNpmScript, DraftRunBatchSnapshot } from '../shared/types';
 import type { ModelSourceProvider } from '../accounts/types';
 
 export interface PromptReferenceInput {
@@ -111,6 +111,8 @@ export type WebviewMessage =
   | { type: 'applyAllDraftEdits' }
   | { type: 'discardAllDraftEdits' }
   | { type: 'approveDraftRun'; id: string; specHash: string; autoContinue?: boolean }
+  | { type: 'approveDraftRunBatch'; snapshot: DraftRunBatchSnapshot }
+  | { type: 'cancelDraftRunBatch'; operationId: string }
   | { type: 'rejectDraftRun'; id: string }
   | { type: 'cancelDraftRun'; id: string }
   | { type: 'cloneDraftRun'; id: string }

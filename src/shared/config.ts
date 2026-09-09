@@ -51,6 +51,7 @@ export const DEFAULT_MAX_IMPLICIT_SKILLS = 3;
 export const DEFAULT_BACKGROUND_MAX_ROUNDS = 5;
 export const DEFAULT_BACKGROUND_MAX_DURATION_MS = 0;
 export const DEFAULT_BACKGROUND_MAX_TOOL_CALLS = 60;
+export const DEFAULT_AGENT_MAX_AUTO_CONTINUE_TURNS = 8;
 export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
   // DeepSeek 峰谷定价(自 2026-08-17 北京时间 00:00 起生效)。
   // 空闲档为常规价;高峰档(北京时间每日 9-12 点、14-18 点)价格更高。
@@ -318,6 +319,12 @@ export function getConfiguredBackgroundMaxRounds(): number {
 
 export function getConfiguredAgentMaxExecutionMs(): number {
   return normalizeDuration(vscode.workspace.getConfiguration('keepseek').get('agent.maxExecutionMs', 0));
+}
+
+export function getConfiguredAgentMaxAutoContinueTurns(): number {
+  const configured = vscode.workspace.getConfiguration('keepseek')
+    .get<number>('agent.maxAutoContinueTurns', DEFAULT_AGENT_MAX_AUTO_CONTINUE_TURNS);
+  return normalizeIntegerInRange(configured, 0, 100, DEFAULT_AGENT_MAX_AUTO_CONTINUE_TURNS);
 }
 
 export function getConfiguredStreamIdleTimeoutMs(): number {

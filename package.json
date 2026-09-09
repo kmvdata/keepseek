@@ -130,6 +130,10 @@
           "scope": "window",
           "markdownDescription": "Maximum bytes KeepSeek reads from one referenced or workspace text file. Binary, media, archive, and otherwise unreadable files are still rejected."
         },
+        "keepseek.agent.maxAutoContinueTurns": {
+          "type": "integer", "default": 8, "minimum": 0, "maximum": 100, "scope": "window",
+          "markdownDescription": "Maximum consecutive automatic new turns after the foreground Agent reaches its tool-round or tool-call limit. Applies to all approval modes and incurs new model usage. 0 disables budget auto-continuation. Pending approvals, no successful tools, repeated work, context/time limits and Stop still pause execution. / 前台 Agent 工具轮次或次数耗尽后最多连续自动续跑轮数，适用于全部审批模式，会产生新的模型用量。0 关闭；待审批、无成功工具操作、重复工作、上下文/时间上限或停止操作仍会暂停。"
+        },
         "keepseek.agent.maxExecutionMs": {
           "type": "number", "default": 0, "minimum": 0, "scope": "window",
           "markdownDescription": "Maximum effective execution time per logical Agent task (including children and recovery). 0 = unlimited. Authorization, Apply, queue and host suspension time are excluded. / 每项 Agent 任务的有效执行时间上限；0 不限时，恢复不清零。"
