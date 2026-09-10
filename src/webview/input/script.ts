@@ -4756,6 +4756,7 @@ export function getInputScript(): string {
       var settingsDialogBusyAction = '';
       var settingsDialogBusyTimer = null;
       var settingsDialogDirty = false;
+      var settingsDefaultModelSelection = null;
       var settingsOriginalFormSignature = '';
       var settingsRunBusyStatusVisible = false;
       var defaultHistoryRetentionDays = 7;
@@ -5336,6 +5337,36 @@ export function getInputScript(): string {
           row.classList.toggle('is-disabled', model.enabled === false);
           var actions = document.createElement('div');
           actions.className = 'settings-model-actions';
+          var defaultSlot = document.createElement('span');
+          defaultSlot.className = 'settings-model-default-slot';
+          // Reserve the action's localized width even when displaying the shorter
+          // badge or an unavailable row, so adjacent controls never move.
+          defaultSlot.dataset.label = t('setAsDefaultModel');
+          var isDefault = settingsDefaultModelSelection && account
+            && settingsDefaultModelSelection.sourceId === account.id
+            && settingsDefaultModelSelection.modelId === model.id;
+          if (isDefault) {
+            var defaultBadge = document.createElement('span');
+            defaultBadge.className = 'settings-model-default-badge';
+            defaultBadge.textContent = t('defaultModel');
+            defaultSlot.append(defaultBadge);
+          } else if (account && account.enabled !== false && model.enabled !== false && model.agentCompatible !== false) {
+            var defaultButton = document.createElement('button');
+            defaultButton.type = 'button';
+            defaultButton.className = 'settings-model-default-action';
+            defaultButton.textContent = t('setAsDefaultModel');
+            defaultButton.disabled = controlsDisabled;
+            defaultButton.setAttribute('aria-label', t('setAsDefaultModel') + ': ' + model.id);
+            defaultButton.addEventListener('click', function(event) {
+              event.stopPropagation();
+              if (blockAccountSettingsWhileRunBusy() || settingsDialogBusyAction) { return; }
+              if (blockSettingsActionForUnsavedChanges()) { return; }
+              beginSettingsDialogAction('set-default-model', t('savingDefaultModel'));
+              vscode.postMessage({ type: 'setDefaultModel', sourceId: account.id, modelId: model.id });
+            });
+            defaultSlot.append(defaultButton);
+          }
+          actions.append(defaultSlot);
           var enableLabel = document.createElement('label');
           enableLabel.className = 'settings-model-enable';
           enableLabel.title = model.agentCompatible === false
@@ -5491,7 +5522,7 @@ export function getInputScript(): string {
         if (!settingsOverlay || !settingsApiKey || !settingsBaseUrl) { return; }
         var values = settings && typeof settings === 'object' ? settings : {};
         var rawSources = Array.isArray(values.sources) ? values.sources : [];
-        var rawSources = Array.isArray(values.sources) ? values.sources : [];
+        settingsDefaultModelSelection = values.defaultModelSelection || null;
         settingsSources = rawSources.map(normalizeSettingsSource).filter(Boolean);
         var requestedSourceId = readSettingsString(values.selectedSourceId, '').trim();
         if (settingsOverlay.classList.contains('hidden')) {
@@ -5502,6 +5533,7 @@ export function getInputScript(): string {
           if (settingsSources.length) { settingsSelectedSourceId = settingsSources[0].id; }
         }
         clearSettingsDialogBusy();
+        if (values.defaultModelPending) { settingsDialogBusyAction = 'set-default-model'; }
         settingsRunBusyStatusVisible = false;
         setSettingsDialogStatus('');
         populateSettingsAccount(getSettingsActiveAccount());

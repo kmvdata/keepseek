@@ -158,3 +158,28 @@ export function findModelBySelection(
 export function toModelSelection(model: { sourceId: string; id: string }): ModelSelection {
   return { sourceId: model.sourceId, modelId: model.id };
 }
+
+/** The catalog already carries the settings account/model order and availability. */
+export function resolveDefaultModel(
+  models: readonly KeepseekModel[],
+  explicitDefault?: Partial<ModelSelection>
+): KeepseekModel | undefined {
+  const selectable = models.filter((model) => model.sourceId && model.agentCompatible !== false);
+  const explicit = explicitDefault?.sourceId && explicitDefault.modelId
+    ? findModelBySelection(selectable, explicitDefault)
+    : undefined;
+  return explicit ?? selectable[0];
+}
+
+export function resolveProjectModel(
+  models: readonly KeepseekModel[],
+  projectSelection: Partial<ModelSelection> | undefined,
+  defaultSelection?: Partial<ModelSelection>
+): KeepseekModel | undefined {
+  // Only modelId-only legacy selections may match across accounts. An invalid
+  // complete identity must reach the global default instead of a namesake.
+  const selected = projectSelection?.modelId
+    ? findModelBySelection(models, projectSelection)
+    : undefined;
+  return selected ?? resolveDefaultModel(models, defaultSelection);
+}

@@ -8,7 +8,7 @@ test('provider model-source refresh prevents stale catalog commits', async () =>
   assert.match(source, /private modelSourceStateRefreshGeneration = 0/u);
   assert.match(source, /const generation = \+\+this\.modelSourceStateRefreshGeneration/u);
   assert.match(source, /if \(generation !== this\.modelSourceStateRefreshGeneration\) \{\s*return;/u);
-  assert.match(source, /const availableModels = createModelCatalog\(modelSources\)/u);
+  assert.match(source, /await this\.defaultModelStore\.refresh\(\)/u);
 });
 
 test('request credentials are resolved from the exact selected model source', async () => {

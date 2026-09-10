@@ -190,6 +190,9 @@ export function clearCreatedTerminals(): void {
 }
 
 export const window = {
+  async showErrorMessage(_message: string): Promise<undefined> {
+    return undefined;
+  },
   createTerminal(options: { name: string; pty?: { open(): void; close(): void } }) {
     const record: TestTerminalRecord = {
       name: options.name,
@@ -352,7 +355,8 @@ export const workspace = {
 };
 
 export const ConfigurationTarget = {
-  Global: 1
+  Global: 1,
+  Workspace: 2
 };
 
 export class TextDocument {

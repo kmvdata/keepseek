@@ -155,6 +155,73 @@ export function getStyles(): string {
 
     ${getInputStyles()}
 
+    .settings-model-default-slot {
+      display: inline-grid;
+      flex: none;
+      align-items: center;
+      justify-items: end;
+      font-size: 12px;
+      line-height: 20px;
+      white-space: nowrap;
+    }
+
+    .settings-model-default-slot::before {
+      content: attr(data-label);
+      visibility: hidden;
+      grid-area: 1 / 1;
+    }
+
+    .settings-model-default-action,
+    .settings-model-default-badge {
+      grid-area: 1 / 1;
+      font: inherit;
+    }
+
+    .settings-model-default-action {
+      padding: 0;
+      min-width: 0;
+      min-height: 20px;
+      border: none;
+      background: transparent;
+      color: var(--vscode-textLink-foreground, #3794ff);
+      cursor: pointer;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 160ms ease;
+    }
+
+    .settings-model-row:hover .settings-model-default-action,
+    .settings-model-row:focus-within .settings-model-default-action {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .settings-model-default-action:hover {
+      color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground, #3794ff));
+      background: transparent;
+    }
+
+    .settings-model-default-action:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder, #3794ff);
+      outline-offset: 3px;
+    }
+
+    .settings-model-default-action:disabled {
+      cursor: default;
+    }
+
+    .settings-model-default-badge {
+      color: var(--vscode-testing-iconPassed, #388a34);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .settings-model-default-action { transition: none; }
+    }
+
+    @media (hover: none) {
+      .settings-model-default-action { opacity: 1; pointer-events: auto; }
+    }
+
     .shell {
       position: relative;
       display: flex;

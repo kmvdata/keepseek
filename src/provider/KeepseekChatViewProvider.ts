@@ -94,6 +94,7 @@ import {
   getConfiguredTotalContextBudgetTokens,
   getConfiguredModels,
   getConfiguredModelSelection,
+  getSavedModelSelection,
   getConfiguredSlimToolModeEnabled,
   MAX_HISTORY_RETENTION_DAYS,
   MIN_HISTORY_RETENTION_DAYS,
@@ -159,7 +160,8 @@ import {
 } from '../accounts/subagentSettingsStore';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
 import { probeSourceConnection, refreshSourceModelCache } from '../accounts/modelDiscovery';
-import { createModelCatalog, findModelBySelection } from '../accounts/modelCatalog';
+import { createModelCatalog, findModelBySelection, resolveDefaultModel, resolveProjectModel } from '../accounts/modelCatalog';
+import { DefaultModelStore } from '../accounts/defaultModelStore';
 import { ModelSourceService } from '../accounts/modelSourceService';
 import { isOfficialDeepSeekSource, requiresModelSourceApiKey } from '../accounts/sourceCapabilities';
 import type {
@@ -187,6 +189,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly agentRunner: AgentRunner;
   private readonly agentRequestCoordinator: AgentRequestCoordinator;
   private readonly sourceStore: ModelSourceStore;
+  private readonly defaultModelStore: DefaultModelStore;
   private readonly modelSourceService: ModelSourceService;
   private readonly subagentSettingsStore: SubagentSettingsStore;
   private readonly subagentRuntime: SubagentRuntime;
@@ -217,6 +220,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private modelSourceStateRefreshGeneration = 0;
   private modelSourceStateRefreshPromise: Promise<void> | undefined;
   private availableModels: KeepseekModel[] = [];
+  private defaultModelSelection: { sourceId: string; modelId: string } | undefined;
+  private defaultModelRequestGeneration = 0;
+  private defaultModelPending = false;
   private selectedSourceId = '';
   private selectedModelId = '';
   private subagentModelSetting: SubagentModelSetting = createDefaultSubagentModelSetting();
@@ -273,6 +279,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
     this.skillStore = new SkillStore(skillState);
     this.sourceStore = new ModelSourceStore(this.globalStorageUri);
+    this.defaultModelStore = new DefaultModelStore(skillState, () => this.sourceStore.listSources());
     this.approvalReviews = new ApprovalReviewStore(this.globalStorageUri);
     this.approvalReviewer = new ApprovalReviewerService({
       globalStorageUri: this.globalStorageUri,
@@ -406,6 +413,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.backgroundRunModelSelections.clear();
     this.currentRunContextsBySession.clear();
     this.slimToolNamesBySession.clear();
+    await this.refreshModelSourceState();
     await this.legacyMemoryMigration.refresh();
     await this.refreshSkills({ post: false });
     await this.refreshBackgroundRunAvailability({ post: false });
@@ -942,6 +950,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       case 'setModelEnabled': {
         await this.setModelEnabled(message);
+        return;
+      }
+      case 'setDefaultModel': {
+        await this.setDefaultModel(message);
         return;
       }
       case 'setModelContextWindow': {
@@ -2025,21 +2037,44 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private async refreshModelSourceState(options: { preserveAuthoritativeSelection?: boolean } = {}): Promise<void> {
     const generation = ++this.modelSourceStateRefreshGeneration;
+    const previousRefresh = this.modelSourceStateRefreshPromise;
     const refreshPromise = (async () => {
-      const modelSources = await this.sourceStore.listSources();
-      const availableModels = createModelCatalog(modelSources);
-      const selection = options.preserveAuthoritativeSelection
+      // A refresh can now persist project adoption. Finish that write before
+      // another refresh reads the paired workspace keys.
+      await previousRefresh?.catch(() => undefined);
+      if (generation !== this.modelSourceStateRefreshGeneration) {
+        return;
+      }
+      const { modelSources, availableModels, defaultModel } = await this.defaultModelStore.refresh();
+      if (generation !== this.modelSourceStateRefreshGeneration) {
+        return;
+      }
+      const defaultSelection = defaultModel?.sourceId
+        ? { sourceId: defaultModel.sourceId, modelId: defaultModel.id }
+        : undefined;
+      const savedSelection = getSavedModelSelection();
+      const selection = options.preserveAuthoritativeSelection && this.selectedModelId
         ? { sourceId: this.selectedSourceId, modelId: this.selectedModelId }
-        : getConfiguredModelSelection(availableModels);
-      const selectedModel = findModelBySelection(availableModels, selection);
+        : savedSelection;
+      const selectedModel = resolveProjectModel(availableModels, selection, defaultSelection);
       if (selectedModel?.sourceId && selectedModel.supportsBilling) {
         await this.balanceStore.refreshFromDisk(this.getBalanceSourceScope(selectedModel.sourceId));
       }
       if (generation !== this.modelSourceStateRefreshGeneration) {
         return;
       }
+      // Adopting a default is a one-time project choice. Persist the complete
+      // identity, including legacy modelId-only selections, before publishing it.
+      if (selectedModel?.sourceId && (savedSelection.sourceId !== selectedModel.sourceId
+        || savedSelection.modelId !== selectedModel.id) && vscode.workspace.workspaceFolders?.length) {
+        await this.persistModelSelection(selectedModel.sourceId, selectedModel.id);
+        if (generation !== this.modelSourceStateRefreshGeneration) {
+          return;
+        }
+      }
       this.modelSources = modelSources;
       this.availableModels = availableModels;
+      this.defaultModelSelection = defaultSelection;
       this.selectedSourceId = selectedModel?.sourceId ?? '';
       this.selectedModelId = selectedModel?.id ?? '';
       if (selectedModel?.sourceId) {
@@ -2079,6 +2114,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postToWebview({
       type: 'showSettingsDialog',
       selectedSourceId: this.selectedSourceId,
+      defaultModelSelection: this.defaultModelSelection,
+      defaultModelPending: this.defaultModelPending,
       sources: this.modelSources.map((source) => ({
         ...source,
         models: source.models.map((model) => ({ ...model })),
@@ -2215,17 +2252,40 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const modelId = input.modelId.trim();
       await this.modelSourceService.removeModel(input.sourceId, modelId);
       await this.refreshModelSourceState();
-      if (this.selectedSourceId === input.sourceId && this.selectedModelId === modelId) {
-        const fallback = this.availableModels.find((model) => model.sourceId === input.sourceId);
-        if (fallback?.sourceId) {
-          await this.persistModelSelection(fallback.sourceId, fallback.id);
-        }
-      }
       this.postState();
       this.postModelSettingsDialog();
     } catch (error) {
       vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
       this.postModelSettingsDialog();
+    }
+  }
+
+  private async setDefaultModel(input: { sourceId: string; modelId: string }): Promise<void> {
+    if (this.rejectModelSourceMutationWhileBusy()) {
+      return;
+    }
+    const requestGeneration = ++this.defaultModelRequestGeneration;
+    this.defaultModelPending = true;
+    try {
+      // Finish adopting the previous default first, even if settings were opened
+      // before initial loading completed. Changing this preference never switches
+      // an already valid project selection or the running request snapshot.
+      await this.refreshModelSourceState();
+      if (requestGeneration !== this.defaultModelRequestGeneration || this.rejectModelSourceMutationWhileBusy()) {
+        return;
+      }
+      await this.defaultModelStore.set(input);
+      await this.refreshModelSourceState();
+    } catch (error) {
+      if (requestGeneration === this.defaultModelRequestGeneration) {
+        vscode.window.showErrorMessage(this.t('modelOperationFailed', { message: getErrorMessage(error) }));
+      }
+    } finally {
+      if (requestGeneration === this.defaultModelRequestGeneration) {
+        this.defaultModelPending = false;
+        this.postState();
+        this.postModelSettingsDialog();
+      }
     }
   }
 
@@ -2389,7 +2449,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.modelSourceStateRefreshGeneration += 1;
     this.modelSources = this.modelSources.filter((source) => source.id !== sourceId);
     this.availableModels = createModelCatalog(this.modelSources);
-    const selected = findModelBySelection(this.availableModels, getConfiguredModelSelection(this.availableModels));
+    const fallback = resolveDefaultModel(this.availableModels, this.defaultModelSelection);
+    this.defaultModelSelection = fallback?.sourceId
+      ? { sourceId: fallback.sourceId, modelId: fallback.id }
+      : undefined;
+    const selected = resolveProjectModel(this.availableModels, getSavedModelSelection(), this.defaultModelSelection);
     this.selectedSourceId = selected?.sourceId ?? '';
     this.selectedModelId = selected?.id ?? '';
   }
@@ -2739,7 +2803,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private syncConfiguredState(): void {
-    const selected = findModelBySelection(this.availableModels, getConfiguredModelSelection(this.availableModels));
+    const selected = findModelBySelection(this.availableModels, getConfiguredModelSelection(this.availableModels, this.defaultModelSelection));
     this.selectedSourceId = selected?.sourceId ?? '';
     this.selectedModelId = selected?.id ?? '';
     this.agentSettings = getConfiguredAgentSettings();

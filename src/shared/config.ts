@@ -14,6 +14,7 @@ import {
   getSupportedDeepSeekV4Models
 } from './modelProfiles';
 import { isOfficialDeepSeekSource } from '../accounts/sourceCapabilities';
+import { resolveProjectModel } from '../accounts/modelCatalog';
 
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
@@ -118,17 +119,18 @@ export function getConfiguredModels(): KeepseekModel[] {
   return getSupportedDeepSeekV4Models();
 }
 
-export function getConfiguredModelSelection(models: readonly KeepseekModel[]): ModelSelection {
+export function getSavedModelSelection(): ModelSelection {
   const config = vscode.workspace.getConfiguration('keepseek');
   const sourceId = config.get<string>('selectedSourceId', DEFAULT_SELECTED_SOURCE_ID).trim();
   const modelId = config.get<string>('selectedModelId', DEFAULT_SELECTED_MODEL_ID).trim();
-  const exact = sourceId && modelId
-    ? models.find((model) => model.sourceId === sourceId && model.id === modelId)
-    : undefined;
-  const backwardCompatible = !exact && modelId
-    ? models.find((model) => model.id === modelId)
-    : undefined;
-  const selected = exact ?? backwardCompatible ?? models[0];
+  return { sourceId, modelId };
+}
+
+export function getConfiguredModelSelection(
+  models: readonly KeepseekModel[],
+  defaultSelection?: Partial<ModelSelection>
+): ModelSelection {
+  const selected = resolveProjectModel(models, getSavedModelSelection(), defaultSelection);
   return {
     sourceId: selected?.sourceId ?? DEFAULT_SELECTED_SOURCE_ID,
     modelId: selected?.id ?? DEFAULT_SELECTED_MODEL_ID

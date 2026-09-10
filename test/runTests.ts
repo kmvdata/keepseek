@@ -7,6 +7,8 @@ import './accountStore.test';
 import './modelAlias.test';
 import './modelDiscovery.test';
 import './modelCatalog.test';
+import './defaultModel.test';
+import './modelSelection.test';
 import './kimiGlmProviders.test';
 import './qwenCloudProvider.test';
 import './openAiResponses.test';

@@ -125,7 +125,7 @@ test('command menu model settings are registered and persisted for the current w
     type: 'string',
     default: '',
     scope: 'window',
-    markdownDescription: 'Selected model for the current workspace. An empty or unavailable value falls back to the first supported model.'
+    markdownDescription: 'Selected model for the current workspace. An empty or unavailable value adopts the global default model, or the first available model when no explicit default is valid.'
   });
   assert.deepEqual(properties['keepseek.thinkingEnabled'], {
     type: 'boolean',
