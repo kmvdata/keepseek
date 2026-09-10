@@ -13,7 +13,7 @@ import {
 } from './chatSessionStore';
 import { isRecord } from '../shared/errors';
 import { pruneExpiredSessions } from './sessionRetention';
-import type { ChatSession, WorkspaceSummary } from '../shared/types';
+import type { ApprovalMode, ChatSession, WorkspaceSummary } from '../shared/types';
 
 export const SESSION_MIGRATION_KEY = 'keepseek.chatSessionsMigratedToGlobalV1';
 
@@ -44,6 +44,7 @@ export interface WorkspaceSessionFile {
   workspaceName: string;
   workspaceFolders: string[];
   activeSessionId: string;
+  approvalMode: ApprovalMode;
   sessions: ChatSession[];
   updatedAt: string;
 }
@@ -81,6 +82,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
 
     return {
       activeSessionId: file.activeSessionId,
+      approvalMode: file.approvalMode,
       sessions: file.sessions
     };
   }
@@ -304,6 +306,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
           : groupScope;
         await this.saveWorkspace(saveScope, {
           activeSessionId,
+          approvalMode: existingFile?.approvalMode,
           sessions: mergedSessions
         });
       }
@@ -463,6 +466,7 @@ function createWorkspaceSessionFile(
   const initialActiveSessionId = chooseActiveSessionId(rawSessions, state.activeSessionId);
   const sessions = compactWorkspaceSessions(rawSessions, initialActiveSessionId);
   const activeSessionId = chooseActiveSessionId(sessions, state.activeSessionId);
+  const activeSession = sessions.find((session) => session.id === activeSessionId);
   const now = new Date().toISOString();
   return {
     version: SESSION_STORAGE_VERSION,
@@ -470,6 +474,7 @@ function createWorkspaceSessionFile(
     workspaceName: workspaceScope.name,
     workspaceFolders: workspaceScope.folderUris,
     activeSessionId,
+    approvalMode: normalizeApprovalMode(state.approvalMode ?? activeSession?.approvalMode),
     sessions,
     updatedAt: now
   };
@@ -541,6 +546,7 @@ function normalizeWorkspaceSessionFile(
     fallback?.activeSessionId
   );
   const newestSession = sortSessionsByUpdatedAt(sessions)[0];
+  const activeSession = sessions.find((session) => session.id === activeSessionId);
   const updatedAtFallback = newestSession?.updatedAt ?? fallback?.updatedAt ?? new Date().toISOString();
 
   return {
@@ -549,6 +555,7 @@ function normalizeWorkspaceSessionFile(
     workspaceName,
     workspaceFolders,
     activeSessionId,
+    approvalMode: normalizeApprovalMode(value.approvalMode ?? activeSession?.approvalMode),
     sessions: sortSessionsByUpdatedAt(sessions),
     updatedAt: normalizeIsoString(value.updatedAt, updatedAtFallback)
   };
@@ -661,6 +668,10 @@ function getStringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string' && Boolean(item))
     : [];
+}
+
+function normalizeApprovalMode(value: unknown): ApprovalMode {
+  return value === 'delegate' || value === 'model_review' ? value : 'ask';
 }
 
 function normalizeIsoString(value: unknown, fallback: string): string {

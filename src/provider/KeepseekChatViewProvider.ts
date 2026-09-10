@@ -814,15 +814,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         {
           const session = this.sessionStore.getActiveSession();
-          if (normalizeApprovalMode(session.approvalMode) === message.mode) return;
+          if (this.sessionStore.approvalMode === message.mode) return;
           // Every mode transition revokes queued effects and unconsumed authority.
           this.draftRunBatches?.cancel();
           this.delegatedApprovals.cancel();
           this.pendingBudgetContinuation = undefined;
           if (message.mode === 'ask') this.abortPrompt();
-          session.approvalMode = message.mode;
-          session.updatedAt = new Date().toISOString();
-          await this.sessionStore.persist();
+          await this.sessionStore.setApprovalMode(message.mode);
           if (message.mode !== 'ask' && session.approvalMode === message.mode && session.id === this.sessionStore.activeSessionId) {
             const sets = this.changeSets.toWebviewState(session.id).filter((set) => set.files.some((file) => file.status === 'pending'));
             const runs = this.draftRuns.toWebviewState(session.id).filter((run) => run.status === 'pending');

@@ -390,7 +390,6 @@ export function getInputScript(): string {
           vscode.postMessage({ type: 'setApprovalMode', mode: mode });
           commandApprovalModeListOpen = false;
           renderCommandMenu();
-          setComposerStatus(t('approvalMode') + ': ' + t(getApprovalModeLabelKey(mode)));
         });
       }
 

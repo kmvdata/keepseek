@@ -132,6 +132,8 @@ test('approval mode uses the model selector interaction directly below the subag
   assert.match(inputScript, /commandApprovalModeListOpen/u);
   assert.match(inputScript, /openCommandApprovalModeListAndFocus/u);
   assert.match(inputScript, /postMessage\(\{ type: 'setApprovalMode'/u);
+  assert.doesNotMatch(inputScript, /setComposerStatus\(t\('approvalMode'\)/u);
+  assert.match(getScript(), /approvalMode: 'ask'/u);
   assert.doesNotMatch(JSON.stringify(getAgentTools({ requestProtocolVersion: 7 })), /setApprovalMode/u);
 });
 

@@ -90,6 +90,7 @@ export function getScript(): string {
       draftRunBatchSnapshots: [],
       draftRunBatch: null,
       activeDraftRunId: '',
+      approvalMode: 'ask',
       authorizedExternalReferenceUris: [],
       isBusy: false,
       agentActivity: {

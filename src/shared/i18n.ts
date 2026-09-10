@@ -10,7 +10,7 @@ type TranslationCatalog = Record<string, string>;
 export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
     approvalMode: '审批模式',
-    approvalModeDescription: '选择写入文件和运行命令的审批方式',
+    approvalModeDescription: '为当前项目选择写入文件和运行命令的审批方式',
     approvalAsk: '请求批准',
     approvalModelReview: '模型审批',
     approvalDelegate: '自动批准',
@@ -732,7 +732,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
   },
   en: {
     approvalMode: 'Approvals',
-    approvalModeDescription: 'Choose how file writes and commands are approved',
+    approvalModeDescription: 'Choose project-wide approval for file writes and commands',
     approvalAsk: 'Ask for approval',
     approvalModelReview: 'Model review',
     approvalDelegate: 'Auto approve',

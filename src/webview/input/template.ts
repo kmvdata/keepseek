@@ -250,7 +250,7 @@ export function getInputTemplate(): string {
             >
               <span class="command-row-main">
                 <span class="command-row-title" data-i18n="approvalMode">审批模式</span>
-                <span id="commandApprovalModeDescription" class="command-row-description" data-i18n="approvalModeDescription">选择写入文件和运行命令的审批方式</span>
+                <span id="commandApprovalModeDescription" class="command-row-description" data-i18n="approvalModeDescription">为当前项目选择写入文件和运行命令的审批方式</span>
               </span>
               <span id="commandApprovalModeValue" class="command-row-value command-model-current" data-i18n="approvalAsk">请求批准</span>
             </button>

@@ -15,6 +15,7 @@ import {
   AnthropicMessagesReplayState,
   AnthropicReplayContentBlock,
   AnthropicReplayMessage,
+  type ApprovalMode,
   OpenAiResponsesReplayItem,
   OpenAiResponsesReplayState,
   ProviderReplayState,
@@ -60,6 +61,7 @@ export interface StoredSessionState {
 
 export interface StoredWorkspaceSessionState {
   activeSessionId: string;
+  approvalMode?: ApprovalMode;
   sessions: ChatSession[];
 }
 
@@ -91,6 +93,7 @@ export interface DeleteSessionsResult {
 export class ChatSessionStore {
   private sessions: ChatSession[] = [];
   private activeSessionIdValue = '';
+  private approvalModeValue: ApprovalMode = 'ask';
 
   public constructor(
     private readonly sessionStorage: ChatSessionStorageAdapter,
@@ -108,6 +111,10 @@ export class ChatSessionStore {
 
   public get workspaceKey(): string {
     return this.workspaceScope.key;
+  }
+
+  public get approvalMode(): ApprovalMode {
+    return this.approvalModeValue;
   }
 
   public get messages(): ChatMessage[] {
@@ -134,11 +141,24 @@ export class ChatSessionStore {
 
   public async createNewSession(language: KeepseekLanguage = this.language): Promise<ChatSession> {
     this.language = language;
-    const session = createEmptySession(language, this.workspaceScope);
+    const session = createEmptySession(language, this.workspaceScope, this.approvalModeValue);
     this.sessions.unshift(session);
     this.setActiveSessionId(session.id);
     await this.persist();
     return session;
+  }
+
+  public async setApprovalMode(approvalMode: ApprovalMode): Promise<boolean> {
+    const session = this.getActiveSession();
+    if (this.approvalModeValue === approvalMode && session.approvalMode === approvalMode) {
+      return false;
+    }
+
+    this.approvalModeValue = approvalMode;
+    session.approvalMode = approvalMode;
+    session.updatedAt = new Date().toISOString();
+    await this.persist();
+    return true;
   }
 
   public async selectSession(sessionId: string): Promise<ChatSession | undefined> {
@@ -148,6 +168,7 @@ export class ChatSessionStore {
     }
 
     session.updatedAt = new Date().toISOString();
+    session.approvalMode = this.approvalModeValue;
     this.setActiveSessionId(session.id);
     await this.persist();
     return session;
@@ -169,7 +190,7 @@ export class ChatSessionStore {
     const now = new Date().toISOString();
     const copied: ChatSession = {
       ...source,
-      approvalMode: 'ask',
+      approvalMode: this.approvalModeValue,
       id: randomUUID(),
       messages: source.messages.map(copyMessage),
       contextCompression: undefined,
@@ -239,7 +260,7 @@ export class ChatSessionStore {
     });
 
     if (deletedActiveSession) {
-      const session = createEmptySession(this.language, this.workspaceScope);
+      const session = createEmptySession(this.language, this.workspaceScope, this.approvalModeValue);
       this.sessions.unshift(session);
       this.setActiveSessionId(session.id);
     } else {
@@ -268,7 +289,11 @@ export class ChatSessionStore {
   private persistenceQueue: Promise<void> = Promise.resolve();
   public async persist(): Promise<void> {
     this.compact();
-    const snapshot = structuredClone({ activeSessionId: this.activeSessionIdValue, sessions: this.sessions });
+    const snapshot = structuredClone({
+      activeSessionId: this.activeSessionIdValue,
+      approvalMode: this.approvalModeValue,
+      sessions: this.sessions
+    });
     const write = this.persistenceQueue.catch(() => undefined).then(() => this.sessionStorage.saveWorkspace(this.workspaceScope, snapshot));
     this.persistenceQueue = write;
     await write;
@@ -351,6 +376,9 @@ export class ChatSessionStore {
 
     this.sessions = sessions.filter((session) => this.isInCurrentWorkspace(session));
     this.activeSessionIdValue = typeof stored.activeSessionId === 'string' ? stored.activeSessionId : '';
+    const storedActiveSession = this.sessions.find((session) => session.id === this.activeSessionIdValue)
+      ?? this.getCurrentWorkspaceSessions()[0];
+    this.approvalModeValue = normalizeStoredApprovalMode(stored.approvalMode ?? storedActiveSession?.approvalMode);
     this.ensureActiveSession();
     this.compact();
   }
@@ -359,14 +387,17 @@ export class ChatSessionStore {
     const currentSessions = this.getCurrentWorkspaceSessions();
     const existing = currentSessions.find((session) => session.id === this.activeSessionIdValue);
     if (existing) {
+      existing.approvalMode = this.approvalModeValue;
       this.setActiveSessionId(existing.id);
       return existing;
     }
 
-    const fallback = currentSessions[0] ?? createEmptySession(this.language, this.workspaceScope);
+    const fallback = currentSessions[0]
+      ?? createEmptySession(this.language, this.workspaceScope, this.approvalModeValue);
     if (!currentSessions.length) {
       this.sessions.unshift(fallback);
     }
+    fallback.approvalMode = this.approvalModeValue;
     this.setActiveSessionId(fallback.id);
     return fallback;
   }
@@ -428,13 +459,15 @@ export class ChatSessionStore {
 
 export function createEmptySession(
   language: KeepseekLanguage = getConfiguredKeepseekLanguage(),
-  workspaceScope: WorkspaceSessionScope = getCurrentWorkspaceSessionScope()
+  workspaceScope: WorkspaceSessionScope = getCurrentWorkspaceSessionScope(),
+  approvalMode: ApprovalMode = 'ask'
 ): ChatSession {
   const now = new Date().toISOString();
   return {
     id: randomUUID(),
     title: localize(language, 'defaultSessionTitle'),
     messages: [],
+    approvalMode,
     activeSkillIds: [],
     requestProtocol: createNewSessionRequestProtocol(now),
     createdAt: now,
@@ -444,6 +477,10 @@ export function createEmptySession(
     workspaceFolders: workspaceScope.folderUris,
     isFavorite: false
   };
+}
+
+function normalizeStoredApprovalMode(value: unknown): ApprovalMode {
+  return value === 'delegate' || value === 'model_review' ? value : 'ask';
 }
 
 export function createSessionTitle(prompt: string, language: KeepseekLanguage = getConfiguredKeepseekLanguage()): string {
