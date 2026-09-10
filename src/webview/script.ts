@@ -3232,8 +3232,7 @@ export function getScript(): string {
 
       var fields = document.createElement('div');
       fields.className = 'draft-run-fields';
-      appendDraftRunField(fields, t('draftRunExecutable'), String(spec.executable || ''), true);
-      appendDraftRunField(fields, t('draftRunArguments'), JSON.stringify(Array.isArray(spec.args) ? spec.args : []), true);
+      appendDraftRunField(fields, t('draftRunCommand'), formatShellCommand(spec.executable, spec.args), true);
       var cwdDisplay = String(spec.cwdLabel || '');
       var cwdUri = String(spec.cwdUri || '');
       appendDraftRunField(fields, t('draftRunCwd'), cwdUri && cwdUri !== cwdDisplay
@@ -3416,6 +3415,17 @@ export function getScript(): string {
       content.textContent = value || '—';
       row.append(label, content);
       container.append(row);
+    }
+
+    function formatShellCommand(executable, args) {
+      return [executable].concat(Array.isArray(args) ? args : []).map(formatShellWord).join(' ');
+    }
+
+    function formatShellWord(value) {
+      var word = String(value === undefined || value === null ? '' : value);
+      if (word && /^[A-Za-z0-9_@%+=:,./-]+$/.test(word)) return word;
+      var quote = String.fromCharCode(39);
+      return quote + word.split(quote).join(quote + '"' + quote + '"' + quote) + quote;
     }
 
     function getDraftRunStatusLabel(statusValue) {

@@ -341,7 +341,7 @@ class UiElement {
 function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: 'en' | 'zh-CN') {
   const source = getScript();
   const names = ['createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
-    'getDraftRunTitle', 'appendDraftRunField', 'getDraftRunStatusLabel', 'getDraftRunEffectLabel',
+    'getDraftRunTitle', 'appendDraftRunField', 'formatShellCommand', 'formatShellWord', 'getDraftRunStatusLabel', 'getDraftRunEffectLabel',
     'createChangeSetCard', 'createChangeSetFileRow', 'createEditActionButton', 'createEditOpenFileButton',
     'createChangeSetActionButton', 'getChangeSetStatusLabel', 'getChangeFileStatusLabel', 'isChangeSetActionable',
     'renderUnlinkedChangeSets', 'buildDraftRunTimelineProjection'];
@@ -413,6 +413,31 @@ test('both languages and all card entrances hide bulk actions at 0/1, show count
     assert.equal(ui.api.buildDraftRunTimelineProjection().unlinked.length, 3, 'unlinked projection uses the same cards');
   });
 });
+
+test('DraftRun card renders executable and argv as one shell-readable command without changing the stored spec', async () => fixture(async (f) => {
+  const spec: DraftRunSpec = {
+    ...f.proposal('display-command').spec,
+    executable: '/usr/bin/sed',
+    args: ['-i', '', '-e', 's/kmvpy\\.common\\.kore/kmvpy.common.kmv/g', 'path with spaces/file.py', "it's.py"]
+  };
+  f.store.addProposals({
+    proposals: [{ id: 'display-command', spec, specHash: hashDraftRunSpec(spec), effectAssessment: analyzeDraftRunEffects(spec) }],
+    sessionId: 's',
+    agentRunId: 'r',
+    messageId: 'assistant'
+  });
+
+  const ui = renderHarness(f, 'zh-CN');
+  const card = ui.render().cards[0];
+  const fields = elements([card]).filter((item) => item.className === 'draft-run-field');
+  assert.equal(fields[0]?.children[0]?.textContent, '完整命令');
+  assert.equal(
+    fields[0]?.children[1]?.textContent,
+    "/usr/bin/sed -i '' -e 's/kmvpy\\.common\\.kore/kmvpy.common.kmv/g' 'path with spaces/file.py' 'it'\"'\"'s.py'"
+  );
+  assert.equal(fields.some((field) => field.children[0]?.textContent === '可执行文件' || field.children[0]?.textContent === '完整参数'), false);
+  assert.deepEqual(f.store.get('display-command')?.spec, spec);
+}));
 
 test('running batch with one remaining command keeps accessible progress and stop; external cwd and automated modes disable/hide approval', async () => fixture(async (f) => {
   f.add(['A', 'B']); const ui = renderHarness(f, 'en'); const executing = f.execute(f.accept());
