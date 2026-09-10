@@ -3232,14 +3232,13 @@ export function getScript(): string {
 
       var fields = document.createElement('div');
       fields.className = 'draft-run-fields';
-      appendDraftRunField(fields, t('draftRunCommand'), formatShellCommand(spec.executable, spec.args), true);
+      appendDraftRunField(fields, t('draftRunCommand'), formatShellCommand(spec.executable, spec.args, spec.env), true);
       var cwdDisplay = String(spec.cwdLabel || '');
       var cwdUri = String(spec.cwdUri || '');
       appendDraftRunField(fields, t('draftRunCwd'), cwdUri && cwdUri !== cwdDisplay
         ? cwdDisplay + String.fromCharCode(10) + cwdUri
         : cwdDisplay || cwdUri, true);
       appendDraftRunField(fields, t('draftRunTimeout'), formatDuration(Number(spec.timeoutMs) || 0), false);
-      appendDraftRunField(fields, t('draftRunEnvironment'), JSON.stringify(Array.isArray(spec.env) ? spec.env : []), true);
 
       var assessment = draftRun.effectAssessment || {};
       var risk = document.createElement('div');
@@ -3417,8 +3416,14 @@ export function getScript(): string {
       container.append(row);
     }
 
-    function formatShellCommand(executable, args) {
-      return [executable].concat(Array.isArray(args) ? args : []).map(formatShellWord).join(' ');
+    function formatShellCommand(executable, args, environment) {
+      var command = [executable].concat(Array.isArray(args) ? args : []).map(formatShellWord);
+      var overrides = (Array.isArray(environment) ? environment : []).map(function(entry) {
+        var name = String(entry && entry.name || '');
+        var value = entry && entry.value !== undefined && entry.value !== null ? entry.value : '';
+        return name + '=' + formatShellWord(value);
+      });
+      return overrides.concat(command).join(' ');
     }
 
     function formatShellWord(value) {

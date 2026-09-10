@@ -418,7 +418,8 @@ test('DraftRun card renders executable and argv as one shell-readable command wi
   const spec: DraftRunSpec = {
     ...f.proposal('display-command').spec,
     executable: '/usr/bin/sed',
-    args: ['-i', '', '-e', 's/kmvpy\\.common\\.kore/kmvpy.common.kmv/g', 'path with spaces/file.py', "it's.py"]
+    args: ['-i', '', '-e', 's/kmvpy\\.common\\.kore/kmvpy.common.kmv/g', 'path with spaces/file.py', "it's.py"],
+    env: []
   };
   f.store.addProposals({
     proposals: [{ id: 'display-command', spec, specHash: hashDraftRunSpec(spec), effectAssessment: analyzeDraftRunEffects(spec) }],
@@ -436,7 +437,38 @@ test('DraftRun card renders executable and argv as one shell-readable command wi
     "/usr/bin/sed -i '' -e 's/kmvpy\\.common\\.kore/kmvpy.common.kmv/g' 'path with spaces/file.py' 'it'\"'\"'s.py'"
   );
   assert.equal(fields.some((field) => field.children[0]?.textContent === '可执行文件' || field.children[0]?.textContent === '完整参数'), false);
+  assert.equal(fields.some((field) => field.children[0]?.textContent === '环境覆盖'), false);
   assert.deepEqual(f.store.get('display-command')?.spec, spec);
+}));
+
+test('DraftRun card folds scoped environment overrides into the displayed command with shell-safe values', async () => fixture(async (f) => {
+  const spec: DraftRunSpec = {
+    ...f.proposal('display-environment').spec,
+    executable: 'node',
+    args: ['script.js'],
+    env: [
+      { name: 'NODE_ENV', value: 'test' },
+      { name: 'EMPTY', value: '' },
+      { name: 'GREETING', value: 'hello world' },
+      { name: 'PRICE', value: '$5' },
+      { name: 'QUOTE', value: "it's" }
+    ]
+  };
+  f.store.addProposals({
+    proposals: [{ id: 'display-environment', spec, specHash: hashDraftRunSpec(spec), effectAssessment: analyzeDraftRunEffects(spec) }],
+    sessionId: 's',
+    agentRunId: 'r',
+    messageId: 'assistant'
+  });
+
+  const card = renderHarness(f, 'zh-CN').render().cards[0];
+  const fields = elements([card]).filter((item) => item.className === 'draft-run-field');
+  assert.equal(
+    fields[0]?.children[1]?.textContent,
+    "NODE_ENV=test EMPTY='' GREETING='hello world' PRICE='$5' QUOTE='it'\"'\"'s' node script.js"
+  );
+  assert.equal(fields.some((field) => field.children[0]?.textContent === '环境覆盖'), false);
+  assert.deepEqual(f.store.get('display-environment')?.spec, spec);
 }));
 
 test('running batch with one remaining command keeps accessible progress and stop; external cwd and automated modes disable/hide approval', async () => fixture(async (f) => {
