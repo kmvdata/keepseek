@@ -163,18 +163,29 @@ test('an existing store observes another window default and rolls back an optimi
   assert.deepEqual(identity((await store.refresh()).defaultModel), b);
 });
 
-test('configuration preserves modelId-only projects but invalid full identities reach the default before namesake fallback', () => {
+test('configuration ignores an inherited legacy model ID in a new project and preserves explicit project choices', () => {
   const original = vscode.workspace.getConfiguration;
-  let saved: Record<string, string> = {};
-  vscode.workspace.getConfiguration = () => ({ ...original(), get: <T>(key: string, fallback: T): T => (saved[key] ?? fallback) as T });
+  let workspaceValues: Record<string, string> = {};
+  const inheritedValues: Record<string, string> = {
+    selectedModelId: 'shared'
+  };
+  vscode.workspace.getConfiguration = () => ({
+    ...original(),
+    get: <T>(key: string, fallback: T): T => (workspaceValues[key] ?? inheritedValues[key] ?? fallback) as T,
+    inspect: <T>(key: string) => ({
+      key: `keepseek.${key}`,
+      globalValue: inheritedValues[key] as T | undefined,
+      workspaceValue: workspaceValues[key] as T | undefined
+    })
+  });
   try {
     const models = createModelCatalog([source('a'), source('b')]);
     assert.deepEqual(getConfiguredModelSelection(models, b), b);
-    saved = { selectedModelId: 'shared' };
+    workspaceValues = { selectedModelId: 'shared' };
     assert.deepEqual(getConfiguredModelSelection(models, b), a);
-    saved.selectedSourceId = 'deleted';
+    workspaceValues.selectedSourceId = 'deleted';
     assert.deepEqual(getConfiguredModelSelection(models, b), b);
-    saved.selectedSourceId = 'a';
+    workspaceValues.selectedSourceId = 'a';
     assert.deepEqual(getConfiguredModelSelection(models, b), a);
     assert.deepEqual(getConfiguredModelSelection([], b), { sourceId: '', modelId: '' });
   } finally { vscode.workspace.getConfiguration = original; }
@@ -183,22 +194,30 @@ test('configuration preserves modelId-only projects but invalid full identities 
 test('Provider persists adoption once, retains it on default changes/restart, and supports ordinary project switching', async () => {
   const originalConfig = vscode.workspace.getConfiguration;
   const originalFolders = vscode.workspace.workspaceFolders;
-  const saved: Record<string, string> = {};
+  const workspaceValues: Record<string, string> = {};
+  const inheritedValues: Record<string, string> = {
+    selectedModelId: 'shared'
+  };
   const writes: string[] = [];
   const state = memory(b);
   vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file('/workspace') }];
   vscode.workspace.getConfiguration = () => ({
-    get: <T>(key: string, fallback: T): T => (saved[key] ?? fallback) as T,
+    get: <T>(key: string, fallback: T): T => (workspaceValues[key] ?? inheritedValues[key] ?? fallback) as T,
+    inspect: <T>(key: string) => ({
+      key: `keepseek.${key}`,
+      globalValue: inheritedValues[key] as T | undefined,
+      workspaceValue: workspaceValues[key] as T | undefined
+    }),
     async update(key: string, value: string, target: unknown) {
       assert.equal(target, vscode.ConfigurationTarget.Workspace);
-      saved[key] = value; writes.push(key);
+      workspaceValues[key] = value; writes.push(key);
     }
-  } as ReturnType<typeof originalConfig>);
+  } as unknown as ReturnType<typeof originalConfig>);
   try {
     const host = providerHost(state);
     await host.refreshModelSourceState();
     assert.equal(host.selectedSourceId, 'b');
-    assert.deepEqual(saved, { selectedSourceId: 'b', selectedModelId: 'shared' });
+    assert.deepEqual(workspaceValues, { selectedSourceId: 'b', selectedModelId: 'shared' });
     await host.setDefaultModel(a);
     assert.equal(host.selectedSourceId, 'b');
     assert.deepEqual(host.defaultModelSelection, a);

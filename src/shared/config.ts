@@ -121,9 +121,27 @@ export function getConfiguredModels(): KeepseekModel[] {
 
 export function getSavedModelSelection(): ModelSelection {
   const config = vscode.workspace.getConfiguration('keepseek');
-  const sourceId = config.get<string>('selectedSourceId', DEFAULT_SELECTED_SOURCE_ID).trim();
-  const modelId = config.get<string>('selectedModelId', DEFAULT_SELECTED_MODEL_ID).trim();
+  const sourceId = getWorkspaceConfigurationString(config, 'selectedSourceId');
+  const modelId = getWorkspaceConfigurationString(config, 'selectedModelId');
   return { sourceId, modelId };
+}
+
+function getWorkspaceConfigurationString(
+  config: vscode.WorkspaceConfiguration,
+  key: string
+): string {
+  // The main-model choice is project-scoped. `get()` is a merged view and may
+  // contain a user-level value left by an older KeepSeek version; treating that
+  // as a project choice makes every new workspace override the global default.
+  // Read only the value explicitly stored for this workspace. The fallback is
+  // retained for lightweight hosts/tests that do not implement `inspect()`.
+  const inspected = typeof config.inspect === 'function'
+    ? config.inspect<string>(key)
+    : undefined;
+  const value = inspected
+    ? inspected.workspaceValue
+    : config.get<string>(key, '');
+  return typeof value === 'string' ? value.trim() : '';
 }
 
 export function getConfiguredModelSelection(
