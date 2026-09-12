@@ -1,6 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
@@ -305,6 +305,18 @@ test('persisted approved or running DraftRuns fail closed after restart and neve
     vscode.workspace.workspaceFolders = [];
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('initialize does not rewrite DraftRun storage when no interrupted state needs repair', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-draft-run-no-rewrite-'));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const storagePath = path.join(root, 'draft-runs.json');
+  const value = JSON.stringify({ version: 1, draftRuns: [] });
+  await writeFile(storagePath, value, 'utf8');
+  const store = new DraftRunStore(vscode.Uri.file(root) as never, new FakeDraftRunExecutor());
+  await store.initialize();
+  assert.equal(await readFile(storagePath, 'utf8'), value);
+  store.dispose();
 });
 
 class FakeDraftRunExecutor implements DraftRunExecutorAdapter {

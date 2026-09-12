@@ -50,6 +50,12 @@ export interface SkillDiscoveryOptions {
 
 export class SkillDiscovery {
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
+  private readonly markdownCache = new Map<string, {
+    mtime: number;
+    size: number;
+    maxBytes: number;
+    result: { ok: true; content: string } | { ok: false; error: string };
+  }>();
 
   public constructor(private readonly options: SkillDiscoveryOptions = {}) {}
 
@@ -207,6 +213,7 @@ export class SkillDiscovery {
         hasAssets,
         hasScripts,
         unavailableReason: readResult.error
+        ,contentFingerprint: readResult.fingerprint
       };
     }
 
@@ -223,6 +230,7 @@ export class SkillDiscovery {
       enabled: true,
       allowImplicit: parsed.allowImplicit ?? false,
       userInvocable: parsed.userInvocable ?? true,
+      contentFingerprint: readResult.fingerprint,
       hasReferences,
       hasAssets,
       hasScripts,
@@ -266,30 +274,42 @@ export class SkillDiscovery {
     }
   }
 
-  private async readSkillMarkdown(skillUri: vscode.Uri): Promise<{ ok: true; content: string } | { ok: false; error: string }> {
+  private async readSkillMarkdown(skillUri: vscode.Uri): Promise<
+    ({ ok: true; content: string } | { ok: false; error: string }) & { fingerprint: string }
+  > {
     if (shouldSkipTextUri(skillUri)) {
-      return { ok: false, error: `${getUriBasename(skillUri)} is not a readable text file.` };
+      return { ok: false, error: `${getUriBasename(skillUri)} is not a readable text file.`, fingerprint: 'skipped' };
     }
 
     const maxBytes = getConfiguredMaxFileBytes();
     try {
       const stat = await vscode.workspace.fs.stat(skillUri);
+      const key = skillUri.toString();
+      const cached = this.markdownCache.get(key);
+      if (cached && cached.mtime === stat.mtime && cached.size === stat.size && cached.maxBytes === maxBytes) {
+        return { ...cached.result, fingerprint: `${stat.mtime}:${stat.size}` };
+      }
       if (stat.size > maxBytes) {
-        return { ok: false, error: `${getUriBasename(skillUri)} is larger than ${formatBytes(maxBytes)}.` };
+        const result = { ok: false as const, error: `${getUriBasename(skillUri)} is larger than ${formatBytes(maxBytes)}.` };
+        this.markdownCache.set(key, { mtime: stat.mtime, size: stat.size, maxBytes, result });
+        return { ...result, fingerprint: `${stat.mtime}:${stat.size}` };
       }
       const bytes = await vscode.workspace.fs.readFile(skillUri);
       if (bytes.byteLength > maxBytes) {
-        return { ok: false, error: `${getUriBasename(skillUri)} is larger than ${formatBytes(maxBytes)}.` };
+        return { ok: false, error: `${getUriBasename(skillUri)} is larger than ${formatBytes(maxBytes)}.`, fingerprint: `${stat.mtime}:${stat.size}` };
       }
       const content = this.decoder.decode(bytes);
       if (!isReadableTextContent(content)) {
-        return { ok: false, error: `${getUriBasename(skillUri)} appears to be binary or unreadable text.` };
+        return { ok: false, error: `${getUriBasename(skillUri)} appears to be binary or unreadable text.`, fingerprint: `${stat.mtime}:${stat.size}` };
       }
-      return { ok: true, content };
+      const result = { ok: true as const, content };
+      this.markdownCache.set(key, { mtime: stat.mtime, size: stat.size, maxBytes, result });
+      return { ...result, fingerprint: `${stat.mtime}:${stat.size}` };
     } catch (error) {
       return {
         ok: false,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
+        fingerprint: 'error'
       };
     }
   }

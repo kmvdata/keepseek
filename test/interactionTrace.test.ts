@@ -52,7 +52,7 @@ test('local and workspace-fs traces use local dates for events, filenames, appen
       },
       async readFile(uri) { return uri.scheme === 'file' ? await originalFs.readFile(uri) : remoteFiles.get(uri.toString())!; },
       async stat(uri) { return uri.scheme === 'file' ? await originalFs.stat(uri)
-        : { type: vscode.FileType.File, size: remoteFiles.get(uri.toString())!.byteLength }; }
+        : { type: vscode.FileType.File, size: remoteFiles.get(uri.toString())!.byteLength, mtime: 0, ctime: 0 }; }
     };
     for (const storage of [vscode.Uri.file(directory), vscode.Uri.parse('memfs:/trace-storage')]) {
       const sinkTimestamps: string[] = [];

@@ -67,8 +67,8 @@ export class ModelSourceStore {
     const sources: ModelSource[] = [];
     const seenIds = new Set<string>();
 
-    for (const currentProvider of providers) {
-      const providerSources = await this.readProviderSources(currentProvider);
+    const providerResults = await Promise.all(providers.map((currentProvider) => this.readProviderSources(currentProvider)));
+    for (const providerSources of providerResults) {
       for (const source of providerSources) {
         // sourceId is the stable half of a model selection, so it remains unique
         // across provider directories even though the physical storage is scoped.
@@ -208,22 +208,18 @@ export class ModelSourceStore {
       return [];
     }
 
-    const sources: ModelSource[] = [];
     const sourceFileNames = entries
       .filter(([name, type]) => type === vscode.FileType.File && name.endsWith(ACCOUNT_FILE_EXTENSION))
       .map(([name]) => name)
       .sort((left, right) => left.localeCompare(right));
-    for (const fileName of sourceFileNames) {
+    const sources = await Promise.all(sourceFileNames.map(async (fileName) => {
       const sourceId = fileName.slice(0, -ACCOUNT_FILE_EXTENSION.length);
       if (!isValidModelSourceId(sourceId)) {
-        continue;
+        return undefined;
       }
-      const source = await this.readSourceFile(provider, sourceId);
-      if (source) {
-        sources.push(source);
-      }
-    }
-    return sources;
+      return await this.readSourceFile(provider, sourceId);
+    }));
+    return sources.filter((source): source is ModelSource => Boolean(source));
   }
 
   private async readSourceFile(

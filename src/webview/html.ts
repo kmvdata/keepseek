@@ -32,6 +32,13 @@ ${getStyles()}
   </style>
 </head>
 <body ondragover="event.preventDefault();event.dataTransfer.dropEffect='copy';return false;" ondrop="event.preventDefault();return false;">
+  <script nonce="${nonce}">
+window.keepseekVscode = acquireVsCodeApi();
+window.keepseekBootstrapQueue = [];
+window.keepseekBootstrapListener = function(event) { window.keepseekBootstrapQueue.push(event.data); };
+window.addEventListener('message', window.keepseekBootstrapListener);
+window.keepseekVscode.postMessage({ type: 'ready' });
+  </script>
 ${getTemplate(input.extensionInfo)}
   <script nonce="${nonce}">
 window.keepseekLogoUri = ${JSON.stringify(String(keepseekLogoUri))};

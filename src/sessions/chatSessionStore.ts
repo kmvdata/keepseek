@@ -63,6 +63,8 @@ export interface StoredWorkspaceSessionState {
   activeSessionId: string;
   approvalMode?: ApprovalMode;
   sessions: ChatSession[];
+  /** Small index records. Sharded adapters return these without loading message bodies. */
+  sessionSummaries?: ChatSessionSummary[];
 }
 
 export interface ChatSessionStorageAdapter {
@@ -70,12 +72,16 @@ export interface ChatSessionStorageAdapter {
   saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
   listAllWorkspaceSummaries(): Promise<WorkspaceSummary[]>;
   loadWorkspaceSessions(workspaceKey: string): Promise<ChatSession[]>;
+  loadSession?(workspaceKey: string, sessionId: string): Promise<ChatSession | undefined>;
+  listWorkspaceSessionSummaries?(workspaceKey: string): Promise<ChatSessionSummary[]>;
   deleteWorkspaceSessions(workspaceKey: string, sessionIds: string[]): Promise<void>;
   deleteEntireWorkspace(workspaceKey: string): Promise<void>;
   cleanupExpiredSessions(options: {
     currentWorkspaceKey: string;
     currentActiveSessionId: string;
+    protectedSessionIds?: readonly string[];
     now?: number;
+    force?: boolean;
   }): Promise<boolean>;
 }
 
@@ -92,6 +98,7 @@ export interface DeleteSessionsResult {
 
 export class ChatSessionStore {
   private sessions: ChatSession[] = [];
+  private sessionSummaries = new Map<string, ChatSessionSummary>();
   private activeSessionIdValue = '';
   private approvalModeValue: ApprovalMode = 'ask';
 
@@ -162,7 +169,7 @@ export class ChatSessionStore {
   }
 
   public async selectSession(sessionId: string): Promise<ChatSession | undefined> {
-    const session = this.sessions.find((item) => item.id === sessionId && this.isInCurrentWorkspace(item));
+    const session = await this.loadSessionById(sessionId);
     if (!session) {
       return undefined;
     }
@@ -181,8 +188,10 @@ export class ChatSessionStore {
       return undefined;
     }
 
-    const sessions = await this.sessionStorage.loadWorkspaceSessions(normalizedWorkspaceKey);
-    const source = sessions.find((session) => session.id === normalizedSessionId);
+    const source = this.sessionStorage.loadSession
+      ? await this.sessionStorage.loadSession(normalizedWorkspaceKey, normalizedSessionId)
+      : (await this.sessionStorage.loadWorkspaceSessions(normalizedWorkspaceKey))
+        .find((session) => session.id === normalizedSessionId);
     if (!source) {
       return undefined;
     }
@@ -211,7 +220,7 @@ export class ChatSessionStore {
   }
 
   public async toggleSessionFavorite(sessionId: string): Promise<ChatSession | undefined> {
-    const session = this.sessions.find((item) => item.id === sessionId && this.isInCurrentWorkspace(item));
+    const session = await this.loadSessionById(sessionId);
     if (!session) {
       return undefined;
     }
@@ -222,7 +231,7 @@ export class ChatSessionStore {
   }
 
   public async renameSession(sessionId: string, title: string): Promise<ChatSession | undefined> {
-    const session = this.sessions.find((item) => item.id === sessionId && this.isInCurrentWorkspace(item));
+    const session = await this.loadSessionById(sessionId);
     if (!session) {
       return undefined;
     }
@@ -246,18 +255,18 @@ export class ChatSessionStore {
     }
 
     const previousActiveSessionId = this.activeSessionIdValue;
-    let deletedActiveSession = false;
-    let deletedCount = 0;
+    const deletedSummaryIds = new Set(Array.from(ids).filter((id) => this.sessionSummaries.has(id)));
+    const deletedActiveSession = deletedSummaryIds.has(previousActiveSessionId);
+    const deletedCount = deletedSummaryIds.size;
     this.sessions = this.sessions.filter((session) => {
       if (!this.isInCurrentWorkspace(session) || !ids.has(session.id)) {
         return true;
       }
-      if (session.id === previousActiveSessionId) {
-        deletedActiveSession = true;
-      }
-      deletedCount += 1;
       return false;
     });
+    for (const id of ids) {
+      this.sessionSummaries.delete(id);
+    }
 
     if (deletedActiveSession) {
       const session = createEmptySession(this.language, this.workspaceScope, this.approvalModeValue);
@@ -267,6 +276,7 @@ export class ChatSessionStore {
       this.ensureActiveSession();
     }
     this.compact();
+    await this.sessionStorage.deleteWorkspaceSessions(this.workspaceScope.key, Array.from(ids));
     await this.persist();
     return {
       deletedCount,
@@ -274,11 +284,17 @@ export class ChatSessionStore {
     };
   }
 
-  public async cleanupExpiredSessions(now = Date.now()): Promise<boolean> {
+  public async cleanupExpiredSessions(
+    now = Date.now(),
+    protectedSessionIds: readonly string[] = [],
+    force = false
+  ): Promise<boolean> {
     const changed = await this.sessionStorage.cleanupExpiredSessions({
       currentWorkspaceKey: this.workspaceScope.key,
       currentActiveSessionId: this.activeSessionIdValue,
-      now
+      protectedSessionIds,
+      now,
+      force
     });
     if (changed) {
       await this.load();
@@ -292,7 +308,8 @@ export class ChatSessionStore {
     const snapshot = structuredClone({
       activeSessionId: this.activeSessionIdValue,
       approvalMode: this.approvalModeValue,
-      sessions: this.sessions
+      sessions: this.sessions,
+      sessionSummaries: this.getSessionSummaries()
     });
     const write = this.persistenceQueue.catch(() => undefined).then(() => this.sessionStorage.saveWorkspace(this.workspaceScope, snapshot));
     this.persistenceQueue = write;
@@ -318,7 +335,12 @@ export class ChatSessionStore {
   }
 
   public getSessionSummaries(): ChatSessionSummary[] {
-    return this.getCurrentWorkspaceSessions().map((session) => toSessionSummary(session, this.language));
+    for (const session of this.getCurrentWorkspaceSessions()) {
+      this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
+    }
+    return Array.from(this.sessionSummaries.values())
+      .filter((summary) => summary.workspaceKey === this.workspaceScope.key)
+      .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
   }
 
   public async getAllWorkspaceSummaries(): Promise<WorkspaceSummary[]> {
@@ -331,6 +353,9 @@ export class ChatSessionStore {
       return [];
     }
 
+    if (this.sessionStorage.listWorkspaceSessionSummaries) {
+      return await this.sessionStorage.listWorkspaceSessionSummaries(normalizedWorkspaceKey);
+    }
     const sessions = await this.sessionStorage.loadWorkspaceSessions(normalizedWorkspaceKey);
     return sessions.map((session) => toSessionSummary(session, this.language));
   }
@@ -346,8 +371,8 @@ export class ChatSessionStore {
       return 0;
     }
 
-    const sessions = await this.sessionStorage.loadWorkspaceSessions(normalizedWorkspaceKey);
-    const deletedCount = sessions.filter((session) => ids.has(session.id)).length;
+    const summaries = await this.getOtherWorkspaceSessionSummaries(normalizedWorkspaceKey);
+    const deletedCount = summaries.filter((session) => ids.has(session.id)).length;
     if (!deletedCount) {
       return 0;
     }
@@ -375,6 +400,9 @@ export class ChatSessionStore {
     const sessions = normalizeStoredSessions({ sessions: stored.sessions }, this.workspaceScope);
 
     this.sessions = sessions.filter((session) => this.isInCurrentWorkspace(session));
+    this.sessionSummaries = new Map((stored.sessionSummaries ?? this.sessions.map((session) => toSessionSummary(session, this.language)))
+      .filter((summary) => summary.workspaceKey === this.workspaceScope.key)
+      .map((summary) => [summary.id, summary]));
     this.activeSessionIdValue = typeof stored.activeSessionId === 'string' ? stored.activeSessionId : '';
     const storedActiveSession = this.sessions.find((session) => session.id === this.activeSessionIdValue)
       ?? this.getCurrentWorkspaceSessions()[0];
@@ -441,7 +469,26 @@ export class ChatSessionStore {
     }
 
     this.sessions = sortSessionsByUpdatedAt(compacted);
+    for (const session of this.sessions) {
+      this.sessionSummaries.set(session.id, toSessionSummary(session, this.language));
+    }
     this.setActiveSessionId(activeSession.id);
+  }
+
+  private async loadSessionById(sessionId: string): Promise<ChatSession | undefined> {
+    const loaded = this.sessions.find((item) => item.id === sessionId && this.isInCurrentWorkspace(item));
+    if (loaded) {
+      return loaded;
+    }
+    if (!this.sessionSummaries.has(sessionId) || !this.sessionStorage.loadSession) {
+      return undefined;
+    }
+    const session = await this.sessionStorage.loadSession(this.workspaceScope.key, sessionId);
+    if (!session || !this.isInCurrentWorkspace(session)) {
+      return undefined;
+    }
+    this.sessions.push(session);
+    return session;
   }
 
   private getCurrentWorkspaceSessions(): ChatSession[] {

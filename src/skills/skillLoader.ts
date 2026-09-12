@@ -17,6 +17,7 @@ interface LoadedSkillResource {
 
 export class SkillLoader {
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
+  private readonly textCache = new Map<string, { mtime: number; size: number; maxBytes: number; content: string }>();
 
   public async loadSkill(manifest: SkillManifest): Promise<ActivatedSkill> {
     if (!manifest.enabled) {
@@ -85,6 +86,11 @@ export class SkillLoader {
     if (stat.size > maxBytes) {
       throw new Error(`${getUriBasename(uri)} is larger than ${formatBytes(maxBytes)}.`);
     }
+    const key = uri.toString();
+    const cached = this.textCache.get(key);
+    if (cached && cached.mtime === stat.mtime && cached.size === stat.size && cached.maxBytes === maxBytes) {
+      return cached.content;
+    }
 
     const bytes = await vscode.workspace.fs.readFile(uri);
     if (bytes.byteLength > maxBytes) {
@@ -95,6 +101,7 @@ export class SkillLoader {
     if (!isReadableTextContent(content)) {
       throw new Error(`${getUriBasename(uri)} appears to be binary or unreadable text.`);
     }
+    this.textCache.set(key, { mtime: stat.mtime, size: stat.size, maxBytes, content });
     return content;
   }
 }

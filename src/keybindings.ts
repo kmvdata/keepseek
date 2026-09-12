@@ -1,8 +1,13 @@
-import * as fs from 'node:fs';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 
-export function ensureKeybindings(context: vscode.ExtensionContext): void {
+const KEYBINDING_MIGRATION_KEY = 'keepseek.keybindingsCheckedV2';
+
+export async function ensureKeybindings(context: vscode.ExtensionContext): Promise<void> {
+  if (context.globalState.get<boolean>(KEYBINDING_MIGRATION_KEY, false)) {
+    return;
+  }
   try {
     const storageDir = path.dirname(context.globalStorageUri.fsPath);
     const userDir = path.dirname(storageDir);
@@ -34,14 +39,12 @@ export function ensureKeybindings(context: vscode.ExtensionContext): void {
     const keepseekCommands = new Set(bindings.map((binding) => binding.command));
 
     let keybindings: Array<Record<string, unknown>> = [];
-    if (fs.existsSync(keybindingsPath)) {
-      try {
-        const raw = fs.readFileSync(keybindingsPath, 'utf-8');
+    try {
+        const raw = await fs.readFile(keybindingsPath, 'utf-8');
         const cleaned = raw.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
         keybindings = JSON.parse(cleaned) as Array<Record<string, unknown>>;
       } catch {
         keybindings = [];
-      }
     }
 
     if (process.platform !== 'darwin') {
@@ -57,6 +60,7 @@ export function ensureKeybindings(context: vscode.ExtensionContext): void {
     ));
 
     if (!missingBindings.length) {
+      await context.globalState.update(KEYBINDING_MIGRATION_KEY, true);
       return;
     }
 
@@ -68,8 +72,9 @@ export function ensureKeybindings(context: vscode.ExtensionContext): void {
       });
     }
 
-    fs.mkdirSync(path.dirname(keybindingsPath), { recursive: true });
-    fs.writeFileSync(keybindingsPath, JSON.stringify(keybindings, null, 2) + '\n', 'utf-8');
+    await fs.mkdir(path.dirname(keybindingsPath), { recursive: true });
+    await fs.writeFile(keybindingsPath, JSON.stringify(keybindings, null, 2) + '\n', 'utf-8');
+    await context.globalState.update(KEYBINDING_MIGRATION_KEY, true);
   } catch {
     // The package.json keybinding contribution is the primary mechanism.
   }

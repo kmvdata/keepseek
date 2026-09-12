@@ -5,7 +5,7 @@ import { WEBVIEW_TRANSLATIONS } from '../shared/i18n';
 
 export function getScript(): string {
   return `
-    const vscode = acquireVsCodeApi();
+    const vscode = window.keepseekVscode;
     const keepseekLogoUri = window.keepseekLogoUri || '';
     const keepseekPluginIconUri = window.keepseekSkillIconUri || '';
     const modelProtocolLogoUris = window.keepseekModelProtocolLogoUris || {};
@@ -113,7 +113,14 @@ export function getScript(): string {
       },
       language: 'zh-CN',
       isMac: false
+      ,startup: {
+        phase: 'loading-sessions',
+        interactiveReady: false,
+        sideEffectsReady: false
+      }
+      ,hasOlderMessages: false
     };
+    var lastStateRevision = 0;
 
     function getLanguage() {
       return state.language === 'en' ? 'en' : 'zh-CN';
@@ -1163,9 +1170,12 @@ export function getScript(): string {
     ${getInputScript()}
     ${getNewAccountDialogScript()}
 
-    window.addEventListener('message', function(event) {
+    function handleKeepseekHostMessage(event) {
       var message = event.data;
-      if (message.type === 'state') {
+      if (message.type === 'state' || message.type === 'statePatch') {
+        var incomingRevision = Number(message.revision || 0);
+        if (incomingRevision && incomingRevision <= lastStateRevision) return;
+        if (incomingRevision) lastStateRevision = incomingRevision;
         var previousActiveSessionId = state.activeSessionId || '';
         Object.assign(state, message.state);
         pendingChangeActions.clear();
@@ -1298,7 +1308,14 @@ export function getScript(): string {
       } else if (message.type === 'referenceResources') {
         handleEditReferenceResourcesMessage(message);
       }
+    }
+
+    window.removeEventListener('message', window.keepseekBootstrapListener);
+    window.addEventListener('message', handleKeepseekHostMessage);
+    (window.keepseekBootstrapQueue || []).forEach(function(message) {
+      handleKeepseekHostMessage({ data: message });
     });
+    window.keepseekBootstrapQueue = [];
 
     function render() {
       var focusedAction = document.activeElement instanceof HTMLElement
@@ -1334,11 +1351,11 @@ export function getScript(): string {
       if (window.keepseekInputControls) {
         window.keepseekInputControls.render();
       }
-      sendButton.disabled = !state.isBusy && (
+      sendButton.disabled = !state.startup?.interactiveReady || (!state.isBusy && (
         window.keepseekInputControls && window.keepseekInputControls.isPromptSubmittableEmpty
           ? window.keepseekInputControls.isPromptSubmittableEmpty()
           : promptInput.classList.contains('is-empty')
-      );
+      ));
     }
 
     function upsertDraftRun(draftRun) {
@@ -2151,6 +2168,12 @@ export function getScript(): string {
     }
 
     function renderStatus() {
+      if (!state.startup?.interactiveReady) {
+        stopAgentStatusRotation();
+        agentStatusRotationKey = '';
+        setTransientStatus(getLanguage() === 'en' ? 'Restoring conversations and safety state…' : '正在恢复会话与安全状态…');
+        return;
+      }
       if (!state.isBusy) {
         stopAgentStatusRotation();
         agentStatusRotationKey = '';
@@ -3385,6 +3408,7 @@ export function getScript(): string {
       }
       var allowWhileBusy = action === 'cancelDraftRun' || action === 'cancelDraftRunBatch' || action === 'openDraftRunTerminal';
       button.disabled = Boolean(forceDisabled)
+        || (!state.startup?.sideEffectsReady && action !== 'openDraftRunTerminal')
         || (Boolean(state.isBusy) && !allowWhileBusy)
         || actionPending
         || (action === 'approveDraftRun' && pendingDraftRunApprovals.has(String(draftRun.id || '')));
@@ -3649,7 +3673,8 @@ export function getScript(): string {
       button.className = secondary ? 'secondary' : '';
       button.dataset.editId = id;
       button.dataset.editAction = action;
-      button.disabled = (state.isBusy && action !== 'openDraftDiff') || pendingChangeActions.has(action + ':' + id);
+      button.disabled = (!state.startup?.sideEffectsReady && action !== 'openDraftDiff')
+        || (state.isBusy && action !== 'openDraftDiff') || pendingChangeActions.has(action + ':' + id);
       return button;
     }
 
@@ -3672,7 +3697,7 @@ export function getScript(): string {
       button.className = secondary ? 'secondary' : '';
       button.dataset.changeSetId = id;
       button.dataset.changeSetAction = action;
-      button.disabled = state.isBusy || pendingChangeActions.has(action + ':' + id);
+      button.disabled = !state.startup?.sideEffectsReady || state.isBusy || pendingChangeActions.has(action + ':' + id);
       return button;
     }
 
@@ -3701,6 +3726,18 @@ export function getScript(): string {
     function renderTranscript(changeSetProjection, draftRunProjection) {
       var shouldStick = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 24;
       transcript.innerHTML = '';
+
+      if (state.hasOlderMessages) {
+        var loadOlder = document.createElement('button');
+        loadOlder.type = 'button';
+        loadOlder.className = 'secondary';
+        loadOlder.textContent = getLanguage() === 'en' ? 'Load older messages' : '加载更早消息';
+        loadOlder.addEventListener('click', function() {
+          loadOlder.disabled = true;
+          vscode.postMessage({ type: 'loadOlderMessages' });
+        });
+        transcript.append(loadOlder);
+      }
 
       if (!state.messages.length) {
         var empty = document.createElement('div');
@@ -6839,5 +6876,9 @@ export function getScript(): string {
       return (bytes / 1024 / 1024).toFixed(1) + ' MB';
     }
 
-    vscode.postMessage({ type: 'ready' });`;
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() {
+        vscode.postMessage({ type: 'startupRendered', revision: lastStateRevision });
+      });
+    });`;
 }

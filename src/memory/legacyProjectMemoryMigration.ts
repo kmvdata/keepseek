@@ -43,6 +43,7 @@ export interface LegacyMemoryMigrationDraft {
 export class LegacyProjectMemoryMigration {
   private sources: LegacyMemorySource[] = [];
   private error: string | undefined;
+  private readonly fileCache = new Map<string, { mtime: number; size: number; maxBytes: number; entries: LegacyProjectMemoryEntry[] }>();
 
   public constructor(
     private readonly globalStorageUri: vscode.Uri,
@@ -56,13 +57,13 @@ export class LegacyProjectMemoryMigration {
     try {
       for (const folder of vscode.workspace.workspaceFolders ?? []) {
         const uri = vscode.Uri.joinPath(folder.uri, LEGACY_MEMORY_DIRECTORY, LEGACY_MEMORY_FILE);
-        const entries = await readLegacyEntries(uri, maxBytes);
+        const entries = await this.readLegacyEntries(uri, maxBytes);
         if (entries.length) {
           sources.push({ uri, workspaceFolder: folder, entries });
         }
       }
       const globalUri = this.getGlobalMemoryUri();
-      const globalEntries = await readLegacyEntries(globalUri, maxBytes);
+      const globalEntries = await this.readLegacyEntries(globalUri, maxBytes);
       if (globalEntries.length) {
         sources.push({ uri: globalUri, entries: globalEntries });
       }
@@ -178,6 +179,28 @@ export class LegacyProjectMemoryMigration {
     await this.updateStoredWorkspaceState({ status: 'draft-created', lastDraftChangeSetId: changeSetId });
   }
 
+  private async readLegacyEntries(uri: vscode.Uri, maxBytes: number): Promise<LegacyProjectMemoryEntry[]> {
+    if (shouldSkipTextUri(uri)) return [];
+    try {
+      const stat = await vscode.workspace.fs.stat(uri);
+      if (stat.type !== vscode.FileType.File || stat.size > maxBytes) return [];
+      const key = uri.toString();
+      const cached = this.fileCache.get(key);
+      if (cached && cached.mtime === stat.mtime && cached.size === stat.size && cached.maxBytes === maxBytes) {
+        return cached.entries.map((entry) => ({ ...entry }));
+      }
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      if (bytes.byteLength > maxBytes) return [];
+      const content = new TextDecoder('utf-8', { fatal: false }).decode(bytes).replace(/\r\n?/gu, '\n');
+      if (!content || !isReadableTextContent(content)) return [];
+      const entries = normalizeLegacyProjectMemory(JSON.parse(content)).entries;
+      this.fileCache.set(key, { mtime: stat.mtime, size: stat.size, maxBytes, entries });
+      return entries.map((entry) => ({ ...entry }));
+    } catch {
+      return [];
+    }
+  }
+
   public async complete(): Promise<void> {
     await this.updateStoredWorkspaceState({
       ...this.getStoredWorkspaceState(),
@@ -261,18 +284,6 @@ export class LegacyProjectMemoryMigration {
         [this.getWorkspaceKey()]: next
       }
     } satisfies StoredMigrationState);
-  }
-}
-
-async function readLegacyEntries(uri: vscode.Uri, maxBytes: number): Promise<LegacyProjectMemoryEntry[]> {
-  const content = await readOptionalTextFile(uri, maxBytes);
-  if (!content) {
-    return [];
-  }
-  try {
-    return normalizeLegacyProjectMemory(JSON.parse(content)).entries;
-  } catch {
-    return [];
   }
 }
 

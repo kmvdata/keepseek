@@ -1,5 +1,5 @@
 import { writeJsonAtomic } from '../shared/atomicStorage';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ChatSessionStore } from '../sessions/chatSessionStore';
 import type {
@@ -23,6 +23,20 @@ type Translator = (key: string, values?: Record<string, string | number>) => str
 type ChangeSetTraceHandler = (changeSet: ChangeSet, event: Record<string, unknown>) => void;
 const MAX_COMPACT_HISTORY_CHANGE_SETS = 500;
 
+interface ChangeSetIndexEntry {
+  id: string;
+  sessionId: string;
+  kind: 'runtime' | 'history';
+  storageFile: string;
+  checkpointIds: string[];
+  updatedAt: string;
+}
+
+interface ChangeSetStorageIndex {
+  version: 3;
+  entries: ChangeSetIndexEntry[];
+}
+
 type WebviewChangeSetFile = Omit<
   ChangeSetFile,
   'newText' | 'expectedOriginalTextHash' | 'expectedOriginalSize'
@@ -43,6 +57,13 @@ export class ChangeSetStore {
   private readonly historicalChangeSets = new Map<string, WebviewChangeSet>();
   private readonly checkpoints = new Map<string, ChangeCheckpoint>();
   private readonly storageUri: vscode.Uri;
+  private readonly shardedRootUri: vscode.Uri;
+  private readonly indexUri: vscode.Uri;
+  private readonly runtimeUri: vscode.Uri;
+  private readonly historyUri: vscode.Uri;
+  private readonly checkpointsUri: vscode.Uri;
+  private storageIndex: ChangeSetStorageIndex = { version: 3, entries: [] };
+  private readonly loadedSessionIds = new Set<string>();
   private persistenceError?: unknown;
   private persistenceQueue: Promise<void> = Promise.resolve();
   private initialized = false;
@@ -56,6 +77,11 @@ export class ChangeSetStore {
     private readonly onTraceEvent?: ChangeSetTraceHandler
   ) {
     this.storageUri = vscode.Uri.joinPath(globalStorageUri, 'change-sets.json');
+    this.shardedRootUri = vscode.Uri.joinPath(globalStorageUri, 'change-sets', 'v3');
+    this.indexUri = vscode.Uri.joinPath(this.shardedRootUri, 'index.json');
+    this.runtimeUri = vscode.Uri.joinPath(this.shardedRootUri, 'runtime');
+    this.historyUri = vscode.Uri.joinPath(this.shardedRootUri, 'history');
+    this.checkpointsUri = vscode.Uri.joinPath(this.shardedRootUri, 'checkpoints');
   }
 
   public async initialize(): Promise<void> {
@@ -63,6 +89,12 @@ export class ChangeSetStore {
       return;
     }
     this.initialized = true;
+    const shardedIndex = await this.readShardedIndex(true);
+    if (shardedIndex) {
+      this.storageIndex = await this.reconcileShardedIndex(shardedIndex);
+      await this.loadSession(this.sessionStore.activeSessionId || this.sessionStore.getActiveSession().id);
+      return;
+    }
     try {
       const content = new TextDecoder('utf-8', { fatal: false }).decode(
         await vscode.workspace.fs.readFile(this.storageUri)
@@ -73,6 +105,11 @@ export class ChangeSetStore {
         history?: WebviewChangeSet[];
         checkpoints?: ChangeCheckpoint[];
       };
+      console.debug('KeepSeek startup: legacy-change-set-storage-read', {
+        bytesRead: Buffer.byteLength(content, 'utf8'),
+        entries: (parsed.changeSets?.length ?? 0) + (parsed.history?.length ?? 0),
+        checkpoints: parsed.checkpoints?.length ?? 0
+      });
       if (parsed.version !== 1 && parsed.version !== 2) {
         return;
       }
@@ -108,7 +145,18 @@ export class ChangeSetStore {
         }
       }
       if (consolidatedStoredChangeSets) {
-        this.schedulePersist();
+        // The migration below persists the consolidated shape.
+      }
+      for (const changeSet of [...this.changeSets.values(), ...this.historicalChangeSets.values()]) {
+        if (changeSet.sessionId) this.loadedSessionIds.add(changeSet.sessionId);
+      }
+      await this.persistShardedNow();
+      // The V3 index is the atomic commit marker. Delete the monolith only
+      // after that commit; any migration failure above leaves it untouched.
+      try {
+        await vscode.workspace.fs.delete(this.storageUri, { recursive: false, useTrash: false });
+      } catch {
+        // Keeping a redundant legacy copy is safe; V3 remains authoritative.
       }
     } catch {
       // Missing or malformed checkpoint storage must not block the chat view.
@@ -145,6 +193,7 @@ export class ChangeSetStore {
     const files = changeSet.files.filter((file) => !known.has(file.id));
     if (!files.length) return undefined;
     const registered = cloneChangeSet({ ...changeSet, files, fileCount: files.length });
+    if (registered.sessionId) this.loadedSessionIds.add(registered.sessionId);
     this.changeSets.set(registered.id, registered);
     this.historicalChangeSets.delete(registered.id);
     this.recordTrace(registered, {
@@ -255,6 +304,42 @@ export class ChangeSetStore {
     return Array.from(this.changeSets.values()).some((changeSet) =>
       changeSet.sessionId === sessionId && changeSet.files.some(isApplicable)
     );
+  }
+
+  public async loadSession(sessionId: string): Promise<void> {
+    if (!sessionId || this.loadedSessionIds.has(sessionId)) return;
+    const entries = this.storageIndex.entries.filter((entry) => entry.sessionId === sessionId);
+    for (const entry of entries) {
+      const value = await readJsonFile(entry.kind === 'runtime'
+        ? vscode.Uri.joinPath(this.runtimeUri, fileNameForId(entry.id))
+        : vscode.Uri.joinPath(this.historyUri, fileNameForId(entry.id)));
+      if (!isRecordWithChangeSet(value)) continue;
+      if (entry.kind === 'runtime' && isStoredChangeSet(value.changeSet)) {
+        const changeSet = normalizeStoredChangeSet(value.changeSet);
+        this.changeSets.set(changeSet.id, changeSet);
+        const checkpointIds = new Set([
+          ...entry.checkpointIds,
+          ...changeSet.files.map((file) => file.checkpointId).filter((id): id is string => Boolean(id))
+        ]);
+        for (const checkpointId of checkpointIds) {
+          const checkpointValue = await readJsonFile(vscode.Uri.joinPath(this.checkpointsUri, fileNameForId(checkpointId)));
+          if (isRecordWithCheckpoint(checkpointValue) && isStoredCheckpoint(checkpointValue.checkpoint)) {
+            this.checkpoints.set(checkpointId, { ...checkpointValue.checkpoint });
+          }
+        }
+      } else if (entry.kind === 'history' && isStoredHistoricalChangeSet(value.changeSet)) {
+        this.historicalChangeSets.set(entry.id, cloneWebviewChangeSet(value.changeSet));
+      }
+    }
+    this.loadedSessionIds.add(sessionId);
+  }
+
+  public getProtectedSessionIds(): string[] {
+    return Array.from(new Set([
+      ...this.storageIndex.entries.filter((entry) => entry.kind === 'runtime').map((entry) => entry.sessionId),
+      ...Array.from(this.changeSets.values()).filter(requiresRuntimeState).map((changeSet) => changeSet.sessionId)
+    ]
+      .filter(Boolean)));
   }
 
   public getLatestChangeSetId(sessionId: string): string | undefined {
@@ -446,6 +531,7 @@ export class ChangeSetStore {
   }
 
   public clearSession(sessionId: string): void {
+    if (sessionId) this.loadedSessionIds.add(sessionId);
     for (const [changeSetId, changeSet] of this.changeSets) {
       if (changeSet.sessionId !== sessionId) {
         continue;
@@ -497,6 +583,7 @@ export class ChangeSetStore {
   }
 
   public clear(): void {
+    for (const entry of this.storageIndex.entries) this.loadedSessionIds.add(entry.sessionId);
     this.changeSets.clear();
     this.historicalChangeSets.clear();
     this.checkpoints.clear();
@@ -703,21 +790,146 @@ export class ChangeSetStore {
     const checkpoints = Array.from(this.checkpoints.values())
       .filter((checkpoint) => checkpointIds.has(checkpoint.id))
       .map((checkpoint) => ({ ...checkpoint }));
-    const bytes = new TextEncoder().encode(JSON.stringify({
-      version: 2,
-      changeSets,
-      history,
-      checkpoints
-    }));
+    const loadedSessionIds = new Set(this.loadedSessionIds);
     this.persistenceQueue = this.persistenceQueue
       .then(async () => {
-        await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(this.storageUri, '..'));
-        await writeJsonAtomic(this.storageUri, JSON.parse(new TextDecoder().decode(bytes)));
+        await this.writeShardedSnapshot({ changeSets, history, checkpoints, loadedSessionIds });
         this.persistenceError = undefined;
       })
       .catch((error: unknown) => {
         this.persistenceError = error; // Critical callers observe this through flush().
       });
+  }
+
+  private async persistShardedNow(): Promise<void> {
+    const changeSets = Array.from(this.changeSets.values()).filter(requiresRuntimeState).map(cloneChangeSet);
+    const history = Array.from(this.historicalChangeSets.values()).map(cloneWebviewChangeSet);
+    const checkpointIds = new Set(changeSets.flatMap((changeSet) => changeSet.files
+      .map((file) => file.checkpointId).filter((id): id is string => Boolean(id))));
+    const checkpoints = Array.from(this.checkpoints.values())
+      .filter((checkpoint) => checkpointIds.has(checkpoint.id)).map((checkpoint) => ({ ...checkpoint }));
+    await this.writeShardedSnapshot({
+      changeSets,
+      history,
+      checkpoints,
+      loadedSessionIds: new Set(this.loadedSessionIds)
+    });
+  }
+
+  private async writeShardedSnapshot(input: {
+    changeSets: ChangeSet[];
+    history: WebviewChangeSet[];
+    checkpoints: ChangeCheckpoint[];
+    loadedSessionIds: Set<string>;
+  }): Promise<void> {
+    const checkpointById = new Map(input.checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]));
+    await Promise.all(input.checkpoints.map((checkpoint) => writeJsonAtomic(
+      vscode.Uri.joinPath(this.checkpointsUri, fileNameForId(checkpoint.id)),
+      { version: 3, checkpoint }
+    )));
+    await Promise.all(input.changeSets.map((changeSet) => writeJsonAtomic(
+      vscode.Uri.joinPath(this.runtimeUri, fileNameForId(changeSet.id)),
+      { version: 3, changeSet }
+    )));
+    await Promise.all(input.history.map((changeSet) => writeJsonAtomic(
+      vscode.Uri.joinPath(this.historyUri, fileNameForId(changeSet.id)),
+      { version: 3, changeSet }
+    )));
+
+    // Re-read immediately before commit and preserve other windows' sessions.
+    // Orphan reconciliation on the next load recovers the narrow simultaneous
+    // index-write race without ever discarding a record file.
+    const latest = await this.readShardedIndex() ?? this.storageIndex;
+    const entries = latest.entries.filter((entry) => !input.loadedSessionIds.has(entry.sessionId));
+    for (const changeSet of input.changeSets) {
+      entries.push({
+        id: changeSet.id,
+        sessionId: changeSet.sessionId,
+        kind: 'runtime',
+        storageFile: `runtime/${fileNameForId(changeSet.id)}`,
+        checkpointIds: changeSet.files.map((file) => file.checkpointId)
+          .filter((id): id is string => typeof id === 'string' && checkpointById.has(id)),
+        updatedAt: changeSet.updatedAt
+      });
+    }
+    for (const changeSet of input.history) {
+      entries.push({
+        id: changeSet.id,
+        sessionId: changeSet.sessionId,
+        kind: 'history',
+        storageFile: `history/${fileNameForId(changeSet.id)}`,
+        checkpointIds: [],
+        updatedAt: changeSet.updatedAt
+      });
+    }
+    const index: ChangeSetStorageIndex = { version: 3, entries: dedupeIndexEntries(entries) };
+    await writeJsonAtomic(this.indexUri, index);
+    this.storageIndex = index;
+  }
+
+  private async readShardedIndex(recordDiagnostics = false): Promise<ChangeSetStorageIndex | undefined> {
+    try {
+      const bytes = await vscode.workspace.fs.readFile(this.indexUri);
+      const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: false }).decode(bytes));
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+      const record = value as Record<string, unknown>;
+      if (record.version !== 3 || !Array.isArray(record.entries)) return undefined;
+      const entries = record.entries.map(normalizeIndexEntry).filter((entry): entry is ChangeSetIndexEntry => Boolean(entry));
+      if (recordDiagnostics) {
+        console.debug('KeepSeek startup: change-set-index-read', {
+          bytesRead: bytes.byteLength,
+          entries: entries.length,
+          checkpoints: entries.reduce((sum, entry) => sum + entry.checkpointIds.length, 0)
+        });
+      }
+      return { version: 3, entries: dedupeIndexEntries(entries) };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async reconcileShardedIndex(index: ChangeSetStorageIndex): Promise<ChangeSetStorageIndex> {
+    const known = new Set(index.entries.map((entry) => entry.storageFile));
+    let changed = false;
+    for (const kind of ['runtime', 'history'] as const) {
+      const directory = kind === 'runtime' ? this.runtimeUri : this.historyUri;
+      for (const file of await listJsonFiles(directory)) {
+        const storageFile = `${kind}/${file}`;
+        if (known.has(storageFile)) continue;
+        const value = await readJsonFile(vscode.Uri.joinPath(directory, file));
+        if (!isRecordWithChangeSet(value)) continue;
+        const changeSet = value.changeSet;
+        if (kind === 'runtime' && isStoredChangeSet(changeSet)) {
+          const normalized = normalizeStoredChangeSet(changeSet);
+          if (index.entries.some((entry) => entry.id === normalized.id)) continue;
+          index.entries.push({
+            id: normalized.id,
+            sessionId: normalized.sessionId,
+            kind,
+            storageFile,
+            checkpointIds: normalized.files.map((item) => item.checkpointId).filter((id): id is string => Boolean(id)),
+            updatedAt: normalized.updatedAt
+          });
+          changed = true;
+        } else if (kind === 'history' && isStoredHistoricalChangeSet(changeSet)) {
+          if (index.entries.some((entry) => entry.id === changeSet.id)) continue;
+          index.entries.push({
+            id: changeSet.id,
+            sessionId: changeSet.sessionId,
+            kind,
+            storageFile,
+            checkpointIds: [],
+            updatedAt: changeSet.updatedAt
+          });
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      index.entries = dedupeIndexEntries(index.entries);
+      await writeJsonAtomic(this.indexUri, index);
+    }
+    return index;
   }
 }
 
@@ -731,6 +943,64 @@ function isRevertible(file: ChangeSetFile): boolean {
 
 function requiresRuntimeState(changeSet: ChangeSet): boolean {
   return changeSet.files.some((file) => isApplicable(file) || isRevertible(file));
+}
+
+function fileNameForId(id: string): string {
+  return `${createHash('sha256').update(id).digest('hex').slice(0, 32)}.json`;
+}
+
+function normalizeIndexEntry(value: unknown): ChangeSetIndexEntry | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== 'string' || typeof record.sessionId !== 'string'
+    || (record.kind !== 'runtime' && record.kind !== 'history')) return undefined;
+  return {
+    id: record.id,
+    sessionId: record.sessionId,
+    kind: record.kind,
+    storageFile: typeof record.storageFile === 'string'
+      ? record.storageFile
+      : `${record.kind}/${fileNameForId(record.id)}`,
+    checkpointIds: Array.isArray(record.checkpointIds)
+      ? record.checkpointIds.filter((id): id is string => typeof id === 'string' && Boolean(id))
+      : [],
+    updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date(0).toISOString()
+  };
+}
+
+function dedupeIndexEntries(entries: ChangeSetIndexEntry[]): ChangeSetIndexEntry[] {
+  const byId = new Map<string, ChangeSetIndexEntry>();
+  for (const entry of entries) {
+    const previous = byId.get(entry.id);
+    if (!previous || entry.updatedAt.localeCompare(previous.updatedAt) >= 0) byId.set(entry.id, entry);
+  }
+  return Array.from(byId.values()).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+async function readJsonFile(uri: vscode.Uri): Promise<unknown | undefined> {
+  try {
+    return JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)));
+  } catch {
+    return undefined;
+  }
+}
+
+async function listJsonFiles(uri: vscode.Uri): Promise<string[]> {
+  try {
+    return (await vscode.workspace.fs.readDirectory(uri))
+      .filter(([name, type]) => type === vscode.FileType.File && /^[a-f0-9]{32}\.json$/u.test(name))
+      .map(([name]) => name);
+  } catch {
+    return [];
+  }
+}
+
+function isRecordWithChangeSet(value: unknown): value is { changeSet: unknown } {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) && 'changeSet' in value;
+}
+
+function isRecordWithCheckpoint(value: unknown): value is { checkpoint: unknown } {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) && 'checkpoint' in value;
 }
 
 function cloneChangeSet(changeSet: ChangeSet): ChangeSet {

@@ -5,29 +5,44 @@ import { GlobalSessionStorage } from './sessions/globalSessionStorage';
 import { ChatSessionStore, getCurrentWorkspaceSessionScope } from './sessions/chatSessionStore';
 import { getConfiguredKeepseekLanguage } from './shared/i18n';
 import type { KeepseekExtensionInfo } from './shared/types';
+import { StartupPerformanceTrace } from './shared/startupPerformance';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  ensureKeybindings(context);
+  const startupTrace = new StartupPerformanceTrace();
+  startupTrace.mark('activate-start');
 
-  const globalSessionStorage = new GlobalSessionStorage(context.globalStorageUri);
+  const globalSessionStorage = new GlobalSessionStorage(context.globalStorageUri, startupTrace);
   const workspaceScope = getCurrentWorkspaceSessionScope();
-  await globalSessionStorage.migrateLegacyWorkspaceState(context.workspaceState, workspaceScope);
   const sessionStore = new ChatSessionStore(globalSessionStorage, getConfiguredKeepseekLanguage(), workspaceScope);
-  await sessionStore.initialize();
-  await sessionStore.cleanupExpiredSessions();
+  let startSessionInitialization: (() => void) | undefined;
+  const sessionInitialization = new Promise<void>((resolve, reject) => {
+    startSessionInitialization = () => {
+      void startupTrace.measure('current-workspace-sessions-loaded', async () => {
+        await globalSessionStorage.migrateLegacyWorkspaceState(context.workspaceState, workspaceScope);
+        await sessionStore.initialize();
+      }, () => ({ entries: sessionStore.getSessionSummaries().length })).then(resolve, reject);
+    };
+  });
 
   const provider = new KeepseekChatViewProvider(
     context.extensionUri,
     sessionStore,
     context.globalStorageUri,
     context.globalState,
-    createExtensionInfo(context)
+    createExtensionInfo(context),
+    sessionInitialization,
+    startupTrace
   );
   const webviewProvider = vscode.window.registerWebviewViewProvider(KeepseekChatViewProvider.viewType, provider, {
     webviewOptions: {
       retainContextWhenHidden: true
     }
   });
+  startupTrace.mark('provider-registered');
+  startSessionInitialization?.();
+  // The package contribution is authoritative; this only performs the legacy
+  // user-keybindings migration once and never blocks Provider registration.
+  void ensureKeybindings(context);
 
   context.subscriptions.push(
     provider,

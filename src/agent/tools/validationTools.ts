@@ -174,15 +174,33 @@ export async function getAvailableSafeValidationScripts(): Promise<SafeNpmScript
   if (!workspaceFolder) {
     return [];
   }
-  const definitions = await Promise.all(SAFE_NPM_SCRIPT_ORDER.map(async (script) => ({
-    script,
-    definition: await readNpmScript(workspaceFolder, script)
-  })));
+  const scripts = await readNpmScripts(workspaceFolder);
+  const definitions = SAFE_NPM_SCRIPT_ORDER.map((script) => ({ script, definition: scripts?.[script] }));
   return definitions
     .filter((entry): entry is { script: SafeNpmScript; definition: string } =>
       typeof entry.definition === 'string' && !hasValidationBlockingRisk(entry.definition)
     )
     .map(({ script }) => script);
+}
+
+async function readNpmScripts(workspaceFolder: vscode.WorkspaceFolder): Promise<Partial<Record<SafeNpmScript, string>> | undefined> {
+  try {
+    const packageJsonUri = vscode.Uri.joinPath(workspaceFolder.uri, 'package.json');
+    const bytes = await vscode.workspace.fs.readFile(packageJsonUri);
+    if (bytes.byteLength > 1_000_000) return undefined;
+    const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: false }).decode(bytes));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    const value = (parsed as Record<string, unknown>).scripts;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const result: Partial<Record<SafeNpmScript, string>> = {};
+    for (const script of SAFE_NPM_SCRIPT_ORDER) {
+      const definition = (value as Record<string, unknown>)[script];
+      if (typeof definition === 'string' && definition.trim()) result[script] = definition.trim();
+    }
+    return result;
+  } catch {
+    return undefined;
+  }
 }
 
 export interface ValidationPreflightResult {
@@ -305,25 +323,7 @@ function findWorkspaceFolder(requested: string | undefined): vscode.WorkspaceFol
 }
 
 async function readNpmScript(workspaceFolder: vscode.WorkspaceFolder, script: SafeNpmScript): Promise<string | undefined> {
-  try {
-    const packageJsonUri = vscode.Uri.joinPath(workspaceFolder.uri, 'package.json');
-    const bytes = await vscode.workspace.fs.readFile(packageJsonUri);
-    if (bytes.byteLength > 1_000_000) {
-      return undefined;
-    }
-    const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: false }).decode(bytes));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return undefined;
-    }
-    const scripts = (parsed as Record<string, unknown>).scripts;
-    if (!scripts || typeof scripts !== 'object' || Array.isArray(scripts)) {
-      return undefined;
-    }
-    const value = (scripts as Record<string, unknown>)[script];
-    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-  } catch {
-    return undefined;
-  }
+  return (await readNpmScripts(workspaceFolder))?.[script];
 }
 
 function createValidationTask(workspaceFolder: vscode.WorkspaceFolder, script: SafeNpmScript): vscode.Task {

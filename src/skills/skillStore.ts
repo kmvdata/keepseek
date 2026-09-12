@@ -50,9 +50,15 @@ export class SkillStore {
 
   public async refresh(): Promise<void> {
     const discovered = await this.discovery.discover();
+    const previousFingerprints = new Map(this.manifests.map((manifest) => [manifest.id, manifest.contentFingerprint]));
     this.manifests = discovered.map((manifest) => this.applyStoredState(manifest));
-    this.cachedActiveSkills.clear();
-    this.activeSkillLoadErrors.clear();
+    for (const id of this.cachedActiveSkills.keys()) {
+      const next = this.manifests.find((manifest) => manifest.id === id);
+      if (!next || next.contentFingerprint !== previousFingerprints.get(id)) {
+        this.cachedActiveSkills.delete(id);
+        this.activeSkillLoadErrors.delete(id);
+      }
+    }
   }
 
   public getStateView(session: ChatSession): SkillStateView {

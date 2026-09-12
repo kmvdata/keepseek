@@ -108,10 +108,11 @@ test('consolidates previously persisted split ChangeSets for one Agent run', asy
   assert.deepEqual(state[0]?.files.map((file) => file.id), ['a', 'b']);
 
   await fixture.store.flush();
-  const persisted = JSON.parse(await readFile(path.join(root, 'change-sets.json'), 'utf8')) as {
-    changeSets?: unknown[];
+  const persisted = JSON.parse(await readFile(path.join(root, 'change-sets', 'v3', 'index.json'), 'utf8')) as {
+    entries?: Array<{ kind?: string }>;
   };
-  assert.equal(persisted.changeSets?.length, 1);
+  assert.equal(persisted.entries?.filter((entry) => entry.kind === 'runtime').length, 1);
+  await assert.rejects(readFile(path.join(root, 'change-sets.json'), 'utf8'));
 });
 
 test('keeps multiple rounds associated with their assistant message and omits newText from Webview state', async () => {
@@ -285,17 +286,17 @@ test('persists discarded and reverted terminal history without source text', asy
 
   fixture.store.discardAll(discarded.id);
   await fixture.store.applyAll(reverted.id);
-  const storagePath = path.join(root, 'change-sets.json');
-  await waitForStoredRuntimeChangeSet(storagePath, reverted.id);
+  await waitForStoredRuntimeChangeSet(root, reverted.id);
 
   const afterApply = createStoreFixture(root);
   await afterApply.store.initialize();
   const appliedState = afterApply.store.toWebviewState('session-1');
   assert.deepEqual(appliedState.map((changeSet) => changeSet.status).sort(), ['applied', 'discarded']);
   await afterApply.store.revertAll(reverted.id);
+  await afterApply.store.flush();
 
-  const persisted = await waitForStoredHistory(storagePath, 2);
-  assert.equal(persisted.version, 2);
+  const persisted = await waitForStoredHistory(root, 2);
+  assert.equal(persisted.version, 3);
   assert.ok(!JSON.stringify(persisted.history).includes('"newText"'));
 
   const reloaded = createStoreFixture(root);
@@ -328,6 +329,68 @@ test('loads legacy pending ChangeSets without messageId as unlinked instead of i
   assert.equal(state.length, 1);
   assert.equal(state[0]?.messageId, '');
   assert.equal(state[0]?.status, 'pending');
+});
+
+test('sharded ChangeSets load only the active session and remain inoperable until an old session is loaded', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-lazy-'));
+  const fixture = createStoreFixture(root);
+  const current = fixture.store.addDraftEdits({
+    runId: 'current-run', sessionId: 'session-1', messageId: 'current-message', edits: [draft('current', 'current.ts')]
+  });
+  const older = fixture.store.addDraftEdits({
+    runId: 'older-run', sessionId: 'session-2', messageId: 'older-message', edits: [draft('older', 'older.ts')]
+  });
+  assert.ok(current && older);
+  await fixture.store.flush();
+
+  const restarted = createStoreFixture(root).store;
+  await restarted.initialize();
+  assert.equal(restarted.toWebviewState('session-1').length, 1);
+  assert.equal(restarted.toWebviewState('session-2').length, 0);
+  assert.equal(await restarted.applyAll(older.id), undefined);
+  await restarted.loadSession('session-2');
+  assert.equal(restarted.toWebviewState('session-2').length, 1);
+  assert.ok(await restarted.applyAll(older.id));
+});
+
+test('runtime records recover checkpoint links when an older index commit is observed', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-index-race-'));
+  const fixture = createStoreFixture(root);
+  const changeSet = fixture.store.addDraftEdits({
+    runId: 'race-run', sessionId: 'session-1', messageId: 'race-message', edits: [draft('race', 'race.ts')]
+  });
+  assert.ok(changeSet);
+  await fixture.store.applyAll(changeSet.id);
+  await fixture.store.flush();
+  const indexPath = path.join(root, 'change-sets', 'v3', 'index.json');
+  const index = JSON.parse(await readFile(indexPath, 'utf8')) as { entries: Array<{ checkpointIds: string[] }> };
+  for (const entry of index.entries) entry.checkpointIds = [];
+  await writeFile(indexPath, JSON.stringify(index));
+
+  const restarted = createStoreFixture(root).store;
+  await restarted.initialize();
+  const result = await restarted.revertAll(changeSet.id);
+  assert.deepEqual(result?.revertedEditIds, ['race']);
+});
+
+test('failed ChangeSet migration keeps the monolith readable in memory', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-migration-fallback-'));
+  const pending = createChangeSet({
+    runId: 'legacy-run', sessionId: 'session-1', messageId: 'legacy-message', edits: [draft('legacy-fallback', 'fallback.ts')]
+  });
+  assert.ok(pending);
+  const monolithPath = path.join(root, 'change-sets.json');
+  await writeFile(monolithPath, JSON.stringify({ version: 2, changeSets: [pending], history: [], checkpoints: [] }));
+  const originalRename = vscode.workspace.fs.rename;
+  vscode.workspace.fs.rename = async (source, target, options) => {
+    if (target.fsPath.endsWith('/change-sets/v3/index.json')) throw new Error('simulated index failure');
+    await originalRename(source, target, options);
+  };
+  t.after(() => { vscode.workspace.fs.rename = originalRename; });
+  const fixture = createStoreFixture(root);
+  await fixture.store.initialize();
+  assert.equal(fixture.store.toWebviewState('session-1')[0]?.id, pending.id);
+  assert.equal(JSON.parse(await readFile(monolithPath, 'utf8')).changeSets.length, 1);
 });
 
 function draft(id: string, label: string) {
@@ -387,13 +450,23 @@ function createStoreFixture(root: string, failLabel?: string) {
 }
 
 async function waitForStoredHistory(
-  storagePath: string,
+  storageRoot: string,
   count: number
 ): Promise<{ version?: number; history?: unknown[] }> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
-      const parsed = JSON.parse(await readFile(storagePath, 'utf8')) as { version?: number; history?: unknown[] };
-      if ((parsed.history?.length ?? 0) >= count) return parsed;
+      const index = JSON.parse(await readFile(path.join(storageRoot, 'change-sets', 'v3', 'index.json'), 'utf8')) as {
+        version?: number;
+        entries?: Array<{ kind?: string; storageFile?: string }>;
+      };
+      const historyEntries = (index.entries ?? []).filter((entry) => entry.kind === 'history' && entry.storageFile);
+      if (historyEntries.length >= count) {
+        const history = await Promise.all(historyEntries.map(async (entry) => {
+          const record = JSON.parse(await readFile(path.join(storageRoot, 'change-sets', 'v3', entry.storageFile!), 'utf8')) as { changeSet?: unknown };
+          return record.changeSet;
+        }));
+        return { version: index.version, history };
+      }
     } catch {
       // Persistence is queued; retry until the terminal snapshots have been written.
     }
@@ -402,13 +475,19 @@ async function waitForStoredHistory(
   throw new Error('Timed out waiting for compact ChangeSet history.');
 }
 
-async function waitForStoredRuntimeChangeSet(storagePath: string, changeSetId: string): Promise<void> {
+async function waitForStoredRuntimeChangeSet(storageRoot: string, changeSetId: string): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
-      const parsed = JSON.parse(await readFile(storagePath, 'utf8')) as {
-        changeSets?: Array<{ id?: string; status?: string }>;
+      const index = JSON.parse(await readFile(path.join(storageRoot, 'change-sets', 'v3', 'index.json'), 'utf8')) as {
+        entries?: Array<{ id?: string; kind?: string; storageFile?: string }>;
       };
-      if (parsed.changeSets?.some((changeSet) => changeSet.id === changeSetId && changeSet.status === 'applied')) return;
+      const entry = index.entries?.find((candidate) => candidate.id === changeSetId && candidate.kind === 'runtime');
+      if (entry?.storageFile) {
+        const record = JSON.parse(await readFile(path.join(storageRoot, 'change-sets', 'v3', entry.storageFile), 'utf8')) as {
+          changeSet?: { status?: string };
+        };
+        if (record.changeSet?.status === 'applied') return;
+      }
     } catch {
       // Persistence is queued; retry until the applied runtime state is durable.
     }

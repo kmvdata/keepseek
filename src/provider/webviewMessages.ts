@@ -22,6 +22,8 @@ export interface DroppedFileReferenceInput {
 export type WebviewMessage =
   | { type: 'setApprovalMode'; mode: ApprovalMode }
   | { type: 'ready' }
+  | { type: 'startupRendered'; revision?: number }
+  | { type: 'loadOlderMessages' }
   | { type: 'refreshBalance' }
   | { type: 'sendPrompt'; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'editUserPrompt'; messageId: string; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }

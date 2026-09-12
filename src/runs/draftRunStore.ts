@@ -78,9 +78,14 @@ export class DraftRunStore {
         await vscode.workspace.fs.readFile(this.storageUri)
       );
       const parsed = JSON.parse(content) as { version?: number; draftRuns?: unknown[] };
+      console.debug('KeepSeek startup: draft-run-storage-read', {
+        bytesRead: Buffer.byteLength(content, 'utf8'),
+        entries: parsed.draftRuns?.length ?? 0
+      });
       if (parsed.version !== 1) {
         return;
       }
+      let repairedInterruptedRun = false;
       for (const value of parsed.draftRuns ?? []) {
         const draftRun = normalizeStoredDraftRun(value);
         if (!draftRun) {
@@ -91,10 +96,13 @@ export class DraftRunStore {
           draftRun.error = 'DraftRun was interrupted by an extension restart and was not resumed.';
           draftRun.finishedAt = new Date().toISOString();
           draftRun.updatedAt = draftRun.finishedAt;
+          repairedInterruptedRun = true;
         }
         this.draftRuns.set(draftRun.id, draftRun);
       }
-      await this.persistNow();
+      if (repairedInterruptedRun) {
+        await this.persistNow();
+      }
     } catch {
       // Missing or malformed persistence must not block the chat view.
     }
@@ -134,6 +142,18 @@ export class DraftRunStore {
       .filter((draftRun) => draftRun.sessionId === sessionId)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
       .map(toWebviewDraftRun);
+  }
+
+  public async loadSession(_sessionId: string): Promise<void> {
+    // DraftRuns are capped and remain in one small fail-closed recovery file.
+    // This hook keeps session switching aligned with sharded ChangeSets.
+  }
+
+  public getProtectedSessionIds(): string[] {
+    return Array.from(new Set(Array.from(this.draftRuns.values())
+      .filter((run) => run.status === 'pending' || run.status === 'approved' || run.status === 'running')
+      .map((run) => run.sessionId)
+      .filter(Boolean)));
   }
 
   public get(id: string): DraftRun | undefined {

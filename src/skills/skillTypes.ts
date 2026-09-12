@@ -27,6 +27,8 @@ export interface SkillManifest {
     resultMaxChars?: number;
   };
   unavailableReason?: string;
+  /** Internal cache identity; omitted from the Webview projection. */
+  contentFingerprint?: string;
 }
 
 export interface SkillManifestView {

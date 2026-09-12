@@ -27,6 +27,10 @@ export class ApprovalReviewStore {
     try {
       const bytes = await vscode.workspace.fs.readFile(this.storageUri);
       const parsed = JSON.parse(new TextDecoder().decode(bytes)) as { version?: number; records?: unknown[] };
+      console.debug('KeepSeek startup: approval-review-storage-read', {
+        bytesRead: bytes.byteLength,
+        entries: parsed.records?.length ?? 0
+      });
       if (parsed.version !== 1) return;
       for (const value of parsed.records ?? []) {
         const record = normalizeRecord(value);

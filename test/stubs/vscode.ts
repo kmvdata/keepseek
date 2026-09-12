@@ -242,7 +242,9 @@ export const workspace = {
       const stat = await fs.stat(uri.fsPath);
       return {
         type: stat.isFile() ? FileType.File : stat.isDirectory() ? FileType.Directory : FileType.Unknown,
-        size: stat.size
+        size: stat.size,
+        mtime: stat.mtimeMs,
+        ctime: stat.ctimeMs
       };
     },
     async readDirectory(uri: Uri): Promise<Array<[string, number]>> {

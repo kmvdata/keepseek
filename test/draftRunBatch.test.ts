@@ -264,6 +264,7 @@ function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
   const states = { pendingEdits: false, background: false, sends: 0 };
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     draftRuns: f.store, draftRunBatches: f.batch, delegatedApprovals: new DelegatedApprovalQueue(),
+    approvalDataReady: true,
     isBusy: false, isStartingRun: false, delegatedApprovalInFlight: false, draftRunAutoContinueInFlight: false,
     selectedSourceId: 'source', selectedModelId: 'model', language: 'en', agentSettings: {},
     repairLoopsBySession: new Map(), authorizedExternalReferenceUris: new Set(),
@@ -353,6 +354,7 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   }).join('\n');
   const state = { draftRuns: f.store.toWebviewState('s'), draftRunBatchSnapshots: f.batch.snapshots('s'),
     draftRunBatch: f.batch.state, approvalMode: 'ask', isBusy: false, activeDraftRunId: '',
+    startup: { sideEffectsReady: true },
     authorizedExternalReferenceUris: [] as string[], messages: [{ id: 'assistant', role: 'assistant' }] };
   const unlinked = new UiElement();
   const context = { state, document: { createElement: () => new UiElement() },

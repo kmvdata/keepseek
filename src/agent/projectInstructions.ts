@@ -24,6 +24,12 @@ export interface ProjectInstructionsResolverOptions {
 
 export class ProjectInstructionsResolver {
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
+  private readonly fileCache = new Map<string, {
+    mtime: number;
+    size: number;
+    maxFileBytes: number;
+    value: { content?: string; rejected: boolean };
+  }>();
 
   public async resolve(options: ProjectInstructionsResolverOptions = {}): Promise<ProjectInstructionsResolution> {
     const folders = options.workspaceFolders ?? vscode.workspace.workspaceFolders ?? [];
@@ -93,10 +99,18 @@ export class ProjectInstructionsResolver {
     try {
       stat = await vscode.workspace.fs.stat(uri);
     } catch {
+      this.fileCache.delete(uri.toString());
       return { rejected: false };
     }
+    const cacheKey = uri.toString();
+    const cached = this.fileCache.get(cacheKey);
+    if (cached && cached.mtime === stat.mtime && cached.size === stat.size && cached.maxFileBytes === maxFileBytes) {
+      return { ...cached.value };
+    }
     if (stat.type !== vscode.FileType.File || stat.size > maxFileBytes) {
-      return { rejected: true };
+      const value = { rejected: true };
+      this.fileCache.set(cacheKey, { mtime: stat.mtime, size: stat.size, maxFileBytes, value });
+      return value;
     }
     try {
       const bytes = await vscode.workspace.fs.readFile(uri);
@@ -104,9 +118,11 @@ export class ProjectInstructionsResolver {
         return { rejected: true };
       }
       const content = this.decoder.decode(bytes).replace(/\r\n?/gu, '\n').trim();
-      return content && isReadableTextContent(content)
+      const value = content && isReadableTextContent(content)
         ? { content, rejected: false }
         : { rejected: true };
+      this.fileCache.set(cacheKey, { mtime: stat.mtime, size: stat.size, maxFileBytes, value });
+      return { ...value };
     } catch {
       return { rejected: true };
     }
