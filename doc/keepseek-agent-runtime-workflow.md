@@ -2,6 +2,8 @@
 
 本文面向 KeepSeek 的维护者和需要理解运行机制的使用者，梳理 KeepSeek 在重构后作为 VS Code 侧边栏 Agent 的主要工作流程、核心功能边界和关键安全规则。本文以当前源码为准，不沿用旧版假设。
 
+子代理的运行期工具闸门、proposal 路径租约、类型化签收、结果复用、按 profile 模型和脱敏进度/诊断契约见 [子代理运行时安全与兼容性](./subagent-runtime-security.md)。
+
 KeepSeek 的本质是一个 VS Code 扩展内的轻量 coding agent runtime。扩展端负责会话、上下文、引用展开、本地只读工具、模型请求循环、自动档位预算控制、trace 记录和 DraftEdit 待确认写入；云端模型负责语言理解、推理、工具选择、参数生成和最终回复生成。
 
 ## 1. 总体架构

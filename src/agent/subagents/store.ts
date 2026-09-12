@@ -1,15 +1,20 @@
 import { writeJsonAtomic } from '../../shared/atomicStorage';
 import { normalizeRunCheckpoint } from '../runCheckpoint';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { isRecord } from '../../shared/errors';
 import { normalizeSubagentRunUsageSummaryValue } from '../subagentUsageStats';
 import type {
   StoredSubagentMetadata,
-  StoredSubagentTranscript
+  StoredSubagentTranscript,
+  SubagentDiagnosticReference,
+  SubagentFailureKind
 } from './types';
 
 const SUBAGENT_STORAGE_VERSION = 'v1';
+const DIAGNOSTIC_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_DIAGNOSTIC_CHARS = 768;
+const MAX_DIAGNOSTIC_BYTES = 8_192;
 export const DEFAULT_SUBAGENT_RESULT_PAGE_CHARS = 12_000;
 export const MAX_SUBAGENT_RESULT_PAGE_CHARS = 24_000;
 
@@ -109,6 +114,113 @@ export class SubagentStore {
     };
   }
 
+  public async findCompletedCandidates(input: {
+    parentSessionId: string;
+    excludeSubagentId?: string;
+    normalizedTaskHash: string;
+    profile: string;
+    lane: string;
+    sourceId: string;
+    modelId: string;
+    sourceConfigHash: string;
+    systemPromptHash: string;
+    toolSchemaHash: string;
+    profileHash: string;
+    projectInstructionsHash: string;
+    authorizationContextHash: string;
+    workspaceContextHash: string;
+  }): Promise<Array<{ metadata: StoredSubagentMetadata; transcript: StoredSubagentTranscript }>> {
+    if (!isSafeId(input.parentSessionId)) return [];
+    let entries: [string, vscode.FileType][];
+    try {
+      entries = await vscode.workspace.fs.readDirectory(this.getParentDirectory(input.parentSessionId));
+    } catch {
+      return [];
+    }
+    const ids = entries
+      .filter(([name, type]) => type === vscode.FileType.File && name.endsWith('.run.json'))
+      .map(([name]) => name.slice(0, -'.run.json'.length))
+      .filter((id) => id !== input.excludeSubagentId)
+      .slice(-64);
+    const candidates = (await Promise.all(ids.map(async (id) => await this.read(input.parentSessionId, id))))
+      .filter((value): value is { metadata: StoredSubagentMetadata; transcript: StoredSubagentTranscript } => Boolean(value))
+      .filter(({ metadata }) => metadata.status === 'completed'
+        && metadata.resultStatus === 'complete'
+        && metadata.normalizedTaskHash === input.normalizedTaskHash
+        && metadata.profile === input.profile
+        && metadata.lane === input.lane
+        && metadata.sourceId === input.sourceId
+        && metadata.modelId === input.modelId
+        && metadata.sourceConfigHash === input.sourceConfigHash
+        && metadata.systemPromptHash === input.systemPromptHash
+        && metadata.toolSchemaHash === input.toolSchemaHash
+        && metadata.profileHash === input.profileHash
+        && metadata.projectInstructionsHash === input.projectInstructionsHash
+        && metadata.authorizationContextHash === input.authorizationContextHash
+        && metadata.workspaceContextHash === input.workspaceContextHash
+        && Boolean(metadata.resultEnvelope));
+    return candidates.sort((left, right) => right.metadata.updatedAt.localeCompare(left.metadata.updatedAt)).slice(0, 5);
+  }
+
+  public async saveDiagnostic(input: {
+    parentSessionId: string;
+    subagentId: string;
+    parentRunId: string;
+    kind: SubagentFailureKind;
+    reasonCode: string;
+    summary: string;
+    traceRunIds?: readonly string[];
+    checkpointTaskId?: string;
+  }): Promise<SubagentDiagnosticReference> {
+    if (!isSafeId(input.parentSessionId) || !isSafeId(input.subagentId)) {
+      throw new Error('Invalid subagent diagnostic scope.');
+    }
+    const id = `diag_${randomUUID()}`;
+    const createdAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + DIAGNOSTIC_RETENTION_MS).toISOString();
+    const payload = {
+      version: 1,
+      id,
+      subagentId: input.subagentId,
+      parentRunId: input.parentRunId,
+      kind: input.kind,
+      reasonCode: sanitizeDiagnosticText(input.reasonCode, 96),
+      summary: sanitizeDiagnosticText(input.summary, MAX_DIAGNOSTIC_CHARS),
+      traceRunIds: (input.traceRunIds ?? []).filter(isSafeId).slice(-4),
+      checkpointTaskId: input.checkpointTaskId && isSafeId(input.checkpointTaskId) ? input.checkpointTaskId : undefined,
+      createdAt,
+      expiresAt
+    };
+    const serialized = `${JSON.stringify(payload, null, 2)}\n`;
+    const sizeBytes = this.encoder.encode(serialized).byteLength;
+    if (sizeBytes > MAX_DIAGNOSTIC_BYTES) throw new Error('Subagent diagnostic exceeded its storage limit.');
+    const directory = this.getParentDirectory(input.parentSessionId);
+    await vscode.workspace.fs.createDirectory(directory);
+    await writeJsonAtomic(vscode.Uri.joinPath(directory, `${input.subagentId}.${id}.diagnostic.json`), payload);
+    return { id, kind: input.kind, sizeBytes, expiresAt };
+  }
+
+  public async readDiagnostic(input: {
+    parentSessionId: string;
+    subagentId: string;
+    diagnosticId: string;
+  }): Promise<Record<string, unknown> | undefined> {
+    if (!isSafeId(input.parentSessionId) || !isSafeId(input.subagentId) || !isSafeId(input.diagnosticId)) return undefined;
+    try {
+      const uri = vscode.Uri.joinPath(this.getParentDirectory(input.parentSessionId), `${input.subagentId}.${input.diagnosticId}.diagnostic.json`);
+      const value: unknown = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(uri)));
+      if (!isRecord(value) || value.id !== input.diagnosticId || value.subagentId !== input.subagentId
+        || typeof value.expiresAt !== 'string') return undefined;
+      if (Date.parse(value.expiresAt) <= Date.now()) {
+        await Promise.resolve(vscode.workspace.fs.delete(uri, { useTrash: false })).catch(() => undefined);
+        return undefined;
+      }
+      return value;
+    } catch {
+      return undefined;
+    }
+  }
+
   private getParentDirectory(parentSessionId: string): vscode.Uri {
     if (!isSafeId(parentSessionId)) {
       throw new Error('Invalid parent session id for subagent storage.');
@@ -139,7 +251,19 @@ function normalizeMetadata(value: unknown): StoredSubagentMetadata | undefined {
     || typeof value.status !== 'string') {
     return undefined;
   }
-  return { ...value, status: value.status === 'running' || value.status === 'queued' ? 'stopped' : value.status, stats: normalizeSubagentRunUsageSummaryValue(value.stats) } as unknown as StoredSubagentMetadata;
+  const interrupted = value.status === 'running' || value.status === 'queued';
+  return {
+    ...value,
+    status: interrupted ? 'stopped' : value.status,
+    ...(interrupted ? {
+      resultStatus: 'failed',
+      failureKind: 'interrupted',
+      error: typeof value.error === 'string' && value.error.trim()
+        ? value.error
+        : 'Subagent was interrupted by extension restart.'
+    } : {}),
+    stats: normalizeSubagentRunUsageSummaryValue(value.stats)
+  } as unknown as StoredSubagentMetadata;
 }
 
 function normalizeTranscript(value: unknown): StoredSubagentTranscript | undefined {
@@ -162,4 +286,16 @@ function clampInteger(value: number | undefined, min: number, max: number, fallb
   return typeof value === 'number' && Number.isFinite(value)
     ? Math.min(max, Math.max(min, Math.floor(value)))
     : fallback;
+}
+
+function sanitizeDiagnosticText(value: string, maxChars: number): string {
+  return value
+    .replace(/(?:api[-_ ]?key|authorization|token|secret|password)\s*[:=]\s*[^\s,;]+/giu, 'credential=[redacted]')
+    .replace(/\b[A-Z][A-Z0-9_]{1,63}=\S+/gu, 'environment=[redacted]')
+    .replace(/[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\){2,}[^\\/:*?"<>|\r\n]*/gu, '[path redacted]')
+    .replace(/(?:\/[A-Za-z0-9._ -]+){3,}/gu, '[path redacted]')
+    .replace(/[\r\n\t]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, maxChars);
 }

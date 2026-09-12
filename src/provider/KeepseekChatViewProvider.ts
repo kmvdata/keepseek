@@ -159,7 +159,9 @@ import {
 } from '../accounts/accountStore';
 import {
   createDefaultSubagentModelSetting,
-  SubagentSettingsStore
+  createDefaultSubagentModelSettingsSnapshot,
+  SubagentSettingsStore,
+  type SubagentModelSettingsSnapshot
 } from '../accounts/subagentSettingsStore';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
 import { probeSourceConnection, refreshSourceModelCache } from '../accounts/modelDiscovery';
@@ -239,6 +241,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private selectedSourceId = '';
   private selectedModelId = '';
   private subagentModelSetting: SubagentModelSetting = createDefaultSubagentModelSetting();
+  private subagentModelSettings: SubagentModelSettingsSnapshot = createDefaultSubagentModelSettingsSnapshot();
   private subagentProgress: SubagentProgressState[] = [];
   private modelSelectionPersistenceDepth = 0;
   private readonly modelSelectionTransactions = new ModelSelectionTransactionCoordinator();
@@ -959,7 +962,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.postStartupSettingsPatch();
           return;
         }
-        await this.setSubagentModel(message.mode, message.sourceId, message.modelId);
+        await this.setSubagentModel(message.mode, message.sourceId, message.modelId, message.profile);
         return;
       case 'cancelPendingModelSelection':
         this.cancelPendingModelSelection(message.requestId);
@@ -976,6 +979,22 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'openRunTrace':
         await this.openRunTrace(message.messageId);
         return;
+      case 'openSubagentDiagnostic': {
+        const session = this.sessionStore.getActiveSession();
+        const diagnostic = await this.subagentRuntime.readDiagnostic(session.id, message.subagentId, message.diagnosticId);
+        if (!diagnostic) {
+          vscode.window.showWarningMessage(this.language === 'en'
+            ? 'This subagent diagnostic is unavailable or expired.'
+            : '该子代理诊断不可用或已过期。');
+          return;
+        }
+        const document = await vscode.workspace.openTextDocument({
+          language: 'json',
+          content: `${JSON.stringify(diagnostic, null, 2)}\n`
+        });
+        await vscode.window.showTextDocument(document, { preview: true });
+        return;
+      }
       case 'createLegacyMemoryMigrationDraft':
         await this.createLegacyMemoryMigrationDraft();
         return;
@@ -2233,7 +2252,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private async setSubagentModel(
     mode: 'follow-main' | 'fixed',
     sourceId?: string,
-    modelId?: string
+    modelId?: string,
+    profile?: 'research' | 'review' | 'proposal'
   ): Promise<void> {
     if (this.rejectModelSourceMutationWhileBusy()) {
       return;
@@ -2251,11 +2271,21 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         mode: 'fixed',
         sourceId: model.sourceId,
         modelId: model.id
-      });
+      }, profile);
     } else {
-      this.subagentModelSetting = await this.subagentSettingsStore.save({ mode: 'follow-main' });
+      this.subagentModelSetting = await this.subagentSettingsStore.save({ mode: 'follow-main' }, profile);
     }
+    this.subagentModelSettings = await this.loadSubagentModelSettings();
+    this.subagentModelSetting = this.subagentModelSettings.default;
     this.postState();
+  }
+
+  private async loadSubagentModelSettings(): Promise<SubagentModelSettingsSnapshot> {
+    const store = this.subagentSettingsStore as SubagentSettingsStore & {
+      loadAll?: () => Promise<SubagentModelSettingsSnapshot>;
+    };
+    if (typeof store.loadAll === 'function') return await store.loadAll();
+    return { version: 2, default: await store.load(), profiles: {} };
   }
 
   private async waitForBalanceRefresh(): Promise<void> {
@@ -4137,6 +4167,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       const activeSession = this.sessionStore.getActiveSession();
       const approvalMode = normalizeApprovalMode(activeSession.approvalMode);
+      const explicitSubagentSelection = resolveExplicitSubagentSelection(trimmedPrompt);
+      if (explicitSubagentSelection && (activeSession.requestProtocol?.version ?? 1) < 5) {
+        activeSession.requestProtocol = {
+          ...activeSession.requestProtocol,
+          version: 5,
+          serializationStrategy: 'provider-projection-v2',
+          toolSchemaVersion: 5,
+          toolNames: [],
+          createdAt: activeSession.requestProtocol?.createdAt ?? new Date().toISOString()
+        };
+        this.slimToolNamesBySession.delete(activeSession.id);
+      }
       const requiredApprovalProtocol = approvalMode === 'model_review'
         ? MODEL_REVIEW_APPROVAL_PROTOCOL_VERSION
         : approvalMode === 'delegate'
@@ -4266,7 +4308,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const draftRunTail = this.draftRuns.getPendingProviderTail(activeSession.id, this.language);
       const approvalTail = (activeSession.requestProtocol?.version ?? 1) >= DELEGATED_APPROVAL_PROTOCOL_VERSION
         ? getApprovalModeUserTail(approvalMode) : '';
-      const providerTails = [dynamicContextTail, approvalTail, draftRunTail?.content ?? ''].filter(Boolean);
+      const explicitSubagentTail = explicitSubagentSelection
+        ? formatExplicitSubagentTail(explicitSubagentSelection)
+        : '';
+      const providerTails = [dynamicContextTail, approvalTail, draftRunTail?.content ?? '', explicitSubagentTail].filter(Boolean);
 
       const userMessage: ChatMessage = {
         id: randomUUID(),
@@ -4806,7 +4851,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const subagentTask = (async () => {
         try {
           await this.measureStartup('subagent-settings-loaded', async () => {
-            this.subagentModelSetting = await this.subagentSettingsStore.load();
+            this.subagentModelSettings = await this.loadSubagentModelSettings();
+            this.subagentModelSetting = this.subagentModelSettings.default;
           });
           this.commandSettingsReadiness.subagentModel = 'ready';
           this.markStartupStageOnce('subagent-model-visible', { entries: 1 });
@@ -4923,6 +4969,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           lockedByBackground: this.hasActiveBackgroundRun()
         },
         subagentModelSetting: this.subagentModelSetting,
+        subagentModelSettings: this.subagentModelSettings,
         approvalMode: normalizeApprovalMode(activeSession.approvalMode),
         commandSettingsReadiness: { ...this.commandSettingsReadiness },
         startup: this.getStartupState(),
@@ -5096,6 +5143,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         subagents: this.subagentProgress.filter((item) => item.parentSessionId === activeSession.id)
           .map(toSubagentProgressViewModel),
         subagentModelSetting: this.subagentModelSetting,
+        subagentModelSettings: this.subagentModelSettings,
         legacyMemoryMigration: this.getLegacyMemoryMigrationStateView(),
         backgroundRun: this.backgroundRunCoordinator.getActiveRun(),
         backgroundAvailableScripts: this.backgroundAvailableScripts,
@@ -5804,6 +5852,31 @@ function normalizeSkillIds(value: unknown): string[] | undefined {
     ids.push(id);
   }
   return ids;
+}
+
+type ExplicitSubagentSelection =
+  | { kind: 'single'; profile: 'research' | 'review' | 'proposal' }
+  | { kind: 'parallel'; profile: 'research' };
+
+function resolveExplicitSubagentSelection(prompt: string): ExplicitSubagentSelection | undefined {
+  const command = /^\/(research|review|proposal|parallel)(?:\s|$)/iu.exec(prompt)?.[1]?.toLocaleLowerCase();
+  if (command === 'parallel') return { kind: 'parallel', profile: 'research' };
+  if (command === 'research' || command === 'review' || command === 'proposal') {
+    return { kind: 'single', profile: command };
+  }
+  return undefined;
+}
+
+function formatExplicitSubagentTail(selection: ExplicitSubagentSelection): string {
+  return [
+    '<keepseek-explicit-subagent-selection-v1>',
+    `mode: ${selection.kind}`,
+    `profile: ${selection.profile}`,
+    selection.kind === 'parallel'
+      ? 'Use keepseek_delegate_parallel for independent read-only analysis tasks. Do not raise child permissions.'
+      : `Use keepseek_delegate_task with profile "${selection.profile}". This user selection does not change approval mode or child permissions.`,
+    '</keepseek-explicit-subagent-selection-v1>'
+  ].join('\n');
 }
 
 function toChatMessageSkills(skills: ActivatedSkill[]): ChatMessageSkill[] | undefined {

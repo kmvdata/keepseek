@@ -1235,6 +1235,26 @@ export function getInputStyles(): string {
       padding: 2px 0 4px 12px;
     }
 
+    .command-subagent-profile-group {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 4px;
+      padding: 4px;
+      border-bottom: 1px solid var(--vscode-widget-border, transparent);
+    }
+
+    .command-subagent-profile-option {
+      min-width: 0;
+      justify-content: center;
+      padding-inline: 6px;
+      font-size: 11px;
+    }
+
+    .command-subagent-profile-option[aria-pressed="true"] {
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+    }
+
     .command-model-source {
       display: flex;
       align-items: center;
@@ -1901,6 +1921,21 @@ export function getInputStyles(): string {
     .subagent-progress-row.status-failed,
     .subagent-progress-row.status-stopped {
       border-left-color: var(--vscode-errorForeground);
+    }
+
+    .subagent-diagnostic-button {
+      width: fit-content;
+      padding: 2px 6px;
+      border: 0;
+      color: var(--vscode-textLink-foreground);
+      background: transparent;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .subagent-diagnostic-button:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder);
+      outline-offset: 1px;
     }
 
     .settings-dialog-status {

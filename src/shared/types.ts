@@ -1271,6 +1271,7 @@ export interface AgentRunCallbacks {
   onActivity?: (kind: 'network' | 'event' | 'content' | 'request' | 'retry') => void;
   onDelta?: (event: AgentProgressEvent) => void;
   onStatus?: (status: AgentActivityInput) => void;
+  onToolRejected?: (event: { toolName: string; errorType: 'subagent_tool_not_exposed' }) => void;
   onUsageEstimate?: (usage: ContextUsageEstimate) => void;
   onUsage?: (event: UsageEvent) => void;
   onSubagentRunSummary?: (summary: SubagentRunUsageSummary) => void;

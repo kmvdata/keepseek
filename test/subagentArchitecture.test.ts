@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -267,7 +268,13 @@ test('real child provider request disables thinking and excludes parent-only con
   globalThis.fetch = (async (_input, init) => {
     capturedBodies.push(typeof init?.body === 'string' ? init.body : '');
     const event = `data: ${JSON.stringify({
-      choices: [{ delta: { content: 'Compact child conclusion.' }, finish_reason: 'stop' }]
+      choices: [{ delta: { content: JSON.stringify({
+        taskHash: createHash('sha256').update('CHILD SELF CONTAINED TASK').digest('hex'),
+        status: 'complete',
+        summary: 'Compact child conclusion.',
+        evidence: [{ claim: 'The requested child-only context was available.' }],
+        uncertainties: []
+      }) }, finish_reason: 'stop' }]
     })}\n\ndata: [DONE]\n\n`;
     return new Response(new ReadableStream<Uint8Array>({
       start(controller) {

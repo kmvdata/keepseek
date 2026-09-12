@@ -12,6 +12,7 @@ import {
   WORKSPACE_DIRECTORY_GLOB_EXCLUDE
 } from '../../workspace/workspaceDirectory';
 import { READ_WORKSPACE_FILE_RANGE_TOOL_NAME } from '../protocol';
+import { stableWorkspaceRootId } from '../subagents/pathScope';
 
 const WORKSPACE_TOOL_EXCLUDED_DIRECTORIES = ['.git', '.vscode-test', 'build', 'coverage', 'dist', 'node_modules', 'out'];
 const WORKSPACE_TOOL_GLOB_EXCLUDE = WORKSPACE_DIRECTORY_GLOB_EXCLUDE;
@@ -824,12 +825,14 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
 
     if (folders.length > 1) {
       for (const folder of folders) {
-        const folderPrefix = `${folder.name}/`;
-        if (normalizedPath === folder.name || normalizedPath.startsWith(folderPrefix)) {
-          const pathWithinFolder = normalizedPath === folder.name
-            ? ''
-            : normalizedPath.slice(folderPrefix.length);
-          return vscode.Uri.joinPath(folder.uri, ...pathWithinFolder.split('/').filter(Boolean));
+        for (const rootPrefix of [stableWorkspaceRootId(folder.uri), folder.name]) {
+          const folderPrefix = `${rootPrefix}/`;
+          if (normalizedPath === rootPrefix || normalizedPath.startsWith(folderPrefix)) {
+            const pathWithinFolder = normalizedPath === rootPrefix
+              ? ''
+              : normalizedPath.slice(folderPrefix.length);
+            return vscode.Uri.joinPath(folder.uri, ...pathWithinFolder.split('/').filter(Boolean));
+          }
         }
       }
     }

@@ -3798,6 +3798,9 @@ export function getScript(): string {
         state.subagents.slice(-8).forEach(function(child) {
           var row = document.createElement('div');
           row.className = 'subagent-progress-row status-' + String(child.status || 'queued');
+          if (child.parentToolCallId) {
+            row.dataset.parentToolCallId = String(child.parentToolCallId);
+          }
           var heading = document.createElement('div');
           heading.className = 'subagent-progress-heading';
           var label = document.createElement('span');
@@ -3807,6 +3810,31 @@ export function getScript(): string {
           depth.textContent = 'D' + String(child.depth || 1);
           heading.append(label, depth);
           row.append(heading);
+          var detail = document.createElement('div');
+          detail.className = 'subagent-progress-summary';
+          var phaseKey = 'subagentPhase_' + String(child.phase || child.status || 'queued');
+          var durationMs = Number(child.durationMs || 0);
+          var parentCallSuffix = child.parentToolCallId
+            ? ' · ↳ ' + String(child.parentToolCallId).slice(-12)
+            : '';
+          detail.textContent = t(phaseKey)
+            + (durationMs > 0 ? ' · ' + Math.max(1, Math.round(durationMs / 1000)) + 's' : '')
+            + parentCallSuffix;
+          row.append(detail);
+          if (child.diagnosticRef && child.status === 'failed') {
+            var diagnosticButton = document.createElement('button');
+            diagnosticButton.type = 'button';
+            diagnosticButton.className = 'subagent-diagnostic-button';
+            diagnosticButton.textContent = t('subagentViewDiagnostic');
+            diagnosticButton.addEventListener('click', function() {
+              vscode.postMessage({
+                type: 'openSubagentDiagnostic',
+                subagentId: String(child.id || ''),
+                diagnosticId: String(child.diagnosticRef || '')
+              });
+            });
+            row.append(diagnosticButton);
+          }
           subagentPanel.append(row);
         });
         transcript.append(subagentPanel);

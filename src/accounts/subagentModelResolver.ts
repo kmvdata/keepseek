@@ -23,10 +23,11 @@ export async function resolveConfiguredSubagentModel(input: {
   parentRequest: Pick<AgentRequest, 'model' | 'sourceConfig'>;
   language: KeepseekLanguage;
   settingsStore?: SubagentSettingsStore;
+  profileId?: string;
 }): Promise<ResolvedSubagentModel> {
   const settingsStore = input.settingsStore
     ?? new SubagentSettingsStore(input.globalStorageUri, input.workspaceKey);
-  const setting = await settingsStore.load();
+  const setting = await settingsStore.load(input.profileId);
   if (setting.mode === 'follow-main') {
     const sourceConfig = input.parentRequest.sourceConfig ?? await resolveModelSourceConfig(
       input.parentRequest.model.sourceId,

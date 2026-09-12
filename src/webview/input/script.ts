@@ -64,6 +64,7 @@ export function getInputScript(): string {
       var commandMenuOpen = false;
       var commandModelListOpen = false;
       var commandSubagentModelListOpen = false;
+      var commandSubagentModelProfile = 'research';
       var commandApprovalModeListOpen = false;
       var commandSkillListOpen = false;
       var commandSkillFilterOpen = false;
@@ -396,6 +397,14 @@ export function getInputScript(): string {
       if (commandSubagentModelList) {
         commandSubagentModelList.addEventListener('click', function(event) {
           var target = event.target instanceof Element ? event.target : null;
+          var profileButton = target?.closest('button[data-subagent-profile]');
+          if (profileButton && !profileButton.disabled) {
+            event.preventDefault();
+            event.stopPropagation();
+            commandSubagentModelProfile = profileButton.dataset.subagentProfile || 'research';
+            renderCommandSubagentModel();
+            return;
+          }
           var button = target?.closest('button[data-subagent-model-mode]');
           if (!button || isSubagentModelSelectionLocked()) { return; }
           event.preventDefault();
@@ -406,11 +415,11 @@ export function getInputScript(): string {
             var sourceId = button.dataset.sourceId || '';
             var modelId = button.dataset.modelId || '';
             if (!sourceId || !modelId) { return; }
-            vscode.postMessage({ type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId });
+            vscode.postMessage({ type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId, profile: commandSubagentModelProfile });
             var model = findModelForSelection(Array.isArray(state.models) ? state.models : [], sourceId, modelId);
             statusValue = getModelDisplayLabel(model);
           } else {
-            vscode.postMessage({ type: 'setSubagentModel', mode: 'follow-main' });
+            vscode.postMessage({ type: 'setSubagentModel', mode: 'follow-main', profile: commandSubagentModelProfile });
           }
           commandSubagentModelListOpen = false;
           renderCommandMenu();
@@ -2615,9 +2624,12 @@ export function getInputScript(): string {
           : modelReadiness === 'error' ? t('mainModelLoadFailed')
             : settingReadiness === 'loading' ? t('subagentModelLoading')
               : modelReadiness === 'loading' ? t('mainModelLoading') : '';
-        var rawSetting = state.subagentModelSetting && typeof state.subagentModelSetting === 'object'
-          ? state.subagentModelSetting
-          : { mode: 'follow-main' };
+        var allSettings = state.subagentModelSettings && typeof state.subagentModelSettings === 'object'
+          ? state.subagentModelSettings
+          : { default: state.subagentModelSetting, profiles: {} };
+        var rawSetting = allSettings.profiles && allSettings.profiles[commandSubagentModelProfile]
+          ? allSettings.profiles[commandSubagentModelProfile]
+          : allSettings.default && typeof allSettings.default === 'object' ? allSettings.default : { mode: 'follow-main' };
         var isFixed = rawSetting.mode === 'fixed';
         var sourceId = isFixed && typeof rawSetting.sourceId === 'string' ? rawSetting.sourceId : '';
         var modelId = isFixed && typeof rawSetting.modelId === 'string' ? rawSetting.modelId : '';
@@ -2658,6 +2670,22 @@ export function getInputScript(): string {
 
         commandSubagentModelList.classList.toggle('hidden', !commandSubagentModelListOpen);
         commandSubagentModelList.innerHTML = '';
+
+        var profileGroup = document.createElement('div');
+        profileGroup.className = 'command-subagent-profile-group';
+        profileGroup.setAttribute('role', 'group');
+        profileGroup.setAttribute('aria-label', t('subagentProfileModelScope'));
+        ['research', 'review', 'proposal'].forEach(function(profile) {
+          var profileOption = document.createElement('button');
+          profileOption.type = 'button';
+          profileOption.className = 'command-model-option command-subagent-profile-option';
+          profileOption.dataset.subagentProfile = profile;
+          profileOption.disabled = locked;
+          profileOption.setAttribute('aria-pressed', profile === commandSubagentModelProfile ? 'true' : 'false');
+          profileOption.textContent = t('subagentProfile_' + profile);
+          profileGroup.append(profileOption);
+        });
+        commandSubagentModelList.append(profileGroup);
 
         var followOption = document.createElement('button');
         followOption.type = 'button';

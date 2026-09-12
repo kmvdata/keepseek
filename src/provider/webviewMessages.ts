@@ -42,12 +42,13 @@ export type WebviewMessage =
   | { type: 'deleteOtherWorkspaceSessions'; workspaceKey: string; sessionIds: string[] }
   | { type: 'deleteOtherWorkspace'; workspaceKey: string }
   | { type: 'setSelectedModel'; requestId: string; sourceId: string; modelId: string }
-  | { type: 'setSubagentModel'; mode: 'follow-main' | 'fixed'; sourceId?: string; modelId?: string }
+  | { type: 'setSubagentModel'; mode: 'follow-main' | 'fixed'; profile?: 'research' | 'review' | 'proposal'; sourceId?: string; modelId?: string }
   | { type: 'cancelPendingModelSelection'; requestId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
   | { type: 'setDebugMode'; enabled: boolean }
   | { type: 'openCurrentSessionLog' }
   | { type: 'openRunTrace'; messageId: string }
+  | { type: 'openSubagentDiagnostic'; subagentId: string; diagnosticId: string }
   | { type: 'createLegacyMemoryMigrationDraft' }
   | { type: 'exportLegacyMemory' }
   | { type: 'completeLegacyMemoryMigration' }

@@ -9,6 +9,16 @@ import type { KeepseekLanguage } from '../../shared/i18n';
 
 export type SubagentLane = 'research-read' | 'review-read' | 'proposal' | 'nested-read';
 export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'stopped';
+export type SubagentProgressPhase = 'queued' | 'searching' | 'reading' | 'analyzing' | 'preparing_proposal' | 'finalizing' | 'completed' | 'failed' | 'stopped';
+export type SubagentToolCategory = 'search' | 'read' | 'analysis' | 'proposal' | 'delegation';
+export type SubagentFailureKind = 'provider_failure' | 'timeout' | 'cancelled' | 'budget_exhausted' | 'protocol_error' | 'unauthorized_tool' | 'result_rejected' | 'interrupted';
+
+export interface SubagentDiagnosticReference {
+  id: string;
+  kind: SubagentFailureKind;
+  sizeBytes: number;
+  expiresAt: string;
+}
 
 export interface SubagentModelSetting {
   version: 1;
@@ -56,6 +66,8 @@ export interface ReadSubagentResultInput {
 export interface SubagentInvocationContext {
   parentRequest: AgentRequest;
   parentRunId: string;
+  parentToolCallId?: string;
+  parentDraftEditUris?: string[];
   language: KeepseekLanguage;
   signal?: AbortSignal;
   onUsage?: (event: UsageEvent) => void;
@@ -87,12 +99,18 @@ export interface SubagentProgressState {
   id: string;
   parentSessionId: string;
   parentRunId: string;
+  parentToolCallId?: string;
   profile: string;
   lane: SubagentLane;
   depth: number;
   status: SubagentStatus;
+  phase?: SubagentProgressPhase;
+  toolCategory?: SubagentToolCategory;
   summary: string;
+  queuedAt?: string;
   startedAt?: string;
+  durationMs?: number;
+  diagnosticRef?: string;
   updatedAt: string;
   completedAt?: string;
 }
@@ -118,6 +136,18 @@ export interface StoredSubagentMetadata {
   toolSchemaHash: string;
   profileHash: string;
   projectInstructionsHash: string;
+  authorizationContextHash?: string;
+  workspaceContextHash?: string;
+  normalizedTaskHash?: string;
+  resultStatus?: 'complete' | 'partial' | 'failed';
+  failureKind?: SubagentFailureKind;
+  resultEnvelope?: import('./resultEnvelope').SubagentResultEnvelope;
+  readSet?: Array<{ uri: string; contentHash: string; sizeBytes: number }>;
+  readSetComplete?: boolean;
+  reusedFromSubagentId?: string;
+  reusedFromParentRunId?: string;
+  freshness?: 'fresh' | 'stale' | 'unverified';
+  diagnostic?: SubagentDiagnosticReference;
   resultHash?: string;
   resultChars?: number;
   resultTruncated?: boolean;

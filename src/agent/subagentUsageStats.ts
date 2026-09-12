@@ -20,9 +20,26 @@ export const MAX_RECENT_SUBAGENT_RUNS = 50;
 /** Progress summaries may contain child tasks, output, or errors. Never send them to the Webview. */
 export function toSubagentProgressViewModel(value: SubagentProgressState) {
   return {
-    id: value.id, profile: value.profile, lane: value.lane, depth: value.depth,
-    status: value.status, updatedAt: value.updatedAt, completedAt: value.completedAt
+    id: safeProgressIdentifier(value.id),
+    parentRunId: safeProgressIdentifier(value.parentRunId),
+    parentToolCallId: safeProgressIdentifier(value.parentToolCallId),
+    profile: safeProgressIdentifier(value.profile),
+    lane: value.lane,
+    depth: value.depth,
+    status: value.status,
+    phase: value.phase,
+    toolCategory: value.toolCategory,
+    queuedAt: value.queuedAt,
+    startedAt: value.startedAt,
+    durationMs: value.durationMs,
+    diagnosticRef: safeProgressIdentifier(value.diagnosticRef),
+    updatedAt: value.updatedAt,
+    completedAt: value.completedAt
   };
+}
+
+function safeProgressIdentifier(value: string | undefined): string | undefined {
+  return value && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(value) ? value : undefined;
 }
 
 const USAGE_SOURCES: UsageSource[] = [

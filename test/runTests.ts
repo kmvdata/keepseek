@@ -50,6 +50,7 @@ import './runDetails.test';
 import './safeFileEditor.test';
 import './semanticTools.test';
 import './subagentArchitecture.test';
+import './subagentSafety.test';
 import './subagentUsageStats.test';
 import './subagentUsageRuntime.test';
 import './referenceResources.test';

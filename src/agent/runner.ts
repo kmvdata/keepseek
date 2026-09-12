@@ -775,6 +775,11 @@ export class AgentLoop {
       messages: formatMessagesForTrace(messages, trace.includesPayload('request'))
     });
     const tools = providerProjection.tools;
+    // Runtime authority comes from the exact schema sent to the Provider, not
+    // from the runner's wider routing table. This guard is shared by native,
+    // Responses, Anthropic, DSML, and checkpoint-replayed tool calls because
+    // every lane converges on performToolCall below.
+    const exposedToolNames = new Set(tools.map((tool) => tool.function.name));
     const schemaHash = hashText(JSON.stringify(tools));
     if (checkpoint.toolSchemaHash && checkpoint.toolSchemaHash !== schemaHash) throw new Error('Tool schema changed; recovery refused / 工具协议变化，不能继续旧任务');
     checkpoint.toolSchemaHash = schemaHash;
@@ -1053,6 +1058,22 @@ export class AgentLoop {
       const acceptedEmulatedHandoffs: Array<{ toolCallId: string; toolName: string }> = [];
       const performToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
         this.throwIfAborted(request.signal, request.language);
+        const exposureError = getToolExposureError(toolCall.function.name, exposedToolNames);
+        if (exposureError) {
+          const rejected = exposureError;
+          callbacks.onToolRejected?.({
+            toolName: toolCall.function.name,
+            errorType: 'subagent_tool_not_exposed'
+          });
+          trace.record({
+            type: 'tool_result',
+            toolCallId: toolCall.id,
+            toolName: toolCall.function.name,
+            content: summarizeText(rejected)
+          });
+          runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, rejected);
+          return rejected;
+        }
         if (Object.hasOwn(pending!.results, toolCall.id)) return pending!.results[toolCall.id];
         if (approvalReviewStopReason) {
           return JSON.stringify({
@@ -2683,12 +2704,12 @@ export class AgentLoop {
       const args = this.parseToolArguments(toolCall.function.arguments);
       switch (toolCall.function.name) {
         case DELEGATE_TASK_TOOL_NAME: {
-          const context = this.getSubagentInvocationContext(language, options);
+          const context = this.getSubagentInvocationContext(language, options, toolCall.id, draftEdits);
           const result = await this.subagentTools!.delegateTask(this.readDelegateTaskInput(args), context);
           return this.mergeSubagentProposals(result, draftEdits, draftRuns);
         }
         case DELEGATE_PARALLEL_TOOL_NAME: {
-          const context = this.getSubagentInvocationContext(language, options);
+          const context = this.getSubagentInvocationContext(language, options, toolCall.id, draftEdits);
           const rawTasks = args.tasks;
           if (!Array.isArray(rawTasks)) {
             throw new Error('Tool argument "tasks" must be an array.');
@@ -2844,7 +2865,9 @@ export class AgentLoop {
       parentRunId?: string;
       onUsage?: AgentRunCallbacks['onUsage'];
       onSubagentRunSummary?: AgentRunCallbacks['onSubagentRunSummary'];
-    }
+    },
+    parentToolCallId?: string,
+    parentDraftEdits: readonly DraftEdit[] = []
   ): import('./subagents/types').SubagentInvocationContext {
     if (!this.subagentTools || !options.parentRequest || !options.parentRunId) {
       throw new Error('Subagent runtime is unavailable for this Agent runner.');
@@ -2852,6 +2875,8 @@ export class AgentLoop {
     return {
       parentRequest: options.parentRequest,
       parentRunId: options.parentRunId,
+      parentToolCallId,
+      parentDraftEditUris: parentDraftEdits.map((edit) => edit.uri),
       language,
       signal: options.signal,
       onUsage: options.onUsage,
@@ -4218,6 +4243,16 @@ export class AgentLoop {
     }
   }
 
+}
+
+export function getToolExposureError(toolName: string, exposedToolNames: ReadonlySet<string>): string | undefined {
+  if (exposedToolNames.has(toolName)) return undefined;
+  return JSON.stringify({
+    ok: false,
+    errorType: 'subagent_tool_not_exposed',
+    error: 'The requested tool was not exposed in this Provider request and was not executed.',
+    toolName
+  });
 }
 
 /** Stable main-agent entry point retained for provider and test call sites. */
