@@ -12,12 +12,13 @@
 
 It brings AI services, project context, code exploration, file editing, and command execution into one workflow. There is no need to shuttle content between your browser, terminal, and editor—or learn a different tool every time you switch models.
 
-KeepSeek’s practical value comes down to four things:
+KeepSeek’s practical value comes down to five things:
 
 - **No provider lock-in**: connect DeepSeek, Kimi, GLM, QwenCloud, OpenAI- and Anthropic-compatible services, and local Ollama at the same time, then switch by task;
 - **Understands the project you are working on**: selections, files, directories, terminal output, and debug logs can become conversation context, while the agent can search and re-read code as needed;
 - **Takes action without overstepping**: you see a diff before an edit and the full command before execution; the active approval mode determines whether each action proceeds;
 - **Built for long tasks**: project-scoped sessions, Skills, subagent collaboration, context compaction, and usage statistics help complex work keep moving.
+- **Fast to start, cheap to run**: an empty session is ready immediately on cold start and common settings are available from the first second; context estimates are cached and prompt-cache hit rates stay high, so long conversations use fewer tokens and cost less;
 
 If you want to keep control of your APIs, models, and costs while gaining a complete agent workflow inside VS Code, KeepSeek is built for you.
 
@@ -37,11 +38,18 @@ KeepSeek currently supports official DeepSeek, Kimi, GLM, and QwenCloud accounts
 
 API keys are stored only in VS Code extension global storage. They are never written to the workspace or Git.
 
+Alongside the account system, KeepSeek adds several model-management conveniences:
+
+- **Global default model**: mark any available model as the default; it is used whenever you do not choose explicitly and stays consistent across workspaces. If the default model becomes unavailable, it is cleared automatically instead of silently stalling your task;
+- **Model aliases**: give accounts or models custom names so they are instantly recognizable when switching;
+- **Per-model tuning**: set a separate context window and max output for each model (compact K/M token notation), and control whether a model appears in the picker;
+- **Switch while generating**: queue a model switch while waiting for a reply—only your last selection takes effect; background tasks keep the model they started with and never change lanes mid-flight.
+
 ### 2. Give AI Only the Context That Matters
 
 KeepSeek lives in the Secondary Sidebar. Open `KeepSeek: Open Chat`, choose an account and model, and start working directly with the current project:
 
-- Select code in the editor and add it through the context menu or with `Cmd+L` / `Ctrl+Shift+L`;
+- Select code in the editor and add it through the context menu or with `Cmd+L` / `Ctrl+Shift+L`; on first launch KeepSeek fills in any missing shortcuts for you (user-level keybindings.json), so there is nothing to configure;
 - Add files or directories from Explorer, or drag them straight into the input box;
 - Reference runtime information from the terminal, Output panel, or Debug Console;
 - Use `<path#L10-L20>` to include only the lines you need;
@@ -61,6 +69,12 @@ KeepSeek separates proposing an action from carrying it out:
 - Built-in validation is limited to the configured `compile`, `lint`, and `test` tasks. After a failure, the agent can prepare a fix for another review.
 
 The agent can therefore complete real engineering work without silently changing files or running commands out of sight.
+
+Larger workloads stay just as controllable:
+
+- **Batched command execution**: pending commands proposed in one turn can be grouped into a batch, approved once, run in order with per-command progress, and stopped at any time. Approvals automatically expire when the session, approval mode, or workspace trust changes;
+- **Auto-continue after budget exhaustion**: when a foreground task hits the tool-turn or step limit, KeepSeek starts a new round to finish outstanding work—but only when there is real progress to show (up to 8 rounds by default, configurable). Edits still need individual approval;
+- **Surgical edits in huge files**: oversized files are handled with resumable range reads and precise incremental edits, so every change stays visible and reviewable.
 
 ### 4. Control the Current Task from the Command Menu
 
@@ -97,6 +111,8 @@ Click the indicator to open Usage details, where you can inspect the context win
 </p>
 
 When a provider can reliably return pricing, balance, or cache data, KeepSeek displays it as reported. When data is unavailable, the UI says so instead of presenting an estimate as a precise result.
+
+Performance starts from the first second VS Code opens: an empty session is ready on cold start, and main model, subagent model, approval mode, and other settings are available right away. Stable inputs reuse cached context-estimation results, so the usage display is faster and cheaper to compute, and concurrent windows can write without interfering with one another. Combined with the per-session frozen protocol and tool schema, multi-turn conversations keep higher prompt-cache hit rates—so long tasks cost less in practice.
 
 ---
 
@@ -155,4 +171,4 @@ bun run reinstall:vsix
 
 KeepSeek’s early context and cache design was inspired in part by **Reasonix**. Our thanks to the project.
 
-KeepSeek is open source under the [MIT License](./LICENSE). Issues, suggestions, and contributions are welcome.
+KeepSeek is open source under the [MIT License](./LICENSE). If KeepSeek helps you get work done, a star on GitHub or a kind review in the marketplace goes a long way. Issues, suggestions, and contributions are always welcome.
