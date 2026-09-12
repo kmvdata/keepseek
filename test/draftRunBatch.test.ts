@@ -381,7 +381,10 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   return { api, state, unlinked, render };
 }
 function elements(cards: UiElement[]): UiElement[] { return cards.flatMap((card) => [card, ...elements(card.children)]); }
-function bulk(cards: UiElement[]) { return elements(cards).filter((item) => item.dataset.draftRunAction === 'approveDraftRunBatch' || item.dataset.changeSetAction === 'applyChangeSet'); }
+function bulk(cards: UiElement[]) {
+  return elements(cards).filter((item) => item.dataset.draftRunAction === 'approveDraftRunBatch'
+    || ['applyChangeSet', 'discardChangeSet', 'revertChangeSet'].includes(item.dataset.changeSetAction));
+}
 
 test('both languages and all card entrances hide bulk actions at 0/1, show counts at 2+, and retain single actions after 2→1', async () => {
   for (const language of ['en', 'zh-CN'] as const) await fixture(async (f) => {
@@ -390,10 +393,13 @@ test('both languages and all card entrances hide bulk actions at 0/1, show count
     f.add(['A']);
     assert.equal(bulk(ui.render([['pending']]).cards).length, 0, 'one command plus one edit are not a batch');
     f.add(['B']);
-    const initial = ui.render([['pending', 'pending', 'applied', 'discarded']]);
-    assert.equal(bulk(initial.cards).length, 2);
-    assert.ok(bulk(initial.cards).every((button) => /2/u.test(button.textContent)));
-    assert.equal(bulk(ui.unlinked.children).length, 2);
+    const initial = ui.render([['pending', 'pending', 'applied', 'applied', 'discarded']]);
+    assert.equal(bulk(initial.cards).length, 4);
+    assert.equal(bulk(initial.cards).filter((button) => /2/u.test(button.textContent)).length, 2);
+    assert.deepEqual(bulk(initial.cards).map((button) => button.dataset.draftRunAction || button.dataset.changeSetAction), [
+      'approveDraftRunBatch', 'applyChangeSet', 'discardChangeSet', 'revertChangeSet'
+    ]);
+    assert.equal(bulk(ui.unlinked.children).length, 4);
     assert.equal(ui.api.buildDraftRunTimelineProjection().byMessageId.assistant.length, 2);
     const snapshot = JSON.parse(bulk(initial.cards)[0].dataset.batchSnapshot);
     assert.deepEqual(snapshot.entries.map((entry: { draftRunId: string }) => entry.draftRunId), ['A', 'B']);
@@ -404,6 +410,9 @@ test('both languages and all card entrances hide bulk actions at 0/1, show count
     assert.equal(bulk(reduced.cards).length, 0); assert.equal(bulk(ui.unlinked.children).length, 0);
     assert.ok(elements(reduced.cards).some((item) => item.dataset.draftRunAction === 'approveDraftRun' && item.dataset.draftRunId === 'B' && !item.disabled));
     assert.ok(elements(reduced.cards).some((item) => item.dataset.editAction === 'applyDraftEdit' && !item.disabled));
+    assert.ok(elements(reduced.cards).some((item) => item.dataset.editAction === 'discardDraftEdit' && !item.disabled));
+    assert.equal(bulk(ui.render([['applied']]).cards).length, 0, 'one revertible edit uses only its row action');
+    assert.ok(elements(ui.render([['applied']]).cards).some((item) => item.dataset.editAction === 'revertDraftEdit' && !item.disabled));
     assert.equal(bulk(ui.render([['pending'], ['pending']]).cards).length, 0, 'separate ChangeSets never combine');
     f.add(['C'], 's', 'another-run');
     assert.equal(bulk(ui.render().cards).length, 0, 'separate command batches never combine');

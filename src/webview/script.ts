@@ -3490,11 +3490,9 @@ export function getScript(): string {
       if (!historical) {
         if (applicableFiles.length >= 2) {
           setActions.append(createChangeSetActionButton(t('changeSetApplyAll', { count: applicableFiles.length }), 'applyChangeSet', changeSet.id, false));
-        }
-        if (applicableFiles.length) {
           setActions.append(createChangeSetActionButton(t('changeSetDiscardAll'), 'discardChangeSet', changeSet.id, true));
         }
-        if (revertibleFiles.length) {
+        if (revertibleFiles.length >= 2) {
           setActions.append(createChangeSetActionButton(t('revertAgentChange'), 'revertChangeSet', changeSet.id, true));
         }
       }
