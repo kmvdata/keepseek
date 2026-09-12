@@ -260,7 +260,7 @@ test('main AgentRunner routes delegation through the isolated adapter and reject
   assert.deepEqual(edits, [existing]);
 });
 
-test('real child provider request excludes parent history, context files, and parent-only instructions', async () => {
+test('real child provider request disables thinking and excludes parent-only context', async () => {
   const storageRoot = await createTemporaryDirectory('keepseek-subagent-runtime-');
   const capturedBodies: string[] = [];
   const originalFetch = globalThis.fetch;
@@ -285,13 +285,18 @@ test('real child provider request excludes parent history, context files, and pa
     const parent = createParentRequest();
     parent.model = {
       ...parent.model,
-      provider: 'openai-compatible',
+      provider: 'deepseek',
       contextWindowTokens: 64_000,
       maxOutputTokens: 2_000
     };
+    parent.settings = {
+      thinkingEnabled: true,
+      reasoningEffort: 'max',
+      compressionThreshold: 'balanced'
+    };
     parent.sourceConfig = {
       sourceId: 'source-a',
-      provider: 'openai-compatible',
+      provider: 'deepseek',
       apiKey: 'test-key',
       baseUrl: 'https://provider.invalid/v1',
       supportsBilling: false
@@ -350,6 +355,9 @@ test('real child provider request excludes parent history, context files, and pa
     assert.equal(JSON.parse(execution.content).ok, true);
     assert.equal(capturedBodies.length, 1);
     const providerBody = capturedBodies[0];
+    const parsedProviderBody = JSON.parse(providerBody) as Record<string, unknown>;
+    assert.deepEqual(parsedProviderBody.thinking, { type: 'disabled' });
+    assert.equal(Object.hasOwn(parsedProviderBody, 'reasoning_effort'), false);
     assert.match(providerBody, /CHILD SELF CONTAINED TASK/u);
     assert.match(providerBody, /PROJECT RULE ALLOWED IN CHILD/u);
     assert.doesNotMatch(providerBody, /PARENT HISTORY MUST NOT LEAK/u);

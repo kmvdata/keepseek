@@ -454,7 +454,14 @@ export class SubagentRuntime implements SubagentToolAdapter {
         checkpoint: resumeCheckpoint,
         prompt: input.input.task,
         model,
-        settings: { ...input.context.parentRequest.settings },
+        // Subagents are deliberately non-thinking regardless of the parent
+        // session's switch or effort. Keep this override at the child request
+        // boundary so fixed-model, follow-main, nested, and resumed runs all
+        // share the same invariant.
+        settings: {
+          ...input.context.parentRequest.settings,
+          thinkingEnabled: false
+        },
         contextFiles: [],
         contextInstructions,
         slimToolNames: toolNames,
