@@ -1,3 +1,4 @@
+import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
@@ -14,6 +15,7 @@ import type { ChatMessage, ChatSession } from '../src/shared/types';
 import { ContextUsageEstimateCache, createContextUsageCacheKey } from '../src/agent/contextUsageCache';
 import { getScript } from '../src/webview/script';
 import { getHtmlForWebview } from '../src/webview/html';
+import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 
 test('cold storage starts with one usable empty session without creating a monolith', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-cold-start-'));
@@ -221,6 +223,11 @@ test('webview bootstrap uses monotonic revisions, early ready, paging, and fail-
   assert.match(script, /incomingRevision <= lastStateRevision/u);
   assert.match(script, /type: 'loadOlderMessages'/u);
   assert.match(script, /sideEffectsReady/u);
+  assert.match(script, /getCommandSettingReadiness\('mainModel'\)/u);
+  assert.match(script, /approvalModeRestoring/u);
+  assert.match(script, /startupLoadingRequestContext/u);
+  assert.match(script, /message\.scope === 'startupSettings'/u);
+  assert.match(script, /syncSendButtonAvailability/u);
   assert.doesNotMatch(script, /postMessage\(\{ type: 'ready' \}\)/u);
   const html = getHtmlForWebview({
     webview: { cspSource: 'test-csp', asWebviewUri: (uri: vscode.Uri) => uri } as never,
@@ -233,6 +240,111 @@ test('webview bootstrap uses monotonic revisions, early ready, paging, and fail-
   });
   assert.ok(html.indexOf("postMessage({ type: 'ready' })") < html.indexOf('window.keepseekLogoUri'));
   assert.match(html, /script-src 'nonce-[A-Za-z0-9]+'/u);
+});
+
+test('startup settings patches expose values independently while keeping unsafe controls fail closed', () => {
+  const posted: Array<{ type: string; scope?: string; revision: number; state: Record<string, unknown> }> = [];
+  const activeSession = { approvalMode: 'delegate' };
+  const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    sessionReady: true,
+    approvalDataReady: false,
+    requestContextReady: false,
+    runContextReadiness: 'loading',
+    commandSettingsReadiness: {
+      mainModel: 'ready', subagentModel: 'loading', approvalMode: 'loading'
+    },
+    stateRevision: 0,
+    startupStatePostCount: 0,
+    availableModels: [{ id: 'model', sourceId: 'source' }],
+    selectedSourceId: 'source',
+    selectedModelId: 'model',
+    subagentModelSetting: { version: 1, mode: 'follow-main', updatedAt: new Date(0).toISOString() },
+    modelSelectionTransactions: { getSnapshot: () => ({ generation: 0 }) },
+    backgroundRunCoordinator: { getActiveRun: () => undefined },
+    sessionStore: { getActiveSession: () => activeSession },
+    startupTraceStages: new Set<string>(),
+    postToWebview: (message: { type: string; scope?: string; revision: number; state: Record<string, unknown> }) => posted.push(message)
+  });
+  const provider = host as unknown as { postStartupSettingsPatch(): void };
+  provider.postStartupSettingsPatch();
+  assert.equal(posted[0]?.type, 'statePatch');
+  assert.equal(posted[0]?.scope, 'startupSettings');
+  assert.equal(posted[0]?.revision, 1);
+  assert.equal(posted[0]?.state.approvalMode, 'delegate');
+  assert.deepEqual(posted[0]?.state.startup, {
+    phase: 'restoring-safety-state', interactiveReady: false, sideEffectsReady: false
+  });
+  assert.deepEqual(posted[0]?.state.commandSettingsReadiness, {
+    mainModel: 'ready', subagentModel: 'loading', approvalMode: 'loading'
+  });
+
+  host.approvalDataReady = true;
+  host.requestContextReady = true;
+  host.runContextReadiness = 'ready';
+  host.commandSettingsReadiness = {
+    mainModel: 'ready', subagentModel: 'ready', approvalMode: 'ready'
+  };
+  provider.postStartupSettingsPatch();
+  assert.equal(posted[1]?.revision, 2);
+  assert.deepEqual(posted[1]?.state.startup, {
+    phase: 'ready', interactiveReady: true, sideEffectsReady: true
+  });
+});
+
+test('command settings become ready without waiting for project context or the first full state', async () => {
+  let releaseContext!: () => void;
+  const contextGate = new Promise<void>((resolve) => { releaseContext = resolve; });
+  let settingsReady!: () => void;
+  const settingsReadySignal = new Promise<void>((resolve) => { settingsReady = resolve; });
+  let fullStatePosts = 0;
+  const patches: Array<Record<string, string>> = [];
+  const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    sessionInitialization: Promise.resolve(),
+    sessionReady: false,
+    approvalDataReady: false,
+    requestContextReady: false,
+    runContextReadiness: 'loading',
+    commandSettingsReadiness: {
+      mainModel: 'loading', subagentModel: 'loading', approvalMode: 'loading'
+    },
+    availableModels: [{ id: 'model', sourceId: 'source' }],
+    startupTraceStages: new Set<string>(),
+    sessionStore: { activeSessionId: 'session', getActiveSession: () => ({ approvalMode: 'ask' }) },
+    approvalReviews: { initialize: async () => {} },
+    changeSets: { initialize: async () => {}, loadSession: async () => {} },
+    draftRuns: { initialize: async () => {}, loadSession: async () => {} },
+    legacyMemoryMigration: { refresh: async () => {} },
+    subagentSettingsStore: {
+      load: async () => ({ version: 1, mode: 'follow-main', updatedAt: new Date(0).toISOString() })
+    },
+    syncConfiguredState: () => {},
+    postLightweightState: () => {},
+    postStartupSettingsPatch() {
+      const snapshot = { ...this.commandSettingsReadiness } as Record<string, string>;
+      patches.push(snapshot);
+      if (Object.values(snapshot).every((value) => value === 'ready')) settingsReady();
+    },
+    refreshModelSourceState: async (options?: { onResolved?: () => void }) => { options?.onResolved?.(); },
+    refreshSkills: async () => { await contextGate; },
+    refreshBackgroundRunAvailability: async () => {},
+    postState: () => { fullStatePosts += 1; },
+    cleanupExpiredSessions: async () => {},
+    refreshBalance: async () => {}
+  });
+  const provider = host as unknown as { initializeAfterWebviewReady(): Promise<void> };
+  const initialization = provider.initializeAfterWebviewReady();
+  await settingsReadySignal;
+  assert.equal(fullStatePosts, 0);
+  assert.equal(host.approvalDataReady, true);
+  assert.equal(host.requestContextReady, false);
+  assert.ok(patches.some((snapshot) => snapshot.mainModel === 'ready'));
+  assert.ok(patches.some((snapshot) => snapshot.subagentModel === 'ready'));
+  assert.ok(patches.some((snapshot) => snapshot.approvalMode === 'ready'));
+
+  releaseContext();
+  await initialization;
+  assert.equal(host.requestContextReady, true);
+  assert.equal(fullStatePosts, 1);
 });
 
 function workspaceScope(name: string): WorkspaceSessionScope {

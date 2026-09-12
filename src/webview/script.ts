@@ -91,6 +91,11 @@ export function getScript(): string {
       draftRunBatch: null,
       activeDraftRunId: '',
       approvalMode: 'ask',
+      commandSettingsReadiness: {
+        mainModel: 'loading',
+        subagentModel: 'loading',
+        approvalMode: 'loading'
+      },
       authorizedExternalReferenceUris: [],
       isBusy: false,
       agentActivity: {
@@ -1178,6 +1183,15 @@ export function getScript(): string {
         if (incomingRevision) lastStateRevision = incomingRevision;
         var previousActiveSessionId = state.activeSessionId || '';
         Object.assign(state, message.state);
+        if (message.type === 'statePatch' && message.scope === 'startupSettings') {
+          rememberTerminalAgentActivity(state.agentActivity);
+          renderStatus();
+          if (window.keepseekInputControls) {
+            window.keepseekInputControls.render();
+          }
+          syncSendButtonAvailability();
+          return;
+        }
         pendingChangeActions.clear();
         pendingDraftRunApprovals.clear();
         pendingDraftRunActions.clear();
@@ -1351,6 +1365,10 @@ export function getScript(): string {
       if (window.keepseekInputControls) {
         window.keepseekInputControls.render();
       }
+      syncSendButtonAvailability();
+    }
+
+    function syncSendButtonAvailability() {
       sendButton.disabled = !state.startup?.interactiveReady || (!state.isBusy && (
         window.keepseekInputControls && window.keepseekInputControls.isPromptSubmittableEmpty
           ? window.keepseekInputControls.isPromptSubmittableEmpty()
@@ -2171,7 +2189,14 @@ export function getScript(): string {
       if (!state.startup?.interactiveReady) {
         stopAgentStatusRotation();
         agentStatusRotationKey = '';
-        setTransientStatus(getLanguage() === 'en' ? 'Restoring conversations and safety state…' : '正在恢复会话与安全状态…');
+        var phase = state.startup?.phase;
+        setTransientStatus(t(phase === 'loading-sessions'
+          ? 'startupLoadingSessions'
+          : phase === 'loading-request-context'
+            ? 'startupLoadingRequestContext'
+            : phase === 'startup-error'
+              ? 'startupLoadFailed'
+              : 'startupRestoringSafetyState'));
         return;
       }
       if (!state.isBusy) {

@@ -187,6 +187,14 @@ const INITIAL_VISIBLE_MESSAGE_COUNT = 30;
 const MESSAGE_PAGE_SIZE = 50;
 const MAX_DELETE_CONFIRMATION_PATHS = 10;
 
+type StartupLoadState = 'loading' | 'ready' | 'error';
+
+interface CommandSettingsReadiness {
+  mainModel: StartupLoadState;
+  subagentModel: StartupLoadState;
+  approvalMode: StartupLoadState;
+}
+
 export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = CHAT_VIEW_TYPE;
 
@@ -276,6 +284,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly visibleMessageLimits = new Map<string, number>();
   private sessionReady = false;
   private approvalDataReady = false;
+  private requestContextReady = false;
+  private runContextReadiness: StartupLoadState = 'loading';
+  private commandSettingsReadiness: CommandSettingsReadiness = {
+    mainModel: 'loading',
+    subagentModel: 'loading',
+    approvalMode: 'loading'
+  };
+  private readonly startupTraceStages = new Set<string>();
   private startupInitializationPromise: Promise<void> | undefined;
   private stateRevision = 0;
   private fullStateSent = false;
@@ -805,9 +821,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleMessage(message: WebviewMessage): Promise<void> {
+    if (isAgentRequestMessage(message.type) && (!this.approvalDataReady || !this.requestContextReady)) {
+      console.warn('KeepSeek: ignored an Agent request before startup context and recovery stores were ready.');
+      this.postStartupSettingsPatch();
+      return;
+    }
     if (isApprovalMutationMessage(message.type) && !this.approvalDataReady) {
       console.warn('KeepSeek: ignored an approval action before recovery stores were ready.');
-      this.postLightweightState();
+      this.postStartupSettingsPatch();
       return;
     }
     switch (message.type) {
@@ -847,6 +868,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.abortPrompt();
         return;
       case 'setApprovalMode':
+        if (this.commandSettingsReadiness.approvalMode !== 'ready') {
+          this.postStartupSettingsPatch();
+          return;
+        }
         if (message.mode !== 'ask' && message.mode !== 'model_review' && message.mode !== 'delegate') return;
         if (message.mode !== 'ask' && (this.isBusy || this.isStartingRun || this.activeDraftRunId)) return;
         if (message.mode !== 'ask' && !vscode.workspace.isTrusted) {
@@ -922,9 +947,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.deleteOtherWorkspace(message.workspaceKey);
         return;
       case 'setSelectedModel':
+        if (this.commandSettingsReadiness.mainModel !== 'ready') {
+          this.postStartupSettingsPatch();
+          return;
+        }
         await this.setSelectedModel(message.requestId, message.sourceId, message.modelId);
         return;
       case 'setSubagentModel':
+        if (this.commandSettingsReadiness.mainModel !== 'ready'
+          || this.commandSettingsReadiness.subagentModel !== 'ready') {
+          this.postStartupSettingsPatch();
+          return;
+        }
         await this.setSubagentModel(message.mode, message.sourceId, message.modelId);
         return;
       case 'cancelPendingModelSelection':
@@ -2077,7 +2111,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async refreshModelSourceState(options: { preserveAuthoritativeSelection?: boolean } = {}): Promise<void> {
+  private async refreshModelSourceState(options: {
+    preserveAuthoritativeSelection?: boolean;
+    onResolved?: () => void;
+  } = {}): Promise<void> {
     const generation = ++this.modelSourceStateRefreshGeneration;
     const previousRefresh = this.modelSourceStateRefreshPromise;
     const refreshPromise = (async () => {
@@ -2105,15 +2142,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (generation !== this.modelSourceStateRefreshGeneration) {
         return;
       }
-      // Adopting a default is a one-time project choice. Persist the complete
-      // identity, including legacy modelId-only selections, before publishing it.
-      if (selectedModel?.sourceId && (savedSelection.sourceId !== selectedModel.sourceId
-        || savedSelection.modelId !== selectedModel.id) && vscode.workspace.workspaceFolders?.length) {
-        await this.persistModelSelection(selectedModel.sourceId, selectedModel.id);
-        if (generation !== this.modelSourceStateRefreshGeneration) {
-          return;
-        }
-      }
+      const previousSelection = {
+        sourceId: this.selectedSourceId,
+        modelId: this.selectedModelId
+      };
       this.modelSources = modelSources;
       this.availableModels = availableModels;
       this.defaultModelSelection = defaultSelection;
@@ -2121,6 +2153,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.selectedModelId = selectedModel?.id ?? '';
       if (selectedModel?.sourceId) {
         this.balanceStore.selectSource(this.getBalanceSourceScope(selectedModel.sourceId));
+      }
+      // Publish the resolved catalog immediately. A new workspace may still be
+      // persisting its adopted default selection, but the command menu no longer
+      // needs to stay blank while those two workspace configuration writes finish.
+      options.onResolved?.();
+      // Adopting a default is a one-time project choice. Persist the complete
+      // identity, including legacy modelId-only selections. Interaction remains
+      // disabled until this completes, so a failed adoption can safely roll back.
+      if (selectedModel?.sourceId && (savedSelection.sourceId !== selectedModel.sourceId
+        || savedSelection.modelId !== selectedModel.id) && vscode.workspace.workspaceFolders?.length) {
+        await this.persistModelSelection(selectedModel.sourceId, selectedModel.id, previousSelection);
+        if (generation !== this.modelSourceStateRefreshGeneration) {
+          return;
+        }
       }
     })();
     this.modelSourceStateRefreshPromise = refreshPromise;
@@ -2709,9 +2755,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postState();
   }
 
-  private async persistModelSelection(sourceId: string, modelId: string): Promise<void> {
-    const previousSourceId = this.selectedSourceId;
-    const previousModelId = this.selectedModelId;
+  private async persistModelSelection(
+    sourceId: string,
+    modelId: string,
+    rollbackSelection: { sourceId: string; modelId: string } = {
+      sourceId: this.selectedSourceId,
+      modelId: this.selectedModelId
+    }
+  ): Promise<void> {
+    const previousSourceId = rollbackSelection.sourceId;
+    const previousModelId = rollbackSelection.modelId;
     const config = vscode.workspace.getConfiguration('keepseek');
     this.modelSelectionPersistenceDepth += 1;
     try {
@@ -2722,9 +2775,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await config.update('selectedSourceId', previousSourceId, vscode.ConfigurationTarget.Workspace);
         await config.update('selectedModelId', previousModelId, vscode.ConfigurationTarget.Workspace);
       } catch {
-        // The in-memory authoritative selection remains unchanged; the next
-        // configuration refresh will reconcile any partial external write.
+        // The explicit rollback below also restores the in-memory selection;
+        // the next configuration refresh can reconcile any partial external write.
       }
+      this.selectedSourceId = previousSourceId;
+      this.selectedModelId = previousModelId;
       throw error;
     } finally {
       this.modelSelectionPersistenceDepth = Math.max(0, this.modelSelectionPersistenceDepth - 1);
@@ -4701,40 +4756,106 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.sessionReady = true;
       this.syncConfiguredState();
       this.postLightweightState();
+      this.markStartupStageOnce('approval-mode-visible', { entries: 1 });
 
       const approvalTask = this.measureStartup('approval-review-store-loaded', () => this.approvalReviews.initialize());
       const changeSetTask = this.measureStartup('change-set-store-loaded', () => this.changeSets.initialize());
       const draftRunTask = this.measureStartup('draft-run-store-loaded', () => this.draftRuns.initialize());
-      const legacyTask = this.measureStartup('legacy-memory-loaded', () => this.legacyMemoryMigration.refresh());
-      const modelTask = this.measureStartup('model-sources-loaded', () => this.refreshModelSourceState());
-      const subagentTask = this.measureStartup('subagent-settings-loaded', async () => {
-        this.subagentModelSetting = await this.subagentSettingsStore.load();
-      });
-      const skillsTask = legacyTask.then(() => this.measureStartup('skills-and-project-instructions-loaded', () => this.refreshSkills({ post: false })));
-      const validationTask = this.measureStartup('validation-scripts-loaded', () => this.refreshBackgroundRunAvailability({ post: false }));
-      const results = await Promise.allSettled([
-        approvalTask,
-        changeSetTask,
-        draftRunTask,
-        legacyTask,
-        modelTask,
-        subagentTask,
-        skillsTask,
-        validationTask
-      ]);
-      this.approvalDataReady = results.slice(0, 3).every((result) => result.status === 'fulfilled');
-      if (this.approvalDataReady) {
-        await Promise.allSettled([
-          this.changeSets.loadSession?.(this.sessionStore.activeSessionId),
-          this.draftRuns.loadSession?.(this.sessionStore.activeSessionId)
-        ]);
-      }
+      const safetyTask = (async () => {
+        const results = await Promise.allSettled([approvalTask, changeSetTask, draftRunTask]);
+        let ready = results.every((result) => result.status === 'fulfilled');
+        if (ready) {
+          const sessionResults = await Promise.allSettled([
+            this.changeSets.loadSession?.(this.sessionStore.activeSessionId),
+            this.draftRuns.loadSession?.(this.sessionStore.activeSessionId)
+          ]);
+          ready = sessionResults.every((result) => result.status === 'fulfilled');
+        }
+        this.approvalDataReady = ready;
+        this.commandSettingsReadiness.approvalMode = ready ? 'ready' : 'error';
+        this.postStartupSettingsPatch();
+      })();
+
+      const legacyTask = this.measureStartup(
+        'legacy-memory-loaded',
+        () => this.legacyMemoryMigration.refresh()
+      ).then(
+        () => true,
+        (error) => {
+          console.warn('KeepSeek: legacy memory initialization failed; continuing without it.', error);
+          return false;
+        }
+      );
+      const modelTask = (async () => {
+        try {
+          await this.measureStartup('model-sources-loaded', () => this.refreshModelSourceState({
+            onResolved: () => {
+              this.markStartupStageOnce('main-model-visible', { entries: this.availableModels.length });
+              this.postStartupSettingsPatch();
+            }
+          }));
+          this.commandSettingsReadiness.mainModel = 'ready';
+        } catch (error) {
+          this.commandSettingsReadiness.mainModel = 'error';
+          console.warn('KeepSeek: model source initialization failed.', error);
+        } finally {
+          this.updateRequestContextReadiness();
+          this.postStartupSettingsPatch();
+        }
+      })();
+      const subagentTask = (async () => {
+        try {
+          await this.measureStartup('subagent-settings-loaded', async () => {
+            this.subagentModelSetting = await this.subagentSettingsStore.load();
+          });
+          this.commandSettingsReadiness.subagentModel = 'ready';
+          this.markStartupStageOnce('subagent-model-visible', { entries: 1 });
+        } catch (error) {
+          this.commandSettingsReadiness.subagentModel = 'error';
+          console.warn('KeepSeek: subagent settings initialization failed.', error);
+        } finally {
+          this.postStartupSettingsPatch();
+        }
+      })();
+      const runContextTask = (async () => {
+        await legacyTask;
+        try {
+          await this.measureStartup(
+            'skills-and-project-instructions-loaded',
+            () => this.refreshSkills({ post: false })
+          );
+          this.runContextReadiness = 'ready';
+        } catch (error) {
+          this.runContextReadiness = 'error';
+          console.warn('KeepSeek: project instructions or Skills initialization failed.', error);
+        } finally {
+          this.updateRequestContextReadiness();
+          this.postStartupSettingsPatch();
+        }
+      })();
+      const validationTask = (async () => {
+        try {
+          await this.measureStartup(
+            'validation-scripts-loaded',
+            () => this.refreshBackgroundRunAvailability({ post: false })
+          );
+        } catch (error) {
+          console.warn('KeepSeek: validation script discovery failed.', error);
+        } finally {
+          this.postStartupSettingsPatch();
+        }
+      })();
+
+      // A complete state needs recovered approval data and request context, but
+      // subagent preferences and validation discovery can finish independently.
+      await Promise.all([safetyTask, modelTask, runContextTask]);
       this.postState({ immediate: true, forceFull: true });
       this.startupTrace?.mark('first-full-state-sent', { revision: this.stateRevision });
       // Cleanup is deliberately after first full state and fail-closed store
       // recovery so it cannot remove sessions referenced by pending work.
       if (this.approvalDataReady) void this.cleanupExpiredSessions().catch(() => undefined);
       void this.refreshBalance();
+      void Promise.all([subagentTask, validationTask]);
       if (sessionResult[0]?.status === 'rejected') {
         console.warn('KeepSeek: session initialization failed; showing a recoverable empty session.', sessionResult[0].reason);
       }
@@ -4751,6 +4872,76 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     } else {
       await work();
     }
+  }
+
+  private updateRequestContextReadiness(): void {
+    this.requestContextReady = this.commandSettingsReadiness.mainModel === 'ready'
+      && this.runContextReadiness === 'ready';
+  }
+
+  private getStartupState(): {
+    phase: 'loading-sessions' | 'restoring-safety-state' | 'loading-request-context' | 'startup-error' | 'ready';
+    interactiveReady: boolean;
+    sideEffectsReady: boolean;
+  } {
+    const interactiveReady = this.sessionReady && this.approvalDataReady && this.requestContextReady;
+    const hasError = this.commandSettingsReadiness.mainModel === 'error'
+      || this.commandSettingsReadiness.approvalMode === 'error'
+      || this.runContextReadiness === 'error';
+    return {
+      phase: !this.sessionReady
+        ? 'loading-sessions'
+        : hasError
+          ? 'startup-error'
+          : !this.approvalDataReady
+            ? 'restoring-safety-state'
+            : !this.requestContextReady
+              ? 'loading-request-context'
+              : 'ready',
+      interactiveReady,
+      sideEffectsReady: this.sessionReady && this.approvalDataReady
+    };
+  }
+
+  private postStartupSettingsPatch(): void {
+    if (!this.sessionReady) {
+      this.postLightweightState();
+      return;
+    }
+    const revision = ++this.stateRevision;
+    const activeSession = this.sessionStore.getActiveSession();
+    this.postToWebview({
+      type: 'statePatch',
+      scope: 'startupSettings',
+      revision,
+      state: {
+        models: this.availableModels,
+        selectedSourceId: this.selectedSourceId,
+        selectedModelId: this.selectedModelId,
+        modelSelection: {
+          ...this.modelSelectionTransactions.getSnapshot(),
+          lockedByBackground: this.hasActiveBackgroundRun()
+        },
+        subagentModelSetting: this.subagentModelSetting,
+        approvalMode: normalizeApprovalMode(activeSession.approvalMode),
+        commandSettingsReadiness: { ...this.commandSettingsReadiness },
+        startup: this.getStartupState(),
+        backgroundAvailableScripts: this.backgroundAvailableScripts
+      }
+    });
+    this.startupStatePostCount += 1;
+    if (Object.values(this.commandSettingsReadiness).every((state) => state === 'ready')) {
+      this.markStartupStageOnce('command-menu-settings-ready', { revision });
+    }
+  }
+
+  private markStartupStageOnce(
+    stage: string,
+    details: { entries?: number; revision?: number } = {}
+  ): void {
+    if (this.startupTraceStages.has(stage)) return;
+    this.startupTraceStages.add(stage);
+    this.startupTrace?.mark(stage, details);
   }
 
   private postLightweightState(): void {
@@ -4770,11 +4961,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         hasOlderMessages: Boolean(activeSession && activeSession.messages.length > messages.length),
         changeSets: [],
         draftRuns: [],
-        startup: {
-          phase: hasSession ? 'restoring-safety-state' : 'loading-sessions',
-          interactiveReady: false,
-          sideEffectsReady: false
-        },
+        ...(activeSession ? { approvalMode: normalizeApprovalMode(activeSession.approvalMode) } : {}),
+        commandSettingsReadiness: { ...this.commandSettingsReadiness },
+        startup: this.getStartupState(),
         language: this.language,
         extensionInfo: this.extensionInfo,
         isMac: process.platform === 'darwin'
@@ -4957,11 +5146,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         draftRunBatch: this.draftRunBatches.state?.sessionId === activeSession.id ? this.draftRunBatches.state : undefined,
         activeDraftRunId: this.activeDraftRunId,
         approvalMode: normalizeApprovalMode(activeSession.approvalMode),
-        startup: {
-          phase: this.approvalDataReady ? 'ready' : 'restoring-safety-state',
-          interactiveReady: this.approvalDataReady,
-          sideEffectsReady: this.approvalDataReady
-        },
+        commandSettingsReadiness: { ...this.commandSettingsReadiness },
+        startup: this.getStartupState(),
         authorizedExternalReferenceUris: [...this.authorizedExternalReferenceUris],
         isBusy: this.isBusy || this.isStartingRun || Boolean(this.activeDraftRunId),
         agentActivity: this.agentActivity,
@@ -5532,6 +5718,16 @@ function isApprovalMutationMessage(type: WebviewMessage['type']): boolean {
     'cancelDraftRun',
     'cloneDraftRun',
     'authorizeDraftRunCwd'
+  ]).has(type);
+}
+
+function isAgentRequestMessage(type: WebviewMessage['type']): boolean {
+  return new Set<WebviewMessage['type']>([
+    'sendPrompt',
+    'editUserPrompt',
+    'continueAgentTask',
+    'continueAgentTaskInNewTurn',
+    'continueRepair'
   ]).has(type);
 }
 

@@ -241,6 +241,42 @@ test('Provider persists adoption once, retains it on default changes/restart, an
   }
 });
 
+test('Provider exposes the resolved startup model before new-project workspace writes finish', async () => {
+  const originalConfig = vscode.workspace.getConfiguration;
+  const originalFolders = vscode.workspace.workspaceFolders;
+  const workspaceValues: Record<string, string> = {};
+  let releaseWrites!: () => void;
+  const writesReleased = new Promise<void>((resolve) => { releaseWrites = resolve; });
+  let modelVisible!: () => void;
+  const visible = new Promise<void>((resolve) => { modelVisible = resolve; });
+  vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file('/workspace') }];
+  vscode.workspace.getConfiguration = () => ({
+    get: <T>(_key: string, fallback: T): T => fallback,
+    inspect: <T>(key: string) => ({ key: `keepseek.${key}`, workspaceValue: workspaceValues[key] as T | undefined }),
+    async update(key: string, value: string, target: unknown) {
+      assert.equal(target, vscode.ConfigurationTarget.Workspace);
+      await writesReleased;
+      workspaceValues[key] = value;
+    }
+  } as unknown as ReturnType<typeof originalConfig>);
+  try {
+    const host = providerHost(memory(b));
+    let finished = false;
+    const refresh = host.refreshModelSourceState({ onResolved: modelVisible }).then(() => { finished = true; });
+    await visible;
+    assert.equal(host.selectedSourceId, 'b');
+    assert.equal(finished, false, 'the model should be visible while workspace persistence is still pending');
+    assert.deepEqual(workspaceValues, {});
+    releaseWrites();
+    await refresh;
+    assert.deepEqual(workspaceValues, { selectedSourceId: 'b', selectedModelId: 'shared' });
+  } finally {
+    releaseWrites();
+    vscode.workspace.getConfiguration = originalConfig;
+    vscode.workspace.workspaceFolders = originalFolders;
+  }
+});
+
 function providerHost(state: Pick<Vscode.Memento, 'get' | 'update'>) {
   return Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     language: 'en', selectedSourceId: '', selectedModelId: '', modelSources: [], availableModels: [],
@@ -252,7 +288,7 @@ function providerHost(state: Pick<Vscode.Memento, 'get' | 'update'>) {
     postState: () => {}, postModelSettingsDialog: () => {}
   }) as {
     selectedSourceId: string; defaultModelSelection?: ModelSelection;
-    refreshModelSourceState(): Promise<void>;
+    refreshModelSourceState(options?: { onResolved?: () => void }): Promise<void>;
     setDefaultModel(selection: ModelSelection): Promise<void>;
     persistModelSelection(sourceId: string, modelId: string): Promise<void>;
   };

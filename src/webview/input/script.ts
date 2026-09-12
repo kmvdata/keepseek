@@ -305,7 +305,7 @@ export function getInputScript(): string {
           event.preventDefault();
           event.stopPropagation();
           if (isModelSelectionLocked()) {
-            setComposerStatus(t('modelSelectionLockedByBackground'));
+            setComposerStatus(getMainModelLockText());
             return;
           }
           commandModelListOpen = !commandModelListOpen;
@@ -364,7 +364,7 @@ export function getInputScript(): string {
           event.preventDefault();
           event.stopPropagation();
           if (isApprovalModeSelectionLocked()) {
-            setComposerStatus(t('modelSettingsReadonlyWhileBusy'));
+            setComposerStatus(getApprovalModeLockText());
             return;
           }
           commandApprovalModeListOpen = !commandApprovalModeListOpen;
@@ -2469,6 +2469,9 @@ export function getInputScript(): string {
       function renderCommandModel() {
         var models = Array.isArray(state.models) ? state.models : [];
         var selected = getSelectedModel(models);
+        var readiness = getCommandSettingReadiness('mainModel');
+        var readinessText = readiness === 'error' ? t('mainModelLoadFailed')
+          : readiness === 'loading' ? t('mainModelLoading') : '';
         var selectionState = state.modelSelection && typeof state.modelSelection === 'object'
           ? state.modelSelection
           : {};
@@ -2478,11 +2481,13 @@ export function getInputScript(): string {
         var currentRun = selectionState.currentRun && typeof selectionState.currentRun === 'object'
           ? selectionState.currentRun
           : null;
-        var locked = selectionState.lockedByBackground === true;
+        var lockedByBackground = selectionState.lockedByBackground === true;
+        var locked = readiness !== 'ready' || lockedByBackground;
+        var lockText = readinessText || (lockedByBackground ? t('modelSelectionLockedByBackground') : '');
         if (commandModelValue) {
           var currentModelValue = selected
             ? getModelSourceLabel(selected.model) + ' / ' + getModelDisplayLabel(selected.model)
-            : t('addModel');
+            : readinessText || t('addModel');
           commandModelValue.innerHTML = '';
           if (selected) {
             var currentLogo = createCommandModelProtocolLogo(selected.model.provider);
@@ -2499,13 +2504,14 @@ export function getInputScript(): string {
 
         if (commandModelSwitch) {
           commandModelSwitch.disabled = locked;
-          commandModelSwitch.title = locked ? t('modelSelectionLockedByBackground') : t('switchModelDescription');
+          commandModelSwitch.title = lockText || t('switchModelDescription');
           commandModelSwitch.setAttribute('aria-disabled', locked ? 'true' : 'false');
+          commandModelSwitch.setAttribute('aria-busy', readiness === 'loading' ? 'true' : 'false');
           commandModelSwitch.setAttribute('aria-expanded', commandModelListOpen ? 'true' : 'false');
         }
         if (commandModelDescription) {
-          commandModelDescription.textContent = locked
-            ? t('modelSelectionLockedByBackground')
+          commandModelDescription.textContent = lockText
+            ? lockText
             : state.isBusy ? t('modelSelectForNextTurn') : t('switchModelDescription');
         }
         if (commandModelStatus && commandModelStatusText && commandModelCancelPending) {
@@ -2516,7 +2522,7 @@ export function getInputScript(): string {
                 current: getModelDisplayLabel(currentRunModel),
                 target: pendingModel ? getModelDisplayLabel(pendingModel) : String(pending.modelId || '')
               })
-            : locked ? t('modelSelectionLockedByBackground') : '';
+            : lockedByBackground ? t('modelSelectionLockedByBackground') : '';
           commandModelStatus.classList.toggle('hidden', !pendingText);
           commandModelStatusText.textContent = pendingText;
           commandModelCancelPending.classList.toggle('hidden', !pending || locked);
@@ -2543,7 +2549,7 @@ export function getInputScript(): string {
         if (!models.length) {
           var empty = document.createElement('div');
           empty.className = 'command-model-option command-model-empty';
-          empty.textContent = t('modelsEmpty');
+          empty.textContent = readinessText || t('modelsEmpty');
           commandModelList.append(empty);
           return;
         }
@@ -2589,8 +2595,8 @@ export function getInputScript(): string {
           label.className = 'command-model-name';
           label.textContent = getModelDisplayLabel(model);
           label.title = model.id || getModelDisplayLabel(model);
-          option.title = locked
-            ? t('modelSelectionLockedByBackground')
+          option.title = lockText
+            ? lockText
             : isPending ? t('modelPendingOption', { model: getModelDisplayLabel(model) }) : model.id || getModelDisplayLabel(model);
 
           option.append(check, label);
@@ -2600,6 +2606,15 @@ export function getInputScript(): string {
 
       function renderCommandSubagentModel() {
         var models = Array.isArray(state.models) ? state.models : [];
+        var settingReadiness = getCommandSettingReadiness('subagentModel');
+        var modelReadiness = getCommandSettingReadiness('mainModel');
+        var readiness = settingReadiness === 'error' || modelReadiness === 'error'
+          ? 'error'
+          : settingReadiness === 'ready' && modelReadiness === 'ready' ? 'ready' : 'loading';
+        var readinessText = settingReadiness === 'error' ? t('subagentModelLoadFailed')
+          : modelReadiness === 'error' ? t('mainModelLoadFailed')
+            : settingReadiness === 'loading' ? t('subagentModelLoading')
+              : modelReadiness === 'loading' ? t('mainModelLoading') : '';
         var rawSetting = state.subagentModelSetting && typeof state.subagentModelSetting === 'object'
           ? state.subagentModelSetting
           : { mode: 'follow-main' };
@@ -2607,8 +2622,8 @@ export function getInputScript(): string {
         var sourceId = isFixed && typeof rawSetting.sourceId === 'string' ? rawSetting.sourceId : '';
         var modelId = isFixed && typeof rawSetting.modelId === 'string' ? rawSetting.modelId : '';
         var selectedModel = isFixed ? findModelForSelection(models, sourceId, modelId) : null;
-        var locked = isSubagentModelSelectionLocked();
-        var lockText = locked ? getSubagentModelLockText() : '';
+        var locked = readiness !== 'ready' || state.isBusy || isModelSelectionLocked();
+        var lockText = readinessText || (locked ? getSubagentModelLockText() : '');
         var currentText = isFixed
           ? selectedModel
             ? getModelSourceLabel(selectedModel) + ' / ' + getModelDisplayLabel(selectedModel)
@@ -2633,6 +2648,7 @@ export function getInputScript(): string {
           commandSubagentModelSwitch.disabled = locked;
           commandSubagentModelSwitch.title = lockText || t('subagentModelHint');
           commandSubagentModelSwitch.setAttribute('aria-disabled', locked ? 'true' : 'false');
+          commandSubagentModelSwitch.setAttribute('aria-busy', readiness === 'loading' ? 'true' : 'false');
           commandSubagentModelSwitch.setAttribute('aria-expanded', commandSubagentModelListOpen ? 'true' : 'false');
         }
         if (commandSubagentModelDescription) {
@@ -2706,7 +2722,11 @@ export function getInputScript(): string {
         var currentMode = state.approvalMode === 'delegate'
           ? 'delegate'
           : state.approvalMode === 'model_review' ? 'model_review' : 'ask';
+        var readiness = getCommandSettingReadiness('approvalMode');
+        var readinessText = readiness === 'error' ? t('approvalModeLoadFailed')
+          : readiness === 'loading' ? t('approvalModeRestoring') : '';
         var locked = isApprovalModeSelectionLocked();
+        var lockText = readinessText || (locked ? t('modelSettingsReadonlyWhileBusy') : '');
         var currentLabelKey = getApprovalModeLabelKey(currentMode);
         var currentDescriptionKey = getApprovalModeDescriptionKey(currentMode);
 
@@ -2716,13 +2736,14 @@ export function getInputScript(): string {
         }
         if (commandApprovalModeSwitch) {
           commandApprovalModeSwitch.disabled = locked;
-          commandApprovalModeSwitch.title = locked ? t('modelSettingsReadonlyWhileBusy') : t(currentDescriptionKey);
+          commandApprovalModeSwitch.title = lockText || t(currentDescriptionKey);
           commandApprovalModeSwitch.setAttribute('aria-disabled', locked ? 'true' : 'false');
+          commandApprovalModeSwitch.setAttribute('aria-busy', readiness === 'loading' ? 'true' : 'false');
           commandApprovalModeSwitch.setAttribute('aria-expanded', commandApprovalModeListOpen ? 'true' : 'false');
         }
         if (commandApprovalModeDescription) {
-          commandApprovalModeDescription.textContent = locked
-            ? t('modelSettingsReadonlyWhileBusy')
+          commandApprovalModeDescription.textContent = lockText
+            ? lockText
             : t(currentDescriptionKey);
         }
         if (!commandApprovalModeList) { return; }
@@ -2743,7 +2764,7 @@ export function getInputScript(): string {
           option.setAttribute('role', 'menuitemradio');
           option.setAttribute('aria-checked', isSelected ? 'true' : 'false');
           option.setAttribute('aria-label', t(item.labelKey));
-          option.title = t(item.descriptionKey);
+          option.title = lockText || t(item.descriptionKey);
 
           var check = document.createElement('span');
           check.className = 'command-model-check';
@@ -2757,7 +2778,7 @@ export function getInputScript(): string {
           var copy = document.createElement('span');
           copy.className = 'command-approval-option-copy';
           copy.append(label, description);
-          option.title = t(item.descriptionKey);
+          option.title = lockText || t(item.descriptionKey);
           option.setAttribute('aria-label', t(item.labelKey) + '. ' + t(item.descriptionKey));
           option.append(check, copy);
           commandApprovalModeList.append(option);
@@ -2780,18 +2801,50 @@ export function getInputScript(): string {
       }
 
       function isModelSelectionLocked() {
-        return Boolean(state.modelSelection && state.modelSelection.lockedByBackground === true);
+        return getCommandSettingReadiness('mainModel') !== 'ready'
+          || Boolean(state.modelSelection && state.modelSelection.lockedByBackground === true);
       }
 
       function isSubagentModelSelectionLocked() {
-        return Boolean(state.isBusy || isModelSelectionLocked());
+        return getCommandSettingReadiness('subagentModel') !== 'ready'
+          || Boolean(state.isBusy || isModelSelectionLocked());
       }
 
       function isApprovalModeSelectionLocked() {
-        return Boolean(state.isBusy && state.approvalMode === 'ask');
+        return getCommandSettingReadiness('approvalMode') !== 'ready'
+          || Boolean(state.isBusy && state.approvalMode === 'ask');
+      }
+
+      function getCommandSettingReadiness(key) {
+        var readiness = state.commandSettingsReadiness && typeof state.commandSettingsReadiness === 'object'
+          ? state.commandSettingsReadiness[key]
+          : 'loading';
+        return readiness === 'ready' || readiness === 'error' ? readiness : 'loading';
+      }
+
+      function getMainModelLockText() {
+        var readiness = getCommandSettingReadiness('mainModel');
+        return t(readiness === 'error'
+          ? 'mainModelLoadFailed'
+          : readiness === 'loading' ? 'mainModelLoading' : 'modelSelectionLockedByBackground');
+      }
+
+      function getApprovalModeLockText() {
+        var readiness = getCommandSettingReadiness('approvalMode');
+        return t(readiness === 'error'
+          ? 'approvalModeLoadFailed'
+          : readiness === 'loading' ? 'approvalModeRestoring' : 'modelSettingsReadonlyWhileBusy');
       }
 
       function getSubagentModelLockText() {
+        var readiness = getCommandSettingReadiness('subagentModel');
+        if (readiness !== 'ready') {
+          return t(readiness === 'error' ? 'subagentModelLoadFailed' : 'subagentModelLoading');
+        }
+        var mainReadiness = getCommandSettingReadiness('mainModel');
+        if (mainReadiness !== 'ready') {
+          return t(mainReadiness === 'error' ? 'mainModelLoadFailed' : 'mainModelLoading');
+        }
         return t(isModelSelectionLocked() ? 'modelSelectionLockedByBackground' : 'modelSettingsReadonlyWhileBusy');
       }
 

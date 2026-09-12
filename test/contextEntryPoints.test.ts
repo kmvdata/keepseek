@@ -462,7 +462,7 @@ test('command model labels prefer fetched names while hover keeps the model id',
   assert.match(inputScript, /label\.title = model\.id \|\| getModelDisplayLabel\(model\)/u);
   assert.match(
     inputScript,
-    /option\.title = locked[\s\S]*?: isPending[\s\S]*?: model\.id \|\| getModelDisplayLabel\(model\)/u
+    /option\.title = lockText[\s\S]*?: isPending[\s\S]*?: model\.id \|\| getModelDisplayLabel\(model\)/u
   );
 });
 
