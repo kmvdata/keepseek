@@ -25,6 +25,7 @@ import {
   LIST_WORKSPACE_DIRECTORY_TOOL_NAME,
   LIST_WORKSPACE_FILES_TOOL_NAME,
   READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
+  READ_EVIDENCE_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
   READ_SUBAGENT_RESULT_TOOL_NAME,
@@ -53,6 +54,10 @@ const LOW_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
   [DELEGATE_TASK_TOOL_NAME, 'subagent_delegate'],
   [DELEGATE_PARALLEL_TOOL_NAME, 'subagent_delegate'],
   [READ_SUBAGENT_RESULT_TOOL_NAME, 'subagent_delegate'],
+  // Evidence snapshots are immutable, task-scoped reads. Keep them in the
+  // same low-risk class as other local read-only retrieval tools so a v8
+  // schema can execute the infrastructure tool it exposes.
+  [READ_EVIDENCE_TOOL_NAME, 'workspace_read'],
   [LIST_WORKSPACE_FILES_TOOL_NAME, 'workspace_read'],
   [LIST_WORKSPACE_DIRECTORY_TOOL_NAME, 'workspace_read'],
   [SEARCH_WORKSPACE_TOOL_NAME, 'workspace_read'],

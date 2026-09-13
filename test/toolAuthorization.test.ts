@@ -6,6 +6,7 @@ import {
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   FIND_REFERENCES_TOOL_NAME,
   GIT_DIFF_TOOL_NAME,
+  READ_EVIDENCE_TOOL_NAME,
   RUN_DRAFT_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME
 } from '../src/agent/protocol';
@@ -22,6 +23,10 @@ test('classifies read-only semantic and Git tools as low risk', () => {
   assert.deepEqual(getToolAuthorizationMetadata(GIT_DIFF_TOOL_NAME), {
     riskLevel: 'low',
     scope: 'git_read'
+  });
+  assert.deepEqual(getToolAuthorizationMetadata(READ_EVIDENCE_TOOL_NAME), {
+    riskLevel: 'low',
+    scope: 'workspace_read'
   });
   assert.deepEqual(getToolAuthorizationMetadata(CREATE_DRAFT_EDIT_TOOL_NAME), {
     riskLevel: 'low',
