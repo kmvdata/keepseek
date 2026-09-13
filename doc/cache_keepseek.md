@@ -43,6 +43,7 @@ KeepSeek 的请求组装遵循三个互相配合的原则（实现核心在 `src
 1. **分层前缀（base-first）**：请求被拆成「极少变化的段」和「只增长的段」。system 系统提示、稳定上下文块、工具定义放在最前；历史消息按追加顺序居中；当前用户 prompt 放在最后。变化频率越低的段越靠前，保证任意一段变化时，被它「带失效」的后续内容尽量少。
 2. **Append-only 历史（只增不改）**：历史消息一旦进入投影就只增不改。任何「滑动窗口」「逐轮重打包」机制都会删除或重写中间消息，使第一个变化消息之后的所有内容 miss。
 3. **低频失效点（low-frequency invalidation）**：一切需要改写前缀的操作（摘要压缩、技能重激活、工具集裁剪）都被刻意压低频率；运行中变化的上下文则追加到新 user 消息尾部，不回写旧前缀。
+4. **受控 epoch 边界**：历史摘要刷新之外，Context Epoch rollover 是第二个明确的缓存重置点。它只重建同一逻辑任务的 provider replay lane，不改写持久化聊天历史，也不产生可见 user 消息。
 
 请求的最终形态（`buildInitialAgentMessages`，`src/agent/protocol.ts:80-126`）：
 
@@ -144,7 +145,7 @@ messages = [
 
 缓存优先档会把投影上限 `maxProjectionTokens = contextWindow × forceRatio` 提高到上下文窗口的 95%，因此能保留更多原始历史并延后摘要刷新；这是保护 DeepSeek 前缀缓存的预期取舍。提前清理档则更早释放上下文空间。
 
-模型、来源、provider 或 base URL 变化会迁移 `requestProtocol` cache lane，因为旧 provider 缓存前缀本来就不能复用；它**不会删除或强制重建** `contextCompression.summaries`。摘要是模型无关的语义文本，`HistorySummary.modelId` 只记录 provenance，新模型继续在 projection 中读取既有摘要。`requestProtocolVersion` 仅表示序列化与工具 schema 的兼容版本，不表示模型能力等级。v3 更新了 validation 的 schema 说明，但没有增加、删除或重排工具；新会话直接使用 v3，热 v2 会话保持原 schema 字节，只有 cache lane 已经自然失效时才升级，缺失版本的旧会话仍按 v1 回放。
+模型、来源、provider 或 base URL 变化会迁移 `requestProtocol` cache lane，因为旧 provider 缓存前缀本来就不能复用；它**不会删除或强制重建** `contextCompression.summaries`。摘要是模型无关的语义文本，`HistorySummary.modelId` 只记录 provenance，新模型继续在 projection 中读取既有摘要。`requestProtocolVersion` 仅表示序列化与工具 schema 的兼容版本，不表示模型能力等级。新会话使用 v8；v1–v7 的 system/history/schema 字节继续冻结。热旧 lane 在缓存自然失效或首次必须外置大结果时，通过一次 Context Epoch rollover 迁移到 v8，绝不重写旧 lane 或制造伪 user 消息。
 
 ### 3.6 工具集 schema 稳定性
 
@@ -186,20 +187,29 @@ messages = [
 
 **失效时机**：从不（相同状态下输出确定）。
 
-### 3.9 工具输出字节确定性
+### 3.9 Tool Evidence 与结果信封字节确定性
 
-**做什么**：`tool` 角色的消息（工具调用结果）也参与前缀。KeepSeek 对工具输出做确定性处理，保证「工作区状态相同则输出字节相同」：
+**做什么**：`tool` 角色的消息（工具调用结果）也参与前缀。v8 的所有工具先在 `ToolEvidenceStore` 保存执行意图，执行后保存完整正文、hash 与终态，再由动态准入生成一次 provider-visible 结果：
 
 - 文件列表确定性排序（`files.sort` localeCompare，`src/agent/tools/workspaceTools.ts`）；
 - CRLF 统一归一化为 `\n`；
-- 固定截断边界：搜索结果每行 500 字符加 `...`（`shapeSearchLine`，`workspaceTools.ts:1092-1099`）、范围读取行数 clamp、UTF-8 字节二分截断（`truncateToUtf8Bytes`）；
-- git 输出固定上限与 preview 截断（`src/agent/tools/gitTools.ts`）。
+- 文件/diff/log 按完整行、搜索/符号/诊断按 item、JSON 按合法结构整形；
+- 完整结果放不下时返回规范化 envelope：`completeInline=false`、稳定 `evidenceRef`/`contentHash`/总量和 `keepseek_read_evidence` 分页方法；
+- envelope 在 evidence record 中只写一次。重启、重试、三协议回放都逐字节复用；已保存证据不能重新截断或换序。
 
-**原理**：工具输出是历史中体积最大、最容易「不稳定」的部分。同一个 `keepseek_list_workspace_files` 结果，如果两次调用返回的文件顺序不同（取决于文件系统枚举顺序）或换行风格不同，字节就不同，从该 tool 消息之后全部 miss。确定性排序 + 归一化 + 固定截断把「同一状态的输出」钉死在同一个字节序列上。
+**原理**：工具输出是历史中体积最大、最容易不稳定的部分。内容寻址 evidence 把「完整结果保真」与「模型当次可见字节」分离；规范 JSON 排序和一次性保存把该次结果钉死。模型需要细节时读取不可变快照，而不是重跑原工具或改写旧消息。
 
-**失效时机**：从不（工作区状态不变时）；工作区文件变化时输出自然变化，这是真实信息变化，缓存失效是合理代价。
+**失效时机**：envelope 一旦创建永不变化。工作区后来变化不影响快照；需要当前状态时执行新的源读取并产生新 evidence。
 
-### 3.10 并发与顺序控制
+### 3.10 Context Epoch：第二个受控缓存边界
+
+**做什么**：动态准入在每次 Provider 请求前根据协议的真实 prospective projection、learned effective window、阶段化输出预留、协议开销、并行批次最小信封和动态误差量计算空间。当连最小信封也放不下、单 epoch 工具阈值到达、模型输出因 length 需续写，或 Provider 返回 context-too-long 时，Runner 在完整工具批次后持久化旧 epoch；完整宿主状态写入可分页 checkpoint evidence，规范化 seed 只携带其 ref/hash 和有界近期状态，再在同一 `sessionId/taskId` 内创建新 lane。
+
+新 seed 复用完全相同的 system、冻结 schema、会话 projection 和原始 user 需求，再追加语义摘要、宿主权威状态及 evidence 引用。模型摘要失败时使用确定性宿主摘要；失败不会结束任务。Responses 不把孤立 function output 带入新 lane，Anthropic 不伪造 thinking signature，Chat Completions 不拆散 tool call/result 对。
+
+**缓存代价**：rollover 是明确的一次冷边界，trace 记录原因、前后估算/实际 tokens、declared/learned window、摘要 fallback 和缓存数据。它换取后续 epoch 的稳定增长；旧 epoch 和 `ChatSession.messages` 原样保留。timestamp、随机 ID、绝对路径不进入可避免的稳定前缀，epoch seed 使用规范 key 排序并持久化后复用。
+
+### 3.11 并发与顺序控制
 
 **做什么**：前缀稳定性还要求「同一时刻只有一个东西在改这段会话」：
 
@@ -211,7 +221,7 @@ messages = [
 
 **失效时机**：不适用（它防止的是「意外失效」）。
 
-### 3.11 历史字节还原与当前 prompt 去重（B1/B4 契约）
+### 3.12 历史字节还原与当前 prompt 去重（B1/B4 契约）
 
 **做什么**：历史重发时的字节路径与首次发送时完全一致，这是缓存命中的直接守护：
 
@@ -272,11 +282,13 @@ Anthropic 对应指纹直接消费权威原生投影：top-level system、Anthro
 | system 稳定 | `cacheByteStability.test.ts` | system[0] 不随上下文/历史变化 |
 | 冻结 + append-only | `cacheByteStability.test.ts` | Skills 冻结后块字节稳定，请求序列保持字节前缀 |
 | context files 位置 | `protocolCache.test.ts` | context files 只进稳定 system 块，user 消息是纯 prompt |
-| 工具 schema 规范化/版本冻结 | `protocolCache.test.ts` | tools 按名排序、JSON 相等；v2 字节保持不变，v3 只在安全边界启用 |
+| 工具 schema 规范化/版本冻结 | `protocolCache.test.ts`、`toolResultBudget.test.ts` | tools 按名排序、JSON 相等；v1–v7 字节保持不变，v8 只在安全边界启用且固定含 evidence 工具 |
 | slim 冻结 | `protocolCache.test.ts` | 冻结后同一工具集 schema 跨轮一致 |
 | 压缩低频 | `historyCompressor.test.ts` | 低于比率不刷新（`fresh_enough`）、超强制比率同步刷新 |
 | 投影 append-only | `historyProjection.test.ts` | 无摘要时全量保留、前缀只增长 |
 | Anthropic 原生缓存与 replay | `anthropicMessages.test.ts` | 官方 cache_control、tools 冻结、lane 隔离、Thinking/signature 与工具结果原样有序回放 |
+| Evidence/envelope | `toolResultBudget.test.ts` | 20MB 分页、session/task 授权、结构化信封、重启后 provider-visible bytes 完全相同 |
+| Context Epoch | `toolResultBudget.test.ts`、三协议测试 | 同一任务内部 rollover、旧 lane 归档、新 seed 规范化、无伪 user 消息、协议配对合法 |
 
 这些测试用 `JSON.stringify` 级别的字节比较而不是语义比较——因为它们守护的正是「字节」这个缓存命中的唯一契约。
 
@@ -293,10 +305,11 @@ Anthropic 对应指纹直接消费权威原生投影：top-level system、Anthro
 | slim 冻结 | slim 模式也不会中途失效 | slim 模式无法中途增减工具 | 会话开始 / 编辑重发 |
 | implicit skill 冻结 | Skills 块跨轮不变 | 后续 prompt 不再激活新隐式技能 | 会话开始 / 编辑重发 |
 | 上下文去重 | 更小且确定的上下文块 | 需要 hash 计算 | 从不 |
-| 确定性工具输出 | tool 消息字节稳定 | 需要固定排序与截断边界 | 从不 |
+| Evidence + 不可变 envelope | 完整结果不挤占前缀，恢复字节完全一致 | 大结果需要按需分页 | envelope 创建一次 |
+| Context Epoch rollover | 容量压力下自动建立新的稳定增长段 | 每次 rollover 有一次明确冷启动成本 | 软阈值/协议迁移/Provider 拒绝时 |
 | 并发串行化 | 避免并发改写前缀 | 单飞限制吞吐 | 不适用 |
 | 当前 prompt 去重 | 避免重复消息导致错位 | 依赖内容比对 | 从不 |
 
 ## 7. 结语
 
-一句话总结：**KeepSeek 把「请求前缀」当成一种需要刻意维护的稳定资源**——用分层消息（base-first）、append-only 历史投影、低频失效点（阈值化压缩、per-session 冻结、字节不变复用）与确定性输出（schema 规范化、排序、截断、CRLF 归一化）来制造字节级稳定的前缀；用 usage 归一化、前缀指纹与命中率归因来监控它；用字节契约测试来守护它。最终效果是：多轮 agent 会话中，每一轮请求的大部分 token 都能以 1/50~1/120 的价格命中缓存，只有每轮新追加的消息按全价计费。
+一句话总结：**KeepSeek 把「请求前缀」当成一种需要刻意维护的稳定资源**——用分层消息、append-only 历史、不可变 evidence envelope 和低频受控边界制造字节级稳定前缀；历史摘要刷新与 Context Epoch rollover 分别处理跨消息历史与当前任务内的容量压力，二者都不会静默改写持久化聊天。usage 校准、前缀指纹、rollover trace 与字节契约测试共同守护这一行为。

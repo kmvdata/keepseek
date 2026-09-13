@@ -40,7 +40,6 @@ export interface AgentRuntimeProfile {
   maxToolCalls: number;
   /** Compatibility field, always 0. User execution policy lives outside model capabilities. */
   maxRunMs: number;
-  toolResultTokenBudget: number;
   streamIdleTimeoutMs: number;
   temperature: number;
   topP: number;
@@ -87,7 +86,6 @@ const FLASH_PROFILES = {
     maxToolIterations: 16,
     maxToolCalls: 48,
     maxRunMs: 0,
-    toolResultTokenBudget: 160_000,
     contextCompression: {
       keepRecentTurns: 14,
       softCompactRatio: 0.38,
@@ -103,7 +101,6 @@ const FLASH_PROFILES = {
     maxToolIterations: 24,
     maxToolCalls: 72,
     maxRunMs: 0,
-    toolResultTokenBudget: 240_000,
     contextCompression: {
       keepRecentTurns: 12,
       softCompactRatio: 0.34,
@@ -119,7 +116,6 @@ const FLASH_PROFILES = {
     maxToolIterations: 32,
     maxToolCalls: 96,
     maxRunMs: 0,
-    toolResultTokenBudget: 320_000,
     contextCompression: {
       keepRecentTurns: 10,
       softCompactRatio: 0.28,
@@ -138,7 +134,6 @@ const PRO_PROFILES = {
     maxToolIterations: 20,
     maxToolCalls: 64,
     maxRunMs: 0,
-    toolResultTokenBudget: 200_000,
     contextCompression: {
       keepRecentTurns: 18,
       softCompactRatio: 0.46,
@@ -154,7 +149,6 @@ const PRO_PROFILES = {
     maxToolIterations: 32,
     maxToolCalls: 96,
     maxRunMs: 0,
-    toolResultTokenBudget: 320_000,
     contextCompression: {
       keepRecentTurns: 16,
       softCompactRatio: 0.4,
@@ -170,7 +164,6 @@ const PRO_PROFILES = {
     maxToolIterations: 48,
     maxToolCalls: 144,
     maxRunMs: 0,
-    toolResultTokenBudget: 400_000,
     contextCompression: {
       keepRecentTurns: 12,
       softCompactRatio: 0.32,
@@ -187,7 +180,6 @@ const GENERIC_PROFILE = {
   maxToolIterations: 16,
   maxToolCalls: 48,
   maxRunMs: 0,
-  maxToolResultTokenBudget: 64_000,
   streamIdleTimeoutMs: 0,
   temperature: 1,
   topP: 1,
@@ -260,7 +252,6 @@ export function getAgentRuntimeProfile(
       maxToolIterations: selected.maxToolIterations,
       maxToolCalls: selected.maxToolCalls,
       maxRunMs: selected.maxRunMs,
-      toolResultTokenBudget: Math.min(selected.toolResultTokenBudget, contextWindowTokens),
       streamIdleTimeoutMs: 0,
       temperature: 1,
       topP: 1,
@@ -287,10 +278,6 @@ export function getAgentRuntimeProfile(
     maxToolIterations: GENERIC_PROFILE.maxToolIterations,
     maxToolCalls: GENERIC_PROFILE.maxToolCalls,
     maxRunMs: GENERIC_PROFILE.maxRunMs,
-    toolResultTokenBudget: Math.max(1, Math.min(
-      GENERIC_PROFILE.maxToolResultTokenBudget,
-      Math.floor(contextWindowTokens * 0.5)
-    )),
     streamIdleTimeoutMs: GENERIC_PROFILE.streamIdleTimeoutMs,
     temperature: GENERIC_PROFILE.temperature,
     topP: GENERIC_PROFILE.topP,

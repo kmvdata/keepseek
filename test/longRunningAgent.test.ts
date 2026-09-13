@@ -11,7 +11,7 @@ import { SafeFileEditor } from '../src/edits/safeFileEditor';
 import { getScript } from '../src/webview/script';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 import { getVisibleMessages, normalizeStoredSessions } from '../src/sessions/chatSessionStore';
-import { ExecutionClock, abortable, mergeDurations, normalizeDuration } from '../src/agent/executionPolicy';
+import { ExecutionClock, ExecutionCostBudget, abortable, mergeCostLimits, mergeDurations, normalizeCostLimit, normalizeDuration } from '../src/agent/executionPolicy';
 import { checkpointCopy, createRunCheckpoint, normalizeRunCheckpoint, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import { AgentRunner } from '../src/agent/runner';
 import { BackgroundRunCoordinator } from '../src/agent/backgroundRunCoordinator';
@@ -21,7 +21,7 @@ import { ResponsesStreamParser } from '../src/agent/providers/responsesStreamPar
 import { AnthropicStreamParser } from '../src/agent/providers/anthropicStreamParser';
 import { OpenAICompatibleClient } from '../src/agent/providers/openAiCompatibleClient';
 import { getAgentRuntimeProfile } from '../src/shared/modelProfiles';
-import { getConfiguredAgentMaxExecutionMs, getConfiguredBackgroundMaxDurationMs } from '../src/shared/config';
+import { getConfiguredAgentMaxCost, getConfiguredAgentMaxExecutionMs, getConfiguredBackgroundMaxDurationMs } from '../src/shared/config';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import type { AgentRequest } from '../src/shared/types';
 
@@ -33,12 +33,26 @@ describe('long-running Agent execution and safe recovery', () => {
     assert.equal(normalizeDuration(Number.MAX_VALUE), Number.MAX_SAFE_INTEGER);
     assert.equal(JSON.parse(JSON.stringify({ duration: normalizeDuration(undefined) })).duration, 0);
     assert.equal(getConfiguredAgentMaxExecutionMs(), 0);
+    assert.equal(getConfiguredAgentMaxCost(), 0);
     assert.equal(getConfiguredBackgroundMaxDurationMs(), 0);
     for (const id of ['generic', 'deepseek-v4-flash', 'deepseek-v4-pro']) {
       for (const reasoningEffort of ['high', 'max'] as const) {
         assert.equal(getAgentRuntimeProfile({ id, label: id, provider: id.startsWith('deepseek') ? 'deepseek' : 'openai-compatible' }, { thinkingEnabled: true, reasoningEffort }).maxRunMs, 0);
       }
     }
+  });
+
+  it('shares a stable per-currency cost ceiling across one logical task', () => {
+    for (const value of [undefined, null, 0, -1, NaN, Infinity, '0.1']) assert.equal(normalizeCostLimit(value), 0);
+    assert.equal(normalizeCostLimit(0.25), 0.25);
+    assert.equal(mergeCostLimits(0, undefined, 0.5, 1), 0.5);
+    const budget = new ExecutionCostBudget(0.5, { '$': 0.1 });
+    budget.record(0.15, '¥');
+    budget.record(0.4, '$');
+    assert.deepEqual(budget.snapshot(), { '$': 0.5, '¥': 0.15 });
+    assert.deepEqual(budget.exhausted, { currency: '$', cost: 0.5, limit: 0.5 });
+    const restored = new ExecutionCostBudget(0.5, budget.snapshot());
+    assert.deepEqual(restored.exhausted, budget.exhausted);
   });
 
   it('runs beyond 10, 30, 60 minutes; excludes pauses and host suspension; parallel time counts once', () => {
@@ -218,6 +232,12 @@ describe('long-running Agent execution and safe recovery', () => {
     cp.status = 'running'; cp.usedMs = 100;
     assert.match(recoveryBlocker(cp)!, /Time budget/u);
     assert.equal(normalizeRunCheckpoint(cp)?.stopReason, 'extension_restart');
+    const costCp = createRunCheckpoint(request(), 0, 'user', [], 0.25);
+    costCp.status = 'interrupted'; costCp.usedCostByCurrency = { '¥': 0.25 };
+    const normalizedCost = normalizeRunCheckpoint(JSON.parse(JSON.stringify(costCp)))!;
+    assert.equal(normalizedCost.maxCost, 0.25);
+    assert.deepEqual(normalizedCost.usedCostByCurrency, { '¥': 0.25 });
+    assert.match(recoveryBlocker(normalizedCost)!, /cost limit/u);
     assert.equal(normalizeRunCheckpoint({ version: 1 }), undefined);
     assert.equal(normalizeRunCheckpoint({ ...cp, version: 900 }), undefined);
   });
@@ -226,9 +246,34 @@ describe('long-running Agent execution and safe recovery', () => {
     const cp = createRunCheckpoint(request(), 0, 'default', []);
     const scope = { key: 'w', name: 'workspace', folderUris: [] };
     const sessions = normalizeStoredSessions({ sessions: [{
-      id: 's', workspaceKey: 'w', messages: [{ id: 'a', role: 'assistant', content: 'partial', createdAt: new Date().toISOString(), runCheckpoint: cp }]
+      id: 's', workspaceKey: 'w', messages: [{
+        id: 'a', role: 'assistant', content: 'partial', createdAt: new Date().toISOString(), runCheckpoint: cp,
+        runDetails: {
+          runId: 'run', modelId: 'model', status: 'succeeded', startedAt: new Date().toISOString(),
+          modelRequests: {}, toolCalls: [],
+          contextEpochs: [{
+            index: 2, reason: 'soft_threshold', estimatedPromptTokens: 28_000,
+            afterEstimatedPromptTokens: 7_000, actualPromptTokens: 27_500,
+            declaredWindowTokens: 32_000, learnedEffectiveWindowTokens: 30_000,
+            reusablePrefixTokensEstimate: 6_000, estimatedCacheResetTokens: 21_500,
+            summaryKind: 'model'
+          }]
+        }
+      }]
     }] }, scope);
     assert.equal(sessions[0].messages[0].runCheckpoint?.stopReason, 'extension_restart');
+    assert.deepEqual(sessions[0].messages[0].runDetails?.contextEpochs?.[0], {
+      index: 2,
+      reason: 'soft_threshold',
+      estimatedPromptTokens: 28_000,
+      afterEstimatedPromptTokens: 7_000,
+      actualPromptTokens: 27_500,
+      declaredWindowTokens: 32_000,
+      learnedEffectiveWindowTokens: 30_000,
+      reusablePrefixTokensEstimate: 6_000,
+      estimatedCacheResetTokens: 21_500,
+      summaryKind: 'model'
+    });
     const visible = getVisibleMessages(sessions[0].messages);
     assert.equal(visible[0].runState?.canResume, true);
     assert.equal(visible[0].runCheckpoint, undefined);

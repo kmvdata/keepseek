@@ -308,6 +308,8 @@ export type ChatRole = 'user' | 'assistant' | 'system';
 export interface ChatMessageContextMeta {
   isProtected?: boolean;
   protectedReason?: string;
+  /** `budget_auto_continue` is deserialization-only for old transcripts. New
+   * runs never create it or any capacity-continuation user message. */
   displayKind?: 'draft_run_auto_continue' | 'delegated_auto_continue' | 'budget_auto_continue';
 }
 
@@ -432,7 +434,7 @@ export interface ChatMessage {
   runState?: {
     taskId: string; status: string; stopReason?: string; usedMs: number; maxExecutionMs: number; limitSource: string;
     attempt: number; modelRequests: number; retries: number; lastNetworkAt?: string; lastEventAt?: string;
-    requestStartedAt?: string; lastContentAt?: string; lastStepAt?: string; steps: number; canResume: boolean; canContinueInNewTurn?: boolean; blocker?: string; error?: string;
+    requestStartedAt?: string; lastContentAt?: string; lastStepAt?: string; steps: number; canResume: boolean; blocker?: string; error?: string;
   };
   id: string;
   role: ChatRole;
@@ -962,6 +964,18 @@ export interface RunDetailsSummary {
   };
   cache?: RunDetailsCacheSummary;
   historySummaries?: RunDetailsHistorySummaryProvenance[];
+  contextEpochs?: Array<{
+    index: number;
+    reason: string;
+    estimatedPromptTokens: number;
+    afterEstimatedPromptTokens?: number;
+    actualPromptTokens?: number;
+    declaredWindowTokens: number;
+    learnedEffectiveWindowTokens: number;
+    reusablePrefixTokensEstimate?: number;
+    estimatedCacheResetTokens?: number;
+    summaryKind: 'model' | 'host_fallback';
+  }>;
   budgetStopReason?: string;
   failureReason?: string;
   traceLogUri?: string;
@@ -1102,6 +1116,8 @@ export interface AgentRequest {
   approvalRootTaskId?: string;
   checkpoint?: import('../agent/runCheckpoint').RunCheckpoint;
   taskClock?: import('../agent/executionPolicy').ExecutionClock;
+  /** Runtime-only shared cost ledger; excluded from persisted request bytes. */
+  taskCostBudget?: import('../agent/executionPolicy').ExecutionCostBudget;
   prompt: string;
   model: KeepseekModel;
   settings: AgentSettings;
@@ -1155,6 +1171,7 @@ export interface AgentExecutionLimits {
   maxToolIterations?: number;
   maxToolCalls?: number;
   maxRunMs?: number;
+  maxCost?: number;
   timeLimitSource?: string;
   maxRepairIterations?: number;
 }
@@ -1280,6 +1297,8 @@ export interface AgentRunCallbacks {
   onTraceLog?: (traceLog: AgentTraceLogInfo) => void;
   onTaskPlan?: (taskPlan: TaskPlan) => void;
   onRunDetails?: (runDetails: RunDetailsSummary) => void;
+  /** Persists a controlled in-task protocol rollover without a visible turn. */
+  onProtocolMigration?: (protocol: { version: number; toolSchemaVersion: number; toolNames: string[] }) => Promise<void>;
 }
 
 export type BackgroundRunStatus =
@@ -1299,6 +1318,7 @@ export interface BackgroundRunGoal {
 export interface BackgroundRunLimits {
   maxRounds: number;
   maxDurationMs: number;
+  /** Legacy serialized name; interpreted as a per-epoch rollover threshold. */
   maxToolCalls: number;
 }
 

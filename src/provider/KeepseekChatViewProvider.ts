@@ -1,5 +1,4 @@
-import { canContinueBudgetInNewTurn, checkpointCopy, endpointHash, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
-import { canContinueRepairLoop, getBudgetContinuationPrompt, nextBudgetContinuation, type BudgetContinuationProgress } from '../agent/budgetContinuation';
+import { checkpointCopy, endpointHash, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
@@ -82,7 +81,6 @@ import {
   DEFAULT_DEEPSEEK_BASE_URL,
   DEFAULT_HISTORY_RETENTION_DAYS,
   getConfiguredAgentSettings,
-  getConfiguredAgentMaxAutoContinueTurns,
   getConfiguredBalanceRefreshIntervalMs,
   getConfiguredBackgroundMaxDurationMs,
   getConfiguredBackgroundMaxRounds,
@@ -255,16 +253,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private currentRunAbortController: AbortController | undefined;
   private activeDraftRunId: string | undefined;
   private readonly delegatedApprovals = new DelegatedApprovalQueue();
-  /** Volatile, consumed once. Loading a saved budget panel never schedules work. */
-  private pendingBudgetContinuation?: {
-    sessionId: string;
-    messageId: string;
-    sourceId: string;
-    modelId: string;
-    approvalMode: ChatSession['approvalMode'];
-    progress: BudgetContinuationProgress;
-    approvalRootTaskId?: string;
-  };
   private delegatedApprovalInFlight = false;
   private draftRunOutputPostTimer: ReturnType<typeof setTimeout> | undefined;
   private pendingDraftRunOutputEvent: DraftRunStoreEvent | undefined;
@@ -408,7 +396,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   public dispose(): void {
     this.draftRunBatches?.cancel();
     this.delegatedApprovals.cancel();
-    this.pendingBudgetContinuation = undefined;
     this.currentRunAbortController?.abort();
     clearInterval(this.sessionCleanupTimer);
     if (this.draftRunOutputPostTimer) {
@@ -887,7 +874,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           // Every mode transition revokes queued effects and unconsumed authority.
           this.draftRunBatches?.cancel();
           this.delegatedApprovals.cancel();
-          this.pendingBudgetContinuation = undefined;
           if (message.mode === 'ask') this.abortPrompt();
           await this.sessionStore.setApprovalMode(message.mode);
           if (message.mode !== 'ask' && session.approvalMode === message.mode && session.id === this.sessionStore.activeSessionId) {
@@ -908,9 +894,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'continueAgentTask':
         await this.continueAgentTask(message.messageId);
-        return;
-      case 'continueAgentTaskInNewTurn':
-        await this.continueAgentTaskInNewTurn(message.messageId);
         return;
       case 'continueRepair':
         await this.continueRepair();
@@ -1382,7 +1365,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private clearSessionTransientState(): void {
     this.draftRunBatches?.cancel();
     this.delegatedApprovals.cancel();
-    this.pendingBudgetContinuation = undefined;
     this.fileContext.clear();
     this.authorizedExternalReferenceUris.clear();
     this.liveContextUsage = undefined;
@@ -3155,7 +3137,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private abortPrompt(): void {
     this.draftRunBatches?.cancel();
     this.delegatedApprovals.cancel();
-    this.pendingBudgetContinuation = undefined;
     this.currentRunAbortController?.abort();
     if (this.activeDraftRunId) {
       this.draftRuns.cancel(this.activeDraftRunId);
@@ -3209,7 +3190,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         sessionId: session.id, sourceId: this.selectedSourceId, modelId: this.selectedModelId
       });
       claimed = true;
-      this.pendingBudgetContinuation = undefined;
       this.delegatedApprovals.cancel();
       this.isBusy = true;
       this.postState();
@@ -3856,21 +3836,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postState();
   }
 
-  private async continueAgentTaskInNewTurn(messageId: string): Promise<void> {
-    if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.hasActiveBackgroundRun()) return;
-    const session = this.sessionStore.getActiveSession();
-    const message = session.messages.at(-1);
-    const cp = message?.runCheckpoint;
-    if (message?.id !== messageId || !cp || !canContinueBudgetInNewTurn(cp)) return;
-    // A visible, ordinary user message starts a new run. Do not mutate the old
-    // checkpoint, reuse its execution permits, or reset a pending repair loop.
-    const prompt = getBudgetContinuationPrompt(this.language, normalizeApprovalMode(session.approvalMode));
-    await this.sendPrompt(prompt, this.selectedSourceId, this.selectedModelId, this.agentSettings, {
-      repairLoop: this.repairLoopsBySession.get(session.id) ?? session.repairLoop ?? cp.finalResponse?.repairLoop,
-      strictModelSelection: true
-    });
-  }
-
   private async continueAgentTask(messageId: string): Promise<void> {
     if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.hasActiveBackgroundRun()) return;
     const session = this.sessionStore.getActiveSession();
@@ -3940,7 +3905,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         onTaskPlan: (plan) => { this.taskPlansBySession.set(session.id, plan); refresh(); },
         onRunDetails: (details) => { message.runDetails = details; refresh(); },
         onSubagentRunSummary: (summary) => { session.subagentUsageStats = upsertSubagentRunUsageSummary(session.subagentUsageStats, summary); },
-        onSubagentHandoffEstimate: (estimate) => { session.subagentUsageStats = addSubagentHandoffEstimate(session.subagentUsageStats, estimate); }
+        onSubagentHandoffEstimate: (estimate) => { session.subagentUsageStats = addSubagentHandoffEstimate(session.subagentUsageStats, estimate); },
+        onProtocolMigration: async (protocol) => {
+          session.requestProtocol = {
+            ...session.requestProtocol,
+            ...protocol,
+            serializationStrategy: 'provider-projection-v2',
+            createdAt: session.requestProtocol?.createdAt ?? new Date().toISOString()
+          };
+          await this.sessionStore.persist();
+        }
       });
       message.content = response.message;
       message.reasoningContent = response.reasoningContent;
@@ -3966,7 +3940,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         approvalToolResults: response.approvalToolResults,
         approvalStopReason: response.approvalContinuationStopReason
       });
-      this.queueBudgetAutoContinuation(session.id, response, controller.signal);
     } catch (error) {
       vscode.window.showWarningMessage(getErrorMessage(error));
     } finally {
@@ -3989,8 +3962,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (this.draftRunBatches?.locked) return;
       this.draftRunBatches?.cancel();
     }
-    this.pendingBudgetContinuation = undefined;
-    const sessionId = this.sessionStore.activeSessionId;
     this.isStartingRun = true;
     this.postState();
     const preparationController = new AbortController();
@@ -4003,8 +3974,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.activeRunSettled = new Promise<void>((resolve) => { settled = resolve; });
     try {
       const response = await this.sendPromptImpl(...args);
-      if (response) this.queueBudgetAutoContinuation(sessionId, response, preparationController.signal,
-        args[4]?.budgetContinuation, args[4]?.approvalRootTaskId);
       return response;
     }
     finally {
@@ -4032,7 +4001,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       draftRunAutoContinue?: { agentRunId: string };
       draftRunBatch?: { operationId: string; signal: AbortSignal };
       delegatedContinuation?: boolean;
-      budgetContinuation?: BudgetContinuationProgress;
       approvalRootTaskId?: string;
     }
   ): Promise<AgentResponse | undefined> {
@@ -4320,9 +4288,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         createdAt: now,
         modelId: model.id,
         usedSkills: toChatMessageSkills(activeSkills),
-        contextMeta: options?.budgetContinuation
-          ? { displayKind: 'budget_auto_continue' }
-          : options?.delegatedContinuation
+        contextMeta: options?.delegatedContinuation
           ? { ...createProtectedContextMeta('delegated_approval_result'), displayKind: 'delegated_auto_continue' }
           : draftRunTail
           ? {
@@ -4497,6 +4463,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             assistantMessage.runDetails = runDetails;
           }
           scheduleLiveState();
+        },
+        onProtocolMigration: async (protocol) => {
+          activeSession.requestProtocol = {
+            ...activeSession.requestProtocol,
+            ...protocol,
+            serializationStrategy: 'provider-projection-v2',
+            createdAt: activeSession.requestProtocol?.createdAt ?? new Date().toISOString()
+          };
+          await this.sessionStore.persist();
         }
       });
       completedResponse = response;
@@ -4666,8 +4641,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     } finally {
       streamPublisher?.dispose();
       if (options?.backgroundRunId && assistantMessage?.runCheckpoint) this.backgroundRunCoordinator.recordExecutionTime(assistantMessage.runCheckpoint.usedMs);
-      // sendPrompt owns this controller through persistence and continuation
-      // scheduling, so Stop also cancels the gap between two budgeted turns.
+      // sendPrompt owns this controller through persistence and internal
+      // continuation scheduling, so Stop also cancels a rollover boundary.
       this.updateActiveSessionContextUsage(this.liveContextUsage);
       this.liveContextUsage = undefined;
       this.liveTurnUsage = undefined;
@@ -5265,52 +5240,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.draftRunAutoContinueTimer.unref?.();
   }
 
-  private queueBudgetAutoContinuation(sessionId: string, response: AgentResponse, signal: AbortSignal,
-    previous?: BudgetContinuationProgress, approvalRootTaskId?: string): void {
-    const session = this.sessionStore.getActiveSession();
-    if (signal.aborted || session.id !== sessionId || !vscode.workspace.isTrusted) return;
-    const message = session.messages.at(-1);
-    const cp = message?.runCheckpoint;
-    const progress = nextBudgetContinuation(cp, response, getConfiguredAgentMaxAutoContinueTurns(), previous);
-    if (!message || !cp || !progress || this.hasPendingBudgetContinuationApproval(session)) return;
-    this.pendingBudgetContinuation = {
-      sessionId, messageId: message.id, sourceId: cp.source.sourceId, modelId: cp.source.modelId,
-      approvalMode: session.approvalMode, progress,
-      approvalRootTaskId: approvalRootTaskId ?? cp.request.approvalRootTaskId ?? cp.taskId
-    };
-  }
-
-  private hasPendingBudgetContinuationApproval(session: ChatSession): boolean {
-    return this.changeSets.hasPendingForSession(session.id)
-      || this.draftRuns.toWebviewState(session.id).some((run) => ['pending', 'approved', 'running'].includes(run.status))
-      || !canContinueRepairLoop(this.repairLoopsBySession.get(session.id) ?? session.repairLoop);
-  }
-
-  private async maybeAutoContinueBudget(): Promise<boolean> {
-    if (this.draftRunBatches?.pending) return false;
-    if (!this.pendingBudgetContinuation || this.isBusy || this.isStartingRun || this.activeDraftRunId
-      || this.delegatedApprovalInFlight || this.draftRunAutoContinueInFlight || this.hasActiveBackgroundRun()) return false;
-    const pending = this.pendingBudgetContinuation;
-    this.pendingBudgetContinuation = undefined;
-    const session = this.sessionStore.getActiveSession();
-    const message = session.messages.at(-1);
-    const cp = message?.runCheckpoint;
-    if (session.id !== pending.sessionId || message?.id !== pending.messageId || !cp || !canContinueBudgetInNewTurn(cp)
-      || !vscode.workspace.isTrusted || session.approvalMode !== pending.approvalMode
-      || this.selectedSourceId !== pending.sourceId || this.selectedModelId !== pending.modelId
-      || getConfiguredAgentMaxAutoContinueTurns() < pending.progress.turns
-      || this.hasPendingBudgetContinuationApproval(session)) return false;
-    // No await between consuming the queue and sendPrompt's synchronous lock.
-    await this.sendPrompt(getBudgetContinuationPrompt(this.language, normalizeApprovalMode(session.approvalMode), true),
-      pending.sourceId, pending.modelId, this.agentSettings, {
-        repairLoop: this.repairLoopsBySession.get(session.id) ?? session.repairLoop ?? cp.finalResponse?.repairLoop,
-        budgetContinuation: pending.progress,
-        approvalRootTaskId: pending.approvalRootTaskId,
-        strictModelSelection: true
-      });
-    return true;
-  }
-
   private async maybeAutoContinueDraftRun(): Promise<void> {
     if (this.draftRunBatches?.pending) {
       await this.maybeAutoContinueDraftRunBatch();
@@ -5327,7 +5256,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
       }
     }
-    if (await this.maybeAutoContinueBudget()) return;
     if (this.draftRunAutoContinueInFlight
       || this.isBusy
       || this.isStartingRun
@@ -5748,7 +5676,6 @@ function isApprovalMutationMessage(type: WebviewMessage['type']): boolean {
     'sendPrompt',
     'editUserPrompt',
     'continueAgentTask',
-    'continueAgentTaskInNewTurn',
     'continueRepair',
     'createSkillDraft',
     'applyDraftEdit',
@@ -5774,7 +5701,6 @@ function isAgentRequestMessage(type: WebviewMessage['type']): boolean {
     'sendPrompt',
     'editUserPrompt',
     'continueAgentTask',
-    'continueAgentTaskInNewTurn',
     'continueRepair'
   ]).has(type);
 }

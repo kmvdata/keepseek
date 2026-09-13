@@ -252,7 +252,7 @@ test('restart keeps remaining commands pending and restores no batch/continuatio
 
 type Host = {
   approveDraftRunBatch(snapshot: DraftRunBatchSnapshot): Promise<void>;
-  maybeAutoContinueDraftRun(): Promise<void>; maybeAutoContinueBudget(): Promise<boolean>;
+  maybeAutoContinueDraftRun(): Promise<void>;
   handleMessage(message: unknown): Promise<void>; abortPrompt(): void;
   sendPrompt(prompt: string, source: string, model: string): Promise<AgentResponse | undefined>;
   isBusy: boolean; isStartingRun: boolean; selectedModelId: string;
@@ -274,20 +274,18 @@ function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
     sessionStore: { activeSessionId: 's', getActiveSession: () => session },
     t: (key: string) => key,
     postState: () => {}, postToWebview: () => {}, setAgentActivity: () => {},
-    queueBudgetAutoContinuation: () => {},
     sendPromptImpl: async () => { states.sends++; return {} as AgentResponse; }
   }) as Host;
   return { host, states, session };
 }
 
-test('Provider holds the batch lock across all commands and blocks duplicate messages, single approval, models and budget continuation', async () => fixture(async (f) => {
+test('Provider holds the batch lock across all commands and blocks duplicate messages, single approval and models', async () => fixture(async (f) => {
   f.add(['A', 'B', 'C']); const { host, states } = hostFixture(f);
   const snapshot = f.batch.snapshots('s')[0];
   const executing = host.approveDraftRunBatch(snapshot); await f.executor.started(1);
   await host.handleMessage({ type: 'approveDraftRunBatch', snapshot });
   await host.handleMessage({ type: 'approveDraftRun', id: 'B', specHash: f.store.get('B')!.specHash, autoContinue: true });
   await host.sendPrompt('new prompt', 'source', 'model');
-  assert.equal(await host.maybeAutoContinueBudget(), false);
   f.executor.finish('A'); await f.executor.started(2); assert.equal(host.isBusy, true);
   await host.maybeAutoContinueDraftRun(); assert.equal(states.sends, 0);
   f.executor.finish('B'); await f.executor.started(3); assert.equal(host.isBusy, true);

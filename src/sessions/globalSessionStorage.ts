@@ -16,6 +16,7 @@ import { getHardRetentionCutoff } from './sessionRetention';
 import { writeJsonAtomic } from '../shared/atomicStorage';
 import type { StartupPerformanceTrace } from '../shared/startupPerformance';
 import type { ApprovalMode, ChatSession, ChatSessionSummary, WorkspaceSummary } from '../shared/types';
+import { ToolEvidenceStore } from '../agent/evidence/store';
 
 export const SESSION_MIGRATION_KEY = 'keepseek.chatSessionsMigratedToGlobalV1';
 export const SESSION_CLEANUP_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -84,6 +85,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   private readonly manifestUri: vscode.Uri;
   private readonly workspacesUri: vscode.Uri;
   private readonly legacyWorkspacesUri: vscode.Uri;
+  private readonly evidenceStore: ToolEvidenceStore;
 
   public constructor(
     globalStorageUri: vscode.Uri,
@@ -98,6 +100,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       LEGACY_SESSION_STORAGE_VERSION_DIR,
       SESSION_STORAGE_WORKSPACES_DIR
     );
+    this.evidenceStore = new ToolEvidenceStore(globalStorageUri);
   }
 
   public async loadWorkspace(workspaceScope: WorkspaceSessionScope): Promise<StoredWorkspaceSessionState> {
@@ -223,7 +226,10 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     if (!index) return;
     const removed = index.sessions.filter((entry) => ids.has(entry.id));
     if (!removed.length) return;
-    await Promise.all(removed.map((entry) => this.deleteFile(this.getSessionUri(getWorkspaceHash(normalizedWorkspaceKey), entry.id))));
+    await Promise.all(removed.flatMap((entry) => [
+      this.deleteFile(this.getSessionUri(getWorkspaceHash(normalizedWorkspaceKey), entry.id)),
+      this.evidenceStore.deleteSessionEvidence(entry.id)
+    ]));
     index.sessions = index.sessions.filter((entry) => !ids.has(entry.id));
     index.activeSessionId = chooseActiveSessionIdFromEntries(index.sessions, index.activeSessionId);
     index.updatedAt = new Date().toISOString();
@@ -239,6 +245,8 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const normalizedWorkspaceKey = workspaceKey.trim();
     if (!normalizedWorkspaceKey) return;
     const hash = getWorkspaceHash(normalizedWorkspaceKey);
+    const index = await this.loadIndexByWorkspaceKey(normalizedWorkspaceKey);
+    if (index) await Promise.all(index.sessions.map((entry) => this.evidenceStore.deleteSessionEvidence(entry.id)));
     await this.deleteFile(this.getWorkspaceDirectoryUri(hash), true);
     await this.deleteFile(vscode.Uri.joinPath(this.legacyWorkspacesUri, `${hash}.json`));
     const manifest = await this.readManifest();
@@ -300,7 +308,10 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       if (removed.length) {
         changed = true;
         const removedIds = new Set(removed.map((entry) => entry.id));
-        await Promise.all(removed.map((entry) => this.deleteFile(this.getSessionUri(hash, entry.id))));
+        await Promise.all(removed.flatMap((entry) => [
+          this.deleteFile(this.getSessionUri(hash, entry.id)),
+          this.evidenceStore.deleteSessionEvidence(entry.id)
+        ]));
         index.sessions = index.sessions.filter((entry) => !removedIds.has(entry.id));
         index.activeSessionId = chooseActiveSessionIdFromEntries(index.sessions, index.activeSessionId);
         index.updatedAt = new Date(now).toISOString();

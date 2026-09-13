@@ -27,7 +27,7 @@ describe('BackgroundRunCoordinator', () => {
     assert.match(coordinator.getActiveRun()?.stopReason ?? '', /rounds/iu);
   });
 
-  it('tracks cumulative tool calls and can be stopped', () => {
+  it('keeps cumulative tool calls as telemetry and uses the limit only as an epoch threshold', () => {
     const coordinator = new BackgroundRunCoordinator();
     coordinator.start({
       sessionId: 'session-1',
@@ -37,7 +37,15 @@ describe('BackgroundRunCoordinator', () => {
     });
     coordinator.beginRound();
     coordinator.recordRun(createRunDetails(2));
-    assert.match(coordinator.getLimitStopReason() ?? '', /tool calls/iu);
+    assert.equal(coordinator.getActiveRun()?.progress.toolCalls, 2);
+    assert.equal(coordinator.getLimitStopReason(), undefined);
+    assert.deepEqual(coordinator.getRemainingExecutionLimits(), {
+      maxToolIterations: 2,
+      maxToolCalls: 2,
+      maxRunMs: 60_000,
+      timeLimitSource: 'background.maxDurationMs + agent.maxExecutionMs (remaining active time)',
+      maxRepairIterations: 5
+    });
     assert.equal(coordinator.stop('User stopped.').status, 'stopped');
   });
 });

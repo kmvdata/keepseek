@@ -130,13 +130,21 @@
           "scope": "window",
           "markdownDescription": "Maximum bytes KeepSeek reads from one referenced or workspace text file. Binary, media, archive, and otherwise unreadable files are still rejected."
         },
-        "keepseek.agent.maxAutoContinueTurns": {
-          "type": "integer", "default": 8, "minimum": 0, "maximum": 100, "scope": "window",
-          "markdownDescription": "Maximum consecutive automatic new turns after the foreground Agent reaches its tool-round or tool-call limit. Applies to all approval modes and incurs new model usage. 0 disables budget auto-continuation. Pending approvals, no successful tools, repeated work, context/time limits and Stop still pause execution. / 前台 Agent 工具轮次或次数耗尽后最多连续自动续跑轮数，适用于全部审批模式，会产生新的模型用量。0 关闭；待审批、无成功工具操作、重复工作、上下文/时间上限或停止操作仍会暂停。"
+        "keepseek.providerInlineResultMaxChars": {
+          "type": "integer", "default": 48000, "minimum": 1024, "maximum": 1000000, "scope": "window",
+          "markdownDescription": "Maximum characters a newly produced tool result may inline into one Provider request. Dynamic context admission may choose a smaller envelope. This does not limit workspace reads or evidence storage."
+        },
+        "keepseek.evidenceMaxBytes": {
+          "type": "integer", "default": 100000000, "minimum": 1000000, "maximum": 1000000000, "scope": "window",
+          "markdownDescription": "Maximum bytes stored for one immutable tool-evidence result. Independent from the workspace read safety limit and Provider inline admission."
         },
         "keepseek.agent.maxExecutionMs": {
           "type": "number", "default": 0, "minimum": 0, "scope": "window",
           "markdownDescription": "Maximum effective execution time per logical Agent task (including children and recovery). 0 = unlimited. Authorization, Apply, queue and host suspension time are excluded. / 每项 Agent 任务的有效执行时间上限；0 不限时，恢复不清零。"
+        },
+        "keepseek.agent.maxCost": {
+          "type": "number", "default": 0, "minimum": 0, "scope": "window",
+          "markdownDescription": "Maximum accounted Provider cost per logical Agent task and billing currency, shared with child agents and recovery. 0 = unlimited. A positive value fails closed when the selected source cannot provide priced usage. / 每项逻辑任务、每种计费币种的 Provider 费用上限；子代理与恢复共享，0 不限额。来源不能提供可计费用量时正值配置会安全拒绝请求。"
         },
         "keepseek.agent.streamIdleTimeoutMs": {
           "type": "number", "default": 0, "minimum": 0, "maximum": 2147483647, "scope": "window",

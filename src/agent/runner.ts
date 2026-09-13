@@ -1,7 +1,7 @@
-import { ExecutionClock, ExecutionBudgetError, abortable, mergeDurations } from './executionPolicy';
-import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, AgentBudgetExceededError, recoveryBlocker, endpointHash, MAX_LENGTH_CONTINUATION_REQUESTS, type AgentBudgetFinishReason } from './runCheckpoint';
+import { ExecutionClock, ExecutionBudgetError, ExecutionCostBudget, abortable, mergeCostLimits, mergeDurations } from './executionPolicy';
+import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted, migrateLegacyCapacityCheckpoint } from './runCheckpoint';
 import { shapeWorkspaceListingResult } from './toolResultShaping';
-import { getConfiguredAgentMaxExecutionMs, getConfiguredStreamIdleTimeoutMs } from '../shared/config';
+import { getConfiguredAgentMaxCost, getConfiguredAgentMaxExecutionMs, getConfiguredEvidenceMaxBytes, getConfiguredProviderInlineResultMaxChars, getConfiguredStreamIdleTimeoutMs } from '../shared/config';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
@@ -69,6 +69,7 @@ import {
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
   READ_SUBAGENT_RESULT_TOOL_NAME,
+  READ_EVIDENCE_TOOL_NAME,
   RUN_DRAFT_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_SESSION_ARCHIVE_TOOL_NAME,
@@ -155,8 +156,23 @@ import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
 import { RunDetailsBuilder } from './logging/runDetails';
 import { createDraftRunProposal } from '../runs/draftRunProposal';
 import { normalizeApprovalMode } from './approvalMode';
+import { ToolEvidencePersistenceError, ToolEvidenceStore } from './evidence/store';
+import { prepareEvidenceEnvelope, stableStringify } from './evidence/shaping';
+import type { ToolEvidence } from './evidence/types';
+import { isContextTooLongError, ToolResultAdmissionController } from './toolResultAdmission';
+import { ContextWindowCalibrationStore } from './contextWindowCalibrationStore';
+import {
+  createContextEpochState,
+  createEpochHostCheckpoint,
+  createEpochSeed,
+  createHostFallbackSummary,
+  createTaskPlanProgressHash,
+  createWorkFingerprint,
+  observeNoProgress,
+  type ContextEpochRolloverReason
+} from './contextEpoch';
 
-const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 16_000;
+const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 2_048;
 const SEARCH_SHAPED_RESULT_LIMIT = 120;
 const SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT = 12;
 const SEARCH_SHAPED_TOTAL_CHARS = 50_000;
@@ -179,7 +195,7 @@ interface AgentRuntimeConfig {
   maxToolIterations: number;
   maxToolCalls: number;
   maxRunMs: number;
-  toolResultTokenBudget: number;
+  maxCost: number;
   streamIdleTimeoutMs: number;
   temperature: number;
   topP: number;
@@ -288,6 +304,7 @@ export class AgentRunAbortedError extends Error {
  * mutable services; the main extension coordinator uses AgentRunner below. */
 export class AgentLoop {
   private readonly dsmlToolParser = new DsmlToolParser();
+  private evidenceStore?: ToolEvidenceStore;
 
   public constructor(
     private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService(),
@@ -303,18 +320,33 @@ export class AgentLoop {
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
     if (request.checkpoint) {
-      const blocker = recoveryBlocker(request.checkpoint);
-      if (blocker) throw new AgentInterruptedError('waiting_for_user', blocker);
-      const source = request.checkpoint.source;
+      const requestCheckpoint = migrateLegacyCapacityCheckpoint(request.checkpoint);
+      request = { ...request, checkpoint: requestCheckpoint };
+      await this.reconcilePersistedEvidence(requestCheckpoint, request.sessionId ?? request.subagentContext?.parentSessionId ?? requestCheckpoint.taskId);
+      if (requestCheckpoint.state?.pending?.executing) {
+        throw new AgentInterruptedError('uncertain_tool_result',
+          `Uncertain tool result: ${requestCheckpoint.state.pending.executing.name}. Verify before resuming. / 工具结果未知，请先核实后再恢复。`);
+      }
+      const blocker = recoveryBlocker(requestCheckpoint);
+      if (blocker) throw new AgentInterruptedError(
+        isCostLimitExhausted(requestCheckpoint) ? 'cost_limit' : 'waiting_for_user',
+        blocker
+      );
+      const source = requestCheckpoint.source;
       if (request.model.id !== source.modelId || (request.sourceConfig && (
         request.sourceConfig.sourceId !== source.sourceId || request.sourceConfig.provider !== source.provider
         || endpointHash(request.sourceConfig.baseUrl) !== source.endpointHash))) throw new Error('Recovery source/model mismatch / 恢复来源或模型不匹配');
-      request = { ...request, executionLimits: request.checkpoint.request.executionLimits };
+      request = { ...request, executionLimits: requestCheckpoint.request.executionLimits };
     }
     const limit = request.checkpoint?.maxExecutionMs ?? mergeDurations(getConfiguredAgentMaxExecutionMs(), request.executionLimits?.maxRunMs);
+    const maxCost = request.taskCostBudget?.limit ?? (request.checkpoint
+      ? request.checkpoint.maxCost ?? 0
+      : mergeCostLimits(getConfiguredAgentMaxCost(), request.executionLimits?.maxCost));
     const cp = request.checkpoint ? checkpointCopy(request.checkpoint) : createRunCheckpoint(request, limit,
       request.executionLimits?.timeLimitSource ?? (request.executionLimits?.maxRunMs ? 'explicit invocation + agent.maxExecutionMs' : 'agent.maxExecutionMs (0 = unlimited)'),
-      (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString()));
+      (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString()), maxCost);
+    const taskCostBudget = request.taskCostBudget ?? new ExecutionCostBudget(maxCost, cp.usedCostByCurrency);
+    cp.maxCost = taskCostBudget.limit;
     if (!request.subagentContext && cp.delegationBudget) this.subagentTools?.restoreTree?.(cp.taskId, cp.delegationBudget);
     cp.attempt++; cp.status = 'running'; cp.stopReason = undefined; cp.error = undefined;
     const ownClock = new ExecutionClock(limit, cp.usedMs);
@@ -329,7 +361,9 @@ export class AgentLoop {
     if (signals.some((signal) => signal.aborted)) abort();
     const persist = async () => {
       if (!request.subagentContext) cp.delegationBudget = this.subagentTools?.snapshotTree?.(cp.taskId) ?? cp.delegationBudget;
-      cp.usedMs = ownClock.usedMs; cp.updatedAt = new Date().toISOString();
+      cp.usedMs = ownClock.usedMs;
+      cp.usedCostByCurrency = taskCostBudget.snapshot();
+      cp.updatedAt = new Date().toISOString();
       try { await callbacks.onCheckpoint?.(checkpointCopy(cp)); }
       catch (error) { cp.status = 'blocked'; cp.stopReason = String(error).includes('resource limit') ? 'resource_limit' : 'storage_failure'; cp.error = String(error); controller.abort(error); throw error; }
     };
@@ -343,7 +377,8 @@ export class AgentLoop {
     checkpointTimer.unref?.();
     try {
       await persist();
-      const response = await this.runLoop({ ...request, checkpoint: cp, taskClock: request.taskClock ?? ownClock, signal: controller.signal }, {
+      const response = await this.runLoop({ ...request, checkpoint: cp, taskClock: request.taskClock ?? ownClock,
+        taskCostBudget, signal: controller.signal }, {
         ...callbacks,
         beforeModelRequest: async () => {
           cp.modelRequests++; cp.requestStartedAt = new Date().toISOString();
@@ -374,9 +409,12 @@ export class AgentLoop {
       await persist();
       return response;
     } catch (error) {
-      cp.status = error instanceof AgentBudgetExceededError || ['storage_failure', 'resource_limit'].includes(cp.stopReason ?? '') ? 'blocked' : 'interrupted';
       cp.stopReason ??= clocks.some((clock) => clock.signal.aborted) ? 'time_budget'
-        : request.signal?.aborted ? 'user_stop' : error instanceof AgentInterruptedError ? error.reason : 'connection_interrupted';
+        : request.signal?.aborted ? 'user_stop'
+          : error instanceof AgentInterruptedError ? error.reason
+            : error instanceof ToolEvidencePersistenceError ? error.reason
+              : 'connection_interrupted';
+      cp.status = ['storage_failure', 'resource_limit'].includes(cp.stopReason) ? 'blocked' : 'interrupted';
       cp.error = error instanceof Error ? error.message : String(error);
       await persist();
       if (cp.stopReason === 'time_budget') throw new ExecutionBudgetError();
@@ -543,13 +581,11 @@ export class AgentLoop {
       details: Record<string, unknown> = {}
     ): AgentResponse => {
       const finishReason = typeof details.finishReason === 'string' ? details.finishReason : undefined;
-      const isBlocked = finishReason === 'tool_iterations_exhausted'
-        || finishReason === 'tool_call_limit_exhausted'
-        || finishReason === 'tool_result_budget_exhausted'
-        || finishReason === 'context_window_exhausted'
-        || finishReason === 'run_time_limit_exhausted';
+      const isBlocked = finishReason === 'run_time_limit_exhausted';
       if (isBlocked && finishReason) {
-        taskPlan.addBlocker(this.getBudgetToolError(finishReason as AgentBudgetFinishReason, request.language));
+        taskPlan.addBlocker(request.language === 'en'
+          ? 'The configured task execution-time limit was reached.'
+          : '已达到用户配置的任务执行时长上限。');
       }
       const repairState = repairLoop.getState();
       const finalMessage = validationState.decorateFinalMessage(
@@ -689,7 +725,7 @@ export class AgentLoop {
       maxToolCalls: runtimeConfig.maxToolCalls, maxRepairIterations: repairLoop.getState().maxIterations, maxValidationRuns: runtimeConfig.maxValidationRuns
     };
     taskPlan.beginExecution();
-    const providerProjection = buildProviderRequestProjection({
+    const buildCurrentProviderProjection = () => buildProviderRequestProjection({
       model: request.model,
       agentSettings: request.settings,
       contextFiles: request.contextFiles,
@@ -709,14 +745,15 @@ export class AgentLoop {
       baseUrl: runtimeConfig.baseUrl,
       systemPrompt: request.persona?.systemPrompt
     });
+    let providerProjection = buildCurrentProviderProjection();
     const projection = providerProjection.historyProjection;
     runDetailsBuilderRef.current?.setHistorySummaries(
       (request.contextCompression?.summaries ?? []).filter((summary) => (
         projection.usedSummaryIds.includes(summary.id)
       ))
     );
-    const messages = structuredClone(restored?.messages ?? providerProjection.messages);
-    providerRunState = providerProjection.responses
+    let messages = structuredClone(restored?.messages ?? providerProjection.messages);
+    const createInitialProviderRunState = (): ProviderNativeRunState | undefined => providerProjection.responses
       ? {
           protocol: 'openai-responses',
           input: [...providerProjection.responses.input],
@@ -739,6 +776,7 @@ export class AgentLoop {
             }) ? { type: 'ephemeral' } : undefined
           }
         : undefined;
+    providerRunState = createInitialProviderRunState();
     if (restored?.provider) providerRunState = structuredClone(restored.provider);
     trace.record({
       type: 'context_projection',
@@ -774,13 +812,13 @@ export class AgentLoop {
       type: 'agent_messages_initialized',
       messages: formatMessagesForTrace(messages, trace.includesPayload('request'))
     });
-    const tools = providerProjection.tools;
+    let tools = providerProjection.tools;
     // Runtime authority comes from the exact schema sent to the Provider, not
     // from the runner's wider routing table. This guard is shared by native,
     // Responses, Anthropic, DSML, and checkpoint-replayed tool calls because
     // every lane converges on performToolCall below.
-    const exposedToolNames = new Set(tools.map((tool) => tool.function.name));
-    const schemaHash = hashText(JSON.stringify(tools));
+    let exposedToolNames = new Set(tools.map((tool) => tool.function.name));
+    let schemaHash = hashText(JSON.stringify(tools));
     if (checkpoint.toolSchemaHash && checkpoint.toolSchemaHash !== schemaHash) throw new Error('Tool schema changed; recovery refused / 工具协议变化，不能继续旧任务');
     checkpoint.toolSchemaHash = schemaHash;
     promptCacheDiagnostics = this.createPromptCacheDiagnostics({
@@ -805,10 +843,28 @@ export class AgentLoop {
     draftEdits.forEach((edit) => validationState.recordDraftEdit(edit.id));
     const maxIterations = Math.max(0, runtimeConfig.maxToolIterations);
     const runDeadlineAt: number | undefined = undefined; // Effective clock owns cancellation; never a wall-clock deadline.
-    const maxToolResultTokens = runtimeConfig.toolResultTokenBudget > 0
-      ? runtimeConfig.toolResultTokenBudget
-      : Number.POSITIVE_INFINITY;
-    const outputReserveTokens = resolveOutputReserveTokens(runtimeConfig.maxTokens);
+    const calibrationStore = new ContextWindowCalibrationStore(this.globalStorageUri);
+    const calibrationKey = {
+      sourceId: runtimeConfig.sourceId,
+      provider: runtimeConfig.provider,
+      modelId: request.model.id,
+      endpointHash: endpointHash(runtimeConfig.baseUrl)
+    };
+    const admission = new ToolResultAdmissionController(
+      runtimeConfig.contextWindowTokens,
+      restored?.epoch?.calibration ?? await calibrationStore.load(calibrationKey)
+    );
+    const epoch = restored?.epoch
+      ? { ...restored.epoch, failures: [...(restored.epoch.failures ?? [])] }
+      : createContextEpochState(admission.state);
+    const outputReserveTokens = admission.decide({
+      estimatedInputTokens: 0,
+      configuredMaxOutputTokens: runtimeConfig.maxTokens,
+      phase: 'tool',
+      remainingBatchResults: 1
+    }).outputReserveTokens;
+    const evidenceStore = this.getEvidenceStore();
+    const evidenceSessionId = request.sessionId ?? request.subagentContext?.parentSessionId ?? checkpoint.taskId;
     const runtimeUsageBreakdown = {
       ...createContextUsageEstimate({
         model: request.model,
@@ -880,43 +936,7 @@ export class AgentLoop {
     let approvalReviewStopReason: string | undefined;
     let approvalReviewBoundaryReached = false;
     const approvalToolResults: NonNullable<AgentResponse['approvalToolResults']> = [];
-    let budgetStopReason: AgentBudgetFinishReason | undefined = restored?.budgetStopReason;
-    let budgetStopInstructionQueued = restored?.budgetStopInstructionQueued ?? false;
-    const queueBudgetStopInstruction = () => {
-      if (!budgetStopReason || budgetStopInstructionQueued) {
-        return;
-      }
-      const budgetInstructionMessage: DeepSeekMessage = {
-        role: 'user',
-        content: this.getBudgetStopInstruction(budgetStopReason, request.language)
-      };
-      messages.push(budgetInstructionMessage);
-      this.appendProviderUserText(providerRunState, budgetInstructionMessage.content ?? '');
-      trace.record({
-        type: 'agent_message_appended',
-        reason: 'budget_stop_instruction',
-        budgetStopReason,
-        message: trace.includesPayload('request') ? budgetInstructionMessage : summarizeDeepSeekMessage(budgetInstructionMessage)
-      });
-      runtimeUsageBreakdown.inputTokensEstimate += estimateDeepSeekMessageTokens(budgetInstructionMessage);
-      budgetStopInstructionQueued = true;
-      emitUsageEstimate(tools);
-    };
-
     emitUsageEstimate(tools);
-
-    const initialBudgetStopReason = this.getContextWindowBudgetStopReason(
-      request,
-      messages,
-      tools,
-      outputReserveTokens,
-      providerRunState
-    );
-    if (initialBudgetStopReason) {
-      throw new AgentBudgetExceededError(initialBudgetStopReason, request.language === 'en'
-        ? 'The provider request would exceed the model context window before the first API call. Reduce attached context or allow history compression to complete.'
-        : '首次 API 调用前的 Provider 请求将超过模型上下文窗口。请减少附件上下文，或等待历史压缩完成。');
-    }
 
     let nextTurn = restored?.turn ?? 0;
     let pending = restored?.pending;
@@ -931,12 +951,188 @@ export class AgentLoop {
       checkpoint.state = {
         messages: committedMessages, provider: committedProvider, completedReplay, toolRounds, draftEdits, draftRuns,
         reasoningParts, turn: nextTurn, toolCallCount, validationRunCount, toolResultTokens,
-        validationState: validationState.getState(), repairLoop: repairLoop.getState(), budgetStopReason, budgetStopInstructionQueued, pending
+        validationState: validationState.getState(), repairLoop: repairLoop.getState(), epoch: { ...epoch, calibration: { ...admission.state } }, pending
       };
       await callbacks.onCheckpoint?.(checkpoint);
     };
     await saveStep();
-    for (let turn = nextTurn; turn <= maxIterations; turn += 1) {
+    const rolloverEpoch = async (reason: ContextEpochRolloverReason): Promise<void> => {
+      let estimated: number;
+      let summaryKind: 'model' | 'host_fallback';
+      let seed: string;
+      let archiveName: string;
+      const persistedRollover = epoch.status === 'persisted' && epoch.pendingRollover?.seed
+        && epoch.pendingRollover.archiveName && epoch.pendingRollover.summaryKind
+        && typeof epoch.pendingRollover.estimatedPromptTokens === 'number'
+        ? epoch.pendingRollover
+        : undefined;
+      if (persistedRollover) {
+        reason = persistedRollover.reason;
+        estimated = persistedRollover.estimatedPromptTokens!;
+        summaryKind = persistedRollover.summaryKind!;
+        seed = persistedRollover.seed!;
+        archiveName = persistedRollover.archiveName!;
+      } else {
+        epoch.status = 'summarizing';
+        epoch.pendingRollover = { reason };
+        await saveStep!();
+        estimated = this.estimateCurrentProviderInputTokens(request, messages, tools, providerRunState);
+        let semanticSummary: string | undefined;
+        const rolloverFailures: string[] = [];
+        try {
+          semanticSummary = await this.createEpochSemanticSummary({
+            request, runtimeConfig, messages, tools, providerRunState, callbacks: runCallbacks,
+            trace, usageTotals: upstreamUsageTotals, runDeadlineAt
+          });
+        } catch (error) {
+          // A summary timeout is recoverable through the deterministic host
+          // checkpoint. An explicit task Stop is not: propagate it immediately
+          // instead of persisting a new epoch after cancellation.
+          if (request.signal?.aborted) throw error;
+          const summaryError = formatUnknownError(error);
+          rolloverFailures.push(summaryError instanceof Error ? summaryError.message : stableStringify(summaryError));
+          trace.record({ type: 'context_epoch_summary_failed', epochIndex: epoch.index, error: summaryError });
+        }
+        summaryKind = semanticSummary?.trim() ? 'model' : 'host_fallback';
+        semanticSummary = semanticSummary?.trim() || createHostFallbackSummary({
+          plan: taskPlan.getPlan(), evidenceRefs: epoch.evidenceRefs, failures: rolloverFailures
+        });
+        const epochCheckpointInput = {
+          originalTask: request.prompt,
+          taskPlan: taskPlan.getPlan(),
+          draftEdits,
+          draftRuns,
+          repairLoop: repairLoop.getState(),
+          validationState: validationState.getState(),
+          evidenceRefs: epoch.evidenceRefs,
+          idempotency: epoch.idempotency,
+          noProgress: epoch.noProgress,
+          failures: [...epoch.failures.map((failure) => stableStringify(failure)), ...rolloverFailures],
+          nextStep: 'Continue the remaining plan from the strongest unresolved item.',
+          runtimeState: {
+            taskId: checkpoint.taskId,
+            approvalRootTaskId: request.approvalRootTaskId ?? checkpoint.taskId,
+            modelRequests: checkpoint.modelRequests,
+            totalToolCalls: toolCallCount,
+            totalToolResultTokensEstimate: toolResultTokens,
+            totalCostByCurrency: request.taskCostBudget?.snapshot(),
+            maxCost: request.taskCostBudget?.limit
+          },
+          approvalResults: approvalToolResults.map(({ toolCallId, toolName, status }) => ({ toolCallId, toolName, status }))
+        };
+        const hostCheckpoint = createEpochHostCheckpoint(epochCheckpointInput);
+        let hostCheckpointEvidence = await evidenceStore.ensureIntent({
+          sessionId: evidenceSessionId,
+          taskId: checkpoint.taskId,
+          epochIndex: epoch.index,
+          toolCallId: `__keepseek_context_epoch_host_state_${epoch.index}`,
+          toolName: 'keepseek_context_epoch_host_state',
+          argumentsHash: hashText(hostCheckpoint),
+          effectKind: 'read'
+        });
+        hostCheckpointEvidence = await evidenceStore.complete(hostCheckpointEvidence, hostCheckpoint, { contentType: 'json' });
+        this.upsertEpochEvidenceRef(epoch, hostCheckpointEvidence);
+        seed = createEpochSeed({
+          ...epochCheckpointInput,
+          semanticSummary,
+          checkpointEvidence: {
+            evidenceRef: hostCheckpointEvidence.evidenceRef,
+            contentHash: hostCheckpointEvidence.contentHash!,
+            totalChars: hostCheckpointEvidence.totalChars!,
+            totalBytes: hostCheckpointEvidence.totalBytes!
+          }
+        });
+        archiveName = await evidenceStore.saveEpochSnapshot(evidenceSessionId, checkpoint.taskId, epoch.index, {
+          version: 1, index: epoch.index, messages, provider: providerRunState, seed,
+          messageHash: hashText(stableStringify(messages)), providerHash: hashText(stableStringify(providerRunState))
+        });
+        epoch.status = 'persisted';
+        epoch.pendingRollover = {
+          reason,
+          estimatedPromptTokens: estimated,
+          actualPromptTokens: admission.state.lastActualInputTokens,
+          summaryKind,
+          archiveName,
+          seed
+        };
+        await saveStep!();
+      }
+      if (reason === 'protocol_migration' && (request.requestProtocolVersion ?? 1) < 8) {
+        request = { ...request, requestProtocolVersion: 8 };
+        checkpoint.request.requestProtocolVersion = 8;
+        providerProjection = buildCurrentProviderProjection();
+        tools = providerProjection.tools;
+        exposedToolNames = new Set(tools.map((tool) => tool.function.name));
+        schemaHash = hashText(JSON.stringify(tools));
+        checkpoint.toolSchemaHash = schemaHash;
+        await callbacks.onProtocolMigration?.({
+          version: 8,
+          toolSchemaVersion: 8,
+          toolNames: tools.map((tool) => tool.function.name)
+        });
+      }
+      const currentIndex = epoch.index;
+      epoch.rollovers.push({
+        index: currentIndex,
+        reason,
+        estimatedPromptTokens: estimated,
+        actualPromptTokens: admission.state.lastActualInputTokens,
+        declaredWindowTokens: runtimeConfig.contextWindowTokens,
+        learnedEffectiveWindowTokens: admission.state.learnedEffectiveWindowTokens,
+        summaryKind,
+        archiveName,
+        seedHash: hashText(seed)
+      });
+      epoch.index += 1;
+      epoch.totalRollovers += 1;
+      epoch.turnInEpoch = 0;
+      epoch.toolCallsInEpoch = 0;
+      epoch.status = 'active';
+      epoch.pendingRollover = undefined;
+      epoch.seed = seed;
+      messages = structuredClone(providerProjection.messages);
+      providerRunState = createInitialProviderRunState();
+      const reusablePrefixTokensEstimate = this.estimateCurrentProviderInputTokens(
+        request, messages, tools, providerRunState
+      );
+      const seedMessage: DeepSeekMessage = { role: 'user', content: seed };
+      messages.push(seedMessage);
+      this.appendProviderUserText(providerRunState, seed);
+      const afterEstimatedPromptTokens = this.estimateCurrentProviderInputTokens(
+        request, messages, tools, providerRunState
+      );
+      const estimatedCacheResetTokens = Math.max(0, afterEstimatedPromptTokens - reusablePrefixTokensEstimate);
+      completedReplay = undefined;
+      committedMessages = structuredClone(messages);
+      committedProvider = structuredClone(providerRunState);
+      pending = undefined;
+      trace.record({
+        type: 'context_epoch_rollover', epochIndex: epoch.index, reason,
+        estimatedPromptTokens: estimated, actualPromptTokens: admission.state.lastActualInputTokens,
+        afterEstimatedPromptTokens,
+        declaredWindowTokens: runtimeConfig.contextWindowTokens,
+        learnedEffectiveWindowTokens: admission.state.learnedEffectiveWindowTokens,
+        reusablePrefixTokensEstimate, estimatedCacheResetTokens,
+        summaryKind, seedHash: hashText(seed), providerProtocol: runDetailsBuilderRef.current?.build().protocol
+      });
+      runDetailsBuilderRef.current?.recordEpochRollover?.({
+        index: epoch.index, reason, estimatedPromptTokens: estimated,
+        afterEstimatedPromptTokens,
+        actualPromptTokens: admission.state.lastActualInputTokens,
+        declaredWindowTokens: runtimeConfig.contextWindowTokens,
+        learnedEffectiveWindowTokens: admission.state.learnedEffectiveWindowTokens,
+        reusablePrefixTokensEstimate,
+        estimatedCacheResetTokens,
+        summaryKind
+      });
+      await saveStep!();
+    };
+
+    if (epoch.status !== 'active') {
+      await rolloverEpoch(epoch.pendingRollover?.reason ?? 'soft_context_pressure');
+    }
+
+    for (let turn = nextTurn; ; turn += 1) {
       this.throwIfAborted(request.signal, request.language);
       const runTimeStopReason = this.getRunTimeStopReason(runDeadlineAt);
       if (runTimeStopReason) {
@@ -952,24 +1148,71 @@ export class AgentLoop {
         }, { finishReason: runTimeStopReason });
       }
 
-      if (!budgetStopReason && turn >= maxIterations) {
-        budgetStopReason = 'tool_iterations_exhausted';
+      if (maxIterations > 0 && epoch.turnInEpoch >= maxIterations) {
+        await rolloverEpoch('tool_round_threshold');
       }
-      queueBudgetStopInstruction();
       // The schema is frozen for the whole session/run. When tool calls are no
       // longer allowed, keep the identical tools array and switch tool_choice to
       // none instead of removing the cached schema prefix.
-      const allowToolCalls = !budgetStopReason && turn < maxIterations;
+      const allowToolCalls = maxIterations > 0;
       const toolsForTurn = tools;
-      const allowTerminalDraftEdit = maxIterations > 0 && budgetStopReason === 'tool_iterations_exhausted';
+      const allowTerminalDraftEdit = false;
       emitUsageEstimate(toolsForTurn);
-      const response = pending?.response ?? await this.createModelResponse(request, runtimeConfig, messages, toolsForTurn, runCallbacks, runDeadlineAt, {
-        trace,
-        usageTotals: upstreamUsageTotals,
-        usageSource: request.backgroundRunId ? 'background' : 'executor',
-        toolChoice: allowToolCalls ? 'auto' : 'none',
+      let response: DeepSeekStreamResult;
+      const estimatedInputBeforeRequest = this.estimateCurrentProviderInputTokens(
+        request,
+        messages,
+        toolsForTurn,
         providerRunState
+      );
+      const requestAdmission = admission.decide({
+        estimatedInputTokens: estimatedInputBeforeRequest,
+        configuredMaxOutputTokens: runtimeConfig.maxTokens,
+        phase: allowToolCalls ? 'tool' : 'final',
+        remainingBatchResults: 1
       });
+      try {
+        const deliveryRecords = await this.getPendingEvidenceDeliveryRecords(evidenceStore, evidenceSessionId, checkpoint.taskId, epoch.evidenceRefs);
+        for (const record of deliveryRecords) await evidenceStore.markSending(record);
+        response = pending?.response ?? await this.createModelResponse(
+          request,
+          { ...runtimeConfig, maxTokens: requestAdmission.outputReserveTokens },
+          messages,
+          toolsForTurn,
+          runCallbacks,
+          runDeadlineAt,
+          {
+          trace,
+          usageTotals: upstreamUsageTotals,
+          usageSource: request.backgroundRunId ? 'background' : 'executor',
+          toolChoice: allowToolCalls ? 'auto' : 'none',
+          providerRunState
+          }
+        );
+        if (!pending) admission.recordSuccessfulRequest();
+        for (const record of deliveryRecords) await evidenceStore.markDelivered(record);
+        const actualInput = response.usage?.prompt_tokens;
+        if (typeof actualInput === 'number') {
+          admission.observe(estimatedInputBeforeRequest, actualInput);
+          await calibrationStore.save(calibrationKey, admission.state);
+        }
+      } catch (error) {
+        if (!isContextTooLongError(error)) throw error;
+        const attempted = this.estimateCurrentProviderInputTokens(request, messages, toolsForTurn, providerRunState);
+        admission.recordContextTooLong(attempted);
+        await calibrationStore.save(calibrationKey, admission.state);
+        trace.record({ type: 'context_window_adapted', attemptedPromptTokens: attempted,
+          learnedEffectiveWindowTokens: admission.state.learnedEffectiveWindowTokens,
+          contextTooLongCount: admission.state.contextTooLongCount });
+        if (admission.state.contextTooLongCount >= 4 && epoch.turnInEpoch === 0) {
+          throw new AgentInterruptedError('provider_error', request.language === 'en'
+            ? 'The provider context capacity is too small for the frozen system, tool schema, original request, and minimum recovery checkpoint.'
+            : 'Provider 上下文容量不足以容纳冻结 system、工具 schema、原始请求和最小恢复检查点。');
+        }
+        await rolloverEpoch('provider_context_too_long');
+        turn -= 1;
+        continue;
+      }
       const normalizedAssistant = this.normalizeAssistantToolCalls(
         response.message,
         allowToolCalls || allowTerminalDraftEdit,
@@ -1002,23 +1245,41 @@ export class AgentLoop {
         pending ??= { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {} };
         committedProvider = structuredClone(providerRunState);
         await saveStep();
-        const continuedResponse = await this.tryContinueLengthLimitedResponse({
-          request,
-          runtimeConfig,
-          messages,
-          assistant,
-          response,
-          draftEdits,
-          callbacks: runCallbacks,
-          runDeadlineAt,
-          outputReserveTokens,
-          reasoningParts,
-          runtimeUsageBreakdown,
-          trace,
-          usageTotals: upstreamUsageTotals,
-          tools,
-          providerRunState
-        });
+        let continuedResponse: { content: string; finishReason?: string | null } | undefined;
+        try {
+          continuedResponse = await this.tryContinueLengthLimitedResponse({
+            request,
+            runtimeConfig,
+            messages,
+            assistant,
+            response,
+            draftEdits,
+            callbacks: runCallbacks,
+            runDeadlineAt,
+            outputReserveTokens,
+            reasoningParts,
+            runtimeUsageBreakdown,
+            trace,
+            usageTotals: upstreamUsageTotals,
+            tools,
+            providerRunState
+          });
+        } catch (error) {
+          if (!isContextTooLongError(error)) throw error;
+          const attempted = this.estimateCurrentProviderInputTokens(request, messages, tools, providerRunState);
+          admission.recordContextTooLong(attempted);
+          await calibrationStore.save(calibrationKey, admission.state);
+          trace.record({
+            type: 'context_window_adapted',
+            attemptedPromptTokens: attempted,
+            learnedEffectiveWindowTokens: admission.state.learnedEffectiveWindowTokens,
+            contextTooLongCount: admission.state.contextTooLongCount,
+            during: 'length_continuation'
+          });
+          await rolloverEpoch('length_continuation');
+          turn -= 1;
+          continue;
+        }
         if (continuedResponse) {
           emitUsageEstimate(toolsForTurn);
           emitStatus({
@@ -1037,9 +1298,7 @@ export class AgentLoop {
           base: 'thinking',
           phase: 'finalizing'
         });
-        const finalFinishReason = response.finishReason === 'length'
-          ? response.finishReason
-          : budgetStopReason ?? response.finishReason;
+        const finalFinishReason = response.finishReason;
         return finishRun({
           message: this.getFinalMessage(assistant.content, draftEdits, finalFinishReason, request.language, runtimeConfig),
           reasoningContent: this.formatReasoning(reasoningParts),
@@ -1056,6 +1315,10 @@ export class AgentLoop {
       const responseFunctionOutputs: OpenAiResponsesItem[] = [];
       const anthropicToolResults: AnthropicUserContentBlock[] = [];
       const acceptedEmulatedHandoffs: Array<{ toolCallId: string; toolName: string }> = [];
+      const batchWorkFingerprints: string[] = [];
+      let rolloverAfterBatchReason: ContextEpochRolloverReason | undefined;
+      let strategyWarningAfterBatch = false;
+      let noProgressStopAfterBatch = false;
       const performToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
         this.throwIfAborted(request.signal, request.language);
         const exposureError = getToolExposureError(toolCall.function.name, exposedToolNames);
@@ -1093,52 +1356,37 @@ export class AgentLoop {
           type: 'tool_call',
           toolCall: trace.includesPayload('request') ? toolCall : summarizeDeepSeekToolCall(toolCall)
         });
-        if (budgetStopReason) {
-          const allowBudgetedDraftEdit = budgetStopReason === 'tool_iterations_exhausted'
-            && allowTerminalDraftEdit
-            && (isDraftEditPreparationTool(toolCall.function.name)
-              || isDraftRunPreparationTool(toolCall.function.name));
-          if (allowBudgetedDraftEdit) {
-            trace.record({
-              type: 'tool_budget_terminal_draft_edit',
-              toolCallId: toolCall.id,
-              toolName: toolCall.function.name,
-              budgetStopReason
+        const argumentsHash = hashText(toolCall.function.arguments || '{}');
+        let evidenceRecord = await evidenceStore.ensureIntent({
+          sessionId: evidenceSessionId,
+          taskId: checkpoint.taskId,
+          epochIndex: epoch.index,
+          toolCallId: toolCall.id,
+          toolName: toolCall.function.name,
+          argumentsHash,
+          effectKind: this.getEvidenceEffectKind(toolCall.function.name)
+        });
+        if (evidenceRecord.executionStatus === 'completed') {
+          if (evidenceRecord.providerEnvelope === undefined) {
+            const raw = await evidenceStore.readContent(evidenceRecord);
+            const decision = admission.decide({
+              estimatedInputTokens: this.estimateCurrentProviderInputTokens(request, messages, tools, providerRunState),
+              configuredMaxOutputTokens: runtimeConfig.maxTokens,
+              phase: 'tool',
+              remainingBatchResults: Math.max(1, toolCalls.length)
             });
-          } else {
-            const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language);
-            trace.record({
-              type: 'tool_result',
-              toolCallId: toolCall.id,
-              toolName: toolCall.function.name,
-              budgetStopReason,
-              content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
-            });
-            runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, budgetToolResult);
-            return budgetToolResult;
+            const prepared = prepareEvidenceEnvelope({ record: evidenceRecord, rawContent: raw,
+              inlineTokenAllowance: decision.inlineTokenAllowance,
+              inlineCharLimit: getConfiguredProviderInlineResultMaxChars() });
+            evidenceRecord = await evidenceStore.saveProviderEnvelope(evidenceRecord, prepared.content, prepared.completeInline, prepared.source);
           }
+          this.upsertEpochEvidenceRef(epoch, evidenceRecord);
+          trace.record({ type: 'tool_evidence_reused', toolCallId: toolCall.id, toolName: toolCall.function.name,
+            evidenceRef: evidenceRecord.evidenceRef, contentHash: evidenceRecord.contentHash });
+          return evidenceRecord.providerEnvelope!;
         }
-
-        if (runtimeConfig.maxToolCalls > 0 && toolCallCount >= runtimeConfig.maxToolCalls) {
-          budgetStopReason = 'tool_call_limit_exhausted';
-          const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
-            toolCallCount,
-            maxToolCalls: runtimeConfig.maxToolCalls
-          });
-          trace.record({
-            type: 'tool_result',
-            toolCallId: toolCall.id,
-            toolName: toolCall.function.name,
-            budgetStopReason,
-            toolCallCount,
-            maxToolCalls: runtimeConfig.maxToolCalls,
-            content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
-          });
-          runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, budgetToolResult);
-          return budgetToolResult;
-        }
-
         toolCallCount += 1;
+        epoch.toolCallsInEpoch += 1;
         taskPlan.startTool(toolCall.function.name);
         emitStatus({
           base: 'executing',
@@ -1245,8 +1493,9 @@ export class AgentLoop {
                   repairIteration: repairLoop.getState().iteration
                 });
               }
-              pending!.executing = { id: toolCall.id, name: toolCall.function.name };
+              pending!.executing = { id: toolCall.id, name: toolCall.function.name, evidenceRef: evidenceRecord.evidenceRef };
               await saveStep!(); // A durable intent is required before validation/delegation or any proposal.
+              evidenceRecord = await evidenceStore.markExecuting(evidenceRecord);
               this.throwIfAborted(request.signal, request.language);
               if (getSubagentHandoffKind(toolCall.function.name)) emitStatus({ base: 'waiting', phase: 'waiting_for_subagent', toolName: toolCall.function.name });
               const execution = this.handleToolCall(toolCall, draftEdits, draftRuns, request.language, {
@@ -1257,7 +1506,10 @@ export class AgentLoop {
                 parentRequest: request,
                 parentRunId: trace.runId,
                 onUsage: runCallbacks.onUsage,
-                onSubagentRunSummary: runCallbacks.onSubagentRunSummary
+                onSubagentRunSummary: runCallbacks.onSubagentRunSummary,
+                evidenceStore,
+                evidenceSessionId,
+                evidenceTaskId: checkpoint.taskId
               });
               const cancellableRead = !isDraftEditPreparationTool(toolCall.function.name)
                 && !isDraftRunPreparationTool(toolCall.function.name)
@@ -1282,6 +1534,16 @@ export class AgentLoop {
           });
         }
         rawToolResult = this.normalizeToolResultFeedback(toolCall.function.name, rawToolResult);
+        evidenceRecord = await evidenceStore.complete(evidenceRecord, rawToolResult);
+        if (this.isToolResultError(rawToolResult)) {
+          epoch.failures.push({
+            toolName: toolCall.function.name,
+            toolCallId: toolCall.id,
+            contentHash: evidenceRecord.contentHash!,
+            errorType: readToolResultErrorType(rawToolResult)
+          });
+          if (epoch.failures.length > 200) epoch.failures.splice(0, epoch.failures.length - 200);
+        }
         if (authorizationDecision?.approvalReview) {
           approvalToolResults.push({
             toolCallId: toolCall.id,
@@ -1360,122 +1622,66 @@ export class AgentLoop {
               message: 'The host will provide the review decision and any execution result in the next user message.'
             })
           : rawToolResult;
-        const shapedToolResult = this.shapeToolResult(
-          toolCall.function.name,
-          providerVisibleToolResult,
-          this.shouldSnipToolResult(
-            request,
-            messages,
-            nextToolsForRequest,
-            outputReserveTokens,
-            providerRunState,
-            responseFunctionOutputs,
-            anthropicToolResults
-          )
+        const admissionDecision = admission.decide({
+          estimatedInputTokens: this.estimateCurrentProviderInputTokens(request, messages, nextToolsForRequest, providerRunState,
+            responseFunctionOutputs, anthropicToolResults),
+          configuredMaxOutputTokens: runtimeConfig.maxTokens,
+          phase: 'tool',
+          remainingBatchResults: Math.max(1, toolCalls.length - Object.keys(pending!.results).length)
+        });
+        if (admissionDecision.shouldRollover) rolloverAfterBatchReason ??= 'minimum_envelope_unfit';
+        const remainingBatchResults = Math.max(1, toolCalls.length - Object.keys(pending!.results).length);
+        const preparedEnvelope = prepareEvidenceEnvelope({
+          record: evidenceRecord,
+          rawContent: providerVisibleToolResult,
+          // DSML carries a parallel batch in one synthetic user message. A
+          // per-result share prevents its earlier pages from consuming the
+          // reserve needed for later envelopes; native lanes benefit too.
+          inlineTokenAllowance: Math.floor(admissionDecision.inlineTokenAllowance / remainingBatchResults),
+          inlineCharLimit: getConfiguredProviderInlineResultMaxChars()
+        });
+        evidenceRecord = await evidenceStore.saveProviderEnvelope(
+          evidenceRecord,
+          preparedEnvelope.content,
+          preparedEnvelope.completeInline,
+          preparedEnvelope.source
         );
+        if (!preparedEnvelope.completeInline && providerProjection.requestProtocolVersion < 8) {
+          rolloverAfterBatchReason = 'protocol_migration';
+        }
+        this.upsertEpochEvidenceRef(epoch, evidenceRecord);
+        const shapedToolResult: ShapedToolResult = {
+          content: evidenceRecord.providerEnvelope!,
+          path: evidenceRecord.source?.path,
+          startLine: evidenceRecord.source?.startLine,
+          endLine: evidenceRecord.source?.endLine,
+          rawLength: rawToolResult.length,
+          shapedLength: evidenceRecord.providerEnvelope!.length,
+          compressible: true,
+          truncated: !evidenceRecord.completeInline
+        };
         const shapedToolMessage: DeepSeekMessage = {
           role: 'tool',
           tool_call_id: toolCall.id,
           content: shapedToolResult.content
         };
         const nextToolResultTokens = estimateDeepSeekMessageTokens(shapedToolMessage);
-        if (toolResultTokens + nextToolResultTokens > maxToolResultTokens) {
-          budgetStopReason = 'tool_result_budget_exhausted';
-          const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
-            usedTokens: toolResultTokens,
-            nextTokens: nextToolResultTokens,
-            maxTokens: Number.isFinite(maxToolResultTokens) ? maxToolResultTokens : 0
-          });
-          trace.record({
-            type: 'tool_result',
-            toolCallId: toolCall.id,
-            toolName: toolCall.function.name,
-            budgetStopReason,
-            usedTokens: toolResultTokens,
-            nextTokens: nextToolResultTokens,
-            maxTokens: maxToolResultTokens,
-            content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
-          });
-          runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, budgetToolResult, { deliveryOnly: true });
-          return budgetToolResult;
-        }
-
         const prospectiveResponseOutput: OpenAiResponsesItem = {
           type: 'function_call_output',
           call_id: toolCall.id,
           output: shapedToolResult.content
         };
-        if (this.getContextWindowBudgetStopReason(
-          request,
-          [...messages, shapedToolMessage],
-          nextToolsForRequest,
-          outputReserveTokens,
-          providerRunState,
-          providerRunState?.protocol === 'openai-responses'
-            ? [...responseFunctionOutputs, prospectiveResponseOutput]
-            : [],
-          providerRunState?.protocol === 'anthropic-messages'
-            ? [...anthropicToolResults, {
-                type: 'tool_result',
-                tool_use_id: toolCall.id,
-                content: shapedToolResult.content,
-                ...(this.isToolResultError(shapedToolResult.content) ? { is_error: true } : {})
-              }]
-            : []
-        )) {
-          budgetStopReason = 'context_window_exhausted';
-          const projectedUsage = providerRunState?.protocol === 'openai-responses'
-            ? createContextUsageEstimateFromResponses({
-                model: request.model,
-                input: [...providerRunState.input, ...responseFunctionOutputs, prospectiveResponseOutput],
-                tools: providerRunState.tools,
-                outputReserveTokens,
-                safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-              })
-            : providerRunState?.protocol === 'anthropic-messages'
-              ? createContextUsageEstimateFromAnthropic({
-                  model: request.model,
-                  system: providerRunState.system,
-                  messages: [...providerRunState.messages, {
-                    role: 'user',
-                    content: [...anthropicToolResults, {
-                      type: 'tool_result',
-                      tool_use_id: toolCall.id,
-                      content: shapedToolResult.content,
-                      ...(this.isToolResultError(shapedToolResult.content) ? { is_error: true } : {})
-                    }]
-                  }],
-                  tools: providerRunState.tools,
-                  outputReserveTokens,
-                  safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-                })
-              : createContextUsageEstimateFromMessages({
-                model: request.model,
-                messages: [...messages, shapedToolMessage],
-                tools: nextToolsForRequest,
-                outputReserveTokens,
-                safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-              });
-          const budgetToolResult = this.createBudgetToolResult(budgetStopReason, request.language, {
-            usedTokens: projectedUsage.usedTokensEstimate,
-            nextTokens: nextToolResultTokens,
-            maxTokens: projectedUsage.maxTokensEstimate
-          });
-          trace.record({
-            type: 'tool_result',
-            toolCallId: toolCall.id,
-            toolName: toolCall.function.name,
-            budgetStopReason,
-            usedTokens: projectedUsage.usedTokensEstimate,
-            nextTokens: nextToolResultTokens,
-            maxTokens: projectedUsage.maxTokensEstimate,
-            content: trace.includesPayload('request') ? budgetToolResult : summarizeText(budgetToolResult)
-          });
-          runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, budgetToolResult, { deliveryOnly: true });
-          return budgetToolResult;
-        }
-
         toolResultTokens += nextToolResultTokens;
+        const fingerprint = createWorkFingerprint({
+          toolName: toolCall.function.name,
+          argumentsHash,
+          resultHash: evidenceRecord.contentHash!,
+          sourceFingerprint: evidenceRecord.source?.fingerprint,
+          planProgressHash: createTaskPlanProgressHash(taskPlan.getPlan())
+        });
+        epoch.idempotency.push(fingerprint);
+        if (epoch.idempotency.length > 2_000) epoch.idempotency.splice(0, epoch.idempotency.length - 2_000);
+        batchWorkFingerprints.push(fingerprint.fingerprint);
         if (shapedToolResult.content !== rawToolResult) {
           runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, shapedToolResult.content, { deliveryOnly: true });
         }
@@ -1518,12 +1724,18 @@ export class AgentLoop {
           truncated: shapedToolResult.truncated
         };
         toolResultLedger.push(ledgerEntry);
-        budgetStopReason = budgetStopReason ?? this.getRunTimeStopReason(runDeadlineAt);
         trace.record({
           type: 'tool_result',
           toolCallId: toolCall.id,
           toolName: toolCall.function.name,
           ledgerEntry,
+          evidenceRef: evidenceRecord.evidenceRef,
+          contentHash: evidenceRecord.contentHash,
+          rawBytes: evidenceRecord.totalBytes,
+          rawTokensEstimate: evidenceRecord.totalTokensEstimate,
+          inlineTokensEstimate: preparedEnvelope.inlineTokens,
+          completeInline: preparedEnvelope.completeInline,
+          noProgressFingerprint: fingerprint.fingerprint,
           content: trace.includesPayload('request') ? shapedToolResult.content : summarizeText(shapedToolResult.content)
         });
         return shapedToolResult.content;
@@ -1679,15 +1891,56 @@ export class AgentLoop {
         emitUsageEstimate(tools);
       }
 
-      queueBudgetStopInstruction();
+      // A model has no opportunity to react between parallel calls from the
+      // same response. Observe one canonical fingerprint per completed batch,
+      // so duplicate calls inside that batch cannot manufacture a warning.
+      if (batchWorkFingerprints.length) {
+        const batchFingerprint = hashText(stableStringify(batchWorkFingerprints));
+        const progress = observeNoProgress(epoch.noProgress, batchFingerprint);
+        epoch.noProgress = progress.state;
+        strategyWarningAfterBatch = progress.action === 'warn';
+        noProgressStopAfterBatch = progress.action === 'stop';
+      }
+
       pending = undefined;
       checkpoint.modelStepRetries = 0;
       completedReplay = this.createProviderReplayState(providerRunState);
       nextTurn = turn + 1;
+      epoch.turnInEpoch += 1;
       committedMessages = structuredClone(messages);
       committedProvider = structuredClone(providerRunState);
       checkpoint.lastStepAt = new Date().toISOString();
       await saveStep();
+      if (noProgressStopAfterBatch) {
+        throw new AgentInterruptedError('no_progress_loop', request.language === 'en'
+          ? 'The task stopped because the same tool work and unchanged result repeated after a strategy-change warning.'
+          : '任务在策略调整提醒后仍重复相同工具操作和未变化结果，已按无进展循环停止。');
+      }
+      if (strategyWarningAfterBatch) {
+        const warning = request.language === 'en'
+          ? 'No-progress warning: the same normalized tool operation produced the same evidence with no TaskPlan progress. Change strategy, use existing evidence, or finish now; do not repeat it again.'
+          : '无进展提醒：相同规范化工具操作在 TaskPlan 无进展时产生了相同证据。请改变策略、使用已有证据或立即收尾，不要再次重复。';
+        messages.push({ role: 'user', content: warning });
+        this.appendProviderUserText(providerRunState, warning);
+        committedMessages = structuredClone(messages);
+        committedProvider = structuredClone(providerRunState);
+        await saveStep();
+      }
+      const estimatedNextInput = this.estimateCurrentProviderInputTokens(request, messages, tools, providerRunState);
+      const nextAdmission = admission.decide({
+        estimatedInputTokens: estimatedNextInput,
+        configuredMaxOutputTokens: runtimeConfig.maxTokens,
+        phase: 'tool',
+        remainingBatchResults: 1
+      });
+      if (!rolloverAfterBatchReason && estimatedNextInput >= admission.state.learnedEffectiveWindowTokens * runtimeConfig.contextCompression.triggerRatio) {
+        rolloverAfterBatchReason = 'soft_context_pressure';
+      }
+      if (!rolloverAfterBatchReason && runtimeConfig.maxToolCalls > 0 && epoch.toolCallsInEpoch >= runtimeConfig.maxToolCalls) {
+        rolloverAfterBatchReason = 'tool_call_threshold';
+      }
+      if (!rolloverAfterBatchReason && nextAdmission.shouldRollover) rolloverAfterBatchReason = 'minimum_envelope_unfit';
+      if (rolloverAfterBatchReason) await rolloverEpoch(rolloverAfterBatchReason);
       if (approvalReviewStopReason) {
         emitStatus({ base: 'complete', phase: 'finalizing', detail: approvalReviewStopReason });
         return finishRun({
@@ -1716,16 +1969,6 @@ export class AgentLoop {
       }
     }
 
-    emitStatus({
-      base: 'thinking',
-      phase: 'finalizing'
-    });
-    return finishRun({
-      message: this.getFinalMessage(null, draftEdits, 'tool_iterations_exhausted', request.language, runtimeConfig),
-      reasoningContent: this.formatReasoning(reasoningParts),
-      draftEdits,
-      draftRuns
-    }, { finishReason: 'tool_iterations_exhausted' });
     } catch (error) {
       let failedPlan;
       if (error instanceof AgentRunAbortedError || request.signal?.aborted) {
@@ -1740,7 +1983,7 @@ export class AgentLoop {
       callbacks.onRunDetails?.(runDetailsBuilderRef.current?.finish({
         taskPlan: failedPlan,
         repairLoop: repairLoop.getState(),
-        finishReason: error instanceof AgentBudgetExceededError ? error.code : undefined,
+        finishReason: undefined,
         failureReason: error instanceof Error ? error.message : String(error),
         stopped: error instanceof AgentRunAbortedError || request.signal?.aborted
       }) ?? createFallbackRunDetails(trace.runId, request, failedPlan, traceLog?.uri, error));
@@ -1767,6 +2010,7 @@ export class AgentLoop {
     } = {}
   ): Promise<DeepSeekStreamResult> {
     const trace = options.trace ?? createNoopInteractionTrace();
+    this.throwIfCostLimitReached(request);
     let body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody;
     if (runtimeConfig.provider === 'openai-responses') {
       const responsesState = options.providerRunState;
@@ -1911,7 +2155,16 @@ export class AgentLoop {
       runtimeConfig.supportsBilling,
       options.usageSource ?? 'executor'
     );
-    if (usageEvent) { callbacks.onUsage?.(usageEvent); }
+    if (usageEvent?.pricingStatus === 'priced') {
+      request.taskCostBudget?.record(usageEvent.cost, usageEvent.currency);
+      if (request.checkpoint) request.checkpoint.usedCostByCurrency = request.taskCostBudget?.snapshot() ?? {};
+    }
+    if (usageEvent) callbacks.onUsage?.(usageEvent);
+    if ((request.taskCostBudget?.limit ?? 0) > 0 && usageEvent?.pricingStatus !== 'priced') {
+      throw new AgentInterruptedError('provider_error', request.language === 'en'
+        ? 'The configured Provider cost limit cannot be enforced because this response did not include priceable usage.'
+        : '本次响应没有提供可计费用量，无法安全执行用户配置的 Provider 费用上限。');
+    }
     if (response.ok && response.message) {
       if (usageEvent) {
         callbacks.onUsageEstimate?.(calibrateContextUsageEstimate(
@@ -2033,7 +2286,7 @@ export class AgentLoop {
     const saved = input.request.checkpoint?.state;
     let content = saved?.continuation?.content ?? input.assistant.content ?? '';
     let finishReason = saved?.continuation?.finishReason ?? input.response.finishReason;
-    for (let continuationIndex = saved?.continuation?.requests ?? 0; continuationIndex < MAX_LENGTH_CONTINUATION_REQUESTS; continuationIndex += 1) {
+    for (let continuationIndex = saved?.continuation?.requests ?? 0; ; continuationIndex += 1) {
       const assistantMessage: DeepSeekMessage = {
         role: 'assistant',
         content
@@ -2042,36 +2295,12 @@ export class AgentLoop {
         role: 'user',
         content: this.getLengthContinuationInstruction(input.request.language)
       };
-      const continuationMessages = [
-        ...input.messages,
-        assistantMessage,
-        instructionMessage
-      ];
-
       const isAnthropicPause = input.providerRunState?.protocol === 'anthropic-messages'
         && finishReason === 'pause_turn';
-      const continuationInstructionItem: OpenAiResponsesItem = {
-        role: 'user',
-        content: instructionMessage.content ?? ''
-      };
       const anthropicContinuationMessage: AnthropicMessage = {
         role: 'user',
         content: [{ type: 'text', text: instructionMessage.content ?? '' }]
       };
-      if (this.getContextWindowBudgetStopReason(
-        input.request,
-        continuationMessages,
-        input.tools,
-        input.outputReserveTokens,
-        input.providerRunState,
-        input.providerRunState?.protocol === 'openai-responses' ? [continuationInstructionItem] : [],
-        input.providerRunState?.protocol === 'anthropic-messages' && !isAnthropicPause
-          ? anthropicContinuationMessage.content
-          : []
-      )) {
-        return continuationIndex > 0 ? { content, finishReason } : undefined;
-      }
-
       if (!saved?.continuation?.inFlight) {
       input.messages.push(assistantMessage, instructionMessage);
       if (input.providerRunState?.protocol === 'openai-responses') {
@@ -2137,8 +2366,13 @@ export class AgentLoop {
         await input.callbacks.onCheckpoint?.(input.request.checkpoint!);
       }
 
-      if ((finishReason !== 'length' && finishReason !== 'pause_turn') || (!continuationContent.trim() && finishReason !== 'pause_turn')) {
+      if ((finishReason !== 'length' && finishReason !== 'pause_turn')) {
         break;
+      }
+      if (!continuationContent.trim() && finishReason !== 'pause_turn') {
+        throw new AgentInterruptedError('no_progress_loop', input.request.language === 'en'
+          ? 'The provider repeatedly returned a length stop without additional content.'
+          : 'Provider 连续因长度停止且没有产生新增内容，已按无进展循环停止。');
       }
     }
 
@@ -2164,37 +2398,11 @@ export class AgentLoop {
     if (input.draftEdits.length) {
       return false;
     }
-    if (isLength && !input.assistant.content?.trim()) {
-      return false;
-    }
     if (input.assistant.tool_calls?.some((toolCall) => toolCall.type === 'function')) {
       return false;
     }
 
-    const continuationMessages: DeepSeekMessage[] = [
-      ...input.messages,
-      {
-        role: 'assistant',
-        content: input.assistant.content
-      },
-      {
-        role: 'user',
-        content: this.getLengthContinuationInstruction(input.request.language)
-      }
-    ];
-    return !this.getContextWindowBudgetStopReason(
-      input.request,
-      continuationMessages,
-      input.tools,
-      input.outputReserveTokens,
-      input.providerRunState,
-      input.providerRunState?.protocol === 'openai-responses'
-        ? [{ role: 'user', content: this.getLengthContinuationInstruction(input.request.language) }]
-        : [],
-      input.providerRunState?.protocol === 'anthropic-messages' && isLength
-        ? [{ type: 'text', text: this.getLengthContinuationInstruction(input.request.language) }]
-        : []
-    );
+    return true;
   }
 
   private async createContinuationAfterPartialFailure(input: {
@@ -2255,25 +2463,19 @@ export class AgentLoop {
         ? continuationMessages
         : continuationMessages.map(summarizeDeepSeekMessage)
     });
-    const outputReserveTokens = resolveOutputReserveTokens(input.runtimeConfig.maxTokens);
-    if (this.getContextWindowBudgetStopReason(
-      input.request,
-      continuationMessages,
-      input.tools,
-      outputReserveTokens,
-      input.providerRunState
-    )) {
-      throw new Error(input.failureError ?? (input.request.language === 'en'
-        ? 'The provider streaming connection failed before completion, and there was not enough context budget to request a continuation.'
-        : 'Provider 流式连接在完成前中断，且上下文预算不足，无法请求续写。'));
-    }
-
     const continuationResponse = await this.createModelResponse(
       input.request,
       input.runtimeConfig,
       continuationMessages,
       input.tools,
-      input.callbacks,
+      {
+        ...input.callbacks,
+        // Epoch summaries are an internal lane. Their streamed text must not
+        // become part of the single user-visible assistant response.
+        onDelta: undefined,
+        onStatus: undefined,
+        onUsageEstimate: undefined
+      },
       input.runDeadlineAt,
       {
         allowPartialRecovery: false,
@@ -2529,6 +2731,16 @@ export class AgentLoop {
     }
   }
 
+  private throwIfCostLimitReached(request: AgentRequest): void {
+    const exhausted = request.taskCostBudget?.exhausted;
+    if (!exhausted) return;
+    const cost = Number(exhausted.cost.toFixed(8));
+    const limit = Number(exhausted.limit.toFixed(8));
+    throw new AgentInterruptedError('cost_limit', request.language === 'en'
+      ? `Configured Provider cost limit reached (${exhausted.currency}${cost} / ${exhausted.currency}${limit}).`
+      : `已达到用户配置的 Provider 费用上限（${exhausted.currency}${cost} / ${exhausted.currency}${limit}）。`);
+  }
+
   private createStatusEmitter(callbacks: AgentRunCallbacks): (status: AgentActivityInput) => void {
     let lastStatusKey = '';
     return (status) => {
@@ -2580,6 +2792,7 @@ export class AgentLoop {
       case DELEGATE_TASK_TOOL_NAME:
       case DELEGATE_PARALLEL_TOOL_NAME:
       case READ_SUBAGENT_RESULT_TOOL_NAME:
+      case READ_EVIDENCE_TOOL_NAME:
         return 'delegating';
       case RUN_VALIDATION_TOOL_NAME:
         return 'running_validation';
@@ -2698,11 +2911,31 @@ export class AgentLoop {
       parentRunId?: string;
       onUsage?: AgentRunCallbacks['onUsage'];
       onSubagentRunSummary?: AgentRunCallbacks['onSubagentRunSummary'];
+      evidenceStore?: ToolEvidenceStore;
+      evidenceSessionId?: string;
+      evidenceTaskId?: string;
     } = {}
   ): Promise<string> {
     try {
       const args = this.parseToolArguments(toolCall.function.arguments);
       switch (toolCall.function.name) {
+        case READ_EVIDENCE_TOOL_NAME:
+          if (!options.evidenceStore || !options.evidenceSessionId || !options.evidenceTaskId) {
+            throw new Error('Tool evidence store is unavailable.');
+          }
+          return stableStringify(await options.evidenceStore.read({
+            evidenceRef: this.readRequiredString(args, 'evidenceRef'),
+            sessionId: options.evidenceSessionId,
+            taskId: options.evidenceTaskId,
+            cursor: this.readOptionalString(args, 'cursor'),
+            offset: this.readOptionalNumber(args, 'offset'),
+            startLine: this.readOptionalNumber(args, 'startLine'),
+            endLine: this.readOptionalNumber(args, 'endLine'),
+            itemOffset: this.readOptionalNumber(args, 'itemOffset'),
+            itemLimit: this.readOptionalNumber(args, 'itemLimit'),
+            search: this.readOptionalString(args, 'search'),
+            maxChars: this.readOptionalNumber(args, 'maxChars')
+          }));
         case DELEGATE_TASK_TOOL_NAME: {
           const context = this.getSubagentInvocationContext(language, options, toolCall.id, draftEdits);
           const result = await this.subagentTools!.delegateTask(this.readDelegateTaskInput(args), context);
@@ -2973,6 +3206,7 @@ export class AgentLoop {
       draftRun: {
         id: draftRun.id,
         status: 'pending',
+        specHash: draftRun.specHash,
         executable: draftRun.spec.executable,
         args: draftRun.spec.args,
         cwd: draftRun.spec.cwdLabel,
@@ -3812,98 +4046,10 @@ export class AgentLoop {
     throw new Error(`Tool argument "${key}" must be one of: compile, lint, test.`);
   }
 
-  private getContextWindowBudgetStopReason(
-    request: AgentRequest,
-    messages: DeepSeekMessage[],
-    tools: DeepSeekFunctionTool[],
-    outputReserveTokens: number,
-    providerRunState?: ProviderNativeRunState,
-    additionalResponsesItems: OpenAiResponsesItem[] = [],
-    additionalAnthropicToolResults: AnthropicUserContentBlock[] = []
-  ): AgentBudgetFinishReason | undefined {
-    const usage = providerRunState?.protocol === 'openai-responses'
-      ? createContextUsageEstimateFromResponses({
-          model: request.model,
-          input: [...providerRunState.input, ...additionalResponsesItems],
-          tools: providerRunState.tools,
-          outputReserveTokens,
-          safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-        })
-      : providerRunState?.protocol === 'anthropic-messages'
-        ? createContextUsageEstimateFromAnthropic({
-            model: request.model,
-            system: providerRunState.system,
-            messages: additionalAnthropicToolResults.length
-              ? [...providerRunState.messages, {
-                  role: 'user',
-                  content: additionalAnthropicToolResults
-                }]
-              : providerRunState.messages,
-            tools: providerRunState.tools,
-            outputReserveTokens,
-            safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-          })
-        : createContextUsageEstimateFromMessages({
-          model: request.model,
-          messages,
-          tools,
-          outputReserveTokens,
-          safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-        });
-    return usage.usedTokensEstimate > usage.maxTokensEstimate ? 'context_window_exhausted' : undefined;
-  }
-
-  private getRunTimeStopReason(runDeadlineAt: number | undefined): AgentBudgetFinishReason | undefined {
+  private getRunTimeStopReason(runDeadlineAt: number | undefined): 'run_time_limit_exhausted' | undefined {
     return typeof runDeadlineAt === 'number' && Date.now() >= runDeadlineAt
       ? 'run_time_limit_exhausted'
       : undefined;
-  }
-
-  private createBudgetToolResult(
-    reason: AgentBudgetFinishReason,
-    language: KeepseekLanguage,
-    details: Record<string, number> = {}
-  ): string {
-    return JSON.stringify({
-      ok: false,
-      errorType: reason,
-      error: this.getBudgetToolError(reason, language),
-      budgetReason: reason,
-      ...details
-    });
-  }
-
-  private getBudgetToolError(reason: AgentBudgetFinishReason, language: KeepseekLanguage): string {
-    switch (reason) {
-      case 'tool_call_limit_exhausted':
-        return language === 'en'
-          ? 'The KeepSeek tool-call budget was reached. Stop calling tools and answer from the available context.'
-          : 'KeepSeek 工具调用总数预算已达上限。请停止调用工具，并基于已有上下文回答。';
-      case 'tool_result_budget_exhausted':
-        return language === 'en'
-          ? 'The KeepSeek tool-result token budget was reached. Stop calling tools and answer from the available context.'
-          : 'KeepSeek 工具结果 token 预算已达上限。请停止调用工具，并基于已有上下文回答。';
-      case 'context_window_exhausted':
-        return language === 'en'
-          ? 'The model context window would be exceeded. Stop calling tools and summarize progress; reduce attached context or compact history before starting a new turn.'
-          : '工具结果会超出模型上下文容量。请停止调用工具并总结进度；减少附件上下文或压缩历史后再开始新一轮。';
-      case 'run_time_limit_exhausted':
-        return language === 'en'
-          ? 'The KeepSeek total run-time budget was reached. Stop calling tools and answer from the available context.'
-          : 'KeepSeek 本次执行总时长预算已达上限。请停止调用工具，并基于已有上下文回答。';
-      case 'tool_iterations_exhausted':
-      default:
-        return language === 'en'
-          ? 'The KeepSeek tool-iteration budget was reached. Stop calling tools and answer from the available context.'
-          : 'KeepSeek 工具调用轮次预算已达上限。请停止调用工具，并基于已有上下文回答。';
-    }
-  }
-
-  private getBudgetStopInstruction(reason: AgentBudgetFinishReason, language: KeepseekLanguage): string {
-    const error = this.getBudgetToolError(reason, language);
-    return language === 'en'
-      ? `${error} Do not emit function calls or DSML tool calls in the next response. Provide the best concise result using the information already gathered, and mention any remaining gap.`
-      : `${error} 下一次回复不要输出 function call 或 DSML 工具调用。请使用已经收集到的信息给出尽量完整、简洁的结果，并说明仍缺少的信息。`;
   }
 
   private getFinalMessage(
@@ -3915,9 +4061,7 @@ export class AgentLoop {
   ): string {
     const text = (content ?? '').trim();
     if (text) {
-      return finishReason === 'length'
-        ? `${text}\n\n${this.getLengthLimitMessage(language, runtimeConfig?.maxTokens)}`
-        : text;
+      return text;
     }
 
     if (draftEdits.length) {
@@ -3943,33 +4087,9 @@ export class AgentLoop {
         : 'DeepSeek 返回内容被安全策略过滤，未生成可展示回复。';
     }
 
-    if (finishReason === 'length') {
-      return this.getLengthLimitMessage(language, runtimeConfig?.maxTokens);
-    }
-
-    if (finishReason === 'tool_iterations_exhausted') {
-      return language === 'en'
-        ? 'The agent reached the automatic tool-round safety limit and stopped this run. Ask it to continue, or use Pro with Thinking Max for a broader coding task.'
-        : 'Agent 达到自动工具轮次安全上限，已停止本次执行。你可以让它继续，或对更大范围的编程任务使用 Pro + Thinking Max。';
-    }
-
-    if (finishReason === 'tool_call_limit_exhausted') {
-      return language === 'en'
-        ? 'The agent reached the automatic tool-call safety limit and stopped this run. Ask it to continue with the remaining work.'
-        : 'Agent 达到自动工具调用安全上限，已停止本次执行。你可以让它继续完成剩余工作。';
-    }
-
-    if (finishReason === 'tool_result_budget_exhausted') {
-      return language === 'en'
-        ? 'The per-run tool-result token limit was reached. Choose Continue in a new turn or send a follow-up message to continue the unfinished work.'
-        : '本轮工具结果的累计 token 数达到上限。可点击“继续（新一轮）”或发送新消息，继续未完成的工作。';
-    }
-
-    if (finishReason === 'context_window_exhausted') {
-      return language === 'en'
-        ? 'The model context window is full. Reduce attached context or compact history before starting a follow-up turn.'
-        : '模型上下文容量已满。请减少附件上下文或压缩历史后，再发起后续轮次。';
-    }
+    if (finishReason === 'length') throw new AgentInterruptedError('no_progress_loop', language === 'en'
+      ? 'The provider stopped for length without returning resumable content.'
+      : 'Provider 因长度停止且未返回可续写内容。');
 
     if (finishReason === 'run_time_limit_exhausted') {
       return this.getRunTimeLimitError(runtimeConfig?.maxRunMs ?? 0, language);
@@ -4010,15 +4130,6 @@ export class AgentLoop {
     return seconds > 0
       ? `Agent 本次执行达到总时长上限（${seconds} 秒），已停止本次执行。`
       : 'Agent 本次执行达到总时长上限，已停止本次执行。';
-  }
-
-  private getLengthLimitMessage(language: KeepseekLanguage, maxTokens?: number): string {
-    const budgetHint = typeof maxTokens === 'number' && maxTokens > 0
-      ? (language === 'en' ? ` The active model/mode profile allows up to ${maxTokens} generated tokens.` : `当前模型/模式的自动档位最多允许生成 ${maxTokens} tokens。`)
-      : '';
-    return language === 'en'
-      ? `DeepSeek returned finish_reason=length before the reply was complete. Thinking tokens may count toward this limit, so the visible answer can be shorter than expected.${budgetHint} Ask the agent to continue, lower the reasoning mode, or narrow the context and retry.`
-      : `DeepSeek 在回复完成前返回 finish_reason=length。Thinking token 可能计入该上限，因此可见正文可能比预期短。${budgetHint}你可以让 Agent 继续、降低推理模式，或缩小上下文后重试。`;
   }
 
   private formatReasoning(parts: string[]): string | undefined {
@@ -4167,6 +4278,170 @@ export class AgentLoop {
     return {};
   }
 
+  private getEvidenceStore(): ToolEvidenceStore {
+    this.evidenceStore ??= new ToolEvidenceStore(this.globalStorageUri, getConfiguredEvidenceMaxBytes());
+    return this.evidenceStore;
+  }
+
+  private async reconcilePersistedEvidence(checkpoint: import('./runCheckpoint').RunCheckpoint, sessionId: string): Promise<void> {
+    const executing = checkpoint.state?.pending?.executing;
+    if (!executing || !checkpoint.state?.pending) return;
+    const store = this.getEvidenceStore();
+    const evidence = executing.evidenceRef
+      ? await store.findByRef(executing.evidenceRef, sessionId, checkpoint.taskId)
+      : await store.findByToolCall(sessionId, checkpoint.taskId, executing.id, checkpoint.state.epoch?.index ?? 0);
+    if (!evidence) return;
+    if (evidence.executionStatus === 'pending') {
+      // The durable intent exists but execution never started.
+      checkpoint.state.pending.executing = undefined;
+      return;
+    }
+    if (evidence.executionStatus === 'completed') {
+      if (checkpoint.state.epoch) this.upsertEpochEvidenceRef(checkpoint.state.epoch, evidence);
+      if (evidence.providerEnvelope !== undefined) checkpoint.state.pending.results[executing.id] = evidence.providerEnvelope;
+      checkpoint.state.pending.executing = undefined;
+      return;
+    }
+    if (evidence.effectKind === 'read' || evidence.effectKind === 'proposal') {
+      await store.resetReplayableIntent(evidence);
+      checkpoint.state.pending.executing = undefined;
+      return;
+    }
+    await store.markUncertain(evidence);
+    // executing/uncertain is deliberately left in place. Side effects cannot
+    // be proven absent and therefore are never replayed automatically.
+  }
+
+  private estimateCurrentProviderInputTokens(
+    request: AgentRequest,
+    messages: DeepSeekMessage[],
+    tools: DeepSeekFunctionTool[],
+    providerRunState?: ProviderNativeRunState,
+    additionalResponsesItems: OpenAiResponsesItem[] = [],
+    additionalAnthropicToolResults: AnthropicUserContentBlock[] = []
+  ): number {
+    if (providerRunState?.protocol === 'openai-responses') {
+      return createContextUsageEstimateFromResponses({
+        model: request.model,
+        input: [...providerRunState.input, ...additionalResponsesItems],
+        tools: providerRunState.tools,
+        outputReserveTokens: 0,
+        safetyReserveTokens: 0
+      }).usedTokensEstimate;
+    }
+    if (providerRunState?.protocol === 'anthropic-messages') {
+      return createContextUsageEstimateFromAnthropic({
+        model: request.model,
+        system: providerRunState.system,
+        messages: additionalAnthropicToolResults.length
+          ? [...providerRunState.messages, { role: 'user', content: additionalAnthropicToolResults }]
+          : providerRunState.messages,
+        tools: providerRunState.tools,
+        outputReserveTokens: 0,
+        safetyReserveTokens: 0
+      }).usedTokensEstimate;
+    }
+    return createContextUsageEstimateFromMessages({
+      model: request.model,
+      messages,
+      tools,
+      outputReserveTokens: 0,
+      safetyReserveTokens: 0
+    }).usedTokensEstimate;
+  }
+
+  private async getPendingEvidenceDeliveryRecords(
+    store: ToolEvidenceStore,
+    sessionId: string,
+    taskId: string,
+    refs: Array<{ evidenceRef: string }>
+  ): Promise<ToolEvidence[]> {
+    const records = await Promise.all(refs.map(async (item) => await store.findByRef(item.evidenceRef, sessionId, taskId)));
+    return records.filter((item): item is ToolEvidence => Boolean(item?.providerEnvelope)
+      && item!.deliveryStatus !== 'delivered');
+  }
+
+  private upsertEpochEvidenceRef(
+    epoch: import('./contextEpoch').ContextEpochState,
+    evidence: ToolEvidence
+  ): void {
+    if (!evidence.contentHash) return;
+    const item = { evidenceRef: evidence.evidenceRef, contentHash: evidence.contentHash,
+      toolName: evidence.toolName, toolCallId: evidence.toolCallId,
+      source: evidence.source ? { ...evidence.source } : undefined };
+    const index = epoch.evidenceRefs.findIndex((entry) => entry.evidenceRef === evidence.evidenceRef);
+    if (index >= 0) epoch.evidenceRefs[index] = item;
+    else epoch.evidenceRefs.push(item);
+    // Older inventories remain reachable through prior host-state evidence.
+    // Bound the live checkpoint itself so durable recovery cannot be defeated
+    // by an otherwise healthy task that runs for thousands of tool calls.
+    if (epoch.evidenceRefs.length > 4_096) {
+      epoch.evidenceRefs.splice(0, epoch.evidenceRefs.length - 4_096);
+    }
+  }
+
+  private getEvidenceEffectKind(toolName: string): ToolEvidence['effectKind'] {
+    if (isDraftEditPreparationTool(toolName) || isDraftRunPreparationTool(toolName)) return 'proposal';
+    if (toolName === RUN_VALIDATION_TOOL_NAME) return 'validation';
+    if (getSubagentHandoffKind(toolName)) return 'delegation';
+    return 'read';
+  }
+
+  private async createEpochSemanticSummary(input: {
+    request: AgentRequest;
+    runtimeConfig: AgentRuntimeConfig;
+    messages: DeepSeekMessage[];
+    tools: DeepSeekFunctionTool[];
+    providerRunState?: ProviderNativeRunState;
+    callbacks: AgentRunCallbacks;
+    trace: AgentInteractionTrace;
+    usageTotals: UpstreamUsageTotals;
+    runDeadlineAt?: number;
+  }): Promise<string | undefined> {
+    const instruction = input.request.language === 'en'
+      ? 'Create a concise semantic checkpoint for this same task: objective, completed and remaining work, confirmed facts with paths/lines, evidenceRefs and hashes, failures, and the next best step. Do not call tools. Return plain text only.'
+      : '为同一任务生成简洁语义检查点：目标、已完成和未完成工作、带路径/行号的已确认事实、evidenceRef 与 hash、失败尝试和最佳下一步。不要调用工具，只返回纯文本。';
+    const summaryMessages = structuredClone(input.messages);
+    summaryMessages.push({ role: 'user', content: instruction });
+    const summaryProvider = structuredClone(input.providerRunState);
+    this.appendProviderUserText(summaryProvider, instruction);
+    const summaryAbort = new AbortController();
+    const abortFromParent = () => summaryAbort.abort(input.request.signal?.reason);
+    if (input.request.signal?.aborted) abortFromParent();
+    else input.request.signal?.addEventListener('abort', abortFromParent, { once: true });
+    const timeout = setTimeout(() => summaryAbort.abort(new Error('Context Epoch summary timed out.')), 12_000);
+    timeout.unref?.();
+    try {
+      const response = await this.createModelResponse(
+        { ...input.request, signal: summaryAbort.signal },
+        { ...input.runtimeConfig, maxTokens: Math.min(2_048, input.runtimeConfig.maxTokens) },
+        summaryMessages,
+        input.tools,
+        {
+          ...input.callbacks,
+          // This is a hidden provider lane. Only its usage/trace is observable;
+          // streamed checkpoint prose must never leak into the final transcript.
+          onDelta: undefined,
+          onStatus: undefined,
+          onUsageEstimate: undefined
+        },
+        input.runDeadlineAt,
+        {
+          trace: input.trace,
+          usageTotals: input.usageTotals,
+          usageSource: 'continuation',
+          toolChoice: 'none',
+          providerRunState: summaryProvider
+        }
+      );
+      const content = response.message.content?.trim();
+      return content ? content.slice(0, 16_000) : undefined;
+    } finally {
+      clearTimeout(timeout);
+      input.request.signal?.removeEventListener('abort', abortFromParent);
+    }
+  }
+
   private async getRuntimeConfig(request: AgentRequest): Promise<AgentRuntimeConfig> {
     const sourceConfig = request.sourceConfig ?? await resolveModelSourceConfig(
       request.model.sourceId,
@@ -4181,6 +4456,15 @@ export class AgentLoop {
       throw new MissingModelSourceApiKeyError(request.language);
     }
     const profile = getAgentRuntimeProfile(request.model, request.settings);
+    const maxCost = request.taskCostBudget?.limit ?? mergeCostLimits(
+      getConfiguredAgentMaxCost(),
+      request.executionLimits?.maxCost
+    );
+    if (maxCost > 0 && (!sourceConfig.supportsBilling || !getConfiguredModelUsagePricing(request.model.id))) {
+      throw new AgentInterruptedError('provider_error', request.language === 'en'
+        ? 'The configured Provider cost limit requires a source and model with available usage pricing.'
+        : '用户配置的 Provider 费用上限要求当前来源和模型具有可用的用量价格。');
+    }
 
     return {
       sourceId: sourceConfig.sourceId,
@@ -4193,7 +4477,7 @@ export class AgentLoop {
       maxToolIterations: clampRunLimit(profile.maxToolIterations, request.executionLimits?.maxToolIterations),
       maxToolCalls: clampRunLimit(profile.maxToolCalls, request.executionLimits?.maxToolCalls),
       maxRunMs: request.checkpoint?.maxExecutionMs ?? mergeDurations(getConfiguredAgentMaxExecutionMs(), request.executionLimits?.maxRunMs),
-      toolResultTokenBudget: profile.toolResultTokenBudget,
+      maxCost,
       streamIdleTimeoutMs: getConfiguredStreamIdleTimeoutMs(),
       temperature: profile.temperature,
       topP: profile.topP,
@@ -4296,6 +4580,17 @@ function readDraftEditId(rawResult: string): string | undefined {
     }
     const id = (draftEdit as Record<string, unknown>).id;
     return typeof id === 'string' && id ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readToolResultErrorType(rawResult: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(rawResult);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    const value = (parsed as Record<string, unknown>).errorType;
+    return typeof value === 'string' && value ? value.slice(0, 120) : undefined;
   } catch {
     return undefined;
   }

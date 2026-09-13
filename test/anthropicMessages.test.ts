@@ -593,19 +593,28 @@ describe('Anthropic Messages compatible protocol', () => {
     }
   });
 
-  it('freezes tools while switching tool_choice to none when the tool budget is exhausted', async () => {
+  it('freezes tools across an internal epoch rollover at the per-epoch tool threshold', async () => {
     const bodies: AnthropicMessagesRequestBody[] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_input, init) => {
       bodies.push(JSON.parse(String(init?.body)) as AnthropicMessagesRequestBody);
-      return bodies.length === 1 ? anthropicToolResponse(false) : anthropicTextResponse('stopped');
+      return bodies.length === 1 ? anthropicToolResponse() : anthropicTextResponse('stopped');
     }) as typeof fetch;
     try {
       await new AgentRunner().run(createAgentRequest({ maxToolIterations: 1 }));
-      assert.equal(bodies.length, 2);
+      assert.equal(bodies.length, 3);
       assert.deepEqual(bodies[0].tool_choice, { type: 'auto' });
       assert.deepEqual(bodies[1].tool_choice, { type: 'none' });
+      assert.deepEqual(bodies[2].tool_choice, { type: 'auto' });
       assert.equal(JSON.stringify(bodies[0].tools), JSON.stringify(bodies[1].tools));
+      assert.equal(JSON.stringify(bodies[1].tools), JSON.stringify(bodies[2].tools));
+      assert.equal(JSON.stringify(bodies[2].messages).includes('keepseek_context_epoch_checkpoint'), true);
+      assert.equal(JSON.stringify(bodies[1].messages).includes('opaque-signature'), true,
+        'the old epoch summary lane replays the exact opaque thinking block');
+      assert.equal(JSON.stringify(bodies[1].messages).includes('opaque-redacted'), true);
+      assert.equal(JSON.stringify(bodies[2].messages).includes('opaque-signature'), false,
+        'a new epoch never copies or reconstructs an opaque signature');
+      assert.equal(JSON.stringify(bodies[2].messages).includes('opaque-redacted'), false);
     } finally {
       globalThis.fetch = originalFetch;
     }

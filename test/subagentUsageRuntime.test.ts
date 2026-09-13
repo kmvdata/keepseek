@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import { ModelSourceStore } from '../src/accounts/accountStore';
 import { SubagentSettingsStore } from '../src/accounts/subagentSettingsStore';
 import { AgentLoop, AgentRunner } from '../src/agent/runner';
+import { createRunCheckpoint } from '../src/agent/runCheckpoint';
 import { estimateDeepSeekMessageTokens } from '../src/agent/protocol';
 import { createContextUsageEstimateFromAnthropic, createContextUsageEstimateFromResponses } from '../src/agent/contextUsage';
 import { createProviderClient } from '../src/agent/providers/factory';
@@ -55,14 +56,16 @@ test('root runner observes all three final accepted tool messages without changi
   assert.ok(estimates.at(-1)!.breakdown.toolResultTokensEstimate > 0, 'final Provider calibration preserves intermediate categories');
 });
 
-test('root runner does not count results rejected by the tool-token budget or context-window budget', async () => {
+test('root runner observes bounded handoff envelopes instead of rejecting large child results', async () => {
   for (const contentLength of [50_000, 400_000]) {
     const observed: SubagentHandoffEstimate[] = [];
     const result = await runParent({ onSubagentHandoffEstimate: (event) => observed.push(event) }, {
       result: JSON.stringify({ ok: true, result: '中'.repeat(contentLength) }), contextWindowTokens: 64_000
     });
-    assert.equal(observed.length, 0);
-    assert.match(JSON.stringify(result.response.toolRounds), /tool_result_budget_exhausted/u);
+    assert.equal(observed.length, 3);
+    const serialized = JSON.stringify(result.response.toolRounds);
+    assert.match(serialized, /evidenceRef/u);
+    assert.doesNotMatch(serialized, /tool_result_budget_exhausted/u);
   }
 });
 
@@ -76,10 +79,13 @@ test('nested runner results never enter the root handoff counter', async () => {
 test('Responses, Anthropic, and DSML handoffs use the final native context representation and keep requests byte-stable', async () => {
   for (const format of ['responses', 'anthropic', 'dsml'] as const) {
     const observed: SubagentHandoffEstimate[] = [];
-    const baseline = await runParent({}, { format });
-    const observedRun = await runParent({ onSubagentHandoffEstimate: (event) => observed.push(event) }, { format });
+    const largeResult = JSON.stringify({ ok: true, result: '中'.repeat(50_000) });
+    const baseline = await runParent({}, { format, result: largeResult, contextWindowTokens: 64_000 });
+    const observedRun = await runParent({ onSubagentHandoffEstimate: (event) => observed.push(event) },
+      { format, result: largeResult, contextWindowTokens: 64_000 });
     assert.deepEqual(observedRun.bodies, baseline.bodies, format);
     assert.equal(observed.length, 3, format);
+    assert.match(observedRun.bodies.join('\n'), /evidenceRef/u);
     const body = JSON.parse(observedRun.bodies[1]);
     let expected: number;
     if (format === 'responses') {
@@ -91,14 +97,19 @@ test('Responses, Anthropic, and DSML handoffs use the final native context repre
       const estimate = (messages: typeof body.messages) => createContextUsageEstimateFromAnthropic({
         model: parentRequest().model, system: body.system, messages, outputReserveTokens: 0, safetyReserveTokens: 0
       }).usedTokensEstimate;
-      expected = estimate(body.messages) - estimate(body.messages.slice(0, -1));
+      const toolResultIndex = body.messages.findIndex((message: { content: unknown }) => Array.isArray(message.content)
+        && message.content.some((block: { type?: string }) => block.type === 'tool_result'));
+      assert.ok(toolResultIndex >= 0);
+      expected = estimate(body.messages) - estimate(body.messages.filter((_: unknown, index: number) => index !== toolResultIndex));
     } else {
       const wrapper = body.messages.find((message: { role: string; content: string }) => message.role === 'user'
         && message.content.includes('KeepSeek executed the DSML tool requests'));
       assert.ok(wrapper);
       expected = estimateDeepSeekMessageTokens(wrapper);
     }
-    assert.equal(observed.reduce((sum, event) => sum + event.tokensEstimate, 0), expected, format);
+    const observedTotal = observed.reduce((sum, event) => sum + event.tokensEstimate, 0);
+    assert.ok(Math.abs(observedTotal - expected) <= observed.length,
+      `${format}: per-item conservative rounding must stay within one token per handoff (${observedTotal} vs ${expected})`);
   }
 });
 
@@ -252,6 +263,9 @@ async function runParent(callbacks: Parameters<AgentRunner['run']>[1], options: 
       request.subagentContext = { id: 'sa_ancestor', parentSessionId: 'session-one', parentRunId: 'parent', rootRunId: 'root',
         treeId: 'tree', depth: 1, profile: 'research', lane: 'research-read' };
     }
+    const checkpoint = createRunCheckpoint(request, 0, 'test', []);
+    checkpoint.taskId = 'stable-subagent-handoff-task';
+    request.checkpoint = checkpoint;
     const response = await new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, undefined, adapter).run(request, callbacks);
     return { response, bodies };
   } finally { globalThis.fetch = originalFetch; }

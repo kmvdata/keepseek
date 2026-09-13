@@ -542,11 +542,6 @@ export function getScript(): string {
           vscode.postMessage({ type: 'continueAgentTask', messageId: runMessage.id });
           return;
         }
-        if (runButton.dataset.runAction === 'continueTaskInNewTurn') {
-          runButton.disabled = true;
-          vscode.postMessage({ type: 'continueAgentTaskInNewTurn', messageId: runMessage.id });
-          return;
-        }
         if (!runMessage.runDetails) return;
         if (runButton.dataset.runAction === 'openTrace') {
           vscode.postMessage({ type: 'openRunTrace', messageId: runMessage.id });
@@ -3951,16 +3946,6 @@ export function getScript(): string {
         button.dataset.runAction = 'continueTask'; button.dataset.messageId = message.id;
         button.disabled = Boolean(state.isBusy);
         panel.append(button);
-      } else if (run.canContinueInNewTurn) {
-        var nextTurnButton = document.createElement('button');
-        nextTurnButton.type = 'button'; nextTurnButton.textContent = t('runContinueInNewTurn');
-        nextTurnButton.title = t('runNewTurnNotice');
-        nextTurnButton.dataset.runAction = 'continueTaskInNewTurn'; nextTurnButton.dataset.messageId = message.id;
-        nextTurnButton.disabled = Boolean(state.isBusy);
-        panel.append(nextTurnButton);
-        var nextTurnNotice = document.createElement('div');
-        nextTurnNotice.textContent = t('runNewTurnNotice');
-        panel.append(nextTurnNotice);
       }
       return panel;
     }
@@ -4030,6 +4015,20 @@ export function getScript(): string {
             source: summary.sourceId || t('summarySourceUnknown'),
             provider: summary.provider || '—',
             createdAt: formatDateTime(summary.createdAt)
+          });
+        })));
+      }
+
+      if (Array.isArray(details.contextEpochs) && details.contextEpochs.length) {
+        body.append(createRunTextSection(t('runDetailsContextEpochs'), details.contextEpochs.map(function(epoch) {
+          return t('runDetailsContextEpochLine', {
+            index: String(epoch.index || 0),
+            reason: String(epoch.reason || '—'),
+            before: formatRunTokenCount(epoch.estimatedPromptTokens || 0),
+            after: typeof epoch.afterEstimatedPromptTokens === 'number' ? formatRunTokenCount(epoch.afterEstimatedPromptTokens) : '—',
+            reusable: typeof epoch.reusablePrefixTokensEstimate === 'number' ? formatRunTokenCount(epoch.reusablePrefixTokensEstimate) : '—',
+            reset: typeof epoch.estimatedCacheResetTokens === 'number' ? formatRunTokenCount(epoch.estimatedCacheResetTokens) : '—',
+            summary: String(epoch.summaryKind || 'host_fallback')
           });
         })));
       }
@@ -4293,6 +4292,17 @@ export function getScript(): string {
           source: summary.sourceId || t('summarySourceUnknown'),
           provider: summary.provider || '—',
           createdAt: formatDateTime(summary.createdAt)
+        }));
+      });
+      (details.contextEpochs || []).forEach(function(epoch) {
+        lines.push(t('runDetailsContextEpochs') + ': ' + t('runDetailsContextEpochLine', {
+          index: String(epoch.index || 0),
+          reason: String(epoch.reason || '—'),
+          before: formatRunTokenCount(epoch.estimatedPromptTokens || 0),
+          after: typeof epoch.afterEstimatedPromptTokens === 'number' ? formatRunTokenCount(epoch.afterEstimatedPromptTokens) : '—',
+          reusable: typeof epoch.reusablePrefixTokensEstimate === 'number' ? formatRunTokenCount(epoch.reusablePrefixTokensEstimate) : '—',
+          reset: typeof epoch.estimatedCacheResetTokens === 'number' ? formatRunTokenCount(epoch.estimatedCacheResetTokens) : '—',
+          summary: String(epoch.summaryKind || 'host_fallback')
         }));
       });
       if (details.taskPlan?.goal) lines.push(t('runDetailsTaskPlan') + ': ' + details.taskPlan.goal);

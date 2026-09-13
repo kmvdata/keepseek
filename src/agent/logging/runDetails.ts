@@ -183,6 +183,7 @@ export class RunDetailsBuilder {
       contextDiscarded: this.contextDiscarded.map((source) => ({ ...source })),
       contextDeduplication: this.contextDeduplication ? { ...this.contextDeduplication } : undefined,
       historySummaries: this.historySummaries.map((summary) => ({ ...summary })),
+      contextEpochs: this.contextEpochs.map((epoch) => ({ ...epoch })),
       budgetStopReason: this.budgetStopReason,
       failureReason: this.failureReason,
       traceLogUri: this.input.traceLogUri,
@@ -196,6 +197,11 @@ export class RunDetailsBuilder {
   private contextDeduplication: RunDetailsSummary['contextDeduplication'];
   private historySummaries: NonNullable<RunDetailsSummary['historySummaries']> = [];
   private approvalReviews: NonNullable<RunDetailsSummary['approvalReviews']> = [];
+  private contextEpochs: NonNullable<RunDetailsSummary['contextEpochs']> = [];
+
+  public recordEpochRollover(value: NonNullable<RunDetailsSummary['contextEpochs']>[number]): void {
+    this.contextEpochs.push({ ...value });
+  }
 
   public setHistorySummaries(summaries: readonly HistorySummary[]): void {
     this.historySummaries = summaries.map((summary) => ({

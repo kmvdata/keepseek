@@ -40,8 +40,10 @@
 │   1. buildHistoryProjection() → 历史投影              │
 │   2. buildInitialAgentMessages() → 组装 messages[]   │
 │   3. providerRequestProjection → 协议原生 body       │
-│   4. POST /chat/completions、/responses 或 /messages  │
-│   5. 工具调用循环（如有）                              │
+│   4. dynamic admission / learned window              │
+│   5. POST /chat/completions、/responses 或 /messages  │
+│   6. intent → tool → evidence → immutable envelope   │
+│   7. 必要时同 task 内 Context Epoch rollover           │
 └──────────────────────────────────────────────────────┘
            │
            ▼
@@ -99,7 +101,30 @@
 
 下面我们逐层拆解 `messages` 数组的组装过程，尤其是当前用户 prompt 如何被构建。
 
-### 2.1 Anthropic Messages 原生结构
+### 2.1 OpenAI Responses 原生结构
+
+Responses 使用 `/responses` 和原生 Items，不把它转换成 Chat messages：
+
+```json
+{
+  "model": "responses-model-id",
+  "input": [
+    { "role": "system", "content": "<KeepSeek system>" },
+    { "role": "user", "content": "<展开后的 prompt>" },
+    { "type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "keepseek_search_workspace", "arguments": "{\"query\":\"epoch\"}" },
+    { "type": "function_call_output", "call_id": "call_1", "output": "<saved evidence envelope bytes>" }
+  ],
+  "tools": [{ "type": "function", "name": "keepseek_read_evidence", "description": "...", "parameters": {} }],
+  "tool_choice": "auto",
+  "stream": true,
+  "store": false,
+  "max_output_tokens": 8192
+}
+```
+
+epoch 内 Items 原始顺序 append-only，`function_call_output.call_id` 必须对应已存在的 call。rollover 创建明确的新内部 lane，只继承原始任务、可见语义/checkpoint 和 evidence 引用，绝不把旧 lane 的孤立 output 拼入新 input。
+
+### 2.2 Anthropic Messages 原生结构
 
 Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使用 `/v1/messages`，以 `/apps/anthropic` 结尾的 SDK base 使用 `/apps/anthropic/v1/messages`。请求头为 `x-api-key`、`anthropic-version: 2023-06-01`、JSON 与 SSE Accept；空 Key 只允许自定义兼容端点。请求不会包含 Bearer、`chat/completions`、`stream_options`、`reasoning_effort` 或 Responses 字段：
 
@@ -125,9 +150,9 @@ Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使�
 
 `cache_control` 只在 host 精确为 `api.anthropic.com` 时默认加入；代理/内网 compatible endpoint 默认省略。Thinking 参数只由 `/models` 声明的能力启用。若自定义兼容端点只实现 Messages、没有模型列表，404 探测会降级为“服务可达但 Key 未验证”，账号仍可保存，模型 ID 必须手动添加；手动添加是终态操作，不会紧接着再次请求模型列表。
 
-### 2.2 通用运行画像与输出上限
+### 2.3 通用运行画像与输出上限
 
-`buildProviderRequestProjection()` 同时返回 `runtimeProfile`，Runner、上下文用量、hard-limit、工具结果 snip 和历史压缩都使用 `src/shared/modelProfiles.ts` 的同一解析规则：
+`buildProviderRequestProjection()` 同时返回 `runtimeProfile`，Runner、上下文用量、动态结果准入和历史压缩都使用 `src/shared/modelProfiles.ts` 的同一解析规则：
 
 1. 手动模型显式 `contextWindowTokens` / `maxOutputTokens`；
 2. 最新 `/models` 发现元数据；
@@ -135,9 +160,9 @@ Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使�
 4. `modelContextWindowGuesses.ts` 中受控、可测试的模型家族上下文窗口与最大输出猜测；
 5. 其它未知模型保守 fallback：32768 context tokens / 8192 output tokens。
 
-最终 output limit 会被有效 context window 再次收紧，summary budget 会被最终 output limit 收紧。Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tokens`，Anthropic 写入 `max_tokens`；它们不会互相注入 DeepSeek `thinking` / `reasoning_effort`、Responses `reasoning` 或 Anthropic `cache_control` 等协议专属字段。名称猜测同时覆盖已知模型的 context window 与 max output，但不会持久化为 provider 事实；没有公开输出上限的文本模型继续使用 8192 output fallback。已知图像生成/语音合成资源不使用 token fallback：它们在账号清单中显示“不适用”，并从文本 Agent 模型目录排除。账号设置用模型领域惯用的 `K/M tokens` 表达两个能力，例如 `32768 → 32K tokens`、`1000000 → 1M tokens`；上下文窗口按 `K tokens` 编辑，最大输出按精确 tokens 编辑，保存后均成为优先于发现值和猜测值的账号级覆盖。
+最终 output limit 会被 learned effective window 再次收紧，工具选择轮、最终回答轮和摘要轮使用不同的动态输出预留。Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tokens`，Anthropic 写入 `max_tokens`；它们不会互相注入协议专属字段。Provider 的真实 input usage 按来源/endpoint/model 校准估算比例；context-too-long 会降低 learned window 并重建 epoch，这些校准值不进入 system/history。名称猜测与人工 metadata 只是声明起点，不是终止依据。
 
-模型切换会迁移 provider/cache lane，但不会删除或强制重建语义摘要。`HistorySummary.modelId` 保留生成 provenance；`requestProtocolVersion` 只表示序列化/schema 兼容版本，不表示模型能力等级。当前协议版本为 v3：新会话使用 v3，已有 v2 热会话继续保留 v2 工具 schema；只有 cache lane 已经自然失效时才迁移到 v3。缺失版本的旧会话仍按 v1 回放。
+模型切换会迁移 provider/cache lane，但不会删除或强制重建语义摘要。`HistorySummary.modelId` 保留生成 provenance；`requestProtocolVersion` 只表示序列化/schema 兼容版本，不表示模型能力等级。当前协议/Tool Schema 为 v8：新会话固定包含 `keepseek_read_evidence`，工具按名稳定排序；v1–v7 热会话保持原 provider-visible bytes，在 cache lane 已冷或首次需要外置结果时经一次受控 epoch rollover 迁移。历史消息和旧预算文本不改写。rollover 的完整宿主权威状态保存为可分页 checkpoint evidence；Provider seed 只带最近条目、总量/hash 和 manifest `evidenceRef`，因此长期任务的恢复前缀不会随累计工具次数无限增长。
 
 ## 3. 稳定上下文与当前用户 prompt 的组装
 
@@ -479,18 +504,33 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
 当模型返回 `tool_calls` 时，Runner 会：
 
 1. 将 assistant 消息（含 `tool_calls`）加入 messages
-2. 本地执行工具
-3. 对工具结果做 shaping（裁剪、截断、限制字符数）
-4. 将 shaped result 作为 `role: "tool"` 消息加入 messages
-5. 再次请求模型
+2. 在 Tool Evidence Store 持久化每个调用的 `pending` 意图，再标记 `executing`
+3. 本地执行工具，先持久化完整结果、`contentHash` 和 `completed` 终态
+4. 以三协议的 prospective request 计算动态 inline allowance
+5. 小结果原样保存为 provider-visible bytes；大结果按完整行/item/合法 JSON 生成不可变 envelope
+6. 将保存后的 bytes 作为原生 tool result 加入请求；需要细节时调用 `keepseek_read_evidence`
+7. 如果最小批次信封也放不下，在完整批次后保存旧 lane 并以相同 task 创建下一 Context Epoch
 
-工具结果 shaping 是确保上下文不被单个大型工具结果吞掉的关键设计。例如：
+典型非完整 envelope：
 
-- **搜索结果 shaping**：限制总命中数（120 → 60）、每文件命中数（12 → 6）、单行字符数（500 → 300）、总字符数（50K → 20K）
-- **范围读取 shaping**：内容字符上限 160K（snipped 模式 60K）
-- **全文读取**：小文件不压缩，保持精确返回
+```json
+{
+  "completeInline": false,
+  "contentHash": "<sha256>",
+  "contentType": "json",
+  "evidenceRef": "ev_<task-scoped-id>.<scope-proof>",
+  "summary": { "ok": true, "path": "src/large.ts" },
+  "totalBytes": 20000000,
+  "totalChars": 20000000,
+  "totalTokensEstimate": 5000000,
+  "read": {
+    "tool": "keepseek_read_evidence",
+    "paging": "Use cursor, startLine/endLine, itemOffset/itemLimit, or search."
+  }
+}
+```
 
-shaping 后的 tool result 仍保留截断元数据（`truncated`、`limit`、`totalLines` 等），让模型知道结果可能不完整，可以继续调用工具。
+同一 session/protocol lane 的 schema 冻结，envelope 一旦持久化逐字节复用。大结果不是工具失败，旧工具也不能为了下一页被重复执行。
 
 Anthropic 使用不同的原生结构：assistant content 中可依次含 `thinking`（完整 thinking + opaque signature）、`redacted_thinking`（opaque data）、`text`、多个 `tool_use`；随后一个 user content 数组先放同序的全部 `tool_result`。这些 blocks 在同 protocol/source/endpoint lane 内由 `providerReplay` 原样持久化和回放，不能从通用 `toolRounds` 或摘要字符串重建。跨 lane 只保留用户可见文本。
 
@@ -700,6 +740,7 @@ export async function loginUser(
 - 调用 `keepseek_search_workspace` 搜索相关代码
 - 在用户授权修改时调用 incremental 或完整 DraftEdit 创建待确认修改；分析、诊断和审查请求仍保持只读
 - 当旧工具证据已从投影省略时调用 `keepseek_search_session_archive`
+- 当前任务的大结果（包括新子代理完整签收结果）统一通过 `keepseek_read_evidence` 分页；根 V8 schema 中的 `keepseek_read_subagent_result` 仅桥接 V1–V7 已存结果，桥接输出随即进入通用 evidence/admission 管线
 
 validation 只观察当前已落盘工作区：可在 DraftEdit 前复现/建立基线；任一 DraftEdit 成功后，Runner 会在 Apply 前硬性拒绝新的 validation。该约束同时覆盖普通 DraftEdit 和 repair DraftEdit，不能只依赖模型遵守 prompt。
 
@@ -727,12 +768,12 @@ validation 只观察当前已落盘工作区：可在 DraftEdit 前复现/建立
 }
 ```
 
-### 7.2 Runner 执行工具并 shaping 结果
+### 7.2 Runner 保存证据并准入结果
 
-工具执行返回 raw result，然后 shaping：
+Runner 在执行前保存 intent；执行完成后先保存下列完整 raw result 和 hash。因为本例很小，动态准入可以原样内联：
 
 ```json
-// Shaped tool result（role=tool 消息的 content）
+// 小型 provider-visible tool result（role=tool 消息的 content）
 {
   "ok": true,
   "path": "doc",
@@ -797,6 +838,8 @@ validation 只观察当前已落盘工作区：可在 DraftEdit 前复现/建立
 
 模型收到 tool 结果后继续推理，可能接着调用 `keepseek_read_workspace_file_range` 读取文档，或直接基于已获得的信息给出回答。
 
+若其中任一结果过大，`content` 改为此前展示的不可变 evidence envelope；两个 `tool_result` 仍必须一次完整、同序回传。若旧 epoch 没有容纳这组最小信封的空间，KeepSeek 保存两份证据并从新 epoch 的权威 checkpoint 继续，不复制 opaque signature，也不重跑工具。
+
 ## 8. 关键设计决策与 trade-off
 
 ### 8.1 为什么不把所有引用都展开到 prompt 里？
@@ -815,13 +858,18 @@ validation 只观察当前已落盘工作区：可在 DraftEdit 前复现/建立
 | 内容完整性 | 行范围引用只读取指定行 | 总是完整文件内容 |
 | 生命周期 | 仅当前轮次 | 跨轮次保留在 FileContextStore 中，直到用户移除 |
 
-### 8.3 工具结果 shaping 的边界
+### 8.3 Evidence、准入与 Context Epoch 的边界
 
-工具结果在进入 `role=tool` 消息前会被 shaping，但 shaping 保留截断元数据：
+工具结果在进入 Provider 前必须先持久化；准入只决定本次可见字节，不决定工具成功与否：
 
-- 模型始终知道结果可能不完整（`truncated: true`）
-- 模型可以继续调用工具获取更多数据
-- 全文读取（小文件）不做 shaping，保证 DraftEdit 生成精度
+- 小结果尽量原样，避免不必要的额外调用；
+- 非完整结果始终有 `completeInline:false`、hash、总量和 evidenceRef，不静默丢失；
+- 文件/diff/log 只在完整行边界结束，集合按 item 页，JSON 始终合法；
+- `keepseek_read_evidence` 支持 byte cursor、1-based 行、item offset 和 search，并返回 `hasMore`/下一位置；
+- evidence 是当时结果的不可变快照；源文件变化后如需当前事实，应重新读取源；
+- 最小信封空间不足触发同 task 的 epoch rollover，不产生聊天 user 消息或新审批。
+
+宿主显式停止预算不进入 Provider payload：`keepseek.agent.maxExecutionMs` 与 `keepseek.agent.maxCost` 冻结在逻辑任务检查点，Context Epoch 不会重置。费用上限按每种计费币种分别应用于主任务、子代理与恢复；正值配置要求来源、模型和响应都有可计价用量，否则在下一次无法核算的请求前 fail-closed。它与动态结果准入无关，不能把 evidence 大小或上下文压力解释成费用/时间耗尽。
 
 ### 8.4 Slim tool mode
 
@@ -861,13 +909,15 @@ KeepSeek 的 API 通信链路可以概括为：
     ├─ + 历史投影中的 user/assistant 消息
     │
     ▼
-messages[] → POST /chat/completions
+权威 projection → POST /chat/completions、/responses 或 /messages
     │
     ├─ 模型返回文本或 tool_calls
-    ├─ tool_calls → 本地执行 → shaping → role=tool → 再次请求
+    ├─ tool_calls → durable intent → 本地执行 → evidence/hash
+    ├─ dynamic admission → 原样结果或 immutable envelope
+    ├─ 容量压力 → 同 task Context Epoch rollover
     └─ 循环至模型给出最终文本回复
 ```
 
-LLM 看到的始终是「纯文本消息 + 工具定义」，不知道 VS Code Webview、引用 chip、富文本编辑器等 UI 细节。所有引用展开、上下文组装、工具路由和结果 shaping 都在 KeepSeek 扩展端完成，对模型透明。
+LLM 看到的是协议原生的消息/Items、冻结工具定义和有界证据结果，不知道 VS Code Webview、引用 chip、富文本编辑器或 epoch 调度等 UI/宿主细节。所有引用展开、上下文组装、工具路由、证据持久化、动态准入和恢复都在扩展端完成。
 
 这种设计让 KeepSeek 可同时适配 OpenAI-compatible function calling、Responses Items 与 Anthropic `tool_use`，模型不需要理解 KeepSeek 的引用语法或 UI。Anthropic 的 Bedrock/Vertex 专用认证、OAuth、Files、图片/PDF、server tools 与 Messages Batches 不在当前范围。

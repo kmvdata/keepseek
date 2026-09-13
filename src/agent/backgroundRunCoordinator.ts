@@ -129,11 +129,12 @@ export class BackgroundRunCoordinator {
   public getRemainingExecutionLimits(): AgentExecutionLimits {
     const run = this.requireRun();
     const elapsedMs = run.progress.usedMs ?? 0;
-    const remainingToolCalls = Math.max(1, run.limits.maxToolCalls - run.progress.toolCalls);
     const remainingDurationMs = run.limits.maxDurationMs > 0 ? Math.max(1, run.limits.maxDurationMs - elapsedMs) : 0;
     return {
-      maxToolIterations: remainingToolCalls,
-      maxToolCalls: remainingToolCalls,
+      // This legacy setting is now a per-Context-Epoch rollover threshold.
+      // Cumulative calls remain telemetry and never terminate the task.
+      maxToolIterations: run.limits.maxToolCalls,
+      maxToolCalls: run.limits.maxToolCalls,
       maxRunMs: remainingDurationMs,
       timeLimitSource: 'background.maxDurationMs + agent.maxExecutionMs (remaining active time)',
       maxRepairIterations: run.limits.maxRounds
@@ -143,7 +144,6 @@ export class BackgroundRunCoordinator {
   public getLimitStopReason(run = this.activeRun): string | undefined {
     if (!run) return 'Background task is unavailable.';
     if (run.progress.round >= run.limits.maxRounds) return `Maximum background rounds reached (${run.limits.maxRounds}).`;
-    if (run.progress.toolCalls >= run.limits.maxToolCalls) return `Maximum background tool calls reached (${run.limits.maxToolCalls}).`;
     if (run.limits.maxDurationMs > 0 && (run.progress.usedMs ?? 0) >= run.limits.maxDurationMs) return `Maximum background duration reached (${run.limits.maxDurationMs} ms).`;
     return undefined;
   }

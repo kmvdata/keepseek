@@ -4,7 +4,7 @@
 
 子代理的运行期工具闸门、proposal 路径租约、类型化签收、结果复用、按 profile 模型和脱敏进度/诊断契约见 [子代理运行时安全与兼容性](./subagent-runtime-security.md)。
 
-KeepSeek 的本质是一个 VS Code 扩展内的轻量 coding agent runtime。扩展端负责会话、上下文、引用展开、本地只读工具、模型请求循环、自动档位预算控制、trace 记录和 DraftEdit 待确认写入；云端模型负责语言理解、推理、工具选择、参数生成和最终回复生成。
+KeepSeek 的本质是一个 VS Code 扩展内的可恢复 coding agent runtime。扩展端负责会话、上下文、引用展开、Tool Evidence、动态准入、Context Epoch、本地工具、模型请求循环、trace 和安全审批；云端模型负责语言理解、推理、工具选择、参数生成和最终回复生成。
 
 ## 1. 总体架构
 
@@ -14,7 +14,7 @@ KeepSeek 的 Agent 链路可以分成四层。
 |---|---|---|
 | Webview 表现层 | `src/webview/*`、`src/webview/input/*` | 输入框、消息列表、引用 chip、设置弹窗、活动状态文案、发送/停止交互 |
 | Provider 编排层 | `src/provider/KeepseekChatViewProvider.ts` | 接收 Webview 消息、维护 busy 状态、会话接线、引用授权、调用业务服务和 Agent Runtime |
-| Agent Runtime 层 | `src/agent/agentRequestCoordinator.ts`、`src/agent/runner.ts`、`src/agent/providerRequestProjection.ts`、`src/agent/providers/*`、`src/agent/historyProjection.ts`、`src/agent/historyCompressor.ts`、`src/agent/contextUsage.ts` | 构造权威协议投影、上下文压缩与用量估算，流式调用 Chat Completions / Responses / Anthropic Messages，执行工具循环并整理结果 |
+| Agent Runtime 层 | `src/agent/agentRequestCoordinator.ts`、`src/agent/runner.ts`、`src/agent/evidence/*`、`src/agent/toolResultAdmission.ts`、`src/agent/contextEpoch.ts`、`src/agent/providerRequestProjection.ts`、`src/agent/providers/*` | 构造权威协议投影、证据/准入/epoch、上下文压缩与用量估算，流式调用三种 Provider 协议并执行工具循环 |
 | 本地能力层 | `src/agent/tools/workspaceTools.ts`、`src/edits/*`、`src/context/*`、`src/sessions/*` | 只读工作区工具、引用展开、DraftEdit 安全写入、上下文文件、会话和压缩状态持久化 |
 
 几个边界很重要：
@@ -22,6 +22,7 @@ KeepSeek 的 Agent 链路可以分成四层。
 - Provider 只做协调，不直接承载可独立测试的大块业务逻辑。
 - `AgentRunner` 只负责编排模型请求、工具调用循环和最终响应整理。
 - 上下文压缩属于 Agent Runtime 层：`AgentRequestCoordinator` 负责压缩刷新调度和 AgentRequest 组装，`HistoryCompressor` 负责摘要刷新，`historyProjection` 负责把真实会话投影成模型请求历史，`contextUsage` 使用同一套投影估算上下文窗口占用。Provider 只触发协调器，Session 存储只负责保存真实消息和 `contextCompression` 状态。
+- 工具结果控制不依赖累计预算：`ToolEvidenceStore` 保证先意图、后完整结果、再不可变信封；`ToolResultAdmissionController` 按每次真实请求决定内联量；`contextEpoch` 在同一逻辑任务内滚动 Provider 上下文。
 - 工作区工具保持只读，不能写磁盘。
 - AI 不能直接修改文件，只能创建 DraftEdit。
 - 真正写入磁盘只发生在用户点击 Apply 后，由 `SafeFileEditor` 执行。
@@ -79,7 +80,7 @@ Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节
 - 工作区内文件可直接展开。
 - 外部文件必须先授权。
 - 图片、媒体、归档、常见二进制扩展会跳过。
-- 全文引用受 `keepseek.maxFileBytes` 限制。
+- 全文引用受 `keepseek.maxFileBytes` 的文件系统读取/安全快照上限约束；Provider 内联由 `keepseek.providerInlineResultMaxChars` 独立控制，evidence 持久化由 `keepseek.evidenceMaxBytes` 独立控制。
 - 行段引用会读取指定行列范围并包装为 Markdown 代码块。
 
 目录引用由 `context/references/directoryReference.ts` 处理：
@@ -130,11 +131,11 @@ system prompt 的职责按固定顺序覆盖：身份与语言、安全和修改
 - `src/shared/modelProfiles.ts` 是运行画像唯一解析入口。能力优先级为：手动模型显式覆盖 > 最新发现元数据 > DeepSeek 内置元数据 > `modelContextWindowGuesses.ts` 的受控模型家族猜测 > 保守 fallback。已知模型名称可分别猜测 context 与 output；没有公开输出上限或名称未知的模型仍使用 32768 context tokens / 8192 output tokens fallback。
 - 账号设置中的上下文窗口与最大输出使用模型领域惯用的紧凑 token 表达，例如 `32768 → 32K tokens`、`1000000 → 1M tokens`。猜测/fallback 会显式标注；点击上下文数值可按 `K tokens` 编辑（例如 1M 输入 `1000`），点击最大输出可按精确 tokens 编辑。保存后写入账号下的精确覆盖，刷新 `/models` 不会覆盖它。
 - 名称猜测覆盖 Qwen 3.6/3.7/3.8、GLM 4.5–5.3、DeepSeek V4 与 Qwen Audio Realtime 等已知文本/实时模型。`wan2.7-image`、`wan2.7-image-pro`、`qwen-audio-3.0-tts-plus` 会作为非文本资源保留在账号清单并显示“不适用”，但不会进入文本 Agent 的模型目录，也不能编辑 token 能力。
-- 最终输出上限不超过有效 context window，摘要预算不超过最终输出上限。Chat Completions、Ollama、Responses、Anthropic 与摘要请求都消费同一画像，但各协议只发送自己支持的字段。
+- 最终输出上限不超过 learned effective context window，工具选择轮和最终回答轮分别使用动态输出预留。Chat Completions、Ollama、Responses、Anthropic 与摘要请求消费同一画像，但各协议只发送自己支持的字段；不再为每次请求僵硬预留完整声明输出上限。
 - 自动压缩阈值由命令菜单中的用户档位覆盖 profile 的 `triggerRatio / forceRatio`：提前清理 `0.70 / 0.85`、默认平衡 `0.80 / 0.92`、缓存优先 `0.85 / 0.95`；其他压缩参数仍保留 profile 原值。
 - DeepSeek Chat Completions 固定使用 V4 推荐的 `temperature=1.0`、`top_p=1.0`。
 - `stream_options.include_usage = true`，用于获取服务商真实 usage。
-- 有工具预算时发送 function tools 和 `tool_choice: "auto"`。
+- epoch 内始终发送会话冻结的 function tools；工具选择轮用 `tool_choice: "auto"`，隐藏摘要/强制收尾用 `none`，不通过删除 schema 改变缓存前缀。
 
 流式响应由 `DeepSeekClient` 和 `DeepSeekStreamParser` 处理。Parser 会解析：
 
@@ -144,7 +145,7 @@ system prompt 的职责按固定顺序覆盖：身份与语言、安全和修改
 - `finish_reason`。
 - `usage`。
 
-如果请求在已有 partial output 后失败，Runner 会尝试发起续写恢复。如果模型返回 `finish_reason=length` 且满足条件，Runner 会请求一次受限续写。
+如果请求在已有 partial output 后失败，Runner 会在同一逻辑任务内恢复。`finish_reason=length` 自动续写，必要时先做 Context Epoch rollover；它不创建新的聊天 user 消息，也没有人为的自动续写次数预算。重复空续写由跨 epoch 无进展检测终止。
 
 Anthropic Messages 使用规范化的原生 Messages endpoint、`x-api-key` 和 `anthropic-version: 2023-06-01`，不发送 Bearer、`stream_options`、`reasoning_effort` 或 Responses 字段。常规 `/v1` base 追加 `/messages`；以 `/apps/anthropic` 结尾的 SDK base 追加 `/v1/messages`。专用 SSE parser 处理任意分块、CRLF、ping、Thinking/signature、redacted thinking、并行 `tool_use` 与 cache usage。模型能力来自 `/models` 元数据：只有明确声明 adaptive/enabled 时才发送 Thinking 参数；不提供模型列表的兼容网关允许保存账号并手动添加模型 ID，其能力可在账号设置中手动填写，否则使用通用保守 fallback。
 
@@ -158,27 +159,28 @@ Anthropic Messages 使用规范化的原生 Messages endpoint、`x-api-key` 和 
 请求模型
   -> 模型返回文本或 tool_calls
   -> 若无工具，整理最终回答
-  -> 若有工具，本地执行工具
-  -> 对工具结果做 shaping
-  -> 将 shaped result 作为 role=tool 消息加入 messages
+  -> 若有工具，先逐项持久化执行意图，再本地执行
+  -> 逐项保存完整结果/hash/终态
+  -> 按 prospective Provider 请求动态生成完整结果或 evidence envelope
+  -> 以原生协议顺序回灌；必要时在完整批次后 rollover
   -> 再次请求模型
 ```
 
-DeepSeek 循环上限由 `src/shared/modelProfiles.ts` 的 6 个自动档位控制（Flash / Pro × 非思考 / High / Max）。其它模型使用固定的保守通用工具/运行预算，Thinking 只影响协议明确支持的推理字段，不放大未知能力。两款 DeepSeek 内置模型的上下文窗口仍按 1M tokens 估算；其它模型优先使用发现或人工配置的窗口。
+`maxToolIterations` 和 `maxToolCalls` 是**单个 epoch 的 rollover 阈值**，不再是逻辑任务终止预算。达到阈值后保留 task、运行时钟、usage、TaskPlan、repair、审批与幂等账本，自动创建下一 provider epoch。工具总结果 tokens 只做 telemetry，累计数百万 tokens 也不会形成停止条件。
 
-Anthropic 工具轮使用原生消息顺序：assistant 的 Thinking/text/`tool_use` blocks 后紧跟一个 user message；同轮全部 `tool_result` 集中在该 message 开头并保持 `tool_use` 顺序。下一请求原样回放 opaque signature/redacted data，工具预算耗尽时 tools 字节不变，仅把 `tool_choice` 改为 `{ "type": "none" }`。
+并行批次先为每个调用预留最小信封，结果独立持久化。Chat Completions 保持 `tool_call_id` 配对；Responses 保持 function call/output 的 `call_id` 和 Items 原始顺序；Anthropic 把同轮全部 `tool_result` 集中在紧随 `tool_use` 的 user message 开头并保持顺序。若旧 epoch 无法合法容纳整个最小批次，结果仍先保存，再在新 epoch checkpoint 中交付 evidence 引用；绝不重跑原工具。Anthropic 跨 epoch 不复制或伪造 opaque thinking signature/redacted data。
 
 上下文投影上限按 `maxProjectionTokens = contextWindow × forceRatio` 计算。选择 85% 缓存优先档时，`forceRatio=0.95` 会让投影上限增大，从而保留更多原始历史、尽量延后会破坏前缀缓存的摘要刷新；这是预期行为。
 
-模型、来源、provider 或 base URL 切换只迁移 provider/cache lane，并在这个本来就冷启动的边界升级请求序列化；既有 `contextCompression.summaries` 保留并继续参与 projection，`HistorySummary.modelId` 只作为生成来源记录。`requestProtocolVersion` 是序列化策略和工具 schema 的兼容版本，不是模型能力等级，也不会驱动摘要淘汰。
+模型、来源、provider 或 base URL 切换只迁移 provider/cache lane，并在这个本来就冷启动的边界升级请求序列化；既有 `contextCompression.summaries` 保留并继续参与 projection。新会话使用 v8。v1–v7 热会话维持旧 provider-visible bytes，直到缓存已冷或首次需要大结果时经受控 rollover 迁移；历史里的旧预算文字不改写。
 
-如果自动安全上限耗尽，Runner 会追加一条本地用户消息，要求模型停止调用工具，基于已获得的信息给出最终回答并说明缺口。
+同一逻辑任务只有真实审批、用户 Stop、Provider/存储失败、显式时间/费用上限、副作用结果不确定、来源/模型安全不匹配或持续无进展才停止。`agent.maxCost` 按计费币种分别统计，主任务、子代理、epoch 与恢复共享同一账本；无法获得可计价用量时正值上限采用 fail-closed。内部容量调度不映射为 blocked，不会追加“继续新一轮”消息。
 
 ### 3.4 DSML 工具调用兜底
 
 如果模型没有返回原生 `tool_calls`，但在文本里输出了 DSML 风格的工具调用块，`DsmlToolParser` 会尝试解析并模拟成 function tool call 执行。
 
-这只是 Chat Completions 的兼容兜底，不是 MCP，也不是外部工具运行时。Anthropic 原生 `tool_use` 不走 DSML。
+这只是 Chat Completions 的兼容兜底，不是 MCP，也不是外部工具运行时。DSML 解析出的调用会进入同一 intent/evidence/admission/epoch 管线，不能绕过幂等或结果大小控制；Anthropic 原生 `tool_use` 不走 DSML。
 
 ## 4. 当前可用工具
 
@@ -186,6 +188,7 @@ Anthropic 工具轮使用原生消息顺序：assistant 的 Thinking/text/`tool_
 
 | 工具名 | 类型 | 用途 |
 |---|---|---|
+| `keepseek_read_evidence` | 只读基础设施 | 按 task-scoped evidenceRef 做字节游标、1-based 行、结构化 item 或搜索分页，始终有界 |
 | `keepseek_search_workspace` | 只读 | 搜索工作区文本，返回命中行和前后上下文 |
 | `keepseek_list_workspace_files` | 只读 | 列出当前工作区文件 |
 | `keepseek_list_workspace_directory` | 只读 | 列出指定工作区目录，可选递归 |
@@ -368,6 +371,8 @@ Anthropic 工具轮使用原生消息顺序：assistant 的 Thinking/text/`tool_
 
 历史维护会把较早的超大工具结果保存在 `ChatSession.historyArchive`，投影中只留稳定引用。`keepseek_search_session_archive` 用本地词法/BM25 排名返回受限 excerpt 和稳定 archive id，不联网、不调用模型。旧证据足以回答时避免重新扫描；代码新鲜度重要时仍要重读当前文件。
 
+v8 的 `keepseek_read_evidence` 与旧 session archive 的职责不同：前者是当前逻辑任务中每次工具执行的不可变、授权快照及交付账本，引用只允许同一 session/task 读取；后者是跨聊天轮次的历史检索。evidence 可按 UTF-8 byte cursor、1-based 行范围、结构化 item 或 search 读取，返回 hash、位置、`hasMore` 和下一 cursor。需要“当前文件状态”时应重读源文件，不能把旧 evidence 当作实时视图。
+
 ### 4.8 validation 的落盘边界
 
 `keepseek_run_validation` 只能看到当前已经落盘的工作区。创建 DraftEdit 前可以验证，用于复现或建立基线；本 run 任一 DraftEdit 成功后，`RunValidationStateTracker` 会在授权和任务启动前硬性阻止后续 validation，不区分普通 edit 与 repair edit。
@@ -378,85 +383,70 @@ Runner 的最终状态装饰会区分未验证、修改前基线、pending/unapp
 
 主要工具结果使用紧凑 JSON：`ok` 表示成功，失败包含稳定 `errorType`，长结果保留 `truncated`，语义/Git/搜索退化保留 `fallback` 或 engine 信息，必要时返回 `suggestedTool` 和最小建议参数。运行时能硬性执行的约束不依赖模型遵守 description。
 
-## 5. 工具结果控制
+## 5. Tool Evidence、结构化整形与动态准入
 
-为了避免工具结果吞掉上下文，Runner 在工具结果进入 messages 前会做 deterministic shaping。
+### 5.1 执行与交付状态机
 
-### 5.1 shaping 发生的位置
+每个工具调用先以 `sessionId + taskId + epochIndex + toolCallId` 创建确定性的 evidence intent，随后依次进入：
 
-工具执行后先得到 raw result。Runner 会：
+```text
+pending -> executing -> completed(evidence/hash saved)
+                         -> envelope_ready -> sending -> delivered
+```
 
-1. 记录 raw result 的摘要到 trace，避免重复写入大型 payload。
-2. 对部分工具结果做 shaping。
-3. 使用 shaped result 估算 token 预算。
-4. 将 shaped result 作为 `role: "tool"` 消息追加到 messages。
+扩展重启后，`pending` 表示未执行；已 `completed` 的工具直接复用相同 evidence ID 和 envelope，不能重跑。处于 `executing` 的只读/纯 proposal 可安全回到 pending；validation、delegate 或其它无法证明副作用终态的调用进入 `uncertain`，要求核实，不自动重放。证据或 checkpoint 持久化失败属于真实停止条件。
 
-因此，模型实际看到的是 shaped result，而不是未经控制的 raw payload。
+不可重建的重要结果保存 content-addressed blob；会话/task 目录和 capability-style evidenceRef 同时校验，跨会话猜测引用返回 `evidence_not_found`。活动 checkpoint 引用的 evidence 不得被清理。正文可能包含敏感数据，普通 telemetry 只写 hash、大小、类型和引用，不写原文。
 
-### 5.2 search result shaping
+### 5.2 合法且可继续的结果信封
 
-搜索结果会限制：
+小结果在动态容量允许时原样内联。大结果按类别整形：
 
-- 总命中数。
-- 每个文件代表性命中数。
-- 单行字符数。
-- 总字符数。
+- 文件、range、diff、patch、日志按完整行，保留真实行号和下一范围；
+- 搜索、符号、引用、诊断、目录按完整 item 分页；
+- JSON 每页保持合法 JSON；
+- 子代理只内联权威摘要，全文进入 evidence；
+- DraftEdit、ChangeSet、DraftRun、审批/validation 返回权威 ID、状态、hash、目标和必要摘要，不重复大正文；
+- 错误保持小型稳定 `errorType`，大结果绝不伪装成失败。
 
-返回中会保留：
+所有非完整信封明确包含 `completeInline:false`、`evidenceRef`、`contentHash`、字符/字节/token 估算和 `keepseek_read_evidence` 读取方法。信封以规范 key 顺序序列化、持久化一次；恢复不得重新整形。
 
-- `limit`
-- `truncated`
-- `perFileLimit`
-- `totalCharLimit`
+V8 子代理的完整签收结果也先交给同一 evidence/admission 管线，新子代理 lane 不再使用独立分页。根 schema 中的 `keepseek_read_subagent_result` 只作为 V1–V7 已存结果迁移桥；桥接页本身仍进入通用 evidence/admission 管线。这样单子代理、并行子代理、DSML 与原生工具没有独立的当前任务分页预算或恢复账本，同时旧结果不会在迁移边界失联。
 
-这样模型知道结果可能被截断，可以继续缩小 query 或 path 后搜索。
+### 5.3 动态 Tool Result Admission
 
-### 5.3 range read shaping
+不存在固定累计 `toolResultTokenBudget`。每个批次根据当前协议的 prospective request 计算：
 
-范围读取本身已经按字节控制返回内容。Runner 还会对进入消息的内容做字符上限保护，并保留：
+```text
+inlineAllowance = learnedEffectiveWindow
+  - currentProviderProjection
+  - phaseSpecificOutputReserve
+  - protocolEnvelopeOverhead
+  - remainingBatchMinimumEnvelopes
+  - adaptiveEstimatorSafety
+```
 
-- `startLine`
-- `endLine`
-- `requestedStartLine`
-- `requestedEndLine`
-- `totalLines`
-- `truncated`
+Responses 计算原生 Items，Anthropic 计算 system/Messages/tool blocks，Chat Completions/DSML 计算实际 messages。Provider 返回的真实 prompt/input usage 校准估算倍率；没有可靠 tokenizer 时用保守字符估算和动态误差因子。完整结果放不下就使用 evidence envelope；连最小信封放不下则在完整批次后 rollover，不能结束任务。
 
-模型可以据此继续读取下一段或更精确的范围。
+`maxFileBytes` 仅控制文件系统读取/安全快照，`providerInlineResultMaxChars` 控制单次模型可见结果，`evidenceMaxBytes` 控制证据持久化。`toolResultTokens` 和旧 ledger 字段仅是 telemetry。
 
-### 5.4 full read 不随意压缩
+## 6. Context Epoch、容量自校准与 usage
 
-全文读取工具只面向小文件。小文件全文结果保持精确返回，不做随意压缩。这对后续生成 DraftEdit 很重要，因为模型可能需要完整原文来构造完整新文件。
+### 6.1 rollover 检查点
 
-## 6. Tool Result Ledger 与 usage
+Context Epoch 是一条用户请求内部的 Provider 上下文分段。rollover 保持 `sessionId`、`taskId`、`approvalRootTaskId`、原始 user 请求、TaskPlan、DraftEdit/ChangeSet/DraftRun、repair/validation、已消费 permit、幂等账本、运行时钟、usage/cost、Stop 与子代理关系不变，不创建聊天消息、不重新授权或执行副作用。
 
-Runner 内部维护第一版 `toolResultLedger`。它不改变对外 `AgentResponse` 类型，只写入 trace。
+旧 epoch 在请求新模型之前完整持久化；完整宿主状态另存为 task-scoped、可分页的 checkpoint evidence，新 seed 携带其 ref/hash、最近证据与有界恢复状态，避免长期任务让最小 seed 无限增长。它覆盖原始任务、计划完成/未完成项、事实线索、evidence/hash、幂等指纹、草案/审批/validation/repair 状态、失败和下一步。优先调用当前模型生成隔离的无工具语义摘要；失败、超时、空或错误格式时使用宿主确定性摘要。`summarizing`、`persisted` 和新 epoch 尚未请求三个崩溃点都可恢复，已保存 seed 原样复用。
 
-每条 ledger 记录：
+### 6.2 Provider 容量自校准
 
-- `toolName`
-- `path`
-- `startLine`
-- `endLine`
-- `estimatedTokens`
-- `rawLength`
-- `shapedLength`
-- `compressible`
-- `truncated`
+容量状态按 source/provider/规范 endpoint/model 隔离保存，不进入 system 或历史。真实 input usage 更新本地估算比例；识别 context-too-long 后降低 learned effective window，以更小 inline allowance 重建新 epoch，只重发模型请求、不重跑工具。后续成功可保守回升并带阻尼。只有 system、冻结 schema、原始请求和最小 checkpoint 本身仍无法容纳时，才报告真实 provider 容量/配置错误。
 
-这用于调试和后续校准工具结果预算。
+### 6.3 usage 与原生 lane
 
-真实 usage 由各协议 parser 归一化。Chat Completions 请求使用 `stream_options.include_usage`；Anthropic 从 `message_start/message_delta` 获取 usage，并按 `input + cache_creation + cache_read` 计算 prompt，cache read 计 hit，`input + cache_creation` 计 miss。Runner 会汇总：
+真实 usage 由各协议 parser 归一化。Chat Completions 使用 `stream_options.include_usage`；Responses 读取 input/output usage；Anthropic 按 `input + cache_creation + cache_read` 计算 prompt，cache read 计 hit。Runner 汇总 request、prompt/completion/total、cache hit/miss、reasoning、cost 与来源，跨 epoch 连续累计。
 
-- request count
-- prompt tokens
-- completion tokens
-- total tokens
-- 原始 usage records
-
-这些记录只进入 trace，不改变 Webview 的上下文估算模型。当前上下文 UI 仍使用本地轻量估算，不引入 `tiktoken`。
-
-Anthropic 原生回放只保存在 session 内，不发送到 Webview。lane 必须同时匹配 protocol、sourceId 和规范化 Messages endpoint；换账号、Base URL 或 Provider 时只降级为可见 assistant 文本。Bedrock、Vertex、OAuth、Files、图片/PDF、server tools 和 Messages Batches 不在此实现范围。
+Responses epoch 内 replay Items 原样有序；rollover 不把孤立 output 拼进新 lane。Anthropic epoch 内原样保存 Thinking/signature/redacted data/tool blocks；跨 lane 只继承合法可见文本、checkpoint 和 evidence 引用。原生 replay 不发送到 Webview，lane 仍要求 protocol/sourceId/规范 endpoint 完全匹配。
 
 ## 7. DraftEdit 安全写入流程
 
@@ -531,17 +521,11 @@ Webview 会把 phase 映射成中英文状态文案，例如“搜索工作区..
 
 日志事件的 `ts` 使用扩展运行所在操作系统的本地时区，格式为带毫秒与明确偏移的 ISO 8601，例如 `2026-09-04T16:04:03.123+08:00`。日期目录、文件名、后续追加事件和截断标记使用同一规则；夏令时按事件发生时间计算。旧日志不回写，嵌套的请求/响应 payload 与历史消息时间字段保持原样，避免破坏原始证据和请求缓存字节。
 
-预算诊断使用不同错误码，工具返回的 `errorType` / `budgetReason` 与运行摘要的 `budgetStopReason` 对齐：
+内部容量调度不再生产 `tool_result_budget_exhausted`、工具次数耗尽或 `context_window_exhausted` blocked 状态。旧 enum/字段只用于读取历史 checkpoint；恢复时转换为同一 task 的 v8 epoch 迁移，不生成自动 user 消息，也不显示继续按钮。
 
-- `tool_iterations_exhausted` / `tool_call_limit_exhausted`：单轮工具轮次/次数耗尽。通用模型默认 16 轮/48 次，官网 Flash High 为 24 轮/72 次。前台在有成功工具操作、无待审批事项、无阻塞修复状态时自动发送新一轮继续请求，三档审批模式均适用；`keepseek.agent.maxAutoContinueTurns` 默认 8，范围 0–100，0 关闭。连续两轮工具名称/参数/结果完全相同时停止续跑，拒绝记录也会停止纯预算续跑。含草案或审批结果的轮次仍由原审批队列处理。
-- `tool_result_budget_exhausted`：本轮累计工具结果超限。`usedTokens + nextTokens > maxTokens`；与模型上下文容量不同。
-- `context_window_exhausted`：预计 Provider 请求超出模型上下文容量。`usedTokens` 是包含待加入结果、输出预留和安全预留后的预计总量，`maxTokens` 是上下文上限；不要再次加上 `nextTokens`。首次 API 请求前发现超限时，`run_error.error.code` 也使用此码，且不发送请求。
+trace 对每个 evidence 记录 raw/inline chars、bytes、token 估算、`evidenceRef`、hash、是否分页及协议；对每次 rollover 记录 epoch index、reason、前后估算/真实 prompt tokens、declared/learned window、summary/fallback、context-too-long 自适应和缓存边界成本；无进展仅记录不可逆 hash 指纹。普通 telemetry 不含 evidence 正文、凭证或可避免的绝对路径。
 
-工具结果超限事件在 `metadata` 级别也保留错误码和上述数量，调试无需打开完整 payload。
-
-预算自动续跑是新的可见 user 消息（UI 标为 KeepSeek），会产生新用量，沿用普通请求的历史投影、压缩和用量统计。它不恢复旧 checkpoint、不重置旧预算、不复用 permit；修复次数与状态保留。队列只存在于内存，停止、切换会话/审批模式或发送新消息会撤销；来源/模型变化时不自动发送。扩展重启后仍需手动继续。上下文容量、工具结果 token 和时间预算耗尽不自动续跑。
-
-缓存边界：system、工具 schema 和已记录的历史/工具结果均不改写；自动继续文本只追加到新 user 消息。Chat Completions 的临时预算收尾指令沿用现有行为，不进入持久化工具轮，跨新轮最多从该收尾指令处失配，此前全部工具轮前缀仍稳定；Responses/Anthropic 沿用原生 replay。正常触发历史压缩仍是受控缓存重置点。
+真实停止原因使用精确状态：用户 Stop、等待审批、Provider 鉴权/服务失败、来源/模型/工作区变化导致不可安全恢复、checkpoint/evidence 存储失败、显式时间/费用上限、副作用结果不确定或 `no_progress_loop`。无进展检测对工具名、规范参数、结果 hash、源 fingerprint 和 TaskPlan 进度生成跨 epoch 指纹；第一次重复给模型策略调整机会，持续重复才停止，绝不描述成 token 或工具预算耗尽。
 
 trace 记录包括：
 
@@ -554,6 +538,7 @@ trace 记录包括：
 - raw tool result 摘要。
 - shaped tool result 或摘要。
 - toolResultLedger。
+- evidence admission、delivery 与 Context Epoch rollover。
 
 trace level 控制 payload 细节：
 
@@ -561,7 +546,7 @@ trace level 控制 payload 细节：
 - `request`：记录请求和组装后的响应消息 payload。
 - `full`：还可记录 raw stream。
 
-工具结果控制后，大型 raw payload 不会被无脑重复写入 trace 的 raw/result 两处，降低日志膨胀风险。
+Evidence 管线启用后，大型 raw payload 不会写入普通 trace；只有显式 payload 级别才允许受保护地记录模型可见 envelope，正文仍以会话/task 隔离的证据存储为权威来源。
 
 ## 10. 推荐的 Agent 工作方式
 
@@ -578,7 +563,7 @@ KeepSeek 使用“识别任务类型 → 解决下一个关键不确定性 → �
   -> 按只读或修改授权完成，并准确汇报修改/验证状态
 ```
 
-这比“列出全项目文件，再读取一堆完整文件”更省 token，也更不容易触发上下文或工具结果预算。
+这比“列出全项目文件，再读取一堆完整文件”更省 token；即使证据量很大，运行时也会外置并自动整理上下文，而不是中断用户任务。
 
 ### 10.2 工具选择提示
 
@@ -606,7 +591,9 @@ KeepSeek 使用“识别任务类型 → 解决下一个关键不确定性 → �
 - 只读工作区工具。
 - 搜索和范围读取。
 - semantic、Git、diagnostics、validation 与 session archive 只读能力。
-- 自动模型 / Thinking 档位预算和工具结果 shaping。
+- 自动模型 / Thinking 档位、动态结果准入与 learned effective window。
+- 通用 Tool Evidence、20MB 级有界分页、不可变 provider envelope 与崩溃恢复账本。
+- 同一逻辑任务内的 Context Epoch、摘要 fallback、三协议/DSML 合法续跑与跨 epoch 无进展检测。
 - 历史投影、会话摘要和后台上下文压缩刷新。
 - incremental/full/delete DraftEdit、ChangeSet 与 Apply 后安全写入。
 - 普通/repair pending DraftEdit 的统一 validation 硬阻断与 Apply 后继续验证。
@@ -622,9 +609,9 @@ KeepSeek 使用“识别任务类型 → 解决下一个关键不确定性 → �
 - MCP 与外部 server tools。
 - 更丰富的 provider capability 元数据与多模态输入。
 
-这些能力后续可以逐步扩展，但应继续遵守当前分层：Provider 只编排，AgentRunner 管请求循环，工作区工具保持只读，写入仍只走 DraftEdit。
+这些能力后续可以逐步扩展，但应继续遵守当前分层：Provider 只编排，evidence/admission/epoch 保持独立抽象，工作区工具保持只读，写入仍只走 DraftEdit。
 
-模型/Provider、Thinking、上下文窗口和最大输出继续由模型选择器与设置页展示和配置；这些运行时事实不进入静态 system prompt，也没有为此新增会改变工具集合的 runtime-info 工具。预算由 Runner 和 model profile 强制执行。
+模型/Provider、Thinking、声明上下文窗口和最大输出继续由模型选择器与设置页展示和配置；learned window 只存在校准存储/Run Details，不进入静态 system/history。显式时间/费用上限仍由宿主强制；内部工具轮、调用次数和结果累计量只触发 epoch 调度，不是停止预算。
 
 ## Ask 模式下的有限命令批量批准
 

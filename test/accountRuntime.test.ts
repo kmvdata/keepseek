@@ -8,6 +8,7 @@ import { ModelSourceStore } from '../src/accounts/accountStore';
 import type { ModelSourceConfigSnapshot, ModelSourceProvider } from '../src/accounts/types';
 import { HistoryCompressor } from '../src/agent/historyCompressor';
 import { AgentRunner } from '../src/agent/runner';
+import { ToolResultAdmissionController } from '../src/agent/toolResultAdmission';
 import type {
   DeepSeekFunctionTool,
   DeepSeekMessage,
@@ -27,7 +28,6 @@ interface TestRuntimeConfig {
   maxToolIterations: number;
   maxToolCalls: number;
   maxRunMs: number;
-  toolResultTokenBudget: number;
   streamIdleTimeoutMs: number;
   temperature: number;
   topP: number;
@@ -50,24 +50,6 @@ interface RuntimeInvoker {
 
 interface RuntimeConfigInvoker {
   getRuntimeConfig(request: AgentRequest): Promise<TestRuntimeConfig>;
-}
-
-interface ContextBudgetInvoker {
-  getContextWindowBudgetStopReason(
-    request: AgentRequest,
-    messages: DeepSeekMessage[],
-    tools: DeepSeekFunctionTool[],
-    outputReserveTokens: number
-  ): string | undefined;
-}
-
-interface ToolSnipInvoker {
-  shouldSnipToolResult(
-    request: AgentRequest,
-    messages: DeepSeekMessage[],
-    tools: DeepSeekFunctionTool[],
-    outputReserveTokens: number
-  ): boolean;
 }
 
 interface SummaryInvoker {
@@ -303,35 +285,17 @@ test('main runtime uses the immutable per-run source snapshot', async () => {
   assert.equal(runtime.baseUrl, 'https://snapshot.example/v1');
 });
 
-test('hard-limit checks use the model metadata context window', () => {
-  const runner = new AgentRunner() as unknown as ContextBudgetInvoker;
-  const constrained = createRequest('manual-small-window', 'openai-compatible');
-  constrained.model.contextWindowTokens = 8_000;
-  constrained.model.maxOutputTokens = 1_000;
-  const roomy = createRequest('manual-roomy-window', 'openai-compatible');
-  roomy.model.contextWindowTokens = 64_000;
-  roomy.model.maxOutputTokens = 1_000;
-  const messages: DeepSeekMessage[] = [{ role: 'user', content: 'hello' }];
-
-  assert.equal(
-    runner.getContextWindowBudgetStopReason(constrained, messages, [], 1_000),
-    'context_window_exhausted'
-  );
-  assert.equal(runner.getContextWindowBudgetStopReason(roomy, messages, [], 1_000), undefined);
-});
-
-test('tool-result snip pressure uses the same metadata-backed runtime profile', () => {
-  const runner = new AgentRunner() as unknown as ToolSnipInvoker;
-  const constrained = createRequest('manual-small-window', 'openai-compatible');
-  constrained.model.contextWindowTokens = 20_000;
-  constrained.model.maxOutputTokens = 1_000;
-  const roomy = createRequest('manual-roomy-window', 'openai-compatible');
-  roomy.model.contextWindowTokens = 100_000;
-  roomy.model.maxOutputTokens = 1_000;
-  const messages: DeepSeekMessage[] = [{ role: 'user', content: 'hello' }];
-
-  assert.equal(runner.shouldSnipToolResult(constrained, messages, [], 1_000), true);
-  assert.equal(runner.shouldSnipToolResult(roomy, messages, [], 1_000), false);
+test('dynamic admission uses model metadata without creating a terminal hard-limit result', () => {
+  const constrained = new ToolResultAdmissionController(8_000).decide({
+    estimatedInputTokens: 7_000, configuredMaxOutputTokens: 1_000, phase: 'tool', remainingBatchResults: 1
+  });
+  const roomy = new ToolResultAdmissionController(64_000).decide({
+    estimatedInputTokens: 7_000, configuredMaxOutputTokens: 1_000, phase: 'tool', remainingBatchResults: 1
+  });
+  assert.equal(constrained.shouldRollover, true);
+  assert.equal(constrained.inlineTokenAllowance, 0);
+  assert.equal(roomy.shouldRollover, false);
+  assert.ok(roomy.inlineTokenAllowance > 0);
 });
 
 test('Responses runtime uses its immutable non-billing source snapshot', async () => {
@@ -523,7 +487,6 @@ function createRuntimeConfig(provider: TestRuntimeConfig['provider']): TestRunti
     maxToolIterations: 8,
     maxToolCalls: 24,
     maxRunMs: 60_000,
-    toolResultTokenBudget: 10_000,
     streamIdleTimeoutMs: 0,
     temperature: 1,
     topP: 1,

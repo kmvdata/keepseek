@@ -9,6 +9,50 @@ export function mergeDurations(...values: unknown[]): number {
   return finite.length ? Math.min(...finite) : 0;
 }
 
+export function normalizeCostLimit(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.min(Number.MAX_SAFE_INTEGER, value) : 0;
+}
+
+export function mergeCostLimits(...values: unknown[]): number {
+  const finite = values.map(normalizeCostLimit).filter((value) => value > 0);
+  return finite.length ? Math.min(...finite) : 0;
+}
+
+/** Shared by a root run and its children. Costs in different currencies are
+ * intentionally not added together; the configured ceiling applies to each
+ * independently accounted currency. */
+export class ExecutionCostBudget {
+  private readonly costs = new Map<string, number>();
+
+  public constructor(public readonly limit: number, restored: Record<string, number> = {}) {
+    for (const [currency, cost] of Object.entries(restored)) {
+      if (currency && Number.isFinite(cost) && cost >= 0) this.costs.set(currency, cost);
+    }
+  }
+
+  public record(cost: number, currency: string): void {
+    if (!(cost >= 0) || !Number.isFinite(cost) || !currency) return;
+    this.costs.set(currency, (this.costs.get(currency) ?? 0) + cost);
+  }
+
+  public get exhausted(): { currency: string; cost: number; limit: number } | undefined {
+    if (!(this.limit > 0)) return undefined;
+    for (const [currency, cost] of [...this.costs].sort(compareCurrencyEntries)) {
+      if (cost >= this.limit) return { currency, cost, limit: this.limit };
+    }
+    return undefined;
+  }
+
+  public snapshot(): Record<string, number> {
+    return Object.fromEntries([...this.costs].sort(compareCurrencyEntries));
+  }
+}
+
+function compareCurrencyEntries([left]: [string, number], [right]: [string, number]): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 export class ExecutionBudgetError extends Error {
   public constructor() { super('Effective execution time budget exhausted / 有效执行时间预算已用尽'); }
 }

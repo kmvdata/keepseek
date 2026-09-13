@@ -23,6 +23,7 @@ import {
   DELEGATE_PARALLEL_TOOL_NAME,
   DELEGATE_TASK_TOOL_NAME,
   getAgentTools,
+  READ_EVIDENCE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
   READ_SUBAGENT_RESULT_TOOL_NAME,
   RUN_DRAFT_TOOL_NAME
@@ -65,7 +66,7 @@ import type {
 } from './types';
 import type { SubagentToolCategory } from './types';
 
-const SUBAGENT_PROTOCOL_VERSION = 6;
+const SUBAGENT_PROTOCOL_VERSION = 8;
 const MAX_INLINE_RESULT_CHARS = DEFAULT_SUBAGENT_RESULT_PAGE_CHARS;
 const MAX_PARALLEL_TASKS = 8;
 
@@ -436,7 +437,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       SUBAGENT_PROTOCOL_VERSION
     );
     const systemPrompt = getSubagentSystemPromptForVersion(input.context.language, input.profile, input.depth, SUBAGENT_PROTOCOL_VERSION);
-    const toolNames = getChildToolNamesForRuntime(input.profile, input.depth);
+    const toolNames = getChildToolNamesForRuntime(input.profile, input.depth, SUBAGENT_PROTOCOL_VERSION);
     const compatibility = {
       sourceConfigHash: hashText(JSON.stringify({
         sourceId: sourceConfig.sourceId,
@@ -712,6 +713,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
           lane: input.profile.lane
         },
         taskClock: input.context.parentRequest.taskClock,
+        taskCostBudget: input.context.parentRequest.taskCostBudget,
         signal: abort.signal
       }, {
         onCheckpoint: async (checkpoint) => {
@@ -863,7 +865,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         updatedAt: completedAt,
         completedAt
       });
-      const inline = fullResult.content.slice(0, MAX_INLINE_RESULT_CHARS);
+      const usesGeneralEvidence = (input.context.parentRequest.requestProtocolVersion ?? 1) >= 8;
+      const inline = usesGeneralEvidence ? fullResult.content : fullResult.content.slice(0, MAX_INLINE_RESULT_CHARS);
       return {
         content: JSON.stringify({
           ok: true,
@@ -876,8 +879,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
           result: inline,
           resultChars: fullResult.content.length,
           resultHash,
-          hasMore: inline.length < fullResult.content.length,
-          ...(inline.length < fullResult.content.length ? { nextOffset: inline.length } : {}),
+          hasMore: !usesGeneralEvidence && inline.length < fullResult.content.length,
+          ...(!usesGeneralEvidence && inline.length < fullResult.content.length ? { nextOffset: inline.length } : {}),
           status: acceptance.envelope.status,
           envelope: acceptance.envelope,
           draftEditCount: artifactCheck.draftEdits.length,
@@ -1059,7 +1062,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
       updatedAt: completedAt,
       completedAt
     });
-    const inline = result.slice(0, MAX_INLINE_RESULT_CHARS);
+    const usesGeneralEvidence = (input.input.context.parentRequest.requestProtocolVersion ?? 1) >= 8;
+    const inline = usesGeneralEvidence ? result : result.slice(0, MAX_INLINE_RESULT_CHARS);
     return {
       content: JSON.stringify({
         ok: true,
@@ -1075,8 +1079,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         result: inline,
         resultChars: result.length,
         resultHash: hashText(result),
-        hasMore: inline.length < result.length,
-        ...(inline.length < result.length ? { nextOffset: inline.length } : {})
+        hasMore: !usesGeneralEvidence && inline.length < result.length,
+        ...(!usesGeneralEvidence && inline.length < result.length ? { nextOffset: inline.length } : {})
       })
     };
   }
@@ -1146,6 +1150,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
           lane: input.input.profile.lane
         },
         taskClock: input.input.context.parentRequest.taskClock,
+        taskCostBudget: input.input.context.parentRequest.taskCostBudget,
         signal: input.input.context.signal
       }, { onUsage: input.onUsage });
       return repaired.message;
@@ -1183,13 +1188,18 @@ export class SubagentRuntime implements SubagentToolAdapter {
   }
 }
 
-export function getChildToolNamesForRuntime(profile: SubagentProfile, depth: number): string[] {
+export function getChildToolNamesForRuntime(profile: SubagentProfile, depth: number, protocolVersion = 5): string[] {
   const names = new Set(profile.toolNames);
+  // Preserve the exact legacy child schema for V1-V7. Evidence paging is
+  // infrastructure, not a profile capability, but it enters only at the V8
+  // cache boundary and replaces the child-specific result reader there.
+  if (protocolVersion >= 8) names.add(READ_EVIDENCE_TOOL_NAME);
+  else names.add(READ_SUBAGENT_RESULT_TOOL_NAME);
   if (profile.canDelegate && depth < 2 && profile.lane !== 'proposal') {
     names.add(DELEGATE_TASK_TOOL_NAME);
     names.add(DELEGATE_PARALLEL_TOOL_NAME);
-    names.add(READ_SUBAGENT_RESULT_TOOL_NAME);
   }
+  if (protocolVersion >= 8) names.delete(READ_SUBAGENT_RESULT_TOOL_NAME);
   return [...names].sort();
 }
 

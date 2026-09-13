@@ -37,7 +37,7 @@
 
 system prompt、工具 schema、任务输入、继承历史和输出/安全预留不属于隔离中间上下文。继续运行已有子代理时，只统计新一轮内部工作。Provider 校准通知保留本次分类计数，不会清零；final/continuation 的本地可见推理也属于内部工作。估算器版本为 `local-context-v1`。
 
-回传观察点位于 `shapeToolResult` 和工具结果 Token/上下文窗口预算检查之后。Chat Completions 估算最终 tool message；Responses/Anthropic 估算实际原生输出投影的增量；DSML 兼容通道计入实际接受结果的包装，混合批次仅分配子代理部分。首次委派、并行包装和后续分页都会计入，嵌套子代理向上一级子代理回传不算根主会话回传。预算拒绝的原结果不计入。
+回传观察点位于通用 Tool Evidence 持久化和动态结果准入之后。Chat Completions 估算最终 tool message；Responses/Anthropic 估算实际原生输出投影的增量；DSML 兼容通道计入实际接受结果的包装，混合批次仅分配子代理部分。V8 的首次委派、并行包装和 `keepseek_read_evidence` 有界读取都会计入；V1–V7 冻结历史仍可识别旧子代理分页。嵌套子代理向上一级子代理回传不算根主会话回传。完整原文无论是否内联都保存为 evidence，不存在因累计工具结果预算而拒绝回传。
 
 所有估算显示 `≈`，分母为零不显示百分比。界面明确说明：
 
@@ -53,16 +53,16 @@ system prompt、工具 schema、任务输入、继承历史和输出/安全预�
 - Provider 协调者同步读取最新会话统计后应用更新，无跨 await 的旧快照覆盖；同一 `subagentId` 重复回调不重复累计。
 - 明细上限 50；累计模型/工作类型/状态/估算不因裁剪减少。ID-only 账本保留幂等性，裁剪后的终态被视为不可变；同 ID 的迟到重复回调忽略。
 - `StoredSubagentMetadata.stats` 只含统计，不改变工具结果的既有 usage 序列化。Webview 的进度白名单排除 task/result/error 摘要，消息投影排除 `toolRounds` 与 Provider replay；子代理私有上下文仍仅存在独立本地存储中。
-- 协议 v1-v5 历史兼容，`SUBAGENT_PROTOCOL_VERSION`、三个工具 schema、system prompt、Provider 请求内容和缓存前缀不变。
+- 协议 v1-v7 历史字节兼容；V8 将新子代理完整签收结果汇入通用 evidence/admission/epoch 管线。旧读取工具及存储只作为 V1–V7 已存结果的迁移桥，桥接输出仍由通用管线持久化和准入。
 
 ## 验证
 
 `test/subagentUsageStats.test.ts` 覆盖分币种/旧数据/缓存完整性、真实来源拆分、模型账号分组、幂等并发、明细裁剪、估算公式、安全持久化/视图、翻译与脚本语法。
 
-`test/subagentUsageRuntime.test.ts` 使用模拟 Provider 验证实际接受边界、分页/并行、嵌套排除、预算拒绝、失败/停止已发生用量、嵌套事件不重复计费、最后有效估算及观察回调不改变请求字节。原有协议/缓存、模型设置和存储测试仍全量运行。
+`test/subagentUsageRuntime.test.ts` 使用模拟 Provider 验证实际接受边界、evidence/并行、嵌套排除、失败/停止已发生用量、嵌套事件不重复计费、最后有效估算及观察回调不改变请求字节。原有协议/缓存、模型设置和存储测试仍全量运行。
 
 ```sh
-npm run compile
-npm run build:test
-npm test
+bun run compile
+bun run build:test
+bun run test
 ```

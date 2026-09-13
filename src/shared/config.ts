@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { mergeDurations, normalizeDuration } from '../agent/executionPolicy';
+import { mergeDurations, normalizeCostLimit, normalizeDuration } from '../agent/executionPolicy';
 import {
   AgentSettings,
   CompressionThreshold,
@@ -19,6 +19,9 @@ import { resolveProjectModel } from '../accounts/modelCatalog';
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
 export const DEFAULT_MAX_FILE_BYTES = 200_000;
+export const DEFAULT_PROVIDER_INLINE_RESULT_MAX_CHARS = 48_000;
+export const DEFAULT_EVIDENCE_MAX_BYTES = 100_000_000;
+export const DEFAULT_AGENT_MAX_COST = 0;
 export const DEFAULT_DRAFT_RUN_TIMEOUT_MS = 120_000;
 export const DEFAULT_DRAFT_RUN_MAX_TRANSCRIPT_BYTES = 131_072;
 export const DEFAULT_MAX_REQUEST_RETRIES = 2;
@@ -52,7 +55,6 @@ export const DEFAULT_MAX_IMPLICIT_SKILLS = 3;
 export const DEFAULT_BACKGROUND_MAX_ROUNDS = 5;
 export const DEFAULT_BACKGROUND_MAX_DURATION_MS = 0;
 export const DEFAULT_BACKGROUND_MAX_TOOL_CALLS = 60;
-export const DEFAULT_AGENT_MAX_AUTO_CONTINUE_TURNS = 8;
 export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
   // DeepSeek 峰谷定价(自 2026-08-17 北京时间 00:00 起生效)。
   // 空闲档为常规价;高峰档(北京时间每日 9-12 点、14-18 点)价格更高。
@@ -341,10 +343,8 @@ export function getConfiguredAgentMaxExecutionMs(): number {
   return normalizeDuration(vscode.workspace.getConfiguration('keepseek').get('agent.maxExecutionMs', 0));
 }
 
-export function getConfiguredAgentMaxAutoContinueTurns(): number {
-  const configured = vscode.workspace.getConfiguration('keepseek')
-    .get<number>('agent.maxAutoContinueTurns', DEFAULT_AGENT_MAX_AUTO_CONTINUE_TURNS);
-  return normalizeIntegerInRange(configured, 0, 100, DEFAULT_AGENT_MAX_AUTO_CONTINUE_TURNS);
+export function getConfiguredAgentMaxCost(): number {
+  return normalizeCostLimit(vscode.workspace.getConfiguration('keepseek').get('agent.maxCost', DEFAULT_AGENT_MAX_COST));
 }
 
 export function getConfiguredStreamIdleTimeoutMs(): number {
@@ -418,6 +418,20 @@ export function getConfiguredWorkspaceReadMaxBytes(): number {
     .getConfiguration('keepseek')
     .get<number>('maxFileBytes', DEFAULT_MAX_FILE_BYTES);
   return normalizeIntegerInRange(configuredLimit, 1, 20_000_000, DEFAULT_MAX_FILE_BYTES);
+}
+
+export function getConfiguredProviderInlineResultMaxChars(): number {
+  const configuredLimit = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('providerInlineResultMaxChars', DEFAULT_PROVIDER_INLINE_RESULT_MAX_CHARS);
+  return normalizeIntegerInRange(configuredLimit, 1_024, 1_000_000, DEFAULT_PROVIDER_INLINE_RESULT_MAX_CHARS);
+}
+
+export function getConfiguredEvidenceMaxBytes(): number {
+  const configuredLimit = vscode.workspace
+    .getConfiguration('keepseek')
+    .get<number>('evidenceMaxBytes', DEFAULT_EVIDENCE_MAX_BYTES);
+  return normalizeIntegerInRange(configuredLimit, 1_000_000, 1_000_000_000, DEFAULT_EVIDENCE_MAX_BYTES);
 }
 
 export function getConfiguredHistoryRetentionDays(): number {

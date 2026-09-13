@@ -264,6 +264,7 @@ test('main AgentRunner routes delegation through the isolated adapter and reject
 test('real child provider request disables thinking and excludes parent-only context', async () => {
   const storageRoot = await createTemporaryDirectory('keepseek-subagent-runtime-');
   const capturedBodies: string[] = [];
+  const childSummary = 'Detailed child conclusion. '.repeat(800);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (_input, init) => {
     capturedBodies.push(typeof init?.body === 'string' ? init.body : '');
@@ -271,7 +272,7 @@ test('real child provider request disables thinking and excludes parent-only con
       choices: [{ delta: { content: JSON.stringify({
         taskHash: createHash('sha256').update('CHILD SELF CONTAINED TASK').digest('hex'),
         status: 'complete',
-        summary: 'Compact child conclusion.',
+        summary: childSummary,
         evidence: [{ claim: 'The requested child-only context was available.' }],
         uncertainties: []
       }) }, finish_reason: 'stop' }]
@@ -290,6 +291,7 @@ test('real child provider request disables thinking and excludes parent-only con
       sourceStore: new ModelSourceStore(vscode.Uri.file(storageRoot))
     });
     const parent = createParentRequest();
+    parent.requestProtocolVersion = 8;
     parent.model = {
       ...parent.model,
       provider: 'deepseek',
@@ -359,12 +361,20 @@ test('real child provider request disables thinking and excludes parent-only con
       language: 'en'
     });
 
-    assert.equal(JSON.parse(execution.content).ok, true);
+    const toolResult = JSON.parse(execution.content) as { ok: boolean; result: string; hasMore: boolean; nextOffset?: number };
+    assert.equal(toolResult.ok, true);
+    assert.ok(toolResult.result.length > 12_000, 'v8 hands the complete child result to general evidence admission');
+    assert.equal(toolResult.hasMore, false);
+    assert.equal(toolResult.nextOffset, undefined);
     assert.equal(capturedBodies.length, 1);
     const providerBody = capturedBodies[0];
     const parsedProviderBody = JSON.parse(providerBody) as Record<string, unknown>;
     assert.deepEqual(parsedProviderBody.thinking, { type: 'disabled' });
     assert.equal(Object.hasOwn(parsedProviderBody, 'reasoning_effort'), false);
+    const childToolNames = (parsedProviderBody.tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name);
+    assert.equal(childToolNames.includes('keepseek_read_evidence'), true);
+    assert.equal(childToolNames.includes('keepseek_read_subagent_result'), false,
+      'new child lanes use general evidence; only a root v8 lane exposes the legacy migration bridge');
     assert.match(providerBody, /CHILD SELF CONTAINED TASK/u);
     assert.match(providerBody, /PROJECT RULE ALLOWED IN CHILD/u);
     assert.doesNotMatch(providerBody, /PARENT HISTORY MUST NOT LEAK/u);

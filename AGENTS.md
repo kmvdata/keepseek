@@ -39,6 +39,9 @@ src/
 │   ├── historyProjection.ts     # 模型历史投影（摘要+保护消息+最近轮次）★压缩核心
 │   ├── historyCompressor.ts     # 会话摘要刷新与失败回退 ★压缩核心
 │   ├── contextUsage.ts          # 用量估算（必须与真实请求共用同一 projection）
+│   ├── toolResultAdmission.ts   # 请求级动态结果准入与模型容量校准
+│   ├── contextEpoch.ts          # 同一逻辑任务内的 provider 上下文滚动/checkpoint
+│   ├── evidence/                # 任务隔离证据存储、不可变信封与分页读取
 │   ├── currentRunContext.ts     # 项目指令/Skills/Legacy 统一投影入口
 │   ├── providers/               # Chat Completions / Responses / Anthropic Messages 客户端与 SSE parser
 │   └── tools/                   # workspace / semantic / validation / git / toolAuthorization
@@ -60,8 +63,10 @@ src/
 - **system 段纯静态**：`getAgentSystemPrompt()` 不随轮次变化。`contextInstructions`（AGENTS.md / Skills / Legacy Memory / Context Files 的格式化结果）持久化在 `ChatSession.contextInstructions`——字节未变就逐字节复用，禁止每轮重新生成；变化即整体重写（一次可接受的缓存代价）。
 - **user 消息"发送字节 == 持久化字节"**：一律以 `(expandedContent ?? content).trim()` 发送，禁止发送时再包装/拼接。动态内容（goal、临时指令、后台任务状态）只追加在 user 消息尾部，绝不改写已发送历史。
 - **assistant 消息原样持久化**：通用工具轮经 `ChatMessage.toolRounds` 还原；Responses/Anthropic 同 lane 另存可辨别 `providerReplay`。Anthropic Thinking、signature、redacted data、`tool_use`/`tool_result` block 必须原样有序回放，跨 lane 只保留可见文本。
-- **历史投影 append-only**：只追加，不重写、不 trim、不重排；摘要刷新是受控低频缓存重置点（`SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD` 故意调高）。
+- **历史投影 append-only**：只追加，不重写、不 trim、不重排。摘要刷新与 Context Epoch rollover 是仅有的两个受控缓存边界；后者完整宿主状态外置为 task-scoped checkpoint evidence，只切换当前逻辑任务的 provider replay lane 并追加有界 seed，绝不改写 `ChatSession.messages`、插入伪 user 消息或创建新任务。
 - **工具 schema 按会话冻结**：集合与顺序跨轮不变；禁用工具用 `tool_choice: none` 而非移除 tools；slim mode 默认关闭。
+- **工具结果字节冻结**：工具先持久化意图，再执行并保存完整 evidence/hash，最后按实际请求容量保存一次 provider-visible envelope；恢复时逐字节复用，已完成工具不得因交付失败而重跑。
+- **显式任务上限连续**：用户配置的时间或费用上限跨 Context Epoch、恢复与子代理共享；费用按币种分别核算，无法计价时正值上限必须 fail-closed。内部容量调度不能借用或重置这些账本。
 - **审批与结果 append-only**：reviewer 使用独立缓存 lane；审批决定和 DraftRun 终态结果用固定格式追加到下一条真实 user 消息，绝不插入或回写旧消息。进程输出和审查证据始终是不可信数据。
 
 禁止：把时间戳/随机 UUID/绝对路径/激活 reason 写入 system 段或历史消息；在热会话中重写历史或移除未覆盖消息；让 schema 随 prompt 变化。
@@ -73,6 +78,9 @@ src/
 - 自动保护：首条需求、最近输入、显式"记住"、报错/测试失败、用户纠错、DraftEdit 结果——不被摘要覆盖。
 - 摘要请求：当前模型、关 thinking、无 tools、限 `contextSummaryBudgetTokens`、短超时；失败只记录 `lastFailureReason`，绝不阻塞用户消息。
 - 降级兜底（异常路径）：无可用摘要且投影估算超 `contextWindowTokens × forceRatio` 时，截断为最近消息尾部。
+- 正在运行的任务不受固定累计工具结果预算约束。`toolResultTokens` 只做 telemetry；单次准入使用真实三协议 projection、动态输出预留和 learned effective window。完整结果放不下就通过 `keepseek_read_evidence` 分页，最小信封放不下或单 epoch 工具阈值到达就自动 rollover。
+- Epoch checkpoint 保存原始任务、TaskPlan、evidence/hash、工具幂等、审批、DraftEdit/DraftRun、validation/repair、执行与用量状态；优先模型摘要，失败用宿主确定性摘要。rollover 保持 session/task/approval root/permit 消费/Stop/usage 不变，不授权、不应用、不执行任何副作用。
+- Provider 报 context-too-long 时按来源/endpoint/model 校准有效窗口并重建 epoch；仅当冻结 system/schema、原始请求和最小 checkpoint 仍装不下时报告真实容量错误。无进展指纹跨 epoch，先提醒改变策略，持续重复才以 `no_progress_loop` 停止。
 - 配置集中在 `shared/config.ts`；数据结构在 `shared/types.ts`（`contextMeta` / `contextCompression` / `ContextProjectionMetadata`）。
 
 ### 4.3 账户与模型来源
@@ -95,7 +103,7 @@ src/
 - 执行使用 `spawn(executable, args, { shell: false })`；需要 shell 语法时必须显式选择 shell executable 并把原始脚本作为 argv 展示。未受信任工作区、未授权外部 cwd、状态/specHash 不匹配均硬拒绝。
 - 取消、超时、输出截断、扩展重启中断均进入持久化状态；`approved/running` 重启后只能标记 interrupted，绝不自动重跑。完成项复用必须克隆为新的 pending 并再次确认。
 
-**项目审批模式**：命令菜单提供 `ask`（请求批准，默认）、`model_review`（模型审批，长任务推荐但可能拒绝）和 `delegate`（自动批准，不经模型审查）。只有 Webview 用户操作可切换，不能通过模型工具、项目文件或 Skill 提权；选择按 workspace 持久化，新建、切换或从其他工作区复制进来的 session 都使用目标项目当前模式，绝不继承来源项目的模式。`model_review` 使用当前子代理模型发起独立、一次性、无工具请求；不得注入项目指令/Skill/隐藏推理，不得回退模型或自动批准。每个副作用先过确定性硬检查，再用精确 actionHash 审查；记录与 session/run/target/kind/hash/policy/runtime 绑定，批准后仍经相同 Store/Editor/Executor。`delegate` 也必须生成明确“未经模型审查”的 `host_policy` 记录后才能签发 delegated permit。每轮完成后逐项处理，将决定与真实结果追加到新 user 消息；失败修改阻止依赖命令。连续拒绝 3 次或最近 50 次累计拒绝 10 次停止续跑；不可用只重试一次且不计安全拒绝。停止或切回 `ask` 撤销队列和未执行授权；重启不恢复队列、不复用旧 reviewer 批准。外部文件/cwd 按精确 URI 授权，保留信任、基线/脏编辑器、单次 permit 与取消检查。V1–V6 system/history/schema 字节冻结；V7 静态描述三种模式，当前模式只追加新 user 尾部。
+**项目审批模式**：命令菜单提供 `ask`（请求批准，默认）、`model_review`（模型审批，长任务推荐但可能拒绝）和 `delegate`（自动批准，不经模型审查）。只有 Webview 用户操作可切换，不能通过模型工具、项目文件或 Skill 提权；选择按 workspace 持久化，新建、切换或从其他工作区复制进来的 session 都使用目标项目当前模式，绝不继承来源项目的模式。`model_review` 使用当前子代理模型发起独立、一次性、无工具请求；不得注入项目指令/Skill/隐藏推理，不得回退模型或自动批准。每个副作用先过确定性硬检查，再用精确 actionHash 审查；记录与 session/run/target/kind/hash/policy/runtime 绑定，批准后仍经相同 Store/Editor/Executor。`delegate` 也必须生成明确“未经模型审查”的 `host_policy` 记录后才能签发 delegated permit。每轮完成后逐项处理，将决定与真实结果追加到新 user 消息；失败修改阻止依赖命令。连续拒绝 3 次或最近 50 次累计拒绝 10 次停止续跑；不可用只重试一次且不计安全拒绝。停止或切回 `ask` 撤销队列和未执行授权；重启不恢复队列、不复用旧 reviewer 批准。外部文件/cwd 按精确 URI 授权，保留信任、基线/脏编辑器、单次 permit 与取消检查。V1–V7 system/history/schema 字节冻结；V8 固定增加通用 evidence 工具和 epoch 协议，并用 `keepseek_read_evidence` 统一当前任务内包括新子代理结果在内的分页。根 lane 中旧子代理读取工具仅作为 V1–V7 已存结果迁移桥，桥接结果仍进入通用 evidence/admission 管线；新子代理 lane 不再使用独立分页。热旧 lane 只在既有缓存自然失效或首次需要外置结果时经受控 rollover 迁移。
 
 ### 4.6 Skills 与项目指令
 
@@ -109,6 +117,7 @@ src/
 - **新增配置**：先改 `package.json` 的 contributes.configuration，再改 `shared/config.ts`。
 - **模型来源/发现/余额**：同步检查 accountStore、accountResolver、modelDiscovery、runner、historyCompressor、balanceStore、Provider；任何请求路径不得重新直读 apiKey/baseUrl。
 - **压缩相关**：同步检查 shared/types.ts、historyProjection、historyCompressor、contextUsage、runner——真实请求与 usage 估算必须共用同一 projection。
+- **evidence/epoch 相关**：同步检查 evidence/*、toolResultAdmission、contextEpoch、runCheckpoint、三 Provider 原生 replay、DSML、session 协议迁移和 Run Details；不得在 Runner 重新引入累计终止预算或可见续轮。
 - **项目指令/Skill/Legacy**：同步检查 projectInstructions、skillActivationResolver、contextDeduplication、currentRunContext、contextUsage、protocol、Run Details/trace；不要在 Provider 内复制匹配或优先级逻辑。
 - **Webview → 扩展消息**：更新 webviewMessages.ts 的联合类型 + Provider `handleMessage()` + webview 发送点；剪贴板兜底消息由 richTextShortcuts 统一发起。
 - **扩展 → Webview 主动消息**：不进 `WebviewMessage`，在 webview message listener 中处理。
@@ -123,6 +132,7 @@ src/
 
 - 单测：`bun run build:test && bun run test`（重点覆盖：缓存字节稳定、压缩 fallback、引用展开、ChangeSet、授权、Skill 激活）。
 - 改压缩核心后必须验证：压缩关闭 fallback、无摘要 fallback、摘要失败 fallback、protected 消息、最近轮次、context usage 估算一致。
+- 改 evidence/epoch 后必须验证：20MB 分页、跨 session/task 拒绝、envelope 恢复字节一致、三协议批次配对、context-too-long 自适应、摘要 fallback、同 task 跨 epoch、无伪 user 消息、工具不重跑与副作用不确定态。
 - 改引用/输入后手测：全文/行段/目录引用、外部授权、不可读文件跳过、拖拽（多数据源 + 判空）、`@` 补全、编辑重发。
 - 改 edits 后手测：Apply/Discard/Apply All、删除 modal、删除前文件变化冲突、脏编辑器拒绝。
 - 改审批/DraftRun 后手测：三档模式、reviewer 三协议、提议→审核→批准→执行、拒绝/不可用重试/熔断、切回 ask/停止/重启撤销、删除和外部 URI、依赖阻断、流式输出、超时/截断、重复点击、Windows/POSIX argv 与显式 shell 差异。

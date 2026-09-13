@@ -1,4 +1,4 @@
-import { canContinueBudgetInNewTurn, normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
+import { normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
@@ -569,19 +569,20 @@ export function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
     providerReplay: _providerReplay,
     toolRounds: _toolRounds,
     ...message
-  }, index) => ({
+  }) => ({
     ...message,
     runState: runCheckpoint ? {
-      taskId: runCheckpoint.taskId, status: runCheckpoint.status,
-      // Older checkpoints used waiting_for_user for budget stops as well.
-      stopReason: runCheckpoint.stopReason === 'waiting_for_user' && runCheckpoint.finalResponse?.runDetails.budgetStopReason
-        ? 'budget_exhausted' : runCheckpoint.stopReason,
+      taskId: runCheckpoint.taskId,
+      status: (runCheckpoint.stopReason === 'budget_exhausted' || runCheckpoint.state?.budgetStopReason
+        || runCheckpoint.finalResponse?.runDetails.budgetStopReason) ? 'interrupted' : runCheckpoint.status,
+      // Old capacity checkpoints migrate through the ordinary same-task resume path.
+      stopReason: (runCheckpoint.stopReason === 'budget_exhausted' || runCheckpoint.state?.budgetStopReason
+        || runCheckpoint.finalResponse?.runDetails.budgetStopReason) ? 'extension_restart' : runCheckpoint.stopReason,
       usedMs: runCheckpoint.usedMs, maxExecutionMs: runCheckpoint.maxExecutionMs, limitSource: runCheckpoint.limitSource,
       attempt: runCheckpoint.attempt, modelRequests: runCheckpoint.modelRequests, retries: runCheckpoint.retries,
       lastNetworkAt: runCheckpoint.lastNetworkAt, lastEventAt: runCheckpoint.lastEventAt, lastContentAt: runCheckpoint.lastContentAt,
       requestStartedAt: runCheckpoint.requestStartedAt, lastStepAt: runCheckpoint.lastStepAt, steps: (runCheckpoint.state?.toolRounds.reduce((count, round) => count + round.toolResults.length, 0) ?? 0) + Object.keys(runCheckpoint.state?.pending?.results ?? {}).length,
       canResume: runCheckpoint.status !== 'running' && !recoveryBlocker(runCheckpoint),
-      canContinueInNewTurn: index === messages.length - 1 && canContinueBudgetInNewTurn(runCheckpoint),
       blocker: recoveryBlocker(runCheckpoint), error: runCheckpoint.error
     } : undefined,
     ...(message.runDetails ? { runDetails: {
@@ -1266,6 +1267,24 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
           sourceId: typeof summary.sourceId === 'string' && summary.sourceId.trim() ? summary.sourceId.trim() : undefined,
           provider: typeof summary.provider === 'string' && summary.provider.trim() ? summary.provider.trim() : undefined,
           createdAt: normalizeSessionTimestamp(summary.createdAt, new Date().toISOString())
+        }))
+      : undefined,
+    contextEpochs: Array.isArray(value.contextEpochs)
+      ? value.contextEpochs.filter(isRecord).slice(0, 128).map((epoch) => ({
+          index: normalizeNonNegativeInteger(epoch.index),
+          reason: typeof epoch.reason === 'string' ? epoch.reason.slice(0, 120) : 'unknown',
+          estimatedPromptTokens: normalizeNonNegativeInteger(epoch.estimatedPromptTokens),
+          afterEstimatedPromptTokens: typeof epoch.afterEstimatedPromptTokens === 'number'
+            ? normalizeNonNegativeInteger(epoch.afterEstimatedPromptTokens) : undefined,
+          actualPromptTokens: typeof epoch.actualPromptTokens === 'number'
+            ? normalizeNonNegativeInteger(epoch.actualPromptTokens) : undefined,
+          declaredWindowTokens: normalizeNonNegativeInteger(epoch.declaredWindowTokens),
+          learnedEffectiveWindowTokens: normalizeNonNegativeInteger(epoch.learnedEffectiveWindowTokens),
+          reusablePrefixTokensEstimate: typeof epoch.reusablePrefixTokensEstimate === 'number'
+            ? normalizeNonNegativeInteger(epoch.reusablePrefixTokensEstimate) : undefined,
+          estimatedCacheResetTokens: typeof epoch.estimatedCacheResetTokens === 'number'
+            ? normalizeNonNegativeInteger(epoch.estimatedCacheResetTokens) : undefined,
+          summaryKind: epoch.summaryKind === 'model' ? 'model' as const : 'host_fallback' as const
         }))
       : undefined,
     budgetStopReason: typeof value.budgetStopReason === 'string' ? value.budgetStopReason.slice(0, 120) : undefined,
