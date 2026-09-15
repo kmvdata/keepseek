@@ -1,4 +1,4 @@
-import { ExecutionClock, ExecutionBudgetError, ExecutionCostBudget, abortable, mergeCostLimits, mergeDurations } from './executionPolicy';
+import { ExecutionClock, ExecutionBudgetError, ExecutionCostBudget, ModelRequestBudget, abortable, mergeCostLimits, mergeDurations } from './executionPolicy';
 import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted, migrateLegacyCapacityCheckpoint } from './runCheckpoint';
 import { shapeWorkspaceListingResult } from './toolResultShaping';
 import { getConfiguredAgentMaxCost, getConfiguredAgentMaxExecutionMs, getConfiguredEvidenceMaxBytes, getConfiguredPatchSettings, getConfiguredProviderInlineResultMaxChars, getConfiguredStreamIdleTimeoutMs } from '../shared/config';
@@ -334,6 +334,12 @@ export class AgentLoop {
     private readonly approvalReviewer?: ApprovalReviewerAdapter
   ) {}
 
+  /** Persistent Goal attempts retain one root tree across model steps. The
+   * coordinator calls this only after the Goal reaches a terminal state. */
+  public releasePersistentTask(taskId: string): void {
+    this.subagentTools?.releaseTree?.(taskId);
+  }
+
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
     if (request.checkpoint) {
       const requestCheckpoint = migrateLegacyCapacityCheckpoint(request.checkpoint);
@@ -362,6 +368,10 @@ export class AgentLoop {
       request.executionLimits?.timeLimitSource ?? (request.executionLimits?.maxRunMs ? 'explicit invocation + agent.maxExecutionMs' : 'agent.maxExecutionMs (0 = unlimited)'),
       (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString()), maxCost);
     const taskCostBudget = request.taskCostBudget ?? new ExecutionCostBudget(maxCost, cp.usedCostByCurrency);
+    const taskModelRequestBudget = request.taskModelRequestBudget ?? new ModelRequestBudget(
+      request.executionLimits?.maxModelRequests ?? 0,
+      cp.modelRequests
+    );
     cp.maxCost = taskCostBudget.limit;
     if (!request.subagentContext && cp.delegationBudget) this.subagentTools?.restoreTree?.(cp.taskId, cp.delegationBudget);
     cp.attempt++; cp.status = 'running'; cp.stopReason = undefined; cp.error = undefined;
@@ -379,6 +389,12 @@ export class AgentLoop {
       if (!request.subagentContext) cp.delegationBudget = this.subagentTools?.snapshotTree?.(cp.taskId) ?? cp.delegationBudget;
       cp.usedMs = ownClock.usedMs;
       cp.usedCostByCurrency = taskCostBudget.snapshot();
+      cp.modelRequests = taskModelRequestBudget.used;
+      if (cp.goal) {
+        cp.goal.activeExecutionMs = cp.usedMs;
+        cp.goal.costByCurrency = { ...cp.usedCostByCurrency };
+        cp.goal.modelRequests = cp.modelRequests;
+      }
       cp.updatedAt = new Date().toISOString();
       try { await callbacks.onCheckpoint?.(checkpointCopy(cp)); }
       catch (error) { cp.status = 'blocked'; cp.stopReason = String(error).includes('resource limit') ? 'resource_limit' : 'storage_failure'; cp.error = String(error); controller.abort(error); throw error; }
@@ -394,14 +410,25 @@ export class AgentLoop {
     try {
       await persist();
       const response = await this.runLoop({ ...request, checkpoint: cp, taskClock: request.taskClock ?? ownClock,
-        taskCostBudget, signal: controller.signal }, {
+        taskCostBudget, taskModelRequestBudget, signal: controller.signal }, {
         ...callbacks,
         beforeModelRequest: async () => {
-          cp.modelRequests++; cp.requestStartedAt = new Date().toISOString();
+          if (!taskModelRequestBudget.reserve()) {
+            throw new AgentInterruptedError('model_request_limit', 'Goal model request budget exhausted / Goal 模型请求预算已用尽');
+          }
+          cp.modelRequests = taskModelRequestBudget.used;
+          if (cp.goal) cp.goal.modelRequests = cp.modelRequests;
+          cp.requestStartedAt = new Date().toISOString();
           cp.lastNetworkAt = undefined; cp.lastEventAt = undefined; cp.lastContentAt = undefined;
           await persist();
         },
-        beforeRetry: async () => { cp.retries++; cp.modelStepRetries = (cp.modelStepRetries ?? 0) + 1; await persist(); },
+        beforeRetry: async () => {
+          if (!taskModelRequestBudget.reserve()) {
+            throw new AgentInterruptedError('model_request_limit', 'Goal model request budget exhausted / Goal 模型请求预算已用尽');
+          }
+          cp.modelRequests = taskModelRequestBudget.used;
+          cp.retries++; cp.modelStepRetries = (cp.modelStepRetries ?? 0) + 1; await persist();
+        },
         onTaskPlan: (plan) => { cp.taskPlan = plan; callbacks.onTaskPlan?.(plan); },
         onCheckpoint: async (next) => { cp.state = next.state; await persist(); },
         onActivity: (kind) => {
@@ -418,8 +445,10 @@ export class AgentLoop {
         }
       });
       cp.finalResponse = response;
-      cp.status = response.runDetails.budgetStopReason ? 'blocked' : 'completed';
+      cp.status = response.goalOutcome === 'candidate_final' ? 'candidate_final'
+        : response.runDetails.budgetStopReason ? 'blocked' : 'completed';
       cp.stopReason = response.runDetails.budgetStopReason ? 'budget_exhausted'
+        : response.goalOutcome === 'candidate_final' ? 'waiting_for_user'
         : response.runDetails.status === 'waiting' || response.repairLoop.status === 'waiting_for_apply'
           ? 'waiting_for_user' : 'completed';
       await persist();
@@ -436,7 +465,7 @@ export class AgentLoop {
       if (cp.stopReason === 'time_budget') throw new ExecutionBudgetError();
       throw error;
     } finally {
-      if (!request.subagentContext) this.subagentTools?.releaseTree?.(cp.taskId);
+      if (!request.subagentContext && !request.goal?.preserveTaskRuntime) this.subagentTools?.releaseTree?.(cp.taskId);
       clearInterval(checkpointTimer);
       suspendClock(); ownClock.dispose();
       signals.forEach((signal) => signal.removeEventListener('abort', abort));
@@ -628,7 +657,12 @@ export class AgentLoop {
         usage: response.usage ?? this.toTurnUsageStats(upstreamUsageTotals, request.model.id),
         promptCacheDiagnostics: response.promptCacheDiagnostics ?? promptCacheDiagnostics,
         toolRounds: toolRounds.length ? toolRounds : undefined,
-        providerReplay: response.providerReplay ?? this.createProviderReplayState(providerRunState)
+        providerReplay: response.providerReplay ?? this.createProviderReplayState(providerRunState),
+        ...(request.goal ? { goalOutcome: details.candidateFinal === true
+          ? 'candidate_final' as const
+          : response.draftEdits.length || (response.draftRuns?.length ?? 0) > 0
+            ? 'needs_tool_or_side_effect' as const
+            : details.stopped === true ? 'blocked' as const : 'waiting' as const } : {})
       };
       trace.record({
         type: 'run_finish',
@@ -1042,7 +1076,20 @@ export class AgentLoop {
             totalCostByCurrency: request.taskCostBudget?.snapshot(),
             maxCost: request.taskCostBudget?.limit
           },
-          approvalResults: approvalToolResults.map(({ toolCallId, toolName, status }) => ({ toolCallId, toolName, status }))
+          approvalResults: approvalToolResults.map(({ toolCallId, toolName, status }) => ({ toolCallId, toolName, status })),
+          goal: checkpoint.goal ? {
+            contractHash: checkpoint.goal.contractHash,
+            revision: checkpoint.goal.revision,
+            activeExecutionMs: checkpoint.goal.activeExecutionMs,
+            costByCurrency: checkpoint.goal.costByCurrency,
+            modelRequests: checkpoint.goal.modelRequests,
+            completionReviews: checkpoint.goal.completionReviews,
+            criteria: checkpoint.goal.criteria,
+            validationMutationRevision: checkpoint.goal.validationMutationRevision,
+            replayHash: checkpoint.goal.replayCursor?.bytesHash,
+            resultConsumptionHash: hashText(stableStringify(checkpoint.goal.consumedResultKeys)),
+            completionDecisionRef: checkpoint.goal.completionDecisionRef
+          } : undefined
         };
         const hostCheckpoint = createEpochHostCheckpoint(epochCheckpointInput);
         let hostCheckpointEvidence = await evidenceStore.ensureIntent({
@@ -1315,7 +1362,7 @@ export class AgentLoop {
             reasoningContent: this.formatReasoning(reasoningParts),
             draftEdits,
             draftRuns
-          }, { finishReason: continuedResponse.finishReason, continued: true });
+          }, { finishReason: continuedResponse.finishReason, continued: true, candidateFinal: true });
         }
 
         emitStatus({
@@ -1328,7 +1375,7 @@ export class AgentLoop {
           reasoningContent: this.formatReasoning(reasoningParts),
           draftEdits,
           draftRuns
-        }, { finishReason: finalFinishReason });
+        }, { finishReason: finalFinishReason, candidateFinal: true });
       }
 
       pending ??= { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {} };
@@ -2035,6 +2082,7 @@ export class AgentLoop {
   ): Promise<DeepSeekStreamResult> {
     const trace = options.trace ?? createNoopInteractionTrace();
     this.throwIfCostLimitReached(request);
+    await callbacks.beforeModelRequest?.();
     let body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody;
     if (runtimeConfig.provider === 'openai-responses') {
       const responsesState = options.providerRunState;

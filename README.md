@@ -76,6 +76,14 @@ KeepSeek 把“提出改动”和“真正执行”分开：
 - **预算耗尽自动续跑**：前台任务达到工具轮次或次数上限后，仅在确有新进展时自动开启新一轮继续完成工作（默认最多 8 轮，可配置）；修改与命令仍需逐项确认；
 - **大文件也能精确改动**：超大文件用行段续读与精确的增量编辑处理，每处改动仍逐项可见、可审阅。
 
+#### 持久 Goal
+
+输入 `/goal <目标>` 会先打开确认面板；在你确认至少一项验收条件、include/exclude 范围、必需验证、预算和恢复策略前，不会创建聊天消息或请求模型。开始后，状态卡提供 Pause、Resume、Stop、Clear 和追加修订；模型过早给出最终文字时，KeepSeek 会先核对文件/命令终态、最后一次修改后的验证、验收证据与隔离 completion reviewer，再决定完成或在同一逻辑任务中继续。
+
+Goal 不改变安全边界：请求批准模式仍等待你真实 Apply/Run；模型审批继续绑定精确 actionHash；自动批准仍记录“未经模型审查”的宿主策略。Reload 或崩溃后，运行态先标记为 interrupted，旧 permit、临时外部授权和内存审批队列不会复活；文件或命令终态不确定时必须人工核实，绝不会自动重跑。旧“持续修复直到 compile/lint/test 通过”入口现在只是预填 Goal 的兼容入口。
+
+**Goal 只会在 KeepSeek 的 VS Code Extension Host 运行时推进；VS Code 关闭、Reload 或设备休眠期间不会执行，重新激活后可恢复。** 默认采用手动恢复；显式选择 `auto_on_activation` 也只表示 KeepSeek 再次激活并完成全部安全核对后自动恢复。有效执行时间排除暂停、等待、Host 不运行和检测到的休眠；模型请求数包含主模型、重试、子代理、摘要及两类 reviewer；费用按币种分别累计，正费用上限无法计价时安全停止。
+
 ### 4. 用命令菜单控制当前任务
 
 点击输入框下方的 **`/` 按钮**，即可打开命令菜单。你可以在这里调用 Skills、切换主模型和子代理模型、调整审批模式与自动压缩阈值，以及控制 Thinking 强度。
@@ -164,6 +172,7 @@ bun run reinstall:vsix
 ### 维护资料
 
 - [Agent 运行时工作流](./doc/keepseek-agent-runtime-workflow.md)
+- [持久 Goal 与长任务恢复](./doc/long-running-agent.md)
 - [缓存命中优化技术详解](./doc/cache_keepseek.md)
 - [API Payload 参考](./doc/keepseek-api-payload-reference.md)
 - [文件引用规范](./doc/keepseek-file-reference-spec.md)

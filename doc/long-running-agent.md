@@ -26,6 +26,38 @@ VS Code 设置：
 
 有效时间使用单调时钟：同一父子任务树的活跃时间取并集，不累加并行子任务时长。等待授权、Apply、子任务队列不计费于时间预算。扩展每 250ms 采样，超过 5 秒的宿主停顿（休眠或长时间不可调度）保守排除，不以系统日期跳变判断到期。因此它是客户端保守执行时间预算，不是供应商计费硬上限。崩溃可能丢失最后一次定期保存以来最多约 15 秒的计时；重启离线时间不会补扣。
 
+## 持久 Goal
+
+`/goal <objective>` 是范围明确、具有可验证停止条件的持久任务入口。命令只打开独立确认面板；用户确认目标、至少一项验收条件、工作区相对 include/exclude 范围、`compile | lint | test` 必需验证、预算和恢复策略之后，宿主才创建 Goal。原始 `/goal ...` 可见消息、引用展开结果和确定性 contract tail 先冻结；Goal Store、lease 和首个 v3 RunCheckpoint 成功写入后，才允许首个 Provider 请求。`/goal status|pause|resume|stop|clear|amend` 分别查看、在安全边界暂停、恢复、停止、清理终态记录和追加 contract revision；修订不重写原目标或历史，并使旧验证/完成审查失效。
+
+Goal 状态由 `src/agent/goals/goalCoordinator.ts` 单独拥有。一次 `AgentRunner` attempt 没有工具调用时返回 `candidate_final`，不会直接完成 checkpoint 或把候选 assistant 写进聊天历史。宿主先检查 lease、冻结身份、Workspace Trust、授权、TaskPlan、criteria、最后 mutation 之后的验证、ChangeSet/DraftRun/approval/tool/subagent 终态和预算；再调用隔离、无工具、无写入/执行能力的 completion reviewer。reviewer 决定绑定 contract/revision/candidate/evidence manifest/mutation revision，提交 completed 前全部重验。只有纯机器可验证 criteria 才允许 reviewer 不可用 fallback；正费用上限无法对 reviewer 计价时不允许 fallback。manual criterion 必须由用户在状态卡明确确认。
+
+活动 Goal 的 `ask`、`model_review`、`delegate` 与普通任务使用同一安全管线。`ask` 等待真实 Apply/Run；`model_review` 继续使用当前 runtime、精确 actionHash、一次重试和拒绝熔断；`delegate` 仍写入明确的 `host_policy`，没有模型审查。Goal 不改变 Workspace Trust、外部 URI、脏编辑器、base/result hash、删除二次确认、一次性 permit 或显式 shell 规则。拒绝、Discard、Revert、partial Apply、命令失败和 workspace mutation 会使旧证据失效；未知文件提交、未知 DraftRun 终态或 uncertain tool result 永不自动重跑。
+
+Goal Store 位于 extension `globalStorageUri/goals/v1`，使用小型 index、每 Goal 的不可变 content-addressed snapshot 和 append-only journal shard；文件存储通过临时文件 flush/close、原子 rename 和目录 fsync 发布。损坏的最新 generation 会回退到最后一份同时通过 record hash 与 journal 校验的 snapshot；完全不可验证的数据 fail-closed。`file:` global storage 还使用 owner/heartbeat/expiry 和单调 fencing token 的 workspace lease；stale takeover 必须超时、复读并确认 Goal 状态，取得调度权不代表旧副作用可重试。不能提供相同排他语义的非 `file:` storage 不运行 Goal。
+
+恢复默认是 `manual`。激活时 `running/pausing` 先持久化为 `interrupted`，然后核对 workspace/session、V10 session、首次 user 的精确 `providerContent`、v3 checkpoint、冻结 source/model/provider/endpoint、Trust、外部授权、ChangeSet、DraftRun、approval runtime 和 lease。旧 runtime 的 approval、permit、batch continuation 与内存队列全部丢弃；重启后不能证明文件未变，因此旧 validation 和 completion decision 保守失效。只有 contract 选择 `auto_on_activation`、配置允许、全部上下文匹配且没有审批等待或不确定副作用时才自动恢复。
+
+> Goal 只会在 KeepSeek 的 VS Code Extension Host 运行时推进；VS Code 关闭、Reload 或设备休眠期间不会执行，重新激活后可恢复。
+
+保持 `onView:keepseek.chat` 激活边界：没有外部 daemon、shell scheduler、云 worker 或 `onStartupFinished`。侧栏隐藏不会暂停仍存活的 Extension Host；Host 不存在期间没有 heartbeat、请求或工具执行，也不累计 active execution。
+
+Goal 配置为：
+
+```json
+{
+  "keepseek.goal.maxActiveExecutionMs": 0,
+  "keepseek.goal.maxCost": 0,
+  "keepseek.goal.maxModelRequests": 0,
+  "keepseek.goal.maxCompletionReviews": 0,
+  "keepseek.goal.autoResumeOnActivation": false
+}
+```
+
+0 表示 unlimited，但创建面板会醒目标注，并以“开始 Goal”作为明确确认。正值 Goal 时间/费用上限与 `agent.maxExecutionMs` / `agent.maxCost` 取更严格者。active execution 是 Provider、活跃工具/子代理和宿主推进/reviewer 阶段的墙钟并集；paused、waiting、Host 停止与检测到的设备休眠不计。模型请求数覆盖主请求、重试、Context Epoch summary、子代理、completion reviewer 和 model approval reviewer。费用继续按币种分别累计，不换算；所有账本跨 attempt、epoch 与激活恢复延续。
+
+Goal 独占 V10 request protocol，但 tools schema version 保持 V9；V10 system prompt 和工具集合/顺序/字节与 V9 完全相同，普通新 session、非 Goal 和 V1–V9 fixture 不变。活动 Goal 的审批结果、工具/副作用结果和 deterministic control item 进入独立 Goal replay，不伪造 `ChatSession.messages` user turn。Chat Completions 保存内部 messages/tool rounds，Responses 保存原生 Items，Anthropic 保存 system/messages blocks；终态 assistant 携带完整 Goal replay，使下一条真实用户消息能从精确 Provider 前缀继续。旧 `repair_until_validation_passes` BackgroundRun 入口只生成预填 Goal contract，不再使用内存轮数协调器。
+
 ## 连接状态
 
 分别记录网络字节、已解析 SSE 事件/注释、正文/推理/工具参数、完整工具步骤的时间。界面自己的计时器仅展示静默提示，不充当服务端心跳，不请求模型。

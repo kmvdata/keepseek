@@ -190,6 +190,26 @@
           "type": "number", "default": 0, "minimum": 0, "scope": "window",
           "markdownDescription": "Legacy explicit background execution budget. Combined with agent.maxExecutionMs using the smaller positive value; 0 unlimited. / 兼容旧版显式后台时间预算。"
         },
+        "keepseek.goal.maxActiveExecutionMs": {
+          "type": "number", "default": 0, "minimum": 0, "scope": "window",
+          "markdownDescription": "Maximum active execution time for one persistent Goal. Combined with agent.maxExecutionMs using the smaller positive value. Waiting, pause, host shutdown, Reload, and device sleep are excluded; 0 = unlimited. / 持久 Goal 的有效执行时间上限，与 agent.maxExecutionMs 取更严格正值；等待、暂停、Host 关闭、Reload 和休眠不计时，0 不限额。"
+        },
+        "keepseek.goal.maxCost": {
+          "type": "number", "default": 0, "minimum": 0, "scope": "window",
+          "markdownDescription": "Maximum priced Provider cost per currency for a Goal, combined with agent.maxCost using the smaller positive value. 0 = unlimited; positive limits fail closed for unpriced sources. / Goal 每种币种的费用上限，与 agent.maxCost 取更严格正值；0 不限额，无法计价时正值安全拒绝。"
+        },
+        "keepseek.goal.maxModelRequests": {
+          "type": "integer", "default": 0, "minimum": 0, "maximum": 1000000, "scope": "window",
+          "markdownDescription": "Maximum Provider requests across the Goal, including retries, child agents, summaries, approval reviewers, and completion reviewers. 0 = unlimited. / Goal 跨重试、子代理、摘要、审批 reviewer 和完成 reviewer 的模型请求上限，0 不限额。"
+        },
+        "keepseek.goal.maxCompletionReviews": {
+          "type": "integer", "default": 0, "minimum": 0, "maximum": 1000000, "scope": "window",
+          "markdownDescription": "Maximum isolated completion reviews for a Goal. 0 = unlimited. / Goal 隔离完成审查次数上限，0 不限额。"
+        },
+        "keepseek.goal.autoResumeOnActivation": {
+          "type": "boolean", "default": false, "scope": "window",
+          "markdownDescription": "Allow Goals configured for auto-on-activation to resume only after KeepSeek is activated and all recovery checks pass. This is not a daemon. / 允许选择自动恢复的 Goal 仅在 KeepSeek 再次激活且恢复检查全部通过后继续；这不是后台常驻服务。"
+        },
         "keepseek.draftRun.timeoutMs": {
           "type": "number",
           "default": 120000,

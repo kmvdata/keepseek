@@ -25,6 +25,7 @@ import type {
   AnthropicMessage,
   AnthropicSystemTextBlock
 } from './providers/anthropicTypes';
+import { endpointHash } from './runCheckpoint';
 import { buildHistoryProjection, type HistoryProjectionResult } from './historyProjection';
 import {
   buildInitialAgentMessages,
@@ -34,6 +35,8 @@ import {
 } from './protocol';
 
 export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 9;
+/** V10 is opt-in for active Goal sessions. Ordinary session creation remains v9. */
+export const GOAL_PROVIDER_REQUEST_PROTOCOL_VERSION = 10;
 export const LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION = 1;
 export const PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION = 2;
 export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 9;
@@ -171,7 +174,7 @@ export function buildProviderRequestProjection(
     maxProjectionTokens: input.maxProjectionTokens,
     includeProviderReplay: provider === 'openai-responses' || provider === 'anthropic-compatible'
   });
-  const messages = buildInitialAgentMessages({
+  const initialMessages = buildInitialAgentMessages({
     prompt: input.prompt,
     contextFiles: input.contextFiles,
     currentRunContext: input.currentRunContext,
@@ -182,6 +185,12 @@ export function buildProviderRequestProjection(
     requestProtocolVersion,
     systemPrompt: input.systemPrompt
   });
+  const goalReplayAnchor = requestProtocolVersion >= GOAL_PROVIDER_REQUEST_PROTOCOL_VERSION
+    ? findGoalReplayAnchor(input.history, provider ?? 'openai-compatible', input.sourceId ?? input.model.sourceId ?? '', input.baseUrl ?? '')
+    : undefined;
+  const messages = goalReplayAnchor?.replay.protocol === 'chat-completions'
+    ? appendChatHistoryAfterGoalReplay(goalReplayAnchor.replay.messages, input.history.slice(goalReplayAnchor.index + 1), input.prompt, requestProtocolVersion)
+    : initialMessages;
   const includeTools = input.includeTools ?? profile.maxToolIterations > 0;
   const toolNames = includeTools
     ? [...(input.slimToolNames ?? getAgentToolNamesForPrompt(
@@ -192,7 +201,16 @@ export function buildProviderRequestProjection(
     : [];
   const tools = includeTools ? getAgentTools({ toolNames, requestProtocolVersion }) : [];
   const responses = provider === 'openai-responses'
-    ? buildOpenAiResponsesRequestProjection({
+    ? goalReplayAnchor?.replay.protocol === 'openai-responses'
+      ? buildOpenAiResponsesAfterGoalReplay({
+          replayInput: goalReplayAnchor.replay.input,
+          tools,
+          history: input.history.slice(goalReplayAnchor.index + 1),
+          prompt: input.prompt,
+          sourceId: input.sourceId ?? input.model.sourceId ?? '',
+          baseUrl: input.baseUrl ?? ''
+        })
+      : buildOpenAiResponsesRequestProjection({
         messages,
         tools,
         history: historyProjection.history,
@@ -202,7 +220,17 @@ export function buildProviderRequestProjection(
       })
     : undefined;
   const anthropic = provider === 'anthropic-compatible'
-    ? buildAnthropicMessagesRequestProjection({
+    ? goalReplayAnchor?.replay.protocol === 'anthropic-messages'
+      ? buildAnthropicAfterGoalReplay({
+          replaySystem: goalReplayAnchor.replay.system,
+          replayMessages: goalReplayAnchor.replay.messages,
+          tools,
+          history: input.history.slice(goalReplayAnchor.index + 1),
+          prompt: input.prompt,
+          sourceId: input.sourceId ?? input.model.sourceId ?? '',
+          baseUrl: input.baseUrl ?? ''
+        })
+      : buildAnthropicMessagesRequestProjection({
         messages,
         tools,
         history: historyProjection.history,
@@ -222,6 +250,108 @@ export function buildProviderRequestProjection(
     responses,
     anthropic
   };
+}
+
+function findGoalReplayAnchor(
+  history: ChatMessage[],
+  provider: ModelSourceProvider,
+  sourceId: string,
+  baseUrl: string
+): { index: number; replay: NonNullable<ChatMessage['goalReplay']> } | undefined {
+  const protocol = provider === 'openai-responses' ? 'openai-responses'
+    : provider === 'anthropic-compatible' ? 'anthropic-messages' : 'chat-completions';
+  const expectedEndpointHash = endpointHash(baseUrl);
+  for (let index = history.length - 1; index >= 0; index--) {
+    const replay = history[index].goalReplay;
+    if (replay?.protocol === protocol && replay.sourceId === sourceId && replay.endpointHash === expectedEndpointHash) {
+      return { index, replay };
+    }
+  }
+  return undefined;
+}
+
+function appendChatHistoryAfterGoalReplay(
+  replayMessages: DeepSeekMessage[],
+  history: ChatMessage[],
+  prompt: string,
+  requestProtocolVersion: number
+): DeepSeekMessage[] {
+  const messages = structuredClone(replayMessages);
+  let promptIncluded = false;
+  const normalizedPrompt = prompt.trim();
+  for (const message of history) {
+    if (message.role !== 'user' && message.role !== 'assistant') continue;
+    if (message.role === 'assistant') {
+      for (const round of message.toolRounds ?? []) {
+        messages.push({ role: 'assistant', content: round.assistantContent,
+          reasoning_content: round.reasoningContent, tool_calls: structuredClone(round.toolCalls) });
+        for (const result of round.toolResults) {
+          messages.push({ role: 'tool', tool_call_id: result.toolCallId, content: result.content });
+        }
+      }
+      messages.push({ role: 'assistant', content: getMessageContentForAgent(message),
+        ...(requestProtocolVersion <= 1 ? { reasoning_content: message.reasoningContent ?? null } : {}) });
+      continue;
+    }
+    const content = getMessageContentForAgent(message);
+    if (!content) continue;
+    messages.push({ role: 'user', content });
+    promptIncluded = promptIncluded || content === normalizedPrompt
+      || (message.expandedContent ?? message.content).trim() === normalizedPrompt
+      || message.content.trim() === normalizedPrompt;
+  }
+  if (normalizedPrompt && !promptIncluded) messages.push({ role: 'user', content: normalizedPrompt });
+  return messages;
+}
+
+function buildOpenAiResponsesAfterGoalReplay(input: {
+  replayInput: OpenAiResponsesItem[]; tools: DeepSeekFunctionTool[]; history: ChatMessage[];
+  prompt: string; sourceId: string; baseUrl: string;
+}): OpenAiResponsesRequestProjection {
+  const responseInput = structuredClone(input.replayInput);
+  let promptIncluded = false;
+  const normalizedPrompt = input.prompt.trim();
+  const lane = { sourceId: input.sourceId, baseUrl: normalizeOpenAiResponsesLaneBaseUrl(input.baseUrl) };
+  for (const message of input.history) {
+    if (message.role === 'user') {
+      const content = getMessageContentForAgent(message); if (!content) continue;
+      responseInput.push({ role: 'user', content });
+      promptIncluded = promptIncluded || content === normalizedPrompt
+        || (message.expandedContent ?? message.content).trim() === normalizedPrompt
+        || message.content.trim() === normalizedPrompt;
+    } else if (isReplayInLane(message, lane) && message.providerReplay?.protocol === 'openai-responses') {
+      responseInput.push(...structuredClone(message.providerReplay.items));
+    } else {
+      const content = getMessageContentForAgent(message); if (content) responseInput.push({ role: 'assistant', content });
+    }
+  }
+  if (normalizedPrompt && !promptIncluded) responseInput.push({ role: 'user', content: normalizedPrompt });
+  return { input: responseInput, tools: toOpenAiResponsesTools(input.tools), lane };
+}
+
+function buildAnthropicAfterGoalReplay(input: {
+  replaySystem: AnthropicSystemTextBlock[]; replayMessages: AnthropicMessage[]; tools: DeepSeekFunctionTool[];
+  history: ChatMessage[]; prompt: string; sourceId: string; baseUrl: string;
+}): AnthropicMessagesRequestProjection {
+  const messages = structuredClone(input.replayMessages);
+  let promptIncluded = false;
+  const normalizedPrompt = input.prompt.trim();
+  const lane = { sourceId: input.sourceId, baseUrl: normalizeAnthropicMessagesLaneBaseUrl(input.baseUrl) };
+  for (const message of input.history) {
+    if (message.role === 'user') {
+      const content = getMessageContentForAgent(message); if (!content) continue;
+      messages.push({ role: 'user', content: [{ type: 'text', text: content }] });
+      promptIncluded = promptIncluded || content === normalizedPrompt
+        || (message.expandedContent ?? message.content).trim() === normalizedPrompt
+        || message.content.trim() === normalizedPrompt;
+    } else if (isAnthropicReplayInLane(message, lane) && message.providerReplay?.protocol === 'anthropic-messages') {
+      messages.push(...structuredClone(message.providerReplay.messages));
+    } else {
+      const content = getMessageContentForAgent(message); if (content) messages.push({ role: 'assistant', content: [{ type: 'text', text: content }] });
+    }
+  }
+  if (normalizedPrompt && !promptIncluded) messages.push({ role: 'user', content: [{ type: 'text', text: normalizedPrompt }] });
+  return { system: structuredClone(input.replaySystem), messages, tools: toAnthropicTools(input.tools), lane };
 }
 
 function buildAnthropicMessagesRequestProjection(input: {
@@ -415,6 +545,9 @@ export function normalizeChatCompletionsLaneBaseUrl(rawBaseUrl: string): string 
 
 function normalizeRequestProtocolVersion(value: number | undefined): number {
   const normalized = Number.isFinite(value) ? Math.floor(Number(value)) : LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION;
+  if (normalized >= GOAL_PROVIDER_REQUEST_PROTOCOL_VERSION) {
+    return GOAL_PROVIDER_REQUEST_PROTOCOL_VERSION;
+  }
   if (normalized >= CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION) {
     return CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION;
   }

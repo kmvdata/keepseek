@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { mergeDurations, normalizeCostLimit, normalizeDuration } from '../agent/executionPolicy';
+import { mergeCostLimits, mergeDurations, normalizeCostLimit, normalizeDuration } from '../agent/executionPolicy';
 import {
   AgentSettings,
   CompressionThreshold,
@@ -64,6 +64,11 @@ export const DEFAULT_MAX_IMPLICIT_SKILLS = 3;
 export const DEFAULT_BACKGROUND_MAX_ROUNDS = 5;
 export const DEFAULT_BACKGROUND_MAX_DURATION_MS = 0;
 export const DEFAULT_BACKGROUND_MAX_TOOL_CALLS = 60;
+export const DEFAULT_GOAL_MAX_ACTIVE_EXECUTION_MS = 0;
+export const DEFAULT_GOAL_MAX_COST = 0;
+export const DEFAULT_GOAL_MAX_MODEL_REQUESTS = 0;
+export const DEFAULT_GOAL_MAX_COMPLETION_REVIEWS = 0;
+export const DEFAULT_GOAL_AUTO_RESUME_ON_ACTIVATION = false;
 export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
   // DeepSeek 峰谷定价(自 2026-08-17 北京时间 00:00 起生效)。
   // 空闲档为常规价;高峰档(北京时间每日 9-12 点、14-18 点)价格更高。
@@ -377,6 +382,39 @@ export function getConfiguredBackgroundMaxDurationMs(): number {
   // survive migration; absence uses the new zero default.
   return mergeDurations(getConfiguredAgentMaxExecutionMs(),
     vscode.workspace.getConfiguration('keepseek').get('background.maxDurationMs', 0));
+}
+
+export function getConfiguredGoalMaxActiveExecutionMs(): number {
+  return mergeDurations(
+    getConfiguredAgentMaxExecutionMs(),
+    vscode.workspace.getConfiguration('keepseek').get('goal.maxActiveExecutionMs', DEFAULT_GOAL_MAX_ACTIVE_EXECUTION_MS)
+  );
+}
+
+export function getConfiguredGoalMaxCost(): number {
+  return mergeCostLimits(
+    getConfiguredAgentMaxCost(),
+    vscode.workspace.getConfiguration('keepseek').get('goal.maxCost', DEFAULT_GOAL_MAX_COST)
+  );
+}
+
+export function getConfiguredGoalMaxModelRequests(): number {
+  return normalizeIntegerInRange(
+    vscode.workspace.getConfiguration('keepseek').get('goal.maxModelRequests', DEFAULT_GOAL_MAX_MODEL_REQUESTS),
+    0, 1_000_000, DEFAULT_GOAL_MAX_MODEL_REQUESTS
+  );
+}
+
+export function getConfiguredGoalMaxCompletionReviews(): number {
+  return normalizeIntegerInRange(
+    vscode.workspace.getConfiguration('keepseek').get('goal.maxCompletionReviews', DEFAULT_GOAL_MAX_COMPLETION_REVIEWS),
+    0, 1_000_000, DEFAULT_GOAL_MAX_COMPLETION_REVIEWS
+  );
+}
+
+export function getConfiguredGoalAutoResumeOnActivation(): boolean {
+  return vscode.workspace.getConfiguration('keepseek')
+    .get<boolean>('goal.autoResumeOnActivation', DEFAULT_GOAL_AUTO_RESUME_ON_ACTIVATION);
 }
 
 export function getConfiguredBackgroundMaxToolCalls(): number {

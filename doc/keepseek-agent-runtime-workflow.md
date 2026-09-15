@@ -70,6 +70,14 @@ Provider 会完成这些本地准备：
 
 Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节。它只是把 UI、会话状态和底层服务串起来。
 
+### 2.2.1 `/goal` 创建与宿主边界
+
+Provider 在普通 `sendPrompt()` 之前用 `goals/goalCommand.ts` 重新解析 `/goal`。创建命令只打开独立 input dialog fragment，不产生 ChatMessage 或网络请求。开始操作把 objective、criteria、workspace-relative scope、required validations、预算、恢复策略和冻结 source/model/provider/endpoint 组装为 `GoalContractV1`；canonical serializer 固定字段/数组顺序与 LF，以完整序列化字节计算 hash。Goal ID、时间、绝对路径、凭据、lease owner 与 runtime 值不进入 Provider contract tail。
+
+确认后顺序为：持久化 Goal snapshot/journal → 将 session 显式升级到 Goal-only V10 → 取得 workspace lease/fencing → 写入请求 intent 和首个 v3 RunCheckpoint → 创建真实 Goal user message并持久化其完整 `providerContent` → 请求 Provider。任一步保存失败都禁止下一步。崩溃落在 Goal 与 session 两份存储之间时，只允许在仍为 `preparing`、没有 checkpoint/真实消息且冻结来源一致时确定性补齐 V10 metadata；checkpoint 已存在却找不到精确首次消息时 fail-closed。
+
+`GoalCoordinator` 是唯一续跑状态机；Provider 只做入口、事件转发和裁剪 view model。`GoalStore` 使用 index、不可变 snapshot 与 journal shard；`GoalLease` 为 file global storage 提供 heartbeat/expiry/fencing；`GoalReplay` 维护三协议内部 continuation；`GoalCompletionReviewService` 执行硬检查和隔离 reviewer。Goal 状态与 checkpoint、lease、隐藏 reviewer 输入或大 evidence 不发送给 Webview。
+
 ### 2.3 Prompt 引用展开
 
 发送给模型前，Provider 会先展开 prompt 中的引用。
@@ -172,9 +180,21 @@ Anthropic Messages 使用规范化的原生 Messages endpoint、`x-api-key` 和 
 
 上下文投影上限按 `maxProjectionTokens = contextWindow × forceRatio` 计算。选择 85% 缓存优先档时，`forceRatio=0.95` 会让投影上限增大，从而保留更多原始历史、尽量延后会破坏前缀缓存的摘要刷新；这是预期行为。
 
-模型、来源、provider 或 base URL 切换只迁移 provider/cache lane，并在这个本来就冷启动的边界升级请求序列化；既有 `contextCompression.summaries` 保留并继续参与 projection。新会话使用 v9。v1–v8 热会话维持旧 provider-visible bytes，直到缓存已冷或受控 rollover 迁移；历史里的旧预算文字不改写。V9 在 V8 evidence/epoch schema 上只新增 `keepseek_apply_patch` 和对应静态规则。
+模型、来源、provider 或 base URL 切换只迁移 provider/cache lane，并在这个本来就冷启动的边界升级请求序列化；既有 `contextCompression.summaries` 保留并继续参与 projection。普通新会话使用 v9。v1–v9 的 system、schema、fixture 与普通 replay 字节保持冻结。只有用户确认开始 Goal 时，该 session 在明确边界升级到 V10；V10 的 system prompt 与 tools schema 集合、顺序和字节等同 V9，tool schema version 仍为 9。V9 在 V8 evidence/epoch schema 上只新增 `keepseek_apply_patch` 和对应静态规则。
 
 同一逻辑任务只有真实审批、用户 Stop、Provider/存储失败、显式时间/费用上限、副作用结果不确定、来源/模型安全不匹配或持续无进展才停止。`agent.maxCost` 按计费币种分别统计，主任务、子代理、epoch 与恢复共享同一账本；无法获得可计价用量时正值上限采用 fail-closed。内部容量调度不映射为 blocked，不会追加“继续新一轮”消息。
+
+### 3.3.1 Goal attempt、完成判定与内部 replay
+
+Goal attempt 复用同一 `taskId`、ExecutionClock、分币种 cost ledger、模型请求账本、Context Epoch 和子代理根。模型无工具调用时 Runner 返回 `candidate_final`，完整保存候选文本和 native replay，但不把 checkpoint 标成普通 completed，也不把候选写入 ChatSession。模型请求预算包含重试、epoch summary、子代理、completion reviewer 与 model approval reviewer；active execution 统计 Provider/工具/子代理/宿主推进阶段的墙钟并集，所有 waiting/paused、Host 停止与检测到的休眠不计。
+
+完成分两层：宿主先检查 contract/revision、lease fencing、Trust、workspace/session/source/endpoint、授权、mutation watermark、TaskPlan、criteria/validation evidence，以及 ChangeSet、DraftRun、approval、tool result、subagent 全部收束；再发起独立无工具 completion reviewer。reviewer 只能返回严格的 `complete | continue | blocked`，绑定 candidate、完整 evidence manifest 与 mutation revision，无权批准副作用。commit 前重新获取安全快照；completed record、terminal replay 和 finalMessageId 原子持久化成功后，UI 才能显示完成并提交最终 assistant。
+
+`continue` 由 contract hash/revision、evidence manifest hash、mutation revision、未满足 criterion、缺失 validation、有界 TaskPlan/blocker 与单一 next step 生成确定性 control item。V10 活动 Goal 允许把该 control、审批和实际副作用结果写入 Goal replay，从而不等待下一条真实 user 消息；这是普通“审批结果追加到下一条真实 user message”约定的唯一例外，不接触聊天 UI。Chat Completions 精确续接 messages/tool rounds，Responses 精确续接 Items，Anthropic 精确续接 system/messages blocks；已消费 result key 和完成工具不会再次执行。Context Epoch 只携带有界 Goal hash/revision、账本、criteria、validation watermark、replay cursor、消费记录和 completion decision 引用。
+
+`ask` 在真实 Apply/Run 完成事件后继续；`model_review` 保留隔离 reviewer、actionHash/runtime 绑定与拒绝熔断；`delegate` 保留明确 `host_policy`。Pause 可取消 Provider 并在安全边界落地，不能中断 SafeFileEditor 原子提交；Stop 撤销易失队列和未消费 permit但保留 Draft/证据。Reload 时 running/pausing 先写为 interrupted，旧 approval runtime、permit、batch 与外部授权不复用；applying/uncertain 文件、terminal-unknown DraftRun 或 uncertain tool result 进入 needs_attention。旧 BackgroundRun 验证修复入口仅构造 Goal preset。
+
+Goal 只会在 KeepSeek 的 VS Code Extension Host 运行时推进；VS Code 关闭、Reload 或设备休眠期间不会执行，重新激活后可恢复。默认 `manual`；`auto_on_activation` 也只在 `onView:keepseek.chat` 再次激活、完整上下文匹配且没有审批等待/不确定副作用时恢复，未增加 `onStartupFinished` 或外部 daemon。
 
 ### 3.4 DSML 工具调用兜底
 

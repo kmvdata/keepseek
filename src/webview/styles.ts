@@ -751,6 +751,27 @@ export function getStyles(): string {
       background: var(--vscode-sideBar-background, var(--vscode-editor-background));
     }
 
+    .goal-region {
+      display: grid;
+      gap: 7px;
+      margin: 6px var(--keepseek-edge-padding) 0;
+      padding: 10px;
+      border: 1px solid var(--vscode-focusBorder, var(--vscode-panel-border));
+      border-radius: 7px;
+      background: color-mix(in srgb, var(--vscode-editor-background) 92%, var(--vscode-textLink-foreground));
+    }
+    .goal-card-heading, .goal-card-controls, .goal-amend-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .goal-card-heading { justify-content: space-between; }
+    .goal-card-status { color: var(--vscode-descriptionForeground); font-size: 11px; }
+    .goal-card-objective { font-size: 12px; overflow-wrap: anywhere; }
+    .goal-card-meta, .goal-card-reason { color: var(--vscode-descriptionForeground); font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+    .goal-card-criteria { display: grid; gap: 3px; margin: 0; padding-left: 20px; font-size: 11px; }
+    .goal-card-criteria li.is-satisfied { color: var(--vscode-testing-iconPassed); }
+    .goal-card-criteria li.is-blocked { color: var(--vscode-errorForeground); }
+    .goal-confirm-criterion { min-height: 20px; padding: 1px 6px; font-size: 10px; }
+    .goal-card-controls button { min-height: 22px; padding: 2px 7px; font-size: 10px; }
+    .goal-amend-row input { min-width: 0; flex: 1; border: 1px solid var(--vscode-input-border); border-radius: 4px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); padding: 4px 7px; font-size: 11px; }
+
     .background-main,
     .background-controls {
       display: flex;

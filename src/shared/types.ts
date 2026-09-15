@@ -420,6 +420,14 @@ export interface DraftRun extends DraftRunProposal {
   outputTruncated: boolean;
   omittedOutputBytes: number;
   error?: string;
+  /** Backward-compatible recovery metadata distinguishes a command whose
+   * terminal state is unknown from an ordinary command failure. */
+  interruption?: {
+    reason: 'extension_restart';
+    previousStatus: 'approved' | 'running';
+    terminalUnknown: boolean;
+    recordedAt: string;
+  };
   resultBoundMessageId?: string;
   /** Set only by the explicit "run and continue" user action. */
   autoContinueRequested?: boolean;
@@ -458,6 +466,8 @@ export interface ChatMessage {
   toolRounds?: AgentToolRound[];
   /** Provider-native replay, valid only inside the recorded protocol/source/endpoint lane. */
   providerReplay?: ProviderReplayState;
+  /** V10-only exact Goal continuation state. Never exposed to the Webview. */
+  goalReplay?: import('../agent/goals/goalReplay').GoalProviderReplayStateV1;
 }
 
 export type OpenAiResponsesReplayJsonValue =
@@ -1213,6 +1223,8 @@ export interface AgentRequest {
   taskClock?: import('../agent/executionPolicy').ExecutionClock;
   /** Runtime-only shared cost ledger; excluded from persisted request bytes. */
   taskCostBudget?: import('../agent/executionPolicy').ExecutionCostBudget;
+  /** Runtime-only request ledger shared with subagents and hidden model lanes. */
+  taskModelRequestBudget?: import('../agent/executionPolicy').ModelRequestBudget;
   prompt: string;
   model: KeepseekModel;
   settings: AgentSettings;
@@ -1239,6 +1251,14 @@ export interface AgentRequest {
   repairLoop?: RepairLoopState;
   executionLimits?: AgentExecutionLimits;
   backgroundRunId?: string;
+  /** V10-only persistent Goal metadata. It is runtime/checkpoint authority, not a dynamic system prompt. */
+  goal?: {
+    mode: 'persistent';
+    goalId: string;
+    contractHash: string;
+    revision: number;
+    preserveTaskRuntime: boolean;
+  };
   /** Credentials frozen once at run start so summaries and the main request cannot diverge. */
   sourceConfig?: ModelSourceConfigSnapshot;
   /** Undefined preserves the byte-stable main-agent system prompt. */
@@ -1269,6 +1289,8 @@ export interface AgentExecutionLimits {
   maxCost?: number;
   timeLimitSource?: string;
   maxRepairIterations?: number;
+  /** Goal-wide Provider request ceiling. Zero or undefined means unlimited. */
+  maxModelRequests?: number;
 }
 
 export interface ActivatedSkill {
@@ -1309,6 +1331,8 @@ export interface AgentResponse {
   /** 本 run 内工具轮的原样字节快照，调用方持久化到 assistant 消息后跨轮还原 */
   toolRounds?: AgentToolRound[];
   providerReplay?: ProviderReplayState;
+  /** Present only for a persistent Goal attempt. Ordinary runs preserve legacy final behavior. */
+  goalOutcome?: 'needs_tool_or_side_effect' | 'waiting' | 'candidate_final' | 'blocked' | 'failed';
   /** A reviewed in-loop effect reached an append-only user-message boundary. */
   approvalContinuationRequired?: boolean;
   /** Present only when reviewer unavailability or a refusal fuse stops continuation. */

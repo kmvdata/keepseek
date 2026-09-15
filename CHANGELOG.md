@@ -1,6 +1,9 @@
 # 更新日志
 
 ## 0.3.1
+- 新增 `/goal` 持久目标：先确认目标、验收条件、范围、验证、预算和恢复策略，再在同一 logical task 中跨模型请求、Context Epoch、子代理、ChangeSet、DraftRun 与验证循环持续推进；候选 final 只有通过宿主硬检查和隔离 completion reviewer 才会完成。
+- Goal 使用独立的版本化 snapshot/journal Store、workspace 排他 lease 与 fencing token。Reload/崩溃后默认手动恢复，旧审批 runtime、permit、批次意图和临时外部授权不复活；不确定副作用进入需处理状态且不会自动重跑。`auto_on_activation` 只在 KeepSeek 再次激活且上下文完全匹配时生效，Host 关闭或设备休眠期间不执行。
+- 增加 Goal-only 请求协议 V10 和 Chat Completions、OpenAI Responses、Anthropic Messages 三协议内部 replay；V10 的 system/tools 字节与 V9 相同，tool schema 仍为 V9，普通会话和 V1–V9 历史字节保持不变。旧后台验证修复入口迁移为预填 Goal。
 - 大文件编辑能力升级：现在修改超过 200 KB 的代码文件时，只记录和处理实际变化的几行，不再因为文件整体过大而无法创建或采纳修改。
 - 修改审核与回滚更可靠：采纳前后都会核对文件内容，只有确认结果已经正确写入后才显示成功；扩展重启后仍可继续判断修改状态并精确撤销。若文件在审核期间或采纳后被其它程序改动，KeepSeek 会停止操作，避免覆盖新内容。
 - 一次修改可以安全包含多个文件的新增、更新、删除和移动，并继续归入同一个待确认修改组；删除文件仍需单独确认，部分文件失败时会明确显示结果，不会把整组误报为全部成功。

@@ -39,6 +39,8 @@ export interface AgentRequestCoordinatorInput {
   assistantMessageId?: string;
   repairLoop?: AgentRequest['repairLoop'];
   executionLimits?: AgentRequest['executionLimits'];
+  checkpoint?: AgentRequest['checkpoint'];
+  goal?: AgentRequest['goal'];
   backgroundRunId?: string;
   sourceConfig?: AgentRequest['sourceConfig'];
   signal?: AbortSignal;
@@ -109,6 +111,8 @@ export class AgentRequestCoordinator {
         ? { ...input.repairLoop, pendingDraftEditIds: [...input.repairLoop.pendingDraftEditIds] }
         : undefined,
       executionLimits: input.executionLimits ? { ...input.executionLimits } : undefined,
+      checkpoint: input.checkpoint ? structuredClone(input.checkpoint) : undefined,
+      goal: input.goal ? { ...input.goal } : undefined,
       backgroundRunId: input.backgroundRunId,
       sourceConfig: input.sourceConfig ? { ...input.sourceConfig } : undefined,
       signal: input.signal
@@ -247,7 +251,8 @@ function cloneChatMessage(message: ChatMessage): ChatMessage {
       toolCalls: round.toolCalls.map((call) => ({ ...call, function: { ...call.function } })),
       toolResults: round.toolResults.map((result) => ({ ...result }))
     })),
-    providerReplay: message.providerReplay ? structuredClone(message.providerReplay) : undefined
+    providerReplay: message.providerReplay ? structuredClone(message.providerReplay) : undefined,
+    goalReplay: message.goalReplay ? structuredClone(message.goalReplay) : undefined
   };
 }
 

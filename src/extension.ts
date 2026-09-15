@@ -64,7 +64,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('keepseek')) {
-        provider.refreshConfiguration();
+        void provider.refreshConfiguration();
       }
     }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
@@ -75,6 +75,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void provider.refreshBackgroundRunAvailability();
     }),
     vscode.workspace.onDidSaveTextDocument((document) => {
+      provider.notifyWorkspaceFilesChanged([document.uri], 'workspace_file_saved');
       if (/(?:^|\/)package\.json$/u.test(document.uri.path)) {
         void provider.refreshBackgroundRunAvailability();
       }
@@ -86,14 +87,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     vscode.workspace.onDidCreateFiles((event) => {
+      provider.notifyWorkspaceFilesChanged(event.files, 'workspace_files_created');
       if (event.files.some((uri) => /(?:^|\/)\.keepseek\/memory\.json$/u.test(uri.path))) {
         void provider.refreshLegacyMemoryMigration();
       }
     }),
     vscode.workspace.onDidDeleteFiles((event) => {
+      provider.notifyWorkspaceFilesChanged(event.files, 'workspace_files_deleted');
       if (event.files.some((uri) => /(?:^|\/)\.keepseek\/memory\.json$/u.test(uri.path))) {
         void provider.refreshLegacyMemoryMigration();
       }
+    }),
+    vscode.workspace.onDidRenameFiles((event) => {
+      provider.notifyWorkspaceFilesChanged(event.files.flatMap((file) => [file.oldUri, file.newUri]), 'workspace_files_renamed');
     })
   );
 }

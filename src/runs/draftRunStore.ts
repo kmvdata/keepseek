@@ -92,10 +92,17 @@ export class DraftRunStore {
           continue;
         }
         if (draftRun.status === 'approved' || draftRun.status === 'running') {
+          const previousStatus = draftRun.status;
           draftRun.status = 'failed';
           draftRun.error = 'DraftRun was interrupted by an extension restart and was not resumed.';
           draftRun.finishedAt = new Date().toISOString();
           draftRun.updatedAt = draftRun.finishedAt;
+          draftRun.interruption = {
+            reason: 'extension_restart',
+            previousStatus,
+            terminalUnknown: previousStatus === 'running',
+            recordedAt: draftRun.finishedAt
+          };
           repairedInterruptedRun = true;
         }
         this.draftRuns.set(draftRun.id, draftRun);
@@ -685,7 +692,7 @@ function cloneProposal(proposal: DraftRunProposal): DraftRunProposal {
 }
 
 function cloneDraftRun(draftRun: DraftRun): DraftRun {
-  return { ...draftRun, ...cloneProposal(draftRun) };
+  return { ...draftRun, ...cloneProposal(draftRun), interruption: draftRun.interruption ? { ...draftRun.interruption } : undefined };
 }
 
 function normalizeStoredDraftRun(value: unknown): DraftRun | undefined {
@@ -713,6 +720,16 @@ function normalizeStoredDraftRun(value: unknown): DraftRun | undefined {
     autoContinueRequested: record.autoContinueRequested === true || undefined,
     autoContinueClaimedAt: typeof record.autoContinueClaimedAt === 'string'
       ? record.autoContinueClaimedAt
+      : undefined,
+    interruption: record.interruption?.reason === 'extension_restart'
+      && (record.interruption.previousStatus === 'approved' || record.interruption.previousStatus === 'running')
+      && typeof record.interruption.recordedAt === 'string'
+      ? {
+          reason: 'extension_restart',
+          previousStatus: record.interruption.previousStatus,
+          terminalUnknown: record.interruption.previousStatus === 'running' && record.interruption.terminalUnknown === true,
+          recordedAt: record.interruption.recordedAt
+        }
       : undefined
   } as DraftRun);
 }

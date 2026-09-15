@@ -27,6 +27,8 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     sourceStore: ModelSourceStore;
     store: ApprovalReviewStore;
     onUsage?: (event: UsageEvent) => void;
+    beforeModelRequest?: (request: ApprovalReviewRequest, modelContext: Required<ApprovalReviewerModelContext>) => Promise<void>;
+    afterModelRequest?: (request: ApprovalReviewRequest, usageObserved: boolean) => Promise<void>;
     requestText?: typeof requestApprovalReviewText;
     circuitBreaker?: ApprovalCircuitBreaker;
   }) {}
@@ -73,6 +75,8 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
+        await this.options.beforeModelRequest?.(request, resolved);
+        let usageObserved = false;
         const raw = await (this.options.requestText ?? requestApprovalReviewText)({
           model: resolved.model,
           sourceConfig: resolved.sourceConfig,
@@ -80,8 +84,9 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
           userPrompt: serialized,
           language: request.responseLanguage,
           signal,
-          onUsage: this.options.onUsage
+          onUsage: (event) => { usageObserved = true; this.options.onUsage?.(event); }
         });
+        await this.options.afterModelRequest?.(request, usageObserved);
         const decision = parseApprovalReviewerJson(raw);
         const record = await this.options.store.add({
           sessionId: request.sessionId,

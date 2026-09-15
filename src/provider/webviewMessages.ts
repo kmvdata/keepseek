@@ -26,6 +26,19 @@ export type WebviewMessage =
   | { type: 'loadOlderMessages' }
   | { type: 'refreshBalance' }
   | { type: 'sendPrompt'; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
+  | {
+      type: 'startGoal'; objective: string;
+      acceptanceCriteria: Array<{ text: string; type: 'validation' | 'workspace_state' | 'artifact' | 'manual'; evidenceRequirement: string }>;
+      includeScope: string[]; excludeScope: string[]; requiredValidations: SafeNpmScript[];
+      maxActiveExecutionMs: number; maxCost: number; maxModelRequests: number; maxCompletionReviews: number;
+      resumePolicy: 'manual' | 'auto_on_activation'; sourceId: string; modelId: string;
+    }
+  | { type: 'goalPause' }
+  | { type: 'goalResume' }
+  | { type: 'goalStop' }
+  | { type: 'goalClear' }
+  | { type: 'goalAmend'; instruction: string }
+  | { type: 'goalConfirmCriterion'; criterionId: string }
   | { type: 'editUserPrompt'; messageId: string; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'abortPrompt' }
   | { type: 'continueAgentTask'; messageId: string }

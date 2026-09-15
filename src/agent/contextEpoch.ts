@@ -81,6 +81,19 @@ export interface ContextEpochCheckpointInput {
     maxCost?: number;
   };
   approvalResults?: readonly { toolCallId: string; toolName: string; status: string }[];
+  goal?: {
+    contractHash: string;
+    revision: number;
+    activeExecutionMs: number;
+    costByCurrency: Record<string, number>;
+    modelRequests: number;
+    completionReviews: number;
+    criteria: Array<{ id: string; status: string; evidenceManifestHash?: string }>;
+    validationMutationRevision: number;
+    replayHash?: string;
+    resultConsumptionHash: string;
+    completionDecisionRef?: string;
+  };
 }
 
 export interface ContextEpochSeedInput extends ContextEpochCheckpointInput {
@@ -165,6 +178,7 @@ function createEpochHostState(
 ) {
   return {
     runtime: input.runtimeState,
+    goal: input.goal,
     taskPlan,
     completedItems: taskPlan.steps.filter((step) => step.status === 'completed' || step.status === 'skipped'),
     incompleteItems: taskPlan.steps.filter((step) => step.status === 'pending' || step.status === 'in_progress' || step.status === 'blocked'),

@@ -49,6 +49,21 @@ export class ExecutionCostBudget {
   }
 }
 
+/** Runtime-only request ledger shared by a root attempt and every descendant.
+ * The persisted root checkpoint restores its monotonically increasing count. */
+export class ModelRequestBudget {
+  private count: number;
+  public constructor(public readonly limit: number, used = 0) {
+    this.count = Number.isSafeInteger(used) && used >= 0 ? used : 0;
+  }
+  public reserve(): boolean {
+    if (this.limit > 0 && this.count >= this.limit) return false;
+    this.count += 1;
+    return true;
+  }
+  public get used(): number { return this.count; }
+}
+
 function compareCurrencyEntries([left]: [string, number], [right]: [string, number]): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }

@@ -11,7 +11,7 @@ import { SafeFileEditor } from '../src/edits/safeFileEditor';
 import { getScript } from '../src/webview/script';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 import { getVisibleMessages, normalizeStoredSessions } from '../src/sessions/chatSessionStore';
-import { ExecutionClock, ExecutionCostBudget, abortable, mergeCostLimits, mergeDurations, normalizeCostLimit, normalizeDuration } from '../src/agent/executionPolicy';
+import { ExecutionClock, ExecutionCostBudget, ModelRequestBudget, abortable, mergeCostLimits, mergeDurations, normalizeCostLimit, normalizeDuration } from '../src/agent/executionPolicy';
 import { checkpointCopy, createRunCheckpoint, normalizeRunCheckpoint, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import { AgentRunner } from '../src/agent/runner';
 import { BackgroundRunCoordinator } from '../src/agent/backgroundRunCoordinator';
@@ -53,6 +53,17 @@ describe('long-running Agent execution and safe recovery', () => {
     assert.deepEqual(budget.exhausted, { currency: '$', cost: 0.5, limit: 0.5 });
     const restored = new ExecutionCostBudget(0.5, budget.snapshot());
     assert.deepEqual(restored.exhausted, budget.exhausted);
+  });
+
+  it('shares and restores one model-request budget across root, retry, reviewer, and subagent callers', () => {
+    const budget = new ModelRequestBudget(4, 1);
+    assert.equal(budget.reserve(), true);
+    assert.equal(budget.reserve(), true);
+    assert.equal(budget.used, 3);
+    const restored = new ModelRequestBudget(4, budget.used);
+    assert.equal(restored.reserve(), true);
+    assert.equal(restored.reserve(), false);
+    assert.equal(restored.used, 4);
   });
 
   it('runs beyond 10, 30, 60 minutes; excludes pauses and host suspension; parallel time counts once', () => {

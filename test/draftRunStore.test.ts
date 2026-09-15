@@ -298,6 +298,10 @@ test('persisted approved or running DraftRuns fail closed after restart and neve
     const restored = store.get(running.id);
     assert.equal(restored?.status, 'failed');
     assert.match(restored?.error ?? '', /interrupted by an extension restart/u);
+    assert.deepEqual(restored?.interruption && {
+      previousStatus: restored.interruption.previousStatus,
+      terminalUnknown: restored.interruption.terminalUnknown
+    }, { previousStatus: 'running', terminalUnknown: true });
     assert.equal(executor.executeCount, 0);
   } finally {
     await store.flush();

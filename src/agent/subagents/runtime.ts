@@ -715,6 +715,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         },
         taskClock: input.context.parentRequest.taskClock,
         taskCostBudget: input.context.parentRequest.taskCostBudget,
+        taskModelRequestBudget: input.context.parentRequest.taskModelRequestBudget,
         signal: abort.signal
       }, {
         onCheckpoint: async (checkpoint) => {
@@ -1152,6 +1153,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         },
         taskClock: input.input.context.parentRequest.taskClock,
         taskCostBudget: input.input.context.parentRequest.taskCostBudget,
+        taskModelRequestBudget: input.input.context.parentRequest.taskModelRequestBudget,
         signal: input.input.context.signal
       }, { onUsage: input.onUsage });
       return repaired.message;

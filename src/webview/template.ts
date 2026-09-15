@@ -99,6 +99,21 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
       <div class="context-bar-inner" id="contextBar"></div>
     </div>
 
+    <section id="goalRegion" class="goal-region hidden" aria-labelledby="goalCardTitle">
+      <div class="goal-card-heading"><strong id="goalCardTitle" data-i18n="goalStatusTitle">持久 Goal</strong><span id="goalCardStatus" class="goal-card-status"></span></div>
+      <div id="goalCardObjective" class="goal-card-objective"></div>
+      <div id="goalCardMeta" class="goal-card-meta"></div>
+      <ol id="goalCardCriteria" class="goal-card-criteria"></ol>
+      <div id="goalCardReason" class="goal-card-reason hidden"></div>
+      <div class="goal-card-controls">
+        <button id="goalPause" type="button" class="secondary" data-i18n="goalPause">暂停</button>
+        <button id="goalResume" type="button" data-i18n="goalResume">恢复 Goal</button>
+        <button id="goalStop" type="button" class="secondary" data-i18n="goalStop">停止</button>
+        <button id="goalClear" type="button" class="secondary" data-i18n="goalClear">清理</button>
+      </div>
+      <div id="goalAmendRow" class="goal-amend-row"><input id="goalAmendInput" type="text" maxlength="20000" data-i18n-placeholder="goalAmendPlaceholder" placeholder="追加修订（不重写原目标）"><button id="goalAmend" type="button" class="secondary" data-i18n="goalAmend">修订</button></div>
+    </section>
+
     <section id="backgroundRegion" class="background-region hidden" aria-label="后台任务" data-i18n-aria-label="backgroundRun">
       <div class="background-main">
         <span id="backgroundLabel" class="background-label" data-i18n="backgroundRun">后台任务</span>

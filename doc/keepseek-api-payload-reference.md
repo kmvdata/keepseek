@@ -162,7 +162,31 @@ Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使�
 
 最终 output limit 会被 learned effective window 再次收紧，工具选择轮、最终回答轮和摘要轮使用不同的动态输出预留。Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tokens`，Anthropic 写入 `max_tokens`；它们不会互相注入协议专属字段。Provider 的真实 input usage 按来源/endpoint/model 校准估算比例；context-too-long 会降低 learned window 并重建 epoch，这些校准值不进入 system/history。名称猜测与人工 metadata 只是声明起点，不是终止依据。
 
-模型切换会迁移 provider/cache lane，但不会删除或强制重建语义摘要。`HistorySummary.modelId` 保留生成 provenance；`requestProtocolVersion` 只表示序列化/schema 兼容版本，不表示模型能力等级。当前协议/Tool Schema 为 v9：新会话固定包含 V8 的 `keepseek_read_evidence` 和 V9 的 `keepseek_apply_patch`，工具按名稳定排序；v1–v8 热会话保持原 provider-visible bytes，只在缓存已冷或受控 epoch rollover 边界迁移，历史消息和旧预算文本不改写。rollover 的完整宿主权威状态保存为可分页 checkpoint evidence；Provider seed 只带最近条目、总量/hash 和 manifest `evidenceRef`，因此长期任务的恢复前缀不会随累计工具次数无限增长。
+模型切换会迁移 provider/cache lane，但不会删除或强制重建语义摘要。`HistorySummary.modelId` 保留生成 provenance；`requestProtocolVersion` 只表示序列化/schema 兼容版本，不表示模型能力等级。普通会话当前协议/Tool Schema 为 v9：新会话固定包含 V8 的 `keepseek_read_evidence` 和 V9 的 `keepseek_apply_patch`，工具按名稳定排序；v1–v9 的 system、tools、fixture 和普通 replay 字节保持冻结，历史消息和旧预算文本不改写。rollover 的完整宿主权威状态保存为可分页 checkpoint evidence；Provider seed 只带最近条目、总量/hash 和 manifest `evidenceRef`，因此长期任务的恢复前缀不会随累计工具次数无限增长。
+
+### 2.4 Goal-only V10 payload 与 replay
+
+只有用户在 `/goal` 确认面板点击“开始 Goal”时，该 session 才升级到 request protocol V10。V10 不增加模型工具，tool schema version 仍为 V9；`getAgentSystemPrompt(v10)` 与 `getAgentTools(v10)` 的序列化字节分别等同 V9。首次 Provider user content 是已持久化的原始/引用展开内容加确定性 tail：
+
+```text
+/goal <用户确认前可见的目标与引用>
+
+<keepseek_goal_contract_v1>
+{"version":1,"canonicalHash":"<hash>","objective":"...","amendments":[],"acceptanceCriteria":[...],"includeScope":[...],"excludeScope":[...],"requiredValidations":[...],"completionPolicy":"host_and_reviewer","budgets":{...},"requestProtocolVersion":10,"toolSchemaVersion":9}
+</keepseek_goal_contract_v1>
+```
+
+tail 不含本地 Goal ID、时间戳、凭据、绝对路径、source ID、endpoint hash、runtime profile、lease owner 或 fencing token；这些只在 canonical host contract/snapshot 中。该完整 user 字节在首个 v3 checkpoint 和 `ChatMessage.providerContent` 中各自冻结，恢复时要求精确匹配，不重新 trim、格式化或归档改写。
+
+模型无 tool call 时产生的候选 assistant 不立刻写入聊天历史。若 completion hard check/reviewer 要求继续，宿主生成 canonical `keepseek_goal_control`：仅含 contract hash/revision、完整 evidence manifest hash、workspace mutation revision、排序后的未满足 criterion/validation、有界 TaskPlan blocker 与一个确定性 next step。它进入下列内部 replay，不构造 UI user message：
+
+- Chat Completions：在持久 checkpoint `messages` 中追加 candidate assistant 和 control user，既有 tool round 原字节保留；
+- OpenAI Responses：在 `input/replayItems` 中追加原生 user Item；
+- Anthropic Messages：在 `messages/replayMessages` 中追加原生 user text block，system、thinking/signature、redacted data 和 tool blocks 顺序不变。
+
+V10 活动 Goal 还可用同一机制持久化审批结果与实际副作用结果，并以 result consumption key 保证一次消费。这是 Goal-only 例外；非 Goal 会话继续把审批/DraftRun 结果追加到下一条真实 user message。completed 提交先持久化一个带 bytes hash 的 terminal Goal replay，再创建最终 assistant ChatMessage。下一条真实用户消息以该 replay 为三协议锚点，只追加终态之后的真实消息；切换 protocol/source/endpoint 时不能误用旧锚点。
+
+Goal checkpoint/Context Epoch 只投影有界 authority：contract hash/revision、active execution/分币种费用/模型请求/completion review 账本、criteria 状态、validation mutation watermark、replay cursor、已消费 result key 与 completion decision 引用；大 evidence 正文继续留在 task-scoped evidence store。Goal ID、lease 和隐藏 reviewer 输入不进入 Provider 或 Webview。
 
 ## 3. 稳定上下文与当前用户 prompt 的组装
 

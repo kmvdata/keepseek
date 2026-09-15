@@ -28,6 +28,7 @@ import {
   CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
   PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION
 } from '../agent/providerRequestProjection';
+import { normalizeGoalReplay } from '../agent/goals/goalReplay';
 import { getConfiguredKeepseekLanguage, localize, type KeepseekLanguage } from '../shared/i18n';
 import { isRecord } from '../shared/errors';
 import { normalizeContextUsageEstimateValue } from '../agent/contextUsage';
@@ -567,6 +568,7 @@ export function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
     runCheckpoint,
     expandedContent: _expandedContent,
     providerReplay: _providerReplay,
+    goalReplay: _goalReplay,
     toolRounds: _toolRounds,
     ...message
   }) => ({
@@ -741,7 +743,8 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     runCheckpoint: normalizeRunCheckpoint(value.runCheckpoint),
     runDetails: normalizeRunDetails(value.runDetails),
     toolRounds: normalizeAgentToolRounds(value.toolRounds),
-    providerReplay: normalizeProviderReplay(value.providerReplay)
+    providerReplay: normalizeProviderReplay(value.providerReplay),
+    goalReplay: normalizeGoalReplay(value.goalReplay)
   };
 }
 

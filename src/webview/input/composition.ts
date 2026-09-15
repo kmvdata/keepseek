@@ -19,11 +19,13 @@ import * as accountSettingsRender from './dialogs/accountSettings/render';
 import * as historySettingsScript from './dialogs/historySettings/script';
 import * as aboutScript from './dialogs/about/script';
 import * as createSkillScript from './dialogs/createSkill/script';
+import * as goalDialogScript from './dialogs/goal/script';
 import * as composerTemplate from './composer/template';
 import * as commandMenuTemplate from './commandMenu/template';
 import * as referenceTemplate from './references/template';
 import * as usageTemplate from './usage/template';
 import * as backgroundRunTemplate from './dialogs/backgroundRun/template';
+import * as goalDialogTemplate from './dialogs/goal/template';
 import * as accountSettingsTemplate from './dialogs/accountSettings/template';
 import * as historySettingsTemplate from './dialogs/historySettings/template';
 import * as aboutTemplate from './dialogs/about/template';
@@ -38,6 +40,7 @@ import * as subagentProgressStyles from './usage/subagentProgressStyles';
 import * as dialogStyles from './dialogs/sharedStyles';
 import * as accountSettingsStyles from './dialogs/accountSettings/styles';
 import * as aboutStyles from './dialogs/about/styles';
+import * as goalDialogStyles from './dialogs/goal/styles';
 
 export interface WebviewFragment {
   readonly id: string;
@@ -144,6 +147,7 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   historySettingsScript.historySettingsOverlayBindingsFragment,
   aboutScript.aboutOverlayBindingsFragment,
   createSkillScript.createSkillOverlayBindingsFragment,
+  goalDialogScript.goalDialogScriptFragment,
   dragDrop.dragDropBindingsFragment,
   referenceChips.referenceHostMessageFragment,
   composerScript.composerPublicApiFragment
@@ -167,6 +171,7 @@ export const INPUT_STYLE_FRAGMENTS = [
   accountSettingsStyles.accountSettingsStatusStylesFragment,
   accountSettingsStyles.accountSettingsStylesFragment,
   aboutStyles.aboutStylesFragment,
+  goalDialogStyles.goalDialogStylesFragment,
   dialogStyles.dialogFieldStylesFragment,
   accountSettingsStyles.accountSettingsSecretStylesFragment,
   dialogStyles.dialogFooterStylesFragment,
@@ -179,6 +184,7 @@ export const INPUT_TEMPLATE_FRAGMENTS = [
   referenceTemplate.referenceMenuTemplateFragment,
   usageTemplate.usageTemplateFragment,
   backgroundRunTemplate.backgroundRunTemplateFragment,
+  goalDialogTemplate.goalDialogTemplateFragment,
   accountSettingsTemplate.accountSettingsTemplateFragment,
   historySettingsTemplate.historySettingsTemplateFragment,
   aboutTemplate.aboutTemplateFragment,

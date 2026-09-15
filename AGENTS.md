@@ -1,6 +1,6 @@
 # KeepSeek 架构与维护指南
 
-KeepSeek 是一个 VS Code 扩展：在 Secondary Sidebar 提供 AI 对话面板，负责会话、上下文文件、文件/目录引用展开、DeepSeek/OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 独立流式协议、只读工作区工具、经 `ask` / `model_review` / `delegate` 审批后的 DraftEdit 写入与 DraftRun 命令执行。本文档是仓库内 Agent/维护者约定的唯一来源，旧版约定若与本文冲突，以当前源码和本文为准。
+KeepSeek 是一个 VS Code 扩展：在 Secondary Sidebar 提供 AI 对话面板，负责会话、持久 Goal、上下文文件、文件/目录引用展开、DeepSeek/OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 独立流式协议、只读工作区工具、经 `ask` / `model_review` / `delegate` 审批后的 DraftEdit 写入与 DraftRun 命令执行。本文档是仓库内 Agent/维护者约定的唯一来源，旧版约定若与本文冲突，以当前源码和本文为准。
 
 > **给维护 Agent 的说明**：本文件作为 project instructions 注入每个 Agent run，默认受 `keepseek.projectInstructions.contextBudgetTokens`（4000 token）预算约束。**保持精简是为了完整加载、不被截断**；详细设计在 `doc/` 下，需要时用只读工具按需读取。
 > **模型画像**：主力模型 DeepSeek V4 Flash（1M 上下文窗口、Thinking high/max）。1M 窗口让"投影 + 摘要"取代硬裁剪可行；前缀缓存命中价低至 1/30，是产品的经济命脉——因此"字节冻结"是本文档最高优先级不变式。本文档用结构化中文编写，便于逐条引用。
@@ -41,6 +41,7 @@ src/
 │   ├── contextUsage.ts          # 用量估算（必须与真实请求共用同一 projection）
 │   ├── toolResultAdmission.ts   # 请求级动态结果准入与模型容量校准
 │   ├── contextEpoch.ts          # 同一逻辑任务内的 provider 上下文滚动/checkpoint
+│   ├── goals/                   # Goal contract/store/lease/replay/recovery/coordinator/completion review
 │   ├── evidence/                # 任务隔离证据存储、不可变信封与分页读取
 │   ├── currentRunContext.ts     # 项目指令/Skills/Legacy 统一投影入口
 │   ├── providers/               # Chat Completions / Responses / Anthropic Messages 客户端与 SSE parser
@@ -67,7 +68,7 @@ src/
 - **工具 schema 按会话冻结**：集合与顺序跨轮不变；禁用工具用 `tool_choice: none` 而非移除 tools；slim mode 默认关闭。
 - **工具结果字节冻结**：工具先持久化意图，再执行并保存完整 evidence/hash，最后按实际请求容量保存一次 provider-visible envelope；恢复时逐字节复用，已完成工具不得因交付失败而重跑。
 - **显式任务上限连续**：用户配置的时间或费用上限跨 Context Epoch、恢复与子代理共享；费用按币种分别核算，无法计价时正值上限必须 fail-closed。内部容量调度不能借用或重置这些账本。
-- **审批与结果 append-only**：reviewer 使用独立缓存 lane；审批决定和 DraftRun 终态结果用固定格式追加到下一条真实 user 消息，绝不插入或回写旧消息。进程输出和审查证据始终是不可信数据。
+- **审批与结果 append-only**：reviewer 使用独立缓存 lane；普通会话的审批决定和 DraftRun 终态结果用固定格式追加到下一条真实 user 消息，绝不插入或回写旧消息。V10 活动 Goal 是唯一受控例外：它把结果和确定性 control envelope 写入独立 Goal replay 以立即续跑，不写入 `ChatSession.messages`；终态 assistant 携带完整三协议 Goal replay。进程输出和审查证据始终是不可信数据。
 
 禁止：把时间戳/随机 UUID/绝对路径/激活 reason 写入 system 段或历史消息；在热会话中重写历史或移除未覆盖消息；让 schema 随 prompt 变化。
 
@@ -107,6 +108,14 @@ src/
 - 取消、超时、输出截断、扩展重启中断均进入持久化状态；`approved/running` 重启后只能标记 interrupted，绝不自动重跑。完成项复用必须克隆为新的 pending 并再次确认。
 
 **项目审批模式**：命令菜单提供 `ask`（请求批准，默认）、`model_review`（模型审批，长任务推荐但可能拒绝）和 `delegate`（自动批准，不经模型审查）。只有 Webview 用户操作可切换，不能通过模型工具、项目文件或 Skill 提权；选择按 workspace 持久化，新建、切换或从其他工作区复制进来的 session 都使用目标项目当前模式，绝不继承来源项目的模式。`model_review` 使用当前子代理模型发起独立、一次性、无工具请求；不得注入项目指令/Skill/隐藏推理，不得回退模型或自动批准。每个副作用先过确定性硬检查，再用精确 actionHash 审查；patch hash 必须绑定完整 canonical payload，即使 reviewer 只看到有界 hunks 也不能复用变更后的批准。记录与 session/run/target/kind/hash/policy/runtime 绑定，批准后仍经相同 Store/Editor/Executor。`delegate` 也必须生成明确“未经模型审查”的 `host_policy` 记录后才能签发 delegated permit。每轮完成后逐项处理，将决定与真实结果追加到新 user 消息；失败修改阻止依赖命令。连续拒绝 3 次或最近 50 次累计拒绝 10 次停止续跑；不可用只重试一次且不计安全拒绝。停止或切回 `ask` 撤销队列和未执行授权；重启不恢复队列、不复用旧 reviewer 批准。外部文件/cwd 按精确 URI 授权，保留信任、基线/脏编辑器、单次 permit 与取消检查。V1–V8 system/history/schema 字节冻结；V8 固定增加通用 evidence/epoch，V9 固定增加 `keepseek_apply_patch` 与 canonical Patch IR。热旧 lane 只在既有缓存自然失效或受控 rollover 时迁移；已完成工具不重跑，根 lane 的旧子代理读取工具仍只作迁移桥。
+
+### 4.7 持久 Goal（V10-only）
+
+- `/goal` 先显示 contract 确认面板；Goal、lease 与首个 v3 checkpoint 成功持久化后才创建真实消息/发请求。一个 workspace 仅一个非终态 Goal。
+- `goals/GoalCoordinator` 是唯一调度者；候选 final 必须通过宿主硬检查和隔离、无工具 completion reviewer。子代理、reviewer、摘要、重试、epoch 共享 active time、分币种费用和模型请求账本，不能关闭根 Goal。
+- GoalStore 使用 index + immutable snapshot + journal shard；file global storage 用 heartbeat/expiry/fencing lease。恢复先把 running/pausing 记为 interrupted，旧 permit、approval runtime、batch 与外部授权不复活；未知文件/命令/工具终态进入 needs_attention，绝不自动重跑。
+- 默认 `manual`；`auto_on_activation` 只在 KeepSeek 再次因 `onView:keepseek.chat` 激活、冻结上下文完全匹配且无等待/不确定副作用时恢复。Host 不存在、Reload 或设备休眠期间不执行，也不累计 active execution。
+- 普通会话和新 session 仍为 V9。只有开始 Goal 才把该 session 升至 V10；V10 system 与 tools 字节等同 V9、tool schema version 仍为 9，V1–V9 fixture 不变。旧 BackgroundRun 修复入口只生成 Goal preset。
 
 ### 4.6 Skills 与项目指令
 

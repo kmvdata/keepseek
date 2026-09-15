@@ -6,18 +6,18 @@ import type { ContextEpochState } from './contextEpoch';
 
 export type StopReason = 'user_stop' | 'time_budget' | 'tool_timeout' | 'connection_interrupted'
   | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'budget_exhausted' | 'completed' | 'storage_failure' | 'resource_limit'
-  | 'cost_limit' | 'no_progress_loop' | 'uncertain_tool_result';
+  | 'cost_limit' | 'model_request_limit' | 'completion_review_limit' | 'no_progress_loop' | 'uncertain_tool_result';
 
 /** Deserialization-only values produced by v1 checkpoints. V2 never emits them. */
 export type LegacyCapacityFinishReason = 'tool_iterations_exhausted' | 'tool_call_limit_exhausted'
   | 'tool_result_budget_exhausted' | 'context_window_exhausted' | 'run_time_limit_exhausted';
 
 export interface RunCheckpoint {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   taskId: string;
   attempt: number;
   attemptIds: string[];
-  status: 'running' | 'interrupted' | 'completed' | 'blocked';
+  status: 'running' | 'interrupted' | 'candidate_final' | 'completed' | 'blocked';
   stopReason?: StopReason;
   error?: string;
   usedMs: number;
@@ -43,6 +43,8 @@ export interface RunCheckpoint {
   modelStepRetries?: number;
   taskPlan?: import('../shared/types').TaskPlan;
   delegationBudget?: import('./subagents/types').SubagentTreeBudget;
+  /** V3-only bounded Goal authority. V1/V2 readers continue without it. */
+  goal?: import('./goals/goalTypes').GoalCheckpointStateV1;
   state?: {
     continuation?: { content: string; finishReason?: string | null; requests: number; inFlight: boolean };
     completedReplay?: import('../shared/types').ProviderReplayState;
@@ -91,14 +93,27 @@ export function createRunCheckpoint(
   delete input.checkpoint;
   delete input.taskClock;
   delete input.taskCostBudget;
+  delete input.taskModelRequestBudget;
   input.history = input.history.map(({ runCheckpoint: _cp, ...message }) => message);
   return {
-    version: 2, taskId: randomUUID(), attempt: 0, attemptIds: [], status: 'running', usedMs: 0,
+    version: request.goal ? 3 : 2, taskId: randomUUID(), attempt: 0, attemptIds: [], status: 'running', usedMs: 0,
     maxExecutionMs, usedCostByCurrency: {}, maxCost, limitSource: source, modelRequests: 0, retries: 0, updatedAt: new Date().toISOString(),
     request: structuredClone(input),
     source: { sourceId: sourceConfig?.sourceId ?? request.model.sourceId ?? '', modelId: request.model.id,
       provider: sourceConfig?.provider ?? request.model.provider ?? '', endpointHash: endpointHash(sourceConfig?.baseUrl ?? '') },
-    workspaceFolders
+    workspaceFolders,
+    ...(request.goal ? { goal: {
+      version: 1 as const,
+      contractHash: request.goal.contractHash,
+      revision: request.goal.revision,
+      activeExecutionMs: 0,
+      costByCurrency: {},
+      modelRequests: 0,
+      completionReviews: 0,
+      criteria: [],
+      validationMutationRevision: 0,
+      consumedResultKeys: []
+    } } : {})
   };
 }
 
@@ -114,7 +129,7 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
   if (!value || typeof value !== 'object') return undefined;
   const cp = value as RunCheckpoint;
   try {
-    if ((cp.version !== 1 && cp.version !== 2) || !cp.taskId || !cp.request?.model?.id || !Array.isArray(cp.request.history)
+    if ((cp.version !== 1 && cp.version !== 2 && cp.version !== 3) || !cp.taskId || !cp.request?.model?.id || !Array.isArray(cp.request.history)
       || !cp.source?.endpointHash || !Array.isArray(cp.workspaceFolders)
       || !Array.isArray(cp.attemptIds) || !Number.isFinite(cp.usedMs) || cp.usedMs < 0
       || !Number.isFinite(cp.maxExecutionMs) || cp.maxExecutionMs < 0) return undefined;
@@ -139,7 +154,10 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
       }
     }
     const copy = checkpointCopy(cp);
-    copy.version = 2;
+    copy.version = cp.version === 3 ? 3 : 2;
+    if (copy.version === 3 && (!copy.goal || copy.goal.version !== 1 || !copy.goal.contractHash
+      || !Number.isSafeInteger(copy.goal.revision) || copy.goal.revision < 1
+      || !Array.isArray(copy.goal.criteria) || !Array.isArray(copy.goal.consumedResultKeys))) return undefined;
     copy.maxCost ??= 0;
     copy.usedCostByCurrency ??= {};
     if (copy.status === 'running') {

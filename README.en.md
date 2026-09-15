@@ -76,6 +76,14 @@ Larger workloads stay just as controllable:
 - **Auto-continue after budget exhaustion**: when a foreground task hits the tool-turn or step limit, KeepSeek starts a new round to finish outstanding work—but only when there is real progress to show (up to 8 rounds by default, configurable). Edits still need individual approval;
 - **Surgical edits in huge files**: oversized files are handled with resumable range reads and precise incremental edits, so every change stays visible and reviewable.
 
+#### Persistent Goals
+
+Enter `/goal <objective>` to open a confirmation panel. KeepSeek creates no chat message or model request until you confirm at least one acceptance criterion, include/exclude scope, required validations, budgets, and the resume policy. Once started, the Goal card provides Pause, Resume, Stop, Clear, and append-only amendments. If the model returns final text early, KeepSeek checks side-effect terminal states, validations after the latest mutation, criterion evidence, and an isolated completion reviewer before completing or continuing the same logical task.
+
+Goals do not relax safety. Ask mode still waits for your real Apply/Run action, model review remains bound to the exact action hash, and auto approve still records an explicit host-policy approval without model review. After a reload or crash, running state becomes interrupted; old permits, temporary external authorization, and in-memory approval queues are not revived. An uncertain file or command outcome requires human verification and is never automatically retried. The legacy “repair until compile/lint/test passes” entry now opens a prefilled Goal.
+
+**A Goal advances only while KeepSeek's VS Code Extension Host is running. Nothing executes while VS Code is closed, during Reload, or while the device is asleep; the Goal can resume after KeepSeek is activated again.** Manual resume is the default. `auto_on_activation` means only that KeepSeek may resume after reactivation and complete safety checks. Active execution excludes pauses, waits, host downtime, and detected sleep; the request budget includes the main model, retries, subagents, summaries, and both reviewer kinds; costs remain separate by currency and positive limits fail closed when pricing is unavailable.
+
 ### 4. Control the Current Task from the Command Menu
 
 Click the **`/` button** below the input box to open the command menu. From here, you can launch Skills, switch the main and subagent models, adjust the approval mode and auto-compaction threshold, and control Thinking effort.
@@ -162,6 +170,7 @@ bun run reinstall:vsix
 ### Maintainer Resources
 
 - [Agent runtime workflow](./doc/keepseek-agent-runtime-workflow.md)
+- [Persistent Goals and long-task recovery](./doc/long-running-agent.md)
 - [Cache-hit optimization](./doc/cache_keepseek.md)
 - [API payload reference](./doc/keepseek-api-payload-reference.md)
 - [File reference specification](./doc/keepseek-file-reference-spec.md)
