@@ -71,6 +71,7 @@ export class Range {
 }
 
 const commandHandlers = new Map<string, (...args: unknown[]) => unknown>();
+const textDocumentProviders = new Map<string, { provideTextDocumentContent(uri: Uri): string | Thenable<string> }>();
 
 export const commands = {
   async executeCommand<T>(command: string, ...args: unknown[]): Promise<T | undefined> {
@@ -284,6 +285,13 @@ export const workspace = {
       }
     };
   },
+  registerTextDocumentContentProvider(
+    scheme: string,
+    provider: { provideTextDocumentContent(uri: Uri): string | Thenable<string> }
+  ) {
+    textDocumentProviders.set(scheme, provider);
+    return { dispose(): void { textDocumentProviders.delete(scheme); } };
+  },
   getWorkspaceFolder(uri: Uri) {
     const normalizedPath = path.resolve(uri.fsPath);
     return workspace.workspaceFolders.find((folder) => {
@@ -349,7 +357,10 @@ export const workspace = {
     return results;
   },
   async openTextDocument(uri: Uri): Promise<TextDocument> {
-    const content = await fs.readFile(uri.fsPath, 'utf8');
+    const provider = textDocumentProviders.get(uri.scheme);
+    const content = provider
+      ? await provider.provideTextDocumentContent(uri)
+      : await fs.readFile(uri.fsPath, 'utf8');
     const document = new TextDocument(uri, content);
     workspace.textDocuments.push(document);
     return document;

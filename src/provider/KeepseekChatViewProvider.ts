@@ -71,6 +71,8 @@ import { ApprovalCircuitBreaker } from '../approvals/approvalCircuitBreaker';
 import { createDraftEditReviewRequest, createDraftRunReviewRequest, createExternalFileReviewRequest } from '../approvals/approvalReviewSurface';
 import { APPROVAL_POLICY_VERSION, type ApprovalReviewRecord, type ApprovalReviewRequest } from '../approvals/approvalReviewTypes';
 import { hashDraftEditAction } from '../approvals/approvalReviewHash';
+import { createFullTextDraftEdit, getDraftEditBase } from '../edits/draftEdit';
+import { hashBytes } from '../edits/textPatch';
 import { DraftDiffService } from '../edits/draftDiffService';
 import {
   openDirectoryReferenceUri,
@@ -364,7 +366,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.subagentRuntime,
       this.approvalReviewer
     );
-    this.draftDiffService = new DraftDiffService();
+    this.draftDiffService = new DraftDiffService(this.globalStorageUri);
     this.changeSets = new ChangeSetStore(
       new SafeFileEditor((key, values) => this.t(key, values)),
       this.draftDiffService,
@@ -2028,14 +2030,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
-      const edit: DraftEdit = {
+      const edit: DraftEdit = createFullTextDraftEdit({
         id: randomUUID(),
         uri: draft.targetUri.toString(),
         label: draft.label,
         action: 'create',
-        newText: draft.content,
+        content: draft.content,
         reason: draft.reason
-      };
+      });
       const timelineMessage = this.appendChangeSetTimelineMessage(
         this.t('createSkillDraftCreated', { label: draft.label })
       );
@@ -3866,16 +3868,22 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (cp.request.authorizedExternalReferenceUris?.some((uri) => !this.authorizedExternalReferenceUris.has(uri))) throw new Error(this.t('runRecoveryWorkspaceChanged'));
       for (const edit of cp.state?.draftEdits ?? []) {
         const storedFile = this.changeSets.toWebviewState(session.id).flatMap((set) => set.files).find((file) => file.id === edit.id);
-        if (storedFile && storedFile.status !== 'pending' && storedFile.status !== 'apply_failed') throw new Error(this.t('runRecoveryFileChanged', { label: edit.label }));
+        if (storedFile && storedFile.status !== 'pending' && storedFile.status !== 'apply_failed' && storedFile.status !== 'interrupted') {
+          throw new Error(this.t('runRecoveryFileChanged', { label: edit.label }));
+        }
         if (edit.action === 'create') {
           let exists = false;
           try { await vscode.workspace.fs.stat(vscode.Uri.parse(edit.uri)); exists = true; }
           catch (error) { if (!error || typeof error !== 'object' || !('code' in error) || !['FileNotFound', 'ENOENT'].includes(String(error.code))) throw error; }
           if (exists) throw new Error(this.t('runRecoveryFileChanged', { label: edit.label }));
         }
-        if (edit.expectedOriginalTextHash && edit.action !== 'create') {
+        const editBase = getDraftEditBase(edit);
+        if (editBase?.sha256 && edit.action !== 'create') {
           const current = await vscode.workspace.fs.readFile(vscode.Uri.parse(edit.uri));
-          if (endpointHash(new TextDecoder().decode(current)) !== edit.expectedOriginalTextHash) throw new Error(this.t('runRecoveryFileChanged', { label: edit.label }));
+          const currentHash = edit.kind ? hashBytes(current) : endpointHash(new TextDecoder().decode(current));
+          if (currentHash !== editBase.sha256 || (editBase.sizeBytes >= 0 && current.byteLength !== editBase.sizeBytes)) {
+            throw new Error(this.t('runRecoveryFileChanged', { label: edit.label }));
+          }
         }
       }
       // All compatibility checks complete before changing the visible run.

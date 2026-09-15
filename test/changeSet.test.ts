@@ -108,7 +108,7 @@ test('consolidates previously persisted split ChangeSets for one Agent run', asy
   assert.deepEqual(state[0]?.files.map((file) => file.id), ['a', 'b']);
 
   await fixture.store.flush();
-  const persisted = JSON.parse(await readFile(path.join(root, 'change-sets', 'v3', 'index.json'), 'utf8')) as {
+  const persisted = JSON.parse(await readFile(path.join(root, 'change-sets', 'v4', 'index.json'), 'utf8')) as {
     entries?: Array<{ kind?: string }>;
   };
   assert.equal(persisted.entries?.filter((entry) => entry.kind === 'runtime').length, 1);
@@ -296,7 +296,7 @@ test('persists discarded and reverted terminal history without source text', asy
   await afterApply.store.flush();
 
   const persisted = await waitForStoredHistory(root, 2);
-  assert.equal(persisted.version, 3);
+  assert.equal(persisted.version, 4);
   assert.ok(!JSON.stringify(persisted.history).includes('"newText"'));
 
   const reloaded = createStoreFixture(root);
@@ -362,7 +362,7 @@ test('runtime records recover checkpoint links when an older index commit is obs
   assert.ok(changeSet);
   await fixture.store.applyAll(changeSet.id);
   await fixture.store.flush();
-  const indexPath = path.join(root, 'change-sets', 'v3', 'index.json');
+  const indexPath = path.join(root, 'change-sets', 'v4', 'index.json');
   const index = JSON.parse(await readFile(indexPath, 'utf8')) as { entries: Array<{ checkpointIds: string[] }> };
   for (const entry of index.entries) entry.checkpointIds = [];
   await writeFile(indexPath, JSON.stringify(index));
@@ -383,7 +383,7 @@ test('failed ChangeSet migration keeps the monolith readable in memory', async (
   await writeFile(monolithPath, JSON.stringify({ version: 2, changeSets: [pending], history: [], checkpoints: [] }));
   const originalRename = vscode.workspace.fs.rename;
   vscode.workspace.fs.rename = async (source, target, options) => {
-    if (target.fsPath.endsWith('/change-sets/v3/index.json')) throw new Error('simulated index failure');
+    if (target.fsPath.endsWith('/change-sets/v4/index.json')) throw new Error('simulated index failure');
     await originalRename(source, target, options);
   };
   t.after(() => { vscode.workspace.fs.rename = originalRename; });
@@ -455,14 +455,14 @@ async function waitForStoredHistory(
 ): Promise<{ version?: number; history?: unknown[] }> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
-      const index = JSON.parse(await readFile(path.join(storageRoot, 'change-sets', 'v3', 'index.json'), 'utf8')) as {
+      const index = JSON.parse(await readFile(path.join(storageRoot, 'change-sets', 'v4', 'index.json'), 'utf8')) as {
         version?: number;
         entries?: Array<{ kind?: string; storageFile?: string }>;
       };
       const historyEntries = (index.entries ?? []).filter((entry) => entry.kind === 'history' && entry.storageFile);
       if (historyEntries.length >= count) {
         const history = await Promise.all(historyEntries.map(async (entry) => {
-          const record = JSON.parse(await readFile(path.join(storageRoot, 'change-sets', 'v3', entry.storageFile!), 'utf8')) as { changeSet?: unknown };
+          const record = JSON.parse(await readFile(path.join(storageRoot, 'change-sets', 'v4', entry.storageFile!), 'utf8')) as { changeSet?: unknown };
           return record.changeSet;
         }));
         return { version: index.version, history };
@@ -478,12 +478,12 @@ async function waitForStoredHistory(
 async function waitForStoredRuntimeChangeSet(storageRoot: string, changeSetId: string): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
-      const index = JSON.parse(await readFile(path.join(storageRoot, 'change-sets', 'v3', 'index.json'), 'utf8')) as {
+      const index = JSON.parse(await readFile(path.join(storageRoot, 'change-sets', 'v4', 'index.json'), 'utf8')) as {
         entries?: Array<{ id?: string; kind?: string; storageFile?: string }>;
       };
       const entry = index.entries?.find((candidate) => candidate.id === changeSetId && candidate.kind === 'runtime');
       if (entry?.storageFile) {
-        const record = JSON.parse(await readFile(path.join(storageRoot, 'change-sets', 'v3', entry.storageFile), 'utf8')) as {
+        const record = JSON.parse(await readFile(path.join(storageRoot, 'change-sets', 'v4', entry.storageFile), 'utf8')) as {
           changeSet?: { status?: string };
         };
         if (record.changeSet?.status === 'applied') return;

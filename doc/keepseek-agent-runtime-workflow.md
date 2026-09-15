@@ -80,7 +80,7 @@ Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节
 - 工作区内文件可直接展开。
 - 外部文件必须先授权。
 - 图片、媒体、归档、常见二进制扩展会跳过。
-- 全文引用受 `keepseek.maxFileBytes` 的文件系统读取/安全快照上限约束；Provider 内联由 `keepseek.providerInlineResultMaxChars` 独立控制，evidence 持久化由 `keepseek.evidenceMaxBytes` 独立控制。
+- 全文读取和上下文引用受 `keepseek.maxFileBytes` 约束；局部 patch 不受目标文件总大小约束。Provider 内联由 `keepseek.providerInlineResultMaxChars` 控制，evidence 与 patch artifact 分别使用独立配额。
 - 行段引用会读取指定行列范围并包装为 Markdown 代码块。
 
 目录引用由 `context/references/directoryReference.ts` 处理：
@@ -172,7 +172,7 @@ Anthropic Messages 使用规范化的原生 Messages endpoint、`x-api-key` 和 
 
 上下文投影上限按 `maxProjectionTokens = contextWindow × forceRatio` 计算。选择 85% 缓存优先档时，`forceRatio=0.95` 会让投影上限增大，从而保留更多原始历史、尽量延后会破坏前缀缓存的摘要刷新；这是预期行为。
 
-模型、来源、provider 或 base URL 切换只迁移 provider/cache lane，并在这个本来就冷启动的边界升级请求序列化；既有 `contextCompression.summaries` 保留并继续参与 projection。新会话使用 v8。v1–v7 热会话维持旧 provider-visible bytes，直到缓存已冷或首次需要大结果时经受控 rollover 迁移；历史里的旧预算文字不改写。
+模型、来源、provider 或 base URL 切换只迁移 provider/cache lane，并在这个本来就冷启动的边界升级请求序列化；既有 `contextCompression.summaries` 保留并继续参与 projection。新会话使用 v9。v1–v8 热会话维持旧 provider-visible bytes，直到缓存已冷或受控 rollover 迁移；历史里的旧预算文字不改写。V9 在 V8 evidence/epoch schema 上只新增 `keepseek_apply_patch` 和对应静态规则。
 
 同一逻辑任务只有真实审批、用户 Stop、Provider/存储失败、显式时间/费用上限、副作用结果不确定、来源/模型安全不匹配或持续无进展才停止。`agent.maxCost` 按计费币种分别统计，主任务、子代理、epoch 与恢复共享同一账本；无法获得可计价用量时正值上限采用 fail-closed。内部容量调度不映射为 blocked，不会追加“继续新一轮”消息。
 
@@ -206,8 +206,9 @@ Anthropic Messages 使用规范化的原生 Messages endpoint、`x-api-key` 和 
 | `keepseek_git_diff` | 只读 | 读取受限 Git diff |
 | `keepseek_git_create_patch` | 只读 | 返回 patch 内容，不写入也不应用 |
 | `keepseek_git_suggest_commit_message` | 只读 | 基于当前变更建议 commit message，不创建 commit |
-| `keepseek_create_incremental_draft_edit` | 待确认修改 | 对现有文本文件组合精确小范围修改，生成一个 pending DraftEdit |
-| `keepseek_create_draft_edit` | 待确认修改 | 为新/小文件、整体重写或不适合 incremental 的修改创建 DraftEdit |
+| `keepseek_apply_patch` | 待确认修改 | V9 严格 grammar；一次提交多个 Add/Update/Delete/Move，每个目标生成独立 canonical DraftEdit |
+| `keepseek_create_incremental_draft_edit` | 待确认修改 | 兼容入口；对现有文本文件组合精确修改并生成 `text_patch_v1` |
+| `keepseek_create_draft_edit` | 待确认修改 | 为新文件/整体重写生成 `full_text_v1`；带 range 时生成 `text_patch_v1` |
 | `keepseek_delete_workspace_file` | 待确认修改 | 为一个普通可读文件准备非递归 pending delete，不立即删除 |
 
 ### 4.1 `keepseek_search_workspace`
@@ -363,9 +364,9 @@ Anthropic Messages 使用规范化的原生 Messages endpoint、`x-api-key` 和 
 
 ### 4.6 DraftEdit 工具选择
 
-现有大文件的小范围修改优先走 `keepseek_create_incremental_draft_edit`：每个精确 search 必须唯一命中，多个不重叠 edit 在本地组合成一个完整 DraftEdit，继续复用现有 review/checkpoint 安全链。新文件、小文件、整体重写或 incremental 无法安全表达时才用 `keepseek_create_draft_edit`。删除只走 `keepseek_delete_workspace_file`，并保留删除前基线与 Apply 二次确认。
+V9 的首选入口是 `keepseek_apply_patch`。它接收严格 `keepseek_patch_v1` JSON：路径只能是规范化 workspace-relative path；Update edit 只能是唯一精确 `search`、明确的 1-based 整行范围，或文件头/尾插入；禁止绝对路径、URI、`..`、未知字段、重复目标、模糊/忽略空白匹配和重叠 hunk。一次调用可含多个 Add/Update/Delete/Move，但每个文件生成独立 DraftEdit，并由同一 Agent run 合并到一个 ChangeSet。删除仍逐文件二次确认。
 
-三个工具都只把 pending DraftEdit 交给 ChangeSet/Webview；Apply 前工作区不会变化。
+`keepseek_create_incremental_draft_edit` 是兼容入口，同样生成 canonical `text_patch_v1`，不再展开/持久化完整 `newText`。`keepseek_create_draft_edit` 只在新建/整体替换时生成 `full_text_v1`，带 range 时也转成 patch；删除和移动分别使用 `delete_v1` / `move_v1`。所有入口都只返回稳定 ID、状态、文件摘要和 hash，Apply 前工作区字节不变。
 
 ### 4.7 会话归档恢复
 
@@ -428,7 +429,7 @@ inlineAllowance = learnedEffectiveWindow
 
 Responses 计算原生 Items，Anthropic 计算 system/Messages/tool blocks，Chat Completions/DSML 计算实际 messages。Provider 返回的真实 prompt/input usage 校准估算倍率；没有可靠 tokenizer 时用保守字符估算和动态误差因子。完整结果放不下就使用 evidence envelope；连最小信封放不下则在完整批次后 rollover，不能结束任务。
 
-`maxFileBytes` 仅控制文件系统读取/安全快照，`providerInlineResultMaxChars` 控制单次模型可见结果，`evidenceMaxBytes` 控制证据持久化。`toolResultTokens` 和旧 ledger 字段仅是 telemetry。
+`maxFileBytes` 仅控制全文 workspace read、上下文文件与项目指令等全文入口，不限制 `text_patch_v1` 的本地目标大小。`patch.maxPayloadBytes/maxHunks/maxChangedBytes/maxInlineBytes` 限制 patch 变化量，`patch.maxProviderBufferBytes` 限制非 `file:` provider fallback，`patch.maxBackupBytes/maxChangeSetArtifactBytes/blobStoreQuotaBytes` 分别限制全量备份、单 ChangeSet artifact 和全局 blob。`providerInlineResultMaxChars` 与 `evidenceMaxBytes` 继续独立控制模型结果/证据。
 
 ## 6. Context Epoch、容量自校准与 usage
 
@@ -454,34 +455,48 @@ KeepSeek 的写入安全边界是它区别于普通自动写文件 agent 的关�
 
 ### 7.1 创建 DraftEdit
 
-模型调用 `keepseek_create_draft_edit` 时，Runner 只创建内存中的 `DraftEdit`：
+权威数据是版本化 discriminated union。现有 UTF-8 文件的局部修改示意如下：
 
 ```ts
 {
   id,
   uri,
   label,
-  action,
-  newText,
-  reason
+  kind: 'text_patch_v1',
+  action: 'modify',
+  reason,
+  patch: {
+    version: 'text_patch_v1',
+    targetUri: uri,
+    base: { sha256, sizeBytes },
+    result: { sha256, sizeBytes },
+    encoding: { name: 'utf-8', bom, eol, finalEol },
+    hunks: [{ startByte, endByte, startLine, oldText, newText,
+      oldSha256, newSha256, oldSizeBytes, newSizeBytes }],
+    canonicalHash
+  }
 }
 ```
 
-这个 DraftEdit 会显示在 Webview 的 pending changes 区域。此时磁盘没有变化。
+Runner 只把模型的行号当定位输入：创建时读取当前内容、做 lossless UTF-8/二进制检查、解析精确 byte offset、拒绝缺失/歧义/重叠，再计算完整 base/result identity 和字段顺序固定的 canonical hash。原始 wire patch 不是审批权威。`full_text_v1`、`delete_v1`、`move_v1` 有独立 payload；V1–V3 的 `newText` 只作兼容读取。
 
 ### 7.2 用户确认 Apply
 
 用户点击 Apply 后，Provider 调用 `ChangeSetStore`，再由 `SafeFileEditor` 执行写入。
 
-写入前会检查：
+单文件流程是：重查 workspace trust / URI 授权 / 审批记录与 actionHash；拒绝 dirty document/tab 和符号链接越界；流式计算当前 base hash/size；在任何 workspace mutation 前持久化 `prepared` checkpoint；再记 `applying`；生成结果并先核验 result hash/size。`file:` 使用同目录临时文件、保留 mode、flush/fsync 和原子 rename，再重新扫描落盘结果；其它 FileSystemProvider 使用有界 `workspace.fs` buffer fallback 并 read-back。只有实际结果匹配 canonical result 才写 `applied` 终态。
 
-- 目标文件是否有未保存 dirty editor/tab。
-- 目标 URI 是否可写。
-- DraftEdit action 是 create/modify/delete/move 中的哪一种。
+`Apply All` 是逐文件 journal，不宣称跨 provider 原子事务。某个文件失败不抹掉已验证的成功，ChangeSet 明确进入 partial 或 uncertain 状态；存储/写入/read-back 任何一步无法判断副作用时不自动重试。
 
-确认后的 create/modify/delete 都由 ChangeSet checkpoint 和 `SafeFileEditor` 保护。后续写入行为应优先扩展 `edits/changeSetStore.ts` 与 `edits/safeFileEditor.ts`，不要把应用逻辑放进 `AgentRunner`。
+### 7.3 回滚、重启与 Diff
 
-### 7.3 用户可见语义
+patch checkpoint 不保存完整原文件，只保存 inverse patch，并绑定完整 result hash。Revert 前必须仍精确处于 result；逆向写入后必须匹配 base。Apply 后发生外部修改时拒绝自动回滚。delete/full replace 的原始 raw bytes 保存到 global storage 的 SHA-256 blob，JSON 只保留 hash；blob 原子写入、读回校验、去重，并以所有持久化 JSON 引用为 GC root，扫描失败时 fail-closed 不删除。
+
+扩展重启检查 journal 对应目标：base 表示 Apply 未发生（恢复 pending），result 表示已落盘（恢复 applied），两者都不匹配表示 uncertain；Revert journal 使用相反方向判定。任何状态恢复都不重放副作用。V4 ChangeSet shard 可读 V3 shard 与 V1/V2 monolith，旧 pending/applied checkpoint 仍可 Apply/Revert，旧审批 hash 不会跨 payload version 复用。
+
+普通大小 patch 在用户打开 Diff 时从当前 base 延迟生成 before/proposed；超过 `patch.maxDiffBytes` 时使用 hunk-only review，显示路径/byte/line、old/new、局部和完整 hash。ChangeSet/Webview 不持久化或传输完整 proposed file；Diff 失败也不能隐式授权 Apply。
+
+### 7.4 用户可见语义
 
 模型和最终回答必须遵守这个语义：
 
@@ -580,7 +595,7 @@ KeepSeek 使用“识别任务类型 → 解决下一个关键不确定性 → �
 - 模型需要继续读取某段之前或之后的内容。
 - 全文 read 返回 `suggestedTool` 时。
 - 小文件或真正的整体问题才全文读取。
-- 大文件局部改动用 incremental DraftEdit；新/小文件或整体重写用完整 DraftEdit。
+- 大文件局部改动用 canonical patch；新文件或整体重写才用 full-text DraftEdit。
 
 ## 11. 当前边界和后续扩展方向
 
@@ -595,7 +610,7 @@ KeepSeek 使用“识别任务类型 → 解决下一个关键不确定性 → �
 - 通用 Tool Evidence、20MB 级有界分页、不可变 provider envelope 与崩溃恢复账本。
 - 同一逻辑任务内的 Context Epoch、摘要 fallback、三协议/DSML 合法续跑与跨 epoch 无进展检测。
 - 历史投影、会话摘要和后台上下文压缩刷新。
-- incremental/full/delete DraftEdit、ChangeSet 与 Apply 后安全写入。
+- V9 canonical patch/full/delete/move DraftEdit、V4 ChangeSet journal/blob 与 hash-verified Apply/Revert。
 - 普通/repair pending DraftEdit 的统一 validation 硬阻断与 Apply 后继续验证。
 - trace 和 usage 记录。
 - 离线行为评测契约和显式 opt-in live runner。

@@ -8,6 +8,7 @@ import type {
   ToolRiskLevel
 } from '../../shared/types';
 import {
+  APPLY_PATCH_TOOL_NAME,
   CREATE_DRAFT_EDIT_TOOL_NAME,
   CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
   DELEGATE_PARALLEL_TOOL_NAME,
@@ -72,6 +73,7 @@ const LOW_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
   [GET_WORKSPACE_SYMBOLS_TOOL_NAME, 'semantic_read'],
   [CREATE_DRAFT_EDIT_TOOL_NAME, 'draft_edit_prepare'],
   [CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME, 'draft_edit_prepare'],
+  [APPLY_PATCH_TOOL_NAME, 'draft_edit_prepare'],
   [RUN_DRAFT_TOOL_NAME, 'draft_run_prepare'],
   [GIT_STATUS_TOOL_NAME, 'git_read'],
   [GIT_DIFF_TOOL_NAME, 'git_read'],

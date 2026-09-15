@@ -30,8 +30,10 @@ export class DraftEditStore {
     this.edits.clear();
   }
 
-  public toWebviewState(): Array<Omit<DraftEdit, 'newText'>> {
-    return Array.from(this.edits.values()).map(({ newText: _newText, ...edit }) => edit);
+  public toWebviewState(): Array<Pick<DraftEdit, 'id' | 'uri' | 'label' | 'action' | 'reason'>> {
+    return Array.from(this.edits.values()).map((edit) => ({
+      id: edit.id, uri: edit.uri, label: edit.label, action: edit.action, reason: edit.reason
+    }));
   }
 
   public async apply(id: string): Promise<boolean> {

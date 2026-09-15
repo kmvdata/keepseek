@@ -6,6 +6,7 @@ import {
   getConfiguredDraftRunMaxTranscriptBytes,
   getConfiguredDraftRunTimeoutMs,
   getConfiguredModelUsagePricing,
+  getConfiguredPatchSettings,
   normalizeAgentSettings,
   normalizeCompressionThreshold
 } from '../src/shared/config';
@@ -77,4 +78,18 @@ test('partial agent settings preserve the fallback compression threshold', () =>
 test('DraftRun uses bounded timeout and transcript defaults', () => {
   assert.equal(getConfiguredDraftRunTimeoutMs(), 120_000);
   assert.equal(getConfiguredDraftRunMaxTranscriptBytes(), 131_072);
+});
+
+test('patch limits are independent risk-object defaults rather than maxFileBytes aliases', () => {
+  assert.deepEqual(getConfiguredPatchSettings(), {
+    maxPayloadBytes: 1_048_576,
+    maxHunks: 256,
+    maxChangedBytes: 2_097_152,
+    maxInlineBytes: 65_536,
+    maxProviderBufferBytes: 16_777_216,
+    maxBackupBytes: 33_554_432,
+    maxChangeSetArtifactBytes: 134_217_728,
+    blobStoreQuotaBytes: 1_073_741_824,
+    maxDiffBytes: 4_194_304
+  });
 });

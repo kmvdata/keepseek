@@ -6,15 +6,18 @@ import { test } from 'node:test';
 import { AgentRunner } from '../src/agent/runner';
 import { DsmlToolParser } from '../src/agent/deepseek/dsmlToolParser';
 import {
+  APPLY_PATCH_TOOL_NAME,
   CREATE_DRAFT_EDIT_TOOL_NAME,
   CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME
 } from '../src/agent/protocol';
 import { DraftEdit } from '../src/shared/types';
+import { applyTextPatchToBytes } from '../src/edits/textPatch';
 import * as vscode from './stubs/vscode';
 
 type DraftEditInvoker = {
   createDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[], language: 'en' | 'zh-CN'): Promise<string>;
   createIncrementalDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[], language: 'en' | 'zh-CN'): Promise<string>;
+  createPatchDraftEdits(args: Record<string, unknown>, draftEdits: DraftEdit[], language: 'en' | 'zh-CN'): Promise<string>;
 };
 
 test('parses full-width DSML draft edit calls with range aliases', () => {
@@ -40,7 +43,7 @@ test('parses full-width DSML draft edit calls with range aliases', () => {
   });
 });
 
-test('creates a full-file DraftEdit from targetPath/newContent/replaceRange aliases', async (t) => {
+test('creates a patch-native DraftEdit from targetPath/newContent/replaceRange aliases', async (t) => {
   const previousWorkspaceFolders = vscode.workspace.workspaceFolders;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'keepseek-draft-edit-'));
   t.after(async () => {
@@ -67,11 +70,14 @@ test('creates a full-file DraftEdit from targetPath/newContent/replaceRange alia
   assert.match(parsedResult.message ?? '', /one pending ChangeSet/u);
   assert.equal(draftEdits.length, 1);
   assert.equal(draftEdits[0].label, 'src/sample.ts');
-  assert.equal(draftEdits[0].newText, 'one\ndeux\ntrois\nfour\n');
+  assert.equal(draftEdits[0].kind, 'text_patch_v1');
+  assert.equal(draftEdits[0].kind === 'text_patch_v1'
+    ? new TextDecoder().decode(applyTextPatchToBytes(new TextEncoder().encode(originalContent), draftEdits[0].patch))
+    : '', 'one\ndeux\ntrois\nfour\n');
   assert.equal(await fs.readFile(targetPath, 'utf8'), originalContent);
 });
 
-test('combines multiple exact incremental edits into one safe full-file DraftEdit', async (t) => {
+test('combines multiple exact incremental edits into one canonical patch DraftEdit', async (t) => {
   const previousWorkspaceFolders = vscode.workspace.workspaceFolders;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'keepseek-incremental-edit-'));
   t.after(async () => {
@@ -100,9 +106,52 @@ test('combines multiple exact incremental edits into one safe full-file DraftEdi
   assert.equal(parsedResult.draftEdit?.editCount, 2);
   assert.match(parsedResult.message ?? '', /one ChangeSet/u);
   assert.equal(draftEdits.length, 1);
-  assert.equal(draftEdits[0].newText, ['const alpha = 10;', 'const untouched = 2;', 'const omega = 30;', ''].join('\n'));
+  assert.equal(draftEdits[0].kind, 'text_patch_v1');
+  assert.equal(draftEdits[0].kind === 'text_patch_v1'
+    ? new TextDecoder().decode(applyTextPatchToBytes(new TextEncoder().encode(originalContent), draftEdits[0].patch))
+    : '', ['const alpha = 10;', 'const untouched = 2;', 'const omega = 30;', ''].join('\n'));
   assert.equal(await fs.readFile(targetPath, 'utf8'), originalContent);
   assert.equal(CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME, 'keepseek_create_incremental_draft_edit');
+});
+
+test('v9 patch grammar stages Add/Update/Delete/Move as independent DraftEdits without workspace mutation', async (t) => {
+  const previousWorkspaceFolders = vscode.workspace.workspaceFolders;
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'keepseek-multi-patch-'));
+  t.after(async () => {
+    vscode.workspace.workspaceFolders = previousWorkspaceFolders;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(root), name: 'keepseek-test' }];
+  await Promise.all([
+    fs.writeFile(path.join(root, 'update.ts'), 'const value = 1;\n'),
+    fs.writeFile(path.join(root, 'delete.ts'), 'delete me\n'),
+    fs.writeFile(path.join(root, 'move.ts'), 'move me\n')
+  ]);
+  const wirePatch = JSON.stringify({
+    version: 'keepseek_patch_v1',
+    operations: [
+      { action: 'update', path: 'update.ts', edits: [{ search: 'value = 1', replace: 'value = 2' }] },
+      { action: 'add', path: 'add.ts', content: 'new file\n' },
+      { action: 'delete', path: 'delete.ts' },
+      { action: 'move', path: 'move.ts', to: 'moved.ts' }
+    ]
+  });
+  const edits: DraftEdit[] = [];
+  const rawResult = await (new AgentRunner() as unknown as DraftEditInvoker).createPatchDraftEdits({
+    patch: wirePatch,
+    reason: 'One coherent multi-file change.'
+  }, edits, 'en');
+  const result = JSON.parse(rawResult) as { draftEditIds?: string[]; files?: unknown[] };
+
+  assert.equal(APPLY_PATCH_TOOL_NAME, 'keepseek_apply_patch');
+  assert.equal(result.draftEditIds?.length, 4);
+  assert.equal(result.files?.length, 4);
+  assert.deepEqual(edits.map((edit) => edit.kind), ['text_patch_v1', 'full_text_v1', 'delete_v1', 'move_v1']);
+  assert.equal(await fs.readFile(path.join(root, 'update.ts'), 'utf8'), 'const value = 1;\n');
+  assert.equal(await fs.readFile(path.join(root, 'delete.ts'), 'utf8'), 'delete me\n');
+  assert.equal(await fs.readFile(path.join(root, 'move.ts'), 'utf8'), 'move me\n');
+  await assert.rejects(fs.stat(path.join(root, 'add.ts')));
+  await assert.rejects(fs.stat(path.join(root, 'moved.ts')));
 });
 
 test('incremental edit refuses ambiguous search targets instead of guessing', async (t) => {

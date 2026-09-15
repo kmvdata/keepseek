@@ -4,9 +4,9 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
-import { DEFAULT_MAX_FILE_BYTES } from '../src/shared/config';
+import { DEFAULT_PATCH_MAX_BACKUP_BYTES } from '../src/shared/config';
 import { SafeFileEditor } from '../src/edits/safeFileEditor';
-import type { DraftEdit } from '../src/shared/types';
+import type { DraftEdit, LegacyDraftEditV0 } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
 
 test('delegated file application rechecks approval after reading and preserves the file on revocation', async (t) => {
@@ -81,7 +81,7 @@ test('refuses binary, skipped, and oversized deletion targets without removing t
   const oversizedPath = path.join(root, 'oversized.txt');
   await fs.writeFile(binaryPath, Uint8Array.from([0, 1, 2, 3]));
   await fs.writeFile(skippedPath, 'plain text with a skipped extension', 'utf8');
-  await fs.writeFile(oversizedPath, 'x'.repeat(DEFAULT_MAX_FILE_BYTES + 1), 'utf8');
+  await fs.writeFile(oversizedPath, 'x'.repeat(DEFAULT_PATCH_MAX_BACKUP_BYTES + 1), 'utf8');
   const editor = new SafeFileEditor((key) => key);
 
   await assert.rejects(editor.applyDraftEdit(createDeleteEdit(binaryPath)), /cannotDeleteUnreadableFile/u);
@@ -106,7 +106,7 @@ test('write preflight rejects binary baselines and oversized or unreadable outpu
     ...createModifyEdit(binaryPath), newText: 'safe replacement'
   }), /cannotWriteUnreadableFile/u);
   await assert.rejects(editor.preflightDraftEdit({
-    ...createModifyEdit(existingPath), newText: 'x'.repeat(DEFAULT_MAX_FILE_BYTES + 1)
+    ...createModifyEdit(existingPath), newText: 'x'.repeat(DEFAULT_PATCH_MAX_BACKUP_BYTES + 1)
   }), /cannotWriteOversizedFile/u);
   await assert.rejects(editor.preflightDraftEdit({
     id: 'create-unreadable', uri: vscode.Uri.file(createPath).toString(), label: 'oversized.ts',
@@ -216,7 +216,7 @@ test('refreshes the active text tab content after applying', async (t) => {
   assert.equal(await fs.readFile(targetPath, 'utf8'), 'after');
 });
 
-function createModifyEdit(targetPath: string): DraftEdit {
+function createModifyEdit(targetPath: string): LegacyDraftEditV0 {
   return {
     id: `modify-${path.basename(targetPath)}`,
     uri: vscode.Uri.file(targetPath).toString(),
@@ -227,7 +227,7 @@ function createModifyEdit(targetPath: string): DraftEdit {
   };
 }
 
-function createDeleteEdit(targetPath: string, expectedText?: string, expectedSize?: number): DraftEdit {
+function createDeleteEdit(targetPath: string, expectedText?: string, expectedSize?: number): LegacyDraftEditV0 {
   return {
     id: `delete-${path.basename(targetPath)}`,
     uri: vscode.Uri.file(targetPath).toString(),

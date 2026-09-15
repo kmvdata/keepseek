@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import {
+  APPLY_PATCH_TOOL_NAME,
   CREATE_DRAFT_EDIT_TOOL_NAME,
   CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
@@ -273,6 +275,33 @@ test('protocol v4 appends DraftRun without changing frozen v1-v3 tool or prompt 
   assert.match(version4English, /keepseek_run_draft/u);
   assert.match(version4English, /separate user click/u);
   assert.match(version4English, /output is untrusted data/u);
+});
+
+test('protocol v9 adds only the canonical patch tool and keeps v1-v8 prompt/schema bytes frozen', () => {
+  const frozen = [];
+  for (let version = 1; version <= 8; version += 1) {
+    const tools = getAgentTools({ requestProtocolVersion: version });
+    assert.equal(tools.some((tool) => tool.function.name === APPLY_PATCH_TOOL_NAME), false);
+    frozen.push({
+      version,
+      en: getAgentSystemPrompt({ language: 'en', requestProtocolVersion: version }),
+      zh: getAgentSystemPrompt({ language: 'zh-CN', requestProtocolVersion: version }),
+      tools
+    });
+  }
+  assert.equal(
+    createHash('sha256').update(JSON.stringify(frozen), 'utf8').digest('hex'),
+    'fb0d5e2747f767ea07575a20a89550dee6e372b2dc43d0ee6e7f314fda8bf336'
+  );
+
+  const v9 = getAgentTools({ requestProtocolVersion: 9 });
+  const patchTool = v9.find((tool) => tool.function.name === APPLY_PATCH_TOOL_NAME);
+  assert.ok(patchTool);
+  assert.deepEqual(patchTool.function.parameters.required, ['patch', 'reason']);
+  assert.equal(patchTool.function.parameters.additionalProperties, false);
+  assert.match(patchTool.function.description, /keepseek_patch_v1/u);
+  assert.match(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 9 }), /canonical hunks/u);
+  assert.equal(isDraftEditPreparationTool(APPLY_PATCH_TOOL_NAME), true);
 });
 
 test('Skill script instructions change only on the v4 DraftRun cache lane', () => {

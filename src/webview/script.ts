@@ -3497,6 +3497,7 @@ export function getScript(): string {
       return (Array.isArray(changeSet?.files) ? changeSet.files : []).some(function(file) {
         return file.status === 'pending'
           || file.status === 'apply_failed'
+          || file.status === 'interrupted'
           || file.status === 'applied'
           || file.status === 'revert_failed';
       });
@@ -3520,7 +3521,7 @@ export function getScript(): string {
       title.textContent = String(changeSet.operationSummary || t('changeSets'));
       title.title = title.textContent;
       var files = Array.isArray(changeSet.files) ? changeSet.files : [];
-      var applicableFiles = historical ? [] : files.filter(function(file) { return file.status === 'pending' || file.status === 'apply_failed'; });
+      var applicableFiles = historical ? [] : files.filter(function(file) { return file.status === 'pending' || file.status === 'apply_failed' || file.status === 'interrupted'; });
       var revertibleFiles = historical ? [] : files.filter(function(file) { return file.status === 'applied' || file.status === 'revert_failed'; });
       var meta = document.createElement('div');
       meta.className = 'change-set-meta';
@@ -3566,7 +3567,9 @@ export function getScript(): string {
       main.append(createDraftEditActionIcon(edit), label);
       var details = document.createElement('div');
       details.className = 'draft-chip-details';
-      details.textContent = getChangeFileStatusLabel(edit.status) + (edit.reason ? ' · ' + edit.reason : '');
+      details.textContent = getChangeFileStatusLabel(edit.status)
+        + (edit.patchSummary ? ' · ' + t('patchHunkSummary', { count: edit.patchSummary.hunkCount, bytes: edit.patchSummary.changedBytes }) : '')
+        + (edit.reason ? ' · ' + edit.reason : '');
       content.append(main, details);
       if (edit.approvalReview) {
         content.append(createApprovalReviewSummary(edit.approvalReview));
@@ -3590,7 +3593,7 @@ export function getScript(): string {
       if (allowActions && edit.status !== 'discarded') {
         actions.append(createEditActionButton(t('previewDiff'), 'openDraftDiff', edit.id, true));
       }
-      if (allowActions && (edit.status === 'pending' || edit.status === 'apply_failed')) {
+      if (allowActions && (edit.status === 'pending' || edit.status === 'apply_failed' || edit.status === 'interrupted')) {
         actions.append(
           createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false),
           createEditActionButton(t('discard'), 'discardDraftEdit', edit.id, true)
@@ -3726,6 +3729,7 @@ export function getScript(): string {
         case 'partially_applied': return t('changeSetStatusPartiallyApplied');
         case 'applied': return t('changeSetStatusApplied');
         case 'partially_failed': return t('changeSetStatusPartiallyFailed');
+        case 'uncertain': return t('changeSetStatusUncertain');
         case 'reverted': return t('changeSetStatusReverted');
         case 'discarded': return t('changeSetStatusDiscarded');
         default: return t('changeSetStatusPending');
@@ -3737,6 +3741,10 @@ export function getScript(): string {
         case 'applied': return t('changeFileStatusApplied');
         case 'discarded': return t('changeFileStatusDiscarded');
         case 'apply_failed': return t('changeFileStatusApplyFailed');
+        case 'prepared': return t('changeFileStatusPrepared');
+        case 'applying': return t('changeFileStatusApplying');
+        case 'interrupted': return t('changeFileStatusInterrupted');
+        case 'uncertain': return t('changeFileStatusUncertain');
         case 'reverted': return t('changeFileStatusReverted');
         case 'revert_failed': return t('changeFileStatusRevertFailed');
         default: return t('changeFileStatusPending');

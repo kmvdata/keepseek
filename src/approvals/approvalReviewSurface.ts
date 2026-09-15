@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import type { AgentRequest, ChatMessage, DraftEdit, DraftRun, SafeNpmScript } from '../shared/types';
 import { createBoundedReviewText, hashApprovalText, hashApprovalValue, hashDraftEditAction, hashDraftRunAction } from './approvalReviewHash';
 import type { ApprovalReviewRequest } from './approvalReviewTypes';
+import { getDraftEditBase, getDraftEditFullText, getDraftEditKind, getDraftEditResult } from '../edits/draftEdit';
+import { renderPatchReview } from '../edits/textPatch';
 
 export function createDraftEditReviewRequest(input: {
   sessionId: string;
@@ -13,11 +15,22 @@ export function createDraftEditReviewRequest(input: {
   language: 'zh-CN' | 'en';
 }): ApprovalReviewRequest {
   const kind = input.edit.action === 'delete' ? 'draft_delete_apply' : 'draft_edit_apply';
-  const originalTextHash = input.edit.expectedOriginalTextHash ?? hashApprovalText(input.originalText);
+  const base = getDraftEditBase(input.edit);
+  const result = getDraftEditResult(input.edit);
+  const originalTextHash = base?.sha256 ?? hashApprovalText(input.originalText);
   // Create/modify reviews receive the exact proposed new content (bounded
   // deterministically); delete reviews receive the bounded content that would
   // disappear. The original full-file hash separately binds the baseline.
-  const change = input.edit.action === 'delete' ? input.originalText : input.edit.newText;
+  const change = input.edit.kind === 'text_patch_v1'
+    ? renderPatchReview(input.edit.patch)
+    : input.edit.action === 'delete'
+      ? input.originalText
+      : input.edit.kind === 'move_v1'
+        ? `${input.edit.sourceUri} -> ${input.edit.targetUri}`
+        : getDraftEditFullText(input.edit)
+          ?? (input.edit.kind === 'full_text_v1' && input.edit.contentBlobHash
+            ? `[content-addressed blob sha256 ${input.edit.contentBlobHash}; ${input.edit.result.sizeBytes} bytes]`
+            : '');
   return createBaseRequest({
     sessionId: input.sessionId,
     rootTaskId: input.rootTaskId ?? input.agentRunId,
@@ -30,15 +43,20 @@ export function createDraftEditReviewRequest(input: {
     staticRiskAnalysis: [
       `file_action:${input.edit.action}`,
       input.edit.action === 'delete' ? 'destructive_delete' : 'workspace_write',
-      input.edit.expectedOriginalTextHash ? 'baseline_hash_present' : 'baseline_hash_absent'
+      base?.sha256 ? 'baseline_hash_present' : 'baseline_hash_absent',
+      `payload_version:${getDraftEditKind(input.edit)}`
     ],
     exactAction: {
       kind,
       action: input.edit.action,
       uri: input.edit.uri,
       proposedChange: createBoundedReviewText(change),
+      payloadVersion: getDraftEditKind(input.edit),
+      canonicalPayloadHash: input.edit.kind === 'text_patch_v1' ? input.edit.patch.canonicalHash : undefined,
       expectedOriginalTextHash: originalTextHash,
-      expectedOriginalSize: input.edit.expectedOriginalSize ?? Buffer.byteLength(input.originalText, 'utf8')
+      expectedOriginalSize: base?.sizeBytes ?? Buffer.byteLength(input.originalText, 'utf8'),
+      resultTextHash: result?.sha256,
+      resultSize: result?.sizeBytes
     },
     language: input.language
   });

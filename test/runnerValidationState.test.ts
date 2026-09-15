@@ -1,12 +1,13 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, test } from 'node:test';
 import * as vscode from './stubs/vscode';
 import { AgentRunner } from '../src/agent/runner';
 import {
+  APPLY_PATCH_TOOL_NAME,
   CREATE_DRAFT_EDIT_TOOL_NAME,
   READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
   RUN_DRAFT_TOOL_NAME,
@@ -88,6 +89,45 @@ test('Runner also blocks validation after a repair DraftEdit', async () => {
   assert.equal(response.repairLoop.pendingDraftEditIds.length, 1);
   assert.match(response.message, /Validation is paused/u);
   assert.match(response.message, /covered only the pre-change workspace baseline/u);
+});
+
+test('Runner records every v9 multi-file patch DraftEdit before blocking validation', async () => {
+  const validation = new FakeValidationTools([]);
+  await writeFile(path.join(workspaceRoot, 'one.ts'), 'export const one = 1;\n');
+  await writeFile(path.join(workspaceRoot, 'two.ts'), 'export const two = 2;\n');
+  const patch = JSON.stringify({
+    version: 'keepseek_patch_v1',
+    operations: [
+      { action: 'update', path: 'one.ts', edits: [{ search: 'one = 1', replace: 'one = 10' }] },
+      { action: 'update', path: 'two.ts', edits: [{ search: 'two = 2', replace: 'two = 20' }] }
+    ]
+  });
+  const request = createRequest('Patch both files, then validate.');
+  request.requestProtocolVersion = 9;
+  const response = await withResponses([
+    toolResponse([
+      toolCall('patch-both', APPLY_PATCH_TOOL_NAME, { patch, reason: 'Update both constants.' }),
+      toolCall('validate-after-patch', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })
+    ]),
+    textResponse('Both changes are pending.')
+  ], async () => await createRunner(validation).run(request));
+
+  assert.equal(validation.runCount, 0);
+  assert.equal(response.draftEdits.length, 2);
+  assert.equal(response.draftEdits.every((edit) => edit.kind === 'text_patch_v1' && !('newText' in edit)), true);
+  const patchResult = JSON.parse(response.toolRounds?.[0]?.toolResults[0]?.content ?? '{}') as {
+    draftEditIds?: string[];
+    files?: Array<{ hash?: string }>;
+    patch?: unknown;
+  };
+  assert.equal(patchResult.draftEditIds?.length, 2);
+  assert.equal(patchResult.files?.every((file) => /^[a-f0-9]{64}$/u.test(file.hash ?? '')), true);
+  assert.equal(Object.hasOwn(patchResult, 'patch'), false);
+  assert.equal(JSON.parse(response.toolRounds?.[0]?.toolResults[1]?.content ?? '{}').errorType, 'pending_changes_require_apply');
+  assert.deepEqual(await Promise.all([
+    readFile(path.join(workspaceRoot, 'one.ts'), 'utf8'),
+    readFile(path.join(workspaceRoot, 'two.ts'), 'utf8')
+  ]), ['export const one = 1;\n', 'export const two = 2;\n']);
 });
 
 test('Runner preserves the Apply-then-continue validation flow', async () => {

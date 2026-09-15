@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import { ModelSourceStore } from '../src/accounts/accountStore';
 import { SubagentSettingsStore } from '../src/accounts/subagentSettingsStore';
 import {
+  APPLY_PATCH_TOOL_NAME,
   CREATE_DRAFT_EDIT_TOOL_NAME,
   getAgentTools,
   READ_WORKSPACE_FILE_TOOL_NAME,
@@ -157,7 +158,7 @@ test('read-only and depth-limited child profiles cannot draft, validate, run, or
   for (const id of ['research', 'review']) {
     const profile = resolveSubagentProfile({ requestedId: id })!;
     const shallow = getChildToolNamesForRuntime(profile, 1);
-    for (const forbidden of [CREATE_DRAFT_EDIT_TOOL_NAME, RUN_DRAFT_TOOL_NAME, RUN_VALIDATION_TOOL_NAME]) {
+    for (const forbidden of [APPLY_PATCH_TOOL_NAME, CREATE_DRAFT_EDIT_TOOL_NAME, RUN_DRAFT_TOOL_NAME, RUN_VALIDATION_TOOL_NAME]) {
       assert.equal(shallow.includes(forbidden), false, `${id}:${forbidden}`);
       assert.match(getToolExposureError(forbidden, new Set(shallow)) ?? '', /subagent_tool_not_exposed/u);
     }
@@ -169,6 +170,8 @@ test('read-only and depth-limited child profiles cannot draft, validate, run, or
   assert.equal(proposal.includes(CREATE_DRAFT_EDIT_TOOL_NAME), true);
   assert.equal(proposal.includes(RUN_VALIDATION_TOOL_NAME), false);
   assert.equal(proposal.includes('keepseek_delegate_task'), false);
+  assert.equal(getChildToolNamesForRuntime(resolveSubagentProfile({ requestedId: 'proposal' })!, 1, 8).includes(APPLY_PATCH_TOOL_NAME), false);
+  assert.equal(getChildToolNamesForRuntime(resolveSubagentProfile({ requestedId: 'proposal' })!, 1, 9).includes(APPLY_PATCH_TOOL_NAME), true);
   const nestedProposal = restrictSubagentRuntimeProfile(resolveSubagentProfile({ requestedId: 'proposal' })!, { nested: true, parallel: false });
   assert.equal(nestedProposal.lane, 'nested-read');
   assert.equal(nestedProposal.toolNames.includes(CREATE_DRAFT_EDIT_TOOL_NAME), false);

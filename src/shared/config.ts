@@ -19,6 +19,15 @@ import { resolveProjectModel } from '../accounts/modelCatalog';
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
 export const DEFAULT_MAX_FILE_BYTES = 200_000;
+export const DEFAULT_PATCH_MAX_PAYLOAD_BYTES = 1_048_576;
+export const DEFAULT_PATCH_MAX_HUNKS = 256;
+export const DEFAULT_PATCH_MAX_CHANGED_BYTES = 2_097_152;
+export const DEFAULT_PATCH_MAX_INLINE_BYTES = 65_536;
+export const DEFAULT_PATCH_MAX_PROVIDER_BUFFER_BYTES = 16_777_216;
+export const DEFAULT_PATCH_MAX_BACKUP_BYTES = 33_554_432;
+export const DEFAULT_PATCH_MAX_CHANGE_SET_ARTIFACT_BYTES = 134_217_728;
+export const DEFAULT_PATCH_BLOB_STORE_QUOTA_BYTES = 1_073_741_824;
+export const DEFAULT_PATCH_MAX_DIFF_BYTES = 4_194_304;
 export const DEFAULT_PROVIDER_INLINE_RESULT_MAX_CHARS = 48_000;
 export const DEFAULT_EVIDENCE_MAX_BYTES = 100_000_000;
 export const DEFAULT_AGENT_MAX_COST = 0;
@@ -115,6 +124,18 @@ export interface InteractionTraceSettings {
   logRawStream: boolean;
   retentionDays: number;
   maxFileBytes: number;
+}
+
+export interface PatchSettings {
+  maxPayloadBytes: number;
+  maxHunks: number;
+  maxChangedBytes: number;
+  maxInlineBytes: number;
+  maxProviderBufferBytes: number;
+  maxBackupBytes: number;
+  maxChangeSetArtifactBytes: number;
+  blobStoreQuotaBytes: number;
+  maxDiffBytes: number;
 }
 
 export function getConfiguredModels(): KeepseekModel[] {
@@ -418,6 +439,21 @@ export function getConfiguredWorkspaceReadMaxBytes(): number {
     .getConfiguration('keepseek')
     .get<number>('maxFileBytes', DEFAULT_MAX_FILE_BYTES);
   return normalizeIntegerInRange(configuredLimit, 1, 20_000_000, DEFAULT_MAX_FILE_BYTES);
+}
+
+export function getConfiguredPatchSettings(): PatchSettings {
+  const config = vscode.workspace.getConfiguration('keepseek');
+  return {
+    maxPayloadBytes: normalizeIntegerInRange(config.get('patch.maxPayloadBytes', DEFAULT_PATCH_MAX_PAYLOAD_BYTES), 1_024, 16_777_216, DEFAULT_PATCH_MAX_PAYLOAD_BYTES),
+    maxHunks: normalizeIntegerInRange(config.get('patch.maxHunks', DEFAULT_PATCH_MAX_HUNKS), 1, 4_096, DEFAULT_PATCH_MAX_HUNKS),
+    maxChangedBytes: normalizeIntegerInRange(config.get('patch.maxChangedBytes', DEFAULT_PATCH_MAX_CHANGED_BYTES), 1, 67_108_864, DEFAULT_PATCH_MAX_CHANGED_BYTES),
+    maxInlineBytes: normalizeIntegerInRange(config.get('patch.maxInlineBytes', DEFAULT_PATCH_MAX_INLINE_BYTES), 1_024, 4_194_304, DEFAULT_PATCH_MAX_INLINE_BYTES),
+    maxProviderBufferBytes: normalizeIntegerInRange(config.get('patch.maxProviderBufferBytes', DEFAULT_PATCH_MAX_PROVIDER_BUFFER_BYTES), 1_024, 268_435_456, DEFAULT_PATCH_MAX_PROVIDER_BUFFER_BYTES),
+    maxBackupBytes: normalizeIntegerInRange(config.get('patch.maxBackupBytes', DEFAULT_PATCH_MAX_BACKUP_BYTES), 1_024, 536_870_912, DEFAULT_PATCH_MAX_BACKUP_BYTES),
+    maxChangeSetArtifactBytes: normalizeIntegerInRange(config.get('patch.maxChangeSetArtifactBytes', DEFAULT_PATCH_MAX_CHANGE_SET_ARTIFACT_BYTES), 1_048_576, 1_073_741_824, DEFAULT_PATCH_MAX_CHANGE_SET_ARTIFACT_BYTES),
+    blobStoreQuotaBytes: normalizeIntegerInRange(config.get('patch.blobStoreQuotaBytes', DEFAULT_PATCH_BLOB_STORE_QUOTA_BYTES), 1_048_576, 10_737_418_240, DEFAULT_PATCH_BLOB_STORE_QUOTA_BYTES),
+    maxDiffBytes: normalizeIntegerInRange(config.get('patch.maxDiffBytes', DEFAULT_PATCH_MAX_DIFF_BYTES), 65_536, 67_108_864, DEFAULT_PATCH_MAX_DIFF_BYTES)
+  };
 }
 
 export function getConfiguredProviderInlineResultMaxChars(): number {

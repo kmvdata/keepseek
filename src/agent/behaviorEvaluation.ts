@@ -89,6 +89,7 @@ export interface BehaviorEvalScore {
 const DRAFT_TOOL_NAMES = new Set([
   'keepseek_create_draft_edit',
   'keepseek_create_incremental_draft_edit',
+  'keepseek_apply_patch',
   'keepseek_delete_workspace_file'
 ]);
 const BROAD_SCAN_TOOL_NAMES = new Set([

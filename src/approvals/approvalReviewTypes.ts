@@ -36,8 +36,12 @@ export type ApprovalReviewExactAction =
       action: DraftEditAction;
       uri: string;
       proposedChange: BoundedReviewText;
+      payloadVersion?: string;
+      canonicalPayloadHash?: string;
       expectedOriginalTextHash?: string;
       expectedOriginalSize?: number;
+      resultTextHash?: string;
+      resultSize?: number;
     }
   | {
       kind: 'draft_run_execute';

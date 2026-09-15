@@ -741,18 +741,94 @@ export interface WorkspaceSummary {
 
 export type DraftEditAction = 'create' | 'modify' | 'delete' | 'move';
 
-export interface DraftEdit {
+export interface FileContentIdentity {
+  sha256: string;
+  sizeBytes: number;
+}
+
+export interface TextFileEncoding {
+  name: 'utf-8';
+  bom: 'none' | 'utf8';
+  eol: 'none' | 'lf' | 'crlf' | 'mixed';
+  finalEol: boolean;
+}
+
+export interface TextPatchHunkV1 {
+  /** Inclusive byte offset in the exact base file. */
+  startByte: number;
+  /** Exclusive byte offset in the exact base file. */
+  endByte: number;
+  /** Informational, one-based location captured when the patch was prepared. */
+  startLine: number;
+  oldText: string;
+  newText: string;
+  oldSha256: string;
+  newSha256: string;
+  oldSizeBytes: number;
+  newSizeBytes: number;
+}
+
+export interface TextPatchV1 {
+  version: 'text_patch_v1';
+  targetUri: string;
+  base: FileContentIdentity;
+  result: FileContentIdentity;
+  encoding: TextFileEncoding;
+  hunks: TextPatchHunkV1[];
+  canonicalHash: string;
+}
+
+interface DraftEditBase {
   id: string;
   uri: string;
   label: string;
   action: DraftEditAction;
-  newText: string;
   reason: string;
+}
+
+/** Deserialization-only shape written by ChangeSet storage V1-V3. */
+export interface LegacyDraftEditV0 extends DraftEditBase {
+  kind?: undefined;
+  newText: string;
   /** Internal apply precondition. Never expose this value to the Webview. */
   expectedOriginalTextHash?: string;
   /** Internal apply precondition. Never expose this value to the Webview. */
   expectedOriginalSize?: number;
 }
+
+export interface FullTextDraftEditV1 extends DraftEditBase {
+  kind: 'full_text_v1';
+  action: 'create' | 'modify';
+  content?: string;
+  contentBlobHash?: string;
+  base?: FileContentIdentity;
+  result: FileContentIdentity;
+  encoding: TextFileEncoding;
+}
+
+export interface TextPatchDraftEditV1 extends DraftEditBase {
+  kind: 'text_patch_v1';
+  action: 'modify';
+  patch: TextPatchV1;
+}
+
+export interface DeleteDraftEditV1 extends DraftEditBase {
+  kind: 'delete_v1';
+  action: 'delete';
+  base: FileContentIdentity;
+  encoding: TextFileEncoding;
+}
+
+export interface MoveDraftEditV1 extends DraftEditBase {
+  kind: 'move_v1';
+  action: 'move';
+  sourceUri: string;
+  targetUri: string;
+  base: FileContentIdentity;
+}
+
+export type DraftEdit = LegacyDraftEditV0 | FullTextDraftEditV1 | TextPatchDraftEditV1
+  | DeleteDraftEditV1 | MoveDraftEditV1;
 
 export type TaskPlanStatus = 'running' | 'blocked' | 'completed' | 'failed' | 'stopped';
 
@@ -785,24 +861,29 @@ export type ChangeSetStatus =
   | 'partially_applied'
   | 'applied'
   | 'partially_failed'
+  | 'uncertain'
   | 'reverted'
   | 'discarded';
 
 export type ChangeSetFileStatus =
   | 'pending'
+  | 'prepared'
+  | 'applying'
   | 'applied'
   | 'discarded'
   | 'apply_failed'
+  | 'uncertain'
+  | 'interrupted'
   | 'reverted'
   | 'revert_failed';
 
-export interface ChangeSetFile extends DraftEdit {
+export type ChangeSetFile = DraftEdit & {
   status: ChangeSetFileStatus;
   approvalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
   approvalSource?: 'user_click' | 'model_reviewer' | 'delegated_approver';
   error?: string;
   checkpointId?: string;
-}
+};
 
 export interface ChangeSetApplyFailure {
   editId: string;
@@ -827,21 +908,35 @@ export interface ChangeSetRevertResult {
 }
 
 export interface ChangeCheckpoint {
+  version?: 1 | 2;
   /** Exact external target explicitly authorized when this checkpoint was applied. */
   authorizedExternalUri?: string;
   id: string;
   changeSetId: string;
   editId: string;
   uri: string;
+  targetUri?: string;
   label: string;
   action: DraftEditAction;
+  draftKind?: 'legacy_full_text_v0' | 'full_text_v1' | 'text_patch_v1' | 'delete_v1' | 'move_v1';
+  state?: 'prepared' | 'applying' | 'applied' | 'uncertain' | 'interrupted' | 'reverted';
+  /** Direction of the last journaled mutation. Legacy checkpoints imply apply. */
+  operation?: 'apply' | 'revert';
   originalExists: boolean;
+  /** V1 migration only. V2 patch checkpoints use inversePatch instead. */
   originalText?: string;
   originalTextHash?: string;
+  hashMode?: 'legacy_text' | 'utf8_bytes';
+  originalSizeBytes?: number;
+  originalBlobHash?: string;
   appliedExists: boolean;
   appliedTextHash?: string;
+  appliedSizeBytes?: number;
+  inversePatch?: TextPatchV1;
   createdAt: string;
-  appliedAt: string;
+  preparedAt?: string;
+  applyingAt?: string;
+  appliedAt?: string;
   revertedAt?: string;
 }
 

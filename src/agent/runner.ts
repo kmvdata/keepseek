@@ -1,7 +1,7 @@
 import { ExecutionClock, ExecutionBudgetError, ExecutionCostBudget, abortable, mergeCostLimits, mergeDurations } from './executionPolicy';
 import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted, migrateLegacyCapacityCheckpoint } from './runCheckpoint';
 import { shapeWorkspaceListingResult } from './toolResultShaping';
-import { getConfiguredAgentMaxCost, getConfiguredAgentMaxExecutionMs, getConfiguredEvidenceMaxBytes, getConfiguredProviderInlineResultMaxChars, getConfiguredStreamIdleTimeoutMs } from '../shared/config';
+import { getConfiguredAgentMaxCost, getConfiguredAgentMaxExecutionMs, getConfiguredEvidenceMaxBytes, getConfiguredPatchSettings, getConfiguredProviderInlineResultMaxChars, getConfiguredStreamIdleTimeoutMs } from '../shared/config';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
@@ -49,6 +49,7 @@ import {
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
   CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
+  APPLY_PATCH_TOOL_NAME,
   DELEGATE_PARALLEL_TOOL_NAME,
   DELEGATE_TASK_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
@@ -105,6 +106,21 @@ import {
 } from './tools/toolAuthorization';
 import type { KeepseekLanguage } from '../shared/i18n';
 import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
+import {
+  createDeleteDraftEdit as createDeleteDraftEditV1,
+  createFullTextDraftEdit,
+  getDraftEditBase,
+  getDraftEditResult
+} from '../edits/draftEdit';
+import {
+  hashBytes,
+  inspectTextEncoding,
+  parseKeepseekPatch,
+  prepareTextPatch,
+  type KeepseekPatchOperation,
+  type TextPatchEditInput
+} from '../edits/textPatch';
+import { ChangeArtifactStore } from '../edits/changeArtifactStore';
 import { DsmlToolParser } from './deepseek/dsmlToolParser';
 import { createProviderClient } from './providers/factory';
 import type { ProviderClientConfig } from './providers/types';
@@ -633,7 +649,14 @@ export class AgentLoop {
                 label: edit.label,
                 action: edit.action,
                 reason: edit.reason,
-                newText: summarizeText(edit.newText)
+                kind: edit.kind ?? 'legacy_full_text_v0',
+                payloadHash: edit.kind === 'text_patch_v1'
+                  ? edit.patch.canonicalHash
+                  : edit.kind === 'full_text_v1'
+                    ? edit.result.sha256
+                    : edit.kind === 'delete_v1' || edit.kind === 'move_v1'
+                      ? edit.base.sha256
+                      : hashText(edit.newText)
               })),
               draftRuns: responseWithUsage.draftRuns.map((draftRun) => ({
                 id: draftRun.id,
@@ -998,6 +1021,7 @@ export class AgentLoop {
           plan: taskPlan.getPlan(), evidenceRefs: epoch.evidenceRefs, failures: rolloverFailures
         });
         const epochCheckpointInput = {
+          protocolVersion: request.requestProtocolVersion ?? 1,
           originalTask: request.prompt,
           taskPlan: taskPlan.getPlan(),
           draftEdits,
@@ -1578,11 +1602,11 @@ export class AgentLoop {
           repairLoop.recordProblemsRead();
           taskPlan.markProblemsRead();
         } else if (isDraftEditPreparationTool(toolCall.function.name)) {
-          const draftEditId = readDraftEditId(rawToolResult);
-          if (draftEditId) {
-            validationState.recordDraftEdit(draftEditId);
+          const draftEditIds = readDraftEditIds(rawToolResult);
+          if (draftEditIds.length) {
+            for (const draftEditId of draftEditIds) validationState.recordDraftEdit(draftEditId);
             if (repairLoop.getState().status === 'generating_repair') {
-              repairLoop.recordDraftEdit(draftEditId);
+              for (const draftEditId of draftEditIds) repairLoop.recordDraftEdit(draftEditId);
               const detail = request.language === 'en'
                 ? 'Repair prepared. Apply the pending ChangeSet before validation can continue.'
                 : '修复已准备。请先应用待确认 ChangeSet，之后才能继续验证。';
@@ -2772,6 +2796,7 @@ export class AgentLoop {
         return 'reading_file';
       case CREATE_DRAFT_EDIT_TOOL_NAME:
       case CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME:
+      case APPLY_PATCH_TOOL_NAME:
       case DELETE_WORKSPACE_FILE_TOOL_NAME:
         return 'creating_draft_edit';
       case RUN_DRAFT_TOOL_NAME:
@@ -3074,6 +3099,8 @@ export class AgentLoop {
           return await this.createDraftEdit(args, draftEdits, language);
         case CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME:
           return await this.createIncrementalDraftEdit(args, draftEdits, language);
+        case APPLY_PATCH_TOOL_NAME:
+          return await this.createPatchDraftEdits(args, draftEdits, language);
         case DELETE_WORKSPACE_FILE_TOOL_NAME:
           return await this.createDeleteDraftEdit(args, draftEdits, language);
         default:
@@ -3220,15 +3247,23 @@ export class AgentLoop {
   }
 
   private async captureDraftBaseline(edit: DraftEdit): Promise<void> {
-    if (edit.action === 'create' || edit.expectedOriginalTextHash) return;
+    if (edit.kind === 'text_patch_v1' || edit.kind === 'delete_v1' || edit.kind === 'move_v1' || edit.action === 'create') return;
+    if (edit.kind === 'full_text_v1' && edit.base) return;
+    if (!edit.kind && edit.expectedOriginalTextHash) return;
     const uri = vscode.Uri.parse(edit.uri);
     const stat = await vscode.workspace.fs.stat(uri);
-    const limit = getConfiguredWorkspaceReadMaxBytes();
+    const limit = edit.kind === 'full_text_v1'
+      ? getConfiguredPatchSettings().maxBackupBytes
+      : getConfiguredWorkspaceReadMaxBytes();
     if (stat.type !== vscode.FileType.File || stat.size > limit) throw new AgentInterruptedError('resource_limit', 'Draft baseline is not a bounded text file / 草案基线不是允许大小内的文本文件');
     const bytes = await vscode.workspace.fs.readFile(uri);
     if (bytes.byteLength > limit) throw new AgentInterruptedError('resource_limit', 'Draft baseline resource limit / 草案基线超出资源上限');
-    edit.expectedOriginalTextHash = hashText(new TextDecoder().decode(bytes));
-    edit.expectedOriginalSize = bytes.byteLength;
+    if (edit.kind === 'full_text_v1') {
+      edit.base = { sha256: hashBytes(bytes), sizeBytes: bytes.byteLength };
+    } else {
+      edit.expectedOriginalTextHash = hashText(new TextDecoder().decode(bytes));
+      edit.expectedOriginalSize = bytes.byteLength;
+    }
   }
 
   private async createDraftEdit(args: Record<string, unknown>, draftEdits: DraftEdit[], language: KeepseekLanguage): Promise<string> {
@@ -3238,17 +3273,28 @@ export class AgentLoop {
     if (conflict) {
       return this.createDraftEditConflictResult(uri, conflict, language);
     }
-    const content = input.replaceRange
-      ? await this.createRangeReplacedDraftContent(uri, input.content, input.replaceRange, language)
-      : input.content;
-    const draftEdit: DraftEdit = {
-      id: randomUUID(),
-      uri: uri.toString(),
-      label: this.workspaceTools.getLabel(uri),
-      action: await this.getDraftEditAction(uri),
-      newText: content,
-      reason: input.reason
-    };
+    const action = await this.getDraftEditAction(uri);
+    let draftEdit: DraftEdit;
+    if (input.replaceRange) {
+      if (action !== 'modify') throw new Error('Line-range replacement requires an existing text file.');
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      const patch = prepareTextPatch({
+        targetUri: uri.toString(),
+        baseBytes: bytes,
+        edits: [{ startLine: input.replaceRange.startLine, endLine: input.replaceRange.endLine, replace: input.content }],
+        limits: this.getTextPatchLimits(),
+        normalizeReplacementEol: true
+      });
+      draftEdit = {
+        id: randomUUID(), uri: uri.toString(), label: this.workspaceTools.getLabel(uri),
+        kind: 'text_patch_v1', action: 'modify', patch, reason: input.reason
+      };
+    } else {
+      draftEdit = await this.createFullTextDraft({
+        id: randomUUID(), uri: uri.toString(), label: this.workspaceTools.getLabel(uri),
+        action, content: input.content, reason: input.reason
+      });
+    }
 
     draftEdits.push(draftEdit);
     return JSON.stringify({
@@ -3281,43 +3327,40 @@ export class AgentLoop {
     if (stat.type !== vscode.FileType.File) {
       throw new Error('Incremental edits require an existing regular file.');
     }
-    const originalContent = new TextDecoder('utf-8', { fatal: false }).decode(await vscode.workspace.fs.readFile(uri));
-    if (!isReadableTextContent(originalContent)) {
-      throw new Error('Incremental edits require readable UTF-8 text.');
-    }
-    const edits = this.readIncrementalEditOperations(args.edits, originalContent);
-    const ordered = [...edits].sort((left, right) => right.startOffset - left.startOffset);
-    let nextText = originalContent;
-    for (const edit of ordered) {
-      nextText = `${nextText.slice(0, edit.startOffset)}${edit.replacement}${nextText.slice(edit.endOffset)}`;
-    }
+    const originalBytes = await vscode.workspace.fs.readFile(uri);
+    const edits = this.readIncrementalEditOperations(args.edits);
+    const patch = prepareTextPatch({
+      targetUri: uri.toString(),
+      baseBytes: originalBytes,
+      edits,
+      limits: this.getTextPatchLimits(),
+      normalizeReplacementEol: true
+    });
     const draftEdit: DraftEdit = {
       id: randomUUID(),
       uri: uri.toString(),
       label: this.workspaceTools.getLabel(uri),
+      kind: 'text_patch_v1',
       action: 'modify',
-      newText: nextText,
+      patch,
       reason
     };
     draftEdits.push(draftEdit);
     return JSON.stringify({
       ok: true,
       draftEdit: { id: draftEdit.id, label: draftEdit.label, editCount: edits.length },
-      message: 'Incremental edits were combined into one pending full-file DraftEdit. KeepSeek groups it with every other DraftEdit from this Agent run in one ChangeSet for individual review or Accept all.'
+      message: 'Incremental edits were canonicalized into one patch-native pending DraftEdit. KeepSeek groups it with every other DraftEdit from this Agent run in one ChangeSet for individual review or Accept all.'
     });
   }
 
   private readIncrementalEditOperations(
-    value: unknown,
-    originalContent: string
-  ): Array<{ startOffset: number; endOffset: number; replacement: string }> {
-    if (!Array.isArray(value) || value.length < 1 || value.length > 100) {
-      throw new Error('Tool argument "edits" must contain between 1 and 100 edits.');
+    value: unknown
+  ): TextPatchEditInput[] {
+    const maxHunks = getConfiguredPatchSettings().maxHunks;
+    if (!Array.isArray(value) || value.length < 1 || value.length > maxHunks) {
+      throw new Error(`Tool argument "edits" must contain between 1 and ${maxHunks} edits.`);
     }
-    const newline = originalContent.includes('\r\n') ? '\r\n' : '\n';
-    const lineStarts = this.getRawLineStartOffsets(originalContent);
-    const lineCount = this.getNormalizedLineCount(originalContent.replace(/\r\n?/gu, '\n'), this.getLineStartOffsets(originalContent.replace(/\r\n?/gu, '\n')));
-    const operations = value.map((raw, index) => {
+    return value.map((raw, index) => {
       if (!this.isRecord(raw)) {
         throw new Error(`edits[${index}] must be an object.`);
       }
@@ -3334,47 +3377,11 @@ export class AgentLoop {
         if (!search) {
           throw new Error(`edits[${index}].search cannot be empty.`);
         }
-        const startOffset = originalContent.indexOf(search);
-        if (startOffset < 0) {
-          throw new Error(`edits[${index}].search did not match the current file. Reread the relevant range and retry.`);
-        }
-        if (originalContent.indexOf(search, startOffset + search.length) >= 0) {
-          throw new Error(`edits[${index}].search is ambiguous because it matches more than once.`);
-        }
-        return { startOffset, endOffset: startOffset + search.length, replacement: raw.replace as string };
+        return { search, replace: raw.replace as string };
       }
       const range = this.parseLineReplacementRange(raw.replaceRange, `edits[${index}].replaceRange`);
-      if (range.endLine > lineCount) {
-        throw new Error(`edits[${index}].replaceRange exceeds file length ${lineCount}.`);
-      }
-      const startOffset = lineStarts[range.startLine - 1] ?? originalContent.length;
-      const endOffset = range.endLine >= lineCount
-        ? originalContent.length
-        : lineStarts[range.endLine] ?? originalContent.length;
-      let replacement = (raw.replace as string).replace(/\r\n?|\n/gu, newline);
-      if (replacement && !replacement.endsWith(newline)
-        && (endOffset < originalContent.length || originalContent.endsWith(newline))) {
-        replacement += newline;
-      }
-      return { startOffset, endOffset, replacement };
+      return { startLine: range.startLine, endLine: range.endLine, replace: raw.replace as string };
     });
-    const ascending = [...operations].sort((left, right) => left.startOffset - right.startOffset);
-    for (let index = 1; index < ascending.length; index += 1) {
-      if (ascending[index].startOffset < ascending[index - 1].endOffset) {
-        throw new Error('Incremental edits overlap; reread the relevant range and submit non-overlapping targets.');
-      }
-    }
-    return operations;
-  }
-
-  private getRawLineStartOffsets(content: string): number[] {
-    const starts = [0];
-    for (let index = 0; index < content.length; index += 1) {
-      if (content[index] === '\n') {
-        starts.push(index + 1);
-      }
-    }
-    return starts;
   }
 
   private async createDeleteDraftEdit(
@@ -3427,7 +3434,7 @@ export class AgentLoop {
           : '安全删除与回滚仅支持可读的 UTF-8 文本文件。'
       });
     }
-    const maxBytes = getConfiguredWorkspaceReadMaxBytes();
+    const maxBytes = getConfiguredPatchSettings().maxBackupBytes;
     if (stat.size > maxBytes) {
       return JSON.stringify({
         ok: false,
@@ -3453,8 +3460,7 @@ export class AgentLoop {
           : `文件超过安全删除与回滚上限 ${formatBytes(maxBytes)}。`
       });
     }
-    const originalText = decodeRollbackSafeUtf8Text(originalBytes);
-    if (originalText === undefined) {
+    if (decodeRollbackSafeUtf8Text(originalBytes) === undefined) {
       return JSON.stringify({
         ok: false,
         errorType: 'delete_target_unreadable',
@@ -3465,16 +3471,9 @@ export class AgentLoop {
       });
     }
 
-    const draftEdit: DraftEdit = {
-      id: randomUUID(),
-      uri: uri.toString(),
-      label,
-      action: 'delete',
-      newText: '',
-      reason,
-      expectedOriginalTextHash: hashText(originalText),
-      expectedOriginalSize: originalBytes.byteLength
-    };
+    const draftEdit: DraftEdit = createDeleteDraftEditV1({
+      id: randomUUID(), uri: uri.toString(), label, reason, baseBytes: originalBytes
+    });
     draftEdits.push(draftEdit);
     return JSON.stringify({
       ok: true,
@@ -3491,7 +3490,137 @@ export class AgentLoop {
 
   private findDraftEditConflict(uri: vscode.Uri, draftEdits: readonly DraftEdit[]): DraftEdit | undefined {
     const key = uri.toString();
-    return draftEdits.find((edit) => edit.uri === key);
+    return draftEdits.find((edit) => edit.uri === key || (edit.kind === 'move_v1' && edit.targetUri === key));
+  }
+
+  private getTextPatchLimits() {
+    const settings = getConfiguredPatchSettings();
+    return {
+      maxPatchBytes: settings.maxPayloadBytes,
+      maxHunks: settings.maxHunks,
+      maxChangedBytes: settings.maxChangedBytes,
+      maxInlineBytes: settings.maxInlineBytes
+    };
+  }
+
+  private async createPatchDraftEdits(
+    args: Record<string, unknown>,
+    draftEdits: DraftEdit[],
+    language: KeepseekLanguage
+  ): Promise<string> {
+    const reason = this.readRequiredString(args, 'reason');
+    const document = parseKeepseekPatch(this.readRequiredString(args, 'patch'), this.getTextPatchLimits());
+    const staged: DraftEdit[] = [];
+    for (const operation of document.operations) {
+      const created = await this.createPatchOperationDraft(operation, reason, [...draftEdits, ...staged], language);
+      staged.push(created);
+    }
+    const changedBytes = staged.reduce((total, edit) => {
+      if (edit.kind === 'text_patch_v1') {
+        return total + edit.patch.hunks.reduce((sum, hunk) => sum + hunk.oldSizeBytes + hunk.newSizeBytes, 0);
+      }
+      if (edit.kind === 'move_v1') return total;
+      return total + (getDraftEditBase(edit)?.sizeBytes ?? 0) + (getDraftEditResult(edit)?.sizeBytes ?? 0);
+    }, 0);
+    const changedLimit = getConfiguredPatchSettings().maxChangedBytes;
+    if (changedBytes > changedLimit) {
+      throw new Error(`Patch changes ${changedBytes} bytes across files, exceeding the configured ${changedLimit}-byte limit.`);
+    }
+    draftEdits.push(...staged);
+    return JSON.stringify({
+      ok: true,
+      draftEditIds: staged.map((edit) => edit.id),
+      status: 'pending',
+      files: staged.map((edit) => ({
+        id: edit.id,
+        label: edit.label,
+        action: edit.action,
+        kind: edit.kind,
+        hash: edit.kind === 'text_patch_v1'
+          ? edit.patch.canonicalHash
+          : edit.kind === 'full_text_v1'
+            ? edit.result.sha256
+            : edit.kind === 'delete_v1' || edit.kind === 'move_v1'
+              ? edit.base.sha256
+              : hashText(edit.newText)
+      }))
+    });
+  }
+
+  private async createPatchOperationDraft(
+    operation: KeepseekPatchOperation,
+    reason: string,
+    existing: readonly DraftEdit[],
+    language: KeepseekLanguage
+  ): Promise<DraftEdit> {
+    const uri = this.workspaceTools.resolveTargetUri(operation.path);
+    const conflict = this.findDraftEditConflict(uri, existing);
+    if (conflict) {
+      throw new Error(JSON.parse(this.createDraftEditConflictResult(uri, conflict, language)).error as string);
+    }
+    const label = this.workspaceTools.getLabel(uri);
+    if (operation.action === 'add') {
+      if (await this.getDraftEditAction(uri) !== 'create') throw new Error(`Patch add target already exists: ${label}`);
+      return await this.createFullTextDraft({
+        id: randomUUID(), uri: uri.toString(), label, action: 'create', content: operation.content, reason
+      });
+    }
+    if (operation.action === 'move') {
+      const targetUri = this.workspaceTools.resolveTargetUri(operation.to);
+      if (this.findDraftEditConflict(targetUri, existing)) throw new Error('Patch move target conflicts with another declared target.');
+      const source = await this.readExistingPatchTarget(uri, label);
+      try {
+        await vscode.workspace.fs.stat(targetUri);
+        throw new Error(`Patch move target already exists: ${this.workspaceTools.getLabel(targetUri)}`);
+      } catch (error) {
+        if (!isFileNotFoundError(error)) throw error;
+      }
+      return {
+        id: randomUUID(), uri: uri.toString(), label, kind: 'move_v1', action: 'move', reason,
+        sourceUri: uri.toString(), targetUri: targetUri.toString(),
+        base: { sha256: hashBytes(source), sizeBytes: source.byteLength }
+      };
+    }
+    const bytes = await this.readExistingPatchTarget(uri, label);
+    if (operation.action === 'delete') {
+      if (bytes.byteLength > getConfiguredPatchSettings().maxBackupBytes) {
+        throw new Error(`Delete target exceeds the configured rollback backup limit: ${label}`);
+      }
+      return createDeleteDraftEditV1({ id: randomUUID(), uri: uri.toString(), label, reason, baseBytes: bytes });
+    }
+    const patch = prepareTextPatch({
+      targetUri: uri.toString(), baseBytes: bytes, edits: operation.edits,
+      limits: this.getTextPatchLimits(), normalizeReplacementEol: false
+    });
+    return {
+      id: randomUUID(), uri: uri.toString(), label, kind: 'text_patch_v1', action: 'modify', reason, patch
+    };
+  }
+
+  private async readExistingPatchTarget(uri: vscode.Uri, label: string): Promise<Uint8Array> {
+    if (shouldSkipTextUri(uri)) throw new Error(`Patch target is not an allowed text file: ${label}`);
+    const stat = await vscode.workspace.fs.stat(uri);
+    if (stat.type !== vscode.FileType.File) throw new Error(`Patch target is not a regular file: ${label}`);
+    const providerLimit = getConfiguredPatchSettings().maxProviderBufferBytes;
+    if (uri.scheme !== 'file' && stat.size > providerLimit) {
+      throw new Error(`Non-file patch target exceeds the configured ${providerLimit}-byte buffer limit: ${label}`);
+    }
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    if (uri.scheme !== 'file' && bytes.byteLength > providerLimit) {
+      throw new Error(`Non-file patch target exceeds the configured ${providerLimit}-byte buffer limit: ${label}`);
+    }
+    inspectTextEncoding(bytes);
+    return bytes;
+  }
+
+  private async createFullTextDraft(input: Parameters<typeof createFullTextDraftEdit>[0]): Promise<DraftEdit> {
+    const edit = createFullTextDraftEdit(input);
+    const bytes = new TextEncoder().encode(input.content);
+    if (bytes.byteLength > getConfiguredPatchSettings().maxInlineBytes && this.globalStorageUri) {
+      edit.contentBlobHash = await new ChangeArtifactStore(this.globalStorageUri).putBlob(bytes);
+      edit.content = undefined;
+    }
+    return edit;
   }
 
   private createDraftEditConflictResult(
@@ -4506,19 +4635,19 @@ export class AgentLoop {
     }
 
     const uri = this.workspaceTools.resolveTargetUri(targetPath);
-    return {
+    return await this.createFullTextDraft({
       id: randomUUID(),
       uri: uri.toString(),
       label: this.workspaceTools.getLabel(uri),
       action: await this.getDraftEditAction(uri),
-      newText,
+      content: newText,
       reason: language === 'en'
         ? 'Draft edit proposed from the KeepSeek chat panel.'
         : '来自 KeepSeek 对话面板的待确认修改。'
-    };
+    });
   }
 
-  private async getDraftEditAction(uri: vscode.Uri): Promise<DraftEdit['action']> {
+  private async getDraftEditAction(uri: vscode.Uri): Promise<'create' | 'modify'> {
     try {
       await vscode.workspace.fs.stat(uri);
       return 'modify';
@@ -4568,20 +4697,24 @@ function readOptionalFiniteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-function readDraftEditId(rawResult: string): string | undefined {
+function readDraftEditIds(rawResult: string): string[] {
   try {
     const parsed: unknown = JSON.parse(rawResult);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return undefined;
+      return [];
     }
-    const draftEdit = (parsed as Record<string, unknown>).draftEdit;
+    const record = parsed as Record<string, unknown>;
+    if (Array.isArray(record.draftEditIds)) {
+      return record.draftEditIds.filter((id): id is string => typeof id === 'string' && Boolean(id));
+    }
+    const draftEdit = record.draftEdit;
     if (!draftEdit || typeof draftEdit !== 'object' || Array.isArray(draftEdit)) {
-      return undefined;
+      return [];
     }
     const id = (draftEdit as Record<string, unknown>).id;
-    return typeof id === 'string' && id ? id : undefined;
+    return typeof id === 'string' && id ? [id] : [];
   } catch {
-    return undefined;
+    return [];
   }
 }
 

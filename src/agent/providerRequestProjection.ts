@@ -33,10 +33,10 @@ import {
   getAgentTools
 } from './protocol';
 
-export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 8;
+export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 9;
 export const LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION = 1;
 export const PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION = 2;
-export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 8;
+export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 9;
 
 export interface ProviderRequestProjectionInput {
   model: KeepseekModel;
@@ -418,6 +418,7 @@ function normalizeRequestProtocolVersion(value: number | undefined): number {
   if (normalized >= CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION) {
     return CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION;
   }
+  if (normalized >= 8) return 8;
   if (normalized >= 7) return 7;
   if (normalized >= 6) return 6;
   if (normalized >= 5) return 5;

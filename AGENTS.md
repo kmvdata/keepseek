@@ -47,7 +47,7 @@ src/
 │   └── tools/                   # workspace / semantic / validation / git / toolAuthorization
 ├── accounts/                    # 来源 CRUD、accountResolver（凭据唯一入口）、modelDiscovery
 ├── context/references/          # <path> / <path#Lx-Ly> / <keepseek-dir:> 展开、授权、@ 补全
-├── edits/                       # changeSetStore（主管线）、safeFileEditor、draftDiffService
+├── edits/                       # Patch IR/engine、ChangeSet journal/blob、SafeFileEditor、延迟 Diff
 ├── runs/                        # DraftRun 提议/风险分析/一次性 permit/store/spawn 执行器
 ├── sessions/                    # chatSessionStore、globalSessionStorage（摘要/归档存这里）
 ├── skills/                      # Skill 发现/激活/加载（scripts 绝不隐式执行）
@@ -92,7 +92,10 @@ src/
 
 ### 4.4 安全写入与删除
 
-- `ChangeSetStore` 是待确认修改主管线（Diff/Apply/Discard/Revert/checkpoint）；`SafeFileEditor` 负责单文件写入/删除、脏编辑器保护、删除前基线检查与 checkpoint 回滚。不要把应用行为放进 `AgentRunner`。
+- `DraftEdit` 是有版本的 union：局部修改用 canonical `text_patch_v1`（URI、base/result 字节 hash/size、编码/EOL、非重叠 byte hunks），新建/整体替换用 `full_text_v1`，删除用 `delete_v1`，移动用显式 `move_v1`。旧 `newText` 仅兼容读取；原始 patch 文本、行号和模糊匹配都不是 Apply 权威。
+- `ChangeSetStore` 是待确认修改主管线（Diff/Apply/Discard/Revert/journal）；`SafeFileEditor` 负责单文件实际落盘。patch Apply 必须先持久化 prepared journal，再核验 base，生成并验证结果，本地同目录临时文件 fsync/原子替换，最后 read-back hash 成功才记 applied；重启按 base/result/unknown 恢复，未知副作用绝不重试。不要把 patch/应用逻辑放进 `AgentRunner` 或 Provider。
+- patch 正常回滚只存 inverse patch 并绑定 result hash；delete/full replace 的原始字节进入 global storage 的 SHA-256 content-addressed blob，不把大正文嵌入 ChangeSet/checkpoint/Webview。Diff 正常延迟生成，超阈值只显示 hunk review。
+- `keepseek.maxFileBytes` 只限制全文读取/上下文，不限制本地大文件的小 patch；patch hunk/变化量、非 file provider buffer、备份、ChangeSet artifact 和全局 blob 分别受 `keepseek.patch.*` 配额限制。
 - 删除是高风险：授权 modal + Apply 前删除专用 modal；草案后文件被改动则拒绝删除；目录/二进制/超限/越界拒绝。
 - 外部文件/目录必须先授权（授权 key = `uri.toString()`）。
 
@@ -103,7 +106,7 @@ src/
 - 执行使用 `spawn(executable, args, { shell: false })`；需要 shell 语法时必须显式选择 shell executable 并把原始脚本作为 argv 展示。未受信任工作区、未授权外部 cwd、状态/specHash 不匹配均硬拒绝。
 - 取消、超时、输出截断、扩展重启中断均进入持久化状态；`approved/running` 重启后只能标记 interrupted，绝不自动重跑。完成项复用必须克隆为新的 pending 并再次确认。
 
-**项目审批模式**：命令菜单提供 `ask`（请求批准，默认）、`model_review`（模型审批，长任务推荐但可能拒绝）和 `delegate`（自动批准，不经模型审查）。只有 Webview 用户操作可切换，不能通过模型工具、项目文件或 Skill 提权；选择按 workspace 持久化，新建、切换或从其他工作区复制进来的 session 都使用目标项目当前模式，绝不继承来源项目的模式。`model_review` 使用当前子代理模型发起独立、一次性、无工具请求；不得注入项目指令/Skill/隐藏推理，不得回退模型或自动批准。每个副作用先过确定性硬检查，再用精确 actionHash 审查；记录与 session/run/target/kind/hash/policy/runtime 绑定，批准后仍经相同 Store/Editor/Executor。`delegate` 也必须生成明确“未经模型审查”的 `host_policy` 记录后才能签发 delegated permit。每轮完成后逐项处理，将决定与真实结果追加到新 user 消息；失败修改阻止依赖命令。连续拒绝 3 次或最近 50 次累计拒绝 10 次停止续跑；不可用只重试一次且不计安全拒绝。停止或切回 `ask` 撤销队列和未执行授权；重启不恢复队列、不复用旧 reviewer 批准。外部文件/cwd 按精确 URI 授权，保留信任、基线/脏编辑器、单次 permit 与取消检查。V1–V7 system/history/schema 字节冻结；V8 固定增加通用 evidence 工具和 epoch 协议，并用 `keepseek_read_evidence` 统一当前任务内包括新子代理结果在内的分页。根 lane 中旧子代理读取工具仅作为 V1–V7 已存结果迁移桥，桥接结果仍进入通用 evidence/admission 管线；新子代理 lane 不再使用独立分页。热旧 lane 只在既有缓存自然失效或首次需要外置结果时经受控 rollover 迁移。
+**项目审批模式**：命令菜单提供 `ask`（请求批准，默认）、`model_review`（模型审批，长任务推荐但可能拒绝）和 `delegate`（自动批准，不经模型审查）。只有 Webview 用户操作可切换，不能通过模型工具、项目文件或 Skill 提权；选择按 workspace 持久化，新建、切换或从其他工作区复制进来的 session 都使用目标项目当前模式，绝不继承来源项目的模式。`model_review` 使用当前子代理模型发起独立、一次性、无工具请求；不得注入项目指令/Skill/隐藏推理，不得回退模型或自动批准。每个副作用先过确定性硬检查，再用精确 actionHash 审查；patch hash 必须绑定完整 canonical payload，即使 reviewer 只看到有界 hunks 也不能复用变更后的批准。记录与 session/run/target/kind/hash/policy/runtime 绑定，批准后仍经相同 Store/Editor/Executor。`delegate` 也必须生成明确“未经模型审查”的 `host_policy` 记录后才能签发 delegated permit。每轮完成后逐项处理，将决定与真实结果追加到新 user 消息；失败修改阻止依赖命令。连续拒绝 3 次或最近 50 次累计拒绝 10 次停止续跑；不可用只重试一次且不计安全拒绝。停止或切回 `ask` 撤销队列和未执行授权；重启不恢复队列、不复用旧 reviewer 批准。外部文件/cwd 按精确 URI 授权，保留信任、基线/脏编辑器、单次 permit 与取消检查。V1–V8 system/history/schema 字节冻结；V8 固定增加通用 evidence/epoch，V9 固定增加 `keepseek_apply_patch` 与 canonical Patch IR。热旧 lane 只在既有缓存自然失效或受控 rollover 时迁移；已完成工具不重跑，根 lane 的旧子代理读取工具仍只作迁移桥。
 
 ### 4.6 Skills 与项目指令
 
@@ -123,7 +126,7 @@ src/
 - **扩展 → Webview 主动消息**：不进 `WebviewMessage`，在 webview message listener 中处理。
 - **新增 Agent 工具**：更新 protocol.ts 的 schema + runner 的工具路由；实现放独立模块。
 - **引用格式**：同步检查 fileReference、directoryReference、webview/input/script.ts、webview/script.ts 的序列化/反序列化/打开逻辑。
-- **DraftEdit/ChangeSet 行为**：优先改 ChangeSetStore / SafeFileEditor。
+- **DraftEdit/ChangeSet 行为**：同步检查 `textPatch`、`draftEdit`、`changeArtifactStore`、ChangeSetStore、SafeFileEditor、DraftDiffService、审批 hash/surface、RunCheckpoint/epoch/子代理与 Webview；canonical 字段、journal 和 blob 引用不可只改一侧。
 - **审批 / DraftRun 行为**：同步检查 protocol 版本/冻结 schema、approvals/*、runner、toolAuthorization、runs/*、Provider、webviewMessages、script/styles、i18n、审批/结果 user-tail 与 usage 分类；reviewer 不得写文件或启动进程，实际执行不得放进 AgentRunner。
 - **UI 归属**：样式只碰 styles.ts；输入区只碰 input/script.ts；transcript/设置/会话只碰 script.ts；通用快捷键碰 richTextShortcuts.ts（两个编辑器共用，勿复制实现）。
 - **公共逻辑复用**：Markdown fence、字节格式化、配置读取、错误字符串、文本文件判断用 shared/*，勿复制。
@@ -134,7 +137,7 @@ src/
 - 改压缩核心后必须验证：压缩关闭 fallback、无摘要 fallback、摘要失败 fallback、protected 消息、最近轮次、context usage 估算一致。
 - 改 evidence/epoch 后必须验证：20MB 分页、跨 session/task 拒绝、envelope 恢复字节一致、三协议批次配对、context-too-long 自适应、摘要 fallback、同 task 跨 epoch、无伪 user 消息、工具不重跑与副作用不确定态。
 - 改引用/输入后手测：全文/行段/目录引用、外部授权、不可读文件跳过、拖拽（多数据源 + 判空）、`@` 补全、编辑重发。
-- 改 edits 后手测：Apply/Discard/Apply All、删除 modal、删除前文件变化冲突、脏编辑器拒绝。
+- 改 edits 后手测：大文件小 patch 的 Apply/重启/Revert、base/result hash 冲突、prepared/applying/uncertain 恢复、普通/hunk-only Diff、非 file fallback、Apply All partial、删除 modal、脏编辑器与符号链接边界。
 - 改审批/DraftRun 后手测：三档模式、reviewer 三协议、提议→审核→批准→执行、拒绝/不可用重试/熔断、切回 ask/停止/重启撤销、删除和外部 URI、依赖阻断、流式输出、超时/截断、重复点击、Windows/POSIX argv 与显式 shell 差异。
 - 大字符串文件（webview/script.ts、webview/input/script.ts）改动后保持 DOM id / message type / 序列化格式兼容，并手测输入、拖拽、`@` 引用、Apply/Discard。
 

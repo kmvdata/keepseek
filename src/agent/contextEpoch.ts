@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { DraftEdit, DraftRunProposal, RepairLoopState, TaskPlan } from '../shared/types';
 import type { ContextWindowCalibrationState } from './toolResultAdmission';
 import { stableStringify } from './evidence/shaping';
+import { getDraftEditBase, getDraftEditKind, getDraftEditResult } from '../edits/draftEdit';
 
 export type ContextEpochRolloverReason = 'soft_context_pressure' | 'minimum_envelope_unfit' | 'tool_round_threshold'
   | 'tool_call_threshold' | 'provider_context_too_long' | 'length_continuation' | 'protocol_migration';
@@ -58,6 +59,7 @@ export interface ContextEpochState {
 }
 
 export interface ContextEpochCheckpointInput {
+  protocolVersion?: number;
   originalTask: string;
   taskPlan: TaskPlan;
   draftEdits: readonly DraftEdit[];
@@ -120,7 +122,7 @@ export function createEpochSeed(input: ContextEpochSeedInput): string {
     : fullHostState;
   const checkpoint = {
     kind: 'keepseek_context_epoch_checkpoint',
-    protocolVersion: 8,
+    protocolVersion: input.protocolVersion ?? 8,
     originalTask: input.originalTask,
     semanticSummary: input.semanticSummary,
     hostState,
@@ -145,7 +147,7 @@ export function createEpochHostCheckpoint(input: ContextEpochCheckpointInput): s
   };
   return stableStringify({
     kind: 'keepseek_context_epoch_host_state',
-    protocolVersion: 8,
+    protocolVersion: input.protocolVersion ?? 8,
     originalTask: input.originalTask,
     ...createEpochHostState(input, taskPlan)
   });
@@ -166,8 +168,16 @@ function createEpochHostState(
     taskPlan,
     completedItems: taskPlan.steps.filter((step) => step.status === 'completed' || step.status === 'skipped'),
     incompleteItems: taskPlan.steps.filter((step) => step.status === 'pending' || step.status === 'in_progress' || step.status === 'blocked'),
-    draftEdits: input.draftEdits.map((edit) => ({ id: edit.id, status: 'pending', action: edit.action, label: edit.label,
-      expectedOriginalTextHash: edit.expectedOriginalTextHash })),
+    draftEdits: input.draftEdits.map((edit) => ({
+      id: edit.id,
+      status: 'pending',
+      action: edit.action,
+      kind: getDraftEditKind(edit),
+      label: edit.label,
+      base: getDraftEditBase(edit),
+      result: getDraftEditResult(edit),
+      patchHash: edit.kind === 'text_patch_v1' ? edit.patch.canonicalHash : undefined
+    })),
     draftRuns: input.draftRuns.map((run) => ({ id: run.id, status: 'pending', specHash: run.specHash,
       target: run.spec.cwdLabel, effectVerdict: run.effectAssessment.verdict })),
     approvalResults: input.approvalResults,

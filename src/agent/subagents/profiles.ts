@@ -1,5 +1,6 @@
 import type { ActivatedSkill } from '../../shared/types';
 import {
+  APPLY_PATCH_TOOL_NAME,
   CREATE_DRAFT_EDIT_TOOL_NAME,
   CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
@@ -44,6 +45,7 @@ const PROPOSAL_TOOLS = [
   ...READ_TOOLS,
   CREATE_DRAFT_EDIT_TOOL_NAME,
   CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
+  APPLY_PATCH_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   RUN_DRAFT_TOOL_NAME
 ];
@@ -149,6 +151,7 @@ function inferCustomLane(toolNames: readonly string[]): SubagentLane {
   return toolNames.some((name) => (
     name === CREATE_DRAFT_EDIT_TOOL_NAME
     || name === CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME
+    || name === APPLY_PATCH_TOOL_NAME
     || name === DELETE_WORKSPACE_FILE_TOOL_NAME
     || name === RUN_DRAFT_TOOL_NAME
   )) ? 'proposal' : 'research-read';

@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { AgentRunner } from '../src/agent/runner';
-import { DEFAULT_MAX_FILE_BYTES } from '../src/shared/config';
+import { DEFAULT_PATCH_MAX_BACKUP_BYTES } from '../src/shared/config';
 import type { DraftEdit } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
 
@@ -39,9 +39,9 @@ test('prepares a baseline-guarded delete DraftEdit without deleting the file', a
   assert.equal(result.ok, true);
   assert.equal(draftEdits.length, 1);
   assert.equal(draftEdits[0]?.action, 'delete');
-  assert.equal(draftEdits[0]?.newText, '');
-  assert.equal(draftEdits[0]?.expectedOriginalSize, Buffer.byteLength(originalText));
-  assert.equal(draftEdits[0]?.expectedOriginalTextHash, hashText(originalText));
+  assert.equal(draftEdits[0]?.kind, 'delete_v1');
+  assert.equal(draftEdits[0]?.kind === 'delete_v1' ? draftEdits[0].base.sizeBytes : 0, Buffer.byteLength(originalText));
+  assert.equal(draftEdits[0]?.kind === 'delete_v1' ? draftEdits[0].base.sha256 : '', hashText(originalText));
   assert.equal(await fs.readFile(targetPath, 'utf8'), originalText);
 });
 
@@ -52,7 +52,7 @@ test('rejects missing, directory, outside-workspace, binary, and oversized delet
   const oversizedPath = path.join(root, 'oversized.txt');
   await fs.mkdir(directoryPath, { recursive: true });
   await fs.writeFile(binaryPath, Uint8Array.from([...Buffer.from('safe prefix'), 0xff]));
-  await fs.writeFile(oversizedPath, 'x'.repeat(DEFAULT_MAX_FILE_BYTES + 1), 'utf8');
+  await fs.writeFile(oversizedPath, 'x'.repeat(DEFAULT_PATCH_MAX_BACKUP_BYTES + 1), 'utf8');
 
   const missing = JSON.parse(await invoke().createDeleteDraftEdit({
     path: 'missing.ts',

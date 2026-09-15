@@ -20,6 +20,7 @@ import type {
 } from '../../shared/types';
 import type { InteractionTraceLogService } from '../logging/interactionTrace';
 import {
+  APPLY_PATCH_TOOL_NAME,
   DELEGATE_PARALLEL_TOOL_NAME,
   DELEGATE_TASK_TOOL_NAME,
   getAgentTools,
@@ -66,7 +67,7 @@ import type {
 } from './types';
 import type { SubagentToolCategory } from './types';
 
-const SUBAGENT_PROTOCOL_VERSION = 8;
+const SUBAGENT_PROTOCOL_VERSION = 9;
 const MAX_INLINE_RESULT_CHARS = DEFAULT_SUBAGENT_RESULT_PAGE_CHARS;
 const MAX_PARALLEL_TASKS = 8;
 
@@ -1200,6 +1201,7 @@ export function getChildToolNamesForRuntime(profile: SubagentProfile, depth: num
     names.add(DELEGATE_PARALLEL_TOOL_NAME);
   }
   if (protocolVersion >= 8) names.delete(READ_SUBAGENT_RESULT_TOOL_NAME);
+  if (protocolVersion < 9) names.delete(APPLY_PATCH_TOOL_NAME);
   return [...names].sort();
 }
 
@@ -1399,6 +1401,13 @@ export function validateSubagentArtifacts(input: {
     if (!target.ok || !input.proposalScope || !scopeContains(input.proposalScope, target.scope, input.roots)) {
       diagnostics.push(`draft_edit_outside_claim:${edit.label}`);
       return false;
+    }
+    if (edit.kind === 'move_v1') {
+      const moveTarget = resolveProposalUriScope(edit.targetUri, input.roots);
+      if (!moveTarget.ok || !scopeContains(input.proposalScope, moveTarget.scope, input.roots)) {
+        diagnostics.push(`draft_move_target_outside_claim:${edit.label}`);
+        return false;
+      }
     }
     return true;
   });

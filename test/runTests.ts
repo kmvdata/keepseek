@@ -48,6 +48,7 @@ import './runnerValidationState.test';
 import './richTextShortcuts.test';
 import './runDetails.test';
 import './safeFileEditor.test';
+import './textPatch.test';
 import './semanticTools.test';
 import './subagentArchitecture.test';
 import './subagentSafety.test';

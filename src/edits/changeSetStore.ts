@@ -14,10 +14,14 @@ import type {
 import { getErrorMessage } from '../shared/errors';
 import type { DraftDiffService } from './draftDiffService';
 import type { DelegatedEditApproval, SafeFileEditor } from './safeFileEditor';
+import { SafeFileEditError } from './safeFileEditor';
 import type { DraftEditPreflight } from './safeFileEditor';
 import type { ApprovalReviewRecord } from '../approvals/approvalReviewTypes';
 import { toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
 import { createChangeSet } from './changeSet';
+import { ChangeArtifactStore } from './changeArtifactStore';
+import { getDraftEditBase, getDraftEditKind, getDraftEditResult } from './draftEdit';
+import { getConfiguredPatchSettings } from '../shared/config';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
 type ChangeSetTraceHandler = (changeSet: ChangeSet, event: Record<string, unknown>) => void;
@@ -33,14 +37,24 @@ interface ChangeSetIndexEntry {
 }
 
 interface ChangeSetStorageIndex {
-  version: 3;
+  version: 4;
   entries: ChangeSetIndexEntry[];
 }
 
-type WebviewChangeSetFile = Omit<
-  ChangeSetFile,
-  'newText' | 'expectedOriginalTextHash' | 'expectedOriginalSize'
->;
+export interface WebviewChangeSetFile {
+  id: string;
+  uri: string;
+  label: string;
+  action: ChangeSetFile['action'];
+  kind?: string;
+  reason: string;
+  status: ChangeSetFile['status'];
+  approvalReview?: ChangeSetFile['approvalReview'];
+  approvalSource?: ChangeSetFile['approvalSource'];
+  error?: string;
+  checkpointId?: string;
+  patchSummary?: { hunkCount: number; baseSha256: string; resultSha256: string; changedBytes: number };
+}
 
 export type WebviewChangeSet = Omit<ChangeSet, 'files'> & {
   files: WebviewChangeSetFile[];
@@ -58,11 +72,13 @@ export class ChangeSetStore {
   private readonly checkpoints = new Map<string, ChangeCheckpoint>();
   private readonly storageUri: vscode.Uri;
   private readonly shardedRootUri: vscode.Uri;
+  private readonly legacyV3RootUri: vscode.Uri;
   private readonly indexUri: vscode.Uri;
   private readonly runtimeUri: vscode.Uri;
   private readonly historyUri: vscode.Uri;
   private readonly checkpointsUri: vscode.Uri;
-  private storageIndex: ChangeSetStorageIndex = { version: 3, entries: [] };
+  private storageIndex: ChangeSetStorageIndex = { version: 4, entries: [] };
+  private readonly artifactStore: ChangeArtifactStore;
   private readonly loadedSessionIds = new Set<string>();
   private persistenceError?: unknown;
   private persistenceQueue: Promise<void> = Promise.resolve();
@@ -77,11 +93,14 @@ export class ChangeSetStore {
     private readonly onTraceEvent?: ChangeSetTraceHandler
   ) {
     this.storageUri = vscode.Uri.joinPath(globalStorageUri, 'change-sets.json');
-    this.shardedRootUri = vscode.Uri.joinPath(globalStorageUri, 'change-sets', 'v3');
+    this.shardedRootUri = vscode.Uri.joinPath(globalStorageUri, 'change-sets', 'v4');
+    this.legacyV3RootUri = vscode.Uri.joinPath(globalStorageUri, 'change-sets', 'v3');
     this.indexUri = vscode.Uri.joinPath(this.shardedRootUri, 'index.json');
     this.runtimeUri = vscode.Uri.joinPath(this.shardedRootUri, 'runtime');
     this.historyUri = vscode.Uri.joinPath(this.shardedRootUri, 'history');
     this.checkpointsUri = vscode.Uri.joinPath(this.shardedRootUri, 'checkpoints');
+    this.artifactStore = new ChangeArtifactStore(globalStorageUri);
+    this.safeFileEditor.configureArtifactStore?.(this.artifactStore);
   }
 
   public async initialize(): Promise<void> {
@@ -93,6 +112,11 @@ export class ChangeSetStore {
     if (shardedIndex) {
       this.storageIndex = await this.reconcileShardedIndex(shardedIndex);
       await this.loadSession(this.sessionStore.activeSessionId || this.sessionStore.getActiveSession().id);
+      await this.reconcileInterruptedFiles();
+      return;
+    }
+    if (await this.migrateLegacyV3Storage()) {
+      await this.reconcileInterruptedFiles();
       return;
     }
     try {
@@ -151,12 +175,13 @@ export class ChangeSetStore {
         if (changeSet.sessionId) this.loadedSessionIds.add(changeSet.sessionId);
       }
       await this.persistShardedNow();
-      // The V3 index is the atomic commit marker. Delete the monolith only
+      await this.reconcileInterruptedFiles();
+      // The V4 index is the atomic commit marker. Delete the monolith only
       // after that commit; any migration failure above leaves it untouched.
       try {
         await vscode.workspace.fs.delete(this.storageUri, { recursive: false, useTrash: false });
       } catch {
-        // Keeping a redundant legacy copy is safe; V3 remains authoritative.
+        // Keeping a redundant legacy copy is safe; V4 remains authoritative.
       }
     } catch {
       // Missing or malformed checkpoint storage must not block the chat view.
@@ -169,8 +194,12 @@ export class ChangeSetStore {
   }
 
   public add(changeSet: ChangeSet): ChangeSet | undefined {
+    this.assertChangeSetArtifactQuota(changeSet);
     const existing = this.findActiveChangeSetForRun(changeSet);
     if (existing) {
+      const candidate = cloneChangeSet(existing);
+      this.mergeIntoActiveChangeSet(candidate, changeSet);
+      this.assertChangeSetArtifactQuota(candidate);
       const result = this.mergeIntoActiveChangeSet(existing, changeSet);
       const mergedIdentity = existing.id !== changeSet.id;
       if (result.changed || mergedIdentity) {
@@ -332,6 +361,7 @@ export class ChangeSetStore {
       }
     }
     this.loadedSessionIds.add(sessionId);
+    await this.reconcileInterruptedFiles(sessionId);
   }
 
   public getProtectedSessionIds(): string[] {
@@ -596,7 +626,20 @@ export class ChangeSetStore {
     for (const file of files) {
       file.approvalSource = approval?.source ?? 'user_click';
       try {
-        const checkpoint = await this.safeFileEditor.applyDraftEdit(file, changeSet.id, approval);
+        const checkpoint = await this.safeFileEditor.applyDraftEdit(file, changeSet.id, approval, {
+          persist: async (next) => {
+            this.assertChangeSetArtifactQuota(changeSet, next);
+            this.checkpoints.set(next.id, { ...next });
+            file.checkpointId = next.id;
+            file.status = next.state === 'prepared' ? 'prepared'
+              : next.state === 'applying' ? 'applying'
+                : next.state === 'applied' ? 'applied'
+                  : next.state === 'interrupted' ? 'interrupted'
+                    : 'uncertain';
+            this.updateChangeSetStatus(changeSet);
+            await this.persistShardedNow();
+          }
+        });
         this.checkpoints.set(checkpoint.id, checkpoint);
         file.checkpointId = checkpoint.id;
         file.status = 'applied';
@@ -604,7 +647,14 @@ export class ChangeSetStore {
         appliedEditIds.push(file.id);
       } catch (error) {
         const message = getErrorMessage(error);
-        file.status = 'apply_failed';
+        const interruptedCheckpoint = error instanceof SafeFileEditError ? error.checkpoint : undefined;
+        if (interruptedCheckpoint) {
+          this.checkpoints.set(interruptedCheckpoint.id, interruptedCheckpoint);
+          file.checkpointId = interruptedCheckpoint.id;
+        }
+        file.status = interruptedCheckpoint?.state === 'uncertain' ? 'uncertain'
+          : interruptedCheckpoint?.state === 'interrupted' ? 'interrupted'
+            : 'apply_failed';
         file.error = message;
         failed.push({ editId: file.id, label: file.label, error: message });
       }
@@ -639,14 +689,31 @@ export class ChangeSetStore {
         continue;
       }
       try {
-        const revertedCheckpoint = await this.safeFileEditor.revertCheckpoint(checkpoint);
+        const revertedCheckpoint = await this.safeFileEditor.revertCheckpoint(checkpoint, {
+          persist: async (next) => {
+            this.checkpoints.set(next.id, { ...next });
+            file.status = next.state === 'reverted' ? 'reverted'
+              : next.state === 'uncertain' ? 'uncertain'
+                : next.state === 'interrupted' ? 'interrupted'
+                  : 'applying';
+            this.updateChangeSetStatus(changeSet);
+            await this.persistShardedNow();
+          }
+        });
         this.checkpoints.set(revertedCheckpoint.id, revertedCheckpoint);
         file.status = 'reverted';
         file.error = undefined;
         revertedEditIds.push(file.id);
       } catch (error) {
         const message = getErrorMessage(error);
-        file.status = 'revert_failed';
+        const interruptedCheckpoint = error instanceof SafeFileEditError ? error.checkpoint : undefined;
+        if (interruptedCheckpoint) {
+          this.checkpoints.set(interruptedCheckpoint.id, interruptedCheckpoint);
+          file.checkpointId = interruptedCheckpoint.id;
+        }
+        file.status = interruptedCheckpoint?.state === 'uncertain' ? 'uncertain'
+          : interruptedCheckpoint?.state === 'interrupted' ? 'interrupted'
+            : 'revert_failed';
         file.error = message;
         failed.push({ editId: file.id, label: file.label, error: message });
       }
@@ -720,6 +787,8 @@ export class ChangeSetStore {
     const statuses = changeSet.files.map((file) => file.status);
     if (statuses.every((status) => status === 'discarded')) {
       changeSet.status = 'discarded';
+    } else if (statuses.some((status) => status === 'uncertain' || status === 'prepared' || status === 'applying')) {
+      changeSet.status = 'uncertain';
     } else if (statuses.every((status) => status === 'reverted' || status === 'discarded')) {
       changeSet.status = 'reverted';
     } else if (statuses.every((status) => status === 'applied' || status === 'discarded')) {
@@ -825,15 +894,15 @@ export class ChangeSetStore {
     const checkpointById = new Map(input.checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]));
     await Promise.all(input.checkpoints.map((checkpoint) => writeJsonAtomic(
       vscode.Uri.joinPath(this.checkpointsUri, fileNameForId(checkpoint.id)),
-      { version: 3, checkpoint }
+      { version: 4, checkpoint }
     )));
     await Promise.all(input.changeSets.map((changeSet) => writeJsonAtomic(
       vscode.Uri.joinPath(this.runtimeUri, fileNameForId(changeSet.id)),
-      { version: 3, changeSet }
+      { version: 4, changeSet }
     )));
     await Promise.all(input.history.map((changeSet) => writeJsonAtomic(
       vscode.Uri.joinPath(this.historyUri, fileNameForId(changeSet.id)),
-      { version: 3, changeSet }
+      { version: 4, changeSet }
     )));
 
     // Re-read immediately before commit and preserve other windows' sessions.
@@ -862,9 +931,10 @@ export class ChangeSetStore {
         updatedAt: changeSet.updatedAt
       });
     }
-    const index: ChangeSetStorageIndex = { version: 3, entries: dedupeIndexEntries(entries) };
+    const index: ChangeSetStorageIndex = { version: 4, entries: dedupeIndexEntries(entries) };
     await writeJsonAtomic(this.indexUri, index);
     this.storageIndex = index;
+    await this.garbageCollectArtifacts(index);
   }
 
   private async readShardedIndex(recordDiagnostics = false): Promise<ChangeSetStorageIndex | undefined> {
@@ -873,7 +943,7 @@ export class ChangeSetStore {
       const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: false }).decode(bytes));
       if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
       const record = value as Record<string, unknown>;
-      if (record.version !== 3 || !Array.isArray(record.entries)) return undefined;
+      if (record.version !== 4 || !Array.isArray(record.entries)) return undefined;
       const entries = record.entries.map(normalizeIndexEntry).filter((entry): entry is ChangeSetIndexEntry => Boolean(entry));
       if (recordDiagnostics) {
         console.debug('KeepSeek startup: change-set-index-read', {
@@ -882,7 +952,7 @@ export class ChangeSetStore {
           checkpoints: entries.reduce((sum, entry) => sum + entry.checkpointIds.length, 0)
         });
       }
-      return { version: 3, entries: dedupeIndexEntries(entries) };
+      return { version: 4, entries: dedupeIndexEntries(entries) };
     } catch {
       return undefined;
     }
@@ -931,10 +1001,131 @@ export class ChangeSetStore {
     }
     return index;
   }
+
+  private async migrateLegacyV3Storage(): Promise<boolean> {
+    const value = await readJsonFile(vscode.Uri.joinPath(this.legacyV3RootUri, 'index.json'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const record = value as Record<string, unknown>;
+    if (record.version !== 3 || !Array.isArray(record.entries)) return false;
+    const entries = record.entries.map(normalizeIndexEntry).filter((entry): entry is ChangeSetIndexEntry => Boolean(entry));
+    for (const entry of entries) {
+      const stored = await readJsonFile(vscode.Uri.joinPath(this.legacyV3RootUri, entry.storageFile));
+      if (!isRecordWithChangeSet(stored)) continue;
+      if (entry.kind === 'runtime' && isStoredChangeSet(stored.changeSet)) {
+        const changeSet = normalizeStoredChangeSet(stored.changeSet);
+        this.changeSets.set(changeSet.id, changeSet);
+        for (const checkpointId of entry.checkpointIds) {
+          const checkpointValue = await readJsonFile(vscode.Uri.joinPath(this.legacyV3RootUri, 'checkpoints', fileNameForId(checkpointId)));
+          if (isRecordWithCheckpoint(checkpointValue) && isStoredCheckpoint(checkpointValue.checkpoint)) {
+            this.checkpoints.set(checkpointId, { ...checkpointValue.checkpoint });
+          }
+        }
+      } else if (entry.kind === 'history' && isStoredHistoricalChangeSet(stored.changeSet)) {
+        this.historicalChangeSets.set(entry.id, cloneWebviewChangeSet(stored.changeSet));
+      }
+      if (entry.sessionId) this.loadedSessionIds.add(entry.sessionId);
+    }
+    await this.persistShardedNow();
+    return true;
+  }
+
+  private async reconcileInterruptedFiles(sessionId?: string): Promise<void> {
+    let changed = false;
+    for (const changeSet of this.changeSets.values()) {
+      if (sessionId && changeSet.sessionId !== sessionId) continue;
+      for (const file of changeSet.files) {
+        if (file.status !== 'prepared' && file.status !== 'applying' && file.status !== 'interrupted') continue;
+        const checkpoint = file.checkpointId ? this.checkpoints.get(file.checkpointId) : undefined;
+        if (!checkpoint) {
+          file.status = 'uncertain';
+          file.error = 'Prepared DraftEdit checkpoint is unavailable after restart.';
+          changed = true;
+          continue;
+        }
+        const state = await this.safeFileEditor.classifyCheckpoint(checkpoint).catch(() => 'unknown' as const);
+        if (checkpoint.operation === 'revert') {
+          if (state === 'base') {
+            file.status = 'reverted';
+            checkpoint.state = 'reverted';
+            checkpoint.revertedAt ??= new Date().toISOString();
+            file.error = undefined;
+          } else if (state === 'result') {
+            file.status = 'applied';
+            checkpoint.state = 'interrupted';
+            file.error = undefined;
+          } else {
+            file.status = 'uncertain';
+            checkpoint.state = 'uncertain';
+            file.error = 'DraftEdit revert is uncertain after restart; target matches neither base nor result hash.';
+          }
+        } else if (state === 'base') {
+          file.status = 'pending';
+          checkpoint.state = 'interrupted';
+          file.error = undefined;
+        } else if (state === 'result') {
+          file.status = 'applied';
+          checkpoint.state = 'applied';
+          checkpoint.appliedAt ??= new Date().toISOString();
+          file.error = undefined;
+        } else {
+          file.status = 'uncertain';
+          checkpoint.state = 'uncertain';
+          file.error = 'DraftEdit state is uncertain after restart; target matches neither base nor result hash.';
+        }
+        changed = true;
+      }
+      if (changed) this.updateChangeSetStatus(changeSet);
+    }
+    if (changed) await this.persistShardedNow();
+  }
+
+  private async garbageCollectArtifacts(index: ChangeSetStorageIndex): Promise<void> {
+    const liveCheckpointIds = new Set(index.entries.flatMap((entry) => entry.checkpointIds));
+    for (const file of await listJsonFiles(this.checkpointsUri)) {
+      const uri = vscode.Uri.joinPath(this.checkpointsUri, file);
+      const checkpointId = Array.from(liveCheckpointIds).find((id) => fileNameForId(id) === file);
+      if (!checkpointId) await vscode.workspace.fs.delete(uri, { useTrash: false }).then(undefined, () => undefined);
+    }
+    const referencedBlobs = new Set<string>();
+    for (const entry of index.entries.filter((item) => item.kind === 'runtime')) {
+      const inMemory = this.changeSets.get(entry.id);
+      const stored = inMemory ? undefined : await readJsonFile(vscode.Uri.joinPath(this.shardedRootUri, entry.storageFile));
+      const changeSet = inMemory ?? (isRecordWithChangeSet(stored) && isStoredChangeSet(stored.changeSet)
+        ? normalizeStoredChangeSet(stored.changeSet) : undefined);
+      for (const file of changeSet?.files ?? []) {
+        if (file.kind === 'full_text_v1' && file.contentBlobHash) referencedBlobs.add(file.contentBlobHash);
+      }
+    }
+    for (const checkpointId of liveCheckpointIds) {
+      const checkpoint = this.checkpoints.get(checkpointId)
+        ?? await readJsonFile(vscode.Uri.joinPath(this.checkpointsUri, fileNameForId(checkpointId)))
+          .then((value) => isRecordWithCheckpoint(value) && isStoredCheckpoint(value.checkpoint) ? value.checkpoint : undefined);
+      if (checkpoint?.originalBlobHash) referencedBlobs.add(checkpoint.originalBlobHash);
+    }
+    await this.artifactStore.garbageCollect(referencedBlobs);
+  }
+
+  private assertChangeSetArtifactQuota(changeSet: ChangeSet, nextCheckpoint?: ChangeCheckpoint): void {
+    const checkpointById = new Map(this.checkpoints);
+    if (nextCheckpoint) checkpointById.set(nextCheckpoint.id, nextCheckpoint);
+    const checkpointBytes = changeSet.files.reduce((total, file) => {
+      const checkpoint = file.id === nextCheckpoint?.editId
+        ? nextCheckpoint
+        : file.checkpointId ? checkpointById.get(file.checkpointId) : undefined;
+      return total + (checkpoint?.originalBlobHash ? checkpoint.originalSizeBytes ?? 0 : 0)
+        + (checkpoint?.inversePatch ? Buffer.byteLength(JSON.stringify(checkpoint.inversePatch), 'utf8') : 0);
+    }, 0);
+    const payloadBytes = Buffer.byteLength(JSON.stringify(changeSet.files), 'utf8');
+    const contentBlobBytes = changeSet.files.reduce((total, file) => total
+      + (file.kind === 'full_text_v1' && file.contentBlobHash ? file.result.sizeBytes : 0), 0);
+    if (checkpointBytes + payloadBytes + contentBlobBytes > getConfiguredPatchSettings().maxChangeSetArtifactBytes) {
+      throw new Error('ChangeSet checkpoint/blob quota exceeded; no workspace mutation occurred.');
+    }
+  }
 }
 
 function isApplicable(file: ChangeSetFile): boolean {
-  return file.status === 'pending' || file.status === 'apply_failed';
+  return file.status === 'pending' || file.status === 'apply_failed' || file.status === 'interrupted';
 }
 
 function isRevertible(file: ChangeSetFile): boolean {
@@ -942,7 +1133,8 @@ function isRevertible(file: ChangeSetFile): boolean {
 }
 
 function requiresRuntimeState(changeSet: ChangeSet): boolean {
-  return changeSet.files.some((file) => isApplicable(file) || isRevertible(file));
+  return changeSet.files.some((file) => isApplicable(file) || isRevertible(file)
+    || file.status === 'prepared' || file.status === 'applying' || file.status === 'uncertain');
 }
 
 function fileNameForId(id: string): string {
@@ -1006,7 +1198,7 @@ function isRecordWithCheckpoint(value: unknown): value is { checkpoint: unknown 
 function cloneChangeSet(changeSet: ChangeSet): ChangeSet {
   return {
     ...changeSet,
-    files: changeSet.files.map((file) => ({ ...file })),
+    files: changeSet.files.map((file) => structuredClone(file)),
     lastApplyResult: changeSet.lastApplyResult
       ? {
           ...changeSet.lastApplyResult,
@@ -1018,24 +1210,18 @@ function cloneChangeSet(changeSet: ChangeSet): ChangeSet {
 }
 
 function refreshStoredDraftEdit(target: ChangeSetFile, incoming: ChangeSetFile): boolean {
-  const next = {
-    uri: incoming.uri,
-    label: incoming.label,
-    action: incoming.action,
-    newText: incoming.newText,
-    reason: incoming.reason,
-    expectedOriginalTextHash: incoming.expectedOriginalTextHash ?? target.expectedOriginalTextHash,
-    expectedOriginalSize: incoming.expectedOriginalSize ?? target.expectedOriginalSize
-  };
-  const changed = target.uri !== next.uri
-    || target.label !== next.label
-    || target.action !== next.action
-    || target.newText !== next.newText
-    || target.reason !== next.reason
-    || target.expectedOriginalTextHash !== next.expectedOriginalTextHash
-    || target.expectedOriginalSize !== next.expectedOriginalSize;
+  const runtimeKeys = new Set(['status', 'approvalReview', 'approvalSource', 'error', 'checkpointId']);
+  const payload = (value: ChangeSetFile) => Object.fromEntries(
+    Object.entries(value).filter(([key]) => !runtimeKeys.has(key))
+  );
+  const next = payload(incoming);
+  const changed = JSON.stringify(payload(target)) !== JSON.stringify(next);
+  if (changed && (target.kind !== undefined || incoming.kind !== undefined)) {
+    throw new Error(`Versioned DraftEdit payload changed for stable id ${target.id}. Create a new DraftEdit id and approval actionHash.`);
+  }
   if (changed) {
-    Object.assign(target, next);
+    for (const key of Object.keys(target)) if (!runtimeKeys.has(key)) delete (target as unknown as Record<string, unknown>)[key];
+    Object.assign(target, structuredClone(next));
   }
   return changed;
 }
@@ -1050,12 +1236,7 @@ function normalizeStoredChangeSet(changeSet: ChangeSet): ChangeSet {
 function toWebviewChangeSet(changeSet: ChangeSet): WebviewChangeSet {
   return {
     ...changeSet,
-    files: changeSet.files.map(({
-      newText: _newText,
-      expectedOriginalTextHash: _expectedOriginalTextHash,
-      expectedOriginalSize: _expectedOriginalSize,
-      ...file
-    }) => ({ ...file })),
+    files: changeSet.files.map(toWebviewChangeSetFile),
     lastApplyResult: changeSet.lastApplyResult
       ? {
           ...changeSet.lastApplyResult,
@@ -1083,12 +1264,14 @@ function cloneWebviewChangeSet(changeSet: WebviewChangeSet): WebviewChangeSet {
       uri: file.uri,
       label: file.label,
       action: file.action,
+      kind: file.kind,
       reason: file.reason,
       status: file.status,
       approvalReview: file.approvalReview ? { ...file.approvalReview } : undefined,
       approvalSource: file.approvalSource,
       error: file.error,
-      checkpointId: file.checkpointId
+      checkpointId: file.checkpointId,
+      patchSummary: file.patchSummary ? { ...file.patchSummary } : undefined
     })),
     lastApplyResult: changeSet.lastApplyResult
       ? {
@@ -1097,6 +1280,30 @@ function cloneWebviewChangeSet(changeSet: WebviewChangeSet): WebviewChangeSet {
           failed: changeSet.lastApplyResult.failed.map((failure) => ({ ...failure }))
         }
       : undefined
+  };
+}
+
+function toWebviewChangeSetFile(file: ChangeSetFile): WebviewChangeSetFile {
+  const base = getDraftEditBase(file);
+  const result = getDraftEditResult(file);
+  return {
+    id: file.id,
+    uri: file.uri,
+    label: file.label,
+    action: file.action,
+    kind: getDraftEditKind(file),
+    reason: file.reason,
+    status: file.status,
+    approvalReview: file.approvalReview ? { ...file.approvalReview } : undefined,
+    approvalSource: file.approvalSource,
+    error: file.error,
+    checkpointId: file.checkpointId,
+    patchSummary: file.kind === 'text_patch_v1' ? {
+      hunkCount: file.patch.hunks.length,
+      baseSha256: base?.sha256 ?? '',
+      resultSha256: result?.sha256 ?? '',
+      changedBytes: file.patch.hunks.reduce((sum, hunk) => sum + hunk.oldSizeBytes + hunk.newSizeBytes, 0)
+    } : undefined
   };
 }
 

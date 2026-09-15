@@ -130,6 +130,42 @@
           "scope": "window",
           "markdownDescription": "Maximum bytes KeepSeek reads from one referenced or workspace text file. Binary, media, archive, and otherwise unreadable files are still rejected."
         },
+        "keepseek.patch.maxPayloadBytes": {
+          "type": "integer", "default": 1048576, "minimum": 1024, "maximum": 16777216, "scope": "window",
+          "markdownDescription": "Maximum encoded size of one patch tool payload. Independent from keepseek.maxFileBytes."
+        },
+        "keepseek.patch.maxHunks": {
+          "type": "integer", "default": 256, "minimum": 1, "maximum": 4096, "scope": "window",
+          "markdownDescription": "Maximum number of canonical patch hunks or file operations in one patch request."
+        },
+        "keepseek.patch.maxChangedBytes": {
+          "type": "integer", "default": 2097152, "minimum": 1, "maximum": 67108864, "scope": "window",
+          "markdownDescription": "Maximum total added plus removed bytes in one text patch. The target file itself may be larger."
+        },
+        "keepseek.patch.maxInlineBytes": {
+          "type": "integer", "default": 65536, "minimum": 1024, "maximum": 4194304, "scope": "window",
+          "markdownDescription": "Maximum old or new bytes allowed inline in one canonical patch hunk. Larger local changes must be split safely or use an explicitly bounded full replacement."
+        },
+        "keepseek.patch.maxProviderBufferBytes": {
+          "type": "integer", "default": 16777216, "minimum": 1024, "maximum": 268435456, "scope": "window",
+          "markdownDescription": "Maximum whole-file fallback buffer for non-file VS Code FileSystemProvider patch targets."
+        },
+        "keepseek.patch.maxBackupBytes": {
+          "type": "integer", "default": 33554432, "minimum": 1024, "maximum": 536870912, "scope": "window",
+          "markdownDescription": "Maximum content-addressed backup size for delete and full-file replacement operations."
+        },
+        "keepseek.patch.maxChangeSetArtifactBytes": {
+          "type": "integer", "default": 134217728, "minimum": 1048576, "maximum": 1073741824, "scope": "window",
+          "markdownDescription": "Maximum checkpoint and blob bytes retained by one active ChangeSet."
+        },
+        "keepseek.patch.blobStoreQuotaBytes": {
+          "type": "integer", "default": 1073741824, "minimum": 1048576, "maximum": 10737418240, "scope": "window",
+          "markdownDescription": "Global quota for raw content-addressed rollback blobs. Safe garbage collection removes only unreferenced blobs."
+        },
+        "keepseek.patch.maxDiffBytes": {
+          "type": "integer", "default": 4194304, "minimum": 65536, "maximum": 67108864, "scope": "window",
+          "markdownDescription": "Maximum file size for a normal full diff preview; larger patch edits use a hunk-only review document."
+        },
         "keepseek.providerInlineResultMaxChars": {
           "type": "integer", "default": 48000, "minimum": 1024, "maximum": 1000000, "scope": "window",
           "markdownDescription": "Maximum characters a newly produced tool result may inline into one Provider request. Dynamic context admission may choose a smaller envelope. This does not limit workspace reads or evidence storage."
