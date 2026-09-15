@@ -349,6 +349,16 @@ export class AgentLoop {
         throw new AgentInterruptedError('uncertain_tool_result',
           `Uncertain tool result: ${requestCheckpoint.state.pending.executing.name}. Verify before resuming. / 工具结果未知，请先核实后再恢复。`);
       }
+      // A previous checkpoint write can fail transiently (for example an old
+      // concurrent CAS race). Once persisted evidence proves that no unknown
+      // effect remains, retry from the durable checkpoint. The first new
+      // checkpoint is still written before any Provider request or tool work;
+      // a continuing storage failure therefore stops safely again.
+      if (requestCheckpoint.stopReason === 'storage_failure') {
+        requestCheckpoint.status = 'interrupted';
+        requestCheckpoint.stopReason = 'extension_restart';
+        requestCheckpoint.error = undefined;
+      }
       const blocker = recoveryBlocker(requestCheckpoint);
       if (blocker) throw new AgentInterruptedError(
         isCostLimitExhausted(requestCheckpoint) ? 'cost_limit' : 'waiting_for_user',
@@ -460,7 +470,9 @@ export class AgentLoop {
             : error instanceof ToolEvidencePersistenceError ? error.reason
               : 'connection_interrupted';
       cp.status = ['storage_failure', 'resource_limit'].includes(cp.stopReason) ? 'blocked' : 'interrupted';
-      cp.error = error instanceof Error ? error.message : String(error);
+      if (!(['storage_failure', 'resource_limit'].includes(cp.stopReason ?? '') && cp.error)) {
+        cp.error = error instanceof Error ? error.message : String(error);
+      }
       await persist();
       if (cp.stopReason === 'time_budget') throw new ExecutionBudgetError();
       throw error;
@@ -481,7 +493,7 @@ export class AgentLoop {
     const runDetailsBuilderRef: { current?: RunDetailsBuilder } = {};
     const trace = this.traceLogService?.createRunTrace((event, timestamp) => {
       runDetailsBuilderRef.current?.record(event, timestamp);
-    }) ?? createNoopInteractionTrace((event, timestamp) => {
+    }, { metadataFallback: Boolean(request.goal) }) ?? createNoopInteractionTrace((event, timestamp) => {
       runDetailsBuilderRef.current?.record(event, timestamp);
     });
     checkpoint.attemptIds.push(trace.runId);

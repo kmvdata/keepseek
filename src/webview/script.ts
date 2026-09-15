@@ -957,7 +957,6 @@ export function getScript(): string {
         event.stopPropagation();
         if (state.isBusy) return;
         state.debugMode = !state.debugMode;
-        state.hasCurrentSessionLog = state.debugMode ? state.hasCurrentSessionLog : false;
         renderSettingsControls();
         vscode.postMessage({ type: 'setDebugMode', enabled: state.debugMode });
       });
@@ -1454,9 +1453,9 @@ export function getScript(): string {
       }
       if (settingsOpenLogMenuItem) {
         settingsOpenLogMenuItem.disabled = !canRequestCurrentSessionLog();
-        settingsOpenLogMenuItem.title = t(state.debugMode
-          ? (state.hasCurrentSessionLog ? 'openCurrentSessionLog' : 'openCurrentSessionLogUnavailable')
-          : 'openCurrentSessionLogDebugOff');
+        settingsOpenLogMenuItem.title = t(state.hasCurrentSessionLog
+          ? 'openCurrentSessionLog'
+          : state.debugMode ? 'openCurrentSessionLogUnavailable' : 'openCurrentSessionLogDebugOff');
       }
       if (settingsLanguageValue) {
         settingsLanguageValue.textContent = getLanguageDisplayName(getLanguage());
@@ -1599,7 +1598,7 @@ export function getScript(): string {
     }
 
     function canRequestCurrentSessionLog() {
-      return state.debugMode === true;
+      return state.debugMode === true || state.hasCurrentSessionLog === true;
     }
 
     function toggleSettingsMenu() {

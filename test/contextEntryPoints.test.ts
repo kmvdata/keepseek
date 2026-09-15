@@ -583,25 +583,53 @@ test('Goal resume reports pending and failure states and Goal model output stays
   const script = getScript();
   const inputScript = getInputScript();
   const extensionSource = await readFile(path.resolve(process.cwd(), 'src/extension.ts'), 'utf8');
+  const runnerSource = await readFile(path.resolve(process.cwd(), 'src/agent/runner.ts'), 'utf8');
   const providerSource = await readFile(
     path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
     'utf8'
   );
   const resumeHandler = getGeneratedSection(providerSource, "case 'goalResume':", "case 'goalStop':");
-  const resumeMethod = getGeneratedSection(providerSource, 'private async resumeGoal()', 'private async initializeGoalRecovery()');
+  const resumeMethod = getGeneratedSection(providerSource, 'private async resumeGoal(', 'private async initializeGoalRecovery()');
+  const goalTraceMethod = getGeneratedSection(providerSource, 'private async createGoalActionTrace(', 'private async refreshBalance(');
+  const openLogMethod = getGeneratedSection(providerSource, 'private async openCurrentSessionLog()', '/** Goal start/resume can fail');
+  const recoveryContext = getGeneratedSection(providerSource, 'private createGoalRecoveryContext(', 'private async repairPreparingGoalSessionProtocol(');
   const promptStream = getGeneratedSection(providerSource, 'assistantMessage = {', 'const response = await this.agentRunner.run');
+  const goalFailure = getGeneratedSection(
+    providerSource,
+    'if (options?.goalAttempt && !(error instanceof AgentRunAbortedError)',
+    'if (error instanceof AgentRunAbortedError || abortController.signal.aborted)'
+  );
 
   assert.match(resumeHandler, /goalActionFeedback/u);
+  assert.match(resumeHandler, /createGoalActionTrace\('resume'\)/u);
+  assert.match(resumeHandler, /goal_action_failed/u);
   assert.match(resumeHandler, /status: 'pending'/u);
   assert.match(resumeHandler, /status: 'error'/u);
   assert.match(resumeHandler, /finally[\s\S]*?postState\(\{ immediate: true, forceFull: true \}\)/u);
   assert.match(resumeMethod, /goalResumeBlocker/u);
+  assert.match(resumeMethod, /reconnectGoalSessionForResume\(record\)/u);
+  assert.match(resumeMethod, /rememberGoalActionTrace\(actionTrace\)/u);
+  assert.match(resumeMethod, /resolveGoalSessionForResume/u);
+  assert.match(resumeMethod, /changeSets\.loadSession/u);
+  assert.match(resumeMethod, /draftRuns\.loadSession/u);
+  assert.match(resumeMethod, /refreshCurrentRunContext/u);
+  assert.match(resumeMethod, /type: 'sessionChanged'/u);
   assert.doesNotMatch(resumeMethod, /recoverAfterActivation/u);
   assert.match(promptStream, /this\.goalAttemptStream =/u);
   assert.match(promptStream, /else \{\s*this\.messages\.push\(assistantMessage\)/u);
   assert.match(providerSource, /getVisibleMessagesForWebview/u);
   assert.match(providerSource, /nativeStoragePath: this\.globalStoragePath/u);
   assert.match(providerSource, /canAcquireLease: this\.goalLease\.supported/u);
+  assert.match(recoveryContext, /hasUncertainToolResult: record\.sideEffects\.uncertainToolCallIds\.length > 0/u);
+  assert.doesNotMatch(recoveryContext, /runCheckpoint\?\.state\?\.pending\?\.executing/u);
+  assert.match(goalFailure, /throw error;/u);
+  assert.doesNotMatch(goalFailure, /\breturn;/u);
+  assert.match(goalTraceMethod, /metadataFallback: true/u);
+  assert.match(goalTraceMethod, /pendingToolName/u);
+  assert.match(runnerSource, /metadataFallback: Boolean\(request\.goal\)/u);
+  assert.ok(openLogMethod.indexOf('logUriText') < openLogMethod.indexOf('getConfiguredDebugMode()'));
+  assert.match(script, /return state\.debugMode === true \|\| state\.hasCurrentSessionLog === true;/u);
+  assert.doesNotMatch(script, /state\.hasCurrentSessionLog = state\.debugMode/u);
   assert.match(extensionSource, /context\.globalStoragePath/u);
   assert.match(script, /message\.type === 'goalActionFeedback'/u);
   assert.match(inputScript, /setActionFeedback: setGoalActionFeedback/u);

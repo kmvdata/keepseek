@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { AgentResponse } from '../../shared/types';
 import type { UsageEvent } from '../../shared/types';
 import type { RunCheckpoint } from '../runCheckpoint';
-import { checkpointCopy } from '../runCheckpoint';
+import { AgentInterruptedError, checkpointCopy } from '../runCheckpoint';
 import { ExecutionClock } from '../executionPolicy';
 import { amendGoalContract, serializeGoalProviderContract } from './goalContract';
 import type {
@@ -56,6 +56,9 @@ export class GoalCoordinator {
   private hostActiveScopes = 0;
   private cancelLeaseWait?: () => void;
   private resumeInFlight?: Promise<void>;
+  /** Timer and tool-boundary checkpoints can arrive concurrently. Preserve
+   * their invocation order so they never race the GoalStore CAS revision. */
+  private checkpointWriteQueue: Promise<void> = Promise.resolve();
 
   public constructor(
     private readonly store: GoalStore,
@@ -436,7 +439,13 @@ export class GoalCoordinator {
 
   /** Checkpoints are persisted by the Provider callback before the current
    * model/tool request is allowed to make further progress. */
-  public async persistCheckpoint(checkpoint: RunCheckpoint): Promise<void> {
+  public persistCheckpoint(checkpoint: RunCheckpoint): Promise<void> {
+    const operation = this.checkpointWriteQueue.then(async () => await this.persistCheckpointNow(checkpoint));
+    this.checkpointWriteQueue = operation.catch(() => undefined);
+    return operation;
+  }
+
+  private async persistCheckpointNow(checkpoint: RunCheckpoint): Promise<void> {
     const record = this.requireRecord();
     await this.assertLease();
     if (checkpoint.version !== 3 || checkpoint.goal?.contractHash !== record.currentContractHash
@@ -611,6 +620,9 @@ export class GoalCoordinator {
       await this.consumeAttempt(result);
     } catch (error) {
       if (this.record?.status === 'pausing') await this.finishPause();
+      else if (error instanceof AgentInterruptedError && error.reason === 'uncertain_tool_result') {
+        await this.moveExecutingToolToUncertain(error.message);
+      }
       else await this.moveToAttention(error instanceof Error ? error.message : String(error));
     } finally {
       this.dispatching = false;
@@ -868,6 +880,36 @@ export class GoalCoordinator {
     catch { next = { ...structuredClone(this.record), status: 'needs_attention', stopReason: reason, updatedAt: new Date().toISOString() }; }
     next.lease = undefined;
     this.record = await this.store.append(next, 'goal_needs_attention', { reason: reason.slice(0, 1_000) });
+    await this.lease.release();
+    this.emit();
+  }
+
+  /** Converts a still-executing checkpoint intent into an explicit uncertain
+   * result only after AgentRunner has reconciled its ToolEvidence and proved
+   * that it was neither safely replayable nor durably completed. */
+  private async moveExecutingToolToUncertain(reason: string): Promise<void> {
+    if (!this.record || isGoalTerminalStatus(this.record.status)) return;
+    await this.assertLease();
+    const toolCallId = this.record.runCheckpoint?.state?.pending?.executing?.id;
+    if (!toolCallId) {
+      await this.moveToAttention(reason);
+      return;
+    }
+    const next = structuredClone(this.record);
+    next.sideEffects.pendingToolCallIds = next.sideEffects.pendingToolCallIds.filter((id) => id !== toolCallId);
+    if (!next.sideEffects.uncertainToolCallIds.includes(toolCallId)) {
+      next.sideEffects.uncertainToolCallIds.push(toolCallId);
+    }
+    const requestIntent = next.requestIntents.at(-1);
+    if (requestIntent?.status === 'dispatched') requestIntent.status = 'uncertain';
+    let attention: GoalRecordV1;
+    try { attention = transitionGoal(next, 'needs_attention', { reason }); }
+    catch { attention = { ...next, status: 'needs_attention', stopReason: reason, updatedAt: new Date().toISOString() }; }
+    attention.lease = undefined;
+    this.record = await this.store.append(attention, 'goal_tool_result_uncertain', {
+      toolCallId,
+      reason: reason.slice(0, 1_000)
+    });
     await this.lease.release();
     this.emit();
   }

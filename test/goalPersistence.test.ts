@@ -9,9 +9,15 @@ import { GoalLease } from '../src/agent/goals/goalLease';
 import { GoalCoordinator } from '../src/agent/goals/goalCoordinator';
 import { GoalCompletionReviewService } from '../src/agent/goals/goalCompletionReview';
 import { hashGoalContract } from '../src/agent/goals/goalContract';
-import { classifyGoalRecovery, goalResumeBlocker, type GoalRecoveryContext } from '../src/agent/goals/goalRecovery';
+import {
+  classifyGoalRecovery,
+  goalResumeBlocker,
+  resolveGoalSessionForResume,
+  type GoalRecoveryContext
+} from '../src/agent/goals/goalRecovery';
 import { GoalStore, GoalStoreCorruptionError } from '../src/agent/goals/goalStore';
 import { transitionGoal } from '../src/agent/goals/goalStateMachine';
+import { AgentInterruptedError, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import { contract } from './goalDomain.test';
 
 const roots: string[] = [];
@@ -274,6 +280,90 @@ describe('Goal lease and recovery', () => {
     assert.equal(coordinator.current?.status, 'needs_attention');
   });
 
+  test('persists a runner-confirmed unknown tool result without misclassifying every executing intent', async () => {
+    const root = await tempRoot();
+    const store = new GoalStore(vscode.Uri.file(root));
+    const value = contract();
+    let held = false;
+    const lease = {
+      workspaceKey: 'workspace',
+      acquire: async () => {
+        held = true;
+        return { acquired: true, lease: { ownerId: 'owner', fencingToken: 7 } };
+      },
+      confirm: async () => held,
+      release: async () => { held = false; },
+      startHeartbeat: () => undefined,
+      get binding() { return held ? { ownerId: 'owner', fencingToken: 7 } : undefined; }
+    } as unknown as GoalLease;
+    const checkpoint = executingGoalCheckpoint(value, 'tool-call-1', 'keepseek_run_validation');
+    let coordinator!: GoalCoordinator;
+    coordinator = new GoalCoordinator(store, lease, new GoalCompletionReviewService(), {
+      dispatchAttempt: async () => {
+        await coordinator.persistCheckpoint(checkpoint);
+        throw new AgentInterruptedError('uncertain_tool_result', 'Validation terminal state is unknown.');
+      },
+      completionSafety: async () => { throw new Error('not reached'); },
+      completionReviewerContext: async () => { throw new Error('not reached'); }
+    });
+    await coordinator.create(value, 'session', {
+      visibleContent: 'Goal: test', expandedContent: 'Goal: test', providerContent: 'Goal: test\nTAIL'
+    });
+    await coordinator.start();
+
+    assert.equal(coordinator.current?.status, 'needs_attention');
+    assert.deepEqual(coordinator.current?.sideEffects.pendingToolCallIds, []);
+    assert.deepEqual(coordinator.current?.sideEffects.uncertainToolCallIds, ['tool-call-1']);
+    assert.equal(coordinator.current?.requestIntents.at(-1)?.status, 'uncertain');
+    assert.equal(coordinator.current?.stopReason, 'Validation terminal state is unknown.');
+    assert.equal(held, false);
+    assert.equal((await store.readJournal(coordinator.current!)).at(-1)?.type, 'goal_tool_result_uncertain');
+  });
+
+  test('serializes concurrent timer and tool-boundary checkpoint writes in invocation order', async () => {
+    const root = await tempRoot();
+    const store = new GoalStore(vscode.Uri.file(root));
+    const value = contract();
+    let held = false;
+    const lease = {
+      workspaceKey: 'workspace',
+      acquire: async () => {
+        held = true;
+        return { acquired: true, lease: { ownerId: 'owner', fencingToken: 8 } };
+      },
+      confirm: async () => held,
+      release: async () => { held = false; },
+      startHeartbeat: () => undefined,
+      get binding() { return held ? { ownerId: 'owner', fencingToken: 8 } : undefined; }
+    } as unknown as GoalLease;
+    let coordinator!: GoalCoordinator;
+    coordinator = new GoalCoordinator(store, lease, new GoalCompletionReviewService(), {
+      dispatchAttempt: async () => {
+        const timerCheckpoint = executingGoalCheckpoint(value, 'timer-call', 'keepseek_create_draft_edit');
+        timerCheckpoint.usedMs = 100;
+        timerCheckpoint.goal!.activeExecutionMs = 100;
+        const toolBoundaryCheckpoint = structuredClone(timerCheckpoint);
+        toolBoundaryCheckpoint.usedMs = 200;
+        toolBoundaryCheckpoint.goal!.activeExecutionMs = 200;
+        await Promise.all([
+          coordinator.persistCheckpoint(timerCheckpoint),
+          coordinator.persistCheckpoint(toolBoundaryCheckpoint)
+        ]);
+        return undefined;
+      },
+      completionSafety: async () => { throw new Error('not reached'); },
+      completionReviewerContext: async () => { throw new Error('not reached'); }
+    });
+    await coordinator.create(value, 'session', {
+      visibleContent: 'Goal: test', expandedContent: 'Goal: test', providerContent: 'Goal: test\nTAIL'
+    });
+    await coordinator.start();
+
+    assert.equal(coordinator.current?.runCheckpoint?.usedMs, 200);
+    assert.equal(coordinator.current?.usage.activeExecutionMs, 200);
+    assert.notEqual(coordinator.current?.runCheckpoint?.stopReason, 'storage_failure');
+  });
+
   test('resume reports a live competing window without rewriting the recovery record', async () => {
     const root = await tempRoot();
     const store = new GoalStore(vscode.Uri.file(root));
@@ -445,6 +535,44 @@ describe('Goal lease and recovery', () => {
     assert.match(goalResumeBlocker(record, recoveryContext(value, { hasExternalAuthorizationRequirement: true })) ?? '', /authorization/u);
     assert.match(goalResumeBlocker(record, recoveryContext(value, { canAcquireLease: false })) ?? '', /cannot guarantee exclusive/u);
   });
+
+  test('explicit resume reconnects the immutable Goal session instead of transplanting history', async () => {
+    const value = contract();
+    const record = createMinimalRecord(value);
+    const selected: string[] = [];
+    const resolved = await resolveGoalSessionForResume(
+      record,
+      { id: 'new-session', workspaceKey: 'workspace' },
+      async (sessionId) => {
+        selected.push(sessionId);
+        return { id: sessionId, workspaceKey: 'workspace' };
+      }
+    );
+    assert.deepEqual(selected, ['session']);
+    assert.equal(resolved.changed, true);
+    assert.equal(resolved.session.id, record.sessionId);
+
+    const alreadyActive = await resolveGoalSessionForResume(
+      record,
+      { id: 'session', workspaceKey: 'workspace' },
+      async () => { throw new Error('must not select'); }
+    );
+    assert.equal(alreadyActive.changed, false);
+  });
+
+  test('explicit resume fails closed when the owning Goal session is missing or belongs elsewhere', async () => {
+    const record = createMinimalRecord(contract());
+    await assert.rejects(() => resolveGoalSessionForResume(
+      record,
+      { id: 'new-session', workspaceKey: 'workspace' },
+      async () => undefined
+    ), /unavailable or was deleted/u);
+    await assert.rejects(() => resolveGoalSessionForResume(
+      record,
+      { id: 'new-session', workspaceKey: 'workspace' },
+      async (sessionId) => ({ id: sessionId, workspaceKey: 'different-workspace' })
+    ), /does not match/u);
+  });
 });
 
 async function tempRoot(): Promise<string> {
@@ -479,4 +607,62 @@ function recoveryContext(value: ReturnType<typeof contract>, overrides: Partial<
 
 function createHashForMutatedContract(value: ReturnType<typeof contract>): string {
   return hashGoalContract(value);
+}
+
+function executingGoalCheckpoint(
+  value: ReturnType<typeof contract>,
+  toolCallId: string,
+  toolName: string
+): RunCheckpoint {
+  return {
+    version: 3,
+    taskId: 'goal-task',
+    attempt: 1,
+    attemptIds: [],
+    status: 'interrupted',
+    stopReason: 'connection_interrupted',
+    usedMs: 100,
+    maxExecutionMs: value.budgets.maxActiveExecutionMs,
+    usedCostByCurrency: {},
+    maxCost: value.budgets.maxCost,
+    limitSource: 'Goal test',
+    modelRequests: 1,
+    retries: 0,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    request: {} as RunCheckpoint['request'],
+    source: {
+      sourceId: value.main.sourceId,
+      modelId: value.main.modelId,
+      provider: value.main.provider,
+      endpointHash: value.main.endpointHash
+    },
+    workspaceFolders: [],
+    goal: {
+      version: 1,
+      contractHash: value.canonicalHash,
+      revision: 1,
+      activeExecutionMs: 100,
+      costByCurrency: {},
+      modelRequests: 1,
+      completionReviews: 0,
+      criteria: [],
+      validationMutationRevision: 0,
+      consumedResultKeys: []
+    },
+    state: {
+      messages: [], provider: undefined, toolRounds: [], draftEdits: [], draftRuns: [], reasoningParts: [],
+      turn: 0, toolCallCount: 1, validationRunCount: 0, toolResultTokens: 0,
+      repairLoop: { status: 'idle', iteration: 0, maxIterations: 1, pendingDraftEditIds: [] },
+      pending: {
+        response: {
+          message: {
+            role: 'assistant',
+            tool_calls: [{ id: toolCallId, type: 'function', function: { name: toolName, arguments: '{}' } }]
+          }
+        },
+        results: {},
+        executing: { id: toolCallId, name: toolName, evidenceRef: 'evidence-ref' }
+      }
+    }
+  };
 }

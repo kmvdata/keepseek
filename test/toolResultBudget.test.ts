@@ -700,6 +700,7 @@ test('crash recovery distinguishes pending, replayable, completed and uncertain 
   const uri = vscode.Uri.file(root) as unknown as import('vscode').Uri;
   const scenarios = [
     { name: 'intent-not-started', status: 'pending' as const, complete: false, envelope: false, expectedReads: 1 },
+    { name: 'intent-not-started-after-storage-failure', status: 'pending' as const, complete: false, envelope: false, expectedReads: 1, storageFailure: true },
     { name: 'read-result-unknown', status: 'executing' as const, complete: false, envelope: false, expectedReads: 1 },
     { name: 'evidence-no-envelope', status: 'executing' as const, complete: true, envelope: false, expectedReads: 0 },
     { name: 'envelope-not-sent', status: 'executing' as const, complete: true, envelope: true, expectedReads: 0 },
@@ -724,6 +725,11 @@ test('crash recovery distinguishes pending, replayable, completed and uncertain 
       }
       if (scenario.sending) evidence = await store.markSending(evidence);
       checkpoint.state!.pending!.executing!.evidenceRef = evidence.evidenceRef;
+      if (scenario.storageFailure) {
+        checkpoint.status = 'blocked';
+        checkpoint.stopReason = 'storage_failure';
+        checkpoint.error = 'A previous Goal snapshot write failed.';
+      }
       input.checkpoint = checkpoint;
       let reads = 0;
       const workspace = new WorkspaceToolService();

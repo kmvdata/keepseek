@@ -119,7 +119,7 @@ import type { StartupPerformanceTrace } from '../shared/startupPerformance';
 import { ContextUsageEstimateCache, createContextUsageCacheKey } from '../agent/contextUsageCache';
 import { focusView } from './focusView';
 import type { DroppedFileReferenceInput, PromptReferenceInput, WebviewMessage } from './webviewMessages';
-import { InteractionTraceLogService } from '../agent/logging/interactionTrace';
+import { InteractionTraceLogService, type AgentInteractionTrace } from '../agent/logging/interactionTrace';
 import { applyChangeSetEventToRunDetails } from '../agent/logging/runDetails';
 import { fetchModelSourceBalance } from '../agent/balance';
 import { GlobalBalanceStore, type BalanceSourceScope } from '../agent/deepseek/balanceStore';
@@ -165,7 +165,7 @@ import { GoalLease } from '../agent/goals/goalLease';
 import { GoalCoordinator } from '../agent/goals/goalCoordinator';
 import { GoalCompletionReviewService, type GoalCompletionSafetySnapshot } from '../agent/goals/goalCompletionReview';
 import { GoalDraftGeneratorService, type GoalDraftSuggestionV1 } from '../agent/goals/goalDraftGenerator';
-import { goalResumeBlocker } from '../agent/goals/goalRecovery';
+import { goalResumeBlocker, resolveGoalSessionForResume } from '../agent/goals/goalRecovery';
 import { createGoalViewModel, createGoalViewModelPayload } from '../agent/goals/goalViewModel';
 import type { GoalContractV1, GoalRecordV1 } from '../agent/goals/goalTypes';
 import { GOAL_REQUEST_PROTOCOL_VERSION, MAX_GOAL_OBJECTIVE_CHARACTERS } from '../agent/goals/goalTypes';
@@ -1008,33 +1008,50 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'startGoal':
         this.cancelGoalDraftGeneration(false);
-        await this.startGoal(message).catch((error) => vscode.window.showWarningMessage(getErrorMessage(error)));
-        this.postState({ immediate: true, forceFull: true });
+        {
+          const trace = await this.createGoalActionTrace('start');
+          try {
+            await this.startGoal(message);
+            trace.record({ type: 'goal_action_settled', action: 'start', status: this.goalCoordinator.current?.status });
+          } catch (error) {
+            trace.record({ type: 'goal_action_failed', action: 'start', error: goalDiagnosticError(error) });
+            vscode.window.showWarningMessage(getErrorMessage(error));
+          } finally {
+            await trace.flush();
+            this.postState({ immediate: true, forceFull: true });
+          }
+        }
         return;
       case 'goalPause':
         await this.goalCoordinator.pause().catch((error) => vscode.window.showWarningMessage(getErrorMessage(error)));
         return;
       case 'goalResume':
-        this.postToWebview({
-          type: 'goalActionFeedback', action: 'resume', status: 'pending',
-          message: this.language === 'en' ? 'Checking Goal recovery…' : '正在检查 Goal 恢复条件…'
-        });
-        try {
-          await this.resumeGoal();
-          if (this.goalCoordinator.current && this.goalCoordinator.current.status !== 'stopped') {
-            this.postToWebview({
-              type: 'goalActionFeedback', action: 'resume', status: 'success',
-              message: this.language === 'en' ? 'Goal resumed.' : 'Goal 已恢复。'
-            });
+        {
+          const trace = await this.createGoalActionTrace('resume');
+          this.postToWebview({
+            type: 'goalActionFeedback', action: 'resume', status: 'pending',
+            message: this.language === 'en' ? 'Checking Goal recovery…' : '正在检查 Goal 恢复条件…'
+          });
+          try {
+            await this.resumeGoal(trace);
+            if (this.goalCoordinator.current && this.goalCoordinator.current.status !== 'stopped') {
+              trace.record({ type: 'goal_action_settled', action: 'resume', status: this.goalCoordinator.current.status });
+              this.postToWebview({
+                type: 'goalActionFeedback', action: 'resume', status: 'success',
+                message: this.language === 'en' ? 'Goal resumed.' : 'Goal 已恢复。'
+              });
+            }
+          } catch (error) {
+            const detail = getErrorMessage(error);
+            trace.record({ type: 'goal_action_failed', action: 'resume', error: goalDiagnosticError(error) });
+            this.postToWebview({ type: 'goalActionFeedback', action: 'resume', status: 'error', message: detail });
+            vscode.window.showWarningMessage(this.language === 'en'
+              ? `Goal could not resume: ${detail}`
+              : `Goal 无法恢复：${detail}`);
+          } finally {
+            await trace.flush();
+            this.postState({ immediate: true, forceFull: true });
           }
-        } catch (error) {
-          const detail = getErrorMessage(error);
-          this.postToWebview({ type: 'goalActionFeedback', action: 'resume', status: 'error', message: detail });
-          vscode.window.showWarningMessage(this.language === 'en'
-            ? `Goal could not resume: ${detail}`
-            : `Goal 无法恢复：${detail}`);
-        } finally {
-          this.postState({ immediate: true, forceFull: true });
         }
         return;
       case 'goalStop':
@@ -3172,17 +3189,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async openCurrentSessionLog(): Promise<void> {
-    if (!getConfiguredDebugMode()) {
-      vscode.window.showWarningMessage(this.t('debugModeRequiredForLogs'));
-      this.postState();
-      return;
-    }
-
     const activeSession = this.sessionStore.getActiveSession();
     const logUriText = activeSession.lastTraceLogUri?.trim()
       || this.sessionTraceLogUris.get(activeSession.id)?.trim();
     if (!logUriText) {
-      vscode.window.showWarningMessage(this.t('currentSessionLogUnavailable'));
+      vscode.window.showWarningMessage(this.t(getConfiguredDebugMode()
+        ? 'currentSessionLogUnavailable'
+        : 'debugModeRequiredForLogs'));
       this.postState();
       return;
     }
@@ -3205,6 +3218,43 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.postState();
       vscode.window.showErrorMessage(this.t('cannotOpenCurrentSessionLog', { message: getErrorMessage(error) }));
     }
+  }
+
+  /** Goal start/resume can fail before AgentRunner creates its per-attempt
+   * trace (for example while checking a persisted tool intent). Persist a
+   * metadata-only action trace first so those failures remain diagnosable even
+   * when payload-level Debug Mode is disabled. */
+  private async createGoalActionTrace(action: 'start' | 'resume'): Promise<AgentInteractionTrace> {
+    const trace = this.traceLogService.createRunTrace(undefined, { metadataFallback: true });
+    if (!trace.enabled || !trace.logUri) return trace;
+    const record = this.goalCoordinator?.current;
+    trace.record({
+      type: 'goal_action_started',
+      action,
+      goalStatus: record?.status,
+      revision: record?.currentRevision,
+      contractHash: record?.currentContractHash,
+      checkpointStatus: record?.runCheckpoint?.status,
+      checkpointStopReason: record?.runCheckpoint?.stopReason,
+      checkpointError: record?.runCheckpoint?.error,
+      pendingToolName: record?.runCheckpoint?.state?.pending?.executing?.name,
+      pendingToolCount: record?.sideEffects.pendingToolCallIds.length ?? 0,
+      uncertainToolCount: record?.sideEffects.uncertainToolCallIds.length ?? 0,
+      changeSetCount: record?.sideEffects.changeSetIds.length ?? 0,
+      draftRunCount: record?.sideEffects.draftRunIds.length ?? 0
+    });
+    await trace.flush();
+    await this.rememberGoalActionTrace(trace);
+    return trace;
+  }
+
+  private async rememberGoalActionTrace(trace: AgentInteractionTrace): Promise<void> {
+    if (!trace.enabled || !trace.logUri) return;
+    const session = this.sessionStore.getActiveSession();
+    session.lastTraceLogUri = trace.logUri;
+    this.sessionTraceLogUris.set(session.id, trace.logUri);
+    try { await this.sessionStore.persist(); }
+    catch (error) { console.warn('[KeepSeek] Failed to persist Goal diagnostic log reference:', getErrorMessage(error)); }
   }
 
   private async refreshBalance(options: { force?: boolean; post?: boolean } = {}): Promise<void> {
@@ -4147,9 +4197,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async resumeGoal(): Promise<void> {
+  private async resumeGoal(actionTrace?: AgentInteractionTrace): Promise<void> {
     const record = this.goalCoordinator?.current;
     if (!record) throw new Error('No Goal is available to resume.');
+    await this.reconnectGoalSessionForResume(record);
+    // If reconnect changed the visible session, make the preflight trace
+    // discoverable from the Goal session before any later recovery check can
+    // fail. AgentRunner replaces this pointer with its richer attempt trace
+    // once dispatch begins.
+    if (actionTrace) await this.rememberGoalActionTrace(actionTrace);
     if (record.status === 'preparing') await this.goalCoordinator.start();
     else if (['waiting_for_apply', 'waiting_for_command', 'waiting_for_authorization'].includes(record.status)
       && await this.goalLease.confirm()) {
@@ -4175,6 +4231,31 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (resumed?.status === 'needs_attention') {
       throw new Error(resumed.stopReason ?? 'Goal recovery checks require attention.');
     }
+  }
+
+  private async reconnectGoalSessionForResume(record: GoalRecordV1): Promise<void> {
+    const activeSession = this.sessionStore.getActiveSession();
+    if (activeSession.id !== record.sessionId && (this.isBusy || this.isStartingRun || this.activeDraftRunId)) {
+      throw new Error('The Goal session cannot be reopened while another operation is running.');
+    }
+    const resolved = await resolveGoalSessionForResume(
+      record,
+      activeSession,
+      async (sessionId) => await this.sessionStore.selectSession(sessionId)
+    );
+    if (!resolved.changed) return;
+
+    // This is an explicit reconnection to the Goal's immutable session
+    // binding, not a migration to the session that happened to be visible.
+    // Volatile runtime state from both sessions is intentionally discarded.
+    this.clearSessionTransientState();
+    await Promise.all([
+      this.changeSets.loadSession?.(resolved.session.id),
+      this.draftRuns.loadSession?.(resolved.session.id)
+    ]);
+    await this.refreshCurrentRunContext(resolved.session, '');
+    this.postToWebview({ type: 'sessionChanged' });
+    this.postState({ immediate: true, forceFull: true });
   }
 
   private async initializeGoalRecovery(): Promise<void> {
@@ -4233,8 +4314,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       checkpointValid: protocolMatches && (requestNeverStarted || Boolean(checkpointMatches && exactInitialMessageExists)),
       hasUncertainChangeSet,
       hasUncertainDraftRun: runs.some((run) => run?.interruption?.terminalUnknown === true),
-      hasUncertainToolResult: record.sideEffects.uncertainToolCallIds.length > 0
-        || Boolean(record.runCheckpoint?.state?.pending?.executing),
+      // A persisted executing intent is not itself proof of an uncertain side
+      // effect. AgentRunner reconciles it against ToolEvidence before making a
+      // Provider request: an unstarted intent can be discarded, completed
+      // evidence can be consumed, and read/proposal work can be replayed.
+      // Only an explicitly classified uncertain result blocks recovery here.
+      hasUncertainToolResult: record.sideEffects.uncertainToolCallIds.length > 0,
       hasPendingApproval: record.status === 'waiting_for_authorization',
       canAcquireLease: this.goalLease.supported,
       autoResumeEnabled
@@ -5428,7 +5513,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           assistantMessage = undefined;
         }
         this.setAgentActivity({ base: 'error', phase: 'failed' }, { post: false });
-        return;
+        // GoalCoordinator owns the durable state transition. Propagating the
+        // original failure keeps its actionable reason instead of replacing it
+        // with the generic "attempt ended without a durable result" message.
+        throw error;
       }
       if (error instanceof AgentRunAbortedError || abortController.signal.aborted) {
         if (assistantMessage) {
@@ -6673,6 +6761,17 @@ function sanitizeGoalResultText(value: string): string {
     .replace(/\b[A-Za-z]:\\[^\s"'<>]*/gu, '<local-path>')
     .replace(/(^|[\s"'(<])\/[A-Za-z0-9._-]+\/[A-Za-z0-9._~/-]+[^\s"'<>]*/gmu, '$1<local-path>')
     .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/giu, '<runtime-id>');
+}
+
+function goalDiagnosticError(error: unknown): { name: string; message: string; code?: string } {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      ...('code' in error && typeof error.code === 'string' ? { code: error.code } : {})
+    };
+  }
+  return { name: 'Error', message: String(error) };
 }
 
 function getWorkspaceSummaryTimestamp(workspace: WorkspaceSummary): number {

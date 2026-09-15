@@ -103,6 +103,54 @@ test('local and workspace-fs traces use local dates for events, filenames, appen
   }
 });
 
+test('Goal metadata fallback creates an openable log while Debug Mode is off without persisting payload fields', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'keepseek-goal-diagnostic-'));
+  const originalConfig = vscode.workspace.getConfiguration;
+  try {
+    vscode.workspace.getConfiguration = () => ({ ...originalConfig(),
+      get<T>(key: string, fallback: T): T {
+        if (key === 'trace.enabled') return false as T;
+        if (key === 'trace.level') return 'full' as T;
+        if (key === 'trace.logRawStream') return true as T;
+        return fallback;
+      }
+    });
+    const service = new InteractionTraceLogService(
+      vscode.Uri.file(directory) as unknown as import('vscode').Uri
+    );
+    const disabled = service.createRunTrace();
+    assert.equal(disabled.enabled, false);
+    assert.equal(disabled.logUri, undefined);
+
+    const diagnostic = service.createRunTrace(undefined, { metadataFallback: true });
+    assert.equal(diagnostic.enabled, true);
+    assert.equal(diagnostic.level, 'metadata');
+    assert.equal(diagnostic.logRawStream, false);
+    diagnostic.record({
+      type: 'goal_action_failed',
+      action: 'resume',
+      goalStatus: 'interrupted',
+      prompt: 'PRIVATE GOAL PROMPT',
+      reasoningContent: 'PRIVATE REASONING',
+      contextFiles: [{ fsPath: '/Users/person/private.py', content: 'PRIVATE FILE' }],
+      error: { name: 'AgentInterruptedError', message: 'Recovery checkpoint mismatch.', stack: 'PRIVATE STACK' }
+    });
+    await diagnostic.flush();
+
+    const bytes = await readFile(vscode.Uri.parse(diagnostic.logUri!).fsPath, 'utf8');
+    const record = JSON.parse(bytes.trim()) as Record<string, unknown>;
+    assert.equal(record.type, 'goal_action_failed');
+    assert.equal(record.action, 'resume');
+    assert.equal(record.goalStatus, 'interrupted');
+    assert.deepEqual(record.error, { name: 'AgentInterruptedError', message: 'Recovery checkpoint mismatch.' });
+    assert.deepEqual(record.contextFilesSummary, { present: true, items: 1 });
+    assert.doesNotMatch(bytes, /PRIVATE GOAL PROMPT|PRIVATE REASONING|PRIVATE FILE|PRIVATE STACK|\/Users\/person/u);
+  } finally {
+    vscode.workspace.getConfiguration = originalConfig;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 function restoreTimezone(timezone: string | undefined): void {
   if (timezone === undefined) delete process.env.TZ;
   else process.env.TZ = timezone;

@@ -26,6 +26,31 @@ export interface GoalRecoveryResult {
   reason?: string;
 }
 
+export interface GoalSessionReference {
+  id: string;
+  workspaceKey: string;
+}
+
+/** An explicit Resume action may be invoked while another chat session is
+ * visible. Reconnect the persisted Goal to its owning session before applying
+ * the strict recovery checks; never transplant it into the current session. */
+export async function resolveGoalSessionForResume<T extends GoalSessionReference>(
+  record: GoalRecordV1,
+  activeSession: T,
+  selectSession: (sessionId: string) => Promise<T | undefined>
+): Promise<{ session: T; changed: boolean }> {
+  const session = activeSession.id === record.sessionId
+    ? activeSession
+    : await selectSession(record.sessionId);
+  if (!session) {
+    throw new Error('The Goal session is unavailable or was deleted.');
+  }
+  if (session.id !== record.sessionId || session.workspaceKey !== record.workspaceKey) {
+    throw new Error('The Goal session does not match the persisted workspace binding.');
+  }
+  return { session, changed: session.id !== activeSession.id };
+}
+
 /** Re-checks the durable/runtime boundary for an explicit user resume without
  * replaying activation recovery or invalidating already-current evidence. */
 export function goalResumeBlocker(record: GoalRecordV1, context: GoalRecoveryContext): string | undefined {

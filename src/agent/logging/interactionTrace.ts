@@ -37,18 +37,34 @@ export interface AgentInteractionTrace {
 }
 
 export type InteractionTraceEventSink = (event: InteractionTraceEvent, timestamp: string) => void;
+type InteractionTraceEventTransform = (event: InteractionTraceEvent) => InteractionTraceEvent;
+
+export interface InteractionTraceCreateOptions {
+  /** Goal recovery can fail before AgentRunner reaches its normal trace setup.
+   * In that case create a metadata-only diagnostic without enabling payload,
+   * reasoning, tool-argument, or raw-stream logging. */
+  metadataFallback?: boolean;
+}
 
 export class InteractionTraceLogService {
   private lastRunTraceLogUri: string | undefined;
 
   public constructor(private readonly globalStorageUri: vscode.Uri) {}
 
-  public createRunTrace(eventSink?: InteractionTraceEventSink): AgentInteractionTrace {
-    const settings = getConfiguredInteractionTraceSettings();
-    if (!settings.enabled) {
+  public createRunTrace(
+    eventSink?: InteractionTraceEventSink,
+    options: InteractionTraceCreateOptions = {}
+  ): AgentInteractionTrace {
+    const configuredSettings = getConfiguredInteractionTraceSettings();
+    if (!configuredSettings.enabled && !options.metadataFallback) {
       this.lastRunTraceLogUri = undefined;
       return createNoopInteractionTrace(eventSink);
     }
+    const metadataFallback = !configuredSettings.enabled && options.metadataFallback === true;
+    const settings: InteractionTraceSettings = configuredSettings.enabled
+      ? configuredSettings
+      : { ...configuredSettings, enabled: true, level: 'metadata', logRawStream: false };
+    const eventTransform = metadataFallback ? toGoalDiagnosticEvent : undefined;
 
     const runId = randomUUID();
     const now = new Date();
@@ -58,12 +74,12 @@ export class InteractionTraceLogService {
     void this.cleanupExpiredLogs(settings);
 
     if (fileUri.scheme === 'file') {
-      const trace = new JsonlInteractionTrace(runId, fileUri.fsPath, settings, eventSink);
+      const trace = new JsonlInteractionTrace(runId, fileUri.fsPath, settings, eventSink, eventTransform);
       this.lastRunTraceLogUri = trace.logUri;
       return trace;
     }
 
-    const trace = new WorkspaceFsJsonlInteractionTrace(runId, fileUri, settings, eventSink);
+    const trace = new WorkspaceFsJsonlInteractionTrace(runId, fileUri, settings, eventSink, eventTransform);
     this.lastRunTraceLogUri = trace.logUri;
     return trace;
   }
@@ -202,7 +218,8 @@ class JsonlInteractionTrace implements AgentInteractionTrace {
     public readonly runId: string,
     private readonly filePath: string,
     private readonly settings: InteractionTraceSettings,
-    private readonly eventSink?: InteractionTraceEventSink
+    private readonly eventSink?: InteractionTraceEventSink,
+    private readonly eventTransform?: InteractionTraceEventTransform
   ) {
     this.logUri = vscode.Uri.file(filePath).toString();
     this.level = settings.level;
@@ -229,7 +246,7 @@ class JsonlInteractionTrace implements AgentInteractionTrace {
       ts: timestamp,
       runId: this.runId,
       seq: ++this.sequence,
-      ...event
+      ...(this.eventTransform?.(event) ?? event)
     };
     const line = `${safeJsonStringify(envelope)}\n`;
     const lineBytes = Buffer.byteLength(line, 'utf8');
@@ -293,7 +310,8 @@ class WorkspaceFsJsonlInteractionTrace implements AgentInteractionTrace {
     public readonly runId: string,
     private readonly fileUri: vscode.Uri,
     private readonly settings: InteractionTraceSettings,
-    private readonly eventSink?: InteractionTraceEventSink
+    private readonly eventSink?: InteractionTraceEventSink,
+    private readonly eventTransform?: InteractionTraceEventTransform
   ) {
     this.logUri = fileUri.toString();
     this.level = settings.level;
@@ -318,7 +336,7 @@ class WorkspaceFsJsonlInteractionTrace implements AgentInteractionTrace {
       ts: timestamp,
       runId: this.runId,
       seq: ++this.sequence,
-      ...event
+      ...(this.eventTransform?.(event) ?? event)
     };
     const line = `${safeJsonStringify(envelope)}\n`;
     const lineBytes = Buffer.byteLength(line, 'utf8');
@@ -519,6 +537,54 @@ function safeJsonStringify(value: unknown): string {
       error: formatUnknownError(error)
     });
   }
+}
+
+/** Always-on Goal diagnostics retain state-machine and failure metadata while
+ * stripping content-bearing fields. Full payload traces remain opt-in. */
+function toGoalDiagnosticEvent(event: InteractionTraceEvent): InteractionTraceEvent {
+  const result: InteractionTraceEvent = { type: event.type };
+  for (const [key, value] of Object.entries(event)) {
+    if (key === 'type' || value === undefined) continue;
+    if (key === 'error') {
+      result.error = diagnosticError(value);
+      continue;
+    }
+    if (isDiagnosticContentKey(key)) {
+      result[`${key}Summary`] = diagnosticValueSummary(value);
+      continue;
+    }
+    if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      result[key] = value;
+    } else {
+      result[`${key}Summary`] = diagnosticValueSummary(value);
+    }
+  }
+  return result;
+}
+
+function isDiagnosticContentKey(key: string): boolean {
+  return /prompt|content|text|message|reasoning|argument|\bargs?\b|body|request|response|history|context|skill|file|path|uri|root|input|output|raw|label|executable|command|env|summary|detail|operation|policy/iu.test(key);
+}
+
+function diagnosticValueSummary(value: unknown): Record<string, unknown> {
+  if (typeof value === 'string') return summarizeText(value);
+  if (Array.isArray(value)) return { present: true, items: value.length };
+  if (value && typeof value === 'object') return { present: true, fields: Object.keys(value).length };
+  return { present: value !== undefined && value !== null, valueType: typeof value };
+}
+
+function diagnosticError(value: unknown): Record<string, unknown> {
+  if (value instanceof Error) return { name: value.name, message: value.message,
+    ...('code' in value && typeof value.code === 'string' ? { code: value.code } : {}) };
+  if (value && typeof value === 'object') {
+    const item = value as { name?: unknown; message?: unknown; code?: unknown };
+    return {
+      name: typeof item.name === 'string' ? item.name : 'Error',
+      message: typeof item.message === 'string' ? item.message : String(value),
+      ...(typeof item.code === 'string' ? { code: item.code } : {})
+    };
+  }
+  return { name: 'Error', message: String(value) };
 }
 
 function redactSensitiveTraceText(value: string): string {

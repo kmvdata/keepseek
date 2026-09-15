@@ -76,7 +76,7 @@ Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节
 
 确认后顺序为：持久化 Goal snapshot/journal → 将 session 显式升级到 Goal-only V10 → 取得 workspace lease/fencing → 写入请求 intent 和首个 v3 RunCheckpoint → 创建真实 Goal user message并持久化其完整 `providerContent` → 请求 Provider。任一步保存失败都禁止下一步。崩溃落在 Goal 与 session 两份存储之间时，只允许在仍为 `preparing`、没有 checkpoint/真实消息且冻结来源一致时确定性补齐 V10 metadata；checkpoint 已存在却找不到精确首次消息时 fail-closed。
 
-`GoalCoordinator` 是唯一续跑状态机；Provider 只做入口、事件转发和裁剪 view model。`GoalStore` 使用 index、不可变 snapshot、单调 `storageRevision` 乐观并发校验与 journal shard；`GoalLease` 为 file global storage 提供 heartbeat/expiry/fencing。启动或恢复等待 lease 时，Stop/interrupt/amend/dispose 会递增生命周期 generation，迟到的 acquire 必须释放且不得覆盖新状态或 dispatch。`GoalReplay` 维护三协议内部 continuation；`GoalCompletionReviewService` 执行硬检查和隔离 reviewer。Goal 状态与 checkpoint、lease、隐藏 reviewer 输入或大 evidence 不发送给 Webview。当前 Goal attempt 的 Provider delta 通过独立的内存 assistant 投影复用普通 transcript 流式渲染；它不属于 session 历史，完成候选落盘、后续 replay 与缓存投影都不读取该对象。显式 Resume 有独立 pending/success/error 回执并只执行当前安全复核；activation recovery 仅在重新激活时执行一次。
+`GoalCoordinator` 是唯一续跑状态机；Provider 只做入口、事件转发和裁剪 view model。`GoalStore` 使用 index、不可变 snapshot、单调 `storageRevision` 乐观并发校验与 journal shard；`GoalLease` 为 file global storage 提供 heartbeat/expiry/fencing。启动或恢复等待 lease 时，Stop/interrupt/amend/dispose 会递增生命周期 generation，迟到的 acquire 必须释放且不得覆盖新状态或 dispatch。`GoalReplay` 维护三协议内部 continuation；`GoalCompletionReviewService` 执行硬检查和隔离 reviewer。Goal 状态与 checkpoint、lease、隐藏 reviewer 输入或大 evidence 不发送给 Webview。当前 Goal attempt 的 Provider delta 通过独立的内存 assistant 投影复用普通 transcript 流式渲染；它不属于 session 历史，完成候选落盘、后续 replay 与缓存投影都不读取该对象。显式 Resume 有独立 pending/success/error 回执并只执行当前安全复核；若当前显示的是另一会话，Resume 先按不可变 `sessionId + workspaceKey` 重载 Goal 原会话及其 ChangeSet/DraftRun/运行上下文，绝不把 Goal 历史移植到当前会话，所属会话缺失或 workspace 绑定不符时 fail-closed。activation recovery 仅在重新激活时执行一次。
 
 ### 2.3 Prompt 引用展开
 
@@ -553,6 +553,8 @@ Webview 会把 phase 映射成中英文状态文案，例如“搜索工作区..
 ## 9. Trace 与调试
 
 开启 `keepseek.trace.enabled` 后，`InteractionTraceLogService` 会在全局存储下写 JSONL 日志。
+
+Goal 的 Start/Resume 与每次进入 Runner 的 attempt 还会在调试模式关闭时生成一份仅元数据诊断日志。Start/Resume 在 lease、session/checkpoint 绑定和遗留工具证据检查之前先持久化日志引用，因此恢复前置检查失败也有可打开的记录。该 fallback 固定关闭 raw stream，并把 prompt、消息、reasoning、文件内容/路径、工具参数、命令和 Provider payload 替换为长度或数量摘要；开启调试模式后仍使用用户选择的常规 trace level。关闭调试模式不会隐藏当前会话已经存在的 Goal 诊断日志。
 
 日志事件的 `ts` 使用扩展运行所在操作系统的本地时区，格式为带毫秒与明确偏移的 ISO 8601，例如 `2026-09-04T16:04:03.123+08:00`。日期目录、文件名、后续追加事件和截断标记使用同一规则；夏令时按事件发生时间计算。旧日志不回写，嵌套的请求/响应 payload 与历史消息时间字段保持原样，避免破坏原始证据和请求缓存字节。
 
