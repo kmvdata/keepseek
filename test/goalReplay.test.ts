@@ -18,14 +18,14 @@ import { contract, recordFor } from './goalDomain.test';
 describe('Goal replay', () => {
   test('appends candidate and deterministic control without touching ChatSession messages', () => {
     const checkpoint = checkpointFor('chat');
-    const sessionMessages = [{ role: 'user', content: '/goal test' }];
+    const sessionMessages = [{ role: 'user', content: 'Goal: test' }];
     const control = createGoalControlItem({
       contractHash: 'contract', revision: 1, evidenceManifestHash: 'manifest', workspaceMutationRevision: 2,
       unmetCriterionIds: ['criterion-b', 'criterion-a'], incompleteValidations: ['test', 'compile'],
       taskPlan: { status: 'in_progress', currentStepId: 'step-1', blockers: ['b'] }, nextStep: 'satisfy_criterion:criterion-a'
     });
     const next = appendGoalContinuation({ checkpoint, candidateContent: 'Too early.', controlContent: control.content });
-    assert.deepEqual(sessionMessages, [{ role: 'user', content: '/goal test' }]);
+    assert.deepEqual(sessionMessages, [{ role: 'user', content: 'Goal: test' }]);
     assert.deepEqual(next.state?.messages.slice(-2), [
       { role: 'assistant', content: 'Too early.' }, { role: 'user', content: control.content }
     ]);
@@ -183,10 +183,10 @@ function checkpointFor(protocol: 'chat' | 'responses' | 'anthropic'): RunCheckpo
     usedCostByCurrency: {}, maxCost: 1, limitSource: 'goal', modelRequests: 1, retries: 0,
     updatedAt: '2026-01-01T00:00:00.000Z', workspaceFolders: ['file:///workspace'],
     source: { sourceId: 'source', modelId: 'model', provider: 'openai-compatible', endpointHash: contract().main.endpointHash },
-    request: { model: { id: 'model', label: 'Model' }, prompt: '/goal test', settings: settings(), contextFiles: [], history: [], language: 'en', sessionId: 'session' },
+    request: { model: { id: 'model', label: 'Model' }, prompt: 'Goal: test', settings: settings(), contextFiles: [], history: [], language: 'en', sessionId: 'session' },
     goal: { version: 1, contractHash: 'contract', revision: 1, activeExecutionMs: 0, costByCurrency: {}, modelRequests: 1,
       completionReviews: 0, criteria: [], validationMutationRevision: 0, consumedResultKeys: [] },
-    state: { messages: [{ role: 'user', content: '/goal test' }], provider, toolRounds: [], draftEdits: [], draftRuns: [],
+    state: { messages: [{ role: 'user', content: 'Goal: test' }], provider, toolRounds: [], draftEdits: [], draftRuns: [],
       reasoningParts: [], turn: 1, toolCallCount: 0, validationRunCount: 0, toolResultTokens: 0,
       repairLoop: { status: 'idle', iteration: 0, maxIterations: 3, pendingDraftEditIds: [], validationFailures: [] } }
   } as unknown as RunCheckpoint;

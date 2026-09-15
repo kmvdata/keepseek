@@ -5,6 +5,7 @@ export function createGoalViewModel(record: GoalRecordV1 | undefined, approvalMo
   if (!record) return undefined;
   const contract = record.revisions.find((revision) => revision.revision === record.currentRevision)?.contract;
   if (!contract) return undefined;
+  const taskPlan = record.runCheckpoint?.taskPlan ?? record.candidateFinal?.taskPlan;
   return {
     version: 1,
     id: record.id,
@@ -23,7 +24,7 @@ export function createGoalViewModel(record: GoalRecordV1 | undefined, approvalMo
       status: record.validations.filter((validation) => validation.script === script)
         .sort((left, right) => right.completedAt.localeCompare(left.completedAt))[0]?.status ?? 'pending'
     })),
-    currentStep: record.candidateFinal?.taskPlan?.steps.find((step) => step.id === record.candidateFinal?.taskPlan?.currentStepId)?.title,
+    currentStep: taskPlan?.steps.find((step) => step.id === taskPlan.currentStepId)?.title,
     activeExecutionMs: record.usage.activeExecutionMs,
     maxActiveExecutionMs: contract.budgets.maxActiveExecutionMs,
     modelRequests: record.usage.modelRequests,
@@ -42,4 +43,14 @@ export function createGoalViewModel(record: GoalRecordV1 | undefined, approvalMo
     canStop: !isGoalTerminalStatus(record.status),
     canClear: isGoalTerminalStatus(record.status)
   };
+}
+
+/** Webview state patches cross VS Code's message serialization boundary. An
+ * explicit null is required to clear an earlier Goal; undefined properties may
+ * be omitted by the transport and would leave stale client state behind. */
+export function createGoalViewModelPayload(
+  record: GoalRecordV1 | undefined,
+  approvalMode: ApprovalMode
+): GoalViewModelV1 | null {
+  return createGoalViewModel(record, approvalMode) ?? null;
 }

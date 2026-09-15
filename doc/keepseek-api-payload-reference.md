@@ -166,10 +166,12 @@ Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使�
 
 ### 2.4 Goal-only V10 payload 与 replay
 
-只有用户在 `/goal` 确认面板点击“开始 Goal”时，该 session 才升级到 request protocol V10。V10 不增加模型工具，tool schema version 仍为 V9；`getAgentSystemPrompt(v10)` 与 `getAgentTools(v10)` 的序列化字节分别等同 V9。首次 Provider user content 是已持久化的原始/引用展开内容加确定性 tail：
+点击 `G` 后、用户确认开始前的 Goal 表单预填是独立的无工具子代理请求：system 指令固定，user payload 只含版本、已去除已知本机引用路径的 objective 和当前可用 validation 列表；严格 JSON 输出只用于填表，不进入 Goal replay，不创建 ChatMessage，也不升级 session protocol。取消会中止该请求；用量记入普通 session 的 `subagent` 分类。
+
+只有用户通过输入区 `G` 按钮打开确认面板并点击“开始 Goal”时，该 session 才升级到 request protocol V10。V10 不增加模型工具，tool schema version 仍为 V9；`getAgentSystemPrompt(v10)` 与 `getAgentTools(v10)` 的序列化字节分别等同 V9。首次 Provider user content 是已持久化的 `Goal: <objective>` 可见消息/引用展开内容加确定性 tail：
 
 ```text
-/goal <用户确认前可见的目标与引用>
+Goal: <用户确认前可见的目标与引用>
 
 <keepseek_goal_contract_v1>
 {"version":1,"canonicalHash":"<hash>","objective":"...","amendments":[],"acceptanceCriteria":[...],"includeScope":[...],"excludeScope":[...],"requiredValidations":[...],"completionPolicy":"host_and_reviewer","budgets":{...},"requestProtocolVersion":10,"toolSchemaVersion":9}

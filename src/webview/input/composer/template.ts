@@ -51,6 +51,27 @@ export const composerTemplateFragment: WebviewFragment = {
               >
                 <span class="composer-trigger-glyph command-trigger-glyph" aria-hidden="true">/</span>
               </button>
+              <button
+                id="goalButton"
+                type="button"
+                class="composer-icon-btn composer-goal-btn"
+                title="创建 Goal"
+                aria-label="创建 Goal"
+                data-i18n-title="goalButtonCreate"
+                data-i18n-aria-label="goalButtonCreate"
+                aria-haspopup="dialog"
+                aria-controls="goalDialogOverlay"
+                aria-expanded="false"
+                aria-describedby="goalHoverCard"
+              >
+                <span class="composer-trigger-glyph goal-trigger-glyph" aria-hidden="true">G</span>
+                <span id="goalHoverCard" class="goal-hover-card" role="tooltip">
+                  <span id="goalHoverHeading" class="goal-hover-heading"></span>
+                  <span id="goalHoverObjective" class="goal-hover-objective"></span>
+                  <span id="goalHoverMeta" class="goal-hover-meta"></span>
+                  <span id="goalHoverReason" class="goal-hover-reason hidden"></span>
+                </span>
+              </button>
               <span id="status" class="composer-status" aria-describedby="statusTooltip">
                 <span id="statusText" class="composer-status-text"></span>
                 <span id="statusTooltip" class="composer-status-tooltip hidden" role="tooltip"></span>
@@ -76,4 +97,3 @@ export const composerTemplateFragment: WebviewFragment = {
         </div>
 `.slice(1)
 };
-

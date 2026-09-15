@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import * as vscode from 'vscode';
 import { stableStringify } from '../evidence/shaping';
@@ -41,14 +41,26 @@ export class GoalStoreCorruptionError extends Error {
   public constructor(message: string, public readonly uri: string) { super(message); }
 }
 
+export class GoalStoreConcurrencyError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = 'GoalStoreConcurrencyError';
+  }
+}
+
 export class GoalStore {
   private readonly root: vscode.Uri;
+  private readonly nativeRootPath?: string;
   private index: GoalIndexV1 = { version: 1, entries: [] };
   private initialized = false;
   private writeChain: Promise<void> = Promise.resolve();
 
-  public constructor(private readonly globalStorageUri: vscode.Uri) {
+  public constructor(private readonly globalStorageUri: vscode.Uri, nativeStoragePath?: string) {
     this.root = vscode.Uri.joinPath(globalStorageUri, 'goals', 'v1');
+    const nativeRoot = globalStorageUri.scheme === 'file'
+      ? globalStorageUri.fsPath
+      : normalizeNativeStoragePath(nativeStoragePath);
+    this.nativeRootPath = nativeRoot ? join(nativeRoot, 'goals', 'v1') : undefined;
   }
 
   public async initialize(): Promise<void> {
@@ -102,6 +114,7 @@ export class GoalStore {
       const id = input.id ?? randomUUID();
       const record: GoalRecordV1 = {
         version: GOAL_RECORD_VERSION,
+        storageRevision: 0,
         id,
         workspaceKey: input.workspaceKey,
         sessionId: input.sessionId,
@@ -157,8 +170,14 @@ export class GoalStore {
       if (current.workspaceKey !== record.workspaceKey || current.sessionId !== record.sessionId) {
         throw new Error('Goal workspace/session identity cannot change.');
       }
-      await this.writeSnapshotAndIndex(record);
-      return structuredClone(record);
+      const latest = await this.load(record.id);
+      if (!latest || (latest.storageRevision ?? 0) !== (record.storageRevision ?? 0)) {
+        throw new GoalStoreConcurrencyError('Stale Goal storage revision cannot save a snapshot.');
+      }
+      const next = structuredClone(record);
+      next.storageRevision = (latest.storageRevision ?? 0) + 1;
+      await this.writeSnapshotAndIndex(next);
+      return structuredClone(next);
     });
   }
 
@@ -169,8 +188,12 @@ export class GoalStore {
     return this.serialize(async () => {
       const current = await this.load(record.id);
       if (!current) throw new Error('Goal is unavailable.');
-      if (current.nextJournalSequence !== record.nextJournalSequence) throw new Error('Stale Goal journal sequence.');
-      if (hashRecord(current) !== hashRecord(record)) throw new Error('Stale Goal snapshot cannot append a journal event.');
+      if (current.nextJournalSequence !== record.nextJournalSequence) throw new GoalStoreConcurrencyError('Stale Goal journal sequence.');
+      if ((current.storageRevision ?? 0) !== (record.storageRevision ?? 0)) {
+        throw new GoalStoreConcurrencyError('Stale Goal storage revision cannot append a journal event.');
+      }
+      if (current.workspaceKey !== record.workspaceKey || current.sessionId !== record.sessionId
+        || current.id !== record.id) throw new Error('Goal identity cannot change.');
       const sequence = record.nextJournalSequence;
       const shardName = `${String(sequence).padStart(10, '0')}.json`;
       const event: GoalJournalEventV1 = {
@@ -178,6 +201,7 @@ export class GoalStore {
       };
       await writeAtomicJson(vscode.Uri.joinPath(this.goalRoot(record.id), 'journal', shardName), event);
       const next = structuredClone(record);
+      next.storageRevision = (current.storageRevision ?? 0) + 1;
       next.journalShards.push(shardName);
       next.nextJournalSequence = sequence + 1;
       next.updatedAt = now;
@@ -346,7 +370,7 @@ export class GoalStore {
     this.writeChain = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     let guard: Awaited<ReturnType<typeof open>> | undefined;
-    const guardPath = this.root.scheme === 'file' ? `${this.root.fsPath}.store-lock` : undefined;
+    const guardPath = this.nativeRootPath ? `${this.nativeRootPath}.store-lock` : undefined;
     try {
       if (guardPath) {
         await mkdir(dirname(guardPath), { recursive: true });
@@ -365,6 +389,11 @@ export class GoalStore {
       release();
     }
   }
+}
+
+function normalizeNativeStoragePath(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized && isAbsolute(normalized) && dirname(normalized) !== normalized ? normalized : undefined;
 }
 
 function normalizeIndex(value: unknown): GoalIndexV1 {
@@ -393,6 +422,7 @@ function normalizeRecord(record: GoalRecordV1): void {
   record.usage.mainModelRequests ??= record.usage.modelRequests ?? 0;
   record.usage.auxiliaryModelRequests ??= 0;
   if (record.version !== GOAL_RECORD_VERSION || !record.id || !record.workspaceKey || !record.sessionId
+    || (record.storageRevision !== undefined && (!Number.isSafeInteger(record.storageRevision) || record.storageRevision < 0))
     || !record.initialPrompt?.visibleContent || !record.initialPrompt.expandedContent || !record.initialPrompt.providerContent
     || !record.currentContractHash || !Number.isSafeInteger(record.currentRevision) || record.currentRevision < 1
     || !Array.isArray(record.revisions) || !record.revisions.length || !Array.isArray(record.journalShards)

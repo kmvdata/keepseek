@@ -26,6 +26,19 @@ export interface GoalRecoveryResult {
   reason?: string;
 }
 
+/** Re-checks the durable/runtime boundary for an explicit user resume without
+ * replaying activation recovery or invalidating already-current evidence. */
+export function goalResumeBlocker(record: GoalRecordV1, context: GoalRecoveryContext): string | undefined {
+  if (context.hasUncertainChangeSet || context.hasUncertainDraftRun || context.hasUncertainToolResult) {
+    return 'A file, command, or tool result has an unknown terminal state and must be verified.';
+  }
+  const mismatch = firstMismatch(record, context);
+  if (mismatch) return mismatch;
+  if (context.hasPendingApproval) return 'The Goal is waiting for a fresh approval decision.';
+  if (context.hasExternalAuthorizationRequirement) return 'The Goal requires external URI authorization again.';
+  return undefined;
+}
+
 /** Classifies persisted state without reviving any volatile approval, permit,
  * batch, authorization, or in-memory continuation. */
 export function classifyGoalRecovery(record: GoalRecordV1, context: GoalRecoveryContext, now = new Date().toISOString()): GoalRecoveryResult {
@@ -70,7 +83,7 @@ function firstMismatch(record: GoalRecordV1, context: GoalRecoveryContext): stri
   if (!context.checkpointValid) return 'The Goal checkpoint cannot be verified.';
   if (contract.main.sourceId !== context.sourceId || contract.main.modelId !== context.modelId
     || contract.main.provider !== context.provider || contract.main.endpointHash !== context.endpointHash) return 'The frozen Goal model source changed.';
-  if (!context.canAcquireLease) return 'The workspace Goal lease is held elsewhere or cannot be acquired.';
+  if (!context.canAcquireLease) return 'This storage provider cannot guarantee exclusive Goal execution.';
   return undefined;
 }
 

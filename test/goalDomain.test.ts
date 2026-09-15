@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { describe, test } from 'node:test';
-import { parseGoalCommand } from '../src/agent/goals/goalCommand';
 import {
   amendGoalContract,
   createGoalContract,
@@ -12,35 +11,10 @@ import {
 } from '../src/agent/goals/goalContract';
 import { canTransitionGoal, transitionGoal } from '../src/agent/goals/goalStateMachine';
 import type { GoalContractV1, GoalRecordV1 } from '../src/agent/goals/goalTypes';
-import { createGoalViewModel } from '../src/agent/goals/goalViewModel';
+import { createGoalViewModel, createGoalViewModelPayload } from '../src/agent/goals/goalViewModel';
 import { getAgentSystemPrompt, getAgentTools } from '../src/agent/protocol';
 
-describe('Goal command and canonical contract', () => {
-  test('strictly recognizes the exact command boundary without normalizing body bytes', () => {
-    assert.equal(parseGoalCommand('  /GoAl\n修复 Ω\r\n第二行  ').recognized, true);
-    const parsed = parseGoalCommand('  /GoAl\n修复 Ω\r\n第二行  ');
-    assert.deepEqual(parsed.recognized && parsed.command, {
-      kind: 'create', raw: '/GoAl\n修复 Ω\r\n第二行', objective: '修复 Ω\r\n第二行'
-    });
-    assert.deepEqual(parseGoalCommand('/goalkeeper fix'), { recognized: false, text: '/goalkeeper fix' });
-    assert.deepEqual(parseGoalCommand('/goals'), { recognized: false, text: '/goals' });
-    const empty = parseGoalCommand('/goal');
-    const status = parseGoalCommand('/GOAL status');
-    assert.equal(empty.recognized && empty.command.kind, 'status');
-    assert.equal(status.recognized && status.command.kind, 'status');
-  });
-
-  test('rejects missing or extra reserved arguments and enforces the shared limit', () => {
-    const amend = parseGoalCommand('/goal amend');
-    const pause = parseGoalCommand('/goal pause later');
-    const tooLong = parseGoalCommand(`/goal ${'x'.repeat(20_001)}`);
-    assert.equal(amend.recognized && amend.command.kind, 'error');
-    assert.equal(pause.recognized && pause.command.kind, 'error');
-    assert.equal(tooLong.recognized && tooLong.command.kind, 'error');
-    const unicode = parseGoalCommand('/goal amend 追加条件：保留🙂');
-    assert.equal(unicode.recognized && unicode.command.kind === 'amend' && unicode.command.instruction, '追加条件：保留🙂');
-  });
-
+describe('Goal canonical contract', () => {
   test('serializes with stable field order, LF normalization, and a stable hash', () => {
     const first = contract({ objective: 'Line one\r\nLine two' });
     const second = contract({ objective: 'Line one\nLine two' });
@@ -111,7 +85,13 @@ describe('Goal state and protocol boundary', () => {
     const record = recordFor(contract());
     record.requiredExternalAuthorizationUris = ['/Users/alice/private'];
     record.lease = { ownerId: 'lease-owner-secret', fencingToken: 42 };
-    record.runCheckpoint = { hidden: 'checkpoint-secret' } as never;
+    record.runCheckpoint = {
+      hidden: 'checkpoint-secret',
+      taskPlan: {
+        currentStepId: 'step-current',
+        steps: [{ id: 'step-current', title: 'Verify live Goal progress', status: 'in_progress' }]
+      }
+    } as never;
     record.candidateFinal = {
       content: 'candidate-secret',
       contentHash: 'candidate-hash',
@@ -121,7 +101,18 @@ describe('Goal state and protocol boundary', () => {
     const bytes = JSON.stringify(view);
     assert.ok(view);
     assert.equal(view?.objective, contract().objective);
+    assert.equal(view?.currentStep, 'Verify live Goal progress');
     assert.doesNotMatch(bytes, /Users\/alice|lease-owner-secret|checkpoint-secret|candidate-secret|reviewer-secret/u);
+  });
+
+  test('serializes an explicit null so clearing a Goal removes stale Webview state across sessions', () => {
+    const state: { goal: unknown } = { goal: createGoalViewModel(recordFor(contract()), 'ask') };
+    const serializedPatch = JSON.parse(JSON.stringify({
+      goal: createGoalViewModelPayload(undefined, 'ask')
+    })) as { goal: unknown };
+    assert.deepEqual(serializedPatch, { goal: null });
+    Object.assign(state, serializedPatch);
+    assert.equal(state.goal, null);
   });
 });
 
@@ -145,7 +136,7 @@ export function contract(overrides: { objective?: string } = {}): GoalContractV1
 export function recordFor(value: GoalContractV1): GoalRecordV1 {
   return {
     version: 1, id: 'goal-1', workspaceKey: 'workspace-1', sessionId: 'session-1',
-    initialPrompt: { visibleContent: '/goal test', expandedContent: '/goal test', providerContent: '/goal test' },
+    initialPrompt: { visibleContent: 'Goal: test', expandedContent: 'Goal: test', providerContent: 'Goal: test' },
     requiredExternalAuthorizationUris: [], status: 'preparing',
     revisions: [{ revision: 1, contract: value, createdAt: '2026-01-01T00:00:00.000Z' }],
     currentRevision: 1, currentContractHash: value.canonicalHash,

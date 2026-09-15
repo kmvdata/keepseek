@@ -18,7 +18,10 @@ export function buildApprovalReviewerProviderBody(input: {
   provider: ModelSourceConfigSnapshot['provider'];
   systemPrompt: string;
   userPrompt: string;
+  maxOutputTokens?: number;
 }): DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody {
+  const maxOutputTokens = Number.isSafeInteger(input.maxOutputTokens) && (input.maxOutputTokens ?? 0) > 0
+    ? input.maxOutputTokens! : APPROVAL_REVIEW_MAX_OUTPUT_TOKENS;
   if (input.provider === 'openai-responses') {
     return {
       model: input.modelId,
@@ -28,7 +31,7 @@ export function buildApprovalReviewerProviderBody(input: {
       ],
       stream: true,
       store: false,
-      max_output_tokens: APPROVAL_REVIEW_MAX_OUTPUT_TOKENS,
+      max_output_tokens: maxOutputTokens,
       temperature: 0,
       top_p: 0.1
     };
@@ -39,7 +42,7 @@ export function buildApprovalReviewerProviderBody(input: {
       system: [{ type: 'text', text: input.systemPrompt }],
       messages: [{ role: 'user', content: [{ type: 'text', text: input.userPrompt }] }],
       stream: true,
-      max_tokens: APPROVAL_REVIEW_MAX_OUTPUT_TOKENS,
+      max_tokens: maxOutputTokens,
       temperature: 0
     };
   }
@@ -53,7 +56,7 @@ export function buildApprovalReviewerProviderBody(input: {
     thinking: input.provider === 'deepseek' ? { type: 'disabled' } : undefined,
     temperature: 0,
     top_p: 0.1,
-    max_tokens: APPROVAL_REVIEW_MAX_OUTPUT_TOKENS,
+    max_tokens: maxOutputTokens,
     stream_options: { include_usage: true }
   };
 }
@@ -66,6 +69,7 @@ export async function requestApprovalReviewText(input: {
   language: KeepseekLanguage;
   signal?: AbortSignal;
   onUsage?: (event: UsageEvent) => void;
+  maxOutputTokens?: number;
 }): Promise<string> {
   if (!input.sourceConfig.apiKey.trim() && requiresModelSourceApiKey(input.sourceConfig)) {
     throw new Error(input.language === 'en'
@@ -87,7 +91,8 @@ export async function requestApprovalReviewText(input: {
         modelId: input.model.id,
         provider: input.sourceConfig.provider,
         systemPrompt: input.systemPrompt,
-        userPrompt: input.userPrompt
+        userPrompt: input.userPrompt,
+        maxOutputTokens: input.maxOutputTokens
       }),
       language: input.language,
       signal: abort.signal,

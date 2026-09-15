@@ -544,6 +544,72 @@ test('references open once from a single click in the prompt, message editor, an
   );
 });
 
+test('Goal progress renders and refreshes inside the transcript without creating synthetic messages', () => {
+  const script = getScript();
+  const styles = getStyles();
+  const goalTranscript = getGeneratedSection(
+    script,
+    'function goalTranscriptStatusLabel',
+    'function handleKeepseekHostMessage'
+  );
+  const deltaHandler = getGeneratedSection(
+    script,
+    "} else if (message.type === 'agentRunDelta')",
+    "} else if (message.type === 'draftRunStateChanged'"
+  );
+  const transcriptRenderer = getGeneratedSection(
+    script,
+    'function renderTranscript(changeSetProjection, draftRunProjection)',
+    'function createRunStatePanel(message)'
+  );
+
+  assert.match(goalTranscript, /createGoalTranscriptCard\(goal\)/u);
+  assert.match(goalTranscript, /dataset\.goalTranscriptCard = 'true'/u);
+  assert.match(goalTranscript, /setAttribute\('role', 'progressbar'\)/u);
+  assert.match(goalTranscript, /window\.keepseekGoalDialog\?\.showManager\(\)/u);
+  assert.match(goalTranscript, /goalTranscriptCurrentStep\(goal\)/u);
+  assert.match(goalTranscript, /plan\.steps\.find/u);
+  assert.doesNotMatch(goalTranscript, /state\.messages\.(?:push|splice|unshift)/u);
+  assert.match(transcriptRenderer, /if \(!state\.messages\.length && !state\.goal\)/u);
+  assert.match(transcriptRenderer, /refreshGoalTranscriptCard\(\);/u);
+  assert.match(deltaHandler, /refreshGoalTranscriptCard\(\);/u);
+  assert.match(styles, /\.goal-transcript-card\s*\{/u);
+  assert.match(styles, /\.goal-transcript-progress\s*\{/u);
+  assert.match(styles, /@media \(max-width: 360px\)[\s\S]*?\.goal-transcript-progress/u);
+  assert.doesNotThrow(() => new Function(script));
+});
+
+test('Goal resume reports pending and failure states and Goal model output stays view-only while streaming', async () => {
+  const script = getScript();
+  const inputScript = getInputScript();
+  const extensionSource = await readFile(path.resolve(process.cwd(), 'src/extension.ts'), 'utf8');
+  const providerSource = await readFile(
+    path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
+    'utf8'
+  );
+  const resumeHandler = getGeneratedSection(providerSource, "case 'goalResume':", "case 'goalStop':");
+  const resumeMethod = getGeneratedSection(providerSource, 'private async resumeGoal()', 'private async initializeGoalRecovery()');
+  const promptStream = getGeneratedSection(providerSource, 'assistantMessage = {', 'const response = await this.agentRunner.run');
+
+  assert.match(resumeHandler, /goalActionFeedback/u);
+  assert.match(resumeHandler, /status: 'pending'/u);
+  assert.match(resumeHandler, /status: 'error'/u);
+  assert.match(resumeHandler, /finally[\s\S]*?postState\(\{ immediate: true, forceFull: true \}\)/u);
+  assert.match(resumeMethod, /goalResumeBlocker/u);
+  assert.doesNotMatch(resumeMethod, /recoverAfterActivation/u);
+  assert.match(promptStream, /this\.goalAttemptStream =/u);
+  assert.match(promptStream, /else \{\s*this\.messages\.push\(assistantMessage\)/u);
+  assert.match(providerSource, /getVisibleMessagesForWebview/u);
+  assert.match(providerSource, /nativeStoragePath: this\.globalStoragePath/u);
+  assert.match(providerSource, /canAcquireLease: this\.goalLease\.supported/u);
+  assert.match(extensionSource, /context\.globalStoragePath/u);
+  assert.match(script, /message\.type === 'goalActionFeedback'/u);
+  assert.match(inputScript, /setActionFeedback: setGoalActionFeedback/u);
+  assert.match(inputScript, /goalResumePending/u);
+  assert.doesNotThrow(() => new Function(script));
+  assert.doesNotThrow(() => new Function(inputScript));
+});
+
 test('reference chips use type icons, one-line names, and full-path hover labels', () => {
   const transcriptScript = getScript();
   const styles = getStyles();

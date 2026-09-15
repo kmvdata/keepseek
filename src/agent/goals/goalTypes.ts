@@ -170,6 +170,9 @@ export interface GoalLeaseBindingV1 {
 
 export interface GoalRecordV1 {
   version: typeof GOAL_RECORD_VERSION;
+  /** Monotonic optimistic-concurrency revision for snapshots. Optional only
+   * when reading early V1 records written before this field existed. */
+  storageRevision?: number;
   id: string;
   workspaceKey: string;
   sessionId: string;

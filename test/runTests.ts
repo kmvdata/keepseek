@@ -19,6 +19,8 @@ import './balanceStore.test';
 import './backgroundRunCoordinator.test';
 import './goalDomain.test';
 import './goalPersistence.test';
+import './goalDraftGenerator.test';
+import './goalViewProjection.test';
 import './goalReplay.test';
 import './behaviorEvaluation.test';
 import './cacheByteStability.test';

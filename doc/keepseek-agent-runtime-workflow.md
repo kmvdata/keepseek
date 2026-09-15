@@ -70,13 +70,13 @@ Provider 会完成这些本地准备：
 
 Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节。它只是把 UI、会话状态和底层服务串起来。
 
-### 2.2.1 `/goal` 创建与宿主边界
+### 2.2.1 `G` 按钮创建与宿主边界
 
-Provider 在普通 `sendPrompt()` 之前用 `goals/goalCommand.ts` 重新解析 `/goal`。创建命令只打开独立 input dialog fragment，不产生 ChatMessage 或网络请求。开始操作把 objective、criteria、workspace-relative scope、required validations、预算、恢复策略和冻结 source/model/provider/endpoint 组装为 `GoalContractV1`；canonical serializer 固定字段/数组顺序与 LF，以完整序列化字节计算 hash。Goal ID、时间、绝对路径、凭据、lease owner 与 runtime 值不进入 Provider contract tail。
+输入区“/”旁的 `G` 按钮是唯一 Goal 入口。没有 Goal 时点击按钮，Webview 将输入框当前目标和引用元数据交给 Provider；Provider 先打开独立 input dialog fragment，再用 `proposal` 子代理配置发起可取消、无工具的严格 JSON 预填请求，生成 criteria/evidence/workspace-relative scope/当前可用 validations。该请求失败时只显示保守默认项，不创建 Goal、ChatMessage 或任何权限；其用量归入会话的 subagent 分类。常用确认字段直接显示，预算、恢复和回退证据折叠在高级设置。已有 Goal 时，按钮 hover 显示有界状态摘要，点击在同一弹窗中管理状态、修订和人工验收；聊天 transcript 还会显示一张独立的实时 Goal 卡，原位投影当前步骤、criteria/validation 进度和预算用量，可进入相同管理弹窗，但不会追加或改写会话消息。开始操作把 objective、criteria、workspace-relative scope、required validations、预算、恢复策略和冻结 source/model/provider/endpoint 组装为 `GoalContractV1`；canonical serializer 固定字段/数组顺序与 LF，以完整序列化字节计算 hash。Goal ID、时间、绝对路径、凭据、lease owner 与 runtime 值不进入 Provider contract tail。
 
 确认后顺序为：持久化 Goal snapshot/journal → 将 session 显式升级到 Goal-only V10 → 取得 workspace lease/fencing → 写入请求 intent 和首个 v3 RunCheckpoint → 创建真实 Goal user message并持久化其完整 `providerContent` → 请求 Provider。任一步保存失败都禁止下一步。崩溃落在 Goal 与 session 两份存储之间时，只允许在仍为 `preparing`、没有 checkpoint/真实消息且冻结来源一致时确定性补齐 V10 metadata；checkpoint 已存在却找不到精确首次消息时 fail-closed。
 
-`GoalCoordinator` 是唯一续跑状态机；Provider 只做入口、事件转发和裁剪 view model。`GoalStore` 使用 index、不可变 snapshot 与 journal shard；`GoalLease` 为 file global storage 提供 heartbeat/expiry/fencing；`GoalReplay` 维护三协议内部 continuation；`GoalCompletionReviewService` 执行硬检查和隔离 reviewer。Goal 状态与 checkpoint、lease、隐藏 reviewer 输入或大 evidence 不发送给 Webview。
+`GoalCoordinator` 是唯一续跑状态机；Provider 只做入口、事件转发和裁剪 view model。`GoalStore` 使用 index、不可变 snapshot、单调 `storageRevision` 乐观并发校验与 journal shard；`GoalLease` 为 file global storage 提供 heartbeat/expiry/fencing。启动或恢复等待 lease 时，Stop/interrupt/amend/dispose 会递增生命周期 generation，迟到的 acquire 必须释放且不得覆盖新状态或 dispatch。`GoalReplay` 维护三协议内部 continuation；`GoalCompletionReviewService` 执行硬检查和隔离 reviewer。Goal 状态与 checkpoint、lease、隐藏 reviewer 输入或大 evidence 不发送给 Webview。当前 Goal attempt 的 Provider delta 通过独立的内存 assistant 投影复用普通 transcript 流式渲染；它不属于 session 历史，完成候选落盘、后续 replay 与缓存投影都不读取该对象。显式 Resume 有独立 pending/success/error 回执并只执行当前安全复核；activation recovery 仅在重新激活时执行一次。
 
 ### 2.3 Prompt 引用展开
 

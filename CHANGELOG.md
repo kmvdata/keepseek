@@ -1,7 +1,10 @@
 # 更新日志
 
 ## 0.3.1
-- 新增 `/goal` 持久目标：先确认目标、验收条件、范围、验证、预算和恢复策略，再在同一 logical task 中跨模型请求、Context Epoch、子代理、ChangeSet、DraftRun 与验证循环持续推进；候选 final 只有通过宿主硬检查和隔离 completion reviewer 才会完成。
+- 新增 `G` 按钮持久目标：从输入区“/”旁的按钮创建 Goal；已配置的 `proposal` 子代理模型会从输入框目标无工具生成验收条件、证据、范围和验证预填项，生成可取消，常用确认保持精简、高级预算和恢复设置折叠展示。运行后，聊天列表中的独立状态卡会原位反馈当前步骤、验收/验证和预算进度且不进入模型历史；悬浮 `G` 查看摘要，点击状态卡或 `G` 在统一弹窗中管理 Pause、Resume、Stop、Clear 或修订。`preparing` 阶段也可立即取消，清理通过显式空状态同步到所有 Webview，随后可以立即创建新 Goal。确认后，Goal 在同一 logical task 中跨模型请求、Context Epoch、子代理、ChangeSet、DraftRun 与验证循环持续推进；候选 final 只有通过宿主硬检查和隔离 completion reviewer 才会完成。
+- 修复 Goal Store 将正常状态变化误判为陈旧快照的问题；snapshot 现在使用单调存储 revision 做乐观并发校验，真实旧版本仍会被拒绝，启动/恢复等待租约时的 Stop 也不会被迟到结果重新激活。
+- 修复“恢复 Goal”异常后按钮无响应及 Reload 后旧 Host 租约尚未过期时的误阻塞：恢复检查现在有弹窗内进行中/成功/失败反馈；孤立旧租约会等待剩余 TTL 后安全接管，等待可由 Stop 取消，真实的另一窗口仍在续租时只报告冲突且不改写共享 Goal。普通显式恢复不再重复 activation recovery。Goal 当前模型 attempt 以不落入 `ChatSession.messages` 的临时 assistant 消息流式显示推理和正文，完整状态刷新或候选审查期间也不会丢失本轮反馈。
+- 修复部分桌面兼容宿主将 `globalStorageUri` 暴露为非 `file:` scheme 时 Goal 被错误判定为不支持：Node Extension Host 现在使用 VS Code 同时提供的绝对 `globalStoragePath` 建立同等级的原子 Store guard、lease 和 fencing；只有确实没有可靠本机路径时才安全拒绝。
 - Goal 使用独立的版本化 snapshot/journal Store、workspace 排他 lease 与 fencing token。Reload/崩溃后默认手动恢复，旧审批 runtime、permit、批次意图和临时外部授权不复活；不确定副作用进入需处理状态且不会自动重跑。`auto_on_activation` 只在 KeepSeek 再次激活且上下文完全匹配时生效，Host 关闭或设备休眠期间不执行。
 - 增加 Goal-only 请求协议 V10 和 Chat Completions、OpenAI Responses、Anthropic Messages 三协议内部 replay；V10 的 system/tools 字节与 V9 相同，tool schema 仍为 V9，普通会话和 V1–V9 历史字节保持不变。旧后台验证修复入口迁移为预填 Goal。
 - 大文件编辑能力升级：现在修改超过 200 KB 的代码文件时，只记录和处理实际变化的几行，不再因为文件整体过大而无法创建或采纳修改。

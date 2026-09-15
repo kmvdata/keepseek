@@ -111,9 +111,9 @@ src/
 
 ### 4.7 持久 Goal（V10-only）
 
-- `/goal` 先显示 contract 确认面板；Goal、lease 与首个 v3 checkpoint 成功持久化后才创建真实消息/发请求。一个 workspace 仅一个非终态 Goal。
+- 输入区“/”旁的 `G` 按钮是 Goal 的唯一交互入口：无 Goal 时以输入框当前目标调用已配置的 `proposal` 子代理模型，无工具地生成验收条件/证据/范围/验证预填项；生成可取消、失败回退保守默认，且只有用户确认后才创建 Goal/聊天消息。已有 Goal 时悬浮显示摘要、点击打开状态与操作弹窗；`preparing` 也必须可取消。Goal 开始后，聊天 transcript 以独立、原位刷新的状态卡显示步骤、验收/验证进度和预算用量；当前 attempt 另以 view-only assistant 消息流式显示 Provider 推理/正文，既不写入 `ChatSession.messages`，也不参与 Provider replay。显式 Resume 必须先在弹窗显示进行中状态，错误必须回传并重新启用操作；普通暂停/恢复只复核当前安全边界，不能重复执行 activation recovery 或再次失效当前证据。Goal、lease 与首个 v3 checkpoint 成功持久化后才发首个正式请求。一个 workspace 仅一个非终态 Goal；Clear 后跨 Webview 状态边界必须显式发送 `goal: null`，不能发送可能被序列化省略的 `undefined`。
 - `goals/GoalCoordinator` 是唯一调度者；候选 final 必须通过宿主硬检查和隔离、无工具 completion reviewer。子代理、reviewer、摘要、重试、epoch 共享 active time、分币种费用和模型请求账本，不能关闭根 Goal。
-- GoalStore 使用 index + immutable snapshot + journal shard；file global storage 用 heartbeat/expiry/fencing lease。恢复先把 running/pausing 记为 interrupted，旧 permit、approval runtime、batch 与外部授权不复活；未知文件/命令/工具终态进入 needs_attention，绝不自动重跑。
+- GoalStore 使用 index + immutable snapshot + journal shard；lease 使用 heartbeat/expiry/fencing。`file:` 直接使用 `globalStorageUri.fsPath`；Node Extension Host 对非 `file:` storage 必须显式使用 VS Code 提供的绝对 `globalStoragePath` 作为 Store guard/lease 的原子文件路径，没有可靠本机路径才保持暂停。Reload 后显式恢复若只遇到上一 Host 尚未到期的租约，应等待其剩余 TTL 后做一次复读、状态核对和原子接管；等待可由 Stop 取消，若另一窗口仍在 heartbeat 则只向本地报告冲突，未持有 lease 不得改写 Goal。恢复先把 running/pausing 记为 interrupted，旧 permit、approval runtime、batch 与外部授权不复活；未知文件/命令/工具终态进入 needs_attention，绝不自动重跑。
 - 默认 `manual`；`auto_on_activation` 只在 KeepSeek 再次因 `onView:keepseek.chat` 激活、冻结上下文完全匹配且无等待/不确定副作用时恢复。Host 不存在、Reload 或设备休眠期间不执行，也不累计 active execution。
 - 普通会话和新 session 仍为 V9。只有开始 Goal 才把该 session 升至 V10；V10 system 与 tools 字节等同 V9、tool schema version 仍为 9，V1–V9 fixture 不变。旧 BackgroundRun 修复入口只生成 Goal preset。
 

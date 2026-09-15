@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import * as vscode from 'vscode';
 
@@ -16,28 +16,59 @@ export interface GoalLeaseAcquireResult {
   acquired: boolean;
   lease?: GoalLeaseRecordV1;
   reason?: 'unsupported_storage' | 'held' | 'lock_busy' | 'state_changed' | 'storage_error';
+  /** Bounded time until a held lease/guard can first be considered stale. */
+  retryAfterMs?: number;
+}
+
+export interface GoalLeaseOptions {
+  ownerId?: string;
+  ttlMs?: number;
+  now?: () => number;
+  /** Absolute Extension Host path corresponding to globalStorageUri. This is
+   * the Node-host fallback when a desktop-compatible host exposes storage
+   * through a non-file URI scheme. */
+  nativeStoragePath?: string;
 }
 
 export class GoalLease {
   private current?: GoalLeaseRecordV1;
   private heartbeatTimer?: ReturnType<typeof setInterval>;
+  public readonly ownerId: string;
+  private readonly ttlMs: number;
+  private readonly now: () => number;
+  private readonly nativeStoragePath?: string;
 
   public constructor(
     private readonly globalStorageUri: vscode.Uri,
     public readonly workspaceKey: string,
-    public readonly ownerId: string = randomUUID(),
-    private readonly ttlMs = 30_000,
-    private readonly now: () => number = Date.now
-  ) {}
+    options: GoalLeaseOptions = {}
+  ) {
+    this.ownerId = options.ownerId ?? randomUUID();
+    this.ttlMs = options.ttlMs ?? 30_000;
+    this.now = options.now ?? Date.now;
+    this.nativeStoragePath = normalizeNativeStoragePath(options.nativeStoragePath);
+  }
+
+  public get supported(): boolean { return this.leasePath() !== undefined; }
 
   public async acquire(options: { allowStaleTakeover?: boolean; confirmState?: () => Promise<boolean> } = {}): Promise<GoalLeaseAcquireResult> {
-    if (this.globalStorageUri.scheme !== 'file') return { acquired: false, reason: 'unsupported_storage' };
     const path = this.leasePath();
+    if (!path) return { acquired: false, reason: 'unsupported_storage' };
     const guard = `${path}.guard`;
     await mkdir(dirname(path), { recursive: true });
     let guardHandle;
     try { guardHandle = await acquireGuard(guard, this.ttlMs, this.now); }
-    catch (error) { return { acquired: false, reason: isExists(error) ? 'lock_busy' : 'storage_error' }; }
+    catch (error) {
+      if (!isExists(error)) return { acquired: false, reason: 'storage_error' };
+      const guardStat = await stat(guard).catch(() => undefined);
+      return {
+        acquired: false,
+        reason: 'lock_busy',
+        retryAfterMs: guardStat
+          ? boundedRetryAfter(this.ttlMs - (this.now() - guardStat.mtimeMs), this.ttlMs)
+          : undefined
+      };
+    }
     try {
       const previous = await readLease(path);
       const now = this.now();
@@ -45,7 +76,13 @@ export class GoalLease {
         this.current = previous;
         return { acquired: true, lease: { ...previous } };
       }
-      if (previous && previous.ownerId !== this.ownerId && previous.expiresAt > now) return { acquired: false, reason: 'held' };
+      if (previous && previous.ownerId !== this.ownerId && previous.expiresAt > now) {
+        return {
+          acquired: false,
+          reason: 'held',
+          retryAfterMs: boundedRetryAfter(previous.expiresAt - now, this.ttlMs)
+        };
+      }
       if (previous && previous.ownerId !== this.ownerId) {
         if (!options.allowStaleTakeover) return { acquired: false, reason: 'held' };
         if (options.confirmState && !(await options.confirmState())) return { acquired: false, reason: 'state_changed' };
@@ -73,25 +110,27 @@ export class GoalLease {
   }
 
   public async confirm(): Promise<boolean> {
-    if (!this.current || this.globalStorageUri.scheme !== 'file') return false;
-    const lease = await readLease(this.leasePath());
+    const path = this.leasePath();
+    if (!this.current || !path) return false;
+    const lease = await readLease(path);
     return Boolean(lease && lease.workspaceKey === this.workspaceKey && lease.ownerId === this.ownerId
       && lease.fencingToken === this.current.fencingToken && lease.expiresAt > this.now());
   }
 
   public async heartbeat(): Promise<boolean> {
-    if (!this.current || this.globalStorageUri.scheme !== 'file') return false;
-    const guard = `${this.leasePath()}.guard`;
+    const path = this.leasePath();
+    if (!this.current || !path) return false;
+    const guard = `${path}.guard`;
     let guardHandle;
     try { guardHandle = await acquireGuard(guard, this.ttlMs, this.now); }
     catch { return false; }
     try {
-      const latest = await readLease(this.leasePath());
+      const latest = await readLease(path);
       if (!latest || latest.ownerId !== this.current.ownerId || latest.fencingToken !== this.current.fencingToken
         || latest.expiresAt <= this.now()) return false;
       const now = this.now();
       const next = { ...this.current, heartbeatAt: now, expiresAt: now + this.ttlMs };
-      await atomicWrite(this.leasePath(), JSON.stringify(next));
+      await atomicWrite(path, JSON.stringify(next));
       this.current = next;
       return true;
     } finally {
@@ -115,14 +154,15 @@ export class GoalLease {
 
   public async release(): Promise<void> {
     this.stopHeartbeat();
-    if (!this.current || this.globalStorageUri.scheme !== 'file') return;
-    const guard = `${this.leasePath()}.guard`;
+    const path = this.leasePath();
+    if (!this.current || !path) return;
+    const guard = `${path}.guard`;
     let guardHandle;
     try { guardHandle = await acquireGuard(guard, this.ttlMs, this.now); } catch { this.current = undefined; return; }
     try {
-      const latest = await readLease(this.leasePath());
+      const latest = await readLease(path);
       if (latest?.ownerId === this.ownerId && latest.fencingToken === this.current.fencingToken) {
-        await unlink(this.leasePath()).catch(() => undefined);
+        await unlink(path).catch(() => undefined);
       }
     } finally { await guardHandle.close(); await unlink(guard).catch(() => undefined); }
     this.current = undefined;
@@ -132,11 +172,24 @@ export class GoalLease {
     return this.current ? { ownerId: this.current.ownerId, fencingToken: this.current.fencingToken } : undefined;
   }
 
-  private leasePath(): string {
+  private leasePath(): string | undefined {
+    const storagePath = this.globalStorageUri.scheme === 'file'
+      ? this.globalStorageUri.fsPath
+      : this.nativeStoragePath;
+    if (!storagePath) return undefined;
     const name = createHash('sha256').update(this.workspaceKey, 'utf8').digest('hex');
-    return vscode.Uri.joinPath(this.globalStorageUri, 'goals', 'leases', `${name}.json`).fsPath;
+    return join(storagePath, 'goals', 'leases', `${name}.json`);
   }
-  private counterPath(): string { return `${this.leasePath()}.fence`; }
+  private counterPath(): string {
+    const path = this.leasePath();
+    if (!path) throw new Error('Goal lease storage is unavailable.');
+    return `${path}.fence`;
+  }
+}
+
+function normalizeNativeStoragePath(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized && isAbsolute(normalized) && dirname(normalized) !== normalized ? normalized : undefined;
 }
 
 async function readLease(path: string): Promise<GoalLeaseRecordV1 | undefined> {
@@ -168,6 +221,9 @@ async function atomicWrite(path: string, text: string): Promise<void> {
 
 function isMissing(error: unknown): boolean { return (error as { code?: string }).code === 'ENOENT'; }
 function isExists(error: unknown): boolean { return (error as { code?: string }).code === 'EEXIST'; }
+function boundedRetryAfter(value: number, ttlMs: number): number {
+  return Math.max(1, Math.min(Math.ceil(value), ttlMs));
+}
 
 async function acquireGuard(path: string, ttlMs: number, now: () => number) {
   try { return await open(path, 'wx', 0o600); }

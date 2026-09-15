@@ -319,7 +319,7 @@ describe('long-running Agent execution and safe recovery', () => {
 
   it('parses the generated webview script and has bilingual recovery/status strings', () => {
     assert.doesNotThrow(() => new Script(getScript()));
-    for (const key of Object.keys(WEBVIEW_TRANSLATIONS.en).filter((key) => key.startsWith('run'))) {
+    for (const key of Object.keys(WEBVIEW_TRANSLATIONS.en).filter((key) => key.startsWith('run') || key.startsWith('goal'))) {
       assert.ok(WEBVIEW_TRANSLATIONS['zh-CN'][key], key);
     }
   });

@@ -69,6 +69,7 @@ import { ApprovalReviewStore } from '../approvals/approvalReviewStore';
 import { ApprovalReviewerService, type ApprovalReviewerModelContext } from '../approvals/approvalReviewer';
 import { ApprovalCircuitBreaker } from '../approvals/approvalCircuitBreaker';
 import { createDraftEditReviewRequest, createDraftRunReviewRequest, createExternalFileReviewRequest } from '../approvals/approvalReviewSurface';
+import { redactSensitiveReviewText } from '../approvals/approvalPolicy';
 import { APPROVAL_POLICY_VERSION, type ApprovalReviewRecord, type ApprovalReviewRequest } from '../approvals/approvalReviewTypes';
 import { hashDraftEditAction } from '../approvals/approvalReviewHash';
 import { createFullTextDraftEdit, getDraftEditBase } from '../edits/draftEdit';
@@ -158,13 +159,14 @@ import {
   LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION,
   PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION
 } from '../agent/providerRequestProjection';
-import { parseGoalCommand } from '../agent/goals/goalCommand';
 import { createGoalContract, formatGoalProviderTail } from '../agent/goals/goalContract';
 import { GoalStore } from '../agent/goals/goalStore';
 import { GoalLease } from '../agent/goals/goalLease';
 import { GoalCoordinator } from '../agent/goals/goalCoordinator';
 import { GoalCompletionReviewService, type GoalCompletionSafetySnapshot } from '../agent/goals/goalCompletionReview';
-import { createGoalViewModel } from '../agent/goals/goalViewModel';
+import { GoalDraftGeneratorService, type GoalDraftSuggestionV1 } from '../agent/goals/goalDraftGenerator';
+import { goalResumeBlocker } from '../agent/goals/goalRecovery';
+import { createGoalViewModel, createGoalViewModelPayload } from '../agent/goals/goalViewModel';
 import type { GoalContractV1, GoalRecordV1 } from '../agent/goals/goalTypes';
 import { GOAL_REQUEST_PROTOCOL_VERSION, MAX_GOAL_OBJECTIVE_CHARACTERS } from '../agent/goals/goalTypes';
 import { GoalStatusBar } from './goalStatusBar';
@@ -179,6 +181,7 @@ import {
   type SubagentModelSettingsSnapshot
 } from '../accounts/subagentSettingsStore';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
+import { resolveConfiguredSubagentModel } from '../accounts/subagentModelResolver';
 import { probeSourceConnection, refreshSourceModelCache } from '../accounts/modelDiscovery';
 import { createModelCatalog, findModelBySelection, resolveDefaultModel, resolveProjectModel } from '../accounts/modelCatalog';
 import { DefaultModelStore } from '../accounts/defaultModelStore';
@@ -237,6 +240,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly goalStore: GoalStore;
   private goalLease: GoalLease;
   private goalCoordinator: GoalCoordinator;
+  private readonly goalDraftGenerator = new GoalDraftGeneratorService();
   private readonly goalStatusBar = new GoalStatusBar();
   private readonly sessionTraceLogUris = new Map<string, string>();
   private readonly taskPlansBySession = new Map<string, TaskPlan>();
@@ -263,9 +267,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly modelSelectionTransactions = new ModelSelectionTransactionCoordinator();
   private modelSelectionMutationPromise: Promise<void> = Promise.resolve();
   private pendingGoalDraft?: {
-    originalRaw?: string; objective: string; preset?: SafeNpmScript;
+    objective: string; preset?: SafeNpmScript;
     sourceId?: string; modelId?: string; references?: PromptReferenceInput[]; skillIds?: string[];
   };
+  private goalDraftGenerationAbortController: AbortController | undefined;
+  private goalDraftGeneration = 0;
   private agentSettings = getConfiguredAgentSettings();
   private language = getConfiguredKeepseekLanguage();
   private isBusy = false;
@@ -281,6 +287,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private draftRunAutoContinueInFlight = false;
   private goalSideEffectInFlight = 0;
   private goalUsagePersistence: Promise<void> = Promise.resolve();
+  /** View-only Goal attempt output. It is projected to the Webview like a
+   * normal streaming assistant message but never enters ChatSession.messages. */
+  private goalAttemptStream?: { goalId: string; sessionId: string; message: ChatMessage };
   private liveContextUsage: ContextUsageEstimate | undefined;
   private liveTurnUsage: TurnUsageStats | undefined;
   /** 防并发：同一 Provider 同时只允许一个余额刷新流程；限流按来源全局共享。 */
@@ -324,7 +333,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     skillState: vscode.Memento,
     private readonly extensionInfo: KeepseekExtensionInfo,
     private readonly sessionInitialization: Promise<void> = Promise.resolve(),
-    private readonly startupTrace?: StartupPerformanceTrace
+    private readonly startupTrace?: StartupPerformanceTrace,
+    private readonly globalStoragePath?: string
   ) {
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
     this.skillStore = new SkillStore(skillState);
@@ -425,8 +435,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       new DraftRunAuthorizationService(this.approvalReviews),
       (event) => this.handleDraftRunStoreEvent(event)
     );
-    this.goalStore = new GoalStore(this.globalStorageUri);
-    this.goalLease = new GoalLease(this.globalStorageUri, this.sessionStore.workspaceKey);
+    this.goalStore = new GoalStore(this.globalStorageUri, this.globalStoragePath);
+    this.goalLease = new GoalLease(this.globalStorageUri, this.sessionStore.workspaceKey, {
+      nativeStoragePath: this.globalStoragePath
+    });
     this.goalCoordinator = this.createGoalCoordinator(this.goalLease);
     this.draftRunBatches = new DraftRunBatchCoordinator(this.draftRuns, () => this.postState());
     this.sessionCleanupTimer = setInterval(() => {
@@ -472,6 +484,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.postState();
         },
         onCompleted: async (record) => await this.commitGoalFinalMessage(record),
+        onLeaseWait: (retryAfterMs) => {
+          const seconds = Math.max(1, Math.ceil(retryAfterMs / 1_000));
+          this.postToWebview({
+            type: 'goalActionFeedback', action: 'resume', status: 'pending',
+            message: this.language === 'en'
+              ? `Waiting up to ${seconds}s for the previous Extension Host lease to expire…`
+              : `正在等待上一个 Extension Host 的租约到期（最多 ${seconds} 秒）…`
+          });
+        },
         onCancelRuntime: () => {
           this.draftRunBatches.cancel();
           this.delegatedApprovals.cancel();
@@ -486,6 +507,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.draftRunBatches?.cancel();
     this.delegatedApprovals.cancel();
     this.currentRunAbortController?.abort();
+    this.cancelGoalDraftGeneration(false);
     clearInterval(this.sessionCleanupTimer);
     if (this.draftRunOutputPostTimer) {
       clearTimeout(this.draftRunOutputPostTimer);
@@ -506,6 +528,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (this.modelSelectionPersistenceDepth > 0) {
       return;
     }
+    this.cancelGoalDraftGeneration(false);
     await this.interruptGoalForLifecycle('KeepSeek configuration changed.');
     this.syncConfiguredState();
     this.postState();
@@ -515,6 +538,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   public async refreshWorkspaceScope(): Promise<void> {
     this.draftRunBatches?.cancel();
+    this.cancelGoalDraftGeneration(false);
     this.currentRunAbortController?.abort();
     await this.activeRunSettled;
     await this.interruptGoalForLifecycle('Workspace identity changed.');
@@ -523,7 +547,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     await this.goalCoordinator.dispose();
-    this.goalLease = new GoalLease(this.globalStorageUri, this.sessionStore.workspaceKey);
+    this.goalLease = new GoalLease(this.globalStorageUri, this.sessionStore.workspaceKey, {
+      nativeStoragePath: this.globalStoragePath
+    });
     this.goalCoordinator = this.createGoalCoordinator(this.goalLease);
 
     this.clearSessionTransientState();
@@ -952,24 +978,76 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         void this.refreshBalance({ force: false });
         return;
       case 'sendPrompt':
-        if (await this.handleGoalPrompt(message.prompt, message.sourceId, message.modelId, message.references, message.skillIds)) return;
+        this.cancelGoalDraftGeneration(false);
         await this.sendPrompt(message.prompt, message.sourceId, message.modelId, message.settings, { references: message.references, skillIds: message.skillIds });
         return;
+      case 'openGoalDialog':
+        if (this.goalCoordinator?.current) {
+          this.postState({ immediate: true, forceFull: true });
+        } else {
+          await this.openGoalDraftDialog({
+            objective: message.objective ?? '',
+            sourceId: message.sourceId || this.selectedSourceId,
+            modelId: message.modelId || this.selectedModelId,
+            references: message.references,
+            skillIds: message.skillIds
+          });
+        }
+        return;
+      case 'generateGoalDraft':
+        await this.openGoalDraftDialog({
+          objective: message.objective,
+          sourceId: message.sourceId || this.selectedSourceId,
+          modelId: message.modelId || this.selectedModelId,
+          references: this.pendingGoalDraft?.references,
+          skillIds: this.pendingGoalDraft?.skillIds
+        });
+        return;
+      case 'cancelGoalDraftGeneration':
+        this.cancelGoalDraftGeneration(true);
+        return;
       case 'startGoal':
+        this.cancelGoalDraftGeneration(false);
         await this.startGoal(message).catch((error) => vscode.window.showWarningMessage(getErrorMessage(error)));
+        this.postState({ immediate: true, forceFull: true });
         return;
       case 'goalPause':
         await this.goalCoordinator.pause().catch((error) => vscode.window.showWarningMessage(getErrorMessage(error)));
         return;
       case 'goalResume':
-        await this.resumeGoal();
+        this.postToWebview({
+          type: 'goalActionFeedback', action: 'resume', status: 'pending',
+          message: this.language === 'en' ? 'Checking Goal recovery…' : '正在检查 Goal 恢复条件…'
+        });
+        try {
+          await this.resumeGoal();
+          if (this.goalCoordinator.current && this.goalCoordinator.current.status !== 'stopped') {
+            this.postToWebview({
+              type: 'goalActionFeedback', action: 'resume', status: 'success',
+              message: this.language === 'en' ? 'Goal resumed.' : 'Goal 已恢复。'
+            });
+          }
+        } catch (error) {
+          const detail = getErrorMessage(error);
+          this.postToWebview({ type: 'goalActionFeedback', action: 'resume', status: 'error', message: detail });
+          vscode.window.showWarningMessage(this.language === 'en'
+            ? `Goal could not resume: ${detail}`
+            : `Goal 无法恢复：${detail}`);
+        } finally {
+          this.postState({ immediate: true, forceFull: true });
+        }
         return;
       case 'goalStop':
         await this.goalCoordinator.stop(this.language === 'en' ? 'Stopped by the user.' : '已由用户停止。')
           .catch((error) => vscode.window.showWarningMessage(getErrorMessage(error)));
+        this.postState({ immediate: true, forceFull: true });
         return;
       case 'goalClear':
-        await this.goalCoordinator.clear().catch((error) => vscode.window.showWarningMessage(getErrorMessage(error)));
+        await this.goalCoordinator.clear().then(() => {
+          this.pendingGoalDraft = undefined;
+          this.goalAttemptStream = undefined;
+          this.postState({ immediate: true, forceFull: true });
+        }).catch((error) => vscode.window.showWarningMessage(getErrorMessage(error)));
         return;
       case 'goalAmend':
         await this.goalCoordinator.amend(message.instruction).catch((error) => vscode.window.showWarningMessage(getErrorMessage(error)));
@@ -979,6 +1057,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           .catch((error) => vscode.window.showWarningMessage(getErrorMessage(error)));
         return;
       case 'editUserPrompt':
+        this.cancelGoalDraftGeneration(false);
         await this.sendPrompt(message.prompt, message.sourceId, message.modelId, message.settings, { replaceMessageId: message.messageId, references: message.references, skillIds: message.skillIds });
         return;
       case 'abortPrompt':
@@ -1493,12 +1572,25 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return this.sessionStore.messages;
   }
 
+  private getVisibleMessagesForWebview(session: ChatSession, limit: number): ChatMessage[] {
+    const visible = getVisibleMessages(session.messages.slice(-limit));
+    const stream = this.goalAttemptStream;
+    const goal = this.goalCoordinator?.current;
+    if (stream && goal && stream.goalId === goal.id && stream.sessionId === session.id
+      && !visible.some((message) => message.id === stream.message.id)) {
+      visible.push(getVisibleMessages([stream.message])[0]!);
+    }
+    return visible;
+  }
+
   private clearSessionTransientState(): void {
     this.draftRunBatches?.cancel();
     this.delegatedApprovals.cancel();
+    this.cancelGoalDraftGeneration(false);
     this.fileContext.clear();
     this.authorizedExternalReferenceUris.clear();
     this.liveContextUsage = undefined;
+    this.goalAttemptStream = undefined;
   }
 
   private showChangeSetFailures(failures: readonly ChangeSetApplyFailure[] | undefined): void {
@@ -3811,66 +3903,36 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async handleGoalPrompt(
-    prompt: string,
-    sourceId: string,
-    modelId: string,
-    references?: PromptReferenceInput[],
-    skillIds?: string[]
-  ): Promise<boolean> {
-    const parsed = parseGoalCommand(prompt);
-    if (!parsed.recognized) return false;
-    const command = parsed.command;
-    try {
-      if (command.kind === 'error') {
-        vscode.window.showWarningMessage(command.message);
-      } else if (command.kind === 'create') {
-        if (this.hasNonTerminalGoal()) throw new Error('Only one active Goal is allowed in this workspace.');
-        this.showGoalDialog({ originalRaw: command.raw, objective: command.objective, sourceId, modelId, references, skillIds });
-      } else if (command.kind === 'status') {
-        if (this.goalCoordinator?.current) this.postState({ immediate: true, forceFull: true });
-        else this.showGoalDialog({ objective: '', sourceId, modelId, references, skillIds });
-      } else if (command.kind === 'pause') {
-        await this.goalCoordinator.pause();
-      } else if (command.kind === 'resume') {
-        await this.resumeGoal();
-      } else if (command.kind === 'stop') {
-        await this.goalCoordinator.stop(this.language === 'en' ? 'Stopped by the user.' : '已由用户停止。');
-      } else if (command.kind === 'clear') {
-        await this.goalCoordinator.clear();
-      } else if (command.kind === 'amend') {
-        await this.goalCoordinator.amend(command.instruction);
-      }
-    } catch (error) {
-      vscode.window.showWarningMessage(getErrorMessage(error));
-    }
-    return true;
-  }
-
   private showGoalDialog(input: {
-    originalRaw?: string; objective: string; preset?: SafeNpmScript;
+    objective: string; preset?: SafeNpmScript;
     sourceId?: string; modelId?: string; references?: PromptReferenceInput[]; skillIds?: string[];
-  }): void {
+  }, options: {
+    suggestion?: GoalDraftSuggestionV1;
+    generationStatus?: 'idle' | 'generating' | 'ready' | 'error' | 'cancelled';
+    generationMessage?: string;
+    generatorModelId?: string;
+  } = {}): void {
     this.pendingGoalDraft = { ...input };
-    const validations = input.preset ? [input.preset] : [];
+    const fallbackCriterion = input.preset ? {
+      text: this.language === 'en' ? `${input.preset} passes after the last workspace change.` : `最后一次工作区修改后 ${input.preset} 验证通过。`,
+      type: 'validation' as const,
+      evidenceRequirement: this.language === 'en' ? 'A current controlled validation result.' : '当前受控验证结果。'
+    } : {
+      text: this.language === 'en'
+        ? `The requested outcome is implemented and verified: ${input.objective || 'describe the intended outcome'}`
+        : `请求的结果已经实现并验证：${input.objective || '请描述预期结果'}`,
+      type: 'workspace_state' as const,
+      evidenceRequirement: this.language === 'en' ? 'Current workspace state and verification evidence.' : '当前工作区状态和验证证据。'
+    };
+    const validations = options.suggestion?.requiredValidations ?? (input.preset ? [input.preset] : []);
     this.postToWebview({
       type: 'showGoalDialog',
       draft: {
         objective: input.objective,
-        visibleCommand: input.originalRaw ?? (input.objective ? `/goal ${input.objective}` : '/goal '),
-        acceptanceCriteria: input.preset ? [{
-          text: this.language === 'en' ? `${input.preset} passes after the last workspace change.` : `最后一次工作区修改后 ${input.preset} 验证通过。`,
-          type: 'validation',
-          evidenceRequirement: this.language === 'en' ? 'A current controlled validation result.' : '当前受控验证结果。'
-        }] : [{
-          text: this.language === 'en'
-            ? `The requested outcome is implemented and verified: ${input.objective || 'describe the intended outcome'}`
-            : `请求的结果已经实现并验证：${input.objective || '请描述预期结果'}`,
-          type: 'workspace_state',
-          evidenceRequirement: this.language === 'en' ? 'Current workspace state and verification evidence.' : '当前工作区状态和验证证据。'
-        }],
-        includeScope: [],
-        excludeScope: [],
+        visibleMessage: this.language === 'en' ? `Goal: ${input.objective}` : `Goal：${input.objective}`,
+        acceptanceCriteria: options.suggestion?.acceptanceCriteria ?? [fallbackCriterion],
+        includeScope: options.suggestion?.includeScope ?? [],
+        excludeScope: options.suggestion?.excludeScope ?? [],
         requiredValidations: validations,
         maxActiveExecutionMs: input.preset
           ? getConfiguredBackgroundMaxDurationMs()
@@ -3881,14 +3943,128 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         resumePolicy: getConfiguredGoalAutoResumeOnActivation() ? 'auto_on_activation' : 'manual',
         sourceId: input.sourceId ?? this.selectedSourceId,
         modelId: input.modelId ?? this.selectedModelId,
+        generationStatus: options.generationStatus ?? 'idle',
+        generationMessage: options.generationMessage ?? '',
+        generatorModelId: options.generatorModelId ?? '',
         lifecycleNotice: 'Goal 只会在 KeepSeek 的 VS Code Extension Host 运行时推进；VS Code 关闭、Reload 或设备休眠期间不会执行，重新激活后可恢复。'
       }
     });
   }
 
+  private async openGoalDraftDialog(input: {
+    objective: string;
+    sourceId: string;
+    modelId: string;
+    references?: PromptReferenceInput[];
+    skillIds?: string[];
+  }): Promise<void> {
+    const objective = input.objective.trim();
+    this.cancelGoalDraftGeneration(false);
+    if (!objective) {
+      this.showGoalDialog({ ...input, objective }, { generationStatus: 'idle' });
+      return;
+    }
+    const generation = ++this.goalDraftGeneration;
+    const controller = new AbortController();
+    this.goalDraftGenerationAbortController = controller;
+    this.showGoalDialog({ ...input, objective }, {
+      generationStatus: 'generating',
+      generationMessage: this.language === 'en'
+        ? 'The configured subagent model is generating acceptance criteria and scope…'
+        : '正在使用已配置的子代理模型生成验收条件和范围…'
+    });
+    try {
+      await this.refreshModelSourceState();
+      const mainModel = findModelBySelection(this.availableModels, {
+        sourceId: input.sourceId,
+        modelId: input.modelId
+      });
+      if (!mainModel?.sourceId) throw new Error(this.t('modelRequired'));
+      const mainSource = await resolveModelSourceConfig(mainModel.sourceId, this.globalStorageUri, {
+        sourceStore: this.sourceStore,
+        language: this.language,
+        requireApiKey: false
+      });
+      const subagent = await resolveConfiguredSubagentModel({
+        globalStorageUri: this.globalStorageUri,
+        workspaceKey: this.sessionStore.workspaceKey,
+        sourceStore: this.sourceStore,
+        settingsStore: this.subagentSettingsStore,
+        profileId: 'proposal',
+        parentRequest: {
+          model: mainModel,
+          sourceConfig: {
+            sourceId: mainSource.sourceId,
+            provider: mainSource.provider,
+            apiKey: mainSource.apiKey,
+            baseUrl: mainSource.baseUrl,
+            supportsBilling: mainSource.supportsBilling
+          }
+        },
+        language: this.language
+      });
+      const providerObjective = this.sanitizeGoalReferencePaths(objective, input.references, input.skillIds);
+      const sessionId = this.sessionStore.activeSessionId;
+      const suggestion = await this.goalDraftGenerator.generate({
+        objective: providerObjective,
+        availableValidations: this.backgroundAvailableScripts,
+        model: subagent.model,
+        sourceConfig: subagent.sourceConfig,
+        language: this.language,
+        signal: controller.signal,
+        onUsage: (event) => {
+          const session = this.sessionStore.getActiveSession();
+          if (session.id !== sessionId) return;
+          session.usageStats = addUsageEventToSessionStats(session.usageStats, event);
+          session.updatedAt = new Date().toISOString();
+          void this.sessionStore.persist().catch(() => undefined);
+          this.postState();
+        }
+      });
+      if (controller.signal.aborted || generation !== this.goalDraftGeneration) return;
+      this.showGoalDialog({ ...input, objective }, {
+        suggestion,
+        generationStatus: 'ready',
+        generatorModelId: subagent.model.id,
+        generationMessage: this.language === 'en'
+          ? `Generated by subagent model ${subagent.model.id}. Review before starting.`
+          : `已由子代理模型 ${subagent.model.id} 生成，请确认后再开始。`
+      });
+    } catch (error) {
+      if (controller.signal.aborted || generation !== this.goalDraftGeneration) return;
+      const safeMessage = redactSensitiveReviewText(getErrorMessage(error));
+      this.showGoalDialog({ ...input, objective }, {
+        generationStatus: 'error',
+        generationMessage: this.language === 'en'
+          ? `Could not generate automatically. Conservative defaults are available: ${safeMessage}`
+          : `自动生成失败，已保留保守默认项，可手动修改：${safeMessage}`
+      });
+    } finally {
+      if (this.goalDraftGenerationAbortController === controller) {
+        this.goalDraftGenerationAbortController = undefined;
+      }
+    }
+  }
+
+  private cancelGoalDraftGeneration(postFeedback: boolean): void {
+    this.goalDraftGeneration += 1;
+    this.goalDraftGenerationAbortController?.abort();
+    this.goalDraftGenerationAbortController = undefined;
+    if (postFeedback) {
+      this.postToWebview({
+        type: 'goalDraftGenerationState',
+        status: 'cancelled',
+        message: this.language === 'en'
+          ? 'Automatic generation cancelled. You can edit the conservative defaults manually.'
+          : '已取消自动生成；可以直接修改保守默认项。'
+      });
+    }
+  }
+
   private async startGoal(message: Extract<WebviewMessage, { type: 'startGoal' }>): Promise<void> {
     if (this.isBusy || this.isStartingRun || this.activeDraftRunId) return;
     if (this.hasNonTerminalGoal()) throw new Error('Only one active Goal is allowed in this workspace.');
+    this.goalAttemptStream = undefined;
     const objective = message.objective.trim();
     if (!objective || objective.length > MAX_GOAL_OBJECTIVE_CHARACTERS) {
       vscode.window.showWarningMessage(`Goal objective must contain 1-${MAX_GOAL_OBJECTIVE_CHARACTERS} characters.`);
@@ -3905,11 +4081,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const profile = getAgentRuntimeProfile(model, this.agentSettings);
     const referenceInputs = this.pendingGoalDraft?.references;
     const contract = createGoalContract({
-      objective: this.sanitizeGoalReferencePaths(objective, referenceInputs),
+      objective: this.sanitizeGoalReferencePaths(objective, referenceInputs, this.pendingGoalDraft?.skillIds),
       acceptanceCriteria: message.acceptanceCriteria.map((criterion) => ({
         ...criterion,
-        text: this.sanitizeGoalReferencePaths(criterion.text, referenceInputs),
-        evidenceRequirement: this.sanitizeGoalReferencePaths(criterion.evidenceRequirement, referenceInputs)
+        text: this.sanitizeGoalReferencePaths(criterion.text, referenceInputs, this.pendingGoalDraft?.skillIds),
+        evidenceRequirement: this.sanitizeGoalReferencePaths(criterion.evidenceRequirement, referenceInputs, this.pendingGoalDraft?.skillIds)
       })),
       includeScope: message.includeScope,
       excludeScope: message.excludeScope,
@@ -3934,7 +4110,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         provider: resolved.provider, endpointHash: endpointHash(resolved.baseUrl)
       }
     });
-    const visibleContent = this.pendingGoalDraft?.originalRaw ?? `/goal ${objective}`;
+    const visibleContent = this.language === 'en' ? `Goal: ${objective}` : `Goal：${objective}`;
     const authorizationKeys = this.collectAuthorizedExternalReferenceUris(this.pendingGoalDraft?.references);
     const expandedRaw = await expandPromptReferencesInPrompt(visibleContent, {
       authorizedExternalReferenceUris: authorizationKeys,
@@ -3942,24 +4118,33 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       expandSkillContents: false,
       language: this.language
     });
-    const expandedContent = this.sanitizeGoalReferencePaths(expandedRaw, referenceInputs);
+    const expandedContent = this.sanitizeGoalReferencePaths(expandedRaw, referenceInputs, this.pendingGoalDraft?.skillIds);
     const providerContent = `${expandedContent.trim()}${formatGoalProviderTail(contract)}`;
     const session = this.sessionStore.getActiveSession();
     await this.goalCoordinator.create(contract, session.id, {
       visibleContent, expandedContent, providerContent
     }, [...authorizationKeys].filter((key) => !this.isWorkspaceAuthorizationKey(key)));
-    session.requestProtocol = {
-      ...session.requestProtocol,
-      version: GOAL_REQUEST_PROTOCOL_VERSION,
-      serializationStrategy: 'provider-projection-v2',
-      toolSchemaVersion: CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
-      toolNames: [], modelId: model.id, sourceId: model.sourceId,
-      providerId: resolved.provider, baseUrl: resolved.baseUrl,
-      createdAt: session.requestProtocol?.createdAt ?? new Date().toISOString()
-    };
-    await this.sessionStore.persist();
-    this.pendingGoalDraft = undefined;
-    await this.goalCoordinator.start();
+    try {
+      session.requestProtocol = {
+        ...session.requestProtocol,
+        version: GOAL_REQUEST_PROTOCOL_VERSION,
+        serializationStrategy: 'provider-projection-v2',
+        toolSchemaVersion: CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
+        toolNames: [], modelId: model.id, sourceId: model.sourceId,
+        providerId: resolved.provider, baseUrl: resolved.baseUrl,
+        createdAt: session.requestProtocol?.createdAt ?? new Date().toISOString()
+      };
+      await this.sessionStore.persist();
+      this.pendingGoalDraft = undefined;
+      await this.goalCoordinator.start();
+    } catch (error) {
+      if (this.goalCoordinator.current?.status === 'preparing') {
+        await this.goalCoordinator.interrupt(this.language === 'en'
+          ? `Goal preparation failed: ${getErrorMessage(error)}`
+          : `Goal 准备失败：${getErrorMessage(error)}`).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   private async resumeGoal(): Promise<void> {
@@ -3982,13 +4167,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       await this.continueGoalAfterSettledEffects(record, 'manual_resume_after_settled_side_effects');
     }
     else {
-      const recovered = await this.goalCoordinator.recoverAfterActivation(
-        this.createGoalRecoveryContext(record, false)
-      );
-      if (recovered?.status === 'needs_attention') {
-        throw new Error(recovered.stopReason ?? 'Goal recovery checks require attention.');
-      }
+      const blocker = goalResumeBlocker(record, this.createGoalRecoveryContext(record, false));
+      if (blocker) throw new Error(blocker);
       await this.goalCoordinator.resume();
+    }
+    const resumed = this.goalCoordinator.current;
+    if (resumed?.status === 'needs_attention') {
+      throw new Error(resumed.stopReason ?? 'Goal recovery checks require attention.');
     }
   }
 
@@ -4033,6 +4218,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const checkpointMatches = record.runCheckpoint?.version === 3
       && record.runCheckpoint.goal?.contractHash === record.currentContractHash
       && record.runCheckpoint.goal.revision === record.currentRevision;
+    const requestNeverStarted = !record.runCheckpoint && !exactInitialMessageExists;
     return {
       runtimeId: this.approvalReviews.runtimeId,
       workspaceKey: this.sessionStore.workspaceKey,
@@ -4044,15 +4230,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       workspaceTrusted: vscode.workspace.isTrusted,
       hasExternalAuthorizationRequirement: record.requiredExternalAuthorizationUris.some((key) =>
         !this.authorizedExternalReferenceUris.has(key)),
-      checkpointValid: protocolMatches && (record.status === 'preparing'
-        ? !record.runCheckpoint && !exactInitialMessageExists
-        : Boolean(checkpointMatches && exactInitialMessageExists)),
+      checkpointValid: protocolMatches && (requestNeverStarted || Boolean(checkpointMatches && exactInitialMessageExists)),
       hasUncertainChangeSet,
       hasUncertainDraftRun: runs.some((run) => run?.interruption?.terminalUnknown === true),
       hasUncertainToolResult: record.sideEffects.uncertainToolCallIds.length > 0
         || Boolean(record.runCheckpoint?.state?.pending?.executing),
       hasPendingApproval: record.status === 'waiting_for_authorization',
-      canAcquireLease: this.globalStorageUri.scheme === 'file',
+      canAcquireLease: this.goalLease.supported,
       autoResumeEnabled
     };
   }
@@ -4124,7 +4308,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private sanitizeGoalReferencePaths(text: string, references: readonly PromptReferenceInput[] | undefined): string {
+  private sanitizeGoalReferencePaths(
+    text: string,
+    references: readonly PromptReferenceInput[] | undefined,
+    skillIds?: readonly string[]
+  ): string {
     let sanitized = text;
     for (const [index, reference] of (references ?? []).entries()) {
       const uri = resolveFileReferenceUri(reference.path);
@@ -4136,6 +4324,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         ? `${(vscode.workspace.workspaceFolders?.length ?? 0) > 1 ? `${folder!.name}/` : ''}${relativePath}`
         : `authorized-external-reference-${index + 1}`;
       for (const runtimeValue of [reference.path, uri.toString(), uri.fsPath]) {
+        if (runtimeValue) sanitized = sanitized.split(runtimeValue).join(stable);
+      }
+    }
+    for (const skillId of skillIds ?? []) {
+      const manifest = this.skillStore.getManifests().find((item) => item.id === skillId);
+      if (!manifest) continue;
+      const stableName = manifest.name.trim().replace(/[^A-Za-z0-9._-]+/gu, '-').replace(/^-+|-+$/gu, '') || 'skill';
+      const stable = `skills/${stableName}/SKILL.md`;
+      for (const runtimeValue of [manifest.skillUri.toString(), manifest.skillUri.fsPath, manifest.skillUri.path]) {
         if (runtimeValue) sanitized = sanitized.split(runtimeValue).join(stable);
       }
     }
@@ -4250,6 +4447,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     const session = this.sessionStore.getActiveSession();
     if (session.id !== record.sessionId) throw new Error('Goal session changed before final message commit.');
+    if (this.goalAttemptStream?.goalId === record.id) this.goalAttemptStream = undefined;
     let inserted = false;
     if (!session.messages.some((message) => message.id === record.finalMessageId)) {
       session.messages.push({
@@ -4592,8 +4790,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const activeGoal = this.goalCoordinator?.current;
     if (!options?.goalAttempt && activeGoal && !['completed', 'failed', 'stopped'].includes(activeGoal.status)) {
       vscode.window.showInformationMessage(this.language === 'en'
-        ? 'A Goal is active. Use /goal pause, /goal stop, or /goal amend before sending another message.'
-        : '当前有活动 Goal。请先使用 /goal pause、/goal stop 或 /goal amend。');
+        ? 'A Goal is active. Use the G button beside / to pause, stop, or amend it before sending another message.'
+        : '当前有活动 Goal。请点击 “/” 旁的 G 按钮暂停、停止或修订。');
       return;
     }
 
@@ -4967,7 +5165,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         usedSkills: toChatMessageSkills(activeSkills),
         isStreaming: true
       };
-      this.messages.push(assistantMessage);
+      if (options?.goalAttempt) {
+        this.goalAttemptStream = {
+          goalId: options.goalAttempt.record.id,
+          sessionId: activeSession.id,
+          message: assistantMessage
+        };
+      } else {
+        this.messages.push(assistantMessage);
+      }
       streamPublisher = this.createRunStreamPublisher(activeSession.id, assistantMessage);
       this.setAgentActivity({
         base: 'thinking',
@@ -5148,8 +5354,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       };
 
       if (options?.goalAttempt && assistantMessage) {
-        const placeholderIndex = this.messages.findIndex((message) => message.id === assistantMessage?.id);
-        if (placeholderIndex >= 0) this.messages.splice(placeholderIndex, 1);
+        assistantMessage.content = response.message;
+        assistantMessage.reasoningContent = response.reasoningContent;
+        delete assistantMessage.isStreaming;
+        assistantMessage.runDetails = response.runDetails;
         assistantMessage = undefined;
       }
       if (assistantMessage) {
@@ -5211,8 +5419,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       if (options?.goalAttempt && !(error instanceof AgentRunAbortedError) && !abortController.signal.aborted) {
         if (assistantMessage) {
-          const index = this.messages.findIndex((message) => message.id === assistantMessage?.id);
-          if (index >= 0) this.messages.splice(index, 1);
+          const detail = getErrorMessage(error);
+          const hasPartialOutput = Boolean(assistantMessage.content.trim() || assistantMessage.reasoningContent?.trim());
+          assistantMessage.content = hasPartialOutput
+            ? [assistantMessage.content.trimEnd(), `${this.t('errorPrefix')}: ${detail}`].filter(Boolean).join('\n\n')
+            : `${this.t('errorPrefix')}: ${detail}`;
+          delete assistantMessage.isStreaming;
           assistantMessage = undefined;
         }
         this.setAgentActivity({ base: 'error', phase: 'failed' }, { post: false });
@@ -5224,8 +5436,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           const assistantMessageId = assistantMessage.id;
           delete assistantMessage.isStreaming;
           if (options?.goalAttempt) {
-            const assistantIndex = this.messages.findIndex((message) => message.id === assistantMessageId);
-            if (assistantIndex >= 0) this.messages.splice(assistantIndex, 1);
+            if (!hasPartialOutput) {
+              assistantMessage.content = this.language === 'en'
+                ? 'Goal attempt paused or stopped.'
+                : 'Goal 本轮已暂停或停止。';
+            }
             assistantMessage = undefined;
           } else if (!hasPartialOutput && assistantMessage.runDetails) {
             assistantMessage.content = this.language === 'en'
@@ -5610,7 +5825,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const hasSession = this.sessionReady;
     const activeSession = hasSession ? this.sessionStore.getActiveSession() : undefined;
     const messages = activeSession
-      ? getVisibleMessages(activeSession.messages.slice(-this.getVisibleMessageLimit(activeSession.id)))
+      ? this.getVisibleMessagesForWebview(activeSession, this.getVisibleMessageLimit(activeSession.id))
       : [];
     this.postToWebview({
       type: 'state',
@@ -5730,7 +5945,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const visibleLimit = this.getVisibleMessageLimit(activeSession.id);
     const visibleMessages = options.omitMessages
       ? undefined
-      : getVisibleMessages(this.messages.slice(-visibleLimit));
+      : this.getVisibleMessagesForWebview(activeSession, visibleLimit);
     const revision = ++this.stateRevision;
     const forceFull = options.forceFull === true || !this.fullStateSent;
     this.postToWebview({
@@ -5747,7 +5962,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         agentSettings: this.agentSettings,
         ...(visibleMessages ? {
           messages: visibleMessages,
-          hasOlderMessages: this.messages.length > visibleMessages.length
+          hasOlderMessages: this.messages.length > visibleLimit
         } : {}),
         activeSessionId: this.sessionStore.activeSessionId,
         workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath || folder.uri.toString()),
@@ -5759,7 +5974,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         subagentModelSetting: this.subagentModelSetting,
         subagentModelSettings: this.subagentModelSettings,
         legacyMemoryMigration: this.getLegacyMemoryMigrationStateView(),
-        goal: createGoalViewModel(this.goalCoordinator?.current, normalizeApprovalMode(activeSession.approvalMode)),
+        goal: createGoalViewModelPayload(this.goalCoordinator?.current, normalizeApprovalMode(activeSession.approvalMode)),
         backgroundRun: undefined,
         backgroundAvailableScripts: this.backgroundAvailableScripts,
         backgroundDefaults: {
@@ -6413,7 +6628,13 @@ function isAgentRequestMessage(type: WebviewMessage['type']): boolean {
     'sendPrompt',
     'editUserPrompt',
     'continueAgentTask',
-    'continueRepair'
+    'continueRepair',
+    'openGoalDialog',
+    'generateGoalDraft',
+    'startGoal',
+    'goalResume',
+    'goalAmend',
+    'goalConfirmCriterion'
   ]).has(type);
 }
 

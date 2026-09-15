@@ -126,20 +126,24 @@ export const composerControlsStylesFragment: WebviewFragment = {
     }
 
     .composer-reference-btn,
-    .composer-command-btn {
+    .composer-command-btn,
+    .composer-goal-btn {
       font-weight: 700;
     }
 
     .composer-reference-btn[aria-expanded="true"],
     .composer-reference-btn.is-active,
     .composer-command-btn[aria-expanded="true"],
-    .composer-command-btn.is-active {
+    .composer-command-btn.is-active,
+    .composer-goal-btn[aria-expanded="true"],
+    .composer-goal-btn.is-active {
       color: var(--vscode-foreground);
       background: var(--vscode-toolbar-activeBackground, var(--vscode-toolbar-hoverBackground));
     }
 
     .composer-trigger-glyph,
-    .command-trigger-glyph {
+    .command-trigger-glyph,
+    .goal-trigger-glyph {
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -149,6 +153,101 @@ export const composerControlsStylesFragment: WebviewFragment = {
       line-height: 16px;
       font-family: var(--vscode-editor-font-family, monospace);
     }
+
+    .composer-goal-btn {
+      position: relative;
+    }
+
+    .composer-goal-btn[data-goal-state]:not([data-goal-state="none"]) {
+      border-color: var(--vscode-focusBorder, var(--vscode-button-background));
+      color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+    }
+
+    .composer-goal-btn[data-goal-state="running"]::after,
+    .composer-goal-btn[data-goal-state="waiting_for_apply"]::after,
+    .composer-goal-btn[data-goal-state="waiting_for_authorization"]::after,
+    .composer-goal-btn[data-goal-state="waiting_for_command"]::after {
+      content: '';
+      position: absolute;
+      top: 3px;
+      right: 3px;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--vscode-testing-iconQueued, var(--vscode-progressBar-background));
+    }
+
+    .composer-goal-btn[data-goal-state="completed"]::after {
+      content: '';
+      position: absolute;
+      top: 3px;
+      right: 3px;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--vscode-testing-iconPassed);
+    }
+
+    .composer-goal-btn[data-goal-state="failed"]::after,
+    .composer-goal-btn[data-goal-state="needs_attention"]::after,
+    .composer-goal-btn[data-goal-state="interrupted"]::after {
+      content: '';
+      position: absolute;
+      top: 3px;
+      right: 3px;
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--vscode-errorForeground);
+    }
+
+    .goal-hover-card {
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 7px);
+      z-index: 55;
+      display: grid;
+      gap: 4px;
+      width: min(280px, calc(100vw - 16px));
+      padding: 9px 10px;
+      border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border));
+      border-radius: 7px;
+      background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
+      box-shadow: 0 4px 14px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.24));
+      color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+      font-size: 11px;
+      font-weight: 400;
+      line-height: 1.4;
+      text-align: left;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      opacity: 0;
+      visibility: hidden;
+      transform: translate(-27%, 2px);
+      pointer-events: none;
+      transition: opacity 100ms ease, transform 100ms ease, visibility 0s linear 100ms;
+    }
+
+    .composer-goal-btn:hover:not(:disabled) .goal-hover-card,
+    .composer-goal-btn:focus-visible .goal-hover-card {
+      opacity: 1;
+      visibility: visible;
+      transform: translate(-27%, 0);
+      transition-delay: 120ms;
+    }
+
+    .composer-goal-btn[aria-expanded="true"] .goal-hover-card {
+      display: none;
+    }
+
+    .goal-hover-heading { font-weight: 600; }
+    .goal-hover-objective {
+      display: -webkit-box;
+      overflow: hidden;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 3;
+    }
+    .goal-hover-meta, .goal-hover-reason { color: var(--vscode-descriptionForeground); }
 
     .composer-icon-btn:hover:not(:disabled) {
       color: var(--vscode-foreground);
@@ -286,4 +385,3 @@ export const composerStatusStylesFragment: WebviewFragment = {
 
 `.slice(1)
 };
-

@@ -16,7 +16,7 @@ import { appendGoalContinuation, appendGoalHostControl, createGoalCheckpointRepl
 import { stableStringify } from '../evidence/shaping';
 import { transitionGoal } from './goalStateMachine';
 import { classifyGoalRecovery, type GoalRecoveryContext } from './goalRecovery';
-import type { GoalStore } from './goalStore';
+import { GoalStoreConcurrencyError, type GoalStore } from './goalStore';
 import {
   isGoalTerminalStatus,
   type GoalContractV1,
@@ -38,6 +38,7 @@ export interface GoalCoordinatorHooks {
   onCompleted?(record: GoalRecordV1): Promise<void> | void;
   onCancelRuntime?(): void;
   onReleaseTask?(taskId: string): void;
+  onLeaseWait?(retryAfterMs: number): void;
 }
 
 /** Durable event-driven Goal state machine. Every dispatch, review, and control
@@ -47,8 +48,14 @@ export class GoalCoordinator {
   private dispatching = false;
   private continuePending = false;
   private disposed = false;
+  /** Invalidates lease acquisition/start continuations after Stop, interrupt,
+   * amendment, or disposal. This prevents a stale preparing snapshot from
+   * reviving a Goal after the user has cancelled it. */
+  private lifecycleGeneration = 0;
   private hostClock?: ExecutionClock;
   private hostActiveScopes = 0;
+  private cancelLeaseWait?: () => void;
+  private resumeInFlight?: Promise<void>;
 
   public constructor(
     private readonly store: GoalStore,
@@ -111,15 +118,23 @@ export class GoalCoordinator {
       if (record.status === 'running') return;
       throw new Error(`Goal cannot start from ${record.status}.`);
     }
+    const generation = this.lifecycleGeneration;
     const acquired = await this.lease.acquire({
       allowStaleTakeover: record.status === 'interrupted',
       confirmState: async () => (await this.store.load(record.id))?.currentContractHash === record.currentContractHash
     });
+    const current = this.record;
+    if (generation !== this.lifecycleGeneration || !current
+      || current.id !== record.id || current.currentContractHash !== record.currentContractHash
+      || current.currentRevision !== record.currentRevision || isGoalTerminalStatus(current.status)) {
+      if (acquired.acquired) await this.lease.release();
+      return;
+    }
     if (!acquired.acquired || !acquired.lease) {
       await this.moveToAttention(`Goal lease unavailable: ${acquired.reason ?? 'unknown'}`);
       return;
     }
-    this.record = structuredClone(record);
+    this.record = structuredClone(current);
     this.record.lease = { ownerId: acquired.lease.ownerId, fencingToken: acquired.lease.fencingToken };
     this.record = transitionGoal(this.record, 'running');
     this.record = await this.store.append(this.record, 'goal_started', {
@@ -144,35 +159,83 @@ export class GoalCoordinator {
   }
 
   public async resume(): Promise<void> {
+    if (this.resumeInFlight) return await this.resumeInFlight;
+    const operation = this.resumeOnce();
+    this.resumeInFlight = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.resumeInFlight === operation) this.resumeInFlight = undefined;
+    }
+  }
+
+  private async resumeOnce(): Promise<void> {
     const record = this.requireRecord();
     if (record.status === 'running') return;
     if (!['paused', 'interrupted', 'waiting_for_user', 'needs_attention', 'waiting_for_apply', 'waiting_for_authorization', 'waiting_for_command'].includes(record.status)) {
       throw new Error(`Goal cannot resume from ${record.status}.`);
     }
+    const generation = this.lifecycleGeneration;
     let valid = await this.lease.confirm();
+    let acquireFailure: Awaited<ReturnType<GoalLease['acquire']>> | undefined;
     if (!valid) {
-      const acquired = await this.lease.acquire({ allowStaleTakeover: true,
+      acquireFailure = await this.lease.acquire({ allowStaleTakeover: true,
         confirmState: async () => (await this.store.load(record.id))?.currentContractHash === record.currentContractHash });
-      valid = acquired.acquired;
+      valid = acquireFailure.acquired;
+      if (!valid && (acquireFailure.reason === 'held' || acquireFailure.reason === 'lock_busy')
+        && acquireFailure.retryAfterMs && acquireFailure.retryAfterMs <= 30_000) {
+        this.hooks.onLeaseWait?.(acquireFailure.retryAfterMs);
+        if (!(await this.waitForLeaseExpiry(acquireFailure.retryAfterMs, generation))) return;
+        acquireFailure = await this.lease.acquire({
+          allowStaleTakeover: true,
+          confirmState: async () => (await this.store.load(record.id))?.currentContractHash === record.currentContractHash
+        });
+        valid = acquireFailure.acquired;
+      }
     }
-    if (!valid) { await this.moveToAttention('Goal lease cannot be safely acquired.'); return; }
-    this.record = transitionGoal(record, 'running');
+    const current = this.record;
+    if (generation !== this.lifecycleGeneration || !current
+      || current.id !== record.id || current.currentContractHash !== record.currentContractHash
+      || current.currentRevision !== record.currentRevision || isGoalTerminalStatus(current.status)) {
+      if (valid) await this.lease.release();
+      return;
+    }
+    // Never rewrite durable Goal state without owning its lease. A live second
+    // window may still be advancing this same record; the local UI can report
+    // the conflict while leaving the persisted recovery point untouched.
+    if (!valid) throw new Error(goalLeaseFailureMessage(acquireFailure?.reason));
+    this.record = transitionGoal(current, 'running');
     this.record.lease = this.lease.binding;
     this.record = await this.store.append(this.record, 'goal_resumed', { revision: this.record.currentRevision });
+    this.lease.startHeartbeat(() => { void this.moveToAttention('Goal lease was lost.'); });
     this.emit();
     await this.dispatch('resume');
   }
 
   public async stop(reason = 'Stopped by the user.'): Promise<void> {
-    const record = this.requireRecord();
+    let record = this.requireRecord();
     if (isGoalTerminalStatus(record.status)) return;
+    this.lifecycleGeneration += 1;
+    this.cancelPendingLeaseWait();
     this.hooks.onCancelRuntime?.();
-    this.record = transitionGoal(record, 'stopped', { reason });
-    this.record.lease = undefined;
-    this.record = await this.store.append(this.record, 'goal_stopped', { reason: reason.slice(0, 1_000) });
-    await this.lease.release();
-    if (this.record.logicalTaskId) this.hooks.onReleaseTask?.(this.record.logicalTaskId);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const next = transitionGoal(record, 'stopped', { reason });
+      next.lease = undefined;
+      try {
+        this.record = await this.store.append(next, 'goal_stopped', { reason: reason.slice(0, 1_000) });
+        break;
+      } catch (error) {
+        if (!(error instanceof GoalStoreConcurrencyError) || attempt === 3) throw error;
+        const latest = await this.store.load(record.id);
+        if (!latest) throw new Error('Goal disappeared while stopping.');
+        this.record = record = latest;
+        if (isGoalTerminalStatus(record.status)) return;
+      }
+    }
     this.emit();
+    await this.lease.release();
+    const stopped = this.requireRecord();
+    if (stopped.logicalTaskId) this.hooks.onReleaseTask?.(stopped.logicalTaskId);
   }
 
   public async clear(): Promise<void> {
@@ -186,6 +249,8 @@ export class GoalCoordinator {
   public async amend(instruction: string): Promise<void> {
     const record = this.requireRecord();
     if (isGoalTerminalStatus(record.status)) throw new Error('A terminal Goal cannot be amended.');
+    this.lifecycleGeneration += 1;
+    this.cancelPendingLeaseWait();
     if (record.lease) await this.assertLease();
     const contract = currentContract(record);
     const amended = amendGoalContract(contract, instruction);
@@ -464,12 +529,25 @@ export class GoalCoordinator {
   }
 
   public async interrupt(reason: string): Promise<void> {
-    const record = this.requireRecord();
+    let record = this.requireRecord();
     if (isGoalTerminalStatus(record.status)) return;
+    this.lifecycleGeneration += 1;
+    this.cancelPendingLeaseWait();
     this.hooks.onCancelRuntime?.();
-    this.record = transitionGoal(record, 'interrupted', { reason });
-    this.record.lease = undefined;
-    this.record = await this.store.append(this.record, 'goal_interrupted', { reason: reason.slice(0, 1_000) });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const next = transitionGoal(record, 'interrupted', { reason });
+      next.lease = undefined;
+      try {
+        this.record = await this.store.append(next, 'goal_interrupted', { reason: reason.slice(0, 1_000) });
+        break;
+      } catch (error) {
+        if (!(error instanceof GoalStoreConcurrencyError) || attempt === 3) throw error;
+        const latest = await this.store.load(record.id);
+        if (!latest) throw new Error('Goal disappeared while interrupting.');
+        this.record = record = latest;
+        if (isGoalTerminalStatus(record.status)) return;
+      }
+    }
     await this.lease.release();
     this.emit();
   }
@@ -478,6 +556,8 @@ export class GoalCoordinator {
 
   public async dispose(): Promise<void> {
     this.disposed = true;
+    this.lifecycleGeneration += 1;
+    this.cancelPendingLeaseWait();
     this.hooks.onCancelRuntime?.();
     this.hostClock?.dispose();
     this.hostClock = undefined;
@@ -780,7 +860,11 @@ export class GoalCoordinator {
   private async moveToAttention(reason: string): Promise<void> {
     if (!this.record || isGoalTerminalStatus(this.record.status)) return;
     let next: GoalRecordV1;
-    try { next = transitionGoal(this.record, 'needs_attention', { reason }); }
+    try {
+      next = this.record.status === 'needs_attention'
+        ? { ...structuredClone(this.record), stopReason: reason, updatedAt: new Date().toISOString() }
+        : transitionGoal(this.record, 'needs_attention', { reason });
+    }
     catch { next = { ...structuredClone(this.record), status: 'needs_attention', stopReason: reason, updatedAt: new Date().toISOString() }; }
     next.lease = undefined;
     this.record = await this.store.append(next, 'goal_needs_attention', { reason: reason.slice(0, 1_000) });
@@ -792,6 +876,29 @@ export class GoalCoordinator {
     const binding = this.requireRecord().lease;
     if (!binding || binding.ownerId !== this.lease.binding?.ownerId || binding.fencingToken !== this.lease.binding?.fencingToken
       || !(await this.lease.confirm())) throw new Error('Goal lease/fencing check failed.');
+  }
+
+  private async waitForLeaseExpiry(delayMs: number, generation: number): Promise<boolean> {
+    this.cancelPendingLeaseWait();
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (this.cancelLeaseWait === finish) this.cancelLeaseWait = undefined;
+        resolve();
+      };
+      const timer = setTimeout(finish, Math.max(1, delayMs + 25));
+      this.cancelLeaseWait = finish;
+    });
+    return generation === this.lifecycleGeneration && !this.disposed;
+  }
+
+  private cancelPendingLeaseWait(): void {
+    const cancel = this.cancelLeaseWait;
+    this.cancelLeaseWait = undefined;
+    cancel?.();
   }
 
   private assertBudgets(record: GoalRecordV1): void {
@@ -811,6 +918,16 @@ function currentContract(record: GoalRecordV1): GoalContractV1 {
   const contract = record.revisions.find((revision) => revision.revision === record.currentRevision)?.contract;
   if (!contract) throw new Error('Current Goal contract is missing.');
   return contract;
+}
+
+function goalLeaseFailureMessage(reason: Awaited<ReturnType<GoalLease['acquire']>>['reason']): string {
+  switch (reason) {
+    case 'held': return 'Another VS Code window is actively running this workspace Goal.';
+    case 'lock_busy': return 'The Goal lease update is still busy; retry Resume.';
+    case 'unsupported_storage': return 'This storage provider cannot guarantee exclusive Goal execution.';
+    case 'state_changed': return 'The Goal changed while the lease takeover was being checked.';
+    default: return 'The Goal lease could not be safely acquired.';
+  }
 }
 
 function evidenceManifestHash(checkpoint: RunCheckpoint): string {

@@ -26,6 +26,9 @@ export type WebviewMessage =
   | { type: 'loadOlderMessages' }
   | { type: 'refreshBalance' }
   | { type: 'sendPrompt'; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
+  | { type: 'openGoalDialog'; objective?: string; sourceId?: string; modelId?: string; references?: PromptReferenceInput[]; skillIds?: string[] }
+  | { type: 'generateGoalDraft'; objective: string; sourceId: string; modelId: string }
+  | { type: 'cancelGoalDraftGeneration' }
   | {
       type: 'startGoal'; objective: string;
       acceptanceCriteria: Array<{ text: string; type: 'validation' | 'workspace_state' | 'artifact' | 'manual'; evidenceRequirement: string }>;

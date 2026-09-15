@@ -75,6 +75,7 @@ export const composerRenderFragment: WebviewFragment = {
         renderContextProgress();
         renderCommandMenu();
         renderReferenceMenuButton();
+        renderGoalControls();
         renderSendButton();
         setApiKeyVisible(apiKeyVisible, false);
         if (settingsOverlay && !settingsOverlay.classList.contains('hidden')) {
@@ -148,4 +149,3 @@ export const composerPublicApiFragment: WebviewFragment = {
     })();
 `.slice(1)
 };
-

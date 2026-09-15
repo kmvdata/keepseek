@@ -1,6 +1,7 @@
 import { getInputScript } from './input/script';
 import { getNewAccountDialogScript } from './input/newAccountDialog';
 import { getRichTextShortcutsScript } from './richTextShortcuts';
+import { getGoalTranscriptScript } from './goalTranscript';
 import { WEBVIEW_TRANSLATIONS } from '../shared/i18n';
 
 export function getScript(): string {
@@ -421,19 +422,6 @@ export function getScript(): string {
     const backgroundResume = document.getElementById('backgroundResume');
     const backgroundStop = document.getElementById('backgroundStop');
     const backgroundDismiss = document.getElementById('backgroundDismiss');
-    const goalRegion = document.getElementById('goalRegion');
-    const goalCardStatus = document.getElementById('goalCardStatus');
-    const goalCardObjective = document.getElementById('goalCardObjective');
-    const goalCardMeta = document.getElementById('goalCardMeta');
-    const goalCardCriteria = document.getElementById('goalCardCriteria');
-    const goalCardReason = document.getElementById('goalCardReason');
-    const goalPause = document.getElementById('goalPause');
-    const goalResume = document.getElementById('goalResume');
-    const goalStop = document.getElementById('goalStop');
-    const goalClear = document.getElementById('goalClear');
-    const goalAmendRow = document.getElementById('goalAmendRow');
-    const goalAmendInput = document.getElementById('goalAmendInput');
-    const goalAmend = document.getElementById('goalAmend');
     const contextBarOuter = document.getElementById('contextBarOuter');
     const contextBar = document.getElementById('contextBar');
     const planRegion = document.getElementById('planRegion');
@@ -914,17 +902,6 @@ export function getScript(): string {
       });
     }
 
-    goalPause?.addEventListener('click', function() { vscode.postMessage({ type: 'goalPause' }); });
-    goalResume?.addEventListener('click', function() { vscode.postMessage({ type: 'goalResume' }); });
-    goalStop?.addEventListener('click', function() { vscode.postMessage({ type: 'goalStop' }); });
-    goalClear?.addEventListener('click', function() { vscode.postMessage({ type: 'goalClear' }); });
-    goalAmend?.addEventListener('click', function() {
-      var instruction = String(goalAmendInput?.value || '').trim();
-      if (!instruction) return;
-      vscode.postMessage({ type: 'goalAmend', instruction: instruction });
-      if (goalAmendInput) goalAmendInput.value = '';
-    });
-
     document.addEventListener('keydown', function(event) {
       if (!backgroundRunDialogOpen || event.key !== 'Escape') return;
       event.preventDefault();
@@ -1201,6 +1178,7 @@ export function getScript(): string {
 
     ${getInputScript()}
     ${getNewAccountDialogScript()}
+    ${getGoalTranscriptScript()}
 
     function handleKeepseekHostMessage(event) {
       var message = event.data;
@@ -1275,6 +1253,7 @@ export function getScript(): string {
           }
         }
         renderStatus();
+        refreshGoalTranscriptCard();
         if (stick) transcript.scrollTop = transcript.scrollHeight;
       } else if (message.type === 'draftRunStateChanged'  || message.type === 'draftRunOutput') {
         pendingDraftRunApprovals.delete(String(message.draftRun?.id || ''));
@@ -1308,6 +1287,10 @@ export function getScript(): string {
         }
       } else if (message.type === 'showGoalDialog') {
         window.keepseekGoalDialog?.show(message);
+      } else if (message.type === 'goalDraftGenerationState') {
+        window.keepseekGoalDialog?.setGenerationState(message.status, message.message);
+      } else if (message.type === 'goalActionFeedback') {
+        window.keepseekGoalDialog?.setActionFeedback(message.status, message.message);
       } else if (message.type === 'skillDraftCreated') {
         if (window.keepseekInputControls && window.keepseekInputControls.onSkillDraftCreated) {
           window.keepseekInputControls.onSkillDraftCreated(message);
@@ -1369,7 +1352,6 @@ export function getScript(): string {
       syncEditingState();
       renderSettingsControls();
       renderSessionControls();
-      renderGoal();
       renderBackgroundRun();
       renderContextChips();
       renderTaskPlan();
@@ -1593,53 +1575,6 @@ export function getScript(): string {
       if (backgroundDismiss) {
         backgroundDismiss.classList.toggle('hidden', active);
       }
-    }
-
-    function renderGoal() {
-      if (!goalRegion) return;
-      var goal = state.goal && typeof state.goal === 'object' ? state.goal : null;
-      goalRegion.classList.toggle('hidden', !goal);
-      if (!goal) return;
-      if (goalCardStatus) goalCardStatus.textContent = String(goal.status || '') + ' · r' + String(goal.revision || 1);
-      if (goalCardObjective) goalCardObjective.textContent = String(goal.objective || '');
-      var costs = Object.entries(goal.costByCurrency || {}).map(function(entry) { return entry[0] + Number(entry[1] || 0).toFixed(4); }).join(', ') || '—';
-      if (goalCardMeta) {
-        goalCardMeta.textContent = [
-          t('goalActiveExecution') + ': ' + Math.floor(Number(goal.activeExecutionMs || 0) / 1000) + 's / ' + (goal.maxActiveExecutionMs ? Math.floor(goal.maxActiveExecutionMs / 1000) + 's' : '∞'),
-          t('goalRequests') + ': ' + Number(goal.modelRequests || 0) + ' / ' + (goal.maxModelRequests || '∞'),
-          t('goalReviews') + ': ' + Number(goal.completionReviews || 0) + ' / ' + (goal.maxCompletionReviews || '∞'),
-          t('goalCost') + ': ' + costs + ' / ' + (goal.maxCost || '∞'),
-          String(goal.modelId || ''), String(goal.approvalMode || '')
-        ].join(' · ');
-      }
-      if (goalCardCriteria) {
-        goalCardCriteria.replaceChildren();
-        (Array.isArray(goal.criteria) ? goal.criteria : []).forEach(function(criterion) {
-          var item = document.createElement('li');
-          item.className = 'is-' + String(criterion.status || 'pending');
-          item.textContent = (criterion.status === 'satisfied' ? '✓ ' : criterion.status === 'blocked' ? '! ' : '○ ')
-            + String(criterion.text || '') + ' [' + String(criterion.type || '') + ']';
-          if (criterion.type === 'manual' && criterion.status !== 'satisfied' && !goal.canClear) {
-            var confirmCriterion = document.createElement('button');
-            confirmCriterion.type = 'button';
-            confirmCriterion.className = 'goal-confirm-criterion';
-            confirmCriterion.textContent = t('goalConfirmCriterion');
-            confirmCriterion.addEventListener('click', function() {
-              confirmCriterion.disabled = true;
-              vscode.postMessage({ type: 'goalConfirmCriterion', criterionId: String(criterion.id || '') });
-            });
-            item.append(' ', confirmCriterion);
-          }
-          goalCardCriteria.append(item);
-        });
-      }
-      var reason = String(goal.waitingReason || goal.stopReason || goal.currentStep || '');
-      if (goalCardReason) { goalCardReason.textContent = reason; goalCardReason.classList.toggle('hidden', !reason); }
-      if (goalPause) { goalPause.classList.toggle('hidden', !goal.canPause); goalPause.disabled = state.isBusy && goal.status !== 'running'; }
-      if (goalResume) { goalResume.classList.toggle('hidden', !goal.canResume); goalResume.disabled = state.isBusy; }
-      if (goalStop) goalStop.classList.toggle('hidden', !goal.canStop);
-      if (goalClear) goalClear.classList.toggle('hidden', !goal.canClear);
-      if (goalAmendRow) goalAmendRow.classList.toggle('hidden', goal.canClear);
     }
 
     function isBackgroundActive() {
@@ -3849,7 +3784,7 @@ export function getScript(): string {
         transcript.append(loadOlder);
       }
 
-      if (!state.messages.length) {
+      if (!state.messages.length && !state.goal) {
         var empty = document.createElement('div');
         empty.className = 'transcript-empty';
         var icon = document.createElement('div');
@@ -4011,6 +3946,8 @@ export function getScript(): string {
         item.append(body);
         transcript.append(item);
       }
+
+      refreshGoalTranscriptCard();
 
       if (shouldStick) {
         transcript.scrollTop = transcript.scrollHeight;
