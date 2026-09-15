@@ -23,6 +23,7 @@ import './chatSessionStore.test';
 import './changeSet.test';
 import './config.test';
 import './contextEntryPoints.test';
+import './inputComposition.test';
 import './contextMaintenanceBenchmark.test';
 import './currentRunContext.test';
 import './draftEditRange.test';
