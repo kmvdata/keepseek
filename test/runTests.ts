@@ -68,6 +68,8 @@ import './skillReference.test';
 import './taskPlan.test';
 import './toolAuthorization.test';
 import './usageStats.test';
+import './usagePricingProjection.test';
+import './usageCostFormatting.test';
 import './validationAvailability.test';
 import './workspaceToolsSearch.test';
 import './startupPerformance.test';

@@ -354,11 +354,18 @@ export const usageFormattersFragment: WebviewFragment = {
         if (!Number.isFinite(number)) {
           return t('usagePendingValue');
         }
-        if (number > 0 && number < 0.000001) { return (currency || '') + '<0.000001'; }
-        return (currency || '') + number.toLocaleString(undefined, {
+        var truncated = truncateMetricCost(number);
+        return (currency || '') + truncated.toLocaleString(undefined, {
           minimumFractionDigits: 2,
-          maximumFractionDigits: 6
+          maximumFractionDigits: 2
         });
+      }
+
+      function truncateMetricCost(value) {
+        var parts = String(Math.max(0, value)).toLowerCase().split('e');
+        var exponent = parts.length > 1 ? Number(parts[1]) : 0;
+        var shifted = Number(parts[0] + 'e' + (exponent + 2));
+        return Math.trunc(shifted) / 100;
       }
 
       function formatMetricBalance(balance) {
@@ -392,4 +399,3 @@ export const usageFormattersFragment: WebviewFragment = {
 
 `.slice(1)
 };
-

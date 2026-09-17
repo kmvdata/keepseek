@@ -64,6 +64,7 @@ test('usage pricing has no unknown-model fallback', () => {
     peakInputPrice: 2,
     peakOutputPrice: 8
   };
+  assert.deepEqual(getConfiguredModelUsagePricing('deepseek-flash'), flashPricing);
   assert.deepEqual(getConfiguredModelUsagePricing('deepseek-v4.1-flash'), flashPricing);
   assert.deepEqual(getConfiguredModelUsagePricing('deepseek-v4-flash'), flashPricing);
   assert.deepEqual(getConfiguredModelUsagePricing('deepseek-v4-pro'), {

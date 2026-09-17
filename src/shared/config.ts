@@ -15,6 +15,7 @@ import {
 } from './modelProfiles';
 import { isOfficialDeepSeekSource } from '../accounts/sourceCapabilities';
 import { resolveProjectModel } from '../accounts/modelCatalog';
+import { getDeepSeekPricingModelId } from './deepSeekModels';
 
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
@@ -241,7 +242,13 @@ export function getConfiguredUsagePricingMap(): Record<string, UsageCostRates> {
 
 export function getConfiguredModelUsagePricing(modelId: string): UsageCostRates | undefined {
   const pricing = getConfiguredUsagePricingMap();
-  return pricing[modelId];
+  const exactModelId = modelId.trim();
+  const exact = pricing[exactModelId];
+  if (exact) {
+    return exact;
+  }
+  const canonicalModelId = getDeepSeekPricingModelId(exactModelId);
+  return canonicalModelId ? pricing[canonicalModelId] : undefined;
 }
 
 export function getConfiguredBalanceEndpointUrl(baseUrl: string): string {

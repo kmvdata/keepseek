@@ -9,6 +9,7 @@ import { createModelCatalog, findModelBySelection } from '../src/accounts/modelC
 import { ModelSourceService } from '../src/accounts/modelSourceService';
 import { ModelSourceStore } from '../src/accounts/accountStore';
 import { isOfficialDeepSeekSource } from '../src/accounts/sourceCapabilities';
+import { getConfiguredModelUsagePricing } from '../src/shared/config';
 import { getAgentRuntimeProfile } from '../src/shared/modelProfiles';
 import type { ModelSource } from '../src/accounts/types';
 
@@ -60,6 +61,31 @@ describe('model source catalog', () => {
     })]);
     assert.deepEqual(catalog.map((model) => model.id), ['discovered-model', 'manual-model']);
     assert.equal(catalog.some((model) => model.id === 'deepseek-v4-flash'), false);
+  });
+
+  it('recognizes the official deepseek-flash discovery alias for billing and the 1M runtime window', () => {
+    const catalog = createModelCatalog([createSource({
+      id: 'official',
+      baseUrl: 'https://api.deepseek.com/anthropic',
+      modelCache: {
+        fetchedAt: NOW,
+        models: [{ id: 'deepseek-flash' }, { id: 'deepseek-v4-pro' }]
+      }
+    })]);
+    const flash = catalog.find((model) => model.id === 'deepseek-flash');
+
+    assert.ok(flash);
+    assert.equal(flash.supportsBilling, true);
+    assert.equal(flash.contextWindowTokens, 1_000_000);
+    assert.equal(flash.maxOutputTokens, 384_000);
+    assert.equal(getConfiguredModelUsagePricing(flash.id)?.currency, '¥');
+    const profile = getAgentRuntimeProfile(flash, {
+      thinkingEnabled: true,
+      reasoningEffort: 'max'
+    });
+    assert.equal(profile.profileKind, 'deepseek-v4');
+    assert.equal(profile.contextWindowTokens, 1_000_000);
+    assert.equal(profile.maxTokens, 192_000);
   });
 
   it('hides disabled model IDs from normal catalogs while keeping the full settings inventory', () => {

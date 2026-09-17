@@ -19,8 +19,8 @@ KeepSeek 默认价格表（`src/shared/config.ts` 的 `DEFAULT_USAGE_PRICING`）
 
 | 模型 | 时段 | 缓存命中价（¥/M tokens） | 缓存未命中输入价（¥/M tokens） | 输出价（¥/M tokens） |
 |---|---|---|---|---|
-| `deepseek-v4.1-flash` / `deepseek-v4-flash` | 工作日高峰 | 0.04 | 2 | 8 |
-| `deepseek-v4.1-flash` / `deepseek-v4-flash` | 空闲/周末 | 0.02 | 1 | 4 |
+| `deepseek-flash` / `deepseek-v4.1-flash` / `deepseek-v4-flash` | 工作日高峰 | 0.04 | 2 | 8 |
+| `deepseek-flash` / `deepseek-v4.1-flash` / `deepseek-v4-flash` | 空闲/周末 | 0.02 | 1 | 4 |
 | `deepseek-v4-pro` | 工作日高峰 | 0.30 | 9 | 27 |
 | `deepseek-v4-pro` | 空闲/周末 | 0.15 | 4.5 | 13.5 |
 

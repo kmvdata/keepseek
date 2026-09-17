@@ -1,4 +1,5 @@
 import type { NonTextModelKind } from './types';
+import { getDeepSeekV4ModelKind } from './deepSeekModels';
 
 interface ModelTokenGuessRule {
   aliases: readonly string[];
@@ -175,10 +176,16 @@ const NON_TEXT_MODEL_RULES: readonly NonTextModelRule[] = [
 ];
 
 export function getGuessedContextWindowTokens(modelId: string | undefined): number | undefined {
+  if (getDeepSeekV4ModelKind(modelId)) {
+    return 1_000_000;
+  }
   return getGuessedTokens(modelId, MODEL_CONTEXT_WINDOW_GUESS_RULES);
 }
 
 export function getGuessedMaxOutputTokens(modelId: string | undefined): number | undefined {
+  if (getDeepSeekV4ModelKind(modelId)) {
+    return 384_000;
+  }
   return getGuessedTokens(modelId, MODEL_MAX_OUTPUT_GUESS_RULES);
 }
 

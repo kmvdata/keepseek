@@ -4,6 +4,8 @@ import {
   COMPRESSION_THRESHOLDS,
   DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS,
   DEFAULT_GENERIC_MAX_OUTPUT_TOKENS,
+  DEEPSEEK_FLASH_MODEL_ID,
+  DEEPSEEK_V41_FLASH_MODEL_ID,
   DEEPSEEK_V4_FLASH_MODEL_ID,
   DEEPSEEK_V4_PRO_MODEL_ID,
   getAgentRuntimeProfile,
@@ -51,6 +53,20 @@ test('runtime profiles follow model and thinking mode automatically', () => {
   assert.ok(proMax.contextCompression.summaryBudgetTokens > proHigh.contextCompression.summaryBudgetTokens);
   assert.equal(flashNonThinking.contextCompression.triggerRatio, 0.8);
   assert.equal(flashNonThinking.contextCompression.forceRatio, 0.92);
+
+  for (const modelId of [DEEPSEEK_FLASH_MODEL_ID, DEEPSEEK_V41_FLASH_MODEL_ID]) {
+    const alias = getAgentRuntimeProfile({
+      id: modelId,
+      label: modelId,
+      provider: 'deepseek'
+    }, {
+      thinkingEnabled: true,
+      reasoningEffort: 'max'
+    });
+    assert.equal(alias.profileKind, 'deepseek-v4', modelId);
+    assert.equal(alias.contextWindowTokens, 1_000_000, modelId);
+    assert.equal(alias.maxTokens, 192_000, modelId);
+  }
 });
 
 test('generic models use metadata first and never inherit DeepSeek output amplification', () => {

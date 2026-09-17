@@ -137,6 +137,7 @@ import {
   toSubagentProgressViewModel,
   upsertSubagentRunUsageSummary
 } from '../agent/subagentUsageStats';
+import { projectUsagePricingForDisplay } from '../agent/usagePricingProjection';
 import { SkillStore } from '../skills/skillStore';
 import { SkillCreator } from '../skills/skillCreator';
 import {
@@ -6215,7 +6216,22 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.isBusy ? liveContextUsage : undefined
     ) ?? computedContextUsage;
     const contextCompression = getAgentRuntimeProfile(selectedModel, this.agentSettings).contextCompression;
-    const lastTurnUsage = this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage;
+    const rawLastTurnUsage = this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage;
+    const displayUsage = projectUsagePricingForDisplay({
+      sessionUsageStats: activeSession.usageStats,
+      lastTurnUsage: rawLastTurnUsage,
+      resolvePricing: (identity) => {
+        const model = findModelBySelection(this.availableModels, {
+          sourceId: identity.sourceId,
+          modelId: identity.modelId
+        });
+        return model?.supportsBilling
+          ? getConfiguredModelUsagePricing(model.id)
+          : undefined;
+      }
+    });
+    const sessionUsageStats = displayUsage.sessionUsageStats;
+    const lastTurnUsage = displayUsage.lastTurnUsage;
     const contextPercent = contextUsage.usedPercent;
 
     const webviewChangeSets = this.changeSets.toWebviewState(activeSession.id);
@@ -6275,10 +6291,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         contextUsage,
         contextUsageSessionId: this.sessionStore.activeSessionId,
         usageMetrics: {
-          sessionUsageStats: activeSession.usageStats,
+          sessionUsageStats,
           lastTurnUsage,
           usageDetails: createUsageDetailsViewModel({
-            sessionUsageStats: activeSession.usageStats,
+            sessionUsageStats,
             lastTurnUsage,
             subagentUsageStats: activeSession.subagentUsageStats
           }),
