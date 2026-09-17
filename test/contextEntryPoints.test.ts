@@ -319,6 +319,13 @@ test('command menu owns project-scoped main and subagent model selection', async
   assert.match(inputScript, /type: 'setSubagentModel', mode: 'follow-main'/u);
   assert.match(inputScript, /type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId/u);
   assert.match(inputScript, /function renderCommandSubagentModel\(\)/u);
+  assert.match(inputScript, /\['research', 'review', 'proposal'\]\.forEach\(function\(profile\)/u);
+  assert.match(inputScript, /profileRow\.append\(profileLabel, profileButton\)/u);
+  assert.match(inputScript, /profileButton\.dataset\.subagentProfileToggle = profile/u);
+  assert.match(inputScript, /option\.dataset\.subagentProfile = profile/u);
+  assert.match(styles, /\.command-subagent-profile-row\s*\{/u);
+  assert.match(styles, /\.command-subagent-model-trigger\s*\{/u);
+  assert.doesNotMatch(styles, /\.command-subagent-profile-group\s*\{/u);
   assert.match(inputScript, /function isSubagentModelSelectionLocked\(\)/u);
   assert.match(settingsStoreSource, /getWorkspaceHash\(workspaceKey\.trim\(\) \|\| 'workspace:empty'\)/u);
   assert.match(providerSource, /new SubagentSettingsStore\([\s\S]*?this\.sessionStore\.workspaceKey/u);

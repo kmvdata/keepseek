@@ -46,6 +46,7 @@ export const commandSkillsBindingsFragment: WebviewFragment = {
           if (commandSkillListOpen) {
             commandModelListOpen = false;
             commandSubagentModelListOpen = false;
+            commandSubagentModelProfile = '';
             commandApprovalModeListOpen = false;
             vscode.postMessage({ type: 'requestSkills' });
           }
@@ -417,4 +418,3 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
 
 `.slice(1)
 };
-

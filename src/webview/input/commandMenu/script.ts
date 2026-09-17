@@ -87,6 +87,7 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         commandMenuOpen = false;
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
+        commandSubagentModelProfile = '';
         commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
         commandMenu.classList.add('hidden');
@@ -126,6 +127,12 @@ export const commandMenuImplementationFragment: WebviewFragment = {
             openCommandSubagentModelListAndFocus();
             return;
           }
+          var subagentProfileButton = target.closest('button[data-subagent-profile-toggle]');
+          if (subagentProfileButton) {
+            event.preventDefault();
+            openCommandSubagentProfileModelListAndFocus(subagentProfileButton.dataset.subagentProfileToggle || '');
+            return;
+          }
           if (target === commandApprovalModeSwitch) {
             event.preventDefault();
             openCommandApprovalModeListAndFocus();
@@ -148,7 +155,16 @@ export const commandMenuImplementationFragment: WebviewFragment = {
           }
           if (commandSubagentModelListOpen && commandSubagentModelList && (commandSubagentModelList.contains(target) || target === commandSubagentModelSwitch)) {
             event.preventDefault();
+            if (commandSubagentModelProfile && commandSubagentModelList.contains(target)) {
+              var activeProfile = commandSubagentModelProfile;
+              commandSubagentModelProfile = '';
+              renderCommandMenu();
+              var activeProfileButton = commandSubagentModelList.querySelector('button[data-subagent-profile-toggle="' + activeProfile + '"]');
+              if (activeProfileButton instanceof HTMLElement) { activeProfileButton.focus(); }
+              return;
+            }
             commandSubagentModelListOpen = false;
+            commandSubagentModelProfile = '';
             renderCommandMenu();
             if (commandSubagentModelSwitch) { commandSubagentModelSwitch.focus(); }
             return;
@@ -202,6 +218,7 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         if (!commandModelSwitch || isModelSelectionLocked()) { return; }
         commandModelListOpen = true;
         commandSubagentModelListOpen = false;
+        commandSubagentModelProfile = '';
         commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
         renderCommandMenu();
@@ -209,8 +226,9 @@ export const commandMenuImplementationFragment: WebviewFragment = {
       }
 
       function openCommandSubagentModelListAndFocus() {
-        if (!commandSubagentModelSwitch || isSubagentModelSelectionLocked()) { return; }
+        if (!commandSubagentModelSwitch) { return; }
         commandSubagentModelListOpen = true;
+        commandSubagentModelProfile = '';
         commandModelListOpen = false;
         commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
@@ -218,11 +236,26 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         focusFirstCommandMenuControl(commandSubagentModelList);
       }
 
+      function openCommandSubagentProfileModelListAndFocus(profile) {
+        if (!commandSubagentModelList || isSubagentModelSelectionLocked()
+          || !['research', 'review', 'proposal'].includes(profile)) { return; }
+        commandSubagentModelListOpen = true;
+        commandSubagentModelProfile = profile;
+        commandModelListOpen = false;
+        commandApprovalModeListOpen = false;
+        commandSkillListOpen = false;
+        renderCommandMenu();
+        var profileSection = commandSubagentModelList.querySelector('[data-subagent-profile-section="' + profile + '"]');
+        var dropdown = profileSection?.querySelector('.command-subagent-profile-dropdown');
+        focusFirstCommandMenuControl(dropdown);
+      }
+
       function openCommandApprovalModeListAndFocus() {
         if (!commandApprovalModeSwitch || isApprovalModeSelectionLocked()) { return; }
         commandApprovalModeListOpen = true;
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
+        commandSubagentModelProfile = '';
         commandSkillListOpen = false;
         renderCommandMenu();
         focusFirstCommandMenuControl(commandApprovalModeList);
@@ -233,6 +266,7 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         commandSkillListOpen = true;
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
+        commandSubagentModelProfile = '';
         commandApprovalModeListOpen = false;
         vscode.postMessage({ type: 'requestSkills' });
         renderCommandMenu();

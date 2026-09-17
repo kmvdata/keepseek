@@ -343,24 +343,93 @@ export const commandMenuStylesFragment: WebviewFragment = {
       padding: 2px 0 4px 12px;
     }
 
-    .command-subagent-profile-group {
+    .command-subagent-menu {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 4px;
-      padding: 4px;
-      border-bottom: 1px solid var(--vscode-widget-border, transparent);
+      gap: 2px;
+      padding: 2px 0 4px 12px;
     }
 
-    .command-subagent-profile-option {
-      min-width: 0;
+    .command-subagent-menu-chevron,
+    .command-subagent-profile-chevron {
+      display: inline-flex;
+      flex: 0 0 14px;
+      align-items: center;
       justify-content: center;
-      padding-inline: 6px;
-      font-size: 11px;
+      width: 14px;
+      height: 14px;
+      color: var(--vscode-descriptionForeground);
+      transition: transform 120ms ease;
     }
 
-    .command-subagent-profile-option[aria-pressed="true"] {
-      color: var(--vscode-button-foreground);
-      background: var(--vscode-button-background);
+    #commandSubagentModelSwitch[aria-expanded="true"] .command-subagent-menu-chevron,
+    .command-subagent-model-trigger[aria-expanded="true"] .command-subagent-profile-chevron {
+      transform: rotate(90deg);
+    }
+
+    .command-subagent-profile-section {
+      min-width: 0;
+      border-radius: 5px;
+    }
+
+    .command-subagent-profile-section + .command-subagent-profile-section {
+      border-top: 1px solid var(--vscode-widget-border, transparent);
+    }
+
+    .command-subagent-profile-row {
+      display: grid;
+      grid-template-columns: minmax(68px, 0.65fr) minmax(0, 1.35fr);
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      padding: 3px 4px 3px 8px;
+    }
+
+    .command-subagent-profile-label {
+      min-width: 0;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.25;
+    }
+
+    .command-subagent-model-trigger {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 5px;
+      min-width: 0;
+      min-height: 26px;
+      padding: 3px 5px 3px 7px;
+      border: 1px solid transparent;
+      border-radius: 5px;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+      font: inherit;
+      font-size: 11px;
+      line-height: 1.25;
+      text-align: right;
+      cursor: pointer;
+    }
+
+    .command-subagent-model-trigger:hover:not(:disabled),
+    .command-subagent-model-trigger:focus-visible:not(:disabled),
+    .command-subagent-model-trigger[aria-expanded="true"]:not(:disabled) {
+      color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
+      background: var(--vscode-quickInputList-focusBackground, var(--vscode-list-hoverBackground));
+      border-color: var(--vscode-focusBorder, transparent);
+      outline: none;
+    }
+
+    .command-subagent-model-trigger:disabled {
+      color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
+      cursor: default;
+    }
+
+    .command-subagent-profile-dropdown {
+      display: grid;
+      gap: 2px;
+      margin: 0 4px 4px 8px;
+      padding: 2px 0 2px 8px;
+      border-left: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
     }
 
     .command-model-source {
@@ -649,4 +718,3 @@ export const commandMenuStylesFragment: WebviewFragment = {
 
 `.slice(1)
 };
-

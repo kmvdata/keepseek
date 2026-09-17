@@ -168,9 +168,9 @@ export const commandMenuTemplateFragment: WebviewFragment = {
                 <span class="command-row-title" data-i18n="subagentModelTitle">子代理模型</span>
                 <span id="commandSubagentModelDescription" class="command-row-description" data-i18n="subagentModelHint">默认跟随主模型，可为当前项目单独选择</span>
               </span>
-              <span id="commandSubagentModelValue" class="command-row-value command-model-current">跟随主模型</span>
+              <span id="commandSubagentModelValue" class="command-row-value command-subagent-menu-chevron" aria-hidden="true">›</span>
             </button>
-            <div id="commandSubagentModelList" class="command-model-list hidden" role="group" aria-label="子代理模型" data-i18n-aria-label="subagentModelTitle"></div>
+            <div id="commandSubagentModelList" class="command-subagent-menu hidden" role="group" aria-label="子代理模型" data-i18n-aria-label="subagentModelTitle"></div>
             <button
               id="commandApprovalModeSwitch"
               type="button"
