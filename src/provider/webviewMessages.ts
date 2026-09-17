@@ -29,6 +29,13 @@ export type WebviewMessage =
   | { type: 'openGoalDialog'; objective?: string; sourceId?: string; modelId?: string; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'generateGoalDraft'; objective: string; sourceId: string; modelId: string }
   | { type: 'cancelGoalDraftGeneration' }
+  | { type: 'discardGoalProposal' }
+  | {
+      type: 'adoptGoalProposal'; proposalHash: string; selectedWorkItemIds: string[];
+      includeScope: string[]; excludeScope: string[]; requiredValidations: SafeNpmScript[];
+      maxActiveExecutionMs: number; maxCost: number; maxModelRequests: number; maxCompletionReviews: number;
+      resumePolicy: 'manual' | 'auto_on_activation'; sourceId: string; modelId: string;
+    }
   | {
       type: 'startGoal'; objective: string;
       acceptanceCriteria: Array<{ text: string; type: 'validation' | 'workspace_state' | 'artifact' | 'manual'; evidenceRequirement: string }>;
@@ -42,6 +49,7 @@ export type WebviewMessage =
   | { type: 'goalClear' }
   | { type: 'goalAmend'; instruction: string }
   | { type: 'goalConfirmCriterion'; criterionId: string }
+  | { type: 'openGoalTrace'; traceId: string }
   | { type: 'editUserPrompt'; messageId: string; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'abortPrompt' }
   | { type: 'continueAgentTask'; messageId: string }

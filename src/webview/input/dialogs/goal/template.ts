@@ -11,8 +11,12 @@ export const goalDialogTemplateFragment: WebviewFragment = {
           <div id="goalDraftGenerationStatus" class="goal-generation-status hidden" role="status" aria-live="polite"><span id="goalDraftGenerationText"></span><button id="goalCancelGeneration" type="button" class="secondary" data-i18n="goalCancelGeneration">取消生成</button></div>
           <label class="settings-field"><span class="settings-field-label" data-i18n="goalObjective">目标</span><textarea id="goalObjective" class="settings-input settings-textarea" maxlength="20000"></textarea></label>
           <div class="goal-generate-row"><span class="settings-dialog-desc" data-i18n="goalGeneratedHint">验收条件、证据要求、范围和验证项可由子代理模型自动生成。</span><button id="goalGenerateDraft" type="button" class="secondary" data-i18n="goalRegenerate">重新生成</button></div>
-          <label class="settings-field"><span class="settings-field-label" data-i18n="goalCriteria">验收条件（每行一项）</span><textarea id="goalCriteria" class="settings-input settings-textarea"></textarea></label>
-          <div id="goalGeneratedCriteria" class="goal-generated-criteria"></div>
+          <div class="goal-proposal-toolbar"><span id="goalProposalSelectionSummary" class="settings-field-label" aria-live="polite"></span><div><button id="goalSelectAll" type="button" class="secondary" data-i18n="goalSelectAll">全选</button><button id="goalSelectNone" type="button" class="secondary" data-i18n="goalSelectNone">取消全选</button></div></div>
+          <div id="goalProposalWorkItems" class="goal-proposal-work-items" role="group" aria-labelledby="goalProposalSelectionSummary"></div>
+          <div id="goalProposalLive" class="sr-only" role="status" aria-live="polite"></div>
+          <div id="goalApprovalModeNotice" class="goal-approval-mode-notice"></div>
+          <label class="settings-field hidden"><span class="settings-field-label" data-i18n="goalCriteria">验收条件（每行一项）</span><textarea id="goalCriteria" class="settings-input settings-textarea"></textarea></label>
+          <div id="goalGeneratedCriteria" class="goal-generated-criteria hidden"></div>
           <fieldset class="goal-validations"><legend data-i18n="goalValidations">Required validations</legend><label><input id="goalValidationCompile" type="checkbox"> compile</label><label><input id="goalValidationLint" type="checkbox"> lint</label><label><input id="goalValidationTest" type="checkbox"> test</label></fieldset>
           <details class="goal-advanced">
             <summary data-i18n="goalAdvancedSettings">高级设置：证据回退、范围、预算与恢复</summary>
@@ -42,8 +46,18 @@ export const goalDialogTemplateFragment: WebviewFragment = {
             <div id="goalManageReason" class="goal-manage-reason hidden"></div>
           </div>
           <div class="goal-manage-section">
+            <span class="settings-field-label" data-i18n="goalWorkItemsProgress">工作项</span>
+            <ol id="goalManageWorkItems" class="goal-manage-work-items"></ol>
+          </div>
+          <div class="goal-manage-section">
             <span class="settings-field-label" data-i18n="goalCriteriaProgress">验收条件</span>
             <ol id="goalManageCriteria" class="goal-manage-criteria"></ol>
+          </div>
+          <div class="goal-manage-section">
+            <span class="settings-field-label" data-i18n="goalTraceLogs">Goal 调试日志</span>
+            <div class="goal-trace-toolbar"><button id="goalToggleDebug" type="button" class="secondary" data-i18n="goalEnableDebug">为后续 attempt 开启调试</button></div>
+            <ol id="goalManageTraces" class="goal-manage-traces"></ol>
+            <div id="goalTraceEmpty" class="settings-dialog-desc" data-i18n="goalTraceEmpty">当前 Goal 还没有可查看的日志。</div>
           </div>
           <div class="goal-manage-section">
             <span class="settings-field-label" data-i18n="goalValidationProgress">必需验证</span>
@@ -61,9 +75,9 @@ export const goalDialogTemplateFragment: WebviewFragment = {
           <div id="goalAmendRow" class="goal-amend-row"><input id="goalAmendInput" type="text" maxlength="20000" data-i18n-placeholder="goalAmendPlaceholder" placeholder="追加修订（不重写原目标）"><button id="goalAmend" type="button" class="secondary" data-i18n="goalAmend">修订</button></div>
         </div>
         <div class="settings-dialog-footer">
-          <button id="goalCancel" type="button" class="secondary" data-i18n="cancel">取消</button>
+          <button id="goalCancel" type="button" class="secondary" data-i18n="goalDiscardProposal">放弃提案</button>
           <button id="goalClose" type="button" class="secondary hidden" data-i18n="close">关闭</button>
-          <button id="goalStart" type="button" data-i18n="goalStart">开始 Goal</button>
+          <button id="goalStart" type="button" data-i18n="goalAdoptSelected">采纳所选项并开始</button>
         </div>
       </div>
     </div>

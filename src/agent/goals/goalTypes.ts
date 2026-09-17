@@ -3,10 +3,12 @@ import type { RunCheckpoint } from '../runCheckpoint';
 import type { GoalProviderReplayStateV1 } from './goalReplay';
 
 export const GOAL_CONTRACT_VERSION = 1 as const;
+export const GOAL_CONTRACT_V2_VERSION = 2 as const;
 export const GOAL_RECORD_VERSION = 1 as const;
 export const GOAL_REQUEST_PROTOCOL_VERSION = 10 as const;
 export const GOAL_TOOL_SCHEMA_VERSION = 9 as const;
 export const MAX_GOAL_OBJECTIVE_CHARACTERS = 20_000;
+export const MAX_GOAL_PROPOSAL_WORK_ITEMS = 20;
 
 export type GoalCriterionType = 'validation' | 'workspace_state' | 'artifact' | 'manual';
 
@@ -15,6 +17,40 @@ export interface GoalAcceptanceCriterionV1 {
   text: string;
   type: GoalCriterionType;
   evidenceRequirement: string;
+}
+
+export type GoalProposalCriterionV1 = GoalAcceptanceCriterionV1;
+
+export interface GoalProposalWorkItemV1 {
+  id: string;
+  title: string;
+  detail: string;
+  acceptanceCriteria: GoalProposalCriterionV1[];
+  dependsOn: string[];
+}
+
+/** Immutable, provider-generated candidate. Runtime ids, timestamps, local
+ * paths, and user selection are deliberately excluded from its hash. */
+export interface GoalProposalV1 {
+  version: 1;
+  objective: string;
+  workItems: GoalProposalWorkItemV1[];
+  includeScope: string[];
+  excludeScope: string[];
+  requiredValidations: SafeNpmScript[];
+  proposalHash: string;
+}
+
+export type GoalWorkItemSelection = 'selected' | 'unselected';
+
+/** Host-only audit artifact. It is stored with the Goal snapshot and never
+ * projected into Provider requests or Goal replay. */
+export interface GoalProposalDecisionV1 {
+  version: 1;
+  proposal: GoalProposalV1;
+  proposalHash: string;
+  decisions: Array<{ workItemId: string; selection: GoalWorkItemSelection }>;
+  decidedAt: string;
 }
 
 export interface GoalBudgetV1 {
@@ -60,9 +96,44 @@ export interface GoalContractV1 {
   canonicalHash: string;
 }
 
+export interface GoalAcceptanceCriterionV2 extends GoalAcceptanceCriterionV1 {
+  workItemId: string;
+}
+
+export interface GoalWorkItemV2 {
+  id: string;
+  title: string;
+  detail: string;
+  acceptanceCriterionIds: string[];
+  dependsOn: string[];
+}
+
+/** New Goals use V2. V1 remains byte-for-byte readable and serializable. */
+export interface GoalContractV2 {
+  version: typeof GOAL_CONTRACT_V2_VERSION;
+  objective: string;
+  amendments: string[];
+  proposalHash: string;
+  workItems: GoalWorkItemV2[];
+  acceptanceCriteria: GoalAcceptanceCriterionV2[];
+  includeScope: string[];
+  excludeScope: string[];
+  requiredValidations: SafeNpmScript[];
+  completionPolicy: 'host_and_reviewer';
+  budgets: GoalBudgetV1;
+  resumePolicy: 'manual' | 'auto_on_activation';
+  main: GoalFrozenRuntimeV1;
+  completionReviewer: GoalCompletionReviewerV1;
+  requestProtocolVersion: typeof GOAL_REQUEST_PROTOCOL_VERSION;
+  toolSchemaVersion: typeof GOAL_TOOL_SCHEMA_VERSION;
+  canonicalHash: string;
+}
+
+export type GoalContract = GoalContractV1 | GoalContractV2;
+
 export interface GoalContractRevisionV1 {
   revision: number;
-  contract: GoalContractV1;
+  contract: GoalContract;
   amendment?: string;
   createdAt: string;
 }
@@ -131,10 +202,21 @@ export interface GoalCheckpointStateV1 {
   modelRequests: number;
   completionReviews: number;
   criteria: Array<{ id: string; status: GoalCriterionProgressV1['status']; evidenceManifestHash?: string }>;
+  workItems?: GoalWorkItemProgressV1[];
   validationMutationRevision: number;
   replayCursor?: GoalReplayCursorV1;
   consumedResultKeys: string[];
   completionDecisionRef?: string;
+}
+
+export interface GoalWorkItemProgressV1 {
+  version: 1;
+  workItemId: string;
+  status: TaskPlan['steps'][number]['status'];
+  acceptanceCriterionIds: string[];
+  detail?: string;
+  /** Present only when host evidence can bind a Goal pause to this item. */
+  pauseReason?: string;
 }
 
 export interface GoalSideEffectStateV1 {
@@ -184,6 +266,8 @@ export interface GoalRecordV1 {
   /** Host-only exact authorization keys. Never included in contract/replay/view model. */
   requiredExternalAuthorizationUris: string[];
   status: GoalStatus;
+  /** Present for V2 Goals only; complete selected/unselected audit stays host-side. */
+  proposalDecision?: GoalProposalDecisionV1;
   revisions: GoalContractRevisionV1[];
   currentRevision: number;
   currentContractHash: string;
@@ -206,6 +290,7 @@ export interface GoalRecordV1 {
   workspaceMutationRevision: number;
   validations: GoalValidationRecordV1[];
   criteria: GoalCriterionProgressV1[];
+  workItems?: GoalWorkItemProgressV1[];
   completionDecision?: GoalCompletionDecisionV1;
   candidateFinal?: {
     content: string;
@@ -264,6 +349,33 @@ export interface GoalViewModelV1 {
   canStop: boolean;
   canClear: boolean;
 }
+
+export interface GoalTraceSummaryV1 {
+  id: string;
+  kind: 'start' | 'resume' | 'attempt' | 'completion_review' | 'approval';
+  attempt: number;
+  createdAt: string;
+  level: 'metadata' | 'request' | 'full';
+}
+
+export interface GoalViewModelV2 extends Omit<GoalViewModelV1, 'version'> {
+  version: 2;
+  contractVersion: GoalContract['version'];
+  workItems: Array<{
+    id: string;
+    title: string;
+    detail: string;
+    selection: 'selected';
+    status: GoalWorkItemProgressV1['status'];
+    acceptanceCriterionIds: string[];
+    pauseReason?: string;
+  }>;
+  currentActivity?: { kind: 'task_plan_step' | 'goal_state'; text: string };
+  interruption?: Pick<GoalRuntimeInterruptionV1, 'reason' | 'previousStatus' | 'uncertainSideEffect'>;
+  traces: GoalTraceSummaryV1[];
+}
+
+export type GoalViewModel = GoalViewModelV1 | GoalViewModelV2;
 
 export function isGoalTerminalStatus(status: GoalStatus): status is GoalTerminalStatus {
   return status === 'completed' || status === 'failed' || status === 'stopped';

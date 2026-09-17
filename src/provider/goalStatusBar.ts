@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { GoalViewModelV1 } from '../agent/goals/goalTypes';
+import type { GoalViewModel } from '../agent/goals/goalTypes';
 
 export class GoalStatusBar implements vscode.Disposable {
   private readonly item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
@@ -9,7 +9,7 @@ export class GoalStatusBar implements vscode.Disposable {
     this.item.name = 'KeepSeek Goal';
   }
 
-  public update(goal: GoalViewModelV1 | undefined): void {
+  public update(goal: GoalViewModel | undefined): void {
     if (!goal) { this.item.hide(); return; }
     const icon = goal.status === 'completed' ? '$(check)'
       : goal.status === 'running' ? '$(play-circle)'

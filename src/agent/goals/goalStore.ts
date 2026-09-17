@@ -4,11 +4,14 @@ import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import * as vscode from 'vscode';
 import { stableStringify } from '../evidence/shaping';
 import { verifyGoalContract } from './goalContract';
+import { verifyGoalProposal } from './goalDraftGenerator';
 import {
   GOAL_RECORD_VERSION,
   isGoalActiveStatus,
   isGoalTerminalStatus,
-  type GoalContractV1,
+  type GoalContract,
+  type GoalContractV2,
+  type GoalProposalDecisionV1,
   type GoalJournalEventV1,
   type GoalRecordV1,
   type GoalStatus
@@ -99,7 +102,8 @@ export class GoalStore {
   public async create(input: {
     workspaceKey: string;
     sessionId: string;
-    contract: GoalContractV1;
+    contract: GoalContract;
+    proposalDecision?: GoalProposalDecisionV1;
     initialPrompt: GoalRecordV1['initialPrompt'];
     requiredExternalAuthorizationUris?: string[];
     now?: string;
@@ -107,6 +111,8 @@ export class GoalStore {
   }): Promise<GoalRecordV1> {
     await this.initialize();
     if (!verifyGoalContract(input.contract)) throw new Error('Goal contract hash is invalid.');
+    if (input.contract.version === 2) validateProposalDecision(input.contract, input.proposalDecision);
+    else if (input.proposalDecision) throw new Error('A V1 Goal cannot store a V2 proposal decision.');
     return this.serialize(async () => {
       const active = await this.loadWorkspaceUnlocked(input.workspaceKey);
       if (active && isGoalActiveStatus(active.status)) throw new Error('Only one active Goal is allowed in this workspace.');
@@ -121,6 +127,7 @@ export class GoalStore {
         initialPrompt: structuredClone(input.initialPrompt),
         requiredExternalAuthorizationUris: [...(input.requiredExternalAuthorizationUris ?? [])],
         status: 'preparing',
+        ...(input.proposalDecision ? { proposalDecision: structuredClone(input.proposalDecision) } : {}),
         revisions: [{ revision: 1, contract: structuredClone(input.contract), createdAt: now }],
         currentRevision: 1,
         currentContractHash: input.contract.canonicalHash,
@@ -133,6 +140,12 @@ export class GoalStore {
         criteria: input.contract.acceptanceCriteria.map((criterion) => ({
           criterionId: criterion.id, status: 'pending', evidenceRefs: []
         })),
+        ...(input.contract.version === 2 ? { workItems: input.contract.workItems.map((item) => ({
+          version: 1 as const,
+          workItemId: item.id,
+          status: 'pending' as const,
+          acceptanceCriterionIds: [...item.acceptanceCriterionIds]
+        })) } : {}),
         consumedResultKeys: [],
         requestIntents: [],
         journalShards: [],
@@ -429,6 +442,33 @@ function normalizeRecord(record: GoalRecordV1): void {
     || record.nextJournalSequence !== record.journalShards.length + 1) throw new Error('invalid Goal record');
   const contract = record.revisions.find((revision) => revision.revision === record.currentRevision)?.contract;
   if (!contract || !verifyGoalContract(contract) || contract.canonicalHash !== record.currentContractHash) throw new Error('invalid Goal contract revision');
+  if (contract.version === 2) {
+    validateProposalDecision(contract, record.proposalDecision);
+    if (!Array.isArray(record.workItems) || record.workItems.length !== contract.workItems.length
+      || record.workItems.some((progress, index) => progress.version !== 1
+        || progress.workItemId !== contract.workItems[index]?.id
+        || !['pending', 'in_progress', 'completed', 'blocked', 'failed', 'skipped'].includes(progress.status)
+        || !Array.isArray(progress.acceptanceCriterionIds)
+        || progress.acceptanceCriterionIds.length !== contract.workItems[index]!.acceptanceCriterionIds.length
+        || progress.acceptanceCriterionIds.some((id, criterionIndex) =>
+          id !== contract.workItems[index]!.acceptanceCriterionIds[criterionIndex]))) {
+      throw new Error('invalid Goal work item progress');
+    }
+  }
+}
+
+function validateProposalDecision(contract: GoalContractV2, decision: GoalProposalDecisionV1 | undefined): void {
+  if (!decision || decision.version !== 1 || decision.proposalHash !== contract.proposalHash
+    || decision.proposal.proposalHash !== contract.proposalHash || !verifyGoalProposal(decision.proposal)
+    || typeof decision.decidedAt !== 'string' || !Number.isFinite(Date.parse(decision.decidedAt))
+    || decision.decisions.length !== decision.proposal.workItems.length
+    || decision.decisions.some((item, index) => item.workItemId !== decision.proposal.workItems[index]?.id
+      || (item.selection !== 'selected' && item.selection !== 'unselected'))) {
+    throw new Error('invalid Goal proposal decision');
+  }
+  const selected = decision.decisions.filter((item) => item.selection === 'selected').map((item) => item.workItemId);
+  if (selected.length !== contract.workItems.length
+    || selected.some((id, index) => id !== contract.workItems[index]?.id)) throw new Error('Goal contract does not match selected proposal work items');
 }
 
 function normalizeJournalEvent(value: unknown, goalId: string, sequence: number): GoalJournalEventV1 {

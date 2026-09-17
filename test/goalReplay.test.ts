@@ -12,8 +12,8 @@ import {
 import { endpointHash, normalizeRunCheckpoint, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import { buildProviderRequestProjection } from '../src/agent/providerRequestProjection';
 import type { ChatMessage } from '../src/shared/types';
-import type { GoalRecordV1 } from '../src/agent/goals/goalTypes';
-import { contract, recordFor } from './goalDomain.test';
+import type { GoalContract, GoalRecordV1 } from '../src/agent/goals/goalTypes';
+import { contract, recordFor, v2Fixture } from './goalDomain.test';
 
 describe('Goal replay', () => {
   test('appends candidate and deterministic control without touching ChatSession messages', () => {
@@ -92,10 +92,15 @@ describe('Goal replay', () => {
 
   test('normalizes v1/v2 checkpoints and preserves bounded v3 Goal authority', () => {
     const v3 = checkpointFor('chat');
+    v3.goal!.workItems = [{ version: 1, workItemId: 'work-1', status: 'blocked', acceptanceCriterionIds: ['criterion-1'] }];
     const normalized = normalizeRunCheckpoint(v3);
     assert.equal(normalized?.version, 3);
     assert.equal(normalized?.goal?.contractHash, 'contract');
     assert.equal(normalized?.status, 'interrupted');
+    assert.deepEqual(normalized?.goal?.workItems, v3.goal?.workItems);
+    const invalid = structuredClone(v3);
+    invalid.goal!.workItems![0]!.status = 'running' as never;
+    assert.equal(normalizeRunCheckpoint(invalid), undefined);
     for (const version of [1, 2] as const) {
       const legacy = { ...v3, version, goal: undefined };
       assert.equal(normalizeRunCheckpoint(legacy)?.version, 2);
@@ -104,6 +109,20 @@ describe('Goal replay', () => {
 });
 
 describe('Goal completion hard checks and isolated reviewer', () => {
+  test('does not treat a selected skipped work item as completed without acceptance evidence', () => {
+    const fixture = v2Fixture('Verify skipped work item semantics.');
+    const record = recordFor(contract());
+    record.revisions = [{ revision: 1, contract: fixture.contract, createdAt: record.createdAt }];
+    record.currentContractHash = fixture.contract.canonicalHash;
+    record.proposalDecision = fixture.decision;
+    record.criteria = [{ criterionId: 'criterion-selected', status: 'pending', evidenceRefs: [] }];
+    record.workItems = [{ version: 1, workItemId: 'selected-work', status: 'skipped', acceptanceCriterionIds: ['criterion-selected'] }];
+    const service = new GoalCompletionReviewService(async () => { throw new Error('must not review'); });
+    const result = service.hardCheck(record, safety({ currentContractHash: fixture.contract.canonicalHash }));
+    assert.equal(result.passed, false);
+    assert.deepEqual(result.unmetCriterionIds, ['criterion-selected']);
+  });
+
   test('blocks unsettled side effects, stale validation, active subagents, and stale bindings', () => {
     const record = completedEvidenceRecord();
     const service = new GoalCompletionReviewService(async () => { throw new Error('must not call reviewer'); });
@@ -231,6 +250,6 @@ function settings() {
     contextRecentTurns: 4, contextForceRatio: 0.95 };
 }
 
-function requireHash(value: ReturnType<typeof contract>): string {
+function requireHash(value: GoalContract): string {
   return hashGoalContract(value);
 }

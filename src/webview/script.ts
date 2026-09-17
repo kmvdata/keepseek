@@ -45,6 +45,7 @@ export function getScript(): string {
       },
       backgroundRun: null,
       goal: null,
+      goalProposal: null,
       goalDefaults: {
         maxActiveExecutionMs: 0,
         maxCost: 0,
@@ -1286,8 +1287,12 @@ export function getScript(): string {
         }
       } else if (message.type === 'showGoalDialog') {
         window.keepseekGoalDialog?.show(message);
+        refreshGoalTranscriptCard();
       } else if (message.type === 'goalDraftGenerationState') {
         window.keepseekGoalDialog?.setGenerationState(message.status, message.message);
+      } else if (message.type === 'goalProposalDiscarded') {
+        state.goalProposal = null;
+        refreshGoalTranscriptCard();
       } else if (message.type === 'goalActionFeedback') {
         window.keepseekGoalDialog?.setActionFeedback(message.status, message.message);
       } else if (message.type === 'skillDraftCreated') {

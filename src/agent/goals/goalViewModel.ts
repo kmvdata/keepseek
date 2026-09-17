@@ -1,17 +1,46 @@
 import type { ApprovalMode } from '../../shared/types';
-import { isGoalTerminalStatus, type GoalRecordV1, type GoalViewModelV1 } from './goalTypes';
+import {
+  isGoalTerminalStatus,
+  type GoalRecordV1,
+  type GoalTraceSummaryV1,
+  type GoalViewModelV2
+} from './goalTypes';
 
-export function createGoalViewModel(record: GoalRecordV1 | undefined, approvalMode: ApprovalMode): GoalViewModelV1 | undefined {
+export function createGoalViewModel(
+  record: GoalRecordV1 | undefined,
+  approvalMode: ApprovalMode,
+  traces: readonly GoalTraceSummaryV1[] = []
+): GoalViewModelV2 | undefined {
   if (!record) return undefined;
   const contract = record.revisions.find((revision) => revision.revision === record.currentRevision)?.contract;
   if (!contract) return undefined;
   const taskPlan = record.runCheckpoint?.taskPlan ?? record.candidateFinal?.taskPlan;
+  const currentStep = taskPlan?.steps.find((step) => step.id === taskPlan.currentStepId)?.title;
+  const currentActivity = currentStep
+    ? { kind: 'task_plan_step' as const, text: currentStep }
+    : (record.waitingReason || record.stopReason)
+      ? { kind: 'goal_state' as const, text: record.waitingReason ?? record.stopReason! }
+      : undefined;
+  const workItems = contract.version === 2 ? contract.workItems.map((item) => {
+    const progress = record.workItems?.find((entry) => entry.workItemId === item.id);
+    return {
+      id: item.id,
+      title: item.title,
+      detail: item.detail,
+      selection: 'selected' as const,
+      status: progress?.status ?? 'pending' as const,
+      acceptanceCriterionIds: [...item.acceptanceCriterionIds],
+      pauseReason: progress?.pauseReason
+    };
+  }) : [];
   return {
-    version: 1,
+    version: 2,
+    contractVersion: contract.version,
     id: record.id,
     status: record.status,
     objective: contract.objective,
     revision: record.currentRevision,
+    workItems,
     criteria: contract.acceptanceCriteria.map((criterion) => ({
       id: criterion.id,
       text: criterion.text,
@@ -24,7 +53,8 @@ export function createGoalViewModel(record: GoalRecordV1 | undefined, approvalMo
       status: record.validations.filter((validation) => validation.script === script)
         .sort((left, right) => right.completedAt.localeCompare(left.completedAt))[0]?.status ?? 'pending'
     })),
-    currentStep: taskPlan?.steps.find((step) => step.id === taskPlan.currentStepId)?.title,
+    currentStep,
+    currentActivity,
     activeExecutionMs: record.usage.activeExecutionMs,
     maxActiveExecutionMs: contract.budgets.maxActiveExecutionMs,
     modelRequests: record.usage.modelRequests,
@@ -38,6 +68,12 @@ export function createGoalViewModel(record: GoalRecordV1 | undefined, approvalMo
     resumePolicy: contract.resumePolicy,
     waitingReason: record.waitingReason,
     stopReason: record.stopReason,
+    interruption: record.lastInterruption ? {
+      reason: record.lastInterruption.reason,
+      previousStatus: record.lastInterruption.previousStatus,
+      uncertainSideEffect: record.lastInterruption.uncertainSideEffect
+    } : undefined,
+    traces: traces.slice(-100).map((trace) => ({ ...trace })),
     canPause: record.status === 'running' || record.status === 'pausing',
     canResume: record.status === 'paused' || record.status === 'interrupted' || record.status === 'waiting_for_user' || record.status === 'needs_attention',
     canStop: !isGoalTerminalStatus(record.status),
@@ -50,7 +86,8 @@ export function createGoalViewModel(record: GoalRecordV1 | undefined, approvalMo
  * be omitted by the transport and would leave stale client state behind. */
 export function createGoalViewModelPayload(
   record: GoalRecordV1 | undefined,
-  approvalMode: ApprovalMode
-): GoalViewModelV1 | null {
-  return createGoalViewModel(record, approvalMode) ?? null;
+  approvalMode: ApprovalMode,
+  traces: readonly GoalTraceSummaryV1[] = []
+): GoalViewModelV2 | null {
+  return createGoalViewModel(record, approvalMode, traces) ?? null;
 }

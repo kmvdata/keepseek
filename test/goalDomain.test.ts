@@ -4,11 +4,14 @@ import { describe, test } from 'node:test';
 import {
   amendGoalContract,
   createGoalContract,
+  createGoalContractV2,
   formatGoalProviderTail,
   hashGoalContract,
   serializeGoalContract,
+  serializeGoalContractV1,
   serializeGoalProviderContract
 } from '../src/agent/goals/goalContract';
+import { createGoalProposalDecision, parseGoalDraftSuggestion } from '../src/agent/goals/goalDraftGenerator';
 import { canTransitionGoal, transitionGoal } from '../src/agent/goals/goalStateMachine';
 import type { GoalContractV1, GoalRecordV1 } from '../src/agent/goals/goalTypes';
 import { createGoalViewModel, createGoalViewModelPayload } from '../src/agent/goals/goalViewModel';
@@ -40,6 +43,24 @@ describe('Goal canonical contract', () => {
     assert.equal(amended.objective, original.objective);
     assert.deepEqual(amended.amendments, ['Also keep the public API stable.']);
     assert.notEqual(amended.canonicalHash, original.canonicalHash);
+  });
+
+  test('keeps the V1 serializer on its frozen byte path', () => {
+    const value = contract();
+    assert.equal(serializeGoalContractV1(value), serializeGoalContract(value));
+    assert.equal(value.canonicalHash, '6acbb5a8bcbdce6b1f1613b58a83b1bbcdbf5fa6e51cf24abd06534e87730c8a');
+  });
+
+  test('V2 serializes selected work items stably and excludes unselected proposal text from Provider bytes', () => {
+    const first = v2Contract('Line one\r\nLine two');
+    const second = v2Contract('Line one\nLine two');
+    assert.equal(serializeGoalContract(first), serializeGoalContract(second));
+    assert.equal(first.canonicalHash, second.canonicalHash);
+    const provider = serializeGoalProviderContract(first);
+    assert.match(provider, /selected-work/u);
+    assert.doesNotMatch(provider, /unselected-secret/u);
+    assert.doesNotMatch(provider, /decidedAt|traceUri|runtime-profile-secret|review-source/u);
+    assert.match(formatGoalProviderTail(first), /keepseek_goal_contract_v2/u);
   });
 });
 
@@ -114,6 +135,27 @@ describe('Goal state and protocol boundary', () => {
     Object.assign(state, serializedPatch);
     assert.equal(state.goal, null);
   });
+
+  test('keeps selected work-item progress independent from the dynamic TaskPlan', () => {
+    const fixture = v2Fixture('Track Goal work independently.');
+    const record = recordFor(contract());
+    record.revisions = [{ revision: 1, contract: fixture.contract, createdAt: record.createdAt }];
+    record.currentContractHash = fixture.contract.canonicalHash;
+    record.proposalDecision = fixture.decision;
+    record.criteria = [{ criterionId: 'criterion-selected', status: 'pending', evidenceRefs: [] }];
+    record.workItems = [{ version: 1, workItemId: 'selected-work', status: 'pending', acceptanceCriterionIds: ['criterion-selected'] }];
+    record.runCheckpoint = {
+      taskPlan: {
+        currentStepId: 'runtime-step',
+        steps: [{ id: 'runtime-step', title: 'Read current files', status: 'in_progress' }]
+      }
+    } as never;
+    const view = createGoalViewModel(record, 'model_review');
+    assert.equal(view?.currentActivity?.kind, 'task_plan_step');
+    assert.equal(view?.workItems[0]?.status, 'pending');
+    assert.equal(view?.workItems[0]?.selection, 'selected');
+    assert.equal(view?.approvalMode, 'model_review');
+  });
 });
 
 export function contract(overrides: { objective?: string } = {}): GoalContractV1 {
@@ -147,4 +189,40 @@ export function recordFor(value: GoalContractV1): GoalRecordV1 {
     sideEffects: { changeSetIds: [], draftRunIds: [], approvalIds: [], pendingToolCallIds: [], uncertainToolCallIds: [], subagentIds: [] },
     createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z'
   };
+}
+
+export function v2Contract(objective: string) {
+  return v2Fixture(objective).contract;
+}
+
+export function v2Fixture(objective: string) {
+  const proposal = parseGoalDraftSuggestion(JSON.stringify({
+    version: 1,
+    objective,
+    workItems: [
+      {
+        id: 'selected-work', title: 'Selected work', detail: 'Visible selected detail', dependsOn: [],
+        acceptanceCriteria: [{ id: 'criterion-selected', text: 'Selected result exists', type: 'workspace_state', evidenceRequirement: 'Workspace evidence' }]
+      },
+      {
+        id: 'unselected-work', title: 'unselected-secret', detail: 'unselected-secret-detail', dependsOn: [],
+        acceptanceCriteria: [{ id: 'criterion-unselected', text: 'unselected-secret-criterion', type: 'manual', evidenceRequirement: 'unselected-secret-evidence' }]
+      }
+    ],
+    includeScope: ['src'], excludeScope: ['out'], requiredValidations: ['compile']
+  }), ['compile'], objective.replace(/\r\n?/gu, '\n'));
+  const decision = createGoalProposalDecision(proposal, ['selected-work'], '2026-01-01T00:00:00.000Z');
+  const value = createGoalContractV2({
+    decision,
+    budgets: { maxActiveExecutionMs: 60_000, maxCost: 1, maxModelRequests: 10, maxCompletionReviews: 2 },
+    resumePolicy: 'manual',
+    main: {
+      sourceId: 'source-secret', modelId: 'model', provider: 'openai-compatible',
+      endpointHash: 'endpoint-secret', runtimeProfile: 'runtime-profile-secret'
+    },
+    completionReviewer: {
+      mode: 'fixed', sourceId: 'review-source', modelId: 'review-model', provider: 'openai-compatible', endpointHash: 'review-endpoint'
+    }
+  });
+  return { proposal, decision, contract: value };
 }

@@ -19,8 +19,10 @@ import { classifyGoalRecovery, type GoalRecoveryContext } from './goalRecovery';
 import { GoalStoreConcurrencyError, type GoalStore } from './goalStore';
 import {
   isGoalTerminalStatus,
-  type GoalContractV1,
+  type GoalContract,
+  type GoalProposalDecisionV1,
   type GoalRecordV1,
+  type GoalRuntimeInterruptionV1,
   type GoalStatus,
   type GoalValidationRecordV1
 } from './goalTypes';
@@ -39,6 +41,7 @@ export interface GoalCoordinatorHooks {
   onCancelRuntime?(): void;
   onReleaseTask?(taskId: string): void;
   onLeaseWait?(retryAfterMs: number): void;
+  onTraceEvent?(kind: 'completion_review', record: GoalRecordV1, event: Record<string, unknown>): Promise<void> | void;
 }
 
 /** Durable event-driven Goal state machine. Every dispatch, review, and control
@@ -99,14 +102,16 @@ export class GoalCoordinator {
   }
 
   public async create(
-    contract: GoalContractV1,
+    contract: GoalContract,
     sessionId: string,
     initialPrompt: GoalRecordV1['initialPrompt'],
-    requiredExternalAuthorizationUris: string[] = []
+    requiredExternalAuthorizationUris: string[] = [],
+    proposalDecision?: GoalProposalDecisionV1
   ): Promise<GoalRecordV1> {
     this.ensureUsable();
     this.record = await this.store.create({
-      workspaceKey: this.lease.workspaceKey, sessionId, contract, initialPrompt, requiredExternalAuthorizationUris
+      workspaceKey: this.lease.workspaceKey, sessionId, contract, initialPrompt, requiredExternalAuthorizationUris,
+      proposalDecision
     });
     this.record = await this.store.append(this.record, 'goal_created', {
       contractHash: contract.canonicalHash, revision: 1, resumePolicy: contract.resumePolicy
@@ -264,6 +269,9 @@ export class GoalCoordinator {
     next.completionDecision = undefined;
     next.validations = [];
     next.criteria = amended.acceptanceCriteria.map((criterion) => ({ criterionId: criterion.id, status: 'pending', evidenceRefs: [] }));
+    if (amended.version === 2) next.workItems = amended.workItems.map((item) => ({
+      version: 1, workItemId: item.id, status: 'pending', acceptanceCriterionIds: [...item.acceptanceCriterionIds]
+    }));
     if (next.runCheckpoint?.goal) {
       next.runCheckpoint.goal.contractHash = amended.canonicalHash;
       next.runCheckpoint.goal.revision = next.currentRevision;
@@ -304,6 +312,7 @@ export class GoalCoordinator {
     next.completionDecision = undefined;
     next.criteria = next.criteria.map((criterion) => ({ ...criterion, status: 'pending', evidenceManifestHash: undefined,
       detail: `Invalidated by workspace mutation: ${reason.slice(0, 300)}` }));
+    syncGoalWorkItemProgress(next);
     syncGoalCheckpoint(next);
     this.record = await this.store.append(next, 'workspace_mutated', {
       mutationRevision: next.workspaceMutationRevision, reason: reason.slice(0, 500)
@@ -334,6 +343,7 @@ export class GoalCoordinator {
     if (!criterion.evidenceRefs.includes(evidenceRef)) criterion.evidenceRefs.push(evidenceRef);
     criterion.evidenceManifestHash = evidenceManifestHash;
     criterion.status = 'satisfied';
+    syncGoalWorkItemProgress(next);
     syncGoalCheckpoint(next);
     this.record = await this.store.append(next, 'criterion_evidence_recorded', { criterionId, evidenceManifestHash });
     this.emit();
@@ -432,6 +442,7 @@ export class GoalCoordinator {
       ...criterion, status: 'pending', evidenceManifestHash: undefined,
       detail: `Invalidated: ${reason.slice(0, 300)}`
     }));
+    syncGoalWorkItemProgress(next);
     syncGoalCheckpoint(next);
     this.record = await this.store.append(next, 'goal_evidence_invalidated', { reason: reason.slice(0, 500) });
     this.emit();
@@ -537,7 +548,11 @@ export class GoalCoordinator {
     };
   }
 
-  public async interrupt(reason: string): Promise<void> {
+  public async interrupt(
+    reason: string,
+    classification?: GoalRuntimeInterruptionV1['reason'],
+    uncertainSideEffect = false
+  ): Promise<void> {
     let record = this.requireRecord();
     if (isGoalTerminalStatus(record.status)) return;
     this.lifecycleGeneration += 1;
@@ -546,8 +561,21 @@ export class GoalCoordinator {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const next = transitionGoal(record, 'interrupted', { reason });
       next.lease = undefined;
+      if (classification) {
+        next.lastInterruption = {
+          runtimeId: randomUUID(),
+          previousStatus: record.status,
+          reason: classification,
+          uncertainSideEffect,
+          recordedAt: next.updatedAt
+        };
+      }
       try {
-        this.record = await this.store.append(next, 'goal_interrupted', { reason: reason.slice(0, 1_000) });
+        this.record = await this.store.append(next, 'goal_interrupted', {
+          reason: reason.slice(0, 1_000),
+          classification,
+          uncertainSideEffect
+        });
         break;
       } catch (error) {
         if (!(error instanceof GoalStoreConcurrencyError) || attempt === 3) throw error;
@@ -666,6 +694,8 @@ export class GoalCoordinator {
     const intent = next.requestIntents.at(-1);
     if (intent) intent.status = 'settled';
     if (result.response.goalOutcome !== 'candidate_final') {
+      syncGoalWorkItemProgress(next);
+      syncGoalCheckpoint(next);
       const waitingStatus: GoalStatus = result.response.draftEdits.length ? 'waiting_for_apply'
         : (result.response.draftRuns?.length ?? 0) > 0 ? 'waiting_for_command'
           : result.response.approvalContinuationRequired ? 'waiting_for_authorization' : 'waiting_for_user';
@@ -692,7 +722,7 @@ export class GoalCoordinator {
         progress.evidenceManifestHash = manifestHash;
       }
     }
-    syncGoalCheckpoint(next);
+    syncGoalWorkItemProgress(next);
     next.candidateFinal = {
       content: result.response.message,
       contentHash: sha256(result.response.message),
@@ -701,6 +731,7 @@ export class GoalCoordinator {
       providerReplay: result.response.providerReplay
     };
     next.runCheckpoint = checkpointCopy(result.checkpoint);
+    syncGoalCheckpoint(next);
     this.record = await this.store.append(next, 'candidate_final_persisted', {
       candidateHash: next.candidateFinal.contentHash, evidenceManifestHash: manifestHash,
       mutationRevision: next.workspaceMutationRevision
@@ -747,6 +778,11 @@ export class GoalCoordinator {
           });
         }
       });
+    } catch (error) {
+      await Promise.resolve(this.hooks.onTraceEvent?.('completion_review', this.requireRecord(), {
+        status: 'failed', reason: error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000)
+      })).catch(() => undefined);
+      throw error;
     } finally {
       await phase.finish();
     }
@@ -775,6 +811,13 @@ export class GoalCoordinator {
       await this.moveToAttention('Goal completion reviewer usage could not be priced; the positive cost limit is fail-closed.');
       return;
     }
+    await Promise.resolve(this.hooks.onTraceEvent?.('completion_review', this.requireRecord(), {
+      status: result.status,
+      decision: result.decision?.decision,
+      unmetCriterionCount: result.decision?.unmetCriterionIds.length ?? result.hardCheck.unmetCriterionIds.length,
+      incompleteValidationCount: result.hardCheck.incompleteValidations.length,
+      blockerCount: result.hardCheck.blockers.length
+    })).catch(() => undefined);
     await this.commitReviewResult(result, safety.evidenceManifestHash);
   }
 
@@ -956,7 +999,7 @@ export class GoalCoordinator {
   private emit(): void { this.hooks.onStateChanged?.(this.current); }
 }
 
-function currentContract(record: GoalRecordV1): GoalContractV1 {
+function currentContract(record: GoalRecordV1): GoalContract {
   const contract = record.revisions.find((revision) => revision.revision === record.currentRevision)?.contract;
   if (!contract) throw new Error('Current Goal contract is missing.');
   return contract;
@@ -999,6 +1042,7 @@ function syncGoalCheckpoint(record: GoalRecordV1): void {
   goal.criteria = record.criteria.map(({ criterionId, status, evidenceManifestHash }) => ({
     id: criterionId, status, evidenceManifestHash
   }));
+  goal.workItems = record.workItems?.map((item) => structuredClone(item));
   goal.validationMutationRevision = record.workspaceMutationRevision;
   record.replayCursor = createGoalCheckpointReplayCursor(checkpoint) ?? record.replayCursor;
   goal.replayCursor = record.replayCursor ? structuredClone(record.replayCursor) : undefined;
@@ -1008,4 +1052,28 @@ function syncGoalCheckpoint(record: GoalRecordV1): void {
   checkpoint.usedMs = Math.max(checkpoint.usedMs, record.usage.activeExecutionMs);
   checkpoint.usedCostByCurrency = { ...record.usage.costByCurrency };
   checkpoint.modelRequests = record.usage.modelRequests;
+}
+
+/** Work-item status is derived only from persisted criterion evidence. The
+ * dynamic TaskPlan remains independent and never selects a business item by
+ * textual similarity or model assertion. */
+function syncGoalWorkItemProgress(record: GoalRecordV1): void {
+  if (!record.workItems) return;
+  for (const item of record.workItems) {
+    const criteria = item.acceptanceCriterionIds.map((id) => record.criteria.find((criterion) => criterion.criterionId === id));
+    if (criteria.some((criterion) => criterion?.status === 'blocked')) {
+      item.status = 'blocked';
+      item.detail = 'One or more acceptance criteria are blocked.';
+    } else if (criteria.length > 0 && criteria.every((criterion) => criterion?.status === 'satisfied')) {
+      item.status = 'completed';
+      item.detail = undefined;
+    } else if (criteria.some((criterion) => criterion?.status === 'satisfied')) {
+      item.status = 'in_progress';
+      item.detail = 'Some acceptance evidence is satisfied.';
+    } else {
+      item.status = 'pending';
+      item.detail = undefined;
+    }
+    item.pauseReason = undefined;
+  }
 }

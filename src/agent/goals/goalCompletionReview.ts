@@ -4,7 +4,7 @@ import type { KeepseekLanguage } from '../../shared/i18n';
 import type { KeepseekModel, SafeNpmScript, TaskPlan, UsageEvent } from '../../shared/types';
 import { requestApprovalReviewText } from '../../approvals/oneShotTextRequest';
 import { serializeGoalProviderContract } from './goalContract';
-import type { GoalCompletionDecisionV1, GoalContractV1, GoalRecordV1 } from './goalTypes';
+import type { GoalCompletionDecisionV1, GoalContract, GoalRecordV1 } from './goalTypes';
 
 export interface GoalCompletionSafetySnapshot {
   currentContractHash: string;
@@ -162,7 +162,7 @@ export class GoalCompletionReviewService {
   }
 }
 
-function currentContract(record: GoalRecordV1): GoalContractV1 {
+function currentContract(record: GoalRecordV1): GoalContract {
   const contract = record.revisions.find((revision) => revision.revision === record.currentRevision)?.contract;
   if (!contract) throw new Error('Current Goal contract is missing.');
   return contract;
@@ -189,7 +189,7 @@ function createDecision(
   };
 }
 
-function parseReviewerOutput(raw: string, contract: GoalContractV1): {
+function parseReviewerOutput(raw: string, contract: GoalContract): {
   decision: 'complete' | 'continue' | 'blocked'; reason: string; unmetCriterionIds: string[]; nextStep: string; requiredInput?: string;
 } | undefined {
   try {
@@ -212,7 +212,7 @@ function parseReviewerOutput(raw: string, contract: GoalContractV1): {
   } catch { return undefined; }
 }
 
-function canUseUnavailableFallback(contract: GoalContractV1): boolean {
+function canUseUnavailableFallback(contract: GoalContract): boolean {
   return contract.acceptanceCriteria.every((criterion) => criterion.type !== 'manual');
 }
 

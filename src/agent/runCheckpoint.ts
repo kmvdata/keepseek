@@ -158,6 +158,13 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
     if (copy.version === 3 && (!copy.goal || copy.goal.version !== 1 || !copy.goal.contractHash
       || !Number.isSafeInteger(copy.goal.revision) || copy.goal.revision < 1
       || !Array.isArray(copy.goal.criteria) || !Array.isArray(copy.goal.consumedResultKeys))) return undefined;
+    if (copy.version === 3 && copy.goal?.workItems !== undefined
+      && (!Array.isArray(copy.goal.workItems) || copy.goal.workItems.length > 20
+        || copy.goal.workItems.some((item) => item.version !== 1
+          || typeof item.workItemId !== 'string' || !item.workItemId
+          || !['pending', 'in_progress', 'completed', 'blocked', 'failed', 'skipped'].includes(item.status)
+          || !Array.isArray(item.acceptanceCriterionIds)
+          || item.acceptanceCriterionIds.some((id) => typeof id !== 'string' || !id)))) return undefined;
     copy.maxCost ??= 0;
     copy.usedCostByCurrency ??= {};
     if (copy.status === 'running') {

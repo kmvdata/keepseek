@@ -18,7 +18,7 @@ import {
 import { GoalStore, GoalStoreCorruptionError } from '../src/agent/goals/goalStore';
 import { transitionGoal } from '../src/agent/goals/goalStateMachine';
 import { AgentInterruptedError, type RunCheckpoint } from '../src/agent/runCheckpoint';
-import { contract } from './goalDomain.test';
+import { contract, v2Fixture } from './goalDomain.test';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -26,6 +26,37 @@ afterEach(async () => {
 });
 
 describe('GoalStore', () => {
+  test('atomically persists and restores a V2 proposal decision with initial work-item progress', async () => {
+    const root = await tempRoot();
+    const store = new GoalStore(vscode.Uri.file(root));
+    const fixture = v2Fixture('Implement V2 Goal persistence.');
+    const record = await store.create({
+      id: 'goal-v2', workspaceKey: 'workspace', sessionId: 'session', contract: fixture.contract,
+      proposalDecision: fixture.decision,
+      initialPrompt: { visibleContent: 'Goal: V2', expandedContent: 'Goal: V2', providerContent: 'Goal: V2\nTAIL' },
+      now: '2026-01-01T00:00:00.000Z'
+    });
+    assert.equal(record.currentRevision, 1);
+    assert.equal(record.proposalDecision?.decisions.some((item) => item.selection === 'unselected'), true);
+    assert.deepEqual(record.workItems?.map((item) => [item.workItemId, item.status]), [['selected-work', 'pending']]);
+    const restored = await new GoalStore(vscode.Uri.file(root)).loadWorkspace('workspace');
+    assert.deepEqual(restored?.proposalDecision, record.proposalDecision);
+    assert.deepEqual(restored?.workItems, record.workItems);
+  });
+
+  test('rejects V2 creation when selection audit does not match the executable contract', async () => {
+    const root = await tempRoot();
+    const store = new GoalStore(vscode.Uri.file(root));
+    const fixture = v2Fixture('Implement V2 Goal persistence.');
+    const tampered = structuredClone(fixture.decision);
+    tampered.decisions[0]!.selection = 'unselected';
+    await assert.rejects(() => store.create({
+      id: 'goal-v2-invalid', workspaceKey: 'workspace', sessionId: 'session', contract: fixture.contract,
+      proposalDecision: tampered,
+      initialPrompt: { visibleContent: 'Goal: V2', expandedContent: 'Goal: V2', providerContent: 'Goal: V2\nTAIL' }
+    }), /selected proposal work items/u);
+  });
+
   test('atomically persists one active Goal and ordered journal shards', async () => {
     const root = await tempRoot();
     const store = new GoalStore(vscode.Uri.file(root));
@@ -151,6 +182,25 @@ describe('GoalStore', () => {
 });
 
 describe('Goal lease and recovery', () => {
+  test('ordinary lifecycle interruption persists its explicit classification', async () => {
+    const root = await tempRoot();
+    const store = new GoalStore(vscode.Uri.file(root));
+    const lease = { workspaceKey: 'workspace', release: async () => undefined } as unknown as GoalLease;
+    const coordinator = new GoalCoordinator(store, lease, new GoalCompletionReviewService(), {
+      dispatchAttempt: async () => undefined,
+      completionSafety: async () => { throw new Error('not reached'); },
+      completionReviewerContext: async () => { throw new Error('not reached'); }
+    });
+    await coordinator.create(contract(), 'session', {
+      visibleContent: 'Goal', expandedContent: 'Goal', providerContent: 'Goal\nTAIL'
+    });
+    await coordinator.interrupt('Approval mode changed.', 'approval_mode_changed');
+    assert.equal(coordinator.current?.status, 'interrupted');
+    assert.equal(coordinator.current?.lastInterruption?.reason, 'approval_mode_changed');
+    assert.equal(coordinator.current?.lastInterruption?.previousStatus, 'preparing');
+    assert.equal((await store.loadWorkspace('workspace'))?.lastInterruption?.reason, 'approval_mode_changed');
+  });
+
   test('stop and clear release the workspace slot so a new session can create a fresh Goal', async () => {
     const root = await tempRoot();
     const store = new GoalStore(vscode.Uri.file(root));

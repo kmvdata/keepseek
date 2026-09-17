@@ -22,6 +22,7 @@ import './goalPersistence.test';
 import './goalDraftGenerator.test';
 import './goalViewProjection.test';
 import './goalReplay.test';
+import './goalTraceIndex.test';
 import './behaviorEvaluation.test';
 import './cacheByteStability.test';
 import './chatSessionStore.test';

@@ -5,7 +5,7 @@ import type { AnthropicMessage, AnthropicSystemTextBlock } from '../providers/an
 import { checkpointCopy, type RunCheckpoint } from '../runCheckpoint';
 import type { ProviderNativeRunState } from '../runner';
 import { stableStringify } from '../evidence/shaping';
-import type { GoalContractV1, GoalReplayCursorV1 } from './goalTypes';
+import type { GoalContract, GoalReplayCursorV1 } from './goalTypes';
 
 export interface GoalControlItemV1 {
   kind: 'keepseek_goal_control';
@@ -124,7 +124,7 @@ export function appendGoalHostControl(checkpointInput: RunCheckpoint, content: s
 
 export function createTerminalGoalReplay(input: {
   checkpoint: RunCheckpoint;
-  contract: GoalContractV1;
+  contract: GoalContract;
   candidateContent: string;
 }): GoalProviderReplayStateV1 {
   if (!input.checkpoint.state) throw new Error('Goal completion requires a complete RunCheckpoint state.');
