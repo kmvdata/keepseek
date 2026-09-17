@@ -115,7 +115,7 @@ export interface UsageCostRates {
   inputPrice: number; // 输入·缓存未命中 (¥/M tokens)
   outputPrice: number; // 输出 (¥/M tokens)
   currency: string;
-  // DeepSeek 峰谷定价(2026-08-17 起):高峰时段可选,缺省时回退到上面空闲档
+  // DeepSeek 峰谷定价（2026-08-23 起周末全天为空闲档）；高峰字段缺省时回退到空闲档
   peakCacheHitPrice?: number;
   peakInputPrice?: number;
   peakOutputPrice?: number;

@@ -55,7 +55,26 @@ test('compression threshold configuration defaults to balanced and normalizes in
 
 test('usage pricing has no unknown-model fallback', () => {
   assert.equal(getConfiguredModelUsagePricing('unknown-vendor-model'), undefined);
-  assert.equal(getConfiguredModelUsagePricing('deepseek-v4-flash')?.currency, '¥');
+  const flashPricing = {
+    cacheHitPrice: 0.02,
+    inputPrice: 1,
+    outputPrice: 4,
+    currency: '¥',
+    peakCacheHitPrice: 0.04,
+    peakInputPrice: 2,
+    peakOutputPrice: 8
+  };
+  assert.deepEqual(getConfiguredModelUsagePricing('deepseek-v4.1-flash'), flashPricing);
+  assert.deepEqual(getConfiguredModelUsagePricing('deepseek-v4-flash'), flashPricing);
+  assert.deepEqual(getConfiguredModelUsagePricing('deepseek-v4-pro'), {
+    cacheHitPrice: 0.15,
+    inputPrice: 4.5,
+    outputPrice: 13.5,
+    currency: '¥',
+    peakCacheHitPrice: 0.3,
+    peakInputPrice: 9,
+    peakOutputPrice: 27
+  });
   assert.deepEqual(getConfiguredModelUsagePricing('kimi-k2.7-code'), {
     cacheHitPrice: 1.3,
     inputPrice: 6.5,

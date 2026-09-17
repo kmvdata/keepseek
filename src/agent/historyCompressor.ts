@@ -461,7 +461,9 @@ export class HistoryCompressor {
       const pricing = clientConfig.supportsBilling
         ? getConfiguredModelUsagePricing(input.model.id)
         : undefined;
-      const canPriceUsage = Boolean(pricing && normalizedUsage?.cacheDataStatus === 'reported');
+      // Keep hidden summary calls under the same accounting rule as main calls:
+      // missing cache details are priced conservatively as cache misses.
+      const canPriceUsage = Boolean(pricing && normalizedUsage);
       return {
         content: response.message?.content ?? '',
         usageEvent: normalizedUsage

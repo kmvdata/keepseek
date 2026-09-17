@@ -2660,7 +2660,9 @@ export class AgentLoop {
     const pricing = supportsBilling
       ? getConfiguredModelUsagePricing(modelId)
       : undefined;
-    const canPriceUsage = Boolean(pricing && normalizedUsage.cacheDataStatus === 'reported');
+    // Known official pricing is enough to account the request. If DeepSeek omits
+    // cache details, calculateUsageCost conservatively treats all prompt tokens as misses.
+    const canPriceUsage = Boolean(pricing);
     const usageEvent = createUsageEvent({
       usage: normalizedUsage,
       cost: canPriceUsage && pricing ? calculateUsageCost(normalizedUsage, pricing) : 0,

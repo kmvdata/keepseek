@@ -83,7 +83,7 @@ interface UsageInvoker {
     requestId: string,
     modelId: string,
     sourceId: string,
-    provider: 'openai-compatible',
+    provider: ModelSourceProvider,
     baseUrl: string,
     supportsBilling: boolean,
     source: 'executor'
@@ -456,6 +456,39 @@ test('non-official sources record tokens but force cost and currency to empty va
   assert.equal(event?.cost, 0);
   assert.equal(event?.currency, '');
   assert.equal(totals.cost, 0);
+});
+
+test('official DeepSeek usage remains priceable when cache details are absent', () => {
+  const runner = new AgentRunner() as unknown as UsageInvoker;
+  const totals = {
+    requestCount: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    cacheHitTokens: 0,
+    cacheMissTokens: 0,
+    reasoningTokens: 0,
+    cost: 0,
+    currency: '',
+    records: [] as UsageEvent[]
+  };
+  const event = runner.recordUpstreamUsage(
+    { prompt_tokens: 1_000, completion_tokens: 200, total_tokens: 1_200 },
+    totals,
+    createNoopInteractionTrace(),
+    'request-1',
+    'deepseek-v4.1-flash',
+    'deepseek-official',
+    'deepseek',
+    'https://api.deepseek.com',
+    true,
+    'executor'
+  );
+
+  assert.equal(event?.pricingStatus, 'priced');
+  assert.equal(event?.currency, '¥');
+  assert.ok((event?.cost ?? 0) > 0);
+  assert.equal(totals.cost, event?.cost);
 });
 
 function createRequest(modelId: string, provider: string): AgentRequest {

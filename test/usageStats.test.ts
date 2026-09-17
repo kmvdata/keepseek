@@ -6,8 +6,10 @@ import {
   addUsageEventToSessionStats,
   calculateCacheHitRate,
   calculateUsageCost,
+  calculateUsageCostAt,
   createUsageEvent,
   getCacheMissPossibleReasons,
+  getPricingPeriod,
   normalizeBalanceStateValue,
   normalizeDeepSeekUsage,
   normalizeSessionUsageStatsValue
@@ -157,6 +159,57 @@ test('calculates turn cost and cumulative average hit rate', () => {
   assert.equal(calculateCacheHitRate(stats), (800 / 1500) * 100);
   assert.equal(stats.sessionCost, 0.001316);
   assert.equal(stats.bySource?.executor?.requestCount, 2);
+});
+
+test('uses DeepSeek weekday peak rates and weekend off-peak rates in Beijing time', () => {
+  const flashRates = {
+    cacheHitPrice: 0.02,
+    inputPrice: 1,
+    outputPrice: 4,
+    peakCacheHitPrice: 0.04,
+    peakInputPrice: 2,
+    peakOutputPrice: 8,
+    currency: '¥'
+  };
+  const usage = {
+    promptTokens: 1_000_000,
+    completionTokens: 1_000_000,
+    totalTokens: 2_000_000,
+    cacheHitTokens: 300_000,
+    cacheMissTokens: 700_000,
+    cacheDataStatus: 'reported' as const
+  };
+  const weekdayPeak = new Date('2026-09-15T10:00:00+08:00');
+  const weekdayOffPeak = new Date('2026-09-15T13:00:00+08:00');
+  const weekendPeakHours = new Date('2026-09-19T10:00:00+08:00');
+
+  assert.equal(getPricingPeriod(weekdayPeak), 'peak');
+  assert.equal(getPricingPeriod(weekdayOffPeak), 'offPeak');
+  assert.equal(getPricingPeriod(weekendPeakHours), 'offPeak');
+  assert.equal(calculateUsageCostAt(usage, flashRates, weekdayPeak), 9.412);
+  assert.equal(calculateUsageCostAt(usage, flashRates, weekdayOffPeak), 4.706);
+  assert.equal(calculateUsageCostAt(usage, flashRates, weekendPeakHours), 4.706);
+});
+
+test('prices missing DeepSeek cache details conservatively as cache misses', () => {
+  const cost = calculateUsageCostAt({
+    promptTokens: 1_000_000,
+    completionTokens: 100_000,
+    totalTokens: 1_100_000,
+    cacheHitTokens: 0,
+    cacheMissTokens: 0,
+    cacheDataStatus: 'unavailable'
+  }, {
+    cacheHitPrice: 0.02,
+    inputPrice: 1,
+    outputPrice: 4,
+    peakCacheHitPrice: 0.04,
+    peakInputPrice: 2,
+    peakOutputPrice: 8,
+    currency: '¥'
+  }, new Date('2026-09-19T10:00:00+08:00'));
+
+  assert.equal(cost, 1.4);
 });
 
 test('classifies hidden calls by source without dropping their cost', () => {

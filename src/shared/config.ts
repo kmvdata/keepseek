@@ -70,15 +70,25 @@ export const DEFAULT_GOAL_MAX_MODEL_REQUESTS = 0;
 export const DEFAULT_GOAL_MAX_COMPLETION_REVIEWS = 0;
 export const DEFAULT_GOAL_AUTO_RESUME_ON_ACTIVATION = false;
 export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
-  // DeepSeek 峰谷定价(自 2026-08-17 北京时间 00:00 起生效)。
-  // 空闲档为常规价;高峰档(北京时间每日 9-12 点、14-18 点)价格更高。
+  // DeepSeek 峰谷定价（自 2026-08-23 起，周末全天按空闲档）。
+  // 工作日高峰为北京时间 9-12 点、14-18 点，其余时间按空闲档。
+  'deepseek-v4.1-flash': {
+    cacheHitPrice: 0.02,
+    inputPrice: 1.0,
+    outputPrice: 4.0,
+    peakCacheHitPrice: 0.04,
+    peakInputPrice: 2.0,
+    peakOutputPrice: 8.0,
+    currency: '¥'
+  },
+  // 官方旧模型名现由 V4.1 Flash 提供服务，使用相同价格。
   'deepseek-v4-flash': {
-    cacheHitPrice: 0.05,
-    inputPrice: 1.5,
-    outputPrice: 4.5,
-    peakCacheHitPrice: 0.1,
-    peakInputPrice: 3.0,
-    peakOutputPrice: 9.0,
+    cacheHitPrice: 0.02,
+    inputPrice: 1.0,
+    outputPrice: 4.0,
+    peakCacheHitPrice: 0.04,
+    peakInputPrice: 2.0,
+    peakOutputPrice: 8.0,
     currency: '¥'
   },
   'deepseek-v4-pro': {
@@ -578,8 +588,26 @@ function normalizeUsageCostRates(
     outputPrice: normalizeNonNegativeNumber(rates.outputPrice, fallback.outputPrice),
     currency: typeof rates.currency === 'string' && rates.currency.trim()
       ? rates.currency.trim()
-      : fallback.currency
+      : fallback.currency,
+    ...normalizeOptionalPrice('peakCacheHitPrice', rates, fallback),
+    ...normalizeOptionalPrice('peakInputPrice', rates, fallback),
+    ...normalizeOptionalPrice('peakOutputPrice', rates, fallback)
   };
+}
+
+function normalizeOptionalPrice<K extends 'peakCacheHitPrice' | 'peakInputPrice' | 'peakOutputPrice'>(
+  key: K,
+  rates: Partial<UsageCostRates>,
+  fallback: UsageCostRates
+): Partial<Pick<UsageCostRates, K>> {
+  const configuredValue = rates[key];
+  const fallbackValue = fallback[key];
+  if (configuredValue === undefined && fallbackValue === undefined) {
+    return {};
+  }
+  return {
+    [key]: normalizeNonNegativeNumber(configuredValue, fallbackValue ?? 0)
+  } as Pick<UsageCostRates, K>;
 }
 
 function normalizeNonNegativeNumber(value: unknown, fallback: number): number {

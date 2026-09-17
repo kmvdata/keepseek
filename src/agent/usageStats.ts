@@ -246,13 +246,18 @@ export function addTurnUsageToSessionStats(
 export type PricingPeriod = 'offPeak' | 'peak';
 
 /**
- * DeepSeek 峰谷计价时段判定(北京时间,公告口径 2026-08-17 起)。
+ * DeepSeek 峰谷计价时段判定（北京时间，公告口径 2026-08-23 起）。
  *
- * 高峰时段 = 北京时间每日 9:00-12:00 与 14:00-18:00,其余为空闲时段。
- * 把时间整体加 8 小时再读 UTC 小时,得到等价于北京时钟的小时数,不依赖运行环境时区。
+ * 高峰时段 = 周一至周五 9:00-12:00 与 14:00-18:00；工作日其余时间及周末为空闲时段。
+ * 把时间整体加 8 小时再读 UTC 星期与小时，得到等价于北京时钟的值，不依赖运行环境时区。
  */
 export function getPricingPeriod(date: Date = new Date()): PricingPeriod {
-  const beijingHour = new Date(date.getTime() + 8 * 60 * 60 * 1000).getUTCHours();
+  const beijingTime = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+  const beijingDay = beijingTime.getUTCDay();
+  if (beijingDay === 0 || beijingDay === 6) {
+    return 'offPeak';
+  }
+  const beijingHour = beijingTime.getUTCHours();
   const isPeak =
     (beijingHour >= 9 && beijingHour < 12) ||
     (beijingHour >= 14 && beijingHour < 18);
@@ -273,7 +278,7 @@ function pickPeakRate(
     : normalizePrice(peakValue);
 }
 
-/** 按空闲档价格折算成本(保留旧入口,等价于按非高峰档计费)。 */
+/** 按当前北京时间所在峰/谷时段折算成本。 */
 export function calculateUsageCost(usage: Usage, rates: UsageCostRates): number {
   return calculateUsageCostAt(usage, rates, new Date());
 }
@@ -289,9 +294,14 @@ export function calculateUsageCostAt(
   at: Date
 ): number {
   const peak = getPricingPeriod(at) === 'peak';
+  // DeepSeek 偶尔只返回总输入 token。此时仍可按“全部未命中”给出保守上界，
+  // 避免已有完整输入/输出用量的官方请求被整笔标记为不可计价。
+  const cacheDataUnavailable = usage.cacheDataStatus === 'unavailable';
+  const cacheHitTokens = cacheDataUnavailable ? 0 : usage.cacheHitTokens;
+  const cacheMissTokens = cacheDataUnavailable ? usage.promptTokens : usage.cacheMissTokens;
   return normalizeCost((
-    usage.cacheHitTokens * pickPeakRate(peak ? rates.peakCacheHitPrice : undefined, peak, rates.cacheHitPrice) +
-    usage.cacheMissTokens * pickPeakRate(peak ? rates.peakInputPrice : undefined, peak, rates.inputPrice) +
+    cacheHitTokens * pickPeakRate(peak ? rates.peakCacheHitPrice : undefined, peak, rates.cacheHitPrice) +
+    cacheMissTokens * pickPeakRate(peak ? rates.peakInputPrice : undefined, peak, rates.inputPrice) +
     usage.completionTokens * pickPeakRate(peak ? rates.peakOutputPrice : undefined, peak, rates.outputPrice)
   ) / 1_000_000);
 }
