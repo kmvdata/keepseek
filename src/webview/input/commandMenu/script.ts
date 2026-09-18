@@ -5,6 +5,8 @@ export const commandMenuDeclarationFragment: WebviewFragment = {
   source: `
       var commandMenuButton = document.getElementById('commandMenuButton');
       var commandMenu = document.getElementById('commandMenu');
+      var commandGoalMode = document.getElementById('commandGoalMode');
+      var commandGoalModeDescription = document.getElementById('commandGoalModeDescription');
 `.slice(1)
 };
 
@@ -32,6 +34,20 @@ export const commandMenuTriggerBindingsFragment: WebviewFragment = {
       if (commandMenu) {
         commandMenu.addEventListener('keydown', handleCommandMenuKeydown);
       }
+      commandGoalMode?.addEventListener('click', function() {
+        var mode = String(state.goalUi?.mode || 'chat');
+        closeCommandMenu();
+        if (mode === 'goal_active' || mode === 'goal_terminal' || mode === 'proposal_review') {
+          window.keepseekGoalInterface?.focusCard();
+          return;
+        }
+        if (mode === 'workspace_goal_elsewhere') {
+          var sessionId = String(state.goalUi?.goalSessionId || '');
+          if (sessionId) vscode.postMessage({ type: 'selectSession', sessionId: sessionId });
+          return;
+        }
+        vscode.postMessage({ type: 'setGoalComposerMode', enabled: mode === 'chat' });
+      });
 
 `.slice(1)
 };
@@ -355,6 +371,26 @@ export const commandMenuRenderFragment: WebviewFragment = {
         renderLegacyMemoryCommand();
         renderBackgroundRunCommand();
         renderEffort();
+        renderCommandGoalMode();
+      }
+
+      function renderCommandGoalMode() {
+        if (!commandGoalMode) return;
+        var mode = String(state.goalUi?.mode || 'chat');
+        var checked = mode !== 'chat' && mode !== 'workspace_goal_elsewhere';
+        commandGoalMode.setAttribute('aria-checked', checked ? 'true' : 'false');
+        commandGoalMode.classList.toggle('is-checked', checked);
+        commandGoalMode.disabled = !state.startup?.interactiveReady || (Boolean(state.isBusy) && mode === 'chat');
+        if (commandGoalModeDescription) {
+          var key = mode === 'goal_active' ? 'goalModeActiveHint'
+            : mode === 'goal_terminal' ? 'goalModeTerminalHint'
+              : mode === 'workspace_goal_elsewhere' ? 'goalModeElsewhereHint'
+                : mode === 'proposal_generating' ? 'goalModeGeneratingHint'
+                  : mode === 'proposal_review' ? 'goalModeReviewHint'
+                    : mode === 'goal_armed' ? 'goalModeArmedHint'
+                      : 'goalModeDescription';
+          commandGoalModeDescription.textContent = t(key);
+        }
       }
 
       function renderBackgroundRunCommand() {

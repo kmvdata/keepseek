@@ -1407,6 +1407,80 @@ export function getStyles(): string {
       background: transparent;
     }
 
+    .live-agent-activity {
+      display: grid;
+      gap: 7px;
+      margin: 4px 8px 12px;
+      padding: 8px 10px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+      border-radius: 7px;
+      background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+      font-size: 11px;
+    }
+
+    .live-agent-activity-heading {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--vscode-foreground);
+    }
+
+    .live-agent-activity-pulse {
+      width: 7px;
+      height: 7px;
+      flex: none;
+      border-radius: 50%;
+      background: var(--vscode-progressBar-background, var(--vscode-textLink-foreground));
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--vscode-progressBar-background, var(--vscode-textLink-foreground)) 50%, transparent);
+      animation: keepseek-live-activity-pulse 1.8s ease-out infinite;
+    }
+
+    .live-agent-activity-list {
+      display: grid;
+      gap: 4px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      color: var(--vscode-descriptionForeground);
+    }
+
+    .live-agent-activity-item {
+      display: grid;
+      grid-template-columns: 8px minmax(0, 1fr);
+      gap: 6px;
+      align-items: start;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .live-agent-activity-marker {
+      width: 5px;
+      height: 5px;
+      margin-top: 5px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: .55;
+    }
+
+    .live-agent-activity-item:last-child {
+      color: var(--vscode-foreground);
+      font-weight: 500;
+    }
+
+    .live-agent-activity-item.status-error,
+    .live-agent-activity-item.status-stopped {
+      color: var(--vscode-errorForeground);
+    }
+
+    @keyframes keepseek-live-activity-pulse {
+      70% { box-shadow: 0 0 0 5px transparent; }
+      100% { box-shadow: 0 0 0 0 transparent; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .live-agent-activity-pulse { animation: none; }
+    }
+
     .transcript-empty {
       display: flex;
       flex-direction: column;

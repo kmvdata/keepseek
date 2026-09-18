@@ -169,6 +169,15 @@ export class ChatSessionStore {
     return true;
   }
 
+  public async setGoalComposerMode(sessionId: string, enabled: boolean): Promise<boolean> {
+    const session = await this.loadSessionById(sessionId);
+    if (!session || Boolean(session.goalComposerMode) === enabled) return false;
+    session.goalComposerMode = enabled;
+    session.updatedAt = new Date().toISOString();
+    await this.persist();
+    return true;
+  }
+
   public async selectSession(sessionId: string): Promise<ChatSession | undefined> {
     const session = await this.loadSessionById(sessionId);
     if (!session) {
@@ -201,6 +210,7 @@ export class ChatSessionStore {
     const copied: ChatSession = {
       ...source,
       approvalMode: this.approvalModeValue,
+      goalComposerMode: false,
       id: randomUUID(),
       messages: source.messages.map(copyMessage),
       contextCompression: undefined,
@@ -516,6 +526,7 @@ export function createEmptySession(
     title: localize(language, 'defaultSessionTitle'),
     messages: [],
     approvalMode,
+    goalComposerMode: false,
     activeSkillIds: [],
     requestProtocol: createNewSessionRequestProtocol(now),
     createdAt: now,
@@ -673,6 +684,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       approvalMode: item.approvalMode === 'delegate' || item.approvalMode === 'model_review'
         ? item.approvalMode
         : 'ask',
+      goalComposerMode: item.goalComposerMode === true,
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
       frozenImplicitSkillIds: normalizeStringArray(item.frozenImplicitSkillIds),
       requestProtocol: normalizeSessionRequestProtocol(item.requestProtocol),

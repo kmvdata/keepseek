@@ -26,12 +26,21 @@ export type WebviewMessage =
   | { type: 'loadOlderMessages' }
   | { type: 'refreshBalance' }
   | { type: 'sendPrompt'; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
+  | { type: 'setGoalComposerMode'; enabled: boolean }
+  | { type: 'prepareGoal'; objective: string; sourceId: string; modelId: string; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'openGoalDialog'; objective?: string; sourceId?: string; modelId?: string; references?: PromptReferenceInput[]; skillIds?: string[] }
   | { type: 'generateGoalDraft'; objective: string; sourceId: string; modelId: string }
+  | { type: 'invalidateGoalProposal'; objective: string }
   | { type: 'cancelGoalDraftGeneration' }
   | { type: 'discardGoalProposal' }
   | {
       type: 'adoptGoalProposal'; proposalHash: string; selectedWorkItemIds: string[];
+      includeScope: string[]; excludeScope: string[]; requiredValidations: SafeNpmScript[];
+      maxActiveExecutionMs: number; maxCost: number; maxModelRequests: number; maxCompletionReviews: number;
+      resumePolicy: 'manual' | 'auto_on_activation'; sourceId: string; modelId: string;
+    }
+  | {
+      type: 'adoptGoalOriginal'; selectedWorkItemIds?: string[];
       includeScope: string[]; excludeScope: string[]; requiredValidations: SafeNpmScript[];
       maxActiveExecutionMs: number; maxCost: number; maxModelRequests: number; maxCompletionReviews: number;
       resumePolicy: 'manual' | 'auto_on_activation'; sourceId: string; modelId: string;

@@ -120,6 +120,22 @@ test('approval mode persists for the project and is inherited by every new or se
   assert.equal(restarted.getActiveSession().approvalMode, 'model_review');
 });
 
+test('Goal composer mode is session-local, persisted, and defaults to false', async () => {
+  const workspaceScope: WorkspaceSessionScope = { key: 'workspace:goal-mode', name: 'Goal Mode', folderUris: [] };
+  const original = createSession('original', [createMessage(0)], workspaceScope);
+  const other = createSession('other', [createMessage(1)], workspaceScope);
+  const storage = new MemorySessionStorage({ activeSessionId: original.id, sessions: [original, other] });
+  const store = new ChatSessionStore(storage, 'en', workspaceScope);
+  await store.initialize();
+
+  assert.equal(store.getActiveSession().goalComposerMode, false);
+  assert.equal(await store.setGoalComposerMode(original.id, true), true);
+  assert.equal(storage.saved?.sessions.find((session) => session.id === original.id)?.goalComposerMode, true);
+  assert.equal((await store.selectSession(other.id))?.goalComposerMode, false);
+  assert.equal((await store.selectSession(original.id))?.goalComposerMode, true);
+  assert.equal((await store.createNewSession('en')).goalComposerMode, false);
+});
+
 test('legacy workspace approval mode migrates from its active session', async () => {
   const workspaceScope: WorkspaceSessionScope = {
     key: 'workspace:legacy-approval-mode',

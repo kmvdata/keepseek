@@ -82,6 +82,20 @@ export const commandMenuReadonlyStylesFragment: WebviewFragment = {
 export const commandMenuStylesFragment: WebviewFragment = {
   id: 'styles.command-menu.main',
   source: `
+      .command-goal-section {
+        border-top: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.24));
+      }
+
+      .command-goal-check {
+        opacity: 0;
+        color: var(--vscode-testing-iconPassed, #73c991);
+        font-weight: 700;
+      }
+
+      .command-goal-mode.is-checked .command-goal-check {
+        opacity: 1;
+      }
+
     .command-menu-header {
       display: flex;
       align-items: center;

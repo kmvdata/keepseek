@@ -46,6 +46,7 @@ export function getScript(): string {
       backgroundRun: null,
       goal: null,
       goalProposal: null,
+      goalUi: { version: 1, mode: 'chat', composerMode: false, activeSessionId: '' },
       goalDefaults: {
         maxActiveExecutionMs: 0,
         maxCost: 0,
@@ -453,6 +454,9 @@ export function getScript(): string {
     let agentStatusRotationIndex = 0;
     let agentStatusRotationKey = '';
     let terminalAgentStatusKey = '';
+    let liveAgentActivitySessionId = '';
+    let liveAgentActivitySequence = -1;
+    let liveAgentActivityEvents = [];
     let planExpanded = false;
     const pendingChangeActions = new Set();
     const pendingDraftRunApprovals = new Set();
@@ -1187,6 +1191,7 @@ export function getScript(): string {
         if (incomingRevision && incomingRevision <= lastStateRevision) return;
         if (incomingRevision) lastStateRevision = incomingRevision;
         var previousActiveSessionId = state.activeSessionId || '';
+        var previousBusy = Boolean(state.isBusy);
         Object.assign(state, message.state);
         if (message.type === 'statePatch' && message.scope === 'startupSettings') {
           rememberTerminalAgentActivity(state.agentActivity);
@@ -1203,7 +1208,10 @@ export function getScript(): string {
         pendingDraftRunBatchSnapshot = '';
         if (previousActiveSessionId && previousActiveSessionId !== state.activeSessionId) {
           planExpanded = false;
+          resetLiveAgentActivity();
         }
+        if (!previousBusy && state.isBusy) resetLiveAgentActivity();
+        rememberLiveAgentActivity(state.agentActivity);
         rememberTerminalAgentActivity(state.agentActivity);
         render();
       } else if (message.type === 'agentRunDelta') {
@@ -1221,6 +1229,7 @@ export function getScript(): string {
         targetMessage.reasoningContent = (targetMessage.reasoningContent || '') + reasoningTail;
         targetMessage.runState = message.runState;
         state.agentActivity = message.activity;
+        rememberLiveAgentActivity(message.activity);
         if (window.keepseekInputControls?.renderUsage) {
           window.keepseekInputControls.renderUsage();
         }
@@ -1254,6 +1263,7 @@ export function getScript(): string {
         }
         renderStatus();
         refreshGoalTranscriptCard();
+        renderLiveAgentActivityPanel();
         if (stick) transcript.scrollTop = transcript.scrollHeight;
       } else if (message.type === 'draftRunStateChanged'  || message.type === 'draftRunOutput') {
         pendingDraftRunApprovals.delete(String(message.draftRun?.id || ''));
@@ -1295,6 +1305,7 @@ export function getScript(): string {
         refreshGoalTranscriptCard();
       } else if (message.type === 'goalActionFeedback') {
         window.keepseekGoalDialog?.setActionFeedback(message.status, message.message);
+        window.keepseekGoalInterface?.setActionFeedback(message.action, message.status, message.message);
       } else if (message.type === 'skillDraftCreated') {
         if (window.keepseekInputControls && window.keepseekInputControls.onSkillDraftCreated) {
           window.keepseekInputControls.onSkillDraftCreated(message);
@@ -1385,7 +1396,9 @@ export function getScript(): string {
     }
 
     function syncSendButtonAvailability() {
-      sendButton.disabled = !state.startup?.interactiveReady || (!state.isBusy && (
+      var goalMode = String(state.goalUi?.mode || 'chat');
+      var goalLocked = goalMode !== 'chat' && goalMode !== 'goal_armed';
+      sendButton.disabled = !state.startup?.interactiveReady || goalLocked || (!state.isBusy && (
         window.keepseekInputControls && window.keepseekInputControls.isPromptSubmittableEmpty
           ? window.keepseekInputControls.isPromptSubmittableEmpty()
           : promptInput.classList.contains('is-empty')
@@ -2215,9 +2228,19 @@ export function getScript(): string {
               : 'startupRestoringSafetyState'));
         return;
       }
+      if (transientStatus) return;
+      if (renderGoalStatusSummary()) {
+        stopAgentStatusRotation();
+        agentStatusRotationKey = '';
+        return;
+      }
       if (!state.isBusy) {
         stopAgentStatusRotation();
         agentStatusRotationKey = '';
+        statusText.textContent = '';
+        statusTooltip.textContent = '';
+        statusTooltip.classList.add('hidden');
+        status.classList.remove('is-active');
         return;
       }
 
@@ -2229,6 +2252,39 @@ export function getScript(): string {
         setTransientStatus(getAgentActivityStatusText(activity) || t('processing'));
       }
       startAgentStatusRotation();
+    }
+
+    function renderGoalStatusSummary() {
+      var mode = String(state.goalUi?.mode || 'chat');
+      if (mode === 'chat') return false;
+      var goal = state.goal && typeof state.goal === 'object' ? state.goal : null;
+      var primary = mode === 'goal_armed' ? t('goalModeArmedHint')
+        : mode === 'proposal_generating' ? t('goalModeGeneratingHint')
+          : mode === 'proposal_review' ? t('goalModeReviewHint')
+            : mode === 'workspace_goal_elsewhere' ? t('goalModeElsewhereHint')
+              : goal ? goalTranscriptStatusLabel(goal.status) + ' · ' + goalTranscriptCurrentStep(goal)
+                : t('goalModeTitle');
+      var criteria = Array.isArray(goal?.criteria) ? goal.criteria : [];
+      var completed = criteria.filter(function(item) { return item.status === 'satisfied'; }).length;
+      var validations = Array.isArray(goal?.requiredValidations) ? goal.requiredValidations : [];
+      var validationsDone = validations.filter(function(item) { return item.status === 'passed'; }).length;
+      var costs = Object.entries(goal?.costByCurrency || {}).map(function(entry) {
+        return entry[0] + ' ' + Number(entry[1] || 0).toFixed(4);
+      }).join(', ');
+      var budget = goal ? [
+        t('goalTranscriptCriteria', { completed: completed, total: criteria.length }),
+        validations.length ? t('goalTranscriptValidations', { completed: validationsDone, total: validations.length }) : '',
+        t('goalActiveExecution') + ' ' + goalTranscriptExecutionText(goal),
+        t('goalRequests') + ' ' + Number(goal.modelRequests || 0) + '/' + goalTranscriptBudgetValue(goal.maxModelRequests),
+        t('goalReviews') + ' ' + Number(goal.completionReviews || 0) + '/' + goalTranscriptBudgetValue(goal.maxCompletionReviews),
+        t('goalCost') + ' ' + (costs || '—') + '/' + goalTranscriptBudgetValue(goal.maxCost)
+      ].filter(Boolean).join(' · ') : '';
+      var activity = state.isBusy ? getAgentActivityStatusText(normalizeAgentActivity(state.agentActivity)) : '';
+      statusText.textContent = primary;
+      statusTooltip.textContent = [primary, budget, activity].filter(Boolean).join('\\n');
+      statusTooltip.classList.toggle('hidden', !statusTooltip.textContent);
+      status.classList.add('is-active');
+      return true;
     }
 
     function setTransientStatus(message) {
@@ -2265,9 +2321,7 @@ export function getScript(): string {
           }
           transientStatusClearTimer = 0;
           transientStatus = '';
-          statusText.textContent = '';
-          statusTooltip.textContent = '';
-          statusTooltip.classList.add('hidden');
+          renderStatus();
           status.classList.remove('is-fading');
         }, STATUS_MESSAGE_FADE_MS);
       }, STATUS_MESSAGE_DURATION_MS);
@@ -2400,6 +2454,62 @@ export function getScript(): string {
         default:
           return 'executing_tool';
       }
+    }
+
+    function resetLiveAgentActivity() {
+      liveAgentActivitySessionId = state.activeSessionId || '';
+      liveAgentActivitySequence = -1;
+      liveAgentActivityEvents = [];
+    }
+
+    function getLiveAgentActivityText(activity) {
+      var keys = getAgentActivityStatusKeys(activity);
+      if (!keys.length) return '';
+      var key = keys[0];
+      var label = key === 'agentStatusDeepSeekReasoning'
+        ? t(key, { modelId: state.selectedModelId || 'DeepSeek' }) : t(key);
+      var detail = String(activity.detail || '').replace(/\\s+/gu, ' ').trim();
+      if (detail.length > 180) detail = detail.slice(0, 177) + '…';
+      return detail && detail !== label ? label + ' · ' + detail : label;
+    }
+
+    function rememberLiveAgentActivity(activity) {
+      if (liveAgentActivitySessionId !== (state.activeSessionId || '')) resetLiveAgentActivity();
+      var normalized = normalizeAgentActivity(activity);
+      if (normalized.base === 'idle' || normalized.sequence <= liveAgentActivitySequence) return;
+      liveAgentActivitySequence = normalized.sequence;
+      var text = getLiveAgentActivityText(normalized);
+      if (!text) return;
+      var previous = liveAgentActivityEvents[liveAgentActivityEvents.length - 1];
+      if (previous && previous.text === text && previous.base === normalized.base) {
+        previous.sequence = normalized.sequence;
+        return;
+      }
+      liveAgentActivityEvents.push({
+        sequence: normalized.sequence,
+        base: normalized.base,
+        phase: normalized.phase,
+        text: text
+      });
+      if (liveAgentActivityEvents.length > 8) liveAgentActivityEvents.splice(0, liveAgentActivityEvents.length - 8);
+    }
+
+    function renderLiveAgentActivityPanel() {
+      transcript.querySelector('[data-live-agent-activity]')?.remove();
+      if (!state.isBusy || !liveAgentActivityEvents.length) return;
+      var panel = document.createElement('section'); panel.className = 'live-agent-activity';
+      panel.dataset.liveAgentActivity = 'true'; panel.setAttribute('role', 'status'); panel.setAttribute('aria-live', 'polite');
+      var heading = document.createElement('div'); heading.className = 'live-agent-activity-heading';
+      var pulse = document.createElement('span'); pulse.className = 'live-agent-activity-pulse'; pulse.setAttribute('aria-hidden', 'true');
+      var title = document.createElement('strong'); title.textContent = t('agentLiveActivityTitle'); heading.append(pulse, title); panel.append(heading);
+      var list = document.createElement('ol'); list.className = 'live-agent-activity-list';
+      liveAgentActivityEvents.slice(-5).forEach(function(event, index, visible) {
+        var item = document.createElement('li'); item.className = 'live-agent-activity-item status-' + String(event.base || 'thinking');
+        var marker = document.createElement('span'); marker.className = 'live-agent-activity-marker'; marker.setAttribute('aria-hidden', 'true');
+        var copy = document.createElement('span'); copy.textContent = (index === visible.length - 1 ? t('agentLiveActivityCurrent') + ' · ' : '') + event.text;
+        item.append(marker, copy); list.append(item);
+      });
+      panel.append(list); transcript.append(panel);
     }
 
     function syncEditingState() {
@@ -3951,6 +4061,7 @@ export function getScript(): string {
         transcript.append(item);
       }
 
+      renderLiveAgentActivityPanel();
       refreshGoalTranscriptCard();
 
       if (shouldStick) {

@@ -39,44 +39,8 @@ export const goalDialogTemplateFragment: WebviewFragment = {
           </details>
           <div id="goalDialogError" class="goal-warning hidden"></div>
         </div>
-        <div id="goalManagePane" class="settings-dialog-body goal-manage-pane hidden">
-          <div class="goal-manage-summary">
-            <div class="goal-manage-heading"><strong id="goalManageObjective"></strong><span id="goalManageStatus" class="goal-status-pill"></span></div>
-            <div id="goalManageMeta" class="goal-manage-meta"></div>
-            <div id="goalManageReason" class="goal-manage-reason hidden"></div>
-          </div>
-          <div class="goal-manage-section">
-            <span class="settings-field-label" data-i18n="goalWorkItemsProgress">工作项</span>
-            <ol id="goalManageWorkItems" class="goal-manage-work-items"></ol>
-          </div>
-          <div class="goal-manage-section">
-            <span class="settings-field-label" data-i18n="goalCriteriaProgress">验收条件</span>
-            <ol id="goalManageCriteria" class="goal-manage-criteria"></ol>
-          </div>
-          <div class="goal-manage-section">
-            <span class="settings-field-label" data-i18n="goalTraceLogs">Goal 调试日志</span>
-            <div class="goal-trace-toolbar"><button id="goalToggleDebug" type="button" class="secondary" data-i18n="goalEnableDebug">为后续 attempt 开启调试</button></div>
-            <ol id="goalManageTraces" class="goal-manage-traces"></ol>
-            <div id="goalTraceEmpty" class="settings-dialog-desc" data-i18n="goalTraceEmpty">当前 Goal 还没有可查看的日志。</div>
-          </div>
-          <div class="goal-manage-section">
-            <span class="settings-field-label" data-i18n="goalValidationProgress">必需验证</span>
-            <ul id="goalManageValidations" class="goal-manage-validations"></ul>
-          </div>
-          <div class="goal-manage-section">
-            <span class="settings-field-label" data-i18n="goalActions">Goal 操作</span>
-            <div class="goal-manage-controls">
-              <button id="goalPause" type="button" class="secondary" data-i18n="goalPause">暂停</button>
-              <button id="goalResume" type="button" data-i18n="goalResume">恢复 Goal</button>
-              <button id="goalStop" type="button" class="secondary" data-i18n="goalStop">停止</button>
-              <button id="goalClear" type="button" class="secondary" data-i18n="goalClear">清理</button>
-            </div>
-          </div>
-          <div id="goalAmendRow" class="goal-amend-row"><input id="goalAmendInput" type="text" maxlength="20000" data-i18n-placeholder="goalAmendPlaceholder" placeholder="追加修订（不重写原目标）"><button id="goalAmend" type="button" class="secondary" data-i18n="goalAmend">修订</button></div>
-        </div>
         <div class="settings-dialog-footer">
-          <button id="goalCancel" type="button" class="secondary" data-i18n="goalDiscardProposal">放弃提案</button>
-          <button id="goalClose" type="button" class="secondary hidden" data-i18n="close">关闭</button>
+          <button id="goalCancel" type="button" class="secondary" data-i18n="close">关闭</button>
           <button id="goalStart" type="button" data-i18n="goalAdoptSelected">采纳所选项并开始</button>
         </div>
       </div>

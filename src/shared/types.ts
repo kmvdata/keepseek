@@ -666,6 +666,9 @@ export type ApprovalMode = 'ask' | 'model_review' | 'delegate';
 
 export interface ChatSession {
   approvalMode?: ApprovalMode;
+  /** Host/UI-only session preference. It is never projected into Provider
+   * history, prompts, context instructions, or cache-prefix material. */
+  goalComposerMode?: boolean;
   id: string;
   title: string;
   messages: ChatMessage[];

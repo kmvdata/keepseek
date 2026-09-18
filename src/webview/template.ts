@@ -138,6 +138,8 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
       </div>
     </section>
 
+    <section id="goalCardRegion" class="goal-card-region hidden" aria-live="polite"></section>
+
     <aside id="unlinkedChangeSetRegion" class="draft-bar hidden" aria-labelledby="unlinkedChangeSetLabel">
       <div class="draft-bar-header">
         <div id="unlinkedChangeSetLabel" class="draft-bar-label" data-i18n="unlinkedChangeSets">未关联的待处理修改</div>

@@ -551,7 +551,7 @@ test('references open once from a single click in the prompt, message editor, an
   );
 });
 
-test('Goal progress renders and refreshes inside the transcript without creating synthetic messages', () => {
+test('Goal confirmation and progress cards render in the persistent region without synthetic messages', () => {
   const script = getScript();
   const styles = getStyles();
   const goalTranscript = getGeneratedSection(
@@ -573,7 +573,12 @@ test('Goal progress renders and refreshes inside the transcript without creating
   assert.match(goalTranscript, /createGoalTranscriptCard\(goal\)/u);
   assert.match(goalTranscript, /dataset\.goalTranscriptCard = 'true'/u);
   assert.match(goalTranscript, /setAttribute\('role', 'progressbar'\)/u);
-  assert.match(goalTranscript, /window\.keepseekGoalDialog\?\.showManager\(\)/u);
+  assert.match(goalTranscript, /goalCardRegion\.replaceChildren\(\)/u);
+  assert.match(goalTranscript, /window\.keepseekGoalDialog\?\.openProposalFromState\(\)/u);
+  assert.match(goalTranscript, /function goalPreparationStageLabel\(pending\)/u);
+  assert.match(goalTranscript, /if \(!proposal\)[\s\S]*?goalCancelGeneration[\s\S]*?discardGoalProposal/u);
+  assert.doesNotMatch(goalTranscript, /if \(!proposal\) return null/u);
+  assert.doesNotMatch(goalTranscript, /transcript\.append\(.*(?:goal|card)/u);
   assert.match(goalTranscript, /goalTranscriptCurrentStep\(goal\)/u);
   assert.match(goalTranscript, /plan\.steps\.find/u);
   assert.doesNotMatch(goalTranscript, /state\.messages\.(?:push|splice|unshift)/u);
@@ -581,9 +586,32 @@ test('Goal progress renders and refreshes inside the transcript without creating
   assert.match(transcriptRenderer, /refreshGoalTranscriptCard\(\);/u);
   assert.match(deltaHandler, /refreshGoalTranscriptCard\(\);/u);
   assert.match(styles, /\.goal-transcript-card\s*\{/u);
+  assert.match(styles, /\.goal-card-region\s*\{/u);
   assert.match(styles, /\.goal-transcript-progress\s*\{/u);
+  assert.match(styles, /\.goal-preparation-skeleton\s*\{/u);
   assert.match(styles, /@media \(max-width: 360px\)[\s\S]*?\.goal-transcript-progress/u);
   assert.doesNotThrow(() => new Function(script));
+});
+
+test('Agent activity is projected into a bounded view-only transcript feed', async () => {
+  const script = getScript();
+  const styles = getStyles();
+  const providerSource = await readFile(
+    path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
+    'utf8'
+  );
+  assert.match(script, /function rememberLiveAgentActivity\(activity\)/u);
+  assert.match(script, /liveAgentActivityEvents\.length > 8/u);
+  assert.match(script, /function renderLiveAgentActivityPanel\(\)[\s\S]*?transcript\.append\(panel\)/u);
+  assert.match(script, /rememberLiveAgentActivity\(message\.activity\)[\s\S]*?renderLiveAgentActivityPanel\(\)/u);
+  assert.doesNotMatch(
+    getGeneratedSection(script, 'function rememberLiveAgentActivity(activity)', 'function syncEditingState()'),
+    /state\.messages\.(?:push|splice|unshift)/u
+  );
+  assert.match(styles, /\.live-agent-activity\s*\{/u);
+  assert.match(styles, /prefers-reduced-motion[\s\S]*?\.live-agent-activity-pulse/u);
+  assert.match(providerSource, /onProgress: \(event\) => \{[\s\S]*?streamedCharacters \+= event\.delta\.length/u);
+  assert.match(providerSource, /postState\(\{ immediate: true \}\)/u);
 });
 
 test('Goal resume reports pending and failure states and Goal model output stays view-only while streaming', async () => {
@@ -639,10 +667,40 @@ test('Goal resume reports pending and failure states and Goal model output stays
   assert.doesNotMatch(script, /state\.hasCurrentSessionLog = state\.debugMode/u);
   assert.match(extensionSource, /context\.globalStoragePath/u);
   assert.match(script, /message\.type === 'goalActionFeedback'/u);
-  assert.match(inputScript, /setActionFeedback: setGoalActionFeedback/u);
-  assert.match(inputScript, /goalResumePending/u);
+  assert.match(script, /setActionFeedback: function\(action, status, message\)/u);
+  assert.match(script, /goalResumePending/u);
+  assert.match(inputScript, /setActionFeedback: function\(\) \{\}/u);
   assert.doesNotThrow(() => new Function(script));
   assert.doesNotThrow(() => new Function(inputScript));
+});
+
+test('Goal Clear suppresses intermediate projection and exits composer mode only after coordinator success', async () => {
+  const providerPath = path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts');
+  const providerSource = await readFile(providerPath, 'utf8');
+  const clearStart = providerSource.indexOf("case 'goalClear':");
+  const clearEnd = providerSource.indexOf("case 'goalAmend':", clearStart);
+  const clearHandler = providerSource.slice(clearStart, clearEnd);
+  assert.ok(clearStart >= 0 && clearEnd > clearStart);
+  const clearCall = clearHandler.indexOf('await this.goalCoordinator.clear()');
+  const disableMode = clearHandler.indexOf('await this.sessionStore.setGoalComposerMode(goalSessionId, false)');
+  assert.ok(clearCall >= 0 && disableMode > clearCall);
+  assert.match(clearHandler, /this\.suppressGoalStatePosts \+= 1/u);
+  assert.match(clearHandler, /this\.suppressGoalStatePosts = Math\.max\(0, this\.suppressGoalStatePosts - 1\)/u);
+  assert.match(clearHandler, /status: 'error'/u);
+  assert.equal(clearHandler.match(/this\.postState\(\{ immediate: true, forceFull: true \}\)/gu)?.length, 1);
+});
+
+test('normalized Goal objectives rehydrate known references only for visible expansion and sanitize Provider bytes again', async () => {
+  const providerPath = path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts');
+  const providerSource = await readFile(providerPath, 'utf8');
+  const startGoal = getGeneratedSection(providerSource, 'private async startGoal(', 'private async resumeGoal(');
+  assert.match(startGoal, /restoreGoalReferencePaths\(proposal\.objective, referenceInputs/u);
+  const expandIndex = startGoal.indexOf('await expandPromptReferencesInPrompt(visibleContent');
+  const sanitizeIndex = startGoal.indexOf('this.sanitizeGoalReferencePaths(expandedRaw');
+  const providerIndex = startGoal.indexOf('const providerContent =');
+  assert.ok(expandIndex >= 0 && sanitizeIndex > expandIndex && providerIndex > sanitizeIndex);
+  assert.match(providerSource, /visibleValue: reference\.path/u);
+  assert.match(providerSource, /: `authorized-external-reference-\$\{index \+ 1\}`/u);
 });
 
 test('reference chips use type icons, one-line names, and full-path hover labels', () => {

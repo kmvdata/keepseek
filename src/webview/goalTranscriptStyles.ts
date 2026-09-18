@@ -1,12 +1,21 @@
 export function getGoalTranscriptStyles(): string {
   return `
+    .goal-card-region {
+      flex: 0 0 auto;
+      max-height: min(58vh, 620px);
+      overflow: auto;
+      padding: 8px var(--keepseek-page-padding, 10px) 0;
+      border-top: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-sideBar-background);
+    }
+
     .goal-transcript-card {
       --goal-state-color: var(--vscode-textLink-foreground);
       display: grid;
       gap: 9px;
       width: 100%;
       box-sizing: border-box;
-      margin: 2px 0 18px;
+      margin: 0 0 8px;
       padding: 11px 12px;
       border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
       border-left: 3px solid var(--goal-state-color);
@@ -21,6 +30,41 @@ export function getGoalTranscriptStyles(): string {
 
     .goal-proposal-card {
       --goal-state-color: var(--vscode-textLink-foreground);
+    }
+
+    .goal-proposal-card.status-error {
+      --goal-state-color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground));
+    }
+
+    .goal-proposal-card.status-cancelled {
+      --goal-state-color: var(--vscode-notificationsWarningIcon-foreground, var(--vscode-editorWarning-foreground));
+    }
+
+    .goal-preparation-skeleton {
+      display: grid;
+      gap: 6px;
+      padding: 5px 0;
+    }
+
+    .goal-preparation-skeleton > span {
+      display: block;
+      height: 7px;
+      border-radius: 999px;
+      background: linear-gradient(90deg,
+        var(--vscode-editor-inactiveSelectionBackground) 10%,
+        var(--vscode-list-hoverBackground) 45%,
+        var(--vscode-editor-inactiveSelectionBackground) 80%);
+      background-size: 220% 100%;
+      animation: keepseek-goal-skeleton 1.4s ease-in-out infinite;
+    }
+
+    @keyframes keepseek-goal-skeleton {
+      from { background-position: 100% 0; }
+      to { background-position: -100% 0; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .goal-preparation-skeleton > span { animation: none; }
     }
 
     .goal-transcript-proposal-items {
@@ -70,6 +114,87 @@ export function getGoalTranscriptStyles(): string {
       gap: 5px;
     }
 
+    .goal-card-selection-actions,
+    .goal-progress-actions,
+    .goal-trace-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+
+    .goal-card-selection-actions button,
+    .goal-progress-actions button,
+    .goal-trace-list button,
+    .goal-confirm-criterion {
+      min-height: 24px;
+      padding: 2px 7px;
+      font-size: 10px;
+    }
+
+    .goal-card-notice {
+      padding: 6px 8px;
+      border-radius: 5px;
+      color: var(--vscode-descriptionForeground);
+      background: var(--vscode-textBlockQuote-background, var(--vscode-editor-inactiveSelectionBackground));
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    .goal-card-notice.is-error {
+      color: var(--vscode-errorForeground);
+    }
+
+    .goal-card-notice.is-success {
+      color: var(--vscode-testing-iconPassed);
+    }
+
+    .goal-assessment-grid {
+      display: grid;
+      grid-template-columns: minmax(0, .8fr) minmax(0, 1.6fr);
+      gap: 7px;
+    }
+
+    .goal-assessment-verdict,
+    .goal-assessment-reason,
+    .goal-objective-diff > div {
+      display: grid;
+      gap: 3px;
+      padding: 7px 8px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 5px;
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+
+    .goal-assessment-verdict span,
+    .goal-assessment-reason span,
+    .goal-objective-diff > div > div {
+      color: var(--vscode-descriptionForeground);
+      white-space: pre-wrap;
+    }
+
+    .goal-objective-diff {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 7px;
+    }
+
+    .goal-amend-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+    }
+
+    .goal-amend-row input {
+      min-width: 0;
+      min-height: 26px;
+      padding: 3px 7px;
+      border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+      border-radius: 4px;
+      color: var(--vscode-input-foreground);
+      background: var(--vscode-input-background);
+    }
+
     .goal-transcript-proposal-actions button {
       min-height: 24px;
       padding: 2px 7px;
@@ -110,6 +235,11 @@ export function getGoalTranscriptStyles(): string {
     .goal-transcript-details > summary {
       cursor: pointer;
       color: var(--vscode-descriptionForeground);
+    }
+
+    .goal-transcript-details > strong {
+      display: block;
+      margin-top: 9px;
     }
 
     .goal-transcript-work-items {
@@ -186,6 +316,18 @@ export function getGoalTranscriptStyles(): string {
       overflow-wrap: anywhere;
     }
 
+    .goal-card-state-reasons {
+      display: grid;
+      gap: 4px;
+      padding: 8px 10px;
+      border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
+      border-radius: 6px;
+      color: var(--vscode-descriptionForeground);
+      background: color-mix(in srgb, var(--vscode-inputValidation-warningBackground, transparent) 45%, transparent);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
     .goal-transcript-progress-row {
       justify-content: space-between;
       gap: 10px;
@@ -231,6 +373,11 @@ export function getGoalTranscriptStyles(): string {
 
       .goal-transcript-progress {
         width: 100%;
+      }
+
+      .goal-assessment-grid,
+      .goal-objective-diff {
+        grid-template-columns: 1fr;
       }
     }
   `.slice(1);

@@ -264,6 +264,22 @@ export const commandMenuTemplateFragment: WebviewFragment = {
               </span>
             </label>
           </section>
+
+          <section class="command-section command-goal-section" aria-label="Goal">
+            <button
+              id="commandGoalMode"
+              type="button"
+              class="command-row command-goal-mode"
+              role="menuitemcheckbox"
+              aria-checked="false"
+            >
+              <span class="command-row-main">
+                <span class="command-row-title" data-i18n="goalModeTitle">Goal 模式</span>
+                <span id="commandGoalModeDescription" class="command-row-description" data-i18n="goalModeDescription">在输入框提交可验收的持久目标</span>
+              </span>
+              <span class="command-row-value command-goal-check" aria-hidden="true">✓</span>
+            </button>
+          </section>
         </div>
 `.slice(1)
 };

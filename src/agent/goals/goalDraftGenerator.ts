@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto';
 import type { ModelSourceConfigSnapshot } from '../../accounts/types';
 import type { KeepseekLanguage } from '../../shared/i18n';
-import type { KeepseekModel, SafeNpmScript, UsageEvent } from '../../shared/types';
+import type { AgentProgressEvent, KeepseekModel, SafeNpmScript, UsageEvent } from '../../shared/types';
 import { isRecord } from '../../shared/errors';
 import { requestApprovalReviewText } from '../../approvals/oneShotTextRequest';
 import {
   MAX_GOAL_OBJECTIVE_CHARACTERS,
   MAX_GOAL_PROPOSAL_WORK_ITEMS,
   type GoalCriterionType,
+  type GoalDraftAssessmentV1,
   type GoalProposalDecisionV1,
   type GoalProposalV1,
   type GoalProposalWorkItemV1
@@ -26,10 +27,15 @@ const GOAL_DRAFT_MAX_OUTPUT_TOKENS = 4_000;
  * criteria-only draft. The V1 proposal now includes candidate work items. */
 export type GoalDraftSuggestionV1 = GoalProposalV1;
 
-export const GOAL_DRAFT_GENERATOR_SYSTEM_PROMPT = `You prepare a conservative KeepSeek Goal proposal from one user objective.
+export const GOAL_DRAFT_GENERATOR_SYSTEM_PROMPT = `You assess and prepare one conservative KeepSeek Goal proposal from one user objective.
 Return exactly one JSON object and no markdown or commentary:
-{"version":1,"objective":"...","workItems":[{"id":"work-1","title":"...","detail":"...","acceptanceCriteria":[{"id":"criterion-1","text":"...","type":"validation|workspace_state|artifact|manual","evidenceRequirement":"..."}],"dependsOn":[]}],"includeScope":["workspace/relative/path"],"excludeScope":["workspace/relative/path"],"requiredValidations":["compile|lint|test"]}
+{"version":1,"verdict":"ready|needs_normalization","reason":"...","originalObjective":"...","normalizedObjective":"...","proposal":{"version":1,"objective":"...","workItems":[{"id":"work-1","title":"...","detail":"...","acceptanceCriteria":[{"id":"criterion-1","text":"...","type":"validation|workspace_state|artifact|manual","evidenceRequirement":"..."}],"dependsOn":[]}],"includeScope":["workspace/relative/path"],"excludeScope":["workspace/relative/path"],"requiredValidations":["compile|lint|test"]}}
 Rules:
+- originalObjective must exactly equal the supplied objective.
+- Use verdict ready when the objective is already clear and testable; then normalizedObjective must exactly equal originalObjective.
+- Use needs_normalization only to make the requested delivery explicit or remove harmless conversational ambiguity. Give a concrete non-empty reason.
+- Normalization must preserve constraints, references, safety boundaries, and scope. Never invent facts, product scope, or architecture decisions, and never silently remove a user restriction.
+- proposal.objective must exactly equal normalizedObjective. Assessment, reason, and objective differences are review-only and never create a Goal.
 - Normally produce 4-8 independently reviewable work items; never produce more than 20.
 - Prefer no more than 12 work items. Titles are at most 240 characters, details at most 1500, criterion fields at most 2000, scopes at most 512, and total JSON at most 64000 characters.
 - Work-item and criterion ids use lowercase letters, digits, and hyphens, start with a letter or digit, contain at most 64 characters, are unique, and are not UUIDs.
@@ -54,7 +60,8 @@ export class GoalDraftGeneratorService {
     language: KeepseekLanguage;
     signal?: AbortSignal;
     onUsage?: (event: UsageEvent) => void;
-  }): Promise<GoalProposalV1> {
+    onProgress?: (event: AgentProgressEvent) => void;
+  }): Promise<GoalDraftAssessmentV1> {
     const objective = normalizeText(input.objective).trim();
     if (!objective) throw new Error('Goal objective is required.');
     if (objective.length > MAX_GOAL_OBJECTIVE_CHARACTERS) throw new Error('Goal objective is too long.');
@@ -67,10 +74,47 @@ export class GoalDraftGeneratorService {
       language: input.language,
       signal: input.signal,
       maxOutputTokens: GOAL_DRAFT_MAX_OUTPUT_TOKENS,
+      onDelta: input.onProgress,
       onUsage: (event) => input.onUsage?.({ ...event, source: 'subagent' })
     });
-    return parseGoalDraftSuggestion(raw, available, objective);
+    return parseGoalDraftAssessment(raw, available, objective);
   }
+}
+
+export function parseGoalDraftAssessment(
+  raw: string,
+  availableValidations: readonly SafeNpmScript[],
+  expectedOriginalObjective: string
+): GoalDraftAssessmentV1 {
+  const parsed = parseJsonObject(raw);
+  if (!isRecord(parsed) || parsed.version !== 1 || !hasExactKeys(parsed, [
+    'version', 'verdict', 'reason', 'originalObjective', 'normalizedObjective', 'proposal'
+  ]) || (parsed.verdict !== 'ready' && parsed.verdict !== 'needs_normalization') || !isRecord(parsed.proposal)) {
+    throw new Error('Goal draft generator returned an invalid assessment schema.');
+  }
+  const expected = normalizeText(expectedOriginalObjective).trim();
+  const originalObjective = boundedText(parsed.originalObjective, MAX_GOAL_OBJECTIVE_CHARACTERS, 'original objective');
+  if (originalObjective !== expected) throw new Error('Goal draft generator changed the original objective.');
+  const normalizedObjective = boundedText(parsed.normalizedObjective, MAX_GOAL_OBJECTIVE_CHARACTERS, 'normalized objective');
+  const reason = boundedText(parsed.reason, MAX_WORK_ITEM_DETAIL_CHARACTERS, 'assessment reason');
+  assertSafeProposalText(originalObjective);
+  assertSafeGeneratedText(normalizedObjective);
+  assertSafeGeneratedText(reason);
+  if (parsed.verdict === 'ready' && normalizedObjective !== originalObjective) {
+    throw new Error('A ready Goal assessment must preserve the objective exactly.');
+  }
+  if (parsed.verdict === 'needs_normalization' && normalizedObjective === originalObjective) {
+    throw new Error('A normalized Goal assessment must contain a changed objective.');
+  }
+  const proposal = parseGoalDraftSuggestion(JSON.stringify(parsed.proposal), availableValidations, normalizedObjective);
+  return {
+    version: 1,
+    verdict: parsed.verdict,
+    reason,
+    originalObjective,
+    normalizedObjective,
+    proposal
+  };
 }
 
 export function parseGoalDraftSuggestion(

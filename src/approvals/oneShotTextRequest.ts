@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ModelSourceConfigSnapshot } from '../accounts/types';
 import { requiresModelSourceApiKey } from '../accounts/sourceCapabilities';
 import type { KeepseekLanguage } from '../shared/i18n';
-import type { KeepseekModel, UsageEvent } from '../shared/types';
+import type { AgentRunCallbacks, KeepseekModel, UsageEvent } from '../shared/types';
 import { getConfiguredModelUsagePricing } from '../shared/config';
 import type { DeepSeekChatRequestBody } from '../agent/deepseek/types';
 import { createProviderClient } from '../agent/providers/factory';
@@ -69,6 +69,7 @@ export async function requestApprovalReviewText(input: {
   language: KeepseekLanguage;
   signal?: AbortSignal;
   onUsage?: (event: UsageEvent) => void;
+  onDelta?: AgentRunCallbacks['onDelta'];
   maxOutputTokens?: number;
 }): Promise<string> {
   if (!input.sourceConfig.apiKey.trim() && requiresModelSourceApiKey(input.sourceConfig)) {
@@ -96,6 +97,7 @@ export async function requestApprovalReviewText(input: {
       }),
       language: input.language,
       signal: abort.signal,
+      callbacks: input.onDelta ? { onDelta: input.onDelta } : undefined,
       runDeadlineAt: deadlineAt,
       requestId
     });
@@ -126,7 +128,8 @@ export async function requestApprovalReviewText(input: {
         source: 'reviewer'
       }));
     }
-    // Provider reasoning is intentionally ignored and never leaves this call.
+    // Provider reasoning is excluded from the returned review text. A caller
+    // may opt into transient deltas for progress UI, but nothing is persisted here.
     return response.message.content.trim();
   } finally {
     abort.dispose();

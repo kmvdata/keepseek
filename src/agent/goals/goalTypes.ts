@@ -41,6 +41,34 @@ export interface GoalProposalV1 {
   proposalHash: string;
 }
 
+/** Ephemeral, pre-Goal assessment. It is kept only in Extension Host memory
+ * and never enters GoalStore, ChatSession messages, or Provider replay. */
+export interface GoalDraftAssessmentV1 {
+  version: 1;
+  verdict: 'ready' | 'needs_normalization';
+  reason: string;
+  originalObjective: string;
+  normalizedObjective: string;
+  proposal: GoalProposalV1;
+}
+
+export type GoalUiMode =
+  | 'chat'
+  | 'goal_armed'
+  | 'proposal_generating'
+  | 'proposal_review'
+  | 'goal_active'
+  | 'goal_terminal'
+  | 'workspace_goal_elsewhere';
+
+export interface GoalUiStateV1 {
+  version: 1;
+  mode: GoalUiMode;
+  composerMode: boolean;
+  activeSessionId: string;
+  goalSessionId?: string;
+}
+
 export type GoalWorkItemSelection = 'selected' | 'unselected';
 
 /** Host-only audit artifact. It is stored with the Goal snapshot and never

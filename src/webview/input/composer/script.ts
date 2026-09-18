@@ -22,6 +22,13 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
   source: `
       composer.addEventListener('submit', function(event) {
         event.preventDefault();
+        var goalMode = String(state.goalUi?.mode || 'chat');
+        if (goalMode !== 'chat' && goalMode !== 'goal_armed') {
+          closeCommandMenu();
+          closeReferenceMenu(false);
+          window.keepseekGoalInterface?.focusCard();
+          return;
+        }
         if (state.isBusy) {
           closeCommandMenu();
           closeReferenceMenu(false);
@@ -34,22 +41,47 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
         if (!prompt.trim()) return;
         closeCommandMenu();
         closeReferenceMenu(false);
-        vscode.postMessage({
-          type: 'sendPrompt',
-          prompt: prompt,
-          sourceId: state.selectedSourceId,
-          modelId: state.selectedModelId,
-          settings: readAgentSettingsFromControls(),
-          references: collectPromptFileReferences(),
-          skillIds: collectActiveSkillIds()
-        });
-        state.isBusy = true;
+        if (goalMode === 'goal_armed') {
+          vscode.postMessage({
+            type: 'prepareGoal', objective: prompt,
+            sourceId: state.selectedSourceId, modelId: state.selectedModelId,
+            references: collectPromptFileReferences(), skillIds: collectActiveSkillIds()
+          });
+          state.goalUi = { ...(state.goalUi || {}), mode: 'proposal_generating', composerMode: true };
+          // Presentation-only placeholder. The Extension Host replaces it with
+          // the authoritative proposal/preparation state on the next revision.
+          state.goalProposal = {
+            proposal: null,
+            conservativeProposal: null,
+            visibleOriginalObjective: prompt,
+            selectedWorkItemIds: [],
+            generationStatus: 'generating',
+            generationMessage: t('goalPreparationValidatingInput'),
+            generatorModelId: '',
+            preparationStage: 'validating_input',
+            streamedCharacters: 0
+          };
+          refreshGoalTranscriptCard();
+          renderStatus();
+        } else {
+          vscode.postMessage({
+            type: 'sendPrompt',
+            prompt: prompt,
+            sourceId: state.selectedSourceId,
+            modelId: state.selectedModelId,
+            settings: readAgentSettingsFromControls(),
+            references: collectPromptFileReferences(),
+            skillIds: collectActiveSkillIds()
+          });
+          state.isBusy = true;
+        }
         renderInputControls();
         clearPrompt();
       });
 
       if (sendButton) {
         sendButton.addEventListener('click', function(event) {
+          if (String(state.goalUi?.mode || 'chat') !== 'chat') return;
           if (!state.isBusy) {
             return;
           }
@@ -75,7 +107,8 @@ export const composerRenderFragment: WebviewFragment = {
         renderContextProgress();
         renderCommandMenu();
         renderReferenceMenuButton();
-        renderGoalControls();
+        renderGoalComposerState();
+        window.keepseekGoalDialog?.sync?.();
         renderSendButton();
         setApiKeyVisible(apiKeyVisible, false);
         if (settingsOverlay && !settingsOverlay.classList.contains('hidden')) {
@@ -85,7 +118,8 @@ export const composerRenderFragment: WebviewFragment = {
 
       function renderReferenceMenuButton() {
         if (!referenceMenuButton) { return; }
-        var busy = Boolean(state.isBusy);
+        var goalMode = String(state.goalUi?.mode || 'chat');
+        var busy = Boolean(state.isBusy) || (goalMode !== 'chat' && goalMode !== 'goal_armed');
         referenceMenuButton.disabled = busy;
         referenceMenuButton.title = busy ? t('referenceFileDisabledWhileBusy') : t('referenceFileTitle');
         referenceMenuButton.setAttribute('aria-disabled', busy ? 'true' : 'false');
@@ -94,10 +128,12 @@ export const composerRenderFragment: WebviewFragment = {
 
       function renderSendButton(isEmpty) {
         if (!sendButton) { return; }
-        var isAbortMode = Boolean(state.isBusy);
+        var goalMode = String(state.goalUi?.mode || 'chat');
+        var goalLocked = goalMode !== 'chat' && goalMode !== 'goal_armed';
+        var isAbortMode = Boolean(state.isBusy) && goalMode === 'chat';
         var mode = isAbortMode ? 'abort' : 'send';
-        var label = t(isAbortMode ? 'stop' : 'send');
-        sendButton.disabled = !isAbortMode && isPromptSubmittableEmpty();
+        var label = t(isAbortMode ? 'stop' : goalMode === 'goal_armed' ? 'goalPrepareSubmit' : 'send');
+        sendButton.disabled = goalLocked || (!isAbortMode && isPromptSubmittableEmpty());
         sendButton.classList.toggle('is-abort', isAbortMode);
         sendButton.title = label;
         sendButton.setAttribute('aria-label', label);
@@ -105,6 +141,23 @@ export const composerRenderFragment: WebviewFragment = {
           sendButton.dataset.mode = mode;
           sendButton.innerHTML = isAbortMode ? stopIconSvg : sendIconSvg;
         }
+      }
+
+      function renderGoalComposerState() {
+        var mode = String(state.goalUi?.mode || 'chat');
+        var editable = mode === 'chat' || mode === 'goal_armed';
+        composer.classList.toggle('is-goal-mode', mode !== 'chat' && mode !== 'workspace_goal_elsewhere');
+        composer.classList.toggle('is-goal-locked', !editable);
+        promptInput.setAttribute('contenteditable', editable ? 'true' : 'false');
+        promptInput.setAttribute('aria-disabled', editable ? 'false' : 'true');
+        var placeholderKey = mode === 'goal_armed' ? 'goalComposerPlaceholder'
+          : mode === 'proposal_generating' ? 'goalComposerGenerating'
+            : mode === 'proposal_review' ? 'goalComposerReview'
+              : mode === 'goal_active' ? 'goalComposerActive'
+                : mode === 'goal_terminal' ? 'goalComposerTerminal'
+                  : mode === 'workspace_goal_elsewhere' ? 'goalComposerElsewhere'
+                    : 'promptPlaceholder';
+        promptInput.dataset.placeholder = t(placeholderKey);
       }
 
 `.slice(1)

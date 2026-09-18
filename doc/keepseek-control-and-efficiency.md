@@ -110,7 +110,7 @@
 ### 4.5 完成审查（`goalCompletionReview.ts`）
 - 无工具调用返回 `candidate_final` 后，宿主先复核 lease、身份、Trust、授权、TaskPlan、criteria、最后 mutation 之后的验证、所有副作用终态与预算，再调用**隔离、无工具、无写入/执行能力**的 completion reviewer。
 - reviewer 决策绑定 contract/revision/candidate/evidence manifest/mutation revision，提交 completed 前全部重验。
-- 仅纯机器可验证 criteria 才允许 reviewer 不可用回退；正费用上限下无法计价 reviewer 时不允许回退；`manual` criterion 必须由用户在管理弹窗明确确认。
+- 仅纯机器可验证 criteria 才允许 reviewer 不可用回退；正费用上限下无法计价 reviewer 时不允许回退；`manual` criterion 必须由用户在常驻 Goal 进度卡明确确认。
 
 ### 4.6 TaskPlan 运行时任务跟踪（`taskPlan.ts`）
 - 每个 run 附带结构化计划（goal + steps），步种类 `inspect / edit / validate`；工具错误转为 blocker，plan 进入 `blocked`，解决后恢复 `running`。

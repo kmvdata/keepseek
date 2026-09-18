@@ -1,10 +1,33 @@
 import type { ApprovalMode } from '../../shared/types';
 import {
   isGoalTerminalStatus,
+  type GoalUiStateV1,
   type GoalRecordV1,
   type GoalTraceSummaryV1,
   type GoalViewModelV2
 } from './goalTypes';
+
+export function createGoalUiState(input: {
+  activeSessionId: string;
+  composerMode: boolean;
+  goal?: GoalRecordV1;
+  proposalStatus?: 'idle' | 'generating' | 'ready' | 'error' | 'cancelled';
+}): GoalUiStateV1 {
+  const goalSessionId = input.goal?.sessionId;
+  let mode: GoalUiStateV1['mode'];
+  if (input.goal && goalSessionId !== input.activeSessionId) mode = 'workspace_goal_elsewhere';
+  else if (input.goal) mode = isGoalTerminalStatus(input.goal.status) ? 'goal_terminal' : 'goal_active';
+  else if (input.proposalStatus === 'generating') mode = 'proposal_generating';
+  else if (input.proposalStatus) mode = 'proposal_review';
+  else mode = input.composerMode ? 'goal_armed' : 'chat';
+  return {
+    version: 1,
+    mode,
+    composerMode: mode === 'workspace_goal_elsewhere' ? false : input.composerMode,
+    activeSessionId: input.activeSessionId,
+    ...(goalSessionId ? { goalSessionId } : {})
+  };
+}
 
 export function createGoalViewModel(
   record: GoalRecordV1 | undefined,

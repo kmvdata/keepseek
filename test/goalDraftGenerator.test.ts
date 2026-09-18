@@ -5,6 +5,7 @@ import {
   createConservativeGoalProposal,
   createGoalProposalDecision,
   GoalDraftGeneratorService,
+  parseGoalDraftAssessment,
   parseGoalDraftSuggestion,
   verifyGoalProposal
 } from '../src/agent/goals/goalDraftGenerator';
@@ -26,6 +27,48 @@ const validDraft = {
   excludeScope: ['out'],
   requiredValidations: ['compile']
 };
+
+const validAssessment = {
+  version: 1,
+  verdict: 'needs_normalization',
+  reason: '将交付结果明确为可验收目标。',
+  originalObjective: '实现持久 Goal',
+  normalizedObjective: '实现并验证持久 Goal',
+  proposal: { ...validDraft, objective: '实现并验证持久 Goal' }
+};
+
+test('Goal assessment strictly binds original, normalized objective, and proposal in one response', () => {
+  const assessment = parseGoalDraftAssessment(JSON.stringify(validAssessment), ['compile'], validAssessment.originalObjective);
+  assert.equal(assessment.verdict, 'needs_normalization');
+  assert.equal(assessment.proposal.objective, assessment.normalizedObjective);
+  assert.equal(verifyGoalProposal(assessment.proposal), true);
+  const ready = parseGoalDraftAssessment(JSON.stringify({
+    ...validAssessment,
+    verdict: 'ready',
+    reason: '目标已经明确且可验收。',
+    normalizedObjective: validAssessment.originalObjective,
+    proposal: validDraft
+  }), ['compile'], validAssessment.originalObjective);
+  assert.equal(ready.normalizedObjective, ready.originalObjective);
+});
+
+test('Goal assessment rejects unknown fields, mismatches, unsafe text, empty reasons, and invalid proposal graphs', () => {
+  const invalid = [
+    { ...validAssessment, extra: true },
+    { ...validAssessment, originalObjective: '被篡改' },
+    { ...validAssessment, reason: '' },
+    { ...validAssessment, normalizedObjective: '另一个目标', proposal: validAssessment.proposal },
+    { ...validAssessment, normalizedObjective: '/Users/alice/private', proposal: { ...validAssessment.proposal, objective: '/Users/alice/private' } },
+    { ...validAssessment, reason: 'api_key=secret' },
+    { ...validAssessment, proposal: { ...validAssessment.proposal, requiredValidations: ['test'] } },
+    { ...validAssessment, proposal: { ...validAssessment.proposal, workItems: validAssessment.proposal.workItems.map((item, index) => ({
+      ...item, dependsOn: [index ? 'work-ui' : 'work-tests']
+    })) } },
+    { ...validAssessment, verdict: 'ready', normalizedObjective: validAssessment.normalizedObjective },
+    { ...validAssessment, verdict: 'needs_normalization', normalizedObjective: validAssessment.originalObjective, proposal: validDraft }
+  ];
+  for (const value of invalid) assert.throws(() => parseGoalDraftAssessment(JSON.stringify(value), ['compile'], validAssessment.originalObjective), /Goal/u);
+});
 
 test('Goal proposal generator strictly parses work items, dependencies, scope, and hashes', () => {
   const parsed = parseGoalDraftSuggestion(JSON.stringify(validDraft), ['compile'], validDraft.objective);
@@ -86,13 +129,15 @@ test('Goal proposal selection requires selected dependencies', () => {
 
 test('Goal draft generation is tool-free, cancelable, and reports usage as subagent work', async () => {
   let seen: { systemPrompt: string; userPrompt: string; maxOutputTokens?: number } | undefined;
+  const progress: string[] = [];
   const service = new GoalDraftGeneratorService(async (input) => {
     seen = input;
+    input.onDelta?.({ type: 'content', delta: '{"version":1}' });
     input.onUsage?.({
       usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2, cacheHitTokens: 0, cacheMissTokens: 1 },
       cost: 0, currency: '', modelId: input.model.id, source: 'reviewer'
     });
-    return JSON.stringify(validDraft);
+    return JSON.stringify(validAssessment);
   });
   let usageSource = '';
   const parsed = await service.generate({
@@ -101,13 +146,17 @@ test('Goal draft generation is tool-free, cancelable, and reports usage as subag
     model: { id: 'subagent', label: 'Subagent', provider: 'openai-compatible', sourceId: 'source' },
     sourceConfig: { sourceId: 'source', provider: 'openai-compatible', apiKey: 'key', baseUrl: 'https://example.test', supportsBilling: false },
     language: 'zh-CN',
+    onProgress: (event) => { progress.push(`${event.type}:${event.delta}`); },
     onUsage: (event) => { usageSource = event.source; }
   });
-  assert.equal(parsed.workItems.length, 2);
+  assert.equal(parsed.proposal.workItems.length, 2);
+  assert.equal(parsed.proposal.objective, parsed.normalizedObjective);
   assert.equal(usageSource, 'subagent');
   assert.equal(seen?.systemPrompt, GOAL_DRAFT_GENERATOR_SYSTEM_PROMPT);
   assert.equal(seen?.maxOutputTokens, 4_000);
+  assert.deepEqual(progress, ['content:{"version":1}']);
   assert.doesNotMatch(seen?.userPrompt ?? '', /tools/u);
+  assert.match(seen?.systemPrompt ?? '', /verdict/u);
 });
 
 test('Goal draft cancellation and conservative fallback remain available without creating a Goal', async () => {

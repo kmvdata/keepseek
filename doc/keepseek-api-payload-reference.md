@@ -166,16 +166,16 @@ Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使�
 
 ### 2.4 Goal-only V10 payload 与 replay
 
-点击 `G` 后、用户确认开始前的 Goal 表单预填是独立的无工具子代理请求：system 指令固定，user payload 只含版本、已去除已知本机引用路径的 objective 和当前可用 validation 列表；严格 JSON 输出只用于填表，不进入 Goal replay，不创建 ChatMessage，也不升级 session protocol。取消会中止该请求；用量记入普通 session 的 `subagent` 分类。
+用户从命令菜单开启 Goal composer 模式并提交目标后、确认创建前，宿主发起一次独立的无工具 proposal 请求：system 指令固定，user payload 只含版本、已去除已知本机引用路径的 objective 和当前可用 validation 列表。严格 JSON 响应是临时 `GoalDraftAssessmentV1`，一次返回判定、理由、逐字匹配的原目标、必要时的规范化目标，以及 objective 与规范化目标完全一致的 `GoalProposalV1`。宿主严格校验 wrapper 字段、长度、安全文本、validation、scope、依赖图和 proposal hash；该对象只进入 Extension Host 易失 pending state，不进入 Goal replay、ChatMessage 或 GoalStore，也不升级 session protocol。取消会中止该请求；用量记入普通 session 的 `subagent` 分类，不计尚不存在的 Goal 请求/费用账本。
 
-只有用户通过输入区 `G` 按钮打开确认面板并点击“开始 Goal”时，该 session 才升级到 request protocol V10。V10 不增加模型工具，tool schema version 仍为 V9；`getAgentSystemPrompt(v10)` 与 `getAgentTools(v10)` 的序列化字节分别等同 V9。首次 Provider user content 是已持久化的 `Goal: <objective>` 可见消息/引用展开内容加确定性 tail：
+只有用户在常驻确认卡或创建高级设置 Dialog 中明确采纳后，该 session 才升级到 request protocol V10。采用建议使用同一 assessment 中的 normalized objective 与 proposal；按原目标创建使用宿主生成并验证的保守 proposal，不把“跳过规范化”解释为执行授权。V10 不增加模型工具，tool schema version 仍为 V9；`getAgentSystemPrompt(v10)` 与 `getAgentTools(v10)` 的序列化字节分别等同 V9。首次 Provider user content 是已持久化的 `Goal: <objective>` 可见消息/引用展开内容加确定性 V2 tail：
 
 ```text
 Goal: <用户确认前可见的目标与引用>
 
-<keepseek_goal_contract_v1>
-{"version":1,"canonicalHash":"<hash>","objective":"...","amendments":[],"acceptanceCriteria":[...],"includeScope":[...],"excludeScope":[...],"requiredValidations":[...],"completionPolicy":"host_and_reviewer","budgets":{...},"requestProtocolVersion":10,"toolSchemaVersion":9}
-</keepseek_goal_contract_v1>
+<keepseek_goal_contract_v2>
+{"version":2,"canonicalHash":"<hash>","objective":"...","amendments":[],"proposalHash":"...","workItems":[...],"acceptanceCriteria":[...],"includeScope":[...],"excludeScope":[...],"requiredValidations":[...],"completionPolicy":"host_and_reviewer","budgets":{...},"requestProtocolVersion":10,"toolSchemaVersion":9}
+</keepseek_goal_contract_v2>
 ```
 
 tail 不含本地 Goal ID、时间戳、凭据、绝对路径、source ID、endpoint hash、runtime profile、lease owner 或 fencing token；这些只在 canonical host contract/snapshot 中。该完整 user 字节在首个 v3 checkpoint 和 `ChatMessage.providerContent` 中各自冻结，恢复时要求精确匹配，不重新 trim、格式化或归档改写。
