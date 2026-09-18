@@ -245,6 +245,29 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.match(detailsRenderer, /if \(mainSessionOnly\) \{\s*list\.append\(createActualAnalysisCard/u);
   assert.match(script, /function createSourceAnalysisCard\(group, colorClass\)/u);
   assert.match(script, /amountText: amountText, text: textValue/u);
+  const costFormatterSource = script.slice(
+    script.indexOf('function formatMetricCost('),
+    script.indexOf('function formatMetricBalance(')
+  );
+  const formatMetricCost = new Function('t', costFormatterSource + '; return formatMetricCost;')(
+    (key: string) => key
+  ) as (value: number, currency: string, hasData: boolean, truncateToCents?: boolean) => string;
+  assert.equal(formatMetricCost(12.239, '¥', true, true), '¥12.23');
+  assert.equal(formatMetricCost(12.235, '¥', true, true), '¥12.23');
+  assert.equal(formatMetricCost(0.009, '¥', true, true), '¥0.00');
+  assert.equal(formatMetricCost(12.239, '¥', true), '¥12.239');
+  const accountedCostsSource = script.slice(
+    script.indexOf('function formatAccountedCosts('),
+    script.indexOf('function normalizeCacheReasonList(')
+  );
+  const formatAccountedCosts = new Function(
+    't', accountedCostsSource + costFormatterSource + '; return formatAccountedCosts;'
+  )((key: string) => key) as (usage: Record<string, unknown>) => { amountText: string };
+  const pricedUsage = {
+    costByCurrency: { '¥': 12.239 }, pricingStatus: 'priced', pricedRequestCount: 1, unpricedRequestCount: 0
+  };
+  assert.equal(formatAccountedCosts({ ...pricedUsage, provider: 'deepseek' }).amountText, '¥12.23');
+  assert.equal(formatAccountedCosts({ ...pricedUsage, provider: 'kimi' }).amountText, '¥12.239');
   assert.doesNotThrow(() => new Function(script));
   const webviewScript = getScript();
   assert.doesNotThrow(() => new Function(webviewScript));

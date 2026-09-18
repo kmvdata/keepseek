@@ -15,14 +15,18 @@ DeepSeek API 提供服务端上下文缓存（context caching / prompt prefix ca
 
 ### 1.2 计费差异：命中与未命中相差 50~120 倍
 
-KeepSeek 默认价格表（`src/shared/config.ts` 的 `DEFAULT_USAGE_PRICING`）：
+KeepSeek 默认价格表（`src/shared/config.ts` 的 `DEFAULT_USAGE_PRICING`）按 DeepSeek
+官方峰谷价格维护；高峰仅为北京时间周一至周五 9:00–12:00、14:00–18:00，
+其余时间（含周末全天）为空闲时段：
 
-| 模型 | 缓存命中价（¥/M tokens） | 输入价（¥/M tokens） | 输出价（¥/M tokens） |
-|---|---|---|---|
-| `deepseek-v4-flash` | 0.02 | 1 | 2 |
-| `deepseek-v4-pro` | 0.025 | 3 | 6 |
+| 模型 | 时段 | 缓存命中价（¥/M tokens） | 输入价（¥/M tokens） | 输出价（¥/M tokens） |
+|---|---|---:|---:|---:|
+| `deepseek-flash` / `deepseek-v4-flash` | 空闲 | 0.02 | 1 | 4 |
+| `deepseek-flash` / `deepseek-v4-flash` | 高峰 | 0.04 | 2 | 8 |
+| `deepseek-v4-pro` | 空闲 | 0.15 | 4.5 | 13.5 |
+| `deepseek-v4-pro` | 高峰 | 0.30 | 9 | 27 |
 
-缓存命中的输入成本只有全价的 **1/50（flash）到 1/120（pro）**。
+缓存命中的输入成本只有缓存未命中输入的 **1/50（Flash）到 1/30（Pro）**。
 
 在 agent 场景下，一次请求的 prompt 由「系统提示 + 稳定上下文 + 历史消息 + 工具定义 + 当前 prompt」构成，其中历史与工具定义往往占据绝大部分 token。因此**多轮会话的每一轮请求，本质上大部分 token 都是重复发送的旧内容**。如果这些旧内容能命中缓存，成本几乎可以忽略；如果命中不了，每一轮都要为全部上下文按全价付费。
 

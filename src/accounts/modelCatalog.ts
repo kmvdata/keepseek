@@ -5,6 +5,7 @@ import {
   getKnownNonTextModelKind
 } from '../shared/modelContextWindowGuesses';
 import {
+  DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
   DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS,
   DEFAULT_GENERIC_MAX_OUTPUT_TOKENS,
   getSupportedDeepSeekV4Models
@@ -85,6 +86,7 @@ export function createModelCatalog(
         ?? fetched?.contextWindowTokens
         ?? builtIn?.contextWindowTokens
         ?? guessedContextWindowTokens
+        ?? (officialDeepSeek ? DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS : undefined)
         ?? DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS;
       const contextWindowSource: KeepseekModel['contextWindowSource'] = manual?.contextWindowTokens
         ? 'manual'
@@ -94,7 +96,9 @@ export function createModelCatalog(
             ? 'built-in'
             : guessedContextWindowTokens
               ? 'guessed'
-              : 'fallback';
+              : officialDeepSeek
+                ? 'built-in'
+                : 'fallback';
       const maxOutputTokens = manual?.maxOutputTokens
         ?? fetched?.maxOutputTokens
         ?? builtIn?.maxOutputTokens

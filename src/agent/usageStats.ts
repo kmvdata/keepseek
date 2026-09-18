@@ -246,16 +246,21 @@ export function addTurnUsageToSessionStats(
 export type PricingPeriod = 'offPeak' | 'peak';
 
 /**
- * DeepSeek 峰谷计价时段判定(北京时间,公告口径 2026-08-17 起)。
+ * DeepSeek 峰谷计价时段判定(北京时间)。
  *
- * 高峰时段 = 北京时间每日 9:00-12:00 与 14:00-18:00,其余为空闲时段。
- * 把时间整体加 8 小时再读 UTC 小时,得到等价于北京时钟的小时数,不依赖运行环境时区。
+ * 高峰时段 = 北京时间周一至周五 9:00-12:00 与 14:00-18:00;
+ * 工作日其余时间及周六、周日全天为空闲时段。把时间整体加 8 小时后读取 UTC
+ * 星期与小时,得到等价于北京时钟的值,不依赖运行环境时区。
  */
 export function getPricingPeriod(date: Date = new Date()): PricingPeriod {
-  const beijingHour = new Date(date.getTime() + 8 * 60 * 60 * 1000).getUTCHours();
-  const isPeak =
+  const beijingTime = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+  const beijingDay = beijingTime.getUTCDay();
+  const beijingHour = beijingTime.getUTCHours();
+  const isWeekday = beijingDay >= 1 && beijingDay <= 5;
+  const isPeak = isWeekday && (
     (beijingHour >= 9 && beijingHour < 12) ||
-    (beijingHour >= 14 && beijingHour < 18);
+    (beijingHour >= 14 && beijingHour < 18)
+  );
   return isPeak ? 'peak' : 'offPeak';
 }
 
@@ -273,7 +278,7 @@ function pickPeakRate(
     : normalizePrice(peakValue);
 }
 
-/** 按空闲档价格折算成本(保留旧入口,等价于按非高峰档计费)。 */
+/** 按当前时刻所在的峰/谷时段折算成本。 */
 export function calculateUsageCost(usage: Usage, rates: UsageCostRates): number {
   return calculateUsageCostAt(usage, rates, new Date());
 }

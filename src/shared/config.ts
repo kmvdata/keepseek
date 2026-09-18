@@ -64,18 +64,22 @@ export const DEFAULT_MAX_IMPLICIT_SKILLS = 3;
 export const DEFAULT_BACKGROUND_MAX_ROUNDS = 5;
 export const DEFAULT_BACKGROUND_MAX_DURATION_MS = 0;
 export const DEFAULT_BACKGROUND_MAX_TOOL_CALLS = 60;
+const DEEPSEEK_V41_FLASH_USAGE_PRICING: UsageCostRates = {
+  cacheHitPrice: 0.02,
+  inputPrice: 1.0,
+  outputPrice: 4.0,
+  peakCacheHitPrice: 0.04,
+  peakInputPrice: 2.0,
+  peakOutputPrice: 8.0,
+  currency: '¥'
+};
+
 export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
-  // DeepSeek 峰谷定价(自 2026-08-17 北京时间 00:00 起生效)。
-  // 空闲档为常规价;高峰档(北京时间每日 9-12 点、14-18 点)价格更高。
-  'deepseek-v4-flash': {
-    cacheHitPrice: 0.05,
-    inputPrice: 1.5,
-    outputPrice: 4.5,
-    peakCacheHitPrice: 0.1,
-    peakInputPrice: 3.0,
-    peakOutputPrice: 9.0,
-    currency: '¥'
-  },
+  // DeepSeek 当前峰谷价格:北京时间工作日 9-12 点、14-18 点为高峰,
+  // 其余时间(含周六、周日全天)为空闲档。旧 V4 Flash 名称按 V4.1 Flash 计费。
+  'deepseek-flash': { ...DEEPSEEK_V41_FLASH_USAGE_PRICING },
+  'deepseek-v4-flash': { ...DEEPSEEK_V41_FLASH_USAGE_PRICING },
+  'deepseek-v4-flash-vision-exp': { ...DEEPSEEK_V41_FLASH_USAGE_PRICING },
   'deepseek-v4-pro': {
     cacheHitPrice: 0.15,
     inputPrice: 4.5,
@@ -532,7 +536,7 @@ export function normalizeIntegerInRange(value: unknown, min: number, max: number
 
 function normalizeUsageCostRates(
   rates: Partial<UsageCostRates>,
-  fallback: UsageCostRates = DEFAULT_USAGE_PRICING['deepseek-v4-flash']
+  fallback: UsageCostRates = DEFAULT_USAGE_PRICING['deepseek-flash']
 ): UsageCostRates {
   return {
     cacheHitPrice: normalizeNonNegativeNumber(rates.cacheHitPrice, fallback.cacheHitPrice),

@@ -284,14 +284,26 @@ export const usageFormattersFragment: WebviewFragment = {
           return { available: false, partial: false, amountText: '', text: '' };
         }
         var partial = usage.pricingStatus === 'partial' || usage.unpricedRequestCount > 0;
+        var truncateToCents = usesOfficialDeepSeekCostFormat(usage);
         var amountText = currencies.map(function(currency) {
-          return formatMetricCost(costs[currency], currency, true);
+          return formatMetricCost(costs[currency], currency, true, truncateToCents);
         }).join(' · ');
         var textValue = amountText;
         if (partial) {
           textValue += ' · ' + t('usagePartialPricing', { count: usage.unpricedRequestCount || 0 });
         }
         return { available: true, partial: partial, amountText: amountText, text: textValue };
+      }
+
+      function usesOfficialDeepSeekCostFormat(usage) {
+        if (usage.provider === 'deepseek' && usage.pricedRequestCount > 0) {
+          return true;
+        }
+        var pricedGroups = Array.isArray(usage.byModelSource)
+          ? usage.byModelSource.filter(function(group) { return group.pricedRequestCount > 0; })
+          : [];
+        return pricedGroups.length > 0
+          && pricedGroups.every(function(group) { return group.provider === 'deepseek'; });
       }
 
       function normalizeCacheReasonList(value) {
@@ -346,7 +358,7 @@ export const usageFormattersFragment: WebviewFragment = {
         return Math.max(0, Math.floor(Number(value) || 0)).toLocaleString();
       }
 
-      function formatMetricCost(value, currency, hasData) {
+      function formatMetricCost(value, currency, hasData, truncateToCents) {
         if (!hasData) {
           return t('usagePendingValue');
         }
@@ -354,10 +366,15 @@ export const usageFormattersFragment: WebviewFragment = {
         if (!Number.isFinite(number)) {
           return t('usagePendingValue');
         }
-        if (number > 0 && number < 0.000001) { return (currency || '') + '<0.000001'; }
+        if (truncateToCents) {
+          var nonNegative = Math.max(0, number);
+          number = Math.floor((nonNegative + Number.EPSILON * Math.max(1, nonNegative)) * 100) / 100;
+        } else if (number > 0 && number < 0.000001) {
+          return (currency || '') + '<0.000001';
+        }
         return (currency || '') + number.toLocaleString(undefined, {
           minimumFractionDigits: 2,
-          maximumFractionDigits: 6
+          maximumFractionDigits: truncateToCents ? 2 : 6
         });
       }
 
@@ -392,4 +409,3 @@ export const usageFormattersFragment: WebviewFragment = {
 
 `.slice(1)
 };
-

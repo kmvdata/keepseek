@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import * as vscode from 'vscode';
+import { createContextUsageEstimateFromMessages } from '../src/agent/contextUsage';
 import { createModelCatalog, findModelBySelection } from '../src/accounts/modelCatalog';
 import { ModelSourceService } from '../src/accounts/modelSourceService';
 import { ModelSourceStore } from '../src/accounts/accountStore';
@@ -60,6 +61,25 @@ describe('model source catalog', () => {
     })]);
     assert.deepEqual(catalog.map((model) => model.id), ['discovered-model', 'manual-model']);
     assert.equal(catalog.some((model) => model.id === 'deepseek-v4-flash'), false);
+  });
+
+  it('keeps the official DeepSeek context window when discovery omits capability metadata', () => {
+    const [model] = createModelCatalog([createSource({
+      id: 'official',
+      baseUrl: 'https://api.deepseek.com/v1',
+      modelCache: { fetchedAt: NOW, models: [{ id: 'deepseek-chat' }] }
+    })]);
+
+    assert.equal(model?.contextWindowTokens, 1_000_000);
+    assert.equal(model?.contextWindowSource, 'built-in');
+    const usage = createContextUsageEstimateFromMessages({
+      model: model!,
+      messages: [{ role: 'user', content: '中'.repeat(300_000) }],
+      outputReserveTokens: 0,
+      safetyReserveTokens: 0
+    });
+    assert.ok(usage.usedTokensEstimate > 300_000 && usage.usedTokensEstimate < 301_000);
+    assert.ok(usage.usedPercent > 30 && usage.usedPercent < 31);
   });
 
   it('hides disabled model IDs from normal catalogs while keeping the full settings inventory', () => {

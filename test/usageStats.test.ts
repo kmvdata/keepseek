@@ -6,8 +6,10 @@ import {
   addUsageEventToSessionStats,
   calculateCacheHitRate,
   calculateUsageCost,
+  calculateUsageCostAt,
   createUsageEvent,
   getCacheMissPossibleReasons,
+  getPricingPeriod,
   normalizeBalanceStateValue,
   normalizeDeepSeekUsage,
   normalizeSessionUsageStatsValue
@@ -157,6 +159,42 @@ test('calculates turn cost and cumulative average hit rate', () => {
   assert.equal(calculateCacheHitRate(stats), (800 / 1500) * 100);
   assert.equal(stats.sessionCost, 0.001316);
   assert.equal(stats.bySource?.executor?.requestCount, 2);
+});
+
+test('applies DeepSeek peak pricing only during Beijing weekday peak hours', () => {
+  assert.equal(getPricingPeriod(new Date('2026-08-24T00:59:59.999Z')), 'offPeak'); // 周一 08:59:59
+  assert.equal(getPricingPeriod(new Date('2026-08-24T01:00:00.000Z')), 'peak'); // 周一 09:00
+  assert.equal(getPricingPeriod(new Date('2026-08-24T04:00:00.000Z')), 'offPeak'); // 周一 12:00
+  assert.equal(getPricingPeriod(new Date('2026-08-24T06:00:00.000Z')), 'peak'); // 周一 14:00
+  assert.equal(getPricingPeriod(new Date('2026-08-24T10:00:00.000Z')), 'offPeak'); // 周一 18:00
+  assert.equal(getPricingPeriod(new Date('2026-08-29T01:00:00.000Z')), 'offPeak'); // 周六 09:00
+  assert.equal(getPricingPeriod(new Date('2026-08-30T06:00:00.000Z')), 'offPeak'); // 周日 14:00
+});
+
+test('calculates current DeepSeek V4.1 Flash and V4 Pro peak and off-peak prices', () => {
+  const usage = {
+    promptTokens: 2_000_000,
+    completionTokens: 1_000_000,
+    totalTokens: 3_000_000,
+    cacheHitTokens: 1_000_000,
+    cacheMissTokens: 1_000_000,
+    cacheDataStatus: 'reported' as const
+  };
+  const flashRates = {
+    cacheHitPrice: 0.02, inputPrice: 1, outputPrice: 4,
+    peakCacheHitPrice: 0.04, peakInputPrice: 2, peakOutputPrice: 8, currency: '¥'
+  };
+  const proRates = {
+    cacheHitPrice: 0.15, inputPrice: 4.5, outputPrice: 13.5,
+    peakCacheHitPrice: 0.3, peakInputPrice: 9, peakOutputPrice: 27, currency: '¥'
+  };
+  const weekdayPeak = new Date('2026-08-24T01:00:00.000Z');
+  const weekendOffPeak = new Date('2026-08-29T01:00:00.000Z');
+
+  assert.equal(calculateUsageCostAt(usage, flashRates, weekdayPeak), 10.04);
+  assert.equal(calculateUsageCostAt(usage, flashRates, weekendOffPeak), 5.02);
+  assert.equal(calculateUsageCostAt(usage, proRates, weekdayPeak), 36.3);
+  assert.equal(calculateUsageCostAt(usage, proRates, weekendOffPeak), 18.15);
 });
 
 test('classifies hidden calls by source without dropping their cost', () => {
