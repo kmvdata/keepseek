@@ -70,7 +70,7 @@ describe('model source catalog', () => {
       modelCache: { fetchedAt: NOW, models: [{ id: 'deepseek-chat' }] }
     })]);
 
-    assert.equal(model?.contextWindowTokens, 1_000_000);
+    assert.equal(model?.contextWindowTokens, 1_048_576);
     assert.equal(model?.contextWindowSource, 'built-in');
     const usage = createContextUsageEstimateFromMessages({
       model: model!,
@@ -79,7 +79,7 @@ describe('model source catalog', () => {
       safetyReserveTokens: 0
     });
     assert.ok(usage.usedTokensEstimate > 300_000 && usage.usedTokensEstimate < 301_000);
-    assert.ok(usage.usedPercent > 30 && usage.usedPercent < 31);
+    assert.ok(usage.usedPercent > 28 && usage.usedPercent < 29);
   });
 
   it('hides disabled model IDs from normal catalogs while keeping the full settings inventory', () => {
@@ -180,14 +180,14 @@ describe('model source catalog', () => {
       models: [{ id: 'deepseek-v4-pro' }]
     })]);
 
-    assert.equal(catalog[0]?.contextWindowTokens, 1_000_000);
+    assert.equal(catalog[0]?.contextWindowTokens, 1_048_576);
     assert.equal(catalog[0]?.contextWindowSource, 'guessed');
-    assert.equal(catalog[0]?.maxOutputTokens, 384_000);
+    assert.equal(catalog[0]?.maxOutputTokens, 393_216);
     assert.equal(catalog[0]?.maxOutputSource, 'guessed');
     assert.equal(getAgentRuntimeProfile(catalog[0]!, {
       thinkingEnabled: true,
       reasoningEffort: 'high'
-    }).maxTokens, 384_000);
+    }).maxTokens, 393_216);
   });
 
   it('shows the conservative fallback for unknown model IDs', () => {

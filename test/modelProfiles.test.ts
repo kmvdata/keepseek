@@ -4,7 +4,9 @@ import {
   COMPRESSION_THRESHOLDS,
   DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS,
   DEFAULT_GENERIC_MAX_OUTPUT_TOKENS,
+  DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
   DEEPSEEK_V4_FLASH_MODEL_ID,
+  DEEPSEEK_V4_MAX_OUTPUT_TOKENS,
   DEEPSEEK_V4_PRO_MODEL_ID,
   getAgentRuntimeProfile,
   getDeepSeekV4ContextCompressionSettings,
@@ -13,10 +15,15 @@ import {
 } from '../src/shared/modelProfiles';
 
 test('KeepSeek exposes only DeepSeek V4 Flash and Pro', () => {
+  const models = getSupportedDeepSeekV4Models();
   assert.deepEqual(
-    getSupportedDeepSeekV4Models().map((model) => model.id),
+    models.map((model) => model.id),
     [DEEPSEEK_V4_FLASH_MODEL_ID, DEEPSEEK_V4_PRO_MODEL_ID]
   );
+  for (const model of models) {
+    assert.equal(model.contextWindowTokens, DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS);
+    assert.equal(model.maxOutputTokens, DEEPSEEK_V4_MAX_OUTPUT_TOKENS);
+  }
 });
 
 test('runtime profiles follow model and thinking mode automatically', () => {

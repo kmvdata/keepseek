@@ -3,7 +3,8 @@ import { getGuessedContextWindowTokens } from './modelContextWindowGuesses';
 
 export const DEEPSEEK_V4_FLASH_MODEL_ID = 'deepseek-v4-flash';
 export const DEEPSEEK_V4_PRO_MODEL_ID = 'deepseek-v4-pro';
-export const DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS = 1_000_000;
+export const DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS = 1_048_576;
+export const DEEPSEEK_V4_MAX_OUTPUT_TOKENS = 393_216;
 /**
  * Capability fallback for a model whose source supplies no trustworthy metadata.
  * 32K / 8K is intentionally conservative: KeepSeek must not claim a million-token
@@ -69,14 +70,14 @@ const SUPPORTED_MODELS: readonly KeepseekModel[] = [
     label: 'DeepSeek-V4-Flash',
     provider: 'deepseek',
     contextWindowTokens: DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
-    maxOutputTokens: 384_000
+    maxOutputTokens: DEEPSEEK_V4_MAX_OUTPUT_TOKENS
   },
   {
     id: DEEPSEEK_V4_PRO_MODEL_ID,
     label: 'DeepSeek-V4-Pro',
     provider: 'deepseek',
     contextWindowTokens: DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
-    maxOutputTokens: 384_000
+    maxOutputTokens: DEEPSEEK_V4_MAX_OUTPUT_TOKENS
   }
 ];
 

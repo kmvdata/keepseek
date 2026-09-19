@@ -29,6 +29,7 @@ const MODEL_CONTEXT_WINDOW_GUESS_RULES: readonly ModelTokenGuessRule[] = [
     ],
     tokens: 1_048_576
   },
+  { aliases: ['deepseek-v4'], tokens: 1_048_576 },
   {
     aliases: [
       'gpt-5-5',
@@ -52,6 +53,8 @@ const MODEL_CONTEXT_WINDOW_GUESS_RULES: readonly ModelTokenGuessRule[] = [
       'qwen-3-8-2-4t-a95b',
       'qwen3-8-max',
       'qwen-3-8-max',
+      'qwen3-8-flash',
+      'qwen-3-8-flash',
       'qwen3-7-max',
       'qwen-3-7-max',
       'qwen3-7-plus',
@@ -60,7 +63,6 @@ const MODEL_CONTEXT_WINDOW_GUESS_RULES: readonly ModelTokenGuessRule[] = [
       'qwen-3-6-flash',
       'qwen3-5-plus',
       'qwen-3-5-plus',
-      'deepseek-v4',
       'deepseek-v3-2',
       'glm-5-2',
       'glm-5-3',
@@ -125,6 +127,8 @@ const MODEL_MAX_OUTPUT_GUESS_RULES: readonly ModelTokenGuessRule[] = [
       'qwen-3-8-2-4t-a95b',
       'qwen3-8-max',
       'qwen-3-8-max',
+      'qwen3-8-flash',
+      'qwen-3-8-flash',
       'qwen3-7-max',
       'qwen-3-7-max',
       'qwen3-7-plus',
@@ -138,7 +142,7 @@ const MODEL_MAX_OUTPUT_GUESS_RULES: readonly ModelTokenGuessRule[] = [
   { aliases: ['gemini-3-7-flash'], tokens: 64_000 },
   { aliases: ['gpt-4o'], tokens: 16_384 },
   { aliases: ['minimax-m2-5-lightning'], tokens: 8_192 },
-  { aliases: ['deepseek-v4'], tokens: 384_000 },
+  { aliases: ['deepseek-v4'], tokens: 393_216 },
   { aliases: ['minimax-m3'], tokens: 131_000 },
   { aliases: ['kimi-k3'], tokens: 131_072 },
   { aliases: ['glm-4-5-air', 'glm-4-5'], tokens: 96_000 },

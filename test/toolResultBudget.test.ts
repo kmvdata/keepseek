@@ -17,7 +17,10 @@ import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import { getScript } from '../src/webview/script';
 import * as vscode from './stubs/vscode';
 import type { AgentRequest, TaskPlan } from '../src/shared/types';
-import { getAgentRuntimeProfile } from '../src/shared/modelProfiles';
+import {
+  DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
+  getAgentRuntimeProfile
+} from '../src/shared/modelProfiles';
 
 const LARGE_ASCII = 'const value = 1; // evidence\n'.repeat(8_000);
 const LARGE_CJK = '这是不可变的工具证据。\n'.repeat(12_000);
@@ -253,7 +256,10 @@ test('generic, metadata-backed 1M, and built-in DeepSeek profiles have no fixed 
   ]) {
     const profile = getAgentRuntimeProfile(model, { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' });
     assert.equal('toolResultTokenBudget' in profile, false, model.id);
-    assert.equal(profile.contextWindowTokens, model.contextWindowTokens ?? 1_000_000);
+    assert.equal(
+      profile.contextWindowTokens,
+      model.contextWindowTokens ?? DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+    );
   }
 });
 
