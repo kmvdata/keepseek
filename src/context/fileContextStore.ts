@@ -43,6 +43,40 @@ export class FileContextStore {
     this.files.delete(uri);
   }
 
+  /** Reload only context files whose backing URI changed on disk. */
+  public async refreshUris(uris: readonly string[]): Promise<boolean> {
+    let changed = false;
+    for (const value of new Set(uris)) {
+      if (!this.files.has(value)) continue;
+      const uri = vscode.Uri.parse(value);
+      try {
+        const stat = await vscode.workspace.fs.stat(uri);
+        const limits = this.getLimits();
+        if (stat.type !== vscode.FileType.File || stat.size > limits.maxFileBytes) {
+          this.files.delete(value);
+          changed = true;
+          continue;
+        }
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        if (bytes.byteLength > limits.maxFileBytes) {
+          this.files.delete(value);
+          changed = true;
+          continue;
+        }
+        const content = this.decodeText(bytes, uri);
+        const languageId = await this.detectLanguageId(uri);
+        this.files.set(value, this.createContextFile(uri, content, languageId));
+        changed = true;
+      } catch {
+        // A delete/move or a newly unreadable file must not leave stale bytes in
+        // the next model request.
+        this.files.delete(value);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   public async addCurrentEditor(): Promise<ContextFile> {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {

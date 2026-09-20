@@ -21,6 +21,7 @@ import './behaviorEvaluation.test';
 import './cacheByteStability.test';
 import './chatSessionStore.test';
 import './changeSet.test';
+import './applyWorkflow.test';
 import './config.test';
 import './contextEntryPoints.test';
 import './inputComposition.test';

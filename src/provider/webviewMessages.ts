@@ -103,16 +103,16 @@ export type WebviewMessage =
   | { type: 'openDirectoryReference'; path: string }
   | { type: 'removeContextFile'; uri: string }
   | { type: 'clearContext' }
-  | { type: 'applyDraftEdit'; id: string }
-  | { type: 'discardDraftEdit'; id: string }
+  | { type: 'applyDraftEdit'; id: string; requestId: string }
+  | { type: 'discardDraftEdit'; id: string; requestId: string }
   | { type: 'openDraftDiff'; id: string }
   | { type: 'openDraftEditFile'; id: string }
-  | { type: 'applyChangeSet'; id: string }
-  | { type: 'discardChangeSet'; id: string }
-  | { type: 'revertDraftEdit'; id: string }
-  | { type: 'revertChangeSet'; id: string }
-  | { type: 'applyAllDraftEdits' }
-  | { type: 'discardAllDraftEdits' }
+  | { type: 'applyChangeSet'; id: string; requestId: string }
+  | { type: 'discardChangeSet'; id: string; requestId: string }
+  | { type: 'revertDraftEdit'; id: string; requestId: string }
+  | { type: 'revertChangeSet'; id: string; requestId: string }
+  | { type: 'applyAllDraftEdits'; requestId?: string }
+  | { type: 'discardAllDraftEdits'; requestId?: string }
   | { type: 'approveDraftRun'; id: string; specHash: string; autoContinue?: boolean }
   | { type: 'approveDraftRunBatch'; snapshot: DraftRunBatchSnapshot }
   | { type: 'cancelDraftRunBatch'; operationId: string }

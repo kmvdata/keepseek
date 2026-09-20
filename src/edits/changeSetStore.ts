@@ -26,6 +26,17 @@ import { getConfiguredPatchSettings } from '../shared/config';
 type Translator = (key: string, values?: Record<string, string | number>) => string;
 type ChangeSetTraceHandler = (changeSet: ChangeSet, event: Record<string, unknown>) => void;
 const MAX_COMPACT_HISTORY_CHANGE_SETS = 500;
+const ARTIFACT_GC_IDLE_DELAY_MS = 2_000;
+
+export interface ChangeSetOperationProgress {
+  changeSetId: string;
+  editId: string;
+  status: ChangeSetFile['status'];
+}
+
+export interface ChangeSetOperationOptions {
+  onProgress?: (progress: ChangeSetOperationProgress) => void;
+}
 
 interface ChangeSetIndexEntry {
   id: string;
@@ -82,6 +93,10 @@ export class ChangeSetStore {
   private readonly loadedSessionIds = new Set<string>();
   private persistenceError?: unknown;
   private persistenceQueue: Promise<void> = Promise.resolve();
+  private persistenceScheduled = false;
+  private artifactGcTimer: ReturnType<typeof setTimeout> | undefined;
+  private artifactGcQueued = false;
+  private readonly activeEditOperations = new Set<string>();
   private initialized = false;
 
   public constructor(
@@ -113,10 +128,12 @@ export class ChangeSetStore {
       this.storageIndex = await this.reconcileShardedIndex(shardedIndex);
       await this.loadSession(this.sessionStore.activeSessionId || this.sessionStore.getActiveSession().id);
       await this.reconcileInterruptedFiles();
+      this.scheduleArtifactGarbageCollection();
       return;
     }
     if (await this.migrateLegacyV3Storage()) {
       await this.reconcileInterruptedFiles();
+      this.scheduleArtifactGarbageCollection();
       return;
     }
     try {
@@ -183,13 +200,18 @@ export class ChangeSetStore {
       } catch {
         // Keeping a redundant legacy copy is safe; V4 remains authoritative.
       }
+      this.scheduleArtifactGarbageCollection();
     } catch {
       // Missing or malformed checkpoint storage must not block the chat view.
     }
   }
 
   public async flush(): Promise<void> {
-    await this.persistenceQueue;
+    let pending: Promise<void>;
+    do {
+      pending = this.persistenceQueue;
+      await pending;
+    } while (pending !== this.persistenceQueue);
     if (this.persistenceError) throw this.persistenceError;
   }
 
@@ -399,6 +421,30 @@ export class ChangeSetStore {
     };
   }
 
+  public getEditUris(editIds: readonly string[]): string[] {
+    const requested = new Set(editIds);
+    const uris = new Set<string>();
+    for (const changeSet of this.changeSets.values()) {
+      for (const file of changeSet.files) {
+        if (!requested.has(file.id)) continue;
+        uris.add(file.uri);
+        if (file.kind === 'move_v1') uris.add(file.targetUri);
+      }
+    }
+    return [...uris];
+  }
+
+  public getChangeSetEditUris(changeSetId: string): string[] {
+    const changeSet = this.changeSets.get(changeSetId);
+    if (!changeSet) return [];
+    const uris = new Set<string>();
+    for (const file of changeSet.files) {
+      uris.add(file.uri);
+      if (file.kind === 'move_v1') uris.add(file.targetUri);
+    }
+    return [...uris];
+  }
+
   public async preflightEdit(editId: string, approval?: DelegatedEditApproval): Promise<DraftEditPreflight> {
     const found = this.findEdit(editId);
     if (!found || !isApplicable(found.edit)) throw new Error('Pending DraftEdit was not found.');
@@ -458,19 +504,26 @@ export class ChangeSetStore {
     return true;
   }
 
-  public async applyEdit(editId: string, approval?: DelegatedEditApproval): Promise<ChangeSetApplyResult | undefined> {
+  public async applyEdit(
+    editId: string,
+    approval?: DelegatedEditApproval,
+    options: ChangeSetOperationOptions = {}
+  ): Promise<ChangeSetApplyResult | undefined> {
     const found = this.findEdit(editId);
     if (!found || !isApplicable(found.edit)) {
       return undefined;
     }
-    const result = await this.applyFiles(found.changeSet, [found.edit], approval);
+    const result = await this.applyFiles(found.changeSet, [found.edit], approval, options);
     if (result.appliedEditIds.length) {
       await this.recordAppliedResult(found.changeSet, result).catch(() => undefined);
     }
     return result;
   }
 
-  public async applyAll(changeSetId: string): Promise<ChangeSetApplyResult | undefined> {
+  public async applyAll(
+    changeSetId: string,
+    options: ChangeSetOperationOptions = {}
+  ): Promise<ChangeSetApplyResult | undefined> {
     const changeSet = this.changeSets.get(changeSetId);
     if (!changeSet) {
       return undefined;
@@ -479,7 +532,7 @@ export class ChangeSetStore {
     if (!files.length) {
       return undefined;
     }
-    const result = await this.applyFiles(changeSet, files);
+    const result = await this.applyFiles(changeSet, files, undefined, options);
     if (result.appliedEditIds.length) {
       await this.recordAppliedResult(changeSet, result).catch(() => undefined);
     }
@@ -488,7 +541,7 @@ export class ChangeSetStore {
 
   public discardEdit(editId: string): boolean {
     const found = this.findEdit(editId);
-    if (!found || !isApplicable(found.edit)) {
+    if (!found || !isApplicable(found.edit) || this.activeEditOperations.has(found.edit.id)) {
       return false;
     }
     found.edit.status = 'discarded';
@@ -508,6 +561,9 @@ export class ChangeSetStore {
   public discardAll(changeSetId: string): boolean {
     const changeSet = this.changeSets.get(changeSetId);
     if (!changeSet) {
+      return false;
+    }
+    if (changeSet.files.some((file) => isApplicable(file) && this.activeEditOperations.has(file.id))) {
       return false;
     }
     let changed = false;
@@ -532,19 +588,25 @@ export class ChangeSetStore {
     return true;
   }
 
-  public async revertEdit(editId: string): Promise<ChangeSetRevertResult | undefined> {
+  public async revertEdit(
+    editId: string,
+    options: ChangeSetOperationOptions = {}
+  ): Promise<ChangeSetRevertResult | undefined> {
     const found = this.findEdit(editId);
     if (!found || !isRevertible(found.edit)) {
       return undefined;
     }
-    const result = await this.revertFiles(found.changeSet, [found.edit]);
+    const result = await this.revertFiles(found.changeSet, [found.edit], options);
     if (result.revertedEditIds.length) {
       await this.recordRevertedResult(found.changeSet, result).catch(() => undefined);
     }
     return result;
   }
 
-  public async revertAll(changeSetId: string): Promise<ChangeSetRevertResult | undefined> {
+  public async revertAll(
+    changeSetId: string,
+    options: ChangeSetOperationOptions = {}
+  ): Promise<ChangeSetRevertResult | undefined> {
     const changeSet = this.changeSets.get(changeSetId);
     if (!changeSet) {
       return undefined;
@@ -553,7 +615,7 @@ export class ChangeSetStore {
     if (!files.length) {
       return undefined;
     }
-    const result = await this.revertFiles(changeSet, files);
+    const result = await this.revertFiles(changeSet, files, options);
     if (result.revertedEditIds.length) {
       await this.recordRevertedResult(changeSet, result).catch(() => undefined);
     }
@@ -580,6 +642,7 @@ export class ChangeSetStore {
       }
     }
     this.schedulePersist();
+    this.scheduleArtifactGarbageCollection();
   }
 
   public discardPendingForSession(sessionId: string): void {
@@ -618,12 +681,29 @@ export class ChangeSetStore {
     this.historicalChangeSets.clear();
     this.checkpoints.clear();
     this.schedulePersist();
+    this.scheduleArtifactGarbageCollection();
   }
 
-  private async applyFiles(changeSet: ChangeSet, files: ChangeSetFile[], approval?: DelegatedEditApproval): Promise<ChangeSetApplyResult> {
+  private async applyFiles(
+    changeSet: ChangeSet,
+    files: ChangeSetFile[],
+    approval?: DelegatedEditApproval,
+    options: ChangeSetOperationOptions = {}
+  ): Promise<ChangeSetApplyResult> {
     const appliedEditIds: string[] = [];
     const failed: ChangeSetApplyFailure[] = [];
+    const acquiredEditIds = new Set<string>();
     for (const file of files) {
+      if (!this.activeEditOperations.has(file.id)) {
+        this.activeEditOperations.add(file.id);
+        acquiredEditIds.add(file.id);
+      }
+    }
+    for (const file of files) {
+      if (!acquiredEditIds.has(file.id)) {
+        failed.push({ editId: file.id, label: file.label, error: 'This DraftEdit is already being applied.' });
+        continue;
+      }
       file.approvalSource = approval?.source ?? 'user_click';
       try {
         const checkpoint = await this.safeFileEditor.applyDraftEdit(file, changeSet.id, approval, {
@@ -637,7 +717,8 @@ export class ChangeSetStore {
                   : next.state === 'interrupted' ? 'interrupted'
                     : 'uncertain';
             this.updateChangeSetStatus(changeSet);
-            await this.persistShardedNow();
+            await this.persistJournalIncremental(changeSet, next);
+            options.onProgress?.({ changeSetId: changeSet.id, editId: file.id, status: file.status });
           }
         });
         this.checkpoints.set(checkpoint.id, checkpoint);
@@ -645,6 +726,7 @@ export class ChangeSetStore {
         file.status = 'applied';
         file.error = undefined;
         appliedEditIds.push(file.id);
+        options.onProgress?.({ changeSetId: changeSet.id, editId: file.id, status: file.status });
       } catch (error) {
         const message = getErrorMessage(error);
         const interruptedCheckpoint = error instanceof SafeFileEditError ? error.checkpoint : undefined;
@@ -657,6 +739,9 @@ export class ChangeSetStore {
             : 'apply_failed';
         file.error = message;
         failed.push({ editId: file.id, label: file.label, error: message });
+        options.onProgress?.({ changeSetId: changeSet.id, editId: file.id, status: file.status });
+      } finally {
+        this.activeEditOperations.delete(file.id);
       }
     }
     const result: ChangeSetApplyResult = {
@@ -672,20 +757,37 @@ export class ChangeSetStore {
       type: 'change_set_apply_result',
       result
     });
-    this.schedulePersist();
+    await this.persistRuntimeChangeSetIncremental(changeSet);
     return result;
   }
 
-  private async revertFiles(changeSet: ChangeSet, files: ChangeSetFile[]): Promise<ChangeSetRevertResult> {
+  private async revertFiles(
+    changeSet: ChangeSet,
+    files: ChangeSetFile[],
+    options: ChangeSetOperationOptions = {}
+  ): Promise<ChangeSetRevertResult> {
     const revertedEditIds: string[] = [];
     const failed: ChangeSetApplyFailure[] = [];
+    const acquiredEditIds = new Set<string>();
     for (const file of files) {
+      if (!this.activeEditOperations.has(file.id)) {
+        this.activeEditOperations.add(file.id);
+        acquiredEditIds.add(file.id);
+      }
+    }
+    for (const file of files) {
+      if (!acquiredEditIds.has(file.id)) {
+        failed.push({ editId: file.id, label: file.label, error: 'This DraftEdit is already being changed.' });
+        continue;
+      }
       const checkpoint = file.checkpointId ? this.checkpoints.get(file.checkpointId) : undefined;
       if (!checkpoint) {
         const error = this.t('changeCheckpointUnavailable', { label: file.label });
         file.status = 'revert_failed';
         file.error = error;
         failed.push({ editId: file.id, label: file.label, error });
+        options.onProgress?.({ changeSetId: changeSet.id, editId: file.id, status: file.status });
+        this.activeEditOperations.delete(file.id);
         continue;
       }
       try {
@@ -697,13 +799,15 @@ export class ChangeSetStore {
                 : next.state === 'interrupted' ? 'interrupted'
                   : 'applying';
             this.updateChangeSetStatus(changeSet);
-            await this.persistShardedNow();
+            await this.persistJournalIncremental(changeSet, next);
+            options.onProgress?.({ changeSetId: changeSet.id, editId: file.id, status: file.status });
           }
         });
         this.checkpoints.set(revertedCheckpoint.id, revertedCheckpoint);
         file.status = 'reverted';
         file.error = undefined;
         revertedEditIds.push(file.id);
+        options.onProgress?.({ changeSetId: changeSet.id, editId: file.id, status: file.status });
       } catch (error) {
         const message = getErrorMessage(error);
         const interruptedCheckpoint = error instanceof SafeFileEditError ? error.checkpoint : undefined;
@@ -716,6 +820,9 @@ export class ChangeSetStore {
             : 'revert_failed';
         file.error = message;
         failed.push({ editId: file.id, label: file.label, error: message });
+        options.onProgress?.({ changeSetId: changeSet.id, editId: file.id, status: file.status });
+      } finally {
+        this.activeEditOperations.delete(file.id);
       }
     }
     const result: ChangeSetRevertResult = {
@@ -730,8 +837,13 @@ export class ChangeSetStore {
       type: 'change_set_revert_result',
       result
     });
+    const remainsRuntime = requiresRuntimeState(changeSet);
     this.compactTerminalChangeSet(changeSet);
-    this.schedulePersist();
+    if (remainsRuntime) {
+      await this.persistRuntimeChangeSetIncremental(changeSet);
+    } else {
+      await this.persistTerminalHistoryIncremental(changeSet);
+    }
     return result;
   }
 
@@ -828,61 +940,163 @@ export class ChangeSetStore {
         this.checkpoints.delete(file.checkpointId);
       }
     }
+    this.scheduleArtifactGarbageCollection();
   }
 
   private schedulePersist(): void {
-    const changeSets = Array.from(this.changeSets.values())
-      .filter(requiresRuntimeState)
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-      .map(cloneChangeSet);
+    if (this.persistenceScheduled) return;
+    this.persistenceScheduled = true;
+    void this.enqueuePersistence(async () => {
+      this.persistenceScheduled = false;
+      await this.writeShardedSnapshot(this.captureShardedSnapshot());
+    }).catch(() => undefined);
+  }
+
+  private async persistShardedNow(): Promise<void> {
+    await this.enqueuePersistence(async () => {
+      await this.writeShardedSnapshot(this.captureShardedSnapshot());
+    });
+  }
+
+  private captureShardedSnapshot(): {
+    changeSets: ChangeSet[];
+    history: WebviewChangeSet[];
+    checkpoints: ChangeCheckpoint[];
+    loadedSessionIds: Set<string>;
+  } {
+    const changeSets = Array.from(this.changeSets.values()).filter(requiresRuntimeState).map(cloneChangeSet);
     const historyById = new Map(this.historicalChangeSets);
     for (const changeSet of this.changeSets.values()) {
-      if (requiresRuntimeState(changeSet)) {
-        historyById.delete(changeSet.id);
-      } else {
-        historyById.set(changeSet.id, toWebviewChangeSet(changeSet));
-      }
+      if (requiresRuntimeState(changeSet)) historyById.delete(changeSet.id);
+      else historyById.set(changeSet.id, toWebviewChangeSet(changeSet));
     }
     const history = Array.from(historyById.values())
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       .slice(0, MAX_COMPACT_HISTORY_CHANGE_SETS)
       .map(cloneWebviewChangeSet);
     this.historicalChangeSets.clear();
-    for (const changeSet of history) {
-      this.historicalChangeSets.set(changeSet.id, changeSet);
-    }
-    const checkpointIds = new Set(
-      changeSets.flatMap((changeSet) => changeSet.files
-        .map((file) => file.checkpointId)
-        .filter((id): id is string => Boolean(id)))
-    );
-    const checkpoints = Array.from(this.checkpoints.values())
-      .filter((checkpoint) => checkpointIds.has(checkpoint.id))
-      .map((checkpoint) => ({ ...checkpoint }));
-    const loadedSessionIds = new Set(this.loadedSessionIds);
-    this.persistenceQueue = this.persistenceQueue
-      .then(async () => {
-        await this.writeShardedSnapshot({ changeSets, history, checkpoints, loadedSessionIds });
-        this.persistenceError = undefined;
-      })
-      .catch((error: unknown) => {
-        this.persistenceError = error; // Critical callers observe this through flush().
-      });
-  }
-
-  private async persistShardedNow(): Promise<void> {
-    const changeSets = Array.from(this.changeSets.values()).filter(requiresRuntimeState).map(cloneChangeSet);
-    const history = Array.from(this.historicalChangeSets.values()).map(cloneWebviewChangeSet);
+    for (const changeSet of history) this.historicalChangeSets.set(changeSet.id, changeSet);
     const checkpointIds = new Set(changeSets.flatMap((changeSet) => changeSet.files
       .map((file) => file.checkpointId).filter((id): id is string => Boolean(id))));
     const checkpoints = Array.from(this.checkpoints.values())
       .filter((checkpoint) => checkpointIds.has(checkpoint.id)).map((checkpoint) => ({ ...checkpoint }));
-    await this.writeShardedSnapshot({
+    return {
       changeSets,
       history,
       checkpoints,
       loadedSessionIds: new Set(this.loadedSessionIds)
+    };
+  }
+
+  private async persistJournalIncremental(changeSet: ChangeSet, checkpoint: ChangeCheckpoint): Promise<void> {
+    const storedChangeSet = cloneChangeSet(changeSet);
+    const storedCheckpoint = { ...checkpoint };
+    await this.enqueuePersistence(async () => {
+      // The checkpoint is committed before its owning runtime shard. The
+      // prepared callback cannot return (and mutation cannot begin) until both
+      // records, plus the first index link, are durable.
+      await writeJsonAtomic(
+        vscode.Uri.joinPath(this.checkpointsUri, fileNameForId(storedCheckpoint.id)),
+        { version: 4, checkpoint: storedCheckpoint }
+      );
+      await writeJsonAtomic(
+        vscode.Uri.joinPath(this.runtimeUri, fileNameForId(storedChangeSet.id)),
+        { version: 4, changeSet: storedChangeSet }
+      );
+      const checkpointIds = storedChangeSet.files
+        .map((file) => file.checkpointId)
+        .filter((id): id is string => Boolean(id));
+      const current = this.storageIndex.entries.find((entry) => entry.id === storedChangeSet.id);
+      const needsIndexCommit = !current
+        || current.kind !== 'runtime'
+        || current.sessionId !== storedChangeSet.sessionId
+        || !sameStringSet(current.checkpointIds, checkpointIds);
+      if (needsIndexCommit) {
+        const latest = await this.readShardedIndex() ?? this.storageIndex;
+        const entries = latest.entries.filter((entry) => entry.id !== storedChangeSet.id);
+        entries.push({
+          id: storedChangeSet.id,
+          sessionId: storedChangeSet.sessionId,
+          kind: 'runtime',
+          storageFile: `runtime/${fileNameForId(storedChangeSet.id)}`,
+          checkpointIds,
+          updatedAt: storedChangeSet.updatedAt
+        });
+        const index: ChangeSetStorageIndex = { version: 4, entries: dedupeIndexEntries(entries) };
+        await writeJsonAtomic(this.indexUri, index);
+        this.storageIndex = index;
+      }
     });
+  }
+
+  private async persistRuntimeChangeSetIncremental(changeSet: ChangeSet): Promise<void> {
+    const storedChangeSet = cloneChangeSet(changeSet);
+    const checkpoints = storedChangeSet.files
+      .map((file) => file.checkpointId ? this.checkpoints.get(file.checkpointId) : undefined)
+      .filter((checkpoint): checkpoint is ChangeCheckpoint => Boolean(checkpoint))
+      .map((checkpoint) => ({ ...checkpoint }));
+    await this.enqueuePersistence(async () => {
+      for (const checkpoint of checkpoints) {
+        await writeJsonAtomic(
+          vscode.Uri.joinPath(this.checkpointsUri, fileNameForId(checkpoint.id)),
+          { version: 4, checkpoint }
+        );
+      }
+      await writeJsonAtomic(
+        vscode.Uri.joinPath(this.runtimeUri, fileNameForId(storedChangeSet.id)),
+        { version: 4, changeSet: storedChangeSet }
+      );
+      const checkpointIds = checkpoints.map((checkpoint) => checkpoint.id);
+      const current = this.storageIndex.entries.find((entry) => entry.id === storedChangeSet.id);
+      if (!current || current.kind !== 'runtime' || current.sessionId !== storedChangeSet.sessionId
+        || !sameStringSet(current.checkpointIds, checkpointIds)) {
+        await this.commitIncrementalIndexEntry({
+          id: storedChangeSet.id,
+          sessionId: storedChangeSet.sessionId,
+          kind: 'runtime',
+          storageFile: `runtime/${fileNameForId(storedChangeSet.id)}`,
+          checkpointIds,
+          updatedAt: storedChangeSet.updatedAt
+        });
+      }
+    });
+  }
+
+  private async persistTerminalHistoryIncremental(changeSet: ChangeSet): Promise<void> {
+    const stored = cloneWebviewChangeSet(toWebviewChangeSet(changeSet));
+    await this.enqueuePersistence(async () => {
+      await writeJsonAtomic(
+        vscode.Uri.joinPath(this.historyUri, fileNameForId(stored.id)),
+        { version: 4, changeSet: stored }
+      );
+      await this.commitIncrementalIndexEntry({
+        id: stored.id,
+        sessionId: stored.sessionId,
+        kind: 'history',
+        storageFile: `history/${fileNameForId(stored.id)}`,
+        checkpointIds: [],
+        updatedAt: stored.updatedAt
+      });
+    });
+  }
+
+  private async commitIncrementalIndexEntry(entry: ChangeSetIndexEntry): Promise<void> {
+    const latest = await this.readShardedIndex() ?? this.storageIndex;
+    const index: ChangeSetStorageIndex = {
+      version: 4,
+      entries: dedupeIndexEntries([...latest.entries.filter((item) => item.id !== entry.id), entry])
+    };
+    await writeJsonAtomic(this.indexUri, index);
+    this.storageIndex = index;
+  }
+
+  private enqueuePersistence(operation: () => Promise<void>): Promise<void> {
+    const pending = this.persistenceQueue.then(operation);
+    this.persistenceQueue = pending.then(
+      () => { this.persistenceError = undefined; },
+      (error: unknown) => { this.persistenceError = error; }
+    );
+    return pending;
   }
 
   private async writeShardedSnapshot(input: {
@@ -934,7 +1148,6 @@ export class ChangeSetStore {
     const index: ChangeSetStorageIndex = { version: 4, entries: dedupeIndexEntries(entries) };
     await writeJsonAtomic(this.indexUri, index);
     this.storageIndex = index;
-    await this.garbageCollectArtifacts(index);
   }
 
   private async readShardedIndex(recordDiagnostics = false): Promise<ChangeSetStorageIndex | undefined> {
@@ -1079,15 +1292,48 @@ export class ChangeSetStore {
     if (changed) await this.persistShardedNow();
   }
 
+  private scheduleArtifactGarbageCollection(): void {
+    this.artifactGcQueued = true;
+    if (this.artifactGcTimer) clearTimeout(this.artifactGcTimer);
+    this.artifactGcTimer = setTimeout(() => {
+      this.artifactGcTimer = undefined;
+      if (!this.artifactGcQueued) return;
+      if (this.activeEditOperations.size) {
+        this.scheduleArtifactGarbageCollection();
+        return;
+      }
+      this.artifactGcQueued = false;
+      void this.enqueuePersistence(async () => {
+        if (this.activeEditOperations.size) {
+          this.scheduleArtifactGarbageCollection();
+          return;
+        }
+        await this.garbageCollectArtifacts(this.storageIndex);
+      }).catch(() => {
+        // GC is fail-closed and best effort. A later startup/terminal-state
+        // trigger retries it; journal durability errors remain observable.
+      });
+    }, ARTIFACT_GC_IDLE_DELAY_MS);
+    (this.artifactGcTimer as NodeJS.Timeout).unref?.();
+  }
+
   private async garbageCollectArtifacts(index: ChangeSetStorageIndex): Promise<void> {
     const liveCheckpointIds = new Set(index.entries.flatMap((entry) => entry.checkpointIds));
     for (const file of await listJsonFiles(this.checkpointsUri)) {
+      if (this.activeEditOperations.size) {
+        this.scheduleArtifactGarbageCollection();
+        return;
+      }
       const uri = vscode.Uri.joinPath(this.checkpointsUri, file);
       const checkpointId = Array.from(liveCheckpointIds).find((id) => fileNameForId(id) === file);
       if (!checkpointId) await vscode.workspace.fs.delete(uri, { useTrash: false }).then(undefined, () => undefined);
     }
     const referencedBlobs = new Set<string>();
     for (const entry of index.entries.filter((item) => item.kind === 'runtime')) {
+      if (this.activeEditOperations.size) {
+        this.scheduleArtifactGarbageCollection();
+        return;
+      }
       const inMemory = this.changeSets.get(entry.id);
       const stored = inMemory ? undefined : await readJsonFile(vscode.Uri.joinPath(this.shardedRootUri, entry.storageFile));
       const changeSet = inMemory ?? (isRecordWithChangeSet(stored) && isStoredChangeSet(stored.changeSet)
@@ -1097,12 +1343,19 @@ export class ChangeSetStore {
       }
     }
     for (const checkpointId of liveCheckpointIds) {
+      if (this.activeEditOperations.size) {
+        this.scheduleArtifactGarbageCollection();
+        return;
+      }
       const checkpoint = this.checkpoints.get(checkpointId)
         ?? await readJsonFile(vscode.Uri.joinPath(this.checkpointsUri, fileNameForId(checkpointId)))
           .then((value) => isRecordWithCheckpoint(value) && isStoredCheckpoint(value.checkpoint) ? value.checkpoint : undefined);
       if (checkpoint?.originalBlobHash) referencedBlobs.add(checkpoint.originalBlobHash);
     }
-    await this.artifactStore.garbageCollect(referencedBlobs);
+    await this.artifactStore.garbageCollect(referencedBlobs, {
+      shouldAbort: () => this.activeEditOperations.size > 0
+    });
+    if (this.activeEditOperations.size) this.scheduleArtifactGarbageCollection();
   }
 
   private assertChangeSetArtifactQuota(changeSet: ChangeSet, nextCheckpoint?: ChangeCheckpoint): void {
@@ -1167,6 +1420,12 @@ function dedupeIndexEntries(entries: ChangeSetIndexEntry[]): ChangeSetIndexEntry
     if (!previous || entry.updatedAt.localeCompare(previous.updatedAt) >= 0) byId.set(entry.id, entry);
   }
   return Array.from(byId.values()).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const values = new Set(left);
+  return values.size === new Set(right).size && right.every((value) => values.has(value));
 }
 
 async function readJsonFile(uri: vscode.Uri): Promise<unknown | undefined> {

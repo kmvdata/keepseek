@@ -61,18 +61,23 @@ export class ChangeArtifactStore {
 
   public async garbageCollect(
     referencedHashes: ReadonlySet<string>,
-    options: { minimumAgeMs?: number } = {}
+    options: { minimumAgeMs?: number; shouldAbort?: () => boolean } = {}
   ): Promise<{ removed: number; retainedBytes: number }> {
     const protectedHashes = new Set(referencedHashes);
+    if (options.shouldAbort?.()) return { removed: 0, retainedBytes: 0 };
     // Persisted Agent/ChangeSet/session checkpoints may all own a blob. Scan
     // every JSON root before sweeping; any unreadable directory/file aborts
     // deletion so GC can never guess that a still-referenced blob is orphaned.
-    if (!await this.collectPersistedReferences(this.globalStorageUri, protectedHashes, 0)) {
+    if (!await this.collectPersistedReferences(this.globalStorageUri, protectedHashes, 0, options.shouldAbort)) {
+      if (options.shouldAbort?.()) return { removed: 0, retainedBytes: 0 };
       return { removed: 0, retainedBytes: await this.getUsageBytes() };
     }
     let removed = 0;
     let retainedBytes = 0;
     for (const [name, type] of await this.listBlobs()) {
+      if (options.shouldAbort?.()) {
+        return { removed, retainedBytes };
+      }
       if (type !== vscode.FileType.File || !/^([a-f0-9]{64})\.blob$/u.test(name)) continue;
       const hash = name.slice(0, 64);
       const uri = vscode.Uri.joinPath(this.blobRoot, name);
@@ -120,8 +125,13 @@ export class ChangeArtifactStore {
     }
   }
 
-  private async collectPersistedReferences(uri: vscode.Uri, hashes: Set<string>, depth: number): Promise<boolean> {
-    if (depth > 12) return false;
+  private async collectPersistedReferences(
+    uri: vscode.Uri,
+    hashes: Set<string>,
+    depth: number,
+    shouldAbort?: () => boolean
+  ): Promise<boolean> {
+    if (depth > 12 || shouldAbort?.()) return false;
     let entries: Array<[string, vscode.FileType]>;
     try {
       entries = await vscode.workspace.fs.readDirectory(uri);
@@ -129,10 +139,11 @@ export class ChangeArtifactStore {
       return depth === 0 ? !(await exists(uri)) : false;
     }
     for (const [name, type] of entries) {
+      if (shouldAbort?.()) return false;
       const child = vscode.Uri.joinPath(uri, name);
       if (type === vscode.FileType.Directory) {
         if (child.toString() === this.blobRoot.toString()) continue;
-        if (!await this.collectPersistedReferences(child, hashes, depth + 1)) return false;
+        if (!await this.collectPersistedReferences(child, hashes, depth + 1, shouldAbort)) return false;
         continue;
       }
       if (type !== vscode.FileType.File || !name.endsWith('.json')) continue;

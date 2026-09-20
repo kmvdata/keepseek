@@ -173,6 +173,10 @@ import {
 } from '../accounts/subagentSettingsStore';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
 import { probeSourceConnection, refreshSourceModelCache } from '../accounts/modelDiscovery';
+
+type ChangeActionMessage = Extract<WebviewMessage,
+  { type: 'applyDraftEdit' | 'discardDraftEdit' | 'applyChangeSet' | 'discardChangeSet' | 'revertDraftEdit' | 'revertChangeSet' }>;
+type ChangeActionFeedbackPhase = 'checking' | 'writing' | 'complete' | 'failed' | 'cancelled' | 'busy' | 'not_found';
 import { createModelCatalog, findModelBySelection, resolveDefaultModel, resolveProjectModel } from '../accounts/modelCatalog';
 import { DefaultModelStore } from '../accounts/defaultModelStore';
 import { ModelSourceService } from '../accounts/modelSourceService';
@@ -304,6 +308,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly usageLedgerStore: UsageLedgerStore;
   private readonly usageLedgerFlushes = new Map<string, Promise<void>>();
   private readonly latestCacheObservationByScope = new Map<string, import('../shared/types').ProviderCacheObservation>();
+  private readonly activeChangeActions = new Set<string>();
+  private runContextRefreshPromise: Promise<void> | undefined;
+  private runContextRefreshInFlight = false;
+  private runContextRefreshError: unknown;
   private startupStatePostCount = 0;
   private firstLightweightStateSent = false;
 
@@ -837,6 +845,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (isApprovalMutationMessage(message.type) && !this.approvalDataReady) {
       console.warn('KeepSeek: ignored an approval action before recovery stores were ready.');
       this.postStartupSettingsPatch();
+      if (isChangeActionMessage(message)) {
+        this.postChangeActionFeedback(message, 'busy', this.t('changeActionBusy'));
+      }
       return;
     }
     switch (message.type) {
@@ -1249,30 +1260,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.draftRuns.showTerminal(message.id);
         return;
       case 'applyDraftEdit':
-        {
-          if (this.isBusy || this.isStartingRun) {
-            return;
-          }
-          const deleteTargets = this.changeSets.getPendingDeleteTargetsForEdit(message.id);
-          if (!(await this.confirmDeleteApply(deleteTargets))) {
-            return;
-          }
-          const result = await this.changeSets.applyEdit(message.id);
-          if (result?.appliedEditIds.length) {
-            await this.refreshSkills({ post: false });
-            await this.handleAppliedRepairEdits(result.appliedEditIds);
-          }
-          this.showChangeSetFailures(result?.failed);
-          this.postState();
-        }
+        await this.handleApplyDraftEdit(message);
         return;
       case 'discardDraftEdit':
-        if (this.isBusy || this.isStartingRun) {
-          return;
-        }
-        this.changeSets.discardEdit(message.id);
-        await this.markActiveRepairDiscarded(message.id);
-        this.postState();
+        await this.handleDiscardDraftEdit(message);
         return;
       case 'openDraftDiff':
         try {
@@ -1289,95 +1280,263 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       case 'applyChangeSet':
-        {
-          if (this.isBusy || this.isStartingRun) {
-            return;
-          }
-          const deleteTargets = this.changeSets.getPendingDeleteTargetsForChangeSet(message.id);
-          if (!(await this.confirmDeleteApply(deleteTargets))) {
-            return;
-          }
-          const result = await this.changeSets.applyAll(message.id);
-          if (result?.appliedEditIds.length) {
-            await this.refreshSkills({ post: false });
-            await this.handleAppliedRepairEdits(result.appliedEditIds);
-          }
-          this.showChangeSetFailures(result?.failed);
-          this.postState();
-        }
+        await this.handleApplyChangeSet(message);
         return;
       case 'discardChangeSet':
-        if (this.isBusy || this.isStartingRun) {
-          return;
-        }
-        this.changeSets.discardAll(message.id);
-        await this.markActiveRepairDiscarded();
-        this.postState();
+        await this.handleDiscardChangeSet(message);
         return;
       case 'revertDraftEdit':
-        {
-          if (this.isBusy || this.isStartingRun) {
-            return;
-          }
-          const result = await this.changeSets.revertEdit(message.id);
-          if (result?.revertedEditIds.length) {
-            await this.refreshSkills({ post: false });
-          }
-          this.showChangeSetFailures(result?.failed);
-          this.postState();
-        }
+        await this.handleRevertDraftEdit(message);
         return;
       case 'revertChangeSet':
-        {
-          if (this.isBusy || this.isStartingRun) {
-            return;
-          }
-          const result = await this.changeSets.revertAll(message.id);
-          if (result?.revertedEditIds.length) {
-            await this.refreshSkills({ post: false });
-          }
-          this.showChangeSetFailures(result?.failed);
-          this.postState();
-        }
+        await this.handleRevertChangeSet(message);
         return;
       case 'applyAllDraftEdits': {
-        if (this.isBusy || this.isStartingRun) {
+        const feedbackMessage = { ...message, id: 'latest' };
+        if (this.isBusy || this.isStartingRun || this.runContextRefreshInFlight) {
+          this.postChangeActionFeedback(feedbackMessage, 'busy', this.t('changeActionBusy'));
           return;
         }
-        const changeSetId = this.changeSets.getLatestChangeSetId(this.sessionStore.activeSessionId);
-        const deleteTargets = changeSetId
-          ? this.changeSets.getPendingDeleteTargetsForChangeSet(changeSetId)
-          : [];
-        if (!(await this.confirmDeleteApply(deleteTargets))) {
-          return;
+        this.postChangeActionFeedback(feedbackMessage, 'checking');
+        try {
+          const changeSetId = this.changeSets.getLatestChangeSetId(this.sessionStore.activeSessionId);
+          if (!changeSetId) {
+            this.postChangeActionFeedback(feedbackMessage, 'not_found', this.t('changeActionNotFound'));
+            return;
+          }
+          const deleteTargets = this.changeSets.getPendingDeleteTargetsForChangeSet(changeSetId);
+          if (!(await this.confirmDeleteApply(deleteTargets))) {
+            this.postChangeActionFeedback(feedbackMessage, 'cancelled');
+            return;
+          }
+          const targetUris = this.changeSets.getChangeSetEditUris(changeSetId);
+          const result = await this.changeSets.applyAll(changeSetId, {
+            onProgress: (progress) => {
+              this.postChangeActionFeedback(feedbackMessage, progress.status === 'applying' ? 'writing' : 'checking');
+              this.postState({ immediate: true, omitMessages: true });
+            }
+          });
+          if (!result) {
+            this.postChangeActionFeedback(feedbackMessage, 'not_found', this.t('changeActionNotFound'));
+            return;
+          }
+          if (result.appliedEditIds.length) {
+            this.postState({ immediate: true, omitMessages: true });
+            this.scheduleRunContextRefresh(targetUris);
+            await this.handleAppliedRepairEdits(result.appliedEditIds);
+          }
+          this.showChangeSetFailures(result.failed);
+          const failed = result.failed.length > 0 && result.appliedEditIds.length === 0;
+          this.postChangeActionFeedback(feedbackMessage, failed ? 'failed' : 'complete', failed ? result.failed[0]?.error : undefined);
+          this.postState({ immediate: true, omitMessages: true });
+        } catch (error) {
+          const detail = getErrorMessage(error);
+          this.postChangeActionFeedback(feedbackMessage, 'failed', detail);
+          this.postState({ immediate: true, omitMessages: true });
         }
-        const result = changeSetId ? await this.changeSets.applyAll(changeSetId) : undefined;
-        if (result?.appliedEditIds.length) {
-          await this.refreshSkills({ post: false });
-          await this.handleAppliedRepairEdits(result.appliedEditIds);
-        }
-        this.showChangeSetFailures(result?.failed);
-        this.postState();
         return;
       }
       case 'discardAllDraftEdits':
         {
-          if (this.isBusy || this.isStartingRun) {
+          const feedbackMessage = { ...message, id: 'latest' };
+          if (this.isBusy || this.isStartingRun || this.runContextRefreshInFlight) {
+            this.postChangeActionFeedback(feedbackMessage, 'busy', this.t('changeActionBusy'));
             return;
           }
-          const changeSetId = this.changeSets.getLatestChangeSetId(this.sessionStore.activeSessionId);
-          if (changeSetId) {
-            this.changeSets.discardAll(changeSetId);
+          this.postChangeActionFeedback(feedbackMessage, 'checking');
+          try {
+            const changeSetId = this.changeSets.getLatestChangeSetId(this.sessionStore.activeSessionId);
+            if (!changeSetId || !this.changeSets.discardAll(changeSetId)) {
+              this.postChangeActionFeedback(feedbackMessage, 'not_found', this.t('changeActionNotFound'));
+              return;
+            }
             await this.markActiveRepairDiscarded();
+            this.postChangeActionFeedback(feedbackMessage, 'complete');
+          } catch (error) {
+            this.postChangeActionFeedback(feedbackMessage, 'failed', getErrorMessage(error));
           }
         }
-        this.postState();
+        this.postState({ immediate: true, omitMessages: true });
         return;
     }
   }
 
   private get messages(): ChatMessage[] {
     return this.sessionStore.messages;
+  }
+
+  private beginChangeAction(message: ChangeActionMessage): string | undefined {
+    const key = `${message.type}:${message.id}`;
+    if (this.isBusy || this.isStartingRun || this.runContextRefreshInFlight || this.activeChangeActions.has(key)) {
+      this.postChangeActionFeedback(message, 'busy', this.t('changeActionBusy'));
+      return undefined;
+    }
+    this.activeChangeActions.add(key);
+    this.postChangeActionFeedback(message, 'checking');
+    return key;
+  }
+
+  private finishChangeAction(message: ChangeActionMessage, key: string, phase: ChangeActionFeedbackPhase, detail?: string): void {
+    this.activeChangeActions.delete(key);
+    this.postChangeActionFeedback(message, phase, detail);
+    this.postState({ immediate: true, omitMessages: true });
+  }
+
+  private postChangeActionFeedback(
+    message: ChangeActionMessage | (Extract<WebviewMessage, { type: 'applyAllDraftEdits' | 'discardAllDraftEdits' }> & { id: string }),
+    phase: ChangeActionFeedbackPhase,
+    detail?: string
+  ): void {
+    if (!message.requestId) return;
+    this.postToWebview({
+      type: 'changeActionFeedback',
+      requestId: message.requestId,
+      action: message.type,
+      id: message.id,
+      phase,
+      detail
+    });
+  }
+
+  private changeActionProgress(message: ChangeActionMessage, status: string): void {
+    this.postChangeActionFeedback(message, status === 'applying' ? 'writing' : 'checking');
+    this.postState({ immediate: true, omitMessages: true });
+  }
+
+  private async handleApplyDraftEdit(message: Extract<WebviewMessage, { type: 'applyDraftEdit' }>): Promise<void> {
+    const key = this.beginChangeAction(message);
+    if (!key) return;
+    try {
+      const targetUris = this.changeSets.getEditUris([message.id]);
+      if (!(await this.confirmDeleteApply(this.changeSets.getPendingDeleteTargetsForEdit(message.id)))) {
+        this.finishChangeAction(message, key, 'cancelled');
+        return;
+      }
+      const result = await this.changeSets.applyEdit(message.id, undefined, {
+        onProgress: (progress) => this.changeActionProgress(message, progress.status)
+      });
+      if (!result) {
+        this.finishChangeAction(message, key, 'not_found', this.t('changeActionNotFound'));
+        return;
+      }
+      this.postState({ immediate: true, omitMessages: true });
+      if (result.appliedEditIds.length) {
+        this.scheduleRunContextRefresh(targetUris);
+        await this.handleAppliedRepairEdits(result.appliedEditIds);
+      }
+      this.showChangeSetFailures(result.failed);
+      const failed = result.failed.length > 0 && result.appliedEditIds.length === 0;
+      this.finishChangeAction(message, key, failed ? 'failed' : 'complete', failed ? result.failed[0]?.error : undefined);
+    } catch (error) {
+      const detail = getErrorMessage(error);
+      vscode.window.showErrorMessage(detail);
+      this.finishChangeAction(message, key, 'failed', detail);
+    }
+  }
+
+  private async handleApplyChangeSet(message: Extract<WebviewMessage, { type: 'applyChangeSet' }>): Promise<void> {
+    const key = this.beginChangeAction(message);
+    if (!key) return;
+    try {
+      const targetUris = this.changeSets.getChangeSetEditUris(message.id);
+      if (!(await this.confirmDeleteApply(this.changeSets.getPendingDeleteTargetsForChangeSet(message.id)))) {
+        this.finishChangeAction(message, key, 'cancelled');
+        return;
+      }
+      const result = await this.changeSets.applyAll(message.id, {
+        onProgress: (progress) => this.changeActionProgress(message, progress.status)
+      });
+      if (!result) {
+        this.finishChangeAction(message, key, 'not_found', this.t('changeActionNotFound'));
+        return;
+      }
+      this.postState({ immediate: true, omitMessages: true });
+      if (result.appliedEditIds.length) {
+        this.scheduleRunContextRefresh(targetUris);
+        await this.handleAppliedRepairEdits(result.appliedEditIds);
+      }
+      this.showChangeSetFailures(result.failed);
+      const failed = result.failed.length > 0 && result.appliedEditIds.length === 0;
+      this.finishChangeAction(message, key, failed ? 'failed' : 'complete', failed ? result.failed[0]?.error : undefined);
+    } catch (error) {
+      const detail = getErrorMessage(error);
+      vscode.window.showErrorMessage(detail);
+      this.finishChangeAction(message, key, 'failed', detail);
+    }
+  }
+
+  private async handleDiscardDraftEdit(message: Extract<WebviewMessage, { type: 'discardDraftEdit' }>): Promise<void> {
+    const key = this.beginChangeAction(message);
+    if (!key) return;
+    try {
+      if (!this.changeSets.discardEdit(message.id)) {
+        this.finishChangeAction(message, key, 'not_found', this.t('changeActionNotFound'));
+        return;
+      }
+      await this.markActiveRepairDiscarded(message.id);
+      this.finishChangeAction(message, key, 'complete');
+    } catch (error) {
+      this.finishChangeAction(message, key, 'failed', getErrorMessage(error));
+    }
+  }
+
+  private async handleDiscardChangeSet(message: Extract<WebviewMessage, { type: 'discardChangeSet' }>): Promise<void> {
+    const key = this.beginChangeAction(message);
+    if (!key) return;
+    try {
+      if (!this.changeSets.discardAll(message.id)) {
+        this.finishChangeAction(message, key, 'not_found', this.t('changeActionNotFound'));
+        return;
+      }
+      await this.markActiveRepairDiscarded();
+      this.finishChangeAction(message, key, 'complete');
+    } catch (error) {
+      this.finishChangeAction(message, key, 'failed', getErrorMessage(error));
+    }
+  }
+
+  private async handleRevertDraftEdit(message: Extract<WebviewMessage, { type: 'revertDraftEdit' }>): Promise<void> {
+    const key = this.beginChangeAction(message);
+    if (!key) return;
+    try {
+      const targetUris = this.changeSets.getEditUris([message.id]);
+      const result = await this.changeSets.revertEdit(message.id, {
+        onProgress: (progress) => this.changeActionProgress(message, progress.status)
+      });
+      if (!result) {
+        this.finishChangeAction(message, key, 'not_found', this.t('changeActionNotFound'));
+        return;
+      }
+      this.postState({ immediate: true, omitMessages: true });
+      if (result.revertedEditIds.length) this.scheduleRunContextRefresh(targetUris);
+      this.showChangeSetFailures(result.failed);
+      const failed = result.failed.length > 0 && result.revertedEditIds.length === 0;
+      this.finishChangeAction(message, key, failed ? 'failed' : 'complete', failed ? result.failed[0]?.error : undefined);
+    } catch (error) {
+      this.finishChangeAction(message, key, 'failed', getErrorMessage(error));
+    }
+  }
+
+  private async handleRevertChangeSet(message: Extract<WebviewMessage, { type: 'revertChangeSet' }>): Promise<void> {
+    const key = this.beginChangeAction(message);
+    if (!key) return;
+    try {
+      const targetUris = this.changeSets.getChangeSetEditUris(message.id);
+      const result = await this.changeSets.revertAll(message.id, {
+        onProgress: (progress) => this.changeActionProgress(message, progress.status)
+      });
+      if (!result) {
+        this.finishChangeAction(message, key, 'not_found', this.t('changeActionNotFound'));
+        return;
+      }
+      this.postState({ immediate: true, omitMessages: true });
+      if (result.revertedEditIds.length) this.scheduleRunContextRefresh(targetUris);
+      this.showChangeSetFailures(result.failed);
+      const failed = result.failed.length > 0 && result.revertedEditIds.length === 0;
+      this.finishChangeAction(message, key, failed ? 'failed' : 'complete', failed ? result.failed[0]?.error : undefined);
+    } catch (error) {
+      this.finishChangeAction(message, key, 'failed', getErrorMessage(error));
+    }
   }
 
   private clearSessionTransientState(): void {
@@ -1984,6 +2143,57 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (options.post !== false) {
       this.postState();
     }
+  }
+
+  private scheduleRunContextRefresh(uris: readonly string[]): void {
+    const scope = classifyRunContextRefresh(uris, this.fileContext?.getAll?.().map((file) => file.uri) ?? []);
+    if (!scope.contextFiles && !scope.projectInstructions && !scope.skills && !scope.legacyMemory) return;
+    const previous = this.runContextRefreshPromise ?? Promise.resolve();
+    const refresh = previous.catch(() => undefined).then(async () => {
+      const session = this.sessionStore.getActiveSession();
+      if (scope.contextFiles) await this.fileContext.refreshUris(uris);
+      if (scope.skills) {
+        await this.skillStore.refresh();
+        this.skillStore.invalidateImplicitSkillSnapshot(session);
+      }
+      if (scope.legacyMemory) await this.legacyMemoryMigration.refresh();
+      session.contextUsage = undefined;
+      await this.refreshCurrentRunContext(session, '');
+    });
+    this.runContextRefreshPromise = refresh;
+    this.runContextRefreshInFlight = true;
+    this.runContextRefreshError = undefined;
+    this.postState({ immediate: true, omitMessages: true });
+    void refresh.then(
+      () => undefined,
+      (error: unknown) => {
+        this.runContextRefreshError = error;
+        return vscode.window.showWarningMessage(this.t('runContextRefreshFailed', { message: getErrorMessage(error) }));
+      }
+    ).finally(() => {
+      if (this.runContextRefreshPromise !== refresh) return;
+      this.runContextRefreshPromise = undefined;
+      this.runContextRefreshInFlight = false;
+      this.postState({ immediate: true, omitMessages: true });
+    });
+  }
+
+  private async awaitRunContextRefresh(): Promise<boolean> {
+    const pending = this.runContextRefreshPromise;
+    if (pending) {
+      try {
+        await pending;
+      } catch {
+        return false;
+      }
+    }
+    if (this.runContextRefreshError) {
+      vscode.window.showWarningMessage(this.t('runContextRefreshFailed', {
+        message: getErrorMessage(this.runContextRefreshError)
+      }));
+      return false;
+    }
+    return true;
   }
 
   private async refreshCurrentRunContext(
@@ -4090,6 +4300,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async sendPrompt(...args: Parameters<KeepseekChatViewProvider['sendPromptImpl']>): Promise<AgentResponse | undefined> {
+    if (!await this.awaitRunContextRefresh()) return;
     if (this.isBusy || this.isStartingRun) return;
     if (!args[4]?.draftRunBatch) {
       if (this.draftRunBatches?.locked) return;
@@ -5326,7 +5537,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         commandSettingsReadiness: { ...this.commandSettingsReadiness },
         startup: this.getStartupState(),
         authorizedExternalReferenceUris: [...this.authorizedExternalReferenceUris],
-        isBusy: this.isBusy || this.isStartingRun || Boolean(this.activeDraftRunId),
+        isBusy: this.isBusy || this.isStartingRun || this.runContextRefreshInFlight || Boolean(this.activeDraftRunId),
         agentActivity: this.agentActivity,
         maxFileBytes: getConfiguredMaxFileBytes(),
         historyRetentionDays: getConfiguredHistoryRetentionDays(),
@@ -5582,11 +5793,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.changeSets.attachApprovalReview(id, consumedReview);
         this.attachApprovalReviewToRunDetails(consumedReview);
         this.setAgentActivity({ base: 'executing', phase: 'executing_tool', detail: file.label });
-        const result = await this.changeSets.applyEdit(id, fileAuthorization);
+        const targetUris = [file.uri, ...(file.kind === 'move_v1' ? [file.targetUri] : [])];
+        const result = await this.changeSets.applyEdit(id, fileAuthorization, {
+          onProgress: () => this.postState({ immediate: true, omitMessages: true })
+        });
         editResults.push({ id, applied: Boolean(result?.appliedEditIds.includes(id)), errors: result?.failed.map((failure) => failure.error) ?? [] });
         await this.changeSets.flush();
-        if (result?.appliedEditIds.length) await this.handleAppliedRepairEdits(result.appliedEditIds);
-        this.postState();
+        if (result?.appliedEditIds.length) {
+          this.postState({ immediate: true, omitMessages: true });
+          this.scheduleRunContextRefresh(targetUris);
+          await this.handleAppliedRepairEdits(result.appliedEditIds);
+        }
+        this.postState({ immediate: true, omitMessages: true });
       }
       // Commands may depend on the edits. Never execute them on a partially applied batch.
       if (!reviewerUnavailable && !circuitBreakReason && !reviewResults.some((result) => result.decision === 'deny')
@@ -5634,7 +5852,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
       }
       if (!isAuthorized()) return;
-      await this.refreshSkills({ post: false });
+      if (!await this.awaitRunContextRefresh()) return;
       await this.sessionStore.persist();
       if (!isAuthorized() || reusedDeniedAction) return;
       const prompt = [
@@ -5848,6 +6066,40 @@ function isApprovalMutationMessage(type: WebviewMessage['type']): boolean {
     'cloneDraftRun',
     'authorizeDraftRunCwd'
   ]).has(type);
+}
+
+function isChangeActionMessage(message: WebviewMessage): message is ChangeActionMessage {
+  return message.type === 'applyDraftEdit'
+    || message.type === 'discardDraftEdit'
+    || message.type === 'applyChangeSet'
+    || message.type === 'discardChangeSet'
+    || message.type === 'revertDraftEdit'
+    || message.type === 'revertChangeSet';
+}
+
+function classifyRunContextRefresh(
+  changedUris: readonly string[],
+  contextFileUris: readonly string[]
+): { contextFiles: boolean; projectInstructions: boolean; skills: boolean; legacyMemory: boolean } {
+  const attached = new Set(contextFileUris);
+  const result = {
+    contextFiles: false,
+    projectInstructions: false,
+    skills: false,
+    legacyMemory: false
+  };
+  for (const value of changedUris) {
+    if (attached.has(value)) result.contextFiles = true;
+    let path = value;
+    try { path = vscode.Uri.parse(value).path; } catch { /* use the original value */ }
+    const normalized = path.replace(/\\/gu, '/').replace(/\/+$/u, '');
+    const lower = normalized.toLocaleLowerCase();
+    const name = lower.slice(lower.lastIndexOf('/') + 1);
+    if (name === 'agents.md') result.projectInstructions = true;
+    if (name === 'skill.md' || lower.includes('/.agents/')) result.skills = true;
+    if (lower.endsWith('/.keepseek/memory.json')) result.legacyMemory = true;
+  }
+  return result;
 }
 
 function isAgentRequestMessage(type: WebviewMessage['type']): boolean {

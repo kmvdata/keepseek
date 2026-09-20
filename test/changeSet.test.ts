@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -214,6 +215,142 @@ test('reports mixed apply results per file and preserves retryable failures', as
   assert.equal(state?.status, 'partially_failed');
   assert.deepEqual(state?.files.map((file) => file.status), ['applied', 'apply_failed']);
   assert.match(state?.files[1]?.error ?? '', /failed b\.ts/u);
+});
+
+test('journal Apply I/O stays constant with large history and does not run GC before mutation', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-journal-hot-path-'));
+  let writeCount = 0;
+  let historyWriteCount = 0;
+  let directoryScanCount = 0;
+  let writesBeforeMutation = 0;
+  let scansBeforeMutation = 0;
+  const originalWriteFile = vscode.workspace.fs.writeFile;
+  const originalReadDirectory = vscode.workspace.fs.readDirectory;
+  const now = '2026-09-20T00:00:00.000Z';
+  const safeFileEditor = {
+    async applyDraftEdit(
+      file: ChangeSetFile,
+      changeSetId: string,
+      _approval: unknown,
+      journal: { persist(checkpoint: ChangeCheckpoint): Promise<void> }
+    ): Promise<ChangeCheckpoint> {
+      const checkpoint: ChangeCheckpoint = {
+        version: 2, id: `checkpoint-${file.id}`, changeSetId, editId: file.id, uri: file.uri,
+        label: file.label, action: file.action, draftKind: 'legacy_full_text_v0', state: 'prepared',
+        operation: 'apply', originalExists: true, appliedExists: true, createdAt: now
+      };
+      await journal.persist(checkpoint);
+      const checkpointFile = `${createHash('sha256').update(checkpoint.id).digest('hex').slice(0, 32)}.json`;
+      const runtimeFile = `${createHash('sha256').update(changeSetId).digest('hex').slice(0, 32)}.json`;
+      const durablePrepared = JSON.parse(await readFile(
+        path.join(root, 'change-sets', 'v4', 'checkpoints', checkpointFile), 'utf8'
+      )) as { checkpoint?: ChangeCheckpoint };
+      const durablePreparedOwner = JSON.parse(await readFile(
+        path.join(root, 'change-sets', 'v4', 'runtime', runtimeFile), 'utf8'
+      )) as { changeSet?: { files?: ChangeSetFile[] } };
+      assert.equal(durablePrepared.checkpoint?.state, 'prepared');
+      assert.equal(durablePreparedOwner.changeSet?.files?.find((item) => item.id === file.id)?.status, 'prepared');
+      checkpoint.state = 'applying';
+      await journal.persist(checkpoint);
+      const durableApplying = JSON.parse(await readFile(
+        path.join(root, 'change-sets', 'v4', 'checkpoints', checkpointFile), 'utf8'
+      )) as { checkpoint?: ChangeCheckpoint };
+      assert.equal(durableApplying.checkpoint?.state, 'applying');
+      writesBeforeMutation = writeCount;
+      scansBeforeMutation = directoryScanCount;
+      checkpoint.state = 'applied';
+      checkpoint.appliedAt = now;
+      await journal.persist(checkpoint);
+      return checkpoint;
+    }
+  };
+  const activeSession = { id: 'session-1', messages: [], updatedAt: now } as unknown as ChatSession;
+  const store = new ChangeSetStore(
+    safeFileEditor as never,
+    { async openDiff() { return undefined; } } as never,
+    { activeSessionId: 'session-1', getActiveSession: () => activeSession, async persist() { return undefined; } } as never,
+    vscode.Uri.file(root),
+    (key) => key
+  );
+  for (let index = 0; index < 150; index += 1) {
+    const historical = store.addDraftEdits({
+      runId: `history-run-${index}`, sessionId: 'session-1', messageId: `history-message-${index}`,
+      edits: [draft(`history-${index}`, `history-${index}.ts`)]
+    });
+    assert.ok(historical);
+    store.discardAll(historical.id);
+  }
+  await store.flush();
+  const target = store.addDraftEdits({
+    runId: 'hot-run', sessionId: 'session-1', messageId: 'hot-message', edits: [draft('hot-edit', 'hot.ts')]
+  });
+  assert.ok(target);
+  await store.flush();
+  vscode.workspace.fs.writeFile = async (uri, content) => {
+    writeCount += 1;
+    if (uri.fsPath.includes(`${path.sep}history${path.sep}`)) historyWriteCount += 1;
+    await originalWriteFile(uri, content);
+  };
+  vscode.workspace.fs.readDirectory = async (uri) => {
+    directoryScanCount += 1;
+    return await originalReadDirectory(uri);
+  };
+  try {
+    assert.deepEqual((await store.applyEdit('hot-edit'))?.appliedEditIds, ['hot-edit']);
+  } finally {
+    vscode.workspace.fs.writeFile = originalWriteFile;
+    vscode.workspace.fs.readDirectory = originalReadDirectory;
+  }
+  assert.ok(writesBeforeMutation <= 5, `expected bounded prepared/applying writes, saw ${writesBeforeMutation}`);
+  assert.equal(historyWriteCount, 0, 'journal stages must not rewrite history shards');
+  assert.equal(scansBeforeMutation, 0, 'artifact GC must not scan directories before workspace mutation');
+});
+
+test('overlapping single and batch Apply never execute the same DraftEdit twice', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-apply-lock-'));
+  let releaseFirst!: () => void;
+  let firstStarted!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+  const calls: string[] = [];
+  const now = '2026-09-20T00:00:00.000Z';
+  const safeFileEditor = {
+    async applyDraftEdit(file: ChangeSetFile, changeSetId: string): Promise<ChangeCheckpoint> {
+      calls.push(file.id);
+      if (file.id === 'locked-a') {
+        firstStarted();
+        await firstGate;
+      }
+      return {
+        id: `checkpoint-${file.id}`, changeSetId, editId: file.id, uri: file.uri, label: file.label,
+        action: file.action, originalExists: true, appliedExists: true, createdAt: now, appliedAt: now
+      };
+    }
+  };
+  const activeSession = { id: 'session-1', messages: [], updatedAt: now } as unknown as ChatSession;
+  const store = new ChangeSetStore(
+    safeFileEditor as never,
+    { async openDiff() { return undefined; } } as never,
+    { activeSessionId: 'session-1', getActiveSession: () => activeSession, async persist() { return undefined; } } as never,
+    vscode.Uri.file(root), (key) => key
+  );
+  const changeSet = store.addDraftEdits({
+    runId: 'lock-run', sessionId: 'session-1', messageId: 'lock-message',
+    edits: [draft('locked-a', 'a.ts'), draft('locked-b', 'b.ts')]
+  });
+  assert.ok(changeSet);
+  const progress: string[] = [];
+  const batch = store.applyAll(changeSet.id, {
+    onProgress: (update) => progress.push(`${update.editId}:${update.status}`)
+  });
+  await started;
+  const overlapping = await store.applyEdit('locked-b');
+  assert.equal(overlapping?.appliedEditIds.length, 0);
+  assert.match(overlapping?.failed[0]?.error ?? '', /already being applied/u);
+  releaseFirst();
+  assert.deepEqual((await batch)?.appliedEditIds, ['locked-a', 'locked-b']);
+  assert.deepEqual(calls, ['locked-a', 'locked-b']);
+  assert.deepEqual(progress, ['locked-a:applied', 'locked-b:applied']);
 });
 
 test('opens a pending edit file that exists inside the workspace', async (t) => {

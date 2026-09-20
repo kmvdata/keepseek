@@ -444,7 +444,8 @@ export function getScript(): string {
     let agentStatusRotationKey = '';
     let terminalAgentStatusKey = '';
     let planExpanded = false;
-    const pendingChangeActions = new Set();
+    const pendingChangeActions = new Map();
+    let changeActionRequestSequence = 0;
     const pendingDraftRunApprovals = new Set();
     const pendingDraftRunActions = new Set();
     let pendingDraftRunBatchSnapshot = '';
@@ -752,10 +753,31 @@ export function getScript(): string {
       var action = button.dataset.editAction || button.dataset.changeSetAction || '';
       if (!id || !action) return;
       if (action !== 'openDraftDiff' && action !== 'openDraftEditFile') {
-        pendingChangeActions.add(action + ':' + id);
+        var actionKey = action + ':' + id;
+        if (pendingChangeActions.has(actionKey)) return;
+        var requestId = 'change-action-' + (++changeActionRequestSequence);
+        pendingChangeActions.set(actionKey, { requestId: requestId, phase: 'checking' });
         render();
+        vscode.postMessage({ type: action, id: id, requestId: requestId });
+        return;
       }
       vscode.postMessage({ type: action, id: id });
+    }
+
+    function handleChangeActionFeedback(message) {
+      var changeKey = String(message.action || '') + ':' + String(message.id || '');
+      var pendingChange = pendingChangeActions.get(changeKey);
+      if (!pendingChange || pendingChange.requestId !== String(message.requestId || '')) return false;
+      var terminalChangePhase = ['complete', 'failed', 'cancelled', 'busy', 'not_found'].includes(String(message.phase || ''));
+      if (terminalChangePhase) {
+        pendingChangeActions.delete(changeKey);
+        if (message.detail) setTransientStatus(String(message.detail));
+      } else {
+        pendingChange.phase = String(message.phase || 'checking');
+        pendingChangeActions.set(changeKey, pendingChange);
+      }
+      render();
+      return true;
     }
 
     transcript.addEventListener('click', handleChangeSetActionClick);
@@ -1187,7 +1209,6 @@ export function getScript(): string {
           syncSendButtonAvailability();
           return;
         }
-        pendingChangeActions.clear();
         pendingDraftRunApprovals.clear();
         pendingDraftRunActions.clear();
         pendingDraftRunBatchSnapshot = '';
@@ -1258,7 +1279,10 @@ export function getScript(): string {
         } else {
           setTransientStatus(t('draftRunCloneUnavailable'));
         }
+      } else if (message.type === 'changeActionFeedback') {
+        handleChangeActionFeedback(message);
       } else if (message.type === 'sessionChanged') {
+        pendingChangeActions.clear();
         resetLocalContextUsageEstimate();
         clearPromptDraft();
       } else if (message.type === 'modelSelectionFeedback') {
@@ -3692,12 +3716,16 @@ export function getScript(): string {
     function createEditActionButton(label, action, id, secondary) {
       var button = document.createElement('button');
       button.type = 'button';
-      button.textContent = label;
+      var pending = pendingChangeActions.get(action + ':' + id);
+      button.textContent = pending
+        ? pending.phase === 'writing' ? t('changeActionWriting') : t('changeActionChecking')
+        : label;
       button.className = secondary ? 'secondary' : '';
       button.dataset.editId = id;
       button.dataset.editAction = action;
       button.disabled = (!state.startup?.sideEffectsReady && action !== 'openDraftDiff')
-        || (state.isBusy && action !== 'openDraftDiff') || pendingChangeActions.has(action + ':' + id);
+        || (state.isBusy && action !== 'openDraftDiff') || Boolean(pending);
+      if (pending) button.setAttribute('aria-busy', 'true');
       return button;
     }
 
@@ -3716,11 +3744,15 @@ export function getScript(): string {
     function createChangeSetActionButton(label, action, id, secondary) {
       var button = document.createElement('button');
       button.type = 'button';
-      button.textContent = label;
+      var pending = pendingChangeActions.get(action + ':' + id);
+      button.textContent = pending
+        ? pending.phase === 'writing' ? t('changeActionWriting') : t('changeActionChecking')
+        : label;
       button.className = secondary ? 'secondary' : '';
       button.dataset.changeSetId = id;
       button.dataset.changeSetAction = action;
-      button.disabled = !state.startup?.sideEffectsReady || state.isBusy || pendingChangeActions.has(action + ':' + id);
+      button.disabled = !state.startup?.sideEffectsReady || state.isBusy || Boolean(pending);
+      if (pending) button.setAttribute('aria-busy', 'true');
       return button;
     }
 

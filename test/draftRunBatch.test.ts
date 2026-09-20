@@ -356,7 +356,7 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
     authorizedExternalReferenceUris: [] as string[], messages: [{ id: 'assistant', role: 'assistant' }] };
   const unlinked = new UiElement();
   const context = { state, document: { createElement: () => new UiElement() },
-    pendingDraftRunBatchSnapshot: '', pendingDraftRunActions: new Set(), pendingDraftRunApprovals: new Set(), pendingChangeActions: new Set(),
+    pendingDraftRunBatchSnapshot: '', pendingDraftRunActions: new Set(), pendingDraftRunApprovals: new Set(), pendingChangeActions: new Map(),
     formatDuration: String, createDraftEditActionIcon: () => new UiElement(),
     createApprovalSourceSummary: () => new UiElement(), getEditApprovalSourceLabel: String,
     unlinkedChangeSetList: unlinked, unlinkedChangeSetRegion: new UiElement(),

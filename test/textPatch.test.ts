@@ -416,14 +416,15 @@ test('persists inverse patches across restart and reverts without full-file snap
   assert.deepEqual(await fs.readFile(target), Buffer.from(original));
 });
 
-test('restart reconciliation maps apply journals at base/result/unknown hashes without replay', async (t) => {
+test('restart reconciliation covers prepared, applying-before-replace, written-before-marker, and unknown states without replay', async (t) => {
   const root = await configureWorkspace(t, 'keepseek-patch-reconcile-');
   const storage = path.join(root, '.global');
-  const files = ['base.ts', 'result.ts', 'unknown.ts'];
+  const files = ['prepared-base.ts', 'applying-base.ts', 'written-before-marker.ts', 'unknown.ts'];
   const edits = files.map((name) => patchEdit(path.join(root, name), 'before\n', [{ search: 'before', replace: 'after' }]));
   await fs.writeFile(path.join(root, files[0]), 'before\n');
-  await fs.writeFile(path.join(root, files[1]), 'after\n');
-  await fs.writeFile(path.join(root, files[2]), 'external\n');
+  await fs.writeFile(path.join(root, files[1]), 'before\n');
+  await fs.writeFile(path.join(root, files[2]), 'after\n');
+  await fs.writeFile(path.join(root, files[3]), 'external\n');
   const changeSet = createChangeSet({
     runId: 'crash-run', sessionId: 'session-1', messageId: 'message-1', edits
   });
@@ -458,11 +459,12 @@ test('restart reconciliation maps apply journals at base/result/unknown hashes w
   const restarted = createRealStore(storage);
   await restarted.store.initialize();
   assert.deepEqual(restarted.store.toWebviewState('session-1')[0]?.files.map((file) => file.status), [
-    'pending', 'applied', 'uncertain'
+    'pending', 'pending', 'applied', 'uncertain'
   ]);
   assert.equal(await fs.readFile(path.join(root, files[0]), 'utf8'), 'before\n');
-  assert.equal(await fs.readFile(path.join(root, files[1]), 'utf8'), 'after\n');
-  assert.equal(await fs.readFile(path.join(root, files[2]), 'utf8'), 'external\n');
+  assert.equal(await fs.readFile(path.join(root, files[1]), 'utf8'), 'before\n');
+  assert.equal(await fs.readFile(path.join(root, files[2]), 'utf8'), 'after\n');
+  assert.equal(await fs.readFile(path.join(root, files[3]), 'utf8'), 'external\n');
 });
 
 test('migrates v3 legacy pending and revertible ChangeSets without reusing patch hashes', async (t) => {
