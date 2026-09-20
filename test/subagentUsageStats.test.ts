@@ -244,6 +244,16 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.match(detailsRenderer, /var mainSessionOnly = selected\.total\.totalTokens > 0 && selected\.mainPercent >= 100/u);
   assert.match(detailsRenderer, /if \(mainSessionOnly\) \{\s*list\.append\(createActualAnalysisCard/u);
   assert.match(script, /function createSourceAnalysisCard\(group, colorClass\)/u);
+  const analysisCardRenderer = script.slice(
+    script.indexOf('function createUsageAnalysisCard('),
+    script.indexOf('function createSubagentAnalysisDetails(')
+  );
+  assert.match(analysisCardRenderer, /usageNode\('div', 'usage-analysis-card'\)/u);
+  assert.match(analysisCardRenderer, /card\.append\(header\)[\s\S]*?card\.append\(body\)/u);
+  assert.doesNotMatch(analysisCardRenderer, /usageNode\('details'|usageNode\('summary'|usageAnalysisExpand/u);
+  assert.doesNotMatch(inputStyles, /\.usage-analysis-(?:summary|expand)|\.usage-analysis-card\[open\]/u);
+  assert.equal('usageAnalysisExpand' in WEBVIEW_TRANSLATIONS.en, false);
+  assert.equal('usageAnalysisExpand' in WEBVIEW_TRANSLATIONS['zh-CN'], false);
   assert.match(script, /amountText: amountText, text: textValue/u);
   const costFormatterSource = script.slice(
     script.indexOf('function formatMetricCost('),

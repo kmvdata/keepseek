@@ -539,11 +539,12 @@ export const usageRenderFragment: WebviewFragment = {
       }
 
       function createUsageAnalysisCard(label, usage, colorClass, requestCount) {
-        var details = usageNode('details', 'usage-analysis-card');
-        var summary = usageNode('summary', 'usage-analysis-summary');
+        var card = usageNode('div', 'usage-analysis-card');
+        var header = usageNode('div', 'usage-analysis-card-header');
+        var heading = usageNode('div', 'usage-analysis-card-heading');
         var title = usageNode('div', 'usage-analysis-card-title');
         title.append(usageNode('i', 'usage-analysis-dot ' + colorClass), usageNode('strong', '', label));
-        summary.append(title, usageNode('span', 'usage-analysis-request-count', t('usageRequestCountValue', {
+        heading.append(title, usageNode('span', 'usage-analysis-request-count', t('usageRequestCountValue', {
           count: formatMetricInteger(requestCount)
         })));
         var metricGrid = usageNode('div', 'usage-analysis-card-grid');
@@ -558,8 +559,8 @@ export const usageRenderFragment: WebviewFragment = {
           metric.append(usageNode('span', '', t(item[0])), usageNode('strong', '', item[1]));
           metricGrid.append(metric);
         });
-        summary.append(metricGrid, usageNode('span', 'usage-analysis-expand', t('usageAnalysisExpand')));
-        details.append(summary);
+        header.append(heading, metricGrid);
+        card.append(header);
         var body = usageNode('div', 'usage-analysis-card-body');
         body.append(usageNode('p', '', t('usageCacheCoverage', {
           reported: usage.cacheDataRequestCount || 0,
@@ -572,8 +573,8 @@ export const usageRenderFragment: WebviewFragment = {
           })));
         }
         body.append(usageNode('p', '', t('usageCurrencyExplanation')));
-        details.append(body);
-        return details;
+        card.append(body);
+        return card;
       }
 
       function createSubagentAnalysisDetails(subagents) {

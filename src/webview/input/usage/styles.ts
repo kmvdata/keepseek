@@ -289,7 +289,6 @@ export const usageDialogStylesFragment: WebviewFragment = {
       font-weight: 600;
     }
     .usage-segmented-control button:focus-visible,
-    .usage-analysis-summary:focus-visible,
     .usage-subagent-analysis > summary:focus-visible {
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: 1px;
@@ -467,15 +466,13 @@ export const usageDialogStylesFragment: WebviewFragment = {
     .usage-analysis-list { display: grid; gap: 7px; }
     .usage-analysis-card,
     .usage-subagent-analysis { border: 1px solid var(--vscode-panel-border); border-radius: 7px; background: var(--vscode-editor-background, transparent); }
-    .usage-analysis-summary { padding: 9px; cursor: pointer; }
-    .usage-analysis-summary::marker,
+    .usage-analysis-card-header { padding: 9px; }
+    .usage-analysis-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .usage-subagent-analysis > summary::marker { color: var(--vscode-descriptionForeground); font-size: 10px; }
-    .usage-analysis-card-title { display: inline-flex; align-items: center; gap: 6px; max-width: calc(100% - 60px); vertical-align: middle; }
+    .usage-analysis-card-title { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
     .usage-analysis-card-title strong { overflow-wrap: anywhere; font-size: 11px; }
-    .usage-analysis-request-count { float: right; color: var(--vscode-descriptionForeground); font-size: 10px; font-variant-numeric: tabular-nums; }
+    .usage-analysis-request-count { flex: none; color: var(--vscode-descriptionForeground); font-size: 10px; font-variant-numeric: tabular-nums; }
     .usage-analysis-card-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 9px; }
-    .usage-analysis-expand { display: block; margin-top: 7px; color: var(--vscode-descriptionForeground); font-size: 9px; }
-    .usage-analysis-card[open] .usage-analysis-expand { display: none; }
     .usage-analysis-card-body { padding: 0 9px 9px; border-top: 1px solid var(--vscode-panel-border); }
     .usage-subagent-analysis { margin-top: 8px; }
     .usage-subagent-analysis > summary { padding: 9px; cursor: pointer; font-size: 11px; font-weight: 600; }
@@ -508,4 +505,3 @@ export const usageDialogStylesFragment: WebviewFragment = {
 
 `.slice(1)
 };
-
