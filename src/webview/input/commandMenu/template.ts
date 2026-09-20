@@ -174,11 +174,27 @@ export const commandMenuTemplateFragment: WebviewFragment = {
             </button>
             <div id="commandSubagentModelList" class="command-subagent-profile-list hidden" role="group" aria-label="子代理模型" data-i18n-aria-label="subagentModelTitle"></div>
             <button
+              id="commandExecutionModeSwitch"
+              type="button"
+              class="command-row"
+              role="menuitem"
+              aria-expanded="false"
+              aria-controls="commandExecutionModeList"
+            >
+              <span class="command-row-main">
+                <span class="command-row-title" data-i18n="executionMode">执行方式</span>
+                <span id="commandExecutionModeDescription" class="command-row-description" data-i18n="executionNormalDescription">边分析边推进，适合明确的日常任务</span>
+              </span>
+              <span id="commandExecutionModeValue" class="command-row-value command-model-current" data-i18n="executionNormal">常规</span>
+            </button>
+            <div id="commandExecutionModeList" class="command-model-list hidden" role="group" aria-label="执行方式" data-i18n-aria-label="executionMode"></div>
+            <button
               id="commandApprovalModeSwitch"
               type="button"
               class="command-row"
               role="menuitem"
               aria-expanded="false"
+              aria-controls="commandApprovalModeList"
             >
               <span class="command-row-main">
                 <span class="command-row-title" data-i18n="approvalMode">审批模式</span>

@@ -21,8 +21,10 @@ import {
   ProviderReplayState,
   RepairLoopState,
   SessionRequestProtocol,
-  WorkspaceSummary
+  WorkspaceSummary,
+  type ExecutionMode
 } from '../shared/types';
+import { normalizeExecutionMode, normalizePlanWorkflowRecords } from '../agent/executionMode';
 import {
   CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION,
   CURRENT_PROVIDER_TOOL_SCHEMA_VERSION,
@@ -125,6 +127,10 @@ export class ChatSessionStore {
     return this.approvalModeValue;
   }
 
+  public get executionMode(): ExecutionMode {
+    return normalizeExecutionMode(this.getActiveSession().executionMode);
+  }
+
   public get messages(): ChatMessage[] {
     return this.getActiveSession().messages;
   }
@@ -149,7 +155,7 @@ export class ChatSessionStore {
 
   public async createNewSession(language: KeepseekLanguage = this.language): Promise<ChatSession> {
     this.language = language;
-    const session = createEmptySession(language, this.workspaceScope, this.approvalModeValue);
+    const session = createEmptySession(language, this.workspaceScope, this.approvalModeValue, 'normal');
     this.sessions.unshift(session);
     this.setActiveSessionId(session.id);
     await this.persist();
@@ -169,6 +175,16 @@ export class ChatSessionStore {
     return true;
   }
 
+  public async setExecutionMode(executionMode: ExecutionMode): Promise<boolean> {
+    const session = this.getActiveSession();
+    const normalized = normalizeExecutionMode(executionMode);
+    if (normalizeExecutionMode(session.executionMode) === normalized) return false;
+    session.executionMode = normalized;
+    session.updatedAt = new Date().toISOString();
+    await this.persist();
+    return true;
+  }
+
   public async selectSession(sessionId: string): Promise<ChatSession | undefined> {
     const session = await this.loadSessionById(sessionId);
     if (!session) {
@@ -177,6 +193,7 @@ export class ChatSessionStore {
 
     session.updatedAt = new Date().toISOString();
     session.approvalMode = this.approvalModeValue;
+    session.executionMode = normalizeExecutionMode(session.executionMode);
     this.setActiveSessionId(session.id);
     await this.persist();
     return session;
@@ -201,6 +218,8 @@ export class ChatSessionStore {
     const copied: ChatSession = {
       ...source,
       approvalMode: this.approvalModeValue,
+      executionMode: 'normal',
+      planWorkflows: undefined,
       id: randomUUID(),
       messages: source.messages.map(copyMessage),
       contextCompression: undefined,
@@ -417,6 +436,7 @@ export class ChatSessionStore {
     const existing = currentSessions.find((session) => session.id === this.activeSessionIdValue);
     if (existing) {
       existing.approvalMode = this.approvalModeValue;
+      existing.executionMode = normalizeExecutionMode(existing.executionMode);
       this.setActiveSessionId(existing.id);
       return existing;
     }
@@ -508,7 +528,8 @@ export class ChatSessionStore {
 export function createEmptySession(
   language: KeepseekLanguage = getConfiguredKeepseekLanguage(),
   workspaceScope: WorkspaceSessionScope = getCurrentWorkspaceSessionScope(),
-  approvalMode: ApprovalMode = 'ask'
+  approvalMode: ApprovalMode = 'ask',
+  executionMode: ExecutionMode = 'normal'
 ): ChatSession {
   const now = new Date().toISOString();
   return {
@@ -516,6 +537,8 @@ export function createEmptySession(
     title: localize(language, 'defaultSessionTitle'),
     messages: [],
     approvalMode,
+    executionMode: normalizeExecutionMode(executionMode),
+    planWorkflows: [],
     activeSkillIds: [],
     requestProtocol: createNewSessionRequestProtocol(now),
     createdAt: now,
@@ -672,6 +695,8 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       approvalMode: item.approvalMode === 'delegate' || item.approvalMode === 'model_review'
         ? item.approvalMode
         : 'ask',
+      executionMode: normalizeExecutionMode(item.executionMode),
+      planWorkflows: normalizePlanWorkflowRecords(item.planWorkflows, item.id),
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
       frozenImplicitSkillIds: normalizeStringArray(item.frozenImplicitSkillIds),
       requestProtocol: normalizeSessionRequestProtocol(item.requestProtocol),
@@ -1475,7 +1500,10 @@ function normalizeMessageContextMeta(value: unknown): ChatMessageContextMeta | u
   const protectedReason = typeof value.protectedReason === 'string' && value.protectedReason.trim()
     ? value.protectedReason.trim()
     : undefined;
-  const displayKind = value.displayKind === 'draft_run_auto_continue' || value.displayKind === 'delegated_auto_continue' || value.displayKind === 'budget_auto_continue'
+  const displayKind = value.displayKind === 'draft_run_auto_continue'
+    || value.displayKind === 'delegated_auto_continue'
+    || value.displayKind === 'plan_execution_continuation'
+    || value.displayKind === 'budget_auto_continue'
     ? value.displayKind
     : undefined;
   return isProtected || protectedReason || displayKind

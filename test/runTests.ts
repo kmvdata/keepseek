@@ -32,6 +32,7 @@ import './deleteDraftEdit.test';
 import './draftRunExecutor.test';
 import './draftRunRisk.test';
 import './draftRunStore.test';
+import './executionMode.test';
 import './draftRunBatch.test';
 import './fileReference.test';
 import './fileReferenceOpener.test';

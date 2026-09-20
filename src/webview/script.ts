@@ -90,10 +90,13 @@ export function getScript(): string {
       draftRunBatchSnapshots: [],
       draftRunBatch: null,
       activeDraftRunId: '',
+      executionMode: 'normal',
+      planWorkflows: [],
       approvalMode: 'ask',
       commandSettingsReadiness: {
         mainModel: 'loading',
         subagentModel: 'loading',
+        executionMode: 'loading',
         approvalMode: 'loading'
       },
       authorizedExternalReferenceUris: [],
@@ -1290,6 +1293,11 @@ export function getScript(): string {
         if (window.keepseekInputControls && window.keepseekInputControls.showStatus) {
           window.keepseekInputControls.showStatus(feedbackMessage);
         }
+      } else if (message.type === 'focusComposer') {
+        if (window.keepseekInputControls && window.keepseekInputControls.showStatus) {
+          window.keepseekInputControls.showStatus(t('planRevisionRequested'));
+        }
+        promptInput.focus();
       } else if (message.type === 'showSettingsDialog') {
         if (window.keepseekInputControls && window.keepseekInputControls.showSettingsDialog) {
           window.keepseekInputControls.showSettingsDialog(message);
@@ -1366,15 +1374,15 @@ export function getScript(): string {
       var draftRunProjection = buildDraftRunTimelineProjection();
       renderTranscript(changeSetProjection, draftRunProjection);
       renderUnlinkedChangeSets(changeSetProjection.unlinked, draftRunProjection.unlinked);
-      if (focusedAction?.draftRunId || focusedAction?.editId || focusedAction?.changeSetId) {
-        var actionButtons = Array.from(document.querySelectorAll('.draft-run-card button, .change-set-card button'));
+      if (focusedAction?.draftRunId || focusedAction?.editId || focusedAction?.changeSetId || focusedAction?.planId) {
+        var actionButtons = Array.from(document.querySelectorAll('.draft-run-card button, .change-set-card button, .plan-decision-card button'));
         var sameTarget = function(button) {
-          return !button.disabled && ['draftRunId', 'editId', 'changeSetId'].some(function(key) {
+          return !button.disabled && ['draftRunId', 'editId', 'changeSetId', 'planId'].some(function(key) {
             return focusedAction[key] && button.dataset[key] === focusedAction[key];
           });
         };
         var nextFocus = actionButtons.find(function(button) {
-          return sameTarget(button) && ['draftRunAction', 'editAction', 'changeSetAction'].some(function(key) {
+          return sameTarget(button) && ['draftRunAction', 'editAction', 'changeSetAction', 'planAction'].some(function(key) {
             return focusedAction[key] && button.dataset[key] === focusedAction[key];
           });
         }) || actionButtons.find(sameTarget);
@@ -3879,7 +3887,7 @@ export function getScript(): string {
         var message = state.messages[i];
         var item = document.createElement('article');
         var isDraftRunAutoContinuation = message.role === 'user'
-          && (message.contextMeta?.displayKind === 'draft_run_auto_continue' || message.contextMeta?.displayKind === 'delegated_auto_continue' || message.contextMeta?.displayKind === 'budget_auto_continue');
+          && (message.contextMeta?.displayKind === 'draft_run_auto_continue' || message.contextMeta?.displayKind === 'delegated_auto_continue' || message.contextMeta?.displayKind === 'plan_execution_continuation' || message.contextMeta?.displayKind === 'budget_auto_continue');
         var isEditing = message.role === 'user' && !isDraftRunAutoContinuation && message.id === editingMessageId;
         item.dataset.messageId = message.id;
         item.className = 'message ' + message.role
@@ -3939,6 +3947,13 @@ export function getScript(): string {
           }
         }
 
+        if (message.role === 'assistant' && !message.isStreaming) {
+          var planWorkflow = Array.isArray(state.planWorkflows)
+            ? state.planWorkflows.find(function(plan) { return plan && plan.assistantMessageId === message.id; })
+            : null;
+          if (planWorkflow) body.append(createPlanDecisionCard(planWorkflow));
+        }
+
         if (message.role === 'assistant' && message.runState) {
           var runStatePanel = createRunStatePanel(message);
           if (runStatePanel) body.append(runStatePanel);
@@ -3965,6 +3980,57 @@ export function getScript(): string {
       if (shouldStick) {
         transcript.scrollTop = transcript.scrollHeight;
       }
+    }
+
+    function createPlanDecisionCard(plan) {
+      var card = document.createElement('section');
+      card.className = 'plan-decision-card status-' + String(plan.status || 'invalid');
+      card.dataset.planId = String(plan.id || '');
+      card.setAttribute('aria-label', t('planConfirmationTitle'));
+
+      var title = document.createElement('div');
+      title.className = 'plan-decision-title';
+      title.textContent = t('planConfirmationTitle');
+      var description = document.createElement('div');
+      description.className = 'plan-decision-description';
+      var statusKey = plan.status === 'pending' ? 'planPendingConfirmation'
+        : plan.status === 'approved' ? 'planApproved'
+        : plan.status === 'revision_requested' ? 'planRevisionRequested'
+        : plan.status === 'exited' ? 'planExited'
+        : 'planInvalidOrSuperseded';
+      description.textContent = t(statusKey);
+      card.append(title, description);
+
+      if (plan.status === 'pending') {
+        var actions = document.createElement('div');
+        actions.className = 'plan-decision-actions';
+        [
+          { action: 'start_execution', labelKey: 'planStartExecution', primary: true },
+          { action: 'revise_plan', labelKey: 'planRevise' },
+          { action: 'exit_plan', labelKey: 'planExit' }
+        ].forEach(function(item) {
+          var button = document.createElement('button');
+          button.type = 'button';
+          button.className = item.primary ? 'primary' : 'secondary';
+          button.dataset.planId = String(plan.id || '');
+          button.dataset.planAction = item.action;
+          button.textContent = t(item.labelKey);
+          button.setAttribute('aria-label', t(item.labelKey));
+          button.disabled = Boolean(state.isBusy);
+          button.addEventListener('click', function() {
+            if (button.disabled) return;
+            button.disabled = true;
+            vscode.postMessage({
+              type: 'resolvePlanDecision',
+              planId: String(plan.id || ''),
+              action: item.action
+            });
+          });
+          actions.append(button);
+        });
+        card.append(actions);
+      }
+      return card;
     }
 
     function createRunStatePanel(message) {

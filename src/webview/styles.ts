@@ -1830,6 +1830,45 @@ export function getStyles(): string {
       margin-top: 4px;
     }
 
+    .plan-decision-card {
+      display: grid;
+      gap: 7px;
+      width: 100%;
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--vscode-focusBorder, var(--vscode-panel-border));
+      border-radius: 7px;
+      background: color-mix(in srgb, var(--vscode-editor-background) 94%, var(--vscode-focusBorder));
+    }
+
+    .plan-decision-card:not(.status-pending) {
+      border-color: var(--vscode-panel-border);
+      background: var(--vscode-editor-background);
+    }
+
+    .plan-decision-title {
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .plan-decision-description {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .plan-decision-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .plan-decision-actions button {
+      min-height: 26px;
+      padding: 3px 9px;
+      border-radius: 4px;
+    }
+
     .run-details {
       margin-top: 8px;
       border: 1px solid var(--vscode-panel-border);

@@ -6,6 +6,7 @@ import type { ContextEpochState } from './contextEpoch';
 import { getEffectiveContextWindowTokens } from '../shared/modelProfiles';
 import { DEEPSEEK_MODEL_IDENTITY_VERSION, getCanonicalModelIdentity } from '../shared/deepSeekModels';
 import { migrateContextWindowCalibrationState } from './toolResultAdmission';
+import { normalizeExecutionMode } from './executionMode';
 
 export type StopReason = 'user_stop' | 'time_budget' | 'tool_timeout' | 'connection_interrupted'
   | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'budget_exhausted' | 'completed' | 'storage_failure' | 'resource_limit'
@@ -143,6 +144,7 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
     }
     const copy = checkpointCopy(cp);
     copy.version = 2;
+    copy.request.executionMode = normalizeExecutionMode(copy.request.executionMode);
     copy.maxCost ??= 0;
     copy.usedCostByCurrency ??= {};
     if (copy.state?.epoch?.calibration) {

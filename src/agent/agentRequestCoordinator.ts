@@ -19,6 +19,7 @@ import { getAgentContextCompressionSettings } from '../shared/modelProfiles';
 
 export interface AgentRequestCoordinatorInput {
   approvalMode?: AgentRequest['approvalMode'];
+  executionMode?: AgentRequest['executionMode'];
   approvalRootTaskId?: AgentRequest['approvalRootTaskId'];
   prompt: string;
   model: KeepseekModel;
@@ -63,6 +64,7 @@ export class AgentRequestCoordinator {
   public createAgentRequest(input: AgentRequestCoordinatorInput): AgentRequest {
     return {
       approvalMode: input.approvalMode,
+      executionMode: input.executionMode,
       approvalRootTaskId: input.approvalRootTaskId,
       prompt: input.prompt,
       model: { ...input.model },

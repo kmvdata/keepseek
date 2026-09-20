@@ -9,6 +9,24 @@ type TranslationCatalog = Record<string, string>;
 
 export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
+    executionMode: '执行方式',
+    executionNormal: '常规',
+    executionPlan: '计划',
+    executionNormalDescription: '边分析边推进，适合明确的日常任务',
+    executionPlanDescription: '先产出实施计划，用户确认后再开始执行',
+    executionModeReadonlyWhileBusy: '任务运行期间不能切换执行方式。',
+    executionModeRestoring: '正在恢复当前会话的执行方式…',
+    executionModeLoadFailed: '执行方式恢复失败，请重新加载窗口。',
+    executionModePendingPlan: '计划等待你的确认；切换为常规将退出计划且不会执行。',
+    planConfirmationTitle: '实施计划待确认',
+    planPendingConfirmation: '只有你的操作能让此计划进入实施阶段。',
+    planStartExecution: '开始执行',
+    planRevise: '修改计划',
+    planExit: '退出计划',
+    planRevisionRequested: '请在输入框中说明需要修改的内容；下一份完整计划会取代当前计划。',
+    planApproved: '计划已由你批准，已进入新的实施轮次。',
+    planExited: '已退出计划，未开始实施。',
+    planInvalidOrSuperseded: '计划已失效或已被其他计划取代。',
     approvalMode: '审批模式',
     approvalModeDescription: '为当前项目选择写入文件和运行命令的审批方式',
     approvalAsk: '请求批准',
@@ -801,6 +819,24 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     stopShortcutHintMac: '按 Ctrl+Enter 或 Command+Enter 中止'
   },
   en: {
+    executionMode: 'Execution mode',
+    executionNormal: 'Normal',
+    executionPlan: 'Plan',
+    executionNormalDescription: 'Analyze and proceed as you work; best for clear everyday tasks',
+    executionPlanDescription: 'Produce an implementation plan first, then wait for user confirmation',
+    executionModeReadonlyWhileBusy: 'Execution mode cannot be changed while a task is running.',
+    executionModeRestoring: 'Restoring this conversation’s execution mode…',
+    executionModeLoadFailed: 'Execution mode failed to load. Reload the window to retry.',
+    executionModePendingPlan: 'This plan awaits your confirmation. Switching to Normal exits without executing it.',
+    planConfirmationTitle: 'Implementation plan awaiting confirmation',
+    planPendingConfirmation: 'Only your action can move this plan into implementation.',
+    planStartExecution: 'Start execution',
+    planRevise: 'Revise plan',
+    planExit: 'Exit plan',
+    planRevisionRequested: 'Describe the changes in the input. The next complete plan will replace this one.',
+    planApproved: 'You approved this plan. A new implementation turn has started.',
+    planExited: 'Plan mode exited without starting implementation.',
+    planInvalidOrSuperseded: 'This plan is no longer valid or has been replaced by another plan.',
     approvalMode: 'Approvals',
     approvalModeDescription: 'Choose project-wide approval for file writes and commands',
     approvalAsk: 'Ask for approval',
@@ -1596,6 +1632,10 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
 
 const EXTENSION_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
+    planDecisionBusy: '当前任务仍在运行，请结束后再处理计划。',
+    planDecisionInvalid: '该计划已失效、已处理、内容不匹配或不属于当前会话，不能执行。',
+    planImplementationArtifactRejected: '计划阶段检测到实施草案，宿主已拒绝并丢弃；该响应不能作为可批准计划。请重新生成纯计划。',
+    runRecoveryExecutionModeChanged: '该任务保存时的执行方式已变化，不能恢复旧阶段；请发起新请求。',
     runContinue: '继续任务',
     runRecoveryNotice: '将从已保存步骤继续；未完成的模型步骤会重新请求，可能产生新用量，不会恢复供应商内部思考。',
     runRecoveryHistoryChanged: '此任务之后已有新消息，无法原位继续。请查看保存进度后发起新请求。',
@@ -1746,6 +1786,10 @@ const EXTENSION_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
     enterPath: '请输入文件或文件夹路径。'
   },
   en: {
+    planDecisionBusy: 'A task is still running. Finish or stop it before deciding this plan.',
+    planDecisionInvalid: 'This plan is stale, already resolved, content-mismatched, or belongs to another conversation, so it cannot execute.',
+    planImplementationArtifactRejected: 'The host detected and discarded implementation artifacts during the planning phase. This response cannot be approved as a plan; generate a planning-only response again.',
+    runRecoveryExecutionModeChanged: 'The saved task’s execution mode has changed. Its old phase cannot be resumed; start a new request.',
     runContinue: 'Continue task',
     runRecoveryNotice: 'Continue from saved steps. An unfinished model step starts a new request and may incur usage; provider internal thinking is not restored.',
     runRecoveryHistoryChanged: 'New messages follow this task. Review saved progress and start a new request.',

@@ -31,6 +31,7 @@ export const approvalBindingsFragment: WebviewFragment = {
           if (commandApprovalModeListOpen) {
             commandModelListOpen = false;
             commandSubagentModelListOpen = false;
+            commandExecutionModeListOpen = false;
             commandSkillListOpen = false;
           }
           renderCommandMenu();
@@ -139,4 +140,3 @@ export const approvalRenderFragment: WebviewFragment = {
 
 `.slice(1)
 };
-

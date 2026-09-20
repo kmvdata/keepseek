@@ -179,6 +179,10 @@ import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
 import { RunDetailsBuilder } from './logging/runDetails';
 import { createDraftRunProposal } from '../runs/draftRunProposal';
 import { normalizeApprovalMode } from './approvalMode';
+import {
+  createPlanPhaseBlockedToolResult,
+  getPlanPhaseToolBlockReason
+} from './executionMode';
 import { ToolEvidencePersistenceError, ToolEvidenceStore } from './evidence/store';
 import { prepareEvidenceEnvelope, stableStringify } from './evidence/shaping';
 import type { ToolEvidence } from './evidence/types';
@@ -1490,7 +1494,15 @@ export class AgentLoop {
         try {
           toolArgs = this.parseToolArguments(toolCall.function.arguments);
           runDetailsBuilderRef.current?.recordToolArguments(toolCall.id, toolCall.function.name, toolArgs);
-          if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && validationState.hasPendingDraftEdit()) {
+          const planPhaseBlockReason = getPlanPhaseToolBlockReason({
+            executionMode: request.executionMode,
+            toolName: toolCall.function.name,
+            args: toolArgs,
+            skills: request.currentRunContext?.skills
+          });
+          if (planPhaseBlockReason) {
+            rawToolResult = createPlanPhaseBlockedToolResult(toolCall.function.name, planPhaseBlockReason);
+          } else if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && validationState.hasPendingDraftEdit()) {
             rawToolResult = validationState.createBlockedValidationResult(request.language);
           } else if (isDraftEditPreparationTool(toolCall.function.name) && !repairLoop.beginRepair()) {
             const state = repairLoop.getState();

@@ -120,6 +120,35 @@ test('approval mode persists for the project and is inherited by every new or se
   assert.equal(restarted.getActiveSession().approvalMode, 'model_review');
 });
 
+test('execution mode defaults to normal and is restored independently for each session', async () => {
+  const workspaceScope: WorkspaceSessionScope = {
+    key: 'workspace:execution-mode',
+    name: 'Execution Workspace',
+    folderUris: []
+  };
+  const normal = createSession('normal-session', [createMessage(0)], workspaceScope);
+  const planned = createSession('plan-session', [createMessage(1)], workspaceScope);
+  planned.executionMode = 'plan';
+  const storage = new MemorySessionStorage({
+    activeSessionId: normal.id,
+    sessions: [normal, planned]
+  });
+  const store = new ChatSessionStore(storage, 'en', workspaceScope);
+
+  await store.initialize();
+  assert.equal(store.executionMode, 'normal');
+  assert.equal((await store.createNewSession('en')).executionMode, 'normal');
+  assert.equal((await store.selectSession(planned.id))?.executionMode, 'plan');
+  assert.equal(await store.setExecutionMode('normal'), true);
+  assert.equal((await store.selectSession(normal.id))?.executionMode, 'normal');
+  assert.equal(await store.setExecutionMode('plan'), true);
+
+  const restarted = new ChatSessionStore(storage, 'en', workspaceScope);
+  await restarted.initialize();
+  assert.equal(restarted.executionMode, 'plan');
+  assert.equal((await restarted.selectSession(planned.id))?.executionMode, 'normal');
+});
+
 test('legacy workspace approval mode migrates from its active session', async () => {
   const workspaceScope: WorkspaceSessionScope = {
     key: 'workspace:legacy-approval-mode',
@@ -173,6 +202,7 @@ test('global storage isolates project approval modes and copied sessions use the
   const first = new ChatSessionStore(storage, 'en', firstScope);
   await first.initialize();
   await first.setApprovalMode('delegate');
+  await first.setExecutionMode('plan');
   const firstSessionId = first.activeSessionId;
 
   const second = new ChatSessionStore(storage, 'en', secondScope);
@@ -181,6 +211,8 @@ test('global storage isolates project approval modes and copied sessions use the
   await second.setApprovalMode('model_review');
   const copied = await second.copyOtherWorkspaceSession(firstScope.key, firstSessionId);
   assert.equal(copied?.approvalMode, 'model_review');
+  assert.equal(copied?.executionMode, 'normal');
+  assert.equal(copied?.planWorkflows, undefined);
 
   const restartedFirst = new ChatSessionStore(new GlobalSessionStorage(storageUri), 'en', firstScope);
   await restartedFirst.initialize();

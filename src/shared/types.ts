@@ -505,7 +505,7 @@ export interface ChatMessageContextMeta {
   protectedReason?: string;
   /** `budget_auto_continue` is deserialization-only for old transcripts. New
    * runs never create it or any capacity-continuation user message. */
-  displayKind?: 'draft_run_auto_continue' | 'delegated_auto_continue' | 'budget_auto_continue';
+  displayKind?: 'draft_run_auto_continue' | 'delegated_auto_continue' | 'plan_execution_continuation' | 'budget_auto_continue';
 }
 
 export type DraftRunStatus =
@@ -849,8 +849,33 @@ export interface LegacyProjectMemoryMigrationStateView {
 
 export type ApprovalMode = 'ask' | 'model_review' | 'delegate';
 
+export type ExecutionMode = 'normal' | 'plan';
+
+export type PlanWorkflowStatus = 'pending' | 'approved' | 'revision_requested' | 'exited' | 'superseded';
+
+/**
+ * Host-owned approval state for one assistant-authored implementation plan.
+ * The plan body remains solely in the referenced assistant message.
+ */
+export interface PlanWorkflowRecord {
+  id: string;
+  sessionId: string;
+  userMessageId: string;
+  assistantMessageId: string;
+  contentHash: string;
+  status: PlanWorkflowStatus;
+  createdAt: string;
+  decidedAt?: string;
+}
+
+export interface PlanWorkflowView extends Omit<PlanWorkflowRecord, 'contentHash' | 'status'> {
+  status: PlanWorkflowStatus | 'invalid';
+}
+
 export interface ChatSession {
   approvalMode?: ApprovalMode;
+  executionMode?: ExecutionMode;
+  planWorkflows?: PlanWorkflowRecord[];
   id: string;
   title: string;
   messages: ChatMessage[];
@@ -1426,6 +1451,8 @@ export interface ReferenceResource {
 
 export interface AgentRequest {
   approvalMode?: ApprovalMode;
+  /** Frozen for the whole logical turn. ApprovalMode remains an independent axis. */
+  executionMode?: ExecutionMode;
   /** Runtime root used only for model-approval refusal-fuse accounting. */
   approvalRootTaskId?: string;
   checkpoint?: import('../agent/runCheckpoint').RunCheckpoint;

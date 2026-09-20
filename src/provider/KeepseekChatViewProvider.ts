@@ -62,6 +62,19 @@ import {
 import { ChangeSetStore, type PendingDeleteTarget } from '../edits/changeSetStore';
 import { DraftRunStore, type DraftRunStoreEvent } from '../runs/draftRunStore';
 import { DELEGATED_APPROVAL_PROTOCOL_VERSION, DelegatedApprovalQueue, getApprovalModeUserTail, MODEL_REVIEW_APPROVAL_PROTOCOL_VERSION, normalizeApprovalMode } from '../agent/approvalMode';
+import {
+  exitPendingPlan,
+  getPlanWorkflowTail,
+  getPlanWorkflowViews,
+  hasPlanImplementationArtifacts,
+  invalidatePlansForRemovedMessages,
+  normalizeExecutionMode,
+  PLAN_EXECUTION_CONTINUATION_PROMPT,
+  registerPendingPlan,
+  requestPlanRevisionForNewPrompt,
+  resolvePlanDecision as resolvePlanWorkflowDecision,
+  type PlanDecisionAction
+} from '../agent/executionMode';
 import { DraftRunAuthorizationService } from '../runs/draftRunAuthorization';
 import { DraftRunBatchCoordinator } from '../runs/draftRunBatchCoordinator';
 import type { DraftRunBatchSnapshot, DraftRunBatchState } from '../shared/types';
@@ -206,6 +219,7 @@ type StartupLoadState = 'loading' | 'ready' | 'error';
 interface CommandSettingsReadiness {
   mainModel: StartupLoadState;
   subagentModel: StartupLoadState;
+  executionMode: StartupLoadState;
   approvalMode: StartupLoadState;
 }
 
@@ -294,6 +308,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private commandSettingsReadiness: CommandSettingsReadiness = {
     mainModel: 'loading',
     subagentModel: 'loading',
+    executionMode: 'loading',
     approvalMode: 'loading'
   };
   private readonly startupTraceStages = new Set<string>();
@@ -885,6 +900,45 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'abortPrompt':
         this.abortPrompt();
+        return;
+      case 'setExecutionMode':
+        if (this.commandSettingsReadiness.executionMode !== 'ready') {
+          this.postStartupSettingsPatch();
+          return;
+        }
+        if (message.mode !== 'normal' && message.mode !== 'plan') return;
+        if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.hasActiveBackgroundRun()) return;
+        {
+          const session = this.sessionStore.getActiveSession();
+          if (normalizeExecutionMode(session.executionMode) === message.mode) return;
+          const originalExecutionMode = session.executionMode;
+          const originalUpdatedAt = session.updatedAt;
+          const originalPlanStates = (session.planWorkflows ?? []).map((record) => ({
+            record,
+            status: record.status,
+            decidedAt: record.decidedAt
+          }));
+          if (message.mode === 'normal') exitPendingPlan(session);
+          session.executionMode = message.mode;
+          session.updatedAt = new Date().toISOString();
+          try {
+            await this.sessionStore.persist();
+          } catch (error) {
+            session.executionMode = originalExecutionMode;
+            session.updatedAt = originalUpdatedAt;
+            for (const original of originalPlanStates) {
+              original.record.status = original.status;
+              original.record.decidedAt = original.decidedAt;
+            }
+            vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error));
+            this.postState();
+            return;
+          }
+          this.postState();
+        }
+        return;
+      case 'resolvePlanDecision':
+        await this.handlePlanDecision(message.planId, message.action);
         return;
       case 'setApprovalMode':
         if (this.commandSettingsReadiness.approvalMode !== 'ready') {
@@ -4156,8 +4210,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       message.runDetails = checkpoint.finalResponse.runDetails;
     }
     session.updatedAt = checkpoint.updatedAt;
-    const draftEdits = checkpoint.finalResponse?.draftEdits ?? checkpoint.state?.draftEdits ?? [];
-    const draftRuns = checkpoint.finalResponse?.draftRuns ?? checkpoint.state?.draftRuns ?? [];
+    const planningOnly = normalizeExecutionMode(checkpoint.request.executionMode) === 'plan';
+    const draftEdits = planningOnly ? [] : checkpoint.finalResponse?.draftEdits ?? checkpoint.state?.draftEdits ?? [];
+    const draftRuns = planningOnly ? [] : checkpoint.finalResponse?.draftRuns ?? checkpoint.state?.draftRuns ?? [];
     if (draftEdits.length) this.changeSets.addDraftEdits({
       edits: draftEdits, runId: checkpoint.taskId, sessionId: session.id, messageId: message.id
     });
@@ -4189,6 +4244,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     try {
       const blocker = recoveryBlocker(cp);
       if (blocker) throw new Error(blocker);
+      const executionMode = normalizeExecutionMode(cp.request.executionMode);
+      if (normalizeExecutionMode(session.executionMode) !== executionMode) {
+        throw new Error(this.t('runRecoveryExecutionModeChanged'));
+      }
       if (session.messages[session.messages.length - 1]?.id !== messageId) throw new Error(this.t('runRecoveryHistoryChanged'));
       const folders = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString());
       if (!vscode.workspace.isTrusted || JSON.stringify(folders) !== JSON.stringify(cp.workspaceFolders)) throw new Error(this.t('runRecoveryWorkspaceChanged'));
@@ -4259,6 +4318,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           await this.sessionStore.persist();
         }
       });
+      const planPhaseViolation = executionMode === 'plan' && hasPlanImplementationArtifacts(response);
+      if (planPhaseViolation) {
+        response.message = [response.message.trim(), this.t('planImplementationArtifactRejected')]
+          .filter(Boolean)
+          .join('\n\n');
+        response.draftEdits = [];
+        response.draftRuns = [];
+        response.changeSet = undefined;
+        response.approvalContinuationRequired = false;
+        response.approvalToolResults = undefined;
+      }
       message.content = response.message;
       message.reasoningContent = response.reasoningContent;
       message.toolRounds = response.toolRounds;
@@ -4266,9 +4336,25 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       message.runDetails = response.runDetails;
       session.repairLoop = response.repairLoop;
       this.repairLoopsBySession.set(session.id, response.repairLoop);
-      if (response.changeSet) this.changeSets.add(response.changeSet);
-      if (response.draftRuns?.length) this.draftRuns.addProposals({ proposals: response.draftRuns, agentRunId: cp.taskId, sessionId: session.id, messageId });
-      if (session.approvalMode !== 'ask' && !controller.signal.aborted) this.delegatedApprovals.enqueue({
+      if (!planPhaseViolation && response.changeSet) this.changeSets.add(response.changeSet);
+      if (!planPhaseViolation && response.draftRuns?.length) this.draftRuns.addProposals({ proposals: response.draftRuns, agentRunId: cp.taskId, sessionId: session.id, messageId });
+      if (executionMode === 'plan'
+        && !planPhaseViolation
+        && !controller.signal.aborted
+        && response.message.trim()
+        && normalizeExecutionMode(session.executionMode) === 'plan') {
+        const messageIndex = session.messages.findIndex((item) => item.id === messageId);
+        const userMessage = session.messages.slice(0, messageIndex).reverse().find((item) => item.role === 'user');
+        if (userMessage) {
+          registerPendingPlan({
+            session,
+            userMessageId: userMessage.id,
+            assistantMessageId: message.id,
+            content: response.message
+          });
+        }
+      }
+      if (executionMode === 'normal' && session.approvalMode !== 'ask' && !controller.signal.aborted) this.delegatedApprovals.enqueue({
         sessionId: session.id,
         // saveAgentCheckpoint persists recovered proposals under the logical
         // checkpoint task, while response.runId identifies only this attempt.
@@ -4299,9 +4385,77 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async handlePlanDecision(planId: string, action: PlanDecisionAction): Promise<void> {
+    if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.hasActiveBackgroundRun()) {
+      vscode.window.showInformationMessage(this.t('planDecisionBusy'));
+      return;
+    }
+    if (action === 'start_execution' && (!this.approvalDataReady || !this.requestContextReady)) {
+      this.postStartupSettingsPatch();
+      return;
+    }
+    const reservesRun = action === 'start_execution';
+    if (reservesRun) {
+      this.isStartingRun = true;
+      this.postState();
+    }
+    try {
+      const session = this.sessionStore.getActiveSession();
+      const originalExecutionMode = session.executionMode;
+      const originalUpdatedAt = session.updatedAt;
+      const originalRecord = session.planWorkflows?.find((record) => record.id === planId);
+      const originalRecordState = originalRecord
+        ? { status: originalRecord.status, decidedAt: originalRecord.decidedAt }
+        : undefined;
+      const resolution = resolvePlanWorkflowDecision({
+        session,
+        activeSessionId: this.sessionStore.activeSessionId,
+        planId,
+        action
+      });
+      if (!resolution.ok) {
+        vscode.window.showWarningMessage(this.t('planDecisionInvalid'));
+        this.postState();
+        return;
+      }
+      try {
+        await this.sessionStore.persist();
+      } catch (error) {
+        session.executionMode = originalExecutionMode;
+        session.updatedAt = originalUpdatedAt;
+        if (originalRecord && originalRecordState) {
+          originalRecord.status = originalRecordState.status;
+          originalRecord.decidedAt = originalRecordState.decidedAt;
+        }
+        vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error));
+        this.postState();
+        return;
+      }
+      this.postState({ immediate: true });
+      if (action === 'revise_plan') {
+        this.postToWebview({ type: 'focusComposer' });
+        return;
+      }
+      if (!resolution.startExecution) return;
+      await this.sendPrompt(
+        PLAN_EXECUTION_CONTINUATION_PROMPT,
+        this.selectedSourceId,
+        this.selectedModelId,
+        this.agentSettings,
+        { planExecutionContinuation: { planId: resolution.record.id } }
+      );
+    } finally {
+      if (reservesRun && this.isStartingRun) {
+        this.isStartingRun = false;
+        this.postState();
+      }
+    }
+  }
+
   private async sendPrompt(...args: Parameters<KeepseekChatViewProvider['sendPromptImpl']>): Promise<AgentResponse | undefined> {
     if (!await this.awaitRunContextRefresh()) return;
-    if (this.isBusy || this.isStartingRun) return;
+    const reservedPlanContinuation = Boolean(args[4]?.planExecutionContinuation && this.isStartingRun);
+    if (this.isBusy || (this.isStartingRun && !reservedPlanContinuation)) return;
     if (!args[4]?.draftRunBatch) {
       if (this.draftRunBatches?.locked) return;
       this.draftRunBatches?.cancel();
@@ -4345,6 +4499,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       draftRunAutoContinue?: { agentRunId: string };
       draftRunBatch?: { operationId: string; signal: AbortSignal };
       delegatedContinuation?: boolean;
+      planExecutionContinuation?: { planId: string };
       approvalRootTaskId?: string;
     }
   ): Promise<AgentResponse | undefined> {
@@ -4479,6 +4634,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       const activeSession = this.sessionStore.getActiveSession();
       const approvalMode = normalizeApprovalMode(activeSession.approvalMode);
+      const executionMode = normalizeExecutionMode(activeSession.executionMode);
       const explicitSubagentSelection = resolveExplicitSubagentSelection(trimmedPrompt);
       if (explicitSubagentSelection && (activeSession.requestProtocol?.version ?? 1) < 5) {
         activeSession.requestProtocol = {
@@ -4600,6 +4756,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const removedMessageIds = activeSession.messages
           .slice(replacementIndex)
           .map((message) => message.id);
+        invalidatePlansForRemovedMessages(activeSession, new Set(removedMessageIds), now);
         activeSession.messages.splice(replacementIndex);
         this.draftRuns.releaseResultBindingsForMessages(activeSession.id, removedMessageIds);
         activeSession.contextUsage = undefined;
@@ -4617,13 +4774,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         activeSession.createdAt = now;
       }
 
+      if (executionMode === 'plan' && !options?.planExecutionContinuation) {
+        requestPlanRevisionForNewPrompt(activeSession, now);
+      }
+
       const draftRunTail = this.draftRuns.getPendingProviderTail(activeSession.id, this.language);
       const approvalTail = (activeSession.requestProtocol?.version ?? 1) >= DELEGATED_APPROVAL_PROTOCOL_VERSION
         ? getApprovalModeUserTail(approvalMode) : '';
       const explicitSubagentTail = explicitSubagentSelection
         ? formatExplicitSubagentTail(explicitSubagentSelection)
         : '';
-      const providerTails = [dynamicContextTail, approvalTail, draftRunTail?.content ?? '', explicitSubagentTail].filter(Boolean);
+      const executionModeTail = getPlanWorkflowTail(executionMode);
+      const providerTails = [dynamicContextTail, approvalTail, draftRunTail?.content ?? '', explicitSubagentTail, executionModeTail].filter(Boolean);
 
       const userMessage: ChatMessage = {
         id: randomUUID(),
@@ -4632,7 +4794,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         createdAt: now,
         modelId: model.id,
         usedSkills: toChatMessageSkills(activeSkills),
-        contextMeta: options?.delegatedContinuation
+        contextMeta: options?.planExecutionContinuation
+          ? { ...createProtectedContextMeta('plan_execution_continuation'), displayKind: 'plan_execution_continuation' }
+          : options?.delegatedContinuation
           ? { ...createProtectedContextMeta('delegated_approval_result'), displayKind: 'delegated_auto_continue' }
           : draftRunTail
           ? {
@@ -4700,6 +4864,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
       const response = await this.agentRunner.run(this.agentRequestCoordinator.createAgentRequest({
         approvalMode,
+        executionMode,
         approvalRootTaskId: options?.approvalRootTaskId,
         prompt: expandedPrompt,
         model,
@@ -4823,6 +4988,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           await this.sessionStore.persist();
         }
       });
+      const planPhaseViolation = executionMode === 'plan' && hasPlanImplementationArtifacts(response);
+      if (planPhaseViolation) {
+        response.message = [response.message.trim(), this.t('planImplementationArtifactRejected')]
+          .filter(Boolean)
+          .join('\n\n');
+        response.draftEdits = [];
+        response.draftRuns = [];
+        response.changeSet = undefined;
+        response.approvalContinuationRequired = false;
+        response.approvalToolResults = undefined;
+      }
       completedResponse = response;
 
       if (activeSession.requestProtocol) {
@@ -4883,7 +5059,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (assistantMessage) {
         assistantMessage.content = response.message;
         assistantMessage.reasoningContent = response.reasoningContent;
-        if (response.draftEdits.length || response.draftRuns?.length) {
+        if (!planPhaseViolation && (response.draftEdits.length || response.draftRuns?.length)) {
           assistantMessage.contextMeta = createProtectedContextMeta(
             response.draftRuns?.length ? 'draft_run_proposal' : 'draft_edit_result'
           );
@@ -4899,13 +5075,30 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         delete assistantMessage.isStreaming;
         assistantMessage.runDetails = response.runDetails;
       }
+      if (executionMode === 'plan'
+        && !planPhaseViolation
+        && !abortController.signal.aborted
+        && response.message.trim()
+        && assistantMessage
+        && activeSession.id === this.sessionStore.activeSessionId
+        && normalizeExecutionMode(activeSession.executionMode) === 'plan') {
+        registerPendingPlan({
+          session: activeSession,
+          userMessageId: userMessage.id,
+          assistantMessageId: assistantMessage.id,
+          content: response.message
+        });
+      }
       this.updateActiveSessionContextUsage(this.createCurrentSessionContextUsage(model));
       this.scheduleContextCompressionRefresh(activeSession, expandedPrompt, model, sourceConfig);
       this.setAgentActivity({
         base: 'complete',
         phase: 'finalizing'
       }, { post: false });
-      if (approvalMode !== 'ask' && activeSession.approvalMode === approvalMode && !abortController.signal.aborted) {
+      if (executionMode === 'normal'
+        && approvalMode !== 'ask'
+        && activeSession.approvalMode === approvalMode
+        && !abortController.signal.aborted) {
         const persistedAgentRunId = assistantMessage?.runCheckpoint?.taskId ?? response.runId;
         const approvalReviews = response.approvalContinuationRequired
           ? response.runDetails.approvalReviews ?? []
@@ -5139,6 +5332,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.usageLedgerFlushes.get(session.id);
       }
       this.sessionReady = true;
+      this.commandSettingsReadiness.executionMode = sessionResult[0]?.status === 'fulfilled' ? 'ready' : 'error';
       this.syncConfiguredState();
       this.postLightweightState();
       this.markStartupStageOnce('approval-mode-visible', { entries: 1 });
@@ -5272,6 +5466,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   } {
     const interactiveReady = this.sessionReady && this.approvalDataReady && this.requestContextReady;
     const hasError = this.commandSettingsReadiness.mainModel === 'error'
+      || this.commandSettingsReadiness.executionMode === 'error'
       || this.commandSettingsReadiness.approvalMode === 'error'
       || this.runContextReadiness === 'error';
     return {
@@ -5310,6 +5505,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         },
         subagentModelSetting: this.subagentModelSetting,
         subagentModelSettings: this.subagentModelSettings,
+        executionMode: normalizeExecutionMode(activeSession.executionMode),
+        planWorkflows: getPlanWorkflowViews(activeSession),
         approvalMode: normalizeApprovalMode(activeSession.approvalMode),
         commandSettingsReadiness: { ...this.commandSettingsReadiness },
         startup: this.getStartupState(),
@@ -5348,7 +5545,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         hasOlderMessages: Boolean(activeSession && activeSession.messages.length > messages.length),
         changeSets: [],
         draftRuns: [],
-        ...(activeSession ? { approvalMode: normalizeApprovalMode(activeSession.approvalMode) } : {}),
+        ...(activeSession ? {
+          executionMode: normalizeExecutionMode(activeSession.executionMode),
+          planWorkflows: getPlanWorkflowViews(activeSession),
+          approvalMode: normalizeApprovalMode(activeSession.approvalMode)
+        } : {}),
         commandSettingsReadiness: { ...this.commandSettingsReadiness },
         startup: this.getStartupState(),
         language: this.language,
@@ -5533,6 +5734,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           ? this.draftRunBatches.snapshots(activeSession.id) : [],
         draftRunBatch: this.draftRunBatches.state?.sessionId === activeSession.id ? this.draftRunBatches.state : undefined,
         activeDraftRunId: this.activeDraftRunId,
+        executionMode: normalizeExecutionMode(activeSession.executionMode),
+        planWorkflows: getPlanWorkflowViews(activeSession),
         approvalMode: normalizeApprovalMode(activeSession.approvalMode),
         commandSettingsReadiness: { ...this.commandSettingsReadiness },
         startup: this.getStartupState(),

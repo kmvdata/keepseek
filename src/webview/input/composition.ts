@@ -9,6 +9,7 @@ import * as referenceCodec from './references/codec';
 import * as skillsScript from './skills/script';
 import * as commandMenuScript from './commandMenu/script';
 import * as commandModels from './commandMenu/models';
+import * as commandExecution from './commandMenu/execution';
 import * as commandApproval from './commandMenu/approval';
 import * as commandAgentSettings from './commandMenu/agentSettings';
 import * as commandSkills from './commandMenu/skills';
@@ -52,6 +53,7 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   referenceChips.referenceButtonDeclarationFragment,
   commandMenuScript.commandMenuDeclarationFragment,
   commandModels.modelSelectorsDeclarationFragment,
+  commandExecution.executionDeclarationFragment,
   commandApproval.approvalDeclarationFragment,
   commandModels.modelStatusDeclarationFragment,
   commandAgentSettings.agentSettingsDeclarationFragment,
@@ -61,6 +63,7 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   skillsScript.skillsDeclarationFragment,
   commandMenuScript.commandMenuStateFragment,
   commandModels.modelControlsStateFragment,
+  commandExecution.executionStateFragment,
   commandApproval.approvalStateFragment,
   commandSkills.commandSkillsStateFragment,
   referenceMenu.referenceMenuStateFragment,
@@ -73,6 +76,7 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   referenceMenu.referenceMenuButtonBindingsFragment,
   commandMenuScript.commandMenuTriggerBindingsFragment,
   commandModels.modelSelectorBindingsFragment,
+  commandExecution.executionBindingsFragment,
   commandApproval.approvalBindingsFragment,
   commandModels.subagentAndPendingBindingsFragment,
   commandAgentSettings.compressionBindingsFragment,
@@ -93,6 +97,7 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   usageFormatters.usageFormattersFragment,
   commandMenuScript.commandMenuRenderFragment,
   commandModels.modelControlsRenderFragment,
+  commandExecution.executionRenderFragment,
   commandApproval.approvalRenderFragment,
   commandModels.modelControlsLockingFragment,
   commandAgentSettings.agentSettingsRenderFragment,

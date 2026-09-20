@@ -9,6 +9,8 @@ import { AgentRunner } from '../src/agent/runner';
 import {
   APPLY_PATCH_TOOL_NAME,
   CREATE_DRAFT_EDIT_TOOL_NAME,
+  DELEGATE_TASK_TOOL_NAME,
+  DELETE_WORKSPACE_FILE_TOOL_NAME,
   READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
   RUN_DRAFT_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME
@@ -181,6 +183,39 @@ test('Runner turns keepseek_run_draft into a pending proposal without executing 
   assert.match(result.message ?? '', /no process was started/u);
 });
 
+test('Runner Plan phase allows read-only investigation and blocks implementation before every approval mode', async () => {
+  for (const approvalMode of ['ask', 'model_review', 'delegate'] as const) {
+    const validation = new FakeValidationTools([]);
+    const reviewer = new FakeApprovalReviewer('approve');
+    const authorization = new AllowAllToolAuthorization();
+    const request = createRequest('Plan the change without implementing it.');
+    request.executionMode = 'plan';
+    request.approvalMode = approvalMode;
+    request.requestProtocolVersion = 5;
+    request.sessionId = 'plan-session-' + approvalMode;
+    const response = await withResponses([
+      toolResponse([
+        toolCall('read', READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME, {}),
+        toolCall('draft', CREATE_DRAFT_EDIT_TOOL_NAME, { path: 'blocked.ts', content: 'blocked', reason: 'blocked' }),
+        toolCall('delete', DELETE_WORKSPACE_FILE_TOOL_NAME, { path: 'blocked.ts', reason: 'blocked' }),
+        toolCall('run', RUN_DRAFT_TOOL_NAME, { executable: 'node', args: ['--version'], reason: 'blocked' }),
+        toolCall('writer', DELEGATE_TASK_TOOL_NAME, { profile: 'proposal', task: 'write files' })
+      ]),
+      textResponse('1. Inspect\n   - Verify the relevant code paths.')
+    ], async () => await createRunner(validation, reviewer, authorization).run(request));
+
+    assert.deepEqual(authorization.toolNames, [READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME]);
+    assert.equal(reviewer.calls, 0);
+    assert.equal(response.draftEdits.length, 0);
+    assert.equal(response.draftRuns?.length, 0);
+    const results = response.toolRounds?.[0]?.toolResults ?? [];
+    assert.equal(JSON.parse(results[0]?.content ?? '{}').ok, true);
+    for (const result of results.slice(1)) {
+      assert.equal(JSON.parse(result.content).errorType, 'plan_phase_implementation_blocked');
+    }
+  }
+});
+
 test('model-reviewed validation persists a neutral tool placeholder and requires a new user-message boundary', async () => {
   await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { compile: 'tsc -p .' } }));
   const validation = new FakeValidationTools([validationResult(true)]);
@@ -250,6 +285,8 @@ class FakeValidationTools implements ValidationToolAdapter {
 }
 
 class AllowAllToolAuthorization implements ToolAuthorizationAdapter {
+  public readonly toolNames: string[] = [];
+
   public createRunPolicy(runId: string): RunAuthorizationPolicy {
     return {
       runId,
@@ -264,6 +301,7 @@ class AllowAllToolAuthorization implements ToolAuthorizationAdapter {
     args: Record<string, unknown>;
     policy: RunAuthorizationPolicy;
   }): Promise<ToolAuthorizationDecision> {
+    this.toolNames.push(input.toolName);
     const validation = input.toolName === RUN_VALIDATION_TOOL_NAME;
     const draftRun = input.toolName === RUN_DRAFT_TOOL_NAME;
     return {
@@ -279,14 +317,18 @@ class AllowAllToolAuthorization implements ToolAuthorizationAdapter {
   }
 }
 
-function createRunner(validation: ValidationToolAdapter, reviewer?: ApprovalReviewerAdapter): AgentRunner {
+function createRunner(
+  validation: ValidationToolAdapter,
+  reviewer?: ApprovalReviewerAdapter,
+  authorization: ToolAuthorizationAdapter = new AllowAllToolAuthorization()
+): AgentRunner {
   return new AgentRunner(
     new WorkspaceToolService(),
     undefined,
     validation,
     undefined,
     undefined,
-    new AllowAllToolAuthorization(),
+    authorization,
     undefined,
     undefined,
     reviewer

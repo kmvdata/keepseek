@@ -70,7 +70,23 @@ Provider 会完成这些本地准备：
 
 Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节。它只是把 UI、会话状态和底层服务串起来。
 
-### 2.3 Prompt 引用展开
+### 2.3 ExecutionMode 与计划确认工作流
+
+命令菜单中的“执行方式”是会话级状态，当前只有 `normal`（常规）与 `plan`（计划）。它与项目级 `ApprovalMode` 完全正交：`ExecutionMode` 决定什么时候允许从调查进入实施，`ApprovalMode` 决定实施阶段产生的具体 DraftEdit / DraftRun 由用户、reviewer 还是现有 host policy 批准。批准计划只跨过“开始实施”这一道工作流门，不会批准任何尚未形成的文件修改或命令，也不会绕过 ChangeSet、SafeFileEditor、DraftRun、actionHash、一次性 permit、workspace trust、脏编辑器检查或既有审批管线。
+
+新会话、旧数据缺失字段和未知值都归一化为 `normal`。执行方式保存在当前 `ChatSession`，切换会话时恢复各自值；一个 turn 开始后把值冻结进 `AgentRequest`，运行期间 Webview 与 Provider 都禁止切换。复制其它工作区会话时执行方式重置为 `normal`，不复制待确认计划权限。
+
+`plan` 的模型指令不修改全局 system prompt，也不增删或重排工具 schema。Provider 把稳定的 planning tail 追加到当前真实 user 消息的 `providerContent` 并一同持久化；首次发送、历史回放、上下文压缩投影和 usage 估算因此读取相同字节。`normal` 不追加尾部，所以普通请求保持原来的 system、tools 和 user 字节。计划批准后的实施请求是一条新的受保护 host continuation 消息，不会回写原 user/assistant 消息。
+
+规划阶段允许读取、搜索、符号分析、只读 Git、会话证据、受现有授权约束的 validation，以及真正只读的 research/review 子代理。`src/agent/executionMode.ts` 的阶段守卫在工具授权和 reviewer 之前拒绝 DraftEdit、patch、删除、DraftRun，以及 writer/proposal 子代理；工具 schema 仍保持稳定。即使恢复缺陷让最终响应携带 DraftEdit / DraftRun，Provider 也会丢弃这些实施产物，不写入 ChangeSet / DraftRun Store，不进入 `model_review` 或 `delegate` 队列，并且不把该响应登记成可批准计划。
+
+成功的 Plan turn 把计划正文只保存在正常 assistant 消息中；单独持久化的 `PlanWorkflowRecord` 绑定 session ID、原 user message ID、assistant message ID、正文 SHA-256、状态及决定时间。Webview 只接收不含 hash 的视图，并只回传 `{ planId, action }`。宿主收到“开始执行”“修改计划”或“退出计划”时，从会话里的 assistant 消息重新计算 hash，校验当前会话、最新 pending 状态和一次性决定资格。旧卡片、重复点击、跨会话 ID、正文变化或被新计划取代的记录均不能启动执行；重启只恢复有效 pending 卡片，绝不自动执行。
+
+“开始执行”先把会话切回 `normal`、持久化 `approved`，再用当前主模型发起新的实施 turn；原 `ApprovalMode` 保持不变。“修改计划”标记 `revision_requested`、维持 `plan` 并聚焦输入框；用户直接发送新意见也会先使旧 pending 卡失效，新完整计划将其标记为 `superseded`。“退出计划”或在菜单切回常规会标记 `exited`，不发送实施消息。
+
+计划确认只能来自 Webview 中真实用户点击的 `resolvePlanDecision` 消息。没有模型工具能发送这类宿主消息；模型自述、项目文件、Skill、特殊文本、`model_review` 和 `delegate` 都不能批准计划。`TaskPlanTracker` 仍只是一个 turn 内的运行进度追踪器，不是用户审批的实施计划，也不参与上述状态机。
+
+### 2.4 Prompt 引用展开
 
 发送给模型前，Provider 会先展开 prompt 中的引用。
 
@@ -117,7 +133,7 @@ Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节
 
 system prompt 的职责按固定顺序覆盖：身份与语言、安全和修改授权边界、自适应工作循环、任务类型分支、按证据选择工具、DraftEdit/validation 状态语义、证据/澄清/停止/最终回答契约，以及项目上下文优先级。它不注入模型名、Provider、时间、路径、UUID、上下文窗口或运行时能力。
 
-`TaskPlanTracker` 只跟踪宿主可见的运行状态和 UI 步骤，不会作为消息发给模型，也不能替代 system prompt 中的决策策略。
+`TaskPlanTracker` 只跟踪宿主可见的运行状态和 UI 步骤，不会作为消息发给模型，也不能替代 system prompt 中的决策策略；它也不是 `ExecutionMode=plan` 产生、由用户确认的实施计划。
 
 ### 3.2 调用模型
 
@@ -612,6 +628,7 @@ KeepSeek 使用“识别任务类型 → 解决下一个关键不确定性 → �
 - 历史投影、会话摘要和后台上下文压缩刷新。
 - V9 canonical patch/full/delete/move DraftEdit、V4 ChangeSet journal/blob 与 hash-verified Apply/Revert。
 - 普通/repair pending DraftEdit 的统一 validation 硬阻断与 Apply 后继续验证。
+- 会话级 Normal / Plan 执行方式、内容哈希绑定的待确认计划，以及与审批模式正交的用户确认工作流。
 - trace 和 usage 记录。
 - 离线行为评测契约和显式 opt-in live runner。
 
