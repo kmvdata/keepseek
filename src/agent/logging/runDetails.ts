@@ -42,6 +42,8 @@ export class RunDetailsBuilder {
   private taskPlan: TaskPlan | undefined;
   private taskPlanUpdateCount = 0;
   private requestCount = 0;
+  private providerAttemptCount = 0;
+  private usageResponseCount = 0;
   private toolCallCount = 0;
   private messageCount = 0;
   private exposedToolCount = 0;
@@ -65,6 +67,12 @@ export class RunDetailsBuilder {
         return;
       case 'upstream_request':
         this.recordModelRequest(event.body);
+        return;
+      case 'upstream_attempt_start':
+        this.providerAttemptCount += 1;
+        return;
+      case 'upstream_usage':
+        this.usageResponseCount += 1;
         return;
       case 'tool_call':
         this.recordToolCallEvent(event, timestamp);
@@ -168,6 +176,8 @@ export class RunDetailsBuilder {
         : undefined,
       modelRequests: {
         requestCount: this.requestCount,
+        providerAttemptCount: this.providerAttemptCount,
+        usageResponseCount: this.usageResponseCount,
         messageCount: this.messageCount,
         exposedToolCount: this.exposedToolCount,
         maxOutputTokens: this.maxOutputTokens,
@@ -184,6 +194,7 @@ export class RunDetailsBuilder {
       contextDeduplication: this.contextDeduplication ? { ...this.contextDeduplication } : undefined,
       historySummaries: this.historySummaries.map((summary) => ({ ...summary })),
       contextEpochs: this.contextEpochs.map((epoch) => ({ ...epoch })),
+      capacityAdjustments: this.capacityAdjustments.map((item) => ({ ...item })),
       budgetStopReason: this.budgetStopReason,
       failureReason: this.failureReason,
       traceLogUri: this.input.traceLogUri,
@@ -198,9 +209,16 @@ export class RunDetailsBuilder {
   private historySummaries: NonNullable<RunDetailsSummary['historySummaries']> = [];
   private approvalReviews: NonNullable<RunDetailsSummary['approvalReviews']> = [];
   private contextEpochs: NonNullable<RunDetailsSummary['contextEpochs']> = [];
+  private capacityAdjustments: NonNullable<RunDetailsSummary['capacityAdjustments']> = [];
 
   public recordEpochRollover(value: NonNullable<RunDetailsSummary['contextEpochs']>[number]): void {
     this.contextEpochs.push({ ...value });
+  }
+
+  public recordCapacityAdjustment(
+    value: NonNullable<RunDetailsSummary['capacityAdjustments']>[number]
+  ): void {
+    this.capacityAdjustments.push({ ...value });
   }
 
   public setHistorySummaries(summaries: readonly HistorySummary[]): void {

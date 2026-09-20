@@ -38,6 +38,7 @@ import {
   normalizeSessionUsageStatsValue,
   normalizeTurnUsageStatsValue
 } from '../agent/usageStats';
+import { normalizeUsageLedgerValue } from '../agent/usageLedger';
 
 export const SESSION_STORAGE_KEY = 'keepseek.chatSessions';
 export const SESSION_STORAGE_VERSION = 2;
@@ -682,6 +683,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       repairLoop: normalizeRepairLoopState(item.repairLoop),
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
       usageStats: normalizeSessionUsageStatsValue(item.usageStats),
+      usageLedger: normalizeUsageLedgerValue(item.usageLedger),
       lastTurnUsage: normalizeTurnUsageStatsValue(item.lastTurnUsage),
       subagentUsageStats: normalizeSubagentSessionUsageStatsValue(item.subagentUsageStats),
       balance: normalizeBalanceStateValue(item.balance),

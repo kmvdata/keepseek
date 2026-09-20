@@ -2,13 +2,16 @@ import { randomUUID } from 'node:crypto';
 import type { ModelSourceConfigSnapshot } from '../accounts/types';
 import { requiresModelSourceApiKey } from '../accounts/sourceCapabilities';
 import type { KeepseekLanguage } from '../shared/i18n';
-import type { KeepseekModel, UsageEvent } from '../shared/types';
-import { getConfiguredModelUsagePricing } from '../shared/config';
+import type { KeepseekModel, ProviderUsageLedgerRecord, UsageEvent, UsagePriceSnapshot } from '../shared/types';
 import type { DeepSeekChatRequestBody } from '../agent/deepseek/types';
 import { createProviderClient } from '../agent/providers/factory';
 import type { AnthropicMessagesRequestBody } from '../agent/providers/anthropicTypes';
 import type { OpenAiResponsesRequestBody } from '../agent/providers/responsesTypes';
-import { calculateUsageCost, createUsageEvent, normalizeDeepSeekUsage } from '../agent/usageStats';
+import { createUsageEvent, normalizeDeepSeekUsage } from '../agent/usageStats';
+import {
+  createUsageLedgerRecords,
+  createUsagePriceSnapshot
+} from '../agent/usageLedger';
 
 export const APPROVAL_REVIEW_MAX_OUTPUT_TOKENS = 512;
 export const APPROVAL_REVIEW_TIMEOUT_MS = 20_000;
@@ -66,6 +69,7 @@ export async function requestApprovalReviewText(input: {
   language: KeepseekLanguage;
   signal?: AbortSignal;
   onUsage?: (event: UsageEvent) => void;
+  onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => void;
 }): Promise<string> {
   if (!input.sourceConfig.apiKey.trim() && requiresModelSourceApiKey(input.sourceConfig)) {
     throw new Error(input.language === 'en'
@@ -75,6 +79,21 @@ export async function requestApprovalReviewText(input: {
   const requestId = `approval_${randomUUID()}`;
   const deadlineAt = Date.now() + APPROVAL_REVIEW_TIMEOUT_MS;
   const abort = createDeadlineSignal(input.signal, APPROVAL_REVIEW_TIMEOUT_MS);
+  const protocol = input.sourceConfig.provider === 'openai-responses'
+    ? 'openai-responses'
+    : input.sourceConfig.provider === 'anthropic-compatible'
+      ? 'anthropic-messages'
+      : 'chat-completions';
+  const createSnapshot = (requestStartedAt: string): UsagePriceSnapshot => createUsagePriceSnapshot({
+    originalModelId: input.model.id,
+    sourceId: input.sourceConfig.sourceId,
+    provider: input.sourceConfig.provider,
+    protocol,
+    supportsBilling: input.sourceConfig.supportsBilling,
+    requestStartedAt
+  });
+  const fallbackSnapshot = createSnapshot(new Date().toISOString());
+  const attemptSnapshots: UsagePriceSnapshot[] = [];
   try {
     const response = await createProviderClient(input.sourceConfig.provider).createModelResponse({
       apiKey: input.sourceConfig.apiKey,
@@ -92,31 +111,43 @@ export async function requestApprovalReviewText(input: {
       language: input.language,
       signal: abort.signal,
       runDeadlineAt: deadlineAt,
-      requestId
+      requestId,
+      onAttempt: ({ attemptIndex, startedAt }) => {
+        attemptSnapshots[attemptIndex] = createSnapshot(startedAt);
+      }
     });
+    while (attemptSnapshots.length < (response.attemptCount ?? 1)) {
+      attemptSnapshots.push(attemptSnapshots.length === 0
+        ? fallbackSnapshot
+        : createSnapshot(new Date().toISOString()));
+    }
+    const usage = normalizeDeepSeekUsage(response.usage);
+    const ledgerRecords = createUsageLedgerRecords({
+      requestId,
+      attempts: attemptSnapshots,
+      usage,
+      source: 'reviewer'
+    });
+    ledgerRecords.forEach((record) => input.onUsageLedgerRecord?.(record));
     if (!response.ok || !response.message?.content?.trim()) {
       throw new Error(response.error ?? (input.language === 'en'
         ? 'Approval reviewer returned no usable response.'
         : '审批模型未返回可用响应。'));
     }
-    const usage = normalizeDeepSeekUsage(response.usage);
     if (usage) {
-      const rates = input.sourceConfig.supportsBilling
-        ? getConfiguredModelUsagePricing(input.model.id)
-        : undefined;
+      const billed = ledgerRecords.find((record) => record.kind === 'usage_response');
       input.onUsage?.(createUsageEvent({
         usage,
-        cost: rates ? calculateUsageCost(usage, rates) : 0,
-        currency: rates?.currency ?? '',
-        pricingStatus: rates ? 'priced' : 'unavailable',
+        cost: billed?.cost ?? 0,
+        currency: billed?.currency ?? '',
+        pricingStatus: billed?.pricingStatus ?? 'unavailable',
+        unpricedReason: billed?.unpricedReason,
+        ledgerRecorded: true,
+        providerAttemptCount: ledgerRecords.length,
         sourceId: input.sourceConfig.sourceId,
         modelId: input.model.id,
         provider: input.sourceConfig.provider,
-        protocol: input.sourceConfig.provider === 'openai-responses'
-          ? 'openai-responses'
-          : input.sourceConfig.provider === 'anthropic-compatible'
-            ? 'anthropic-messages'
-            : 'chat-completions',
+        protocol,
         requestId,
         source: 'reviewer'
       }));

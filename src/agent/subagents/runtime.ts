@@ -658,6 +658,11 @@ export class SubagentRuntime implements SubagentToolAdapter {
       }
       input.context.onUsage?.(childEvent);
     };
+    const recordChildLedger = (
+      record: import('../../shared/types').ProviderUsageLedgerRecord
+    ): void => {
+      input.context.onUsageLedgerRecord?.({ ...record, source: 'subagent' });
+    };
     try {
       if (resumeBlocker) throw new SubagentRecoveryBlockedError(resumeBlocker);
       const runner = new AgentLoop(
@@ -737,6 +742,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
           }
         },
         onUsage: recordChildUsage,
+        onUsageLedgerRecord: recordChildLedger,
         onToolRejected: () => { rejectedUnexposedTool = true; },
         onUsageEstimate: (usage) => {
           const categories = [usage.breakdown.toolCallTokensEstimate,
@@ -779,7 +785,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
           originalResult: acceptedRaw,
           diagnostics: acceptance.diagnostics,
           taskHash,
-          onUsage: recordChildUsage
+          onUsage: recordChildUsage,
+          onUsageLedgerRecord: recordChildLedger
         });
         acceptedRaw = repaired;
         acceptance = acceptSubagentResult({
@@ -1105,6 +1112,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
     diagnostics: readonly string[];
     taskHash: string;
     onUsage: (event: UsageEvent) => void;
+    onUsageLedgerRecord?: import('../../shared/types').AgentRunCallbacks['onUsageLedgerRecord'];
   }): Promise<string> {
     const repairPrompt = getSubagentFormatRepairPrompt(input.input.profile.lane, input.diagnostics, input.taskHash);
     try {
@@ -1153,7 +1161,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         taskClock: input.input.context.parentRequest.taskClock,
         taskCostBudget: input.input.context.parentRequest.taskCostBudget,
         signal: input.input.context.signal
-      }, { onUsage: input.onUsage });
+      }, { onUsage: input.onUsage, onUsageLedgerRecord: input.onUsageLedgerRecord });
       return repaired.message;
     } catch {
       return '';

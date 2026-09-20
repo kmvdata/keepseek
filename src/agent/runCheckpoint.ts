@@ -3,6 +3,9 @@ import type { AgentRequest, AgentToolRound, DraftEdit, DraftRunProposal, RepairL
 import type { DeepSeekAssistantMessage, DeepSeekMessage, DeepSeekUsage } from './deepseek/types';
 import type { ProviderNativeRunState } from './runner';
 import type { ContextEpochState } from './contextEpoch';
+import { getEffectiveContextWindowTokens } from '../shared/modelProfiles';
+import { DEEPSEEK_MODEL_IDENTITY_VERSION, getCanonicalModelIdentity } from '../shared/deepSeekModels';
+import { migrateContextWindowCalibrationState } from './toolResultAdmission';
 
 export type StopReason = 'user_stop' | 'time_budget' | 'tool_timeout' | 'connection_interrupted'
   | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'budget_exhausted' | 'completed' | 'storage_failure' | 'resource_limit'
@@ -142,6 +145,17 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
     copy.version = 2;
     copy.maxCost ??= 0;
     copy.usedCostByCurrency ??= {};
+    if (copy.state?.epoch?.calibration) {
+      const declaredWindowTokens = getEffectiveContextWindowTokens(copy.request.model);
+      copy.state.epoch.calibration = migrateContextWindowCalibrationState(
+        copy.state.epoch.calibration,
+        declaredWindowTokens,
+        {
+          identity: getCanonicalModelIdentity(copy.request.model.id),
+          version: `${DEEPSEEK_MODEL_IDENTITY_VERSION}:${declaredWindowTokens}`
+        }
+      ).state;
+    }
     if (copy.status === 'running') {
       copy.status = 'interrupted'; copy.stopReason = 'extension_restart';
       if (copy.taskPlan) copy.taskPlan.status = 'stopped';

@@ -21,6 +21,7 @@ import {
   DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
   getAgentRuntimeProfile
 } from '../src/shared/modelProfiles';
+import { DEEPSEEK_MODEL_IDENTITY_VERSION } from '../src/shared/deepSeekModels';
 
 const LARGE_ASCII = 'const value = 1; // evidence\n'.repeat(8_000);
 const LARGE_CJK = '这是不可变的工具证据。\n'.repeat(12_000);
@@ -274,6 +275,64 @@ test('learned effective windows persist by exact source, provider, endpoint and 
   assert.equal(await store.load({ ...key, endpointHash: 'endpoint-b' }), undefined);
 });
 
+test('v1 calibration migration is canonical, atomic and retryable after a failed v2 write', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-calibration-v1-'));
+  const storage = vscode.Uri.file(root) as unknown as import('vscode').Uri;
+  const store = new ContextWindowCalibrationStore(storage);
+  const key = {
+    sourceId: 'official',
+    provider: 'deepseek' as const,
+    modelId: 'deepseek-flash',
+    canonicalModelId: 'deepseek-v4-flash',
+    endpointHash: 'official-endpoint'
+  };
+  const v1Hash = createHash('sha256').update(JSON.stringify([
+    key.provider, key.sourceId, key.modelId, key.endpointHash
+  ]), 'utf8').digest('hex');
+  const v1Directory = vscode.Uri.joinPath(storage, 'model-calibration', 'v1');
+  const v1Uri = vscode.Uri.joinPath(v1Directory, `${v1Hash}.json`);
+  await vscode.workspace.fs.createDirectory(v1Directory);
+  await vscode.workspace.fs.writeFile(v1Uri, new TextEncoder().encode(JSON.stringify({
+    version: 1,
+    keyHash: v1Hash,
+    state: {
+      declaredWindowTokens: 32_768,
+      learnedEffectiveWindowTokens: 32_768,
+      estimatorScale: 1.31,
+      observations: 4,
+      contextTooLongCount: 0
+    },
+    updatedAt: '2026-01-01T00:00:00.000Z'
+  })));
+
+  const originalRename = vscode.workspace.fs.rename;
+  vscode.workspace.fs.rename = async (source, target, options) => {
+    if (target.fsPath.includes('/model-calibration/v2/')) throw new Error('simulated atomic migration failure');
+    await originalRename(source, target, options);
+  };
+  t.after(() => { vscode.workspace.fs.rename = originalRename; });
+  const declaration = {
+    identity: 'deepseek-v4-flash',
+    version: 'deepseek-model-identity-v1:1048576',
+    declaredWindowTokens: 1_048_576
+  };
+  const inMemory = await store.load(key, declaration);
+  assert.equal(inMemory?.learnedEffectiveWindowTokens, 1_048_576);
+  assert.equal(inMemory?.estimatorScale, 1.31);
+  assert.ok((await vscode.workspace.fs.readFile(v1Uri)).byteLength > 0, 'failed migration preserves v1 source');
+
+  vscode.workspace.fs.rename = originalRename;
+  const retried = await store.load({ ...key, modelId: 'deepseek-v4.1-flash' }, declaration);
+  assert.equal(retried, undefined, 'v1 lookup remains tied to the original wire alias until migration succeeds');
+  const migrated = await store.load(key, declaration);
+  assert.equal(migrated?.learnedEffectiveWindowTokens, 1_048_576);
+  assert.deepEqual(
+    await store.load({ ...key, modelId: 'deepseek-v4.1-flash' }, declaration),
+    migrated,
+    'v2 calibration is shared by canonical model identity'
+  );
+});
+
 test('epoch seed is canonical and no-progress detection survives rollovers', () => {
   const state = createContextEpochState(new ToolResultAdmissionController(32_000).state);
   const plan = planFixture();
@@ -458,6 +517,46 @@ test('provider context metadata errors downshift the learned window and rebuild 
     assert.equal(response.runDetails.contextEpochs?.[0].reason, 'provider_context_too_long');
     assert.equal(bodies.length, 3);
     assert.equal(input.history.length, 0, 'rollover does not create a visible history message');
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('a successful 40K prompt repairs stale 32K calibration without an epoch rollover storm', async () => {
+  const workspace = new WorkspaceToolService();
+  workspace.readWorkspaceFile = async () => JSON.stringify({ ok: true, path: 'small.ts', content: 'export {};' });
+  const input = request('openai-compatible');
+  input.model.contextWindowTokens = 1_000_000;
+  const checkpoint = epochRecoveryCheckpoint(input, 'task-stale-capacity');
+  checkpoint.state!.epoch!.calibration = {
+    ...checkpoint.state!.epoch!.calibration,
+    declaredWindowTokens: 1_000_000,
+    declaredIdentity: 'custom-model',
+    declaredVersion: `${DEEPSEEK_MODEL_IDENTITY_VERSION}:1000000`,
+    learnedEffectiveWindowTokens: 32_768,
+    estimatorScale: 1.37,
+    successfulInputFloorTokens: 0,
+    lastAdjustmentSource: 'declared'
+  };
+  input.checkpoint = checkpoint;
+  const bodies: string[] = [];
+  let finalCheckpoint!: RunCheckpoint;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url, init) => {
+    bodies.push(String(init?.body));
+    return bodies.length === 1
+      ? toolCallResponseWithUsage(40_960)
+      : chatResponseWithUsage('Done.', 42_000);
+  }) as typeof fetch;
+  try {
+    const response = await new AgentRunner(workspace).run(input, {
+      onCheckpoint: async (cp) => { finalCheckpoint = checkpointCopy(cp); }
+    });
+    assert.equal(response.message, 'Done.');
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies.some((body) => body.includes('Create a concise semantic checkpoint')), false);
+    assert.equal(finalCheckpoint.state?.epoch?.totalRollovers, 0);
+    assert.equal(finalCheckpoint.state?.epoch?.calibration.learnedEffectiveWindowTokens, 1_000_000);
+    assert.equal(response.runDetails.capacityAdjustments?.length, 1);
+    assert.equal(response.runDetails.capacityAdjustments?.[0]?.reason, 'stale_capacity_calibration');
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -891,6 +990,25 @@ function pricedToolCallResponse(): Response {
       prompt_cache_hit_tokens: 0,
       prompt_cache_miss_tokens: 1_000
     }
+  })}\n\ndata: [DONE]\n\n`, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+}
+
+function toolCallResponseWithUsage(promptTokens: number): Response {
+  return new Response(`data: ${JSON.stringify({
+    choices: [{
+      delta: { tool_calls: [{ index: 0, id: 'stale-read', type: 'function', function: {
+        name: 'keepseek_read_workspace_file', arguments: '{"path":"small.ts"}'
+      } }] },
+      finish_reason: 'tool_calls'
+    }],
+    usage: { prompt_tokens: promptTokens, completion_tokens: 20, total_tokens: promptTokens + 20 }
+  })}\n\ndata: [DONE]\n\n`, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+}
+
+function chatResponseWithUsage(text: string, promptTokens: number): Response {
+  return new Response(`data: ${JSON.stringify({
+    choices: [{ delta: { content: text }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: promptTokens, completion_tokens: 10, total_tokens: promptTokens + 10 }
   })}\n\ndata: [DONE]\n\n`, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 }
 

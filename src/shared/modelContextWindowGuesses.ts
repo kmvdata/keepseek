@@ -1,4 +1,5 @@
 import type { NonTextModelKind } from './types';
+import { getDeepSeekModelIdentity } from './deepSeekModels';
 
 interface ModelTokenGuessRule {
   aliases: readonly string[];
@@ -29,7 +30,6 @@ const MODEL_CONTEXT_WINDOW_GUESS_RULES: readonly ModelTokenGuessRule[] = [
     ],
     tokens: 1_048_576
   },
-  { aliases: ['deepseek-v4'], tokens: 1_048_576 },
   {
     aliases: [
       'gpt-5-5',
@@ -142,7 +142,6 @@ const MODEL_MAX_OUTPUT_GUESS_RULES: readonly ModelTokenGuessRule[] = [
   { aliases: ['gemini-3-7-flash'], tokens: 64_000 },
   { aliases: ['gpt-4o'], tokens: 16_384 },
   { aliases: ['minimax-m2-5-lightning'], tokens: 8_192 },
-  { aliases: ['deepseek-v4'], tokens: 393_216 },
   { aliases: ['minimax-m3'], tokens: 131_000 },
   { aliases: ['kimi-k3'], tokens: 131_072 },
   { aliases: ['glm-4-5-air', 'glm-4-5'], tokens: 96_000 },
@@ -179,11 +178,13 @@ const NON_TEXT_MODEL_RULES: readonly NonTextModelRule[] = [
 ];
 
 export function getGuessedContextWindowTokens(modelId: string | undefined): number | undefined {
-  return getGuessedTokens(modelId, MODEL_CONTEXT_WINDOW_GUESS_RULES);
+  return getDeepSeekModelIdentity(modelId)?.contextWindowTokens
+    ?? getGuessedTokens(modelId, MODEL_CONTEXT_WINDOW_GUESS_RULES);
 }
 
 export function getGuessedMaxOutputTokens(modelId: string | undefined): number | undefined {
-  return getGuessedTokens(modelId, MODEL_MAX_OUTPUT_GUESS_RULES);
+  return getDeepSeekModelIdentity(modelId)?.maxOutputTokens
+    ?? getGuessedTokens(modelId, MODEL_MAX_OUTPUT_GUESS_RULES);
 }
 
 export function getKnownNonTextModelKind(

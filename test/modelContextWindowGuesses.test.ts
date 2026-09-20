@@ -39,8 +39,10 @@ test('known model families use the centrally documented context-window guesses',
     ['qwen3.6-flash', 1_000_000],
     ['qwen3.5-plus', 1_000_000],
     ['deepseek-v4-pro', 1_048_576],
+    ['deepseek-flash', 1_048_576],
+    ['deepseek-v4.1-flash', 1_048_576],
     ['deepseek-v4-flash', 1_048_576],
-    ['deepseek-v4-flash-0731', 1_048_576],
+    ['deepseek-v4-flash-vision-exp', 1_048_576],
     ['deepseek-v3.2', 1_000_000],
     ['deepseek-v3.1', 128_000],
     ['glm-5.2', 1_000_000],
@@ -87,7 +89,10 @@ test('known model families use centrally documented max-output guesses', () => {
     ['gemini-3.1-pro-preview', 65_535],
     ['gemini-2.5-pro', 65_535],
     ['deepseek-v4-pro', 393_216],
-    ['deepseek-v4-flash-0731', 393_216],
+    ['deepseek-flash', 393_216],
+    ['deepseek-v4.1-flash', 393_216],
+    ['deepseek-v4-flash', 393_216],
+    ['deepseek-v4-flash-vision-exp', 393_216],
     ['qwen3.8-2.4T-A95B', 131_072],
     ['qwen3.8-max', 131_072],
     ['qwen3.8-flash', 131_072],
@@ -112,6 +117,11 @@ test('known model families use centrally documented max-output guesses', () => {
   for (const [modelId, expectedTokens] of cases) {
     assert.equal(getGuessedMaxOutputTokens(modelId), expectedTokens, modelId);
   }
+});
+
+test('unknown near-match DeepSeek names do not inherit explicit V4 capabilities', () => {
+  assert.equal(getGuessedContextWindowTokens('deepseek-v4-flash-0731'), undefined);
+  assert.equal(getGuessedMaxOutputTokens('deepseek-v4-flash-0731'), undefined);
 });
 
 test('known image and speech resources are classified without invented token limits', () => {

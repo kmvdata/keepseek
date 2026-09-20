@@ -58,10 +58,11 @@ const HANDOFF_KINDS: SubagentHandoffKind[] = ['delegate', 'parallel', 'read-resu
 export interface ActualUsageSlice extends Usage {
   requestCount: number;
   pricedRequestCount: number;
+  estimatedRequestCount: number;
   unpricedRequestCount: number;
   cacheDataRequestCount: number;
   cacheDataMissingRequestCount: number;
-  pricingStatus: 'priced' | 'partial' | 'unavailable';
+  pricingStatus: 'priced' | 'estimated_upper_bound' | 'partial' | 'unavailable';
   costByCurrency: Record<string, number>;
   cacheHitRate?: number;
 }
@@ -477,8 +478,11 @@ function mergeTurnUsage(
   const leftUsage = left ?? createEmptyTurnUsage();
   const pricedRequestCount = clampCount((leftUsage.pricedRequestCount ?? 0)
     + direction * (right.pricedRequestCount ?? (right.pricingStatus === 'priced' ? right.requestCount : 0)));
+  const estimatedRequestCount = clampCount((leftUsage.estimatedRequestCount ?? 0)
+    + direction * (right.estimatedRequestCount
+      ?? (right.pricingStatus === 'estimated_upper_bound' ? right.requestCount : 0)));
   const unpricedRequestCount = clampCount((leftUsage.unpricedRequestCount ?? 0)
-    + direction * (right.unpricedRequestCount ?? (right.pricingStatus === 'priced' ? 0 : right.requestCount)));
+    + direction * (right.unpricedRequestCount ?? (right.pricingStatus === 'unavailable' ? right.requestCount : 0)));
   const cacheDataRequestCount = clampCount((leftUsage.cacheDataRequestCount ?? 0)
     + direction * (right.cacheDataRequestCount ?? (right.cacheDataStatus === 'reported' ? right.requestCount : 0)));
   const cacheDataMissingRequestCount = clampCount((leftUsage.cacheDataMissingRequestCount ?? 0)
@@ -502,8 +506,9 @@ function mergeTurnUsage(
     requestCount,
     cost: currency ? costByCurrency[currency] ?? 0 : 0,
     currency,
-    pricingStatus: pricingStatus(pricedRequestCount, unpricedRequestCount),
+    pricingStatus: pricingStatus(pricedRequestCount, estimatedRequestCount, unpricedRequestCount),
     pricedRequestCount,
+    estimatedRequestCount,
     unpricedRequestCount,
     cacheDataRequestCount,
     cacheDataMissingRequestCount,
@@ -518,6 +523,7 @@ function toActualUsageSlice(value: (Usage & {
   unpricedRequestCount?: number;
   cacheDataRequestCount?: number;
   cacheDataMissingRequestCount?: number;
+  estimatedRequestCount?: number;
   costByCurrency?: Record<string, number>;
   currency?: string;
   cost?: number;
@@ -531,9 +537,12 @@ function toActualUsageSlice(value: (Usage & {
   const legacyCost = safeNumber(value.sessionCost ?? value.cost);
   const costByCurrency = normalizeCurrencyCosts(value.costByCurrency, legacyCost, value.currency);
   const pricedRequestCount = safeInteger(value.pricedRequestCount
-    ?? (value.pricingStatus === 'priced' || legacyCost > 0 ? requestCount : 0));
+    ?? (value.pricingStatus === 'priced'
+      || (legacyCost > 0 && value.pricingStatus !== 'estimated_upper_bound') ? requestCount : 0));
+  const estimatedRequestCount = safeInteger(value.estimatedRequestCount
+    ?? (value.pricingStatus === 'estimated_upper_bound' ? requestCount : 0));
   const unpricedRequestCount = safeInteger(value.unpricedRequestCount
-    ?? Math.max(0, requestCount - pricedRequestCount));
+    ?? Math.max(0, requestCount - pricedRequestCount - estimatedRequestCount));
   const cacheDataRequestCount = safeInteger(value.cacheDataRequestCount
     ?? (value.cacheDataStatus === 'reported' ? requestCount : 0));
   const cacheDataMissingRequestCount = safeInteger(value.cacheDataMissingRequestCount
@@ -548,10 +557,11 @@ function toActualUsageSlice(value: (Usage & {
     cacheDataStatus: cacheStatus(cacheDataRequestCount, cacheDataMissingRequestCount),
     requestCount,
     pricedRequestCount,
+    estimatedRequestCount,
     unpricedRequestCount,
     cacheDataRequestCount,
     cacheDataMissingRequestCount,
-    pricingStatus: pricingStatus(pricedRequestCount, unpricedRequestCount),
+    pricingStatus: pricingStatus(pricedRequestCount, estimatedRequestCount, unpricedRequestCount),
     costByCurrency,
     cacheHitRate: cacheRate(value.cacheHitTokens, value.cacheMissTokens, cacheDataRequestCount)
   };
@@ -560,6 +570,7 @@ function toActualUsageSlice(value: (Usage & {
 function sumActualUsageSlices(values: ActualUsageSlice[]): ActualUsageSlice {
   return values.reduce((total, value) => {
     const pricedRequestCount = total.pricedRequestCount + value.pricedRequestCount;
+    const estimatedRequestCount = total.estimatedRequestCount + value.estimatedRequestCount;
     const unpricedRequestCount = total.unpricedRequestCount + value.unpricedRequestCount;
     const cacheDataRequestCount = total.cacheDataRequestCount + value.cacheDataRequestCount;
     const cacheDataMissingRequestCount = total.cacheDataMissingRequestCount + value.cacheDataMissingRequestCount;
@@ -574,10 +585,11 @@ function sumActualUsageSlices(values: ActualUsageSlice[]): ActualUsageSlice {
       cacheDataStatus: cacheStatus(cacheDataRequestCount, cacheDataMissingRequestCount),
       requestCount: total.requestCount + value.requestCount,
       pricedRequestCount,
+      estimatedRequestCount,
       unpricedRequestCount,
       cacheDataRequestCount,
       cacheDataMissingRequestCount,
-      pricingStatus: pricingStatus(pricedRequestCount, unpricedRequestCount),
+      pricingStatus: pricingStatus(pricedRequestCount, estimatedRequestCount, unpricedRequestCount),
       costByCurrency: mergeCurrencyCosts(total.costByCurrency, value.costByCurrency, 1),
       cacheHitRate: cacheRate(total.cacheHitTokens + value.cacheHitTokens, total.cacheMissTokens + value.cacheMissTokens, cacheDataRequestCount)
     };
@@ -586,6 +598,7 @@ function sumActualUsageSlices(values: ActualUsageSlice[]): ActualUsageSlice {
 
 function subtractActualUsageSlice(total: ActualUsageSlice, known: ActualUsageSlice): ActualUsageSlice {
   const pricedRequestCount = clampCount(total.pricedRequestCount - known.pricedRequestCount);
+  const estimatedRequestCount = clampCount(total.estimatedRequestCount - known.estimatedRequestCount);
   const unpricedRequestCount = clampCount(total.unpricedRequestCount - known.unpricedRequestCount);
   const cacheDataRequestCount = clampCount(total.cacheDataRequestCount - known.cacheDataRequestCount);
   const cacheDataMissingRequestCount = clampCount(total.cacheDataMissingRequestCount - known.cacheDataMissingRequestCount);
@@ -600,10 +613,11 @@ function subtractActualUsageSlice(total: ActualUsageSlice, known: ActualUsageSli
     cacheDataStatus: cacheStatus(cacheDataRequestCount, cacheDataMissingRequestCount),
     requestCount: clampCount(total.requestCount - known.requestCount),
     pricedRequestCount,
+    estimatedRequestCount,
     unpricedRequestCount,
     cacheDataRequestCount,
     cacheDataMissingRequestCount,
-    pricingStatus: pricingStatus(pricedRequestCount, unpricedRequestCount),
+    pricingStatus: pricingStatus(pricedRequestCount, estimatedRequestCount, unpricedRequestCount),
     costByCurrency: subtractCurrencyCosts(total.costByCurrency, known.costByCurrency),
     cacheHitRate: cacheRate(total.cacheHitTokens - known.cacheHitTokens, total.cacheMissTokens - known.cacheMissTokens, cacheDataRequestCount)
   };
@@ -619,6 +633,7 @@ function createEmptyActualUsageSlice(): ActualUsageSlice {
     cacheDataStatus: 'unavailable',
     requestCount: 0,
     pricedRequestCount: 0,
+    estimatedRequestCount: 0,
     unpricedRequestCount: 0,
     cacheDataRequestCount: 0,
     cacheDataMissingRequestCount: 0,
@@ -640,6 +655,7 @@ function createEmptyTurnUsage(): TurnUsageStats {
     currency: '',
     pricingStatus: 'unavailable',
     pricedRequestCount: 0,
+    estimatedRequestCount: 0,
     unpricedRequestCount: 0,
     cacheDataRequestCount: 0,
     cacheDataMissingRequestCount: 0,
@@ -783,8 +799,14 @@ function normalizeTerminalStatus(value: unknown): SubagentTerminalStatus | undef
   return value === 'completed' || value === 'failed' || value === 'stopped' ? value : undefined;
 }
 
-function pricingStatus(priced: number, unpriced: number): 'priced' | 'partial' | 'unavailable' {
-  return priced > 0 && unpriced > 0 ? 'partial' : priced > 0 ? 'priced' : 'unavailable';
+function pricingStatus(
+  priced: number,
+  estimated: number,
+  unpriced: number
+): 'priced' | 'estimated_upper_bound' | 'partial' | 'unavailable' {
+  if (priced + estimated > 0 && unpriced > 0) return 'partial';
+  if (estimated > 0) return 'estimated_upper_bound';
+  return priced > 0 ? 'priced' : 'unavailable';
 }
 
 function cacheStatus(reported: number, missing: number): Usage['cacheDataStatus'] {

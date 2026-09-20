@@ -120,9 +120,14 @@ import {
   addUsageEventToSessionStats,
   addUsageEventToTurnStats,
   addTurnUsageToSessionStats,
+  applyUsageLedgerSummaryToSessionStats,
   calculateCacheHitRate,
   getCacheMissPossibleReasons
 } from '../agent/usageStats';
+import {
+  appendUsageLedgerRecord,
+  summarizeUsageLedger
+} from '../agent/usageLedger';
 import {
   addSubagentHandoffEstimate,
   createUsageDetailsViewModel,
@@ -321,7 +326,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         session.usageStats = addUsageEventToSessionStats(session.usageStats, event);
         session.updatedAt = new Date().toISOString();
         this.postState();
-      }
+      },
+      onUsageLedgerRecord: (record) => this.applyUsageLedgerRecord(
+        this.sessionStore.getActiveSession(),
+        record
+      )
     });
     this.modelSourceService = new ModelSourceService(this.sourceStore);
     this.subagentSettingsStore = new SubagentSettingsStore(
@@ -1433,6 +1442,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     session.usageStats = addUsageEventToSessionStats(session.usageStats, event, nextTurnUsage.updatedAt);
     session.updatedAt = nextTurnUsage.updatedAt ?? new Date().toISOString();
     return nextTurnUsage;
+  }
+
+  private applyUsageLedgerRecord(
+    session: ChatSession,
+    record: import('../shared/types').ProviderUsageLedgerRecord
+  ): void {
+    const legacyAggregate = !session.usageLedger && (session.usageStats?.requestCount ?? 0) > 0;
+    session.usageLedger = appendUsageLedgerRecord(session.usageLedger, record, legacyAggregate);
+    session.usageStats = applyUsageLedgerSummaryToSessionStats(
+      session.usageStats,
+      summarizeUsageLedger(session.usageLedger)
+    );
+    session.updatedAt = new Date().toISOString();
+    void this.sessionStore.persist();
   }
 
   private applyTurnUsage(session: ChatSession, turnUsage: TurnUsageStats): TurnUsageStats {
@@ -3909,6 +3932,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           streamPublisher.schedule();
         },
         onUsage: (event) => { usage = this.applyUsageEvent(session, usage, event); this.liveTurnUsage = usage; refresh(); },
+        onUsageLedgerRecord: (record) => { this.applyUsageLedgerRecord(session, record); refresh(); },
         onUsageEstimate: (estimate) => { this.liveContextUsage = toSessionContextUsageEstimate(estimate); refresh(); },
         onTaskPlan: (plan) => { this.taskPlansBySession.set(session.id, plan); refresh(); },
         onRunDetails: (details) => { message.runDetails = details; refresh(); },
@@ -4437,6 +4461,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.liveTurnUsage = currentTurnUsage;
           scheduleLiveState();
         },
+        onUsageLedgerRecord: (record) => {
+          this.applyUsageLedgerRecord(activeSession, record);
+          scheduleLiveState();
+        },
         onSubagentRunSummary: (summary) => {
           activeSession.subagentUsageStats = upsertSubagentRunUsageSummary(
             activeSession.subagentUsageStats,
@@ -4771,6 +4799,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     for (const usageEvent of result.usageEvents ?? []) {
       session.usageStats = addUsageEventToSessionStats(session.usageStats, usageEvent);
+    }
+    for (const record of result.usageLedgerRecords ?? []) {
+      this.applyUsageLedgerRecord(session, record);
     }
     session.contextUsage = undefined;
     session.updatedAt = new Date().toISOString();

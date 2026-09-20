@@ -63,11 +63,11 @@ describe('model source catalog', () => {
     assert.equal(catalog.some((model) => model.id === 'deepseek-v4-flash'), false);
   });
 
-  it('keeps the official DeepSeek context window when discovery omits capability metadata', () => {
+  it('uses canonical DeepSeek capabilities when discovery omits capability metadata', () => {
     const [model] = createModelCatalog([createSource({
       id: 'official',
       baseUrl: 'https://api.deepseek.com/v1',
-      modelCache: { fetchedAt: NOW, models: [{ id: 'deepseek-chat' }] }
+      modelCache: { fetchedAt: NOW, models: [{ id: 'deepseek-v4.1-flash' }] }
     })]);
 
     assert.equal(model?.contextWindowTokens, 1_048_576);

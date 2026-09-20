@@ -15,6 +15,11 @@ import {
 } from './modelProfiles';
 import { isOfficialDeepSeekSource } from '../accounts/sourceCapabilities';
 import { resolveProjectModel } from '../accounts/modelCatalog';
+import {
+  DEEPSEEK_FLASH_PRICING_KEY,
+  DEEPSEEK_PRO_PRICING_KEY,
+  getCanonicalPricingKey
+} from './deepSeekModels';
 
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 export const DEFAULT_WORKSPACE_TOOL_FILE_LIMIT = 2_000;
@@ -74,13 +79,17 @@ const DEEPSEEK_V41_FLASH_USAGE_PRICING: UsageCostRates = {
   currency: '¥'
 };
 
+/**
+ * Increment only when the built-in monetary rates or their time-band rules
+ * change. Alias additions and capability metadata changes do not change it.
+ */
+export const USAGE_PRICE_TABLE_VERSION = 'keepseek-pricing-2026-09-01';
+
 export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
   // DeepSeek 当前峰谷价格:北京时间工作日 9-12 点、14-18 点为高峰,
   // 其余时间(含周六、周日全天)为空闲档。旧 V4 Flash 名称按 V4.1 Flash 计费。
-  'deepseek-flash': { ...DEEPSEEK_V41_FLASH_USAGE_PRICING },
-  'deepseek-v4-flash': { ...DEEPSEEK_V41_FLASH_USAGE_PRICING },
-  'deepseek-v4-flash-vision-exp': { ...DEEPSEEK_V41_FLASH_USAGE_PRICING },
-  'deepseek-v4-pro': {
+  [DEEPSEEK_FLASH_PRICING_KEY]: { ...DEEPSEEK_V41_FLASH_USAGE_PRICING },
+  [DEEPSEEK_PRO_PRICING_KEY]: {
     cacheHitPrice: 0.15,
     inputPrice: 4.5,
     outputPrice: 13.5,
@@ -223,14 +232,31 @@ export function getConfiguredUsagePricingMap(): Record<string, UsageCostRates> {
     if (!normalizedModelId || !rates || typeof rates !== 'object' || Array.isArray(rates)) {
       continue;
     }
-    merged[normalizedModelId] = normalizeUsageCostRates(rates, merged[normalizedModelId]);
+    const canonicalPricingKey = getCanonicalPricingKey(normalizedModelId);
+    const canonicalConfigured = canonicalPricingKey && canonicalPricingKey !== normalizedModelId
+      ? configured[canonicalPricingKey]
+      : undefined;
+    const canonicalFallback = canonicalPricingKey
+      ? canonicalConfigured && typeof canonicalConfigured === 'object' && !Array.isArray(canonicalConfigured)
+        ? normalizeUsageCostRates(
+          canonicalConfigured,
+          merged[canonicalPricingKey] ?? DEFAULT_USAGE_PRICING[DEEPSEEK_FLASH_PRICING_KEY]
+        )
+        : merged[canonicalPricingKey]
+      : undefined;
+    merged[normalizedModelId] = normalizeUsageCostRates(
+      rates,
+      merged[normalizedModelId] ?? canonicalFallback
+    );
   }
   return merged;
 }
 
 export function getConfiguredModelUsagePricing(modelId: string): UsageCostRates | undefined {
   const pricing = getConfiguredUsagePricingMap();
-  return pricing[modelId];
+  const exactId = modelId.trim();
+  const canonicalPricingKey = getCanonicalPricingKey(exactId);
+  return pricing[exactId] ?? (canonicalPricingKey ? pricing[canonicalPricingKey] : undefined);
 }
 
 export function getConfiguredBalanceEndpointUrl(baseUrl: string): string {
@@ -536,16 +562,31 @@ export function normalizeIntegerInRange(value: unknown, min: number, max: number
 
 function normalizeUsageCostRates(
   rates: Partial<UsageCostRates>,
-  fallback: UsageCostRates = DEFAULT_USAGE_PRICING['deepseek-flash']
+  fallback: UsageCostRates = DEFAULT_USAGE_PRICING[DEEPSEEK_FLASH_PRICING_KEY]
 ): UsageCostRates {
   return {
     cacheHitPrice: normalizeNonNegativeNumber(rates.cacheHitPrice, fallback.cacheHitPrice),
     inputPrice: normalizeNonNegativeNumber(rates.inputPrice, fallback.inputPrice),
     outputPrice: normalizeNonNegativeNumber(rates.outputPrice, fallback.outputPrice),
+    peakCacheHitPrice: normalizeOptionalNonNegativeNumber(
+      rates.peakCacheHitPrice,
+      fallback.peakCacheHitPrice
+    ),
+    peakInputPrice: normalizeOptionalNonNegativeNumber(rates.peakInputPrice, fallback.peakInputPrice),
+    peakOutputPrice: normalizeOptionalNonNegativeNumber(rates.peakOutputPrice, fallback.peakOutputPrice),
     currency: typeof rates.currency === 'string' && rates.currency.trim()
       ? rates.currency.trim()
       : fallback.currency
   };
+}
+
+function normalizeOptionalNonNegativeNumber(
+  value: unknown,
+  fallback: number | undefined
+): number | undefined {
+  if (value === undefined) return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
 }
 
 function normalizeNonNegativeNumber(value: unknown, fallback: number): number {

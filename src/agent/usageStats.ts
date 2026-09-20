@@ -12,6 +12,7 @@ import type {
   UsageSource,
   UsageSourceStats
 } from '../shared/types';
+import type { UsageLedgerSummary } from './usageLedger';
 
 const DEFAULT_CURRENCY = '¥';
 
@@ -62,11 +63,14 @@ export function createEmptySessionUsageStats(currency = DEFAULT_CURRENCY): Sessi
     cacheHitTokens: 0,
     cacheMissTokens: 0,
     requestCount: 0,
+    providerAttemptCount: 0,
+    usageResponseCount: 0,
     sessionCost: 0,
     currency: normalizeCurrency(currency),
     pricingStatus: 'unavailable',
     pricedRequestCount: 0,
     unpricedRequestCount: 0,
+    estimatedRequestCount: 0,
     cacheDataRequestCount: 0,
     cacheDataMissingRequestCount: 0,
     costByCurrency: {},
@@ -82,11 +86,14 @@ export function createEmptyTurnUsageStats(currency = DEFAULT_CURRENCY, modelId?:
     cacheHitTokens: 0,
     cacheMissTokens: 0,
     requestCount: 0,
+    providerAttemptCount: 0,
+    usageResponseCount: 0,
     cost: 0,
     currency: normalizeCurrency(currency),
     pricingStatus: 'unavailable',
     pricedRequestCount: 0,
     unpricedRequestCount: 0,
+    estimatedRequestCount: 0,
     cacheDataRequestCount: 0,
     cacheDataMissingRequestCount: 0,
     costByCurrency: {},
@@ -106,12 +113,15 @@ export function createUsageEvent(input: {
   requestId?: string;
   source?: UsageSource;
   requestCount?: number;
+  providerAttemptCount?: number;
+  unpricedReason?: string;
+  ledgerRecorded?: boolean;
 }): UsageEvent {
   const currency = normalizeCurrency(input.currency);
   const pricingStatus = input.pricingStatus ?? (currency ? 'priced' : 'unavailable');
   return {
     usage: normalizeUsage(input.usage),
-    cost: pricingStatus === 'priced' ? normalizeCost(input.cost) : 0,
+    cost: isCostKnownPricingStatus(pricingStatus) ? normalizeCost(input.cost) : 0,
     currency,
     sourceId: normalizeOptionalString(input.sourceId),
     modelId: input.modelId,
@@ -120,7 +130,10 @@ export function createUsageEvent(input: {
     pricingStatus,
     requestId: input.requestId,
     source: input.source ?? 'executor',
-    requestCount: Math.max(1, Math.floor(input.requestCount ?? 1))
+    requestCount: Math.max(1, Math.floor(input.requestCount ?? 1)),
+    providerAttemptCount: Math.max(1, Math.floor(input.providerAttemptCount ?? input.requestCount ?? 1)),
+    unpricedReason: input.unpricedReason,
+    ledgerRecorded: input.ledgerRecorded === true
   };
 }
 
@@ -133,21 +146,27 @@ export function addUsageEventToTurnStats(
   const requestCount = normalizeRequestCount(event.requestCount);
   const pricedRequestCount = (base.pricedRequestCount ?? 0)
     + (event.pricingStatus === 'priced' ? requestCount : 0);
+  const estimatedRequestCount = (base.estimatedRequestCount ?? 0)
+    + (event.pricingStatus === 'estimated_upper_bound' ? requestCount : 0);
   const unpricedRequestCount = (base.unpricedRequestCount ?? 0)
-    + (event.pricingStatus === 'priced' ? 0 : requestCount);
+    + (event.pricingStatus === 'unavailable' ? requestCount : 0);
   const costByCurrency = addCostByCurrency(base.costByCurrency, event);
   const cacheCounts = addCacheDataCounts(base, event.usage, requestCount);
   return {
     ...sumUsage(base, event.usage),
     requestCount: base.requestCount + requestCount,
+    providerAttemptCount: (base.providerAttemptCount ?? base.requestCount)
+      + (event.providerAttemptCount ?? requestCount),
+    usageResponseCount: (base.usageResponseCount ?? base.requestCount) + requestCount,
     cost: getSingleCurrencyCost(costByCurrency),
     currency: getSingleCurrency(costByCurrency) ?? normalizeCurrency(event.currency || base.currency),
     sourceId: event.sourceId ?? base.sourceId,
     modelId: event.modelId || base.modelId,
     provider: event.provider ?? base.provider,
     protocol: event.protocol ?? base.protocol,
-    pricingStatus: getAggregatePricingStatus(pricedRequestCount, unpricedRequestCount),
+    pricingStatus: getAggregatePricingStatus(pricedRequestCount, estimatedRequestCount, unpricedRequestCount),
     pricedRequestCount,
+    estimatedRequestCount,
     unpricedRequestCount,
     ...cacheCounts,
     costByCurrency,
@@ -173,17 +192,24 @@ export function addUsageEventToSessionStats(
   const requestCount = normalizeRequestCount(event.requestCount);
   const pricedRequestCount = (base.pricedRequestCount ?? 0)
     + (event.pricingStatus === 'priced' ? requestCount : 0);
+  const estimatedRequestCount = (base.estimatedRequestCount ?? 0)
+    + (event.pricingStatus === 'estimated_upper_bound' ? requestCount : 0);
   const unpricedRequestCount = (base.unpricedRequestCount ?? 0)
-    + (event.pricingStatus === 'priced' ? 0 : requestCount);
+    + (event.pricingStatus === 'unavailable' ? requestCount : 0);
   const costByCurrency = addCostByCurrency(base.costByCurrency, event);
   const cacheCounts = addCacheDataCounts(base, event.usage, requestCount);
   return {
     ...sumUsage(base, event.usage),
     requestCount: base.requestCount + requestCount,
+    providerAttemptCount: (base.providerAttemptCount ?? base.requestCount)
+      + (event.ledgerRecorded ? 0 : event.providerAttemptCount ?? requestCount),
+    usageResponseCount: (base.usageResponseCount ?? base.requestCount)
+      + (event.ledgerRecorded ? 0 : requestCount),
     sessionCost: getSingleCurrencyCost(costByCurrency),
     currency: getSingleCurrency(costByCurrency) ?? normalizeCurrency(event.currency || base.currency),
-    pricingStatus: getAggregatePricingStatus(pricedRequestCount, unpricedRequestCount),
+    pricingStatus: getAggregatePricingStatus(pricedRequestCount, estimatedRequestCount, unpricedRequestCount),
     pricedRequestCount,
+    estimatedRequestCount,
     unpricedRequestCount,
     ...cacheCounts,
     costByCurrency,
@@ -202,6 +228,22 @@ export function addUsageEventToSessionStats(
   };
 }
 
+/** Attempt telemetry is sourced from the append-only ledger, not zero-token usage events. */
+export function applyUsageLedgerSummaryToSessionStats(
+  current: SessionUsageStats | undefined,
+  summary: UsageLedgerSummary
+): SessionUsageStats | undefined {
+  const base = normalizeSessionUsageStatsValue(current);
+  if (!base && summary.providerAttemptCount === 0) return undefined;
+  const stats = base ?? createEmptySessionUsageStats();
+  return {
+    ...stats,
+    providerAttemptCount: summary.providerAttemptCount,
+    usageResponseCount: summary.usageResponseCount,
+    attemptStatsIncomplete: summary.incomplete || summary.legacyAggregate
+  };
+}
+
 export function addTurnUsageToSessionStats(
   current: SessionUsageStats | undefined,
   turn: TurnUsageStats,
@@ -212,8 +254,10 @@ export function addTurnUsageToSessionStats(
   const requestCount = Math.max(1, turn.requestCount);
   const pricedRequestCount = (base.pricedRequestCount ?? 0)
     + (turn.pricedRequestCount ?? (turn.pricingStatus === 'priced' ? requestCount : 0));
+  const estimatedRequestCount = (base.estimatedRequestCount ?? 0)
+    + (turn.estimatedRequestCount ?? (turn.pricingStatus === 'estimated_upper_bound' ? requestCount : 0));
   const unpricedRequestCount = (base.unpricedRequestCount ?? 0)
-    + (turn.unpricedRequestCount ?? (turn.pricingStatus === 'priced' ? 0 : requestCount));
+    + (turn.unpricedRequestCount ?? (turn.pricingStatus === 'unavailable' ? requestCount : 0));
   const cacheDataRequestCount = (base.cacheDataRequestCount ?? 0)
     + (turn.cacheDataRequestCount ?? (turn.cacheDataStatus === 'reported' ? requestCount : 0));
   const cacheDataMissingRequestCount = (base.cacheDataMissingRequestCount ?? 0)
@@ -223,15 +267,20 @@ export function addTurnUsageToSessionStats(
     turn.costByCurrency,
     turn.cost,
     turn.currency,
-    (turn.pricedRequestCount ?? (turn.pricingStatus === 'priced' ? requestCount : 0)) > 0
+    (turn.pricedRequestCount ?? 0) + (turn.estimatedRequestCount ?? 0) > 0
   );
   return {
     ...sumUsage(base, turn),
     requestCount: base.requestCount + requestCount,
+    providerAttemptCount: (base.providerAttemptCount ?? base.requestCount)
+      + (turn.providerAttemptCount ?? requestCount),
+    usageResponseCount: (base.usageResponseCount ?? base.requestCount)
+      + (turn.usageResponseCount ?? requestCount),
     sessionCost: getSingleCurrencyCost(costByCurrency),
     currency: getSingleCurrency(costByCurrency) ?? normalizeCurrency(turn.currency || base.currency),
-    pricingStatus: getAggregatePricingStatus(pricedRequestCount, unpricedRequestCount),
+    pricingStatus: getAggregatePricingStatus(pricedRequestCount, estimatedRequestCount, unpricedRequestCount),
     pricedRequestCount,
+    estimatedRequestCount,
     unpricedRequestCount,
     cacheDataRequestCount,
     cacheDataMissingRequestCount,
@@ -294,9 +343,12 @@ export function calculateUsageCostAt(
   at: Date
 ): number {
   const peak = getPricingPeriod(at) === 'peak';
+  const cacheReported = usage.cacheDataStatus === 'reported';
+  const cacheHitTokens = cacheReported ? usage.cacheHitTokens : 0;
+  const cacheMissTokens = cacheReported ? usage.cacheMissTokens : usage.promptTokens;
   return normalizeCost((
-    usage.cacheHitTokens * pickPeakRate(peak ? rates.peakCacheHitPrice : undefined, peak, rates.cacheHitPrice) +
-    usage.cacheMissTokens * pickPeakRate(peak ? rates.peakInputPrice : undefined, peak, rates.inputPrice) +
+    cacheHitTokens * pickPeakRate(peak ? rates.peakCacheHitPrice : undefined, peak, rates.cacheHitPrice) +
+    cacheMissTokens * pickPeakRate(peak ? rates.peakInputPrice : undefined, peak, rates.inputPrice) +
     usage.completionTokens * pickPeakRate(peak ? rates.peakOutputPrice : undefined, peak, rates.outputPrice)
   ) / 1_000_000);
 }
@@ -382,16 +434,21 @@ export function normalizeSessionUsageStatsValue(value: unknown): SessionUsageSta
   const sessionCost = normalizeCost(value.sessionCost);
   const pricingStatus = normalizeAggregatePricingStatus(value.pricingStatus)
     ?? (sessionCost > 0 ? 'priced' : 'unavailable');
+  const estimatedRequestCount = readOptionalNonNegativeInteger(value.estimatedRequestCount)
+    ?? (pricingStatus === 'estimated_upper_bound' ? requestCount : 0);
   const stats: SessionUsageStats = {
     ...usage,
     requestCount,
+    providerAttemptCount: readOptionalNonNegativeInteger(value.providerAttemptCount) ?? 0,
+    usageResponseCount: readOptionalNonNegativeInteger(value.usageResponseCount) ?? 0,
     sessionCost,
     currency: normalizeCurrency(value.currency),
     pricingStatus,
     pricedRequestCount: readOptionalNonNegativeInteger(value.pricedRequestCount)
       ?? (pricingStatus === 'priced' ? requestCount : 0),
+    estimatedRequestCount,
     unpricedRequestCount: readOptionalNonNegativeInteger(value.unpricedRequestCount)
-      ?? (pricingStatus === 'priced' ? 0 : requestCount),
+      ?? (pricingStatus === 'unavailable' ? requestCount : 0),
     cacheDataRequestCount: readOptionalNonNegativeInteger(value.cacheDataRequestCount)
       ?? (usage.cacheDataStatus === 'reported' ? requestCount : 0),
     cacheDataMissingRequestCount: readOptionalNonNegativeInteger(value.cacheDataMissingRequestCount)
@@ -401,10 +458,14 @@ export function normalizeSessionUsageStatsValue(value: unknown): SessionUsageSta
     legacyUnattributed: typeof value.legacyUnattributed === 'boolean'
       ? value.legacyUnattributed
       : !Array.isArray(value.byModelSource),
+    attemptStatsIncomplete: typeof value.attemptStatsIncomplete === 'boolean'
+      ? value.attemptStatsIncomplete
+      : value.providerAttemptCount === undefined || value.usageResponseCount === undefined,
     updatedAt: normalizeOptionalString(value.updatedAt),
     bySource: normalizeUsageSourceStatsMap(value.bySource, getLegacySourceCurrency(value.costByCurrency, value.currency))
   };
-  return hasAnyUsage(stats) || stats.requestCount > 0 || stats.sessionCost > 0 ? stats : undefined;
+  return hasAnyUsage(stats) || stats.requestCount > 0 || (stats.providerAttemptCount ?? 0) > 0
+    || stats.sessionCost > 0 ? stats : undefined;
 }
 
 export function normalizeTurnUsageStatsValue(value: unknown): TurnUsageStats | undefined {
@@ -416,9 +477,13 @@ export function normalizeTurnUsageStatsValue(value: unknown): TurnUsageStats | u
   const cost = normalizeCost(value.cost);
   const pricingStatus = normalizeAggregatePricingStatus(value.pricingStatus)
     ?? (cost > 0 ? 'priced' : 'unavailable');
+  const estimatedRequestCount = readOptionalNonNegativeInteger(value.estimatedRequestCount)
+    ?? (pricingStatus === 'estimated_upper_bound' ? requestCount : 0);
   const stats: TurnUsageStats = {
     ...usage,
     requestCount,
+    providerAttemptCount: readOptionalNonNegativeInteger(value.providerAttemptCount) ?? 0,
+    usageResponseCount: readOptionalNonNegativeInteger(value.usageResponseCount) ?? 0,
     cost,
     currency: normalizeCurrency(value.currency),
     sourceId: normalizeOptionalString(value.sourceId),
@@ -428,8 +493,9 @@ export function normalizeTurnUsageStatsValue(value: unknown): TurnUsageStats | u
     pricingStatus,
     pricedRequestCount: readOptionalNonNegativeInteger(value.pricedRequestCount)
       ?? (pricingStatus === 'priced' ? requestCount : 0),
+    estimatedRequestCount,
     unpricedRequestCount: readOptionalNonNegativeInteger(value.unpricedRequestCount)
-      ?? (pricingStatus === 'priced' ? 0 : requestCount),
+      ?? (pricingStatus === 'unavailable' ? requestCount : 0),
     cacheDataRequestCount: readOptionalNonNegativeInteger(value.cacheDataRequestCount)
       ?? (usage.cacheDataStatus === 'reported' ? requestCount : 0),
     cacheDataMissingRequestCount: readOptionalNonNegativeInteger(value.cacheDataMissingRequestCount)
@@ -438,7 +504,8 @@ export function normalizeTurnUsageStatsValue(value: unknown): TurnUsageStats | u
     updatedAt: normalizeOptionalString(value.updatedAt),
     bySource: normalizeUsageSourceStatsMap(value.bySource, getLegacySourceCurrency(value.costByCurrency, value.currency))
   };
-  return hasAnyUsage(stats) || stats.requestCount > 0 || stats.cost > 0 ? stats : undefined;
+  return hasAnyUsage(stats) || stats.requestCount > 0 || (stats.providerAttemptCount ?? 0) > 0
+    || stats.cost > 0 ? stats : undefined;
 }
 
 export function normalizeBalanceStateValue(value: unknown): ModelSourceBalanceState | undefined {
@@ -546,11 +613,14 @@ function addUsageSourceStats(
     [source]: {
       ...sumUsage(previous, usage),
       requestCount: previous.requestCount + normalizedRequestCount,
+      usageResponseCount: (previous.usageResponseCount ?? previous.requestCount) + normalizedRequestCount,
       cost: getSingleCurrencyCost(costByCurrency),
       pricedRequestCount: (previous.pricedRequestCount ?? 0)
         + (pricingStatus === 'priced' ? normalizedRequestCount : 0),
+      estimatedRequestCount: (previous.estimatedRequestCount ?? 0)
+        + (pricingStatus === 'estimated_upper_bound' ? normalizedRequestCount : 0),
       unpricedRequestCount: (previous.unpricedRequestCount ?? 0)
-        + (pricingStatus === 'priced' ? 0 : normalizedRequestCount),
+        + (pricingStatus === 'unavailable' ? normalizedRequestCount : 0),
       ...cacheCounts,
       costByCurrency
     }
@@ -581,15 +651,18 @@ function mergeUsageSourceStats(
       stats.costByCurrency,
       stats.cost,
       '',
-      (stats.pricedRequestCount ?? 0) > 0
+      (stats.pricedRequestCount ?? 0) + (stats.estimatedRequestCount ?? 0) > 0
     );
     merged = {
       ...(merged ?? {}),
       [source]: {
         ...sumUsage(previous, stats),
         requestCount: previous.requestCount + stats.requestCount,
+        usageResponseCount: (previous.usageResponseCount ?? previous.requestCount)
+          + (stats.usageResponseCount ?? stats.requestCount),
         cost: getSingleCurrencyCost(costByCurrency),
         pricedRequestCount: (previous.pricedRequestCount ?? 0) + (stats.pricedRequestCount ?? 0),
+        estimatedRequestCount: (previous.estimatedRequestCount ?? 0) + (stats.estimatedRequestCount ?? 0),
         unpricedRequestCount: (previous.unpricedRequestCount ?? 0) + (stats.unpricedRequestCount ?? 0),
         cacheDataRequestCount: (previous.cacheDataRequestCount ?? 0) + (stats.cacheDataRequestCount ?? 0),
         cacheDataMissingRequestCount: (previous.cacheDataMissingRequestCount ?? 0)
@@ -618,13 +691,17 @@ function normalizeUsageSourceStatsMap(
     const requestCount = readNonNegativeInteger(raw.requestCount);
     const legacyCost = normalizeCost(raw.cost);
     const pricedRequestCount = readOptionalNonNegativeInteger(raw.pricedRequestCount)
-      ?? (legacyCost > 0 ? requestCount : 0);
+      ?? (raw.pricingStatus === 'estimated_upper_bound' ? 0 : legacyCost > 0 ? requestCount : 0);
+    const estimatedRequestCount = readOptionalNonNegativeInteger(raw.estimatedRequestCount)
+      ?? (raw.pricingStatus === 'estimated_upper_bound' ? requestCount : 0);
     const costByCurrency = normalizeCostByCurrency(raw.costByCurrency, raw.cost, fallbackCurrency);
     result[source] = {
       ...usage,
       requestCount,
+      usageResponseCount: readOptionalNonNegativeInteger(raw.usageResponseCount) ?? requestCount,
       cost: costByCurrency ? getSingleCurrencyCost(costByCurrency) : legacyCost,
       pricedRequestCount,
+      estimatedRequestCount,
       unpricedRequestCount: readOptionalNonNegativeInteger(raw.unpricedRequestCount)
         ?? Math.max(0, requestCount - pricedRequestCount),
       cacheDataRequestCount: readOptionalNonNegativeInteger(raw.cacheDataRequestCount)
@@ -669,8 +746,10 @@ function addUsageModelGroup(
   const requestCount = normalizeRequestCount(event.requestCount);
   const pricedRequestCount = previous.pricedRequestCount
     + (event.pricingStatus === 'priced' ? requestCount : 0);
+  const estimatedRequestCount = (previous.estimatedRequestCount ?? 0)
+    + (event.pricingStatus === 'estimated_upper_bound' ? requestCount : 0);
   const unpricedRequestCount = previous.unpricedRequestCount
-    + (event.pricingStatus === 'priced' ? 0 : requestCount);
+    + (event.pricingStatus === 'unavailable' ? requestCount : 0);
   const cacheDataRequestCount = previous.cacheDataRequestCount
     + (event.usage.cacheDataStatus === 'reported' ? requestCount : 0);
   const cacheDataMissingRequestCount = previous.cacheDataMissingRequestCount
@@ -683,6 +762,7 @@ function addUsageModelGroup(
     protocol: event.protocol ?? previous.protocol,
     requestCount: previous.requestCount + requestCount,
     pricedRequestCount,
+    estimatedRequestCount,
     unpricedRequestCount,
     cacheDataRequestCount,
     cacheDataMissingRequestCount,
@@ -727,13 +807,16 @@ function addTurnUsageModelGroup(
         modelId,
         provider: turn.provider,
         protocol: turn.protocol,
-        pricingStatus: turn.pricingStatus === 'priced' ? 'priced' : 'unavailable',
+        pricingStatus: turn.pricingStatus === 'priced' || turn.pricingStatus === 'estimated_upper_bound'
+          ? turn.pricingStatus : 'unavailable',
         source: 'executor',
         requestCount: Math.max(1, turn.requestCount)
       });
   const requestCount = Math.max(1, turn.requestCount);
   const pricedRequestCount = previous.pricedRequestCount
     + (turn.pricedRequestCount ?? (turn.pricingStatus === 'priced' ? requestCount : 0));
+  const estimatedRequestCount = (previous.estimatedRequestCount ?? 0)
+    + (turn.estimatedRequestCount ?? (turn.pricingStatus === 'estimated_upper_bound' ? requestCount : 0));
   const next: UsageModelGroupStats = {
     ...sumUsage(previous, turn),
     sourceId,
@@ -742,8 +825,9 @@ function addTurnUsageModelGroup(
     protocol: turn.protocol ?? previous.protocol,
     requestCount: previous.requestCount + requestCount,
     pricedRequestCount,
+    estimatedRequestCount,
     unpricedRequestCount: previous.unpricedRequestCount
-      + (turn.unpricedRequestCount ?? (turn.pricingStatus === 'priced' ? 0 : requestCount)),
+      + (turn.unpricedRequestCount ?? (turn.pricingStatus === 'unavailable' ? requestCount : 0)),
     cacheDataRequestCount: previous.cacheDataRequestCount
       + (turn.cacheDataRequestCount ?? (turn.cacheDataStatus === 'reported' ? requestCount : 0)),
     cacheDataMissingRequestCount: previous.cacheDataMissingRequestCount
@@ -753,7 +837,7 @@ function addTurnUsageModelGroup(
       turn.costByCurrency,
       turn.cost,
       turn.currency,
-      (turn.pricedRequestCount ?? (turn.pricingStatus === 'priced' ? requestCount : 0)) > 0
+      (turn.pricedRequestCount ?? 0) + (turn.estimatedRequestCount ?? 0) > 0
     ),
     bySource: mergeUsageSourceStats(previous.bySource, turn.bySource)
   };
@@ -778,6 +862,7 @@ function createEmptyUsageModelGroup(event: UsageEvent): UsageModelGroupStats {
     protocol: event.protocol,
     requestCount: 0,
     pricedRequestCount: 0,
+    estimatedRequestCount: 0,
     unpricedRequestCount: 0,
     cacheDataRequestCount: 0,
     cacheDataMissingRequestCount: 0,
@@ -802,6 +887,7 @@ function normalizeUsageModelGroups(value: unknown, fallbackCurrency?: unknown): 
       protocol: normalizeOptionalString(item.protocol),
       requestCount: readNonNegativeInteger(item.requestCount),
       pricedRequestCount: readNonNegativeInteger(item.pricedRequestCount),
+      estimatedRequestCount: readNonNegativeInteger(item.estimatedRequestCount),
       unpricedRequestCount: readNonNegativeInteger(item.unpricedRequestCount),
       cacheDataRequestCount: readNonNegativeInteger(item.cacheDataRequestCount),
       cacheDataMissingRequestCount: readNonNegativeInteger(item.cacheDataMissingRequestCount),
@@ -830,7 +916,7 @@ function addCostByCurrency(
 ): Record<string, number> {
   const result = { ...(current ?? {}) };
   const currency = normalizeCurrency(event.currency);
-  if (event.pricingStatus === 'priced' && currency) {
+  if (isCostKnownPricingStatus(event.pricingStatus) && currency) {
     result[currency] = normalizeCost((result[currency] ?? 0) + event.cost);
   }
   return result;
@@ -900,16 +986,26 @@ function getSingleCurrencyCost(costs: Record<string, number>): number {
 
 function getAggregatePricingStatus(
   pricedRequestCount: number,
+  estimatedRequestCount: number,
   unpricedRequestCount: number
-): 'priced' | 'unavailable' | 'partial' {
-  if (pricedRequestCount > 0 && unpricedRequestCount > 0) {
+): 'priced' | 'estimated_upper_bound' | 'unavailable' | 'partial' {
+  const knownCount = pricedRequestCount + estimatedRequestCount;
+  if (knownCount > 0 && unpricedRequestCount > 0) {
     return 'partial';
   }
+  if (estimatedRequestCount > 0) return 'estimated_upper_bound';
   return pricedRequestCount > 0 ? 'priced' : 'unavailable';
 }
 
-function normalizeAggregatePricingStatus(value: unknown): 'priced' | 'unavailable' | 'partial' | undefined {
-  return value === 'priced' || value === 'unavailable' || value === 'partial' ? value : undefined;
+function normalizeAggregatePricingStatus(
+  value: unknown
+): 'priced' | 'estimated_upper_bound' | 'unavailable' | 'partial' | undefined {
+  return value === 'priced' || value === 'estimated_upper_bound'
+    || value === 'unavailable' || value === 'partial' ? value : undefined;
+}
+
+function isCostKnownPricingStatus(value: UsagePricingStatus | undefined): boolean {
+  return value === 'priced' || value === 'estimated_upper_bound';
 }
 
 function normalizeCacheDataStatus(value: unknown): Usage['cacheDataStatus'] | undefined {

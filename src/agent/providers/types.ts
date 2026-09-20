@@ -35,6 +35,8 @@ export interface ProviderClientRequest {
   runDeadlineAt?: number;
   trace?: AgentInteractionTrace;
   requestId?: string;
+  /** Called immediately before each physical fetch, including retries. */
+  onAttempt?: (attempt: { requestId: string; attemptIndex: number; startedAt: string }) => void;
 }
 
 export interface ProviderClientResult {

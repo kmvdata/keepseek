@@ -316,7 +316,8 @@ export const usageRenderFragment: WebviewFragment = {
             : formatUsageAvailabilityValue(selected.total, 'usageMetricCostUnavailableValue'), ''],
           ['usageEffectiveRuntime', latestRunState ? formatUsageRuntime(latestRunState.usedMs)
             : t(hasSessionUsage ? 'usageMetricUnavailableValue' : 'usagePendingValue'), ''],
-          ['usageRequestCount', hasSessionUsage ? formatMetricInteger(selected.total.requestCount) : t('usagePendingValue'), ''],
+          ['usageProviderAttemptCount', hasSessionUsage ? formatMetricInteger(selected.total.providerAttemptCount) : t('usagePendingValue'), ''],
+          ['usageUsageResponseCount', hasSessionUsage ? formatMetricInteger(selected.total.usageResponseCount) : t('usagePendingValue'), ''],
           ['usageCumulativeTokens', hasSessionUsage ? formatMetricInteger(selected.total.totalTokens) : t('usagePendingValue'), 'is-wide']
         ];
         if (metrics.supportsBilling) {
@@ -333,7 +334,22 @@ export const usageRenderFragment: WebviewFragment = {
           notes.append(usageNode('p', 'usage-warning', t(selected.total.pricedRequestCount > 0
             ? 'usagePartialPricing' : 'usageAllUnpriced', { count: selected.total.unpricedRequestCount })));
         }
-        if (!selected.total.requestCount) {
+        if (selected.total.estimatedRequestCount > 0) {
+          notes.append(usageNode('p', '', t('usageUpperBoundPricing', {
+            count: selected.total.estimatedRequestCount
+          })));
+        }
+        var attemptsWithoutUsage = Math.max(0,
+          selected.total.providerAttemptCount - selected.total.usageResponseCount);
+        if (attemptsWithoutUsage > 0) {
+          notes.append(usageNode('p', '', t('usageAttemptsWithoutUsage', {
+            count: attemptsWithoutUsage
+          })));
+        }
+        if (selected.total.attemptStatsIncomplete) {
+          notes.append(usageNode('p', '', t('usageLegacyAttemptStatsIncomplete')));
+        }
+        if (!selected.total.providerAttemptCount && !selected.total.requestCount) {
           notes.append(usageNode('p', '', t('usageNoProviderData')));
         }
         section.append(notes);
@@ -552,4 +568,3 @@ export const usageRenderFragment: WebviewFragment = {
 
 `.slice(1)
 };
-

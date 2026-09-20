@@ -23,6 +23,7 @@ import {
   ToolAuthorizationDecision,
   TurnUsageStats,
   UsageEvent,
+  UsagePriceSnapshot,
   UsageSource
 } from '../shared/types';
 import type { ProviderReplayState } from '../shared/types';
@@ -162,10 +163,14 @@ import {
 } from './deepseek/types';
 import {
   addUsageEventToTurnStats,
-  calculateUsageCost,
   createUsageEvent,
   normalizeDeepSeekUsage
 } from './usageStats';
+import {
+  createUsageLedgerRecords,
+  createUsagePriceSnapshot,
+  priceUsageFromSnapshot
+} from './usageLedger';
 import { TaskPlanTracker } from './taskPlan';
 import { createChangeSet } from '../edits/changeSet';
 import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
@@ -177,6 +182,10 @@ import { prepareEvidenceEnvelope, stableStringify } from './evidence/shaping';
 import type { ToolEvidence } from './evidence/types';
 import { isContextTooLongError, ToolResultAdmissionController } from './toolResultAdmission';
 import { ContextWindowCalibrationStore } from './contextWindowCalibrationStore';
+import {
+  DEEPSEEK_MODEL_IDENTITY_VERSION,
+  getCanonicalModelIdentity
+} from '../shared/deepSeekModels';
 import {
   createContextEpochState,
   createEpochHostCheckpoint,
@@ -871,12 +880,44 @@ export class AgentLoop {
       sourceId: runtimeConfig.sourceId,
       provider: runtimeConfig.provider,
       modelId: request.model.id,
+      canonicalModelId: getCanonicalModelIdentity(request.model.id),
       endpointHash: endpointHash(runtimeConfig.baseUrl)
     };
+    const calibrationDeclaration = {
+      identity: getCanonicalModelIdentity(request.model.id),
+      version: `${DEEPSEEK_MODEL_IDENTITY_VERSION}:${runtimeConfig.contextWindowTokens}`,
+      declaredWindowTokens: runtimeConfig.contextWindowTokens
+    };
+    const restoredCalibration = restored?.epoch?.calibration
+      ?? await calibrationStore.load(calibrationKey, calibrationDeclaration);
     const admission = new ToolResultAdmissionController(
       runtimeConfig.contextWindowTokens,
-      restored?.epoch?.calibration ?? await calibrationStore.load(calibrationKey)
+      restoredCalibration,
+      calibrationDeclaration
     );
+    if (admission.migration) {
+      await calibrationStore.save(calibrationKey, admission.state);
+      trace.record({ type: 'stale_capacity_calibration', ...admission.migration });
+      runDetailsBuilderRef.current?.recordCapacityAdjustment(admission.migration);
+    }
+    let lastStaleCalibrationFingerprint = '';
+    const decideWithCalibrationRepair = async (
+      input: Parameters<ToolResultAdmissionController['decide']>[0]
+    ) => {
+      let decision = admission.decide(input);
+      if (!decision.shouldRollover) return decision;
+      const adjustment = admission.reconcileSuccessfulFloor();
+      if (!adjustment) return decision;
+      const fingerprint = `${input.estimatedInputTokens}:${input.phase}:${input.remainingBatchResults}:${adjustment.beforeWindowTokens}:${adjustment.afterWindowTokens}`;
+      if (fingerprint !== lastStaleCalibrationFingerprint) {
+        lastStaleCalibrationFingerprint = fingerprint;
+        trace.record({ type: 'stale_capacity_calibration', ...adjustment });
+        runDetailsBuilderRef.current?.recordCapacityAdjustment(adjustment);
+      }
+      await calibrationStore.save(calibrationKey, admission.state);
+      decision = admission.decide(input);
+      return decision;
+    };
     const epoch = restored?.epoch
       ? { ...restored.epoch, failures: [...(restored.epoch.failures ?? [])] }
       : createContextEpochState(admission.state);
@@ -1213,13 +1254,19 @@ export class AgentLoop {
           providerRunState
           }
         );
-        if (!pending) admission.recordSuccessfulRequest();
         for (const record of deliveryRecords) await evidenceStore.markDelivered(record);
         const actualInput = response.usage?.prompt_tokens;
+        const successfulAdjustment = !pending
+          ? admission.recordSuccessfulRequest(actualInput)
+          : undefined;
+        if (successfulAdjustment) {
+          trace.record({ type: 'stale_capacity_calibration', ...successfulAdjustment });
+          runDetailsBuilderRef.current?.recordCapacityAdjustment(successfulAdjustment);
+        }
         if (typeof actualInput === 'number') {
           admission.observe(estimatedInputBeforeRequest, actualInput);
-          await calibrationStore.save(calibrationKey, admission.state);
         }
+        if (!pending) await calibrationStore.save(calibrationKey, admission.state);
       } catch (error) {
         if (!isContextTooLongError(error)) throw error;
         const attempted = this.estimateCurrentProviderInputTokens(request, messages, toolsForTurn, providerRunState);
@@ -1530,6 +1577,7 @@ export class AgentLoop {
                 parentRequest: request,
                 parentRunId: trace.runId,
                 onUsage: runCallbacks.onUsage,
+                onUsageLedgerRecord: runCallbacks.onUsageLedgerRecord,
                 onSubagentRunSummary: runCallbacks.onSubagentRunSummary,
                 evidenceStore,
                 evidenceSessionId,
@@ -1646,7 +1694,7 @@ export class AgentLoop {
               message: 'The host will provide the review decision and any execution result in the next user message.'
             })
           : rawToolResult;
-        const admissionDecision = admission.decide({
+        const admissionDecision = await decideWithCalibrationRepair({
           estimatedInputTokens: this.estimateCurrentProviderInputTokens(request, messages, nextToolsForRequest, providerRunState,
             responseFunctionOutputs, anthropicToolResults),
           configuredMaxOutputTokens: runtimeConfig.maxTokens,
@@ -1951,7 +1999,7 @@ export class AgentLoop {
         await saveStep();
       }
       const estimatedNextInput = this.estimateCurrentProviderInputTokens(request, messages, tools, providerRunState);
-      const nextAdmission = admission.decide({
+      const nextAdmission = await decideWithCalibrationRepair({
         estimatedInputTokens: estimatedNextInput,
         configuredMaxOutputTokens: runtimeConfig.maxTokens,
         phase: 'tool',
@@ -2115,6 +2163,25 @@ export class AgentLoop {
     }
 
     const upstreamRequestId = randomUUID();
+    const requestProtocol = getProviderRequestLane({
+      provider: runtimeConfig.provider,
+      sourceId: runtimeConfig.sourceId,
+      baseUrl: runtimeConfig.baseUrl,
+      modelId: request.model.id
+    }).protocol;
+    const createAttemptSnapshot = (startedAt: string): UsagePriceSnapshot => createUsagePriceSnapshot({
+      originalModelId: request.model.id,
+      sourceId: runtimeConfig.sourceId,
+      provider: runtimeConfig.provider,
+      protocol: requestProtocol,
+      supportsBilling: runtimeConfig.supportsBilling,
+      requestStartedAt: startedAt
+    });
+    // Freeze a fallback before dispatch for defensive compatibility, but do
+    // not count it unless the transport reports a physical attempt. The exact
+    // per-attempt callback normally replaces every such fallback.
+    const fallbackSnapshot = createAttemptSnapshot(new Date().toISOString());
+    const attemptSnapshots: UsagePriceSnapshot[] = [];
     trace.record({
       type: 'upstream_request',
       requestId: upstreamRequestId,
@@ -2128,42 +2195,27 @@ export class AgentLoop {
       callbacks,
       runDeadlineAt,
       trace,
-      requestId: upstreamRequestId
+      requestId: upstreamRequestId,
+      onAttempt: ({ attemptIndex, startedAt }) => {
+        attemptSnapshots[attemptIndex] = createAttemptSnapshot(startedAt);
+      }
     });
 
     const retryCount = response.retryCount ?? 0;
-    if (retryCount > 0) {
-      const retryEvent = createUsageEvent({
-        usage: {
-          promptTokens: 0,
-          completionTokens: 0,
-          totalTokens: 0,
-          cacheHitTokens: 0,
-          cacheMissTokens: 0
-        },
-        cost: 0,
-        currency: '',
-        sourceId: runtimeConfig.sourceId,
-        modelId: request.model.id,
-        provider: runtimeConfig.provider,
-        protocol: getProviderRequestLane({
-          provider: runtimeConfig.provider,
-          sourceId: runtimeConfig.sourceId,
-          baseUrl: runtimeConfig.baseUrl,
-          modelId: request.model.id
-        }).protocol,
-        pricingStatus: 'unavailable',
-        requestId: upstreamRequestId,
-        source: 'retry',
-        requestCount: retryCount
-      });
-      options.usageTotals?.records.push(retryEvent);
-      if (options.usageTotals) {
-        options.usageTotals.requestCount += retryCount;
-      }
-      // Keep retry-attempt bookkeeping in the historic response/trace, but an
-      // attempt without Provider usage is not an actual-usage observation.
+    while (attemptSnapshots.length < (response.attemptCount ?? retryCount + 1)) {
+      attemptSnapshots.push(attemptSnapshots.length === 0
+        ? fallbackSnapshot
+        : createAttemptSnapshot(new Date().toISOString()));
     }
+    const normalizedUsageForLedger = normalizeDeepSeekUsage(response.usage);
+    const ledgerRecords = createUsageLedgerRecords({
+      requestId: upstreamRequestId,
+      attempts: attemptSnapshots,
+      usage: normalizedUsageForLedger,
+      source: options.usageSource ?? 'executor'
+    });
+    for (const record of ledgerRecords) callbacks.onUsageLedgerRecord?.(record);
+    trace.record({ type: 'upstream_usage_ledger', requestId: upstreamRequestId, records: ledgerRecords });
 
     // Usage can be reported before a failed/stopped stream. Observe it even
     // when no usable final assistant message is available.
@@ -2177,14 +2229,18 @@ export class AgentLoop {
       runtimeConfig.provider,
       runtimeConfig.baseUrl,
       runtimeConfig.supportsBilling,
-      options.usageSource ?? 'executor'
+      options.usageSource ?? 'executor',
+      attemptSnapshots.at(-1),
+      attemptSnapshots.length
     );
-    if (usageEvent?.pricingStatus === 'priced') {
+    if (usageEvent?.pricingStatus === 'priced' || usageEvent?.pricingStatus === 'estimated_upper_bound') {
       request.taskCostBudget?.record(usageEvent.cost, usageEvent.currency);
       if (request.checkpoint) request.checkpoint.usedCostByCurrency = request.taskCostBudget?.snapshot() ?? {};
     }
     if (usageEvent) callbacks.onUsage?.(usageEvent);
-    if ((request.taskCostBudget?.limit ?? 0) > 0 && usageEvent?.pricingStatus !== 'priced') {
+    if ((request.taskCostBudget?.limit ?? 0) > 0
+      && usageEvent?.pricingStatus !== 'priced'
+      && usageEvent?.pricingStatus !== 'estimated_upper_bound') {
       throw new AgentInterruptedError('provider_error', request.language === 'en'
         ? 'The configured Provider cost limit cannot be enforced because this response did not include priceable usage.'
         : '本次响应没有提供可计费用量，无法安全执行用户配置的 Provider 费用上限。');
@@ -2586,7 +2642,9 @@ export class AgentLoop {
     provider: ModelSourceProvider,
     baseUrl: string,
     supportsBilling: boolean,
-    source: UsageSource
+    source: UsageSource,
+    priceSnapshot: UsagePriceSnapshot | undefined,
+    providerAttemptCount = 1
   ): UsageEvent | undefined {
     if (!usage || !totals) {
       return undefined;
@@ -2597,19 +2655,27 @@ export class AgentLoop {
       return undefined;
     }
 
-    const pricing = supportsBilling
-      ? getConfiguredModelUsagePricing(modelId)
-      : undefined;
-    const canPriceUsage = Boolean(pricing && normalizedUsage.cacheDataStatus === 'reported');
+    const snapshot = priceSnapshot ?? createUsagePriceSnapshot({
+      originalModelId: modelId,
+      sourceId,
+      provider,
+      protocol: getProviderRequestLane({ provider, sourceId, baseUrl, modelId }).protocol,
+      supportsBilling,
+      requestStartedAt: new Date().toISOString()
+    });
+    const priced = priceUsageFromSnapshot(normalizedUsage, snapshot);
     const usageEvent = createUsageEvent({
       usage: normalizedUsage,
-      cost: canPriceUsage && pricing ? calculateUsageCost(normalizedUsage, pricing) : 0,
-      currency: canPriceUsage ? pricing?.currency ?? '' : '',
+      cost: priced.cost,
+      currency: priced.currency,
       sourceId,
       modelId,
       provider,
       protocol: getProviderRequestLane({ provider, sourceId, baseUrl, modelId }).protocol,
-      pricingStatus: canPriceUsage ? 'priced' : 'unavailable',
+      pricingStatus: priced.pricingStatus,
+      unpricedReason: priced.unpricedReason,
+      ledgerRecorded: true,
+      providerAttemptCount,
       requestId,
       source
     });
@@ -2935,6 +3001,7 @@ export class AgentLoop {
       parentRequest?: AgentRequest;
       parentRunId?: string;
       onUsage?: AgentRunCallbacks['onUsage'];
+      onUsageLedgerRecord?: AgentRunCallbacks['onUsageLedgerRecord'];
       onSubagentRunSummary?: AgentRunCallbacks['onSubagentRunSummary'];
       evidenceStore?: ToolEvidenceStore;
       evidenceSessionId?: string;
@@ -3124,6 +3191,7 @@ export class AgentLoop {
       parentRequest?: AgentRequest;
       parentRunId?: string;
       onUsage?: AgentRunCallbacks['onUsage'];
+      onUsageLedgerRecord?: AgentRunCallbacks['onUsageLedgerRecord'];
       onSubagentRunSummary?: AgentRunCallbacks['onSubagentRunSummary'];
     },
     parentToolCallId?: string,
@@ -3140,6 +3208,7 @@ export class AgentLoop {
       language,
       signal: options.signal,
       onUsage: options.onUsage,
+      onUsageLedgerRecord: options.onUsageLedgerRecord,
       onRunSummary: options.onSubagentRunSummary
     };
   }
@@ -4558,7 +4627,7 @@ export class AgentLoop {
         {
           trace: input.trace,
           usageTotals: input.usageTotals,
-          usageSource: 'continuation',
+          usageSource: 'summary',
           toolChoice: 'none',
           providerRunState: summaryProvider
         }

@@ -101,6 +101,7 @@ export const usageFormattersFragment: WebviewFragment = {
 
       function hasActualUsage(usage) {
         return Boolean(usage && (usage.totalTokens > 0 || usage.requestCount > 0
+          || usage.providerAttemptCount > 0
           || Object.keys(usage.costByCurrency || {}).some(function(currency) { return usage.costByCurrency[currency] > 0; })));
       }
 
@@ -167,20 +168,26 @@ export const usageFormattersFragment: WebviewFragment = {
           cacheDataRequestCount: readNonNegativeNumber(value.cacheDataRequestCount, 0),
           cacheDataMissingRequestCount: readNonNegativeNumber(value.cacheDataMissingRequestCount, 0),
           requestCount: readNonNegativeNumber(value.requestCount, 0),
+          providerAttemptCount: readNonNegativeNumber(value.providerAttemptCount, 0),
+          usageResponseCount: readNonNegativeNumber(value.usageResponseCount, 0),
           cost: readNonNegativeNumber(value[costKey], 0),
           sessionCost: readNonNegativeNumber(value.sessionCost, 0),
           currency: typeof value.currency === 'string' ? value.currency.trim() : '',
           pricingStatus: value.pricingStatus === 'priced' || value.pricingStatus === 'partial'
+            || value.pricingStatus === 'estimated_upper_bound'
             ? value.pricingStatus
             : 'unavailable',
           pricedRequestCount: readNonNegativeNumber(value.pricedRequestCount, 0),
           unpricedRequestCount: readNonNegativeNumber(value.unpricedRequestCount, 0),
+          estimatedRequestCount: readNonNegativeNumber(value.estimatedRequestCount, 0),
           costByCurrency: normalizeCostByCurrency(value.costByCurrency),
           sourceId: typeof value.sourceId === 'string' ? value.sourceId : '',
           modelId: typeof value.modelId === 'string' ? value.modelId : '',
           provider: typeof value.provider === 'string' ? value.provider : '',
           protocol: typeof value.protocol === 'string' ? value.protocol : '',
           legacyUnattributed: value.legacyUnattributed === true,
+          attemptStatsIncomplete: value.attemptStatsIncomplete === true
+            || value.providerAttemptCount === undefined || value.usageResponseCount === undefined,
           byModelSource: []
         };
         normalized.byModelSource = Array.isArray(value.byModelSource)
@@ -216,7 +223,8 @@ export const usageFormattersFragment: WebviewFragment = {
       }
 
       function hasUsageData(usage) {
-        return Boolean(usage && (usage.requestCount > 0 || usage.totalTokens > 0));
+        return Boolean(usage && (usage.requestCount > 0 || usage.totalTokens > 0
+          || usage.providerAttemptCount > 0));
       }
 
       function calculateHitRate(usage) {
@@ -276,7 +284,8 @@ export const usageFormattersFragment: WebviewFragment = {
         var currencies = Object.keys(costs).filter(function(currency) {
           return Number.isFinite(Number(costs[currency]));
         });
-        if (!currencies.length && usage.pricingStatus === 'priced' && Number.isFinite(Number(usage.cost))) {
+        if (!currencies.length && (usage.pricingStatus === 'priced'
+          || usage.pricingStatus === 'estimated_upper_bound') && Number.isFinite(Number(usage.cost))) {
           currencies = usage.currency ? [usage.currency] : [];
           if (currencies.length) { costs = { [usage.currency]: Number(usage.cost) }; }
         }
@@ -296,7 +305,8 @@ export const usageFormattersFragment: WebviewFragment = {
       }
 
       function usesOfficialDeepSeekCostFormat(usage) {
-        if (usage.provider === 'deepseek' && usage.pricedRequestCount > 0) {
+        if (usage.provider === 'deepseek'
+          && (usage.pricedRequestCount > 0 || usage.estimatedRequestCount > 0)) {
           return true;
         }
         var pricedGroups = Array.isArray(usage.byModelSource)

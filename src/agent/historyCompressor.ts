@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
-  getConfiguredModelUsagePricing,
   getConfiguredRequestRetryBaseMs
 } from '../shared/config';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
@@ -24,6 +23,8 @@ import type {
   AgentSettings,
   CurrentRunContext,
   UsageEvent,
+  ProviderUsageLedgerRecord,
+  UsagePriceSnapshot,
   UsageSource
 } from '../shared/types';
 import { createProviderClient } from './providers/factory';
@@ -43,7 +44,8 @@ import {
 import { estimateTokenCount } from './tokenEstimate';
 import { buildProviderRequestProjection } from './providerRequestProjection';
 import { estimateDeepSeekMessageTokens, estimateDeepSeekToolsTokens } from './protocol';
-import { calculateUsageCost, createUsageEvent, normalizeDeepSeekUsage } from './usageStats';
+import { createUsageEvent, normalizeDeepSeekUsage } from './usageStats';
+import { createUsageLedgerRecords, createUsagePriceSnapshot } from './usageLedger';
 
 const SUMMARY_MAX_INPUT_CHARS = 90_000;
 // Deliberately high: every summary refresh rewrites the synthetic summary message and
@@ -76,6 +78,7 @@ export interface HistoryCompressionRefreshResult {
   reason: 'created' | 'updated' | 'skipped' | 'failed';
   failureReason?: string;
   usageEvents?: UsageEvent[];
+  usageLedgerRecords?: ProviderUsageLedgerRecord[];
 }
 
 export type HistoryCompressionRefreshMode = 'none' | 'sync' | 'background';
@@ -96,6 +99,7 @@ export interface HistoryCompressionRefreshPlan {
 export interface HistorySummaryCompletionResult {
   content: string;
   usageEvent?: UsageEvent;
+  usageLedgerRecords?: ProviderUsageLedgerRecord[];
 }
 
 export type HistorySummaryCompletion = (input: {
@@ -255,7 +259,8 @@ export class HistoryCompressor {
         },
         changed: true,
         reason: protectedState.state.summaries.length ? 'updated' : 'created',
-        usageEvents: completion.usageEvent ? [completion.usageEvent] : undefined
+        usageEvents: completion.usageEvent ? [completion.usageEvent] : undefined,
+        usageLedgerRecords: completion.usageLedgerRecords
       };
     } catch (error) {
       const failureReason = summarizeFailureReason(error);
@@ -266,7 +271,10 @@ export class HistoryCompressor {
         },
         changed: true,
         reason: 'failed',
-        failureReason
+        failureReason,
+        usageLedgerRecords: error instanceof HistorySummaryRequestError
+          ? error.usageLedgerRecords
+          : undefined
       };
     }
   }
@@ -444,41 +452,70 @@ export class HistoryCompressor {
               include_usage: true
             }
           };
+      const requestId = randomUUID();
+      const protocol = clientConfig.provider === 'openai-responses'
+        ? 'openai-responses'
+        : clientConfig.provider === 'anthropic-compatible'
+          ? 'anthropic-messages'
+          : 'chat-completions';
+      const createSnapshot = (requestStartedAt: string): UsagePriceSnapshot => createUsagePriceSnapshot({
+        originalModelId: input.model.id,
+        sourceId: clientConfig.sourceId,
+        provider: clientConfig.provider,
+        protocol,
+        supportsBilling: clientConfig.supportsBilling,
+        requestStartedAt
+      });
+      const fallbackSnapshot = createSnapshot(new Date().toISOString());
+      const attemptSnapshots: UsagePriceSnapshot[] = [];
       const response = await createProviderClient(clientConfig.provider).createModelResponse(clientConfig, {
         body,
         language: input.language,
         signal: abort.signal,
-        runDeadlineAt: Date.now() + input.timeoutMs
+        runDeadlineAt: Date.now() + input.timeoutMs,
+        requestId,
+        onAttempt: ({ attemptIndex, startedAt }) => {
+          attemptSnapshots[attemptIndex] = createSnapshot(startedAt);
+        }
+      });
+
+      while (attemptSnapshots.length < (response.attemptCount ?? 1)) {
+        attemptSnapshots.push(attemptSnapshots.length === 0
+          ? fallbackSnapshot
+          : createSnapshot(new Date().toISOString()));
+      }
+      const normalizedUsage = normalizeDeepSeekUsage(response.usage);
+      const usageLedgerRecords = createUsageLedgerRecords({
+        requestId,
+        attempts: attemptSnapshots,
+        usage: normalizedUsage,
+        source: input.usageSource
       });
 
       if (!response.ok) {
-        throw new Error(abort.timedOut()
+        throw new HistorySummaryRequestError(abort.timedOut()
           ? 'Context summary request timed out.'
-          : response.error ?? 'Context summary request failed.');
+          : response.error ?? 'Context summary request failed.', usageLedgerRecords);
       }
 
-      const normalizedUsage = normalizeDeepSeekUsage(response.usage);
-      const pricing = clientConfig.supportsBilling
-        ? getConfiguredModelUsagePricing(input.model.id)
-        : undefined;
-      const canPriceUsage = Boolean(pricing && normalizedUsage?.cacheDataStatus === 'reported');
+      const billed = usageLedgerRecords.find((record) => record.kind === 'usage_response');
       return {
         content: response.message?.content ?? '',
+        usageLedgerRecords,
         usageEvent: normalizedUsage
           ? createUsageEvent({
               usage: normalizedUsage,
-              cost: canPriceUsage && pricing ? calculateUsageCost(normalizedUsage, pricing) : 0,
-              currency: canPriceUsage ? pricing?.currency ?? '' : '',
+              cost: billed?.cost ?? 0,
+              currency: billed?.currency ?? '',
               sourceId: clientConfig.sourceId,
               modelId: input.model.id,
               provider: clientConfig.provider,
-              protocol: clientConfig.provider === 'openai-responses'
-                ? 'openai-responses'
-                : clientConfig.provider === 'anthropic-compatible'
-                  ? 'anthropic-messages'
-                  : 'chat-completions',
-              pricingStatus: canPriceUsage ? 'priced' : 'unavailable',
-              requestId: randomUUID(),
+              protocol,
+              pricingStatus: billed?.pricingStatus ?? 'unavailable',
+              unpricedReason: billed?.unpricedReason,
+              ledgerRecorded: true,
+              providerAttemptCount: usageLedgerRecords.length,
+              requestId,
               source: input.usageSource
             })
           : undefined
@@ -486,6 +523,15 @@ export class HistoryCompressor {
     } finally {
       abort.dispose();
     }
+  }
+}
+
+class HistorySummaryRequestError extends Error {
+  public constructor(
+    message: string,
+    public readonly usageLedgerRecords: ProviderUsageLedgerRecord[]
+  ) {
+    super(message);
   }
 }
 

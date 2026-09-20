@@ -288,7 +288,8 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.equal(WEBVIEW_TRANSLATIONS['zh-CN'].usageNoRatio, '--');
   assert.match(detailsRenderer, /var hasSessionUsage = hasUsageData\(selected\.total\)/u);
   assert.match(detailsRenderer, /formatUsageAvailabilityValue\(selected\.total, 'usageMetricCostUnavailableValue'\)/u);
-  assert.match(detailsRenderer, /hasSessionUsage \? formatMetricInteger\(selected\.total\.requestCount\) : t\('usagePendingValue'\)/u);
+  assert.match(detailsRenderer, /hasSessionUsage \? formatMetricInteger\(selected\.total\.providerAttemptCount\) : t\('usagePendingValue'\)/u);
+  assert.match(detailsRenderer, /hasSessionUsage \? formatMetricInteger\(selected\.total\.usageResponseCount\) : t\('usagePendingValue'\)/u);
   assert.match(script, /function formatUsageAvailabilityValue\(usage, unavailableKey\) \{\s*return hasUsageData\(usage\) \? t\(unavailableKey\) : t\('usagePendingValue'\);/u);
   const provider = await readFile(path.resolve('src/provider/KeepseekChatViewProvider.ts'), 'utf8');
   assert.match(provider, /usageDetails: createUsageDetailsViewModel\(/u);

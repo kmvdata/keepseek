@@ -2,7 +2,7 @@ import type { ModelSourceConfigSnapshot } from '../accounts/types';
 import * as vscode from 'vscode';
 import { ModelSourceStore } from '../accounts/accountStore';
 import { resolveConfiguredSubagentModel } from '../accounts/subagentModelResolver';
-import type { AgentRequest, KeepseekModel, UsageEvent } from '../shared/types';
+import type { AgentRequest, KeepseekModel, ProviderUsageLedgerRecord, UsageEvent } from '../shared/types';
 import { APPROVAL_REVIEWER_SYSTEM_PROMPT, findDeterministicReviewDenial, parseApprovalReviewerJson, redactSensitiveReviewText, serializeApprovalReviewRequest } from './approvalPolicy';
 import { requestApprovalReviewText } from './oneShotTextRequest';
 import { APPROVAL_POLICY_VERSION, type ApprovalReviewOutcome, type ApprovalReviewRecord, type ApprovalReviewRequest } from './approvalReviewTypes';
@@ -27,6 +27,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     sourceStore: ModelSourceStore;
     store: ApprovalReviewStore;
     onUsage?: (event: UsageEvent) => void;
+    onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => void;
     requestText?: typeof requestApprovalReviewText;
     circuitBreaker?: ApprovalCircuitBreaker;
   }) {}
@@ -80,7 +81,8 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
           userPrompt: serialized,
           language: request.responseLanguage,
           signal,
-          onUsage: this.options.onUsage
+          onUsage: this.options.onUsage,
+          onUsageLedgerRecord: this.options.onUsageLedgerRecord
         });
         const decision = parseApprovalReviewerJson(raw);
         const record = await this.options.store.add({

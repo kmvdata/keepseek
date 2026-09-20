@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import * as vscode from './stubs/vscode';
 import {
   getConfiguredAgentSettings,
   getConfiguredBalanceEndpointUrl,
@@ -65,8 +66,10 @@ test('usage pricing has no unknown-model fallback', () => {
     currency: '¥'
   };
   assert.deepEqual(getConfiguredModelUsagePricing('deepseek-flash'), flashPricing);
+  assert.deepEqual(getConfiguredModelUsagePricing('deepseek-v4.1-flash'), flashPricing);
   assert.deepEqual(getConfiguredModelUsagePricing('deepseek-v4-flash'), flashPricing);
   assert.deepEqual(getConfiguredModelUsagePricing('deepseek-v4-flash-vision-exp'), flashPricing);
+  assert.equal(getConfiguredModelUsagePricing('deepseek-v4-flash-0731'), undefined);
   assert.deepEqual(getConfiguredModelUsagePricing('deepseek-v4-pro'), {
     cacheHitPrice: 0.15,
     inputPrice: 4.5,
@@ -82,6 +85,50 @@ test('usage pricing has no unknown-model fallback', () => {
     outputPrice: 27,
     currency: '¥'
   });
+});
+
+test('usage pricing preserves peak fields and prefers exact custom model IDs before canonical fallback', () => {
+  const original = vscode.workspace.getConfiguration;
+  vscode.workspace.getConfiguration = () => ({
+    ...original(),
+    get: <T>(key: string, fallback: T): T => key === 'usagePricing' ? ({
+      'deepseek-v4.1-flash': {
+        cacheHitPrice: 1,
+        inputPrice: 2,
+        outputPrice: 3,
+        peakCacheHitPrice: 4,
+        peakInputPrice: 5,
+        peakOutputPrice: 6,
+        currency: 'CNY'
+      },
+      'deepseek-flash': {
+        inputPrice: 9,
+        peakInputPrice: 18
+      }
+    } as T) : fallback
+  });
+  try {
+    assert.deepEqual(getConfiguredModelUsagePricing('deepseek-v4-flash'), {
+      cacheHitPrice: 1,
+      inputPrice: 2,
+      outputPrice: 3,
+      peakCacheHitPrice: 4,
+      peakInputPrice: 5,
+      peakOutputPrice: 6,
+      currency: 'CNY'
+    });
+    assert.deepEqual(getConfiguredModelUsagePricing('deepseek-flash'), {
+      cacheHitPrice: 1,
+      inputPrice: 9,
+      outputPrice: 3,
+      peakCacheHitPrice: 4,
+      peakInputPrice: 18,
+      peakOutputPrice: 6,
+      currency: 'CNY'
+    });
+  } finally {
+    vscode.workspace.getConfiguration = original;
+  }
 });
 
 test('partial agent settings preserve the fallback compression threshold', () => {

@@ -344,6 +344,36 @@ test('DeepSeek runtime preserves thinking and reasoning effort fields', async ()
   }
 });
 
+test('canonical DeepSeek Flash aliases remain unchanged on the wire', async () => {
+  const aliases = [
+    'deepseek-flash',
+    'deepseek-v4.1-flash',
+    'deepseek-v4-flash',
+    'deepseek-v4-flash-vision-exp'
+  ];
+  const captured: CapturedRequest[] = [];
+  const restore = mockFetchCapturing(captured, 'ok');
+  try {
+    const runner = new AgentRunner() as unknown as RuntimeInvoker;
+    for (const modelId of aliases) {
+      await runner.createModelResponse(
+        createRequest(modelId, 'deepseek'),
+        createRuntimeConfig('deepseek'),
+        [{ role: 'user', content: 'hello' }],
+        [],
+        {}
+      );
+    }
+
+    assert.deepEqual(
+      captured.map((request) => parseRequestBody(request.body).model),
+      aliases
+    );
+  } finally {
+    restore();
+  }
+});
+
 test('context summaries resolve the selected source and omit DeepSeek-only fields for compatible providers', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'keepseek-runtime-account-'));
   try {

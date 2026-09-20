@@ -5,7 +5,6 @@ import {
   getKnownNonTextModelKind
 } from '../shared/modelContextWindowGuesses';
 import {
-  DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
   DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS,
   DEFAULT_GENERIC_MAX_OUTPUT_TOKENS,
   getSupportedDeepSeekV4Models
@@ -15,6 +14,7 @@ import {
   supportsOfficialBillingSource
 } from './sourceCapabilities';
 import type { ModelSource } from './types';
+import { getDeepSeekModelIdentity } from '../shared/deepSeekModels';
 
 export interface CreateModelCatalogOptions {
   includeDisabledModels?: boolean;
@@ -57,8 +57,17 @@ export function createModelCatalog(
       if (!options.includeDisabledModels && disabledModelIds.has(modelId)) {
         continue;
       }
-      const builtIn = source.provider === 'deepseek'
-        ? builtIns.find((model) => model.id === modelId)
+      const identity = source.provider === 'deepseek' ? getDeepSeekModelIdentity(modelId) : undefined;
+      const canonicalBuiltIn = identity
+        ? builtIns.find((model) => model.id === identity.canonicalModelId)
+        : undefined;
+      const builtIn = canonicalBuiltIn && identity
+        ? {
+            ...canonicalBuiltIn,
+            id: modelId,
+            contextWindowTokens: identity.contextWindowTokens,
+            maxOutputTokens: identity.maxOutputTokens
+          }
         : undefined;
       const fetched = source.modelCache?.models.find((model) => model.id === modelId);
       const manual = source.models.find((model) => model.id === modelId);
@@ -86,7 +95,6 @@ export function createModelCatalog(
         ?? fetched?.contextWindowTokens
         ?? builtIn?.contextWindowTokens
         ?? guessedContextWindowTokens
-        ?? (officialDeepSeek ? DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS : undefined)
         ?? DEFAULT_GENERIC_CONTEXT_WINDOW_TOKENS;
       const contextWindowSource: KeepseekModel['contextWindowSource'] = manual?.contextWindowTokens
         ? 'manual'
@@ -96,9 +104,7 @@ export function createModelCatalog(
             ? 'built-in'
             : guessedContextWindowTokens
               ? 'guessed'
-              : officialDeepSeek
-                ? 'built-in'
-                : 'fallback';
+              : 'fallback';
       const maxOutputTokens = manual?.maxOutputTokens
         ?? fetched?.maxOutputTokens
         ?? builtIn?.maxOutputTokens

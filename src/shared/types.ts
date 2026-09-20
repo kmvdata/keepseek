@@ -107,7 +107,8 @@ export interface Usage {
 }
 
 export type UsageCacheDataStatus = 'reported' | 'partial' | 'unavailable';
-export type UsagePricingStatus = 'priced' | 'unavailable';
+export type UsagePricingStatus = 'priced' | 'estimated_upper_bound' | 'unavailable';
+export type AggregateUsagePricingStatus = UsagePricingStatus | 'partial';
 
 export interface UsageCostRates {
   // 空闲时段(或单一档)价格,兼容旧配置;旧配置缺省峰谷时段时按此档计费
@@ -132,8 +133,63 @@ export interface UsageEvent {
   pricingStatus?: UsagePricingStatus;
   requestId?: string;
   source: UsageSource;
-  /** Physical provider attempts represented by this event. Defaults to one. */
+  /** Usage-bearing responses represented by this event. Defaults to one. */
   requestCount?: number;
+  /** Physical attempts ending in this usage response, including retries. */
+  providerAttemptCount?: number;
+  /** Why a response with usage could not be priced. */
+  unpricedReason?: string;
+  /** Attempt/response counters were already appended to the request ledger. */
+  ledgerRecorded?: boolean;
+}
+
+export interface UsagePriceSnapshot {
+  readonly version: 1;
+  readonly originalModelId: string;
+  readonly canonicalModelIdentity: string;
+  readonly canonicalPricingKey?: string;
+  readonly sourceId: string;
+  readonly provider: string;
+  readonly protocol: string;
+  readonly requestStartedAt: string;
+  readonly currency: string;
+  readonly cacheHitRate?: number;
+  readonly inputRate?: number;
+  readonly outputRate?: number;
+  readonly pricingPeriod: 'offPeak' | 'peak';
+  readonly priceTableVersion: string;
+  readonly supportsBilling: boolean;
+  readonly unavailableReason?: 'unsupported_source' | 'price_not_configured' | 'invalid_price';
+}
+
+export interface ProviderUsageLedgerRecord {
+  version: 1;
+  requestId: string;
+  attemptIndex: number;
+  kind: 'usage_response' | 'attempt_without_usage';
+  source: UsageSource;
+  sourceId: string;
+  provider: string;
+  protocol: string;
+  originalModelId: string;
+  canonicalModelIdentity: string;
+  canonicalPricingKey?: string;
+  requestStartedAt: string;
+  usage?: Usage;
+  providerCacheDataStatus: UsageCacheDataStatus;
+  priceSnapshot: UsagePriceSnapshot;
+  cost: number;
+  currency: string;
+  pricingStatus: UsagePricingStatus;
+  unpricedReason?: string;
+}
+
+export interface ProviderUsageLedger {
+  version: 1;
+  records: ProviderUsageLedgerRecord[];
+  /** Older aggregate counters cannot be split into attempts and usage responses. */
+  legacyAggregate: boolean;
+  incomplete: boolean;
 }
 
 export type UsageSource =
@@ -149,9 +205,11 @@ export type UsageSource =
 
 export interface UsageSourceStats extends Usage {
   requestCount: number;
+  usageResponseCount?: number;
   cost: number;
   pricedRequestCount?: number;
   unpricedRequestCount?: number;
+  estimatedRequestCount?: number;
   /** Accounted provider cost split by currency. Different currencies are never summed. */
   costByCurrency?: Record<string, number>;
   /** Requests for which the provider returned cache token fields. */
@@ -168,6 +226,7 @@ export interface UsageModelGroupStats extends Usage {
   requestCount: number;
   pricedRequestCount: number;
   unpricedRequestCount: number;
+  estimatedRequestCount?: number;
   cacheDataRequestCount: number;
   cacheDataMissingRequestCount: number;
   costByCurrency?: Record<string, number>;
@@ -176,15 +235,18 @@ export interface UsageModelGroupStats extends Usage {
 
 export interface TurnUsageStats extends Usage {
   requestCount: number;
+  providerAttemptCount?: number;
+  usageResponseCount?: number;
   cost: number;
   currency: string;
   sourceId?: string;
   modelId?: string;
   provider?: string;
   protocol?: string;
-  pricingStatus?: 'priced' | 'unavailable' | 'partial';
+  pricingStatus?: AggregateUsagePricingStatus;
   pricedRequestCount?: number;
   unpricedRequestCount?: number;
+  estimatedRequestCount?: number;
   cacheDataRequestCount?: number;
   cacheDataMissingRequestCount?: number;
   costByCurrency?: Record<string, number>;
@@ -194,17 +256,21 @@ export interface TurnUsageStats extends Usage {
 
 export interface SessionUsageStats extends Usage {
   requestCount: number;
+  providerAttemptCount?: number;
+  usageResponseCount?: number;
   sessionCost: number;
   currency: string;
-  pricingStatus?: 'priced' | 'unavailable' | 'partial';
+  pricingStatus?: AggregateUsagePricingStatus;
   pricedRequestCount?: number;
   unpricedRequestCount?: number;
+  estimatedRequestCount?: number;
   cacheDataRequestCount?: number;
   cacheDataMissingRequestCount?: number;
   costByCurrency?: Record<string, number>;
   byModelSource?: UsageModelGroupStats[];
   /** Persisted aggregate from an older version that cannot be attributed safely. */
   legacyUnattributed?: boolean;
+  attemptStatsIncomplete?: boolean;
   updatedAt?: string;
   bySource?: Partial<Record<UsageSource, UsageSourceStats>>;
 }
@@ -678,6 +744,7 @@ export interface ChatSession {
   contextInstructions?: string;
   contextUsage?: ContextUsageEstimate;
   usageStats?: SessionUsageStats;
+  usageLedger?: ProviderUsageLedger;
   lastTurnUsage?: TurnUsageStats;
   subagentUsageStats?: SubagentSessionUsageStats;
   balance?: ModelSourceBalanceState;
@@ -968,6 +1035,8 @@ export interface RunDetailsTaskPlanSummary {
 
 export interface RunDetailsModelRequestSummary {
   requestCount: number;
+  providerAttemptCount?: number;
+  usageResponseCount?: number;
   messageCount: number;
   exposedToolCount: number;
   maxOutputTokens?: number;
@@ -1070,6 +1139,12 @@ export interface RunDetailsSummary {
     reusablePrefixTokensEstimate?: number;
     estimatedCacheResetTokens?: number;
     summaryKind: 'model' | 'host_fallback';
+  }>;
+  capacityAdjustments?: Array<{
+    reason: 'stale_capacity_calibration';
+    beforeWindowTokens: number;
+    afterWindowTokens: number;
+    evidence: string;
   }>;
   budgetStopReason?: string;
   failureReason?: string;
@@ -1386,6 +1461,7 @@ export interface AgentRunCallbacks {
   onToolRejected?: (event: { toolName: string; errorType: 'subagent_tool_not_exposed' }) => void;
   onUsageEstimate?: (usage: ContextUsageEstimate) => void;
   onUsage?: (event: UsageEvent) => void;
+  onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => void;
   onSubagentRunSummary?: (summary: SubagentRunUsageSummary) => void;
   onSubagentHandoffEstimate?: (estimate: SubagentHandoffEstimate) => void;
   onPromptCacheDiagnostics?: (diagnostics: PromptCacheDiagnostics) => void;

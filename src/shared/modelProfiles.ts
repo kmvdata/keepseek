@@ -1,10 +1,17 @@
 import type { AgentSettings, CompressionThreshold, KeepseekModel } from './types';
 import { getGuessedContextWindowTokens } from './modelContextWindowGuesses';
+import {
+  DEEPSEEK_FLASH_CANONICAL_MODEL_ID,
+  DEEPSEEK_PRO_CANONICAL_MODEL_ID,
+  DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
+  DEEPSEEK_V4_MAX_OUTPUT_TOKENS,
+  getDeepSeekModelIdentity,
+  isDeepSeekFlashIdentity
+} from './deepSeekModels';
 
-export const DEEPSEEK_V4_FLASH_MODEL_ID = 'deepseek-v4-flash';
-export const DEEPSEEK_V4_PRO_MODEL_ID = 'deepseek-v4-pro';
-export const DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS = 1_048_576;
-export const DEEPSEEK_V4_MAX_OUTPUT_TOKENS = 393_216;
+export const DEEPSEEK_V4_FLASH_MODEL_ID = DEEPSEEK_FLASH_CANONICAL_MODEL_ID;
+export const DEEPSEEK_V4_PRO_MODEL_ID = DEEPSEEK_PRO_CANONICAL_MODEL_ID;
+export { DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS, DEEPSEEK_V4_MAX_OUTPUT_TOKENS } from './deepSeekModels';
 /**
  * Capability fallback for a model whose source supplies no trustworthy metadata.
  * 32K / 8K is intentionally conservative: KeepSeek must not claim a million-token
@@ -197,7 +204,7 @@ export function getSupportedDeepSeekV4Models(): KeepseekModel[] {
 }
 
 export function normalizeDeepSeekV4ModelId(modelId: string | undefined): DeepSeekV4ModelId {
-  return modelId === DEEPSEEK_V4_PRO_MODEL_ID
+  return getDeepSeekModelIdentity(modelId)?.canonicalModelId === DEEPSEEK_V4_PRO_MODEL_ID
     ? DEEPSEEK_V4_PRO_MODEL_ID
     : DEEPSEEK_V4_FLASH_MODEL_ID;
 }
@@ -236,9 +243,10 @@ export function getAgentRuntimeProfile(
   );
 
   if (isDeepSeekV4Model(model)) {
-    const selected = model.id === DEEPSEEK_V4_PRO_MODEL_ID
-      ? PRO_PROFILES[reasoningMode]
-      : FLASH_PROFILES[reasoningMode];
+    const identity = getDeepSeekModelIdentity(model.id);
+    const selected = isDeepSeekFlashIdentity(identity)
+      ? FLASH_PROFILES[reasoningMode]
+      : PRO_PROFILES[reasoningMode];
     const maxTokens = Math.min(
       selected.maxTokens,
       declaredMaxOutputTokens ?? selected.maxTokens,
@@ -328,8 +336,7 @@ function getReasoningMode(
 function isDeepSeekV4Model(
   model: Pick<KeepseekModel, 'id' | 'provider'>
 ): model is Pick<KeepseekModel, 'id' | 'provider'> & { id: DeepSeekV4ModelId } {
-  return model.provider === 'deepseek'
-    && (model.id === DEEPSEEK_V4_FLASH_MODEL_ID || model.id === DEEPSEEK_V4_PRO_MODEL_ID);
+  return model.provider === 'deepseek' && Boolean(getDeepSeekModelIdentity(model.id));
 }
 
 function normalizeCapabilityTokens(value: number | undefined, max: number): number | undefined {

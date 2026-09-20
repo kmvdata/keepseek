@@ -46,18 +46,20 @@ export class OpenAICompatibleClient implements ProviderClient {
     request: ProviderClientRequest
   ): Promise<ProviderClientResult> {
     const maxRetries = Math.min(5, Math.max(0, Math.floor(config.maxRequestRetries) || 0));
+    let physicalAttemptCount = 0;
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      if (request.signal?.aborted) return { ok: false, hadPartialOutput: false, retryable: false, failureKind: 'external_abort', attemptCount: attempt, retryCount: Math.max(0, attempt - 1) };
+      if (request.signal?.aborted) return { ok: false, hadPartialOutput: false, retryable: false, failureKind: 'external_abort', attemptCount: physicalAttemptCount, retryCount: Math.max(0, physicalAttemptCount - 1) };
       await request.callbacks?.beforeModelRequest?.();
       if (request.signal?.aborted) continue;
       request.callbacks?.onActivity?.('request');
+      physicalAttemptCount += 1;
       const result = await this.createModelResponseAttempt(config, request, attempt);
       if (result.ok || !this.shouldRetry(result, attempt, maxRetries)) {
         return {
           ...result,
-          attemptCount: attempt + 1,
-          retryCount: attempt
+          attemptCount: physicalAttemptCount,
+          retryCount: Math.max(0, physicalAttemptCount - 1)
         };
       }
 
@@ -80,8 +82,8 @@ export class OpenAICompatibleClient implements ProviderClient {
       ok: false,
       hadPartialOutput: false,
       retryable: false,
-      attemptCount: maxRetries + 1,
-      retryCount: maxRetries,
+      attemptCount: physicalAttemptCount,
+      retryCount: Math.max(0, physicalAttemptCount - 1),
       error: request.language === 'en'
         ? `${this.displayName} API request failed after retries.`
         : `${this.displayName} API 请求重试后仍失败。`
@@ -191,6 +193,11 @@ export class OpenAICompatibleClient implements ProviderClient {
         requestId: request.requestId,
         attempt,
         url: requestUrl
+      });
+      request.onAttempt?.({
+        requestId: request.requestId ?? '',
+        attemptIndex: attempt,
+        startedAt: new Date().toISOString()
       });
       const headers = this.buildRequestHeaders(config);
       const response = await fetch(requestUrl, {

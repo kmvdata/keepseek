@@ -3979,6 +3979,8 @@ export function getScript(): string {
       appendRunDetailRow(grid, t('runDetailsStatus'), getRunStatusLabel(details.status));
       appendRunDetailRow(grid, t('runDetailsRequests'), [
         String(details.modelRequests?.requestCount || 0),
+        t('runDetailsProviderAttempts') + '=' + String(details.modelRequests?.providerAttemptCount || 0),
+        t('runDetailsUsageResponses') + '=' + String(details.modelRequests?.usageResponseCount || 0),
         'messages=' + String(details.modelRequests?.messageCount || 0),
         'tools=' + String(details.modelRequests?.exposedToolCount || 0),
         details.modelRequests?.maxOutputTokens ? 'max=' + String(details.modelRequests.maxOutputTokens) : ''

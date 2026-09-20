@@ -2,6 +2,7 @@ import type {
   AgentRequest,
   DraftEdit,
   DraftRunProposal,
+  ProviderUsageLedgerRecord,
   SubagentRunUsageSummary,
   UsageEvent
 } from '../../shared/types';
@@ -71,6 +72,7 @@ export interface SubagentInvocationContext {
   language: KeepseekLanguage;
   signal?: AbortSignal;
   onUsage?: (event: UsageEvent) => void;
+  onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => void;
   onRunSummary?: (summary: SubagentRunUsageSummary) => void;
 }
 
