@@ -11,8 +11,8 @@ export const executionModeStylesFragment: WebviewFragment = {
 
     .composer-execution-mode-btn {
       font-family: var(--vscode-editor-font-family, monospace);
-      font-size: 11px;
-      font-weight: 700;
+      font-size: 15px;
+      font-weight: 500;
       line-height: 1;
     }
 
