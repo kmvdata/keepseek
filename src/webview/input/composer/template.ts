@@ -51,6 +51,40 @@ export const composerTemplateFragment: WebviewFragment = {
               >
                 <span class="composer-trigger-glyph command-trigger-glyph" aria-hidden="true">/</span>
               </button>
+              <span class="composer-execution-mode-control">
+                <button
+                  id="executionModeButton"
+                  type="button"
+                  class="composer-icon-btn composer-execution-mode-btn"
+                  aria-label="执行方式：常规。边分析边推进，适合明确的日常任务"
+                  aria-describedby="executionModeTooltip"
+                  aria-haspopup="menu"
+                  aria-controls="executionModeMenu"
+                  aria-expanded="false"
+                >
+                  <span id="executionModeButtonLabel" aria-hidden="true">N</span>
+                </button>
+                <span id="executionModeTooltip" class="execution-mode-tooltip" role="tooltip">
+                  <span id="executionModeTooltipTitle" class="execution-mode-tooltip-title">执行方式：常规</span>
+                  <span id="executionModeTooltipDescription" class="execution-mode-tooltip-description">边分析边推进，适合明确的日常任务</span>
+                </span>
+                <span id="executionModeMenu" class="execution-mode-menu hidden" role="menu" aria-label="执行方式" data-i18n-aria-label="executionMode">
+                  <button type="button" class="execution-mode-option" role="menuitemradio" data-execution-mode="normal" aria-checked="true">
+                    <span class="execution-mode-option-check" aria-hidden="true">✓</span>
+                    <span class="execution-mode-option-copy">
+                      <span class="execution-mode-option-label" data-i18n="executionNormal">常规</span>
+                      <span class="execution-mode-option-description" data-i18n="executionNormalDescription">边分析边推进，适合明确的日常任务</span>
+                    </span>
+                  </button>
+                  <button type="button" class="execution-mode-option" role="menuitemradio" data-execution-mode="plan" aria-checked="false">
+                    <span class="execution-mode-option-check" aria-hidden="true"></span>
+                    <span class="execution-mode-option-copy">
+                      <span class="execution-mode-option-label" data-i18n="executionPlan">计划</span>
+                      <span class="execution-mode-option-description" data-i18n="executionPlanDescription">先产出实施计划，用户确认后再开始执行</span>
+                    </span>
+                  </button>
+                </span>
+              </span>
               <span id="status" class="composer-status" aria-describedby="statusTooltip">
                 <span id="statusText" class="composer-status-text"></span>
                 <span id="statusTooltip" class="composer-status-tooltip hidden" role="tooltip"></span>
@@ -76,4 +110,3 @@ export const composerTemplateFragment: WebviewFragment = {
         </div>
 `.slice(1)
 };
-

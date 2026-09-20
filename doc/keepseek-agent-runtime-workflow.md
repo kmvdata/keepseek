@@ -72,7 +72,7 @@ Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节
 
 ### 2.3 ExecutionMode 与计划确认工作流
 
-命令菜单中的“执行方式”是会话级状态，当前只有 `normal`（常规）与 `plan`（计划）。它与项目级 `ApprovalMode` 完全正交：`ExecutionMode` 决定什么时候允许从调查进入实施，`ApprovalMode` 决定实施阶段产生的具体 DraftEdit / DraftRun 由用户、reviewer 还是现有 host policy 批准。批准计划只跨过“开始实施”这一道工作流门，不会批准任何尚未形成的文件修改或命令，也不会绕过 ChangeSet、SafeFileEditor、DraftRun、actionHash、一次性 permit、workspace trust、脏编辑器检查或既有审批管线。
+输入框工具栏中 `/` 右侧的 `N` / `P` 按钮用于选择会话级“执行方式”，当前只有 `normal`（常规）与 `plan`（计划）；悬停或键盘聚焦会显示当前方式说明，点击后在独立菜单中切换。它与命令菜单中的项目级 `ApprovalMode` 完全正交：`ExecutionMode` 决定什么时候允许从调查进入实施，`ApprovalMode` 决定实施阶段产生的具体 DraftEdit / DraftRun 由用户、reviewer 还是现有 host policy 批准。批准计划只跨过“开始实施”这一道工作流门，不会批准任何尚未形成的文件修改或命令，也不会绕过 ChangeSet、SafeFileEditor、DraftRun、actionHash、一次性 permit、workspace trust、脏编辑器检查或既有审批管线。
 
 新会话、旧数据缺失字段和未知值都归一化为 `normal`。执行方式保存在当前 `ChatSession`，切换会话时恢复各自值；一个 turn 开始后把值冻结进 `AgentRequest`，运行期间 Webview 与 Provider 都禁止切换。复制其它工作区会话时执行方式重置为 `normal`，不复制待确认计划权限。
 

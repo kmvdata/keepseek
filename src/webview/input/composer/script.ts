@@ -24,6 +24,7 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
         event.preventDefault();
         if (state.isBusy) {
           closeCommandMenu();
+          closeExecutionModeMenu(false);
           closeReferenceMenu(false);
           setComposerStatus(t('taskAlreadyRunning'));
           promptInput.focus();
@@ -33,6 +34,7 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
         var prompt = serializePrompt();
         if (!prompt.trim()) return;
         closeCommandMenu();
+        closeExecutionModeMenu(false);
         closeReferenceMenu(false);
         vscode.postMessage({
           type: 'sendPrompt',
@@ -56,6 +58,7 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
           event.preventDefault();
           event.stopPropagation();
           closeCommandMenu();
+          closeExecutionModeMenu(false);
           closeReferenceMenu(false);
           vscode.postMessage({ type: 'abortPrompt' });
           setComposerStatus(t('stoppingTask'));
@@ -74,6 +77,7 @@ export const composerRenderFragment: WebviewFragment = {
         renderActiveSkillsBar();
         renderContextProgress();
         renderCommandMenu();
+        renderExecutionModeControl();
         renderReferenceMenuButton();
         renderSendButton();
         setApiKeyVisible(apiKeyVisible, false);
@@ -118,6 +122,7 @@ export const composerStatusFragment: WebviewFragment = {
 
       function clearPrompt() {
         closeCommandMenu();
+        closeExecutionModeMenu(false);
         closeReferenceMenu(false);
         promptInput.innerHTML = '';
         promptShortcutController.deactivateMark();
@@ -148,4 +153,3 @@ export const composerPublicApiFragment: WebviewFragment = {
     })();
 `.slice(1)
 };
-

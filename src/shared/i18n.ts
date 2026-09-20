@@ -10,8 +10,8 @@ type TranslationCatalog = Record<string, string>;
 export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
     executionMode: '执行方式',
-    executionNormal: '常规',
-    executionPlan: '计划',
+    executionNormal: 'Normal 常规',
+    executionPlan: 'Plan 计划',
     executionNormalDescription: '边分析边推进，适合明确的日常任务',
     executionPlanDescription: '先产出实施计划，用户确认后再开始执行',
     executionModeReadonlyWhileBusy: '任务运行期间不能切换执行方式。',

@@ -88,7 +88,6 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
         commandSubagentModelProfile = '';
-        commandExecutionModeListOpen = false;
         commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
         commandMenu.classList.add('hidden');
@@ -142,11 +141,6 @@ export const commandMenuImplementationFragment: WebviewFragment = {
             openCommandApprovalModeListAndFocus();
             return;
           }
-          if (target === commandExecutionModeSwitch) {
-            event.preventDefault();
-            openCommandExecutionModeListAndFocus();
-            return;
-          }
           if (target === commandSkillsMainButton || target === commandSkillsButton) {
             event.preventDefault();
             openCommandSkillListAndFocus();
@@ -185,13 +179,6 @@ export const commandMenuImplementationFragment: WebviewFragment = {
             commandApprovalModeListOpen = false;
             renderCommandMenu();
             if (commandApprovalModeSwitch) { commandApprovalModeSwitch.focus(); }
-            return;
-          }
-          if (commandExecutionModeListOpen && commandExecutionModeList && (commandExecutionModeList.contains(target) || target === commandExecutionModeSwitch)) {
-            event.preventDefault();
-            commandExecutionModeListOpen = false;
-            renderCommandMenu();
-            if (commandExecutionModeSwitch) { commandExecutionModeSwitch.focus(); }
             return;
           }
           if (commandSkillListOpen && commandSkillList && (commandSkillList.contains(target) || target === commandSkillsMainButton || target === commandSkillsButton || target === commandCreateSkillButton)) {
@@ -236,7 +223,6 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         if (!commandModelSwitch || isModelSelectionLocked()) { return; }
         commandModelListOpen = true;
         commandSubagentModelListOpen = false;
-        commandExecutionModeListOpen = false;
         commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
         renderCommandMenu();
@@ -248,22 +234,10 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         commandSubagentModelListOpen = true;
         commandSubagentModelProfile = '';
         commandModelListOpen = false;
-        commandExecutionModeListOpen = false;
         commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
         renderCommandMenu();
         focusFirstCommandMenuControl(commandSubagentModelList);
-      }
-
-      function openCommandExecutionModeListAndFocus() {
-        if (!commandExecutionModeSwitch || isExecutionModeSelectionLocked()) { return; }
-        commandExecutionModeListOpen = true;
-        commandModelListOpen = false;
-        commandSubagentModelListOpen = false;
-        commandApprovalModeListOpen = false;
-        commandSkillListOpen = false;
-        renderCommandMenu();
-        focusFirstCommandMenuControl(commandExecutionModeList);
       }
 
       function openCommandApprovalModeListAndFocus() {
@@ -271,7 +245,6 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         commandApprovalModeListOpen = true;
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
-        commandExecutionModeListOpen = false;
         commandSkillListOpen = false;
         renderCommandMenu();
         focusFirstCommandMenuControl(commandApprovalModeList);
@@ -282,7 +255,6 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         commandSkillListOpen = true;
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
-        commandExecutionModeListOpen = false;
         commandApprovalModeListOpen = false;
         vscode.postMessage({ type: 'requestSkills' });
         renderCommandMenu();
@@ -356,14 +328,13 @@ export const commandMenuRenderFragment: WebviewFragment = {
       function renderCommandMenu() {
         if (!commandMenu) { return; }
         if (commandMenuButton) {
-          commandMenuButton.title = t('showCommandMenuTitle') + ' · ' + t(getExecutionModeLabelKey(state.executionMode)) + ' · ' + t(getApprovalModeLabelKey(state.approvalMode));
+          commandMenuButton.title = t('showCommandMenuTitle') + ' · ' + t(getApprovalModeLabelKey(state.approvalMode));
         }
         commandMenu.classList.toggle('is-readonly', Boolean(state.isBusy));
         commandMenu.classList.toggle('allows-model-selection', Boolean(state.isBusy && !isModelSelectionLocked()));
         commandMenu.classList.toggle('allows-approval-selection', Boolean(state.isBusy && !isApprovalModeSelectionLocked()));
         renderCommandModel();
         renderCommandSubagentModel();
-        renderCommandExecutionMode();
         renderCommandApprovalMode();
         renderCompressionThreshold();
         renderCommandSkillFilter();

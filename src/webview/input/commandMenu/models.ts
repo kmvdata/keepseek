@@ -49,7 +49,6 @@ export const modelSelectorBindingsFragment: WebviewFragment = {
           commandModelListOpen = !commandModelListOpen;
           if (commandModelListOpen) {
             commandSubagentModelListOpen = false;
-            commandExecutionModeListOpen = false;
             commandApprovalModeListOpen = false;
             commandSkillListOpen = false;
           }
@@ -92,7 +91,6 @@ export const modelSelectorBindingsFragment: WebviewFragment = {
           if (commandSubagentModelListOpen) {
             commandSubagentModelProfile = '';
             commandModelListOpen = false;
-            commandExecutionModeListOpen = false;
             commandApprovalModeListOpen = false;
             commandSkillListOpen = false;
           } else {
