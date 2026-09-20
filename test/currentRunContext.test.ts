@@ -5,13 +5,16 @@ import {
   calibrateContextUsageEstimate,
   createContextUsageEstimate,
   createContextUsageEstimateFromMessages,
-  createDisplayedSessionContextUsageEstimate
+  createDisplayedSessionContextUsageEstimate,
+  createUnsentSessionContextUsageEstimate
 } from '../src/agent/contextUsage';
 import { buildCurrentRunContext } from '../src/agent/currentRunContext';
 import { hashContent } from '../src/agent/projectInstructions';
 import { buildInitialAgentMessages, formatCurrentRunContextForAgent } from '../src/agent/protocol';
 import { getSupportedDeepSeekV4Models } from '../src/shared/modelProfiles';
-import type { ActivatedSkill, ProjectInstructionContext } from '../src/shared/types';
+import { hasSessionProviderRequest } from '../src/provider/modelSelection';
+import { createEmptySession } from '../src/sessions/chatSessionStore';
+import type { ActivatedSkill, ChatMessage, ChatSession, ProjectInstructionContext } from '../src/shared/types';
 
 test('deduplicates exact normalized URIs before consuming context budget', () => {
   const result = deduplicateContextSources([
@@ -188,6 +191,107 @@ test('metadata-backed context and output limits drive request and displayed usag
   assert.equal(displayedUsage.maxTokensEstimate, 64_000);
   assert.equal(displayedUsage.breakdown.outputReserveTokensEstimate, 0);
 });
+
+test('a session that never reached the provider displays no used context', () => {
+  const model = getSupportedDeepSeekV4Models()[0];
+  const currentRunContext = buildCurrentRunContext({
+    projectInstructions: { instructions: [projectInstruction('Use the shared projection.')], discarded: [] },
+    skills: [],
+    skillCharacterBudget: 10_000
+  });
+  const input = {
+    model,
+    agentSettings: { thinkingEnabled: false, reasoningEffort: 'high' as const, compressionThreshold: 'balanced' as const },
+    contextFiles: [],
+    currentRunContext,
+    messages: [] as ChatMessage[],
+    language: 'en' as const,
+    prompt: '',
+    includeTools: false,
+    requestProtocolVersion: 9
+  };
+  const projected = createDisplayedSessionContextUsageEstimate(input);
+  // 根因：尚未发送的动态上下文前缀（AGENTS.md 项目指令等）此前被计入“已用”。
+  assert.ok(projected.breakdown.contextFileTokensEstimate > 0);
+  assert.ok(projected.usedTokensEstimate > 0);
+
+  const displayed = createUnsentSessionContextUsageEstimate(projected);
+  assert.equal(displayed.maxTokensEstimate, projected.maxTokensEstimate);
+  assert.equal(displayed.usedTokensEstimate, 0);
+  assert.equal(displayed.usedPercent, 0);
+  assert.equal(displayed.remainingPercent, 100);
+  assert.equal(displayed.remainingTokensEstimate, projected.maxTokensEstimate);
+  assert.ok(Object.values(displayed.breakdown).every((value) => value === 0));
+});
+
+test('provider interaction is required before a session counts as used', () => {
+  const fresh = createEmptySession('en');
+  assert.equal(hasSessionProviderRequest(fresh), false);
+
+  const withUserMessage: ChatSession = { ...fresh, messages: [userMessage()] };
+  assert.equal(hasSessionProviderRequest(withUserMessage), false);
+
+  const protocol = fresh.requestProtocol;
+  assert.ok(protocol);
+  const withProviderRequest: ChatSession = {
+    ...fresh,
+    requestProtocol: { ...protocol, lastProviderRequestAt: new Date().toISOString() }
+  };
+  assert.equal(hasSessionProviderRequest(withProviderRequest), true);
+
+  const withAssistantReply: ChatSession = {
+    ...fresh,
+    messages: [userMessage(), {
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'done',
+      createdAt: new Date().toISOString(),
+      modelId: 'deepseek-v4-flash'
+    }]
+  };
+  assert.equal(hasSessionProviderRequest(withAssistantReply), true);
+});
+
+test('an interacted session still counts its dynamic context prefix', () => {
+  const fresh = createEmptySession('en');
+  const protocol = fresh.requestProtocol;
+  assert.ok(protocol);
+  const interacted: ChatSession = {
+    ...fresh,
+    requestProtocol: { ...protocol, lastProviderRequestAt: new Date().toISOString() }
+  };
+  const projected = createDisplayedSessionContextUsageEstimate({
+    model: getSupportedDeepSeekV4Models()[0],
+    agentSettings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' },
+    contextFiles: [],
+    currentRunContext: buildCurrentRunContext({
+      projectInstructions: { instructions: [projectInstruction('Use the shared projection.')], discarded: [] },
+      skills: [],
+      skillCharacterBudget: 10_000
+    }),
+    messages: [] as ChatMessage[],
+    language: 'en',
+    prompt: '',
+    includeTools: false,
+    requestProtocolVersion: 9
+  });
+  const displayed = hasSessionProviderRequest(interacted)
+    ? projected
+    : createUnsentSessionContextUsageEstimate(projected);
+
+  assert.equal(displayed, projected);
+  assert.ok(displayed.breakdown.contextFileTokensEstimate > 0);
+  assert.ok(displayed.usedTokensEstimate > 0);
+});
+
+function userMessage(): ChatMessage {
+  return {
+    id: 'user-1',
+    role: 'user',
+    content: 'Inspect the project.',
+    createdAt: new Date().toISOString()
+  };
+}
 
 function candidate(id: string, uri: string, content: string, priority: number) {
   return {

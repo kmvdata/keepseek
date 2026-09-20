@@ -94,7 +94,7 @@ export const usageRenderFragment: WebviewFragment = {
         var usedPercent = clampNumber(metrics.contextPercent, 0, 100);
         var angle = usedPercent * 3.6;
         var title = t('usageStatsTitle');
-        var contextLine = ['usageMetricContextPercent', formatMetricPercent(usedPercent)];
+        var contextLine = ['usageMetricContextPercent', formatContextPercentValue(usedPercent)];
         var primaryLine = ['usageMetricSessionTokens', formatMetricTokens(
           sessionUsage && sessionUsage.totalTokens,
           hasUsageData(sessionUsage)
@@ -248,8 +248,9 @@ export const usageRenderFragment: WebviewFragment = {
         progress.setAttribute('aria-valuemin', '0');
         progress.setAttribute('aria-valuemax', '100');
         progress.setAttribute('aria-valuenow', String(Math.round(usedPercent)));
-        progress.setAttribute('aria-label', t('usageMetricContextPercent') + ' ' + formatMetricPercent(usedPercent));
-        var currentMarker = usageNode('span', 'usage-context-marker usage-context-current-marker', formatRoundedPercent(usedPercent));
+        progress.setAttribute('aria-label', t('usageMetricContextPercent') + ' ' + formatContextPercentValue(usedPercent));
+        var currentMarker = usageNode('span', 'usage-context-marker usage-context-current-marker',
+          isContextUsagePending(usedPercent) ? t('usagePendingValue') : formatRoundedPercent(usedPercent));
         currentMarker.style.left = usedPercent + '%';
         var thresholdMarker = usageNode('span', 'usage-context-marker usage-context-threshold-marker', formatRoundedPercent(compactPercent));
         thresholdMarker.style.left = compactPercent + '%';

@@ -791,6 +791,36 @@ test('generated Webview JavaScript passes syntax compilation', () => {
   assert.doesNotThrow(() => new Function(getScript()));
 });
 
+test('context usage shows a placeholder instead of 0.00% before the session starts', () => {
+  const inputScript = getInputScript();
+
+  assert.match(inputScript, /var contextLine = \['usageMetricContextPercent', formatContextPercentValue\(usedPercent\)\];/u);
+  assert.match(
+    inputScript,
+    /isContextUsagePending\(usedPercent\) \? t\('usagePendingValue'\) : formatRoundedPercent\(usedPercent\)/u
+  );
+  assert.match(
+    inputScript,
+    /progress\.setAttribute\('aria-label', t\('usageMetricContextPercent'\) \+ ' ' \+ formatContextPercentValue\(usedPercent\)\);/u
+  );
+
+  const formatContextPercent = new Function(`
+    const t = key => key === 'usagePendingValue' ? '--' : key;
+    const clampNumber = (value, min, max) => Math.min(max, Math.max(min, Number(value) || 0));
+    ${getGeneratedSection(inputScript, 'function isContextUsagePending(value)', 'function formatMetricTokens(value, hasData)')}
+    return { pending: isContextUsagePending, value: formatContextPercentValue };
+  `)() as { pending: (value: number) => boolean; value: (value: number) => string };
+
+  assert.equal(formatContextPercent.pending(0), true);
+  assert.equal(formatContextPercent.pending(0), true);
+  assert.equal(formatContextPercent.pending(0.001), true);
+  assert.equal(formatContextPercent.pending(0.39), false);
+  assert.equal(formatContextPercent.value(0), '--');
+  assert.equal(formatContextPercent.value(0.001), '--');
+  assert.equal(formatContextPercent.value(0.39), '0.39%');
+  assert.equal(formatContextPercent.value(12), '12.00%');
+});
+
 test('composer status fades after eight seconds and reveals a tooltip only above 24 UTF-8 bytes', () => {
   const inputTemplate = getInputTemplate();
   const inputScript = getInputScript();

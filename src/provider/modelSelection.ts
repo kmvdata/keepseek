@@ -218,7 +218,11 @@ export function getCacheLaneChangeReasons(
   return reasons;
 }
 
-function hasSessionProviderRequest(
+/**
+ * 会话是否已经把至少一条请求真正发给 provider。显示层用它决定是否统计尚未发送的
+ * 动态上下文前缀；模型切换用它决定缓存车道归因。
+ */
+export function hasSessionProviderRequest(
   session: Pick<ChatSession, 'messages' | 'requestProtocol'>
 ): boolean {
   if (session.requestProtocol?.lastProviderRequestAt) {

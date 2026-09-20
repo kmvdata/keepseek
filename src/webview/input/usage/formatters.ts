@@ -394,6 +394,18 @@ export const usageFormattersFragment: WebviewFragment = {
         return localized === key ? normalized : localized;
       }
 
+      // 上下文“已用”百分比：会话还没有开始（会被格式化成 0.00%）时一律显示占位，
+      // 用 -- 表达“还没有开始”，不再赘述没有信息量的 0.00%。
+      function isContextUsagePending(value) {
+        return formatMetricPercent(clampNumber(value, 0, 100)) === '0.00%';
+      }
+
+      function formatContextPercentValue(value) {
+        return isContextUsagePending(value)
+          ? t('usagePendingValue')
+          : formatMetricPercent(clampNumber(value, 0, 100));
+      }
+
       function formatMetricPercent(value) {
         if (value === null || value === undefined || value === '') {
           return t('usagePendingValue');

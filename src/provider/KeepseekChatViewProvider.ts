@@ -55,6 +55,7 @@ import {
 } from '../sessions/chatSessionStore';
 import {
   createDisplayedSessionContextUsageEstimate,
+  createUnsentSessionContextUsageEstimate,
   finalizeSessionContextUsageEstimate,
   pickLargerContextUsageEstimate,
   toSessionContextUsageEstimate
@@ -201,6 +202,7 @@ import type {
 } from '../accounts/types';
 import {
   analyzeModelSwitchImpact,
+  hasSessionProviderRequest,
   isBackgroundModelSelectionLocked,
   ModelSelectionTransactionCoordinator,
   type ModelSwitchImpact,
@@ -1835,10 +1837,22 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
+  /**
+   * 显示口径不变量：只有真实发送给 provider 的字节才算“已用”。未交互会话一个字节都还
+   * 没有发出，因此返回归零的估算（仅保留窗口上限），避免把尚未发送的系统提示词与动态
+   * 上下文前缀显示成已用。
+   */
+  private contextUsageForSessionDisplay(
+    session: ChatSession,
+    usage: ContextUsageEstimate
+  ): ContextUsageEstimate {
+    return hasSessionProviderRequest(session) ? usage : createUnsentSessionContextUsageEstimate(usage);
+  }
+
   private createCurrentSessionContextUsage(model = this.getSelectedModel()): ContextUsageEstimate {
     const activeSession = this.sessionStore.getActiveSession();
     const modelSource = this.modelSources.find((source) => source.id === model.sourceId);
-    return createDisplayedSessionContextUsageEstimate({
+    return this.contextUsageForSessionDisplay(activeSession, createDisplayedSessionContextUsageEstimate({
       model,
       agentSettings: this.agentSettings,
       contextFiles: this.fileContext.getAll(),
@@ -1854,7 +1868,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       provider: modelSource?.provider,
       sourceId: model.sourceId,
       baseUrl: modelSource?.baseUrl
-    });
+    }));
   }
 
   private resolveSessionToolNames(
@@ -3213,7 +3227,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   ): ModelSwitchImpact {
     const activeSession = this.sessionStore.getActiveSession();
     const targetProfile = getAgentRuntimeProfile(model, this.agentSettings);
-    const targetContextUsage = createDisplayedSessionContextUsageEstimate({
+    const targetContextUsage = this.contextUsageForSessionDisplay(activeSession, createDisplayedSessionContextUsageEstimate({
       model,
       agentSettings: this.agentSettings,
       contextFiles: this.fileContext.getAll(),
@@ -3227,7 +3241,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       provider: sourceConfig.provider,
       sourceId: sourceConfig.sourceId,
       baseUrl: sourceConfig.baseUrl
-    });
+    }));
     const targetProjection = buildProviderRequestProjection({
       model,
       agentSettings: this.agentSettings,
@@ -5644,10 +5658,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const liveContextUsage = this.liveContextUsage?.maxTokensEstimate === computedContextUsage.maxTokensEstimate
       ? this.liveContextUsage
       : undefined;
-    const contextUsage = pickLargerContextUsageEstimate(
+    const selectedContextUsage = pickLargerContextUsageEstimate(
       pickLargerContextUsageEstimate(storedContextUsage, computedContextUsage),
       this.isBusy ? liveContextUsage : undefined
     ) ?? computedContextUsage;
+    // 只有真实发送给 provider 的字节才算“已用”：未交互会话显示归零估算。
+    const contextUsage = this.contextUsageForSessionDisplay(activeSession, selectedContextUsage);
     const contextCompression = getAgentRuntimeProfile(selectedModel, this.agentSettings).contextCompression;
     const lastTurnUsage = this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage;
     const contextPercent = contextUsage.usedPercent;
