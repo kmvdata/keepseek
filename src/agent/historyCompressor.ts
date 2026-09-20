@@ -24,6 +24,7 @@ import type {
   CurrentRunContext,
   UsageEvent,
   ProviderUsageLedgerRecord,
+  ProviderCacheObservation,
   UsagePriceSnapshot,
   UsageSource
 } from '../shared/types';
@@ -46,6 +47,7 @@ import { buildProviderRequestProjection } from './providerRequestProjection';
 import { estimateDeepSeekMessageTokens, estimateDeepSeekToolsTokens } from './protocol';
 import { createUsageEvent, normalizeDeepSeekUsage } from './usageStats';
 import { createUsageLedgerRecords, createUsagePriceSnapshot } from './usageLedger';
+import { createProviderCacheObservation } from './cacheObservation';
 
 const SUMMARY_MAX_INPUT_CHARS = 90_000;
 // Deliberately high: every summary refresh rewrites the synthetic summary message and
@@ -111,6 +113,7 @@ export type HistorySummaryCompletion = (input: {
 }) => Promise<string | HistorySummaryCompletionResult>;
 
 export class HistoryCompressor {
+  private readonly previousCacheObservationByScope = new Map<string, ProviderCacheObservation>();
 
   public constructor(
     private readonly completion?: HistorySummaryCompletion,
@@ -228,7 +231,8 @@ export class HistoryCompressor {
         language: input.language,
         signal: input.signal,
         usageSource: input.usageSource ?? 'summary',
-        sourceConfig: input.sourceConfig
+        sourceConfig: input.sourceConfig,
+        sessionId: input.session.id
       });
       const content = completion.content.trim();
 
@@ -382,6 +386,7 @@ export class HistoryCompressor {
     signal?: AbortSignal;
     usageSource: Extract<UsageSource, 'summary' | 'background'>;
     sourceConfig?: ModelSourceConfigSnapshot;
+    sessionId?: string;
   }): Promise<HistorySummaryCompletionResult> {
     const runtimeProfile = getAgentRuntimeProfile(input.model, {
       thinkingEnabled: false,
@@ -468,6 +473,23 @@ export class HistoryCompressor {
       });
       const fallbackSnapshot = createSnapshot(new Date().toISOString());
       const attemptSnapshots: UsagePriceSnapshot[] = [];
+      const attemptCacheObservations: ProviderCacheObservation[] = [];
+      const cacheScope = `${input.sessionId ?? 'unknown-session'}\u0000${input.usageSource}`;
+      const previousCacheObservation = this.previousCacheObservationByScope.get(cacheScope);
+      const createObservation = (attemptIndex: number) => createProviderCacheObservation({
+        requestId,
+        attemptIndex,
+        source: input.usageSource,
+        sourceId: clientConfig.sourceId,
+        provider: clientConfig.provider,
+        baseUrl: clientConfig.baseUrl,
+        body,
+        taskId: input.sessionId,
+        runId: `summary:${input.sessionId ?? requestId}`,
+        requestProtocolVersion: 1,
+        previous: attemptIndex > 0 ? attemptCacheObservations[0] ?? previousCacheObservation : previousCacheObservation,
+        historyCompacted: true
+      });
       const response = await createProviderClient(clientConfig.provider).createModelResponse(clientConfig, {
         body,
         language: input.language,
@@ -476,21 +498,29 @@ export class HistoryCompressor {
         requestId,
         onAttempt: ({ attemptIndex, startedAt }) => {
           attemptSnapshots[attemptIndex] = createSnapshot(startedAt);
+          attemptCacheObservations[attemptIndex] = createObservation(attemptIndex);
         }
       });
 
       while (attemptSnapshots.length < (response.attemptCount ?? 1)) {
+        const attemptIndex = attemptSnapshots.length;
         attemptSnapshots.push(attemptSnapshots.length === 0
           ? fallbackSnapshot
           : createSnapshot(new Date().toISOString()));
+        attemptCacheObservations[attemptIndex] = createObservation(attemptIndex);
       }
       const normalizedUsage = normalizeDeepSeekUsage(response.usage);
       const usageLedgerRecords = createUsageLedgerRecords({
         requestId,
         attempts: attemptSnapshots,
         usage: normalizedUsage,
-        source: input.usageSource
+        source: input.usageSource,
+        cacheObservations: attemptCacheObservations
       });
+      if (response.ok && normalizedUsage) {
+        const observation = usageLedgerRecords.find((record) => record.kind === 'usage_response')?.cacheObservation;
+        if (observation) this.previousCacheObservationByScope.set(cacheScope, observation);
+      }
 
       if (!response.ok) {
         throw new HistorySummaryRequestError(abort.timedOut()

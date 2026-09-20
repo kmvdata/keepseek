@@ -684,6 +684,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
       usageStats: normalizeSessionUsageStatsValue(item.usageStats),
       usageLedger: normalizeUsageLedgerValue(item.usageLedger),
+      usageLedgerRef: normalizeUsageLedgerRef(item.usageLedgerRef, item.id),
       lastTurnUsage: normalizeTurnUsageStatsValue(item.lastTurnUsage),
       subagentUsageStats: normalizeSubagentSessionUsageStatsValue(item.subagentUsageStats),
       balance: normalizeBalanceStateValue(item.balance),
@@ -703,6 +704,19 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
   }
 
   return sortSessionsByUpdatedAt(sessions);
+}
+
+function normalizeUsageLedgerRef(value: unknown, sessionId: string): ChatSession['usageLedgerRef'] {
+  if (!isRecord(value) || value.version !== 2 || value.sessionId !== sessionId) return undefined;
+  return {
+    version: 2,
+    sessionId,
+    ...(value.migratedInlineVersion === 1 ? { migratedInlineVersion: 1 } : {}),
+    legacyAggregate: value.legacyAggregate === true,
+    incomplete: value.incomplete === true,
+    ...(Number.isSafeInteger(value.damagedBucketCount) && Number(value.damagedBucketCount) > 0
+      ? { damagedBucketCount: Number(value.damagedBucketCount) } : {})
+  };
 }
 
 export function normalizeStoredActiveSessionIds(value: unknown, sessions: ChatSession[]): Record<string, string> {

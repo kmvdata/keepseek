@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ModelSourceConfigSnapshot } from '../accounts/types';
 import { requiresModelSourceApiKey } from '../accounts/sourceCapabilities';
 import type { KeepseekLanguage } from '../shared/i18n';
-import type { KeepseekModel, ProviderUsageLedgerRecord, UsageEvent, UsagePriceSnapshot } from '../shared/types';
+import type { KeepseekModel, ProviderCacheObservation, ProviderUsageLedgerRecord, UsageEvent, UsagePriceSnapshot } from '../shared/types';
 import type { DeepSeekChatRequestBody } from '../agent/deepseek/types';
 import { createProviderClient } from '../agent/providers/factory';
 import type { AnthropicMessagesRequestBody } from '../agent/providers/anthropicTypes';
@@ -12,6 +12,7 @@ import {
   createUsageLedgerRecords,
   createUsagePriceSnapshot
 } from '../agent/usageLedger';
+import { createProviderCacheObservation } from '../agent/cacheObservation';
 
 export const APPROVAL_REVIEW_MAX_OUTPUT_TOKENS = 512;
 export const APPROVAL_REVIEW_TIMEOUT_MS = 20_000;
@@ -70,6 +71,9 @@ export async function requestApprovalReviewText(input: {
   signal?: AbortSignal;
   onUsage?: (event: UsageEvent) => void;
   onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => void;
+  sessionId?: string;
+  taskId?: string;
+  runId?: string;
 }): Promise<string> {
   if (!input.sourceConfig.apiKey.trim() && requiresModelSourceApiKey(input.sourceConfig)) {
     throw new Error(input.language === 'en'
@@ -94,6 +98,29 @@ export async function requestApprovalReviewText(input: {
   });
   const fallbackSnapshot = createSnapshot(new Date().toISOString());
   const attemptSnapshots: UsagePriceSnapshot[] = [];
+  const body = buildApprovalReviewerProviderBody({
+    modelId: input.model.id,
+    provider: input.sourceConfig.provider,
+    systemPrompt: input.systemPrompt,
+    userPrompt: input.userPrompt
+  });
+  const attemptCacheObservations: ProviderCacheObservation[] = [];
+  const createObservation = (attemptIndex: number) => createProviderCacheObservation({
+    requestId,
+    attemptIndex,
+    source: 'reviewer',
+    sourceId: input.sourceConfig.sourceId,
+    provider: input.sourceConfig.provider,
+    baseUrl: input.sourceConfig.baseUrl,
+    body,
+    taskId: input.taskId,
+    runId: input.runId,
+    requestProtocolVersion: 1,
+    // Reviewer calls are isolated one-shot decisions, not append-only
+    // continuations of an earlier review. Only physical retries of this same
+    // logical request are comparable.
+    previous: attemptIndex > 0 ? attemptCacheObservations[0] : undefined
+  });
   try {
     const response = await createProviderClient(input.sourceConfig.provider).createModelResponse({
       apiKey: input.sourceConfig.apiKey,
@@ -102,31 +129,30 @@ export async function requestApprovalReviewText(input: {
       maxRequestRetries: 0,
       requestRetryBaseMs: 250
     }, {
-      body: buildApprovalReviewerProviderBody({
-        modelId: input.model.id,
-        provider: input.sourceConfig.provider,
-        systemPrompt: input.systemPrompt,
-        userPrompt: input.userPrompt
-      }),
+      body,
       language: input.language,
       signal: abort.signal,
       runDeadlineAt: deadlineAt,
       requestId,
       onAttempt: ({ attemptIndex, startedAt }) => {
         attemptSnapshots[attemptIndex] = createSnapshot(startedAt);
+        attemptCacheObservations[attemptIndex] = createObservation(attemptIndex);
       }
     });
     while (attemptSnapshots.length < (response.attemptCount ?? 1)) {
+      const attemptIndex = attemptSnapshots.length;
       attemptSnapshots.push(attemptSnapshots.length === 0
         ? fallbackSnapshot
         : createSnapshot(new Date().toISOString()));
+      attemptCacheObservations[attemptIndex] = createObservation(attemptIndex);
     }
     const usage = normalizeDeepSeekUsage(response.usage);
     const ledgerRecords = createUsageLedgerRecords({
       requestId,
       attempts: attemptSnapshots,
       usage,
-      source: 'reviewer'
+      source: 'reviewer',
+      cacheObservations: attemptCacheObservations
     });
     ledgerRecords.forEach((record) => input.onUsageLedgerRecord?.(record));
     if (!response.ok || !response.message?.content?.trim()) {

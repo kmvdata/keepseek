@@ -162,6 +162,133 @@ export interface UsagePriceSnapshot {
   readonly unavailableReason?: 'unsupported_source' | 'price_not_configured' | 'invalid_price';
 }
 
+export type CacheObservationReason =
+  | 'cold_start'
+  | 'append_only_prefix_preserved'
+  | 'retry_projection_unchanged'
+  | 'model_lane_changed'
+  | 'source_lane_changed'
+  | 'protocol_lane_changed'
+  | 'endpoint_lane_changed'
+  | 'system_prompt_changed'
+  | 'context_instructions_changed'
+  | 'tools_schema_changed'
+  | 'history_rewritten'
+  | 'history_compacted'
+  | 'context_epoch_rollover'
+  | 'protocol_migration'
+  | 'provider_context_too_long'
+  | 'stale_capacity_calibration'
+  | 'provider_cache_eviction_possible'
+  | 'provider_cache_metrics_unavailable'
+  | 'unexpected_local_prefix_break';
+
+export type CacheObservationReasonCategory = 'normal' | 'controlled_boundary' | 'provider' | 'local_anomaly';
+
+export interface CacheProjectionFingerprint {
+  hash: string;
+  byteLength: number;
+  tokensEstimate: number;
+}
+
+/**
+ * A content-free description of the exact provider-native projection used by
+ * one physical request. Hashes and sizes are local telemetry only; prompt
+ * bytes, credentials and endpoint URLs are deliberately excluded.
+ */
+export interface ProviderCacheObservation {
+  version: 1;
+  requestId: string;
+  attemptIndex: number;
+  source: UsageSource;
+  sourceId: string;
+  provider: string;
+  protocol: string;
+  /** SHA-256 identity of the normalized endpoint lane, never the URL itself. */
+  endpointLaneIdentity: string;
+  laneKey: string;
+  originalModelId: string;
+  canonicalModelIdentity: string;
+  taskId?: string;
+  runId?: string;
+  contextEpochIndex: number;
+  requestProtocolVersion: number;
+  system: CacheProjectionFingerprint;
+  contextInstructions: CacheProjectionFingerprint;
+  tools: CacheProjectionFingerprint;
+  providerHistory: CacheProjectionFingerprint;
+  newTail: CacheProjectionFingerprint;
+  cacheableProjection: CacheProjectionFingerprint;
+  estimatedPromptTokens: number;
+  previousPromptTokensEstimate?: number;
+  previousRequestIdentity?: string;
+  previousSameLaneRequestIdentity?: string;
+  prefixRelation: 'cold' | 'strict_prefix' | 'identical_retry' | 'broken';
+  inheritsPreviousCacheablePrefix: boolean;
+  firstChangedSegment?: 'lane' | 'system' | 'context_instructions' | 'tools' | 'provider_history';
+  commonPrefixTokensEstimate: number;
+  reusablePrefixTokensEstimate: number;
+  unavoidableNewTokensEstimate: number;
+  expectedRawHitRateCeiling?: number;
+  reuseEfficiencyRaw?: number;
+  eligibleForHealthTarget: boolean;
+  reason: CacheObservationReason;
+  reasonCategory: CacheObservationReasonCategory;
+  boundary: {
+    historyCompacted: boolean;
+    historyRewritten: boolean;
+    contextEpochRollover: boolean;
+    protocolMigration: boolean;
+  };
+}
+
+export interface CacheSourceMetrics {
+  source: UsageSource;
+  rawHitRate?: number;
+  expectedRawHitRateCeiling?: number;
+  reuseEfficiency?: number;
+  reuseEfficiencyRaw?: number;
+  cacheDataResponseCount: number;
+  cacheDataMissingResponseCount: number;
+  comparableRequestCount: number;
+  healthyReusableRequestCount: number;
+  anomalousReusableRequestCount: number;
+}
+
+export interface CacheLaneMetrics extends Omit<CacheSourceMetrics, 'source'> {
+  source: UsageSource;
+  sourceId: string;
+  provider: string;
+  protocol: string;
+  originalModelId: string;
+}
+
+export interface CacheDiagnosticsMetrics {
+  rawHitRate?: number;
+  mainAgentRawHitRate?: number;
+  expectedRawHitRateCeiling?: number;
+  mainAgentExpectedRawHitRateCeiling?: number;
+  reuseEfficiency?: number;
+  reuseEfficiencyRaw?: number;
+  mainAgentReuseEfficiency?: number;
+  mainAgentReuseEfficiencyRaw?: number;
+  cacheDataResponseCount: number;
+  cacheDataMissingResponseCount: number;
+  coldStartRequestCount: number;
+  controlledBoundaryRequestCount: number;
+  comparableRequestCount: number;
+  healthyReusableRequestCount: number;
+  anomalousReusableRequestCount: number;
+  providerCacheEvictionPossibleCount: number;
+  estimatedReusableTokensNotHit: number;
+  estimatedLocalBoundaryLossTokens: number;
+  estimatedLocalBoundaryExtraCostByCurrency: Record<string, number>;
+  lastAnomalyReason?: CacheObservationReason;
+  bySource: CacheSourceMetrics[];
+  byLane: CacheLaneMetrics[];
+  incomplete: boolean;
+}
+
 export interface ProviderUsageLedgerRecord {
   version: 1;
   requestId: string;
@@ -182,6 +309,7 @@ export interface ProviderUsageLedgerRecord {
   currency: string;
   pricingStatus: UsagePricingStatus;
   unpricedReason?: string;
+  cacheObservation?: ProviderCacheObservation;
 }
 
 export interface ProviderUsageLedger {
@@ -273,6 +401,7 @@ export interface SessionUsageStats extends Usage {
   attemptStatsIncomplete?: boolean;
   updatedAt?: string;
   bySource?: Partial<Record<UsageSource, UsageSourceStats>>;
+  cacheDiagnostics?: CacheDiagnosticsMetrics;
 }
 
 export type SubagentTerminalStatus = 'completed' | 'failed' | 'stopped';
@@ -745,6 +874,14 @@ export interface ChatSession {
   contextUsage?: ContextUsageEstimate;
   usageStats?: SessionUsageStats;
   usageLedger?: ProviderUsageLedger;
+  usageLedgerRef?: {
+    version: 2;
+    sessionId: string;
+    migratedInlineVersion?: 1;
+    legacyAggregate: boolean;
+    incomplete: boolean;
+    damagedBucketCount?: number;
+  };
   lastTurnUsage?: TurnUsageStats;
   subagentUsageStats?: SubagentSessionUsageStats;
   balance?: ModelSourceBalanceState;
@@ -1138,6 +1275,7 @@ export interface RunDetailsSummary {
     learnedEffectiveWindowTokens: number;
     reusablePrefixTokensEstimate?: number;
     estimatedCacheResetTokens?: number;
+    necessity?: 'necessary' | 'controlled_policy';
     summaryKind: 'model' | 'host_fallback';
   }>;
   capacityAdjustments?: Array<{
@@ -1159,6 +1297,12 @@ export interface RunDetailsCacheSummary {
   providerDataStatus: UsageCacheDataStatus;
   cacheLaneChanged: boolean;
   cacheMissPossibleReasons: string[];
+  expectedRawHitRateCeiling?: number;
+  reuseEfficiency?: number;
+  healthyReusableRequestCount?: number;
+  anomalousReusableRequestCount?: number;
+  controlledBoundaryRequestCount?: number;
+  providerCacheEvictionPossibleCount?: number;
 }
 
 export interface RunDetailsHistorySummaryProvenance {
@@ -1462,6 +1606,11 @@ export interface AgentRunCallbacks {
   onUsageEstimate?: (usage: ContextUsageEstimate) => void;
   onUsage?: (event: UsageEvent) => void;
   onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => void;
+  getPreviousCacheObservation?: (input: {
+    sessionId: string;
+    source: UsageSource;
+    taskId?: string;
+  }) => Promise<ProviderCacheObservation | undefined>;
   onSubagentRunSummary?: (summary: SubagentRunUsageSummary) => void;
   onSubagentHandoffEstimate?: (estimate: SubagentHandoffEstimate) => void;
   onPromptCacheDiagnostics?: (diagnostics: PromptCacheDiagnostics) => void;

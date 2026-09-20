@@ -1,5 +1,6 @@
 import type { DeepSeekUsage } from './deepseek/types';
 import type {
+  CacheDiagnosticsMetrics,
   ModelSourceBalanceState,
   PromptCacheDiagnostics,
   SessionUsageStats,
@@ -10,9 +11,13 @@ import type {
   UsageModelGroupStats,
   UsagePricingStatus,
   UsageSource,
-  UsageSourceStats
+  UsageSourceStats,
+  ProviderUsageLedgerRecord
 } from '../shared/types';
-import type { UsageLedgerSummary } from './usageLedger';
+import { summarizeUsageLedger, type UsageLedgerSummary } from './usageLedger';
+import { getPricingPeriod } from './usagePricingPeriod';
+export { getPricingPeriod } from './usagePricingPeriod';
+export type { PricingPeriod } from './usagePricingPeriod';
 
 const DEFAULT_CURRENCY = '¥';
 
@@ -240,8 +245,41 @@ export function applyUsageLedgerSummaryToSessionStats(
     ...stats,
     providerAttemptCount: summary.providerAttemptCount,
     usageResponseCount: summary.usageResponseCount,
-    attemptStatsIncomplete: summary.incomplete || summary.legacyAggregate
+    attemptStatsIncomplete: summary.incomplete || summary.legacyAggregate,
+    cacheDiagnostics: summary.cacheDiagnostics
   };
+}
+
+/** Deterministic reconstruction for v2 ledger-backed sessions. */
+export function rebuildSessionUsageStatsFromLedger(
+  records: readonly ProviderUsageLedgerRecord[]
+): SessionUsageStats | undefined {
+  let stats: SessionUsageStats | undefined;
+  for (const record of records) {
+    if (record.kind !== 'usage_response' || !record.usage) continue;
+    stats = addUsageEventToSessionStats(stats, createUsageEvent({
+      usage: record.usage,
+      cost: record.cost,
+      currency: record.currency,
+      sourceId: record.sourceId,
+      modelId: record.originalModelId,
+      provider: record.provider,
+      protocol: record.protocol,
+      pricingStatus: record.pricingStatus,
+      unpricedReason: record.unpricedReason,
+      ledgerRecorded: true,
+      providerAttemptCount: 1,
+      requestId: record.requestId,
+      source: record.source
+    }), record.requestStartedAt);
+  }
+  const ledger = {
+    version: 1 as const,
+    records: [...records],
+    legacyAggregate: false,
+    incomplete: false
+  };
+  return applyUsageLedgerSummaryToSessionStats(stats, summarizeUsageLedger(ledger));
 }
 
 export function addTurnUsageToSessionStats(
@@ -290,27 +328,6 @@ export function addTurnUsageToSessionStats(
     updatedAt: now,
     bySource: mergeUsageSourceStats(base.bySource, turn.bySource)
   };
-}
-
-export type PricingPeriod = 'offPeak' | 'peak';
-
-/**
- * DeepSeek 峰谷计价时段判定(北京时间)。
- *
- * 高峰时段 = 北京时间周一至周五 9:00-12:00 与 14:00-18:00;
- * 工作日其余时间及周六、周日全天为空闲时段。把时间整体加 8 小时后读取 UTC
- * 星期与小时,得到等价于北京时钟的值,不依赖运行环境时区。
- */
-export function getPricingPeriod(date: Date = new Date()): PricingPeriod {
-  const beijingTime = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-  const beijingDay = beijingTime.getUTCDay();
-  const beijingHour = beijingTime.getUTCHours();
-  const isWeekday = beijingDay >= 1 && beijingDay <= 5;
-  const isPeak = isWeekday && (
-    (beijingHour >= 9 && beijingHour < 12) ||
-    (beijingHour >= 14 && beijingHour < 18)
-  );
-  return isPeak ? 'peak' : 'offPeak';
 }
 
 /** 高峰档字段未配置时回退到空闲档。 */
@@ -374,8 +391,9 @@ export interface CacheMissReasonInput {
  * 前缀缓存失效归因。
  *
  * - system / tools schema 指纹变化是从该点起整段前缀失效的直接证据，无条件归因（不依赖命中率门槛）。
- * - history 段在 append-only 投影下每轮必然追加新消息，historyPrefixHash 逐轮变化是预期行为；
- *   只有命中率显著下降时才把 history 变化或 provider 缓存逐出列为候选原因。
+ * - history 段在 append-only 投影下每轮必然追加新消息，historyPrefixHash 逐轮变化是预期行为。
+ * - 历史改写和 Provider 逐出只能由逐请求账本中基于真实原生投影的字节前缀证明得出；
+ *   这个旧聚合兼容入口不根据整段 hash 或命中率变化猜测。
  */
 export function getCacheMissPossibleReasons(input: CacheMissReasonInput): string[] {
   const reasons: string[] = [];
@@ -389,13 +407,13 @@ export function getCacheMissPossibleReasons(input: CacheMissReasonInput): string
     reasons.push('tools_schema_changed');
   }
   if (previous?.modelId && previous.modelId !== current.modelId) {
-    reasons.push('model_changed');
+    reasons.push('model_lane_changed');
   }
   if (previous?.sourceId && previous.sourceId !== current.sourceId) {
-    reasons.push('source_changed');
+    reasons.push('source_lane_changed');
   }
   if (previous?.protocol && previous.protocol !== current.protocol) {
-    reasons.push('protocol_changed');
+    reasons.push('protocol_lane_changed');
   }
   if (previous?.baseUrl && previous.baseUrl !== current.baseUrl) {
     reasons.push('endpoint_lane_changed');
@@ -404,24 +422,12 @@ export function getCacheMissPossibleReasons(input: CacheMissReasonInput): string
     reasons.push('history_compacted');
   }
   if (current.historyRewriteReason) {
-    reasons.push(`history_rewrite:${current.historyRewriteReason}`);
+    reasons.push('history_rewritten');
   }
-
-  const previousHitRate = input.previousTurnUsage ? calculateCacheHitRate(input.previousTurnUsage) : undefined;
-  const currentHitRate = input.currentTurnUsage ? calculateCacheHitRate(input.currentTurnUsage) : undefined;
-  if (
-    previousHitRate !== undefined &&
-    currentHitRate !== undefined &&
-    previousHitRate >= 60 &&
-    previousHitRate - currentHitRate >= 30
-  ) {
-    if (previous?.historyPrefixHash && previous.historyPrefixHash !== current.historyPrefixHash) {
-      reasons.push('history_prefix_changed');
-    }
-    if (!reasons.length) {
-      reasons.push('provider_cache_eviction_possible');
-    }
-  }
+  // Whole-history hashes change on every healthy append-only turn. Provider
+  // eviction and history rewrites are now diagnosed only by the request-ledger
+  // observation, which proves the previous byte prefix against the actual
+  // provider-native projection.
   return reasons;
 }
 
@@ -462,7 +468,8 @@ export function normalizeSessionUsageStatsValue(value: unknown): SessionUsageSta
       ? value.attemptStatsIncomplete
       : value.providerAttemptCount === undefined || value.usageResponseCount === undefined,
     updatedAt: normalizeOptionalString(value.updatedAt),
-    bySource: normalizeUsageSourceStatsMap(value.bySource, getLegacySourceCurrency(value.costByCurrency, value.currency))
+    bySource: normalizeUsageSourceStatsMap(value.bySource, getLegacySourceCurrency(value.costByCurrency, value.currency)),
+    cacheDiagnostics: normalizeCacheDiagnosticsMetrics(value.cacheDiagnostics)
   };
   return hasAnyUsage(stats) || stats.requestCount > 0 || (stats.providerAttemptCount ?? 0) > 0
     || stats.sessionCost > 0 ? stats : undefined;
@@ -506,6 +513,93 @@ export function normalizeTurnUsageStatsValue(value: unknown): TurnUsageStats | u
   };
   return hasAnyUsage(stats) || stats.requestCount > 0 || (stats.providerAttemptCount ?? 0) > 0
     || stats.cost > 0 ? stats : undefined;
+}
+
+function normalizeCacheDiagnosticsMetrics(value: unknown): CacheDiagnosticsMetrics | undefined {
+  if (!isRecord(value)) return undefined;
+  const percent = (input: unknown): number | undefined => {
+    const number = Number(input);
+    return Number.isFinite(number) && number >= 0 ? number : undefined;
+  };
+  const count = (input: unknown): number => readNonNegativeInteger(input);
+  const bySource = Array.isArray(value.bySource) ? value.bySource.flatMap((item) => {
+    if (!isRecord(item) || typeof item.source !== 'string') return [];
+    const source = USAGE_SOURCES.includes(item.source as UsageSource) ? item.source as UsageSource : 'executor';
+    return [{
+      source,
+      ...(percent(item.rawHitRate) === undefined ? {} : { rawHitRate: percent(item.rawHitRate) }),
+      ...(percent(item.expectedRawHitRateCeiling) === undefined ? {} : {
+        expectedRawHitRateCeiling: percent(item.expectedRawHitRateCeiling)
+      }),
+      ...(percent(item.reuseEfficiency) === undefined ? {} : { reuseEfficiency: percent(item.reuseEfficiency) }),
+      ...(percent(item.reuseEfficiencyRaw) === undefined ? {} : { reuseEfficiencyRaw: percent(item.reuseEfficiencyRaw) }),
+      cacheDataResponseCount: count(item.cacheDataResponseCount),
+      cacheDataMissingResponseCount: count(item.cacheDataMissingResponseCount),
+      comparableRequestCount: count(item.comparableRequestCount),
+      healthyReusableRequestCount: count(item.healthyReusableRequestCount),
+      anomalousReusableRequestCount: count(item.anomalousReusableRequestCount)
+    }];
+  }) : [];
+  const byLane = Array.isArray(value.byLane) ? value.byLane.flatMap((item) => {
+    if (!isRecord(item) || typeof item.source !== 'string' || typeof item.sourceId !== 'string'
+      || typeof item.provider !== 'string' || typeof item.protocol !== 'string'
+      || typeof item.originalModelId !== 'string') return [];
+    const source = USAGE_SOURCES.includes(item.source as UsageSource) ? item.source as UsageSource : 'executor';
+    return [{
+      source,
+      sourceId: item.sourceId,
+      provider: item.provider,
+      protocol: item.protocol,
+      originalModelId: item.originalModelId,
+      ...(percent(item.rawHitRate) === undefined ? {} : { rawHitRate: percent(item.rawHitRate) }),
+      ...(percent(item.expectedRawHitRateCeiling) === undefined ? {} : {
+        expectedRawHitRateCeiling: percent(item.expectedRawHitRateCeiling)
+      }),
+      ...(percent(item.reuseEfficiency) === undefined ? {} : { reuseEfficiency: percent(item.reuseEfficiency) }),
+      ...(percent(item.reuseEfficiencyRaw) === undefined ? {} : { reuseEfficiencyRaw: percent(item.reuseEfficiencyRaw) }),
+      cacheDataResponseCount: count(item.cacheDataResponseCount),
+      cacheDataMissingResponseCount: count(item.cacheDataMissingResponseCount),
+      comparableRequestCount: count(item.comparableRequestCount),
+      healthyReusableRequestCount: count(item.healthyReusableRequestCount),
+      anomalousReusableRequestCount: count(item.anomalousReusableRequestCount)
+    }];
+  }) : [];
+  return {
+    ...(percent(value.rawHitRate) === undefined ? {} : { rawHitRate: percent(value.rawHitRate) }),
+    ...(percent(value.mainAgentRawHitRate) === undefined ? {} : { mainAgentRawHitRate: percent(value.mainAgentRawHitRate) }),
+    ...(percent(value.expectedRawHitRateCeiling) === undefined ? {} : {
+      expectedRawHitRateCeiling: percent(value.expectedRawHitRateCeiling)
+    }),
+    ...(percent(value.mainAgentExpectedRawHitRateCeiling) === undefined ? {} : {
+      mainAgentExpectedRawHitRateCeiling: percent(value.mainAgentExpectedRawHitRateCeiling)
+    }),
+    ...(percent(value.reuseEfficiency) === undefined ? {} : { reuseEfficiency: percent(value.reuseEfficiency) }),
+    ...(percent(value.reuseEfficiencyRaw) === undefined ? {} : { reuseEfficiencyRaw: percent(value.reuseEfficiencyRaw) }),
+    ...(percent(value.mainAgentReuseEfficiency) === undefined ? {} : {
+      mainAgentReuseEfficiency: percent(value.mainAgentReuseEfficiency)
+    }),
+    ...(percent(value.mainAgentReuseEfficiencyRaw) === undefined ? {} : {
+      mainAgentReuseEfficiencyRaw: percent(value.mainAgentReuseEfficiencyRaw)
+    }),
+    cacheDataResponseCount: count(value.cacheDataResponseCount),
+    cacheDataMissingResponseCount: count(value.cacheDataMissingResponseCount),
+    coldStartRequestCount: count(value.coldStartRequestCount),
+    controlledBoundaryRequestCount: count(value.controlledBoundaryRequestCount),
+    comparableRequestCount: count(value.comparableRequestCount),
+    healthyReusableRequestCount: count(value.healthyReusableRequestCount),
+    anomalousReusableRequestCount: count(value.anomalousReusableRequestCount),
+    providerCacheEvictionPossibleCount: count(value.providerCacheEvictionPossibleCount),
+    estimatedReusableTokensNotHit: count(value.estimatedReusableTokensNotHit),
+    estimatedLocalBoundaryLossTokens: count(value.estimatedLocalBoundaryLossTokens),
+    estimatedLocalBoundaryExtraCostByCurrency: normalizeCostByCurrency(
+      value.estimatedLocalBoundaryExtraCostByCurrency, undefined, undefined
+    ) ?? {},
+    ...(typeof value.lastAnomalyReason === 'string'
+      ? { lastAnomalyReason: value.lastAnomalyReason as CacheDiagnosticsMetrics['lastAnomalyReason'] } : {}),
+    bySource,
+    byLane,
+    incomplete: value.incomplete === true
+  };
 }
 
 export function normalizeBalanceStateValue(value: unknown): ModelSourceBalanceState | undefined {

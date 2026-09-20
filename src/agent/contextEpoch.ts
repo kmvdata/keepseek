@@ -14,9 +14,32 @@ export interface ContextEpochRolloverRecord {
   actualPromptTokens?: number;
   declaredWindowTokens: number;
   learnedEffectiveWindowTokens: number;
+  afterEstimatedPromptTokens?: number;
+  reusablePrefixTokensEstimate?: number;
+  estimatedCacheResetTokens?: number;
+  necessity?: 'necessary' | 'controlled_policy';
   summaryKind: 'model' | 'host_fallback';
   archiveName: string;
   seedHash: string;
+}
+
+export const SOFT_CONTEXT_PRESSURE_HYSTERESIS_RATIO = 0.03;
+export const SOFT_CONTEXT_PRESSURE_MIN_TURNS_AFTER_ROLLOVER = 2;
+
+export function shouldRolloverForSoftContextPressure(input: {
+  estimatedPromptTokens: number;
+  learnedEffectiveWindowTokens: number;
+  triggerRatio: number;
+  epochIndex: number;
+  turnsInEpoch: number;
+}): boolean {
+  if (!(input.learnedEffectiveWindowTokens > 0)) return false;
+  const hysteresis = input.epochIndex > 0 ? SOFT_CONTEXT_PRESSURE_HYSTERESIS_RATIO : 0;
+  if (input.epochIndex > 0 && input.turnsInEpoch < SOFT_CONTEXT_PRESSURE_MIN_TURNS_AFTER_ROLLOVER) {
+    return false;
+  }
+  return input.estimatedPromptTokens >= input.learnedEffectiveWindowTokens
+    * Math.min(0.98, Math.max(0, input.triggerRatio) + hysteresis);
 }
 
 export interface ToolWorkFingerprint {

@@ -81,6 +81,9 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
           userPrompt: serialized,
           language: request.responseLanguage,
           signal,
+          sessionId: request.sessionId,
+          taskId: request.rootTaskId,
+          runId: request.agentRunId,
           onUsage: this.options.onUsage,
           onUsageLedgerRecord: this.options.onUsageLedgerRecord
         });

@@ -188,12 +188,69 @@ export const usageFormattersFragment: WebviewFragment = {
           legacyUnattributed: value.legacyUnattributed === true,
           attemptStatsIncomplete: value.attemptStatsIncomplete === true
             || value.providerAttemptCount === undefined || value.usageResponseCount === undefined,
+          cacheDiagnostics: normalizeCacheDiagnosticsForView(value.cacheDiagnostics),
           byModelSource: []
         };
         normalized.byModelSource = Array.isArray(value.byModelSource)
           ? value.byModelSource.map(function(group) { return normalizeUsageStats(group, 'cost'); }).filter(Boolean)
           : [];
         return normalized;
+      }
+
+      function normalizeCacheDiagnosticsForView(value) {
+        if (!value || typeof value !== 'object') { return null; }
+        function metricList(items, includeLane) {
+          return Array.isArray(items) ? items.filter(function(item) {
+            return item && typeof item === 'object';
+          }).map(function(item) {
+            var result = {
+              source: typeof item.source === 'string' ? item.source : 'executor',
+              rawHitRate: readOptionalMetricNumber(item.rawHitRate),
+              expectedRawHitRateCeiling: readOptionalMetricNumber(item.expectedRawHitRateCeiling),
+              reuseEfficiency: readOptionalMetricNumber(item.reuseEfficiency),
+              cacheDataResponseCount: readNonNegativeNumber(item.cacheDataResponseCount, 0),
+              cacheDataMissingResponseCount: readNonNegativeNumber(item.cacheDataMissingResponseCount, 0),
+              comparableRequestCount: readNonNegativeNumber(item.comparableRequestCount, 0),
+              healthyReusableRequestCount: readNonNegativeNumber(item.healthyReusableRequestCount, 0),
+              anomalousReusableRequestCount: readNonNegativeNumber(item.anomalousReusableRequestCount, 0)
+            };
+            if (includeLane) {
+              result.sourceId = typeof item.sourceId === 'string' ? item.sourceId : '';
+              result.provider = typeof item.provider === 'string' ? item.provider : '';
+              result.protocol = typeof item.protocol === 'string' ? item.protocol : '';
+              result.originalModelId = typeof item.originalModelId === 'string' ? item.originalModelId : '';
+            }
+            return result;
+          }) : [];
+        }
+        return {
+          rawHitRate: readOptionalMetricNumber(value.rawHitRate),
+          mainAgentRawHitRate: readOptionalMetricNumber(value.mainAgentRawHitRate),
+          expectedRawHitRateCeiling: readOptionalMetricNumber(value.expectedRawHitRateCeiling),
+          mainAgentExpectedRawHitRateCeiling: readOptionalMetricNumber(value.mainAgentExpectedRawHitRateCeiling),
+          reuseEfficiency: readOptionalMetricNumber(value.reuseEfficiency),
+          mainAgentReuseEfficiency: readOptionalMetricNumber(value.mainAgentReuseEfficiency),
+          cacheDataResponseCount: readNonNegativeNumber(value.cacheDataResponseCount, 0),
+          cacheDataMissingResponseCount: readNonNegativeNumber(value.cacheDataMissingResponseCount, 0),
+          coldStartRequestCount: readNonNegativeNumber(value.coldStartRequestCount, 0),
+          controlledBoundaryRequestCount: readNonNegativeNumber(value.controlledBoundaryRequestCount, 0),
+          comparableRequestCount: readNonNegativeNumber(value.comparableRequestCount, 0),
+          healthyReusableRequestCount: readNonNegativeNumber(value.healthyReusableRequestCount, 0),
+          anomalousReusableRequestCount: readNonNegativeNumber(value.anomalousReusableRequestCount, 0),
+          providerCacheEvictionPossibleCount: readNonNegativeNumber(value.providerCacheEvictionPossibleCount, 0),
+          estimatedReusableTokensNotHit: readNonNegativeNumber(value.estimatedReusableTokensNotHit, 0),
+          estimatedLocalBoundaryLossTokens: readNonNegativeNumber(value.estimatedLocalBoundaryLossTokens, 0),
+          estimatedLocalBoundaryExtraCostByCurrency: normalizeCostByCurrency(value.estimatedLocalBoundaryExtraCostByCurrency),
+          lastAnomalyReason: typeof value.lastAnomalyReason === 'string' ? value.lastAnomalyReason : '',
+          bySource: metricList(value.bySource, false),
+          byLane: metricList(value.byLane, true),
+          incomplete: value.incomplete === true
+        };
+      }
+
+      function readOptionalMetricNumber(value) {
+        var number = Number(value);
+        return value === null || value === undefined || value === '' || !Number.isFinite(number) ? null : number;
       }
 
       function normalizeCostByCurrency(value) {

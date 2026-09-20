@@ -208,6 +208,7 @@ export const usageRenderFragment: WebviewFragment = {
         var selected = details.session;
         usageDetailsBody.append(createContextWindowSection(metrics));
         usageDetailsBody.append(createSessionMetricsSection(metrics, selected));
+        usageDetailsBody.append(createCacheDiagnosticsSection(metrics));
         usageDetailsBody.append(createUsageAnalysisSection(selected, usageGroups, sessionUsage, details.subagents));
         usageDetailsBody.scrollTop = scrollTop;
         if (focusedControl) {
@@ -310,8 +311,21 @@ export const usageRenderFragment: WebviewFragment = {
         var cost = formatAccountedCosts(selected.total);
         var latestRunState = getLatestRunState();
         var hasSessionUsage = hasUsageData(selected.total);
+        var cacheDiagnostics = metrics.sessionUsageStats && metrics.sessionUsageStats.cacheDiagnostics;
         var metricsList = [
-          ['usageAverageHit', formatActualCacheRateOnly(selected.total), 'is-positive'],
+          ['usageMainRawHitRate', cacheDiagnostics && Number.isFinite(cacheDiagnostics.mainAgentRawHitRate)
+            ? formatMetricPercent(cacheDiagnostics.mainAgentRawHitRate) : t('usageMetricCacheUnavailableValue'), 'is-positive'],
+          ['usageAllProviderRawHitRate', cacheDiagnostics && Number.isFinite(cacheDiagnostics.rawHitRate)
+            ? formatMetricPercent(cacheDiagnostics.rawHitRate) : formatActualCacheRateOnly(selected.total), 'is-positive'],
+          ['usageMainReuseEfficiency', cacheDiagnostics && Number.isFinite(cacheDiagnostics.mainAgentReuseEfficiency)
+            ? formatMetricPercent(cacheDiagnostics.mainAgentReuseEfficiency) : t('usageMetricCacheUnavailableValue'), 'is-positive'],
+          ['usageExpectedHitCeiling', cacheDiagnostics && Number.isFinite(cacheDiagnostics.mainAgentExpectedRawHitRateCeiling)
+            ? formatMetricPercent(cacheDiagnostics.mainAgentExpectedRawHitRateCeiling) : t('usageMetricCacheUnavailableValue'), ''],
+          ['usageCacheDataCoverageRate', cacheDiagnostics
+            && (cacheDiagnostics.cacheDataResponseCount + cacheDiagnostics.cacheDataMissingResponseCount) > 0
+            ? formatMetricPercent(100 * cacheDiagnostics.cacheDataResponseCount
+              / (cacheDiagnostics.cacheDataResponseCount + cacheDiagnostics.cacheDataMissingResponseCount))
+            : t('usageMetricCacheUnavailableValue'), ''],
           ['usageCostLabel', cost.available ? cost.amountText
             : formatUsageAvailabilityValue(selected.total, 'usageMetricCostUnavailableValue'), ''],
           ['usageEffectiveRuntime', latestRunState ? formatUsageRuntime(latestRunState.usedMs)
@@ -353,6 +367,69 @@ export const usageRenderFragment: WebviewFragment = {
           notes.append(usageNode('p', '', t('usageNoProviderData')));
         }
         section.append(notes);
+        return section;
+      }
+
+      function createCacheDiagnosticsSection(metrics) {
+        var section = createUsageSection('usageCacheDiagnosticsTitle');
+        var diagnostics = metrics.sessionUsageStats && metrics.sessionUsageStats.cacheDiagnostics;
+        if (!diagnostics) {
+          section.append(usageNode('p', 'usage-note', t('usageCacheDiagnosticsUnavailable')));
+          return section;
+        }
+        var grid = usageNode('div', 'usage-session-metrics-grid');
+        [
+          ['usageHealthyReusableRequests', diagnostics.healthyReusableRequestCount],
+          ['usageAnomalousReusableRequests', diagnostics.anomalousReusableRequestCount],
+          ['usageColdStarts', diagnostics.coldStartRequestCount],
+          ['usageControlledBoundaries', diagnostics.controlledBoundaryRequestCount],
+          ['usageProviderEvictionPossible', diagnostics.providerCacheEvictionPossibleCount],
+          ['usageReusableTokensNotHit', diagnostics.estimatedReusableTokensNotHit]
+        ].forEach(function(item) {
+          var metric = usageNode('div', 'usage-session-metric');
+          metric.append(usageNode('span', '', t(item[0])), usageNode('strong', '', formatMetricInteger(item[1])));
+          grid.append(metric);
+        });
+        section.append(grid);
+        section.append(usageNode('p', 'usage-note', t('usageCacheCoverage', {
+          reported: diagnostics.cacheDataResponseCount,
+          missing: diagnostics.cacheDataMissingResponseCount
+        })));
+        if (diagnostics.lastAnomalyReason) {
+          section.append(usageNode('p', 'usage-warning', t('usageLastCacheAnomaly') + ' '
+            + formatCacheReason(diagnostics.lastAnomalyReason)));
+        }
+        var boundaryCosts = diagnostics.estimatedLocalBoundaryExtraCostByCurrency
+          && typeof diagnostics.estimatedLocalBoundaryExtraCostByCurrency === 'object'
+          ? diagnostics.estimatedLocalBoundaryExtraCostByCurrency : {};
+        var boundaryCostText = Object.keys(boundaryCosts).filter(function(currency) {
+          return Number.isFinite(Number(boundaryCosts[currency])) && Number(boundaryCosts[currency]) > 0;
+        }).map(function(currency) {
+          return formatMetricCost(boundaryCosts[currency], currency, true, false);
+        }).join(' · ');
+        if (boundaryCostText) {
+          section.append(usageNode('p', 'usage-warning', t('usageEstimatedLocalBoundaryExtraCost', {
+            cost: boundaryCostText
+          })));
+        }
+        if (diagnostics.incomplete) {
+          section.append(usageNode('p', 'usage-note', t('usageCacheDiagnosticsIncomplete')));
+        }
+        var lanes = Array.isArray(diagnostics.byLane) ? diagnostics.byLane : [];
+        if (lanes.length) {
+          var list = usageNode('div', 'usage-analysis-list');
+          lanes.forEach(function(lane) {
+            var card = usageNode('div', 'usage-analysis-card usage-analysis-card-body');
+            card.append(usageNode('strong', '', [lane.source, lane.provider, lane.protocol, lane.originalModelId]
+              .filter(Boolean).join(' / ')));
+            card.append(usageNode('p', '', t('usageRawHitAndReuse', {
+              raw: Number.isFinite(lane.rawHitRate) ? formatMetricPercent(lane.rawHitRate) : t('usageMetricCacheUnavailableValue'),
+              reuse: Number.isFinite(lane.reuseEfficiency) ? formatMetricPercent(lane.reuseEfficiency) : t('usageMetricCacheUnavailableValue')
+            })));
+            list.append(card);
+          });
+          section.append(list);
+        }
         return section;
       }
 

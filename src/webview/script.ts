@@ -4005,6 +4005,12 @@ export function getScript(): string {
           if (typeof details.cache.hitRate === 'number') {
             cacheLines.push(t('runDetailsCacheRate', { percent: Number(details.cache.hitRate).toFixed(2) + '%' }));
           }
+          if (typeof details.cache.expectedRawHitRateCeiling === 'number') {
+            cacheLines.push(t('usageExpectedHitCeiling') + ': ' + Number(details.cache.expectedRawHitRateCeiling).toFixed(2) + '%');
+          }
+          if (typeof details.cache.reuseEfficiency === 'number') {
+            cacheLines.push(t('usageMainReuseEfficiency') + ': ' + Number(details.cache.reuseEfficiency).toFixed(2) + '%');
+          }
         }
         if (details.cache.cacheLaneChanged) {
           cacheLines.push(t('runDetailsCacheLaneChanged'));

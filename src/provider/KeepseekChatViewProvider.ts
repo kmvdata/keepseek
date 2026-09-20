@@ -122,12 +122,15 @@ import {
   addTurnUsageToSessionStats,
   applyUsageLedgerSummaryToSessionStats,
   calculateCacheHitRate,
-  getCacheMissPossibleReasons
+  getCacheMissPossibleReasons,
+  rebuildSessionUsageStatsFromLedger
 } from '../agent/usageStats';
 import {
   appendUsageLedgerRecord,
+  normalizeUsageLedgerValue,
   summarizeUsageLedger
 } from '../agent/usageLedger';
+import { UsageLedgerStore } from '../agent/usageLedgerStore';
 import {
   addSubagentHandoffEstimate,
   createUsageDetailsViewModel,
@@ -298,6 +301,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private pendingPostStateOmitMessages = true;
   private readonly contextUsageCache = new ContextUsageEstimateCache<ContextUsageEstimate>();
   private readonly contextFileFingerprints = new WeakMap<ContextFile, string>();
+  private readonly usageLedgerStore: UsageLedgerStore;
+  private readonly usageLedgerFlushes = new Map<string, Promise<void>>();
+  private readonly latestCacheObservationByScope = new Map<string, import('../shared/types').ProviderCacheObservation>();
   private startupStatePostCount = 0;
   private firstLightweightStateSent = false;
 
@@ -310,6 +316,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     private readonly sessionInitialization: Promise<void> = Promise.resolve(),
     private readonly startupTrace?: StartupPerformanceTrace
   ) {
+    this.usageLedgerStore = new UsageLedgerStore(this.globalStorageUri);
     this.traceLogService = new InteractionTraceLogService(this.globalStorageUri);
     this.skillStore = new SkillStore(skillState);
     this.sourceStore = new ModelSourceStore(this.globalStorageUri);
@@ -1448,14 +1455,93 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     session: ChatSession,
     record: import('../shared/types').ProviderUsageLedgerRecord
   ): void {
-    const legacyAggregate = !session.usageLedger && (session.usageStats?.requestCount ?? 0) > 0;
+    const legacyAggregate = !session.usageLedgerRef && !session.usageLedger
+      && (session.usageStats?.requestCount ?? 0) > 0;
     session.usageLedger = appendUsageLedgerRecord(session.usageLedger, record, legacyAggregate);
+    if (record.cacheObservation && record.kind === 'usage_response') {
+      this.latestCacheObservationByScope.set(
+        this.cacheObservationScopeKey(session.id, record.source, record.cacheObservation.taskId),
+        record.cacheObservation
+      );
+    }
     session.usageStats = applyUsageLedgerSummaryToSessionStats(
       session.usageStats,
       summarizeUsageLedger(session.usageLedger)
     );
     session.updatedAt = new Date().toISOString();
     void this.sessionStore.persist();
+    this.queueUsageLedgerFlush(session);
+  }
+
+  private queueUsageLedgerFlush(session: ChatSession): void {
+    const previous = this.usageLedgerFlushes.get(session.id) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(async () => {
+      const snapshot = normalizeUsageLedgerValue(session.usageLedger);
+      if (snapshot?.records.length) await this.usageLedgerStore.appendMany(session.id, snapshot.records);
+      const rebuilt = await this.usageLedgerStore.rebuild(session.id);
+      for (const storedRecord of rebuilt.ledger.records) {
+        if (storedRecord.kind === 'usage_response' && storedRecord.cacheObservation) {
+          this.latestCacheObservationByScope.set(
+            this.cacheObservationScopeKey(session.id, storedRecord.source, storedRecord.cacheObservation.taskId),
+            storedRecord.cacheObservation
+          );
+        }
+      }
+      if (!rebuilt.ledger.records.length && !snapshot?.records.length && !session.usageLedgerRef) return;
+      session.usageLedgerRef = {
+        version: 2,
+        sessionId: session.id,
+        migratedInlineVersion: snapshot?.records.length ? 1 : session.usageLedgerRef?.migratedInlineVersion,
+        legacyAggregate: snapshot?.legacyAggregate ?? session.usageLedgerRef?.legacyAggregate
+          ?? Boolean(session.usageStats?.legacyUnattributed),
+        incomplete: Boolean(snapshot?.incomplete || session.usageLedgerRef?.incomplete
+          || rebuilt.ledger.incomplete),
+        ...(rebuilt.damagedBucketCount ? { damagedBucketCount: rebuilt.damagedBucketCount } : {})
+      };
+      session.usageStats = session.usageLedgerRef.legacyAggregate
+        ? applyUsageLedgerSummaryToSessionStats(session.usageStats, {
+            ...rebuilt.summary,
+            legacyAggregate: true,
+            incomplete: true
+          })
+        : rebuildSessionUsageStatsFromLedger(rebuilt.ledger.records);
+      if (snapshot?.records.length) {
+        const flushed = new Set(snapshot.records.map((record) => `${record.requestId}\u0000${record.attemptIndex}`));
+        const current = normalizeUsageLedgerValue(session.usageLedger);
+        const remaining = current?.records.filter((record) => !flushed.has(`${record.requestId}\u0000${record.attemptIndex}`)) ?? [];
+        session.usageLedger = remaining.length ? {
+          version: 1,
+          records: remaining,
+          legacyAggregate: session.usageLedgerRef.legacyAggregate,
+          incomplete: session.usageLedgerRef.incomplete
+        } : undefined;
+      }
+      session.updatedAt = new Date().toISOString();
+      await this.sessionStore.persist();
+    }).catch((error) => {
+      // Inline records remain the crash-safe migration source until the v2
+      // store confirms an atomic bucket write.
+      console.warn('[KeepSeek] Usage ledger flush failed; inline records retained.', error);
+    });
+    this.usageLedgerFlushes.set(session.id, next);
+    void next.finally(() => {
+      if (this.usageLedgerFlushes.get(session.id) === next) this.usageLedgerFlushes.delete(session.id);
+    });
+  }
+
+  private cacheObservationScopeKey(sessionId: string, source: import('../shared/types').UsageSource, taskId?: string): string {
+    const taskScoped = source === 'subagent' || source === 'background' || source === 'reviewer';
+    return `${sessionId}\u0000${source}\u0000${taskScoped ? taskId ?? '' : ''}`;
+  }
+
+  private getPreviousCacheObservation(input: {
+    sessionId: string;
+    source: import('../shared/types').UsageSource;
+    taskId?: string;
+  }): Promise<import('../shared/types').ProviderCacheObservation | undefined> {
+    return Promise.resolve(this.latestCacheObservationByScope.get(
+      this.cacheObservationScopeKey(input.sessionId, input.source, input.taskId)
+    ));
   }
 
   private applyTurnUsage(session: ChatSession, turnUsage: TurnUsageStats): TurnUsageStats {
@@ -1505,7 +1591,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private createRunCacheSummary(
     currentTurnUsage: TurnUsageStats | undefined,
-    cacheMissPossibleReasons: string[]
+    cacheMissPossibleReasons: string[],
+    diagnostics?: import('../shared/types').CacheDiagnosticsMetrics
   ): RunDetailsCacheSummary {
     const providerDataStatus = currentTurnUsage?.cacheDataStatus ?? 'unavailable';
     return {
@@ -1516,12 +1603,22 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }),
       providerDataStatus,
       cacheLaneChanged: cacheMissPossibleReasons.some((reason) => (
-        reason === 'model_changed'
-        || reason === 'source_changed'
-        || reason === 'protocol_changed'
+        reason === 'model_lane_changed'
+        || reason === 'source_lane_changed'
+        || reason === 'protocol_lane_changed'
         || reason === 'endpoint_lane_changed'
       )),
-      cacheMissPossibleReasons
+      cacheMissPossibleReasons,
+      ...(diagnostics?.mainAgentExpectedRawHitRateCeiling === undefined ? {} : {
+        expectedRawHitRateCeiling: diagnostics.mainAgentExpectedRawHitRateCeiling
+      }),
+      ...(diagnostics?.mainAgentReuseEfficiency === undefined ? {} : {
+        reuseEfficiency: diagnostics.mainAgentReuseEfficiency
+      }),
+      healthyReusableRequestCount: diagnostics?.healthyReusableRequestCount,
+      anomalousReusableRequestCount: diagnostics?.anomalousReusableRequestCount,
+      controlledBoundaryRequestCount: diagnostics?.controlledBoundaryRequestCount,
+      providerCacheEvictionPossibleCount: diagnostics?.providerCacheEvictionPossibleCount
     };
   }
 
@@ -1656,6 +1753,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
     if (!wasActiveSession) {
       this.clearSessionTransientState();
+      this.queueUsageLedgerFlush(session);
+      await this.usageLedgerFlushes.get(session.id);
       await Promise.all([
         this.changeSets.loadSession?.(session.id),
         this.draftRuns.loadSession?.(session.id)
@@ -1710,6 +1809,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.changeSets.clearSession(sessionId);
       this.draftRuns.clearSession(sessionId);
       this.taskPlansBySession.delete(sessionId);
+      await this.usageLedgerStore.deleteSession(sessionId);
     }
 
     if (result.activeSessionChanged) {
@@ -3933,6 +4033,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         },
         onUsage: (event) => { usage = this.applyUsageEvent(session, usage, event); this.liveTurnUsage = usage; refresh(); },
         onUsageLedgerRecord: (record) => { this.applyUsageLedgerRecord(session, record); refresh(); },
+        getPreviousCacheObservation: (input) => this.getPreviousCacheObservation(input),
         onUsageEstimate: (estimate) => { this.liveContextUsage = toSessionContextUsageEstimate(estimate); refresh(); },
         onTaskPlan: (plan) => { this.taskPlansBySession.set(session.id, plan); refresh(); },
         onRunDetails: (details) => { message.runDetails = details; refresh(); },
@@ -4465,6 +4566,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.applyUsageLedgerRecord(activeSession, record);
           scheduleLiveState();
         },
+        getPreviousCacheObservation: (input) => this.getPreviousCacheObservation(input),
         onSubagentRunSummary: (summary) => {
           activeSession.subagentUsageStats = upsertSubagentRunUsageSummary(
             activeSession.subagentUsageStats,
@@ -4560,7 +4662,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       );
       response.runDetails = {
         ...response.runDetails,
-        cache: this.createRunCacheSummary(currentTurnUsage, cacheMissPossibleReasons)
+        cache: this.createRunCacheSummary(
+          currentTurnUsage,
+          cacheMissPossibleReasons,
+          activeSession.usageStats?.cacheDiagnostics
+        )
       };
 
       if (assistantMessage) {
@@ -4617,7 +4723,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (assistantMessage?.runDetails) {
         assistantMessage.runDetails = {
           ...assistantMessage.runDetails,
-          cache: this.createRunCacheSummary(currentTurnUsage, failedCacheReasons)
+          cache: this.createRunCacheSummary(
+            currentTurnUsage,
+            failedCacheReasons,
+            failedSession.usageStats?.cacheDiagnostics
+          )
         };
       }
       if (error instanceof AgentRunAbortedError || abortController.signal.aborted) {
@@ -4812,6 +4922,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (this.startupInitializationPromise) return this.startupInitializationPromise;
     this.startupInitializationPromise = (async () => {
       const sessionResult = await Promise.allSettled([this.sessionInitialization]);
+      if (sessionResult[0]?.status === 'fulfilled' && this.usageLedgerStore && this.usageLedgerFlushes) {
+        const session = this.sessionStore.getActiveSession();
+        this.queueUsageLedgerFlush(session);
+        await this.usageLedgerFlushes.get(session.id);
+      }
       this.sessionReady = true;
       this.syncConfiguredState();
       this.postLightweightState();

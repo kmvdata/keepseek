@@ -170,5 +170,5 @@ test('model changes migrate the cache lane while preserving semantic summaries',
     previousTurnUsage: undefined,
     currentTurnUsage: undefined
   });
-  assert.deepEqual(reasons, ['model_changed']);
+  assert.deepEqual(reasons, ['model_lane_changed']);
 });

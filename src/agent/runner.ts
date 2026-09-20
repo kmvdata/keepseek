@@ -23,6 +23,7 @@ import {
   ToolAuthorizationDecision,
   TurnUsageStats,
   UsageEvent,
+  ProviderCacheObservation,
   UsagePriceSnapshot,
   UsageSource
 } from '../shared/types';
@@ -171,6 +172,7 @@ import {
   createUsagePriceSnapshot,
   priceUsageFromSnapshot
 } from './usageLedger';
+import { createProviderCacheObservation } from './cacheObservation';
 import { TaskPlanTracker } from './taskPlan';
 import { createChangeSet } from '../edits/changeSet';
 import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
@@ -194,6 +196,7 @@ import {
   createTaskPlanProgressHash,
   createWorkFingerprint,
   observeNoProgress,
+  shouldRolloverForSoftContextPressure,
   type ContextEpochRolloverReason
 } from './contextEpoch';
 
@@ -330,6 +333,8 @@ export class AgentRunAbortedError extends Error {
 export class AgentLoop {
   private readonly dsmlToolParser = new DsmlToolParser();
   private evidenceStore?: ToolEvidenceStore;
+  /** Content-free last successful projection by logical usage lane. */
+  private readonly previousCacheObservationByScope = new Map<string, ProviderCacheObservation>();
 
   public constructor(
     private readonly workspaceTools: WorkspaceToolAdapter = new WorkspaceToolService(),
@@ -1137,6 +1142,12 @@ export class AgentLoop {
         });
       }
       const currentIndex = epoch.index;
+      const reusablePrefixTokensBeforeRollover = Math.min(
+        estimated,
+        admission.state.lastActualInputTokens ?? estimated
+      );
+      const rolloverNecessity = reason === 'provider_context_too_long' || reason === 'minimum_envelope_unfit'
+        ? 'necessary' as const : 'controlled_policy' as const;
       epoch.rollovers.push({
         index: currentIndex,
         reason,
@@ -1144,6 +1155,9 @@ export class AgentLoop {
         actualPromptTokens: admission.state.lastActualInputTokens,
         declaredWindowTokens: runtimeConfig.contextWindowTokens,
         learnedEffectiveWindowTokens: admission.state.learnedEffectiveWindowTokens,
+        reusablePrefixTokensEstimate: reusablePrefixTokensBeforeRollover,
+        estimatedCacheResetTokens: reusablePrefixTokensBeforeRollover,
+        necessity: rolloverNecessity,
         summaryKind,
         archiveName,
         seedHash: hashText(seed)
@@ -1157,16 +1171,16 @@ export class AgentLoop {
       epoch.seed = seed;
       messages = structuredClone(providerProjection.messages);
       providerRunState = createInitialProviderRunState();
-      const reusablePrefixTokensEstimate = this.estimateCurrentProviderInputTokens(
-        request, messages, tools, providerRunState
-      );
+      const retainedBaseTokensEstimate = this.estimateCurrentProviderInputTokens(request, messages, tools, providerRunState);
       const seedMessage: DeepSeekMessage = { role: 'user', content: seed };
       messages.push(seedMessage);
       this.appendProviderUserText(providerRunState, seed);
       const afterEstimatedPromptTokens = this.estimateCurrentProviderInputTokens(
         request, messages, tools, providerRunState
       );
-      const estimatedCacheResetTokens = Math.max(0, afterEstimatedPromptTokens - reusablePrefixTokensEstimate);
+      const estimatedCacheResetTokens = reusablePrefixTokensBeforeRollover;
+      const rolloverRecord = epoch.rollovers.at(-1);
+      if (rolloverRecord) rolloverRecord.afterEstimatedPromptTokens = afterEstimatedPromptTokens;
       completedReplay = undefined;
       committedMessages = structuredClone(messages);
       committedProvider = structuredClone(providerRunState);
@@ -1177,7 +1191,9 @@ export class AgentLoop {
         afterEstimatedPromptTokens,
         declaredWindowTokens: runtimeConfig.contextWindowTokens,
         learnedEffectiveWindowTokens: admission.state.learnedEffectiveWindowTokens,
-        reusablePrefixTokensEstimate, estimatedCacheResetTokens,
+        reusablePrefixTokensEstimate: reusablePrefixTokensBeforeRollover,
+        retainedBaseTokensEstimate,
+        estimatedCacheResetTokens, necessity: rolloverNecessity,
         summaryKind, seedHash: hashText(seed), providerProtocol: runDetailsBuilderRef.current?.build().protocol
       });
       runDetailsBuilderRef.current?.recordEpochRollover?.({
@@ -1186,8 +1202,9 @@ export class AgentLoop {
         actualPromptTokens: admission.state.lastActualInputTokens,
         declaredWindowTokens: runtimeConfig.contextWindowTokens,
         learnedEffectiveWindowTokens: admission.state.learnedEffectiveWindowTokens,
-        reusablePrefixTokensEstimate,
+        reusablePrefixTokensEstimate: reusablePrefixTokensBeforeRollover,
         estimatedCacheResetTokens,
+        necessity: rolloverNecessity,
         summaryKind
       });
       await saveStep!();
@@ -1251,7 +1268,9 @@ export class AgentLoop {
           usageTotals: upstreamUsageTotals,
           usageSource: request.backgroundRunId ? 'background' : 'executor',
           toolChoice: allowToolCalls ? 'auto' : 'none',
-          providerRunState
+          providerRunState,
+          contextEpochIndex: epoch.index,
+          historyCompacted: projection.metadata.usedSummary
           }
         );
         for (const record of deliveryRecords) await evidenceStore.markDelivered(record);
@@ -2005,7 +2024,13 @@ export class AgentLoop {
         phase: 'tool',
         remainingBatchResults: 1
       });
-      if (!rolloverAfterBatchReason && estimatedNextInput >= admission.state.learnedEffectiveWindowTokens * runtimeConfig.contextCompression.triggerRatio) {
+      if (!rolloverAfterBatchReason && shouldRolloverForSoftContextPressure({
+        estimatedPromptTokens: estimatedNextInput,
+        learnedEffectiveWindowTokens: admission.state.learnedEffectiveWindowTokens,
+        triggerRatio: runtimeConfig.contextCompression.triggerRatio,
+        epochIndex: epoch.index,
+        turnsInEpoch: epoch.turnInEpoch
+      })) {
         rolloverAfterBatchReason = 'soft_context_pressure';
       }
       if (!rolloverAfterBatchReason && runtimeConfig.maxToolCalls > 0 && epoch.toolCallsInEpoch >= runtimeConfig.maxToolCalls) {
@@ -2079,6 +2104,9 @@ export class AgentLoop {
       toolChoice?: 'auto' | 'none';
       usageSource?: UsageSource;
       providerRunState?: ProviderNativeRunState;
+      contextEpochIndex?: number;
+      historyCompacted?: boolean;
+      protocolMigration?: boolean;
     } = {}
   ): Promise<DeepSeekStreamResult> {
     const trace = options.trace ?? createNoopInteractionTrace();
@@ -2182,6 +2210,47 @@ export class AgentLoop {
     // per-attempt callback normally replaces every such fallback.
     const fallbackSnapshot = createAttemptSnapshot(new Date().toISOString());
     const attemptSnapshots: UsagePriceSnapshot[] = [];
+    const attemptCacheObservations: ProviderCacheObservation[] = [];
+    const usageSource = options.usageSource ?? 'executor';
+    const observationTaskId = request.checkpoint?.taskId
+      ?? (usageSource === 'background' ? request.backgroundRunId : undefined);
+    const cacheScope = [
+      request.sessionId ?? request.subagentContext?.parentSessionId ?? request.checkpoint?.taskId ?? 'unknown-session',
+      usageSource === 'subagent' ? request.subagentContext?.id ?? observationTaskId ?? ''
+        : usageSource === 'background' ? observationTaskId ?? '' : '',
+      usageSource
+    ].join('\u0000');
+    const previousCacheObservation = this.previousCacheObservationByScope.get(cacheScope)
+      ?? await callbacks.getPreviousCacheObservation?.({
+        sessionId: request.sessionId ?? request.subagentContext?.parentSessionId ?? 'unknown-session',
+        source: usageSource,
+        taskId: observationTaskId
+      });
+    const estimatedPromptTokens = this.estimateCurrentProviderInputTokens(
+      request,
+      messages,
+      tools,
+      options.providerRunState
+    );
+    const createAttemptObservation = (attemptIndex: number): ProviderCacheObservation => createProviderCacheObservation({
+      requestId: upstreamRequestId,
+      attemptIndex,
+      source: usageSource,
+      sourceId: runtimeConfig.sourceId,
+      provider: runtimeConfig.provider,
+      baseUrl: runtimeConfig.baseUrl,
+      body,
+      taskId: observationTaskId,
+      runId: trace.runId,
+      contextEpochIndex: options.contextEpochIndex,
+      requestProtocolVersion: request.requestProtocolVersion,
+      contextInstructions: request.contextInstructions,
+      estimatedPromptTokens,
+      previous: attemptIndex > 0 ? attemptCacheObservations[0] ?? previousCacheObservation : previousCacheObservation,
+      historyCompacted: options.historyCompacted,
+      historyRewriteReason: request.historyRewriteReason,
+      protocolMigration: options.protocolMigration
+    });
     trace.record({
       type: 'upstream_request',
       requestId: upstreamRequestId,
@@ -2198,22 +2267,30 @@ export class AgentLoop {
       requestId: upstreamRequestId,
       onAttempt: ({ attemptIndex, startedAt }) => {
         attemptSnapshots[attemptIndex] = createAttemptSnapshot(startedAt);
+        attemptCacheObservations[attemptIndex] = createAttemptObservation(attemptIndex);
       }
     });
 
     const retryCount = response.retryCount ?? 0;
     while (attemptSnapshots.length < (response.attemptCount ?? retryCount + 1)) {
+      const attemptIndex = attemptSnapshots.length;
       attemptSnapshots.push(attemptSnapshots.length === 0
         ? fallbackSnapshot
         : createAttemptSnapshot(new Date().toISOString()));
+      attemptCacheObservations[attemptIndex] = createAttemptObservation(attemptIndex);
     }
     const normalizedUsageForLedger = normalizeDeepSeekUsage(response.usage);
     const ledgerRecords = createUsageLedgerRecords({
       requestId: upstreamRequestId,
       attempts: attemptSnapshots,
       usage: normalizedUsageForLedger,
-      source: options.usageSource ?? 'executor'
+      source: usageSource,
+      cacheObservations: attemptCacheObservations
     });
+    if (response.ok && normalizedUsageForLedger) {
+      const successfulObservation = ledgerRecords.find((record) => record.kind === 'usage_response')?.cacheObservation;
+      if (successfulObservation) this.previousCacheObservationByScope.set(cacheScope, successfulObservation);
+    }
     for (const record of ledgerRecords) callbacks.onUsageLedgerRecord?.(record);
     trace.record({ type: 'upstream_usage_ledger', requestId: upstreamRequestId, records: ledgerRecords });
 

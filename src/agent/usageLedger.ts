@@ -9,13 +9,22 @@ import {
 import type {
   ProviderUsageLedger,
   ProviderUsageLedgerRecord,
+  ProviderCacheObservation,
+  CacheDiagnosticsMetrics,
+  CacheSourceMetrics,
+  CacheLaneMetrics,
   Usage,
   UsageCostRates,
   UsagePriceSnapshot,
   UsagePricingStatus,
   UsageSource
 } from '../shared/types';
-import { getPricingPeriod } from './usageStats';
+import { getPricingPeriod } from './usagePricingPeriod';
+import {
+  CACHE_HEALTH_REUSE_TARGET_PERCENT,
+  finalizeCacheObservationWithUsage,
+  reasonCategory
+} from './cacheObservation';
 
 export const USAGE_LEDGER_SCHEMA_VERSION = 1;
 export const USAGE_PRICE_SNAPSHOT_VERSION = 1;
@@ -36,6 +45,7 @@ export interface UsageLedgerSummary {
   costByCurrency: Record<string, number>;
   legacyAggregate: boolean;
   incomplete: boolean;
+  cacheDiagnostics: CacheDiagnosticsMetrics;
 }
 
 export function createUsagePriceSnapshot(input: {
@@ -115,6 +125,7 @@ export function createUsageLedgerRecords(input: {
   attempts: readonly UsagePriceSnapshot[];
   usage?: Usage;
   source: UsageSource;
+  cacheObservations?: readonly ProviderCacheObservation[];
 }): ProviderUsageLedgerRecord[] {
   if (!input.attempts.length) return [];
   const usageAttemptIndex = input.usage ? input.attempts.length - 1 : -1;
@@ -123,6 +134,7 @@ export function createUsageLedgerRecords(input: {
     const priced = usage
       ? priceUsageFromSnapshot(usage, snapshot)
       : { cost: 0, currency: snapshot.currency, pricingStatus: 'unavailable' as const, unpricedReason: 'no_usage' };
+    const cacheObservation = input.cacheObservations?.[attemptIndex];
     return {
       version: USAGE_LEDGER_SCHEMA_VERSION,
       requestId: input.requestId,
@@ -142,7 +154,10 @@ export function createUsageLedgerRecords(input: {
       cost: priced.cost,
       currency: priced.currency,
       pricingStatus: priced.pricingStatus,
-      ...(priced.unpricedReason ? { unpricedReason: priced.unpricedReason } : {})
+      ...(priced.unpricedReason ? { unpricedReason: priced.unpricedReason } : {}),
+      ...(cacheObservation ? {
+        cacheObservation: finalizeCacheObservationWithUsage(cacheObservation, usage)
+      } : {})
     };
   });
 }
@@ -206,7 +221,8 @@ export function summarizeUsageLedger(ledger: ProviderUsageLedger | undefined): U
     cacheDataMissingRequestCount: 0,
     costByCurrency: {},
     legacyAggregate: normalized?.legacyAggregate ?? false,
-    incomplete: normalized?.incomplete ?? false
+    incomplete: normalized?.incomplete ?? false,
+    cacheDiagnostics: summarizeCacheDiagnostics(normalized?.records ?? [], normalized?.incomplete ?? false)
   };
   for (const record of normalized?.records ?? []) {
     summary.providerAttemptCount += 1;
@@ -282,7 +298,7 @@ export function repriceUsageLedger(
   };
 }
 
-function normalizeUsageLedgerRecord(value: unknown): ProviderUsageLedgerRecord | undefined {
+export function normalizeUsageLedgerRecord(value: unknown): ProviderUsageLedgerRecord | undefined {
   if (!isRecord(value) || value.version !== 1 || typeof value.requestId !== 'string'
     || !Number.isSafeInteger(value.attemptIndex) || Number(value.attemptIndex) < 0
     || (value.kind !== 'usage_response' && value.kind !== 'attempt_without_usage')
@@ -311,8 +327,230 @@ function normalizeUsageLedgerRecord(value: unknown): ProviderUsageLedgerRecord |
     ...(usage ? { usage } : {}),
     providerCacheDataStatus: usage?.cacheDataStatus ?? 'unavailable',
     priceSnapshot: snapshot,
-    ...priced
+    ...priced,
+    ...(normalizeCacheObservation(value.cacheObservation, value.requestId, Number(value.attemptIndex))
+      ? { cacheObservation: normalizeCacheObservation(value.cacheObservation, value.requestId, Number(value.attemptIndex)) }
+      : {})
   };
+}
+
+export function summarizeCacheDiagnostics(
+  records: readonly ProviderUsageLedgerRecord[],
+  incomplete = false
+): CacheDiagnosticsMetrics {
+  const usageRecords = records.filter((record) => record.kind === 'usage_response' && record.usage);
+  const all = summarizeCacheSlice(usageRecords);
+  const main = summarizeCacheSlice(usageRecords.filter((record) => record.source === 'executor'));
+  const bySource = Array.from(new Set(usageRecords.map((record) => record.source)))
+    .map((source): CacheSourceMetrics => ({ source, ...summarizeCacheSlice(
+      usageRecords.filter((record) => record.source === source)
+    ) }));
+  const laneRecords = new Map<string, ProviderUsageLedgerRecord[]>();
+  for (const record of usageRecords) {
+    const laneKey = record.cacheObservation?.laneKey;
+    if (!laneKey) continue;
+    laneRecords.set(laneKey, [...(laneRecords.get(laneKey) ?? []), record]);
+  }
+  const byLane = Array.from(laneRecords.values()).map((items): CacheLaneMetrics => {
+    const first = items[0]!;
+    return {
+      source: first.source,
+      sourceId: first.sourceId,
+      provider: first.provider,
+      protocol: first.protocol,
+      originalModelId: first.originalModelId,
+      ...summarizeCacheSlice(items)
+    };
+  });
+  const observations = records.map((record) => record.cacheObservation).filter(
+    (value): value is ProviderCacheObservation => Boolean(value)
+  );
+  const eligible = usageRecords.filter((record) => record.cacheObservation?.eligibleForHealthTarget
+    && record.providerCacheDataStatus === 'reported');
+  const healthy = eligible.filter((record) => (record.cacheObservation?.reuseEfficiencyRaw ?? 0)
+    >= CACHE_HEALTH_REUSE_TARGET_PERCENT);
+  const anomalous = eligible.filter((record) => (record.cacheObservation?.reuseEfficiencyRaw ?? 100)
+    < CACHE_HEALTH_REUSE_TARGET_PERCENT);
+  const localBoundaryRecords = usageRecords.filter((record) => record.cacheObservation?.reasonCategory === 'local_anomaly');
+  const estimatedLocalBoundaryExtraCostByCurrency: Record<string, number> = {};
+  let estimatedLocalBoundaryLossTokens = 0;
+  for (const record of localBoundaryRecords) {
+    const observation = record.cacheObservation!;
+    const previousTokens = Math.max(observation.commonPrefixTokensEstimate,
+      observation.previousPromptTokensEstimate ?? 0);
+    const lost = Math.max(0, previousTokens - observation.commonPrefixTokensEstimate);
+    estimatedLocalBoundaryLossTokens += lost;
+    const snapshot = record.priceSnapshot;
+    if (record.currency && typeof snapshot.inputRate === 'number' && typeof snapshot.cacheHitRate === 'number') {
+      estimatedLocalBoundaryExtraCostByCurrency[record.currency] = normalizeCost(
+        (estimatedLocalBoundaryExtraCostByCurrency[record.currency] ?? 0)
+          + lost * Math.max(0, snapshot.inputRate - snapshot.cacheHitRate) / 1_000_000
+      );
+    }
+  }
+  const lastAnomaly = [...observations].reverse().find((observation) => observation.reasonCategory === 'local_anomaly'
+    || observation.reason === 'provider_cache_eviction_possible');
+  return {
+    rawHitRate: all.rawHitRate,
+    mainAgentRawHitRate: main.rawHitRate,
+    expectedRawHitRateCeiling: all.expectedRawHitRateCeiling,
+    mainAgentExpectedRawHitRateCeiling: main.expectedRawHitRateCeiling,
+    reuseEfficiency: all.reuseEfficiency,
+    reuseEfficiencyRaw: all.reuseEfficiencyRaw,
+    mainAgentReuseEfficiency: main.reuseEfficiency,
+    mainAgentReuseEfficiencyRaw: main.reuseEfficiencyRaw,
+    cacheDataResponseCount: all.cacheDataResponseCount,
+    cacheDataMissingResponseCount: all.cacheDataMissingResponseCount,
+    coldStartRequestCount: observations.filter((observation) => observation.prefixRelation === 'cold'
+      && !Object.values(observation.boundary).some(Boolean)).length,
+    controlledBoundaryRequestCount: observations.filter((observation) => Object.values(observation.boundary).some(Boolean)
+      || observation.reasonCategory === 'controlled_boundary').length,
+    comparableRequestCount: eligible.length,
+    healthyReusableRequestCount: healthy.length,
+    anomalousReusableRequestCount: anomalous.length,
+    providerCacheEvictionPossibleCount: observations.filter((observation) => observation.reason === 'provider_cache_eviction_possible').length,
+    estimatedReusableTokensNotHit: anomalous.reduce((sum, record) => sum + Math.max(0,
+      (record.cacheObservation?.reusablePrefixTokensEstimate ?? 0) - (record.usage?.cacheHitTokens ?? 0)), 0),
+    estimatedLocalBoundaryLossTokens,
+    estimatedLocalBoundaryExtraCostByCurrency,
+    ...(lastAnomaly ? { lastAnomalyReason: lastAnomaly.reason } : {}),
+    bySource,
+    byLane,
+    incomplete: incomplete || usageRecords.some((record) => !record.cacheObservation)
+  };
+}
+
+function summarizeCacheSlice(records: readonly ProviderUsageLedgerRecord[]): Omit<CacheSourceMetrics, 'source'> {
+  let hit = 0;
+  let miss = 0;
+  let reusable = 0;
+  let prompt = 0;
+  let reported = 0;
+  let missing = 0;
+  let comparable = 0;
+  let healthy = 0;
+  let anomalous = 0;
+  for (const record of records) {
+    const usage = record.usage;
+    if (!usage) continue;
+    if (record.providerCacheDataStatus === 'reported') {
+      hit += usage.cacheHitTokens;
+      miss += usage.cacheMissTokens;
+      reported += 1;
+    } else {
+      missing += 1;
+    }
+    const observation = record.cacheObservation;
+    if (!observation?.eligibleForHealthTarget || record.providerCacheDataStatus !== 'reported') continue;
+    comparable += 1;
+    reusable += observation.reusablePrefixTokensEstimate;
+    prompt += usage.promptTokens;
+    if ((observation.reuseEfficiencyRaw ?? 0) >= CACHE_HEALTH_REUSE_TARGET_PERCENT) healthy += 1;
+    else anomalous += 1;
+  }
+  const rawHitRate = hit + miss > 0 ? hit / (hit + miss) * 100 : undefined;
+  const expectedRawHitRateCeiling = prompt > 0 ? reusable / prompt * 100 : undefined;
+  const reuseEfficiencyRaw = reusable > 0 ? hit / reusable * 100 : undefined;
+  return {
+    ...(rawHitRate === undefined ? {} : { rawHitRate }),
+    ...(expectedRawHitRateCeiling === undefined ? {} : { expectedRawHitRateCeiling }),
+    ...(reuseEfficiencyRaw === undefined ? {} : {
+      reuseEfficiencyRaw,
+      reuseEfficiency: Math.max(0, Math.min(100, reuseEfficiencyRaw))
+    }),
+    cacheDataResponseCount: reported,
+    cacheDataMissingResponseCount: missing,
+    comparableRequestCount: comparable,
+    healthyReusableRequestCount: healthy,
+    anomalousReusableRequestCount: anomalous
+  };
+}
+
+function normalizeCacheObservation(
+  value: unknown,
+  requestId: string,
+  attemptIndex: number
+): ProviderCacheObservation | undefined {
+  if (!isRecord(value) || value.version !== 1 || value.requestId !== requestId
+    || value.attemptIndex !== attemptIndex || typeof value.laneKey !== 'string'
+    || typeof value.endpointLaneIdentity !== 'string' || typeof value.originalModelId !== 'string'
+    || typeof value.canonicalModelIdentity !== 'string' || typeof value.sourceId !== 'string'
+    || typeof value.provider !== 'string' || typeof value.protocol !== 'string'
+    || !isRecord(value.system) || !isRecord(value.contextInstructions) || !isRecord(value.tools)
+    || !isRecord(value.providerHistory) || !isRecord(value.newTail) || !isRecord(value.cacheableProjection)
+    || !isRecord(value.boundary)) return undefined;
+  const fingerprints = [value.system, value.contextInstructions, value.tools, value.providerHistory,
+    value.newTail, value.cacheableProjection].map(normalizeFingerprint);
+  if (fingerprints.some((item) => !item)) return undefined;
+  const reason = normalizeCacheReason(value.reason);
+  if (!reason) return undefined;
+  return {
+    version: 1,
+    requestId,
+    attemptIndex,
+    source: normalizeSource(value.source),
+    sourceId: value.sourceId,
+    provider: value.provider,
+    protocol: value.protocol,
+    endpointLaneIdentity: value.endpointLaneIdentity,
+    laneKey: value.laneKey,
+    originalModelId: value.originalModelId,
+    canonicalModelIdentity: value.canonicalModelIdentity,
+    ...(optionalString(value.taskId) ? { taskId: optionalString(value.taskId) } : {}),
+    ...(optionalString(value.runId) ? { runId: optionalString(value.runId) } : {}),
+    contextEpochIndex: nonNegativeInteger(value.contextEpochIndex),
+    requestProtocolVersion: Math.max(1, nonNegativeInteger(value.requestProtocolVersion)),
+    system: fingerprints[0]!, contextInstructions: fingerprints[1]!, tools: fingerprints[2]!,
+    providerHistory: fingerprints[3]!, newTail: fingerprints[4]!, cacheableProjection: fingerprints[5]!,
+    estimatedPromptTokens: nonNegativeInteger(value.estimatedPromptTokens),
+    ...(finiteNumber(value.previousPromptTokensEstimate) === undefined
+      ? {} : { previousPromptTokensEstimate: nonNegativeInteger(value.previousPromptTokensEstimate) }),
+    ...(optionalString(value.previousRequestIdentity) ? { previousRequestIdentity: optionalString(value.previousRequestIdentity) } : {}),
+    ...(optionalString(value.previousSameLaneRequestIdentity)
+      ? { previousSameLaneRequestIdentity: optionalString(value.previousSameLaneRequestIdentity) } : {}),
+    prefixRelation: value.prefixRelation === 'strict_prefix' || value.prefixRelation === 'identical_retry'
+      || value.prefixRelation === 'broken' ? value.prefixRelation : 'cold',
+    inheritsPreviousCacheablePrefix: value.inheritsPreviousCacheablePrefix === true,
+    ...(value.firstChangedSegment === 'lane' || value.firstChangedSegment === 'system'
+      || value.firstChangedSegment === 'context_instructions' || value.firstChangedSegment === 'tools'
+      || value.firstChangedSegment === 'provider_history' ? { firstChangedSegment: value.firstChangedSegment } : {}),
+    commonPrefixTokensEstimate: nonNegativeInteger(value.commonPrefixTokensEstimate),
+    reusablePrefixTokensEstimate: nonNegativeInteger(value.reusablePrefixTokensEstimate),
+    unavoidableNewTokensEstimate: nonNegativeInteger(value.unavoidableNewTokensEstimate),
+    ...(finiteNumber(value.expectedRawHitRateCeiling) === undefined ? {} : { expectedRawHitRateCeiling: finiteNumber(value.expectedRawHitRateCeiling) }),
+    ...(finiteNumber(value.reuseEfficiencyRaw) === undefined ? {} : { reuseEfficiencyRaw: finiteNumber(value.reuseEfficiencyRaw) }),
+    eligibleForHealthTarget: value.eligibleForHealthTarget === true,
+    reason,
+    reasonCategory: reasonCategory(reason),
+    boundary: {
+      historyCompacted: value.boundary.historyCompacted === true,
+      historyRewritten: value.boundary.historyRewritten === true,
+      contextEpochRollover: value.boundary.contextEpochRollover === true,
+      protocolMigration: value.boundary.protocolMigration === true
+    }
+  };
+}
+
+function normalizeFingerprint(value: unknown): import('../shared/types').CacheProjectionFingerprint | undefined {
+  if (!isRecord(value) || typeof value.hash !== 'string' || !/^[a-f0-9]{64}$/u.test(value.hash)) return undefined;
+  return { hash: value.hash, byteLength: nonNegativeInteger(value.byteLength), tokensEstimate: nonNegativeInteger(value.tokensEstimate) };
+}
+
+function normalizeCacheReason(value: unknown): import('../shared/types').CacheObservationReason | undefined {
+  const reasons: import('../shared/types').CacheObservationReason[] = [
+    'cold_start', 'append_only_prefix_preserved', 'retry_projection_unchanged', 'model_lane_changed',
+    'source_lane_changed', 'protocol_lane_changed', 'endpoint_lane_changed', 'system_prompt_changed',
+    'context_instructions_changed', 'tools_schema_changed', 'history_rewritten', 'history_compacted',
+    'context_epoch_rollover', 'protocol_migration', 'provider_context_too_long', 'stale_capacity_calibration',
+    'provider_cache_eviction_possible', 'provider_cache_metrics_unavailable', 'unexpected_local_prefix_break'
+  ];
+  return typeof value === 'string' && reasons.includes(value as import('../shared/types').CacheObservationReason)
+    ? value as import('../shared/types').CacheObservationReason : undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : undefined;
 }
 
 function normalizeUsagePriceSnapshot(value: unknown): UsagePriceSnapshot | undefined {

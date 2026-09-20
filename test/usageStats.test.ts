@@ -397,24 +397,24 @@ test('does not report history change when hit rate is stable (append-only is exp
   assert.deepEqual(reasons, []);
 });
 
-test('reports history change when hit rate drops sharply', () => {
+test('does not infer a history rewrite from a whole-history hash and hit-rate drop', () => {
   const reasons = getCacheMissPossibleReasons({
     previousDiagnostics: createDiagnostics({}),
     diagnostics: createDiagnostics({ historyPrefixHash: 'history-b' }),
     previousTurnUsage: createTurnUsage(900, 100),
     currentTurnUsage: createTurnUsage(400, 600)
   });
-  assert.deepEqual(reasons, ['history_prefix_changed']);
+  assert.deepEqual(reasons, []);
 });
 
-test('reports provider cache eviction when nothing locally changed but hit rate dropped', () => {
+test('does not infer provider eviction without a byte-proven reusable prefix', () => {
   const reasons = getCacheMissPossibleReasons({
     previousDiagnostics: createDiagnostics({}),
     diagnostics: createDiagnostics({}),
     previousTurnUsage: createTurnUsage(900, 100),
     currentTurnUsage: createTurnUsage(300, 700)
   });
-  assert.deepEqual(reasons, ['provider_cache_eviction_possible']);
+  assert.deepEqual(reasons, []);
 });
 
 test('attributes source, protocol, and endpoint cache-lane changes independently', () => {
@@ -432,7 +432,7 @@ test('attributes source, protocol, and endpoint cache-lane changes independently
     previousTurnUsage: undefined,
     currentTurnUsage: undefined
   });
-  assert.deepEqual(reasons, ['source_changed', 'protocol_changed', 'endpoint_lane_changed']);
+  assert.deepEqual(reasons, ['source_lane_changed', 'protocol_lane_changed', 'endpoint_lane_changed']);
 });
 
 test('reports model change, compaction and rewrite reasons directly', () => {
@@ -446,5 +446,5 @@ test('reports model change, compaction and rewrite reasons directly', () => {
     previousTurnUsage: createTurnUsage(500, 500),
     currentTurnUsage: createTurnUsage(500, 500)
   });
-  assert.deepEqual(reasons, ['model_changed', 'history_compacted', 'history_rewrite:user_edited']);
+  assert.deepEqual(reasons, ['model_lane_changed', 'history_compacted', 'history_rewritten']);
 });
