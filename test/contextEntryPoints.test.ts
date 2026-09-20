@@ -337,6 +337,53 @@ test('command menu owns project-scoped main and subagent model selection', async
   assert.doesNotMatch(runtimeSource, /global subagent|Global subagent|全局子代理|Account management/u);
 });
 
+test('subagent model overview renders safely before the startup model catalog arrives', () => {
+  const inputScript = getInputScript();
+  const renderStartupState = new Function(`
+    const state = {
+      models: [],
+      isBusy: false,
+      commandSettingsReadiness: { mainModel: 'loading', subagentModel: 'loading' }
+    };
+    var commandSubagentModelListOpen = false;
+    var commandSubagentModelProfile = '';
+    function createNode() {
+      return {
+        children: [],
+        dataset: {},
+        classList: { toggle() {} },
+        append(...children) { this.children.push(...children); },
+        setAttribute() {}
+      };
+    }
+    const document = { createElement: createNode };
+    const commandSubagentModelValue = createNode();
+    const commandSubagentModelSwitch = createNode();
+    const commandSubagentModelDescription = createNode();
+    const commandSubagentModelList = createNode();
+    const t = key => key;
+    const getCommandSettingReadiness = key => state.commandSettingsReadiness[key] || 'loading';
+    const isModelSelectionLocked = () => false;
+    const getSubagentModelLockText = () => 'subagentModelLoading';
+    const getSelectedModel = () => null;
+    const findModelForSelection = () => null;
+    const getModelSourceLabel = () => 'source';
+    const getModelDisplayLabel = () => 'model';
+    const createCommandModelProtocolLogo = () => null;
+    ${getGeneratedSection(inputScript, 'function renderCommandSubagentModel()', 'function appendCommandSubagentModelOptions')}
+    renderCommandSubagentModel();
+    return {
+      rowCount: commandSubagentModelList.children.length,
+      value: commandSubagentModelValue.children[0]?.textContent
+    };
+  `);
+
+  assert.deepEqual(renderStartupState(), {
+    rowCount: 3,
+    value: 'subagentModelLoading'
+  });
+});
+
 test('model picker waits for authoritative extension state and exposes pending cancellation', () => {
   const inputTemplate = getInputTemplate();
   const inputScript = getInputScript();

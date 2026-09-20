@@ -331,7 +331,7 @@ export const modelControlsRenderFragment: WebviewFragment = {
         var locked = readiness !== 'ready' || state.isBusy || isModelSelectionLocked();
         var lockText = readinessText || (locked ? getSubagentModelLockText() : '');
         var mainSelection = getSelectedModel(models);
-        var mainModel = mainSelection.model;
+        var mainModel = mainSelection ? mainSelection.model : null;
 
         if (!commandSubagentModelListOpen) {
           commandSubagentModelProfile = '';
