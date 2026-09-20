@@ -87,6 +87,7 @@ export const commandMenuImplementationFragment: WebviewFragment = {
         commandMenuOpen = false;
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
+        commandSubagentModelProfile = '';
         commandApprovalModeListOpen = false;
         commandSkillListOpen = false;
         commandMenu.classList.add('hidden');
@@ -126,6 +127,15 @@ export const commandMenuImplementationFragment: WebviewFragment = {
             openCommandSubagentModelListAndFocus();
             return;
           }
+          var subagentProfileButton = target.closest('button[data-subagent-profile]');
+          if (subagentProfileButton && commandSubagentModelList && commandSubagentModelList.contains(subagentProfileButton)) {
+            event.preventDefault();
+            commandSubagentModelProfile = subagentProfileButton.dataset.subagentProfile || '';
+            renderCommandMenu();
+            var subagentModelOptions = document.getElementById('commandSubagentModelOptions-' + commandSubagentModelProfile);
+            focusFirstCommandMenuControl(subagentModelOptions);
+            return;
+          }
           if (target === commandApprovalModeSwitch) {
             event.preventDefault();
             openCommandApprovalModeListAndFocus();
@@ -148,7 +158,18 @@ export const commandMenuImplementationFragment: WebviewFragment = {
           }
           if (commandSubagentModelListOpen && commandSubagentModelList && (commandSubagentModelList.contains(target) || target === commandSubagentModelSwitch)) {
             event.preventDefault();
+            if (commandSubagentModelProfile && commandSubagentModelList.contains(target)) {
+              var activeSubagentProfile = commandSubagentModelProfile;
+              commandSubagentModelProfile = '';
+              renderCommandMenu();
+              var activeSubagentProfileButton = commandSubagentModelList.querySelector('button[data-subagent-profile="' + activeSubagentProfile + '"]');
+              if (activeSubagentProfileButton instanceof HTMLElement) {
+                activeSubagentProfileButton.focus();
+              }
+              return;
+            }
             commandSubagentModelListOpen = false;
+            commandSubagentModelProfile = '';
             renderCommandMenu();
             if (commandSubagentModelSwitch) { commandSubagentModelSwitch.focus(); }
             return;
@@ -211,6 +232,7 @@ export const commandMenuImplementationFragment: WebviewFragment = {
       function openCommandSubagentModelListAndFocus() {
         if (!commandSubagentModelSwitch || isSubagentModelSelectionLocked()) { return; }
         commandSubagentModelListOpen = true;
+        commandSubagentModelProfile = '';
         commandModelListOpen = false;
         commandApprovalModeListOpen = false;
         commandSkillListOpen = false;

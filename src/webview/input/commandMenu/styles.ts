@@ -27,6 +27,7 @@ export const commandMenuReadonlyStylesFragment: WebviewFragment = {
     .command-menu.is-readonly .command-skill-create-button,
     .command-menu.is-readonly .command-control-row,
     .command-menu.is-readonly .command-model-option,
+    .command-menu.is-readonly .command-subagent-profile-model-button,
     .command-menu.is-readonly .command-compression-tab {
       cursor: default;
     }
@@ -41,6 +42,9 @@ export const commandMenuReadonlyStylesFragment: WebviewFragment = {
     .command-menu.is-readonly .command-model-option:hover,
     .command-menu.is-readonly .command-model-option:focus-visible,
     .command-menu.is-readonly .command-model-option[aria-checked="true"],
+    .command-menu.is-readonly .command-subagent-profile-model-button:hover,
+    .command-menu.is-readonly .command-subagent-profile-model-button:focus-visible,
+    .command-menu.is-readonly .command-subagent-profile-model-button[aria-expanded="true"],
     .command-menu.is-readonly .command-compression-tab:hover,
     .command-menu.is-readonly .command-compression-tab:focus-visible {
       color: inherit;
@@ -54,7 +58,9 @@ export const commandMenuReadonlyStylesFragment: WebviewFragment = {
     }
 
     .command-menu.is-readonly.allows-model-selection #commandModelSwitch:not(:disabled),
+    .command-menu.is-readonly.allows-model-selection #commandSubagentModelSwitch:not(:disabled),
     .command-menu.is-readonly.allows-model-selection .command-model-option:not(:disabled),
+    .command-menu.is-readonly.allows-model-selection .command-subagent-profile-model-button:not(:disabled),
     .command-menu.is-readonly.allows-approval-selection #commandApprovalModeSwitch:not(:disabled),
     .command-menu.is-readonly.allows-approval-selection #commandApprovalModeList .command-model-option:not(:disabled) {
       cursor: pointer;
@@ -62,9 +68,14 @@ export const commandMenuReadonlyStylesFragment: WebviewFragment = {
 
     .command-menu.is-readonly.allows-model-selection #commandModelSwitch:not(:disabled):hover,
     .command-menu.is-readonly.allows-model-selection #commandModelSwitch:not(:disabled):focus-visible,
+    .command-menu.is-readonly.allows-model-selection #commandSubagentModelSwitch:not(:disabled):hover,
+    .command-menu.is-readonly.allows-model-selection #commandSubagentModelSwitch:not(:disabled):focus-visible,
     .command-menu.is-readonly.allows-model-selection .command-model-option:not(:disabled):hover,
     .command-menu.is-readonly.allows-model-selection .command-model-option:not(:disabled):focus-visible,
     .command-menu.is-readonly.allows-model-selection .command-model-option.is-pending:not(:disabled),
+    .command-menu.is-readonly.allows-model-selection .command-subagent-profile-model-button:not(:disabled):hover,
+    .command-menu.is-readonly.allows-model-selection .command-subagent-profile-model-button:not(:disabled):focus-visible,
+    .command-menu.is-readonly.allows-model-selection .command-subagent-profile-model-button[aria-expanded="true"]:not(:disabled),
     .command-menu.is-readonly.allows-approval-selection #commandApprovalModeSwitch:not(:disabled):hover,
     .command-menu.is-readonly.allows-approval-selection #commandApprovalModeSwitch:not(:disabled):focus-visible,
     .command-menu.is-readonly.allows-approval-selection #commandApprovalModeSwitch[aria-expanded="true"]:not(:disabled),
@@ -343,24 +354,98 @@ export const commandMenuStylesFragment: WebviewFragment = {
       padding: 2px 0 4px 12px;
     }
 
-    .command-subagent-profile-group {
+    .command-subagent-profile-list {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 4px;
-      padding: 4px;
-      border-bottom: 1px solid var(--vscode-widget-border, transparent);
+      gap: 2px;
+      padding: 3px 0 5px 12px;
     }
 
-    .command-subagent-profile-option {
+    .command-subagent-profile-row {
+      display: grid;
+      grid-template-columns: minmax(42px, auto) minmax(0, 1fr);
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      padding: 2px 4px 2px 8px;
+      border-radius: 6px;
+    }
+
+    .command-subagent-profile-label {
+      color: var(--vscode-foreground);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .command-subagent-profile-model-button {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 5px;
       min-width: 0;
-      justify-content: center;
-      padding-inline: 6px;
+      min-height: 28px;
+      padding: 3px 5px;
+      overflow: hidden;
+      border: 1px solid transparent;
+      border-radius: 5px;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
       font-size: 11px;
+      text-align: right;
+      cursor: pointer;
     }
 
-    .command-subagent-profile-option[aria-pressed="true"] {
-      color: var(--vscode-button-foreground);
-      background: var(--vscode-button-background);
+    .command-subagent-profile-model-button:hover:not(:disabled),
+    .command-subagent-profile-model-button:focus-visible:not(:disabled),
+    .command-subagent-profile-model-button[aria-expanded="true"]:not(:disabled) {
+      color: var(--vscode-quickInputList-focusForeground, var(--vscode-foreground));
+      background: var(--vscode-quickInputList-focusBackground, var(--vscode-list-hoverBackground));
+      border-color: var(--vscode-focusBorder);
+      outline: none;
+    }
+
+    .command-subagent-profile-model-button:disabled {
+      cursor: default;
+      opacity: 0.65;
+    }
+
+    .command-subagent-profile-model-mode {
+      flex: 0 1 68px;
+      min-width: 0;
+      overflow: hidden;
+      color: var(--vscode-descriptionForeground);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 9px;
+    }
+
+    .command-subagent-profile-model-text {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .command-subagent-profile-chevron {
+      display: inline-flex;
+      flex: none;
+      align-items: center;
+      justify-content: center;
+      width: 12px;
+      font-size: 16px;
+      transition: transform 120ms ease;
+    }
+
+    .command-subagent-profile-model-button[aria-expanded="true"] .command-subagent-profile-chevron {
+      transform: rotate(90deg);
+    }
+
+    .command-subagent-model-options {
+      display: grid;
+      gap: 2px;
+      margin: -1px 4px 3px 50px;
+      padding: 3px 0 4px 8px;
+      border-left: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
     }
 
     .command-model-source {
@@ -649,4 +734,3 @@ export const commandMenuStylesFragment: WebviewFragment = {
 
 `.slice(1)
 };
-

@@ -31,7 +31,7 @@ export const modelControlsStateFragment: WebviewFragment = {
   source: `
       var commandModelListOpen = false;
       var commandSubagentModelListOpen = false;
-      var commandSubagentModelProfile = 'research';
+      var commandSubagentModelProfile = '';
 `.slice(1)
 };
 
@@ -89,9 +89,12 @@ export const modelSelectorBindingsFragment: WebviewFragment = {
           }
           commandSubagentModelListOpen = !commandSubagentModelListOpen;
           if (commandSubagentModelListOpen) {
+            commandSubagentModelProfile = '';
             commandModelListOpen = false;
             commandApprovalModeListOpen = false;
             commandSkillListOpen = false;
+          } else {
+            commandSubagentModelProfile = '';
           }
           renderCommandMenu();
         });
@@ -110,29 +113,39 @@ export const subagentAndPendingBindingsFragment: WebviewFragment = {
           if (profileButton && !profileButton.disabled) {
             event.preventDefault();
             event.stopPropagation();
-            commandSubagentModelProfile = profileButton.dataset.subagentProfile || 'research';
+            var requestedProfile = profileButton.dataset.subagentProfile || 'research';
+            commandSubagentModelProfile = commandSubagentModelProfile === requestedProfile ? '' : requestedProfile;
             renderCommandSubagentModel();
+            var replacementProfileButton = commandSubagentModelList.querySelector('button[data-subagent-profile="' + requestedProfile + '"]');
+            if (replacementProfileButton instanceof HTMLElement) {
+              replacementProfileButton.focus();
+            }
             return;
           }
           var button = target?.closest('button[data-subagent-model-mode]');
           if (!button || isSubagentModelSelectionLocked()) { return; }
           event.preventDefault();
           event.stopPropagation();
+          var selectedProfile = button.dataset.subagentModelProfile || commandSubagentModelProfile || 'research';
           var mode = button.dataset.subagentModelMode || 'follow-main';
           var statusValue = t('subagentModelFollowMain');
           if (mode === 'fixed') {
             var sourceId = button.dataset.sourceId || '';
             var modelId = button.dataset.modelId || '';
             if (!sourceId || !modelId) { return; }
-            vscode.postMessage({ type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId, profile: commandSubagentModelProfile });
+            vscode.postMessage({ type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId, profile: selectedProfile });
             var model = findModelForSelection(Array.isArray(state.models) ? state.models : [], sourceId, modelId);
             statusValue = getModelDisplayLabel(model);
           } else {
-            vscode.postMessage({ type: 'setSubagentModel', mode: 'follow-main', profile: commandSubagentModelProfile });
+            vscode.postMessage({ type: 'setSubagentModel', mode: 'follow-main', profile: selectedProfile });
           }
-          commandSubagentModelListOpen = false;
-          renderCommandMenu();
-          setComposerStatus(t('subagentModelTitle') + ': ' + statusValue);
+          commandSubagentModelProfile = '';
+          renderCommandSubagentModel();
+          var selectedProfileButton = commandSubagentModelList.querySelector('button[data-subagent-profile="' + selectedProfile + '"]');
+          if (selectedProfileButton instanceof HTMLElement) {
+            selectedProfileButton.focus();
+          }
+          setComposerStatus(t('subagentProfile_' + selectedProfile) + ': ' + statusValue);
         });
       }
 
@@ -315,34 +328,22 @@ export const modelControlsRenderFragment: WebviewFragment = {
         var allSettings = state.subagentModelSettings && typeof state.subagentModelSettings === 'object'
           ? state.subagentModelSettings
           : { default: state.subagentModelSetting, profiles: {} };
-        var rawSetting = allSettings.profiles && allSettings.profiles[commandSubagentModelProfile]
-          ? allSettings.profiles[commandSubagentModelProfile]
-          : allSettings.default && typeof allSettings.default === 'object' ? allSettings.default : { mode: 'follow-main' };
-        var isFixed = rawSetting.mode === 'fixed';
-        var sourceId = isFixed && typeof rawSetting.sourceId === 'string' ? rawSetting.sourceId : '';
-        var modelId = isFixed && typeof rawSetting.modelId === 'string' ? rawSetting.modelId : '';
-        var selectedModel = isFixed ? findModelForSelection(models, sourceId, modelId) : null;
         var locked = readiness !== 'ready' || state.isBusy || isModelSelectionLocked();
         var lockText = readinessText || (locked ? getSubagentModelLockText() : '');
-        var currentText = isFixed
-          ? selectedModel
-            ? getModelSourceLabel(selectedModel) + ' / ' + getModelDisplayLabel(selectedModel)
-            : t('subagentModelUnavailable')
-          : t('subagentModelFollowMain');
+        var mainSelection = getSelectedModel(models);
+        var mainModel = mainSelection.model;
+
+        if (!commandSubagentModelListOpen) {
+          commandSubagentModelProfile = '';
+        }
 
         if (commandSubagentModelValue) {
           commandSubagentModelValue.innerHTML = '';
-          if (selectedModel) {
-            var currentLogo = createCommandModelProtocolLogo(selectedModel.provider);
-            if (currentLogo) {
-              commandSubagentModelValue.append(currentLogo);
-            }
-          }
           var currentModelText = document.createElement('span');
           currentModelText.className = 'command-model-current-text';
-          currentModelText.textContent = currentText;
+          currentModelText.textContent = readinessText || t('subagentProfileModelScope');
           commandSubagentModelValue.append(currentModelText);
-          commandSubagentModelValue.title = isFixed ? sourceId + ' / ' + modelId : currentText;
+          commandSubagentModelValue.title = readinessText || t('subagentProfileModelScope');
         }
         if (commandSubagentModelSwitch) {
           commandSubagentModelSwitch.disabled = locked;
@@ -359,42 +360,104 @@ export const modelControlsRenderFragment: WebviewFragment = {
         commandSubagentModelList.classList.toggle('hidden', !commandSubagentModelListOpen);
         commandSubagentModelList.innerHTML = '';
 
-        var profileGroup = document.createElement('div');
-        profileGroup.className = 'command-subagent-profile-group';
-        profileGroup.setAttribute('role', 'group');
-        profileGroup.setAttribute('aria-label', t('subagentProfileModelScope'));
         ['research', 'review', 'proposal'].forEach(function(profile) {
-          var profileOption = document.createElement('button');
-          profileOption.type = 'button';
-          profileOption.className = 'command-model-option command-subagent-profile-option';
-          profileOption.dataset.subagentProfile = profile;
-          profileOption.disabled = locked;
-          profileOption.setAttribute('aria-pressed', profile === commandSubagentModelProfile ? 'true' : 'false');
-          profileOption.textContent = t('subagentProfile_' + profile);
-          profileGroup.append(profileOption);
+          var rawSetting = allSettings.profiles && allSettings.profiles[profile]
+            ? allSettings.profiles[profile]
+            : allSettings.default && typeof allSettings.default === 'object' ? allSettings.default : { mode: 'follow-main' };
+          var isFixed = rawSetting.mode === 'fixed';
+          var sourceId = isFixed && typeof rawSetting.sourceId === 'string' ? rawSetting.sourceId : '';
+          var modelId = isFixed && typeof rawSetting.modelId === 'string' ? rawSetting.modelId : '';
+          var selectedModel = isFixed ? findModelForSelection(models, sourceId, modelId) : mainModel;
+          var currentText = selectedModel
+            ? getModelSourceLabel(selectedModel) + ' / ' + getModelDisplayLabel(selectedModel)
+            : isFixed ? t('subagentModelUnavailable') : readinessText || t('modelsEmpty');
+          var expanded = profile === commandSubagentModelProfile;
+
+          var profileRow = document.createElement('div');
+          profileRow.className = 'command-subagent-profile-row';
+
+          var profileLabel = document.createElement('span');
+          profileLabel.className = 'command-subagent-profile-label';
+          profileLabel.textContent = t('subagentProfile_' + profile);
+
+          var profileButton = document.createElement('button');
+          profileButton.type = 'button';
+          profileButton.className = 'command-subagent-profile-model-button';
+          profileButton.dataset.subagentProfile = profile;
+          profileButton.disabled = locked;
+          profileButton.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+          profileButton.setAttribute('aria-controls', 'commandSubagentModelOptions-' + profile);
+          profileButton.setAttribute('aria-label', t('subagentProfile_' + profile) + ': ' + (isFixed ? currentText : t('subagentModelFollowMain') + ', ' + currentText));
+          profileButton.title = lockText || (isFixed ? sourceId + ' / ' + modelId : t('subagentModelFollowMain') + ': ' + currentText);
+
+          if (selectedModel) {
+            var currentLogo = createCommandModelProtocolLogo(selectedModel.provider);
+            if (currentLogo) {
+              profileButton.append(currentLogo);
+            }
+          }
+          if (!isFixed) {
+            var followMode = document.createElement('span');
+            followMode.className = 'command-subagent-profile-model-mode';
+            followMode.textContent = t('subagentModelFollowMain');
+            profileButton.append(followMode);
+          }
+          var profileModelText = document.createElement('span');
+          profileModelText.className = 'command-subagent-profile-model-text';
+          profileModelText.textContent = currentText;
+          profileButton.append(profileModelText);
+
+          var profileChevron = document.createElement('span');
+          profileChevron.className = 'command-subagent-profile-chevron';
+          profileChevron.setAttribute('aria-hidden', 'true');
+          profileChevron.textContent = '\u203a';
+          profileButton.append(profileChevron);
+
+          profileRow.append(profileLabel, profileButton);
+          commandSubagentModelList.append(profileRow);
+
+          if (expanded) {
+            appendCommandSubagentModelOptions({
+              profile: profile,
+              models: models,
+              isFixed: isFixed,
+              sourceId: sourceId,
+              modelId: modelId,
+              locked: locked,
+              lockText: lockText
+            });
+          }
         });
-        commandSubagentModelList.append(profileGroup);
+      }
+
+      function appendCommandSubagentModelOptions(input) {
+        var options = document.createElement('div');
+        options.id = 'commandSubagentModelOptions-' + input.profile;
+        options.className = 'command-subagent-model-options';
+        options.setAttribute('role', 'group');
+        options.setAttribute('aria-label', t('subagentProfile_' + input.profile));
 
         var followOption = document.createElement('button');
         followOption.type = 'button';
         followOption.className = 'command-model-option';
         followOption.dataset.subagentModelMode = 'follow-main';
-        followOption.disabled = locked;
+        followOption.dataset.subagentModelProfile = input.profile;
+        followOption.disabled = input.locked;
         followOption.setAttribute('role', 'menuitemradio');
-        followOption.setAttribute('aria-checked', isFixed ? 'false' : 'true');
-        followOption.title = lockText || t('subagentModelFollowMain');
+        followOption.setAttribute('aria-checked', input.isFixed ? 'false' : 'true');
+        followOption.title = input.lockText || t('subagentModelFollowMain');
         var followCheck = document.createElement('span');
         followCheck.className = 'command-model-check';
-        followCheck.textContent = isFixed ? '' : '\u2713';
+        followCheck.textContent = input.isFixed ? '' : '\u2713';
         var followLabel = document.createElement('span');
         followLabel.className = 'command-model-name';
         followLabel.textContent = t('subagentModelFollowMain');
         followOption.append(followCheck, followLabel);
-        commandSubagentModelList.append(followOption);
+        options.append(followOption);
 
         var previousSourceId = '';
-        for (var i = 0; i < models.length; i++) {
-          var model = models[i];
+        for (var i = 0; i < input.models.length; i++) {
+          var model = input.models[i];
           if (model.sourceId !== previousSourceId) {
             var groupLabel = document.createElement('div');
             groupLabel.className = 'command-model-source';
@@ -406,21 +469,22 @@ export const modelControlsRenderFragment: WebviewFragment = {
             groupName.className = 'command-model-source-name';
             groupName.textContent = getModelSourceLabel(model);
             groupLabel.append(groupName);
-            commandSubagentModelList.append(groupLabel);
+            options.append(groupLabel);
             previousSourceId = model.sourceId || '';
           }
           var option = document.createElement('button');
-          var isSelected = isFixed && model.sourceId === sourceId && model.id === modelId;
+          var isSelected = input.isFixed && model.sourceId === input.sourceId && model.id === input.modelId;
           option.type = 'button';
           option.className = 'command-model-option';
           option.dataset.subagentModelMode = 'fixed';
+          option.dataset.subagentModelProfile = input.profile;
           option.dataset.sourceId = model.sourceId || '';
           option.dataset.modelId = model.id;
-          option.disabled = locked;
+          option.disabled = input.locked;
           option.setAttribute('role', 'menuitemradio');
           option.setAttribute('aria-checked', isSelected ? 'true' : 'false');
           option.setAttribute('aria-label', getModelDisplayLabel(model));
-          option.title = lockText || model.id || getModelDisplayLabel(model);
+          option.title = input.lockText || model.id || getModelDisplayLabel(model);
 
           var check = document.createElement('span');
           check.className = 'command-model-check';
@@ -430,8 +494,9 @@ export const modelControlsRenderFragment: WebviewFragment = {
           label.textContent = getModelDisplayLabel(model);
           label.title = model.id || getModelDisplayLabel(model);
           option.append(check, label);
-          commandSubagentModelList.append(option);
+          options.append(option);
         }
+        commandSubagentModelList.append(options);
       }
 
 `.slice(1)
@@ -554,4 +619,3 @@ export const modelControlsHelpersFragment: WebviewFragment = {
 
 `.slice(1)
 };
-
