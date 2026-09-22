@@ -1,157 +1,129 @@
-# KeepSeek 架构与维护指南
+# KeepSeek Agent 开发指南
 
-KeepSeek 是一个 VS Code 扩展：在 Secondary Sidebar 提供 AI 对话面板，负责会话、上下文文件、文件/目录引用展开、DeepSeek/OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 独立流式协议、只读工作区工具、经 `ask` / `model_review` / `delegate` 审批后的 DraftEdit 写入与 DraftRun 命令执行。本文档是仓库内 Agent/维护者约定的唯一来源，旧版约定若与本文冲突，以当前源码和本文为准。
+KeepSeek 是 VS Code 侧边栏编程 Agent，支持多模型/协议、项目上下文、只读工具、隔离子代理及经审批的文件修改和命令执行。
 
-> **给维护 Agent 的说明**：本文件作为 project instructions 注入每个 Agent run，默认受 `keepseek.projectInstructions.contextBudgetTokens`（4000 token）预算约束。**保持精简是为了完整加载、不被截断**；详细设计在 `doc/` 下，需要时用只读工具按需读取。
-> **模型画像**：主力模型 DeepSeek V4 Flash（1M 上下文窗口、Thinking high/max）。1M 窗口让"投影 + 摘要"取代硬裁剪可行；前缀缓存命中价低至 1/30，是产品的经济命脉——因此"字节冻结"是本文档最高优先级不变式。本文档用结构化中文编写，便于逐条引用。
+本文件是仓库内 AI/维护者的高优先级约定，须低于默认 4000-token 项目指令预算。架构见 `doc/keepseek-code-architecture.md`；源码与本文冲突时先核实实现，不凭旧文档猜测。
 
-## 一、最高优先级不变式（不可违反）
+## 1. 开始工作
 
-1. **缓存命中率是第一位的产品行为**（与安全同级，高于"实现简洁性"）：DeepSeek 前缀缓存从请求第 0 个 token 起逐字节匹配，任何历史字节漂移都会使该点之后整段缓存失效。改动若可能改变请求前缀字节，必须证明前缀仍稳定，或明确标注为可接受的缓存代价。
-2. **写盘与执行必须经审批管线**：create/modify/delete 只能生成 DraftEdit → ChangeSet，再由 `SafeFileEditor` 落盘；任意命令只能生成不可变 DraftRun，取得一次性 permit 后才可 spawn。默认 `ask` 由用户逐项批准；`model_review` 由隔离 reviewer 逐项审查；`delegate` 由宿主策略自动批准（见 4.5）。不要提前声称文件或命令结果已发生。
-3. **只读与 Git 边界**：只读工具仅访问工作区或已授权外部路径，Git 工具仍只有 status/diff/branch/patch/commit message 建议；commit/push 等 mutation 只能作为完整可见的 DraftRun 经当前审批模式授权，不能直接执行。
-4. **受控验证与任意执行分离**：`keepseek_run_validation` 只运行固定 `compile` / `lint` / `test`；任意命令只能走 DraftRun，不得借验证/修复循环绕过逐次确认。验证失败后的 DraftEdit/`waiting_for_apply`/修复轮次约束保持不变。
+1. 先读本文件，再按任务阅读目标源码、相邻模块和测试；架构问题查 `doc/keepseek-code-architecture.md`。
+2. 修改前用 `rg` 找全类型、消息、工具名和持久化字段引用；按“改动路由”确认影响面。
+3. 保留用户改动，不重写无关文件，不用破坏性 Git 命令。实现最小完整变更，补齐 normalize/migration/recovery 和测试。
+4. 涉及请求字节、副作用、审批或恢复时，先明确不变式，再动代码。
+5. 交付时说明改动、验证和风险；未经真实 Apply/执行/测试，不得声称已经发生或通过。
 
-## 二、常用命令（bun）
-
-```bash
-bun run compile          # src → out/（F5 调试的 preLaunchTask 也会跑）
-bun run lint             # ESLint
-bun run build:test       # 测试编译 → out-test/
-bun run test             # 测试套件（node out-test/test/runTests.js）
-bun run package:market   # 发布打包（含安全校验，见"七、发布"）
-bun run reinstall:vsix   # 本机一键重装验证：打包 → 卸载旧版 → 安装新版
-```
-
-开发调试：用 VS Code 打开仓库，按 F5 启动 Extension Development Host。
-
-## 三、分层结构速览
-
-```text
-src/
-├── extension.ts                 # 激活入口、命令注册、事件接线（不放业务）
-├── provider/
-│   ├── KeepseekChatViewProvider.ts # VS Code/Webview 协调者（消息分发/状态推送/服务接线）
-│   └── webviewMessages.ts       # Webview → 扩展消息联合类型唯一来源
-├── agent/
-│   ├── runner.ts                # 请求编排、工具调用循环、最终响应整理
-│   ├── protocol.ts              # system prompt、消息拼装、工具 schema、token 估算入口
-│   ├── historyProjection.ts     # 模型历史投影（摘要+保护消息+最近轮次）★压缩核心
-│   ├── historyCompressor.ts     # 会话摘要刷新与失败回退 ★压缩核心
-│   ├── contextUsage.ts          # 用量估算（必须与真实请求共用同一 projection）
-│   ├── toolResultAdmission.ts   # 请求级动态结果准入与模型容量校准
-│   ├── contextEpoch.ts          # 同一逻辑任务内的 provider 上下文滚动/checkpoint
-│   ├── evidence/                # 任务隔离证据存储、不可变信封与分页读取
-│   ├── currentRunContext.ts     # 项目指令/Skills/Legacy 统一投影入口
-│   ├── providers/               # Chat Completions / Responses / Anthropic Messages 客户端与 SSE parser
-│   └── tools/                   # workspace / semantic / validation / git / toolAuthorization
-├── accounts/                    # 来源 CRUD、accountResolver（凭据唯一入口）、modelDiscovery
-├── context/references/          # <path> / <path#Lx-Ly> / <keepseek-dir:> 展开、授权、@ 补全
-├── edits/                       # Patch IR/engine、ChangeSet journal/blob、SafeFileEditor、延迟 Diff
-├── runs/                        # DraftRun 提议/风险分析/一次性 permit/store/spawn 执行器
-├── sessions/                    # chatSessionStore、globalSessionStorage（摘要/归档存这里）
-├── skills/                      # Skill 发现/激活/加载（scripts 绝不隐式执行）
-├── memory/                      # legacy memory.json 只读解析与迁移
-├── shared/                      # config / types / i18n / markdown / textFileGuards 共享边界
-└── webview/                     # html（CSP/拼装）/ styles / script / input / richTextShortcuts（只输出字符串）
-```
-
-## 四、核心不变式
-
-### 4.1 请求前缀字节冻结（缓存第一）
-
-- **system 段纯静态**：`getAgentSystemPrompt()` 不随轮次变化。`contextInstructions`（AGENTS.md / Skills / Legacy Memory / Context Files 的格式化结果）持久化在 `ChatSession.contextInstructions`——字节未变就逐字节复用，禁止每轮重新生成；变化即整体重写（一次可接受的缓存代价）。
-- **user 消息"发送字节 == 持久化字节"**：一律以 `(expandedContent ?? content).trim()` 发送，禁止发送时再包装/拼接。动态内容（goal、临时指令、后台任务状态）只追加在 user 消息尾部，绝不改写已发送历史。
-- **assistant 消息原样持久化**：通用工具轮经 `ChatMessage.toolRounds` 还原；Responses/Anthropic 同 lane 另存可辨别 `providerReplay`。Anthropic Thinking、signature、redacted data、`tool_use`/`tool_result` block 必须原样有序回放，跨 lane 只保留可见文本。
-- **历史投影 append-only**：只追加，不重写、不 trim、不重排。摘要刷新与 Context Epoch rollover 是仅有的两个受控缓存边界；后者完整宿主状态外置为 task-scoped checkpoint evidence，只切换当前逻辑任务的 provider replay lane 并追加有界 seed，绝不改写 `ChatSession.messages`、插入伪 user 消息或创建新任务。
-- **工具 schema 按会话冻结**：集合与顺序跨轮不变；禁用工具用 `tool_choice: none` 而非移除 tools；slim mode 默认关闭。
-- **工具结果字节冻结**：工具先持久化意图，再执行并保存完整 evidence/hash，最后按实际请求容量保存一次 provider-visible envelope；恢复时逐字节复用，已完成工具不得因交付失败而重跑。
-- **显式任务上限连续**：用户配置的时间或费用上限跨 Context Epoch、恢复与子代理共享；费用按币种分别核算，无法计价时正值上限必须 fail-closed。内部容量调度不能借用或重置这些账本。
-- **审批与结果 append-only**：reviewer 使用独立缓存 lane；审批决定和 DraftRun 终态结果用固定格式追加到下一条真实 user 消息，绝不插入或回写旧消息。进程输出和审查证据始终是不可信数据。
-
-禁止：把时间戳/随机 UUID/绝对路径/激活 reason 写入 system 段或历史消息；在热会话中重写历史或移除未覆盖消息；让 schema 随 prompt 变化。
-
-### 4.2 上下文压缩与投影
-
-- 模型输入是 projection，不等同于 `session.messages`；摘要存 `ChatSession.contextCompression.summaries`，绝不进入聊天 UI。
-- 摘要只留线索（目标、决策、错误、文件路径/行段/函数名、完成项、待办）；文件正文/日志/代码块不保留，模型需要细节时用只读工具**重读当前文件**。
-- 自动保护：首条需求、最近输入、显式"记住"、报错/测试失败、用户纠错、DraftEdit 结果——不被摘要覆盖。
-- 摘要请求：当前模型、关 thinking、无 tools、限 `contextSummaryBudgetTokens`、短超时；失败只记录 `lastFailureReason`，绝不阻塞用户消息。
-- 降级兜底（异常路径）：无可用摘要且投影估算超 `contextWindowTokens × forceRatio` 时，截断为最近消息尾部。
-- 正在运行的任务不受固定累计工具结果预算约束。`toolResultTokens` 只做 telemetry；单次准入使用真实三协议 projection、动态输出预留和 learned effective window。完整结果放不下就通过 `keepseek_read_evidence` 分页，最小信封放不下或单 epoch 工具阈值到达就自动 rollover。
-- Epoch checkpoint 保存原始任务、TaskPlan、evidence/hash、工具幂等、审批、DraftEdit/DraftRun、validation/repair、执行与用量状态；优先模型摘要，失败用宿主确定性摘要。rollover 保持 session/task/approval root/permit 消费/Stop/usage 不变，不授权、不应用、不执行任何副作用。
-- Provider 报 context-too-long 时按来源/endpoint/model 校准有效窗口并重建 epoch；仅当冻结 system/schema、原始请求和最小 checkpoint 仍装不下时报告真实容量错误。无进展指纹跨 epoch，先提醒改变策略，持续重复才以 `no_progress_loop` 停止。
-- 配置集中在 `shared/config.ts`；数据结构在 `shared/types.ts`（`contextMeta` / `contextCompression` / `ContextProjectionMetadata`）。
-
-### 4.3 账户与模型来源
-
-- `accounts/accountResolver.ts` 是按来源解析凭证的唯一入口；删除、模型切换、摘要、主请求、余额的来源语义必须一致；密钥不得写入 workspace 或 trace。
-- 仅官网 DeepSeek（`provider === 'deepseek' && baseUrl.host === 'api.deepseek.com'`）保留余额/费用能力；其余来源只走各自的对话/SSE/工具调用/token 统计，不启用余额和费用。
-- `anthropic-compatible` 是独立 Messages 协议：`x-api-key` + `anthropic-version: 2023-06-01`，不得发送 Bearer 或 OpenAI 请求字段；仅官方 `api.anthropic.com` 默认启用顶层 ephemeral Prompt Caching，自定义网关默认不启用。
-- 来源持久化在 `globalStorageUri/accounts/<provider>/`；旧 `keepseek.apiKey` / `keepseek.baseUrl` 只复制迁移、不修改；`.initialized` 不含密钥。
-
-### 4.4 安全写入与删除
-
-- `DraftEdit` 是有版本的 union：局部修改用 canonical `text_patch_v1`（URI、base/result 字节 hash/size、编码/EOL、非重叠 byte hunks），新建/整体替换用 `full_text_v1`，删除用 `delete_v1`，移动用显式 `move_v1`。旧 `newText` 仅兼容读取；原始 patch 文本、行号和模糊匹配都不是 Apply 权威。
-- `ChangeSetStore` 是待确认修改主管线（Diff/Apply/Discard/Revert/journal）；`SafeFileEditor` 负责单文件实际落盘。patch Apply 必须先持久化 prepared journal，再核验 base，生成并验证结果，本地同目录临时文件 fsync/原子替换，最后 read-back hash 成功才记 applied；重启按 base/result/unknown 恢复，未知副作用绝不重试。不要把 patch/应用逻辑放进 `AgentRunner` 或 Provider。
-- patch 正常回滚只存 inverse patch 并绑定 result hash；delete/full replace 的原始字节进入 global storage 的 SHA-256 content-addressed blob，不把大正文嵌入 ChangeSet/checkpoint/Webview。Diff 正常延迟生成，超阈值只显示 hunk review。
-- `keepseek.maxFileBytes` 只限制全文读取/上下文，不限制本地大文件的小 patch；patch hunk/变化量、非 file provider buffer、备份、ChangeSet artifact 和全局 blob 分别受 `keepseek.patch.*` 配额限制。
-- 删除是高风险：授权 modal + Apply 前删除专用 modal；草案后文件被改动则拒绝删除；目录/二进制/超限/越界拒绝。
-- 外部文件/目录必须先授权（授权 key = `uri.toString()`）。
-
-### 4.5 DraftRun 与一次性执行
-
-- `keepseek_run_draft` 只生成不可变 pending DraftRun，不 spawn；审核面必须完整显示 executable、argv、cwd、env、用途和风险，拒绝不能改写命令。
-- `DraftRunExecutor` 只接受绑定 `draftRunId + specHash`、短时有效且单次消费的 `ExecutionPermit`，来源仅 `user_click` 或 `delegated_approver`；后者必须有匹配审批记录。AI 风险分析不能自行改变审批模式。
-- 执行使用 `spawn(executable, args, { shell: false })`；需要 shell 语法时必须显式选择 shell executable 并把原始脚本作为 argv 展示。未受信任工作区、未授权外部 cwd、状态/specHash 不匹配均硬拒绝。
-- 取消、超时、输出截断、扩展重启中断均进入持久化状态；`approved/running` 重启后只能标记 interrupted，绝不自动重跑。完成项复用必须克隆为新的 pending 并再次确认。
-
-**项目审批模式**：命令菜单提供 `ask`（请求批准，默认）、`model_review`（模型审批，长任务推荐但可能拒绝）和 `delegate`（自动批准，不经模型审查）。只有 Webview 用户操作可切换，不能通过模型工具、项目文件或 Skill 提权；选择按 workspace 持久化，新建、切换或从其他工作区复制进来的 session 都使用目标项目当前模式，绝不继承来源项目的模式。`model_review` 使用当前子代理模型发起独立、一次性、无工具请求；不得注入项目指令/Skill/隐藏推理，不得回退模型或自动批准。每个副作用先过确定性硬检查，再用精确 actionHash 审查；patch hash 必须绑定完整 canonical payload，即使 reviewer 只看到有界 hunks 也不能复用变更后的批准。记录与 session/run/target/kind/hash/policy/runtime 绑定，批准后仍经相同 Store/Editor/Executor。`delegate` 也必须生成明确“未经模型审查”的 `host_policy` 记录后才能签发 delegated permit。每轮完成后逐项处理，将决定与真实结果追加到新 user 消息；失败修改阻止依赖命令。连续拒绝 3 次或最近 50 次累计拒绝 10 次停止续跑；不可用只重试一次且不计安全拒绝。停止或切回 `ask` 撤销队列和未执行授权；重启不恢复队列、不复用旧 reviewer 批准。外部文件/cwd 按精确 URI 授权，保留信任、基线/脏编辑器、单次 permit 与取消检查。V1–V8 system/history/schema 字节冻结；V8 固定增加通用 evidence/epoch，V9 固定增加 `keepseek_apply_patch` 与 canonical Patch IR。热旧 lane 只在既有缓存自然失效或受控 rollover 时迁移；已完成工具不重跑，根 lane 的旧子代理读取工具仍只作迁移桥。
-
-### 4.6 Skills 与项目指令
-
-- 激活顺序：explicit → session → workspace-default → implicit；`allowImplicit: false` 不可隐式激活；未受信任工作区不自动加载项目 Skill。
-- `ProjectInstructionsResolver` 只读各受信任 workspace root 的 `AGENTS.md`（`.agents/**/AGENTS.md` 属于 Skill，不作为全局项目指令）；受文件大小与 token 预算约束。
-- Skill 的 `scripts/` 默认只在清单与 Run Details 中标记存在，**绝不隐式执行**；只有作为完整 DraftRun 并获用户逐次批准后才可运行。workspace 默认只持久化 Skill URI 引用，不复制内容。
-- Legacy `memory.json` 只读、最低优先级注入；迁移只能生成待确认 ChangeSet，不删除旧文件。不使用 `window.prompt()` / `window.alert()` / `window.confirm()`。
-
-## 五、改动影响面清单（改前必查）
-
-- **新增配置**：先改 `package.json` 的 contributes.configuration，再改 `shared/config.ts`。
-- **模型来源/发现/余额**：同步检查 accountStore、accountResolver、modelDiscovery、runner、historyCompressor、balanceStore、Provider；任何请求路径不得重新直读 apiKey/baseUrl。
-- **压缩相关**：同步检查 shared/types.ts、historyProjection、historyCompressor、contextUsage、runner——真实请求与 usage 估算必须共用同一 projection。
-- **evidence/epoch 相关**：同步检查 evidence/*、toolResultAdmission、contextEpoch、runCheckpoint、三 Provider 原生 replay、DSML、session 协议迁移和 Run Details；不得在 Runner 重新引入累计终止预算或可见续轮。
-- **项目指令/Skill/Legacy**：同步检查 projectInstructions、skillActivationResolver、contextDeduplication、currentRunContext、contextUsage、protocol、Run Details/trace；不要在 Provider 内复制匹配或优先级逻辑。
-- **Webview → 扩展消息**：更新 webviewMessages.ts 的联合类型 + Provider `handleMessage()` + webview 发送点；剪贴板兜底消息由 richTextShortcuts 统一发起。
-- **扩展 → Webview 主动消息**：不进 `WebviewMessage`，在 webview message listener 中处理。
-- **新增 Agent 工具**：更新 protocol.ts 的 schema + runner 的工具路由；实现放独立模块。
-- **引用格式**：同步检查 fileReference、directoryReference、webview/input/script.ts、webview/script.ts 的序列化/反序列化/打开逻辑。
-- **DraftEdit/ChangeSet 行为**：同步检查 `textPatch`、`draftEdit`、`changeArtifactStore`、ChangeSetStore、SafeFileEditor、DraftDiffService、审批 hash/surface、RunCheckpoint/epoch/子代理与 Webview；canonical 字段、journal 和 blob 引用不可只改一侧。
-- **审批 / DraftRun 行为**：同步检查 protocol 版本/冻结 schema、approvals/*、runner、toolAuthorization、runs/*、Provider、webviewMessages、script/styles、i18n、审批/结果 user-tail 与 usage 分类；reviewer 不得写文件或启动进程，实际执行不得放进 AgentRunner。
-- **UI 归属**：样式只碰 styles.ts；输入区只碰 input/script.ts；transcript/设置/会话只碰 script.ts；通用快捷键碰 richTextShortcuts.ts（两个编辑器共用，勿复制实现）。
-- **公共逻辑复用**：Markdown fence、字节格式化、配置读取、错误字符串、文本文件判断用 shared/*，勿复制。
-
-## 六、测试与手测
-
-- 单测：`bun run build:test && bun run test`（重点覆盖：缓存字节稳定、压缩 fallback、引用展开、ChangeSet、授权、Skill 激活）。
-- 改压缩核心后必须验证：压缩关闭 fallback、无摘要 fallback、摘要失败 fallback、protected 消息、最近轮次、context usage 估算一致。
-- 改 evidence/epoch 后必须验证：20MB 分页、跨 session/task 拒绝、envelope 恢复字节一致、三协议批次配对、context-too-long 自适应、摘要 fallback、同 task 跨 epoch、无伪 user 消息、工具不重跑与副作用不确定态。
-- 改引用/输入后手测：全文/行段/目录引用、外部授权、不可读文件跳过、拖拽（多数据源 + 判空）、`@` 补全、编辑重发。
-- 改 edits 后手测：大文件小 patch 的 Apply/重启/Revert、base/result hash 冲突、prepared/applying/uncertain 恢复、普通/hunk-only Diff、非 file fallback、Apply All partial、删除 modal、脏编辑器与符号链接边界。
-- 改审批/DraftRun 后手测：三档模式、reviewer 三协议、提议→审核→批准→执行、拒绝/不可用重试/熔断、切回 ask/停止/重启撤销、删除和外部 URI、依赖阻断、流式输出、超时/截断、重复点击、Windows/POSIX argv 与显式 shell 差异。
-- 大字符串文件（webview/script.ts、webview/input/script.ts）改动后保持 DOM id / message type / 序列化格式兼容，并手测输入、拖拽、`@` 引用、Apply/Discard。
-
-## 七、发布
+常用命令：
 
 ```bash
+bun run compile
+bun run lint
+bun run build:test
+bun run test
 bun run package:market
 ```
 
-`package:market`（scripts/package-market.js）：检查运行时依赖已安装 → 清理 `out/` → 编译 → `vsce package --dependencies` → `verify-vsix.js` 校验（确认含 `node_modules/ignore` 与 main 入口、无旧扁平 `out/*.js` 产物）。**绝不**裸跑 `npx vsce package --no-dependencies`（市场版会缺依赖、激活失败）。`bun run reinstall:vsix` 用于本地一键重装验证。
+开发调试按 F5。市场包只用 `bun run package:market`，禁止 `vsce package --no-dependencies`。
 
-## 八、详细设计文档
+## 2. 当前代码分层
 
-- `doc/cache_keepseek.md`：缓存命中优化技术详解（维护者/进阶）
-- `doc/keepseek-agent-runtime-workflow.md`：Agent 运行时工作流
-- `doc/keepseek-api-payload-reference.md`：API payload 参考
-- `doc/keepseek-file-reference-spec.md`：文件引用规范（序列化格式、右键菜单、拖拽流程等细节）
+```text
+src/extension.ts       激活、命令和生命周期接线；不放业务
+src/provider/          VS Code/Webview 协调、消息/状态、模型切换
+src/webview/           HTML/CSS/浏览器脚本字符串；input/ 按 fragment 组合
+src/accounts/          来源 CRUD、模型发现/目录/选择、凭据解析
+src/context/           上下文、文件/目录/Skill 引用、外部授权
+src/skills/            Skill 发现、加载、激活、创建
+src/memory/            legacy memory.json 只读解析与迁移
+src/agent/             请求投影、模型/工具循环、压缩、evidence/epoch、用量
+  providers/           Chat Completions / Responses / Anthropic Messages 客户端
+  tools/               workspace / semantic / git / validation / authorization
+  subagents/           隔离 child runtime、调度、profile、路径租约和结果存储
+  evidence/            工具意图、完整证据、确定性信封和分页读取
+src/approvals/         reviewer/host policy、action hash、记录和熔断
+src/edits/             DraftEdit、canonical Patch IR、ChangeSet、SafeFileEditor
+src/runs/              DraftRun、风险、一次性 permit、store、batch、spawn
+src/sessions/          会话、协议迁移、分片持久化、retention
+src/shared/            跨层 types/config/i18n/文本守卫/原子存储
+test/                  按行为契约组织的回归测试
+```
+
+`src/provider/` 是宿主协调层，`src/agent/providers/` 是上游 API 层。`KeepseekChatViewProvider` 只做跨模块编排；规则、持久化和副作用执行下沉到所属子系统。
+
+## 3. 不可违反的不变式
+
+### 3.1 Provider 前缀与会话历史
+
+- 缓存稳定与安全同级。`getAgentSystemPrompt()` 保持静态；时间戳、随机 ID、绝对路径和激活原因不得进入静态 system。
+- `ChatSession.contextInstructions` 保存稳定上下文字节；内容未变必须原样复用。
+- user 发送字节等于持久化字节：使用 `(expandedContent ?? content).trim()`，不得在 Provider 层重写旧 user 消息。
+- `session.messages` append-only，不 trim、不重排、不插入伪 user。摘要只改变 projection；摘要刷新与 Context Epoch rollover 是受控缓存边界。
+- Chat Completions 工具轮存 `toolRounds`；Responses/Anthropic 原生块存 `providerReplay`，仅在相同 protocol/source/endpoint lane 回放。
+- 工具集合、顺序和 schema 按会话冻结；禁用工具用 `tool_choice: none`，不能按轮移除。热旧协议只在缓存失效或受控边界迁移。
+- `buildProviderRequestProjection()` 是真实请求、用量估算、压缩决策和硬上限的共同权威，禁止各自重建 messages/tools。
+
+### 3.2 Evidence、容量与长任务
+
+- 工具先持久化 intent，再执行并保存完整 evidence/hash，最后一次性保存 Provider-visible envelope；已完成工具不得因交付失败或恢复而重跑。
+- 大结果用 `keepseek_read_evidence` 分页；准入使用真实三协议 projection、输出预留和 learned effective window，不恢复固定累计结果预算。
+- Epoch checkpoint 覆盖任务、计划、evidence、幂等、审批、副作用、验证/修复和用量；rollover 不新建任务、不授权、不执行副作用。
+- 时间/费用上限跨恢复、epoch、子代理共享且不可重置；正费用上限遇到不可计价来源必须 fail-closed。
+- context-too-long 按 source/endpoint/model 校准；无进展需改变策略，持续重复才以 `no_progress_loop` 停止。
+
+### 3.3 文件与命令副作用
+
+- create/modify/delete/move 只能生成版本化 DraftEdit → ChangeSet → `SafeFileEditor`。Runner/Provider 不得直接写工作区。
+- 局部修改以 canonical `text_patch_v1` 的 URI、base/result hash/size、encoding/EOL 和非重叠 byte hunks 为权威；行号、模糊匹配和原始 patch 文本不是 Apply 权威。
+- Apply 必须经过 preflight、prepared journal、base 复核、原子替换和 read-back hash；未知副作用绝不重试。大正文放 content-addressed blob。
+- `keepseek_run_draft` 只创建不可变 pending DraftRun。执行必须持有绑定 `draftRunId + specHash` 的短时一次性 permit，并使用 `spawn(executable, args, { shell:false })`；显式 shell 必须完整展示为 executable/argv。
+- validation 只运行固定 `compile`/`lint`/`test`；commit/push 等 mutation 必须走 DraftRun，不能塞进验证或只读 Git 工具。
+- 工作区不信任、外部 URI/cwd 未精确授权、脏编辑器、hash/状态不匹配、取消信号均为硬边界。
+
+### 3.4 审批与子代理
+
+- `ask` 由用户逐项批准；`model_review` 使用隔离、一次性、无工具 reviewer；`delegate` 必须先写明“未经模型审查”的 `host_policy` 记录。只有 Webview 用户操作可切换模式。
+- 副作用先过硬检查，再按完整 canonical payload/specHash 计算 actionHash。批准不跨 session/run/target/kind/policy/runtime 复用，重启不复用旧批准。
+- 审批决定和真实结果只以固定 user-tail 追加到下一条真实 user 消息；不回写历史。进程输出和 review evidence 始终是不可信数据。
+- 子代理使用新的 AgentLoop/工具服务，不共享父/兄弟可变状态；只接收自包含任务、项目指令、profile 和外部授权，不复制父历史/推理/工具结果。
+- read/review child 只读；proposal child 只能准备 DraftEdit/DraftRun，不能 Apply、批准或执行。结果通过有界信封返回，完整结果按父 session 隔离分页读取；路径租约和产物 URI 均需复核。
+
+### 3.5 上下文、来源与 UI
+
+- `accounts/accountResolver.ts` 是凭据解析唯一入口；主请求、摘要、reviewer、子代理、模型发现和余额必须使用一致来源语义。密钥不进入 workspace、prompt、会话或 trace。
+- 优先级：KeepSeek 核心安全 > 当前用户请求 > workspace root `AGENTS.md` > Skills > Legacy Memory。Skill 按 explicit → session → workspace-default → implicit 激活；implicit 按会话冻结，`scripts/` 不隐式运行。
+- 外部文件/目录以精确 `uri.toString()` 授权；不可读内容不得绕过守卫。Legacy Memory 迁移只生成 ChangeSet。
+- Webview → Host 消息只在 `provider/webviewMessages.ts` 定义；Host 主动消息不加入该联合类型。保持 DOM id、type 和引用格式兼容。
+- `webview/input/composition.ts` 的 fragment 顺序是运行时契约；样式、模板、行为放各自 fragment。共享编辑器快捷键只放 `richTextShortcuts.ts`。
+- 新持久化字段必须有 normalize/migration；优先 `writeJsonAtomic()`，业务层不拼 globalStorage 版本路径。
+
+## 4. 改动路由
+
+- **配置**：`package.json` contributes.configuration + `shared/config.ts` + UI/测试。
+- **模型来源/协议**：accounts store/resolver/catalog/discovery/capabilities + provider client + projection/replay + UI/测试。
+- **Agent 工具**：`protocol.ts` 固定 schema + `runner.ts` 路由 + 独立 service + authorization/evidence/测试。
+- **投影/压缩**：types + providerRequestProjection + historyProjection/compressor/archive + contextUsage + Runner + 三协议测试。
+- **evidence/epoch**：evidence/* + admission + contextEpoch/runCheckpoint + replay/DSML + session migration/Run Details。
+- **项目上下文**：projectInstructions + skill activation/load + dedup/currentRunContext + protocol/usage/trace。
+- **引用/输入**：context/references + Webview references/composer codec + opener/授权；手测拖拽、@、编辑重发。
+- **Webview 消息**：webviewMessages 联合类型 + Provider `handleMessage()` + 发送/接收 fragment + i18n。
+- **DraftEdit**：draftEdit/textPatch/artifact + ChangeSet/SafeFileEditor/Diff + approval hash/surface + checkpoint/subagent/UI。
+- **审批/DraftRun**：approval store/reviewer + runs/* + Provider/Runner/authorization + user-tail/usage/UI。
+- **子代理**：subagents runtime/scheduler/store/profile/pathScope + model resolver + protocol/admission/checkpoint/usage。
+- **会话结构**：`shared/types.ts` + chatSessionStore normalize/migration + GlobalSessionStorage + UI state + 旧数据测试。
+
+## 5. 验证与交付
+
+- 默认运行 compile、lint、`bun run build:test && bun run test`；仅文档改动可用链接/格式检查替代，并说明未跑代码测试。
+- 改缓存/投影：验证字节稳定、三协议 payload/replay、无摘要/摘要失败 fallback、protected/recent、usage 一致。
+- 改 evidence/epoch：验证分页与跨 scope 拒绝、envelope 恢复、context-too-long、无伪 user、工具不重跑、未知副作用不重试。
+- 改 edits/runs/approvals：验证三模式、hash 冲突、恢复、取消/超时/重复点击、删除/外部路径、依赖和跨平台 argv。
+- 改 Webview fragment：验证首次 ready、输入/拖拽/@、会话、设置、Apply/Discard 和键盘/焦点。
+- 测试应守行为契约，优先扩展最接近的现有 `test/*.test.ts`；不要只断言内部实现。
+
+## 6. 按需阅读
+
+- `doc/keepseek-code-architecture.md`：目录、依赖、调用链、持久化与改动定位
+- `doc/keepseek-agent-runtime-workflow.md`：Agent 运行时、长任务与恢复
+- `doc/cache_keepseek.md`：缓存前缀、投影、压缩与观测
+- `doc/keepseek-api-payload-reference.md`：三协议真实 payload
+- `doc/keepseek-file-reference-spec.md`：引用语法
+- `SUBAGENTS.md`：子代理架构、安全、恢复与用量

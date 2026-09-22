@@ -189,10 +189,10 @@ bun run reinstall:vsix
 ### 维护资料
 
 - [Agent 运行时工作流](./doc/keepseek-agent-runtime-workflow.md)
-- [缓存命中优化技术详解](./doc/cache_keepseek.md)
+- [请求缓存与上下文投影](./doc/cache_keepseek.md)
 - [API Payload 参考](./doc/keepseek-api-payload-reference.md)
 - [文件引用规范](./doc/keepseek-file-reference-spec.md)
-- [子代理架构与 Profile](./SUBAGENTS.md)
+- [子代理架构、安全与用量](./SUBAGENTS.md)
 
 ### 致谢
 

@@ -1,656 +1,354 @@
-# KeepSeek Agent Runtime 工作流程与核心功能说明
+# KeepSeek Agent 运行时工作流
 
-本文面向 KeepSeek 的维护者和需要理解运行机制的使用者，梳理 KeepSeek 在重构后作为 VS Code 侧边栏 Agent 的主要工作流程、核心功能边界和关键安全规则。本文以当前源码为准，不沿用旧版假设。
+> 本文是运行时主线的交接文档：从扩展激活、请求构建、流式工具循环，到审批、副作用、长任务和崩溃恢复。目录职责见 [`keepseek-code-architecture.md`](keepseek-code-architecture.md)，请求字节与上下文容量见 [`cache_keepseek.md`](cache_keepseek.md)，子代理见 [`../SUBAGENTS.md`](../SUBAGENTS.md)。
 
-子代理的运行期工具闸门、proposal 路径租约、类型化签收、结果复用、按 profile 模型和脱敏进度/诊断契约见 [子代理运行时安全与兼容性](./subagent-runtime-security.md)。
+## 1. 运行时边界
 
-KeepSeek 的本质是一个 VS Code 扩展内的可恢复 coding agent runtime。扩展端负责会话、上下文、引用展开、Tool Evidence、动态准入、Context Epoch、本地工具、模型请求循环、trace 和安全审批；云端模型负责语言理解、推理、工具选择、参数生成和最终回复生成。
-
-## 1. 总体架构
-
-KeepSeek 的 Agent 链路可以分成四层。
-
-| 层级 | 主要模块 | 职责 |
-|---|---|---|
-| Webview 表现层 | `src/webview/*`、`src/webview/input/*` | 输入框、消息列表、引用 chip、设置弹窗、活动状态文案、发送/停止交互 |
-| Provider 编排层 | `src/provider/KeepseekChatViewProvider.ts` | 接收 Webview 消息、维护 busy 状态、会话接线、引用授权、调用业务服务和 Agent Runtime |
-| Agent Runtime 层 | `src/agent/agentRequestCoordinator.ts`、`src/agent/runner.ts`、`src/agent/evidence/*`、`src/agent/toolResultAdmission.ts`、`src/agent/contextEpoch.ts`、`src/agent/providerRequestProjection.ts`、`src/agent/providers/*` | 构造权威协议投影、证据/准入/epoch、上下文压缩与用量估算，流式调用三种 Provider 协议并执行工具循环 |
-| 本地能力层 | `src/agent/tools/workspaceTools.ts`、`src/edits/*`、`src/context/*`、`src/sessions/*` | 只读工作区工具、引用展开、DraftEdit 安全写入、上下文文件、会话和压缩状态持久化 |
-
-几个边界很重要：
-
-- Provider 只做协调，不直接承载可独立测试的大块业务逻辑。
-- `AgentRunner` 只负责编排模型请求、工具调用循环和最终响应整理。
-- 上下文压缩属于 Agent Runtime 层：`AgentRequestCoordinator` 负责压缩刷新调度和 AgentRequest 组装，`HistoryCompressor` 负责摘要刷新，`historyProjection` 负责把真实会话投影成模型请求历史，`contextUsage` 使用同一套投影估算上下文窗口占用。Provider 只触发协调器，Session 存储只负责保存真实消息和 `contextCompression` 状态。
-- 工具结果控制不依赖累计预算：`ToolEvidenceStore` 保证先意图、后完整结果、再不可变信封；`ToolResultAdmissionController` 按每次真实请求决定内联量；`contextEpoch` 在同一逻辑任务内滚动 Provider 上下文。
-- 工作区工具保持只读，不能写磁盘。
-- AI 不能直接修改文件，只能创建 DraftEdit。
-- 真正写入磁盘只发生在用户点击 Apply 后，由 `SafeFileEditor` 执行。
-
-## 2. 一次 Agent 请求的完整流程
-
-### 2.1 Webview 收集输入
-
-用户在输入框中输入自然语言，也可以通过这些方式插入上下文引用：
-
-- 当前编辑器文件或选区。
-- Explorer 右键 `KeepSeek: Add File to Chat` 添加文件，支持多选去重。
-- Explorer 右键 `KeepSeek: Add Folder to Chat` 添加目录。
-- 拖拽文件到输入框。
-- 终端、输出、Debug Console 选区落盘后引用。
-- `@` 文件/目录补全。
-- `$` Skill 引用，Skill 可来自工作区 `.agents` 或用户 `~/.codex/skills`。
-
-Webview 内部使用富文本输入框显示引用 chip。发送时，`serializePrompt()` 会把 DOM 里的引用还原成可解析的文本格式：
+KeepSeek 是 VS Code 扩展，不是独立 Agent 服务。宿主掌握会话、工作区权限、工具执行、审批和持久化；模型只产生文本、工具调用及待审核提议。
 
 ```text
-文件名 (第N-M行) <路径#LN-LM>
-目录名/ <keepseek-dir:路径>
+VS Code / Webview
+  → KeepseekChatViewProvider
+  → AgentRequestCoordinator
+  → AgentRunner / AgentLoop
+  → provider-native projection
+  → Provider client + SSE parser
+  → Tool / Evidence / Context Epoch
+  → AgentResponse
+  → session persistence + Webview update
 ```
 
-如果当前 `state.isBusy` 为 true，普通提交不会开启第二个任务，而是提示当前任务运行中。只有用户明确点击停止按钮时，才会发送 `abortPrompt` 中止当前运行。
+最重要的责任边界：
 
-### 2.2 Provider 准备运行状态
+- `extension.ts` 只做激活、注册和接线。
+- `KeepseekChatViewProvider` 是 UI、会话和服务协调者，不承载 patch 或进程执行算法。
+- `AgentRunner` 编排模型与工具循环，可以生成 DraftEdit/DraftRun，但不能直接写盘或 spawn。
+- 文件变更只由 `ChangeSetStore` + `SafeFileEditor` 落盘。
+- 命令只由 `DraftRunExecutor` 在消费一次性 permit 后执行。
+- Provider 客户端只处理各自协议、认证和流式解析，不复制上下文/审批逻辑。
 
-Webview 发送 `{ type: 'sendPrompt', ... }` 后，Provider 的 `handleMessage()` 分发到 `sendPrompt()`。
+## 2. 关键模块
 
-Provider 会完成这些本地准备：
+| 层 | 主要入口 | 职责 |
+| --- | --- | --- |
+| 激活与宿主 | `src/extension.ts` | 注册 View、命令、事件和持久化服务 |
+| UI 协调 | `src/provider/KeepseekChatViewProvider.ts` | 会话选择、消息分发、状态推送、Apply/Run 入口 |
+| 请求协调 | `src/agent/agentRequestCoordinator.ts` | 请求快照、压缩刷新、Runner 生命周期 |
+| Agent 循环 | `src/agent/runner.ts`（`AgentLoop` / `AgentRunner`） | 模型调用、工具路由、轮次推进、最终响应 |
+| 请求协议 | `src/agent/protocol.ts`、`providerRequestProjection.ts` | system、schema、三协议原生投影 |
+| Context | `currentRunContext.ts`、`context/references/*`、`skills/*` | 项目指令、Skill、引用和授权 |
+| 长上下文 | `historyProjection.ts`、`historyCompressor.ts`、`evidence/*`、`contextEpoch.ts` | 摘要、结果准入、Evidence、rollover |
+| 副作用 | `edits/*`、`runs/*`、`approvals/*` | 草案、审核、应用、执行与恢复 |
+| 来源 | `accounts/*`、`agent/providers/*` | 凭据解析、模型发现、协议请求与 SSE |
+| 持久化 | `sessions/*`、`runCheckpoint.ts`、`usageLedger.ts` | 会话、checkpoint、用量和诊断 |
 
-1. 检查当前是否 busy。
-2. 解析模型配置和 Agent 设置。
-3. 创建 `AbortController`。
-4. 记录 prompt 中外部引用的授权集合。
-5. 设置活动状态为 `preparing`、`expanding_references`。
-6. 调用 `expandPromptReferencesInPrompt()` 展开文件/目录引用。
-7. 将用户消息写入当前会话。
-8. best-effort 调用 `AgentRequestCoordinator.refreshContextCompressionBeforeRun()`。只有当前会话没有可用摘要且 raw 历史估算接近上下文窗口时，才会发送前同步刷新摘要；其它可刷新场景会留到本轮完成后的后台刷新。
-9. 创建 streaming assistant 消息，用来显示流式输出。
-10. 通过 `AgentRequestCoordinator.createAgentRequest()` 组装请求并调用 `AgentRunner.run()`。
-11. 本轮完成后，`AgentRequestCoordinator.scheduleBackgroundContextCompressionRefresh()` 可在后台刷新摘要。后台刷新按 session 去重，并在写回前检查消息位置，避免编辑重发或会话变化后用旧摘要覆盖新历史。
+共享数据结构优先查 `src/shared/types.ts`；配置只从 `src/shared/config.ts` 读取。
 
-Provider 不直接执行模型工具，也不直接管理 DraftEdit 写入细节。它只是把 UI、会话状态和底层服务串起来。
+## 3. 扩展启动与状态装配
 
-### 2.3 ExecutionMode 与计划确认工作流
+激活阶段大致按以下顺序完成：
 
-输入框工具栏中 `/` 右侧的 `N` / `P` 按钮用于选择会话级“执行方式”，当前只有 `normal`（常规）与 `plan`（计划）；悬停或键盘聚焦会显示当前方式说明，点击后在独立菜单中切换。它与命令菜单中的项目级 `ApprovalMode` 完全正交：`ExecutionMode` 决定什么时候允许从调查进入实施，`ApprovalMode` 决定实施阶段产生的具体 DraftEdit / DraftRun 由用户、reviewer 还是现有 host policy 批准。批准计划只跨过“开始实施”这一道工作流门，不会批准任何尚未形成的文件修改或命令，也不会绕过 ChangeSet、SafeFileEditor、DraftRun、actionHash、一次性 permit、workspace trust、脏编辑器检查或既有审批管线。
+1. 创建账户、模型、会话、ChangeSet、DraftRun、审批、Skill 和 Usage Ledger 等服务。
+2. 恢复持久化记录；对重启时仍处于中间态的写入、命令和 Agent run 做保守归一化。
+3. 注册 `keepseek.chatView`、工作区命令、右键引用命令与 URI 打开处理。
+4. 建立 Provider 与 Webview，推送配置、账户、会话、变更和运行状态。
+5. 监听配置、工作区、编辑器和会话变化，更新宿主状态。
 
-新会话、旧数据缺失字段和未知值都归一化为 `normal`。执行方式保存在当前 `ChatSession`，切换会话时恢复各自值；一个 turn 开始后把值冻结进 `AgentRequest`，运行期间 Webview 与 Provider 都禁止切换。复制其它工作区会话时执行方式重置为 `normal`，不复制待确认计划权限。
+Webview 消息的唯一联合类型在 `provider/webviewMessages.ts`。Webview → 扩展的新消息必须同时更新类型、`handleMessage()` 和发送点；扩展主动推送消息不加入该联合类型。
 
-`plan` 的模型指令不修改全局 system prompt，也不增删或重排工具 schema。Provider 把稳定的 planning tail 追加到当前真实 user 消息的 `providerContent` 并一同持久化；首次发送、历史回放、上下文压缩投影和 usage 估算因此读取相同字节。`normal` 不追加尾部，所以普通请求保持原来的 system、tools 和 user 字节。计划批准后的实施请求是一条新的受保护 host continuation 消息，不会回写原 user/assistant 消息。
+## 4. 一次用户请求
 
-规划阶段允许读取、搜索、符号分析、只读 Git、会话证据、受现有授权约束的 validation，以及真正只读的 research/review 子代理。`src/agent/executionMode.ts` 的阶段守卫在工具授权和 reviewer 之前拒绝 DraftEdit、patch、删除、DraftRun，以及 writer/proposal 子代理；工具 schema 仍保持稳定。即使恢复缺陷让最终响应携带 DraftEdit / DraftRun，Provider 也会丢弃这些实施产物，不写入 ChangeSet / DraftRun Store，不进入 `model_review` 或 `delegate` 队列，并且不把该响应登记成可批准计划。
+### 4.1 输入规范化与上下文冻结
 
-成功的 Plan turn 把计划正文只保存在正常 assistant 消息中；单独持久化的 `PlanWorkflowRecord` 绑定 session ID、原 user message ID、assistant message ID、正文 SHA-256、状态及决定时间。Webview 只接收不含 hash 的视图，并只回传 `{ planId, action }`。宿主收到“开始执行”“修改计划”或“退出计划”时，从会话里的 assistant 消息重新计算 hash，校验当前会话、最新 pending 状态和一次性决定资格。旧卡片、重复点击、跨会话 ID、正文变化或被新计划取代的记录均不能启动执行；重启只恢复有效 pending 卡片，绝不自动执行。
+用户提交后，Provider：
 
-“开始执行”先把会话切回 `normal`、持久化 `approved`，再用当前主模型发起新的实施 turn；原 `ApprovalMode` 保持不变。“修改计划”标记 `revision_requested`、维持 `plan` 并聚焦输入框；用户直接发送新意见也会先使旧 pending 卡失效，新完整计划将其标记为 `superseded`。“退出计划”或在菜单切回常规会标记 `exited`，不发送实施消息。
+1. 拒绝空输入，并确认工作区、会话和当前 run 状态。
+2. 读取当前项目指令、显式/会话/默认/隐式 Skill、Legacy Memory 和授权上下文。
+3. 首轮把格式化结果冻结为 `ChatSession.contextInstructions`；后续变化追加到当前真实 user 消息尾部，不回写旧前缀。
+4. 按“目录引用 → 文件引用 → Skill”展开输入；外部 URI 先检查精确授权。
+5. 持久化原始 `content`、必要时的 `expandedContent`，以及真正发送的 `providerContent`。
+6. 建立请求快照与取消控制器，然后交给 `AgentRequestCoordinator`。
 
-计划确认只能来自 Webview 中真实用户点击的 `resolvePlanDecision` 消息。没有模型工具能发送这类宿主消息；模型自述、项目文件、Skill、特殊文本、`model_review` 和 `delegate` 都不能批准计划。`TaskPlanTracker` 仍只是一个 turn 内的运行进度追踪器，不是用户审批的实施计划，也不参与上述状态机。
+项目指令来源只有受信任 workspace root 的 `AGENTS.md`；`.agents/**/AGENTS.md` 属于 Skill，不是全局项目指令。Skill 的脚本只可作为 DraftRun 提议，绝不因激活而执行。
 
-### 2.4 Prompt 引用展开
+### 4.2 历史与原生请求
 
-发送给模型前，Provider 会先展开 prompt 中的引用。
+Coordinator 先按模型画像刷新摘要，再由 `buildProviderRequestProjection()` 生成实际 lane：
 
-文件引用由 `context/references/fileReference.ts` 处理：
+- Chat Completions；
+- OpenAI Responses；
+- Anthropic Messages。
 
-- 支持 `<path>`、`<path#Lx-Ly>`、`<path#LxCy-LmCn>`。
-- 工作区内文件可直接展开。
-- 外部文件必须先授权。
-- 图片、媒体、归档、常见二进制扩展会跳过。
-- 全文读取和上下文引用受 `keepseek.maxFileBytes` 约束；局部 patch 不受目标文件总大小约束。Provider 内联由 `keepseek.providerInlineResultMaxChars` 控制，evidence 与 patch artifact 分别使用独立配额。
-- 行段引用会读取指定行列范围并包装为 Markdown 代码块。
+实际请求、token 估算、工具结果准入和缓存观测共用这一投影。当前 request protocol/tool schema 是 V9；热旧会话只在受控边界迁移。
 
-目录引用由 `context/references/directoryReference.ts` 处理：
+### 4.3 来源解析
 
-- 支持 `<keepseek-dir:path>`。
-- 不展开整个目录内容。
-- 展开为目录锚点、使用说明和受限条目清单。
-- 如果模型需要更多细节，应继续调用只读工作区工具。
+所有凭据必须经 `accounts/accountResolver.ts` 解析。主请求、摘要、模型发现、余额和删除操作不能各自读取 API key/base URL。
 
-引用展开的设计目标是：用户显式提供的上下文优先进入模型，但避免把整个目录或不可读文件一次性塞进 prompt。
+- DeepSeek/OpenAI-compatible 使用 Chat Completions lane。
+- OpenAI Responses 使用独立 Responses replay。
+- Anthropic-compatible 使用 Messages 协议、`x-api-key` 与固定 `anthropic-version`。
+- Ollama 只走其兼容对话能力。
+- 仅官方 DeepSeek endpoint 启用余额/费用语义；仅官方 Anthropic 默认启用顶层 ephemeral Prompt Caching。
 
-## 3. AgentRunner 主循环
+密钥不可写入 workspace、trace、checkpoint 或 Webview payload。
 
-`AgentRunner.run()` 是 Agent runtime 的核心。它负责把一次用户请求转换为一轮或多轮模型请求。
+## 5. Agent 工具循环
 
-### 3.1 构造上下文投影与初始 messages
-
-`AgentRunner.run()` 在请求模型前会先调用 `src/agent/historyProjection.ts` 的 `buildHistoryProjection()`。这是上下文压缩进入模型请求的核心边界：真实的 `session.messages` 不会被替换成摘要，也不会因为上下文窗口限制被硬裁剪；Runner 只为本次模型请求构造 projection。
-
-上下文压缩始终启用，projection 由这些部分组成：
-
-1. 可选 synthetic summary system message，来自 `ChatSession.contextCompression.summaries`。
-2. protected messages，包括首条用户需求、最近用户请求、显式保留约束、用户纠错、明显报错或测试失败、DraftEdit 关键结果等。
-3. 未被摘要覆盖（`coveredMessageIds`）的其余 user/assistant 消息——**append-only**：消息只追加、内容冻结（始终以 `expandedContent ?? content` 原样发送），只有摘要刷新覆盖时才成批移除，这是低频缓存失效点。recent 窗口（`keepRecentTurns`）只用于判定哪些消息可压缩。
-4. 当前展开后的用户 prompt。
-
-之后 `providerRequestProjection.ts` 以 `buildInitialAgentMessages()` 的通用结果为唯一输入，再投影到具体协议。Chat Completions 保留原 messages；Responses 生成原生 Items；Anthropic 把全部 system/context/summary 按原顺序放到顶层 `system` text blocks，只在 `messages` 中保留 user/assistant：
-
-1. 纯静态 system prompt，只依赖界面语言。
-2. 会话冻结的 `contextInstructions` system message，包含 AGENTS.md、Skills、Legacy Memory 与 Context Files。
-3. synthetic summary system message。
-4. projection 选中的历史消息。
-5. 当前展开后的用户 prompt，如果它还没有作为最后一条 user message 出现在 projection 中。
-
-system prompt 的职责按固定顺序覆盖：身份与语言、安全和修改授权边界、自适应工作循环、任务类型分支、按证据选择工具、DraftEdit/validation 状态语义、证据/澄清/停止/最终回答契约，以及项目上下文优先级。它不注入模型名、Provider、时间、路径、UUID、上下文窗口或运行时能力。
-
-`TaskPlanTracker` 只跟踪宿主可见的运行状态和 UI 步骤，不会作为消息发给模型，也不能替代 system prompt 中的决策策略；它也不是 `ExecutionMode=plan` 产生、由用户确认的实施计划。
-
-### 3.2 调用模型
-
-`providers/factory.ts` 按账号冻结的 provider 分派三条独立协议路径。DeepSeek、Kimi、GLM、QwenCloud、Ollama 与 OpenAI compatible 使用 Chat Completions；`openai-responses` 使用 Responses；`anthropic-compatible` 使用原生 Messages，不做 OpenAI→Anthropic 转换。
-
-请求特征：
-
-- 使用 streaming。
-- DeepSeek 内置 profile 支持 `deepseek-v4-flash` 和 `deepseek-v4-pro`，保留 Flash / Pro × 非思考 / High / Max 的既有预算；其它账号的模型来自各自 `/models` 或手动模型 ID，并使用 metadata-first 通用画像。
-- Thinking 开关和 `high` / `max` reasoning effort 由输入区选择。
-- `src/shared/modelProfiles.ts` 是运行画像唯一解析入口。能力优先级为：手动模型显式覆盖 > 最新发现元数据 > DeepSeek 内置元数据 > `modelContextWindowGuesses.ts` 的受控模型家族猜测 > 保守 fallback。已知模型名称可分别猜测 context 与 output；没有公开输出上限或名称未知的模型仍使用 32768 context tokens / 8192 output tokens fallback。
-- 账号设置中的上下文窗口与最大输出使用模型领域惯用的紧凑 token 表达，例如 `32768 → 32K tokens`、`1000000 → 1M tokens`。猜测/fallback 会显式标注；点击上下文数值可按 `K tokens` 编辑（例如 1M 输入 `1000`），点击最大输出可按精确 tokens 编辑。保存后写入账号下的精确覆盖，刷新 `/models` 不会覆盖它。
-- 名称猜测覆盖 Qwen 3.6/3.7/3.8、GLM 4.5–5.3、DeepSeek V4 与 Qwen Audio Realtime 等已知文本/实时模型。`wan2.7-image`、`wan2.7-image-pro`、`qwen-audio-3.0-tts-plus` 会作为非文本资源保留在账号清单并显示“不适用”，但不会进入文本 Agent 的模型目录，也不能编辑 token 能力。
-- 最终输出上限不超过 learned effective context window，工具选择轮和最终回答轮分别使用动态输出预留。Chat Completions、Ollama、Responses、Anthropic 与摘要请求消费同一画像，但各协议只发送自己支持的字段；不再为每次请求僵硬预留完整声明输出上限。
-- 自动压缩阈值由命令菜单中的用户档位覆盖 profile 的 `triggerRatio / forceRatio`：提前清理 `0.70 / 0.85`、默认平衡 `0.80 / 0.92`、缓存优先 `0.85 / 0.95`；其他压缩参数仍保留 profile 原值。
-- DeepSeek Chat Completions 固定使用 V4 推荐的 `temperature=1.0`、`top_p=1.0`。
-- `stream_options.include_usage = true`，用于获取服务商真实 usage。
-- epoch 内始终发送会话冻结的 function tools；工具选择轮用 `tool_choice: "auto"`，隐藏摘要/强制收尾用 `none`，不通过删除 schema 改变缓存前缀。
-
-流式响应由 `DeepSeekClient` 和 `DeepSeekStreamParser` 处理。Parser 会解析：
-
-- `content`：可见回答。
-- `reasoning_content`：Thinking 内容。
-- streaming `tool_calls`：模型请求的工具名和参数。
-- `finish_reason`。
-- `usage`。
-
-如果请求在已有 partial output 后失败，Runner 会在同一逻辑任务内恢复。`finish_reason=length` 自动续写，必要时先做 Context Epoch rollover；它不创建新的聊天 user 消息，也没有人为的自动续写次数预算。重复空续写由跨 epoch 无进展检测终止。
-
-Anthropic Messages 使用规范化的原生 Messages endpoint、`x-api-key` 和 `anthropic-version: 2023-06-01`，不发送 Bearer、`stream_options`、`reasoning_effort` 或 Responses 字段。常规 `/v1` base 追加 `/messages`；以 `/apps/anthropic` 结尾的 SDK base 追加 `/v1/messages`。专用 SSE parser 处理任意分块、CRLF、ping、Thinking/signature、redacted thinking、并行 `tool_use` 与 cache usage。模型能力来自 `/models` 元数据：只有明确声明 adaptive/enabled 时才发送 Thinking 参数；不提供模型列表的兼容网关允许保存账号并手动添加模型 ID，其能力可在账号设置中手动填写，否则使用通用保守 fallback。
-
-官方 `api.anthropic.com` 默认发送顶层 `cache_control: {"type":"ephemeral"}`。自定义兼容端点默认不发送，不做失败后删字段重试。Anthropic 摘要请求复用同一不可变 source snapshot，关闭 tools/Thinking，`temperature=0`，并受模型输出上限约束。
-
-### 3.3 工具调用循环
-
-模型可能返回一个或多个 function tool calls。Runner 的工具循环是：
+Runner 反复执行：
 
 ```text
-请求模型
-  -> 模型返回文本或 tool_calls
-  -> 若无工具，整理最终回答
-  -> 若有工具，先逐项持久化执行意图，再本地执行
-  -> 逐项保存完整结果/hash/终态
-  -> 按 prospective Provider 请求动态生成完整结果或 evidence envelope
-  -> 以原生协议顺序回灌；必要时在完整批次后 rollover
-  -> 再次请求模型
+构建原生请求
+  → 流式读取 assistant 内容/推理/工具参数
+  → 原子提交完整工具调用
+  → 宿主授权与执行
+  → 保存 Evidence 和 provider envelope
+  → 继续同一逻辑任务或结束
 ```
 
-`maxToolIterations` 和 `maxToolCalls` 是**单个 epoch 的 rollover 阈值**，不再是逻辑任务终止预算。达到阈值后保留 task、运行时钟、usage、TaskPlan、repair、审批与幂等账本，自动创建下一 provider epoch。工具总结果 tokens 只做 telemetry，累计数百万 tokens 也不会形成停止条件。
+流式中间参数不能执行。只有完整、可解析且当前 schema 允许的工具调用才进入路由。工具调用 ID、结果顺序与协议原生块必须保持配对。
 
-并行批次先为每个调用预留最小信封，结果独立持久化。Chat Completions 保持 `tool_call_id` 配对；Responses 保持 function call/output 的 `call_id` 和 Items 原始顺序；Anthropic 把同轮全部 `tool_result` 集中在紧随 `tool_use` 的 user message 开头并保持顺序。若旧 epoch 无法合法容纳整个最小批次，结果仍先保存，再在新 epoch checkpoint 中交付 evidence 引用；绝不重跑原工具。Anthropic 跨 epoch 不复制或伪造 opaque thinking signature/redacted data。
+### 5.1 工具族
 
-上下文投影上限按 `maxProjectionTokens = contextWindow × forceRatio` 计算。选择 85% 缓存优先档时，`forceRatio=0.95` 会让投影上限增大，从而保留更多原始历史、尽量延后会破坏前缀缓存的摘要刷新；这是预期行为。
+| 工具族 | 代表能力 | 副作用 |
+| --- | --- | --- |
+| 工作区读取 | list/read/range/search/diagnostics | 无；限工作区或已授权 URI |
+| 语义读取 | symbols/references/definitions/implementations | 无；由 VS Code language service 提供 |
+| Git 读取 | status/diff/branch/patch/commit message 建议 | 无；commit/push 不在此工具族 |
+| 验证 | compile/lint/test | 仅固定脚本，不接受任意命令 |
+| Evidence | `keepseek_read_evidence` | 无；按 task/session 隔离、分页读取 |
+| 变更提议 | DraftEdit、incremental edit、apply patch/delete | 只生成待确认 ChangeSet |
+| 命令提议 | DraftRun | 只生成待批准命令，不 spawn |
+| 子代理 | delegate/parallel | 隔离 child run；详见 `SUBAGENTS.md` |
 
-模型、来源、provider 或 base URL 切换只迁移 provider/cache lane，并在这个本来就冷启动的边界升级请求序列化；既有 `contextCompression.summaries` 保留并继续参与 projection。新会话使用 v9。v1–v8 热会话维持旧 provider-visible bytes，直到缓存已冷或受控 rollover 迁移；历史里的旧预算文字不改写。V9 在 V8 evidence/epoch schema 上只新增 `keepseek_apply_patch` 和对应静态规则。
+新增工具时需要同时更新 schema、Runner 路由、授权分类、协议版本策略和测试；实现应放在独立模块，而不是继续扩大 Provider 或 Runner。
 
-同一逻辑任务只有真实审批、用户 Stop、Provider/存储失败、显式时间/费用上限、副作用结果不确定、来源/模型安全不匹配或持续无进展才停止。`agent.maxCost` 按计费币种分别统计，主任务、子代理、epoch 与恢复共享同一账本；无法获得可计价用量时正值上限采用 fail-closed。内部容量调度不映射为 blocked，不会追加“继续新一轮”消息。
+### 5.2 Evidence 与交付状态
 
-### 3.4 DSML 工具调用兜底
-
-如果模型没有返回原生 `tool_calls`，但在文本里输出了 DSML 风格的工具调用块，`DsmlToolParser` 会尝试解析并模拟成 function tool call 执行。
-
-这只是 Chat Completions 的兼容兜底，不是 MCP，也不是外部工具运行时。DSML 解析出的调用会进入同一 intent/evidence/admission/epoch 管线，不能绕过幂等或结果大小控制；Anthropic 原生 `tool_use` 不走 DSML。
-
-## 4. 当前可用工具
-
-当前工具 schema 由 `getAgentTools()` 提供，工具路由在 `AgentRunner.handleToolCall()` 中，工作区工具实现主要在 `WorkspaceToolService` 中。
-
-| 工具名 | 类型 | 用途 |
-|---|---|---|
-| `keepseek_read_evidence` | 只读基础设施 | 按 task-scoped evidenceRef 做字节游标、1-based 行、结构化 item 或搜索分页，始终有界 |
-| `keepseek_search_workspace` | 只读 | 搜索工作区文本，返回命中行和前后上下文 |
-| `keepseek_list_workspace_files` | 只读 | 列出当前工作区文件 |
-| `keepseek_list_workspace_directory` | 只读 | 列出指定工作区目录，可选递归 |
-| `keepseek_read_workspace_file_range` | 只读 | 按 1-based inclusive 行号读取文件片段 |
-| `keepseek_read_workspace_file` | 只读 | 读取小文件全文 |
-| `keepseek_find_symbol` | 只读 | 用 document/workspace symbol provider 定位声明，必要时退化文本搜索 |
-| `keepseek_find_references` | 只读 | 用 reference provider 查引用，必要时退化文本搜索 |
-| `keepseek_get_document_symbols` | 只读 | 返回单文档语义符号树 |
-| `keepseek_get_workspace_symbols` | 只读 | 查询工作区语义符号 |
-| `keepseek_search_session_archive` | 只读 | 在本地会话归档中找回被投影省略的完整旧工具结果 |
-| `keepseek_read_workspace_diagnostics` | 只读 | 读取当前 VS Code Problems |
-| `keepseek_run_validation` | 受控验证 | 只运行 allowlist 中的 compile/lint/test，且只验证已落盘工作区 |
-| `keepseek_git_status` | 只读 | 读取 Git 状态 |
-| `keepseek_git_current_branch` | 只读 | 读取当前分支和 upstream 元数据 |
-| `keepseek_git_diff` | 只读 | 读取受限 Git diff |
-| `keepseek_git_create_patch` | 只读 | 返回 patch 内容，不写入也不应用 |
-| `keepseek_git_suggest_commit_message` | 只读 | 基于当前变更建议 commit message，不创建 commit |
-| `keepseek_apply_patch` | 待确认修改 | V9 严格 grammar；一次提交多个 Add/Update/Delete/Move，每个目标生成独立 canonical DraftEdit |
-| `keepseek_create_incremental_draft_edit` | 待确认修改 | 兼容入口；对现有文本文件组合精确修改并生成 `text_patch_v1` |
-| `keepseek_create_draft_edit` | 待确认修改 | 为新文件/整体重写生成 `full_text_v1`；带 range 时生成 `text_patch_v1` |
-| `keepseek_delete_workspace_file` | 待确认修改 | 为一个普通可读文件准备非递归 pending delete，不立即删除 |
-
-### 4.1 `keepseek_search_workspace`
-
-搜索工具的目标是低成本定位相关代码。
-
-参数：
-
-| 参数 | 说明 |
-|---|---|
-| `query` | 必填，搜索文本或正则 |
-| `path` | 可选，限定到工作区内文件或目录 |
-| `include` | 可选，工作区相对 glob，例如 `src/**/*.ts` |
-| `isRegex` | 可选，默认 false |
-| `matchCase` | 可选，默认 false |
-| `maxResults` | 可选，默认 50，内部上限 200 |
-
-实现原则：
-
-- 优先调用 VS Code 运行时的 `workspace.findTextInFiles`。
-- 不引入 ripgrep 或 npm 依赖。
-- 搜索范围必须在当前工作区内。
-- 跳过 `.git`、`node_modules`、`dist`、`coverage` 等目录。
-- 结果上下文默认前后各 2 行。
-- 长行会截断并标记。
-- 返回结果总字符数有上限，避免把搜索结果撑爆上下文。
-
-返回结果包含：
-
-```json
-{
-  "ok": true,
-  "query": "xxx",
-  "results": [
-    {
-      "path": "src/example.ts",
-      "uri": "file:///...",
-      "line": 12,
-      "startColumn": 5,
-      "endColumn": 18,
-      "matchLine": "命中所在行",
-      "matchLineTruncated": false,
-      "before": [{ "line": 10, "text": "...", "truncated": false }],
-      "after": [{ "line": 13, "text": "...", "truncated": false }]
-    }
-  ],
-  "count": 1,
-  "limit": 50,
-  "truncated": false,
-  "excluded": [".git", "node_modules"]
-}
-```
-
-### 4.2 `keepseek_read_workspace_file_range`
-
-范围读取工具用于在定位后读取相关片段，尤其适合大文件。
-
-参数：
-
-| 参数 | 说明 |
-|---|---|
-| `path` | 必填，工作区内路径 |
-| `startLine` | 必填，1-based inclusive |
-| `endLine` | 必填，1-based inclusive |
-| `maxBytes` | 可选，返回内容字节上限 |
-
-实现原则：
-
-- 复用工作区内路径解析和越界校验。
-- 复用文本/二进制保护规则。
-- `startLine >= 1`，`endLine >= startLine`。
-- 对最大行数和返回字节数做内部限制。
-- 本地 `file` scheme 优先流式扫描，避免为了读片段而整文件载入内存。
-- 非 `file` scheme 使用保守 fallback，文件过大时拒绝。
-- 不因为整个文件大于 `keepseek.maxFileBytes` 就拒绝，只控制返回内容大小。
-
-返回结果包含：
-
-```json
-{
-  "ok": true,
-  "path": "src/example.ts",
-  "uri": "file:///...",
-  "languageId": "typescript",
-  "content": "指定行段内容",
-  "startLine": 100,
-  "endLine": 180,
-  "requestedStartLine": 100,
-  "requestedEndLine": 220,
-  "totalLines": 560,
-  "truncated": true,
-  "sizeBytes": 123456
-}
-```
-
-### 4.3 `keepseek_read_workspace_file`
-
-全文读取工具仍然保留，但策略已经变成“只适合小文件或确实需要完整上下文时使用”。
-
-它会拒绝：
-
-- 工作区外路径。
-- 非普通文件。
-- 图片、媒体、归档、常见二进制扩展。
-- 看起来不是可读文本的内容。
-- 超过 `keepseek.maxFileBytes` 的全文读取。
-
-当文件超过全文读取上限时，返回结构化错误，并建议模型改用范围读取：
-
-```json
-{
-  "ok": false,
-  "path": "src/large.ts",
-  "sizeBytes": 500000,
-  "limitBytes": 200000,
-  "suggestedTool": "keepseek_read_workspace_file_range",
-  "suggestedRange": {
-    "path": "src/large.ts",
-    "startLine": 1,
-    "endLine": 200
-  }
-}
-```
-
-### 4.4 `keepseek_list_workspace_files`
-
-文件列表工具用于快速了解项目文件分布。它通过 VS Code `workspace.findFiles` 实现，并跳过常见依赖、构建、覆盖率和 VCS 目录。
-
-结果包括：
-
-- `path`
-- `label`
-- `workspaceFolder`
-- `sizeBytes`
-- `size`
-- `extension`
-- `count`
-- `limit`
-- `truncated`
-- `excluded`
-
-### 4.5 `keepseek_list_workspace_directory`
-
-目录列表工具用于在用户引用目录或 search 命中目录后进一步探索。
-
-特点：
-
-- 路径必须在当前工作区内。
-- 可选递归。
-- 递归深度和返回条目数有限制。
-- 跳过 `.git`、`node_modules`、`dist` 等目录。
-- 返回文件和目录两类 entry。
-
-### 4.6 DraftEdit 工具选择
-
-V9 的首选入口是 `keepseek_apply_patch`。它接收严格 `keepseek_patch_v1` JSON：路径只能是规范化 workspace-relative path；Update edit 只能是唯一精确 `search`、明确的 1-based 整行范围，或文件头/尾插入；禁止绝对路径、URI、`..`、未知字段、重复目标、模糊/忽略空白匹配和重叠 hunk。一次调用可含多个 Add/Update/Delete/Move，但每个文件生成独立 DraftEdit，并由同一 Agent run 合并到一个 ChangeSet。删除仍逐文件二次确认。
-
-`keepseek_create_incremental_draft_edit` 是兼容入口，同样生成 canonical `text_patch_v1`，不再展开/持久化完整 `newText`。`keepseek_create_draft_edit` 只在新建/整体替换时生成 `full_text_v1`，带 range 时也转成 patch；删除和移动分别使用 `delete_v1` / `move_v1`。所有入口都只返回稳定 ID、状态、文件摘要和 hash，Apply 前工作区字节不变。
-
-### 4.7 会话归档恢复
-
-历史维护会把较早的超大工具结果保存在 `ChatSession.historyArchive`，投影中只留稳定引用。`keepseek_search_session_archive` 用本地词法/BM25 排名返回受限 excerpt 和稳定 archive id，不联网、不调用模型。旧证据足以回答时避免重新扫描；代码新鲜度重要时仍要重读当前文件。
-
-v8 的 `keepseek_read_evidence` 与旧 session archive 的职责不同：前者是当前逻辑任务中每次工具执行的不可变、授权快照及交付账本，引用只允许同一 session/task 读取；后者是跨聊天轮次的历史检索。evidence 可按 UTF-8 byte cursor、1-based 行范围、结构化 item 或 search 读取，返回 hash、位置、`hasMore` 和下一 cursor。需要“当前文件状态”时应重读源文件，不能把旧 evidence 当作实时视图。
-
-### 4.8 validation 的落盘边界
-
-`keepseek_run_validation` 只能看到当前已经落盘的工作区。创建 DraftEdit 前可以验证，用于复现或建立基线；本 run 任一 DraftEdit 成功后，`RunValidationStateTracker` 会在授权和任务启动前硬性阻止后续 validation，不区分普通 edit 与 repair edit。
-
-Runner 的最终状态装饰会区分未验证、修改前基线、pending/unapplied edit 与 Apply 后验证；没有限定语的虚假“验证通过/失败”段落不会在 pending 状态下保留。repair ChangeSet 全部 Apply 后，Provider 把 repair 状态迁到 `ready_for_validation`，现有“继续验证修复”流程再对真实更新后的工作区运行验证。
-
-### 4.9 工具反馈契约
-
-主要工具结果使用紧凑 JSON：`ok` 表示成功，失败包含稳定 `errorType`，长结果保留 `truncated`，语义/Git/搜索退化保留 `fallback` 或 engine 信息，必要时返回 `suggestedTool` 和最小建议参数。运行时能硬性执行的约束不依赖模型遵守 description。
-
-## 5. Tool Evidence、结构化整形与动态准入
-
-### 5.1 执行与交付状态机
-
-每个工具调用先以 `sessionId + taskId + epochIndex + toolCallId` 创建确定性的 evidence intent，随后依次进入：
+大结果先完整保存到 task-scoped Evidence，再生成有界 envelope。典型状态为：
 
 ```text
-pending -> executing -> completed(evidence/hash saved)
-                         -> envelope_ready -> sending -> delivered
+pending → executing → completed → envelope_ready → sending → delivered
 ```
 
-扩展重启后，`pending` 表示未执行；已 `completed` 的工具直接复用相同 evidence ID 和 envelope，不能重跑。处于 `executing` 的只读/纯 proposal 可安全回到 pending；validation、delegate 或其它无法证明副作用终态的调用进入 `uncertain`，要求核实，不自动重放。证据或 checkpoint 持久化失败属于真实停止条件。
+恢复时根据已持久化状态继续交付，不重跑已完成工具。`executing` 状态若无法证明是否发生副作用，必须标记 uncertain 并停止自动恢复。
 
-不可重建的重要结果保存 content-addressed blob；会话/task 目录和 capability-style evidenceRef 同时校验，跨会话猜测引用返回 `evidence_not_found`。活动 checkpoint 引用的 evidence 不得被清理。正文可能包含敏感数据，普通 telemetry 只写 hash、大小、类型和引用，不写原文。
+`keepseek_read_evidence` 只能读取同 session/task 的 evidence，并受分页和大小限制。Evidence 内容与 shell/搜索输出始终视为不可信数据，不能被当作项目指令。
 
-### 5.2 合法且可继续的结果信封
+### 5.3 Context Epoch
 
-小结果在动态容量允许时原样内联。大结果按类别整形：
+当最小 envelope 无法装入、单 epoch 工具阈值到达、软压力持续，或 provider 报 context-too-long 时，`ContextEpochManager` 外置 checkpoint 并切换 replay lane。
 
-- 文件、range、diff、patch、日志按完整行，保留真实行号和下一范围；
-- 搜索、符号、引用、诊断、目录按完整 item 分页；
-- JSON 每页保持合法 JSON；
-- 子代理只内联权威摘要，全文进入 evidence；
-- DraftEdit、ChangeSet、DraftRun、审批/validation 返回权威 ID、状态、hash、目标和必要摘要，不重复大正文；
-- 错误保持小型稳定 `errorType`，大结果绝不伪装成失败。
+rollover 保持原任务、证据、工具幂等、审批、副作用、时间和费用账本，不创建新会话、不伪造 user 消息、不自动执行任何动作。详细容量和缓存规则见缓存文档。
 
-所有非完整信封明确包含 `completeInline:false`、`evidenceRef`、`contentHash`、字符/字节/token 估算和 `keepseek_read_evidence` 读取方法。信封以规范 key 顺序序列化、持久化一次；恢复不得重新整形。
+## 6. DraftEdit 写入管线
 
-V8 子代理的完整签收结果也先交给同一 evidence/admission 管线，新子代理 lane 不再使用独立分页。根 schema 中的 `keepseek_read_subagent_result` 只作为 V1–V7 已存结果迁移桥；桥接页本身仍进入通用 evidence/admission 管线。这样单子代理、并行子代理、DSML 与原生工具没有独立的当前任务分页预算或恢复账本，同时旧结果不会在迁移边界失联。
-
-### 5.3 动态 Tool Result Admission
-
-不存在固定累计 `toolResultTokenBudget`。每个批次根据当前协议的 prospective request 计算：
+模型不能直接写文件。规范流程为：
 
 ```text
-inlineAllowance = learnedEffectiveWindow
-  - currentProviderProjection
-  - phaseSpecificOutputReserve
-  - protocolEnvelopeOverhead
-  - remainingBatchMinimumEnvelopes
-  - adaptiveEstimatorSafety
+工具调用
+  → canonical DraftEdit
+  → ChangeSetStore
+  → 审批/用户确认
+  → SafeFileEditor
+  → read-back 校验
+  → applied / failed / uncertain
 ```
 
-Responses 计算原生 Items，Anthropic 计算 system/Messages/tool blocks，Chat Completions/DSML 计算实际 messages。Provider 返回的真实 prompt/input usage 校准估算倍率；没有可靠 tokenizer 时用保守字符估算和动态误差因子。完整结果放不下就使用 evidence envelope；连最小信封放不下则在完整批次后 rollover，不能结束任务。
+### 6.1 DraftEdit 形式
 
-`maxFileBytes` 仅控制全文 workspace read、上下文文件与项目指令等全文入口，不限制 `text_patch_v1` 的本地目标大小。`patch.maxPayloadBytes/maxHunks/maxChangedBytes/maxInlineBytes` 限制 patch 变化量，`patch.maxProviderBufferBytes` 限制非 `file:` provider fallback，`patch.maxBackupBytes/maxChangeSetArtifactBytes/blobStoreQuotaBytes` 分别限制全量备份、单 ChangeSet artifact 和全局 blob。`providerInlineResultMaxChars` 与 `evidenceMaxBytes` 继续独立控制模型结果/证据。
+- `text_patch_v1`：局部 byte hunks，绑定 URI、base/result hash、size、编码和 EOL。
+- `full_text_v1`：新建或整体替换。
+- `delete_v1`：删除；需要额外高风险确认。
+- `move_v1`：显式源/目标移动。
 
-## 6. Context Epoch、容量自校准与 usage
+原始 unified patch、模型行号和模糊匹配不是 Apply 权威。`keepseek_apply_patch` 必须先归一化为 canonical Patch IR。
 
-### 6.1 rollover 检查点
+### 6.2 Apply 与恢复
 
-Context Epoch 是一条用户请求内部的 Provider 上下文分段。rollover 保持 `sessionId`、`taskId`、`approvalRootTaskId`、原始 user 请求、TaskPlan、DraftEdit/ChangeSet/DraftRun、repair/validation、已消费 permit、幂等账本、运行时钟、usage/cost、Stop 与子代理关系不变，不创建聊天消息、不重新授权或执行副作用。
+SafeFileEditor 在落盘前持久化 prepared journal，核验 base，再使用同目录临时文件、fsync/原子替换并 read-back 校验 result hash。重启后按磁盘的 base/result/unknown 状态恢复；未知副作用不重试。
 
-旧 epoch 在请求新模型之前完整持久化；完整宿主状态另存为 task-scoped、可分页的 checkpoint evidence，新 seed 携带其 ref/hash、最近证据与有界恢复状态，避免长期任务让最小 seed 无限增长。它覆盖原始任务、计划完成/未完成项、事实线索、evidence/hash、幂等指纹、草案/审批/validation/repair 状态、失败和下一步。优先调用当前模型生成隔离的无工具语义摘要；失败、超时、空或错误格式时使用宿主确定性摘要。`summarizing`、`persisted` 和新 epoch 尚未请求三个崩溃点都可恢复，已保存 seed 原样复用。
+局部 patch 的回滚保存 inverse patch；delete/full replace 的原始字节进入 global storage 下的 SHA-256 content-addressed blob。大正文不嵌入 ChangeSet、checkpoint 或 Webview。外部 URI、符号链接、脏编辑器、非 file provider 和配额在实际 Apply 时重新检查。
 
-### 6.2 Provider 容量自校准
+Diff 默认延迟生成，超阈值显示 hunk review。目录、二进制、越界和不满足基线的删除直接拒绝。
 
-容量状态按 source/provider/规范 endpoint/model 隔离保存，不进入 system 或历史。真实 input usage 更新本地估算比例；识别 context-too-long 后降低 learned effective window，以更小 inline allowance 重建新 epoch，只重发模型请求、不重跑工具。后续成功可保守回升并带阻尼。只有 system、冻结 schema、原始请求和最小 checkpoint 本身仍无法容纳时，才报告真实 provider 容量/配置错误。
+## 7. DraftRun 命令管线
 
-### 6.3 usage 与原生 lane
+任意命令与固定 validation 分离：
 
-真实 usage 由各协议 parser 归一化。Chat Completions 使用 `stream_options.include_usage`；Responses 读取 input/output usage；Anthropic 按 `input + cache_creation + cache_read` 计算 prompt，cache read 计 hit。Runner 汇总 request、prompt/completion/total、cache hit/miss、reasoning、cost 与来源，跨 epoch 连续累计。
+```text
+keepseek_run_draft
+  → immutable pending DraftRun
+  → 硬检查 + 审批记录
+  → ExecutionPermit(draftRunId, specHash, expiry, one-shot)
+  → DraftRunExecutor
+  → completed / failed / cancelled / timed_out / interrupted
+```
 
-Responses epoch 内 replay Items 原样有序；rollover 不把孤立 output 拼进新 lane。Anthropic epoch 内原样保存 Thinking/signature/redacted data/tool blocks；跨 lane 只继承合法可见文本、checkpoint 和 evidence 引用。原生 replay 不发送到 Webview，lane 仍要求 protocol/sourceId/规范 endpoint 完全匹配。
-
-## 7. DraftEdit 安全写入流程
-
-KeepSeek 的写入安全边界是它区别于普通自动写文件 agent 的关键部分。
-
-### 7.1 创建 DraftEdit
-
-权威数据是版本化 discriminated union。现有 UTF-8 文件的局部修改示意如下：
+审核面完整展示 executable、argv、cwd、env、用途和风险。执行使用：
 
 ```ts
-{
-  id,
-  uri,
-  label,
-  kind: 'text_patch_v1',
-  action: 'modify',
-  reason,
-  patch: {
-    version: 'text_patch_v1',
-    targetUri: uri,
-    base: { sha256, sizeBytes },
-    result: { sha256, sizeBytes },
-    encoding: { name: 'utf-8', bom, eol, finalEol },
-    hunks: [{ startByte, endByte, startLine, oldText, newText,
-      oldSha256, newSha256, oldSizeBytes, newSizeBytes }],
-    canonicalHash
-  }
-}
+spawn(executable, args, { shell: false })
 ```
 
-Runner 只把模型的行号当定位输入：创建时读取当前内容、做 lossless UTF-8/二进制检查、解析精确 byte offset、拒绝缺失/歧义/重叠，再计算完整 base/result identity 和字段顺序固定的 canonical hash。原始 wire patch 不是审批权威。`full_text_v1`、`delete_v1`、`move_v1` 有独立 payload；V1–V3 的 `newText` 只作兼容读取。
+需要 shell 语法时，shell 本身必须作为 executable，原始脚本作为可见 argv。拒绝不能改写命令；要修改只能新建 DraftRun。未受信任工作区、未授权外部 cwd、specHash 不匹配、过期/重复 permit 均硬拒绝。
 
-### 7.2 用户确认 Apply
+完成记录可克隆为新的 pending，但必须再次批准。重启时 `approved/running` 只能变为 interrupted，绝不自动重跑。
 
-用户点击 Apply 后，Provider 调用 `ChangeSetStore`，再由 `SafeFileEditor` 执行写入。
+## 8. 审批模式
 
-单文件流程是：重查 workspace trust / URI 授权 / 审批记录与 actionHash；拒绝 dirty document/tab 和符号链接越界；流式计算当前 base hash/size；在任何 workspace mutation 前持久化 `prepared` checkpoint；再记 `applying`；生成结果并先核验 result hash/size。`file:` 使用同目录临时文件、保留 mode、flush/fsync 和原子 rename，再重新扫描落盘结果；其它 FileSystemProvider 使用有界 `workspace.fs` buffer fallback 并 read-back。只有实际结果匹配 canonical result 才写 `applied` 终态。
+项目有三档审批模式，仅 Webview 用户操作可切换，且按目标 workspace 持久化：
 
-`Apply All` 是逐文件 journal，不宣称跨 provider 原子事务。某个文件失败不抹掉已验证的成功，ChangeSet 明确进入 partial 或 uncertain 状态；存储/写入/read-back 任何一步无法判断副作用时不自动重试。
+| 模式 | 决策者 | 行为 |
+| --- | --- | --- |
+| `ask` | 用户 | 默认；逐项或批量批准 |
+| `model_review` | 隔离 reviewer | 长任务适用；逐 actionHash 审查，可拒绝 |
+| `delegate` | 宿主策略 | 不经模型审查，但必须生成 `host_policy` 记录 |
 
-### 7.3 回滚、重启与 Diff
+共同规则：
 
-patch checkpoint 不保存完整原文件，只保存 inverse patch，并绑定完整 result hash。Revert 前必须仍精确处于 result；逆向写入后必须匹配 base。Apply 后发生外部修改时拒绝自动回滚。delete/full replace 的原始 raw bytes 保存到 global storage 的 SHA-256 blob，JSON 只保留 hash；blob 原子写入、读回校验、去重，并以所有持久化 JSON 引用为 GC root，扫描失败时 fail-closed 不删除。
+- 所有动作先过确定性硬检查，审批不能绕过工作区信任、URI 授权、基线、脏编辑器或 permit。
+- reviewer 是无工具、一次性、关闭 thinking 的独立请求，不注入项目指令/Skill/隐藏推理。
+- actionHash 绑定完整 canonical payload；patch 即使只展示有界 hunks，也不能复用变更后的批准。
+- 批准记录与 session/run/target/kind/hash/policy/runtime 绑定；重启不恢复审批队列，不复用旧 reviewer 批准。
+- 停止或切回 `ask` 会撤销队列和未执行授权。
+- 决定与真实结果以固定 user-tail 追加到下一条真实 user 消息，不能插入或改写旧历史。
+- 修改失败会阻止依赖它的命令；连续拒绝达到熔断阈值时停止续跑。
 
-扩展重启检查 journal 对应目标：base 表示 Apply 未发生（恢复 pending），result 表示已落盘（恢复 applied），两者都不匹配表示 uncertain；Revert journal 使用相反方向判定。任何状态恢复都不重放副作用。V4 ChangeSet shard 可读 V3 shard 与 V1/V2 monolith，旧 pending/applied checkpoint 仍可 Apply/Revert，旧审批 hash 不会跨 payload version 复用。
+模型给出的“低风险”分析只供展示，不能自行改变审批模式。
 
-普通大小 patch 在用户打开 Diff 时从当前 base 延迟生成 before/proposed；超过 `patch.maxDiffBytes` 时使用 hunk-only review，显示路径/byte/line、old/new、局部和完整 hash。ChangeSet/Webview 不持久化或传输完整 proposed file；Diff 失败也不能隐式授权 Apply。
+## 9. 执行模式、验证与修复
 
-### 7.4 用户可见语义
+执行模式与审批模式正交：
 
-模型和最终回答必须遵守这个语义：
+- `normal`：可使用当前协议允许的全部工具。
+- `plan`：只做分析与计划，限制会产生副作用提议的工具。
 
-- 可以说“已准备待确认修改”。
-- 不能说“已写入文件”。
-- 只有用户 Apply 成功后，扩展端才会追加“已写入”的 assistant 消息。
+`keepseek_run_validation` 仅运行项目定义的 `compile`、`lint`、`test`，不能接受任意 argv。产生 DraftEdit 后，在用户 Apply 前不会假装用未落盘内容验证；Apply 后可进入验证/修复循环。修复仍生成新的 DraftEdit，并重新走审批、基线和 Apply。
 
-## 8. 活动状态与 UI 反馈
+验证输出进入 Evidence；失败结果、修复轮次和 `waiting_for_apply` 状态写入 checkpoint，避免恢复后重复或越权。
 
-Agent runtime 会通过 `AgentRunCallbacks.onStatus` 向 Provider 报告活动状态。Provider 再把状态推给 Webview。
+## 10. 长任务与预算
 
-主要 phase 包括：
+原 `long-running-agent.md` 的运行时契约已合并到本节。
 
-| phase | 含义 |
-|---|---|
-| `preparing` | 准备请求 |
-| `expanding_references` | 展开引用 |
-| `requesting_model` | 等待模型响应 |
-| `reasoning` | 接收 Thinking |
-| `generating` | 接收可见正文 |
-| `planning_tool` | 模型准备调用工具 |
-| `searching_workspace` | 执行搜索工具 |
-| `listing_files` | 列文件 |
-| `listing_directory` | 列目录 |
-| `reading_file_range` | 读取文件片段 |
-| `reading_file` | 读取完整文件 |
-| `creating_draft_edit` | 创建 DraftEdit |
-| `reviewing_tool_result` | 工具结果回灌后继续推理 |
-| `finalizing` | 整理最终回答 |
-| `failed` | 失败 |
+### 10.1 显式限制
 
-Webview 会把 phase 映射成中英文状态文案，例如“搜索工作区...”和“读取文件片段...”。
+| 配置 | 默认值 | 语义 |
+| --- | ---: | --- |
+| `keepseek.agent.maxExecutionMs` | `0` | 逻辑任务执行时间上限；0 表示不设显式上限 |
+| `keepseek.agent.maxCost` | `0` | 按来源币种的费用上限；0 表示不设显式上限 |
+| `keepseek.agent.streamIdleTimeoutMs` | `0` | 流式静默超时；0 表示继续等待 |
 
-## 9. Trace 与调试
+旧 `background.maxDurationMs` 仅作兼容输入；与新上限同时存在时取较小的正值。
 
-开启 `keepseek.trace.enabled` 后，`InteractionTraceLogService` 会在全局存储下写 JSONL 日志。
+时间、费用和取消状态属于逻辑任务，不因子代理、Context Epoch 或恢复而重置：
 
-日志事件的 `ts` 使用扩展运行所在操作系统的本地时区，格式为带毫秒与明确偏移的 ISO 8601，例如 `2026-09-04T16:04:03.123+08:00`。日期目录、文件名、后续追加事件和截断标记使用同一规则；夏令时按事件发生时间计算。旧日志不回写，嵌套的请求/响应 payload 与历史消息时间字段保持原样，避免破坏原始证据和请求缓存字节。
+- 主 Agent 与子代理共享任务时钟和费用账本。
+- 并行 child 的墙钟时间按区间并集核算，避免简单相加夸大。
+- 等待用户批准、Apply 和调度队列的暂停不计入执行时间。
+- 使用单调时钟，checkpoint 只保存累计值，不依赖墙钟倒退。
+- 费用按币种分别累计，不做隐式汇率换算。
+- 设置正费用上限但当前来源无法计价时 fail closed。
 
-内部容量调度不再生产 `tool_result_budget_exhausted`、工具次数耗尽或 `context_window_exhausted` blocked 状态。旧 enum/字段只用于读取历史 checkpoint；恢复时转换为同一 task 的 v8 epoch 迁移，不生成自动 user 消息，也不显示继续按钮。
+有效限制在任务启动时冻结；运行中修改设置不会追溯改变当前任务。Provider 用量只能在响应返回后记账，所以单次已被接受的请求可能略微越过费用线，但下一次请求前必须停止。内部 context capacity、tool step 或 epoch 调度阈值不是用户预算，不能借机重置或扩大显式限制。
 
-trace 对每个 evidence 记录 raw/inline chars、bytes、token 估算、`evidenceRef`、hash、是否分页及协议；对每次 rollover 记录 epoch index、reason、前后估算/真实 prompt tokens、declared/learned window、summary/fallback、context-too-long 自适应和缓存边界成本；无进展仅记录不可逆 hash 指纹。普通 telemetry 不含 evidence 正文、凭证或可避免的绝对路径。
+### 10.2 流式与重试
 
-真实停止原因使用精确状态：用户 Stop、等待审批、Provider 鉴权/服务失败、来源/模型/工作区变化导致不可安全恢复、checkpoint/evidence 存储失败、显式时间/费用上限、副作用结果不确定或 `no_progress_loop`。无进展检测对工具名、规范参数、结果 hash、源 fingerprint 和 TaskPlan 进度生成跨 epoch 指纹；第一次重复给模型策略调整机会，持续重复才停止，绝不描述成 token 或工具预算耗尽。
+网络层区分“收到字节、收到 SSE、得到可消费内容、完成一个 step”。默认允许长时间安静推理；用户设置 idle timeout 后才因静默中止。
 
-trace 记录包括：
+安全重试遵循“无法证明请求未执行，就不重发”：
 
-- run start / finish / error。
-- 初始化后的 agent messages。
-- 上游请求摘要。
-- 上游响应 message。
-- usage 和 usage totals。
-- tool call。
-- raw tool result 摘要。
-- shaped tool result 或摘要。
-- toolResultLedger。
-- evidence admission、delivery 与 Context Epoch rollover。
+- 模糊 POST 失败、空响应、5xx 不自动重放整个请求。
+- 429 只做有界退避，并受剩余时间/费用约束。
+- 因长度截断或 provider pause 最多做受控续接；已有部分流式内容时不自动重发原请求。
+- KeepSeek 没有 provider job 查询或后台云任务服务；恢复依赖本地 checkpoint，不假设远端可续跑。
 
-trace level 控制 payload 细节：
+### 10.3 Checkpoint 与崩溃恢复
 
-- `metadata`：主要记录生命周期和大小。
-- `request`：记录请求和组装后的响应消息 payload。
-- `full`：还可记录 raw stream。
+checkpoint 在请求边界、工具意图/结果、审批、Apply、Run、epoch 和重要状态转换处持久化。它保存恢复所需的有限状态，不复制全部私有上下文。
 
-Evidence 管线启用后，大型 raw payload 不会写入普通 trace；只有显式 payload 级别才允许受保护地记录模型可见 envelope，正文仍以会话/task 隔离的证据存储为权威来源。
+恢复前至少验证：
 
-## 10. 推荐的 Agent 工作方式
+- session/task、workspace roots 与信任状态；
+- source/model、endpoint、请求协议和工具 schema；
+- 项目指令、外部授权和必要的 compatibility hash；
+- 未完成工具是否可能已有副作用；
+- 时间/费用/取消账本是否仍允许继续。
 
-KeepSeek 使用“识别任务类型 → 解决下一个关键不确定性 → 根据证据调整”的自适应工作模式，而不是固定菜谱。
+扩展重启后，运行中的 Agent、DraftRun 或 Apply 不会自动继续。确定性只读结果可按 checkpoint 恢复交付；任何 `executing` 副作用若不能证明结果，保持 interrupted/uncertain，交给用户处理。
 
-### 10.1 理想探索流程
+单个完整模型流和序列化 checkpoint 均有 32 MiB 资源上限；达到上限时停止，不能静默截断必须回放的原生协议数据。关闭 VS Code 不会让任务在后台继续运行。
 
-```text
-用户提出任务
-  -> 不依赖工作区：直接回答
-  -> 已知路径/符号/错误/diff：从该强线索开始
-  -> 选择能解决下一个关键不确定性的最窄工具
-  -> 证据仍不足时才扩大范围
-  -> 按只读或修改授权完成，并准确汇报修改/验证状态
+## 11. 子代理边界
+
+主运行时只负责调度、工具暴露和接收有界结果。子代理拥有独立 AgentLoop、私有 transcript、精确工具白名单、并发/深度限制、路径作用域、continuation token 和独立诊断存储。
+
+父 Agent 只能获得结构化结果和 Evidence 引用，不能读取 child 隐藏推理。proposal child 只能提出 DraftEdit/DraftRun，真实副作用仍回到父会话的审批管线。安全模型、结果协议、复用条件和用量统计统一维护在 [`SUBAGENTS.md`](../SUBAGENTS.md)，不要在本文复制第二套规则。
+
+## 12. 会话、用量与 UI
+
+### 12.1 会话事实与派生状态
+
+- `ChatSession.messages` 保存用户可见事实，普通请求按消息 append-only；只有编辑重发或已进入缓存安全压缩边界的归档维护会改写旧 provider 内容。
+- `contextCompression`、`providerReplay`、`toolRounds`、subagent stats 和 checkpoint 是派生/恢复状态，不应污染 transcript。
+- 摘要不进入聊天 UI；Evidence 大正文也不进入 session JSON。
+- 归档搜索只读全局会话存储，不改变当前会话上下文。
+
+### 12.2 用量
+
+Usage Ledger 记录每个实际 provider 请求的来源、模型、输入/输出、缓存字段、费用和诊断。主请求、摘要、reviewer、子代理必须用不同 usage source 分类；缺失的 provider 计量是 unknown，不得当作 0。
+
+会话/UI 只接收必要汇总。API key、endpoint identity hash、原始 prompt、私有 child transcript 和内部审批证据不得下发。
+
+### 12.3 Run Details
+
+Run Details 用于解释当前上下文来源、工具、Skill、审批、Evidence、epoch、用量和停止原因。它是诊断视图，不是另一个执行入口，也不能把不可信工具输出提升为指令。
+
+## 13. 改动影响面
+
+| 改动 | 必查模块 |
+| --- | --- |
+| 新增配置 | `package.json` contributes.configuration、`shared/config.ts`、配置测试 |
+| 来源/模型/余额 | accountStore、accountResolver、modelDiscovery、Runner、Compressor、Provider、balanceStore |
+| system/schema/协议 | protocol、projection、三 Provider replay、缓存观测、协议迁移测试 |
+| 压缩/容量 | shared types、historyProjection、historyCompressor、contextUsage、toolResultAdmission、Runner |
+| Evidence/Epoch | evidence/*、contextEpoch、runCheckpoint、三协议配对、Run Details |
+| DraftEdit | Patch IR、draftEdit、artifact/blob、ChangeSet、SafeFileEditor、Diff、审批 hash、Webview |
+| DraftRun/审批 | approvals/*、runs/*、toolAuthorization、Provider、消息类型、i18n、usage |
+| 子代理 | runtime、scheduler、profiles、path scope、result protocol、storage、stats、四组测试 |
+| Webview 消息 | webviewMessages 联合类型、Provider handler、发送/接收点 |
+
+## 14. 验证矩阵
+
+基础验证：
+
+```bash
+bun run compile
+bun run lint
+bun run build:test
+bun run test
 ```
 
-这比“列出全项目文件，再读取一堆完整文件”更省 token；即使证据量很大，运行时也会外置并自动整理上下文，而不是中断用户任务。
+按改动追加重点：
 
-### 10.2 工具选择提示
+- 请求/缓存：`cacheByteStability`、`protocolCache`、`p1CacheObservability`、`openAiResponses`、`anthropicMessages`。
+- 压缩/Epoch：`historyCompressor`、`historyProjection`、`currentRunContext`、`toolResultBudget`。
+- 写入：ChangeSet、SafeFileEditor、patch/delete/move、重启与 Revert。
+- 命令/审批：三模式、actionHash、permit 单次消费、取消/超时/重启、Windows/POSIX argv。
+- 子代理：`subagentArchitecture`、`subagentSafety`、`subagentUsageStats`、`subagentUsageRuntime`。
+- Webview 大字符串：输入、拖拽、`@` 引用、编辑重发、Apply/Discard 手测。
 
-- 已知声明/符号关系：semantic tool。
-- 已知精确字符串、错误文案、配置 key：限定范围 search。
-- 已知路径：直接 range/full read，不先列全仓库。
-- 本地变更审查：优先 Git diff，再读必要上下文。
-- 较早工具证据被省略：优先 session archive。
+发布前使用 `bun run package:market`；不要用 `vsce package --no-dependencies` 绕过依赖和 VSIX 内容校验。
 
-### 10.3 读取与修改粒度
+## 15. 维护判断准则
 
-- search 命中后读取上下文。
-- 大文件中只需要某个函数或配置段。
-- 模型需要继续读取某段之前或之后的内容。
-- 全文 read 返回 `suggestedTool` 时。
-- 小文件或真正的整体问题才全文读取。
-- 大文件局部改动用 canonical patch；新文件或整体重写才用 full-text DraftEdit。
+遇到跨层改动时，依次确认：
 
-## 11. 当前边界和后续扩展方向
+1. 是否改写了已发送请求字节或拆散了原生协议轮次？
+2. 是否让模型绕过 DraftEdit/DraftRun、审批或一次性 permit？
+3. 是否把未授权路径、密钥、私有 transcript 或不可信输出带入了错误边界？
+4. 是否能从 checkpoint 区分“未发生”“已完成”和“可能发生过”？
+5. 是否让主请求、摘要、reviewer、子代理或不同 provider lane 的用量混算？
 
-当前版本已经具备轻量 Agent runtime 的核心能力：
-
-- 流式模型请求。
-- 工具调用循环。
-- 只读工作区工具。
-- 搜索和范围读取。
-- semantic、Git、diagnostics、validation 与 session archive 只读能力。
-- 自动模型 / Thinking 档位、动态结果准入与 learned effective window。
-- 通用 Tool Evidence、20MB 级有界分页、不可变 provider envelope 与崩溃恢复账本。
-- 同一逻辑任务内的 Context Epoch、摘要 fallback、三协议/DSML 合法续跑与跨 epoch 无进展检测。
-- 历史投影、会话摘要和后台上下文压缩刷新。
-- V9 canonical patch/full/delete/move DraftEdit、V4 ChangeSet journal/blob 与 hash-verified Apply/Revert。
-- 普通/repair pending DraftEdit 的统一 validation 硬阻断与 Apply 后继续验证。
-- 会话级 Normal / Plan 执行方式、内容哈希绑定的待确认计划，以及与审批模式正交的用户确认工作流。
-- trace 和 usage 记录。
-- 离线行为评测契约和显式 opt-in live runner。
-
-仍未覆盖的方向：
-
-- 队列 prompt。
-- MCP。
-- 任意 shell 或非 allowlist 命令执行。
-- Git commit/push/remote 修改。
-- MCP 与外部 server tools。
-- 更丰富的 provider capability 元数据与多模态输入。
-
-这些能力后续可以逐步扩展，但应继续遵守当前分层：Provider 只编排，evidence/admission/epoch 保持独立抽象，工作区工具保持只读，写入仍只走 DraftEdit。
-
-模型/Provider、Thinking、声明上下文窗口和最大输出继续由模型选择器与设置页展示和配置；learned window 只存在校准存储/Run Details，不进入静态 system/history。显式时间/费用上限仍由宿主强制；内部工具轮、调用次数和结果累计量只触发 epoch 调度，不是停止预算。
-
-## Ask 模式下的有限命令批量批准
-
-- 同一 `sessionId + agentRunId` 至少有两条 pending DraftRun 时，首张相关命令卡片提供“全部批准（N）”；展示顺序沿用 Store 顺序，不按 UUID 排序。Transcript 与未关联回复区域复用同一渲染入口。
-- `DraftRunBatchCoordinator` 保存宿主展示快照和独立 operationId；点击只提交 snapshotId、会话/来源批次及有序 ID/hash。接收时消费快照，首次持久化后再次比对完整列表。后续新增/克隆命令不加入授权。
-- 整批运行保持 Provider 忙碌锁；逐条走 Store → Authorization → Executor，前一条结果保存后才执行下一条。每条命令在自己的最终检查、审批状态持久化完成后签发 30 秒单次 user_click permit。首次仅检查全部命令的信任/哈希/精确 cwd 授权边界，逐条执行前才检查 cwd 实际存在。
-- 失败或停止撤销余下授权，剩余命令仍 pending。全局停止、当前命令停止及“停止本批”均取消整批续跑；进度、快照和续跑意图只存在当前宿主内存，重启不恢复。
-- 全部成功后独立认领一次续跑，沿用新 user 消息、结果 user-tail、保护消息及请求投影。待确认修改、其他未终结命令、修复流程及后台任务继续阻塞并显示原因；停止、新用户输入、会话/审批模式/信任变化取消旧意图，来源或模型不匹配则明确停止续跑，不回退模型。
-- DraftEdit 的 ChangeSet 级“全部采纳 / 全部取消”仅在实际可处理项（pending / apply_failed）至少两条时显示；ChangeSet 级回滚同样仅在实际可回滚项至少两条时显示。单条修改只保留文件行内动作，不改变采纳、删除确认、冲突检查或回滚流程。命令与修改分别计数。
-- 未改动 system prompt、协议版本、工具 schema 或已发送消息字节；批量进度不写入模型历史。
+只要其中一项答案不明确，就应先补齐状态模型与回归测试，再继续实现。

@@ -1,319 +1,262 @@
-# KeepSeek 缓存命中优化技术与原理
+# KeepSeek 请求缓存与上下文投影
 
-> 面向 KeepSeek 维护者与进阶使用者。本文基于当前仓库源码（`src/` 与 `test/`）整理，详细描述 KeepSeek 为提升 DeepSeek「上下文前缀缓存」命中率所使用的全部技术手段，并解释每一项技术背后的原理。文中行号以当前仓库为准，可能与后续提交有小幅偏移。
+> 面向维护者与接手开发的 AI。本文描述当前实现中的请求字节稳定性、历史投影、Evidence/Context Epoch 与缓存诊断。运行时总流程见 [`keepseek-agent-runtime-workflow.md`](keepseek-agent-runtime-workflow.md)，字段级请求示例见 [`keepseek-api-payload-reference.md`](keepseek-api-payload-reference.md)。
 
-## 1. 背景：为什么缓存命中如此重要
+## 1. 核心结论
 
-### 1.1 DeepSeek 的上下文缓存模型
+KeepSeek 的缓存目标不是“尽量少发内容”，而是让同一会话的下一次请求保持稳定前缀，只在尾部追加必要的新内容。对 DeepSeek 等从第 0 个 token 开始匹配前缀的来源，历史中任意较早字节的变化都会使其后的缓存失效。
 
-DeepSeek API 提供服务端上下文缓存（context caching / prompt prefix cache）：当一次请求的 prompt **从 token 0 起**与历史请求**逐字节一致**时，命中的前缀不需要重新计算 KV（key-value）缓存，直接复用上次的注意力计算结果，并大幅降低计费单价。
+因此，下列约束与安全边界同级：
 
-这里的两个关键限定词是：
+1. 在当前热缓存 lane 内，已发送的 system、工具 schema、用户消息、assistant replay 和工具结果不可被重新格式化。
+2. 普通会话历史只追加；编辑重发、缓存安全归档、摘要刷新和 Context Epoch rollover 是显式受控边界。
+3. 用量估算、压缩判断、容量准入与实际发送必须使用同一个 provider-native projection。
+4. 缓存健康按“本可复用的前缀实际复用了多少”判断，不能直接拿原始命中率与固定目标比较。
 
-- **从 token 0 起**：缓存是按「前缀」组织的。只要第 N 个 token 与上次不同，第 N 个 token 之后的所有 token 全部 miss。
-- **逐字节一致**：缓存命中要求字节级精确匹配（服务端按 token 序列做前缀匹配，任何字节差异都会使该位置之后的全部内容失效）。它不是语义相似度匹配。
+## 2. 权威实现入口
 
-### 1.2 计费差异：命中与未命中相差 50~120 倍
+| 关注点 | 权威模块 |
+| --- | --- |
+| 静态 system、工具 schema、请求消息拼装 | `src/agent/protocol.ts` |
+| 三协议实际请求投影 | `src/agent/providerRequestProjection.ts` |
+| 历史选择、摘要和 protected 消息 | `src/agent/historyProjection.ts`、`src/agent/historyCompressor.ts` |
+| 用量估算 | `src/agent/contextUsage.ts` |
+| 工具结果动态准入 | `src/agent/toolResultAdmission.ts` |
+| Evidence 与 provider-visible envelope | `src/agent/evidence/*` |
+| Context Epoch checkpoint/rollover | `src/agent/contextEpoch.ts`、`src/agent/runCheckpoint.ts` |
+| 请求级缓存观测与聚合 | `src/agent/cacheObservation.ts`、`src/agent/usageLedger.ts` |
+| 会话持久化结构 | `src/shared/types.ts`、`src/sessions/chatSessionStore.ts` |
 
-KeepSeek 默认价格表（`src/shared/config.ts` 的 `DEFAULT_USAGE_PRICING`）按 DeepSeek
-官方峰谷价格维护；高峰仅为北京时间周一至周五 9:00–12:00、14:00–18:00，
-其余时间（含周末全天）为空闲时段：
+不要在 Provider 客户端、Webview 或统计代码中另造一套消息投影。它们只能消费上述模块的结果。
 
-| 模型 | 时段 | 缓存命中价（¥/M tokens） | 输入价（¥/M tokens） | 输出价（¥/M tokens） |
-|---|---|---:|---:|---:|
-| `deepseek-flash` / `deepseek-v4-flash` | 空闲 | 0.02 | 1 | 4 |
-| `deepseek-flash` / `deepseek-v4-flash` | 高峰 | 0.04 | 2 | 8 |
-| `deepseek-v4-pro` | 空闲 | 0.15 | 4.5 | 13.5 |
-| `deepseek-v4-pro` | 高峰 | 0.30 | 9 | 27 |
+## 3. 请求由哪些稳定段组成
 
-缓存命中的输入成本只有缓存未命中输入的 **1/50（Flash）到 1/30（Pro）**。
-
-在 agent 场景下，一次请求的 prompt 由「系统提示 + 稳定上下文 + 历史消息 + 工具定义 + 当前 prompt」构成，其中历史与工具定义往往占据绝大部分 token。因此**多轮会话的每一轮请求，本质上大部分 token 都是重复发送的旧内容**。如果这些旧内容能命中缓存，成本几乎可以忽略；如果命中不了，每一轮都要为全部上下文按全价付费。
-
-这也是 `usageStats` 专门统计 `cacheHitTokens`、计算命中率并做失效归因的原因（`src/agent/usageStats.ts` 的 `normalizeDeepSeekUsage` / `calculateCacheHitRate`）。
-
-### 1.3 缓存命中的核心矛盾
-
-缓存命中的前提是**字节级前缀稳定**：这一轮的请求必须是上一轮请求的前缀（或完全相等）。但 agent 会话天然是「增长的」——每轮都会追加新消息。KeepSeek 面临的核心问题是：
-
-> 如何在**上下文不断增长**（必须追加新内容）和**上下文不断变化**（摘要压缩、技能激活、工具裁剪等都可能改写旧内容）之间，维持一个尽量稳定的前缀？
-
-KeepSeek 的全部缓存优化技术，都是围绕「**制造并守护一个字节稳定的前缀**」展开的。
-
-## 2. 总体设计原则
-
-KeepSeek 的请求组装遵循三个互相配合的原则（实现核心在 `src/agent/protocol.ts` 的 `buildInitialAgentMessages`）：
-
-1. **分层前缀（base-first）**：请求被拆成「极少变化的段」和「只增长的段」。system 系统提示、稳定上下文块、工具定义放在最前；历史消息按追加顺序居中；当前用户 prompt 放在最后。变化频率越低的段越靠前，保证任意一段变化时，被它「带失效」的后续内容尽量少。
-2. **Append-only 历史（只增不改）**：历史消息一旦进入投影就只增不改。任何「滑动窗口」「逐轮重打包」机制都会删除或重写中间消息，使第一个变化消息之后的所有内容 miss。
-3. **低频失效点（low-frequency invalidation）**：一切需要改写前缀的操作（摘要压缩、技能重激活、工具集裁剪）都被刻意压低频率；运行中变化的上下文则追加到新 user 消息尾部，不回写旧前缀。
-4. **受控 epoch 边界**：历史摘要刷新之外，Context Epoch rollover 是第二个明确的缓存重置点。它只重建同一逻辑任务的 provider replay lane，不改写持久化聊天历史，也不产生可见 user 消息。
-
-请求的最终形态（`buildInitialAgentMessages`，`src/agent/protocol.ts:80-126`）：
+概念上，一次请求由以下稳定段构成：
 
 ```text
-messages = [
-  system      ← 固定 agent 系统提示（跨轮字节不变）
-  system      ← contextInstructions 稳定上下文块（AGENTS.md/Skills/Legacy Memory/Context Files）
-  system*     ← synthetic summary（历史压缩摘要，低频刷新）
-  user        ← 历史消息（append-only，逐字节还原）
-  assistant   ← 历史消息（toolRounds 展开为 assistant(tool_calls) → tool → assistant）
-  ...
-  user        ← 当前 prompt（trim 后；与历史末条 user 相同则不重复发送）
-]
+system
+contextInstructions
+tools / tool choice
+provider-native history
+current user / tool continuation
 ```
 
-## 3. 技术详解
+字段在不同协议中的物理位置并不相同，缓存判断以真正交给 transport 的原生请求体为准：
 
-### 3.1 固定 system 提示（base-first 分层）
+- Chat Completions：`messages`、`tools`、`tool_choice`。
+- OpenAI Responses：`instructions`、`input`、`tools`、`tool_choice`。
+- Anthropic Messages：`system` blocks、`messages`、`tools`、`tool_choice`。
 
-**做什么**：`getAgentSystemPrompt`（`src/agent/protocol.ts:249-...`）生成 agent 的固定系统提示，只依赖语言，**不依赖任何上下文、历史或 prompt**。`buildInitialAgentMessages` 把它固定在 `messages[0]`。
+`buildProviderRequestProjection()` 是这三条 lane 的共同入口。Runner 的实际请求、`contextUsage`、摘要触发判断和工具结果准入都必须基于它，避免“估算看得见、实际没发送”或反过来的分叉。
 
-**原理**：system[0] 是请求前缀的最开头。只要它不变，前缀的「头」就是稳定的；它后面任何段的变化都不会波及它。把「所有与运行状态无关的指令」全部收进这条固定消息，是缓存稳定性的第一道保险。
+### 3.1 协议 lane
 
-**失效时机**：从不（除非改代码或切换语言）。
+当前 provider 请求协议与工具 schema 版本均为 **V9**：
 
-**测试守护**：`test/cacheByteStability.test.ts` 断言 system prompt 不随 contextInstructions/历史变化。
+- V5 引入子代理。
+- V8 引入通用 Evidence 与 Context Epoch。
+- V9 固定加入 `keepseek_apply_patch` 与 canonical Patch IR。
 
-### 3.2 稳定上下文块 contextInstructions（初始冻结，变化只追加）
+V1–V8 的已存在热会话保持原有 system/schema 字节；只有缓存自然冷却或发生受控 rollover 时才迁移。不同来源、endpoint、wire model、协议版本或原生协议不能共用缓存 lane。
 
-**做什么**：AGENTS.md 项目指令、激活的 Skills、Legacy Project Memory、Context Files 这些「动态上下文」统一由 `formatCurrentRunContextForAgent`（`src/agent/protocol.ts:212-243`）格式化为**第二条 system 消息**，而不是塞进 user 消息。
+## 4. 字节冻结规则
 
-在 Provider 侧，首轮格式化结果被持久化为 `ChatSession.contextInstructions` 并冻结为第二条 system 消息。后续每轮仍计算内容 hash：字节未变时直接复用；AGENTS.md / Skills / Legacy Memory / Context Files 真正变化时，**不会重写已经发送过的 `contextInstructions`**，而是把新的上下文 envelope 只追加到本轮 user 消息尾部，并通过 `providerContent` 原样持久化。下一轮它作为历史消息重放，因此新事实仍然可见，同时旧前缀没有任何字节漂移。
+### 4.1 system 与项目上下文
 
-**原理**：
+- `getAgentSystemPrompt()` 只包含协议级静态约束，不放时间戳、随机 ID、绝对路径、临时状态或激活原因。
+- 首轮解析出的 `contextInstructions` 持久化到 `ChatSession`，之后逐字节复用。
+- AGENTS.md、Skill、Legacy Memory 或 Context Files 在会话中发生变化时，不回写旧前缀；格式化后的变化以稳定的 dynamic context tail 追加到下一条真实 user 消息。
+- 未发生变化时不重复追加 tail。项目指令大小和 token 上限仍由 `ProjectInstructionsResolver` 与配置控制。
 
-- 这些内容放进独立的 system 块，使 system[0] 完全不受它们影响；
-- user 消息保持「纯 prompt」，跨轮字节一致——如果把这些内容塞进 user 消息，user 消息的字节会随上下文变化，历史重放时全部 miss；
-- 「重算 hash、变化时只在尾部追加」把**内容更新**与**历史重写**分离：旧 system 与历史保持冻结，新上下文从当前轮末尾开始生效。
+这意味着“上下文更新”通常只损失新追加部分，而不是让整段历史重新编码。
 
-**失效时机**：初始 `contextInstructions` 建立时。后续真实内容变化只增加新的 miss 尾部，不使既有前缀失效；编辑重发属于另一个显式历史重写边界。
+### 4.2 user 消息
 
-**测试守护**：`test/cacheByteStability.test.ts`（相同输入必得相同输出、不同输入必得不同输出）、`test/protocolCache.test.ts`（context files 只进 system 块、user 消息无包装）。
+- 原始输入先 `trim()`；存在引用展开时使用 `expandedContent`。
+- 真正送往 provider 的内容持久化为 `providerContent`，在当前热前缀内发送与恢复复用同一字符串。
+- goal、审批结果、执行结果、动态上下文等宿主信息只追加在当前真实 user 消息尾部。
+- 禁止事后为旧 user 消息添加标签、日期、角色说明或重新展开引用。
 
-### 3.3 Append-only 历史投影（historyProjection）
+“编辑并重发”是显式用户操作，会从被替换轮次起截断后续历史，因此是明确的缓存边界，不属于普通 append-only 路径。
 
-**做什么**：`buildHistoryProjection`（`src/agent/historyProjection.ts:49-111`）决定每一轮请求发送哪些历史消息。它的核心规则是：
+另一个受控例外是 `historyArchive.ts` 的缓存安全维护：Coordinator 已决定同步压缩、旧前缀本就会失效时，才可把超大的首条 providerContent 或陈旧低优先级工具结果替换为稳定 archive 占位符；完整原文按 content hash 留在 `session.historyArchive`，由 `keepseek_search_session_archive` 检索。它不能在热前缀中任意运行。
 
-1. **投影成员 = 受保护消息 ∪ 所有未被摘要覆盖的消息**。`recentMessageIds`（最近 N 轮）只决定一条消息「是否可被压缩」，**绝不决定它是否留在投影里**。
-2. **消息字节终身冻结**：消息在投影中始终以 `(expandedContent ?? content)` 形态出现，序列化字节跨轮不变。
-3. **降级兜底**：仅当无摘要可用且投影超 token 预算时，才截断到最近消息（`capProjectionToTokenBudget`）。这是压缩持续失败的罕见失败路径，正常 append-only 路径永不触发。
+### 4.3 assistant 与工具轮
 
-源码注释（`historyProjection.ts:59-65`）直接写明了设计动机：
+- Chat Completions 的 assistant/tool 序列保存在 `ChatMessage.toolRounds`，恢复时按原顺序还原；缓存安全归档只替换旧结果正文，不移除调用/结果配对。
+- Responses 与 Anthropic 的同 lane 原生块保存在 `providerReplay`；跨 lane 只投影可见文本，不能伪造原生块。
+- Anthropic 的 thinking、signature、redacted data、`tool_use` 和 `tool_result` 必须保持原样及原顺序。
+- reasoning 与对应工具调用属于一个原子轮次，不能只保留其中一半。
 
-> 缓存优先投影：选中的消息是 append-only 的。消息创建即进入投影，只有摘要刷新覆盖它时才离开——这是刻意选定的低频失效点。如果滑动 recent-turn 窗口，每轮都会删除或重写中间消息，使第一个变化消息之后的所有内容都 miss（DeepSeek 前缀缓存要求 token 0 起字节相同）。
+### 4.4 工具 schema
 
-**原理**：对比两种方案——
+- schema 的集合、字段和顺序按会话协议版本冻结。
+- 工具耗尽或当前轮禁止调用时使用 `tool_choice: none`，不临时删除 `tools`。
+- slim mode 默认关闭。新增或改名工具必须升级协议版本并覆盖热会话迁移测试。
+- Skill 与能力只影响上下文和运行策略，不得悄悄改写已冻结的 system/schema。
 
-- **滑动窗口方案**：每轮只保留最近 N 轮消息。第 2 轮发送 `[m1, m2]`，第 3 轮变成 `[m2, m3]`——m1 被删、m3 是新的，从 m2 之后全部 miss，而且每轮 miss 一次。缓存几乎永远不命中。
-- **append-only 方案**：第 2 轮发送 `[m1, m2]`，第 3 轮发送 `[m1, m2, m3]`——第 2 轮的请求是第 3 轮请求的**完整前缀**，服务端从 token 0 一路命中到上一轮末尾，只有新追加的 m3 需要按全价计费。
+### 4.5 工具结果
 
-净效果：多轮会话中，前缀只**增长**，中间任何字节都不变。命中率随轮次增加而趋于接近 100%（只有最后追加的消息 miss）。
+工具调用按以下顺序提交：
 
-**失效时机**：从不（正常路径）。唯一例外是摘要刷新覆盖旧消息（见 3.5）。
+```text
+持久化调用意图
+  → 执行工具
+  → 保存完整 Evidence 与 hash
+  → 按真实剩余容量生成一次 provider-visible envelope
+  → 标记发送/交付状态
+```
 
-**测试守护**：`test/historyProjection.test.ts`（无摘要时全量保留、前缀只增长）。
+完整结果属于不可变 Evidence；进入模型历史的是保存过的 envelope。恢复时复用该 envelope，不重新读取文件、重跑搜索，更不能重新执行副作用。调用进入未知状态时保持 uncertain，不能以重试“猜测修复”。
 
-### 3.4 受保护消息（Protection）
+## 5. 历史投影与摘要
 
-**做什么**：`getAutoProtectionReason`（`src/agent/historyProjection.ts:167-196`）按内容特征识别「不该被压缩」的消息，并标记为受保护：
+`session.messages` 是聊天事实记录，provider history 是按容量生成的投影，两者不可混同。
 
-- 首条 / 末条 user 消息（会话的起点与当前任务）；
-- 显式要求保留的消息（匹配「记住/保留/不要忘记/始终/偏好/约束/remember/always/from now on/preference/constraint」等关键词）；
-- 用户纠正类消息（「不对/不是/纠正/actually/correction」等）；
-- 重要错误 / 测试输出（含 stack trace、`error:`、`npm err!` 等标记且内容足够长或有代码块）；
-- DraftEdit 结果（「待确认修改/已准备…修改」等）。
+### 5.1 投影结构
 
-**原理**：摘要压缩会**删除**被覆盖的消息，而删除任何一条消息都会让该消息之后的全部前缀失效。受保护消息是「业务上不可丢失」的内容——它们被压缩掉会导致模型遗忘关键约束或错误信息。KeepSeek 用内容特征把它们从「可压缩集合」里剔除，**既保护了对话语义，又避免了一次本可避免的压缩触发**（压缩是可压缩消息数量驱动的，保护消息越多，触发越晚）。
+投影优先包含：
 
-**失效时机**：从不（保护是永久的，除非会话被编辑重发）。
+1. 当前有效摘要；
+2. 自动保护的关键消息；
+3. 摘要覆盖点之后的消息；
+4. 最近完整轮次和当前请求。
 
-### 3.5 低频历史压缩（historyCompressor）——失效点管理的关键
+自动保护至少覆盖首条需求、最近输入、显式“记住”、错误/测试失败、用户纠错和 DraftEdit 结果。选择单位是完整轮次，不能拆散 assistant/tool 配对。
 
-**做什么**：历史压缩（把旧消息替换成一条摘要）是**必须的**——否则会话无限增长会撑爆当前模型的有效上下文窗口。但每次摘要刷新都会：
+### 5.2 摘要约束
 
-- 重写 synthetic summary system 消息（字节变化）；
-- 把被覆盖的消息从投影中删除（历史段被改写）。
+- 摘要只保存目标、决策、错误、路径/符号线索、完成项和待办，不复制文件正文、长日志或代码块。
+- 摘要使用当前来源和模型，关闭 thinking、禁用 tools、设置独立输出预算与短超时。
+- 已成功摘要持久化后逐字节复用；不要假定同一输入重新请求一定得到相同文本。
+- 摘要失败只记录原因，不阻塞用户请求。
+- 无可用摘要且投影超过强制阈值时，才退化为保留受保护消息和最近历史。
 
-这两件事都会让前缀从摘要处起全部失效。因此压缩被设计成**低频失效点**（`src/agent/historyCompressor.ts:34-38` 注释：「Deliberately high: every summary refresh rewrites the synthetic summary message and drops covered messages from the projection... Keep refreshes rare (a low-frequency cache-invalidation point) instead of sliding the recent-turn window every turn」）。具体手段：
+压缩阈值来自模型画像，而不是散落在 Runner 中：
 
-1. **增量阈值**：已有摘要时，新增可压缩消息 ≥ 48 条（`SUMMARY_INCREMENTAL_MESSAGE_THRESHOLD = 48`，`historyCompressor.ts:38`）且占用比超过 `triggerRatio` 才刷新。普通对话几轮内不会触发。
-2. **比率闸门**：原始会话 token 占有效上下文窗口的比例低于 `triggerRatio` 时直接 `fresh_enough` 跳过（`shouldRefreshSummary`）。`triggerRatio / forceRatio` 由用户在命令菜单中选择的三档自动压缩阈值覆盖：提前清理为 `0.70 / 0.85`，默认平衡为 `0.80 / 0.92`，缓存优先为 `0.85 / 0.95`。DeepSeek V4 内置模型保留专用参数；其它模型按“手动 > 发现 > 受控名称猜测 > 32768 fallback”解析上下文窗口，摘要预算还会被最终输出上限收紧。猜测和 `K/M tokens` 展示只影响请求 envelope/预算，不进入 system、历史消息或工具 schema。
-3. **确定性摘要**：摘要请求 `temperature: 0`、关闭 thinking、限制输出 token、短超时（`historyCompressor.ts:347-349`）。摘要刷新时「被覆盖消息的变化」是不可避免的成本，**不能再叠加模型输出的随机字节漂移**——温度 0 保证同一输入得到同一摘要，后续增量刷新时摘要本身不再无故变化。
-4. **C3 失败自锁**：上次刷新失败时暂停自动刷新（`shouldRefreshSummary` 中的 `lastFailureReason` 检查），避免「缓存已经受伤」的情况下反复触发可能再次失败的刷新；只有接近/超过强制上限（`forceRatio`）时才允许重试，保护上下文窗口。
-5. **分级执行**：超过 `forceRatio` 同步强制压缩（`force_context_limit`）、无摘要且接近上下文上限时同步创建（`missing_summary_near_context_limit`），其余情况走后台刷新（`planRefresh`）——前台请求不被压缩延迟阻塞。
+| 画像 | 开始摘要 | 强制降级 |
+| --- | ---: | ---: |
+| aggressive | 70% | 85% |
+| balanced | 80% | 92% |
+| cache | 85% | 95% |
 
-**原理**：压缩是「用一次大的缓存失效，换取未来很多轮的小前缀」。如果每轮都压缩，等于每轮都失效；如果把压缩推迟到增量 48 条或用户选择的占用比阈值才做，那么两次压缩之间可能间隔几十轮请求，期间每一轮都几乎全量命中。这是典型的「批量失效」思想：**让失效次数最小化，而不是让失效内容最小化**。
+累计新增消息达到增量刷新阈值时也可更新摘要；当前实现阈值为 48 条消息。
 
-**失效时机**：每 ≥48 条可压缩消息且超比率（后台）/ 超强制比率（同步）。
+## 6. 大工具结果与 Context Epoch
 
-缓存优先档会把投影上限 `maxProjectionTokens = contextWindow × forceRatio` 提高到上下文窗口的 95%，因此能保留更多原始历史并延后摘要刷新；这是保护 DeepSeek 前缀缓存的预期取舍。提前清理档则更早释放上下文空间。
+KeepSeek 不再用固定的“累计工具结果预算”终止长任务。每次结果准入综合考虑：
 
-模型、来源、provider 或 base URL 变化会迁移 `requestProtocol` cache lane，因为旧 provider 缓存前缀本来就不能复用；它**不会删除或强制重建** `contextCompression.summaries`。摘要是模型无关的语义文本，`HistorySummary.modelId` 只记录 provenance，新模型继续在 projection 中读取既有摘要。`requestProtocolVersion` 仅表示序列化与工具 schema 的兼容版本，不表示模型能力等级。新会话使用 v8；v1–v7 的 system/history/schema 字节继续冻结。热旧 lane 在缓存自然失效或首次必须外置大结果时，通过一次 Context Epoch rollover 迁移到 v8，绝不重写旧 lane 或制造伪 user 消息。
+- 当前三协议真实 projection；
+- 模型声明窗口与 learned effective window；
+- 动态输出预留；
+- 最小 envelope 大小；
+- 当前 epoch 的工具数量和软压力。
 
-### 3.6 工具集 schema 稳定性
+完整结果放不下时，模型通过 `keepseek_read_evidence` 分页读取；最小 envelope 也放不下、provider 报 context-too-long，或 epoch 达到受控阈值时，执行 rollover。
 
-**做什么**：工具定义（`tools` 段）位于请求前缀的中前部，其 JSON 字节必须跨轮一致。KeepSeek 用三层手段保证：
+rollover 会外置 task-scoped checkpoint，并开始新的 provider replay lane，但保持：
 
-1. **完整工具集固定**：默认暴露的 `ALL_AGENT_TOOL_NAMES` 是常量列表（`src/agent/protocol.ts:44-63`），不随 prompt 变化。只要用户不开 slim 模式，每轮请求的工具集完全相同。
-2. **schema 规范化与版本冻结**：`getAgentTools` 输出的 tools 经 `canonicalizeDeepSeekTool` 处理——对象 key 递归排序、`required` 数组排序、补全空 `properties`，保证同一工具集生成的 JSON 逐字节相同（即使内部构造顺序不同）。工具说明按会话的 `requestProtocolVersion` 生成，不能在热会话中途漂移。
-3. **slim 模式默认关闭 + per-session 冻结**：`DEFAULT_SLIM_TOOL_MODE_ENABLED = false`（`src/shared/config.ts:23-27`）。slim 模式按 prompt 关键词裁剪工具集（如出现 git 字样才暴露 git 工具），会让 tools 段随 prompt 变化而失效，因此默认关闭。若用户显式开启，工具集在**首次真实请求时确定并冻结**（`slimToolNamesBySession`，`src/provider/KeepseekChatViewProvider.ts:2354-2356`），后续轮次不再按关键词变化；编辑重发时删除冻结、按新 prompt 重新确定（`KeepseekChatViewProvider.ts:2336-2340`）。
+- 同一 session、逻辑 task 和 approval root；
+- 原始需求、TaskPlan、Evidence/hash 与工具幂等状态；
+- DraftEdit、DraftRun、审批、validation/repair 和未知副作用状态；
+- 运行时钟、费用账本、取消/停止状态。
 
-**原理**：tools 段是一段很大的 JSON（每个工具的 description、parameters 都很长），位于前缀中部。它一变，其后所有历史消息 + 当前 prompt 全部 miss。工具集「固定 + 规范化」确保：无论模型调用多少次工具、无论代码内部以什么顺序构造工具列表，发出的 JSON 字节都一样。slim 模式本质上是在「更小的 prompt（更少 token，但缓存更容易失效）」和「更大的固定 schema（更多 token，但缓存稳定）」之间做取舍，KeepSeek 默认选择后者。
+它不会改写 `session.messages`、插入伪 user 消息、创建新聊天，或授权/应用/执行任何副作用。checkpoint 优先使用模型生成的有界摘要，失败时使用宿主确定性摘要。
 
-**失效时机**：会话开始（slim 冻结时）/ 编辑重发 / 切换模型。普通轮次从不。
+context-too-long 会按来源、endpoint 和模型校准有效窗口后重建 epoch。只有冻结的 system/schema、原始请求与最小 checkpoint 仍无法装入时，才向用户报告真实容量错误。跨 epoch 的无进展指纹用于阻止重复循环。
 
-**测试守护**：`test/protocolCache.test.ts`（tools schema 顺序按工具名规范化、不同输入顺序得到相同 JSON；slim 冻结后 schema 跨轮一致）。
+## 7. 缓存可观测性
 
-### 3.7 implicit Skill 会话冻结
+`cacheObservation.ts` 从实际 transport 请求生成不含正文的观测记录。它对 system、contextInstructions、tools、provider history 和完整请求分别计算指纹，并在同一 lane 内判断与上一请求的关系：
 
-**做什么**：隐式激活的 Skills（按 prompt 关键词匹配，如 prompt 提到 review 就激活 review skill）会随 prompt 变化而改变 Skills 块字节。KeepSeek 的解法是**会话内冻结**：
+- `cold`：没有可比较前序请求；
+- `strict_prefix`：上一请求是当前请求的严格前缀；
+- `identical_retry`：请求未变化的重试；
+- `broken`：较早段发生变化，并记录首个变化段。
 
-- 首次真实请求（prompt 非空）时，把隐式激活结果写回 `session.frozenImplicitSkillIds`（**空集也冻结**，`src/skills/skillStore.ts:185-195`）；
-- 之后每轮跳过关键词匹配，只按冻结 id 激活，activation reason 固定为 `'Frozen from the first user request of this chat session.'`（`src/skills/skillActivationResolver.ts:31-35, 59-61, 74-81`）；
-- 失效时机被严格限定在「本来就会重写前缀」的事件：刷新 Skills、启用/停用 Skill、编辑重发（`invalidateImplicitSkillSnapshot`，`src/skills/skillStore.ts:239-243`；`KeepseekChatViewProvider.ts:1324, 1373, 1389, 2336-2340`）——此时前缀本来就从该点失效，顺势重算。
+lane 至少按 usage source、provider、协议、source ID、endpoint identity 和 wire model 隔离。wire alias 或自定义 endpoint 不得混在一起。
 
-**原理**：与 slim 冻结同理。implicit skill 的匹配对象是「当前 prompt」，而 prompt 每轮都变；如果不冻结，几乎每轮都会出现「某个 skill 被移出/加入激活集」，Skills 块字节随之变化，其后全部 miss。冻结后，激活集在会话内恒定——**用「首轮可能不是最优的技能组合」换取「整个会话的字节稳定」**。同时「空集也冻结」很关键：否则第一轮没有技能、第二轮 prompt 匹配到技能，第二轮就要重写前缀。
+### 7.1 正确的健康指标
 
-**失效时机**：会话开始（首次真实请求）/ 编辑重发 / Skills 显式变更。
+原始缓存命中率：
 
-**测试守护**：`test/cacheByteStability.test.ts`（冻结后 skills 块字节稳定、请求序列保持字节前缀）。
+```text
+cacheHitTokens / inputTokens
+```
 
-### 3.8 上下文去重与确定性规范化
+它会被本轮不可避免的新 token 稀释，不能直接要求达到固定百分比。KeepSeek 先估算：
 
-**做什么**：`deduplicateContextSources`（`src/agent/contextDeduplication.ts:26-84`）在把 AGENTS.md / Skills / Context Files 组装进上下文块前做去重：
+```text
+reusablePrefixTokensEstimate
+unavoidableNewTokensEstimate
+expectedRawHitRateCeiling
+```
 
-- **URI 规范化**：`normalizeUri` 统一反斜杠、尾斜杠、win32 盘符大小写（`src/agent/projectInstructions.ts`），同一文件不会以不同 URI 出现两次；
-- **内容 hash 去重**：`hashContent` 对 `\r\n` 归一化后做 sha256，相同内容跨来源只保留一份；
-- **确定性排序**：候选按优先级稳定排序（project 30 / explicit 40 / session 45 / workspace-default 50 / implicit 60 / legacy 70，`src/agent/currentRunContext.ts`），Skills 内容按字符预算截断并 CRLF 归一化。
+只有满足以下条件的请求才进入健康判断：
 
-**原理**：去重有两个缓存收益——（1）**减少 prompt 体积**，体积越小，每轮全价计费的部分越少；（2）**保证字节确定性**，同一文件经不同路径（如 `C:\a` 与 `c:/a`）进入上下文时，若 URI 不同会被视为不同来源，可能重复注入；排序不稳定则相同内容在不同轮次可能顺序不同，直接破坏字节稳定。CRLF 归一化则防止「同一文件在 git 检出换行风格变化时」造成无谓的字节漂移。
+- 与上次请求是 `strict_prefix`；
+- 可复用前缀至少 1024 token；
+- 没有摘要、rollover、协议迁移等受控边界；
+- provider 返回可用的缓存计量字段。
 
-**失效时机**：从不（相同状态下输出确定）。
+核心指标是复用效率：
 
-### 3.9 Tool Evidence 与结果信封字节确定性
+```text
+cacheReuseEfficiency = cacheHitTokens / reusablePrefixTokensEstimate
+```
 
-**做什么**：`tool` 角色的消息（工具调用结果）也参与前缀。v8 的所有工具先在 `ToolEvidenceStore` 保存执行意图，执行后保存完整正文、hash 与终态，再由动态准入生成一次 provider-visible 结果：
+当前健康目标为 95%。只有本地已证明前缀稳定、provider 又报告了缓存数据且效率低于目标时，才可标记为可能的 provider eviction；不能把冷启动、正常新增 token 或本地主动边界误报为供应商故障。
 
-- 文件列表确定性排序（`files.sort` localeCompare，`src/agent/tools/workspaceTools.ts`）；
-- CRLF 统一归一化为 `\n`；
-- 文件/diff/log 按完整行、搜索/符号/诊断按 item、JSON 按合法结构整形；
-- 完整结果放不下时返回规范化 envelope：`completeInline=false`、稳定 `evidenceRef`/`contentHash`/总量和 `keepseek_read_evidence` 分页方法；
-- envelope 在 evidence record 中只写一次。重启、重试、三协议回放都逐字节复用；已保存证据不能重新截断或换序。
+### 7.2 归因与隐私
 
-**原理**：工具输出是历史中体积最大、最容易不稳定的部分。内容寻址 evidence 把「完整结果保真」与「模型当次可见字节」分离；规范 JSON 排序和一次性保存把该次结果钉死。模型需要细节时读取不可变快照，而不是重跑原工具或改写旧消息。
+缓存原因分为四类：
 
-**失效时机**：envelope 一旦创建永不变化。工作区后来变化不影响快照；需要当前状态时执行新的源读取并产生新 evidence。
+- `normal`：冷请求、稳定追加、相同重试；
+- `controlled_boundary`：摘要、epoch rollover、协议迁移、context-too-long 重建；
+- `provider`：在本地稳定证据充分时推断的缓存逐出；
+- `local_anomaly`：system、context、tools 或历史发生非预期变化。
 
-### 3.10 Context Epoch：第二个受控缓存边界
+Usage Ledger 保存请求级诊断，并按来源与 lane 聚合命中、可复用前缀、理论上限及本地边界损失。Webview 只接收汇总；endpoint identity、内部 hash、prompt 正文和 ledger 原始记录不得下发。
 
-**做什么**：动态准入在每次 Provider 请求前根据协议的真实 prospective projection、learned effective window、阶段化输出预留、协议开销、并行批次最小信封和动态误差量计算空间。当连最小信封也放不下、单 epoch 工具阈值到达、模型输出因 length 需续写，或 Provider 返回 context-too-long 时，Runner 在完整工具批次后持久化旧 epoch；完整宿主状态写入可分页 checkpoint evidence，规范化 seed 只携带其 ref/hash 和有界近期状态，再在同一 `sessionId/taskId` 内创建新 lane。
+## 8. 修改前检查
 
-新 seed 复用完全相同的 system、冻结 schema、会话 projection 和原始 user 需求，再追加语义摘要、宿主权威状态及 evidence 引用。模型摘要失败时使用确定性宿主摘要；失败不会结束任务。Responses 不把孤立 function output 带入新 lane，Anthropic 不伪造 thinking signature，Chat Completions 不拆散 tool call/result 对。
+### 改 system、schema 或消息序列化
 
-**缓存代价**：rollover 是明确的一次冷边界，trace 记录原因、前后估算/实际 tokens、declared/learned window、摘要 fallback 和缓存数据。它换取后续 epoch 的稳定增长；旧 epoch 和 `ChatSession.messages` 原样保留。timestamp、随机 ID、绝对路径不进入可避免的稳定前缀，epoch seed 使用规范 key 排序并持久化后复用。
+1. 明确是否需要提升 request/schema protocol version。
+2. 同步检查三协议 projection 与原生 replay。
+3. 证明普通下一轮仍是严格前缀追加。
+4. 验证热旧 lane 不被静默改写。
 
-### 3.11 并发与顺序控制
+### 改压缩、估算或模型窗口
 
-**做什么**：前缀稳定性还要求「同一时刻只有一个东西在改这段会话」：
+1. 同步检查 `shared/types.ts`、`historyProjection`、`historyCompressor`、`contextUsage` 和 Runner。
+2. 使用真实 projection，不单独拼一份估算消息。
+3. 覆盖无摘要、摘要失败、protected 消息、最近轮次和降级路径。
 
-- **单飞**：普通聊天与后台运行互斥，同一工作区同时最多一个后台 run（`src/provider/KeepseekChatViewProvider.ts`、`src/agent/backgroundRunCoordinator.ts`）；
-- **压缩串行化**：per-session 后台压缩用 Map 去重，前台刷新前先 await 后台刷新（`src/agent/agentRequestCoordinator.ts`），避免并发压缩改写 history 段；
-- **后台轮次不破坏前缀**：后台 run 复用同一 session 与同一发送路径，只在该会话消息上 append，后台 prompt 是固定模板，字节稳定。
+### 改工具结果或 epoch
 
-**原理**：前缀稳定是「全局不变量」。如果两个并发流程同时改写同一会话（例如后台压缩正在把旧消息换成摘要、前台请求同时基于旧投影发送），即使各自逻辑正确，也会产生「互相覆盖」的中间状态，导致请求字节不可预测。单飞 + 串行化保证每次字节变更都是确定性的、可复现的。
+1. 保存意图、Evidence、envelope 和交付状态的顺序不可倒置。
+2. 覆盖 20MB 分页、跨 session/task 拒绝、恢复字节一致和三协议配对。
+3. 验证 rollover 不产生伪 user 消息、不重跑工具、不重置审批/时限/费用。
+4. 未知副作用必须 fail closed。
 
-**失效时机**：不适用（它防止的是「意外失效」）。
+## 9. 回归测试入口
 
-### 3.12 历史字节还原与当前 prompt 去重（B1/B4 契约）
+```bash
+bun run build:test
+bun run test
+```
 
-**做什么**：历史重发时的字节路径与首次发送时完全一致，这是缓存命中的直接守护：
+重点测试：
 
-- **user 消息**：一律取 `(expandedContent ?? content).trim()`（`src/agent/protocol.ts` 的 `getMessageContentForAgent`）。引用展开（`<path#L1-L5>`）在首次发送时就写进 `expandedContent` 并原样保存，重发时不再重新展开——否则「首次以 prompt 身份发送、之后以历史身份重发」会得到不同字节。
-- **assistant 消息**：按 `toolRounds` 还原为 `assistant(tool_calls) → tool → assistant(最终文本)` 的完整序列（`appendHistoryMessage`，`protocol.ts:128-160`），`reasoning_content` 与 `tool_call_id` 一并保留。上一轮请求中「模型发起的工具调用 + 工具结果」在下一轮必须以完全相同的字节重现。
-- **Provider 原生回放**：Responses Items 与 Anthropic Messages 使用可辨别 `providerReplay`。Anthropic 同 lane 原样追加 Thinking/signature/redacted data/`tool_use`/`tool_result`；跨 protocol、sourceId 或规范化 endpoint 时只保留可见文本。工具耗尽不删除 tools，只切换 `tool_choice`。
-- **当前 prompt 去重**：若当前 prompt 与历史最后一条 user 消息内容相同，则不重复追加（`findCurrentPromptMessage`，`protocol.ts:779-791`）——否则「上轮刚问过、这轮再点一次发送」会白白追加一条重复 user 消息，且字节上还会多出这条消息导致其后内容错位。
+| 测试 | 保护的契约 |
+| --- | --- |
+| `test/cacheByteStability.test.ts` | system/schema、user/providerContent、toolRounds、Skill 与前缀字节稳定 |
+| `test/p1CacheObservability.test.ts` | 三协议观测、lane 隔离、严格前缀、95% 复用效率、隐私与迁移 |
+| `test/historyCompressor.test.ts`、`test/historyProjection.test.ts` | 摘要、保护消息、轮次原子性、失败与强制降级 |
+| `test/currentRunContext.test.ts` | 用量估算与真实 current-run projection 一致 |
+| `test/historyArchive.test.ts` | 缓存安全归档、原文召回与工具调用配对 |
+| `test/toolResultBudget.test.ts` | Evidence、动态准入、20MB 分页、epoch、容量校准与恢复 |
+| `test/openAiResponses.test.ts`、`test/anthropicMessages.test.ts` | 原生请求形态、replay 配对与 context accounting |
 
-**原理**：缓存命中的前提是「上一轮的请求字节 ⊑ 这一轮的请求字节」。如果历史消息在重发时经过不同的处理路径（比如首次发送时做了引用展开、重发时没做），同一逻辑消息就会产生不同字节，前缀在第一条历史消息处就断了。B1/B4 契约的本质是：**每一条消息只允许有一种字节形态**。
-
-**测试守护**：`test/cacheByteStability.test.ts` 的 B1 契约（第一轮完整请求是第二轮请求的字节前缀）、expandedContent 跨轮原样、B4 契约（toolRounds 跨轮重建与上一轮发送序列逐字节一致）、带工具调用前缀契约。
-
-## 4. 命中率的度量、指纹与失效归因
-
-光有「稳定的前缀」还不够——如果服务端缓存被逐出（LRU、容量、时间），命中率也会掉。KeepSeek 需要能区分「**KeepSeek 自己改了前缀**」与「**服务端把缓存逐出了**」。为此它做了三层监控：
-
-### 4.1 usage 归一化与命中率
-
-`normalizeDeepSeekUsage` 兼容 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 与 `prompt_tokens_details.cached_tokens`，归一化为 `cacheHitTokens / cacheMissTokens`。Anthropic parser 将 prompt 计算为 `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`，hit 为 cache read，miss 为 uncached input + cache creation，不虚构 reasoning tokens。命中率与成本在会话/轮次粒度持久化。
-
-官方 Anthropic host 默认使用稳定顶层 `cache_control: {type:"ephemeral"}`；自定义 compatible endpoint 默认不发送，且不会在失败后删字段重试。其 tools、system、messages 与 Thinking 配置在同一 run 内冻结。
-
-### 4.2 请求前缀指纹
-
-`createPromptCacheDiagnostics`（`src/agent/runner.ts:1487-1518`）在每轮请求发出前记录三类指纹：
-
-- `systemPromptHash`：所有 system 消息拼接的 sha256；
-- `toolsSchemaHash`：tools JSON 的 sha256；
-- `historyPrefixHash`：system 段之后全部消息（含 `tool_calls` / `reasoning_content`）的 sha256。
-
-Anthropic 对应指纹直接消费权威原生投影：top-level system、Anthropic tools、Messages/history prefix，并附 protocol/source/lane 信息；普通 trace 只记录 opaque block 类型与长度，不记录完整 signature。
-
-指纹跨轮不变即前缀缓存可命中；指纹变化则说明是 KeepSeek 自己改了前缀。
-
-### 4.3 失效归因
-
-`getCacheMissPossibleReasons`（`src/agent/usageStats.ts:161-198`）按证据强弱归因：
-
-- **无条件归因**：system 提示变化、tools schema 变化、模型切换——这是前缀整段失效的直接证据，不依赖命中率门槛；
-- **历史重写**：`historyCompacted`（用了摘要）、`historyRewriteReason`（如编辑重发）直接上报；
-- **直接 lane 归因**：模型、来源、协议或规范化 endpoint/cache lane 变化会直接记录为候选原因；Webview 只接收可读原因，不接收完整 Base URL 或原始哈希。
-- **带门槛归因**：history 段在 append-only 投影下每轮追加新消息、`historyPrefixHash` 逐轮变化是**预期行为**；只有当命中率从 ≥60% 跌 ≥30 个百分点时，才把 history 变化（`history_prefix_changed`）或 provider 缓存逐出（`provider_cache_eviction_possible`）列为候选原因。
-- **真实数据边界**：只有 provider 返回缓存字段时才展示 hit/miss 与命中率；字段缺失显示“不可用”。缓存通道变化是本地证据，不能被描述成已经归零或必然全量 miss。
-
-归因结果写入会话的 `promptCacheDiagnostics` 并在扩展侧 `console.debug` 告警，用于判断「是 KeepSeek 改了前缀还是服务端逐出了缓存」。
-
-## 5. 契约测试守护
-
-缓存稳定性由一组「字节契约」测试守护（`test/cacheByteStability.test.ts`、`test/protocolCache.test.ts`、`test/historyProjection.test.ts`、`test/historyCompressor.test.ts`），任何破坏前缀稳定的改动都会红：
-
-| 契约 | 测试 | 验证内容 |
-|---|---|---|
-| B1 | `cacheByteStability.test.ts` | 同一 user 消息以 prompt / 历史两种身份发送字节一致；第一轮请求是第二轮请求的字节前缀 |
-| 引用展开 | `cacheByteStability.test.ts` | `expandedContent` 跨轮原样，不因发送时机改变 |
-| B4 | `cacheByteStability.test.ts` | `toolRounds` 跨轮重建与上一轮发送序列逐字节一致 |
-| 带工具前缀 | `cacheByteStability.test.ts` | 带 `tool_calls`+`tool` 消息的请求序列是下一轮请求的字节前缀 |
-| contextInstructions | `cacheByteStability.test.ts` | 相同输入必得相同输出，不同输入必得不同输出 |
-| system 稳定 | `cacheByteStability.test.ts` | system[0] 不随上下文/历史变化 |
-| 冻结 + append-only | `cacheByteStability.test.ts` | Skills 冻结后块字节稳定，请求序列保持字节前缀 |
-| context files 位置 | `protocolCache.test.ts` | context files 只进稳定 system 块，user 消息是纯 prompt |
-| 工具 schema 规范化/版本冻结 | `protocolCache.test.ts`、`toolResultBudget.test.ts` | tools 按名排序、JSON 相等；v1–v7 字节保持不变，v8 只在安全边界启用且固定含 evidence 工具 |
-| slim 冻结 | `protocolCache.test.ts` | 冻结后同一工具集 schema 跨轮一致 |
-| 压缩低频 | `historyCompressor.test.ts` | 低于比率不刷新（`fresh_enough`）、超强制比率同步刷新 |
-| 投影 append-only | `historyProjection.test.ts` | 无摘要时全量保留、前缀只增长 |
-| Anthropic 原生缓存与 replay | `anthropicMessages.test.ts` | 官方 cache_control、tools 冻结、lane 隔离、Thinking/signature 与工具结果原样有序回放 |
-| Evidence/envelope | `toolResultBudget.test.ts` | 20MB 分页、session/task 授权、结构化信封、重启后 provider-visible bytes 完全相同 |
-| Context Epoch | `toolResultBudget.test.ts`、三协议测试 | 同一任务内部 rollover、旧 lane 归档、新 seed 规范化、无伪 user 消息、协议配对合法 |
-
-这些测试用 `JSON.stringify` 级别的字节比较而不是语义比较——因为它们守护的正是「字节」这个缓存命中的唯一契约。
-
-## 6. 设计权衡总结
-
-| 机制 | 缓存收益 | 代价 | 失效点频率 |
-|---|---|---|---|
-| system 提示分层 | system[0] 永不变 | 代码结构约束 | 从不 |
-| contextInstructions 初始冻结 | 旧 system 块不重写；变化内容追加到新 user 尾部 | 每轮计算一次 hash | 初始建立 / 显式历史重写 |
-| append-only 历史投影 | 前缀只增长不重写 | 无法逐轮裁剪中间消息（靠压缩兜底） | 从不（正常路径） |
-| 受保护消息 | 防止重要消息被压缩删除 | 保护消息占用上下文 | 从不 |
-| 低频摘要压缩 | 摘要刷新次数被压到最低（≥48 条/超比率） | 旧消息以摘要形式驻留，丢失细节 | 每 ≥48 条可压缩消息 / 超比率 |
-| 工具集固定 + 规范化 | tools 段跨轮字节不变 | 完整工具集占用较多 token | 会话开始 / 编辑重发 |
-| slim 冻结 | slim 模式也不会中途失效 | slim 模式无法中途增减工具 | 会话开始 / 编辑重发 |
-| implicit skill 冻结 | Skills 块跨轮不变 | 后续 prompt 不再激活新隐式技能 | 会话开始 / 编辑重发 |
-| 上下文去重 | 更小且确定的上下文块 | 需要 hash 计算 | 从不 |
-| Evidence + 不可变 envelope | 完整结果不挤占前缀，恢复字节完全一致 | 大结果需要按需分页 | envelope 创建一次 |
-| Context Epoch rollover | 容量压力下自动建立新的稳定增长段 | 每次 rollover 有一次明确冷启动成本 | 软阈值/协议迁移/Provider 拒绝时 |
-| 并发串行化 | 避免并发改写前缀 | 单飞限制吞吐 | 不适用 |
-| 当前 prompt 去重 | 避免重复消息导致错位 | 依赖内容比对 | 从不 |
-
-## 7. 结语
-
-一句话总结：**KeepSeek 把「请求前缀」当成一种需要刻意维护的稳定资源**——用分层消息、append-only 历史、不可变 evidence envelope 和低频受控边界制造字节级稳定前缀；历史摘要刷新与 Context Epoch rollover 分别处理跨消息历史与当前任务内的容量压力，二者都不会静默改写持久化聊天。usage 校准、前缀指纹、rollover trace 与字节契约测试共同守护这一行为。
+审查缓存相关改动时，最终问题只有两个：**既有字节是否仍原样存在？实际请求、估算与诊断是否观察同一份 projection？**

@@ -162,10 +162,10 @@ bun run reinstall:vsix
 ### Maintainer Resources
 
 - [Agent runtime workflow](./doc/keepseek-agent-runtime-workflow.md)
-- [Cache-hit optimization](./doc/cache_keepseek.md)
+- [Request caching and context projection](./doc/cache_keepseek.md)
 - [API payload reference](./doc/keepseek-api-payload-reference.md)
 - [File reference specification](./doc/keepseek-file-reference-spec.md)
-- [Subagent architecture and profiles](./SUBAGENTS.md)
+- [Subagent architecture, safety, and usage](./SUBAGENTS.md)
 
 ### Acknowledgments
 
