@@ -58,6 +58,7 @@ export const accountSettingsStateFragment: WebviewFragment = {
       var settingsDialogBusyAction = '';
       var settingsDialogBusyTimer = null;
       var settingsDialogDirty = false;
+      var settingsSaveCompleted = false;
       var settingsDefaultModelSelection = null;
       var settingsOriginalFormSignature = '';
       var settingsRunBusyStatusVisible = false;
@@ -374,6 +375,7 @@ export const accountSettingsOpenFragment: WebviewFragment = {
           if (settingsSources.length) { settingsSelectedSourceId = settingsSources[0].id; }
         }
         clearSettingsDialogBusy();
+        settingsSaveCompleted = values.settingsSaved === true;
         if (values.defaultModelPending) { settingsDialogBusyAction = 'set-default-model'; }
         settingsRunBusyStatusVisible = false;
         setSettingsDialogStatus('');
@@ -405,6 +407,7 @@ export const accountSettingsCloseFragment: WebviewFragment = {
           return;
         }
         clearSettingsDialogBusy();
+        settingsSaveCompleted = false;
         settingsRunBusyStatusVisible = false;
         setSettingsDialogStatus('');
         settingsOverlay.classList.add('hidden');
@@ -435,6 +438,10 @@ export const accountSettingsBindingsFragment: WebviewFragment = {
 
       if (settingsSaveBtn) {
         settingsSaveBtn.addEventListener('click', function() {
+          if (settingsSaveCompleted && !settingsDialogBusyAction) {
+            hideSettingsDialog();
+            return;
+          }
           if (blockAccountSettingsWhileRunBusy()) { return; }
           var source = getSettingsActiveAccount();
           if (settingsDialogBusyAction) { return; }
@@ -495,6 +502,7 @@ export const accountSettingsBindingsFragment: WebviewFragment = {
           if (!sourceId || sourceId === settingsSelectedSourceId) { return; }
           if (blockSettingsActionForUnsavedChanges()) { return; }
           settingsSelectedSourceId = sourceId;
+          settingsSaveCompleted = false;
           populateSettingsAccount(getSettingsActiveAccount());
           if (settingsModelList) { settingsModelList.innerHTML = ''; }
           renderAccountSettings();
@@ -592,6 +600,7 @@ export const accountSettingsBindingsFragment: WebviewFragment = {
       [settingsAccountName, settingsApiKey, settingsBaseUrl].forEach(function(input) {
         if (!input) { return; }
         input.addEventListener('input', function() {
+          settingsSaveCompleted = false;
           updateSettingsDialogDirtyState();
           if (!settingsDialogBusyAction) {
             setSettingsDialogStatus('');

@@ -467,7 +467,12 @@ export const accountSettingsRenderFragment: WebviewFragment = {
         [settingsAccountName, settingsApiKey, settingsBaseUrl, settingsApiKeyVisibilityBtn, settingsSaveBtn, settingsManualModelId, settingsManualContextWindow, settingsManualMaxOutput, settingsConfirmAddModelBtn].forEach(function(control) {
           if (control) { control.disabled = controlsDisabled; }
         });
-        if (settingsSaveBtn) { settingsSaveBtn.textContent = account ? t('save') : t('addAccount'); }
+        if (settingsSaveBtn) {
+          settingsSaveBtn.textContent = settingsSaveCompleted
+            ? t('closeWindow')
+            : (account ? t('save') : t('addAccount'));
+          settingsSaveBtn.disabled = settingsSaveCompleted ? operationBusy : controlsDisabled;
+        }
         if (settingsCancelBtn) { settingsCancelBtn.disabled = operationBusy; }
         renderSettingsAccountList(controlsDisabled);
         renderSettingsModelList(account, controlsDisabled);

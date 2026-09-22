@@ -414,6 +414,10 @@ test('model settings dialog manages flat logo-led accounts and per-source models
     path.resolve(process.cwd(), 'src/shared/i18n.ts'),
     'utf8'
   );
+  const providerSource = await readFile(
+    path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
+    'utf8'
+  );
 
   for (const legacyId of [
     'settingsDialogOverlay',
@@ -484,6 +488,15 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(inputScript, /modelSelectionLockedByBackground/u);
   assert.ok((inputScript.match(/blockAccountSettingsWhileRunBusy\(\)/gu) ?? []).length >= 9);
   assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: '正在生成回复；完成或停止后才能修改模型设置。'/u);
+  assert.match(inputScript, /var settingsSaveCompleted = false/u);
+  assert.match(inputScript, /settingsSaveCompleted = values\.settingsSaved === true/u);
+  assert.match(inputScript, /settingsSaveCompleted && !settingsDialogBusyAction/u);
+  assert.match(inputScript, /t\('closeWindow'\)/u);
+  assert.match(i18nSource, /closeWindow: '关闭窗口'/u);
+  assert.match(i18nSource, /closeWindow: 'Close window'/u);
+  assert.ok(providerSource.includes('settingsSaved: outcome.settingsSaved === true'));
+  assert.ok(providerSource.includes('private postModelSettingsDialog(outcome: { settingsSaved?: boolean } = {}): void'));
+  assert.ok((providerSource.match(/settingsSaved: true/gu) ?? []).length >= 2);
   assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: 'Model settings are read-only while a response is being generated\. Finish or stop it first\.'/u);
   assert.match(
     inputScript,

@@ -2602,9 +2602,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
-  private postModelSettingsDialog(): void {
+  private postModelSettingsDialog(outcome: { settingsSaved?: boolean } = {}): void {
     this.postToWebview({
       type: 'showSettingsDialog',
+      settingsSaved: outcome.settingsSaved === true,
       selectedSourceId: this.selectedSourceId,
       defaultModelSelection: this.defaultModelSelection,
       defaultModelPending: this.defaultModelPending,
@@ -2715,7 +2716,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await this.persistModelSelection(selected.sourceId, selected.id);
       }
       this.postState();
-      this.postModelSettingsDialog();
+      this.postModelSettingsDialog({ settingsSaved: true });
       this.postToWebview({
         type: 'addModelResult',
         ok: true,
@@ -2886,7 +2887,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       await this.refreshModelSourceState();
       this.postState();
-      this.postModelSettingsDialog();
+      this.postModelSettingsDialog({ settingsSaved: true });
       if (result.discovery?.status === 'failed') {
         vscode.window.showWarningMessage(this.language === 'en'
           ? 'The source was saved, but automatic model discovery failed. You can refresh it manually.'
