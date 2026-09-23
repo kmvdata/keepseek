@@ -79,12 +79,21 @@ export const commands = {
   }
 };
 
+const extensionStubs = new Map<string, unknown>();
+
 export const extensions = {
-  getExtension<T>(_id: string): T | undefined {
-    void _id;
-    return undefined;
+  getExtension<T>(id: string): T | undefined {
+    return extensionStubs.get(id) as T | undefined;
   }
 };
+
+export function setExtension(id: string, value: unknown): void {
+  extensionStubs.set(id, value);
+}
+
+export function clearExtensions(): void {
+  extensionStubs.clear();
+}
 
 export function setCommandHandler(command: string, handler: (...args: unknown[]) => unknown): void {
   commandHandlers.set(command, handler);

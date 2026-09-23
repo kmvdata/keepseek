@@ -10,8 +10,10 @@ const PATCH_MAX_CHARS = 200_000;
 const GIT_PROCESS_MAX_BUFFER = 2_000_000;
 
 interface GitResourceStateLike {
-  resourceUri: vscode.Uri;
+  uri?: vscode.Uri;
+  resourceUri?: vscode.Uri;
   type?: number;
+  status?: number;
 }
 
 interface GitRepositoryStateLike {
@@ -253,9 +255,14 @@ export class GitToolService implements GitToolAdapter {
     let diff: string | undefined;
     if (resolved.repository) {
       try {
-        diff = input.staged
+        const apiDiff: unknown = input.staged
           ? await (resolved.repository.diffIndexWithHEAD?.(relativePath) ?? resolved.repository.diff(true))
           : await (resolved.repository.diffWithHEAD?.(relativePath) ?? resolved.repository.diff(false));
+        if (typeof apiDiff === 'string') {
+          diff = apiDiff;
+        } else {
+          resolved.fallbackReason = 'The VS Code Git API returned a non-text diff; KeepSeek uses a workspace-scoped read-only fallback.';
+        }
       } catch (error) {
         resolved.fallbackReason = `VS Code Git API diff failed: ${formatError(error)}`;
       }
@@ -346,9 +353,10 @@ interface DiffSummary {
   hunks: number;
 }
 
-function summarizeDiff(diff: string): DiffSummary {
-  const files = Array.from(new Set(Array.from(diff.matchAll(/^\+\+\+ b\/(.+)$/gmu), (match) => match[1]).filter(Boolean)));
-  const lines = diff.split(/\r?\n/u);
+function summarizeDiff(diff: unknown): DiffSummary {
+  const text = typeof diff === 'string' ? diff : '';
+  const files = Array.from(new Set(Array.from(text.matchAll(/^\+\+\+ b\/(.+)$/gmu), (match) => match[1]).filter(Boolean)));
+  const lines = text.split(/\r?\n/u);
   return {
     files,
     fileCount: files.length,
@@ -359,12 +367,20 @@ function summarizeDiff(diff: string): DiffSummary {
 }
 
 function serializeChangeGroup(group: string, changes: GitResourceStateLike[] | undefined): Array<Record<string, unknown>> {
-  return (changes ?? []).map((change) => ({
-    group,
-    path: vscode.workspace.asRelativePath(change.resourceUri, false),
-    uri: change.resourceUri.toString(),
-    status: change.type
-  }));
+  const entries: Array<Record<string, unknown>> = [];
+  for (const change of changes ?? []) {
+    const resourceUri = change.uri ?? change.resourceUri;
+    if (!resourceUri) {
+      continue;
+    }
+    entries.push({
+      group,
+      path: vscode.workspace.asRelativePath(resourceUri, false),
+      uri: resourceUri.toString(),
+      status: change.type ?? change.status
+    });
+  }
+  return entries;
 }
 
 function serializeBranch(head: GitRepositoryStateLike['HEAD']): Record<string, unknown> | undefined {

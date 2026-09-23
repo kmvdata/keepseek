@@ -44,6 +44,72 @@ test('Git helpers use the controlled read-only fallback without committing or pu
   assert.equal(log.trim().split(/\r?\n/u).length, 1);
 });
 
+test('Git helpers tolerate the newer VS Code Git API change shape and non-text diff results', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'keepseek-git-api-'));
+  t.after(async () => await fs.rm(root, { recursive: true, force: true }));
+  t.after(() => {
+    vscode.workspace.workspaceFolders = [];
+    vscode.clearExtensions();
+  });
+  await runGit(root, ['init', '-b', 'main']);
+  await runGit(root, ['config', 'user.email', 'keepseek-test@example.invalid']);
+  await runGit(root, ['config', 'user.name', 'KeepSeek Test']);
+  await fs.writeFile(path.join(root, 'README.md'), '# Before\n');
+  await runGit(root, ['add', 'README.md']);
+  await runGit(root, ['commit', '-m', 'initial']);
+  await fs.writeFile(path.join(root, 'README.md'), '# After\n\nGit API shape test.\n');
+
+  const changedUri = vscode.Uri.file(path.join(root, 'README.md'));
+  const repository = {
+    rootUri: vscode.Uri.file(root),
+    state: {
+      HEAD: { name: 'main', commit: 'abc1234', ahead: 0, behind: 0 },
+      indexChanges: [],
+      workingTreeChanges: [{ uri: changedUri, status: 5 }],
+      mergeChanges: [],
+      untrackedChanges: []
+    },
+    async status(): Promise<void> {
+      return undefined;
+    },
+    async diff(): Promise<string> {
+      return '';
+    },
+    async diffWithHEAD(): Promise<unknown> {
+      return [{ uri: changedUri, status: 5 }];
+    }
+  };
+  vscode.setExtension('vscode.git', {
+    isActive: true,
+    exports: { enabled: true, getAPI: () => ({ repositories: [repository] }) }
+  });
+  vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(root), name: 'git-test' }];
+
+  const service = new GitToolService(createWorkspaceAdapter(root));
+  const status = JSON.parse(await service.getStatus({}, 'en'));
+  const diff = JSON.parse(await service.getDiff({}, 'en'));
+  const patch = JSON.parse(await service.createPatch({}, 'en'));
+
+  assert.equal(status.ok, true);
+  assert.equal(status.providerAvailable, true);
+  assert.equal(status.fallback, false);
+  assert.equal(status.count, 1);
+  assert.equal(status.changes[0].path, 'README.md');
+  assert.equal(status.changes[0].uri, changedUri.toString());
+  assert.equal(status.changes[0].status, 5);
+
+  assert.equal(diff.ok, true);
+  assert.equal(diff.fallback, true);
+  assert.equal(diff.summary.fileCount, 1);
+  assert.match(diff.diff, /Git API shape test/u);
+
+  assert.equal(patch.ok, true);
+  assert.match(patch.patch, /^diff --git/mu);
+
+  const log = await runGit(root, ['log', '--oneline']);
+  assert.equal(log.trim().split(/\r?\n/u).length, 1);
+});
+
 function createWorkspaceAdapter(root: string): WorkspaceToolAdapter {
   return {
     resolveTargetUri(targetPath: string) { return vscode.Uri.file(path.join(root, targetPath)); },
