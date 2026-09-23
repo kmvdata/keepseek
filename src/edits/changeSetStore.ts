@@ -128,11 +128,13 @@ export class ChangeSetStore {
       this.storageIndex = await this.reconcileShardedIndex(shardedIndex);
       await this.loadSession(this.sessionStore.activeSessionId || this.sessionStore.getActiveSession().id);
       await this.reconcileInterruptedFiles();
+      this.supersedeStaleDrafts();
       this.scheduleArtifactGarbageCollection();
       return;
     }
     if (await this.migrateLegacyV3Storage()) {
       await this.reconcileInterruptedFiles();
+      this.supersedeStaleDrafts();
       this.scheduleArtifactGarbageCollection();
       return;
     }
@@ -193,6 +195,7 @@ export class ChangeSetStore {
       }
       await this.persistShardedNow();
       await this.reconcileInterruptedFiles();
+      this.supersedeStaleDrafts();
       // The V4 index is the atomic commit marker. Delete the monolith only
       // after that commit; any migration failure above leaves it untouched.
       try {
@@ -237,6 +240,7 @@ export class ChangeSetStore {
       if (result.changed) {
         this.schedulePersist();
       }
+      this.supersedeStaleDrafts(existing.sessionId);
       return cloneChangeSet(existing);
     }
 
@@ -253,6 +257,7 @@ export class ChangeSetStore {
       fileCount: registered.fileCount,
       operationSummary: registered.operationSummary
     });
+    this.supersedeStaleDrafts(registered.sessionId);
     this.schedulePersist();
     return cloneChangeSet(registered);
   }
@@ -384,6 +389,7 @@ export class ChangeSetStore {
     }
     this.loadedSessionIds.add(sessionId);
     await this.reconcileInterruptedFiles(sessionId);
+    this.supersedeStaleDrafts(sessionId);
   }
 
   public getProtectedSessionIds(): string[] {
@@ -753,6 +759,7 @@ export class ChangeSetStore {
     };
     changeSet.lastApplyResult = result;
     this.updateChangeSetStatus(changeSet);
+    this.supersedeStaleDrafts(changeSet.sessionId);
     this.recordTrace(changeSet, {
       type: 'change_set_apply_result',
       result
@@ -897,13 +904,14 @@ export class ChangeSetStore {
 
   private updateChangeSetStatus(changeSet: ChangeSet): void {
     const statuses = changeSet.files.map((file) => file.status);
-    if (statuses.every((status) => status === 'discarded')) {
-      changeSet.status = 'discarded';
+    const isInactive = (status: ChangeSetFile['status']) => status === 'discarded' || status === 'superseded';
+    if (statuses.every(isInactive)) {
+      changeSet.status = statuses.some((status) => status === 'superseded') ? 'superseded' : 'discarded';
     } else if (statuses.some((status) => status === 'uncertain' || status === 'prepared' || status === 'applying')) {
       changeSet.status = 'uncertain';
-    } else if (statuses.every((status) => status === 'reverted' || status === 'discarded')) {
+    } else if (statuses.every((status) => status === 'reverted' || isInactive(status))) {
       changeSet.status = 'reverted';
-    } else if (statuses.every((status) => status === 'applied' || status === 'discarded')) {
+    } else if (statuses.every((status) => status === 'applied' || isInactive(status))) {
       changeSet.status = 'applied';
     } else if (statuses.some((status) => status === 'apply_failed' || status === 'revert_failed')) {
       changeSet.status = 'partially_failed';
@@ -913,6 +921,50 @@ export class ChangeSetStore {
       changeSet.status = 'pending';
     }
     changeSet.updatedAt = new Date().toISOString();
+  }
+
+  /**
+   * Two drafts for the same URI and the same base identity are alternatives,
+   * not sequential edits. Once either one is applied, every still-applicable
+   * sibling is guaranteed to fail its baseline check and must stop presenting
+   * an Apply action.
+   */
+  private supersedeStaleDrafts(sessionId?: string): boolean {
+    const applied = Array.from(this.changeSets.values())
+      .filter((changeSet) => !sessionId || changeSet.sessionId === sessionId)
+      .flatMap((changeSet) => changeSet.files
+        .filter((file) => file.status === 'applied')
+        .map((file) => ({ changeSet, file })));
+    if (!applied.length) return false;
+
+    const changed = new Map<ChangeSet, Array<{ editId: string; supersedingEditId: string }>>();
+    for (const changeSet of this.changeSets.values()) {
+      if (sessionId && changeSet.sessionId !== sessionId) continue;
+      for (const file of changeSet.files) {
+        if (!isApplicable(file) || this.activeEditOperations.has(file.id)) continue;
+        const winner = applied.find((candidate) => candidate.changeSet.sessionId === changeSet.sessionId
+          && candidate.file.id !== file.id
+          && sharesDraftBase(candidate.file, file));
+        if (!winner) continue;
+        file.status = 'superseded';
+        file.error = this.t('changeFileSupersededReason');
+        const entries = changed.get(changeSet) ?? [];
+        entries.push({ editId: file.id, supersedingEditId: winner.file.id });
+        changed.set(changeSet, entries);
+      }
+    }
+
+    for (const [changeSet, entries] of changed) {
+      this.updateChangeSetStatus(changeSet);
+      this.recordTrace(changeSet, {
+        type: 'change_set_files_superseded',
+        changeSetId: changeSet.id,
+        files: entries
+      });
+      this.compactTerminalChangeSet(changeSet);
+    }
+    if (changed.size) this.schedulePersist();
+    return changed.size > 0;
   }
 
   private findEdit(editId: string): { changeSet: ChangeSet; edit: ChangeSetFile } | undefined {
@@ -1379,6 +1431,16 @@ export class ChangeSetStore {
 
 function isApplicable(file: ChangeSetFile): boolean {
   return file.status === 'pending' || file.status === 'apply_failed' || file.status === 'interrupted';
+}
+
+function sharesDraftBase(applied: ChangeSetFile, pending: ChangeSetFile): boolean {
+  if (applied.uri !== pending.uri) return false;
+  const appliedBase = getDraftEditBase(applied);
+  const pendingBase = getDraftEditBase(pending);
+  if (appliedBase?.sha256 && pendingBase?.sha256) {
+    return appliedBase.sha256 === pendingBase.sha256;
+  }
+  return applied.action === 'create' && pending.action === 'create' && !appliedBase && !pendingBase;
 }
 
 function isRevertible(file: ChangeSetFile): boolean {

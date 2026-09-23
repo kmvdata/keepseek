@@ -1119,6 +1119,7 @@ export type ChangeSetStatus =
   | 'partially_failed'
   | 'uncertain'
   | 'reverted'
+  | 'superseded'
   | 'discarded';
 
 export type ChangeSetFileStatus =
@@ -1126,6 +1127,7 @@ export type ChangeSetFileStatus =
   | 'prepared'
   | 'applying'
   | 'applied'
+  | 'superseded'
   | 'discarded'
   | 'apply_failed'
   | 'uncertain'

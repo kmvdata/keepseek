@@ -3253,7 +3253,7 @@ export function getScript(): string {
     }
 
     function getHistoricalFileStatus(statusValue, index, summary) {
-      if (statusValue === 'applied' || statusValue === 'discarded' || statusValue === 'reverted') {
+      if (statusValue === 'applied' || statusValue === 'discarded' || statusValue === 'reverted' || statusValue === 'superseded') {
         return statusValue;
       }
       var appliedCount = Math.max(0, Number(summary?.appliedCount) || 0);
@@ -3541,7 +3541,7 @@ export function getScript(): string {
       var card = document.createElement('section');
       card.className = 'change-set-card change-set-' + statusValue
         + (historical ? ' is-historical' : '')
-        + (statusValue === 'discarded' || statusValue === 'reverted' ? ' is-terminal' : '');
+        + (statusValue === 'discarded' || statusValue === 'reverted' || statusValue === 'superseded' ? ' is-terminal' : '');
       card.dataset.changeSetId = String(changeSet.id || '');
 
       var header = document.createElement('div');
@@ -3622,7 +3622,7 @@ export function getScript(): string {
       if (edit.uri) {
         actions.append(createEditOpenFileButton(edit));
       }
-      if (allowActions && edit.status !== 'discarded') {
+      if (allowActions && edit.status !== 'discarded' && edit.status !== 'superseded') {
         actions.append(createEditActionButton(t('previewDiff'), 'openDraftDiff', edit.id, true));
       }
       if (allowActions && (edit.status === 'pending' || edit.status === 'apply_failed' || edit.status === 'interrupted')) {
@@ -3771,6 +3771,7 @@ export function getScript(): string {
         case 'partially_failed': return t('changeSetStatusPartiallyFailed');
         case 'uncertain': return t('changeSetStatusUncertain');
         case 'reverted': return t('changeSetStatusReverted');
+        case 'superseded': return t('changeSetStatusSuperseded');
         case 'discarded': return t('changeSetStatusDiscarded');
         default: return t('changeSetStatusPending');
       }
@@ -3779,6 +3780,7 @@ export function getScript(): string {
     function getChangeFileStatusLabel(statusValue) {
       switch (statusValue) {
         case 'applied': return t('changeFileStatusApplied');
+        case 'superseded': return t('changeFileStatusSuperseded');
         case 'discarded': return t('changeFileStatusDiscarded');
         case 'apply_failed': return t('changeFileStatusApplyFailed');
         case 'prepared': return t('changeFileStatusPrepared');

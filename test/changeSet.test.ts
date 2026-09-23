@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import * as vscode from 'vscode';
 import { createChangeSet } from '../src/edits/changeSet';
 import { ChangeSetStore } from '../src/edits/changeSetStore';
+import { createFullTextDraftEdit } from '../src/edits/draftEdit';
 import type { ChangeCheckpoint, ChangeSetFile, ChatMessage, ChatSession } from '../src/shared/types';
 
 test('creates one structured ChangeSet for multiple draft edits', () => {
@@ -215,6 +216,71 @@ test('reports mixed apply results per file and preserves retryable failures', as
   assert.equal(state?.status, 'partially_failed');
   assert.deepEqual(state?.files.map((file) => file.status), ['applied', 'apply_failed']);
   assert.match(state?.files[1]?.error ?? '', /failed b\.ts/u);
+});
+
+test('supersedes sibling drafts from the same file baseline after one is applied', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-superseded-'));
+  const fixture = createStoreFixture(root);
+  const base = { sha256: 'same-base-sha', sizeBytes: 12 };
+  const acceptedEdit = versionedDraft('accepted', 'shared.ts', base, 'accepted result\n');
+  const staleEdit = versionedDraft('stale', 'shared.ts', base, 'stale alternative\n');
+  const accepted = fixture.store.addDraftEdits({
+    runId: 'accepted-run', sessionId: 'session-1', messageId: 'accepted-message', edits: [acceptedEdit]
+  });
+  const stale = fixture.store.addDraftEdits({
+    runId: 'stale-run', sessionId: 'session-1', messageId: 'stale-message', edits: [staleEdit]
+  });
+  assert.ok(accepted && stale);
+
+  assert.deepEqual((await fixture.store.applyEdit(acceptedEdit.id))?.appliedEditIds, [acceptedEdit.id]);
+  const state = fixture.store.toWebviewState('session-1');
+  const staleState = state.find((changeSet) => changeSet.id === stale.id);
+  assert.equal(staleState?.status, 'superseded');
+  assert.equal(staleState?.files[0]?.status, 'superseded');
+  assert.equal(staleState?.files[0]?.error, 'changeFileSupersededReason');
+  assert.equal(await fixture.store.applyEdit(staleEdit.id), undefined);
+  assert.equal(fixture.store.hasPendingForSession('session-1'), false);
+
+  const sequentialEdit = versionedDraft(
+    'sequential',
+    'shared.ts',
+    acceptedEdit.result,
+    'sequential result\n'
+  );
+  const sequential = fixture.store.addDraftEdits({
+    runId: 'sequential-run', sessionId: 'session-1', messageId: 'sequential-message', edits: [sequentialEdit]
+  });
+  assert.equal(sequential?.files[0]?.status, 'pending');
+  assert.equal(fixture.store.hasPendingForSession('session-1'), true);
+});
+
+test('reconciles already-persisted sibling drafts as superseded on startup', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-superseded-restart-'));
+  const base = { sha256: 'persisted-base-sha', sizeBytes: 14 };
+  const accepted = createChangeSet({
+    runId: 'accepted-run', sessionId: 'session-1', messageId: 'accepted-message',
+    edits: [versionedDraft('accepted', 'shared.ts', base, 'accepted result\n')]
+  });
+  const stale = createChangeSet({
+    runId: 'stale-run', sessionId: 'session-1', messageId: 'stale-message',
+    edits: [versionedDraft('stale', 'shared.ts', base, 'stale alternative\n')]
+  });
+  assert.ok(accepted && stale);
+  accepted.files[0].status = 'applied';
+  accepted.status = 'applied';
+  await writeFile(path.join(root, 'change-sets.json'), JSON.stringify({
+    version: 2,
+    changeSets: [accepted, stale],
+    history: [],
+    checkpoints: []
+  }));
+
+  const fixture = createStoreFixture(root);
+  await fixture.store.initialize();
+  const staleState = fixture.store.toWebviewState('session-1').find((changeSet) => changeSet.id === stale.id);
+  assert.equal(staleState?.status, 'superseded');
+  assert.equal(staleState?.files[0]?.status, 'superseded');
+  assert.equal(fixture.store.hasPendingForSession('session-1'), false);
 });
 
 test('journal Apply I/O stays constant with large history and does not run GC before mutation', async () => {
@@ -539,6 +605,23 @@ function draft(id: string, label: string) {
     newText: `source for ${label}`,
     reason: `Update ${label}`
   };
+}
+
+function versionedDraft(
+  id: string,
+  label: string,
+  base: { sha256: string; sizeBytes: number },
+  content: string
+) {
+  return createFullTextDraftEdit({
+    id,
+    uri: `file:///workspace/${label}`,
+    label,
+    action: 'modify',
+    content,
+    reason: `Update ${label}`,
+    base
+  });
 }
 
 function createStoreFixture(root: string, failLabel?: string) {

@@ -413,6 +413,12 @@ test('both languages and all card entrances hide bulk actions at 0/1, show count
     assert.ok(elements(reduced.cards).some((item) => item.dataset.editAction === 'discardDraftEdit' && !item.disabled));
     assert.equal(bulk(ui.render([['applied']]).cards).length, 0, 'one revertible edit uses only its row action');
     assert.ok(elements(ui.render([['applied']]).cards).some((item) => item.dataset.editAction === 'revertDraftEdit' && !item.disabled));
+    const superseded = ui.render([['superseded']]).cards;
+    assert.equal(elements(superseded).some((item) => Boolean(item.dataset.editAction)), false,
+      'a superseded edit has no stale Apply, discard, diff, or revert action');
+    assert.ok(elements(superseded).some((item) => item.textContent.includes(
+      language === 'en' ? 'Superseded by another draft' : '已被其他草案取代'
+    )));
     assert.equal(bulk(ui.render([['pending'], ['pending']]).cards).length, 0, 'separate ChangeSets never combine');
     f.add(['C'], 's', 'another-run');
     assert.equal(bulk(ui.render().cards).length, 0, 'separate command batches never combine');

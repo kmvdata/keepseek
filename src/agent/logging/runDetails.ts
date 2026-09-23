@@ -1,5 +1,6 @@
 import type {
   ChangeSet,
+  ChangeSetFile,
   HistorySummary,
   RepairLoopState,
   RunDetailsChangeSetSummary,
@@ -511,11 +512,12 @@ function updateChangeSetSummaryCounts(target: RunDetailsChangeSetSummary): void 
   const statuses = target.files.map((file) => file.status);
   target.appliedCount = statuses.filter((status) => status === 'applied').length;
   target.failedCount = statuses.filter((status) => status === 'apply_failed' || status === 'revert_failed').length;
-  if (statuses.every((status) => status === 'discarded')) {
-    target.status = 'discarded';
-  } else if (statuses.every((status) => status === 'reverted' || status === 'discarded')) {
+  const isInactive = (status: ChangeSetFile['status']) => status === 'discarded' || status === 'superseded';
+  if (statuses.every(isInactive)) {
+    target.status = statuses.some((status) => status === 'superseded') ? 'superseded' : 'discarded';
+  } else if (statuses.every((status) => status === 'reverted' || isInactive(status))) {
     target.status = 'reverted';
-  } else if (statuses.every((status) => status === 'applied' || status === 'discarded')) {
+  } else if (statuses.every((status) => status === 'applied' || isInactive(status))) {
     target.status = 'applied';
   } else if (target.failedCount > 0) {
     target.status = 'partially_failed';

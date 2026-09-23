@@ -1499,7 +1499,9 @@ function normalizeChangeSetStatus(value: unknown): NonNullable<ChatMessage['runD
     || value === 'partially_applied'
     || value === 'applied'
     || value === 'partially_failed'
+    || value === 'uncertain'
     || value === 'reverted'
+    || value === 'superseded'
     || value === 'discarded'
     ? value
     : 'pending';
@@ -1507,6 +1509,7 @@ function normalizeChangeSetStatus(value: unknown): NonNullable<ChatMessage['runD
 
 function normalizeChangeSetFileStatus(value: unknown): NonNullable<NonNullable<ChatMessage['runDetails']>['changeSets'][number]['files']>[number]['status'] {
   return value === 'applied'
+    || value === 'superseded'
     || value === 'discarded'
     || value === 'apply_failed'
     || value === 'reverted'
