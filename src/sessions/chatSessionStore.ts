@@ -322,18 +322,86 @@ export class ChatSessionStore {
     return changed;
   }
 
-  private persistenceQueue: Promise<void> = Promise.resolve();
+  private persistRevision = 0;
+  private persistedRevision = 0;
+  private pendingPersistence?: {
+    revision: number;
+    scope: WorkspaceSessionScope;
+    snapshot: StoredWorkspaceSessionState;
+  };
+  private persistenceDrain?: Promise<void>;
+  private readonly persistenceWaiters: Array<{
+    revision: number;
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  }> = [];
+
   public async persist(): Promise<void> {
     this.compact();
-    const snapshot = structuredClone({
+    const revision = ++this.persistRevision;
+    const snapshot: StoredWorkspaceSessionState = structuredClone({
       activeSessionId: this.activeSessionIdValue,
       approvalMode: this.approvalModeValue,
       sessions: this.sessions,
       sessionSummaries: this.getSessionSummaries()
     });
-    const write = this.persistenceQueue.catch(() => undefined).then(() => this.sessionStorage.saveWorkspace(this.workspaceScope, snapshot));
-    this.persistenceQueue = write;
-    await write;
+    this.pendingPersistence = { revision, scope: { ...this.workspaceScope, folderUris: [...this.workspaceScope.folderUris] }, snapshot };
+    const completed = new Promise<void>((resolve, reject) => {
+      this.persistenceWaiters.push({ revision, resolve, reject });
+    });
+    this.startPersistenceDrain();
+    await completed;
+  }
+
+  private startPersistenceDrain(): void {
+    if (this.persistenceDrain) return;
+    const drain = this.drainPersistence();
+    this.persistenceDrain = drain;
+    void drain.then(
+      () => this.finishPersistenceDrain(drain),
+      () => this.finishPersistenceDrain(drain)
+    );
+  }
+
+  private finishPersistenceDrain(drain: Promise<void>): void {
+    if (this.persistenceDrain !== drain) return;
+    this.persistenceDrain = undefined;
+    if (this.pendingPersistence) this.startPersistenceDrain();
+  }
+
+  private async drainPersistence(): Promise<void> {
+    while (this.pendingPersistence) {
+      const next = this.pendingPersistence;
+      this.pendingPersistence = undefined;
+      try {
+        await this.sessionStorage.saveWorkspace(next.scope, next.snapshot);
+      } catch (error) {
+        this.rejectPersistenceWaitersThrough(next.revision, error);
+        throw error;
+      }
+      this.persistedRevision = Math.max(this.persistedRevision, next.revision);
+      this.settlePersistenceWaiters();
+    }
+  }
+
+  private rejectPersistenceWaitersThrough(revision: number, error: unknown): void {
+    for (let index = this.persistenceWaiters.length - 1; index >= 0; index -= 1) {
+      const waiter = this.persistenceWaiters[index];
+      if (waiter.revision <= revision) {
+        this.persistenceWaiters.splice(index, 1);
+        waiter.reject(error);
+      }
+    }
+  }
+
+  private settlePersistenceWaiters(): void {
+    for (let index = this.persistenceWaiters.length - 1; index >= 0; index -= 1) {
+      const waiter = this.persistenceWaiters[index];
+      if (waiter.revision <= this.persistedRevision) {
+        this.persistenceWaiters.splice(index, 1);
+        waiter.resolve();
+      }
+    }
   }
 
   public async relocalizeEmptySessionTitles(language: KeepseekLanguage): Promise<void> {

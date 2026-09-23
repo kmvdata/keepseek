@@ -13,7 +13,7 @@ import {
 } from './chatSessionStore';
 import { isRecord } from '../shared/errors';
 import { getHardRetentionCutoff } from './sessionRetention';
-import { writeJsonAtomic } from '../shared/atomicStorage';
+import { deleteStorageUri, withStorageCoordinator, writeJsonAtomic } from '../shared/atomicStorage';
 import type { StartupPerformanceTrace } from '../shared/startupPerformance';
 import type { ApprovalMode, ChatSession, ChatSessionSummary, WorkspaceSummary } from '../shared/types';
 import { ToolEvidenceStore } from '../agent/evidence/store';
@@ -27,6 +27,11 @@ const LEGACY_SESSION_STORAGE_VERSION_DIR = 'v1';
 const SESSION_STORAGE_MANIFEST_FILE = 'manifest.json';
 const SESSION_STORAGE_WORKSPACES_DIR = 'workspaces';
 const cleanupFlights = new Map<string, Promise<boolean>>();
+const manifestRefreshes = new Map<string, {
+  indexes: Map<string, WorkspaceSessionIndex>;
+  timer?: ReturnType<typeof setTimeout>;
+}>();
+const MANIFEST_REFRESH_DEBOUNCE_MS = 100;
 
 export interface GlobalSessionManifest {
   version: 2;
@@ -137,6 +142,10 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   }
 
   public async saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void> {
+    await withStorageCoordinator(this.rootUri, async () => this.saveWorkspaceCoordinated(workspaceScope, state));
+  }
+
+  private async saveWorkspaceCoordinated(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void> {
     const workspaceHash = getWorkspaceHash(workspaceScope.key);
     const existing = await this.readWorkspaceIndex(workspaceHash, workspaceScope);
     const entries = new Map((existing?.sessions ?? []).map((entry) => [entry.id, entry]));
@@ -175,7 +184,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       updatedAt: now
     };
     await this.writeWorkspaceIndex(index);
-    await this.updateManifestWorkspace(index);
+    this.scheduleManifestWorkspace(index);
   }
 
   public async loadSession(workspaceKey: string, sessionId: string): Promise<ChatSession | undefined> {
@@ -192,7 +201,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   }
 
   public async listAllWorkspaceSummaries(): Promise<WorkspaceSummary[]> {
-    const manifest = await this.readManifest();
+    const manifest = await this.readManifestWithoutRebuild();
     let repaired = false;
     for (const hash of await this.listWorkspaceIndexHashes()) {
       if (manifest.workspaces[hash]) continue;
@@ -201,7 +210,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       this.setManifestWorkspace(manifest, index);
       repaired = true;
     }
-    if (repaired) await this.writeManifest(manifest);
+    if (repaired) await this.writeManifestBestEffort(manifest, 'workspace listing repair');
     return Object.values(manifest.workspaces).map((entry) => ({
       workspaceKey: entry.workspaceKey,
       workspaceName: entry.workspaceName,
@@ -219,6 +228,10 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   }
 
   public async deleteWorkspaceSessions(workspaceKey: string, sessionIds: string[]): Promise<void> {
+    await withStorageCoordinator(this.rootUri, async () => this.deleteWorkspaceSessionsCoordinated(workspaceKey, sessionIds));
+  }
+
+  private async deleteWorkspaceSessionsCoordinated(workspaceKey: string, sessionIds: string[]): Promise<void> {
     const normalizedWorkspaceKey = workspaceKey.trim();
     const ids = new Set(sessionIds.map((id) => id.trim()).filter(Boolean));
     if (!normalizedWorkspaceKey || !ids.size) return;
@@ -234,17 +247,22 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     index.activeSessionId = chooseActiveSessionIdFromEntries(index.sessions, index.activeSessionId);
     index.updatedAt = new Date().toISOString();
     if (!index.sessions.length) {
-      await this.deleteEntireWorkspace(normalizedWorkspaceKey);
+      await this.deleteEntireWorkspaceCoordinated(normalizedWorkspaceKey);
       return;
     }
     await this.writeWorkspaceIndex(index);
-    await this.updateManifestWorkspace(index);
+    this.scheduleManifestWorkspace(index);
   }
 
   public async deleteEntireWorkspace(workspaceKey: string): Promise<void> {
+    await withStorageCoordinator(this.rootUri, async () => this.deleteEntireWorkspaceCoordinated(workspaceKey));
+  }
+
+  private async deleteEntireWorkspaceCoordinated(workspaceKey: string): Promise<void> {
     const normalizedWorkspaceKey = workspaceKey.trim();
     if (!normalizedWorkspaceKey) return;
     const hash = getWorkspaceHash(normalizedWorkspaceKey);
+    this.forgetScheduledManifestWorkspace(hash);
     const index = await this.loadIndexByWorkspaceKey(normalizedWorkspaceKey);
     if (index) await Promise.all(index.sessions.map((entry) => this.evidenceStore.deleteSessionEvidence(entry.id)));
     await this.deleteFile(this.getWorkspaceDirectoryUri(hash), true);
@@ -252,7 +270,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const manifest = await this.readManifest();
     if (manifest.workspaces[hash]) {
       delete manifest.workspaces[hash];
-      await this.writeManifest(manifest);
+      await this.writeManifestBestEffort(manifest, 'delete workspace');
     }
   }
 
@@ -266,7 +284,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const key = this.rootUri.toString();
     const existing = cleanupFlights.get(key);
     if (existing) return await existing;
-    const flight = this.performCleanup(options).finally(() => {
+    const flight = withStorageCoordinator(this.rootUri, async () => this.performCleanup(options)).finally(() => {
       if (cleanupFlights.get(key) === flight) cleanupFlights.delete(key);
     });
     cleanupFlights.set(key, flight);
@@ -281,7 +299,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     force?: boolean;
   }): Promise<boolean> {
     const now = options.now ?? Date.now();
-    const manifest = await this.readManifest();
+    const manifest = await this.readManifestWithoutRebuild();
     const previousCleanup = manifest.lastCleanupAt ? Date.parse(manifest.lastCleanupAt) : Number.NaN;
     if (!options.force && Number.isFinite(previousCleanup) && now - previousCleanup < SESSION_CLEANUP_MIN_INTERVAL_MS) {
       this.startupTrace?.mark('session-cleanup-skipped', { skipped: true });
@@ -315,14 +333,19 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
         index.sessions = index.sessions.filter((entry) => !removedIds.has(entry.id));
         index.activeSessionId = chooseActiveSessionIdFromEntries(index.sessions, index.activeSessionId);
         index.updatedAt = new Date(now).toISOString();
-        if (index.sessions.length) await this.writeWorkspaceIndex(index);
-        else await this.deleteFile(this.getWorkspaceDirectoryUri(hash), true);
+        if (index.sessions.length) {
+          await this.writeWorkspaceIndex(index);
+          this.scheduleManifestWorkspace(index);
+        } else {
+          this.forgetScheduledManifestWorkspace(hash);
+          await this.deleteFile(this.getWorkspaceDirectoryUri(hash), true);
+        }
       }
       if (index.sessions.length) this.setManifestWorkspace(manifest, index);
       else delete manifest.workspaces[hash];
     }
     manifest.lastCleanupAt = new Date(now).toISOString();
-    await this.writeManifest(manifest);
+    await this.writeManifestBestEffort(manifest, 'session cleanup');
     this.startupTrace?.mark('session-cleanup-finished', { entries: hashes.size });
     return changed;
   }
@@ -392,8 +415,8 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     // The index is the commit marker. A failed migration leaves V1 authoritative.
     await this.writeWorkspaceIndex(index);
     await this.updateManifestWorkspace(index);
-    // Only remove V1 after every shard, the atomic index commit, and the
-    // manifest update have succeeded. Until this point it remains the fallback.
+    // The atomic workspace index is the migration commit marker. The global
+    // manifest is derived and may be refreshed later without risking shards.
     await this.deleteFile(vscode.Uri.joinPath(this.legacyWorkspacesUri, `${workspaceHash}.json`));
     return index;
   }
@@ -451,9 +474,64 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   }
 
   private async updateManifestWorkspace(index: WorkspaceSessionIndex): Promise<void> {
-    const manifest = await this.readManifest();
-    this.setManifestWorkspace(manifest, index);
-    await this.writeManifest(manifest);
+    this.scheduleManifestWorkspace(index);
+  }
+
+  private scheduleManifestWorkspace(index: WorkspaceSessionIndex): void {
+    const key = this.rootUri.toString();
+    const pending = manifestRefreshes.get(key) ?? { indexes: new Map<string, WorkspaceSessionIndex>() };
+    pending.indexes.set(getWorkspaceHash(index.workspaceKey), structuredClone(index));
+    if (!pending.timer) {
+      pending.timer = setTimeout(() => {
+        pending.timer = undefined;
+        const indexes = [...pending.indexes.values()];
+        pending.indexes.clear();
+        void withStorageCoordinator(this.rootUri, async () => {
+          const manifest = await this.readManifestWithoutRebuild();
+          indexes.forEach((next) => this.setManifestWorkspace(manifest, next));
+          await this.writeManifest(manifest);
+        }).catch((error) => {
+          console.warn('KeepSeek: derived session manifest refresh failed; it will be rebuilt later.', error);
+          indexes.forEach((next) => {
+            const hash = getWorkspaceHash(next.workspaceKey);
+            if (!pending.indexes.has(hash)) pending.indexes.set(hash, next);
+          });
+          if (!pending.timer) {
+            pending.timer = setTimeout(() => {
+              pending.timer = undefined;
+              const retryIndexes = [...pending.indexes.values()];
+              pending.indexes.clear();
+              void withStorageCoordinator(this.rootUri, async () => {
+                const manifest = await this.readManifestWithoutRebuild();
+                retryIndexes.forEach((next) => this.setManifestWorkspace(manifest, next));
+                await this.writeManifest(manifest);
+              }).catch((retryError) => console.warn(
+                'KeepSeek: derived session manifest retry failed; startup rebuild remains available.', retryError));
+            }, MANIFEST_REFRESH_DEBOUNCE_MS * 10);
+            pending.timer.unref?.();
+          }
+        });
+      }, MANIFEST_REFRESH_DEBOUNCE_MS);
+      pending.timer.unref?.();
+    }
+    manifestRefreshes.set(key, pending);
+  }
+
+  private forgetScheduledManifestWorkspace(workspaceHash: string): void {
+    manifestRefreshes.get(this.rootUri.toString())?.indexes.delete(workspaceHash);
+  }
+
+  private async writeManifestBestEffort(manifest: GlobalSessionManifest, operation: string): Promise<void> {
+    try {
+      await this.writeManifest(manifest);
+    } catch (error) {
+      console.warn(`KeepSeek: derived session manifest update failed during ${operation}; continuing.`, error);
+    }
+  }
+
+  private async readManifestWithoutRebuild(): Promise<GlobalSessionManifest> {
+    return normalizeManifest(await this.readJsonFile(this.manifestUri, 'session manifest'))
+      ?? { version: 2, workspaces: {} };
   }
 
   private setManifestWorkspace(manifest: GlobalSessionManifest, index: WorkspaceSessionIndex): void {
@@ -510,11 +588,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   }
 
   private async deleteFile(uri: vscode.Uri, recursive = false): Promise<void> {
-    try {
-      await vscode.workspace.fs.delete(uri, { recursive, useTrash: false });
-    } catch (error) {
-      if (!isFileNotFoundError(error)) throw error;
-    }
+    await deleteStorageUri(uri, { recursive });
   }
 
   private getWorkspaceDirectoryUri(hash: string): vscode.Uri {

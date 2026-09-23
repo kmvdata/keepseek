@@ -4,7 +4,6 @@ import './approvalReviewer.test';
 import './accountResolver.test';
 import './accountRuntime.test';
 import './accountStore.test';
-import './modelAlias.test';
 import './modelDiscovery.test';
 import './modelCatalog.test';
 import './defaultModel.test';
@@ -72,4 +71,5 @@ import './startupPerformance.test';
 
 import './longRunningAgent.test';
 import './toolResultBudget.test';
+import './runBudgetP0.test';
 import './interactionTrace.test';

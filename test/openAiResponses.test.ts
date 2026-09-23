@@ -350,7 +350,7 @@ describe('OpenAI Responses account protocol', () => {
     }
   });
 
-  it('runs parallel function calls through two stateless /responses requests and persists replay order', async () => {
+  it('runs parallel function calls through one bounded no-tool finalization and persists replay order', async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_input, init) => {
@@ -388,7 +388,7 @@ describe('OpenAI Responses account protocol', () => {
       };
       const response = await new AgentRunner().run(request);
       assert.equal(response.message, 'done');
-      assert.equal(bodies.length, 3);
+      assert.equal(bodies.length, 2);
       const first = bodies[0];
       assert.equal(first.store, false);
       assert.ok(Array.isArray(first.input));
@@ -416,15 +416,15 @@ describe('OpenAI Responses account protocol', () => {
       assert.ok(callIndexes[1] < outputIndexes[0]);
       assert.ok(outputIndexes[0] < outputIndexes[1]);
 
-      assert.equal(bodies[2].tool_choice, 'auto');
-      assert.deepEqual(bodies[2].tools, first.tools);
-      assert.equal(JSON.stringify(bodies[2].input).includes('keepseek_context_epoch_checkpoint'), true);
-      assert.equal((bodies[2].input as OpenAiResponsesItem[]).some((item) =>
-        item.type === 'function_call' || item.type === 'function_call_output'), false,
-      'the new epoch contains no orphaned call or output item from the old lane');
       const replay = getResponsesReplay(response.providerReplay);
-      assert.deepEqual(replay.items.map((item) => item.type), [undefined, 'message']);
-      assert.equal(replay.items[0].role, 'user');
+      assert.deepEqual(replay.items.map((item) => item.type), [
+        'reasoning',
+        'function_call',
+        'function_call',
+        'function_call_output',
+        'function_call_output',
+        'message'
+      ]);
       assert.equal(replay.sourceId, 'responses-source');
       assert.equal(replay.baseUrl, 'https://proxy.example/v1/responses');
       assert.equal(response.toolRounds?.[0]?.toolResults.length, 2);

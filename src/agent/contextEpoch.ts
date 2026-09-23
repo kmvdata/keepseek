@@ -4,8 +4,8 @@ import type { ContextWindowCalibrationState } from './toolResultAdmission';
 import { stableStringify } from './evidence/shaping';
 import { getDraftEditBase, getDraftEditKind, getDraftEditResult } from '../edits/draftEdit';
 
-export type ContextEpochRolloverReason = 'soft_context_pressure' | 'minimum_envelope_unfit' | 'tool_round_threshold'
-  | 'tool_call_threshold' | 'provider_context_too_long' | 'length_continuation' | 'protocol_migration';
+export type ContextEpochRolloverReason = 'soft_context_pressure' | 'minimum_envelope_unfit'
+  | 'provider_context_too_long' | 'length_continuation' | 'protocol_migration';
 
 export interface ContextEpochRolloverRecord {
   index: number;

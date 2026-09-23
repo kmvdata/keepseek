@@ -417,7 +417,7 @@ test('large results complete in one logical task for all three provider protocol
   }
 });
 
-test('tool round thresholds roll over internally without a synthetic visible turn', async () => {
+test('tool round thresholds are logical hard limits with one stable-schema finalization', async () => {
   const workspace = new WorkspaceToolService();
   let reads = 0;
   workspace.readWorkspaceFile = async () => { reads += 1; return JSON.stringify({ ok: true, path: 'a.ts', content: LARGE_ASCII }); };
@@ -439,15 +439,17 @@ test('tool round thresholds roll over internally without a synthetic visible tur
     assert.equal(response.message, 'Done.');
     assert.equal(reads, 1);
     assert.equal(checkpoint.request.approvalRootTaskId ?? checkpoint.taskId, checkpoint.taskId);
-    assert.equal(checkpoint.state?.epoch?.totalRollovers, 1);
-    assert.equal(response.runDetails.contextEpochs?.length, 1);
+    assert.equal(checkpoint.state?.epoch?.totalRollovers, 0);
+    assert.equal(checkpoint.runBudget?.toolRounds, 1);
+    assert.equal(checkpoint.runBudget?.finalizationAttempted, true);
+    assert.equal(response.runDetails.budgetStopReason, 'tool_budget_exhausted');
+    assert.equal(response.runDetails.contextEpochs?.length ?? 0, 0);
     assert.equal(input.history.length, 0);
-    assert.ok(bodies.some((body) => body.includes('keepseek_context_epoch_checkpoint')));
+    assert.equal(bodies.some((body) => body.includes('keepseek_context_epoch_checkpoint')), false);
     const first = JSON.parse(bodies[0]);
-    const nextEpoch = JSON.parse(bodies.at(-1)!);
-    assert.deepEqual(nextEpoch.tools, first.tools);
-    assert.deepEqual(nextEpoch.messages.slice(0, first.messages.length), first.messages,
-      'rollover reuses the stable system/session/original-user prefix');
+    const finalization = JSON.parse(bodies.at(-1)!);
+    assert.deepEqual(finalization.tools, first.tools);
+    assert.equal(finalization.tool_choice, 'none');
     assert.equal(bodies.some((body) => body.includes('budget_auto_continue')), false);
   } finally { globalThis.fetch = originalFetch; }
 });
@@ -560,7 +562,7 @@ test('a successful 40K prompt repairs stale 32K calibration without an epoch rol
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test('epoch summary failure falls back to deterministic host state without stopping the task', async () => {
+test('tool budget finalization does not create an epoch or hidden summary request', async () => {
   const workspace = new WorkspaceToolService();
   let reads = 0;
   workspace.readWorkspaceFile = async () => { reads += 1; return JSON.stringify({ ok: true, path: 'fallback.ts', content: 'small' }); };
@@ -584,9 +586,10 @@ test('epoch summary failure falls back to deterministic host state without stopp
     const response = await new AgentRunner(workspace).run(input, { onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); } });
     assert.equal(response.message, 'Done.');
     assert.equal(reads, 1);
-    assert.equal(checkpoint.state?.epoch?.rollovers[0].summaryKind, 'host_fallback');
-    assert.equal(response.runDetails.contextEpochs?.[0].summaryKind, 'host_fallback');
-    assert.ok(bodies.some((body) => body.includes('keepseek_context_epoch_checkpoint')));
+    assert.equal(checkpoint.state?.epoch?.rollovers.length, 0);
+    assert.equal(response.runDetails.contextEpochs?.length ?? 0, 0);
+    assert.equal(response.runDetails.budgetStopReason, 'tool_budget_exhausted');
+    assert.equal(bodies.some((body) => body.includes('Create a concise semantic checkpoint')), false);
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -704,7 +707,7 @@ test('no-progress fingerprints survive epoch rollover and stop only after a stra
   }) as typeof fetch;
   try {
     const input = request('openai-compatible');
-    input.executionLimits = { maxToolIterations: 1 };
+    input.executionLimits = { maxToolIterations: 3 };
     await assert.rejects(
       () => new AgentRunner(workspace).run(input, { onCheckpoint: async (cp) => {
         checkpoint = checkpointCopy(cp); taskIds.add(cp.taskId);
@@ -714,12 +717,12 @@ test('no-progress fingerprints survive epoch rollover and stop only after a stra
     assert.equal(reads, 3);
     assert.equal(mainRequests, 3);
     assert.equal(taskIds.size, 1);
-    assert.equal(checkpoint.state?.epoch?.totalRollovers, 2);
+    assert.equal(checkpoint.state?.epoch?.totalRollovers, 0);
     assert.equal(checkpoint.state?.epoch?.noProgress?.strategyWarningIssued, true);
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test('many results can cumulatively exceed two million tokens across one logical task', async () => {
+test('logical tool budget prevents rollover from multiplying a run indefinitely', async () => {
   const workspace = new WorkspaceToolService();
   let reads = 0;
   workspace.readWorkspaceFile = async (path) => {
@@ -743,11 +746,12 @@ test('many results can cumulatively exceed two million tokens across one logical
     input.model.contextWindowTokens = 1_000_000;
     input.executionLimits = { maxToolIterations: 2 };
     const response = await new AgentRunner(workspace).run(input, { onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); } });
-    assert.equal(response.message, 'Done.');
-    assert.equal(reads, 48);
-    assert.ok((checkpoint.state?.toolResultTokens ?? 0) > 2_000_000);
-    assert.ok((checkpoint.state?.epoch?.totalRollovers ?? 0) >= 23);
-    assert.equal(response.runDetails.budgetStopReason, undefined);
+    assert.match(response.message, /safety budget/u);
+    assert.equal(reads, 2);
+    assert.equal(checkpoint.runBudget?.toolRounds, 2);
+    assert.equal(checkpoint.runBudget?.toolCalls, 2);
+    assert.equal(checkpoint.state?.epoch?.totalRollovers, 0);
+    assert.equal(response.runDetails.budgetStopReason, 'tool_budget_exhausted');
   } finally { globalThis.fetch = originalFetch; }
 });
 

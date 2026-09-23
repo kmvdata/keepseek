@@ -37,6 +37,7 @@ import { AnthropicStreamParser } from '../src/agent/providers/anthropicStreamPar
 import type { AnthropicMessagesRequestBody } from '../src/agent/providers/anthropicTypes';
 import { createProviderClient } from '../src/agent/providers/factory';
 import { AgentRunner } from '../src/agent/runner';
+import { checkpointCopy, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import {
   getVisibleMessages,
   normalizeAnthropicMessagesReplay,
@@ -559,7 +560,7 @@ describe('Anthropic Messages compatible protocol', () => {
       const response = await new AgentRunner().run(createAgentRequest({ maxToolIterations: 2 }));
       assert.equal(response.message, 'done');
       assert.equal(bodies.length, 2);
-      assert.equal(bodies[0].max_tokens, 16_000);
+      assert.equal(bodies[0].max_tokens, 8_192);
       assert.deepEqual(bodies[0].thinking, { type: 'adaptive', display: 'summarized' });
       assert.equal('output_config' in bodies[0], false);
       assert.deepEqual(bodies[0].cache_control, { type: 'ephemeral' });
@@ -593,7 +594,7 @@ describe('Anthropic Messages compatible protocol', () => {
     }
   });
 
-  it('freezes tools across an internal epoch rollover at the per-epoch tool threshold', async () => {
+  it('freezes tools while a logical tool limit allows only one no-tool finalization', async () => {
     const bodies: AnthropicMessagesRequestBody[] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_input, init) => {
@@ -602,19 +603,13 @@ describe('Anthropic Messages compatible protocol', () => {
     }) as typeof fetch;
     try {
       await new AgentRunner().run(createAgentRequest({ maxToolIterations: 1 }));
-      assert.equal(bodies.length, 3);
+      assert.equal(bodies.length, 2);
       assert.deepEqual(bodies[0].tool_choice, { type: 'auto' });
       assert.deepEqual(bodies[1].tool_choice, { type: 'none' });
-      assert.deepEqual(bodies[2].tool_choice, { type: 'auto' });
       assert.equal(JSON.stringify(bodies[0].tools), JSON.stringify(bodies[1].tools));
-      assert.equal(JSON.stringify(bodies[1].tools), JSON.stringify(bodies[2].tools));
-      assert.equal(JSON.stringify(bodies[2].messages).includes('keepseek_context_epoch_checkpoint'), true);
       assert.equal(JSON.stringify(bodies[1].messages).includes('opaque-signature'), true,
-        'the old epoch summary lane replays the exact opaque thinking block');
+        'the finalization replays the exact opaque thinking block');
       assert.equal(JSON.stringify(bodies[1].messages).includes('opaque-redacted'), true);
-      assert.equal(JSON.stringify(bodies[2].messages).includes('opaque-signature'), false,
-        'a new epoch never copies or reconstructs an opaque signature');
-      assert.equal(JSON.stringify(bodies[2].messages).includes('opaque-redacted'), false);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -651,6 +646,29 @@ describe('Anthropic Messages compatible protocol', () => {
     try {
       await assert.rejects(new AgentRunner().run(createAgentRequest()), /Cannot parse/u);
       assert.equal(bodies.length, 1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('bounds repeated pause_turn responses with the same continuation fuse', async () => {
+    const bodies: AnthropicMessagesRequestBody[] = [];
+    let checkpoint: RunCheckpoint | undefined;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as AnthropicMessagesRequestBody);
+      return anthropicTextResponse('paused ', 'pause_turn');
+    }) as typeof fetch;
+    try {
+      const input = createAgentRequest();
+      input.executionLimits = { maxContinuations: 1 };
+      const response = await new AgentRunner().run(input, {
+        onCheckpoint: async (next) => { checkpoint = checkpointCopy(next); }
+      });
+      assert.equal(bodies.length, 2);
+      assert.equal(checkpoint?.runBudget?.continuations, 1);
+      assert.match(response.message, /Truncated because the automatic output\/continuation budget/u);
+      assert.equal(response.runDetails.budgetStopReason, 'continuation_budget_exhausted');
     } finally {
       globalThis.fetch = originalFetch;
     }

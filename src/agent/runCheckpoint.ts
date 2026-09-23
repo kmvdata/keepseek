@@ -7,6 +7,7 @@ import { getEffectiveContextWindowTokens } from '../shared/modelProfiles';
 import { DEEPSEEK_MODEL_IDENTITY_VERSION, getCanonicalModelIdentity } from '../shared/deepSeekModels';
 import { migrateContextWindowCalibrationState } from './toolResultAdmission';
 import { normalizeExecutionMode } from './executionMode';
+import { createLogicalRunBudgetState, type LogicalRunBudgetState } from './executionPolicy';
 
 export type StopReason = 'user_stop' | 'time_budget' | 'tool_timeout' | 'connection_interrupted'
   | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'budget_exhausted' | 'completed' | 'storage_failure' | 'resource_limit'
@@ -31,6 +32,8 @@ export interface RunCheckpoint {
   maxCost?: number;
   limitSource: string;
   modelRequests: number;
+  /** Whole logical-task counters. They never reset at Context Epoch boundaries. */
+  runBudget?: LogicalRunBudgetState;
   retries: number;
   lastNetworkAt?: string;
   lastEventAt?: string;
@@ -95,6 +98,7 @@ export function createRunCheckpoint(
   delete input.checkpoint;
   delete input.taskClock;
   delete input.taskCostBudget;
+  delete input.taskRunBudget;
   input.history = input.history.map(({ runCheckpoint: _cp, ...message }) => message);
   return {
     version: 2, taskId: randomUUID(), attempt: 0, attemptIds: [], status: 'running', usedMs: 0,
@@ -147,6 +151,26 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
     copy.request.executionMode = normalizeExecutionMode(copy.request.executionMode);
     copy.maxCost ??= 0;
     copy.usedCostByCurrency ??= {};
+    const hasSerializedRunBudget = Object.prototype.hasOwnProperty.call(copy, 'runBudget');
+    if (hasSerializedRunBudget && (!copy.runBudget || typeof copy.runBudget !== 'object'
+      || Array.isArray(copy.runBudget))) return undefined;
+    const legacyCapacityStop = !hasSerializedRunBudget && (copy.stopReason === 'budget_exhausted'
+      || copy.state?.budgetStopReason || copy.finalResponse?.runDetails.budgetStopReason);
+    if (hasSerializedRunBudget) {
+      copy.runBudget = createLogicalRunBudgetState(copy.runBudget);
+      copy.modelRequests = copy.runBudget.modelRequests;
+    } else if (!legacyCapacityStop) {
+      copy.runBudget = createLogicalRunBudgetState({
+        modelRequests: copy.modelRequests,
+        toolRounds: copy.state?.turn ?? 0,
+        toolCalls: copy.state?.toolCallCount ?? 0,
+        continuations: copy.state?.continuation?.requests ?? 0,
+        contextEpochRollovers: copy.state?.epoch?.totalRollovers ?? 0,
+        usedMs: copy.usedMs,
+        treeUpstreamTokens: 0
+      });
+      copy.modelRequests = copy.runBudget.modelRequests;
+    }
     if (copy.state?.epoch?.calibration) {
       const declaredWindowTokens = getEffectiveContextWindowTokens(copy.request.model);
       copy.state.epoch.calibration = migrateContextWindowCalibrationState(
@@ -173,6 +197,9 @@ export function recoveryBlocker(cp: RunCheckpoint): string | undefined {
   if (isCostLimitExhausted(cp)) {
     return 'Configured Provider cost limit reached / 已达到用户配置的 Provider 费用上限';
   }
+  if (cp.stopReason === 'budget_exhausted' && cp.runBudget) {
+    return cp.error ?? 'Logical run budget exhausted / 逻辑任务预算已用尽';
+  }
   // Legacy capacity stops are migrated to a Context Epoch by the runner. They
   // are not user-action blockers and must never require a synthetic new turn.
   if (cp.stopReason === 'budget_exhausted' || cp.state?.budgetStopReason || cp.finalResponse?.runDetails.budgetStopReason) return undefined;
@@ -186,6 +213,7 @@ export function isCostLimitExhausted(cp: Pick<RunCheckpoint, 'maxCost' | 'usedCo
 
 export function migrateLegacyCapacityCheckpoint(cp: RunCheckpoint): RunCheckpoint {
   const copy = checkpointCopy(cp);
+  if (copy.runBudget) return copy;
   if (!copy.state?.budgetStopReason && !copy.finalResponse?.runDetails.budgetStopReason && copy.stopReason !== 'budget_exhausted') return copy;
   copy.version = 2;
   copy.status = 'interrupted';

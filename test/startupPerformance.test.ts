@@ -122,7 +122,7 @@ test('cleanup is single-flight, limited to once per 24 hours, and preserves favo
   assert.equal(workspaceEnumerations, 2);
 });
 
-test('a cleanup write failure does not prevent the active conversation from loading', async (t) => {
+test('a derived manifest write failure does not reject cleanup or prevent the active conversation from loading', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-cleanup-failure-'));
   t.after(async () => await rm(root, { recursive: true, force: true }));
   const scope = workspaceScope('cleanup-failure');
@@ -134,11 +134,11 @@ test('a cleanup write failure does not prevent the active conversation from load
     if (target.fsPath.endsWith('/chat-sessions/v2/manifest.json')) throw new Error('simulated cleanup failure');
     await originalRename(source, target, options);
   };
-  await assert.rejects(storage.cleanupExpiredSessions({
+  await storage.cleanupExpiredSessions({
     currentWorkspaceKey: scope.key,
     currentActiveSessionId: active.id,
     now: Date.parse('2026-09-12T00:00:00.000Z')
-  }));
+  });
   vscode.workspace.fs.rename = originalRename;
   t.after(() => { vscode.workspace.fs.rename = originalRename; });
   const restarted = new ChatSessionStore(new GlobalSessionStorage(vscode.Uri.file(root) as never), 'en', scope);
@@ -160,6 +160,49 @@ test('concurrent windows preserve independently written session shards', async (
   ]);
   const recovered = new GlobalSessionStorage(vscode.Uri.file(root) as never);
   assert.deepEqual((await recovered.listWorkspaceSessionSummaries(scope.key)).map((item) => item.id).sort(), ['first', 'second']);
+});
+
+test('save and cleanup share one storage coordinator without deleting the active checkpoint shard', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-save-cleanup-'));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const scope = workspaceScope('save-cleanup');
+  const active = session('active', scope, 2, 0);
+  const first = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  const second = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  await first.saveWorkspace(scope, { activeSessionId: active.id, sessions: [active] });
+  active.messages.push({ id: 'checkpoint', role: 'assistant', content: 'latest', createdAt: new Date().toISOString() });
+  active.updatedAt = new Date().toISOString();
+  await Promise.all([
+    first.saveWorkspace(scope, { activeSessionId: active.id, sessions: [active] }),
+    second.cleanupExpiredSessions({
+      currentWorkspaceKey: scope.key,
+      currentActiveSessionId: active.id,
+      now: Date.parse('2026-09-12T00:00:00.000Z'),
+      force: true
+    })
+  ]);
+  const recovered = await new GlobalSessionStorage(vscode.Uri.file(root) as never).loadSession(scope.key, active.id);
+  assert.equal(recovered?.messages.at(-1)?.content, 'latest');
+});
+
+test('critical session shard failures still reject even though manifest failures are derived', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-shard-failure-'));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const scope = workspaceScope('shard-failure');
+  const active = session('active', scope, 1, 0);
+  const originalRename = vscode.workspace.fs.rename;
+  vscode.workspace.fs.rename = async (source, target, options) => {
+    if (target.fsPath.includes('/sessions/')) throw Object.assign(new Error('EACCES shard'), { code: 'EACCES' });
+    await originalRename(source, target, options);
+  };
+  t.after(() => { vscode.workspace.fs.rename = originalRename; });
+  await assert.rejects(
+    new GlobalSessionStorage(vscode.Uri.file(root) as never).saveWorkspace(scope, {
+      activeSessionId: active.id,
+      sessions: [active]
+    }),
+    /EACCES shard/u
+  );
 });
 
 test('workspace listing repairs manifest entries lost by concurrent project writes', async (t) => {

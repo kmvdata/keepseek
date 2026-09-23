@@ -1,5 +1,6 @@
 import { recoveryBlocker, type RunCheckpoint } from '../runCheckpoint';
 import { mergeDurations } from '../executionPolicy';
+import { getConfiguredSubagentMaxExecutionMs } from '../../shared/config';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { ModelSourceStore } from '../../accounts/accountStore';
@@ -616,7 +617,11 @@ export class SubagentRuntime implements SubagentToolAdapter {
       ...(input.prior?.transcript.messages ?? []).map(cloneMessage),
       userMessage
     ];
-    const timeoutMs = mergeDurations(input.input.timeoutMs, input.profile.timeoutMs);
+    const timeoutMs = mergeDurations(
+      getConfiguredSubagentMaxExecutionMs(),
+      input.input.timeoutMs,
+      input.profile.timeoutMs
+    );
     const abort = createChildAbortSignal(input.context.signal);
     const parentMaxSteps = input.context.parentRequest.executionLimits?.maxToolIterations
       ?? 10;
@@ -727,6 +732,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         },
         taskClock: input.context.parentRequest.taskClock,
         taskCostBudget: input.context.parentRequest.taskCostBudget,
+        taskRunBudget: input.context.parentRequest.taskRunBudget,
         signal: abort.signal
       }, {
         onCheckpoint: async (checkpoint) => {

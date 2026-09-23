@@ -89,6 +89,50 @@ test('trimActiveHistory preserves persisted active session messages', async () =
   assert.equal(next.requestProtocol?.serializationStrategy, 'provider-projection-v2');
 });
 
+test('coalesced persistence waits for the requested snapshot revision and commits the latest state', async () => {
+  const workspaceScope: WorkspaceSessionScope = {
+    key: 'workspace:coalesced-persist',
+    name: 'Coalesced Persist',
+    folderUris: []
+  };
+  const session = createSession('session-1', [createMessage(0)], workspaceScope);
+  const storage = new MemorySessionStorage({ activeSessionId: session.id, sessions: [session] });
+  const originalSave = storage.saveWorkspace.bind(storage);
+  let releaseFirst!: () => void;
+  let releaseSecond!: () => void;
+  let signalFirst!: () => void;
+  let signalSecond!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
+  const secondStarted = new Promise<void>((resolve) => { signalSecond = resolve; });
+  let writes = 0;
+  storage.saveWorkspace = async (scope, state) => {
+    writes += 1;
+    if (writes === 1) { signalFirst(); await firstGate; }
+    if (writes === 2) { signalSecond(); await secondGate; }
+    await originalSave(scope, state);
+  };
+  const store = new ChatSessionStore(storage, 'en', workspaceScope);
+  await store.initialize();
+
+  store.messages.push(createMessage(1));
+  const first = store.persist();
+  await firstStarted;
+  store.messages.push(createMessage(2));
+  let secondResolved = false;
+  const second = store.persist().then(() => { secondResolved = true; });
+  releaseFirst();
+  await first;
+  await secondStarted;
+  assert.equal(secondResolved, false, 'the latest caller must not resolve after only the older snapshot is durable');
+  releaseSecond();
+  await second;
+
+  assert.equal(writes, 2);
+  assert.deepEqual(storage.saved?.sessions[0]?.messages.map((message) => message.id), ['m0', 'm1', 'm2']);
+});
+
 test('approval mode persists for the project and is inherited by every new or selected session', async () => {
   const workspaceScope: WorkspaceSessionScope = {
     key: 'workspace:approval-mode',

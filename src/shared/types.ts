@@ -1459,6 +1459,8 @@ export interface AgentRequest {
   taskClock?: import('../agent/executionPolicy').ExecutionClock;
   /** Runtime-only shared cost ledger; excluded from persisted request bytes. */
   taskCostBudget?: import('../agent/executionPolicy').ExecutionCostBudget;
+  /** Runtime-only logical/tree budget ledger; excluded from persisted request bytes. */
+  taskRunBudget?: import('../agent/executionPolicy').LogicalRunBudget;
   prompt: string;
   model: KeepseekModel;
   settings: AgentSettings;
@@ -1515,6 +1517,11 @@ export interface AgentExecutionLimits {
   maxCost?: number;
   timeLimitSource?: string;
   maxRepairIterations?: number;
+  maxModelRequests?: number;
+  maxContinuations?: number;
+  maxContextEpochRollovers?: number;
+  maxUpstreamTokens?: number;
+  maxTreeUpstreamTokens?: number;
 }
 
 export interface ActivatedSkill {
@@ -1665,7 +1672,7 @@ export interface BackgroundRunGoal {
 export interface BackgroundRunLimits {
   maxRounds: number;
   maxDurationMs: number;
-  /** Legacy serialized name; interpreted as a per-epoch rollover threshold. */
+  /** Cumulative hard limit across every AgentRunner invocation in the background task. */
   maxToolCalls: number;
 }
 

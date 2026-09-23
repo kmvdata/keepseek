@@ -36,6 +36,18 @@ export const DEFAULT_PATCH_MAX_DIFF_BYTES = 4_194_304;
 export const DEFAULT_PROVIDER_INLINE_RESULT_MAX_CHARS = 48_000;
 export const DEFAULT_EVIDENCE_MAX_BYTES = 100_000_000;
 export const DEFAULT_AGENT_MAX_COST = 0;
+export const DEFAULT_AGENT_MAX_EXECUTION_MS = 15 * 60 * 1000;
+export const DEFAULT_SUBAGENT_MAX_EXECUTION_MS = 5 * 60 * 1000;
+export const DEFAULT_AGENT_MAX_MODEL_REQUESTS = 32;
+export const DEFAULT_SUBAGENT_MAX_MODEL_REQUESTS = 12;
+export const DEFAULT_AGENT_MAX_CONTINUATIONS = 1;
+export const DEFAULT_AGENT_MAX_CONTEXT_EPOCH_ROLLOVERS = 3;
+export const DEFAULT_AGENT_MAX_TREE_UPSTREAM_TOKENS = 2_000_000;
+export const DEFAULT_SUBAGENT_MAX_UPSTREAM_TOKENS = 500_000;
+export const DEFAULT_AGENT_TOOL_MAX_OUTPUT_TOKENS = 8_192;
+export const DEFAULT_AGENT_FINAL_MAX_OUTPUT_TOKENS = 16_384;
+export const DEFAULT_AGENT_CONTINUATION_MAX_OUTPUT_TOKENS = 8_192;
+export const DEFAULT_AGENT_REPAIR_MAX_OUTPUT_TOKENS = 4_096;
 export const DEFAULT_DRAFT_RUN_TIMEOUT_MS = 120_000;
 export const DEFAULT_DRAFT_RUN_MAX_TRANSCRIPT_BYTES = 131_072;
 export const DEFAULT_MAX_REQUEST_RETRIES = 2;
@@ -391,7 +403,62 @@ export function getConfiguredBackgroundMaxRounds(): number {
 }
 
 export function getConfiguredAgentMaxExecutionMs(): number {
-  return normalizeDuration(vscode.workspace.getConfiguration('keepseek').get('agent.maxExecutionMs', 0));
+  return normalizeDuration(vscode.workspace.getConfiguration('keepseek').get(
+    'agent.maxExecutionMs', DEFAULT_AGENT_MAX_EXECUTION_MS));
+}
+
+export function getConfiguredSubagentMaxExecutionMs(): number {
+  return normalizeDuration(vscode.workspace.getConfiguration('keepseek').get(
+    'agent.subagentMaxExecutionMs', DEFAULT_SUBAGENT_MAX_EXECUTION_MS));
+}
+
+export function getConfiguredAgentMaxModelRequests(subagent = false): number {
+  const fallback = subagent ? DEFAULT_SUBAGENT_MAX_MODEL_REQUESTS : DEFAULT_AGENT_MAX_MODEL_REQUESTS;
+  const key = subagent ? 'agent.subagentMaxModelRequests' : 'agent.maxModelRequests';
+  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(key, fallback), 1, 512, fallback);
+}
+
+export function getConfiguredAgentMaxContinuations(): number {
+  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(
+    'agent.maxContinuations', DEFAULT_AGENT_MAX_CONTINUATIONS), 0, 8, DEFAULT_AGENT_MAX_CONTINUATIONS);
+}
+
+export function getConfiguredAgentMaxContextEpochRollovers(): number {
+  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(
+    'agent.maxContextEpochRollovers', DEFAULT_AGENT_MAX_CONTEXT_EPOCH_ROLLOVERS),
+  0, 32, DEFAULT_AGENT_MAX_CONTEXT_EPOCH_ROLLOVERS);
+}
+
+export function getConfiguredAgentMaxTreeUpstreamTokens(): number {
+  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(
+    'agent.maxTreeUpstreamTokens', DEFAULT_AGENT_MAX_TREE_UPSTREAM_TOKENS),
+  1_000, 100_000_000, DEFAULT_AGENT_MAX_TREE_UPSTREAM_TOKENS);
+}
+
+export function getConfiguredSubagentMaxUpstreamTokens(): number {
+  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(
+    'agent.subagentMaxUpstreamTokens', DEFAULT_SUBAGENT_MAX_UPSTREAM_TOKENS),
+  1_000, 100_000_000, DEFAULT_SUBAGENT_MAX_UPSTREAM_TOKENS);
+}
+
+export function getConfiguredAgentToolMaxOutputTokens(): number {
+  return getConfiguredOutputLimit('agent.toolMaxOutputTokens', DEFAULT_AGENT_TOOL_MAX_OUTPUT_TOKENS);
+}
+
+export function getConfiguredAgentFinalMaxOutputTokens(): number {
+  return getConfiguredOutputLimit('agent.finalMaxOutputTokens', DEFAULT_AGENT_FINAL_MAX_OUTPUT_TOKENS);
+}
+
+export function getConfiguredAgentContinuationMaxOutputTokens(): number {
+  return getConfiguredOutputLimit('agent.continuationMaxOutputTokens', DEFAULT_AGENT_CONTINUATION_MAX_OUTPUT_TOKENS);
+}
+
+export function getConfiguredAgentRepairMaxOutputTokens(): number {
+  return getConfiguredOutputLimit('agent.repairMaxOutputTokens', DEFAULT_AGENT_REPAIR_MAX_OUTPUT_TOKENS);
+}
+
+function getConfiguredOutputLimit(key: string, fallback: number): number {
+  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(key, fallback), 256, 65_536, fallback);
 }
 
 export function getConfiguredAgentMaxCost(): number {

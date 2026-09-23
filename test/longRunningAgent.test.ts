@@ -2,7 +2,7 @@ import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { Script } from 'node:vm';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as vscode from './stubs/vscode';
@@ -32,9 +32,9 @@ describe('long-running Agent execution and safe recovery', () => {
     assert.equal(mergeDurations(null, -1, Infinity), 0);
     assert.equal(normalizeDuration(Number.MAX_VALUE), Number.MAX_SAFE_INTEGER);
     assert.equal(JSON.parse(JSON.stringify({ duration: normalizeDuration(undefined) })).duration, 0);
-    assert.equal(getConfiguredAgentMaxExecutionMs(), 0);
+    assert.equal(getConfiguredAgentMaxExecutionMs(), 900_000);
     assert.equal(getConfiguredAgentMaxCost(), 0);
-    assert.equal(getConfiguredBackgroundMaxDurationMs(), 0);
+    assert.equal(getConfiguredBackgroundMaxDurationMs(), 900_000);
     for (const id of ['generic', 'deepseek-v4-flash', 'deepseek-v4-pro']) {
       for (const reasoningEffort of ['high', 'max'] as const) {
         assert.equal(getAgentRuntimeProfile({ id, label: id, provider: id.startsWith('deepseek') ? 'deepseek' : 'openai-compatible' }, { thinkingEnabled: true, reasoningEffort }).maxRunMs, 0);
@@ -302,6 +302,28 @@ describe('long-running Agent execution and safe recovery', () => {
     } finally {
       vscode.workspace.fs.writeFile = oldWriter;
       vscode.workspace.workspaceFolders = oldFolders;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('recognizes a committed overwrite rename FileNotFound race and removes its temporary file', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'keepseek-rename-race-'));
+    const uri = vscode.Uri.file(join(directory, 'state.json'));
+    const originalRename = vscode.workspace.fs.rename;
+    let injected = false;
+    try {
+      vscode.workspace.fs.rename = async (source, target, options) => {
+        await originalRename(source, target, options);
+        if (!injected) {
+          injected = true;
+          throw Object.assign(new Error('target disappeared during overwrite'), { code: 'FileNotFound' });
+        }
+      };
+      await writeJsonAtomic(uri as unknown as import('vscode').Uri, { committed: true });
+      assert.deepEqual(JSON.parse(await readFile(uri.fsPath, 'utf8')), { committed: true });
+      assert.equal((await readdir(directory)).some((name) => name.startsWith('.keepseek-')), false);
+    } finally {
+      vscode.workspace.fs.rename = originalRename;
       await rm(directory, { recursive: true, force: true });
     }
   });

@@ -1,7 +1,33 @@
-import { ExecutionClock, ExecutionBudgetError, ExecutionCostBudget, abortable, mergeCostLimits, mergeDurations } from './executionPolicy';
+import {
+  ExecutionClock,
+  ExecutionBudgetError,
+  ExecutionCostBudget,
+  LogicalBudgetExceededError,
+  LogicalRunBudget,
+  SharedUpstreamTokenBudget,
+  abortable,
+  mergeCostLimits,
+  mergeDurations
+} from './executionPolicy';
 import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted, migrateLegacyCapacityCheckpoint } from './runCheckpoint';
 import { shapeWorkspaceListingResult } from './toolResultShaping';
-import { getConfiguredAgentMaxCost, getConfiguredAgentMaxExecutionMs, getConfiguredEvidenceMaxBytes, getConfiguredPatchSettings, getConfiguredProviderInlineResultMaxChars, getConfiguredStreamIdleTimeoutMs } from '../shared/config';
+import {
+  getConfiguredAgentContinuationMaxOutputTokens,
+  getConfiguredAgentFinalMaxOutputTokens,
+  getConfiguredAgentMaxContextEpochRollovers,
+  getConfiguredAgentMaxContinuations,
+  getConfiguredAgentMaxCost,
+  getConfiguredAgentMaxExecutionMs,
+  getConfiguredAgentMaxModelRequests,
+  getConfiguredAgentMaxTreeUpstreamTokens,
+  getConfiguredAgentRepairMaxOutputTokens,
+  getConfiguredAgentToolMaxOutputTokens,
+  getConfiguredEvidenceMaxBytes,
+  getConfiguredPatchSettings,
+  getConfiguredProviderInlineResultMaxChars,
+  getConfiguredStreamIdleTimeoutMs,
+  getConfiguredSubagentMaxUpstreamTokens
+} from '../shared/config';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
@@ -236,6 +262,15 @@ interface AgentRuntimeConfig {
   requestRetryBaseMs: number;
   maxValidationRuns: number;
   maxRepairIterations: number;
+  maxModelRequests: number;
+  maxContinuations: number;
+  maxContextEpochRollovers: number;
+  maxUpstreamTokens: number;
+  maxTreeUpstreamTokens: number;
+  toolMaxOutputTokens: number;
+  finalMaxOutputTokens: number;
+  continuationMaxOutputTokens: number;
+  repairMaxOutputTokens: number;
 }
 
 interface OpenAiResponsesRunState {
@@ -380,6 +415,8 @@ export class AgentLoop {
       request.executionLimits?.timeLimitSource ?? (request.executionLimits?.maxRunMs ? 'explicit invocation + agent.maxExecutionMs' : 'agent.maxExecutionMs (0 = unlimited)'),
       (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.toString()), maxCost);
     const taskCostBudget = request.taskCostBudget ?? new ExecutionCostBudget(maxCost, cp.usedCostByCurrency);
+    if (request.taskCostBudget) taskCostBudget.restoreAtLeast(cp.usedCostByCurrency ?? {});
+    let activeRunBudget: LogicalRunBudget | undefined;
     cp.maxCost = taskCostBudget.limit;
     if (!request.subagentContext && cp.delegationBudget) this.subagentTools?.restoreTree?.(cp.taskId, cp.delegationBudget);
     cp.attempt++; cp.status = 'running'; cp.stopReason = undefined; cp.error = undefined;
@@ -397,6 +434,11 @@ export class AgentLoop {
       if (!request.subagentContext) cp.delegationBudget = this.subagentTools?.snapshotTree?.(cp.taskId) ?? cp.delegationBudget;
       cp.usedMs = ownClock.usedMs;
       cp.usedCostByCurrency = taskCostBudget.snapshot();
+      if (activeRunBudget) {
+        activeRunBudget.syncUsedMs(cp.usedMs);
+        cp.runBudget = activeRunBudget.state;
+        cp.modelRequests = activeRunBudget.state.modelRequests;
+      }
       cp.updatedAt = new Date().toISOString();
       try { await callbacks.onCheckpoint?.(checkpointCopy(cp)); }
       catch (error) { cp.status = 'blocked'; cp.stopReason = String(error).includes('resource limit') ? 'resource_limit' : 'storage_failure'; cp.error = String(error); controller.abort(error); throw error; }
@@ -415,7 +457,8 @@ export class AgentLoop {
         taskCostBudget, signal: controller.signal }, {
         ...callbacks,
         beforeModelRequest: async () => {
-          cp.modelRequests++; cp.requestStartedAt = new Date().toISOString();
+          cp.modelRequests = activeRunBudget?.state.modelRequests ?? cp.modelRequests;
+          cp.requestStartedAt = new Date().toISOString();
           cp.lastNetworkAt = undefined; cp.lastEventAt = undefined; cp.lastContentAt = undefined;
           await persist();
         },
@@ -434,7 +477,7 @@ export class AgentLoop {
           else resumeClock();
           callbacks.onStatus?.(status);
         }
-      });
+      }, (budget) => { activeRunBudget = budget; });
       cp.finalResponse = response;
       cp.status = response.runDetails.budgetStopReason ? 'blocked' : 'completed';
       cp.stopReason = response.runDetails.budgetStopReason ? 'budget_exhausted'
@@ -450,7 +493,7 @@ export class AgentLoop {
               : 'connection_interrupted';
       cp.status = ['storage_failure', 'resource_limit'].includes(cp.stopReason) ? 'blocked' : 'interrupted';
       cp.error = error instanceof Error ? error.message : String(error);
-      await persist();
+      if (cp.stopReason !== 'storage_failure' && cp.stopReason !== 'resource_limit') await persist();
       if (cp.stopReason === 'time_budget') throw new ExecutionBudgetError();
       throw error;
     } finally {
@@ -461,7 +504,11 @@ export class AgentLoop {
     }
   }
 
-  private async runLoop(request: AgentRequest, callbacks: AgentRunCallbacks): Promise<AgentResponse> {
+  private async runLoop(
+    request: AgentRequest,
+    callbacks: AgentRunCallbacks,
+    onBudgetReady?: (budget: LogicalRunBudget) => void
+  ): Promise<AgentResponse> {
     this.workspaceTools.setAuthorizedExternalReferenceUris(request.authorizedExternalReferenceUris);
     this.workspaceTools.setDelegatedFileAuthorization?.(request.approvalMode === 'delegate' && !request.persona);
     const checkpoint = request.checkpoint!;
@@ -615,11 +662,16 @@ export class AgentLoop {
       details: Record<string, unknown> = {}
     ): AgentResponse => {
       const finishReason = typeof details.finishReason === 'string' ? details.finishReason : undefined;
-      const isBlocked = finishReason === 'run_time_limit_exhausted';
+      const isBlocked = Boolean(finishReason && /(?:budget|limit|exhausted)/u.test(finishReason));
       if (isBlocked && finishReason) {
+        const timeLimit = finishReason.includes('run_time');
         taskPlan.addBlocker(request.language === 'en'
-          ? 'The configured task execution-time limit was reached.'
-          : '已达到用户配置的任务执行时长上限。');
+          ? timeLimit
+            ? 'The configured task execution-time limit was reached.'
+            : `The logical task safety budget was reached (${finishReason}).`
+          : timeLimit
+            ? '已达到用户配置的任务执行时长上限。'
+            : `已达到逻辑任务安全预算（${finishReason}）。`);
       }
       const repairState = repairLoop.getState();
       const finalMessage = validationState.decorateFinalMessage(
@@ -720,9 +772,13 @@ export class AgentLoop {
       policy: runAuthorizationPolicy
     });
 
+    const emitStatus = this.createStatusEmitter(callbacks);
+    const draftEdits: DraftEdit[] = structuredClone(restored?.draftEdits ?? []);
+    const draftRuns: DraftRunProposal[] = structuredClone(restored?.draftRuns ?? []);
+    const reasoningParts: string[] = [...(restored?.reasoningParts ?? [])];
+
     try {
     this.throwIfAborted(request.signal, request.language);
-    const emitStatus = this.createStatusEmitter(callbacks);
     const runCallbacks: AgentRunCallbacks = {
       ...callbacks,
       onStatus: emitStatus
@@ -763,8 +819,33 @@ export class AgentLoop {
     const runtimeConfig = await this.getRuntimeConfig(request);
     if (!restored) checkpoint.request.executionLimits = {
       ...request.executionLimits, maxToolIterations: runtimeConfig.maxToolIterations,
-      maxToolCalls: runtimeConfig.maxToolCalls, maxRepairIterations: repairLoop.getState().maxIterations, maxValidationRuns: runtimeConfig.maxValidationRuns
+      maxToolCalls: runtimeConfig.maxToolCalls, maxRepairIterations: repairLoop.getState().maxIterations,
+      maxValidationRuns: runtimeConfig.maxValidationRuns, maxModelRequests: runtimeConfig.maxModelRequests,
+      maxContinuations: runtimeConfig.maxContinuations,
+      maxContextEpochRollovers: runtimeConfig.maxContextEpochRollovers,
+      maxUpstreamTokens: runtimeConfig.maxUpstreamTokens,
+      maxTreeUpstreamTokens: runtimeConfig.maxTreeUpstreamTokens
     };
+    const parentRunBudget = request.taskRunBudget;
+    const sharedTreeBudget = parentRunBudget?.tree ?? new SharedUpstreamTokenBudget(
+      runtimeConfig.maxTreeUpstreamTokens,
+      checkpoint.runBudget?.treeUpstreamTokens ?? 0
+    );
+    const logicalBudget = new LogicalRunBudget(checkpoint.runBudget, {
+      maxModelRequests: runtimeConfig.maxModelRequests,
+      maxToolRounds: runtimeConfig.maxToolIterations,
+      maxToolCalls: runtimeConfig.maxToolCalls,
+      maxContinuations: runtimeConfig.maxContinuations,
+      maxContextEpochRollovers: runtimeConfig.maxContextEpochRollovers,
+      maxUpstreamTokens: runtimeConfig.maxUpstreamTokens,
+      maxTreeUpstreamTokens: runtimeConfig.maxTreeUpstreamTokens,
+      maxContinuationOutputTokens: runtimeConfig.continuationMaxOutputTokens,
+      maxContinuationOutputChars: runtimeConfig.continuationMaxOutputTokens * 4
+    }, sharedTreeBudget, runtimeConfig.maxRunMs, Date.now(), parentRunBudget?.deadlineAt);
+    checkpoint.runBudget = logicalBudget.state;
+    checkpoint.modelRequests = logicalBudget.state.modelRequests;
+    request = { ...request, taskRunBudget: logicalBudget };
+    onBudgetReady?.(logicalBudget);
     taskPlan.beginExecution();
     const buildCurrentProviderProjection = () => buildProviderRequestProjection({
       model: request.model,
@@ -878,12 +959,8 @@ export class AgentLoop {
       exposedToolNames: tools.map((tool) => tool.function.name),
       projectionMetadata: projection.metadata
     });
-    const draftEdits: DraftEdit[] = structuredClone(restored?.draftEdits ?? []);
-    const draftRuns: DraftRunProposal[] = structuredClone(restored?.draftRuns ?? []);
-    const reasoningParts: string[] = [...(restored?.reasoningParts ?? [])];
     draftEdits.forEach((edit) => validationState.recordDraftEdit(edit.id));
-    const maxIterations = Math.max(0, runtimeConfig.maxToolIterations);
-    const runDeadlineAt: number | undefined = undefined; // Effective clock owns cancellation; never a wall-clock deadline.
+    const runDeadlineAt = logicalBudget.deadlineAt;
     const calibrationStore = new ContextWindowCalibrationStore(this.globalStorageUri);
     const calibrationKey = {
       sourceId: runtimeConfig.sourceId,
@@ -949,7 +1026,7 @@ export class AgentLoop {
         contextCompression: request.contextCompression,
         language: request.language,
         prompt: request.prompt,
-        includeTools: maxIterations > 0,
+        includeTools: runtimeConfig.maxToolIterations > 0,
         outputReserveTokens,
         safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
         slimToolNames: request.slimToolNames,
@@ -1046,6 +1123,9 @@ export class AgentLoop {
         seed = persistedRollover.seed!;
         archiveName = persistedRollover.archiveName!;
       } else {
+        if (!logicalBudget.tryRecordRollover()) {
+          throw new LogicalBudgetExceededError('context_epoch_rollover_budget_exhausted');
+        }
         epoch.status = 'summarizing';
         epoch.pendingRollover = { reason };
         await saveStep!();
@@ -1234,13 +1314,18 @@ export class AgentLoop {
         }, { finishReason: runTimeStopReason });
       }
 
-      if (maxIterations > 0 && epoch.turnInEpoch >= maxIterations) {
-        await rolloverEpoch('tool_round_threshold');
-      }
       // The schema is frozen for the whole session/run. When tool calls are no
       // longer allowed, keep the identical tools array and switch tool_choice to
       // none instead of removing the cached schema prefix.
-      const allowToolCalls = maxIterations > 0;
+      const toolBudgetExhausted = !logicalBudget.canUseTools();
+      const isBudgetFinalization = toolBudgetExhausted;
+      if (isBudgetFinalization && !pending) {
+        if (!logicalBudget.beginFinalization()) {
+          throw new LogicalBudgetExceededError('tool_budget_exhausted');
+        }
+        await saveStep();
+      }
+      const allowToolCalls = !toolBudgetExhausted;
       const toolsForTurn = tools;
       const allowTerminalDraftEdit = false;
       emitUsageEstimate(toolsForTurn);
@@ -1253,7 +1338,9 @@ export class AgentLoop {
       );
       const requestAdmission = admission.decide({
         estimatedInputTokens: estimatedInputBeforeRequest,
-        configuredMaxOutputTokens: runtimeConfig.maxTokens,
+        configuredMaxOutputTokens: allowToolCalls
+          ? runtimeConfig.toolMaxOutputTokens
+          : runtimeConfig.finalMaxOutputTokens,
         phase: allowToolCalls ? 'tool' : 'final',
         remainingBatchResults: 1
       });
@@ -1262,7 +1349,10 @@ export class AgentLoop {
         for (const record of deliveryRecords) await evidenceStore.markSending(record);
         response = pending?.response ?? await this.createModelResponse(
           request,
-          { ...runtimeConfig, maxTokens: requestAdmission.outputReserveTokens },
+          { ...runtimeConfig, maxTokens: Math.min(
+            requestAdmission.outputReserveTokens,
+            allowToolCalls ? runtimeConfig.toolMaxOutputTokens : runtimeConfig.finalMaxOutputTokens
+          ) },
           messages,
           toolsForTurn,
           runCallbacks,
@@ -1324,6 +1414,10 @@ export class AgentLoop {
       }
 
       const toolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
+      const rawToolCalls = response.message.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
+      if (isBudgetFinalization && rawToolCalls.length) {
+        throw new LogicalBudgetExceededError('tool_budget_exhausted');
+      }
       if (normalizedAssistant.displayReasoningContent) {
         runtimeUsageBreakdown.reasoningTokensEstimate += estimateChatMessageTokens('assistant', normalizedAssistant.displayReasoningContent);
         emitUsageEstimate(toolsForTurn);
@@ -1339,6 +1433,18 @@ export class AgentLoop {
         pending ??= { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {} };
         committedProvider = structuredClone(providerRunState);
         await saveStep();
+        if (isBudgetFinalization) {
+          const finalizationContent = response.finishReason === 'length' || response.finishReason === 'pause_turn'
+            ? this.appendBudgetTruncationNotice(assistant.content ?? '', request.language)
+            : assistant.content;
+          emitStatus({ base: 'thinking', phase: 'finalizing' });
+          return finishRun({
+            message: this.getFinalMessage(finalizationContent, draftEdits, 'tool_budget_exhausted', request.language, runtimeConfig),
+            reasoningContent: this.formatReasoning(reasoningParts),
+            draftEdits,
+            draftRuns
+          }, { finishReason: 'tool_budget_exhausted', stopped: true });
+        }
         let continuedResponse: { content: string; finishReason?: string | null } | undefined;
         try {
           continuedResponse = await this.tryContinueLengthLimitedResponse({
@@ -1403,6 +1509,7 @@ export class AgentLoop {
 
       pending ??= { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {} };
       committedProvider = structuredClone(providerRunState);
+      logicalBudget.recordToolRound();
       await saveStep();
       emitStatus({ base: 'thinking', phase: 'planning_tool' });
 
@@ -1479,7 +1586,14 @@ export class AgentLoop {
             evidenceRef: evidenceRecord.evidenceRef, contentHash: evidenceRecord.contentHash });
           return evidenceRecord.providerEnvelope!;
         }
-        toolCallCount += 1;
+        if (!logicalBudget.tryRecordToolCall()) {
+          return JSON.stringify({
+            ok: false,
+            errorType: 'tool_call_budget_exhausted',
+            error: 'The logical run tool-call budget is exhausted. No tool was executed.'
+          });
+        }
+        toolCallCount = logicalBudget.state.toolCalls;
         epoch.toolCallsInEpoch += 1;
         taskPlan.startTool(toolCall.function.name);
         emitStatus({
@@ -2045,9 +2159,6 @@ export class AgentLoop {
       })) {
         rolloverAfterBatchReason = 'soft_context_pressure';
       }
-      if (!rolloverAfterBatchReason && runtimeConfig.maxToolCalls > 0 && epoch.toolCallsInEpoch >= runtimeConfig.maxToolCalls) {
-        rolloverAfterBatchReason = 'tool_call_threshold';
-      }
       if (!rolloverAfterBatchReason && nextAdmission.shouldRollover) rolloverAfterBatchReason = 'minimum_envelope_unfit';
       if (rolloverAfterBatchReason) await rolloverEpoch(rolloverAfterBatchReason);
       if (approvalReviewStopReason) {
@@ -2079,6 +2190,20 @@ export class AgentLoop {
     }
 
     } catch (error) {
+      const budgetReason = error instanceof LogicalBudgetExceededError
+        ? error.budgetReason
+        : request.signal?.aborted && request.signal.reason instanceof ExecutionBudgetError
+          ? 'run_time_limit_exhausted'
+          : undefined;
+      if (budgetReason) {
+        emitStatus({ base: 'thinking', phase: 'finalizing' });
+        return finishRun({
+          message: this.getBudgetStopMessage(budgetReason, draftEdits, request.language),
+          reasoningContent: this.formatReasoning(reasoningParts),
+          draftEdits,
+          draftRuns
+        }, { finishReason: budgetReason, stopped: true });
+      }
       let failedPlan;
       if (error instanceof AgentRunAbortedError || request.signal?.aborted) {
         failedPlan = taskPlan.stop(error instanceof Error ? error.message : undefined);
@@ -2269,11 +2394,23 @@ export class AgentLoop {
       body: formatRequestBodyForTrace(body, trace.includesPayload('request'))
     });
 
+    const requestReservations: Array<ReturnType<LogicalRunBudget['reservePhysicalRequest']>> = [];
+    const physicalCallbacks: AgentRunCallbacks = {
+      ...callbacks,
+      beforeModelRequest: async () => {
+        const reservation = request.taskRunBudget?.reservePhysicalRequest(
+          estimatedPromptTokens,
+          runtimeConfig.maxTokens
+        );
+        if (reservation) requestReservations.push(reservation);
+        await callbacks.beforeModelRequest?.();
+      }
+    };
     const response = await createProviderClient(runtimeConfig.provider).createModelResponse(this.toProviderClientConfig(runtimeConfig), {
       body,
       language: request.language,
       signal: request.signal,
-      callbacks,
+      callbacks: physicalCallbacks,
       runDeadlineAt,
       trace,
       requestId: upstreamRequestId,
@@ -2282,6 +2419,13 @@ export class AgentLoop {
         attemptCacheObservations[attemptIndex] = createAttemptObservation(attemptIndex);
       }
     });
+    const lastReservation = requestReservations.at(-1);
+    if (lastReservation) request.taskRunBudget?.settlePhysicalRequest(lastReservation, response.usage ?? undefined);
+    if (request.checkpoint && requestReservations.length) {
+      request.checkpoint.runBudget = request.taskRunBudget?.state;
+      request.checkpoint.modelRequests = request.taskRunBudget?.state.modelRequests ?? request.checkpoint.modelRequests;
+      await callbacks.onCheckpoint?.(request.checkpoint);
+    }
 
     const retryCount = response.retryCount ?? 0;
     while (attemptSnapshots.length < (response.attemptCount ?? retryCount + 1)) {
@@ -2414,7 +2558,7 @@ export class AgentLoop {
         hadPartialOutput: response.hadPartialOutput,
         error: response.error
       });
-      throw new Error(this.getRunTimeLimitError(runtimeConfig.maxRunMs, request.language));
+      throw new LogicalBudgetExceededError('run_time_limit_exhausted');
     }
     trace.record({
       type: 'upstream_request_failed',
@@ -2456,6 +2600,12 @@ export class AgentLoop {
     let content = saved?.continuation?.content ?? input.assistant.content ?? '';
     let finishReason = saved?.continuation?.finishReason ?? input.response.finishReason;
     for (let continuationIndex = saved?.continuation?.requests ?? 0; ; continuationIndex += 1) {
+      if (!input.request.taskRunBudget?.beginContinuation()) {
+        return {
+          content: this.appendBudgetTruncationNotice(content, input.request.language),
+          finishReason: 'continuation_budget_exhausted'
+        };
+      }
       const assistantMessage: DeepSeekMessage = {
         role: 'assistant',
         content
@@ -2499,14 +2649,19 @@ export class AgentLoop {
       if (saved) {
         saved.messages = structuredClone(input.messages);
         saved.provider = structuredClone(input.providerRunState);
-        saved.continuation = { content, finishReason, requests: continuationIndex + 1, inFlight: true };
+        saved.continuation = {
+          content,
+          finishReason,
+          requests: input.request.taskRunBudget?.state.continuations ?? continuationIndex + 1,
+          inFlight: true
+        };
         await input.callbacks.onCheckpoint?.(input.request.checkpoint!);
       }
 
 
       const continuationResponse = await this.createModelResponse(
         input.request,
-        input.runtimeConfig,
+        { ...input.runtimeConfig, maxTokens: input.runtimeConfig.continuationMaxOutputTokens },
         input.messages,
         input.tools,
         input.callbacks,
@@ -2521,24 +2676,51 @@ export class AgentLoop {
         }
       );
       const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false, false);
+      if (continuationResponse.message.tool_calls?.some((toolCall) => toolCall.type === 'function')) {
+        return {
+          content: this.appendBudgetTruncationNotice(content, input.request.language),
+          finishReason: 'continuation_budget_exhausted'
+        };
+      }
       if (normalizedContinuation.displayReasoningContent) {
         input.reasoningParts.push(normalizedContinuation.displayReasoningContent);
         input.runtimeUsageBreakdown.reasoningTokensEstimate += estimateChatMessageTokens('assistant', normalizedContinuation.displayReasoningContent);
       }
       const continuationContent = normalizedContinuation.assistant.content ?? '';
-      content = this.joinContinuationContent(content, continuationContent);
+      const continuationCharLimit = input.request.taskRunBudget?.limits.maxContinuationOutputChars ?? 0;
+      const continuationCharsUsed = input.request.taskRunBudget?.state.continuationOutputChars ?? 0;
+      const remainingContinuationChars = continuationCharLimit > 0
+        ? Math.max(0, continuationCharLimit - continuationCharsUsed)
+        : continuationContent.length;
+      const boundedContinuationContent = continuationContent.slice(0, remainingContinuationChars);
+      content = this.joinContinuationContent(content, boundedContinuationContent);
       finishReason = continuationResponse.finishReason;
+      const continuationTokens = continuationResponse.usage?.completion_tokens
+        ?? estimateChatMessageTokens('assistant', continuationContent);
+      const withinOutputBudget = input.request.taskRunBudget?.recordContinuationOutput(
+        continuationTokens,
+        continuationContent.length
+      ) !== false && boundedContinuationContent.length === continuationContent.length;
       if (saved) {
-        saved.continuation = { content, finishReason, requests: continuationIndex + 1, inFlight: false };
+        saved.continuation = {
+          content,
+          finishReason,
+          requests: input.request.taskRunBudget?.state.continuations ?? continuationIndex + 1,
+          inFlight: false
+        };
         saved.provider = structuredClone(input.providerRunState);
         saved.pending = { response: { message: { ...normalizedContinuation.assistant, content }, finishReason }, results: {} };
         await input.callbacks.onCheckpoint?.(input.request.checkpoint!);
       }
 
-      if ((finishReason !== 'length' && finishReason !== 'pause_turn')) {
-        break;
+      if (!withinOutputBudget) {
+        return {
+          content: this.appendBudgetTruncationNotice(content, input.request.language),
+          finishReason: 'continuation_budget_exhausted'
+        };
       }
-      if (!continuationContent.trim() && finishReason !== 'pause_turn') {
+      if ((finishReason !== 'length' && finishReason !== 'pause_turn')) break;
+      if (!continuationContent.trim()) {
         throw new AgentInterruptedError('no_progress_loop', input.request.language === 'en'
           ? 'The provider repeatedly returned a length stop without additional content.'
           : 'Provider 连续因长度停止且没有产生新增内容，已按无进展循环停止。');
@@ -2634,7 +2816,7 @@ export class AgentLoop {
     });
     const continuationResponse = await this.createModelResponse(
       input.request,
-      input.runtimeConfig,
+      { ...input.runtimeConfig, maxTokens: input.runtimeConfig.repairMaxOutputTokens },
       continuationMessages,
       input.tools,
       {
@@ -4385,6 +4567,24 @@ export class AgentLoop {
     return language === 'en' ? 'DeepSeek did not return text content.' : 'DeepSeek 未返回文本内容。';
   }
 
+  private appendBudgetTruncationNotice(content: string, language: KeepseekLanguage): string {
+    const notice = language === 'en'
+      ? '[Truncated because the automatic output/continuation budget was reached.]'
+      : '[由于自动输出/续写预算已达到上限，内容已截断。]';
+    return [content.trim(), notice].filter(Boolean).join('\n\n');
+  }
+
+  private getBudgetStopMessage(reason: string, draftEdits: DraftEdit[], language: KeepseekLanguage): string {
+    const prepared = draftEdits.length
+      ? language === 'en'
+        ? ` ${draftEdits.length} pending change(s) were preserved for review.`
+        : ` 已保留 ${draftEdits.length} 个待审核修改。`
+      : '';
+    return language === 'en'
+      ? `The logical task stopped at its safety budget (${reason}). Completed tool evidence and proposals were preserved.${prepared}`
+      : `逻辑任务已在安全预算边界停止（${reason}）。已完成的工具证据和提案均已保留。${prepared}`;
+  }
+
   private decorateRepairMessage(
     message: string,
     state: ReturnType<RepairLoopTracker['getState']>,
@@ -4701,7 +4901,7 @@ export class AgentLoop {
     try {
       const response = await this.createModelResponse(
         { ...input.request, signal: summaryAbort.signal },
-        { ...input.runtimeConfig, maxTokens: Math.min(2_048, input.runtimeConfig.maxTokens) },
+        { ...input.runtimeConfig, maxTokens: Math.min(2_048, input.runtimeConfig.repairMaxOutputTokens) },
         summaryMessages,
         input.tools,
         {
@@ -4772,7 +4972,25 @@ export class AgentLoop {
       maxRequestRetries: Math.max(0, getConfiguredMaxRequestRetries() - (request.checkpoint?.modelStepRetries ?? 0)),
       requestRetryBaseMs: getConfiguredRequestRetryBaseMs(),
       maxValidationRuns: clampRunLimit(getConfiguredMaxValidationRuns(), request.executionLimits?.maxValidationRuns),
-      maxRepairIterations: getConfiguredMaxRepairIterations()
+      maxRepairIterations: getConfiguredMaxRepairIterations(),
+      maxModelRequests: clampConfiguredLimit(
+        getConfiguredAgentMaxModelRequests(Boolean(request.subagentContext)),
+        request.executionLimits?.maxModelRequests
+      ),
+      maxContinuations: clampConfiguredLimit(
+        getConfiguredAgentMaxContinuations(), request.executionLimits?.maxContinuations, true),
+      maxContextEpochRollovers: clampConfiguredLimit(
+        getConfiguredAgentMaxContextEpochRollovers(), request.executionLimits?.maxContextEpochRollovers, true),
+      maxUpstreamTokens: clampConfiguredLimit(
+        request.subagentContext ? getConfiguredSubagentMaxUpstreamTokens() : getConfiguredAgentMaxTreeUpstreamTokens(),
+        request.executionLimits?.maxUpstreamTokens
+      ),
+      maxTreeUpstreamTokens: clampConfiguredLimit(
+        getConfiguredAgentMaxTreeUpstreamTokens(), request.executionLimits?.maxTreeUpstreamTokens),
+      toolMaxOutputTokens: Math.min(profile.maxTokens, getConfiguredAgentToolMaxOutputTokens()),
+      finalMaxOutputTokens: Math.min(profile.maxTokens, getConfiguredAgentFinalMaxOutputTokens()),
+      continuationMaxOutputTokens: Math.min(profile.maxTokens, getConfiguredAgentContinuationMaxOutputTokens()),
+      repairMaxOutputTokens: Math.min(profile.maxTokens, getConfiguredAgentRepairMaxOutputTokens())
     };
   }
 
@@ -4918,6 +5136,13 @@ function clampRunLimit(profileLimit: number, requestedLimit: number | undefined)
     return profileLimit;
   }
   return Math.max(0, Math.min(profileLimit, Math.floor(requestedLimit)));
+}
+
+function clampConfiguredLimit(configuredLimit: number, requestedLimit: number | undefined, allowZero = false): number {
+  if (typeof requestedLimit !== 'number' || !Number.isFinite(requestedLimit)) return configuredLimit;
+  const normalized = Math.floor(requestedLimit);
+  if (allowZero && normalized === 0) return 0;
+  return normalized > 0 ? Math.min(configuredLimit, normalized) : configuredLimit;
 }
 
 function normalizeRepairIterationLimit(requestedLimit: number | undefined): number {

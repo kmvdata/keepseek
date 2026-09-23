@@ -3,11 +3,22 @@ import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
 import {
   getConfiguredAgentSettings,
+  getConfiguredAgentContinuationMaxOutputTokens,
+  getConfiguredAgentFinalMaxOutputTokens,
+  getConfiguredAgentMaxContextEpochRollovers,
+  getConfiguredAgentMaxContinuations,
+  getConfiguredAgentMaxExecutionMs,
+  getConfiguredAgentMaxModelRequests,
+  getConfiguredAgentMaxTreeUpstreamTokens,
+  getConfiguredAgentRepairMaxOutputTokens,
+  getConfiguredAgentToolMaxOutputTokens,
   getConfiguredBalanceEndpointUrl,
   getConfiguredDraftRunMaxTranscriptBytes,
   getConfiguredDraftRunTimeoutMs,
   getConfiguredModelUsagePricing,
   getConfiguredPatchSettings,
+  getConfiguredSubagentMaxExecutionMs,
+  getConfiguredSubagentMaxUpstreamTokens,
   normalizeAgentSettings,
   normalizeCompressionThreshold
 } from '../src/shared/config';
@@ -145,6 +156,44 @@ test('partial agent settings preserve the fallback compression threshold', () =>
 test('DraftRun uses bounded timeout and transcript defaults', () => {
   assert.equal(getConfiguredDraftRunTimeoutMs(), 120_000);
   assert.equal(getConfiguredDraftRunMaxTranscriptBytes(), 131_072);
+});
+
+test('logical run safety fuses have finite defaults and bounded configuration normalization', () => {
+  assert.equal(getConfiguredAgentMaxExecutionMs(), 900_000);
+  assert.equal(getConfiguredSubagentMaxExecutionMs(), 300_000);
+  assert.equal(getConfiguredAgentMaxModelRequests(), 32);
+  assert.equal(getConfiguredAgentMaxModelRequests(true), 12);
+  assert.equal(getConfiguredAgentMaxContinuations(), 1);
+  assert.equal(getConfiguredAgentMaxContextEpochRollovers(), 3);
+  assert.equal(getConfiguredAgentMaxTreeUpstreamTokens(), 2_000_000);
+  assert.equal(getConfiguredSubagentMaxUpstreamTokens(), 500_000);
+  assert.equal(getConfiguredAgentToolMaxOutputTokens(), 8_192);
+  assert.equal(getConfiguredAgentFinalMaxOutputTokens(), 16_384);
+  assert.equal(getConfiguredAgentContinuationMaxOutputTokens(), 8_192);
+  assert.equal(getConfiguredAgentRepairMaxOutputTokens(), 4_096);
+
+  const original = vscode.workspace.getConfiguration;
+  vscode.workspace.getConfiguration = () => ({
+    ...original(),
+    get: <T>(key: string, fallback: T): T => ({
+      'agent.maxModelRequests': 4,
+      'agent.subagentMaxModelRequests': 2,
+      'agent.maxContinuations': 99,
+      'agent.maxContextEpochRollovers': -3,
+      'agent.maxTreeUpstreamTokens': 1_000,
+      'agent.toolMaxOutputTokens': 256
+    }[key] as T | undefined) ?? fallback
+  });
+  try {
+    assert.equal(getConfiguredAgentMaxModelRequests(), 4);
+    assert.equal(getConfiguredAgentMaxModelRequests(true), 2);
+    assert.equal(getConfiguredAgentMaxContinuations(), 8);
+    assert.equal(getConfiguredAgentMaxContextEpochRollovers(), 0);
+    assert.equal(getConfiguredAgentMaxTreeUpstreamTokens(), 1_000);
+    assert.equal(getConfiguredAgentToolMaxOutputTokens(), 256);
+  } finally {
+    vscode.workspace.getConfiguration = original;
+  }
 });
 
 test('patch limits are independent risk-object defaults rather than maxFileBytes aliases', () => {

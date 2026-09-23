@@ -207,7 +207,6 @@ test('a session that never reached the provider displays no used context', () =>
     messages: [] as ChatMessage[],
     language: 'en' as const,
     prompt: '',
-    includeTools: false,
     requestProtocolVersion: 9
   };
   const projected = createDisplayedSessionContextUsageEstimate(input);
@@ -272,7 +271,6 @@ test('an interacted session still counts its dynamic context prefix', () => {
     messages: [] as ChatMessage[],
     language: 'en',
     prompt: '',
-    includeTools: false,
     requestProtocolVersion: 9
   });
   const displayed = hasSessionProviderRequest(interacted)

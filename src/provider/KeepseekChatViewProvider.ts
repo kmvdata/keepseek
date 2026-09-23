@@ -1684,13 +1684,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       summarizeUsageLedger(session.usageLedger)
     );
     session.updatedAt = new Date().toISOString();
-    void this.sessionStore.persist();
     this.queueUsageLedgerFlush(session);
   }
 
   private queueUsageLedgerFlush(session: ChatSession): void {
-    const previous = this.usageLedgerFlushes.get(session.id) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(async () => {
+    if (this.usageLedgerFlushes.has(session.id)) return;
+    const next = new Promise<void>((resolve) => setTimeout(resolve, 50)).then(async () => {
       const snapshot = normalizeUsageLedgerValue(session.usageLedger);
       if (snapshot?.records.length) await this.usageLedgerStore.appendMany(session.id, snapshot.records);
       const rebuilt = await this.usageLedgerStore.rebuild(session.id);
@@ -1740,7 +1739,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     });
     this.usageLedgerFlushes.set(session.id, next);
     void next.finally(() => {
-      if (this.usageLedgerFlushes.get(session.id) === next) this.usageLedgerFlushes.delete(session.id);
+      if (this.usageLedgerFlushes.get(session.id) === next) {
+        this.usageLedgerFlushes.delete(session.id);
+        if (normalizeUsageLedgerValue(session.usageLedger)?.records.length) this.queueUsageLedgerFlush(session);
+      }
     });
   }
 

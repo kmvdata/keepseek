@@ -175,8 +175,52 @@
           "markdownDescription": "Maximum bytes stored for one immutable tool-evidence result. Independent from the workspace read safety limit and Provider inline admission."
         },
         "keepseek.agent.maxExecutionMs": {
-          "type": "number", "default": 0, "minimum": 0, "scope": "window",
-          "markdownDescription": "Maximum effective execution time per logical Agent task (including children and recovery). 0 = unlimited. Authorization, Apply, queue and host suspension time are excluded. / 每项 Agent 任务的有效执行时间上限；0 不限时，恢复不清零。"
+          "type": "number", "default": 900000, "minimum": 0, "scope": "window",
+          "markdownDescription": "Maximum time per root logical Agent task, shared with child agents and recovery. Default 15 minutes; explicitly set 0 for unlimited. / 根逻辑任务、子代理及恢复共享的最长时间，默认 15 分钟；仅显式设为 0 时不限时。"
+        },
+        "keepseek.agent.subagentMaxExecutionMs": {
+          "type": "number", "default": 300000, "minimum": 0, "scope": "window",
+          "markdownDescription": "Maximum time for one child Agent, additionally bounded by its root task. Default 5 minutes. / 单个子代理最长时间，且仍受根任务限制，默认 5 分钟。"
+        },
+        "keepseek.agent.maxModelRequests": {
+          "type": "integer", "default": 32, "minimum": 1, "maximum": 512, "scope": "window",
+          "markdownDescription": "Maximum physical Provider attempts per root logical run, including retries, recovery, continuation, repair, summary and finalization. / 根逻辑任务的物理 Provider 请求上限，包含重试、恢复、续写、修复、摘要和收尾。"
+        },
+        "keepseek.agent.subagentMaxModelRequests": {
+          "type": "integer", "default": 12, "minimum": 1, "maximum": 512, "scope": "window",
+          "markdownDescription": "Maximum physical Provider attempts per child Agent. / 单个子代理的物理 Provider 请求上限。"
+        },
+        "keepseek.agent.maxContinuations": {
+          "type": "integer", "default": 1, "minimum": 0, "maximum": 8, "scope": "window",
+          "markdownDescription": "Maximum automatic continuations after length or pause_turn stops. / length 或 pause_turn 后自动续写的次数上限。"
+        },
+        "keepseek.agent.maxContextEpochRollovers": {
+          "type": "integer", "default": 3, "minimum": 0, "maximum": 32, "scope": "window",
+          "markdownDescription": "Maximum Context Epoch rollovers in one logical run. Tool budgets never trigger rollover. / 单个逻辑任务的 Context Epoch rollover 上限；工具预算不会触发 rollover。"
+        },
+        "keepseek.agent.maxTreeUpstreamTokens": {
+          "type": "integer", "default": 2000000, "minimum": 1000, "maximum": 100000000, "scope": "window",
+          "markdownDescription": "Maximum upstream tokens reserved or reported by a root run and all child agents combined. / 根任务及全部子代理合计的上游 token 上限。"
+        },
+        "keepseek.agent.subagentMaxUpstreamTokens": {
+          "type": "integer", "default": 500000, "minimum": 1000, "maximum": 100000000, "scope": "window",
+          "markdownDescription": "Maximum upstream tokens for one child Agent, additionally bounded by the shared tree limit. / 单个子代理的上游 token 上限，且仍受共享树级上限限制。"
+        },
+        "keepseek.agent.toolMaxOutputTokens": {
+          "type": "integer", "default": 8192, "minimum": 256, "maximum": 65536, "scope": "window",
+          "markdownDescription": "Maximum output tokens for an ordinary tool-decision request. / 普通工具决策请求的最大输出 token。"
+        },
+        "keepseek.agent.finalMaxOutputTokens": {
+          "type": "integer", "default": 16384, "minimum": 256, "maximum": 65536, "scope": "window",
+          "markdownDescription": "Maximum output tokens for the final answer or one budget finalization request. / 最终回答或预算收尾请求的最大输出 token。"
+        },
+        "keepseek.agent.continuationMaxOutputTokens": {
+          "type": "integer", "default": 8192, "minimum": 256, "maximum": 65536, "scope": "window",
+          "markdownDescription": "Per-request and cumulative automatic continuation output limit. / 自动续写的单次及累计输出 token 上限。"
+        },
+        "keepseek.agent.repairMaxOutputTokens": {
+          "type": "integer", "default": 4096, "minimum": 256, "maximum": 65536, "scope": "window",
+          "markdownDescription": "Maximum output tokens for hidden summary and format/recovery repair requests. / 隐藏摘要及格式/恢复修复请求的最大输出 token。"
         },
         "keepseek.agent.maxCost": {
           "type": "number", "default": 0, "minimum": 0, "scope": "window",
