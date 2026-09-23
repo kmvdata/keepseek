@@ -11,7 +11,7 @@ import { ContextWindowCalibrationStore } from '../src/agent/contextWindowCalibra
 import { prepareEvidenceEnvelope } from '../src/agent/evidence/shaping';
 import { ToolEvidencePersistenceError, ToolEvidenceStore } from '../src/agent/evidence/store';
 import { getAgentTools, READ_EVIDENCE_TOOL_NAME } from '../src/agent/protocol';
-import { AgentInterruptedError, checkpointCopy, createRunCheckpoint, migrateLegacyCapacityCheckpoint, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
+import { AgentInterruptedError, checkpointCopy, createRunCheckpoint, grantCheckpointToolBudgetSegment, migrateLegacyCapacityCheckpoint, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import { isContextTooLongError, ToolResultAdmissionController } from '../src/agent/toolResultAdmission';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import { getScript } from '../src/webview/script';
@@ -22,6 +22,7 @@ import {
   getAgentRuntimeProfile
 } from '../src/shared/modelProfiles';
 import { DEEPSEEK_MODEL_IDENTITY_VERSION } from '../src/shared/deepSeekModels';
+import { getVisibleMessages } from '../src/sessions/chatSessionStore';
 
 const LARGE_ASCII = 'const value = 1; // evidence\n'.repeat(8_000);
 const LARGE_CJK = '这是不可变的工具证据。\n'.repeat(12_000);
@@ -417,7 +418,84 @@ test('large results complete in one logical task for all three provider protocol
   }
 });
 
-test('tool round thresholds are logical hard limits with one stable-schema finalization', async () => {
+test('default interactive root runs 101 progressing tool rounds beyond old request and token ceilings', async () => {
+  const workspace = new WorkspaceToolService();
+  let reads = 0;
+  workspace.readWorkspaceFile = async (path) => {
+    reads += 1;
+    return JSON.stringify({ ok: true, path, content: `evidence-${path}` });
+  };
+  const bodies: string[] = [];
+  let checkpoint!: RunCheckpoint;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url, init) => {
+    bodies.push(String(init?.body));
+    const round = bodies.length;
+    return round <= 101
+      ? chatToolCallsResponse([{
+          id: `long-${round}`,
+          name: 'keepseek_read_workspace_file',
+          args: JSON.stringify({ path: `file-${round}.ts` })
+        }], { prompt_tokens: 20_000, completion_tokens: 5_000, total_tokens: 25_000 })
+      : chatTextWithUsage('Long task complete.', { prompt_tokens: 20_000, completion_tokens: 5_000, total_tokens: 25_000 });
+  }) as typeof fetch;
+  try {
+    const input = request('openai-compatible');
+    input.model = {
+      ...input.model,
+      id: 'deepseek-v4-flash-0731',
+      provider: 'qwen',
+      contextWindowTokens: 10_000_000,
+      maxOutputTokens: 256
+    };
+    input.executionLimits = undefined;
+    const response = await new AgentRunner(workspace).run(input, {
+      onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); }
+    });
+    assert.equal(response.message, 'Long task complete.');
+    assert.equal(response.runDetails.budgetStopReason, undefined);
+    assert.equal(reads, 101);
+    assert.equal(bodies.length, 102);
+    assert.equal(checkpoint.runBudget?.toolRounds, 101);
+    assert.equal(checkpoint.runBudget?.modelRequests, 102);
+    assert.ok((checkpoint.runBudget?.treeUpstreamTokens ?? 0) > 2_000_000);
+    assert.equal(bodies.some((body) => body.includes('Host finalization boundary')), false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('Qwen-compatible Flash shape reaches request 17 after 16 rounds and 24 calls without an implicit pause', async () => {
+  const workspace = new WorkspaceToolService();
+  let reads = 0;
+  workspace.readWorkspaceFile = async (path) => {
+    reads += 1;
+    return JSON.stringify({ ok: true, path, content: path });
+  };
+  let requests = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    requests += 1;
+    if (requests === 17) return modelResponse('openai-compatible', undefined, 'Seventeenth request completed.');
+    const callCount = requests <= 8 ? 2 : 1;
+    return chatToolCallsResponse(Array.from({ length: callCount }, (_, index) => ({
+      id: `shape-${requests}-${index}`,
+      name: 'keepseek_read_workspace_file',
+      args: JSON.stringify({ path: `shape-${requests}-${index}.ts` })
+    })));
+  }) as typeof fetch;
+  try {
+    const input = request('openai-compatible');
+    input.model = { ...input.model, id: 'deepseek-v4-flash-0731', provider: 'qwen', contextWindowTokens: 1_000_000 };
+    input.executionLimits = undefined;
+    const response = await new AgentRunner(workspace).run(input);
+    assert.equal(response.message, 'Seventeenth request completed.');
+    assert.equal(response.runDetails.budgetStopReason, undefined);
+    assert.equal(requests, 17);
+    assert.equal(reads, 24);
+    assert.equal(response.toolRounds?.length, 16);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('an explicit tool-round grant lands in one stable-schema resumable finalization', async () => {
   const workspace = new WorkspaceToolService();
   let reads = 0;
   workspace.readWorkspaceFile = async () => { reads += 1; return JSON.stringify({ ok: true, path: 'a.ts', content: LARGE_ASCII }); };
@@ -428,29 +506,172 @@ test('tool round thresholds are logical hard limits with one stable-schema final
     const body = String(init?.body);
     bodies.push(body);
     if (body.includes('Create a concise semantic checkpoint')) return modelResponse('openai-compatible', undefined, 'Read completed; evidence retained.');
-    return bodies.length === 1
-      ? modelResponse('openai-compatible', { id: 'read-once', name: 'keepseek_read_workspace_file', args: '{"path":"a.ts"}' })
+    return bodies.length <= 3
+      ? modelResponse('openai-compatible', { id: `read-${bodies.length}`, name: 'keepseek_read_workspace_file', args: JSON.stringify({ path: `a-${bodies.length}.ts` }) })
       : modelResponse('openai-compatible');
   }) as typeof fetch;
   try {
     const input = request('openai-compatible');
-    input.executionLimits = { maxToolIterations: 1 };
+    input.executionLimits = { maxToolIterations: 3 };
     const response = await new AgentRunner(workspace).run(input, { onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); } });
     assert.equal(response.message, 'Done.');
-    assert.equal(reads, 1);
+    assert.equal(reads, 3);
     assert.equal(checkpoint.request.approvalRootTaskId ?? checkpoint.taskId, checkpoint.taskId);
     assert.equal(checkpoint.state?.epoch?.totalRollovers, 0);
-    assert.equal(checkpoint.runBudget?.toolRounds, 1);
+    assert.equal(checkpoint.runBudget?.toolRounds, 3);
     assert.equal(checkpoint.runBudget?.finalizationAttempted, true);
     assert.equal(response.runDetails.budgetStopReason, 'tool_budget_exhausted');
+    assert.deepEqual(response.runDetails.budgetPause, {
+      kind: 'explicit_tool_budget', resumable: true, segment: 0
+    });
+    assert.equal(response.runDetails.status, 'waiting');
+    assert.equal(checkpoint.status, 'interrupted');
+    assert.equal(checkpoint.stopReason, 'budget_pause');
+    const visible = getVisibleMessages([{ id: 'assistant', role: 'assistant', content: response.message,
+      createdAt: new Date().toISOString(), runCheckpoint: checkpoint }]);
+    assert.equal(visible[0].runState?.canResume, true);
     assert.equal(response.runDetails.contextEpochs?.length ?? 0, 0);
     assert.equal(input.history.length, 0);
     assert.equal(bodies.some((body) => body.includes('keepseek_context_epoch_checkpoint')), false);
     const first = JSON.parse(bodies[0]);
     const finalization = JSON.parse(bodies.at(-1)!);
+    assert.equal(bodies.length, 4);
     assert.deepEqual(finalization.tools, first.tools);
     assert.equal(finalization.tool_choice, 'none');
+    assert.match(JSON.stringify(finalization.messages), /Host finalization boundary/u);
     assert.equal(bodies.some((body) => body.includes('budget_auto_continue')), false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('all three protocols pair and refuse tool calls returned during finalization without executing them', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const provider of ['openai-compatible', 'openai-responses', 'anthropic-compatible'] as const) {
+      const workspace = new WorkspaceToolService();
+      let reads = 0;
+      workspace.readWorkspaceFile = async () => {
+        reads += 1;
+        return JSON.stringify({ ok: true, path: 'first.ts', content: 'first' });
+      };
+      let requests = 0;
+      globalThis.fetch = (async () => {
+        requests += 1;
+        return requests === 1
+          ? modelResponse(provider, { id: `${provider}-first`, name: 'keepseek_read_workspace_file', args: '{"path":"first.ts"}' })
+          : modelToolWithTextResponse(provider, { id: `${provider}-blocked`, name: 'keepseek_read_workspace_file', args: '{"path":"must-not-run.ts"}' }, `Partial final ${provider}`);
+      }) as typeof fetch;
+      const input = request(provider);
+      input.sessionId = `finalization-block-${provider}`;
+      input.executionLimits = { maxToolIterations: 1 };
+      const response = await new AgentRunner(workspace).run(input);
+      assert.equal(requests, 2, provider);
+      assert.equal(reads, 1, provider);
+      assert.equal(response.runDetails.budgetPause?.resumable, true, provider);
+      assert.match(response.message, new RegExp(`Partial final ${provider}`, 'u'), provider);
+      const blocked = response.toolRounds?.at(-1)?.toolResults.at(-1)?.content;
+      assert.equal(JSON.parse(blocked ?? '{}').errorType, 'tool_budget_finalization_blocked', provider);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('Continue grants a new audited tool segment on the same task without replaying completed tools', async () => {
+  const workspace = new WorkspaceToolService();
+  const executedPaths: string[] = [];
+  workspace.readWorkspaceFile = async (path) => {
+    executedPaths.push(path);
+    return JSON.stringify({ ok: true, path, content: path });
+  };
+  let requests = 0;
+  let firstCheckpoint!: RunCheckpoint;
+  let resumedCheckpoint!: RunCheckpoint;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    requests += 1;
+    if (requests === 1) return modelResponse('openai-compatible', { id: 'segment-0', name: 'keepseek_read_workspace_file', args: '{"path":"first.ts"}' });
+    if (requests === 2) return modelResponse('openai-compatible', undefined, 'First segment summary.');
+    if (requests === 3) return modelResponse('openai-compatible', { id: 'segment-1', name: 'keepseek_read_workspace_file', args: '{"path":"second.ts"}' });
+    return modelResponse('openai-compatible', undefined, 'Second segment summary.');
+  }) as typeof fetch;
+  try {
+    const input = request('openai-compatible');
+    input.sessionId = 'segment-resume';
+    input.executionLimits = { maxToolIterations: 1, maxToolCalls: 1 };
+    await new AgentRunner(workspace).run(input, {
+      onCheckpoint: async (cp) => { firstCheckpoint = checkpointCopy(cp); }
+    });
+    const taskId = firstCheckpoint.taskId;
+    const evidenceRefs = firstCheckpoint.state?.epoch?.evidenceRefs.map((item) => item.evidenceRef);
+    const granted = grantCheckpointToolBudgetSegment(firstCheckpoint);
+    assert.equal(granted.taskId, taskId);
+    assert.equal(granted.runBudget?.toolRounds, 1);
+    assert.equal(granted.runBudget?.segmentStartToolRounds, 1);
+    assert.equal(granted.runBudget?.toolBudgetSegment, 1);
+    assert.equal(granted.runBudget?.finalizationAttempted, false);
+    assert.deepEqual(granted.state?.epoch?.evidenceRefs.map((item) => item.evidenceRef), evidenceRefs);
+    const resumed = await new AgentRunner(workspace).run({
+      ...granted.request,
+      checkpoint: granted,
+      sourceConfig: input.sourceConfig
+    }, {
+      onCheckpoint: async (cp) => { resumedCheckpoint = checkpointCopy(cp); }
+    });
+    assert.equal(resumedCheckpoint.taskId, taskId);
+    assert.deepEqual(executedPaths, ['first.ts', 'second.ts']);
+    assert.equal(resumedCheckpoint.runBudget?.toolRounds, 2);
+    assert.equal(resumedCheckpoint.runBudget?.toolCalls, 2);
+    assert.equal(resumedCheckpoint.runBudget?.toolBudgetSegment, 1);
+    assert.equal(resumed.runDetails.budgetPause?.resumable, true);
+    assert.equal(requests, 4);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('Responses and Anthropic resume a finalized segment in the same native replay lane', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const provider of ['openai-responses', 'anthropic-compatible'] as const) {
+      const workspace = new WorkspaceToolService();
+      let reads = 0;
+      workspace.readWorkspaceFile = async () => {
+        reads += 1;
+        return JSON.stringify({ ok: true, path: `${provider}.ts`, content: provider });
+      };
+      const bodies: string[] = [];
+      let paused!: RunCheckpoint;
+      let completed!: RunCheckpoint;
+      globalThis.fetch = (async (_url, init) => {
+        bodies.push(String(init?.body));
+        if (bodies.length === 1) {
+          return modelResponse(provider, { id: `${provider}-first`, name: 'keepseek_read_workspace_file',
+            args: JSON.stringify({ path: `${provider}.ts` }) });
+        }
+        return bodies.length === 2
+          ? modelResponse(provider, undefined, `${provider} segment summary`)
+          : modelResponse(provider, undefined, `${provider} resumed complete`);
+      }) as typeof fetch;
+      const input = request(provider);
+      input.sessionId = `native-resume-${provider}`;
+      input.executionLimits = { maxToolIterations: 1 };
+      await new AgentRunner(workspace).run(input, {
+        onCheckpoint: async (cp) => { paused = checkpointCopy(cp); }
+      });
+      const taskId = paused.taskId;
+      const granted = grantCheckpointToolBudgetSegment(paused);
+      const response = await new AgentRunner(workspace).run({
+        ...granted.request,
+        checkpoint: granted,
+        sourceConfig: input.sourceConfig
+      }, {
+        onCheckpoint: async (cp) => { completed = checkpointCopy(cp); }
+      });
+      assert.equal(response.message, `${provider} resumed complete`);
+      assert.equal(response.runDetails.budgetStopReason, undefined);
+      assert.equal(completed.taskId, taskId);
+      assert.equal(completed.runBudget?.toolBudgetSegment, 1);
+      assert.equal(completed.runBudget?.toolCalls, 1);
+      assert.equal(reads, 1, `${provider} must not replay the completed tool`);
+      assert.equal(bodies.length, 3);
+      assert.match(bodies[2], /Host continuation: the user explicitly selected Continue/u);
+    }
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -746,7 +967,7 @@ test('logical tool budget prevents rollover from multiplying a run indefinitely'
     input.model.contextWindowTokens = 1_000_000;
     input.executionLimits = { maxToolIterations: 2 };
     const response = await new AgentRunner(workspace).run(input, { onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); } });
-    assert.match(response.message, /safety budget/u);
+    assert.match(response.message, /explicit tool budget/u);
     assert.equal(reads, 2);
     assert.equal(checkpoint.runBudget?.toolRounds, 2);
     assert.equal(checkpoint.runBudget?.toolCalls, 2);
@@ -779,6 +1000,63 @@ test('finish_reason length continues inside the same logical task without a visi
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test('QwenCloud honors the disabled thinking setting on the initial request', async () => {
+  let body: Record<string, unknown> | undefined;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url, init) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return chatTextResponse('Done.', 'stop');
+  }) as typeof fetch;
+  try {
+    const input = request('openai-compatible');
+    input.model = { ...input.model, provider: 'qwencloud', id: 'deepseek-v4-flash-0731' };
+    input.sourceConfig = { ...input.sourceConfig!, provider: 'qwencloud', apiKey: 'secret' };
+    input.settings = { ...input.settings, thinkingEnabled: false };
+    const response = await new AgentRunner().run(input);
+    assert.equal(response.message, 'Done.');
+    assert.equal(body?.enable_thinking, false);
+    assert.equal(Object.hasOwn(body ?? {}, 'thinking'), false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('reasoning-only length stop retries QwenCloud in direct non-thinking mode', async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url, init) => {
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return bodies.length === 1
+      ? chatReasoningOnlyResponse('Analysis reached the answer.', 'length')
+      : chatTextResponse('Recovered final answer.', 'stop');
+  }) as typeof fetch;
+  try {
+    const input = request('openai-compatible');
+    input.model = { ...input.model, provider: 'qwencloud', id: 'deepseek-v4-flash-0731' };
+    input.sourceConfig = { ...input.sourceConfig!, provider: 'qwencloud', apiKey: 'secret' };
+    input.settings = { ...input.settings, thinkingEnabled: true };
+    const response = await new AgentRunner().run(input);
+    assert.equal(response.message, 'Recovered final answer.');
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[0]?.enable_thinking, true);
+    assert.equal(bodies[1]?.enable_thinking, false);
+    assert.equal(bodies[1]?.tool_choice, 'none');
+    assert.match(JSON.stringify(bodies[1]?.messages), /analysis is already complete/iu);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('reasoning-only output exhaustion is a Provider error, not a tool no-progress loop', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => chatReasoningOnlyResponse('Still reasoning.', 'length')) as typeof fetch;
+  try {
+    const input = request('openai-compatible');
+    input.model = { ...input.model, provider: 'qwencloud', id: 'deepseek-v4-flash-0731' };
+    input.sourceConfig = { ...input.sourceConfig!, provider: 'qwencloud', apiKey: 'secret' };
+    await assert.rejects(
+      () => new AgentRunner().run(input),
+      (error: unknown) => error instanceof AgentInterruptedError && error.reason === 'provider_error'
+    );
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('legacy capacity checkpoints migrate in place and UI has no new-turn action', () => {
   const legacy = {
     version: 1, id: 'checkpoint', taskId: 'task', approvalRootTaskId: 'task', createdAt: '', updatedAt: '', attempt: 1,
@@ -796,6 +1074,10 @@ test('legacy capacity checkpoints migrate in place and UI has no new-turn action
   assert.equal(migrated.status, 'interrupted');
   assert.equal(migrated.stopReason, 'extension_restart');
   assert.equal(migrated.state?.budgetStopReason, undefined);
+  assert.equal(migrated.runBudget?.toolRounds, 1);
+  assert.equal(migrated.runBudget?.toolCalls, 1);
+  assert.equal(migrated.request.executionLimits?.maxToolIterations, 0);
+  assert.equal(migrated.request.executionLimits?.maxToolCalls, 0);
   assert.equal(recoveryBlocker(migrated), undefined);
   assert.equal(JSON.stringify(legacy).includes('tool_result_budget_exhausted'), true);
   const source = getScript();
@@ -974,9 +1256,89 @@ function modelResponse(provider: Provider, call?: { id: string; name: string; ar
     + (provider === 'openai-compatible' ? 'data: [DONE]\n\n' : ''), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 }
 
+function modelToolWithTextResponse(
+  provider: Provider,
+  call: { id: string; name: string; args: string },
+  text: string
+): Response {
+  let events: unknown[];
+  if (provider === 'openai-responses') {
+    events = [{ type: 'response.completed', response: { status: 'completed', output: [
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] },
+      { type: 'function_call', call_id: call.id, name: call.name, arguments: call.args }
+    ] } }];
+  } else if (provider === 'anthropic-compatible') {
+    events = [
+      { type: 'message_start', message: {} },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: call.id, name: call.name, input: JSON.parse(call.args) } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
+      { type: 'message_stop' }
+    ];
+  } else {
+    events = [{ choices: [{ delta: {
+      content: text,
+      tool_calls: [{ index: 0, id: call.id, type: 'function', function: { name: call.name, arguments: call.args } }]
+    }, finish_reason: 'tool_calls' }] }];
+  }
+  return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')
+    + (provider === 'openai-compatible' ? 'data: [DONE]\n\n' : ''), {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' }
+  });
+}
+
+function chatToolCallsResponse(
+  calls: Array<{ id: string; name: string; args: string }>,
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+): Response {
+  const event = {
+    choices: [{
+      delta: {
+        tool_calls: calls.map((call, index) => ({
+          index,
+          id: call.id,
+          type: 'function',
+          function: { name: call.name, arguments: call.args }
+        }))
+      },
+      finish_reason: 'tool_calls'
+    }],
+    usage
+  };
+  return new Response(`data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' }
+  });
+}
+
+function chatTextWithUsage(
+  text: string,
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+): Response {
+  return new Response(`data: ${JSON.stringify({
+    choices: [{ delta: { content: text }, finish_reason: 'stop' }],
+    usage
+  })}\n\ndata: [DONE]\n\n`, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' }
+  });
+}
+
 function chatTextResponse(text: string, finishReason: 'length' | 'stop'): Response {
   return new Response(`data: ${JSON.stringify({ choices: [{ delta: { content: text }, finish_reason: finishReason }] })}\n\ndata: [DONE]\n\n`,
     { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+}
+
+function chatReasoningOnlyResponse(reasoning: string, finishReason: 'length' | 'stop'): Response {
+  return new Response(`data: ${JSON.stringify({
+    choices: [{ delta: { reasoning_content: reasoning }, finish_reason: finishReason }]
+  })}\n\ndata: [DONE]\n\n`, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' }
+  });
 }
 
 function pricedToolCallResponse(): Response {

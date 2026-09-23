@@ -424,6 +424,8 @@ src/agent/subagents/
 
 费用上限由共享 `ExecutionCostBudget` 管理，时间上限由 `ExecutionClock` 管理；主 Agent、子代理、恢复和 Context Epoch 不能重置或借用这些账本。
 
+根任务执行策略由 `shared/config.ts` + `AgentExecutionLimits` + `executionPolicy.ts` 独立管理。数值执行预算统一为 `0 = unlimited`，合并时把 unlimited 当作无穷大，只在存在正数约束时取最小值；因此 unlimited 根任务不会吞掉子代理或后台任务的正数限制。工具暴露由 `toolsEnabled`/空工具集合单独控制。正数工具额度按 segment grant 执行，累计审计计数不归零；收尾 checkpoint 是可续跑 `budget_pause`，显式时间/费用、资源失败和未知副作用仍是硬边界。
+
 ## 8. `src/edits/`：文件修改事务
 
 ```text
@@ -557,7 +559,7 @@ src/sessions/
 | --- | --- |
 | `types.ts` | 跨目录核心领域类型的中心定义 |
 | `config.ts` | `package.json` 配置的读取、默认值和范围归一化 |
-| `modelProfiles.ts` | 模型运行画像、上下文和工具上限 |
+| `modelProfiles.ts` | 模型能力画像：上下文、输出、推理/采样和压缩；不含用户执行预算 |
 | `modelContextWindowGuesses.ts` | 未显式发现时的窗口猜测 |
 | `deepSeekModels.ts` | DeepSeek 模型身份规范化 |
 | `atomicStorage.ts` | JSON 同目录临时文件原子替换 |
@@ -718,6 +720,7 @@ globalStorageUri/
 - 不确定的文件/进程副作用不能自动重试；
 - 时间、费用、审批 root 和 permit 消费状态跨恢复连续；
 - Context Epoch 只能更换 Provider replay lane，不能创建伪 user 消息或新任务。
+- 工具预算 Continue 只新增可审计 segment grant；不能清空累计计数、Evidence、epoch、验证或幂等状态，也不能恢复旧 `budget_auto_continue` 伪用户消息。
 
 ### 16.4 权限红线
 

@@ -183,16 +183,24 @@
           "markdownDescription": "Maximum bytes stored for one immutable tool-evidence result. Independent from the workspace read safety limit and Provider inline admission."
         },
         "keepseek.agent.maxExecutionMs": {
-          "type": "number", "default": 900000, "minimum": 0, "scope": "window",
-          "markdownDescription": "Maximum time per root logical Agent task, shared with child agents and recovery. Default 15 minutes; explicitly set 0 for unlimited. / 根逻辑任务、子代理及恢复共享的最长时间，默认 15 分钟；仅显式设为 0 时不限时。"
+          "type": "number", "default": 0, "minimum": 0, "scope": "window",
+          "markdownDescription": "Explicit maximum active time per root logical Agent task, shared with child agents and recovery. 0 = unlimited. Context Epoch rollover never resets it. / 根逻辑任务、子代理及恢复共享的显式有效执行时长上限；0 不限时，Context Epoch rollover 不会重置该预算。"
         },
         "keepseek.agent.subagentMaxExecutionMs": {
           "type": "number", "default": 300000, "minimum": 0, "scope": "window",
           "markdownDescription": "Maximum time for one child Agent, additionally bounded by its root task. Default 5 minutes. / 单个子代理最长时间，且仍受根任务限制，默认 5 分钟。"
         },
         "keepseek.agent.maxModelRequests": {
-          "type": "integer", "default": 32, "minimum": 1, "maximum": 512, "scope": "window",
-          "markdownDescription": "Maximum physical Provider attempts per root logical run, including retries, recovery, continuation, repair, summary and finalization. / 根逻辑任务的物理 Provider 请求上限，包含重试、恢复、续写、修复、摘要和收尾。"
+          "type": "integer", "default": 0, "minimum": 0, "maximum": 512, "scope": "window",
+          "markdownDescription": "Explicit maximum physical Provider attempts per root logical run, including retries, recovery, continuation, repair, summary and finalization. 0 = unlimited. / 根逻辑任务的显式物理 Provider 请求上限，包含重试、恢复、续写、修复、摘要和收尾；0 不限。"
+        },
+        "keepseek.agent.maxToolIterations": {
+          "type": "integer", "default": 0, "minimum": 0, "maximum": 512, "scope": "window",
+          "markdownDescription": "Explicit tool-round grant for each interactive root-task segment. 0 = unlimited. Reaching a positive limit requests one tool-free finalization and pauses for Continue. This is user execution policy, not a model capability. / 每个交互式根任务预算段的显式工具轮次额度；0 不限。正数额度到达后执行一次无工具收尾并暂停等待继续；这是用户执行策略，不是模型能力。"
+        },
+        "keepseek.agent.maxToolCalls": {
+          "type": "integer", "default": 0, "minimum": 0, "maximum": 2048, "scope": "window",
+          "markdownDescription": "Explicit tool-call grant for each interactive root-task segment. 0 = unlimited. Cumulative audit counters and completed evidence are preserved when Continue grants another segment. / 每个交互式根任务预算段的显式工具调用额度；0 不限。点击继续授予新预算段时保留累计审计计数与已完成证据。"
         },
         "keepseek.agent.subagentMaxModelRequests": {
           "type": "integer", "default": 12, "minimum": 1, "maximum": 512, "scope": "window",
@@ -203,12 +211,12 @@
           "markdownDescription": "Maximum automatic continuations after length or pause_turn stops. / length 或 pause_turn 后自动续写的次数上限。"
         },
         "keepseek.agent.maxContextEpochRollovers": {
-          "type": "integer", "default": 3, "minimum": 0, "maximum": 32, "scope": "window",
-          "markdownDescription": "Maximum Context Epoch rollovers in one logical run. Tool budgets never trigger rollover. / 单个逻辑任务的 Context Epoch rollover 上限；工具预算不会触发 rollover。"
+          "type": "integer", "default": 0, "minimum": 0, "maximum": 32, "scope": "window",
+          "markdownDescription": "Explicit maximum Context Epoch rollovers in one root logical run. 0 = unlimited. Epochs maintain context capacity; they do not reset time, cost, evidence or execution budgets. / 单个根逻辑任务的显式 Context Epoch rollover 上限；0 不限。Epoch 只维护上下文容量，不会重置时间、费用、证据或执行预算。"
         },
         "keepseek.agent.maxTreeUpstreamTokens": {
-          "type": "integer", "default": 2000000, "minimum": 1000, "maximum": 100000000, "scope": "window",
-          "markdownDescription": "Maximum upstream tokens reserved or reported by a root run and all child agents combined. / 根任务及全部子代理合计的上游 token 上限。"
+          "type": "integer", "default": 0, "minimum": 0, "maximum": 100000000, "scope": "window",
+          "markdownDescription": "Explicit maximum upstream tokens reserved or reported by a root run and all child agents combined. 0 = unlimited. / 根任务及全部子代理合计的显式上游 token 上限；0 不限。"
         },
         "keepseek.agent.subagentMaxUpstreamTokens": {
           "type": "integer", "default": 500000, "minimum": 1000, "maximum": 100000000, "scope": "window",

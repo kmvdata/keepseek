@@ -49,6 +49,7 @@ export class RunDetailsBuilder {
   private exposedToolCount = 0;
   private maxOutputTokens: number | undefined;
   private budgetStopReason: string | undefined;
+  private budgetPause: RunDetailsSummary['budgetPause'];
   private failureReason: string | undefined;
   private truncated = false;
 
@@ -137,10 +138,12 @@ export class RunDetailsBuilder {
     finishReason?: string;
     failureReason?: string;
     stopped?: boolean;
+    budgetPause?: RunDetailsSummary['budgetPause'];
   }): RunDetailsSummary {
     this.taskPlan = cloneTaskPlan(input.taskPlan);
     this.failureReason = input.failureReason ?? this.failureReason;
     this.budgetStopReason = normalizeBudgetReason(input.finishReason) ?? this.budgetStopReason;
+    this.budgetPause = input.budgetPause;
     if (input.changeSet) {
       this.upsertChangeSet(toChangeSetSummary(input.changeSet));
     }
@@ -196,6 +199,7 @@ export class RunDetailsBuilder {
       contextEpochs: this.contextEpochs.map((epoch) => ({ ...epoch })),
       capacityAdjustments: this.capacityAdjustments.map((item) => ({ ...item })),
       budgetStopReason: this.budgetStopReason,
+      budgetPause: this.budgetPause ? { ...this.budgetPause } : undefined,
       failureReason: this.failureReason,
       traceLogUri: this.input.traceLogUri,
       truncated: this.truncated
@@ -558,7 +562,9 @@ function resolveStatus(input: {
   repairLoop: RepairLoopState;
   failureReason?: string;
   stopped?: boolean;
+  budgetPause?: RunDetailsSummary['budgetPause'];
 }): RunDetailsStatus {
+  if (input.budgetPause?.resumable) return 'waiting';
   if (input.stopped || input.taskPlan.status === 'stopped') return 'stopped';
   if (input.failureReason || input.taskPlan.status === 'failed') return 'failed';
   if (input.repairLoop.status === 'waiting_for_apply' || input.repairLoop.status === 'ready_for_validation') return 'waiting';

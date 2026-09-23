@@ -40,8 +40,9 @@ describe('BackgroundRunCoordinator', () => {
     assert.equal(coordinator.getActiveRun()?.progress.toolCalls, 2);
     assert.match(coordinator.getLimitStopReason() ?? '', /tool calls/iu);
     assert.deepEqual(coordinator.getRemainingExecutionLimits(), {
-      maxToolIterations: 0,
-      maxToolCalls: 0,
+      toolsEnabled: false,
+      maxToolIterations: undefined,
+      maxToolCalls: undefined,
       maxRunMs: 60_000,
       timeLimitSource: 'background.maxDurationMs + agent.maxExecutionMs (remaining active time)',
       maxRepairIterations: 5

@@ -7,10 +7,10 @@ import { getEffectiveContextWindowTokens } from '../shared/modelProfiles';
 import { DEEPSEEK_MODEL_IDENTITY_VERSION, getCanonicalModelIdentity } from '../shared/deepSeekModels';
 import { migrateContextWindowCalibrationState } from './toolResultAdmission';
 import { normalizeExecutionMode } from './executionMode';
-import { createLogicalRunBudgetState, type LogicalRunBudgetState } from './executionPolicy';
+import { createLogicalRunBudgetState, grantNextToolBudgetSegment, type LogicalRunBudgetState } from './executionPolicy';
 
 export type StopReason = 'user_stop' | 'time_budget' | 'tool_timeout' | 'connection_interrupted'
-  | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'budget_exhausted' | 'completed' | 'storage_failure' | 'resource_limit'
+  | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'budget_pause' | 'budget_exhausted' | 'completed' | 'storage_failure' | 'resource_limit'
   | 'cost_limit' | 'no_progress_loop' | 'uncertain_tool_result';
 
 /** Deserialization-only values produced by v1 checkpoints. V2 never emits them. */
@@ -156,10 +156,22 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
       || Array.isArray(copy.runBudget))) return undefined;
     const legacyCapacityStop = !hasSerializedRunBudget && (copy.stopReason === 'budget_exhausted'
       || copy.state?.budgetStopReason || copy.finalResponse?.runDetails.budgetStopReason);
+    const legacyToolBudgetStop = legacyCapacityStop && isToolBudgetReason(readBudgetStopReason(copy));
     if (hasSerializedRunBudget) {
       copy.runBudget = createLogicalRunBudgetState(copy.runBudget);
       copy.modelRequests = copy.runBudget.modelRequests;
-    } else if (!legacyCapacityStop) {
+      if (isToolBudgetReason(readBudgetStopReason(copy))
+        && copy.finalResponse?.runDetails.budgetPause?.resumable !== true
+        && !copy.request.subagentContext) {
+        // Pre-segment checkpoints could only have received these root limits
+        // from the old model profile. Do not perpetuate that implicit ceiling.
+        copy.request.executionLimits = {
+          ...copy.request.executionLimits,
+          maxToolIterations: 0,
+          maxToolCalls: 0
+        };
+      }
+    } else if (!legacyCapacityStop || legacyToolBudgetStop) {
       copy.runBudget = createLogicalRunBudgetState({
         modelRequests: copy.modelRequests,
         toolRounds: copy.state?.turn ?? 0,
@@ -170,6 +182,13 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
         treeUpstreamTokens: 0
       });
       copy.modelRequests = copy.runBudget.modelRequests;
+      if (legacyToolBudgetStop && !copy.request.subagentContext) {
+        copy.request.executionLimits = {
+          ...copy.request.executionLimits,
+          maxToolIterations: 0,
+          maxToolCalls: 0
+        };
+      }
     }
     if (copy.state?.epoch?.calibration) {
       const declaredWindowTokens = getEffectiveContextWindowTokens(copy.request.model);
@@ -186,6 +205,10 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
       copy.status = 'interrupted'; copy.stopReason = 'extension_restart';
       if (copy.taskPlan) copy.taskPlan.status = 'stopped';
     }
+    if (isResumableToolBudgetCheckpoint(copy)) {
+      copy.status = 'interrupted';
+      copy.stopReason = 'budget_pause';
+    }
     return copy;
   } catch { return undefined; }
 }
@@ -197,6 +220,7 @@ export function recoveryBlocker(cp: RunCheckpoint): string | undefined {
   if (isCostLimitExhausted(cp)) {
     return 'Configured Provider cost limit reached / 已达到用户配置的 Provider 费用上限';
   }
+  if (isResumableToolBudgetCheckpoint(cp)) return undefined;
   if (cp.stopReason === 'budget_exhausted' && cp.runBudget) {
     return cp.error ?? 'Logical run budget exhausted / 逻辑任务预算已用尽';
   }
@@ -213,9 +237,75 @@ export function isCostLimitExhausted(cp: Pick<RunCheckpoint, 'maxCost' | 'usedCo
 
 export function migrateLegacyCapacityCheckpoint(cp: RunCheckpoint): RunCheckpoint {
   const copy = checkpointCopy(cp);
-  if (copy.runBudget) return copy;
-  if (!copy.state?.budgetStopReason && !copy.finalResponse?.runDetails.budgetStopReason && copy.stopReason !== 'budget_exhausted') return copy;
+  if (copy.runBudget) {
+    if (isResumableToolBudgetCheckpoint(copy)) {
+      copy.status = 'interrupted';
+      copy.stopReason = 'budget_pause';
+      if (copy.finalResponse?.runDetails.budgetPause?.resumable !== true
+        && !copy.request.subagentContext) {
+        copy.request.executionLimits = {
+          ...copy.request.executionLimits,
+          maxToolIterations: 0,
+          maxToolCalls: 0
+        };
+      }
+    }
+    return copy;
+  }
+  const legacyToolBudgetStop = isToolBudgetReason(readBudgetStopReason(copy));
+  if (legacyToolBudgetStop) {
+    copy.runBudget = createLogicalRunBudgetState({
+      modelRequests: copy.modelRequests,
+      toolRounds: copy.state?.turn ?? 0,
+      toolCalls: copy.state?.toolCallCount ?? 0,
+      continuations: copy.state?.continuation?.requests ?? 0,
+      contextEpochRollovers: copy.state?.epoch?.totalRollovers ?? 0,
+      usedMs: copy.usedMs
+    });
+    if (!copy.request.subagentContext) {
+      copy.request.executionLimits = {
+        ...copy.request.executionLimits,
+        maxToolIterations: 0,
+        maxToolCalls: 0
+      };
+    }
+  }
+  if (!copy.state?.budgetStopReason && !copy.finalResponse?.runDetails.budgetStopReason
+    && copy.stopReason !== 'budget_exhausted' && copy.stopReason !== 'budget_pause') return copy;
   copy.version = 2;
+  copy.status = 'interrupted';
+  copy.stopReason = 'extension_restart';
+  copy.error = undefined;
+  copy.finalResponse = undefined;
+  if (copy.state) {
+    copy.state.budgetStopReason = undefined;
+    copy.state.budgetStopInstructionQueued = false;
+  }
+  return copy;
+}
+
+export function isResumableToolBudgetCheckpoint(cp: RunCheckpoint): boolean {
+  if (cp.stopReason === 'budget_pause' || cp.finalResponse?.runDetails.budgetPause?.resumable === true) return true;
+  return cp.stopReason === 'budget_exhausted' && isToolBudgetReason(readBudgetStopReason(cp));
+}
+
+function readBudgetStopReason(cp: RunCheckpoint): string | undefined {
+  return cp.state?.budgetStopReason ?? cp.finalResponse?.runDetails.budgetStopReason;
+}
+
+function isToolBudgetReason(reason: string | undefined): boolean {
+  return typeof reason === 'string'
+    && /^(?:tool_budget_exhausted|tool_round_budget_exhausted|tool_call_budget_exhausted|tool_iterations_exhausted|tool_call_limit_exhausted|tool_result_budget_exhausted)$/u.test(reason);
+}
+
+/** Called only for the real Continue UI action. It grants another finite tool
+ * segment while preserving task identity, evidence, aggregate usage and all
+ * idempotency/approval state. */
+export function grantCheckpointToolBudgetSegment(cp: RunCheckpoint): RunCheckpoint {
+  const copy = checkpointCopy(cp);
+  if (!isResumableToolBudgetCheckpoint(copy) || !copy.runBudget) return copy;
+  copy.runBudget = grantNextToolBudgetSegment(copy.runBudget);
+  copy.modelRequests = copy.runBudget.modelRequests;
   copy.status = 'interrupted';
   copy.stopReason = 'extension_restart';
   copy.error = undefined;

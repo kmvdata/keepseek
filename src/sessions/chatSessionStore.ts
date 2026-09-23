@@ -1,4 +1,4 @@
-import { normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
+import { isResumableToolBudgetCheckpoint, normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
@@ -663,20 +663,20 @@ export function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
     ...message
   }) => ({
     ...message,
-    runState: runCheckpoint ? {
+    runState: runCheckpoint ? (() => {
+      const resumableBudgetPause = isResumableToolBudgetCheckpoint(runCheckpoint);
+      return {
       taskId: runCheckpoint.taskId,
-      status: (runCheckpoint.stopReason === 'budget_exhausted' || runCheckpoint.state?.budgetStopReason
-        || runCheckpoint.finalResponse?.runDetails.budgetStopReason) ? 'interrupted' : runCheckpoint.status,
-      // Old capacity checkpoints migrate through the ordinary same-task resume path.
-      stopReason: (runCheckpoint.stopReason === 'budget_exhausted' || runCheckpoint.state?.budgetStopReason
-        || runCheckpoint.finalResponse?.runDetails.budgetStopReason) ? 'extension_restart' : runCheckpoint.stopReason,
+      status: resumableBudgetPause ? 'interrupted' : runCheckpoint.status,
+      stopReason: resumableBudgetPause ? 'budget_pause' : runCheckpoint.stopReason,
       usedMs: runCheckpoint.usedMs, maxExecutionMs: runCheckpoint.maxExecutionMs, limitSource: runCheckpoint.limitSource,
       attempt: runCheckpoint.attempt, modelRequests: runCheckpoint.modelRequests, retries: runCheckpoint.retries,
       lastNetworkAt: runCheckpoint.lastNetworkAt, lastEventAt: runCheckpoint.lastEventAt, lastContentAt: runCheckpoint.lastContentAt,
       requestStartedAt: runCheckpoint.requestStartedAt, lastStepAt: runCheckpoint.lastStepAt, steps: (runCheckpoint.state?.toolRounds.reduce((count, round) => count + round.toolResults.length, 0) ?? 0) + Object.keys(runCheckpoint.state?.pending?.results ?? {}).length,
       canResume: runCheckpoint.status !== 'running' && !recoveryBlocker(runCheckpoint),
       blocker: recoveryBlocker(runCheckpoint), error: runCheckpoint.error
-    } : undefined,
+      };
+    })() : undefined,
     ...(message.runDetails ? { runDetails: {
       ...message.runDetails,
       toolCalls: message.runDetails.toolCalls.map((tool) => {
@@ -1397,6 +1397,15 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
         }))
       : undefined,
     budgetStopReason: typeof value.budgetStopReason === 'string' ? value.budgetStopReason.slice(0, 120) : undefined,
+    budgetPause: isRecord(value.budgetPause)
+      && value.budgetPause.kind === 'explicit_tool_budget'
+      && value.budgetPause.resumable === true
+      ? {
+          kind: 'explicit_tool_budget' as const,
+          resumable: true as const,
+          segment: normalizeNonNegativeInteger(value.budgetPause.segment)
+        }
+      : undefined,
     failureReason: typeof value.failureReason === 'string' ? value.failureReason.slice(0, 500) : undefined,
     traceLogUri: typeof value.traceLogUri === 'string' ? value.traceLogUri : undefined,
     truncated: value.truncated === true

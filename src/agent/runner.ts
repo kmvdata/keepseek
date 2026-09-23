@@ -19,6 +19,8 @@ import {
   getConfiguredAgentMaxCost,
   getConfiguredAgentMaxExecutionMs,
   getConfiguredAgentMaxModelRequests,
+  getConfiguredAgentMaxToolCalls,
+  getConfiguredAgentMaxToolIterations,
   getConfiguredAgentMaxTreeUpstreamTokens,
   getConfiguredAgentRepairMaxOutputTokens,
   getConfiguredAgentToolMaxOutputTokens,
@@ -26,7 +28,8 @@ import {
   getConfiguredPatchSettings,
   getConfiguredProviderInlineResultMaxChars,
   getConfiguredStreamIdleTimeoutMs,
-  getConfiguredSubagentMaxUpstreamTokens
+  getConfiguredSubagentMaxUpstreamTokens,
+  DEFAULT_SUBAGENT_MAX_CONTEXT_EPOCH_ROLLOVERS
 } from '../shared/config';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
@@ -250,6 +253,7 @@ interface AgentRuntimeConfig {
   supportsBilling: boolean;
   contextWindowTokens: number;
   maxTokens: number;
+  toolsEnabled: boolean;
   maxToolIterations: number;
   maxToolCalls: number;
   maxRunMs: number;
@@ -479,8 +483,12 @@ export class AgentLoop {
         }
       }, (budget) => { activeRunBudget = budget; });
       cp.finalResponse = response;
-      cp.status = response.runDetails.budgetStopReason ? 'blocked' : 'completed';
-      cp.stopReason = response.runDetails.budgetStopReason ? 'budget_exhausted'
+      cp.status = response.runDetails.budgetPause?.resumable
+        ? 'interrupted'
+        : response.runDetails.budgetStopReason ? 'blocked' : 'completed';
+      cp.stopReason = response.runDetails.budgetPause?.resumable
+        ? 'budget_pause'
+        : response.runDetails.budgetStopReason ? 'budget_exhausted'
         : response.runDetails.status === 'waiting' || response.repairLoop.status === 'waiting_for_apply'
           ? 'waiting_for_user' : 'completed';
       await persist();
@@ -662,7 +670,8 @@ export class AgentLoop {
       details: Record<string, unknown> = {}
     ): AgentResponse => {
       const finishReason = typeof details.finishReason === 'string' ? details.finishReason : undefined;
-      const isBlocked = Boolean(finishReason && /(?:budget|limit|exhausted)/u.test(finishReason));
+      const budgetPause = isRunDetailsBudgetPause(details.budgetPause) ? details.budgetPause : undefined;
+      const isBlocked = !budgetPause && Boolean(finishReason && /(?:budget|limit|exhausted)/u.test(finishReason));
       if (isBlocked && finishReason) {
         const timeLimit = finishReason.includes('run_time');
         taskPlan.addBlocker(request.language === 'en'
@@ -678,7 +687,9 @@ export class AgentLoop {
         this.decorateRepairMessage(response.message, repairState, request.language),
         request.language
       );
-      const completedPlan = taskPlan.complete(finalMessage, isBlocked);
+      const completedPlan = budgetPause
+        ? taskPlan.stop(finalMessage)
+        : taskPlan.complete(finalMessage, isBlocked);
       const changeSet = createChangeSet({
         runId: trace.runId,
         sessionId: request.sessionId,
@@ -759,7 +770,8 @@ export class AgentLoop {
         repairLoop: repairState,
         changeSet,
         finishReason,
-        stopped: details.stopped === true
+        stopped: details.stopped === true,
+        budgetPause
       }) ?? createFallbackRunDetails(trace.runId, request, completedPlan, traceLog?.uri);
       callbacks.onRunDetails?.(runDetails);
       return traceLog
@@ -859,7 +871,7 @@ export class AgentLoop {
       prompt: request.prompt,
       slimToolNames: request.slimToolNames,
       requestProtocolVersion: request.requestProtocolVersion,
-      includeTools: runtimeConfig.maxToolIterations > 0,
+      includeTools: runtimeConfig.toolsEnabled,
       maxProjectionTokens: runtimeConfig.contextWindowTokens
         * runtimeConfig.contextCompression.forceRatio,
       provider: runtimeConfig.provider,
@@ -1026,7 +1038,7 @@ export class AgentLoop {
         contextCompression: request.contextCompression,
         language: request.language,
         prompt: request.prompt,
-        includeTools: runtimeConfig.maxToolIterations > 0,
+        includeTools: runtimeConfig.toolsEnabled,
         outputReserveTokens,
         safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
         slimToolNames: request.slimToolNames,
@@ -1090,10 +1102,27 @@ export class AgentLoop {
 
     let nextTurn = restored?.turn ?? 0;
     let pending = restored?.pending;
+    let completedReplay = restored?.completedReplay;
+    if (logicalBudget.consumeToolBudgetResume()) {
+      const priorFinalization = pending?.response.message;
+      if (priorFinalization) {
+        messages.push({
+          role: 'assistant',
+          content: priorFinalization.content ?? null,
+          reasoning_content: priorFinalization.reasoning_content ?? null
+        });
+      }
+      pending = undefined;
+      const resumeInstruction = request.language === 'en'
+        ? 'Host continuation: the user explicitly selected Continue and granted a new tool-budget segment for this same task. Continue from the saved plan and evidence; do not repeat completed tools.'
+        : '宿主续跑指令：用户已明确点击“继续任务”，为同一任务授予新的工具预算段。请从已保存的计划和证据继续，不要重复已完成的工具。';
+      messages.push({ role: 'user', content: resumeInstruction });
+      this.appendProviderUserText(providerRunState, resumeInstruction);
+      completedReplay = this.createProviderReplayState(providerRunState);
+    }
     // Committed projection stays at the start of the current model step. During
     // a tool round only its result journal changes, so replay cannot duplicate
     // already appended tool messages after an interruption.
-    let completedReplay = restored?.completedReplay;
     let committedMessages = structuredClone(messages);
     let committedProvider = structuredClone(providerRunState);
     saveStep = async () => {
@@ -1317,15 +1346,31 @@ export class AgentLoop {
       // The schema is frozen for the whole session/run. When tool calls are no
       // longer allowed, keep the identical tools array and switch tool_choice to
       // none instead of removing the cached schema prefix.
-      const toolBudgetExhausted = !logicalBudget.canUseTools();
+      const toolBudgetExhausted = runtimeConfig.toolsEnabled && logicalBudget.isToolBudgetExhausted();
       const isBudgetFinalization = toolBudgetExhausted;
       if (isBudgetFinalization && !pending) {
         if (!logicalBudget.beginFinalization()) {
-          throw new LogicalBudgetExceededError('tool_budget_exhausted');
+          emitStatus({ base: 'thinking', phase: 'finalizing' });
+          return finishRun({
+            message: this.getToolBudgetPauseFallback(request.language),
+            reasoningContent: this.formatReasoning(reasoningParts),
+            draftEdits,
+            draftRuns
+          }, {
+            finishReason: 'tool_budget_exhausted',
+            stopped: true,
+            budgetPause: this.createToolBudgetPause(logicalBudget)
+          });
         }
+        const finalizationNudge = this.getToolBudgetFinalizationNudge(request.language);
+        messages.push({ role: 'user', content: finalizationNudge });
+        this.appendProviderUserText(providerRunState, finalizationNudge);
+        committedMessages = structuredClone(messages);
+        committedProvider = structuredClone(providerRunState);
+        completedReplay = this.createProviderReplayState(providerRunState);
         await saveStep();
       }
-      const allowToolCalls = !toolBudgetExhausted;
+      const allowToolCalls = runtimeConfig.toolsEnabled && !toolBudgetExhausted;
       const toolsForTurn = tools;
       const allowTerminalDraftEdit = false;
       emitUsageEstimate(toolsForTurn);
@@ -1349,7 +1394,9 @@ export class AgentLoop {
         for (const record of deliveryRecords) await evidenceStore.markSending(record);
         response = pending?.response ?? await this.createModelResponse(
           request,
-          { ...runtimeConfig, maxTokens: Math.min(
+          { ...runtimeConfig,
+            maxRequestRetries: isBudgetFinalization ? 0 : runtimeConfig.maxRequestRetries,
+            maxTokens: Math.min(
             requestAdmission.outputReserveTokens,
             allowToolCalls ? runtimeConfig.toolMaxOutputTokens : runtimeConfig.finalMaxOutputTokens
           ) },
@@ -1383,6 +1430,19 @@ export class AgentLoop {
         if (!pending) await calibrationStore.save(calibrationKey, admission.state);
       } catch (error) {
         if (!isContextTooLongError(error)) throw error;
+        if (isBudgetFinalization) {
+          emitStatus({ base: 'thinking', phase: 'finalizing' });
+          return finishRun({
+            message: this.getToolBudgetPauseFallback(request.language),
+            reasoningContent: this.formatReasoning(reasoningParts),
+            draftEdits,
+            draftRuns
+          }, {
+            finishReason: 'tool_budget_exhausted',
+            stopped: true,
+            budgetPause: this.createToolBudgetPause(logicalBudget)
+          });
+        }
         const attempted = this.estimateCurrentProviderInputTokens(request, messages, toolsForTurn, providerRunState);
         admission.recordContextTooLong(attempted);
         await calibrationStore.save(calibrationKey, admission.state);
@@ -1417,7 +1477,67 @@ export class AgentLoop {
       const toolCalls = assistant.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
       const rawToolCalls = response.message.tool_calls?.filter((toolCall) => toolCall.type === 'function') ?? [];
       if (isBudgetFinalization && rawToolCalls.length) {
-        throw new LogicalBudgetExceededError('tool_budget_exhausted');
+        const blockedResults = rawToolCalls.map((toolCall) => ({
+          toolCall,
+          content: this.createBudgetFinalizationBlockedToolResult(toolCall.function.name)
+        }));
+        const assistantToolCallMessage: DeepSeekMessage = {
+          role: 'assistant',
+          content: response.message.content ?? null,
+          reasoning_content: response.message.reasoning_content ?? null,
+          tool_calls: rawToolCalls
+        };
+        messages.push(assistantToolCallMessage);
+        for (const blocked of blockedResults) {
+          messages.push({ role: 'tool', tool_call_id: blocked.toolCall.id, content: blocked.content });
+        }
+        if (providerRunState?.protocol === 'openai-responses') {
+          const outputs: OpenAiResponsesItem[] = blockedResults.map((blocked) => ({
+            type: 'function_call_output',
+            call_id: blocked.toolCall.id,
+            output: blocked.content
+          }));
+          providerRunState.input.push(...outputs);
+          providerRunState.replayItems.push(...outputs);
+        } else if (providerRunState?.protocol === 'anthropic-messages') {
+          const blockedMessage: AnthropicMessage = {
+            role: 'user',
+            content: blockedResults.map((blocked) => ({
+              type: 'tool_result',
+              tool_use_id: blocked.toolCall.id,
+              content: blocked.content,
+              is_error: true
+            }))
+          };
+          providerRunState.messages.push(blockedMessage);
+          providerRunState.replayMessages.push(blockedMessage);
+        }
+        toolRounds.push({
+          assistantContent: assistantToolCallMessage.content ?? null,
+          reasoningContent: assistantToolCallMessage.reasoning_content ?? null,
+          toolCalls: rawToolCalls,
+          toolResults: blockedResults.map((blocked) => ({
+            toolCallId: blocked.toolCall.id,
+            content: blocked.content
+          }))
+        });
+        pending = undefined;
+        completedReplay = this.createProviderReplayState(providerRunState);
+        committedMessages = structuredClone(messages);
+        committedProvider = structuredClone(providerRunState);
+        await saveStep();
+        const finalizationText = response.message.content?.trim() || this.getToolBudgetPauseFallback(request.language);
+        emitStatus({ base: 'thinking', phase: 'finalizing' });
+        return finishRun({
+          message: finalizationText,
+          reasoningContent: this.formatReasoning(reasoningParts),
+          draftEdits,
+          draftRuns
+        }, {
+          finishReason: 'tool_budget_exhausted',
+          stopped: true,
+          budgetPause: this.createToolBudgetPause(logicalBudget)
+        });
       }
       if (normalizedAssistant.displayReasoningContent) {
         runtimeUsageBreakdown.reasoningTokensEstimate += estimateChatMessageTokens('assistant', normalizedAssistant.displayReasoningContent);
@@ -1444,7 +1564,11 @@ export class AgentLoop {
             reasoningContent: this.formatReasoning(reasoningParts),
             draftEdits,
             draftRuns
-          }, { finishReason: 'tool_budget_exhausted', stopped: true });
+          }, {
+            finishReason: 'tool_budget_exhausted',
+            stopped: true,
+            budgetPause: this.createToolBudgetPause(logicalBudget)
+          });
         }
         let continuedResponse: { content: string; finishReason?: string | null } | undefined;
         try {
@@ -2162,7 +2286,11 @@ export class AgentLoop {
         rolloverAfterBatchReason = 'soft_context_pressure';
       }
       if (!rolloverAfterBatchReason && nextAdmission.shouldRollover) rolloverAfterBatchReason = 'minimum_envelope_unfit';
-      if (rolloverAfterBatchReason) await rolloverEpoch(rolloverAfterBatchReason);
+      // A finite tool-budget boundary lands directly. It must not manufacture
+      // an epoch or hidden summary merely to make room for the grace response.
+      if (rolloverAfterBatchReason && !logicalBudget.isToolBudgetExhausted()) {
+        await rolloverEpoch(rolloverAfterBatchReason);
+      }
       if (approvalReviewStopReason) {
         emitStatus({ base: 'complete', phase: 'finalizing', detail: approvalReviewStopReason });
         return finishRun({
@@ -2238,6 +2366,9 @@ export class AgentLoop {
     runDeadlineAt?: number,
     options: {
       allowPartialRecovery?: boolean;
+      /** Output recovery must not spend another complete response budget on
+       * hidden reasoning after a reasoning-only length stop. */
+      forceDisableThinking?: boolean;
       trace?: AgentInteractionTrace;
       usageTotals?: UpstreamUsageTotals;
       toolChoice?: 'auto' | 'none';
@@ -2250,6 +2381,9 @@ export class AgentLoop {
   ): Promise<DeepSeekStreamResult> {
     const trace = options.trace ?? createNoopInteractionTrace();
     this.throwIfCostLimitReached(request);
+    const thinkingEnabled = options.forceDisableThinking === true
+      ? false
+      : request.settings.thinkingEnabled;
     let body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody;
     if (runtimeConfig.provider === 'openai-responses') {
       const responsesState = options.providerRunState;
@@ -2266,10 +2400,10 @@ export class AgentLoop {
         max_output_tokens: runtimeConfig.maxTokens > 0 ? runtimeConfig.maxTokens : undefined,
         // KeepSeek's `max` is a DeepSeek-only setting. The Responses protocol
         // uses its portable supported level instead of emitting a pseudo value.
-        include: request.settings.thinkingEnabled
+        include: thinkingEnabled
           ? ['reasoning.encrypted_content']
           : undefined,
-        reasoning: request.settings.thinkingEnabled
+        reasoning: thinkingEnabled
           ? { effort: 'high' }
           : undefined,
         temperature: runtimeConfig.temperature,
@@ -2290,8 +2424,8 @@ export class AgentLoop {
           : undefined,
         stream: true,
         max_tokens: runtimeConfig.maxTokens,
-        thinking: anthropicState.thinking,
-        output_config: anthropicState.outputConfig,
+        thinking: thinkingEnabled ? anthropicState.thinking : undefined,
+        output_config: thinkingEnabled ? anthropicState.outputConfig : undefined,
         temperature: runtimeConfig.temperature,
         cache_control: anthropicState.cacheControl
       };
@@ -2307,8 +2441,11 @@ export class AgentLoop {
           ? messages
           : messages.map(withoutDeepSeekReasoningContent),
         stream: true,
+        enable_thinking: runtimeConfig.provider === 'qwencloud'
+          ? thinkingEnabled
+          : undefined,
         thinking: runtimeConfig.provider === 'deepseek'
-          ? { type: request.settings.thinkingEnabled ? 'enabled' : 'disabled' }
+          ? { type: thinkingEnabled ? 'enabled' : 'disabled' }
           : undefined,
         temperature: runtimeConfig.temperature,
         top_p: runtimeConfig.topP,
@@ -2316,7 +2453,7 @@ export class AgentLoop {
         tool_choice: tools.length ? options.toolChoice ?? 'auto' : undefined
       };
 
-      if (runtimeConfig.provider === 'deepseek' && request.settings.thinkingEnabled) {
+      if (runtimeConfig.provider === 'deepseek' && thinkingEnabled) {
         body.reasoning_effort = request.settings.reasoningEffort;
       }
 
@@ -2618,6 +2755,8 @@ export class AgentLoop {
     const saved = input.request.checkpoint?.state;
     let content = saved?.continuation?.content ?? input.assistant.content ?? '';
     let finishReason = saved?.continuation?.finishReason ?? input.response.finishReason;
+    let requiresDirectAnswerRecovery = !content.trim()
+      && Boolean(input.response.message.reasoning_content?.trim());
     for (let continuationIndex = saved?.continuation?.requests ?? 0; ; continuationIndex += 1) {
       if (!input.request.taskRunBudget?.beginContinuation()) {
         return {
@@ -2631,7 +2770,7 @@ export class AgentLoop {
       };
       const instructionMessage: DeepSeekMessage = {
         role: 'user',
-        content: this.getLengthContinuationInstruction(input.request.language)
+        content: this.getLengthContinuationInstruction(input.request.language, requiresDirectAnswerRecovery)
       };
       const isAnthropicPause = input.providerRunState?.protocol === 'anthropic-messages'
         && finishReason === 'pause_turn';
@@ -2690,6 +2829,7 @@ export class AgentLoop {
           trace: input.trace,
           usageTotals: input.usageTotals,
           toolChoice: 'none',
+          forceDisableThinking: requiresDirectAnswerRecovery,
           usageSource: 'continuation',
           providerRunState: input.providerRunState
         }
@@ -2740,10 +2880,11 @@ export class AgentLoop {
       }
       if ((finishReason !== 'length' && finishReason !== 'pause_turn')) break;
       if (!continuationContent.trim()) {
-        throw new AgentInterruptedError('no_progress_loop', input.request.language === 'en'
-          ? 'The provider repeatedly returned a length stop without additional content.'
-          : 'Provider 连续因长度停止且没有产生新增内容，已按无进展循环停止。');
+        throw new AgentInterruptedError('provider_error', input.request.language === 'en'
+          ? 'The provider exhausted its output limit without visible content, including after a direct-answer recovery request.'
+          : 'Provider 耗尽输出额度但未产生可见内容，直接回答恢复请求后仍未成功。');
       }
+      requiresDirectAnswerRecovery = false;
     }
 
     return { content, finishReason };
@@ -2868,7 +3009,12 @@ export class AgentLoop {
     };
   }
 
-  private getLengthContinuationInstruction(language: KeepseekLanguage): string {
+  private getLengthContinuationInstruction(language: KeepseekLanguage, directAnswerOnly = false): string {
+    if (directAnswerOnly) {
+      return language === 'en'
+        ? 'The previous response used its entire output allowance on hidden reasoning and produced no visible answer. The analysis is already complete. Do not analyze again. Immediately provide a concise final user-facing answer using the work already completed. Do not call tools.'
+        : '上一条响应把全部输出额度用于隐藏推理，未产生可见回答。分析已经完成，请勿重新分析。请立即基于已完成的工作给出简洁的最终用户答复，不要调用工具。';
+    }
     return language === 'en'
       ? 'Continue the previous answer from exactly where it was cut off. Do not repeat earlier text. Do not call tools.'
       : '继续上一条回答，从截断处继续，不要重复前文。不要调用工具。';
@@ -4585,7 +4731,7 @@ export class AgentLoop {
         : 'DeepSeek 返回内容被安全策略过滤，未生成可展示回复。';
     }
 
-    if (finishReason === 'length') throw new AgentInterruptedError('no_progress_loop', language === 'en'
+    if (finishReason === 'length') throw new AgentInterruptedError('provider_error', language === 'en'
       ? 'The provider stopped for length without returning resumable content.'
       : 'Provider 因长度停止且未返回可续写内容。');
 
@@ -4601,6 +4747,36 @@ export class AgentLoop {
       ? '[Truncated because the automatic output/continuation budget was reached.]'
       : '[由于自动输出/续写预算已达到上限，内容已截断。]';
     return [content.trim(), notice].filter(Boolean).join('\n\n');
+  }
+
+  private getToolBudgetFinalizationNudge(language: KeepseekLanguage): string {
+    return language === 'en'
+      ? 'Host finalization boundary: the user-configured tool budget for this segment has been reached. Do not call any more research or workspace tools. Using only the evidence already completed, give the best final response now. State what is complete, what remains, and what is uncertain, and tell the user they can choose Continue to grant another tool-budget segment.'
+      : '宿主收尾边界：本预算段的用户显式工具额度已达到上限。不要再调用研究或工作区工具。请仅依据已经完成的证据给出当前最佳答复，说明已完成、未完成和不确定项，并告知用户可点击“继续任务”授予新的工具预算段。';
+  }
+
+  private getToolBudgetPauseFallback(language: KeepseekLanguage): string {
+    return language === 'en'
+      ? 'The explicit tool budget for this segment was reached. Completed work and evidence were saved, but the provider did not return a usable tool-free summary. Choose Continue to grant another tool-budget segment.'
+      : '本预算段的显式工具额度已达到上限。已完成工作和证据均已保存，但 Provider 未返回可用的无工具总结。可点击“继续任务”授予新的工具预算段。';
+  }
+
+  private createBudgetFinalizationBlockedToolResult(toolName: string): string {
+    return JSON.stringify({
+      ok: false,
+      executed: false,
+      errorType: 'tool_budget_finalization_blocked',
+      toolName,
+      error: 'Blocked by the host: this finalization request cannot execute tools.'
+    });
+  }
+
+  private createToolBudgetPause(budget: LogicalRunBudget): NonNullable<RunDetailsSummary['budgetPause']> {
+    return {
+      kind: 'explicit_tool_budget',
+      resumable: true,
+      segment: budget.state.toolBudgetSegment
+    };
   }
 
   private getBudgetStopMessage(reason: string, draftEdits: DraftEdit[], language: KeepseekLanguage): string {
@@ -4990,8 +5166,15 @@ export class AgentLoop {
       supportsBilling: sourceConfig.supportsBilling,
       contextWindowTokens: profile.contextWindowTokens,
       maxTokens: profile.maxTokens,
-      maxToolIterations: clampRunLimit(profile.maxToolIterations, request.executionLimits?.maxToolIterations),
-      maxToolCalls: clampRunLimit(profile.maxToolCalls, request.executionLimits?.maxToolCalls),
+      toolsEnabled: request.executionLimits?.toolsEnabled !== false,
+      maxToolIterations: mergeUnlimitedBudgetLimits(
+        request.subagentContext ? 0 : getConfiguredAgentMaxToolIterations(),
+        request.executionLimits?.maxToolIterations
+      ),
+      maxToolCalls: mergeUnlimitedBudgetLimits(
+        request.subagentContext ? 0 : getConfiguredAgentMaxToolCalls(),
+        request.executionLimits?.maxToolCalls
+      ),
       maxRunMs: request.checkpoint?.maxExecutionMs ?? mergeDurations(getConfiguredAgentMaxExecutionMs(), request.executionLimits?.maxRunMs),
       maxCost,
       streamIdleTimeoutMs: getConfiguredStreamIdleTimeoutMs(),
@@ -5000,21 +5183,24 @@ export class AgentLoop {
       contextCompression: profile.contextCompression,
       maxRequestRetries: Math.max(0, getConfiguredMaxRequestRetries() - (request.checkpoint?.modelStepRetries ?? 0)),
       requestRetryBaseMs: getConfiguredRequestRetryBaseMs(),
-      maxValidationRuns: clampRunLimit(getConfiguredMaxValidationRuns(), request.executionLimits?.maxValidationRuns),
+      maxValidationRuns: clampFeatureLimit(getConfiguredMaxValidationRuns(), request.executionLimits?.maxValidationRuns),
       maxRepairIterations: getConfiguredMaxRepairIterations(),
-      maxModelRequests: clampConfiguredLimit(
+      maxModelRequests: mergeUnlimitedBudgetLimits(
         getConfiguredAgentMaxModelRequests(Boolean(request.subagentContext)),
         request.executionLimits?.maxModelRequests
       ),
       maxContinuations: clampConfiguredLimit(
         getConfiguredAgentMaxContinuations(), request.executionLimits?.maxContinuations, true),
-      maxContextEpochRollovers: clampConfiguredLimit(
-        getConfiguredAgentMaxContextEpochRollovers(), request.executionLimits?.maxContextEpochRollovers, true),
-      maxUpstreamTokens: clampConfiguredLimit(
+      maxContextEpochRollovers: mergeUnlimitedBudgetLimits(
+        request.subagentContext
+          ? DEFAULT_SUBAGENT_MAX_CONTEXT_EPOCH_ROLLOVERS
+          : getConfiguredAgentMaxContextEpochRollovers(),
+        request.executionLimits?.maxContextEpochRollovers),
+      maxUpstreamTokens: mergeUnlimitedBudgetLimits(
         request.subagentContext ? getConfiguredSubagentMaxUpstreamTokens() : getConfiguredAgentMaxTreeUpstreamTokens(),
         request.executionLimits?.maxUpstreamTokens
       ),
-      maxTreeUpstreamTokens: clampConfiguredLimit(
+      maxTreeUpstreamTokens: mergeUnlimitedBudgetLimits(
         getConfiguredAgentMaxTreeUpstreamTokens(), request.executionLimits?.maxTreeUpstreamTokens),
       toolMaxOutputTokens: Math.min(profile.maxTokens, getConfiguredAgentToolMaxOutputTokens()),
       finalMaxOutputTokens: Math.min(profile.maxTokens, getConfiguredAgentFinalMaxOutputTokens()),
@@ -5102,6 +5288,16 @@ function readOptionalFiniteNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+function isRunDetailsBudgetPause(value: unknown): value is NonNullable<RunDetailsSummary['budgetPause']> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const pause = value as Record<string, unknown>;
+  return pause.kind === 'explicit_tool_budget'
+    && pause.resumable === true
+    && typeof pause.segment === 'number'
+    && Number.isSafeInteger(pause.segment)
+    && pause.segment >= 0;
+}
+
 function readDraftEditIds(rawResult: string): string[] {
   try {
     const parsed: unknown = JSON.parse(rawResult);
@@ -5160,11 +5356,11 @@ function isFileNotFoundError(error: unknown): boolean {
   return code === 'ENOENT' || code === 'FileNotFound';
 }
 
-function clampRunLimit(profileLimit: number, requestedLimit: number | undefined): number {
+function clampFeatureLimit(configuredLimit: number, requestedLimit: number | undefined): number {
   if (typeof requestedLimit !== 'number' || !Number.isFinite(requestedLimit)) {
-    return profileLimit;
+    return configuredLimit;
   }
-  return Math.max(0, Math.min(profileLimit, Math.floor(requestedLimit)));
+  return Math.max(0, Math.min(configuredLimit, Math.floor(requestedLimit)));
 }
 
 function clampConfiguredLimit(configuredLimit: number, requestedLimit: number | undefined, allowZero = false): number {
@@ -5172,6 +5368,16 @@ function clampConfiguredLimit(configuredLimit: number, requestedLimit: number | 
   const normalized = Math.floor(requestedLimit);
   if (allowZero && normalized === 0) return 0;
   return normalized > 0 ? Math.min(configuredLimit, normalized) : configuredLimit;
+}
+
+/** Zero represents infinity for execution budgets. Merge only positive
+ * constraints so an unlimited parent/config never erases a finite child or
+ * invocation limit. */
+function mergeUnlimitedBudgetLimits(configuredLimit: number, requestedLimit: number | undefined): number {
+  const limits = [configuredLimit, requestedLimit]
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0)
+    .map((value) => Math.floor(value));
+  return limits.length ? Math.min(...limits) : 0;
 }
 
 function normalizeRepairIterationLimit(requestedLimit: number | undefined): number {

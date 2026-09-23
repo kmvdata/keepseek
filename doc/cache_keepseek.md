@@ -92,7 +92,8 @@ V1–V8 的已存在热会话保持原有 system/schema 字节；只有缓存自
 ### 4.4 工具 schema
 
 - schema 的集合、字段和顺序按会话协议版本冻结。
-- 工具耗尽或当前轮禁止调用时使用 `tool_choice: none`，不临时删除 `tools`。
+- 用户显式的有限工具预算耗尽时，先向内部 projection 追加 host finalization nudge，再使用 `tool_choice: none`；不临时删除 `tools`，nudge 不进入 `session.messages`。
+- no-tools reviewer/format-repair 通过独立的 `toolsEnabled=false` / 空工具集合建模；数值预算的 `0` 始终表示 unlimited，不再兼任“禁用工具”。
 - slim mode 默认关闭。新增或改名工具必须升级协议版本并覆盖热会话迁移测试。
 - Skill 与能力只影响上下文和运行策略，不得悄悄改写已冻结的 system/schema。
 
@@ -165,6 +166,8 @@ rollover 会外置 task-scoped checkpoint，并开始新的 provider replay lane
 它不会改写 `session.messages`、插入伪 user 消息、创建新聊天，或授权/应用/执行任何副作用。checkpoint 优先使用模型生成的有界摘要，失败时使用宿主确定性摘要。
 
 context-too-long 会按来源、endpoint 和模型校准有效窗口后重建 epoch。只有冻结的 system/schema、原始请求与最小 checkpoint 仍无法装入时，才向用户报告真实容量错误。跨 epoch 的无进展指纹用于阻止重复循环。
+
+“上下文容量维护”和“用户执行预算”必须分开理解：模型 profile 决定窗口、输出与压缩策略，不决定根任务工具轮数；默认根任务不会因 16/32 轮、32 次请求、15 分钟、2M tree token 或 3 次 rollover 被截断。Context Epoch 可以更换 replay lane，但不能重置显式时间/费用/工具预算，也不能为工具预算收尾创建隐藏摘要。显式工具额度到达后的唯一收尾请求保持原 schema 字节稳定；三协议分别追加普通内部 user item/message，并在 Provider 违背 `tool_choice:none` 时保留原生调用/blocked-result 配对而不执行工具。
 
 ## 7. 缓存可观测性
 

@@ -32,14 +32,11 @@ describe('long-running Agent execution and safe recovery', () => {
     assert.equal(mergeDurations(null, -1, Infinity), 0);
     assert.equal(normalizeDuration(Number.MAX_VALUE), Number.MAX_SAFE_INTEGER);
     assert.equal(JSON.parse(JSON.stringify({ duration: normalizeDuration(undefined) })).duration, 0);
-    assert.equal(getConfiguredAgentMaxExecutionMs(), 900_000);
+    assert.equal(getConfiguredAgentMaxExecutionMs(), 0);
     assert.equal(getConfiguredAgentMaxCost(), 0);
-    assert.equal(getConfiguredBackgroundMaxDurationMs(), 900_000);
-    for (const id of ['generic', 'deepseek-v4-flash', 'deepseek-v4-pro']) {
-      for (const reasoningEffort of ['high', 'max'] as const) {
-        assert.equal(getAgentRuntimeProfile({ id, label: id, provider: id.startsWith('deepseek') ? 'deepseek' : 'openai-compatible' }, { thinkingEnabled: true, reasoningEffort }).maxRunMs, 0);
-      }
-    }
+    assert.equal(getConfiguredBackgroundMaxDurationMs(), 0);
+    assert.equal('maxRunMs' in getAgentRuntimeProfile({ id: 'generic', label: 'generic', provider: 'openai-compatible' },
+      { thinkingEnabled: true, reasoningEffort: 'high' }), false);
   });
 
   it('shares a stable per-currency cost ceiling across one logical task', () => {

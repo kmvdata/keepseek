@@ -448,6 +448,7 @@ export class HistoryCompressor {
             model: input.model.id,
             messages: input.messages,
             stream: true,
+            enable_thinking: clientConfig.provider === 'qwencloud' ? false : undefined,
             thinking: clientConfig.provider === 'deepseek' ? { type: 'disabled' } : undefined,
             // Deterministic summaries: a stable completion reduces unrelated byte drift
             // between refreshes (the covered-message change is the unavoidable part).

@@ -141,6 +141,8 @@ pending → executing → completed → envelope_ready → sending → delivered
 
 rollover 保持原任务、证据、工具幂等、审批、副作用、时间和费用账本，不创建新会话、不伪造 user 消息、不自动执行任何动作。详细容量和缓存规则见缓存文档。
 
+Context Epoch 只解决“当前 Provider projection 是否装得下”的容量问题，不是用户执行预算。模型画像只描述上下文窗口、单次最大输出、推理/采样和压缩能力；Flash、Pro 或 generic/Qwen-compatible 身份都不能隐式决定根任务可运行多少工具轮。
+
 ## 6. DraftEdit 写入管线
 
 模型不能直接写文件。规范流程为：
@@ -237,6 +239,11 @@ spawn(executable, args, { shell: false })
 | 配置 | 默认值 | 语义 |
 | --- | ---: | --- |
 | `keepseek.agent.maxExecutionMs` | `0` | 逻辑任务执行时间上限；0 表示不设显式上限 |
+| `keepseek.agent.maxToolIterations` | `0` | 每个交互式根任务预算段的工具轮额度；0 表示 unlimited |
+| `keepseek.agent.maxToolCalls` | `0` | 每个交互式根任务预算段的工具调用额度；0 表示 unlimited |
+| `keepseek.agent.maxModelRequests` | `0` | 根逻辑任务物理 Provider 请求上限；0 表示 unlimited |
+| `keepseek.agent.maxTreeUpstreamTokens` | `0` | 根任务及 child 合计上游 token 上限；0 表示 unlimited |
+| `keepseek.agent.maxContextEpochRollovers` | `0` | 根逻辑任务 rollover 上限；0 表示 unlimited |
 | `keepseek.agent.maxCost` | `0` | 按来源币种的费用上限；0 表示不设显式上限 |
 | `keepseek.agent.streamIdleTimeoutMs` | `0` | 流式静默超时；0 表示继续等待 |
 
@@ -251,9 +258,21 @@ spawn(executable, args, { shell: false })
 - 费用按币种分别累计，不做隐式汇率换算。
 - 设置正费用上限但当前来源无法计价时 fail closed。
 
-有效限制在任务启动时冻结；运行中修改设置不会追溯改变当前任务。Provider 用量只能在响应返回后记账，所以单次已被接受的请求可能略微越过费用线，但下一次请求前必须停止。内部 context capacity、tool step 或 epoch 调度阈值不是用户预算，不能借机重置或扩大显式限制。
+有效限制在任务启动时冻结；运行中修改设置不会追溯改变当前任务。Provider 用量只能在响应返回后记账，所以单次已被接受的请求可能略微越过费用线，但下一次请求前必须停止。内部 context capacity、tool step 或 epoch 调度阈值不是用户预算，不能借机重置或扩大显式限制。普通交互式根任务没有模型 profile 注入的固定工具轮、请求数、15 分钟、2M token 或 3 次 rollover 上限；子代理、后台任务、review/format-repair 仍使用各自的正数边界或无工具 lane。
 
-### 10.2 流式与重试
+### 10.2 显式工具预算的安全收尾与继续
+
+当且仅当 `maxToolIterations` 或 `maxToolCalls` 为正且当前段额度到达时，Runner 在当前工具批次和 Evidence 已持久化后执行一次收尾：
+
+1. 在内部 Provider projection 尾部追加 host finalization nudge，不写入 `session.messages`；
+2. 保持冻结的工具 schema 和顺序，支持时设置 `tool_choice: none`；
+3. 最多发出一次无工具收尾请求，不创建 Context Epoch 或隐藏摘要；
+4. Provider 若仍返回工具调用，宿主不执行，并为原生协议配对确定性的 blocked tool result；
+5. 将结果记录为 `budget_pause` / `budgetPause.resumable=true`，而不是永久 `blocked`。
+
+用户点击现有“继续任务”按钮才会授予下一工具预算段。同一 `taskId`、累计轮次/调用/请求、时间、费用、Evidence、DraftEdit/DraftRun、validation、epoch、审批 root 和幂等记录全部保留；新段只更新 segment base 并重置该段的收尾状态，已完成工具不会重跑。旧 `tool_budget_exhausted` checkpoint 以不可变迁移方式归一化为可继续边界；malformed 或未知副作用 checkpoint 仍 fail closed。这里的内部 host 消息不是聊天中的伪用户消息，也不会恢复旧 `budget_auto_continue` 自动续跑。
+
+### 10.3 流式与重试
 
 网络层区分“收到字节、收到 SSE、得到可消费内容、完成一个 step”。默认允许长时间安静推理；用户设置 idle timeout 后才因静默中止。
 
@@ -264,7 +283,7 @@ spawn(executable, args, { shell: false })
 - 因长度截断或 provider pause 最多做受控续接；已有部分流式内容时不自动重发原请求。
 - KeepSeek 没有 provider job 查询或后台云任务服务；恢复依赖本地 checkpoint，不假设远端可续跑。
 
-### 10.3 Checkpoint 与崩溃恢复
+### 10.4 Checkpoint 与崩溃恢复
 
 checkpoint 在请求边界、工具意图/结果、审批、Apply、Run、epoch 和重要状态转换处持久化。它保存恢复所需的有限状态，不复制全部私有上下文。
 

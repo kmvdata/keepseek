@@ -710,8 +710,10 @@ export class SubagentRuntime implements SubagentToolAdapter {
       input.profile.timeoutMs
     );
     const abort = createChildAbortSignal(input.context.signal);
-    const parentMaxSteps = input.context.parentRequest.executionLimits?.maxToolIterations
-      ?? 10;
+    const configuredParentMaxSteps = input.context.parentRequest.executionLimits?.maxToolIterations;
+    const parentMaxSteps = configuredParentMaxSteps && configuredParentMaxSteps > 0
+      ? configuredParentMaxSteps
+      : 10;
     const inheritedMaxSteps = Math.max(5, Math.floor(parentMaxSteps / 2));
     const maxSteps = clampInteger(
       input.input.maxSteps ?? input.profile.maxSteps,
@@ -1250,8 +1252,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         sessionId: input.input.parentSessionId,
         assistantMessageId: `${input.input.id}-format-repair`,
         executionLimits: {
-          maxToolIterations: 0,
-          maxToolCalls: 0,
+          toolsEnabled: false,
           maxValidationRuns: 0,
           maxRepairIterations: 0,
           maxRunMs: 30_000,

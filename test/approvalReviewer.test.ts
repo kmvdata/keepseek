@@ -45,15 +45,19 @@ test('reviewer provider bodies are tool-free and protocol-native', () => {
   const responses = buildApprovalReviewerProviderBody({
     modelId: 'responses-model', provider: 'openai-responses', systemPrompt: 'system', userPrompt: 'evidence'
   }) as unknown as Record<string, unknown>;
+  const qwenCloud = buildApprovalReviewerProviderBody({
+    modelId: 'deepseek-v4-flash-0731', provider: 'qwencloud', systemPrompt: 'system', userPrompt: 'evidence'
+  }) as unknown as Record<string, unknown>;
   const anthropic = buildApprovalReviewerProviderBody({
     modelId: 'anthropic-model', provider: 'anthropic-compatible', systemPrompt: 'system', userPrompt: 'evidence'
   }) as unknown as Record<string, unknown>;
-  for (const body of [chat, responses, anthropic]) {
+  for (const body of [chat, qwenCloud, responses, anthropic]) {
     assert.equal(Object.hasOwn(body, 'tools'), false);
     assert.equal(body.stream, true);
     assert.equal(body.temperature, 0);
   }
   assert.deepEqual((chat.messages as Array<{ role: string }>).map((item) => item.role), ['system', 'user']);
+  assert.equal(qwenCloud.enable_thinking, false);
   assert.equal(Object.hasOwn(responses, 'thinking'), false);
   assert.equal(responses.store, false);
   assert.deepEqual((responses.input as Array<{ role: string }>).map((item) => item.role), ['system', 'user']);

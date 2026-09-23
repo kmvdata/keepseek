@@ -38,13 +38,16 @@ export const DEFAULT_SUBAGENT_HANDOFF_PREVIEW_BYTES = 10_240;
 export const DEFAULT_SUBAGENT_PARALLEL_HANDOFF_BYTES = 20_480;
 export const DEFAULT_EVIDENCE_MAX_BYTES = 100_000_000;
 export const DEFAULT_AGENT_MAX_COST = 0;
-export const DEFAULT_AGENT_MAX_EXECUTION_MS = 15 * 60 * 1000;
+export const DEFAULT_AGENT_MAX_EXECUTION_MS = 0;
 export const DEFAULT_SUBAGENT_MAX_EXECUTION_MS = 5 * 60 * 1000;
-export const DEFAULT_AGENT_MAX_MODEL_REQUESTS = 32;
+export const DEFAULT_AGENT_MAX_TOOL_ITERATIONS = 0;
+export const DEFAULT_AGENT_MAX_TOOL_CALLS = 0;
+export const DEFAULT_AGENT_MAX_MODEL_REQUESTS = 0;
 export const DEFAULT_SUBAGENT_MAX_MODEL_REQUESTS = 12;
 export const DEFAULT_AGENT_MAX_CONTINUATIONS = 1;
-export const DEFAULT_AGENT_MAX_CONTEXT_EPOCH_ROLLOVERS = 3;
-export const DEFAULT_AGENT_MAX_TREE_UPSTREAM_TOKENS = 2_000_000;
+export const DEFAULT_AGENT_MAX_CONTEXT_EPOCH_ROLLOVERS = 0;
+export const DEFAULT_SUBAGENT_MAX_CONTEXT_EPOCH_ROLLOVERS = 3;
+export const DEFAULT_AGENT_MAX_TREE_UPSTREAM_TOKENS = 0;
 export const DEFAULT_SUBAGENT_MAX_UPSTREAM_TOKENS = 500_000;
 export const DEFAULT_AGENT_TOOL_MAX_OUTPUT_TOKENS = 8_192;
 export const DEFAULT_AGENT_FINAL_MAX_OUTPUT_TOKENS = 16_384;
@@ -409,6 +412,16 @@ export function getConfiguredAgentMaxExecutionMs(): number {
     'agent.maxExecutionMs', DEFAULT_AGENT_MAX_EXECUTION_MS));
 }
 
+export function getConfiguredAgentMaxToolIterations(): number {
+  return normalizeUnlimitedInteger(vscode.workspace.getConfiguration('keepseek').get(
+    'agent.maxToolIterations', DEFAULT_AGENT_MAX_TOOL_ITERATIONS), 512, DEFAULT_AGENT_MAX_TOOL_ITERATIONS);
+}
+
+export function getConfiguredAgentMaxToolCalls(): number {
+  return normalizeUnlimitedInteger(vscode.workspace.getConfiguration('keepseek').get(
+    'agent.maxToolCalls', DEFAULT_AGENT_MAX_TOOL_CALLS), 2_048, DEFAULT_AGENT_MAX_TOOL_CALLS);
+}
+
 export function getConfiguredSubagentMaxExecutionMs(): number {
   return normalizeDuration(vscode.workspace.getConfiguration('keepseek').get(
     'agent.subagentMaxExecutionMs', DEFAULT_SUBAGENT_MAX_EXECUTION_MS));
@@ -429,7 +442,10 @@ export function getConfiguredSubagentParallelHandoffBytes(): number {
 export function getConfiguredAgentMaxModelRequests(subagent = false): number {
   const fallback = subagent ? DEFAULT_SUBAGENT_MAX_MODEL_REQUESTS : DEFAULT_AGENT_MAX_MODEL_REQUESTS;
   const key = subagent ? 'agent.subagentMaxModelRequests' : 'agent.maxModelRequests';
-  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(key, fallback), 1, 512, fallback);
+  const configured = vscode.workspace.getConfiguration('keepseek').get(key, fallback);
+  return subagent
+    ? normalizeIntegerInRange(configured, 1, 512, fallback)
+    : normalizeUnlimitedInteger(configured, 512, fallback);
 }
 
 export function getConfiguredAgentMaxContinuations(): number {
@@ -438,15 +454,15 @@ export function getConfiguredAgentMaxContinuations(): number {
 }
 
 export function getConfiguredAgentMaxContextEpochRollovers(): number {
-  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(
+  return normalizeUnlimitedInteger(vscode.workspace.getConfiguration('keepseek').get(
     'agent.maxContextEpochRollovers', DEFAULT_AGENT_MAX_CONTEXT_EPOCH_ROLLOVERS),
-  0, 32, DEFAULT_AGENT_MAX_CONTEXT_EPOCH_ROLLOVERS);
+  32, DEFAULT_AGENT_MAX_CONTEXT_EPOCH_ROLLOVERS);
 }
 
 export function getConfiguredAgentMaxTreeUpstreamTokens(): number {
-  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(
+  return normalizeUnlimitedInteger(vscode.workspace.getConfiguration('keepseek').get(
     'agent.maxTreeUpstreamTokens', DEFAULT_AGENT_MAX_TREE_UPSTREAM_TOKENS),
-  1_000, 100_000_000, DEFAULT_AGENT_MAX_TREE_UPSTREAM_TOKENS);
+  100_000_000, DEFAULT_AGENT_MAX_TREE_UPSTREAM_TOKENS, 1_000);
 }
 
 export function getConfiguredSubagentMaxUpstreamTokens(): number {
@@ -639,6 +655,16 @@ export function normalizeIntegerInRange(value: unknown, min: number, max: number
     return fallback;
   }
   return Math.min(max, Math.max(min, Math.floor(number)));
+}
+
+/** Numeric execution budgets use one serialized convention: zero is
+ * unlimited and only a positive integer creates a boundary. */
+function normalizeUnlimitedInteger(value: unknown, max: number, fallback: number, minPositive = 1): number {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  const normalized = Math.floor(number);
+  if (normalized <= 0) return 0;
+  return Math.min(max, Math.max(minPositive, normalized));
 }
 
 function normalizeUsageCostRates(

@@ -1924,6 +1924,10 @@ export function getStyles(): string {
       color: var(--vscode-errorForeground);
     }
 
+    .run-details-paused {
+      color: var(--vscode-notificationsInfoIcon-foreground, var(--vscode-descriptionForeground));
+    }
+
     .run-details-denied {
       color: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground));
     }

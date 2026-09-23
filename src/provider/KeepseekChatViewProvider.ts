@@ -1,4 +1,4 @@
-import { checkpointCopy, endpointHash, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
+import { checkpointCopy, endpointHash, grantCheckpointToolBudgetSegment, isResumableToolBudgetCheckpoint, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
@@ -4336,12 +4336,21 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
       }
       // All compatibility checks complete before changing the visible run.
+      const checkpointForResume = isResumableToolBudgetCheckpoint(cp)
+        ? grantCheckpointToolBudgetSegment(cp)
+        : cp;
+      if (checkpointForResume !== cp) {
+        // Persist the user-approved grant before dispatch. A restart can then
+        // resume this segment without accidentally granting an additional one.
+        message.runCheckpoint = checkpointCopy(checkpointForResume);
+        await this.sessionStore.persist();
+      }
       this.modelSelectionTransactions.beginRun({ sourceId: cp.source.sourceId, modelId: cp.source.modelId });
       message.isStreaming = true;
       this.setAgentActivity({ base: 'thinking', phase: 'requesting_model', detail: this.t('runRecoveryNotice') });
       let usage: TurnUsageStats | undefined;
       const response = await this.agentRunner.run({
-        ...cp.request, model: { ...cp.request.model }, checkpoint: cp,
+        ...checkpointForResume.request, model: { ...checkpointForResume.request.model }, checkpoint: checkpointForResume,
         approvalMode: normalizeApprovalMode(session.approvalMode),
         sourceConfig: { sourceId: source.sourceId, provider: source.provider, apiKey: source.apiKey, baseUrl: source.baseUrl, supportsBilling: source.supportsBilling },
         signal: controller.signal

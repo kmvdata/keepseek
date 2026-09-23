@@ -610,6 +610,7 @@ describe('Anthropic Messages compatible protocol', () => {
       assert.equal(JSON.stringify(bodies[1].messages).includes('opaque-signature'), true,
         'the finalization replays the exact opaque thinking block');
       assert.equal(JSON.stringify(bodies[1].messages).includes('opaque-redacted'), true);
+      assert.match(JSON.stringify(bodies[1].messages), /Host finalization boundary/u);
     } finally {
       globalThis.fetch = originalFetch;
     }

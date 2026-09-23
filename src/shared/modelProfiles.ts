@@ -44,10 +44,6 @@ export interface AgentRuntimeProfile {
   reasoningMode: 'non-thinking' | 'high' | 'max';
   contextWindowTokens: number;
   maxTokens: number;
-  maxToolIterations: number;
-  maxToolCalls: number;
-  /** Compatibility field, always 0. User execution policy lives outside model capabilities. */
-  maxRunMs: number;
   streamIdleTimeoutMs: number;
   temperature: number;
   topP: number;
@@ -91,9 +87,6 @@ const SUPPORTED_MODELS: readonly KeepseekModel[] = [
 const FLASH_PROFILES = {
   'non-thinking': {
     maxTokens: 48_000,
-    maxToolIterations: 16,
-    maxToolCalls: 48,
-    maxRunMs: 0,
     contextCompression: {
       keepRecentTurns: 14,
       softCompactRatio: 0.38,
@@ -106,9 +99,6 @@ const FLASH_PROFILES = {
   },
   high: {
     maxTokens: 96_000,
-    maxToolIterations: 24,
-    maxToolCalls: 72,
-    maxRunMs: 0,
     contextCompression: {
       keepRecentTurns: 12,
       softCompactRatio: 0.34,
@@ -121,9 +111,6 @@ const FLASH_PROFILES = {
   },
   max: {
     maxTokens: 192_000,
-    maxToolIterations: 32,
-    maxToolCalls: 96,
-    maxRunMs: 0,
     contextCompression: {
       keepRecentTurns: 10,
       softCompactRatio: 0.28,
@@ -139,9 +126,6 @@ const FLASH_PROFILES = {
 const PRO_PROFILES = {
   'non-thinking': {
     maxTokens: 64_000,
-    maxToolIterations: 20,
-    maxToolCalls: 64,
-    maxRunMs: 0,
     contextCompression: {
       keepRecentTurns: 18,
       softCompactRatio: 0.46,
@@ -154,9 +138,6 @@ const PRO_PROFILES = {
   },
   high: {
     maxTokens: 128_000,
-    maxToolIterations: 32,
-    maxToolCalls: 96,
-    maxRunMs: 0,
     contextCompression: {
       keepRecentTurns: 16,
       softCompactRatio: 0.4,
@@ -169,9 +150,6 @@ const PRO_PROFILES = {
   },
   max: {
     maxTokens: 256_000,
-    maxToolIterations: 48,
-    maxToolCalls: 144,
-    maxRunMs: 0,
     contextCompression: {
       keepRecentTurns: 12,
       softCompactRatio: 0.32,
@@ -185,9 +163,6 @@ const PRO_PROFILES = {
 } as const;
 
 const GENERIC_PROFILE = {
-  maxToolIterations: 16,
-  maxToolCalls: 48,
-  maxRunMs: 0,
   streamIdleTimeoutMs: 0,
   temperature: 1,
   topP: 1,
@@ -258,9 +233,6 @@ export function getAgentRuntimeProfile(
       reasoningMode,
       contextWindowTokens,
       maxTokens,
-      maxToolIterations: selected.maxToolIterations,
-      maxToolCalls: selected.maxToolCalls,
-      maxRunMs: selected.maxRunMs,
       streamIdleTimeoutMs: 0,
       temperature: 1,
       topP: 1,
@@ -284,9 +256,6 @@ export function getAgentRuntimeProfile(
     reasoningMode,
     contextWindowTokens,
     maxTokens,
-    maxToolIterations: GENERIC_PROFILE.maxToolIterations,
-    maxToolCalls: GENERIC_PROFILE.maxToolCalls,
-    maxRunMs: GENERIC_PROFILE.maxRunMs,
     streamIdleTimeoutMs: GENERIC_PROFILE.streamIdleTimeoutMs,
     temperature: GENERIC_PROFILE.temperature,
     topP: GENERIC_PROFILE.topP,

@@ -105,7 +105,6 @@ export interface ModelSwitchImpact {
   compressionTriggerRatio: number;
   forceRatio: number;
   maxOutputTokens: number;
-  maxToolIterations: number;
   currentLane?: ProviderRequestLane;
   targetLane: ProviderRequestLane;
   hasPreviousProviderRequest: boolean;
@@ -172,7 +171,6 @@ export function analyzeModelSwitchImpact(input: {
     compressionTriggerRatio: profile.contextCompression.triggerRatio,
     forceRatio: profile.contextCompression.forceRatio,
     maxOutputTokens: profile.maxTokens,
-    maxToolIterations: profile.maxToolIterations,
     currentLane,
     targetLane,
     hasPreviousProviderRequest,

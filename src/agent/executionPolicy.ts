@@ -34,7 +34,16 @@ export interface LogicalRunBudgetState {
   continuationOutputChars: number;
   usedMs: number;
   deadlineAt?: string;
+  /** Monotonic user-approved tool-budget segment. Aggregate counters above
+   * never reset; these bases define only the allowance granted to this segment. */
+  toolBudgetSegment: number;
+  segmentStartToolRounds: number;
+  segmentStartToolCalls: number;
   finalizationAttempted: boolean;
+  finalizationNudgeQueued: boolean;
+  /** Set only by the explicit Continue action and consumed by the runner after
+   * it commits the prior finalization response into the provider projection. */
+  toolBudgetResumePending: boolean;
   treeUpstreamTokens: number;
 }
 
@@ -66,7 +75,12 @@ export function createLogicalRunBudgetState(input: Partial<LogicalRunBudgetState
     continuationOutputChars: budgetCount(input.continuationOutputChars),
     usedMs: normalizeDuration(input.usedMs),
     deadlineAt: normalizeDeadline(input.deadlineAt),
+    toolBudgetSegment: budgetCount(input.toolBudgetSegment),
+    segmentStartToolRounds: Math.min(budgetCount(input.segmentStartToolRounds), budgetCount(input.toolRounds)),
+    segmentStartToolCalls: Math.min(budgetCount(input.segmentStartToolCalls), budgetCount(input.toolCalls)),
     finalizationAttempted: input.finalizationAttempted === true,
+    finalizationNudgeQueued: input.finalizationNudgeQueued === true,
+    toolBudgetResumePending: input.toolBudgetResumePending === true,
     treeUpstreamTokens: budgetCount(input.treeUpstreamTokens)
   };
 }
@@ -194,19 +208,30 @@ export class LogicalRunBudget {
   }
 
   public canUseTools(): boolean {
-    return this.limits.maxToolRounds > 0 && this.state.toolRounds < this.limits.maxToolRounds
-      && this.limits.maxToolCalls > 0 && this.state.toolCalls < this.limits.maxToolCalls;
+    return !this.isToolBudgetExhausted();
+  }
+
+  public hasFiniteToolBudget(): boolean {
+    return this.limits.maxToolRounds > 0 || this.limits.maxToolCalls > 0;
+  }
+
+  public isToolBudgetExhausted(): boolean {
+    const segmentRounds = this.state.toolRounds - this.state.segmentStartToolRounds;
+    const segmentCalls = this.state.toolCalls - this.state.segmentStartToolCalls;
+    return (this.limits.maxToolRounds > 0 && segmentRounds >= this.limits.maxToolRounds)
+      || (this.limits.maxToolCalls > 0 && segmentCalls >= this.limits.maxToolCalls);
   }
 
   public recordToolRound(): void {
-    if (this.limits.maxToolRounds <= 0 || this.state.toolRounds >= this.limits.maxToolRounds) {
+    if (this.isToolBudgetExhausted()) {
       throw new LogicalBudgetExceededError('tool_round_budget_exhausted');
     }
     this.state.toolRounds += 1;
   }
 
   public tryRecordToolCall(): boolean {
-    if (this.limits.maxToolCalls <= 0 || this.state.toolCalls >= this.limits.maxToolCalls) return false;
+    const segmentCalls = this.state.toolCalls - this.state.segmentStartToolCalls;
+    if (this.limits.maxToolCalls > 0 && segmentCalls >= this.limits.maxToolCalls) return false;
     this.state.toolCalls += 1;
     return true;
   }
@@ -214,6 +239,13 @@ export class LogicalRunBudget {
   public beginFinalization(): boolean {
     if (this.state.finalizationAttempted) return false;
     this.state.finalizationAttempted = true;
+    this.state.finalizationNudgeQueued = true;
+    return true;
+  }
+
+  public consumeToolBudgetResume(): boolean {
+    if (!this.state.toolBudgetResumePending) return false;
+    this.state.toolBudgetResumePending = false;
     return true;
   }
 
@@ -233,7 +265,7 @@ export class LogicalRunBudget {
   }
 
   public tryRecordRollover(): boolean {
-    if (this.limits.maxContextEpochRollovers >= 0
+    if (this.limits.maxContextEpochRollovers > 0
       && this.state.contextEpochRollovers >= this.limits.maxContextEpochRollovers) return false;
     this.state.contextEpochRollovers += 1;
     return true;
@@ -245,6 +277,18 @@ export class LogicalRunBudget {
   }
 
   private syncTree(): void { this.state.treeUpstreamTokens = this.tree.usedTokens; }
+}
+
+/** Grants the next tool-budget segment without erasing whole-task accounting. */
+export function grantNextToolBudgetSegment(state: LogicalRunBudgetState): LogicalRunBudgetState {
+  const next = createLogicalRunBudgetState(state);
+  next.toolBudgetSegment += 1;
+  next.segmentStartToolRounds = next.toolRounds;
+  next.segmentStartToolCalls = next.toolCalls;
+  next.finalizationAttempted = false;
+  next.finalizationNudgeQueued = false;
+  next.toolBudgetResumePending = true;
+  return next;
 }
 
 function budgetCount(value: unknown): number {

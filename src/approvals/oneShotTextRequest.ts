@@ -54,6 +54,7 @@ export function buildApprovalReviewerProviderBody(input: {
       { role: 'user', content: input.userPrompt }
     ],
     stream: true,
+    enable_thinking: input.provider === 'qwencloud' ? false : undefined,
     thinking: input.provider === 'deepseek' ? { type: 'disabled' } : undefined,
     temperature: 0,
     top_p: 0.1,

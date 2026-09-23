@@ -54,7 +54,8 @@ test('runtime profiles follow model and thinking mode automatically', () => {
   assert.equal(flashMax.maxTokens, 192_000);
   assert.equal(proHigh.maxTokens, 128_000);
   assert.equal(proMax.maxTokens, 256_000);
-  assert.ok(proMax.maxToolIterations > flashMax.maxToolIterations);
+  assert.equal('maxToolIterations' in flashMax, false);
+  assert.equal('maxToolCalls' in proMax, false);
   assert.ok(proMax.contextCompression.summaryBudgetTokens > proHigh.contextCompression.summaryBudgetTokens);
   assert.equal(flashNonThinking.contextCompression.triggerRatio, 0.8);
   assert.equal(flashNonThinking.contextCompression.forceRatio, 0.92);

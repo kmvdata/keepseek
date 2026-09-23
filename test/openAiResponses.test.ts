@@ -423,8 +423,10 @@ describe('OpenAI Responses account protocol', () => {
         'function_call',
         'function_call_output',
         'function_call_output',
+        undefined,
         'message'
       ]);
+      assert.match(String(replay.items[5]?.content), /Host finalization boundary/u);
       assert.equal(replay.sourceId, 'responses-source');
       assert.equal(replay.baseUrl, 'https://proxy.example/v1/responses');
       assert.equal(response.toolRounds?.[0]?.toolResults.length, 2);

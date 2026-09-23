@@ -4184,7 +4184,11 @@ export function getScript(): string {
         ].filter(Boolean)));
       }
       if (details.budgetStopReason) {
-        body.append(createRunTextSection(t('runDetailsBudgetStop'), [details.budgetStopReason], 'run-details-error'));
+        var budgetPauseText = details.budgetPause?.resumable
+          ? details.budgetStopReason + ' · ' + t('runBudgetPauseResumable')
+          : details.budgetStopReason;
+        body.append(createRunTextSection(t('runDetailsBudgetStop'), [budgetPauseText],
+          details.budgetPause?.resumable ? 'run-details-paused' : 'run-details-error'));
       }
       if (details.failureReason) {
         body.append(createRunTextSection(t('runDetailsFailure'), [details.failureReason], 'run-details-error'));
@@ -4438,7 +4442,8 @@ export function getScript(): string {
         lines.push('- ' + [source.kind, source.id, source.reason, source.uri, source.keptId ? 'kept=' + source.keptId : '']
           .filter(Boolean).join(' · '));
       });
-      if (details.budgetStopReason) lines.push(t('runDetailsBudgetStop') + ': ' + details.budgetStopReason);
+      if (details.budgetStopReason) lines.push(t('runDetailsBudgetStop') + ': ' + details.budgetStopReason
+        + (details.budgetPause?.resumable ? ' · ' + t('runBudgetPauseResumable') : ''));
       if (details.failureReason) lines.push(t('runDetailsFailure') + ': ' + details.failureReason);
       (details.toolCalls || []).slice(0, 40).forEach(function(tool) {
         lines.push('- ' + [tool.name, getRunToolStatusLabel(tool.status), tool.argumentsSummary, tool.resultSummary].filter(Boolean).join(' · '));

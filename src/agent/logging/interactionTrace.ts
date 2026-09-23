@@ -460,6 +460,7 @@ export function summarizeDeepSeekRequestBody(body: DeepSeekChatRequestBody): Rec
   return {
     model: body.model,
     stream: body.stream,
+    enableThinking: body.enable_thinking,
     thinking: body.thinking,
     reasoningEffort: body.reasoning_effort,
     toolChoice: body.tool_choice,

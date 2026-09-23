@@ -8,7 +8,7 @@ import {
   createLogicalRunBudgetState
 } from '../src/agent/executionPolicy';
 import { AgentRunner } from '../src/agent/runner';
-import { checkpointCopy, normalizeRunCheckpoint, type RunCheckpoint } from '../src/agent/runCheckpoint';
+import { checkpointCopy, normalizeRunCheckpoint, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import type { AgentRequest } from '../src/shared/types';
 
 test('length continuation is bounded, persisted, and returns marked partial content', async () => {
@@ -118,7 +118,11 @@ test('checkpoint normalization migrates old counters and clamps malformed budget
   raw.stopReason = 'budget_exhausted';
   raw.state!.budgetStopReason = 'tool_iterations_exhausted';
   const legacyCapacity = normalizeRunCheckpoint(raw);
-  assert.equal(legacyCapacity?.runBudget, undefined, 'legacy capacity stops remain eligible for epoch migration');
+  assert.equal(legacyCapacity?.runBudget?.toolRounds, 3, 'legacy tool stops gain an auditable cumulative ledger');
+  assert.equal(legacyCapacity?.runBudget?.toolCalls, 7);
+  assert.equal(legacyCapacity?.request.executionLimits?.maxToolIterations, 0,
+    'old root profile ceilings migrate to the new unlimited default');
+  assert.equal(legacyCapacity?.stopReason, 'budget_pause');
   raw.stopReason = 'extension_restart';
   raw.state!.budgetStopReason = undefined;
 
@@ -127,6 +131,26 @@ test('checkpoint normalization migrates old counters and clamps malformed budget
   assert.equal(normalized?.runBudget?.modelRequests, 0);
   assert.equal(normalized?.runBudget?.upstreamTokens, 0);
   assert.equal(normalized?.runBudget?.finalizationAttempted, true);
+
+  raw.status = 'blocked';
+  raw.stopReason = 'budget_exhausted';
+  raw.request.executionLimits = { maxToolIterations: 16, maxToolCalls: 48 };
+  raw.finalResponse = {
+    message: 'legacy tool stop',
+    draftEdits: [],
+    repairLoop: { status: 'idle', iteration: 0, maxIterations: 2, pendingDraftEditIds: [] },
+    taskPlan: raw.state!.repairLoop as never,
+    runId: 'legacy-run',
+    runDetails: { budgetStopReason: 'tool_budget_exhausted' } as never
+  } as never;
+  const oldSerialized = JSON.stringify(raw);
+  const migratedToolPause = normalizeRunCheckpoint(raw);
+  assert.equal(migratedToolPause?.status, 'interrupted');
+  assert.equal(migratedToolPause?.stopReason, 'budget_pause');
+  assert.equal(migratedToolPause?.request.executionLimits?.maxToolIterations, 0);
+  assert.equal(migratedToolPause?.request.executionLimits?.maxToolCalls, 0);
+  assert.equal(recoveryBlocker(migratedToolPause!), undefined);
+  assert.equal(JSON.stringify(raw), oldSerialized, 'normalization must not mutate the stored legacy object');
 });
 
 test('a restored finalization attempt cannot dispatch a second finalization request', async () => {

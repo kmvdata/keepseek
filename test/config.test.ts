@@ -9,6 +9,8 @@ import {
   getConfiguredAgentMaxContinuations,
   getConfiguredAgentMaxExecutionMs,
   getConfiguredAgentMaxModelRequests,
+  getConfiguredAgentMaxToolCalls,
+  getConfiguredAgentMaxToolIterations,
   getConfiguredAgentMaxTreeUpstreamTokens,
   getConfiguredAgentRepairMaxOutputTokens,
   getConfiguredAgentToolMaxOutputTokens,
@@ -160,16 +162,18 @@ test('DraftRun uses bounded timeout and transcript defaults', () => {
   assert.equal(getConfiguredDraftRunMaxTranscriptBytes(), 131_072);
 });
 
-test('logical run safety fuses have finite defaults and bounded configuration normalization', () => {
-  assert.equal(getConfiguredAgentMaxExecutionMs(), 900_000);
+test('root execution budgets default to unlimited while child safety budgets stay finite', () => {
+  assert.equal(getConfiguredAgentMaxExecutionMs(), 0);
   assert.equal(getConfiguredSubagentMaxExecutionMs(), 300_000);
   assert.equal(getConfiguredSubagentHandoffPreviewBytes(), 10_240);
   assert.equal(getConfiguredSubagentParallelHandoffBytes(), 20_480);
-  assert.equal(getConfiguredAgentMaxModelRequests(), 32);
+  assert.equal(getConfiguredAgentMaxToolIterations(), 0);
+  assert.equal(getConfiguredAgentMaxToolCalls(), 0);
+  assert.equal(getConfiguredAgentMaxModelRequests(), 0);
   assert.equal(getConfiguredAgentMaxModelRequests(true), 12);
   assert.equal(getConfiguredAgentMaxContinuations(), 1);
-  assert.equal(getConfiguredAgentMaxContextEpochRollovers(), 3);
-  assert.equal(getConfiguredAgentMaxTreeUpstreamTokens(), 2_000_000);
+  assert.equal(getConfiguredAgentMaxContextEpochRollovers(), 0);
+  assert.equal(getConfiguredAgentMaxTreeUpstreamTokens(), 0);
   assert.equal(getConfiguredSubagentMaxUpstreamTokens(), 500_000);
   assert.equal(getConfiguredAgentToolMaxOutputTokens(), 8_192);
   assert.equal(getConfiguredAgentFinalMaxOutputTokens(), 16_384);
@@ -181,6 +185,8 @@ test('logical run safety fuses have finite defaults and bounded configuration no
     ...original(),
     get: <T>(key: string, fallback: T): T => ({
       'agent.maxModelRequests': 4,
+      'agent.maxToolIterations': 3,
+      'agent.maxToolCalls': 7,
       'agent.subagentMaxModelRequests': 2,
       'agent.maxContinuations': 99,
       'agent.maxContextEpochRollovers': -3,
@@ -192,6 +198,8 @@ test('logical run safety fuses have finite defaults and bounded configuration no
   });
   try {
     assert.equal(getConfiguredAgentMaxModelRequests(), 4);
+    assert.equal(getConfiguredAgentMaxToolIterations(), 3);
+    assert.equal(getConfiguredAgentMaxToolCalls(), 7);
     assert.equal(getConfiguredAgentMaxModelRequests(true), 2);
     assert.equal(getConfiguredAgentMaxContinuations(), 8);
     assert.equal(getConfiguredAgentMaxContextEpochRollovers(), 0);

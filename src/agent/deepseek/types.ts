@@ -101,6 +101,9 @@ export interface DeepSeekChatRequestBody {
   model: string;
   messages: DeepSeekMessage[];
   stream: true;
+  /** Alibaba Cloud Model Studio's OpenAI-compatible switch for hybrid-thinking
+   * models. This is intentionally provider-scoped by the request builder. */
+  enable_thinking?: boolean;
   thinking?: {
     type: DeepSeekThinkingType;
   };

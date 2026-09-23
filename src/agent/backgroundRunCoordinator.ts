@@ -132,8 +132,9 @@ export class BackgroundRunCoordinator {
     const remainingDurationMs = run.limits.maxDurationMs > 0 ? Math.max(1, run.limits.maxDurationMs - elapsedMs) : 0;
     const remainingToolCalls = Math.max(0, run.limits.maxToolCalls - run.progress.toolCalls);
     return {
-      maxToolIterations: remainingToolCalls,
-      maxToolCalls: remainingToolCalls,
+      toolsEnabled: remainingToolCalls > 0,
+      maxToolIterations: remainingToolCalls > 0 ? remainingToolCalls : undefined,
+      maxToolCalls: remainingToolCalls > 0 ? remainingToolCalls : undefined,
       maxRunMs: remainingDurationMs,
       timeLimitSource: 'background.maxDurationMs + agent.maxExecutionMs (remaining active time)',
       maxRepairIterations: run.limits.maxRounds

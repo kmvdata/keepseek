@@ -1337,6 +1337,13 @@ export interface RunDetailsSummary {
     evidence: string;
   }>;
   budgetStopReason?: string;
+  /** Present only for a user-configured tool-budget boundary that can receive
+   * another segment through the existing Continue action. */
+  budgetPause?: {
+    kind: 'explicit_tool_budget';
+    resumable: true;
+    segment: number;
+  };
   failureReason?: string;
   traceLogUri?: string;
   truncated: boolean;
@@ -1541,6 +1548,8 @@ export interface AgentRequest {
 }
 
 export interface AgentExecutionLimits {
+  /** Controls schema exposure independently from numeric budgets. */
+  toolsEnabled?: boolean;
   maxValidationRuns?: number;
   maxToolIterations?: number;
   maxToolCalls?: number;

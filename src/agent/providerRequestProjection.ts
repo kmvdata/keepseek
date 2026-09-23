@@ -182,7 +182,9 @@ export function buildProviderRequestProjection(
     requestProtocolVersion,
     systemPrompt: input.systemPrompt
   });
-  const includeTools = input.includeTools ?? profile.maxToolIterations > 0;
+  // Tool exposure is an execution capability, not a model capability or a
+  // budget sentinel. Callers that need a no-tools lane must say so explicitly.
+  const includeTools = input.includeTools ?? true;
   const toolNames = includeTools
     ? [...(input.slimToolNames ?? getAgentToolNamesForPrompt(
         input.prompt,
