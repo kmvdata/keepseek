@@ -15,6 +15,9 @@ const SUBAGENT_STORAGE_VERSION = 'v1';
 const DIAGNOSTIC_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_DIAGNOSTIC_CHARS = 768;
 const MAX_DIAGNOSTIC_BYTES = 8_192;
+export const DEFAULT_SUBAGENT_RESULT_PAGE_BYTES = 12_288;
+export const MAX_SUBAGENT_RESULT_PAGE_BYTES = 24_576;
+/** V1-V9 compatibility aliases. */
 export const DEFAULT_SUBAGENT_RESULT_PAGE_CHARS = 12_000;
 export const MAX_SUBAGENT_RESULT_PAGE_CHARS = 24_000;
 
@@ -80,38 +83,116 @@ export class SubagentStore {
 
   public async readResultPage(input: {
     parentSessionId: string;
-    subagentId: string;
+    ref?: string;
+    subagentId?: string;
+    allowedTreeId?: string;
+    offsetBytes?: number;
+    limitBytes?: number;
     offset?: number;
     maxChars?: number;
   }): Promise<Record<string, unknown>> {
-    const stored = await this.read(input.parentSessionId, input.subagentId);
+    const ref = input.ref ?? input.subagentId ?? '';
+    const legacy = !input.ref && input.offsetBytes === undefined && input.limitBytes === undefined;
+    const stored = await this.read(input.parentSessionId, ref);
     if (!stored) {
-      return { ok: false, errorType: 'subagent_not_found', error: 'The requested subagent result was not found in this parent session.' };
+      return {
+        ok: false,
+        errorType: await this.runFileExists(input.parentSessionId, ref)
+          ? 'subagent_result_corrupt' : 'subagent_result_not_found',
+        error: 'The requested subagent result is unavailable in this session lineage.'
+      };
     }
-    const result = stored.transcript.result;
-    const offset = clampInteger(input.offset, 0, result.length, 0);
-    const maxChars = clampInteger(
-      input.maxChars,
-      1,
-      MAX_SUBAGENT_RESULT_PAGE_CHARS,
-      DEFAULT_SUBAGENT_RESULT_PAGE_CHARS
-    );
-    const content = result.slice(offset, offset + maxChars);
-    const nextOffset = offset + content.length;
+    if (input.allowedTreeId && stored.metadata.treeId !== input.allowedTreeId) {
+      return { ok: false, errorType: 'subagent_result_forbidden', error: 'The result reference is outside the current subagent tree.' };
+    }
+    if (stored.metadata.status === 'queued'
+      || stored.metadata.status === 'running'
+      || stored.metadata.failureKind === 'interrupted') {
+      return {
+        ok: false,
+        ref,
+        status: stored.metadata.status,
+        errorType: 'subagent_result_pending',
+        error: 'The referenced subagent result is not complete yet.'
+      };
+    }
+    const result = await this.readCanonicalResult(input.parentSessionId, stored);
+    if (result === undefined) {
+      return { ok: false, ref, errorType: 'subagent_result_corrupt', error: 'The canonical stored result reference is invalid.' };
+    }
+    if (stored.metadata.resultHash
+      && createHash('sha256').update(result, 'utf8').digest('hex') !== stored.metadata.resultHash) {
+      return { ok: false, ref, errorType: 'subagent_result_corrupt', error: 'The stored result failed its integrity check.' };
+    }
+    if (legacy) {
+      const offset = clampInteger(input.offset, 0, result.length, 0);
+      const maxChars = clampInteger(input.maxChars, 1, MAX_SUBAGENT_RESULT_PAGE_CHARS, DEFAULT_SUBAGENT_RESULT_PAGE_CHARS);
+      const content = result.slice(offset, offset + maxChars);
+      const nextOffset = offset + content.length;
+      return {
+        ok: true,
+        subagentId: stored.metadata.id,
+        status: manifestStatus(stored.metadata),
+        profile: stored.metadata.profile,
+        lane: stored.metadata.lane,
+        offset,
+        content,
+        totalChars: result.length,
+        hasMore: nextOffset < result.length,
+        ...(nextOffset < result.length ? { nextOffset } : {}),
+        resultHash: stored.metadata.resultHash,
+        usage: stored.metadata.usage
+      };
+    }
+    const bytes = this.encoder.encode(result);
+    const offsetBytes = clampInteger(input.offsetBytes, 0, Number.MAX_SAFE_INTEGER, 0);
+    if (offsetBytes > bytes.byteLength) {
+      return { ok: false, ref, errorType: 'subagent_result_offset_out_of_range', offsetBytes, totalBytes: bytes.byteLength,
+        error: 'The requested byte offset is beyond the stored result.' };
+    }
+    if (offsetBytes < bytes.byteLength && isUtf8ContinuationByte(bytes[offsetBytes]!)) {
+      return { ok: false, ref, errorType: 'subagent_result_invalid_utf8_offset', offsetBytes,
+        error: 'The requested byte offset is not a UTF-8 character boundary.' };
+    }
+    const limitBytes = clampInteger(input.limitBytes, 4, MAX_SUBAGENT_RESULT_PAGE_BYTES, DEFAULT_SUBAGENT_RESULT_PAGE_BYTES);
+    let end = Math.min(bytes.byteLength, offsetBytes + limitBytes);
+    while (end > offsetBytes && end < bytes.byteLength && isUtf8ContinuationByte(bytes[end]!)) end -= 1;
+    const content = this.decoder.decode(bytes.slice(offsetBytes, end));
+    const returnedBytes = end - offsetBytes;
+    const hasMore = end < bytes.byteLength;
     return {
       ok: true,
-      subagentId: stored.metadata.id,
-      status: stored.metadata.status,
+      ref,
+      status: manifestStatus(stored.metadata),
       profile: stored.metadata.profile,
       lane: stored.metadata.lane,
-      offset,
       content,
-      totalChars: result.length,
-      hasMore: nextOffset < result.length,
-      ...(nextOffset < result.length ? { nextOffset } : {}),
-      resultHash: stored.metadata.resultHash,
-      usage: stored.metadata.usage
+      offsetBytes,
+      returnedBytes,
+      ...(hasMore ? { nextOffsetBytes: end } : {}),
+      totalBytes: bytes.byteLength,
+      hasMore,
+      resultHash: stored.metadata.resultHash ?? createHash('sha256').update(result, 'utf8').digest('hex'),
+      resultTruncated: stored.metadata.resultTruncated === true
     };
+  }
+
+  public async readCanonicalResult(
+    parentSessionId: string,
+    initial: { metadata: StoredSubagentMetadata; transcript: StoredSubagentTranscript }
+  ): Promise<string | undefined> {
+    let current = initial;
+    const visited = new Set<string>();
+    for (let depth = 0; depth < 4; depth += 1) {
+      if (current.transcript.result) return current.transcript.result;
+      const ref = current.transcript.resultRef ?? current.metadata.reusedFromSubagentId;
+      if (!ref || visited.has(ref)) return current.transcript.resultRef ? undefined : '';
+      visited.add(ref);
+      const next = await this.read(parentSessionId, ref);
+      if (!next) return undefined;
+      current = next;
+    }
+    return undefined;
   }
 
   public async findCompletedCandidates(input: {
@@ -144,7 +225,7 @@ export class SubagentStore {
       .slice(-64);
     const candidates = (await Promise.all(ids.map(async (id) => await this.read(input.parentSessionId, id))))
       .filter((value): value is { metadata: StoredSubagentMetadata; transcript: StoredSubagentTranscript } => Boolean(value))
-      .filter(({ metadata }) => metadata.status === 'completed'
+      .filter(({ metadata, transcript }) => metadata.status === 'completed'
         && metadata.resultStatus === 'complete'
         && metadata.normalizedTaskHash === input.normalizedTaskHash
         && metadata.profile === input.profile
@@ -158,7 +239,7 @@ export class SubagentStore {
         && metadata.projectInstructionsHash === input.projectInstructionsHash
         && metadata.authorizationContextHash === input.authorizationContextHash
         && metadata.workspaceContextHash === input.workspaceContextHash
-        && Boolean(metadata.resultEnvelope));
+        && Boolean(transcript.result));
     return candidates.sort((left, right) => right.metadata.updatedAt.localeCompare(left.metadata.updatedAt)).slice(0, 5);
   }
 
@@ -241,11 +322,19 @@ export class SubagentStore {
     }
     return vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.transcript.json`);
   }
+
+  private async runFileExists(parentSessionId: string, subagentId: string): Promise<boolean> {
+    if (!isSafeId(parentSessionId) || !isSafeId(subagentId)) return false;
+    try {
+      await vscode.workspace.fs.stat(vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.run.json`));
+      return true;
+    } catch { return false; }
+  }
 }
 
 function normalizeMetadata(value: unknown): StoredSubagentMetadata | undefined {
   if (!isRecord(value)
-    || value.version !== 1
+    || (value.version !== 1 && value.version !== 2)
     || typeof value.id !== 'string'
     || typeof value.parentSessionId !== 'string'
     || typeof value.status !== 'string') {
@@ -268,14 +357,26 @@ function normalizeMetadata(value: unknown): StoredSubagentMetadata | undefined {
 
 function normalizeTranscript(value: unknown): StoredSubagentTranscript | undefined {
   if (!isRecord(value)
-    || value.version !== 1
+    || (value.version !== 1 && value.version !== 2)
     || typeof value.metadataId !== 'string'
     || typeof value.contextInstructions !== 'string'
     || !Array.isArray(value.messages)
     || typeof value.result !== 'string') {
     return undefined;
   }
-  return { ...value, checkpoint: normalizeRunCheckpoint(value.checkpoint) } as unknown as StoredSubagentTranscript;
+  return {
+    ...value,
+    ...(typeof value.resultRef === 'string' && isSafeId(value.resultRef) ? { resultRef: value.resultRef } : {}),
+    checkpoint: normalizeRunCheckpoint(value.checkpoint)
+  } as unknown as StoredSubagentTranscript;
+}
+
+function isUtf8ContinuationByte(value: number): boolean { return (value & 0xc0) === 0x80; }
+
+function manifestStatus(metadata: StoredSubagentMetadata): string {
+  if (metadata.failureKind === 'budget_exhausted') return 'budget_exhausted';
+  if (metadata.failureKind === 'cancelled') return 'cancelled';
+  return metadata.status;
 }
 
 function isSafeId(value: string): boolean {

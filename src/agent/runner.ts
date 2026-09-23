@@ -1360,7 +1360,8 @@ export class AgentLoop {
           {
           trace,
           usageTotals: upstreamUsageTotals,
-          usageSource: request.backgroundRunId ? 'background' : 'executor',
+          usageSource: request.subagentContext ? 'subagent'
+            : request.backgroundRunId ? 'background' : 'executor',
           toolChoice: allowToolCalls ? 'auto' : 'none',
           providerRunState,
           contextEpochIndex: epoch.index,
@@ -1723,6 +1724,7 @@ export class AgentLoop {
                 parentRunId: trace.runId,
                 onUsage: runCallbacks.onUsage,
                 onUsageLedgerRecord: runCallbacks.onUsageLedgerRecord,
+                getCacheObservationCandidates: runCallbacks.getCacheObservationCandidates,
                 onSubagentRunSummary: runCallbacks.onSubagentRunSummary,
                 evidenceStore,
                 evidenceSessionId,
@@ -2357,11 +2359,21 @@ export class AgentLoop {
         : usageSource === 'background' ? observationTaskId ?? '' : '',
       usageSource
     ].join('\u0000');
+    const conversationId = usageSource === 'subagent'
+      ? request.subagentContext?.id
+      : usageSource === 'background' ? observationTaskId : undefined;
+    const candidateContext = await callbacks.getCacheObservationCandidates?.({
+      sessionId: request.sessionId ?? request.subagentContext?.parentSessionId ?? 'unknown-session',
+      source: usageSource,
+      conversationId: request.subagentContext?.previousConversationId ?? conversationId,
+      cacheFamilyKey: request.subagentContext?.cacheFamilyKey
+    });
     const previousCacheObservation = this.previousCacheObservationByScope.get(cacheScope)
+      ?? candidateContext?.conversationPrevious
       ?? await callbacks.getPreviousCacheObservation?.({
         sessionId: request.sessionId ?? request.subagentContext?.parentSessionId ?? 'unknown-session',
         source: usageSource,
-        taskId: observationTaskId
+        taskId: request.subagentContext?.previousConversationId ?? observationTaskId
       });
     const estimatedPromptTokens = this.estimateCurrentProviderInputTokens(
       request,
@@ -2378,12 +2390,18 @@ export class AgentLoop {
       baseUrl: runtimeConfig.baseUrl,
       body,
       taskId: observationTaskId,
+      conversationId,
       runId: trace.runId,
       contextEpochIndex: options.contextEpochIndex,
       requestProtocolVersion: request.requestProtocolVersion,
       contextInstructions: request.contextInstructions,
       estimatedPromptTokens,
-      previous: attemptIndex > 0 ? attemptCacheObservations[0] ?? previousCacheObservation : previousCacheObservation,
+      conversationPrevious: attemptIndex > 0 ? attemptCacheObservations[0] ?? previousCacheObservation : previousCacheObservation,
+      familyCandidates: candidateContext?.familyCandidates,
+      cacheFamilyKey: request.subagentContext?.cacheFamilyKey,
+      subagentProfile: request.subagentContext?.profile,
+      subagentLane: request.subagentContext?.lane,
+      subagentDepth: request.subagentContext?.depth,
       historyCompacted: options.historyCompacted,
       historyRewriteReason: request.historyRewriteReason,
       protocolMigration: options.protocolMigration
@@ -2464,7 +2482,8 @@ export class AgentLoop {
       runtimeConfig.supportsBilling,
       options.usageSource ?? 'executor',
       attemptSnapshots.at(-1),
-      attemptSnapshots.length
+      attemptSnapshots.length,
+      request.subagentContext?.id
     );
     if (usageEvent?.pricingStatus === 'priced' || usageEvent?.pricingStatus === 'estimated_upper_bound') {
       request.taskCostBudget?.record(usageEvent.cost, usageEvent.currency);
@@ -2915,7 +2934,8 @@ export class AgentLoop {
     supportsBilling: boolean,
     source: UsageSource,
     priceSnapshot: UsagePriceSnapshot | undefined,
-    providerAttemptCount = 1
+    providerAttemptCount = 1,
+    subagentId?: string
   ): UsageEvent | undefined {
     if (!usage || !totals) {
       return undefined;
@@ -2935,7 +2955,8 @@ export class AgentLoop {
       requestStartedAt: new Date().toISOString()
     });
     const priced = priceUsageFromSnapshot(normalizedUsage, snapshot);
-    const usageEvent = createUsageEvent({
+    const usageEvent: UsageEvent = {
+      ...createUsageEvent({
       usage: normalizedUsage,
       cost: priced.cost,
       currency: priced.currency,
@@ -2949,7 +2970,9 @@ export class AgentLoop {
       providerAttemptCount,
       requestId,
       source
-    });
+      }),
+      ...(subagentId ? { subagentId } : {})
+    };
     totals.requestCount += 1;
     totals.promptTokens += normalizedUsage.promptTokens;
     totals.completionTokens += normalizedUsage.completionTokens;
@@ -3273,6 +3296,7 @@ export class AgentLoop {
       parentRunId?: string;
       onUsage?: AgentRunCallbacks['onUsage'];
       onUsageLedgerRecord?: AgentRunCallbacks['onUsageLedgerRecord'];
+      getCacheObservationCandidates?: AgentRunCallbacks['getCacheObservationCandidates'];
       onSubagentRunSummary?: AgentRunCallbacks['onSubagentRunSummary'];
       evidenceStore?: ToolEvidenceStore;
       evidenceSessionId?: string;
@@ -3323,7 +3347,10 @@ export class AgentLoop {
         }
         case READ_SUBAGENT_RESULT_TOOL_NAME:
           return (await this.subagentTools!.readResult({
-            subagentId: this.readRequiredString(args, 'subagentId'),
+            ref: this.readOptionalString(args, 'ref'),
+            subagentId: this.readOptionalString(args, 'subagentId'),
+            offsetBytes: this.readOptionalNumber(args, 'offsetBytes'),
+            limitBytes: this.readOptionalNumber(args, 'limitBytes'),
             offset: this.readOptionalNumber(args, 'offset'),
             maxChars: this.readOptionalNumber(args, 'maxChars')
           }, this.getSubagentInvocationContext(language, options))).content;
@@ -3463,6 +3490,7 @@ export class AgentLoop {
       parentRunId?: string;
       onUsage?: AgentRunCallbacks['onUsage'];
       onUsageLedgerRecord?: AgentRunCallbacks['onUsageLedgerRecord'];
+      getCacheObservationCandidates?: AgentRunCallbacks['getCacheObservationCandidates'];
       onSubagentRunSummary?: AgentRunCallbacks['onSubagentRunSummary'];
     },
     parentToolCallId?: string,
@@ -3480,6 +3508,7 @@ export class AgentLoop {
       signal: options.signal,
       onUsage: options.onUsage,
       onUsageLedgerRecord: options.onUsageLedgerRecord,
+      getCacheObservationCandidates: options.getCacheObservationCandidates,
       onRunSummary: options.onSubagentRunSummary
     };
   }

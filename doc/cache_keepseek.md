@@ -51,11 +51,12 @@ current user / tool continuation
 
 ### 3.1 协议 lane
 
-当前 provider 请求协议与工具 schema 版本均为 **V9**：
+当前 provider 请求协议与工具 schema 版本均为 **V10**：
 
 - V5 引入子代理。
 - V8 引入通用 Evidence 与 Context Epoch。
 - V9 固定加入 `keepseek_apply_patch` 与 canonical Patch IR。
+- V10 将子代理 handoff 改为小型 manifest，并把完整结果读取工具升级为 UTF-8 byte paging。
 
 V1–V8 的已存在热会话保持原有 system/schema 字节；只有缓存自然冷却或发生受控 rollover 时才迁移。不同来源、endpoint、wire model、协议版本或原生协议不能共用缓存 lane。
 

@@ -34,6 +34,8 @@ export const DEFAULT_PATCH_MAX_CHANGE_SET_ARTIFACT_BYTES = 134_217_728;
 export const DEFAULT_PATCH_BLOB_STORE_QUOTA_BYTES = 1_073_741_824;
 export const DEFAULT_PATCH_MAX_DIFF_BYTES = 4_194_304;
 export const DEFAULT_PROVIDER_INLINE_RESULT_MAX_CHARS = 48_000;
+export const DEFAULT_SUBAGENT_HANDOFF_PREVIEW_BYTES = 10_240;
+export const DEFAULT_SUBAGENT_PARALLEL_HANDOFF_BYTES = 20_480;
 export const DEFAULT_EVIDENCE_MAX_BYTES = 100_000_000;
 export const DEFAULT_AGENT_MAX_COST = 0;
 export const DEFAULT_AGENT_MAX_EXECUTION_MS = 15 * 60 * 1000;
@@ -410,6 +412,18 @@ export function getConfiguredAgentMaxExecutionMs(): number {
 export function getConfiguredSubagentMaxExecutionMs(): number {
   return normalizeDuration(vscode.workspace.getConfiguration('keepseek').get(
     'agent.subagentMaxExecutionMs', DEFAULT_SUBAGENT_MAX_EXECUTION_MS));
+}
+
+export function getConfiguredSubagentHandoffPreviewBytes(): number {
+  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(
+    'subagent.handoffPreviewBytes', DEFAULT_SUBAGENT_HANDOFF_PREVIEW_BYTES),
+  1_024, 24_576, DEFAULT_SUBAGENT_HANDOFF_PREVIEW_BYTES);
+}
+
+export function getConfiguredSubagentParallelHandoffBytes(): number {
+  return normalizeIntegerInRange(vscode.workspace.getConfiguration('keepseek').get(
+    'subagent.parallelHandoffBytes', DEFAULT_SUBAGENT_PARALLEL_HANDOFF_BYTES),
+  16_384, 65_536, DEFAULT_SUBAGENT_PARALLEL_HANDOFF_BYTES);
 }
 
 export function getConfiguredAgentMaxModelRequests(subagent = false): number {

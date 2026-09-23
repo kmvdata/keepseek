@@ -170,6 +170,14 @@
           "type": "integer", "default": 48000, "minimum": 1024, "maximum": 1000000, "scope": "window",
           "markdownDescription": "Maximum characters a newly produced tool result may inline into one Provider request. Dynamic context admission may choose a smaller envelope. This does not limit workspace reads or evidence storage."
         },
+        "keepseek.subagent.handoffPreviewBytes": {
+          "type": "integer", "default": 10240, "minimum": 1024, "maximum": 24576, "scope": "window",
+          "markdownDescription": "Maximum UTF-8 bytes previewed in one child-result manifest. The full accepted result remains pageable in isolated storage. / 单个子代理结果清单内联预览的 UTF-8 字节上限；完整结果仍保存在隔离存储中并可分页读取。"
+        },
+        "keepseek.subagent.parallelHandoffBytes": {
+          "type": "integer", "default": 20480, "minimum": 16384, "maximum": 65536, "scope": "window",
+          "markdownDescription": "Total UTF-8 byte budget shared fairly by all previews in one parallel child handoff. Status and result references are reserved first. / 一次并行子代理 handoff 的 UTF-8 总预算；先保留全部状态和引用，再公平分配预览。"
+        },
         "keepseek.evidenceMaxBytes": {
           "type": "integer", "default": 100000000, "minimum": 1000000, "maximum": 1000000000, "scope": "window",
           "markdownDescription": "Maximum bytes stored for one immutable tool-evidence result. Independent from the workspace read safety limit and Provider inline admission."

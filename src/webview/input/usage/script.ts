@@ -385,7 +385,10 @@ export const usageRenderFragment: WebviewFragment = {
           ['usageColdStarts', diagnostics.coldStartRequestCount],
           ['usageControlledBoundaries', diagnostics.controlledBoundaryRequestCount],
           ['usageProviderEvictionPossible', diagnostics.providerCacheEvictionPossibleCount],
-          ['usageReusableTokensNotHit', diagnostics.estimatedReusableTokensNotHit]
+          ['usageReusableTokensNotHit', diagnostics.estimatedReusableTokensNotHit],
+          ['usageReusablePrefixTokens', diagnostics.reusablePrefixTokens],
+          ['usageUnavoidableNewTokens', diagnostics.unavoidableNewTokens],
+          ['usageLocalEstimateLowCount', diagnostics.localEstimateLowCount]
         ].forEach(function(item) {
           var metric = usageNode('div', 'usage-session-metric');
           metric.append(usageNode('span', '', t(item[0])), usageNode('strong', '', formatMetricInteger(item[1])));
@@ -421,12 +424,29 @@ export const usageRenderFragment: WebviewFragment = {
           var list = usageNode('div', 'usage-analysis-list');
           lanes.forEach(function(lane) {
             var card = usageNode('div', 'usage-analysis-card usage-analysis-card-body');
-            card.append(usageNode('strong', '', [lane.source, lane.provider, lane.protocol, lane.originalModelId]
+            card.append(usageNode('strong', '', [lane.source, lane.profile, lane.subagentLane, lane.provider, lane.protocol, lane.originalModelId,
+              lane.cacheFamilyId ? t('usageCacheFamilyShort', { id: lane.cacheFamilyId }) : '']
               .filter(Boolean).join(' / ')));
             card.append(usageNode('p', '', t('usageRawHitAndReuse', {
               raw: Number.isFinite(lane.rawHitRate) ? formatMetricPercent(lane.rawHitRate) : t('usageMetricCacheUnavailableValue'),
               reuse: Number.isFinite(lane.reuseEfficiency) ? formatMetricPercent(lane.reuseEfficiency) : t('usageMetricCacheUnavailableValue')
             })));
+            card.append(usageNode('p', '', t('usageCacheLaneDetails', {
+              ceiling: Number.isFinite(lane.expectedRawHitRateCeiling)
+                ? formatMetricPercent(lane.expectedRawHitRateCeiling) : t('usageMetricCacheUnavailableValue'),
+              reusable: formatMetricInteger(lane.reusablePrefixTokens),
+              unavoidable: formatMetricInteger(lane.unavoidableNewTokens),
+              requests: formatMetricInteger(lane.requestCount),
+              reported: formatMetricInteger(lane.cacheDataResponseCount),
+              missing: formatMetricInteger(lane.cacheDataMissingResponseCount)
+            })));
+            if (lane.source === 'subagent') {
+              card.append(usageNode('p', 'usage-note', t('usageSubagentCacheModes', {
+                cold: formatMetricInteger(lane.coldRequestCount),
+                continued: formatMetricInteger(lane.continuedRequestCount),
+                sibling: formatMetricInteger(lane.siblingRequestCount)
+              })));
+            }
             list.append(card);
           });
           section.append(list);

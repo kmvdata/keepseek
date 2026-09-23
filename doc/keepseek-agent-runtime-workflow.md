@@ -79,7 +79,7 @@ Coordinator 先按模型画像刷新摘要，再由 `buildProviderRequestProject
 - OpenAI Responses；
 - Anthropic Messages。
 
-实际请求、token 估算、工具结果准入和缓存观测共用这一投影。当前 request protocol/tool schema 是 V9；热旧会话只在受控边界迁移。
+实际请求、token 估算、工具结果准入和缓存观测共用这一投影。当前 request protocol/tool schema 是 V10；V10 将子代理结果读取升级为 UTF-8 byte-offset 分页，热旧会话只在受控边界迁移。
 
 ### 4.3 来源解析
 

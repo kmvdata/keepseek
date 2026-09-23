@@ -391,21 +391,20 @@ test('runtime reuses only an exact fresh result and invalidates it after a file 
     const first = JSON.parse((await runtime.delegateTask({ task: 'Read A', profile: 'research' }, {
       parentRequest: parent, parentRunId: 'run-one', language: 'en'
     })).content);
-    assert.equal(first.kind, 'subagent_result');
+    assert.equal(first.kind, 'subagent_result_manifest');
     const second = JSON.parse((await runtime.delegateTask({ task: 'Read A', profile: 'research' }, {
       parentRequest: parent, parentRunId: 'run-two', language: 'en'
     })).content);
-    assert.equal(second.kind, 'subagent_reused_result');
-    assert.equal(second.sourceSubagentId, first.subagentId);
-    assert.equal(second.freshness, 'fresh');
+    assert.equal(second.kind, 'subagent_result_manifest');
+    assert.equal(second.reusedFromSubagentId, first.subagentId);
     assert.equal(requests, 2);
 
     await writeFile(filePath, 'changed', 'utf8');
     const third = JSON.parse((await runtime.delegateTask({ task: 'Read A', profile: 'research' }, {
       parentRequest: parent, parentRunId: 'run-three', language: 'en'
     })).content);
-    assert.equal(third.kind, 'subagent_result');
-    assert.equal(third.reuseCandidate.freshness, 'stale');
+    assert.equal(third.kind, 'subagent_result_manifest');
+    assert.equal(third.reusedFromSubagentId, undefined);
     assert.equal(requests, 4);
   } finally {
     globalThis.fetch = originalFetch;

@@ -141,6 +141,8 @@ export interface UsageEvent {
   unpricedReason?: string;
   /** Attempt/response counters were already appended to the request ledger. */
   ledgerRecorded?: boolean;
+  /** Runtime-only child attribution used to prevent nested double counting. */
+  subagentId?: string;
 }
 
 export interface UsagePriceSnapshot {
@@ -165,6 +167,7 @@ export interface UsagePriceSnapshot {
 export type CacheObservationReason =
   | 'cold_start'
   | 'append_only_prefix_preserved'
+  | 'family_common_prefix_preserved'
   | 'retry_projection_unchanged'
   | 'model_lane_changed'
   | 'source_lane_changed'
@@ -197,7 +200,7 @@ export interface CacheProjectionFingerprint {
  * bytes, credentials and endpoint URLs are deliberately excluded.
  */
 export interface ProviderCacheObservation {
-  version: 1;
+  version: 1 | 2;
   requestId: string;
   attemptIndex: number;
   source: UsageSource;
@@ -207,9 +210,16 @@ export interface ProviderCacheObservation {
   /** SHA-256 identity of the normalized endpoint lane, never the URL itself. */
   endpointLaneIdentity: string;
   laneKey: string;
+  /** Stable sibling family; hashed and content-free. */
+  cacheFamilyKey?: string;
+  cacheFamilyId?: string;
+  subagentProfile?: string;
+  subagentLane?: string;
+  subagentDepth?: number;
   originalModelId: string;
   canonicalModelIdentity: string;
   taskId?: string;
+  conversationId?: string;
   runId?: string;
   contextEpochIndex: number;
   requestProtocolVersion: number;
@@ -219,11 +229,14 @@ export interface ProviderCacheObservation {
   providerHistory: CacheProjectionFingerprint;
   newTail: CacheProjectionFingerprint;
   cacheableProjection: CacheProjectionFingerprint;
+  /** Prefix before task-specific provider history. */
+  stablePrefix?: CacheProjectionFingerprint;
   estimatedPromptTokens: number;
   previousPromptTokensEstimate?: number;
   previousRequestIdentity?: string;
   previousSameLaneRequestIdentity?: string;
-  prefixRelation: 'cold' | 'strict_prefix' | 'identical_retry' | 'broken';
+  prefixRelation: 'cold' | 'strict_prefix' | 'identical_retry' | 'family_common_prefix' | 'broken';
+  comparisonScope?: 'conversation' | 'family';
   inheritsPreviousCacheablePrefix: boolean;
   firstChangedSegment?: 'lane' | 'system' | 'context_instructions' | 'tools' | 'provider_history';
   commonPrefixTokensEstimate: number;
@@ -253,6 +266,11 @@ export interface CacheSourceMetrics {
   comparableRequestCount: number;
   healthyReusableRequestCount: number;
   anomalousReusableRequestCount: number;
+  requestCount?: number;
+  promptTokens?: number;
+  reusablePrefixTokens?: number;
+  unavoidableNewTokens?: number;
+  localEstimateLowCount?: number;
 }
 
 export interface CacheLaneMetrics extends Omit<CacheSourceMetrics, 'source'> {
@@ -261,6 +279,12 @@ export interface CacheLaneMetrics extends Omit<CacheSourceMetrics, 'source'> {
   provider: string;
   protocol: string;
   originalModelId: string;
+  cacheFamilyId?: string;
+  profile?: string;
+  subagentLane?: string;
+  coldRequestCount?: number;
+  continuedRequestCount?: number;
+  siblingRequestCount?: number;
 }
 
 export interface CacheDiagnosticsMetrics {
@@ -283,6 +307,9 @@ export interface CacheDiagnosticsMetrics {
   estimatedReusableTokensNotHit: number;
   estimatedLocalBoundaryLossTokens: number;
   estimatedLocalBoundaryExtraCostByCurrency: Record<string, number>;
+  reusablePrefixTokens?: number;
+  unavoidableNewTokens?: number;
+  localEstimateLowCount?: number;
   lastAnomalyReason?: CacheObservationReason;
   bySource: CacheSourceMetrics[];
   byLane: CacheLaneMetrics[];
@@ -1498,6 +1525,8 @@ export interface AgentRequest {
    * parent chat transcript or provider-visible parent context. */
   subagentContext?: {
     id: string;
+    /** Immediate predecessor conversation when this child continues a stored child session. */
+    previousConversationId?: string;
     treeId: string;
     parentSessionId: string;
     parentRunId: string;
@@ -1505,6 +1534,8 @@ export interface AgentRequest {
     depth: number;
     profile: string;
     lane: 'research-read' | 'review-read' | 'proposal' | 'nested-read';
+    /** Content-free identity of the byte-stable sibling prefix. */
+    cacheFamilyKey?: string;
   };
   signal?: AbortSignal;
 }
@@ -1645,6 +1676,15 @@ export interface AgentRunCallbacks {
     source: UsageSource;
     taskId?: string;
   }) => Promise<ProviderCacheObservation | undefined>;
+  getCacheObservationCandidates?: (input: {
+    sessionId: string;
+    source: UsageSource;
+    conversationId?: string;
+    cacheFamilyKey?: string;
+  }) => Promise<{
+    conversationPrevious?: ProviderCacheObservation;
+    familyCandidates: ProviderCacheObservation[];
+  }>;
   onSubagentRunSummary?: (summary: SubagentRunUsageSummary) => void;
   onSubagentHandoffEstimate?: (estimate: SubagentHandoffEstimate) => void;
   onPromptCacheDiagnostics?: (diagnostics: PromptCacheDiagnostics) => void;

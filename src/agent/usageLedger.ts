@@ -347,9 +347,10 @@ export function summarizeCacheDiagnostics(
     ) }));
   const laneRecords = new Map<string, ProviderUsageLedgerRecord[]>();
   for (const record of usageRecords) {
-    const laneKey = record.cacheObservation?.laneKey;
+    const laneKey = record.cacheObservation?.cacheFamilyKey ?? record.cacheObservation?.laneKey;
     if (!laneKey) continue;
-    laneRecords.set(laneKey, [...(laneRecords.get(laneKey) ?? []), record]);
+    const groupKey = `${record.source}\u0000${laneKey}`;
+    laneRecords.set(groupKey, [...(laneRecords.get(groupKey) ?? []), record]);
   }
   const byLane = Array.from(laneRecords.values()).map((items): CacheLaneMetrics => {
     const first = items[0]!;
@@ -359,6 +360,12 @@ export function summarizeCacheDiagnostics(
       provider: first.provider,
       protocol: first.protocol,
       originalModelId: first.originalModelId,
+      ...(first.cacheObservation?.cacheFamilyId ? { cacheFamilyId: first.cacheObservation.cacheFamilyId } : {}),
+      ...(first.cacheObservation?.subagentProfile ? { profile: first.cacheObservation.subagentProfile } : {}),
+      ...(first.cacheObservation?.subagentLane ? { subagentLane: first.cacheObservation.subagentLane } : {}),
+      coldRequestCount: items.filter((item) => item.cacheObservation?.prefixRelation === 'cold').length,
+      continuedRequestCount: items.filter((item) => item.cacheObservation?.comparisonScope === 'conversation').length,
+      siblingRequestCount: items.filter((item) => item.cacheObservation?.prefixRelation === 'family_common_prefix').length,
       ...summarizeCacheSlice(items)
     };
   });
@@ -413,6 +420,9 @@ export function summarizeCacheDiagnostics(
       (record.cacheObservation?.reusablePrefixTokensEstimate ?? 0) - (record.usage?.cacheHitTokens ?? 0)), 0),
     estimatedLocalBoundaryLossTokens,
     estimatedLocalBoundaryExtraCostByCurrency,
+    reusablePrefixTokens: all.reusablePrefixTokens,
+    unavoidableNewTokens: all.unavoidableNewTokens,
+    localEstimateLowCount: all.localEstimateLowCount,
     ...(lastAnomaly ? { lastAnomalyReason: lastAnomaly.reason } : {}),
     bySource,
     byLane,
@@ -421,36 +431,49 @@ export function summarizeCacheDiagnostics(
 }
 
 function summarizeCacheSlice(records: readonly ProviderUsageLedgerRecord[]): Omit<CacheSourceMetrics, 'source'> {
-  let hit = 0;
-  let miss = 0;
-  let reusable = 0;
-  let prompt = 0;
+  let reportedHit = 0;
+  let reportedPrompt = 0;
+  let eligibleHit = 0;
+  let eligibleReusable = 0;
+  let allReusable = 0;
+  let allPrompt = 0;
+  let unavoidable = 0;
   let reported = 0;
   let missing = 0;
   let comparable = 0;
   let healthy = 0;
   let anomalous = 0;
+  let requestCount = 0;
+  let localEstimateLowCount = 0;
   for (const record of records) {
     const usage = record.usage;
     if (!usage) continue;
+    requestCount += 1;
     if (record.providerCacheDataStatus === 'reported') {
-      hit += usage.cacheHitTokens;
-      miss += usage.cacheMissTokens;
+      reportedHit += usage.cacheHitTokens;
+      reportedPrompt += usage.promptTokens;
       reported += 1;
     } else {
       missing += 1;
     }
     const observation = record.cacheObservation;
+    if (observation) {
+      allPrompt += usage.promptTokens;
+      allReusable += Math.min(usage.promptTokens, observation.reusablePrefixTokensEstimate);
+      unavoidable += Math.max(0, usage.promptTokens - observation.reusablePrefixTokensEstimate);
+      if (record.providerCacheDataStatus === 'reported'
+        && usage.cacheHitTokens > observation.reusablePrefixTokensEstimate) localEstimateLowCount += 1;
+    }
     if (!observation?.eligibleForHealthTarget || record.providerCacheDataStatus !== 'reported') continue;
     comparable += 1;
-    reusable += observation.reusablePrefixTokensEstimate;
-    prompt += usage.promptTokens;
+    eligibleReusable += Math.min(usage.promptTokens, observation.reusablePrefixTokensEstimate);
+    eligibleHit += usage.cacheHitTokens;
     if ((observation.reuseEfficiencyRaw ?? 0) >= CACHE_HEALTH_REUSE_TARGET_PERCENT) healthy += 1;
     else anomalous += 1;
   }
-  const rawHitRate = hit + miss > 0 ? hit / (hit + miss) * 100 : undefined;
-  const expectedRawHitRateCeiling = prompt > 0 ? reusable / prompt * 100 : undefined;
-  const reuseEfficiencyRaw = reusable > 0 ? hit / reusable * 100 : undefined;
+  const rawHitRate = reportedPrompt > 0 ? reportedHit / reportedPrompt * 100 : undefined;
+  const expectedRawHitRateCeiling = allPrompt > 0 ? allReusable / allPrompt * 100 : undefined;
+  const reuseEfficiencyRaw = eligibleReusable > 0 ? eligibleHit / eligibleReusable * 100 : undefined;
   return {
     ...(rawHitRate === undefined ? {} : { rawHitRate }),
     ...(expectedRawHitRateCeiling === undefined ? {} : { expectedRawHitRateCeiling }),
@@ -462,7 +485,12 @@ function summarizeCacheSlice(records: readonly ProviderUsageLedgerRecord[]): Omi
     cacheDataMissingResponseCount: missing,
     comparableRequestCount: comparable,
     healthyReusableRequestCount: healthy,
-    anomalousReusableRequestCount: anomalous
+    anomalousReusableRequestCount: anomalous,
+    requestCount,
+    promptTokens: allPrompt,
+    reusablePrefixTokens: allReusable,
+    unavoidableNewTokens: unavoidable,
+    localEstimateLowCount
   };
 }
 
@@ -471,7 +499,7 @@ function normalizeCacheObservation(
   requestId: string,
   attemptIndex: number
 ): ProviderCacheObservation | undefined {
-  if (!isRecord(value) || value.version !== 1 || value.requestId !== requestId
+  if (!isRecord(value) || (value.version !== 1 && value.version !== 2) || value.requestId !== requestId
     || value.attemptIndex !== attemptIndex || typeof value.laneKey !== 'string'
     || typeof value.endpointLaneIdentity !== 'string' || typeof value.originalModelId !== 'string'
     || typeof value.canonicalModelIdentity !== 'string' || typeof value.sourceId !== 'string'
@@ -485,7 +513,7 @@ function normalizeCacheObservation(
   const reason = normalizeCacheReason(value.reason);
   if (!reason) return undefined;
   return {
-    version: 1,
+    version: value.version,
     requestId,
     attemptIndex,
     source: normalizeSource(value.source),
@@ -494,14 +522,21 @@ function normalizeCacheObservation(
     protocol: value.protocol,
     endpointLaneIdentity: value.endpointLaneIdentity,
     laneKey: value.laneKey,
+    ...(optionalString(value.cacheFamilyKey) ? { cacheFamilyKey: optionalString(value.cacheFamilyKey) } : {}),
+    ...(optionalString(value.cacheFamilyId) ? { cacheFamilyId: optionalString(value.cacheFamilyId) } : {}),
+    ...(optionalString(value.subagentProfile) ? { subagentProfile: optionalString(value.subagentProfile) } : {}),
+    ...(optionalString(value.subagentLane) ? { subagentLane: optionalString(value.subagentLane) } : {}),
+    ...(finiteNumber(value.subagentDepth) === undefined ? {} : { subagentDepth: nonNegativeInteger(value.subagentDepth) }),
     originalModelId: value.originalModelId,
     canonicalModelIdentity: value.canonicalModelIdentity,
     ...(optionalString(value.taskId) ? { taskId: optionalString(value.taskId) } : {}),
+    ...(optionalString(value.conversationId) ? { conversationId: optionalString(value.conversationId) } : {}),
     ...(optionalString(value.runId) ? { runId: optionalString(value.runId) } : {}),
     contextEpochIndex: nonNegativeInteger(value.contextEpochIndex),
     requestProtocolVersion: Math.max(1, nonNegativeInteger(value.requestProtocolVersion)),
     system: fingerprints[0]!, contextInstructions: fingerprints[1]!, tools: fingerprints[2]!,
     providerHistory: fingerprints[3]!, newTail: fingerprints[4]!, cacheableProjection: fingerprints[5]!,
+    ...(normalizeFingerprint(value.stablePrefix) ? { stablePrefix: normalizeFingerprint(value.stablePrefix) } : {}),
     estimatedPromptTokens: nonNegativeInteger(value.estimatedPromptTokens),
     ...(finiteNumber(value.previousPromptTokensEstimate) === undefined
       ? {} : { previousPromptTokensEstimate: nonNegativeInteger(value.previousPromptTokensEstimate) }),
@@ -509,7 +544,10 @@ function normalizeCacheObservation(
     ...(optionalString(value.previousSameLaneRequestIdentity)
       ? { previousSameLaneRequestIdentity: optionalString(value.previousSameLaneRequestIdentity) } : {}),
     prefixRelation: value.prefixRelation === 'strict_prefix' || value.prefixRelation === 'identical_retry'
+      || value.prefixRelation === 'family_common_prefix'
       || value.prefixRelation === 'broken' ? value.prefixRelation : 'cold',
+    ...(value.comparisonScope === 'conversation' || value.comparisonScope === 'family'
+      ? { comparisonScope: value.comparisonScope } : {}),
     inheritsPreviousCacheablePrefix: value.inheritsPreviousCacheablePrefix === true,
     ...(value.firstChangedSegment === 'lane' || value.firstChangedSegment === 'system'
       || value.firstChangedSegment === 'context_instructions' || value.firstChangedSegment === 'tools'
@@ -538,7 +576,7 @@ function normalizeFingerprint(value: unknown): import('../shared/types').CachePr
 
 function normalizeCacheReason(value: unknown): import('../shared/types').CacheObservationReason | undefined {
   const reasons: import('../shared/types').CacheObservationReason[] = [
-    'cold_start', 'append_only_prefix_preserved', 'retry_projection_unchanged', 'model_lane_changed',
+    'cold_start', 'append_only_prefix_preserved', 'family_common_prefix_preserved', 'retry_projection_unchanged', 'model_lane_changed',
     'source_lane_changed', 'protocol_lane_changed', 'endpoint_lane_changed', 'system_prompt_changed',
     'context_instructions_changed', 'tools_schema_changed', 'history_rewritten', 'history_compacted',
     'context_epoch_rollover', 'protocol_migration', 'provider_context_too_long', 'stale_capacity_calibration',

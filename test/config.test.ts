@@ -18,6 +18,8 @@ import {
   getConfiguredModelUsagePricing,
   getConfiguredPatchSettings,
   getConfiguredSubagentMaxExecutionMs,
+  getConfiguredSubagentHandoffPreviewBytes,
+  getConfiguredSubagentParallelHandoffBytes,
   getConfiguredSubagentMaxUpstreamTokens,
   normalizeAgentSettings,
   normalizeCompressionThreshold
@@ -161,6 +163,8 @@ test('DraftRun uses bounded timeout and transcript defaults', () => {
 test('logical run safety fuses have finite defaults and bounded configuration normalization', () => {
   assert.equal(getConfiguredAgentMaxExecutionMs(), 900_000);
   assert.equal(getConfiguredSubagentMaxExecutionMs(), 300_000);
+  assert.equal(getConfiguredSubagentHandoffPreviewBytes(), 10_240);
+  assert.equal(getConfiguredSubagentParallelHandoffBytes(), 20_480);
   assert.equal(getConfiguredAgentMaxModelRequests(), 32);
   assert.equal(getConfiguredAgentMaxModelRequests(true), 12);
   assert.equal(getConfiguredAgentMaxContinuations(), 1);
@@ -181,7 +185,9 @@ test('logical run safety fuses have finite defaults and bounded configuration no
       'agent.maxContinuations': 99,
       'agent.maxContextEpochRollovers': -3,
       'agent.maxTreeUpstreamTokens': 1_000,
-      'agent.toolMaxOutputTokens': 256
+      'agent.toolMaxOutputTokens': 256,
+      'subagent.handoffPreviewBytes': 99_999,
+      'subagent.parallelHandoffBytes': 1
     }[key] as T | undefined) ?? fallback
   });
   try {
@@ -191,6 +197,8 @@ test('logical run safety fuses have finite defaults and bounded configuration no
     assert.equal(getConfiguredAgentMaxContextEpochRollovers(), 0);
     assert.equal(getConfiguredAgentMaxTreeUpstreamTokens(), 1_000);
     assert.equal(getConfiguredAgentToolMaxOutputTokens(), 256);
+    assert.equal(getConfiguredSubagentHandoffPreviewBytes(), 24_576);
+    assert.equal(getConfiguredSubagentParallelHandoffBytes(), 16_384);
   } finally {
     vscode.workspace.getConfiguration = original;
   }

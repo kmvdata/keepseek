@@ -120,7 +120,8 @@ test('append-only native history proves a strict byte prefix even though the who
   assert.equal(second.prefixRelation, 'strict_prefix');
   assert.equal(second.inheritsPreviousCacheablePrefix, true);
   assert.equal(second.reason, 'append_only_prefix_preserved');
-  assert.equal(second.reusablePrefixTokensEstimate, 76_000);
+  assert.equal(second.reusablePrefixTokensEstimate, 75_968,
+    'DeepSeek reusable estimates are rounded down to its cache-block granularity');
 });
 
 test('the first changed local segment is deterministic for system, context, tools and history', () => {
@@ -177,8 +178,8 @@ test('100K prompt with 76K reusable and 75K hit is healthy at about 98.7% reuse'
   });
   const metrics = summarizeCacheDiagnostics(records);
   assert.ok(Math.abs((metrics.rawHitRate ?? 0) - 75) < 0.01);
-  assert.ok(Math.abs((metrics.expectedRawHitRateCeiling ?? 0) - 76) < 0.01);
-  assert.ok(Math.abs((metrics.reuseEfficiency ?? 0) - 98.6842) < 0.01);
+  assert.ok(Math.abs((metrics.expectedRawHitRateCeiling ?? 0) - 75.968) < 0.01);
+  assert.ok(Math.abs((metrics.reuseEfficiency ?? 0) - (75_000 / 75_968 * 100)) < 0.01);
   assert.equal(metrics.healthyReusableRequestCount, 1);
   assert.equal(metrics.anomalousReusableRequestCount, 0);
 });

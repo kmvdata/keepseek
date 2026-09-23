@@ -1232,18 +1232,24 @@ function createSubagentTools(requestProtocolVersion: number): DeepSeekFunctionTo
       type: 'function',
       function: {
         name: READ_SUBAGENT_RESULT_TOOL_NAME,
-        description: requestProtocolVersion >= 8
+        description: requestProtocolVersion >= 10
+          ? 'Read exactly one bounded UTF-8 byte page from a stored child final result referenced by a V2 handoff manifest. References are restricted to the current parent session and permitted subagent lineage. This never returns hidden reasoning, private tool traces, or additional pages automatically.'
+          : requestProtocolVersion >= 8
           ? 'Legacy migration bridge for a child result created by a V1–V7 parent lane. New V8 child results use keepseek_read_evidence. This bounded read never returns hidden reasoning or the child tool trace, and its result enters the same general evidence/admission pipeline.'
           : 'Read a bounded page from a stored child final result in the same parent session. This never returns hidden reasoning or the child tool trace.',
         strict: true,
         parameters: {
           type: 'object',
-          properties: {
+          properties: requestProtocolVersion >= 10 ? {
+            ref: { type: 'string', description: 'Opaque resultRef from a subagent_result_manifest in this conversation lineage.' },
+            offsetBytes: { type: 'number', description: 'Zero-based UTF-8 byte offset. Defaults to 0 and must be a character boundary.', minimum: 0 },
+            limitBytes: { type: 'number', description: 'Maximum UTF-8 bytes for this page. Defaults to 12288 and is capped at 24576.', minimum: 4, maximum: 24576 }
+          } : {
             subagentId: { type: 'string', description: 'Stable child id returned by a delegation tool.' },
             offset: { type: 'number', description: 'Zero-based character offset. Defaults to 0.' },
             maxChars: { type: 'number', description: 'Page size. Defaults to 12000 and is capped at 24000.' }
           },
-          required: ['subagentId'],
+          required: requestProtocolVersion >= 10 ? ['ref'] : ['subagentId'],
           additionalProperties: false
         }
       }

@@ -162,7 +162,7 @@ Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使�
 
 最终 output limit 会被 learned effective window 再次收紧，工具选择轮、最终回答轮和摘要轮使用不同的动态输出预留。Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tokens`，Anthropic 写入 `max_tokens`；它们不会互相注入协议专属字段。Provider 的真实 input usage 按来源/endpoint/model 校准估算比例；context-too-long 会降低 learned window 并重建 epoch，这些校准值不进入 system/history。名称猜测与人工 metadata 只是声明起点，不是终止依据。
 
-模型切换会迁移 provider/cache lane，但不会删除或强制重建语义摘要。`HistorySummary.modelId` 保留生成 provenance；`requestProtocolVersion` 只表示序列化/schema 兼容版本，不表示模型能力等级。当前协议/Tool Schema 为 v9：新会话固定包含 V8 的 `keepseek_read_evidence` 和 V9 的 `keepseek_apply_patch`，工具按名稳定排序；v1–v8 热会话保持原 provider-visible bytes，只在缓存已冷或受控 epoch rollover 边界迁移，历史消息和旧预算文本不改写。rollover 的完整宿主权威状态保存为可分页 checkpoint evidence；Provider seed 只带最近条目、总量/hash 和 manifest `evidenceRef`，因此长期任务的恢复前缀不会随累计工具次数无限增长。
+模型切换会迁移 provider/cache lane，但不会删除或强制重建语义摘要。`HistorySummary.modelId` 保留生成 provenance；`requestProtocolVersion` 只表示序列化/schema 兼容版本，不表示模型能力等级。当前协议/Tool Schema 为 v10：新会话固定包含 V8 的 `keepseek_read_evidence`、V9 的 `keepseek_apply_patch`，并使用 V10 的 UTF-8 byte-offset `keepseek_read_subagent_result` schema；工具按名稳定排序。v1–v9 热会话保持原 provider-visible bytes，只在缓存已冷或受控 epoch rollover 边界迁移，历史消息和旧预算文本不改写。rollover 的完整宿主权威状态保存为可分页 checkpoint evidence；Provider seed 只带最近条目、总量/hash 和 manifest `evidenceRef`，因此长期任务的恢复前缀不会随累计工具次数无限增长。
 
 ## 3. 稳定上下文与当前用户 prompt 的组装
 

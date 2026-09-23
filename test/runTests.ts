@@ -65,6 +65,7 @@ import './toolAuthorization.test';
 import './usageStats.test';
 import './p0CapacityPricing.test';
 import './p1CacheObservability.test';
+import './p1SubagentHandoffCacheFamily.test';
 import './validationAvailability.test';
 import './workspaceToolsSearch.test';
 import './startupPerformance.test';

@@ -59,9 +59,47 @@ export interface DelegateParallelInput {
 }
 
 export interface ReadSubagentResultInput {
-  subagentId: string;
+  /** V10 result reference. Legacy callers may still provide subagentId. */
+  ref?: string;
+  subagentId?: string;
+  offsetBytes?: number;
+  limitBytes?: number;
+  /** V1-V9 compatibility fields. */
   offset?: number;
   maxChars?: number;
+}
+
+export type SubagentManifestStatus = 'completed' | 'failed' | 'cancelled' | 'budget_exhausted' | 'stopped';
+
+/** Provider-visible V10 handoff. Full result text never appears in this object. */
+export interface SubagentResultManifestV2 {
+  version: 2;
+  ok: boolean;
+  kind: 'subagent_result_manifest';
+  subagentId: string;
+  treeId: string;
+  profile: string;
+  lane: SubagentLane;
+  depth: number;
+  status: SubagentManifestStatus;
+  summary: string;
+  preview: string;
+  resultRef: string;
+  resultHash: string;
+  resultChars: number;
+  resultBytes: number;
+  hasMore: boolean;
+  resultTruncated?: boolean;
+  originalResultChars?: number;
+  originalResultHash?: string;
+  model: { sourceId: string; modelId: string };
+  usageSummary: { requests: number; totalTokens: number };
+  draftEditCount: number;
+  draftRunCount: number;
+  errorType?: string;
+  error?: string;
+  diagnosticRef?: string;
+  reusedFromSubagentId?: string;
 }
 
 export interface SubagentInvocationContext {
@@ -73,6 +111,7 @@ export interface SubagentInvocationContext {
   signal?: AbortSignal;
   onUsage?: (event: UsageEvent) => void;
   onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => void;
+  getCacheObservationCandidates?: import('../../shared/types').AgentRunCallbacks['getCacheObservationCandidates'];
   onRunSummary?: (summary: SubagentRunUsageSummary) => void;
 }
 
@@ -118,7 +157,7 @@ export interface SubagentProgressState {
 }
 
 export interface StoredSubagentMetadata {
-  version: 1;
+  version: 1 | 2;
   id: string;
   treeId: string;
   parentSessionId: string;
@@ -152,6 +191,9 @@ export interface StoredSubagentMetadata {
   diagnostic?: SubagentDiagnosticReference;
   resultHash?: string;
   resultChars?: number;
+  resultBytes?: number;
+  originalResultHash?: string;
+  originalResultChars?: number;
   resultTruncated?: boolean;
   usage?: import('../../shared/types').TurnUsageStats;
   stats?: SubagentRunUsageSummary;
@@ -163,9 +205,13 @@ export interface StoredSubagentMetadata {
 
 export interface StoredSubagentTranscript {
   checkpoint?: import('../runCheckpoint').RunCheckpoint;
-  version: 1;
+  version: 1 | 2;
   metadataId: string;
   contextInstructions: string;
   messages: import('../../shared/types').ChatMessage[];
+  /** V2 messages may keep an empty final assistant content; restore from result. */
+  resultMessageId?: string;
+  /** V2 reuse records point at the canonical stored result instead of copying it. */
+  resultRef?: string;
   result: string;
 }

@@ -15,7 +15,7 @@ import type { OpenAiResponsesRequestBody } from './providers/responsesTypes';
 import type { AnthropicMessagesRequestBody } from './providers/anthropicTypes';
 import type { ModelSourceProvider } from '../accounts/types';
 
-export const CACHE_OBSERVATION_SCHEMA_VERSION = 1;
+export const CACHE_OBSERVATION_SCHEMA_VERSION = 2;
 export const CACHE_HEALTH_REUSABLE_PREFIX_MIN_TOKENS = 1_024;
 export const CACHE_HEALTH_REUSE_TARGET_PERCENT = 95;
 
@@ -30,11 +30,18 @@ export interface CreateCacheObservationInput {
   baseUrl: string;
   body: ProviderRequestBody;
   taskId?: string;
+  conversationId?: string;
   runId?: string;
   contextEpochIndex?: number;
   requestProtocolVersion?: number;
   contextInstructions?: string;
   estimatedPromptTokens?: number;
+  conversationPrevious?: ProviderCacheObservation;
+  familyCandidates?: readonly ProviderCacheObservation[];
+  cacheFamilyKey?: string;
+  subagentProfile?: string;
+  subagentLane?: string;
+  subagentDepth?: number;
   previous?: ProviderCacheObservation;
   historyCompacted?: boolean;
   historyRewriteReason?: string;
@@ -46,7 +53,51 @@ interface ProjectionBytes {
   contextInstructions: Uint8Array;
   tools: Uint8Array;
   providerHistory: Uint8Array;
+  stablePrefix: Uint8Array;
   full: Uint8Array;
+}
+
+export function createSubagentCacheFamilyKey(input: {
+  sourceId: string;
+  provider: ModelSourceProvider;
+  baseUrl: string;
+  modelId: string;
+  profile: string;
+  lane: string;
+  depth: number;
+  personaVersion: string;
+  contextInstructionsHash: string;
+  toolSchemaVersion: number;
+  toolNames: readonly string[];
+  authorizationContextHash: string;
+  workspaceContextHash: string;
+  requestProtocolVersion: number;
+  capabilityBits?: readonly string[];
+}): string {
+  const requestLane = getProviderRequestLane({
+    provider: input.provider,
+    sourceId: input.sourceId,
+    baseUrl: input.baseUrl,
+    modelId: input.modelId
+  });
+  return hashText(JSON.stringify([
+    requestLane.sourceId,
+    requestLane.protocol,
+    hashText(requestLane.endpointLane),
+    input.modelId,
+    getCanonicalModelIdentity(input.modelId),
+    input.profile,
+    input.lane,
+    Math.max(0, Math.floor(input.depth)),
+    input.personaVersion,
+    input.contextInstructionsHash,
+    Math.max(1, Math.floor(input.toolSchemaVersion)),
+    [...input.toolNames].sort(),
+    input.authorizationContextHash,
+    input.workspaceContextHash,
+    Math.max(1, Math.floor(input.requestProtocolVersion)),
+    [...(input.capabilityBits ?? [])].sort()
+  ]));
 }
 
 /**
@@ -72,7 +123,7 @@ export function createProviderCacheObservation(input: CreateCacheObservationInpu
   const projection = projectNativeRequest(input.body, input.contextInstructions);
   const estimatedPromptTokens = positiveInteger(input.estimatedPromptTokens)
     ?? estimateTokenCount(decode(projection.full));
-  const previous = input.previous;
+  const previous = input.conversationPrevious ?? input.previous;
   const sameLane = Boolean(previous && previous.laneKey === laneKey);
   const previousIdentity = previous ? requestIdentity(previous.requestId, previous.attemptIndex) : undefined;
   const commonPrefixBytes = previous && sameLane
@@ -85,6 +136,10 @@ export function createProviderCacheObservation(input: CreateCacheObservationInpu
     && input.requestId === previous.requestId
     && projection.full.byteLength === previous.cacheableProjection.byteLength
     && hashBytes(projection.full) === previous.cacheableProjection.hash);
+  const familyCandidate = !previous && input.cacheFamilyKey
+    ? selectFamilyCandidate(input.familyCandidates ?? [], input.cacheFamilyKey, laneKey, projection.stablePrefix)
+    : undefined;
+  const familyCommonPrefix = Boolean(familyCandidate);
   const contextEpochRollover = Boolean(previous
     && Math.max(0, Math.floor(input.contextEpochIndex ?? 0)) !== previous.contextEpochIndex);
   const protocolMigration = Boolean(input.protocolMigration || (previous
@@ -110,19 +165,26 @@ export function createProviderCacheObservation(input: CreateCacheObservationInpu
     projection,
     strictPrefix,
     identicalRetry,
+    familyCommonPrefix,
     boundary
   });
+  const effectiveCommonPrefixBytes = familyCandidate?.stablePrefix?.byteLength ?? commonPrefixBytes;
   const commonPrefixTokensEstimate = projection.full.byteLength > 0
-    ? Math.min(estimatedPromptTokens, Math.floor(estimatedPromptTokens * commonPrefixBytes / projection.full.byteLength))
+    ? Math.min(estimatedPromptTokens, Math.floor(estimatedPromptTokens * effectiveCommonPrefixBytes / projection.full.byteLength))
     : 0;
-  const reusablePrefixTokensEstimate = strictPrefix && previous
+  const rawReusablePrefixTokens = strictPrefix && previous
     ? Math.min(estimatedPromptTokens, previous.estimatedPromptTokens)
-    : identicalRetry && previous ? Math.min(estimatedPromptTokens, previous.estimatedPromptTokens) : 0;
+    : identicalRetry && previous ? Math.min(estimatedPromptTokens, previous.estimatedPromptTokens)
+      : familyCandidate ? Math.min(estimatedPromptTokens, projectionStableTokens(projection.stablePrefix, estimatedPromptTokens, projection.full))
+        : 0;
+  const reusablePrefixTokensEstimate = floorToProviderCacheBlock(rawReusablePrefixTokens, input.provider);
   const newTailBytes = strictPrefix && previous
     ? projection.full.slice(previous.cacheableProjection.byteLength)
-    : identicalRetry ? new Uint8Array() : projection.full;
+    : identicalRetry ? new Uint8Array()
+      : familyCommonPrefix ? projection.full.slice(projection.stablePrefix.byteLength)
+        : projection.full;
   const unavoidableNewTokensEstimate = Math.max(0, estimatedPromptTokens - reusablePrefixTokensEstimate);
-  const eligibleForHealthTarget = strictPrefix
+  const eligibleForHealthTarget = (strictPrefix || familyCommonPrefix)
     && reusablePrefixTokensEstimate >= CACHE_HEALTH_REUSABLE_PREFIX_MIN_TOKENS
     && !Object.values(boundary).some(Boolean);
 
@@ -136,9 +198,17 @@ export function createProviderCacheObservation(input: CreateCacheObservationInpu
     protocol: lane.protocol,
     endpointLaneIdentity,
     laneKey,
+    ...(input.cacheFamilyKey ? {
+      cacheFamilyKey: input.cacheFamilyKey,
+      cacheFamilyId: input.cacheFamilyKey.slice(0, 12)
+    } : {}),
+    ...(input.subagentProfile ? { subagentProfile: input.subagentProfile } : {}),
+    ...(input.subagentLane ? { subagentLane: input.subagentLane } : {}),
+    ...(typeof input.subagentDepth === 'number' ? { subagentDepth: Math.max(0, Math.floor(input.subagentDepth)) } : {}),
     originalModelId: input.body.model,
     canonicalModelIdentity: getCanonicalModelIdentity(input.body.model),
     ...(input.taskId ? { taskId: input.taskId } : {}),
+    ...(input.conversationId ? { conversationId: input.conversationId } : {}),
     ...(input.runId ? { runId: input.runId } : {}),
     contextEpochIndex: Math.max(0, Math.floor(input.contextEpochIndex ?? 0)),
     requestProtocolVersion: Math.max(1, Math.floor(input.requestProtocolVersion ?? 1)),
@@ -148,12 +218,16 @@ export function createProviderCacheObservation(input: CreateCacheObservationInpu
     providerHistory: fingerprint(projection.providerHistory),
     newTail: fingerprint(newTailBytes),
     cacheableProjection: { ...fingerprint(projection.full), tokensEstimate: estimatedPromptTokens },
+    stablePrefix: fingerprint(projection.stablePrefix),
     estimatedPromptTokens,
     ...(previous ? { previousPromptTokensEstimate: previous.estimatedPromptTokens } : {}),
     ...(previousIdentity ? { previousRequestIdentity: previousIdentity } : {}),
     ...(previousIdentity && sameLane ? { previousSameLaneRequestIdentity: previousIdentity } : {}),
-    prefixRelation: !previous ? 'cold' : strictPrefix ? 'strict_prefix' : identicalRetry ? 'identical_retry' : 'broken',
-    inheritsPreviousCacheablePrefix: strictPrefix || identicalRetry,
+    prefixRelation: identicalRetry ? 'identical_retry' : strictPrefix ? 'strict_prefix'
+      : familyCommonPrefix ? 'family_common_prefix' : !previous ? 'cold' : 'broken',
+    ...(previous ? { comparisonScope: 'conversation' as const }
+      : familyCommonPrefix ? { comparisonScope: 'family' as const } : {}),
+    inheritsPreviousCacheablePrefix: strictPrefix || identicalRetry || familyCommonPrefix,
     ...(changed.segment ? { firstChangedSegment: changed.segment } : {}),
     commonPrefixTokensEstimate,
     reusablePrefixTokensEstimate,
@@ -236,6 +310,7 @@ function projectNativeRequest(body: ProviderRequestBody, contextInstructions?: s
     contextInstructions: contextInstructionsBytes,
     tools: toolsBytes,
     providerHistory,
+    stablePrefix: concatBytes(system, contextInstructionsBytes, toolsBytes, encodeItems('history', [])),
     full: concatBytes(system, contextInstructionsBytes, toolsBytes, providerHistory)
   };
 }
@@ -265,6 +340,7 @@ function classifyChange(input: {
   projection: ProjectionBytes;
   strictPrefix: boolean;
   identicalRetry: boolean;
+  familyCommonPrefix: boolean;
   boundary: ProviderCacheObservation['boundary'];
 }): { reason: CacheObservationReason; segment?: ProviderCacheObservation['firstChangedSegment'] } {
   const previous = input.previous;
@@ -273,6 +349,7 @@ function classifyChange(input: {
     if (input.boundary.historyCompacted) return { reason: 'history_compacted', segment: 'provider_history' };
     if (input.boundary.historyRewritten) return { reason: 'history_rewritten', segment: 'provider_history' };
     if (input.boundary.protocolMigration) return { reason: 'protocol_migration', segment: 'lane' };
+    if (input.familyCommonPrefix) return { reason: 'family_common_prefix_preserved' };
     return { reason: 'cold_start' };
   }
   if (previous.originalModelId !== input.lane.modelId) return { reason: 'model_lane_changed', segment: 'lane' };
@@ -303,7 +380,8 @@ function classifyChange(input: {
 }
 
 export function reasonCategory(reason: CacheObservationReason): CacheObservationReasonCategory {
-  if (reason === 'cold_start' || reason === 'append_only_prefix_preserved' || reason === 'retry_projection_unchanged') {
+  if (reason === 'cold_start' || reason === 'append_only_prefix_preserved'
+    || reason === 'family_common_prefix_preserved' || reason === 'retry_projection_unchanged') {
     return 'normal';
   }
   if (reason === 'history_compacted' || reason === 'context_epoch_rollover' || reason === 'protocol_migration'
@@ -320,6 +398,33 @@ function commonPrefixByteLengthFromHash(current: Uint8Array, previous: CacheProj
   // Persisted records intentionally omit old bytes. A failed complete-prefix
   // proof cannot safely claim a shorter reusable prefix.
   return 0;
+}
+
+function selectFamilyCandidate(
+  candidates: readonly ProviderCacheObservation[],
+  cacheFamilyKey: string,
+  laneKey: string,
+  currentStablePrefix: Uint8Array
+): ProviderCacheObservation | undefined {
+  const stableHash = hashBytes(currentStablePrefix);
+  return candidates
+    .filter((candidate) => candidate.cacheFamilyKey === cacheFamilyKey
+      && candidate.laneKey === laneKey
+      && candidate.stablePrefix?.hash === stableHash
+      && candidate.stablePrefix.byteLength === currentStablePrefix.byteLength)
+    .sort((left, right) => (right.stablePrefix?.tokensEstimate ?? 0) - (left.stablePrefix?.tokensEstimate ?? 0)
+      || requestIdentity(left.requestId, left.attemptIndex).localeCompare(requestIdentity(right.requestId, right.attemptIndex)))[0];
+}
+
+function projectionStableTokens(stable: Uint8Array, estimatedPromptTokens: number, full: Uint8Array): number {
+  return full.byteLength > 0
+    ? Math.floor(estimatedPromptTokens * stable.byteLength / full.byteLength)
+    : 0;
+}
+
+function floorToProviderCacheBlock(tokens: number, provider: ModelSourceProvider): number {
+  const block = provider === 'deepseek' ? 64 : 1_024;
+  return Math.floor(Math.max(0, tokens) / block) * block;
 }
 
 function fingerprint(value: Uint8Array): CacheProjectionFingerprint {

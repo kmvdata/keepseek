@@ -212,13 +212,24 @@ export const usageFormattersFragment: WebviewFragment = {
               cacheDataMissingResponseCount: readNonNegativeNumber(item.cacheDataMissingResponseCount, 0),
               comparableRequestCount: readNonNegativeNumber(item.comparableRequestCount, 0),
               healthyReusableRequestCount: readNonNegativeNumber(item.healthyReusableRequestCount, 0),
-              anomalousReusableRequestCount: readNonNegativeNumber(item.anomalousReusableRequestCount, 0)
+              anomalousReusableRequestCount: readNonNegativeNumber(item.anomalousReusableRequestCount, 0),
+              requestCount: readNonNegativeNumber(item.requestCount, 0),
+              promptTokens: readNonNegativeNumber(item.promptTokens, 0),
+              reusablePrefixTokens: readNonNegativeNumber(item.reusablePrefixTokens, 0),
+              unavoidableNewTokens: readNonNegativeNumber(item.unavoidableNewTokens, 0),
+              localEstimateLowCount: readNonNegativeNumber(item.localEstimateLowCount, 0)
             };
             if (includeLane) {
               result.sourceId = typeof item.sourceId === 'string' ? item.sourceId : '';
               result.provider = typeof item.provider === 'string' ? item.provider : '';
               result.protocol = typeof item.protocol === 'string' ? item.protocol : '';
               result.originalModelId = typeof item.originalModelId === 'string' ? item.originalModelId : '';
+              result.cacheFamilyId = typeof item.cacheFamilyId === 'string' ? item.cacheFamilyId : '';
+              result.profile = typeof item.profile === 'string' ? item.profile : '';
+              result.subagentLane = typeof item.subagentLane === 'string' ? item.subagentLane : '';
+              result.coldRequestCount = readNonNegativeNumber(item.coldRequestCount, 0);
+              result.continuedRequestCount = readNonNegativeNumber(item.continuedRequestCount, 0);
+              result.siblingRequestCount = readNonNegativeNumber(item.siblingRequestCount, 0);
             }
             return result;
           }) : [];
@@ -240,6 +251,9 @@ export const usageFormattersFragment: WebviewFragment = {
           providerCacheEvictionPossibleCount: readNonNegativeNumber(value.providerCacheEvictionPossibleCount, 0),
           estimatedReusableTokensNotHit: readNonNegativeNumber(value.estimatedReusableTokensNotHit, 0),
           estimatedLocalBoundaryLossTokens: readNonNegativeNumber(value.estimatedLocalBoundaryLossTokens, 0),
+          reusablePrefixTokens: readNonNegativeNumber(value.reusablePrefixTokens, 0),
+          unavoidableNewTokens: readNonNegativeNumber(value.unavoidableNewTokens, 0),
+          localEstimateLowCount: readNonNegativeNumber(value.localEstimateLowCount, 0),
           estimatedLocalBoundaryExtraCostByCurrency: normalizeCostByCurrency(value.estimatedLocalBoundaryExtraCostByCurrency),
           lastAnomalyReason: typeof value.lastAnomalyReason === 'string' ? value.lastAnomalyReason : '',
           bySource: metricList(value.bySource, false),

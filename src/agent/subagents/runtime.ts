@@ -1,6 +1,10 @@
 import { recoveryBlocker, type RunCheckpoint } from '../runCheckpoint';
 import { mergeDurations } from '../executionPolicy';
-import { getConfiguredSubagentMaxExecutionMs } from '../../shared/config';
+import {
+  getConfiguredSubagentHandoffPreviewBytes,
+  getConfiguredSubagentMaxExecutionMs,
+  getConfiguredSubagentParallelHandoffBytes
+} from '../../shared/config';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { ModelSourceStore } from '../../accounts/accountStore';
@@ -32,13 +36,20 @@ import {
 } from '../protocol';
 import { AgentLoop } from '../runner';
 import { addUsageEventToTurnStats } from '../usageStats';
+import { createSubagentCacheFamilyKey } from '../cacheObservation';
 import {
   createSubagentRunUsageSummary
 } from '../subagentUsageStats';
 import { getBuiltInReadToolNames, resolveSubagentProfile } from './profiles';
 import { normalizeExecutionMode, PLAN_PHASE_BLOCKED_ERROR_TYPE } from '../executionMode';
 import { SubagentScheduler } from './scheduler';
-import { SubagentStore, DEFAULT_SUBAGENT_RESULT_PAGE_CHARS } from './store';
+import { SubagentStore } from './store';
+import {
+  createParallelHandoff,
+  createSubagentResultManifest,
+  stableJson,
+  utf8ByteLength
+} from './handoff';
 import {
   createWorkspaceScopeRoots,
   createStableWorkspaceContext,
@@ -64,13 +75,13 @@ import type {
   SubagentInvocationContext,
   SubagentProgressState,
   SubagentProfile,
+  SubagentResultManifestV2,
   SubagentToolAdapter,
   SubagentToolExecution
 } from './types';
 import type { SubagentToolCategory } from './types';
 
-const SUBAGENT_PROTOCOL_VERSION = 9;
-const MAX_INLINE_RESULT_CHARS = DEFAULT_SUBAGENT_RESULT_PAGE_CHARS;
+const SUBAGENT_PROTOCOL_VERSION = 10;
 const MAX_PARALLEL_TASKS = 8;
 
 interface PreparedSubagentTask {
@@ -184,22 +195,39 @@ export class SubagentRuntime implements SubagentToolAdapter {
       }
     });
     const accepted = conflicts.length === 0 && failedTasks.length === 0;
+    const manifests = executions.map((execution, index): SubagentResultManifestV2 => {
+      const parsed = safeParseToolResult(execution.content);
+      if (isSubagentResultManifest(parsed)) return parsed;
+      const preparedTask = prepared[index]!;
+      return createSubagentResultManifest({
+        metadata: {
+          id: preparedTask.id,
+          treeId: preparedTask.treeId,
+          profile: preparedTask.profile.id,
+          lane: preparedTask.profile.lane,
+          depth: preparedTask.depth,
+          sourceId: '',
+          modelId: ''
+        },
+        result: '',
+        status: 'failed',
+        ok: false,
+        summary: 'The child did not return a readable result manifest.',
+        errorType: 'subagent_manifest_missing'
+      });
+    });
     return {
-      content: JSON.stringify({
-        ok: accepted,
-        kind: 'subagent_parallel_result',
-        results: executions.map((execution, index) => ({
-          taskIndex: index,
-          result: safeParseToolResult(execution.content)
-        })),
+      content: createParallelHandoff({
+        manifests,
+        accepted,
         draftEditCount: accepted ? draftEdits.length : 0,
         draftRunCount: accepted ? draftRuns.length : 0,
+        maxBytes: getConfiguredSubagentParallelHandoffBytes(),
         ...(failedTasks.length ? {
           errorType: 'subagent_parallel_child_failed',
           failedTasks,
           error: 'One or more child results failed and no batch proposals were merged.'
-        } : {}),
-        ...(conflicts.length ? {
+        } : conflicts.length ? {
           errorType: 'subagent_proposal_conflict',
           conflicts,
           error: 'Overlapping proposal outputs were not merged.'
@@ -217,7 +245,11 @@ export class SubagentRuntime implements SubagentToolAdapter {
     }
     const result = await this.store.readResultPage({
       parentSessionId,
+      ref: input.ref,
       subagentId: input.subagentId,
+      allowedTreeId: context.parentRequest.subagentContext?.treeId,
+      offsetBytes: input.offsetBytes,
+      limitBytes: input.limitBytes,
       offset: input.offset,
       maxChars: input.maxChars
     });
@@ -243,9 +275,26 @@ export class SubagentRuntime implements SubagentToolAdapter {
     const id = `sa_${randomUUID()}`;
     const treeId = parentChild?.treeId ?? parentRequest.checkpoint?.taskId ?? context.parentRunId;
     const rootRunId = parentChild?.rootRunId ?? context.parentRunId;
-    const prior = input.continueSubagentId
+    const storedPrior = input.continueSubagentId
       ? await this.store.read(parentSessionId, input.continueSubagentId)
       : undefined;
+    const priorResult = storedPrior
+      ? await this.store.readCanonicalResult(parentSessionId, storedPrior)
+      : undefined;
+    const prior = storedPrior && priorResult !== undefined ? {
+      metadata: storedPrior.metadata,
+      transcript: {
+        ...storedPrior.transcript,
+        result: priorResult,
+        messages: storedPrior.transcript.messages.length ? storedPrior.transcript.messages : [{
+          id: storedPrior.metadata.id,
+          role: 'assistant' as const,
+          content: priorResult,
+          createdAt: storedPrior.metadata.completedAt ?? storedPrior.metadata.updatedAt,
+          modelId: storedPrior.metadata.modelId
+        }]
+      }
+    } : undefined;
     if (input.continueSubagentId && !prior) {
       return toolError('subagent_not_found', 'The requested subagent continuation was not found in this parent session.');
     }
@@ -368,8 +417,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         startedAt: now,
         completedAt
       });
-      await this.store.save({
-        version: 1,
+      const failureMetadata: StoredSubagentMetadata = {
+        version: 2,
         id,
         treeId,
         parentSessionId,
@@ -394,11 +443,17 @@ export class SubagentRuntime implements SubagentToolAdapter {
         stats,
         error: message,
         diagnostic,
+        resultHash: hashText(''),
+        resultChars: 0,
+        resultBytes: 0,
+        originalResultHash: hashText(''),
+        originalResultChars: 0,
         createdAt: now,
         updatedAt: completedAt,
         completedAt
-      }, {
-        version: 1,
+      };
+      await this.store.save(failureMetadata, {
+        version: 2,
         metadataId: id,
         contextInstructions: '',
         messages: [],
@@ -415,11 +470,18 @@ export class SubagentRuntime implements SubagentToolAdapter {
         updatedAt: completedAt,
         completedAt
       });
-      return toolError(
-        context.signal?.aborted ? 'subagent_stopped' : 'subagent_failed',
-        publicSubagentFailureMessage(failureKind),
-        { subagentId: id, failureKind, ...(diagnostic ? { diagnosticRef: diagnostic.id } : {}) }
-      );
+      const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
+      return { content: stableJson(createSubagentResultManifest({
+        metadata: failureMetadata,
+        result: '',
+        status: manifestStatusFromFailure(failureKind, context.signal?.aborted === true),
+        ok: false,
+        summary: publicSubagentFailureMessage(failureKind),
+        previewBytes,
+        maxBytes: previewBytes + 2_048,
+        errorType: context.signal?.aborted ? 'subagent_stopped' : 'subagent_failed',
+        error: message
+      })) };
     }
   }
 
@@ -468,6 +530,23 @@ export class SubagentRuntime implements SubagentToolAdapter {
       ].sort())),
       workspaceContextHash: workspaceContext.hash
     };
+    const cacheFamilyKey = createSubagentCacheFamilyKey({
+      sourceId: sourceConfig.sourceId,
+      provider: sourceConfig.provider,
+      baseUrl: sourceConfig.baseUrl,
+      modelId: model.id,
+      profile: input.profile.id,
+      lane: input.profile.lane,
+      depth: input.depth,
+      personaVersion: `subagent-system-v${SUBAGENT_PROTOCOL_VERSION}`,
+      contextInstructionsHash: hashText(contextInstructions),
+      toolSchemaVersion: SUBAGENT_PROTOCOL_VERSION,
+      toolNames,
+      authorizationContextHash: compatibility.authorizationContextHash,
+      workspaceContextHash: compatibility.workspaceContextHash,
+      requestProtocolVersion: SUBAGENT_PROTOCOL_VERSION,
+      capabilityBits: [input.profile.canDelegate ? 'delegate' : 'no-delegate', input.profile.lane === 'proposal' ? 'proposal' : 'read-only']
+    });
     if (input.prior && !isContinuationCompatible(input.prior.metadata, {
       sourceId: sourceConfig.sourceId,
       modelId: model.id,
@@ -497,8 +576,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         startedAt: this.progress.get(input.id)?.updatedAt ?? completedAt,
         completedAt
       });
-      await this.store.save({
-        version: 1,
+      const failureMetadata: StoredSubagentMetadata = {
+        version: 2,
         id: input.id,
         treeId: input.treeId,
         parentSessionId: input.parentSessionId,
@@ -520,11 +599,17 @@ export class SubagentRuntime implements SubagentToolAdapter {
         stats,
         error: failureMessage,
         diagnostic,
+        resultHash: hashText(''),
+        resultChars: 0,
+        resultBytes: 0,
+        originalResultHash: hashText(''),
+        originalResultChars: 0,
         createdAt: this.progress.get(input.id)?.queuedAt ?? completedAt,
         updatedAt: completedAt,
         completedAt
-      }, {
-        version: 1,
+      };
+      await this.store.save(failureMetadata, {
+        version: 2,
         metadataId: input.id,
         contextInstructions,
         messages: [],
@@ -541,19 +626,20 @@ export class SubagentRuntime implements SubagentToolAdapter {
         updatedAt: completedAt,
         completedAt
       });
-      return toolError(
-        'subagent_continuation_incompatible',
-        'Continuation was refused because the child model, system prompt, profile, tool schema, project instructions, or workspace structure changed.',
-        {
-          subagentId: input.id,
-          continuedFrom: input.prior.metadata.id,
-          failureKind: 'protocol_error',
-          ...(diagnostic ? { diagnosticRef: diagnostic.id } : {})
-        }
-      );
+      const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
+      return { content: stableJson(createSubagentResultManifest({
+        metadata: failureMetadata,
+        result: '',
+        status: 'failed',
+        ok: false,
+        summary: 'Continuation was refused because the child runtime context changed.',
+        previewBytes,
+        maxBytes: previewBytes + 2_048,
+        errorType: 'subagent_continuation_incompatible',
+        error: failureMessage
+      })) };
     }
     const taskHash = hashText(normalizeTask(input.input.task));
-    let reuseCandidate: { id: string; freshness: 'stale' | 'unverified' } | undefined;
     if (!input.prior && input.profile.lane !== 'proposal') {
       const candidates = await this.store.findCompletedCandidates({
         parentSessionId: input.parentSessionId,
@@ -566,7 +652,9 @@ export class SubagentRuntime implements SubagentToolAdapter {
         ...compatibility
       });
       for (const candidate of candidates) {
-        const serializedEnvelope = JSON.stringify(candidate.metadata.resultEnvelope);
+        const serializedEnvelope = candidate.metadata.resultEnvelope
+          ? stableJson(candidate.metadata.resultEnvelope)
+          : candidate.transcript.result;
         const verifiedEnvelope = acceptSubagentResult({
           raw: serializedEnvelope,
           lane: input.profile.lane,
@@ -586,7 +674,6 @@ export class SubagentRuntime implements SubagentToolAdapter {
             taskHash
           });
         }
-        reuseCandidate ??= { id: candidate.metadata.id, freshness };
       }
     }
     const startedAt = new Date().toISOString();
@@ -614,7 +701,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       modelId: model.id
     };
     const history = [
-      ...(input.prior?.transcript.messages ?? []).map(cloneMessage),
+      ...restoreTranscriptMessages(input.prior?.transcript),
       userMessage
     ];
     const timeoutMs = mergeDurations(
@@ -633,7 +720,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       inheritedMaxSteps
     );
     const metadataBase: Omit<StoredSubagentMetadata, 'status' | 'updatedAt'> = {
-      version: 1,
+      version: 2,
       id: input.id,
       treeId: input.treeId,
       parentSessionId: input.parentSessionId,
@@ -662,10 +749,14 @@ export class SubagentRuntime implements SubagentToolAdapter {
     let lastUsageEstimate: ContextUsageEstimate | undefined;
     const recordChildUsage = (event: UsageEvent): void => {
       receivedUsageEvent = true;
-      const childEvent: UsageEvent = { ...event, source: 'subagent' };
+      const childEvent: UsageEvent = {
+        ...event,
+        source: 'subagent',
+        subagentId: event.subagentId ?? input.id
+      };
       // Nested children report their own summaries. Forward their events to the
       // root exactly once, but do not count them again as this child's usage.
-      if (event.source !== 'subagent') {
+      if (event.subagentId ? event.subagentId === input.id : event.source !== 'subagent') {
         childUsage = addUsageEventToTurnStats(childUsage, childEvent);
       }
       input.context.onUsage?.(childEvent);
@@ -675,6 +766,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
     ): void => {
       input.context.onUsageLedgerRecord?.({ ...record, source: 'subagent' });
     };
+    let partialResult = '';
     try {
       if (resumeBlocker) throw new SubagentRecoveryBlockedError(resumeBlocker);
       const runner = new AgentLoop(
@@ -722,13 +814,15 @@ export class SubagentRuntime implements SubagentToolAdapter {
         persona: { kind: 'subagent', systemPrompt },
         subagentContext: {
           id: input.id,
+          ...(input.prior ? { previousConversationId: input.prior.metadata.id } : {}),
           treeId: input.treeId,
           parentSessionId: input.parentSessionId,
           parentRunId: input.context.parentRunId,
           rootRunId: input.rootRunId,
           depth: input.depth,
           profile: input.profile.id,
-          lane: input.profile.lane
+          lane: input.profile.lane,
+          cacheFamilyKey
         },
         taskClock: input.context.parentRequest.taskClock,
         taskCostBudget: input.context.parentRequest.taskCostBudget,
@@ -738,7 +832,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         onCheckpoint: async (checkpoint) => {
           savedCheckpoint = checkpoint;
           await this.store.save({ ...metadataBase, status: checkpoint.status === 'running' ? 'running' : checkpoint.status === 'completed' ? 'completed' : 'stopped', updatedAt: checkpoint.updatedAt }, {
-            version: 1, metadataId: input.id, contextInstructions, messages: history, result: '', checkpoint
+            version: 2, metadataId: input.id, contextInstructions, messages: history, result: '', checkpoint
           });
         },
         onStatus: (status) => {
@@ -756,6 +850,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         },
         onUsage: recordChildUsage,
         onUsageLedgerRecord: recordChildLedger,
+        getCacheObservationCandidates: input.context.getCacheObservationCandidates,
         onToolRejected: () => { rejectedUnexposedTool = true; },
         onUsageEstimate: (usage) => {
           const categories = [usage.breakdown.toolCallTokensEstimate,
@@ -766,6 +861,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         },
         onSubagentRunSummary: input.context.onRunSummary
       });
+      partialResult = response.message;
       if (rejectedUnexposedTool) {
         throw new SubagentResultAcceptanceError(['subagent_tool_not_exposed']);
       }
@@ -785,7 +881,6 @@ export class SubagentRuntime implements SubagentToolAdapter {
         lane: input.profile.lane,
         draftEdits: artifactCheck.draftEdits,
         draftRuns: artifactCheck.draftRuns,
-        maxChars: input.profile.resultMaxChars,
         expectedTaskHash: taskHash
       });
       if (!acceptance.ok) {
@@ -807,7 +902,6 @@ export class SubagentRuntime implements SubagentToolAdapter {
           lane: input.profile.lane,
           draftEdits: artifactCheck.draftEdits,
           draftRuns: artifactCheck.draftRuns,
-          maxChars: input.profile.resultMaxChars,
           expectedTaskHash: taskHash
         });
       }
@@ -817,11 +911,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         );
       }
       const readSet = await createResultReadSet(acceptance.envelope, input.roots, response.toolRounds);
-      const serializedEnvelope = JSON.stringify(acceptance.envelope);
-      if (serializedEnvelope.length > input.profile.resultMaxChars) {
-        throw new SubagentResultAcceptanceError(['result_too_large']);
-      }
-      const fullResult = { content: serializedEnvelope, truncated: false };
+      const serializedEnvelope = stableJson(acceptance.envelope);
+      const fullResult = capResult(serializedEnvelope, input.profile.resultMaxChars);
       // Keep the pre-existing tool-visible usage serialization unchanged. Richer
       // statistics belong only to metadata.stats and the session/UI observer.
       const toolVisibleUsage = response.usage ? relabelTurnUsageAsSubagent(response.usage) : undefined;
@@ -830,7 +921,9 @@ export class SubagentRuntime implements SubagentToolAdapter {
       const assistantMessage: ChatMessage = {
         id: input.id,
         role: 'assistant',
-        content: fullResult.content,
+        // V2 keeps the canonical final bytes once in transcript.result. The
+        // continuation loader restores this content before provider projection.
+        content: '',
         reasoningContent: undefined,
         createdAt: new Date().toISOString(),
         modelId: model.id,
@@ -854,25 +947,29 @@ export class SubagentRuntime implements SubagentToolAdapter {
         usage: childUsage,
         lastUsageEstimate
       });
-      await this.store.save({
+      const completedMetadata: StoredSubagentMetadata = {
         ...metadataBase,
         status: 'completed',
         resultStatus: acceptance.envelope.status,
-        resultEnvelope: acceptance.envelope,
         readSet: readSet.readSet,
         readSetComplete: readSet.complete,
         updatedAt: completedAt,
         completedAt,
         resultHash,
         resultChars: fullResult.content.length,
+        resultBytes: utf8ByteLength(fullResult.content),
+        originalResultHash: hashText(serializedEnvelope),
+        originalResultChars: serializedEnvelope.length,
         resultTruncated: fullResult.truncated,
         usage: toolVisibleUsage,
         stats
-      }, {
-        version: 1,
+      };
+      await this.store.save(completedMetadata, {
+        version: 2,
         metadataId: input.id,
         contextInstructions,
         messages: [...history, assistantMessage],
+        resultMessageId: input.id,
         result: fullResult.content,
         checkpoint: savedCheckpoint
       });
@@ -886,29 +983,21 @@ export class SubagentRuntime implements SubagentToolAdapter {
         updatedAt: completedAt,
         completedAt
       });
-      const usesGeneralEvidence = (input.context.parentRequest.requestProtocolVersion ?? 1) >= 8;
-      const inline = usesGeneralEvidence ? fullResult.content : fullResult.content.slice(0, MAX_INLINE_RESULT_CHARS);
+      const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
+      const manifest = createSubagentResultManifest({
+        metadata: completedMetadata,
+        result: fullResult.content,
+        status: 'completed',
+        ok: true,
+        summary: acceptance.envelope.summary,
+        usage: toolVisibleUsage,
+        draftEditCount: artifactCheck.draftEdits.length,
+        draftRunCount: artifactCheck.draftRuns.length,
+        previewBytes,
+        maxBytes: previewBytes + 2_048
+      });
       return {
-        content: JSON.stringify({
-          ok: true,
-          kind: 'subagent_result',
-          subagentId: input.id,
-          profile: input.profile.id,
-          lane: input.profile.lane,
-          depth: input.depth,
-          model: { sourceId: sourceConfig.sourceId, modelId: model.id },
-          result: inline,
-          resultChars: fullResult.content.length,
-          resultHash,
-          hasMore: !usesGeneralEvidence && inline.length < fullResult.content.length,
-          ...(!usesGeneralEvidence && inline.length < fullResult.content.length ? { nextOffset: inline.length } : {}),
-          status: acceptance.envelope.status,
-          envelope: acceptance.envelope,
-          draftEditCount: artifactCheck.draftEdits.length,
-          draftRunCount: artifactCheck.draftRuns.length,
-          usage: toolVisibleUsage,
-          ...(reuseCandidate ? { reuseCandidate } : {})
-        }),
+        content: stableJson(manifest),
         draftEdits: artifactCheck.draftEdits,
         draftRuns: artifactCheck.draftRuns
       };
@@ -945,7 +1034,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         usage: childUsage,
         lastUsageEstimate
       });
-      await this.store.save({
+      const failureResult = capResult(partialResult, input.profile.resultMaxChars);
+      const failureMetadata: StoredSubagentMetadata = {
         ...metadataBase,
         status: stopped ? 'stopped' : 'failed',
         resultStatus: 'failed',
@@ -953,14 +1043,21 @@ export class SubagentRuntime implements SubagentToolAdapter {
         diagnostic,
         stats,
         error: message,
+        resultHash: hashText(failureResult.content),
+        resultChars: failureResult.content.length,
+        resultBytes: utf8ByteLength(failureResult.content),
+        originalResultHash: hashText(partialResult),
+        originalResultChars: partialResult.length,
+        resultTruncated: failureResult.truncated,
         updatedAt: completedAt,
         completedAt
-      }, {
-        version: 1,
+      };
+      await this.store.save(failureMetadata, {
+        version: 2,
         metadataId: input.id,
         contextInstructions,
         messages: history,
-        result: '',
+        result: failureResult.content,
         checkpoint: savedCheckpoint
       }).catch(() => undefined);
       input.context.onRunSummary?.(stats);
@@ -974,18 +1071,24 @@ export class SubagentRuntime implements SubagentToolAdapter {
         updatedAt: completedAt,
         completedAt
       });
-      return toolError(
-        stopped ? 'subagent_stopped'
-          : acceptanceFailure ? 'subagent_result_rejected'
-            : recoveryFailure ? 'subagent_recovery_blocked' : 'subagent_failed',
-        publicSubagentFailureMessage(failureKind),
-        {
-          subagentId: input.id,
-          failureKind,
-          ...(diagnostic ? { diagnosticRef: diagnostic.id } : {}),
-          ...(acceptanceFailure ? { diagnostics: error.diagnostics } : {})
-        }
-      );
+      const errorType = stopped ? 'subagent_stopped'
+        : acceptanceFailure ? 'subagent_result_rejected'
+          : recoveryFailure ? 'subagent_recovery_blocked' : 'subagent_failed';
+      const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
+      return {
+        content: stableJson(createSubagentResultManifest({
+          metadata: failureMetadata,
+          result: failureResult.content,
+          status: manifestStatusFromFailure(failureKind, stopped),
+          ok: false,
+          summary: publicSubagentFailureMessage(failureKind),
+          usage: childUsage,
+          previewBytes,
+          maxBytes: previewBytes + 2_048,
+          errorType,
+          error: message
+        }))
+      };
     } finally {
       abort.dispose();
     }
@@ -1018,7 +1121,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
     taskHash: string;
   }): Promise<SubagentToolExecution> {
     const completedAt = new Date().toISOString();
-    const result = JSON.stringify(input.envelope);
+    const result = input.source.transcript.result || stableJson(input.envelope);
     const stats = createSubagentRunUsageSummary({
       subagentId: input.input.id,
       parentRunId: input.input.context.parentRunId,
@@ -1033,8 +1136,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
       startedAt: completedAt,
       completedAt
     });
-    await this.store.save({
-      version: 1,
+    const metadata: StoredSubagentMetadata = {
+      version: 2,
       id: input.input.id,
       treeId: input.input.treeId,
       parentSessionId: input.input.parentSessionId,
@@ -1052,9 +1155,11 @@ export class SubagentRuntime implements SubagentToolAdapter {
       ...input.compatibility,
       normalizedTaskHash: input.taskHash,
       resultStatus: 'complete',
-      resultEnvelope: input.envelope,
       resultHash: hashText(result),
       resultChars: result.length,
+      resultBytes: utf8ByteLength(result),
+      originalResultHash: input.source.metadata.originalResultHash ?? hashText(result),
+      originalResultChars: input.source.metadata.originalResultChars ?? result.length,
       resultTruncated: input.source.metadata.resultTruncated,
       readSet: input.source.metadata.readSet,
       readSetComplete: true,
@@ -1065,12 +1170,14 @@ export class SubagentRuntime implements SubagentToolAdapter {
       createdAt: completedAt,
       updatedAt: completedAt,
       completedAt
-    }, {
-      version: 1,
+    };
+    await this.store.save(metadata, {
+      version: 2,
       metadataId: input.input.id,
       contextInstructions: '',
       messages: [],
-      result
+      result: '',
+      resultRef: input.source.metadata.id
     });
     input.input.context.onRunSummary?.(stats);
     this.setProgress({
@@ -1083,26 +1190,17 @@ export class SubagentRuntime implements SubagentToolAdapter {
       updatedAt: completedAt,
       completedAt
     });
-    const usesGeneralEvidence = (input.input.context.parentRequest.requestProtocolVersion ?? 1) >= 8;
-    const inline = usesGeneralEvidence ? result : result.slice(0, MAX_INLINE_RESULT_CHARS);
+    const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
     return {
-      content: JSON.stringify({
+      content: stableJson(createSubagentResultManifest({
+        metadata,
+        result,
+        status: 'completed',
         ok: true,
-        kind: 'subagent_reused_result',
-        subagentId: input.input.id,
-        sourceSubagentId: input.source.metadata.id,
-        sourceParentRunId: input.source.metadata.parentRunId,
-        freshness: 'fresh',
-        profile: input.input.profile.id,
-        lane: input.input.profile.lane,
-        status: input.envelope.status,
-        envelope: input.envelope,
-        result: inline,
-        resultChars: result.length,
-        resultHash: hashText(result),
-        hasMore: !usesGeneralEvidence && inline.length < result.length,
-        ...(!usesGeneralEvidence && inline.length < result.length ? { nextOffset: inline.length } : {})
-      })
+        summary: input.envelope.summary,
+        previewBytes,
+        maxBytes: previewBytes + 2_048
+      }))
     };
   }
 
@@ -1217,11 +1315,12 @@ export function getChildToolNamesForRuntime(profile: SubagentProfile, depth: num
   // cache boundary and replaces the child-specific result reader there.
   if (protocolVersion >= 8) names.add(READ_EVIDENCE_TOOL_NAME);
   else names.add(READ_SUBAGENT_RESULT_TOOL_NAME);
+  if (protocolVersion >= 10) names.add(READ_SUBAGENT_RESULT_TOOL_NAME);
   if (profile.canDelegate && depth < 2 && profile.lane !== 'proposal') {
     names.add(DELEGATE_TASK_TOOL_NAME);
     names.add(DELEGATE_PARALLEL_TOOL_NAME);
   }
-  if (protocolVersion >= 8) names.delete(READ_SUBAGENT_RESULT_TOOL_NAME);
+  if (protocolVersion >= 8 && protocolVersion < 10) names.delete(READ_SUBAGENT_RESULT_TOOL_NAME);
   if (protocolVersion < 9) names.delete(APPLY_PATCH_TOOL_NAME);
   return [...names].sort();
 }
@@ -1390,6 +1489,17 @@ function cloneMessage(message: ChatMessage): ChatMessage {
     })),
     providerReplay: message.providerReplay ? structuredClone(message.providerReplay) : undefined
   };
+}
+
+function restoreTranscriptMessages(transcript: StoredSubagentTranscript | undefined): ChatMessage[] {
+  if (!transcript) return [];
+  return transcript.messages.map((message) => {
+    const clone = cloneMessage(message);
+    if (transcript.version >= 2 && transcript.resultMessageId === clone.id && !clone.content) {
+      clone.content = transcript.result;
+    }
+    return clone;
+  });
 }
 
 function capResult(value: string, maxChars: number): { content: string; truncated: boolean } {
@@ -1649,6 +1759,23 @@ function safeParseToolResult(value: string): unknown {
   } catch {
     return value;
   }
+}
+
+function isSubagentResultManifest(value: unknown): value is SubagentResultManifestV2 {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Partial<SubagentResultManifestV2>;
+  return item.version === 2 && item.kind === 'subagent_result_manifest'
+    && typeof item.subagentId === 'string' && typeof item.resultRef === 'string'
+    && typeof item.resultHash === 'string' && typeof item.status === 'string';
+}
+
+function manifestStatusFromFailure(
+  failureKind: import('./types').SubagentFailureKind,
+  stopped: boolean
+): import('./types').SubagentManifestStatus {
+  if (failureKind === 'budget_exhausted') return 'budget_exhausted';
+  if (failureKind === 'cancelled') return 'cancelled';
+  return stopped ? 'stopped' : 'failed';
 }
 
 function toolError(errorType: string, error: string, extra: Record<string, unknown> = {}): SubagentToolExecution {

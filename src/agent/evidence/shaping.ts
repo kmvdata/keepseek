@@ -31,6 +31,17 @@ export function prepareEvidenceEnvelope(input: {
   }
 
   const parsed = parseJson(input.rawContent);
+  if (isSubagentHandoff(parsed)) {
+    const content = shapeSubagentHandoff(parsed, input.record.evidenceRef, allowedChars, allowedTokens);
+    return {
+      content,
+      completeInline: false,
+      inlineChars: content.length,
+      inlineTokens: estimateTokenCount(content),
+      contentType: 'structured',
+      source
+    };
+  }
   const authority = isRecord(parsed) ? pickAuthority(parsed) : {};
   const base = {
     ok: typeof authority.ok === 'boolean' ? authority.ok : true,
@@ -249,3 +260,76 @@ function canonicalize(value: unknown): unknown {
   for (const key of Object.keys(value).sort()) result[key] = canonicalize(value[key]);
   return result;
 }
+
+function isSubagentHandoff(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && value.version === 2
+    && (value.kind === 'subagent_result_manifest' || value.kind === 'subagent_parallel_manifest');
+}
+
+/** A child handoff is already a bounded preview. If context admission must
+ * shrink it again, keep the capability/identity fields and remove prose first. */
+function shapeSubagentHandoff(
+  value: Record<string, unknown>,
+  evidenceRef: string,
+  allowedChars: number,
+  allowedTokens: number
+): string {
+  const base = value.kind === 'subagent_parallel_manifest'
+    ? {
+        version: 2,
+        ok: value.ok === true,
+        kind: 'subagent_parallel_manifest',
+        results: Array.isArray(value.results) ? value.results.map((item) => shapeSubagentItem(item)) : [],
+        draftEditCount: readNonNegative(value.draftEditCount),
+        draftRunCount: readNonNegative(value.draftRunCount),
+        ...(typeof value.errorType === 'string' ? { errorType: value.errorType.slice(0, 128) } : {})
+      }
+    : shapeSubagentItem(value);
+  const withRefs: Record<string, unknown> = {
+    ...base,
+    completeInline: false,
+    evidenceRef,
+    referenceGuide: {
+      evidenceRef: 'pages this immutable handoff record',
+      resultRef: 'pages the canonical full subagent result'
+    }
+  };
+  let content = stableStringify(withRefs);
+  const fits = () => content.length <= Math.max(allowedChars, 1_024)
+    && estimateTokenCount(content) <= Math.max(allowedTokens, MIN_EVIDENCE_ENVELOPE_TOKENS);
+  if (fits()) return content;
+  const items = value.kind === 'subagent_parallel_manifest'
+    ? ((withRefs.results as Array<Record<string, unknown>>) ?? [])
+    : [withRefs];
+  for (const item of items) item.preview = '';
+  content = stableStringify(withRefs);
+  if (fits()) return content;
+  for (const item of items) {
+    if (typeof item.summary === 'string') item.summary = (item.summary as string).slice(0, 160);
+    if (typeof item.error === 'string') item.error = (item.error as string).slice(0, 160);
+  }
+  return stableStringify(withRefs);
+}
+
+function shapeSubagentItem(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, unknown> = {};
+  for (const key of [
+    'version', 'ok', 'kind', 'taskIndex', 'subagentId', 'treeId', 'profile', 'lane', 'depth', 'status',
+    'resultRef', 'resultHash', 'resultChars', 'resultBytes', 'hasMore', 'resultTruncated',
+    'originalResultChars', 'originalResultHash', 'draftEditCount', 'draftRunCount', 'errorType',
+    'diagnosticRef', 'reusedFromSubagentId'
+  ]) {
+    const field = value[key];
+    if (typeof field === 'string') result[key] = field.slice(0, 1_024);
+    else if (typeof field === 'number' || typeof field === 'boolean') result[key] = field;
+  }
+  if (isRecord(value.model)) result.model = canonicalize(value.model);
+  if (isRecord(value.usageSummary)) result.usageSummary = canonicalize(value.usageSummary);
+  result.summary = typeof value.summary === 'string' ? value.summary.slice(0, 1_024) : '';
+  result.preview = typeof value.preview === 'string' ? value.preview : '';
+  if (typeof value.error === 'string') result.error = value.error.slice(0, 512);
+  return result;
+}
+
+function readNonNegative(value: unknown): number { return Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : 0; }

@@ -191,7 +191,7 @@ test('subagent store returns bounded final-result pages without transcript or re
     toolSchemaHash: 'tools-hash',
     profileHash: 'profile-hash',
     projectInstructionsHash: 'project-hash',
-    resultHash: 'result-hash',
+    resultHash: createHash('sha256').update('R'.repeat(30_000)).digest('hex'),
     resultChars: 30_000,
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:01:00.000Z',
@@ -361,11 +361,17 @@ test('real child provider request disables thinking and excludes parent-only con
       language: 'en'
     });
 
-    const toolResult = JSON.parse(execution.content) as { ok: boolean; result: string; hasMore: boolean; nextOffset?: number };
+    const toolResult = JSON.parse(execution.content) as {
+      version: number; ok: boolean; kind: string; preview: string; resultRef: string; hasMore: boolean
+    };
     assert.equal(toolResult.ok, true);
-    assert.ok(toolResult.result.length > 12_000, 'v8 hands the complete child result to general evidence admission');
-    assert.equal(toolResult.hasMore, false);
-    assert.equal(toolResult.nextOffset, undefined);
+    assert.equal(toolResult.version, 2);
+    assert.equal(toolResult.kind, 'subagent_result_manifest');
+    assert.ok(Buffer.byteLength(toolResult.preview, 'utf8') <= 10_240);
+    assert.equal(toolResult.hasMore, true);
+    assert.ok(toolResult.resultRef.startsWith('sa_'));
+    assert.equal(Object.hasOwn(toolResult, 'result'), false);
+    assert.equal(Object.hasOwn(toolResult, 'envelope'), false);
     assert.equal(capturedBodies.length, 1);
     const providerBody = capturedBodies[0];
     const parsedProviderBody = JSON.parse(providerBody) as Record<string, unknown>;
@@ -373,8 +379,8 @@ test('real child provider request disables thinking and excludes parent-only con
     assert.equal(Object.hasOwn(parsedProviderBody, 'reasoning_effort'), false);
     const childToolNames = (parsedProviderBody.tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name);
     assert.equal(childToolNames.includes('keepseek_read_evidence'), true);
-    assert.equal(childToolNames.includes('keepseek_read_subagent_result'), false,
-      'new child lanes use general evidence; only a root v8 lane exposes the legacy migration bridge');
+    assert.equal(childToolNames.includes('keepseek_read_subagent_result'), true,
+      'v10 child lanes can page canonical nested-child results without inlining them');
     assert.match(providerBody, /CHILD SELF CONTAINED TASK/u);
     assert.match(providerBody, /PROJECT RULE ALLOWED IN CHILD/u);
     assert.doesNotMatch(providerBody, /PARENT HISTORY MUST NOT LEAK/u);

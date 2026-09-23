@@ -325,6 +325,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly usageLedgerStore: UsageLedgerStore;
   private readonly usageLedgerFlushes = new Map<string, Promise<void>>();
   private readonly latestCacheObservationByScope = new Map<string, import('../shared/types').ProviderCacheObservation>();
+  private readonly recentCacheObservationsByFamily = new Map<string, import('../shared/types').ProviderCacheObservation[]>();
   private readonly activeChangeActions = new Set<string>();
   private runContextRefreshPromise: Promise<void> | undefined;
   private runContextRefreshInFlight = false;
@@ -1674,10 +1675,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       && (session.usageStats?.requestCount ?? 0) > 0;
     session.usageLedger = appendUsageLedgerRecord(session.usageLedger, record, legacyAggregate);
     if (record.cacheObservation && record.kind === 'usage_response') {
-      this.latestCacheObservationByScope.set(
-        this.cacheObservationScopeKey(session.id, record.source, record.cacheObservation.taskId),
-        record.cacheObservation
-      );
+      this.rememberCacheObservation(session.id, record.cacheObservation);
     }
     session.usageStats = applyUsageLedgerSummaryToSessionStats(
       session.usageStats,
@@ -1695,10 +1693,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const rebuilt = await this.usageLedgerStore.rebuild(session.id);
       for (const storedRecord of rebuilt.ledger.records) {
         if (storedRecord.kind === 'usage_response' && storedRecord.cacheObservation) {
-          this.latestCacheObservationByScope.set(
-            this.cacheObservationScopeKey(session.id, storedRecord.source, storedRecord.cacheObservation.taskId),
-            storedRecord.cacheObservation
-          );
+          this.rememberCacheObservation(session.id, storedRecord.cacheObservation);
         }
       }
       if (!rebuilt.ledger.records.length && !snapshot?.records.length && !session.usageLedgerRef) return;
@@ -1759,6 +1754,51 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return Promise.resolve(this.latestCacheObservationByScope.get(
       this.cacheObservationScopeKey(input.sessionId, input.source, input.taskId)
     ));
+  }
+
+  private getCacheObservationCandidates(input: {
+    sessionId: string;
+    source: import('../shared/types').UsageSource;
+    conversationId?: string;
+    cacheFamilyKey?: string;
+  }): Promise<{
+    conversationPrevious?: import('../shared/types').ProviderCacheObservation;
+    familyCandidates: import('../shared/types').ProviderCacheObservation[];
+  }> {
+    const conversationPrevious = this.latestCacheObservationByScope.get(
+      this.cacheObservationScopeKey(input.sessionId, input.source, input.conversationId)
+    );
+    return Promise.resolve({
+      ...(conversationPrevious ? { conversationPrevious } : {}),
+      familyCandidates: input.cacheFamilyKey
+        ? [...(this.recentCacheObservationsByFamily.get(input.cacheFamilyKey) ?? [])]
+        : []
+    });
+  }
+
+  private rememberCacheObservation(
+    sessionId: string,
+    observation: import('../shared/types').ProviderCacheObservation
+  ): void {
+    const scope = this.cacheObservationScopeKey(
+      sessionId,
+      observation.source,
+      observation.conversationId ?? observation.taskId
+    );
+    this.latestCacheObservationByScope.delete(scope);
+    this.latestCacheObservationByScope.set(scope, observation);
+    while (this.latestCacheObservationByScope.size > 512) {
+      this.latestCacheObservationByScope.delete(this.latestCacheObservationByScope.keys().next().value!);
+    }
+    if (!observation.cacheFamilyKey) return;
+    const recent = this.recentCacheObservationsByFamily.get(observation.cacheFamilyKey) ?? [];
+    const identity = `${observation.requestId}:${observation.attemptIndex}`;
+    const next = [...recent.filter((candidate) => `${candidate.requestId}:${candidate.attemptIndex}` !== identity), observation].slice(-8);
+    this.recentCacheObservationsByFamily.delete(observation.cacheFamilyKey);
+    this.recentCacheObservationsByFamily.set(observation.cacheFamilyKey, next);
+    while (this.recentCacheObservationsByFamily.size > 128) {
+      this.recentCacheObservationsByFamily.delete(this.recentCacheObservationsByFamily.keys().next().value!);
+    }
   }
 
   private applyTurnUsage(session: ChatSession, turnUsage: TurnUsageStats): TurnUsageStats {
@@ -4320,6 +4360,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         onUsage: (event) => { usage = this.applyUsageEvent(session, usage, event); this.liveTurnUsage = usage; refresh(); },
         onUsageLedgerRecord: (record) => { this.applyUsageLedgerRecord(session, record); refresh(); },
         getPreviousCacheObservation: (input) => this.getPreviousCacheObservation(input),
+        getCacheObservationCandidates: (input) => this.getCacheObservationCandidates(input),
         onUsageEstimate: (estimate) => { this.liveContextUsage = toSessionContextUsageEstimate(estimate); refresh(); },
         onTaskPlan: (plan) => { this.taskPlansBySession.set(session.id, plan); refresh(); },
         onRunDetails: (details) => { message.runDetails = details; refresh(); },
@@ -4960,6 +5001,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           scheduleLiveState();
         },
         getPreviousCacheObservation: (input) => this.getPreviousCacheObservation(input),
+        getCacheObservationCandidates: (input) => this.getCacheObservationCandidates(input),
         onSubagentRunSummary: (summary) => {
           activeSession.subagentUsageStats = upsertSubagentRunUsageSummary(
             activeSession.subagentUsageStats,

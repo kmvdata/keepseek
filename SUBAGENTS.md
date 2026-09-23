@@ -1,6 +1,6 @@
 # KeepSeek 子代理架构、安全与用量
 
-> 子代理主题的唯一交接入口。本文合并了原 `doc/subagent-runtime-security.md` 与 `doc/subagent-usage-statistics.md`，覆盖当前 V9 的隔离、调度、结果协议、恢复和统计。主 Agent 工作流见 [`doc/keepseek-agent-runtime-workflow.md`](doc/keepseek-agent-runtime-workflow.md)。
+> 子代理主题的唯一交接入口。本文合并了原 `doc/subagent-runtime-security.md` 与 `doc/subagent-usage-statistics.md`，覆盖当前 V10 的隔离、调度、结果协议、恢复和统计。主 Agent 工作流见 [`doc/keepseek-agent-runtime-workflow.md`](doc/keepseek-agent-runtime-workflow.md)。
 
 ## 1. 设计目标
 
@@ -14,7 +14,7 @@
 4. proposal 只能产生草案；实际写入和命令仍回到父会话审批管线。
 5. 时间、费用和取消属于同一逻辑任务，不能通过委派重置。
 
-当前 `SUBAGENT_PROTOCOL_VERSION` 为 **9**，与 provider request/tool schema V9 对齐。
+当前 `SUBAGENT_PROTOCOL_VERSION` 为 **10**，与 provider request/tool schema V10 对齐。V10 将完整 child 结果留在隔离 run store，只向父 Agent 返回有界 manifest。
 
 ## 2. 权威模块
 
@@ -123,8 +123,8 @@ provider tool call
 
 协议规则：
 
-- V8+ child 使用通用 `keepseek_read_evidence`。
-- V8 以前的 lane 才可能保留 `keepseek_read_subagent_result` 迁移桥。
+- V8+ child 使用通用 `keepseek_read_evidence` 读取普通工具证据。
+- V10 child 同时使用固定 schema 的 `keepseek_read_subagent_result`，按 result ref 分页读取完整 child 结论；V1–V9 保留原 schema 字节。
 - V9 才允许 `keepseek_apply_patch` schema。
 - 只有 profile 明确允许、深度小于 2 且 lane 不是 `proposal` 时，才暴露再委派工具。
 
@@ -158,7 +158,7 @@ child 必须返回有界 JSON envelope，而不是任意聊天文本。公共字
 
 若结果格式错误，宿主只允许一次“仅修复格式”的无工具请求；仍不合法则 fail closed。解析器不得从自由文本中猜测安全关键字段。
 
-父 Agent 收到的是经大小整形后的结果 envelope。完整证据保存在 task-scoped Evidence，需要时分页读取；child 私有 transcript 和隐藏推理不会回传。
+父 Agent 收到 V2 handoff manifest：固定元数据、最多 1024 字符 summary、默认最多 10KB UTF-8 preview，以及 session/tree 受限的 result ref。单结果 manifest 默认总上限 12KB；parallel/fleet 共用 20KB 总预算并先保留每个 child 的状态与引用。完整接受结果只保存在 child run store 的 canonical transcript result，需要时由 `keepseek_read_subagent_result` 以 12KB 默认页、24KB 最大页读取；普通工具证据仍由 `keepseek_read_evidence` 读取。child 私有工具 trace 和隐藏推理不会回传。
 
 ## 10. Continuation 与结果复用
 
@@ -242,7 +242,7 @@ Webview 只接收汇总：次数、状态、token/费用分类和本地估算。
 ### 改 profile、工具或协议
 
 1. 同步 schema 白名单和 Runner 执行时门禁。
-2. 检查 V8/V9 迁移 lane 与 Evidence reader。
+2. 检查 V8/V9/V10 迁移 lane、Evidence reader 与 UTF-8 byte-offset result reader。
 3. 确认嵌套与 proposal lane 没有获得额外副作用能力。
 4. 更新 compatibility hash 与 continuation 测试。
 
