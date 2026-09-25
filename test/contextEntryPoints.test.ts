@@ -874,6 +874,26 @@ test('ChangeSets render in their assistant timeline entry with an unlinked actio
   assert.doesNotMatch(script, /function renderDraftEdits/u);
 });
 
+test('conversation panels and expanded draft content share the transcript vertical scrollbar', () => {
+  const template = getTemplate();
+  const script = getScript();
+  const styles = getStyles();
+  const draftBarStyles = getGeneratedSection(styles, '    .draft-bar {', '\n    .draft-bar-header');
+  const draftOutputStyles = getGeneratedSection(styles, '    .draft-run-output {', '\n    .change-set-partially_failed');
+  const codeBlockStyles = getGeneratedSection(styles, '    .message-code-block pre {', '\n    .message-code-block code');
+
+  assert.match(template, /<section id="transcript"[^>]*>[\s\S]*?<section id="planRegion"[\s\S]*?<aside id="unlinkedChangeSetRegion"[\s\S]*?<\/aside>\s*<\/section>/u);
+  assert.match(script, /function renderTranscript[\s\S]*?planRegion\.remove\(\)[\s\S]*?unlinkedChangeSetRegion\.remove\(\)[\s\S]*?transcript\.append\(planRegion\)[\s\S]*?transcript\.append\(unlinkedChangeSetRegion\)[\s\S]*?renderUnlinkedChangeSets/u);
+  assert.doesNotMatch(script, /unlinkedChangeSetList\.addEventListener\('click'/u);
+  assert.match(styles, /\.transcript\s*\{[\s\S]*?overflow-y:\s*auto/u);
+  assert.match(draftBarStyles, /max-height:\s*none/u);
+  assert.match(draftBarStyles, /overflow-y:\s*visible/u);
+  assert.doesNotMatch(draftOutputStyles, /max-height|overflow-y:\s*auto/u);
+  assert.match(draftOutputStyles, /overflow-y:\s*visible/u);
+  assert.doesNotMatch(codeBlockStyles, /max-height|overflow-y:\s*auto/u);
+  assert.match(codeBlockStyles, /overflow-y:\s*visible/u);
+});
+
 test('ChangeSet controls stay stacked and wrapping in a narrow Secondary Sidebar', () => {
   const styles = getStyles();
 

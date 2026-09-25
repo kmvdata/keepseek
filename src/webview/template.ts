@@ -111,39 +111,39 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
       </div>
     </section>
 
-    <section id="planRegion" class="plan-region hidden" aria-label="计划 / 进度" data-i18n-aria-label="planProgress">
-      <button id="planToggle" type="button" class="plan-toggle" aria-expanded="false" aria-controls="planBody">
-        <span class="plan-toggle-main">
-          <span class="plan-status-dot" aria-hidden="true"></span>
-          <span class="plan-toggle-label" data-i18n="planProgress">计划 / 进度</span>
-          <span id="planSummary" class="plan-summary"></span>
-        </span>
-        <span id="planCount" class="plan-count"></span>
-        <span class="plan-chevron" aria-hidden="true">⌄</span>
-      </button>
-      <div id="planBody" class="plan-body hidden">
-        <div id="planGoal" class="plan-goal"></div>
-        <ol id="planSteps" class="plan-steps"></ol>
-        <div id="planBlockers" class="plan-note hidden"></div>
-        <div id="planCompletion" class="plan-note hidden"></div>
-        <button id="planContinueRepair" type="button" class="plan-continue-repair hidden" data-i18n="continueRepairValidation">继续验证修复</button>
-      </div>
-    </section>
-
     <section id="transcript" class="transcript">
+      <section id="planRegion" class="plan-region hidden" aria-label="计划 / 进度" data-i18n-aria-label="planProgress">
+        <button id="planToggle" type="button" class="plan-toggle" aria-expanded="false" aria-controls="planBody">
+          <span class="plan-toggle-main">
+            <span class="plan-status-dot" aria-hidden="true"></span>
+            <span class="plan-toggle-label" data-i18n="planProgress">计划 / 进度</span>
+            <span id="planSummary" class="plan-summary"></span>
+          </span>
+          <span id="planCount" class="plan-count"></span>
+          <span class="plan-chevron" aria-hidden="true">⌄</span>
+        </button>
+        <div id="planBody" class="plan-body hidden">
+          <div id="planGoal" class="plan-goal"></div>
+          <ol id="planSteps" class="plan-steps"></ol>
+          <div id="planBlockers" class="plan-note hidden"></div>
+          <div id="planCompletion" class="plan-note hidden"></div>
+          <button id="planContinueRepair" type="button" class="plan-continue-repair hidden" data-i18n="continueRepairValidation">继续验证修复</button>
+        </div>
+      </section>
+
       <div class="transcript-empty">
         <div class="transcript-empty-icon">&#x2726;</div>
         <div data-i18n="startChat">开始 KeepSeek 对话</div>
         <div style="font-size:11px;opacity:0.6" data-i18n="emptyTranscriptHint">添加上下文文件后，输入消息并发送</div>
       </div>
-    </section>
 
-    <aside id="unlinkedChangeSetRegion" class="draft-bar hidden" aria-labelledby="unlinkedChangeSetLabel">
-      <div class="draft-bar-header">
-        <div id="unlinkedChangeSetLabel" class="draft-bar-label" data-i18n="unlinkedChangeSets">未关联的待处理修改</div>
-      </div>
-      <div id="unlinkedChangeSetList" class="draft-bar-list"></div>
-    </aside>
+      <aside id="unlinkedChangeSetRegion" class="draft-bar hidden" aria-labelledby="unlinkedChangeSetLabel">
+        <div class="draft-bar-header">
+          <div id="unlinkedChangeSetLabel" class="draft-bar-label" data-i18n="unlinkedChangeSets">未关联的待处理修改</div>
+        </div>
+        <div id="unlinkedChangeSetList" class="draft-bar-list"></div>
+      </aside>
+    </section>
 
     ${getInputTemplate()}
   </main>`;

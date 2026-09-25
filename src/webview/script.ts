@@ -784,7 +784,6 @@ export function getScript(): string {
     }
 
     transcript.addEventListener('click', handleChangeSetActionClick);
-    unlinkedChangeSetList.addEventListener('click', handleChangeSetActionClick);
 
     function handleDraftRunActionClick(event) {
       var target = event.target instanceof Element ? event.target : null;
@@ -814,7 +813,6 @@ export function getScript(): string {
     }
 
     transcript.addEventListener('click', handleDraftRunActionClick);
-    unlinkedChangeSetList.addEventListener('click', handleDraftRunActionClick);
 
     function focusDraftRunCard(draftRunId) {
       setTimeout(function() {
@@ -1373,7 +1371,6 @@ export function getScript(): string {
       var changeSetProjection = buildChangeSetTimelineProjection();
       var draftRunProjection = buildDraftRunTimelineProjection();
       renderTranscript(changeSetProjection, draftRunProjection);
-      renderUnlinkedChangeSets(changeSetProjection.unlinked, draftRunProjection.unlinked);
       if (focusedAction?.draftRunId || focusedAction?.editId || focusedAction?.changeSetId || focusedAction?.planId) {
         var actionButtons = Array.from(document.querySelectorAll('.draft-run-card button, .change-set-card button, .plan-decision-card button'));
         var sameTarget = function(button) {
@@ -3795,7 +3792,14 @@ export function getScript(): string {
 
     function renderTranscript(changeSetProjection, draftRunProjection) {
       var shouldStick = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 24;
+      planRegion.remove();
+      unlinkedChangeSetRegion.remove();
       transcript.innerHTML = '';
+      transcript.append(planRegion);
+
+      var hasUnlinkedDrafts = (Array.isArray(changeSetProjection.unlinked)
+        ? changeSetProjection.unlinked.some(isChangeSetActionable)
+        : false) || (Array.isArray(draftRunProjection.unlinked) && draftRunProjection.unlinked.length > 0);
 
       if (state.hasOlderMessages) {
         var loadOlder = document.createElement('button');
@@ -3809,7 +3813,7 @@ export function getScript(): string {
         transcript.append(loadOlder);
       }
 
-      if (!state.messages.length) {
+      if (!state.messages.length && !hasUnlinkedDrafts) {
         var empty = document.createElement('div');
         empty.className = 'transcript-empty';
         var icon = document.createElement('div');
@@ -3978,6 +3982,9 @@ export function getScript(): string {
         item.append(body);
         transcript.append(item);
       }
+
+      transcript.append(unlinkedChangeSetRegion);
+      renderUnlinkedChangeSets(changeSetProjection.unlinked, draftRunProjection.unlinked);
 
       if (shouldStick) {
         transcript.scrollTop = transcript.scrollHeight;

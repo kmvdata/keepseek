@@ -788,7 +788,7 @@ export function getStyles(): string {
     }
 
     .plan-region {
-      margin: 5px var(--keepseek-edge-padding) 0;
+      margin: 0 0 8px;
       border: 1px solid var(--vscode-panel-border);
       border-radius: 6px;
       background: color-mix(in srgb, var(--vscode-sideBar-background) 88%, var(--vscode-editor-background));
@@ -1001,10 +1001,10 @@ export function getStyles(): string {
     }
 
     .draft-bar {
-      margin: 8px var(--keepseek-edge-padding) 0;
+      margin: 8px 0 0;
       padding: 10px;
-      max-height: min(40vh, 420px);
-      overflow-y: auto;
+      max-height: none;
+      overflow-y: visible;
       border: 1px solid var(--vscode-panel-border);
       border-radius: 8px;
       background: var(--vscode-sideBar-background, var(--vscode-editor-background));
@@ -1188,10 +1188,10 @@ export function getStyles(): string {
     }
 
     .draft-run-output {
-      max-height: 260px;
       margin: 0;
       padding: 7px;
-      overflow: auto;
+      overflow-x: auto;
+      overflow-y: visible;
       border: 1px solid var(--vscode-panel-border);
       border-radius: 4px;
       color: var(--vscode-terminal-foreground, var(--vscode-editor-foreground));
@@ -1770,8 +1770,8 @@ export function getStyles(): string {
 
     .message-code-block pre {
       margin: 0;
-      max-height: 420px;
-      overflow: auto;
+      overflow-x: auto;
+      overflow-y: visible;
       padding: 10px 12px;
       color: var(--vscode-editor-foreground);
       background: transparent;
