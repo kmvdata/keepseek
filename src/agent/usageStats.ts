@@ -22,7 +22,7 @@ export type { PricingPeriod } from './usagePricingPeriod';
 const DEFAULT_CURRENCY = '¥';
 
 export function normalizeDeepSeekUsage(usage: DeepSeekUsage | null | undefined): Usage | undefined {
-  if (!usage) {
+  if (!usage || !hasCompleteProviderUsage(usage)) {
     return undefined;
   }
 
@@ -58,6 +58,13 @@ export function normalizeDeepSeekUsage(usage: DeepSeekUsage | null | undefined):
     cacheDataStatus,
     ...(reasoningTokens === undefined ? {} : { reasoningTokens })
   };
+}
+
+/** Partial/empty provider reports cannot settle an output or monetary bound. */
+export function hasCompleteProviderUsage(usage: DeepSeekUsage | null | undefined): boolean {
+  const valid = (value: unknown): boolean => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  return Boolean(usage && valid(usage.prompt_tokens) && valid(usage.completion_tokens)
+    && (usage.total_tokens === undefined || valid(usage.total_tokens)));
 }
 
 export function createEmptySessionUsageStats(currency = DEFAULT_CURRENCY): SessionUsageStats {

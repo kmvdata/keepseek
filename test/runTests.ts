@@ -74,3 +74,6 @@ import './longRunningAgent.test';
 import './toolResultBudget.test';
 import './runBudgetP0.test';
 import './interactionTrace.test';
+import './modelNetworkRecoveryRuntime.test';
+import './providerNetworkRecovery.test';
+import './providerStreamRecovery.test';

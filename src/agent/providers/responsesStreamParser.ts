@@ -1,18 +1,12 @@
 import type { AgentRunCallbacks } from '../../shared/types';
 import type { KeepseekLanguage } from '../../shared/i18n';
-import type { AgentInteractionTrace } from '../logging/interactionTrace';
+import type { ProviderStreamParseOptions } from './types';
+import { ProviderIncompleteStreamError, ProviderStreamProtocolError, ProviderStreamProviderError, ProviderStreamReader, ProviderStreamTextDecoder, isTruncatedJsonError, mergeProviderStreamUsage } from './streamErrors';
 import type { DeepSeekToolCall, DeepSeekUsage } from '../deepseek/types';
 import type {
   OpenAiResponsesItem,
   OpenAiResponsesStreamResult
 } from './responsesTypes';
-
-interface ResponsesStreamParseOptions {
-  trace?: AgentInteractionTrace;
-  requestId?: string;
-  attempt?: number;
-  onStreamActivity?: () => void;
-}
 
 interface CompletedResponse {
   status?: string;
@@ -30,19 +24,34 @@ export class ResponsesStreamParser {
     body: NonNullable<Response['body']>,
     language: KeepseekLanguage,
     callbacks: AgentRunCallbacks,
-    options: ResponsesStreamParseOptions = {}
+    options: ProviderStreamParseOptions = {}
   ): Promise<OpenAiResponsesStreamResult> {
     const reader = body.getReader();
+    const stream = new ProviderStreamReader(reader, options);
     try {
-      const decoder = new TextDecoder();
+      const decoder = new ProviderStreamTextDecoder(stream);
       const streamedText: string[] = [];
       const streamedReasoningSummary: string[] = [];
       const outputItems = new Map<number, OpenAiResponsesItem>();
       const functionArguments = new Map<string, string>();
       let buffer = '';
       let sawEvent = false;
-      let done = false;
       let terminalResponse: CompletedResponse | undefined;
+      let usage: DeepSeekUsage | null | undefined;
+      let finalResult: OpenAiResponsesStreamResult | undefined;
+      const state = { streamedText, streamedReasoningSummary, outputItems, functionArguments, options };
+
+      const consume = (rawEvent: string, final = false) => {
+        stream.event();
+        const result = this.consumeEvent(rawEvent, language, callbacks, state, final,
+          stream.progress.semanticComplete, (observed) => { usage = mergeProviderStreamUsage(usage, observed); stream.publish(usage); });
+        sawEvent = sawEvent || result.sawEvent;
+        terminalResponse = result.response ?? terminalResponse;
+        if (terminalResponse) {
+          finalResult = this.finalizeResponse(terminalResponse, state, language, usage);
+          stream.completed(finalResult.usage);
+        }
+      };
 
       const consumeBufferedEvents = (final = false) => {
         const trailingCarriageReturn = !final && buffer.endsWith('\r');
@@ -52,96 +61,102 @@ export class ResponsesStreamParser {
         while (separatorIndex >= 0) {
           const rawEvent = buffer.slice(0, separatorIndex);
           buffer = buffer.slice(separatorIndex + 2);
-          const result = this.consumeEvent(rawEvent, language, callbacks, {
-            streamedText,
-            streamedReasoningSummary,
-            outputItems,
-            functionArguments,
-            options
-          });
-          sawEvent = sawEvent || result.sawEvent;
-          done = done || result.done;
-          terminalResponse = result.response ?? terminalResponse;
-          if (done) {
-            break;
-          }
+          consume(rawEvent);
           separatorIndex = buffer.indexOf('\n\n');
         }
       };
-
-      while (!done) {
-        const chunk = await reader.read();
+      while (true) {
+        let chunk: { done: boolean; value?: Uint8Array };
+        try { chunk = await stream.read(); }
+        catch (error) {
+          if (!stream.canPreserve(error)) throw error;
+          stream.interruptedTail();
+          break;
+        }
         if (chunk.done) {
           buffer += decoder.decode();
           consumeBufferedEvents(true);
           break;
         }
-        buffer += decoder.decode(chunk.value, { stream: true });
-        options.onStreamActivity?.();
+        buffer += decoder.decode(chunk.value!);
         consumeBufferedEvents();
       }
-
-      if (buffer.trim() && !done) {
-        const result = this.consumeEvent(buffer, language, callbacks, {
-          streamedText,
-          streamedReasoningSummary,
-          outputItems,
-          functionArguments,
-          options
-        });
-        sawEvent = sawEvent || result.sawEvent;
-        terminalResponse = result.response ?? terminalResponse;
+      if (buffer.trim()) {
+        try { consume(buffer.trim(), true); }
+        catch (error) {
+          // A transport cutoff may leave an unfinished tail frame, but a whole
+          // provider error or invalid protocol event still overrides completion.
+          if (!stream.progress.semanticComplete || !(error instanceof ProviderIncompleteStreamError)) throw error;
+          stream.interruptedTail();
+        }
       }
-
-      if (!sawEvent) {
-        throw new Error(language === 'en'
-          ? 'The Responses API did not return any streaming events.'
-          : 'Responses API 未返回任何流式事件。');
-      }
-
-      if (!terminalResponse) throw new Error(language === 'en' ? 'Responses stream ended before a terminal response.' : 'Responses 流未收到完整终态响应。');
-      const authoritativeItems = this.readReplayableItems(terminalResponse?.output);
-      let replayItems = authoritativeItems.length
-        ? authoritativeItems
-        : Array.from(outputItems.entries())
-            .sort(([left], [right]) => left - right)
-            .map(([index, item]) => this.applyAccumulatedArguments(item, functionArguments, index))
-            .filter((item) => REPLAYABLE_OUTPUT_TYPES.has(item.type ?? ''));
-      if (streamedText.length && !this.buildMessage(replayItems).content) {
-        replayItems = this.applyAccumulatedOutputText(replayItems, streamedText.join(''));
-      }
-      const message = this.buildMessage(replayItems);
-      const finalVisibleText = message.content ?? '';
+      if (!sawEvent) throw new ProviderIncompleteStreamError(language === 'en'
+        ? 'The Responses API did not return any streaming events.' : 'Responses API 未返回任何流式事件。');
+      if (!finalResult) throw new ProviderIncompleteStreamError(language === 'en'
+        ? 'Responses stream ended before a terminal response.' : 'Responses 流未收到完整终态响应。');
+      const finalVisibleText = finalResult.message.content ?? '';
       if (!streamedText.length && finalVisibleText) {
         callbacks.onStatus?.({ base: 'thinking', phase: 'generating' });
         callbacks.onDelta?.({ type: 'content', delta: finalVisibleText });
       }
+      return finalResult;
+    } finally { await stream.release(); }
+  }
 
-      const status = terminalResponse?.status;
-      const incompleteReason = this.readNestedString(terminalResponse?.incomplete_details, 'reason');
-      if ((status === 'incomplete' || incompleteReason) && incompleteReason !== 'max_output_tokens') {
-        throw new Error(this.formatTerminalError('incomplete', terminalResponse ?? {}, language));
+  private finalizeResponse(
+    response: CompletedResponse,
+    state: { streamedText: string[]; outputItems: Map<number, OpenAiResponsesItem>; functionArguments: Map<string, string> },
+    language: KeepseekLanguage,
+    observedUsage?: DeepSeekUsage | null
+  ): OpenAiResponsesStreamResult {
+    const status = response.status;
+    const incompleteReason = this.readNestedString(response.incomplete_details, 'reason');
+    if (response.error || status === 'failed') throw new ProviderStreamProviderError(this.formatTerminalError('failed', response, language));
+    if ((status === 'incomplete' || incompleteReason) && incompleteReason !== 'max_output_tokens') {
+      throw new ProviderStreamProviderError(this.formatTerminalError('incomplete', response, language));
+    }
+    if (status !== 'completed' && status !== 'incomplete') throw new ProviderStreamProtocolError('Invalid Responses terminal status.');
+    const authoritativeItems = this.readReplayableItems(response.output);
+    let replayItems = response.output !== undefined ? authoritativeItems
+      : Array.from(state.outputItems.entries()).sort(([left], [right]) => left - right)
+        .map(([index, item]) => this.applyAccumulatedArguments(item, state.functionArguments, index));
+    if (state.streamedText.length && !this.buildMessage(replayItems).content) {
+      replayItems = this.applyAccumulatedOutputText(replayItems, state.streamedText.join(''));
+    }
+    for (const item of replayItems) if (item.status !== undefined && item.status !== 'completed'
+      && !(item.status === 'incomplete' && status === 'incomplete' && item.type !== 'function_call')) {
+      throw new ProviderStreamProtocolError('Responses terminal output contains an unfinished item.');
+    }
+    const message = this.buildMessage(replayItems);
+    const toolCalls = message.tool_calls ?? [];
+    if (status === 'incomplete' && toolCalls.length) throw new ProviderStreamProtocolError('Incomplete Responses tool call / Responses 工具调用不完整');
+    const ids = new Set<string>();
+    for (const call of toolCalls) {
+      if (!call.id || !call.function.name || ids.has(call.id)) throw new ProviderStreamProtocolError('Invalid or duplicate Responses tool identity.');
+      ids.add(call.id);
+      let args: unknown;
+      try { args = JSON.parse(call.function.arguments); }
+      catch { throw new ProviderStreamProtocolError('Invalid tool arguments'); }
+      if (!this.isRecord(args)) throw new ProviderStreamProtocolError('Invalid tool arguments');
+    }
+    const knownKeys = new Set<string>();
+    for (const [index, item] of state.outputItems) {
+      if (item.type !== 'function_call') continue;
+      if (typeof item.call_id !== 'string' || !item.call_id || typeof item.name !== 'string' || !item.name
+        || !toolCalls.some((call) => call.id === item.call_id && call.function.name === item.name)) {
+        throw new ProviderStreamProtocolError('Completed Responses output omitted or damaged a seen tool call.');
       }
-      if (status === 'failed') {
-        throw new Error(this.formatTerminalError('failed', terminalResponse ?? {}, language));
-      }
-
-      const toolCalls = message.tool_calls ?? [];
-      if (status === 'incomplete' && toolCalls.length) throw new Error('Incomplete Responses tool call / Responses 工具调用不完整');
-      for (const call of toolCalls) {
-        const args: unknown = JSON.parse(call.function.arguments);
-        if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Invalid tool arguments');
-      }
-      return {
-        message,
-        finishReason: toolCalls.length
-          ? 'tool_calls'
-          : incompleteReason === 'max_output_tokens' ? 'length' : 'stop',
-        usage: this.normalizeUsage(terminalResponse?.usage),
-        outputItems: replayItems
-      };
-    } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
-
+      for (const key of [item.id, item.call_id, `output:${index}`]) if (typeof key === 'string') knownKeys.add(key);
+    }
+    for (const item of replayItems) if (item.type === 'function_call') {
+      for (const key of [item.id, item.call_id]) if (typeof key === 'string') knownKeys.add(key);
+    }
+    for (const key of state.functionArguments.keys()) if (!knownKeys.has(key)) {
+      throw new ProviderStreamProtocolError('Responses arguments did not belong to a complete tool call.');
+    }
+    if (!replayItems.length) throw new ProviderStreamProtocolError('Responses API returned an empty completed output.');
+    return { message, finishReason: toolCalls.length ? 'tool_calls' : incompleteReason === 'max_output_tokens' ? 'length' : 'stop',
+      usage: mergeProviderStreamUsage(observedUsage, this.normalizeUsage(response.usage)) ?? null, outputItems: replayItems };
   }
 
   private consumeEvent(
@@ -153,8 +168,11 @@ export class ResponsesStreamParser {
       streamedReasoningSummary: string[];
       outputItems: Map<number, OpenAiResponsesItem>;
       functionArguments: Map<string, string>;
-      options: ResponsesStreamParseOptions;
-    }
+      options: ProviderStreamParseOptions;
+    },
+    final = false,
+    semanticComplete = false,
+    onUsage?: (usage: DeepSeekUsage) => void
   ): { sawEvent: boolean; done: boolean; response?: CompletedResponse } {
     if (rawEvent.split('\n').some((line) => line.startsWith(':'))) callbacks.onActivity?.('event');
     const data = rawEvent
@@ -178,17 +196,25 @@ export class ResponsesStreamParser {
       }
       event = parsed;
     } catch (error) {
-      throw new Error(language === 'en'
+      if (final && isTruncatedJsonError(error)) throw new ProviderIncompleteStreamError('Responses stream ended in an incomplete JSON event.');
+      throw new ProviderStreamProtocolError(language === 'en'
         ? `Cannot parse the Responses streaming event: ${error instanceof Error ? error.message : String(error)}`
         : `无法解析 Responses 流式事件：${error instanceof Error ? error.message : String(error)}`);
     }
 
     callbacks.onActivity?.('event');
     const type = typeof event.type === 'string' ? event.type : '';
+    if (!type) throw new ProviderStreamProtocolError('Responses event type is missing.');
+    const observedUsage = this.normalizeUsage(this.isRecord(event.response) ? event.response.usage : event.usage);
+    if (observedUsage) onUsage?.(observedUsage);
+    if (semanticComplete && /\.(?:delta|done|added)$/u.test(type) && type !== 'response.done') {
+      throw new ProviderStreamProtocolError('Responses output arrived after its terminal response.');
+    }
     if (type.endsWith('.delta')) callbacks.onActivity?.('content');
     switch (type) {
       case 'response.output_text.delta': {
-        const delta = typeof event.delta === 'string' ? event.delta : '';
+        if (typeof event.delta !== 'string') throw new ProviderStreamProtocolError('Invalid Responses text delta.');
+        const delta = event.delta;
         if (delta) {
           state.streamedText.push(delta);
           callbacks.onStatus?.({ base: 'thinking', phase: 'generating' });
@@ -197,6 +223,7 @@ export class ResponsesStreamParser {
         break;
       }
       case 'response.output_text.done': {
+        if (typeof event.text !== 'string') throw new ProviderStreamProtocolError('Invalid Responses completed text.');
         if (!state.streamedText.length && typeof event.text === 'string' && event.text) {
           state.streamedText.push(event.text);
           callbacks.onStatus?.({ base: 'thinking', phase: 'generating' });
@@ -205,7 +232,8 @@ export class ResponsesStreamParser {
         break;
       }
       case 'response.reasoning_summary_text.delta': {
-        const delta = typeof event.delta === 'string' ? event.delta : '';
+        if (typeof event.delta !== 'string') throw new ProviderStreamProtocolError('Invalid Responses text delta.');
+        const delta = event.delta;
         if (delta) {
           state.streamedReasoningSummary.push(delta);
           callbacks.onStatus?.({ base: 'thinking', phase: 'reasoning' });
@@ -217,6 +245,7 @@ export class ResponsesStreamParser {
       case 'response.output_item.done': {
         const index = this.readNonNegativeInteger(event.output_index, state.outputItems.size);
         const item = this.cloneItem(event.item);
+        if (!item || !REPLAYABLE_OUTPUT_TYPES.has(item.type ?? '')) throw new ProviderStreamProtocolError('Invalid Responses output item.');
         if (item) {
           state.outputItems.set(index, item);
           if (item.type === 'function_call') {
@@ -230,8 +259,10 @@ export class ResponsesStreamParser {
         const key = this.readCallAccumulatorKey(event);
         const current = state.functionArguments.get(key) ?? '';
         if (type.endsWith('.delta')) {
-          state.functionArguments.set(key, `${current}${typeof event.delta === 'string' ? event.delta : ''}`);
-        } else if (typeof event.arguments === 'string') {
+          if (typeof event.delta !== 'string') throw new ProviderStreamProtocolError('Invalid Responses argument delta.');
+          state.functionArguments.set(key, `${current}${event.delta}`);
+        } else {
+          if (typeof event.arguments !== 'string') throw new ProviderStreamProtocolError('Invalid Responses completed arguments.');
           state.functionArguments.set(key, event.arguments);
         }
         callbacks.onStatus?.({ base: 'thinking', phase: 'planning_tool' });
@@ -239,7 +270,8 @@ export class ResponsesStreamParser {
       }
       case 'response.completed':
       case 'response.incomplete': {
-        const response = this.isRecord(event.response) ? event.response : {};
+        if (!this.isRecord(event.response)) throw new ProviderStreamProtocolError('Invalid Responses terminal event.');
+        const response = event.response;
         return {
           sawEvent: true,
           done: true,
@@ -252,11 +284,12 @@ export class ResponsesStreamParser {
         };
       }
       case 'response.failed': {
-        const response = this.isRecord(event.response) ? event.response : {};
-        throw new Error(this.formatTerminalError('failed', response, language));
+        if (!this.isRecord(event.response)) throw new ProviderStreamProtocolError('Invalid Responses terminal event.');
+        const response = event.response;
+        throw new ProviderStreamProviderError(this.formatTerminalError('failed', response, language));
       }
       case 'error':
-        throw new Error(this.formatEventError(event, language));
+        throw new ProviderStreamProviderError(this.formatEventError(event, language));
       default:
         break;
     }
@@ -268,12 +301,17 @@ export class ResponsesStreamParser {
     const contentParts: string[] = [];
     const toolCalls: DeepSeekToolCall[] = [];
     for (const item of items) {
+      if (item.type === 'message' && typeof item.content !== 'string' && !Array.isArray(item.content)) {
+        throw new ProviderStreamProtocolError('Invalid Responses message content.');
+      }
       if (item.type === 'message' && typeof item.content === 'string') {
         contentParts.push(item.content);
       } else if (item.type === 'message' && Array.isArray(item.content)) {
         for (const part of item.content) {
-          if (!this.isRecord(part)) {
-            continue;
+          if (!this.isRecord(part) || !['output_text', 'refusal'].includes(String(part.type))
+            || (part.type === 'output_text' && typeof part.text !== 'string')
+            || (part.type === 'refusal' && typeof part.refusal !== 'string')) {
+            throw new ProviderStreamProtocolError('Invalid Responses output content part.');
           }
           if (part.type === 'output_text' && typeof part.text === 'string') {
             contentParts.push(part.text);
@@ -281,9 +319,10 @@ export class ResponsesStreamParser {
             contentParts.push(part.refusal);
           }
         }
-      } else if (item.type === 'function_call'
-        && typeof item.call_id === 'string'
-        && typeof item.name === 'string') {
+      } else if (item.type === 'function_call') {
+        if (typeof item.call_id !== 'string' || !item.call_id || typeof item.name !== 'string' || !item.name || typeof item.arguments !== 'string') {
+          throw new ProviderStreamProtocolError('Invalid Responses function call.');
+        }
         toolCalls.push({
           id: item.call_id,
           type: 'function',
@@ -303,12 +342,13 @@ export class ResponsesStreamParser {
   }
 
   private readReplayableItems(value: unknown): OpenAiResponsesItem[] {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-    return value
-      .map((item) => this.cloneItem(item))
-      .filter((item): item is OpenAiResponsesItem => Boolean(item && REPLAYABLE_OUTPUT_TYPES.has(item.type ?? '')));
+    if (value === undefined) return [];
+    if (!Array.isArray(value)) throw new ProviderStreamProtocolError('Invalid Responses output array.');
+    return value.map((rawItem) => {
+      const item = this.cloneItem(rawItem);
+      if (!item || !REPLAYABLE_OUTPUT_TYPES.has(item.type ?? '')) throw new ProviderStreamProtocolError('Invalid Responses replay output item.');
+      return item;
+    });
   }
 
   private applyAccumulatedArguments(
@@ -338,26 +378,27 @@ export class ResponsesStreamParser {
   }
 
   private normalizeUsage(value: unknown): DeepSeekUsage | null {
-    if (!this.isRecord(value)) {
-      return null;
+    if (!this.isRecord(value)) return null;
+    const count = (tokens: unknown): number | undefined => typeof tokens === 'number' && Number.isFinite(tokens) && tokens >= 0
+      ? Math.floor(tokens) : undefined;
+    const inputTokens = count(value.input_tokens);
+    const outputTokens = count(value.output_tokens);
+    const cachedTokens = this.isRecord(value.input_tokens_details) ? count(value.input_tokens_details.cached_tokens) : undefined;
+    const reasoningTokens = this.isRecord(value.output_tokens_details) ? count(value.output_tokens_details.reasoning_tokens) : undefined;
+    const totalTokens = count(value.total_tokens) ?? (inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined);
+    const usage: DeepSeekUsage = {};
+    if (inputTokens !== undefined) {
+      usage.prompt_tokens = inputTokens;
+      if (cachedTokens !== undefined) {
+        usage.prompt_cache_hit_tokens = cachedTokens;
+        usage.prompt_cache_miss_tokens = Math.max(0, inputTokens - cachedTokens);
+        usage.prompt_tokens_details = { cached_tokens: cachedTokens };
+      }
     }
-    const inputTokens = this.readNonNegativeInteger(value.input_tokens, 0);
-    const outputTokens = this.readNonNegativeInteger(value.output_tokens, 0);
-    const cachedTokens = this.isRecord(value.input_tokens_details)
-      ? this.readNonNegativeInteger(value.input_tokens_details.cached_tokens, 0)
-      : 0;
-    const reasoningTokens = this.isRecord(value.output_tokens_details)
-      ? this.readNonNegativeInteger(value.output_tokens_details.reasoning_tokens, 0)
-      : 0;
-    return {
-      prompt_tokens: inputTokens,
-      completion_tokens: outputTokens,
-      total_tokens: this.readNonNegativeInteger(value.total_tokens, inputTokens + outputTokens),
-      prompt_cache_hit_tokens: cachedTokens,
-      prompt_cache_miss_tokens: Math.max(0, inputTokens - cachedTokens),
-      prompt_tokens_details: { cached_tokens: cachedTokens },
-      completion_tokens_details: { reasoning_tokens: reasoningTokens }
-    };
+    if (outputTokens !== undefined) usage.completion_tokens = outputTokens;
+    if (totalTokens !== undefined) usage.total_tokens = totalTokens;
+    if (reasoningTokens !== undefined) usage.completion_tokens_details = { reasoning_tokens: reasoningTokens };
+    return Object.keys(usage).length ? usage : null;
   }
 
   private formatEventError(event: Record<string, unknown>, language: KeepseekLanguage): string {
@@ -410,7 +451,7 @@ export class ResponsesStreamParser {
     }
   }
 
-  private recordRawSseData(data: string, options: ResponsesStreamParseOptions): void {
+  private recordRawSseData(data: string, options: ProviderStreamParseOptions): void {
     if (!options.trace?.enabled || !options.trace.logRawStream || !options.trace.includesPayload('full')) {
       return;
     }
@@ -423,9 +464,9 @@ export class ResponsesStreamParser {
   }
 
   private readNonNegativeInteger(value: unknown, fallback: number): number {
-    return typeof value === 'number' && Number.isFinite(value) && value >= 0
-      ? Math.floor(value)
-      : fallback;
+    if (value === undefined) return fallback;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) throw new ProviderStreamProtocolError('Invalid Responses output index.');
+    return value;
   }
 
   private isRecord(value: unknown): value is Record<string, unknown> {

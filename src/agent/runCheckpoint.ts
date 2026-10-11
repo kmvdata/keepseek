@@ -48,6 +48,10 @@ export interface RunCheckpoint {
   finalResponse?: import('../shared/types').AgentResponse;
   toolSchemaHash?: string;
   modelStepRetries?: number;
+  /** Physical dispatches for the uncommitted model round; survives Continue/restart. */
+  modelStepAttempts?: number;
+  /** Small integrity metadata only; the live transport owns frozen request bytes. */
+  modelStepRequestHash?: string;
   taskPlan?: import('../shared/types').TaskPlan;
   delegationBudget?: import('./subagents/types').SubagentTreeBudget;
   state?: {
@@ -132,6 +136,11 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
         !currency || typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0))) return undefined;
     if (![cp.attempt, cp.modelRequests, cp.retries].every((value) => Number.isSafeInteger(value) && value >= 0)
       || cp.request.model.id !== cp.source.modelId) return undefined;
+    if (cp.modelStepRetries !== undefined && (!Number.isSafeInteger(cp.modelStepRetries) || cp.modelStepRetries < 0 || cp.modelStepRetries > 5)) return undefined;
+    if (cp.modelStepAttempts !== undefined && (!Number.isSafeInteger(cp.modelStepAttempts) || cp.modelStepAttempts < 0 || cp.modelStepAttempts > 6)) return undefined;
+    if (cp.modelStepAttempts !== undefined && cp.modelStepRetries !== undefined
+      && cp.modelStepRetries > Math.max(0, cp.modelStepAttempts - 1)) return undefined;
+    if (cp.modelStepRequestHash !== undefined && !/^[a-f0-9]{64}$/u.test(cp.modelStepRequestHash)) return undefined;
     if (cp.state && (![cp.state.toolCallCount, cp.state.validationRunCount, cp.state.toolResultTokens].every((value) => Number.isFinite(value) && value >= 0)
       || !Array.isArray(cp.state.messages) || !Array.isArray(cp.state.toolRounds)
       || !Array.isArray(cp.state.draftEdits) || !Array.isArray(cp.state.draftRuns)
@@ -147,6 +156,10 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
       }
     }
     const copy = checkpointCopy(cp);
+    // Older retries counted scheduled waits. Conservatively retain the spent
+    // allowance rather than granting a fresh six requests after recovery.
+    copy.modelStepAttempts ??= copy.modelStepRetries ? copy.modelStepRetries + 1 : 0;
+    copy.modelStepRetries = Math.max(0, copy.modelStepAttempts - 1);
     copy.version = 2;
     copy.request.executionMode = normalizeExecutionMode(copy.request.executionMode);
     copy.maxCost ??= 0;

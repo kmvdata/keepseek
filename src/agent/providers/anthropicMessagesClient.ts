@@ -1,11 +1,10 @@
 import { DEFAULT_ANTHROPIC_COMPATIBLE_BASE_URL } from '../../accounts/accountStore';
 import type { KeepseekLanguage } from '../../shared/i18n';
 import type { AgentRunCallbacks } from '../../shared/types';
-import type { AgentInteractionTrace } from '../logging/interactionTrace';
 import { OpenAICompatibleClient } from './openAiCompatibleClient';
 import { AnthropicStreamParser } from './anthropicStreamParser';
 import type { AnthropicMessagesStreamResult } from './anthropicTypes';
-import type { ProviderClientConfig } from './types';
+import type { ProviderClientConfig, ProviderStreamParseOptions } from './types';
 
 export class AnthropicMessagesClient extends OpenAICompatibleClient {
   private readonly anthropicStreamParser = new AnthropicStreamParser();
@@ -38,12 +37,7 @@ export class AnthropicMessagesClient extends OpenAICompatibleClient {
     body: NonNullable<Response['body']>,
     language: KeepseekLanguage,
     callbacks: AgentRunCallbacks,
-    options: {
-      trace?: AgentInteractionTrace;
-      requestId?: string;
-      attempt?: number;
-      onStreamActivity?: () => void;
-    }
+    options: ProviderStreamParseOptions
   ): Promise<AnthropicMessagesStreamResult> {
     return await this.anthropicStreamParser.parse(body, language, callbacks, options);
   }

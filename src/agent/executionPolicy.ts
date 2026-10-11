@@ -192,14 +192,16 @@ export class LogicalRunBudget {
       total_tokens?: number;
       reasoning_tokens?: number;
       completion_tokens_details?: { reasoning_tokens?: number };
-    }
+    },
+    complete = true
   ): void {
-    if (!usage) return;
+    if (!usage || ![usage.prompt_tokens, usage.completion_tokens].every((value) =>
+      typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)) return;
     const prompt = budgetCount(usage.prompt_tokens);
     const completion = budgetCount(usage.completion_tokens);
     const reasoning = budgetCount(usage.reasoning_tokens ?? usage.completion_tokens_details?.reasoning_tokens);
-    const total = budgetCount(usage.total_tokens || prompt + completion);
-    this.state.promptTokens = budgetCount(this.state.promptTokens - reservation.promptTokens + prompt);
+    const total = Math.max(budgetCount(usage.total_tokens || prompt + completion), complete ? 0 : reservation.upstreamTokens);
+    this.state.promptTokens = budgetCount(this.state.promptTokens - reservation.promptTokens + Math.max(prompt, complete ? 0 : reservation.promptTokens));
     this.state.completionTokens += completion;
     this.state.reasoningTokens += reasoning;
     this.state.upstreamTokens = budgetCount(this.state.upstreamTokens - reservation.upstreamTokens + total);
@@ -315,6 +317,22 @@ export class ExecutionCostBudget {
   public record(cost: number, currency: string): void {
     if (!(cost >= 0) || !Number.isFinite(cost) || !currency) return;
     this.costs.set(currency, (this.costs.get(currency) ?? 0) + cost);
+  }
+
+  /** Charge a conservative upper bound before dispatch. Unknown/failed usage
+   * keeps the charge, including after restart and across parallel children. */
+  public reserve(cost: number, currency: string): { cost: number; currency: string } {
+    if (!Number.isFinite(cost) || cost < 0 || !currency) throw new Error('Unpriceable request cost reservation');
+    const used = this.costs.get(currency) ?? 0;
+    if (this.limit > 0 && used + cost > this.limit) throw new LogicalBudgetExceededError('provider_cost_budget_exhausted');
+    this.record(cost, currency);
+    return { cost, currency };
+  }
+
+  public settle(reservation: { cost: number; currency: string }, actualCost?: number): void {
+    if (actualCost === undefined || !Number.isFinite(actualCost) || actualCost < 0) return;
+    this.costs.set(reservation.currency, Math.max(0,
+      (this.costs.get(reservation.currency) ?? 0) - reservation.cost + actualCost));
   }
 
   public restoreAtLeast(restored: Record<string, number>): void {

@@ -483,18 +483,26 @@ export function summarizeDeepSeekTool(tool: DeepSeekFunctionTool): Record<string
 }
 
 export function formatUnknownError(error: unknown): Record<string, unknown> {
-  if (error instanceof Error) {
+  const seen = new Set<object>();
+  let nodes = 0;
+  const clip = (value: string, limit = 1024): string => redactSensitiveTraceText(value)
+    .replace(/(https?:\/\/)[^\s/@]+(?::[^\s/@]*)?@/giu, '$1[redacted]@').slice(0, limit);
+  const visit = (value: unknown, depth: number): Record<string, unknown> => {
+    if (!value || typeof value !== 'object') return { message: clip(String(value)) };
+    if (seen.has(value)) return { message: '[circular error]' };
+    if (depth > 4 || nodes++ >= 24) return { message: '[error chain truncated]' };
+    seen.add(value);
+    const record = value as { name?: unknown; message?: unknown; code?: unknown; stack?: unknown; cause?: unknown; errors?: unknown };
     return {
-      name: error.name,
-      message: error.message,
-      ...('code' in error && typeof error.code === 'string' ? { code: error.code } : {}),
-      stack: error.stack
+      name: typeof record.name === 'string' ? clip(record.name, 100) : undefined,
+      message: typeof record.message === 'string' ? clip(record.message) : clip(String(value)),
+      code: typeof record.code === 'string' ? clip(record.code, 100) : undefined,
+      stack: typeof record.stack === 'string' ? clip(record.stack, 4096) : undefined,
+      ...(record.cause !== undefined ? { cause: visit(record.cause, depth + 1) } : {}),
+      ...(Array.isArray(record.errors) ? { errors: record.errors.slice(0, 8).map((inner) => visit(inner, depth + 1)) } : {})
     };
-  }
-
-  return {
-    message: String(error)
   };
+  return visit(error, 0);
 }
 
 function safeJsonStringify(value: unknown): string {

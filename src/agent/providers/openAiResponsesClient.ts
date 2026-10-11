@@ -1,9 +1,9 @@
 import { DEFAULT_OPENAI_RESPONSES_BASE_URL } from '../../accounts/accountStore';
 import type { KeepseekLanguage } from '../../shared/i18n';
 import type { AgentRunCallbacks } from '../../shared/types';
-import type { AgentInteractionTrace } from '../logging/interactionTrace';
 import { OpenAICompatibleClient } from './openAiCompatibleClient';
 import { ResponsesStreamParser } from './responsesStreamParser';
+import type { ProviderStreamParseOptions } from './types';
 import type { OpenAiResponsesStreamResult } from './responsesTypes';
 
 export class OpenAiResponsesClient extends OpenAICompatibleClient {
@@ -24,12 +24,7 @@ export class OpenAiResponsesClient extends OpenAICompatibleClient {
     body: NonNullable<Response['body']>,
     language: KeepseekLanguage,
     callbacks: AgentRunCallbacks,
-    options: {
-      trace?: AgentInteractionTrace;
-      requestId?: string;
-      attempt?: number;
-      onStreamActivity?: () => void;
-    }
+    options: ProviderStreamParseOptions
   ): Promise<OpenAiResponsesStreamResult> {
     return await this.responsesStreamParser.parse(body, language, callbacks, options);
   }

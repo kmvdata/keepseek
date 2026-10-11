@@ -149,7 +149,7 @@ describe('long-running Agent execution and safe recovery', () => {
     assert.ok(activity.includes('content'));
   });
 
-  it('uses bounded retries only for explicit rejection and cancels a silent original request', async () => {
+  it('uses bounded retries for transient model transport failures and cancels a silent original request', async () => {
     const savedFetch = globalThis.fetch;
     const client = new OpenAICompatibleClient({ displayName: 'Test' });
     const config = { apiKey: '', baseUrl: 'https://example.invalid', maxRequestRetries: 2, requestRetryBaseMs: 0, streamIdleTimeoutMs: 0 };
@@ -162,7 +162,7 @@ describe('long-running Agent execution and safe recovery', () => {
       count = 0;
       globalThis.fetch = (async () => { count++; throw new TypeError('fetch failed'); }) as typeof fetch;
       const uncertain = await client.createModelResponse(config, input);
-      assert.equal(count, 1); assert.equal(uncertain.retryable, false);
+      assert.equal(count, 3); assert.equal(uncertain.recoveryExhausted, true);
       const controller = new AbortController();
       globalThis.fetch = (async (_url, init) => new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => reject(new DOMException('stopped', 'AbortError')), { once: true });

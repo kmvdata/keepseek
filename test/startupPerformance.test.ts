@@ -16,6 +16,64 @@ import { ContextUsageEstimateCache, createContextUsageCacheKey } from '../src/ag
 import { getScript } from '../src/webview/script';
 import { getHtmlForWebview } from '../src/webview/html';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
+import type { AgentActivityInput } from '../src/shared/types';
+
+test('host preserves reconnect activity counters and clears them on the next normal status', () => {
+  let posts = 0;
+  const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    agentActivity: { base: 'idle', phase: 'idle', sequence: 0, updatedAt: '' }, agentActivitySequence: 0,
+    postState: () => { posts++; }
+  }) as unknown as { agentActivity: AgentActivityInput; setAgentActivity(activity: AgentActivityInput): boolean };
+  assert.equal(host.setAgentActivity({ base: 'thinking', phase: 'reconnecting', reconnectAttempt: 1, maxReconnectAttempts: 5, retryDelayMs: 1000 }), true);
+  assert.equal(host.agentActivity.reconnectAttempt, 1);
+  assert.equal(host.setAgentActivity({ base: 'thinking', phase: 'reconnecting', reconnectAttempt: 1, maxReconnectAttempts: 5, retryDelayMs: 1000 }), false);
+  assert.equal(host.setAgentActivity({ base: 'thinking', phase: 'reconnecting', reconnectAttempt: 2, maxReconnectAttempts: 5, retryDelayMs: 2000 }), true);
+  assert.equal(posts, 2);
+  host.setAgentActivity({ base: 'thinking', phase: 'requesting_model' });
+  assert.equal(host.agentActivity.reconnectAttempt, undefined);
+  assert.equal(host.agentActivity.retryDelayMs, undefined);
+});
+
+test('stream publisher replaces a failed suffix, preserves complete prior rounds and cancels pending batches', async () => {
+  const controller = new AbortController();
+  const posted: Array<Record<string, unknown>> = [];
+  const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    currentRunAbortController: controller,
+    agentActivity: { base: 'thinking', phase: 'requesting_model' },
+    postToWebview: (message: Record<string, unknown>) => posted.push(message)
+  }) as unknown as { createRunStreamPublisher(sessionId: string, message: ChatMessage): {
+    schedule(): void; beginModelRound(): void; resetAttempt(): void; dispose(): void;
+  } };
+  const message: ChatMessage = { id: 'answer', role: 'assistant', content: '', reasoningContent: '', isStreaming: true, createdAt: new Date().toISOString() };
+  const stream = host.createRunStreamPublisher('session', message);
+  stream.beginModelRound();
+  stream.resetAttempt();
+  message.content = 'completed'; message.reasoningContent = 'committed reasoning';
+  stream.beginModelRound();
+  message.content += 'failed'; message.reasoningContent += 'incomplete';
+  stream.schedule();
+  stream.resetAttempt();
+  assert.equal(message.content, 'completed');
+  assert.equal(message.reasoningContent, 'committed reasoning');
+  assert.equal(posted.at(-1)?.type, 'agentRunAttemptReset');
+  assert.equal(posted.at(-1)?.streamRevision, 2);
+  message.content += 'success';
+  stream.schedule();
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(posted.filter((event) => event.type === 'agentRunDelta').length, 1);
+  assert.equal(posted.at(-1)?.contentOffset, 'completed'.length);
+  assert.equal(posted.at(-1)?.contentDelta, 'success');
+  message.content += 'cancelled';
+  stream.schedule();
+  controller.abort();
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.equal(posted.filter((event) => event.type === 'agentRunDelta').length, 1);
+  stream.resetAttempt();
+  assert.equal(message.content, 'completed', 'canceled partial cannot enter the next user turn history');
+  assert.equal(message.reasoningContent, 'committed reasoning');
+  assert.equal(posted.filter((event) => event.type === 'agentRunAttemptReset').length, 2);
+  stream.dispose();
+});
 
 test('cold storage starts with one usable empty session without creating a monolith', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-cold-start-'));

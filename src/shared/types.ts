@@ -330,6 +330,9 @@ export interface ProviderUsageLedgerRecord {
   canonicalPricingKey?: string;
   requestStartedAt: string;
   usage?: Usage;
+  /** Provider counters received without a complete billable usage report.
+   * Omitted counters remain unknown; they are never synthesized as zero. */
+  observedUsage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number; reasoningTokens?: number };
   providerCacheDataStatus: UsageCacheDataStatus;
   priceSnapshot: UsagePriceSnapshot;
   cost: number;
@@ -1625,6 +1628,7 @@ export type AgentActivityPhase =
   | 'preparing'
   | 'expanding_references'
   | 'requesting_model'
+  | 'reconnecting'
   | 'reasoning'
   | 'planning_tool'
   | 'executing_tool'
@@ -1655,6 +1659,10 @@ export interface AgentActivityInput {
   phase: AgentActivityPhase;
   toolName?: string;
   detail?: string;
+  /** Reconnects within one model round, independent of the task run attempt. */
+  reconnectAttempt?: number;
+  maxReconnectAttempts?: number;
+  retryDelayMs?: number;
 }
 
 export interface AgentActivityState extends AgentActivityInput {
@@ -1677,6 +1685,10 @@ export interface AgentRunCallbacks {
   onCheckpoint?: (checkpoint: import('../agent/runCheckpoint').RunCheckpoint) => Promise<void>;
   onActivity?: (kind: 'network' | 'event' | 'content' | 'request' | 'retry') => void;
   onDelta?: (event: AgentProgressEvent) => void;
+  /** Discard only the current uncommitted model attempt's displayed deltas. */
+  onAttemptReset?: () => void;
+  /** Mark the boundary after previously completed model output. */
+  onModelRoundStart?: () => void;
   onStatus?: (status: AgentActivityInput) => void;
   onToolRejected?: (event: { toolName: string; errorType: 'subagent_tool_not_exposed' }) => void;
   onUsageEstimate?: (usage: ContextUsageEstimate) => void;

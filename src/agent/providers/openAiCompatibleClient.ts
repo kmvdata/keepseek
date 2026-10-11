@@ -1,10 +1,13 @@
 import { AgentRunCallbacks } from '../../shared/types';
 import type { KeepseekLanguage } from '../../shared/i18n';
 import { StreamParser } from './streamParser';
+import { isRecoverableNetworkError, parseRetryAfter } from './networkErrors';
+import { ProviderStreamProtocolError, ProviderStreamProviderError } from './streamErrors';
 import { formatUnknownError, summarizeDeepSeekMessage, summarizeText } from '../logging/interactionTrace';
 import type {
   DeepSeekAssistantMessage,
-  DeepSeekStreamResult
+  DeepSeekStreamResult,
+  DeepSeekUsage
 } from '../deepseek/types';
 import type { OpenAiResponsesStreamResult } from './responsesTypes';
 import type { AnthropicMessagesStreamResult } from './anthropicTypes';
@@ -12,7 +15,8 @@ import type {
   ProviderClient,
   ProviderClientConfig,
   ProviderClientRequest,
-  ProviderClientResult
+  ProviderClientResult,
+  ProviderStreamParseOptions
 } from './types';
 
 interface OpenAICompatibleClientOptions {
@@ -24,6 +28,7 @@ interface OpenAICompatibleClientOptions {
 
 interface ClientAttemptResult extends ProviderClientResult {
   hadStreamActivity: boolean;
+  retryAfterMs?: number;
 }
 
 /**
@@ -45,479 +50,335 @@ export class OpenAICompatibleClient implements ProviderClient {
     config: ProviderClientConfig,
     request: ProviderClientRequest
   ): Promise<ProviderClientResult> {
-    const maxRetries = Math.min(5, Math.max(0, Math.floor(config.maxRequestRetries) || 0));
+    // Freeze the lane, credentials and authoritative projection before callbacks
+    // can mutate live configuration. Every physical send reuses these bytes.
+    const frozenConfig = { ...config };
+    const frozen = {
+      url: this.getRequestUrl(frozenConfig.baseUrl),
+      headers: Object.freeze(this.buildRequestHeaders(frozenConfig)),
+      body: request.serializedBody ?? JSON.stringify(request.body)
+    };
+    const maxRetries = Math.min(5, Math.max(0, Math.floor(frozenConfig.maxRequestRetries) || 0));
+    const initialAttempts = Math.max(0, Math.floor(request.initialAttemptCount
+      ?? (request.initialRetryCount === undefined ? 0 : request.initialRetryCount + 1)) || 0);
     let physicalAttemptCount = 0;
-
-    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      if (request.signal?.aborted) return { ok: false, hadPartialOutput: false, retryable: false, failureKind: 'external_abort', attemptCount: physicalAttemptCount, retryCount: Math.max(0, physicalAttemptCount - 1) };
+    let lastResult: ClientAttemptResult | undefined;
+    const finish = (result: ProviderClientResult): ProviderClientResult => ({
+      ...result,
+      attemptCount: physicalAttemptCount,
+      retryCount: Math.max(0, initialAttempts + physicalAttemptCount - 1)
+    });
+    const stopped = (): ProviderClientResult | undefined => {
+      if (request.signal?.aborted) return finish({ ...lastResult, ok: false, hadPartialOutput: lastResult?.hadPartialOutput ?? false,
+        retryable: false, failureKind: 'external_abort', error: request.language === 'en' ? 'Agent run was stopped.' : 'Agent 推理已中止。' });
+      if (typeof request.runDeadlineAt === 'number' && request.runDeadlineAt <= Date.now()) return finish({ ...lastResult,
+        ok: false, hadPartialOutput: lastResult?.hadPartialOutput ?? false, retryable: false, failureKind: 'run_time_limit',
+        error: request.language === 'en' ? 'The agent reached the total run-time limit.' : 'Agent 本次执行达到总时长上限。' });
+      return undefined;
+    };
+    for (let localAttempt = 0; initialAttempts + physicalAttemptCount <= maxRetries; localAttempt += 1) {
+      const boundary = stopped();
+      if (boundary) return boundary;
       await request.callbacks?.beforeModelRequest?.();
-      if (request.signal?.aborted) continue;
+      const nextBoundary = stopped();
+      if (nextBoundary) return nextBoundary;
       request.callbacks?.onActivity?.('request');
       physicalAttemptCount += 1;
-      const result = await this.createModelResponseAttempt(config, request, attempt);
-      if (result.ok || !this.shouldRetry(result, attempt, maxRetries)) {
-        return {
-          ...result,
-          attemptCount: physicalAttemptCount,
-          retryCount: Math.max(0, physicalAttemptCount - 1)
-        };
-      }
-
-      request.trace?.record({
-        type: 'upstream_retry_scheduled',
-        requestId: request.requestId,
-        attempt,
-        nextAttempt: attempt + 1,
-        maxRetries,
-        failureKind: result.failureKind,
-        status: result.status,
-        error: result.error
-      });
+      const absoluteAttempt = initialAttempts + physicalAttemptCount - 1;
+      const result = await this.createModelResponseAttempt(frozenConfig, request, frozen, localAttempt, absoluteAttempt);
+      lastResult = result;
+      if (!result.ok) request.callbacks?.onAttemptReset?.();
+      await request.onAttemptResult?.({ attemptIndex: localAttempt, result: finish(result) });
+      if (result.ok || !result.retryable) return finish(result);
+      if (initialAttempts + physicalAttemptCount > maxRetries) break;
+      const delayMs = Math.max(result.retryAfterMs ?? 0, Math.min(60_000,
+        Math.max(0, frozenConfig.requestRetryBaseMs) * (2 ** absoluteAttempt) * (0.8 + Math.random() * 0.4)));
+      const reconnectAttempt = initialAttempts + physicalAttemptCount;
       await request.callbacks?.beforeRetry?.();
+      const retryBoundary = stopped();
+      if (retryBoundary) return retryBoundary;
+      request.trace?.record({ type: 'upstream_retry_scheduled', requestId: request.requestId,
+        attempt: absoluteAttempt, nextAttempt: reconnectAttempt, maxRetries, delayMs,
+        failureKind: result.failureKind, status: result.status, error: result.error });
       request.callbacks?.onActivity?.('retry');
-      await this.sleepBeforeRetry(config.requestRetryBaseMs, attempt, request.signal, request.runDeadlineAt);
+      request.callbacks?.onStatus?.({ base: 'thinking', phase: 'reconnecting',
+        reconnectAttempt, maxReconnectAttempts: maxRetries, retryDelayMs: Math.ceil(delayMs) });
+      await this.sleepBeforeRetry(delayMs, request.signal, request.runDeadlineAt);
     }
-
-    return {
-      ok: false,
-      hadPartialOutput: false,
-      retryable: false,
-      attemptCount: physicalAttemptCount,
-      retryCount: Math.max(0, physicalAttemptCount - 1),
-      error: request.language === 'en'
-        ? `${this.displayName} API request failed after retries.`
-        : `${this.displayName} API 请求重试后仍失败。`
-    };
+    const boundary = stopped();
+    if (boundary) return boundary;
+    const error = request.language === 'en'
+      ? `${this.displayName} connection recovery failed after ${maxRetries} reconnects. ${lastResult?.error ?? ''}`
+      : `${this.displayName} 自动恢复失败，已用尽 ${maxRetries} 次重连。${lastResult?.error ?? ''}`;
+    request.callbacks?.onStatus?.({ base: 'thinking', phase: 'failed', detail: error });
+    return finish({ ...lastResult, ok: false, hadPartialOutput: lastResult?.hadPartialOutput ?? false,
+      retryable: false, recoveryExhausted: true, failureKind: lastResult?.failureKind ?? 'network', error });
   }
 
   private async createModelResponseAttempt(
     config: ProviderClientConfig,
     request: ProviderClientRequest,
+    frozen: { url: string; headers: Readonly<Record<string, string>>; body: string },
+    localAttempt: number,
     attempt: number
   ): Promise<ClientAttemptResult> {
     const controller = new AbortController();
     let idleTimeout: ReturnType<typeof setTimeout> | undefined;
     let runTimeout: ReturnType<typeof setTimeout> | undefined;
+    let headersTimeout: ReturnType<typeof setTimeout> | undefined;
     let observedBody: ReadableStream<Uint8Array> | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let abortedByStreamIdleTimeout = false;
     let abortedByRunTimeLimit = false;
     let abortedByExternalSignal = false;
+    let abortedByHeadersTimeout = false;
     let hadStreamActivity = false;
     let hadPartialOutput = false;
+    let httpComplete = false;
+    let semanticComplete = false;
+    let usage: DeepSeekUsage | null | undefined;
+    let responseBytes = 0;
+    let eventCount = 0;
+    let lastActivityAt = Date.now();
+    let phase: 'waiting_response_headers' | 'reading_error_body' | 'reading_sse' | 'model_complete' | 'finishing' = 'waiting_response_headers';
+    let status: number | undefined;
+    let rejectedHttpResponse = false;
+    let retryAfterMs: number | undefined;
+    let providerRequestId: string | undefined;
+    const startedAt = Date.now();
     const partialContentParts: string[] = [];
     const partialReasoningParts: string[] = [];
     const language = request.language;
     const trace = request.trace;
-    const abortByExternalSignal = () => {
-      abortedByExternalSignal = true;
-      controller.abort();
-    };
+    const diagnostics = () => ({ phase, status, providerRequestId, elapsedMs: Date.now() - startedAt,
+      receivedBytes: responseBytes, eventCount, lastActivityAt: new Date(lastActivityAt).toISOString(),
+      semanticComplete, httpComplete, attempt, reconnectCount: attempt });
+    const abortByExternalSignal = () => { abortedByExternalSignal = true; controller.abort(); };
+    const clearStreamIdleTimeout = () => { if (idleTimeout) clearTimeout(idleTimeout); idleTimeout = undefined; };
     const resetStreamIdleTimeout = () => {
-      if (config.streamIdleTimeoutMs <= 0) {
-        return;
-      }
-      if (idleTimeout) {
-        clearTimeout(idleTimeout);
-      }
-      idleTimeout = setTimeout(() => {
-        abortedByStreamIdleTimeout = true;
-        controller.abort();
-      }, config.streamIdleTimeoutMs);
-    };
-    const clearStreamIdleTimeout = () => {
-      if (idleTimeout) {
-        clearTimeout(idleTimeout);
-        idleTimeout = undefined;
-      }
+      clearStreamIdleTimeout();
+      if (config.streamIdleTimeoutMs <= 0 || semanticComplete) return;
+      idleTimeout = setTimeout(() => { abortedByStreamIdleTimeout = true; controller.abort(); }, config.streamIdleTimeoutMs);
     };
     const setRunTimeout = () => {
-      if (typeof request.runDeadlineAt !== 'number' || !Number.isFinite(request.runDeadlineAt)) {
-        return;
-      }
+      if (typeof request.runDeadlineAt !== 'number' || !Number.isFinite(request.runDeadlineAt)) return;
       const remainingMs = request.runDeadlineAt - Date.now();
-      if (remainingMs <= 0) {
-        abortedByRunTimeLimit = true;
-        controller.abort();
-        return;
-      }
+      if (remainingMs <= 0) { abortedByRunTimeLimit = true; controller.abort(); return; }
       runTimeout = setTimeout(setRunTimeout, Math.min(remainingMs, 2_147_483_647));
-    };
-    const clearRunTimeout = () => {
-      if (runTimeout) {
-        clearTimeout(runTimeout);
-        runTimeout = undefined;
-      }
     };
     const callbacks: AgentRunCallbacks = {
       ...request.callbacks,
       onDelta: (event) => {
         hadPartialOutput = true;
-        if (event.type === 'reasoning') {
-          partialReasoningParts.push(event.delta);
-        } else {
-          partialContentParts.push(event.delta);
-        }
+        (event.type === 'reasoning' ? partialReasoningParts : partialContentParts).push(event.delta);
         request.callbacks?.onDelta?.(event);
       }
     };
     const partialMessage = (): DeepSeekAssistantMessage | undefined => {
       const content = partialContentParts.join('');
       const reasoningContent = partialReasoningParts.join('');
-      if (!content && !reasoningContent) {
-        return undefined;
-      }
-      return {
-        role: 'assistant',
-        content,
-        reasoning_content: reasoningContent,
-        tool_calls: null
-      };
+      return content || reasoningContent ? { role: 'assistant', content, reasoning_content: reasoningContent, tool_calls: null } : undefined;
     };
-
-    resetStreamIdleTimeout();
-    setRunTimeout();
-    if (request.signal?.aborted) {
-      abortByExternalSignal();
-    } else {
-      request.signal?.addEventListener('abort', abortByExternalSignal, { once: true });
-    }
-
     try {
-      request.callbacks?.onStatus?.({
-        base: 'thinking',
-        phase: 'requesting_model'
-      });
-      const requestUrl = this.getRequestUrl(config.baseUrl);
-      trace?.record({
-        type: 'upstream_attempt_start',
-        requestId: request.requestId,
-        attempt,
-        url: requestUrl
-      });
-      request.onAttempt?.({
-        requestId: request.requestId ?? '',
-        attemptIndex: attempt,
-        startedAt: new Date().toISOString()
-      });
-      const headers = this.buildRequestHeaders(config);
-      const response = await fetch(requestUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(request.body),
-        signal: controller.signal
-      });
-      trace?.record({
-        type: 'upstream_http_response',
-        requestId: request.requestId,
-        attempt,
-        status: response.status,
-        ok: response.ok
-      });
-
+      request.callbacks?.onStatus?.({ base: 'thinking', phase: 'requesting_model' });
+      trace?.record({ type: 'upstream_attempt_start', requestId: request.requestId, attempt,
+        // Query parameters and URL userinfo may contain credentials.
+        endpoint: this.safeEndpoint(frozen.url), transport: this.transportRuntime() });
+      await request.onAttempt?.({ requestId: request.requestId ?? '', attemptIndex: localAttempt,
+        startedAt: new Date(startedAt).toISOString() });
+      if (request.signal?.aborted) abortByExternalSignal();
+      else request.signal?.addEventListener('abort', abortByExternalSignal, { once: true });
+      resetStreamIdleTimeout();
+      setRunTimeout();
+      // An explicit establishment boundary; it does not act as a stream idle timer.
+      headersTimeout = setTimeout(() => { abortedByHeadersTimeout = true;
+        controller.abort(Object.assign(new Error('Response headers timed out.'), { code: 'KEEPSEEK_HEADERS_TIMEOUT' }));
+      }, 30_000);
+      const response = await fetch(frozen.url, { method: 'POST', headers: frozen.headers,
+        body: frozen.body, signal: controller.signal });
+      clearTimeout(headersTimeout); headersTimeout = undefined;
+      status = response.status;
+      rejectedHttpResponse = !response.ok;
+      retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
+      providerRequestId = (response.headers.get('x-request-id') ?? response.headers.get('request-id')
+        ?? response.headers.get('x-amzn-requestid') ?? response.headers.get('trace-id'))?.slice(0, 256);
+      phase = response.ok ? 'reading_sse' : 'reading_error_body';
+      trace?.record({ type: 'upstream_http_response', requestId: request.requestId, ok: response.ok, ...diagnostics() });
       if (!response.ok) {
-        const responseText = await this.readErrorBody(response);
-        trace?.record({
-          type: 'upstream_http_error',
-          requestId: request.requestId,
-          attempt,
-          status: response.status,
-          responseText: trace.includesPayload('request') ? responseText : summarizeText(responseText)
-        });
-        return {
-          ok: false,
-          hadPartialOutput,
-          hadStreamActivity,
-          retryable: this.isRetryableStatus(response.status),
-          failureKind: 'http',
-          status: response.status,
+        const responseText = await this.readErrorBody(response, controller);
+        trace?.record({ type: 'upstream_http_error', requestId: request.requestId, ...diagnostics(),
+          responseText: trace.includesPayload('request') ? responseText : summarizeText(responseText) });
+        return { ok: false, hadPartialOutput, hadStreamActivity, retryable: [408, 429, 500, 502, 503, 504].includes(response.status),
+          retryAfterMs, failureKind: 'http', status: response.status,
           error: language === 'en'
             ? `${this.displayName} API request failed (${response.status}): ${this.formatApiError(responseText, language)}`
-            : `${this.displayName} API 请求失败 (${response.status}): ${this.formatApiError(responseText, language)}`
-        };
+            : `${this.displayName} API 请求失败 (${response.status}): ${this.formatApiError(responseText, language)}` };
       }
-
-      if (!response.body) {
-        trace?.record({
-          type: 'upstream_empty_body',
-          requestId: request.requestId,
-          attempt
-        });
-        return {
-          ok: false,
-          hadPartialOutput,
-          hadStreamActivity,
-          retryable: false,
-          failureKind: 'empty_body',
-          error: language === 'en'
-            ? `${this.displayName} API did not return a streaming response body.`
-            : `${this.displayName} API 未返回流式响应体。`
-        };
-      }
-
+      if (!response.body) return { ok: false, hadPartialOutput, hadStreamActivity, retryable: true, failureKind: 'empty_body',
+        error: language === 'en' ? `${this.displayName} API returned no streaming body.` : `${this.displayName} API 未返回流式响应体。` };
       resetStreamIdleTimeout();
-      // Bound accumulated response bytes for all parsers, including unknown
-      // events and parameter fragments. No replay data is silently truncated.
-      let responseBytes = 0;
-      const reader = response.body.getReader();
+      reader = response.body.getReader();
       observedBody = new ReadableStream<Uint8Array>({
         pull: async (target) => {
           try {
-            const chunk = await reader.read();
-            if (chunk.done) { target.close(); reader.releaseLock(); return; }
-            hadStreamActivity = true;
-            request.callbacks?.onActivity?.('network');
-            resetStreamIdleTimeout();
-            responseBytes += chunk.value.byteLength;
+            const chunk = await reader!.read();
+            if (chunk.done) { httpComplete = true; target.close(); return; }
+            hadStreamActivity = true; lastActivityAt = Date.now(); responseBytes += chunk.value.byteLength;
             if (responseBytes > 32 * 1024 * 1024) throw new Error('Streaming resource limit (32 MiB) / 流响应资源上限（32 MiB）');
-            target.enqueue(chunk.value);
-          } catch (error) { target.error(error); void reader.cancel().catch(() => undefined); }
+            request.callbacks?.onActivity?.('network'); resetStreamIdleTimeout(); target.enqueue(chunk.value);
+          } catch (error) { target.error(error); }
         },
-        cancel: async () => { await reader.cancel().catch(() => undefined); }
+        cancel: async () => { controller.abort(); await reader!.cancel().catch(() => undefined); }
       });
-      const result = await this.parseStream(
-        observedBody,
-        language,
-        callbacks,
-        {
-          trace,
-          requestId: request.requestId,
-          attempt,
-          onStreamActivity: () => {
-            hadStreamActivity = true;
-            resetStreamIdleTimeout();
+      const result = await this.parseStream(observedBody, language, callbacks, {
+        trace, requestId: request.requestId, attempt, signal: controller.signal,
+        onStreamActivity: () => { hadStreamActivity = true; resetStreamIdleTimeout(); },
+        onProgress: (progress) => {
+          usage = progress.usage ?? usage; eventCount = progress.eventCount;
+          if (progress.semanticComplete && !semanticComplete) {
+            semanticComplete = true; phase = 'model_complete'; clearStreamIdleTimeout();
+            trace?.record({ type: 'upstream_model_complete', requestId: request.requestId, ...diagnostics() });
           }
         }
-      );
-      trace?.record({
-        type: 'upstream_attempt_finish',
-        requestId: request.requestId,
-        attempt,
-        ok: true,
-        finishReason: result.finishReason,
-        usage: result.usage,
-        nativeOutputItems: 'outputItems' in result
-          ? {
-              count: result.outputItems.length,
-              types: result.outputItems.map((item) => item.type ?? 'local_message')
-            }
-          : undefined,
-        nativeAnthropicBlocks: 'contentBlocks' in result
-          ? { count: result.contentBlocks.length, types: result.contentBlocks.map((block) => block.type) }
-          : undefined,
-        message: trace.includesPayload('request') ? result.message : summarizeDeepSeekMessage(result.message)
       });
+      // Cancellation and budgets remain hard boundaries even if a terminal was seen.
+      if (abortedByExternalSignal || request.signal?.aborted || abortedByRunTimeLimit || abortedByStreamIdleTimeout) throw new DOMException('Aborted', 'AbortError');
+      phase = 'finishing';
+      trace?.record({ type: 'upstream_attempt_finish', requestId: request.requestId, ok: true,
+        finishReason: result.finishReason, usage: result.usage ?? usage, ...diagnostics(),
+        nativeOutputItems: 'outputItems' in result ? { count: result.outputItems.length, types: result.outputItems.map((item) => item.type ?? 'local_message') } : undefined,
+        nativeAnthropicBlocks: 'contentBlocks' in result ? { count: result.contentBlocks.length, types: result.contentBlocks.map((block) => block.type) } : undefined,
+        message: trace?.includesPayload('request') ? result.message : summarizeDeepSeekMessage(result.message) });
       const normalizedMessage = 'outputItems' in result && partialReasoningParts.length
-        ? { ...result.message, reasoning_content: partialReasoningParts.join('') }
-        : result.message;
-      return {
-        ok: true,
-        finishReason: result.finishReason,
-        message: normalizedMessage,
-        usage: result.usage,
+        ? { ...result.message, reasoning_content: partialReasoningParts.join('') } : result.message;
+      return { ok: true, finishReason: result.finishReason, message: normalizedMessage, usage: result.usage ?? usage,
         nativeOutputItems: 'outputItems' in result ? result.outputItems : undefined,
         nativeAnthropicContentBlocks: 'contentBlocks' in result ? result.contentBlocks : undefined,
-        hadPartialOutput,
-        hadStreamActivity,
-        retryable: false
-      };
+        hadPartialOutput, hadStreamActivity, retryable: false };
     } catch (error) {
-      const abortError = error instanceof Error && error.name === 'AbortError';
-      if (abortError && (abortedByExternalSignal || request.signal?.aborted)) {
-        trace?.record({
-          type: 'upstream_attempt_finish',
-          requestId: request.requestId,
-          attempt,
-          ok: false,
-          failureKind: 'external_abort',
-          hadPartialOutput,
-          hadStreamActivity,
-          partialMessage: trace.includesPayload('request') ? partialMessage() : summarizeDeepSeekMessage(partialMessage() ?? {})
-        });
-        return {
-          ok: false,
-          message: partialMessage(),
-          hadPartialOutput,
-          hadStreamActivity,
-          retryable: false,
-          failureKind: 'external_abort',
-          error: language === 'en' ? 'Agent run was stopped.' : 'Agent 推理已中止。'
-        };
+      let failureKind: ProviderClientResult['failureKind'];
+      let message: string;
+      let retryable = false;
+      if (abortedByExternalSignal || request.signal?.aborted) {
+        failureKind = 'external_abort'; message = language === 'en' ? 'Agent run was stopped.' : 'Agent 推理已中止。';
+      } else if (abortedByRunTimeLimit) {
+        failureKind = 'run_time_limit'; message = language === 'en' ? 'The agent reached the total run-time limit.' : 'Agent 本次执行达到总时长上限。';
+      } else if (abortedByStreamIdleTimeout) {
+        failureKind = 'stream_idle_timeout'; message = language === 'en'
+          ? `${this.displayName} streaming response was idle for ${Math.round(config.streamIdleTimeoutMs / 1000)} seconds.`
+          : `${this.displayName} API 流式响应连续 ${Math.round(config.streamIdleTimeoutMs / 1000)} 秒没有返回数据，已停止本次请求。`;
+      } else {
+        // A broken error body cannot turn a known authentication/configuration
+        // rejection into a retryable POST.
+        retryable = rejectedHttpResponse
+          ? [408, 429, 500, 502, 503, 504].includes(status ?? 0)
+          : abortedByHeadersTimeout || isRecoverableNetworkError(error);
+        failureKind = rejectedHttpResponse ? 'http'
+          : error instanceof ProviderStreamProtocolError ? 'protocol'
+            : error instanceof ProviderStreamProviderError ? 'provider'
+              : error instanceof Error && /resource limit|资源上限/u.test(error.message) ? 'resource_limit'
+                : retryable ? (hadStreamActivity ? 'stream' : 'network') : 'stream';
+        message = rejectedHttpResponse
+          ? `${this.displayName} API (${status}): ${error instanceof Error ? error.message : String(error)}`
+          : this.formatStreamingError(error, language, phase);
       }
-      if (abortError && abortedByRunTimeLimit) {
-        trace?.record({
-          type: 'upstream_attempt_finish',
-          requestId: request.requestId,
-          attempt,
-          ok: false,
-          failureKind: 'run_time_limit',
-          hadPartialOutput,
-          hadStreamActivity,
-          partialMessage: trace.includesPayload('request') ? partialMessage() : summarizeDeepSeekMessage(partialMessage() ?? {})
-        });
-        return {
-          ok: false,
-          message: partialMessage(),
-          hadPartialOutput,
-          hadStreamActivity,
-          retryable: false,
-          failureKind: 'run_time_limit',
-          error: language === 'en'
-            ? 'The agent reached the total run-time limit and stopped this run.'
-            : 'Agent 本次执行达到总时长上限，已停止本次执行。'
-        };
-      }
-      if (abortError && abortedByStreamIdleTimeout) {
-        trace?.record({
-          type: 'upstream_attempt_finish',
-          requestId: request.requestId,
-          attempt,
-          ok: false,
-          failureKind: 'stream_idle_timeout',
-          hadPartialOutput,
-          hadStreamActivity,
-          partialMessage: trace.includesPayload('request') ? partialMessage() : summarizeDeepSeekMessage(partialMessage() ?? {})
-        });
-        return {
-          ok: false,
-          message: partialMessage(),
-          hadPartialOutput,
-          hadStreamActivity,
-          retryable: false,
-          failureKind: 'stream_idle_timeout',
-          error: language === 'en'
-            ? `${this.displayName} API streaming response was idle for ${Math.round(config.streamIdleTimeoutMs / 1000)} seconds.`
-            : `${this.displayName} API 流式响应连续 ${Math.round(config.streamIdleTimeoutMs / 1000)} 秒没有返回数据，已停止本次请求。`
-        };
-      }
-
-      const retryable = false; // A transport error cannot prove that the POST was not accepted.
-      const isEmptyStream = error instanceof Error && (
-        error.message.includes('did not return any streaming chunks') ||
-        error.message.includes('未返回任何流式数据块') ||
-        error.message.includes('did not return any streaming events') ||
-        error.message.includes('未返回任何流式事件')
-      );
-      trace?.record({
-        type: 'upstream_attempt_finish',
-        requestId: request.requestId,
-        attempt,
-        ok: false,
-        failureKind: this.isRetryableTransportError(error) ? 'network' : isEmptyStream ? 'empty_stream' : 'stream',
-        retryable,
-        hadPartialOutput,
-        hadStreamActivity,
-        error: formatUnknownError(error),
-        partialMessage: trace?.includesPayload('request') ? partialMessage() : summarizeDeepSeekMessage(partialMessage() ?? {})
-      });
-      return {
-        ok: false,
-        message: partialMessage(),
-        hadPartialOutput,
-        hadStreamActivity,
-        retryable,
-        failureKind: this.isRetryableTransportError(error) ? 'network' : isEmptyStream ? 'empty_stream' : 'stream',
-        error: this.formatStreamingError(error, config, language, hadPartialOutput)
-      };
+      trace?.record({ type: 'upstream_attempt_finish', requestId: request.requestId, ok: false,
+        failureKind, retryable, hadPartialOutput, hadStreamActivity, usage, ...diagnostics(), error: formatUnknownError(error),
+        partialMessage: trace?.includesPayload('request') ? partialMessage() : summarizeDeepSeekMessage(partialMessage() ?? {}) });
+      return { ok: false, message: partialMessage(), usage, hadPartialOutput, hadStreamActivity, retryable,
+        failureKind, status, retryAfterMs, error: message };
     } finally {
       request.signal?.removeEventListener('abort', abortByExternalSignal);
       clearStreamIdleTimeout();
-      clearRunTimeout();
-      controller.abort();
-      if (observedBody && !observedBody.locked) await observedBody.cancel().catch(() => undefined);
+      if (runTimeout) clearTimeout(runTimeout);
+      if (headersTimeout) clearTimeout(headersTimeout);
+      // Natural EOF keeps the healthy socket reusable. Incomplete/failed reads
+      // must be aborted and fully cancelled before the next request is dispatched.
+      if (!httpComplete) controller.abort();
+      if (observedBody && !observedBody.locked && !httpComplete) await observedBody.cancel().catch(() => undefined);
+      if (reader) {
+        if (!httpComplete) await reader.cancel().catch(() => undefined);
+        reader.releaseLock();
+      }
     }
   }
 
-  private async readErrorBody(response: Response): Promise<string> {
+  private async readErrorBody(response: Response, controller: AbortController): Promise<string> {
     if (!response.body) return '';
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let bytes = 0;
+    let complete = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const signal = controller.signal;
+    let removeAbort: (() => void) | undefined;
+    // A rejected request needs only a short diagnostic preview. Silent error
+    // bodies must not bypass cancellation or hold recovery indefinitely when
+    // the normal stream idle timeout is disabled.
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        const error = Object.assign(new Error('HTTP error response body exceeded its 2-second read deadline.'), {
+          code: 'KEEPSEEK_HTTP_ERROR_BODY_TIMEOUT'
+        });
+        controller.abort(error);
+        reject(error);
+      }, 2_000);
+    });
+    const cancelled = new Promise<never>((_, reject) => {
+      const abort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      signal.addEventListener('abort', abort, { once: true });
+      removeAbort = () => signal.removeEventListener('abort', abort);
+      if (signal.aborted) abort();
+    });
     try {
       while (bytes < 65_536) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
+        const chunk = await Promise.race([reader.read(), deadline, cancelled]);
+        if (chunk.done) { complete = true; break; }
         const part = chunk.value.subarray(0, 65_536 - bytes);
         chunks.push(part); bytes += part.byteLength;
       }
       return Buffer.concat(chunks).toString('utf8');
-    } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
-  }
-
-  private shouldRetry(result: ClientAttemptResult, attempt: number, maxRetries: number): boolean {
-    return result.retryable && !result.hadPartialOutput && !result.hadStreamActivity && attempt < maxRetries;
-  }
-
-  private async sleepBeforeRetry(
-    baseMs: number,
-    attempt: number,
-    signal: AbortSignal | undefined,
-    runDeadlineAt: number | undefined
-  ): Promise<void> {
-    if (signal?.aborted) return;
-    const rawDelayMs = Math.min(60_000, Math.max(0, Math.floor(baseMs) || 0) * (2 ** attempt));
-    const deadlineDelayMs = typeof runDeadlineAt === 'number'
-      ? Math.max(0, runDeadlineAt - Date.now())
-      : rawDelayMs;
-    const delayMs = Math.min(rawDelayMs, deadlineDelayMs);
-    if (delayMs <= 0) {
-      return;
+    } finally {
+      if (timer) clearTimeout(timer);
+      removeAbort?.();
+      if (!complete) await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
     }
+  }
 
+  private async sleepBeforeRetry(delayMs: number, signal?: AbortSignal, runDeadlineAt?: number): Promise<void> {
+    if (signal?.aborted) return;
+    const waitMs = Math.min(delayMs, typeof runDeadlineAt === 'number' ? Math.max(0, runDeadlineAt - Date.now()) : delayMs);
+    if (waitMs <= 0) return;
     await new Promise<void>((resolve) => {
-      const handleAbort = () => {
-        clearTimeout(timeout);
-        resolve();
-      };
-      const timeout = setTimeout(() => {
-        signal?.removeEventListener('abort', handleAbort);
-        resolve();
-      }, delayMs);
-      signal?.addEventListener('abort', handleAbort, { once: true });
+      const finish = () => { clearTimeout(timer); signal?.removeEventListener('abort', finish); resolve(); };
+      const timer = setTimeout(finish, waitMs);
+      signal?.addEventListener('abort', finish, { once: true });
+      if (signal?.aborted) finish();
     });
   }
 
-  private isRetryableStatus(status: number): boolean {
-    return status === 429; // Explicit rate-limit rejection is safe; gateway 5xx acceptance is uncertain.
+  private safeEndpoint(value: string): string {
+    const url = new URL(value); url.username = ''; url.password = ''; url.search = ''; url.hash = '';
+    return url.toString();
   }
 
-  private isRetryableTransportError(error: unknown): boolean {
-    if (!(error instanceof Error)) {
-      return false;
-    }
-    const message = error.message.toLowerCase();
-    return error.name === 'TypeError' && (
-      message.includes('fetch failed') ||
-      message.includes('terminated') ||
-      message.includes('socket') ||
-      message.includes('network')
-    );
+  private transportRuntime(): Record<string, unknown> {
+    const runtime = globalThis as typeof globalThis & { __vscodeOriginalFetch?: unknown; __vscodePatchedFetch?: unknown };
+    return { implementation: runtime.__vscodeOriginalFetch ? 'vscode_fetch' : 'runtime_fetch',
+      nodeVersion: process.version, undiciVersion: (process.versions as Record<string, string | undefined>).undici,
+      headersTimeoutMs: 30_000, errorBodyTimeoutMs: 2_000, bodyIdleTimeoutManagedByRuntime: true };
   }
 
-  private formatStreamingError(
-    error: unknown,
-    config: ProviderClientConfig,
-    language: KeepseekLanguage,
-    hadPartialOutput: boolean
-  ): string {
-    if (!this.isRetryableTransportError(error)) {
-      return error instanceof Error ? error.message : String(error);
-    }
-
-    const originalMessage = error instanceof Error ? error.message : String(error);
-    const idleHint = config.streamIdleTimeoutMs > 0
-      ? (language === 'en'
-        ? ` KeepSeek's automatic stream timeout for this request is ${Math.round(config.streamIdleTimeoutMs / 1000)} seconds.`
-        : `KeepSeek 对本次请求使用的自动流式超时为 ${Math.round(config.streamIdleTimeoutMs / 1000)} 秒。`)
-      : (language === 'en'
-        ? ' KeepSeek stream idle timeout is disabled, so this usually means the network, proxy, or provider closed the SSE connection.'
-        : 'KeepSeek 已禁用流式空闲超时，因此这通常表示网络、代理或服务商关闭了 SSE 连接。');
-    const partialHint = hadPartialOutput
-      ? (language === 'en' ? ' Any partial output already received was kept in the transcript.' : ' 已收到的部分输出会保留在对话中。')
-      : '';
-
+  private formatStreamingError(error: unknown, language: KeepseekLanguage, phase: string): string {
+    const original = error instanceof Error ? error.message : String(error);
+    if (!isRecoverableNetworkError(error)) return original;
+    const phaseText = phase === 'waiting_response_headers'
+      ? (language === 'en' ? 'connecting or waiting for response headers' : '连接或等待响应头时')
+      : (language === 'en' ? 'reading the streaming response' : '读取流式响应时');
     return language === 'en'
-      ? `${this.displayName} streaming connection failed before completion (${originalMessage}).${idleHint}${partialHint}`
-      : `${this.displayName} 流式连接在完成前中断（${originalMessage}）。${idleHint}${partialHint}`;
+      ? `${this.displayName} connection failed while ${phaseText} (${original}).`
+      : `${this.displayName} 在${phaseText}连接中断（${original}）。`;
   }
 
   private formatApiError(responseText: string, language: KeepseekLanguage): string {
@@ -579,12 +440,7 @@ export class OpenAICompatibleClient implements ProviderClient {
     body: NonNullable<Response['body']>,
     language: KeepseekLanguage,
     callbacks: AgentRunCallbacks,
-    options: {
-      trace?: import('../logging/interactionTrace').AgentInteractionTrace;
-      requestId?: string;
-      attempt?: number;
-      onStreamActivity?: () => void;
-    }
+    options: ProviderStreamParseOptions
   ): Promise<DeepSeekStreamResult | OpenAiResponsesStreamResult | AnthropicMessagesStreamResult> {
     return await this.streamParser.parse(body, language, callbacks, options);
   }

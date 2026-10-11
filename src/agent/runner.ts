@@ -58,7 +58,6 @@ import {
 } from '../shared/types';
 import type { ProviderReplayState } from '../shared/types';
 import {
-  getConfiguredMaxRequestRetries,
   getConfiguredMaxRepairIterations,
   getConfiguredMaxValidationRuns,
   getConfiguredModelUsagePricing,
@@ -466,7 +465,12 @@ export class AgentLoop {
           cp.lastNetworkAt = undefined; cp.lastEventAt = undefined; cp.lastContentAt = undefined;
           await persist();
         },
-        beforeRetry: async () => { cp.retries++; cp.modelStepRetries = (cp.modelStepRetries ?? 0) + 1; await persist(); },
+        beforeRetry: async () => {
+          this.throwIfAborted(controller.signal, request.language);
+          activeRunBudget?.assertCanDispatch();
+          this.throwIfCostLimitReached({ ...request, taskCostBudget });
+          await callbacks.beforeRetry?.();
+        },
         onTaskPlan: (plan) => { cp.taskPlan = plan; callbacks.onTaskPlan?.(plan); },
         onCheckpoint: async (next) => { cp.state = next.state; await persist(); },
         onActivity: (kind) => {
@@ -1130,7 +1134,8 @@ export class AgentLoop {
       checkpoint.state = {
         messages: committedMessages, provider: committedProvider, completedReplay, toolRounds, draftEdits, draftRuns,
         reasoningParts, turn: nextTurn, toolCallCount, validationRunCount, toolResultTokens,
-        validationState: validationState.getState(), repairLoop: repairLoop.getState(), epoch: { ...epoch, calibration: { ...admission.state } }, pending
+        validationState: validationState.getState(), repairLoop: repairLoop.getState(), epoch: { ...epoch, calibration: { ...admission.state } }, pending,
+        continuation: pending ? checkpoint.state?.continuation : undefined
       };
       await callbacks.onCheckpoint?.(checkpoint);
     };
@@ -1298,6 +1303,9 @@ export class AgentLoop {
       committedMessages = structuredClone(messages);
       committedProvider = structuredClone(providerRunState);
       pending = undefined;
+      // A controlled capacity/protocol boundary may change the projection;
+      // it preserves the current round's consumed physical request allowance.
+      checkpoint.modelStepRequestHash = undefined;
       trace.record({
         type: 'context_epoch_rollover', epochIndex: epoch.index, reason,
         estimatedPromptTokens: estimated, actualPromptTokens: admission.state.lastActualInputTokens,
@@ -1522,6 +1530,7 @@ export class AgentLoop {
           }))
         });
         pending = undefined;
+        this.commitModelRequestRecovery(checkpoint);
         completedReplay = this.createProviderReplayState(providerRunState);
         committedMessages = structuredClone(messages);
         committedProvider = structuredClone(providerRunState);
@@ -1551,6 +1560,7 @@ export class AgentLoop {
         });
       }
       if (!toolCalls.length) {
+        if (!pending) this.commitModelRequestRecovery(checkpoint);
         pending ??= { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {} };
         committedProvider = structuredClone(providerRunState);
         await saveStep();
@@ -1632,6 +1642,7 @@ export class AgentLoop {
         }, { finishReason: finalFinishReason });
       }
 
+      if (!pending) this.commitModelRequestRecovery(checkpoint);
       pending ??= { response: { message: assistant, finishReason: response.finishReason, usage: response.usage }, results: {} };
       committedProvider = structuredClone(providerRunState);
       logicalBudget.recordToolRound();
@@ -2247,6 +2258,8 @@ export class AgentLoop {
 
       pending = undefined;
       checkpoint.modelStepRetries = 0;
+      checkpoint.modelStepAttempts = 0;
+      checkpoint.modelStepRequestHash = undefined;
       completedReplay = this.createProviderReplayState(providerRunState);
       nextTurn = turn + 1;
       epoch.turnInEpoch += 1;
@@ -2365,7 +2378,6 @@ export class AgentLoop {
     callbacks: AgentRunCallbacks,
     runDeadlineAt?: number,
     options: {
-      allowPartialRecovery?: boolean;
       /** Output recovery must not spend another complete response budget on
        * hidden reasoning after a reasoning-only length stop. */
       forceDisableThinking?: boolean;
@@ -2549,91 +2561,145 @@ export class AgentLoop {
       body: formatRequestBodyForTrace(body, trace.includesPayload('request'))
     });
 
+    // Only the visible/current round owns checkpoint reconnect metadata. An
+    // internal epoch summary has its own bounded request and cannot grant or
+    // consume a fresh allowance for an interrupted visible model round.
+    const tracksModelRound = usageSource !== 'summary';
+    const checkpoint = tracksModelRound ? request.checkpoint : undefined;
+    const serializedBody = JSON.stringify(body);
+    const requestHash = hashText(serializedBody);
+    if (checkpoint?.modelStepRequestHash && checkpoint.modelStepRequestHash !== requestHash) {
+      throw new AgentInterruptedError('provider_error', request.language === 'en'
+        ? 'The interrupted model request changed; exact recovery was refused. Start a new user turn to change its parameters.'
+        : '中断模型轮的请求已变化，已拒绝非精确恢复；如需修改参数，请发送新的用户消息。');
+    }
+    const initialAttemptCount = checkpoint?.modelStepAttempts ?? (checkpoint?.modelStepRetries ? checkpoint.modelStepRetries + 1 : 0);
     const requestReservations: Array<ReturnType<LogicalRunBudget['reservePhysicalRequest']>> = [];
+    const costReservations: Array<ReturnType<ExecutionCostBudget['reserve']> | undefined> = [];
+    const accountedAttempts = new Set<number>();
+    let finalUsageEvent: UsageEvent | undefined;
     const physicalCallbacks: AgentRunCallbacks = {
       ...callbacks,
       beforeModelRequest: async () => {
-        const reservation = request.taskRunBudget?.reservePhysicalRequest(
-          estimatedPromptTokens,
-          runtimeConfig.maxTokens
-        );
+        this.throwIfAborted(request.signal, request.language);
+        if (!vscode.workspace.isTrusted) throw new AgentInterruptedError('waiting_for_user', 'Workspace trust is required / 工作区需要信任');
+        this.throwIfCostLimitReached(request);
+        request.taskRunBudget?.assertCanDispatch();
+        const snapshot = createAttemptSnapshot(new Date().toISOString());
+        let costReservation: ReturnType<ExecutionCostBudget['reserve']> | undefined;
+        if ((request.taskCostBudget?.limit ?? 0) > 0) {
+          // Declared context capacity and output cap form a conservative bill
+          // reservation; local prompt estimates cannot prove a billing bound.
+          const rate = Math.max(snapshot.inputRate ?? NaN, snapshot.cacheHitRate ?? NaN);
+          const configuredRates = getConfiguredModelUsagePricing(request.model.id);
+          const upperInputRate = Math.max(rate, configuredRates?.peakInputPrice ?? rate,
+            configuredRates?.peakCacheHitPrice ?? rate);
+          const upperOutputRate = Math.max(snapshot.outputRate ?? NaN,
+            configuredRates?.peakOutputPrice ?? snapshot.outputRate ?? NaN);
+          const upperCost = (runtimeConfig.contextWindowTokens * upperInputRate
+            + runtimeConfig.maxTokens * upperOutputRate) / 1_000_000;
+          if (!snapshot.supportsBilling || snapshot.unavailableReason || !Number.isFinite(upperCost) || !snapshot.currency) {
+            throw new AgentInterruptedError('provider_error', request.language === 'en'
+              ? 'The next physical request cannot be safely priced within the configured cost limit.'
+              : '无法为下一次物理请求安全预留费用，已按费用上限停止。');
+          }
+          try { costReservation = request.taskCostBudget!.reserve(upperCost, snapshot.currency); }
+          catch (error) {
+            if (!(error instanceof LogicalBudgetExceededError)) throw error;
+            throw new AgentInterruptedError('cost_limit', request.language === 'en'
+              ? 'The remaining Provider cost budget cannot cover the next request upper bound.'
+              : '剩余 Provider 费用预算不足以覆盖下一次请求的费用上界。');
+          }
+        }
+        let reservation: ReturnType<LogicalRunBudget['reservePhysicalRequest']> | undefined;
+        try {
+          reservation = request.taskRunBudget?.reservePhysicalRequest(estimatedPromptTokens, runtimeConfig.maxTokens);
+        } catch (error) {
+          if (costReservation) request.taskCostBudget?.settle(costReservation, 0);
+          throw error;
+        }
         if (reservation) requestReservations.push(reservation);
+        costReservations.push(costReservation);
+        if (checkpoint) {
+          const previousAttempts = checkpoint.modelStepAttempts ?? initialAttemptCount;
+          checkpoint.modelStepAttempts = previousAttempts + 1;
+          checkpoint.modelStepRetries = Math.max(0, checkpoint.modelStepAttempts - 1);
+          checkpoint.modelStepRequestHash = requestHash;
+          if (previousAttempts > 0) checkpoint.retries += 1;
+          checkpoint.usedCostByCurrency = request.taskCostBudget?.snapshot() ?? {};
+        }
+        // Persist dispatch counters/reservations before sending. Storage failure
+        // is a hard stop; it must never turn into a transport reconnect.
         await callbacks.beforeModelRequest?.();
+      },
+      beforeRetry: async () => {
+        this.throwIfAborted(request.signal, request.language);
+        this.throwIfCostLimitReached(request);
+        request.taskRunBudget?.assertCanDispatch();
+        await callbacks.beforeRetry?.();
       }
     };
+    const accountAttempt = async (attemptIndex: number, result: import('./providers/types').ProviderClientResult) => {
+      if (accountedAttempts.has(attemptIndex)) return;
+      accountedAttempts.add(attemptIndex);
+      const snapshot = attemptSnapshots[attemptIndex] ?? fallbackSnapshot;
+      const observation = attemptCacheObservations[attemptIndex] ?? createAttemptObservation(attemptIndex);
+      const usage = normalizeDeepSeekUsage(result.usage);
+      const reservation = requestReservations[attemptIndex];
+      if (reservation) request.taskRunBudget?.settlePhysicalRequest(reservation, usage ? result.usage ?? undefined : undefined, result.ok);
+      const records = createUsageLedgerRecords({
+        requestId: upstreamRequestId, attempts: [snapshot], usage, source: usageSource,
+        cacheObservations: [observation],
+        observedUsage: {
+          promptTokens: result.usage?.prompt_tokens,
+          completionTokens: result.usage?.completion_tokens,
+          totalTokens: result.usage?.total_tokens,
+          reasoningTokens: result.usage?.completion_tokens_details?.reasoning_tokens
+        }
+      }).map((record) => ({ ...record, attemptIndex }));
+      for (const record of records) callbacks.onUsageLedgerRecord?.(record);
+      trace.record({ type: 'upstream_usage_ledger', requestId: upstreamRequestId, attemptIndex, records });
+      if (result.ok && usage) {
+        const successfulObservation = records[0]?.cacheObservation;
+        if (successfulObservation) this.previousCacheObservationByScope.set(cacheScope, successfulObservation);
+      }
+      const event = this.recordUpstreamUsage(result.usage, options.usageTotals, trace,
+        upstreamRequestId, request.model.id, runtimeConfig.sourceId, runtimeConfig.provider,
+        runtimeConfig.baseUrl, runtimeConfig.supportsBilling, usageSource, snapshot, 1,
+        request.subagentContext?.id);
+      const costReservation = costReservations[attemptIndex];
+      const priceable = event?.pricingStatus === 'priced' || event?.pricingStatus === 'estimated_upper_bound';
+      if (costReservation) {
+        // Failure can report only input/partial output usage. Keep its full
+        // upper bound unless the complete result carries priceable final usage.
+        if (priceable) request.taskCostBudget?.settle(costReservation, result.ok ? event.cost : Math.max(costReservation.cost, event.cost));
+      } else if (priceable) request.taskCostBudget?.record(event.cost, event.currency);
+      if (event) callbacks.onUsage?.(event);
+      finalUsageEvent = event;
+      if (request.checkpoint) {
+        request.checkpoint.runBudget = request.taskRunBudget?.state;
+        request.checkpoint.modelRequests = request.taskRunBudget?.state.modelRequests ?? request.checkpoint.modelRequests;
+        request.checkpoint.usedCostByCurrency = request.taskCostBudget?.snapshot() ?? {};
+        await callbacks.onCheckpoint?.(request.checkpoint);
+      }
+    };
+    if (tracksModelRound) callbacks.onModelRoundStart?.();
     const response = await createProviderClient(runtimeConfig.provider).createModelResponse(this.toProviderClientConfig(runtimeConfig), {
-      body,
-      language: request.language,
-      signal: request.signal,
-      callbacks: physicalCallbacks,
-      runDeadlineAt,
-      trace,
-      requestId: upstreamRequestId,
+      body, serializedBody, language: request.language, signal: request.signal, callbacks: physicalCallbacks,
+      runDeadlineAt, trace, requestId: upstreamRequestId, initialAttemptCount,
       onAttempt: ({ attemptIndex, startedAt }) => {
         attemptSnapshots[attemptIndex] = createAttemptSnapshot(startedAt);
         attemptCacheObservations[attemptIndex] = createAttemptObservation(attemptIndex);
-      }
+      },
+      onAttemptResult: ({ attemptIndex, result }) => accountAttempt(attemptIndex, result)
     });
-    const lastReservation = requestReservations.at(-1);
-    if (lastReservation) request.taskRunBudget?.settlePhysicalRequest(lastReservation, response.usage ?? undefined);
-    if (request.checkpoint && requestReservations.length) {
-      request.checkpoint.runBudget = request.taskRunBudget?.state;
-      request.checkpoint.modelRequests = request.taskRunBudget?.state.modelRequests ?? request.checkpoint.modelRequests;
-      await callbacks.onCheckpoint?.(request.checkpoint);
+    // Compatibility with custom clients/test doubles that report only the final
+    // result. Production transport accounts each attempt before any next wait.
+    for (let attemptIndex = 0; attemptIndex < (response.attemptCount ?? 1); attemptIndex += 1) {
+      await accountAttempt(attemptIndex, attemptIndex === (response.attemptCount ?? 1) - 1
+        ? response : { ok: false, hadPartialOutput: false, retryable: false });
     }
-
-    const retryCount = response.retryCount ?? 0;
-    while (attemptSnapshots.length < (response.attemptCount ?? retryCount + 1)) {
-      const attemptIndex = attemptSnapshots.length;
-      attemptSnapshots.push(attemptSnapshots.length === 0
-        ? fallbackSnapshot
-        : createAttemptSnapshot(new Date().toISOString()));
-      attemptCacheObservations[attemptIndex] = createAttemptObservation(attemptIndex);
-    }
-    const normalizedUsageForLedger = normalizeDeepSeekUsage(response.usage);
-    const ledgerRecords = createUsageLedgerRecords({
-      requestId: upstreamRequestId,
-      attempts: attemptSnapshots,
-      usage: normalizedUsageForLedger,
-      source: usageSource,
-      cacheObservations: attemptCacheObservations
-    });
-    if (response.ok && normalizedUsageForLedger) {
-      const successfulObservation = ledgerRecords.find((record) => record.kind === 'usage_response')?.cacheObservation;
-      if (successfulObservation) this.previousCacheObservationByScope.set(cacheScope, successfulObservation);
-    }
-    for (const record of ledgerRecords) callbacks.onUsageLedgerRecord?.(record);
-    trace.record({ type: 'upstream_usage_ledger', requestId: upstreamRequestId, records: ledgerRecords });
-
-    // Usage can be reported before a failed/stopped stream. Observe it even
-    // when no usable final assistant message is available.
-    const usageEvent = this.recordUpstreamUsage(
-      response.usage,
-      options.usageTotals,
-      trace,
-      upstreamRequestId,
-      request.model.id,
-      runtimeConfig.sourceId,
-      runtimeConfig.provider,
-      runtimeConfig.baseUrl,
-      runtimeConfig.supportsBilling,
-      options.usageSource ?? 'executor',
-      attemptSnapshots.at(-1),
-      attemptSnapshots.length,
-      request.subagentContext?.id
-    );
-    if (usageEvent?.pricingStatus === 'priced' || usageEvent?.pricingStatus === 'estimated_upper_bound') {
-      request.taskCostBudget?.record(usageEvent.cost, usageEvent.currency);
-      if (request.checkpoint) request.checkpoint.usedCostByCurrency = request.taskCostBudget?.snapshot() ?? {};
-    }
-    if (usageEvent) callbacks.onUsage?.(usageEvent);
-    if ((request.taskCostBudget?.limit ?? 0) > 0
-      && usageEvent?.pricingStatus !== 'priced'
-      && usageEvent?.pricingStatus !== 'estimated_upper_bound') {
-      throw new AgentInterruptedError('provider_error', request.language === 'en'
-        ? 'The configured Provider cost limit cannot be enforced because this response did not include priceable usage.'
-        : '本次响应没有提供可计费用量，无法安全执行用户配置的 Provider 费用上限。');
-    }
+    const usageEvent = finalUsageEvent;
     if (response.ok && response.message) {
       if (usageEvent) {
         callbacks.onUsageEstimate?.(calibrateContextUsageEstimate(
@@ -2726,7 +2792,8 @@ export class AgentLoop {
       error: response.error
     });
 
-    throw new AgentInterruptedError(response.error?.includes('resource limit') ? 'resource_limit' : response.failureKind === 'http' ? 'provider_error' : 'connection_interrupted', response.error ?? (request.language === 'en'
+    throw new AgentInterruptedError(response.failureKind === 'resource_limit' || response.error?.includes('resource limit')
+      ? 'resource_limit' : ['http', 'protocol', 'provider'].includes(response.failureKind ?? '') ? 'provider_error' : 'connection_interrupted', response.error ?? (request.language === 'en'
       ? 'The provider API request failed.'
       : 'Provider API 请求失败。'));
   }
@@ -2758,7 +2825,7 @@ export class AgentLoop {
     let requiresDirectAnswerRecovery = !content.trim()
       && Boolean(input.response.message.reasoning_content?.trim());
     for (let continuationIndex = saved?.continuation?.requests ?? 0; ; continuationIndex += 1) {
-      if (!input.request.taskRunBudget?.beginContinuation()) {
+      if (!saved?.continuation?.inFlight && !input.request.taskRunBudget?.beginContinuation()) {
         return {
           content: this.appendBudgetTruncationNotice(content, input.request.language),
           finishReason: 'continuation_budget_exhausted'
@@ -2825,7 +2892,6 @@ export class AgentLoop {
         input.callbacks,
         input.runDeadlineAt,
         {
-          allowPartialRecovery: false,
           trace: input.trace,
           usageTotals: input.usageTotals,
           toolChoice: 'none',
@@ -2869,6 +2935,7 @@ export class AgentLoop {
         };
         saved.provider = structuredClone(input.providerRunState);
         saved.pending = { response: { message: { ...normalizedContinuation.assistant, content }, finishReason }, results: {} };
+        this.commitModelRequestRecovery(input.request.checkpoint!);
         await input.callbacks.onCheckpoint?.(input.request.checkpoint!);
       }
 
@@ -2916,99 +2983,6 @@ export class AgentLoop {
     return true;
   }
 
-  private async createContinuationAfterPartialFailure(input: {
-    request: AgentRequest;
-    runtimeConfig: AgentRuntimeConfig;
-    messages: DeepSeekMessage[];
-    partialAssistant: DeepSeekAssistantMessage;
-    failureError?: string;
-    callbacks: AgentRunCallbacks;
-    runDeadlineAt?: number;
-    trace: AgentInteractionTrace;
-    usageTotals?: UpstreamUsageTotals;
-    tools: DeepSeekFunctionTool[];
-    providerRunState?: ProviderNativeRunState;
-  }): Promise<DeepSeekStreamResult> {
-    const partialContent = input.partialAssistant.content ?? '';
-    if (!partialContent.trim()) {
-      throw new Error(input.failureError ?? (input.request.language === 'en'
-        ? 'The provider streaming connection failed before completion.'
-        : 'Provider 流式连接在完成前中断。'));
-    }
-
-    const continuationMessages: DeepSeekMessage[] = [
-      ...input.messages,
-      {
-        role: 'assistant',
-        content: partialContent
-      },
-      {
-        role: 'user',
-        content: this.getPartialFailureContinuationInstruction(input.request.language)
-      }
-    ];
-    if (input.providerRunState?.protocol === 'openai-responses') {
-      const partialMessage: OpenAiResponsesItem = { role: 'assistant', content: partialContent };
-      const instructionItem: OpenAiResponsesItem = {
-        role: 'user',
-        content: this.getPartialFailureContinuationInstruction(input.request.language)
-      };
-      input.providerRunState.input.push(partialMessage, instructionItem);
-      input.providerRunState.replayItems.push(partialMessage, instructionItem);
-    } else if (input.providerRunState?.protocol === 'anthropic-messages') {
-      const partialMessage: AnthropicMessage = {
-        role: 'assistant',
-        content: [{ type: 'text', text: partialContent }]
-      };
-      const instructionMessage: AnthropicMessage = {
-        role: 'user',
-        content: [{ type: 'text', text: this.getPartialFailureContinuationInstruction(input.request.language) }]
-      };
-      input.providerRunState.messages.push(partialMessage, instructionMessage);
-      input.providerRunState.replayMessages.push(partialMessage, instructionMessage);
-    }
-    input.trace.record({
-      type: 'partial_failure_continuation_messages',
-      failureError: input.failureError,
-      messages: input.trace.includesPayload('request')
-        ? continuationMessages
-        : continuationMessages.map(summarizeDeepSeekMessage)
-    });
-    const continuationResponse = await this.createModelResponse(
-      input.request,
-      { ...input.runtimeConfig, maxTokens: input.runtimeConfig.repairMaxOutputTokens },
-      continuationMessages,
-      input.tools,
-      {
-        ...input.callbacks,
-        // Epoch summaries are an internal lane. Their streamed text must not
-        // become part of the single user-visible assistant response.
-        onDelta: undefined,
-        onStatus: undefined,
-        onUsageEstimate: undefined
-      },
-      input.runDeadlineAt,
-      {
-        allowPartialRecovery: false,
-        trace: input.trace,
-        usageTotals: input.usageTotals,
-        toolChoice: 'none',
-        usageSource: 'continuation',
-        providerRunState: input.providerRunState
-      }
-    );
-    const normalizedContinuation = this.normalizeAssistantToolCalls(continuationResponse.message, false, false);
-    return {
-      message: {
-        ...normalizedContinuation.assistant,
-        content: this.joinContinuationContent(partialContent, normalizedContinuation.assistant.content ?? ''),
-        tool_calls: null
-      },
-      finishReason: continuationResponse.finishReason,
-      usage: continuationResponse.usage
-    };
-  }
-
   private getLengthContinuationInstruction(language: KeepseekLanguage, directAnswerOnly = false): string {
     if (directAnswerOnly) {
       return language === 'en'
@@ -3020,10 +2994,12 @@ export class AgentLoop {
       : '继续上一条回答，从截断处继续，不要重复前文。不要调用工具。';
   }
 
-  private getPartialFailureContinuationInstruction(language: KeepseekLanguage): string {
-    return language === 'en'
-      ? 'The previous streaming response was interrupted after partial visible output. Continue from exactly where it stopped. Do not repeat earlier text. Do not call tools.'
-      : '上一条流式回答在输出部分可见内容后中断。请从刚才停止的位置继续，不要重复前文。不要调用工具。';
+  /** Caller invokes this only alongside durable complete pending/committed
+   * model state, never merely because the transport finished successfully. */
+  private commitModelRequestRecovery(checkpoint: import('./runCheckpoint').RunCheckpoint): void {
+    checkpoint.modelStepAttempts = 0;
+    checkpoint.modelStepRetries = 0;
+    checkpoint.modelStepRequestHash = undefined;
   }
 
   private joinContinuationContent(left: string, right: string): string {
@@ -3278,7 +3254,10 @@ export class AgentLoop {
         status.base,
         status.phase,
         status.toolName ?? '',
-        status.detail ?? ''
+        status.detail ?? '',
+        status.reconnectAttempt ?? '',
+        status.maxReconnectAttempts ?? '',
+        status.retryDelayMs ?? ''
       ].join('\u0000');
       if (nextStatusKey === lastStatusKey) {
         return;
@@ -5115,6 +5094,8 @@ export class AgentLoop {
           // streamed checkpoint prose must never leak into the final transcript.
           onDelta: undefined,
           onStatus: undefined,
+          onAttemptReset: undefined,
+          onModelRoundStart: undefined,
           onUsageEstimate: undefined
         },
         input.runDeadlineAt,
@@ -5181,7 +5162,7 @@ export class AgentLoop {
       temperature: profile.temperature,
       topP: profile.topP,
       contextCompression: profile.contextCompression,
-      maxRequestRetries: Math.max(0, getConfiguredMaxRequestRetries() - (request.checkpoint?.modelStepRetries ?? 0)),
+      maxRequestRetries: 5,
       requestRetryBaseMs: getConfiguredRequestRetryBaseMs(),
       maxValidationRuns: clampFeatureLimit(getConfiguredMaxValidationRuns(), request.executionLimits?.maxValidationRuns),
       maxRepairIterations: getConfiguredMaxRepairIterations(),

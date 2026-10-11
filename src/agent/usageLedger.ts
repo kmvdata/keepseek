@@ -124,6 +124,7 @@ export function createUsageLedgerRecords(input: {
   requestId: string;
   attempts: readonly UsagePriceSnapshot[];
   usage?: Usage;
+  observedUsage?: ProviderUsageLedgerRecord['observedUsage'];
   source: UsageSource;
   cacheObservations?: readonly ProviderCacheObservation[];
 }): ProviderUsageLedgerRecord[] {
@@ -149,6 +150,8 @@ export function createUsageLedgerRecords(input: {
       ...(snapshot.canonicalPricingKey ? { canonicalPricingKey: snapshot.canonicalPricingKey } : {}),
       requestStartedAt: snapshot.requestStartedAt,
       ...(usage ? { usage: { ...usage } } : {}),
+      ...(!usage && attemptIndex === input.attempts.length - 1 && normalizeObservedUsage(input.observedUsage)
+        ? { observedUsage: normalizeObservedUsage(input.observedUsage) } : {}),
       providerCacheDataStatus: usage?.cacheDataStatus ?? 'unavailable',
       priceSnapshot: snapshot,
       cost: priced.cost,
@@ -325,6 +328,7 @@ export function normalizeUsageLedgerRecord(value: unknown): ProviderUsageLedgerR
     ...(snapshot.canonicalPricingKey ? { canonicalPricingKey: snapshot.canonicalPricingKey } : {}),
     requestStartedAt,
     ...(usage ? { usage } : {}),
+    ...(!usage && normalizeObservedUsage(value.observedUsage) ? { observedUsage: normalizeObservedUsage(value.observedUsage) } : {}),
     providerCacheDataStatus: usage?.cacheDataStatus ?? 'unavailable',
     priceSnapshot: snapshot,
     ...priced,
@@ -633,6 +637,16 @@ function normalizeUsagePriceSnapshot(value: unknown): UsagePriceSnapshot | undef
     supportsBilling: value.supportsBilling,
     ...(unavailableReason ? { unavailableReason } : {})
   });
+}
+
+export function normalizeObservedUsage(value: unknown): ProviderUsageLedgerRecord['observedUsage'] | undefined {
+  if (!isRecord(value)) return undefined;
+  const result: NonNullable<ProviderUsageLedgerRecord['observedUsage']> = {};
+  for (const key of ['promptTokens', 'completionTokens', 'totalTokens', 'reasoningTokens'] as const) {
+    const counter = value[key];
+    if (typeof counter === 'number' && Number.isSafeInteger(counter) && counter >= 0) result[key] = counter;
+  }
+  return Object.keys(result).length ? result : undefined;
 }
 
 function normalizeUsage(value: unknown): Usage | undefined {

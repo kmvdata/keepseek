@@ -264,3 +264,9 @@ bun run test
 | `test/openAiResponses.test.ts`、`test/anthropicMessages.test.ts` | 原生请求形态、replay 配对与 context accounting |
 
 审查缓存相关改动时，最终问题只有两个：**既有字节是否仍原样存在？实际请求、估算与诊断是否观察同一份 projection？**
+
+### 网络恢复与冻结请求
+
+每个模型轮在权威 Provider projection 上构建实际请求，正文一次序列化后在共享 transport 内冻结。在线重连复用同一正文、URL、headers 和配置快照；429、临时 5xx、网络/不完整 EOF 合计最多 5 次重连。退避和重连不重新投影、不变更 tools/tool_choice/thinking、不摘要、不 rollover，不追加失败 partial 或内部续传 user。失败输出仅属当前 attempt 的 UI 临时段，失败即清除；完整响应才追加 providerReplay/toolRounds。
+
+每次物理请求都保留独立 attempt/usage 记录。输入前缀相同可作为 `identical_retry` 观测，但它不等于原生成结果续传，也不保证命中服务商缓存。checkpoint 只保存已用物理次数和请求 hash；重启/Continue 不清零，用 hash 拒绝变化的恢复请求。跨重启的请求字节没有另存 blob，因此第一版精确字节保证限于运行中的自动重连。已完成工具仍复用 evidence/envelope，不因模型重新计算而重跑。

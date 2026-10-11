@@ -541,9 +541,9 @@ describe('Anthropic Messages compatible protocol', () => {
       const retried = await client.createModelResponse({ ...clientConfig(), maxRequestRetries: 1 }, {
         body: minimalAnthropicBody(), language: 'en'
       });
-      assert.equal(retried.ok, false);
-      assert.equal(retried.retryCount, 0);
-      assert.equal(attempts, 1);
+      assert.equal(retried.ok, true);
+      assert.equal(retried.retryCount, 1);
+      assert.equal(attempts, 2);
     } finally {
       globalThis.fetch = originalFetch;
     }

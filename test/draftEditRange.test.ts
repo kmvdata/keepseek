@@ -43,6 +43,51 @@ test('parses full-width DSML draft edit calls with range aliases', () => {
   });
 });
 
+test('DSML requires complete blocks, invocations, parameters and valid typed values', () => {
+  const parser = new DsmlToolParser();
+  const block = (body: string) => `<||DSML||tool_calls>${body}</||DSML||tool_calls>`;
+  const invoke = (body: string, name = 'keepseek_read_workspace_file') => `<||DSML||invoke name="${name}">${body}</||DSML||invoke>`;
+  const parameter = '<||DSML||parameter name="path" string="true">a.ts</||DSML||parameter>';
+  const damaged = [
+    '<||DSML||tool_calls>' + invoke(parameter),
+    '<||DSML||tool_calls',
+    block('<||DSML||invoke name="keepseek_read_workspace_file">' + parameter),
+    block(invoke('<||DSML||parameter name="path">a.ts')),
+    block('<||DSML||invoke>' + parameter + '</||DSML||invoke>'),
+    block(invoke('<||DSML||parameter string="true">a.ts</||DSML||parameter>')),
+    block(invoke('<||DSML||parameter name="path" string="false">{broken}</||DSML||parameter>')),
+    block(invoke('<||DSML||parameter name="path" string="false"></||DSML||parameter>')),
+    block(invoke('<||DSML||parameter name="path" string=false>a.ts</||DSML||parameter>')),
+    block(invoke('<||DSML||parameter name="path" string="maybe">a.ts</||DSML||parameter>')),
+    block(invoke(parameter + parameter)),
+    block(invoke('<||DSML||parameter name="path">a<||DSML||parameter name="nested">b</||DSML||parameter>')),
+    block(invoke(parameter) + '<||DSML||invoke name="incomplete">'),
+    block(invoke(parameter) + 'ignored damaged body'),
+    block(''),
+    '<||DSML||invoke name="orphan"></||DSML||invoke>',
+    block('<||DSML||invoke name="one" name="two"></||DSML||invoke>')
+  ];
+  for (const content of damaged) assert.throws(() => parser.parse(content), (error: unknown) => {
+    const failure = error as Error & { code?: string };
+    return failure.name === 'ProviderStreamProtocolError' && failure.code === 'KEEPSEEK_STREAM_PROTOCOL_ERROR';
+  }, content);
+});
+
+test('DSML validates every block and preserves alternative closers, literal examples and original argument text', () => {
+  const parser = new DsmlToolParser();
+  const first = '<||DSML||tool_calls><||DSML||invoke name="one"><||DSML||parameter name="data" string="false">{"valid":[1,true,null]}||DSML||parameter>||DSML||invoke>||DSML||tool_calls>';
+  const second = '<||DSML||tool_calls><||DSML||invoke name="two"><||DSML||parameter name="text">`source` &lt;||DSML||parameter&gt;</||DSML||parameter></||DSML||invoke></||DSML||tool_calls>';
+  const parsed = parser.parse('Before\n' + first + '\nBetween\n' + second + '\nAfter');
+  assert.equal(parsed?.content, 'Before\n\nBetween\n\nAfter');
+  assert.deepEqual(parsed?.toolCalls.map((call) => call.id), ['dsml-tool-call-0', 'dsml-tool-call-1']);
+  assert.deepEqual(JSON.parse(parsed!.toolCalls[0].function.arguments), { data: { valid: [1, true, null] } });
+  assert.deepEqual(JSON.parse(parsed!.toolCalls[1].function.arguments), { text: '`source` <||DSML||parameter>' });
+  assert.equal(parser.parse('The DSML format uses a tool_calls block.'), undefined);
+  assert.equal(parser.parse('The marker is `<||DSML||tool_calls>`.'), undefined);
+  assert.equal(parser.parse('Example:\n```xml\n<||DSML||tool_calls>\n```'), undefined);
+  assert.throws(() => parser.parse(first + '<||DSML||tool_calls>'), /not closed/u);
+});
+
 test('creates a patch-native DraftEdit from targetPath/newContent/replaceRange aliases', async (t) => {
   const previousWorkspaceFolders = vscode.workspace.workspaceFolders;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'keepseek-draft-edit-'));

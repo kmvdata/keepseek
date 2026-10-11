@@ -129,6 +129,7 @@ export function getScript(): string {
       ,hasOlderMessages: false
     };
     var lastStateRevision = 0;
+    var runStreamRevisions = new Map();
 
     function getLanguage() {
       return state.language === 'en' ? 'en' : 'zh-CN';
@@ -445,6 +446,7 @@ export function getScript(): string {
     let agentStatusRotationTimer = 0;
     let agentStatusRotationIndex = 0;
     let agentStatusRotationKey = '';
+    let reconnectStatusActive = false;
     let terminalAgentStatusKey = '';
     let planExpanded = false;
     const pendingChangeActions = new Map();
@@ -1215,24 +1217,20 @@ export function getScript(): string {
         pendingDraftRunBatchSnapshot = '';
         if (previousActiveSessionId && previousActiveSessionId !== state.activeSessionId) {
           planExpanded = false;
+          runStreamRevisions.clear();
         }
         rememberTerminalAgentActivity(state.agentActivity);
         render();
-      } else if (message.type === 'agentRunDelta') {
-        if (message.sessionId !== state.activeSessionId) return;
-        var targetMessage = state.messages.find(function(item) { return item.id === message.messageId; });
-        if (!targetMessage?.isStreaming || targetMessage.runState?.attempt !== message.attempt) return;
-        // Full-state messages may already include some/all of this patch.
-        function suffix(existing, offset, delta) {
-          return typeof delta === 'string' && existing.length >= offset
-            ? delta.slice(Math.max(0, existing.length - offset)) : '';
+      } else if (message.type === 'agentRunDelta' || message.type === 'agentRunAttemptReset') {
+        var streamPatch = applyAgentRunStreamPatch(message);
+        if (!streamPatch) return;
+        if (streamPatch.reset) {
+          render();
+          return;
         }
-        var contentTail = suffix(targetMessage.content || '', message.contentOffset, message.contentDelta);
-        var reasoningTail = suffix(targetMessage.reasoningContent || '', message.reasoningOffset, message.reasoningDelta);
-        targetMessage.content = (targetMessage.content || '') + contentTail;
-        targetMessage.reasoningContent = (targetMessage.reasoningContent || '') + reasoningTail;
-        targetMessage.runState = message.runState;
-        state.agentActivity = message.activity;
+        var targetMessage = streamPatch.targetMessage;
+        var contentTail = streamPatch.contentTail;
+        var reasoningTail = streamPatch.reasoningTail;
         if (window.keepseekInputControls?.renderUsage) {
           window.keepseekInputControls.renderUsage();
         }
@@ -1347,6 +1345,40 @@ export function getScript(): string {
       } else if (message.type === 'referenceResources') {
         handleEditReferenceResourcesMessage(message);
       }
+    }
+
+    function applyAgentRunStreamPatch(message) {
+      if (message.sessionId !== state.activeSessionId) return null;
+      var targetMessage = state.messages.find(function(item) { return item.id === message.messageId; });
+      if (!targetMessage?.isStreaming || targetMessage.runState?.attempt !== message.attempt) return null;
+      var streamKey = [message.sessionId, message.messageId, message.attempt].join('|');
+      var streamRevision = Number(message.streamRevision) || 0;
+      var previousRevision = runStreamRevisions.get(streamKey);
+      if (previousRevision !== undefined && streamRevision < previousRevision) return null;
+      if (message.type === 'agentRunAttemptReset') {
+        // A delayed reset for an already rendered attempt is also stale.
+        if (previousRevision !== undefined && streamRevision === previousRevision) return null;
+        runStreamRevisions.set(streamKey, streamRevision);
+        targetMessage.content = typeof message.content === 'string' ? message.content : '';
+        targetMessage.reasoningContent = typeof message.reasoningContent === 'string' ? message.reasoningContent : '';
+        targetMessage.runState = message.runState;
+        state.agentActivity = message.activity;
+        return { reset: true, targetMessage: targetMessage };
+      }
+      if (previousRevision !== undefined && streamRevision !== previousRevision) return null;
+      runStreamRevisions.set(streamKey, streamRevision);
+      // Full-state messages may already include some/all of this patch.
+      function suffix(existing, offset, delta) {
+        return typeof delta === 'string' && existing.length >= offset
+          ? delta.slice(Math.max(0, existing.length - offset)) : '';
+      }
+      var contentTail = suffix(targetMessage.content || '', message.contentOffset, message.contentDelta);
+      var reasoningTail = suffix(targetMessage.reasoningContent || '', message.reasoningOffset, message.reasoningDelta);
+      targetMessage.content = (targetMessage.content || '') + contentTail;
+      targetMessage.reasoningContent = (targetMessage.reasoningContent || '') + reasoningTail;
+      targetMessage.runState = message.runState;
+      state.agentActivity = message.activity;
+      return { reset: false, targetMessage: targetMessage, contentTail: contentTail, reasoningTail: reasoningTail };
     }
 
     window.removeEventListener('message', window.keepseekBootstrapListener);
@@ -2226,11 +2258,21 @@ export function getScript(): string {
       if (!state.isBusy) {
         stopAgentStatusRotation();
         agentStatusRotationKey = '';
+        if (reconnectStatusActive) setTransientStatus('');
+        reconnectStatusActive = false;
         return;
       }
 
       var activity = normalizeAgentActivity(state.agentActivity);
       var activityKey = getAgentActivityKey(activity);
+      if (activity.phase === 'reconnecting') {
+        stopAgentStatusRotation();
+        agentStatusRotationKey = activityKey;
+        reconnectStatusActive = true;
+        setTransientStatus(getAgentActivityStatusText(activity), true);
+        return;
+      }
+      reconnectStatusActive = false;
       if (activityKey !== agentStatusRotationKey) {
         agentStatusRotationKey = activityKey;
         agentStatusRotationIndex = 0;
@@ -2239,7 +2281,7 @@ export function getScript(): string {
       startAgentStatusRotation();
     }
 
-    function setTransientStatus(message) {
+    function setTransientStatus(message, persistent) {
       transientStatus = String(message || '');
       transientStatusSequence += 1;
       var sequence = transientStatusSequence;
@@ -2257,7 +2299,7 @@ export function getScript(): string {
       statusTooltip.textContent = showTooltip ? transientStatus : '';
       statusTooltip.classList.toggle('hidden', !showTooltip);
       status.classList.toggle('is-active', Boolean(transientStatus));
-      if (!transientStatus) {
+      if (!transientStatus || persistent) {
         return;
       }
       transientStatusTimer = setTimeout(function() {
@@ -2294,6 +2336,9 @@ export function getScript(): string {
         phase: typeof activity.phase === 'string' ? activity.phase : 'idle',
         toolName: typeof activity.toolName === 'string' ? activity.toolName : '',
         detail: typeof activity.detail === 'string' ? activity.detail : '',
+        reconnectAttempt: Number.isSafeInteger(activity.reconnectAttempt) && activity.reconnectAttempt >= 0 ? activity.reconnectAttempt : 0,
+        maxReconnectAttempts: Number.isSafeInteger(activity.maxReconnectAttempts) && activity.maxReconnectAttempts > 0 ? activity.maxReconnectAttempts : 5,
+        retryDelayMs: Number.isFinite(activity.retryDelayMs) && activity.retryDelayMs >= 0 ? activity.retryDelayMs : 0,
         sequence: Number(activity.sequence) || 0,
         updatedAt: typeof activity.updatedAt === 'string' ? activity.updatedAt : ''
       };
@@ -2304,6 +2349,7 @@ export function getScript(): string {
       if (normalized.base !== 'complete' && normalized.base !== 'error' && normalized.base !== 'stopped') {
         return;
       }
+      reconnectStatusActive = false;
       var key = [normalized.base, normalized.sequence, normalized.updatedAt].join('|');
       if (key === terminalAgentStatusKey) {
         return;
@@ -2320,7 +2366,10 @@ export function getScript(): string {
         activity.base,
         activity.phase,
         activity.toolName,
-        activity.detail
+        activity.detail,
+        activity.reconnectAttempt,
+        activity.maxReconnectAttempts,
+        activity.retryDelayMs
       ].join('|');
     }
 
@@ -2349,6 +2398,9 @@ export function getScript(): string {
     }
 
     function getAgentActivityStatusText(activity) {
+      if (activity.phase === 'reconnecting') {
+        return t('agentStatusReconnecting', { attempt: activity.reconnectAttempt, max: activity.maxReconnectAttempts });
+      }
       var current = state.messages.find(function(message) { return message.runState?.status === 'running'; });
       if (current && ['requesting_model', 'reasoning', 'generating', 'planning_tool'].includes(activity.phase)) {
         var networkAt = Date.parse(current.runState.lastNetworkAt || '');

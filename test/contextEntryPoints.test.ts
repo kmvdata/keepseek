@@ -7,6 +7,7 @@ import { getInputTemplate } from '../src/webview/input/template';
 import { getScript } from '../src/webview/script';
 import { getStyles } from '../src/webview/styles';
 import { getTemplate } from '../src/webview/template';
+import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 
 test('contributes concise English editor, Explorer, and Windows-friendly terminal context commands', async () => {
   const packagePath = path.resolve(process.cwd(), 'package.json');
@@ -856,6 +857,92 @@ test('composer status fades after eight seconds and reveals a tooltip only above
   assert.match(styles, /\.composer-status-tooltip\s*\{[\s\S]*?white-space:\s*pre-wrap/u);
   assert.doesNotMatch(script, /durationMs \|\| 2200/u);
   assert.doesNotMatch(inputScript, /\}, 2200\);/u);
+});
+
+test('stream reconnect replaces only the failed model attempt and rejects stale or already consumed deltas', () => {
+  const current = { id: 'answer', isStreaming: true, content: 'committedfailed', reasoningContent: 'keptfailed', runState: { attempt: 2 } };
+  const previous = { id: 'previous', isStreaming: false, content: 'earlier message', reasoningContent: '', runState: { attempt: 1 } };
+  const state = { activeSessionId: 'session', messages: [previous, current], agentActivity: {} };
+  const apply = new Function('state', 'runStreamRevisions', `
+    ${getGeneratedSection(getScript(), 'function applyAgentRunStreamPatch(message)', "window.removeEventListener('message'")}
+    return applyAgentRunStreamPatch;
+  `)(state, new Map()) as (message: Record<string, unknown>) => { reset?: boolean; contentTail?: string } | null;
+  const identity = { sessionId: 'session', messageId: 'answer', attempt: 2, runState: { attempt: 2 }, activity: {} };
+  const reset = { ...identity, type: 'agentRunAttemptReset', streamRevision: 2, content: 'committed', reasoningContent: 'kept' };
+  assert.equal(apply(reset)?.reset, true);
+  assert.equal(current.content, 'committed');
+  assert.equal(current.reasoningContent, 'kept');
+  assert.equal(previous.content, 'earlier message');
+  assert.equal(apply({ ...identity, type: 'agentRunDelta', streamRevision: 1, contentOffset: 9, contentDelta: 'stale' }), null);
+  const delta = { ...identity, type: 'agentRunDelta', streamRevision: 2, contentOffset: 9, contentDelta: 'success', reasoningOffset: 4, reasoningDelta: 'new' };
+  assert.equal(apply(delta)?.contentTail, 'success');
+  assert.equal(current.content, 'committedsuccess');
+  assert.equal(current.reasoningContent, 'keptnew');
+  assert.equal(apply(delta)?.contentTail, '');
+  assert.equal(apply(reset), null, 'duplicate reset cannot erase the new attempt');
+  assert.equal(apply({ ...delta, sessionId: 'another' }), null);
+  assert.equal(apply({ ...delta, attempt: 1 }), null, 'task run attempt is distinct from stream revision');
+  current.isStreaming = false;
+  assert.equal(apply(delta), null);
+});
+
+test('reconnect status uses structured counts, stays visible through backoff and leaves no recovery timer on stop', () => {
+  const state = { language: 'en', startup: { interactiveReady: true }, isBusy: true, messages: [],
+    agentActivity: { base: 'thinking', phase: 'reconnecting', reconnectAttempt: 2, maxReconnectAttempts: 5, retryDelayMs: 16000 } };
+  const harness = new Function('state', 'translations', `
+    let transientStatus = '', transientStatusTimer = 0, transientStatusClearTimer = 0, transientStatusSequence = 0;
+    let agentStatusRotationTimer = 0, agentStatusRotationIndex = 0, agentStatusRotationKey = '', terminalAgentStatusKey = '', reconnectStatusActive = false;
+    const STATUS_MESSAGE_DURATION_MS = 8000, STATUS_MESSAGE_FADE_MS = 200, STATUS_TOOLTIP_MIN_BYTES = 24, AGENT_STATUS_ROTATION_MS = 2000;
+    const timeouts = new Map(), intervals = new Map(); let serial = 0;
+    const setTimeout = (fn, ms) => { timeouts.set(++serial, { fn, ms }); return serial; }, clearTimeout = id => timeouts.delete(id);
+    const setInterval = (fn, ms) => { intervals.set(++serial, { fn, ms }); return serial; }, clearInterval = id => intervals.delete(id);
+    const classes = { add() {}, remove() {}, toggle() {} };
+    const status = { classList: classes }, statusText = { textContent: '' }, statusTooltip = { textContent: '', classList: classes };
+    const getLanguage = () => state.language;
+    const t = (key, values = {}) => (translations[state.language][key] || key).replace(/\\{(\\w+)\\}/g, (_, name) => values[name] ?? '');
+    const agentStatusPools = { generating: ['agentStatusGenerating'], preparing: ['agentStatusPreparingContext'] };
+    ${getGeneratedSection(getScript(), 'function renderStatus()', 'function syncEditingState()')}
+    return { render: renderStatus, terminal: rememberTerminalAgentActivity, statusText, timeouts, intervals };
+  `)(state, WEBVIEW_TRANSLATIONS) as {
+    render(): void; terminal(activity: Record<string, unknown>): void;
+    statusText: { textContent: string }; timeouts: Map<number, unknown>; intervals: Map<number, unknown>;
+  };
+  harness.render();
+  assert.equal(harness.statusText.textContent, 'Connection interrupted. Reconnecting (2/5).');
+  assert.equal(harness.timeouts.size, 0, 'reconnect must not disappear after the normal eight second status timeout');
+  assert.equal(harness.intervals.size, 0, 'reconnect status does not rotate into ordinary model status');
+  state.agentActivity.reconnectAttempt = 5;
+  state.language = 'zh-CN';
+  harness.render();
+  assert.equal(harness.statusText.textContent, '网络连接中断，正在重连（第 5/5 次）');
+  state.agentActivity.phase = 'generating';
+  harness.render();
+  assert.equal(harness.statusText.textContent, '生成回答...');
+  assert.equal(harness.timeouts.size, 1);
+  assert.equal(harness.intervals.size, 1);
+  state.agentActivity.phase = 'reconnecting';
+  harness.render();
+  assert.equal(harness.timeouts.size, 0);
+  assert.equal(harness.intervals.size, 0);
+  state.isBusy = false;
+  state.agentActivity = { ...state.agentActivity, base: 'stopped', phase: 'finalizing' };
+  harness.terminal(state.agentActivity);
+  harness.render();
+  assert.equal(harness.statusText.textContent, '已中止');
+  assert.equal(harness.timeouts.size, 1, 'only the ordinary stopped notice timer remains');
+  state.isBusy = true;
+  state.agentActivity.phase = 'reconnecting';
+  state.startup.interactiveReady = false;
+  harness.render();
+  assert.equal(harness.statusText.textContent, '正在恢复会话与安全状态…');
+  state.startup.interactiveReady = true;
+  harness.render();
+  assert.equal(harness.statusText.textContent, '网络连接中断，正在重连（第 5/5 次）');
+  state.isBusy = false;
+  state.agentActivity.phase = 'idle';
+  harness.render();
+  assert.equal(harness.statusText.textContent, '');
+  assert.equal(harness.timeouts.size, 0);
 });
 
 test('ChangeSets render in their assistant timeline entry with an unlinked actionable fallback', () => {

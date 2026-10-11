@@ -1150,7 +1150,7 @@ test('crash recovery distinguishes pending, replayable, completed and uncertain 
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test('an explicit task cost ceiling survives tool delivery and stops before another Provider request', async () => {
+test('an explicit task cost ceiling reserves a billable upper bound before the first Provider request', async () => {
   const workspace = new WorkspaceToolService();
   let toolCalls = 0;
   workspace.listWorkspaceFiles = async () => {
@@ -1179,14 +1179,12 @@ test('an explicit task cost ceiling survives tool delivery and stops before anot
       () => new AgentRunner(workspace).run(input, { onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); } }),
       (error: unknown) => error instanceof AgentInterruptedError && error.reason === 'cost_limit'
     );
-    assert.equal(providerRequests, 1, 'the exhausted task never starts a second Provider request');
-    assert.equal(toolCalls, 1, 'the accepted tool call still completes exactly once');
+    assert.equal(providerRequests, 0, 'the next request upper bound is reserved before dispatch');
+    assert.equal(toolCalls, 0, 'an unaffordable model request cannot propose tools');
     assert.equal(checkpoint?.stopReason, 'cost_limit');
     assert.equal(checkpoint?.maxCost, 0.000_001);
-    assert.ok((checkpoint?.usedCostByCurrency?.['¥'] ?? 0) >= 0.000_001);
-    assert.equal(checkpoint?.state?.toolRounds.some((round) =>
-      round.toolResults.some((result) => result.toolCallId === 'cost-tool')), true,
-    'the completed tool result is durable before the cost stop');
+    assert.equal(checkpoint?.usedCostByCurrency?.['¥'] ?? 0, 0);
+    assert.equal(checkpoint?.state?.toolRounds.length, 0);
   } finally { globalThis.fetch = originalFetch; }
 });
 

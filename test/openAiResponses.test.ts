@@ -342,9 +342,9 @@ describe('OpenAI Responses account protocol', () => {
         body: minimalResponsesBody(),
         language: 'en'
       });
-      assert.equal(retried.ok, false);
-      assert.equal(retried.retryCount, 0);
-      assert.equal(attempts, 1);
+      assert.equal(retried.ok, true);
+      assert.equal(retried.retryCount, 1);
+      assert.equal(attempts, 2);
     } finally {
       globalThis.fetch = originalFetch;
     }

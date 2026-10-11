@@ -3551,13 +3551,19 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       base: activity.base,
       phase: activity.phase,
       toolName: activity.toolName?.trim() || undefined,
-      detail: activity.detail?.trim() || undefined
+      detail: activity.detail?.trim() || undefined,
+      reconnectAttempt: activity.reconnectAttempt,
+      maxReconnectAttempts: activity.maxReconnectAttempts,
+      retryDelayMs: activity.retryDelayMs
     };
     if (
       this.agentActivity.base === normalizedActivity.base &&
       this.agentActivity.phase === normalizedActivity.phase &&
       this.agentActivity.toolName === normalizedActivity.toolName &&
-      this.agentActivity.detail === normalizedActivity.detail
+      this.agentActivity.detail === normalizedActivity.detail &&
+      this.agentActivity.reconnectAttempt === normalizedActivity.reconnectAttempt &&
+      this.agentActivity.maxReconnectAttempts === normalizedActivity.maxReconnectAttempts &&
+      this.agentActivity.retryDelayMs === normalizedActivity.retryDelayMs
     ) {
       return false;
     }
@@ -3584,18 +3590,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.draftRunBatches?.cancel();
     this.delegatedApprovals.cancel();
     this.currentRunAbortController?.abort();
+    // Stop clears a reconnect notice synchronously.
+    if (this.isBusy || this.isStartingRun) {
+      this.setAgentActivity({ base: 'stopped', phase: 'finalizing' }, { post: false });
+      this.postState({ immediate: true, omitMessages: true });
+    }
     if (this.activeDraftRunId) {
       this.draftRuns.cancel(this.activeDraftRunId);
       return;
     }
-    if ((!this.isBusy && !this.isStartingRun) || !this.currentRunAbortController || this.currentRunAbortController.signal.aborted) {
-      return;
-    }
-    this.currentRunAbortController.abort();
-    this.setAgentActivity({
-      base: 'waiting',
-      phase: 'finalizing'
-    });
   }
 
   private async executeApprovedDraftRun(id: string, autoContinue: boolean): Promise<void> {
@@ -4218,18 +4221,26 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
-  private createRunStreamPublisher(sessionId: string, message: ChatMessage): { schedule(): void; dispose(): void } {
+  private createRunStreamPublisher(sessionId: string, message: ChatMessage): {
+    schedule(): void; beginModelRound(): void; resetAttempt(): void; dispose(): void;
+  } {
     let contentOffset = message.content.length;
     let reasoningOffset = (message.reasoningContent ?? '').length;
+    let committedContent = message.content;
+    let committedReasoning = message.reasoningContent ?? '';
+    let streamRevision = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const signal = this.currentRunAbortController?.signal;
+    const clearPending = () => { if (timer) clearTimeout(timer); timer = undefined; };
+    signal?.addEventListener('abort', clearPending, { once: true });
     return {
       schedule: () => {
-        if (timer) return;
+        if (timer || signal?.aborted) return;
         timer = setTimeout(() => {
           timer = undefined;
-          if (!message.isStreaming) return;
+          if (!message.isStreaming || signal?.aborted) return;
           const visible = getVisibleMessages([message])[0];
-          this.postToWebview({ type: 'agentRunDelta', sessionId, messageId: message.id, attempt: message.runCheckpoint?.attempt,
+          this.postToWebview({ type: 'agentRunDelta', sessionId, messageId: message.id, attempt: message.runCheckpoint?.attempt, streamRevision,
             contentOffset, contentDelta: message.content.slice(contentOffset),
             reasoningOffset, reasoningDelta: (message.reasoningContent ?? '').slice(reasoningOffset),
             runState: visible.runState, activity: this.agentActivity });
@@ -4237,7 +4248,29 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           reasoningOffset = (message.reasoningContent ?? '').length;
         }, 100);
       },
-      dispose: () => { if (timer) clearTimeout(timer); timer = undefined; }
+      beginModelRound: () => {
+        committedContent = message.content;
+        committedReasoning = message.reasoningContent ?? '';
+      },
+      resetAttempt: () => {
+        clearPending();
+        // Display text is temporary. Only a logical round boundary commits its
+        // prefix; a physical reconnect replaces the current attempt's suffix.
+        message.content = committedContent;
+        message.reasoningContent = committedReasoning;
+        contentOffset = committedContent.length;
+        reasoningOffset = committedReasoning.length;
+        // A canceled attempt is equally uncommitted. Remove its local display
+        // suffix before session persistence, while keeping Stop's UI status.
+        if (signal?.aborted) return;
+        streamRevision++;
+        const visible = getVisibleMessages([message])[0];
+        this.postToWebview({ type: 'agentRunAttemptReset', sessionId, messageId: message.id,
+          attempt: message.runCheckpoint?.attempt, streamRevision,
+          content: committedContent, reasoningContent: committedReasoning,
+          runState: visible.runState, activity: this.agentActivity });
+      },
+      dispose: () => { clearPending(); signal?.removeEventListener('abort', clearPending); }
     };
   }
 
@@ -4347,6 +4380,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.modelSelectionTransactions.beginRun({ sourceId: cp.source.sourceId, modelId: cp.source.modelId });
       message.isStreaming = true;
+      // Interrupted display deltas and the old error notice cannot become the
+      // committed prefix of a recovered model attempt.
+      message.content = (cp.state?.toolRounds.map((round) => round.assistantContent ?? '').join('') ?? '')
+        + (cp.state?.continuation?.content ?? cp.state?.pending?.response.message.content ?? '');
+      message.reasoningContent = cp.state?.reasoningParts?.join('\n\n') ?? '';
+      streamPublisher.beginModelRound();
+      streamPublisher.resetAttempt();
       this.setAgentActivity({ base: 'thinking', phase: 'requesting_model', detail: this.t('runRecoveryNotice') });
       let usage: TurnUsageStats | undefined;
       const response = await this.agentRunner.run({
@@ -4359,7 +4399,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           if (this.currentRunAbortController === controller) await this.saveAgentCheckpoint(session, message, next);
         },
         onStatus: (status) => { if (!controller.signal.aborted) this.setAgentActivity(status); },
-        onActivity: (kind) => { this.observeRunActivity(message, kind); streamPublisher.schedule(); },
+        onActivity: (kind) => { if (!controller.signal.aborted) { this.observeRunActivity(message, kind); streamPublisher.schedule(); } },
+        onModelRoundStart: () => { if (!controller.signal.aborted) streamPublisher.beginModelRound(); },
+        onAttemptReset: () => { if (this.currentRunAbortController === controller) streamPublisher.resetAttempt(); },
         onDelta: (event) => {
           if (controller.signal.aborted || this.currentRunAbortController !== controller) return;
           if (event.type === 'reasoning') message.reasoningContent = (message.reasoningContent ?? '') + event.delta;
@@ -4961,11 +5003,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           }
         },
         onActivity: (kind) => {
-          if (!assistantMessage || this.currentRunAbortController !== abortController) return;
+          if (!assistantMessage || this.currentRunAbortController !== abortController || abortController.signal.aborted) return;
           this.observeRunActivity(assistantMessage, kind);
           streamPublisher?.schedule();
         },
+        onModelRoundStart: () => {
+          if (this.currentRunAbortController === abortController && !abortController.signal.aborted) streamPublisher?.beginModelRound();
+        },
+        onAttemptReset: () => {
+          if (this.currentRunAbortController === abortController) streamPublisher?.resetAttempt();
+        },
         onStatus: (activity) => {
+          if (this.currentRunAbortController !== abortController || abortController.signal.aborted) return;
           if (options?.backgroundRunId) {
             if (activity.phase === 'awaiting_authorization') {
               this.backgroundRunCoordinator.waitForAuthorization(activity.detail ?? activity.toolName ?? 'Waiting for authorization.');

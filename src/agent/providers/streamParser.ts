@@ -1,6 +1,8 @@
 import { AgentRunCallbacks } from '../../shared/types';
 import type { KeepseekLanguage } from '../../shared/i18n';
-import type { AgentInteractionTrace } from '../logging/interactionTrace';
+import type { ProviderStreamParseOptions } from './types';
+import { ProviderIncompleteStreamError, ProviderStreamProtocolError, ProviderStreamProviderError, ProviderStreamReader, ProviderStreamTextDecoder, isTruncatedJsonError, mergeProviderStreamUsage } from './streamErrors';
+import { DsmlToolParser } from '../deepseek/dsmlToolParser';
 import { DeepSeekStreamChunk, DeepSeekStreamResult, DeepSeekToolCall, DeepSeekToolCallDelta } from '../deepseek/types';
 
 interface StreamingToolCallAccumulator {
@@ -11,13 +13,6 @@ interface StreamingToolCallAccumulator {
     arguments: string;
 
   };
-}
-
-interface StreamParseOptions {
-  trace?: AgentInteractionTrace;
-  requestId?: string;
-  attempt?: number;
-  onStreamActivity?: () => void;
 }
 
 class StreamingDsmlDisplayFilter {
@@ -79,15 +74,17 @@ class StreamingDsmlDisplayFilter {
  * openai-compatible 共享同一套流式协议解析，属于协议层而不是某一家服务商。
  */
 export class StreamParser {
+  private readonly dsmlToolParser = new DsmlToolParser();
   public async parse(
     body: NonNullable<Response['body']>,
     language: KeepseekLanguage,
     callbacks: AgentRunCallbacks,
-    options: StreamParseOptions = {}
+    options: ProviderStreamParseOptions = {}
   ): Promise<DeepSeekStreamResult> {
     const reader = body.getReader();
+    const stream = new ProviderStreamReader(reader, options);
     try {
-      const decoder = new TextDecoder();
+      const decoder = new ProviderStreamTextDecoder(stream);
       const contentParts: string[] = [];
       const reasoningParts: string[] = [];
       const toolCallParts = new Map<number, StreamingToolCallAccumulator>();
@@ -96,92 +93,93 @@ export class StreamParser {
       let buffer = '';
       let finishReason: string | null | undefined;
       let usage: DeepSeekStreamResult['usage'];
-      let streamDone = false;
       let sawChunk = false;
 
-      const normalizeAndConsumeBuffer = () => {
-        const trailingCr = buffer.endsWith('\r');
-        buffer = (trailingCr ? buffer.slice(0, -1) : buffer).replace(/\r\n?/gu, '\n') + (trailingCr ? '\r' : '');
+      const validateTerminal = (): boolean => {
+        if (!finishReason) return false;
+        if (!['stop', 'length', 'tool_calls', 'content_filter'].includes(finishReason)) {
+          throw new ProviderStreamProtocolError(`Invalid finish_reason: ${finishReason}`);
+        }
+        if (!contentParts.length && !reasoningParts.length && !toolCallParts.size) {
+          throw new ProviderStreamProtocolError(language === 'en'
+            ? 'The model API did not return any streaming chunks.' : '模型 API 未返回任何流式数据块。');
+        }
+        if (toolCallParts.size && finishReason !== 'tool_calls' && finishReason !== 'stop') {
+          throw new ProviderStreamProtocolError('Incomplete tool response / 工具响应未完成');
+        }
+        this.dsmlToolParser.parse(contentParts.join(''));
+        this.dsmlToolParser.parse(reasoningParts.join(''));
+        const toolCalls = this.buildStreamingToolCalls(toolCallParts);
+        if (finishReason === 'tool_calls' && !toolCalls?.length) {
+          throw new ProviderStreamProtocolError('Terminal tool response contains no tool calls.');
+        }
+        return true;
+      };
 
+      const consume = (rawEvent: string, final = false) => {
+        stream.event();
+        const eventResult = this.consumeSseEvent(
+          rawEvent, language, contentParts, reasoningParts, toolCallParts,
+          contentDisplayFilter, reasoningDisplayFilter, callbacks, options, final,
+          stream.progress.semanticComplete, (observed) => { usage = mergeProviderStreamUsage(usage, observed); stream.publish(usage); }
+        );
+        sawChunk = sawChunk || eventResult.sawChunk;
+        finishReason = eventResult.finishReason ?? finishReason;
+        usage = mergeProviderStreamUsage(usage, eventResult.usage);
+        stream.publish(usage);
+        if (validateTerminal()) stream.completed(usage);
+      };
+
+      const consumeBuffer = (final = false) => {
+        const trailingCr = !final && buffer.endsWith('\r');
+        buffer = (trailingCr ? buffer.slice(0, -1) : buffer).replace(/\r\n?/gu, '\n') + (trailingCr ? '\r' : '');
         let separatorIndex = buffer.indexOf('\n\n');
         while (separatorIndex >= 0) {
           const rawEvent = buffer.slice(0, separatorIndex);
           buffer = buffer.slice(separatorIndex + 2);
-          const eventResult = this.consumeSseEvent(
-            rawEvent,
-            language,
-            contentParts,
-            reasoningParts,
-            toolCallParts,
-            contentDisplayFilter,
-            reasoningDisplayFilter,
-            callbacks,
-            options
-          );
-          sawChunk = sawChunk || eventResult.sawChunk;
-          finishReason = eventResult.finishReason ?? finishReason;
-          usage = eventResult.usage ?? usage;
-          streamDone = eventResult.done;
-          if (streamDone) {
-            break;
-          }
+          consume(rawEvent);
           separatorIndex = buffer.indexOf('\n\n');
         }
       };
 
-      while (!streamDone) {
-        const { done, value } = await reader.read();
-        if (done) {
-          buffer += decoder.decode();
-          normalizeAndConsumeBuffer();
+      while (true) {
+        let chunk: { done: boolean; value?: Uint8Array };
+        try { chunk = await stream.read(); }
+        catch (error) {
+          if (!stream.canPreserve(error)) throw error;
+          stream.interruptedTail();
           break;
         }
-
-        buffer += decoder.decode(value, { stream: true });
-        options.onStreamActivity?.();
-        normalizeAndConsumeBuffer();
+        if (chunk.done) {
+          buffer += decoder.decode();
+          consumeBuffer(true);
+          break;
+        }
+        buffer += decoder.decode(chunk.value!);
+        consumeBuffer();
       }
 
-      const remaining = buffer.trim();
-      if (remaining && !streamDone) {
-        const eventResult = this.consumeSseEvent(
-          remaining,
-          language,
-          contentParts,
-          reasoningParts,
-          toolCallParts,
-          contentDisplayFilter,
-          reasoningDisplayFilter,
-          callbacks,
-          options
-        );
-        sawChunk = sawChunk || eventResult.sawChunk;
-        finishReason = eventResult.finishReason ?? finishReason;
-        usage = eventResult.usage ?? usage;
+      if (buffer.trim()) {
+        try { consume(buffer.trim(), true); }
+        catch (error) {
+          // A transport cutoff may leave an unfinished tail frame, but a whole
+          // provider error or invalid protocol event still overrides completion.
+          if (!stream.progress.semanticComplete || !(error instanceof ProviderIncompleteStreamError)) throw error;
+          stream.interruptedTail();
+        }
       }
-
-      if (!streamDone && !finishReason) throw new Error(language === 'en' ? 'Stream ended before completion.' : '流在完成前中断。');
-      if (!sawChunk || (!contentParts.length && !reasoningParts.length && !toolCallParts.size)) {
-        throw new Error(language === 'en'
-          ? 'The model API did not return any streaming chunks.'
-          : '模型 API 未返回任何流式数据块。');
-      }
-
-      if (toolCallParts.size && finishReason !== 'tool_calls' && finishReason !== 'stop') throw new Error('Incomplete tool response / 工具响应未完成');
+      // [DONE] is a framing marker, not evidence of valid model completion.
+      if (!sawChunk) throw new ProviderIncompleteStreamError(language === 'en'
+        ? 'The model API did not return any streaming chunks.' : '模型 API 未返回任何流式数据块。');
+      if (!validateTerminal()) throw new ProviderIncompleteStreamError(language === 'en'
+        ? 'Stream ended before completion.' : '流在完成前中断。');
       this.flushDisplayFilter(reasoningDisplayFilter, callbacks, 'reasoning');
       this.flushDisplayFilter(contentDisplayFilter, callbacks, 'content');
-
       return {
-        message: {
-          role: 'assistant',
-          content: contentParts.join(''),
-          reasoning_content: reasoningParts.join(''),
-          tool_calls: this.buildStreamingToolCalls(toolCallParts)
-        },
-        finishReason,
-        usage
+        message: { role: 'assistant', content: contentParts.join(''), reasoning_content: reasoningParts.join(''),
+          tool_calls: this.buildStreamingToolCalls(toolCallParts) }, finishReason, usage
       };
-    } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+    } finally { await stream.release(); }
   }
 
   private consumeSseEvent(
@@ -193,7 +191,10 @@ export class StreamParser {
     contentDisplayFilter: StreamingDsmlDisplayFilter,
     reasoningDisplayFilter: StreamingDsmlDisplayFilter,
     callbacks: AgentRunCallbacks,
-    options: StreamParseOptions
+    options: ProviderStreamParseOptions,
+    final = false,
+    semanticComplete = false,
+    onUsage?: (usage: NonNullable<DeepSeekStreamResult['usage']>) => void
   ): { done: boolean; sawChunk: boolean; finishReason?: string | null; usage?: DeepSeekStreamResult['usage'] } {
     if (rawEvent.split('\n').some((line) => line.startsWith(':'))) callbacks.onActivity?.('event');
     const dataLines = rawEvent
@@ -217,9 +218,13 @@ export class StreamParser {
       }
 
       this.recordRawSseData(data, options);
-      const chunk = this.parseStreamChunk(data, language);
+      const chunk = this.parseStreamChunk(data, language, final);
       callbacks.onActivity?.('event');
-      if ((chunk as unknown as { error?: unknown }).error) throw new Error(JSON.stringify((chunk as unknown as { error: unknown }).error));
+      if (chunk.usage) onUsage?.(chunk.usage);
+      if ((chunk as unknown as { error?: unknown }).error) throw new ProviderStreamProviderError(JSON.stringify((chunk as unknown as { error: unknown }).error));
+      if (semanticComplete && chunk.choices?.some((choice) => choice.delta && (choice.delta.content || choice.delta.reasoning_content || choice.delta.tool_calls?.length))) {
+        throw new ProviderStreamProtocolError('Model output arrived after finish_reason.');
+      }
       sawChunk = true;
       usage = chunk.usage ?? usage;
       finishReason = this.applyStreamChunk(
@@ -236,7 +241,7 @@ export class StreamParser {
     return { done: false, sawChunk, finishReason, usage };
   }
 
-  private recordRawSseData(data: string, options: StreamParseOptions): void {
+  private recordRawSseData(data: string, options: ProviderStreamParseOptions): void {
     if (!options.trace?.enabled || !options.trace.logRawStream || !options.trace.includesPayload('full')) {
       return;
     }
@@ -249,15 +254,19 @@ export class StreamParser {
     });
   }
 
-  private parseStreamChunk(data: string, language: KeepseekLanguage): DeepSeekStreamChunk {
+  private parseStreamChunk(data: string, language: KeepseekLanguage, final = false): DeepSeekStreamChunk {
     try {
       const parsed: unknown = JSON.parse(data);
       if (!this.isRecord(parsed)) {
-        throw new Error(language === 'en' ? 'Chunk is not a JSON object.' : '数据块不是 JSON 对象。');
+        throw new ProviderStreamProtocolError(language === 'en' ? 'Chunk is not a JSON object.' : '数据块不是 JSON 对象。');
+      }
+      if (parsed.choices !== undefined && (!Array.isArray(parsed.choices) || parsed.choices.some((choice) => !this.isRecord(choice)))) {
+        throw new ProviderStreamProtocolError('Invalid streaming choices.');
       }
       return parsed as DeepSeekStreamChunk;
     } catch (error) {
-      throw new Error(language === 'en'
+      if (final && isTruncatedJsonError(error)) throw new ProviderIncompleteStreamError('Stream ended in an incomplete JSON event.');
+      throw new ProviderStreamProtocolError(language === 'en'
         ? `Cannot parse the streaming response: ${error instanceof Error ? error.message : String(error)}`
         : `无法解析流式响应：${error instanceof Error ? error.message : String(error)}`);
     }
@@ -277,6 +286,7 @@ export class StreamParser {
 
     for (const choice of choices) {
       if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
+        if (typeof choice.finish_reason !== 'string' || !choice.finish_reason) throw new ProviderStreamProtocolError('Invalid finish_reason.');
         finishReason = choice.finish_reason;
       }
 
@@ -284,9 +294,15 @@ export class StreamParser {
       if (!delta) {
         continue;
       }
+      if (!this.isRecord(delta) || (delta.tool_calls !== undefined && !Array.isArray(delta.tool_calls))) {
+        throw new ProviderStreamProtocolError('Invalid streaming delta.');
+      }
+      for (const text of [delta.content, delta.reasoning_content]) if (text !== undefined && text !== null && typeof text !== 'string') {
+        throw new ProviderStreamProtocolError('Invalid streaming text delta.');
+      }
 
-      this.collectTextDelta(delta.reasoning_content, reasoningParts, reasoningDisplayFilter, callbacks, 'reasoning');
-      this.collectTextDelta(delta.content, contentParts, contentDisplayFilter, callbacks, 'content');
+      this.collectTextDelta(typeof delta.reasoning_content === 'string' ? delta.reasoning_content : null, reasoningParts, reasoningDisplayFilter, callbacks, 'reasoning');
+      this.collectTextDelta(typeof delta.content === 'string' ? delta.content : null, contentParts, contentDisplayFilter, callbacks, 'content');
       this.collectToolCallDeltas(delta.tool_calls ?? [], toolCallParts, callbacks);
     }
 
@@ -341,6 +357,14 @@ export class StreamParser {
 
     for (let deltaIndex = 0; deltaIndex < toolCallDeltas.length; deltaIndex += 1) {
       const toolCallDelta = toolCallDeltas[deltaIndex];
+      if (!this.isRecord(toolCallDelta) || (toolCallDelta.index !== undefined && (typeof toolCallDelta.index !== 'number' || !Number.isInteger(toolCallDelta.index) || toolCallDelta.index < 0))
+        || (toolCallDelta.type !== undefined && toolCallDelta.type !== 'function')
+        || (toolCallDelta.id !== undefined && typeof toolCallDelta.id !== 'string')
+        || (toolCallDelta.function !== undefined && (!this.isRecord(toolCallDelta.function)
+          || (toolCallDelta.function.name !== undefined && typeof toolCallDelta.function.name !== 'string')
+          || (toolCallDelta.function.arguments !== undefined && typeof toolCallDelta.function.arguments !== 'string')))) {
+        throw new ProviderStreamProtocolError('Invalid streaming tool call.');
+      }
       const index = typeof toolCallDelta.index === 'number' ? toolCallDelta.index : deltaIndex;
       const current = toolCallParts.get(index) ?? {
         id: '',
@@ -352,6 +376,7 @@ export class StreamParser {
       };
 
       if (typeof toolCallDelta.id === 'string' && toolCallDelta.id) {
+        if (current.id && current.id !== toolCallDelta.id) throw new ProviderStreamProtocolError('Conflicting tool call identity.');
         current.id = toolCallDelta.id;
       }
       if (toolCallDelta.type === 'function') {
@@ -371,19 +396,18 @@ export class StreamParser {
   private buildStreamingToolCalls(toolCallParts: Map<number, StreamingToolCallAccumulator>): DeepSeekToolCall[] | null {
     const toolCalls = Array.from(toolCallParts.entries())
       .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
-      .map(([index, toolCall]) => ({
-        id: toolCall.id || `tool-call-${index}`,
-        type: 'function' as const,
-        function: {
-          name: toolCall.function.name,
-          arguments: toolCall.function.arguments
-        }
-      }))
-      .filter((toolCall) => Boolean(toolCall.function.name));
-
+      .map(([, toolCall]) => ({ id: toolCall.id, type: 'function' as const,
+        function: { name: toolCall.function.name, arguments: toolCall.function.arguments } }));
+    const ids = new Set<string>();
     for (const call of toolCalls) {
-      const args: unknown = JSON.parse(call.function.arguments);
-      if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Incomplete tool arguments / 工具参数不完整');
+      if (!call.id || !call.function.name || ids.has(call.id)) {
+        throw new ProviderStreamProtocolError('Incomplete or duplicate tool call identity / 工具调用标识不完整或重复');
+      }
+      ids.add(call.id);
+      let args: unknown;
+      try { args = JSON.parse(call.function.arguments); }
+      catch { throw new ProviderStreamProtocolError('Incomplete tool arguments / 工具参数不完整'); }
+      if (!this.isRecord(args)) throw new ProviderStreamProtocolError('Incomplete tool arguments / 工具参数不完整');
     }
     return toolCalls.length ? toolCalls : null;
   }
