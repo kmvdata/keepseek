@@ -281,8 +281,13 @@ function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
 
 test('Provider holds the batch lock across all commands and blocks duplicate messages, single approval and models', async () => fixture(async (f) => {
   f.add(['A', 'B', 'C']); const { host, states } = hostFixture(f);
+  const immediateMembership: string[][] = [];
+  Object.assign(host, { postState: (options: { immediate?: boolean } = {}) => {
+    if (options.immediate) immediateMembership.push(f.batch.state!.entries.map((entry) => entry.draftRunId));
+  } });
   const snapshot = f.batch.snapshots('s')[0];
   const executing = host.approveDraftRunBatch(snapshot); await f.executor.started(1);
+  assert.deepEqual(immediateMembership, [['A', 'B', 'C']], 'accepted membership is published before the first command starts');
   await host.handleMessage({ type: 'approveDraftRunBatch', snapshot });
   await host.handleMessage({ type: 'approveDraftRun', id: 'B', specHash: f.store.get('B')!.specHash, autoContinue: true });
   await host.sendPrompt('new prompt', 'source', 'model');
@@ -328,18 +333,39 @@ test('Provider global/card stop, cleanup, real input and model changes cancel ol
 
 class UiElement {
   children: UiElement[] = [];
+  parentElement?: UiElement;
   dataset: Record<string, string> = {};
   attributes: Record<string, string> = {};
   className = ''; textContent = ''; disabled = false; type = ''; title = '';
-  classList = { toggle: (_name: string, _value: boolean) => {} };
+  style = { cssText: '' };
+  scrollTop = 0; clientHeight = 500; scrollHeight = 500;
+  classList = {
+    add: (name: string) => { this.className += ' ' + name; },
+    contains: (name: string) => this.className.split(' ').includes(name),
+    toggle: (_name: string, _value: boolean) => {}
+  };
   get childElementCount() { return this.children.length; }
-  set innerHTML(_value: string) { this.children = []; }
-  append(...children: UiElement[]) { this.children.push(...children); }
+  set innerHTML(_value: string) { this.children.forEach((child) => { child.parentElement = undefined; }); this.children = []; }
+  append(...children: UiElement[]) {
+    for (const child of children) { child.remove(); child.parentElement = this; this.children.push(child); }
+  }
+  remove() {
+    if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+    this.parentElement = undefined;
+  }
+  contains(child: UiElement): boolean { return this === child || this.children.some((item) => item.contains(child)); }
+  addEventListener() {}
+  closest(selector: string): UiElement | null {
+    if (selector === 'button[data-draft-run-id]' && this.type === 'button' && this.dataset.draftRunId) return this;
+    return this.parentElement?.closest(selector) ?? null;
+  }
   setAttribute(key: string, value: string) { this.attributes[key] = value; }
 }
 function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: 'en' | 'zh-CN') {
   const source = getScript();
   const names = ['createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
+    'isDraftRunBatchActive', 'getDraftRunBatchMembers', 'createDraftRunTimelineItem', 'renderDraftRunItems',
+    'captureDraftRunActionFocus', 'findDraftRunActionFocus', 'renderTranscript', 'handleDraftRunActionClick',
     'getDraftRunTitle', 'appendDraftRunField', 'formatShellCommand', 'formatShellWord', 'getDraftRunStatusLabel', 'getDraftRunEffectLabel',
     'createChangeSetCard', 'createChangeSetFileRow', 'createEditActionButton', 'createEditOpenFileButton',
     'createChangeSetActionButton', 'getChangeSetStatusLabel', 'getChangeFileStatusLabel', 'isChangeSetActionable',
@@ -351,40 +377,254 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
     return source.slice(start, end);
   }).join('\n');
   const state = { draftRuns: f.store.toWebviewState('s'), draftRunBatchSnapshots: f.batch.snapshots('s'),
-    draftRunBatch: f.batch.state, approvalMode: 'ask', isBusy: false, activeDraftRunId: '',
+    draftRunBatch: f.batch.state, draftRunBatchHistory: f.store.toBatchDisplayHistory('s'), approvalMode: 'ask', isBusy: false, activeDraftRunId: '',
     startup: { sideEffectsReady: true },
-    authorizedExternalReferenceUris: [] as string[], messages: [{ id: 'assistant', role: 'assistant' }] };
+    authorizedExternalReferenceUris: [] as string[], messages: [{ id: 'assistant', role: 'assistant' }] as Array<{
+      id: string; role: string; isStreaming?: boolean; content?: string;
+    }> };
   const unlinked = new UiElement();
-  const context = { state, document: { createElement: () => new UiElement() },
+  const transcript = new UiElement();
+  const unlinkedRegion = new UiElement(); unlinkedRegion.append(unlinked);
+  const messages: unknown[] = [];
+  const context = { state, document: { createElement: () => new UiElement() }, Element: UiElement, HTMLElement: UiElement,
     pendingDraftRunBatchSnapshot: '', pendingDraftRunActions: new Set(), pendingDraftRunApprovals: new Set(), pendingChangeActions: new Map(),
     formatDuration: String, createDraftEditActionIcon: () => new UiElement(),
     createApprovalSourceSummary: () => new UiElement(), getEditApprovalSourceLabel: String,
-    unlinkedChangeSetList: unlinked, unlinkedChangeSetRegion: new UiElement(),
+    unlinkedChangeSetList: unlinked, unlinkedChangeSetRegion: unlinkedRegion,
+    transcript, planRegion: new UiElement(), editingMessageId: '', keepseekLogoUri: '',
+    renderMarkdownContent: () => {}, createAssistantMessageActions: () => new UiElement(),
+    createUserMessageActions: () => new UiElement(), getLanguage: () => language,
+    render: () => {}, setTransientStatus: () => {}, vscode: { postMessage: (message: unknown) => messages.push(message) },
     t: (key: string, values: Record<string, unknown> = {}) => {
       const translations = WEBVIEW_TRANSLATIONS[language] as Record<string, string>;
       return (translations[key] ?? key).replace(/\{(\w+)\}/gu, (_, name) => String(values[name] ?? ''));
     }
   };
-  const api = new Script(functions + '\n({ createDraftRunCard, createChangeSetCard, renderUnlinkedChangeSets, buildDraftRunTimelineProjection });').runInNewContext(context) as {
+  const api = new Script(functions + '\n({ createDraftRunCard, createChangeSetCard, renderUnlinkedChangeSets, buildDraftRunTimelineProjection, renderTranscript, captureDraftRunActionFocus, findDraftRunActionFocus, handleDraftRunActionClick });').runInNewContext(context) as {
     createDraftRunCard(run: unknown): UiElement; createChangeSetCard(set: unknown): UiElement;
     renderUnlinkedChangeSets(sets: unknown[], runs: unknown[]): void;
     buildDraftRunTimelineProjection(): { byMessageId: Record<string, unknown[]>; unlinked: unknown[] };
+    renderTranscript(sets: unknown, runs: unknown): void;
+    captureDraftRunActionFocus(element: UiElement): Record<string, string>;
+    findDraftRunActionFocus(buttons: UiElement[], descriptor: Record<string, string>): UiElement | undefined;
+    handleDraftRunActionClick(event: { target: UiElement }): void;
+  };
+  const renderCurrentState = (edits: string[][] = []) => {
+    const sets = edits.map((statuses, index) => ({ id: 'set-' + index, files: statuses.map((status, i) => ({ id: 'e-' + index + '-' + i, status, label: 'file' + i })) }));
+    const projection = api.buildDraftRunTimelineProjection();
+    api.renderTranscript({ byMessageId: {}, unlinked: sets }, projection);
+    // Return the actual tree produced by both real timeline entrances.
+    return { cards: transcript.children, sets, projection };
   };
   const render = (edits: string[][] = []) => {
     state.draftRuns = f.store.toWebviewState('s'); state.draftRunBatchSnapshots = f.batch.snapshots('s'); state.draftRunBatch = f.batch.state;
-    const cards = state.draftRuns.map((run) => api.createDraftRunCard(run));
-    const sets = edits.map((statuses, index) => ({ id: 'set-' + index, files: statuses.map((status, i) => ({ id: 'e-' + index + '-' + i, status, label: 'file' + i })) }));
-    cards.push(...sets.map((set) => api.createChangeSetCard(set)));
-    api.renderUnlinkedChangeSets(sets, state.draftRuns);
-    return { cards, sets };
+    state.draftRunBatchHistory = f.store.toBatchDisplayHistory('s');
+    return renderCurrentState(edits);
   };
-  return { api, state, unlinked, render };
+  context.render = () => { renderCurrentState(); };
+  return { api, state, unlinked, transcript, context, messages, render, renderCurrentState };
 }
 function elements(cards: UiElement[]): UiElement[] { return cards.flatMap((card) => [card, ...elements(card.children)]); }
 function bulk(cards: UiElement[]) {
   return elements(cards).filter((item) => item.dataset.draftRunAction === 'approveDraftRunBatch'
     || ['applyChangeSet', 'discardChangeSet', 'revertChangeSet'].includes(item.dataset.changeSetAction));
 }
+function runCards(nodes: UiElement[]) {
+  return elements(nodes).filter((item) => item.classList.contains('draft-run-card'));
+}
+function batchGroups(nodes: UiElement[]) {
+  return elements(nodes).filter((item) => item.classList.contains('draft-run-batch-group'));
+}
+function assertRunOrder(nodes: UiElement[], ids: string[]) {
+  assert.deepEqual(runCards(nodes).map((card) => card.dataset.draftRunId), ids);
+  assert.equal(new Set(runCards(nodes).map((card) => card.dataset.draftRunId)).size, ids.length);
+}
+function assertSharedGroup(nodes: UiElement[], ids: string[]) {
+  const groups = batchGroups(nodes);
+  assert.equal(groups.length, 1);
+  assertRunOrder([groups[0]], ids);
+  assertRunOrder(nodes, ids);
+  const headers = elements([groups[0]]).filter((item) => item.className === 'draft-run-batch');
+  assert.equal(headers.length, 1);
+  assert.equal(headers[0].parentElement, groups[0]);
+  assert.ok(runCards([groups[0]]).every((card) => !card.contains(headers[0])), 'batch header is outside every command card');
+  return groups[0];
+}
+
+test('real transcript keeps A/B/C in one ordered container throughout snapshot, queued, running, waiting, continuing and completed', async () => fixture(async (f) => {
+  f.add(['z-A', 'a-B', 'm-C']);
+  const ui = renderHarness(f, 'zh-CN');
+  const ids = ['z-A', 'a-B', 'm-C'];
+  assertSharedGroup(ui.render().cards, ids);
+  const snapshotButton = bulk(ui.transcript.children)[0];
+  const snapshotFocus = ui.api.captureDraftRunActionFocus(snapshotButton);
+  const operationId = f.accept();
+  let group = assertSharedGroup(ui.render().cards, ids);
+  assert.equal(group.dataset.operationId, operationId);
+  let stop = elements([group]).find((item) => item.dataset.draftRunAction === 'cancelDraftRunBatch')!;
+  assert.equal(ui.api.findDraftRunActionFocus(elements([group]).filter((node) => node.type === 'button'), snapshotFocus), stop, 'approval focus follows its exact snapshot into its operation');
+  const executing = f.execute(operationId);
+  await f.executor.started(1);
+  ui.state.isBusy = true;
+  group = assertSharedGroup(ui.render().cards, ids);
+  assert.equal(bulk([group]).length, 0);
+  assert.equal(elements([group]).filter((item) => item.attributes.role === 'status').length, 1);
+  f.executor.finish('z-A'); await f.executor.started(2);
+  assert.equal(f.store.toWebviewState('s').filter((run) => run.status === 'pending').length, 1);
+  assertSharedGroup(ui.render().cards, ids);
+  f.executor.finish('a-B'); await f.executor.started(3);
+  assertSharedGroup(ui.render().cards, ids);
+  f.executor.finish('m-C'); await executing;
+  assert.equal(f.batch.state?.phase, 'waiting');
+  assertSharedGroup(ui.render().cards, ids);
+  const sent = deferred<boolean>();
+  const continuing = f.batch.continueOnce({ assertContext: () => {}, blocker: () => undefined, send: () => sent.promise });
+  assert.equal(f.batch.state?.phase, 'continuing');
+  assertSharedGroup(ui.render().cards, ids);
+  sent.resolve(true); await continuing;
+  assert.equal(f.batch.state?.phase, 'completed');
+  group = assertSharedGroup(ui.render().cards, ids);
+  assert.ok(elements([group]).some((node) => node.textContent.includes('已自动继续一次')));
+  stop = elements([group]).find((item) => item.dataset.draftRunAction === 'cancelDraftRunBatch')!;
+  assert.equal(stop, undefined, 'terminal history has no stop authority');
+}));
+
+test('failed/cancelled batches retain their record while remaining pending members move once into a new candidate and approval', async () => {
+  for (const ending of ['failed', 'cancelled']) await fixture(async (f) => {
+    f.add(['A', 'B', 'C']); const ui = renderHarness(f, 'en');
+    const oldOperation = f.accept(); const executing = f.execute(oldOperation);
+    await f.executor.started(1);
+    if (ending === 'failed') f.executor.finish('A', { exitCode: 2, cancelled: false, timedOut: false });
+    else f.batch.cancel(oldOperation);
+    await executing;
+    assert.equal(f.batch.state?.phase, ending);
+    assert.equal(f.store.get('A')?.status, ending);
+    assert.equal(f.store.get('B')?.status, 'pending');
+    assert.equal(f.store.get('C')?.status, 'pending');
+    let tree = ui.render().cards;
+    assert.equal(batchGroups(tree).length, 2, 'previous approval and new candidate have distinct headers');
+    assertRunOrder(tree, ['A', 'B', 'C']);
+    const old = batchGroups(tree).find((group) => group.dataset.operationId === oldOperation)!;
+    assertRunOrder([old], ['A']);
+    assert.ok(elements([old]).some((node) => node.className === 'draft-run-batch-hint'
+      && node.textContent === WEBVIEW_TRANSLATIONS.en.draftRunBatchMovedMembers.replace('{count}', '2')));
+    assert.equal(bulk(tree).length, 1);
+    const newSnapshot = JSON.parse(bulk(tree)[0].dataset.batchSnapshot) as DraftRunBatchSnapshot;
+    assert.deepEqual(newSnapshot.entries.map((entry) => entry.draftRunId), ['B', 'C']);
+    const newOperation = f.batch.accept(newSnapshot, { sessionId: 's', sourceId: 'source', modelId: 'model' });
+    assert.notEqual(newOperation, oldOperation);
+    tree = ui.render().cards;
+    assert.equal(batchGroups(tree).length, 2);
+    assertRunOrder(tree, ['A', 'B', 'C']);
+    assert.equal(bulk(tree).length, 0);
+    const retry = f.execute(newOperation);
+    await f.executor.started(2); f.executor.finish('B');
+    await f.executor.started(3); f.executor.finish('C'); await retry;
+    await f.batch.continueOnce({ assertContext: () => {}, blocker: () => undefined, send: async () => true });
+    tree = ui.render().cards;
+    assertRunOrder(tree, ['A', 'B', 'C']);
+    assert.equal(batchGroups(tree).length, 2);
+    assert.equal(f.executor.calls.filter((call) => call.draftRun.id === 'A').length, 1);
+  });
+});
+
+test('completed groups survive new same-run clones, later approval, session switches and a new Webview projection', async () => fixture(async (f) => {
+  f.add(['A', 'B']); const first = f.accept(); const executing = f.execute(first);
+  await f.executor.started(1); f.executor.finish('A'); await f.executor.started(2); f.executor.finish('B'); await executing;
+  await f.batch.continueOnce({ assertContext: () => {}, blocker: () => undefined, send: async () => true });
+  const clone = f.store.cloneAsPending('A')!; f.add(['C']);
+  const ui = renderHarness(f, 'en'); let tree = ui.render().cards;
+  assert.equal(batchGroups(tree).length, 2);
+  assertRunOrder([batchGroups(tree).find((group) => group.dataset.operationId === first)!], ['A', 'B']);
+  assertRunOrder(tree, ['A', 'B', clone.id, 'C']);
+  const second = f.accept();
+  assert.notEqual(first, second);
+  tree = ui.render().cards;
+  assert.equal(batchGroups(tree).length, 2);
+  assertRunOrder([batchGroups(tree).find((group) => group.dataset.operationId === first)!], ['A', 'B']);
+  f.add(['other-A', 'other-B'], 'other-session', 'r');
+  ui.state.draftRuns = f.store.toWebviewState('other-session');
+  ui.state.draftRunBatchSnapshots = f.batch.snapshots('other-session');
+  ui.state.draftRunBatchHistory = f.store.toBatchDisplayHistory('other-session');
+  ui.state.draftRunBatch = undefined;
+  assertSharedGroup(ui.renderCurrentState().cards, ['other-A', 'other-B']);
+  tree = ui.render().cards;
+  assert.equal(batchGroups(tree).length, 2);
+  assertRunOrder(tree, ['A', 'B', clone.id, 'C']);
+  const rebuilt = renderHarness(f, 'en');
+  assert.equal(batchGroups(rebuilt.render().cards).length, 2);
+  assertRunOrder(rebuilt.transcript.children, ['A', 'B', clone.id, 'C']);
+}));
+
+test('global projection groups cross-message, mixed linked/unlinked, streaming and unloaded-message members without duplicate cards', async () => fixture(async (f) => {
+  for (const [id, messageId] of [['A', 'm1'], ['B', 'm2'], ['C', 'missing']]) f.store.addProposals({
+    proposals: [f.proposal(id)], sessionId: 's', agentRunId: 'r', messageId
+  });
+  const ui = renderHarness(f, 'en'); ui.state.messages = [{ id: 'm1', role: 'assistant' }, { id: 'm2', role: 'assistant' }];
+  let tree = ui.render().cards;
+  assertSharedGroup(tree, ['A', 'B', 'C']); assertSharedGroup(ui.unlinked.children, ['A', 'B', 'C']);
+  ui.state.messages.push({ id: 'missing', role: 'assistant' });
+  assertSharedGroup(ui.render().cards, ['A', 'B', 'C']); assert.equal(batchGroups(ui.unlinked.children).length, 1, 'cross-message anchor stays unlinked');
+  ui.state.draftRuns = ui.state.draftRuns.map((run) => ({ ...run, messageId: 'm1' }));
+  ui.state.messages = [{ id: 'm1', role: 'assistant', isStreaming: true }];
+  assertSharedGroup(ui.renderCurrentState().cards, ['A', 'B', 'C']); assert.equal(batchGroups(ui.unlinked.children).length, 1);
+  ui.state.messages[0].isStreaming = false;
+  tree = ui.renderCurrentState().cards;
+  assertSharedGroup(tree, ['A', 'B', 'C']); assert.equal(batchGroups(ui.unlinked.children).length, 0);
+  ui.state.messages = [];
+  assertSharedGroup(ui.renderCurrentState().cards, ['A', 'B', 'C']); assert.equal(batchGroups(ui.unlinked.children).length, 1);
+  ui.state.messages = [{ id: 'm1', role: 'assistant' }];
+  assertSharedGroup(ui.renderCurrentState().cards, ['A', 'B', 'C']); assert.equal(batchGroups(ui.unlinked.children).length, 0);
+}));
+
+test('incomplete operation data keeps a header without its first card; inconsistent membership leaves commands conservatively ungrouped', async () => fixture(async (f) => {
+  f.add(['A', 'B', 'C']); f.accept();
+  const ui = renderHarness(f, 'en'); ui.render();
+  ui.state.draftRuns = ui.state.draftRuns.filter((run) => run.id !== 'A');
+  let tree = ui.renderCurrentState().cards;
+  assertSharedGroup(tree, ['B', 'C']);
+  assert.equal(elements(tree).filter((node) => node.attributes.role === 'status').length, 1);
+  assert.equal(bulk(tree).length, 0);
+  for (const changed of ['specHash', 'sessionId', 'agentRunId'] as const) {
+    ui.render();
+    ui.state.draftRuns = ui.state.draftRuns.map((run) => run.id === 'A' ? { ...run, [changed]: 'different' } : run);
+    tree = ui.renderCurrentState().cards;
+    assertRunOrder(tree, ['A', 'B', 'C']);
+    assert.equal(batchGroups(tree).length, 0, 'invalid operation membership cannot imply shared approval');
+  }
+}));
+
+test('shared header delegates exact approval/stop payloads, blocks repeated clicks, and keeps focus within its identity', async () => fixture(async (f) => {
+  f.add(['A', 'B']); const ui = renderHarness(f, 'en');
+  let tree = ui.render().cards;
+  const approve = bulk(tree)[0];
+  const focus = ui.api.captureDraftRunActionFocus(approve);
+  ui.api.handleDraftRunActionClick({ target: approve });
+  ui.api.handleDraftRunActionClick({ target: approve });
+  assert.equal(ui.messages.length, 1, 'repeat click against a detached old button is ignored');
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.messages[0])), { type: 'approveDraftRunBatch', snapshot: f.batch.snapshots('s')[0] });
+  assert.equal(bulk(ui.transcript.children)[0].disabled, true);
+  ui.context.pendingDraftRunBatchSnapshot = '';
+  ui.state.startup.sideEffectsReady = false;
+  assert.equal(bulk(ui.render().cards)[0].disabled, true);
+  ui.state.startup.sideEffectsReady = true; ui.state.isBusy = true;
+  assert.equal(bulk(ui.render().cards)[0].disabled, true);
+  ui.state.isBusy = false;
+  f.add(['C']); tree = ui.render().cards;
+  const buttons = elements(tree).filter((node) => node.type === 'button');
+  assert.equal(ui.api.findDraftRunActionFocus(buttons, focus), null, 'a new candidate never inherits another snapshot focus');
+  const newFocus = ui.api.captureDraftRunActionFocus(bulk(tree)[0]);
+  const operationId = f.accept(); tree = ui.render().cards;
+  const stop = elements(tree).find((node) => node.dataset.draftRunAction === 'cancelDraftRunBatch')!;
+  const allButtons = elements(tree).filter((node) => node.type === 'button');
+  assert.equal(ui.api.findDraftRunActionFocus(allButtons, newFocus), stop);
+  const cardFocus = { draftRunId: 'A', draftRunAction: 'cancelDraftRun' };
+  assert.notEqual(ui.api.findDraftRunActionFocus(allButtons, cardFocus), stop, 'single-card fallback never selects batch controls');
+  ui.api.handleDraftRunActionClick({ target: stop });
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.at(-1))), { type: 'cancelDraftRunBatch', operationId });
+  f.batch.cancel(operationId); tree = ui.render().cards;
+  assert.equal(ui.api.findDraftRunActionFocus(elements(tree).filter((node) => node.type === 'button'), ui.api.captureDraftRunActionFocus(stop)), null);
+}));
 
 test('both languages and all card entrances hide bulk actions at 0/1, show counts at 2+, and retain single actions after 2→1', async () => {
   for (const language of ['en', 'zh-CN'] as const) await fixture(async (f) => {
@@ -399,8 +639,8 @@ test('both languages and all card entrances hide bulk actions at 0/1, show count
     assert.deepEqual(bulk(initial.cards).map((button) => button.dataset.draftRunAction || button.dataset.changeSetAction), [
       'approveDraftRunBatch', 'applyChangeSet', 'discardChangeSet', 'revertChangeSet'
     ]);
-    assert.equal(bulk(ui.unlinked.children).length, 4);
-    assert.equal(ui.api.buildDraftRunTimelineProjection().byMessageId.assistant.length, 2);
+    assert.equal(bulk(ui.unlinked.children).length, 3, 'linked command group stays in its message');
+    assert.equal(ui.api.buildDraftRunTimelineProjection().byMessageId.assistant.length, 1);
     const snapshot = JSON.parse(bulk(initial.cards)[0].dataset.batchSnapshot);
     assert.deepEqual(snapshot.entries.map((entry: { draftRunId: string }) => entry.draftRunId), ['A', 'B']);
     assert.equal(snapshot.spec, undefined);
@@ -413,7 +653,7 @@ test('both languages and all card entrances hide bulk actions at 0/1, show count
     assert.ok(elements(reduced.cards).some((item) => item.dataset.editAction === 'discardDraftEdit' && !item.disabled));
     assert.equal(bulk(ui.render([['applied']]).cards).length, 0, 'one revertible edit uses only its row action');
     assert.ok(elements(ui.render([['applied']]).cards).some((item) => item.dataset.editAction === 'revertDraftEdit' && !item.disabled));
-    const superseded = ui.render([['superseded']]).cards;
+    const superseded = [ui.api.createChangeSetCard(ui.render([['superseded']]).sets[0])];
     assert.equal(elements(superseded).some((item) => Boolean(item.dataset.editAction)), false,
       'a superseded edit has no stale Apply, discard, diff, or revert action');
     assert.ok(elements(superseded).some((item) => item.textContent.includes(
@@ -444,7 +684,7 @@ test('DraftRun card renders executable and argv as one shell-readable command wi
   });
 
   const ui = renderHarness(f, 'zh-CN');
-  const card = ui.render().cards[0];
+  const card = elements(ui.render().cards).find((item) => item.classList.contains('draft-run-card'))!;
   const fields = elements([card]).filter((item) => item.className === 'draft-run-field');
   assert.equal(fields[0]?.children[0]?.textContent, '完整命令');
   assert.equal(
@@ -476,7 +716,7 @@ test('DraftRun card folds scoped environment overrides into the displayed comman
     messageId: 'assistant'
   });
 
-  const card = renderHarness(f, 'zh-CN').render().cards[0];
+  const card = runCards(renderHarness(f, 'zh-CN').render().cards)[0];
   const fields = elements([card]).filter((item) => item.className === 'draft-run-field');
   assert.equal(
     fields[0]?.children[1]?.textContent,

@@ -3641,7 +3641,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       claimed = true;
       this.delegatedApprovals.cancel();
       this.isBusy = true;
-      this.postState();
+      // Publish the accepted membership before per-command events can invalidate
+      // the pending snapshot, including when persistence resolves immediately.
+      this.postState({ immediate: true });
       const batch = this.draftRunBatches.state!;
       await this.draftRunBatches.execute(operationId, {
         authorizedUris: this.authorizedExternalReferenceUris,
@@ -5852,6 +5854,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         draftRunBatchSnapshots: normalizeApprovalMode(activeSession.approvalMode) === 'ask'
           ? this.draftRunBatches.snapshots(activeSession.id) : [],
         draftRunBatch: this.draftRunBatches.state?.sessionId === activeSession.id ? this.draftRunBatches.state : undefined,
+        draftRunBatchHistory: this.draftRuns.toBatchDisplayHistory(activeSession.id),
         activeDraftRunId: this.activeDraftRunId,
         executionMode: normalizeExecutionMode(activeSession.executionMode),
         planWorkflows: getPlanWorkflowViews(activeSession),

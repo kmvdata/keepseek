@@ -626,6 +626,13 @@ export interface DraftRunBatchState extends DraftRunBatchSnapshot {
   failureStage?: 'continuation';
 }
 
+/** Read-only presentation history. Never restores approval or continuation authority. */
+export type DraftRunBatchDisplay = Pick<DraftRunBatchState,
+  'snapshotId' | 'sessionId' | 'agentRunId' | 'entries' | 'operationId'
+  | 'completed' | 'currentIndex' | 'remaining' | 'currentCommand' | 'reason' | 'failureStage'> & {
+  phase: DraftRunBatchState['phase'] | 'interrupted';
+};
+
 export interface DraftRun extends DraftRunProposal {
   agentRunId: string;
   sessionId: string;

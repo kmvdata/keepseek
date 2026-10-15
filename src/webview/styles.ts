@@ -7,9 +7,44 @@ export function getStyles(): string {
       flex-wrap: wrap;
       align-items: center;
       gap: 8px;
-      padding-bottom: 10px;
-      margin-bottom: 10px;
-      border-bottom: 1px solid var(--vscode-widget-border);
+      min-width: 0;
+      padding: 9px;
+      overflow-wrap: anywhere;
+    }
+    .draft-run-batch-group {
+      width: 100%;
+      min-width: 0;
+      margin-top: 10px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editor-background);
+      overflow: hidden;
+    }
+    .draft-run-batch-title {
+      flex-basis: 100%;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .draft-run-batch-status {
+      flex: 1 1 180px;
+      min-width: 0;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .draft-run-batch-members > .draft-run-card {
+      margin-top: 0;
+      border-width: 1px 0 0;
+      border-radius: 0;
+    }
+    .draft-run-batch-members > .draft-run-running {
+      box-shadow: inset 2px 0 var(--vscode-focusBorder);
+    }
+    .draft-run-batch-members > .draft-run-failed {
+      box-shadow: inset 2px 0 var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground));
+    }
+    .draft-run-batch button {
+      max-width: 100%;
+      white-space: normal;
       overflow-wrap: anywhere;
     }
     .draft-run-batch-hint {

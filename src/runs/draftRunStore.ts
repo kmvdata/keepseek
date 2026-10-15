@@ -5,6 +5,8 @@ import { getConfiguredDraftRunMaxTranscriptBytes } from '../shared/config';
 import type { KeepseekLanguage } from '../shared/i18n';
 import type {
   DraftRun,
+  DraftRunBatchDisplay,
+  DraftRunBatchState,
   DraftRunProposal,
   DraftRunStatus
 } from '../shared/types';
@@ -21,6 +23,10 @@ import {
 
 const MAX_DRAFT_RUN_HISTORY = 500;
 const TERMINAL_STATUSES = new Set<DraftRunStatus>(['rejected', 'done', 'cancelled', 'failed']);
+const BATCH_DISPLAY_PHASES = new Set<DraftRunBatchDisplay['phase']>([
+  'queued', 'running', 'waiting', 'continuing', 'completed', 'failed', 'cancelled', 'interrupted'
+]);
+const TERMINAL_BATCH_DISPLAY_PHASES = new Set<DraftRunBatchDisplay['phase']>(['completed', 'failed', 'cancelled', 'interrupted']);
 // Terminal output is untrusted and must lose ANSI/OSC control sequences before
 // it enters persisted conversation state. These patterns intentionally name
 // control bytes, which is exactly what the lint rule normally discourages.
@@ -51,6 +57,7 @@ export interface DraftRunAutoContinuationClaim {
 
 export class DraftRunStore {
   private readonly draftRuns = new Map<string, DraftRun>();
+  private readonly batchDisplays = new Map<string, DraftRunBatchDisplay>();
   private readonly cancelRequests = new Set<string>();
   private readonly abortControllers = new Map<string, AbortController>();
   private readonly storageUri: vscode.Uri;
@@ -77,7 +84,7 @@ export class DraftRunStore {
       const content = new TextDecoder('utf-8', { fatal: false }).decode(
         await vscode.workspace.fs.readFile(this.storageUri)
       );
-      const parsed = JSON.parse(content) as { version?: number; draftRuns?: unknown[] };
+      const parsed = JSON.parse(content) as { version?: number; draftRuns?: unknown[]; batchDisplays?: unknown[] };
       console.debug('KeepSeek startup: draft-run-storage-read', {
         bytesRead: Buffer.byteLength(content, 'utf8'),
         entries: parsed.draftRuns?.length ?? 0
@@ -86,7 +93,7 @@ export class DraftRunStore {
         return;
       }
       let repairedInterruptedRun = false;
-      for (const value of parsed.draftRuns ?? []) {
+      for (const value of Array.isArray(parsed.draftRuns) ? parsed.draftRuns : []) {
         const draftRun = normalizeStoredDraftRun(value);
         if (!draftRun) {
           continue;
@@ -99,6 +106,16 @@ export class DraftRunStore {
           repairedInterruptedRun = true;
         }
         this.draftRuns.set(draftRun.id, draftRun);
+      }
+      const displays = Array.isArray(parsed.batchDisplays) ? parsed.batchDisplays : [];
+      const repeatedOperationIds = repeatedDisplayIds(displays, 'operationId');
+      const repeatedSnapshotIds = repeatedDisplayIds(displays, 'snapshotId');
+      for (const value of displays.slice(-MAX_DRAFT_RUN_HISTORY)) {
+        const display = normalizeBatchDisplay(value, this.draftRuns, true);
+        if (!display || repeatedOperationIds.has(display.operationId) || repeatedSnapshotIds.has(display.snapshotId)) continue;
+        this.batchDisplays.set(display.operationId, display);
+        if (!TERMINAL_BATCH_DISPLAY_PHASES.has((value as DraftRunBatchDisplay).phase)
+          || display.phase !== (value as DraftRunBatchDisplay).phase) repairedInterruptedRun = true;
       }
       if (repairedInterruptedRun) {
         await this.persistNow();
@@ -142,6 +159,27 @@ export class DraftRunStore {
       .filter((draftRun) => draftRun.sessionId === sessionId)
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
       .map(toWebviewDraftRun);
+  }
+
+  /** Presentation metadata only; it is never consulted by approval or execution. */
+  public recordBatchDisplay(state: DraftRunBatchState): void {
+    const display = normalizeBatchDisplay(state, this.draftRuns, false);
+    if (!display) return;
+    const existing = this.batchDisplays.get(display.operationId);
+    if (existing && (existing.snapshotId !== display.snapshotId || existing.sessionId !== display.sessionId
+      || existing.agentRunId !== display.agentRunId || JSON.stringify(existing.entries) !== JSON.stringify(display.entries))) return;
+    if (Array.from(this.batchDisplays.values()).some((record) => record.operationId !== display.operationId
+      && record.snapshotId === display.snapshotId)) return;
+    this.batchDisplays.set(display.operationId, display);
+    while (this.batchDisplays.size > MAX_DRAFT_RUN_HISTORY) this.batchDisplays.delete(this.batchDisplays.keys().next().value!);
+    this.schedulePersist();
+  }
+
+  public toBatchDisplayHistory(sessionId: string): DraftRunBatchDisplay[] {
+    return Array.from(this.batchDisplays.values())
+      .filter((record) => record.sessionId === sessionId)
+      .map((record) => normalizeBatchDisplay(record, this.draftRuns, false))
+      .filter((record): record is DraftRunBatchDisplay => record !== undefined);
   }
 
   public async loadSession(_sessionId: string): Promise<void> {
@@ -516,6 +554,9 @@ export class DraftRunStore {
       }
       this.draftRuns.delete(id);
     }
+    for (const [id, display] of this.batchDisplays) {
+      if (display.sessionId === sessionId) this.batchDisplays.delete(id);
+    }
     this.schedulePersist();
   }
 
@@ -592,7 +633,13 @@ export class DraftRunStore {
       .map((run) => run.id));
     // Preserve insertion order through persistence, including equal createdAt values.
     const draftRuns = Array.from(this.draftRuns.values()).filter((run) => retainedIds.has(run.id)).map(cloneDraftRun);
-    const write = this.persistenceQueue.catch(() => undefined).then(() => writeJsonAtomic(this.storageUri, { version: 1, draftRuns }));
+    for (const [id, display] of this.batchDisplays) {
+      if (!display.entries.some((entry) => retainedIds.has(entry.draftRunId))) this.batchDisplays.delete(id);
+    }
+    const batchDisplays = Array.from(this.batchDisplays.values())
+      .map((record) => normalizeBatchDisplay(record, this.draftRuns, false))
+      .filter((record): record is DraftRunBatchDisplay => record !== undefined);
+    const write = this.persistenceQueue.catch(() => undefined).then(() => writeJsonAtomic(this.storageUri, { version: 1, draftRuns, batchDisplays }));
     this.persistenceQueue = write;
     await write; // In particular, approval persistence failure must prevent spawn.
 
@@ -686,6 +733,75 @@ function cloneProposal(proposal: DraftRunProposal): DraftRunProposal {
 
 function cloneDraftRun(draftRun: DraftRun): DraftRun {
   return { ...draftRun, ...cloneProposal(draftRun) };
+}
+
+function repeatedDisplayIds(values: readonly unknown[], field: 'operationId' | 'snapshotId'): Set<string> {
+  const seen = new Set<string>();
+  const repeated = new Set<string>();
+  for (const value of values) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const id = (value as Record<string, unknown>)[field];
+    if (typeof id !== 'string') continue;
+    if (seen.has(id)) repeated.add(id);
+    seen.add(id);
+  }
+  return repeated;
+}
+
+function normalizeBatchDisplay(
+  value: unknown,
+  draftRuns: ReadonlyMap<string, DraftRun>,
+  restarting: boolean
+): DraftRunBatchDisplay | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (!['operationId', 'snapshotId', 'sessionId', 'agentRunId'].every((field) => typeof record[field] === 'string' && record[field] !== '')
+    || typeof record.phase !== 'string' || !BATCH_DISPLAY_PHASES.has(record.phase as DraftRunBatchDisplay['phase'])
+    || !Array.isArray(record.entries) || record.entries.length < 2
+    || !['completed', 'currentIndex', 'remaining'].every((field) => typeof record[field] === 'number' && Number.isFinite(record[field]))
+    || (record.currentCommand !== undefined && typeof record.currentCommand !== 'string')
+    || (record.reason !== undefined && typeof record.reason !== 'string')
+    || (record.failureStage !== undefined && record.failureStage !== 'continuation')) return undefined;
+  const entries: DraftRunBatchDisplay['entries'] = [];
+  const ids = new Set<string>();
+  let hasMember = false;
+  let completedMismatch = false;
+  for (const value of record.entries) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const entry = value as Record<string, unknown>;
+    if (typeof entry.draftRunId !== 'string' || !entry.draftRunId || typeof entry.specHash !== 'string' || !entry.specHash
+      || ids.has(entry.draftRunId)) return undefined;
+    ids.add(entry.draftRunId);
+    const member = draftRuns.get(entry.draftRunId);
+    if (member) {
+      if (member.sessionId !== record.sessionId || member.agentRunId !== record.agentRunId || member.specHash !== entry.specHash) return undefined;
+      hasMember = true;
+      if (member.status !== 'done') completedMismatch = true;
+    }
+    entries.push({ draftRunId: entry.draftRunId, specHash: entry.specHash });
+  }
+  if (!hasMember) return undefined;
+  const count = entries.length;
+  const clamp = (value: unknown) => Math.max(0, Math.min(count, Math.floor(value as number)));
+  const completed = clamp(record.completed);
+  const remaining = clamp(record.remaining);
+  const savedPhase = record.phase as DraftRunBatchDisplay['phase'];
+  const interrupted = (restarting && !TERMINAL_BATCH_DISPLAY_PHASES.has(savedPhase))
+    || (savedPhase === 'completed' && (completedMismatch || completed !== count || remaining !== 0));
+  return {
+    operationId: record.operationId as string,
+    snapshotId: record.snapshotId as string,
+    sessionId: record.sessionId as string,
+    agentRunId: record.agentRunId as string,
+    entries,
+    phase: interrupted ? 'interrupted' : savedPhase,
+    completed,
+    currentIndex: clamp(record.currentIndex),
+    remaining,
+    currentCommand: interrupted ? undefined : record.currentCommand as string | undefined,
+    reason: interrupted ? undefined : record.reason as string | undefined,
+    failureStage: record.failureStage as 'continuation' | undefined
+  };
 }
 
 function normalizeStoredDraftRun(value: unknown): DraftRun | undefined {

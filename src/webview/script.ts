@@ -89,6 +89,7 @@ export function getScript(): string {
       draftRuns: [],
       draftRunBatchSnapshots: [],
       draftRunBatch: null,
+      draftRunBatchHistory: [],
       activeDraftRunId: '',
       executionMode: 'normal',
       planWorkflows: [],
@@ -454,6 +455,7 @@ export function getScript(): string {
     const pendingDraftRunApprovals = new Set();
     const pendingDraftRunActions = new Set();
     let pendingDraftRunBatchSnapshot = '';
+    let retainedDraftRunBatchFocus = null;
     let settingsMenuOpen = false;
     let backgroundRunDialogOpen = false;
     let dismissedBackgroundRunId = '';
@@ -796,6 +798,7 @@ export function getScript(): string {
       if (!id || !action) return;
       var payload = { type: action, id: id };
       if (action === 'approveDraftRunBatch') {
+        if (pendingDraftRunBatchSnapshot) return;
         payload = { type: action, snapshot: JSON.parse(button.dataset.batchSnapshot) };
         pendingDraftRunBatchSnapshot = payload.snapshot.snapshotId;
         render();
@@ -1391,7 +1394,14 @@ export function getScript(): string {
     function render() {
       var focusedAction = document.activeElement instanceof HTMLElement
         && (transcript.contains(document.activeElement) || unlinkedChangeSetList.contains(document.activeElement))
-        ? { ...document.activeElement.dataset } : null;
+        ? captureDraftRunActionFocus(document.activeElement) : null;
+      if (!focusedAction) {
+        // A pending approval temporarily disables/removes its button. Keep only that
+        // exact snapshot's focus while the host replaces it with operation controls.
+        if (!document.activeElement || document.activeElement === document.body || !document.activeElement.isConnected) {
+          focusedAction = retainedDraftRunBatchFocus;
+        } else retainedDraftRunBatchFocus = null;
+      }
       applyStaticTranslations();
       renderCurrentSessionTitle();
       syncEditingState();
@@ -1403,25 +1413,44 @@ export function getScript(): string {
       var changeSetProjection = buildChangeSetTimelineProjection();
       var draftRunProjection = buildDraftRunTimelineProjection();
       renderTranscript(changeSetProjection, draftRunProjection);
-      if (focusedAction?.draftRunId || focusedAction?.editId || focusedAction?.changeSetId || focusedAction?.planId) {
-        var actionButtons = Array.from(document.querySelectorAll('.draft-run-card button, .change-set-card button, .plan-decision-card button'));
-        var sameTarget = function(button) {
-          return !button.disabled && ['draftRunId', 'editId', 'changeSetId', 'planId'].some(function(key) {
-            return focusedAction[key] && button.dataset[key] === focusedAction[key];
-          });
-        };
-        var nextFocus = actionButtons.find(function(button) {
-          return sameTarget(button) && ['draftRunAction', 'editAction', 'changeSetAction', 'planAction'].some(function(key) {
-            return focusedAction[key] && button.dataset[key] === focusedAction[key];
-          });
-        }) || actionButtons.find(sameTarget);
-        if (nextFocus) nextFocus.focus({ preventScroll: true });
+      if (focusedAction) {
+        var actionButtons = Array.from(document.querySelectorAll('.draft-run-batch button, .draft-run-card button, .change-set-card button, .plan-decision-card button'));
+        var nextFocus = findDraftRunActionFocus(actionButtons, focusedAction);
+        if (nextFocus) {
+          nextFocus.focus({ preventScroll: true });
+          retainedDraftRunBatchFocus = null;
+        } else {
+          retainedDraftRunBatchFocus = focusedAction.batchSnapshotId && pendingDraftRunBatchSnapshot ? focusedAction : null;
+        }
       }
       renderStatus();
       if (window.keepseekInputControls) {
         window.keepseekInputControls.render();
       }
       syncSendButtonAvailability();
+    }
+
+    function captureDraftRunActionFocus(element) {
+      return element?.dataset ? { ...element.dataset } : null;
+    }
+
+    function findDraftRunActionFocus(buttons, focusedAction) {
+      if (!focusedAction) return null;
+      var sameTarget = function(button) {
+        if (button.disabled) return false;
+        // Batch controls must never fall back to a member card or a later approval.
+        if (focusedAction.operationId) return button.dataset.operationId === focusedAction.operationId;
+        if (focusedAction.batchSnapshotId) return button.dataset.batchSnapshotId === focusedAction.batchSnapshotId;
+        if (button.dataset.operationId || button.dataset.batchSnapshotId) return false;
+        return ['draftRunId', 'editId', 'changeSetId', 'planId'].some(function(key) {
+          return focusedAction[key] && button.dataset[key] === focusedAction[key];
+        });
+      };
+      return buttons.find(function(button) {
+        return sameTarget(button) && ['draftRunAction', 'editAction', 'changeSetAction', 'planAction'].some(function(key) {
+          return focusedAction[key] && button.dataset[key] === focusedAction[key];
+        });
+      }) || buttons.find(sameTarget) || null;
     }
 
     function syncSendButtonAvailability() {
@@ -3256,18 +3285,134 @@ export function getScript(): string {
       (Array.isArray(state.messages) ? state.messages : []).forEach(function(message) {
         if (message?.id) messagesById[String(message.id)] = message;
       });
-      (Array.isArray(state.draftRuns) ? state.draftRuns : []).forEach(function(draftRun) {
-        if (!draftRun?.id) return;
-        var messageId = String(draftRun.messageId || '');
-        var message = messageId ? messagesById[messageId] : null;
-        if (message?.role === 'assistant' && !message.isStreaming) {
-          if (!byMessageId[messageId]) byMessageId[messageId] = [];
-          byMessageId[messageId].push(draftRun);
-        } else {
-          unlinked.push(draftRun);
+      var runsById = Object.create(null);
+      var knownRunsById = Object.create(null);
+      var runOrder = Object.create(null);
+      var visibleRunCount = 0;
+      var allRuns = Array.isArray(state.draftRuns) ? state.draftRuns : [];
+      allRuns.forEach(function(run) {
+        if (run?.id && !knownRunsById[String(run.id)]) knownRunsById[String(run.id)] = run;
+      });
+      var runs = allRuns.filter(function(run) {
+        if (!run?.id || (state.activeSessionId && run.sessionId !== state.activeSessionId)
+          || runsById[String(run.id)]) return false;
+        runsById[String(run.id)] = run;
+        runOrder[String(run.id)] = visibleRunCount++;
+        return true;
+      });
+      var groups = [];
+      var addGroup = function(batch, kind) {
+        if (!batch || !batch.sessionId || !batch.agentRunId
+          || (state.activeSessionId && batch.sessionId !== state.activeSessionId)) return;
+        var entries = Array.isArray(batch.entries) ? batch.entries : [];
+        var ids = new Set();
+        if (entries.length < 2 || entries.some(function(entry) {
+          if (!entry?.draftRunId || !entry.specHash || ids.has(String(entry.draftRunId))) return true;
+          ids.add(String(entry.draftRunId)); return false;
+        })) return;
+        if (kind === 'snapshot' ? !batch.snapshotId : !batch.operationId) return;
+        // Missing records can be reported, but a contradictory identity invalidates
+        // the whole association; its remaining cards must not imply approval.
+        if (entries.some(function(entry) {
+          var run = knownRunsById[String(entry.draftRunId)];
+          return run && (run.sessionId !== batch.sessionId || run.agentRunId !== batch.agentRunId || run.specHash !== entry.specHash);
+        })) return;
+        var originalRuns = getDraftRunBatchMembers(batch, runsById);
+        if (kind === 'snapshot') {
+          var pending = runs.filter(function(run) {
+            return run.sessionId === batch.sessionId && run.agentRunId === batch.agentRunId && run.status === 'pending';
+          });
+          if (originalRuns.length !== entries.length || pending.length !== entries.length
+            || pending.some(function(run, index) {
+              return run.id !== entries[index].draftRunId || run.specHash !== entries[index].specHash;
+            })) return;
         }
+        // Anchor from all original members, including cards owned by a newer group.
+        // Missing messages, streaming messages and mixed-message batches go together below the transcript.
+        var messageId = originalRuns.length === entries.length ? String(originalRuns[0]?.messageId || '') : '';
+        if (!messageId || originalRuns.some(function(run) { return String(run.messageId || '') !== messageId; })
+          || messagesById[messageId]?.role !== 'assistant' || messagesById[messageId]?.isStreaming) messageId = '';
+        groups.push({ batch: batch, kind: kind, runs: [], originalRuns: originalRuns,
+          originalCount: entries.length, missingCount: entries.length - originalRuns.length, movedCount: 0,
+          snapshotId: batch.snapshotId || '', operationId: batch.operationId || '', messageId: messageId,
+          order: originalRuns.length ? Math.min.apply(null, originalRuns.map(function(run) { return runOrder[run.id]; })) : runs.length });
+      };
+      var liveBatch = state.draftRunBatch;
+      var history = Array.isArray(state.draftRunBatchHistory) ? state.draftRunBatchHistory : [];
+      var latestRecord = Object.create(null);
+      history.forEach(function(batch, index) {
+        if (batch?.operationId) latestRecord[String(batch.operationId)] = index;
+      });
+      // The store projects oldest first. Newer explicit membership takes ownership of cards;
+      // older records remain as read-only summaries instead of duplicating actions.
+      history.forEach(function(batch, index) {
+        if (!batch?.operationId || batch.operationId === liveBatch?.operationId || latestRecord[batch.operationId] !== index) return;
+        addGroup(batch, 'history');
+      });
+      addGroup(liveBatch, 'operation');
+      if (state.approvalMode === 'ask' && !isDraftRunBatchActive(liveBatch)) {
+        (Array.isArray(state.draftRunBatchSnapshots) ? state.draftRunBatchSnapshots : []).forEach(function(batch) {
+          addGroup(batch, 'snapshot');
+        });
+      }
+      var owners = Object.create(null);
+      groups.forEach(function(group) {
+        group.originalRuns.forEach(function(run) { owners[run.id] = group; });
+      });
+      groups.forEach(function(group) {
+        group.runs = group.originalRuns.filter(function(run) { return owners[run.id] === group; });
+        group.movedCount = group.originalRuns.length - group.runs.length;
+        delete group.originalRuns;
+      });
+      var items = groups.concat(runs.filter(function(run) { return !owners[run.id]; }).map(function(run) {
+        var messageId = String(run.messageId || '');
+        var message = messagesById[messageId];
+        return { draftRun: run, order: runOrder[run.id], messageId: message?.role === 'assistant' && !message.isStreaming ? messageId : '' };
+      }));
+      items.sort(function(a, b) { return a.order - b.order; });
+      items.forEach(function(item) {
+        if (item.messageId) {
+          if (!byMessageId[item.messageId]) byMessageId[item.messageId] = [];
+          byMessageId[item.messageId].push(item);
+        } else unlinked.push(item);
       });
       return { byMessageId: byMessageId, unlinked: unlinked };
+    }
+
+    function isDraftRunBatchActive(batch) {
+      return Boolean(batch && (!state.activeSessionId || batch.sessionId === state.activeSessionId)
+        && ['queued', 'running', 'waiting', 'continuing'].includes(batch.phase));
+    }
+
+    function getDraftRunBatchMembers(batch, runsById) {
+      return batch.entries.map(function(entry) {
+        var run = runsById[String(entry.draftRunId)];
+        return run?.sessionId === batch.sessionId && run?.agentRunId === batch.agentRunId
+          && run?.specHash === entry.specHash ? run : null;
+      }).filter(Boolean);
+    }
+
+    function renderDraftRunItems(container, items) {
+      (Array.isArray(items) ? items : []).forEach(function(item) {
+        container.append(createDraftRunTimelineItem(item));
+      });
+    }
+
+    function createDraftRunTimelineItem(item) {
+      if (item.draftRun) return createDraftRunCard(item.draftRun);
+      var group = document.createElement('section');
+      group.className = 'draft-run-batch-group';
+      group.dataset.batchKind = item.kind;
+      if (item.operationId) group.dataset.operationId = String(item.operationId);
+      if (item.snapshotId) group.dataset.batchSnapshotId = String(item.snapshotId);
+      var header = document.createElement('div');
+      header.className = 'draft-run-batch';
+      appendDraftRunBatchControls(header, item);
+      var members = document.createElement('div');
+      members.className = 'draft-run-batch-members';
+      item.runs.forEach(function(run) { members.append(createDraftRunCard(run)); });
+      group.append(header, members);
+      return group;
     }
 
     function createHistoricalChangeSet(summary, messageId) {
@@ -3320,9 +3465,7 @@ export function getScript(): string {
       actionable.forEach(function(changeSet) {
         unlinkedChangeSetList.append(createChangeSetCard(changeSet));
       });
-      runItems.forEach(function(draftRun) {
-        unlinkedChangeSetList.append(createDraftRunCard(draftRun));
-      });
+      renderDraftRunItems(unlinkedChangeSetList, runItems);
     }
 
     function createDraftRunCard(draftRun) {
@@ -3331,7 +3474,6 @@ export function getScript(): string {
       var card = document.createElement('section');
       card.className = 'draft-run-card draft-run-' + statusValue;
       card.dataset.draftRunId = String(draftRun.id || '');
-      appendDraftRunBatchControls(card, draftRun);
 
       var header = document.createElement('div');
       header.className = 'draft-run-header';
@@ -3409,30 +3551,23 @@ export function getScript(): string {
       return card;
     }
 
-    function appendDraftRunBatchControls(card, draftRun) {
-      var batch = state.draftRunBatch;
-      var ownBatch = batch?.sessionId === draftRun.sessionId && batch?.agentRunId === draftRun.agentRunId;
-      var active = ownBatch && ['queued', 'running', 'waiting', 'continuing'].includes(batch.phase);
-      var progress = ownBatch && batch.entries?.[0]?.draftRunId === draftRun.id;
-      var snapshot = state.approvalMode === 'ask' && !active
-        ? (state.draftRunBatchSnapshots || []).find(function(item) {
-            if (item.sessionId !== draftRun.sessionId || item.agentRunId !== draftRun.agentRunId
-              || item.entries?.[0]?.draftRunId !== draftRun.id || item.entries.length < 2) return false;
-            var pending = (state.draftRuns || []).filter(function(run) {
-              return run.sessionId === item.sessionId && run.agentRunId === item.agentRunId && run.status === 'pending';
-            });
-            return pending.length === item.entries.length && pending.every(function(run, index) {
-              return run.id === item.entries[index].draftRunId && run.specHash === item.entries[index].specHash;
-            });
-          }) : null;
-      if (!progress && !snapshot) return;
-      var region = document.createElement('div');
-      region.className = 'draft-run-batch';
-      if (progress) {
+    function appendDraftRunBatchControls(region, item) {
+      var batch = item.batch;
+      var snapshot = item.kind === 'snapshot' ? batch : null;
+      var active = item.kind === 'operation' && isDraftRunBatchActive(batch);
+      var draftRun = item.runs[0] || { id: batch.entries[0].draftRunId };
+      var title = document.createElement('div');
+      title.className = 'draft-run-batch-title';
+      title.textContent = t(snapshot ? 'draftRunBatchCandidateTitle' : 'draftRunBatchApprovedTitle', { count: item.originalCount });
+      region.append(title);
+      if (!snapshot) {
         var status = document.createElement('div');
+        status.className = 'draft-run-batch-status';
         status.setAttribute('role', 'status');
         status.setAttribute('aria-live', 'polite');
-        status.textContent = t('draftRunBatch_' + batch.phase, {
+        var phase = item.kind === 'history' && isDraftRunBatchActive(batch) ? 'interrupted' : batch.phase;
+        if (!['queued', 'running', 'waiting', 'continuing', 'completed', 'failed', 'cancelled', 'interrupted'].includes(phase)) phase = 'interrupted';
+        status.textContent = t('draftRunBatch_' + phase, {
           index: batch.currentIndex, count: batch.entries.length, remaining: batch.remaining,
           command: batch.currentCommand || '', reason: batch.reason || t('draftRunBatchWaitHandoff'),
           location: batch.failureStage === 'continuation' ? t('draftRunBatchFailureContinuation')
@@ -3443,15 +3578,15 @@ export function getScript(): string {
         if (active) {
           var stop = createDraftRunActionButton(t('draftRunBatchStop'), 'cancelDraftRunBatch', draftRun, true);
           stop.dataset.operationId = batch.operationId;
+          if (batch.snapshotId) stop.dataset.batchSnapshotId = batch.snapshotId;
           region.append(stop);
         }
       }
       if (snapshot) {
         var approve = createDraftRunActionButton(t('draftRunBatchApprove', { count: snapshot.entries.length }), 'approveDraftRunBatch', draftRun, false);
         approve.dataset.batchSnapshot = JSON.stringify(snapshot);
-        var unauthorized = snapshot.entries.map(function(entry) {
-          return state.draftRuns.find(function(run) { return run.id === entry.draftRunId; });
-        }).filter(function(run) {
+        approve.dataset.batchSnapshotId = snapshot.snapshotId;
+        var unauthorized = item.runs.filter(function(run) {
           return run?.spec?.externalCwd && !(state.authorizedExternalReferenceUris || []).includes(run.spec.cwdUri);
         });
         approve.disabled = approve.disabled || Boolean(pendingDraftRunBatchSnapshot) || unauthorized.length > 0;
@@ -3461,7 +3596,13 @@ export function getScript(): string {
           ? ' ' + t('draftRunBatchAuthorize', { commands: unauthorized.map(function(run) { return run.spec.executable + ' (' + run.spec.cwdLabel + ')'; }).join(', ') }) : '');
         region.append(approve, hint);
       }
-      card.append(region);
+      if (item.missingCount || item.movedCount) {
+        var notice = document.createElement('div');
+        notice.className = 'draft-run-batch-hint';
+        notice.textContent = [item.missingCount ? t('draftRunBatchMissingMembers', { count: item.missingCount }) : '',
+          item.movedCount ? t('draftRunBatchMovedMembers', { count: item.movedCount }) : ''].filter(Boolean).join(' ');
+        region.append(notice);
+      }
     }
 
     function appendDraftRunActions(container, draftRun) {
@@ -4026,9 +4167,7 @@ export function getScript(): string {
             body.append(createChangeSetCard(changeSet));
           });
           var messageDraftRuns = draftRunProjection.byMessageId[String(message.id)] || [];
-          messageDraftRuns.forEach(function(draftRun) {
-            body.append(createDraftRunCard(draftRun));
-          });
+          renderDraftRunItems(body, messageDraftRuns);
         }
 
         item.append(body);

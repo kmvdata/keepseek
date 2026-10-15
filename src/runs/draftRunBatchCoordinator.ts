@@ -3,7 +3,7 @@ import type { DraftRun, DraftRunBatchSnapshot, DraftRunBatchState } from '../sha
 import type { DraftRunStore } from './draftRunStore';
 
 type BatchStore = Pick<DraftRunStore, 'get' | 'toWebviewState' | 'flush' | 'approveAndRun'
-  | 'validateApprovalBoundary' | 'cancelAutoContinuations'>;
+  | 'validateApprovalBoundary' | 'cancelAutoContinuations' | 'recordBatchDisplay'>;
 
 /** One finite user-click authorization, with an independent once-only continuation. */
 export class DraftRunBatchCoordinator {
@@ -11,6 +11,11 @@ export class DraftRunBatchCoordinator {
   private operation?: { state: DraftRunBatchState; controller: AbortController };
 
   public constructor(private readonly store: BatchStore, private readonly changed: () => void = () => {}) {}
+
+  private notifyChanged(): void {
+    if (this.operation) this.store.recordBatchDisplay(this.operation.state);
+    this.changed();
+  }
 
   public get state(): DraftRunBatchState | undefined {
     return this.operation ? structuredClone(this.operation.state) : undefined;
@@ -68,6 +73,7 @@ export class DraftRunBatchCoordinator {
       phase: 'queued', completed: 0, currentIndex: 0, remaining: offer.entries.length
     };
     this.operation = { state, controller: new AbortController() };
+    this.store.recordBatchDisplay(state);
     // Retire old single-command intentions without touching history or results.
     this.store.cancelAutoContinuations(context.sessionId);
     return state.operationId;
@@ -90,7 +96,7 @@ export class DraftRunBatchCoordinator {
     op.controller.abort();
     op.state.phase = 'cancelled';
     op.state.reason = undefined;
-    this.changed();
+    this.notifyChanged();
   }
 
   public async execute(operationId: string, input: {
@@ -125,7 +131,7 @@ export class DraftRunBatchCoordinator {
         op.state.remaining = op.state.entries.length - index - 1;
         op.state.currentCommand = run.spec.executable;
         input.onCurrent(run);
-        this.changed();
+        this.notifyChanged();
         assertValid();
         const result = await this.store.approveAndRun(entry.draftRunId, input.authorizedUris, {
           signal: op.controller.signal, expectedSpecHash: entry.specHash,
@@ -136,7 +142,7 @@ export class DraftRunBatchCoordinator {
         if (!result || result.status !== 'done') throw new Error(result?.error ?? `Command ${index + 1} did not succeed.`);
         op.state.completed++;
         input.onCurrent(undefined);
-        this.changed();
+        this.notifyChanged();
       }
       assertValid();
       op.state.phase = 'waiting';
@@ -150,14 +156,14 @@ export class DraftRunBatchCoordinator {
     } finally {
       op.state.remaining = op.state.entries.filter((entry) => this.store.get(entry.draftRunId)?.status === 'pending').length;
       input.onCurrent(undefined);
-      this.changed();
+      this.notifyChanged();
     }
   }
 
   public wait(reason: string): void {
     if (this.operation?.state.phase !== 'waiting' || this.operation.state.reason === reason) return;
     this.operation.state.reason = reason;
-    this.changed();
+    this.notifyChanged();
   }
 
   /** Claim synchronously; duplicate timers/state pushes cannot dispatch again. */
@@ -169,6 +175,7 @@ export class DraftRunBatchCoordinator {
     const op = this.operation;
     if (!op || op.state.phase !== 'waiting') return;
     op.state.phase = 'continuing';
+    this.notifyChanged();
     try {
       await this.store.flush();
       if (!this.isValid(op.state.operationId)) return;
@@ -192,6 +199,6 @@ export class DraftRunBatchCoordinator {
         op.state.reason = error instanceof Error ? error.message : String(error);
         op.controller.abort();
       }
-    } finally { this.changed(); }
+    } finally { this.notifyChanged(); }
   }
 }

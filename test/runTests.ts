@@ -33,6 +33,7 @@ import './draftRunRisk.test';
 import './draftRunStore.test';
 import './executionMode.test';
 import './draftRunBatch.test';
+import './draftRunBatchDisplay.test';
 import './fileReference.test';
 import './fileReferenceOpener.test';
 import './gitTools.test';
