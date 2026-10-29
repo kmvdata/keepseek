@@ -57,6 +57,15 @@ export const DEFAULT_DRAFT_RUN_TIMEOUT_MS = 120_000;
 export const DEFAULT_DRAFT_RUN_MAX_TRANSCRIPT_BYTES = 131_072;
 export const DEFAULT_MAX_REQUEST_RETRIES = 5;
 export const DEFAULT_REQUEST_RETRY_BASE_MS = 1_000;
+export const DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS = 3_600;
+export const MODEL_REQUEST_TIMEOUT_PRESETS = [
+  { seconds: 300, labelKey: 'requestTimeout5Minutes', label: '5 分钟' },
+  { seconds: 900, labelKey: 'requestTimeout15Minutes', label: '15 分钟' },
+  { seconds: 3_600, labelKey: 'requestTimeout1Hour', label: '1 小时' },
+  { seconds: 7_200, labelKey: 'requestTimeout2Hours', label: '2 小时' },
+  { seconds: 28_800, labelKey: 'requestTimeout8Hours', label: '8 小时' },
+  { seconds: 86_400, labelKey: 'requestTimeout24Hours', label: '24 小时' }
+] as const;
 export const DEFAULT_SELECTED_MODEL_ID = '';
 export const DEFAULT_SELECTED_SOURCE_ID = '';
 export const DEFAULT_HISTORY_RETENTION_DAYS = 7;
@@ -495,8 +504,23 @@ export function getConfiguredAgentMaxCost(): number {
   return normalizeCostLimit(vscode.workspace.getConfiguration('keepseek').get('agent.maxCost', DEFAULT_AGENT_MAX_COST));
 }
 
-export function getConfiguredStreamIdleTimeoutMs(): number {
-  return Math.min(2_147_483_647, normalizeDuration(vscode.workspace.getConfiguration('keepseek').get('agent.streamIdleTimeoutMs', 0)));
+export function getConfiguredModelRequestTimeoutMs(): number {
+  const config = vscode.workspace.getConfiguration('keepseek');
+  // One user-level policy for every source/model. Never recover a timeout from
+  // a model profile, session checkpoint, or workspace-specific override.
+  const inspected = typeof config.inspect === 'function'
+    ? config.inspect<number>('modelRequestTimeoutSeconds')
+    : undefined;
+  const configured = inspected
+    ? inspected.globalValue ?? inspected.defaultValue
+    : config.get<number>('modelRequestTimeoutSeconds', DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS);
+  // Legacy arbitrary values fall back to the shared default without rewriting
+  // user settings during reads. Only the six presets can reach the runtime.
+  return (isModelRequestTimeoutPreset(configured) ? configured : DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS) * 1_000;
+}
+
+export function isModelRequestTimeoutPreset(value: unknown): value is number {
+  return MODEL_REQUEST_TIMEOUT_PRESETS.some((preset) => preset.seconds === value);
 }
 
 export function getConfiguredBackgroundMaxDurationMs(): number {

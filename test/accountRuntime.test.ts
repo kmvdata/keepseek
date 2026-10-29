@@ -8,6 +8,7 @@ import { ModelSourceStore } from '../src/accounts/accountStore';
 import type { ModelSourceConfigSnapshot, ModelSourceProvider } from '../src/accounts/types';
 import { HistoryCompressor } from '../src/agent/historyCompressor';
 import { AgentRunner } from '../src/agent/runner';
+import { requestApprovalReviewText } from '../src/approvals/oneShotTextRequest';
 import { ToolResultAdmissionController } from '../src/agent/toolResultAdmission';
 import type {
   DeepSeekFunctionTool,
@@ -57,7 +58,6 @@ interface SummaryInvoker {
     model: AgentRequest['model'];
     messages: DeepSeekMessage[];
     maxTokens: number;
-    timeoutMs: number;
     language: AgentRequest['language'];
     usageSource: 'summary';
     sourceConfig?: ModelSourceConfigSnapshot;
@@ -95,6 +95,46 @@ interface CapturedRequest {
   body: string;
   authorization: string | undefined;
 }
+
+test('summary and reviewer requests share the default timeout regardless of source and model', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const lane of ['summary', 'reviewer'] as const) {
+      let signal: AbortSignal | undefined;
+      let dispatched!: () => void;
+      const started = new Promise<void>((resolve) => { dispatched = resolve; });
+      let complete!: (response: Response) => void;
+      globalThis.fetch = (async (_url, init) => {
+        signal = init?.signal ?? undefined;
+        dispatched();
+        return new Promise<Response>((resolve, reject) => {
+          complete = resolve;
+          signal?.addEventListener('abort', () => reject(signal?.reason), { once: true });
+        });
+      }) as typeof fetch;
+      const sourceConfig: ModelSourceConfigSnapshot = {
+        sourceId: lane, provider: 'openai-compatible', apiKey: 'test-key',
+        baseUrl: `https://${lane}.example/v1`, supportsBilling: false
+      };
+      const model = { id: `${lane}-model`, label: lane, provider: 'openai-compatible' };
+      const pending = lane === 'summary'
+        ? (new HistoryCompressor() as unknown as SummaryInvoker).completeSummary({
+          model, messages: [{ role: 'user', content: 'summarize' }], maxTokens: 100,
+          language: 'en', usageSource: 'summary', sourceConfig
+        }).then((result) => result.content)
+        : requestApprovalReviewText({ model, sourceConfig, language: 'en', systemPrompt: 'review', userPrompt: 'draft' });
+      await started;
+      t.mock.timers.tick(120_001);
+      assert.equal(signal?.aborted, false, `${lane} must not retain its old fixed timeout`);
+      complete(new Response('data: ' + JSON.stringify({ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] })
+        + '\n\ndata: [DONE]\n\n'));
+      assert.equal(await pending, 'ok');
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 /** 替换全局 fetch 捕获上游请求，返回一段固定 SSE 流；返回恢复函数。 */
 function mockFetchCapturing(
@@ -141,8 +181,7 @@ const BASE_COMPRESSION: ContextCompressionSettings = {
   toolResultSnipRatio: 0.5,
   triggerRatio: 0.8,
   forceRatio: 0.92,
-  summaryBudgetTokens: 1_000,
-  summaryRequestTimeoutMs: 1_000
+  summaryBudgetTokens: 1_000
 };
 
 const TEST_TOOL: DeepSeekFunctionTool = {
@@ -400,7 +439,6 @@ test('context summaries resolve the selected source and omit DeepSeek-only field
         },
         messages: [{ role: 'user', content: 'summarize' }],
         maxTokens: 100,
-        timeoutMs: 1_000,
         language: 'en',
         usageSource: 'summary'
       });
@@ -440,7 +478,6 @@ test('context summaries use the same immutable per-run source snapshot', async (
       },
       messages: [{ role: 'user', content: 'summarize' }],
       maxTokens: 100,
-      timeoutMs: 1_000,
       language: 'en',
       usageSource: 'summary',
       sourceConfig

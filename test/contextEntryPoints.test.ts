@@ -9,6 +9,83 @@ import { getStyles } from '../src/webview/styles';
 import { getTemplate } from '../src/webview/template';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 
+test('header timeout dropdown offers exactly six presets with a one-hour default in both languages', async () => {
+  const template = getTemplate();
+  const select = template.match(/<select id="settingsRequestTimeoutValue"[^>]*>([\s\S]*?)<\/select>/u)?.[1] ?? '';
+  const options = [...select.matchAll(/<option value="(\d+)" data-i18n="([^"]+)"( selected)?>([^<]+)<\/option>/gu)];
+  assert.deepEqual(options.map((option) => Number(option[1])), [300, 900, 3600, 7200, 28800, 86400]);
+  assert.deepEqual(options.filter((option) => option[3]).map((option) => option[1]), ['3600']);
+  assert.deepEqual(options.map((option) => option[4]), ['5 分钟', '15 分钟', '1 小时', '2 小时', '8 小时', '24 小时']);
+  assert.deepEqual(options.map((option) => WEBVIEW_TRANSLATIONS.en[option[2]]),
+    ['5 minutes', '15 minutes', '1 hour', '2 hours', '8 hours', '24 hours']);
+  assert.match(template, /<label for="settingsRequestTimeoutValue"/u);
+  const manifest = JSON.parse(await readFile(path.resolve(process.cwd(), 'package.json'), 'utf8'));
+  const setting = manifest.contributes.configuration.properties['keepseek.modelRequestTimeoutSeconds'];
+  assert.deepEqual(setting.enum, [300, 900, 3600, 7200, 28800, 86400]);
+  assert.equal(setting.default, 3600);
+  assert.equal(setting.scope, 'application');
+});
+
+test('timeout dropdown saves in place, prevents overlapping saves and restores the host value on completion', () => {
+  const script = getScript();
+  const binding = script.slice(script.indexOf('    if (settingsRequestTimeoutValue) {'),
+    script.indexOf('    if (settingsHistoryMenuItem) {'));
+  const render = script.match(/      if \(settingsRequestTimeoutValue\) \{[\s\S]*?\n      \}/u)?.[0];
+  const result = script.match(/      if \(message.type === 'requestTimeoutSettingsResult'\) \{([\s\S]*?)\n      \} else if/u)?.[1];
+  assert.ok(render);
+  assert.ok(result);
+  const harness = new Function(`
+    const requestTimeoutPresets = [300, 900, 3600, 7200, 28800, 86400];
+    const state = { modelRequestTimeoutSeconds: 3600, isBusy: false };
+    let pendingModelRequestTimeoutSeconds = null;
+    let pendingModelRequestTimeoutFocus = false;
+    const settingsMenuOpen = true;
+    const sent = [], handlers = {};
+    const vscode = { postMessage: message => sent.push(message) };
+    const settingsRequestTimeoutValue = { value: '3600', disabled: false,
+      focus: () => { document.activeElement = settingsRequestTimeoutValue; },
+      addEventListener: (event, handler) => { handlers[event] = handler; } };
+    const document = { body: {}, activeElement: settingsRequestTimeoutValue };
+    function renderSettingsControls() { ${render} }
+    ${binding}
+    return { sent, state, document, select: settingsRequestTimeoutValue,
+      change: value => {
+        settingsRequestTimeoutValue.value = value;
+        handlers.change({ stopPropagation() {} });
+        if (settingsRequestTimeoutValue.disabled) document.activeElement = document.body;
+      },
+      acknowledge: seconds => { const message = { seconds }; ${result} }
+    };
+  `)() as {
+    sent: unknown[]; state: { isBusy: boolean }; document: { activeElement: unknown };
+    select: { value: string; disabled: boolean };
+    change(value: string): void; acknowledge(seconds: number): void;
+  };
+  harness.change('3600');
+  harness.change('600');
+  assert.equal(harness.sent.length, 0);
+  assert.equal(harness.select.value, '3600');
+  harness.change('7200');
+  assert.deepEqual(harness.sent, [{ type: 'setModelRequestTimeout', seconds: 7200 }]);
+  assert.equal(harness.select.disabled, true);
+  harness.change('86400');
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.select.value, '7200');
+  harness.acknowledge(7200);
+  assert.equal(harness.select.disabled, false);
+  assert.equal(harness.document.activeElement, harness.select, 'restore focus after the save');
+  harness.change('28800');
+  const otherControl = {};
+  harness.document.activeElement = otherControl;
+  harness.acknowledge(7200); // A failed save restores the last persisted choice.
+  assert.equal(harness.select.value, '7200');
+  assert.equal(harness.select.disabled, false);
+  assert.equal(harness.document.activeElement, otherControl, 'do not steal focus after the user moves away');
+  harness.state.isBusy = true;
+  harness.change('300');
+  assert.equal(harness.sent.length, 2);
+});
+
 test('contributes concise English editor, Explorer, and Windows-friendly terminal context commands', async () => {
   const packagePath = path.resolve(process.cwd(), 'package.json');
   const packageJson = JSON.parse(await readFile(packagePath, 'utf8')) as {

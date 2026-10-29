@@ -59,6 +59,7 @@ export type WebviewMessage =
   | { type: 'stopBackgroundRun' }
   | { type: 'openApiSettings' }
   | { type: 'openHistorySettings' }
+  | { type: 'setModelRequestTimeout'; seconds: number }
   | {
       type: 'addModel';
       sourceId?: string;

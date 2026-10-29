@@ -20,6 +20,7 @@ export type ProviderClientFailureKind =
   | 'resource_limit'
   | 'external_abort'
   | 'run_time_limit'
+  | 'request_timeout'
   | 'stream_idle_timeout';
 
 export interface ProviderClientConfig {

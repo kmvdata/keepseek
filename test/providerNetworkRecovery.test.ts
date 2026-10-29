@@ -10,6 +10,7 @@ import { isRecoverableNetworkError, parseRetryAfter } from '../src/agent/provide
 import { formatUnknownError, createNoopInteractionTrace } from '../src/agent/logging/interactionTrace';
 import type { ProviderClientConfig, ProviderClientResult, ProviderClientRequest } from '../src/agent/providers/types';
 import type { AgentActivityInput } from '../src/shared/types';
+import * as vscode from './stubs/vscode';
 
 const config: ProviderClientConfig = { apiKey: 'key', baseUrl: 'https://example.invalid/v1',
   streamIdleTimeoutMs: 0, maxRequestRetries: 5, requestRetryBaseMs: 0 };
@@ -37,6 +38,105 @@ function interrupted(text: string): Response {
     else target.error(networkError());
   } }), { status: 200 });
 }
+
+test('all three protocols wait past 120 seconds and stop at the shared one-hour deadline without replay', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  for (const provider of [client(), new OpenAiResponsesClient(), new AnthropicMessagesClient()]) {
+    let count = 0;
+    let signal: AbortSignal | undefined;
+    let dispatched!: () => void;
+    const started = new Promise<void>((resolve) => { dispatched = resolve; });
+    await usingFetch((async (_url, init) => {
+      count++;
+      signal = init?.signal ?? undefined;
+      dispatched();
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(signal?.reason), { once: true });
+      });
+    }) as typeof fetch, async () => {
+      const pending = provider.createModelResponse(config, request());
+      await started;
+      t.mock.timers.tick(120_001);
+      assert.equal(signal?.aborted, false, 'legacy model/header deadline must not interrupt');
+      t.mock.timers.tick(3_600_000 - 120_002);
+      assert.equal(signal?.aborted, false);
+      t.mock.timers.tick(1);
+      const result = await pending;
+      assert.equal(result.failureKind, 'request_timeout');
+      assert.equal(result.retryable, false);
+      assert.equal(result.attemptCount, 1);
+      assert.equal(count, 1);
+      assert.match(result.error!, /3600 seconds/u);
+    });
+  }
+});
+
+test('configured timeout includes active streaming, freezes in flight and changes on the next request', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const originalConfig = vscode.workspace.getConfiguration;
+  let seconds = 300;
+  vscode.workspace.getConfiguration = () => ({
+    ...originalConfig(),
+    get: <T>(key: string, fallback: T): T => key === 'modelRequestTimeoutSeconds' ? seconds as T : fallback
+  });
+  try {
+    for (const expectedMs of [300_000, 86_400_000]) {
+      let stream!: ReadableStreamDefaultController<Uint8Array>;
+      let signal: AbortSignal | undefined;
+      let outputReady!: () => void;
+      const output = new Promise<void>((resolve) => { outputReady = resolve; });
+      await usingFetch((async (_url, init) => {
+        signal = init?.signal ?? undefined;
+        return new Response(new ReadableStream<Uint8Array>({ start(target) {
+          stream = target;
+          target.enqueue(encoded(chunk('partial'.repeat(10))));
+          signal?.addEventListener('abort', () => target.error(signal?.reason), { once: true });
+        } }));
+      }) as typeof fetch, async () => {
+        const pending = client().createModelResponse(config, { ...request(), callbacks: { onDelta: () => outputReady() } });
+        await output;
+        seconds = 86_400;
+        t.mock.timers.tick(expectedMs - 1);
+        assert.equal(signal?.aborted, false);
+        const more = new Promise<void>((resolve) => { outputReady = resolve; });
+        stream.enqueue(encoded(chunk('more'.repeat(20))));
+        await more;
+        t.mock.timers.tick(1);
+        const result = await pending;
+        assert.equal(result.failureKind, 'request_timeout');
+        assert.equal(result.attemptCount, 1);
+        assert.equal(result.hadPartialOutput, true);
+        assert.match(result.message?.content ?? '', /partialmore/u);
+      });
+    }
+  } finally {
+    vscode.workspace.getConfiguration = originalConfig;
+  }
+});
+
+test('request timeout leaves cancellation and the task deadline as earlier hard boundaries', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  for (const external of [true, false]) {
+    const controller = new AbortController();
+    let dispatched!: () => void;
+    const started = new Promise<void>((resolve) => { dispatched = resolve; });
+    await usingFetch((async (_url, init) => {
+      dispatched();
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    }) as typeof fetch, async () => {
+      const pending = client().createModelResponse(config, { ...request(), signal: controller.signal,
+        runDeadlineAt: Date.now() + 1000 });
+      await started;
+      if (external) controller.abort();
+      else t.mock.timers.tick(1000);
+      const result = await pending;
+      assert.equal(result.failureKind, external ? 'external_abort' : 'run_time_limit');
+      assert.equal(result.attemptCount, 1);
+    });
+  }
+});
 
 test('reconnects use frozen lane and request bytes, replace partials, and settle each physical attempt', async () => {
   const bodies: unknown[] = []; const urls: unknown[] = []; const keys: unknown[] = [];

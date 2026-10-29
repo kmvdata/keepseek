@@ -103,6 +103,7 @@ import {
   getConfiguredBackgroundMaxToolCalls,
   getConfiguredDebugMode,
   getConfiguredHistoryRetentionDays,
+  getConfiguredModelRequestTimeoutMs,
   getConfiguredMaxFileBytes,
   getConfiguredPromptCacheTtlMs,
   getConfiguredSkillContextBudgetChars,
@@ -125,6 +126,7 @@ import { getHtmlForWebview } from '../webview/html';
 import type { StartupPerformanceTrace } from '../shared/startupPerformance';
 import { ContextUsageEstimateCache, createContextUsageCacheKey } from '../agent/contextUsageCache';
 import { focusView } from './focusView';
+import { saveModelRequestTimeout } from './requestTimeoutSettings';
 import type { DroppedFileReferenceInput, PromptReferenceInput, WebviewMessage } from './webviewMessages';
 import { InteractionTraceLogService } from '../agent/logging/interactionTrace';
 import { applyChangeSetEventToRunDetails } from '../agent/logging/runDetails';
@@ -1095,6 +1097,20 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           type: 'showHistorySettingsDialog',
           historyRetentionDays: getConfiguredHistoryRetentionDays()
         });
+        return;
+      }
+      case 'setModelRequestTimeout': {
+        try {
+          await saveModelRequestTimeout(message.seconds);
+        } catch (error) {
+          vscode.window.showErrorMessage(this.t('requestTimeoutSaveFailed', { message: getErrorMessage(error) }));
+        } finally {
+          this.postToWebview({
+            type: 'requestTimeoutSettingsResult',
+            seconds: getConfiguredModelRequestTimeoutMs() / 1_000
+          });
+          this.postState();
+        }
         return;
       }
       case 'addModel': {
@@ -5867,6 +5883,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         maxFileBytes: getConfiguredMaxFileBytes(),
         historyRetentionDays: getConfiguredHistoryRetentionDays(),
         debugMode: getConfiguredDebugMode(),
+        modelRequestTimeoutSeconds: getConfiguredModelRequestTimeoutMs() / 1_000,
         hasCurrentSessionLog: Boolean(
           activeSession.lastTraceLogUri?.trim()
           || this.sessionTraceLogUris.get(activeSession.id)?.trim()

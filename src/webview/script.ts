@@ -2,6 +2,7 @@ import { getInputScript } from './input/script';
 import { getNewAccountDialogScript } from './input/newAccountDialog';
 import { getRichTextShortcutsScript } from './richTextShortcuts';
 import { WEBVIEW_TRANSLATIONS } from '../shared/i18n';
+import { DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS, MODEL_REQUEST_TIMEOUT_PRESETS } from '../shared/config';
 
 export function getScript(): string {
   return `
@@ -10,10 +11,12 @@ export function getScript(): string {
     const keepseekPluginIconUri = window.keepseekSkillIconUri || '';
     const modelProtocolLogoUris = window.keepseekModelProtocolLogoUris || {};
     const translations = ${JSON.stringify(WEBVIEW_TRANSLATIONS)};
+    const requestTimeoutPresets = ${JSON.stringify(MODEL_REQUEST_TIMEOUT_PRESETS.map((preset) => preset.seconds))};
     const state = {
       models: [],
       selectedSourceId: '',
       selectedModelId: '',
+      modelRequestTimeoutSeconds: ${DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS},
       modelSelection: {
         generation: 0,
         currentRun: null,
@@ -397,6 +400,9 @@ export function getScript(): string {
     const settingsMenu = document.getElementById('settingsMenu');
     const settingsApiKeyMenuItem = document.getElementById('settingsApiKeyMenuItem');
     const settingsHistoryMenuItem = document.getElementById('settingsHistoryMenuItem');
+    const settingsRequestTimeoutValue = document.getElementById('settingsRequestTimeoutValue');
+    let pendingModelRequestTimeoutSeconds = null;
+    let pendingModelRequestTimeoutFocus = false;
     const settingsAboutMenuItem = document.getElementById('settingsAboutMenuItem');
     const settingsAboutVersionValue = document.getElementById('settingsAboutVersionValue');
     const settingsDebugMenuItem = document.getElementById('settingsDebugMenuItem');
@@ -938,6 +944,22 @@ export function getScript(): string {
       });
     }
 
+    if (settingsRequestTimeoutValue) {
+      settingsRequestTimeoutValue.addEventListener('change', function(event) {
+        event.stopPropagation();
+        var seconds = Number(settingsRequestTimeoutValue.value);
+        if (pendingModelRequestTimeoutSeconds !== null || state.isBusy
+          || !requestTimeoutPresets.includes(seconds) || seconds === state.modelRequestTimeoutSeconds) {
+          renderSettingsControls();
+          return;
+        }
+        pendingModelRequestTimeoutSeconds = seconds;
+        pendingModelRequestTimeoutFocus = document.activeElement === settingsRequestTimeoutValue;
+        renderSettingsControls();
+        vscode.postMessage({ type: 'setModelRequestTimeout', seconds: seconds });
+      });
+    }
+
     if (settingsHistoryMenuItem) {
       settingsHistoryMenuItem.addEventListener('click', function(event) {
         event.preventDefault();
@@ -1200,7 +1222,15 @@ export function getScript(): string {
 
     function handleKeepseekHostMessage(event) {
       var message = event.data;
-      if (message.type === 'state' || message.type === 'statePatch') {
+      if (message.type === 'requestTimeoutSettingsResult') {
+        var restoreTimeoutFocus = pendingModelRequestTimeoutFocus && settingsMenuOpen
+          && document.activeElement === document.body;
+        pendingModelRequestTimeoutSeconds = null;
+        pendingModelRequestTimeoutFocus = false;
+        state.modelRequestTimeoutSeconds = message.seconds;
+        renderSettingsControls();
+        if (restoreTimeoutFocus) settingsRequestTimeoutValue.focus();
+      } else if (message.type === 'state' || message.type === 'statePatch') {
         var incomingRevision = Number(message.revision || 0);
         if (incomingRevision && incomingRevision <= lastStateRevision) return;
         if (incomingRevision) lastStateRevision = incomingRevision;
@@ -1514,6 +1544,10 @@ export function getScript(): string {
       }
       if (settingsDebugValue) {
         settingsDebugValue.textContent = t(state.debugMode ? 'on' : 'off');
+      }
+      if (settingsRequestTimeoutValue) {
+        settingsRequestTimeoutValue.value = String(pendingModelRequestTimeoutSeconds ?? state.modelRequestTimeoutSeconds);
+        settingsRequestTimeoutValue.disabled = state.isBusy || pendingModelRequestTimeoutSeconds !== null;
       }
       if (settingsDebugMenuItem) {
         var debugItem = settingsDebugMenuItem.closest('.settings-debug-item');

@@ -35,7 +35,6 @@ export interface ContextCompressionSettings {
   triggerRatio: number;
   forceRatio: number;
   summaryBudgetTokens: number;
-  summaryRequestTimeoutMs: number;
 }
 
 export interface AgentRuntimeProfile {
@@ -93,8 +92,7 @@ const FLASH_PROFILES = {
       toolResultSnipRatio: 0.48,
       triggerRatio: 0.58,
       forceRatio: 0.72,
-      summaryBudgetTokens: 6_000,
-      summaryRequestTimeoutMs: 45_000
+      summaryBudgetTokens: 6_000
     }
   },
   high: {
@@ -105,8 +103,7 @@ const FLASH_PROFILES = {
       toolResultSnipRatio: 0.44,
       triggerRatio: 0.54,
       forceRatio: 0.68,
-      summaryBudgetTokens: 8_000,
-      summaryRequestTimeoutMs: 60_000
+      summaryBudgetTokens: 8_000
     }
   },
   max: {
@@ -117,8 +114,7 @@ const FLASH_PROFILES = {
       toolResultSnipRatio: 0.38,
       triggerRatio: 0.46,
       forceRatio: 0.62,
-      summaryBudgetTokens: 10_000,
-      summaryRequestTimeoutMs: 75_000
+      summaryBudgetTokens: 10_000
     }
   }
 } as const;
@@ -132,8 +128,7 @@ const PRO_PROFILES = {
       toolResultSnipRatio: 0.58,
       triggerRatio: 0.7,
       forceRatio: 0.84,
-      summaryBudgetTokens: 8_000,
-      summaryRequestTimeoutMs: 60_000
+      summaryBudgetTokens: 8_000
     }
   },
   high: {
@@ -144,8 +139,7 @@ const PRO_PROFILES = {
       toolResultSnipRatio: 0.52,
       triggerRatio: 0.62,
       forceRatio: 0.78,
-      summaryBudgetTokens: 12_000,
-      summaryRequestTimeoutMs: 90_000
+      summaryBudgetTokens: 12_000
     }
   },
   max: {
@@ -156,8 +150,7 @@ const PRO_PROFILES = {
       toolResultSnipRatio: 0.45,
       triggerRatio: 0.5,
       forceRatio: 0.7,
-      summaryBudgetTokens: 16_000,
-      summaryRequestTimeoutMs: 120_000
+      summaryBudgetTokens: 16_000
     }
   }
 } as const;
@@ -169,8 +162,7 @@ const GENERIC_PROFILE = {
   contextCompression: {
     keepRecentTurns: 8,
     softCompactRatio: 0.5,
-    toolResultSnipRatio: 0.6,
-    summaryRequestTimeoutMs: 45_000
+    toolResultSnipRatio: 0.6
   }
 } as const;
 

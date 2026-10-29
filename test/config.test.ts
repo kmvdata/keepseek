@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
+import { saveModelRequestTimeout } from '../src/provider/requestTimeoutSettings';
 import {
   getConfiguredAgentSettings,
   getConfiguredAgentContinuationMaxOutputTokens,
@@ -18,6 +19,8 @@ import {
   getConfiguredDraftRunMaxTranscriptBytes,
   getConfiguredDraftRunTimeoutMs,
   getConfiguredModelUsagePricing,
+  getConfiguredModelRequestTimeoutMs,
+  MODEL_REQUEST_TIMEOUT_PRESETS,
   getConfiguredPatchSettings,
   getConfiguredSubagentMaxExecutionMs,
   getConfiguredSubagentHandoffPreviewBytes,
@@ -26,6 +29,61 @@ import {
   normalizeAgentSettings,
   normalizeCompressionThreshold
 } from '../src/shared/config';
+
+test('model timeout accepts only the six shared presets and normalizes legacy values to one hour', () => {
+  assert.equal(getConfiguredModelRequestTimeoutMs(), 3_600_000);
+  assert.deepEqual(MODEL_REQUEST_TIMEOUT_PRESETS.map((preset) => preset.seconds), [300, 900, 3600, 7200, 28800, 86400]);
+  const original = vscode.workspace.getConfiguration;
+  let value: unknown;
+  vscode.workspace.getConfiguration = () => ({
+    ...original(),
+    inspect: () => ({ globalValue: value, workspaceValue: 300, defaultValue: 3600 })
+  });
+  try {
+    for (const seconds of [300, 900, 3600, 7200, 28800, 86400]) {
+      value = seconds;
+      assert.equal(getConfiguredModelRequestTimeoutMs(), seconds * 1000);
+    }
+    for (const invalid of [undefined, null, '7200', true, 120, 0, -1, 5.9, 600, NaN, Infinity, 1e10]) {
+      value = invalid;
+      assert.equal(getConfiguredModelRequestTimeoutMs(), 3_600_000, String(invalid));
+    }
+  } finally {
+    vscode.workspace.getConfiguration = original;
+  }
+});
+
+test('timeout changes save presets globally and reject arbitrary or malformed messages without writes', async () => {
+  const originalConfig = vscode.workspace.getConfiguration;
+  const writes: unknown[][] = [];
+  let saved = 3600;
+  let fail = false;
+  vscode.workspace.getConfiguration = () => ({
+    ...originalConfig(),
+    inspect: () => ({ globalValue: saved }),
+    update: async (...args: unknown[]) => {
+      if (fail) throw new Error('settings unavailable');
+      writes.push(args);
+      saved = args[1] as number;
+    }
+  });
+  try {
+    for (const seconds of [300, 900, 3600, 7200, 28800, 86400]) {
+      assert.equal(await saveModelRequestTimeout(seconds), true);
+      assert.deepEqual(writes.at(-1), ['modelRequestTimeoutSeconds', seconds, vscode.ConfigurationTarget.Global]);
+      assert.equal(getConfiguredModelRequestTimeoutMs(), seconds * 1000);
+    }
+    for (const invalid of [undefined, null, '7200', true, 120, 0, -1, 5.9, 600, NaN, Infinity, 1e10]) {
+      assert.equal(await saveModelRequestTimeout(invalid), false);
+    }
+    assert.equal(writes.length, 6);
+    fail = true;
+    await assert.rejects(saveModelRequestTimeout(7200), /settings unavailable/u);
+    assert.equal(getConfiguredModelRequestTimeoutMs(), 86_400_000);
+  } finally {
+    vscode.workspace.getConfiguration = originalConfig;
+  }
+});
 
 // vscode stub 的 getConfiguration().get() 总是返回 fallback,
 // 因此这些用例覆盖 URL 推导分支(不覆盖 balanceEndpointUrl 配置项)。

@@ -378,6 +378,14 @@ export function getStyles(): string {
       min-height: 42px;
     }
 
+    .settings-timeout-select {
+      width: auto;
+      min-width: 90px;
+      max-width: 120px;
+      flex: 0 0 auto;
+      font-size: 12px;
+    }
+
     .settings-about-menu-row {
       margin-top: 4px;
       border-top: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));

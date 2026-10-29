@@ -242,9 +242,11 @@
           "type": "number", "default": 0, "minimum": 0, "scope": "window",
           "markdownDescription": "Maximum accounted Provider cost per logical Agent task and billing currency, shared with child agents and recovery. 0 = unlimited. A positive value fails closed when the selected source cannot provide priced usage. / 每项逻辑任务、每种计费币种的 Provider 费用上限；子代理与恢复共享，0 不限额。来源不能提供可计费用量时正值配置会安全拒绝请求。"
         },
-        "keepseek.agent.streamIdleTimeoutMs": {
-          "type": "number", "default": 0, "minimum": 0, "maximum": 2147483647, "scope": "window",
-          "markdownDescription": "Opt-in automatic disconnect after no network data, including while waiting for response headers. 0 waits conservatively. Silence does not prove failure. / 显式开启静默断开；0 保守等待，静默不等于失联。"
+        "keepseek.modelRequestTimeoutSeconds": {
+          "type": "integer", "default": 3600, "scope": "application",
+          "enum": [300, 900, 3600, 7200, 28800, 86400],
+          "enumItemLabels": ["5 分钟 / 5 minutes", "15 分钟 / 15 minutes", "1 小时 / 1 hour", "2 小时 / 2 hours", "8 小时 / 8 hours", "24 小时 / 24 hours"],
+          "markdownDescription": "Timeout in seconds for each model request, including response headers and streaming. Shared by all accounts and models, including summaries and approval reviewers. Changes apply to new requests. Task execution limits and cancellation still apply. / 每次模型请求的超时时间（秒），包含等待响应头和流式响应。所有账号、模型、摘要及审批模型共用，修改后对新请求生效；任务执行时限及取消仍然有效。"
         },
         "keepseek.background.maxDurationMs": {
           "type": "number", "default": 0, "minimum": 0, "scope": "window",

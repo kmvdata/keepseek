@@ -1,4 +1,5 @@
 import { AgentRunCallbacks } from '../../shared/types';
+import { getConfiguredModelRequestTimeoutMs } from '../../shared/config';
 import type { KeepseekLanguage } from '../../shared/i18n';
 import { StreamParser } from './streamParser';
 import { isRecoverableNetworkError, parseRetryAfter } from './networkErrors';
@@ -56,7 +57,8 @@ export class OpenAICompatibleClient implements ProviderClient {
     const frozen = {
       url: this.getRequestUrl(frozenConfig.baseUrl),
       headers: Object.freeze(this.buildRequestHeaders(frozenConfig)),
-      body: request.serializedBody ?? JSON.stringify(request.body)
+      body: request.serializedBody ?? JSON.stringify(request.body),
+      timeoutMs: getConfiguredModelRequestTimeoutMs()
     };
     const maxRetries = Math.min(5, Math.max(0, Math.floor(frozenConfig.maxRequestRetries) || 0));
     const initialAttempts = Math.max(0, Math.floor(request.initialAttemptCount
@@ -118,20 +120,20 @@ export class OpenAICompatibleClient implements ProviderClient {
   private async createModelResponseAttempt(
     config: ProviderClientConfig,
     request: ProviderClientRequest,
-    frozen: { url: string; headers: Readonly<Record<string, string>>; body: string },
+    frozen: { url: string; headers: Readonly<Record<string, string>>; body: string; timeoutMs: number },
     localAttempt: number,
     attempt: number
   ): Promise<ClientAttemptResult> {
     const controller = new AbortController();
     let idleTimeout: ReturnType<typeof setTimeout> | undefined;
     let runTimeout: ReturnType<typeof setTimeout> | undefined;
-    let headersTimeout: ReturnType<typeof setTimeout> | undefined;
+    let requestTimeout: ReturnType<typeof setTimeout> | undefined;
     let observedBody: ReadableStream<Uint8Array> | undefined;
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let abortedByStreamIdleTimeout = false;
     let abortedByRunTimeLimit = false;
     let abortedByExternalSignal = false;
-    let abortedByHeadersTimeout = false;
+    let abortedByRequestTimeout = false;
     let hadStreamActivity = false;
     let hadPartialOutput = false;
     let httpComplete = false;
@@ -183,20 +185,20 @@ export class OpenAICompatibleClient implements ProviderClient {
       request.callbacks?.onStatus?.({ base: 'thinking', phase: 'requesting_model' });
       trace?.record({ type: 'upstream_attempt_start', requestId: request.requestId, attempt,
         // Query parameters and URL userinfo may contain credentials.
-        endpoint: this.safeEndpoint(frozen.url), transport: this.transportRuntime() });
+        endpoint: this.safeEndpoint(frozen.url), transport: this.transportRuntime(frozen.timeoutMs) });
       await request.onAttempt?.({ requestId: request.requestId ?? '', attemptIndex: localAttempt,
         startedAt: new Date(startedAt).toISOString() });
       if (request.signal?.aborted) abortByExternalSignal();
       else request.signal?.addEventListener('abort', abortByExternalSignal, { once: true });
       resetStreamIdleTimeout();
       setRunTimeout();
-      // An explicit establishment boundary; it does not act as a stream idle timer.
-      headersTimeout = setTimeout(() => { abortedByHeadersTimeout = true;
-        controller.abort(Object.assign(new Error('Response headers timed out.'), { code: 'KEEPSEEK_HEADERS_TIMEOUT' }));
-      }, 30_000);
+      // The same deadline covers headers and streaming for every protocol/lane.
+      // Network activity must not extend this user-configured request budget.
+      requestTimeout = setTimeout(() => { abortedByRequestTimeout = true;
+        controller.abort(new Error('Model request timed out.'));
+      }, frozen.timeoutMs);
       const response = await fetch(frozen.url, { method: 'POST', headers: frozen.headers,
         body: frozen.body, signal: controller.signal });
-      clearTimeout(headersTimeout); headersTimeout = undefined;
       status = response.status;
       rejectedHttpResponse = !response.ok;
       retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
@@ -242,7 +244,7 @@ export class OpenAICompatibleClient implements ProviderClient {
         }
       });
       // Cancellation and budgets remain hard boundaries even if a terminal was seen.
-      if (abortedByExternalSignal || request.signal?.aborted || abortedByRunTimeLimit || abortedByStreamIdleTimeout) throw new DOMException('Aborted', 'AbortError');
+      if (abortedByExternalSignal || request.signal?.aborted || abortedByRunTimeLimit || abortedByStreamIdleTimeout || abortedByRequestTimeout) throw new DOMException('Aborted', 'AbortError');
       phase = 'finishing';
       trace?.record({ type: 'upstream_attempt_finish', requestId: request.requestId, ok: true,
         finishReason: result.finishReason, usage: result.usage ?? usage, ...diagnostics(),
@@ -263,6 +265,10 @@ export class OpenAICompatibleClient implements ProviderClient {
         failureKind = 'external_abort'; message = language === 'en' ? 'Agent run was stopped.' : 'Agent 推理已中止。';
       } else if (abortedByRunTimeLimit) {
         failureKind = 'run_time_limit'; message = language === 'en' ? 'The agent reached the total run-time limit.' : 'Agent 本次执行达到总时长上限。';
+      } else if (abortedByRequestTimeout) {
+        failureKind = 'request_timeout'; message = language === 'en'
+          ? `${this.displayName} model request timed out after ${frozen.timeoutMs / 1000} seconds.`
+          : `${this.displayName} 模型请求超过 ${frozen.timeoutMs / 1000} 秒，已停止本次请求。`;
       } else if (abortedByStreamIdleTimeout) {
         failureKind = 'stream_idle_timeout'; message = language === 'en'
           ? `${this.displayName} streaming response was idle for ${Math.round(config.streamIdleTimeoutMs / 1000)} seconds.`
@@ -272,7 +278,7 @@ export class OpenAICompatibleClient implements ProviderClient {
         // rejection into a retryable POST.
         retryable = rejectedHttpResponse
           ? [408, 429, 500, 502, 503, 504].includes(status ?? 0)
-          : abortedByHeadersTimeout || isRecoverableNetworkError(error);
+          : isRecoverableNetworkError(error);
         failureKind = rejectedHttpResponse ? 'http'
           : error instanceof ProviderStreamProtocolError ? 'protocol'
             : error instanceof ProviderStreamProviderError ? 'provider'
@@ -291,7 +297,7 @@ export class OpenAICompatibleClient implements ProviderClient {
       request.signal?.removeEventListener('abort', abortByExternalSignal);
       clearStreamIdleTimeout();
       if (runTimeout) clearTimeout(runTimeout);
-      if (headersTimeout) clearTimeout(headersTimeout);
+      if (requestTimeout) clearTimeout(requestTimeout);
       // Natural EOF keeps the healthy socket reusable. Incomplete/failed reads
       // must be aborted and fully cancelled before the next request is dispatched.
       if (!httpComplete) controller.abort();
@@ -348,13 +354,20 @@ export class OpenAICompatibleClient implements ProviderClient {
 
   private async sleepBeforeRetry(delayMs: number, signal?: AbortSignal, runDeadlineAt?: number): Promise<void> {
     if (signal?.aborted) return;
-    const waitMs = Math.min(delayMs, typeof runDeadlineAt === 'number' ? Math.max(0, runDeadlineAt - Date.now()) : delayMs);
-    if (waitMs <= 0) return;
+    const wakeAt = Math.min(Date.now() + delayMs, runDeadlineAt ?? Infinity);
+    if (wakeAt <= Date.now()) return;
     await new Promise<void>((resolve) => {
+      let timer: ReturnType<typeof setTimeout>;
       const finish = () => { clearTimeout(timer); signal?.removeEventListener('abort', finish); resolve(); };
-      const timer = setTimeout(finish, waitMs);
+      const wait = () => {
+        const remainingMs = wakeAt - Date.now();
+        // Timers can wake slightly early. Never turn a bounded backoff into a
+        // fresh POST just before the logical task deadline.
+        if (signal?.aborted || remainingMs <= 0) finish();
+        else timer = setTimeout(wait, Math.min(remainingMs, 2_147_483_647));
+      };
       signal?.addEventListener('abort', finish, { once: true });
-      if (signal?.aborted) finish();
+      wait();
     });
   }
 
@@ -363,11 +376,11 @@ export class OpenAICompatibleClient implements ProviderClient {
     return url.toString();
   }
 
-  private transportRuntime(): Record<string, unknown> {
+  private transportRuntime(requestTimeoutMs: number): Record<string, unknown> {
     const runtime = globalThis as typeof globalThis & { __vscodeOriginalFetch?: unknown; __vscodePatchedFetch?: unknown };
     return { implementation: runtime.__vscodeOriginalFetch ? 'vscode_fetch' : 'runtime_fetch',
       nodeVersion: process.version, undiciVersion: (process.versions as Record<string, string | undefined>).undici,
-      headersTimeoutMs: 30_000, errorBodyTimeoutMs: 2_000, bodyIdleTimeoutManagedByRuntime: true };
+      requestTimeoutMs, errorBodyTimeoutMs: 2_000, bodyIdleTimeoutManagedByRuntime: true };
   }
 
   private formatStreamingError(error: unknown, language: KeepseekLanguage, phase: string): string {

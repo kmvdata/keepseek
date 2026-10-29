@@ -1,5 +1,6 @@
 import { getInputTemplate } from './input/template';
 import type { KeepseekExtensionInfo } from '../shared/types';
+import { DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS, MODEL_REQUEST_TIMEOUT_PRESETS } from '../shared/config';
 
 export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version'>): string {
   const versionLabel = formatVersionLabel(extensionInfo?.version);
@@ -40,6 +41,15 @@ export function getTemplate(extensionInfo?: Pick<KeepseekExtensionInfo, 'version
           <span class="command-row-description" data-i18n="settingsApiKeyDescription">API Key 和 Base URL</span>
         </span>
       </button>
+      <div id="settingsRequestTimeoutMenuItem" class="command-row settings-menu-row">
+        <label for="settingsRequestTimeoutValue" class="command-row-main">
+          <span class="command-row-title" data-i18n="settingsRequestTimeoutTitle">模型请求超时</span>
+          <span class="command-row-description" data-i18n="settingsRequestTimeoutDescription">所有账号和模型共用</span>
+        </label>
+        <select id="settingsRequestTimeoutValue" class="settings-timeout-select">
+          ${MODEL_REQUEST_TIMEOUT_PRESETS.map((preset) => `<option value="${preset.seconds}" data-i18n="${preset.labelKey}"${preset.seconds === DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS ? ' selected' : ''}>${preset.label}</option>`).join('\n          ')}
+        </select>
+      </div>
       <button id="settingsHistoryMenuItem" type="button" class="command-row settings-menu-row">
         <span class="command-row-main">
           <span class="command-row-title" data-i18n="settingsHistoryMenuTitle">历史会话</span>

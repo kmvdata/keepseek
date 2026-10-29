@@ -15,7 +15,6 @@ import {
 import { createProviderCacheObservation } from '../agent/cacheObservation';
 
 export const APPROVAL_REVIEW_MAX_OUTPUT_TOKENS = 512;
-export const APPROVAL_REVIEW_TIMEOUT_MS = 20_000;
 
 export function buildApprovalReviewerProviderBody(input: {
   modelId: string;
@@ -82,8 +81,6 @@ export async function requestApprovalReviewText(input: {
       : '审批模型的凭据无效或缺失。');
   }
   const requestId = `approval_${randomUUID()}`;
-  const deadlineAt = Date.now() + APPROVAL_REVIEW_TIMEOUT_MS;
-  const abort = createDeadlineSignal(input.signal, APPROVAL_REVIEW_TIMEOUT_MS);
   const protocol = input.sourceConfig.provider === 'openai-responses'
     ? 'openai-responses'
     : input.sourceConfig.provider === 'anthropic-compatible'
@@ -122,85 +119,61 @@ export async function requestApprovalReviewText(input: {
     // logical request are comparable.
     previous: attemptIndex > 0 ? attemptCacheObservations[0] : undefined
   });
-  try {
-    const response = await createProviderClient(input.sourceConfig.provider).createModelResponse({
-      apiKey: input.sourceConfig.apiKey,
-      baseUrl: input.sourceConfig.baseUrl,
-      streamIdleTimeoutMs: APPROVAL_REVIEW_TIMEOUT_MS,
-      maxRequestRetries: 0,
-      requestRetryBaseMs: 250
-    }, {
-      body,
-      language: input.language,
-      signal: abort.signal,
-      runDeadlineAt: deadlineAt,
-      requestId,
-      onAttempt: ({ attemptIndex, startedAt }) => {
-        attemptSnapshots[attemptIndex] = createSnapshot(startedAt);
-        attemptCacheObservations[attemptIndex] = createObservation(attemptIndex);
-      }
-    });
-    while (attemptSnapshots.length < (response.attemptCount ?? 1)) {
-      const attemptIndex = attemptSnapshots.length;
-      attemptSnapshots.push(attemptSnapshots.length === 0
-        ? fallbackSnapshot
-        : createSnapshot(new Date().toISOString()));
+  const response = await createProviderClient(input.sourceConfig.provider).createModelResponse({
+    apiKey: input.sourceConfig.apiKey,
+    baseUrl: input.sourceConfig.baseUrl,
+    streamIdleTimeoutMs: 0,
+    maxRequestRetries: 0,
+    requestRetryBaseMs: 250
+  }, {
+    body,
+    language: input.language,
+    signal: input.signal,
+    requestId,
+    onAttempt: ({ attemptIndex, startedAt }) => {
+      attemptSnapshots[attemptIndex] = createSnapshot(startedAt);
       attemptCacheObservations[attemptIndex] = createObservation(attemptIndex);
     }
-    const usage = normalizeDeepSeekUsage(response.usage);
-    const ledgerRecords = createUsageLedgerRecords({
-      requestId,
-      attempts: attemptSnapshots,
-      usage,
-      source: 'reviewer',
-      cacheObservations: attemptCacheObservations
-    });
-    ledgerRecords.forEach((record) => input.onUsageLedgerRecord?.(record));
-    if (!response.ok || !response.message?.content?.trim()) {
-      throw new Error(response.error ?? (input.language === 'en'
-        ? 'Approval reviewer returned no usable response.'
-        : '审批模型未返回可用响应。'));
-    }
-    if (usage) {
-      const billed = ledgerRecords.find((record) => record.kind === 'usage_response');
-      input.onUsage?.(createUsageEvent({
-        usage,
-        cost: billed?.cost ?? 0,
-        currency: billed?.currency ?? '',
-        pricingStatus: billed?.pricingStatus ?? 'unavailable',
-        unpricedReason: billed?.unpricedReason,
-        ledgerRecorded: true,
-        providerAttemptCount: ledgerRecords.length,
-        sourceId: input.sourceConfig.sourceId,
-        modelId: input.model.id,
-        provider: input.sourceConfig.provider,
-        protocol,
-        requestId,
-        source: 'reviewer'
-      }));
-    }
-    // Provider reasoning is intentionally ignored and never leaves this call.
-    return response.message.content.trim();
-  } finally {
-    abort.dispose();
+  });
+  while (attemptSnapshots.length < (response.attemptCount ?? 1)) {
+    const attemptIndex = attemptSnapshots.length;
+    attemptSnapshots.push(attemptSnapshots.length === 0
+      ? fallbackSnapshot
+      : createSnapshot(new Date().toISOString()));
+    attemptCacheObservations[attemptIndex] = createObservation(attemptIndex);
   }
-}
-
-function createDeadlineSignal(parent: AbortSignal | undefined, timeoutMs: number): {
-  signal: AbortSignal;
-  dispose(): void;
-} {
-  const controller = new AbortController();
-  const abortFromParent = () => controller.abort(parent?.reason);
-  if (parent?.aborted) controller.abort(parent.reason);
-  else parent?.addEventListener('abort', abortFromParent, { once: true });
-  const timer = setTimeout(() => controller.abort(new Error('Approval reviewer timed out.')), timeoutMs);
-  timer.unref?.();
-  return {
-    signal: controller.signal,
-    dispose: () => {
-      clearTimeout(timer);
-      parent?.removeEventListener('abort', abortFromParent);
-    }
-  };
+  const usage = normalizeDeepSeekUsage(response.usage);
+  const ledgerRecords = createUsageLedgerRecords({
+    requestId,
+    attempts: attemptSnapshots,
+    usage,
+    source: 'reviewer',
+    cacheObservations: attemptCacheObservations
+  });
+  ledgerRecords.forEach((record) => input.onUsageLedgerRecord?.(record));
+  if (!response.ok || !response.message?.content?.trim()) {
+    throw new Error(response.error ?? (input.language === 'en'
+      ? 'Approval reviewer returned no usable response.'
+      : '审批模型未返回可用响应。'));
+  }
+  if (usage) {
+    const billed = ledgerRecords.find((record) => record.kind === 'usage_response');
+    input.onUsage?.(createUsageEvent({
+      usage,
+      cost: billed?.cost ?? 0,
+      currency: billed?.currency ?? '',
+      pricingStatus: billed?.pricingStatus ?? 'unavailable',
+      unpricedReason: billed?.unpricedReason,
+      ledgerRecorded: true,
+      providerAttemptCount: ledgerRecords.length,
+      sourceId: input.sourceConfig.sourceId,
+      modelId: input.model.id,
+      provider: input.sourceConfig.provider,
+      protocol,
+      requestId,
+      source: 'reviewer'
+    }));
+  }
+  // Provider reasoning is intentionally ignored and never leaves this call.
+  return response.message.content.trim();
 }

@@ -27,7 +27,6 @@ import {
   getConfiguredEvidenceMaxBytes,
   getConfiguredPatchSettings,
   getConfiguredProviderInlineResultMaxChars,
-  getConfiguredStreamIdleTimeoutMs,
   getConfiguredSubagentMaxUpstreamTokens,
   DEFAULT_SUBAGENT_MAX_CONTEXT_EPOCH_ROLLOVERS
 } from '../shared/config';
@@ -5076,43 +5075,32 @@ export class AgentLoop {
     summaryMessages.push({ role: 'user', content: instruction });
     const summaryProvider = structuredClone(input.providerRunState);
     this.appendProviderUserText(summaryProvider, instruction);
-    const summaryAbort = new AbortController();
-    const abortFromParent = () => summaryAbort.abort(input.request.signal?.reason);
-    if (input.request.signal?.aborted) abortFromParent();
-    else input.request.signal?.addEventListener('abort', abortFromParent, { once: true });
-    const timeout = setTimeout(() => summaryAbort.abort(new Error('Context Epoch summary timed out.')), 12_000);
-    timeout.unref?.();
-    try {
-      const response = await this.createModelResponse(
-        { ...input.request, signal: summaryAbort.signal },
-        { ...input.runtimeConfig, maxTokens: Math.min(2_048, input.runtimeConfig.repairMaxOutputTokens) },
-        summaryMessages,
-        input.tools,
-        {
-          ...input.callbacks,
-          // This is a hidden provider lane. Only its usage/trace is observable;
-          // streamed checkpoint prose must never leak into the final transcript.
-          onDelta: undefined,
-          onStatus: undefined,
-          onAttemptReset: undefined,
-          onModelRoundStart: undefined,
-          onUsageEstimate: undefined
-        },
-        input.runDeadlineAt,
-        {
-          trace: input.trace,
-          usageTotals: input.usageTotals,
-          usageSource: 'summary',
-          toolChoice: 'none',
-          providerRunState: summaryProvider
-        }
-      );
-      const content = response.message.content?.trim();
-      return content ? content.slice(0, 16_000) : undefined;
-    } finally {
-      clearTimeout(timeout);
-      input.request.signal?.removeEventListener('abort', abortFromParent);
-    }
+    const response = await this.createModelResponse(
+      input.request,
+      { ...input.runtimeConfig, maxTokens: Math.min(2_048, input.runtimeConfig.repairMaxOutputTokens) },
+      summaryMessages,
+      input.tools,
+      {
+        ...input.callbacks,
+        // This is a hidden provider lane. Only its usage/trace is observable;
+        // streamed checkpoint prose must never leak into the final transcript.
+        onDelta: undefined,
+        onStatus: undefined,
+        onAttemptReset: undefined,
+        onModelRoundStart: undefined,
+        onUsageEstimate: undefined
+      },
+      input.runDeadlineAt,
+      {
+        trace: input.trace,
+        usageTotals: input.usageTotals,
+        usageSource: 'summary',
+        toolChoice: 'none',
+        providerRunState: summaryProvider
+      }
+    );
+    const content = response.message.content?.trim();
+    return content ? content.slice(0, 16_000) : undefined;
   }
 
   private async getRuntimeConfig(request: AgentRequest): Promise<AgentRuntimeConfig> {
@@ -5158,7 +5146,7 @@ export class AgentLoop {
       ),
       maxRunMs: request.checkpoint?.maxExecutionMs ?? mergeDurations(getConfiguredAgentMaxExecutionMs(), request.executionLimits?.maxRunMs),
       maxCost,
-      streamIdleTimeoutMs: getConfiguredStreamIdleTimeoutMs(),
+      streamIdleTimeoutMs: 0,
       temperature: profile.temperature,
       topP: profile.topP,
       contextCompression: profile.contextCompression,

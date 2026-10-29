@@ -736,7 +736,6 @@ describe('Anthropic Messages compatible protocol', () => {
           model: typeof MODEL;
           messages: Array<{ role: 'system' | 'user'; content: string }>;
           maxTokens: number;
-          timeoutMs: number;
           language: 'en';
           usageSource: 'summary';
           sourceConfig: AgentRequest['sourceConfig'];
@@ -746,7 +745,6 @@ describe('Anthropic Messages compatible protocol', () => {
         model: { ...MODEL, maxOutputTokens: 200 },
         messages: [{ role: 'system', content: 'summarize' }, { role: 'user', content: 'history' }],
         maxTokens: 321,
-        timeoutMs: 1_000,
         language: 'en',
         usageSource: 'summary',
         sourceConfig: createAgentRequest().sourceConfig

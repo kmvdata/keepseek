@@ -227,7 +227,6 @@ export class HistoryCompressor {
         model: input.model,
         messages: summaryBatch.messages,
         maxTokens: settings.summaryBudgetTokens,
-        timeoutMs: settings.summaryRequestTimeoutMs,
         language: input.language,
         signal: input.signal,
         usageSource: input.usageSource ?? 'summary',
@@ -381,7 +380,6 @@ export class HistoryCompressor {
     model: KeepseekModel;
     messages: DeepSeekMessage[];
     maxTokens: number;
-    timeoutMs: number;
     language: KeepseekLanguage;
     signal?: AbortSignal;
     usageSource: Extract<UsageSource, 'summary' | 'background'>;
@@ -402,158 +400,149 @@ export class HistoryCompressor {
       return typeof result === 'string' ? { content: result } : result;
     }
 
-    const abort = createTimeoutAbortSignal(input.signal, input.timeoutMs);
-    try {
-      const clientConfig = await getSummaryClientConfig(
-        input.timeoutMs,
-        this.globalStorageUri,
-        input.language,
-        input.sourceConfig,
-        input.model.sourceId
-      );
-      const body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody = clientConfig.provider === 'openai-responses'
+    const clientConfig = await getSummaryClientConfig(
+      this.globalStorageUri,
+      input.language,
+      input.sourceConfig,
+      input.model.sourceId
+    );
+    const body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody = clientConfig.provider === 'openai-responses'
+      ? {
+          model: input.model.id,
+          input: input.messages.map((message) => ({
+            role: message.role === 'tool' ? 'user' : message.role,
+            content: message.content ?? ''
+          })),
+          stream: true,
+          store: false,
+          // Deterministic summaries reduce unrelated byte drift at the
+          // unavoidable summary cache-reset boundary.
+          temperature: 0,
+          max_output_tokens: maxTokens
+        }
+      : clientConfig.provider === 'anthropic-compatible'
         ? {
             model: input.model.id,
-            input: input.messages.map((message) => ({
-              role: message.role === 'tool' ? 'user' : message.role,
-              content: message.content ?? ''
-            })),
+            system: input.messages
+              .filter((message) => message.role === 'system' && typeof message.content === 'string')
+              .map((message) => ({ type: 'text', text: message.content ?? '' })),
+            messages: input.messages
+              .filter((message) => message.role === 'user' && typeof message.content === 'string')
+              .map((message) => ({
+                role: 'user' as const,
+                content: [{ type: 'text' as const, text: message.content ?? '' }]
+              })),
             stream: true,
-            store: false,
-            // Deterministic summaries reduce unrelated byte drift at the
-            // unavoidable summary cache-reset boundary.
-            temperature: 0,
-            max_output_tokens: maxTokens
-          }
-        : clientConfig.provider === 'anthropic-compatible'
-          ? {
-              model: input.model.id,
-              system: input.messages
-                .filter((message) => message.role === 'system' && typeof message.content === 'string')
-                .map((message) => ({ type: 'text', text: message.content ?? '' })),
-              messages: input.messages
-                .filter((message) => message.role === 'user' && typeof message.content === 'string')
-                .map((message) => ({
-                  role: 'user' as const,
-                  content: [{ type: 'text' as const, text: message.content ?? '' }]
-                })),
-              stream: true,
-              max_tokens: maxTokens,
-              temperature: 0,
-              cache_control: isOfficialAnthropicSource(clientConfig)
-                ? { type: 'ephemeral' }
-                : undefined
-            }
-          : {
-            model: input.model.id,
-            messages: input.messages,
-            stream: true,
-            enable_thinking: clientConfig.provider === 'qwencloud' ? false : undefined,
-            thinking: clientConfig.provider === 'deepseek' ? { type: 'disabled' } : undefined,
-            // Deterministic summaries: a stable completion reduces unrelated byte drift
-            // between refreshes (the covered-message change is the unavoidable part).
-            temperature: 0,
             max_tokens: maxTokens,
-            stream_options: {
-              include_usage: true
-            }
-          };
-      const requestId = randomUUID();
-      const protocol = clientConfig.provider === 'openai-responses'
-        ? 'openai-responses'
-        : clientConfig.provider === 'anthropic-compatible'
-          ? 'anthropic-messages'
-          : 'chat-completions';
-      const createSnapshot = (requestStartedAt: string): UsagePriceSnapshot => createUsagePriceSnapshot({
-        originalModelId: input.model.id,
-        sourceId: clientConfig.sourceId,
-        provider: clientConfig.provider,
-        protocol,
-        supportsBilling: clientConfig.supportsBilling,
-        requestStartedAt
-      });
-      const fallbackSnapshot = createSnapshot(new Date().toISOString());
-      const attemptSnapshots: UsagePriceSnapshot[] = [];
-      const attemptCacheObservations: ProviderCacheObservation[] = [];
-      const cacheScope = `${input.sessionId ?? 'unknown-session'}\u0000${input.usageSource}`;
-      const previousCacheObservation = this.previousCacheObservationByScope.get(cacheScope);
-      const createObservation = (attemptIndex: number) => createProviderCacheObservation({
-        requestId,
-        attemptIndex,
-        source: input.usageSource,
-        sourceId: clientConfig.sourceId,
-        provider: clientConfig.provider,
-        baseUrl: clientConfig.baseUrl,
-        body,
-        taskId: input.sessionId,
-        runId: `summary:${input.sessionId ?? requestId}`,
-        requestProtocolVersion: 1,
-        previous: attemptIndex > 0 ? attemptCacheObservations[0] ?? previousCacheObservation : previousCacheObservation,
-        historyCompacted: true
-      });
-      const response = await createProviderClient(clientConfig.provider).createModelResponse(clientConfig, {
-        body,
-        language: input.language,
-        signal: abort.signal,
-        runDeadlineAt: Date.now() + input.timeoutMs,
-        requestId,
-        onAttempt: ({ attemptIndex, startedAt }) => {
-          attemptSnapshots[attemptIndex] = createSnapshot(startedAt);
-          attemptCacheObservations[attemptIndex] = createObservation(attemptIndex);
-        }
-      });
-
-      while (attemptSnapshots.length < (response.attemptCount ?? 1)) {
-        const attemptIndex = attemptSnapshots.length;
-        attemptSnapshots.push(attemptSnapshots.length === 0
-          ? fallbackSnapshot
-          : createSnapshot(new Date().toISOString()));
+            temperature: 0,
+            cache_control: isOfficialAnthropicSource(clientConfig)
+              ? { type: 'ephemeral' }
+              : undefined
+          }
+        : {
+          model: input.model.id,
+          messages: input.messages,
+          stream: true,
+          enable_thinking: clientConfig.provider === 'qwencloud' ? false : undefined,
+          thinking: clientConfig.provider === 'deepseek' ? { type: 'disabled' } : undefined,
+          // Deterministic summaries: a stable completion reduces unrelated byte drift
+          // between refreshes (the covered-message change is the unavoidable part).
+          temperature: 0,
+          max_tokens: maxTokens,
+          stream_options: {
+            include_usage: true
+          }
+        };
+    const requestId = randomUUID();
+    const protocol = clientConfig.provider === 'openai-responses'
+      ? 'openai-responses'
+      : clientConfig.provider === 'anthropic-compatible'
+        ? 'anthropic-messages'
+        : 'chat-completions';
+    const createSnapshot = (requestStartedAt: string): UsagePriceSnapshot => createUsagePriceSnapshot({
+      originalModelId: input.model.id,
+      sourceId: clientConfig.sourceId,
+      provider: clientConfig.provider,
+      protocol,
+      supportsBilling: clientConfig.supportsBilling,
+      requestStartedAt
+    });
+    const fallbackSnapshot = createSnapshot(new Date().toISOString());
+    const attemptSnapshots: UsagePriceSnapshot[] = [];
+    const attemptCacheObservations: ProviderCacheObservation[] = [];
+    const cacheScope = `${input.sessionId ?? 'unknown-session'}\u0000${input.usageSource}`;
+    const previousCacheObservation = this.previousCacheObservationByScope.get(cacheScope);
+    const createObservation = (attemptIndex: number) => createProviderCacheObservation({
+      requestId,
+      attemptIndex,
+      source: input.usageSource,
+      sourceId: clientConfig.sourceId,
+      provider: clientConfig.provider,
+      baseUrl: clientConfig.baseUrl,
+      body,
+      taskId: input.sessionId,
+      runId: `summary:${input.sessionId ?? requestId}`,
+      requestProtocolVersion: 1,
+      previous: attemptIndex > 0 ? attemptCacheObservations[0] ?? previousCacheObservation : previousCacheObservation,
+      historyCompacted: true
+    });
+    const response = await createProviderClient(clientConfig.provider).createModelResponse(clientConfig, {
+      body,
+      language: input.language,
+      signal: input.signal,
+      requestId,
+      onAttempt: ({ attemptIndex, startedAt }) => {
+        attemptSnapshots[attemptIndex] = createSnapshot(startedAt);
         attemptCacheObservations[attemptIndex] = createObservation(attemptIndex);
       }
-      const normalizedUsage = normalizeDeepSeekUsage(response.usage);
-      const usageLedgerRecords = createUsageLedgerRecords({
-        requestId,
-        attempts: attemptSnapshots,
-        usage: normalizedUsage,
-        source: input.usageSource,
-        cacheObservations: attemptCacheObservations
-      });
-      if (response.ok && normalizedUsage) {
-        const observation = usageLedgerRecords.find((record) => record.kind === 'usage_response')?.cacheObservation;
-        if (observation) this.previousCacheObservationByScope.set(cacheScope, observation);
-      }
+    });
 
-      if (!response.ok) {
-        throw new HistorySummaryRequestError(abort.timedOut()
-          ? 'Context summary request timed out.'
-          : response.error ?? 'Context summary request failed.', usageLedgerRecords);
-      }
-
-      const billed = usageLedgerRecords.find((record) => record.kind === 'usage_response');
-      return {
-        content: response.message?.content ?? '',
-        usageLedgerRecords,
-        usageEvent: normalizedUsage
-          ? createUsageEvent({
-              usage: normalizedUsage,
-              cost: billed?.cost ?? 0,
-              currency: billed?.currency ?? '',
-              sourceId: clientConfig.sourceId,
-              modelId: input.model.id,
-              provider: clientConfig.provider,
-              protocol,
-              pricingStatus: billed?.pricingStatus ?? 'unavailable',
-              unpricedReason: billed?.unpricedReason,
-              ledgerRecorded: true,
-              providerAttemptCount: usageLedgerRecords.length,
-              requestId,
-              source: input.usageSource
-            })
-          : undefined
-      };
-    } finally {
-      abort.dispose();
+    while (attemptSnapshots.length < (response.attemptCount ?? 1)) {
+      const attemptIndex = attemptSnapshots.length;
+      attemptSnapshots.push(attemptSnapshots.length === 0
+        ? fallbackSnapshot
+        : createSnapshot(new Date().toISOString()));
+      attemptCacheObservations[attemptIndex] = createObservation(attemptIndex);
     }
+    const normalizedUsage = normalizeDeepSeekUsage(response.usage);
+    const usageLedgerRecords = createUsageLedgerRecords({
+      requestId,
+      attempts: attemptSnapshots,
+      usage: normalizedUsage,
+      source: input.usageSource,
+      cacheObservations: attemptCacheObservations
+    });
+    if (response.ok && normalizedUsage) {
+      const observation = usageLedgerRecords.find((record) => record.kind === 'usage_response')?.cacheObservation;
+      if (observation) this.previousCacheObservationByScope.set(cacheScope, observation);
+    }
+
+    if (!response.ok) {
+      throw new HistorySummaryRequestError(response.error ?? 'Context summary request failed.', usageLedgerRecords);
+    }
+
+    const billed = usageLedgerRecords.find((record) => record.kind === 'usage_response');
+    return {
+      content: response.message?.content ?? '',
+      usageLedgerRecords,
+      usageEvent: normalizedUsage
+        ? createUsageEvent({
+            usage: normalizedUsage,
+            cost: billed?.cost ?? 0,
+            currency: billed?.currency ?? '',
+            sourceId: clientConfig.sourceId,
+            modelId: input.model.id,
+            provider: clientConfig.provider,
+            protocol,
+            pricingStatus: billed?.pricingStatus ?? 'unavailable',
+            unpricedReason: billed?.unpricedReason,
+            ledgerRecorded: true,
+            providerAttemptCount: usageLedgerRecords.length,
+            requestId,
+            source: input.usageSource
+          })
+        : undefined
+    };
   }
 }
 
@@ -766,7 +755,6 @@ interface SummaryClientConfig extends ProviderClientConfig {
 }
 
 async function getSummaryClientConfig(
-  timeoutMs: number,
   globalStorageUri: vscode.Uri | undefined,
   language: KeepseekLanguage,
   sourceConfig: ModelSourceConfigSnapshot | undefined,
@@ -786,38 +774,9 @@ async function getSummaryClientConfig(
     apiKey: resolvedSource.apiKey,
     baseUrl: resolvedSource.baseUrl,
     supportsBilling: resolvedSource.supportsBilling,
-    streamIdleTimeoutMs: timeoutMs,
+    streamIdleTimeoutMs: 0,
     maxRequestRetries: 0,
     requestRetryBaseMs: getConfiguredRequestRetryBaseMs()
-  };
-}
-
-function createTimeoutAbortSignal(parentSignal: AbortSignal | undefined, timeoutMs: number): {
-  signal: AbortSignal;
-  timedOut(): boolean;
-  dispose(): void;
-} {
-  const controller = new AbortController();
-  let timedOut = false;
-  const abortFromParent = () => controller.abort();
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
-
-  if (parentSignal?.aborted) {
-    controller.abort();
-  } else {
-    parentSignal?.addEventListener('abort', abortFromParent, { once: true });
-  }
-
-  return {
-    signal: controller.signal,
-    timedOut: () => timedOut,
-    dispose: () => {
-      clearTimeout(timeout);
-      parentSignal?.removeEventListener('abort', abortFromParent);
-    }
   };
 }
 

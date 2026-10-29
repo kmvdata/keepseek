@@ -169,8 +169,7 @@ function createCompressionSettings() {
     toolResultSnipRatio: 0.6,
     triggerRatio: 0.8,
     forceRatio: 0.9,
-    summaryBudgetTokens: 1000,
-    summaryRequestTimeoutMs: 30_000
+    summaryBudgetTokens: 1000
   };
 }
 

@@ -245,7 +245,11 @@ spawn(executable, args, { shell: false })
 | `keepseek.agent.maxTreeUpstreamTokens` | `0` | 根任务及 child 合计上游 token 上限；0 表示 unlimited |
 | `keepseek.agent.maxContextEpochRollovers` | `0` | 根逻辑任务 rollover 上限；0 表示 unlimited |
 | `keepseek.agent.maxCost` | `0` | 按来源币种的费用上限；0 表示不设显式上限 |
-| `keepseek.agent.streamIdleTimeoutMs` | `0` | 流式静默超时；0 表示继续等待 |
+| `keepseek.modelRequestTimeoutSeconds` | `3600` | 单次模型请求总超时（秒），覆盖响应头和流式响应；所有账号及模型共用 |
+
+顶部设置 →「模型请求超时」直接下拉选择 **5 分钟、15 分钟、1 小时、2 小时、8 小时、24 小时**，选择后自动保存为用户级配置，对之后发出的请求生效，默认 1 小时。配置仍以秒存储（300、900、3600、7200、28800、86400）；旧版任意时长或无效值统一按默认 1 小时读取，选择新档位后保存为合法值。主 Agent、子代理、历史摘要、Epoch 摘要和审批模型均使用同一配置，不再从模型档位读取 45～120 秒摘要超时，也不再使用固定的 12/20/30 秒模型请求截止时间。旧 `agent.streamIdleTimeoutMs` 不再参与模型请求策略；已有会话和账号无需迁移。请求超时不会自动重发；取消、任务/子代理总时限仍然优先生效。命令执行、验证工具、模型发现及余额查询保留各自时限。
+
+此项控制 KeepSeek 自身的请求截止时间；VS Code/Node 网络栈、代理及上游服务仍可能独立提前断开连接，网络错误会按既有恢复策略处理。运行日志中的 `transport.requestTimeoutMs` 记录本次实际使用值。
 
 旧 `background.maxDurationMs` 仅作兼容输入；与新上限同时存在时取较小的正值。
 

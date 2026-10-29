@@ -143,8 +143,7 @@ test('compression threshold tiers override only the trigger and force ratios', (
     keepRecentTurns: balanced.keepRecentTurns,
     softCompactRatio: balanced.softCompactRatio,
     toolResultSnipRatio: balanced.toolResultSnipRatio,
-    summaryBudgetTokens: balanced.summaryBudgetTokens,
-    summaryRequestTimeoutMs: balanced.summaryRequestTimeoutMs
+    summaryBudgetTokens: balanced.summaryBudgetTokens
   };
 
   for (const threshold of ['aggressive', 'balanced', 'cache'] as const) {
@@ -162,8 +161,7 @@ test('compression threshold tiers override only the trigger and force ratios', (
       keepRecentTurns: compression.keepRecentTurns,
       softCompactRatio: compression.softCompactRatio,
       toolResultSnipRatio: compression.toolResultSnipRatio,
-      summaryBudgetTokens: compression.summaryBudgetTokens,
-      summaryRequestTimeoutMs: compression.summaryRequestTimeoutMs
+      summaryBudgetTokens: compression.summaryBudgetTokens
     }, preservedSettings);
   }
 });

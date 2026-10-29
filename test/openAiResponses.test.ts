@@ -525,7 +525,6 @@ describe('OpenAI Responses account protocol', () => {
           model: AgentRequest['model'];
           messages: Array<{ role: 'system' | 'user'; content: string }>;
           maxTokens: number;
-          timeoutMs: number;
           language: 'en';
           usageSource: 'summary';
           sourceConfig: AgentRequest['sourceConfig'];
@@ -535,7 +534,6 @@ describe('OpenAI Responses account protocol', () => {
         model: { ...MODEL, maxOutputTokens: 200 },
         messages: [{ role: 'system', content: 'summarize' }, { role: 'user', content: 'history' }],
         maxTokens: 321,
-        timeoutMs: 1_000,
         language: 'en',
         usageSource: 'summary',
         sourceConfig: createAgentRequest().sourceConfig

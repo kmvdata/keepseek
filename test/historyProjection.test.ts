@@ -38,8 +38,7 @@ test('history projection uses summary, protected messages, and recent turns with
       toolResultSnipRatio: 0.6,
       triggerRatio: 0.8,
       forceRatio: 0.9,
-      summaryBudgetTokens: 1000,
-      summaryRequestTimeoutMs: 30_000
+      summaryBudgetTokens: 1000
     }
   });
 
@@ -220,7 +219,6 @@ function createProjectionSettings() {
     toolResultSnipRatio: 0.6,
     triggerRatio: 0.8,
     forceRatio: 0.9,
-    summaryBudgetTokens: 1000,
-    summaryRequestTimeoutMs: 30_000
+    summaryBudgetTokens: 1000
   };
 }
