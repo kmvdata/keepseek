@@ -4257,7 +4257,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         timer = setTimeout(() => {
           timer = undefined;
           if (!message.isStreaming || signal?.aborted) return;
-          const visible = getVisibleMessages([message])[0];
+          const visible = getVisibleMessages([message], this.availableModels)[0];
           this.postToWebview({ type: 'agentRunDelta', sessionId, messageId: message.id, attempt: message.runCheckpoint?.attempt, streamRevision,
             contentOffset, contentDelta: message.content.slice(contentOffset),
             reasoningOffset, reasoningDelta: (message.reasoningContent ?? '').slice(reasoningOffset),
@@ -4282,7 +4282,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         // suffix before session persistence, while keeping Stop's UI status.
         if (signal?.aborted) return;
         streamRevision++;
-        const visible = getVisibleMessages([message])[0];
+        const visible = getVisibleMessages([message], this.availableModels)[0];
         this.postToWebview({ type: 'agentRunAttemptReset', sessionId, messageId: message.id,
           attempt: message.runCheckpoint?.attempt, streamRevision,
           content: committedContent, reasoningContent: committedReasoning,
@@ -4350,7 +4350,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     const refresh = () => { if (!refreshTimer) refreshTimer = setTimeout(() => { refreshTimer = undefined; this.postState({ omitMessages: true }); }, 100); };
     try {
-      const blocker = recoveryBlocker(cp);
+      const currentModel = findModelBySelection(this.availableModels, { sourceId: cp.source.sourceId, modelId: cp.source.modelId });
+      const blocker = recoveryBlocker(cp, currentModel);
       if (blocker) throw new Error(blocker);
       const executionMode = normalizeExecutionMode(cp.request.executionMode);
       if (normalizeExecutionMode(session.executionMode) !== executionMode) {
@@ -4362,8 +4363,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const source = await resolveModelSourceConfig(cp.source.sourceId, this.globalStorageUri, { sourceStore: this.sourceStore, language: this.language, requireApiKey: false });
       if (source.provider !== cp.source.provider || endpointHash(source.baseUrl) !== cp.source.endpointHash
         || this.selectedSourceId !== cp.source.sourceId || this.selectedModelId !== cp.source.modelId) throw new Error(this.t('runRecoverySourceChanged'));
-      const currentModel = findModelBySelection(this.availableModels, { sourceId: cp.source.sourceId, modelId: cp.source.modelId });
-      if (!currentModel || JSON.stringify(getAgentRuntimeProfile(currentModel, cp.request.settings)) !== JSON.stringify(getAgentRuntimeProfile(cp.request.model, cp.request.settings))) throw new Error(this.t('runRecoverySourceChanged'));
+      if (!currentModel || (!cp.outputFailure && JSON.stringify(getAgentRuntimeProfile(currentModel, cp.request.settings)) !== JSON.stringify(getAgentRuntimeProfile(cp.request.model, cp.request.settings)))) throw new Error(this.t('runRecoverySourceChanged'));
       // Do not revive previous external-file permission grants after restart.
       if (cp.request.authorizedExternalReferenceUris?.some((uri) => !this.authorizedExternalReferenceUris.has(uri))) throw new Error(this.t('runRecoveryWorkspaceChanged'));
       for (const edit of cp.state?.draftEdits ?? []) {
@@ -4408,7 +4408,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.setAgentActivity({ base: 'thinking', phase: 'requesting_model', detail: this.t('runRecoveryNotice') });
       let usage: TurnUsageStats | undefined;
       const response = await this.agentRunner.run({
-        ...checkpointForResume.request, model: { ...checkpointForResume.request.model }, checkpoint: checkpointForResume,
+        ...checkpointForResume.request, model: { ...(cp.outputFailure ? currentModel : checkpointForResume.request.model) }, checkpoint: checkpointForResume,
         approvalMode: normalizeApprovalMode(session.approvalMode),
         sourceConfig: { sourceId: source.sourceId, provider: source.provider, apiKey: source.apiKey, baseUrl: source.baseUrl, supportsBilling: source.supportsBilling },
         signal: controller.signal
@@ -5668,7 +5668,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const hasSession = this.sessionReady;
     const activeSession = hasSession ? this.sessionStore.getActiveSession() : undefined;
     const messages = activeSession
-      ? getVisibleMessages(activeSession.messages.slice(-this.getVisibleMessageLimit(activeSession.id)))
+      ? getVisibleMessages(activeSession.messages.slice(-this.getVisibleMessageLimit(activeSession.id)), this.availableModels)
       : [];
     this.postToWebview({
       type: 'state',
@@ -5794,7 +5794,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const visibleLimit = this.getVisibleMessageLimit(activeSession.id);
     const visibleMessages = options.omitMessages
       ? undefined
-      : getVisibleMessages(this.messages.slice(-visibleLimit));
+      : getVisibleMessages(this.messages.slice(-visibleLimit), this.availableModels);
     const revision = ++this.stateRevision;
     const forceFull = options.forceFull === true || !this.fullStateSent;
     this.postToWebview({

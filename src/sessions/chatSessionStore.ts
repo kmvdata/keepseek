@@ -1,3 +1,4 @@
+import { normalizeRequestBudget } from '../agent/requestBudget';
 import { isResumableToolBudgetCheckpoint, normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
@@ -654,7 +655,7 @@ function copyMessage(message: ChatMessage): ChatMessage {
   };
 }
 
-export function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
+export function getVisibleMessages(messages: ChatMessage[], models: readonly import('../shared/types').KeepseekModel[] = []): ChatMessage[] {
   return messages.map(({
     runCheckpoint,
     expandedContent: _expandedContent,
@@ -673,8 +674,12 @@ export function getVisibleMessages(messages: ChatMessage[]): ChatMessage[] {
       attempt: runCheckpoint.attempt, modelRequests: runCheckpoint.modelRequests, retries: runCheckpoint.retries,
       lastNetworkAt: runCheckpoint.lastNetworkAt, lastEventAt: runCheckpoint.lastEventAt, lastContentAt: runCheckpoint.lastContentAt,
       requestStartedAt: runCheckpoint.requestStartedAt, lastStepAt: runCheckpoint.lastStepAt, steps: (runCheckpoint.state?.toolRounds.reduce((count, round) => count + round.toolResults.length, 0) ?? 0) + Object.keys(runCheckpoint.state?.pending?.results ?? {}).length,
-      canResume: runCheckpoint.status !== 'running' && !recoveryBlocker(runCheckpoint),
-      blocker: recoveryBlocker(runCheckpoint), error: runCheckpoint.error
+      outputBudget: runCheckpoint.lastRequestBudget,
+      outputFailure: runCheckpoint.outputFailure ? { finishReason: runCheckpoint.outputFailure.finishReason,
+        requestId: runCheckpoint.outputFailure.requestId, toolsExecuted: 0 as const } : undefined,
+      outputBudgetMigrations: runCheckpoint.outputBudgetMigrations,
+      canResume: runCheckpoint.status !== 'running' && !recoveryBlocker(runCheckpoint, models.find((model) => model.sourceId === runCheckpoint.source.sourceId && model.id === runCheckpoint.source.modelId)),
+      blocker: recoveryBlocker(runCheckpoint, models.find((model) => model.sourceId === runCheckpoint.source.sourceId && model.id === runCheckpoint.source.modelId)), error: runCheckpoint.error
       };
     })() : undefined,
     ...(message.runDetails ? { runDetails: {
@@ -1369,6 +1374,11 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
           truncated: value.contextDeduplication.truncated === true
       }
       : undefined,
+    outputBudgets: Array.isArray(value.outputBudgets)
+      ? value.outputBudgets.slice(-32).flatMap((item) => { const budget = normalizeRequestBudget(item); return budget ? [budget] : []; }) : undefined,
+    outputTruncation: isRecord(value.outputTruncation) && value.outputTruncation.toolsExecuted === 0
+      && typeof value.outputTruncation.finishReason === 'string' && typeof value.outputTruncation.requestId === 'string'
+      ? { finishReason: value.outputTruncation.finishReason.slice(0, 80), requestId: value.outputTruncation.requestId.slice(0, 256), toolsExecuted: 0 } : undefined,
     cache: normalizeRunDetailsCache(value.cache),
     historySummaries: Array.isArray(value.historySummaries)
       ? value.historySummaries.filter(isRecord).slice(0, 32).map((summary) => ({

@@ -1,3 +1,4 @@
+import { calculateOutputBudget } from '../shared/outputBudget';
 import { MIN_EVIDENCE_ENVELOPE_TOKENS } from './evidence/types';
 
 export const CONTEXT_WINDOW_CALIBRATION_VERSION = 2;
@@ -78,18 +79,24 @@ export class ToolResultAdmissionController {
     phase: 'tool' | 'final' | 'summary';
     remainingBatchResults: number;
   }): ToolResultAdmissionDecision {
-    const scaledInput = Math.ceil(Math.max(0, input.estimatedInputTokens) * this.state.estimatorScale);
-    const outputReserveTokens = this.outputReserve(input.configuredMaxOutputTokens, input.phase);
-    const minimumBatchEnvelopeTokens = Math.max(1, input.remainingBatchResults) * MIN_EVIDENCE_ENVELOPE_TOKENS;
-    const uncertainty = Math.abs((this.state.lastActualInputTokens ?? scaledInput) - (this.state.lastEstimatedInputTokens ?? scaledInput));
-    const safetyTokens = Math.max(384, Math.min(8_192, Math.ceil(uncertainty * 1.25 + scaledInput * 0.015)));
+    const budget = calculateOutputBudget({
+      modelMaxOutputTokens: input.configuredMaxOutputTokens,
+      estimatedInputTokens: Math.max(0, input.estimatedInputTokens),
+      effectiveWindowTokens: this.state.learnedEffectiveWindowTokens,
+      estimatorScale: this.state.estimatorScale,
+      uncertaintyTokens: Math.abs((this.state.lastActualInputTokens ?? 0) - (this.state.lastEstimatedInputTokens ?? 0))
+    });
+    const scaledInput = budget.inputBudgetTokens;
+    const outputReserveTokens = budget.actualMaxOutputTokens;
+    const safetyTokens = budget.safetyTokens;
+    const minimumBatchEnvelopeTokens = Math.max(0, input.remainingBatchResults) * MIN_EVIDENCE_ENVELOPE_TOKENS;
     const available = this.state.learnedEffectiveWindowTokens - scaledInput - outputReserveTokens - safetyTokens;
     return {
       inlineTokenAllowance: Math.max(0, available - minimumBatchEnvelopeTokens),
       outputReserveTokens,
       safetyTokens,
       minimumBatchEnvelopeTokens,
-      shouldRollover: available < minimumBatchEnvelopeTokens,
+      shouldRollover: budget.needsCompaction || available < minimumBatchEnvelopeTokens,
       estimatedRequestTokens: scaledInput + outputReserveTokens + safetyTokens,
       learnedEffectiveWindowTokens: this.state.learnedEffectiveWindowTokens
     };
@@ -170,12 +177,7 @@ export class ToolResultAdmissionController {
     };
   }
 
-  private outputReserve(configured: number, phase: 'tool' | 'final' | 'summary'): number {
-    const window = this.state.learnedEffectiveWindowTokens;
-    const ratio = phase === 'tool' ? 0.08 : phase === 'summary' ? 0.04 : 0.22;
-    const floor = phase === 'summary' ? 512 : 1_024;
-    return Math.max(floor, Math.min(Math.max(floor, configured), Math.floor(window * ratio)));
-  }
+
 }
 
 export function migrateContextWindowCalibrationState(
@@ -275,6 +277,7 @@ export function migrateContextWindowCalibrationState(
 
 export function isContextTooLongError(value: unknown): boolean {
   const text = value instanceof Error ? value.message : String(value ?? '');
+  if (/(?:max_tokens|max_output_tokens|output (?:token|limit)).*(?:must be|must not|cannot exceed|at most|supported|range)/iu.test(text)) return false;
   return /(?:context(?:_| |-)?(?:length|window).*(?:exceed|too (?:large|long)|maximum|full)|maximum context|too many (?:input )?tokens|prompt (?:is )?too long|model_context_window_exceeded|context_length_exceeded)/iu.test(text);
 }
 

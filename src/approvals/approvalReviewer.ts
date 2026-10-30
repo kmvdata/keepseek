@@ -12,6 +12,8 @@ import type { ApprovalCircuitBreaker } from './approvalCircuitBreaker';
 export interface ApprovalReviewerModelContext {
   model: KeepseekModel;
   sourceConfig?: ModelSourceConfigSnapshot;
+  taskCostBudget?: AgentRequest['taskCostBudget'];
+  taskRunBudget?: AgentRequest['taskRunBudget'];
 }
 
 export interface ApprovalReviewerAdapter {
@@ -77,6 +79,9 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
         const raw = await (this.options.requestText ?? requestApprovalReviewText)({
           model: resolved.model,
           sourceConfig: resolved.sourceConfig,
+          globalStorageUri: this.options.globalStorageUri,
+          taskCostBudget: modelContext.taskCostBudget,
+          taskRunBudget: modelContext.taskRunBudget,
           systemPrompt: APPROVAL_REVIEWER_SYSTEM_PROMPT,
           userPrompt: serialized,
           language: request.responseLanguage,
@@ -231,7 +236,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
 }
 
 export function toReviewerModelContext(request: AgentRequest): ApprovalReviewerModelContext {
-  return { model: request.model, sourceConfig: request.sourceConfig };
+  return { model: request.model, sourceConfig: request.sourceConfig, taskCostBudget: request.taskCostBudget, taskRunBudget: request.taskRunBudget };
 }
 
 function formatLocalPolicyRationale(rule: string, language: ApprovalReviewRequest['responseLanguage']): string {

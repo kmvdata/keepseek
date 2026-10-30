@@ -297,6 +297,14 @@ spawn(executable, args, { shell: false })
 
 ### 10.4 Checkpoint 与崩溃恢复
 
+输出预算策略独立版本为 `2`，与 checkpoint 外层版本分离。每次发送前保存来源/模型/lane、能力来源、完整输入估算、实际输出额度、有效窗口及安全余量。新模型轮读取同来源同模型的当前能力；正在重连的请求继续使用冻结字节。普通精确恢复的请求 hash 检查保留。
+
+`length` / `max_output_tokens` / `max_tokens` 与未完成工具批次一起出现时，整批禁止执行，记录 `output_truncated`、本轮零工具执行及输出快照。语义截断不走网络自动重试；在有界尾部清理中保留已收到的 usage。只有带结构化证据的 checkpoint 才允许增大有效额度或首次切换为较小完整调用策略，并在发送前持久化旧/新 hash 和额度，不重置任务、费用或六次物理请求额度。分解策略仍失败且额度未增加时禁用无效 Continue，提示发送新消息缩小本步范围。旧 checkpoint 仅有 “Incomplete tool response” 文本时不能推断长度原因，保留历史并要求新用户消息。
+
+正文续写逐请求重新准入，不再用单次 tokens 充当累计输出额度，也不按 tokens × 4 切正文。完整已生成正文和最后追加片段分别保存，重启不重复追加或记账；精确重叠去重、无进展停止、取消及独立任务预算仍有效。原 `agent.maxContinuations` / invocation 次数限制保留，暂停消息明确指出次数来源。续写 rollover 保存完整正文；受保护内容确实无法容纳时停止而非静默裁剪。32 MiB checkpoint 等独立存储资源边界保留，超过时明确报告 storage/resource failure。
+
+独立历史摘要没有任务预留所有者，配置正费用上限时跳过并保留历史；运行时 epoch 摘要继续使用共享任务账本。摘要输出被截断时不推进 covered history。完整验收与操作说明见 [输出预算整改记录](model-output-budget-rectification.md)。
+
 checkpoint 在请求边界、工具意图/结果、审批、Apply、Run、epoch 和重要状态转换处持久化。它保存恢复所需的有限状态，不复制全部私有上下文。
 
 恢复前至少验证：

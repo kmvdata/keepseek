@@ -8,6 +8,15 @@ export class ProviderIncompleteStreamError extends Error {
   public constructor(message: string) { super(message); this.name = 'ProviderIncompleteStreamError'; }
 }
 
+/** Semantic output exhaustion. Never a transport retry or executable tool batch. */
+export class ProviderToolOutputTruncatedError extends Error {
+  public readonly code = 'KEEPSEEK_TOOL_OUTPUT_TRUNCATED';
+  public constructor(public readonly finishReason: string) {
+    super('Output length limit interrupted tool-call generation; no tools in this round were executed / 输出长度限制导致工具调用未完成，本轮工具执行数为 0');
+    this.name = 'ProviderToolOutputTruncatedError';
+  }
+}
+
 /** Complete invalid events must never be replayed automatically. */
 export class ProviderStreamProtocolError extends Error {
   public readonly code = 'KEEPSEEK_STREAM_PROTOCOL_ERROR';
@@ -53,6 +62,10 @@ export class ProviderStreamReader {
   public event(usage?: DeepSeekUsage | null): void {
     this.progress.eventCount += 1;
     this.publish(usage);
+  }
+
+  public terminalFailure(): void {
+    this.terminalAt ??= Date.now();
   }
 
   public completed(usage?: DeepSeekUsage | null): void {
@@ -109,7 +122,12 @@ export class ProviderStreamReader {
   }
 
   public async release(): Promise<void> {
-    if (!this.progress.httpComplete) await this.reader.cancel().catch(() => undefined);
+    if (!this.progress.httpComplete) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([this.reader.cancel().catch(() => undefined),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, 250); })]);
+      if (timer) clearTimeout(timer);
+    }
     this.reader.releaseLock();
   }
 

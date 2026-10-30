@@ -1,7 +1,10 @@
+import { calculateOutputBudget } from '../shared/outputBudget';
+import { applyProviderRequestBudget, loadProviderRequestBudget, resolveProviderRequestBudget } from './requestBudget';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
-  getConfiguredRequestRetryBaseMs
+  getConfiguredRequestRetryBaseMs,
+  getConfiguredAgentMaxCost
 } from '../shared/config';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
 import type { ModelSourceConfigSnapshot, ModelSourceProvider } from '../accounts/types';
@@ -44,7 +47,6 @@ import {
 } from './historyProjection';
 import { estimateTokenCount } from './tokenEstimate';
 import { buildProviderRequestProjection } from './providerRequestProjection';
-import { estimateDeepSeekMessageTokens, estimateDeepSeekToolsTokens } from './protocol';
 import { createUsageEvent, normalizeDeepSeekUsage } from './usageStats';
 import { createUsageLedgerRecords, createUsagePriceSnapshot } from './usageLedger';
 import { createProviderCacheObservation } from './cacheObservation';
@@ -211,11 +213,19 @@ export class HistoryCompressor {
     }
 
     try {
-      const summaryBatch = this.buildSummaryMessages({
+      let summaryBatch = this.buildSummaryMessages({
         messagesToSummarize: summaryInput.newCompressibleMessages,
         summaryBudgetTokens: settings.summaryBudgetTokens,
         language: input.language
       });
+      while (summaryBatch.includedMessageIds.length > 1) {
+        const budget = resolveProviderRequestBudget({ model: input.model, provider: input.sourceConfig?.provider ?? 'openai-compatible',
+          body: { model: input.model.id, messages: summaryBatch.messages, stream: true } });
+        if (!budget.needsCompaction) break;
+        const kept = new Set(summaryBatch.includedMessageIds.slice(0, -1));
+        summaryBatch = this.buildSummaryMessages({ messagesToSummarize: summaryInput.newCompressibleMessages.filter((message) => kept.has(message.id)),
+          summaryBudgetTokens: settings.summaryBudgetTokens, language: input.language });
+      }
       if (!summaryBatch.includedMessageIds.length) {
         return {
           state: protectedState.state,
@@ -391,12 +401,18 @@ export class HistoryCompressor {
       reasoningEffort: 'high',
       compressionThreshold: 'balanced'
     });
-    const requestedMaxTokens = Number.isFinite(input.maxTokens) && input.maxTokens > 0
-      ? Math.floor(input.maxTokens)
-      : runtimeProfile.maxTokens;
-    const maxTokens = Math.max(1, Math.min(requestedMaxTokens, runtimeProfile.maxTokens));
+    const maxTokens = runtimeProfile.maxTokens;
+    // This background/pre-run compressor has no durable task reservation
+    // owner. Under a positive cost limit leave history intact; the runtime's
+    // epoch summarizer uses the shared task ledger and can compact safely.
+    if (getConfiguredAgentMaxCost() > 0) {
+      throw new Error('Standalone history summary skipped: no shared task cost reservation; runtime compaction remains available / 独立历史摘要未发送：无法共享任务费用预留，将保留历史并由运行时按任务预算压缩');
+    }
     if (this.completion) {
-      const result = await this.completion({ ...input, maxTokens });
+      const budget = resolveProviderRequestBudget({ model: input.model, provider: input.sourceConfig?.provider ?? 'openai-compatible',
+        body: { model: input.model.id, messages: input.messages, stream: true, max_tokens: maxTokens } });
+      if (budget.actualMaxOutputTokens < 1) throw new Error('Summary input exceeds context capacity / 摘要输入超出上下文容量');
+      const result = await this.completion({ ...input, maxTokens: budget.actualMaxOutputTokens });
       return typeof result === 'string' ? { content: result } : result;
     }
 
@@ -453,6 +469,9 @@ export class HistoryCompressor {
             include_usage: true
           }
         };
+    const budget = await loadProviderRequestBudget({ model: input.model, sourceId: clientConfig.sourceId,
+      baseUrl: clientConfig.baseUrl, provider: clientConfig.provider, body }, this.globalStorageUri);
+    applyProviderRequestBudget(body, budget);
     const requestId = randomUUID();
     const protocol = clientConfig.provider === 'openai-responses'
       ? 'openai-responses'
@@ -511,14 +530,14 @@ export class HistoryCompressor {
       usage: normalizedUsage,
       source: input.usageSource,
       cacheObservations: attemptCacheObservations
-    });
+    }).map((record) => ({ ...record, requestBudget: budget }));
     if (response.ok && normalizedUsage) {
       const observation = usageLedgerRecords.find((record) => record.kind === 'usage_response')?.cacheObservation;
       if (observation) this.previousCacheObservationByScope.set(cacheScope, observation);
     }
 
-    if (!response.ok) {
-      throw new HistorySummaryRequestError(response.error ?? 'Context summary request failed.', usageLedgerRecords);
+    if (!response.ok || response.finishReason === 'length') {
+      throw new HistorySummaryRequestError(response.error ?? (response.finishReason === 'length' ? 'Context summary output was truncated; covered history was not advanced.' : 'Context summary request failed.'), usageLedgerRecords);
     }
 
     const billed = usageLedgerRecords.find((record) => record.kind === 'usage_response');
@@ -602,22 +621,21 @@ function estimateRawConversationTokens(input: HistoryCompressionRefreshInput): n
     sourceId: input.sourceConfig?.sourceId ?? input.model.sourceId,
     baseUrl: input.sourceConfig?.baseUrl
   });
-  return projection.anthropic
-    ? estimateTokenCount(JSON.stringify({
-        system: projection.anthropic.system,
-        messages: projection.anthropic.messages
-      })) + estimateTokenCount(JSON.stringify(projection.anthropic.tools))
-    : projection.responses
-      ? estimateTokenCount(JSON.stringify(projection.responses.input))
-      + estimateTokenCount(JSON.stringify(projection.responses.tools))
-      + projection.responses.input.length * 4
-      : projection.messages.reduce((total, message) => total + estimateDeepSeekMessageTokens(message), 0)
-        + estimateDeepSeekToolsTokens(projection.tools);
+  return resolveProviderRequestBudget({ model: input.model, provider: input.sourceConfig?.provider ?? 'openai-compatible',
+    body: projection.anthropic
+      ? { model: input.model.id, system: projection.anthropic.system, messages: projection.anthropic.messages,
+        tools: projection.anthropic.tools, stream: true, max_tokens: projection.runtimeProfile.maxTokens }
+      : projection.responses
+        ? { model: input.model.id, input: projection.responses.input, tools: projection.responses.tools, stream: true, store: false }
+        : { model: input.model.id, messages: projection.messages, tools: projection.tools, stream: true }
+  }).estimatedInputTokens;
 }
 
 function estimateRawConversationRatio(input: HistoryCompressionRefreshInput): number {
   const maxTokens = getEffectiveContextWindowTokens(input.model);
-  return estimateRawConversationTokens(input) / maxTokens;
+  const budget = calculateOutputBudget({ modelMaxOutputTokens: getAgentRuntimeProfile(input.model, input.agentSettings).maxTokens,
+    estimatedInputTokens: estimateRawConversationTokens(input), effectiveWindowTokens: maxTokens });
+  return (budget.inputBudgetTokens + budget.modelMaxOutputTokens + budget.safetyTokens) / maxTokens;
 }
 
 function isRawConversationNearContextWindow(

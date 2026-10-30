@@ -560,7 +560,7 @@ describe('Anthropic Messages compatible protocol', () => {
       const response = await new AgentRunner().run(createAgentRequest({ maxToolIterations: 2 }));
       assert.equal(response.message, 'done');
       assert.equal(bodies.length, 2);
-      assert.equal(bodies[0].max_tokens, 8_192);
+      assert.equal(bodies[0].max_tokens, 16_000);
       assert.deepEqual(bodies[0].thinking, { type: 'adaptive', display: 'summarized' });
       assert.equal('output_config' in bodies[0], false);
       assert.deepEqual(bodies[0].cache_control, { type: 'ephemeral' });
@@ -658,7 +658,7 @@ describe('Anthropic Messages compatible protocol', () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_input, init) => {
       bodies.push(JSON.parse(String(init?.body)) as AnthropicMessagesRequestBody);
-      return anthropicTextResponse('paused ', 'pause_turn');
+      return anthropicTextResponse('paused ' + bodies.length + ' ', 'pause_turn');
     }) as typeof fetch;
     try {
       const input = createAgentRequest();
@@ -668,7 +668,7 @@ describe('Anthropic Messages compatible protocol', () => {
       });
       assert.equal(bodies.length, 2);
       assert.equal(checkpoint?.runBudget?.continuations, 1);
-      assert.match(response.message, /Truncated because the automatic output\/continuation budget/u);
+      assert.match(response.message, /Automatic continuation paused.*agent.maxContinuations/u);
       assert.equal(response.runDetails.budgetStopReason, 'continuation_budget_exhausted');
     } finally {
       globalThis.fetch = originalFetch;

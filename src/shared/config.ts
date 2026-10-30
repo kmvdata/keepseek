@@ -480,18 +480,22 @@ export function getConfiguredSubagentMaxUpstreamTokens(): number {
   1_000, 100_000_000, DEFAULT_SUBAGENT_MAX_UPSTREAM_TOKENS);
 }
 
+/** @deprecated Settings compatibility only. Request budgets use the source/model capability. */
 export function getConfiguredAgentToolMaxOutputTokens(): number {
   return getConfiguredOutputLimit('agent.toolMaxOutputTokens', DEFAULT_AGENT_TOOL_MAX_OUTPUT_TOKENS);
 }
 
+/** @deprecated Settings compatibility only. Request budgets use the source/model capability. */
 export function getConfiguredAgentFinalMaxOutputTokens(): number {
   return getConfiguredOutputLimit('agent.finalMaxOutputTokens', DEFAULT_AGENT_FINAL_MAX_OUTPUT_TOKENS);
 }
 
+/** @deprecated Settings compatibility only. Request budgets use the source/model capability. */
 export function getConfiguredAgentContinuationMaxOutputTokens(): number {
   return getConfiguredOutputLimit('agent.continuationMaxOutputTokens', DEFAULT_AGENT_CONTINUATION_MAX_OUTPUT_TOKENS);
 }
 
+/** @deprecated Settings compatibility only. Request budgets use the source/model capability. */
 export function getConfiguredAgentRepairMaxOutputTokens(): number {
   return getConfiguredOutputLimit('agent.repairMaxOutputTokens', DEFAULT_AGENT_REPAIR_MAX_OUTPUT_TOKENS);
 }

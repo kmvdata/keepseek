@@ -1,7 +1,7 @@
 import type { KeepseekLanguage } from '../../shared/i18n';
 import type { AgentRunCallbacks } from '../../shared/types';
 import type { ProviderStreamParseOptions } from './types';
-import { ProviderIncompleteStreamError, ProviderStreamProtocolError, ProviderStreamProviderError, ProviderStreamReader, ProviderStreamTextDecoder, isTruncatedJsonError } from './streamErrors';
+import { ProviderToolOutputTruncatedError, ProviderIncompleteStreamError, ProviderStreamProtocolError, ProviderStreamProviderError, ProviderStreamReader, ProviderStreamTextDecoder, isTruncatedJsonError } from './streamErrors';
 import type { DeepSeekToolCall, DeepSeekUsage } from '../deepseek/types';
 import type {
   AnthropicAssistantContentBlock,
@@ -82,6 +82,7 @@ export class AnthropicStreamParser {
           default: break;
         }
         stream.publish(this.normalizeUsage(usage));
+        if (stopReason === 'max_tokens' && [...blocks.values()].some((block) => block.type === 'tool_use')) stream.terminalFailure();
         if (sawMessageStop) {
           finalResult = this.finalizeMessage(sawMessageStart, blocks, stopReason, usage, language);
           stream.completed(finalResult.usage);
@@ -91,6 +92,7 @@ export class AnthropicStreamParser {
         let chunk: { done: boolean; value?: Uint8Array };
         try { chunk = await stream.read(); }
         catch (error) {
+          if (stopReason === 'max_tokens' && [...blocks.values()].some((block) => block.type === 'tool_use')) throw new ProviderToolOutputTruncatedError(stopReason);
           if (!stream.canPreserve(error)) throw error;
           stream.interruptedTail();
           break;
@@ -108,6 +110,7 @@ export class AnthropicStreamParser {
       }
       if (!sawEvent) throw new ProviderIncompleteStreamError(language === 'en'
         ? 'Anthropic Messages API did not return any streaming events.' : 'Anthropic Messages API 未返回任何流式事件。');
+      if (!finalResult && stopReason === 'max_tokens' && [...blocks.values()].some((block) => block.type === 'tool_use')) throw new ProviderToolOutputTruncatedError(stopReason);
       if (!finalResult) throw new ProviderIncompleteStreamError(language === 'en'
         ? 'Anthropic Messages stream ended before the message completed.' : 'Anthropic Messages 流在消息完成前结束。');
       return finalResult;
@@ -121,6 +124,9 @@ export class AnthropicStreamParser {
     usage: UsageAccumulator,
     language: KeepseekLanguage
   ): AnthropicMessagesStreamResult {
+    if (stopReason === 'max_tokens' && [...blocks.values()].some((block) => block.type === 'tool_use')) {
+      throw new ProviderToolOutputTruncatedError(stopReason);
+    }
     if (!sawMessageStart) throw new ProviderStreamProtocolError('Anthropic message_stop arrived before message_start.');
     if ([...blocks.values()].some((block) => !block.stopped)) throw new ProviderStreamProtocolError(language === 'en'
       ? 'Anthropic Messages stream ended with an unfinished content block.' : 'Anthropic Messages 流包含未完成的内容块。');

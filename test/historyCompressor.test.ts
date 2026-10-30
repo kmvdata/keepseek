@@ -55,7 +55,7 @@ test('summary character cap covers only message ids actually included in the suc
   const result = await compressor.refresh({
     session,
     prompt: 'current request',
-    model: createModel(2_000),
+    model: createModel(200_000),
     agentSettings: { thinkingEnabled: true, reasoningEffort: 'high', compressionThreshold: 'balanced' },
     contextFiles: [],
     language: 'en',
@@ -91,7 +91,7 @@ test('summary failure never advances covered ids', async () => {
   const result = await compressor.refresh({
     session: createSession(messages),
     prompt: 'current request',
-    model: createModel(2_000),
+    model: createModel(200_000),
     agentSettings: { thinkingEnabled: true, reasoningEffort: 'high', compressionThreshold: 'balanced' },
     contextFiles: [],
     language: 'en',
@@ -122,7 +122,7 @@ test('new compression appends an immutable summary segment without rewriting the
   const result = await compressor.refresh({
     session,
     prompt: 'current request',
-    model: createModel(2_000),
+    model: createModel(200_000),
     agentSettings: { thinkingEnabled: true, reasoningEffort: 'high', compressionThreshold: 'balanced' },
     contextFiles: [],
     language: 'en',

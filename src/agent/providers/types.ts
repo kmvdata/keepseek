@@ -16,6 +16,7 @@ export type ProviderClientFailureKind =
   | 'network'
   | 'stream'
   | 'protocol'
+  | 'tool_output_truncated'
   | 'provider'
   | 'resource_limit'
   | 'external_abort'
@@ -81,6 +82,7 @@ export interface ProviderClientResult {
   retryable: boolean;
   error?: string;
   failureKind?: ProviderClientFailureKind;
+  toolIntegrity?: 'incomplete';
   status?: number;
   attemptCount?: number;
   retryCount?: number;

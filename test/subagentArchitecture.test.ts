@@ -386,6 +386,20 @@ test('real child provider request disables thinking and excludes parent-only con
     assert.doesNotMatch(providerBody, /PARENT HISTORY MUST NOT LEAK/u);
     assert.doesNotMatch(providerBody, /PARENT CONTEXT FILE MUST NOT LEAK/u);
     assert.doesNotMatch(providerBody, /PARENT STABLE CONTEXT MUST NOT LEAK/u);
+    assert.equal(parsedProviderBody.max_tokens, 2_000);
+    // Fixed child selection resolves the same wire model under another account.
+    await new ModelSourceStore(vscode.Uri.file(storageRoot)).createSource({
+      id: 'source-b', provider: 'deepseek', name: 'Child fixture', apiKey: 'fixture-only-key', baseUrl: 'https://provider.invalid/v1',
+      models: [{ id: parent.model.id, contextWindowTokens: 1_024_000, maxOutputTokens: 32_768 }]
+    });
+    await new SubagentSettingsStore(vscode.Uri.file(storageRoot), 'workspace-one').save({ mode: 'fixed', sourceId: 'source-b', modelId: parent.model.id }, 'research');
+    parent.model.maxOutputTokens = 393_192;
+    parent.model.contextWindowTokens = 1_024_000;
+    await runtime.delegateTask({ task: 'CHILD SELF CONTAINED TASK', profile: 'research' }, {
+      parentRequest: parent, parentRunId: 'second-parent-run', language: 'en'
+    });
+    assert.equal(JSON.parse(capturedBodies.at(-1)!).max_tokens, 32_768, 'the child never inherits the parent output cap');
+
   } finally {
     globalThis.fetch = originalFetch;
   }

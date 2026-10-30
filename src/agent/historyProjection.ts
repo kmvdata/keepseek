@@ -93,7 +93,8 @@ export function buildHistoryProjection(input: HistoryProjectionInput): HistoryPr
         projectedHistory,
         input.maxProjectionTokens,
         input.requestProtocolVersion ?? 1,
-        input.includeProviderReplay === true
+        input.includeProviderReplay === true,
+        new Set([...protectedMessageIds, ...recentMessageIds])
       )
     : projectedHistory;
 
@@ -120,26 +121,23 @@ function capProjectionToTokenBudget(
   messages: ChatMessage[],
   maxTokens: number,
   requestProtocolVersion: number,
-  includeProviderReplay: boolean
+  includeProviderReplay: boolean,
+  retainedIds: ReadonlySet<string>
 ): ChatMessage[] {
-  // Keeps only the most recent tail. In this degraded mode even protected messages
-  // may be dropped: staying inside the model context window wins over protection
-  // when compression has been failing and the conversation would otherwise exceed
-  // the window. Normal (append-only) projection never takes this path.
-  let tokenCount = 0;
-  const capped: ChatMessage[] = [];
+  // Compaction failure cannot erase protected/recent context. If those alone
+  // exceed capacity, request admission must refuse or reduce output explicitly.
+  let tokenCount = messages.filter((message) => retainedIds.has(message.id)).reduce((sum, message) =>
+    sum + estimateProjectedChatMessageTokens(message, requestProtocolVersion, includeProviderReplay), 0);
+  const selected = new Set(retainedIds);
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    tokenCount += estimateProjectedChatMessageTokens(
-      message,
-      requestProtocolVersion,
-      includeProviderReplay
-    );
-    if (tokenCount > maxTokens && capped.length) {
-      break;
-    }
-    capped.unshift(message);
+    if (selected.has(message.id)) continue;
+    const tokens = estimateProjectedChatMessageTokens(message, requestProtocolVersion, includeProviderReplay);
+    if (tokenCount + tokens > maxTokens) break;
+    selected.add(message.id);
+    tokenCount += tokens;
   }
+  const capped = messages.filter((message) => selected.has(message.id));
   return capped;
 }
 

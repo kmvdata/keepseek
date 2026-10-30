@@ -4278,7 +4278,7 @@ export function getScript(): string {
       notice.textContent = run.stopReason ? t('runStopped_' + run.stopReason) : '';
       if (notice.textContent) panel.append(notice);
       var detail = document.createElement('div');
-      detail.textContent = run.blocker || t('runRecoveryNotice');
+      detail.textContent = run.blocker || (run.outputFailure ? (state.language === 'en' ? 'Continue regenerates smaller complete calls from the saved round. Completed tools will be reused.' : '继续任务将从已保存的模型轮起点生成较小的完整调用，并复用已完成的工具结果。') : t('runRecoveryNotice'));
       panel.append(detail);
       if (run.canResume) {
         var button = document.createElement('button');
@@ -4318,6 +4318,20 @@ export function getScript(): string {
         details.modelRequests?.maxOutputTokens ? 'max=' + String(details.modelRequests.maxOutputTokens) : ''
       ].filter(Boolean).join(' · '));
       appendRunDetailRow(grid, t('runDetailsTools'), String(Number(details.toolCallCount) || (Array.isArray(details.toolCalls) ? details.toolCalls.length : 0)));
+      var outputBudget = message.runState?.outputBudget || details.outputBudgets?.slice(-1)[0];
+      if (outputBudget) {
+        appendRunDetailRow(grid, t('runDetailsOutputBudget'), outputBudget.modelMaxOutputTokens + ' → ' + outputBudget.actualMaxOutputTokens
+          + ' · ' + outputBudget.capabilitySource + ' · ' + outputBudget.limitSource + ' · policy v' + outputBudget.policyVersion);
+        appendRunDetailRow(grid, t('runDetailsInputBudget'), outputBudget.estimatedInputTokens + ' / ' + outputBudget.inputBudgetTokens + ' / '
+          + outputBudget.effectiveWindowTokens + ' / ' + outputBudget.safetyTokens);
+      }
+      var truncation = message.runState?.outputFailure || details.outputTruncation;
+      if (truncation) appendRunDetailRow(grid, t('runDetailsOutputTruncation'), truncation.finishReason + ' · tools=0 · ' + truncation.requestId);
+      (message.runState?.outputBudgetMigrations || []).forEach(function(migration) {
+        appendRunDetailRow(grid, t('runDetailsOutputRecovery'), migration.reason + ' · policy ' + migration.oldPolicy + ' → ' + migration.newPolicy
+          + ' · output ' + migration.oldOutputTokens + ' → ' + migration.newOutputTokens
+          + ' · ' + migration.oldRequestHash + ' → ' + migration.newRequestHash);
+      });
       body.append(grid);
 
       if (details.cache) {

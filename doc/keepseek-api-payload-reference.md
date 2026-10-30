@@ -156,11 +156,13 @@ Anthropic 账号请求规范化后的 Messages endpoint：常规 `/v1` base 使�
 
 1. 手动模型显式 `contextWindowTokens` / `maxOutputTokens`；
 2. 最新 `/models` 发现元数据；
-3. DeepSeek V4 Flash/Pro 内置元数据与专用 Thinking 画像；
+3. DeepSeek V4 Flash/Pro 内置元数据（Thinking 不再降低显式输出配置）；
 4. `modelContextWindowGuesses.ts` 中受控、可测试的模型家族上下文窗口与最大输出猜测；
 5. 其它未知模型保守 fallback：32768 context tokens / 8192 output tokens。
 
-最终 output limit 会被 learned effective window 再次收紧，工具选择轮、最终回答轮和摘要轮使用不同的动态输出预留。Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tokens`，Anthropic 写入 `max_tokens`；它们不会互相注入协议专属字段。Provider 的真实 input usage 按来源/endpoint/model 校准估算比例；context-too-long 会降低 learned window 并重建 epoch，这些校准值不进入 system/history。名称猜测与人工 metadata 只是声明起点，不是终止依据。
+单次输出规则为 `min(本次模型有效 maxOutputTokens, 有效窗口 - 完整输入预算 - 安全余量)`。`shared/outputBudget.ts` 负责计算，`agent/requestBudget.ts` 对实际协议投影及完整工具 schema/native replay 估算并生成版本化快照。空间不足先压缩或 rollover，再重新准入；没有合法输出空间时停止，不制造正数保底。工具、回答、续写、修复、子代理、摘要和 reviewer 均使用各自实际模型的额度，无阶段比例或阶段默认上限。旧四项 `agent.*MaxOutputTokens` 设置仅保留废弃说明，不再参与运行决策。
+
+Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tokens`，Anthropic 写入 `max_tokens`；输出预留、物理请求 token/费用预留、用量显示和 checkpoint 使用同一快照。Anthropic 显式 thinking budget 必须小于准入后的 max_tokens，否则明确拒绝，不关闭用户推理模式。Provider 的真实 input usage 按来源/endpoint/model 校准估算比例；context-too-long 会降低 learned window 并重建 epoch，明确的输出参数拒绝不视为窗口缩小证据。人工 metadata 与名称猜测只是声明，不代表供应商已验证支持。完整规则、恢复兼容性及验收证据见 [输出预算整改记录](model-output-budget-rectification.md)。
 
 模型切换会迁移 provider/cache lane，但不会删除或强制重建语义摘要。`HistorySummary.modelId` 保留生成 provenance；`requestProtocolVersion` 只表示序列化/schema 兼容版本，不表示模型能力等级。当前协议/Tool Schema 为 v10：新会话固定包含 V8 的 `keepseek_read_evidence`、V9 的 `keepseek_apply_patch`，并使用 V10 的 UTF-8 byte-offset `keepseek_read_subagent_result` schema；工具按名稳定排序。v1–v9 热会话保持原 provider-visible bytes，只在缓存已冷或受控 epoch rollover 边界迁移，历史消息和旧预算文本不改写。rollover 的完整宿主权威状态保存为可分页 checkpoint evidence；Provider seed 只带最近条目、总量/hash 和 manifest `evidenceRef`，因此长期任务的恢复前缀不会随累计工具次数无限增长。
 

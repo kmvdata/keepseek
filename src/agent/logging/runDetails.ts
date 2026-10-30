@@ -1,3 +1,4 @@
+import { normalizeRequestBudget } from '../requestBudget';
 import type {
   ChangeSet,
   ChangeSetFile,
@@ -53,6 +54,8 @@ export class RunDetailsBuilder {
   private budgetPause: RunDetailsSummary['budgetPause'];
   private failureReason: string | undefined;
   private truncated = false;
+  private outputBudgets: NonNullable<RunDetailsSummary['outputBudgets']> = [];
+  private outputTruncation: RunDetailsSummary['outputTruncation'];
 
   public constructor(private readonly input: RunDetailsBuilderInput) {
     this.startedAt = input.startedAt ?? new Date().toISOString();
@@ -61,6 +64,14 @@ export class RunDetailsBuilder {
 
   public record(event: InteractionTraceEvent, timestamp = new Date().toISOString()): void {
     switch (event.type) {
+      case 'request_output_budget': {
+        const budget = normalizeRequestBudget(event);
+        if (budget) this.outputBudgets = [...this.outputBudgets, budget].slice(-32);
+        return;
+      }
+      case 'tool_output_truncated':
+        this.outputTruncation = { finishReason: String(event.finishReason), requestId: String(event.requestId), toolsExecuted: 0 };
+        return;
       case 'task_plan_update':
         if (isTaskPlan(event.plan)) {
           this.taskPlan = cloneTaskPlan(event.plan);
@@ -198,6 +209,8 @@ export class RunDetailsBuilder {
       contextDeduplication: this.contextDeduplication ? { ...this.contextDeduplication } : undefined,
       historySummaries: this.historySummaries.map((summary) => ({ ...summary })),
       contextEpochs: this.contextEpochs.map((epoch) => ({ ...epoch })),
+      outputBudgets: this.outputBudgets,
+      outputTruncation: this.outputTruncation,
       capacityAdjustments: this.capacityAdjustments.map((item) => ({ ...item })),
       budgetStopReason: this.budgetStopReason,
       budgetPause: this.budgetPause ? { ...this.budgetPause } : undefined,

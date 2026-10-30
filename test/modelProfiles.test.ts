@@ -26,7 +26,7 @@ test('KeepSeek exposes only DeepSeek V4 Flash and Pro', () => {
   }
 });
 
-test('runtime profiles follow model and thinking mode automatically', () => {
+test('runtime profiles preserve model capability independently of thinking mode', () => {
   const flashNonThinking = getDeepSeekV4RuntimeProfile(DEEPSEEK_V4_FLASH_MODEL_ID, {
     thinkingEnabled: false,
     reasoningEffort: 'max'
@@ -49,11 +49,11 @@ test('runtime profiles follow model and thinking mode automatically', () => {
   });
 
   assert.equal(flashNonThinking.reasoningMode, 'non-thinking');
-  assert.equal(flashNonThinking.maxTokens, 48_000);
-  assert.equal(flashHigh.maxTokens, 96_000);
-  assert.equal(flashMax.maxTokens, 192_000);
-  assert.equal(proHigh.maxTokens, 128_000);
-  assert.equal(proMax.maxTokens, 256_000);
+  assert.equal(flashNonThinking.maxTokens, DEEPSEEK_V4_MAX_OUTPUT_TOKENS);
+  assert.equal(flashHigh.maxTokens, DEEPSEEK_V4_MAX_OUTPUT_TOKENS);
+  assert.equal(flashMax.maxTokens, DEEPSEEK_V4_MAX_OUTPUT_TOKENS);
+  assert.equal(proHigh.maxTokens, DEEPSEEK_V4_MAX_OUTPUT_TOKENS);
+  assert.equal(proMax.maxTokens, DEEPSEEK_V4_MAX_OUTPUT_TOKENS);
   assert.equal('maxToolIterations' in flashMax, false);
   assert.equal('maxToolCalls' in proMax, false);
   assert.ok(proMax.contextCompression.summaryBudgetTokens > proHigh.contextCompression.summaryBudgetTokens);
@@ -86,7 +86,7 @@ test('generic models use metadata first and never inherit DeepSeek output amplif
   assert.ok(unknownMax.contextCompression.summaryBudgetTokens <= unknownMax.maxTokens);
 });
 
-test('declared capabilities clamp output and summary budgets to the effective context window', () => {
+test('declared output capability remains intact until request-relative admission', () => {
   const declared = getAgentRuntimeProfile({
     id: 'manual-model',
     label: 'Manual model',
@@ -99,7 +99,7 @@ test('declared capabilities clamp output and summary budgets to the effective co
     compressionThreshold: 'aggressive'
   });
   assert.equal(declared.contextWindowTokens, 12_000);
-  assert.equal(declared.maxTokens, 12_000);
+  assert.equal(declared.maxTokens, 20_000);
   assert.ok(declared.contextCompression.summaryBudgetTokens <= declared.maxTokens);
   assert.equal(declared.contextCompression.triggerRatio, COMPRESSION_THRESHOLDS.aggressive.triggerRatio);
 

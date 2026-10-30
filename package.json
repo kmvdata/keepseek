@@ -223,20 +223,24 @@
           "markdownDescription": "Maximum upstream tokens for one child Agent, additionally bounded by the shared tree limit. / 单个子代理的上游 token 上限，且仍受共享树级上限限制。"
         },
         "keepseek.agent.toolMaxOutputTokens": {
-          "type": "integer", "default": 8192, "minimum": 256, "maximum": 65536, "scope": "window",
-          "markdownDescription": "Maximum output tokens for an ordinary tool-decision request. / 普通工具决策请求的最大输出 token。"
+          "type": "integer", "default": 8192, "minimum": 256, "scope": "window",
+          "markdownDescription": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。",
+          "deprecationMessage": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。"
         },
         "keepseek.agent.finalMaxOutputTokens": {
-          "type": "integer", "default": 16384, "minimum": 256, "maximum": 65536, "scope": "window",
-          "markdownDescription": "Maximum output tokens for the final answer or one budget finalization request. / 最终回答或预算收尾请求的最大输出 token。"
+          "type": "integer", "default": 16384, "minimum": 256, "scope": "window",
+          "markdownDescription": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。",
+          "deprecationMessage": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。"
         },
         "keepseek.agent.continuationMaxOutputTokens": {
-          "type": "integer", "default": 8192, "minimum": 256, "maximum": 65536, "scope": "window",
-          "markdownDescription": "Per-request and cumulative automatic continuation output limit. / 自动续写的单次及累计输出 token 上限。"
+          "type": "integer", "default": 8192, "minimum": 256, "scope": "window",
+          "markdownDescription": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。",
+          "deprecationMessage": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。"
         },
         "keepseek.agent.repairMaxOutputTokens": {
-          "type": "integer", "default": 4096, "minimum": 256, "maximum": 65536, "scope": "window",
-          "markdownDescription": "Maximum output tokens for hidden summary and format/recovery repair requests. / 隐藏摘要及格式/恢复修复请求的最大输出 token。"
+          "type": "integer", "default": 4096, "minimum": 256, "scope": "window",
+          "markdownDescription": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。",
+          "deprecationMessage": "Deprecated and ignored. Configure maxOutputTokens on each source/model. / 已废弃且不再生效，请在对应来源的模型设置中配置 maxOutputTokens。"
         },
         "keepseek.agent.maxCost": {
           "type": "number", "default": 0, "minimum": 0, "scope": "window",

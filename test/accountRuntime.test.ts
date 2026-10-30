@@ -230,7 +230,7 @@ test('openai-compatible runtime sends the actual model id without DeepSeek-only 
     assert.equal('reasoning_effort' in body, false);
     assert.equal(body.stream, true);
     assert.equal(body.tool_choice, 'auto');
-    assert.equal(body.max_tokens, 1_000);
+    assert.equal(body.max_tokens, 8_192);
     assert.deepEqual(body.tools, [TEST_TOOL]);
     const messages = body.messages as Array<Record<string, unknown>>;
     assert.equal('reasoning_content' in messages[1], false);

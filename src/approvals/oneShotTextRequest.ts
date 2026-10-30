@@ -1,3 +1,9 @@
+import type * as vscode from 'vscode';
+import type { AgentRequest } from '../shared/types';
+import { ExecutionCostBudget } from '../agent/executionPolicy';
+import { getConfiguredAgentMaxCost, getConfiguredModelUsagePricing } from '../shared/config';
+import { applyProviderRequestBudget, loadProviderRequestBudget } from '../agent/requestBudget';
+import { getAgentRuntimeProfile } from '../shared/modelProfiles';
 import { randomUUID } from 'node:crypto';
 import type { ModelSourceConfigSnapshot } from '../accounts/types';
 import { requiresModelSourceApiKey } from '../accounts/sourceCapabilities';
@@ -14,14 +20,15 @@ import {
 } from '../agent/usageLedger';
 import { createProviderCacheObservation } from '../agent/cacheObservation';
 
-export const APPROVAL_REVIEW_MAX_OUTPUT_TOKENS = 512;
-
 export function buildApprovalReviewerProviderBody(input: {
   modelId: string;
+  model?: KeepseekModel;
   provider: ModelSourceConfigSnapshot['provider'];
   systemPrompt: string;
   userPrompt: string;
 }): DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody {
+  const maxTokens = getAgentRuntimeProfile(input.model ?? { id: input.modelId, label: input.modelId, provider: input.provider },
+    { thinkingEnabled: false, reasoningEffort: 'high' }).maxTokens;
   if (input.provider === 'openai-responses') {
     return {
       model: input.modelId,
@@ -31,7 +38,7 @@ export function buildApprovalReviewerProviderBody(input: {
       ],
       stream: true,
       store: false,
-      max_output_tokens: APPROVAL_REVIEW_MAX_OUTPUT_TOKENS,
+      max_output_tokens: maxTokens,
       temperature: 0,
       top_p: 0.1
     };
@@ -42,7 +49,7 @@ export function buildApprovalReviewerProviderBody(input: {
       system: [{ type: 'text', text: input.systemPrompt }],
       messages: [{ role: 'user', content: [{ type: 'text', text: input.userPrompt }] }],
       stream: true,
-      max_tokens: APPROVAL_REVIEW_MAX_OUTPUT_TOKENS,
+      max_tokens: maxTokens,
       temperature: 0
     };
   }
@@ -57,7 +64,7 @@ export function buildApprovalReviewerProviderBody(input: {
     thinking: input.provider === 'deepseek' ? { type: 'disabled' } : undefined,
     temperature: 0,
     top_p: 0.1,
-    max_tokens: APPROVAL_REVIEW_MAX_OUTPUT_TOKENS,
+    max_tokens: maxTokens,
     stream_options: { include_usage: true }
   };
 }
@@ -69,6 +76,9 @@ export async function requestApprovalReviewText(input: {
   userPrompt: string;
   language: KeepseekLanguage;
   signal?: AbortSignal;
+  globalStorageUri?: vscode.Uri;
+  taskCostBudget?: AgentRequest['taskCostBudget'];
+  taskRunBudget?: AgentRequest['taskRunBudget'];
   onUsage?: (event: UsageEvent) => void;
   onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => void;
   sessionId?: string;
@@ -98,10 +108,14 @@ export async function requestApprovalReviewText(input: {
   const attemptSnapshots: UsagePriceSnapshot[] = [];
   const body = buildApprovalReviewerProviderBody({
     modelId: input.model.id,
+    model: input.model,
     provider: input.sourceConfig.provider,
     systemPrompt: input.systemPrompt,
     userPrompt: input.userPrompt
   });
+  const budget = await loadProviderRequestBudget({ model: input.model, sourceId: input.sourceConfig.sourceId,
+    baseUrl: input.sourceConfig.baseUrl, provider: input.sourceConfig.provider, body }, input.globalStorageUri);
+  applyProviderRequestBudget(body, budget);
   const attemptCacheObservations: ProviderCacheObservation[] = [];
   const createObservation = (attemptIndex: number) => createProviderCacheObservation({
     requestId,
@@ -119,6 +133,9 @@ export async function requestApprovalReviewText(input: {
     // logical request are comparable.
     previous: attemptIndex > 0 ? attemptCacheObservations[0] : undefined
   });
+  const costBudget = input.taskCostBudget ?? new ExecutionCostBudget(getConfiguredAgentMaxCost());
+  let costReservation: ReturnType<ExecutionCostBudget['reserve']> | undefined;
+  let tokenReservation: ReturnType<NonNullable<AgentRequest['taskRunBudget']>['reservePhysicalRequest']> | undefined;
   const response = await createProviderClient(input.sourceConfig.provider).createModelResponse({
     apiKey: input.sourceConfig.apiKey,
     baseUrl: input.sourceConfig.baseUrl,
@@ -130,6 +147,22 @@ export async function requestApprovalReviewText(input: {
     language: input.language,
     signal: input.signal,
     requestId,
+    callbacks: { beforeModelRequest: async () => {
+      input.taskRunBudget?.assertCanDispatch();
+      if (costBudget.limit > 0) {
+        const price = createSnapshot(new Date().toISOString());
+        const rates = getConfiguredModelUsagePricing(input.model.id);
+        const upperCost = (getAgentRuntimeProfile(input.model, { thinkingEnabled: false, reasoningEffort: 'high' }).contextWindowTokens
+          * Math.max(price.inputRate ?? NaN, price.cacheHitRate ?? NaN, rates?.peakInputPrice ?? 0, rates?.peakCacheHitPrice ?? 0)
+          + budget.actualMaxOutputTokens * Math.max(price.outputRate ?? NaN, rates?.peakOutputPrice ?? 0)) / 1_000_000;
+        if (!price.supportsBilling || price.unavailableReason || !Number.isFinite(upperCost) || !price.currency) {
+          throw new Error('Approval reviewer cannot be priced under the configured task cost limit / 审批模型无法在任务费用上限内计价');
+        }
+        costReservation = costBudget.reserve(upperCost, price.currency);
+      }
+      try { tokenReservation = input.taskRunBudget?.reservePhysicalRequest(budget.inputBudgetTokens, budget.actualMaxOutputTokens); }
+      catch (error) { if (costReservation) costBudget.settle(costReservation, 0); throw error; }
+    } },
     onAttempt: ({ attemptIndex, startedAt }) => {
       attemptSnapshots[attemptIndex] = createSnapshot(startedAt);
       attemptCacheObservations[attemptIndex] = createObservation(attemptIndex);
@@ -149,13 +182,8 @@ export async function requestApprovalReviewText(input: {
     usage,
     source: 'reviewer',
     cacheObservations: attemptCacheObservations
-  });
+  }).map((record) => ({ ...record, requestBudget: budget }));
   ledgerRecords.forEach((record) => input.onUsageLedgerRecord?.(record));
-  if (!response.ok || !response.message?.content?.trim()) {
-    throw new Error(response.error ?? (input.language === 'en'
-      ? 'Approval reviewer returned no usable response.'
-      : '审批模型未返回可用响应。'));
-  }
   if (usage) {
     const billed = ledgerRecords.find((record) => record.kind === 'usage_response');
     input.onUsage?.(createUsageEvent({
@@ -173,6 +201,15 @@ export async function requestApprovalReviewText(input: {
       requestId,
       source: 'reviewer'
     }));
+  }
+  if (tokenReservation) input.taskRunBudget?.settlePhysicalRequest(tokenReservation, response.usage ?? undefined, response.ok);
+  const billed = ledgerRecords.find((record) => record.kind === 'usage_response');
+  if (costReservation && response.ok && billed?.cost !== undefined
+    && (billed.pricingStatus === 'priced' || billed.pricingStatus === 'estimated_upper_bound')) costBudget.settle(costReservation, billed.cost);
+  if (!response.ok || response.finishReason === 'length' || !response.message?.content?.trim()) {
+    throw new Error(response.error ?? (input.language === 'en'
+      ? 'Approval reviewer returned no usable response.'
+      : '审批模型未返回可用响应。'));
   }
   // Provider reasoning is intentionally ignored and never leaves this call.
   return response.message.content.trim();

@@ -85,7 +85,6 @@ const SUPPORTED_MODELS: readonly KeepseekModel[] = [
 
 const FLASH_PROFILES = {
   'non-thinking': {
-    maxTokens: 48_000,
     contextCompression: {
       keepRecentTurns: 14,
       softCompactRatio: 0.38,
@@ -96,7 +95,6 @@ const FLASH_PROFILES = {
     }
   },
   high: {
-    maxTokens: 96_000,
     contextCompression: {
       keepRecentTurns: 12,
       softCompactRatio: 0.34,
@@ -107,7 +105,6 @@ const FLASH_PROFILES = {
     }
   },
   max: {
-    maxTokens: 192_000,
     contextCompression: {
       keepRecentTurns: 10,
       softCompactRatio: 0.28,
@@ -121,7 +118,6 @@ const FLASH_PROFILES = {
 
 const PRO_PROFILES = {
   'non-thinking': {
-    maxTokens: 64_000,
     contextCompression: {
       keepRecentTurns: 18,
       softCompactRatio: 0.46,
@@ -132,7 +128,6 @@ const PRO_PROFILES = {
     }
   },
   high: {
-    maxTokens: 128_000,
     contextCompression: {
       keepRecentTurns: 16,
       softCompactRatio: 0.4,
@@ -143,7 +138,6 @@ const PRO_PROFILES = {
     }
   },
   max: {
-    maxTokens: 256_000,
     contextCompression: {
       keepRecentTurns: 12,
       softCompactRatio: 0.32,
@@ -214,11 +208,7 @@ export function getAgentRuntimeProfile(
     const selected = isDeepSeekFlashIdentity(identity)
       ? FLASH_PROFILES[reasoningMode]
       : PRO_PROFILES[reasoningMode];
-    const maxTokens = Math.min(
-      selected.maxTokens,
-      declaredMaxOutputTokens ?? selected.maxTokens,
-      contextWindowTokens
-    );
+    const maxTokens = declaredMaxOutputTokens ?? getDeepSeekModelIdentity(model.id)!.maxOutputTokens;
     return {
       modelId: model.id,
       profileKind: 'deepseek-v4',
@@ -238,10 +228,7 @@ export function getAgentRuntimeProfile(
 
   // Thinking settings may change protocol fields where the provider supports
   // them, but they never inflate an unknown model's evidence-backed limits.
-  const maxTokens = Math.min(
-    declaredMaxOutputTokens ?? DEFAULT_GENERIC_MAX_OUTPUT_TOKENS,
-    contextWindowTokens
-  );
+  const maxTokens = declaredMaxOutputTokens ?? DEFAULT_GENERIC_MAX_OUTPUT_TOKENS;
   return {
     modelId: model.id,
     profileKind: 'generic',

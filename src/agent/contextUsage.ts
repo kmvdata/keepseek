@@ -464,7 +464,7 @@ function findPromptMessageIndex(messages: DeepSeekMessage[], prompt: string): nu
   return -1;
 }
 
-function normalizeContextUsageEstimate(input: {
+export function normalizeContextUsageEstimate(input: {
   maxTokensEstimate: number;
   usedTokensEstimate: number;
   breakdown: Partial<ContextUsageBreakdown>;

@@ -78,3 +78,5 @@ import './interactionTrace.test';
 import './modelNetworkRecoveryRuntime.test';
 import './providerNetworkRecovery.test';
 import './providerStreamRecovery.test';
+
+import './modelOutputBudget.test';

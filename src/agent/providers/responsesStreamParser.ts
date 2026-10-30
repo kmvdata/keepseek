@@ -1,7 +1,7 @@
 import type { AgentRunCallbacks } from '../../shared/types';
 import type { KeepseekLanguage } from '../../shared/i18n';
 import type { ProviderStreamParseOptions } from './types';
-import { ProviderIncompleteStreamError, ProviderStreamProtocolError, ProviderStreamProviderError, ProviderStreamReader, ProviderStreamTextDecoder, isTruncatedJsonError, mergeProviderStreamUsage } from './streamErrors';
+import { ProviderToolOutputTruncatedError, ProviderIncompleteStreamError, ProviderStreamProtocolError, ProviderStreamProviderError, ProviderStreamReader, ProviderStreamTextDecoder, isTruncatedJsonError, mergeProviderStreamUsage } from './streamErrors';
 import type { DeepSeekToolCall, DeepSeekUsage } from '../deepseek/types';
 import type {
   OpenAiResponsesItem,
@@ -116,6 +116,10 @@ export class ResponsesStreamParser {
       throw new ProviderStreamProviderError(this.formatTerminalError('incomplete', response, language));
     }
     if (status !== 'completed' && status !== 'incomplete') throw new ProviderStreamProtocolError('Invalid Responses terminal status.');
+    if (incompleteReason === 'max_output_tokens' && (
+      (Array.isArray(response.output) && response.output.some((item) => this.isRecord(item) && item.type === 'function_call'))
+      || [...state.outputItems.values()].some((item) => item.type === 'function_call') || state.functionArguments.size > 0
+    )) throw new ProviderToolOutputTruncatedError(incompleteReason);
     const authoritativeItems = this.readReplayableItems(response.output);
     let replayItems = response.output !== undefined ? authoritativeItems
       : Array.from(state.outputItems.entries()).sort(([left], [right]) => left - right)

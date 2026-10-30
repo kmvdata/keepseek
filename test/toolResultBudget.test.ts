@@ -147,7 +147,12 @@ test('dynamic admission is request-relative and context capacity self-calibrates
     const admission = new ToolResultAdmissionController(declared);
     const early = admission.decide({ estimatedInputTokens: 4_000, configuredMaxOutputTokens: 64_000, phase: 'tool', remainingBatchResults: 3 });
     assert.equal(early.learnedEffectiveWindowTokens, declared);
-    assert.ok(early.inlineTokenAllowance > 0);
+    if (declared > 64_000) assert.ok(early.inlineTokenAllowance > 0);
+    else {
+      assert.equal(early.inlineTokenAllowance, 0);
+      assert.equal(early.shouldRollover, true);
+      assert.equal(early.estimatedRequestTokens, declared);
+    }
     admission.observe(10_000, 12_000);
     assert.ok(admission.state.estimatorScale >= 1.2);
     admission.recordContextTooLong(20_000);
@@ -713,7 +718,7 @@ test('a hot v7 lane migrates only after its first externalized result and then e
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test('provider context metadata errors downshift the learned window and rebuild the same task', async () => {
+test('provider context rejection downshifts capacity and refuses an unfit protected epoch seed', async () => {
   const bodies: string[] = [];
   let checkpoint!: RunCheckpoint;
   const taskIds = new Set<string>();
@@ -730,15 +735,13 @@ test('provider context metadata errors downshift the learned window and rebuild 
   try {
     const input = request('openai-compatible');
     input.model.contextWindowTokens = 1_000_000;
-    const response = await new AgentRunner().run(input, { onCheckpoint: async (cp) => {
+    await assert.rejects(new AgentRunner().run(input, { onCheckpoint: async (cp) => {
       checkpoint = checkpointCopy(cp); taskIds.add(cp.taskId);
-    } });
-    assert.equal(response.message, 'Done.');
+    } }), /Context capacity/u);
     assert.equal(taskIds.size, 1);
     assert.equal(checkpoint.state?.epoch?.rollovers[0].reason, 'provider_context_too_long');
     assert.ok((checkpoint.state?.epoch?.calibration.learnedEffectiveWindowTokens ?? 1_000_000) < 1_000_000);
-    assert.equal(response.runDetails.contextEpochs?.[0].reason, 'provider_context_too_long');
-    assert.equal(bodies.length, 3);
+    assert.ok(bodies.length <= 2, 'never sends a request whose input consumes the calibrated capacity');
     assert.equal(input.history.length, 0, 'rollover does not create a visible history message');
   } finally { globalThis.fetch = originalFetch; }
 });
@@ -1019,7 +1022,7 @@ test('QwenCloud honors the disabled thinking setting on the initial request', as
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test('reasoning-only length stop retries QwenCloud in direct non-thinking mode', async () => {
+test('reasoning-only length continuation preserves the selected QwenCloud thinking mode', async () => {
   const bodies: Array<Record<string, unknown>> = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (_url, init) => {
@@ -1037,7 +1040,7 @@ test('reasoning-only length stop retries QwenCloud in direct non-thinking mode',
     assert.equal(response.message, 'Recovered final answer.');
     assert.equal(bodies.length, 2);
     assert.equal(bodies[0]?.enable_thinking, true);
-    assert.equal(bodies[1]?.enable_thinking, false);
+    assert.equal(bodies[1]?.enable_thinking, true);
     assert.equal(bodies[1]?.tool_choice, 'none');
     assert.match(JSON.stringify(bodies[1]?.messages), /analysis is already complete/iu);
   } finally { globalThis.fetch = originalFetch; }

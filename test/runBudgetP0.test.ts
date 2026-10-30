@@ -17,7 +17,7 @@ test('length continuation is bounded, persisted, and returns marked partial cont
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (_url, init) => {
     bodies.push(String(init?.body));
-    return chatText('partial-', 'length', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+    return chatText('partial-' + bodies.length + ' ', 'length', { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
   }) as typeof fetch;
   try {
     const input = request();
@@ -26,7 +26,7 @@ test('length continuation is bounded, persisted, and returns marked partial cont
       onCheckpoint: async (next) => { checkpoint = checkpointCopy(next); }
     });
     assert.equal(bodies.length, 2);
-    assert.match(response.message, /Truncated because the automatic output\/continuation budget/u);
+    assert.match(response.message, /Automatic continuation paused.*agent.maxContinuations/u);
     assert.equal(checkpoint.runBudget?.continuations, 1);
     assert.equal(checkpoint.runBudget?.modelRequests, 2);
     assert.equal(checkpoint.runBudget?.promptTokens, 20);

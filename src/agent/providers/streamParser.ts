@@ -1,7 +1,7 @@
 import { AgentRunCallbacks } from '../../shared/types';
 import type { KeepseekLanguage } from '../../shared/i18n';
 import type { ProviderStreamParseOptions } from './types';
-import { ProviderIncompleteStreamError, ProviderStreamProtocolError, ProviderStreamProviderError, ProviderStreamReader, ProviderStreamTextDecoder, isTruncatedJsonError, mergeProviderStreamUsage } from './streamErrors';
+import { ProviderToolOutputTruncatedError, ProviderIncompleteStreamError, ProviderStreamProtocolError, ProviderStreamProviderError, ProviderStreamReader, ProviderStreamTextDecoder, isTruncatedJsonError, mergeProviderStreamUsage } from './streamErrors';
 import { DsmlToolParser } from '../deepseek/dsmlToolParser';
 import { DeepSeekStreamChunk, DeepSeekStreamResult, DeepSeekToolCall, DeepSeekToolCallDelta } from '../deepseek/types';
 
@@ -94,6 +94,7 @@ export class StreamParser {
       let finishReason: string | null | undefined;
       let usage: DeepSeekStreamResult['usage'];
       let sawChunk = false;
+      let truncation: ProviderToolOutputTruncatedError | undefined;
 
       const validateTerminal = (): boolean => {
         if (!finishReason) return false;
@@ -103,6 +104,11 @@ export class StreamParser {
         if (!contentParts.length && !reasoningParts.length && !toolCallParts.size) {
           throw new ProviderStreamProtocolError(language === 'en'
             ? 'The model API did not return any streaming chunks.' : '模型 API 未返回任何流式数据块。');
+        }
+        if (finishReason === 'length' && (toolCallParts.size || /<[\uFF5C|]+DSML[\uFF5C|]+(?:tool_calls|calls|invoke)/iu.test(contentParts.join('') + reasoningParts.join('')))) {
+          truncation ??= new ProviderToolOutputTruncatedError(finishReason);
+          stream.terminalFailure();
+          return false;
         }
         if (toolCallParts.size && finishReason !== 'tool_calls' && finishReason !== 'stop') {
           throw new ProviderStreamProtocolError('Incomplete tool response / 工具响应未完成');
@@ -146,6 +152,7 @@ export class StreamParser {
         let chunk: { done: boolean; value?: Uint8Array };
         try { chunk = await stream.read(); }
         catch (error) {
+          if (truncation) break;
           if (!stream.canPreserve(error)) throw error;
           stream.interruptedTail();
           break;
@@ -168,6 +175,7 @@ export class StreamParser {
           stream.interruptedTail();
         }
       }
+      if (truncation) throw truncation;
       // [DONE] is a framing marker, not evidence of valid model completion.
       if (!sawChunk) throw new ProviderIncompleteStreamError(language === 'en'
         ? 'The model API did not return any streaming chunks.' : '模型 API 未返回任何流式数据块。');

@@ -1,3 +1,4 @@
+import { normalizeRequestBudget } from './requestBudget';
 import {
   getConfiguredModelUsagePricing,
   USAGE_PRICE_TABLE_VERSION
@@ -314,12 +315,14 @@ export function normalizeUsageLedgerRecord(value: unknown): ProviderUsageLedgerR
   const priced = usage
     ? priceUsageFromSnapshot(usage, snapshot)
     : { cost: 0, currency: snapshot.currency, pricingStatus: 'unavailable' as const, unpricedReason: 'no_usage' };
+  const requestBudget = normalizeRequestBudget(value.requestBudget);
   return {
     version: 1,
     requestId: value.requestId,
     attemptIndex: Number(value.attemptIndex),
     kind: value.kind,
     source: normalizeSource(value.source),
+    ...(requestBudget ? { requestBudget } : {}),
     sourceId: snapshot.sourceId,
     provider: snapshot.provider,
     protocol: snapshot.protocol,

@@ -317,6 +317,7 @@ export interface CacheDiagnosticsMetrics {
 }
 
 export interface ProviderUsageLedgerRecord {
+  requestBudget?: import('../agent/requestBudget').RequestBudgetSnapshot;
   version: 1;
   requestId: string;
   attemptIndex: number;
@@ -666,6 +667,9 @@ export interface ChatMessage {
   runState?: {
     taskId: string; status: string; stopReason?: string; usedMs: number; maxExecutionMs: number; limitSource: string;
     attempt: number; modelRequests: number; retries: number; lastNetworkAt?: string; lastEventAt?: string;
+    outputBudget?: import('../agent/requestBudget').RequestBudgetSnapshot;
+    outputFailure?: { finishReason: string; requestId: string; toolsExecuted: 0 };
+    outputBudgetMigrations?: import('../agent/runCheckpoint').RunCheckpoint['outputBudgetMigrations'];
     requestStartedAt?: string; lastContentAt?: string; lastStepAt?: string; steps: number; canResume: boolean; blocker?: string; error?: string;
   };
   id: string;
@@ -1342,6 +1346,8 @@ export interface RunDetailsSummary {
     necessity?: 'necessary' | 'controlled_policy';
     summaryKind: 'model' | 'host_fallback';
   }>;
+  outputBudgets?: Array<import('../agent/requestBudget').RequestBudgetSnapshot>;
+  outputTruncation?: { finishReason: string; requestId: string; toolsExecuted: 0 };
   capacityAdjustments?: Array<{
     reason: 'stale_capacity_calibration';
     beforeWindowTokens: number;

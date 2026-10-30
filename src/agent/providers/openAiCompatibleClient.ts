@@ -3,7 +3,7 @@ import { getConfiguredModelRequestTimeoutMs } from '../../shared/config';
 import type { KeepseekLanguage } from '../../shared/i18n';
 import { StreamParser } from './streamParser';
 import { isRecoverableNetworkError, parseRetryAfter } from './networkErrors';
-import { ProviderStreamProtocolError, ProviderStreamProviderError } from './streamErrors';
+import { ProviderToolOutputTruncatedError, ProviderStreamProtocolError, ProviderStreamProviderError } from './streamErrors';
 import { formatUnknownError, summarizeDeepSeekMessage, summarizeText } from '../logging/interactionTrace';
 import type {
   DeepSeekAssistantMessage,
@@ -280,6 +280,7 @@ export class OpenAICompatibleClient implements ProviderClient {
           ? [408, 429, 500, 502, 503, 504].includes(status ?? 0)
           : isRecoverableNetworkError(error);
         failureKind = rejectedHttpResponse ? 'http'
+          : error instanceof ProviderToolOutputTruncatedError ? 'tool_output_truncated'
           : error instanceof ProviderStreamProtocolError ? 'protocol'
             : error instanceof ProviderStreamProviderError ? 'provider'
               : error instanceof Error && /resource limit|资源上限/u.test(error.message) ? 'resource_limit'
@@ -292,7 +293,9 @@ export class OpenAICompatibleClient implements ProviderClient {
         failureKind, retryable, hadPartialOutput, hadStreamActivity, usage, ...diagnostics(), error: formatUnknownError(error),
         partialMessage: trace?.includesPayload('request') ? partialMessage() : summarizeDeepSeekMessage(partialMessage() ?? {}) });
       return { ok: false, message: partialMessage(), usage, hadPartialOutput, hadStreamActivity, retryable,
-        failureKind, status, retryAfterMs, error: message };
+        failureKind, status, retryAfterMs, error: message,
+        finishReason: error instanceof ProviderToolOutputTruncatedError ? error.finishReason : undefined,
+        toolIntegrity: error instanceof ProviderToolOutputTruncatedError ? 'incomplete' : undefined };
     } finally {
       request.signal?.removeEventListener('abort', abortByExternalSignal);
       clearStreamIdleTimeout();

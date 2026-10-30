@@ -182,7 +182,7 @@ test('projection truncates to the recent tail when no summary exists and the bud
   assert.equal(withSummary.history.length, messages.length);
 });
 
-test('projection fallback counts tool rounds atomically instead of only final assistant text', () => {
+test('projection fallback preserves protected and recent tool rounds even when admission must refuse', () => {
   const messages: ChatMessage[] = [
     {
       id: 'u1', role: 'user', content: 'old', createdAt: new Date(0).toISOString()
@@ -209,7 +209,8 @@ test('projection fallback counts tool rounds atomically instead of only final as
     maxProjectionTokens: 100
   });
 
-  assert.deepEqual(projection.history.map((message) => message.id), ['u2']);
+  assert.deepEqual(projection.history.map((message) => message.id), ['u1', 'a1', 'u2']);
+  assert.deepEqual(projection.history[1].toolRounds, messages[1].toolRounds);
 });
 
 function createProjectionSettings() {

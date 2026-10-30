@@ -1,3 +1,6 @@
+import { applyProviderRequestBudget, createRequestBudgetUsage, resolveProviderRequestBudget } from './requestBudget';
+import { ModelSourceStore } from '../accounts/accountStore';
+import { createModelCatalog, findModelBySelection } from '../accounts/modelCatalog';
 import {
   ExecutionClock,
   ExecutionBudgetError,
@@ -12,8 +15,6 @@ import {
 import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted, migrateLegacyCapacityCheckpoint } from './runCheckpoint';
 import { shapeWorkspaceListingResult } from './toolResultShaping';
 import {
-  getConfiguredAgentContinuationMaxOutputTokens,
-  getConfiguredAgentFinalMaxOutputTokens,
   getConfiguredAgentMaxContextEpochRollovers,
   getConfiguredAgentMaxContinuations,
   getConfiguredAgentMaxCost,
@@ -22,8 +23,6 @@ import {
   getConfiguredAgentMaxToolCalls,
   getConfiguredAgentMaxToolIterations,
   getConfiguredAgentMaxTreeUpstreamTokens,
-  getConfiguredAgentRepairMaxOutputTokens,
-  getConfiguredAgentToolMaxOutputTokens,
   getConfiguredEvidenceMaxBytes,
   getConfiguredPatchSettings,
   getConfiguredProviderInlineResultMaxChars,
@@ -120,8 +119,7 @@ import {
   createContextUsageEstimate,
   createContextUsageEstimateFromAnthropic,
   createContextUsageEstimateFromMessages,
-  createContextUsageEstimateFromResponses,
-  resolveOutputReserveTokens
+  createContextUsageEstimateFromResponses
 } from './contextUsage';
 import { WorkspaceToolAdapter, WorkspaceToolService } from './tools/workspaceTools';
 import { preflightSafeValidation, ValidationToolAdapter, ValidationToolService } from './tools/validationTools';
@@ -269,10 +267,6 @@ interface AgentRuntimeConfig {
   maxContextEpochRollovers: number;
   maxUpstreamTokens: number;
   maxTreeUpstreamTokens: number;
-  toolMaxOutputTokens: number;
-  finalMaxOutputTokens: number;
-  continuationMaxOutputTokens: number;
-  repairMaxOutputTokens: number;
 }
 
 interface OpenAiResponsesRunState {
@@ -398,7 +392,7 @@ export class AgentLoop {
         throw new AgentInterruptedError('uncertain_tool_result',
           `Uncertain tool result: ${requestCheckpoint.state.pending.executing.name}. Verify before resuming. / 工具结果未知，请先核实后再恢复。`);
       }
-      const blocker = recoveryBlocker(requestCheckpoint);
+      const blocker = recoveryBlocker(requestCheckpoint, request.model);
       if (blocker) throw new AgentInterruptedError(
         isCostLimitExhausted(requestCheckpoint) ? 'cost_limit' : 'waiting_for_user',
         blocker
@@ -854,8 +848,8 @@ export class AgentLoop {
       maxContextEpochRollovers: runtimeConfig.maxContextEpochRollovers,
       maxUpstreamTokens: runtimeConfig.maxUpstreamTokens,
       maxTreeUpstreamTokens: runtimeConfig.maxTreeUpstreamTokens,
-      maxContinuationOutputTokens: runtimeConfig.continuationMaxOutputTokens,
-      maxContinuationOutputChars: runtimeConfig.continuationMaxOutputTokens * 4
+      maxContinuationOutputTokens: 0,
+      maxContinuationOutputChars: 0
     }, sharedTreeBudget, runtimeConfig.maxRunMs, Date.now(), parentRunBudget?.deadlineAt);
     checkpoint.runBudget = logicalBudget.state;
     checkpoint.modelRequests = logicalBudget.state.modelRequests;
@@ -991,7 +985,7 @@ export class AgentLoop {
     };
     const restoredCalibration = restored?.epoch?.calibration
       ?? await calibrationStore.load(calibrationKey, calibrationDeclaration);
-    const admission = new ToolResultAdmissionController(
+    let admission = new ToolResultAdmissionController(
       runtimeConfig.contextWindowTokens,
       restoredCalibration,
       calibrationDeclaration
@@ -1022,7 +1016,32 @@ export class AgentLoop {
     const epoch = restored?.epoch
       ? { ...restored.epoch, failures: [...(restored.epoch.failures ?? [])] }
       : createContextEpochState(admission.state);
-    const outputReserveTokens = admission.decide({
+    const refreshModelBudget = async (continuingText = false) => {
+      // A transport retry/restart must keep the already-frozen request. Only a
+      // new model round may observe edits to this exact source/model's limits.
+      if (checkpoint.modelStepRequestHash || (pending && !continuingText) || !this.globalStorageUri) return;
+      const source = await new ModelSourceStore(this.globalStorageUri).getSource(runtimeConfig.sourceId);
+      if (!source) return; // Legacy/direct callers may supply a runtime-only source.
+      if (source.provider !== runtimeConfig.provider || endpointHash(source.baseUrl) !== endpointHash(runtimeConfig.baseUrl)) {
+        throw new AgentInterruptedError('waiting_for_user', 'Model source changed; send a new user message / 模型来源已变化，请发送新用户消息。');
+      }
+      const current = findModelBySelection(createModelCatalog([source]), { sourceId: runtimeConfig.sourceId, modelId: request.model.id });
+      if (!current) throw new AgentInterruptedError('waiting_for_user', 'Configured model is unavailable / 当前配置的模型已不可用');
+      const profile = getAgentRuntimeProfile(current, request.settings);
+      request.model = { ...request.model, maxOutputTokens: current.maxOutputTokens, maxOutputSource: current.maxOutputSource,
+        contextWindowTokens: current.contextWindowTokens, contextWindowSource: current.contextWindowSource };
+      runtimeConfig.maxTokens = profile.maxTokens;
+      if (runtimeConfig.contextWindowTokens !== profile.contextWindowTokens) {
+        runtimeConfig.contextWindowTokens = profile.contextWindowTokens;
+        calibrationDeclaration.version = `${DEEPSEEK_MODEL_IDENTITY_VERSION}:${profile.contextWindowTokens}`;
+        calibrationDeclaration.declaredWindowTokens = profile.contextWindowTokens;
+        admission = new ToolResultAdmissionController(profile.contextWindowTokens, admission.state, calibrationDeclaration);
+        epoch.calibration = admission.state;
+        await calibrationStore.save(calibrationKey, admission.state);
+      }
+      checkpoint.request.model = { ...request.model };
+    };
+    let outputReserveTokens = admission.decide({
       estimatedInputTokens: 0,
       configuredMaxOutputTokens: runtimeConfig.maxTokens,
       phase: 'tool',
@@ -1063,6 +1082,9 @@ export class AgentLoop {
       }
     });
     const emitUsageEstimate = (toolsForNextRequest: DeepSeekFunctionTool[]) => {
+      const currentBudget = admission.decide({ estimatedInputTokens: this.estimateCurrentProviderInputTokens(request, messages, toolsForNextRequest, providerRunState),
+        configuredMaxOutputTokens: runtimeConfig.maxTokens, phase: 'tool', remainingBatchResults: 0 });
+      outputReserveTokens = currentBudget.outputReserveTokens;
       const breakdown = {
         ...runtimeUsageBreakdown,
         toolSchemaTokensEstimate: undefined
@@ -1140,6 +1162,7 @@ export class AgentLoop {
     };
     await saveStep();
     const rolloverEpoch = async (reason: ContextEpochRolloverReason): Promise<void> => {
+      const preservedContinuation = reason === 'length_continuation' ? checkpoint.state?.continuation : undefined;
       let estimated: number;
       let summaryKind: 'model' | 'host_fallback';
       let seed: string;
@@ -1292,6 +1315,23 @@ export class AgentLoop {
       const seedMessage: DeepSeekMessage = { role: 'user', content: seed };
       messages.push(seedMessage);
       this.appendProviderUserText(providerRunState, seed);
+      if (preservedContinuation) {
+        const content = preservedContinuation.content;
+        const instruction = this.getLengthContinuationInstruction(request.language, !content.trim());
+        if (content) {
+          messages.push({ role: 'assistant', content });
+          if (providerRunState?.protocol === 'openai-responses') {
+            providerRunState.input.push({ role: 'assistant', content });
+            providerRunState.replayItems.push({ role: 'assistant', content });
+          } else if (providerRunState?.protocol === 'anthropic-messages') {
+            const partial: AnthropicMessage = { role: 'assistant', content: [{ type: 'text', text: content }] };
+            providerRunState.messages.push(partial);
+            providerRunState.replayMessages.push(partial);
+          }
+        }
+        messages.push({ role: 'user', content: instruction });
+        this.appendProviderUserText(providerRunState, instruction);
+      }
       const afterEstimatedPromptTokens = this.estimateCurrentProviderInputTokens(
         request, messages, tools, providerRunState
       );
@@ -1301,10 +1341,13 @@ export class AgentLoop {
       completedReplay = undefined;
       committedMessages = structuredClone(messages);
       committedProvider = structuredClone(providerRunState);
-      pending = undefined;
+      pending = preservedContinuation ? { response: { message: { role: 'assistant', content: preservedContinuation.content },
+        finishReason: preservedContinuation.finishReason }, results: {} } : undefined;
       // A controlled capacity/protocol boundary may change the projection;
       // it preserves the current round's consumed physical request allowance.
       checkpoint.modelStepRequestHash = undefined;
+      checkpoint.outputFailure = undefined;
+      checkpoint.modelStepGenerationStrategy = undefined;
       trace.record({
         type: 'context_epoch_rollover', epochIndex: epoch.index, reason,
         estimatedPromptTokens: estimated, actualPromptTokens: admission.state.lastActualInputTokens,
@@ -1382,6 +1425,14 @@ export class AgentLoop {
       const allowTerminalDraftEdit = false;
       emitUsageEstimate(toolsForTurn);
       let response: DeepSeekStreamResult;
+      await refreshModelBudget();
+      const beforeAdmission = admission.decide({
+        estimatedInputTokens: this.estimateCurrentProviderInputTokens(request, messages, toolsForTurn, providerRunState),
+        configuredMaxOutputTokens: runtimeConfig.maxTokens, phase: 'tool', remainingBatchResults: 0
+      });
+      if (!pending && !checkpoint.modelStepRequestHash && beforeAdmission.shouldRollover && epoch.turnInEpoch > 0) {
+        await rolloverEpoch('minimum_envelope_unfit');
+      }
       const estimatedInputBeforeRequest = this.estimateCurrentProviderInputTokens(
         request,
         messages,
@@ -1390,9 +1441,7 @@ export class AgentLoop {
       );
       const requestAdmission = admission.decide({
         estimatedInputTokens: estimatedInputBeforeRequest,
-        configuredMaxOutputTokens: allowToolCalls
-          ? runtimeConfig.toolMaxOutputTokens
-          : runtimeConfig.finalMaxOutputTokens,
+        configuredMaxOutputTokens: runtimeConfig.maxTokens,
         phase: allowToolCalls ? 'tool' : 'final',
         remainingBatchResults: 1
       });
@@ -1403,10 +1452,7 @@ export class AgentLoop {
           request,
           { ...runtimeConfig,
             maxRequestRetries: isBudgetFinalization ? 0 : runtimeConfig.maxRequestRetries,
-            maxTokens: Math.min(
-            requestAdmission.outputReserveTokens,
-            allowToolCalls ? runtimeConfig.toolMaxOutputTokens : runtimeConfig.finalMaxOutputTokens
-          ) },
+            maxTokens: requestAdmission.outputReserveTokens },
           messages,
           toolsForTurn,
           runCallbacks,
@@ -1451,7 +1497,7 @@ export class AgentLoop {
           });
         }
         const attempted = this.estimateCurrentProviderInputTokens(request, messages, toolsForTurn, providerRunState);
-        admission.recordContextTooLong(attempted);
+        admission.recordContextTooLong(attempted + (checkpoint.lastRequestBudget?.actualMaxOutputTokens ?? runtimeConfig.maxTokens));
         await calibrationStore.save(calibrationKey, admission.state);
         trace.record({ type: 'context_window_adapted', attemptedPromptTokens: attempted,
           learnedEffectiveWindowTokens: admission.state.learnedEffectiveWindowTokens,
@@ -1596,12 +1642,20 @@ export class AgentLoop {
             trace,
             usageTotals: upstreamUsageTotals,
             tools,
-            providerRunState
+            providerRunState,
+            compact: async () => {
+              await refreshModelBudget(true);
+              const decision = admission.decide({ estimatedInputTokens: this.estimateCurrentProviderInputTokens(request, messages, tools, providerRunState),
+                configuredMaxOutputTokens: runtimeConfig.maxTokens, phase: 'final', remainingBatchResults: 0 });
+              if (!decision.shouldRollover || epoch.turnInEpoch === 0 || checkpoint.modelStepRequestHash) return undefined;
+              await rolloverEpoch('length_continuation');
+              return { messages, providerRunState };
+            }
           });
         } catch (error) {
           if (!isContextTooLongError(error)) throw error;
           const attempted = this.estimateCurrentProviderInputTokens(request, messages, tools, providerRunState);
-          admission.recordContextTooLong(attempted);
+          admission.recordContextTooLong(attempted + (checkpoint.lastRequestBudget?.actualMaxOutputTokens ?? runtimeConfig.maxTokens));
           await calibrationStore.save(calibrationKey, admission.state);
           trace.record({
             type: 'context_window_adapted',
@@ -1610,6 +1664,9 @@ export class AgentLoop {
             contextTooLongCount: admission.state.contextTooLongCount,
             during: 'length_continuation'
           });
+          if (admission.state.contextTooLongCount >= 2 && epoch.turnInEpoch === 0) {
+            throw new AgentInterruptedError('provider_error', 'The continuation cannot fit the calibrated context; completed text is preserved / 续写无法容纳于校准后的上下文，已保留全部已生成正文。');
+          }
           await rolloverEpoch('length_continuation');
           turn -= 1;
           continue;
@@ -2259,6 +2316,8 @@ export class AgentLoop {
       checkpoint.modelStepRetries = 0;
       checkpoint.modelStepAttempts = 0;
       checkpoint.modelStepRequestHash = undefined;
+      checkpoint.outputFailure = undefined;
+      checkpoint.modelStepGenerationStrategy = undefined;
       completedReplay = this.createProviderReplayState(providerRunState);
       nextTurn = turn + 1;
       epoch.turnInEpoch += 1;
@@ -2377,9 +2436,6 @@ export class AgentLoop {
     callbacks: AgentRunCallbacks,
     runDeadlineAt?: number,
     options: {
-      /** Output recovery must not spend another complete response budget on
-       * hidden reasoning after a reasoning-only length stop. */
-      forceDisableThinking?: boolean;
       trace?: AgentInteractionTrace;
       usageTotals?: UpstreamUsageTotals;
       toolChoice?: 'auto' | 'none';
@@ -2392,9 +2448,7 @@ export class AgentLoop {
   ): Promise<DeepSeekStreamResult> {
     const trace = options.trace ?? createNoopInteractionTrace();
     this.throwIfCostLimitReached(request);
-    const thinkingEnabled = options.forceDisableThinking === true
-      ? false
-      : request.settings.thinkingEnabled;
+    const thinkingEnabled = request.settings.thinkingEnabled;
     let body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody;
     if (runtimeConfig.provider === 'openai-responses') {
       const responsesState = options.providerRunState;
@@ -2477,6 +2531,27 @@ export class AgentLoop {
       };
     }
 
+    const recoveryCheckpoint = options.usageSource === 'summary' ? undefined : request.checkpoint;
+    const resolveBudget = () => resolveProviderRequestBudget({
+      model: request.model, sourceId: runtimeConfig.sourceId, baseUrl: runtimeConfig.baseUrl,
+      provider: runtimeConfig.provider, body, calibration: request.checkpoint?.state?.epoch?.calibration
+    });
+    let budget = resolveBudget();
+    const failure = recoveryCheckpoint?.outputFailure;
+    const useSmallerCalls = recoveryCheckpoint?.modelStepGenerationStrategy === 'small_tools'
+      || Boolean(failure && budget.actualMaxOutputTokens <= failure.budget.actualMaxOutputTokens);
+    if (useSmallerCalls) {
+      const strategy = 'Host generation strategy: the previous uncommitted tool-call batch exceeded the output limit and none of its tools ran. Generate at most one small complete tool call at a time. Split large edits into independently valid small patches or artifacts using the available tools. Never continue or reconstruct the truncated arguments. Preserve the original task and all completed evidence.';
+      if ('input' in body) body.input = [...body.input, { role: 'system', content: strategy }];
+      else if ('system' in body) body.system = [...(body.system ?? []), { type: 'text', text: strategy }];
+      else body.messages = [...body.messages, { role: 'system', content: strategy }];
+      budget = resolveBudget();
+    }
+    applyProviderRequestBudget(body, budget);
+    runtimeConfig = { ...runtimeConfig, maxTokens: budget.actualMaxOutputTokens };
+    callbacks.onUsageEstimate?.(createRequestBudgetUsage(budget));
+    trace.record({ type: 'request_output_budget', ...budget, usageSource: options.usageSource ?? 'executor' });
+    if (request.checkpoint && options.usageSource !== 'summary') request.checkpoint.lastRequestBudget = budget;
     const upstreamRequestId = randomUUID();
     const requestProtocol = getProviderRequestLane({
       provider: runtimeConfig.provider,
@@ -2567,7 +2642,35 @@ export class AgentLoop {
     const checkpoint = tracksModelRound ? request.checkpoint : undefined;
     const serializedBody = JSON.stringify(body);
     const requestHash = hashText(serializedBody);
+    if (checkpoint?.outputFailure) {
+      const prior = checkpoint.outputFailure;
+      const largerBudget = budget.actualMaxOutputTokens > prior.budget.actualMaxOutputTokens;
+      const newStrategy = useSmallerCalls && checkpoint.modelStepGenerationStrategy !== 'small_tools';
+      if (checkpoint.state?.pending || prior.toolsExecuted !== 0 || prior.requestHash !== checkpoint.modelStepRequestHash
+        || prior.budget.sourceId !== budget.sourceId || prior.budget.modelId !== budget.modelId
+        || prior.budget.endpointHash !== budget.endpointHash || prior.budget.protocol !== budget.protocol
+        || (!largerBudget && !newStrategy) || prior.requestHash === requestHash) {
+        throw new AgentInterruptedError('output_truncated', 'No effective output recovery change; send a new user message requesting smaller complete steps / 没有有效的截断恢复变化，请发送新消息要求分小步完整生成，无需删除会话。');
+      }
+      const migration = {
+        reason: largerBudget ? 'larger_budget' as const : 'smaller_tool_calls' as const,
+        oldPolicy: prior.budget.policyVersion, newPolicy: budget.policyVersion,
+        oldRequestHash: prior.requestHash, newRequestHash: requestHash,
+        oldOutputTokens: prior.budget.actualMaxOutputTokens, newOutputTokens: budget.actualMaxOutputTokens
+      };
+      checkpoint.outputBudgetMigrations = [...(checkpoint.outputBudgetMigrations ?? []), migration].slice(-32);
+      checkpoint.modelStepGenerationStrategy = useSmallerCalls ? 'small_tools' : undefined;
+      checkpoint.outputFailure = undefined;
+      checkpoint.outputBudgetPolicyVersion = budget.policyVersion;
+      checkpoint.modelStepRequestHash = requestHash;
+      checkpoint.request.model = { ...request.model };
+      trace.record({ type: 'output_budget_migration', ...migration });
+      // Persist the semantic boundary before dispatch; physical attempts/cost remain spent.
+      await callbacks.onCheckpoint?.(checkpoint);
+    }
     if (checkpoint?.modelStepRequestHash && checkpoint.modelStepRequestHash !== requestHash) {
+      checkpoint.exactRecoveryBlocked = true;
+      await callbacks.onCheckpoint?.(checkpoint);
       throw new AgentInterruptedError('provider_error', request.language === 'en'
         ? 'The interrupted model request changed; exact recovery was refused. Start a new user turn to change its parameters.'
         : '中断模型轮的请求已变化，已拒绝非精确恢复；如需修改参数，请发送新的用户消息。');
@@ -2612,7 +2715,7 @@ export class AgentLoop {
         }
         let reservation: ReturnType<LogicalRunBudget['reservePhysicalRequest']> | undefined;
         try {
-          reservation = request.taskRunBudget?.reservePhysicalRequest(estimatedPromptTokens, runtimeConfig.maxTokens);
+          reservation = request.taskRunBudget?.reservePhysicalRequest(budget.inputBudgetTokens, budget.actualMaxOutputTokens);
         } catch (error) {
           if (costReservation) request.taskCostBudget?.settle(costReservation, 0);
           throw error;
@@ -2655,7 +2758,7 @@ export class AgentLoop {
           totalTokens: result.usage?.total_tokens,
           reasoningTokens: result.usage?.completion_tokens_details?.reasoning_tokens
         }
-      }).map((record) => ({ ...record, attemptIndex }));
+      }).map((record) => ({ ...record, attemptIndex, requestBudget: budget }));
       for (const record of records) callbacks.onUsageLedgerRecord?.(record);
       trace.record({ type: 'upstream_usage_ledger', requestId: upstreamRequestId, attemptIndex, records });
       if (result.ok && usage) {
@@ -2701,33 +2804,7 @@ export class AgentLoop {
     const usageEvent = finalUsageEvent;
     if (response.ok && response.message) {
       if (usageEvent) {
-        callbacks.onUsageEstimate?.(calibrateContextUsageEstimate(
-          options.providerRunState?.protocol === 'openai-responses'
-            ? createContextUsageEstimateFromResponses({
-                model: request.model,
-                input: options.providerRunState.input,
-                tools: options.providerRunState.tools,
-                outputReserveTokens: resolveOutputReserveTokens(runtimeConfig.maxTokens),
-                safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-              })
-            : options.providerRunState?.protocol === 'anthropic-messages'
-              ? createContextUsageEstimateFromAnthropic({
-                  model: request.model,
-                  system: options.providerRunState.system,
-                  messages: options.providerRunState.messages,
-                  tools: options.providerRunState.tools,
-                  outputReserveTokens: resolveOutputReserveTokens(runtimeConfig.maxTokens),
-                  safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-                })
-              : createContextUsageEstimateFromMessages({
-                model: request.model,
-                messages,
-                tools,
-                outputReserveTokens: resolveOutputReserveTokens(runtimeConfig.maxTokens),
-                safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-              }),
-          usageEvent.usage.promptTokens
-        ));
+        callbacks.onUsageEstimate?.(calibrateContextUsageEstimate(createRequestBudgetUsage(budget), usageEvent.usage.promptTokens));
       }
       if (options.providerRunState?.protocol === 'openai-responses' && response.nativeOutputItems?.length) {
         // response.output is authoritative and must precede all local function
@@ -2759,6 +2836,21 @@ export class AgentLoop {
       };
     }
 
+    if (response.failureKind === 'tool_output_truncated' && response.toolIntegrity === 'incomplete') {
+      if (checkpoint && !checkpoint.state?.pending && ['length', 'max_output_tokens', 'max_tokens'].includes(response.finishReason ?? '')) {
+        checkpoint.outputFailure = {
+          kind: 'tool_output_truncated', finishReason: response.finishReason as 'length' | 'max_output_tokens' | 'max_tokens',
+          toolIntegrity: 'incomplete', toolsExecuted: 0, requestHash, requestId: upstreamRequestId, budget
+        };
+        await callbacks.onCheckpoint?.(checkpoint);
+      }
+      trace.record({ type: 'tool_output_truncated', requestId: upstreamRequestId, requestHash,
+        finishReason: response.finishReason, toolIntegrity: 'incomplete', toolsExecuted: 0, budget });
+      throw new AgentInterruptedError('output_truncated', (response.error ?? 'Output exhausted / 输出额度耗尽')
+        + ` (${budget.actualMaxOutputTokens}/${budget.modelMaxOutputTokens}, ${budget.limitSource}). `
+        + (useSmallerCalls ? 'Send a new message requesting a smaller step / 请发送新消息缩小本步范围。'
+          : 'Continue will regenerate smaller complete tool calls / 继续任务将从本轮起点重新生成较小的完整工具调用。'));
+    }
     if (response.failureKind === 'external_abort') {
       trace.record({
         type: 'upstream_request_failed',
@@ -2813,26 +2905,28 @@ export class AgentLoop {
     usageTotals: UpstreamUsageTotals;
     tools: DeepSeekFunctionTool[];
     providerRunState?: ProviderNativeRunState;
+    compact?: () => Promise<{ messages: DeepSeekMessage[]; providerRunState?: ProviderNativeRunState } | undefined>;
   }): Promise<{ content: string; finishReason?: string | null } | undefined> {
     if (!this.canContinueLengthLimitedResponse(input)) {
       return undefined;
     }
 
-    const saved = input.request.checkpoint?.state;
+    let saved = input.request.checkpoint?.state;
     let content = saved?.continuation?.content ?? input.assistant.content ?? '';
     let finishReason = saved?.continuation?.finishReason ?? input.response.finishReason;
+    let lastSegment = saved?.continuation?.lastSegment ?? input.assistant.content ?? '';
     let requiresDirectAnswerRecovery = !content.trim()
       && Boolean(input.response.message.reasoning_content?.trim());
     for (let continuationIndex = saved?.continuation?.requests ?? 0; ; continuationIndex += 1) {
       if (!saved?.continuation?.inFlight && !input.request.taskRunBudget?.beginContinuation()) {
         return {
-          content: this.appendBudgetTruncationNotice(content, input.request.language),
+          content: this.appendBudgetTruncationNotice(content, input.request.language, input.runtimeConfig.maxContinuations),
           finishReason: 'continuation_budget_exhausted'
         };
       }
       const assistantMessage: DeepSeekMessage = {
         role: 'assistant',
-        content
+        content: lastSegment
       };
       const instructionMessage: DeepSeekMessage = {
         role: 'user',
@@ -2875,6 +2969,7 @@ export class AgentLoop {
         saved.provider = structuredClone(input.providerRunState);
         saved.continuation = {
           content,
+          lastSegment,
           finishReason,
           requests: input.request.taskRunBudget?.state.continuations ?? continuationIndex + 1,
           inFlight: true
@@ -2882,10 +2977,18 @@ export class AgentLoop {
         await input.callbacks.onCheckpoint?.(input.request.checkpoint!);
       }
 
+      if (!input.request.checkpoint?.modelStepRequestHash) {
+        const compacted = await input.compact?.();
+        if (compacted) {
+          input.messages = compacted.messages;
+          input.providerRunState = compacted.providerRunState;
+          saved = input.request.checkpoint?.state;
+        }
+      }
 
       const continuationResponse = await this.createModelResponse(
         input.request,
-        { ...input.runtimeConfig, maxTokens: input.runtimeConfig.continuationMaxOutputTokens },
+        { ...input.runtimeConfig, maxTokens: input.runtimeConfig.maxTokens },
         input.messages,
         input.tools,
         input.callbacks,
@@ -2894,7 +2997,6 @@ export class AgentLoop {
           trace: input.trace,
           usageTotals: input.usageTotals,
           toolChoice: 'none',
-          forceDisableThinking: requiresDirectAnswerRecovery,
           usageSource: 'continuation',
           providerRunState: input.providerRunState
         }
@@ -2911,23 +3013,18 @@ export class AgentLoop {
         input.runtimeUsageBreakdown.reasoningTokensEstimate += estimateChatMessageTokens('assistant', normalizedContinuation.displayReasoningContent);
       }
       const continuationContent = normalizedContinuation.assistant.content ?? '';
-      const continuationCharLimit = input.request.taskRunBudget?.limits.maxContinuationOutputChars ?? 0;
-      const continuationCharsUsed = input.request.taskRunBudget?.state.continuationOutputChars ?? 0;
-      const remainingContinuationChars = continuationCharLimit > 0
-        ? Math.max(0, continuationCharLimit - continuationCharsUsed)
-        : continuationContent.length;
-      const boundedContinuationContent = continuationContent.slice(0, remainingContinuationChars);
-      content = this.joinContinuationContent(content, boundedContinuationContent);
+      const previousContent = content;
+      content = this.joinContinuationContent(content, continuationContent);
       finishReason = continuationResponse.finishReason;
-      const continuationTokens = continuationResponse.usage?.completion_tokens
-        ?? estimateChatMessageTokens('assistant', continuationContent);
-      const withinOutputBudget = input.request.taskRunBudget?.recordContinuationOutput(
-        continuationTokens,
+      lastSegment = content.slice(previousContent.length);
+      input.request.taskRunBudget?.recordContinuationOutput(
+        continuationResponse.usage?.completion_tokens ?? estimateChatMessageTokens('assistant', continuationContent),
         continuationContent.length
-      ) !== false && boundedContinuationContent.length === continuationContent.length;
+      );
       if (saved) {
         saved.continuation = {
           content,
+          lastSegment,
           finishReason,
           requests: input.request.taskRunBudget?.state.continuations ?? continuationIndex + 1,
           inFlight: false
@@ -2938,11 +3035,8 @@ export class AgentLoop {
         await input.callbacks.onCheckpoint?.(input.request.checkpoint!);
       }
 
-      if (!withinOutputBudget) {
-        return {
-          content: this.appendBudgetTruncationNotice(content, input.request.language),
-          finishReason: 'continuation_budget_exhausted'
-        };
+      if (previousContent.trim() && content === previousContent && (finishReason === 'length' || finishReason === 'pause_turn')) {
+        throw new AgentInterruptedError('no_progress_loop', 'Continuation produced no new text / 续写未产生新正文');
       }
       if ((finishReason !== 'length' && finishReason !== 'pause_turn')) break;
       if (!continuationContent.trim()) {
@@ -2999,6 +3093,8 @@ export class AgentLoop {
     checkpoint.modelStepAttempts = 0;
     checkpoint.modelStepRetries = 0;
     checkpoint.modelStepRequestHash = undefined;
+    checkpoint.outputFailure = undefined;
+    checkpoint.modelStepGenerationStrategy = undefined;
   }
 
   private joinContinuationContent(left: string, right: string): string {
@@ -3008,7 +3104,19 @@ export class AgentLoop {
     if (!right) {
       return left;
     }
-    return `${left}${right}`;
+    // Linear-time exact suffix/prefix overlap; large continuations cannot stall the host.
+    const prefix = new Uint32Array(right.length);
+    for (let i = 1, j = 0; i < right.length; i++) {
+      while (j && right[i] !== right[j]) j = prefix[j - 1];
+      if (right[i] === right[j]) j++;
+      prefix[i] = j;
+    }
+    let overlap = 0;
+    for (let i = Math.max(0, left.length - right.length); i < left.length; i++) {
+      while (overlap && (overlap === right.length || left[i] !== right[overlap])) overlap = prefix[overlap - 1];
+      if (left[i] === right[overlap]) overlap++;
+    }
+    return left + right.slice(overlap >= 32 || overlap === right.length ? overlap : 0);
   }
 
   private toProviderClientConfig(runtimeConfig: AgentRuntimeConfig): ProviderClientConfig {
@@ -4720,11 +4828,14 @@ export class AgentLoop {
     return language === 'en' ? 'DeepSeek did not return text content.' : 'DeepSeek 未返回文本内容。';
   }
 
-  private appendBudgetTruncationNotice(content: string, language: KeepseekLanguage): string {
-    const notice = language === 'en'
+  private appendBudgetTruncationNotice(content: string, language: KeepseekLanguage, continuationLimit?: number): string {
+    const notice = continuationLimit !== undefined
+      ? (language === 'en' ? `[Automatic continuation paused at ${continuationLimit} requests (agent.maxContinuations / invocation limit). Completed text is preserved.]`
+        : `[自动续写已达到 ${continuationLimit} 次上限（agent.maxContinuations / 本次调用限制），已保留全部已生成正文。]`)
+      : language === 'en'
       ? '[Truncated because the automatic output/continuation budget was reached.]'
       : '[由于自动输出/续写预算已达到上限，内容已截断。]';
-    return [content.trim(), notice].filter(Boolean).join('\n\n');
+    return [content, notice].filter(Boolean).join('\n\n');
   }
 
   private getToolBudgetFinalizationNudge(language: KeepseekLanguage): string {
@@ -5077,7 +5188,7 @@ export class AgentLoop {
     this.appendProviderUserText(summaryProvider, instruction);
     const response = await this.createModelResponse(
       input.request,
-      { ...input.runtimeConfig, maxTokens: Math.min(2_048, input.runtimeConfig.repairMaxOutputTokens) },
+      input.runtimeConfig,
       summaryMessages,
       input.tools,
       {
@@ -5100,7 +5211,8 @@ export class AgentLoop {
       }
     );
     const content = response.message.content?.trim();
-    return content ? content.slice(0, 16_000) : undefined;
+    if (response.finishReason === 'length') return undefined;
+    return content || undefined;
   }
 
   private async getRuntimeConfig(request: AgentRequest): Promise<AgentRuntimeConfig> {
@@ -5171,10 +5283,6 @@ export class AgentLoop {
       ),
       maxTreeUpstreamTokens: mergeUnlimitedBudgetLimits(
         getConfiguredAgentMaxTreeUpstreamTokens(), request.executionLimits?.maxTreeUpstreamTokens),
-      toolMaxOutputTokens: Math.min(profile.maxTokens, getConfiguredAgentToolMaxOutputTokens()),
-      finalMaxOutputTokens: Math.min(profile.maxTokens, getConfiguredAgentFinalMaxOutputTokens()),
-      continuationMaxOutputTokens: Math.min(profile.maxTokens, getConfiguredAgentContinuationMaxOutputTokens()),
-      repairMaxOutputTokens: Math.min(profile.maxTokens, getConfiguredAgentRepairMaxOutputTokens())
     };
   }
 

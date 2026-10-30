@@ -6,6 +6,8 @@
 
 ## 1. 先建立整体心智模型
 
+2026-10-30 输出预算补充：`shared/outputBudget.ts` 定义唯一单次计算规则；`agent/requestBudget.ts` 将实际三协议请求投影转换为版本化预算快照。Runner、结果准入、压缩器和 reviewer 共用该规则。能力解析仍在 accounts/modelCatalog，按 sourceId + modelId 取值；恢复策略在 runCheckpoint/runner，用户诊断在 runDetails/Webview。行为及兼容迁移见 [输出预算整改记录](model-output-budget-rectification.md)。
+
 KeepSeek 是一个运行在 VS Code Extension Host 中的编程 Agent。它由两部分组成：
 
 - 宿主侧 TypeScript：访问 VS Code API、工作区、持久化存储和模型服务；
