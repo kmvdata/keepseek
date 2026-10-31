@@ -206,25 +206,6 @@ export const usageIndicatorStylesFragment: WebviewFragment = {
       opacity: 0;
     }
 
-    .usage-cost-help {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 15px;
-      height: 15px;
-      margin-left: 5px;
-      padding: 0;
-      border: 1px solid var(--vscode-descriptionForeground);
-      border-radius: 50%;
-      color: var(--vscode-descriptionForeground);
-      background: transparent;
-      font: inherit;
-      font-size: 10px;
-      cursor: help;
-      vertical-align: middle;
-    }
-    .usage-cost-help:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
-
 `.slice(1)
 };
 
@@ -521,6 +502,59 @@ export const usageDialogStylesFragment: WebviewFragment = {
       .usage-context-budget-metric strong,
       .usage-analysis-card-metric strong { font-size: 11px; }
     }
+
+    .usage-details-dialog .usage-cost-label { position: relative; }
+    .usage-details-dialog .usage-cost-help {
+      display: inline-flex;
+      margin-inline-start: 4px;
+      vertical-align: middle;
+      font: inherit;
+      line-height: inherit;
+    }
+    .usage-cost-help-trigger {
+      position: relative;
+      display: inline-flex;
+      flex: none;
+      width: 0.333lh;
+      height: 0.333lh;
+      aspect-ratio: 1;
+      min-width: 0;
+      min-height: 0;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+      font: inherit;
+      line-height: inherit;
+      cursor: default;
+    }
+    .usage-cost-help-trigger::before { content: ''; position: absolute; inset: -3px; }
+    .usage-cost-help-trigger svg { display: block; width: 100%; height: 100%; flex: none; }
+    .usage-cost-help-trigger:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+    .usage-details-dialog .usage-cost-help-tooltip {
+      position: absolute;
+      inset-inline: 0;
+      bottom: 100%;
+      margin-block-end: 4px;
+      z-index: 6;
+      box-sizing: border-box;
+      padding: 6px 8px;
+      border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border));
+      border-radius: 4px;
+      color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+      background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
+      box-shadow: 0 2px 6px var(--vscode-widget-shadow);
+      font-size: 11px;
+      line-height: 1.45;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      visibility: hidden;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .usage-cost-help:hover .usage-cost-help-tooltip,
+    .usage-cost-help:focus-within .usage-cost-help-tooltip { visibility: visible; opacity: 1; }
 
 `.slice(1)
 };

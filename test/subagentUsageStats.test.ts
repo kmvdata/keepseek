@@ -371,11 +371,18 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
       labelRenderer + '; return createUsageMetricLabel;')(
       { usageMetrics: { isOfficialDeepSeek: official, referenceCostSourceIds: referenceIds } },
       (value: unknown) => value, (key: string) => WEBVIEW_TRANSLATIONS.en[key],
-      () => ({ children: [] as unknown[], append(child: unknown) { this.children.push(child); }, setAttribute() {} })
+      (tagName: string, className: string, textContent?: string) => ({ tagName, className, textContent, children: [] as unknown[], attributes: {} as Record<string, string>, append(...children: unknown[]) { this.children.push(...children); }, setAttribute(key: string, value: string) { this.attributes[key] = value; } })
     );
     const label = makeLabel('usageCostLabel', sourceId);
     assert.equal(label.children.length > 0, expected);
-    if (expected) assert.match(label.children[0].title, /DeepSeek Flash V4.1/u);
+    if (expected) {
+      const [trigger, tooltip] = label.children[0].children;
+      assert.match(trigger.attributes['aria-label'], /DeepSeek Flash V4.1/u);
+      assert.equal(trigger.title, undefined, 'no duplicate native tooltip');
+      assert.equal(tooltip.attributes.role, 'tooltip');
+      assert.equal(tooltip.textContent, WEBVIEW_TRANSLATIONS.en.usageFlashReferencePriceHint);
+      assert.match(trigger.innerHTML, /<svg[^>]+viewBox="0 0 20 20"/u);
+    }
     assert.equal(makeLabel('usageTotalTokensLabel', sourceId).children.length, 0);
   }
   assert.match(inputStyles, /\.context-progress:hover::before[\s\S]*?context-progress-inward-scan 900ms linear infinite/u);
@@ -417,11 +424,14 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   );
   const formatMetricCost = new Function('t', costFormatterSource + '; return formatMetricCost;')(
     (key: string) => key
-  ) as (value: number, currency: string, hasData: boolean, truncateToCents?: boolean) => string;
-  assert.equal(formatMetricCost(12.239, '¥', true, true), '¥12.23');
-  assert.equal(formatMetricCost(12.235, '¥', true, true), '¥12.23');
-  assert.equal(formatMetricCost(0.009, '¥', true, true), '¥0.00');
-  assert.equal(formatMetricCost(12.239, '¥', true), '¥12.239');
+  ) as (value: number, currency: string, hasData: boolean) => string;
+  assert.equal(formatMetricCost(12.239, '¥', true), '¥12.23');
+  assert.equal(formatMetricCost(12.235, '¥', true), '¥12.23');
+  assert.equal(formatMetricCost(0.009, '¥', true), '¥0.00');
+  assert.equal(formatMetricCost(1.15, '¥', true), '¥1.15');
+  assert.equal(formatMetricCost(12.999999999999998, '¥', true), '¥12.99');
+  assert.equal(formatMetricCost(1e-9, '$', true), '$0.00');
+  assert.equal(formatMetricCost(1.2, '$', true), '$1.20');
   const accountedCostsSource = script.slice(
     script.indexOf('function formatAccountedCosts('),
     script.indexOf('function normalizeCacheReasonList(')
@@ -433,7 +443,11 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
     costByCurrency: { '¥': 12.239 }, pricingStatus: 'priced', pricedRequestCount: 1, unpricedRequestCount: 0
   };
   assert.equal(formatAccountedCosts({ ...pricedUsage, provider: 'deepseek' }).amountText, '¥12.23');
-  assert.equal(formatAccountedCosts({ ...pricedUsage, provider: 'kimi' }).amountText, '¥12.239');
+  assert.equal(formatAccountedCosts({ ...pricedUsage, provider: 'kimi' }).amountText, '¥12.23');
+  const mixedCosts = { ...pricedUsage, costByCurrency: { '¥': 12.239, '$': 2.999 } };
+  const recorded = JSON.stringify(mixedCosts);
+  assert.equal(formatAccountedCosts(mixedCosts).amountText, '¥12.23 · $2.99');
+  assert.equal(JSON.stringify(mixedCosts), recorded, 'display truncation never alters recorded amounts');
   assert.doesNotThrow(() => new Function(script));
   const webviewScript = getScript();
   assert.doesNotThrow(() => new Function(webviewScript));

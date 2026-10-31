@@ -414,7 +414,7 @@ export const usageRenderFragment: WebviewFragment = {
         var boundaryCostText = Object.keys(boundaryCosts).filter(function(currency) {
           return Number.isFinite(Number(boundaryCosts[currency])) && Number(boundaryCosts[currency]) > 0;
         }).map(function(currency) {
-          return formatMetricCost(boundaryCosts[currency], currency, true, false);
+          return formatMetricCost(boundaryCosts[currency], currency, true);
         }).join(' · ');
         if (boundaryCostText) {
           section.append(usageNode('p', 'usage-warning', t('usageEstimatedLocalBoundaryExtraCost', {
@@ -571,11 +571,16 @@ export const usageRenderFragment: WebviewFragment = {
           || (sourceId === state.selectedSourceId && !metrics.isOfficialDeepSeek)
           : metrics.referenceCostSourceIds.length > 0 || !metrics.isOfficialDeepSeek;
         if (reference) {
-          var hint = usageNode('button', 'usage-cost-help', '?');
+          label.className = 'usage-cost-label';
+          var help = usageNode('span', 'usage-cost-help');
+          var hint = usageNode('button', 'usage-cost-help-trigger');
           hint.type = 'button';
-          hint.title = t('usageFlashReferencePriceHint');
-          hint.setAttribute('aria-label', hint.title);
-          label.append(hint);
+          hint.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="8.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7.5 7.5a2.5 2.5 0 0 1 5 0c0 1.8-2.5 1.8-2.5 3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="10" cy="14" r="0.8" fill="currentColor"/></svg>';
+          hint.setAttribute('aria-label', t('usageFlashReferencePriceHint'));
+          var tooltip = usageNode('span', 'usage-cost-help-tooltip', t('usageFlashReferencePriceHint'));
+          tooltip.setAttribute('role', 'tooltip');
+          help.append(hint, tooltip);
+          label.append(help);
         }
         return label;
       }
