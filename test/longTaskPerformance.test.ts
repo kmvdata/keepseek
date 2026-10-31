@@ -95,7 +95,7 @@ test('session object migration preserves legacy bytes, lazy archives and small d
   const storage = new SessionObjectStore(uri);
   await storage.save(snapshotSession(session));
   const manifest = JSON.parse(await readFile(path, 'utf8'));
-  assert.equal(manifest.version, 3);
+  assert.equal(manifest.version, 4);
   assert.equal(await readFile(join(root, 'session.json.objects', 'legacy-v2.json'), 'utf8'), old);
   let written = 0;
   const original = vscode.workspace.fs.writeFile;
@@ -115,8 +115,10 @@ test('session object migration preserves legacy bytes, lazy archives and small d
   const files = await readdir(join(root, 'session.json.objects'));
   assert.ok(files.length < 400, 'shared history deduplicates across 55 checkpoints');
   const header = JSON.parse(await readFile(path, 'utf8')).header;
-  await writeFile(join(root, 'session.json.objects', `${header}.json`), '{}');
-  await assert.rejects(() => new SessionObjectStore(uri).load(JSON.parse(require('node:fs').readFileSync(path, 'utf8'))), /integrity/);
+  const damaged = JSON.parse(await readFile(path, 'utf8'));
+  if (damaged.headerInline) damaged.headerInline = { kind: 'object', entries: [] };
+  else await writeFile(join(root, 'session.json.objects', `${header}.json`), '{}');
+  await assert.rejects(() => new SessionObjectStore(uri).load(damaged), /integrity/);
 });
 
 test('committed historical interrupted checkpoints unload while the latest recovery point remains live', async t => {
@@ -170,7 +172,7 @@ test('migration progress is observable and cancellation before commit preserves 
   assert.ok(phases.includes('encode') && phases.includes('verify'));
   assert.ok(!phases.includes('commit'));
   await new SessionObjectStore(uri, true).save(snapshotSession(session));
-  assert.equal(JSON.parse(await readFile(path, 'utf8')).version, 3);
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).version, 4);
   assert.equal(await readFile(join(root, 'session.json.objects', 'legacy-v2.json'), 'utf8'), original);
 });
 

@@ -14,7 +14,7 @@ const KEYS = new Set(['sessionId', 'taskId', 'epochIndex', 'requestId', 'attempt
   'stopReason', 'finishReason', 'toolName', 'durationMs', 'elapsedMs', 'headersMs', 'firstContentMs', 'firstChunkMs',
   'estimatedPromptTokens', 'afterEstimatedPromptTokens', 'netReleasedTokens', 'summaryInputTokens', 'summaryOutputTokens',
   'protectedMessageCount', 'compressibleMessageCount', 'bytesWritten', 'objectsWritten', 'snapshotMs', 'encodeMs', 'commitMs',
-  'loadMs', 'eventLoopMaxMs', 'eventLoopP95Ms', 'droppedEvents', 'bodyDelivered', 'envelopeBytes', 'modelMaxOutputTokens', 'costKnown',
+  'loadMs', 'queueMs', 'processingMs', 'queueDepth', 'childId', 'nodesVisited', 'hashMs', 'objectIoMs', 'eventLoopMaxMs', 'eventLoopP95Ms', 'droppedEvents', 'bodyDelivered', 'envelopeBytes', 'modelMaxOutputTokens', 'costKnown',
   'actualMaxOutputTokens', 'estimatedInputTokens', 'inputBudgetTokens', 'safetyTokens', 'effectiveWindowTokens', 'limitSource', 'eventScope']);
 
 /** Independent bounded tail: four 256 KiB segments, at most 256 KiB queued.

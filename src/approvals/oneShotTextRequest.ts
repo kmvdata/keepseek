@@ -80,7 +80,7 @@ export async function requestApprovalReviewText(input: {
   taskCostBudget?: AgentRequest['taskCostBudget'];
   taskRunBudget?: AgentRequest['taskRunBudget'];
   onUsage?: (event: UsageEvent) => void;
-  onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => void;
+  onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => Promise<void> | void;
   sessionId?: string;
   taskId?: string;
   runId?: string;
@@ -183,7 +183,7 @@ export async function requestApprovalReviewText(input: {
     source: 'reviewer',
     cacheObservations: attemptCacheObservations
   }).map((record) => ({ ...record, requestBudget: budget }));
-  ledgerRecords.forEach((record) => input.onUsageLedgerRecord?.(record));
+  for (const record of ledgerRecords) await input.onUsageLedgerRecord?.(record);
   if (usage) {
     const billed = ledgerRecords.find((record) => record.kind === 'usage_response');
     input.onUsage?.(createUsageEvent({

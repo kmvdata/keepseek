@@ -4,19 +4,24 @@ import * as vscode from 'vscode';
 import { writeBytesAtomic, writeJsonAtomic } from '../shared/atomicStorage';
 import type { ChatMessage, ChatSession } from '../shared/types';
 import { getVisibleMessages } from './chatSessionStore';
-import { freezeTree, isFrozenTree } from './persistenceSnapshot';
+import { freezeTree, isFrozenTree, isPackedPersistenceTree, persistenceMessageBody } from './persistenceSnapshot';
 import { recordLocalPerformance } from '../agent/logging/performanceTrace';
 import { getConfiguredKeepseekLanguage, localize } from '../shared/i18n';
 
-type Encoded = null | string | number | boolean | { ref: string };
-type ObjectNode = { kind: 'array'; values: Encoded[] } | { kind: 'object'; entries: Array<[string, Encoded]> } | { kind: 'text'; text: string };
+type Encoded = null | string | number | boolean | { ref: string } | { inline: ObjectNode };
+type ObjectNode = { kind: 'array'; values: Encoded[] } | { kind: 'object'; entries: Array<[string, Encoded]> } | { kind: 'text'; text: string }
+  | { kind: 'json'; value: unknown };
 interface SessionManifest {
-  version: 3;
+  version: 3 | 4;
   workspaceKey: string;
   sessionId: string;
   revision: number;
   header: string;
+  headerInline?: ObjectNode;
   messages: Array<{ body: string; checkpoint?: string; pendingTool?: boolean; summary?: NonNullable<ChatMessage['runState']> }>;
+  /** Optional content-free lifecycle index committed with the graph. */
+  summary?: unknown;
+  summaryHash?: string;
 }
 const HASH = /^[a-f0-9]{64}$/u;
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -25,7 +30,7 @@ const digest = (text: string) => createHash('sha256').update(text).digest('hex')
  * No object GC while a session exists: old manifests and recovery references
  * remain valid, including failed writes and legacy rollback copies. */
 export class SessionObjectStore {
-  private readonly frozenRefs = new WeakMap<object, string>();
+  private readonly frozenRefs = new WeakMap<object, Encoded>();
   private readonly written = new Set<string>();
   private readonly pendingNodes = new Map<string, Promise<string>>();
   private ioActive = 0;
@@ -33,6 +38,11 @@ export class SessionObjectStore {
   private revision?: number;
   private writeBytes = 0;
   private writeObjects = 0;
+  private nodeVisits = 0;
+  private hashMs = 0;
+  private objectIoMs = 0;
+  private measuredIoActive = 0;
+  private measuredIoStarted = 0;
   public constructor(private readonly shard: vscode.Uri, private readonly offlineRecoveryCopy = false,
     private readonly migrationOptions?: { signal?: AbortSignal; onProgress?: (phase: string, completed: number, total: number) => void }) {}
   private directory(): vscode.Uri { return vscode.Uri.joinPath(this.shard, '..', `${this.shard.path.split('/').at(-1)}.objects`); }
@@ -41,8 +51,10 @@ export class SessionObjectStore {
     return vscode.Uri.joinPath(this.directory(), `${hash}.json`);
   }
   private async putNode(node: ObjectNode): Promise<string> {
+    const hashing = performance.now();
     const serialized = JSON.stringify(node);
     const hash = digest(serialized);
+    this.hashMs += performance.now() - hashing;
     if (this.written.has(hash)) return hash;
     const pending = this.pendingNodes.get(hash);
     if (pending) return pending;
@@ -65,18 +77,26 @@ export class SessionObjectStore {
   private async withObjectIo<T>(work: () => Promise<T>): Promise<T> {
     if (this.ioActive >= 4) await new Promise<void>(resolve => this.ioWaiters.push(resolve));
     else this.ioActive++;
+    if (this.measuredIoActive++ === 0) this.measuredIoStarted = performance.now();
     try { return await work(); } finally {
+      if (--this.measuredIoActive === 0) this.objectIoMs += performance.now() - this.measuredIoStarted;
       const next = this.ioWaiters.shift();
       if (next) next(); else this.ioActive--;
     }
   }
   private async encode(value: unknown): Promise<Encoded> {
+    this.nodeVisits++;
     if (value === null || value === undefined) return null;
     if (typeof value === 'string') return value.length > 4096 ? { ref: await this.putNode({ kind: 'text', text: value }) } : value;
     if (typeof value === 'number' || typeof value === 'boolean') return value;
     if (typeof value !== 'object') throw new Error('Non-JSON session value');
     const cached = isFrozenTree(value) ? this.frozenRefs.get(value) : undefined;
-    if (cached) return { ref: cached };
+    if (cached) return cached;
+    if (isPackedPersistenceTree(value)) {
+      const encoded = { ref: await this.putNode({ kind: 'json', value }) };
+      this.frozenRefs.set(value, encoded);
+      return encoded;
+    }
     let node: ObjectNode;
     if (Array.isArray(value)) {
       const values: Encoded[] = new Array(value.length);
@@ -94,14 +114,17 @@ export class SessionObjectStore {
       for (const [key, child] of Object.entries(value)) if (child !== undefined) entries.push([key, await this.encode(child)]);
       node = { kind: 'object', entries };
     }
-    const hash = await this.putNode(node);
-    if (isFrozenTree(value)) this.frozenRefs.set(value, hash);
-    return { ref: hash };
+    // Pack small nodes in their parent instead of fsyncing each dictionary and
+    // array separately. Large/frozen history remains independently addressed.
+    const encoded: Encoded = Buffer.byteLength(JSON.stringify(node)) <= 8192
+      ? { inline: node } : { ref: await this.putNode(node) };
+    if (isFrozenTree(value)) this.frozenRefs.set(value, encoded);
+    return encoded;
   }
   private async object(value: unknown): Promise<string> {
     const encoded = await this.encode(value);
     if (!encoded || typeof encoded !== 'object') throw new Error('Expected session object');
-    return encoded.ref;
+    return 'ref' in encoded ? encoded.ref : this.putNode(encoded.inline);
   }
   private async decode(hash: string, cache: Map<string, unknown>, stack = new Set<string>()): Promise<unknown> {
     if (stack.has(hash)) throw new Error('Cyclic session object');
@@ -110,10 +133,14 @@ export class SessionObjectStore {
     if (digest(raw) !== hash) throw new Error('Session object integrity mismatch');
     const node = JSON.parse(raw) as ObjectNode;
     const nextStack = new Set(stack).add(hash);
+    return this.decodeNode(node, cache, nextStack, hash);
+  }
+  private async decodeNode(node: ObjectNode, cache: Map<string, unknown>, stack: Set<string>, hash?: string): Promise<unknown> {
     const child = async (value: Encoded): Promise<unknown> => value && typeof value === 'object'
-      ? this.decode(value.ref, cache, nextStack) : value;
+      ? 'ref' in value ? this.decode(value.ref, cache, stack) : this.decodeNode(value.inline, cache, stack) : value;
     let value: unknown;
-    if (node.kind === 'text') value = node.text;
+    if (node.kind === 'json') value = node.value;
+    else if (node.kind === 'text') value = node.text;
     else if (node.kind === 'array') {
       const values: unknown[] = [];
       for (const item of node.values) values.push(await child(item));
@@ -124,16 +151,20 @@ export class SessionObjectStore {
       value = Object.fromEntries(entries);
     } else throw new Error('Invalid session object kind');
     freezeTree(value);
-    cache.set(hash, value);
-    if (value && typeof value === 'object') this.frozenRefs.set(value, hash);
-    this.written.add(hash);
+    if (hash) {
+      cache.set(hash, value);
+      if (value && typeof value === 'object') this.frozenRefs.set(value, { ref: hash });
+      this.written.add(hash);
+    }
     return value;
   }
   public async load(manifest: unknown): Promise<ChatSession> {
     const m = manifest as SessionManifest;
-    if (m?.version !== 3 || !Number.isSafeInteger(m.revision) || !Array.isArray(m.messages)) throw new Error('Invalid session manifest');
+    if (![3, 4].includes(m?.version) || !Number.isSafeInteger(m.revision) || !Array.isArray(m.messages)) throw new Error('Invalid session manifest');
     const cache = new Map<string, unknown>();
-    const header = await this.decode(m.header, cache) as Omit<ChatSession, 'messages'>;
+    if (m.headerInline && digest(JSON.stringify(m.headerInline)) !== m.header) throw new Error('Session header integrity mismatch');
+    const header = (m.headerInline ? await this.decodeNode(m.headerInline, cache, new Set())
+      : await this.decode(m.header, cache)) as Omit<ChatSession, 'messages'>;
     if (header.id !== m.sessionId || header.workspaceKey !== m.workspaceKey) throw new Error('Session scope mismatch');
     const messages: ChatMessage[] = [];
     for (let i = 0; i < m.messages.length; i++) {
@@ -155,8 +186,9 @@ export class SessionObjectStore {
     this.revision = m.revision;
     return { ...structuredClone(header), messages };
   }
-  public async save(session: ChatSession): Promise<number> {
+  public async save(session: ChatSession, summary?: unknown, scope?: { sessionId: string; taskId?: string; childId?: string }): Promise<number> {
     const started = performance.now(), bytesBefore = this.writeBytes, objectsBefore = this.writeObjects;
+    const visitsBefore = this.nodeVisits, hashBefore = this.hashMs, ioBefore = this.objectIoMs;
     return this.withWriterLock(async () => {
       let previous: unknown, previousBytes: Uint8Array | undefined;
       try { previousBytes = await vscode.workspace.fs.readFile(this.shard); previous = JSON.parse(new TextDecoder().decode(previousBytes)); }
@@ -164,8 +196,8 @@ export class SessionObjectStore {
       let prior: { version: number; revision: number; sessionId?: string; workspaceKey?: string } | undefined;
       if (previous) {
         const value = previous as SessionManifest & { session?: ChatSession };
-        if (value.version !== 3 && Number(value.version) !== 2) throw new Error('Unsupported session storage version');
-        if (!this.offlineRecoveryCopy && value.version !== 3 && value.session?.messages.some(message => message.runCheckpoint?.status === 'running')) {
+        if (![2, 3, 4].includes(Number(value.version))) throw new Error('Unsupported session storage version');
+        if (!this.offlineRecoveryCopy && Number(value.version) === 2 && value.session?.messages.some(message => message.runCheckpoint?.status === 'running')) {
           throw new Error('Legacy session still marked running; migration requires a stopped writer and an offline recovery copy');
         }
         prior = { version: value.version, revision: value.revision ?? 0,
@@ -175,7 +207,7 @@ export class SessionObjectStore {
       // Keep the legacy bytes for rollback, not a second 224 MB parsed tree
       // throughout object encoding and graph verification.
       previous = undefined;
-      const revision = prior?.version === 3 ? prior.revision : 0;
+      const revision = prior && prior.version >= 3 ? prior.revision : 0;
       if (revision && this.revision === undefined) throw new Error('Existing session must be loaded before saving');
       if (this.revision !== undefined && revision !== this.revision) throw new Error('Stale session writer; reload before saving');
       const migrating = prior?.version === 2;
@@ -192,9 +224,12 @@ export class SessionObjectStore {
       };
       checkCancelled();
       const { messages, ...header } = session;
-      const entries: SessionManifest['messages'] = [];
-      for (const message of messages) {
-        checkCancelled(); report('encode', entries.length, messages.length);
+      const entries: SessionManifest['messages'] = new Array(messages.length);
+      let messageCursor = 0, completedMessages = 0;
+      const workers = await Promise.allSettled(Array.from({ length: Math.min(4, messages.length) }, async () => {
+      while (messageCursor < messages.length) {
+        const index = messageCursor++, message = messages[index];
+        checkCancelled(); report('encode', completedMessages, messages.length);
         const { runCheckpoint, runCheckpointArchive, ...body } = message;
         delete body.runState;
         if (!runCheckpoint && runCheckpointArchive && !this.written.has(runCheckpointArchive.objectHash)) {
@@ -203,16 +238,24 @@ export class SessionObjectStore {
           if (digest(new TextDecoder().decode(bytes)) !== hash) throw new Error('Archived checkpoint integrity mismatch');
           this.written.add(hash);
         }
-        entries.push({ body: await this.object(body),
+        entries[index] = { body: await this.object(persistenceMessageBody(message, body)),
           checkpoint: runCheckpoint ? await this.object(runCheckpoint) : runCheckpointArchive?.objectHash,
           pendingTool: runCheckpoint ? Boolean(runCheckpoint.state?.pending) : runCheckpointArchive?.pendingTool,
-          summary: runCheckpoint ? getVisibleMessages([message])[0].runState : runCheckpointArchive?.summary });
+          summary: runCheckpoint ? getVisibleMessages([message])[0].runState : runCheckpointArchive?.summary };
+        completedMessages++;
       }
-      const manifest: SessionManifest = { version: 3, workspaceKey: session.workspaceKey, sessionId: session.id,
-        revision: revision + 1, header: await this.object(header), messages: entries };
+      }));
+      const failure = workers.find(result => result.status === 'rejected');
+      if (failure?.status === 'rejected') throw failure.reason;
+      const encodedHeader = await this.encode(header);
+      if (!encodedHeader || typeof encodedHeader !== 'object') throw new Error('Invalid session header');
+      const manifest: SessionManifest = { version: 4, workspaceKey: session.workspaceKey, sessionId: session.id,
+        revision: revision + 1, header: 'ref' in encodedHeader ? encodedHeader.ref : digest(JSON.stringify(encodedHeader.inline)),
+        ...('inline' in encodedHeader ? { headerInline: encodedHeader.inline } : {}), messages: entries,
+        ...(summary ? { summary, summaryHash: digest(JSON.stringify(summary)) } : {}) };
       // Verify the new graph before replacing a legacy authority. Keep its exact
       // bytes permanently until explicit session deletion (rollback support).
-      if (previousBytes && prior?.version !== 3) {
+      if (previousBytes && prior?.version === 2) {
         const verificationCache = new Map<string, unknown>();
         for (const [index, entry] of entries.entries()) {
           checkCancelled(); report('verify', index, entries.length);
@@ -227,6 +270,9 @@ export class SessionObjectStore {
         const latest = await vscode.workspace.fs.readFile(this.shard);
         if (Buffer.compare(previousBytes, latest) !== 0) throw new Error('Legacy session changed during migration');
       }
+      if (previousBytes && prior?.version === 3) {
+        await writeBytesAtomic(vscode.Uri.joinPath(this.directory(), 'legacy-v3.json'), previousBytes, { durable: true });
+      }
       checkCancelled(); report('commit', 0, 1);
       const encoded = performance.now();
       await writeJsonAtomic(this.shard, manifest, { durable: true });
@@ -239,9 +285,11 @@ export class SessionObjectStore {
         };
       });
       const bytes = Buffer.byteLength(JSON.stringify(manifest));
-      recordLocalPerformance({ type: 'checkpoint_store', sessionId: session.id,
+      recordLocalPerformance({ type: 'checkpoint_store', sessionId: session.id, ...scope,
         durationMs: performance.now() - started, encodeMs: encoded - started, commitMs: performance.now() - encoded,
         bytesWritten: this.writeBytes - bytesBefore + bytes, objectsWritten: this.writeObjects - objectsBefore });
+      recordLocalPerformance({ type: 'checkpoint_encoding', sessionId: session.id, ...scope,
+        nodesVisited: this.nodeVisits - visitsBefore, hashMs: this.hashMs - hashBefore, objectIoMs: this.objectIoMs - ioBefore });
       return bytes;
       };
       if (migrating && !this.offlineRecoveryCopy && typeof vscode.window.withProgress === 'function') {

@@ -2817,8 +2817,8 @@ export class AgentLoop {
           totalTokens: result.usage?.total_tokens,
           reasoningTokens: result.usage?.completion_tokens_details?.reasoning_tokens
         }
-      }).map((record) => ({ ...record, attemptIndex, requestBudget: budget }));
-      for (const record of records) callbacks.onUsageLedgerRecord?.(record);
+      }).map((record) => ({ ...record, attemptIndex, requestBudget: budget, subagentId: request.subagentContext?.id }));
+      for (const record of records) await callbacks.onUsageLedgerRecord?.(record);
       trace.record({ type: 'upstream_usage_ledger', requestId: upstreamRequestId, attemptIndex, records });
       if (result.ok && usage) {
         const successfulObservation = records[0]?.cacheObservation;
@@ -2848,9 +2848,13 @@ export class AgentLoop {
     const response = await createProviderClient(runtimeConfig.provider).createModelResponse(this.toProviderClientConfig(runtimeConfig), {
       body, serializedBody, language: request.language, signal: request.signal, callbacks: physicalCallbacks,
       runDeadlineAt, trace, requestId: upstreamRequestId, initialAttemptCount,
-      onAttempt: ({ attemptIndex, startedAt }) => {
+      onAttempt: async ({ attemptIndex, startedAt }) => {
         attemptSnapshots[attemptIndex] = createAttemptSnapshot(startedAt);
         attemptCacheObservations[attemptIndex] = createAttemptObservation(attemptIndex);
+        for (const record of createUsageLedgerRecords({ requestId: upstreamRequestId, attempts: [attemptSnapshots[attemptIndex]],
+          source: usageSource, cacheObservations: [attemptCacheObservations[attemptIndex]] })) {
+          await callbacks.onUsageLedgerRecord?.({ ...record, attemptIndex, requestBudget: budget, subagentId: request.subagentContext?.id });
+        }
       },
       onAttemptResult: ({ attemptIndex, result }) => accountAttempt(attemptIndex, result)
     });

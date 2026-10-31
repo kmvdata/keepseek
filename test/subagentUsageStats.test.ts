@@ -48,7 +48,8 @@ test('host ledger flush preserves ref damage and does not spin after storage fai
     referenceCostViews: new Map(),
     usageLedgerStore: {
       appendMany: async () => { writes++; if (fail) throw new Error('injected storage failure'); },
-      rebuild: async () => ({ ledger: { version: 1, records, incomplete: false, legacyAggregate: false }, damagedBucketCount: 0 })
+      current: async () => ({ ledger: { version: 1, records, incomplete: false, legacyAggregate: false },
+        stats: rebuildSessionUsageStatsFromLedger(records), damagedBucketCount: 0 })
     }, sessionStore: { persist: async () => {} }
   }) as { queueUsageLedgerFlush(session: import('../src/shared/types').ChatSession): void; usageLedgerFlushes: Map<string, Promise<void>> };
   host.queueUsageLedgerFlush(session);

@@ -4,8 +4,54 @@ import type {
 } from '../shared/types';
 import { DEEPSEEK_FLASH_PRICING_KEY } from '../shared/deepSeekModels';
 import { DEFAULT_USAGE_PRICING } from '../shared/config';
-import { createUsagePriceSnapshot, normalizeUsageLedgerValue, priceUsageFromSnapshot } from './usageLedger';
-import { rebuildSessionUsageStatsFromLedger } from './usageStats';
+import { createUsagePriceSnapshot, normalizeUsageLedgerValue, priceUsageFromSnapshot, usageLedgerRecordIdentity, preferUsageLedgerRecord } from './usageLedger';
+import { updateUsageLedgerStatsIndex, type UsageLedgerStatsIndex } from './usageStats';
+
+const emptyIndex = (): UsageLedgerStatsIndex => ({ records: new Map() });
+const groupKey = (...parts: unknown[]) => JSON.stringify(parts);
+/** Display costs are incremental too; they never feed the durable billing or budgets. */
+export class ReferenceCostIndex {
+  public readonly total = emptyIndex();
+  public turn = emptyIndex();
+  public readonly groups = new Map<string, UsageLedgerStatsIndex>();
+  private readonly original = new Map<string, ProviderUsageLedgerRecord>();
+  private since?: string;
+  public reconcile(records: ProviderUsageLedgerRecord[], lastUserAt?: string): ProviderUsageLedgerRecord[] {
+    const identities = new Set(records.map(usageLedgerRecordIdentity));
+    if ([...this.original.keys()].some(key => !identities.has(key))) {
+      // Explicit disk rebuild/damage may remove records. Never keep ghost fees
+      // in the derived display index when the durable authority is incomplete.
+      this.original.clear(); this.total.records.clear(); this.total.stats = undefined;
+      this.groups.clear(); this.turn = emptyIndex(); this.since = undefined;
+    }
+    const resetTurn = this.since !== lastUserAt;
+    if (resetTurn) { this.turn = emptyIndex(); this.since = lastUserAt; }
+    const since = Date.parse(lastUserAt ?? '');
+    for (const record of records) {
+      const key = usageLedgerRecordIdentity(record), previous = this.original.get(key);
+      if (preferUsageLedgerRecord(previous, record) !== previous) {
+        this.original.set(key, record);
+        const projected = projectReferenceCostRecord(record);
+        updateUsageLedgerStatsIndex(this.total, projected);
+        if (record.source === 'subagent') {
+          for (const name of [groupKey('model', record.sourceId, record.originalModelId, record.provider),
+            groupKey('profile', record.cacheObservation?.subagentProfile, record.cacheObservation?.subagentLane),
+            groupKey('child', record.subagentId ?? record.cacheObservation?.conversationId)]) {
+            let group = this.groups.get(name); if (!group) { group = emptyIndex(); this.groups.set(name, group); }
+            updateUsageLedgerStatsIndex(group, projected);
+          }
+        }
+        if (!resetTurn && Number.isFinite(since) && Date.parse(record.requestStartedAt) >= since) updateUsageLedgerStatsIndex(this.turn, projected);
+      }
+    }
+    const projected = [...this.total.records.values()];
+    if (resetTurn && Number.isFinite(since)) for (const record of projected) {
+      if (Date.parse(record.requestStartedAt) >= since) updateUsageLedgerStatsIndex(this.turn, record);
+    }
+    return projected;
+  }
+  public group(...parts: unknown[]) { return this.groups.get(groupKey(...parts))?.stats; }
+}
 
 /** Display-only projection. Never persist these records or feed them to task cost budgets. */
 export function projectReferenceCostRecord(record: ProviderUsageLedgerRecord): ProviderUsageLedgerRecord {
@@ -67,27 +113,23 @@ export function applyReferenceCostView<T extends SessionUsageStats | TurnUsageSt
 export function buildReferenceCostView(ledger: ProviderUsageLedger, input: {
   lastUserAt?: string;
   subagentUsageStats?: SubagentSessionUsageStats;
-}) {
+}, index = new ReferenceCostIndex()) {
   const original = normalizeUsageLedgerValue(ledger)?.records ?? [];
-  const records = original.map(projectReferenceCostRecord);
-  const build = (subset: readonly ProviderUsageLedgerRecord[]) => rebuildSessionUsageStatsFromLedger(subset);
-  const session = build(records);
+  const records = index.reconcile(original, input.lastUserAt);
+  const session = index.total.stats;
   const since = input.lastUserAt ? Date.parse(input.lastUserAt) : NaN;
   // Without a real user-turn boundary, do not invent a split from an aggregate timestamp.
-  const turn = Number.isFinite(since) ? build(records.filter((record) => Date.parse(record.requestStartedAt) >= since)) : undefined;
-  const children = records.filter((record) => record.source === 'subagent');
+  const turn = Number.isFinite(since) ? index.turn.stats : undefined;
   const subagents = input.subagentUsageStats ? {
     ...input.subagentUsageStats,
     byModel: input.subagentUsageStats.byModel.map((group) => ({ ...group,
-      usage: applyReferenceCostView(group.usage, build(children.filter((record) => record.sourceId === group.sourceId
-        && record.originalModelId === group.modelId && record.provider === group.provider))) })),
+      usage: applyReferenceCostView(group.usage, index.group('model', group.sourceId, group.modelId, group.provider)) })),
     byProfileLane: input.subagentUsageStats.byProfileLane.map((group) => ({ ...group,
-      usage: applyReferenceCostView(group.usage, build(children.filter((record) => record.cacheObservation?.subagentProfile === group.profile
-        && record.cacheObservation?.subagentLane === group.lane))) })),
+      usage: applyReferenceCostView(group.usage, index.group('profile', group.profile, group.lane)) })),
     recentRuns: input.subagentUsageStats.recentRuns.map((run) => ({ ...run,
-      usage: applyReferenceCostView(run.usage, build(children.filter((record) => record.cacheObservation?.conversationId === run.subagentId))) }))
+      usage: applyReferenceCostView(run.usage, index.group('child', run.subagentId)) }))
   } : undefined;
-  return { session, turn, subagents, lastUserAt: input.lastUserAt,
+  return { session, turn, subagents, records, lastUserAt: input.lastUserAt,
     referenceSourceIds: [...new Set(original.filter((record) => record.kind === 'usage_response'
       && !(record.provider === 'deepseek' && record.priceSnapshot.supportsBilling)).map((record) => record.sourceId))] };
 }

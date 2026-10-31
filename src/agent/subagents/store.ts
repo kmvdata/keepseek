@@ -4,6 +4,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { isRecord } from '../../shared/errors';
 import { normalizeSubagentRunUsageSummaryValue } from '../subagentUsageStats';
+import { SessionObjectStore } from '../../sessions/sessionObjectStore';
+import { copyPersistenceValue, snapshotCheckpoint, packPersistenceInput } from '../../sessions/persistenceSnapshot';
+import { withStorageCoordinator } from '../../shared/atomicStorage';
+import { recordLocalPerformance } from '../logging/performanceTrace';
+import type { ChatSession, SubagentActivity } from '../../shared/types';
+import { CoalescedWriter } from '../../sessions/coalescedWriter';
 import type {
   StoredSubagentMetadata,
   StoredSubagentTranscript,
@@ -22,12 +28,15 @@ export const DEFAULT_SUBAGENT_RESULT_PAGE_CHARS = 12_000;
 export const MAX_SUBAGENT_RESULT_PAGE_CHARS = 24_000;
 
 export class SubagentStore {
-  private persistenceQueue: Promise<void> = Promise.resolve();
+  private readonly objectStores = new Map<string, SessionObjectStore>();
+  private readonly queueDepths = new Map<string, number>();
+  private readonly writers = new Map<string, CoalescedWriter<() => Promise<void>>>();
   private readonly rootUri: vscode.Uri;
   private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder();
 
-  public constructor(globalStorageUri: vscode.Uri, workspaceKey: string) {
+  public constructor(globalStorageUri: vscode.Uri, private readonly workspaceKey: string,
+    private readonly onActivity?: (activity: SubagentActivity) => void) {
     const workspaceHash = createHash('sha256').update(workspaceKey, 'utf8').digest('hex').slice(0, 24);
     this.rootUri = vscode.Uri.joinPath(
       globalStorageUri,
@@ -39,12 +48,89 @@ export class SubagentStore {
   }
 
   public async save(metadata: StoredSubagentMetadata, transcript: StoredSubagentTranscript): Promise<void> {
+    if (!isSafeId(metadata.id) || transcript.metadataId !== metadata.id) throw new Error('Invalid subagent storage scope');
     const directory = this.getParentDirectory(metadata.parentSessionId);
-    await vscode.workspace.fs.createDirectory(directory);
-    const snapshot = structuredClone({ version: 1, metadata, transcript });
-    const write = this.persistenceQueue.catch(() => undefined).then(() => writeJsonAtomic(vscode.Uri.joinPath(directory, `${metadata.id}.run.json`), snapshot));
-    this.persistenceQueue = write;
-    await write;
+    const started = performance.now();
+    const { messages, checkpoint, ...header } = transcript;
+    const savedCheckpoint = checkpoint ? snapshotCheckpoint(checkpoint) : undefined;
+    if (savedCheckpoint) packPersistenceInput(savedCheckpoint.request.history);
+    const snapshot = { id: metadata.id, workspaceKey: this.workspaceKey, messages: [],
+      subagentMetadata: copyPersistenceValue(metadata),
+      subagentTranscript: { ...copyPersistenceValue(header), messages: packPersistenceInput(copyPersistenceValue(messages)),
+        checkpoint: savedCheckpoint }
+    } as unknown as ChatSession;
+    const summary = activityFromMetadata(metadata);
+    const stats = copyPersistenceValue(metadata.stats);
+    const copied = performance.now();
+    const uri = vscode.Uri.joinPath(directory, `${metadata.id}.state.json`);
+    const key = uri.toString();
+    let writer = this.writers.get(key);
+    if (!writer) { writer = new CoalescedWriter(commit => commit()); this.writers.set(key, writer); }
+    const depth = (this.queueDepths.get(key) ?? 0) + 1;
+    this.queueDepths.set(key, depth);
+    try {
+      await writer.save(() => withStorageCoordinator(key + ':child', async () => {
+        const processing = performance.now();
+        let store = this.objectStores.get(key);
+        if (!store) {
+          store = new SessionObjectStore(uri);
+          try { await store.load(JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(uri)))); }
+          catch (error) { if (!isMissing(error)) throw error; }
+          this.objectStores.set(key, store);
+        }
+        await store.save(snapshot, { version: 1, activity: summary, stats }, {
+          sessionId: summary.parentSessionId, taskId: checkpoint?.taskId, childId: summary.id });
+        this.onActivity?.(summary);
+        recordLocalPerformance({ type: 'checkpoint_child_store', sessionId: metadata.parentSessionId,
+          taskId: checkpoint?.taskId, childId: metadata.id, snapshotMs: copied - started,
+          queueMs: processing - copied, processingMs: performance.now() - processing,
+          durationMs: performance.now() - started, queueDepth: depth });
+      }));
+    } finally {
+      const remaining = (this.queueDepths.get(key) ?? 1) - 1;
+      if (remaining) this.queueDepths.set(key, remaining); else this.queueDepths.delete(key);
+    }
+  }
+
+  public async saveActivity(activity: SubagentActivity): Promise<void> {
+    if (!validActivity(activity, activity.parentSessionId, activity.id) || !isSafeId(activity.id)) throw new Error('Invalid subagent activity scope');
+    activity = copyActivity(activity);
+    await writeJsonAtomic(vscode.Uri.joinPath(this.getParentDirectory(activity.parentSessionId), `${activity.id}.activity.json`),
+      { version: 1, activity }, { durable: true });
+    this.onActivity?.(activity);
+  }
+
+  /** One bounded manifest per child; V4 never decodes private transcript objects. */
+  public async readSummaries(parentSessionId: string): Promise<{ activities: SubagentActivity[];
+    summaries: import('../../shared/types').SubagentRunUsageSummary[]; incomplete: boolean }> {
+    const result = { activities: [] as SubagentActivity[], summaries: [] as import('../../shared/types').SubagentRunUsageSummary[], incomplete: false };
+    let files: [string, vscode.FileType][];
+    try { files = await vscode.workspace.fs.readDirectory(this.getParentDirectory(parentSessionId)); }
+    catch (error) { result.incomplete = !isMissing(error); return result; }
+    const ids = new Set(files.flatMap(([name, type]) => type === vscode.FileType.File
+      && /\.(state|run|activity|meta)\.json$/u.test(name) ? [name.replace(/\.(state|run|activity|meta)\.json$/u, '')] : []));
+    for (const id of ids) {
+      if (!isSafeId(id)) { result.incomplete = true; continue; }
+      try {
+        const graph = files.some(([name]) => name === `${id}.state.json`);
+        const legacy = files.some(([name]) => name === `${id}.run.json`);
+        const split = files.some(([name]) => name === `${id}.meta.json`);
+        const value = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(
+          this.getParentDirectory(parentSessionId), `${id}.${graph ? 'state' : legacy ? 'run' : split ? 'meta' : 'activity'}.json`))));
+        const metadata = !graph && (legacy || split) ? normalizeMetadata(legacy ? value.metadata : value) : undefined;
+        const activity = metadata ? activityFromMetadata(metadata) : graph ? value.summary?.activity : value.activity;
+        if (!validActivity(activity, parentSessionId, id) || graph && (value.version !== 4
+          || value.workspaceKey !== this.workspaceKey || value.sessionId !== id || value.summary?.version !== 1
+          || value.summaryHash !== createHash('sha256').update(JSON.stringify(value.summary)).digest('hex'))) throw new Error('Invalid child index');
+        result.activities.push({ ...copyActivity(activity), ...(activity.status === 'queued' || activity.status === 'running'
+          ? { status: 'stopped' as const, interrupted: true } : {}) });
+        const stats = normalizeSubagentRunUsageSummaryValue(metadata?.stats ?? value.summary?.stats);
+        if (stats && stats.subagentId === id && stats.parentRunId === activity.parentRunId && stats.rootRunId === activity.rootRunId
+          && stats.sourceId === activity.sourceId && stats.modelId === activity.modelId && stats.profile === activity.profile && stats.lane === activity.lane) result.summaries.push(stats);
+        else if (activity.status === 'completed' || activity.status === 'failed') result.incomplete = true;
+      } catch { result.incomplete = true; }
+    }
+    return result;
   }
 
   public async read(parentSessionId: string, subagentId: string): Promise<{
@@ -55,13 +141,26 @@ export class SubagentStore {
       return undefined;
     }
     try {
+      const uri = vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.state.json`);
+      try {
+        const manifest = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(uri)));
+        if (manifest.workspaceKey !== this.workspaceKey || manifest.sessionId !== subagentId) return undefined;
+        const session = await new SessionObjectStore(uri).load(manifest) as unknown as {
+          subagentMetadata: unknown; subagentTranscript: Omit<StoredSubagentTranscript, 'messages'>; messages: StoredSubagentTranscript['messages'] };
+        const metadata = normalizeMetadata(session.subagentMetadata);
+        const transcript = normalizeTranscript({ ...session.subagentTranscript,
+          messages: (session.subagentTranscript as StoredSubagentTranscript).messages ?? session.messages });
+        return metadata && transcript && metadata.id === subagentId && metadata.parentSessionId === parentSessionId
+          && transcript.metadataId === subagentId ? { metadata, transcript } : undefined;
+      } catch (error) { if (!isMissing(error)) return undefined; }
       try {
         const data = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(
           vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.run.json`)
         ))) as { metadata?: unknown; transcript?: unknown };
         const metadata = normalizeMetadata(data.metadata);
         const transcript = normalizeTranscript(data.transcript);
-        if (metadata && transcript && transcript.metadataId === metadata.id) return { metadata, transcript };
+        if (metadata && transcript && metadata.id === subagentId && metadata.parentSessionId === parentSessionId
+          && transcript.metadataId === metadata.id) return { metadata, transcript };
         return undefined;
       } catch (error) {
         if (!(error instanceof Error) || !('code' in error) || !['FileNotFound', 'ENOENT'].includes(String(error.code))) return undefined;
@@ -72,7 +171,7 @@ export class SubagentStore {
       ]);
       const metadata = normalizeMetadata(JSON.parse(this.decoder.decode(metadataBytes)));
       const transcript = normalizeTranscript(JSON.parse(this.decoder.decode(transcriptBytes)));
-      if (!metadata || !transcript || transcript.metadataId !== metadata.id) {
+      if (!metadata || !transcript || metadata.id !== subagentId || metadata.parentSessionId !== parentSessionId || transcript.metadataId !== metadata.id) {
         return undefined;
       }
       return { metadata, transcript };
@@ -219,8 +318,8 @@ export class SubagentStore {
       return [];
     }
     const ids = entries
-      .filter(([name, type]) => type === vscode.FileType.File && name.endsWith('.run.json'))
-      .map(([name]) => name.slice(0, -'.run.json'.length))
+      .filter(([name, type]) => type === vscode.FileType.File && /\.(run|state)\.json$/u.test(name))
+      .map(([name]) => name.replace(/\.(run|state)\.json$/u, ''))
       .filter((id) => id !== input.excludeSubagentId)
       .slice(-64);
     const candidates = (await Promise.all(ids.map(async (id) => await this.read(input.parentSessionId, id))))
@@ -326,10 +425,39 @@ export class SubagentStore {
   private async runFileExists(parentSessionId: string, subagentId: string): Promise<boolean> {
     if (!isSafeId(parentSessionId) || !isSafeId(subagentId)) return false;
     try {
-      await vscode.workspace.fs.stat(vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.run.json`));
+      await Promise.resolve(vscode.workspace.fs.stat(vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.state.json`))).catch(async error => {
+        if (!isMissing(error)) throw error;
+        await vscode.workspace.fs.stat(vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.run.json`));
+      });
       return true;
     } catch { return false; }
   }
+}
+
+export function activityFromMetadata(metadata: StoredSubagentMetadata): SubagentActivity {
+  return { id: metadata.id, parentSessionId: metadata.parentSessionId, parentRunId: metadata.parentRunId,
+    rootRunId: metadata.rootRunId, treeId: metadata.treeId, profile: metadata.profile, lane: metadata.lane,
+    status: metadata.status, sourceId: metadata.sourceId, modelId: metadata.modelId, provider: metadata.provider,
+    updatedAt: metadata.updatedAt, reused: Boolean(metadata.reusedFromSubagentId),
+    interrupted: metadata.failureKind === 'interrupted' };
+}
+function copyActivity(value: SubagentActivity): SubagentActivity {
+  return { id: value.id, parentSessionId: value.parentSessionId, parentRunId: value.parentRunId, rootRunId: value.rootRunId,
+    treeId: value.treeId, profile: value.profile, lane: value.lane, status: value.status, sourceId: value.sourceId,
+    modelId: value.modelId, provider: value.provider, updatedAt: value.updatedAt, reused: value.reused === true,
+    interrupted: value.interrupted === true };
+}
+function validActivity(value: unknown, parentSessionId: string, id: string): value is SubagentActivity {
+  return isRecord(value) && value.id === id && value.parentSessionId === parentSessionId
+    && typeof value.parentRunId === 'string' && isSafeId(value.parentRunId)
+    && typeof value.treeId === 'string' && isSafeId(value.treeId)
+    && typeof value.rootRunId === 'string' && isSafeId(value.rootRunId)
+    && typeof value.profile === 'string' && typeof value.lane === 'string'
+    && typeof value.status === 'string' && ['queued', 'running', 'completed', 'failed', 'stopped'].includes(value.status)
+    && typeof value.updatedAt === 'string';
+}
+function isMissing(error: unknown): boolean {
+  return ['FileNotFound', 'ENOENT'].includes(String((error as { code?: string })?.code));
 }
 
 function normalizeMetadata(value: unknown): StoredSubagentMetadata | undefined {

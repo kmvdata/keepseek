@@ -524,7 +524,7 @@ src/approvals/
 
 ## 11. `src/sessions/`：会话模型与持久化
 
-长任务整改后，workspace index 仍为 V2；session shard 的内容升级为 V3 manifest，旁边的 `<shard>.objects/` 保存 SHA-256 不可变对象图。`sessionObjectStore.ts` 负责 scope、hash、revision、写锁及对象先于 manifest 的提交；`persistenceSnapshot.ts` 仅复用生产者不会原地修改的历史/已提交树，复制 pending journal、预算等可变状态。普通加载只展开最后一个未结束 checkpoint，其余保存 `runCheckpointArchive` 元数据；Webview 不接收 checkpoint 对象或 archive 引用。完整审计正文与对象仍在磁盘。
+长任务整改后，workspace index 仍为 V2；session shard 的内容升级为 V4 manifest（兼容 V3），旁边的 `<shard>.objects/` 保存 SHA-256 不可变对象图。`sessionObjectStore.ts` 负责 scope、hash、revision、写锁及对象先于 manifest 的提交；`persistenceSnapshot.ts` 仅复用生产者不会原地修改的历史/已提交树，复制 pending journal、预算等可变状态。普通加载只展开最后一个未结束 checkpoint，其余保存 `runCheckpointArchive` 元数据；Webview 不接收 checkpoint 对象或 archive 引用。完整审计正文与对象仍在磁盘。
 
 迁移备份、失败恢复、回退边界和实际性能见 [长任务整改与验收](long-task-performance-rectification.md)。V3 不依赖旧版本能读新格式；旧版本仍标记 running 的 shard 默认拒绝写入，须使用停止写入者后的离线副本恢复流程。
 
@@ -535,7 +535,7 @@ src/sessions/
 └── sessionRetention.ts       过期清理和保留策略
 ```
 
-`ChatSessionStore` 是内存中的当前工作区会话门面；`GlobalSessionStorage` 是持久化 adapter。workspace index 使用小型 V2 索引；V3 session manifest 指向消息与 checkpoint 对象，避免启动时加载归档检查点。
+`ChatSessionStore` 是内存中的当前工作区会话门面；`GlobalSessionStorage` 是持久化 adapter。workspace index 使用小型 V2 索引；V3/V4 session manifest 指向消息与 checkpoint 对象，避免启动时加载归档检查点。
 
 `ChatSession` 中值得特别关注的字段：
 
@@ -787,3 +787,5 @@ globalStorageUri/
 ## 20. 一句话总结
 
 KeepSeek 的架构核心不是“一个会调用模型的 Webview”，而是一组明确隔离的状态机：会话负责持久历史，投影层负责稳定字节，Runner 负责模型与工具循环，evidence/epoch 负责大结果和长任务，edits/runs 负责受审批的副作用，Provider 负责把这些状态协调成用户可见且可恢复的完整工作流。
+
+子代理统计、V4 小对象打包与恢复索引、增量账本及离线性能验收见 [P0 整改说明](keepseek-p0-subagent-persistence.md)。

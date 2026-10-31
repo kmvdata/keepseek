@@ -14,7 +14,7 @@ import type {
   UsageSourceStats,
   ProviderUsageLedgerRecord
 } from '../shared/types';
-import { summarizeUsageLedger, type UsageLedgerSummary } from './usageLedger';
+import { summarizeUsageLedger, preferUsageLedgerRecord, usageLedgerRecordIdentity, type UsageLedgerSummary } from './usageLedger';
 import { getPricingPeriod } from './usagePricingPeriod';
 export { getPricingPeriod } from './usagePricingPeriod';
 export type { PricingPeriod } from './usagePricingPeriod';
@@ -318,6 +318,28 @@ export function rebuildSessionUsageStatsFromLedger(
     incomplete: Boolean(metadata.incomplete)
   };
   return applyUsageLedgerSummaryToSessionStats(stats, summarizeUsageLedger(ledger));
+}
+
+/** Append/upgrade accumulator for raw and display-only indexes. It never adds
+ * a second attempt when a previously unknown bill becomes available. Cache
+ * diagnostics are derived separately; these totals don't rebuild old groups. */
+export interface UsageLedgerStatsIndex {
+  records: Map<string, ProviderUsageLedgerRecord>;
+  stats?: SessionUsageStats;
+}
+export function updateUsageLedgerStatsIndex(index: UsageLedgerStatsIndex, record: ProviderUsageLedgerRecord, incomplete = false): boolean {
+  const key = usageLedgerRecordIdentity(record), previous = index.records.get(key);
+  if (preferUsageLedgerRecord(previous, record) === previous) return false;
+  if (record.kind === 'usage_response' && record.usage && previous?.kind !== 'usage_response') {
+    index.stats = addUsageEventToSessionStats(index.stats, createUsageEvent({ usage: record.usage, cost: record.cost,
+      currency: record.currency, sourceId: record.sourceId, modelId: record.originalModelId, provider: record.provider,
+      protocol: record.protocol, pricingStatus: record.pricingStatus, source: record.source, requestId: record.requestId,
+      ledgerRecorded: true }), record.requestStartedAt);
+  }
+  const single = (records: ProviderUsageLedgerRecord[]) => summarizeUsageLedger({ version: 1, records, legacyAggregate: false, incomplete });
+  index.stats = applyUsageLedgerDeltaToSessionStats(index.stats, single(previous ? [previous] : []), single([record]));
+  index.records.set(key, record);
+  return true;
 }
 
 export function addTurnUsageToSessionStats(

@@ -11,6 +11,11 @@ import type {
   Usage,
   UsageSource
 } from '../shared/types';
+import type { SubagentActivity, ProviderUsageLedgerRecord } from '../shared/types';
+import type { ChatMessage } from '../shared/types';
+import { rebuildSessionUsageStatsFromLedger } from './usageStats';
+import { summarizeUsageLedger } from './usageLedger';
+import type { ReferenceCostIndex } from './usageReferenceCosts';
 import { normalizeSessionUsageStatsValue, normalizeTurnUsageStatsValue } from './usageStats';
 import type { SubagentProgressState } from './subagents/types';
 
@@ -55,6 +60,25 @@ const USAGE_SOURCES: UsageSource[] = [
 ];
 const HANDOFF_KINDS: SubagentHandoffKind[] = ['delegate', 'parallel', 'read-result'];
 
+/** Observed root tool submissions, including rejected calls. A parallel call
+ * counts once regardless of its accepted child count. Never inspect tool bodies. */
+export function countObservedSubagentInvocations(messages: readonly ChatMessage[]) {
+  const calls = new Map<string, SubagentHandoffKind>();
+  for (const message of messages) {
+    for (const tool of message.runDetails?.toolCalls ?? []) {
+      const kind = getSubagentHandoffKind(tool.name);
+      if (kind) calls.set(`${message.id}:${tool.id}`, kind);
+    }
+    for (const round of message.toolRounds ?? []) for (const tool of round.toolCalls) {
+      const kind = getSubagentHandoffKind(tool.function.name);
+      if (kind) calls.set(`${message.id}:${tool.id}`, kind);
+    }
+  }
+  const kinds = [...calls.values()];
+  return { delegate: kinds.filter(kind => kind === 'delegate').length,
+    parallel: kinds.filter(kind => kind === 'parallel').length, readResult: kinds.filter(kind => kind === 'read-result').length };
+}
+
 export interface ActualUsageSlice extends Usage {
   requestCount: number;
   providerAttemptCount?: number;
@@ -86,6 +110,14 @@ export interface UsageDetailsViewModel {
   session: ActualUsageBreakdown;
   lastTurn?: ActualUsageBreakdown;
   subagents?: {
+    acceptedTaskCount?: number;
+    queuedCount: number;
+    runningCount: number;
+    interruptedCount: number;
+    reusedCount: number;
+    usageUnreportedCount: number;
+    lifecycleIncomplete: boolean;
+    observedInvocations?: ReturnType<typeof countObservedSubagentInvocations>;
     totalCount: number;
     completedCount: number;
     failedCount: number;
@@ -328,23 +360,86 @@ export function createUsageDetailsViewModel(input: {
   sessionUsageStats?: SessionUsageStats;
   lastTurnUsage?: TurnUsageStats;
   subagentUsageStats?: SubagentSessionUsageStats;
+  subagentActivities?: SubagentActivity[];
+  lifecycleIncomplete?: boolean;
+  subagentLedgerRecords?: readonly ProviderUsageLedgerRecord[];
+  observedInvocations?: ReturnType<typeof countObservedSubagentInvocations>;
+  ledgerUsageIndex?: ReferenceCostIndex;
 }): UsageDetailsViewModel {
   const normalizedSession = normalizeSessionUsageStatsValue(input.sessionUsageStats);
   const session = splitActualUsage(normalizedSession);
   const lastTurn = input.lastTurnUsage ? splitActualUsage(normalizeTurnUsageStatsValue(input.lastTurnUsage)) : undefined;
   const subagentStats = normalizeSubagentSessionUsageStatsValue(input.subagentUsageStats);
-  const hasSubagentActualUsage = session.subagent.requestCount > 0 || session.subagent.totalTokens > 0;
-  const hasSubagents = Boolean(subagentStats?.totalCount || hasSubagentActualUsage);
+  const activities = [...new Map((input.subagentActivities ?? []).map(activity => [activity.id, activity])).values()];
+  const hasSubagentActualUsage = (session.subagent.providerAttemptCount ?? 0) > 0
+    || session.subagent.requestCount > 0 || session.subagent.totalTokens > 0;
+  const hasSubagents = Boolean(subagentStats?.totalCount || subagentStats?.rootHandoffCount || hasSubagentActualUsage || activities.length || input.lifecycleIncomplete
+    || input.observedInvocations?.delegate || input.observedInvocations?.parallel);
   if (!hasSubagents) {
     return { session, lastTurn };
   }
   const isolated = subagentStats?.isolatedIntermediateTokensEstimate ?? 0;
   const handoff = subagentStats?.rootHandoffTokensEstimate ?? 0;
   const denominator = isolated + handoff;
+  const byModel: NonNullable<UsageDetailsViewModel['subagents']>['byModel'] = (subagentStats?.byModel ?? [])
+    .map(group => ({ ...cloneSubagentUsageGroup(group), usage: toActualUsageSlice(group.usage) }));
+  // Billing totals come from the ledger-backed session, never terminal task counts.
+  const actualModelKeys = new Set<string>();
+  for (const group of normalizedSession?.byModelSource ?? []) {
+    if (!group.bySource?.subagent) continue;
+    let target = byModel.find(item => item.sourceId === group.sourceId && item.modelId === group.modelId && item.provider === group.provider);
+    if (!target) { target = { sourceId: group.sourceId, modelId: group.modelId, provider: group.provider,
+      taskCount: 0, completedCount: 0, failedCount: 0, stoppedCount: 0, taskCountsAvailable: false, usage: toActualUsageSlice(undefined) }; byModel.push(target); }
+    const key = JSON.stringify([group.sourceId, group.modelId, group.provider]);
+    const usage = toActualUsageSlice(group.bySource.subagent);
+    target.usage = actualModelKeys.has(key) ? sumActualUsageSlices([target.usage, usage]) : usage;
+    actualModelKeys.add(key);
+  }
+  const ledgerRecords = input.subagentLedgerRecords?.filter(record => record.source === 'subagent');
+  const terminalIds = new Set(subagentStats?.countedSubagentIds ?? []);
+  for (const activity of activities) {
+    if (!activity.sourceId || !activity.modelId) continue;
+    let group = byModel.find(item => item.sourceId === activity.sourceId && item.modelId === activity.modelId && item.provider === activity.provider);
+    if (!group) { group = { sourceId: activity.sourceId, modelId: activity.modelId, provider: activity.provider,
+      taskCount: 0, completedCount: 0, failedCount: 0, stoppedCount: 0, usage: toActualUsageSlice(undefined) }; byModel.push(group); }
+    if (!terminalIds.has(activity.id)) group.taskCount++;
+    group.taskCountsAvailable = true;
+  }
+  const actual = (records: ProviderUsageLedgerRecord[]) => {
+    const stats = rebuildSessionUsageStatsFromLedger(records);
+    const counts = summarizeUsageLedger({ version: 1, records, legacyAggregate: false, incomplete: false });
+    return { ...toActualUsageSlice(stats), providerAttemptCount: counts.providerAttemptCount, usageResponseCount: counts.usageResponseCount };
+  };
+  const groupedActual = (key: unknown[], fallback: () => ProviderUsageLedgerRecord[]) => {
+    const stats = input.ledgerUsageIndex?.group(...key);
+    return stats ? toActualUsageSlice(stats) : actual(fallback());
+  };
+  if (ledgerRecords) {
+    for (const record of ledgerRecords) {
+      if (!byModel.some(group => group.sourceId === record.sourceId && group.modelId === record.originalModelId && group.provider === record.provider)) {
+        byModel.push({ sourceId: record.sourceId, modelId: record.originalModelId, provider: record.provider, taskCount: 0,
+          completedCount: 0, failedCount: 0, stoppedCount: 0, taskCountsAvailable: false, usage: toActualUsageSlice(undefined) });
+      }
+    }
+    for (const group of byModel) group.usage = groupedActual(['model', group.sourceId, group.modelId, group.provider],
+      () => ledgerRecords.filter(record => record.sourceId === group.sourceId && record.originalModelId === group.modelId && record.provider === group.provider));
+  }
+  const legacyTaskDetailsMissing = (subagentStats?.totalCount ?? 0) > terminalIds.size;
+  const acceptedTaskCount = !legacyTaskDetailsMissing && (terminalIds.size || activities.length)
+    ? new Set([...terminalIds, ...activities.map(activity => activity.id)]).size : undefined;
   return {
     session,
     lastTurn,
     subagents: {
+      acceptedTaskCount,
+      queuedCount: activities.filter(activity => activity.status === 'queued').length,
+      runningCount: activities.filter(activity => activity.status === 'running').length,
+      interruptedCount: activities.filter(activity => activity.interrupted).length,
+      reusedCount: activities.filter(activity => activity.reused).length,
+      usageUnreportedCount: Math.max(0, (session.subagent.providerAttemptCount ?? session.subagent.requestCount)
+        - (session.subagent.usageResponseCount ?? session.subagent.requestCount)),
+      lifecycleIncomplete: Boolean(input.lifecycleIncomplete || legacyTaskDetailsMissing || activities.some(activity => activity.interrupted)),
+      observedInvocations: input.observedInvocations,
       totalCount: subagentStats?.totalCount ?? 0,
       completedCount: subagentStats?.completedCount ?? 0,
       failedCount: subagentStats?.failedCount ?? 0,
@@ -356,20 +451,17 @@ export function createUsageDetailsViewModel(input: {
       handoffCountByKind: subagentStats?.handoffCountByKind ?? createEmptyHandoffCounts(),
       estimatesAvailable: Boolean(subagentStats?.totalCount),
       summariesIncomplete: (subagentStats?.byModel ?? []).reduce((sum, group) => sum + (group.usage?.requestCount ?? 0), 0)
-        < session.subagent.requestCount,
-      byModel: subagentStats?.byModel.length ? subagentStats.byModel.map((group) => ({
-        ...cloneSubagentUsageGroup(group), usage: toActualUsageSlice(group.usage)
-      })) : (normalizedSession?.byModelSource ?? []).filter((group) => group.bySource?.subagent)
-        .map((group) => ({
-          sourceId: group.sourceId, modelId: group.modelId, provider: group.provider,
-          taskCount: 0, completedCount: 0, failedCount: 0, stoppedCount: 0, taskCountsAvailable: false,
-          usage: toActualUsageSlice(group.bySource!.subagent)
-        })),
+        < session.subagent.requestCount || (subagentStats?.byModel ?? []).reduce((sum, group) => sum + (group.usage?.providerAttemptCount ?? 0), 0)
+        < (session.subagent.providerAttemptCount ?? 0),
+      byModel,
       byProfileLane: (subagentStats?.byProfileLane ?? []).map((group) => ({
-        ...cloneSubagentUsageGroup(group), usage: toActualUsageSlice(group.usage)
+        ...cloneSubagentUsageGroup(group), usage: ledgerRecords ? groupedActual(['profile', group.profile, group.lane], () => ledgerRecords.filter(record =>
+          (record.cacheObservation?.subagentProfile === group.profile && record.cacheObservation?.subagentLane === group.lane)
+          || activities.some(activity => activity.id === record.subagentId && activity.profile === group.profile && activity.lane === group.lane))) : toActualUsageSlice(group.usage)
       })),
       recentRuns: (subagentStats?.recentRuns ?? []).map((run) => ({
-        ...cloneSubagentRunUsageSummary(run), usage: toActualUsageSlice(run.usage)
+        ...cloneSubagentRunUsageSummary(run), usage: ledgerRecords ? groupedActual(['child', run.subagentId], () => ledgerRecords.filter(record => record.subagentId === run.subagentId
+          || record.cacheObservation?.conversationId === run.subagentId)) : toActualUsageSlice(run.usage)
       })),
       estimatorVersion: SUBAGENT_USAGE_ESTIMATOR_VERSION
     }

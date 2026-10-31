@@ -29,7 +29,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     sourceStore: ModelSourceStore;
     store: ApprovalReviewStore;
     onUsage?: (event: UsageEvent) => void;
-    onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => void;
+    onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => Promise<void> | void;
     requestText?: typeof requestApprovalReviewText;
     circuitBreaker?: ApprovalCircuitBreaker;
   }) {}

@@ -122,7 +122,8 @@ export const usageRenderFragment: WebviewFragment = {
         if (subagents && details.session) {
           items = [
             ['usageMainSession', formatMetricTokens(details.session.mainSession.totalTokens, true)],
-            ['usageMetricSubagentTokens', formatMetricTokens(details.session.subagent.totalTokens, true)],
+            ['usageMetricSubagentTokens', subagents.usageUnreportedCount > 0 && !details.session.subagent.requestCount
+              ? t('usageNotReported') : formatMetricTokens(details.session.subagent.totalTokens, true)],
             ['usageSubagentTaskCount', subagents.estimatesAvailable ? formatMetricInteger(subagents.totalCount) : t('usageNotRecorded')],
             ['usageIsolatedEstimate', subagents.estimatesAvailable
               ? '≈ ' + formatCompactTokenCount(subagents.isolatedIntermediateTokensEstimate) : t('usageNotRecorded')],
@@ -585,18 +586,21 @@ export const usageRenderFragment: WebviewFragment = {
         return label;
       }
 
-      function createUsageAnalysisCard(label, usage, colorClass, requestCount, sourceId) {
+      function createUsageAnalysisCard(label, usage, colorClass, requestCount, sourceId, taskCount) {
         var card = usageNode('div', 'usage-analysis-card');
         var header = usageNode('div', 'usage-analysis-card-header');
         var heading = usageNode('div', 'usage-analysis-card-heading');
         var title = usageNode('div', 'usage-analysis-card-title');
         title.append(usageNode('i', 'usage-analysis-dot ' + colorClass), usageNode('strong', '', label));
-        heading.append(title, usageNode('span', 'usage-analysis-request-count', t('usageRequestCountValue', {
+        heading.append(title, usageNode('span', 'usage-analysis-request-count', t(taskCount !== undefined ? 'usageResponseCountValue' : 'usageRequestCountValue', {
           count: formatMetricInteger(requestCount)
         })));
+        if (taskCount !== undefined) heading.append(usageNode('span', 'usage-analysis-request-count',
+          taskCount === null ? t('usageTaskCountUnknown') : t('usageTaskCountValue', { count: formatMetricInteger(taskCount) })));
         var metricGrid = usageNode('div', 'usage-analysis-card-grid');
         [
-          ['usageTotalTokensLabel', formatMetricInteger(usage.totalTokens)],
+          ['usageTotalTokensLabel', !usage.requestCount && (usage.providerAttemptCount > 0 || usage.attemptStatsIncomplete)
+            ? t('usageNotReported') : formatMetricInteger(usage.totalTokens)],
           ['usageCacheHitRate', formatActualCacheRateOnly(usage)],
           ['usageCostLabel', formatAccountedCosts(usage).available
             ? formatAccountedCosts(usage).amountText
@@ -609,6 +613,9 @@ export const usageRenderFragment: WebviewFragment = {
         header.append(heading, metricGrid);
         card.append(header);
         var body = usageNode('div', 'usage-analysis-card-body');
+        if (taskCount !== undefined) body.append(usageNode('p', 'usage-note', Number.isFinite(usage.providerAttemptCount)
+          ? t('usageAttemptResponseCounts', { attempts: formatMetricInteger(usage.providerAttemptCount), responses: formatMetricInteger(usage.usageResponseCount) })
+          : t('usageAttemptCountsUnknown')));
         body.append(usageNode('p', '', t('usageCacheCoverage', {
           reported: usage.cacheDataRequestCount || 0,
           missing: usage.cacheDataMissingRequestCount || 0
@@ -630,6 +637,20 @@ export const usageRenderFragment: WebviewFragment = {
         details.append(summary);
         var body = usageNode('div', 'usage-subagent-analysis-body');
         body.append(usageNode('p', 'usage-note', t('usageIsolationExplanation')));
+        if (subagents.observedInvocations) body.append(usageNode('p', 'usage-note', t('usageObservedDelegationCalls', {
+          single: formatMetricInteger(subagents.observedInvocations.delegate), parallel: formatMetricInteger(subagents.observedInvocations.parallel)
+        })));
+        body.append(usageNode('p', 'usage-note', t('usageSubagentLifecycle', {
+          accepted: Number.isFinite(subagents.acceptedTaskCount) ? formatMetricInteger(subagents.acceptedTaskCount) : t('usageNotRecorded'),
+          queued: formatMetricInteger(subagents.queuedCount), running: formatMetricInteger(subagents.runningCount),
+          reused: formatMetricInteger(subagents.reusedCount), unreported: formatMetricInteger(subagents.usageUnreportedCount),
+          interrupted: formatMetricInteger(subagents.interruptedCount)
+        })));
+        body.append(usageNode('p', 'usage-note', t('usageSubagentHandoffs', {
+          results: formatMetricInteger((subagents.handoffCountByKind.delegate || 0) + (subagents.handoffCountByKind.parallel || 0)),
+          pages: formatMetricInteger(subagents.handoffCountByKind['read-result'] || 0)
+        })));
+        if (subagents.summariesIncomplete || subagents.lifecycleIncomplete) body.append(usageNode('p', 'usage-warning', t('usageSubagentReconciliationPending')));
         if (subagents.estimatesAvailable) {
           var grid = usageNode('div', 'usage-subagent-estimate-grid');
           [
@@ -651,7 +672,8 @@ export const usageRenderFragment: WebviewFragment = {
           var modelList = usageNode('div', 'usage-analysis-list');
           subagents.byModel.forEach(function(group, index) {
             modelList.append(createUsageAnalysisCard(
-              getUsageGroupLabel(group), group.usage, 'color-' + (index % 5), group.taskCount, group.sourceId
+              getUsageGroupLabel(group), group.usage, 'color-' + (index % 5), group.usage.requestCount, group.sourceId,
+              group.taskCountsAvailable === false ? null : group.taskCount
             ));
           });
           body.append(modelList);
@@ -661,7 +683,7 @@ export const usageRenderFragment: WebviewFragment = {
           var workTypeList = usageNode('div', 'usage-analysis-list');
           subagents.byProfileLane.forEach(function(group, index) {
             workTypeList.append(createUsageAnalysisCard(
-              formatSubagentWorkType(group), group.usage, 'color-' + ((index + 1) % 5), group.taskCount
+              formatSubagentWorkType(group), group.usage, 'color-' + ((index + 1) % 5), group.usage.requestCount, undefined, group.taskCount
             ));
           });
           body.append(workTypeList);
@@ -679,7 +701,7 @@ export const usageRenderFragment: WebviewFragment = {
             row.append(
               heading,
               usageNode('p', '', formatSubagentWorkType(run)),
-              usageNode('p', '', formatMetricInteger(run.usage.totalTokens) + ' Tokens · '
+              usageNode('p', '', ((!run.usage.requestCount && run.usage.providerAttemptCount > 0) ? t('usageNotReported') : formatMetricInteger(run.usage.totalTokens) + ' Tokens') + ' · '
                 + formatUsageCost(run.usage) + ' · ' + formatDuration(run.durationMs))
             );
             recentRuns.append(row);

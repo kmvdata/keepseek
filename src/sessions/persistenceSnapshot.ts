@@ -1,11 +1,20 @@
 import { MAX_CHECKPOINT_BYTES, type RunCheckpoint } from '../agent/runCheckpoint';
-import type { ChatSession } from '../shared/types';
+import type { ChatMessage, ChatSession } from '../shared/types';
 
 // Only fields whose producers replace rather than mutate are memoized. Header,
 // pending journal, budgets, plans and mutable arrays are copied every barrier.
 const immutableCopies = new WeakMap<object, object>();
 const immutableSizes = new WeakMap<object, number>();
 const frozenTrees = new WeakSet<object>();
+const packedTrees = new WeakSet<object>();
+const messageBodyCopies = new WeakMap<object, object>();
+const messageSnapshotBodies = new WeakMap<object, object>();
+export function isPackedPersistenceTree(value: object): boolean { return packedTrees.has(value); }
+/** Explicitly immutable inputs may be stored as one hashed object, rather than
+ * hundreds of individually durable leaf files. Never use for a mutable journal. */
+export function packPersistenceInput<T extends object>(value: T): T {
+  freezeTree(value); packedTrees.add(value); return value;
+}
 export function isFrozenTree(value: object): boolean { return frozenTrees.has(value); }
 function jsonSize(value: unknown): number {
   if (!value || typeof value !== 'object') return Buffer.byteLength(JSON.stringify(value) ?? 'null');
@@ -36,6 +45,29 @@ export function freezeTree(value: unknown): void {
   frozenTrees.add(value);
 }
 
+/** Copy mutable journals while retaining only recursively verified immutable trees.
+ * structuredClone loses their identity and makes every downstream store walk them again. */
+export function copyPersistenceValue<T>(value: T): T {
+  if (!value || typeof value !== 'object' || isFrozenTree(value)) return value;
+  if (Array.isArray(value)) return value.map(copyPersistenceValue) as T;
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, copyPersistenceValue(child)])) as T;
+}
+
+function samePersistenceValue(value: unknown, snapshot: unknown): boolean {
+  if (value === snapshot) return true; // Mutable inputs are copied, so shared objects are verified frozen trees.
+  if (!value || !snapshot || typeof value !== 'object' || typeof snapshot !== 'object'
+    || Array.isArray(value) !== Array.isArray(snapshot)) return false;
+  const keys = Object.keys(value), priorKeys = Object.keys(snapshot);
+  return keys.length === priorKeys.length && keys.every(key => Object.hasOwn(snapshot, key)
+    && samePersistenceValue((value as Record<string, unknown>)[key], (snapshot as Record<string, unknown>)[key]));
+}
+
+/** Mutable nested metadata is compared, never cached by identity alone. */
+export function persistenceMessageBody(message: object, current: object): object {
+  const body = messageSnapshotBodies.get(message);
+  return body && samePersistenceValue(current, body) ? body : current;
+}
+
 /** Snapshot used only at persistence barriers. Mutable recovery uses checkpointCopy. */
 export function snapshotCheckpoint(cp: RunCheckpoint): RunCheckpoint {
   const { request, state, ...header } = cp;
@@ -59,8 +91,17 @@ export function snapshotCheckpoint(cp: RunCheckpoint): RunCheckpoint {
 
 export function snapshotSession(session: ChatSession): ChatSession {
   const { messages, ...header } = session;
-  return { ...structuredClone(header), messages: messages.map(message => {
-    const { runCheckpoint, ...body } = message;
-    return { ...structuredClone(body), runCheckpoint: runCheckpoint ? snapshotCheckpoint(runCheckpoint) : undefined };
+  return { ...copyPersistenceValue(header), messages: messages.map(message => {
+    const { runCheckpoint, runCheckpointArchive, ...body } = message;
+    delete body.runState;
+    const prior = messageBodyCopies.get(message);
+    const copied = prior && samePersistenceValue(body, prior) ? prior : copyPersistenceValue(body);
+    freezeTree(copied);
+    messageBodyCopies.set(message, copied);
+    const snapshot = { ...copied as Omit<ChatMessage, 'runCheckpoint'>,
+      runCheckpointArchive: copyPersistenceValue(runCheckpointArchive),
+      runCheckpoint: runCheckpoint ? snapshotCheckpoint(runCheckpoint) : undefined };
+    messageSnapshotBodies.set(snapshot, copied);
+    return snapshot;
   }) };
 }

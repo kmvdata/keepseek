@@ -317,6 +317,8 @@ export interface CacheDiagnosticsMetrics {
 }
 
 export interface ProviderUsageLedgerRecord {
+  /** Stable task owner; old records may only have cacheObservation.taskId. */
+  subagentId?: string;
   requestBudget?: import('../agent/requestBudget').RequestBudgetSnapshot;
   version: 1;
   requestId: string;
@@ -440,6 +442,24 @@ export interface SessionUsageStats extends Usage {
 
 export type SubagentTerminalStatus = 'completed' | 'failed' | 'stopped';
 export type SubagentHandoffKind = 'delegate' | 'parallel' | 'read-result';
+
+/** Accepted task lifecycle, independent of Provider billing and terminal totals. */
+export interface SubagentActivity {
+  id: string;
+  parentSessionId: string;
+  parentRunId: string;
+  rootRunId: string;
+  treeId: string;
+  profile: string;
+  lane: string;
+  status: 'queued' | 'running' | SubagentTerminalStatus;
+  sourceId?: string;
+  modelId?: string;
+  provider?: string;
+  updatedAt: string;
+  reused?: boolean;
+  interrupted?: boolean;
+}
 
 /** Numeric-only summary of one isolated child run. No task, result, reasoning, or tool content is stored here. */
 export interface SubagentRunUsageSummary {
@@ -1657,6 +1677,7 @@ export type AgentActivityPhase =
   | 'preparing'
   | 'expanding_references'
   | 'requesting_model'
+  | 'saving_state'
   | 'reconnecting'
   | 'reasoning'
   | 'planning_tool'
@@ -1722,7 +1743,7 @@ export interface AgentRunCallbacks {
   onToolRejected?: (event: { toolName: string; errorType: 'subagent_tool_not_exposed' }) => void;
   onUsageEstimate?: (usage: ContextUsageEstimate) => void;
   onUsage?: (event: UsageEvent) => void;
-  onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => void;
+  onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => Promise<void> | void;
   getPreviousCacheObservation?: (input: {
     sessionId: string;
     source: UsageSource;

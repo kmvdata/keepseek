@@ -82,3 +82,4 @@ import './providerStreamRecovery.test';
 
 import './modelOutputBudget.test';
 import './longTaskPerformance.test';
+import './p0SubagentPersistence.test';

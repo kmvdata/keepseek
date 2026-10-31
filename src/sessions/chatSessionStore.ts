@@ -3,6 +3,7 @@ import { normalizeRequestBudget } from '../agent/requestBudget';
 import { isResumableToolBudgetCheckpoint, normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
 import { normalizeHistoryWorkFacts } from '../agent/historyProtection';
 import { snapshotSession } from './persistenceSnapshot';
+import { recordLocalPerformance } from '../agent/logging/performanceTrace';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
@@ -333,6 +334,8 @@ export class ChatSessionStore {
     scope: WorkspaceSessionScope;
     snapshot: StoredWorkspaceSessionState;
     checkpointSources: Map<string, ChatMessage['runCheckpoint']>;
+    queuedAt: number;
+    reason: string;
   };
   private persistenceDrain?: Promise<void>;
   private readonly persistenceWaiters: Array<{
@@ -341,7 +344,8 @@ export class ChatSessionStore {
     reject: (error: unknown) => void;
   }> = [];
 
-  public async persist(): Promise<void> {
+  public async persist(reason = 'session_barrier'): Promise<void> {
+    const started = performance.now();
     for (const session of this.sessions) session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
     this.compact();
     const revision = ++this.persistRevision;
@@ -352,7 +356,10 @@ export class ChatSessionStore {
       sessionSummaries: this.getSessionSummaries()
     };
     const checkpointSources = new Map(this.sessions.flatMap(session => session.messages.map(message => [message.id, message.runCheckpoint] as const)));
-    this.pendingPersistence = { revision, scope: { ...this.workspaceScope, folderUris: [...this.workspaceScope.folderUris] }, snapshot, checkpointSources };
+    this.pendingPersistence = { revision, scope: { ...this.workspaceScope, folderUris: [...this.workspaceScope.folderUris] }, snapshot, checkpointSources,
+      queuedAt: performance.now(), reason };
+    for (const session of this.sessions) recordLocalPerformance({ type: 'checkpoint_snapshot', sessionId: session.id,
+      snapshotMs: performance.now() - started, reason, queueDepth: Number(Boolean(this.persistenceDrain)) + 1 });
     const completed = new Promise<void>((resolve, reject) => {
       this.persistenceWaiters.push({ revision, resolve, reject });
     });
@@ -393,6 +400,7 @@ export class ChatSessionStore {
     while (this.pendingPersistence) {
       const next = this.pendingPersistence;
       this.pendingPersistence = undefined;
+      const processing = performance.now();
       try {
         await this.sessionStorage.saveWorkspace(next.scope, next.snapshot);
         // Release archived bodies only after the object graph AND manifest commit.
@@ -414,6 +422,9 @@ export class ChatSessionStore {
         throw error;
       }
       this.persistedRevision = Math.max(this.persistedRevision, next.revision);
+      for (const session of next.snapshot.sessions) recordLocalPerformance({ type: 'checkpoint_session_commit', sessionId: session.id,
+        reason: next.reason, queueMs: processing - next.queuedAt, processingMs: performance.now() - processing,
+        durationMs: performance.now() - next.queuedAt });
       this.settlePersistenceWaiters();
     }
   }

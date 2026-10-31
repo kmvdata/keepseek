@@ -80,6 +80,7 @@ import type {
   SubagentToolExecution
 } from './types';
 import type { SubagentToolCategory } from './types';
+import { freezeTree } from '../../sessions/persistenceSnapshot';
 
 const SUBAGENT_PROTOCOL_VERSION = 10;
 const MAX_PARALLEL_TASKS = 8;
@@ -108,6 +109,7 @@ export interface SubagentRuntimeOptions {
 }
 
 export class SubagentRuntime implements SubagentToolAdapter {
+  private readonly activities = new Map<string, import('../../shared/types').SubagentActivity>();
   private readonly settingsStore: SubagentSettingsStore;
   private readonly store: SubagentStore;
   private readonly scheduler = new SubagentScheduler();
@@ -116,7 +118,25 @@ export class SubagentRuntime implements SubagentToolAdapter {
 
   public constructor(private readonly options: SubagentRuntimeOptions) {
     this.settingsStore = new SubagentSettingsStore(options.globalStorageUri, options.workspaceKey);
-    this.store = new SubagentStore(options.globalStorageUri, options.workspaceKey);
+    this.store = new SubagentStore(options.globalStorageUri, options.workspaceKey, activity => {
+      this.activities.set(activity.id, activity);
+    });
+  }
+
+  public getUsageActivities(sessionId: string) {
+    return [...this.activities.values()].filter(activity => activity.parentSessionId === sessionId).map(activity => {
+      const live = this.progress.get(activity.id);
+      return activity.status === 'queued' && live?.status === 'running' ? { ...activity, status: live.status, updatedAt: live.updatedAt } : activity;
+    });
+  }
+
+  public async restoreUsage(sessionId: string) {
+    const restored = await this.store.readSummaries(sessionId);
+    for (const activity of restored.activities) {
+      // A live task wins over an asynchronous startup read; restoration never schedules work.
+      if (!this.activities.has(activity.id)) this.activities.set(activity.id, activity);
+    }
+    return restored;
   }
 
   public snapshotTree(treeId: string) { return this.scheduler.snapshotTree(treeId); }
@@ -391,6 +411,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
       updatedAt: now
     });
     try {
+      await this.store.saveActivity({ id, treeId, rootRunId, parentSessionId, parentRunId: context.parentRunId,
+        profile: profile.id, lane, status: 'queued', updatedAt: now });
       return await this.scheduler.run({
         depth,
         proposal: lane === 'proposal',
@@ -728,6 +750,9 @@ export class SubagentRuntime implements SubagentToolAdapter {
       ...restoreTranscriptMessages(input.prior?.transcript),
       userMessage
     ];
+    // This child-owned input is never mutated; subsequent rounds live in the
+    // AgentLoop's own recovery journal. Preserve its identity across barriers.
+    freezeTree(history);
     const timeoutMs = mergeDurations(
       getConfiguredSubagentMaxExecutionMs(),
       input.input.timeoutMs,
@@ -787,10 +812,10 @@ export class SubagentRuntime implements SubagentToolAdapter {
       }
       input.context.onUsage?.(childEvent);
     };
-    const recordChildLedger = (
+    const recordChildLedger = async (
       record: import('../../shared/types').ProviderUsageLedgerRecord
-    ): void => {
-      input.context.onUsageLedgerRecord?.({ ...record, source: 'subagent' });
+    ): Promise<void> => {
+      await input.context.onUsageLedgerRecord?.({ ...record, source: 'subagent', subagentId: record.subagentId ?? input.id });
     };
     let partialResult = '';
     try {

@@ -178,12 +178,30 @@ export function appendUsageLedgerRecord(
     legacyAggregate,
     incomplete: legacyAggregate
   };
-  const duplicate = base.records.some((item) => item.requestId === record.requestId
-    && item.attemptIndex === record.attemptIndex);
-  return duplicate ? base : {
+  const normalized = normalizeUsageLedgerRecord(record);
+  if (!normalized) return base;
+  const index = base.records.findIndex(item => usageLedgerRecordIdentity(item) === usageLedgerRecordIdentity(record));
+  if (index >= 0 && preferUsageLedgerRecord(base.records[index], normalized) === base.records[index]) return base;
+  return {
     ...base,
-    records: [...base.records, normalizeUsageLedgerRecord(record)!]
+    records: index < 0 ? [...base.records, normalized] : base.records.map((item, i) => i === index ? normalized : item)
   };
+}
+
+export function usageLedgerRecordIdentity(record: Pick<ProviderUsageLedgerRecord, 'requestId' | 'attemptIndex'>): string {
+  return `${record.requestId}\u0000${record.attemptIndex}`;
+}
+
+/** A partial attempt may be upgraded, never downgrade a reported bill. Conflicting
+ * full reports retain the first authority rather than inventing a second charge. */
+export function preferUsageLedgerRecord(prior: ProviderUsageLedgerRecord | undefined, next: ProviderUsageLedgerRecord): ProviderUsageLedgerRecord {
+  if (!prior) return next;
+  if (prior.source !== next.source || prior.sourceId !== next.sourceId || prior.originalModelId !== next.originalModelId
+    || prior.provider !== next.provider || prior.protocol !== next.protocol) return prior;
+  if (prior.kind !== 'usage_response' && next.kind === 'usage_response') return next;
+  if (prior.kind !== 'usage_response' && next.kind !== 'usage_response'
+    && !prior.observedUsage && next.observedUsage) return next;
+  return prior;
 }
 
 /** A durable rebuild can finish after more immutable attempt records arrive.
@@ -192,7 +210,7 @@ export function mergePendingUsageLedger(durable: ProviderUsageLedger, pending: P
   const records = new Map<string, ProviderUsageLedgerRecord>();
   for (const record of [...durable.records, ...(pending?.records ?? [])]) {
     const key = `${record.requestId}\u0000${record.attemptIndex}`;
-    if (!records.has(key)) records.set(key, record);
+    records.set(key, preferUsageLedgerRecord(records.get(key), record));
   }
   return { version: 1, records: [...records.values()], legacyAggregate: Boolean(durable.legacyAggregate || pending?.legacyAggregate),
     incomplete: Boolean(durable.incomplete || pending?.incomplete) };
@@ -204,15 +222,14 @@ export function normalizeUsageLedgerValue(value: unknown): ProviderUsageLedger |
   const normalizedRecords = Array.isArray(value.records)
     ? rawRecords.map(normalizeUsageLedgerRecord).filter((item): item is ProviderUsageLedgerRecord => Boolean(item))
     : [];
-  const seen = new Set<string>();
-  const records = normalizedRecords.filter((record) => {
-    const key = `${record.requestId}\u0000${record.attemptIndex}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const seen = new Map<string, ProviderUsageLedgerRecord>();
+  for (const record of normalizedRecords) {
+    const key = usageLedgerRecordIdentity(record);
+    seen.set(key, preferUsageLedgerRecord(seen.get(key), record));
+  }
+  const records = [...seen.values()];
   if (value.version !== USAGE_LEDGER_SCHEMA_VERSION && !records.length) return undefined;
-  const damagedRecords = !Array.isArray(value.records) || records.length !== rawRecords.length;
+  const damagedRecords = !Array.isArray(value.records) || normalizedRecords.length !== rawRecords.length;
   return {
     version: USAGE_LEDGER_SCHEMA_VERSION,
     records,
@@ -338,6 +355,7 @@ export function normalizeUsageLedgerRecord(value: unknown): ProviderUsageLedgerR
     requestId: value.requestId,
     attemptIndex: Number(value.attemptIndex),
     kind: value.kind,
+    ...(typeof value.subagentId === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/u.test(value.subagentId) ? { subagentId: value.subagentId } : {}),
     source: normalizeSource(value.source),
     ...(requestBudget ? { requestBudget } : {}),
     sourceId: snapshot.sourceId,

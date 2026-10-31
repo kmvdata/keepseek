@@ -514,6 +514,7 @@ export function getScript(): string {
       preparing: ['agentStatusPreparingContext', 'agentStatusPreparingRequest'],
       expanding_references: ['agentStatusExpandingReferences', 'agentStatusPreparingRequest'],
       requesting_model: ['runWaitingHeaders'],
+      saving_state: ['runSavingState'],
       reasoning: ['agentStatusThinking', 'agentStatusReasoning', 'agentStatusPondering', 'agentStatusSynthesizingClues'],
       planning_tool: ['agentStatusChoosingTools', 'agentStatusPlanningNextStep'],
       executing_tool: ['agentStatusExecutingTool'],

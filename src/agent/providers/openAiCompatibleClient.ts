@@ -188,13 +188,14 @@ export class OpenAICompatibleClient implements ProviderClient {
       const reasoningContent = partialReasoningParts.join('');
       return content || reasoningContent ? { role: 'assistant', content, reasoning_content: reasoningContent, tool_calls: null } : undefined;
     };
+    // Host persistence errors must escape the transport retry classifier.
+    await request.onAttempt?.({ requestId: request.requestId ?? '', attemptIndex: localAttempt,
+      startedAt: new Date(startedAt).toISOString() });
     try {
       request.callbacks?.onStatus?.({ base: 'thinking', phase: 'requesting_model' });
       trace?.record({ type: 'upstream_attempt_start', requestId: request.requestId, attempt,
         // Query parameters and URL userinfo may contain credentials.
         endpoint: this.safeEndpoint(frozen.url), transport: this.transportRuntime(frozen.timeoutMs) });
-      await request.onAttempt?.({ requestId: request.requestId ?? '', attemptIndex: localAttempt,
-        startedAt: new Date(startedAt).toISOString() });
       if (request.signal?.aborted) abortByExternalSignal();
       else request.signal?.addEventListener('abort', abortByExternalSignal, { once: true });
       resetStreamIdleTimeout();

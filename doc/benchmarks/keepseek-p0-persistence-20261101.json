@@ -1,0 +1,1428 @@
+{
+  "date": "2026-11-01 Asia/Shanghai",
+  "baseline": "9a874e8",
+  "durability": "both revisions forced durable atomic writes",
+  "scope": "real temporary filesystem, VS Code API stub; zero Provider requests; unchanged synthetic workload; verification outside timings",
+  "intervals": "queue/processing are cumulative operation work; localPersistenceUnionMs is the union, never add overlapping parent/child events",
+  "baselineMissingMetrics": "null; not inferred as zero",
+  "before": {
+    "environment": {
+      "node": "v24.15.0",
+      "platform": "darwin",
+      "arch": "x64",
+      "provider": "none; identical persistence workload",
+      "filesystem": "real temporary filesystem via VS Code stub",
+      "rounds": 3
+    },
+    "results": {
+      "short": [
+        {
+          "totalMs": 811.208094,
+          "coldMs": 317.061125,
+          "hotMs": 494.14696899999996,
+          "bytes": 5704,
+          "writes": 17,
+          "reads": 17,
+          "hotBytes": 3735,
+          "hotWrites": 10,
+          "hotReads": 10,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0.4809829999999664,
+          "localPersistenceUnionMs": 807.728309,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 11
+        },
+        {
+          "totalMs": 803.623241,
+          "coldMs": 301.575699,
+          "hotMs": 502.047542,
+          "bytes": 5704,
+          "writes": 17,
+          "reads": 17,
+          "hotBytes": 3735,
+          "hotWrites": 10,
+          "hotReads": 10,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0.3729280000001154,
+          "localPersistenceUnionMs": 800.666928,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 11
+        },
+        {
+          "totalMs": 805.1205789999999,
+          "coldMs": 302.69157600000017,
+          "hotMs": 502.42900299999974,
+          "bytes": 5704,
+          "writes": 17,
+          "reads": 17,
+          "hotBytes": 3735,
+          "hotWrites": 10,
+          "hotReads": 10,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0.31042399999978443,
+          "localPersistenceUnionMs": 802.5299739999998,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 11
+        }
+      ],
+      "long": [
+        {
+          "totalMs": 19818.882597000003,
+          "coldMs": 18714.334593,
+          "hotMs": 1104.5480040000039,
+          "bytes": 3618006,
+          "writes": 473,
+          "reads": 473,
+          "hotBytes": 184505,
+          "hotWrites": 20,
+          "hotReads": 20,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 67.07746399999542,
+          "localPersistenceUnionMs": 19748.522777000002,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 467
+        },
+        {
+          "totalMs": 19951.435023000002,
+          "coldMs": 18831.964554000002,
+          "hotMs": 1119.4704689999999,
+          "bytes": 3618006,
+          "writes": 473,
+          "reads": 473,
+          "hotBytes": 184505,
+          "hotWrites": 20,
+          "hotReads": 20,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 59.947063000003254,
+          "localPersistenceUnionMs": 19887.54545499999,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 467
+        },
+        {
+          "totalMs": 19777.084208,
+          "coldMs": 18697.273954000004,
+          "hotMs": 1079.8102539999963,
+          "bytes": 3618006,
+          "writes": 473,
+          "reads": 473,
+          "hotBytes": 184505,
+          "hotWrites": 20,
+          "hotReads": 20,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 44.150756000010006,
+          "localPersistenceUnionMs": 19729.254274999992,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 467
+        }
+      ],
+      "single-child": [
+        {
+          "totalMs": 530.5140729999985,
+          "coldMs": 91.91414400000212,
+          "hotMs": 438.59992899999634,
+          "bytes": 39740004,
+          "writes": 6,
+          "reads": 0,
+          "hotBytes": 33116670,
+          "hotWrites": 5,
+          "hotReads": 0,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0,
+          "localPersistenceUnionMs": null,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 0
+        },
+        {
+          "totalMs": 513.354551000004,
+          "coldMs": 86.96567299999879,
+          "hotMs": 426.3888780000052,
+          "bytes": 39740004,
+          "writes": 6,
+          "reads": 0,
+          "hotBytes": 33116670,
+          "hotWrites": 5,
+          "hotReads": 0,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0,
+          "localPersistenceUnionMs": null,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 0
+        },
+        {
+          "totalMs": 481.60015199999907,
+          "coldMs": 80.51574100000289,
+          "hotMs": 401.0844109999962,
+          "bytes": 39740004,
+          "writes": 6,
+          "reads": 0,
+          "hotBytes": 33116670,
+          "hotWrites": 5,
+          "hotReads": 0,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0,
+          "localPersistenceUnionMs": null,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 0
+        }
+      ],
+      "parallel-child": [
+        {
+          "totalMs": 1455.878239999991,
+          "coldMs": 241.770657999994,
+          "hotMs": 1214.107581999997,
+          "bytes": 119220012,
+          "writes": 18,
+          "reads": 0,
+          "hotBytes": 99350010,
+          "hotWrites": 15,
+          "hotReads": 0,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 18,
+          "snapshotMs": 0,
+          "localPersistenceUnionMs": null,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 0
+        },
+        {
+          "totalMs": 1715.274351999993,
+          "coldMs": 248.4950889999891,
+          "hotMs": 1466.779263000004,
+          "bytes": 119220012,
+          "writes": 18,
+          "reads": 0,
+          "hotBytes": 99350010,
+          "hotWrites": 15,
+          "hotReads": 0,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 18,
+          "snapshotMs": 0,
+          "localPersistenceUnionMs": null,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 0
+        },
+        {
+          "totalMs": 1745.0374889999948,
+          "coldMs": 274.2381719999976,
+          "hotMs": 1470.7993169999972,
+          "bytes": 119220012,
+          "writes": 18,
+          "reads": 0,
+          "hotBytes": 99350010,
+          "hotWrites": 15,
+          "hotReads": 0,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 18,
+          "snapshotMs": 0,
+          "localPersistenceUnionMs": null,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 0
+        }
+      ],
+      "ledger": [
+        {
+          "totalMs": 508.0695620000042,
+          "coldMs": 82.77031700000225,
+          "hotMs": 425.299245000002,
+          "bytes": 5680,
+          "writes": 6,
+          "reads": 1542,
+          "hotBytes": 4734,
+          "hotWrites": 5,
+          "hotReads": 1285,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0,
+          "localPersistenceUnionMs": null,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 0
+        },
+        {
+          "totalMs": 453.46349799999734,
+          "coldMs": 77.99751600000309,
+          "hotMs": 375.46598199999426,
+          "bytes": 5680,
+          "writes": 6,
+          "reads": 1542,
+          "hotBytes": 4734,
+          "hotWrites": 5,
+          "hotReads": 1285,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0,
+          "localPersistenceUnionMs": null,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 0
+        },
+        {
+          "totalMs": 452.7962930000067,
+          "coldMs": 82.05231600000116,
+          "hotMs": 370.74397700000554,
+          "bytes": 5680,
+          "writes": 6,
+          "reads": 1542,
+          "hotBytes": 4734,
+          "hotWrites": 5,
+          "hotReads": 1285,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0,
+          "localPersistenceUnionMs": null,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 0
+        }
+      ]
+    }
+  },
+  "after": {
+    "environment": {
+      "node": "v24.15.0",
+      "platform": "darwin",
+      "arch": "x64",
+      "provider": "none; identical persistence workload",
+      "filesystem": "real temporary filesystem via VS Code stub",
+      "rounds": 3
+    },
+    "results": {
+      "short": [
+        {
+          "totalMs": 424.506754,
+          "coldMs": 109.571348,
+          "hotMs": 314.935406,
+          "bytes": 5562,
+          "writes": 10,
+          "reads": 10,
+          "hotBytes": 3640,
+          "hotWrites": 5,
+          "hotReads": 5,
+          "ioPeak": 4,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0.617525000000029,
+          "localPersistenceUnionMs": 419.965012,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 4
+        },
+        {
+          "totalMs": 433.43355500000007,
+          "coldMs": 121.84749399999998,
+          "hotMs": 311.5860610000001,
+          "bytes": 5562,
+          "writes": 10,
+          "reads": 10,
+          "hotBytes": 3640,
+          "hotWrites": 5,
+          "hotReads": 5,
+          "ioPeak": 4,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0.28972600000008697,
+          "localPersistenceUnionMs": 429.8576169999999,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 4
+        },
+        {
+          "totalMs": 430.642786,
+          "coldMs": 102.78749099999993,
+          "hotMs": 327.85529500000007,
+          "bytes": 5562,
+          "writes": 10,
+          "reads": 10,
+          "hotBytes": 3640,
+          "hotWrites": 5,
+          "hotReads": 5,
+          "ioPeak": 4,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0.33074000000033266,
+          "localPersistenceUnionMs": 427.2270510000003,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 4
+        }
+      ],
+      "long": [
+        {
+          "totalMs": 11463.55573,
+          "coldMs": 10876.789643,
+          "hotMs": 586.766087,
+          "bytes": 3685263,
+          "writes": 454,
+          "reads": 454,
+          "hotBytes": 185715,
+          "hotWrites": 10,
+          "hotReads": 10,
+          "ioPeak": 4,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 51.37943099999734,
+          "localPersistenceUnionMs": 11409.136302000003,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 448
+        },
+        {
+          "totalMs": 11491.538983,
+          "coldMs": 10899.949335,
+          "hotMs": 591.589648000001,
+          "bytes": 3685263,
+          "writes": 454,
+          "reads": 454,
+          "hotBytes": 185715,
+          "hotWrites": 10,
+          "hotReads": 10,
+          "ioPeak": 4,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 46.67516899999646,
+          "localPersistenceUnionMs": 11441.162737,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 448
+        },
+        {
+          "totalMs": 12409.521495999998,
+          "coldMs": 11792.548589000002,
+          "hotMs": 616.9729069999958,
+          "bytes": 3685263,
+          "writes": 454,
+          "reads": 454,
+          "hotBytes": 185715,
+          "hotWrites": 10,
+          "hotReads": 10,
+          "ioPeak": 4,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 44.354146999994555,
+          "localPersistenceUnionMs": 12362.03755899999,
+          "queueMs": null,
+          "processingMs": null,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 448
+        }
+      ],
+      "single-child": [
+        {
+          "totalMs": 481.5561119999984,
+          "coldMs": 174.6308149999968,
+          "hotMs": 306.9252970000016,
+          "bytes": 3329924,
+          "writes": 7,
+          "reads": 8,
+          "hotBytes": 15820,
+          "hotWrites": 5,
+          "hotReads": 5,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 11.316037999997206,
+          "localPersistenceUnionMs": 480.55296599999565,
+          "queueMs": 0.8017959999924642,
+          "processingMs": 468.426191999999,
+          "persistenceQueuePeak": 1,
+          "objectsWritten": 1
+        },
+        {
+          "totalMs": 480.56728500000463,
+          "coldMs": 164.1861410000056,
+          "hotMs": 316.38114399999904,
+          "bytes": 3329924,
+          "writes": 7,
+          "reads": 8,
+          "hotBytes": 15820,
+          "hotWrites": 5,
+          "hotReads": 5,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 8.497410000003583,
+          "localPersistenceUnionMs": 480.0000849999924,
+          "queueMs": 0.5107629999984056,
+          "processingMs": 470.98526399999537,
+          "persistenceQueuePeak": 1,
+          "objectsWritten": 1
+        },
+        {
+          "totalMs": 479.38856600000145,
+          "coldMs": 168.92054300000018,
+          "hotMs": 310.46802300000127,
+          "bytes": 3329924,
+          "writes": 7,
+          "reads": 8,
+          "hotBytes": 15820,
+          "hotWrites": 5,
+          "hotReads": 5,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 8.68866999999591,
+          "localPersistenceUnionMs": 479.06069999999454,
+          "queueMs": 0.4259480000109761,
+          "processingMs": 469.94363400000293,
+          "persistenceQueuePeak": 1,
+          "objectsWritten": 1
+        }
+      ],
+      "parallel-child": [
+        {
+          "totalMs": 916.1347160000005,
+          "coldMs": 290.353618000001,
+          "hotMs": 625.7810979999995,
+          "bytes": 9989772,
+          "writes": 21,
+          "reads": 24,
+          "hotBytes": 47460,
+          "hotWrites": 15,
+          "hotReads": 15,
+          "ioPeak": 3,
+          "providerMs": 0,
+          "saves": 18,
+          "snapshotMs": 8.726501999983157,
+          "localPersistenceUnionMs": 915.8475949999847,
+          "queueMs": 4.393497999997635,
+          "processingMs": 2572.2515330000024,
+          "persistenceQueuePeak": 1,
+          "objectsWritten": 3
+        },
+        {
+          "totalMs": 908.7864310000004,
+          "coldMs": 267.8482160000058,
+          "hotMs": 640.9382149999947,
+          "bytes": 9989772,
+          "writes": 21,
+          "reads": 24,
+          "hotBytes": 47460,
+          "hotWrites": 15,
+          "hotReads": 15,
+          "ioPeak": 3,
+          "providerMs": 0,
+          "saves": 18,
+          "snapshotMs": 8.833545000001322,
+          "localPersistenceUnionMs": 908.5536940000165,
+          "queueMs": 4.2148830000151065,
+          "processingMs": 2557.7593699999998,
+          "persistenceQueuePeak": 1,
+          "objectsWritten": 3
+        },
+        {
+          "totalMs": 868.5071069999976,
+          "coldMs": 274.03446899999835,
+          "hotMs": 594.4726379999993,
+          "bytes": 9989772,
+          "writes": 21,
+          "reads": 24,
+          "hotBytes": 47460,
+          "hotWrites": 15,
+          "hotReads": 15,
+          "ioPeak": 3,
+          "providerMs": 0,
+          "saves": 18,
+          "snapshotMs": 15.392098999982409,
+          "localPersistenceUnionMs": 868.267316999998,
+          "queueMs": 4.475927000014053,
+          "processingMs": 2434.2274079999843,
+          "persistenceQueuePeak": 1,
+          "objectsWritten": 3
+        }
+      ],
+      "ledger": [
+        {
+          "totalMs": 280.29937699999573,
+          "coldMs": 72.09972199999902,
+          "hotMs": 208.1996549999967,
+          "bytes": 5680,
+          "writes": 6,
+          "reads": 262,
+          "hotBytes": 4734,
+          "hotWrites": 5,
+          "hotReads": 5,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0,
+          "localPersistenceUnionMs": 278.16896400001133,
+          "queueMs": 0.13328199998795753,
+          "processingMs": 278.02019400003337,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 0
+        },
+        {
+          "totalMs": 270.59750599999825,
+          "coldMs": 62.78172800000175,
+          "hotMs": 207.8157779999965,
+          "bytes": 5680,
+          "writes": 6,
+          "reads": 262,
+          "hotBytes": 4734,
+          "hotWrites": 5,
+          "hotReads": 5,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0,
+          "localPersistenceUnionMs": 269.8506050000142,
+          "queueMs": 0.04487900000822265,
+          "processingMs": 269.80089100000623,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 0
+        },
+        {
+          "totalMs": 267.6970200000069,
+          "coldMs": 63.45020700000168,
+          "hotMs": 204.2468130000052,
+          "bytes": 5680,
+          "writes": 6,
+          "reads": 262,
+          "hotBytes": 4734,
+          "hotWrites": 5,
+          "hotReads": 5,
+          "ioPeak": 1,
+          "providerMs": 0,
+          "saves": 6,
+          "snapshotMs": 0,
+          "localPersistenceUnionMs": 267.2627939999875,
+          "queueMs": 0.04088299998693401,
+          "processingMs": 267.2170190000179,
+          "persistenceQueuePeak": null,
+          "objectsWritten": 0
+        }
+      ]
+    }
+  },
+  "summary": {
+    "short": {
+      "before": {
+        "totalMs": {
+          "median": 805.1205789999999,
+          "max": 811.208094
+        },
+        "coldMs": {
+          "median": 302.69157600000017,
+          "max": 317.061125
+        },
+        "hotMs": {
+          "median": 502.047542,
+          "max": 502.42900299999974
+        },
+        "bytes": {
+          "median": 5704,
+          "max": 5704
+        },
+        "writes": {
+          "median": 17,
+          "max": 17
+        },
+        "reads": {
+          "median": 17,
+          "max": 17
+        },
+        "hotBytes": {
+          "median": 3735,
+          "max": 3735
+        },
+        "hotWrites": {
+          "median": 10,
+          "max": 10
+        },
+        "hotReads": {
+          "median": 10,
+          "max": 10
+        },
+        "ioPeak": {
+          "median": 1,
+          "max": 1
+        },
+        "providerMs": {
+          "median": 0,
+          "max": 0
+        },
+        "saves": {
+          "median": 6,
+          "max": 6
+        },
+        "snapshotMs": {
+          "median": 0.3729280000001154,
+          "max": 0.4809829999999664
+        },
+        "localPersistenceUnionMs": {
+          "median": 802.5299739999998,
+          "max": 807.728309
+        },
+        "queueMs": {
+          "median": null,
+          "max": null
+        },
+        "processingMs": {
+          "median": null,
+          "max": null
+        },
+        "persistenceQueuePeak": {
+          "median": null,
+          "max": null
+        },
+        "objectsWritten": {
+          "median": 11,
+          "max": 11
+        }
+      },
+      "after": {
+        "totalMs": {
+          "median": 430.642786,
+          "max": 433.43355500000007
+        },
+        "coldMs": {
+          "median": 109.571348,
+          "max": 121.84749399999998
+        },
+        "hotMs": {
+          "median": 314.935406,
+          "max": 327.85529500000007
+        },
+        "bytes": {
+          "median": 5562,
+          "max": 5562
+        },
+        "writes": {
+          "median": 10,
+          "max": 10
+        },
+        "reads": {
+          "median": 10,
+          "max": 10
+        },
+        "hotBytes": {
+          "median": 3640,
+          "max": 3640
+        },
+        "hotWrites": {
+          "median": 5,
+          "max": 5
+        },
+        "hotReads": {
+          "median": 5,
+          "max": 5
+        },
+        "ioPeak": {
+          "median": 4,
+          "max": 4
+        },
+        "providerMs": {
+          "median": 0,
+          "max": 0
+        },
+        "saves": {
+          "median": 6,
+          "max": 6
+        },
+        "snapshotMs": {
+          "median": 0.33074000000033266,
+          "max": 0.617525000000029
+        },
+        "localPersistenceUnionMs": {
+          "median": 427.2270510000003,
+          "max": 429.8576169999999
+        },
+        "queueMs": {
+          "median": null,
+          "max": null
+        },
+        "processingMs": {
+          "median": null,
+          "max": null
+        },
+        "persistenceQueuePeak": {
+          "median": null,
+          "max": null
+        },
+        "objectsWritten": {
+          "median": 4,
+          "max": 4
+        }
+      }
+    },
+    "long": {
+      "before": {
+        "totalMs": {
+          "median": 19818.882597000003,
+          "max": 19951.435023000002
+        },
+        "coldMs": {
+          "median": 18714.334593,
+          "max": 18831.964554000002
+        },
+        "hotMs": {
+          "median": 1104.5480040000039,
+          "max": 1119.4704689999999
+        },
+        "bytes": {
+          "median": 3618006,
+          "max": 3618006
+        },
+        "writes": {
+          "median": 473,
+          "max": 473
+        },
+        "reads": {
+          "median": 473,
+          "max": 473
+        },
+        "hotBytes": {
+          "median": 184505,
+          "max": 184505
+        },
+        "hotWrites": {
+          "median": 20,
+          "max": 20
+        },
+        "hotReads": {
+          "median": 20,
+          "max": 20
+        },
+        "ioPeak": {
+          "median": 1,
+          "max": 1
+        },
+        "providerMs": {
+          "median": 0,
+          "max": 0
+        },
+        "saves": {
+          "median": 6,
+          "max": 6
+        },
+        "snapshotMs": {
+          "median": 59.947063000003254,
+          "max": 67.07746399999542
+        },
+        "localPersistenceUnionMs": {
+          "median": 19748.522777000002,
+          "max": 19887.54545499999
+        },
+        "queueMs": {
+          "median": null,
+          "max": null
+        },
+        "processingMs": {
+          "median": null,
+          "max": null
+        },
+        "persistenceQueuePeak": {
+          "median": null,
+          "max": null
+        },
+        "objectsWritten": {
+          "median": 467,
+          "max": 467
+        }
+      },
+      "after": {
+        "totalMs": {
+          "median": 11491.538983,
+          "max": 12409.521495999998
+        },
+        "coldMs": {
+          "median": 10899.949335,
+          "max": 11792.548589000002
+        },
+        "hotMs": {
+          "median": 591.589648000001,
+          "max": 616.9729069999958
+        },
+        "bytes": {
+          "median": 3685263,
+          "max": 3685263
+        },
+        "writes": {
+          "median": 454,
+          "max": 454
+        },
+        "reads": {
+          "median": 454,
+          "max": 454
+        },
+        "hotBytes": {
+          "median": 185715,
+          "max": 185715
+        },
+        "hotWrites": {
+          "median": 10,
+          "max": 10
+        },
+        "hotReads": {
+          "median": 10,
+          "max": 10
+        },
+        "ioPeak": {
+          "median": 4,
+          "max": 4
+        },
+        "providerMs": {
+          "median": 0,
+          "max": 0
+        },
+        "saves": {
+          "median": 6,
+          "max": 6
+        },
+        "snapshotMs": {
+          "median": 46.67516899999646,
+          "max": 51.37943099999734
+        },
+        "localPersistenceUnionMs": {
+          "median": 11441.162737,
+          "max": 12362.03755899999
+        },
+        "queueMs": {
+          "median": null,
+          "max": null
+        },
+        "processingMs": {
+          "median": null,
+          "max": null
+        },
+        "persistenceQueuePeak": {
+          "median": null,
+          "max": null
+        },
+        "objectsWritten": {
+          "median": 448,
+          "max": 448
+        }
+      }
+    },
+    "single-child": {
+      "before": {
+        "totalMs": {
+          "median": 513.354551000004,
+          "max": 530.5140729999985
+        },
+        "coldMs": {
+          "median": 86.96567299999879,
+          "max": 91.91414400000212
+        },
+        "hotMs": {
+          "median": 426.3888780000052,
+          "max": 438.59992899999634
+        },
+        "bytes": {
+          "median": 39740004,
+          "max": 39740004
+        },
+        "writes": {
+          "median": 6,
+          "max": 6
+        },
+        "reads": {
+          "median": 0,
+          "max": 0
+        },
+        "hotBytes": {
+          "median": 33116670,
+          "max": 33116670
+        },
+        "hotWrites": {
+          "median": 5,
+          "max": 5
+        },
+        "hotReads": {
+          "median": 0,
+          "max": 0
+        },
+        "ioPeak": {
+          "median": 1,
+          "max": 1
+        },
+        "providerMs": {
+          "median": 0,
+          "max": 0
+        },
+        "saves": {
+          "median": 6,
+          "max": 6
+        },
+        "snapshotMs": {
+          "median": 0,
+          "max": 0
+        },
+        "localPersistenceUnionMs": {
+          "median": null,
+          "max": null
+        },
+        "queueMs": {
+          "median": null,
+          "max": null
+        },
+        "processingMs": {
+          "median": null,
+          "max": null
+        },
+        "persistenceQueuePeak": {
+          "median": null,
+          "max": null
+        },
+        "objectsWritten": {
+          "median": 0,
+          "max": 0
+        }
+      },
+      "after": {
+        "totalMs": {
+          "median": 480.56728500000463,
+          "max": 481.5561119999984
+        },
+        "coldMs": {
+          "median": 168.92054300000018,
+          "max": 174.6308149999968
+        },
+        "hotMs": {
+          "median": 310.46802300000127,
+          "max": 316.38114399999904
+        },
+        "bytes": {
+          "median": 3329924,
+          "max": 3329924
+        },
+        "writes": {
+          "median": 7,
+          "max": 7
+        },
+        "reads": {
+          "median": 8,
+          "max": 8
+        },
+        "hotBytes": {
+          "median": 15820,
+          "max": 15820
+        },
+        "hotWrites": {
+          "median": 5,
+          "max": 5
+        },
+        "hotReads": {
+          "median": 5,
+          "max": 5
+        },
+        "ioPeak": {
+          "median": 1,
+          "max": 1
+        },
+        "providerMs": {
+          "median": 0,
+          "max": 0
+        },
+        "saves": {
+          "median": 6,
+          "max": 6
+        },
+        "snapshotMs": {
+          "median": 8.68866999999591,
+          "max": 11.316037999997206
+        },
+        "localPersistenceUnionMs": {
+          "median": 480.0000849999924,
+          "max": 480.55296599999565
+        },
+        "queueMs": {
+          "median": 0.5107629999984056,
+          "max": 0.8017959999924642
+        },
+        "processingMs": {
+          "median": 469.94363400000293,
+          "max": 470.98526399999537
+        },
+        "persistenceQueuePeak": {
+          "median": 1,
+          "max": 1
+        },
+        "objectsWritten": {
+          "median": 1,
+          "max": 1
+        }
+      }
+    },
+    "parallel-child": {
+      "before": {
+        "totalMs": {
+          "median": 1715.274351999993,
+          "max": 1745.0374889999948
+        },
+        "coldMs": {
+          "median": 248.4950889999891,
+          "max": 274.2381719999976
+        },
+        "hotMs": {
+          "median": 1466.779263000004,
+          "max": 1470.7993169999972
+        },
+        "bytes": {
+          "median": 119220012,
+          "max": 119220012
+        },
+        "writes": {
+          "median": 18,
+          "max": 18
+        },
+        "reads": {
+          "median": 0,
+          "max": 0
+        },
+        "hotBytes": {
+          "median": 99350010,
+          "max": 99350010
+        },
+        "hotWrites": {
+          "median": 15,
+          "max": 15
+        },
+        "hotReads": {
+          "median": 0,
+          "max": 0
+        },
+        "ioPeak": {
+          "median": 1,
+          "max": 1
+        },
+        "providerMs": {
+          "median": 0,
+          "max": 0
+        },
+        "saves": {
+          "median": 18,
+          "max": 18
+        },
+        "snapshotMs": {
+          "median": 0,
+          "max": 0
+        },
+        "localPersistenceUnionMs": {
+          "median": null,
+          "max": null
+        },
+        "queueMs": {
+          "median": null,
+          "max": null
+        },
+        "processingMs": {
+          "median": null,
+          "max": null
+        },
+        "persistenceQueuePeak": {
+          "median": null,
+          "max": null
+        },
+        "objectsWritten": {
+          "median": 0,
+          "max": 0
+        }
+      },
+      "after": {
+        "totalMs": {
+          "median": 908.7864310000004,
+          "max": 916.1347160000005
+        },
+        "coldMs": {
+          "median": 274.03446899999835,
+          "max": 290.353618000001
+        },
+        "hotMs": {
+          "median": 625.7810979999995,
+          "max": 640.9382149999947
+        },
+        "bytes": {
+          "median": 9989772,
+          "max": 9989772
+        },
+        "writes": {
+          "median": 21,
+          "max": 21
+        },
+        "reads": {
+          "median": 24,
+          "max": 24
+        },
+        "hotBytes": {
+          "median": 47460,
+          "max": 47460
+        },
+        "hotWrites": {
+          "median": 15,
+          "max": 15
+        },
+        "hotReads": {
+          "median": 15,
+          "max": 15
+        },
+        "ioPeak": {
+          "median": 3,
+          "max": 3
+        },
+        "providerMs": {
+          "median": 0,
+          "max": 0
+        },
+        "saves": {
+          "median": 18,
+          "max": 18
+        },
+        "snapshotMs": {
+          "median": 8.833545000001322,
+          "max": 15.392098999982409
+        },
+        "localPersistenceUnionMs": {
+          "median": 908.5536940000165,
+          "max": 915.8475949999847
+        },
+        "queueMs": {
+          "median": 4.393497999997635,
+          "max": 4.475927000014053
+        },
+        "processingMs": {
+          "median": 2557.7593699999998,
+          "max": 2572.2515330000024
+        },
+        "persistenceQueuePeak": {
+          "median": 1,
+          "max": 1
+        },
+        "objectsWritten": {
+          "median": 3,
+          "max": 3
+        }
+      }
+    },
+    "ledger": {
+      "before": {
+        "totalMs": {
+          "median": 453.46349799999734,
+          "max": 508.0695620000042
+        },
+        "coldMs": {
+          "median": 82.05231600000116,
+          "max": 82.77031700000225
+        },
+        "hotMs": {
+          "median": 375.46598199999426,
+          "max": 425.299245000002
+        },
+        "bytes": {
+          "median": 5680,
+          "max": 5680
+        },
+        "writes": {
+          "median": 6,
+          "max": 6
+        },
+        "reads": {
+          "median": 1542,
+          "max": 1542
+        },
+        "hotBytes": {
+          "median": 4734,
+          "max": 4734
+        },
+        "hotWrites": {
+          "median": 5,
+          "max": 5
+        },
+        "hotReads": {
+          "median": 1285,
+          "max": 1285
+        },
+        "ioPeak": {
+          "median": 1,
+          "max": 1
+        },
+        "providerMs": {
+          "median": 0,
+          "max": 0
+        },
+        "saves": {
+          "median": 6,
+          "max": 6
+        },
+        "snapshotMs": {
+          "median": 0,
+          "max": 0
+        },
+        "localPersistenceUnionMs": {
+          "median": null,
+          "max": null
+        },
+        "queueMs": {
+          "median": null,
+          "max": null
+        },
+        "processingMs": {
+          "median": null,
+          "max": null
+        },
+        "persistenceQueuePeak": {
+          "median": null,
+          "max": null
+        },
+        "objectsWritten": {
+          "median": 0,
+          "max": 0
+        }
+      },
+      "after": {
+        "totalMs": {
+          "median": 270.59750599999825,
+          "max": 280.29937699999573
+        },
+        "coldMs": {
+          "median": 63.45020700000168,
+          "max": 72.09972199999902
+        },
+        "hotMs": {
+          "median": 207.8157779999965,
+          "max": 208.1996549999967
+        },
+        "bytes": {
+          "median": 5680,
+          "max": 5680
+        },
+        "writes": {
+          "median": 6,
+          "max": 6
+        },
+        "reads": {
+          "median": 262,
+          "max": 262
+        },
+        "hotBytes": {
+          "median": 4734,
+          "max": 4734
+        },
+        "hotWrites": {
+          "median": 5,
+          "max": 5
+        },
+        "hotReads": {
+          "median": 5,
+          "max": 5
+        },
+        "ioPeak": {
+          "median": 1,
+          "max": 1
+        },
+        "providerMs": {
+          "median": 0,
+          "max": 0
+        },
+        "saves": {
+          "median": 6,
+          "max": 6
+        },
+        "snapshotMs": {
+          "median": 0,
+          "max": 0
+        },
+        "localPersistenceUnionMs": {
+          "median": 269.8506050000142,
+          "max": 278.16896400001133
+        },
+        "queueMs": {
+          "median": 0.04487900000822265,
+          "max": 0.13328199998795753
+        },
+        "processingMs": {
+          "median": 269.80089100000623,
+          "max": 278.02019400003337
+        },
+        "persistenceQueuePeak": {
+          "median": null,
+          "max": null
+        },
+        "objectsWritten": {
+          "median": 0,
+          "max": 0
+        }
+      }
+    }
+  },
+  "validation": {
+    "compile": 0,
+    "lint": 0,
+    "buildTest": 0,
+    "test": 0,
+    "total": 794,
+    "passed": 793,
+    "failed": 0,
+    "skipped": 1,
+    "skipReason": "sandbox disallows local fault HTTP server port binding",
+    "targetedPassed": 42,
+    "realProviderRun": false,
+    "realVsCodeAcceptance": false
+  },
+  "readOnlyAudit": {
+    "childFiles": 21,
+    "parentSessions": 6,
+    "completed": 20,
+    "failed": 1,
+    "childSummaryUsageResponses": 123,
+    "ledgerSubagentUsageResponses": 123,
+    "ledgerSubagentAttempts": 123,
+    "damagedBuckets": 0
+  }
+}

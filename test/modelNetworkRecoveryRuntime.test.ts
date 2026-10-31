@@ -6,7 +6,7 @@ import { AgentRunner } from '../src/agent/runner';
 import { ExecutionCostBudget, LogicalBudgetExceededError } from '../src/agent/executionPolicy';
 import { AgentInterruptedError, checkpointCopy, createRunCheckpoint, normalizeRunCheckpoint, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import { normalizeDeepSeekUsage } from '../src/agent/usageStats';
-import { normalizeUsageLedgerValue } from '../src/agent/usageLedger';
+import { normalizeUsageLedgerValue, appendUsageLedgerRecord } from '../src/agent/usageLedger';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import type { AgentActivityInput, AgentRequest, ProviderUsageLedgerRecord } from '../src/shared/types';
 
@@ -55,7 +55,7 @@ test('replays the frozen current model round without rerunning completed tool ev
     const history = JSON.stringify(request.history);
     const response = await new AgentRunner(workspace).run(request, {
       onCheckpoint: async (next) => { checkpoint = checkpointCopy(next); },
-      onStatus: (status) => statuses.push(status), onUsageLedgerRecord: (record) => records.push(record),
+      onStatus: (status) => statuses.push(status), onUsageLedgerRecord: (record) => { const next = appendUsageLedgerRecord({ version: 1, records: records, incomplete: false, legacyAggregate: false }, record); records.splice(0, records.length, ...next.records); },
       onModelRoundStart: () => { roundStarts++; }, onAttemptReset: () => { resets++; }
     });
     assert.equal(response.message, 'final answer');
@@ -234,7 +234,7 @@ test('empty or partial usage stays unknown and never refunds token or positive c
   try {
     await new AgentRunner().run(request, {
       onCheckpoint: async (next) => { checkpoint = checkpointCopy(next); },
-      onUsageLedgerRecord: (record) => records.push(record)
+      onUsageLedgerRecord: (record) => { const next = appendUsageLedgerRecord({ version: 1, records: records, incomplete: false, legacyAggregate: false }, record); records.splice(0, records.length, ...next.records); }
     });
     assert.ok((checkpoint.usedCostByCurrency?.['¥'] ?? 0) > 0);
     assert.ok((checkpoint.runBudget?.upstreamTokens ?? 0) > 10);

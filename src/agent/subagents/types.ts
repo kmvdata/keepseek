@@ -110,7 +110,7 @@ export interface SubagentInvocationContext {
   language: KeepseekLanguage;
   signal?: AbortSignal;
   onUsage?: (event: UsageEvent) => void;
-  onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => void;
+  onUsageLedgerRecord?: (record: ProviderUsageLedgerRecord) => Promise<void> | void;
   getCacheObservationCandidates?: import('../../shared/types').AgentRunCallbacks['getCacheObservationCandidates'];
   onRunSummary?: (summary: SubagentRunUsageSummary) => void;
 }

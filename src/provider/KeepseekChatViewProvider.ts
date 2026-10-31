@@ -143,7 +143,6 @@ import {
   applyUsageLedgerDeltaToSessionStats,
   calculateCacheHitRate,
   getCacheMissPossibleReasons,
-  rebuildSessionUsageStatsFromLedger
 } from '../agent/usageStats';
 import {
   appendUsageLedgerRecord,
@@ -152,10 +151,11 @@ import {
   summarizeUsageLedger
 } from '../agent/usageLedger';
 import { UsageLedgerStore } from '../agent/usageLedgerStore';
-import { applyReferenceCostView, buildReferenceCostView } from '../agent/usageReferenceCosts';
+import { applyReferenceCostView, buildReferenceCostView, ReferenceCostIndex } from '../agent/usageReferenceCosts';
 import {
   addSubagentHandoffEstimate,
   createUsageDetailsViewModel,
+  countObservedSubagentInvocations,
   toSubagentProgressViewModel,
   upsertSubagentRunUsageSummary
 } from '../agent/subagentUsageStats';
@@ -332,7 +332,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly contextFileFingerprints = new WeakMap<ContextFile, string>();
   private readonly usageLedgerStore: UsageLedgerStore;
   private readonly usageLedgerFlushes = new Map<string, Promise<void>>();
+  private readonly subagentUsageRecoveries = new Map<string, Promise<void>>();
+  private readonly subagentRecoveryIncomplete = new Set<string>();
+  private readonly restoredCacheObservations = new Set<string>();
+  private checkpointActivityDepth = 0;
+  private checkpointActivityPrevious?: AgentActivityState;
+  private checkpointActivitySequence?: number;
+  private checkpointActivityTimer?: ReturnType<typeof setTimeout>;
   private readonly referenceCostViews = new Map<string, ReturnType<typeof buildReferenceCostView>>();
+  private readonly referenceCostIndexes = new Map<string, ReferenceCostIndex>();
   private readonly latestCacheObservationByScope = new Map<string, import('../shared/types').ProviderCacheObservation>();
   private readonly recentCacheObservationsByFamily = new Map<string, import('../shared/types').ProviderCacheObservation[]>();
   private readonly activeChangeActions = new Set<string>();
@@ -365,7 +373,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       circuitBreaker: this.approvalCircuitBreaker,
       onUsage: (event) => {
         const session = this.sessionStore.getActiveSession();
-        session.usageStats = addUsageEventToSessionStats(session.usageStats, event);
+        if (!event.ledgerRecorded || session.usageLedgerRef?.legacyAggregate || session.usageLedger?.legacyAggregate) {
+          session.usageStats = addUsageEventToSessionStats(session.usageStats, event);
+        }
         session.updatedAt = new Date().toISOString();
         this.postState();
       },
@@ -1685,23 +1695,29 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   ): TurnUsageStats {
     const nextTurnUsage = addUsageEventToTurnStats(currentTurnUsage, event);
     session.lastTurnUsage = nextTurnUsage;
-    session.usageStats = addUsageEventToSessionStats(session.usageStats, event, nextTurnUsage.updatedAt);
+    if (!event.ledgerRecorded || session.usageLedgerRef?.legacyAggregate || session.usageLedger?.legacyAggregate) {
+      session.usageStats = addUsageEventToSessionStats(session.usageStats, event, nextTurnUsage.updatedAt);
+    }
     session.updatedAt = nextTurnUsage.updatedAt ?? new Date().toISOString();
     return nextTurnUsage;
   }
 
-  private applyUsageLedgerRecord(
+  private async applyUsageLedgerRecord(
     session: ChatSession,
     record: import('../shared/types').ProviderUsageLedgerRecord
-  ): void {
-    const legacyAggregate = !session.usageLedgerRef && !session.usageLedger
-      && (session.usageStats?.requestCount ?? 0) > 0;
+  ): Promise<void> {
+    // Physical-attempt records are independently durable before the transport
+    // proceeds; session summaries and UI are derived and may be coalesced.
+    await this.usageLedgerStore.append(session.id, record);
+    const legacyAggregate = Boolean(session.usageLedgerRef?.legacyAggregate || session.usageLedger?.legacyAggregate
+      || !session.usageLedgerRef && !session.usageLedger && (session.usageStats?.requestCount ?? 0) > 0);
     const previousSummary = summarizeUsageLedger(session.usageLedger);
     session.usageLedger = appendUsageLedgerRecord(session.usageLedger, record, legacyAggregate);
     if (record.cacheObservation && record.kind === 'usage_response') {
       this.rememberCacheObservation(session.id, record.cacheObservation);
     }
-    session.usageStats = applyUsageLedgerDeltaToSessionStats(
+    const durableStats = this.usageLedgerStore.peekStats?.(session.id);
+    session.usageStats = !legacyAggregate && durableStats ? durableStats : applyUsageLedgerDeltaToSessionStats(
       session.usageStats,
       previousSummary,
       summarizeUsageLedger(session.usageLedger)
@@ -1715,13 +1731,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     let succeeded = false;
     const next = new Promise<void>((resolve) => setTimeout(resolve, 50)).then(async () => {
       const snapshot = normalizeUsageLedgerValue(session.usageLedger);
-      if (snapshot?.records.length) await this.usageLedgerStore.appendMany(session.id, snapshot.records);
-      const rebuilt = await this.usageLedgerStore.rebuild(session.id);
-      for (const storedRecord of rebuilt.ledger.records) {
+      const pendingRecords = snapshot?.records.filter(record => !this.usageLedgerStore.hasDurableRecord?.(session.id, record)) ?? [];
+      if (pendingRecords.length) await this.usageLedgerStore.appendMany(session.id, pendingRecords);
+      const rebuilt = await this.usageLedgerStore.current(session.id);
+      // Live usage callbacks already remember new observations. Historical
+      // cache families only need replaying once when this session is restored.
+      for (const storedRecord of this.restoredCacheObservations?.has(session.id) ? [] : rebuilt.ledger.records) {
         if (storedRecord.kind === 'usage_response' && storedRecord.cacheObservation) {
           this.rememberCacheObservation(session.id, storedRecord.cacheObservation);
         }
       }
+      this.restoredCacheObservations?.add(session.id);
       if (!rebuilt.ledger.records.length && !snapshot?.records.length && !session.usageLedgerRef) return;
       session.usageLedgerRef = {
         version: 2,
@@ -1741,16 +1761,21 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             legacyAggregate: true,
             incomplete: true
           })
-        : rebuildSessionUsageStatsFromLedger(visibleLedger.records, {
-            incomplete: Boolean(visibleLedger.incomplete || session.usageLedgerRef.incomplete)
-          });
+        : rebuilt.stats;
+      if (session.usageLedgerRef.incomplete && session.usageStats) session.usageStats = applyUsageLedgerSummaryToSessionStats(
+        session.usageStats, { ...summarizeUsageLedger(visibleLedger), incomplete: true });
+      const costIndex = this.referenceCostIndexes?.get(session.id) ?? new ReferenceCostIndex();
+      this.referenceCostIndexes?.set(session.id, costIndex);
       this.referenceCostViews.set(session.id, buildReferenceCostView(visibleLedger, {
         lastUserAt: session.messages.filter((message) => message.role === 'user').at(-1)?.createdAt,
         subagentUsageStats: session.subagentUsageStats
-      }));
+      }, costIndex));
       if (snapshot?.records.length) {
-        const flushed = new Set(snapshot.records.map((record) => `${record.requestId}\u0000${record.attemptIndex}`));
-        const remaining = current?.records.filter((record) => !flushed.has(`${record.requestId}\u0000${record.attemptIndex}`)) ?? [];
+        const flushed = new Map(snapshot.records.map((record) => [`${record.requestId}\u0000${record.attemptIndex}`, record]));
+        const remaining = current?.records.filter((record) => {
+          const saved = flushed.get(`${record.requestId}\u0000${record.attemptIndex}`);
+          return !saved || saved.kind !== record.kind;
+        }) ?? [];
         session.usageLedger = remaining.length ? {
           version: 1,
           records: remaining,
@@ -1759,7 +1784,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         } : undefined;
       }
       session.updatedAt = new Date().toISOString();
-      await this.sessionStore.persist();
+      // No whole-session save for a derived ledger refresh. The raw buckets are
+      // already durable and startup always reconciles them, including no-ref sessions.
       if (this.sessionStore.activeSessionId === session.id) this.postState();
       succeeded = true;
     }).catch((error) => {
@@ -1776,6 +1802,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         if (succeeded && normalizeUsageLedgerValue(session.usageLedger)?.records.length) this.queueUsageLedgerFlush(session);
       }
     });
+  }
+
+  private async recoverSubagentUsage(session: ChatSession): Promise<void> {
+    let recovery = this.subagentUsageRecoveries.get(session.id);
+    if (!recovery) {
+      recovery = this.subagentRuntime.restoreUsage(session.id).then(restored => {
+        for (const summary of restored.summaries) session.subagentUsageStats = upsertSubagentRunUsageSummary(session.subagentUsageStats, summary);
+        if (restored.incomplete) this.subagentRecoveryIncomplete.add(session.id);
+      });
+      this.subagentUsageRecoveries.set(session.id, recovery);
+    }
+    await recovery;
   }
 
   private cacheObservationScopeKey(sessionId: string, source: import('../shared/types').UsageSource, taskId?: string): string {
@@ -2061,6 +2099,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.clearSessionTransientState();
       this.queueUsageLedgerFlush(session);
       await this.usageLedgerFlushes.get(session.id);
+      await this.recoverSubagentUsage(session);
       await Promise.all([
         this.changeSets.loadSession?.(session.id),
         this.draftRuns.loadSession?.(session.id)
@@ -4326,36 +4365,51 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async saveAgentCheckpoint(session: ChatSession, message: ChatMessage, checkpoint: RunCheckpoint): Promise<void> {
-    message.runCheckpoint = snapshotCheckpoint(checkpoint);
-    session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
-    // Only complete rounds are visible to future history projection. Incomplete
-    // native blocks stay exclusively in the display text, never providerReplay.
-    if (checkpoint.state) {
-      message.toolRounds = structuredClone(checkpoint.state.toolRounds);
-      message.providerReplay = normalizeProviderReplay(checkpoint.state.completedReplay);
+    if (++this.checkpointActivityDepth === 1) this.checkpointActivityTimer = setTimeout(() => {
+      if (this.sessionStore.activeSessionId !== session.id) return;
+      this.checkpointActivityPrevious = { ...this.agentActivity };
+      this.setAgentActivity({ base: 'executing', phase: 'saving_state' });
+      this.checkpointActivitySequence = this.agentActivity.sequence;
+    }, 250);
+    try {
+      message.runCheckpoint = snapshotCheckpoint(checkpoint);
+      session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
+      // Only complete rounds are visible to future history projection. Incomplete
+      // native blocks stay exclusively in the display text, never providerReplay.
+      if (checkpoint.state) {
+        message.toolRounds = message.runCheckpoint.state?.toolRounds;
+        message.providerReplay = normalizeProviderReplay(checkpoint.state.completedReplay);
+      }
+      if (checkpoint.finalResponse) {
+        message.content = checkpoint.finalResponse.message;
+        message.reasoningContent = checkpoint.finalResponse.reasoningContent;
+        message.toolRounds = checkpoint.finalResponse.toolRounds;
+        message.providerReplay = normalizeProviderReplay(checkpoint.finalResponse.providerReplay);
+        message.runDetails = checkpoint.finalResponse.runDetails;
+      }
+      session.updatedAt = checkpoint.updatedAt;
+      const planningOnly = normalizeExecutionMode(checkpoint.request.executionMode) === 'plan';
+      const draftEdits = planningOnly ? [] : checkpoint.finalResponse?.draftEdits ?? checkpoint.state?.draftEdits ?? [];
+      const draftRuns = planningOnly ? [] : checkpoint.finalResponse?.draftRuns ?? checkpoint.state?.draftRuns ?? [];
+      if (draftEdits.length) this.changeSets.addDraftEdits({
+        edits: draftEdits, runId: checkpoint.taskId, sessionId: session.id, messageId: message.id
+      });
+      if (draftRuns.length) this.draftRuns.addProposals({
+        proposals: draftRuns, agentRunId: checkpoint.taskId, sessionId: session.id, messageId: message.id
+      });
+      if (draftEdits.length) await this.changeSets.flush();
+      if (draftRuns.length) await this.draftRuns.flush();
+      // Proposals are durable before the task can be marked completed.
+      await this.sessionStore.persist('agent_checkpoint');
+      this.postState();
+    } finally {
+      if (--this.checkpointActivityDepth === 0) {
+        clearTimeout(this.checkpointActivityTimer);
+        if (this.checkpointActivityPrevious && this.checkpointActivitySequence === this.agentActivity.sequence) this.setAgentActivity(this.checkpointActivityPrevious);
+        this.checkpointActivityPrevious = undefined;
+        this.checkpointActivitySequence = undefined;
+      }
     }
-    if (checkpoint.finalResponse) {
-      message.content = checkpoint.finalResponse.message;
-      message.reasoningContent = checkpoint.finalResponse.reasoningContent;
-      message.toolRounds = checkpoint.finalResponse.toolRounds;
-      message.providerReplay = normalizeProviderReplay(checkpoint.finalResponse.providerReplay);
-      message.runDetails = checkpoint.finalResponse.runDetails;
-    }
-    session.updatedAt = checkpoint.updatedAt;
-    const planningOnly = normalizeExecutionMode(checkpoint.request.executionMode) === 'plan';
-    const draftEdits = planningOnly ? [] : checkpoint.finalResponse?.draftEdits ?? checkpoint.state?.draftEdits ?? [];
-    const draftRuns = planningOnly ? [] : checkpoint.finalResponse?.draftRuns ?? checkpoint.state?.draftRuns ?? [];
-    if (draftEdits.length) this.changeSets.addDraftEdits({
-      edits: draftEdits, runId: checkpoint.taskId, sessionId: session.id, messageId: message.id
-    });
-    if (draftRuns.length) this.draftRuns.addProposals({
-      proposals: draftRuns, agentRunId: checkpoint.taskId, sessionId: session.id, messageId: message.id
-    });
-    if (draftEdits.length) await this.changeSets.flush();
-    if (draftRuns.length) await this.draftRuns.flush();
-    // Proposals are durable before the task can be marked completed.
-    await this.sessionStore.persist();
-    this.postState();
   }
 
   private async continueAgentTask(messageId: string): Promise<void> {
@@ -4451,7 +4505,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           streamPublisher.schedule();
         },
         onUsage: (event) => { usage = this.applyUsageEvent(session, usage, event); this.liveTurnUsage = usage; refresh(); },
-        onUsageLedgerRecord: (record) => { this.applyUsageLedgerRecord(session, record); refresh(); },
+        onUsageLedgerRecord: async (record) => { await this.applyUsageLedgerRecord(session, record); refresh(); },
         getPreviousCacheObservation: (input) => this.getPreviousCacheObservation(input),
         getCacheObservationCandidates: (input) => this.getCacheObservationCandidates(input),
         onUsageEstimate: (estimate) => { this.liveContextUsage = toSessionContextUsageEstimate(estimate); refresh(); },
@@ -5115,8 +5169,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.liveTurnUsage = currentTurnUsage;
           scheduleLiveState();
         },
-        onUsageLedgerRecord: (record) => {
-          this.applyUsageLedgerRecord(activeSession, record);
+        onUsageLedgerRecord: async (record) => {
+          await this.applyUsageLedgerRecord(activeSession, record);
           scheduleLiveState();
         },
         getPreviousCacheObservation: (input) => this.getPreviousCacheObservation(input),
@@ -5429,7 +5483,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         sourceConfig,
         signal
       });
-      this.applyContextCompressionRefreshResult(activeSession, result);
+      await this.applyContextCompressionRefreshResult(activeSession, result);
     } catch {
       // Context compression is best-effort and must never block the normal request path.
     }
@@ -5465,7 +5519,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (session.id !== update.sessionId || !this.canApplyBackgroundContextCompressionRefresh(session, update)) {
       return;
     }
-    if (!this.applyContextCompressionRefreshResult(session, update.result)) {
+    if (!await this.applyContextCompressionRefreshResult(session, update.result)) {
       return;
     }
 
@@ -5486,13 +5540,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return expectedLastMessage?.id === update.expectedLastMessageId;
   }
 
-  private applyContextCompressionRefreshResult(
+  private async applyContextCompressionRefreshResult(
     session: ChatSession,
     result: HistoryCompressionRefreshResult | undefined
-  ): boolean {
+  ): Promise<boolean> {
     if (!result?.changed) {
       return false;
     }
+    const legacyAggregate = Boolean(session.usageLedgerRef?.legacyAggregate || session.usageLedger?.legacyAggregate
+      || !session.usageLedgerRef && !session.usageLedger && (session.usageStats?.requestCount ?? 0) > 0);
 
     session.contextCompression = result.state;
     if ((result.reason === 'created' || result.reason === 'updated') && session.requestProtocol) {
@@ -5504,8 +5560,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     for (const usageEvent of result.usageEvents ?? []) {
       session.usageStats = addUsageEventToSessionStats(session.usageStats, usageEvent);
     }
+    // Standalone compression has already contacted the Provider. Retain its
+    // records inline until their independent commit succeeds, including a disk
+    // failure handled by the best-effort compression caller.
+    for (const record of result.usageLedgerRecords ?? []) session.usageLedger = appendUsageLedgerRecord(session.usageLedger, record, legacyAggregate);
     for (const record of result.usageLedgerRecords ?? []) {
-      this.applyUsageLedgerRecord(session, record);
+      await this.applyUsageLedgerRecord(session, record);
     }
     session.contextUsage = undefined;
     session.updatedAt = new Date().toISOString();
@@ -5520,6 +5580,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const session = this.sessionStore.getActiveSession();
         this.queueUsageLedgerFlush(session);
         await this.usageLedgerFlushes.get(session.id);
+        await this.recoverSubagentUsage(session);
       }
       this.sessionReady = true;
       this.commandSettingsReadiness.executionMode = sessionResult[0]?.status === 'fulfilled' ? 'ready' : 'error';
@@ -5902,7 +5963,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           usageDetails: createUsageDetailsViewModel({
             sessionUsageStats: displaySessionUsage,
             lastTurnUsage: displayTurnUsage,
-            subagentUsageStats: referenceCosts?.subagents ?? activeSession.subagentUsageStats
+            subagentUsageStats: activeSession.subagentUsageStats,
+            subagentLedgerRecords: referenceCosts?.records,
+            ledgerUsageIndex: this.referenceCostIndexes.get(activeSession.id),
+            subagentActivities: this.subagentRuntime.getUsageActivities(activeSession.id),
+            lifecycleIncomplete: this.subagentRecoveryIncomplete.has(activeSession.id),
+            observedInvocations: countObservedSubagentInvocations(activeSession.messages)
           }),
           supportsBilling: selectedCatalogModel?.supportsBilling === true,
           isOfficialDeepSeek,

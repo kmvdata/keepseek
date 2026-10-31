@@ -2,7 +2,16 @@ import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import { writeJsonAtomic } from '../shared/atomicStorage';
 import type { ChatSession, ProviderUsageLedger, ProviderUsageLedgerRecord } from '../shared/types';
-import { normalizeUsageLedgerRecord, normalizeUsageLedgerValue, summarizeUsageLedger } from './usageLedger';
+import { normalizeUsageLedgerRecord, normalizeUsageLedgerValue, summarizeUsageLedger, preferUsageLedgerRecord,
+  summarizeCacheDiagnostics } from './usageLedger';
+import { updateUsageLedgerStatsIndex, rebuildSessionUsageStatsFromLedger } from './usageStats';
+import { recordLocalPerformance } from './logging/performanceTrace';
+
+interface LedgerIndex {
+  records: Map<string, ProviderUsageLedgerRecord>;
+  stats: ChatSession['usageStats'];
+  damagedBucketCount: number;
+}
 
 export const USAGE_LEDGER_STORE_SCHEMA_VERSION = 2;
 export const USAGE_LEDGER_STORE_BUCKET_COUNT = 256;
@@ -30,8 +39,15 @@ export interface UsageLedgerPage {
 export class UsageLedgerStore {
   private readonly decoder = new TextDecoder();
   private readonly queues = new Map<string, Promise<unknown>>();
+  private readonly indexes = new Map<string, LedgerIndex>();
 
   public constructor(private readonly globalStorageUri?: vscode.Uri) {}
+
+  public peekStats(sessionId: string): ChatSession['usageStats'] { return this.indexes.get(sessionId)?.stats; }
+  public hasDurableRecord(sessionId: string, record: ProviderUsageLedgerRecord): boolean {
+    const previous = this.indexes.get(sessionId)?.records.get(recordIdentity(record));
+    return Boolean(previous && preferUsageLedgerRecord(previous, record) === previous);
+  }
 
   public async append(sessionId: string, record: ProviderUsageLedgerRecord): Promise<boolean> {
     const result = await this.appendMany(sessionId, [record]);
@@ -57,29 +73,32 @@ export class UsageLedgerStore {
       for (const [bucket, additions] of groups) {
         const existing = await this.readBucket(sessionId, bucket);
         if (existing.damaged) {
+          this.indexes.delete(sessionId);
           // Never overwrite an unreadable bucket. Other buckets remain usable
           // and the caller can surface the incomplete marker.
           throw new Error(`Usage ledger bucket ${bucket} is damaged.`);
         }
-        const seen = new Set(existing.records.map(recordIdentity));
-        const unique = additions.filter((record) => {
+        const nextRecords = new Map(existing.records.map(record => [recordIdentity(record), record]));
+        const unique: ProviderUsageLedgerRecord[] = [];
+        for (const record of additions) {
           const identity = recordIdentity(record);
-          if (seen.has(identity)) {
-            duplicates += 1;
-            return false;
-          }
-          seen.add(identity);
-          return true;
-        });
+          const previous = nextRecords.get(identity);
+          const preferred = preferUsageLedgerRecord(previous, record);
+          if (preferred === previous) { duplicates++; continue; }
+          nextRecords.set(identity, preferred);
+          unique.push(preferred);
+        }
         if (!unique.length) continue;
         const sessionIdentity = hashText(sessionId);
         await writeJsonAtomic(this.bucketUri(sessionIdentity, bucket), {
           version: USAGE_LEDGER_STORE_SCHEMA_VERSION,
           sessionIdentity,
           bucket,
-          records: [...existing.records, ...unique],
+          records: [...nextRecords.values()],
           updatedAt: new Date().toISOString()
-        } satisfies StoredUsageLedgerBucket);
+        } satisfies StoredUsageLedgerBucket, { durable: true });
+        const index = this.indexes.get(sessionId);
+        if (index) for (const record of unique) this.updateIndex(index, record);
         appended += unique.length;
       }
       return { appended, duplicates };
@@ -107,7 +126,7 @@ export class UsageLedgerStore {
 
   public async readAll(sessionId: string, taskId?: string): Promise<UsageLedgerPage> {
     if (!this.globalStorageUri) return { records: [], total: 0, incomplete: false, damagedBucketCount: 0 };
-    const { records, damagedBucketCount } = await this.collectRecords(sessionId, taskId);
+    const { records, damagedBucketCount } = await this.enqueue(sessionId, () => this.collectRecords(sessionId, taskId));
     return {
       records,
       total: records.length,
@@ -143,18 +162,41 @@ export class UsageLedgerStore {
     summary: ReturnType<typeof summarizeUsageLedger>;
     damagedBucketCount: number;
   }> {
-    const page = await this.readAll(sessionId);
+    return this.enqueue(sessionId, async () => {
+    const page = await this.collectRecords(sessionId);
     const ledger: ProviderUsageLedger = {
       version: 1,
       records: page.records,
       legacyAggregate: false,
-      incomplete: page.incomplete
+      incomplete: page.damagedBucketCount > 0
     };
+    this.indexes.set(sessionId, { records: new Map(page.records.map(record => [recordIdentity(record), record])),
+      stats: rebuildSessionUsageStatsFromLedger(page.records, { incomplete: ledger.incomplete }), damagedBucketCount: page.damagedBucketCount });
     return { ledger, summary: summarizeUsageLedger(ledger), damagedBucketCount: page.damagedBucketCount };
+    });
+  }
+
+  /** Startup scans once; normal appends update the index only after durable commit.
+   * Explicit rebuild remains the disk integrity check and repair entrypoint. */
+  public async current(sessionId: string) {
+    if (!this.indexes.has(sessionId)) await this.rebuild(sessionId);
+    return this.enqueue(sessionId, async () => {
+      const index = this.indexes.get(sessionId)!;
+      const records = [...index.records.values()];
+      const incomplete = index.damagedBucketCount > 0;
+      if (index.stats) index.stats.cacheDiagnostics = summarizeCacheDiagnostics(records, incomplete);
+      return { ledger: { version: 1 as const, records, legacyAggregate: false, incomplete },
+        stats: index.stats, damagedBucketCount: index.damagedBucketCount };
+    });
+  }
+
+  private updateIndex(index: LedgerIndex, record: ProviderUsageLedgerRecord): void {
+    updateUsageLedgerStatsIndex(index, record, index.damagedBucketCount > 0);
   }
 
   public async deleteSession(sessionId: string): Promise<void> {
     if (!this.globalStorageUri || !sessionId.trim()) return;
+    this.indexes.delete(sessionId);
     try {
       await vscode.workspace.fs.delete(this.sessionUri(hashText(sessionId)), { recursive: true, useTrash: false });
     } catch {
@@ -174,7 +216,10 @@ export class UsageLedgerStore {
       const records = value.records.map(normalizeUsageLedgerRecord).filter(
         (record): record is ProviderUsageLedgerRecord => Boolean(record)
       );
-      return { records, damaged: records.length !== value.records.length };
+      const inBucket = records.filter(record => bucketFor(record) === bucket);
+      const unique = new Map<string, ProviderUsageLedgerRecord>();
+      for (const record of inBucket) unique.set(recordIdentity(record), preferUsageLedgerRecord(unique.get(recordIdentity(record)), record));
+      return { records: [...unique.values()], damaged: inBucket.length !== value.records.length };
     } catch (error) {
       return isMissingFileError(error) ? { records: [], damaged: false } : { records: [], damaged: true };
     }
@@ -205,8 +250,15 @@ export class UsageLedgerStore {
   }
 
   private async enqueue<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const started = performance.now();
     const previous = this.queues.get(sessionId) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(operation);
+    const current = previous.catch(() => undefined).then(async () => {
+      const processing = performance.now();
+      try { return await operation(); } finally {
+        recordLocalPerformance({ type: 'checkpoint_ledger_store', sessionId, queueMs: processing - started,
+          processingMs: performance.now() - processing, durationMs: performance.now() - started });
+      }
+    });
     this.queues.set(sessionId, current);
     try {
       return await current;

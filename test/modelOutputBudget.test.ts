@@ -1,4 +1,5 @@
 import './registerVscodeStub';
+import { appendUsageLedgerRecord } from '../src/agent/usageLedger';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -115,7 +116,7 @@ for (const provider of ['qwencloud', 'openai-responses', 'anthropic-compatible']
     globalThis.fetch = (async () => { count++; return reply(provider, 'truncated'); }) as typeof fetch;
     try {
       await assert.rejects(new AgentRunner(workspace).run(request(provider), {
-        onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); }, onUsageLedgerRecord: (record) => ledger.push(record)
+        onCheckpoint: async (cp) => { checkpoint = checkpointCopy(cp); }, onUsageLedgerRecord: (record) => { const next = appendUsageLedgerRecord({ version: 1, records: ledger, incomplete: false, legacyAggregate: false }, record); ledger.splice(0, ledger.length, ...next.records); }
       }), /Output length limit/u);
       assert.equal(count, 1, 'semantic truncation is not a network retry');
       assert.equal(tools, 0);

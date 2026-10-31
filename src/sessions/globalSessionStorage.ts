@@ -470,8 +470,8 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
 
   private async readSessionShard(uri: vscode.Uri, index: WorkspaceSessionIndex): Promise<ChatSession | undefined> {
     const value = await this.readJsonFile(uri, 'session shard');
-    if (!isRecord(value) || ![2, 3].includes(Number(value.version))) return undefined;
-    const stored = value.version === 3 ? await this.objects(uri).load(value) : value.session;
+    if (!isRecord(value) || ![2, 3, 4].includes(Number(value.version))) return undefined;
+    const stored = Number(value.version) >= 3 ? await this.objects(uri).load(value) : value.session;
     if (!isRecord(stored)) return undefined;
     const scope = { key: index.workspaceKey, name: index.workspaceName, folderUris: index.workspaceFolders };
     const session = normalizeStoredSessions({ sessions: [stored] }, scope)[0];
