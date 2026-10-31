@@ -14,7 +14,7 @@ import { createContextUsageEstimateFromAnthropic, createContextUsageEstimateFrom
 import { createProviderClient } from '../src/agent/providers/factory';
 import { SubagentRuntime } from '../src/agent/subagents/runtime';
 import { SubagentStore } from '../src/agent/subagents/store';
-import type { SubagentToolAdapter } from '../src/agent/subagents/types';
+import type { SubagentToolAdapter, SubagentProgressState } from '../src/agent/subagents/types';
 import { createUsageEvent } from '../src/agent/usageStats';
 import type { AgentRequest, ContextUsageEstimate, SubagentHandoffEstimate, SubagentRunUsageSummary, UsageEvent } from '../src/shared/types';
 
@@ -270,6 +270,36 @@ async function runParent(callbacks: Parameters<AgentRunner['run']>[1], options: 
     return { response, bodies };
   } finally { globalThis.fetch = originalFetch; }
 }
+
+test('a scoped live child read waits for host completion, rechecks the page and remains cancellable', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'keepseek-child-wait-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const uri = vscode.Uri.file(directory);
+  const runtime = new SubagentRuntime({ globalStorageUri: uri, workspaceKey: 'test', sourceStore: new ModelSourceStore(uri) });
+  const host = runtime as unknown as { store: { readResultPage: () => Promise<Record<string, unknown>>;
+    read: () => Promise<{ metadata: { id: string } }> }; setProgress(state: SubagentProgressState): void };
+  let completed = false, reads = 0;
+  host.store.readResultPage = async () => { reads++; return completed ? { ok: true, content: 'late verified result' } : { ok: false, errorType: 'subagent_result_pending' }; };
+  host.store.read = async () => ({ metadata: { id: 'child' } });
+  const state: SubagentProgressState = { id: 'child', parentSessionId: 'session-one', parentRunId: 'root', profile: 'research',
+    lane: 'research-read', depth: 1, status: 'running', summary: '', updatedAt: '' };
+  host.setProgress(state);
+  const context = { parentRequest: parentRequest(), parentRunId: 'root', language: 'en' as const };
+  let settled = false;
+  const page = runtime.readResult({ subagentId: 'child' }, context).then(result => { settled = true; return result; });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(settled, false); assert.equal(reads, 1, 'host wait does not repeatedly poll storage or Provider');
+  completed = true; host.setProgress({ ...state, status: 'completed' });
+  assert.equal(JSON.parse((await page).content).content, 'late verified result'); assert.equal(reads, 2);
+  completed = false; host.setProgress(state);
+  const controller = new AbortController();
+  const pending = runtime.readResult({ subagentId: 'child' }, { ...context, signal: controller.signal });
+  await new Promise<void>(resolve => setImmediate(resolve)); controller.abort();
+  await assert.rejects(pending, /cancelled/);
+  // No active operation in this parent scope: never wait for another session.
+  host.setProgress({ ...state, parentSessionId: 'other' });
+  assert.equal(JSON.parse((await runtime.readResult({ subagentId: 'child' }, context)).content).errorType, 'subagent_result_pending');
+});
 
 function parentRequest(): AgentRequest {
   return {

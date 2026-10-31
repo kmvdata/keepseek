@@ -42,6 +42,8 @@ interface ProtectionContext {
   firstUserMessageId?: string;
   lastUserMessageId?: string;
   storedProtectedMessageIds: Set<string>;
+  pendingMessageIds?: Set<string>;
+  settledMessageIds?: Set<string>;
 }
 
 const EXPLICIT_MEMORY_PATTERN = /(?:记住|保留|不要忘记|别忘|以后都按|以后请|始终|总是|偏好|约束|remember|keep this|don't forget|do not forget|always|from now on|preference|constraint)/iu;
@@ -203,7 +205,9 @@ export function getDurableProtectedMessageIds(
       index,
       firstUserMessageId,
       lastUserMessageId,
-      storedProtectedMessageIds
+      storedProtectedMessageIds,
+      pendingMessageIds: new Set(contextCompression?.protectionState?.pendingMessageIds),
+      settledMessageIds: new Set(contextCompression?.protectionState?.settledMessageIds)
     });
     if (reason && reason !== 'latest_user_request') {
       protectedMessageIds.add(message.id);
@@ -217,6 +221,14 @@ export function getAutoProtectionReason(
   message: ChatMessage,
   context: ProtectionContext
 ): string | undefined {
+  if (context.pendingMessageIds?.has(message.id) || message.runCheckpoint?.state?.pending
+    || message.runCheckpoint?.stopReason === 'uncertain_tool_result'
+    || message.runCheckpointArchive?.summary.stopReason === 'uncertain_tool_result') return 'unresolved_host_state';
+  // Explicit user constraints and the true first/latest requests outlive artifact
+  // settlement. Host receipts and finished proposals do not acquire that privilege.
+  if (message.role === 'user' && message.id === context.firstUserMessageId) return 'first_user_request';
+  if (message.role === 'user' && message.id === context.lastUserMessageId) return 'latest_user_request';
+  if (context.settledMessageIds?.has(message.id)) return undefined;
   if (message.contextMeta?.isProtected) {
     return message.contextMeta.protectedReason?.trim() || 'stored_message_protection';
   }
@@ -280,7 +292,9 @@ function selectProtectedMessageIds(
       index,
       firstUserMessageId,
       lastUserMessageId,
-      storedProtectedMessageIds
+      storedProtectedMessageIds,
+      pendingMessageIds: new Set(contextCompression?.protectionState?.pendingMessageIds),
+      settledMessageIds: new Set(contextCompression?.protectionState?.settledMessageIds)
     });
     if (reason) {
       protectedMessageIds.add(message.id);

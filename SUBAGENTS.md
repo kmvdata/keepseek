@@ -283,3 +283,7 @@ bun run test
 | `test/subagentUsageRuntime.test.ts` | 实际 usage 归集、失败/停止、nested 去重与 UI 隐私 |
 
 审查子代理改动时，最关键的问题是：**这个 child 是否只获得任务必需的信息和能力，它的结果是否仍必须经过父会话原有的安全边界？**
+
+## 长任务进展与结果等待
+
+父运行的进展按已交付内容/范围与真实宿主状态判断，不按新的 child/evidence ID 判断。`readResult` 对本 runtime 中确实 queued/running、且 parent session 匹配的 child，等待完成事件；不不断请求模型轮询。取消沿用 invocation signal，完成后再次通过 store 校验 lineage、scope 和结果完整性。磁盘上中断的 child 不冒充活跃操作。检查点引用按 session 独立，复制会话不继承旧 session 的可执行 checkpoint/归档引用。费用、时间与用量归属保持现有共享逻辑任务规则。

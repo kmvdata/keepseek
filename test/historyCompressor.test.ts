@@ -162,6 +162,25 @@ test('summary completion budget never exceeds the model runtime output limit', a
   assert.equal(capturedMaxTokens, 500);
 });
 
+test('negative net summary gain retains audit and is not retried for the same final context', async () => {
+  let calls = 0;
+  const compressor = new HistoryCompressor(async () => { calls++; return 'Long useless summary '.repeat(5000); });
+  const session = createSession(Array.from({ length: 30 }, (_, i) => createMessage(i, 'unchanged context '.repeat(20))));
+  const before = JSON.stringify(session.messages);
+  const input = { session, prompt: 'current request', model: { ...createModel(20000), maxOutputTokens: 15000 },
+    agentSettings: { thinkingEnabled: false, reasoningEffort: 'high' as const, compressionThreshold: 'balanced' as const },
+    contextFiles: [], language: 'en' as const,
+    settings: { ...createCompressionSettings(), triggerRatio: 0.01, forceRatio: 0.02 } };
+  const result = await compressor.refresh(input);
+  assert.equal(result.failureReason, 'summary_no_net_gain');
+  assert.ok(result.state.lastCompression!.netReleasedTokens < 0);
+  session.contextCompression = result.state;
+  assert.equal(compressor.planRefresh(input).mode, 'none');
+  assert.equal((await compressor.refresh(input)).reason, 'skipped');
+  assert.equal(calls, 1); assert.equal(JSON.stringify(session.messages), before);
+  assert.equal(result.state.summaries.length, 0);
+});
+
 function createCompressionSettings() {
   return {
     keepRecentTurns: 2,

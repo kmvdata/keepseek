@@ -51,6 +51,16 @@ test('local and workspace-fs traces use local dates for events, filenames, appen
         else remoteFiles.set(uri.toString(), content);
       },
       async readFile(uri) { return uri.scheme === 'file' ? await originalFs.readFile(uri) : remoteFiles.get(uri.toString())!; },
+      async rename(from, to, options) {
+        if (from.scheme === 'file') return originalFs.rename(from, to, options);
+        const bytes = remoteFiles.get(from.toString());
+        if (!bytes) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+        remoteFiles.set(to.toString(), bytes); remoteFiles.delete(from.toString());
+      },
+      async delete(uri, options) {
+        if (uri.scheme === 'file') return originalFs.delete(uri, options);
+        remoteFiles.delete(uri.toString());
+      },
       async stat(uri) { return uri.scheme === 'file' ? await originalFs.stat(uri)
         : { type: vscode.FileType.File, size: remoteFiles.get(uri.toString())!.byteLength, mtime: 0, ctime: 0 }; }
     };
@@ -84,6 +94,12 @@ test('local and workspace-fs traces use local dates for events, filenames, appen
       records = await readTrace(truncated.logUri!);
       assert.equal(records[0].type, 'trace_truncated');
       assert.match(records[0].ts, /\+08:00$/u);
+      truncated.record({ type: 'upstream_attempt_start', requestId: 'after-detail-limit' });
+      truncated.record({ type: 'run_end', stopReason: 'completed' });
+      await truncated.flush();
+      const perf = await readTrace(truncated.logUri! + '.perf-0.jsonl');
+      assert.ok(perf.some(event => event.requestId === 'after-detail-limit'));
+      assert.ok(perf.some(event => event.stopReason === 'completed'));
     }
     const timestamps: string[] = [];
     createNoopInteractionTrace((_event, timestamp) => timestamps.push(timestamp)).record({ type: 'disabled_trace_event' });
@@ -96,7 +112,7 @@ test('local and workspace-fs traces use local dates for events, filenames, appen
     await rm(directory, { recursive: true, force: true });
   }
 
-  async function readTrace(uriString: string): Promise<Array<{ ts: string; type: string; body?: unknown }>> {
+  async function readTrace(uriString: string): Promise<Array<{ ts: string; type: string; body?: unknown; requestId?: string; stopReason?: string }>> {
     const uri = vscode.Uri.parse(uriString);
     const bytes = uri.scheme === 'file' ? await readFile(uri.fsPath) : remoteFiles.get(uri.toString())!;
     return new TextDecoder().decode(bytes).trim().split('\n').map((line) => JSON.parse(line));

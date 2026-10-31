@@ -1,6 +1,7 @@
 import { calculateOutputBudget } from '../shared/outputBudget';
+import { recordLocalPerformance } from './logging/performanceTrace';
 import { applyProviderRequestBudget, loadProviderRequestBudget, resolveProviderRequestBudget } from './requestBudget';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
   getConfiguredRequestRetryBaseMs,
@@ -136,6 +137,13 @@ export class HistoryCompressor {
     }
 
     const summaryInput = this.createSummaryRefreshInput(input, settings, protectedState.state);
+    const current = measureCompressionProjection(input, protectedState.state);
+    const previous = protectedState.state.lastCompression;
+    if (previous && previous.netReleasedTokens <= current.budget.safetyTokens
+      && previous.protectedCount === current.protectedCount
+      && (previous.fingerprint === current.fingerprint || current.budget.estimatedInputTokens <= previous.beforeTokens + current.budget.safetyTokens)) {
+      return { state: protectedState.state, changed: protectedState.changed, mode: 'none', reason: 'fresh_enough' };
+    }
     if (!summaryInput.newCompressibleMessages.length) {
       return {
         state: protectedState.state,
@@ -186,8 +194,17 @@ export class HistoryCompressor {
   }
 
   public async refresh(input: HistoryCompressionRefreshInput): Promise<HistoryCompressionRefreshResult> {
+    const started = performance.now();
+    const before = measureCompressionProjection(input, input.session.contextCompression);
     const settings = input.settings ?? getAgentContextCompressionSettings(input.model, input.agentSettings);
     const protectedState = this.createProtectedState(input.session);
+
+    const previous = protectedState.state.lastCompression;
+    if (previous && previous.netReleasedTokens <= before.budget.safetyTokens
+      && previous.protectedCount === before.protectedCount
+      && previous.fingerprint === before.fingerprint) {
+      return { state: protectedState.state, changed: protectedState.changed, reason: 'skipped' };
+    }
 
     if (input.signal?.aborted) {
       return {
@@ -243,11 +260,13 @@ export class HistoryCompressor {
         sourceConfig: input.sourceConfig,
         sessionId: input.session.id
       });
-      const content = completion.content.trim();
+      let content = completion.content.trim();
 
       if (!content) {
         throw new Error('Context summary result was empty.');
       }
+      const settledFacts = protectedState.state.protectionState?.settledFacts?.filter(fact => summaryBatch.includedMessageIds.includes(fact.messageId));
+      if (settledFacts?.length) content += `\n\nHost settled facts (audit only; never an approval):\n${JSON.stringify(settledFacts)}`;
 
       const now = new Date().toISOString();
       const summary: HistorySummary = {
@@ -262,8 +281,28 @@ export class HistoryCompressor {
         provider: input.sourceConfig?.provider ?? input.model.provider,
         version: CONTEXT_COMPRESSION_VERSION
       };
+      const candidate: ContextCompressionState = { ...protectedState.state,
+        summaries: [...protectedState.state.summaries, summary], lastCompressedAt: now, lastFailureReason: undefined };
+      const after = measureCompressionProjection(input, candidate);
+      const netReleasedTokens = before.budget.estimatedInputTokens - after.budget.estimatedInputTokens;
+      const lastCompression: NonNullable<ContextCompressionState['lastCompression']> = {
+        version: 1, fingerprint: before.fingerprint, beforeTokens: before.budget.estimatedInputTokens,
+        afterTokens: after.budget.estimatedInputTokens, netReleasedTokens, durationMs: performance.now() - started,
+        protectedCount: before.protectedCount, compressibleCount: before.compressibleCount,
+        costKnown: completion.usageEvent?.pricingStatus === 'priced'
+      };
+      recordLocalPerformance({ type: 'context_compression', sessionId: input.session.id, compression: lastCompression,
+        estimatedPromptTokens: lastCompression.beforeTokens, afterEstimatedPromptTokens: lastCompression.afterTokens,
+        protectedMessageCount: before.protectedCount, compressibleMessageCount: before.compressibleCount });
+      if (netReleasedTokens <= 0) return {
+        state: { ...protectedState.state, lastCompression, lastFailureReason: 'summary_no_net_gain' },
+        changed: true, reason: 'failed', failureReason: 'summary_no_net_gain',
+        usageEvents: completion.usageEvent ? [completion.usageEvent] : undefined, usageLedgerRecords: completion.usageLedgerRecords
+      };
       return {
         state: {
+          ...protectedState.state,
+          lastCompression,
           version: CONTEXT_COMPRESSION_VERSION,
           summaries: [...protectedState.state.summaries, summary],
           protectedMessageIds: protectedState.state.protectedMessageIds,
@@ -574,6 +613,21 @@ class HistorySummaryRequestError extends Error {
   }
 }
 
+function measureCompressionProjection(input: HistoryCompressionRefreshInput, state?: ContextCompressionState) {
+  const p = buildProviderRequestProjection({ model: input.model, agentSettings: input.agentSettings,
+    contextFiles: input.contextFiles, currentRunContext: input.currentRunContext, contextInstructions: input.contextInstructions,
+    history: input.session.messages, contextCompression: state, language: input.language, prompt: input.prompt,
+    slimToolNames: input.slimToolNames, requestProtocolVersion: input.requestProtocolVersion,
+    provider: input.sourceConfig?.provider, sourceId: input.sourceConfig?.sourceId, baseUrl: input.sourceConfig?.baseUrl });
+  const body = p.responses ? { model: input.model.id, input: p.responses.input, tools: p.responses.tools, stream: true as const, store: false as const }
+    : p.anthropic ? { model: input.model.id, system: p.anthropic.system, messages: p.anthropic.messages, tools: p.anthropic.tools, max_tokens: p.runtimeProfile.maxTokens, stream: true as const }
+      : { model: input.model.id, messages: p.messages, tools: p.tools, stream: true as const };
+  return { budget: resolveProviderRequestBudget({ model: input.model, provider: input.sourceConfig?.provider ?? (p.responses ? 'openai-responses' : p.anthropic ? 'anthropic-compatible' : 'openai-compatible'), body }),
+    fingerprint: createHash('sha256').update(JSON.stringify({ body, output: p.runtimeProfile.maxTokens,
+      window: p.runtimeProfile.contextWindowTokens, source: input.sourceConfig?.sourceId, endpoint: input.sourceConfig?.baseUrl })).digest('hex'),
+    protectedCount: p.historyProjection.protectedMessageIds.length, compressibleCount: p.historyProjection.compressibleMessageIds.length };
+}
+
 function createCompressionState(state: ContextCompressionState | undefined): ContextCompressionState {
   return {
     version: CONTEXT_COMPRESSION_VERSION,
@@ -582,7 +636,8 @@ function createCompressionState(state: ContextCompressionState | undefined): Con
       .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)),
     protectedMessageIds: Array.from(new Set(state?.protectedMessageIds ?? [])),
     lastCompressedAt: state?.lastCompressedAt,
-    lastFailureReason: state?.lastFailureReason
+    lastFailureReason: state?.lastFailureReason,
+    protectionState: state?.protectionState, lastCompression: state?.lastCompression
   };
 }
 
@@ -590,10 +645,7 @@ function getMergedProtectedMessageIds(
   messages: readonly ChatMessage[],
   state: ContextCompressionState
 ): string[] {
-  return Array.from(new Set([
-    ...state.protectedMessageIds,
-    ...getDurableProtectedMessageIds(messages, state)
-  ]));
+  return Array.from(getDurableProtectedMessageIds(messages, state));
 }
 
 function hasProtectedMessageIdsChanged(left: readonly string[], right: readonly string[]): boolean {

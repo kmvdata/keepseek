@@ -297,6 +297,14 @@ spawn(executable, args, { shell: false })
 
 ### 10.4 Checkpoint 与崩溃恢复
 
+长任务保存使用不可变对象引用与轻量 manifest；工具 intent、完整 evidence、固定 envelope 的屏障仍逐项 await。文件对象在 manifest 切换前同步落盘，失败不推进权威状态。心跳可与后续完整快照合并，但等待者只能在包含该状态或更新状态的提交成功后返回。旧 checkpoint 的历史不在心跳中重新复制或写回；详见 [存储迁移与测量](long-task-performance-rectification.md)。
+
+`keepseek_read_evidence` 的裁剪保持根 evidence 与推进范围；无可交付正文时返回 `evidence_capacity_blocked`，不制造新的空引用。`bodyDelivery` 与 execution/delivery status 分开：执行成功、证据已保存、正文入 envelope、请求交付是不同事实。已保存结果恢复时重交付，不重跑原工具。活跃 child 的结果读取等待宿主完成事件、取消或既有工具/任务限制，完成后重新检查 scope/hash。
+
+保护状态由宿主产物生命周期推导。pending/未知副作用保护；settled 提案和收据可在摘要/Epoch 边界释放，事实保留目标、真实状态、可用 hash 和审批记录，不构成新授权。Epoch 将完整基础历史归档一次，随后只重建 protected/recent 基础，避免把已归档历史装回。每次维护记录最终投影净收益；相同状态无收益不再调用摘要，仍不满足容量时明确等待用户调整。
+
+进展观察使用最近 64 个已交付内容/范围指纹，忽略随机 ID 和时间戳；并行批次组合变化不算新事实。首次重复追加策略调整，持续重复才 `no_progress_loop`；普通 Continue 不清空该记录。新范围、内容或宿主状态变化允许继续。
+
 输出预算策略独立版本为 `2`，与 checkpoint 外层版本分离。每次发送前保存来源/模型/lane、能力来源、完整输入估算、实际输出额度、有效窗口及安全余量。新模型轮读取同来源同模型的当前能力；正在重连的请求继续使用冻结字节。普通精确恢复的请求 hash 检查保留。
 
 `length` / `max_output_tokens` / `max_tokens` 与未完成工具批次一起出现时，整批禁止执行，记录 `output_truncated`、本轮零工具执行及输出快照。语义截断不走网络自动重试；在有界尾部清理中保留已收到的 usage。只有带结构化证据的 checkpoint 才允许增大有效额度或首次切换为较小完整调用策略，并在发送前持久化旧/新 hash 和额度，不重置任务、费用或六次物理请求额度。分解策略仍失败且额度未增加时禁用无效 Continue，提示发送新消息缩小本步范围。旧 checkpoint 仅有 “Incomplete tool response” 文本时不能推断长度原因，保留历史并要求新用户消息。

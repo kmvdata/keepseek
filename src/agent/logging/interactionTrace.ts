@@ -4,6 +4,7 @@ import { appendFile, mkdir, readdir, rm, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { formatLocalTimestamp } from '../../shared/format';
+import { withPerformanceTrace } from './performanceTrace';
 import {
   getConfiguredInteractionTraceSettings,
   type InteractionTraceLevel,
@@ -43,7 +44,7 @@ export class InteractionTraceLogService {
 
   public constructor(private readonly globalStorageUri: vscode.Uri) {}
 
-  public createRunTrace(eventSink?: InteractionTraceEventSink): AgentInteractionTrace {
+  public createRunTrace(eventSink?: InteractionTraceEventSink, scope?: { sessionId?: string; taskId?: string }): AgentInteractionTrace {
     const settings = getConfiguredInteractionTraceSettings();
     if (!settings.enabled) {
       this.lastRunTraceLogUri = undefined;
@@ -60,12 +61,12 @@ export class InteractionTraceLogService {
     if (fileUri.scheme === 'file') {
       const trace = new JsonlInteractionTrace(runId, fileUri.fsPath, settings, eventSink);
       this.lastRunTraceLogUri = trace.logUri;
-      return trace;
+      return withPerformanceTrace(trace, fileUri, scope);
     }
 
     const trace = new WorkspaceFsJsonlInteractionTrace(runId, fileUri, settings, eventSink);
     this.lastRunTraceLogUri = trace.logUri;
-    return trace;
+    return withPerformanceTrace(trace, fileUri, scope);
   }
 
   public getLastRunTraceLogUri(): string | undefined {

@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { AgentRequest, AgentToolRound, DraftEdit, DraftRunProposal, RepairLoopState } from '../shared/types';
 import type { DeepSeekAssistantMessage, DeepSeekMessage, DeepSeekUsage } from './deepseek/types';
 import type { ProviderNativeRunState } from './runner';
-import type { ContextEpochState } from './contextEpoch';
+import { validEpochProgressState, type ContextEpochState } from './contextEpoch';
 import { getEffectiveContextWindowTokens } from '../shared/modelProfiles';
 import { DEEPSEEK_MODEL_IDENTITY_VERSION, getCanonicalModelIdentity } from '../shared/deepSeekModels';
 import { migrateContextWindowCalibrationState } from './toolResultAdmission';
@@ -118,7 +118,7 @@ export function createRunCheckpoint(
   delete input.taskClock;
   delete input.taskCostBudget;
   delete input.taskRunBudget;
-  input.history = input.history.map(({ runCheckpoint: _cp, ...message }) => message);
+  input.history = input.history.map(({ runCheckpoint: _cp, runCheckpointArchive: _archive, ...message }) => message);
   return {
     outputBudgetPolicyVersion: OUTPUT_BUDGET_POLICY_VERSION,
     version: 2, taskId: randomUUID(), attempt: 0, attemptIds: [], status: 'running', usedMs: 0,
@@ -194,6 +194,7 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
         || ![1, 2].includes(m.oldPolicy) || m.newPolicy !== OUTPUT_BUDGET_POLICY_VERSION
         || !/^[a-f0-9]{64}$/u.test(m.oldRequestHash) || !/^[a-f0-9]{64}$/u.test(m.newRequestHash)
         || ![m.oldOutputTokens, m.newOutputTokens].every((n) => Number.isSafeInteger(n) && n > 0)))) return undefined;
+    if (cp.state?.epoch && !validEpochProgressState(cp.state.epoch)) return undefined;
     const copy = checkpointCopy(cp);
     // Older retries counted scheduled waits. Conservatively retain the spent
     // allowance rather than granting a fresh six requests after recovery.
@@ -277,6 +278,7 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
 }
 
 export function recoveryBlocker(cp: RunCheckpoint, currentModel?: AgentRequest['model']): string | undefined {
+  if (cp.stopReason === 'no_progress_loop') return 'No-progress state is preserved. Provide new evidence, a changed scope or an explicit new instruction / 无进展状态已保留，请补充新证据、调整范围或发送新的明确指令。';
   if (cp.stopReason === 'storage_failure' || cp.stopReason === 'resource_limit') return cp.error ?? cp.stopReason;
   if (cp.status === 'completed') return 'Task already completed / 任务已完成';
   if (cp.maxExecutionMs > 0 && cp.usedMs >= cp.maxExecutionMs) return 'Time budget exhausted / 时间预算已用尽';

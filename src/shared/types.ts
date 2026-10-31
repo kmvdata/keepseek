@@ -364,7 +364,9 @@ export type UsageSource =
 
 export interface UsageSourceStats extends Usage {
   requestCount: number;
+  providerAttemptCount?: number;
   usageResponseCount?: number;
+  attemptStatsIncomplete?: boolean;
   cost: number;
   pricedRequestCount?: number;
   unpricedRequestCount?: number;
@@ -396,6 +398,7 @@ export interface TurnUsageStats extends Usage {
   requestCount: number;
   providerAttemptCount?: number;
   usageResponseCount?: number;
+  attemptStatsIncomplete?: boolean;
   cost: number;
   currency: string;
   sourceId?: string;
@@ -664,6 +667,8 @@ export interface DraftRun extends DraftRunProposal {
 
 export interface ChatMessage {
   runCheckpoint?: import('../agent/runCheckpoint').RunCheckpoint;
+  /** V3 immutable archive, scoped to this session's object directory. Never sent to Webview. */
+  runCheckpointArchive?: { version: 1; objectHash: string; pendingTool?: boolean; summary: NonNullable<ChatMessage['runState']> };
   runState?: {
     taskId: string; status: string; stopReason?: string; usedMs: number; maxExecutionMs: number; limitSource: string;
     attempt: number; modelRequests: number; retries: number; lastNetworkAt?: string; lastEventAt?: string;
@@ -799,6 +804,16 @@ export interface ContextCompressionState {
   protectedMessageIds: string[];
   lastCompressedAt?: string;
   lastFailureReason?: string;
+  /** Host-derived lifecycle; absence in legacy sessions retains conservative protection. */
+  protectionState?: { version: 1; pendingMessageIds: string[]; settledMessageIds: string[]; settledFacts?: HistoryWorkFact[] };
+  lastCompression?: { version: 1; fingerprint: string; beforeTokens: number; afterTokens: number;
+    netReleasedTokens: number; durationMs: number; protectedCount: number; compressibleCount: number; costKnown: boolean };
+}
+
+/** Host facts for projection only. They never authorize or replay an action. */
+export interface HistoryWorkFact {
+  messageId: string; status: string; artifactId?: string; target?: string;
+  baseHash?: string; resultHash?: string; specHash?: string; approval?: string;
 }
 
 export interface ContextProjectionMetadata {

@@ -1,5 +1,7 @@
 import { normalizeRequestBudget } from '../agent/requestBudget';
 import { isResumableToolBudgetCheckpoint, normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
+import { normalizeHistoryWorkFacts } from '../agent/historyProtection';
+import { snapshotSession } from './persistenceSnapshot';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
@@ -329,6 +331,7 @@ export class ChatSessionStore {
     revision: number;
     scope: WorkspaceSessionScope;
     snapshot: StoredWorkspaceSessionState;
+    checkpointSources: Map<string, ChatMessage['runCheckpoint']>;
   };
   private persistenceDrain?: Promise<void>;
   private readonly persistenceWaiters: Array<{
@@ -340,13 +343,14 @@ export class ChatSessionStore {
   public async persist(): Promise<void> {
     this.compact();
     const revision = ++this.persistRevision;
-    const snapshot: StoredWorkspaceSessionState = structuredClone({
+    const snapshot: StoredWorkspaceSessionState = {
       activeSessionId: this.activeSessionIdValue,
       approvalMode: this.approvalModeValue,
-      sessions: this.sessions,
+      sessions: this.sessions.map(snapshotSession),
       sessionSummaries: this.getSessionSummaries()
-    });
-    this.pendingPersistence = { revision, scope: { ...this.workspaceScope, folderUris: [...this.workspaceScope.folderUris] }, snapshot };
+    };
+    const checkpointSources = new Map(this.sessions.flatMap(session => session.messages.map(message => [message.id, message.runCheckpoint] as const)));
+    this.pendingPersistence = { revision, scope: { ...this.workspaceScope, folderUris: [...this.workspaceScope.folderUris] }, snapshot, checkpointSources };
     const completed = new Promise<void>((resolve, reject) => {
       this.persistenceWaiters.push({ revision, resolve, reject });
     });
@@ -376,6 +380,20 @@ export class ChatSessionStore {
       this.pendingPersistence = undefined;
       try {
         await this.sessionStorage.saveWorkspace(next.scope, next.snapshot);
+        // Release archived bodies only after the object graph AND manifest commit.
+        // An in-flight newer checkpoint wins; never detach its recovery state.
+        for (const savedSession of next.snapshot.sessions) {
+          const live = this.sessions.find(session => session.id === savedSession.id);
+          for (const saved of savedSession.messages) {
+            if (!saved.runCheckpointArchive) continue;
+            const message = live?.messages.find(item => item.id === saved.id);
+            if (message?.runCheckpoint && message.runCheckpoint.status !== 'running'
+              && message.runCheckpoint === next.checkpointSources.get(saved.id)) {
+              message.runCheckpointArchive = saved.runCheckpointArchive;
+              message.runCheckpoint = undefined;
+            }
+          }
+        }
       } catch (error) {
         this.rejectPersistenceWaitersThrough(next.revision, error);
         throw error;
@@ -651,6 +669,7 @@ function copyMessage(message: ChatMessage): ChatMessage {
     id: randomUUID(),
     isStreaming: undefined,
     runCheckpoint: undefined,
+    runCheckpointArchive: undefined,
     runDetails: message.runDetails ? cloneRunDetails(message.runDetails) : undefined
   };
 }
@@ -658,6 +677,7 @@ function copyMessage(message: ChatMessage): ChatMessage {
 export function getVisibleMessages(messages: ChatMessage[], models: readonly import('../shared/types').KeepseekModel[] = []): ChatMessage[] {
   return messages.map(({
     runCheckpoint,
+    runCheckpointArchive,
     expandedContent: _expandedContent,
     providerReplay: _providerReplay,
     toolRounds: _toolRounds,
@@ -681,7 +701,7 @@ export function getVisibleMessages(messages: ChatMessage[], models: readonly imp
       canResume: runCheckpoint.status !== 'running' && !recoveryBlocker(runCheckpoint, models.find((model) => model.sourceId === runCheckpoint.source.sourceId && model.id === runCheckpoint.source.modelId)),
       blocker: recoveryBlocker(runCheckpoint, models.find((model) => model.sourceId === runCheckpoint.source.sourceId && model.id === runCheckpoint.source.modelId)), error: runCheckpoint.error
       };
-    })() : undefined,
+    })() : runCheckpointArchive?.summary,
     ...(message.runDetails ? { runDetails: {
       ...message.runDetails,
       toolCalls: message.runDetails.toolCalls.map((tool) => {
@@ -853,10 +873,28 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     contextMeta: normalizeMessageContextMeta(value.contextMeta),
     usedSkills: normalizeMessageUsedSkills(value.usedSkills),
     runCheckpoint: normalizeRunCheckpoint(value.runCheckpoint),
+    runCheckpointArchive: normalizeCheckpointArchive(value.runCheckpointArchive),
     runDetails: normalizeRunDetails(value.runDetails),
     toolRounds: normalizeAgentToolRounds(value.toolRounds),
     providerReplay: normalizeProviderReplay(value.providerReplay)
   };
+}
+
+function normalizeCheckpointArchive(value: unknown): ChatMessage['runCheckpointArchive'] {
+  if (!isRecord(value) || value.version !== 1 || typeof value.objectHash !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(value.objectHash) || !isRecord(value.summary)) return undefined;
+  const s = value.summary;
+  if (typeof s.taskId !== 'string' || !['running', 'interrupted', 'completed', 'blocked'].includes(String(s.status))) return undefined;
+  const count = (key: string) => typeof s[key] === 'number' && Number.isFinite(s[key]) ? Math.max(0, Math.floor(s[key] as number)) : 0;
+  return { version: 1, objectHash: value.objectHash,
+    pendingTool: typeof value.pendingTool === 'boolean' ? value.pendingTool : undefined, summary: {
+    taskId: s.taskId, status: s.status === 'running' ? 'interrupted' : String(s.status),
+    stopReason: s.status === 'running' ? 'extension_restart' : typeof s.stopReason === 'string' ? s.stopReason : undefined,
+    usedMs: count('usedMs'), maxExecutionMs: count('maxExecutionMs'), attempt: count('attempt'),
+    modelRequests: count('modelRequests'), retries: count('retries'), steps: count('steps'),
+    limitSource: typeof s.limitSource === 'string' ? s.limitSource : '', canResume: false,
+    error: typeof s.error === 'string' ? s.error : undefined
+  } };
 }
 
 export function normalizeProviderReplay(value: unknown): ProviderReplayState | undefined {
@@ -1620,7 +1658,18 @@ function normalizeContextCompressionState(value: unknown): ContextCompressionSta
     ? value.lastFailureReason.trim()
     : undefined;
 
-  if (!summaries.length && !protectedMessageIds.length && !lastCompressedAt && !lastFailureReason) {
+  const lifecycle = isRecord(value.protectionState) && value.protectionState.version === 1 ? value.protectionState : undefined;
+  const ids = (v: unknown) => Array.isArray(v) ? [...new Set(v.filter((id): id is string => typeof id === 'string' && !!id))] : [];
+  const protectionState = lifecycle ? { version: 1 as const, pendingMessageIds: ids(lifecycle.pendingMessageIds), settledMessageIds: ids(lifecycle.settledMessageIds),
+    settledFacts: normalizeHistoryWorkFacts(lifecycle.settledFacts) } : undefined;
+  const attempt = value.lastCompression;
+  const lastCompression = isRecord(attempt) && attempt.version === 1 && typeof attempt.fingerprint === 'string'
+    && /^[a-f0-9]{64}$/u.test(attempt.fingerprint)
+    && ['beforeTokens', 'afterTokens', 'netReleasedTokens', 'durationMs', 'protectedCount', 'compressibleCount'].every(key => typeof attempt[key] === 'number' && Number.isFinite(attempt[key]))
+    ? { version: 1 as const, fingerprint: attempt.fingerprint, beforeTokens: Number(attempt.beforeTokens), afterTokens: Number(attempt.afterTokens),
+      netReleasedTokens: Number(attempt.netReleasedTokens), durationMs: Number(attempt.durationMs), protectedCount: Number(attempt.protectedCount),
+      compressibleCount: Number(attempt.compressibleCount), costKnown: attempt.costKnown === true } : undefined;
+  if (!summaries.length && !protectedMessageIds.length && !lastCompressedAt && !lastFailureReason && !protectionState && !lastCompression) {
     return undefined;
   }
 
@@ -1629,7 +1678,8 @@ function normalizeContextCompressionState(value: unknown): ContextCompressionSta
     summaries,
     protectedMessageIds,
     lastCompressedAt,
-    lastFailureReason
+    lastFailureReason,
+    protectionState, lastCompression
   };
 }
 

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { DraftEdit, DraftRunProposal, RepairLoopState, TaskPlan } from '../shared/types';
+import type { DraftEdit, DraftRunProposal, RepairLoopState, TaskPlan, HistoryWorkFact } from '../shared/types';
 import type { ContextWindowCalibrationState } from './toolResultAdmission';
 import { stableStringify } from './evidence/shaping';
 import { getDraftEditBase, getDraftEditKind, getDraftEditResult } from '../edits/draftEdit';
@@ -67,6 +67,9 @@ export interface ContextEpochState {
     seed?: string;
   };
   seed?: string;
+  baseHistoryEvidenceRef?: string;
+  compression?: { fingerprint: string; beforeTokens: number; afterTokens: number; netReleasedTokens: number;
+    durationMs: number; summaryInputTokens: number; summaryOutputTokens: number; costKnown: boolean };
   rollovers: ContextEpochRolloverRecord[];
   evidenceRefs: Array<{
     evidenceRef: string;
@@ -77,12 +80,13 @@ export interface ContextEpochState {
   }>;
   failures: Array<{ toolName: string; toolCallId: string; contentHash: string; errorType?: string }>;
   idempotency: ToolWorkFingerprint[];
-  noProgress?: { fingerprint: string; repeats: number; strategyWarningIssued: boolean };
+  noProgress?: { fingerprint: string; repeats: number; strategyWarningIssued: boolean; recent?: string[] };
   calibration: ContextWindowCalibrationState;
 }
 
 export interface ContextEpochCheckpointInput {
   protocolVersion?: number;
+  priorWork?: HistoryWorkFact[];
   originalTask: string;
   taskPlan: TaskPlan;
   draftEdits: readonly DraftEdit[];
@@ -133,6 +137,8 @@ export function createEpochSeed(input: ContextEpochSeedInput): string {
   const hostState = input.checkpointEvidence
     ? {
         ...fullHostState,
+        priorWork: fullHostState.priorWork?.slice(-24),
+        priorWorkCount: fullHostState.priorWork?.length ?? 0,
         evidence: fullHostState.evidence.slice(-24),
         evidenceCount: fullHostState.evidence.length,
         evidenceIndex: input.checkpointEvidence,
@@ -188,6 +194,7 @@ function createEpochHostState(
 ) {
   return {
     runtime: input.runtimeState,
+    priorWork: input.priorWork,
     taskPlan,
     completedItems: taskPlan.steps.filter((step) => step.status === 'completed' || step.status === 'skipped'),
     incompleteItems: taskPlan.steps.filter((step) => step.status === 'pending' || step.status === 'in_progress' || step.status === 'blocked'),
@@ -249,12 +256,49 @@ export function createTaskPlanProgressHash(plan: TaskPlan): string {
 
 export function observeNoProgress(
   previous: ContextEpochState['noProgress'],
-  fingerprint: string
+  observation: string | readonly string[]
 ): { state: NonNullable<ContextEpochState['noProgress']>; action: 'none' | 'warn' | 'stop' } {
-  if (!previous || previous.fingerprint !== fingerprint) {
-    return { state: { fingerprint, repeats: 0, strategyWarningIssued: false }, action: 'none' };
+  const facts = [...new Set(typeof observation === 'string' ? [observation] : observation)].filter(x => x !== 'no_body_delivery');
+  const recent = [...(previous?.recent ?? (previous ? [previous.fingerprint] : []))];
+  const repeated = !facts.length || facts.every(fact => recent.includes(fact));
+  const fingerprint = facts.length === 1 ? facts[0] : facts.length ? createHash('sha256').update(facts.slice().sort().join(':')).digest('hex') : 'no_body_delivery';
+  for (const fact of facts) { const index = recent.indexOf(fact); if (index >= 0) recent.splice(index, 1); recent.push(fact); }
+  const repeats = repeated ? (previous?.repeats ?? 0) + 1 : 0;
+  const warned = repeated && (previous?.strategyWarningIssued ?? false);
+  const action = !repeated ? 'none' : warned && repeats >= 2 ? 'stop' : 'warn';
+  return { state: { fingerprint, repeats, recent: recent.slice(-64), strategyWarningIssued: action !== 'none' }, action };
+}
+
+/** Version 1 extension fields are optional for old checkpoints; malformed new
+ * state fails closed so restart cannot erase a loop or fabricate a gain. */
+export function validEpochProgressState(epoch: ContextEpochState): boolean {
+  const progress = epoch.noProgress, compression = epoch.compression;
+  return (!progress || (typeof progress.fingerprint === 'string' && Number.isSafeInteger(progress.repeats) && progress.repeats >= 0
+    && typeof progress.strategyWarningIssued === 'boolean' && (!progress.recent || (Array.isArray(progress.recent)
+      && progress.recent.length <= 64 && progress.recent.every(x => typeof x === 'string' && x.length <= 128)))))
+    && (!compression || (/^[a-f0-9]{64}$/u.test(compression.fingerprint)
+      && [compression.beforeTokens, compression.afterTokens, compression.durationMs, compression.summaryInputTokens, compression.summaryOutputTokens].every(x => Number.isFinite(x) && x >= 0)
+      && compression.netReleasedTokens === compression.beforeTokens - compression.afterTokens && typeof compression.costKnown === 'boolean'))
+    && (epoch.baseHistoryEvidenceRef === undefined || typeof epoch.baseHistoryEvidenceRef === 'string');
+}
+
+/** Information actually delivered, independent of evidence IDs, query spelling
+ * and self-reported plan completion. Scope is the enclosing logical task. */
+export function visibleProgressFingerprint(toolName: string, content: string): string | undefined {
+  if (toolName === 'keepseek_update_plan') return undefined;
+  let value: unknown;
+  try { value = JSON.parse(content); } catch { value = content; }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    if (record.bodyDelivered === false || record.errorType === 'evidence_capacity_blocked') return undefined;
+    if (record.completeInline === false && !record.inlineContent && !(Array.isArray(record.inlineItems) && record.inlineItems.length)) return undefined;
   }
-  const repeats = previous.repeats + 1;
-  if (!previous.strategyWarningIssued) return { state: { fingerprint, repeats, strategyWarningIssued: true }, action: 'warn' };
-  return { state: { fingerprint, repeats, strategyWarningIssued: true }, action: repeats >= 2 ? 'stop' : 'none' };
+  const normalize = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(normalize);
+    if (!item || typeof item !== 'object') return item;
+    return Object.fromEntries(Object.entries(item).filter(([key]) => ![
+      'evidenceRef', 'id', 'draftEditId', 'draftRunId', 'toolCallId', 'requestId', 'query', 'createdAt', 'updatedAt', 'durationMs', 'read'
+    ].includes(key)).map(([key, child]) => [key, normalize(child)]));
+  };
+  return createHash('sha256').update(stableStringify(normalize(value))).digest('hex');
 }

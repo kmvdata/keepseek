@@ -1,0 +1,71 @@
+{
+  "kind": "synthetic offline real filesystem benchmark",
+  "node": "v24.15.0",
+  "platform": "darwin",
+  "arch": "x64",
+  "results": [
+    {
+      "name": "small",
+      "checkpointCount": 3,
+      "legacyBytes": 95769,
+      "samples": 7,
+      "writeBytes": [
+        96306,
+        96306,
+        96605,
+        96306,
+        96306,
+        96306,
+        96306
+      ],
+      "saveP50Ms": 5.716500999999994,
+      "saveP95Ms": 6.661181999999997,
+      "checkpointCopyP50Ms": 0.15789100000000644,
+      "eventLoopMaxMs": 12.320767,
+      "rssPeakBytes": 56717312,
+      "loadMs": 6.058501000000035
+    },
+    {
+      "name": "medium",
+      "checkpointCount": 20,
+      "legacyBytes": 15936717,
+      "samples": 7,
+      "writeBytes": [
+        15937258,
+        15937258,
+        15937258,
+        15937258,
+        15937258,
+        15937258,
+        15937258
+      ],
+      "saveP50Ms": 150.17575499999998,
+      "saveP95Ms": 160.88954000000012,
+      "checkpointCopyP50Ms": 5.446100999999999,
+      "eventLoopMaxMs": 125.370367,
+      "rssPeakBytes": 284917760,
+      "loadMs": 81.64275899999984
+    },
+    {
+      "name": "large",
+      "checkpointCount": 55,
+      "legacyBytes": 224445672,
+      "samples": 7,
+      "writeBytes": [
+        224446215,
+        224446215,
+        224446215,
+        224446215,
+        224446215,
+        224446215,
+        224446215
+      ],
+      "saveP50Ms": 2344.3824520000007,
+      "saveP95Ms": 2433.604835,
+      "checkpointCopyP50Ms": 24.404951000000437,
+      "eventLoopMaxMs": 2019.557375,
+      "rssPeakBytes": 1411883008,
+      "loadMs": 1232.6039640000017
+    }
+  ]
+}

@@ -80,3 +80,4 @@ import './providerNetworkRecovery.test';
 import './providerStreamRecovery.test';
 
 import './modelOutputBudget.test';
+import './longTaskPerformance.test';

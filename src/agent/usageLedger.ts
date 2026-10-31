@@ -33,6 +33,7 @@ export const USAGE_PRICE_SNAPSHOT_VERSION = 1;
 export interface UsageLedgerSummary {
   providerAttemptCount: number;
   usageResponseCount: number;
+  bySourceCounts?: Partial<Record<UsageSource, { providerAttemptCount: number; usageResponseCount: number }>>;
   pricedRequestCount: number;
   estimatedRequestCount: number;
   unpricedRequestCount: number;
@@ -185,6 +186,18 @@ export function appendUsageLedgerRecord(
   };
 }
 
+/** A durable rebuild can finish after more immutable attempt records arrive.
+ * Include those pending records in the view without counting flushed IDs twice. */
+export function mergePendingUsageLedger(durable: ProviderUsageLedger, pending: ProviderUsageLedger | undefined): ProviderUsageLedger {
+  const records = new Map<string, ProviderUsageLedgerRecord>();
+  for (const record of [...durable.records, ...(pending?.records ?? [])]) {
+    const key = `${record.requestId}\u0000${record.attemptIndex}`;
+    if (!records.has(key)) records.set(key, record);
+  }
+  return { version: 1, records: [...records.values()], legacyAggregate: Boolean(durable.legacyAggregate || pending?.legacyAggregate),
+    incomplete: Boolean(durable.incomplete || pending?.incomplete) };
+}
+
 export function normalizeUsageLedgerValue(value: unknown): ProviderUsageLedger | undefined {
   if (!isRecord(value)) return undefined;
   const rawRecords = Array.isArray(value.records) ? value.records : [];
@@ -213,6 +226,7 @@ export function summarizeUsageLedger(ledger: ProviderUsageLedger | undefined): U
   const summary: UsageLedgerSummary = {
     providerAttemptCount: 0,
     usageResponseCount: 0,
+    bySourceCounts: {},
     pricedRequestCount: 0,
     estimatedRequestCount: 0,
     unpricedRequestCount: 0,
@@ -230,8 +244,11 @@ export function summarizeUsageLedger(ledger: ProviderUsageLedger | undefined): U
   };
   for (const record of normalized?.records ?? []) {
     summary.providerAttemptCount += 1;
+    const source = summary.bySourceCounts![record.source] ??= { providerAttemptCount: 0, usageResponseCount: 0 };
+    source.providerAttemptCount++;
     if (record.kind !== 'usage_response' || !record.usage) continue;
     summary.usageResponseCount += 1;
+    source.usageResponseCount++;
     summary.promptTokens += record.usage.promptTokens;
     summary.completionTokens += record.usage.completionTokens;
     summary.totalTokens += record.usage.totalTokens;

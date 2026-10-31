@@ -112,6 +112,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
   private readonly store: SubagentStore;
   private readonly scheduler = new SubagentScheduler();
   private readonly progress = new Map<string, SubagentProgressState>();
+  private readonly resultWaiters = new Map<string, Set<() => void>>();
 
   public constructor(private readonly options: SubagentRuntimeOptions) {
     this.settingsStore = new SubagentSettingsStore(options.globalStorageUri, options.workspaceKey);
@@ -243,7 +244,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
     if (!parentSessionId) {
       return toolError('parent_session_missing', 'Subagent results can only be read from a persisted parent session.');
     }
-    const result = await this.store.readResultPage({
+    const pageInput = {
       parentSessionId,
       ref: input.ref,
       subagentId: input.subagentId,
@@ -252,8 +253,31 @@ export class SubagentRuntime implements SubagentToolAdapter {
       limitBytes: input.limitBytes,
       offset: input.offset,
       maxChars: input.maxChars
-    });
+    };
+    let result = await this.store.readResultPage(pageInput);
+    if (result.errorType === 'subagent_result_pending') {
+      const stored = await this.store.read(parentSessionId, input.ref ?? input.subagentId ?? '');
+      const live = stored && this.progress.get(stored.metadata.id);
+      if (live?.parentSessionId === parentSessionId && (live.status === 'queued' || live.status === 'running')) {
+        // A verified live host operation is a wait, not new evidence or a model
+        // polling loop. No polling requests, fabricated progress or fresh budget.
+        await this.waitForResult(live.id, context.signal ?? context.parentRequest.signal);
+        result = await this.store.readResultPage(pageInput); // recheck scope and integrity
+      }
+    }
     return { content: JSON.stringify(result) };
+  }
+
+  private async waitForResult(id: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw new Error('Subagent result wait cancelled');
+    await new Promise<void>((resolve, reject) => {
+      const waiters = this.resultWaiters.get(id) ?? new Set<() => void>();
+      const clean = () => { signal?.removeEventListener('abort', abort); waiters.delete(done); if (!waiters.size) this.resultWaiters.delete(id); };
+      const done = () => { clean(); resolve(); };
+      const abort = () => { clean(); reject(new Error('Subagent result wait cancelled')); };
+      waiters.add(done); this.resultWaiters.set(id, waiters);
+      signal?.addEventListener('abort', abort, { once: true });
+    });
   }
 
   public async readDiagnostic(parentSessionId: string, subagentId: string, diagnosticId: string): Promise<Record<string, unknown> | undefined> {
@@ -1297,6 +1321,9 @@ export class SubagentRuntime implements SubagentToolAdapter {
 
   private setProgress(state: SubagentProgressState): void {
     this.progress.set(state.id, state);
+    if (state.status !== 'queued' && state.status !== 'running') {
+      for (const done of this.resultWaiters.get(state.id) ?? []) done();
+    }
     if (this.progress.size > 48) {
       const removable = [...this.progress.values()]
         .filter((item) => item.status !== 'queued' && item.status !== 'running')

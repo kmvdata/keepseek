@@ -957,3 +957,11 @@ KeepSeek 的 API 通信链路可以概括为：
 LLM 看到的是协议原生的消息/Items、冻结工具定义和有界证据结果，不知道 VS Code Webview、引用 chip、富文本编辑器或 epoch 调度等 UI/宿主细节。所有引用展开、上下文组装、工具路由、证据持久化、动态准入和恢复都在扩展端完成。
 
 这种设计让 KeepSeek 可同时适配 OpenAI-compatible function calling、Responses Items 与 Anthropic `tool_use`，模型不需要理解 KeepSeek 的引用语法或 UI。Anthropic 的 Bedrock/Vertex 专用认证、OAuth、Files、图片/PDF、server tools 与 Messages Batches 不在当前范围。
+
+## 长任务最终投影校验
+
+`buildProviderPayloadProjection` 统一运行中三协议的 context surface 与显式候选结果。Chat Completions 仅 DeepSeek 保留 `reasoning_content`；兼容来源在准入、usage、fallback 和实际发送前执行同一规则。Responses 的原生 input/tools 与 Anthropic 的 system/messages/tools 保持原 lane；拒绝把 native replay 带入其他协议。采样参数与输出字段随后由 dispatch 写入，`resolveProviderRequestBudget` 对最终 body 决定实际上限；缓存观测也使用该 body 的预算估算。
+
+`request_output_budget` 记录配置输出、有效输出、输入、窗口、安全余量、限制来源；`projection_estimate.phase=candidate` 明示候选内容，不要求带候选的估算与当前请求数字相等。`keepseek_read_evidence` 页保持根引用和字节/行/项/搜索 cursor；容量阻塞是 `ok:false`，不能将元数据成功计为正文送达。静态 system、冻结 schema 和旧真实 user 字节不因这些变化重写。
+
+回归与协议回放见 [长任务验收](long-task-performance-rectification.md)。

@@ -26,6 +26,9 @@ export function prepareEvidenceEnvelope(input: {
   const fullTokens = estimateTokenCount(input.rawContent);
   const allowedTokens = Math.max(0, Math.floor(input.inlineTokenAllowance));
   const allowedChars = Math.max(0, Math.floor(input.inlineCharLimit));
+  if (input.record.toolName === 'keepseek_read_evidence') {
+    return prepareEvidencePage(input.rawContent, allowedTokens, allowedChars, contentType);
+  }
   if (input.rawContent.length <= allowedChars && fullTokens <= allowedTokens) {
     return { content: input.rawContent, completeInline: true, inlineChars: input.rawContent.length, inlineTokens: fullTokens, contentType, source };
   }
@@ -91,6 +94,62 @@ export function prepareEvidenceEnvelope(input: {
     contentType,
     source
   };
+}
+
+/** A reader result keeps the ROOT identity and advances only over delivered
+ * content. It must never become a reference to the evidence of the read itself. */
+function prepareEvidencePage(raw: string, tokens: number, chars: number, contentType: ToolEvidenceContentType): PreparedEvidenceEnvelope {
+  const page = parseJson(raw);
+  const wrap = (content: string, completeInline: boolean): PreparedEvidenceEnvelope => ({
+    content, completeInline, inlineChars: content.length, inlineTokens: estimateTokenCount(content), contentType
+  });
+  const fits = (value: string) => value.length <= chars && estimateTokenCount(value) <= tokens;
+  if (fits(raw)) return wrap(raw, true);
+  if (!isRecord(page)) return wrap(stableStringify({ ok: false, errorType: 'evidence_page_invalid' }), false);
+  const blocked = () => wrap(stableStringify({
+    ok: false, errorType: 'evidence_capacity_blocked', bodyDelivered: false,
+    evidenceRef: page.evidenceRef, contentHash: page.contentHash,
+    cursor: page.cursor, startLine: page.startLine, itemOffset: page.itemOffset,
+    strategy: 'Release context at a controlled boundary, then read this same root and range. No body was delivered.'
+  }), false);
+  if (page.ok !== true) return wrap(raw, true);
+  let units: unknown[];
+  if (page.mode === 'bytes' && typeof page.content === 'string') units = Array.from(page.content);
+  else if (page.mode === 'lines' && typeof page.content === 'string') units = page.content.split(/(?<=\n)/u).filter(Boolean);
+  else if (page.mode === 'items' && Array.isArray(page.items)) units = page.items;
+  else if (page.mode === 'search' && Array.isArray(page.matches)) units = page.matches;
+  else return blocked();
+  const candidate = (count: number) => {
+    const result: Record<string, unknown> = { ...page, bodyDelivered: count > 0, hasMore: true };
+    const selected = units.slice(0, count);
+    if (page.mode === 'bytes') {
+      result.content = selected.join('');
+      result.nextCursor = `b:${Number(String(page.cursor).slice(2)) + Buffer.byteLength(String(result.content))}`;
+      result.endByte = Number(String(result.nextCursor).slice(2));
+    } else if (page.mode === 'lines') {
+      result.content = selected.join('');
+      result.endLine = Number(page.startLine) + count - 1;
+      result.nextStartLine = Number(page.startLine) + count;
+    } else if (page.mode === 'items') {
+      result.items = selected;
+      result.nextItemOffset = Number(page.itemOffset) + count;
+    } else {
+      result.matches = selected;
+      result.matchCount = count;
+      // Search cursors are offsets into the text surface, not match indices.
+      const last = selected.at(-1) as Record<string, unknown> | undefined;
+      result.nextCursor = last?.nextCursor;
+      if (!result.nextCursor) return undefined;
+    }
+    return stableStringify(result);
+  };
+  let low = 0, high = units.length, best: string | undefined;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const value = candidate(mid);
+    if (value && fits(value)) { low = mid; best = value; } else high = mid - 1;
+  }
+  return best && low > 0 ? wrap(best, false) : blocked();
 }
 
 export function stableStringify(value: unknown): string {

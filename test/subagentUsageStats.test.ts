@@ -23,6 +23,8 @@ import {
   normalizeSessionUsageStatsValue,
   normalizeTurnUsageStatsValue
 } from '../src/agent/usageStats';
+import { applyUsageLedgerDeltaToSessionStats, applyUsageLedgerSummaryToSessionStats } from '../src/agent/usageStats';
+import { summarizeUsageLedger, mergePendingUsageLedger, createUsageLedgerRecords, createUsagePriceSnapshot } from '../src/agent/usageLedger';
 import { getVisibleMessages, normalizeStoredSessions } from '../src/sessions/chatSessionStore';
 import type { ContextUsageEstimate, SubagentSessionUsageStats, SubagentTerminalStatus, UsageSource } from '../src/shared/types';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
@@ -30,6 +32,52 @@ import { getInputScript } from '../src/webview/input/script';
 import { getInputStyles } from '../src/webview/input/styles';
 import { getInputTemplate } from '../src/webview/input/template';
 import { getScript } from '../src/webview/script';
+
+test('attempt and usage response counts survive normalization, aggregation and host view conversion', () => {
+  const normalized = normalizeSessionUsageStatsValue({ promptTokens: 97349731, completionTokens: 534073,
+    totalTokens: 97883804, cacheHitTokens: 0, cacheMissTokens: 0, sessionCost: 0, currency: '',
+    requestCount: 274, providerAttemptCount: 274, usageResponseCount: 256, attemptStatsIncomplete: false });
+  const view = createUsageDetailsViewModel({ sessionUsageStats: normalized });
+  assert.equal(view.session.total.providerAttemptCount, 274);
+  assert.equal(view.session.total.usageResponseCount, 256);
+  const old = normalizeTurnUsageStatsValue({ promptTokens: 100, totalTokens: 100, completionTokens: 0,
+    cacheHitTokens: 0, cacheMissTokens: 0, requestCount: 1, cost: 0, currency: '' });
+  assert.equal(createUsageDetailsViewModel({ lastTurnUsage: old }).lastTurn!.total.attemptStatsIncomplete, true);
+});
+
+test('pending ledger deltas do not replace session totals or double-count a repeated attempt', () => {
+  const empty = summarizeUsageLedger(undefined);
+  const base = applyUsageLedgerSummaryToSessionStats(undefined, { ...empty,
+    providerAttemptCount: 274, usageResponseCount: 256,
+    bySourceCounts: { executor: { providerAttemptCount: 270, usageResponseCount: 253 }, subagent: { providerAttemptCount: 4, usageResponseCount: 3 } } });
+  const pending = { ...empty, providerAttemptCount: 1, usageResponseCount: 0,
+    bySourceCounts: { executor: { providerAttemptCount: 1, usageResponseCount: 0 } } };
+  const next = applyUsageLedgerDeltaToSessionStats(base, empty, pending);
+  assert.equal(next!.providerAttemptCount, 275); assert.equal(next!.usageResponseCount, 256);
+  const duplicate = applyUsageLedgerDeltaToSessionStats(next, pending, pending);
+  assert.equal(duplicate!.providerAttemptCount, 275);
+  const split = splitActualUsage(duplicate);
+  assert.equal(split.mainSession.providerAttemptCount, 271);
+  assert.equal(split.subagent.providerAttemptCount, 4);
+  assert.equal(split.subagent.usageResponseCount, 3);
+  assert.equal(split.mainSession.attemptStatsIncomplete, false);
+});
+
+test('durable ledger rebuild includes attempts arriving during its await without counting flushed records twice', () => {
+  const price = createUsagePriceSnapshot({ originalModelId: 'fixture', sourceId: 'fixture', provider: 'qwencloud',
+    protocol: 'chat_completions', supportsBilling: false });
+  const first = createUsageLedgerRecords({ requestId: 'first', attempts: [price], source: 'executor' })[0];
+  const late = createUsageLedgerRecords({ requestId: 'late', attempts: [price], source: 'executor',
+    usage: { promptTokens: 10, completionTokens: 1, totalTokens: 11, cacheHitTokens: 0, cacheMissTokens: 10, cacheDataStatus: 'unavailable' } })[0];
+  const durable = { version: 1 as const, records: [first], legacyAggregate: false, incomplete: false };
+  const pending = { ...durable, records: [first, late] };
+  const merged = mergePendingUsageLedger(durable, pending);
+  assert.equal(summarizeUsageLedger(merged).providerAttemptCount, 2);
+  assert.equal(summarizeUsageLedger(merged).usageResponseCount, 1);
+  assert.equal(summarizeUsageLedger(merged).totalTokens, 11);
+  assert.deepEqual(mergePendingUsageLedger(merged, pending), merged);
+  assert.equal(pending.records.length, 2, 'unflushed records remain available for the next durable batch');
+});
 
 test('source usage keeps separate currencies, priced zero cost, partial pricing, and cache coverage through merges', () => {
   let turn = addUsageEventToTurnStats(undefined, event('subagent', 120, 'CNY', 1));
@@ -298,8 +346,9 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.equal(WEBVIEW_TRANSLATIONS['zh-CN'].usageNoRatio, '--');
   assert.match(detailsRenderer, /var hasSessionUsage = hasUsageData\(selected\.total\)/u);
   assert.match(detailsRenderer, /formatUsageAvailabilityValue\(selected\.total, 'usageMetricCostUnavailableValue'\)/u);
-  assert.match(detailsRenderer, /hasSessionUsage \? formatMetricInteger\(selected\.total\.providerAttemptCount\) : t\('usagePendingValue'\)/u);
-  assert.match(detailsRenderer, /hasSessionUsage \? formatMetricInteger\(selected\.total\.usageResponseCount\) : t\('usagePendingValue'\)/u);
+  assert.match(detailsRenderer, /selected\.total\.attemptStatsIncomplete && !selected\.total\.providerAttemptCount \? t\('usageMetricUnavailableValue'\)/u);
+  assert.match(detailsRenderer, /selected\.total\.attemptStatsIncomplete && !selected\.total\.usageResponseCount \? t\('usageMetricUnavailableValue'\)/u);
+  assert.match(detailsRenderer, /selected\.total\.attemptStatsIncomplete \? '≥ ' : ''/u);
   assert.match(script, /function formatUsageAvailabilityValue\(usage, unavailableKey\) \{\s*return hasUsageData\(usage\) \? t\(unavailableKey\) : t\('usagePendingValue'\);/u);
   const provider = await readFile(path.resolve('src/provider/KeepseekChatViewProvider.ts'), 'utf8');
   assert.match(provider, /usageDetails: createUsageDetailsViewModel\(/u);

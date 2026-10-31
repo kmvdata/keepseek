@@ -1,4 +1,5 @@
 import type { KeepseekLanguage } from '../shared/i18n';
+import type { ProviderClientRequest } from './providers/types';
 import type { ModelSourceProvider } from '../accounts/types';
 import type {
   AgentSettings,
@@ -37,6 +38,35 @@ export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 10;
 export const LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION = 1;
 export const PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION = 2;
 export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 10;
+
+/** Final context surface shared by dispatch, candidate admission and usage.
+ * Candidate results are explicit additions; native replay is never rebuilt or
+ * converted to another protocol here. Non-context sampling/output options are
+ * applied by dispatch after this projection. */
+export function buildProviderPayloadProjection(input: {
+  modelId: string; maxOutputTokens: number; provider?: string; messages: DeepSeekMessage[]; tools: DeepSeekFunctionTool[];
+  native?: { protocol: 'openai-responses'; input: OpenAiResponsesItem[]; tools: OpenAiResponsesFunctionTool[] }
+    | { protocol: 'anthropic-messages'; system: AnthropicSystemTextBlock[]; messages: AnthropicMessage[]; tools: AnthropicFunctionTool[] };
+  additionalResponsesItems?: OpenAiResponsesItem[];
+  additionalAnthropicResults?: import('./providers/anthropicTypes').AnthropicUserContentBlock[];
+}): ProviderClientRequest['body'] {
+  const native = input.native;
+  if (input.provider === 'openai-responses') {
+    if (native?.protocol !== 'openai-responses') throw new Error('Responses projection lane mismatch');
+    return { model: input.modelId, input: input.additionalResponsesItems?.length
+      ? [...native.input, ...input.additionalResponsesItems] : native.input,
+      tools: native.tools.length ? native.tools : undefined, stream: true, store: false };
+  }
+  if (input.provider === 'anthropic-compatible') {
+    if (native?.protocol !== 'anthropic-messages') throw new Error('Anthropic projection lane mismatch');
+    return { model: input.modelId, system: native.system, messages: input.additionalAnthropicResults?.length
+      ? [...native.messages, { role: 'user', content: input.additionalAnthropicResults }] : native.messages,
+      tools: native.tools.length ? native.tools : undefined, stream: true, max_tokens: input.maxOutputTokens };
+  }
+  if (native) throw new Error('Native replay cannot enter the chat-completions lane');
+  return { model: input.modelId, messages: normalizeProviderMessages(input.messages, input.provider),
+    tools: input.tools.length ? input.tools : undefined, stream: true };
+}
 
 export interface ProviderRequestProjectionInput {
   model: KeepseekModel;
@@ -156,13 +186,21 @@ export function buildProviderRequestProjection(
 ): ProviderRequestProjection {
   const profile = getAgentRuntimeProfile(input.model, input.agentSettings);
   const requestProtocolVersion = normalizeRequestProtocolVersion(input.requestProtocolVersion);
-  const provider = input.provider ?? (
-    input.model.provider === 'openai-responses' || input.model.provider === 'anthropic-compatible'
-      ? input.model.provider
-      : undefined
-  );
+  const provider = input.provider ?? input.model.provider;
+  const lane = getProviderRequestLane({ provider: input.provider ?? (provider === 'openai-responses' || provider === 'anthropic-compatible' ? provider : 'openai-compatible'),
+    sourceId: input.sourceId ?? input.model.sourceId ?? '', baseUrl: input.baseUrl ?? '', modelId: input.model.id });
+  // History fallback admission must also see only bytes eligible for this
+  // source/lane. The persisted audit objects remain untouched.
+  const wireHistory = input.history.map(message => {
+    const stripReasoning = provider && provider !== 'deepseek';
+    const stripReplay = message.providerReplay && hasProviderNativeReplayFidelityRisk([message], lane);
+    if (!stripReasoning && !stripReplay) return message;
+    return { ...message, ...(stripReasoning ? { reasoningContent: undefined,
+      toolRounds: message.toolRounds?.map(round => ({ ...round, reasoningContent: null })) } : {}),
+      ...(stripReplay ? { providerReplay: undefined } : {}) };
+  });
   const historyProjection = buildHistoryProjection({
-    history: input.history,
+    history: wireHistory,
     prompt: input.prompt,
     language: input.language,
     contextCompression: input.contextCompression,
@@ -171,7 +209,7 @@ export function buildProviderRequestProjection(
     maxProjectionTokens: input.maxProjectionTokens,
     includeProviderReplay: provider === 'openai-responses' || provider === 'anthropic-compatible'
   });
-  const messages = buildInitialAgentMessages({
+  const messages = normalizeProviderMessages(buildInitialAgentMessages({
     prompt: input.prompt,
     contextFiles: input.contextFiles,
     currentRunContext: input.currentRunContext,
@@ -181,7 +219,7 @@ export function buildProviderRequestProjection(
     projection: historyProjection,
     requestProtocolVersion,
     systemPrompt: input.systemPrompt
-  });
+  }), provider);
   // Tool exposure is an execution capability, not a model capability or a
   // budget sentinel. Callers that need a no-tools lane must say so explicitly.
   const includeTools = input.includeTools ?? true;
@@ -224,6 +262,18 @@ export function buildProviderRequestProjection(
     responses,
     anthropic
   };
+}
+
+/** Final Chat lane adaptation, shared by initial projection, live tool turns,
+ * admission and transport. Never mutate audit history or DeepSeek prefix bytes. */
+export function normalizeProviderMessages(messages: DeepSeekMessage[], provider?: string): DeepSeekMessage[] {
+  if (!provider || provider === 'deepseek') return messages;
+  return messages.map((message) => {
+    if (message.role !== 'assistant' || !Object.prototype.hasOwnProperty.call(message, 'reasoning_content')) return message;
+    const portable = { ...message };
+    delete portable.reasoning_content;
+    return portable;
+  });
 }
 
 function buildAnthropicMessagesRequestProjection(input: {

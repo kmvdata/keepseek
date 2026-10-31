@@ -385,7 +385,9 @@ export class ExecutionClock {
     const next = this.now();
     const delta = next - this.last;
     this.last = next;
-    if (this.active && delta >= 0 && delta <= 5_000) this.used += delta;
+    // A delayed timer is not evidence of sleep. Count monotonic elapsed time
+    // conservatively; explicit waiting releases the clock through enter().
+    if (this.active && delta >= 0) this.used += delta;
     if (this.limitMs > 0 && this.used >= this.limitMs) this.controller.abort(new ExecutionBudgetError());
   }
   public enter(): () => void {

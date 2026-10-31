@@ -1,7 +1,9 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { visibleProgressFingerprint } from '../contextEpoch';
 import { open } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import * as vscode from 'vscode';
-import { writeJsonAtomic } from '../../shared/atomicStorage';
+import { writeBytesAtomic, writeJsonAtomic } from '../../shared/atomicStorage';
 import { estimateTokenCount } from '../tokenEstimate';
 import type {
   EvidenceIntentInput,
@@ -30,6 +32,7 @@ export class ToolEvidenceStore {
   private readonly records = new Map<string, ToolEvidence>();
   private readonly memoryBlobs = new Map<string, string>();
   private queue: Promise<void> = Promise.resolve();
+  private readonly verifiedBlobs = new Map<string, string>();
 
   public constructor(
     private readonly globalStorageUri?: vscode.Uri,
@@ -125,8 +128,10 @@ export class ToolEvidenceStore {
       if (record.providerEnvelope !== envelope) throw new Error('Provider-visible evidence bytes are immutable.');
       return record;
     }
+    const visibleContentHash = visibleProgressFingerprint(record.toolName, envelope);
     return await this.update(record, {
       providerEnvelope: envelope,
+      bodyDelivery: { version: 1, bodyDelivered: Boolean(visibleContentHash), visibleContentHash, envelopeBytes: Buffer.byteLength(envelope) },
       completeInline,
       source: source ?? record.source,
       deliveryStatus: 'envelope_ready'
@@ -157,7 +162,11 @@ export class ToolEvidenceStore {
     const memory = this.memoryBlobs.get(this.blobKey(record.sessionId, record.taskId, record.blobName));
     if (memory !== undefined) return memory;
     if (!this.globalStorageUri) throw new Error('Tool evidence blob is unavailable.');
-    return this.decoder.decode(await vscode.workspace.fs.readFile(this.getBlobUri(record.sessionId, record.taskId, record.blobName)));
+    const bytes = await vscode.workspace.fs.readFile(this.getBlobUri(record.sessionId, record.taskId, record.blobName));
+    if (bytes.byteLength !== record.totalBytes || createHash('sha256').update(bytes).digest('hex') !== record.contentHash) {
+      throw new Error('Evidence integrity mismatch');
+    }
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   }
 
   public async read(input: EvidenceReadInput): Promise<Record<string, unknown>> {
@@ -166,6 +175,11 @@ export class ToolEvidenceStore {
       return { ok: false, errorType: 'evidence_not_found', error: 'Evidence was not found in this session and task.' };
     }
     const maxChars = clampInt(input.maxChars, 1, MAX_EVIDENCE_PAGE_CHARS, DEFAULT_EVIDENCE_PAGE_CHARS);
+    if (input.cursor && (!new RegExp(input.search?.trim() ? '^s:[0-9]+$' : '^b:[0-9]+$').test(input.cursor)
+      || !Number.isSafeInteger(Number(input.cursor.slice(2)))
+      || (!input.search?.trim() && Number(input.cursor.slice(2)) > (record.totalBytes ?? 0)))) {
+      return { ok: false, errorType: 'invalid_evidence_cursor', evidenceRef: record.evidenceRef };
+    }
     if (input.startLine !== undefined || input.endLine !== undefined) {
       return await this.readLines(record, input.startLine, input.endLine, maxChars);
     }
@@ -222,8 +236,18 @@ export class ToolEvidenceStore {
     let content: string;
     let consumedBytes: number;
     if (this.globalStorageUri?.scheme === 'file' && record.blobName) {
-      const handle = await open(this.getBlobUri(record.sessionId, record.taskId, record.blobName).fsPath, 'r');
+      const blobUri = this.getBlobUri(record.sessionId, record.taskId, record.blobName);
+      const handle = await open(blobUri.fsPath, 'r');
       try {
+        const stat = await handle.stat();
+        const key = blobUri.toString();
+        const identity = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+        if (this.verifiedBlobs.get(key) !== identity) {
+          const hash = createHash('sha256');
+          for await (const chunk of createReadStream(blobUri.fsPath, { fd: handle.fd, autoClose: false, start: 0 })) hash.update(chunk);
+          if (stat.size !== record.totalBytes || hash.digest('hex') !== record.contentHash) throw new Error('Evidence integrity mismatch');
+          this.verifiedBlobs.set(key, identity);
+        }
         if (pageStart > 0 && pageStart < totalBytes) {
           const probe = Buffer.alloc(Math.min(4, totalBytes - pageStart));
           const probeRead = await handle.read(probe, 0, probe.length, pageStart);
@@ -236,6 +260,8 @@ export class ToolEvidenceStore {
         const decoded = decodeUtf8Prefix(buffer.subarray(0, read.bytesRead), maxChars);
         content = decoded.text;
         consumedBytes = decoded.bytes;
+        const after = await handle.stat();
+        if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) throw new Error('Evidence changed during read');
       } finally {
         await handle.close();
       }
@@ -247,10 +273,16 @@ export class ToolEvidenceStore {
       consumedBytes = this.encoder.encode(content).byteLength;
     }
     const next = pageStart + consumedBytes;
+    if (!consumedBytes && pageStart < totalBytes) return this.pageEnvelope(record, {
+      ok: false, errorType: 'evidence_page_too_small', bodyDelivered: false, cursor: `b:${pageStart}`,
+      hint: 'Increase page size to fit the next complete UTF-8 character.'
+    });
     return this.pageEnvelope(record, {
       mode: 'bytes',
       cursor: `b:${pageStart}`,
       content,
+      bodyDelivered: consumedBytes > 0,
+      startByte: pageStart, endByte: next,
       hasMore: next < totalBytes,
       ...(next < totalBytes ? { nextCursor: `b:${next}` } : {})
     });
@@ -320,7 +352,7 @@ export class ToolEvidenceStore {
     const text = surface.text;
     const lower = text.toLocaleLowerCase();
     const needle = query.toLocaleLowerCase();
-    const matches: Array<{ line: number; start: number; text: string }> = [];
+    const matches: Array<{ line: number; start: number; text: string; nextCursor: string }> = [];
     const start = parseSearchCursor(cursor);
     let from = Math.min(start, text.length);
     let chars = 0;
@@ -333,7 +365,8 @@ export class ToolEvidenceStore {
       const lineEnd = lineEndValue < 0 ? text.length : lineEndValue;
       const excerpt = text.slice(lineStart, Math.min(lineEnd, lineStart + Math.min(1_000, maxChars)));
       if (matches.length && chars + excerpt.length > maxChars) { nextCursor = `s:${index}`; break; }
-      matches.push({ line: surface.startLine + countNewlines(text, 0, lineStart), start: index, text: excerpt });
+      matches.push({ line: surface.startLine + countNewlines(text, 0, lineStart), start: index, text: excerpt,
+        nextCursor: `s:${index + Math.max(1, needle.length)}` });
       chars += excerpt.length;
       from = index + Math.max(1, needle.length);
     }
@@ -365,10 +398,11 @@ export class ToolEvidenceStore {
 
   private async writeRecord(record: ToolEvidence): Promise<void> {
     const snapshot = structuredClone(record);
-    this.records.set(this.recordKey(record.sessionId, record.taskId, record.id), snapshot);
-    if (!this.globalStorageUri) return;
+    const key = this.recordKey(record.sessionId, record.taskId, record.id);
+    if (!this.globalStorageUri) { this.records.set(key, snapshot); return; }
     const write = this.queue.catch(() => undefined).then(async () => {
-      await writeJsonAtomic(this.getRecordUri(record.sessionId, record.taskId, record.id), snapshot);
+      await writeJsonAtomic(this.getRecordUri(record.sessionId, record.taskId, record.id), snapshot, { durable: true });
+      this.records.set(key, snapshot);
     });
     this.queue = write;
     try {
@@ -386,6 +420,13 @@ export class ToolEvidenceStore {
     try {
       const value: unknown = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(this.getRecordUri(sessionId, taskId, id))));
       if (!isToolEvidence(value) || value.sessionId !== sessionId || value.taskId !== taskId || value.id !== id) return undefined;
+      // Recompute optional V1 delivery metadata from immutable envelope bytes;
+      // legacy absence or a malformed field must not invent progress.
+      if (value.providerEnvelope !== undefined) {
+        const visibleContentHash = visibleProgressFingerprint(value.toolName, value.providerEnvelope);
+        value.bodyDelivery = { version: 1, bodyDelivered: Boolean(visibleContentHash), visibleContentHash,
+          envelopeBytes: Buffer.byteLength(value.providerEnvelope) };
+      } else delete value.bodyDelivery;
       this.records.set(key, value);
       return structuredClone(value);
     } catch { return undefined; }
@@ -398,21 +439,15 @@ export class ToolEvidenceStore {
       return;
     }
     const uri = this.getBlobUri(sessionId, taskId, blobName);
-    try { await vscode.workspace.fs.stat(uri); return; } catch { /* create */ }
-    const blobDirectory = vscode.Uri.joinPath(this.getTaskDirectory(sessionId, taskId), 'blobs');
-    const temporary = vscode.Uri.joinPath(blobDirectory, `.keepseek-${randomUUID()}.tmp`);
-    await vscode.workspace.fs.createDirectory(blobDirectory);
     try {
-      await vscode.workspace.fs.writeFile(temporary, bytes);
-      await vscode.workspace.fs.rename(temporary, uri, { overwrite: false });
+      const existing = await vscode.workspace.fs.readFile(uri);
+      if (!Buffer.from(existing).equals(Buffer.from(bytes))) throw new Error('Evidence blob integrity mismatch');
+      return;
     } catch (error) {
-      try { await vscode.workspace.fs.stat(uri); }
-      catch {
-        throw new ToolEvidencePersistenceError('storage_failure', 'Tool evidence blob could not be persisted.', { cause: error });
-      }
-    } finally {
-      await Promise.resolve(vscode.workspace.fs.delete(temporary, { useTrash: false })).catch(() => undefined);
+      if (!['ENOENT', 'FileNotFound'].includes(String((error as { code?: string }).code))) throw error;
     }
+    try { await writeBytesAtomic(uri, bytes, { durable: true }); }
+    catch (error) { throw new ToolEvidencePersistenceError('storage_failure', 'Tool evidence blob could not be persisted.', { cause: error }); }
   }
 
   private getRootUri(): vscode.Uri {
@@ -469,10 +504,6 @@ function sliceWithoutSplittingSurrogate(text: string, start: number, maxChars: n
     const previous = text.charCodeAt(end - 1);
     const next = text.charCodeAt(end);
     if (previous >= 0xD800 && previous <= 0xDBFF && next >= 0xDC00 && next <= 0xDFFF) end -= 1;
-  }
-  if (end === start && start < text.length) {
-    const first = text.charCodeAt(start);
-    end = first >= 0xD800 && first <= 0xDBFF ? Math.min(text.length, start + 2) : start + 1;
   }
   return text.slice(start, end);
 }

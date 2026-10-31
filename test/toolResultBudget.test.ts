@@ -2,7 +2,7 @@ import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentRunner } from '../src/agent/runner';
@@ -23,6 +23,7 @@ import {
 } from '../src/shared/modelProfiles';
 import { DEEPSEEK_MODEL_IDENTITY_VERSION } from '../src/shared/deepSeekModels';
 import { getVisibleMessages } from '../src/sessions/chatSessionStore';
+import { snapshotCheckpoint } from '../src/sessions/persistenceSnapshot';
 
 const LARGE_ASCII = 'const value = 1; // evidence\n'.repeat(8_000);
 const LARGE_CJK = '这是不可变的工具证据。\n'.repeat(12_000);
@@ -503,7 +504,7 @@ test('Qwen-compatible Flash shape reaches request 17 after 16 rounds and 24 call
 test('an explicit tool-round grant lands in one stable-schema resumable finalization', async () => {
   const workspace = new WorkspaceToolService();
   let reads = 0;
-  workspace.readWorkspaceFile = async () => { reads += 1; return JSON.stringify({ ok: true, path: 'a.ts', content: LARGE_ASCII }); };
+  workspace.readWorkspaceFile = async (path) => { reads += 1; return JSON.stringify({ ok: true, path, content: `export const file = '${path}';` }); };
   const bodies: string[] = [];
   let checkpoint!: RunCheckpoint;
   const originalFetch = globalThis.fetch;
@@ -817,7 +818,7 @@ test('tool budget finalization does not create an epoch or hidden summary reques
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test('restart while an epoch summary is in flight safely regenerates the checkpoint in the same task', async () => {
+test('restart with no compressible history uses host fallback without repeating an empty summary', async () => {
   const input = request('openai-compatible');
   input.sessionId = 'session-summary-restart';
   const checkpoint = epochRecoveryCheckpoint(input, 'task-summary-restart');
@@ -842,9 +843,9 @@ test('restart while an epoch summary is in flight safely regenerates the checkpo
     assert.equal(response.message, 'Done.');
     assert.equal(taskIds.size, 1);
     assert.deepEqual([...taskIds], ['task-summary-restart']);
-    assert.equal(bodies.length, 2);
-    assert.equal(bodies.filter((body) => body.includes('Create a concise semantic checkpoint')).length, 1);
-    assert.ok(bodies[1].includes('keepseek_context_epoch_checkpoint'));
+    assert.equal(bodies.length, 1);
+    assert.equal(bodies.filter((body) => body.includes('Create a concise semantic checkpoint')).length, 0);
+    assert.ok(bodies[0].includes('keepseek_context_epoch_checkpoint'));
     assert.equal(finalCheckpoint.state?.epoch?.totalRollovers, 1);
     assert.equal(input.history.length, 0);
   } finally { globalThis.fetch = originalFetch; }
@@ -1229,6 +1230,67 @@ async function runLargeResult(provider: Provider) {
 }
 
 type Provider = 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
+
+test('offline 120-round replay across three protocols delivers pages and resumes without re-executing completed reads', async t => {
+  for (const provider of ['openai-compatible', 'openai-responses', 'anthropic-compatible'] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'keepseek-replay-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const uri = vscode.Uri.file(root) as unknown as import('vscode').Uri;
+    const workspace = new WorkspaceToolService();
+    let reads = 0, issued = 0, pages = 0, summaries = 0, rootRef = '', stopped = false;
+    let checkpoint!: RunCheckpoint;
+    const controller = new AbortController();
+    workspace.readWorkspaceFile = async path => {
+      reads++; return JSON.stringify({ ok: true, path, content: `${path}:` + 'unique long file body 中文🙂 '.repeat(9000) });
+    };
+    const bodies: unknown[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url, init) => {
+      const text = String(init?.body), body = JSON.parse(text);
+      if (text.includes('Create a concise semantic checkpoint')) { summaries++; return modelResponse(provider, undefined, 'Summary.'); }
+      bodies.push(body);
+      assert.equal(body.max_tokens ?? body.max_output_tokens, 393192);
+      const outputs = body.input ? body.input.filter((x: { type?: string }) => x.type === 'function_call_output').map((x: { output: string }) => x.output)
+        : provider === 'anthropic-compatible' ? body.messages.flatMap((m: { content: unknown }) => Array.isArray(m.content)
+          ? m.content.filter((c: { type: string }) => c.type === 'tool_result').map((c: { content: string }) => c.content) : [])
+          : body.messages.filter((m: { role: string }) => m.role === 'tool').map((m: { content: string }) => m.content);
+      const last = outputs.at(-1);
+      if (last) {
+        const result = JSON.parse(last);
+        if (issued % 2 === 1) { rootRef = result.evidenceRef; assert.ok(rootRef); }
+        else {
+          assert.equal(result.mode, 'bytes'); assert.equal(result.evidenceRef, rootRef);
+          assert.ok(result.content.length > 0); assert.equal(result.bodyDelivered, true); pages++;
+        }
+      }
+      if (issued === 40) return modelResponse(provider, undefined, 'Offline replay complete.');
+      issued++;
+      return modelResponse(provider, issued % 2 === 1
+        ? { id: `file-${issued}`, name: 'keepseek_read_workspace_file', args: JSON.stringify({ path: `file-${issued}.ts` }) }
+        : { id: `page-${issued}`, name: 'keepseek_read_evidence', args: JSON.stringify({ evidenceRef: rootRef, maxChars: 4000 }) });
+    }) as typeof fetch;
+    try {
+      const input = request(provider); input.executionLimits = undefined;
+      input.model = { ...input.model, contextWindowTokens: 1024000, maxOutputTokens: 393192 };
+      const save = async (cp: RunCheckpoint) => {
+        checkpoint = snapshotCheckpoint(cp);
+        if (!stopped && cp.state?.turn === 20 && !cp.state.pending) { stopped = true; controller.abort(); }
+      };
+      const runner = () => new AgentRunner(workspace, undefined, undefined, undefined, undefined, undefined, uri);
+      await assert.rejects(() => runner().run({ ...input, signal: controller.signal }, { onCheckpoint: save }));
+      const taskId = checkpoint.taskId, spent = checkpoint.usedMs, calls = reads;
+      assert.equal(calls, 10);
+      const result = await runner().run({ ...input, checkpoint: checkpointCopy(checkpoint) }, { onCheckpoint: save });
+      assert.equal(result.message, 'Offline replay complete.');
+      assert.equal(reads, 20); assert.equal(pages, 20); assert.equal(summaries, 0);
+      assert.equal(checkpoint.taskId, taskId); assert.ok(checkpoint.usedMs >= spent);
+      assert.equal(checkpoint.state?.epoch?.totalRollovers, 0);
+      assert.equal(bodies.length, 41);
+      assert.deepEqual((bodies[0] as { tools: unknown }).tools, (bodies.at(-1) as { tools: unknown }).tools);
+      assert.equal(input.history.length, 0);
+    } finally { globalThis.fetch = original; }
+  }
+});
 
 function request(provider: Provider): AgentRequest {
   return { prompt: 'Read the large file and finish.', history: [], contextFiles: [], language: 'en', sessionId: 'session-runner', requestProtocolVersion: 8,

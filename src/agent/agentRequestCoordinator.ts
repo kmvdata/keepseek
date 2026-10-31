@@ -240,8 +240,11 @@ function isPromptCacheCold(session: ChatSession): boolean {
 }
 
 function cloneChatMessage(message: ChatMessage): ChatMessage {
+  const history = { ...message };
+  delete history.runCheckpoint;
+  delete history.runCheckpointArchive;
   return {
-    ...message,
+    ...history,
     contextMeta: message.contextMeta ? { ...message.contextMeta } : undefined,
     usedSkills: message.usedSkills?.map((skill) => ({ ...skill })),
     toolRounds: message.toolRounds?.map((round) => ({

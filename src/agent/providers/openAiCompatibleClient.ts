@@ -148,11 +148,14 @@ export class OpenAICompatibleClient implements ProviderClient {
     let retryAfterMs: number | undefined;
     let providerRequestId: string | undefined;
     const startedAt = Date.now();
+    const monotonicStart = performance.now();
+    let firstChunkMs: number | undefined;
+    let firstContentMs: number | undefined;
     const partialContentParts: string[] = [];
     const partialReasoningParts: string[] = [];
     const language = request.language;
     const trace = request.trace;
-    const diagnostics = () => ({ phase, status, providerRequestId, elapsedMs: Date.now() - startedAt,
+    const diagnostics = () => ({ phase, status, providerRequestId, elapsedMs: performance.now() - monotonicStart, firstChunkMs, firstContentMs,
       receivedBytes: responseBytes, eventCount, lastActivityAt: new Date(lastActivityAt).toISOString(),
       semanticComplete, httpComplete, attempt, reconnectCount: attempt });
     const abortByExternalSignal = () => { abortedByExternalSignal = true; controller.abort(); };
@@ -171,6 +174,10 @@ export class OpenAICompatibleClient implements ProviderClient {
     const callbacks: AgentRunCallbacks = {
       ...request.callbacks,
       onDelta: (event) => {
+        if (event.delta.length > 0 && firstContentMs === undefined) {
+          firstContentMs = performance.now() - monotonicStart;
+          trace?.record({ type: 'provider_first_content', requestId: request.requestId, attempt, firstContentMs });
+        }
         hadPartialOutput = true;
         (event.type === 'reasoning' ? partialReasoningParts : partialContentParts).push(event.delta);
         request.callbacks?.onDelta?.(event);
@@ -225,6 +232,7 @@ export class OpenAICompatibleClient implements ProviderClient {
           try {
             const chunk = await reader!.read();
             if (chunk.done) { httpComplete = true; target.close(); return; }
+            if (firstChunkMs === undefined) firstChunkMs = performance.now() - monotonicStart;
             hadStreamActivity = true; lastActivityAt = Date.now(); responseBytes += chunk.value.byteLength;
             if (responseBytes > 32 * 1024 * 1024) throw new Error('Streaming resource limit (32 MiB) / 流响应资源上限（32 MiB）');
             request.callbacks?.onActivity?.('network'); resetStreamIdleTimeout(); target.enqueue(chunk.value);

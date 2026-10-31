@@ -331,8 +331,8 @@ export const usageRenderFragment: WebviewFragment = {
             : formatUsageAvailabilityValue(selected.total, 'usageMetricCostUnavailableValue'), ''],
           ['usageEffectiveRuntime', latestRunState ? formatUsageRuntime(latestRunState.usedMs)
             : t(hasSessionUsage ? 'usageMetricUnavailableValue' : 'usagePendingValue'), ''],
-          ['usageProviderAttemptCount', hasSessionUsage ? formatMetricInteger(selected.total.providerAttemptCount) : t('usagePendingValue'), ''],
-          ['usageUsageResponseCount', hasSessionUsage ? formatMetricInteger(selected.total.usageResponseCount) : t('usagePendingValue'), ''],
+          ['usageProviderAttemptCount', hasSessionUsage ? (selected.total.attemptStatsIncomplete && !selected.total.providerAttemptCount ? t('usageMetricUnavailableValue') : (selected.total.attemptStatsIncomplete ? '≥ ' : '') + formatMetricInteger(selected.total.providerAttemptCount)) : t('usagePendingValue'), ''],
+          ['usageUsageResponseCount', hasSessionUsage ? (selected.total.attemptStatsIncomplete && !selected.total.usageResponseCount ? t('usageMetricUnavailableValue') : (selected.total.attemptStatsIncomplete ? '≥ ' : '') + formatMetricInteger(selected.total.usageResponseCount)) : t('usagePendingValue'), ''],
           ['usageCumulativeTokens', hasSessionUsage ? formatMetricInteger(selected.total.totalTokens) : t('usagePendingValue'), 'is-wide']
         ];
         if (metrics.supportsBilling) {
@@ -345,6 +345,7 @@ export const usageRenderFragment: WebviewFragment = {
         });
         section.append(grid);
         var notes = usageNode('div', 'usage-session-notes');
+        notes.append(usageNode('p', '', t('usageTimingScopeNote')));
         if (selected.total.unpricedRequestCount > 0) {
           notes.append(usageNode('p', 'usage-warning', t(selected.total.pricedRequestCount > 0
             ? 'usagePartialPricing' : 'usageAllUnpriced', { count: selected.total.unpricedRequestCount })));

@@ -170,6 +170,7 @@ export function addUsageEventToTurnStats(
     providerAttemptCount: (base.providerAttemptCount ?? base.requestCount)
       + (event.providerAttemptCount ?? requestCount),
     usageResponseCount: (base.usageResponseCount ?? base.requestCount) + requestCount,
+    attemptStatsIncomplete: Boolean(base.attemptStatsIncomplete || event.ledgerRecorded),
     cost: getSingleCurrencyCost(costByCurrency),
     currency: getSingleCurrency(costByCurrency) ?? normalizeCurrency(event.currency || base.currency),
     sourceId: event.sourceId ?? base.sourceId,
@@ -217,6 +218,7 @@ export function addUsageEventToSessionStats(
       + (event.ledgerRecorded ? 0 : event.providerAttemptCount ?? requestCount),
     usageResponseCount: (base.usageResponseCount ?? base.requestCount)
       + (event.ledgerRecorded ? 0 : requestCount),
+    attemptStatsIncomplete: base.attemptStatsIncomplete,
     sessionCost: getSingleCurrencyCost(costByCurrency),
     currency: getSingleCurrency(costByCurrency) ?? normalizeCurrency(event.currency || base.currency),
     pricingStatus: getAggregatePricingStatus(pricedRequestCount, estimatedRequestCount, unpricedRequestCount),
@@ -248,13 +250,41 @@ export function applyUsageLedgerSummaryToSessionStats(
   const base = normalizeSessionUsageStatsValue(current);
   if (!base && summary.providerAttemptCount === 0) return undefined;
   const stats = base ?? createEmptySessionUsageStats();
+  const bySource = { ...stats.bySource };
+  for (const source of USAGE_SOURCES) {
+    const counts = summary.bySourceCounts?.[source];
+    if (counts) bySource[source] = { promptTokens: 0, completionTokens: 0, totalTokens: 0, cacheHitTokens: 0,
+      cacheMissTokens: 0, cost: 0, requestCount: 0, ...bySource[source], ...counts,
+      attemptStatsIncomplete: summary.incomplete || summary.legacyAggregate };
+  }
   return {
     ...stats,
+    bySource,
     providerAttemptCount: summary.providerAttemptCount,
     usageResponseCount: summary.usageResponseCount,
     attemptStatsIncomplete: summary.incomplete || summary.legacyAggregate,
     cacheDiagnostics: summary.cacheDiagnostics
   };
+}
+
+/** Pending ledger batches are deltas, not a new session total. Used between
+ * durable ledger flushes so a new attempt cannot briefly reset 274 to 1. */
+export function applyUsageLedgerDeltaToSessionStats(current: SessionUsageStats | undefined,
+  previous: UsageLedgerSummary, next: UsageLedgerSummary): SessionUsageStats | undefined {
+  const counts = { ...next.bySourceCounts };
+  for (const source of USAGE_SOURCES) {
+    if (!counts[source]) continue;
+    counts[source] = {
+      providerAttemptCount: (current?.bySource?.[source]?.providerAttemptCount ?? 0)
+        + counts[source]!.providerAttemptCount - (previous.bySourceCounts?.[source]?.providerAttemptCount ?? 0),
+      usageResponseCount: (current?.bySource?.[source]?.usageResponseCount ?? 0)
+        + counts[source]!.usageResponseCount - (previous.bySourceCounts?.[source]?.usageResponseCount ?? 0)
+    };
+  }
+  return applyUsageLedgerSummaryToSessionStats(current, { ...next, bySourceCounts: counts,
+    providerAttemptCount: (current?.providerAttemptCount ?? 0) + next.providerAttemptCount - previous.providerAttemptCount,
+    usageResponseCount: (current?.usageResponseCount ?? 0) + next.usageResponseCount - previous.usageResponseCount,
+    incomplete: Boolean(current?.attemptStatsIncomplete || next.incomplete) });
 }
 
 /** Deterministic reconstruction for v2 ledger-backed sessions. */
@@ -321,6 +351,7 @@ export function addTurnUsageToSessionStats(
       + (turn.providerAttemptCount ?? requestCount),
     usageResponseCount: (base.usageResponseCount ?? base.requestCount)
       + (turn.usageResponseCount ?? requestCount),
+    attemptStatsIncomplete: Boolean(base.attemptStatsIncomplete || turn.attemptStatsIncomplete),
     sessionCost: getSingleCurrencyCost(costByCurrency),
     currency: getSingleCurrency(costByCurrency) ?? normalizeCurrency(turn.currency || base.currency),
     pricingStatus: getAggregatePricingStatus(pricedRequestCount, estimatedRequestCount, unpricedRequestCount),
@@ -498,6 +529,7 @@ export function normalizeTurnUsageStatsValue(value: unknown): TurnUsageStats | u
     requestCount,
     providerAttemptCount: readOptionalNonNegativeInteger(value.providerAttemptCount) ?? 0,
     usageResponseCount: readOptionalNonNegativeInteger(value.usageResponseCount) ?? 0,
+    attemptStatsIncomplete: value.attemptStatsIncomplete === true || value.providerAttemptCount === undefined || value.usageResponseCount === undefined,
     cost,
     currency: normalizeCurrency(value.currency),
     sourceId: normalizeOptionalString(value.sourceId),
@@ -714,7 +746,10 @@ function addUsageSourceStats(
     [source]: {
       ...sumUsage(previous, usage),
       requestCount: previous.requestCount + normalizedRequestCount,
-      usageResponseCount: (previous.usageResponseCount ?? previous.requestCount) + normalizedRequestCount,
+      providerAttemptCount: previous.providerAttemptCount,
+      usageResponseCount: previous.providerAttemptCount === undefined
+        ? (previous.usageResponseCount ?? previous.requestCount) + normalizedRequestCount : previous.usageResponseCount,
+      attemptStatsIncomplete: previous.attemptStatsIncomplete ?? true,
       cost: getSingleCurrencyCost(costByCurrency),
       pricedRequestCount: (previous.pricedRequestCount ?? 0)
         + (pricingStatus === 'priced' ? normalizedRequestCount : 0),
@@ -759,6 +794,10 @@ function mergeUsageSourceStats(
       [source]: {
         ...sumUsage(previous, stats),
         requestCount: previous.requestCount + stats.requestCount,
+        providerAttemptCount: previous.providerAttemptCount === undefined && stats.providerAttemptCount === undefined
+          ? undefined : (previous.providerAttemptCount ?? 0) + (stats.providerAttemptCount ?? 0),
+        attemptStatsIncomplete: previous.attemptStatsIncomplete || stats.attemptStatsIncomplete
+          || (previous.requestCount > 0 && previous.providerAttemptCount === undefined) || stats.providerAttemptCount === undefined,
         usageResponseCount: (previous.usageResponseCount ?? previous.requestCount)
           + (stats.usageResponseCount ?? stats.requestCount),
         cost: getSingleCurrencyCost(costByCurrency),
@@ -799,6 +838,8 @@ function normalizeUsageSourceStatsMap(
     result[source] = {
       ...usage,
       requestCount,
+      providerAttemptCount: readOptionalNonNegativeInteger(raw.providerAttemptCount),
+      attemptStatsIncomplete: raw.attemptStatsIncomplete === true || raw.providerAttemptCount === undefined || raw.usageResponseCount === undefined,
       usageResponseCount: readOptionalNonNegativeInteger(raw.usageResponseCount) ?? requestCount,
       cost: costByCurrency ? getSingleCurrencyCost(costByCurrency) : legacyCost,
       pricedRequestCount,

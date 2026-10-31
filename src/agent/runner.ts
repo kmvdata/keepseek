@@ -1,5 +1,5 @@
 import { applyProviderRequestBudget, createRequestBudgetUsage, resolveProviderRequestBudget } from './requestBudget';
-import { ModelSourceStore } from '../accounts/accountStore';
+import { ModelSourceStore, normalizeModelSourceProvider } from '../accounts/accountStore';
 import { createModelCatalog, findModelBySelection } from '../accounts/modelCatalog';
 import {
   ExecutionClock,
@@ -113,7 +113,9 @@ import type {
 } from './subagents/types';
 import { searchHistoryArchive } from './historyArchive';
 import { allocateSharedMessageTokens, createAcceptedRootSubagentHandoffEstimate, getSubagentHandoffKind } from './subagentUsageStats';
-import { buildProviderRequestProjection, getProviderRequestLane } from './providerRequestProjection';
+import { buildProviderRequestProjection, buildProviderPayloadProjection, getProviderRequestLane, normalizeProviderMessages } from './providerRequestProjection';
+import { snapshotCheckpoint } from '../sessions/persistenceSnapshot';
+import { recordLocalPerformance } from './logging/performanceTrace';
 import {
   calibrateContextUsageEstimate,
   createContextUsageEstimate,
@@ -225,6 +227,7 @@ import {
   createTaskPlanProgressHash,
   createWorkFingerprint,
   observeNoProgress,
+  visibleProgressFingerprint,
   shouldRolloverForSoftContextPressure,
   type ContextEpochRolloverReason
 } from './contextEpoch';
@@ -436,7 +439,14 @@ export class AgentLoop {
         cp.modelRequests = activeRunBudget.state.modelRequests;
       }
       cp.updatedAt = new Date().toISOString();
-      try { await callbacks.onCheckpoint?.(checkpointCopy(cp)); }
+      try {
+        const start = performance.now();
+        const snapshot = snapshotCheckpoint(cp);
+        const copied = performance.now();
+        await callbacks.onCheckpoint?.(snapshot);
+        recordLocalPerformance({ type: 'checkpoint_save', sessionId: request.sessionId, taskId: cp.taskId,
+          snapshotMs: copied - start, durationMs: performance.now() - start });
+      }
       catch (error) { cp.status = 'blocked'; cp.stopReason = String(error).includes('resource limit') ? 'resource_limit' : 'storage_failure'; cp.error = String(error); controller.abort(error); throw error; }
     };
     resumeClock();
@@ -522,7 +532,7 @@ export class AgentLoop {
     const runDetailsBuilderRef: { current?: RunDetailsBuilder } = {};
     const trace = this.traceLogService?.createRunTrace((event, timestamp) => {
       runDetailsBuilderRef.current?.record(event, timestamp);
-    }) ?? createNoopInteractionTrace((event, timestamp) => {
+    }, { sessionId: request.sessionId, taskId: checkpoint.taskId }) ?? createNoopInteractionTrace((event, timestamp) => {
       runDetailsBuilderRef.current?.record(event, timestamp);
     });
     checkpoint.attemptIds.push(trace.runId);
@@ -781,7 +791,13 @@ export class AgentLoop {
       policy: runAuthorizationPolicy
     });
 
-    const emitStatus = this.createStatusEmitter(callbacks);
+    let phaseStarted = performance.now(), activePhase = 'initializing';
+    const emitStatus = this.createStatusEmitter({ ...callbacks, onStatus: status => {
+      trace.record({ type: 'run_phase', phase: activePhase, status: 'end', durationMs: performance.now() - phaseStarted });
+      activePhase = status.phase; phaseStarted = performance.now();
+      trace.record({ type: 'run_phase', phase: activePhase, status: 'start' });
+      callbacks.onStatus?.(status);
+    } });
     const draftEdits: DraftEdit[] = structuredClone(restored?.draftEdits ?? []);
     const draftRuns: DraftRunProposal[] = structuredClone(restored?.draftRuns ?? []);
     const reasoningParts: string[] = [...(restored?.reasoningParts ?? [])];
@@ -826,6 +842,10 @@ export class AgentLoop {
     }
 
     const runtimeConfig = await this.getRuntimeConfig(request);
+    // Resolve the source once for every downstream admission/usage call. The
+    // runtime credential snapshot is deliberately excluded from checkpoints.
+    request = { ...request, sourceConfig: { sourceId: runtimeConfig.sourceId, provider: runtimeConfig.provider,
+      baseUrl: runtimeConfig.baseUrl, apiKey: runtimeConfig.apiKey, supportsBilling: runtimeConfig.supportsBilling } };
     if (!restored) checkpoint.request.executionLimits = {
       ...request.executionLimits, maxToolIterations: runtimeConfig.maxToolIterations,
       maxToolCalls: runtimeConfig.maxToolCalls, maxRepairIterations: repairLoop.getState().maxIterations,
@@ -856,14 +876,14 @@ export class AgentLoop {
     request = { ...request, taskRunBudget: logicalBudget };
     onBudgetReady?.(logicalBudget);
     taskPlan.beginExecution();
-    const buildCurrentProviderProjection = () => buildProviderRequestProjection({
+    const buildCurrentProviderProjection = (boundaryIds?: Set<string>): ReturnType<typeof buildProviderRequestProjection> => buildProviderRequestProjection({
       model: request.model,
       agentSettings: request.settings,
       contextFiles: request.contextFiles,
       currentRunContext: request.currentRunContext,
       contextInstructions: request.contextInstructions,
-      history: request.history,
-      contextCompression: request.contextCompression,
+      history: boundaryIds ? request.history.filter(message => boundaryIds.has(message.id)) : request.history,
+      contextCompression: boundaryIds ? { ...request.contextCompression, version: 1, summaries: [], protectedMessageIds: projection.protectedMessageIds } : request.contextCompression,
       language: request.language,
       prompt: request.prompt,
       slimToolNames: request.slimToolNames,
@@ -1110,7 +1130,7 @@ export class AgentLoop {
             })
           : createContextUsageEstimateFromMessages({
             model: request.model,
-            messages,
+            messages: normalizeProviderMessages(messages, runtimeConfig.provider),
             tools: toolsForNextRequest,
             outputReserveTokens,
             safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS,
@@ -1162,6 +1182,13 @@ export class AgentLoop {
     };
     await saveStep();
     const rolloverEpoch = async (reason: ContextEpochRolloverReason): Promise<void> => {
+      const compressionStarted = performance.now();
+      const summaryUsageBefore = { ...upstreamUsageTotals };
+      const summaryRecordStart = upstreamUsageTotals.records.length;
+      const contextFingerprint = hashText(stableStringify(providerRunState ?? normalizeProviderMessages(messages, runtimeConfig.provider)));
+      if (epoch.compression?.fingerprint === contextFingerprint && epoch.compression.netReleasedTokens <= 0) {
+        throw new AgentInterruptedError('waiting_for_user', 'Context capacity blocked: the same protected context cannot be compacted again / 相同受保护上下文无法通过重复摘要释放空间');
+      }
       const preservedContinuation = reason === 'length_continuation' ? checkpoint.state?.continuation : undefined;
       let estimated: number;
       let summaryKind: 'model' | 'host_fallback';
@@ -1186,10 +1213,17 @@ export class AgentLoop {
         epoch.pendingRollover = { reason };
         await saveStep!();
         estimated = this.estimateCurrentProviderInputTokens(request, messages, tools, providerRunState);
+        if (!epoch.baseHistoryEvidenceRef) {
+          let archive = await evidenceStore.ensureIntent({ sessionId: evidenceSessionId, taskId: checkpoint.taskId,
+            toolCallId: '__base_history', toolName: 'keepseek_context_history', argumentsHash: hashText(stableStringify(request.history)), effectKind: 'read' });
+          archive = await evidenceStore.complete(archive, stableStringify({ history: request.history, summaries: request.contextCompression?.summaries }), { contentType: 'json' });
+          epoch.baseHistoryEvidenceRef = archive.evidenceRef;
+          this.upsertEpochEvidenceRef(epoch, archive);
+        }
         let semanticSummary: string | undefined;
         const rolloverFailures: string[] = [];
         try {
-          semanticSummary = await this.createEpochSemanticSummary({
+          if (epoch.turnInEpoch > 0 || projection.compressibleMessageIds.length > 0) semanticSummary = await this.createEpochSemanticSummary({
             request, runtimeConfig, messages, tools, providerRunState, callbacks: runCallbacks,
             trace, usageTotals: upstreamUsageTotals, runDeadlineAt
           });
@@ -1208,6 +1242,7 @@ export class AgentLoop {
         });
         const epochCheckpointInput = {
           protocolVersion: request.requestProtocolVersion ?? 1,
+          priorWork: request.contextCompression?.protectionState?.settledFacts,
           originalTask: request.prompt,
           taskPlan: taskPlan.getPlan(),
           draftEdits,
@@ -1309,6 +1344,11 @@ export class AgentLoop {
       epoch.status = 'active';
       epoch.pendingRollover = undefined;
       epoch.seed = seed;
+      // This is the explicit cache boundary. The full base lives in immutable
+      // evidence; subsequent epochs cannot reload it from the original request.
+      providerProjection = buildCurrentProviderProjection(new Set([
+        ...projection.protectedMessageIds, ...projection.recentMessageIds
+      ]));
       messages = structuredClone(providerProjection.messages);
       providerRunState = createInitialProviderRunState();
       const retainedBaseTokensEstimate = this.estimateCurrentProviderInputTokens(request, messages, tools, providerRunState);
@@ -1338,6 +1378,15 @@ export class AgentLoop {
       const estimatedCacheResetTokens = reusablePrefixTokensBeforeRollover;
       const rolloverRecord = epoch.rollovers.at(-1);
       if (rolloverRecord) rolloverRecord.afterEstimatedPromptTokens = afterEstimatedPromptTokens;
+      const netReleasedTokens = estimated - afterEstimatedPromptTokens;
+      epoch.compression = { fingerprint: hashText(stableStringify(providerRunState ?? normalizeProviderMessages(messages, runtimeConfig.provider))),
+        beforeTokens: estimated, afterTokens: afterEstimatedPromptTokens, netReleasedTokens,
+        durationMs: performance.now() - compressionStarted,
+        summaryInputTokens: upstreamUsageTotals.promptTokens - summaryUsageBefore.promptTokens,
+        summaryOutputTokens: upstreamUsageTotals.completionTokens - summaryUsageBefore.completionTokens,
+        costKnown: summaryKind === 'host_fallback' && upstreamUsageTotals.requestCount === summaryUsageBefore.requestCount
+          ? false : upstreamUsageTotals.records.slice(summaryRecordStart).length > 0
+            && upstreamUsageTotals.records.slice(summaryRecordStart).every(event => event.pricingStatus === 'priced') };
       completedReplay = undefined;
       committedMessages = structuredClone(messages);
       committedProvider = structuredClone(providerRunState);
@@ -1357,7 +1406,9 @@ export class AgentLoop {
         reusablePrefixTokensEstimate: reusablePrefixTokensBeforeRollover,
         retainedBaseTokensEstimate,
         estimatedCacheResetTokens, necessity: rolloverNecessity,
-        summaryKind, seedHash: hashText(seed), providerProtocol: runDetailsBuilderRef.current?.build().protocol
+        summaryKind, seedHash: hashText(seed), providerProtocol: runDetailsBuilderRef.current?.build().protocol,
+        compression: epoch.compression, protectedMessageCount: projection.protectedMessageIds.length,
+        compressibleMessageCount: projection.compressibleMessageIds.length
       });
       runDetailsBuilderRef.current?.recordEpochRollover?.({
         index: epoch.index, reason, estimatedPromptTokens: estimated,
@@ -1371,6 +1422,11 @@ export class AgentLoop {
         summaryKind
       });
       await saveStep!();
+      const afterAdmission = admission.decide({ estimatedInputTokens: afterEstimatedPromptTokens,
+        configuredMaxOutputTokens: runtimeConfig.maxTokens, phase: 'tool', remainingBatchResults: 1 });
+      if (reason !== 'length_continuation' && afterAdmission.shouldRollover && netReleasedTokens <= Math.max(afterAdmission.minimumBatchEnvelopeTokens, afterAdmission.safetyTokens)) {
+        throw new AgentInterruptedError('waiting_for_user', 'Context capacity blocked after compaction: protected/recent context and recovery state leave no useful page space / 压缩净收益不足，受保护、近期上下文及恢复状态占满容量');
+      }
     };
 
     if (epoch.status !== 'active') {
@@ -1713,6 +1769,7 @@ export class AgentLoop {
       let strategyWarningAfterBatch = false;
       let noProgressStopAfterBatch = false;
       const performToolCall = async (toolCall: DeepSeekToolCall): Promise<string> => {
+        const toolStarted = performance.now();
         this.throwIfAborted(request.signal, request.language);
         const exposureError = getToolExposureError(toolCall.function.name, exposedToolNames);
         if (exposureError) {
@@ -2019,6 +2076,7 @@ export class AgentLoop {
         }
         trace.record({
           type: 'tool_result_raw',
+          durationMs: performance.now() - toolStarted, epochIndex: epoch.index,
           toolCallId: toolCall.id,
           toolName: toolCall.function.name,
           content: summarizeText(rawToolResult)
@@ -2056,6 +2114,9 @@ export class AgentLoop {
           preparedEnvelope.completeInline,
           preparedEnvelope.source
         );
+        const visibleFingerprint = visibleProgressFingerprint(toolCall.function.name, preparedEnvelope.content);
+        trace.record({ type: 'tool_delivery', toolName: toolCall.function.name, epochIndex: epoch.index,
+          bodyDelivered: Boolean(visibleFingerprint), envelopeBytes: visibleFingerprint ? Buffer.byteLength(preparedEnvelope.content) : 0 });
         if (!preparedEnvelope.completeInline && providerProjection.requestProtocolVersion < 8) {
           rolloverAfterBatchReason = 'protocol_migration';
         }
@@ -2091,7 +2152,7 @@ export class AgentLoop {
         });
         epoch.idempotency.push(fingerprint);
         if (epoch.idempotency.length > 2_000) epoch.idempotency.splice(0, epoch.idempotency.length - 2_000);
-        batchWorkFingerprints.push(fingerprint.fingerprint);
+        batchWorkFingerprints.push(visibleProgressFingerprint(toolCall.function.name, shapedToolResult.content) ?? 'no_body_delivery');
         if (shapedToolResult.content !== rawToolResult) {
           runDetailsBuilderRef.current?.recordToolResult(toolCall.id, toolCall.function.name, shapedToolResult.content, { deliveryOnly: true });
         }
@@ -2305,9 +2366,9 @@ export class AgentLoop {
       // same response. Observe one canonical fingerprint per completed batch,
       // so duplicate calls inside that batch cannot manufacture a warning.
       if (batchWorkFingerprints.length) {
-        const batchFingerprint = hashText(stableStringify(batchWorkFingerprints));
-        const progress = observeNoProgress(epoch.noProgress, batchFingerprint);
+        const progress = observeNoProgress(epoch.noProgress, batchWorkFingerprints);
         epoch.noProgress = progress.state;
+        trace.record({ type: 'progress_observation', epochIndex: epoch.index, status: progress.action });
         strategyWarningAfterBatch = progress.action === 'warn';
         noProgressStopAfterBatch = progress.action === 'stop';
       }
@@ -2413,6 +2474,7 @@ export class AgentLoop {
       }
       trace.record({
         type: 'run_error',
+        stopReason: checkpoint.stopReason,
         error: formatUnknownError(error)
       });
       callbacks.onRunDetails?.(runDetailsBuilderRef.current?.finish({
@@ -2424,6 +2486,7 @@ export class AgentLoop {
       }) ?? createFallbackRunDetails(trace.runId, request, failedPlan, traceLog?.uri, error));
       throw error;
     } finally {
+      trace.record({ type: 'run_phase', phase: activePhase, status: 'end', durationMs: performance.now() - phaseStarted });
       await trace.flush();
     }
   }
@@ -2449,18 +2512,20 @@ export class AgentLoop {
     const trace = options.trace ?? createNoopInteractionTrace();
     this.throwIfCostLimitReached(request);
     const thinkingEnabled = request.settings.thinkingEnabled;
+    const context = buildProviderPayloadProjection({ modelId: request.model.id, provider: runtimeConfig.provider,
+      maxOutputTokens: runtimeConfig.maxTokens, messages, tools, native: options.providerRunState });
     let body: DeepSeekChatRequestBody | OpenAiResponsesRequestBody | AnthropicMessagesRequestBody;
-    if (runtimeConfig.provider === 'openai-responses') {
+    if ('input' in context) {
       const responsesState = options.providerRunState;
       if (responsesState?.protocol !== 'openai-responses') {
         throw new Error('OpenAI Responses request projection is unavailable.');
       }
       body = {
         model: request.model.id,
-        input: responsesState.input,
+        input: context.input,
         stream: true,
         store: false,
-        tools: responsesState.tools.length ? responsesState.tools : undefined,
+        tools: context.tools,
         tool_choice: responsesState.tools.length ? options.toolChoice ?? 'auto' : undefined,
         max_output_tokens: runtimeConfig.maxTokens > 0 ? runtimeConfig.maxTokens : undefined,
         // KeepSeek's `max` is a DeepSeek-only setting. The Responses protocol
@@ -2474,16 +2539,16 @@ export class AgentLoop {
         temperature: runtimeConfig.temperature,
         top_p: runtimeConfig.topP
       };
-    } else if (runtimeConfig.provider === 'anthropic-compatible') {
+    } else if ('system' in context) {
       const anthropicState = options.providerRunState;
       if (anthropicState?.protocol !== 'anthropic-messages') {
         throw new Error('Anthropic Messages request projection is unavailable.');
       }
       body = {
         model: request.model.id,
-        system: anthropicState.system,
-        messages: anthropicState.messages,
-        tools: anthropicState.tools.length ? anthropicState.tools : undefined,
+        system: context.system,
+        messages: context.messages,
+        tools: context.tools,
         tool_choice: anthropicState.tools.length
           ? { type: options.toolChoice ?? 'auto' }
           : undefined,
@@ -2502,9 +2567,7 @@ export class AgentLoop {
         // Keep DeepSeek's exact message objects for prefix-cache stability. Strict
         // OpenAI-compatible endpoints reject DeepSeek's reasoning_content field,
         // including null values on assistant tool-call turns.
-        messages: runtimeConfig.provider === 'deepseek'
-          ? messages
-          : messages.map(withoutDeepSeekReasoningContent),
+        messages: context.messages,
         stream: true,
         enable_thinking: runtimeConfig.provider === 'qwencloud'
           ? thinkingEnabled
@@ -2598,12 +2661,7 @@ export class AgentLoop {
         source: usageSource,
         taskId: request.subagentContext?.previousConversationId ?? observationTaskId
       });
-    const estimatedPromptTokens = this.estimateCurrentProviderInputTokens(
-      request,
-      messages,
-      tools,
-      options.providerRunState
-    );
+    const estimatedPromptTokens = budget.estimatedInputTokens;
     const createAttemptObservation = (attemptIndex: number): ProviderCacheObservation => createProviderCacheObservation({
       requestId: upstreamRequestId,
       attemptIndex,
@@ -5101,34 +5159,17 @@ export class AgentLoop {
     additionalResponsesItems: OpenAiResponsesItem[] = [],
     additionalAnthropicToolResults: AnthropicUserContentBlock[] = []
   ): number {
-    if (providerRunState?.protocol === 'openai-responses') {
-      return createContextUsageEstimateFromResponses({
-        model: request.model,
-        input: [...providerRunState.input, ...additionalResponsesItems],
-        tools: providerRunState.tools,
-        outputReserveTokens: 0,
-        safetyReserveTokens: 0
-      }).usedTokensEstimate;
-    }
-    if (providerRunState?.protocol === 'anthropic-messages') {
-      return createContextUsageEstimateFromAnthropic({
-        model: request.model,
-        system: providerRunState.system,
-        messages: additionalAnthropicToolResults.length
-          ? [...providerRunState.messages, { role: 'user', content: additionalAnthropicToolResults }]
-          : providerRunState.messages,
-        tools: providerRunState.tools,
-        outputReserveTokens: 0,
-        safetyReserveTokens: 0
-      }).usedTokensEstimate;
-    }
-    return createContextUsageEstimateFromMessages({
-      model: request.model,
-      messages,
-      tools,
-      outputReserveTokens: 0,
-      safetyReserveTokens: 0
-    }).usedTokensEstimate;
+    const started = performance.now();
+    const provider = request.sourceConfig?.provider ?? normalizeModelSourceProvider(request.model.provider) ?? 'openai-compatible';
+    const body = buildProviderPayloadProjection({ modelId: request.model.id, provider, messages, tools,
+      maxOutputTokens: getAgentRuntimeProfile(request.model, request.settings).maxTokens, native: providerRunState,
+      additionalResponsesItems, additionalAnthropicResults: additionalAnthropicToolResults });
+    const estimate = resolveProviderRequestBudget({ model: request.model, provider, body }).estimatedInputTokens;
+    recordLocalPerformance({ type: 'projection_estimate', sessionId: request.sessionId,
+      taskId: request.checkpoint?.taskId, epochIndex: request.checkpoint?.state?.epoch?.index,
+      durationMs: performance.now() - started, estimatedInputTokens: estimate,
+      phase: additionalResponsesItems.length || additionalAnthropicToolResults.length ? 'candidate' : 'current' });
+    return estimate;
   }
 
   private async getPendingEvidenceDeliveryRecords(
@@ -5338,12 +5379,6 @@ export function getToolExposureError(toolName: string, exposedToolNames: Readonl
 
 /** Stable main-agent entry point retained for provider and test call sites. */
 export class AgentRunner extends AgentLoop {}
-
-function withoutDeepSeekReasoningContent(message: DeepSeekMessage): DeepSeekMessage {
-  const compatibleMessage = { ...message };
-  delete compatibleMessage.reasoning_content;
-  return compatibleMessage;
-}
 
 function formatReviewerDenial(reason: string, saferAlternative: string | undefined, language: KeepseekLanguage): string {
   return [

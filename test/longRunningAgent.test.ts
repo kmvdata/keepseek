@@ -52,7 +52,7 @@ describe('long-running Agent execution and safe recovery', () => {
     assert.deepEqual(restored.exhausted, budget.exhausted);
   });
 
-  it('runs beyond 10, 30, 60 minutes; excludes pauses and host suspension; parallel time counts once', () => {
+  it('runs beyond 10, 30, 60 minutes; excludes explicit pauses but counts uncertain host gaps; parallel time counts once', () => {
     let now = 0;
     const clock = new ExecutionClock(0, 0, () => now);
     const release = clock.enter();
@@ -64,10 +64,10 @@ describe('long-running Agent execution and safe recovery', () => {
     now += 3_600_000;
     assert.equal(clock.usedMs, 7_200_000);
     const next = clock.enter();
-    now += 3_600_000; // OS sleep / host unavailable
-    assert.equal(clock.usedMs, 7_200_000);
+    now += 3_600_000; // No lifecycle evidence: cannot distinguish blocking from suspension.
+    assert.equal(clock.usedMs, 10_800_000);
     now -= 9_000_000; // clock regression cannot charge time
-    assert.equal(clock.usedMs, 7_200_000);
+    assert.equal(clock.usedMs, 10_800_000);
     next(); clock.dispose();
     const bounded = new ExecutionClock(1000, 700, () => now);
     const finish = bounded.enter(); now += 300;

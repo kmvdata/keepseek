@@ -146,6 +146,12 @@ V1–V8 的已存在热会话保持原有 system/schema 字节；只有缓存自
 
 ## 6. 大工具结果与 Context Epoch
 
+当前统一口径由 `buildProviderRequestProjection()` 及其最终上下文投影 `buildProviderPayloadProjection()` 提供。源历史在 fallback 容量判断前已排除不发送的 reasoning 和不匹配 lane 的 replay；运行时请求、候选工具结果和 usage 使用同一规范化规则。候选结果与批次最小 envelope 的预留是显式差量。用户配置输出上限、已学习窗口及安全余量不因性能优化而下降。
+
+已结束提案不会永久保护整段工具历史。宿主事实随受控摘要保存，完整审计/evidence 留存；pending、未知副作用和当前约束仍保护。摘要的净释放量包含新 summary/seed/元数据，低收益采用现有预算 safety/minimum-envelope 余量判定，不能超限发送，也不对相同失败指纹反复摘要。详情与实际前后对比见 [长任务整改](long-task-performance-rectification.md)。
+
+“本地估算可缓存比例”取代“理论最高原始命中率”：它不是供应商上界，真实命中率不截断。高命中率不能证明进展；计数、正文交付和阶段跨度须一起看。
+
 KeepSeek 不再用固定的“累计工具结果预算”终止长任务。每次结果准入综合考虑：
 
 - 当前三协议真实 projection；

@@ -8,6 +8,8 @@ import type { SubagentModelSetting, SubagentProgressState } from '../agent/subag
 import { AgentRequestCoordinator, type BackgroundContextCompressionRefreshUpdate } from '../agent/agentRequestCoordinator';
 import { HistoryCompressor, type HistoryCompressionRefreshResult } from '../agent/historyCompressor';
 import { createProtectedContextMeta } from '../agent/historyProjection';
+import { snapshotCheckpoint } from '../sessions/persistenceSnapshot';
+import { deriveHistoryProtection } from '../agent/historyProtection';
 import {
   archiveContextSourcesBeyondBudget,
   capOversizedFirstUserProviderContent,
@@ -137,12 +139,14 @@ import {
   addUsageEventToTurnStats,
   addTurnUsageToSessionStats,
   applyUsageLedgerSummaryToSessionStats,
+  applyUsageLedgerDeltaToSessionStats,
   calculateCacheHitRate,
   getCacheMissPossibleReasons,
   rebuildSessionUsageStatsFromLedger
 } from '../agent/usageStats';
 import {
   appendUsageLedgerRecord,
+  mergePendingUsageLedger,
   normalizeUsageLedgerValue,
   summarizeUsageLedger
 } from '../agent/usageLedger';
@@ -1689,12 +1693,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   ): void {
     const legacyAggregate = !session.usageLedgerRef && !session.usageLedger
       && (session.usageStats?.requestCount ?? 0) > 0;
+    const previousSummary = summarizeUsageLedger(session.usageLedger);
     session.usageLedger = appendUsageLedgerRecord(session.usageLedger, record, legacyAggregate);
     if (record.cacheObservation && record.kind === 'usage_response') {
       this.rememberCacheObservation(session.id, record.cacheObservation);
     }
-    session.usageStats = applyUsageLedgerSummaryToSessionStats(
+    session.usageStats = applyUsageLedgerDeltaToSessionStats(
       session.usageStats,
+      previousSummary,
       summarizeUsageLedger(session.usageLedger)
     );
     session.updatedAt = new Date().toISOString();
@@ -1723,16 +1729,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           || rebuilt.ledger.incomplete),
         ...(rebuilt.damagedBucketCount ? { damagedBucketCount: rebuilt.damagedBucketCount } : {})
       };
+      const current = normalizeUsageLedgerValue(session.usageLedger);
+      const visibleLedger = mergePendingUsageLedger(rebuilt.ledger, current);
       session.usageStats = session.usageLedgerRef.legacyAggregate
         ? applyUsageLedgerSummaryToSessionStats(session.usageStats, {
-            ...rebuilt.summary,
+            ...summarizeUsageLedger(visibleLedger),
             legacyAggregate: true,
             incomplete: true
           })
-        : rebuildSessionUsageStatsFromLedger(rebuilt.ledger.records);
+        : rebuildSessionUsageStatsFromLedger(visibleLedger.records);
       if (snapshot?.records.length) {
         const flushed = new Set(snapshot.records.map((record) => `${record.requestId}\u0000${record.attemptIndex}`));
-        const current = normalizeUsageLedgerValue(session.usageLedger);
         const remaining = current?.records.filter((record) => !flushed.has(`${record.requestId}\u0000${record.attemptIndex}`)) ?? [];
         session.usageLedger = remaining.length ? {
           version: 1,
@@ -4303,7 +4310,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async saveAgentCheckpoint(session: ChatSession, message: ChatMessage, checkpoint: RunCheckpoint): Promise<void> {
-    message.runCheckpoint = checkpointCopy(checkpoint);
+    message.runCheckpoint = snapshotCheckpoint(checkpoint);
     // Only complete rounds are visible to future history projection. Incomplete
     // native blocks stay exclusively in the display text, never providerReplay.
     if (checkpoint.state) {
@@ -5361,6 +5368,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     sourceConfig: ModelSourceConfigSnapshot,
     signal: AbortSignal
   ): Promise<void> {
+    activeSession.contextCompression = {
+      version: 1, summaries: [], protectedMessageIds: [], ...activeSession.contextCompression,
+      protectionState: deriveHistoryProtection(activeSession.messages, [
+        ...this.changeSets.toWebviewState(activeSession.id).flatMap(set => set.files.map(file => ({ messageId: set.messageId,
+          artifactId: file.id, status: file.status, target: file.uri, baseHash: file.patchSummary?.baseSha256,
+          resultHash: file.patchSummary?.resultSha256, approval: file.approvalReview?.decision ?? file.approvalSource }))),
+        ...this.draftRuns.toWebviewState(activeSession.id).map(run => ({ messageId: run.messageId, status: run.status,
+          artifactId: run.id, target: run.spec.cwdLabel, specHash: run.specHash, approval: run.approvalReview?.decision }))
+      ])
+    };
     try {
       const result = await this.agentRequestCoordinator.refreshContextCompressionBeforeRun({
         session: activeSession,

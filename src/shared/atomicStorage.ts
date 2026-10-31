@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { open } from 'node:fs/promises';
 import * as vscode from 'vscode';
 
 const storageQueues = new Map<string, Promise<void>>();
@@ -22,18 +23,23 @@ export async function withStorageCoordinator<T>(key: vscode.Uri | string, work: 
 }
 
 /** Same-directory replacement: a failed write keeps the previous valid record. */
-export async function writeJsonAtomic(uri: vscode.Uri, value: unknown): Promise<void> {
+export async function writeJsonAtomic(uri: vscode.Uri, value: unknown, options?: { durable?: boolean }): Promise<void> {
+  return writeBytesAtomic(uri, new TextEncoder().encode(JSON.stringify(value)), options);
+}
+
+export async function writeBytesAtomic(uri: vscode.Uri, bytes: Uint8Array, options?: { durable?: boolean }): Promise<void> {
   await withStorageCoordinator(uri, async () => {
     const parent = vscode.Uri.joinPath(uri, '..');
     const temporary = vscode.Uri.joinPath(parent, `.keepseek-${randomUUID()}.tmp`);
-    const bytes = new TextEncoder().encode(JSON.stringify(value));
     await vscode.workspace.fs.createDirectory(parent);
     try {
       await vscode.workspace.fs.writeFile(temporary, bytes);
+      if (options?.durable && uri.scheme === 'file') await syncLocal(temporary);
       let lastError: unknown;
       for (let attempt = 0; attempt < MAX_RENAME_ATTEMPTS; attempt += 1) {
         try {
           await vscode.workspace.fs.rename(temporary, uri, { overwrite: true });
+          if (options?.durable && uri.scheme === 'file' && process.platform !== 'win32') await syncLocal(parent);
           return;
         } catch (error) {
           lastError = error;
@@ -53,6 +59,11 @@ export async function writeJsonAtomic(uri: vscode.Uri, value: unknown): Promise<
       await Promise.resolve(vscode.workspace.fs.delete(temporary, { useTrash: false })).catch(() => undefined);
     }
   });
+}
+
+async function syncLocal(uri: vscode.Uri): Promise<void> {
+  const handle = await open(uri.fsPath, 'r');
+  try { await handle.sync(); } finally { await handle.close(); }
 }
 
 export async function deleteStorageUri(uri: vscode.Uri, options: { recursive?: boolean } = {}): Promise<void> {

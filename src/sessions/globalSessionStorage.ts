@@ -17,6 +17,7 @@ import { deleteStorageUri, withStorageCoordinator, writeJsonAtomic } from '../sh
 import type { StartupPerformanceTrace } from '../shared/startupPerformance';
 import type { ApprovalMode, ChatSession, ChatSessionSummary, WorkspaceSummary } from '../shared/types';
 import { ToolEvidenceStore } from '../agent/evidence/store';
+import { SessionObjectStore } from './sessionObjectStore';
 
 export const SESSION_MIGRATION_KEY = 'keepseek.chatSessionsMigratedToGlobalV1';
 export const SESSION_CLEANUP_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -91,6 +92,14 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
   private readonly workspacesUri: vscode.Uri;
   private readonly legacyWorkspacesUri: vscode.Uri;
   private readonly evidenceStore: ToolEvidenceStore;
+  private readonly objectStores = new Map<string, SessionObjectStore>();
+
+  private objects(uri: vscode.Uri): SessionObjectStore {
+    const key = uri.toString();
+    let store = this.objectStores.get(key);
+    if (!store) { store = new SessionObjectStore(uri); this.objectStores.set(key, store); }
+    return store;
+  }
 
   public constructor(
     globalStorageUri: vscode.Uri,
@@ -143,6 +152,21 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
 
   public async saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void> {
     await withStorageCoordinator(this.rootUri, async () => this.saveWorkspaceCoordinated(workspaceScope, state));
+    await this.flush();
+  }
+
+  public async flush(): Promise<void> {
+    const pending = manifestRefreshes.get(this.rootUri.toString());
+    if (!pending) return;
+    if (pending.timer) { clearTimeout(pending.timer); pending.timer = undefined; }
+    const indexes = [...pending.indexes.values()];
+    pending.indexes.clear();
+    if (!indexes.length) return;
+    await withStorageCoordinator(this.rootUri, async () => {
+      const manifest = await this.readManifestWithoutRebuild();
+      indexes.forEach(index => this.setManifestWorkspace(manifest, index));
+      await this.writeManifestBestEffort(manifest, 'flush');
+    });
   }
 
   private async saveWorkspaceCoordinated(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void> {
@@ -161,9 +185,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
 
     const sessions = state.sessions.filter((session) => session.workspaceKey === workspaceScope.key);
     await Promise.all(sessions.map(async (session) => {
-      const value = { version: 2, workspaceKey: workspaceScope.key, session };
-      const byteLength = new TextEncoder().encode(JSON.stringify(value)).byteLength;
-      await writeJsonAtomic(this.getSessionUri(workspaceHash, session.id), value);
+      const byteLength = await this.objects(this.getSessionUri(workspaceHash, session.id)).save(session);
       entries.set(session.id, {
         ...toSessionSummary(session),
         storageFile: getSessionStorageFile(session.id),
@@ -241,6 +263,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     if (!removed.length) return;
     await Promise.all(removed.flatMap((entry) => [
       this.deleteFile(this.getSessionUri(getWorkspaceHash(normalizedWorkspaceKey), entry.id)),
+      this.objects(this.getSessionUri(getWorkspaceHash(normalizedWorkspaceKey), entry.id)).deleteObjects(),
       this.evidenceStore.deleteSessionEvidence(entry.id)
     ]));
     index.sessions = index.sessions.filter((entry) => !ids.has(entry.id));
@@ -328,6 +351,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
         const removedIds = new Set(removed.map((entry) => entry.id));
         await Promise.all(removed.flatMap((entry) => [
           this.deleteFile(this.getSessionUri(hash, entry.id)),
+          this.objects(this.getSessionUri(hash, entry.id)).deleteObjects(),
           this.evidenceStore.deleteSessionEvidence(entry.id)
         ]));
         index.sessions = index.sessions.filter((entry) => !removedIds.has(entry.id));
@@ -446,9 +470,11 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
 
   private async readSessionShard(uri: vscode.Uri, index: WorkspaceSessionIndex): Promise<ChatSession | undefined> {
     const value = await this.readJsonFile(uri, 'session shard');
-    if (!isRecord(value) || value.version !== 2 || !isRecord(value.session)) return undefined;
+    if (!isRecord(value) || ![2, 3].includes(Number(value.version))) return undefined;
+    const stored = value.version === 3 ? await this.objects(uri).load(value) : value.session;
+    if (!isRecord(stored)) return undefined;
     const scope = { key: index.workspaceKey, name: index.workspaceName, folderUris: index.workspaceFolders };
-    const session = normalizeStoredSessions({ sessions: [value.session] }, scope)[0];
+    const session = normalizeStoredSessions({ sessions: [stored] }, scope)[0];
     return session?.workspaceKey === index.workspaceKey ? session : undefined;
   }
 

@@ -57,6 +57,9 @@ const HANDOFF_KINDS: SubagentHandoffKind[] = ['delegate', 'parallel', 'read-resu
 
 export interface ActualUsageSlice extends Usage {
   requestCount: number;
+  providerAttemptCount?: number;
+  usageResponseCount?: number;
+  attemptStatsIncomplete?: boolean;
   pricedRequestCount: number;
   estimatedRequestCount: number;
   unpricedRequestCount: number;
@@ -496,6 +499,9 @@ function mergeTurnUsage(
   }
   const reasoningTokens = clampCount((leftUsage.reasoningTokens ?? 0) + direction * (right.reasoningTokens ?? 0));
   return {
+    providerAttemptCount: clampCount((leftUsage.providerAttemptCount ?? 0) + direction * (right.providerAttemptCount ?? 0)),
+    usageResponseCount: clampCount((leftUsage.usageResponseCount ?? 0) + direction * (right.usageResponseCount ?? 0)),
+    attemptStatsIncomplete: leftUsage.attemptStatsIncomplete || right.attemptStatsIncomplete,
     promptTokens: clampCount(leftUsage.promptTokens + direction * right.promptTokens),
     completionTokens: clampCount(leftUsage.completionTokens + direction * right.completionTokens),
     totalTokens: clampCount(leftUsage.totalTokens + direction * right.totalTokens),
@@ -519,6 +525,9 @@ function mergeTurnUsage(
 
 function toActualUsageSlice(value: (Usage & {
   requestCount?: number;
+  providerAttemptCount?: number;
+  usageResponseCount?: number;
+  attemptStatsIncomplete?: boolean;
   pricedRequestCount?: number;
   unpricedRequestCount?: number;
   cacheDataRequestCount?: number;
@@ -556,6 +565,9 @@ function toActualUsageSlice(value: (Usage & {
     ...(safeInteger(value.reasoningTokens) > 0 ? { reasoningTokens: safeInteger(value.reasoningTokens) } : {}),
     cacheDataStatus: cacheStatus(cacheDataRequestCount, cacheDataMissingRequestCount),
     requestCount,
+    providerAttemptCount: value.providerAttemptCount,
+    usageResponseCount: value.usageResponseCount,
+    attemptStatsIncomplete: value.attemptStatsIncomplete === true || value.providerAttemptCount === undefined || value.usageResponseCount === undefined,
     pricedRequestCount,
     estimatedRequestCount,
     unpricedRequestCount,
@@ -584,6 +596,9 @@ function sumActualUsageSlices(values: ActualUsageSlice[]): ActualUsageSlice {
       ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
       cacheDataStatus: cacheStatus(cacheDataRequestCount, cacheDataMissingRequestCount),
       requestCount: total.requestCount + value.requestCount,
+      providerAttemptCount: (total.providerAttemptCount ?? 0) + (value.providerAttemptCount ?? 0),
+      usageResponseCount: (total.usageResponseCount ?? 0) + (value.usageResponseCount ?? 0),
+      attemptStatsIncomplete: total.attemptStatsIncomplete || value.attemptStatsIncomplete,
       pricedRequestCount,
       estimatedRequestCount,
       unpricedRequestCount,
@@ -612,6 +627,9 @@ function subtractActualUsageSlice(total: ActualUsageSlice, known: ActualUsageSli
     ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
     cacheDataStatus: cacheStatus(cacheDataRequestCount, cacheDataMissingRequestCount),
     requestCount: clampCount(total.requestCount - known.requestCount),
+    providerAttemptCount: total.providerAttemptCount === undefined ? undefined : clampCount(total.providerAttemptCount - (known.providerAttemptCount ?? 0)),
+    usageResponseCount: total.usageResponseCount === undefined ? undefined : clampCount(total.usageResponseCount - (known.usageResponseCount ?? 0)),
+    attemptStatsIncomplete: total.attemptStatsIncomplete || known.attemptStatsIncomplete,
     pricedRequestCount,
     estimatedRequestCount,
     unpricedRequestCount,
@@ -632,6 +650,9 @@ function createEmptyActualUsageSlice(): ActualUsageSlice {
     cacheMissTokens: 0,
     cacheDataStatus: 'unavailable',
     requestCount: 0,
+    providerAttemptCount: 0,
+    usageResponseCount: 0,
+    attemptStatsIncomplete: false,
     pricedRequestCount: 0,
     estimatedRequestCount: 0,
     unpricedRequestCount: 0,

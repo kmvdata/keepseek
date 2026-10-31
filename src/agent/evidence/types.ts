@@ -36,6 +36,8 @@ export interface ToolEvidence {
   blobName?: string;
   providerEnvelope?: string;
   completeInline?: boolean;
+  /** Envelope information is distinct from execution and transport delivery. */
+  bodyDelivery?: { version: 1; bodyDelivered: boolean; visibleContentHash?: string; envelopeBytes: number };
   createdAt: string;
   updatedAt: string;
 }
