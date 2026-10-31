@@ -5843,10 +5843,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const contextCompression = getAgentRuntimeProfile(selectedModel, this.agentSettings).contextCompression;
     const lastTurnUsage = this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage;
     const referenceCosts = this.referenceCostViews.get(activeSession.id);
-    const displaySessionUsage = applyReferenceCostView(activeSession.usageStats, referenceCosts?.session);
+    const isOfficialDeepSeek = selectedCatalogModel?.supportsBilling === true && selectedCatalogModel.provider === 'deepseek';
+    const displaySessionUsage = !referenceCosts?.session && isOfficialDeepSeek ? activeSession.usageStats
+      : applyReferenceCostView(activeSession.usageStats, referenceCosts?.session);
     const lastUserAt = activeSession.messages.filter((message) => message.role === 'user').at(-1)?.createdAt;
-    const displayTurnUsage = applyReferenceCostView(lastTurnUsage,
-      referenceCosts?.lastUserAt === lastUserAt ? referenceCosts?.turn : undefined);
+    const displayTurnUsage = referenceCosts?.lastUserAt === lastUserAt && referenceCosts?.turn
+      ? applyReferenceCostView(lastTurnUsage, referenceCosts.turn)
+      : isOfficialDeepSeek ? lastTurnUsage : applyReferenceCostView(lastTurnUsage, undefined);
     const contextPercent = contextUsage.usedPercent;
 
     const webviewChangeSets = this.changeSets.toWebviewState(activeSession.id);
@@ -5902,8 +5905,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             subagentUsageStats: referenceCosts?.subagents ?? activeSession.subagentUsageStats
           }),
           supportsBilling: selectedCatalogModel?.supportsBilling === true,
-          isOfficialDeepSeek: selectedCatalogModel?.supportsBilling === true
-            && selectedCatalogModel.provider === 'deepseek',
+          isOfficialDeepSeek,
           referenceCostSourceIds: referenceCosts?.referenceSourceIds ?? [],
           balance: selectedCatalogModel?.supportsBilling && selectedCatalogModel.sourceId
             ? this.balanceStore.getBalance(this.getBalanceSourceScope(selectedCatalogModel.sourceId))

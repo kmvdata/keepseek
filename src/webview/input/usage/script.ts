@@ -568,6 +568,7 @@ export const usageRenderFragment: WebviewFragment = {
         if (key !== 'usageCostLabel') return label;
         var metrics = normalizeUsageMetrics(state.usageMetrics);
         var reference = sourceId ? metrics.referenceCostSourceIds.indexOf(sourceId) >= 0
+          || (sourceId === state.selectedSourceId && !metrics.isOfficialDeepSeek)
           : metrics.referenceCostSourceIds.length > 0 || !metrics.isOfficialDeepSeek;
         if (reference) {
           var hint = usageNode('button', 'usage-cost-help', '?');

@@ -281,7 +281,7 @@ bun run test
 
 ## 参考费用（2026-10-31 核对）
 
-用量面板的费用统一称为“参考费用 / Reference cost”。DeepSeek 已知官方模型使用内置官方人民币价格，不再使用遗留 `usagePricing` 覆盖；未知模型仍可配置价格，不推断为 Flash。Flash 包括 `deepseek-flash`、V4 Flash 兼容名、`deepseek-v4.1-flash` 和 `deepseek-v4.1-flash-1017`。Pro 使用独立的官方 Pro 价格。
+用量面板的费用统一称为“参考费用 / Reference cost”。DeepSeek 官方账号的已知模型使用内置官方人民币价格，不再使用遗留 `usagePricing` 覆盖。真实费用预算对未知模型仍使用显式配置，不凭模型名称推断为 Flash；其它账号的面板展示则统一使用下述 Flash 标准价。Flash 包括 `deepseek-flash`、V4 Flash 兼容名、`deepseek-v4.1-flash` 和 `deepseek-v4.1-flash-1017`。Pro 使用独立的官方 Pro 价格。
 
 Flash 每百万 tokens 的空闲档：缓存命中 0.02 元、未命中 1 元、输出 4 元；高峰档分别为 0.04、2、8 元。每次物理请求开始时，按北京时间选择档位并冻结价格快照，随后以 Provider 返回的 tokens 结算并逐次累计；打开面板或恢复会话不会按查看时刻重新计价。缓存细分缺失时全部输入按未命中计算，并标记费用上界。
 
