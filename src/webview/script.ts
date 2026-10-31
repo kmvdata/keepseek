@@ -1257,6 +1257,7 @@ export function getScript(): string {
       } else if (message.type === 'agentRunDelta' || message.type === 'agentRunAttemptReset') {
         var streamPatch = applyAgentRunStreamPatch(message);
         if (!streamPatch) return;
+        if (message.executionTime && state.usageMetrics) state.usageMetrics.executionTime = message.executionTime;
         if (streamPatch.reset) {
           render();
           return;

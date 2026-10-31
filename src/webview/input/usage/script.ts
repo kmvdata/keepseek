@@ -134,9 +134,7 @@ export const usageRenderFragment: WebviewFragment = {
         if (latestRunState) {
           items.unshift([
             'usageMetricEffectiveExecution',
-            t('usageMetricEffectiveExecutionValue', {
-              seconds: formatMetricInteger(Math.floor(latestRunState.usedMs / 1000))
-            })
+            formatUsageRuntime(latestRunState.usedMs)
           ]);
         }
         contextProgress.style.setProperty('--context-progress-angle', angle + 'deg');
@@ -164,7 +162,7 @@ export const usageRenderFragment: WebviewFragment = {
         var messages = Array.isArray(state.messages) ? state.messages : [];
         for (var index = messages.length - 1; index >= 0; index -= 1) {
           var runState = messages[index] && messages[index].runState;
-          if (runState && Number.isFinite(Number(runState.usedMs)) && Number(runState.usedMs) >= 0) {
+          if (runState) {
             return runState;
           }
         }
@@ -187,6 +185,7 @@ export const usageRenderFragment: WebviewFragment = {
           metrics.promptCacheDiagnostics,
           metrics.contextCompressionTriggerRatio,
           getLatestRunState(),
+          metrics.executionTime,
           getLanguage()
         ]);
         if (renderKey === usageDetailsRenderKey) { return; }
@@ -197,6 +196,7 @@ export const usageRenderFragment: WebviewFragment = {
           : '';
         usageDetailsBody.replaceChildren();
         if (!details || !details.session) {
+          usageDetailsBody.append(createSessionMetricsSection(metrics, { total: metrics.sessionUsageStats || {} }));
           usageDetailsBody.append(usageNode('p', 'usage-note', t('usageNoProviderData')));
           return;
         }
@@ -331,6 +331,7 @@ export const usageRenderFragment: WebviewFragment = {
             : formatUsageAvailabilityValue(selected.total, 'usageMetricCostUnavailableValue'), ''],
           ['usageEffectiveRuntime', latestRunState ? formatUsageRuntime(latestRunState.usedMs)
             : t(hasSessionUsage ? 'usageMetricUnavailableValue' : 'usagePendingValue'), ''],
+          ['usageSessionTotalTime', formatUsageRuntime(metrics.executionTime.totalMs), ''],
           ['usageProviderAttemptCount', hasSessionUsage ? (selected.total.attemptStatsIncomplete && !selected.total.providerAttemptCount ? t('usageMetricUnavailableValue') : (selected.total.attemptStatsIncomplete ? '≥ ' : '') + formatMetricInteger(selected.total.providerAttemptCount)) : t('usagePendingValue'), ''],
           ['usageUsageResponseCount', hasSessionUsage ? (selected.total.attemptStatsIncomplete && !selected.total.usageResponseCount ? t('usageMetricUnavailableValue') : (selected.total.attemptStatsIncomplete ? '≥ ' : '') + formatMetricInteger(selected.total.usageResponseCount)) : t('usagePendingValue'), ''],
           ['usageCumulativeTokens', hasSessionUsage ? formatMetricInteger(selected.total.totalTokens) : t('usagePendingValue'), 'is-wide']
@@ -346,6 +347,7 @@ export const usageRenderFragment: WebviewFragment = {
         section.append(grid);
         var notes = usageNode('div', 'usage-session-notes');
         notes.append(usageNode('p', '', t('usageTimingScopeNote')));
+        if (metrics.executionTime.incomplete) notes.append(usageNode('p', 'usage-warning', t('usageTimeHistoryIncomplete')));
         if (selected.total.unpricedRequestCount > 0) {
           notes.append(usageNode('p', 'usage-warning', t(selected.total.pricedRequestCount > 0
             ? 'usagePartialPricing' : 'usageAllUnpriced', { count: selected.total.unpricedRequestCount })));

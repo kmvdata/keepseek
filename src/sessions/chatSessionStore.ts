@@ -1,3 +1,4 @@
+import { reconcileExecutionTime } from './executionTimeStats';
 import { normalizeRequestBudget } from '../agent/requestBudget';
 import { isResumableToolBudgetCheckpoint, normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
 import { normalizeHistoryWorkFacts } from '../agent/historyProtection';
@@ -341,6 +342,7 @@ export class ChatSessionStore {
   }> = [];
 
   public async persist(): Promise<void> {
+    for (const session of this.sessions) session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
     this.compact();
     const revision = ++this.persistRevision;
     const snapshot: StoredWorkspaceSessionState = {
@@ -636,6 +638,7 @@ export function createEmptySession(
     id: randomUUID(),
     title: localize(language, 'defaultSessionTitle'),
     messages: [],
+    executionTime: { version: 1, byTask: {}, incomplete: false },
     approvalMode,
     executionMode: normalizeExecutionMode(executionMode),
     planWorkflows: [],
@@ -813,6 +816,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
         : undefined,
       repairLoop: normalizeRepairLoopState(item.repairLoop),
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
+      executionTime: reconcileExecutionTime(item.executionTime, messages),
       usageStats: normalizeSessionUsageStatsValue(item.usageStats),
       usageLedger: normalizeUsageLedgerValue(item.usageLedger),
       usageLedgerRef: normalizeUsageLedgerRef(item.usageLedgerRef, item.id),

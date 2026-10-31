@@ -929,6 +929,7 @@ export interface PlanWorkflowView extends Omit<PlanWorkflowRecord, 'contentHash'
 }
 
 export interface ChatSession {
+  executionTime?: import('../sessions/executionTimeStats').SessionExecutionTime;
   approvalMode?: ApprovalMode;
   executionMode?: ExecutionMode;
   planWorkflows?: PlanWorkflowRecord[];

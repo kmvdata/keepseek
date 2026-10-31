@@ -56,6 +56,7 @@ import './semanticTools.test';
 import './subagentArchitecture.test';
 import './subagentSafety.test';
 import './subagentUsageStats.test';
+import './executionTimeStats.test';
 import './subagentUsageRuntime.test';
 import './referenceResources.test';
 import './skillDiscovery.test';

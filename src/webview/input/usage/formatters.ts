@@ -34,13 +34,12 @@ export const usageFormattersFragment: WebviewFragment = {
       }
 
       function formatUsageRuntime(value) {
-        var totalSeconds = Math.max(0, Math.floor(Number(value) / 1000));
-        if (!Number.isFinite(totalSeconds)) { return t('usagePendingValue'); }
-        var minutes = Math.floor(totalSeconds / 60);
-        var seconds = totalSeconds % 60;
-        return minutes > 0
-          ? t('usageRuntimeMinutesSeconds', { minutes: minutes, seconds: seconds })
-          : t('usageRuntimeSeconds', { seconds: seconds });
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) { return t('usageMetricUnavailableValue'); }
+        var totalSeconds = Math.floor(value / 1000);
+        var days = Math.floor(totalSeconds / 86400);
+        var clock = [Math.floor(totalSeconds / 3600) % 24, Math.floor(totalSeconds / 60) % 60, totalSeconds % 60]
+          .map(function(part) { return String(part).padStart(2, '0'); }).join(':');
+        return days ? t(days === 1 ? 'usageDurationDay' : 'usageDurationDays', { days: days }) + ' ' + clock : clock;
       }
 
       function formatUsageCompactTokens(value) {
@@ -136,6 +135,7 @@ export const usageFormattersFragment: WebviewFragment = {
       function normalizeUsageMetrics(value) {
         var metrics = value && typeof value === 'object' ? value : {};
         return {
+          executionTime: metrics.executionTime || {},
           sessionUsageStats: normalizeUsageStats(metrics.sessionUsageStats, 'sessionCost'),
           lastTurnUsage: normalizeUsageStats(metrics.lastTurnUsage, 'cost'),
           usageDetails: metrics.usageDetails && typeof metrics.usageDetails === 'object' ? metrics.usageDetails : null,

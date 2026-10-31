@@ -1,3 +1,4 @@
+import { executionTimeView, reconcileExecutionTime } from '../sessions/executionTimeStats';
 import { checkpointCopy, endpointHash, grantCheckpointToolBudgetSegment, isResumableToolBudgetCheckpoint, recoverNoProgressWithUserTurn, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
@@ -4255,6 +4256,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private createRunStreamPublisher(sessionId: string, message: ChatMessage): {
     schedule(): void; beginModelRound(): void; resetAttempt(): void; dispose(): void;
   } {
+    const streamSession = this.sessionStore.getActiveSession();
     let contentOffset = message.content.length;
     let reasoningOffset = (message.reasoningContent ?? '').length;
     let committedContent = message.content;
@@ -4274,7 +4276,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           this.postToWebview({ type: 'agentRunDelta', sessionId, messageId: message.id, attempt: message.runCheckpoint?.attempt, streamRevision,
             contentOffset, contentDelta: message.content.slice(contentOffset),
             reasoningOffset, reasoningDelta: (message.reasoningContent ?? '').slice(reasoningOffset),
-            runState: visible.runState, activity: this.agentActivity });
+            executionTime: executionTimeView(streamSession), runState: visible.runState, activity: this.agentActivity });
           contentOffset = message.content.length;
           reasoningOffset = (message.reasoningContent ?? '').length;
         }, 100);
@@ -4299,7 +4301,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.postToWebview({ type: 'agentRunAttemptReset', sessionId, messageId: message.id,
           attempt: message.runCheckpoint?.attempt, streamRevision,
           content: committedContent, reasoningContent: committedReasoning,
-          runState: visible.runState, activity: this.agentActivity });
+          executionTime: executionTimeView(streamSession), runState: visible.runState, activity: this.agentActivity });
       },
       dispose: () => { clearPending(); signal?.removeEventListener('abort', clearPending); }
     };
@@ -4317,6 +4319,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private async saveAgentCheckpoint(session: ChatSession, message: ChatMessage, checkpoint: RunCheckpoint): Promise<void> {
     message.runCheckpoint = snapshotCheckpoint(checkpoint);
+    session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
     // Only complete rounds are visible to future history projection. Incomplete
     // native blocks stay exclusively in the display text, never providerReplay.
     if (checkpoint.state) {
@@ -5877,6 +5880,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         contextUsage,
         contextUsageSessionId: this.sessionStore.activeSessionId,
         usageMetrics: {
+          executionTime: executionTimeView(activeSession),
           sessionUsageStats: activeSession.usageStats,
           lastTurnUsage,
           usageDetails: createUsageDetailsViewModel({

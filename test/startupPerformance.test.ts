@@ -38,6 +38,7 @@ test('stream publisher replaces a failed suffix, preserves complete prior rounds
   const controller = new AbortController();
   const posted: Array<Record<string, unknown>> = [];
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    sessionStore: { getActiveSession: () => ({ id: 'session', messages: [], executionTime: { version: 1, byTask: { a: 1234 }, incomplete: false } }) },
     currentRunAbortController: controller,
     agentActivity: { base: 'thinking', phase: 'requesting_model' },
     postToWebview: (message: Record<string, unknown>) => posted.push(message)
@@ -63,6 +64,7 @@ test('stream publisher replaces a failed suffix, preserves complete prior rounds
   assert.equal(posted.filter((event) => event.type === 'agentRunDelta').length, 1);
   assert.equal(posted.at(-1)?.contentOffset, 'completed'.length);
   assert.equal(posted.at(-1)?.contentDelta, 'success');
+  assert.deepEqual(posted.at(-1)?.executionTime, { totalMs: 1234, incomplete: false });
   message.content += 'cancelled';
   stream.schedule();
   controller.abort();

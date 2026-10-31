@@ -363,3 +363,30 @@ function cloneWorkspaceState(state: StoredWorkspaceSessionState): StoredWorkspac
     }))
   };
 }
+
+test('execution timing survives persistence, repeated saves, session switches and a store restart', async (t) => {
+  const { executionTimeView } = await import('../src/sessions/executionTimeStats.js');
+  const scope = { key: 'timing', name: 'Timing', folderUris: [] };
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-execution-time-'));
+  const storage = new GlobalSessionStorage(vscode.Uri.file(root) as never);
+  t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
+  const store = new ChatSessionStore(storage, 'en', scope);
+  await store.initialize();
+  const first = store.getActiveSession();
+  first.messages.push({ id: 'u', role: 'user', content: 'first run', createdAt: new Date().toISOString() });
+  first.messages.push({ id: 'a', role: 'assistant', content: 'done', createdAt: new Date().toISOString(),
+    runState: { taskId: 'runA', usedMs: 12345, status: 'completed', maxExecutionMs: 0, limitSource: 'test',
+      attempt: 1, modelRequests: 1, retries: 0, steps: 0, canResume: false } });
+  await store.persist();
+  await store.persist();
+  const second = await store.createNewSession();
+  assert.equal(executionTimeView(second).totalMs, 0);
+  second.messages.push({ id: 'u2', role: 'user', content: 'not started', createdAt: new Date().toISOString() });
+  await store.selectSession(first.id);
+  assert.equal(executionTimeView(store.getActiveSession()).totalMs, 12345);
+  const restarted = new ChatSessionStore(storage, 'en', scope);
+  await restarted.initialize();
+  assert.equal(executionTimeView(restarted.getActiveSession()).totalMs, 12345);
+  await restarted.selectSession(second.id);
+  assert.equal(executionTimeView(restarted.getActiveSession()).totalMs, 0);
+});
