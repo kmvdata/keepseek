@@ -1,7 +1,40 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { HistoryCompressor } from '../src/agent/historyCompressor';
+import { HistoryCompressor, measureCompressionProjection } from '../src/agent/historyCompressor';
+import { buildProviderPayloadProjection, buildProviderRequestProjection } from '../src/agent/providerRequestProjection';
+import { resolveProviderRequestBudget } from '../src/agent/requestBudget';
 import type { ChatMessage, ChatSession, KeepseekModel } from '../src/shared/types';
+
+test('compression measures the shared final payload with model provider fallback and learned capacity', () => {
+  for (const provider of ['qwencloud', 'openai-responses', 'anthropic-compatible'] as const) {
+    const input = { session: createSession(Array.from({ length: 30 }, (_, i) => createMessage(i, 'context '.repeat(30)))),
+      prompt: 'current request', model: { ...createModel(1024000), provider, maxOutputTokens: 393192 },
+      agentSettings: { thinkingEnabled: true, reasoningEffort: 'high' as const, compressionThreshold: 'balanced' as const }, contextFiles: [], language: 'en' as const,
+      calibration: { learnedEffectiveWindowTokens: 800000, estimatorScale: 1.2, lastActualInputTokens: 500, lastEstimatedInputTokens: 400 } };
+    const p = buildProviderRequestProjection({ ...input, history: input.session.messages });
+    const body = buildProviderPayloadProjection({ modelId: input.model.id, provider, maxOutputTokens: p.runtimeProfile.maxTokens,
+      messages: p.messages, tools: p.tools, native: p.responses ? { protocol: 'openai-responses', ...p.responses }
+        : p.anthropic ? { protocol: 'anthropic-messages', ...p.anthropic } : undefined });
+    const measured = measureCompressionProjection(input);
+    assert.deepEqual(measured.body, body);
+    assert.deepEqual(measured.budget, resolveProviderRequestBudget({ model: input.model, provider, body, calibration: input.calibration }));
+    assert.equal(measured.budget.modelMaxOutputTokens, 393192);
+    assert.equal(measured.budget.effectiveWindowTokens, 800000);
+  }
+});
+
+test('cancellation during summary completion keeps audit history and does not adopt a summary', async () => {
+  const controller = new AbortController();
+  const compressor = new HistoryCompressor(async () => { controller.abort(); return 'small summary'; });
+  const session = createSession(Array.from({ length: 30 }, (_, i) => createMessage(i, 'context '.repeat(300))));
+  const original = JSON.stringify(session.messages);
+  const result = await compressor.refresh({ session, prompt: 'current', model: createModel(200000),
+    agentSettings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' }, contextFiles: [], language: 'en', signal: controller.signal,
+    settings: { ...createCompressionSettings(), triggerRatio: 0.01, forceRatio: 0.02 } });
+  assert.equal(result.reason, 'skipped');
+  assert.deepEqual(result.state.summaries, []);
+  assert.equal(JSON.stringify(session.messages), original);
+});
 
 test('context compression planning does not refresh below compact ratio', () => {
   const compressor = new HistoryCompressor(async () => 'unused');

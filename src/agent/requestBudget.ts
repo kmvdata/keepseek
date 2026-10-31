@@ -96,7 +96,13 @@ export function createRequestBudgetUsage(budget: RequestBudgetSnapshot) {
 export async function loadProviderRequestBudget(
   input: Parameters<typeof resolveProviderRequestBudget>[0], globalStorageUri?: vscode.Uri
 ): Promise<RequestBudgetSnapshot> {
-  if (input.calibration || !globalStorageUri) return resolveProviderRequestBudget(input);
+  return resolveProviderRequestBudget({ ...input, calibration: await loadProviderRequestCalibration(input, globalStorageUri) });
+}
+
+export async function loadProviderRequestCalibration(
+  input: Parameters<typeof resolveProviderRequestBudget>[0], globalStorageUri?: vscode.Uri
+): Promise<Parameters<typeof resolveProviderRequestBudget>[0]['calibration']> {
+  if (input.calibration || !globalStorageUri) return input.calibration;
   const initial = resolveProviderRequestBudget(input);
   const identity = getCanonicalModelIdentity(input.model.id);
   const calibration = await new ContextWindowCalibrationStore(globalStorageUri).load({
@@ -104,5 +110,5 @@ export async function loadProviderRequestBudget(
     canonicalModelId: identity, endpointHash: initial.endpointHash
   }, { identity, version: `${DEEPSEEK_MODEL_IDENTITY_VERSION}:${initial.effectiveWindowTokens}`,
     declaredWindowTokens: initial.effectiveWindowTokens });
-  return resolveProviderRequestBudget({ ...input, calibration });
+  return calibration;
 }

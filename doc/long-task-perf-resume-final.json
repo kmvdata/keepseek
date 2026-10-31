@@ -1,0 +1,119 @@
+{
+  "kind": "synthetic offline real filesystem benchmark",
+  "node": "v24.15.0",
+  "platform": "darwin",
+  "arch": "x64",
+  "results": [
+    {
+      "name": "small",
+      "checkpointCount": 3,
+      "legacyBytes": 95769,
+      "samples": 7,
+      "writeBytes": [
+        3350,
+        3350,
+        3350,
+        3350,
+        3350,
+        3350,
+        3350
+      ],
+      "saveP50Ms": 107.39172599999984,
+      "saveP95Ms": 108.8342819999998,
+      "checkpointCopyP50Ms": 0.18717400000014095,
+      "eventLoopMaxMs": 12.304383,
+      "rssPeakBytes": 59203584,
+      "heapUsedPeakBytes": 8427520,
+      "retainedHeapP50Bytes": 7714176,
+      "loadMs": 15.42000599999983,
+      "storageBytes": 54390,
+      "graphBytes": 51747,
+      "files": 52,
+      "writeCounts": [
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
+        4
+      ],
+      "encodeP50Ms": 61.496615999999904,
+      "commitP50Ms": 40.01815000000033
+    },
+    {
+      "name": "medium",
+      "checkpointCount": 20,
+      "legacyBytes": 15936717,
+      "samples": 7,
+      "writeBytes": [
+        13230,
+        13230,
+        13230,
+        13230,
+        13230,
+        13230,
+        13230
+      ],
+      "saveP50Ms": 111.64950400000089,
+      "saveP95Ms": 113.72985999999946,
+      "checkpointCopyP50Ms": 0.18911800000023504,
+      "eventLoopMaxMs": 12.640255,
+      "rssPeakBytes": 143962112,
+      "heapUsedPeakBytes": 27911384,
+      "retainedHeapP50Bytes": 10545688,
+      "loadMs": 60.47427600000083,
+      "storageBytes": 891166,
+      "graphBytes": 878644,
+      "files": 316,
+      "writeCounts": [
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
+        4
+      ],
+      "encodeP50Ms": 66.21985200000017,
+      "commitP50Ms": 40.151466999999684
+    },
+    {
+      "name": "large",
+      "checkpointCount": 55,
+      "legacyBytes": 224445672,
+      "samples": 7,
+      "writeBytes": [
+        33589,
+        33589,
+        33589,
+        33589,
+        33589,
+        33589,
+        33589
+      ],
+      "saveP50Ms": 129.04638900000282,
+      "saveP95Ms": 131.50974799999676,
+      "checkpointCopyP50Ms": 0.16629500000271946,
+      "eventLoopMaxMs": 26.623999,
+      "rssPeakBytes": 996278272,
+      "heapUsedPeakBytes": 31758792,
+      "retainedHeapP50Bytes": 21136528,
+      "loadMs": 205.70063400000072,
+      "storageBytes": 4819300,
+      "graphBytes": 4786420,
+      "files": 841,
+      "writeCounts": [
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
+        4
+      ],
+      "encodeP50Ms": 80.58569900000293,
+      "commitP50Ms": 41.25846900000033
+    }
+  ]
+}

@@ -1,0 +1,490 @@
+{
+  "kind": "synthetic offline shard graph benchmark; no workspace index",
+  "node": "v24.15.0",
+  "platform": "darwin",
+  "samplesPerMutation": 7,
+  "percentile": "nearest-rank P95 equals maximum for 7 samples; no confidence claim",
+  "memory": "per-save end samples, not process high-water marks; explicit GC before each sample",
+  "results": [
+    {
+      "checkpointCount": 3,
+      "charsPerMessage": 2000,
+      "mutation": "heartbeat",
+      "samples": 7,
+      "saveP50Ms": 106.51321800000005,
+      "saveP95Ms": 122.47645399999988,
+      "writeBytes": [
+        2561,
+        2561,
+        2561,
+        2561,
+        2561,
+        2561,
+        2561
+      ],
+      "writeCounts": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ],
+      "eventLoopMaxMs": 12.353535,
+      "sampledMaxRssBytes": 57606144,
+      "sampledMaxHeapBytes": 8372048,
+      "gcRetainedHeapP50Bytes": 7691304
+    },
+    {
+      "checkpointCount": 3,
+      "charsPerMessage": 2000,
+      "mutation": "append_message",
+      "samples": 7,
+      "saveP50Ms": 146.49877799999967,
+      "saveP95Ms": 160.62258500000007,
+      "writeBytes": [
+        2754,
+        2831,
+        2907,
+        2983,
+        3059,
+        3135,
+        3211
+      ],
+      "writeCounts": [
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3
+      ],
+      "eventLoopMaxMs": 12.287999,
+      "sampledMaxRssBytes": 59150336,
+      "sampledMaxHeapBytes": 8587584,
+      "gcRetainedHeapP50Bytes": 7800672
+    },
+    {
+      "checkpointCount": 3,
+      "charsPerMessage": 2000,
+      "mutation": "tool_result",
+      "samples": 7,
+      "saveP50Ms": 463.28553100000045,
+      "saveP95Ms": 468.8851709999999,
+      "writeBytes": [
+        46739,
+        46814,
+        46889,
+        46964,
+        47039,
+        47114,
+        47189
+      ],
+      "writeCounts": [
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11
+      ],
+      "eventLoopMaxMs": 12.730367,
+      "sampledMaxRssBytes": 61358080,
+      "sampledMaxHeapBytes": 9933952,
+      "gcRetainedHeapP50Bytes": 8115672
+    },
+    {
+      "checkpointCount": 3,
+      "charsPerMessage": 2000,
+      "mutation": "host_status",
+      "samples": 7,
+      "saveP50Ms": 262.34931099999994,
+      "saveP95Ms": 308.0526809999992,
+      "writeBytes": [
+        4196,
+        4364,
+        3094,
+        4364,
+        3094,
+        4364,
+        3094
+      ],
+      "writeCounts": [
+        6,
+        7,
+        2,
+        7,
+        2,
+        7,
+        2
+      ],
+      "eventLoopMaxMs": 12.345343,
+      "sampledMaxRssBytes": 61984768,
+      "sampledMaxHeapBytes": 9534712,
+      "gcRetainedHeapP50Bytes": 8514024
+    },
+    {
+      "checkpointCount": 20,
+      "charsPerMessage": 12000,
+      "mutation": "heartbeat",
+      "samples": 7,
+      "saveP50Ms": 114.1668929999978,
+      "saveP95Ms": 116.26616400000057,
+      "writeBytes": [
+        12439,
+        12439,
+        12439,
+        12439,
+        12439,
+        12439,
+        12439
+      ],
+      "writeCounts": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ],
+      "eventLoopMaxMs": 14.204927,
+      "sampledMaxRssBytes": 126746624,
+      "sampledMaxHeapBytes": 28611632,
+      "gcRetainedHeapP50Bytes": 24314408
+    },
+    {
+      "checkpointCount": 20,
+      "charsPerMessage": 12000,
+      "mutation": "append_message",
+      "samples": 7,
+      "saveP50Ms": 154.57189300000027,
+      "saveP95Ms": 158.4672070000015,
+      "writeBytes": [
+        12632,
+        12709,
+        12785,
+        12861,
+        12937,
+        13013,
+        13089
+      ],
+      "writeCounts": [
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3
+      ],
+      "eventLoopMaxMs": 15.089663,
+      "sampledMaxRssBytes": 130306048,
+      "sampledMaxHeapBytes": 28731864,
+      "gcRetainedHeapP50Bytes": 24349368
+    },
+    {
+      "checkpointCount": 20,
+      "charsPerMessage": 12000,
+      "mutation": "tool_result",
+      "samples": 7,
+      "saveP50Ms": 477.9952059999996,
+      "saveP95Ms": 604.3121600000013,
+      "writeBytes": [
+        56617,
+        56692,
+        56767,
+        56842,
+        56917,
+        56992,
+        57067
+      ],
+      "writeCounts": [
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11
+      ],
+      "eventLoopMaxMs": 16.080895,
+      "sampledMaxRssBytes": 130719744,
+      "sampledMaxHeapBytes": 30021152,
+      "gcRetainedHeapP50Bytes": 24644248
+    },
+    {
+      "checkpointCount": 20,
+      "charsPerMessage": 12000,
+      "mutation": "host_status",
+      "samples": 7,
+      "saveP50Ms": 274.915012999998,
+      "saveP95Ms": 365.1867179999972,
+      "writeBytes": [
+        14074,
+        14242,
+        12972,
+        14242,
+        12972,
+        14242,
+        12972
+      ],
+      "writeCounts": [
+        6,
+        7,
+        2,
+        7,
+        2,
+        7,
+        2
+      ],
+      "eventLoopMaxMs": 15.065087,
+      "sampledMaxRssBytes": 132091904,
+      "sampledMaxHeapBytes": 29641032,
+      "gcRetainedHeapP50Bytes": 25006856
+    },
+    {
+      "checkpointCount": 55,
+      "charsPerMessage": 23800,
+      "mutation": "heartbeat",
+      "samples": 7,
+      "saveP50Ms": 138.244365999999,
+      "saveP95Ms": 154.08587300000363,
+      "writeBytes": [
+        32797,
+        32797,
+        32797,
+        32797,
+        32797,
+        32797,
+        32797
+      ],
+      "writeCounts": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ],
+      "eventLoopMaxMs": 40.959999,
+      "sampledMaxRssBytes": 488116224,
+      "sampledMaxHeapBytes": 250862104,
+      "gcRetainedHeapP50Bytes": 235178416
+    },
+    {
+      "checkpointCount": 55,
+      "charsPerMessage": 23800,
+      "mutation": "append_message",
+      "samples": 7,
+      "saveP50Ms": 178.73277800000506,
+      "saveP95Ms": 194.2896630000032,
+      "writeBytes": [
+        32990,
+        33067,
+        33143,
+        33219,
+        33295,
+        33371,
+        33447
+      ],
+      "writeCounts": [
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3
+      ],
+      "eventLoopMaxMs": 35.356671,
+      "sampledMaxRssBytes": 488812544,
+      "sampledMaxHeapBytes": 251043008,
+      "gcRetainedHeapP50Bytes": 235215144
+    },
+    {
+      "checkpointCount": 55,
+      "charsPerMessage": 23800,
+      "mutation": "tool_result",
+      "samples": 7,
+      "saveP50Ms": 504.2379349999974,
+      "saveP95Ms": 515.599721999999,
+      "writeBytes": [
+        76975,
+        77050,
+        77125,
+        77200,
+        77275,
+        77350,
+        77425
+      ],
+      "writeCounts": [
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11
+      ],
+      "eventLoopMaxMs": 36.405247,
+      "sampledMaxRssBytes": 489107456,
+      "sampledMaxHeapBytes": 251995440,
+      "gcRetainedHeapP50Bytes": 235477880
+    },
+    {
+      "checkpointCount": 55,
+      "charsPerMessage": 23800,
+      "mutation": "host_status",
+      "samples": 7,
+      "saveP50Ms": 312.2932969999965,
+      "saveP95Ms": 348.37179299999843,
+      "writeBytes": [
+        34432,
+        34600,
+        33330,
+        34600,
+        33330,
+        34600,
+        33330
+      ],
+      "writeCounts": [
+        6,
+        7,
+        2,
+        7,
+        2,
+        7,
+        2
+      ],
+      "eventLoopMaxMs": 35.258367,
+      "sampledMaxRssBytes": 489881600,
+      "sampledMaxHeapBytes": 251650288,
+      "gcRetainedHeapP50Bytes": 235826176
+    },
+    {
+      "checkpointCount": 80,
+      "charsPerMessage": 12000,
+      "mutation": "heartbeat",
+      "samples": 7,
+      "saveP50Ms": 139.31300199999532,
+      "saveP95Ms": 143.67299300000013,
+      "writeBytes": [
+        47347,
+        47347,
+        47347,
+        47347,
+        47347,
+        47347,
+        47347
+      ],
+      "writeCounts": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ],
+      "eventLoopMaxMs": 35.815423,
+      "sampledMaxRssBytes": 627949568,
+      "sampledMaxHeapBytes": 267085472,
+      "gcRetainedHeapP50Bytes": 251030312
+    },
+    {
+      "checkpointCount": 80,
+      "charsPerMessage": 12000,
+      "mutation": "append_message",
+      "samples": 7,
+      "saveP50Ms": 183.51779699999315,
+      "saveP95Ms": 186.22614600000088,
+      "writeBytes": [
+        47540,
+        47617,
+        47693,
+        47769,
+        47845,
+        47921,
+        47997
+      ],
+      "writeCounts": [
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3
+      ],
+      "eventLoopMaxMs": 35.782655,
+      "sampledMaxRssBytes": 629649408,
+      "sampledMaxHeapBytes": 268626040,
+      "gcRetainedHeapP50Bytes": 251030352
+    },
+    {
+      "checkpointCount": 80,
+      "charsPerMessage": 12000,
+      "mutation": "tool_result",
+      "samples": 7,
+      "saveP50Ms": 510.7855120000022,
+      "saveP95Ms": 522.6514410000091,
+      "writeBytes": [
+        91525,
+        91600,
+        91675,
+        91750,
+        91825,
+        91900,
+        91975
+      ],
+      "writeCounts": [
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11
+      ],
+      "eventLoopMaxMs": 35.258367,
+      "sampledMaxRssBytes": 630145024,
+      "sampledMaxHeapBytes": 269496776,
+      "gcRetainedHeapP50Bytes": 251295104
+    },
+    {
+      "checkpointCount": 80,
+      "charsPerMessage": 12000,
+      "mutation": "host_status",
+      "samples": 7,
+      "saveP50Ms": 305.18265699999756,
+      "saveP95Ms": 358.40457700000843,
+      "writeBytes": [
+        48982,
+        49150,
+        47880,
+        49150,
+        47880,
+        49150,
+        47880
+      ],
+      "writeCounts": [
+        6,
+        7,
+        2,
+        7,
+        2,
+        7,
+        2
+      ],
+      "eventLoopMaxMs": 36.405247,
+      "sampledMaxRssBytes": 630554624,
+      "sampledMaxHeapBytes": 269244744,
+      "gcRetainedHeapP50Bytes": 251639568
+    }
+  ]
+}

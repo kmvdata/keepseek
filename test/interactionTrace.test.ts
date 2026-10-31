@@ -7,6 +7,37 @@ import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
 import { createNoopInteractionTrace, InteractionTraceLogService } from '../src/agent/logging/interactionTrace';
 import { formatLocalTimestamp } from '../src/shared/format';
+import { PerformanceTrace, recordLocalPerformance, withPerformanceTrace } from '../src/agent/logging/performanceTrace';
+
+test('performance flush retains local subscriptions until close and reports recovery after a transient disk failure', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-perf-recover-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const base = vscode.Uri.file(join(root, 'run')) as never;
+  const wrapped = withPerformanceTrace(createNoopInteractionTrace(), base, { sessionId: 's' });
+  await wrapped.flush();
+  recordLocalPerformance({ type: 'checkpoint_store', sessionId: 's', durationMs: 123 });
+  await wrapped.flush();
+  assert.match(await readFile(join(root, 'run.perf-0.jsonl'), 'utf8'), /123/);
+  await wrapped.close!();
+  recordLocalPerformance({ type: 'checkpoint_store', sessionId: 's', durationMs: 456 });
+  await wrapped.flush();
+  assert.doesNotMatch(await readFile(join(root, 'run.perf-0.jsonl'), 'utf8'), /"durationMs":456/);
+
+  const perf = new PerformanceTrace(vscode.Uri.file(join(root, 'fault')) as never, 'fault');
+  const original = vscode.workspace.fs.writeFile;
+  let attempts = 0;
+  vscode.workspace.fs.writeFile = async () => { attempts++; throw new Error('disk unavailable'); };
+  try {
+    perf.record({ type: 'run_start' }); await perf.flush();
+    for (let i = 0; i < 10; i++) { perf.record({ type: 'tool_call', toolName: 'read' }); await perf.flush(); }
+    assert.equal(attempts, 1, 'backoff never schedules its own retry loop');
+  } finally { vscode.workspace.fs.writeFile = original; }
+  await new Promise(resolve => setTimeout(resolve, 1010));
+  perf.record({ type: 'run_end', stopReason: 'completed' }); await perf.flush();
+  assert.match(await readFile(join(root, 'fault.perf-0.jsonl'), 'utf8'), /completed/);
+  const index = JSON.parse(await readFile(join(root, 'fault.perf-index.json'), 'utf8'));
+  assert.equal(index.writeFailures, 1);
+});
 
 test('local timestamps preserve instants across local midnight, timezone changes, DST and fractional offsets', () => {
   const originalTimezone = process.env.TZ;
@@ -100,6 +131,7 @@ test('local and workspace-fs traces use local dates for events, filenames, appen
       const perf = await readTrace(truncated.logUri! + '.perf-0.jsonl');
       assert.ok(perf.some(event => event.requestId === 'after-detail-limit'));
       assert.ok(perf.some(event => event.stopReason === 'completed'));
+      await trace.close?.(); await truncated.close?.();
     }
     const timestamps: string[] = [];
     createNoopInteractionTrace((_event, timestamp) => timestamps.push(timestamp)).record({ type: 'disabled_trace_event' });

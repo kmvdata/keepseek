@@ -11,7 +11,7 @@ import { ContextWindowCalibrationStore } from '../src/agent/contextWindowCalibra
 import { prepareEvidenceEnvelope } from '../src/agent/evidence/shaping';
 import { ToolEvidencePersistenceError, ToolEvidenceStore } from '../src/agent/evidence/store';
 import { getAgentTools, READ_EVIDENCE_TOOL_NAME } from '../src/agent/protocol';
-import { AgentInterruptedError, checkpointCopy, createRunCheckpoint, grantCheckpointToolBudgetSegment, migrateLegacyCapacityCheckpoint, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
+import { AgentInterruptedError, checkpointCopy, createRunCheckpoint, grantCheckpointToolBudgetSegment, migrateLegacyCapacityCheckpoint, recoverNoProgressWithUserTurn, recoveryBlocker, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import { isContextTooLongError, ToolResultAdmissionController } from '../src/agent/toolResultAdmission';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import { getScript } from '../src/webview/script';
@@ -947,6 +947,54 @@ test('no-progress fingerprints survive epoch rollover and stop only after a stra
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test('a new real user turn reopens no-progress work across all lanes without resetting budgets or replaying old tools', async t => {
+  for (const provider of ['openai-compatible', 'openai-responses', 'anthropic-compatible'] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'keepseek-progress-recovery-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const workspace = new WorkspaceToolService();
+    let reads = 0, requests = 0, recovering = false;
+    workspace.readWorkspaceFile = async () => { reads++; return JSON.stringify({ ok: true, path: 'same.ts', content: 'same body' }); };
+    const original = globalThis.fetch;
+    let cp!: RunCheckpoint;
+    globalThis.fetch = (async (_url, init) => {
+      requests++;
+      if (recovering) {
+        assert.ok(String(init?.body).includes('NEW VERIFIED INPUT'));
+        return modelResponse(provider, undefined, 'Answer using the new user evidence.');
+      }
+      return modelResponse(provider, { id: `c${requests}`, name: 'keepseek_read_workspace_file', args: '{"path":"same.ts"}' });
+    }) as typeof fetch;
+    try {
+      const input = request(provider);
+      const runner = () => new AgentRunner(workspace, undefined, undefined, undefined, undefined, undefined, vscode.Uri.file(root) as never);
+      await assert.rejects(() => runner().run(input, { onCheckpoint: async next => { cp = checkpointCopy(next); } }),
+        (error: unknown) => error instanceof AgentInterruptedError && error.reason === 'no_progress_loop');
+      assert.equal(reads, 3);
+      assert.match(recoveryBlocker(cp)!, /No-progress/);
+      const before = checkpointCopy(cp), task = cp.taskId;
+      const user = { id: 'new-real-user', role: 'user' as const, content: 'NEW VERIFIED INPUT', createdAt: '' };
+      const next = { ...input, history: [user], prompt: user.content };
+      const reopened = recoverNoProgressWithUserTurn(cp, next, cp.workspaceFolders);
+      assert.equal(reopened.taskId, task);
+      assert.deepEqual(reopened.runBudget, before.runBudget);
+      assert.deepEqual(reopened.state?.epoch?.noProgress, before.state?.epoch?.noProgress);
+      assert.deepEqual(cp, before, 'old audit checkpoint is unchanged');
+      assert.equal(reopened.usedMs, before.usedMs);
+      assert.equal(reopened.maxExecutionMs, before.maxExecutionMs);
+      assert.deepEqual(reopened.usedCostByCurrency, before.usedCostByCurrency);
+      assert.throws(() => recoverNoProgressWithUserTurn({ ...before, usedMs: 1, maxExecutionMs: 1 }, next, before.workspaceFolders), /Time budget/);
+      assert.throws(() => recoverNoProgressWithUserTurn(before, { ...next, sourceConfig: { ...input.sourceConfig!, baseUrl: 'https://other.invalid' } }, before.workspaceFolders), /context changed/);
+      recovering = true;
+      const response = await runner().run({ ...next, checkpoint: reopened }, { onCheckpoint: async value => { cp = checkpointCopy(value); } });
+      assert.equal(response.message, 'Answer using the new user evidence.');
+      assert.equal(reads, 3, 'completed tools are not executed on recovery');
+      assert.equal(response.toolRounds?.length ?? 0, 0, 'old rounds remain only in their original assistant audit');
+      assert.equal(cp.taskId, task);
+      assert.equal(cp.modelRequests, before.modelRequests + 1);
+    } finally { globalThis.fetch = original; }
+  }
+});
+
 test('logical tool budget prevents rollover from multiplying a run indefinitely', async () => {
   const workspace = new WorkspaceToolService();
   let reads = 0;
@@ -1230,6 +1278,71 @@ async function runLargeResult(provider: Provider) {
 }
 
 type Provider = 'openai-compatible' | 'openai-responses' | 'anthropic-compatible';
+
+test('capacity-pressure replay crosses two necessary epochs with mixed audit and preserves configured output', async t => {
+  for (const provider of ['openai-compatible', 'openai-responses', 'anthropic-compatible'] as const) {
+    const root = await mkdtemp(join(tmpdir(), 'keepseek-pressure-replay-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const input = request(provider);
+    input.executionLimits = undefined;
+    input.requestProtocolVersion = 10;
+    input.model = { ...input.model, contextWindowTokens: 1024000, maxOutputTokens: 393192 };
+    input.history = Array.from({ length: 154 }, (_, i) => ({ id: `audit-${i}`, role: i % 2 ? 'assistant' as const : 'user' as const,
+      content: `receipt ${i} ` + 'historic settled evidence '.repeat(150), createdAt: '',
+      contextMeta: { isProtected: true, protectedReason: 'draft_edit_result' } }));
+    input.contextCompression = { version: 1, summaries: [], protectedMessageIds: input.history.map(m => m.id),
+      protectionState: { version: 1, pendingMessageIds: [input.history[1].id], settledMessageIds: input.history.slice(2).map(m => m.id) } };
+    const audit = JSON.stringify(input.history);
+    const calibration = new ToolResultAdmissionController(1024000).state;
+    Object.assign(calibration, { declaredIdentity: input.model.id, declaredVersion: `${DEEPSEEK_MODEL_IDENTITY_VERSION}:1024000`,
+      learnedEffectiveWindowTokens: 500000, providerContextTooLongCeilingTokens: 500000,
+      lastAdjustmentSource: 'provider_context_too_long' });
+    const uri = vscode.Uri.file(root) as never;
+    await new ContextWindowCalibrationStore(uri).save({ sourceId: 'source', provider, modelId: input.model.id,
+      endpointHash: sha256(input.sourceConfig!.baseUrl) }, calibration);
+    const workspace = new WorkspaceToolService();
+    let calls = 0, summaries = 0, requests = 0;
+    workspace.readWorkspaceFile = async path => { calls++; return JSON.stringify({ ok: true, path, content: `${path}:` + 'new verified body '.repeat(2400) }); };
+    let checkpoint!: RunCheckpoint;
+    const pause = new AbortController();
+    let paused = false;
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (_url, init) => {
+      const raw = String(init?.body), body = JSON.parse(raw);
+      if (raw.includes('Create a concise semantic checkpoint')) { summaries++; return modelResponse(provider, undefined, `Bounded semantic state ${summaries}`); }
+      requests++;
+      assert.equal(body.max_tokens ?? body.max_output_tokens, 393192);
+      if ((checkpoint?.state?.epoch?.totalRollovers ?? 0) >= 2) return modelResponse(provider, undefined, 'Pressure replay complete.');
+      assert.ok(requests <= 40, 'bounded fixture must reach actual capacity instead of running forever');
+      const rootEvidence = checkpoint?.state?.epoch?.evidenceRefs.filter(item => item.toolName === 'keepseek_read_workspace_file').at(-1);
+      return modelResponse(provider, requests % 2 === 0 && rootEvidence
+        ? { id: `pressure-${requests}`, name: 'keepseek_read_evidence', args: JSON.stringify({ evidenceRef: rootEvidence.evidenceRef, maxChars: 40000 }) }
+        : { id: `pressure-${requests}`, name: 'keepseek_read_workspace_file', args: JSON.stringify({ path: `file-${requests}.ts` }) });
+    }) as typeof fetch;
+    try {
+      const save = async (cp: RunCheckpoint) => {
+        checkpoint = snapshotCheckpoint(cp);
+        if (!paused && (cp.state?.epoch?.totalRollovers ?? 0) === 1 && cp.state!.turn >= 4 && !cp.state?.pending) {
+          paused = true; pause.abort();
+        }
+      };
+      const runner = () => new AgentRunner(workspace, undefined, undefined, undefined, undefined, undefined, uri);
+      await assert.rejects(() => runner().run({ ...input, signal: pause.signal }, { onCheckpoint: save }));
+      const taskId = checkpoint.taskId, usedMs = checkpoint.usedMs;
+      const response = await runner().run({ ...input, checkpoint: checkpointCopy(checkpoint) }, { onCheckpoint: save });
+      assert.equal(response.message, 'Pressure replay complete.');
+      assert.ok(checkpoint.state!.epoch!.totalRollovers >= 2);
+      assert.ok(summaries <= checkpoint.state!.epoch!.totalRollovers);
+      assert.ok(calls > summaries, 'capacity boundaries must not produce a summary every tool round');
+      assert.equal(JSON.stringify(input.history), audit);
+      assert.ok(checkpoint.state?.epoch?.baseHistoryEvidenceRef);
+      assert.ok(checkpoint.state!.epoch!.rollovers.every(r => r.afterEstimatedPromptTokens! < r.estimatedPromptTokens));
+      assert.equal(checkpoint.taskId, taskId); assert.ok(checkpoint.usedMs >= usedMs);
+      t.diagnostic(JSON.stringify({ provider, requests, calls, summaries, taskPreserved: true,
+        configuredOutput: 393192, rollovers: checkpoint.state!.epoch!.rollovers.map(r => ({ before: r.estimatedPromptTokens, after: r.afterEstimatedPromptTokens })) }));
+    } finally { globalThis.fetch = original; }
+  }
+});
 
 test('offline 120-round replay across three protocols delivers pages and resumes without re-executing completed reads', async t => {
   for (const provider of ['openai-compatible', 'openai-responses', 'anthropic-compatible'] as const) {

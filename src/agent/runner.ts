@@ -1486,7 +1486,8 @@ export class AgentLoop {
         estimatedInputTokens: this.estimateCurrentProviderInputTokens(request, messages, toolsForTurn, providerRunState),
         configuredMaxOutputTokens: runtimeConfig.maxTokens, phase: 'tool', remainingBatchResults: 0
       });
-      if (!pending && !checkpoint.modelStepRequestHash && beforeAdmission.shouldRollover && epoch.turnInEpoch > 0) {
+      if (!pending && !checkpoint.modelStepRequestHash && beforeAdmission.shouldRollover
+        && (epoch.turnInEpoch > 0 || (epoch.index === 0 && projection.compressibleMessageIds.length > 0))) {
         await rolloverEpoch('minimum_envelope_unfit');
       }
       const estimatedInputBeforeRequest = this.estimateCurrentProviderInputTokens(
@@ -2487,7 +2488,7 @@ export class AgentLoop {
       throw error;
     } finally {
       trace.record({ type: 'run_phase', phase: activePhase, status: 'end', durationMs: performance.now() - phaseStarted });
-      await trace.flush();
+      await (trace.close?.() ?? trace.flush());
     }
   }
 

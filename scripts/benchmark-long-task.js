@@ -91,4 +91,5 @@ async function main() {
   const label = (process.argv[2] || 'result').replace(/[^a-z0-9_-]/gi,'');
   await fs.writeFile(path.join(__dirname, '..', 'doc', `long-task-perf-${label}.json`), JSON.stringify({ kind: 'synthetic offline real filesystem benchmark', node: process.version, platform: process.platform, arch: process.arch, results }, null, 2)+'\n');
 }
-main().catch(e=>{console.error(e);process.exitCode=1;});
+module.exports = { fixture, percentile };
+if (require.main === module) main().catch(e=>{console.error(e);process.exitCode=1;});

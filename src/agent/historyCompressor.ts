@@ -1,6 +1,5 @@
-import { calculateOutputBudget } from '../shared/outputBudget';
 import { recordLocalPerformance } from './logging/performanceTrace';
-import { applyProviderRequestBudget, loadProviderRequestBudget, resolveProviderRequestBudget } from './requestBudget';
+import { applyProviderRequestBudget, loadProviderRequestBudget, loadProviderRequestCalibration, resolveProviderRequestBudget } from './requestBudget';
 import { randomUUID, createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import {
@@ -9,10 +8,10 @@ import {
 } from '../shared/config';
 import { MissingModelSourceApiKeyError, resolveModelSourceConfig } from '../accounts/accountResolver';
 import type { ModelSourceConfigSnapshot, ModelSourceProvider } from '../accounts/types';
+import { MODEL_SOURCE_PROVIDERS } from '../accounts/types';
 import {
   getAgentContextCompressionSettings,
   getAgentRuntimeProfile,
-  getEffectiveContextWindowTokens,
   type ContextCompressionSettings
 } from '../shared/modelProfiles';
 import { getErrorMessage } from '../shared/errors';
@@ -47,7 +46,7 @@ import {
   getDurableProtectedMessageIds
 } from './historyProjection';
 import { estimateTokenCount } from './tokenEstimate';
-import { buildProviderRequestProjection } from './providerRequestProjection';
+import { buildProviderPayloadProjection, buildProviderRequestProjection } from './providerRequestProjection';
 import { createUsageEvent, normalizeDeepSeekUsage } from './usageStats';
 import { createUsageLedgerRecords, createUsagePriceSnapshot } from './usageLedger';
 import { createProviderCacheObservation } from './cacheObservation';
@@ -75,6 +74,7 @@ export interface HistoryCompressionRefreshInput {
   usageSource?: Extract<UsageSource, 'summary' | 'background'>;
   /** Per-run credentials shared with AgentRunner; omitted for legacy direct callers. */
   sourceConfig?: ModelSourceConfigSnapshot;
+  calibration?: Parameters<typeof resolveProviderRequestBudget>[0]['calibration'];
 }
 
 export interface HistoryCompressionRefreshResult {
@@ -122,6 +122,14 @@ export class HistoryCompressor {
     private readonly completion?: HistorySummaryCompletion,
     private readonly globalStorageUri?: vscode.Uri
   ) {}
+
+  public async prepareInput(input: HistoryCompressionRefreshInput): Promise<HistoryCompressionRefreshInput> {
+    const measured = measureCompressionProjection(input, input.session.contextCompression);
+    const calibration = await loadProviderRequestCalibration({ model: input.model,
+      provider: measured.provider, sourceId: input.sourceConfig?.sourceId ?? input.model.sourceId,
+      baseUrl: input.sourceConfig?.baseUrl, body: measured.body, calibration: input.calibration }, this.globalStorageUri);
+    return { ...input, calibration };
+  }
 
   public planRefresh(input: HistoryCompressionRefreshInput): HistoryCompressionRefreshPlan {
     const settings = input.settings ?? getAgentContextCompressionSettings(input.model, input.agentSettings);
@@ -194,6 +202,7 @@ export class HistoryCompressor {
   }
 
   public async refresh(input: HistoryCompressionRefreshInput): Promise<HistoryCompressionRefreshResult> {
+    input = await this.prepareInput(input);
     const started = performance.now();
     const before = measureCompressionProjection(input, input.session.contextCompression);
     const settings = input.settings ?? getAgentContextCompressionSettings(input.model, input.agentSettings);
@@ -260,6 +269,11 @@ export class HistoryCompressor {
         sourceConfig: input.sourceConfig,
         sessionId: input.session.id
       });
+      if (input.signal?.aborted) return {
+        state: protectedState.state, changed: protectedState.changed, reason: 'skipped',
+        usageEvents: completion.usageEvent ? [completion.usageEvent] : undefined,
+        usageLedgerRecords: completion.usageLedgerRecords
+      };
       let content = completion.content.trim();
 
       if (!content) {
@@ -613,18 +627,25 @@ class HistorySummaryRequestError extends Error {
   }
 }
 
-function measureCompressionProjection(input: HistoryCompressionRefreshInput, state?: ContextCompressionState) {
+export function measureCompressionProjection(input: HistoryCompressionRefreshInput, state?: ContextCompressionState) {
   const p = buildProviderRequestProjection({ model: input.model, agentSettings: input.agentSettings,
     contextFiles: input.contextFiles, currentRunContext: input.currentRunContext, contextInstructions: input.contextInstructions,
     history: input.session.messages, contextCompression: state, language: input.language, prompt: input.prompt,
     slimToolNames: input.slimToolNames, requestProtocolVersion: input.requestProtocolVersion,
     provider: input.sourceConfig?.provider, sourceId: input.sourceConfig?.sourceId, baseUrl: input.sourceConfig?.baseUrl });
-  const body = p.responses ? { model: input.model.id, input: p.responses.input, tools: p.responses.tools, stream: true as const, store: false as const }
-    : p.anthropic ? { model: input.model.id, system: p.anthropic.system, messages: p.anthropic.messages, tools: p.anthropic.tools, max_tokens: p.runtimeProfile.maxTokens, stream: true as const }
-      : { model: input.model.id, messages: p.messages, tools: p.tools, stream: true as const };
-  return { budget: resolveProviderRequestBudget({ model: input.model, provider: input.sourceConfig?.provider ?? (p.responses ? 'openai-responses' : p.anthropic ? 'anthropic-compatible' : 'openai-compatible'), body }),
+  const provider: ModelSourceProvider = input.sourceConfig?.provider
+    ?? (MODEL_SOURCE_PROVIDERS.includes(input.model.provider as ModelSourceProvider)
+      ? input.model.provider as ModelSourceProvider : 'openai-compatible');
+  const body = buildProviderPayloadProjection({ modelId: input.model.id, maxOutputTokens: p.runtimeProfile.maxTokens,
+    provider, messages: p.messages, tools: p.tools, native: p.responses
+      ? { protocol: 'openai-responses', ...p.responses }
+      : p.anthropic ? { protocol: 'anthropic-messages', ...p.anthropic } : undefined });
+  return { body, provider, budget: resolveProviderRequestBudget({ model: input.model, provider, body,
+      sourceId: input.sourceConfig?.sourceId ?? input.model.sourceId, baseUrl: input.sourceConfig?.baseUrl,
+      calibration: input.calibration }),
     fingerprint: createHash('sha256').update(JSON.stringify({ body, output: p.runtimeProfile.maxTokens,
-      window: p.runtimeProfile.contextWindowTokens, source: input.sourceConfig?.sourceId, endpoint: input.sourceConfig?.baseUrl })).digest('hex'),
+      window: p.runtimeProfile.contextWindowTokens, calibration: input.calibration,
+      source: input.sourceConfig?.sourceId ?? input.model.sourceId, endpoint: input.sourceConfig?.baseUrl })).digest('hex'),
     protectedCount: p.historyProjection.protectedMessageIds.length, compressibleCount: p.historyProjection.compressibleMessageIds.length };
 }
 
@@ -656,38 +677,9 @@ function hasProtectedMessageIdsChanged(left: readonly string[], right: readonly 
   return right.some((id) => !leftIds.has(id));
 }
 
-function estimateRawConversationTokens(input: HistoryCompressionRefreshInput): number {
-  const projection = buildProviderRequestProjection({
-    model: input.model,
-    agentSettings: input.agentSettings,
-    contextFiles: input.contextFiles,
-    currentRunContext: input.currentRunContext,
-    contextInstructions: input.contextInstructions,
-    history: input.session.messages,
-    contextCompression: input.session.contextCompression,
-    language: input.language,
-    prompt: input.prompt,
-    slimToolNames: input.slimToolNames,
-    requestProtocolVersion: input.requestProtocolVersion,
-    provider: input.sourceConfig?.provider,
-    sourceId: input.sourceConfig?.sourceId ?? input.model.sourceId,
-    baseUrl: input.sourceConfig?.baseUrl
-  });
-  return resolveProviderRequestBudget({ model: input.model, provider: input.sourceConfig?.provider ?? 'openai-compatible',
-    body: projection.anthropic
-      ? { model: input.model.id, system: projection.anthropic.system, messages: projection.anthropic.messages,
-        tools: projection.anthropic.tools, stream: true, max_tokens: projection.runtimeProfile.maxTokens }
-      : projection.responses
-        ? { model: input.model.id, input: projection.responses.input, tools: projection.responses.tools, stream: true, store: false }
-        : { model: input.model.id, messages: projection.messages, tools: projection.tools, stream: true }
-  }).estimatedInputTokens;
-}
-
 function estimateRawConversationRatio(input: HistoryCompressionRefreshInput): number {
-  const maxTokens = getEffectiveContextWindowTokens(input.model);
-  const budget = calculateOutputBudget({ modelMaxOutputTokens: getAgentRuntimeProfile(input.model, input.agentSettings).maxTokens,
-    estimatedInputTokens: estimateRawConversationTokens(input), effectiveWindowTokens: maxTokens });
-  return (budget.inputBudgetTokens + budget.modelMaxOutputTokens + budget.safetyTokens) / maxTokens;
+  const { budget } = measureCompressionProjection(input, input.session.contextCompression);
+  return (budget.inputBudgetTokens + budget.modelMaxOutputTokens + budget.safetyTokens) / budget.effectiveWindowTokens;
 }
 
 function isRawConversationNearContextWindow(

@@ -120,6 +120,7 @@ export class AgentRequestCoordinator {
   public async refreshContextCompressionBeforeRun(
     input: HistoryCompressionRefreshInput
   ): Promise<HistoryCompressionRefreshResult | undefined> {
+    input = await this.historyCompressor.prepareInput(input);
     let plan = this.historyCompressor.planRefresh(input);
     if (plan.mode !== 'sync') {
       return plan.changed
@@ -177,10 +178,14 @@ export class AgentRequestCoordinator {
     return await this.historyCompressor.refresh(input);
   }
 
-  public scheduleBackgroundContextCompressionRefresh(
+  public async scheduleBackgroundContextCompressionRefresh(
     input: HistoryCompressionRefreshInput,
     onUpdate: BackgroundContextCompressionRefreshUpdateHandler
-  ): void {
+  ): Promise<void> {
+    const expected = createBackgroundRefreshExpectation(input.session);
+    input = await this.historyCompressor.prepareInput(input);
+    if (input.session.messages.length !== expected.expectedMessageCount
+      || input.session.messages.at(-1)?.id !== expected.expectedLastMessageId) return;
     const sessionId = input.session.id;
     const plan = this.historyCompressor.planRefresh(input);
     if (plan.changed) {

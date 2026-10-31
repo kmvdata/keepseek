@@ -23,7 +23,7 @@ import {
   normalizeSessionUsageStatsValue,
   normalizeTurnUsageStatsValue
 } from '../src/agent/usageStats';
-import { applyUsageLedgerDeltaToSessionStats, applyUsageLedgerSummaryToSessionStats } from '../src/agent/usageStats';
+import { applyUsageLedgerDeltaToSessionStats, applyUsageLedgerSummaryToSessionStats, rebuildSessionUsageStatsFromLedger } from '../src/agent/usageStats';
 import { summarizeUsageLedger, mergePendingUsageLedger, createUsageLedgerRecords, createUsagePriceSnapshot } from '../src/agent/usageLedger';
 import { getVisibleMessages, normalizeStoredSessions } from '../src/sessions/chatSessionStore';
 import type { ContextUsageEstimate, SubagentSessionUsageStats, SubagentTerminalStatus, UsageSource } from '../src/shared/types';
@@ -32,6 +32,33 @@ import { getInputScript } from '../src/webview/input/script';
 import { getInputStyles } from '../src/webview/input/styles';
 import { getInputTemplate } from '../src/webview/input/template';
 import { getScript } from '../src/webview/script';
+import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
+
+test('host ledger flush preserves ref damage and does not spin after storage failure', async () => {
+  const price = createUsagePriceSnapshot({ originalModelId: 'fixture', sourceId: 'fixture', provider: 'qwencloud',
+    protocol: 'chat_completions', supportsBilling: false });
+  const records = createUsageLedgerRecords({ requestId: 'survivor', attempts: [price], source: 'executor' });
+  const session = { id: 's', usageLedger: { version: 1, records },
+    usageLedgerRef: { version: 2, sessionId: 's', incomplete: true, damagedBucketCount: 1 } } as unknown as import('../src/shared/types').ChatSession;
+  let writes = 0, fail = true;
+  const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    usageLedgerFlushes: new Map<string, Promise<void>>(),
+    usageLedgerStore: {
+      appendMany: async () => { writes++; if (fail) throw new Error('injected storage failure'); },
+      rebuild: async () => ({ ledger: { version: 1, records, incomplete: false, legacyAggregate: false }, damagedBucketCount: 0 })
+    }, sessionStore: { persist: async () => {} }
+  }) as { queueUsageLedgerFlush(session: import('../src/shared/types').ChatSession): void; usageLedgerFlushes: Map<string, Promise<void>> };
+  host.queueUsageLedgerFlush(session);
+  await host.usageLedgerFlushes.get(session.id);
+  await new Promise(resolve => setTimeout(resolve, 160));
+  assert.equal(writes, 1);
+  assert.equal(session.usageLedger?.records.length, records.length);
+  fail = false;
+  host.queueUsageLedgerFlush(session);
+  await host.usageLedgerFlushes.get(session.id);
+  assert.equal(writes, 2);
+  assert.equal(createUsageDetailsViewModel({ sessionUsageStats: session.usageStats }).session.total.attemptStatsIncomplete, true);
+});
 
 test('attempt and usage response counts survive normalization, aggregation and host view conversion', () => {
   const normalized = normalizeSessionUsageStatsValue({ promptTokens: 97349731, completionTokens: 534073,
@@ -77,6 +104,19 @@ test('durable ledger rebuild includes attempts arriving during its await without
   assert.equal(summarizeUsageLedger(merged).totalTokens, 11);
   assert.deepEqual(mergePendingUsageLedger(merged, pending), merged);
   assert.equal(pending.records.length, 2, 'unflushed records remain available for the next durable batch');
+});
+
+test('ledger reconstruction preserves incomplete durable and pending provenance through the host view', () => {
+  const price = createUsagePriceSnapshot({ originalModelId: 'fixture', sourceId: 'fixture', provider: 'qwencloud',
+    protocol: 'chat_completions', supportsBilling: false });
+  const records = createUsageLedgerRecords({ requestId: 'surviving-bucket', attempts: [price], source: 'executor' });
+  for (const metadata of [{ incomplete: true }, { legacyAggregate: true }]) {
+    const stats = rebuildSessionUsageStatsFromLedger(records, metadata);
+    const view = createUsageDetailsViewModel({ sessionUsageStats: normalizeSessionUsageStatsValue(stats) });
+    assert.equal(view.session.total.providerAttemptCount, 1, 'surviving attempts are a lower bound');
+    assert.equal(view.session.total.attemptStatsIncomplete, true);
+  }
+  assert.equal(rebuildSessionUsageStatsFromLedger(records)?.attemptStatsIncomplete, false);
 });
 
 test('source usage keeps separate currencies, priced zero cost, partial pricing, and cache coverage through merges', () => {

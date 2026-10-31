@@ -1,5 +1,7 @@
 # KeepSeek Agent 运行时工作流
 
+2026-10-31：无进展停止的普通 Continue 仍被拒绝；真实新 user 可在兼容来源/工作区/授权条件下恢复同 task，沿用预算和进展窗口，未知工具或未完成 continuation 仍拒绝。迁移在 manifest 提交前可安全取消，停止写入者是升级前提。实际回放、故障与现场边界见 [续接验收](long-task-rectification-resume-report.md)。
+
 > 本文是运行时主线的交接文档：从扩展激活、请求构建、流式工具循环，到审批、副作用、长任务和崩溃恢复。目录职责见 [`keepseek-code-architecture.md`](keepseek-code-architecture.md)，请求字节与上下文容量见 [`cache_keepseek.md`](cache_keepseek.md)，子代理见 [`../SUBAGENTS.md`](../SUBAGENTS.md)。
 
 ## 1. 运行时边界

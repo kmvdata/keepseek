@@ -105,7 +105,7 @@ test('refreshContextCompressionBeforeRun waits for background refresh before rep
     await releaseBackground.promise;
     return createRefreshResult(backgroundState);
   });
-  coordinator.scheduleBackgroundContextCompressionRefresh(input, async (update) => {
+  await coordinator.scheduleBackgroundContextCompressionRefresh(input, async (update) => {
     backgroundUpdateStarted.resolve();
     await releaseBackgroundUpdate.promise;
     session.contextCompression = update.result.state;
@@ -147,7 +147,7 @@ test('refreshContextCompressionBeforeRun runs sync refresh when background resul
     await releaseBackground.promise;
     return createRefreshResult(backgroundState);
   });
-  coordinator.scheduleBackgroundContextCompressionRefresh(input, (update) => {
+  await coordinator.scheduleBackgroundContextCompressionRefresh(input, (update) => {
     session.contextCompression = update.result.state;
   });
 
@@ -167,7 +167,7 @@ test('refreshContextCompressionBeforeRun runs sync refresh when background resul
   assert.equal(compressor.refreshCalls.length, 2);
 });
 
-test('hot sessions defer paid background summaries to protect the provider prefix', () => {
+test('hot sessions defer paid background summaries to protect the provider prefix', async () => {
   const compressor = new FakeHistoryCompressor();
   const coordinator = new AgentRequestCoordinator(compressor);
   const session = createSession();
@@ -181,7 +181,7 @@ test('hot sessions defer paid background summaries to protect the provider prefi
     lastProviderRequestAt: session.updatedAt
   };
   compressor.queuePlan(createPlan('background', createCompressionState('hot')));
-  coordinator.scheduleBackgroundContextCompressionRefresh(createRefreshInput(session), () => undefined);
+  await coordinator.scheduleBackgroundContextCompressionRefresh(createRefreshInput(session), () => undefined);
   assert.equal(compressor.refreshCalls.length, 0);
 });
 

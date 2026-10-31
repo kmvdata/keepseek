@@ -1,5 +1,7 @@
 # KeepSeek Agent 底层 API 通信详解：引用展开与真实 payload
 
+2026-10-31：`measureCompressionProjection`通过`buildProviderPayloadProjection`测量与发送相同的三协议context surface，显式携带来源fallback及校准。新真实user解除无进展停止时沿用原task与预算，旧工具轮不重复发表到新assistant；普通Continue不授权新动作。生产链验收入口为`accept-long-task-live.js`，旧behavior eval的独立上限不能证明生产输出预算。范围见 [续接验收](long-task-rectification-resume-report.md)。
+
 本文档面向希望理解 KeepSeek Agent 底层工作方式的开发者和高级用户。文档说明引用、上下文、项目指令和 Skill 如何进入权威请求投影，以及 Chat Completions、OpenAI Responses、Anthropic Messages 三种独立协议的真实 payload。Anthropic 是原生 Messages 客户端，不是 OpenAI→Anthropic 转换器。
 
 ## 1. 总体数据流

@@ -6,6 +6,8 @@
 
 ## 1. 先建立整体心智模型
 
+2026-10-31 长任务续接：压缩规划与收益测量通过共享 payload 和来源隔离校准；`runCheckpoint.recoverNoProgressWithUserTurn` 只接受真实新 user，保留逻辑任务预算与进展窗口。`SessionObjectStore` 迁移有可观察阶段和提交前取消，未知/遗留锁不自动删除；`PerformanceTrace` 将 flush 与 close 分开。详见 [续接验收](long-task-rectification-resume-report.md)。
+
 2026-10-30 输出预算补充：`shared/outputBudget.ts` 定义唯一单次计算规则；`agent/requestBudget.ts` 将实际三协议请求投影转换为版本化预算快照。Runner、结果准入、压缩器和 reviewer 共用该规则。能力解析仍在 accounts/modelCatalog，按 sourceId + modelId 取值；恢复策略在 runCheckpoint/runner，用户诊断在 runDetails/Webview。行为及兼容迁移见 [输出预算整改记录](model-output-budget-rectification.md)。
 
 KeepSeek 是一个运行在 VS Code Extension Host 中的编程 Agent。它由两部分组成：

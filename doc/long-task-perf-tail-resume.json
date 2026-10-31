@@ -1,0 +1,23 @@
+{
+  "kind": "offline bounded trace write amplification; forced flush batches, not provider latency",
+  "results": [
+    {
+      "label": "B",
+      "events": 1000,
+      "flushes": 50,
+      "wallMs": 169.34731100000002,
+      "writeFileBytes": 4395823,
+      "writeFileCalls": 100,
+      "retainedBytes": 172580
+    },
+    {
+      "label": "C",
+      "events": 1000,
+      "flushes": 50,
+      "wallMs": 160.59376,
+      "writeFileBytes": 4409052,
+      "writeFileCalls": 100,
+      "retainedBytes": 172893
+    }
+  ]
+}

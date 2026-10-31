@@ -307,6 +307,48 @@ export function recoveryBlocker(cp: RunCheckpoint, currentModel?: AgentRequest['
   return undefined;
 }
 
+/** A real, persisted user turn may reopen a stopped task, but cannot grant a
+ * fresh budget or forget the no-progress window. Ordinary Continue stays blocked.
+ * Caller must have checked workspace trust and current external grants. */
+export function recoverNoProgressWithUserTurn(cp: RunCheckpoint, request: AgentRequest,
+  workspaceFolders: readonly string[]): RunCheckpoint {
+  const user = request.history.at(-1);
+  if (cp.stopReason !== 'no_progress_loop' || !cp.state || cp.state.pending || cp.state.continuation
+    || !user || user.role !== 'user' || !(user.expandedContent ?? user.content).trim()
+    || cp.request.history.some(message => message.id === user.id)) throw new Error('A new persisted user turn is required for no-progress recovery');
+  const source = request.sourceConfig;
+  if (!source || source.sourceId !== cp.source.sourceId || source.provider !== cp.source.provider
+    || endpointHash(source.baseUrl) !== cp.source.endpointHash || request.model.id !== cp.source.modelId
+    || JSON.stringify(request.model) !== JSON.stringify(cp.request.model)
+    || normalizeExecutionMode(request.executionMode) !== normalizeExecutionMode(cp.request.executionMode)
+    || request.contextInstructions !== cp.request.contextInstructions
+    || JSON.stringify(workspaceFolders) !== JSON.stringify(cp.workspaceFolders)
+    || cp.request.authorizedExternalReferenceUris?.some(uri => !request.authorizedExternalReferenceUris?.includes(uri))) {
+    throw new Error('No-progress recovery context changed; restore the original model, workspace and permissions');
+  }
+  const copy = checkpointCopy(cp);
+  copy.stopReason = undefined;
+  const blocker = recoveryBlocker(copy, request.model);
+  if (blocker) throw new Error(blocker);
+  const content = user.providerContent ?? (user.expandedContent ?? user.content).trim();
+  copy.request = createRunCheckpoint(request, cp.maxExecutionMs, cp.limitSource, cp.workspaceFolders, cp.maxCost).request;
+  copy.request.executionLimits = structuredClone(cp.request.executionLimits);
+  copy.request.approvalRootTaskId = cp.request.approvalRootTaskId;
+  copy.status = 'interrupted'; copy.error = undefined; copy.finalResponse = undefined;
+  copy.state!.messages.push({ role: 'user', content });
+  const native = copy.state!.provider;
+  if (native?.protocol === 'openai-responses') {
+    native.input.push({ role: 'user', content }); native.replayItems = [];
+  } else if (native?.protocol === 'anthropic-messages') {
+    native.messages.push({ role: 'user', content: [{ type: 'text', text: content }] }); native.replayMessages = [];
+  }
+  // Old rounds stay in the preceding assistant's immutable audit. The next
+  // assistant publishes only its new rounds; execution counters remain cumulative.
+  copy.state!.toolRounds = []; copy.state!.completedReplay = undefined; copy.state!.reasoningParts = [];
+  copy.updatedAt = new Date().toISOString();
+  return copy;
+}
+
 export function isCostLimitExhausted(cp: Pick<RunCheckpoint, 'maxCost' | 'usedCostByCurrency'>): boolean {
   const limit = cp.maxCost ?? 0;
   return limit > 0 && Object.values(cp.usedCostByCurrency ?? {}).some((cost) => cost >= limit);

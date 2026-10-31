@@ -358,6 +358,19 @@ export class ChatSessionStore {
     await completed;
   }
 
+  public async getRecoveryCheckpoint(messageId: string): Promise<import('../agent/runCheckpoint').RunCheckpoint | undefined> {
+    const session = this.getActiveSession();
+    const message = session.messages.at(-1);
+    if (message?.id !== messageId) return undefined;
+    if (message.runCheckpoint) return message.runCheckpoint;
+    if (!message.runCheckpointArchive) return undefined;
+    const stored = await this.sessionStorage.loadSession?.(this.workspaceScope.key, session.id);
+    // Recheck the live tail after asynchronous I/O. Never attach stale recovery.
+    if (this.getActiveSession() !== session || session.messages.at(-1) !== message) return undefined;
+    const cp = stored?.messages.at(-1);
+    return cp?.id === messageId ? cp.runCheckpoint : undefined;
+  }
+
   private startPersistenceDrain(): void {
     if (this.persistenceDrain) return;
     const drain = this.drainPersistence();

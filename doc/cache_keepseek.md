@@ -1,5 +1,7 @@
 # KeepSeek 请求缓存与上下文投影
 
+2026-10-31：摘要规划、净收益和阈值测量共用最终 payload builder，并使用按source/endpoint/model加载的校准窗口。初始已有可压缩历史过满也可触发必要Epoch；completion返回时已取消不采纳新摘要。真实user/静态system/冻结schema保持。新增三协议双边界回放见 [续接验收](long-task-rectification-resume-report.md)。
+
 > 面向维护者与接手开发的 AI。本文描述当前实现中的请求字节稳定性、历史投影、Evidence/Context Epoch 与缓存诊断。运行时总流程见 [`keepseek-agent-runtime-workflow.md`](keepseek-agent-runtime-workflow.md)，字段级请求示例见 [`keepseek-api-payload-reference.md`](keepseek-api-payload-reference.md)。
 
 ## 1. 核心结论

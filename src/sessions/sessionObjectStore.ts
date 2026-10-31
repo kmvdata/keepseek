@@ -4,8 +4,9 @@ import * as vscode from 'vscode';
 import { writeBytesAtomic, writeJsonAtomic } from '../shared/atomicStorage';
 import type { ChatMessage, ChatSession } from '../shared/types';
 import { getVisibleMessages } from './chatSessionStore';
-import { freezeTree } from './persistenceSnapshot';
+import { freezeTree, isFrozenTree } from './persistenceSnapshot';
 import { recordLocalPerformance } from '../agent/logging/performanceTrace';
+import { getConfiguredKeepseekLanguage, localize } from '../shared/i18n';
 
 type Encoded = null | string | number | boolean | { ref: string };
 type ObjectNode = { kind: 'array'; values: Encoded[] } | { kind: 'object'; entries: Array<[string, Encoded]> } | { kind: 'text'; text: string };
@@ -32,7 +33,8 @@ export class SessionObjectStore {
   private revision?: number;
   private writeBytes = 0;
   private writeObjects = 0;
-  public constructor(private readonly shard: vscode.Uri, private readonly offlineRecoveryCopy = false) {}
+  public constructor(private readonly shard: vscode.Uri, private readonly offlineRecoveryCopy = false,
+    private readonly migrationOptions?: { signal?: AbortSignal; onProgress?: (phase: string, completed: number, total: number) => void }) {}
   private directory(): vscode.Uri { return vscode.Uri.joinPath(this.shard, '..', `${this.shard.path.split('/').at(-1)}.objects`); }
   private objectUri(hash: string): vscode.Uri {
     if (!HASH.test(hash)) throw new Error('Invalid session object hash');
@@ -73,7 +75,7 @@ export class SessionObjectStore {
     if (typeof value === 'string') return value.length > 4096 ? { ref: await this.putNode({ kind: 'text', text: value }) } : value;
     if (typeof value === 'number' || typeof value === 'boolean') return value;
     if (typeof value !== 'object') throw new Error('Non-JSON session value');
-    const cached = Object.isFrozen(value) ? this.frozenRefs.get(value) : undefined;
+    const cached = isFrozenTree(value) ? this.frozenRefs.get(value) : undefined;
     if (cached) return { ref: cached };
     let node: ObjectNode;
     if (Array.isArray(value)) {
@@ -93,7 +95,7 @@ export class SessionObjectStore {
       node = { kind: 'object', entries };
     }
     const hash = await this.putNode(node);
-    if (Object.isFrozen(value)) this.frozenRefs.set(value, hash);
+    if (isFrozenTree(value)) this.frozenRefs.set(value, hash);
     return { ref: hash };
   }
   private async object(value: unknown): Promise<string> {
@@ -176,9 +178,23 @@ export class SessionObjectStore {
       const revision = prior?.version === 3 ? prior.revision : 0;
       if (revision && this.revision === undefined) throw new Error('Existing session must be loaded before saving');
       if (this.revision !== undefined && revision !== this.revision) throw new Error('Stale session writer; reload before saving');
+      const migrating = prior?.version === 2;
+      const saveGraph = async (progress?: vscode.Progress<{ message?: string }>, token?: vscode.CancellationToken): Promise<number> => {
+      const report = (phase: string, completed: number, total: number) => {
+        if (!migrating) return;
+        this.migrationOptions?.onProgress?.(phase, completed, total);
+        progress?.report({ message: `${phase}: ${completed}/${total}` });
+      };
+      const checkCancelled = () => {
+        if (migrating && (token?.isCancellationRequested || this.migrationOptions?.signal?.aborted)) {
+          throw new Error('Session migration cancelled before commit; original session retained');
+        }
+      };
+      checkCancelled();
       const { messages, ...header } = session;
       const entries: SessionManifest['messages'] = [];
       for (const message of messages) {
+        checkCancelled(); report('encode', entries.length, messages.length);
         const { runCheckpoint, runCheckpointArchive, ...body } = message;
         delete body.runState;
         if (!runCheckpoint && runCheckpointArchive && !this.written.has(runCheckpointArchive.objectHash)) {
@@ -198,10 +214,12 @@ export class SessionObjectStore {
       // bytes permanently until explicit session deletion (rollback support).
       if (previousBytes && prior?.version !== 3) {
         const verificationCache = new Map<string, unknown>();
-        for (const entry of entries) {
+        for (const [index, entry] of entries.entries()) {
+          checkCancelled(); report('verify', index, entries.length);
           await this.decode(entry.body, verificationCache);
           if (entry.checkpoint) await this.decode(entry.checkpoint, verificationCache);
         }
+        checkCancelled(); report('backup', 0, 1);
         await writeBytesAtomic(vscode.Uri.joinPath(this.directory(), 'legacy-v2.json'), previousBytes!, { durable: true });
         this.writeBytes += previousBytes!.byteLength;
         // Older writers cannot honor the new lock. Refuse a concurrent legacy
@@ -209,12 +227,13 @@ export class SessionObjectStore {
         const latest = await vscode.workspace.fs.readFile(this.shard);
         if (Buffer.compare(previousBytes, latest) !== 0) throw new Error('Legacy session changed during migration');
       }
+      checkCancelled(); report('commit', 0, 1);
       const encoded = performance.now();
       await writeJsonAtomic(this.shard, manifest, { durable: true });
       this.revision = manifest.revision;
       messages.forEach((message, index) => {
         const entry = entries[index];
-        if (entry.summary?.canResume && index === messages.length - 1) { delete message.runCheckpointArchive; return; }
+        if (entry.summary && entry.summary.status !== 'completed' && index === messages.length - 1) { delete message.runCheckpointArchive; return; }
         if (entry.checkpoint && entry.summary) message.runCheckpointArchive = {
           version: 1, objectHash: entry.checkpoint, pendingTool: entry.pendingTool, summary: { ...entry.summary, canResume: false }
         };
@@ -224,6 +243,12 @@ export class SessionObjectStore {
         durationMs: performance.now() - started, encodeMs: encoded - started, commitMs: performance.now() - encoded,
         bytesWritten: this.writeBytes - bytesBefore + bytes, objectsWritten: this.writeObjects - objectsBefore });
       return bytes;
+      };
+      if (migrating && !this.offlineRecoveryCopy && typeof vscode.window.withProgress === 'function') {
+        return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, cancellable: true,
+          title: localize(getConfiguredKeepseekLanguage(), 'sessionMigrationTitle') }, saveGraph);
+      }
+      return saveGraph();
     });
   }
   /** Scope comes from this session directory, never a caller-provided path. */
@@ -237,12 +262,15 @@ export class SessionObjectStore {
     try { handle = await open(lock, 'wx'); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const owner = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.file(lock)))) as { pid: number };
-      if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error('Session writer lock needs inspection');
+      let owner: { pid: number };
+      try { owner = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.file(lock)))) as { pid: number }; }
+      catch { throw new Error(`Session writer lock cannot be verified. Close all writers, back up the data and inspect: ${lock}`); }
+      if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error(`Session writer lock needs inspection: ${lock}`);
       try { process.kill(owner.pid, 0); throw new Error('Session already has an active writer'); }
       catch (probe) { if ((probe as NodeJS.ErrnoException).code !== 'ESRCH') throw probe; }
-      await unlink(lock);
-      handle = await open(lock, 'wx');
+      // Automatic unlink after an ESRCH probe races another stale-lock
+      // reclaimer: it can remove that process's newly acquired active lock.
+      throw new Error(`Stale session writer lock. Close all writers and back up the data before removing: ${lock}`);
     }
     try { await handle.writeFile(JSON.stringify({ pid: process.pid })); await handle.sync(); return await work(); }
     finally { await handle.close(); await unlink(lock); }

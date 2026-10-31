@@ -5,9 +5,11 @@ import type { ChatSession } from '../shared/types';
 // pending journal, budgets, plans and mutable arrays are copied every barrier.
 const immutableCopies = new WeakMap<object, object>();
 const immutableSizes = new WeakMap<object, number>();
+const frozenTrees = new WeakSet<object>();
+export function isFrozenTree(value: object): boolean { return frozenTrees.has(value); }
 function jsonSize(value: unknown): number {
   if (!value || typeof value !== 'object') return Buffer.byteLength(JSON.stringify(value) ?? 'null');
-  const cached = Object.isFrozen(value) ? immutableSizes.get(value) : undefined;
+  const cached = isFrozenTree(value) ? immutableSizes.get(value) : undefined;
   if (cached !== undefined) return cached;
   const entries = Array.isArray(value) ? value : Object.entries(value).filter(([, v]) => v !== undefined);
   const size = 2 + Math.max(0, entries.length - 1) + entries.reduce((sum: number, item: unknown) => {
@@ -15,11 +17,11 @@ function jsonSize(value: unknown): number {
     const [key, child] = item as [string, unknown];
     return sum + Buffer.byteLength(JSON.stringify(key)) + 1 + jsonSize(child);
   }, 0);
-  if (Object.isFrozen(value)) immutableSizes.set(value, size);
+  if (isFrozenTree(value)) immutableSizes.set(value, size);
   return size;
 }
 function immutableCopy<T extends object>(value: T): T {
-  if (Object.isFrozen(value)) return value;
+  if (isFrozenTree(value)) return value;
   const prior = immutableCopies.get(value);
   if (prior) return prior as T;
   const copy = structuredClone(value);
@@ -28,9 +30,10 @@ function immutableCopy<T extends object>(value: T): T {
   return copy;
 }
 export function freezeTree(value: unknown): void {
-  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return;
+  if (!value || typeof value !== 'object' || isFrozenTree(value)) return;
   for (const child of Object.values(value)) freezeTree(child);
   Object.freeze(value);
+  frozenTrees.add(value);
 }
 
 /** Snapshot used only at persistence barriers. Mutable recovery uses checkpointCopy. */

@@ -1,7 +1,41 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import * as path from 'node:path';
 import { test } from 'node:test';
+import * as vscode from 'vscode';
+import { ModelSourceStore } from '../src/accounts/accountStore';
+
+test('live acceptance entry exercises account resolution and production runtime using an offline transport fixture', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-accept-entry-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sources = path.join(root, 'sources'), output = path.join(root, 'output');
+  await new ModelSourceStore(vscode.Uri.file(sources)).createSource({ id: 'fixture', provider: 'deepseek', apiKey: 'offline-fixture',
+    models: [{ id: 'deepseek-v4-flash', contextWindowTokens: 1024000, maxOutputTokens: 393192 }] });
+  const preload = path.join(root, 'transport.cjs');
+  await writeFile(preload, `const fs = require('node:fs'); const path = require('node:path'); let calls = 0;
+globalThis.fetch = async (_url, init) => {
+  const body = JSON.parse(init.body);
+  if (body.max_tokens !== 393192) throw new Error('configured output changed');
+  const first = ++calls === 1;
+  const delta = first ? { tool_calls: [{ index: 0, id: 'read', type: 'function', function: { name: 'keepseek_read_workspace_file', arguments: '{"path":"acceptance.txt"}' } }] }
+    : { content: fs.readFileSync(path.join(process.env.KEEPSEEK_ACCEPT_OUTPUT, 'acceptance.txt'), 'utf8') };
+  return new Response('data: ' + JSON.stringify({ choices: [{ delta, finish_reason: first ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } }) + '\\n\\ndata: [DONE]\\n\\n');
+};\n`);
+  const result = await promisify(execFile)(process.execPath, ['--require', preload, path.resolve('scripts/accept-long-task-live.js')], {
+    env: { ...process.env, KEEPSEEK_LIVE_ACCEPT: '1', KEEPSEEK_ACCEPT_SOURCE_STORAGE: sources,
+      KEEPSEEK_ACCEPT_SOURCE_ID: 'fixture', KEEPSEEK_ACCEPT_MODEL: 'deepseek-v4-flash', KEEPSEEK_ACCEPT_OUTPUT: output,
+      KEEPSEEK_ACCEPT_MAX_COST: '1000000', KEEPSEEK_ACCEPT_MAX_MS: '10000', KEEPSEEK_ACCEPT_MAX_REQUESTS: '4' }, timeout: 20000
+  });
+  assert.match(result.stdout, /Verified fixture body/);
+  const report = JSON.parse(await readFile(path.join(output, 'acceptance-result.json'), 'utf8'));
+  assert.equal(report.verifiedBody, true); assert.equal(report.configuredOutput, 393192);
+  assert.equal(report.modelRequests, 2);
+  assert.equal(report.lastRequestBudget.actualMaxOutputTokens, 393192);
+  assert.equal(JSON.stringify(report).includes('offline-fixture'), false);
+});
 import {
   BEHAVIOR_EVAL_SCHEMA_VERSION,
   isBehaviorEvalRunRecord,

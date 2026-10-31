@@ -35,6 +35,7 @@ export interface AgentInteractionTrace {
   includesPayload(level: 'request' | 'full'): boolean;
   record(event: InteractionTraceEvent): void;
   flush(): Promise<void>;
+  close?(): Promise<void>;
 }
 
 export type InteractionTraceEventSink = (event: InteractionTraceEvent, timestamp: string) => void;

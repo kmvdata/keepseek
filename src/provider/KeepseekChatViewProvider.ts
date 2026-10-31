@@ -1,4 +1,4 @@
-import { checkpointCopy, endpointHash, grantCheckpointToolBudgetSegment, isResumableToolBudgetCheckpoint, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
+import { checkpointCopy, endpointHash, grantCheckpointToolBudgetSegment, isResumableToolBudgetCheckpoint, recoverNoProgressWithUserTurn, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
@@ -1709,6 +1709,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private queueUsageLedgerFlush(session: ChatSession): void {
     if (this.usageLedgerFlushes.has(session.id)) return;
+    let succeeded = false;
     const next = new Promise<void>((resolve) => setTimeout(resolve, 50)).then(async () => {
       const snapshot = normalizeUsageLedgerValue(session.usageLedger);
       if (snapshot?.records.length) await this.usageLedgerStore.appendMany(session.id, snapshot.records);
@@ -1737,7 +1738,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             legacyAggregate: true,
             incomplete: true
           })
-        : rebuildSessionUsageStatsFromLedger(visibleLedger.records);
+        : rebuildSessionUsageStatsFromLedger(visibleLedger.records, {
+            incomplete: Boolean(visibleLedger.incomplete || session.usageLedgerRef.incomplete)
+          });
       if (snapshot?.records.length) {
         const flushed = new Set(snapshot.records.map((record) => `${record.requestId}\u0000${record.attemptIndex}`));
         const remaining = current?.records.filter((record) => !flushed.has(`${record.requestId}\u0000${record.attemptIndex}`)) ?? [];
@@ -1750,6 +1753,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       session.updatedAt = new Date().toISOString();
       await this.sessionStore.persist();
+      succeeded = true;
     }).catch((error) => {
       // Inline records remain the crash-safe migration source until the v2
       // store confirms an atomic bucket write.
@@ -1759,7 +1763,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     void next.finally(() => {
       if (this.usageLedgerFlushes.get(session.id) === next) {
         this.usageLedgerFlushes.delete(session.id);
-        if (normalizeUsageLedgerValue(session.usageLedger)?.records.length) this.queueUsageLedgerFlush(session);
+        // A persistent disk failure must not become a 50ms background retry
+        // loop. Retain the inline batch; a later usage event can retry it.
+        if (succeeded && normalizeUsageLedgerValue(session.usageLedger)?.records.length) this.queueUsageLedgerFlush(session);
       }
     });
   }
@@ -4767,6 +4773,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       const activeSession = this.sessionStore.getActiveSession();
+      const priorTail = activeSession.messages.at(-1);
+      const noProgressRecovery = !replaceMessageId && !options?.delegatedContinuation && !options?.draftRunAutoContinue
+        && (priorTail?.runCheckpoint?.stopReason ?? priorTail?.runCheckpointArchive?.summary.stopReason) === 'no_progress_loop'
+        ? await this.sessionStore.getRecoveryCheckpoint(priorTail!.id) : undefined;
+      if ((priorTail?.runCheckpoint?.stopReason ?? priorTail?.runCheckpointArchive?.summary.stopReason) === 'no_progress_loop'
+        && !replaceMessageId && !noProgressRecovery) throw new Error('Saved no-progress checkpoint unavailable; restore the session before continuing.');
       const approvalMode = normalizeApprovalMode(activeSession.approvalMode);
       const executionMode = normalizeExecutionMode(activeSession.executionMode);
       const explicitSubagentSelection = resolveExplicitSubagentSelection(trimmedPrompt);
@@ -4986,6 +4998,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         createdAt: new Date().toISOString(),
         modelId: model.id,
         usedSkills: toChatMessageSkills(activeSkills),
+        // If compatibility validation rejects the new turn, retain the stopped
+        // task on this tail as well. A subsequent send cannot accidentally
+        // escape its logical budget just because an error message was appended.
+        runCheckpoint: noProgressRecovery ? snapshotCheckpoint(noProgressRecovery) : undefined,
         isStreaming: true
       };
       this.messages.push(assistantMessage);
@@ -4996,7 +5012,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }, { post: false });
       this.postState();
 
-      const response = await this.agentRunner.run(this.agentRequestCoordinator.createAgentRequest({
+      const agentRequest = this.agentRequestCoordinator.createAgentRequest({
         approvalMode,
         executionMode,
         approvalRootTaskId: options?.approvalRootTaskId,
@@ -5021,7 +5037,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         backgroundRunId: options?.backgroundRunId,
         sourceConfig,
         signal: abortController.signal
-      }), {
+      });
+      if (noProgressRecovery) {
+        if (!vscode.workspace.isTrusted) throw new Error(this.t('runRecoveryWorkspaceChanged'));
+        agentRequest.checkpoint = recoverNoProgressWithUserTurn(noProgressRecovery, agentRequest,
+          (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.toString()));
+        // The new real turn and its inherited logical budget are durable before
+        // any Provider request. No approval/permit is copied by this transition.
+        await this.saveAgentCheckpoint(activeSession, assistantMessage, agentRequest.checkpoint);
+      }
+      const response = await this.agentRunner.run(agentRequest, {
         onCheckpoint: async (checkpoint) => {
           if (assistantMessage && this.currentRunAbortController === abortController) {
             await this.saveAgentCheckpoint(activeSession, assistantMessage, checkpoint);
@@ -5405,7 +5430,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     model: KeepseekModel,
     sourceConfig: ModelSourceConfigSnapshot
   ): void {
-    this.agentRequestCoordinator.scheduleBackgroundContextCompressionRefresh({
+    void this.agentRequestCoordinator.scheduleBackgroundContextCompressionRefresh({
       session: activeSession,
       prompt,
       model,
@@ -5417,7 +5442,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       requestProtocolVersion: activeSession.requestProtocol?.version,
       language: this.language,
       sourceConfig
-    }, (update) => this.applyBackgroundContextCompressionRefresh(activeSession, update));
+    }, (update) => this.applyBackgroundContextCompressionRefresh(activeSession, update)).catch(error => {
+      console.warn('[KeepSeek] Background compression planning failed.', error);
+    });
   }
 
   private async applyBackgroundContextCompressionRefresh(

@@ -289,7 +289,8 @@ export function applyUsageLedgerDeltaToSessionStats(current: SessionUsageStats |
 
 /** Deterministic reconstruction for v2 ledger-backed sessions. */
 export function rebuildSessionUsageStatsFromLedger(
-  records: readonly ProviderUsageLedgerRecord[]
+  records: readonly ProviderUsageLedgerRecord[],
+  metadata: { incomplete?: boolean; legacyAggregate?: boolean } = {}
 ): SessionUsageStats | undefined {
   let stats: SessionUsageStats | undefined;
   for (const record of records) {
@@ -313,8 +314,8 @@ export function rebuildSessionUsageStatsFromLedger(
   const ledger = {
     version: 1 as const,
     records: [...records],
-    legacyAggregate: false,
-    incomplete: false
+    legacyAggregate: Boolean(metadata.legacyAggregate),
+    incomplete: Boolean(metadata.incomplete)
   };
   return applyUsageLedgerSummaryToSessionStats(stats, summarizeUsageLedger(ledger));
 }

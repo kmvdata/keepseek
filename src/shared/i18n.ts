@@ -94,6 +94,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     runStopped_time_budget: '有效执行时间预算用尽',
     runStopped_budget_pause: '显式工具预算已用尽，任务已保存，可继续',
     runStopped_cost_limit: '已达到用户配置的 Provider 费用上限',
+    sessionMigrationTitle: 'KeepSeek：正在迁移已保存会话（取消会保留原数据）',
     runStopped_no_progress_loop: '检测到持续无进展循环，已停止',
     runStopped_uncertain_tool_result: '工具副作用结果不确定，需要核实',
     runStopped_tool_timeout: '工具超时',
@@ -936,6 +937,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     runStopped_time_budget: 'Effective time budget exhausted',
     runStopped_budget_pause: 'Explicit tool budget reached; work saved and resumable',
     runStopped_cost_limit: 'Configured Provider cost limit reached',
+    sessionMigrationTitle: 'KeepSeek: migrating saved session (cancel keeps the original)',
     runStopped_no_progress_loop: 'Stopped after a persistent no-progress loop',
     runStopped_uncertain_tool_result: 'Tool side-effect result is uncertain and requires verification',
     runStopped_tool_timeout: 'Tool timeout',
@@ -1696,6 +1698,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
 
 const EXTENSION_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
+    sessionMigrationTitle: 'KeepSeek：正在迁移已保存会话（取消会保留原数据）',
     planDecisionBusy: '当前任务仍在运行，请结束后再处理计划。',
     planDecisionInvalid: '该计划已失效、已处理、内容不匹配或不属于当前会话，不能执行。',
     planImplementationArtifactRejected: '计划阶段检测到实施草案，宿主已拒绝并丢弃；该响应不能作为可批准计划。请重新生成纯计划。',
@@ -1858,6 +1861,7 @@ const EXTENSION_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
     enterPath: '请输入文件或文件夹路径。'
   },
   en: {
+    sessionMigrationTitle: 'KeepSeek: migrating saved session (cancel keeps the original)',
     planDecisionBusy: 'A task is still running. Finish or stop it before deciding this plan.',
     planDecisionInvalid: 'This plan is stale, already resolved, content-mismatched, or belongs to another conversation, so it cannot execute.',
     planImplementationArtifactRejected: 'The host detected and discarded implementation artifacts during the planning phase. This response cannot be approved as a plan; generate a planning-only response again.',

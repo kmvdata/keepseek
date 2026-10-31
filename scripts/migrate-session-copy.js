@@ -28,8 +28,19 @@ async function main() {
   if ((await fs.readdir(destination)).length) throw new Error('Output directory must be empty.');
   const shard = path.join(destination, path.basename(source));
   await fs.writeFile(shard, bytes, { flag: 'wx' });
-  const storage = new SessionObjectStore(vscode.Uri.file(shard), true);
-  await storage.save(snapshotSession(session));
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  process.once('SIGINT', cancel);
+  let lastProgress = 0, lastPhase = '';
+  const storage = new SessionObjectStore(vscode.Uri.file(shard), true, { signal: controller.signal,
+    onProgress: (phase, completed, total) => {
+      if (phase !== lastPhase || Date.now() - lastProgress >= 1000) {
+        console.error(JSON.stringify({ phase, completed, total }));
+        lastPhase = phase; lastProgress = Date.now();
+      }
+    } });
+  try { await storage.save(snapshotSession(session)); }
+  finally { process.removeListener('SIGINT', cancel); }
   const manifest = JSON.parse(await fs.readFile(shard, 'utf8'));
   const verified = await new SessionObjectStore(vscode.Uri.file(shard)).load(manifest);
   if (verified.messages.length !== session.messages.length) throw new Error('Verification failed. Original copy retained.');

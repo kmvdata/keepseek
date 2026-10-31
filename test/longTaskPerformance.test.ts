@@ -14,7 +14,7 @@ import { prepareEvidenceEnvelope } from '../src/agent/evidence/shaping';
 import { SessionObjectStore } from '../src/sessions/sessionObjectStore';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
 import { ChatSessionStore } from '../src/sessions/chatSessionStore';
-import { snapshotCheckpoint, snapshotSession } from '../src/sessions/persistenceSnapshot';
+import { freezeTree, snapshotCheckpoint, snapshotSession } from '../src/sessions/persistenceSnapshot';
 import { PerformanceTrace } from '../src/agent/logging/performanceTrace';
 import { observeNoProgress, visibleProgressFingerprint } from '../src/agent/contextEpoch';
 import { deriveHistoryProtection } from '../src/agent/historyProtection';
@@ -153,6 +153,57 @@ test('checkpoint persistence snapshots isolate mutable pending journals without 
   assert.equal(first.usedMs, 0); assert.equal(next.usedMs, 123);
   assert.equal(first.request.history, next.request.history);
   assert.ok(Object.isFrozen(next.request.history));
+});
+
+test('migration progress is observable and cancellation before commit preserves the exact legacy authority', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-migration-cancel-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'session.json'), uri = vscode.Uri.file(path) as never;
+  const session = { id: 's', workspaceKey: 'w', messages: [0, 1, 2].map(i => ({ id: String(i), role: 'user', content: 'original', createdAt: '' })) } as ChatSession;
+  const original = JSON.stringify({ version: 2, session });
+  await writeFile(path, original);
+  const controller = new AbortController(), phases: string[] = [];
+  const storage = new SessionObjectStore(uri, true, { signal: controller.signal,
+    onProgress: (phase, completed) => { phases.push(phase); if (phase === 'verify' && completed === 1) controller.abort(); } });
+  await assert.rejects(() => storage.save(snapshotSession(session)), /cancelled before commit/);
+  assert.equal(await readFile(path, 'utf8'), original);
+  assert.ok(phases.includes('encode') && phases.includes('verify'));
+  assert.ok(!phases.includes('commit'));
+  await new SessionObjectStore(uri, true).save(snapshotSession(session));
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).version, 3);
+  assert.equal(await readFile(join(root, 'session.json.objects', 'legacy-v2.json'), 'utf8'), original);
+});
+
+test('empty, damaged and stale writer locks fail closed without unlinking another writer authority', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-lock-inspect-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const uri = vscode.Uri.file(join(root, 'session.json')) as never;
+  const session = { id: 's', workspaceKey: 'w', messages: [] } as unknown as ChatSession;
+  const storage = new SessionObjectStore(uri);
+  await storage.save(session);
+  const lock = join(root, 'session.json.objects', 'writer.lock');
+  for (const owner of ['', '{', 'null', '{}', JSON.stringify({ pid: process.pid }), JSON.stringify({ pid: 2147483647 })]) {
+    await writeFile(lock, owner);
+    await assert.rejects(() => storage.save(session), /lock|active writer/);
+    assert.equal(await readFile(lock, 'utf8'), owner);
+  }
+});
+
+test('a shallow-frozen native tree is isolated before persistence and recursively frozen on decode', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-shallow-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const uri = vscode.Uri.file(join(root, 'session.json')) as never;
+  const storage = new SessionObjectStore(uri);
+  const nested = { value: 'first' };
+  const session = { id: 's', workspaceKey: 'w', messages: [], extra: Object.freeze({ nested }) } as unknown as ChatSession;
+  await storage.save(session);
+  nested.value = 'second';
+  await storage.save(session);
+  const loaded = await new SessionObjectStore(uri).load(JSON.parse(await readFile(join(root, 'session.json'), 'utf8')));
+  assert.equal((loaded as unknown as { extra: { nested: { value: string } } }).extra.nested.value, 'second');
+  const shallow = Object.freeze({ child: { value: 1 } });
+  freezeTree(shallow);
+  assert.ok(Object.isFrozen(shallow.child));
 });
 
 test('154 settled receipts release active protection, but pending and unknown work remain protected without changing audit', () => {
