@@ -108,8 +108,8 @@ export function priceUsageFromSnapshot(
     };
   }
   const cacheReported = usage.cacheDataStatus === 'reported';
-  const cacheHitTokens = cacheReported ? usage.cacheHitTokens : 0;
-  const cacheMissTokens = cacheReported ? usage.cacheMissTokens : usage.promptTokens;
+  const cacheHitTokens = cacheReported ? Math.min(usage.promptTokens, Math.max(0, usage.cacheHitTokens)) : 0;
+  const cacheMissTokens = usage.promptTokens - cacheHitTokens;
   const cost = normalizeCost((
     cacheHitTokens * snapshot.cacheHitRate! +
     cacheMissTokens * snapshot.inputRate! +

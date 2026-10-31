@@ -46,6 +46,7 @@ const PRO_IDENTITY: DeepSeekModelIdentity = Object.freeze({
 const KNOWN_DEEPSEEK_MODELS: Readonly<Record<string, DeepSeekModelIdentity>> = Object.freeze({
   'deepseek-flash': FLASH_IDENTITY,
   'deepseek-v4.1-flash': FLASH_IDENTITY,
+  'deepseek-v4.1-flash-1017': FLASH_IDENTITY,
   'deepseek-v4-flash': FLASH_IDENTITY,
   'deepseek-v4-flash-vision-exp': FLASH_IDENTITY,
   'deepseek-v4-pro': PRO_IDENTITY

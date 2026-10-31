@@ -400,8 +400,8 @@ export function calculateUsageCostAt(
 ): number {
   const peak = getPricingPeriod(at) === 'peak';
   const cacheReported = usage.cacheDataStatus === 'reported';
-  const cacheHitTokens = cacheReported ? usage.cacheHitTokens : 0;
-  const cacheMissTokens = cacheReported ? usage.cacheMissTokens : usage.promptTokens;
+  const cacheHitTokens = cacheReported ? Math.min(usage.promptTokens, Math.max(0, usage.cacheHitTokens)) : 0;
+  const cacheMissTokens = usage.promptTokens - cacheHitTokens;
   return normalizeCost((
     cacheHitTokens * pickPeakRate(peak ? rates.peakCacheHitPrice : undefined, peak, rates.cacheHitPrice) +
     cacheMissTokens * pickPeakRate(peak ? rates.peakInputPrice : undefined, peak, rates.inputPrice) +

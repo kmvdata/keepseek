@@ -192,9 +192,27 @@ test('calculates current DeepSeek V4.1 Flash and V4 Pro peak and off-peak prices
   const weekendOffPeak = new Date('2026-08-29T01:00:00.000Z');
 
   assert.equal(calculateUsageCostAt(usage, flashRates, weekdayPeak), 10.04);
+  assert.equal(calculateUsageCostAt({ ...usage, cacheMissTokens: 0 }, flashRates, weekdayPeak), 10.04);
+  assert.equal(calculateUsageCostAt({ ...usage, cacheHitTokens: 3_000_000 }, flashRates, weekdayPeak), 8.08);
   assert.equal(calculateUsageCostAt(usage, flashRates, weekendOffPeak), 5.02);
   assert.equal(calculateUsageCostAt(usage, proRates, weekdayPeak), 36.3);
   assert.equal(calculateUsageCostAt(usage, proRates, weekendOffPeak), 18.15);
+});
+
+test('Chinese holidays and make-up weekends stay off-peak in Beijing time', () => {
+  for (const day of [
+    '2025-01-01', '2025-01-28', '2025-02-04', '2025-10-08',
+    '2026-01-02', '2026-02-16', '2026-02-23', '2026-04-06',
+    '2026-05-05', '2026-06-19', '2026-09-25', '2026-10-01', '2026-10-07',
+    '2026-02-14', '2026-02-28', '2026-05-09', '2026-09-20', '2026-10-10'
+  ]) {
+    assert.equal(getPricingPeriod(new Date(day + 'T09:00:00+08:00')), 'offPeak', day);
+    assert.equal(getPricingPeriod(new Date(day + 'T17:59:59+08:00')), 'offPeak', day);
+  }
+  assert.equal(getPricingPeriod(new Date('2026-09-30T17:59:59+08:00')), 'peak');
+  assert.equal(getPricingPeriod(new Date('2026-10-08T09:00:00+08:00')), 'peak');
+  assert.equal(getPricingPeriod(new Date('2026-10-31T09:00:00+08:00')), 'offPeak');
+  assert.throws(() => getPricingPeriod(new Date(NaN)), RangeError);
 });
 
 test('classifies hidden calls by source without dropping their cost', () => {

@@ -21,11 +21,14 @@ import {
   summarizeUsageLedger
 } from '../src/agent/usageLedger';
 import { calculateCacheHitRate } from '../src/agent/usageStats';
+import { rebuildSessionUsageStatsFromLedger } from '../src/agent/usageStats';
+import { applyReferenceCostView, buildReferenceCostView } from '../src/agent/usageReferenceCosts';
 import type { ProviderUsageLedger, Usage, UsageCostRates } from '../src/shared/types';
 
 const FLASH_ALIASES = [
   'deepseek-flash',
   'deepseek-v4.1-flash',
+  'deepseek-v4.1-flash-1017',
   'deepseek-v4-flash',
   'deepseek-v4-flash-vision-exp'
 ] as const;
@@ -48,6 +51,61 @@ const REPORTED_USAGE: Usage = {
   cacheMissTokens: 400,
   cacheDataStatus: 'reported'
 };
+
+test('display reference prices cover other sources while preserving official model prices and real budgets', () => {
+  const usage: Usage = { promptTokens: 2_000_000, completionTokens: 1_000_000,
+    totalTokens: 3_000_000, cacheHitTokens: 1_000_000, cacheMissTokens: 1_000_000, cacheDataStatus: 'reported' };
+  const cases = [
+    { sourceId: 'official', provider: 'deepseek', model: 'deepseek-v4-pro', supportsBilling: true, at: '2026-09-30T09:00:00+08:00' },
+    { sourceId: 'third-party', provider: 'qwencloud', model: 'another-model', supportsBilling: false, at: '2026-09-30T09:00:00+08:00' },
+    { sourceId: 'kimi', provider: 'kimi', model: 'kimi-k3', supportsBilling: true, at: '2026-10-01T09:00:00+08:00' }
+  ];
+  const ledger: ProviderUsageLedger = { version: 1, legacyAggregate: false, incomplete: false,
+    records: cases.flatMap((item, index) => createUsageLedgerRecords({ requestId: String(index), source: 'executor', usage,
+      attempts: [createUsagePriceSnapshot({ ...item, originalModelId: item.model, protocol: 'chat-completions', requestStartedAt: item.at })] })) };
+  const before = JSON.stringify(ledger);
+  const view = buildReferenceCostView(ledger, { lastUserAt: '2026-10-01T00:00:00+08:00' });
+  assert.equal(view.session?.sessionCost, 51.36); // Pro 36.3 + Flash peak 10.04 + holiday 5.02
+  assert.equal(view.turn?.sessionCost, 5.02);
+  assert.deepEqual(view.referenceSourceIds, ['third-party', 'kimi']);
+  assert.equal(ledger.records[1].pricingStatus, 'unavailable', 'standard prices never grant real budget eligibility');
+  assert.equal(JSON.stringify(ledger), before, 'display projection cannot mutate the audit ledger');
+  const base = rebuildSessionUsageStatsFromLedger(ledger.records)!;
+  const display = applyReferenceCostView(base, view.session)!;
+  assert.equal(display.sessionCost, 51.36);
+  assert.equal(display.totalTokens, base.totalTokens);
+  assert.equal(display.byModelSource?.find((group) => group.sourceId === 'third-party')?.costByCurrency?.['¥'], 10.04);
+  const restored = normalizeUsageLedgerValue(JSON.parse(before))!;
+  assert.equal(buildReferenceCostView(restored, {}).session?.sessionCost, 51.36);
+  const legacy = applyReferenceCostView({ ...base, requestCount: base.requestCount + 2 }, view.session)!;
+  assert.equal(legacy.unpricedRequestCount, 2);
+  assert.equal(legacy.pricingStatus, 'partial');
+});
+
+test('official reference costs aggregate each request time band and survive persistence', () => {
+  const records = [
+    ['2026-09-30T09:00:00+08:00', 'peak', 10.04],
+    ['2026-10-01T09:00:00+08:00', 'offPeak', 5.02],
+    ['2026-10-10T09:00:00+08:00', 'offPeak', 5.02]
+  ].flatMap(([at, period, expected], index) => {
+    const snapshot = createUsagePriceSnapshot({
+      originalModelId: 'deepseek-v4.1-flash-1017', sourceId: 'official', provider: 'deepseek',
+      protocol: 'chat-completions', supportsBilling: true, requestStartedAt: String(at)
+    });
+    const usage: Usage = { promptTokens: 2_000_000, completionTokens: 1_000_000,
+      totalTokens: 3_000_000, cacheHitTokens: 1_000_000, cacheMissTokens: 1_000_000,
+      cacheDataStatus: 'reported' };
+    assert.equal(snapshot.pricingPeriod, period);
+    assert.equal(priceUsageFromSnapshot(usage, snapshot).cost, expected);
+    assert.equal(priceUsageFromSnapshot({ ...usage, cacheMissTokens: 0 }, snapshot).cost, expected);
+    assert.equal(priceUsageFromSnapshot({ ...usage, cacheDataStatus: 'unavailable' }, snapshot).cost,
+      period === 'peak' ? 12 : 6);
+    return createUsageLedgerRecords({ requestId: String(index), attempts: [snapshot], usage, source: 'executor' });
+  });
+  const restored = normalizeUsageLedgerValue(JSON.parse(JSON.stringify({ version: 1, records })))!;
+  assert.equal(restored.records.length, 3);
+  assert.equal(summarizeUsageLedger(restored).costByCurrency['¥'], 20.08);
+});
 
 test('explicit Flash aliases share one canonical family, model identity, pricing key and capabilities', () => {
   for (const alias of FLASH_ALIASES) {

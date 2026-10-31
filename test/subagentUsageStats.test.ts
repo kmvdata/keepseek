@@ -33,16 +33,19 @@ import { getInputStyles } from '../src/webview/input/styles';
 import { getInputTemplate } from '../src/webview/input/template';
 import { getScript } from '../src/webview/script';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
+import { createProviderCacheObservation } from '../src/agent/cacheObservation';
+import { buildReferenceCostView } from '../src/agent/usageReferenceCosts';
 
 test('host ledger flush preserves ref damage and does not spin after storage failure', async () => {
   const price = createUsagePriceSnapshot({ originalModelId: 'fixture', sourceId: 'fixture', provider: 'qwencloud',
     protocol: 'chat_completions', supportsBilling: false });
   const records = createUsageLedgerRecords({ requestId: 'survivor', attempts: [price], source: 'executor' });
-  const session = { id: 's', usageLedger: { version: 1, records },
+  const session = { id: 's', messages: [], usageLedger: { version: 1, records },
     usageLedgerRef: { version: 2, sessionId: 's', incomplete: true, damagedBucketCount: 1 } } as unknown as import('../src/shared/types').ChatSession;
   let writes = 0, fail = true;
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     usageLedgerFlushes: new Map<string, Promise<void>>(),
+    referenceCostViews: new Map(),
     usageLedgerStore: {
       appendMany: async () => { writes++; if (fail) throw new Error('injected storage failure'); },
       rebuild: async () => ({ ledger: { version: 1, records, incomplete: false, legacyAggregate: false }, damagedBucketCount: 0 })
@@ -57,7 +60,29 @@ test('host ledger flush preserves ref damage and does not spin after storage fai
   host.queueUsageLedgerFlush(session);
   await host.usageLedgerFlushes.get(session.id);
   assert.equal(writes, 2);
+  assert.equal(session.usageLedger, undefined, 'successful retry finishes the durable flush');
   assert.equal(createUsageDetailsViewModel({ sessionUsageStats: session.usageStats }).session.total.attemptStatsIncomplete, true);
+});
+
+test('reference fees propagate to child totals, model groups, work types and individual runs', () => {
+  const summary = run('child-reference');
+  const subagents = upsertSubagentRunUsageSummary(undefined, summary);
+  const snapshot = createUsagePriceSnapshot({ originalModelId: summary.modelId, sourceId: summary.sourceId,
+    provider: 'deepseek', protocol: 'chat-completions', supportsBilling: false, requestStartedAt: summary.startedAt });
+  const observation = createProviderCacheObservation({ requestId: 'child-request', attemptIndex: 0,
+    source: 'subagent', sourceId: summary.sourceId, provider: 'deepseek', baseUrl: 'https://proxy.example/v1',
+    body: { model: summary.modelId, stream: true, messages: [{ role: 'user', content: 'hello' }] },
+    conversationId: summary.subagentId, subagentProfile: summary.profile, subagentLane: summary.lane });
+  const records = createUsageLedgerRecords({ requestId: 'child-request', attempts: [snapshot],
+    source: 'subagent', usage: event('subagent').usage, cacheObservations: [observation] });
+  const original = JSON.stringify(subagents);
+  const view = buildReferenceCostView({ version: 1, records, incomplete: false, legacyAggregate: false }, { subagentUsageStats: subagents });
+  const expected = view.session!.sessionCost;
+  assert.ok(expected > 0);
+  assert.equal(view.subagents?.byModel[0].usage?.cost, expected);
+  assert.equal(view.subagents?.byProfileLane[0].usage?.cost, expected);
+  assert.equal(view.subagents?.recentRuns[0].usage?.cost, expected);
+  assert.equal(JSON.stringify(subagents), original);
 });
 
 test('attempt and usage response counts survive normalization, aggregation and host view conversion', () => {
@@ -311,13 +336,56 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.doesNotMatch(tooltipRenderer, /usageOpenDetails/u);
   assert.match(tooltipRenderer, /costDisplay\.available \? costDisplay\.amountText/u);
   assert.doesNotMatch(tooltipRenderer, /costDisplay\.available \? costDisplay\.text/u);
+  for (const isOfficialDeepSeek of [true, false]) {
+    for (const available of [true, false]) {
+      const rows: string[] = [];
+      const noop = () => undefined;
+      const env = {
+        state: { usageMetrics: { isOfficialDeepSeek, sessionUsageStats: { totalTokens: 100 }, turnCount: 1 } },
+        normalizeUsageMetrics: (value: unknown) => value,
+        contextProgress: { style: { setProperty: noop }, classList: { toggle: noop }, setAttribute: noop },
+        contextProgressTitle: null, contextProgressPercent: null, contextProgressTokens: null,
+        contextProgressBreakdown: { innerHTML: '', append: (row: string) => rows.push(row), classList: { remove: noop } },
+        usageDetailsDialog: null,
+        findCurrentUsageGroup: noop, clampNumber: () => 0,
+        t: (key: string) => key, formatContextPercentValue: () => '0%',
+        formatMetricTokens: () => '100', hasUsageData: () => true,
+        hasCacheUsageData: () => false, formatCacheHitRate: () => '--',
+        formatMetricInteger: () => '1',
+        formatAccountedCosts: () => ({ available, amountText: '¥1.00' }),
+        formatUsageAvailabilityValue: () => '--', getLatestRunState: noop,
+        createMetricLine: (label: string) => label
+      };
+      new Function(...Object.keys(env), tooltipRenderer + ';renderContextProgress();')(...Object.values(env));
+      assert.equal(rows.some((row) => /Cost/u.test(row)), true);
+      assert.ok(rows.includes('usageMetricTurnTokens'));
+    }
+  }
   const inputStyles = getInputStyles();
+  const labelRenderer = script.slice(script.indexOf('function createUsageMetricLabel('), script.indexOf('function createUsageAnalysisCard('));
+  for (const [official, referenceIds, sourceId, expected] of [
+    [true, [], undefined, false], [false, ['proxy'], undefined, true],
+    [true, ['proxy'], 'official', false], [true, ['proxy'], 'proxy', true], [true, ['proxy'], undefined, true]
+  ] as const) {
+    const makeLabel = new Function('state', 'normalizeUsageMetrics', 't', 'usageNode',
+      labelRenderer + '; return createUsageMetricLabel;')(
+      { usageMetrics: { isOfficialDeepSeek: official, referenceCostSourceIds: referenceIds } },
+      (value: unknown) => value, (key: string) => WEBVIEW_TRANSLATIONS.en[key],
+      () => ({ children: [] as unknown[], append(child: unknown) { this.children.push(child); }, setAttribute() {} })
+    );
+    const label = makeLabel('usageCostLabel', sourceId);
+    assert.equal(label.children.length > 0, expected);
+    if (expected) assert.match(label.children[0].title, /DeepSeek Flash V4.1/u);
+    assert.equal(makeLabel('usageTotalTokensLabel', sourceId).children.length, 0);
+  }
   assert.match(inputStyles, /\.context-progress:hover::before[\s\S]*?context-progress-inward-scan 900ms linear infinite/u);
   assert.match(inputStyles, /@keyframes context-progress-inward-scan[\s\S]*?transform: scale\(1\)[\s\S]*?transform: scale\(0\.08\)[\s\S]*?transform: scale\(0\)/u);
   assert.match(inputStyles, /\.context-progress:hover \.context-progress-ring::before[\s\S]*?context-progress-outer-sync 900ms linear infinite/u);
   assert.match(inputStyles, /@keyframes context-progress-outer-sync[\s\S]*?opacity: 0\.85[\s\S]*?opacity: 0/u);
   assert.doesNotMatch(inputStyles, /\.context-progress::after|context-progress-(?:ripple|breathe|center-flash|inward-pulse)|scale\(2\.2\)|drop-shadow/u);
   assert.equal('usageOpenDetails' in WEBVIEW_TRANSLATIONS.en, false);
+  assert.equal(WEBVIEW_TRANSLATIONS.en.usageCostLabel, 'Reference cost');
+  assert.equal(WEBVIEW_TRANSLATIONS['zh-CN'].usageCostLabel, '参考费用');
   assert.equal('usageOpenDetails' in WEBVIEW_TRANSLATIONS['zh-CN'], false);
   const detailsRenderer = script.slice(script.indexOf('function renderUsageDetails()'), script.indexOf('function createUsageSection('));
   assert.match(detailsRenderer, /createContextWindowSection\(metrics\)/u);

@@ -160,45 +160,24 @@ test('usage pricing has no unknown-model fallback', () => {
   });
 });
 
-test('usage pricing preserves peak fields and prefers exact custom model IDs before canonical fallback', () => {
+test('known DeepSeek reference prices ignore stale overrides while custom models remain configurable', () => {
   const original = vscode.workspace.getConfiguration;
   vscode.workspace.getConfiguration = () => ({
     ...original(),
     get: <T>(key: string, fallback: T): T => key === 'usagePricing' ? ({
-      'deepseek-v4.1-flash': {
-        cacheHitPrice: 1,
-        inputPrice: 2,
-        outputPrice: 3,
-        peakCacheHitPrice: 4,
-        peakInputPrice: 5,
-        peakOutputPrice: 6,
-        currency: 'CNY'
-      },
-      'deepseek-flash': {
-        inputPrice: 9,
-        peakInputPrice: 18
-      }
+      'deepseek-v4.1-flash': { inputPrice: 99, currency: 'USD' },
+      'deepseek-flash': { inputPrice: 88 },
+      'custom-model': { cacheHitPrice: 1, inputPrice: 2, outputPrice: 3, currency: '$' }
     } as T) : fallback
   });
   try {
-    assert.deepEqual(getConfiguredModelUsagePricing('deepseek-v4-flash'), {
-      cacheHitPrice: 1,
-      inputPrice: 2,
-      outputPrice: 3,
-      peakCacheHitPrice: 4,
-      peakInputPrice: 5,
-      peakOutputPrice: 6,
-      currency: 'CNY'
-    });
-    assert.deepEqual(getConfiguredModelUsagePricing('deepseek-flash'), {
-      cacheHitPrice: 1,
-      inputPrice: 9,
-      outputPrice: 3,
-      peakCacheHitPrice: 4,
-      peakInputPrice: 18,
-      peakOutputPrice: 6,
-      currency: 'CNY'
-    });
+    for (const alias of ['deepseek-v4-flash', 'deepseek-flash', 'deepseek-v4.1-flash-1017']) {
+      assert.deepEqual(getConfiguredModelUsagePricing(alias), {
+        cacheHitPrice: 0.02, inputPrice: 1, outputPrice: 4,
+        peakCacheHitPrice: 0.04, peakInputPrice: 2, peakOutputPrice: 8, currency: '¥'
+      });
+    }
+    assert.equal(getConfiguredModelUsagePricing('custom-model')?.inputPrice, 2);
   } finally {
     vscode.workspace.getConfiguration = original;
   }

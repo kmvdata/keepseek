@@ -186,6 +186,8 @@ export const usageRenderFragment: WebviewFragment = {
           metrics.contextCompressionTriggerRatio,
           getLatestRunState(),
           metrics.executionTime,
+          metrics.isOfficialDeepSeek,
+          metrics.referenceCostSourceIds,
           getLanguage()
         ]);
         if (renderKey === usageDetailsRenderKey) { return; }
@@ -341,7 +343,7 @@ export const usageRenderFragment: WebviewFragment = {
         }
         metricsList.forEach(function(item) {
           var metric = usageNode('div', 'usage-session-metric ' + item[2]);
-          metric.append(usageNode('span', '', t(item[0])), usageNode('strong', '', item[1]));
+          metric.append(createUsageMetricLabel(item[0]), usageNode('strong', '', item[1]));
           grid.append(metric);
         });
         section.append(grid);
@@ -561,7 +563,23 @@ export const usageRenderFragment: WebviewFragment = {
         return createUsageAnalysisCard(t(labelKey), usage, colorClass, usage.requestCount);
       }
 
-      function createUsageAnalysisCard(label, usage, colorClass, requestCount) {
+      function createUsageMetricLabel(key, sourceId) {
+        var label = usageNode('span', '', t(key));
+        if (key !== 'usageCostLabel') return label;
+        var metrics = normalizeUsageMetrics(state.usageMetrics);
+        var reference = sourceId ? metrics.referenceCostSourceIds.indexOf(sourceId) >= 0
+          : metrics.referenceCostSourceIds.length > 0 || !metrics.isOfficialDeepSeek;
+        if (reference) {
+          var hint = usageNode('button', 'usage-cost-help', '?');
+          hint.type = 'button';
+          hint.title = t('usageFlashReferencePriceHint');
+          hint.setAttribute('aria-label', hint.title);
+          label.append(hint);
+        }
+        return label;
+      }
+
+      function createUsageAnalysisCard(label, usage, colorClass, requestCount, sourceId) {
         var card = usageNode('div', 'usage-analysis-card');
         var header = usageNode('div', 'usage-analysis-card-header');
         var heading = usageNode('div', 'usage-analysis-card-heading');
@@ -579,7 +597,7 @@ export const usageRenderFragment: WebviewFragment = {
             : formatUsageAvailabilityValue(usage, 'usageMetricCostUnavailableValue')]
         ].forEach(function(item) {
           var metric = usageNode('div', 'usage-analysis-card-metric');
-          metric.append(usageNode('span', '', t(item[0])), usageNode('strong', '', item[1]));
+          metric.append(createUsageMetricLabel(item[0], sourceId || usage.sourceId), usageNode('strong', '', item[1]));
           metricGrid.append(metric);
         });
         header.append(heading, metricGrid);
@@ -627,7 +645,7 @@ export const usageRenderFragment: WebviewFragment = {
           var modelList = usageNode('div', 'usage-analysis-list');
           subagents.byModel.forEach(function(group, index) {
             modelList.append(createUsageAnalysisCard(
-              getUsageGroupLabel(group), group.usage, 'color-' + (index % 5), group.taskCount
+              getUsageGroupLabel(group), group.usage, 'color-' + (index % 5), group.taskCount, group.sourceId
             ));
           });
           body.append(modelList);

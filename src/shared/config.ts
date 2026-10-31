@@ -109,11 +109,11 @@ const DEEPSEEK_V41_FLASH_USAGE_PRICING: UsageCostRates = {
  * Increment only when the built-in monetary rates or their time-band rules
  * change. Alias additions and capability metadata changes do not change it.
  */
-export const USAGE_PRICE_TABLE_VERSION = 'keepseek-pricing-2026-09-01';
+export const USAGE_PRICE_TABLE_VERSION = 'keepseek-pricing-2026-10-31';
 
 export const DEFAULT_USAGE_PRICING: Record<string, UsageCostRates> = {
   // DeepSeek 当前峰谷价格:北京时间工作日 9-12 点、14-18 点为高峰,
-  // 其余时间(含周六、周日全天)为空闲档。旧 V4 Flash 名称按 V4.1 Flash 计费。
+  // 其余时间(含周末和中国节假日全天)为空闲档。旧 V4 Flash 名称按 V4.1 Flash 计费。
   [DEEPSEEK_FLASH_PRICING_KEY]: { ...DEEPSEEK_V41_FLASH_USAGE_PRICING },
   [DEEPSEEK_PRO_PRICING_KEY]: {
     cacheHitPrice: 0.15,
@@ -279,10 +279,12 @@ export function getConfiguredUsagePricingMap(): Record<string, UsageCostRates> {
 }
 
 export function getConfiguredModelUsagePricing(modelId: string): UsageCostRates | undefined {
-  const pricing = getConfiguredUsagePricingMap();
   const exactId = modelId.trim();
   const canonicalPricingKey = getCanonicalPricingKey(exactId);
-  return pricing[exactId] ?? (canonicalPricingKey ? pricing[canonicalPricingKey] : undefined);
+  // Known official models always use the published reference table. Legacy
+  // user overrides must not silently replace the current official prices.
+  if (canonicalPricingKey) return { ...DEFAULT_USAGE_PRICING[canonicalPricingKey] };
+  return getConfiguredUsagePricingMap()[exactId];
 }
 
 export function getConfiguredBalanceEndpointUrl(baseUrl: string): string {

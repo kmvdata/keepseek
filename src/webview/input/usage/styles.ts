@@ -206,6 +206,25 @@ export const usageIndicatorStylesFragment: WebviewFragment = {
       opacity: 0;
     }
 
+    .usage-cost-help {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 15px;
+      height: 15px;
+      margin-left: 5px;
+      padding: 0;
+      border: 1px solid var(--vscode-descriptionForeground);
+      border-radius: 50%;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+      font: inherit;
+      font-size: 10px;
+      cursor: help;
+      vertical-align: middle;
+    }
+    .usage-cost-help:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+
 `.slice(1)
 };
 

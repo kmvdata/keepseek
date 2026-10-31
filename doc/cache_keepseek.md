@@ -278,3 +278,15 @@ bun run test
 每个模型轮在权威 Provider projection 上构建实际请求，正文一次序列化后在共享 transport 内冻结。在线重连复用同一正文、URL、headers 和配置快照；429、临时 5xx、网络/不完整 EOF 合计最多 5 次重连。退避和重连不重新投影、不变更 tools/tool_choice/thinking、不摘要、不 rollover，不追加失败 partial 或内部续传 user。失败输出仅属当前 attempt 的 UI 临时段，失败即清除；完整响应才追加 providerReplay/toolRounds。
 
 每次物理请求都保留独立 attempt/usage 记录。输入前缀相同可作为 `identical_retry` 观测，但它不等于原生成结果续传，也不保证命中服务商缓存。checkpoint 只保存已用物理次数和请求 hash；重启/Continue 不清零，用 hash 拒绝变化的恢复请求。跨重启的请求字节没有另存 blob，因此第一版精确字节保证限于运行中的自动重连。已完成工具仍复用 evidence/envelope，不因模型重新计算而重跑。
+
+## 参考费用（2026-10-31 核对）
+
+用量面板的费用统一称为“参考费用 / Reference cost”。DeepSeek 已知官方模型使用内置官方人民币价格，不再使用遗留 `usagePricing` 覆盖；未知模型仍可配置价格，不推断为 Flash。Flash 包括 `deepseek-flash`、V4 Flash 兼容名、`deepseek-v4.1-flash` 和 `deepseek-v4.1-flash-1017`。Pro 使用独立的官方 Pro 价格。
+
+Flash 每百万 tokens 的空闲档：缓存命中 0.02 元、未命中 1 元、输出 4 元；高峰档分别为 0.04、2、8 元。每次物理请求开始时，按北京时间选择档位并冻结价格快照，随后以 Provider 返回的 tokens 结算并逐次累计；打开面板或恢复会话不会按查看时刻重新计价。缓存细分缺失时全部输入按未命中计算，并标记费用上界。
+
+周一至周五 09:00（含）—12:00（不含）、14:00（含）—18:00（不含）为高峰；中国节假日优先排除，周末（包括调休上班）全天为空闲。节假日表覆盖国务院公布的 2025、2026 年放假范围；后续年度需随公告维护。在未维护的年份，仍按星期和时间判定，尚不能识别该年的节假日。价格表版本更新为 `keepseek-pricing-2026-10-31`；已有账本保留旧快照，缺少逐请求证据的历史累计不伪造或自动重估。
+
+参考费用仅覆盖模型 token，不包含 Search/Fetch 等独立 API 费用，也不等同于官方账单。所有账号均展示参考费用。DeepSeek 官方账号保留逐请求实际模型价格；其它账号统一按 Flash V4.1 官方标准价生成仅供展示的投影，并在详情页费用旁显示问号说明。混合来源会话合计可能同时包含两种口径，各来源卡片分别标注。该投影不写回真实费用账本、不改变预算准入或费用熔断，也不修改实际 tokens。历史逐请求账本可直接重建，无新增持久化字段；仅剩累计数、缺少请求时间的旧数据保持未计价。
+
+来源：[DeepSeek 官方价格](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)、[2025 年节假日](https://www.gov.cn/zhengce/zhengceku/202411/content_6986383.htm)、[2026 年节假日](https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html)。

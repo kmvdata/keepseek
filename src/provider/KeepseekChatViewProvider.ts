@@ -152,6 +152,7 @@ import {
   summarizeUsageLedger
 } from '../agent/usageLedger';
 import { UsageLedgerStore } from '../agent/usageLedgerStore';
+import { applyReferenceCostView, buildReferenceCostView } from '../agent/usageReferenceCosts';
 import {
   addSubagentHandoffEstimate,
   createUsageDetailsViewModel,
@@ -331,6 +332,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly contextFileFingerprints = new WeakMap<ContextFile, string>();
   private readonly usageLedgerStore: UsageLedgerStore;
   private readonly usageLedgerFlushes = new Map<string, Promise<void>>();
+  private readonly referenceCostViews = new Map<string, ReturnType<typeof buildReferenceCostView>>();
   private readonly latestCacheObservationByScope = new Map<string, import('../shared/types').ProviderCacheObservation>();
   private readonly recentCacheObservationsByFamily = new Map<string, import('../shared/types').ProviderCacheObservation[]>();
   private readonly activeChangeActions = new Set<string>();
@@ -1742,6 +1744,10 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         : rebuildSessionUsageStatsFromLedger(visibleLedger.records, {
             incomplete: Boolean(visibleLedger.incomplete || session.usageLedgerRef.incomplete)
           });
+      this.referenceCostViews.set(session.id, buildReferenceCostView(visibleLedger, {
+        lastUserAt: session.messages.filter((message) => message.role === 'user').at(-1)?.createdAt,
+        subagentUsageStats: session.subagentUsageStats
+      }));
       if (snapshot?.records.length) {
         const flushed = new Set(snapshot.records.map((record) => `${record.requestId}\u0000${record.attemptIndex}`));
         const remaining = current?.records.filter((record) => !flushed.has(`${record.requestId}\u0000${record.attemptIndex}`)) ?? [];
@@ -1754,6 +1760,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       }
       session.updatedAt = new Date().toISOString();
       await this.sessionStore.persist();
+      if (this.sessionStore.activeSessionId === session.id) this.postState();
       succeeded = true;
     }).catch((error) => {
       // Inline records remain the crash-safe migration source until the v2
@@ -2109,6 +2116,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.draftRuns.clearSession(sessionId);
       this.taskPlansBySession.delete(sessionId);
       await this.usageLedgerStore.deleteSession(sessionId);
+      this.referenceCostViews.delete(sessionId);
     }
 
     if (result.activeSessionChanged) {
@@ -5834,6 +5842,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const contextUsage = this.contextUsageForSessionDisplay(activeSession, selectedContextUsage);
     const contextCompression = getAgentRuntimeProfile(selectedModel, this.agentSettings).contextCompression;
     const lastTurnUsage = this.isBusy ? this.liveTurnUsage ?? activeSession.lastTurnUsage : activeSession.lastTurnUsage;
+    const referenceCosts = this.referenceCostViews.get(activeSession.id);
+    const displaySessionUsage = applyReferenceCostView(activeSession.usageStats, referenceCosts?.session);
+    const lastUserAt = activeSession.messages.filter((message) => message.role === 'user').at(-1)?.createdAt;
+    const displayTurnUsage = applyReferenceCostView(lastTurnUsage,
+      referenceCosts?.lastUserAt === lastUserAt ? referenceCosts?.turn : undefined);
     const contextPercent = contextUsage.usedPercent;
 
     const webviewChangeSets = this.changeSets.toWebviewState(activeSession.id);
@@ -5881,14 +5894,17 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         contextUsageSessionId: this.sessionStore.activeSessionId,
         usageMetrics: {
           executionTime: executionTimeView(activeSession),
-          sessionUsageStats: activeSession.usageStats,
-          lastTurnUsage,
+          sessionUsageStats: displaySessionUsage,
+          lastTurnUsage: displayTurnUsage,
           usageDetails: createUsageDetailsViewModel({
-            sessionUsageStats: activeSession.usageStats,
-            lastTurnUsage,
-            subagentUsageStats: activeSession.subagentUsageStats
+            sessionUsageStats: displaySessionUsage,
+            lastTurnUsage: displayTurnUsage,
+            subagentUsageStats: referenceCosts?.subagents ?? activeSession.subagentUsageStats
           }),
           supportsBilling: selectedCatalogModel?.supportsBilling === true,
+          isOfficialDeepSeek: selectedCatalogModel?.supportsBilling === true
+            && selectedCatalogModel.provider === 'deepseek',
+          referenceCostSourceIds: referenceCosts?.referenceSourceIds ?? [],
           balance: selectedCatalogModel?.supportsBilling && selectedCatalogModel.sourceId
             ? this.balanceStore.getBalance(this.getBalanceSourceScope(selectedCatalogModel.sourceId))
             : undefined,

@@ -140,6 +140,8 @@ export const usageFormattersFragment: WebviewFragment = {
           lastTurnUsage: normalizeUsageStats(metrics.lastTurnUsage, 'cost'),
           usageDetails: metrics.usageDetails && typeof metrics.usageDetails === 'object' ? metrics.usageDetails : null,
           supportsBilling: metrics.supportsBilling === true,
+          isOfficialDeepSeek: metrics.isOfficialDeepSeek === true,
+          referenceCostSourceIds: Array.isArray(metrics.referenceCostSourceIds) ? metrics.referenceCostSourceIds : [],
           balance: normalizeBalance(metrics.balance),
           promptCacheDiagnostics: metrics.promptCacheDiagnostics || null,
           turnCount: readNonNegativeNumber(metrics.turnCount, 0),
