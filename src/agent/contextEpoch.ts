@@ -285,19 +285,37 @@ export function validEpochProgressState(epoch: ContextEpochState): boolean {
 /** Information actually delivered, independent of evidence IDs, query spelling
  * and self-reported plan completion. Scope is the enclosing logical task. */
 export function visibleProgressFingerprint(toolName: string, content: string): string | undefined {
-  if (toolName === 'keepseek_update_plan') return undefined;
+  if (toolName === 'keepseek_update_plan' || toolName === 'keepseek_delegation_checkpoint') return undefined;
   let value: unknown;
   try { value = JSON.parse(content); } catch { value = content; }
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
     if (record.bodyDelivered === false || record.errorType === 'evidence_capacity_blocked') return undefined;
+    if (toolName === 'keepseek_read_subagent_result' && typeof record.content === 'string') {
+      if (!record.content || record.ok !== true) return undefined;
+      return createHash('sha256').update(stableStringify({
+        resultHash: record.resultHash, offset: record.offsetBytes ?? record.offset,
+        content: record.content
+      })).digest('hex');
+    }
+    if (record.kind === 'subagent_result_manifest' || record.kind === 'subagent_parallel_manifest') {
+      const items = Array.isArray(record.results) ? record.results : [record];
+      const visible = items.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+        .map(item => ({ resultHash: item.resultHash, resultStatus: item.resultStatus,
+          formatAccepted: item.formatAccepted, summary: item.summary, preview: item.preview }));
+      if (!visible.some(item => item.summary || item.preview)) return undefined;
+      // Reuse changes lifecycle/accounting IDs, but does not create another
+      // piece of evidence. Only newly delivered semantic bytes count here.
+      return createHash('sha256').update(stableStringify(visible)).digest('hex');
+    }
     if (record.completeInline === false && !record.inlineContent && !(Array.isArray(record.inlineItems) && record.inlineItems.length)) return undefined;
   }
   const normalize = (item: unknown): unknown => {
     if (Array.isArray(item)) return item.map(normalize);
     if (!item || typeof item !== 'object') return item;
     return Object.fromEntries(Object.entries(item).filter(([key]) => ![
-      'evidenceRef', 'id', 'draftEditId', 'draftRunId', 'toolCallId', 'requestId', 'query', 'createdAt', 'updatedAt', 'durationMs', 'read'
+      'evidenceRef', 'id', 'draftEditId', 'draftRunId', 'toolCallId', 'requestId', 'query', 'createdAt', 'updatedAt', 'durationMs', 'read',
+      'subagentId', 'treeId', 'resultRef', 'reusedFromSubagentId'
     ].includes(key)).map(([key, child]) => [key, normalize(child)]));
   };
   return createHash('sha256').update(stableStringify(normalize(value))).digest('hex');

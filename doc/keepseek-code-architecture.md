@@ -398,6 +398,8 @@ src/agent/evidence/
 
 ### 7.6 子代理
 
+2026-11-01 P1：新会话与 child 进入协议 V11，新增受控宿主 capsule V1、结果合同 V2、handoff manifest V3 与独立结果索引 V1；P0 对象存储 V4、每 child 有界保存队列和统计归集保持。版本分别管理，旧热会话的 system/schema 不随轮次改写。实现与离线/现场验证区别见 [P1 整改说明](keepseek-p1-subagent-reliability.md)。
+
 ```text
 src/agent/subagents/
 ├── runtime.ts         为每个 child 创建隔离 AgentLoop，处理续跑和结果合并
@@ -406,10 +408,19 @@ src/agent/subagents/
 ├── pathScope.ts       proposal 路径租约与冲突判断
 ├── store.ts           子代理 metadata、transcript、结果分页和诊断
 ├── resultEnvelope.ts  类型化结果信封与机械签收
+├── handoff.ts         单/并行有界摘要、状态与两类结果引用
+├── resultIndex.ts     独立 canonical 对象、UTF-8 分页与内容完整性
+├── contextCapsule.ts  项目/profile/workspace/精确授权的宿主继承证明
 └── types.ts           lane、状态、调用上下文和持久化类型
 ```
 
 每个子代理使用新的 AgentLoop 和新的工具服务，不共享父/兄弟的可变运行状态。父会话只收到有界结果信封；完整结果保存在本地并通过分页工具读取。proposal 子代理只能准备 DraftEdit/DraftRun，不能 Apply、批准或执行。
+
+`agent/delegation.ts` 将短分工判断、自包含候选、声明依赖、宿主拒绝、回传和父验收保存在有界 TaskPlan 元数据中。主模型通过 `keepseek_delegation_checkpoint` 评估与采纳，宿主检查确定性合同和结果完整性，不证明语义独立或结论正确。未验收/partial 不能直接完成计划；显式斜杠命令未落实时准确报告，`failFast` 仍为保留参数。
+
+宿主 capsule 可传递到允许的二级解析已授权 profile，但不会整体作为模型上下文；二级仍只读且不可再委派。`resultRef` 指向 canonical child 结果；`evidenceRef` 指向不可变交付快照。profile 字符上限、宿主资源上限、父 preview 字节与用户模型输出 token 上限分别约束；结果超限生成合法 partial，不截断 JSON 或暴露不存在的原始正文引用。新 reader 不为一页结果解码私有 transcript/checkpoint。
+
+`modelRequestTimeoutSeconds` 限制单次网络请求，`agent.subagentMaxExecutionMs` 默认 5 分钟限制 child 有效执行，根 `agent.maxExecutionMs` 限制共享逻辑任务；重试、恢复和委派不能重置共享预算。
 
 更详细的隔离、调度、结果协议和用量边界统一见 [`SUBAGENTS.md`](../SUBAGENTS.md)。
 
@@ -643,14 +654,16 @@ Webview composer
 ### 13.4 子代理
 
 ```text
-主模型调用 delegate_task / delegate_parallel
+主模型评估独立支线并登记自包含候选（V11 checkpoint）
+  → 主模型调用 delegate_task / delegate_parallel
   → Runner 把调用上下文交给 SubagentRuntime
   → Scheduler 检查深度、数量、并发和路径租约
   → 解析并冻结子代理模型与 profile
   → 为 child 创建隔离 AgentLoop 和工具服务
   → child 结果存入 SubagentStore
-  → 有界 result envelope 返回父 Runner
-  → 父模型需要更多内容时 read_subagent_result 分页读取
+  → 有界 manifest 返回父 Runner（生命周期、完成程度、结构接受分别记录）
+  → 父模型按需 read_subagent_result 读取 canonical 的必要页
+  → 主模型综合核验并登记父验收；提案仍回原审批管线
 ```
 
 ## 14. 持久化布局

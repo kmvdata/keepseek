@@ -1160,6 +1160,8 @@ export interface TaskPlan {
   completionSummary?: string;
   createdAt: string;
   updatedAt: string;
+  /** V11 bounded host observations and model decisions; never hidden reasoning. */
+  delegation?: import('../agent/delegation').DelegationStateV1;
 }
 
 export type ChangeSetStatus =
@@ -1352,6 +1354,7 @@ export interface RunDetailsSummary {
   endedAt?: string;
   durationMs?: number;
   taskPlan?: RunDetailsTaskPlanSummary;
+  delegation?: import('../agent/logging/subagentDetails').RunDetailsDelegationSummary;
   modelRequests: RunDetailsModelRequestSummary;
   toolCallCount: number;
   toolCalls: RunDetailsToolCallSummary[];
@@ -1538,6 +1541,8 @@ export interface ReferenceResource {
 }
 
 export interface AgentRequest {
+  /** Host-observed slash command; no authorization or child history is implied. */
+  explicitSubagentSelection?: { kind: 'single' | 'parallel'; profile: 'research' | 'review' | 'proposal' };
   approvalMode?: ApprovalMode;
   /** Frozen for the whole logical turn. ApprovalMode remains an independent axis. */
   executionMode?: ExecutionMode;
@@ -1554,6 +1559,8 @@ export interface AgentRequest {
   settings: AgentSettings;
   contextFiles: ContextFile[];
   currentRunContext?: CurrentRunContext;
+  /** Host-only controlled inheritance; never projected into Provider messages. */
+  subagentHostContext?: import('../agent/subagents/contextCapsule').SubagentHostContextV1;
   /** 持久化的稳定上下文块；跨轮字节不变时由调用方原样复用 */
   contextInstructions?: string;
   /**

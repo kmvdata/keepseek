@@ -5103,6 +5103,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         sourceConfig,
         signal: abortController.signal
       });
+      agentRequest.explicitSubagentSelection = explicitSubagentSelection;
       if (noProgressRecovery) {
         if (!vscode.workspace.isTrusted) throw new Error(this.t('runRecoveryWorkspaceChanged'));
         agentRequest.checkpoint = recoverNoProgressWithUserTurn(noProgressRecovery, agentRequest,

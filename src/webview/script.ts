@@ -4433,6 +4433,10 @@ export function getScript(): string {
           ...(Array.isArray(details.taskPlan.blockers) ? details.taskPlan.blockers : [])
         ].filter(Boolean)));
       }
+      if (details.delegation) {
+        body.append(createRunTextSection(t('runDetailsDelegation'), formatDelegationDetails(details.delegation),
+          details.delegation.explicitUnfulfilled ? 'run-details-paused' : ''));
+      }
       if (details.budgetStopReason) {
         var budgetPauseText = details.budgetPause?.resumable
           ? details.budgetStopReason + ' · ' + t('runBudgetPauseResumable')
@@ -4629,6 +4633,47 @@ export function getScript(): string {
       return (duration / 1000).toFixed(duration < 10000 ? 1 : 0) + ' s';
     }
 
+    function formatDelegationDetails(delegation) {
+      if (!delegation || delegation.version !== 1) return [];
+      var lines = [t('runDetailsDelegationCandidates', { count: Math.max(0, Math.min(8, Number(delegation.candidateCount) || 0)) })];
+      if (delegation.explicitSelection) {
+        lines.push(t('runDetailsDelegationExplicit') + ': /' + String(delegation.explicitSelection).slice(0, 16)
+          + (delegation.explicitUnfulfilled ? ' · ' + t('runDetailsDelegationUnfulfilled') : ''));
+      }
+      if (delegation.assessment) {
+        lines.push(t('runDetailsDelegationModelJudgment') + ': '
+          + (delegation.assessment.decision === 'delegate' ? t('runDetailsDelegationDelegate') : t('runDetailsDelegationLocal'))
+          + (delegation.assessment.reason ? ' · ' + String(delegation.assessment.reason).slice(0, 240) : ''));
+      }
+      (Array.isArray(delegation.results) ? delegation.results : []).slice(-16).forEach(function(result) {
+        var resultKey = 'runDetailsChildResult_' + String(result.resultStatus || 'unknown');
+        var acceptanceKey = 'runDetailsChildAcceptance_' + String(result.parentAcceptance || 'pending');
+        var lifecycleKey = 'subagentStatus_' + String(result.lifecycleStatus || '');
+        var lifecycleLabel = result.lifecycleStatus ? t(lifecycleKey) : '';
+        if (lifecycleLabel === lifecycleKey) lifecycleLabel = String(result.lifecycleStatus || '');
+        lines.push([
+          String(result.subagentId || '').slice(0, 160),
+          result.profile ? String(result.profile).slice(0, 80) : '',
+          lifecycleLabel,
+          t(resultKey),
+          typeof result.formatAccepted === 'boolean'
+            ? t(result.formatAccepted ? 'runDetailsChildFormatAccepted' : 'runDetailsChildFormatRejected') : '',
+          result.supersededBy ? t('runDetailsChildSuperseded') + ': ' + String(result.supersededBy).slice(0, 160) : t(acceptanceKey),
+          result.detailsAvailable === false ? t('runDetailsChildDetailsUnavailable') : '',
+          result.resultRef ? t('runDetailsChildReference') + ': ' + String(result.resultRef).slice(0, 160) : '',
+          result.reason ? t('runDetailsDelegationModelJudgment') + ': ' + String(result.reason).slice(0, 240) : ''
+        ].filter(Boolean).join(' · '));
+      });
+      (Array.isArray(delegation.events) ? delegation.events : []).slice(-16).forEach(function(event) {
+        var key = 'runDetailsDelegationEvent_' + String(event.kind || 'unknown');
+        var label = t(key);
+        if (label === key) label = String(event.kind || 'unknown').slice(0, 64);
+        lines.push([label, event.candidateId, event.subagentId, event.reason ? String(event.reason).slice(0, 240) : '']
+          .filter(Boolean).join(' · '));
+      });
+      return lines;
+    }
+
     function formatDateTime(value) {
       var timestamp = Date.parse(value || '');
       return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString(getLanguage() === 'en' ? 'en' : 'zh-CN') : '—';
@@ -4674,6 +4719,9 @@ export function getScript(): string {
         }));
       });
       if (details.taskPlan?.goal) lines.push(t('runDetailsTaskPlan') + ': ' + details.taskPlan.goal);
+      formatDelegationDetails(details.delegation).forEach(function(line) {
+        lines.push(t('runDetailsDelegation') + ': ' + line);
+      });
       var contextSources = Array.isArray(details.contextSources) ? details.contextSources : [];
       contextSources.forEach(function(source) {
         var label = source.kind === 'project-instructions'

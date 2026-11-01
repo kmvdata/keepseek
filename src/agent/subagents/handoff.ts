@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { TurnUsageStats } from '../../shared/types';
+import type { SubagentResultEnvelope } from './resultEnvelope';
 import type {
   StoredSubagentMetadata,
   SubagentManifestStatus,
@@ -18,7 +19,7 @@ export function createSubagentResultManifest(input: {
     'id' | 'treeId' | 'profile' | 'lane' | 'depth' | 'sourceId' | 'modelId'
     | 'resultHash' | 'resultChars' | 'resultBytes' | 'resultTruncated'
     | 'originalResultChars' | 'originalResultHash' | 'failureKind' | 'diagnostic'
-    | 'reusedFromSubagentId'>;
+    | 'reusedFromSubagentId' | 'resultStatus' | 'resultFormatAccepted'>;
   result: string;
   status: SubagentManifestStatus;
   ok: boolean;
@@ -30,13 +31,16 @@ export function createSubagentResultManifest(input: {
   maxBytes?: number;
   errorType?: string;
   error?: string;
+  contractVersion?: 2;
+  envelope?: SubagentResultEnvelope;
 }): SubagentResultManifestV2 {
   const resultBytes = utf8ByteLength(input.result);
   const preview = truncateUtf8(input.result, Math.max(0, input.previewBytes
     ?? DEFAULT_SUBAGENT_HANDOFF_PREVIEW_BYTES));
+  const legacyPartial = input.contractVersion !== 2 && input.metadata.resultStatus === 'partial';
   const manifest: SubagentResultManifestV2 = {
-    version: 2,
-    ok: input.ok,
+    version: input.contractVersion === 2 ? 3 : 2,
+    ok: legacyPartial ? false : input.ok,
     kind: 'subagent_result_manifest',
     subagentId: input.metadata.id,
     treeId: input.metadata.treeId,
@@ -44,6 +48,19 @@ export function createSubagentResultManifest(input: {
     lane: input.metadata.lane,
     depth: input.metadata.depth,
     status: input.status,
+    ...(input.contractVersion === 2 ? {
+      resultStatus: input.metadata.resultStatus ?? 'failed',
+      formatAccepted: input.metadata.resultFormatAccepted === true,
+      parentAcceptance: 'pending' as const,
+      missing: (input.envelope?.missing ?? []).slice(0, 4).map((value) => truncateChars(value, 160)),
+      uncertainties: (input.envelope?.uncertainties ?? []).slice(0, 4).map((value) => truncateChars(value, 160)),
+      keyEvidence: (input.envelope?.evidence ?? []).slice(0, 3).map((item) => ({
+        claim: truncateChars(item.claim, 240),
+        ...(item.path ? { path: truncateChars(item.path, 512) } : {}),
+        ...(item.startLine ? { startLine: item.startLine } : {}),
+        verification: 'unverified' as const
+      }))
+    } : {}),
     summary: truncateChars(normalizeInlineText(input.summary), SUBAGENT_HANDOFF_SUMMARY_MAX_CHARS),
     preview,
     resultRef: input.metadata.id,
@@ -59,13 +76,13 @@ export function createSubagentResultManifest(input: {
     usageSummary: compactUsage(input.usage),
     draftEditCount: Math.max(0, Math.floor(input.draftEditCount ?? 0)),
     draftRunCount: Math.max(0, Math.floor(input.draftRunCount ?? 0)),
-    ...(input.errorType ? { errorType: truncateChars(input.errorType, 128) } : {}),
+    ...(input.errorType || legacyPartial ? { errorType: truncateChars(input.errorType ?? 'subagent_result_partial', 128) } : {}),
     ...(input.error ? { error: truncateChars(normalizeInlineText(input.error), 512) } : {}),
     ...(input.metadata.diagnostic?.id ? { diagnosticRef: input.metadata.diagnostic.id } : {}),
     ...(input.metadata.reusedFromSubagentId
       ? { reusedFromSubagentId: input.metadata.reusedFromSubagentId } : {})
   };
-  return fitManifest(manifest, input.maxBytes);
+  return fitManifest(manifest, input.maxBytes ?? (input.contractVersion === 2 ? 12_288 : undefined));
 }
 
 export function createParallelHandoff(input: {
@@ -79,6 +96,7 @@ export function createParallelHandoff(input: {
   conflicts?: readonly string[];
   error?: string;
 }): string {
+  if (input.manifests.some((manifest) => manifest.version === 3)) return createParallelHandoffV3(input);
   const maxBytes = Math.max(16_384, Math.floor(input.maxBytes
     ?? DEFAULT_SUBAGENT_PARALLEL_HANDOFF_BYTES));
   const previewSources = input.manifests.map((manifest) => manifest.preview);
@@ -147,6 +165,68 @@ export function createParallelHandoff(input: {
   return serialized;
 }
 
+function createParallelHandoffV3(input: Parameters<typeof createParallelHandoff>[0]): string {
+  const maxBytes = Math.max(16_384, Math.floor(input.maxBytes ?? DEFAULT_SUBAGENT_PARALLEL_HANDOFF_BYTES));
+  const results = input.manifests.map((manifest, taskIndex) => ({
+    taskIndex, ok: manifest.ok, status: manifest.status,
+    resultStatus: manifest.resultStatus ?? 'failed', formatAccepted: manifest.formatAccepted === true,
+    parentAcceptance: manifest.parentAcceptance ?? 'pending',
+    subagentId: manifest.subagentId, treeId: manifest.treeId, profile: manifest.profile,
+    lane: manifest.lane, depth: manifest.depth, resultRef: manifest.resultRef,
+    resultHash: manifest.resultHash, resultChars: manifest.resultChars, resultBytes: manifest.resultBytes,
+    hasMore: manifest.resultBytes > 0, resultTruncated: manifest.resultTruncated === true,
+    draftEditCount: manifest.draftEditCount, draftRunCount: manifest.draftRunCount,
+    ...(manifest.errorType ? { errorType: manifest.errorType } : {}),
+    summary: '', preview: ''
+  }));
+  const payload = () => ({
+    version: 3, ok: input.accepted, kind: 'subagent_parallel_manifest', results,
+    draftEditCount: Math.max(0, Math.floor(input.draftEditCount)),
+    draftRunCount: Math.max(0, Math.floor(input.draftRunCount)),
+    ...(input.errorType ? { errorType: truncateChars(input.errorType, 128) } : {}),
+    ...(input.failedTasks?.length ? { failedTasks: [...input.failedTasks] } : {}),
+    ...(input.conflicts?.length ? { conflicts: input.conflicts.slice(0, 16).map((item) => truncateChars(item, 256)) } : {}),
+    ...(input.error ? { error: truncateChars(normalizeInlineText(input.error), 512) } : {})
+  });
+  // Reserve semantic summaries before positional previews. Allocate escaped JSON
+  // bytes fairly, so quotes, CJK and emoji obey the same total transport bound.
+  const allocate = (field: 'summary' | 'preview', sources: string[]) => {
+    const active = new Set(sources.map((_item, index) => index).filter((index) => sources[index]));
+    let remaining = Math.max(0, maxBytes - utf8ByteLength(stableJson(payload())));
+    const allocations = new Array(sources.length).fill(0) as number[];
+    while (remaining > 8 && active.size) {
+      const share = Math.max(1, Math.floor(remaining / active.size));
+      let consumed = 0;
+      for (const index of [...active]) {
+        const current = results[index]![field];
+        const source = sources[index]!;
+        let low = allocations[index]!;
+        let high = utf8ByteLength(source);
+        while (low < high) {
+          const mid = Math.ceil((low + high) / 2);
+          const candidate = truncateUtf8(source, mid);
+          const added = utf8ByteLength(JSON.stringify(candidate)) - utf8ByteLength(JSON.stringify(current));
+          if (added <= share) low = mid; else high = mid - 1;
+        }
+        const candidate = truncateUtf8(source, low);
+        const added = utf8ByteLength(JSON.stringify(candidate)) - utf8ByteLength(JSON.stringify(current));
+        allocations[index] = low;
+        results[index]![field] = candidate;
+        consumed += added;
+        if (low >= utf8ByteLength(source) || !added) active.delete(index);
+      }
+      if (!consumed) break;
+      remaining -= consumed;
+    }
+  };
+  allocate('summary', input.manifests.map((manifest) => truncateChars(manifest.summary, SUBAGENT_HANDOFF_SUMMARY_MAX_CHARS)));
+  allocate('preview', input.manifests.map((manifest) => manifest.preview));
+  results.forEach((result) => { result.hasMore = result.resultBytes > utf8ByteLength(result.preview); });
+  const serialized = stableJson(payload());
+  if (utf8ByteLength(serialized) > maxBytes) throw new Error('subagent_parallel_metadata_too_large');
+  return serialized;
+}
+
 export function stableJson(value: unknown): string {
   return JSON.stringify(canonicalize(value)) ?? 'null';
 }
@@ -178,6 +258,11 @@ function fitManifest(manifest: SubagentResultManifestV2, maxBytes: number | unde
   if (utf8ByteLength(stableJson(next)) <= maxBytes) return next;
   next.summary = truncateChars(next.summary, 160);
   if (next.error) next.error = truncateChars(next.error, 160);
+  if (next.version === 3) {
+    next.keyEvidence = []; next.uncertainties = []; next.missing = (next.missing ?? []).slice(0, 1);
+    next.hasMore = next.resultBytes > utf8ByteLength(next.preview);
+    if (utf8ByteLength(stableJson(next)) > maxBytes) throw new Error('subagent_manifest_metadata_too_large');
+  }
   return next;
 }
 

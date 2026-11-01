@@ -338,6 +338,153 @@ test('v6 child context adds typed contracts while frozen v5 bytes stay exact and
   assert.doesNotMatch(first.text, /\/workspace\//u);
 });
 
+test('runtime stores oversized valid JSON as explicit partial and never repairs a task binding mismatch', async () => {
+  const directory = await temporaryDirectory('keepseek-subagent-v11-result-');
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = (async () => {
+    requests += 1;
+    const taskHash = requests === 1 ? hash('Large task') : requests === 3 ? hash('Failed task') : hash('Other task');
+    const content = JSON.stringify({ taskHash, status: requests === 3 ? 'failed' : 'complete', summary: 'Observed source behavior.',
+      evidence: [{ claim: '字😀'.repeat(requests === 1 ? 45_000 : 1) }], uncertainties: [] });
+    return chatStream({ choices: [{ delta: { content }, finish_reason: 'stop' }] });
+  }) as typeof fetch;
+  try {
+    const runtime = new SubagentRuntime({ globalStorageUri: vscode.Uri.file(directory), workspaceKey: 'workspace',
+      sourceStore: new ModelSourceStore(vscode.Uri.file(directory)) });
+    const result = await runtime.delegateTask({ task: 'Large task', profile: 'research' }, {
+      parentRequest: { ...childParentRequest(), requestProtocolVersion: 11 }, parentRunId: 'root-v11', language: 'en'
+    });
+    const manifest = JSON.parse(result.content);
+    assert.equal(manifest.version, 3);
+    assert.equal(manifest.status, 'completed', 'lifecycle remains distinct from business completion');
+    assert.equal(manifest.resultStatus, 'partial');
+    assert.equal(manifest.formatAccepted, true);
+    assert.equal(manifest.parentAcceptance, 'pending');
+    assert.equal(manifest.resultTruncated, true);
+    assert.equal(requests, 1, 'profile delivery limit is not a formatting repair');
+    const store = new SubagentStore(vscode.Uri.file(directory), 'workspace');
+    const stored = (await store.read('session', manifest.subagentId))!;
+    const canonical = (await store.readCanonicalResult('session', stored))!;
+    assert.equal(JSON.parse(canonical).status, 'partial');
+    assert.equal(hash(canonical), manifest.resultHash);
+    assert.ok(canonical.length <= 120_000);
+    assert.match(canonical, /result_too_large/u);
+    const wrong = await runtime.delegateTask({ task: 'Expected task', profile: 'research' }, {
+      parentRequest: { ...childParentRequest(), requestProtocolVersion: 11 }, parentRunId: 'root-wrong', language: 'en'
+    });
+    assert.equal(JSON.parse(wrong.content).ok, false);
+    assert.equal(requests, 2, 'binding mismatch cannot be rewritten by a format repair');
+    const failed = JSON.parse((await runtime.delegateTask({ task: 'Failed task', profile: 'research' }, {
+      parentRequest: { ...childParentRequest(), requestProtocolVersion: 11 }, parentRunId: 'root-failed', language: 'en'
+    })).content);
+    assert.equal(failed.ok, false);
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.resultStatus, 'failed');
+    assert.equal(failed.formatAccepted, true, 'valid failed report differs from damaged JSON');
+    const failedStored = (await store.read('session', failed.subagentId))!;
+    const failedBody = JSON.parse((await store.readCanonicalResult('session', failedStored))!);
+    assert.equal(failedBody.summary, 'Observed source behavior.');
+    assert.equal(failedBody.evidence.length, 1, 'failed task evidence stays available without rerunning');
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('a frozen V10 parent treats partial child delivery as failed batch acceptance without hiding siblings', async () => {
+  const directory = await temporaryDirectory('keepseek-subagent-legacy-partial-');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: unknown, init: RequestInit | undefined) => {
+    const request = JSON.parse(String(init?.body));
+    const tail = String(request.messages.filter((item: { role: string }) => item.role === 'user').at(-1).content);
+    const taskHash = tail.match(/taskHash: ([a-f0-9]{64})/u)?.[1];
+    const partial = tail.startsWith('Partial branch');
+    const content = JSON.stringify({ taskHash, status: partial ? 'partial' : 'complete',
+      summary: partial ? 'Missing the second source.' : 'Located the complete bounded source.',
+      evidence: [{ claim: 'Observed a concrete source.' }], uncertainties: partial ? ['Second source unavailable.'] : [] });
+    return chatStream({ choices: [{ delta: { content }, finish_reason: 'stop' }] });
+  }) as typeof fetch;
+  try {
+    const runtime = new SubagentRuntime({ globalStorageUri: vscode.Uri.file(directory), workspaceKey: 'workspace',
+      sourceStore: new ModelSourceStore(vscode.Uri.file(directory)) });
+    const result = await runtime.delegateParallel({ tasks: [{ task: 'Partial branch' }, { task: 'Complete branch' }] }, {
+      parentRequest: { ...childParentRequest(), requestProtocolVersion: 10 }, parentRunId: 'legacy-batch', language: 'en'
+    });
+    const batch = JSON.parse(result.content);
+    assert.equal(batch.version, 2);
+    assert.equal(batch.ok, false);
+    assert.equal(batch.errorType, 'subagent_parallel_child_failed');
+    assert.equal(batch.results[0].ok, false);
+    assert.equal(batch.results[0].errorType, 'subagent_result_partial');
+    assert.equal(batch.results[1].ok, true);
+    assert.equal(result.draftEdits?.length, 0);
+    const successfulPage = JSON.parse((await runtime.readResult({ ref: batch.results[1].resultRef }, {
+      parentRequest: { ...childParentRequest(), requestProtocolVersion: 10 }, parentRunId: 'legacy-batch', language: 'en'
+    })).content);
+    assert.equal(successfulPage.ok, true);
+    assert.match(successfulPage.content, /Observed a concrete source/u);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('terminal persistence failures expose no readable ref, retain observed usage, and do not rerun the child', async () => {
+  const originalSave = SubagentStore.prototype.save;
+  const originalFetch = globalThis.fetch;
+  try {
+    SubagentStore.prototype.save = async function (metadata, transcript) {
+      if (metadata.completedAt) throw new Error('Injected terminal disk failure');
+      return originalSave.call(this, metadata, transcript);
+    };
+    for (const mode of ['completed', 'malformed', 'missing-model'] as const) {
+      const directory = await temporaryDirectory(`keepseek-subagent-barrier-${mode}-`);
+      let requests = 0, summaries = 0, ledgerRecords = 0;
+      globalThis.fetch = (async () => {
+        requests += 1;
+        const content = mode === 'malformed' ? '{broken' : JSON.stringify({ taskHash: hash('Barrier task'), status: 'complete',
+          summary: 'Located concrete code evidence.', evidence: [{ claim: 'The handler exists.' }], uncertainties: [] });
+        return chatStream({ choices: [{ delta: { content }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25 } });
+      }) as typeof fetch;
+      const uri = vscode.Uri.file(directory);
+      if (mode === 'missing-model') await new SubagentSettingsStore(uri, 'workspace').save({ mode: 'fixed', sourceId: 'missing', modelId: 'missing' });
+      const runtime = new SubagentRuntime({ globalStorageUri: uri, workspaceKey: 'workspace', sourceStore: new ModelSourceStore(uri) });
+      const result = JSON.parse((await runtime.delegateTask({ task: 'Barrier task' }, {
+        parentRequest: { ...childParentRequest(), requestProtocolVersion: 11 }, parentRunId: 'barrier', language: 'en',
+        onRunSummary: () => { summaries += 1; }, onUsageLedgerRecord: () => { ledgerRecords += 1; }
+      })).content);
+      assert.equal(result.errorType, 'subagent_result_delivery_unavailable', mode);
+      assert.equal(Object.hasOwn(result, 'resultRef'), false, mode);
+      assert.equal(summaries, 0, 'an uncommitted terminal state has no committed-state callback');
+      assert.equal(requests, mode === 'missing-model' ? 0 : mode === 'malformed' ? 2 : 1, 'persistence failure cannot rerun Provider work');
+      if (requests) assert.ok(ledgerRecords > 0, 'observed Provider usage remains recorded before terminal delivery');
+    }
+  } finally { SubagentStore.prototype.save = originalSave; globalThis.fetch = originalFetch; }
+});
+
+test('throwing progress and summary observers cannot overwrite a committed canonical result', async () => {
+  const directory = await temporaryDirectory('keepseek-subagent-observer-');
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = (async () => {
+    requests += 1;
+    const content = JSON.stringify({ taskHash: hash('Observer task'), status: 'complete',
+      summary: 'Located concrete source evidence.', evidence: [{ claim: 'The handler exists.' }], uncertainties: [] });
+    return chatStream({ choices: [{ delta: { content }, finish_reason: 'stop' }] });
+  }) as typeof fetch;
+  try {
+    const uri = vscode.Uri.file(directory);
+    const runtime = new SubagentRuntime({ globalStorageUri: uri, workspaceKey: 'workspace', sourceStore: new ModelSourceStore(uri),
+      onProgress: () => { throw new Error('Injected UI observer failure'); } });
+    const manifest = JSON.parse((await runtime.delegateTask({ task: 'Observer task' }, {
+      parentRequest: { ...childParentRequest(), requestProtocolVersion: 11 }, parentRunId: 'observer', language: 'en',
+      onRunSummary: () => { throw new Error('Injected summary observer failure'); }
+    })).content);
+    assert.equal(manifest.ok, true);
+    assert.equal(requests, 1);
+    const store = new SubagentStore(uri, 'workspace');
+    const stored = (await store.read('session', manifest.subagentId))!;
+    assert.equal(stored.metadata.status, 'completed');
+    assert.equal(hash((await store.readCanonicalResult('session', stored))!), manifest.resultHash);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('completed-result index requires exact compatibility, same session, and fresh read fingerprints', async () => {
   const directory = await temporaryDirectory('keepseek-subagent-reuse-');
   const filePath = path.join(directory, 'a.ts');

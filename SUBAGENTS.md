@@ -1,6 +1,6 @@
 # KeepSeek 子代理架构、安全与用量
 
-> 子代理主题的唯一交接入口。本文合并了原 `doc/subagent-runtime-security.md` 与 `doc/subagent-usage-statistics.md`，覆盖当前 V10 的隔离、调度、结果协议、恢复和统计。主 Agent 工作流见 [`doc/keepseek-agent-runtime-workflow.md`](doc/keepseek-agent-runtime-workflow.md)。
+> 子代理主题的唯一交接入口。本文合并了原 `doc/subagent-runtime-security.md` 与 `doc/subagent-usage-statistics.md`，覆盖当前 V11 的隔离、调度、结果协议、恢复和统计。主 Agent 工作流见 [`doc/keepseek-agent-runtime-workflow.md`](doc/keepseek-agent-runtime-workflow.md)。P1 变更与验证限制见 [`doc/keepseek-p1-subagent-reliability.md`](doc/keepseek-p1-subagent-reliability.md)。
 
 ## 1. 设计目标
 
@@ -14,7 +14,7 @@
 4. proposal 只能产生草案；实际写入和命令仍回到父会话审批管线。
 5. 时间、费用和取消属于同一逻辑任务，不能通过委派重置。
 
-当前 `SUBAGENT_PROTOCOL_VERSION` 为 **10**，与 provider request/tool schema V10 对齐。V10 将完整 child 结果留在隔离 run store，只向父 Agent 返回有界 manifest。
+当前 `SUBAGENT_PROTOCOL_VERSION` 为 **11**，与新会话 provider request/tool schema V11 对齐。V11 使用结果合同 V2、handoff manifest V3、宿主继承 capsule V1 和独立结果索引 V1；它们与 P0 的会话对象存储 V4 是不同版本维度。V1–V10 旧热会话继续使用冻结的 system/schema 字节，通过新会话或既有冷边界升级。
 
 ## 2. 权威模块
 
@@ -23,6 +23,9 @@
 | 调度与生命周期 | `src/agent/subagents/runtime.ts`、`scheduler.ts` |
 | profile 与 Skill 适配 | `src/agent/subagents/profiles.ts` |
 | 任务/结果协议 | `src/agent/subagents/resultEnvelope.ts`、`types.ts` |
+| 委派候选与父验收 | `src/agent/delegation.ts`、`taskPlan.ts`、`runner.ts` |
+| 宿主继承投影 | `src/agent/subagents/contextCapsule.ts` |
+| 有界回传与独立结果对象 | `src/agent/subagents/handoff.ts`、`resultIndex.ts` |
 | 工具白名单与 child loop | `src/agent/subagents/runtime.ts`、`src/agent/runner.ts` |
 | 路径作用域与冲突检查 | `src/agent/subagents/pathScope.ts`、`scheduler.ts`、`runtime.ts` |
 | continuation/reuse | `src/agent/subagents/runtime.ts`、`store.ts` |
@@ -45,6 +48,10 @@
 模型也可调用 `keepseek_delegate_task` / `keepseek_delegate_parallel`，但是否暴露这些工具由当前协议、profile、深度和 lane 决定。
 
 斜杠选择保留在可见 user 消息中，并只为当前轮追加稳定选择尾部；它不会切换审批模式、提升工具权限或创建新的后台服务。
+
+V11 在初始计划和有证据的调查范围扩大时，引导主模型通过 `keepseek_delegation_checkpoint(action=assess)` 记录简短分工判断与候选合同：目标、范围、必要输入、依赖、所需能力和验收标准。小任务可以留在主 Agent，不强迫委派或额外 router 调用。宿主预检声明的依赖、profile、权限、路径、能力和预算；它不证明任务语义独立。同批有依赖或存在依赖环时拒绝并行，必须等待前置结果被父模型采纳后顺序推进。只读 child 不能运行 shell/Python/验证，proposal 也只能准备命令草案。
+
+显式选择必须由主模型准备自包含 brief 再调用工具。宿主记录选择、请求、拒绝、返回、复用与父验收；未执行或类型不匹配时显示未落实，只有真实记录才能归因为预算或权限。模型判断与宿主事实分别标明，记录不含隐藏推理。`failFast` 继续是保留参数，不承诺新增批次取消策略。
 
 | profile | 典型用途 | 工具能力 | 可再委派 |
 | --- | --- | --- | --- |
@@ -70,10 +77,12 @@
 
 - 父聊天完整历史、隐藏推理和工具结果正文；
 - 父 Context Files、会话归档与 Legacy Memory；
-- 与任务无关的 Skill 或外部路径授权；
+- 未选中 Skill 的模型可见正文、未经父侧授权的外部路径；
 - API key、审批 permit、父 Agent 的可变内部对象。
 
 项目指令和工具输出仍按不可信边界处理；它们不能要求提升工具、审批模式、深度或路径权限。
+
+capsule V1 仅供宿主解析与恢复，保留适用项目指令原字节、稳定 workspace manifest、根运行已激活的 subagent profile 身份/版本与精确外部 URI 授权；不把整个 capsule 发给模型。一级与二级 child 都能解析这些已授权 profile，但模型只收到当前选中 profile 和适用项目约束。二级继续是 `nested-read`、不可再委派；自定义 proposal profile 也不能借继承获得写能力。capsule hash 进入 compatibility/cache family，缺少证明或内容变化时拒绝旧 continuation/reuse，保留审计资料。
 
 ## 5. 模型选择与设置
 
@@ -90,7 +99,7 @@ globalStorageUri/subagent-settings/v1/<workspaceHash>.json
 
 固定来源/模型不可用时 fail closed，不自动降级到另一个来源。子代理 thinking 始终关闭，以控制私有上下文、成本和结果协议稳定性。
 
-不要再读取旧的账户级 `settings.v1.json`，也不要假定存在 5 分钟或 15 分钟的内置 child 默认超时。child 的显式 `timeoutMs`、profile 限制与父任务 `keepseek.agent.maxExecutionMs` 合并，且共用任务时钟。
+不要再读取旧的账户级 `settings.v1.json`。`modelRequestTimeoutSeconds` 是所有来源共用的单次网络请求超时；`keepseek.agent.subagentMaxExecutionMs` 默认 300000 ms（5 分钟），限制 child 的有效执行；`keepseek.agent.maxExecutionMs` 是根逻辑任务共享时钟的另一层上限。child 还受调用 `timeoutMs` 与 profile 限制，正数限制取更严格值；这三层不能混为同一个超时，也不能通过重试、续接或委派重置。
 
 ## 6. 调度与上限
 
@@ -127,6 +136,7 @@ provider tool call
 - V10 child 同时使用固定 schema 的 `keepseek_read_subagent_result`，按 result ref 分页读取完整 child 结论；V1–V9 保留原 schema 字节。
 - V9 才允许 `keepseek_apply_patch` schema。
 - 只有 profile 明确允许、深度小于 2 且 lane 不是 `proposal` 时，才暴露再委派工具。
+- V11 可再委派的 child 同时使用 checkpoint 工具登记候选与验收二级结果；它不增加读写权限或委派深度。
 
 模型即使伪造未暴露工具名，也会在执行时被拒绝并留下诊断。
 
@@ -143,13 +153,15 @@ proposal 的宿主检查分两阶段：
 
 ## 9. 结构化结果协议
 
-child 必须返回有界 JSON envelope，而不是任意聊天文本。公共字段包括：
+child 必须返回合法 JSON envelope，而不是任意聊天文本。公共字段包括：
 
 - `taskHash`；
 - `status`；
 - `summary`；
 - `evidence` 引用；
 - `uncertainties`。
+
+结果合同 V2 可补充实际覆盖 `coverage`、缺失项 `missing`、必要下一步 `nextSteps` 和模型自报验证 `verification`。证据 claim 与自报验证标为未独立核验，非空字符串不代表宿主确认事实。生命周期 `completed/failed/stopped`、结构/绑定接受 `formatAccepted`、子任务完成程度 `resultStatus=complete/partial/failed` 和父主任务验收分别记录；`ok` 表示交付结构可接受，不能证明用户目标完成。
 
 角色扩展：
 
@@ -158,7 +170,13 @@ child 必须返回有界 JSON envelope，而不是任意聊天文本。公共字
 
 若结果格式错误，宿主只允许一次“仅修复格式”的无工具请求；仍不合法则 fail closed。解析器不得从自由文本中猜测安全关键字段。
 
-父 Agent 收到 V2 handoff manifest：固定元数据、最多 1024 字符 summary、默认最多 10KB UTF-8 preview，以及 session/tree 受限的 result ref。单结果 manifest 默认总上限 12KB；parallel/fleet 共用 20KB 总预算并先保留每个 child 的状态与引用。完整接受结果只保存在 child run store 的 canonical transcript result，需要时由 `keepseek_read_subagent_result` 以 12KB 默认页、24KB 最大页读取；普通工具证据仍由 `keepseek_read_evidence` 读取。child 私有工具 trace 和隐藏推理不会回传。
+V11 父 Agent 收到 V3 handoff manifest：固定状态/引用、最多 1024 字符 summary、默认最多 10240 字节 UTF-8 preview。单结果默认总上限 12288 字节；parallel 共用 20480 字节总预算，先保留各项状态与引用，再公平分配 summary/preview，并按 JSON escaping 后的实际字节约束。每项都保留 summary 与完成程度；缩减 preview 后重算 `hasMore`。旧 V10 继续使用 V2 manifest。
+
+profile `resultMaxChars` 是 accepted canonical 交付的硬字符限制，不是模型输出 token 限制或父 preview 上限。超限时生成合法、有界且明确 `partial` 的 canonical，记录 `missing: ["result_too_large"]`、原始 hash/字符数；原始正文不提供可读引用，`resultRef` 只读该 partial。安全存储上限为 2 MiB；超过宿主资源上限拒绝接受，不能用截断 JSON 或不存在的正文引用假装完整结果。hash/size 指向已接受 canonical，`originalResultHash/originalResultChars` 仅说明被拒绝的原始规范化结果；preview 缩减不代表 canonical 被截断。
+
+`resultRef` 经 `keepseek_read_subagent_result` 读取隔离存储中的 canonical child 结果；`evidenceRef` 经 `keepseek_read_evidence` 读取某次不可变工具交付快照，二者不能互相替代。默认页 12288 字节、最大 24576 字节，UTF-8 byte offset 不跳过中文/emoji，最终页还要经过 evidence/admission 与三协议投影；只有实际交付正文的范围才能推进游标。容量不足时明确阻塞，不自动读取全部剩余页，也不返回私有 trace/checkpoint。
+
+父模型先审摘要、完成程度、关键证据和缺失项，再按需读详情或定点核验，并通过 checkpoint `action=accept` 记录 `adopt/needs_details/investigate/reject` 与简短理由。宿主核对结果作用域、绑定、完整性和完成程度，语义正确性仍需父模型与真实验证判断。信封接收不等于采纳，partial、损坏或缺少验收的结果不能自动完成计划；采纳不是审批许可，也不代表提案已 Apply/执行。
 
 ## 10. Continuation 与结果复用
 
@@ -171,9 +189,9 @@ continuation token 只在同一父 session 内有效，并绑定以下 compatibi
 - 外部授权与路径作用域；
 - 父任务和 child run 身份。
 
-任一 hash 不匹配都拒绝继续，不能“尽量恢复”。
+任一 hash 不匹配都拒绝继续，不能“尽量恢复”。V11 还要求有效 capsule 继承证明，旧记录缺少证明时只保留可读审计，不恢复执行。
 
-已完成结果复用仅适用于 research/review，不适用于 proposal。除了 task 与 compatibility 完全一致，还必须证明 read set 仍新鲜；广泛搜索、无法枚举依赖或环境信息不足时，freshness 为 unverified，禁止复用。
+已完成结果复用仅适用于完整、未截断且格式获接受的 research/review，不适用于 proposal、partial 或损坏结果。除了 task 与 compatibility 完全一致，还必须证明 read set 仍新鲜；广泛搜索、无法枚举依赖或环境信息不足时，freshness 为 unverified，禁止复用。
 
 复用时创建新的稳定结果引用，不复制旧私有 transcript，也不伪造新的 provider 调用。父 Agent 的接受/读取行为仍按当前任务记录。
 
@@ -191,7 +209,9 @@ continuation token 只在同一父 session 内有效，并绑定以下 compatibi
 globalStorageUri/chat-sessions/v1/subagents/<workspaceHash>/<parentSessionId>/
 ```
 
-当前以统一 `.run.json` 记录为主，并兼容读取旧的拆分格式。迁移只读旧记录，不应把旧的运行中状态恢复成可执行队列。
+P0 新写 `<id>.state.json` 与 V4 对象图，summaryHash 绑定活动/统计索引；每 child 有界 CoalescedWriter 与必要持久化屏障保持。P1 在同一原子提交前写入独立 canonical 结果对象与 result index V1，分页只读取元数据和请求范围相关 chunk 并核对 hash，不解码私有 transcript/checkpoint。终态正文和元数据提交成功后才回调父侧。损坏新权威不能静默回退旧文件。
+
+兼容旧 combined `.run.json`、split `.meta.json/.transcript.json` 和 P0 state。旧布局首次读取必要时仍需全记录解析，成本与新独立 reader 分开；旧截断 JSON 不能恢复成完整结果，也不会为修复交付重新执行 child。引用链受 workspace/session/tree/lineage 和循环检查约束。
 
 ## 12. 用量归集
 
@@ -242,7 +262,7 @@ Webview 只接收汇总：次数、状态、token/费用分类和本地估算。
 ### 改 profile、工具或协议
 
 1. 同步 schema 白名单和 Runner 执行时门禁。
-2. 检查 V8/V9/V10 迁移 lane、Evidence reader 与 UTF-8 byte-offset result reader。
+2. 检查 V8/V9/V10/V11 冷边界、冻结旧 schema、Evidence reader 与 UTF-8 byte-offset result reader。
 3. 确认嵌套与 proposal lane 没有获得额外副作用能力。
 4. 更新 compatibility hash 与 continuation 测试。
 
@@ -281,6 +301,8 @@ bun run test
 | `test/subagentSafety.test.ts` | 输入隔离、工具门禁、路径作用域、proposal 冲突与 fail-closed |
 | `test/subagentUsageStats.test.ts` | schema 迁移、累计/明细、去重、币种和本地估算 |
 | `test/subagentUsageRuntime.test.ts` | 实际 usage 归集、失败/停止、nested 去重与 UI 隐私 |
+| `test/p1Delegation.test.ts` | 候选合同、依赖门禁、显式选择与父验收路由 |
+| `test/runDetails.test.ts` | 生命周期/完成程度/父判断的有界展示与持久化 |
 
 审查子代理改动时，最关键的问题是：**这个 child 是否只获得任务必需的信息和能力，它的结果是否仍必须经过父会话原有的安全边界？**
 

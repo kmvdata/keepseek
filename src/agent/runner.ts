@@ -80,6 +80,7 @@ import {
   APPLY_PATCH_TOOL_NAME,
   DELEGATE_PARALLEL_TOOL_NAME,
   DELEGATE_TASK_TOOL_NAME,
+  DELEGATION_CHECKPOINT_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   estimateChatMessageTokens,
   estimateDeepSeekMessageTokens,
@@ -201,6 +202,7 @@ import {
 } from './usageLedger';
 import { createProviderCacheObservation } from './cacheObservation';
 import { TaskPlanTracker } from './taskPlan';
+import { DelegationTracker } from './delegation';
 import { createChangeSet } from '../edits/changeSet';
 import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
 import { RunDetailsBuilder } from './logging/runDetails';
@@ -574,6 +576,9 @@ export class AgentLoop {
       onChange: callbacks.onTaskPlan,
       recordTrace: (event) => trace.record(event)
     });
+    const delegation = (request.requestProtocolVersion ?? 1) >= 11
+      ? new DelegationTracker(checkpoint.taskPlan?.delegation, request.explicitSubagentSelection, (state) => taskPlan.updateDelegation(state))
+      : undefined;
     const repairLoop = new RepairLoopTracker(
       normalizeRepairIterationLimit(request.executionLimits?.maxRepairIterations),
       (event) => trace.record(event),
@@ -690,13 +695,26 @@ export class AgentLoop {
             : `已达到逻辑任务安全预算（${finishReason}）。`);
       }
       const repairState = repairLoop.getState();
-      const finalMessage = validationState.decorateFinalMessage(
+      let finalMessage = validationState.decorateFinalMessage(
         this.decorateRepairMessage(response.message, repairState, request.language),
         request.language
       );
+      const delegationStatus = delegation?.finalize();
+      if (delegationStatus?.pending) {
+        taskPlan.addBlocker(request.language === 'en'
+          ? 'Child results still require parent acceptance or further investigation.'
+          : '子任务结果仍待主 Agent 验收或补充调查。');
+      }
+      if (delegationStatus?.explicitUnfulfilled) {
+        const detail = request.language === 'en'
+          ? 'The explicit delegation selection was not fulfilled: no host-returned result matched the selected role or parallel mode. See delegation observations for any recorded host rejection.'
+          : '本次显式委派未落实：宿主返回的结果未匹配所选角色或并行模式。若宿主曾拒绝，请查看已记录的委派原因。';
+        taskPlan.addBlocker(detail);
+        finalMessage = `${finalMessage}\n\n${detail}`;
+      }
       const completedPlan = budgetPause
         ? taskPlan.stop(finalMessage)
-        : taskPlan.complete(finalMessage, isBlocked);
+        : taskPlan.complete(finalMessage, isBlocked || Boolean(delegationStatus?.pending || delegationStatus?.explicitUnfulfilled));
       const changeSet = createChangeSet({
         runId: trace.runId,
         sessionId: request.sessionId,
@@ -1977,7 +1995,8 @@ export class AgentLoop {
                 onSubagentRunSummary: runCallbacks.onSubagentRunSummary,
                 evidenceStore,
                 evidenceSessionId,
-                evidenceTaskId: checkpoint.taskId
+                evidenceTaskId: checkpoint.taskId,
+                delegation
               });
               const cancellableRead = !isDraftEditPreparationTool(toolCall.function.name)
                 && !isDraftRunPreparationTool(toolCall.function.name)
@@ -2002,6 +2021,7 @@ export class AgentLoop {
           });
         }
         rawToolResult = this.normalizeToolResultFeedback(toolCall.function.name, rawToolResult);
+        rawToolResult = delegation?.attachScopeNotice(rawToolResult) ?? rawToolResult;
         evidenceRecord = await evidenceStore.complete(evidenceRecord, rawToolResult);
         if (this.isToolResultError(rawToolResult)) {
           epoch.failures.push({
@@ -3596,11 +3616,23 @@ export class AgentLoop {
       evidenceStore?: ToolEvidenceStore;
       evidenceSessionId?: string;
       evidenceTaskId?: string;
+      delegation?: DelegationTracker;
     } = {}
   ): Promise<string> {
     try {
       const args = this.parseToolArguments(toolCall.function.arguments);
+      options.delegation?.observeScope(toolCall.function.name, toolCall.function.arguments);
       switch (toolCall.function.name) {
+        case DELEGATION_CHECKPOINT_TOOL_NAME: {
+          if (!options.delegation) throw new Error('Delegation checkpoints require protocol V11.');
+          if (args.action === 'assess') return options.delegation.assess(args);
+          if (args.action !== 'accept') throw new Error('Unknown delegation checkpoint action.');
+          if (!this.subagentTools?.inspectResult) throw new Error('Authoritative child result verification is unavailable.');
+          const context = this.getSubagentInvocationContext(language, options, toolCall.id, draftEdits);
+          const authority = await this.subagentTools.inspectResult(this.readRequiredString(args, 'subagentId'), context);
+          if (!authority) throw new Error('The authoritative child result is unavailable or failed scope/integrity verification.');
+          return options.delegation.accept(args, authority);
+        }
         case READ_EVIDENCE_TOOL_NAME:
           if (!options.evidenceStore || !options.evidenceSessionId || !options.evidenceTaskId) {
             throw new Error('Tool evidence store is unavailable.');
@@ -3620,7 +3652,10 @@ export class AgentLoop {
           }));
         case DELEGATE_TASK_TOOL_NAME: {
           const context = this.getSubagentInvocationContext(language, options, toolCall.id, draftEdits);
-          const result = await this.subagentTools!.delegateTask(this.readDelegateTaskInput(args), context);
+          const rawInput = this.readDelegateTaskInput(args);
+          const input = options.delegation?.prepare([rawInput])[0] ?? rawInput;
+          const result = await this.subagentTools!.delegateTask(input, context);
+          options.delegation?.returned([input], result.content);
           return this.mergeSubagentProposals(result, draftEdits, draftRuns);
         }
         case DELEGATE_PARALLEL_TOOL_NAME: {
@@ -3629,19 +3664,22 @@ export class AgentLoop {
           if (!Array.isArray(rawTasks)) {
             throw new Error('Tool argument "tasks" must be an array.');
           }
-          const result = await this.subagentTools!.delegateParallel({
-            tasks: rawTasks.map((task, index) => {
+          const rawInputs = rawTasks.map((task, index) => {
               if (!this.isRecord(task)) {
                 throw new Error(`Tool argument "tasks[${index}]" must be an object.`);
               }
               return this.readDelegateTaskInput(task);
-            }),
+            });
+          const inputs = options.delegation?.prepare(rawInputs) ?? rawInputs;
+          const result = await this.subagentTools!.delegateParallel({
+            tasks: inputs,
             failFast: this.readOptionalBoolean(args, 'failFast', false)
           }, context);
+          options.delegation?.returned(inputs, result.content);
           return this.mergeSubagentProposals(result, draftEdits, draftRuns);
         }
-        case READ_SUBAGENT_RESULT_TOOL_NAME:
-          return (await this.subagentTools!.readResult({
+        case READ_SUBAGENT_RESULT_TOOL_NAME: {
+          const content = (await this.subagentTools!.readResult({
             ref: this.readOptionalString(args, 'ref'),
             subagentId: this.readOptionalString(args, 'subagentId'),
             offsetBytes: this.readOptionalNumber(args, 'offsetBytes'),
@@ -3649,6 +3687,8 @@ export class AgentLoop {
             offset: this.readOptionalNumber(args, 'offset'),
             maxChars: this.readOptionalNumber(args, 'maxChars')
           }, this.getSubagentInvocationContext(language, options))).content;
+          return options.delegation?.decorateResultPage(content) ?? content;
+        }
         case SEARCH_SESSION_ARCHIVE_TOOL_NAME:
           return JSON.stringify({
             ok: true,
@@ -3852,6 +3892,7 @@ export class AgentLoop {
     }
     return {
       task: this.readRequiredString(args, 'task'),
+      candidateId: this.readOptionalString(args, 'candidateId'),
       profile: this.readOptionalString(args, 'profile'),
       lane: lane as SubagentLane | undefined,
       paths: rawPaths?.map((value) => String(value).trim()).filter(Boolean),

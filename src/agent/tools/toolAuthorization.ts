@@ -13,6 +13,7 @@ import {
   CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME,
   DELEGATE_PARALLEL_TOOL_NAME,
   DELEGATE_TASK_TOOL_NAME,
+  DELEGATION_CHECKPOINT_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   FIND_REFERENCES_TOOL_NAME,
   FIND_SYMBOL_TOOL_NAME,
@@ -52,6 +53,7 @@ export interface ToolAuthorizationAdapter {
 }
 
 const LOW_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
+  [DELEGATION_CHECKPOINT_TOOL_NAME, 'subagent_delegate'],
   [DELEGATE_TASK_TOOL_NAME, 'subagent_delegate'],
   [DELEGATE_PARALLEL_TOOL_NAME, 'subagent_delegate'],
   [READ_SUBAGENT_RESULT_TOOL_NAME, 'subagent_delegate'],

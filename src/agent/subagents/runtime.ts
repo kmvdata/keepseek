@@ -28,6 +28,7 @@ import {
   APPLY_PATCH_TOOL_NAME,
   DELEGATE_PARALLEL_TOOL_NAME,
   DELEGATE_TASK_TOOL_NAME,
+  DELEGATION_CHECKPOINT_TOOL_NAME,
   getAgentTools,
   READ_EVIDENCE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
@@ -35,6 +36,7 @@ import {
   RUN_DRAFT_TOOL_NAME
 } from '../protocol';
 import { AgentLoop } from '../runner';
+import { unresolvedDelegationCount } from '../delegation';
 import { addUsageEventToTurnStats } from '../usageStats';
 import { createSubagentCacheFamilyKey } from '../cacheObservation';
 import {
@@ -62,6 +64,9 @@ import {
 } from './pathScope';
 import {
   acceptSubagentResult,
+  applySubagentParentAcceptance,
+  canRepairSubagentResult,
+  prepareSubagentResultDelivery,
   getSubagentFormatRepairPrompt,
   getSubagentResultFormatInstruction,
   type SubagentResultEnvelope
@@ -81,8 +86,9 @@ import type {
 } from './types';
 import type { SubagentToolCategory } from './types';
 import { freezeTree } from '../../sessions/persistenceSnapshot';
+import { createSubagentHostContext, resolveInheritedSubagentHostContext, type SubagentHostContextV1 } from './contextCapsule';
 
-const SUBAGENT_PROTOCOL_VERSION = 10;
+const SUBAGENT_PROTOCOL_VERSION = 11;
 const MAX_PARALLEL_TASKS = 8;
 
 interface PreparedSubagentTask {
@@ -98,6 +104,7 @@ interface PreparedSubagentTask {
   proposalScope?: ProposalPathScope;
   conflictingScopes: ProposalPathScope[];
   context: SubagentInvocationContext;
+  hostContext: SubagentHostContextV1;
 }
 
 export interface SubagentRuntimeOptions {
@@ -115,6 +122,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
   private readonly scheduler = new SubagentScheduler();
   private readonly progress = new Map<string, SubagentProgressState>();
   private readonly resultWaiters = new Map<string, Set<() => void>>();
+  private readonly unavailableResults = new Set<string>();
 
   public constructor(private readonly options: SubagentRuntimeOptions) {
     this.settingsStore = new SubagentSettingsStore(options.globalStorageUri, options.workspaceKey);
@@ -197,7 +205,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
     const failedTasks: number[] = [];
     executions.forEach((execution, index) => {
       const parsedResult = safeParseToolResult(execution.content);
-      if (!parsedResult || typeof parsedResult !== 'object' || (parsedResult as { ok?: unknown }).ok !== true) {
+      if (!parsedResult || typeof parsedResult !== 'object' || (parsedResult as { ok?: unknown }).ok !== true
+        || ((parsedResult as { version?: number }).version === 3 && (parsedResult as { resultStatus?: string }).resultStatus !== 'complete')) {
         failedTasks.push(index + 1);
       }
       for (const edit of execution.draftEdits ?? []) {
@@ -221,6 +230,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       if (isSubagentResultManifest(parsed)) return parsed;
       const preparedTask = prepared[index]!;
       return createSubagentResultManifest({
+        contractVersion: (context.parentRequest.requestProtocolVersion ?? 1) >= 11 ? 2 : undefined,
         metadata: {
           id: preparedTask.id,
           treeId: preparedTask.treeId,
@@ -264,6 +274,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
     if (!parentSessionId) {
       return toolError('parent_session_missing', 'Subagent results can only be read from a persisted parent session.');
     }
+    const resultId = input.ref ?? input.subagentId ?? '';
+    if (this.unavailableResults.has(resultId)) return terminalDeliveryUnavailable();
     const pageInput = {
       parentSessionId,
       ref: input.ref,
@@ -282,10 +294,21 @@ export class SubagentRuntime implements SubagentToolAdapter {
         // A verified live host operation is a wait, not new evidence or a model
         // polling loop. No polling requests, fabricated progress or fresh budget.
         await this.waitForResult(live.id, context.signal ?? context.parentRequest.signal);
+        if (this.unavailableResults.has(live.id)) return terminalDeliveryUnavailable();
         result = await this.store.readResultPage(pageInput); // recheck scope and integrity
       }
     }
     return { content: JSON.stringify(result) };
+  }
+
+  /** Parent acceptance binds the immutable, scope-verified canonical result. */
+  public async inspectResult(subagentId: string, context: SubagentInvocationContext): Promise<{
+    subagentId: string; resultHash: string; resultStatus: 'complete' | 'partial' | 'failed'; formatAccepted: boolean;
+  } | undefined> {
+    const parentSessionId = context.parentRequest.sessionId;
+    if (!parentSessionId) return undefined;
+    return await this.store.verifyResult({ parentSessionId, ref: subagentId,
+      allowedTreeId: context.parentRequest.subagentContext?.treeId });
   }
 
   private async waitForResult(id: string, signal?: AbortSignal): Promise<void> {
@@ -315,6 +338,17 @@ export class SubagentRuntime implements SubagentToolAdapter {
       return toolError('parent_session_missing', 'Delegation requires a parent chat session id.');
     }
     const parentChild = parentRequest.subagentContext;
+    if (!vscode.workspace.isTrusted) return toolError('workspace_untrusted', 'Delegation is unavailable while the workspace is untrusted.');
+    const roots = createWorkspaceScopeRoots().sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const workspaceContext = createStableWorkspaceContext(roots);
+    let hostContext: SubagentHostContextV1;
+    try {
+      const inherited = parentChild ? resolveInheritedSubagentHostContext(parentRequest, workspaceContext, vscode.workspace.isTrusted) : undefined;
+      if (parentChild && !inherited) return toolError('subagent_context_incompatible', 'The inherited project/profile context is missing, invalid, or no longer matches workspace permissions.');
+      hostContext = inherited ?? createSubagentHostContext(parentRequest, workspaceContext, vscode.workspace.isTrusted);
+    } catch (error) {
+      return toolError('subagent_context_incompatible', error instanceof Error ? error.message : String(error));
+    }
     const depth = (parentChild?.depth ?? 0) + 1;
     const id = `sa_${randomUUID()}`;
     const treeId = parentChild?.treeId ?? parentRequest.checkpoint?.taskId ?? context.parentRunId;
@@ -343,10 +377,9 @@ export class SubagentRuntime implements SubagentToolAdapter {
       return toolError('subagent_not_found', 'The requested subagent continuation was not found in this parent session.');
     }
     const requestedProfile = prior?.metadata.profile ?? input.profile;
-    const resolvedProfile = resolveSubagentProfile({
+    const resolvedProfile = hostContext.profiles.find(p => p.profile.id === requestedProfile || p.name === requestedProfile)?.profile ?? resolveSubagentProfile({
       requestedId: requestedProfile,
-      requestedLane: prior?.metadata.lane ?? input.lane,
-      skills: parentRequest.currentRunContext?.skills
+      requestedLane: prior?.metadata.lane ?? input.lane
     });
     if (!resolvedProfile) {
       return toolError('subagent_profile_not_found', `Unknown or inactive subagent profile: ${requestedProfile ?? ''}`);
@@ -361,7 +394,9 @@ export class SubagentRuntime implements SubagentToolAdapter {
       nested: Boolean(parentChild),
       parallel
     });
-    const roots = createWorkspaceScopeRoots();
+    if (profile.lane === 'proposal' && input.assessedCapabilities && !input.assessedCapabilities.includes('proposal')) {
+      return toolError('delegation_capability_mismatch', 'The resolved profile requires proposal capability, which was not declared in the assessed candidate.');
+    }
     let proposalScope: ProposalPathScope | undefined;
     const conflictingScopes: ProposalPathScope[] = [];
     if (profile.lane === 'proposal') {
@@ -375,7 +410,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
     }
     return {
       id, treeId, rootRunId, parentSessionId, depth, profile, input, prior,
-      roots, proposalScope, conflictingScopes, context
+      roots, proposalScope, conflictingScopes, context, hostContext
     };
   }
 
@@ -429,7 +464,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         prior,
         context,
         roots: prepared.roots,
-        proposalScope: prepared.proposalScope
+        proposalScope: prepared.proposalScope,
+        hostContext: prepared.hostContext
       }));
     } catch (error) {
       const completedAt = new Date().toISOString();
@@ -498,14 +534,14 @@ export class SubagentRuntime implements SubagentToolAdapter {
         updatedAt: completedAt,
         completedAt
       };
-      await this.store.save(failureMetadata, {
+      if (!await this.saveTerminal(failureMetadata, {
         version: 2,
         metadataId: id,
         contextInstructions: '',
         messages: [],
         result: ''
-      }).catch(() => undefined);
-      context.onRunSummary?.(stats);
+      })) return terminalDeliveryUnavailable();
+      this.notifyRunSummary(context, stats);
       this.setProgress({
         ...this.progress.get(id)!,
         status: context.signal?.aborted ? 'stopped' : 'failed',
@@ -518,6 +554,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       });
       const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
       return { content: stableJson(createSubagentResultManifest({
+        contractVersion: (context.parentRequest.requestProtocolVersion ?? 1) >= 11 ? 2 : undefined,
         metadata: failureMetadata,
         result: '',
         status: manifestStatusFromFailure(failureKind, context.signal?.aborted === true),
@@ -543,10 +580,13 @@ export class SubagentRuntime implements SubagentToolAdapter {
     context: SubagentInvocationContext;
     roots: WorkspaceScopeRoot[];
     proposalScope?: ProposalPathScope;
+    hostContext: SubagentHostContextV1;
   }): Promise<SubagentToolExecution> {
     const { model, sourceConfig } = await this.resolveChildModel(input.context.parentRequest, input.context.language, input.profile.id);
     const workspaceContext = createStableWorkspaceContext(input.roots);
-    const projectInstructions = formatProjectInstructionsV2(input.context.parentRequest);
+    const projectInstructions = input.hostContext.projectInstructions.map(item => [
+      `## Project instructions: ${item.workspaceFolder}`, item.content
+    ].join('\n')).join('\n\n');
     const contextInstructions = formatChildContextForVersion(
       workspaceContext.text,
       projectInstructions,
@@ -568,8 +608,10 @@ export class SubagentRuntime implements SubagentToolAdapter {
         id: input.profile.id,
         lane: input.profile.lane,
         instructions: input.profile.instructions,
-        tools: toolNames
+        tools: toolNames,
+        hostContextHash: input.hostContext.hash
       })),
+      hostContextHash: input.hostContext.hash,
       projectInstructionsHash: hashText(projectInstructions),
       authorizationContextHash: hashText(JSON.stringify([
         ...(input.context.parentRequest.authorizedExternalReferenceUris ?? [])
@@ -585,7 +627,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       lane: input.profile.lane,
       depth: input.depth,
       personaVersion: `subagent-system-v${SUBAGENT_PROTOCOL_VERSION}`,
-      contextInstructionsHash: hashText(contextInstructions),
+      contextInstructionsHash: hashText(stableJson({ contextInstructions, hostContextHash: input.hostContext.hash })),
       toolSchemaVersion: SUBAGENT_PROTOCOL_VERSION,
       toolNames,
       authorizationContextHash: compatibility.authorizationContextHash,
@@ -654,14 +696,14 @@ export class SubagentRuntime implements SubagentToolAdapter {
         updatedAt: completedAt,
         completedAt
       };
-      await this.store.save(failureMetadata, {
+      if (!await this.saveTerminal(failureMetadata, {
         version: 2,
         metadataId: input.id,
         contextInstructions,
         messages: [],
         result: ''
-      }).catch(() => undefined);
-      input.context.onRunSummary?.(stats);
+      })) return terminalDeliveryUnavailable();
+      this.notifyRunSummary(input.context, stats);
       this.setProgress({
         ...this.progress.get(input.id)!,
         status: 'failed',
@@ -674,6 +716,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       });
       const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
       return { content: stableJson(createSubagentResultManifest({
+        contractVersion: (input.context.parentRequest.requestProtocolVersion ?? 1) >= 11 ? 2 : undefined,
         metadata: failureMetadata,
         result: '',
         status: 'failed',
@@ -705,9 +748,11 @@ export class SubagentRuntime implements SubagentToolAdapter {
           raw: serializedEnvelope,
           lane: input.profile.lane,
           maxChars: input.profile.resultMaxChars,
-          expectedTaskHash: taskHash
+          expectedTaskHash: taskHash,
+          contractVersion: SUBAGENT_PROTOCOL_VERSION >= 11 ? 2 : undefined
         });
-        if (!verifiedEnvelope.ok || verifiedEnvelope.envelope?.status !== 'complete') continue;
+        if (candidate.metadata.hostContextHash !== input.hostContext.hash || candidate.metadata.resultTruncated
+          || !verifiedEnvelope.ok || verifiedEnvelope.envelope?.status !== 'complete') continue;
         const freshness = await verifyStoredSubagentFreshness(candidate.metadata);
         if (freshness === 'fresh') {
           return await this.reuseCompletedResult({
@@ -817,7 +862,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
     ): Promise<void> => {
       await input.context.onUsageLedgerRecord?.({ ...record, source: 'subagent', subagentId: record.subagentId ?? input.id });
     };
-    let partialResult = '';
+    let acceptedFailedEnvelope: SubagentResultEnvelope | undefined;
     try {
       if (resumeBlocker) throw new SubagentRecoveryBlockedError(resumeBlocker);
       const runner = new AgentLoop(
@@ -844,6 +889,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
           thinkingEnabled: false
         },
         contextFiles: [],
+        executionMode: input.context.parentRequest.executionMode,
+        subagentHostContext: structuredClone(input.hostContext),
         contextInstructions,
         slimToolNames: toolNames,
         requestProtocolVersion: SUBAGENT_PROTOCOL_VERSION,
@@ -912,7 +959,6 @@ export class SubagentRuntime implements SubagentToolAdapter {
         },
         onSubagentRunSummary: input.context.onRunSummary
       });
-      partialResult = response.message;
       if (rejectedUnexposedTool) {
         throw new SubagentResultAcceptanceError(['subagent_tool_not_exposed']);
       }
@@ -932,9 +978,11 @@ export class SubagentRuntime implements SubagentToolAdapter {
         lane: input.profile.lane,
         draftEdits: artifactCheck.draftEdits,
         draftRuns: artifactCheck.draftRuns,
-        expectedTaskHash: taskHash
+        expectedTaskHash: taskHash,
+        contractVersion: SUBAGENT_PROTOCOL_VERSION >= 11 ? 2 : undefined
       });
-      if (!acceptance.ok) {
+      if (!acceptance.ok && canRepairSubagentResult(acceptance.diagnostics)
+        && utf8ByteLength(acceptedRaw) <= 2_097_152) {
         const repaired = await this.repairResultEnvelope({
           input,
           model,
@@ -944,6 +992,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
           originalResult: acceptedRaw,
           diagnostics: acceptance.diagnostics,
           taskHash,
+          hostContext: input.hostContext,
           onUsage: recordChildUsage,
           onUsageLedgerRecord: recordChildLedger
         });
@@ -953,17 +1002,28 @@ export class SubagentRuntime implements SubagentToolAdapter {
           lane: input.profile.lane,
           draftEdits: artifactCheck.draftEdits,
           draftRuns: artifactCheck.draftRuns,
-          expectedTaskHash: taskHash
+          expectedTaskHash: taskHash,
+          contractVersion: SUBAGENT_PROTOCOL_VERSION >= 11 ? 2 : undefined
         });
+      }
+      if (acceptance.ok && acceptance.envelope) {
+        acceptance.envelope = applySubagentParentAcceptance(acceptance.envelope, response.taskPlan?.delegation,
+          unresolvedDelegationCount(response.taskPlan?.delegation) > 0 || response.taskPlan?.status === 'blocked');
+      }
+      if (acceptance.ok && acceptance.envelope?.status === 'failed') {
+        const body = stableJson(acceptance.envelope);
+        if (body.length <= input.profile.resultMaxChars && utf8ByteLength(body) <= 2_097_152) acceptedFailedEnvelope = acceptance.envelope;
       }
       if (!acceptance.ok || !acceptance.envelope || acceptance.envelope.status === 'failed') {
         throw new SubagentResultAcceptanceError(
           acceptance.ok ? ['result_status_failed'] : acceptance.diagnostics
         );
       }
-      const readSet = await createResultReadSet(acceptance.envelope, input.roots, response.toolRounds);
       const serializedEnvelope = stableJson(acceptance.envelope);
-      const fullResult = capResult(serializedEnvelope, input.profile.resultMaxChars);
+      if (utf8ByteLength(serializedEnvelope) > 2_097_152) throw new SubagentResultAcceptanceError(['result_storage_limit_exceeded']);
+      const fullResult = prepareSubagentResultDelivery(acceptance.envelope, input.profile.resultMaxChars);
+      const deliveredEnvelope = fullResult.envelope;
+      const readSet = await createResultReadSet(deliveredEnvelope, input.roots, response.toolRounds);
       // Keep the pre-existing tool-visible usage serialization unchanged. Richer
       // statistics belong only to metadata.stats and the session/UI observer.
       const toolVisibleUsage = response.usage ? relabelTurnUsageAsSubagent(response.usage) : undefined;
@@ -1001,7 +1061,9 @@ export class SubagentRuntime implements SubagentToolAdapter {
       const completedMetadata: StoredSubagentMetadata = {
         ...metadataBase,
         status: 'completed',
-        resultStatus: acceptance.envelope.status,
+        resultStatus: deliveredEnvelope.status,
+        resultContractVersion: 2,
+        resultFormatAccepted: true,
         readSet: readSet.readSet,
         readSetComplete: readSet.complete,
         updatedAt: completedAt,
@@ -1009,13 +1071,28 @@ export class SubagentRuntime implements SubagentToolAdapter {
         resultHash,
         resultChars: fullResult.content.length,
         resultBytes: utf8ByteLength(fullResult.content),
-        originalResultHash: hashText(serializedEnvelope),
-        originalResultChars: serializedEnvelope.length,
+        originalResultHash: fullResult.originalHash,
+        originalResultChars: fullResult.originalChars,
         resultTruncated: fullResult.truncated,
         usage: toolVisibleUsage,
         stats
       };
-      await this.store.save(completedMetadata, {
+      const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
+      const manifest = createSubagentResultManifest({
+        contractVersion: (input.context.parentRequest.requestProtocolVersion ?? 1) >= 11 ? 2 : undefined,
+        envelope: deliveredEnvelope,
+        metadata: completedMetadata,
+        result: fullResult.content,
+        status: 'completed',
+        ok: true,
+        summary: deliveredEnvelope.summary,
+        usage: toolVisibleUsage,
+        draftEditCount: artifactCheck.draftEdits.length,
+        draftRunCount: artifactCheck.draftRuns.length,
+        previewBytes,
+        maxBytes: previewBytes + 2_048
+      });
+      if (!await this.saveTerminal(completedMetadata, {
         version: 2,
         metadataId: input.id,
         contextInstructions,
@@ -1023,8 +1100,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         resultMessageId: input.id,
         result: fullResult.content,
         checkpoint: savedCheckpoint
-      });
-      input.context.onRunSummary?.(stats);
+      })) return terminalDeliveryUnavailable();
+      this.notifyRunSummary(input.context, stats);
       this.setProgress({
         ...this.progress.get(input.id)!,
         status: 'completed',
@@ -1034,23 +1111,10 @@ export class SubagentRuntime implements SubagentToolAdapter {
         updatedAt: completedAt,
         completedAt
       });
-      const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
-      const manifest = createSubagentResultManifest({
-        metadata: completedMetadata,
-        result: fullResult.content,
-        status: 'completed',
-        ok: true,
-        summary: acceptance.envelope.summary,
-        usage: toolVisibleUsage,
-        draftEditCount: artifactCheck.draftEdits.length,
-        draftRunCount: artifactCheck.draftRuns.length,
-        previewBytes,
-        maxBytes: previewBytes + 2_048
-      });
       return {
         content: stableJson(manifest),
-        draftEdits: artifactCheck.draftEdits,
-        draftRuns: artifactCheck.draftRuns
+        draftEdits: deliveredEnvelope.status === 'complete' ? artifactCheck.draftEdits : [],
+        draftRuns: deliveredEnvelope.status === 'complete' ? artifactCheck.draftRuns : []
       };
     } catch (error) {
       const stopped = abort.signal.aborted;
@@ -1085,11 +1149,27 @@ export class SubagentRuntime implements SubagentToolAdapter {
         usage: childUsage,
         lastUsageEstimate
       });
-      const failureResult = capResult(partialResult, input.profile.resultMaxChars);
+      const failureEnvelope = { taskHash, status: 'failed', summary: publicSubagentFailureMessage(failureKind),
+        evidence: [], uncertainties: [message.slice(0, 512)] };
+      let failureContent = acceptedFailedEnvelope ? stableJson(acceptedFailedEnvelope) : stableJson(failureEnvelope);
+      // Escaped diagnostics may be longer than the source characters. Even
+      // failure bodies obey the canonical profile/storage bounds.
+      while (!acceptedFailedEnvelope && failureContent.length > input.profile.resultMaxChars
+        && failureEnvelope.uncertainties[0]!.length) {
+        failureEnvelope.uncertainties[0] = failureEnvelope.uncertainties[0]!.slice(0,
+          Math.floor(failureEnvelope.uncertainties[0]!.length / 2));
+        failureContent = stableJson(failureEnvelope);
+      }
+      if (failureContent.length > input.profile.resultMaxChars || utf8ByteLength(failureContent) > 2_097_152) {
+        return terminalDeliveryUnavailable();
+      }
+      const failureResult = { content: failureContent };
       const failureMetadata: StoredSubagentMetadata = {
         ...metadataBase,
         status: stopped ? 'stopped' : 'failed',
         resultStatus: 'failed',
+        resultContractVersion: 2,
+        resultFormatAccepted: acceptedFailedEnvelope !== undefined,
         failureKind,
         diagnostic,
         stats,
@@ -1097,21 +1177,22 @@ export class SubagentRuntime implements SubagentToolAdapter {
         resultHash: hashText(failureResult.content),
         resultChars: failureResult.content.length,
         resultBytes: utf8ByteLength(failureResult.content),
-        originalResultHash: hashText(partialResult),
-        originalResultChars: partialResult.length,
-        resultTruncated: failureResult.truncated,
+        // No accepted original exists for rejected raw model output. Its
+        // diagnostic reference is separate from canonical result identity.
+        originalResultHash: acceptedFailedEnvelope ? hashText(failureContent) : undefined,
+        originalResultChars: acceptedFailedEnvelope ? failureContent.length : undefined,
         updatedAt: completedAt,
         completedAt
       };
-      await this.store.save(failureMetadata, {
+      if (!await this.saveTerminal(failureMetadata, {
         version: 2,
         metadataId: input.id,
         contextInstructions,
         messages: history,
         result: failureResult.content,
         checkpoint: savedCheckpoint
-      }).catch(() => undefined);
-      input.context.onRunSummary?.(stats);
+      })) return terminalDeliveryUnavailable();
+      this.notifyRunSummary(input.context, stats);
       this.setProgress({
         ...this.progress.get(input.id)!,
         status: stopped ? 'stopped' : 'failed',
@@ -1128,11 +1209,13 @@ export class SubagentRuntime implements SubagentToolAdapter {
       const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
       return {
         content: stableJson(createSubagentResultManifest({
+          contractVersion: (input.context.parentRequest.requestProtocolVersion ?? 1) >= 11 ? 2 : undefined,
+          envelope: acceptedFailedEnvelope,
           metadata: failureMetadata,
           result: failureResult.content,
           status: manifestStatusFromFailure(failureKind, stopped),
           ok: false,
-          summary: publicSubagentFailureMessage(failureKind),
+          summary: acceptedFailedEnvelope?.summary ?? publicSubagentFailureMessage(failureKind),
           usage: childUsage,
           previewBytes,
           maxBytes: previewBytes + 2_048,
@@ -1168,6 +1251,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
       projectInstructionsHash: string;
       authorizationContextHash: string;
       workspaceContextHash: string;
+      hostContextHash: string;
     };
     taskHash: string;
   }): Promise<SubagentToolExecution> {
@@ -1206,6 +1290,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
       ...input.compatibility,
       normalizedTaskHash: input.taskHash,
       resultStatus: 'complete',
+      resultContractVersion: input.source.metadata.resultContractVersion,
+      resultFormatAccepted: true,
       resultHash: hashText(result),
       resultChars: result.length,
       resultBytes: utf8ByteLength(result),
@@ -1222,15 +1308,15 @@ export class SubagentRuntime implements SubagentToolAdapter {
       updatedAt: completedAt,
       completedAt
     };
-    await this.store.save(metadata, {
+    if (!await this.saveTerminal(metadata, {
       version: 2,
       metadataId: input.input.id,
       contextInstructions: '',
       messages: [],
       result: '',
       resultRef: input.source.metadata.id
-    });
-    input.input.context.onRunSummary?.(stats);
+    })) return terminalDeliveryUnavailable();
+    this.notifyRunSummary(input.input.context, stats);
     this.setProgress({
       ...this.progress.get(input.input.id)!,
       status: 'completed',
@@ -1244,6 +1330,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
     const previewBytes = getConfiguredSubagentHandoffPreviewBytes();
     return {
       content: stableJson(createSubagentResultManifest({
+        contractVersion: (input.input.context.parentRequest.requestProtocolVersion ?? 1) >= 11 ? 2 : undefined,
+        envelope: input.envelope,
         metadata,
         result,
         status: 'completed',
@@ -1271,6 +1359,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
     systemPrompt: string;
     contextInstructions: string;
     originalResult: string;
+    hostContext: SubagentHostContextV1;
     diagnostics: readonly string[];
     taskHash: string;
     onUsage: (event: UsageEvent) => void;
@@ -1286,6 +1375,8 @@ export class SubagentRuntime implements SubagentToolAdapter {
         prompt: repairPrompt,
         model: input.model,
         settings: { ...input.input.context.parentRequest.settings, thinkingEnabled: false },
+        executionMode: input.input.context.parentRequest.executionMode,
+        subagentHostContext: structuredClone(input.hostContext),
         contextFiles: [],
         contextInstructions: input.contextInstructions,
         slimToolNames: [],
@@ -1293,7 +1384,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         history: [{
           id: `format-source-${input.input.id}`,
           role: 'assistant',
-          content: capResult(input.originalResult, input.input.profile.resultMaxChars).content,
+          content: input.originalResult,
           createdAt: new Date().toISOString(),
           modelId: input.model.id
         }],
@@ -1321,6 +1412,7 @@ export class SubagentRuntime implements SubagentToolAdapter {
         },
         taskClock: input.input.context.parentRequest.taskClock,
         taskCostBudget: input.input.context.parentRequest.taskCostBudget,
+        taskRunBudget: input.input.context.parentRequest.taskRunBudget,
         signal: input.input.context.signal
       }, { onUsage: input.onUsage, onUsageLedgerRecord: input.onUsageLedgerRecord });
       return repaired.message;
@@ -1357,7 +1449,30 @@ export class SubagentRuntime implements SubagentToolAdapter {
         this.progress.delete(removable.shift()!.id);
       }
     }
-    this.options.onProgress?.(this.getProgressStates());
+    try { void Promise.resolve(this.options.onProgress?.(this.getProgressStates())).catch(() => undefined); }
+    catch { /* UI observers cannot change child execution or committed results. */ }
+  }
+
+  /** A reference becomes deliverable only after its terminal durable barrier. */
+  private async saveTerminal(metadata: StoredSubagentMetadata, transcript: StoredSubagentTranscript): Promise<boolean> {
+    try {
+      await this.store.save(metadata, transcript);
+      return true;
+    } catch {
+      this.unavailableResults.add(metadata.id);
+      while (this.unavailableResults.size > 48) this.unavailableResults.delete(this.unavailableResults.values().next().value!);
+      const previous = this.progress.get(metadata.id);
+      if (previous) this.setProgress({ ...previous, status: 'failed', phase: 'failed',
+        summary: 'The result could not be committed. No readable result reference was delivered.',
+        updatedAt: metadata.updatedAt, completedAt: metadata.completedAt });
+      return false;
+    }
+  }
+
+  /** Observers cannot undo a committed canonical result or trigger another run. */
+  private notifyRunSummary(context: SubagentInvocationContext, summary: NonNullable<StoredSubagentMetadata['stats']>): void {
+    try { void Promise.resolve(context.onRunSummary?.(summary)).catch(() => undefined); }
+    catch { /* The durable metadata remains authoritative. */ }
   }
 }
 
@@ -1372,6 +1487,7 @@ export function getChildToolNamesForRuntime(profile: SubagentProfile, depth: num
   if (profile.canDelegate && depth < 2 && profile.lane !== 'proposal') {
     names.add(DELEGATE_TASK_TOOL_NAME);
     names.add(DELEGATE_PARALLEL_TOOL_NAME);
+    if (protocolVersion >= 11) names.add(DELEGATION_CHECKPOINT_TOOL_NAME);
   }
   if (protocolVersion >= 8 && protocolVersion < 10) names.delete(READ_SUBAGENT_RESULT_TOOL_NAME);
   if (protocolVersion < 9) names.delete(APPLY_PATCH_TOOL_NAME);
@@ -1406,7 +1522,9 @@ export function getSubagentSystemPromptForVersion(
   if (protocolVersion <= 5) return frozenV5;
   return [
     frozenV5,
-    getSubagentResultFormatInstruction(profile.lane),
+    getSubagentResultFormatInstruction(profile.lane, protocolVersion >= 11 ? 2 : 1),
+    ...(protocolVersion >= 11 && profile.canDelegate && depth < 2 && profile.lane !== 'proposal'
+      ? ['Before requesting delegation, use keepseek_delegation_checkpoint assess to register self-contained candidates, dependencies, capabilities and acceptance criteria. After a child returns, inspect its completion, evidence and missing work; record parent acceptance with the same tool. Do not mark incomplete or unverified branches complete.'] : []),
     'The host validates this envelope mechanically. Empty, generic, malformed, off-task, or missing required deliverables are failures. Never include hidden reasoning.'
   ].join('\n');
 }
@@ -1440,14 +1558,6 @@ function getSubagentSystemPromptV5(language: import('../../shared/i18n').Keepsee
     '最终答复应紧凑地给出结论、具体证据、不确定性和待确认提案摘要。不得暴露隐藏推理或逐工具流水账。',
     `当前 Profile：${profile.id}`
   ].join('\n');
-}
-
-function formatProjectInstructionsV2(request: AgentRequest): string {
-  const instructions = request.currentRunContext?.projectInstructions ?? [];
-  return instructions.map((item) => [
-    `## Project instructions: ${item.workspaceFolder}`,
-    item.content
-  ].join('\n')).join('\n\n');
 }
 
 function formatChildContextV2(workspaceContext: string, projectInstructions: string, profile: SubagentProfile): string {
@@ -1500,6 +1610,7 @@ function isContinuationCompatible(metadata: StoredSubagentMetadata, input: {
   projectInstructionsHash: string;
   authorizationContextHash: string;
   workspaceContextHash: string;
+  hostContextHash: string;
 }): boolean {
   return metadata.status === 'completed'
     && metadata.sourceId === input.sourceId
@@ -1510,7 +1621,8 @@ function isContinuationCompatible(metadata: StoredSubagentMetadata, input: {
     && metadata.profileHash === input.profileHash
     && metadata.projectInstructionsHash === input.projectInstructionsHash
     && metadata.authorizationContextHash === input.authorizationContextHash
-    && metadata.workspaceContextHash === input.workspaceContextHash;
+    && metadata.workspaceContextHash === input.workspaceContextHash
+    && metadata.hostContextHash === input.hostContextHash;
 }
 
 function createChildAbortSignal(parentSignal: AbortSignal | undefined): {
@@ -1553,16 +1665,6 @@ function restoreTranscriptMessages(transcript: StoredSubagentTranscript | undefi
     }
     return clone;
   });
-}
-
-function capResult(value: string, maxChars: number): { content: string; truncated: boolean } {
-  if (value.length <= maxChars) {
-    return { content: value, truncated: false };
-  }
-  return {
-    content: `${value.slice(0, Math.max(0, maxChars - 80))}\n\n[Subagent result truncated by its profile limit.]`,
-    truncated: true
-  };
 }
 
 export function validateSubagentArtifacts(input: {
@@ -1817,7 +1919,7 @@ function safeParseToolResult(value: string): unknown {
 function isSubagentResultManifest(value: unknown): value is SubagentResultManifestV2 {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const item = value as Partial<SubagentResultManifestV2>;
-  return item.version === 2 && item.kind === 'subagent_result_manifest'
+  return (item.version === 2 || item.version === 3) && item.kind === 'subagent_result_manifest'
     && typeof item.subagentId === 'string' && typeof item.resultRef === 'string'
     && typeof item.resultHash === 'string' && typeof item.status === 'string';
 }
@@ -1833,6 +1935,11 @@ function manifestStatusFromFailure(
 
 function toolError(errorType: string, error: string, extra: Record<string, unknown> = {}): SubagentToolExecution {
   return { content: JSON.stringify({ ok: false, errorType, error, ...extra }) };
+}
+
+function terminalDeliveryUnavailable(): SubagentToolExecution {
+  return toolError('subagent_result_delivery_unavailable',
+    'The child ended but its result could not be committed. No readable result reference is available. Do not automatically rerun the child.');
 }
 
 function clampInteger(value: number | undefined, min: number, max: number, fallback: number): number {

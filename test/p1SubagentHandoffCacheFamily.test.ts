@@ -27,6 +27,70 @@ import {
   summarizeCacheDiagnostics
 } from '../src/agent/usageLedger';
 import { getAgentTools, READ_SUBAGENT_RESULT_TOOL_NAME } from '../src/agent/protocol';
+import { acceptSubagentResult, applySubagentParentAcceptance, canRepairSubagentResult, prepareSubagentResultDelivery } from '../src/agent/subagents/resultEnvelope';
+
+test('V11 canonical profile boundaries preserve structure and mark exceeded results partial', () => {
+  const accepted = acceptSubagentResult({ raw: JSON.stringify({ taskHash: hash('task'), status: 'complete',
+    summary: '调查结论😀', evidence: [{ claim: '观察到具体行为。'.repeat(100) }], uncertainties: [],
+    coverage: ['src/a.ts'], verification: [{ claim: 'read', method: 'source inspection', result: 'handler exists' }] }),
+  lane: 'research-read', expectedTaskHash: hash('task'), contractVersion: 2 });
+  assert.equal(accepted.ok, true);
+  const envelope = accepted.envelope!;
+  assert.equal(envelope.evidence[0].verification, 'unverified');
+  assert.equal(envelope.verification?.[0].source, 'model_reported');
+  const size = JSON.stringify(envelope).length;
+  for (const maxChars of [size + 1, size, size - 1, 800]) {
+    const delivery = prepareSubagentResultDelivery(envelope, maxChars);
+    assert.ok(delivery.content.length <= maxChars);
+    assert.equal(JSON.parse(delivery.content).status, maxChars < size ? 'partial' : 'complete');
+    assert.equal(delivery.truncated, maxChars < size);
+    assert.equal(hash(JSON.stringify(envelope)), delivery.originalHash);
+    assert.equal(acceptSubagentResult({ raw: delivery.content, lane: 'research-read', expectedTaskHash: hash('task'), contractVersion: 2 }).ok, true);
+  }
+  assert.equal(envelope.status, 'complete', 'delivery projection cannot mutate the accepted original');
+  assert.equal(canRepairSubagentResult(['task_binding_mismatch']), false);
+  assert.equal(canRepairSubagentResult(['result_too_large']), false);
+  assert.equal(canRepairSubagentResult(['proposal_missing_host_artifacts']), false);
+  assert.equal(canRepairSubagentResult(['complete_requires_evidence']), false);
+  assert.equal(canRepairSubagentResult(['summary_missing_or_generic']), false);
+  assert.deepEqual(acceptSubagentResult({ raw: '{"taskHash":"foreign",', lane: 'research-read', expectedTaskHash: hash('task') }).diagnostics,
+    ['task_binding_mismatch']);
+  assert.equal(canRepairSubagentResult(['result_not_json_object']), true);
+  const unaccepted = applySubagentParentAcceptance(envelope, { results: [{}] }, true);
+  assert.equal(unaccepted.status, 'partial');
+  assert.ok(unaccepted.missing?.includes('parent_acceptance_pending'));
+  assert.equal(applySubagentParentAcceptance(envelope, { results: [{ acceptance: 'adopt' }] }).status, 'complete');
+  assert.equal(applySubagentParentAcceptance(envelope, { results: [{ acceptance: 'investigate' }, { acceptance: 'adopt' }] }, false).status,
+    'complete', 'validated resolution may supersede an earlier partial; do not reimplement the tracker');
+});
+
+test('V3 parallel preserves semantic summaries and recomputes hasMore under escaped UTF-8 budget', () => {
+  const manifests = Array.from({ length: 8 }, (_, index) => createSubagentResultManifest({
+    contractVersion: 2,
+    metadata: { id: `sa_v3_${index}`, treeId: 'tree', profile: 'research', lane: 'research-read', depth: 1,
+      sourceId: 'source', modelId: 'model', resultStatus: index === 2 ? 'partial' : 'complete', resultFormatAccepted: true },
+    result: `${index}\"\n😀中文`.repeat(8_000), status: 'completed', ok: true,
+    summary: `Conclusion ${index}: ${'\\\"😀中文'.repeat(100)}`, maxBytes: HANDOFF_LIMIT
+  }));
+  const serialized = createParallelHandoff({ manifests, accepted: false, draftEditCount: 0, draftRunCount: 0 });
+  assert.ok(utf8ByteLength(serialized) <= 20_480);
+  const value = JSON.parse(serialized);
+  assert.equal(value.version, 3);
+  assert.equal(value.results[2].resultStatus, 'partial');
+  for (const [index, item] of value.results.entries()) {
+    assert.ok(item.summary.startsWith(`Conclusion ${index}:`));
+    assert.equal(item.parentAcceptance, 'pending');
+    assert.equal(item.formatAccepted, true);
+    assert.equal(item.hasMore, item.resultBytes > utf8ByteLength(item.preview));
+  }
+  const shaped = prepareEvidenceEnvelope({ record: evidenceRecord(serialized), rawContent: serialized,
+    inlineTokenAllowance: 500, inlineCharLimit: 2_000 });
+  const delivered = JSON.parse(shaped.content);
+  assert.equal(delivered.version, 3);
+  assert.equal(delivered.results[2].resultStatus, 'partial');
+  assert.equal(delivered.results[2].formatAccepted, true);
+  assert.equal(delivered.results[2].hasMore, true);
+});
 
 const HANDOFF_LIMIT = 12_288;
 

@@ -1,5 +1,6 @@
 import { reconcileExecutionTime } from './executionTimeStats';
 import { normalizeRequestBudget } from '../agent/requestBudget';
+import { normalizeRunDetailsDelegation } from '../agent/logging/subagentDetails';
 import { isResumableToolBudgetCheckpoint, normalizeRunCheckpoint, recoveryBlocker } from '../agent/runCheckpoint';
 import { normalizeHistoryWorkFacts } from '../agent/historyProtection';
 import { snapshotSession } from './persistenceSnapshot';
@@ -1313,6 +1314,7 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
     endedAt: normalizeOptionalTimestamp(value.endedAt),
     durationMs: typeof value.durationMs === 'number' ? Math.max(0, value.durationMs) : undefined,
     taskPlan: normalizeRunDetailsTaskPlan(value.taskPlan),
+    delegation: normalizeRunDetailsDelegation(value.delegation),
     modelRequests: {
       requestCount: normalizeNonNegativeInteger(modelRequests.requestCount),
       messageCount: normalizeNonNegativeInteger(modelRequests.messageCount),

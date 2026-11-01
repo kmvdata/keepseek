@@ -1,0 +1,1402 @@
+{
+  "version": 1,
+  "baseline": "f313a00",
+  "p1": "uncommitted P1 working tree based on f313a00",
+  "baselineFile": "doc/benchmarks/keepseek-p1-p0-baseline-20261101.json",
+  "p1File": "doc/benchmarks/keepseek-p1-persistence-current-20261101.json",
+  "environment": {
+    "node": "v24.15.0",
+    "platform": "darwin",
+    "arch": "x64",
+    "provider": "none; identical persistence workload",
+    "filesystem": "real temporary filesystem via VS Code stub",
+    "rounds": 3
+  },
+  "roundsPerWorkload": 3,
+  "conditions": {
+    "workloadScript": "scripts/benchmark-p0-persistence.cjs (unchanged)",
+    "durableAtomicReplacement": true,
+    "realTemporaryFilesystem": true,
+    "vscodeStub": true,
+    "providerTraffic": false,
+    "originalHistoryAndCheckpointCountsPreserved": true
+  },
+  "notes": [
+    "This is the P1 delta from f313a00; it does not reuse the older P0 improvement from 9a874e8.",
+    "Three local samples provide min/median/max observations, never production p95.",
+    "Extra result-index metadata or IO is included. No history was removed, persistence barrier weakened, or execution budget increased.",
+    "Timing is environment-dependent; compare IO counts/bytes and behavior alongside elapsed time."
+  ],
+  "workloads": {
+    "short": {
+      "totalMs": {
+        "baseline": {
+          "count": 3,
+          "min": 410.1575700000001,
+          "median": 414.791596,
+          "max": 433.41962199999995
+        },
+        "p1": {
+          "count": 3,
+          "min": 402.3456849999999,
+          "median": 424.11557099999993,
+          "max": 425.8148709999999
+        },
+        "medianDelta": 9.323974999999905,
+        "medianDeltaPercent": 2.2478697953176234
+      },
+      "coldMs": {
+        "baseline": {
+          "count": 3,
+          "min": 101.75777100000005,
+          "median": 102.63781100000006,
+          "max": 123.60710600000002
+        },
+        "p1": {
+          "count": 3,
+          "min": 102.31811299999993,
+          "median": 111.755256,
+          "max": 121.1757399999999
+        },
+        "medianDelta": 9.117444999999947,
+        "medianDeltaPercent": 8.883124952849922
+      },
+      "hotMs": {
+        "baseline": {
+          "count": 3,
+          "min": 307.519759,
+          "median": 309.81251599999996,
+          "max": 313.033825
+        },
+        "p1": {
+          "count": 3,
+          "min": 300.02757199999996,
+          "median": 304.639131,
+          "max": 312.3603149999999
+        },
+        "medianDelta": -5.173384999999939,
+        "medianDeltaPercent": -1.6698437709340122
+      },
+      "bytes": {
+        "baseline": {
+          "count": 3,
+          "min": 5562,
+          "median": 5562,
+          "max": 5562
+        },
+        "p1": {
+          "count": 3,
+          "min": 5562,
+          "median": 5562,
+          "max": 5562
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "writes": {
+        "baseline": {
+          "count": 3,
+          "min": 10,
+          "median": 10,
+          "max": 10
+        },
+        "p1": {
+          "count": 3,
+          "min": 10,
+          "median": 10,
+          "max": 10
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "reads": {
+        "baseline": {
+          "count": 3,
+          "min": 10,
+          "median": 10,
+          "max": 10
+        },
+        "p1": {
+          "count": 3,
+          "min": 10,
+          "median": 10,
+          "max": 10
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotBytes": {
+        "baseline": {
+          "count": 3,
+          "min": 3640,
+          "median": 3640,
+          "max": 3640
+        },
+        "p1": {
+          "count": 3,
+          "min": 3640,
+          "median": 3640,
+          "max": 3640
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotWrites": {
+        "baseline": {
+          "count": 3,
+          "min": 5,
+          "median": 5,
+          "max": 5
+        },
+        "p1": {
+          "count": 3,
+          "min": 5,
+          "median": 5,
+          "max": 5
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotReads": {
+        "baseline": {
+          "count": 3,
+          "min": 5,
+          "median": 5,
+          "max": 5
+        },
+        "p1": {
+          "count": 3,
+          "min": 5,
+          "median": 5,
+          "max": 5
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "ioPeak": {
+        "baseline": {
+          "count": 3,
+          "min": 4,
+          "median": 4,
+          "max": 4
+        },
+        "p1": {
+          "count": 3,
+          "min": 4,
+          "median": 4,
+          "max": 4
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "saves": {
+        "baseline": {
+          "count": 3,
+          "min": 6,
+          "median": 6,
+          "max": 6
+        },
+        "p1": {
+          "count": 3,
+          "min": 6,
+          "median": 6,
+          "max": 6
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "snapshotMs": {
+        "baseline": {
+          "count": 3,
+          "min": 0.2808489999996482,
+          "median": 0.3215910000000122,
+          "max": 0.6346799999999604
+        },
+        "p1": {
+          "count": 3,
+          "min": 0.26796600000022863,
+          "median": 0.3146430000000464,
+          "max": 0.5775970000000541
+        },
+        "medianDelta": -0.006947999999965759,
+        "medianDeltaPercent": -2.160508223167158
+      },
+      "localPersistenceUnionMs": {
+        "baseline": {
+          "count": 3,
+          "min": 407.2927769999998,
+          "median": 411.2645319999999,
+          "max": 429.59915700000005
+        },
+        "p1": {
+          "count": 3,
+          "min": 399.25609299999985,
+          "median": 419.46205699999996,
+          "max": 422.0571859999999
+        },
+        "medianDelta": 8.197525000000041,
+        "medianDeltaPercent": 1.9932487151603056
+      },
+      "queueMs": {
+        "baseline": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "p1": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "medianDelta": null,
+        "medianDeltaPercent": null
+      },
+      "processingMs": {
+        "baseline": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "p1": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "medianDelta": null,
+        "medianDeltaPercent": null
+      },
+      "persistenceQueuePeak": {
+        "baseline": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "p1": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "medianDelta": null,
+        "medianDeltaPercent": null
+      },
+      "objectsWritten": {
+        "baseline": {
+          "count": 3,
+          "min": 4,
+          "median": 4,
+          "max": 4
+        },
+        "p1": {
+          "count": 3,
+          "min": 4,
+          "median": 4,
+          "max": 4
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      }
+    },
+    "long": {
+      "totalMs": {
+        "baseline": {
+          "count": 3,
+          "min": 11143.766601,
+          "median": 11555.536471,
+          "max": 11711.01025
+        },
+        "p1": {
+          "count": 3,
+          "min": 11358.156536999999,
+          "median": 12433.660488999998,
+          "max": 12618.692383
+        },
+        "medianDelta": 878.1240179999986,
+        "medianDeltaPercent": 7.599162706151772
+      },
+      "coldMs": {
+        "baseline": {
+          "count": 3,
+          "min": 10553.593998999999,
+          "median": 10970.247327000001,
+          "max": 11077.853392000005
+        },
+        "p1": {
+          "count": 3,
+          "min": 10794.116164,
+          "median": 11816.100461999999,
+          "max": 12025.549688
+        },
+        "medianDelta": 845.8531349999976,
+        "medianDeltaPercent": 7.710429033976123
+      },
+      "hotMs": {
+        "baseline": {
+          "count": 3,
+          "min": 585.2891439999985,
+          "median": 590.1726020000006,
+          "max": 633.1568579999948
+        },
+        "p1": {
+          "count": 3,
+          "min": 564.0403729999998,
+          "median": 593.1426950000005,
+          "max": 617.5600269999995
+        },
+        "medianDelta": 2.970092999999906,
+        "medianDeltaPercent": 0.5032583671174731
+      },
+      "bytes": {
+        "baseline": {
+          "count": 3,
+          "min": 3685263,
+          "median": 3685263,
+          "max": 3685263
+        },
+        "p1": {
+          "count": 3,
+          "min": 3685263,
+          "median": 3685263,
+          "max": 3685263
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "writes": {
+        "baseline": {
+          "count": 3,
+          "min": 454,
+          "median": 454,
+          "max": 454
+        },
+        "p1": {
+          "count": 3,
+          "min": 454,
+          "median": 454,
+          "max": 454
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "reads": {
+        "baseline": {
+          "count": 3,
+          "min": 454,
+          "median": 454,
+          "max": 454
+        },
+        "p1": {
+          "count": 3,
+          "min": 454,
+          "median": 454,
+          "max": 454
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotBytes": {
+        "baseline": {
+          "count": 3,
+          "min": 185715,
+          "median": 185715,
+          "max": 185715
+        },
+        "p1": {
+          "count": 3,
+          "min": 185715,
+          "median": 185715,
+          "max": 185715
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotWrites": {
+        "baseline": {
+          "count": 3,
+          "min": 10,
+          "median": 10,
+          "max": 10
+        },
+        "p1": {
+          "count": 3,
+          "min": 10,
+          "median": 10,
+          "max": 10
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotReads": {
+        "baseline": {
+          "count": 3,
+          "min": 10,
+          "median": 10,
+          "max": 10
+        },
+        "p1": {
+          "count": 3,
+          "min": 10,
+          "median": 10,
+          "max": 10
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "ioPeak": {
+        "baseline": {
+          "count": 3,
+          "min": 4,
+          "median": 4,
+          "max": 4
+        },
+        "p1": {
+          "count": 3,
+          "min": 4,
+          "median": 4,
+          "max": 4
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "saves": {
+        "baseline": {
+          "count": 3,
+          "min": 6,
+          "median": 6,
+          "max": 6
+        },
+        "p1": {
+          "count": 3,
+          "min": 6,
+          "median": 6,
+          "max": 6
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "snapshotMs": {
+        "baseline": {
+          "count": 3,
+          "min": 41.27064099999552,
+          "median": 45.17474900000343,
+          "max": 50.91771399999743
+        },
+        "p1": {
+          "count": 3,
+          "min": 40.943153999996866,
+          "median": 45.770008999998026,
+          "max": 50.85840799999983
+        },
+        "medianDelta": 0.595259999994596,
+        "medianDeltaPercent": 1.3176830268488062
+      },
+      "localPersistenceUnionMs": {
+        "baseline": {
+          "count": 3,
+          "min": 11089.504617999999,
+          "median": 11507.505362000002,
+          "max": 11666.985132999998
+        },
+        "p1": {
+          "count": 3,
+          "min": 11309.49847,
+          "median": 12389.537943999996,
+          "max": 12564.473565999999
+        },
+        "medianDelta": 882.0325819999944,
+        "medianDeltaPercent": 7.664846152604332
+      },
+      "queueMs": {
+        "baseline": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "p1": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "medianDelta": null,
+        "medianDeltaPercent": null
+      },
+      "processingMs": {
+        "baseline": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "p1": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "medianDelta": null,
+        "medianDeltaPercent": null
+      },
+      "persistenceQueuePeak": {
+        "baseline": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "p1": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "medianDelta": null,
+        "medianDeltaPercent": null
+      },
+      "objectsWritten": {
+        "baseline": {
+          "count": 3,
+          "min": 448,
+          "median": 448,
+          "max": 448
+        },
+        "p1": {
+          "count": 3,
+          "min": 448,
+          "median": 448,
+          "max": 448
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      }
+    },
+    "single-child": {
+      "totalMs": {
+        "baseline": {
+          "count": 3,
+          "min": 489.715615000001,
+          "median": 490.058054000001,
+          "max": 508.0618979999999
+        },
+        "p1": {
+          "count": 3,
+          "min": 478.391856000002,
+          "median": 481.2597989999995,
+          "max": 498.0048400000014
+        },
+        "medianDelta": -8.798255000001518,
+        "medianDeltaPercent": -1.795349536281981
+      },
+      "coldMs": {
+        "baseline": {
+          "count": 3,
+          "min": 172.67478400000255,
+          "median": 179.5572419999953,
+          "max": 181.556826
+        },
+        "p1": {
+          "count": 3,
+          "min": 164.7850099999996,
+          "median": 169.29895599999873,
+          "max": 184.1498619999984
+        },
+        "medianDelta": -10.258285999996588,
+        "medianDeltaPercent": -5.713100672373246
+      },
+      "hotMs": {
+        "baseline": {
+          "count": 3,
+          "min": 310.5008120000057,
+          "median": 317.04083099999843,
+          "max": 326.5050719999999
+        },
+        "p1": {
+          "count": 3,
+          "min": 311.96084300000075,
+          "median": 313.6068460000024,
+          "max": 313.85497800000303
+        },
+        "medianDelta": -3.433984999996028,
+        "medianDeltaPercent": -1.0831365124689714
+      },
+      "bytes": {
+        "baseline": {
+          "count": 3,
+          "min": 3329924,
+          "median": 3329924,
+          "max": 3329924
+        },
+        "p1": {
+          "count": 3,
+          "min": 3332486,
+          "median": 3332486,
+          "max": 3332486
+        },
+        "medianDelta": 2562,
+        "medianDeltaPercent": 0.0769386928950931
+      },
+      "writes": {
+        "baseline": {
+          "count": 3,
+          "min": 7,
+          "median": 7,
+          "max": 7
+        },
+        "p1": {
+          "count": 3,
+          "min": 7,
+          "median": 7,
+          "max": 7
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "reads": {
+        "baseline": {
+          "count": 3,
+          "min": 8,
+          "median": 8,
+          "max": 8
+        },
+        "p1": {
+          "count": 3,
+          "min": 8,
+          "median": 8,
+          "max": 8
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotBytes": {
+        "baseline": {
+          "count": 3,
+          "min": 15820,
+          "median": 15820,
+          "max": 15820
+        },
+        "p1": {
+          "count": 3,
+          "min": 17955,
+          "median": 17955,
+          "max": 17955
+        },
+        "medianDelta": 2135,
+        "medianDeltaPercent": 13.495575221238937
+      },
+      "hotWrites": {
+        "baseline": {
+          "count": 3,
+          "min": 5,
+          "median": 5,
+          "max": 5
+        },
+        "p1": {
+          "count": 3,
+          "min": 5,
+          "median": 5,
+          "max": 5
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotReads": {
+        "baseline": {
+          "count": 3,
+          "min": 5,
+          "median": 5,
+          "max": 5
+        },
+        "p1": {
+          "count": 3,
+          "min": 5,
+          "median": 5,
+          "max": 5
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "ioPeak": {
+        "baseline": {
+          "count": 3,
+          "min": 1,
+          "median": 1,
+          "max": 1
+        },
+        "p1": {
+          "count": 3,
+          "min": 1,
+          "median": 1,
+          "max": 1
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "saves": {
+        "baseline": {
+          "count": 3,
+          "min": 6,
+          "median": 6,
+          "max": 6
+        },
+        "p1": {
+          "count": 3,
+          "min": 6,
+          "median": 6,
+          "max": 6
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "snapshotMs": {
+        "baseline": {
+          "count": 3,
+          "min": 12.145540999990772,
+          "median": 14.253257999989728,
+          "max": 22.826874000005773
+        },
+        "p1": {
+          "count": 3,
+          "min": 7.784049999987474,
+          "median": 7.79574799999682,
+          "max": 13.754942999999912
+        },
+        "medianDelta": -6.457509999992908,
+        "medianDeltaPercent": -45.305501380790005
+      },
+      "localPersistenceUnionMs": {
+        "baseline": {
+          "count": 3,
+          "min": 488.9580439999918,
+          "median": 489.42887399999745,
+          "max": 507.6501309999949
+        },
+        "p1": {
+          "count": 3,
+          "min": 477.95932000000175,
+          "median": 480.9200159999964,
+          "max": 496.83607499999925
+        },
+        "medianDelta": -8.508858000001055,
+        "medianDeltaPercent": -1.738527997022321
+      },
+      "queueMs": {
+        "baseline": {
+          "count": 3,
+          "min": 0.3708009999973001,
+          "median": 0.3780430000042543,
+          "max": 0.8560060000017984
+        },
+        "p1": {
+          "count": 3,
+          "min": 0.3729440000024624,
+          "median": 0.41329800000676187,
+          "max": 0.9124750000046333
+        },
+        "medianDelta": 0.035255000002507586,
+        "medianDeltaPercent": 9.325658721920746
+      },
+      "processingMs": {
+        "baseline": {
+          "count": 3,
+          "min": 473.8373789999896,
+          "median": 476.9105120000095,
+          "max": 484.4401350000044
+        },
+        "p1": {
+          "count": 3,
+          "min": 469.74537200000486,
+          "median": 472.7605040000053,
+          "max": 482.1571050000057
+        },
+        "medianDelta": -4.1500080000041635,
+        "medianDeltaPercent": -0.870185893491918
+      },
+      "persistenceQueuePeak": {
+        "baseline": {
+          "count": 3,
+          "min": 1,
+          "median": 1,
+          "max": 1
+        },
+        "p1": {
+          "count": 3,
+          "min": 1,
+          "median": 1,
+          "max": 1
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "objectsWritten": {
+        "baseline": {
+          "count": 3,
+          "min": 1,
+          "median": 1,
+          "max": 1
+        },
+        "p1": {
+          "count": 3,
+          "min": 1,
+          "median": 1,
+          "max": 1
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      }
+    },
+    "parallel-child": {
+      "totalMs": {
+        "baseline": {
+          "count": 3,
+          "min": 899.8611719999972,
+          "median": 973.3076690000016,
+          "max": 1029.6717050000007
+        },
+        "p1": {
+          "count": 3,
+          "min": 1001.9471330000015,
+          "median": 1009.4482239999998,
+          "max": 1047.2313240000003
+        },
+        "medianDelta": 36.14055499999813,
+        "medianDeltaPercent": 3.713168626024467
+      },
+      "coldMs": {
+        "baseline": {
+          "count": 3,
+          "min": 268.191184000003,
+          "median": 276.87605800000165,
+          "max": 299.772281000005
+        },
+        "p1": {
+          "count": 3,
+          "min": 325.3788510000013,
+          "median": 335.15547700000025,
+          "max": 335.3309599999993
+        },
+        "medianDelta": 58.2794189999986,
+        "medianDeltaPercent": 21.048919657761903
+      },
+      "hotMs": {
+        "baseline": {
+          "count": 3,
+          "min": 622.9851139999955,
+          "median": 705.1164849999986,
+          "max": 729.8994239999956
+        },
+        "p1": {
+          "count": 3,
+          "min": 674.2927469999995,
+          "median": 676.5682820000002,
+          "max": 711.900364000001
+        },
+        "medianDelta": -28.548202999998466,
+        "medianDeltaPercent": -4.048721538541042
+      },
+      "bytes": {
+        "baseline": {
+          "count": 3,
+          "min": 9989772,
+          "median": 9989772,
+          "max": 9989772
+        },
+        "p1": {
+          "count": 3,
+          "min": 9997458,
+          "median": 9997458,
+          "max": 9997458
+        },
+        "medianDelta": 7686,
+        "medianDeltaPercent": 0.0769386928950931
+      },
+      "writes": {
+        "baseline": {
+          "count": 3,
+          "min": 21,
+          "median": 21,
+          "max": 21
+        },
+        "p1": {
+          "count": 3,
+          "min": 21,
+          "median": 21,
+          "max": 21
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "reads": {
+        "baseline": {
+          "count": 3,
+          "min": 24,
+          "median": 24,
+          "max": 24
+        },
+        "p1": {
+          "count": 3,
+          "min": 24,
+          "median": 24,
+          "max": 24
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotBytes": {
+        "baseline": {
+          "count": 3,
+          "min": 47460,
+          "median": 47460,
+          "max": 47460
+        },
+        "p1": {
+          "count": 3,
+          "min": 53865,
+          "median": 53865,
+          "max": 53865
+        },
+        "medianDelta": 6405,
+        "medianDeltaPercent": 13.495575221238937
+      },
+      "hotWrites": {
+        "baseline": {
+          "count": 3,
+          "min": 15,
+          "median": 15,
+          "max": 15
+        },
+        "p1": {
+          "count": 3,
+          "min": 15,
+          "median": 15,
+          "max": 15
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotReads": {
+        "baseline": {
+          "count": 3,
+          "min": 15,
+          "median": 15,
+          "max": 15
+        },
+        "p1": {
+          "count": 3,
+          "min": 15,
+          "median": 15,
+          "max": 15
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "ioPeak": {
+        "baseline": {
+          "count": 3,
+          "min": 3,
+          "median": 3,
+          "max": 3
+        },
+        "p1": {
+          "count": 3,
+          "min": 3,
+          "median": 3,
+          "max": 3
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "saves": {
+        "baseline": {
+          "count": 3,
+          "min": 18,
+          "median": 18,
+          "max": 18
+        },
+        "p1": {
+          "count": 3,
+          "min": 18,
+          "median": 18,
+          "max": 18
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "snapshotMs": {
+        "baseline": {
+          "count": 3,
+          "min": 9.280227000002924,
+          "median": 12.369894000003114,
+          "max": 14.122286999983771
+        },
+        "p1": {
+          "count": 3,
+          "min": 10.8679639999973,
+          "median": 13.262389000003168,
+          "max": 13.343357999998261
+        },
+        "medianDelta": 0.8924950000000536,
+        "medianDeltaPercent": 7.2150577846489945
+      },
+      "localPersistenceUnionMs": {
+        "baseline": {
+          "count": 3,
+          "min": 899.6134840000159,
+          "median": 973.0510479999939,
+          "max": 1029.3792149999936
+        },
+        "p1": {
+          "count": 3,
+          "min": 1001.6593550000034,
+          "median": 1009.1865079999989,
+          "max": 1046.9659669999965
+        },
+        "medianDelta": 36.13546000000497,
+        "medianDeltaPercent": 3.713624282536634
+      },
+      "queueMs": {
+        "baseline": {
+          "count": 3,
+          "min": 3.8980440000086674,
+          "median": 4.091865000016696,
+          "max": 4.1842089999699965
+        },
+        "p1": {
+          "count": 3,
+          "min": 3.9617230000003474,
+          "median": 4.043712999977288,
+          "max": 5.064222999986669
+        },
+        "medianDelta": -0.04815200003940845,
+        "medianDeltaPercent": -1.176773917008796
+      },
+      "processingMs": {
+        "baseline": {
+          "count": 3,
+          "min": 2550.1879929999923,
+          "median": 2792.2215249999936,
+          "max": 2832.302283000019
+        },
+        "p1": {
+          "count": 3,
+          "min": 2799.5130750000244,
+          "median": 2855.145733000012,
+          "max": 2920.6385049999953
+        },
+        "medianDelta": 62.92420800001855,
+        "medianDeltaPercent": 2.253553575052348
+      },
+      "persistenceQueuePeak": {
+        "baseline": {
+          "count": 3,
+          "min": 1,
+          "median": 1,
+          "max": 1
+        },
+        "p1": {
+          "count": 3,
+          "min": 1,
+          "median": 1,
+          "max": 1
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "objectsWritten": {
+        "baseline": {
+          "count": 3,
+          "min": 3,
+          "median": 3,
+          "max": 3
+        },
+        "p1": {
+          "count": 3,
+          "min": 3,
+          "median": 3,
+          "max": 3
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      }
+    },
+    "ledger": {
+      "totalMs": {
+        "baseline": {
+          "count": 3,
+          "min": 262.69142799999827,
+          "median": 271.4407110000029,
+          "max": 282.3674800000008
+        },
+        "p1": {
+          "count": 3,
+          "min": 265.86752200000046,
+          "median": 266.70369899999787,
+          "max": 275.93570300000283
+        },
+        "medianDelta": -4.737012000005052,
+        "medianDeltaPercent": -1.7451368965818104
+      },
+      "coldMs": {
+        "baseline": {
+          "count": 3,
+          "min": 61.34510599999339,
+          "median": 66.26560400000017,
+          "max": 72.27873999999429
+        },
+        "p1": {
+          "count": 3,
+          "min": 62.715909999998985,
+          "median": 64.93074199999683,
+          "max": 68.6721120000002
+        },
+        "medianDelta": -1.3348620000033407,
+        "medianDeltaPercent": -2.0144115792007833
+      },
+      "hotMs": {
+        "baseline": {
+          "count": 3,
+          "min": 201.34632200000488,
+          "median": 205.17510700000275,
+          "max": 210.0887400000065
+        },
+        "p1": {
+          "count": 3,
+          "min": 201.77295700000104,
+          "median": 203.15161200000148,
+          "max": 207.26359100000263
+        },
+        "medianDelta": -2.023495000001276,
+        "medianDeltaPercent": -0.9862283147249675
+      },
+      "bytes": {
+        "baseline": {
+          "count": 3,
+          "min": 5680,
+          "median": 5680,
+          "max": 5680
+        },
+        "p1": {
+          "count": 3,
+          "min": 5680,
+          "median": 5680,
+          "max": 5680
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "writes": {
+        "baseline": {
+          "count": 3,
+          "min": 6,
+          "median": 6,
+          "max": 6
+        },
+        "p1": {
+          "count": 3,
+          "min": 6,
+          "median": 6,
+          "max": 6
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "reads": {
+        "baseline": {
+          "count": 3,
+          "min": 262,
+          "median": 262,
+          "max": 262
+        },
+        "p1": {
+          "count": 3,
+          "min": 262,
+          "median": 262,
+          "max": 262
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotBytes": {
+        "baseline": {
+          "count": 3,
+          "min": 4734,
+          "median": 4734,
+          "max": 4734
+        },
+        "p1": {
+          "count": 3,
+          "min": 4734,
+          "median": 4734,
+          "max": 4734
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotWrites": {
+        "baseline": {
+          "count": 3,
+          "min": 5,
+          "median": 5,
+          "max": 5
+        },
+        "p1": {
+          "count": 3,
+          "min": 5,
+          "median": 5,
+          "max": 5
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "hotReads": {
+        "baseline": {
+          "count": 3,
+          "min": 5,
+          "median": 5,
+          "max": 5
+        },
+        "p1": {
+          "count": 3,
+          "min": 5,
+          "median": 5,
+          "max": 5
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "ioPeak": {
+        "baseline": {
+          "count": 3,
+          "min": 1,
+          "median": 1,
+          "max": 1
+        },
+        "p1": {
+          "count": 3,
+          "min": 1,
+          "median": 1,
+          "max": 1
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "saves": {
+        "baseline": {
+          "count": 3,
+          "min": 6,
+          "median": 6,
+          "max": 6
+        },
+        "p1": {
+          "count": 3,
+          "min": 6,
+          "median": 6,
+          "max": 6
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": 0
+      },
+      "snapshotMs": {
+        "baseline": {
+          "count": 3,
+          "min": 0,
+          "median": 0,
+          "max": 0
+        },
+        "p1": {
+          "count": 3,
+          "min": 0,
+          "median": 0,
+          "max": 0
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": null
+      },
+      "localPersistenceUnionMs": {
+        "baseline": {
+          "count": 3,
+          "min": 262.3420849999966,
+          "median": 270.8979329999929,
+          "max": 280.2261899999721
+        },
+        "p1": {
+          "count": 3,
+          "min": 265.2243989999988,
+          "median": 266.2987079999948,
+          "max": 273.9268510000111
+        },
+        "medianDelta": -4.599224999998114,
+        "medianDeltaPercent": -1.697770429277596
+      },
+      "queueMs": {
+        "baseline": {
+          "count": 3,
+          "min": 0.0316030000030878,
+          "median": 0.034929999987070914,
+          "max": 0.11579399998299778
+        },
+        "p1": {
+          "count": 3,
+          "min": 0.03781499998876825,
+          "median": 0.03877700000157347,
+          "max": 0.10366799999610521
+        },
+        "medianDelta": 0.003847000014502555,
+        "medianDeltaPercent": 11.013455527988818
+      },
+      "processingMs": {
+        "baseline": {
+          "count": 3,
+          "min": 262.3067350000056,
+          "median": 270.85928999999305,
+          "max": 280.0937810000032
+        },
+        "p1": {
+          "count": 3,
+          "min": 265.18273900001805,
+          "median": 266.25579400000424,
+          "max": 273.8095489999978
+        },
+        "medianDelta": -4.603495999988809,
+        "medianDeltaPercent": -1.699589480570863
+      },
+      "persistenceQueuePeak": {
+        "baseline": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "p1": {
+          "count": 0,
+          "min": null,
+          "median": null,
+          "max": null
+        },
+        "medianDelta": null,
+        "medianDeltaPercent": null
+      },
+      "objectsWritten": {
+        "baseline": {
+          "count": 3,
+          "min": 0,
+          "median": 0,
+          "max": 0
+        },
+        "p1": {
+          "count": 3,
+          "min": 0,
+          "median": 0,
+          "max": 0
+        },
+        "medianDelta": 0,
+        "medianDeltaPercent": null
+      }
+    }
+  }
+}

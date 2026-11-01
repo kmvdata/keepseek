@@ -14,6 +14,8 @@ import { createContextUsageEstimateFromAnthropic, createContextUsageEstimateFrom
 import { createProviderClient } from '../src/agent/providers/factory';
 import { SubagentRuntime } from '../src/agent/subagents/runtime';
 import { SubagentStore } from '../src/agent/subagents/store';
+import { createSubagentHostContext } from '../src/agent/subagents/contextCapsule';
+import { createStableWorkspaceContext } from '../src/agent/subagents/pathScope';
 import type { SubagentToolAdapter, SubagentProgressState } from '../src/agent/subagents/types';
 import { createUsageEvent } from '../src/agent/usageStats';
 import type { AgentRequest, ContextUsageEstimate, SubagentHandoffEstimate, SubagentRunUsageSummary, UsageEvent } from '../src/shared/types';
@@ -260,6 +262,7 @@ async function runParent(callbacks: Parameters<AgentRunner['run']>[1], options: 
     }
     if (options.contextWindowTokens) { request.model.contextWindowTokens = options.contextWindowTokens; }
     if (options.nested) {
+      request.subagentHostContext = createSubagentHostContext(request, createStableWorkspaceContext([]));
       request.subagentContext = { id: 'sa_ancestor', parentSessionId: 'session-one', parentRunId: 'parent', rootRunId: 'root',
         treeId: 'tree', depth: 1, profile: 'research', lane: 'research-read' };
     }

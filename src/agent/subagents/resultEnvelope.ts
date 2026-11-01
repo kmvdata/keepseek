@@ -1,4 +1,5 @@
 import type { DraftEdit, DraftRunProposal } from '../../shared/types';
+import { createHash } from 'node:crypto';
 import { isRecord } from '../../shared/errors';
 import type { SubagentLane } from './types';
 
@@ -9,15 +10,22 @@ export interface SubagentEvidence {
   path?: string;
   startLine?: number;
   endLine?: number;
+  /** A populated claim is a model report, not proof that the host verified it. */
+  verification?: 'unverified';
 }
 
 export interface CommonSubagentResultEnvelope {
+  contractVersion?: 2;
   /** Deterministic binding supplied in the current child task, never a random run id. */
   taskHash?: string;
   status: SubagentResultStatus;
   summary: string;
   evidence: SubagentEvidence[];
   uncertainties: string[];
+  coverage?: string[];
+  missing?: string[];
+  nextSteps?: string[];
+  verification?: Array<{ claim: string; method: string; result: string; source: 'model_reported' }>;
 }
 
 export interface SubagentReviewFinding {
@@ -70,12 +78,22 @@ export function acceptSubagentResult(input: {
   draftRuns?: readonly DraftRunProposal[];
   maxChars?: number;
   expectedTaskHash?: string;
+  contractVersion?: 2;
 }): SubagentResultAcceptance {
   if (typeof input.maxChars === 'number' && input.raw.length > input.maxChars) {
     return { ok: false, diagnostics: ['result_too_large'] };
   }
   const parsed = parseJsonObject(input.raw);
-  if (!parsed) return { ok: false, diagnostics: ['result_not_json_object'] };
+  if (!parsed) {
+    // A damaged wrapper is repairable; an explicitly foreign binding is not.
+    // Do not let format repair silently rewrite a task identity hidden in a
+    // truncated JSON object. Escaped keys inside quoted prose are excluded.
+    const claimed = input.raw.match(/(?<!\\)"taskHash"\s*:\s*"([^"\\]*)"/u)?.[1];
+    if (input.expectedTaskHash && claimed !== undefined && claimed !== input.expectedTaskHash) {
+      return { ok: false, diagnostics: ['task_binding_mismatch'] };
+    }
+    return { ok: false, diagnostics: ['result_not_json_object'] };
+  }
   const diagnostics: string[] = [];
   const taskHash = readNonEmptyString(parsed.taskHash);
   const status = readEnum(parsed.status, ['complete', 'partial', 'failed'] as const);
@@ -91,7 +109,33 @@ export function acceptSubagentResult(input: {
   if (diagnostics.length || !status || !summary || !evidence || !uncertainties) {
     return { ok: false, diagnostics };
   }
-  const common = { ...(taskHash ? { taskHash } : {}), status, summary, evidence, uncertainties };
+  const extra: Partial<CommonSubagentResultEnvelope> = {};
+  if (input.contractVersion === 2) {
+    for (const key of ['coverage', 'missing', 'nextSteps'] as const) {
+      if (parsed[key] === undefined) continue;
+      const values = normalizeStringArray(parsed[key]);
+      if (!values) return { ok: false, diagnostics: [`${key}_invalid`] };
+      extra[key] = values;
+    }
+    if (parsed.verification !== undefined) {
+      if (!Array.isArray(parsed.verification)) return { ok: false, diagnostics: ['verification_invalid'] };
+      extra.verification = [];
+      for (const item of parsed.verification) {
+        if (!isRecord(item)) return { ok: false, diagnostics: ['verification_invalid'] };
+        const claim = readNonEmptyString(item.claim);
+        const method = readNonEmptyString(item.method);
+        const result = readNonEmptyString(item.result);
+        if (!claim || !method || !result) return { ok: false, diagnostics: ['verification_invalid'] };
+        extra.verification.push({ claim, method, result, source: 'model_reported' });
+      }
+    }
+    extra.contractVersion = 2;
+  }
+  const common = {
+    ...(taskHash ? { taskHash } : {}), status, summary,
+    evidence: input.contractVersion === 2 ? evidence.map((item) => ({ ...item, verification: 'unverified' as const })) : evidence,
+    uncertainties, ...extra
+  };
   if (input.lane === 'review-read') {
     const verdict = readEnum(parsed.verdict, ['pass', 'warn', 'block'] as const);
     const reviewedPaths = normalizeStringArray(parsed.reviewedPaths);
@@ -99,7 +143,8 @@ export function acceptSubagentResult(input: {
     if (!verdict) diagnostics.push('review_verdict_invalid');
     if (!reviewedPaths?.length) diagnostics.push('reviewed_paths_missing');
     if (!findings) diagnostics.push('review_findings_invalid');
-    if ((verdict === 'warn' || verdict === 'block') && !findings?.length) diagnostics.push('review_findings_required');
+    if ((verdict === 'warn' || verdict === 'block') && !findings?.length
+      && !(input.contractVersion === 2 && status !== 'complete')) diagnostics.push('review_findings_required');
     if (diagnostics.length || !verdict || !reviewedPaths || !findings) return { ok: false, diagnostics };
     return { ok: true, diagnostics, envelope: { kind: 'review', ...common, verdict, reviewedPaths, findings } };
   }
@@ -126,15 +171,68 @@ export function acceptSubagentResult(input: {
   return { ok: true, diagnostics, envelope: { kind: 'research', ...common } };
 }
 
-export function getSubagentResultFormatInstruction(lane: SubagentLane): string {
+export function getSubagentResultFormatInstruction(lane: SubagentLane, contractVersion: 1 | 2 = 1): string {
   const common = 'Return exactly one JSON object with taskHash (copy the exact deterministic value from the current task binding), status (complete|partial|failed), summary, evidence (array of {claim,path?,startLine?,endLine?}), and uncertainties (string array). Do not wrap it in Markdown.';
+  const extended = contractVersion === 2
+    ? ' Include compact coverage, missing, nextSteps string arrays when relevant, and verification entries {claim,method,result} only for checks actually performed. Mark incomplete work partial. Evidence and verification are model reports pending parent verification; do not claim host verification. A review verdict is not approval permission. Return essential conclusions first; the parent reads disputed details on demand.' : '';
   if (lane === 'review-read') {
-    return `${common} Also include verdict (pass|warn|block), reviewedPaths (string array), and findings (array of {severity,title,evidence,impact,path?,startLine?,endLine?}).`;
+    return `${common} Also include verdict (pass|warn|block), reviewedPaths (string array), and findings (array of {severity,title,evidence,impact,path?,startLine?,endLine?}).${extended}`;
   }
   if (lane === 'proposal') {
-    return `${common} Describe only pending proposals in summary/evidence. Artifact counts and paths are derived by the host; do not claim that edits were applied or commands ran.`;
+    return `${common} Describe only pending proposals in summary/evidence. Artifact counts and paths are derived by the host; do not claim that edits were applied or commands ran.${extended}`;
   }
-  return common;
+  return common + extended;
+}
+
+/** Binding, authorization, resource limits and missing facts are never formatting errors. */
+export function canRepairSubagentResult(diagnostics: readonly string[]): boolean {
+  const allowed = new Set(['result_not_json_object', 'status_invalid',
+    'evidence_invalid', 'uncertainties_invalid', 'review_verdict_invalid', 'reviewed_paths_missing',
+    'review_findings_invalid', 'coverage_invalid', 'missing_invalid', 'nextSteps_invalid', 'verification_invalid']);
+  return diagnostics.length > 0 && diagnostics.every((item) => allowed.has(item));
+}
+
+/** A child's own independent branches still need its parent-model disposition. */
+export function applySubagentParentAcceptance(envelope: SubagentResultEnvelope, delegation: {
+  explicitUnfulfilled?: boolean; results: Array<{ acceptance?: string }>;
+} | undefined, pending = false): SubagentResultEnvelope {
+  // pending is computed by the validated delegation tracker, which also knows
+  // when accepted follow-up evidence supersedes an earlier partial result.
+  if (envelope.status !== 'complete' || (!pending && !delegation?.explicitUnfulfilled)) return envelope;
+  return { ...envelope, status: 'partial',
+    missing: [...new Set([...(envelope.missing ?? []), 'parent_acceptance_pending'])],
+    uncertainties: [...envelope.uncertainties, 'One or more delegated branches have not been accepted by this child.'],
+    nextSteps: [...(envelope.nextSteps ?? []), 'Inspect the disputed branch or finish parent acceptance before marking the task complete.'] };
+}
+
+/** The profile limit bounds accepted canonical delivery, separately from model output tokens. */
+export function prepareSubagentResultDelivery(envelope: SubagentResultEnvelope, maxChars: number): {
+  envelope: SubagentResultEnvelope; content: string; truncated: boolean; originalHash: string; originalChars: number;
+} {
+  const original = JSON.stringify(envelope);
+  const originalHash = createHash('sha256').update(original, 'utf8').digest('hex');
+  if (original.length <= maxChars) return { envelope, content: original, truncated: false, originalHash, originalChars: original.length };
+  // Never slice serialized JSON. A resource-limited result is explicit partial
+  // material. The unavailable original has no readable ref and cannot be reused.
+  const partial: SubagentResultEnvelope = {
+    ...envelope, status: 'partial',
+    summary: 'Result exceeds the profile delivery limit; the complete result was not accepted.',
+    evidence: [], uncertainties: ['Original result is unavailable through resultRef.'],
+    missing: ['result_too_large'], coverage: [], nextSteps: ['Narrow the task or request a smaller result.'],
+    verification: [],
+    ...(envelope.kind === 'proposal' ? { artifacts: { ...envelope.artifacts, paths: [] } } : {}),
+    ...(envelope.kind === 'review' ? { findings: [], reviewedPaths: envelope.reviewedPaths.slice(0, 1), verdict: 'warn' as const } : {})
+  };
+  let content = JSON.stringify(partial);
+  if (content.length > maxChars) {
+    // Remove optional model prose/artifacts before failing the hard bound.
+    delete partial.coverage; delete partial.verification; delete partial.nextSteps;
+    if (partial.kind === 'review') partial.reviewedPaths = [];
+    if (partial.kind === 'proposal') partial.artifacts.paths = [];
+    content = JSON.stringify(partial);
+  }
+  if (content.length > maxChars) throw new Error('subagent_profile_result_limit_too_small');
+  return { envelope: partial, content, truncated: true, originalHash, originalChars: original.length };
 }
 
 export function getSubagentFormatRepairPrompt(lane: SubagentLane, diagnostics: readonly string[], taskHash: string): string {

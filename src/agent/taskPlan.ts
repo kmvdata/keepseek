@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { KeepseekLanguage } from '../shared/i18n';
 import type { TaskPlan, TaskPlanStep, TaskPlanStepStatus } from '../shared/types';
+import { normalizeDelegationState, type DelegationStateV1 } from './delegation';
 import {
   CREATE_DRAFT_EDIT_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
@@ -59,7 +60,7 @@ export class TaskPlanTracker {
       createdAt: now,
       updatedAt: now
     };
-    if (input.initialPlan) this.plan = { ...structuredClone(input.initialPlan), runId: input.runId, status: 'running' };
+    if (input.initialPlan) this.plan = { ...structuredClone(input.initialPlan), delegation: normalizeDelegationState(input.initialPlan.delegation), runId: input.runId, status: 'running' };
     this.emit('created');
   }
 
@@ -220,8 +221,14 @@ export class TaskPlanTracker {
     return {
       ...this.plan,
       steps: this.plan.steps.map((step) => ({ ...step })),
-      blockers: [...this.plan.blockers]
+      blockers: [...this.plan.blockers],
+      ...(this.plan.delegation ? { delegation: structuredClone(this.plan.delegation) } : {})
     };
+  }
+
+  public updateDelegation(state: DelegationStateV1): void {
+    this.plan.delegation = structuredClone(state);
+    this.touchAndEmit('delegation_update');
   }
 
   private ensureToolStep(kind: PlanStepKind): TaskPlanStep {

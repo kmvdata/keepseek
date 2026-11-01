@@ -10,6 +10,9 @@ import { withStorageCoordinator } from '../../shared/atomicStorage';
 import { recordLocalPerformance } from '../logging/performanceTrace';
 import type { ChatSession, SubagentActivity } from '../../shared/types';
 import { CoalescedWriter } from '../../sessions/coalescedWriter';
+import { normalizeResultIndex, readResultRange, resultMetadata, saveResultIndex,
+  type ResultIndexMetadata, type SubagentResultIndex } from './resultIndex';
+import { legacyVerifiedRanges, verifyLegacyRanges, type LegacyVerifiedRange } from './legacyResultProjection';
 import type {
   StoredSubagentMetadata,
   StoredSubagentTranscript,
@@ -78,7 +81,9 @@ export class SubagentStore {
           catch (error) { if (!isMissing(error)) throw error; }
           this.objectStores.set(key, store);
         }
-        await store.save(snapshot, { version: 1, activity: summary, stats }, {
+        const resultIndex = await saveResultIndex(directory,
+          (snapshot as unknown as { subagentMetadata: StoredSubagentMetadata }).subagentMetadata, header);
+        await store.save(snapshot, { version: 1, activity: summary, stats, resultIndex }, {
           sessionId: summary.parentSessionId, taskId: checkpoint?.taskId, childId: summary.id });
         this.onActivity?.(summary);
         recordLocalPerformance({ type: 'checkpoint_child_store', sessionId: metadata.parentSessionId,
@@ -145,11 +150,21 @@ export class SubagentStore {
       try {
         const manifest = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(uri)));
         if (manifest.workspaceKey !== this.workspaceKey || manifest.sessionId !== subagentId) return undefined;
+        if (manifest.summary && manifest.summaryHash !== createHash('sha256').update(JSON.stringify(manifest.summary)).digest('hex')) return undefined;
+        const indexedResult = manifest.summary && Object.hasOwn(manifest.summary, 'resultIndex')
+          ? normalizeResultIndex(manifest.summary.resultIndex, parentSessionId, subagentId) : undefined;
+        if (manifest.summary && Object.hasOwn(manifest.summary, 'resultIndex') && !indexedResult) return undefined;
         const session = await new SessionObjectStore(uri).load(manifest) as unknown as {
           subagentMetadata: unknown; subagentTranscript: Omit<StoredSubagentTranscript, 'messages'>; messages: StoredSubagentTranscript['messages'] };
         const metadata = normalizeMetadata(session.subagentMetadata);
         const transcript = normalizeTranscript({ ...session.subagentTranscript,
           messages: (session.subagentTranscript as StoredSubagentTranscript).messages ?? session.messages });
+        if (metadata && transcript && indexedResult && (metadata.resultHash && metadata.resultHash !== indexedResult.metadata.resultHash
+          || !['queued', 'running'].includes(indexedResult.metadata.status) && metadata.resultStatus !== indexedResult.metadata.resultStatus)) return undefined;
+        if (metadata?.status === 'completed' && indexedResult) {
+          const canonical = await this.resolveResultSource(parentSessionId, indexedResult);
+          if (!canonical || createHash('sha256').update(await canonical.range(0, canonical.bytes)).digest('hex') !== canonical.hash) return undefined;
+        }
         return metadata && transcript && metadata.id === subagentId && metadata.parentSessionId === parentSessionId
           && transcript.metadataId === subagentId ? { metadata, transcript } : undefined;
       } catch (error) { if (!isMissing(error)) return undefined; }
@@ -192,106 +207,192 @@ export class SubagentStore {
   }): Promise<Record<string, unknown>> {
     const ref = input.ref ?? input.subagentId ?? '';
     const legacy = !input.ref && input.offsetBytes === undefined && input.limitBytes === undefined;
-    const stored = await this.read(input.parentSessionId, ref);
-    if (!stored) {
-      return {
-        ok: false,
-        errorType: await this.runFileExists(input.parentSessionId, ref)
-          ? 'subagent_result_corrupt' : 'subagent_result_not_found',
-        error: 'The requested subagent result is unavailable in this session lineage.'
-      };
+    try {
+      const stored = await this.resultSource(input.parentSessionId, ref);
+      if (!stored) return { ok: false, errorType: await this.runFileExists(input.parentSessionId, ref)
+        ? 'subagent_result_corrupt' : 'subagent_result_not_found', error: 'The requested result is unavailable in this session lineage.' };
+      const metadata = stored.metadata;
+      if (input.allowedTreeId && metadata.treeId !== input.allowedTreeId) return { ok: false,
+        errorType: 'subagent_result_forbidden', error: 'The result reference is outside the current subagent tree.' };
+      if (metadata.status === 'queued' || metadata.status === 'running' || metadata.failureKind === 'interrupted') return {
+        ok: false, ref, subagentId: metadata.id, status: metadata.status, errorType: 'subagent_result_pending', error: 'The referenced result is not complete yet.' };
+      if (metadata.resultTruncated && metadata.resultContractVersion !== 2) return { ok: false, ref,
+        resultStatus: 'partial', formatAccepted: false, errorType: 'subagent_result_unavailable',
+        error: 'This legacy result was truncated; its original canonical body is unavailable.' };
+      const canonical = await this.resolveResultSource(input.parentSessionId, stored);
+      if (!canonical) return { ok: false, ref, errorType: 'subagent_result_corrupt', error: 'The canonical result reference failed its integrity check.' };
+      const shared = { ok: true, subagentId: metadata.id, status: manifestStatus(metadata), profile: metadata.profile, lane: metadata.lane,
+        resultHash: canonical.hash, resultStatus: metadata.resultStatus ?? 'unknown',
+        formatAccepted: metadata.resultFormatAccepted === true, parentAcceptance: 'pending',
+        resultTruncated: metadata.resultTruncated === true };
+      if (legacy) {
+        const result = this.decoder.decode(await canonical.range(0, canonical.bytes));
+        const offset = clampInteger(input.offset, 0, result.length, 0);
+        const maxChars = clampInteger(input.maxChars, 1, MAX_SUBAGENT_RESULT_PAGE_CHARS, DEFAULT_SUBAGENT_RESULT_PAGE_CHARS);
+        const content = result.slice(offset, offset + maxChars), nextOffset = offset + content.length;
+        return { ...shared, subagentId: metadata.id, offset, content, totalChars: result.length,
+          usage: metadata.usage, hasMore: nextOffset < result.length, ...(nextOffset < result.length ? { nextOffset } : {}) };
+      }
+      if (input.offsetBytes !== undefined && (!Number.isSafeInteger(input.offsetBytes) || input.offsetBytes < 0)) return {
+        ok: false, ref, errorType: 'subagent_result_offset_out_of_range', error: 'The byte offset must be a nonnegative integer.' };
+      const offsetBytes = input.offsetBytes ?? 0;
+      if (offsetBytes > canonical.bytes) return { ok: false, ref, errorType: 'subagent_result_offset_out_of_range',
+        offsetBytes, totalBytes: canonical.bytes, error: 'The requested byte offset is beyond the stored result.' };
+      const limitBytes = clampInteger(input.limitBytes, 4, MAX_SUBAGENT_RESULT_PAGE_BYTES, DEFAULT_SUBAGENT_RESULT_PAGE_BYTES);
+      const bytes = await canonical.range(offsetBytes, Math.min(canonical.bytes, offsetBytes + limitBytes + 1));
+      if (bytes.length && isUtf8ContinuationByte(bytes[0]!)) return { ok: false, ref,
+        errorType: 'subagent_result_invalid_utf8_offset', offsetBytes, error: 'The byte offset is not a UTF-8 character boundary.' };
+      let returnedBytes = Math.min(bytes.length, limitBytes);
+      while (returnedBytes > 0 && returnedBytes < bytes.length && isUtf8ContinuationByte(bytes[returnedBytes]!)) returnedBytes--;
+      const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes.slice(0, returnedBytes));
+      const end = offsetBytes + returnedBytes, hasMore = end < canonical.bytes;
+      return { ...shared, ref, content, offsetBytes, returnedBytes, ...(hasMore ? { nextOffsetBytes: end } : {}),
+        totalBytes: canonical.bytes, hasMore };
+    } catch {
+      return { ok: false, ref, errorType: 'subagent_result_corrupt', error: 'The result index or canonical content failed its integrity check.' };
     }
-    if (input.allowedTreeId && stored.metadata.treeId !== input.allowedTreeId) {
-      return { ok: false, errorType: 'subagent_result_forbidden', error: 'The result reference is outside the current subagent tree.' };
+  }
+
+  /** Acceptance verifies the entire immutable body, not just a delivered page.
+   * This deliberately costs one full canonical read, but no private graph. */
+  public async verifyResult(input: { parentSessionId: string; ref: string; allowedTreeId?: string }): Promise<{
+    subagentId: string; resultHash: string; resultStatus: 'complete' | 'partial' | 'failed'; formatAccepted: boolean;
+  } | undefined> {
+    try {
+      const source = await this.resultSource(input.parentSessionId, input.ref);
+      if (!source || input.allowedTreeId && source.metadata.treeId !== input.allowedTreeId
+        || source.metadata.status === 'queued' || source.metadata.status === 'running' || source.metadata.failureKind === 'interrupted'
+        || !source.metadata.resultStatus || source.metadata.resultTruncated && source.metadata.resultContractVersion !== 2) return undefined;
+      const canonical = await this.resolveResultSource(input.parentSessionId, source);
+      if (!canonical) return undefined;
+      const bytes = await canonical.range(0, canonical.bytes);
+      if (bytes.length !== canonical.bytes || createHash('sha256').update(bytes).digest('hex') !== canonical.hash) return undefined;
+      new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      return { subagentId: source.metadata.id, resultHash: canonical.hash, resultStatus: source.metadata.resultStatus,
+        formatAccepted: source.metadata.resultFormatAccepted === true };
+    } catch { return undefined; }
+  }
+
+  /** Bounded result-only projection; no private messages/checkpoint decoding. */
+  private async resultSource(parentSessionId: string, id: string): Promise<ResultSource | undefined> {
+    if (!isSafeId(parentSessionId) || !isSafeId(id)) return undefined;
+    const directory = this.getParentDirectory(parentSessionId), uri = vscode.Uri.joinPath(directory, `${id}.state.json`);
+    try {
+      const manifest = JSON.parse(this.decoder.decode(await vscode.workspace.fs.readFile(uri)));
+      if (manifest.workspaceKey !== this.workspaceKey || manifest.sessionId !== id || manifest.version !== 4
+        || manifest.summary?.version !== 1 || manifest.summaryHash !== createHash('sha256').update(JSON.stringify(manifest.summary)).digest('hex')) {
+        throw new Error('Invalid child result manifest');
+      }
+      if (Object.hasOwn(manifest.summary, 'resultIndex')) {
+        const index = normalizeResultIndex(manifest.summary.resultIndex, parentSessionId, id);
+        if (!index) throw new Error('Invalid child result index');
+        return index;
+      }
+      const graph = new SessionObjectStore(uri);
+      const metadata = normalizeMetadata(await graph.loadField(manifest, ['subagentMetadata']));
+      const result = await graph.loadField(manifest, ['subagentTranscript', 'result']);
+      const resultRef = await graph.loadField(manifest, ['subagentTranscript', 'resultRef']);
+      if (!metadata || metadata.id !== id || metadata.parentSessionId !== parentSessionId || typeof result !== 'string') throw new Error('Invalid legacy child result');
+      return { metadata: resultMetadata(metadata), result, resultRef: typeof resultRef === 'string' ? resultRef : metadata.reusedFromSubagentId };
+    } catch (error) { if (!isMissing(error)) throw error; }
+    // Legacy combined/split records are immutable after completion. Cache only
+    // extracted, hash-verified result data, keyed by scope and source identity.
+    return this.legacyResultSource(parentSessionId, id);
+  }
+
+  private async resolveResultSource(parentSessionId: string, initial: ResultSource): Promise<{
+    hash: string; bytes: number; range: (start: number, end: number) => Promise<Uint8Array>
+  } | undefined> {
+    let current = initial;
+    const visited = new Set<string>();
+    for (let depth = 0; depth < 8; depth++) {
+      if (visited.has(current.metadata.id)) return undefined;
+      visited.add(current.metadata.id);
+      if (current.metadata.resultTruncated && current.metadata.resultContractVersion !== 2) return undefined;
+      if (current.canonical) {
+        const canonical = current.canonical;
+        if (initial.metadata.resultHash && initial.metadata.resultHash !== canonical.hash
+          || initial.metadata.resultBytes !== undefined && initial.metadata.resultBytes !== canonical.bytes
+          || initial.metadata.resultChars !== undefined && initial.metadata.resultChars !== canonical.chars) return undefined;
+        return { hash: canonical.hash, bytes: canonical.bytes, range: (start, end) => readResultRange(this.getParentDirectory(parentSessionId), canonical, start, end) };
+      }
+      if (current.result) {
+        const bytes = this.encoder.encode(current.result), hash = createHash('sha256').update(bytes).digest('hex');
+        if (current.metadata.resultHash && current.metadata.resultHash !== hash || initial.metadata.resultHash && initial.metadata.resultHash !== hash
+          || current.metadata.resultBytes !== undefined && current.metadata.resultBytes !== bytes.length
+          || current.metadata.resultChars !== undefined && current.metadata.resultChars !== current.result.length
+          || initial.metadata.resultBytes !== undefined && initial.metadata.resultBytes !== bytes.length
+          || initial.metadata.resultChars !== undefined && initial.metadata.resultChars !== current.result.length) return undefined;
+        return { hash, bytes: bytes.length, range: async (start, end) => bytes.slice(start, end) };
+      }
+      const ref = current.resultRef ?? current.metadata.reusedFromSubagentId;
+      if (!ref) return current.metadata.resultHash && current.metadata.resultHash !== createHash('sha256').update('').digest('hex') ? undefined
+        : { hash: createHash('sha256').update('').digest('hex'), bytes: 0, range: async () => new Uint8Array() };
+      if (ref !== current.metadata.reusedFromSubagentId) return undefined;
+      const next = await this.resultSource(parentSessionId, ref);
+      if (!next || next.metadata.parentSessionId !== parentSessionId || current.metadata.reusedFromParentRunId !== next.metadata.parentRunId
+        || current.metadata.normalizedTaskHash !== next.metadata.normalizedTaskHash
+        || current.metadata.resultHash !== next.metadata.resultHash || next.metadata.status !== 'completed'
+        || next.metadata.resultStatus !== 'complete' || next.metadata.resultTruncated) return undefined;
+      current = next;
     }
-    if (stored.metadata.status === 'queued'
-      || stored.metadata.status === 'running'
-      || stored.metadata.failureKind === 'interrupted') {
-      return {
-        ok: false,
-        ref,
-        status: stored.metadata.status,
-        errorType: 'subagent_result_pending',
-        error: 'The referenced subagent result is not complete yet.'
-      };
+    return undefined;
+  }
+
+  private readonly legacyResults = new Map<string, { signature: string; bytes: number; source: ResultSource;
+    ranges: Array<{ uri: vscode.Uri; values: LegacyVerifiedRange[] }> }>();
+  private async legacyResultSource(parentSessionId: string, id: string): Promise<ResultSource | undefined> {
+    const directory = this.getParentDirectory(parentSessionId), combined = vscode.Uri.joinPath(directory, `${id}.run.json`);
+    let uris: vscode.Uri[];
+    try { await vscode.workspace.fs.stat(combined); uris = [combined]; }
+    catch (error) { if (!isMissing(error)) throw error; uris = [this.getMetadataUri(parentSessionId, id), this.getTranscriptUri(parentSessionId, id)]; }
+    const signatureFor = async () => JSON.stringify(await Promise.all(uris.map(async uri => {
+      const stat = await vscode.workspace.fs.stat(uri); return [uri.toString(), stat.size, stat.ctime, stat.mtime];
+    })));
+    let signature: string;
+    try { signature = await signatureFor(); } catch (error) { if (isMissing(error)) return undefined; throw error; }
+    const key = `${parentSessionId}/${id}`, cached = this.legacyResults.get(key);
+    if (cached?.signature === signature) {
+      for (const range of cached.ranges) await verifyLegacyRanges(range.uri, range.values);
+      if (signature !== await signatureFor()) throw new Error('Legacy result changed during verification');
+      this.legacyResults.delete(key); this.legacyResults.set(key, cached); return cached.source;
     }
-    const result = await this.readCanonicalResult(input.parentSessionId, stored);
-    if (result === undefined) {
-      return { ok: false, ref, errorType: 'subagent_result_corrupt', error: 'The canonical stored result reference is invalid.' };
+    this.legacyResults.delete(key);
+    const texts = await Promise.all(uris.map(async uri => new TextDecoder('utf-8', { fatal: true }).decode(await vscode.workspace.fs.readFile(uri))));
+    const values = texts.map(text => JSON.parse(text));
+    const metadata = normalizeMetadata(uris.length === 1 ? values[0].metadata : values[0]);
+    const transcript = uris.length === 1 ? values[0].transcript : values[1];
+    if (!metadata || metadata.id !== id || metadata.parentSessionId !== parentSessionId || !isRecord(transcript)
+      || transcript.metadataId !== id || typeof transcript.result !== 'string') throw new Error('Invalid legacy child result');
+    const result = transcript.result, bytes = Buffer.byteLength(result), hash = createHash('sha256').update(result).digest('hex');
+    if (metadata.resultHash && metadata.resultHash !== hash && !transcript.resultRef) throw new Error('Legacy result integrity mismatch');
+    // Re-encode only the extracted projection so a sliced string cannot retain
+    // the much larger combined private source buffer in the bounded cache.
+    const source = JSON.parse(JSON.stringify({ metadata: resultMetadata(metadata), result,
+      resultRef: typeof transcript.resultRef === 'string' ? transcript.resultRef : metadata.reusedFromSubagentId })) as ResultSource;
+    if (signature !== await signatureFor()) throw new Error('Legacy result changed during verification');
+    if (bytes <= 2 * 1024 * 1024 && uris.every(uri => uri.scheme === 'file')) {
+      const ranges = uris.map((uri, position) => ({ uri, values: uris.length === 2 && position === 0
+        ? [{ offset: 0, bytes: Buffer.byteLength(texts[position]!), hash: createHash('sha256').update(texts[position]!).digest('hex') }]
+        : legacyVerifiedRanges(texts[position]!, uris.length === 1) }));
+      this.legacyResults.set(key, { signature, bytes, source, ranges });
+      while (this.legacyResults.size > 8 || [...this.legacyResults.values()].reduce((total, value) => total + value.bytes, 0) > 4 * 1024 * 1024) {
+        this.legacyResults.delete(this.legacyResults.keys().next().value!);
+      }
     }
-    if (stored.metadata.resultHash
-      && createHash('sha256').update(result, 'utf8').digest('hex') !== stored.metadata.resultHash) {
-      return { ok: false, ref, errorType: 'subagent_result_corrupt', error: 'The stored result failed its integrity check.' };
-    }
-    if (legacy) {
-      const offset = clampInteger(input.offset, 0, result.length, 0);
-      const maxChars = clampInteger(input.maxChars, 1, MAX_SUBAGENT_RESULT_PAGE_CHARS, DEFAULT_SUBAGENT_RESULT_PAGE_CHARS);
-      const content = result.slice(offset, offset + maxChars);
-      const nextOffset = offset + content.length;
-      return {
-        ok: true,
-        subagentId: stored.metadata.id,
-        status: manifestStatus(stored.metadata),
-        profile: stored.metadata.profile,
-        lane: stored.metadata.lane,
-        offset,
-        content,
-        totalChars: result.length,
-        hasMore: nextOffset < result.length,
-        ...(nextOffset < result.length ? { nextOffset } : {}),
-        resultHash: stored.metadata.resultHash,
-        usage: stored.metadata.usage
-      };
-    }
-    const bytes = this.encoder.encode(result);
-    const offsetBytes = clampInteger(input.offsetBytes, 0, Number.MAX_SAFE_INTEGER, 0);
-    if (offsetBytes > bytes.byteLength) {
-      return { ok: false, ref, errorType: 'subagent_result_offset_out_of_range', offsetBytes, totalBytes: bytes.byteLength,
-        error: 'The requested byte offset is beyond the stored result.' };
-    }
-    if (offsetBytes < bytes.byteLength && isUtf8ContinuationByte(bytes[offsetBytes]!)) {
-      return { ok: false, ref, errorType: 'subagent_result_invalid_utf8_offset', offsetBytes,
-        error: 'The requested byte offset is not a UTF-8 character boundary.' };
-    }
-    const limitBytes = clampInteger(input.limitBytes, 4, MAX_SUBAGENT_RESULT_PAGE_BYTES, DEFAULT_SUBAGENT_RESULT_PAGE_BYTES);
-    let end = Math.min(bytes.byteLength, offsetBytes + limitBytes);
-    while (end > offsetBytes && end < bytes.byteLength && isUtf8ContinuationByte(bytes[end]!)) end -= 1;
-    const content = this.decoder.decode(bytes.slice(offsetBytes, end));
-    const returnedBytes = end - offsetBytes;
-    const hasMore = end < bytes.byteLength;
-    return {
-      ok: true,
-      ref,
-      status: manifestStatus(stored.metadata),
-      profile: stored.metadata.profile,
-      lane: stored.metadata.lane,
-      content,
-      offsetBytes,
-      returnedBytes,
-      ...(hasMore ? { nextOffsetBytes: end } : {}),
-      totalBytes: bytes.byteLength,
-      hasMore,
-      resultHash: stored.metadata.resultHash ?? createHash('sha256').update(result, 'utf8').digest('hex'),
-      resultTruncated: stored.metadata.resultTruncated === true
-    };
+    return source;
   }
 
   public async readCanonicalResult(
     parentSessionId: string,
     initial: { metadata: StoredSubagentMetadata; transcript: StoredSubagentTranscript }
   ): Promise<string | undefined> {
-    let current = initial;
-    const visited = new Set<string>();
-    for (let depth = 0; depth < 4; depth += 1) {
-      if (current.transcript.result) return current.transcript.result;
-      const ref = current.transcript.resultRef ?? current.metadata.reusedFromSubagentId;
-      if (!ref || visited.has(ref)) return current.transcript.resultRef ? undefined : '';
-      visited.add(ref);
-      const next = await this.read(parentSessionId, ref);
-      if (!next) return undefined;
-      current = next;
-    }
-    return undefined;
+    if (initial.metadata.parentSessionId !== parentSessionId || initial.transcript.metadataId !== initial.metadata.id) return undefined;
+    try {
+      const canonical = await this.resolveResultSource(parentSessionId, { metadata: resultMetadata(initial.metadata),
+        result: initial.transcript.result, resultRef: initial.transcript.resultRef });
+      return canonical ? new TextDecoder('utf-8', { fatal: true }).decode(await canonical.range(0, canonical.bytes)) : undefined;
+    } catch { return undefined; }
   }
 
   public async findCompletedCandidates(input: {
@@ -326,6 +427,8 @@ export class SubagentStore {
       .filter((value): value is { metadata: StoredSubagentMetadata; transcript: StoredSubagentTranscript } => Boolean(value))
       .filter(({ metadata, transcript }) => metadata.status === 'completed'
         && metadata.resultStatus === 'complete'
+        && !metadata.resultTruncated
+        && (!metadata.resultHash || createHash('sha256').update(transcript.result).digest('hex') === metadata.resultHash)
         && metadata.normalizedTaskHash === input.normalizedTaskHash
         && metadata.profile === input.profile
         && metadata.lane === input.lane
@@ -427,7 +530,9 @@ export class SubagentStore {
     try {
       await Promise.resolve(vscode.workspace.fs.stat(vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.state.json`))).catch(async error => {
         if (!isMissing(error)) throw error;
-        await vscode.workspace.fs.stat(vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.run.json`));
+        try { await vscode.workspace.fs.stat(vscode.Uri.joinPath(this.getParentDirectory(parentSessionId), `${subagentId}.run.json`)); }
+        catch (legacyError) { if (!isMissing(legacyError)) throw legacyError;
+          await vscode.workspace.fs.stat(this.getMetadataUri(parentSessionId, subagentId)); }
       });
       return true;
     } catch { return false; }
@@ -465,7 +570,11 @@ function normalizeMetadata(value: unknown): StoredSubagentMetadata | undefined {
     || (value.version !== 1 && value.version !== 2)
     || typeof value.id !== 'string'
     || typeof value.parentSessionId !== 'string'
-    || typeof value.status !== 'string') {
+    || typeof value.status !== 'string' || !['queued', 'running', 'completed', 'failed', 'stopped'].includes(value.status)
+    || value.hostContextHash !== undefined && (typeof value.hostContextHash !== 'string' || !/^[a-f0-9]{64}$/u.test(value.hostContextHash))
+    || value.resultStatus !== undefined && !['complete', 'partial', 'failed'].includes(String(value.resultStatus))
+    || value.resultFormatAccepted !== undefined && typeof value.resultFormatAccepted !== 'boolean'
+    || value.resultContractVersion !== undefined && value.resultContractVersion !== 2) {
     return undefined;
   }
   const interrupted = value.status === 'running' || value.status === 'queued';
@@ -501,7 +610,7 @@ function normalizeTranscript(value: unknown): StoredSubagentTranscript | undefin
 
 function isUtf8ContinuationByte(value: number): boolean { return (value & 0xc0) === 0x80; }
 
-function manifestStatus(metadata: StoredSubagentMetadata): string {
+function manifestStatus(metadata: ResultIndexMetadata): string {
   if (metadata.failureKind === 'budget_exhausted') return 'budget_exhausted';
   if (metadata.failureKind === 'cancelled') return 'cancelled';
   return metadata.status;
@@ -528,3 +637,5 @@ function sanitizeDiagnosticText(value: string, maxChars: number): string {
     .trim()
     .slice(0, maxChars);
 }
+
+interface ResultSource { metadata: ResultIndexMetadata; canonical?: SubagentResultIndex['canonical']; result?: string; resultRef?: string; }

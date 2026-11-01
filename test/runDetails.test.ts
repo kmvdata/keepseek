@@ -3,8 +3,157 @@ import { describe, it } from 'node:test';
 import { applyChangeSetEventToRunDetails, RunDetailsBuilder } from '../src/agent/logging/runDetails';
 import { createChangeSet } from '../src/edits/changeSet';
 import type { ChangeSet, RepairLoopState, TaskPlan } from '../src/shared/types';
+import { normalizeRunDetailsDelegation } from '../src/agent/logging/subagentDetails';
+import { normalizeStoredSessions } from '../src/sessions/chatSessionStore';
+import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
+import { getScript } from '../src/webview/script';
 
 describe('RunDetailsBuilder', () => {
+  it('keeps lifecycle, partial completion, parent acceptance and unavailable detail distinct without private content', () => {
+    const builder = new RunDetailsBuilder({ runId: 'run-child', modelId: 'model', thinkingEnabled: false });
+    builder.recordToolResult('child', 'keepseek_delegate_task', JSON.stringify({
+      version: 3, kind: 'subagent_result_manifest', ok: true, subagentId: 'sa_child', profile: 'research',
+      status: 'completed', resultStatus: 'partial', formatAccepted: true, parentAcceptance: 'pending',
+      resultRef: 'sa_child', summary: 'private conclusion', preview: 'private child body',
+      transcript: 'private trace'
+    }));
+    let display = builder.build().delegation!;
+    assert.equal(display.results[0].lifecycleStatus, 'completed');
+    assert.equal(display.results[0].resultStatus, 'partial');
+    assert.equal(display.results[0].formatAccepted, true);
+    assert.equal(display.results[0].parentAcceptance, 'pending');
+    assert.equal(JSON.stringify(display).includes('private'), false);
+    const plan = createPlan('blocked');
+    const delegation = {
+      version: 1, candidates: [{ id: 'c1', task: 'private branch task' }],
+      assessment: { trigger: 'initial', decision: 'delegate', reason: 'Two independent modules' },
+      results: [{ candidateId: 'c1', subagentId: 'sa_child', resultRef: 'sa_child', resultStatus: 'partial',
+        formatAccepted: true, acceptance: 'needs_details', reason: 'apiKey=do-not-show Need exact evidence' }],
+      events: [{ kind: 'returned', subagentId: 'sa_child' }]
+    };
+    Object.assign(plan, { delegation });
+    builder.record({ type: 'task_plan_update', plan });
+    delegation.results[0].acceptance = 'adopt';
+    builder.recordToolArguments('page', 'keepseek_read_subagent_result', { ref: 'sa_child', offsetBytes: 0 });
+    builder.recordToolResult('page', 'keepseek_read_subagent_result', JSON.stringify({ ok: false, errorType: 'subagent_result_corrupt' }));
+    display = builder.build().delegation!;
+    assert.equal(display.candidateCount, 1);
+    assert.equal(display.results[0].parentAcceptance, 'needs_details');
+    assert.equal(display.results[0].detailsAvailable, false);
+    assert.equal(display.results[0].lifecycleStatus, 'completed');
+    assert.equal(JSON.stringify(display).includes('do-not-show'), false);
+    assert.equal(JSON.stringify(display).includes('private branch task'), false);
+    assert.match(display.results[0].reason!, /\[redacted\]/u);
+  });
+
+  it('persists bounded display metadata and keeps legacy completed results semantically unknown', () => {
+    const builder = new RunDetailsBuilder({ runId: 'run-legacy-child', modelId: 'model', thinkingEnabled: false });
+    builder.recordToolResult('child', 'keepseek_delegate_task', JSON.stringify({
+      version: 2, kind: 'subagent_result_manifest', ok: true, subagentId: 'sa_old', status: 'completed', resultRef: 'sa_old'
+    }));
+    assert.equal(builder.build().delegation!.results[0].resultStatus, 'unknown');
+    const bounded = normalizeRunDetailsDelegation({
+      version: 1, candidateCount: 1000, explicitSelection: 'parallel', explicitUnfulfilled: true,
+      results: Array.from({ length: 40 }, (_, i) => ({ subagentId: `sa_${i}`, resultStatus: 'partial', privateTrace: 'must omit' })),
+      events: Array.from({ length: 50 }, () => ({ kind: 'rejected', reason: 'x'.repeat(1000), privateTrace: 'must omit' }))
+    })!;
+    assert.equal(bounded.candidateCount, 8);
+    assert.equal(bounded.results.length, 16);
+    assert.equal(bounded.events.length, 16);
+    assert.equal(bounded.events[0].reason?.length, 240);
+    const session = normalizeStoredSessions({ sessions: [{
+      id: 'session-ui', workspaceKey: 'workspace:ui', title: 'UI', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      messages: [{ id: 'm-ui', role: 'assistant', content: '', createdAt: new Date().toISOString(),
+        runDetails: { ...builder.build(), delegation: { ...bounded, privateTrace: 'must omit' } } }]
+    }] }, { key: 'workspace:ui', name: 'UI', folderUris: [] })[0];
+    assert.deepEqual(session.messages[0].runDetails?.delegation, bounded);
+    assert.equal(JSON.stringify(session.messages[0].runDetails?.delegation).includes('must omit'), false);
+    assert.equal(normalizeRunDetailsDelegation({ version: 999, results: [] }), undefined);
+    const invalidAdoption = normalizeRunDetailsDelegation({ version: 1, results: [
+      { subagentId: 'sa_partial', resultStatus: 'partial', formatAccepted: true, parentAcceptance: 'accepted' }
+    ] })!;
+    assert.equal(invalidAdoption.results[0].parentAcceptance, 'pending');
+  });
+
+  it('renders translated completion and parent judgment states without implying an execution permit', () => {
+    const script = getScript();
+    const start = script.indexOf('    function formatDelegationDetails(');
+    const end = script.indexOf('    function formatDateTime(', start);
+    assert.ok(start >= 0 && end > start);
+    for (const language of ['zh-CN', 'en'] as const) {
+      const translate = (key: string, values: Record<string, string | number> = {}) =>
+        Object.entries(values).reduce((value, [name, replacement]) => value.replace(`{${name}}`, String(replacement)),
+          WEBVIEW_TRANSLATIONS[language][key] ?? key);
+      const render = new Function('t', `${script.slice(start, end)};return formatDelegationDetails;`)(translate) as (value: unknown) => string[];
+      const lines = render({
+        version: 1, candidateCount: 1, explicitSelection: 'parallel', explicitUnfulfilled: true,
+        results: [{ subagentId: 'sa_partial', lifecycleStatus: 'completed', resultStatus: 'partial', formatAccepted: true,
+          parentAcceptance: 'needs_details', detailsAvailable: false, resultRef: 'sa_partial' }], events: []
+      }).join('\n');
+      assert.ok(lines.includes(translate('subagentStatus_completed')));
+      assert.ok(lines.includes(translate('runDetailsChildResult_partial')));
+      assert.ok(lines.includes(translate('runDetailsChildAcceptance_needs_details')));
+      assert.ok(lines.includes(translate('runDetailsChildDetailsUnavailable')));
+      assert.ok(lines.includes(translate('runDetailsDelegationUnfulfilled')));
+      assert.equal(lines.includes('runDetailsChild'), false);
+      assert.match(translate('runDetailsChildAcceptance_accepted'), language === 'en' ? /no execution permission/u : /非执行许可/u);
+    }
+    assert.doesNotThrow(() => new Function(script));
+  });
+
+  it('preserves partial audit status while showing replacement by an accepted complete follow-up', () => {
+    const builder = new RunDetailsBuilder({ runId: 'run-follow-up', modelId: 'model', thinkingEnabled: false });
+    const plan = createPlan('completed');
+    Object.assign(plan, { delegation: {
+      version: 1, candidates: [{ id: 'c1' }], events: [], results: [
+        { candidateId: 'c1', subagentId: 'sa_partial', resultStatus: 'partial', formatAccepted: true,
+          resultRef: 'sa_partial', acceptance: 'investigate', supersededBy: 'sa_followup' },
+        { candidateId: 'c1', subagentId: 'sa_followup', resultStatus: 'complete', formatAccepted: true,
+          resultRef: 'sa_followup', acceptance: 'adopt' }
+      ]
+    } });
+    builder.record({ type: 'task_plan_update', plan });
+    const display = builder.build().delegation!;
+    assert.equal(display.results[0].resultStatus, 'partial');
+    assert.equal(display.results[0].parentAcceptance, 'needs_followup');
+    assert.equal(display.results[0].supersededBy, 'sa_followup');
+    assert.deepEqual(normalizeRunDetailsDelegation(JSON.parse(JSON.stringify(display))), display);
+    const archivedPlan = createPlan('completed');
+    Object.assign(archivedPlan, { delegation: { version: 1, candidates: [], results: [], events: [
+      { kind: 'accepted_window_archived' }
+    ] } });
+    builder.record({ type: 'task_plan_update', plan: archivedPlan });
+    assert.equal(builder.build().delegation!.results[0].supersededBy, 'sa_followup');
+    assert.equal(builder.build().delegation!.results[1].parentAcceptance, 'accepted');
+    const reopenedPlan = structuredClone(plan);
+    const reopened = reopenedPlan as unknown as { delegation: { results: Array<{ supersededBy?: string }> } };
+    delete reopened.delegation.results[0].supersededBy;
+    builder.record({ type: 'task_plan_update', plan: reopenedPlan });
+    assert.equal(builder.build().delegation!.results[0].supersededBy, undefined);
+    const invalid = normalizeRunDetailsDelegation({ ...display, results: [
+      { ...display.results[0], supersededBy: 'sa_missing' },
+      display.results[1]
+    ] })!;
+    assert.equal(invalid.results[0].supersededBy, undefined);
+    const unaccepted = normalizeRunDetailsDelegation({ ...display, results: [
+      display.results[0], { ...display.results[1], parentAcceptance: 'pending' }
+    ] })!;
+    assert.equal(unaccepted.results[0].supersededBy, undefined);
+    const script = getScript();
+    const start = script.indexOf('    function formatDelegationDetails(');
+    const end = script.indexOf('    function formatDateTime(', start);
+    for (const language of ['zh-CN', 'en'] as const) {
+      const translate = (key: string) => WEBVIEW_TRANSLATIONS[language][key] ?? key;
+      const render = new Function('t', `${script.slice(start, end)};return formatDelegationDetails;`)(translate) as (value: unknown) => string[];
+      const partialLine = render(display).find((line) => line.startsWith('sa_partial'))!;
+      assert.ok(partialLine.includes(translate('runDetailsChildResult_partial')));
+      assert.ok(partialLine.includes(translate('runDetailsChildSuperseded')));
+      assert.ok(partialLine.includes('sa_followup'));
+      assert.equal(partialLine.includes(translate('runDetailsChildAcceptance_pending')), false);
+      assert.equal(partialLine.includes(translate('runDetailsChildAcceptance_needs_followup')), false);
+    }
+  });
+
   it('records budget rejection without duplicating or changing actual validation evidence', () => {
     const builder = new RunDetailsBuilder({ runId: 'run-budget', modelId: 'model', thinkingEnabled: false });
     builder.recordToolResult('validation', 'keepseek_run_validation', JSON.stringify({ ok: true, script: 'test', exitCode: 0 }));

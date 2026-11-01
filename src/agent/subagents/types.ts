@@ -45,6 +45,10 @@ export interface SubagentProfile {
 
 export interface DelegateTaskInput {
   task: string;
+  /** V11 parent assessment identity; does not grant child capabilities. */
+  candidateId?: string;
+  /** Host-only assessed capability declaration. Never parsed from model arguments. */
+  assessedCapabilities?: Array<'read' | 'review' | 'proposal'>;
   profile?: string;
   lane?: SubagentLane;
   paths?: string[];
@@ -73,7 +77,7 @@ export type SubagentManifestStatus = 'completed' | 'failed' | 'cancelled' | 'bud
 
 /** Provider-visible V10 handoff. Full result text never appears in this object. */
 export interface SubagentResultManifestV2 {
-  version: 2;
+  version: 2 | 3;
   ok: boolean;
   kind: 'subagent_result_manifest';
   subagentId: string;
@@ -82,6 +86,13 @@ export interface SubagentResultManifestV2 {
   lane: SubagentLane;
   depth: number;
   status: SubagentManifestStatus;
+  /** V3: ok accepts non-failed material (including partial), never parent approval. */
+  resultStatus?: 'complete' | 'partial' | 'failed';
+  formatAccepted?: boolean;
+  parentAcceptance?: 'pending' | 'accepted' | 'needs_details' | 'needs_followup' | 'rejected';
+  missing?: string[];
+  uncertainties?: string[];
+  keyEvidence?: Array<{ claim: string; path?: string; startLine?: number; verification: 'unverified' }>;
   summary: string;
   preview: string;
   resultRef: string;
@@ -128,6 +139,12 @@ export interface SubagentTreeBudget {
 }
 
 export interface SubagentToolAdapter {
+  inspectResult?(subagentId: string, context: SubagentInvocationContext): Promise<{
+    subagentId: string;
+    resultHash: string;
+    resultStatus: 'complete' | 'partial' | 'failed';
+    formatAccepted: boolean;
+  } | undefined>;
   snapshotTree?(treeId: string): SubagentTreeBudget | undefined;
   restoreTree?(treeId: string, budget: SubagentTreeBudget): void;
   releaseTree?(treeId: string): void;
@@ -177,10 +194,14 @@ export interface StoredSubagentMetadata {
   toolSchemaHash: string;
   profileHash: string;
   projectInstructionsHash: string;
+  /** V11 controlled context proof; absent legacy records remain audit-only. */
+  hostContextHash?: string;
   authorizationContextHash?: string;
   workspaceContextHash?: string;
   normalizedTaskHash?: string;
   resultStatus?: 'complete' | 'partial' | 'failed';
+  resultContractVersion?: 2;
+  resultFormatAccepted?: boolean;
   failureKind?: SubagentFailureKind;
   resultEnvelope?: import('./resultEnvelope').SubagentResultEnvelope;
   readSet?: Array<{ uri: string; contentHash: string; sizeBytes: number }>;

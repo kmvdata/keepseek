@@ -37,6 +37,7 @@ export const GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME = 'keepseek_git_suggest_commit
 export const DELEGATE_TASK_TOOL_NAME = 'keepseek_delegate_task';
 export const DELEGATE_PARALLEL_TOOL_NAME = 'keepseek_delegate_parallel';
 export const READ_SUBAGENT_RESULT_TOOL_NAME = 'keepseek_read_subagent_result';
+export const DELEGATION_CHECKPOINT_TOOL_NAME = 'keepseek_delegation_checkpoint';
 export const READ_EVIDENCE_TOOL_NAME = 'keepseek_read_evidence';
 
 const UNPROJECTED_HISTORY_MESSAGE_LIMIT = 24;
@@ -101,6 +102,8 @@ const CORE_AGENT_TOOL_NAMES_V8 = [...CORE_AGENT_TOOL_NAMES_V5, READ_EVIDENCE_TOO
 const ALL_AGENT_TOOL_NAMES_V8 = [...ALL_AGENT_TOOL_NAMES_V5, READ_EVIDENCE_TOOL_NAME];
 const CORE_AGENT_TOOL_NAMES_V9 = [...CORE_AGENT_TOOL_NAMES_V8, APPLY_PATCH_TOOL_NAME];
 const ALL_AGENT_TOOL_NAMES_V9 = [...ALL_AGENT_TOOL_NAMES_V8, APPLY_PATCH_TOOL_NAME];
+const CORE_AGENT_TOOL_NAMES_V11 = [...CORE_AGENT_TOOL_NAMES_V9, DELEGATION_CHECKPOINT_TOOL_NAME];
+const ALL_AGENT_TOOL_NAMES_V11 = [...ALL_AGENT_TOOL_NAMES_V9, DELEGATION_CHECKPOINT_TOOL_NAME];
 
 export interface BuildAgentMessagesInput {
   prompt: string;
@@ -469,6 +472,21 @@ export function getAgentSystemPrompt(input: {
         'Patch 路径必须是规范化的工作区相对声明。绝不能放入绝对路径、URI、路径穿越、未声明目标、模糊匹配或忽略空白的匹配。只能使用唯一精确 search、明确的整行范围或文件头/尾插入。工具成功只表示 pending；实际 Apply 经落盘 hash 验证前不得验证或声称成功。'
       ]));
     }
+    if ((input.requestProtocolVersion ?? 1) >= 11) {
+      stable.push(...(input.language === 'en' ? [
+        'At the initial plan and when concrete evidence expands the investigation, assess independent branches with keepseek_delegation_checkpoint (assess). Small direct tasks may stay local. Record only a short decision and evidence, never hidden reasoning. Delegate bounded searches, module investigations, reviews or pending proposals when coordination is worthwhile; retain goal clarification, architecture decisions, dependent work, approvals and synthesis in the parent. Children are not shell, Python or validation runtimes.',
+        'Before delegation, register a self-contained candidate: goal, precise scope, supplied inputs or readable locations, dependencies, required capabilities and acceptance criteria. Pass its candidateId with the task brief. Parallel candidates must have no same-batch dependencies; execute dependent branches sequentially after parent acceptance. Host preflight checks declared contracts and permissions, not semantic independence. Explicit /research, /review, /proposal and /parallel selections must be fulfilled or accurately reported as unfulfilled without inventing a refusal reason.',
+        'If a candidate no longer merits delegation, record assess with decision=local, an empty candidates array and a short reason; this withdraws only candidates that have not returned results. Returned results still require acceptance. A scope_expanded assessment may replace a fully adopted candidate window with new independent candidates; it never resets tree resources or discards tool evidence.',
+        'A V3 child manifest separates lifecycle status, formatAccepted, resultStatus (complete/partial/failed), and parentAcceptance. ok means the handoff was accepted structurally, not that the user goal or parent plan is complete. Review each summary, coverage, evidence and missing items; use keepseek_delegation_checkpoint (accept) to record adopt, needs_details, investigate or reject with a short reason. Only a structurally accepted complete result can be adopted. Claims and child review verdicts remain untrusted until appropriately checked; neither grants approval or proves semantic correctness.',
+        'resultRef reads canonical child result pages with keepseek_read_subagent_result; evidenceRef reads the immutable delivery snapshot with keepseek_read_evidence. Read only missing necessary ranges, never automatically load all pages or private traces. A shortened preview does not mean the canonical result is missing. Reuse unchanged delivered evidence; reread with a concrete need after an Epoch or when freshness or conflicting evidence matters. Keep pending proposals pending until the normal approval and execution pipeline reports actual effects.'
+      ] : [
+        '在初始计划及有具体证据表明调查范围扩大时，用 keepseek_delegation_checkpoint（assess）评估独立支线；简单直接任务可留在主 Agent。只记录简短决定与证据，不记录隐藏推理。协调收益明确时委派有界搜索、模块调查、审查或待确认提案；目标澄清、架构取舍、依赖决策、审批与综合由父侧负责。child 不是 shell、Python 或验证执行环境。',
+        '委派前登记自包含候选：目标、精确范围、已给输入或可读定位、依赖、所需能力及验收标准；调用时传 candidateId 和完整任务 brief。同批候选不得互相依赖，依赖支线在父验收后顺序推进。宿主预检只验证已声明合同与权限，不证明语义独立。显式 /research、/review、/proposal、/parallel 应落实执行，或准确说明未落实，不能编造拒绝原因。',
+        '候选不再适合委派时，用 assess、decision=local、空 candidates 及简短理由撤销尚未返回结果的候选；已返回结果仍需验收。旧候选全部采纳后，scope_expanded 评估可滚动登记新的独立候选；不会重置树级资源或丢弃工具审计证据。',
+        'V3 child manifest 分开表示生命周期 status、格式接受 formatAccepted、完成程度 resultStatus（complete/partial/failed）及父验收 parentAcceptance。ok 仅表示结构交付获接受，不代表用户目标或父计划完成。先审 summary、覆盖范围、证据和缺失项，再用 keepseek_delegation_checkpoint（accept）简短记录 adopt、needs_details、investigate 或 reject。只有格式获接受且 complete 的结果可采纳；claim 和 child review verdict 仍需核验，不能授予审批或证明语义正确。',
+        'resultRef 用 keepseek_read_subagent_result 读 canonical child 结果；evidenceRef 用 keepseek_read_evidence 读不可变交付快照。只读取当前缺失的必要范围，不自动装回全部页或 private trace。preview 缩短不等于 canonical 缺失。复用未变化的已交付证据；跨 Epoch、需要当前状态或证据冲突时可有理由复核。提案仍需经过原审批及执行管线，收到真实结果前保持 pending。'
+      ]));
+    }
     return stable.join('\n\n');
   }
 
@@ -626,7 +644,9 @@ export function getAgentToolNamesForPrompt(
   slimModeEnabled: boolean,
   requestProtocolVersion = 5
 ): string[] {
-  const coreNames = requestProtocolVersion >= 9
+  const coreNames = requestProtocolVersion >= 11
+    ? CORE_AGENT_TOOL_NAMES_V11
+    : requestProtocolVersion >= 9
     ? CORE_AGENT_TOOL_NAMES_V9
     : requestProtocolVersion >= 8
     ? CORE_AGENT_TOOL_NAMES_V8
@@ -637,7 +657,9 @@ export function getAgentToolNamesForPrompt(
     : requestProtocolVersion >= 2
       ? CORE_AGENT_TOOL_NAMES_V3
       : CORE_AGENT_TOOL_NAMES_V1;
-  const allNames = requestProtocolVersion >= 9
+  const allNames = requestProtocolVersion >= 11
+    ? ALL_AGENT_TOOL_NAMES_V11
+    : requestProtocolVersion >= 9
     ? ALL_AGENT_TOOL_NAMES_V9
     : requestProtocolVersion >= 8
     ? ALL_AGENT_TOOL_NAMES_V8
@@ -699,6 +721,7 @@ export function isDraftRunPreparationTool(toolName: string): boolean {
 function getRawAgentTools(requestProtocolVersion: number): DeepSeekFunctionTool[] {
   const tools: DeepSeekFunctionTool[] = [
     ...(requestProtocolVersion >= 8 ? [createEvidenceReadTool()] : []),
+    ...(requestProtocolVersion >= 11 ? [createDelegationCheckpointTool()] : []),
     ...(requestProtocolVersion >= 5 ? createSubagentTools(requestProtocolVersion) : []),
     ...(requestProtocolVersion >= 4 ? [createDraftRunTool(requestProtocolVersion)] : []),
     ...(requestProtocolVersion >= 9 ? [createApplyPatchTool()] : []),
@@ -1148,6 +1171,48 @@ function createEvidenceReadTool(): DeepSeekFunctionTool {
   };
 }
 
+function createDelegationCheckpointTool(): DeepSeekFunctionTool {
+  const shortStrings = { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 512 } };
+  return {
+    type: 'function',
+    function: {
+      name: DELEGATION_CHECKPOINT_TOOL_NAME,
+      description: 'Record a bounded delegation assessment or parent result acceptance, without an extra model call. assess registers self-contained candidates with declared dependencies and capabilities; local is appropriate for small tasks. accept records adopt, needs_details, investigate or reject for a child returned in this plan. Host verifies result binding, structural acceptance and completeness before adopt, but cannot prove semantic correctness. This never approves or executes pending effects.',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['assess', 'accept'] },
+          trigger: { type: 'string', enum: ['initial', 'scope_expanded'] },
+          decision: { type: 'string', enum: ['local', 'delegate', 'adopt', 'needs_details', 'investigate', 'reject'] },
+          reason: { type: 'string', maxLength: 240 },
+          evidence: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 512 } },
+          candidates: {
+            type: 'array', maxItems: 8,
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', maxLength: 64 },
+                goal: { type: 'string', maxLength: 512 },
+                scope: shortStrings,
+                inputs: shortStrings,
+                dependsOn: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 64 } },
+                capabilities: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', enum: ['read', 'review', 'proposal'] } },
+                acceptance: shortStrings
+              },
+              required: ['id', 'goal', 'scope', 'inputs', 'dependsOn', 'capabilities', 'acceptance'],
+              additionalProperties: false
+            }
+          },
+          subagentId: { type: 'string', maxLength: 128 }
+        },
+        required: ['action', 'decision', 'reason'],
+        additionalProperties: false
+      }
+    }
+  };
+}
+
 function createSubagentTools(requestProtocolVersion: number): DeepSeekFunctionTool[] {
   const laneProperty = {
     type: 'string',
@@ -1180,21 +1245,26 @@ function createSubagentTools(requestProtocolVersion: number): DeepSeekFunctionTo
     timeoutMs: {
       type: 'number',
       description: 'Optional child duration cap in milliseconds. KeepSeek applies a global maximum.'
-    }
+    },
+    ...(requestProtocolVersion >= 11 ? {
+      candidateId: { type: 'string', description: 'Candidate id previously registered by keepseek_delegation_checkpoint assess. Host checks declared dependencies, scope and capabilities before execution.' }
+    } : {})
   };
   const tools: DeepSeekFunctionTool[] = [
     {
       type: 'function',
       function: {
         name: DELEGATE_TASK_TOOL_NAME,
-        description: requestProtocolVersion >= 8
+        description: requestProtocolVersion >= 11
+          ? 'Execute one registered self-contained candidate in an isolated child. Pass candidateId and the bounded task brief; the host enforces profile, declared dependencies, scope, budget and restricted capabilities. Returns a V3 manifest with summary, resultStatus, formatAccepted and resultRef. Read necessary canonical details with keepseek_read_subagent_result; evidenceRef identifies only the immutable delivery snapshot. Record parent acceptance with keepseek_delegation_checkpoint. Pending proposals never apply or execute here.'
+          : requestProtocolVersion >= 8
           ? 'Run one isolated subagent on a bounded self-contained task. The child receives a static persona, selected profile, applicable project instructions, the task, and a restricted tool schema—but no parent chat history, parent reasoning, or prior parent tool output. Its complete final result enters the general immutable evidence pipeline; use keepseek_read_evidence when the returned envelope is partial. Proposal outputs remain pending drafts.'
           : 'Run one isolated subagent on a bounded self-contained task. The child receives a static persona, selected profile, applicable project instructions, the task, and a restricted tool schema—but no parent chat history, parent reasoning, or prior parent tool output. Returns a bounded final result plus a stable result reference; proposal outputs remain pending drafts.',
         strict: true,
         parameters: {
           type: 'object',
           properties: taskProperties,
-          required: ['task'],
+          required: requestProtocolVersion >= 11 ? ['task', 'candidateId'] : ['task'],
           additionalProperties: false
         }
       }
@@ -1203,7 +1273,9 @@ function createSubagentTools(requestProtocolVersion: number): DeepSeekFunctionTo
       type: 'function',
       function: {
         name: DELEGATE_PARALLEL_TOOL_NAME,
-        description: 'Run several genuinely independent isolated subagent tasks under bounded concurrency. Results are returned in input order. Proposal path claims and post-run URI checks prevent overlapping edits from being silently merged.',
+        description: requestProtocolVersion >= 11
+          ? 'Execute registered independent candidates under unchanged bounded concurrency, returning V3 summaries and refs in input order. Same-batch dependencies are rejected. Partial or failed siblings block proposal batch merge while readable successful sibling results remain available. Host preflight does not prove semantic independence. failFast remains reserved.'
+          : 'Run several genuinely independent isolated subagent tasks under bounded concurrency. Results are returned in input order. Proposal path claims and post-run URI checks prevent overlapping edits from being silently merged.',
         strict: true,
         parameters: {
           type: 'object',
@@ -1214,7 +1286,7 @@ function createSubagentTools(requestProtocolVersion: number): DeepSeekFunctionTo
               items: {
                 type: 'object',
                 properties: taskProperties,
-                required: ['task'],
+                required: requestProtocolVersion >= 11 ? ['task', 'candidateId'] : ['task'],
                 additionalProperties: false
               }
             },
@@ -1232,7 +1304,9 @@ function createSubagentTools(requestProtocolVersion: number): DeepSeekFunctionTo
       type: 'function',
       function: {
         name: READ_SUBAGENT_RESULT_TOOL_NAME,
-        description: requestProtocolVersion >= 10
+        description: requestProtocolVersion >= 11
+          ? 'Read exactly one bounded UTF-8 byte page of the canonical child result identified by resultRef, scoped to the current parent session and permitted lineage. This differs from evidenceRef, which reads a delivery snapshot with keepseek_read_evidence. Read only necessary ranges; no private transcript, hidden reasoning, automatic remaining pages or child re-execution. The delivered cursor advances only over actual body bytes; capacity can explicitly block delivery.'
+          : requestProtocolVersion >= 10
           ? 'Read exactly one bounded UTF-8 byte page from a stored child final result referenced by a V2 handoff manifest. References are restricted to the current parent session and permitted subagent lineage. This never returns hidden reasoning, private tool traces, or additional pages automatically.'
           : requestProtocolVersion >= 8
           ? 'Legacy migration bridge for a child result created by a V1–V7 parent lane. New V8 child results use keepseek_read_evidence. This bounded read never returns hidden reasoning or the child tool trace, and its result enters the same general evidence/admission pipeline.'

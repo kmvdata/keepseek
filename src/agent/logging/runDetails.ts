@@ -14,6 +14,7 @@ import type {
   ToolAuthorizationDecision
 } from '../../shared/types';
 import type { InteractionTraceEvent } from './interactionTrace';
+import { observeChildResultMetadata, projectDelegationDetails, type RunDetailsChildResult } from './subagentDetails';
 
 const MAX_TOOL_CALLS_IN_SUMMARY = 80;
 const MAX_SUMMARY_CHARS = 500;
@@ -56,6 +57,8 @@ export class RunDetailsBuilder {
   private truncated = false;
   private outputBudgets: NonNullable<RunDetailsSummary['outputBudgets']> = [];
   private outputTruncation: RunDetailsSummary['outputTruncation'];
+  private childResults: RunDetailsChildResult[] = [];
+  private readonly childReadRefs = new Map<string, string>();
 
   public constructor(private readonly input: RunDetailsBuilderInput) {
     this.startedAt = input.startedAt ?? new Date().toISOString();
@@ -75,6 +78,9 @@ export class RunDetailsBuilder {
       case 'task_plan_update':
         if (isTaskPlan(event.plan)) {
           this.taskPlan = cloneTaskPlan(event.plan);
+          this.childResults = projectDelegationDetails(
+            (this.taskPlan as unknown as Record<string, unknown>).delegation, this.childResults
+          )?.results ?? this.childResults;
           this.taskPlanUpdateCount += 1;
         }
         return;
@@ -114,11 +120,20 @@ export class RunDetailsBuilder {
   public recordToolArguments(toolCallId: string, toolName: string, args: Record<string, unknown>): void {
     const tool = this.ensureTool(toolCallId, toolName);
     tool.argumentsSummary = summarizeToolArguments(args);
+    if (toolName === 'keepseek_read_subagent_result' && this.childReadRefs.size < MAX_TOOL_CALLS_IN_SUMMARY) {
+      const ref = args.ref ?? args.subagentId;
+      if (typeof ref === 'string' && ref.length <= 160) this.childReadRefs.set(toolCallId, ref);
+    }
   }
 
   public recordToolResult(toolCallId: string, toolName: string, rawResult: string, options: { deliveryOnly?: boolean } = {}): void {
     const tool = this.ensureTool(toolCallId, toolName);
     const parsed = parseRecord(rawResult);
+    if (parsed && (toolName === 'keepseek_delegate_task' || toolName === 'keepseek_delegate_parallel'
+      || toolName === 'keepseek_read_subagent_result')) {
+      this.childResults = observeChildResultMetadata(this.childResults,
+        this.childReadRefs.has(toolCallId) ? { ref: this.childReadRefs.get(toolCallId), ...parsed } : parsed);
+    }
     tool.endedAt = new Date().toISOString();
     tool.durationMs = Math.max(0, Date.parse(tool.endedAt) - Date.parse(tool.startedAt));
     tool.resultSummary = summarizeToolResult(rawResult);
@@ -189,6 +204,7 @@ export class RunDetailsBuilder {
             blockers: plan.blockers.slice(0, 10).map((blocker) => blocker.slice(0, 240))
           }
         : undefined,
+      delegation: projectDelegationDetails(plan && (plan as unknown as Record<string, unknown>).delegation, this.childResults),
       modelRequests: {
         requestCount: this.requestCount,
         providerAttemptCount: this.providerAttemptCount,
@@ -400,7 +416,7 @@ export function summarizeToolResult(rawResult: string): string {
     return redactSensitiveText(rawResult).replace(/\s+/gu, ' ').slice(0, MAX_SUMMARY_CHARS);
   }
   const summary: Record<string, unknown> = {};
-  for (const key of ['ok', 'budgetReason', 'usedTokens', 'nextTokens', 'maxTokens', 'errorType', 'error', 'path', 'script', 'exitCode', 'durationMs', 'timedOut', 'total', 'count', 'totalListed', 'truncated']) {
+  for (const key of ['ok', 'budgetReason', 'usedTokens', 'nextTokens', 'maxTokens', 'errorType', 'error', 'path', 'script', 'exitCode', 'durationMs', 'timedOut', 'total', 'count', 'totalListed', 'truncated', 'resultStatus', 'formatAccepted', 'parentAcceptance']) {
     const value = parsed[key];
     if (typeof value === 'string') summary[key] = redactSensitiveText(value).slice(0, 240);
     else if (typeof value === 'number' || typeof value === 'boolean') summary[key] = value;
@@ -649,5 +665,5 @@ function isSafeNpmScript(value: unknown): value is SafeNpmScript {
 }
 
 function cloneTaskPlan(plan: TaskPlan): TaskPlan {
-  return { ...plan, steps: plan.steps.map((step) => ({ ...step })), blockers: [...plan.blockers] };
+  return structuredClone(plan);
 }

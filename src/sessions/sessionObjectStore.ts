@@ -158,6 +158,43 @@ export class SessionObjectStore {
     }
     return value;
   }
+  /** Verified field projection for legacy child records. Never decode sibling
+   * transcript/history/checkpoint nodes merely to retrieve a canonical result. */
+  public async loadField(manifest: unknown, path: readonly string[]): Promise<unknown> {
+    const m = manifest as SessionManifest;
+    if (![3, 4].includes(m?.version) || !Number.isSafeInteger(m.revision) || !Array.isArray(m.messages)
+      || !HASH.test(m.header)) throw new Error('Invalid session manifest');
+    const visited = new Set<string>();
+    const nodeFor = async (encoded: Encoded): Promise<ObjectNode | undefined> => {
+      if (!encoded || typeof encoded !== 'object') return undefined;
+      if ('inline' in encoded) return encoded.inline;
+      if (!HASH.test(encoded.ref) || visited.has(encoded.ref)) throw new Error('Invalid projected object reference');
+      visited.add(encoded.ref);
+      const bytes = await vscode.workspace.fs.readFile(this.objectUri(encoded.ref));
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      if (digest(text) !== encoded.ref) throw new Error('Session object integrity mismatch');
+      return JSON.parse(text) as ObjectNode;
+    };
+    if (m.headerInline && digest(JSON.stringify(m.headerInline)) !== m.header) throw new Error('Session header integrity mismatch');
+    let current: Encoded = m.headerInline ? { inline: m.headerInline } : { ref: m.header };
+    for (let position = 0; position < path.length; position++) {
+      const key = path[position]!;
+      const node = await nodeFor(current);
+      if (!node) return undefined;
+      if (node.kind === 'json') {
+        let value = node.value;
+        for (const segment of path.slice(position)) {
+          if (!value || typeof value !== 'object') return undefined;
+          value = (value as Record<string, unknown>)[segment];
+        }
+        return value;
+      }
+      if (node.kind !== 'object' || !Array.isArray(node.entries)) return undefined;
+      current = node.entries.find(([name]) => name === key)?.[1] ?? null;
+    }
+    return current && typeof current === 'object'
+      ? this.decodeNode((await nodeFor(current))!, new Map(), visited) : current;
+  }
   public async load(manifest: unknown): Promise<ChatSession> {
     const m = manifest as SessionManifest;
     if (![3, 4].includes(m?.version) || !Number.isSafeInteger(m.revision) || !Array.isArray(m.messages)) throw new Error('Invalid session manifest');

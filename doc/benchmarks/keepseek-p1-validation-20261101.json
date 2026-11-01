@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "date": "2026-11-01",
+  "timezone": "Asia/Shanghai",
+  "baseline": "f313a00",
+  "workingTree": "uncommitted P1 changes; package version 0.3.9 unchanged",
+  "commands": {
+    "bun run compile": 0,
+    "bun run lint": 0,
+    "bun run build:test": 0,
+    "bun run test": 0,
+    "git diff --check": 0,
+    "node --check scripts/benchmark-p1-delegation.cjs": 0,
+    "node --check scripts/benchmark-p1-result-reader.cjs": 0,
+    "node --check scripts/compare-p1-persistence.cjs": 0
+  },
+  "finalTests": {
+    "total": 829,
+    "suites": 15,
+    "passed": 828,
+    "failed": 0,
+    "skipped": 1,
+    "cancelled": 0,
+    "durationMs": 133142.49031,
+    "skipReason": "Sandbox disallows binding the local HTTP fault server port.",
+    "includesP0PersistenceUsageRecoveryApprovalAndThreeProtocolRegression": true
+  },
+  "protocols": {
+    "newParentAndChild": 11,
+    "resultContract": 2,
+    "handoffManifest": 3,
+    "hostCapsule": 1,
+    "resultIndex": 1,
+    "delegationState": 1,
+    "persistence": 4,
+    "frozenV1ThroughV10HashFixtureVerified": true
+  },
+  "benchmarks": {
+    "persistenceComparison": "keepseek-p1-persistence-comparison-20261101.json",
+    "reader": "keepseek-p1-result-reader-20261101.json",
+    "delegation": "keepseek-p1-delegation-20261101.json",
+    "conditions": "Real temporary filesystem; VS Code stub; durable barriers retained; deterministic fixtures; no production data or Provider traffic.",
+    "productionP95Claimed": false,
+    "actualUsageAvailable": false
+  },
+  "realProviderRequests": 0,
+  "realAccountSettingsChanged": false,
+  "realSessionMigrationPerformed": false,
+  "vscodeF5AcceptancePerformed": false,
+  "hourScaleLiveTaskPerformed": false,
+  "extensionInstalledOrPublished": false,
+  "gitCommitOrPushPerformed": false,
+  "limitations": [
+    "Profile hard delivery overflow yields explicit legal partial; unaccepted full original body is not retained or advertised as readable.",
+    "Old child records without controlled inheritance proof remain audit-readable but cannot resume execution.",
+    "Reader small-result cold IO and legacy first parse can be slower; persistence is not claimed to be uniformly faster.",
+    "The offline delegation task has lower parent context but higher total estimated input after coordination; it does not establish actual cost savings or semantic quality.",
+    "Real model adoption, real usage, VS Code interaction and long-running task quality remain unverified."
+  ]
+}

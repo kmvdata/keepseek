@@ -1,0 +1,1840 @@
+{
+  "version": 2,
+  "kind": "offline-scripted-projection-comparison",
+  "environment": {
+    "node": "v24.15.0",
+    "platform": "darwin",
+    "arch": "x64",
+    "filesystem": "real temporary filesystem and repository source reads via VS Code stub",
+    "providerTraffic": false,
+    "actualUsageAvailable": false,
+    "timingSampleCountPerLane": 1
+  },
+  "notes": [
+    "Input counts are estimates from final serialized three-protocol context payloads. Sampling/transport-only fields are outside this context comparison.",
+    "No real model, tool scheduler, selection probability, network waiting, parent semantic acceptance or live VS Code flow was exercised.",
+    "Tool bodies and child results are deterministic fixtures from real source. The parent gets complete compact conclusions plus narrow verification reads; no private child trace is copied back.",
+    "V11 assessment, candidate preparation, returned-result tracking, full canonical authority verification and parent acceptance use the real DelegationTracker/store methods. Assessment and batched acceptance tool arguments/results each consume a full additional parent request round.",
+    "Every child request includes the complete prepare() brief and deterministic task binding. Output estimates include scripted assistant tool calls as well as final answers; native transport-only output framing remains outside the estimate.",
+    "No context, time, token, approval or durability budget was increased. Additional child prefixes and coordination may increase total estimated task input even when the parent projection shrinks.",
+    "All small canonical results fit the default previews, so this scenario correctly reads zero extra result pages. Reader paging cost is benchmarked separately.",
+    "Single timing samples are observations, never production p95 values. No saving percentage or model quality claim is computed."
+  ],
+  "results": [
+    {
+      "provider": "openai-compatible",
+      "protocolVersion": 11,
+      "task": "Locate the declarations and source identities of resolveSubagentProfile, createParallelHandoff, and readResultPage. Return exact paths and lines, inspect each module independently, then verify each declaration with a narrow reread. This is a source-location audit, not a semantic correctness review.",
+      "sources": [
+        {
+          "path": "src/agent/subagents/profiles.ts",
+          "symbol": "resolveSubagentProfile",
+          "line": 86,
+          "sha256": "5a311640b3593c681273c0af21293057c5d0b65562ba4c6f69939ad295a26ed6",
+          "sizeBytes": 5744
+        },
+        {
+          "path": "src/agent/subagents/handoff.ts",
+          "symbol": "createParallelHandoff",
+          "line": 88,
+          "sha256": "c103f6a009f5b499c7734aebe2f6f51695008175877b436a6a234d3c3af4a4e5",
+          "sizeBytes": 14208
+        },
+        {
+          "path": "src/agent/subagents/store.ts",
+          "symbol": "readResultPage",
+          "line": 198,
+          "sha256": "d0158fe9d6715b350cd0a937502049b580f72163b8a6e9b93ee40c66917f5509",
+          "sizeBytes": 39741
+        }
+      ],
+      "primaryOnly": {
+        "scriptedRequestCount": 5,
+        "inputBytesTotal": 341167,
+        "inputTokensEstimateTotal": 102353,
+        "projectionMs": 41.182399000000004,
+        "requests": [
+          {
+            "inputBytes": 37127,
+            "inputTokensEstimate": 11139,
+            "requestHash": "3099f1bfb504ab63fcaffc3c0cd1afa56d3d0554cb4b8c1fca8288f98b3669be",
+            "projectionMs": 23.34875199999999
+          },
+          {
+            "inputBytes": 43569,
+            "inputTokensEstimate": 13071,
+            "requestHash": "ce5697ee076f5f2f09300f59dbd207308d180c7fb8af073ea6174b95c9a8848e",
+            "projectionMs": 4.487238000000019
+          },
+          {
+            "inputBytes": 58739,
+            "inputTokensEstimate": 17622,
+            "requestHash": "b8e836521429b5a9db786b0d4adf16f6989c025a5fd920493fcad5738928f666",
+            "projectionMs": 4.875654999999995
+          },
+          {
+            "inputBytes": 100238,
+            "inputTokensEstimate": 30072,
+            "requestHash": "76f1a8c2b311933f22843e49246177c8cf53363c9b840a27c33c7d979b2bcd40",
+            "projectionMs": 4.483075000000014
+          },
+          {
+            "inputBytes": 101494,
+            "inputTokensEstimate": 30449,
+            "requestHash": "1b0bf75d62c699057aa0d644fb3cb29fff23d08a9c843a2734121a16ea3a02aa",
+            "projectionMs": 3.9876789999999858
+          }
+        ],
+        "outputBytes": 1468,
+        "outputTokensEstimate": 445,
+        "scriptedAssistantToolCallCount": 6,
+        "parentToolBodyBytes": 61467,
+        "physicalProviderAttempts": 0,
+        "actualUsage": null,
+        "localIntervalsMs": {
+          "provider": 0,
+          "summary": 0,
+          "tools": 4.003393999999986,
+          "localSave": 0,
+          "waiting": 0
+        },
+        "fullSourceReads": 3,
+        "narrowVerificationReads": 3,
+        "supplementaryInvestigations": 0
+      },
+      "delegatedThenVerified": {
+        "scriptedRequestCount": 5,
+        "inputBytesTotal": 213995,
+        "inputTokensEstimateTotal": 64201,
+        "projectionMs": 6.864460999999835,
+        "requests": [
+          {
+            "inputBytes": 37127,
+            "inputTokensEstimate": 11139,
+            "requestHash": "3099f1bfb504ab63fcaffc3c0cd1afa56d3d0554cb4b8c1fca8288f98b3669be",
+            "projectionMs": 1.5260649999999885
+          },
+          {
+            "inputBytes": 39010,
+            "inputTokensEstimate": 11703,
+            "requestHash": "f214ee2b4bfe697ea36ff1800f3e67d30b02522472e9f443c9d94d6f6ee733bd",
+            "projectionMs": 1.9033589999999947
+          },
+          {
+            "inputBytes": 44558,
+            "inputTokensEstimate": 13368,
+            "requestHash": "41d286ed3e0a7c0b74820dd665d5cba677124c14ba9382d474f7387f62a59d5f",
+            "projectionMs": 1.1397599999999102
+          },
+          {
+            "inputBytes": 45814,
+            "inputTokensEstimate": 13745,
+            "requestHash": "130af71d4d4813c284934046817fd1169c1f28cfd5256099770275d67a12a107",
+            "projectionMs": 1.1670159999999896
+          },
+          {
+            "inputBytes": 47486,
+            "inputTokensEstimate": 14246,
+            "requestHash": "1627da19ae16d8ad1f6072040643e700ce784fc67a365a9a7f8ff09e3762a1f1",
+            "projectionMs": 1.1282609999999522
+          }
+        ],
+        "outputBytes": 4390,
+        "outputTokensEstimate": 1321,
+        "scriptedAssistantToolCallCount": 8,
+        "children": [
+          {
+            "scriptedRequestCount": 2,
+            "inputBytesTotal": 48738,
+            "inputTokensEstimateTotal": 14623,
+            "projectionMs": 2.088897000000003,
+            "requests": [
+              {
+                "inputBytes": 21148,
+                "inputTokensEstimate": 6345,
+                "requestHash": "73820613c499ad6c5cae18327bc0df13412922c1b3c2b9e66f78622cd1459d6f",
+                "projectionMs": 1.2181769999999972
+              },
+              {
+                "inputBytes": 27590,
+                "inputTokensEstimate": 8278,
+                "requestHash": "af6b3b48e312ccd5a13c2eb95084b65a12607cba90279f7508f4890077fc27d5",
+                "projectionMs": 0.8707200000000057
+              }
+            ],
+            "outputBytes": 817,
+            "outputTokensEstimate": 247,
+            "scriptedAssistantToolCallCount": 1,
+            "preparedBriefBytes": 551,
+            "boundPromptBytes": 810,
+            "canonicalBytes": 718,
+            "resultHash": "60aff3c173dd65d9c4aaafef81fff6b8d80f33abd4febfc9cf27686b378e76d1",
+            "actualUsage": null
+          },
+          {
+            "scriptedRequestCount": 2,
+            "inputBytesTotal": 57458,
+            "inputTokensEstimateTotal": 17239,
+            "projectionMs": 2.8082790000000273,
+            "requests": [
+              {
+                "inputBytes": 21144,
+                "inputTokensEstimate": 6344,
+                "requestHash": "6c26fed462872b0ea19d1e2ed0c1a5080e0118497d4f265bb5c02c442456487c",
+                "projectionMs": 1.0767440000000192
+              },
+              {
+                "inputBytes": 36314,
+                "inputTokensEstimate": 10895,
+                "requestHash": "3a33ef79fb8c9ff30f92f6c073f68770f14925867e2a594b5a3839c4b1836778",
+                "projectionMs": 1.731535000000008
+              }
+            ],
+            "outputBytes": 811,
+            "outputTokensEstimate": 244,
+            "scriptedAssistantToolCallCount": 1,
+            "preparedBriefBytes": 547,
+            "boundPromptBytes": 806,
+            "canonicalBytes": 713,
+            "resultHash": "8264d121b68e5c8a0aa2cdc9e2535f45c8e5f08e00db5c329a68493e23294bb7",
+            "actualUsage": null
+          },
+          {
+            "scriptedRequestCount": 2,
+            "inputBytesTotal": 83751,
+            "inputTokensEstimateTotal": 25126,
+            "projectionMs": 2.0718890000000556,
+            "requests": [
+              {
+                "inputBytes": 21126,
+                "inputTokensEstimate": 6338,
+                "requestHash": "60889d530fd926348884bc2bfeb2033530aabb73f0d0f083f8d3b4eab7399e62",
+                "projectionMs": 0.8166810000000169
+              },
+              {
+                "inputBytes": 62625,
+                "inputTokensEstimate": 18788,
+                "requestHash": "1ceade69a68fe849f9f30809f457aec5344ec30ea4bd0499933866997d07d65f",
+                "projectionMs": 1.2552080000000387
+              }
+            ],
+            "outputBytes": 789,
+            "outputTokensEstimate": 238,
+            "scriptedAssistantToolCallCount": 1,
+            "preparedBriefBytes": 529,
+            "boundPromptBytes": 788,
+            "canonicalBytes": 693,
+            "resultHash": "af8e98801f0b4c38d7005a3983981c573e190fff56e372a482027823d796f860",
+            "actualUsage": null
+          }
+        ],
+        "parentToolBodyBytes": 5023,
+        "acceptedManifest": {
+          "draftEditCount": 0,
+          "draftRunCount": 0,
+          "kind": "subagent_parallel_manifest",
+          "ok": true,
+          "results": [
+            {
+              "depth": 1,
+              "draftEditCount": 0,
+              "draftRunCount": 0,
+              "formatAccepted": true,
+              "hasMore": false,
+              "lane": "research-read",
+              "ok": true,
+              "parentAcceptance": "pending",
+              "preview": "{\"contractVersion\":2,\"coverage\":[\"src/agent/subagents/profiles.ts\"],\"evidence\":[{\"claim\":\"export function resolveSubagentProfile(input: { (source SHA256 5a311640b3593c681273c0af21293057c5d0b65562ba4c6f69939ad295a26ed6)\",\"endLine\":86,\"path\":\"src/agent/subagents/profiles.ts\",\"startLine\":86,\"verification\":\"unverified\"}],\"kind\":\"research\",\"missing\":[],\"nextSteps\":[\"Parent should verify the declaration location before accepting.\"],\"status\":\"complete\",\"summary\":\"resolveSubagentProfile: src/agent/subagents/profiles.ts:86\",\"taskHash\":\"057080a7ef48aea8ec569b43a802f8e952b9f4e445163033397d81a37de91255\",\"uncertainties\":[\"Offline scripted source-location audit; no semantic model review or runtime behavior verification.\"]}",
+              "profile": "research",
+              "resultBytes": 718,
+              "resultChars": 718,
+              "resultHash": "60aff3c173dd65d9c4aaafef81fff6b8d80f33abd4febfc9cf27686b378e76d1",
+              "resultRef": "sa_offline_0",
+              "resultStatus": "complete",
+              "resultTruncated": false,
+              "status": "completed",
+              "subagentId": "sa_offline_0",
+              "summary": "resolveSubagentProfile: src/agent/subagents/profiles.ts:86",
+              "taskIndex": 0,
+              "treeId": "offline-tree"
+            },
+            {
+              "depth": 1,
+              "draftEditCount": 0,
+              "draftRunCount": 0,
+              "formatAccepted": true,
+              "hasMore": false,
+              "lane": "research-read",
+              "ok": true,
+              "parentAcceptance": "pending",
+              "preview": "{\"contractVersion\":2,\"coverage\":[\"src/agent/subagents/handoff.ts\"],\"evidence\":[{\"claim\":\"export function createParallelHandoff(input: { (source SHA256 c103f6a009f5b499c7734aebe2f6f51695008175877b436a6a234d3c3af4a4e5)\",\"endLine\":88,\"path\":\"src/agent/subagents/handoff.ts\",\"startLine\":88,\"verification\":\"unverified\"}],\"kind\":\"research\",\"missing\":[],\"nextSteps\":[\"Parent should verify the declaration location before accepting.\"],\"status\":\"complete\",\"summary\":\"createParallelHandoff: src/agent/subagents/handoff.ts:88\",\"taskHash\":\"452a89e5e132e5b6445d09723caaa86742d6e429d1353a5dde2b092b6e6c90ff\",\"uncertainties\":[\"Offline scripted source-location audit; no semantic model review or runtime behavior verification.\"]}",
+              "profile": "research",
+              "resultBytes": 713,
+              "resultChars": 713,
+              "resultHash": "8264d121b68e5c8a0aa2cdc9e2535f45c8e5f08e00db5c329a68493e23294bb7",
+              "resultRef": "sa_offline_1",
+              "resultStatus": "complete",
+              "resultTruncated": false,
+              "status": "completed",
+              "subagentId": "sa_offline_1",
+              "summary": "createParallelHandoff: src/agent/subagents/handoff.ts:88",
+              "taskIndex": 1,
+              "treeId": "offline-tree"
+            },
+            {
+              "depth": 1,
+              "draftEditCount": 0,
+              "draftRunCount": 0,
+              "formatAccepted": true,
+              "hasMore": false,
+              "lane": "research-read",
+              "ok": true,
+              "parentAcceptance": "pending",
+              "preview": "{\"contractVersion\":2,\"coverage\":[\"src/agent/subagents/store.ts\"],\"evidence\":[{\"claim\":\"public async readResultPage(input: { (source SHA256 d0158fe9d6715b350cd0a937502049b580f72163b8a6e9b93ee40c66917f5509)\",\"endLine\":198,\"path\":\"src/agent/subagents/store.ts\",\"startLine\":198,\"verification\":\"unverified\"}],\"kind\":\"research\",\"missing\":[],\"nextSteps\":[\"Parent should verify the declaration location before accepting.\"],\"status\":\"complete\",\"summary\":\"readResultPage: src/agent/subagents/store.ts:198\",\"taskHash\":\"e3ae82a4a276b9541cc1cf7c2ff38afd2fb8def765d1c8d5522c667d60d8836a\",\"uncertainties\":[\"Offline scripted source-location audit; no semantic model review or runtime behavior verification.\"]}",
+              "profile": "research",
+              "resultBytes": 693,
+              "resultChars": 693,
+              "resultHash": "af8e98801f0b4c38d7005a3983981c573e190fff56e372a482027823d796f860",
+              "resultRef": "sa_offline_2",
+              "resultStatus": "complete",
+              "resultTruncated": false,
+              "status": "completed",
+              "subagentId": "sa_offline_2",
+              "summary": "readResultPage: src/agent/subagents/store.ts:198",
+              "taskIndex": 2,
+              "treeId": "offline-tree"
+            }
+          ],
+          "version": 3
+        },
+        "acceptedManifestBytes": 3972,
+        "pageReads": 0,
+        "pageBodyBytes": 0,
+        "physicalProviderAttempts": 0,
+        "actualUsage": null,
+        "localIntervalsMs": {
+          "provider": 0,
+          "summary": 0,
+          "tools": 5.660786000000002,
+          "localSave": 447.08476999999993,
+          "coordination": 2.2868169999998145,
+          "waiting": 0
+        },
+        "fullSourceReads": 3,
+        "narrowVerificationReads": 3,
+        "supplementaryInvestigations": 0,
+        "scriptedParentAcceptance": {
+          "status": "accepted",
+          "basis": "All three declaration lines were reread and source identities matched; complete compact results needed no additional result pages.",
+          "semanticModelAcceptance": false
+        },
+        "coordination": {
+          "assessedCandidates": 3,
+          "assessmentArgs": {
+            "action": "assess",
+            "trigger": "initial",
+            "decision": "delegate",
+            "reason": "The three module location checks are independent and have the same narrow acceptance requirement.",
+            "evidence": [],
+            "candidates": [
+              {
+                "id": "candidate-0",
+                "goal": "Locate the declaration and source identity of resolveSubagentProfile.",
+                "scope": [
+                  "src/agent/subagents/profiles.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              },
+              {
+                "id": "candidate-1",
+                "goal": "Locate the declaration and source identity of createParallelHandoff.",
+                "scope": [
+                  "src/agent/subagents/handoff.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              },
+              {
+                "id": "candidate-2",
+                "goal": "Locate the declaration and source identity of readResultPage.",
+                "scope": [
+                  "src/agent/subagents/store.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              }
+            ]
+          },
+          "assessmentResult": {
+            "ok": true,
+            "kind": "delegation_assessment",
+            "judgment": "model_declared",
+            "hostVerified": "contract_shape_and_dependencies",
+            "candidateIds": [
+              "candidate-0",
+              "candidate-1",
+              "candidate-2"
+            ]
+          },
+          "preparedBriefs": [
+            {
+              "candidateId": "candidate-0",
+              "task": "Goal: Locate the declaration and source identity of resolveSubagentProfile.\nScope: src/agent/subagents/profiles.ts\nExplicit inputs: Use the current on-disk module; no parent history is available.\nDependencies already accepted: none\nRequired capabilities: read\nAcceptance: Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration.\nTask details: Locate resolveSubagentProfile in src/agent/subagents/profiles.ts, inspect that module only. Return its declaration and source hash. Do not modify or execute."
+            },
+            {
+              "candidateId": "candidate-1",
+              "task": "Goal: Locate the declaration and source identity of createParallelHandoff.\nScope: src/agent/subagents/handoff.ts\nExplicit inputs: Use the current on-disk module; no parent history is available.\nDependencies already accepted: none\nRequired capabilities: read\nAcceptance: Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration.\nTask details: Locate createParallelHandoff in src/agent/subagents/handoff.ts, inspect that module only. Return its declaration and source hash. Do not modify or execute."
+            },
+            {
+              "candidateId": "candidate-2",
+              "task": "Goal: Locate the declaration and source identity of readResultPage.\nScope: src/agent/subagents/store.ts\nExplicit inputs: Use the current on-disk module; no parent history is available.\nDependencies already accepted: none\nRequired capabilities: read\nAcceptance: Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration.\nTask details: Locate readResultPage in src/agent/subagents/store.ts, inspect that module only. Return its declaration and source hash. Do not modify or execute."
+            }
+          ],
+          "acceptanceCalls": [
+            {
+              "arguments": {
+                "action": "accept",
+                "subagentId": "sa_offline_0",
+                "decision": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              "result": {
+                "ok": true,
+                "subagentId": "sa_offline_0",
+                "decision": "adopt",
+                "judgment": "parent_model",
+                "formatAccepted": true,
+                "resultStatus": "complete",
+                "effectsApplied": false
+              }
+            },
+            {
+              "arguments": {
+                "action": "accept",
+                "subagentId": "sa_offline_1",
+                "decision": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              "result": {
+                "ok": true,
+                "subagentId": "sa_offline_1",
+                "decision": "adopt",
+                "judgment": "parent_model",
+                "formatAccepted": true,
+                "resultStatus": "complete",
+                "effectsApplied": false
+              }
+            },
+            {
+              "arguments": {
+                "action": "accept",
+                "subagentId": "sa_offline_2",
+                "decision": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              "result": {
+                "ok": true,
+                "subagentId": "sa_offline_2",
+                "decision": "adopt",
+                "judgment": "parent_model",
+                "formatAccepted": true,
+                "resultStatus": "complete",
+                "effectsApplied": false
+              }
+            }
+          ],
+          "parentState": {
+            "version": 1,
+            "candidates": [
+              {
+                "id": "candidate-0",
+                "goal": "Locate the declaration and source identity of resolveSubagentProfile.",
+                "scope": [
+                  "src/agent/subagents/profiles.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              },
+              {
+                "id": "candidate-1",
+                "goal": "Locate the declaration and source identity of createParallelHandoff.",
+                "scope": [
+                  "src/agent/subagents/handoff.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              },
+              {
+                "id": "candidate-2",
+                "goal": "Locate the declaration and source identity of readResultPage.",
+                "scope": [
+                  "src/agent/subagents/store.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              }
+            ],
+            "results": [
+              {
+                "candidateId": "candidate-0",
+                "subagentId": "sa_offline_0",
+                "resultRef": "sa_offline_0",
+                "resultHash": "60aff3c173dd65d9c4aaafef81fff6b8d80f33abd4febfc9cf27686b378e76d1",
+                "resultStatus": "complete",
+                "formatAccepted": true,
+                "acceptance": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              {
+                "candidateId": "candidate-1",
+                "subagentId": "sa_offline_1",
+                "resultRef": "sa_offline_1",
+                "resultHash": "8264d121b68e5c8a0aa2cdc9e2535f45c8e5f08e00db5c329a68493e23294bb7",
+                "resultStatus": "complete",
+                "formatAccepted": true,
+                "acceptance": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              {
+                "candidateId": "candidate-2",
+                "subagentId": "sa_offline_2",
+                "resultRef": "sa_offline_2",
+                "resultHash": "af8e98801f0b4c38d7005a3983981c573e190fff56e372a482027823d796f860",
+                "resultStatus": "complete",
+                "formatAccepted": true,
+                "acceptance": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              }
+            ],
+            "events": [
+              {
+                "kind": "model_assessment",
+                "reason": "The three module location checks are independent and have the same narrow acceptance requirement."
+              },
+              {
+                "kind": "requested",
+                "candidateId": "candidate-0"
+              },
+              {
+                "kind": "requested",
+                "candidateId": "candidate-1"
+              },
+              {
+                "kind": "requested",
+                "candidateId": "candidate-2"
+              },
+              {
+                "kind": "returned",
+                "candidateId": "candidate-0",
+                "subagentId": "sa_offline_0"
+              },
+              {
+                "kind": "returned",
+                "candidateId": "candidate-1",
+                "subagentId": "sa_offline_1"
+              },
+              {
+                "kind": "returned",
+                "candidateId": "candidate-2",
+                "subagentId": "sa_offline_2"
+              },
+              {
+                "kind": "parent_model_acceptance",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence.",
+                "candidateId": "candidate-0",
+                "subagentId": "sa_offline_0"
+              },
+              {
+                "kind": "parent_model_acceptance",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence.",
+                "candidateId": "candidate-1",
+                "subagentId": "sa_offline_1"
+              },
+              {
+                "kind": "parent_model_acceptance",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence.",
+                "candidateId": "candidate-2",
+                "subagentId": "sa_offline_2"
+              }
+            ],
+            "assessment": {
+              "trigger": "initial",
+              "decision": "delegate",
+              "reason": "The three module location checks are independent and have the same narrow acceptance requirement.",
+              "evidence": []
+            },
+            "explicitUnfulfilled": false
+          }
+        },
+        "taskInputTokensEstimateTotal": 121189,
+        "taskOutputTokensEstimateTotal": 2050
+      },
+      "controlledQualityCheck": {
+        "sameRequiredSourceIdentities": true,
+        "sameFinalAnswerHash": "05f88333ce56237600d1886cfb589e268ee7597fe5de7740817ae9512ee5b9e2",
+        "requiredDeclarationsFound": 3,
+        "declarationsReread": 3,
+        "limitations": "Only source-location facts are deterministically checked. Scripted summaries do not prove real-model delegation, semantic correctness, task completion quality, or end-to-end savings."
+      }
+    },
+    {
+      "provider": "openai-responses",
+      "protocolVersion": 11,
+      "task": "Locate the declarations and source identities of resolveSubagentProfile, createParallelHandoff, and readResultPage. Return exact paths and lines, inspect each module independently, then verify each declaration with a narrow reread. This is a source-location audit, not a semantic correctness review.",
+      "sources": [
+        {
+          "path": "src/agent/subagents/profiles.ts",
+          "symbol": "resolveSubagentProfile",
+          "line": 86,
+          "sha256": "5a311640b3593c681273c0af21293057c5d0b65562ba4c6f69939ad295a26ed6",
+          "sizeBytes": 5744
+        },
+        {
+          "path": "src/agent/subagents/handoff.ts",
+          "symbol": "createParallelHandoff",
+          "line": 88,
+          "sha256": "c103f6a009f5b499c7734aebe2f6f51695008175877b436a6a234d3c3af4a4e5",
+          "sizeBytes": 14208
+        },
+        {
+          "path": "src/agent/subagents/store.ts",
+          "symbol": "readResultPage",
+          "line": 198,
+          "sha256": "d0158fe9d6715b350cd0a937502049b580f72163b8a6e9b93ee40c66917f5509",
+          "sizeBytes": 39741
+        }
+      ],
+      "primaryOnly": {
+        "scriptedRequestCount": 5,
+        "inputBytesTotal": 338701,
+        "inputTokensEstimateTotal": 101613,
+        "projectionMs": 10.881660000000124,
+        "requests": [
+          {
+            "inputBytes": 36787,
+            "inputTokensEstimate": 11037,
+            "requestHash": "66e4fb4d82cb2c699e1e6a9cf620beaa53d764ee276af9576755f63334a36b48",
+            "projectionMs": 1.5717759999999998
+          },
+          {
+            "inputBytes": 43151,
+            "inputTokensEstimate": 12946,
+            "requestHash": "614d9815d4c9e6fccb1838b85cc98bcbcf20caf43f1c42a63cbaf78a2dda4530",
+            "projectionMs": 1.3382380000000467
+          },
+          {
+            "inputBytes": 58243,
+            "inputTokensEstimate": 17473,
+            "requestHash": "3f67f179e2a33cd5f3c834b362f7dd596851b5426c6652ee4d96007970ba955b",
+            "projectionMs": 1.8615419999999858
+          },
+          {
+            "inputBytes": 99664,
+            "inputTokensEstimate": 29900,
+            "requestHash": "528a49e699098fc669bc051c8c881d7563e693140efa6c8fa00701c56626a582",
+            "projectionMs": 2.9754800000000614
+          },
+          {
+            "inputBytes": 100856,
+            "inputTokensEstimate": 30257,
+            "requestHash": "821c1528dba199ff3e81da8bec5907959ffe9fb2ae10eb48086c6d4ffe3df9a0",
+            "projectionMs": 3.1346240000000307
+          }
+        ],
+        "outputBytes": 1468,
+        "outputTokensEstimate": 445,
+        "scriptedAssistantToolCallCount": 6,
+        "parentToolBodyBytes": 61467,
+        "physicalProviderAttempts": 0,
+        "actualUsage": null,
+        "localIntervalsMs": {
+          "provider": 0,
+          "summary": 0,
+          "tools": 2.0674319999999398,
+          "localSave": 0,
+          "waiting": 0
+        },
+        "fullSourceReads": 3,
+        "narrowVerificationReads": 3,
+        "supplementaryInvestigations": 0
+      },
+      "delegatedThenVerified": {
+        "scriptedRequestCount": 5,
+        "inputBytesTotal": 211557,
+        "inputTokensEstimateTotal": 63470,
+        "projectionMs": 6.241334000000165,
+        "requests": [
+          {
+            "inputBytes": 36787,
+            "inputTokensEstimate": 11037,
+            "requestHash": "66e4fb4d82cb2c699e1e6a9cf620beaa53d764ee276af9576755f63334a36b48",
+            "projectionMs": 1.0878510000000006
+          },
+          {
+            "inputBytes": 38592,
+            "inputTokensEstimate": 11578,
+            "requestHash": "5798200b84cac214b7c8ccdd239c5057dd5d6a31279f80af2d5b0d95cf9d8731",
+            "projectionMs": 1.0557199999999511
+          },
+          {
+            "inputBytes": 44062,
+            "inputTokensEstimate": 13219,
+            "requestHash": "336d253f877d5ee7823e2ad012ec6ecf2a3ccee6658119da4dd20efec9f165ff",
+            "projectionMs": 1.5840780000000905
+          },
+          {
+            "inputBytes": 45254,
+            "inputTokensEstimate": 13577,
+            "requestHash": "c58d89b3be6ccc57b6e7b4d56d5f0671b20e77cb970510803890c5b8290d3f3b",
+            "projectionMs": 1.2356079999999565
+          },
+          {
+            "inputBytes": 46862,
+            "inputTokensEstimate": 14059,
+            "requestHash": "9f43dba226f23ffd0c2cd3c19bb3968c2872b2bf281bc418355a207ebcdacc46",
+            "projectionMs": 1.2780770000001667
+          }
+        ],
+        "outputBytes": 4390,
+        "outputTokensEstimate": 1321,
+        "scriptedAssistantToolCallCount": 8,
+        "children": [
+          {
+            "scriptedRequestCount": 2,
+            "inputBytesTotal": 48162,
+            "inputTokensEstimateTotal": 14449,
+            "projectionMs": 1.4141459999999597,
+            "requests": [
+              {
+                "inputBytes": 20899,
+                "inputTokensEstimate": 6270,
+                "requestHash": "2b0bbd3c789c91099ec9d915f292a5b46bb4df67100ef564c324fe684e1439fd",
+                "projectionMs": 0.6512789999999313
+              },
+              {
+                "inputBytes": 27263,
+                "inputTokensEstimate": 8179,
+                "requestHash": "97d380e59db551704f245775db2cc468d4eef6c6402e5f0a7fe7b07e8c125a65",
+                "projectionMs": 0.7628670000000284
+              }
+            ],
+            "outputBytes": 817,
+            "outputTokensEstimate": 247,
+            "scriptedAssistantToolCallCount": 1,
+            "preparedBriefBytes": 551,
+            "boundPromptBytes": 810,
+            "canonicalBytes": 718,
+            "resultHash": "60aff3c173dd65d9c4aaafef81fff6b8d80f33abd4febfc9cf27686b378e76d1",
+            "actualUsage": null
+          },
+          {
+            "scriptedRequestCount": 2,
+            "inputBytesTotal": 56882,
+            "inputTokensEstimateTotal": 17065,
+            "projectionMs": 2.0672419999999647,
+            "requests": [
+              {
+                "inputBytes": 20895,
+                "inputTokensEstimate": 6269,
+                "requestHash": "615f3da0114e87ff955f986c037f7da4775ed9669a9571b0bea00689fe93bad0",
+                "projectionMs": 0.9036469999999781
+              },
+              {
+                "inputBytes": 35987,
+                "inputTokensEstimate": 10796,
+                "requestHash": "59b1d4f953a1ff263ee9124e2b8da82697ba4b3cdb14627d956edde0c16231a3",
+                "projectionMs": 1.1635949999999866
+              }
+            ],
+            "outputBytes": 811,
+            "outputTokensEstimate": 244,
+            "scriptedAssistantToolCallCount": 1,
+            "preparedBriefBytes": 547,
+            "boundPromptBytes": 806,
+            "canonicalBytes": 713,
+            "resultHash": "8264d121b68e5c8a0aa2cdc9e2535f45c8e5f08e00db5c329a68493e23294bb7",
+            "actualUsage": null
+          },
+          {
+            "scriptedRequestCount": 2,
+            "inputBytesTotal": 83175,
+            "inputTokensEstimateTotal": 24954,
+            "projectionMs": 1.8988170000000082,
+            "requests": [
+              {
+                "inputBytes": 20877,
+                "inputTokensEstimate": 6264,
+                "requestHash": "8b49f428104cc1df255edf98970f49e6f63e67a086bfa93d2e05bcdbd220732e",
+                "projectionMs": 0.6660530000000335
+              },
+              {
+                "inputBytes": 62298,
+                "inputTokensEstimate": 18690,
+                "requestHash": "3387cc78a104e429f7bdd349c8e6c71551f5ac91b62d6bb3f032050715de5dd7",
+                "projectionMs": 1.2327639999999747
+              }
+            ],
+            "outputBytes": 789,
+            "outputTokensEstimate": 238,
+            "scriptedAssistantToolCallCount": 1,
+            "preparedBriefBytes": 529,
+            "boundPromptBytes": 788,
+            "canonicalBytes": 693,
+            "resultHash": "af8e98801f0b4c38d7005a3983981c573e190fff56e372a482027823d796f860",
+            "actualUsage": null
+          }
+        ],
+        "parentToolBodyBytes": 5023,
+        "acceptedManifest": {
+          "draftEditCount": 0,
+          "draftRunCount": 0,
+          "kind": "subagent_parallel_manifest",
+          "ok": true,
+          "results": [
+            {
+              "depth": 1,
+              "draftEditCount": 0,
+              "draftRunCount": 0,
+              "formatAccepted": true,
+              "hasMore": false,
+              "lane": "research-read",
+              "ok": true,
+              "parentAcceptance": "pending",
+              "preview": "{\"contractVersion\":2,\"coverage\":[\"src/agent/subagents/profiles.ts\"],\"evidence\":[{\"claim\":\"export function resolveSubagentProfile(input: { (source SHA256 5a311640b3593c681273c0af21293057c5d0b65562ba4c6f69939ad295a26ed6)\",\"endLine\":86,\"path\":\"src/agent/subagents/profiles.ts\",\"startLine\":86,\"verification\":\"unverified\"}],\"kind\":\"research\",\"missing\":[],\"nextSteps\":[\"Parent should verify the declaration location before accepting.\"],\"status\":\"complete\",\"summary\":\"resolveSubagentProfile: src/agent/subagents/profiles.ts:86\",\"taskHash\":\"057080a7ef48aea8ec569b43a802f8e952b9f4e445163033397d81a37de91255\",\"uncertainties\":[\"Offline scripted source-location audit; no semantic model review or runtime behavior verification.\"]}",
+              "profile": "research",
+              "resultBytes": 718,
+              "resultChars": 718,
+              "resultHash": "60aff3c173dd65d9c4aaafef81fff6b8d80f33abd4febfc9cf27686b378e76d1",
+              "resultRef": "sa_offline_0",
+              "resultStatus": "complete",
+              "resultTruncated": false,
+              "status": "completed",
+              "subagentId": "sa_offline_0",
+              "summary": "resolveSubagentProfile: src/agent/subagents/profiles.ts:86",
+              "taskIndex": 0,
+              "treeId": "offline-tree"
+            },
+            {
+              "depth": 1,
+              "draftEditCount": 0,
+              "draftRunCount": 0,
+              "formatAccepted": true,
+              "hasMore": false,
+              "lane": "research-read",
+              "ok": true,
+              "parentAcceptance": "pending",
+              "preview": "{\"contractVersion\":2,\"coverage\":[\"src/agent/subagents/handoff.ts\"],\"evidence\":[{\"claim\":\"export function createParallelHandoff(input: { (source SHA256 c103f6a009f5b499c7734aebe2f6f51695008175877b436a6a234d3c3af4a4e5)\",\"endLine\":88,\"path\":\"src/agent/subagents/handoff.ts\",\"startLine\":88,\"verification\":\"unverified\"}],\"kind\":\"research\",\"missing\":[],\"nextSteps\":[\"Parent should verify the declaration location before accepting.\"],\"status\":\"complete\",\"summary\":\"createParallelHandoff: src/agent/subagents/handoff.ts:88\",\"taskHash\":\"452a89e5e132e5b6445d09723caaa86742d6e429d1353a5dde2b092b6e6c90ff\",\"uncertainties\":[\"Offline scripted source-location audit; no semantic model review or runtime behavior verification.\"]}",
+              "profile": "research",
+              "resultBytes": 713,
+              "resultChars": 713,
+              "resultHash": "8264d121b68e5c8a0aa2cdc9e2535f45c8e5f08e00db5c329a68493e23294bb7",
+              "resultRef": "sa_offline_1",
+              "resultStatus": "complete",
+              "resultTruncated": false,
+              "status": "completed",
+              "subagentId": "sa_offline_1",
+              "summary": "createParallelHandoff: src/agent/subagents/handoff.ts:88",
+              "taskIndex": 1,
+              "treeId": "offline-tree"
+            },
+            {
+              "depth": 1,
+              "draftEditCount": 0,
+              "draftRunCount": 0,
+              "formatAccepted": true,
+              "hasMore": false,
+              "lane": "research-read",
+              "ok": true,
+              "parentAcceptance": "pending",
+              "preview": "{\"contractVersion\":2,\"coverage\":[\"src/agent/subagents/store.ts\"],\"evidence\":[{\"claim\":\"public async readResultPage(input: { (source SHA256 d0158fe9d6715b350cd0a937502049b580f72163b8a6e9b93ee40c66917f5509)\",\"endLine\":198,\"path\":\"src/agent/subagents/store.ts\",\"startLine\":198,\"verification\":\"unverified\"}],\"kind\":\"research\",\"missing\":[],\"nextSteps\":[\"Parent should verify the declaration location before accepting.\"],\"status\":\"complete\",\"summary\":\"readResultPage: src/agent/subagents/store.ts:198\",\"taskHash\":\"e3ae82a4a276b9541cc1cf7c2ff38afd2fb8def765d1c8d5522c667d60d8836a\",\"uncertainties\":[\"Offline scripted source-location audit; no semantic model review or runtime behavior verification.\"]}",
+              "profile": "research",
+              "resultBytes": 693,
+              "resultChars": 693,
+              "resultHash": "af8e98801f0b4c38d7005a3983981c573e190fff56e372a482027823d796f860",
+              "resultRef": "sa_offline_2",
+              "resultStatus": "complete",
+              "resultTruncated": false,
+              "status": "completed",
+              "subagentId": "sa_offline_2",
+              "summary": "readResultPage: src/agent/subagents/store.ts:198",
+              "taskIndex": 2,
+              "treeId": "offline-tree"
+            }
+          ],
+          "version": 3
+        },
+        "acceptedManifestBytes": 3972,
+        "pageReads": 0,
+        "pageBodyBytes": 0,
+        "physicalProviderAttempts": 0,
+        "actualUsage": null,
+        "localIntervalsMs": {
+          "provider": 0,
+          "summary": 0,
+          "tools": 4.195732999999905,
+          "localSave": 424.44162100000005,
+          "coordination": 0.7455339999996795,
+          "waiting": 0
+        },
+        "fullSourceReads": 3,
+        "narrowVerificationReads": 3,
+        "supplementaryInvestigations": 0,
+        "scriptedParentAcceptance": {
+          "status": "accepted",
+          "basis": "All three declaration lines were reread and source identities matched; complete compact results needed no additional result pages.",
+          "semanticModelAcceptance": false
+        },
+        "coordination": {
+          "assessedCandidates": 3,
+          "assessmentArgs": {
+            "action": "assess",
+            "trigger": "initial",
+            "decision": "delegate",
+            "reason": "The three module location checks are independent and have the same narrow acceptance requirement.",
+            "evidence": [],
+            "candidates": [
+              {
+                "id": "candidate-0",
+                "goal": "Locate the declaration and source identity of resolveSubagentProfile.",
+                "scope": [
+                  "src/agent/subagents/profiles.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              },
+              {
+                "id": "candidate-1",
+                "goal": "Locate the declaration and source identity of createParallelHandoff.",
+                "scope": [
+                  "src/agent/subagents/handoff.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              },
+              {
+                "id": "candidate-2",
+                "goal": "Locate the declaration and source identity of readResultPage.",
+                "scope": [
+                  "src/agent/subagents/store.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              }
+            ]
+          },
+          "assessmentResult": {
+            "ok": true,
+            "kind": "delegation_assessment",
+            "judgment": "model_declared",
+            "hostVerified": "contract_shape_and_dependencies",
+            "candidateIds": [
+              "candidate-0",
+              "candidate-1",
+              "candidate-2"
+            ]
+          },
+          "preparedBriefs": [
+            {
+              "candidateId": "candidate-0",
+              "task": "Goal: Locate the declaration and source identity of resolveSubagentProfile.\nScope: src/agent/subagents/profiles.ts\nExplicit inputs: Use the current on-disk module; no parent history is available.\nDependencies already accepted: none\nRequired capabilities: read\nAcceptance: Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration.\nTask details: Locate resolveSubagentProfile in src/agent/subagents/profiles.ts, inspect that module only. Return its declaration and source hash. Do not modify or execute."
+            },
+            {
+              "candidateId": "candidate-1",
+              "task": "Goal: Locate the declaration and source identity of createParallelHandoff.\nScope: src/agent/subagents/handoff.ts\nExplicit inputs: Use the current on-disk module; no parent history is available.\nDependencies already accepted: none\nRequired capabilities: read\nAcceptance: Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration.\nTask details: Locate createParallelHandoff in src/agent/subagents/handoff.ts, inspect that module only. Return its declaration and source hash. Do not modify or execute."
+            },
+            {
+              "candidateId": "candidate-2",
+              "task": "Goal: Locate the declaration and source identity of readResultPage.\nScope: src/agent/subagents/store.ts\nExplicit inputs: Use the current on-disk module; no parent history is available.\nDependencies already accepted: none\nRequired capabilities: read\nAcceptance: Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration.\nTask details: Locate readResultPage in src/agent/subagents/store.ts, inspect that module only. Return its declaration and source hash. Do not modify or execute."
+            }
+          ],
+          "acceptanceCalls": [
+            {
+              "arguments": {
+                "action": "accept",
+                "subagentId": "sa_offline_0",
+                "decision": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              "result": {
+                "ok": true,
+                "subagentId": "sa_offline_0",
+                "decision": "adopt",
+                "judgment": "parent_model",
+                "formatAccepted": true,
+                "resultStatus": "complete",
+                "effectsApplied": false
+              }
+            },
+            {
+              "arguments": {
+                "action": "accept",
+                "subagentId": "sa_offline_1",
+                "decision": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              "result": {
+                "ok": true,
+                "subagentId": "sa_offline_1",
+                "decision": "adopt",
+                "judgment": "parent_model",
+                "formatAccepted": true,
+                "resultStatus": "complete",
+                "effectsApplied": false
+              }
+            },
+            {
+              "arguments": {
+                "action": "accept",
+                "subagentId": "sa_offline_2",
+                "decision": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              "result": {
+                "ok": true,
+                "subagentId": "sa_offline_2",
+                "decision": "adopt",
+                "judgment": "parent_model",
+                "formatAccepted": true,
+                "resultStatus": "complete",
+                "effectsApplied": false
+              }
+            }
+          ],
+          "parentState": {
+            "version": 1,
+            "candidates": [
+              {
+                "id": "candidate-0",
+                "goal": "Locate the declaration and source identity of resolveSubagentProfile.",
+                "scope": [
+                  "src/agent/subagents/profiles.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              },
+              {
+                "id": "candidate-1",
+                "goal": "Locate the declaration and source identity of createParallelHandoff.",
+                "scope": [
+                  "src/agent/subagents/handoff.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              },
+              {
+                "id": "candidate-2",
+                "goal": "Locate the declaration and source identity of readResultPage.",
+                "scope": [
+                  "src/agent/subagents/store.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              }
+            ],
+            "results": [
+              {
+                "candidateId": "candidate-0",
+                "subagentId": "sa_offline_0",
+                "resultRef": "sa_offline_0",
+                "resultHash": "60aff3c173dd65d9c4aaafef81fff6b8d80f33abd4febfc9cf27686b378e76d1",
+                "resultStatus": "complete",
+                "formatAccepted": true,
+                "acceptance": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              {
+                "candidateId": "candidate-1",
+                "subagentId": "sa_offline_1",
+                "resultRef": "sa_offline_1",
+                "resultHash": "8264d121b68e5c8a0aa2cdc9e2535f45c8e5f08e00db5c329a68493e23294bb7",
+                "resultStatus": "complete",
+                "formatAccepted": true,
+                "acceptance": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              {
+                "candidateId": "candidate-2",
+                "subagentId": "sa_offline_2",
+                "resultRef": "sa_offline_2",
+                "resultHash": "af8e98801f0b4c38d7005a3983981c573e190fff56e372a482027823d796f860",
+                "resultStatus": "complete",
+                "formatAccepted": true,
+                "acceptance": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              }
+            ],
+            "events": [
+              {
+                "kind": "model_assessment",
+                "reason": "The three module location checks are independent and have the same narrow acceptance requirement."
+              },
+              {
+                "kind": "requested",
+                "candidateId": "candidate-0"
+              },
+              {
+                "kind": "requested",
+                "candidateId": "candidate-1"
+              },
+              {
+                "kind": "requested",
+                "candidateId": "candidate-2"
+              },
+              {
+                "kind": "returned",
+                "candidateId": "candidate-0",
+                "subagentId": "sa_offline_0"
+              },
+              {
+                "kind": "returned",
+                "candidateId": "candidate-1",
+                "subagentId": "sa_offline_1"
+              },
+              {
+                "kind": "returned",
+                "candidateId": "candidate-2",
+                "subagentId": "sa_offline_2"
+              },
+              {
+                "kind": "parent_model_acceptance",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence.",
+                "candidateId": "candidate-0",
+                "subagentId": "sa_offline_0"
+              },
+              {
+                "kind": "parent_model_acceptance",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence.",
+                "candidateId": "candidate-1",
+                "subagentId": "sa_offline_1"
+              },
+              {
+                "kind": "parent_model_acceptance",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence.",
+                "candidateId": "candidate-2",
+                "subagentId": "sa_offline_2"
+              }
+            ],
+            "assessment": {
+              "trigger": "initial",
+              "decision": "delegate",
+              "reason": "The three module location checks are independent and have the same narrow acceptance requirement.",
+              "evidence": []
+            },
+            "explicitUnfulfilled": false
+          }
+        },
+        "taskInputTokensEstimateTotal": 119938,
+        "taskOutputTokensEstimateTotal": 2050
+      },
+      "controlledQualityCheck": {
+        "sameRequiredSourceIdentities": true,
+        "sameFinalAnswerHash": "05f88333ce56237600d1886cfb589e268ee7597fe5de7740817ae9512ee5b9e2",
+        "requiredDeclarationsFound": 3,
+        "declarationsReread": 3,
+        "limitations": "Only source-location facts are deterministically checked. Scripted summaries do not prove real-model delegation, semantic correctness, task completion quality, or end-to-end savings."
+      }
+    },
+    {
+      "provider": "anthropic-compatible",
+      "protocolVersion": 11,
+      "task": "Locate the declarations and source identities of resolveSubagentProfile, createParallelHandoff, and readResultPage. Return exact paths and lines, inspect each module independently, then verify each declaration with a narrow reread. This is a source-location audit, not a semantic correctness review.",
+      "sources": [
+        {
+          "path": "src/agent/subagents/profiles.ts",
+          "symbol": "resolveSubagentProfile",
+          "line": 86,
+          "sha256": "5a311640b3593c681273c0af21293057c5d0b65562ba4c6f69939ad295a26ed6",
+          "sizeBytes": 5744
+        },
+        {
+          "path": "src/agent/subagents/handoff.ts",
+          "symbol": "createParallelHandoff",
+          "line": 88,
+          "sha256": "c103f6a009f5b499c7734aebe2f6f51695008175877b436a6a234d3c3af4a4e5",
+          "sizeBytes": 14208
+        },
+        {
+          "path": "src/agent/subagents/store.ts",
+          "symbol": "readResultPage",
+          "line": 198,
+          "sha256": "d0158fe9d6715b350cd0a937502049b580f72163b8a6e9b93ee40c66917f5509",
+          "sizeBytes": 39741
+        }
+      ],
+      "primaryOnly": {
+        "scriptedRequestCount": 5,
+        "inputBytesTotal": 337046,
+        "inputTokensEstimateTotal": 101117,
+        "projectionMs": 11.403278999999884,
+        "requests": [
+          {
+            "inputBytes": 36394,
+            "inputTokensEstimate": 10919,
+            "requestHash": "bd6301155c3be482052e431ffdcf700cf269b761b6fea86e365df0e8a7ff2bfe",
+            "projectionMs": 1.5611469999998917
+          },
+          {
+            "inputBytes": 42795,
+            "inputTokensEstimate": 12839,
+            "requestHash": "37fa18bd452e83b86ba773172e5130db4949a28f7241f44c841425bb5b23ef9d",
+            "projectionMs": 1.2710700000000088
+          },
+          {
+            "inputBytes": 57924,
+            "inputTokensEstimate": 17378,
+            "requestHash": "252c53ed1fbf379eaeacaea08a455a6361004d0f4e81173664b9589ffa68ed84",
+            "projectionMs": 2.1791270000001077
+          },
+          {
+            "inputBytes": 99382,
+            "inputTokensEstimate": 29815,
+            "requestHash": "8c2cc47c3dcc36f0f33baf55d3acfcd1a39f47cbeb0b6b2d756631254c273c18",
+            "projectionMs": 3.14387499999998
+          },
+          {
+            "inputBytes": 100551,
+            "inputTokensEstimate": 30166,
+            "requestHash": "3357da7202275d3f5be9b550bbdf394c71a4c6e49f353c3a9a26a080969b0623",
+            "projectionMs": 3.248059999999896
+          }
+        ],
+        "outputBytes": 1468,
+        "outputTokensEstimate": 445,
+        "scriptedAssistantToolCallCount": 6,
+        "parentToolBodyBytes": 61467,
+        "physicalProviderAttempts": 0,
+        "actualUsage": null,
+        "localIntervalsMs": {
+          "provider": 0,
+          "summary": 0,
+          "tools": 1.6392150000001493,
+          "localSave": 0,
+          "waiting": 0
+        },
+        "fullSourceReads": 3,
+        "narrowVerificationReads": 3,
+        "supplementaryInvestigations": 0
+      },
+      "delegatedThenVerified": {
+        "scriptedRequestCount": 5,
+        "inputBytesTotal": 209244,
+        "inputTokensEstimateTotal": 62775,
+        "projectionMs": 7.878718999999819,
+        "requests": [
+          {
+            "inputBytes": 36394,
+            "inputTokensEstimate": 10919,
+            "requestHash": "bd6301155c3be482052e431ffdcf700cf269b761b6fea86e365df0e8a7ff2bfe",
+            "projectionMs": 1.6927979999998115
+          },
+          {
+            "inputBytes": 38142,
+            "inputTokensEstimate": 11443,
+            "requestHash": "be20453e0677b20103ff419d869ee72f48389f8d9ef5645f4e3b6b01c4cdd034",
+            "projectionMs": 1.3916420000000471
+          },
+          {
+            "inputBytes": 43603,
+            "inputTokensEstimate": 13081,
+            "requestHash": "90cc63d8aba1b9f927260764780fc90e73442a6104e8ca869922b0675c17bbba",
+            "projectionMs": 1.5815170000000762
+          },
+          {
+            "inputBytes": 44772,
+            "inputTokensEstimate": 13432,
+            "requestHash": "fe5ad90feb0abeee15148301523cc0b9d7abf7544015a98c008ec3211f939afe",
+            "projectionMs": 1.5824139999999716
+          },
+          {
+            "inputBytes": 46333,
+            "inputTokensEstimate": 13900,
+            "requestHash": "9ebc2ff7a65bdeee885881f321fdd30ad141c6220c41a19804622605b3e5d2f9",
+            "projectionMs": 1.6303479999999126
+          }
+        ],
+        "outputBytes": 4390,
+        "outputTokensEstimate": 1321,
+        "scriptedAssistantToolCallCount": 8,
+        "children": [
+          {
+            "scriptedRequestCount": 2,
+            "inputBytesTotal": 47627,
+            "inputTokensEstimateTotal": 14289,
+            "projectionMs": 2.3575140000000374,
+            "requests": [
+              {
+                "inputBytes": 20613,
+                "inputTokensEstimate": 6184,
+                "requestHash": "0ccb2c69dbfac34291d24b686591b7bb1c274e3867e7481fc57e2000ea78e9da",
+                "projectionMs": 0.9500820000000658
+              },
+              {
+                "inputBytes": 27014,
+                "inputTokensEstimate": 8105,
+                "requestHash": "85d41dc302473b4fd85efddf7e1f0ca7e035eb81a31b7bbf92b44e71d7ff67f1",
+                "projectionMs": 1.4074319999999716
+              }
+            ],
+            "outputBytes": 817,
+            "outputTokensEstimate": 247,
+            "scriptedAssistantToolCallCount": 1,
+            "preparedBriefBytes": 551,
+            "boundPromptBytes": 810,
+            "canonicalBytes": 718,
+            "resultHash": "60aff3c173dd65d9c4aaafef81fff6b8d80f33abd4febfc9cf27686b378e76d1",
+            "actualUsage": null
+          },
+          {
+            "scriptedRequestCount": 2,
+            "inputBytesTotal": 56347,
+            "inputTokensEstimateTotal": 16905,
+            "projectionMs": 2.2306029999999737,
+            "requests": [
+              {
+                "inputBytes": 20609,
+                "inputTokensEstimate": 6183,
+                "requestHash": "6419b93142c87327367de6fff3ced655c7f782b5cbfa0fd464b2edfa33036471",
+                "projectionMs": 0.8860760000000028
+              },
+              {
+                "inputBytes": 35738,
+                "inputTokensEstimate": 10722,
+                "requestHash": "717cb841a9f0fcfdb2338e835230e2fbaa4d30e71e385bc7573200808425630a",
+                "projectionMs": 1.344526999999971
+              }
+            ],
+            "outputBytes": 811,
+            "outputTokensEstimate": 244,
+            "scriptedAssistantToolCallCount": 1,
+            "preparedBriefBytes": 547,
+            "boundPromptBytes": 806,
+            "canonicalBytes": 713,
+            "resultHash": "8264d121b68e5c8a0aa2cdc9e2535f45c8e5f08e00db5c329a68493e23294bb7",
+            "actualUsage": null
+          },
+          {
+            "scriptedRequestCount": 2,
+            "inputBytesTotal": 82640,
+            "inputTokensEstimateTotal": 24793,
+            "projectionMs": 1.9290900000000875,
+            "requests": [
+              {
+                "inputBytes": 20591,
+                "inputTokensEstimate": 6178,
+                "requestHash": "b6ce81d0542817e0bb01069241ab6877bf50c3b0b69ef713dc6bb4803a816aa6",
+                "projectionMs": 0.6895520000000488
+              },
+              {
+                "inputBytes": 62049,
+                "inputTokensEstimate": 18615,
+                "requestHash": "db5806965c52c57b54881379e26b5891e1ac0bbcc42c64ddfea1b06749e43694",
+                "projectionMs": 1.2395380000000387
+              }
+            ],
+            "outputBytes": 789,
+            "outputTokensEstimate": 238,
+            "scriptedAssistantToolCallCount": 1,
+            "preparedBriefBytes": 529,
+            "boundPromptBytes": 788,
+            "canonicalBytes": 693,
+            "resultHash": "af8e98801f0b4c38d7005a3983981c573e190fff56e372a482027823d796f860",
+            "actualUsage": null
+          }
+        ],
+        "parentToolBodyBytes": 5023,
+        "acceptedManifest": {
+          "draftEditCount": 0,
+          "draftRunCount": 0,
+          "kind": "subagent_parallel_manifest",
+          "ok": true,
+          "results": [
+            {
+              "depth": 1,
+              "draftEditCount": 0,
+              "draftRunCount": 0,
+              "formatAccepted": true,
+              "hasMore": false,
+              "lane": "research-read",
+              "ok": true,
+              "parentAcceptance": "pending",
+              "preview": "{\"contractVersion\":2,\"coverage\":[\"src/agent/subagents/profiles.ts\"],\"evidence\":[{\"claim\":\"export function resolveSubagentProfile(input: { (source SHA256 5a311640b3593c681273c0af21293057c5d0b65562ba4c6f69939ad295a26ed6)\",\"endLine\":86,\"path\":\"src/agent/subagents/profiles.ts\",\"startLine\":86,\"verification\":\"unverified\"}],\"kind\":\"research\",\"missing\":[],\"nextSteps\":[\"Parent should verify the declaration location before accepting.\"],\"status\":\"complete\",\"summary\":\"resolveSubagentProfile: src/agent/subagents/profiles.ts:86\",\"taskHash\":\"057080a7ef48aea8ec569b43a802f8e952b9f4e445163033397d81a37de91255\",\"uncertainties\":[\"Offline scripted source-location audit; no semantic model review or runtime behavior verification.\"]}",
+              "profile": "research",
+              "resultBytes": 718,
+              "resultChars": 718,
+              "resultHash": "60aff3c173dd65d9c4aaafef81fff6b8d80f33abd4febfc9cf27686b378e76d1",
+              "resultRef": "sa_offline_0",
+              "resultStatus": "complete",
+              "resultTruncated": false,
+              "status": "completed",
+              "subagentId": "sa_offline_0",
+              "summary": "resolveSubagentProfile: src/agent/subagents/profiles.ts:86",
+              "taskIndex": 0,
+              "treeId": "offline-tree"
+            },
+            {
+              "depth": 1,
+              "draftEditCount": 0,
+              "draftRunCount": 0,
+              "formatAccepted": true,
+              "hasMore": false,
+              "lane": "research-read",
+              "ok": true,
+              "parentAcceptance": "pending",
+              "preview": "{\"contractVersion\":2,\"coverage\":[\"src/agent/subagents/handoff.ts\"],\"evidence\":[{\"claim\":\"export function createParallelHandoff(input: { (source SHA256 c103f6a009f5b499c7734aebe2f6f51695008175877b436a6a234d3c3af4a4e5)\",\"endLine\":88,\"path\":\"src/agent/subagents/handoff.ts\",\"startLine\":88,\"verification\":\"unverified\"}],\"kind\":\"research\",\"missing\":[],\"nextSteps\":[\"Parent should verify the declaration location before accepting.\"],\"status\":\"complete\",\"summary\":\"createParallelHandoff: src/agent/subagents/handoff.ts:88\",\"taskHash\":\"452a89e5e132e5b6445d09723caaa86742d6e429d1353a5dde2b092b6e6c90ff\",\"uncertainties\":[\"Offline scripted source-location audit; no semantic model review or runtime behavior verification.\"]}",
+              "profile": "research",
+              "resultBytes": 713,
+              "resultChars": 713,
+              "resultHash": "8264d121b68e5c8a0aa2cdc9e2535f45c8e5f08e00db5c329a68493e23294bb7",
+              "resultRef": "sa_offline_1",
+              "resultStatus": "complete",
+              "resultTruncated": false,
+              "status": "completed",
+              "subagentId": "sa_offline_1",
+              "summary": "createParallelHandoff: src/agent/subagents/handoff.ts:88",
+              "taskIndex": 1,
+              "treeId": "offline-tree"
+            },
+            {
+              "depth": 1,
+              "draftEditCount": 0,
+              "draftRunCount": 0,
+              "formatAccepted": true,
+              "hasMore": false,
+              "lane": "research-read",
+              "ok": true,
+              "parentAcceptance": "pending",
+              "preview": "{\"contractVersion\":2,\"coverage\":[\"src/agent/subagents/store.ts\"],\"evidence\":[{\"claim\":\"public async readResultPage(input: { (source SHA256 d0158fe9d6715b350cd0a937502049b580f72163b8a6e9b93ee40c66917f5509)\",\"endLine\":198,\"path\":\"src/agent/subagents/store.ts\",\"startLine\":198,\"verification\":\"unverified\"}],\"kind\":\"research\",\"missing\":[],\"nextSteps\":[\"Parent should verify the declaration location before accepting.\"],\"status\":\"complete\",\"summary\":\"readResultPage: src/agent/subagents/store.ts:198\",\"taskHash\":\"e3ae82a4a276b9541cc1cf7c2ff38afd2fb8def765d1c8d5522c667d60d8836a\",\"uncertainties\":[\"Offline scripted source-location audit; no semantic model review or runtime behavior verification.\"]}",
+              "profile": "research",
+              "resultBytes": 693,
+              "resultChars": 693,
+              "resultHash": "af8e98801f0b4c38d7005a3983981c573e190fff56e372a482027823d796f860",
+              "resultRef": "sa_offline_2",
+              "resultStatus": "complete",
+              "resultTruncated": false,
+              "status": "completed",
+              "subagentId": "sa_offline_2",
+              "summary": "readResultPage: src/agent/subagents/store.ts:198",
+              "taskIndex": 2,
+              "treeId": "offline-tree"
+            }
+          ],
+          "version": 3
+        },
+        "acceptedManifestBytes": 3972,
+        "pageReads": 0,
+        "pageBodyBytes": 0,
+        "physicalProviderAttempts": 0,
+        "actualUsage": null,
+        "localIntervalsMs": {
+          "provider": 0,
+          "summary": 0,
+          "tools": 4.057043999999905,
+          "localSave": 432.26753699999995,
+          "coordination": 0.7448399999998401,
+          "waiting": 0
+        },
+        "fullSourceReads": 3,
+        "narrowVerificationReads": 3,
+        "supplementaryInvestigations": 0,
+        "scriptedParentAcceptance": {
+          "status": "accepted",
+          "basis": "All three declaration lines were reread and source identities matched; complete compact results needed no additional result pages.",
+          "semanticModelAcceptance": false
+        },
+        "coordination": {
+          "assessedCandidates": 3,
+          "assessmentArgs": {
+            "action": "assess",
+            "trigger": "initial",
+            "decision": "delegate",
+            "reason": "The three module location checks are independent and have the same narrow acceptance requirement.",
+            "evidence": [],
+            "candidates": [
+              {
+                "id": "candidate-0",
+                "goal": "Locate the declaration and source identity of resolveSubagentProfile.",
+                "scope": [
+                  "src/agent/subagents/profiles.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              },
+              {
+                "id": "candidate-1",
+                "goal": "Locate the declaration and source identity of createParallelHandoff.",
+                "scope": [
+                  "src/agent/subagents/handoff.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              },
+              {
+                "id": "candidate-2",
+                "goal": "Locate the declaration and source identity of readResultPage.",
+                "scope": [
+                  "src/agent/subagents/store.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              }
+            ]
+          },
+          "assessmentResult": {
+            "ok": true,
+            "kind": "delegation_assessment",
+            "judgment": "model_declared",
+            "hostVerified": "contract_shape_and_dependencies",
+            "candidateIds": [
+              "candidate-0",
+              "candidate-1",
+              "candidate-2"
+            ]
+          },
+          "preparedBriefs": [
+            {
+              "candidateId": "candidate-0",
+              "task": "Goal: Locate the declaration and source identity of resolveSubagentProfile.\nScope: src/agent/subagents/profiles.ts\nExplicit inputs: Use the current on-disk module; no parent history is available.\nDependencies already accepted: none\nRequired capabilities: read\nAcceptance: Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration.\nTask details: Locate resolveSubagentProfile in src/agent/subagents/profiles.ts, inspect that module only. Return its declaration and source hash. Do not modify or execute."
+            },
+            {
+              "candidateId": "candidate-1",
+              "task": "Goal: Locate the declaration and source identity of createParallelHandoff.\nScope: src/agent/subagents/handoff.ts\nExplicit inputs: Use the current on-disk module; no parent history is available.\nDependencies already accepted: none\nRequired capabilities: read\nAcceptance: Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration.\nTask details: Locate createParallelHandoff in src/agent/subagents/handoff.ts, inspect that module only. Return its declaration and source hash. Do not modify or execute."
+            },
+            {
+              "candidateId": "candidate-2",
+              "task": "Goal: Locate the declaration and source identity of readResultPage.\nScope: src/agent/subagents/store.ts\nExplicit inputs: Use the current on-disk module; no parent history is available.\nDependencies already accepted: none\nRequired capabilities: read\nAcceptance: Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration.\nTask details: Locate readResultPage in src/agent/subagents/store.ts, inspect that module only. Return its declaration and source hash. Do not modify or execute."
+            }
+          ],
+          "acceptanceCalls": [
+            {
+              "arguments": {
+                "action": "accept",
+                "subagentId": "sa_offline_0",
+                "decision": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              "result": {
+                "ok": true,
+                "subagentId": "sa_offline_0",
+                "decision": "adopt",
+                "judgment": "parent_model",
+                "formatAccepted": true,
+                "resultStatus": "complete",
+                "effectsApplied": false
+              }
+            },
+            {
+              "arguments": {
+                "action": "accept",
+                "subagentId": "sa_offline_1",
+                "decision": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              "result": {
+                "ok": true,
+                "subagentId": "sa_offline_1",
+                "decision": "adopt",
+                "judgment": "parent_model",
+                "formatAccepted": true,
+                "resultStatus": "complete",
+                "effectsApplied": false
+              }
+            },
+            {
+              "arguments": {
+                "action": "accept",
+                "subagentId": "sa_offline_2",
+                "decision": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              "result": {
+                "ok": true,
+                "subagentId": "sa_offline_2",
+                "decision": "adopt",
+                "judgment": "parent_model",
+                "formatAccepted": true,
+                "resultStatus": "complete",
+                "effectsApplied": false
+              }
+            }
+          ],
+          "parentState": {
+            "version": 1,
+            "candidates": [
+              {
+                "id": "candidate-0",
+                "goal": "Locate the declaration and source identity of resolveSubagentProfile.",
+                "scope": [
+                  "src/agent/subagents/profiles.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              },
+              {
+                "id": "candidate-1",
+                "goal": "Locate the declaration and source identity of createParallelHandoff.",
+                "scope": [
+                  "src/agent/subagents/handoff.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              },
+              {
+                "id": "candidate-2",
+                "goal": "Locate the declaration and source identity of readResultPage.",
+                "scope": [
+                  "src/agent/subagents/store.ts"
+                ],
+                "inputs": [
+                  "Use the current on-disk module; no parent history is available."
+                ],
+                "dependsOn": [],
+                "capabilities": [
+                  "read"
+                ],
+                "acceptance": [
+                  "Return the exact declaration path and line plus source SHA256, then let the parent reread that declaration."
+                ]
+              }
+            ],
+            "results": [
+              {
+                "candidateId": "candidate-0",
+                "subagentId": "sa_offline_0",
+                "resultRef": "sa_offline_0",
+                "resultHash": "60aff3c173dd65d9c4aaafef81fff6b8d80f33abd4febfc9cf27686b378e76d1",
+                "resultStatus": "complete",
+                "formatAccepted": true,
+                "acceptance": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              {
+                "candidateId": "candidate-1",
+                "subagentId": "sa_offline_1",
+                "resultRef": "sa_offline_1",
+                "resultHash": "8264d121b68e5c8a0aa2cdc9e2535f45c8e5f08e00db5c329a68493e23294bb7",
+                "resultStatus": "complete",
+                "formatAccepted": true,
+                "acceptance": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              },
+              {
+                "candidateId": "candidate-2",
+                "subagentId": "sa_offline_2",
+                "resultRef": "sa_offline_2",
+                "resultHash": "af8e98801f0b4c38d7005a3983981c573e190fff56e372a482027823d796f860",
+                "resultStatus": "complete",
+                "formatAccepted": true,
+                "acceptance": "adopt",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence."
+              }
+            ],
+            "events": [
+              {
+                "kind": "model_assessment",
+                "reason": "The three module location checks are independent and have the same narrow acceptance requirement."
+              },
+              {
+                "kind": "requested",
+                "candidateId": "candidate-0"
+              },
+              {
+                "kind": "requested",
+                "candidateId": "candidate-1"
+              },
+              {
+                "kind": "requested",
+                "candidateId": "candidate-2"
+              },
+              {
+                "kind": "returned",
+                "candidateId": "candidate-0",
+                "subagentId": "sa_offline_0"
+              },
+              {
+                "kind": "returned",
+                "candidateId": "candidate-1",
+                "subagentId": "sa_offline_1"
+              },
+              {
+                "kind": "returned",
+                "candidateId": "candidate-2",
+                "subagentId": "sa_offline_2"
+              },
+              {
+                "kind": "parent_model_acceptance",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence.",
+                "candidateId": "candidate-0",
+                "subagentId": "sa_offline_0"
+              },
+              {
+                "kind": "parent_model_acceptance",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence.",
+                "candidateId": "candidate-1",
+                "subagentId": "sa_offline_1"
+              },
+              {
+                "kind": "parent_model_acceptance",
+                "reason": "The declaration was reread at the reported line and its source identity matches the child evidence.",
+                "candidateId": "candidate-2",
+                "subagentId": "sa_offline_2"
+              }
+            ],
+            "assessment": {
+              "trigger": "initial",
+              "decision": "delegate",
+              "reason": "The three module location checks are independent and have the same narrow acceptance requirement.",
+              "evidence": []
+            },
+            "explicitUnfulfilled": false
+          }
+        },
+        "taskInputTokensEstimateTotal": 118762,
+        "taskOutputTokensEstimateTotal": 2050
+      },
+      "controlledQualityCheck": {
+        "sameRequiredSourceIdentities": true,
+        "sameFinalAnswerHash": "05f88333ce56237600d1886cfb589e268ee7597fe5de7740817ae9512ee5b9e2",
+        "requiredDeclarationsFound": 3,
+        "declarationsReread": 3,
+        "limitations": "Only source-location facts are deterministically checked. Scripted summaries do not prove real-model delegation, semantic correctness, task completion quality, or end-to-end savings."
+      }
+    }
+  ]
+}

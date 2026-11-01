@@ -1,0 +1,3819 @@
+{
+  "version": 1,
+  "date": "2026-11-01",
+  "baselineCommit": "f313a00",
+  "kind": "offline-real-filesystem-vscode-stub-no-provider",
+  "methodology": "Three fresh temp directories per scenario; one logical-cold and five warm pages. OS caches are not flushed. Real durable writes precede timing; no Provider traffic. Memory differences are samples, not peak or a production p95. Repeated reads reverify disk chunk hashes; queue is Promise.all concurrency.",
+  "limitations": [
+    "No production p95: 3 cold samples and 15 warm pages per scenario. OS page cache not flushed.",
+    "Memory deltas are sampled changes, not peak retained memory.",
+    "New pages verify only overlapping chunks; parent acceptance separately verifies the entire canonical body.",
+    "Legacy combined first page parses the whole file; warm file-URI pages re-read and verify only canonical and binding ranges. Non-file legacy layouts cannot use native ranges."
+  ],
+  "comparison": [
+    {
+      "layout": "state",
+      "canonicalBytes": 1032,
+      "privateBytesPerChild": 0,
+      "concurrentChildren": 1,
+      "phase": "logical-cold",
+      "before": {
+        "n": 3,
+        "medianMs": 1.2429170000004888,
+        "maxMs": 4.877657999999997,
+        "medianReadBytes": 3250,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 1,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 1482752
+      },
+      "after": {
+        "n": 3,
+        "medianMs": 1.3633570000001782,
+        "maxMs": 3.2643110000000206,
+        "medianReadBytes": 4893,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 135168
+      }
+    },
+    {
+      "layout": "state",
+      "canonicalBytes": 1032,
+      "privateBytesPerChild": 0,
+      "concurrentChildren": 1,
+      "phase": "warm",
+      "before": {
+        "n": 15,
+        "medianMs": 0.8440530000007129,
+        "maxMs": 1.0599349999999959,
+        "medianReadBytes": 3250,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 1,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 16384
+      },
+      "after": {
+        "n": 15,
+        "medianMs": 0.7619199999999751,
+        "maxMs": 1.0004719999997178,
+        "medianReadBytes": 4893,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 16384
+      }
+    },
+    {
+      "layout": "state",
+      "canonicalBytes": 120000,
+      "privateBytesPerChild": 0,
+      "concurrentChildren": 1,
+      "phase": "logical-cold",
+      "before": {
+        "n": 3,
+        "medianMs": 4.5546760000002,
+        "maxMs": 5.78369500000008,
+        "medianReadBytes": 132233,
+        "medianReadObjects": 3,
+        "medianSessionGraphObjects": 2,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 745472
+      },
+      "after": {
+        "n": 3,
+        "medianMs": 1.586184000000003,
+        "maxMs": 1.926339999999982,
+        "medianReadBytes": 27764,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 45056
+      }
+    },
+    {
+      "layout": "state",
+      "canonicalBytes": 120000,
+      "privateBytesPerChild": 0,
+      "concurrentChildren": 1,
+      "phase": "warm",
+      "before": {
+        "n": 15,
+        "medianMs": 4.387431000000106,
+        "maxMs": 4.802522999999837,
+        "medianReadBytes": 132233,
+        "medianReadObjects": 3,
+        "medianSessionGraphObjects": 2,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 925696
+      },
+      "after": {
+        "n": 15,
+        "medianMs": 0.9154390000003332,
+        "maxMs": 1.3658799999998337,
+        "medianReadBytes": 27764,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 20480
+      }
+    },
+    {
+      "layout": "state",
+      "canonicalBytes": 1000008,
+      "privateBytesPerChild": 0,
+      "concurrentChildren": 1,
+      "phase": "logical-cold",
+      "before": {
+        "n": 3,
+        "medianMs": 24.226282999999967,
+        "maxMs": 27.252558000000022,
+        "medianReadBytes": 1085577,
+        "medianReadObjects": 3,
+        "medianSessionGraphObjects": 2,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 5390336
+      },
+      "after": {
+        "n": 3,
+        "medianMs": 1.369637999999668,
+        "maxMs": 2.166599999999562,
+        "medianReadBytes": 31010,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 94208
+      }
+    },
+    {
+      "layout": "state",
+      "canonicalBytes": 1000008,
+      "privateBytesPerChild": 0,
+      "concurrentChildren": 1,
+      "phase": "warm",
+      "before": {
+        "n": 15,
+        "medianMs": 25.10516599999994,
+        "maxMs": 26.52035399999977,
+        "medianReadBytes": 1085577,
+        "medianReadObjects": 3,
+        "medianSessionGraphObjects": 2,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 4476928
+      },
+      "after": {
+        "n": 15,
+        "medianMs": 1.3592660000003889,
+        "maxMs": 2.791968999999881,
+        "medianReadBytes": 31010,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 155648
+      }
+    },
+    {
+      "layout": "state",
+      "canonicalBytes": 1032,
+      "privateBytesPerChild": 4000000,
+      "concurrentChildren": 1,
+      "phase": "logical-cold",
+      "before": {
+        "n": 3,
+        "medianMs": 24.73282700000027,
+        "maxMs": 27.972872000000052,
+        "medianReadBytes": 4003250,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 1,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 16408576
+      },
+      "after": {
+        "n": 3,
+        "medianMs": 1.2561150000001362,
+        "maxMs": 1.2872369999995499,
+        "medianReadBytes": 4893,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 69632
+      }
+    },
+    {
+      "layout": "state",
+      "canonicalBytes": 1032,
+      "privateBytesPerChild": 4000000,
+      "concurrentChildren": 1,
+      "phase": "warm",
+      "before": {
+        "n": 15,
+        "medianMs": 24.850505999999996,
+        "maxMs": 36.39128099999971,
+        "medianReadBytes": 4003250,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 1,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 8732672
+      },
+      "after": {
+        "n": 15,
+        "medianMs": 0.6944999999996071,
+        "maxMs": 1.2844740000000456,
+        "medianReadBytes": 4893,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 126976
+      }
+    },
+    {
+      "layout": "state",
+      "canonicalBytes": 120000,
+      "privateBytesPerChild": 4000000,
+      "concurrentChildren": 1,
+      "phase": "logical-cold",
+      "before": {
+        "n": 3,
+        "medianMs": 28.553651000000173,
+        "maxMs": 33.32772300000033,
+        "medianReadBytes": 4132233,
+        "medianReadObjects": 3,
+        "medianSessionGraphObjects": 2,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 9060352
+      },
+      "after": {
+        "n": 3,
+        "medianMs": 1.333176000000094,
+        "maxMs": 1.3771900000001551,
+        "medianReadBytes": 27764,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 4096
+      }
+    },
+    {
+      "layout": "state",
+      "canonicalBytes": 120000,
+      "privateBytesPerChild": 4000000,
+      "concurrentChildren": 1,
+      "phase": "warm",
+      "before": {
+        "n": 15,
+        "medianMs": 27.579413000000386,
+        "maxMs": 35.67830099999992,
+        "medianReadBytes": 4132233,
+        "medianReadObjects": 3,
+        "medianSessionGraphObjects": 2,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 16392192
+      },
+      "after": {
+        "n": 15,
+        "medianMs": 0.820212999999967,
+        "maxMs": 1.1523599999991347,
+        "medianReadBytes": 27764,
+        "medianReadObjects": 2,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 16384
+      }
+    },
+    {
+      "layout": "state",
+      "canonicalBytes": 120000,
+      "privateBytesPerChild": 4000000,
+      "concurrentChildren": 3,
+      "phase": "logical-cold",
+      "before": {
+        "n": 3,
+        "medianMs": 78.80622200000016,
+        "maxMs": 88.04771700000015,
+        "medianReadBytes": 12396699,
+        "medianReadObjects": 9,
+        "medianSessionGraphObjects": 6,
+        "medianDeliveredBytes": 3069,
+        "maxSampleRssDeltaBytes": 44896256
+      },
+      "after": {
+        "n": 3,
+        "medianMs": 2.1056099999998423,
+        "maxMs": 2.9350600000002487,
+        "medianReadBytes": 83292,
+        "medianReadObjects": 6,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 3069,
+        "maxSampleRssDeltaBytes": 16384
+      }
+    },
+    {
+      "layout": "state",
+      "canonicalBytes": 120000,
+      "privateBytesPerChild": 4000000,
+      "concurrentChildren": 3,
+      "phase": "warm",
+      "before": {
+        "n": 15,
+        "medianMs": 84.09045200000037,
+        "maxMs": 93.69875999999931,
+        "medianReadBytes": 12396699,
+        "medianReadObjects": 9,
+        "medianSessionGraphObjects": 6,
+        "medianDeliveredBytes": 3069,
+        "maxSampleRssDeltaBytes": 49958912
+      },
+      "after": {
+        "n": 15,
+        "medianMs": 1.5339469999998983,
+        "maxMs": 4.628389999999854,
+        "medianReadBytes": 83292,
+        "medianReadObjects": 6,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 3069,
+        "maxSampleRssDeltaBytes": 167936
+      }
+    },
+    {
+      "layout": "legacy-combined",
+      "canonicalBytes": 120000,
+      "privateBytesPerChild": 4000000,
+      "concurrentChildren": 1,
+      "phase": "logical-cold",
+      "before": {
+        "n": 3,
+        "medianMs": 11.135718999999881,
+        "maxMs": 14.431976999999733,
+        "medianReadBytes": 4131228,
+        "medianReadObjects": 1,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 12148736
+      },
+      "after": {
+        "n": 3,
+        "medianMs": 23.49661100000003,
+        "maxMs": 26.285785999999916,
+        "medianReadBytes": 4131228,
+        "medianReadObjects": 1,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 12390400
+      }
+    },
+    {
+      "layout": "legacy-combined",
+      "canonicalBytes": 120000,
+      "privateBytesPerChild": 4000000,
+      "concurrentChildren": 1,
+      "phase": "warm",
+      "before": {
+        "n": 15,
+        "medianMs": 12.477139999999963,
+        "maxMs": 22.297144999999546,
+        "medianReadBytes": 4131228,
+        "medianReadObjects": 1,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 12148736
+      },
+      "after": {
+        "n": 15,
+        "medianMs": 2.2313279999998485,
+        "maxMs": 6.7544920000000275,
+        "medianReadBytes": 131042,
+        "medianReadObjects": 3,
+        "medianSessionGraphObjects": 0,
+        "medianDeliveredBytes": 1023,
+        "maxSampleRssDeltaBytes": 131072
+      }
+    }
+  ],
+  "before": {
+    "version": 1,
+    "baseline": "f313a00",
+    "environment": {
+      "node": "v24.15.0",
+      "platform": "darwin",
+      "arch": "x64"
+    },
+    "methodology": "Three fresh temp directories per scenario; one logical-cold and five warm pages. OS caches are not flushed. Real durable writes precede timing; no Provider traffic. Memory differences are samples, not peak or a production p95. Repeated reads reverify disk chunk hashes; queue is Promise.all concurrency.",
+    "samples": [
+      {
+        "round": 0,
+        "layout": "state",
+        "canonicalBytes": 1032,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 4.877657999999997,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 1482752,
+            "heapDeltaBytes": -373632
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.01281400000002,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 100384
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.0599349999999959,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 16384,
+            "heapDeltaBytes": 106600
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.0252450000000124,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4096,
+            "heapDeltaBytes": 106696
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9820019999999943,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 12288,
+            "heapDeltaBytes": 339128
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.8679410000000018,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 16384,
+            "heapDeltaBytes": 108768
+          }
+        ]
+      },
+      {
+        "round": 0,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 4.134432000000004,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 745472,
+            "heapDeltaBytes": 621640
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.392607999999996,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 925696,
+            "heapDeltaBytes": 682744
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.443482000000017,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 831488,
+            "heapDeltaBytes": 685656
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.073562999999979,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 614400,
+            "heapDeltaBytes": 673752
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.176981999999953,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 774144,
+            "heapDeltaBytes": 663712
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.644637999999986,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -311296,
+            "heapDeltaBytes": -4094168
+          }
+        ]
+      },
+      {
+        "round": 0,
+        "layout": "state",
+        "canonicalBytes": 1000008,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 27.252558000000022,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 5390336,
+            "heapDeltaBytes": 43352
+          },
+          {
+            "phase": "warm",
+            "durationMs": 25.10516599999994,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 1675264,
+            "heapDeltaBytes": -28704
+          },
+          {
+            "phase": "warm",
+            "durationMs": 26.277941000000055,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 1863680,
+            "heapDeltaBytes": 544
+          },
+          {
+            "phase": "warm",
+            "durationMs": 24.77913799999999,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 1261568,
+            "heapDeltaBytes": 1696
+          },
+          {
+            "phase": "warm",
+            "durationMs": 25.290737000000036,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 360448,
+            "heapDeltaBytes": 3080
+          },
+          {
+            "phase": "warm",
+            "durationMs": 24.89510199999995,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 1179648,
+            "heapDeltaBytes": 544
+          }
+        ]
+      },
+      {
+        "round": 0,
+        "layout": "state",
+        "canonicalBytes": 1032,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 27.972872000000052,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 16408576,
+            "heapDeltaBytes": 8111200
+          },
+          {
+            "phase": "warm",
+            "durationMs": 27.998748999999975,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8007680,
+            "heapDeltaBytes": -198736
+          },
+          {
+            "phase": "warm",
+            "durationMs": 29.825068999999985,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 307200,
+            "heapDeltaBytes": -4033856
+          },
+          {
+            "phase": "warm",
+            "durationMs": 24.850505999999996,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8732672,
+            "heapDeltaBytes": 8006304
+          },
+          {
+            "phase": "warm",
+            "durationMs": 28.39832100000001,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": -3837952,
+            "heapDeltaBytes": -8010168
+          },
+          {
+            "phase": "warm",
+            "durationMs": 23.843793000000005,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8007680,
+            "heapDeltaBytes": 8104632
+          }
+        ]
+      },
+      {
+        "round": 0,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 28.514871000000085,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 9060352,
+            "heapDeltaBytes": 8681816
+          },
+          {
+            "phase": "warm",
+            "durationMs": 30.15924599999994,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 16392192,
+            "heapDeltaBytes": 8667624
+          },
+          {
+            "phase": "warm",
+            "durationMs": 28.313536999999997,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -8265728,
+            "heapDeltaBytes": -9067848
+          },
+          {
+            "phase": "warm",
+            "durationMs": 35.67830099999992,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 5513216,
+            "heapDeltaBytes": -3970656
+          },
+          {
+            "phase": "warm",
+            "durationMs": 27.933671000000004,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8146944,
+            "heapDeltaBytes": 8637960
+          },
+          {
+            "phase": "warm",
+            "durationMs": 26.801658999999972,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8691712,
+            "heapDeltaBytes": 8663424
+          }
+        ]
+      },
+      {
+        "round": 0,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 3,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 88.04771700000015,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 44896256,
+            "heapDeltaBytes": 25654456
+          },
+          {
+            "phase": "warm",
+            "durationMs": 89.12215199999991,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 663552,
+            "heapDeltaBytes": -12831656
+          },
+          {
+            "phase": "warm",
+            "durationMs": 85.29517100000021,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 22306816,
+            "heapDeltaBytes": 16531976
+          },
+          {
+            "phase": "warm",
+            "durationMs": 85.32288100000005,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": -3530752,
+            "heapDeltaBytes": -7883336
+          },
+          {
+            "phase": "warm",
+            "durationMs": 81.91914299999962,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 33177600,
+            "heapDeltaBytes": 25596560
+          },
+          {
+            "phase": "warm",
+            "durationMs": 87.64116700000022,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 49958912,
+            "heapDeltaBytes": 25598192
+          }
+        ]
+      },
+      {
+        "round": 0,
+        "layout": "legacy-combined",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 14.431976999999733,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12148736,
+            "heapDeltaBytes": 4169976
+          },
+          {
+            "phase": "warm",
+            "durationMs": 11.57879099999991,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4030464,
+            "heapDeltaBytes": 4237848
+          },
+          {
+            "phase": "warm",
+            "durationMs": 18.784708000000137,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -44003328,
+            "heapDeltaBytes": -45188312
+          },
+          {
+            "phase": "warm",
+            "durationMs": 12.030103000000054,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4030464,
+            "heapDeltaBytes": 4248712
+          },
+          {
+            "phase": "warm",
+            "durationMs": 14.680384000000231,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12148736,
+            "heapDeltaBytes": 4261232
+          },
+          {
+            "phase": "warm",
+            "durationMs": 11.215318000000025,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4001792,
+            "heapDeltaBytes": 4261232
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "state",
+        "canonicalBytes": 1032,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.185725000000275,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8192,
+            "heapDeltaBytes": -56360
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9376200000001518,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 96888
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.8858359999999266,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 97792
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.702288999999837,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 99664
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.8190660000000207,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 95920
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7529410000001917,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 96888
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 4.5546760000002,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 143360,
+            "heapDeltaBytes": 566632
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.1326349999999366,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 282624,
+            "heapDeltaBytes": 663208
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.802522999999837,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 278528,
+            "heapDeltaBytes": 663360
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.054579999999987,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 487424,
+            "heapDeltaBytes": 663360
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.387431000000106,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 593920,
+            "heapDeltaBytes": 667800
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.530729000000065,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 512000,
+            "heapDeltaBytes": 663360
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "state",
+        "canonicalBytes": 1000008,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 24.226282999999967,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 3280896,
+            "heapDeltaBytes": 3277176
+          },
+          {
+            "phase": "warm",
+            "durationMs": 23.984526000000187,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 3289088,
+            "heapDeltaBytes": 3277872
+          },
+          {
+            "phase": "warm",
+            "durationMs": 25.667523999999958,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 3305472,
+            "heapDeltaBytes": 3279000
+          },
+          {
+            "phase": "warm",
+            "durationMs": 24.2164429999998,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4399104,
+            "heapDeltaBytes": 3281168
+          },
+          {
+            "phase": "warm",
+            "durationMs": 26.52035399999977,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4476928,
+            "heapDeltaBytes": 3277056
+          },
+          {
+            "phase": "warm",
+            "durationMs": 24.87098399999968,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 3284992,
+            "heapDeltaBytes": 3277032
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "state",
+        "canonicalBytes": 1032,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 24.73282700000027,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8224768,
+            "heapDeltaBytes": 8109640
+          },
+          {
+            "phase": "warm",
+            "durationMs": 36.39128099999971,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -43397120,
+            "heapDeltaBytes": -54378704
+          },
+          {
+            "phase": "warm",
+            "durationMs": 24.0502019999999,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 8003584,
+            "heapDeltaBytes": 8104304
+          },
+          {
+            "phase": "warm",
+            "durationMs": 23.82130499999994,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8003584,
+            "heapDeltaBytes": 8103968
+          },
+          {
+            "phase": "warm",
+            "durationMs": 29.053490000000238,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": -15994880,
+            "heapDeltaBytes": -16200288
+          },
+          {
+            "phase": "warm",
+            "durationMs": 24.091721999999663,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8003584,
+            "heapDeltaBytes": 8104120
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 33.32772300000033,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -20152320,
+            "heapDeltaBytes": -20481464
+          },
+          {
+            "phase": "warm",
+            "durationMs": 26.83553299999994,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8146944,
+            "heapDeltaBytes": 8638432
+          },
+          {
+            "phase": "warm",
+            "durationMs": 26.79388499999959,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8146944,
+            "heapDeltaBytes": 8663424
+          },
+          {
+            "phase": "warm",
+            "durationMs": 31.70217700000012,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -16265216,
+            "heapDeltaBytes": -17280744
+          },
+          {
+            "phase": "warm",
+            "durationMs": 26.9515879999999,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8146944,
+            "heapDeltaBytes": 8633160
+          },
+          {
+            "phase": "warm",
+            "durationMs": 27.325237000000016,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8146944,
+            "heapDeltaBytes": 8663424
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 3,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 77.83474500000011,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 24457216,
+            "heapDeltaBytes": 25618968
+          },
+          {
+            "phase": "warm",
+            "durationMs": 83.52723700000024,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 102400,
+            "heapDeltaBytes": -350368
+          },
+          {
+            "phase": "warm",
+            "durationMs": 77.69473899999957,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 24539136,
+            "heapDeltaBytes": 25594696
+          },
+          {
+            "phase": "warm",
+            "durationMs": 77.89476700000068,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 25382912,
+            "heapDeltaBytes": 25600224
+          },
+          {
+            "phase": "warm",
+            "durationMs": 93.69875999999931,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": -48992256,
+            "heapDeltaBytes": -51558176
+          },
+          {
+            "phase": "warm",
+            "durationMs": 77.66526299999987,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 24477696,
+            "heapDeltaBytes": 25607224
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "legacy-combined",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 11.135718999999881,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4001792,
+            "heapDeltaBytes": 4239912
+          },
+          {
+            "phase": "warm",
+            "durationMs": 11.385137999999642,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4001792,
+            "heapDeltaBytes": 4259424
+          },
+          {
+            "phase": "warm",
+            "durationMs": 21.637705000000096,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -76742656,
+            "heapDeltaBytes": -79481712
+          },
+          {
+            "phase": "warm",
+            "durationMs": 14.320983999999953,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12148736,
+            "heapDeltaBytes": 4254776
+          },
+          {
+            "phase": "warm",
+            "durationMs": 12.741791999999805,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4001792,
+            "heapDeltaBytes": 4261232
+          },
+          {
+            "phase": "warm",
+            "durationMs": 10.972818000000188,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4001792,
+            "heapDeltaBytes": 4261232
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "state",
+        "canonicalBytes": 1032,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.2429170000004888,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 104336
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.8440530000007129,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 96888
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7983420000000478,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 97072
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7695519999997487,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 96888
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7238569999999527,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 95920
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6423800000002302,
+            "readBytes": 3250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 96888
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 5.78369500000008,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 143360,
+            "heapDeltaBytes": 578472
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.469966999999997,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 151552,
+            "heapDeltaBytes": 667176
+          },
+          {
+            "phase": "warm",
+            "durationMs": 3.8541919999997845,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 143360,
+            "heapDeltaBytes": 663360
+          },
+          {
+            "phase": "warm",
+            "durationMs": 3.6573169999992388,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 143360,
+            "heapDeltaBytes": 663360
+          },
+          {
+            "phase": "warm",
+            "durationMs": 3.724970999999641,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 143360,
+            "heapDeltaBytes": 663360
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.394009000000551,
+            "readBytes": 132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 143360,
+            "heapDeltaBytes": 663360
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "state",
+        "canonicalBytes": 1000008,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 23.92457899999954,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 3174400,
+            "heapDeltaBytes": 3277400
+          },
+          {
+            "phase": "warm",
+            "durationMs": 24.805499000000054,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 3174400,
+            "heapDeltaBytes": 3277032
+          },
+          {
+            "phase": "warm",
+            "durationMs": 25.450738999999885,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 3174400,
+            "heapDeltaBytes": 3277048
+          },
+          {
+            "phase": "warm",
+            "durationMs": 25.484551999999894,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 3174400,
+            "heapDeltaBytes": 3277032
+          },
+          {
+            "phase": "warm",
+            "durationMs": 25.361880999999812,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 3174400,
+            "heapDeltaBytes": 3277072
+          },
+          {
+            "phase": "warm",
+            "durationMs": 24.416463999999905,
+            "readBytes": 1085577,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 3174400,
+            "heapDeltaBytes": 3277032
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "state",
+        "canonicalBytes": 1032,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 24.5389839999998,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8105984,
+            "heapDeltaBytes": 8104944
+          },
+          {
+            "phase": "warm",
+            "durationMs": 35.58078900000055,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -43438080,
+            "heapDeltaBytes": -54378176
+          },
+          {
+            "phase": "warm",
+            "durationMs": 23.918402000000242,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 8003584,
+            "heapDeltaBytes": 8104304
+          },
+          {
+            "phase": "warm",
+            "durationMs": 24.735133000000133,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8003584,
+            "heapDeltaBytes": 8103968
+          },
+          {
+            "phase": "warm",
+            "durationMs": 28.93702200000007,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": -16007168,
+            "heapDeltaBytes": -16197608
+          },
+          {
+            "phase": "warm",
+            "durationMs": 23.764219000000594,
+            "readBytes": 4003250,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 1,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8003584,
+            "heapDeltaBytes": 8104120
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 28.553651000000173,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8146944,
+            "heapDeltaBytes": 8603856
+          },
+          {
+            "phase": "warm",
+            "durationMs": 27.53611600000022,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8146944,
+            "heapDeltaBytes": 8663272
+          },
+          {
+            "phase": "warm",
+            "durationMs": 27.579413000000386,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8146944,
+            "heapDeltaBytes": 8663424
+          },
+          {
+            "phase": "warm",
+            "durationMs": 35.073341999999684,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -44535808,
+            "heapDeltaBytes": -46377632
+          },
+          {
+            "phase": "warm",
+            "durationMs": 27.013402000000497,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8146944,
+            "heapDeltaBytes": 8639592
+          },
+          {
+            "phase": "warm",
+            "durationMs": 32.187918999999965,
+            "readBytes": 4132233,
+            "objectsRead": 3,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 2,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -8146944,
+            "heapDeltaBytes": -8650416
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 3,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 78.80622200000016,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 24444928,
+            "heapDeltaBytes": 25564096
+          },
+          {
+            "phase": "warm",
+            "durationMs": 84.35664300000008,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": -25116672,
+            "heapDeltaBytes": -26314248
+          },
+          {
+            "phase": "warm",
+            "durationMs": 84.09045200000037,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 4313088,
+            "heapDeltaBytes": 4419096
+          },
+          {
+            "phase": "warm",
+            "durationMs": 77.52021199999945,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 24440832,
+            "heapDeltaBytes": 25596608
+          },
+          {
+            "phase": "warm",
+            "durationMs": 91.34457999999995,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": -44695552,
+            "heapDeltaBytes": -51212336
+          },
+          {
+            "phase": "warm",
+            "durationMs": 80.90957799999978,
+            "readBytes": 12396699,
+            "objectsRead": 9,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 6,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 24469504,
+            "heapDeltaBytes": 25609376
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "legacy-combined",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 11.099240000000464,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4001792,
+            "heapDeltaBytes": 4165456
+          },
+          {
+            "phase": "warm",
+            "durationMs": 15.319074,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12144640,
+            "heapDeltaBytes": 4241832
+          },
+          {
+            "phase": "warm",
+            "durationMs": 12.477139999999963,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8134656,
+            "heapDeltaBytes": 4261232
+          },
+          {
+            "phase": "warm",
+            "durationMs": 22.297144999999546,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -68452352,
+            "heapDeltaBytes": -75056464
+          },
+          {
+            "phase": "warm",
+            "durationMs": 11.31150499999967,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4001792,
+            "heapDeltaBytes": 4251224
+          },
+          {
+            "phase": "warm",
+            "durationMs": 11.950256000000081,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4001792,
+            "heapDeltaBytes": 4261232
+          }
+        ]
+      }
+    ]
+  },
+  "after": {
+    "version": 1,
+    "baseline": "P1-working-tree",
+    "environment": {
+      "node": "v24.15.0",
+      "platform": "darwin",
+      "arch": "x64"
+    },
+    "methodology": "Three fresh temp directories per scenario; one logical-cold and five warm pages. OS caches are not flushed. Real durable writes precede timing; no Provider traffic. Memory differences are samples, not peak or a production p95. Repeated reads reverify disk chunk hashes; queue is Promise.all concurrency.",
+    "samples": [
+      {
+        "round": 0,
+        "layout": "state",
+        "canonicalBytes": 1032,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 3.2643110000000206,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 135168,
+            "heapDeltaBytes": 107040
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.8615449999999782,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4096,
+            "heapDeltaBytes": 59720
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9143080000000054,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 12288,
+            "heapDeltaBytes": 68752
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9238110000000006,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12288,
+            "heapDeltaBytes": 67296
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6613120000000094,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 16384,
+            "heapDeltaBytes": 66360
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7619199999999751,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8192,
+            "heapDeltaBytes": 69952
+          }
+        ]
+      },
+      {
+        "round": 0,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.586184000000003,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 45056,
+            "heapDeltaBytes": 84232
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.2081900000000587,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 20480,
+            "heapDeltaBytes": 92856
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.0286100000000715,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 16384,
+            "heapDeltaBytes": 89176
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9079360000000634,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 20480,
+            "heapDeltaBytes": 38784
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.8582440000000133,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8192,
+            "heapDeltaBytes": -83784
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6889409999999998,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4096,
+            "heapDeltaBytes": 78136
+          }
+        ]
+      },
+      {
+        "round": 0,
+        "layout": "state",
+        "canonicalBytes": 1000008,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.0891860000000406,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 94208,
+            "heapDeltaBytes": 90664
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.0940969999999197,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 151552,
+            "heapDeltaBytes": 103224
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.179124999999999,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 110592,
+            "heapDeltaBytes": 100984
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.0374530000000277,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 147456,
+            "heapDeltaBytes": 91496
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.7413709999999583,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -2441216,
+            "heapDeltaBytes": -5498880
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7350380000000314,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 90664
+          }
+        ]
+      },
+      {
+        "round": 0,
+        "layout": "state",
+        "canonicalBytes": 1032,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.2561150000001362,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4096,
+            "heapDeltaBytes": -324120
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.2844740000000456,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 60080
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.2475480000000516,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 58336
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.226372000000083,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 59360
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.1796429999999418,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 58688
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.1907779999999093,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 59360
+          }
+        ]
+      },
+      {
+        "round": 0,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.3771900000001551,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4096,
+            "heapDeltaBytes": 87152
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9433710000000701,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78152
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.0581660000000284,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12288,
+            "heapDeltaBytes": 90072
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.820212999999967,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 174800
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9413779999999861,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78200
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7110199999999622,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78072
+          }
+        ]
+      },
+      {
+        "round": 0,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 3,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 2.1056099999998423,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 16384,
+            "heapDeltaBytes": 247312
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.4046679999999014,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 231400
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.596862000000101,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 243832
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.4959899999998925,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 235328
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.801095000000032,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 167936,
+            "heapDeltaBytes": 234408
+          },
+          {
+            "phase": "warm",
+            "durationMs": 3.9215630000001056,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": -16265216,
+            "heapDeltaBytes": -17760064
+          }
+        ]
+      },
+      {
+        "round": 0,
+        "layout": "legacy-combined",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 26.285785999999916,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12390400,
+            "heapDeltaBytes": 4616768
+          },
+          {
+            "phase": "warm",
+            "durationMs": 6.7544920000000275,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": -28278784,
+            "heapDeltaBytes": -29127432
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.502085000000079,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4096,
+            "heapDeltaBytes": 68464
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.174545999999964,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12288,
+            "heapDeltaBytes": 75432
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.236280000000079,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 40960,
+            "heapDeltaBytes": 69288
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.9428539999998975,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 61704
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "state",
+        "canonicalBytes": 1032,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.1685199999997167,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12288,
+            "heapDeltaBytes": -82384
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9248379999999088,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 59312
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6754519999999502,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 59344
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6148299999999836,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 59312
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.5346239999998943,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 58288
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6029200000002675,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 59312
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.926339999999982,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 28672,
+            "heapDeltaBytes": 221648
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.3658799999998337,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12288,
+            "heapDeltaBytes": -59888
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.3035690000001523,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12288,
+            "heapDeltaBytes": 81416
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9154390000003332,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78072
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9066299999999501,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78072
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6677400000003217,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 80768
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "state",
+        "canonicalBytes": 1000008,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.369637999999668,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 36864,
+            "heapDeltaBytes": 90616
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.3592660000003889,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 135168,
+            "heapDeltaBytes": 107400
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.0374299999998584,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 90112,
+            "heapDeltaBytes": 90616
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.004530000000159,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 94208,
+            "heapDeltaBytes": 90616
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.9244089999997414,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 98304,
+            "heapDeltaBytes": 92736
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7432180000000699,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 94208,
+            "heapDeltaBytes": 90616
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "state",
+        "canonicalBytes": 1032,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 0.9998359999999593,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 65536,
+            "heapDeltaBytes": 59312
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7937310000002071,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 61440,
+            "heapDeltaBytes": 59312
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6812690000001567,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 57344,
+            "heapDeltaBytes": 58288
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.5839180000002671,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 65536,
+            "heapDeltaBytes": 59312
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.5780150000000503,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 57344,
+            "heapDeltaBytes": 58296
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6258990000001177,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 126976,
+            "heapDeltaBytes": 59312
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.333176000000094,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 85008
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.0157140000001164,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78072
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.1393339999999625,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4096,
+            "heapDeltaBytes": 78072
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7288009999997485,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4096,
+            "heapDeltaBytes": 78072
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.8165429999999105,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 16384,
+            "heapDeltaBytes": 88064
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6831720000000132,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78072
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 3,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 2.9350600000002487,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 16384,
+            "heapDeltaBytes": 240248
+          },
+          {
+            "phase": "warm",
+            "durationMs": 4.628389999999854,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": -20684800,
+            "heapDeltaBytes": -21132896
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.9364989999999125,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 61440,
+            "heapDeltaBytes": 258416
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.3002159999996366,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 231256
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.6124479999998584,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 231160
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.3235319999998865,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 69632,
+            "heapDeltaBytes": 237352
+          }
+        ]
+      },
+      {
+        "round": 1,
+        "layout": "legacy-combined",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 23.49661100000003,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12341248,
+            "heapDeltaBytes": 4600872
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.2630730000000767,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 61952
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.36616099999992,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 61752
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.1461920000001555,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 61704
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.2313279999998485,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 131072,
+            "heapDeltaBytes": 61912
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.9685009999998329,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 61800
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "state",
+        "canonicalBytes": 1032,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.3633570000001782,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8192,
+            "heapDeltaBytes": 59312
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.0004719999997178,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 8192,
+            "heapDeltaBytes": 78056
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.8398050000005242,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 59360
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.8536050000002433,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 59280
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7420700000002398,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 58256
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.5226969999994253,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 59280
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.4464150000003428,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78040
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.0311689999998634,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78040
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.3446410000005926,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78048
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.8686090000001059,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78040
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9235250000001543,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 4096,
+            "heapDeltaBytes": 79624
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6827000000002954,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 88736
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "state",
+        "canonicalBytes": 1000008,
+        "privateBytesPerChild": 0,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 2.166599999999562,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 94208,
+            "heapDeltaBytes": 90584
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.1186969999998837,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 155648,
+            "heapDeltaBytes": 135200
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.791968999999881,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 86016,
+            "heapDeltaBytes": 90592
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.0079450000002907,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 94208,
+            "heapDeltaBytes": 90584
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.186126999999942,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 102400,
+            "heapDeltaBytes": 90584
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9197370000001683,
+            "readBytes": 31010,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 90112,
+            "heapDeltaBytes": 90584
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "state",
+        "canonicalBytes": 1032,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.2872369999995499,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 69632,
+            "heapDeltaBytes": 59280
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.8896169999998165,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 57344,
+            "heapDeltaBytes": 59280
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6528010000001814,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 57344,
+            "heapDeltaBytes": 58256
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6273819999996704,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 65536,
+            "heapDeltaBytes": 59280
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6944999999996071,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 12,
+            "rssDeltaBytes": 57344,
+            "heapDeltaBytes": 58256
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.5629900000003545,
+            "readBytes": 4893,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 73728,
+            "heapDeltaBytes": 59280
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.2825880000000325,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 86768
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.1523599999991347,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 81808
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.9185359999992215,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78040
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7323839999999109,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78040
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.7892519999995784,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": -3248
+          },
+          {
+            "phase": "warm",
+            "durationMs": 0.6789120000003095,
+            "readBytes": 27764,
+            "objectsRead": 2,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 78040
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "state",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 3,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 1.710880000000543,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 4096,
+            "heapDeltaBytes": 272568
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.4757970000000569,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 231000
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.8955780000005689,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 8192,
+            "heapDeltaBytes": 234504
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.4179830000002767,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 231216
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.5339469999998983,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 231080
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.1771670000007362,
+            "readBytes": 83292,
+            "objectsRead": 6,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 3069,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 231144
+          }
+        ]
+      },
+      {
+        "round": 2,
+        "layout": "legacy-combined",
+        "canonicalBytes": 120000,
+        "privateBytesPerChild": 4000000,
+        "concurrentChildren": 1,
+        "measurements": [
+          {
+            "phase": "logical-cold",
+            "durationMs": 23.185504999999466,
+            "readBytes": 4131228,
+            "objectsRead": 1,
+            "nativeRangeBytes": 0,
+            "nativeRangeReads": 0,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 12324864,
+            "heapDeltaBytes": 4602896
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.3359909999999218,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 62032
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.362489999999525,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 61704
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.0761969999994108,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 61704
+          },
+          {
+            "phase": "warm",
+            "durationMs": 2.1139929999999367,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 61728
+          },
+          {
+            "phase": "warm",
+            "durationMs": 1.962589000000662,
+            "readBytes": 131042,
+            "objectsRead": 3,
+            "nativeRangeBytes": 131042,
+            "nativeRangeReads": 3,
+            "sessionGraphObjectsRead": 0,
+            "deliveredBytes": 1023,
+            "rssDeltaBytes": 0,
+            "heapDeltaBytes": 61704
+          }
+        ]
+      }
+    ]
+  }
+}

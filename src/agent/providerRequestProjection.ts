@@ -34,10 +34,10 @@ import {
   getAgentTools
 } from './protocol';
 
-export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 10;
+export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 11;
 export const LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION = 1;
 export const PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION = 2;
-export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 10;
+export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 11;
 
 /** Final context surface shared by dispatch, candidate admission and usage.
  * Candidate results are explicit additions; native replay is never rebuilt or
@@ -470,6 +470,7 @@ function normalizeRequestProtocolVersion(value: number | undefined): number {
   if (normalized >= CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION) {
     return CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION;
   }
+  if (normalized >= 10) return 10;
   if (normalized >= 9) return 9;
   if (normalized >= 8) return 8;
   if (normalized >= 7) return 7;

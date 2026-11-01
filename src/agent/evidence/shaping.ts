@@ -1,4 +1,5 @@
 import { estimateTokenCount } from '../tokenEstimate';
+import { prepareSubagentResultPage } from './subagentPage';
 import { MIN_EVIDENCE_ENVELOPE_TOKENS, type ToolEvidence, type ToolEvidenceContentType, type ToolEvidenceSource } from './types';
 
 export interface PreparedEvidenceEnvelope {
@@ -26,6 +27,9 @@ export function prepareEvidenceEnvelope(input: {
   const fullTokens = estimateTokenCount(input.rawContent);
   const allowedTokens = Math.max(0, Math.floor(input.inlineTokenAllowance));
   const allowedChars = Math.max(0, Math.floor(input.inlineCharLimit));
+  if (input.record.toolName === 'keepseek_read_subagent_result') {
+    return prepareSubagentResultPage(input.rawContent, allowedTokens, allowedChars);
+  }
   if (input.record.toolName === 'keepseek_read_evidence') {
     return prepareEvidencePage(input.rawContent, allowedTokens, allowedChars, contentType);
   }
@@ -321,7 +325,7 @@ function canonicalize(value: unknown): unknown {
 }
 
 function isSubagentHandoff(value: unknown): value is Record<string, unknown> {
-  return isRecord(value) && value.version === 2
+  return isRecord(value) && (value.version === 2 || value.version === 3)
     && (value.kind === 'subagent_result_manifest' || value.kind === 'subagent_parallel_manifest');
 }
 
@@ -335,7 +339,7 @@ function shapeSubagentHandoff(
 ): string {
   const base = value.kind === 'subagent_parallel_manifest'
     ? {
-        version: 2,
+        version: value.version,
         ok: value.ok === true,
         kind: 'subagent_parallel_manifest',
         results: Array.isArray(value.results) ? value.results.map((item) => shapeSubagentItem(item)) : [],
@@ -360,7 +364,10 @@ function shapeSubagentHandoff(
   const items = value.kind === 'subagent_parallel_manifest'
     ? ((withRefs.results as Array<Record<string, unknown>>) ?? [])
     : [withRefs];
-  for (const item of items) item.preview = '';
+  for (const item of items) {
+    item.preview = '';
+    if (value.version === 3) item.hasMore = readNonNegative(item.resultBytes) > 0;
+  }
   content = stableStringify(withRefs);
   if (fits()) return content;
   for (const item of items) {
@@ -377,7 +384,9 @@ function shapeSubagentItem(value: unknown): Record<string, unknown> {
     'version', 'ok', 'kind', 'taskIndex', 'subagentId', 'treeId', 'profile', 'lane', 'depth', 'status',
     'resultRef', 'resultHash', 'resultChars', 'resultBytes', 'hasMore', 'resultTruncated',
     'originalResultChars', 'originalResultHash', 'draftEditCount', 'draftRunCount', 'errorType',
-    'diagnosticRef', 'reusedFromSubagentId'
+    'diagnosticRef', 'reusedFromSubagentId',
+    ...(value.version === 3 || value.resultStatus !== undefined
+      ? ['resultStatus', 'formatAccepted', 'parentAcceptance'] : [])
   ]) {
     const field = value[key];
     if (typeof field === 'string') result[key] = field.slice(0, 1_024);
@@ -387,6 +396,12 @@ function shapeSubagentItem(value: unknown): Record<string, unknown> {
   if (isRecord(value.usageSummary)) result.usageSummary = canonicalize(value.usageSummary);
   result.summary = typeof value.summary === 'string' ? value.summary.slice(0, 1_024) : '';
   result.preview = typeof value.preview === 'string' ? value.preview : '';
+  if (value.version === 3 || value.resultStatus !== undefined) {
+    for (const key of ['missing', 'uncertainties', 'keyEvidence']) {
+      if (Array.isArray(value[key])) result[key] = canonicalize(value[key]);
+    }
+    result.hasMore = readNonNegative(value.resultBytes) > new TextEncoder().encode(String(result.preview)).byteLength;
+  }
   if (typeof value.error === 'string') result.error = value.error.slice(0, 512);
   return result;
 }

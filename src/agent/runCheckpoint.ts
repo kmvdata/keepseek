@@ -10,6 +10,8 @@ import { DEEPSEEK_MODEL_IDENTITY_VERSION, getCanonicalModelIdentity } from '../s
 import { migrateContextWindowCalibrationState } from './toolResultAdmission';
 import { normalizeExecutionMode } from './executionMode';
 import { createLogicalRunBudgetState, grantNextToolBudgetSegment, type LogicalRunBudgetState } from './executionPolicy';
+import { normalizeSubagentHostContext } from './subagents/contextCapsule';
+import { normalizeDelegationState } from './delegation';
 
 export type StopReason = 'user_stop' | 'time_budget' | 'tool_timeout' | 'connection_interrupted'
   | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'budget_pause' | 'budget_exhausted' | 'completed' | 'storage_failure' | 'resource_limit'
@@ -196,6 +198,16 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
         || ![m.oldOutputTokens, m.newOutputTokens].every((n) => Number.isSafeInteger(n) && n > 0)))) return undefined;
     if (cp.state?.epoch && !validEpochProgressState(cp.state.epoch)) return undefined;
     const copy = checkpointCopy(cp);
+    if (copy.request.subagentHostContext !== undefined) {
+      const context = normalizeSubagentHostContext(copy.request.subagentHostContext);
+      if (!context) return undefined;
+      copy.request.subagentHostContext = context;
+    }
+    if (copy.taskPlan?.delegation !== undefined) {
+      const delegation = normalizeDelegationState(copy.taskPlan.delegation);
+      if (!delegation) return undefined;
+      copy.taskPlan.delegation = delegation;
+    }
     // Older retries counted scheduled waits. Conservatively retain the spent
     // allowance rather than granting a fresh six requests after recovery.
     copy.modelStepAttempts ??= copy.modelStepRetries ? copy.modelStepRetries + 1 : 0;
@@ -278,6 +290,9 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
 }
 
 export function recoveryBlocker(cp: RunCheckpoint, currentModel?: AgentRequest['model']): string | undefined {
+  if (cp.request.subagentContext && !normalizeSubagentHostContext(cp.request.subagentHostContext)) {
+    return 'Child recovery lacks a valid controlled project/profile context; preserve the audit record and start a fresh delegation / 子任务恢复缺少有效项目与 Profile 继承证明，请保留审计记录并重新委派。';
+  }
   if (cp.stopReason === 'no_progress_loop') return 'No-progress state is preserved. Provide new evidence, a changed scope or an explicit new instruction / 无进展状态已保留，请补充新证据、调整范围或发送新的明确指令。';
   if (cp.stopReason === 'storage_failure' || cp.stopReason === 'resource_limit') return cp.error ?? cp.stopReason;
   if (cp.status === 'completed') return 'Task already completed / 任务已完成';
