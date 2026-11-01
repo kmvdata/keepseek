@@ -11,7 +11,6 @@ export const usageDeclarationFragment: WebviewFragment = {
       var usageDetailsDialog = document.getElementById('usageDetailsDialog');
       var usageDetailsBody = document.getElementById('usageDetailsBody');
       var usageDetailsClose = document.getElementById('usageDetailsClose');
-      var usageAnalysisMode = 'source';
       var usageDetailsRenderKey = '';
       var usageDetailsPreviousFocus = null;
 `.slice(1)
@@ -57,20 +56,6 @@ export const usageBindingsFragment: WebviewFragment = {
       }
       if (usageDetailsClose) {
         usageDetailsClose.addEventListener('click', function() { usageDetailsDialog.close(); });
-      }
-      if (usageDetailsBody) {
-        usageDetailsBody.addEventListener('click', function(event) {
-          var target = event.target instanceof Element
-            ? event.target.closest('button[data-usage-analysis]') : null;
-          if (!target || target.disabled) { return; }
-          var nextMode = target.dataset.usageAnalysis;
-          if (nextMode === 'source' || nextMode === 'type' || nextMode === 'subagent') {
-            usageAnalysisMode = nextMode;
-          }
-          renderUsageDetails();
-          var selected = usageDetailsBody.querySelector('button[data-usage-analysis="' + usageAnalysisMode + '"]');
-          if (selected) { selected.focus(); }
-        });
       }
 
 `.slice(1)
@@ -175,16 +160,12 @@ export const usageRenderFragment: WebviewFragment = {
         if (!usageDetailsBody) { return; }
         var metrics = normalizeUsageMetrics(state.usageMetrics);
         var details = metrics.usageDetails;
-        if (usageAnalysisMode === 'subagent' && !(details && details.subagents)) {
-          usageAnalysisMode = 'source';
-        }
         var sessionUsage = metrics.sessionUsageStats;
         var usageGroups = sessionUsage && Array.isArray(sessionUsage.byModelSource)
           ? sessionUsage.byModelSource
           : [];
         var renderKey = JSON.stringify([
           details,
-          usageAnalysisMode,
           sessionUsage,
           state.contextUsage,
           metrics.promptCacheDiagnostics,
@@ -198,9 +179,6 @@ export const usageRenderFragment: WebviewFragment = {
         if (renderKey === usageDetailsRenderKey) { return; }
         usageDetailsRenderKey = renderKey;
         var scrollTop = usageDetailsBody.scrollTop;
-        var focusedControl = document.activeElement && document.activeElement.dataset
-          ? document.activeElement.dataset.usageAnalysis || ''
-          : '';
         usageDetailsBody.replaceChildren();
         if (!details || !details.session) {
           usageDetailsBody.append(createSessionMetricsSection(metrics, { total: metrics.sessionUsageStats || {} }));
@@ -218,11 +196,6 @@ export const usageRenderFragment: WebviewFragment = {
         usageDetailsBody.append(createCacheDiagnosticsSection(metrics));
         usageDetailsBody.append(createUsageAnalysisSection(selected, usageGroups, sessionUsage, details.subagents));
         usageDetailsBody.scrollTop = scrollTop;
-        if (focusedControl) {
-          var control = usageDetailsBody.querySelector('button[data-usage-analysis="' + focusedControl + '"]')
-            || usageDetailsBody.querySelector('button[data-usage-analysis="' + usageAnalysisMode + '"]');
-          if (control) { control.focus({ preventScroll: true }); }
-        }
       }
 
       function createContextWindowSection(metrics) {
@@ -406,7 +379,7 @@ export const usageRenderFragment: WebviewFragment = {
           grid.append(metric);
         });
         section.append(grid);
-        section.append(usageNode('p', 'usage-note', t('usageCacheCoverage', {
+        section.append(usageNode('p', 'usage-note', t('usageDiagnosticCacheCoverage', {
           reported: diagnostics.cacheDataResponseCount,
           missing: diagnostics.cacheDataMissingResponseCount
         })));
@@ -467,112 +440,222 @@ export const usageRenderFragment: WebviewFragment = {
 
       function createUsageAnalysisSection(selected, usageGroups, sessionUsage, subagents) {
         var section = createUsageSection('usageAnalysisTitle');
-        var controls = usageNode('div', 'usage-segmented-control usage-analysis-controls');
-        controls.setAttribute('role', 'group');
-        controls.setAttribute('aria-label', t('usageAnalysisTitle'));
-        var modes = ['source', 'type'];
-        if (subagents) { modes.push('subagent'); }
-        var labels = { source: 'usageBySource', type: 'usageByType', subagent: 'usageBySubagent' };
-        modes.forEach(function(mode) {
-          var button = usageNode('button', '', t(labels[mode]));
-          button.type = 'button';
-          button.dataset.usageAnalysis = mode;
-          button.setAttribute('aria-pressed', usageAnalysisMode === mode ? 'true' : 'false');
-          controls.append(button);
-        });
-        section.querySelector('.usage-section-heading').append(controls);
-        if (usageAnalysisMode === 'type') {
-          appendTypeAnalysis(section, selected);
-        } else if (usageAnalysisMode === 'subagent') {
-          appendSubagentAnalysis(section, subagents);
-        } else {
-          appendSourceAnalysis(section, usageGroups, sessionUsage);
+        var sources = (usageGroups || []).filter(hasActualUsage);
+        if (sources.length || hasActualUsage(selected.total)) {
+          var sourceSection = createUsageAnalysisGroup('usageSourceTitle', 'usage-analysis-source');
+          appendSourceAnalysis(sourceSection, sources, sessionUsage, selected.total, subagents);
+          section.append(sourceSection);
         }
+        var typeItems = [
+          { key: 'usageMainSession', usage: selected.mainSession, percent: selected.mainPercent },
+          { key: 'usageReviewerLabel', usage: selected.reviewer, percent: selected.reviewerPercent },
+          { key: 'usageSubagentLabel', usage: selected.subagent, percent: selected.subagentPercent },
+          { key: 'usageHistoricalUnattributed', usage: selected.unattributed, percent: selected.unattributedPercent }
+        ].filter(function(item) { return hasActualUsage(item.usage) || (item.key === 'usageSubagentLabel' && subagents); });
+        // A sole main-session slice adds no information. Non-main activity can
+        // matter even with zero tokens, unknown usage, or known zero cost.
+        if (subagents || typeItems.some(function(item) { return item.key !== 'usageMainSession'; })) {
+          var types = createUsageAnalysisGroup('usageTypeTitle', 'usage-analysis-type');
+          types.append(usageNode('p', 'usage-note', t('usageResponsibilityScope')));
+          appendTypeAnalysis(types, typeItems);
+          if (subagents) {
+            var fallbackModels = (subagents.byModel || []).filter(function(model) {
+              return !findSubagentSource(model, sources);
+            });
+            types.append(createSubagentAnalysisDetails(subagents, fallbackModels));
+          }
+          section.append(types);
+        }
+        if (!sources.length && !hasActualUsage(selected.total) && !subagents) {
+          section.append(usageNode('p', 'usage-note', t('usageNoProviderData')));
+        }
+        section.append(createUsageAnalysisFooter(selected.total));
         return section;
       }
 
-      function appendSourceAnalysis(section, groups, sessionUsage) {
-        var visibleGroups = (groups || []).filter(hasUsageData);
-        if (!visibleGroups.length) {
-          section.append(usageNode('p', 'usage-note', t('usageNoProviderData')));
-          return;
-        }
-        var shareItems = visibleGroups.map(function(group, index) {
-          return {
-            label: getUsageGroupLabel(group),
-            value: group.totalTokens,
-            color: 'color-' + (index % 5)
-          };
-        });
-        section.append(createUsageSharePanel('usageSourceShare', shareItems));
+      function createUsageAnalysisGroup(titleKey, className) {
+        var group = usageNode('section', 'usage-analysis-group ' + className);
+        group.setAttribute('aria-label', t(titleKey));
+        group.append(usageNode('h4', 'usage-analysis-group-title', t(titleKey)));
+        return group;
+      }
+
+      function appendSourceAnalysis(section, groups, sessionUsage, total, subagents) {
+        // Keep the existing attributed-source denominator, not session totals,
+        // request counts, or execution-type attribution.
+        var denominator = groups.reduce(function(sum, group) { return sum + group.totalTokens; }, 0);
         var list = usageNode('div', 'usage-analysis-list');
-        visibleGroups.forEach(function(group, index) {
-          list.append(createSourceAnalysisCard(group, 'color-' + (index % 5)));
+        groups.forEach(function(group) {
+          var entry = usageNode('div', 'usage-source-entry');
+          var heading = usageNode('div', 'usage-source-heading');
+          heading.append(usageNode('strong', 'usage-source-name', getUsageGroupLabel(group)));
+          var percent = denominator > 0 && hasReportedUsageTokens(group) ? group.totalTokens / denominator * 100 : undefined;
+          heading.append(usageNode('span', 'usage-token-share', formatTokenShare(percent)));
+          var bar = usageNode('div', 'usage-source-bar');
+          if (Number.isFinite(percent)) {
+            bar.setAttribute('role', 'meter');
+            bar.setAttribute('aria-label', t('usageTokenShare'));
+            bar.setAttribute('aria-valuemin', '0');
+            bar.setAttribute('aria-valuemax', '100');
+            bar.setAttribute('aria-valuenow', String(percent));
+            bar.setAttribute('aria-valuetext', formatTokenShare(percent));
+            var fill = usageNode('span', '');
+            fill.style.width = percent + '%';
+            bar.append(fill);
+          } else { bar.setAttribute('aria-hidden', 'true'); }
+          entry.append(heading, bar, createSourceMetrics(group));
+          appendUsageWarnings(entry, group);
+          var subset = group.bySource && group.bySource.subagent;
+          if (hasActualUsage(subset)) {
+            var onlyChild = isSubagentOnlySource(group);
+            var child = usageNode('div', 'usage-source-subagent');
+            child.append(usageNode('strong', '', t(onlyChild ? 'usageSourceSubagentOnly' : 'usageSourceSubagentSubset')));
+            if (!onlyChild) {
+              child.append(usageNode('span', '', formatUsageTokens(subset) + ' Tokens · '
+                + t('usageCacheHitRate') + ': ' + formatActualCacheRateOnly(subset) + ' · ' + formatAnalysisCost(subset)));
+              appendUsageWarnings(child, subset);
+            }
+            var models = ((subagents && subagents.byModel) || []).filter(function(model) {
+              return findSubagentSource(model, groups) === group;
+            });
+            models.forEach(function(model) { appendSubagentTaskCounts(child, model); });
+            entry.append(child);
+          }
+          list.append(entry);
         });
         section.append(list);
-        if (sessionUsage && sessionUsage.legacyUnattributed) {
-          section.append(usageNode('p', 'usage-note', t('usageMetricLegacyUnattributed')));
+        var sourceIncomplete = !groups.length || (sessionUsage && sessionUsage.legacyUnattributed)
+          || groups.some(function(group) { return !group.sourceId || !group.modelId; })
+          || denominator < total.totalTokens
+          || groups.reduce(function(sum, group) { return sum + group.requestCount; }, 0) < total.requestCount;
+        if (sourceIncomplete) {
+          section.append(usageNode('p', 'usage-warning usage-source-attribution-note', t('usageSourceAttributionIncomplete')));
         }
       }
 
-      function appendTypeAnalysis(section, selected) {
-        var mainSessionOnly = selected.total.totalTokens > 0 && selected.mainPercent >= 100;
-        var typeItems = [
-          { key: 'usageMainSession', usage: selected.mainSession, percent: selected.mainPercent, color: 'color-0' },
-          { key: 'usageReviewerLabel', usage: selected.reviewer, percent: selected.reviewerPercent, color: 'color-1' },
-          { key: 'usageSubagentLabel', usage: selected.subagent, percent: selected.subagentPercent, color: 'color-2' },
-          { key: 'usageHistoricalUnattributed', usage: selected.unattributed, percent: selected.unattributedPercent, color: 'color-3' }
-        ].filter(function(item) { return hasActualUsage(item.usage); });
-        if (!mainSessionOnly && typeItems.length > 1) {
-          section.append(createUsageSharePanel('usageTypeShare', typeItems.map(function(item) {
-            return { label: t(item.key), value: item.usage.totalTokens, color: item.color };
-          })));
-        }
+      function findSubagentSource(model, sources) {
+        if (!model.sourceId || !model.modelId || !model.provider) { return null; }
+        var matches = sources.filter(function(source) {
+          return source.sourceId === model.sourceId && source.modelId === model.modelId && source.provider === model.provider;
+        });
+        return matches.length === 1 && hasActualUsage(matches[0].bySource && matches[0].bySource.subagent)
+          && hasSameUsageCoverage(matches[0].bySource.subagent, model.usage) ? matches[0] : null;
+      }
+
+      function isSubagentOnlySource(source) {
+        var slices = source.bySource || {};
+        var child = slices.subagent;
+        // Identity and the responsibility map establish provenance; coverage
+        // checks additionally reject partially attributed historical sources.
+        return child && !source.legacyUnattributed
+          && Object.keys(slices).filter(function(key) { return hasActualUsage(slices[key]); }).every(function(key) { return key === 'subagent'; })
+          && hasSameUsageCoverage(source, child);
+      }
+
+      function hasSameUsageCoverage(left, right) {
+        return ['totalTokens', 'requestCount', 'pricedRequestCount', 'unpricedRequestCount', 'estimatedRequestCount',
+          'cacheDataRequestCount', 'cacheDataMissingRequestCount'].every(function(key) { return (left[key] || 0) === (right[key] || 0); })
+          && Object.keys(left.costByCurrency || {}).length === Object.keys(right.costByCurrency || {}).length
+          && Object.keys(left.costByCurrency || {}).every(function(currency) { return left.costByCurrency[currency] === right.costByCurrency[currency]; });
+      }
+
+      function hasReportedUsageTokens(usage) {
+        return Boolean(usage && (usage.requestCount > 0 || usage.usageResponseCount > 0 || usage.totalTokens > 0));
+      }
+
+      function formatUsageTokens(usage) {
+        return hasReportedUsageTokens(usage) ? formatMetricInteger(usage.totalTokens) : t('usageNotReported');
+      }
+
+      function formatAnalysisCost(usage) {
+        var cost = formatAccountedCosts(usage);
+        // Partial/unpriced explanations belong to the adjacent short warning,
+        // once per slice, rather than also being appended to the amount.
+        return cost.available ? cost.amountText : formatUsageAvailabilityValue(usage, 'usageMetricCostUnavailableValue');
+      }
+
+      function formatTokenShare(percent) {
+        return t('usageTokenShare') + ': ' + (Number.isFinite(percent) ? formatUsageSharePercent(percent) : t('usageShareUnavailable'));
+      }
+
+      function appendTypeAnalysis(section, items) {
         var list = usageNode('div', 'usage-analysis-list');
-        if (mainSessionOnly) {
-          list.append(createActualAnalysisCard('usageSessionTotal', selected.total, 'color-0'));
-        } else {
-          typeItems.forEach(function(item) {
-            list.append(createActualAnalysisCard(item.key, item.usage, item.color));
-          });
-        }
-        section.append(list);
-      }
-
-      function appendSubagentAnalysis(section, subagents) {
-        section.append(createSubagentAnalysisDetails(subagents));
-      }
-
-      function createUsageSharePanel(titleKey, items) {
-        var panel = usageNode('div', 'usage-analysis-share');
-        panel.append(usageNode('h4', '', t(titleKey)));
-        var total = items.reduce(function(sum, item) { return sum + readNonNegativeNumber(item.value, 0); }, 0);
-        var bar = usageNode('div', 'usage-analysis-share-bar');
-        bar.setAttribute('aria-hidden', 'true');
-        var legend = usageNode('div', 'usage-analysis-share-legend');
         items.forEach(function(item) {
-          var percent = total > 0 ? item.value / total * 100 : 0;
-          if (!(percent > 0)) { return; }
-          var segment = usageNode('span', item.color);
-          segment.style.width = percent + '%';
-          bar.append(segment);
-          var legendItem = usageNode('span', 'usage-analysis-legend-item');
-          legendItem.append(
-            usageNode('i', 'usage-analysis-dot ' + item.color),
-            document.createTextNode(item.label + ' ' + formatUsageSharePercent(percent))
-          );
-          legend.append(legendItem);
+          list.append(createCompactUsageRow(t(item.key), item.usage, undefined,
+            hasReportedUsageTokens(item.usage) ? item.percent : undefined));
         });
-        panel.append(bar, legend);
-        return panel;
+        section.append(list);
       }
 
-      function createSourceAnalysisCard(group, colorClass) {
-        return createUsageAnalysisCard(getUsageGroupLabel(group), group, colorClass, group.requestCount);
+      function createSourceMetrics(usage) {
+        var grid = usageNode('div', 'usage-source-metrics');
+        [
+          ['usageTokensLabel', formatUsageTokens(usage)],
+          ['usageCacheHitRate', formatActualCacheRateOnly(usage)],
+          ['usageCostLabel', formatAnalysisCost(usage)]
+        ].forEach(function(item) {
+          var metric = usageNode('div', 'usage-analysis-card-metric');
+          metric.append(createUsageMetricLabel(item[0], usage.sourceId), usageNode('strong', '', item[1]));
+          grid.append(metric);
+        });
+        return grid;
       }
 
-      function createActualAnalysisCard(labelKey, usage, colorClass) {
-        return createUsageAnalysisCard(t(labelKey), usage, colorClass, usage.requestCount);
+      function createCompactUsageRow(label, usage, sourceId, percent) {
+        var row = usageNode('div', 'usage-compact-row');
+        row.append(usageNode('strong', 'usage-compact-name', label));
+        var values = usageNode('div', 'usage-compact-values');
+        values.append(usageNode('span', '', hasReportedUsageTokens(usage) ? formatUsageTokens(usage) + ' Tokens' : t('usageNotReported')));
+        if (arguments.length > 3) { values.append(usageNode('span', 'usage-token-share', formatTokenShare(percent))); }
+        var cost = usageNode('span', 'usage-compact-cost');
+        cost.append(createUsageMetricLabel('usageCostLabel', sourceId), usageNode('strong', '', formatAnalysisCost(usage)));
+        values.append(cost);
+        row.append(values);
+        appendUsageWarnings(row, usage);
+        return row;
+      }
+
+      function appendUsageWarnings(node, usage) {
+        if (!usage) { return; }
+        var warnings = [];
+        if (usage.cacheDataMissingRequestCount > 0) {
+          warnings.push(t('usageCacheMissingShort', { count: usage.cacheDataMissingRequestCount }));
+        } else if (hasReportedUsageTokens(usage) && !(usage.cacheDataRequestCount > 0)) {
+          warnings.push(t('usageCacheCoverageUnknown'));
+        }
+        var cost = formatAccountedCosts(usage);
+        if (cost.partial) { warnings.push(t('usagePricingPartialShort', { count: usage.unpricedRequestCount || 0 })); }
+        else if (!cost.available && hasActualUsage(usage)) { warnings.push(t('usagePricingUnknownShort')); }
+        if (usage.estimatedRequestCount > 0) { warnings.push(t('usagePricingUpperBoundShort')); }
+        if (usage.providerAttemptCount > (usage.usageResponseCount || 0)) {
+          warnings.push(t('usageAttemptsWithoutUsageShort', { count: usage.providerAttemptCount - (usage.usageResponseCount || 0) }));
+        }
+        if (warnings.length) { node.append(usageNode('p', 'usage-warning', warnings.join(' · '))); }
+      }
+
+      function appendSubagentTaskCounts(node, group) {
+        node.append(usageNode('p', 'usage-note usage-child-counts', group.taskCountsAvailable === false
+          ? t('usageTaskCountUnknown') : t('usageTaskCountValue', { count: formatMetricInteger(group.taskCount) })));
+        node.append(usageNode('p', 'usage-note', Number.isFinite(group.usage.providerAttemptCount)
+          ? t('usageAttemptResponseCounts', { attempts: formatMetricInteger(group.usage.providerAttemptCount), responses: formatMetricInteger(group.usage.usageResponseCount) })
+          : t('usageAttemptCountsUnknown')));
+      }
+
+      function appendCompactCache(row, usage) {
+        row.querySelector('.usage-compact-values').append(usageNode('span', 'usage-slice-cache',
+          t('usageCacheHitRate') + ': ' + formatActualCacheRateOnly(usage)));
+      }
+
+      function createUsageAnalysisFooter(total) {
+        var footer = createUsageAnalysisGroup('usageAnalysisNotesTitle', 'usage-analysis-footer');
+        var reported = total.cacheDataRequestCount;
+        var missing = total.cacheDataMissingRequestCount;
+        var known = Number.isFinite(reported) && Number.isFinite(missing) && reported + missing > 0;
+        var coverage = known ? t('usageCacheCoverage', { reported: reported, missing: missing }) : t('usageCacheCoverageUnknown');
+        if (known && reported + missing < total.requestCount) { coverage += ' · ' + t('usageCacheCoverageUnknown'); }
+        footer.append(usageNode('p', 'usage-note usage-analysis-coverage', coverage));
+        footer.append(usageNode('p', 'usage-note usage-analysis-cost-note', t('usageCurrencyExplanation')));
+        return footer;
       }
 
       function createUsageMetricLabel(key, sourceId) {
@@ -597,52 +680,7 @@ export const usageRenderFragment: WebviewFragment = {
         return label;
       }
 
-      function createUsageAnalysisCard(label, usage, colorClass, requestCount, sourceId, taskCount) {
-        var card = usageNode('div', 'usage-analysis-card');
-        var header = usageNode('div', 'usage-analysis-card-header');
-        var heading = usageNode('div', 'usage-analysis-card-heading');
-        var title = usageNode('div', 'usage-analysis-card-title');
-        title.append(usageNode('i', 'usage-analysis-dot ' + colorClass), usageNode('strong', '', label));
-        heading.append(title, usageNode('span', 'usage-analysis-request-count', t(taskCount !== undefined ? 'usageResponseCountValue' : 'usageRequestCountValue', {
-          count: formatMetricInteger(requestCount)
-        })));
-        if (taskCount !== undefined) heading.append(usageNode('span', 'usage-analysis-request-count',
-          taskCount === null ? t('usageTaskCountUnknown') : t('usageTaskCountValue', { count: formatMetricInteger(taskCount) })));
-        var metricGrid = usageNode('div', 'usage-analysis-card-grid');
-        [
-          ['usageTotalTokensLabel', !usage.requestCount && (usage.providerAttemptCount > 0 || usage.attemptStatsIncomplete)
-            ? t('usageNotReported') : formatMetricInteger(usage.totalTokens)],
-          ['usageCacheHitRate', formatActualCacheRateOnly(usage)],
-          ['usageCostLabel', formatAccountedCosts(usage).available
-            ? formatAccountedCosts(usage).amountText
-            : formatUsageAvailabilityValue(usage, 'usageMetricCostUnavailableValue')]
-        ].forEach(function(item) {
-          var metric = usageNode('div', 'usage-analysis-card-metric');
-          metric.append(createUsageMetricLabel(item[0], sourceId || usage.sourceId), usageNode('strong', '', item[1]));
-          metricGrid.append(metric);
-        });
-        header.append(heading, metricGrid);
-        card.append(header);
-        var body = usageNode('div', 'usage-analysis-card-body');
-        if (taskCount !== undefined) body.append(usageNode('p', 'usage-note', Number.isFinite(usage.providerAttemptCount)
-          ? t('usageAttemptResponseCounts', { attempts: formatMetricInteger(usage.providerAttemptCount), responses: formatMetricInteger(usage.usageResponseCount) })
-          : t('usageAttemptCountsUnknown')));
-        body.append(usageNode('p', '', t('usageCacheCoverage', {
-          reported: usage.cacheDataRequestCount || 0,
-          missing: usage.cacheDataMissingRequestCount || 0
-        })));
-        var cost = formatAccountedCosts(usage);
-        if (cost.partial) {
-          body.append(usageNode('p', 'usage-warning', t('usagePartialPricing', {
-            count: usage.unpricedRequestCount || 0
-          })));
-        }
-        body.append(usageNode('p', '', t('usageCurrencyExplanation')));
-        card.append(body);
-        return card;
-      }
-
-      function createSubagentAnalysisDetails(subagents) {
+      function createSubagentAnalysisDetails(subagents, fallbackModels) {
         var details = usageNode('details', 'usage-subagent-analysis');
         details.open = true;
         var summary = usageNode('summary', '', t('usageSubagentDetailsTitle'));
@@ -679,24 +717,27 @@ export const usageRenderFragment: WebviewFragment = {
         } else {
           body.append(usageNode('p', 'usage-note', t('usageHistoricalEstimateUnavailable')));
         }
-        if ((subagents.byModel || []).length) {
+        if (fallbackModels.length) {
           body.append(usageNode('h5', 'usage-subagent-group-title', t('usageSubagentModels')));
           var modelList = usageNode('div', 'usage-analysis-list');
-          subagents.byModel.forEach(function(group, index) {
-            modelList.append(createUsageAnalysisCard(
-              getUsageGroupLabel(group), group.usage, 'color-' + (index % 5), group.usage.requestCount, group.sourceId,
-              group.taskCountsAvailable === false ? null : group.taskCount
-            ));
+          modelList.className += ' usage-subagent-model-fallback';
+          modelList.append(usageNode('p', 'usage-note', t('usageSubagentSourceFallback')));
+          fallbackModels.forEach(function(group) {
+            var row = createCompactUsageRow(getUsageGroupLabel(group), group.usage, group.sourceId);
+            appendCompactCache(row, group.usage);
+            appendSubagentTaskCounts(row, group);
+            modelList.append(row);
           });
           body.append(modelList);
         }
         if ((subagents.byProfileLane || []).length) {
           body.append(usageNode('h5', 'usage-subagent-group-title', t('usageSubagentWorkTypes')));
           var workTypeList = usageNode('div', 'usage-analysis-list');
-          subagents.byProfileLane.forEach(function(group, index) {
-            workTypeList.append(createUsageAnalysisCard(
-              formatSubagentWorkType(group), group.usage, 'color-' + ((index + 1) % 5), group.usage.requestCount, undefined, group.taskCount
-            ));
+          subagents.byProfileLane.forEach(function(group) {
+            var row = createCompactUsageRow(formatSubagentWorkType(group), group.usage);
+            appendCompactCache(row, group.usage);
+            appendSubagentTaskCounts(row, group);
+            workTypeList.append(row);
           });
           body.append(workTypeList);
         }
@@ -713,9 +754,10 @@ export const usageRenderFragment: WebviewFragment = {
             row.append(
               heading,
               usageNode('p', '', formatSubagentWorkType(run)),
-              usageNode('p', '', ((!run.usage.requestCount && run.usage.providerAttemptCount > 0) ? t('usageNotReported') : formatMetricInteger(run.usage.totalTokens) + ' Tokens') + ' · '
-                + formatUsageCost(run.usage) + ' · ' + formatDuration(run.durationMs))
+              usageNode('p', '', (hasReportedUsageTokens(run.usage) ? formatUsageTokens(run.usage) + ' Tokens' : t('usageNotReported')) + ' · '
+                + formatAnalysisCost(run.usage) + ' · ' + formatDuration(run.durationMs))
             );
+            appendUsageWarnings(row, run.usage);
             recentRuns.append(row);
           });
           body.append(recentRuns, usageNode('p', 'usage-note', t('usageRecentLimit')));

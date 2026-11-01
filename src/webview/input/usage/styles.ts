@@ -260,42 +260,10 @@ export const usageDialogStylesFragment: WebviewFragment = {
       border-bottom: 1px solid var(--vscode-panel-border);
     }
     .usage-details-eyebrow { font-size: 12px; font-weight: 600; }
-    .usage-segmented-control {
-      display: inline-flex;
-      flex-wrap: wrap;
-      max-width: 100%;
-      align-items: center;
-      gap: 1px;
-      padding: 2px;
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 7px;
-      background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
-    }
-    .usage-segmented-control button {
-      min-width: 0;
-      min-height: 24px;
-      padding: 2px 9px;
-      border: 0;
-      border-radius: 5px;
-      color: var(--vscode-descriptionForeground);
-      background: transparent;
-      font: inherit;
-      font-size: 11px;
-      cursor: pointer;
-    }
-    .usage-segmented-control button:hover:not(:disabled) { color: var(--vscode-foreground); }
-    .usage-segmented-control button[aria-pressed="true"] {
-      color: var(--vscode-foreground);
-      background: var(--vscode-button-secondaryBackground, var(--vscode-list-hoverBackground));
-      box-shadow: 0 1px 3px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.2));
-      font-weight: 600;
-    }
-    .usage-segmented-control button:focus-visible,
     .usage-subagent-analysis > summary:focus-visible {
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: 1px;
     }
-    .usage-segmented-control button:disabled { opacity: 0.45; cursor: default; }
     .usage-section {
       margin-bottom: 9px;
       padding: 10px;
@@ -439,44 +407,27 @@ export const usageDialogStylesFragment: WebviewFragment = {
     .usage-session-notes { padding-top: 1px; }
     .usage-session-notes .usage-warning,
     .usage-analysis-card-body .usage-warning { color: var(--vscode-editorWarning-foreground, #cca700); }
-    .usage-analysis-controls { margin-left: auto; }
-    .usage-analysis-share {
-      margin-bottom: 8px;
-      padding: 9px;
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 7px;
-      background: var(--vscode-editorWidget-background, transparent);
-    }
-    .usage-analysis-share h4 { margin: 0 0 8px; font-size: 11px; }
-    .usage-analysis-share-bar { display: flex; height: 6px; overflow: hidden; border-radius: 999px; background: var(--vscode-panel-border); }
-    .usage-analysis-share-bar span { display: block; height: 100%; }
-    .usage-analysis-share-legend { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 7px; }
-    .usage-analysis-legend-item {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      min-width: 0;
-      color: var(--vscode-descriptionForeground);
-      font-size: 9px;
-      overflow-wrap: anywhere;
-    }
-    .usage-analysis-dot { display: inline-block; flex: none; width: 7px; height: 7px; border-radius: 50%; }
-    .usage-analysis-share-bar .color-0, .usage-analysis-dot.color-0 { background: var(--vscode-charts-green, #2fa89a); }
-    .usage-analysis-share-bar .color-1, .usage-analysis-dot.color-1 { background: var(--vscode-charts-blue, #3794ff); }
-    .usage-analysis-share-bar .color-2, .usage-analysis-dot.color-2 { background: var(--vscode-descriptionForeground, #8b949e); }
-    .usage-analysis-share-bar .color-3, .usage-analysis-dot.color-3 { background: var(--vscode-charts-purple, #b180d7); }
-    .usage-analysis-share-bar .color-4, .usage-analysis-dot.color-4 { background: var(--vscode-charts-orange, #ff9d45); }
-    .usage-analysis-list { display: grid; gap: 7px; }
+    .usage-analysis-group + .usage-analysis-group { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--vscode-panel-border); }
+    .usage-analysis-group-title { margin: 0 0 8px; font-size: 12px; font-weight: 600; }
+    .usage-analysis-list { display: grid; gap: 7px; min-width: 0; }
+    .usage-source-entry,
+    .usage-compact-row,
     .usage-analysis-card,
-    .usage-subagent-analysis { border: 1px solid var(--vscode-panel-border); border-radius: 7px; background: var(--vscode-editor-background, transparent); }
-    .usage-analysis-card-header { padding: 9px; }
-    .usage-analysis-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .usage-subagent-analysis { min-width: 0; border: 1px solid var(--vscode-panel-border); border-radius: 7px; background: var(--vscode-editor-background, transparent); }
+    .usage-source-entry, .usage-compact-row { padding: 9px; }
+    .usage-source-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; }
+    .usage-source-name, .usage-compact-name { min-width: 0; overflow-wrap: anywhere; font-size: 11px; }
+    .usage-token-share { color: var(--vscode-descriptionForeground); font-size: 10px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .usage-source-bar { height: 6px; margin-top: 8px; overflow: hidden; border-radius: 999px; background: var(--vscode-panel-border); }
+    .usage-source-bar span { display: block; height: 100%; background: var(--vscode-charts-green, #2fa89a); }
+    .usage-source-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 9px; }
+    .usage-source-subagent { display: grid; gap: 5px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--vscode-panel-border); font-size: 10px; overflow-wrap: anywhere; }
+    .usage-source-subagent .usage-note { margin: 0; }
+    .usage-compact-values { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 12px; margin-top: 6px; font-size: 11px; overflow-wrap: anywhere; }
+    .usage-compact-cost { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px; min-width: 0; }
+    .usage-compact-values > span, .usage-compact-cost strong { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
     .usage-subagent-analysis > summary::marker { color: var(--vscode-descriptionForeground); font-size: 10px; }
-    .usage-analysis-card-title { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-    .usage-analysis-card-title strong { overflow-wrap: anywhere; font-size: 11px; }
-    .usage-analysis-request-count { flex: none; color: var(--vscode-descriptionForeground); font-size: 10px; font-variant-numeric: tabular-nums; }
-    .usage-analysis-card-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 9px; }
-    .usage-analysis-card-body { padding: 0 9px 9px; border-top: 1px solid var(--vscode-panel-border); }
+    .usage-analysis-card-body { padding: 0 9px 9px; }
     .usage-subagent-analysis { margin-top: 8px; }
     .usage-subagent-analysis > summary { padding: 9px; cursor: pointer; font-size: 11px; font-weight: 600; }
     .usage-subagent-analysis-body { padding: 0 9px 9px; }
@@ -500,8 +451,10 @@ export const usageDialogStylesFragment: WebviewFragment = {
       .usage-details-toolbar { margin: 0 -6px 7px; }
       .usage-section { padding: 9px; }
       .usage-context-budget-grid,
-      .usage-analysis-card-grid,
+      .usage-source-metrics,
       .usage-subagent-estimate-grid { gap: 5px; }
+      .usage-source-metrics { grid-template-columns: repeat(auto-fit, minmax(min(100%, 95px), 1fr)); }
+      .usage-source-heading { grid-template-columns: minmax(0, 1fr); }
       .usage-context-budget-metric strong,
       .usage-analysis-card-metric strong { font-size: 11px; }
     }

@@ -330,8 +330,7 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.match(script, /details\.session\.subagent\.totalTokens/u);
   assert.match(script, /usageMetricEffectiveExecution/u);
   assert.match(script, /function getLatestRunState\(\)/u);
-  assert.match(script, /var usageAnalysisMode = 'source'/u);
-  assert.match(script, /button\[data-usage-analysis\]/u);
+  assert.doesNotMatch(script, /usageAnalysisMode|data-usage-analysis/u);
   assert.doesNotMatch(script, /data-usage-scope|usageDetailsScope|usageOverviewLabel|usageThisTurn/u);
   const tooltipRenderer = script.slice(script.indexOf('function renderContextProgress()'), script.indexOf('function getLatestRunState()'));
   assert.doesNotMatch(tooltipRenderer, /usageMetric(?:CacheReasons|CompactThreshold|CacheHitTokens|CacheMissTokens)/u);
@@ -365,7 +364,7 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
     }
   }
   const inputStyles = getInputStyles();
-  const labelRenderer = script.slice(script.indexOf('function createUsageMetricLabel('), script.indexOf('function createUsageAnalysisCard('));
+  const labelRenderer = script.slice(script.indexOf('function createUsageMetricLabel('), script.indexOf('function createSubagentAnalysisDetails('));
   for (const [official, referenceIds, sourceId, expected] of [
     [true, [], undefined, false], [false, ['proxy'], undefined, true],
     [true, ['proxy'], 'official', false], [true, ['proxy'], 'proxy', true], [true, ['proxy'], undefined, true]
@@ -402,22 +401,11 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.match(detailsRenderer, /usageCacheAttribution/u);
   assert.match(detailsRenderer, /usageCompactSource/u);
   assert.match(detailsRenderer, /usageAnalysisTitle/u);
-  assert.match(detailsRenderer, /usageBySource/u);
-  assert.match(detailsRenderer, /usageByType/u);
-  assert.match(detailsRenderer, /usageBySubagent/u);
+  assert.match(detailsRenderer, /usageSourceTitle/u);
+  assert.match(detailsRenderer, /usageTypeTitle/u);
   assert.match(detailsRenderer, /usage-details-eyebrow', t\('usageDetailsTitle'\)/u);
   assert.match(detailsRenderer, /var selected = details\.session/u);
-  assert.match(detailsRenderer, /usageMetricLegacyUnattributed/u);
-  assert.match(detailsRenderer, /var mainSessionOnly = selected\.total\.totalTokens > 0 && selected\.mainPercent >= 100/u);
-  assert.match(detailsRenderer, /if \(mainSessionOnly\) \{\s*list\.append\(createActualAnalysisCard/u);
-  assert.match(script, /function createSourceAnalysisCard\(group, colorClass\)/u);
-  const analysisCardRenderer = script.slice(
-    script.indexOf('function createUsageAnalysisCard('),
-    script.indexOf('function createSubagentAnalysisDetails(')
-  );
-  assert.match(analysisCardRenderer, /usageNode\('div', 'usage-analysis-card'\)/u);
-  assert.match(analysisCardRenderer, /card\.append\(header\)[\s\S]*?card\.append\(body\)/u);
-  assert.doesNotMatch(analysisCardRenderer, /usageNode\('details'|usageNode\('summary'|usageAnalysisExpand/u);
+  assert.doesNotMatch(detailsRenderer, /mainPercent >= 100|createUsageSharePanel|createActualAnalysisCard|createUsageAnalysisCard/u);
   assert.doesNotMatch(inputStyles, /\.usage-analysis-(?:summary|expand)|\.usage-analysis-card\[open\]/u);
   assert.equal('usageAnalysisExpand' in WEBVIEW_TRANSLATIONS.en, false);
   assert.equal('usageAnalysisExpand' in WEBVIEW_TRANSLATIONS['zh-CN'], false);
@@ -483,85 +471,378 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
 });
 
 for (const language of ['zh-CN', 'en'] as const) {
-  test(`subagent usage has an independent, expanded, localized analysis view (${language})`, () => {
+  test(`usage sources, types, and expanded subagent details are visible together (${language})`, () => {
     const ui = createUsageAnalysisHarness(language, true);
     ui.render();
-    const buttons = ui.body.querySelectorAll('button[data-usage-analysis]');
-    assert.deepEqual(buttons.map(button => button.dataset.usageAnalysis), ['source', 'type', 'subagent']);
-    assert.deepEqual(buttons.map(button => button.textContent), language === 'zh-CN'
-      ? ['按来源', '按类型', '子代理'] : ['By source', 'By type', 'Subagents']);
-    const controls = ui.body.querySelector('.usage-analysis-controls')!;
-    assert.equal(controls.attributes.role, 'group');
-    assert.equal(controls.attributes['aria-label'], WEBVIEW_TRANSLATIONS[language].usageAnalysisTitle);
+    assert.equal(ui.body.querySelector('.usage-segmented-control'), null);
+    assert.deepEqual(ui.body.querySelectorAll('.usage-analysis-group-title').map(title => title.textContent),
+      [WEBVIEW_TRANSLATIONS[language].usageSourceTitle, WEBVIEW_TRANSLATIONS[language].usageTypeTitle,
+        WEBVIEW_TRANSLATIONS[language].usageAnalysisNotesTitle]);
+    const sources = ui.body.querySelector('.usage-analysis-source')!;
+    const types = ui.body.querySelector('.usage-analysis-type')!;
+    assert.equal(sources.attributes['aria-label'], WEBVIEW_TRANSLATIONS[language].usageSourceTitle);
+    assert.equal(types.attributes['aria-label'], WEBVIEW_TRANSLATIONS[language].usageTypeTitle);
+    assert.deepEqual(sources.querySelectorAll('.usage-source-entry').map(card => card.querySelector('strong')?.textContent),
+      ['account-a / fixed-small', 'account-b / child-model']);
+    assert.deepEqual(types.children[2].querySelectorAll('.usage-compact-row').map(card => card.querySelector('strong')?.textContent),
+      [WEBVIEW_TRANSLATIONS[language].usageMainSession, WEBVIEW_TRANSLATIONS[language].usageSubagentLabel]);
+    assert.equal(sources.querySelectorAll('.usage-source-bar').length, 2);
+    assert.equal(types.querySelectorAll('.usage-analysis-share').length, 0);
 
-    for (const mode of ['subagent', 'type', 'source', 'subagent']) {
-      ui.button(mode).click();
-      const active = ui.button(mode);
-      assert.equal(ui.document.activeElement, active, 'click restores focus after replacing the DOM');
-      assert.equal(active.attributes['aria-pressed'], 'true');
-      assert.equal(ui.body.querySelectorAll('button[data-usage-analysis]')
-        .filter(button => button.attributes['aria-pressed'] === 'true').length, 1);
-      const details = ui.body.querySelector('details');
-      if (mode === 'subagent') {
-        assert.ok(details);
-        assert.equal(ui.body.querySelectorAll('details').length, 1);
-        assert.equal(details.open, true);
-        assert.equal(details.querySelector('summary')?.textContent, language === 'zh-CN' ? '子代理明细' : 'Subagent details');
-        assert.notEqual(details.querySelector('summary')?.textContent, WEBVIEW_TRANSLATIONS[language].usageIsolationTitle);
-        assert.equal(details.querySelector('.usage-note')?.textContent, WEBVIEW_TRANSLATIONS[language].usageIsolationExplanation);
-        assert.equal(details.querySelectorAll('.usage-subagent-group-title').length, 3, 'model, work type, and recent-run details remain visible');
-        assert.equal(details.querySelectorAll('.usage-subagent-run').length, 1);
-      } else {
-        assert.equal(details, null, 'subagent details appear only in their own mode');
-      }
-    }
-
-    const unknown = ui.document.createElement('button');
-    unknown.dataset.usageAnalysis = 'unknown';
-    ui.body.append(unknown);
-    unknown.click();
-    assert.equal(ui.button('subagent').attributes['aria-pressed'], 'true', 'unknown modes do not silently select source');
-    ui.button('source').disabled = true;
-    ui.button('source').click();
-    assert.equal(ui.button('subagent').attributes['aria-pressed'], 'true', 'disabled modes do not switch views');
+    const details = ui.body.querySelector('details')!;
+    assert.ok(details);
+    assert.equal(ui.body.querySelectorAll('details').length, 1);
+    assert.equal(details.open, true);
+    const summary = details.querySelector('summary')!;
+    assert.equal(summary.textContent, language === 'zh-CN' ? '子代理明细' : 'Subagent details');
+    assert.equal(details.querySelector('.usage-note')?.textContent, WEBVIEW_TRANSLATIONS[language].usageIsolationExplanation);
+    assert.equal(details.querySelectorAll('.usage-subagent-group-title').length, 2);
+    assert.equal(details.querySelectorAll('.usage-subagent-run').length, 1);
+    ui.body.scrollTop = 75;
+    summary.focus();
+    summary.click();
+    ui.render();
+    assert.equal(ui.body.querySelector('.usage-analysis-source'), sources, 'interactions and unchanged metrics do not rebuild the analysis');
+    assert.equal(ui.body.querySelector('.usage-analysis-type'), types);
+    assert.equal(ui.document.activeElement, summary);
+    assert.equal(ui.body.scrollTop, 75);
   });
 }
 
-test('sessions without subagents hide the third mode and a session change restores source and focus', () => {
+test('pure main sessions omit redundant execution totals and empty child sections', () => {
   const empty = createUsageAnalysisHarness('en', false);
   empty.render();
-  assert.deepEqual(empty.body.querySelectorAll('button[data-usage-analysis]')
-    .map(button => button.dataset.usageAnalysis), ['source', 'type']);
+  assert.equal(empty.body.querySelector('.usage-analysis-source')?.querySelectorAll('.usage-source-entry').length, 1);
+  assert.equal(empty.body.querySelector('.usage-analysis-type'), null);
   assert.equal(empty.body.querySelector('details'), null);
 
   const ui = createUsageAnalysisHarness('en', true);
   ui.render();
-  ui.button('subagent').click();
   ui.body.scrollTop = 75;
-  ui.state.usageMetrics.usageDetails = createUsageDetailsViewModel({});
+  ui.state.usageMetrics = empty.state.usageMetrics;
   ui.render();
-  assert.equal(ui.body.querySelector('button[data-usage-analysis="subagent"]'), null);
   assert.equal(ui.body.querySelector('details'), null);
-  assert.equal(ui.button('source').attributes['aria-pressed'], 'true');
-  assert.equal(ui.document.activeElement, ui.button('source'));
+  assert.equal(ui.body.querySelectorAll('.usage-analysis-group').length, 2);
   assert.equal(ui.body.scrollTop, 75);
-  const source = ui.button('source');
-  ui.render();
-  assert.equal(ui.button('source'), source, 'fallback is normalized before caching the render key');
 });
 
-test('Escape closes the usage dialog and restores its trigger after subagent selection', () => {
+test('missing source attribution and empty usage do not render empty analysis groups', () => {
+  const ui = createUsageAnalysisHarness('en', false);
+  ui.state.usageMetrics.sessionUsageStats!.byModelSource = [];
+  ui.render();
+  assert.ok(ui.body.querySelector('.usage-source-attribution-note'), 'missing source attribution is not silently assigned to the current account');
+  assert.equal(ui.body.querySelector('.usage-analysis-type'), null, 'pure main usage needs no duplicate total');
+
+  ui.state.usageMetrics.sessionUsageStats = undefined;
+  ui.state.usageMetrics.usageDetails = createUsageDetailsViewModel({});
+  ui.render();
+  assert.equal(ui.body.querySelectorAll('.usage-analysis-group').length, 1);
+  assert.equal(ui.body.querySelector('details'), null);
+  assert.equal(ui.body.querySelector('.usage-note')?.textContent, WEBVIEW_TRANSLATIONS.en.usageNoProviderData);
+
+  ui.state.usageMetrics.usageDetails = createUsageDetailsViewModel({ lifecycleIncomplete: true });
+  ui.render();
+  assert.equal(ui.body.querySelectorAll('.usage-analysis-group').length, 2);
+  assert.equal(ui.body.querySelector('details')?.open, true, 'child lifecycle data is visible before Provider usage arrives');
+});
+
+test('Escape closes the usage dialog and restores its trigger from expanded analysis', () => {
   const ui = createUsageAnalysisHarness('en', true);
   ui.trigger.focus();
   ui.trigger.click();
   assert.equal(ui.dialog.open, true);
-  ui.button('subagent').click();
+  ui.body.querySelector('summary')!.focus();
   let prevented = false;
   ui.dialog.emit('keydown', { key: 'Escape', preventDefault: () => { prevented = true; }, stopPropagation: () => undefined });
   assert.equal(prevented, true);
   assert.equal(ui.dialog.open, false);
   assert.equal(ui.document.activeElement, ui.trigger);
   assert.equal(ui.trigger.attributes['aria-expanded'], 'false');
+});
+
+for (const language of ['zh-CN', 'en'] as const) {
+  test(`single 8,340 Token main source has one entry, no duplicate total, and one footer (${language})`, () => {
+    const ui = createUsageAnalysisHarness(language, false);
+    const sample = event('executor', 8340, 'CNY', 0);
+    sample.usage.cacheHitTokens = 0;
+    sample.usage.cacheMissTokens = 8339;
+    sample.sourceId = 'Qwen'; sample.modelId = 'deepseek-v4.1-flash-1017'; sample.provider = 'qwencloud';
+    ui.setSession({ sessionUsageStats: usageFixture(sample) });
+    ui.state.usageMetrics.isOfficialDeepSeek = false;
+    ui.state.usageMetrics.referenceCostSourceIds = ['Qwen'];
+    const recorded = JSON.stringify(ui.state.usageMetrics);
+    ui.render();
+    const source = ui.body.querySelector('.usage-source-entry')!;
+    assert.equal(ui.body.querySelectorAll('.usage-source-entry').length, 1);
+    assert.equal(ui.body.querySelectorAll('.usage-source-name').length, 1);
+    assert.equal(source.querySelector('.usage-source-name')!.textContent, 'Qwen / deepseek-v4.1-flash-1017');
+    assert.deepEqual(source.querySelectorAll('.usage-analysis-card-metric').map(metric => metric.querySelector('strong')!.textContent),
+      ['8,340', '0.00%', 'CNY0.00']);
+    assert.equal(source.querySelector('.usage-token-share')!.textContent, WEBVIEW_TRANSLATIONS[language].usageTokenShare + ': 100%');
+    assert.equal(source.querySelector('.usage-source-bar')!.attributes.role, 'meter');
+    assert.equal(ui.body.querySelector('.usage-analysis-type'), null);
+    assert.equal(ui.body.textContent.includes(WEBVIEW_TRANSLATIONS[language].usageSessionTotal), false);
+    assert.equal(ui.body.querySelectorAll('.usage-analysis-coverage').length, 1);
+    assert.equal(ui.body.querySelector('.usage-analysis-coverage')!.textContent,
+      language === 'en' ? 'Cache data: 1 reported, 0 missing' : '缓存数据：1 次已报告，0 次缺失');
+    assert.equal(ui.body.textContent.split(WEBVIEW_TRANSLATIONS[language].usageCurrencyExplanation).length - 1, 1);
+    const help = source.querySelector('.usage-cost-help-trigger')!;
+    assert.ok(help); help.focus(); help.click(); help.emit('mouseover');
+    ui.body.scrollTop = 61; ui.render();
+    assert.equal(ui.body.querySelector('.usage-source-entry'), source);
+    assert.equal(ui.document.activeElement, help);
+    assert.equal(ui.body.scrollTop, 61);
+    assert.equal(JSON.stringify(ui.state.usageMetrics), recorded, 'read-only rendering preserves all recorded usage');
+  });
+}
+
+test('source identities remain distinct and shares use Tokens instead of response counts', () => {
+  const ui = createUsageAnalysisHarness('en', false);
+  const values = [
+    { ...event('executor', 900), sourceId: 'account-a', modelId: 'same' },
+    ...Array.from({ length: 8 }, () => ({ ...event('executor', 10), sourceId: 'account-b', modelId: 'same' })),
+    { ...event('executor', 20), sourceId: 'account-a', modelId: 'other' }
+  ];
+  ui.setSession({ sessionUsageStats: usageFixture(...values) }); ui.render();
+  const entries = ui.body.querySelectorAll('.usage-source-entry');
+  assert.deepEqual(entries.map(entry => entry.querySelector('.usage-source-name')!.textContent),
+    ['account-a / same', 'account-b / same', 'account-a / other']);
+  assert.deepEqual(entries.map(entry => entry.querySelector('.usage-source-bar')!.attributes['aria-valuenow']), ['90', '8', '2']);
+  entries.forEach(entry => {
+    assert.equal(entry.querySelectorAll('.usage-source-bar').length, 1);
+    assert.equal(entry.querySelectorAll('.usage-analysis-card-metric').length, 3);
+  });
+  assert.equal(ui.body.querySelector('.usage-analysis-type'), null, 'multiple main sources still need no repeated type total');
+});
+
+test('execution rows retain all four responsibilities and use the authoritative coverage total once', () => {
+  const ui = createUsageAnalysisHarness('en', true);
+  const legacy = normalizeSessionUsageStatsValue({ ...event('executor', 40).usage, requestCount: 1, sessionCost: 0.01, currency: 'CNY' })!;
+  const stats = addUsageEventToSessionStats(addUsageEventToSessionStats(addUsageEventToSessionStats(legacy,
+    event('executor', 100)), event('subagent', 200)), event('reviewer', 60));
+  ui.setSession({ sessionUsageStats: stats, subagentUsageStats: upsertSubagentRunUsageSummary(undefined, run('scope')) });
+  const total = ui.state.usageMetrics.usageDetails.session.total;
+  ui.render();
+  const types = ui.body.querySelector('.usage-analysis-type')!;
+  const rows = types.children[2].children;
+  assert.deepEqual(rows.map(row => row.querySelector('.usage-compact-name')!.textContent),
+    [WEBVIEW_TRANSLATIONS.en.usageMainSession, WEBVIEW_TRANSLATIONS.en.usageReviewerLabel, WEBVIEW_TRANSLATIONS.en.usageSubagentLabel, WEBVIEW_TRANSLATIONS.en.usageHistoricalUnattributed]);
+  assert.deepEqual(rows.map(row => row.querySelector('.usage-compact-values')!.children[0].textContent),
+    ['100 Tokens', '60 Tokens', '200 Tokens', '40 Tokens']);
+  assert.ok(types.textContent.includes(WEBVIEW_TRANSLATIONS.en.usageResponsibilityScope));
+  assert.equal(ui.body.querySelectorAll('.usage-analysis-coverage').length, 1);
+  assert.equal(ui.body.querySelector('.usage-analysis-coverage')!.textContent,
+    `Cache data: ${total.cacheDataRequestCount} reported, ${total.cacheDataMissingRequestCount} missing`);
+  assert.equal(ui.body.textContent.split(WEBVIEW_TRANSLATIONS.en.usageCurrencyExplanation).length - 1, 1);
+});
+
+test('reviewer-only, child-only, and historical-only sessions keep explicit type labels', () => {
+  for (const source of ['reviewer', 'subagent', 'history'] as const) {
+    const ui = createUsageAnalysisHarness('en', false);
+    const stats = usageFixture(event(source === 'history' ? 'executor' : source));
+    if (source === 'history') { stats.bySource = undefined; }
+    ui.setSession({ sessionUsageStats: stats }); ui.render();
+    const type = ui.body.querySelector('.usage-analysis-type')!;
+    assert.equal(type.children[2].children.length, 1);
+    assert.equal(type.children[2].querySelector('.usage-compact-name')!.textContent,
+      source === 'reviewer' ? WEBVIEW_TRANSLATIONS.en.usageReviewerLabel : source === 'subagent' ? WEBVIEW_TRANSLATIONS.en.usageSubagentLabel : WEBVIEW_TRANSLATIONS.en.usageHistoricalUnattributed);
+    assert.equal(ui.body.querySelector('.usage-source-attribution-note'), null,
+      'execution attribution is independent from complete per-model source attribution');
+  }
+});
+
+test('known zero usage, zero costs, and unknown costs are not confused with missing usage', () => {
+  const ui = createUsageAnalysisHarness('en', false);
+  const zero = event('reviewer', 0, 'CNY', 0);
+  zero.usage.promptTokens = 0; zero.usage.completionTokens = 0; zero.usage.cacheHitTokens = 0;
+  ui.setSession({ sessionUsageStats: usageFixture(zero) }); ui.render();
+  const entry = ui.body.querySelector('.usage-source-entry')!;
+  assert.equal(entry.querySelectorAll('.usage-analysis-card-metric')[0].querySelector('strong')!.textContent, '0');
+  assert.ok(entry.textContent.includes('CNY0.00'));
+  assert.ok(ui.body.querySelector('.usage-analysis-type')!.textContent.includes(WEBVIEW_TRANSLATIONS.en.usageReviewerLabel));
+  assert.equal(entry.querySelector('.usage-source-bar')!.attributes['aria-valuenow'], undefined);
+  assert.ok(entry.querySelector('.usage-token-share')!.textContent.includes('unavailable'));
+  assert.doesNotMatch(ui.body.textContent, /NaN|Infinity|100%/u);
+  ui.setSession({ sessionUsageStats: usageFixture(event('executor', 120, '', 0, false)) }); ui.render();
+  const unknown = ui.body.querySelector('.usage-source-entry')!;
+  assert.ok(unknown.textContent.includes(WEBVIEW_TRANSLATIONS.en.usagePricingUnknownShort));
+  assert.equal(unknown.textContent.includes('CNY0.00'), false);
+});
+
+test('zero-token reviewer costs and attempts remain visible beside 100% main Tokens', () => {
+  const ui = createUsageAnalysisHarness('en', false);
+  const stats = usageFixture(event('executor'));
+  const details = createUsageDetailsViewModel({ sessionUsageStats: stats });
+  details.session.reviewer = { ...details.session.reviewer, costByCurrency: { CNY: 0.25 } };
+  ui.state.usageMetrics.usageDetails = details;
+  ui.render();
+  assert.equal(ui.body.querySelector('.usage-analysis-type')!.children[2].children.length, 2);
+  assert.ok(ui.body.querySelector('.usage-analysis-type')!.textContent.includes('CNY0.25'));
+  details.session.reviewer.costByCurrency = {};
+  details.session.reviewer.providerAttemptCount = 2;
+  ui.render();
+  assert.ok(ui.body.querySelector('.usage-analysis-type')!.textContent.includes('2 attempts without usage'));
+  assert.ok(ui.body.querySelector('.usage-analysis-type')!.textContent.includes('not reported'));
+});
+
+test('source-only attempts stay visible without inventing token shares or response coverage', () => {
+  const ui = createUsageAnalysisHarness('en', false);
+  const price = createUsagePriceSnapshot({ originalModelId: 'failed-model', sourceId: 'failed-account', provider: 'qwencloud',
+    protocol: 'chat_completions', supportsBilling: false });
+  const stats = rebuildSessionUsageStatsFromLedger(createUsageLedgerRecords({ requestId: 'failed-only', attempts: [price], source: 'reviewer' }))!;
+  // Source groups in some host views carry attempt telemetry even before usage.
+  stats.byModelSource = [{ ...stats, sourceId: 'failed-account', modelId: 'failed-model', provider: 'qwencloud',
+    pricedRequestCount: 0, unpricedRequestCount: 0, cacheDataRequestCount: 0, cacheDataMissingRequestCount: 0 }];
+  ui.setSession({ sessionUsageStats: stats }); ui.render();
+  assert.equal(ui.body.querySelectorAll('.usage-source-entry').length, 1);
+  const entry = ui.body.querySelector('.usage-source-entry')!;
+  assert.ok(entry.textContent.includes('Usage not reported'));
+  assert.equal(entry.querySelector('.usage-source-bar')!.children.length, 0);
+  assert.equal(ui.body.querySelector('.usage-analysis-coverage')!.textContent, WEBVIEW_TRANSLATIONS.en.usageCacheCoverageUnknown);
+  assert.doesNotMatch(ui.body.textContent, /NaN|Infinity|100%|0 missing/u);
+});
+
+test('partial historical source attribution and missing identity are explicit without reassigning history', () => {
+  const ui = createUsageAnalysisHarness('en', false);
+  const stats = usageFixture(event('executor', 100), { ...event('executor', 900), sourceId: 'old' });
+  stats.byModelSource = stats.byModelSource!.slice(0, 1);
+  ui.setSession({ sessionUsageStats: stats }); ui.render();
+  assert.ok(ui.body.querySelector('.usage-source-attribution-note'));
+  assert.equal(ui.body.querySelector('.usage-source-bar')!.attributes['aria-valuenow'], '100', 'denominator covers attributed sources only');
+  assert.equal(ui.body.querySelector('.usage-analysis-type'), null, 'source gaps do not imply execution-type gaps');
+  stats.byModelSource![0].sourceId = '';
+  ui.setSession({ sessionUsageStats: stats }); ui.render();
+  assert.ok(ui.body.querySelector('.usage-source-name')!.textContent.includes('Source unknown'));
+  assert.ok(ui.body.querySelector('.usage-source-attribution-note'));
+});
+
+test('child-only sources use a role marker; mixed sources keep a subset; mismatches retain fallback evidence', () => {
+  const ui = createUsageAnalysisHarness('en', false);
+  const child = run('child-role');
+  const summaries = upsertSubagentRunUsageSummary(undefined, child);
+  const stats = usageFixture(event('subagent'));
+  ui.setSession({ sessionUsageStats: stats, subagentUsageStats: summaries }); ui.render();
+  const entry = ui.body.querySelector('.usage-source-entry')!;
+  assert.ok(entry.textContent.includes(WEBVIEW_TRANSLATIONS.en.usageSourceSubagentOnly));
+  assert.equal(entry.querySelectorAll('.usage-analysis-card-metric').length, 3);
+  assert.equal(entry.textContent.split('120').length - 1, 1, 'entire child source does not repeat its Tokens');
+  assert.equal(ui.body.querySelector('.usage-subagent-model-fallback'), null);
+  assert.ok(ui.body.querySelector('.usage-subagent-run'), 'task records are a different granularity');
+  const mixed = usageFixture(event('executor', 360), event('subagent'));
+  ui.setSession({ sessionUsageStats: mixed, subagentUsageStats: summaries }); ui.render();
+  assert.ok(ui.body.querySelector('.usage-source-subagent')!.textContent.includes('120 Tokens'));
+  assert.ok(ui.body.querySelector('.usage-source-subagent')!.textContent.includes('Of which subagents'));
+  assert.equal(ui.body.querySelector('.usage-subagent-model-fallback'), null);
+  delete mixed.byModelSource![0].bySource;
+  ui.setSession({ sessionUsageStats: mixed, subagentUsageStats: summaries }); ui.render();
+  assert.ok(ui.body.querySelector('.usage-subagent-model-fallback')!.textContent.includes('120 Tokens'));
+  assert.ok(ui.body.textContent.includes(WEBVIEW_TRANSLATIONS.en.usageSubagentSourceFallback));
+  mixed.byModelSource![0].bySource = { subagent: { ...stats.bySource!.subagent!, providerAttemptCount: 1, usageResponseCount: 1 } };
+  mixed.byModelSource![0].provider = 'other-provider';
+  ui.setSession({ sessionUsageStats: mixed, subagentUsageStats: summaries }); ui.render();
+  assert.ok(ui.body.querySelector('.usage-subagent-model-fallback'), 'provider mismatch cannot erase another model group');
+});
+
+test('subagent cache slices survive merging and fallback without borrowing the overall source rate', () => {
+  const ui = createUsageAnalysisHarness('en', false);
+  const child = event('subagent', 120);
+  child.usage.cacheHitTokens = 0; child.usage.cacheMissTokens = 119;
+  const summary = { ...run('cache-slice'), usage: addUsageEventToTurnStats(undefined, child) };
+  const stats = usageFixture(event('executor', 360), child);
+  const summaries = upsertSubagentRunUsageSummary(undefined, summary);
+  ui.setSession({ sessionUsageStats: stats, subagentUsageStats: summaries }); ui.render();
+  const source = ui.body.querySelector('.usage-source-entry')!;
+  assert.equal(source.querySelectorAll('.usage-analysis-card-metric')[1].querySelector('strong')!.textContent, '75.10%');
+  assert.ok(source.querySelector('.usage-source-subagent')!.textContent.includes('Cache hit rate: 0.00%'));
+  assert.equal(ui.body.querySelector('.usage-subagent-model-fallback'), null);
+  delete stats.byModelSource![0].bySource;
+  ui.setSession({ sessionUsageStats: stats, subagentUsageStats: summaries }); ui.render();
+  assert.equal(ui.body.querySelector('.usage-subagent-model-fallback')!.querySelector('.usage-slice-cache')!.textContent,
+    'Cache hit rate: 0.00%');
+  assert.ok(ui.body.querySelector('details')!.querySelectorAll('.usage-slice-cache').length >= 2,
+    'model and profile/lane slices keep their own cache evidence');
+});
+
+test('multiple child levels preserve task counts, local anomalies, and a single authoritative footer', () => {
+  const ui = createUsageAnalysisHarness('en', true);
+  const first = run('multi-one');
+  const second = { ...run('multi-two', 'failed', 'account-b', 'child-model'), profile: 'review', lane: 'review-read' };
+  const summaries = upsertSubagentRunUsageSummary(upsertSubagentRunUsageSummary(undefined, first), second);
+  const stats = usageFixture(event('executor'), event('subagent'),
+    { ...event('subagent'), sourceId: 'account-b', modelId: 'child-model' },
+    { ...event('reviewer', 50, '', 0, false), sourceId: 'unpriced', modelId: 'unknown' },
+    { ...event('executor', 100, '', 0, false), sourceId: 'partial', modelId: 'partial' },
+    { ...event('executor', 300), sourceId: 'partial', modelId: 'partial' });
+  ui.setSession({ sessionUsageStats: stats, subagentUsageStats: summaries }); ui.render();
+  const sourceEntries = ui.body.querySelectorAll('.usage-source-entry');
+  assert.equal(sourceEntries[0].textContent.includes('Cache fields missing'), false);
+  assert.ok(sourceEntries.find(entry => entry.textContent.includes('unpriced / unknown'))!.textContent.includes('Cost unknown'));
+  const partial = sourceEntries.find(entry => entry.textContent.includes('partial / partial'))!;
+  assert.ok(partial.textContent.includes('Partially priced (1 unpriced)'));
+  assert.ok(partial.textContent.includes('Cache fields missing (1 usage responses)'));
+  assert.equal(ui.body.querySelectorAll('.usage-subagent-run').length, 2);
+  const subdetails = ui.body.querySelector('details')!;
+  assert.ok(subdetails.textContent.includes('Tasks: 2'));
+  assert.ok(subdetails.textContent.includes('Review and verification') || subdetails.textContent.includes(WEBVIEW_TRANSLATIONS.en.usageProfileReview));
+  assert.equal(ui.body.querySelectorAll('.usage-analysis-coverage').length, 1);
+  assert.equal(ui.body.querySelector('.usage-analysis-coverage')!.textContent, 'Cache data: 4 reported, 2 missing');
+  for (const key of ['usageCurrencyExplanation', 'usageSubagentPrivacy', 'usageEstimateDisclaimer', 'usageIsolationExplanation']) {
+    assert.equal(ui.body.textContent.split(WEBVIEW_TRANSLATIONS.en[key]).length - 1, 1, key);
+  }
+});
+
+test('child lifecycle remains visible before usage, including queue, reuse, and interrupted recovery', () => {
+  const ui = createUsageAnalysisHarness('en', false);
+  ui.setSession({ subagentActivities: [
+    { id: 'queued-child', parentRunId: 'parent', parentSessionId: 'session', rootRunId: 'root', treeId: 'tree', profile: 'research', lane: 'research-read',
+      status: 'queued', updatedAt: '', sourceId: 'account-a', modelId: 'fixed-small', provider: 'deepseek' },
+    { id: 'running-child', parentRunId: 'parent', parentSessionId: 'session', rootRunId: 'root', treeId: 'tree', profile: 'review', lane: 'review-read',
+      status: 'running', updatedAt: '', reused: true, interrupted: true }
+  ], observedInvocations: { delegate: 2, parallel: 1, readResult: 0 } });
+  const before = JSON.stringify(ui.state.usageMetrics); ui.render();
+  const details = ui.body.querySelector('details')!;
+  assert.equal(details.open, true);
+  assert.ok(details.textContent.includes('Queued 1'));
+  assert.ok(details.textContent.includes('Running 1'));
+  assert.ok(details.textContent.includes('Reused 1'));
+  assert.ok(details.textContent.includes('Interrupted 1'));
+  assert.ok(details.textContent.includes('Usage not reported'));
+  assert.equal(details.textContent.includes('0 Tokens'), false, 'unreported child usage is never invented zero consumption');
+  assert.ok(details.textContent.includes(WEBVIEW_TRANSLATIONS.en.usageSubagentReconciliationPending));
+  assert.equal(JSON.stringify(ui.state.usageMetrics), before);
+});
+
+test('historical unknown cache counts are not confirmed as zero missing; observed diagnostics have a separate scope', () => {
+  const ui = createUsageAnalysisHarness('en', false);
+  const stats = usageFixture(event('executor'));
+  ui.setSession({ sessionUsageStats: stats });
+  const total = ui.state.usageMetrics.usageDetails.session.total;
+  total.cacheDataRequestCount = 0; total.cacheDataMissingRequestCount = 0;
+  ui.render();
+  assert.equal(ui.body.querySelector('.usage-analysis-coverage')!.textContent, WEBVIEW_TRANSLATIONS.en.usageCacheCoverageUnknown);
+  assert.doesNotMatch(ui.body.querySelector('.usage-analysis-coverage')!.textContent, /0 missing/u);
+  assert.match(usageRenderFragment.source, /usageDiagnosticCacheCoverage/u);
+  assert.notEqual(WEBVIEW_TRANSLATIONS.en.usageDiagnosticCacheCoverage, WEBVIEW_TRANSLATIONS.en.usageCacheCoverage);
+});
+
+test('official and reference sources keep per-source hints, currencies, truncation, and partial cost states', () => {
+  const ui = createUsageAnalysisHarness('en', false);
+  const stats = usageFixture(
+    { ...event('executor', 100, 'CNY', 12.239), sourceId: 'official' },
+    { ...event('executor', 300, 'USD', 2.999), sourceId: 'proxy' },
+    { ...event('executor', 200, 'CNY', 0.009), sourceId: 'proxy' },
+    { ...event('executor', 50, '', 0, false), sourceId: 'proxy' });
+  ui.setSession({ sessionUsageStats: stats });
+  ui.state.usageMetrics.referenceCostSourceIds = ['proxy'];
+  const original = JSON.stringify(stats); ui.render();
+  const [official, proxy] = ui.body.querySelectorAll('.usage-source-entry');
+  assert.equal(official.querySelector('.usage-cost-help-trigger'), null);
+  assert.equal(proxy.querySelectorAll('.usage-cost-help-trigger').length, 1);
+  assert.ok(official.textContent.includes('CNY12.23'));
+  assert.ok(proxy.textContent.includes('USD2.99 · CNY0.00'));
+  assert.ok(proxy.textContent.includes('Partially priced'));
+  assert.equal(official.textContent.includes('Partially priced'), false);
+  assert.equal(JSON.stringify(stats), original);
 });
 
 function createUsageAnalysisHarness(language: 'zh-CN' | 'en', withSubagents: boolean) {
@@ -571,8 +852,10 @@ function createUsageAnalysisHarness(language: 'zh-CN' | 'en', withSubagents: boo
     children: UsageElement[] = [];
     parent: UsageElement | null = null;
     className = '';
-    textContent = '';
-    disabled = false;
+    private ownText = '';
+    get textContent(): string { return this.ownText + this.children.map(child => child.textContent).join(''); }
+    set textContent(value: string) { this.ownText = value; this.children = []; }
+    style: Record<string, string> = {};
     open = false;
     isConnected = true;
     scrollTop = 0;
@@ -585,15 +868,12 @@ function createUsageAnalysisHarness(language: 'zh-CN' | 'en', withSubagents: boo
     setAttribute(name: string, value: string): void { this.attributes[name] = value; }
     matches(selector: string): boolean {
       if (selector.startsWith('.')) { return this.className.split(' ').includes(selector.slice(1)); }
-      const mode = /^button\[data-usage-analysis(?:="([^"]+)")?\]$/u.exec(selector);
-      return mode ? this.tagName === 'button' && this.dataset.usageAnalysis !== undefined
-        && (mode[1] === undefined || mode[1] === this.dataset.usageAnalysis) : this.tagName === selector;
+      return this.tagName === selector;
     }
     querySelectorAll(selector: string): UsageElement[] {
       return this.children.flatMap(child => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]);
     }
     querySelector(selector: string): UsageElement | null { return this.querySelectorAll(selector)[0] ?? null; }
-    closest(selector: string): UsageElement | null { return this.matches(selector) ? this : this.parent?.closest(selector) ?? null; }
     focus(): void { document.activeElement = this; }
     addEventListener(type: string, listener: (event: Record<string, unknown>) => void): void {
       this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
@@ -613,12 +893,20 @@ function createUsageAnalysisHarness(language: 'zh-CN' | 'en', withSubagents: boo
   const document = {
     activeElement: null as UsageElement | null,
     getElementById: (id: string) => nodes[id] ?? null,
-    createElement: (tag: string) => new UsageElement(tag)
+    createElement: (tag: string) => new UsageElement(tag),
+    createTextNode: (text: string) => { const node = new UsageElement('#text'); node.textContent = text; return node; }
   };
-  const state = { usageMetrics: { usageDetails: createUsageDetailsViewModel(withSubagents
-    ? { subagentUsageStats: upsertSubagentRunUsageSummary(undefined, run('ui-child')) } : {}) } };
+  const sessionUsageStats = usageFixture(event('executor'), ...(withSubagents
+    ? [{ ...event('subagent'), sourceId: 'account-b', modelId: 'child-model' }] : []));
+  const state = { usageMetrics: {
+    isOfficialDeepSeek: true, referenceCostSourceIds: [] as string[],
+    sessionUsageStats: sessionUsageStats as typeof sessionUsageStats | undefined,
+    usageDetails: createUsageDetailsViewModel({ sessionUsageStats,
+      subagentUsageStats: withSubagents
+        ? upsertSubagentRunUsageSummary(undefined, run('ui-child', 'completed', 'account-b', 'child-model')) : undefined })
+  } };
   const env = {
-    document, Element: UsageElement, state, getLanguage: () => language,
+    document, state, getLanguage: () => language,
     t: (key: string, values: Record<string, string | number> = {}) => (WEBVIEW_TRANSLATIONS[language][key] ?? key)
       .replace(/\{(\w+)\}/gu, (_, name: string) => String(values[name] ?? '')),
     closeCommandMenu: () => undefined, closeReferenceMenu: () => undefined,
@@ -630,14 +918,26 @@ function createUsageAnalysisHarness(language: 'zh-CN' | 'en', withSubagents: boo
     "createContextWindowSection = createSessionMetricsSection = createCacheDiagnosticsSection = function() { return usageNode('section', 'fixture-metrics'); };",
     usageBindingsFragment.source, 'return { render: renderUsageDetails };'
   ].join('\n'))(...Object.values(env)) as { render(): void };
-  return {
-    ...api, state, document, body: nodes.usageDetailsBody, trigger: nodes.contextProgress, dialog: nodes.usageDetailsDialog,
-    button(mode: string): UsageElement {
-      const button = nodes.usageDetailsBody.querySelector('button[data-usage-analysis="' + mode + '"]');
-      assert.ok(button, 'missing analysis mode: ' + mode);
-      return button;
-    }
+  const setSession = (input: Parameters<typeof createUsageDetailsViewModel>[0]) => {
+    state.usageMetrics.sessionUsageStats = input.sessionUsageStats;
+    state.usageMetrics.usageDetails = createUsageDetailsViewModel(input);
   };
+  return { ...api, setSession, state, document, body: nodes.usageDetailsBody, trigger: nodes.contextProgress, dialog: nodes.usageDetailsDialog };
+}
+
+// Events carry usage; per-source physical attempt counts are supplied by the
+// ledger summary in production. Keep the fixture's two inputs consistent.
+function usageFixture(...events: ReturnType<typeof event>[]) {
+  let stats;
+  const counts: NonNullable<ReturnType<typeof summarizeUsageLedger>['bySourceCounts']> = {};
+  for (const value of events) {
+    stats = addUsageEventToSessionStats(stats, value);
+    const count = counts[value.source] ?? { providerAttemptCount: 0, usageResponseCount: 0 };
+    counts[value.source] = { providerAttemptCount: count.providerAttemptCount + 1, usageResponseCount: count.usageResponseCount + 1 };
+  }
+  return applyUsageLedgerSummaryToSessionStats(stats, { ...summarizeUsageLedger(undefined),
+    incomplete: false, legacyAggregate: false, providerAttemptCount: events.length, usageResponseCount: events.length,
+    bySourceCounts: counts })!;
 }
 
 function event(source: UsageSource, totalTokens = 120, currency = 'CNY', cost = 0.01, reported = true) {

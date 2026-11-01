@@ -100,8 +100,9 @@ export const usageFormattersFragment: WebviewFragment = {
 
       function hasActualUsage(usage) {
         return Boolean(usage && (usage.totalTokens > 0 || usage.requestCount > 0
-          || usage.providerAttemptCount > 0
-          || Object.keys(usage.costByCurrency || {}).some(function(currency) { return usage.costByCurrency[currency] > 0; })));
+          || usage.providerAttemptCount > 0 || usage.usageResponseCount > 0
+          || usage.pricedRequestCount > 0 || usage.unpricedRequestCount > 0 || usage.estimatedRequestCount > 0
+          || Object.keys(usage.costByCurrency || {}).length > 0));
       }
 
       function usageNode(tag, className, text) {
@@ -191,8 +192,16 @@ export const usageFormattersFragment: WebviewFragment = {
           attemptStatsIncomplete: value.attemptStatsIncomplete === true
             || value.providerAttemptCount === undefined || value.usageResponseCount === undefined,
           cacheDiagnostics: normalizeCacheDiagnosticsForView(value.cacheDiagnostics),
-          byModelSource: []
+          byModelSource: [],
+          bySource: {}
         };
+        // Preserve the host's responsibility slices for display only. Do not infer
+        // a child subset from equal totals or from the currently selected model.
+        ['executor', 'summary', 'retry', 'continuation', 'background', 'reviewer', 'subagent', 'retrieval', 'router'].forEach(function(source) {
+          if (value.bySource && value.bySource[source]) {
+            normalized.bySource[source] = normalizeUsageStats(value.bySource[source], 'cost');
+          }
+        });
         normalized.byModelSource = Array.isArray(value.byModelSource)
           ? value.byModelSource.map(function(group) { return normalizeUsageStats(group, 'cost'); }).filter(Boolean)
           : [];
