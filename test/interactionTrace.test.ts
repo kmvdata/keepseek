@@ -1,6 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { test } from 'node:test';
@@ -8,6 +8,33 @@ import * as vscode from './stubs/vscode';
 import { createNoopInteractionTrace, InteractionTraceLogService } from '../src/agent/logging/interactionTrace';
 import { formatLocalTimestamp } from '../src/shared/format';
 import { PerformanceTrace, recordLocalPerformance, withPerformanceTrace } from '../src/agent/logging/performanceTrace';
+import { captureRuntimeIdentity } from '../src/shared/runtimeIdentity';
+import { getAgentTools, getAgentSystemPrompt } from '../src/agent/protocol';
+import { createHash } from 'node:crypto';
+
+test('activation identity snapshots artifact bytes and executing schema without changing provider prefix or reading again', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'keepseek-runtime-identity-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'out'), { recursive: true });
+  await writeFile(join(root, 'out/extension.js'), 'first activation bytes');
+  const before = getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 11 });
+  const identity = captureRuntimeIdentity({ extensionUri: vscode.Uri.file(root) as never, extensionMode: 2, version: 'test' });
+  await writeFile(join(root, 'out/extension.js'), 'changed after activation');
+  const sha = (text: string) => createHash('sha256').update(text).digest('hex');
+  assert.equal(identity.activationDiskSha256['extension.js'], sha('first activation bytes'));
+  assert.equal(identity.activationDiskSha256['agent/delegation.js'], null, 'missing artifacts are unknown, not invented hashes');
+  assert.equal(identity.supportedToolSchemaSha256, sha(JSON.stringify(getAgentTools({ requestProtocolVersion: 11 }))));
+  assert.equal(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 11 }), before);
+  assert.ok(Object.isFrozen(identity.activationDiskSha256));
+  const perf = new PerformanceTrace(vscode.Uri.file(join(root, 'run')) as never, 'test-run');
+  perf.record({ type: 'run_runtime', ...identity, apiKey: 'secret-fixture', prompt: 'private-fixture' });
+  perf.record({ type: 'run_start', requestProtocolVersion: 10 });
+  await perf.flush();
+  const text = await readFile(join(root, 'run.perf-0.jsonl'), 'utf8');
+  assert.match(text, /"supportedRequestProtocolVersion":11/);
+  assert.match(text, /"requestProtocolVersion":10/, 'supported and session protocols remain distinct');
+  assert.doesNotMatch(text, /secret-fixture|private-fixture|activationDiskSha256|extensionUri/);
+});
 
 test('performance flush retains local subscriptions until close and reports recovery after a transient disk failure', async t => {
   const root = await mkdtemp(join(tmpdir(), 'keepseek-perf-recover-'));

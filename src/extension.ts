@@ -6,10 +6,13 @@ import { ChatSessionStore, getCurrentWorkspaceSessionScope } from './sessions/ch
 import { getConfiguredKeepseekLanguage } from './shared/i18n';
 import type { KeepseekExtensionInfo } from './shared/types';
 import { StartupPerformanceTrace } from './shared/startupPerformance';
+import { getRuntimeIdentity, initializeRuntimeIdentity } from './shared/runtimeIdentity';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const startupTrace = new StartupPerformanceTrace();
   startupTrace.mark('activate-start');
+  initializeRuntimeIdentity({ extensionUri: context.extensionUri, extensionMode: context.extensionMode,
+    version: readPackageString(context.extension.packageJSON.version, '0.0.0'), remoteName: vscode.env.remoteName });
 
   const globalSessionStorage = new GlobalSessionStorage(context.globalStorageUri, startupTrace);
   const workspaceScope = getCurrentWorkspaceSessionScope();
@@ -47,6 +50,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     provider,
     webviewProvider,
+    vscode.commands.registerCommand('keepseek.showRuntimeDiagnostics', async () => {
+      const document = await vscode.workspace.openTextDocument({ language: 'json', content: JSON.stringify(getRuntimeIdentity(), null, 2) });
+      await vscode.window.showTextDocument(document, { preview: true });
+    }),
     vscode.commands.registerCommand('keepseek.openChat', () => provider.reveal()),
     vscode.commands.registerCommand('keepseek.addCurrentFileToContext', () => provider.addCurrentFileToContext()),
     vscode.commands.registerCommand('keepseek.pickWorkspaceFilesToContext', () => provider.pickWorkspaceFilesToContext()),

@@ -1,0 +1,430 @@
+{
+  "version": 1,
+  "date": "2026-11-02",
+  "timezone": "Asia/Shanghai",
+  "capturedAt": "2026-11-01T19:19:02.401Z",
+  "baseline": {
+    "capturedAt": "2026-11-01T18:59:26.529Z",
+    "head": "be8ae39665a3e1fbed6cf288480cae88a2fbb2c9",
+    "status": " M .vscode/settings.json\n M CHANGELOG.md\n M package.json\n",
+    "files": [
+      {
+        "path": ".vscode/settings.json",
+        "bytes": 262,
+        "sha256": "47875eca087130aca9b51dc50a817cad1df47035857db74e07dda5b0fee012bb"
+      },
+      {
+        "path": "CHANGELOG.md",
+        "bytes": 15414,
+        "sha256": "30822f5f22cf9175e595bd026d5f62fe674ff300ab10fe07d64eb4894b6c971d"
+      },
+      {
+        "path": "package.json",
+        "bytes": 24227,
+        "sha256": "aebcdc5b71211f01f12a406b56a3779677b27775b932ef07e15fad8f637bbb0e"
+      },
+      {
+        "path": "out/agent/delegation.js",
+        "bytes": 22909,
+        "sha256": "0d50e03462064ace0df8bba97543973484f2b33ec04b7dd7fa1f618b61c39b2b",
+        "installedSha256": "0d50e03462064ace0df8bba97543973484f2b33ec04b7dd7fa1f618b61c39b2b"
+      },
+      {
+        "path": "out/agent/providerRequestProjection.js",
+        "bytes": 16809,
+        "sha256": "74b3e4c49a7b86b738a72dc234e9f3a174f83f7d567eee16d7e993ca2c28a689",
+        "installedSha256": "74b3e4c49a7b86b738a72dc234e9f3a174f83f7d567eee16d7e993ca2c28a689"
+      },
+      {
+        "path": "out/agent/subagents/runtime.js",
+        "bytes": 89726,
+        "sha256": "66325f69a181d629f6381723e08775b44c41b0c1a62d068293eec8f77e6c2c2b",
+        "installedSha256": "66325f69a181d629f6381723e08775b44c41b0c1a62d068293eec8f77e6c2c2b"
+      }
+    ]
+  },
+  "sourceTreeSha256": "06f1b1066b39b26de0d8eaa1ffe57910c4337f55ec5ae7d8ed63c90b16e0766a",
+  "sourceFileCount": 326,
+  "build": [
+    {
+      "file": "out/extension.js",
+      "bytes": 7491,
+      "sha256": "f9353d79155b3810d111417a46bba66d8d7b7c267508fa1536b23b1e07671ea4"
+    },
+    {
+      "file": "out/shared/runtimeIdentity.js",
+      "bytes": 2461,
+      "sha256": "d74e14b9adcc4367e67382b9543b7dd765c4acf6e5bb37b3dd09cf77243a1693"
+    },
+    {
+      "file": "out/agent/runner.js",
+      "bytes": 292241,
+      "sha256": "84bcab11e6e09e86007e681570eab0e104c5ee137e89f73b65b528f6d7b0a392"
+    },
+    {
+      "file": "out/agent/delegation.js",
+      "bytes": 22909,
+      "sha256": "0d50e03462064ace0df8bba97543973484f2b33ec04b7dd7fa1f618b61c39b2b"
+    },
+    {
+      "file": "out/agent/providerRequestProjection.js",
+      "bytes": 16809,
+      "sha256": "74b3e4c49a7b86b738a72dc234e9f3a174f83f7d567eee16d7e993ca2c28a689"
+    },
+    {
+      "file": "out/agent/subagents/runtime.js",
+      "bytes": 89726,
+      "sha256": "66325f69a181d629f6381723e08775b44c41b0c1a62d068293eec8f77e6c2c2b"
+    }
+  ],
+  "protection": {
+    "settingsUnchanged": true,
+    "changelogUnchanged": true,
+    "packageVersion": "0.5.0",
+    "ownPackageChange": "One bilingual runtime diagnostics command contribution only; original 0.5.0 preserved."
+  },
+  "commands": [
+    {
+      "command": "bun run compile",
+      "exitCode": 0
+    },
+    {
+      "command": "bun run lint",
+      "exitCode": 0
+    },
+    {
+      "command": "bun run build:test",
+      "exitCode": 0
+    },
+    {
+      "command": "bun run test",
+      "exitCode": 0,
+      "tests": 830,
+      "pass": 829,
+      "fail": 0,
+      "skip": 1,
+      "durationMs": 145985.137893,
+      "skipReason": "Sandbox disallows local fault server bind."
+    },
+    {
+      "command": "node --test scripts/field-acceptance-audit.test.cjs",
+      "exitCode": 0,
+      "tests": 2,
+      "pass": 2
+    },
+    {
+      "command": "persistence baseline compile + both unchanged benchmarks + compare + reader + full acceptance + delegation",
+      "exitCode": 0
+    },
+    {
+      "command": "git diff --check",
+      "exitCode": 0
+    },
+    {
+      "command": "node --check (three new scripts)",
+      "exitCode": 0
+    }
+  ],
+  "logHashes": [
+    {
+      "file": "compile.log",
+      "sha256": "29c5ee0f6b0b20dbb259b99d01276198c3d28190090706394608d4deda6d2c0b"
+    },
+    {
+      "file": "lint.log",
+      "sha256": "0ff3a3f42d29a082759e91957344978599171cdcb16c18c00efaa943e6f4ef8d"
+    },
+    {
+      "file": "build-test.log",
+      "sha256": "f2a5798912ec16b3816266875a38f8490158175fa5fa725196071b16f91acad5"
+    },
+    {
+      "file": "test.log",
+      "sha256": "47c10458eb3817afac328e7eb3eb8ab9e69b3008e47d0d9f21550e73258decda"
+    },
+    {
+      "file": "audit-test.log",
+      "sha256": "691f0ac6bc659065368eef8e714731302315fe945cd099bd07ae969ca6fa4d3e"
+    }
+  ],
+  "live": {
+    "version": 1,
+    "kind": "real-provider-real-runtime-vscode-stub",
+    "startedAt": "2026-11-01T19:10:34.042Z",
+    "outputUnit": "tokens from upstream usage, durations in ms, bytes UTF-8",
+    "providerTraffic": true,
+    "extensionHost": false,
+    "batch": "smoke",
+    "temporaryStorage": "/var/folders/gf/cpfmvlwn5v31rp_7tdnlr1140000gn/T/keepseek-live-acceptance-uHRK9s",
+    "limits": {
+      "maxPhysicalTransportsPerBatch": 3,
+      "maxMsPerSample": 180000
+    },
+    "samples": [
+      {
+        "sampleId": "S01",
+        "goal": "只读定位 CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION 的定义与 buildProviderRequestProjection 的关系。给出路径、行号和一句结论。不要修改文件或执行命令。",
+        "sessionId": "field-e43d6e26-e8fc-4f9b-9741-c57c9e375542",
+        "requestProtocolVersion": 11,
+        "physicalAttempts": [
+          {
+            "ordinal": 1,
+            "child": false,
+            "modelId": "deepseek-v4.1-flash-1017",
+            "maxOutputTokens": 393192,
+            "thinking": true,
+            "inputBytes": 46772,
+            "bodySha256": "2ad01c9a8344d77474197788f8572d77eeb5c17695fac6873dd3e06087e7f6a8",
+            "toolNames": [
+              "keepseek_apply_patch",
+              "keepseek_create_draft_edit",
+              "keepseek_create_incremental_draft_edit",
+              "keepseek_delegate_parallel",
+              "keepseek_delegate_task",
+              "keepseek_delegation_checkpoint",
+              "keepseek_delete_workspace_file",
+              "keepseek_find_references",
+              "keepseek_find_symbol",
+              "keepseek_get_document_symbols",
+              "keepseek_get_workspace_symbols",
+              "keepseek_git_create_patch",
+              "keepseek_git_current_branch",
+              "keepseek_git_diff",
+              "keepseek_git_status",
+              "keepseek_git_suggest_commit_message",
+              "keepseek_list_workspace_directory",
+              "keepseek_list_workspace_files",
+              "keepseek_read_evidence",
+              "keepseek_read_subagent_result",
+              "keepseek_read_workspace_diagnostics",
+              "keepseek_read_workspace_file",
+              "keepseek_read_workspace_file_range",
+              "keepseek_run_draft",
+              "keepseek_run_validation",
+              "keepseek_search_session_archive",
+              "keepseek_search_workspace"
+            ],
+            "parentPrivateMarkerPresent": true,
+            "startedOffsetMs": 238.73557600000004,
+            "errorName": "TypeError",
+            "errorCode": "ENOTFOUND"
+          }
+        ],
+        "summaries": [],
+        "startedAt": "2026-11-01T19:10:34.340Z",
+        "status": "error",
+        "errorName": "Error",
+        "errorCode": null,
+        "wallMs": 393.53223,
+        "taskId": "d02fe6e9-08d7-4ad5-9411-a048d9c1e037",
+        "activeMs": 349,
+        "stopReason": "connection_interrupted",
+        "ledger": {
+          "providerAttemptCount": 1,
+          "usageResponseCount": 0,
+          "bySourceCounts": {
+            "executor": {
+              "providerAttemptCount": 1,
+              "usageResponseCount": 0
+            }
+          },
+          "pricedRequestCount": 0,
+          "estimatedRequestCount": 0,
+          "unpricedRequestCount": 0,
+          "promptTokens": 0,
+          "completionTokens": 0,
+          "totalTokens": 0,
+          "cacheHitTokens": 0,
+          "cacheMissTokens": 0,
+          "cacheDataRequestCount": 0,
+          "cacheDataMissingRequestCount": 0,
+          "costByCurrency": {},
+          "legacyAggregate": false,
+          "incomplete": false,
+          "cacheDiagnostics": {
+            "cacheDataResponseCount": 0,
+            "cacheDataMissingResponseCount": 0,
+            "coldStartRequestCount": 1,
+            "controlledBoundaryRequestCount": 0,
+            "comparableRequestCount": 0,
+            "healthyReusableRequestCount": 0,
+            "anomalousReusableRequestCount": 0,
+            "providerCacheEvictionPossibleCount": 0,
+            "estimatedReusableTokensNotHit": 0,
+            "estimatedLocalBoundaryLossTokens": 0,
+            "estimatedLocalBoundaryExtraCostByCurrency": {},
+            "reusablePrefixTokens": 0,
+            "unavoidableNewTokens": 0,
+            "localEstimateLowCount": 0,
+            "bySource": [],
+            "byLane": [],
+            "incomplete": false
+          }
+        },
+        "usage": {
+          "knownResponseCount": 0,
+          "missingAttemptCount": 1,
+          "actualTotalTokens": null,
+          "actualCost": null
+        },
+        "ledgerIdentities": [
+          {
+            "requestId": "69b5a3c5-455d-4d05-8cf4-92d5d8bce54d",
+            "attemptIndex": 0,
+            "source": "executor"
+          }
+        ],
+        "restoredChildren": {
+          "activities": [],
+          "summaries": [],
+          "incomplete": false
+        },
+        "evidenceLevel": "C-attempt-only",
+        "result": "blocked",
+        "runId": null,
+        "quality": {
+          "goalSatisfied": false,
+          "semanticReview": "not_run"
+        }
+      }
+    ],
+    "model": {
+      "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+      "modelId": "deepseek-v4.1-flash-1017",
+      "provider": "qwencloud",
+      "contextWindowTokens": 1024000,
+      "maxOutputTokens": 393192,
+      "settings": {
+        "thinkingEnabled": true,
+        "reasoningEffort": "high",
+        "compressionThreshold": "balanced"
+      }
+    },
+    "configuredLimits": {
+      "getConfiguredModelRequestTimeoutMs": 28800000,
+      "getConfiguredAgentMaxExecutionMs": 0,
+      "getConfiguredSubagentMaxExecutionMs": 300000,
+      "getConfiguredAgentMaxModelRequests": 0,
+      "getConfiguredAgentMaxCost": 0,
+      "getConfiguredAgentMaxTreeUpstreamTokens": 0
+    },
+    "workspaceSourceHash": "5dc03820ab17e16f353223ae15f17db6569989ddaa09c1a20aca061975d5ef3b",
+    "finishedAt": "2026-11-01T19:10:34.770Z"
+  },
+  "initialHarnessProbe": {
+    "includedInAcceptance": false,
+    "reason": "Before correction of global settings path, used fallback timeout; immediately corrected and performed one bounded smoke with correct configuration.",
+    "attempts": 1,
+    "providerResponses": 0,
+    "usageResponses": 0,
+    "errorCode": "ENOTFOUND",
+    "actualTokens": null,
+    "actualCost": null
+  },
+  "totalNewTransports": 2,
+  "totalNewProviderResponses": 0,
+  "totalNewUsageResponses": 0,
+  "ui": {
+    "evidenceLevel": "D-partial",
+    "existingBusyWindowObserved": true,
+    "modifiedExistingSession": false,
+    "isolatedLaunchAttempted": true,
+    "isolatedLaunchVerified": false,
+    "error": "task_name_for_pid: (os/kern) failure (5); no isolated user-data logs or new window observed",
+    "newHostDiagnosticsCommandExecuted": false,
+    "newSessionV11Verified": false
+  },
+  "hostLogs": {
+    "path": "Code/logs/20261031T233340/window1/exthost/exthost.log",
+    "activationAt": "2026-10-31T23:33:45.430+08:00",
+    "pid": 24869,
+    "exactLoadedBytes": "unconfirmed; V10 request schema + ongoing V3 writes + missing current encoding event support an unreloaded host, not exact byte identity"
+  },
+  "samples": [
+    {
+      "sampleId": "S01",
+      "evidenceLevels": "C-attempt-only",
+      "status": "blocked",
+      "reason": "Real native transport failed DNS, no Provider response"
+    },
+    {
+      "sampleId": "S02",
+      "evidenceLevels": "F",
+      "status": "not_run",
+      "reason": "Natural multi-module live behavior blocked by smoke"
+    },
+    {
+      "sampleId": "S03",
+      "evidenceLevels": "F",
+      "status": "not_run",
+      "reason": "Research live behavior blocked by smoke"
+    },
+    {
+      "sampleId": "S04",
+      "evidenceLevels": "F",
+      "status": "not_run",
+      "reason": "Review live behavior blocked by smoke"
+    },
+    {
+      "sampleId": "S05",
+      "evidenceLevels": "B/F",
+      "status": "offline_only",
+      "reason": "Proposal boundary regression passed; real isolated proposal not executed"
+    },
+    {
+      "sampleId": "S06",
+      "evidenceLevels": "B/F",
+      "status": "offline_only",
+      "reason": "Dependency/parallel contracts passed; natural parallel selection unverified"
+    },
+    {
+      "sampleId": "S07",
+      "evidenceLevels": "B/F",
+      "status": "offline_only",
+      "reason": "Real runtime + mock SSE inheritance/isolation tests, no real Provider proof"
+    },
+    {
+      "sampleId": "S08",
+      "evidenceLevels": "B",
+      "status": "pass_offline",
+      "reason": "Paging, partial, wrong binding, acceptance and supersession covered"
+    },
+    {
+      "sampleId": "S09",
+      "evidenceLevels": "C/D/E",
+      "status": "observed_partial",
+      "reason": "Existing V10 task snapshot, not new V11 field acceptance"
+    },
+    {
+      "sampleId": "S10",
+      "evidenceLevels": "B/F",
+      "status": "offline_only",
+      "reason": "Synthetic compression fallback/capacity; real long goal unexecuted"
+    },
+    {
+      "sampleId": "S11",
+      "evidenceLevels": "B/F",
+      "status": "offline_only",
+      "reason": "Synthetic epoch/evidence/no-progress; no natural epoch observed"
+    },
+    {
+      "sampleId": "S12",
+      "evidenceLevels": "B/D/F",
+      "status": "partial",
+      "reason": "Recovery fixtures passed; isolated UI/reload not verified"
+    }
+  ],
+  "worktreeDiffSha256": "013a6a40dcc32849df3f61a3e18222258334d80fa37ede946c203bc08f87f2fb",
+  "artifacts": [
+    {
+      "file": "keepseek-field-record-audit-20261102.json",
+      "bytes": 66321,
+      "sha256": "5a845a47094f662971406f72957f7e0779ec69732a69a6d09985bdc0c113f6d8"
+    },
+    {
+      "file": "keepseek-field-benchmarks-20261102.json",
+      "bytes": 140947,
+      "sha256": "4dcf923bd43d29cc2b326d9d68ed0e12246a4c5e3c2f69e087cbc67a485f05b5"
+    }
+  ]
+}

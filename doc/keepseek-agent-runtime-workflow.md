@@ -81,7 +81,7 @@ Coordinator 先按模型画像刷新摘要，再由 `buildProviderRequestProject
 - OpenAI Responses；
 - Anthropic Messages。
 
-实际请求、token 估算、工具结果准入和缓存观测共用这一投影。当前 request protocol/tool schema 是 V10；V10 将子代理结果读取升级为 UTF-8 byte-offset 分页，热旧会话只在受控边界迁移。
+实际请求、token 估算、工具结果准入和缓存观测共用这一投影。当前新会话 request protocol/tool schema 是 V11；V10 引入子代理 UTF-8 byte-offset 分页，V11 增加分工评估与父验收合同。热旧会话只在受控边界迁移。现场核验方法及尚未完成的验证见 [P1 现场验收](keepseek-p1-field-acceptance.md)。
 
 ### 4.3 来源解析
 

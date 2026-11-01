@@ -1,0 +1,1994 @@
+{
+  "version": 1,
+  "kind": "read-only-record-audit",
+  "capturedAt": "2026-11-01T19:11:02.470Z",
+  "units": {
+    "time": "ms",
+    "tokens": "upstream reported",
+    "bytes": "UTF-8"
+  },
+  "atomicSnapshot": false,
+  "scope": "Existing child summary indexes and their parent ledgers; no private graph, account data or conversation content is exported.",
+  "parents": [
+    {
+      "workspaceHash": "412d45f0438cbdb0143870f0",
+      "parentSessionId": "5faf8ab5-1f87-4b12-9d27-b4339f745b0e",
+      "childCount": 3,
+      "children": [
+        {
+          "subagentId": "sa_21efa636-8144-4533-be36-4bd526afb525",
+          "parentRunId": "443f714e-a115-4204-bceb-dd85156d1640",
+          "rootRunId": "443f714e-a115-4204-bceb-dd85156d1640",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash"
+        },
+        {
+          "subagentId": "sa_4fb27878-5252-49b6-917f-282b947d140e",
+          "parentRunId": "443f714e-a115-4204-bceb-dd85156d1640",
+          "rootRunId": "443f714e-a115-4204-bceb-dd85156d1640",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash"
+        },
+        {
+          "subagentId": "sa_62dd32da-871b-46c1-8fb8-af8bf5ce79b3",
+          "parentRunId": "443f714e-a115-4204-bceb-dd85156d1640",
+          "rootRunId": "443f714e-a115-4204-bceb-dd85156d1640",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash"
+        }
+      ],
+      "summaries": [
+        {
+          "subagentId": "sa_21efa636-8144-4533-be36-4bd526afb525",
+          "providerAttemptCount": 6,
+          "usageResponseCount": 6,
+          "requestCount": 6,
+          "totalTokens": 109289,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_4fb27878-5252-49b6-917f-282b947d140e",
+          "providerAttemptCount": 5,
+          "usageResponseCount": 5,
+          "requestCount": 5,
+          "totalTokens": 129939,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_62dd32da-871b-46c1-8fb8-af8bf5ce79b3",
+          "providerAttemptCount": 6,
+          "usageResponseCount": 6,
+          "requestCount": 6,
+          "totalTokens": 108887,
+          "reused": false
+        }
+      ],
+      "indexIncomplete": false,
+      "damagedLedgerBuckets": 0,
+      "ledger": {
+        "providerAttemptCount": 17,
+        "usageResponseCount": 17,
+        "promptTokens": 338711,
+        "completionTokens": 9404,
+        "totalTokens": 348115,
+        "cacheHitTokens": 172032,
+        "actualCostByCurrency": {}
+      },
+      "missingUsageAttempts": 0,
+      "statsAttempts": 17,
+      "statsUsage": 17,
+      "countsMatch": true,
+      "attemptIdentities": [
+        {
+          "requestId": "72445baf-b2b2-48ed-9c3f-44e53a5df146",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_21efa636-8144-4533-be36-4bd526afb525"
+        },
+        {
+          "requestId": "e6c61a07-8557-4f65-9101-7d3db0f6132b",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_62dd32da-871b-46c1-8fb8-af8bf5ce79b3"
+        },
+        {
+          "requestId": "5d71cb98-ae08-4a0f-861c-c04aa692f28f",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4fb27878-5252-49b6-917f-282b947d140e"
+        },
+        {
+          "requestId": "b945d229-b1b5-471a-8b55-64912ac3c2cf",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_21efa636-8144-4533-be36-4bd526afb525"
+        },
+        {
+          "requestId": "b0a0bc03-efef-43a7-9db1-b5cf1eac1a50",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_62dd32da-871b-46c1-8fb8-af8bf5ce79b3"
+        },
+        {
+          "requestId": "5f4bccad-ca9d-4680-89a8-4d3329e0310d",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4fb27878-5252-49b6-917f-282b947d140e"
+        },
+        {
+          "requestId": "32b9b9a3-8475-40e0-a67c-8c3284f5bce5",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_62dd32da-871b-46c1-8fb8-af8bf5ce79b3"
+        },
+        {
+          "requestId": "9588d744-2c6e-43ec-b842-6d6a52ad1f46",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_62dd32da-871b-46c1-8fb8-af8bf5ce79b3"
+        },
+        {
+          "requestId": "7fb6884d-0961-46a0-b9f0-ea025bfa5505",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4fb27878-5252-49b6-917f-282b947d140e"
+        },
+        {
+          "requestId": "1bda25bb-a8a9-4964-9049-02652d93f06b",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_21efa636-8144-4533-be36-4bd526afb525"
+        },
+        {
+          "requestId": "0dcc7fbd-e112-4ce7-8279-1d00f3821ff0",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_62dd32da-871b-46c1-8fb8-af8bf5ce79b3"
+        },
+        {
+          "requestId": "ee6deef6-633e-4bbc-8b7b-d30724b8c04e",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4fb27878-5252-49b6-917f-282b947d140e"
+        },
+        {
+          "requestId": "ea8702d6-7edc-4d97-b097-6bf4f831503e",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_21efa636-8144-4533-be36-4bd526afb525"
+        },
+        {
+          "requestId": "2925a371-3b63-4b09-9cca-aac6872290e9",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_62dd32da-871b-46c1-8fb8-af8bf5ce79b3"
+        },
+        {
+          "requestId": "cea3cb27-273b-490f-8940-ae08b750c2e0",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_21efa636-8144-4533-be36-4bd526afb525"
+        },
+        {
+          "requestId": "da0bdc9b-929a-47e9-8d5b-d5b2726ee219",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_21efa636-8144-4533-be36-4bd526afb525"
+        },
+        {
+          "requestId": "d4844c98-3612-47d2-b154-9e4a2089a11d",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4fb27878-5252-49b6-917f-282b947d140e"
+        }
+      ],
+      "allRoles": {
+        "executor": {
+          "providerAttemptCount": 41,
+          "usageResponseCount": 40
+        },
+        "subagent": {
+          "providerAttemptCount": 17,
+          "usageResponseCount": 17
+        },
+        "continuation": {
+          "providerAttemptCount": 4,
+          "usageResponseCount": 4
+        }
+      },
+      "childReconciliation": [
+        {
+          "subagentId": "sa_21efa636-8144-4533-be36-4bd526afb525",
+          "summaryAttempts": 6,
+          "summaryUsage": 6,
+          "ledgerAttempts": 6,
+          "ledgerUsage": 6,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_4fb27878-5252-49b6-917f-282b947d140e",
+          "summaryAttempts": 5,
+          "summaryUsage": 5,
+          "ledgerAttempts": 5,
+          "ledgerUsage": 5,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_62dd32da-871b-46c1-8fb8-af8bf5ce79b3",
+          "summaryAttempts": 6,
+          "summaryUsage": 6,
+          "ledgerAttempts": 6,
+          "ledgerUsage": 6,
+          "countsMatch": true
+        }
+      ]
+    },
+    {
+      "workspaceHash": "4a71c62ccbff37b4c9a9a1bc",
+      "parentSessionId": "29a87dd6-14fb-4c45-9cae-98e586027512",
+      "childCount": 1,
+      "children": [
+        {
+          "subagentId": "sa_a151037c-d672-4b9c-b4f7-e7d4484c1af8",
+          "parentRunId": "d35785e7-f1e6-47f2-9bf9-3149a7932489",
+          "rootRunId": "d35785e7-f1e6-47f2-9bf9-3149a7932489",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash-1017"
+        }
+      ],
+      "summaries": [
+        {
+          "subagentId": "sa_a151037c-d672-4b9c-b4f7-e7d4484c1af8",
+          "providerAttemptCount": 7,
+          "usageResponseCount": 7,
+          "requestCount": 7,
+          "totalTokens": 179559,
+          "reused": false
+        }
+      ],
+      "indexIncomplete": false,
+      "damagedLedgerBuckets": 0,
+      "ledger": {
+        "providerAttemptCount": 7,
+        "usageResponseCount": 7,
+        "promptTokens": 174521,
+        "completionTokens": 5038,
+        "totalTokens": 179559,
+        "cacheHitTokens": 87040,
+        "actualCostByCurrency": {}
+      },
+      "missingUsageAttempts": 0,
+      "statsAttempts": 7,
+      "statsUsage": 7,
+      "countsMatch": true,
+      "attemptIdentities": [
+        {
+          "requestId": "056eb2a1-8cf7-4b8c-8c15-85c4b36aae33",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_a151037c-d672-4b9c-b4f7-e7d4484c1af8"
+        },
+        {
+          "requestId": "ecf433aa-5d6d-41b0-b28f-1a276c8f25d4",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_a151037c-d672-4b9c-b4f7-e7d4484c1af8"
+        },
+        {
+          "requestId": "26f77e1f-6872-4dce-a835-48202367cff5",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_a151037c-d672-4b9c-b4f7-e7d4484c1af8"
+        },
+        {
+          "requestId": "b5e2a92f-e927-4bc5-b8a2-0311375e3741",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_a151037c-d672-4b9c-b4f7-e7d4484c1af8"
+        },
+        {
+          "requestId": "abdcb319-6bff-4a32-a58c-4fdb2942997f",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_a151037c-d672-4b9c-b4f7-e7d4484c1af8"
+        },
+        {
+          "requestId": "1eff2793-de01-45e5-8836-0c190978a839",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_a151037c-d672-4b9c-b4f7-e7d4484c1af8"
+        },
+        {
+          "requestId": "f2b46b0e-0cca-45bb-8dcc-3e74386b1b59",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_a151037c-d672-4b9c-b4f7-e7d4484c1af8"
+        }
+      ],
+      "allRoles": {
+        "executor": {
+          "providerAttemptCount": 79,
+          "usageResponseCount": 78
+        },
+        "subagent": {
+          "providerAttemptCount": 7,
+          "usageResponseCount": 7
+        }
+      },
+      "childReconciliation": [
+        {
+          "subagentId": "sa_a151037c-d672-4b9c-b4f7-e7d4484c1af8",
+          "summaryAttempts": 7,
+          "summaryUsage": 7,
+          "ledgerAttempts": 7,
+          "ledgerUsage": 7,
+          "countsMatch": true
+        }
+      ]
+    },
+    {
+      "workspaceHash": "4a71c62ccbff37b4c9a9a1bc",
+      "parentSessionId": "54e245ae-24c8-4b6c-87ce-59c596330d83",
+      "childCount": 4,
+      "children": [
+        {
+          "subagentId": "sa_0943ca4a-bb24-4bb6-a27c-369082561aa0",
+          "parentRunId": "4a576d4d-bbee-4e22-aa78-dbc2a6697093",
+          "rootRunId": "4a576d4d-bbee-4e22-aa78-dbc2a6697093",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash"
+        },
+        {
+          "subagentId": "sa_4069c146-b42b-4acf-a86d-7781830d0131",
+          "parentRunId": "4a576d4d-bbee-4e22-aa78-dbc2a6697093",
+          "rootRunId": "4a576d4d-bbee-4e22-aa78-dbc2a6697093",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash"
+        },
+        {
+          "subagentId": "sa_610ebf37-2a94-463e-90cc-98388dd54b5a",
+          "parentRunId": "4a576d4d-bbee-4e22-aa78-dbc2a6697093",
+          "rootRunId": "4a576d4d-bbee-4e22-aa78-dbc2a6697093",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash"
+        },
+        {
+          "subagentId": "sa_e6b322eb-b53f-4d6d-a36e-1e65df414d75",
+          "parentRunId": "4a576d4d-bbee-4e22-aa78-dbc2a6697093",
+          "rootRunId": "4a576d4d-bbee-4e22-aa78-dbc2a6697093",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash"
+        }
+      ],
+      "summaries": [
+        {
+          "subagentId": "sa_0943ca4a-bb24-4bb6-a27c-369082561aa0",
+          "providerAttemptCount": 7,
+          "usageResponseCount": 7,
+          "requestCount": 7,
+          "totalTokens": 131968,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_4069c146-b42b-4acf-a86d-7781830d0131",
+          "providerAttemptCount": 4,
+          "usageResponseCount": 4,
+          "requestCount": 4,
+          "totalTokens": 73395,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_610ebf37-2a94-463e-90cc-98388dd54b5a",
+          "providerAttemptCount": 6,
+          "usageResponseCount": 6,
+          "requestCount": 6,
+          "totalTokens": 103010,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_e6b322eb-b53f-4d6d-a36e-1e65df414d75",
+          "providerAttemptCount": 4,
+          "usageResponseCount": 4,
+          "requestCount": 4,
+          "totalTokens": 131332,
+          "reused": false
+        }
+      ],
+      "indexIncomplete": false,
+      "damagedLedgerBuckets": 0,
+      "ledger": {
+        "providerAttemptCount": 21,
+        "usageResponseCount": 21,
+        "promptTokens": 425974,
+        "completionTokens": 13731,
+        "totalTokens": 439705,
+        "cacheHitTokens": 163456,
+        "actualCostByCurrency": {}
+      },
+      "missingUsageAttempts": 0,
+      "statsAttempts": 21,
+      "statsUsage": 21,
+      "countsMatch": true,
+      "attemptIdentities": [
+        {
+          "requestId": "6906e389-2591-4870-a2e0-45d2edf69141",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_0943ca4a-bb24-4bb6-a27c-369082561aa0"
+        },
+        {
+          "requestId": "0d1b29c5-69ad-4894-86b2-937c96215089",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4069c146-b42b-4acf-a86d-7781830d0131"
+        },
+        {
+          "requestId": "655a3500-2c40-453c-b63b-6595935d17bf",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_610ebf37-2a94-463e-90cc-98388dd54b5a"
+        },
+        {
+          "requestId": "bf71f35a-108a-48cf-89f3-13ba93e3a653",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_610ebf37-2a94-463e-90cc-98388dd54b5a"
+        },
+        {
+          "requestId": "e1ca622c-7ecd-461b-9bf0-183feeaea30f",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4069c146-b42b-4acf-a86d-7781830d0131"
+        },
+        {
+          "requestId": "98db61d0-5104-4f4e-a687-24c059594218",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_0943ca4a-bb24-4bb6-a27c-369082561aa0"
+        },
+        {
+          "requestId": "c590691e-a42d-4fe8-98dd-afda3357cd11",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_610ebf37-2a94-463e-90cc-98388dd54b5a"
+        },
+        {
+          "requestId": "bd1e5369-fcdc-4474-bdbe-2e22f2f7fb0e",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_0943ca4a-bb24-4bb6-a27c-369082561aa0"
+        },
+        {
+          "requestId": "3999aad1-f5bf-470b-b743-997bc41509ca",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_610ebf37-2a94-463e-90cc-98388dd54b5a"
+        },
+        {
+          "requestId": "ca8f17cf-c26c-4663-a898-0d8af4d1423f",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4069c146-b42b-4acf-a86d-7781830d0131"
+        },
+        {
+          "requestId": "1dadb7a1-612e-4e9e-9b7b-a7aeaf2e28f4",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_0943ca4a-bb24-4bb6-a27c-369082561aa0"
+        },
+        {
+          "requestId": "dd3f28bb-f660-43fc-ab28-a2f361a12665",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_610ebf37-2a94-463e-90cc-98388dd54b5a"
+        },
+        {
+          "requestId": "1a1c3496-f21f-4e39-ae1d-0f9b3a62b094",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4069c146-b42b-4acf-a86d-7781830d0131"
+        },
+        {
+          "requestId": "69bd5c27-f9f4-4ebe-ab68-c6049c6da55d",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_0943ca4a-bb24-4bb6-a27c-369082561aa0"
+        },
+        {
+          "requestId": "e9a04643-d2cb-47d1-b13a-d78e6e752a95",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_610ebf37-2a94-463e-90cc-98388dd54b5a"
+        },
+        {
+          "requestId": "bc40761d-328c-4430-b66d-c637ab8a7712",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_0943ca4a-bb24-4bb6-a27c-369082561aa0"
+        },
+        {
+          "requestId": "24fda7b8-0964-44e5-b1ac-cefc1d747437",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_e6b322eb-b53f-4d6d-a36e-1e65df414d75"
+        },
+        {
+          "requestId": "1d7bdd28-8886-4c56-93e4-66a994fd23ca",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_e6b322eb-b53f-4d6d-a36e-1e65df414d75"
+        },
+        {
+          "requestId": "0983dfd0-a5e0-401d-8584-d997fa67b446",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_0943ca4a-bb24-4bb6-a27c-369082561aa0"
+        },
+        {
+          "requestId": "d29aca78-b1f6-4b8a-969f-f6ae0b874f85",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_e6b322eb-b53f-4d6d-a36e-1e65df414d75"
+        },
+        {
+          "requestId": "fbe00d58-231f-49ce-8a2a-61cbe48b1998",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_e6b322eb-b53f-4d6d-a36e-1e65df414d75"
+        }
+      ],
+      "allRoles": {
+        "executor": {
+          "providerAttemptCount": 23,
+          "usageResponseCount": 23
+        },
+        "subagent": {
+          "providerAttemptCount": 21,
+          "usageResponseCount": 21
+        }
+      },
+      "childReconciliation": [
+        {
+          "subagentId": "sa_0943ca4a-bb24-4bb6-a27c-369082561aa0",
+          "summaryAttempts": 7,
+          "summaryUsage": 7,
+          "ledgerAttempts": 7,
+          "ledgerUsage": 7,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_4069c146-b42b-4acf-a86d-7781830d0131",
+          "summaryAttempts": 4,
+          "summaryUsage": 4,
+          "ledgerAttempts": 4,
+          "ledgerUsage": 4,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_610ebf37-2a94-463e-90cc-98388dd54b5a",
+          "summaryAttempts": 6,
+          "summaryUsage": 6,
+          "ledgerAttempts": 6,
+          "ledgerUsage": 6,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_e6b322eb-b53f-4d6d-a36e-1e65df414d75",
+          "summaryAttempts": 4,
+          "summaryUsage": 4,
+          "ledgerAttempts": 4,
+          "ledgerUsage": 4,
+          "countsMatch": true
+        }
+      ]
+    },
+    {
+      "workspaceHash": "4a71c62ccbff37b4c9a9a1bc",
+      "parentSessionId": "a9c60e8f-fddd-40b6-905a-837220920122",
+      "childCount": 2,
+      "children": [
+        {
+          "subagentId": "sa_1794f382-1ff1-45a7-a9b2-ee69c1fa5ea1",
+          "parentRunId": "b27fd89b-1afb-4c8c-aebf-6b06644cc704",
+          "rootRunId": "b27fd89b-1afb-4c8c-aebf-6b06644cc704",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash"
+        },
+        {
+          "subagentId": "sa_4da3687c-740d-4e18-82d0-73ecf7c9ae35",
+          "parentRunId": "b27fd89b-1afb-4c8c-aebf-6b06644cc704",
+          "rootRunId": "b27fd89b-1afb-4c8c-aebf-6b06644cc704",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash"
+        }
+      ],
+      "summaries": [
+        {
+          "subagentId": "sa_1794f382-1ff1-45a7-a9b2-ee69c1fa5ea1",
+          "providerAttemptCount": 7,
+          "usageResponseCount": 7,
+          "requestCount": 7,
+          "totalTokens": 126316,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_4da3687c-740d-4e18-82d0-73ecf7c9ae35",
+          "providerAttemptCount": 8,
+          "usageResponseCount": 8,
+          "requestCount": 8,
+          "totalTokens": 402638,
+          "reused": false
+        }
+      ],
+      "indexIncomplete": false,
+      "damagedLedgerBuckets": 0,
+      "ledger": {
+        "providerAttemptCount": 15,
+        "usageResponseCount": 15,
+        "promptTokens": 518517,
+        "completionTokens": 10437,
+        "totalTokens": 528954,
+        "cacheHitTokens": 391424,
+        "actualCostByCurrency": {}
+      },
+      "missingUsageAttempts": 0,
+      "statsAttempts": 15,
+      "statsUsage": 15,
+      "countsMatch": true,
+      "attemptIdentities": [
+        {
+          "requestId": "0b474193-df4a-4649-8288-e2b885bb4907",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_1794f382-1ff1-45a7-a9b2-ee69c1fa5ea1"
+        },
+        {
+          "requestId": "13a41d57-cfa4-4047-be9c-412ee0efba1a",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4da3687c-740d-4e18-82d0-73ecf7c9ae35"
+        },
+        {
+          "requestId": "87ede814-ef78-4699-ac0f-86b3fa3ccf59",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4da3687c-740d-4e18-82d0-73ecf7c9ae35"
+        },
+        {
+          "requestId": "cff5a63c-f6eb-49e7-82ba-6580a10e5109",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_1794f382-1ff1-45a7-a9b2-ee69c1fa5ea1"
+        },
+        {
+          "requestId": "529931ab-781c-4c62-b518-3964bb30f0a6",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4da3687c-740d-4e18-82d0-73ecf7c9ae35"
+        },
+        {
+          "requestId": "40ad2613-0d1b-471b-a215-e0bfb2b1e257",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_1794f382-1ff1-45a7-a9b2-ee69c1fa5ea1"
+        },
+        {
+          "requestId": "40598996-4c6c-4d7a-9221-f79ab6f4e985",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_1794f382-1ff1-45a7-a9b2-ee69c1fa5ea1"
+        },
+        {
+          "requestId": "cfeff5a8-511b-4e34-852d-7f20c7aa4c97",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4da3687c-740d-4e18-82d0-73ecf7c9ae35"
+        },
+        {
+          "requestId": "3701f512-981e-4cbc-95d8-a7951d7dc244",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_1794f382-1ff1-45a7-a9b2-ee69c1fa5ea1"
+        },
+        {
+          "requestId": "06c71455-6b74-414b-b323-6d00288ef6a5",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_1794f382-1ff1-45a7-a9b2-ee69c1fa5ea1"
+        },
+        {
+          "requestId": "6f981f7e-16cc-4b3a-b511-cdb4b398477a",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4da3687c-740d-4e18-82d0-73ecf7c9ae35"
+        },
+        {
+          "requestId": "c6489fde-b982-4aab-b319-b84c236f8e62",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_1794f382-1ff1-45a7-a9b2-ee69c1fa5ea1"
+        },
+        {
+          "requestId": "82304079-2799-41a3-bddc-2d1b8308594c",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4da3687c-740d-4e18-82d0-73ecf7c9ae35"
+        },
+        {
+          "requestId": "92fdc33a-eabe-403f-941b-76106d406436",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4da3687c-740d-4e18-82d0-73ecf7c9ae35"
+        },
+        {
+          "requestId": "84085e17-29da-45b7-9606-c4e256e36884",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_4da3687c-740d-4e18-82d0-73ecf7c9ae35"
+        }
+      ],
+      "allRoles": {
+        "executor": {
+          "providerAttemptCount": 146,
+          "usageResponseCount": 146
+        },
+        "subagent": {
+          "providerAttemptCount": 15,
+          "usageResponseCount": 15
+        }
+      },
+      "childReconciliation": [
+        {
+          "subagentId": "sa_1794f382-1ff1-45a7-a9b2-ee69c1fa5ea1",
+          "summaryAttempts": 7,
+          "summaryUsage": 7,
+          "ledgerAttempts": 7,
+          "ledgerUsage": 7,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_4da3687c-740d-4e18-82d0-73ecf7c9ae35",
+          "summaryAttempts": 8,
+          "summaryUsage": 8,
+          "ledgerAttempts": 8,
+          "ledgerUsage": 8,
+          "countsMatch": true
+        }
+      ]
+    },
+    {
+      "workspaceHash": "4a71c62ccbff37b4c9a9a1bc",
+      "parentSessionId": "e78f614f-305d-4084-8f1b-8001408198b0",
+      "childCount": 4,
+      "children": [
+        {
+          "subagentId": "sa_30e5f5cf-30d2-4fd6-973e-9844904ed6e8",
+          "parentRunId": "9264b026-9194-4371-9652-2004e8da1a4c",
+          "rootRunId": "9264b026-9194-4371-9652-2004e8da1a4c",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4-pro"
+        },
+        {
+          "subagentId": "sa_36936d21-c422-47d9-bd0e-ac2e0e16575a",
+          "parentRunId": "9264b026-9194-4371-9652-2004e8da1a4c",
+          "rootRunId": "9264b026-9194-4371-9652-2004e8da1a4c",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4-pro"
+        },
+        {
+          "subagentId": "sa_666f675a-80b7-4fd4-a501-2092cbca5f60",
+          "parentRunId": "9264b026-9194-4371-9652-2004e8da1a4c",
+          "rootRunId": "9264b026-9194-4371-9652-2004e8da1a4c",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4-pro"
+        },
+        {
+          "subagentId": "sa_a926ca5f-75c3-43a8-8641-00839603ec06",
+          "parentRunId": "9264b026-9194-4371-9652-2004e8da1a4c",
+          "rootRunId": "9264b026-9194-4371-9652-2004e8da1a4c",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4-pro"
+        }
+      ],
+      "summaries": [
+        {
+          "subagentId": "sa_30e5f5cf-30d2-4fd6-973e-9844904ed6e8",
+          "providerAttemptCount": 7,
+          "usageResponseCount": 7,
+          "requestCount": 7,
+          "totalTokens": 160311,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_36936d21-c422-47d9-bd0e-ac2e0e16575a",
+          "providerAttemptCount": 5,
+          "usageResponseCount": 5,
+          "requestCount": 5,
+          "totalTokens": 132717,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_666f675a-80b7-4fd4-a501-2092cbca5f60",
+          "providerAttemptCount": 7,
+          "usageResponseCount": 7,
+          "requestCount": 7,
+          "totalTokens": 92783,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_a926ca5f-75c3-43a8-8641-00839603ec06",
+          "providerAttemptCount": 4,
+          "usageResponseCount": 4,
+          "requestCount": 4,
+          "totalTokens": 92171,
+          "reused": false
+        }
+      ],
+      "indexIncomplete": false,
+      "damagedLedgerBuckets": 0,
+      "ledger": {
+        "providerAttemptCount": 23,
+        "usageResponseCount": 23,
+        "promptTokens": 471610,
+        "completionTokens": 6372,
+        "totalTokens": 477982,
+        "cacheHitTokens": 248832,
+        "actualCostByCurrency": {}
+      },
+      "missingUsageAttempts": 0,
+      "statsAttempts": 23,
+      "statsUsage": 23,
+      "countsMatch": true,
+      "attemptIdentities": [
+        {
+          "requestId": "fe7ca1c6-3d2a-4f17-bcfc-b238ef532907",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_36936d21-c422-47d9-bd0e-ac2e0e16575a"
+        },
+        {
+          "requestId": "b64b56ea-7258-4c77-827d-392d1836c72a",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_a926ca5f-75c3-43a8-8641-00839603ec06"
+        },
+        {
+          "requestId": "1591001d-cdfc-4c84-b4ca-545e639a89b0",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_666f675a-80b7-4fd4-a501-2092cbca5f60"
+        },
+        {
+          "requestId": "765be692-9c33-4653-8e8b-ddb3372d8fe6",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_666f675a-80b7-4fd4-a501-2092cbca5f60"
+        },
+        {
+          "requestId": "d458bdcb-34f4-43ba-8e7d-304b2b8209f8",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_666f675a-80b7-4fd4-a501-2092cbca5f60"
+        },
+        {
+          "requestId": "ccc4eee1-ac50-4547-be3c-475b17b4387e",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_36936d21-c422-47d9-bd0e-ac2e0e16575a"
+        },
+        {
+          "requestId": "c27427c5-6803-4204-a00c-da20bd9a8e38",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_a926ca5f-75c3-43a8-8641-00839603ec06"
+        },
+        {
+          "requestId": "89c6a4dd-6cc2-4033-a42a-654af93a023a",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_666f675a-80b7-4fd4-a501-2092cbca5f60"
+        },
+        {
+          "requestId": "d04c6feb-c1a2-4246-8439-fa408ebbe944",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_666f675a-80b7-4fd4-a501-2092cbca5f60"
+        },
+        {
+          "requestId": "80251f95-b1e5-46b1-96ad-8a01d133b079",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_36936d21-c422-47d9-bd0e-ac2e0e16575a"
+        },
+        {
+          "requestId": "5852aff4-c1d7-49b1-8fc0-5bd4dbc79174",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_a926ca5f-75c3-43a8-8641-00839603ec06"
+        },
+        {
+          "requestId": "4caf7527-c453-417e-bb43-76375c21d71d",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_666f675a-80b7-4fd4-a501-2092cbca5f60"
+        },
+        {
+          "requestId": "529c3d32-a708-4de0-a2ac-3b4340cabfac",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_36936d21-c422-47d9-bd0e-ac2e0e16575a"
+        },
+        {
+          "requestId": "2df39ea4-8973-4fa7-847a-ada0fa6ec83d",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_a926ca5f-75c3-43a8-8641-00839603ec06"
+        },
+        {
+          "requestId": "43e99e89-a103-4d81-ad93-e8e1e74b9fc5",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_666f675a-80b7-4fd4-a501-2092cbca5f60"
+        },
+        {
+          "requestId": "2d4fb7d0-f2e4-4a98-8091-afecca0e97ca",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_30e5f5cf-30d2-4fd6-973e-9844904ed6e8"
+        },
+        {
+          "requestId": "95d8abcb-9764-4b1c-a211-bc308067003a",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_36936d21-c422-47d9-bd0e-ac2e0e16575a"
+        },
+        {
+          "requestId": "346079d9-bc08-4e1e-a5a2-265be90f38a9",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_30e5f5cf-30d2-4fd6-973e-9844904ed6e8"
+        },
+        {
+          "requestId": "ab439cc8-0668-43d9-8795-42e2765e1909",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_30e5f5cf-30d2-4fd6-973e-9844904ed6e8"
+        },
+        {
+          "requestId": "62082a7e-b871-447d-8428-b0044db97553",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_30e5f5cf-30d2-4fd6-973e-9844904ed6e8"
+        },
+        {
+          "requestId": "c187873f-14c5-4452-a29c-17b85eb21c11",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_30e5f5cf-30d2-4fd6-973e-9844904ed6e8"
+        },
+        {
+          "requestId": "1080db7a-cf80-477c-be15-030142d8c6f3",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_30e5f5cf-30d2-4fd6-973e-9844904ed6e8"
+        },
+        {
+          "requestId": "04cbfd16-e01b-46a6-88a6-636d808acbca",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_30e5f5cf-30d2-4fd6-973e-9844904ed6e8"
+        }
+      ],
+      "allRoles": {
+        "executor": {
+          "providerAttemptCount": 107,
+          "usageResponseCount": 107
+        },
+        "subagent": {
+          "providerAttemptCount": 23,
+          "usageResponseCount": 23
+        }
+      },
+      "childReconciliation": [
+        {
+          "subagentId": "sa_30e5f5cf-30d2-4fd6-973e-9844904ed6e8",
+          "summaryAttempts": 7,
+          "summaryUsage": 7,
+          "ledgerAttempts": 7,
+          "ledgerUsage": 7,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_36936d21-c422-47d9-bd0e-ac2e0e16575a",
+          "summaryAttempts": 5,
+          "summaryUsage": 5,
+          "ledgerAttempts": 5,
+          "ledgerUsage": 5,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_666f675a-80b7-4fd4-a501-2092cbca5f60",
+          "summaryAttempts": 7,
+          "summaryUsage": 7,
+          "ledgerAttempts": 7,
+          "ledgerUsage": 7,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_a926ca5f-75c3-43a8-8641-00839603ec06",
+          "summaryAttempts": 4,
+          "summaryUsage": 4,
+          "ledgerAttempts": 4,
+          "ledgerUsage": 4,
+          "countsMatch": true
+        }
+      ]
+    },
+    {
+      "workspaceHash": "dc7457072e4da5be3b7858e4",
+      "parentSessionId": "d71e9f19-9f58-40ec-b066-e32de39b15b5",
+      "childCount": 7,
+      "children": [
+        {
+          "subagentId": "sa_05fc036a-7250-42cc-8545-cd794564d6dd",
+          "parentRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "rootRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash-1017"
+        },
+        {
+          "subagentId": "sa_082a671f-68b9-43a3-b123-4c70ccbea773",
+          "parentRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "rootRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash-1017"
+        },
+        {
+          "subagentId": "sa_29d95c54-9514-489a-a9fe-2607db9b7949",
+          "parentRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "rootRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash-1017"
+        },
+        {
+          "subagentId": "sa_5142b798-d93d-4816-bb69-ebbd47a0b03b",
+          "parentRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "rootRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "status": "failed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash-1017"
+        },
+        {
+          "subagentId": "sa_58fb8f3b-fa4c-4661-b88e-5f8db02d37af",
+          "parentRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "rootRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash-1017"
+        },
+        {
+          "subagentId": "sa_931a8b44-d24b-4039-8627-db3c9d863190",
+          "parentRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "rootRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash-1017"
+        },
+        {
+          "subagentId": "sa_f5f53dd3-db45-40c7-a77d-21c9098b4264",
+          "parentRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "rootRunId": "5c340c64-da5a-4198-99ed-24374358b717",
+          "status": "completed",
+          "profile": "research",
+          "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+          "modelId": "deepseek-v4.1-flash-1017"
+        }
+      ],
+      "summaries": [
+        {
+          "subagentId": "sa_05fc036a-7250-42cc-8545-cd794564d6dd",
+          "providerAttemptCount": 6,
+          "usageResponseCount": 6,
+          "requestCount": 6,
+          "totalTokens": 78292,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_082a671f-68b9-43a3-b123-4c70ccbea773",
+          "providerAttemptCount": 4,
+          "usageResponseCount": 4,
+          "requestCount": 4,
+          "totalTokens": 73560,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_29d95c54-9514-489a-a9fe-2607db9b7949",
+          "providerAttemptCount": 6,
+          "usageResponseCount": 6,
+          "requestCount": 6,
+          "totalTokens": 90042,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_5142b798-d93d-4816-bb69-ebbd47a0b03b",
+          "providerAttemptCount": 7,
+          "usageResponseCount": 7,
+          "requestCount": 7,
+          "totalTokens": 89379,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_58fb8f3b-fa4c-4661-b88e-5f8db02d37af",
+          "providerAttemptCount": 5,
+          "usageResponseCount": 5,
+          "requestCount": 5,
+          "totalTokens": 75334,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_931a8b44-d24b-4039-8627-db3c9d863190",
+          "providerAttemptCount": 6,
+          "usageResponseCount": 6,
+          "requestCount": 6,
+          "totalTokens": 77621,
+          "reused": false
+        },
+        {
+          "subagentId": "sa_f5f53dd3-db45-40c7-a77d-21c9098b4264",
+          "providerAttemptCount": 6,
+          "usageResponseCount": 6,
+          "requestCount": 6,
+          "totalTokens": 69973,
+          "reused": false
+        }
+      ],
+      "indexIncomplete": false,
+      "damagedLedgerBuckets": 0,
+      "ledger": {
+        "providerAttemptCount": 40,
+        "usageResponseCount": 40,
+        "promptTokens": 531520,
+        "completionTokens": 22681,
+        "totalTokens": 554201,
+        "cacheHitTokens": 385536,
+        "actualCostByCurrency": {}
+      },
+      "missingUsageAttempts": 0,
+      "statsAttempts": 40,
+      "statsUsage": 40,
+      "countsMatch": true,
+      "attemptIdentities": [
+        {
+          "requestId": "c7656100-09f7-471d-a77a-be2a39470b25",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_931a8b44-d24b-4039-8627-db3c9d863190"
+        },
+        {
+          "requestId": "9aada739-9be5-45d6-adf4-5220013af37e",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_29d95c54-9514-489a-a9fe-2607db9b7949"
+        },
+        {
+          "requestId": "a6324bda-de3a-4508-9d51-44418e0a5353",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_5142b798-d93d-4816-bb69-ebbd47a0b03b"
+        },
+        {
+          "requestId": "8eb11547-7d2b-44a9-a2ff-7bcc2925fc70",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_931a8b44-d24b-4039-8627-db3c9d863190"
+        },
+        {
+          "requestId": "a91deb3e-8846-4c39-aa81-96b06377577c",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_5142b798-d93d-4816-bb69-ebbd47a0b03b"
+        },
+        {
+          "requestId": "0347553f-fcd6-4985-b776-a64db931e5c2",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_931a8b44-d24b-4039-8627-db3c9d863190"
+        },
+        {
+          "requestId": "e4612693-ba65-4e4a-8832-d55331c78644",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_29d95c54-9514-489a-a9fe-2607db9b7949"
+        },
+        {
+          "requestId": "fc4e5f24-d443-4a67-aff4-fa6280f3a5f2",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_931a8b44-d24b-4039-8627-db3c9d863190"
+        },
+        {
+          "requestId": "95d6546e-8bb9-4a9d-bb06-445c9d935875",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_29d95c54-9514-489a-a9fe-2607db9b7949"
+        },
+        {
+          "requestId": "18a7ee91-2f9e-4b3d-ab51-6a7b3ccfc387",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_931a8b44-d24b-4039-8627-db3c9d863190"
+        },
+        {
+          "requestId": "2ef69034-90b6-46c5-b4b4-19bb68a2d2fd",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_29d95c54-9514-489a-a9fe-2607db9b7949"
+        },
+        {
+          "requestId": "0425a5fc-d4f6-471b-8bf5-f579f48bc90d",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_5142b798-d93d-4816-bb69-ebbd47a0b03b"
+        },
+        {
+          "requestId": "06f8a79d-b4e8-445c-9424-ad8014413ba2",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_931a8b44-d24b-4039-8627-db3c9d863190"
+        },
+        {
+          "requestId": "ff3b38d4-7549-41fe-908e-64c080842816",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_29d95c54-9514-489a-a9fe-2607db9b7949"
+        },
+        {
+          "requestId": "4c61f229-234e-4d5f-8274-714324488d95",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_29d95c54-9514-489a-a9fe-2607db9b7949"
+        },
+        {
+          "requestId": "9a324780-7d1b-4c6a-ab2b-d27e2727f5cb",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_5142b798-d93d-4816-bb69-ebbd47a0b03b"
+        },
+        {
+          "requestId": "38e920d1-2931-4a13-8ea7-f04c74ba5988",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_5142b798-d93d-4816-bb69-ebbd47a0b03b"
+        },
+        {
+          "requestId": "94e872c4-a9b5-4d2c-9a62-344f8414536d",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_f5f53dd3-db45-40c7-a77d-21c9098b4264"
+        },
+        {
+          "requestId": "4498e313-15af-45a4-a69c-446214941784",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_58fb8f3b-fa4c-4661-b88e-5f8db02d37af"
+        },
+        {
+          "requestId": "6a202d6d-b1bf-402c-adb8-7943df84aab4",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_5142b798-d93d-4816-bb69-ebbd47a0b03b"
+        },
+        {
+          "requestId": "7c2bf7c3-96c6-491a-ac14-5b60f82a8c68",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_5142b798-d93d-4816-bb69-ebbd47a0b03b"
+        },
+        {
+          "requestId": "45d041f2-a4c2-48f3-aa77-e78af705b27a",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_f5f53dd3-db45-40c7-a77d-21c9098b4264"
+        },
+        {
+          "requestId": "5e97069a-d1a8-480c-8bbc-202ba8f2d525",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_05fc036a-7250-42cc-8545-cd794564d6dd"
+        },
+        {
+          "requestId": "5f7484a2-9cf8-4ad6-b7cd-cea4cfb72ab5",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_f5f53dd3-db45-40c7-a77d-21c9098b4264"
+        },
+        {
+          "requestId": "add08808-a189-448e-aae5-f7d0d8b72536",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_58fb8f3b-fa4c-4661-b88e-5f8db02d37af"
+        },
+        {
+          "requestId": "26815b9a-f90b-428b-ab92-dc2e72a497a6",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_05fc036a-7250-42cc-8545-cd794564d6dd"
+        },
+        {
+          "requestId": "54699041-b43b-43d6-aa00-9e9ecfcb8bdc",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_05fc036a-7250-42cc-8545-cd794564d6dd"
+        },
+        {
+          "requestId": "4893c58b-6524-466a-be97-b6919d94d851",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_f5f53dd3-db45-40c7-a77d-21c9098b4264"
+        },
+        {
+          "requestId": "fec6487e-3cfa-4587-90cc-4d8353c643ed",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_05fc036a-7250-42cc-8545-cd794564d6dd"
+        },
+        {
+          "requestId": "0d8e3b63-89ad-48da-98a1-11a85b8a98c6",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_f5f53dd3-db45-40c7-a77d-21c9098b4264"
+        },
+        {
+          "requestId": "b3bf57bb-05af-4d86-aef2-f8ad7b6de60a",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_58fb8f3b-fa4c-4661-b88e-5f8db02d37af"
+        },
+        {
+          "requestId": "6a2b90bd-670a-496b-aba2-e31cdb64dbbb",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_f5f53dd3-db45-40c7-a77d-21c9098b4264"
+        },
+        {
+          "requestId": "b302aa57-2a02-4927-b9a8-bc43b7a8c043",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_58fb8f3b-fa4c-4661-b88e-5f8db02d37af"
+        },
+        {
+          "requestId": "6b961408-0d39-4ad0-a538-06b4ca959f61",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_05fc036a-7250-42cc-8545-cd794564d6dd"
+        },
+        {
+          "requestId": "3cc7d2d3-dcd7-420d-805e-cddc65aa8630",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_082a671f-68b9-43a3-b123-4c70ccbea773"
+        },
+        {
+          "requestId": "68710548-11e9-4c60-a513-e331c69ddebe",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_58fb8f3b-fa4c-4661-b88e-5f8db02d37af"
+        },
+        {
+          "requestId": "55b5efb9-efb4-4fb3-a5a2-dd3bb9d98b5f",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_082a671f-68b9-43a3-b123-4c70ccbea773"
+        },
+        {
+          "requestId": "aeea1618-c913-41d6-ac6e-435bdafe6392",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_05fc036a-7250-42cc-8545-cd794564d6dd"
+        },
+        {
+          "requestId": "382b31ff-c1cc-47c5-8dd1-c9e050cf6775",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_082a671f-68b9-43a3-b123-4c70ccbea773"
+        },
+        {
+          "requestId": "93466ac3-400d-40a1-9ffa-4096e9a0aab0",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "subagentId": null,
+          "taskId": null,
+          "conversationId": "sa_082a671f-68b9-43a3-b123-4c70ccbea773"
+        }
+      ],
+      "allRoles": {
+        "executor": {
+          "providerAttemptCount": 127,
+          "usageResponseCount": 122
+        },
+        "subagent": {
+          "providerAttemptCount": 40,
+          "usageResponseCount": 40
+        }
+      },
+      "childReconciliation": [
+        {
+          "subagentId": "sa_05fc036a-7250-42cc-8545-cd794564d6dd",
+          "summaryAttempts": 6,
+          "summaryUsage": 6,
+          "ledgerAttempts": 6,
+          "ledgerUsage": 6,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_082a671f-68b9-43a3-b123-4c70ccbea773",
+          "summaryAttempts": 4,
+          "summaryUsage": 4,
+          "ledgerAttempts": 4,
+          "ledgerUsage": 4,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_29d95c54-9514-489a-a9fe-2607db9b7949",
+          "summaryAttempts": 6,
+          "summaryUsage": 6,
+          "ledgerAttempts": 6,
+          "ledgerUsage": 6,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_5142b798-d93d-4816-bb69-ebbd47a0b03b",
+          "summaryAttempts": 7,
+          "summaryUsage": 7,
+          "ledgerAttempts": 7,
+          "ledgerUsage": 7,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_58fb8f3b-fa4c-4661-b88e-5f8db02d37af",
+          "summaryAttempts": 5,
+          "summaryUsage": 5,
+          "ledgerAttempts": 5,
+          "ledgerUsage": 5,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_931a8b44-d24b-4039-8627-db3c9d863190",
+          "summaryAttempts": 6,
+          "summaryUsage": 6,
+          "ledgerAttempts": 6,
+          "ledgerUsage": 6,
+          "countsMatch": true
+        },
+        {
+          "subagentId": "sa_f5f53dd3-db45-40c7-a77d-21c9098b4264",
+          "summaryAttempts": 6,
+          "summaryUsage": 6,
+          "ledgerAttempts": 6,
+          "ledgerUsage": 6,
+          "countsMatch": true
+        }
+      ]
+    }
+  ],
+  "traces": [
+    {
+      "runId": "987040fb-3621-44a6-8ebe-cd025f1071d7",
+      "sessionId": "0734f10e-ea0a-4b7a-90bf-ab392dec651d",
+      "taskId": "dda3349a-f6cf-4db6-ac69-10951a718c2b",
+      "observedAt": "2026-11-01T19:10:57.485Z",
+      "firstSequence": 1,
+      "lastSequence": 1207,
+      "traceComplete": false,
+      "rotated": true,
+      "droppedEvents": 0,
+      "writeFailures": 0,
+      "observationWallMs": 2050637.85309501,
+      "runEnded": false,
+      "providerCompletedUnionMs": 56947.29999899864,
+      "openProviderAttempts": [],
+      "persistenceUnionMs": 2003194.6603789777,
+      "providerAndPersistenceOverlapMs": 34802.04306298494,
+      "checkpointSaveMs": {
+        "count": 176,
+        "min": 3995.15805400908,
+        "max": 56543.757578998804
+      },
+      "checkpointStoreMs": {
+        "count": 176,
+        "min": 3340.9639730006456,
+        "max": 40788.68025499582
+      },
+      "counts": {
+        "run_start": 1,
+        "run_authorization_policy": 1,
+        "context_projection": 1,
+        "projection_estimate": 114,
+        "event_loop": 410,
+        "checkpoint_store": 176,
+        "checkpoint_save": 176,
+        "request_output_budget": 12,
+        "run_phase": 158,
+        "upstream_attempt_start": 12,
+        "upstream_http_response": 12,
+        "provider_first_content": 11,
+        "upstream_model_complete": 12,
+        "upstream_attempt_finish": 12,
+        "tool_call": 22,
+        "tool_result_raw": 22,
+        "tool_delivery": 22,
+        "tool_result": 22,
+        "progress_observation": 11
+      },
+      "eventLoopMaxMs": {
+        "count": 410,
+        "min": 21.757951,
+        "max": 1940.914175
+      },
+      "projectionInputTokensEstimate": {
+        "count": 126,
+        "min": 57502,
+        "max": 133750
+      },
+      "compression": [],
+      "activeMs": null,
+      "userWaitMs": null,
+      "approvalWaitMs": null,
+      "parentAcceptanceMs": null,
+      "unknownIntervals": "All uninstrumented/unpaired intervals remain unassigned; unions overlap and are not additive.",
+      "sources": [
+        {
+          "file": "run-2026-11-02T02-36-46-859+08-00-987040fb-3621-44a6-8ebe-cd025f1071d7.jsonl.perf-0.jsonl",
+          "bytes": 261870,
+          "sha256": "a7f9533ad4ebe4cc0a7f2731d6f51c8b78ef5cb39a999d4b00cdeb61402de2a0"
+        },
+        {
+          "file": "run-2026-11-02T02-36-46-859+08-00-987040fb-3621-44a6-8ebe-cd025f1071d7.jsonl.perf-1.jsonl",
+          "bytes": 135348,
+          "sha256": "d016ba41b69fe77d3af92f6928ab8d6f5b95dd3431bf4f46686e69af55f08df9"
+        }
+      ],
+      "runConfiguration": {
+        "modelId": "deepseek-v4.1-flash-1017",
+        "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+        "provider": "qwencloud",
+        "contextWindowTokens": 1024000,
+        "maxOutputTokens": 393192,
+        "thinkingEnabled": true,
+        "reasoningEffort": "high",
+        "compressionThreshold": "balanced",
+        "requestProtocolVersion": null
+      },
+      "firstRequest": {
+        "toolCount": 26,
+        "schemaSha256": "9289fe9aedf8e148c6f8a520787166ba3ed584ed91a5d3de0fed6621709858cc",
+        "matchingSchemaVersions": [
+          10
+        ],
+        "hasDelegationCheckpoint": false,
+        "maxOutputTokens": 393192,
+        "messageCount": 45
+      },
+      "ledger": {
+        "providerAttemptCount": 12,
+        "usageResponseCount": 12,
+        "promptTokens": 1051575,
+        "completionTokens": 6300,
+        "totalTokens": 1057875,
+        "cacheHitTokens": 936448,
+        "bySource": {
+          "executor": {
+            "providerAttemptCount": 12,
+            "usageResponseCount": 12
+          }
+        }
+      },
+      "requestIdentities": [
+        {
+          "requestId": "8975e5d3-9c0e-40d6-a54d-d9eb6391a77d",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "source": "executor"
+        },
+        {
+          "requestId": "9bf0dbb3-29fc-4038-84c7-49cf687164fc",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "source": "executor"
+        },
+        {
+          "requestId": "81f46bff-c963-4664-a9cf-38cf2eeadde7",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "source": "executor"
+        },
+        {
+          "requestId": "47a81130-b333-4bdf-9459-a4dfc59fc0eb",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "source": "executor"
+        },
+        {
+          "requestId": "1e88f45b-7879-4521-a914-1789093ba7be",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "source": "executor"
+        },
+        {
+          "requestId": "9da5451e-a232-4cdd-ba33-4142ea2b3f3d",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "source": "executor"
+        },
+        {
+          "requestId": "6174a977-4b54-4719-ae8a-3c650a859fd7",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "source": "executor"
+        },
+        {
+          "requestId": "ac5fcd60-7f9a-45bc-ad83-166e20ad7f0b",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "source": "executor"
+        },
+        {
+          "requestId": "a1db81b2-8d30-4411-8394-9d8fa4b29918",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "source": "executor"
+        },
+        {
+          "requestId": "2be3c276-1ab3-405f-8a71-e08f93ae0bdd",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "source": "executor"
+        },
+        {
+          "requestId": "85819d8d-a4c9-4996-a322-ca634951efe3",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "source": "executor"
+        },
+        {
+          "requestId": "82fb582f-a6f9-471b-8dcb-9eed1b70054e",
+          "attemptIndex": 0,
+          "kind": "usage_response",
+          "source": "executor"
+        }
+      ]
+    }
+  ],
+  "activeSessionProtocol": {
+    "sessionId": "0734f10e-ea0a-4b7a-90bf-ab392dec651d",
+    "storageVersion": 3,
+    "revision": 356,
+    "requestProtocol": {
+      "version": 10,
+      "toolSchemaVersion": 10,
+      "toolNames": [
+        "keepseek_create_draft_edit",
+        "keepseek_delete_workspace_file",
+        "keepseek_find_references",
+        "keepseek_find_symbol",
+        "keepseek_get_document_symbols",
+        "keepseek_get_workspace_symbols",
+        "keepseek_git_create_patch",
+        "keepseek_git_current_branch",
+        "keepseek_git_diff",
+        "keepseek_git_status",
+        "keepseek_git_suggest_commit_message",
+        "keepseek_list_workspace_directory",
+        "keepseek_list_workspace_files",
+        "keepseek_read_workspace_file_range",
+        "keepseek_read_workspace_file",
+        "keepseek_read_workspace_diagnostics",
+        "keepseek_run_validation",
+        "keepseek_search_workspace",
+        "keepseek_create_incremental_draft_edit",
+        "keepseek_search_session_archive",
+        "keepseek_run_draft",
+        "keepseek_delegate_task",
+        "keepseek_delegate_parallel",
+        "keepseek_read_subagent_result",
+        "keepseek_read_evidence",
+        "keepseek_apply_patch"
+      ],
+      "modelId": "deepseek-v4.1-flash-1017",
+      "sourceId": "f8e9db79-b30c-4ed9-b9e2-ef97d8680d5e",
+      "providerId": "qwencloud",
+      "endpointHash": "454a5cb975d2f4dfc46ed18cd0dae28a927d76956fb4bc11fd6a2d7db72ba369"
+    }
+  },
+  "interpretation": {
+    "legacyAttribution": "All 123 child ledger records have conversationId; none has newer subagentId. Session aggregate agrees, individual child attribution uses legacy conversation identity only.",
+    "lifecycle": {
+      "completed": 20,
+      "failed": 1
+    },
+    "actualCost": "No actual fee inferred from reference pricing or unknown usage.",
+    "sourceSnapshot": "Read while daily task was running; counts and intervals stop at observedAt, not run completion.",
+    "perChildCountsMatch": true
+  }
+}

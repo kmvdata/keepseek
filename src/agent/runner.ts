@@ -617,6 +617,7 @@ export class AgentLoop {
     let providerRunState: ProviderNativeRunState | undefined;
     trace.record({
       type: 'run_start',
+      requestProtocolVersion: request.requestProtocolVersion ?? 1,
       model: request.model,
       settings: request.settings,
       language: request.language,

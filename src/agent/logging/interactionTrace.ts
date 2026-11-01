@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { formatLocalTimestamp } from '../../shared/format';
 import { withPerformanceTrace } from './performanceTrace';
+import { getRuntimeIdentity } from '../../shared/runtimeIdentity';
 import {
   getConfiguredInteractionTraceSettings,
   type InteractionTraceLevel,
@@ -62,12 +63,18 @@ export class InteractionTraceLogService {
     if (fileUri.scheme === 'file') {
       const trace = new JsonlInteractionTrace(runId, fileUri.fsPath, settings, eventSink);
       this.lastRunTraceLogUri = trace.logUri;
-      return withPerformanceTrace(trace, fileUri, scope);
+      return this.attachRuntimeIdentity(withPerformanceTrace(trace, fileUri, scope));
     }
 
     const trace = new WorkspaceFsJsonlInteractionTrace(runId, fileUri, settings, eventSink);
     this.lastRunTraceLogUri = trace.logUri;
-    return withPerformanceTrace(trace, fileUri, scope);
+    return this.attachRuntimeIdentity(withPerformanceTrace(trace, fileUri, scope));
+  }
+
+  private attachRuntimeIdentity(trace: AgentInteractionTrace): AgentInteractionTrace {
+    const identity = getRuntimeIdentity();
+    if (identity) trace.record({ type: 'run_runtime', ...identity });
+    return trace;
   }
 
   public getLastRunTraceLogUri(): string | undefined {

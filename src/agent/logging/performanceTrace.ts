@@ -10,7 +10,8 @@ export function recordLocalPerformance(event: InteractionTraceEvent): void {
 export function subscribeLocalPerformance(listener: (event: InteractionTraceEvent) => void): () => void {
   listeners.add(listener); return () => { listeners.delete(listener); };
 }
-const KEYS = new Set(['sessionId', 'taskId', 'epochIndex', 'requestId', 'attempt', 'attemptIndex', 'phase', 'status', 'ok', 'reason',
+const KEYS = new Set(['activationId', 'runtimeMarker', 'packageVersion', 'requestProtocolVersion', 'supportedRequestProtocolVersion', 'supportedToolSchemaVersion', 'supportedToolSchemaSha256',
+  'sessionId', 'taskId', 'epochIndex', 'requestId', 'attempt', 'attemptIndex', 'phase', 'status', 'ok', 'reason',
   'stopReason', 'finishReason', 'toolName', 'durationMs', 'elapsedMs', 'headersMs', 'firstContentMs', 'firstChunkMs',
   'estimatedPromptTokens', 'afterEstimatedPromptTokens', 'netReleasedTokens', 'summaryInputTokens', 'summaryOutputTokens',
   'protectedMessageCount', 'compressibleMessageCount', 'bytesWritten', 'objectsWritten', 'snapshotMs', 'encodeMs', 'commitMs',

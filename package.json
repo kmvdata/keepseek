@@ -3,7 +3,7 @@
   "displayName": "KeepSeek",
   "description": "AI-powered coding agent for VS Code",
   "publisher": "keepseek",
-  "version": "0.3.9",
+  "version": "0.5.0",
   "license": "MIT",
   "icon": "resources/keepseek.png",
   "homepage": "https://github.com/kmvdata/keepseek#readme",
@@ -27,6 +27,10 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
+      {
+        "command": "keepseek.showRuntimeDiagnostics",
+        "title": "KeepSeek: Runtime Diagnostics / 运行诊断"
+      },
       {
         "command": "keepseek.openChat",
         "title": "KeepSeek: Open Chat"
