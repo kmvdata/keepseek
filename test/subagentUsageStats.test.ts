@@ -31,6 +31,8 @@ import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 import { getInputScript } from '../src/webview/input/script';
 import { getInputStyles } from '../src/webview/input/styles';
 import { getInputTemplate } from '../src/webview/input/template';
+import { usageBindingsFragment, usageDeclarationFragment, usageRenderFragment } from '../src/webview/input/usage/script';
+import { usageFormattersFragment } from '../src/webview/input/usage/formatters';
 import { getScript } from '../src/webview/script';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { createProviderCacheObservation } from '../src/agent/cacheObservation';
@@ -402,6 +404,7 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.match(detailsRenderer, /usageAnalysisTitle/u);
   assert.match(detailsRenderer, /usageBySource/u);
   assert.match(detailsRenderer, /usageByType/u);
+  assert.match(detailsRenderer, /usageBySubagent/u);
   assert.match(detailsRenderer, /usage-details-eyebrow', t\('usageDetailsTitle'\)/u);
   assert.match(detailsRenderer, /var selected = details\.session/u);
   assert.match(detailsRenderer, /usageMetricLegacyUnattributed/u);
@@ -478,6 +481,164 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.match(provider, /\.map\(toSubagentProgressViewModel\)/u);
   assert.doesNotMatch(provider, /usageMetrics:\s*\{[^}]*transcript/u);
 });
+
+for (const language of ['zh-CN', 'en'] as const) {
+  test(`subagent usage has an independent, expanded, localized analysis view (${language})`, () => {
+    const ui = createUsageAnalysisHarness(language, true);
+    ui.render();
+    const buttons = ui.body.querySelectorAll('button[data-usage-analysis]');
+    assert.deepEqual(buttons.map(button => button.dataset.usageAnalysis), ['source', 'type', 'subagent']);
+    assert.deepEqual(buttons.map(button => button.textContent), language === 'zh-CN'
+      ? ['按来源', '按类型', '子代理'] : ['By source', 'By type', 'Subagents']);
+    const controls = ui.body.querySelector('.usage-analysis-controls')!;
+    assert.equal(controls.attributes.role, 'group');
+    assert.equal(controls.attributes['aria-label'], WEBVIEW_TRANSLATIONS[language].usageAnalysisTitle);
+
+    for (const mode of ['subagent', 'type', 'source', 'subagent']) {
+      ui.button(mode).click();
+      const active = ui.button(mode);
+      assert.equal(ui.document.activeElement, active, 'click restores focus after replacing the DOM');
+      assert.equal(active.attributes['aria-pressed'], 'true');
+      assert.equal(ui.body.querySelectorAll('button[data-usage-analysis]')
+        .filter(button => button.attributes['aria-pressed'] === 'true').length, 1);
+      const details = ui.body.querySelector('details');
+      if (mode === 'subagent') {
+        assert.ok(details);
+        assert.equal(ui.body.querySelectorAll('details').length, 1);
+        assert.equal(details.open, true);
+        assert.equal(details.querySelector('summary')?.textContent, language === 'zh-CN' ? '子代理明细' : 'Subagent details');
+        assert.notEqual(details.querySelector('summary')?.textContent, WEBVIEW_TRANSLATIONS[language].usageIsolationTitle);
+        assert.equal(details.querySelector('.usage-note')?.textContent, WEBVIEW_TRANSLATIONS[language].usageIsolationExplanation);
+        assert.equal(details.querySelectorAll('.usage-subagent-group-title').length, 3, 'model, work type, and recent-run details remain visible');
+        assert.equal(details.querySelectorAll('.usage-subagent-run').length, 1);
+      } else {
+        assert.equal(details, null, 'subagent details appear only in their own mode');
+      }
+    }
+
+    const unknown = ui.document.createElement('button');
+    unknown.dataset.usageAnalysis = 'unknown';
+    ui.body.append(unknown);
+    unknown.click();
+    assert.equal(ui.button('subagent').attributes['aria-pressed'], 'true', 'unknown modes do not silently select source');
+    ui.button('source').disabled = true;
+    ui.button('source').click();
+    assert.equal(ui.button('subagent').attributes['aria-pressed'], 'true', 'disabled modes do not switch views');
+  });
+}
+
+test('sessions without subagents hide the third mode and a session change restores source and focus', () => {
+  const empty = createUsageAnalysisHarness('en', false);
+  empty.render();
+  assert.deepEqual(empty.body.querySelectorAll('button[data-usage-analysis]')
+    .map(button => button.dataset.usageAnalysis), ['source', 'type']);
+  assert.equal(empty.body.querySelector('details'), null);
+
+  const ui = createUsageAnalysisHarness('en', true);
+  ui.render();
+  ui.button('subagent').click();
+  ui.body.scrollTop = 75;
+  ui.state.usageMetrics.usageDetails = createUsageDetailsViewModel({});
+  ui.render();
+  assert.equal(ui.body.querySelector('button[data-usage-analysis="subagent"]'), null);
+  assert.equal(ui.body.querySelector('details'), null);
+  assert.equal(ui.button('source').attributes['aria-pressed'], 'true');
+  assert.equal(ui.document.activeElement, ui.button('source'));
+  assert.equal(ui.body.scrollTop, 75);
+  const source = ui.button('source');
+  ui.render();
+  assert.equal(ui.button('source'), source, 'fallback is normalized before caching the render key');
+});
+
+test('Escape closes the usage dialog and restores its trigger after subagent selection', () => {
+  const ui = createUsageAnalysisHarness('en', true);
+  ui.trigger.focus();
+  ui.trigger.click();
+  assert.equal(ui.dialog.open, true);
+  ui.button('subagent').click();
+  let prevented = false;
+  ui.dialog.emit('keydown', { key: 'Escape', preventDefault: () => { prevented = true; }, stopPropagation: () => undefined });
+  assert.equal(prevented, true);
+  assert.equal(ui.dialog.open, false);
+  assert.equal(ui.document.activeElement, ui.trigger);
+  assert.equal(ui.trigger.attributes['aria-expanded'], 'false');
+});
+
+function createUsageAnalysisHarness(language: 'zh-CN' | 'en', withSubagents: boolean) {
+  class UsageElement {
+    dataset: Record<string, string> = {};
+    attributes: Record<string, string> = {};
+    children: UsageElement[] = [];
+    parent: UsageElement | null = null;
+    className = '';
+    textContent = '';
+    disabled = false;
+    open = false;
+    isConnected = true;
+    scrollTop = 0;
+    listeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+    constructor(public tagName: string) {}
+    append(...children: UsageElement[]): void {
+      children.forEach(child => { child.parent = this; this.children.push(child); });
+    }
+    replaceChildren(): void { this.children.forEach(child => { child.parent = null; }); this.children = []; }
+    setAttribute(name: string, value: string): void { this.attributes[name] = value; }
+    matches(selector: string): boolean {
+      if (selector.startsWith('.')) { return this.className.split(' ').includes(selector.slice(1)); }
+      const mode = /^button\[data-usage-analysis(?:="([^"]+)")?\]$/u.exec(selector);
+      return mode ? this.tagName === 'button' && this.dataset.usageAnalysis !== undefined
+        && (mode[1] === undefined || mode[1] === this.dataset.usageAnalysis) : this.tagName === selector;
+    }
+    querySelectorAll(selector: string): UsageElement[] {
+      return this.children.flatMap(child => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]);
+    }
+    querySelector(selector: string): UsageElement | null { return this.querySelectorAll(selector)[0] ?? null; }
+    closest(selector: string): UsageElement | null { return this.matches(selector) ? this : this.parent?.closest(selector) ?? null; }
+    focus(): void { document.activeElement = this; }
+    addEventListener(type: string, listener: (event: Record<string, unknown>) => void): void {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+    }
+    emit(type: string, event: Record<string, unknown> = {}): void {
+      this.listeners.get(type)?.forEach(listener => listener({ target: this, ...event }));
+      if (this.parent) { this.parent.emit(type, { target: this, ...event }); }
+    }
+    click(): void { this.emit('click'); }
+    showModal(): void { this.open = true; }
+    close(): void { this.open = false; this.emit('close'); }
+  }
+  const nodes: Record<string, UsageElement> = {
+    contextProgress: new UsageElement('button'), usageDetailsBody: new UsageElement('div'),
+    usageDetailsDialog: new UsageElement('dialog'), usageDetailsClose: new UsageElement('button')
+  };
+  const document = {
+    activeElement: null as UsageElement | null,
+    getElementById: (id: string) => nodes[id] ?? null,
+    createElement: (tag: string) => new UsageElement(tag)
+  };
+  const state = { usageMetrics: { usageDetails: createUsageDetailsViewModel(withSubagents
+    ? { subagentUsageStats: upsertSubagentRunUsageSummary(undefined, run('ui-child')) } : {}) } };
+  const env = {
+    document, Element: UsageElement, state, getLanguage: () => language,
+    t: (key: string, values: Record<string, string | number> = {}) => (WEBVIEW_TRANSLATIONS[language][key] ?? key)
+      .replace(/\{(\w+)\}/gu, (_, name: string) => String(values[name] ?? '')),
+    closeCommandMenu: () => undefined, closeReferenceMenu: () => undefined,
+    findModelForSelection: () => undefined, formatDuration: (ms: number) => String(ms)
+  };
+  const api = new Function(...Object.keys(env), [
+    usageDeclarationFragment.source, usageRenderFragment.source, usageFormattersFragment.source,
+    // Keep the real analysis, rendering cache, and event handlers; unrelated metric panels are outside this fixture.
+    "createContextWindowSection = createSessionMetricsSection = createCacheDiagnosticsSection = function() { return usageNode('section', 'fixture-metrics'); };",
+    usageBindingsFragment.source, 'return { render: renderUsageDetails };'
+  ].join('\n'))(...Object.values(env)) as { render(): void };
+  return {
+    ...api, state, document, body: nodes.usageDetailsBody, trigger: nodes.contextProgress, dialog: nodes.usageDetailsDialog,
+    button(mode: string): UsageElement {
+      const button = nodes.usageDetailsBody.querySelector('button[data-usage-analysis="' + mode + '"]');
+      assert.ok(button, 'missing analysis mode: ' + mode);
+      return button;
+    }
+  };
+}
 
 function event(source: UsageSource, totalTokens = 120, currency = 'CNY', cost = 0.01, reported = true) {
   return createUsageEvent({

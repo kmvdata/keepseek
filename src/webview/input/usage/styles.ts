@@ -262,6 +262,8 @@ export const usageDialogStylesFragment: WebviewFragment = {
     .usage-details-eyebrow { font-size: 12px; font-weight: 600; }
     .usage-segmented-control {
       display: inline-flex;
+      flex-wrap: wrap;
+      max-width: 100%;
       align-items: center;
       gap: 1px;
       padding: 2px;
@@ -304,6 +306,7 @@ export const usageDialogStylesFragment: WebviewFragment = {
     .usage-section:last-child { margin-bottom: 0; }
     .usage-section-heading {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
       gap: 10px;

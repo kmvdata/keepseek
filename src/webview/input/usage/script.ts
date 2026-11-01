@@ -63,8 +63,9 @@ export const usageBindingsFragment: WebviewFragment = {
           var target = event.target instanceof Element
             ? event.target.closest('button[data-usage-analysis]') : null;
           if (!target || target.disabled) { return; }
-          if (target.dataset.usageAnalysis) {
-            usageAnalysisMode = target.dataset.usageAnalysis === 'type' ? 'type' : 'source';
+          var nextMode = target.dataset.usageAnalysis;
+          if (nextMode === 'source' || nextMode === 'type' || nextMode === 'subagent') {
+            usageAnalysisMode = nextMode;
           }
           renderUsageDetails();
           var selected = usageDetailsBody.querySelector('button[data-usage-analysis="' + usageAnalysisMode + '"]');
@@ -174,6 +175,9 @@ export const usageRenderFragment: WebviewFragment = {
         if (!usageDetailsBody) { return; }
         var metrics = normalizeUsageMetrics(state.usageMetrics);
         var details = metrics.usageDetails;
+        if (usageAnalysisMode === 'subagent' && !(details && details.subagents)) {
+          usageAnalysisMode = 'source';
+        }
         var sessionUsage = metrics.sessionUsageStats;
         var usageGroups = sessionUsage && Array.isArray(sessionUsage.byModelSource)
           ? sessionUsage.byModelSource
@@ -215,7 +219,8 @@ export const usageRenderFragment: WebviewFragment = {
         usageDetailsBody.append(createUsageAnalysisSection(selected, usageGroups, sessionUsage, details.subagents));
         usageDetailsBody.scrollTop = scrollTop;
         if (focusedControl) {
-          var control = usageDetailsBody.querySelector('button[data-usage-analysis="' + focusedControl + '"]');
+          var control = usageDetailsBody.querySelector('button[data-usage-analysis="' + focusedControl + '"]')
+            || usageDetailsBody.querySelector('button[data-usage-analysis="' + usageAnalysisMode + '"]');
           if (control) { control.focus({ preventScroll: true }); }
         }
       }
@@ -465,8 +470,11 @@ export const usageRenderFragment: WebviewFragment = {
         var controls = usageNode('div', 'usage-segmented-control usage-analysis-controls');
         controls.setAttribute('role', 'group');
         controls.setAttribute('aria-label', t('usageAnalysisTitle'));
-        ['source', 'type'].forEach(function(mode) {
-          var button = usageNode('button', '', t(mode === 'source' ? 'usageBySource' : 'usageByType'));
+        var modes = ['source', 'type'];
+        if (subagents) { modes.push('subagent'); }
+        var labels = { source: 'usageBySource', type: 'usageByType', subagent: 'usageBySubagent' };
+        modes.forEach(function(mode) {
+          var button = usageNode('button', '', t(labels[mode]));
           button.type = 'button';
           button.dataset.usageAnalysis = mode;
           button.setAttribute('aria-pressed', usageAnalysisMode === mode ? 'true' : 'false');
@@ -474,7 +482,9 @@ export const usageRenderFragment: WebviewFragment = {
         });
         section.querySelector('.usage-section-heading').append(controls);
         if (usageAnalysisMode === 'type') {
-          appendTypeAnalysis(section, selected, subagents);
+          appendTypeAnalysis(section, selected);
+        } else if (usageAnalysisMode === 'subagent') {
+          appendSubagentAnalysis(section, subagents);
         } else {
           appendSourceAnalysis(section, usageGroups, sessionUsage);
         }
@@ -505,7 +515,7 @@ export const usageRenderFragment: WebviewFragment = {
         }
       }
 
-      function appendTypeAnalysis(section, selected, subagents) {
+      function appendTypeAnalysis(section, selected) {
         var mainSessionOnly = selected.total.totalTokens > 0 && selected.mainPercent >= 100;
         var typeItems = [
           { key: 'usageMainSession', usage: selected.mainSession, percent: selected.mainPercent, color: 'color-0' },
@@ -527,9 +537,10 @@ export const usageRenderFragment: WebviewFragment = {
           });
         }
         section.append(list);
-        if (subagents) {
-          section.append(createSubagentAnalysisDetails(subagents));
-        }
+      }
+
+      function appendSubagentAnalysis(section, subagents) {
+        section.append(createSubagentAnalysisDetails(subagents));
       }
 
       function createUsageSharePanel(titleKey, items) {
@@ -633,7 +644,8 @@ export const usageRenderFragment: WebviewFragment = {
 
       function createSubagentAnalysisDetails(subagents) {
         var details = usageNode('details', 'usage-subagent-analysis');
-        var summary = usageNode('summary', '', t('usageIsolationTitle'));
+        details.open = true;
+        var summary = usageNode('summary', '', t('usageSubagentDetailsTitle'));
         details.append(summary);
         var body = usageNode('div', 'usage-subagent-analysis-body');
         body.append(usageNode('p', 'usage-note', t('usageIsolationExplanation')));
