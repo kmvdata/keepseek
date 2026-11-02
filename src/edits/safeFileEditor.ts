@@ -11,6 +11,10 @@ import type { ChangeCheckpoint, DraftEdit, FileContentIdentity, TextPatchV1 } fr
 import { ChangeArtifactStore } from './changeArtifactStore';
 import { getDraftEditBase, getDraftEditFullText, getDraftEditKind, getDraftEditResult } from './draftEdit';
 import { applyTextPatchToBytes, createInverseTextPatch, hashBytes, validateCanonicalTextPatch } from './textPatch';
+import { isValidBinaryImageDraft } from './binaryImageDraft';
+import { validateImageBytes, verifyImageContainer } from '../images/imageValidation';
+import { BinaryImageDraftError } from './binaryImageErrors';
+import { getConfiguredKeepseekLanguage, localize } from '../shared/i18n';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
 
@@ -27,7 +31,7 @@ export interface ChangeCheckpointJournal {
 }
 
 export class SafeFileEditError extends Error {
-  public constructor(message: string, public readonly checkpoint?: ChangeCheckpoint) {
+  public constructor(message: string, public readonly checkpoint?: ChangeCheckpoint, public readonly code?: string, public readonly detail?: string) {
     super(message);
     this.name = 'SafeFileEditError';
   }
@@ -55,6 +59,16 @@ export class SafeFileEditor {
 
   public configureArtifactStore(store: ChangeArtifactStore): void {
     this.artifactStore = store;
+  }
+
+  /** Non-writing hard checks used before the host reads a selected image target. */
+  public async assertBinaryImageWorkspaceTarget(uri: vscode.Uri): Promise<void> {
+    if (!vscode.workspace.isTrusted || uri.scheme !== 'file' || !vscode.workspace.getWorkspaceFolder(uri)) {
+      throw new BinaryImageDraftError('imageWriteUnsupportedTarget');
+    }
+    try { await this.assertNoSymlinkEscape(uri, true); }
+    catch (error) { throw new BinaryImageDraftError('imageWriteUnsupportedTarget', error instanceof Error ? error.message : undefined); }
+    this.assertNoDirtyOpenEditor(uri, uri.path);
   }
 
   /** Deterministic hard checks used before a model review. No write occurs. */
@@ -108,7 +122,8 @@ export class SafeFileEditor {
       }
       mutationStarted = true;
 
-      await this.applyMutation(edit, uri);
+      this.checkApproval(edit, approval);
+      await this.applyMutation(edit, uri, approval);
       await this.verifyApplied(edit, checkpoint);
 
       checkpoint.state = 'applied';
@@ -120,7 +135,10 @@ export class SafeFileEditor {
         checkpoint.state = mutationStarted ? 'uncertain' : 'interrupted';
         await journal?.persist(checkpoint).catch(() => undefined);
       }
-      throw new SafeFileEditError(error instanceof Error ? error.message : String(error), checkpoint);
+      const safeError = edit.kind === 'binary_image_v1' ? this.localizeBinaryFailure(error, edit.label) : error;
+      throw new SafeFileEditError(safeError instanceof Error ? safeError.message : String(safeError), checkpoint,
+        safeError instanceof BinaryImageDraftError ? safeError.code : undefined,
+        safeError instanceof BinaryImageDraftError ? safeError.detail : undefined);
     }
   }
 
@@ -162,7 +180,10 @@ export class SafeFileEditor {
     } catch (error) {
       checkpoint.state = 'uncertain';
       await journal?.persist(checkpoint).catch(() => undefined);
-      throw new SafeFileEditError(error instanceof Error ? error.message : String(error), checkpoint);
+      const safeError = checkpoint.draftKind === 'binary_image_v1' ? this.localizeBinaryFailure(error, checkpoint.label) : error;
+      throw new SafeFileEditError(safeError instanceof Error ? safeError.message : String(safeError), checkpoint,
+        safeError instanceof BinaryImageDraftError ? safeError.code : undefined,
+        safeError instanceof BinaryImageDraftError ? safeError.detail : undefined);
     }
   }
 
@@ -195,7 +216,14 @@ export class SafeFileEditor {
   }
 
   private async assertCommonPreconditions(uri: vscode.Uri, edit: DraftEdit, approval?: DelegatedEditApproval): Promise<void> {
-    if (!vscode.workspace.isTrusted) throw new Error('DraftEdit requires a trusted workspace.');
+    if (!vscode.workspace.isTrusted) throw edit.kind === 'binary_image_v1'
+      ? new BinaryImageDraftError('imageWriteUnsupportedTarget') : new Error('DraftEdit requires a trusted workspace.');
+    if (edit.kind === 'binary_image_v1' && uri.scheme !== 'file') {
+      throw new BinaryImageDraftError('imageWriteUnsupportedTarget');
+    }
+    if (edit.kind === 'binary_image_v1' && approval?.source) {
+      throw new BinaryImageDraftError('imageWriteVisualConfirmation');
+    }
     this.checkApproval(edit, approval);
     this.assertWorkspaceTarget(uri, edit.label, approval?.authorizedUri);
     if (edit.kind === 'move_v1') {
@@ -211,7 +239,15 @@ export class SafeFileEditor {
   }
 
   private async assertCheckpointTarget(uri: vscode.Uri, checkpoint: ChangeCheckpoint): Promise<void> {
-    if (!vscode.workspace.isTrusted) throw new Error('DraftEdit revert requires a trusted workspace.');
+    if (!vscode.workspace.isTrusted) throw checkpoint.draftKind === 'binary_image_v1'
+      ? new BinaryImageDraftError('imageWriteUnsupportedTarget') : new Error('DraftEdit revert requires a trusted workspace.');
+    if (checkpoint.draftKind === 'binary_image_v1' && uri.scheme !== 'file') {
+      throw new BinaryImageDraftError('imageWriteUnsupportedTarget');
+    }
+    if (checkpoint.draftKind === 'binary_image_v1' && checkpoint.originalExists
+      && (!checkpoint.originalBlobHash || !this.artifactStore)) {
+      throw new BinaryImageDraftError('imageWriteBackupUnavailable');
+    }
     this.assertWorkspaceTarget(uri, checkpoint.label, checkpoint.authorizedExternalUri);
     await this.assertNoSymlinkEscape(uri, true);
     if (checkpoint.targetUri) {
@@ -224,7 +260,7 @@ export class SafeFileEditor {
 
   private checkApproval(edit: DraftEdit, approval?: DelegatedEditApproval): void {
     if (approval && (!vscode.workspace.isTrusted || approval.authorizedUri !== edit.uri || !approval.isAuthorized())) {
-      throw new Error('Delegated file approval was cancelled or revoked.');
+      throw edit.kind === 'binary_image_v1' ? new BinaryImageDraftError('imageWriteCancelled') : new Error('Delegated file approval was cancelled or revoked.');
     }
   }
 
@@ -249,6 +285,9 @@ export class SafeFileEditor {
       if (edit.action === 'delete' && shouldSkipTextUri(uri)) throw new Error(this.t('cannotDeleteUnreadableFile', { label: edit.label }));
       const bytes = await vscode.workspace.fs.readFile(uri);
       if (bytes.byteLength > limit) throw new Error(this.t('cannotWriteOversizedFile', { label: edit.label, limit: formatBytes(limit) }));
+      if (edit.kind === 'binary_image_v1') {
+        return { exists: true, bytes, byteIdentity: { sha256: hashBytes(bytes), sizeBytes: bytes.byteLength } };
+      }
       const text = decodeRollbackSafeUtf8Text(bytes);
       if (text === undefined) throw new Error(this.t(edit.action === 'delete' ? 'cannotDeleteUnreadableFile' : 'cannotWriteUnreadableFile', { label: edit.label }));
       return {
@@ -287,6 +326,18 @@ export class SafeFileEditor {
     }
     if (edit.action === 'delete' || edit.kind === 'move_v1') return;
     const bytes = await this.resolveDraftOutputBytes(edit);
+    if (edit.kind === 'binary_image_v1') {
+      if (!isValidBinaryImageDraft(edit)) throw new BinaryImageDraftError('imageWriteInvalidMetadata');
+      try {
+        const metadata = validateImageBytes(bytes, edit.mimeType);
+        await verifyImageContainer(bytes, metadata);
+        if (metadata.width !== edit.width || metadata.height !== edit.height) throw new Error('Binary image dimensions do not match its content.');
+      } catch (error) { throw new BinaryImageDraftError('imageWriteInvalidImage', error instanceof Error ? error.message : undefined); }
+      const extension = path.extname(vscode.Uri.parse(edit.uri).path).toLowerCase();
+      const expectedExtensions = edit.mimeType === 'image/png' ? ['.png'] : edit.mimeType === 'image/jpeg' ? ['.jpg', '.jpeg'] : ['.webp'];
+      if (!expectedExtensions.includes(extension)) throw new BinaryImageDraftError('imageWriteExtensionMismatch');
+      return;
+    }
     const text = decodeRollbackSafeUtf8Text(bytes);
     if (text === undefined) throw new Error(this.t('cannotWriteUnreadableFile', { label: edit.label }));
     const limit = getConfiguredPatchSettings().maxBackupBytes;
@@ -330,7 +381,7 @@ export class SafeFileEditor {
     };
   }
 
-  private async applyMutation(edit: DraftEdit, uri: vscode.Uri): Promise<void> {
+  private async applyMutation(edit: DraftEdit, uri: vscode.Uri, approval?: DelegatedEditApproval): Promise<void> {
     if (edit.action === 'delete') {
       await vscode.workspace.fs.delete(uri, { recursive: false, useTrash: false });
       await this.closeOpenTabs(uri);
@@ -350,16 +401,22 @@ export class SafeFileEditor {
       await this.resolveDraftOutputBytes(edit),
       edit.action === 'create',
       getDraftEditBase(edit),
-      edit.action === 'create'
+      edit.action === 'create',
+      edit.kind === 'binary_image_v1' ? () => {
+        this.checkApproval(edit, approval);
+        this.assertNoDirtyOpenEditor(uri, edit.label);
+      } : undefined
     );
   }
 
   private async resolveDraftOutputBytes(edit: DraftEdit): Promise<Uint8Array> {
-    if (edit.kind === 'full_text_v1' && edit.contentBlobHash) {
-      if (!this.artifactStore) throw new Error('Content-addressed DraftEdit blob store is unavailable.');
+    if ((edit.kind === 'full_text_v1' || edit.kind === 'binary_image_v1') && edit.contentBlobHash) {
+      if (!this.artifactStore) throw edit.kind === 'binary_image_v1'
+        ? new BinaryImageDraftError('imageWriteFailed') : new Error('Content-addressed DraftEdit blob store is unavailable.');
       const bytes = await this.artifactStore.getBlob(edit.contentBlobHash);
       if (bytes.byteLength !== edit.result.sizeBytes || hashBytes(bytes) !== edit.result.sha256) {
-        throw new Error('Content-addressed DraftEdit blob does not match its result identity.');
+        throw edit.kind === 'binary_image_v1' ? new BinaryImageDraftError('imageWriteInvalidImage')
+          : new Error('Content-addressed DraftEdit blob does not match its result identity.');
       }
       return bytes;
     }
@@ -447,7 +504,8 @@ export class SafeFileEditor {
     bytes: Uint8Array,
     createParent: boolean,
     expectedBase?: FileContentIdentity,
-    mustNotExist = false
+    mustNotExist = false,
+    beforeReplace?: () => void
   ): Promise<void> {
     if (uri.scheme === 'file') {
       if (createParent) await fs.mkdir(path.dirname(uri.fsPath), { recursive: true });
@@ -462,6 +520,7 @@ export class SafeFileEditor {
         await handle.close();
       }
       try {
+        beforeReplace?.();
         if (mustNotExist) {
           await fs.link(temporaryPath, uri.fsPath);
           await fs.unlink(temporaryPath);
@@ -472,6 +531,7 @@ export class SafeFileEditor {
               throw new Error('Full-text DraftEdit base changed immediately before atomic replacement.');
             }
           }
+          beforeReplace?.();
           await fs.rename(temporaryPath, uri.fsPath);
         }
         await fsyncDirectory(path.dirname(uri.fsPath));
@@ -531,6 +591,14 @@ export class SafeFileEditor {
     const dirtyDocument = vscode.workspace.textDocuments.some((document) => this.isSameUri(document.uri, uri) && document.isDirty);
     const dirtyTab = this.findOpenTabs(uri).some((tab) => tab.isDirty);
     if (dirtyDocument || dirtyTab) throw new Error(this.t('cannotApplyDirtyDraftEdit', { label }));
+  }
+
+  private localizeBinaryFailure(error: unknown, label: string): unknown {
+    if (error instanceof BinaryImageDraftError) return error;
+    const knownKeys = ['cannotApplyCreatedFileExists', 'cannotApplyMissingDraftTarget', 'cannotApplyChangedDraftTarget',
+      'cannotApplyDirtyDraftEdit', 'cannotApplyOutsideWorkspace', 'draftTargetNotFile', 'cannotRevertChangedAgentFile'];
+    if (error instanceof Error && knownKeys.some((key) => error.message === this.t(key, { label }))) return error;
+    return new BinaryImageDraftError('imageWriteFailed', error instanceof Error ? error.message : undefined);
   }
 
   private assertWorkspaceTarget(uri: vscode.Uri, label: string, authorizedUri?: string): void {
@@ -597,6 +665,11 @@ export class SafeFileEditor {
   private isSameUri(left: vscode.Uri, right: vscode.Uri): boolean {
     return left.toString() === right.toString();
   }
+}
+
+export async function assertBinaryImageWorkspaceTarget(uri: vscode.Uri): Promise<void> {
+  const language = getConfiguredKeepseekLanguage();
+  await new SafeFileEditor((key, values) => localize(language, key, values)).assertBinaryImageWorkspaceTarget(uri);
 }
 
 async function hashLocalFile(filePath: string): Promise<FileContentIdentity> {

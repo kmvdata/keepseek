@@ -188,6 +188,26 @@ export function getSavedModelSelection(): ModelSelection {
   return { sourceId, modelId };
 }
 
+/** Independent project-scoped image model; never modifies the chat model. */
+export function getSelectedImageModelSelection(): ModelSelection {
+  const config = vscode.workspace.getConfiguration('keepseek');
+  return {
+    sourceId: getWorkspaceConfigurationString(config, 'image.sourceId'),
+    modelId: getWorkspaceConfigurationString(config, 'image.modelId')
+  };
+}
+
+export async function setSelectedImageModelSelection(selection: ModelSelection): Promise<void> {
+  if (typeof selection.sourceId !== 'string' || typeof selection.modelId !== 'string'
+    || !selection.sourceId.trim() || selection.sourceId.length > 128
+    || !selection.modelId.trim() || selection.modelId.length > 512) {
+    throw new Error('Invalid image model selection.');
+  }
+  const config = vscode.workspace.getConfiguration('keepseek');
+  await config.update('image.sourceId', selection.sourceId.trim(), vscode.ConfigurationTarget.Workspace);
+  await config.update('image.modelId', selection.modelId.trim(), vscode.ConfigurationTarget.Workspace);
+}
+
 function getWorkspaceConfigurationString(
   config: vscode.WorkspaceConfiguration,
   key: string

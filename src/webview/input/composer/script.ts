@@ -80,6 +80,7 @@ export const composerRenderFragment: WebviewFragment = {
         renderExecutionModeControl();
         renderReferenceMenuButton();
         renderSendButton();
+        renderImageActivities();
         setApiKeyVisible(apiKeyVisible, false);
         if (settingsOverlay && !settingsOverlay.classList.contains('hidden')) {
           renderAccountSettings();
@@ -144,6 +145,8 @@ export const composerPublicApiFragment: WebviewFragment = {
         showHistorySettingsDialog: showHistorySettingsDialog,
         showAboutDialog: showAboutDialog,
         onSkillDraftCreated: onSkillDraftCreated,
+        onImageHostMessage: handleImageHostMessage,
+        isImageChangeSet: isImageChangeSet,
         showStatus: setComposerStatus,
         isPromptSubmittableEmpty: isPromptSubmittableEmpty,
         clearPrompt: clearPrompt

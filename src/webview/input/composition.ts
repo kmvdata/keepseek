@@ -40,6 +40,9 @@ import * as subagentProgressStyles from './usage/subagentProgressStyles';
 import * as dialogStyles from './dialogs/sharedStyles';
 import * as accountSettingsStyles from './dialogs/accountSettings/styles';
 import * as aboutStyles from './dialogs/about/styles';
+import * as imageScript from './images/script';
+import * as imageTemplate from './images/template';
+import * as imageStyles from './images/styles';
 
 export interface WebviewFragment {
   readonly id: string;
@@ -152,6 +155,7 @@ export const INPUT_SCRIPT_FRAGMENTS = [
   createSkillScript.createSkillOverlayBindingsFragment,
   dragDrop.dragDropBindingsFragment,
   referenceChips.referenceHostMessageFragment,
+  imageScript.imageScriptFragment,
   composerScript.composerPublicApiFragment
 ] as const satisfies readonly WebviewFragment[];
 
@@ -177,7 +181,8 @@ export const INPUT_STYLE_FRAGMENTS = [
   dialogStyles.dialogFieldStylesFragment,
   accountSettingsStyles.accountSettingsSecretStylesFragment,
   dialogStyles.dialogFooterStylesFragment,
-  accountSettingsStyles.accountSettingsResponsiveStylesFragment
+  accountSettingsStyles.accountSettingsResponsiveStylesFragment,
+  imageStyles.imageStylesFragment
 ] as const satisfies readonly WebviewFragment[];
 
 export const INPUT_TEMPLATE_FRAGMENTS = [
@@ -189,7 +194,8 @@ export const INPUT_TEMPLATE_FRAGMENTS = [
   accountSettingsTemplate.accountSettingsTemplateFragment,
   historySettingsTemplate.historySettingsTemplateFragment,
   aboutTemplate.aboutTemplateFragment,
-  createSkillTemplate.createSkillTemplateFragment
+  createSkillTemplate.createSkillTemplateFragment,
+  imageTemplate.imageTemplateFragment
 ] as const satisfies readonly WebviewFragment[];
 
 export function composeWebviewFragments(fragments: readonly WebviewFragment[]): string {

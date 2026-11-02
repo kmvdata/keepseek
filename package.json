@@ -72,6 +72,18 @@
     "configuration": {
       "title": "KeepSeek",
       "properties": {
+        "keepseek.image.sourceId": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "Independent image account, paired with keepseek.image.modelId. Select it in Generate image. Does not change the chat model. / 独立图像账号，在生成图片面板选择，不改变聊天模型。"
+        },
+        "keepseek.image.modelId": {
+          "type": "string",
+          "default": "",
+          "scope": "window",
+          "markdownDescription": "Independent image model attached to the selected account. First adapter: gpt-image-2.5-sunburst on the official OpenAI Images endpoint. / 独立图像模型，首期支持官方 OpenAI Images 端点的 gpt-image-2.5-sunburst。"
+        },
         "keepseek.selectedSourceId": {
           "type": "string",
           "default": "",

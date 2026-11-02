@@ -14,6 +14,15 @@ export function hashApprovalText(value: string): string {
 }
 
 export function hashDraftEditAction(edit: DraftEdit, originalTextHash = ''): string {
+  if (edit.kind === 'binary_image_v1') {
+    return hashApprovalValue({
+      payloadVersion: edit.kind, uri: edit.uri, action: edit.action, reason: edit.reason,
+      baseExists: edit.action === 'modify', base: edit.base ?? null,
+      result: edit.result, contentBlobHash: edit.contentBlobHash,
+      assetId: edit.assetId, assetHash: edit.assetHash, mimeType: edit.mimeType,
+      width: edit.width, height: edit.height
+    });
+  }
   if (edit.kind === 'text_patch_v1') {
     return hashApprovalValue({
       payloadVersion: edit.kind,

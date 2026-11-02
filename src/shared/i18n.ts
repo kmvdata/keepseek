@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { IMAGE_TRANSLATIONS } from './imageI18n';
 
 export type KeepseekLanguage = 'zh-CN' | 'en';
 
@@ -9,6 +10,7 @@ type TranslationCatalog = Record<string, string>;
 
 export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
+    ...IMAGE_TRANSLATIONS['zh-CN'],
     executionMode: '执行方式',
     executionNormal: 'Normal 常规',
     executionPlan: 'Plan 计划',
@@ -920,6 +922,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
     stopShortcutHintMac: '按 Ctrl+Enter 或 Command+Enter 中止'
   },
   en: {
+    ...IMAGE_TRANSLATIONS.en,
     executionMode: 'Execution mode',
     executionNormal: 'Normal',
     executionPlan: 'Plan',
@@ -1834,6 +1837,7 @@ export const WEBVIEW_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> 
 
 const EXTENSION_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
   'zh-CN': {
+    ...IMAGE_TRANSLATIONS['zh-CN'],
     sessionMigrationTitle: 'KeepSeek：正在迁移已保存会话（取消会保留原数据）',
     planDecisionBusy: '当前任务仍在运行，请结束后再处理计划。',
     planDecisionInvalid: '该计划已失效、已处理、内容不匹配或不属于当前会话，不能执行。',
@@ -1997,6 +2001,7 @@ const EXTENSION_TRANSLATIONS: Record<KeepseekLanguage, TranslationCatalog> = {
     enterPath: '请输入文件或文件夹路径。'
   },
   en: {
+    ...IMAGE_TRANSLATIONS.en,
     sessionMigrationTitle: 'KeepSeek: migrating saved session (cancel keeps the original)',
     planDecisionBusy: 'A task is still running. Finish or stop it before deciding this plan.',
     planDecisionInvalid: 'This plan is stale, already resolved, content-mismatched, or belongs to another conversation, so it cannot execute.',

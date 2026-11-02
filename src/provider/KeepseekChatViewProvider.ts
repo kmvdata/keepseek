@@ -1,4 +1,5 @@
 import { executionTimeView, reconcileExecutionTime } from '../sessions/executionTimeStats';
+import { ImageController } from './imageController';
 import { checkpointCopy, endpointHash, grantCheckpointToolBudgetSegment, isResumableToolBudgetCheckpoint, recoverNoProgressWithUserTurn, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
@@ -248,6 +249,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly changeSets: ChangeSetStore;
   private readonly draftRuns: DraftRunStore;
   private readonly draftRunBatches: DraftRunBatchCoordinator;
+  private readonly imageController: ImageController;
   private readonly approvalReviews: ApprovalReviewStore;
   private readonly approvalReviewer: ApprovalReviewerService;
   private readonly approvalCircuitBreaker = new ApprovalCircuitBreaker();
@@ -451,12 +453,19 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       (event) => this.handleDraftRunStoreEvent(event)
     );
     this.draftRunBatches = new DraftRunBatchCoordinator(this.draftRuns, () => this.postState());
+    this.imageController = new ImageController({
+      globalStorageUri: this.globalStorageUri, extensionUri: this.extensionUri,
+      sources: this.sourceStore, changeSets: this.changeSets, views: () => this.views,
+      scope: () => ({ workspaceId: this.sessionStore.workspaceKey, sessionId: this.sessionStore.activeSessionId }),
+      t: (key, values) => this.t(key, values), onChange: () => this.postState({ immediate: true, omitMessages: true })
+    });
     this.sessionCleanupTimer = setInterval(() => {
       void this.cleanupExpiredSessions();
     }, SESSION_CLEANUP_INTERVAL_MS);
   }
 
   public dispose(): void {
+    this.imageController.dispose();
     this.draftRunBatches?.cancel();
     this.delegatedApprovals.cancel();
     this.currentRunAbortController?.abort();
@@ -480,6 +489,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.syncConfiguredState();
+    this.imageController.syncScope(true);
     this.postState();
     void this.refreshModelSourceState().then(() => this.postState()).catch(() => undefined);
     void this.refreshCurrentRunContext(this.sessionStore.getActiveSession(), '').then(() => this.postState()).catch(() => undefined);
@@ -489,7 +499,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.draftRunBatches?.cancel();
     this.currentRunAbortController?.abort();
     await this.activeRunSettled;
-    if (!(await this.sessionStore.setWorkspaceScope(getCurrentWorkspaceSessionScope()))) {
+    if (!(await this.withImageScopeTransition(() => this.sessionStore.setWorkspaceScope(getCurrentWorkspaceSessionScope())))) {
       return;
     }
 
@@ -874,6 +884,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleMessage(message: WebviewMessage): Promise<void> {
+    if (!message || typeof message !== 'object' || typeof message.type !== 'string') return;
+    if (['imageStateRequest', 'imageImport', 'imageSubmit', 'imageSelectModel', 'imageJobAction'].includes(message.type)) {
+      if (!this.sessionReady || !this.approvalDataReady) return;
+      await this.imageController.handle(message);
+      return;
+    }
     if (isAgentRequestMessage(message.type) && (!this.approvalDataReady || !this.requestContextReady)) {
       console.warn('KeepSeek: ignored an Agent request before startup context and recovery stores were ready.');
       this.postStartupSettingsPatch();
@@ -889,6 +905,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     switch (message.type) {
       case 'ready':
+        this.imageController.syncScope(true);
         this.startupTrace?.mark('webview-ready');
         this.postLightweightState();
         if (this.approvalDataReady) {
@@ -1395,8 +1412,19 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             return;
           }
           const deleteTargets = this.changeSets.getPendingDeleteTargetsForChangeSet(changeSetId);
+          const binarySnapshot = this.binaryApplySnapshot(changeSetId);
+          const imageEditIds = this.changeSets.toWebviewState?.(this.sessionStore.activeSessionId)
+            .find((change) => change.id === changeSetId)?.files.map((file) => file.id) ?? [];
+          if (!(await this.confirmBinaryImageApply(imageEditIds))) {
+            this.postChangeActionFeedback(feedbackMessage, 'cancelled');
+            return;
+          }
           if (!(await this.confirmDeleteApply(deleteTargets))) {
             this.postChangeActionFeedback(feedbackMessage, 'cancelled');
+            return;
+          }
+          if (this.binaryApplySnapshot(changeSetId) !== binarySnapshot) {
+            this.postChangeActionFeedback(feedbackMessage, 'cancelled', this.t('imageVisualConfirmTitle'));
             return;
           }
           const targetUris = this.changeSets.getChangeSetEditUris(changeSetId);
@@ -1498,9 +1526,24 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (!key) return;
     try {
       const targetUris = this.changeSets.getEditUris([message.id]);
+      const pendingImage = this.changeSets.getPendingEdit?.(message.id);
+      const binarySnapshot = pendingImage?.edit.kind === 'binary_image_v1'
+        ? JSON.stringify([pendingImage.sessionId, hashDraftEditAction(pendingImage.edit)]) : undefined;
+      if (!(await this.confirmBinaryImageApply([message.id]))) {
+        this.finishChangeAction(message, key, 'cancelled');
+        return;
+      }
       if (!(await this.confirmDeleteApply(this.changeSets.getPendingDeleteTargetsForEdit(message.id)))) {
         this.finishChangeAction(message, key, 'cancelled');
         return;
+      }
+      if (binarySnapshot) {
+        const current = this.changeSets.getPendingEdit(message.id);
+        if (!current || current.sessionId !== this.sessionStore.activeSessionId
+          || JSON.stringify([current.sessionId, hashDraftEditAction(current.edit)]) !== binarySnapshot) {
+          this.finishChangeAction(message, key, 'cancelled');
+          return;
+        }
       }
       const result = await this.changeSets.applyEdit(message.id, undefined, {
         onProgress: (progress) => this.changeActionProgress(message, progress.status)
@@ -1529,8 +1572,19 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (!key) return;
     try {
       const targetUris = this.changeSets.getChangeSetEditUris(message.id);
+      const binarySnapshot = this.binaryApplySnapshot(message.id);
+      const imageEditIds = this.changeSets.toWebviewState?.(this.sessionStore.activeSessionId)
+        .find((change) => change.id === message.id)?.files.map((file) => file.id) ?? [];
+      if (!(await this.confirmBinaryImageApply(imageEditIds))) {
+        this.finishChangeAction(message, key, 'cancelled');
+        return;
+      }
       if (!(await this.confirmDeleteApply(this.changeSets.getPendingDeleteTargetsForChangeSet(message.id)))) {
         this.finishChangeAction(message, key, 'cancelled');
+        return;
+      }
+      if (this.binaryApplySnapshot(message.id) !== binarySnapshot) {
+        this.finishChangeAction(message, key, 'cancelled', this.t('imageVisualConfirmTitle'));
         return;
       }
       const result = await this.changeSets.applyAll(message.id, {
@@ -1553,6 +1607,33 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       vscode.window.showErrorMessage(detail);
       this.finishChangeAction(message, key, 'failed', detail);
     }
+  }
+
+  private binaryApplySnapshot(changeSetId: string): string {
+    const sessionId = this.sessionStore.activeSessionId;
+    const files = this.changeSets.toWebviewState?.(sessionId).find((change) => change.id === changeSetId)?.files ?? [];
+    const binary = files.map((file) => this.changeSets.getPendingEdit?.(file.id))
+      .filter((pending) => pending?.edit.kind === 'binary_image_v1')
+      .map((pending) => [pending!.edit.id, hashDraftEditAction(pending!.edit)]);
+    return JSON.stringify([sessionId, binary]);
+  }
+
+  private async confirmBinaryImageApply(ids: readonly string[]): Promise<boolean> {
+    const binary = ids.map((id) => this.changeSets.getPendingEdit?.(id))
+      .filter((pending) => pending?.edit.kind === 'binary_image_v1');
+    if (!binary.length) return true;
+    const sessionId = this.sessionStore.activeSessionId;
+    for (const pending of binary) {
+      if (!pending || pending.sessionId !== sessionId) return false;
+      const before = hashDraftEditAction(pending.edit);
+      await this.changeSets.openDiff(pending.edit.id);
+      const confirm = this.t('imageConfirmApply');
+      const choice = await vscode.window.showWarningMessage(this.t('imageVisualConfirmTitle'), { modal: true }, confirm);
+      const current = this.changeSets.getPendingEdit(pending.edit.id);
+      if (choice !== confirm || this.sessionStore.activeSessionId !== sessionId || !current
+        || current.sessionId !== sessionId || hashDraftEditAction(current.edit) !== before) return false;
+    }
+    return true;
   }
 
   private async handleDiscardDraftEdit(message: Extract<WebviewMessage, { type: 'discardDraftEdit' }>): Promise<void> {
@@ -2078,7 +2159,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     this.clearSessionTransientState();
-    await this.sessionStore.createNewSession(this.language);
+    await this.withImageScopeTransition(() => this.sessionStore.createNewSession(this.language));
     await this.refreshSkills({ post: false });
     this.postToWebview({ type: 'sessionChanged' });
     this.postState({ forceFull: true });
@@ -2090,7 +2171,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const wasActiveSession = sessionId === this.sessionStore.activeSessionId;
-    const session = await this.sessionStore.selectSession(sessionId);
+    const session = await this.withImageScopeTransition(() => this.sessionStore.selectSession(sessionId));
     if (!session) {
       return;
     }
@@ -2115,7 +2196,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const session = await this.sessionStore.copyOtherWorkspaceSession(workspaceKey, sessionId);
+    const session = await this.withImageScopeTransition(() => this.sessionStore.copyOtherWorkspaceSession(workspaceKey, sessionId));
     if (!session) {
       return;
     }
@@ -2146,7 +2227,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const result = await this.sessionStore.deleteSessions(uniqueSessionIds);
+    const result = await this.withImageScopeTransition(() => this.sessionStore.deleteSessions(uniqueSessionIds));
     if (!result.deletedCount) {
       return;
     }
@@ -2747,6 +2828,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           maxOutputSource: model.maxOutputSource,
           agentCompatible: model.agentCompatible !== false,
           nonTextModelKind: model.nonTextModelKind,
+          imageCapabilities: model.imageCapabilities,
           supportsBilling: model.supportsBilling === true
         })),
         isOfficialDeepSeek: isOfficialDeepSeekSource(source)
@@ -5822,7 +5904,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       ...this.changeSets.getProtectedSessionIds(),
       ...this.draftRuns.getProtectedSessionIds()
     ];
-    const changed = await this.sessionStore.cleanupExpiredSessions(Date.now(), protectedSessionIds, options.force === true);
+    const changed = await this.withImageScopeTransition(() => this.sessionStore.cleanupExpiredSessions(Date.now(), protectedSessionIds, options.force === true));
     if (changed && options.post !== false) {
       this.postState({ forceFull: true });
     }
@@ -5855,6 +5937,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       this.postLightweightState();
       return;
     }
+    this.imageController.syncScope();
     const batch = this.draftRunBatches?.state;
     if (batch && this.draftRunBatches.pending && (!vscode.workspace.isTrusted
       || this.sessionStore.activeSessionId !== batch.sessionId
@@ -6190,6 +6273,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const pending = this.changeSets.getPendingEdit(id);
         if (!pending || pending.runId !== batch.runId || pending.sessionId !== batch.sessionId) continue;
         const file = pending.edit;
+        // Binary content needs explicit user visual confirmation. Text-only review
+        // and host-policy delegation never authorize manual image Apply.
+        if (file.kind === 'binary_image_v1') {
+          editResults.push({ id, applied: false, errors: [this.t('imageVisualConfirmTitle')] });
+          break;
+        }
         const external = !vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(file.uri));
         const fileAuthorization = {
           authorizedUri: file.uri,
@@ -6492,6 +6581,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     for (const view of this.views) {
       void view.webview.postMessage(message);
     }
+  }
+
+  private async withImageScopeTransition<T>(work: () => Promise<T>): Promise<T> {
+    this.imageController?.beginScopeTransition();
+    try { return await work(); }
+    finally { this.imageController?.endScopeTransition(); }
   }
 
   private getHtmlForWebview(webview: vscode.Webview): string {

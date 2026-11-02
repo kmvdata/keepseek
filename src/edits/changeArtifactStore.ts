@@ -54,8 +54,11 @@ export class ChangeArtifactStore {
 
   public async getBlob(hash: string): Promise<Uint8Array> {
     if (!/^[a-f0-9]{64}$/u.test(hash)) throw new Error('Invalid rollback blob hash.');
+    const limit = getConfiguredPatchSettings().maxBackupBytes;
+    const stat = await vscode.workspace.fs.stat(this.blobUri(hash));
+    if (stat.type !== vscode.FileType.File || stat.size > limit) throw new Error('Rollback blob exceeds the configured byte limit.');
     const bytes = await vscode.workspace.fs.readFile(this.blobUri(hash));
-    if (hashBytes(bytes) !== hash) throw new Error('Rollback blob hash verification failed.');
+    if (bytes.byteLength > limit || hashBytes(bytes) !== hash) throw new Error('Rollback blob hash verification failed.');
     return bytes;
   }
 

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { DEFAULT_DEEPSEEK_BASE_URL } from '../shared/config';
 import { isRecord } from '../shared/errors';
+import { getImageModelCapabilities } from './imageCapabilities';
 import {
   MAX_MODEL_CONTEXT_WINDOW_TOKENS,
   MAX_MODEL_OUTPUT_TOKENS
@@ -325,12 +326,14 @@ export function normalizeDiscoveredModels(value: unknown): DiscoveredModelInfo[]
       MAX_DISCOVERED_OUTPUT_TOKENS
     );
     const anthropicCapabilities = normalizeAnthropicModelCapabilities(item.anthropicCapabilities);
+    const imageCapabilities = getImageModelCapabilities(id);
     models.push({
       id,
       ...(name ? { name } : {}),
       ...(contextWindowTokens ? { contextWindowTokens } : {}),
       ...(maxOutputTokens ? { maxOutputTokens } : {}),
-      ...(anthropicCapabilities ? { anthropicCapabilities } : {})
+      ...(anthropicCapabilities ? { anthropicCapabilities } : {}),
+      ...(imageCapabilities ? { imageCapabilities } : {})
     });
   }
   return models;
@@ -362,7 +365,8 @@ export function normalizeSourceModels(value: unknown): ModelSourceModel[] {
     models.push({
       id,
       ...(contextWindowTokens ? { contextWindowTokens } : {}),
-      ...(maxOutputTokens ? { maxOutputTokens } : {})
+      ...(maxOutputTokens ? { maxOutputTokens } : {}),
+      ...(getImageModelCapabilities(id) ? { imageCapabilities: getImageModelCapabilities(id) } : {})
     });
   }
   return models;

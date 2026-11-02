@@ -26,9 +26,38 @@ import {
   getConfiguredSubagentHandoffPreviewBytes,
   getConfiguredSubagentParallelHandoffBytes,
   getConfiguredSubagentMaxUpstreamTokens,
+  getSelectedImageModelSelection,
+  setSelectedImageModelSelection,
   normalizeAgentSettings,
   normalizeCompressionThreshold
 } from '../src/shared/config';
+
+test('image selection uses separate project settings and never writes the chat selection', async () => {
+  const original = vscode.workspace.getConfiguration;
+  const writes: unknown[][] = [];
+  const values: Record<string, unknown> = {};
+  vscode.workspace.getConfiguration = () => ({
+    ...original(),
+    inspect: (key: string) => ({ workspaceValue: values[key] }),
+    update: async (...args: unknown[]) => {
+      writes.push(args);
+      values[args[0] as string] = args[1];
+    }
+  });
+  try {
+    assert.deepEqual(getSelectedImageModelSelection(), { sourceId: '', modelId: '' });
+    await setSelectedImageModelSelection({ sourceId: ' images ', modelId: ' gpt-image-2.5-sunburst ' });
+    assert.deepEqual(getSelectedImageModelSelection(), { sourceId: 'images', modelId: 'gpt-image-2.5-sunburst' });
+    assert.deepEqual(writes, [
+      ['image.sourceId', 'images', vscode.ConfigurationTarget.Workspace],
+      ['image.modelId', 'gpt-image-2.5-sunburst', vscode.ConfigurationTarget.Workspace]
+    ]);
+    await assert.rejects(setSelectedImageModelSelection({ sourceId: '', modelId: 'x' }));
+    assert.equal(writes.length, 2);
+  } finally {
+    vscode.workspace.getConfiguration = original;
+  }
+});
 
 test('model timeout accepts only the six shared presets and normalizes legacy values to one hour', () => {
   assert.equal(getConfiguredModelRequestTimeoutMs(), 3_600_000);

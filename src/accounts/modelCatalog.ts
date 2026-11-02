@@ -15,6 +15,7 @@ import {
 } from './sourceCapabilities';
 import type { ModelSource } from './types';
 import { getDeepSeekModelIdentity } from '../shared/deepSeekModels';
+import { getImageModelCapabilities } from './imageCapabilities';
 
 export interface CreateModelCatalogOptions {
   includeDisabledModels?: boolean;
@@ -71,6 +72,7 @@ export function createModelCatalog(
         : undefined;
       const fetched = source.modelCache?.models.find((model) => model.id === modelId);
       const manual = source.models.find((model) => model.id === modelId);
+      const imageCapabilities = getImageModelCapabilities(modelId);
       const nonTextModelKind = getKnownNonTextModelKind(modelId);
       if (nonTextModelKind) {
         if (!options.includeDisabledModels) {
@@ -82,6 +84,7 @@ export function createModelCatalog(
           provider: source.provider,
           agentCompatible: false,
           nonTextModelKind,
+          ...(imageCapabilities ? { imageCapabilities } : {}),
           fetchedName: fetched?.name,
           sourceId: source.id,
           sourceName: source.name,

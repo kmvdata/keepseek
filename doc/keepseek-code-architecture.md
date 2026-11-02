@@ -6,6 +6,8 @@
 
 ## 1. 先建立整体心智模型
 
+2026-11-02 图像功能补充：`src/images/` 是独立的手动图像任务与资产子系统，通过 `provider/imageController.ts` 接线，使用单一 OpenAI Images 适配器完成单张生成与整图修改。任务不进入文本 messages、工具集合或三协议投影；`accounts/imageModels.ts` 独立解析图像模型与共享凭据入口，结果通过 `binary_image_v1` 回到既有文件事务管线。支持范围、费用未知与恢复边界、现场验收见 [图像功能说明](keepseek-image-generation.md)。
+
 2026-10-31 长任务续接：压缩规划与收益测量通过共享 payload 和来源隔离校准；`runCheckpoint.recoverNoProgressWithUserTurn` 只接受真实新 user，保留逻辑任务预算与进展窗口。`SessionObjectStore` 迁移有可观察阶段和提交前取消，未知/遗留锁不自动删除；`PerformanceTrace` 将 flush 与 close 分开。详见 [续接验收](long-task-rectification-resume-report.md)。
 
 2026-10-30 输出预算补充：`shared/outputBudget.ts` 定义唯一单次计算规则；`agent/requestBudget.ts` 将实际三协议请求投影转换为版本化预算快照。Runner、结果准入、压缩器和 reviewer 共用该规则。能力解析仍在 accounts/modelCatalog，按 sourceId + modelId 取值；恢复策略在 runCheckpoint/runner，用户诊断在 runDetails/Webview。行为及兼容迁移见 [输出预算整改记录](model-output-budget-rectification.md)。
@@ -446,6 +448,7 @@ src/agent/subagents/
 ```text
 src/edits/
 ├── draftEdit.ts          DraftEdit union、构造和身份读取
+├── binaryImageDraft.ts   binary_image_v1：图片元数据、原始 blob 与新建/替换身份
 ├── textPatch.ts          patch 文本解析、canonical IR、hash、应用和 inverse
 ├── changeSet.ts          从一组 DraftEdit 创建 ChangeSet
 ├── changeSetStore.ts     pending/Apply/Discard/Revert、恢复和持久化主管线
@@ -475,6 +478,7 @@ src/edits/
 
 - `text_patch_v1`：局部修改，canonical byte hunks；
 - `full_text_v1`：新建或完整替换；
+- `binary_image_v1`：单张图片原始字节新建或完整替换，必须用户视觉确认；
 - `delete_v1`：删除；
 - `move_v1`：移动；
 - `legacy_full_text_v0`：只用于旧数据兼容。
@@ -679,6 +683,8 @@ globalStorageUri/
 ├── chat-sessions/v1/subagents/       子代理运行记录（现有兼容布局）
 ├── usage-ledger/v2/                  按 session 分桶的请求级用量账本
 ├── model-calibration/v*/             Provider 有效上下文窗口校准
+├── image-jobs-v1/                    独立图像任务、提交 claim、待入库原始结果暂存
+├── image-assets/v1/                  内容寻址图片、会话所有权引用及专属预览投影
 ├── change-sets/v4/                   ChangeSet index、runtime、history、checkpoints
 ├── change-artifacts/v1/blobs/        大内容回滚 blob
 ├── draft-runs.json                   DraftRun 状态

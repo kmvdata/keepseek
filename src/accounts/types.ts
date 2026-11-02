@@ -13,6 +13,8 @@
  * 旧版 keepseek.apiKey / keepseek.baseUrl / DEEPSEEK_API_KEY 环境变量
  * 不再支持，读取时直接舍弃，不做迁移。
  */
+import type { ImageModelCapabilities } from './imageCapabilities';
+
 export const MODEL_SOURCE_PROVIDERS = [
   'deepseek',
   'kimi',
@@ -45,6 +47,7 @@ export interface DiscoveredModelInfo {
   contextWindowTokens?: number;
   maxOutputTokens?: number;
   anthropicCapabilities?: AnthropicModelCapabilities;
+  imageCapabilities?: ImageModelCapabilities;
 }
 
 export interface ModelDiscoveryCache {
@@ -58,6 +61,7 @@ export interface ModelSourceModel {
   /** Explicit capability overrides for manually attached models. */
   contextWindowTokens?: number;
   maxOutputTokens?: number;
+  imageCapabilities?: ImageModelCapabilities;
 }
 
 /** Persisted model-source schema stored below the extension's globalStorageUri. */

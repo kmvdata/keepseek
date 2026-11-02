@@ -1223,6 +1223,11 @@ export function getScript(): string {
 
     function handleKeepseekHostMessage(event) {
       var message = event.data;
+      if (['imageState', 'imageImported', 'imageSubmitFeedback'].includes(message.type)) {
+        if (window.keepseekInputControls && window.keepseekInputControls.onImageHostMessage) window.keepseekInputControls.onImageHostMessage(message);
+        if (message.type === 'imageState' && message.sessionId === state.activeSessionId) render();
+        return;
+      }
       if (message.type === 'requestTimeoutSettingsResult') {
         var restoreTimeoutFocus = pendingModelRequestTimeoutFocus && settingsMenuOpen
           && document.activeElement === document.body;
@@ -3287,6 +3292,7 @@ export function getScript(): string {
           if (file?.id) liveChangeSetFileIds.add(String(file.id));
         });
         var messageId = String(changeSet.messageId || '');
+        if (window.keepseekInputControls && window.keepseekInputControls.isImageChangeSet && window.keepseekInputControls.isImageChangeSet(changeSet)) return;
         var message = messageId ? messagesById[messageId] : null;
         if (message?.role === 'assistant' && !message.isStreaming) {
           if (!byMessageId[messageId]) byMessageId[messageId] = [];

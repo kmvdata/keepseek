@@ -22,6 +22,8 @@ import { createChangeSet } from './changeSet';
 import { ChangeArtifactStore } from './changeArtifactStore';
 import { getDraftEditBase, getDraftEditKind, getDraftEditResult } from './draftEdit';
 import { getConfiguredPatchSettings } from '../shared/config';
+import { isValidBinaryImageDraft } from './binaryImageDraft';
+import { BinaryImageDraftError } from './binaryImageErrors';
 
 type Translator = (key: string, values?: Record<string, string | number>) => string;
 type ChangeSetTraceHandler = (changeSet: ChangeSet, event: Record<string, unknown>) => void;
@@ -65,6 +67,7 @@ export interface WebviewChangeSetFile {
   error?: string;
   checkpointId?: string;
   patchSummary?: { hunkCount: number; baseSha256: string; resultSha256: string; changedBytes: number };
+  imageSummary?: { assetId: string; mimeType: string; width: number; height: number; sizeBytes: number };
 }
 
 export type WebviewChangeSet = Omit<ChangeSet, 'files'> & {
@@ -484,6 +487,9 @@ export class ChangeSetStore {
     if (!found) {
       return false;
     }
+    if (found.edit.kind === 'binary_image_v1' && found.changeSet.sessionId !== this.sessionStore.activeSessionId) {
+      throw new BinaryImageDraftError('imageWriteOtherSession');
+    }
     const checkpoint = found.edit.checkpointId
       ? this.checkpoints.get(found.edit.checkpointId)
       : undefined;
@@ -496,6 +502,9 @@ export class ChangeSetStore {
     if (!found) {
       return false;
     }
+    if (found.edit.kind === 'binary_image_v1' && found.changeSet.sessionId !== this.sessionStore.activeSessionId) {
+      throw new BinaryImageDraftError('imageWriteOtherSession');
+    }
     const uri = vscode.Uri.parse(found.edit.uri);
     if (!vscode.workspace.getWorkspaceFolder(uri)) {
       throw new Error(this.t('cannotOpenDraftEditOutsideWorkspace', { label: found.edit.label }));
@@ -504,6 +513,10 @@ export class ChangeSetStore {
       await vscode.workspace.fs.stat(uri);
     } catch {
       throw new Error(this.t('draftEditFileNotFound', { label: found.edit.label }));
+    }
+    if (found.edit.kind === 'binary_image_v1') {
+      await vscode.commands.executeCommand('vscode.open', uri, { preview: true });
+      return true;
     }
     const document = await vscode.workspace.openTextDocument(uri);
     await vscode.window.showTextDocument(document, { preview: true });
@@ -855,6 +868,8 @@ export class ChangeSetStore {
   }
 
   private async recordAppliedResult(changeSet: ChangeSet, result: ChangeSetApplyResult): Promise<void> {
+    // Manual image activities never fabricate messages in the text lane.
+    if (changeSet.files.every((file) => file.kind === 'binary_image_v1')) return;
     const session = this.sessionStore.getActiveSession();
     if (session.id !== changeSet.sessionId) {
       return;
@@ -879,6 +894,7 @@ export class ChangeSetStore {
   }
 
   private async recordRevertedResult(changeSet: ChangeSet, result: ChangeSetRevertResult): Promise<void> {
+    if (changeSet.files.every((file) => file.kind === 'binary_image_v1')) return;
     const session = this.sessionStore.getActiveSession();
     if (session.id !== changeSet.sessionId) {
       return;
@@ -1391,7 +1407,7 @@ export class ChangeSetStore {
       const changeSet = inMemory ?? (isRecordWithChangeSet(stored) && isStoredChangeSet(stored.changeSet)
         ? normalizeStoredChangeSet(stored.changeSet) : undefined);
       for (const file of changeSet?.files ?? []) {
-        if (file.kind === 'full_text_v1' && file.contentBlobHash) referencedBlobs.add(file.contentBlobHash);
+        if ((file.kind === 'full_text_v1' || file.kind === 'binary_image_v1') && file.contentBlobHash) referencedBlobs.add(file.contentBlobHash);
       }
     }
     for (const checkpointId of liveCheckpointIds) {
@@ -1422,7 +1438,7 @@ export class ChangeSetStore {
     }, 0);
     const payloadBytes = Buffer.byteLength(JSON.stringify(changeSet.files), 'utf8');
     const contentBlobBytes = changeSet.files.reduce((total, file) => total
-      + (file.kind === 'full_text_v1' && file.contentBlobHash ? file.result.sizeBytes : 0), 0);
+      + ((file.kind === 'full_text_v1' || file.kind === 'binary_image_v1') && file.contentBlobHash ? file.result?.sizeBytes ?? 0 : 0), 0);
     if (checkpointBytes + payloadBytes + contentBlobBytes > getConfiguredPatchSettings().maxChangeSetArtifactBytes) {
       throw new Error('ChangeSet checkpoint/blob quota exceeded; no workspace mutation occurred.');
     }
@@ -1550,7 +1566,10 @@ function refreshStoredDraftEdit(target: ChangeSetFile, incoming: ChangeSetFile):
 function normalizeStoredChangeSet(changeSet: ChangeSet): ChangeSet {
   return cloneChangeSet({
     ...changeSet,
-    messageId: typeof changeSet.messageId === 'string' ? changeSet.messageId : ''
+    messageId: typeof changeSet.messageId === 'string' ? changeSet.messageId : '',
+    files: changeSet.files.map((file) => file.kind === 'binary_image_v1' && !isValidBinaryImageDraft(file as unknown)
+      ? { ...file, status: 'uncertain' as const, error: new BinaryImageDraftError('imageWriteInvalidMetadata').message }
+      : file)
   });
 }
 
@@ -1592,7 +1611,8 @@ function cloneWebviewChangeSet(changeSet: WebviewChangeSet): WebviewChangeSet {
       approvalSource: file.approvalSource,
       error: file.error,
       checkpointId: file.checkpointId,
-      patchSummary: file.patchSummary ? { ...file.patchSummary } : undefined
+      patchSummary: file.patchSummary ? { ...file.patchSummary } : undefined,
+      imageSummary: file.imageSummary ? { ...file.imageSummary } : undefined
     })),
     lastApplyResult: changeSet.lastApplyResult
       ? {
@@ -1619,6 +1639,9 @@ function toWebviewChangeSetFile(file: ChangeSetFile): WebviewChangeSetFile {
     approvalSource: file.approvalSource,
     error: file.error,
     checkpointId: file.checkpointId,
+    imageSummary: file.kind === 'binary_image_v1' && isValidBinaryImageDraft(file) ? {
+      assetId: file.assetId, mimeType: file.mimeType, width: file.width, height: file.height, sizeBytes: file.result.sizeBytes
+    } : undefined,
     patchSummary: file.kind === 'text_patch_v1' ? {
       hunkCount: file.patch.hunks.length,
       baseSha256: base?.sha256 ?? '',

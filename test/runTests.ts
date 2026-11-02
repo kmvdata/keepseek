@@ -1,4 +1,10 @@
 import './registerVscodeStub';
+import './binaryImageDraft.test';
+import './imageAssets.test';
+import './openaiImagesAdapter.test';
+import './imageJobs.test';
+import './imageIntegration.test';
+import './imageWebview.test';
 import './approvalMode.test';
 import './approvalReviewer.test';
 import './accountResolver.test';

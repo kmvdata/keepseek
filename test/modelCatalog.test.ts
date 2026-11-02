@@ -8,12 +8,92 @@ import * as vscode from 'vscode';
 import { createContextUsageEstimateFromMessages } from '../src/agent/contextUsage';
 import { createModelCatalog, findModelBySelection } from '../src/accounts/modelCatalog';
 import { ModelSourceService } from '../src/accounts/modelSourceService';
-import { ModelSourceStore } from '../src/accounts/accountStore';
+import { ModelSourceStore, normalizeDiscoveredModels, normalizeSourceModels } from '../src/accounts/accountStore';
+import { createImageModelCatalog, resolveImageModelSourceConfig } from '../src/accounts/imageModels';
+import { normalizeOpenAIImagesEndpoint, OPENAI_IMAGE_MODEL_ID } from '../src/accounts/imageCapabilities';
+import { parseSourceModelsResponse } from '../src/accounts/modelDiscovery';
 import { isOfficialDeepSeekSource } from '../src/accounts/sourceCapabilities';
 import { getAgentRuntimeProfile } from '../src/shared/modelProfiles';
 import type { ModelSource } from '../src/accounts/types';
 
 const NOW = 1_710_000_000_000;
+
+describe('independent image model availability', () => {
+  it('keeps image models out of text Agent catalogs while providing a distinct image catalog', () => {
+    const source = createSource({
+      id: 'images', name: 'Images', provider: 'openai-compatible',
+      baseUrl: 'https://api.openai.com/v1/', apiKey: 'private-key',
+      models: [{ id: OPENAI_IMAGE_MODEL_ID }, { id: 'gpt-5' }]
+    });
+    assert.deepEqual(createModelCatalog([source]).map((model) => model.id), ['gpt-5']);
+    const [inventory] = createModelCatalog([source], { includeDisabledModels: true });
+    assert.equal(inventory?.agentCompatible, false);
+    assert.deepEqual(inventory?.imageCapabilities?.operations, ['generate', 'edit']);
+    const [image] = createImageModelCatalog([source]);
+    assert.equal(image?.available, true);
+    assert.equal(image?.sourceId, 'images');
+    assert.equal(image?.endpointId, 'https://api.openai.com/v1');
+    assert.equal(JSON.stringify(image).includes('private-key'), false);
+    assert.deepEqual(image?.capabilities.inputMimeTypes, ['image/png', 'image/jpeg', 'image/webp']);
+  });
+
+  it('does not infer native image endpoints from text compatibility or merge namesake accounts', () => {
+    const sources = [
+      createSource({ id: 'first', provider: 'openai-responses', baseUrl: 'https://api.openai.com/v1', models: [{ id: OPENAI_IMAGE_MODEL_ID }] }),
+      createSource({ id: 'second', provider: 'openai-compatible', baseUrl: 'https://gateway.example/v1', models: [{ id: OPENAI_IMAGE_MODEL_ID }] }),
+      createSource({ id: 'third', provider: 'qwencloud', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: [{ id: OPENAI_IMAGE_MODEL_ID }] }),
+      createSource({ id: 'empty', provider: 'openai-compatible', baseUrl: 'https://api.openai.com/v1', apiKey: '', models: [{ id: OPENAI_IMAGE_MODEL_ID }] }),
+      createSource({ id: 'disabled', provider: 'openai-compatible', baseUrl: 'https://api.openai.com/v1', disabledModelIds: [OPENAI_IMAGE_MODEL_ID], models: [{ id: OPENAI_IMAGE_MODEL_ID }] }),
+      createSource({ id: 'off', provider: 'openai-compatible', baseUrl: 'https://api.openai.com/v1', enabled: false, models: [{ id: OPENAI_IMAGE_MODEL_ID }] })
+    ];
+    assert.deepEqual(createImageModelCatalog(sources).map((entry) => [entry.sourceId, entry.available, entry.reason]), [
+      ['first', true, undefined], ['second', false, 'unsupported_endpoint'],
+      ['third', false, 'unsupported_endpoint'], ['empty', false, 'missing_api_key'],
+      ['disabled', false, 'model_disabled'], ['off', false, 'source_disabled']
+    ]);
+    for (const url of [
+      'http://api.openai.com/v1', 'https://api.openai.com/v1/chat/completions',
+      'https://api.openai.com/v1?secret=1', 'https://api.openai.com/v1#fragment',
+      'https://user:pass@api.openai.com/v1', 'https://api.openai.com.evil.example/v1',
+      'https://localhost/v1', 'https://api.openai.com', 'not-a-url'
+    ]) assert.equal(normalizeOpenAIImagesEndpoint(url), undefined, url);
+  });
+
+  it('reads old manual/discovery records and persists verified capabilities without trusting arbitrary flags', () => {
+    const manual = normalizeSourceModels([{ id: OPENAI_IMAGE_MODEL_ID }, { id: 'other', imageCapabilities: { adapter: 'openai-images-v1' } }]);
+    const discovered = normalizeDiscoveredModels([{ id: OPENAI_IMAGE_MODEL_ID }]);
+    const parsed = parseSourceModelsResponse({ data: [{ id: OPENAI_IMAGE_MODEL_ID }] });
+    assert.equal(manual[0]?.imageCapabilities?.version, 1);
+    assert.equal(manual[1]?.imageCapabilities, undefined);
+    assert.deepEqual(discovered[0]?.imageCapabilities, manual[0]?.imageCapabilities);
+    assert.deepEqual(parsed?.[0]?.imageCapabilities, manual[0]?.imageCapabilities);
+    assert.deepEqual(normalizeSourceModels(manual), manual);
+    assert.deepEqual(normalizeDiscoveredModels(discovered), discovered);
+  });
+
+  it('enables image use independently and resolves exactly the selected account through the shared resolver', async () => {
+    const storageRoot = await mkdtemp(path.join(os.tmpdir(), 'keepseek-image-models-'));
+    try {
+      const store = new ModelSourceStore(vscode.Uri.file(storageRoot));
+      const source = await store.createSource({
+        id: 'images', name: 'Images', provider: 'openai-compatible',
+        apiKey: 'selected-key', baseUrl: 'https://api.openai.com/v1',
+        models: [{ id: OPENAI_IMAGE_MODEL_ID }], disabledModelIds: [OPENAI_IMAGE_MODEL_ID]
+      });
+      const service = new ModelSourceService(store);
+      await service.setModelEnabled(source.id, OPENAI_IMAGE_MODEL_ID, true);
+      const resolved = await resolveImageModelSourceConfig({ sourceId: 'images', modelId: OPENAI_IMAGE_MODEL_ID }, undefined, { sourceStore: store });
+      assert.equal(resolved.source.apiKey, 'selected-key');
+      assert.equal(resolved.model.available, true);
+      assert.deepEqual(createModelCatalog([resolved.source.modelSource!]), []);
+      await assert.rejects(resolveImageModelSourceConfig({ sourceId: 'missing', modelId: OPENAI_IMAGE_MODEL_ID }, undefined, { sourceStore: store }));
+      await store.updateSource('images', { baseUrl: 'https://gateway.example/v1' });
+      await assert.rejects(resolveImageModelSourceConfig({ sourceId: 'images', modelId: OPENAI_IMAGE_MODEL_ID }, undefined, { sourceStore: store }), /unsupported_endpoint/u);
+    } finally {
+      await rm(storageRoot, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('model source catalog', () => {
   it('recognizes only the exact official DeepSeek host, including /v1 paths', () => {

@@ -165,6 +165,12 @@ export class TabInputCustom {
   public constructor(public readonly uri: Uri) {}
 }
 
+export enum ViewColumn {
+  Active = -1,
+  Beside = -2,
+  One = 1
+}
+
 export class TabInputNotebook {
   public constructor(public readonly uri: Uri) {}
 }

@@ -168,6 +168,10 @@ const MODEL_MAX_OUTPUT_GUESS_RULES: readonly ModelTokenGuessRule[] = [
 
 const NON_TEXT_MODEL_RULES: readonly NonTextModelRule[] = [
   {
+    aliases: ['gpt-image', 'chatgpt-image', 'dall-e'],
+    kind: 'image-generation'
+  },
+  {
     aliases: ['wan2-7-image-pro', 'wan2-7-image'],
     kind: 'image-generation'
   },

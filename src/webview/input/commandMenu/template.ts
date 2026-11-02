@@ -8,6 +8,12 @@ export const commandMenuTemplateFragment: WebviewFragment = {
             <span class="command-menu-title" data-i18n="commandMenu">命令菜单</span>
           </div>
 
+          <section class="command-section">
+            <button id="commandImageButton" type="button" class="command-row" role="menuitem" aria-haspopup="dialog" aria-expanded="false" aria-controls="imageDialogOverlay">
+              <span class="command-row-main"><span class="command-row-title" data-i18n="imageGenerate">生成图片</span><span class="command-row-description" data-i18n="imageMenuDescription">单张生成与整图修改，结果需单独应用到项目</span></span>
+            </button>
+          </section>
+
           <section class="command-section" aria-label="Skills">
             <div class="command-section-label">Skills</div>
             <div class="command-skills-row">

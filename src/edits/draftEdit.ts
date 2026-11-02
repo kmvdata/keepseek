@@ -10,7 +10,7 @@ import { hashBytes, inspectTextEncoding } from './textPatch';
 
 const encoder = new TextEncoder();
 
-export type DraftEditKind = 'legacy_full_text_v0' | 'full_text_v1' | 'text_patch_v1' | 'delete_v1' | 'move_v1';
+export type DraftEditKind = 'legacy_full_text_v0' | 'full_text_v1' | 'text_patch_v1' | 'delete_v1' | 'move_v1' | 'binary_image_v1';
 
 export function getDraftEditKind(edit: DraftEdit): DraftEditKind {
   return edit.kind ?? 'legacy_full_text_v0';
@@ -18,7 +18,7 @@ export function getDraftEditKind(edit: DraftEdit): DraftEditKind {
 
 export function getDraftEditBase(edit: DraftEdit): FileContentIdentity | undefined {
   if (edit.kind === 'text_patch_v1' || edit.kind === 'delete_v1' || edit.kind === 'move_v1') return edit.kind === 'text_patch_v1' ? edit.patch.base : edit.base;
-  if (edit.kind === 'full_text_v1') return edit.base;
+  if (edit.kind === 'full_text_v1' || edit.kind === 'binary_image_v1') return edit.base;
   if (edit.expectedOriginalTextHash === undefined && edit.expectedOriginalSize === undefined) return undefined;
   return {
     sha256: edit.expectedOriginalTextHash ?? '',
@@ -28,7 +28,7 @@ export function getDraftEditBase(edit: DraftEdit): FileContentIdentity | undefin
 
 export function getDraftEditResult(edit: DraftEdit): FileContentIdentity | undefined {
   if (edit.kind === 'text_patch_v1') return edit.patch.result;
-  if (edit.kind === 'full_text_v1') return edit.result;
+  if (edit.kind === 'full_text_v1' || edit.kind === 'binary_image_v1') return edit.result;
   if (edit.kind === 'delete_v1' || edit.action === 'delete' || edit.kind === 'move_v1') return undefined;
   const bytes = encoder.encode(edit.newText);
   return { sha256: hashBytes(bytes), sizeBytes: bytes.byteLength };

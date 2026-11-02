@@ -1,6 +1,7 @@
 import type { KeepseekLanguage } from './i18n';
 import type { ModelSourceConfigSnapshot } from '../accounts/types';
 import type { AnthropicModelCapabilities } from '../accounts/types';
+import type { ImageModelCapabilities } from '../accounts/imageCapabilities';
 
 export interface KeepseekModel {
   id: string;
@@ -16,6 +17,7 @@ export interface KeepseekModel {
   agentCompatible?: boolean;
   nonTextModelKind?: NonTextModelKind;
   anthropicCapabilities?: AnthropicModelCapabilities;
+  imageCapabilities?: ImageModelCapabilities;
   /** Display name returned by the selected provider's /models endpoint. */
   fetchedName?: string;
   /** Every selectable catalog model has these fields; profile-only fixtures may omit them. */
@@ -1133,8 +1135,22 @@ export interface MoveDraftEditV1 extends DraftEditBase {
   base: FileContentIdentity;
 }
 
+/** Raster image replacement; content lives in the verified artifact store. */
+export interface BinaryImageDraftEditV1 extends DraftEditBase {
+  kind: 'binary_image_v1';
+  action: 'create' | 'modify';
+  base?: FileContentIdentity;
+  result: FileContentIdentity;
+  contentBlobHash: string;
+  assetId: string;
+  assetHash: string;
+  mimeType: 'image/png' | 'image/jpeg' | 'image/webp';
+  width: number;
+  height: number;
+}
+
 export type DraftEdit = LegacyDraftEditV0 | FullTextDraftEditV1 | TextPatchDraftEditV1
-  | DeleteDraftEditV1 | MoveDraftEditV1;
+  | DeleteDraftEditV1 | MoveDraftEditV1 | BinaryImageDraftEditV1;
 
 export type TaskPlanStatus = 'running' | 'blocked' | 'completed' | 'failed' | 'stopped';
 
@@ -1228,7 +1244,7 @@ export interface ChangeCheckpoint {
   targetUri?: string;
   label: string;
   action: DraftEditAction;
-  draftKind?: 'legacy_full_text_v0' | 'full_text_v1' | 'text_patch_v1' | 'delete_v1' | 'move_v1';
+  draftKind?: 'legacy_full_text_v0' | 'full_text_v1' | 'text_patch_v1' | 'delete_v1' | 'move_v1' | 'binary_image_v1';
   state?: 'prepared' | 'applying' | 'applied' | 'uncertain' | 'interrupted' | 'reverted';
   /** Direction of the last journaled mutation. Legacy checkpoints imply apply. */
   operation?: 'apply' | 'revert';

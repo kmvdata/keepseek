@@ -256,6 +256,9 @@ export const accountSettingsHelpersFragment: WebviewFragment = {
           if (source.agentCompatible === false) {
             model.agentCompatible = false;
           }
+          if (source.imageCapabilities && source.imageCapabilities.adapter === 'openai-images-v1') {
+            model.imageCapabilities = source.imageCapabilities;
+          }
           if (source.nonTextModelKind === 'image-generation'
             || source.nonTextModelKind === 'speech-synthesis') {
             model.nonTextModelKind = source.nonTextModelKind;
@@ -276,7 +279,8 @@ export const accountSettingsHelpersFragment: WebviewFragment = {
         var disabledModelIds = Array.isArray(account.disabledModelIds) ? account.disabledModelIds : [];
         return modelOrder.map(function(modelId) {
           var model = modelsById[modelId];
-          model.enabled = model.agentCompatible !== false && disabledModelIds.indexOf(modelId) < 0;
+          model.enabled = (model.agentCompatible !== false || !!model.imageCapabilities)
+            && disabledModelIds.indexOf(modelId) < 0;
           return model;
         });
       }

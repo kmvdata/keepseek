@@ -20,6 +20,11 @@ export interface DroppedFileReferenceInput {
 }
 
 export type WebviewMessage =
+  | { type: 'imageStateRequest'; sessionId: string; inputAssetId?: string; page?: number }
+  | { type: 'imageImport'; sessionId: string }
+  | { type: 'imageSelectModel'; sessionId: string; sourceId: string; modelId: string }
+  | { type: 'imageSubmit'; sessionId: string; actionId: string; sourceId: string; modelId: string; prompt: string; size: string; quality: string; background: string; outputFormat: string; inputAssetId?: string; parentJobId?: string }
+  | { type: 'imageJobAction'; sessionId: string; jobId: string; action: 'open' | 'stop' | 'prepareWrite' | 'retrieve' }
   | { type: 'setApprovalMode'; mode: ApprovalMode }
   | { type: 'setExecutionMode'; mode: ExecutionMode }
   | { type: 'resolvePlanDecision'; planId: string; action: 'start_execution' | 'revise_plan' | 'exit_plan' }

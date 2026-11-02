@@ -146,7 +146,7 @@ export class ModelSourceService {
     if (!knownModel) {
       throw new Error('Model not found in this source.');
     }
-    if (enabled && knownModel.agentCompatible === false) {
+    if (enabled && knownModel.agentCompatible === false && !knownModel.imageCapabilities) {
       throw new Error('This resource is not compatible with the text Agent.');
     }
 

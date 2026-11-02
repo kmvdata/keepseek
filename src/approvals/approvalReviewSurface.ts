@@ -23,6 +23,13 @@ export function createDraftEditReviewRequest(input: {
   // disappear. The original full-file hash separately binds the baseline.
   const change = input.edit.kind === 'text_patch_v1'
     ? renderPatchReview(input.edit.patch)
+    : input.edit.kind === 'binary_image_v1'
+      ? JSON.stringify({
+        reviewScope: 'paths_and_metadata_only; image_pixels_not_reviewed; user_visual_confirmation_required',
+        mimeType: input.edit.mimeType, width: input.edit.width, height: input.edit.height,
+        assetId: input.edit.assetId, assetHash: input.edit.assetHash, result: input.edit.result,
+        baseExists: input.edit.action === 'modify', base: input.edit.base ?? null
+      })
     : input.edit.action === 'delete'
       ? input.originalText
       : input.edit.kind === 'move_v1'
@@ -44,7 +51,8 @@ export function createDraftEditReviewRequest(input: {
       `file_action:${input.edit.action}`,
       input.edit.action === 'delete' ? 'destructive_delete' : 'workspace_write',
       base?.sha256 ? 'baseline_hash_present' : 'baseline_hash_absent',
-      `payload_version:${getDraftEditKind(input.edit)}`
+      `payload_version:${getDraftEditKind(input.edit)}`,
+      ...(input.edit.kind === 'binary_image_v1' ? ['image_content_not_reviewed', 'user_visual_confirmation_required'] : [])
     ],
     exactAction: {
       kind,

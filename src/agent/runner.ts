@@ -759,7 +759,7 @@ export class AgentLoop {
                 kind: edit.kind ?? 'legacy_full_text_v0',
                 payloadHash: edit.kind === 'text_patch_v1'
                   ? edit.patch.canonicalHash
-                  : edit.kind === 'full_text_v1'
+                  : edit.kind === 'full_text_v1' || edit.kind === 'binary_image_v1'
                     ? edit.result.sha256
                     : edit.kind === 'delete_v1' || edit.kind === 'move_v1'
                       ? edit.base.sha256
@@ -3953,7 +3953,7 @@ export class AgentLoop {
   }
 
   private async captureDraftBaseline(edit: DraftEdit): Promise<void> {
-    if (edit.kind === 'text_patch_v1' || edit.kind === 'delete_v1' || edit.kind === 'move_v1' || edit.action === 'create') return;
+    if (edit.kind === 'text_patch_v1' || edit.kind === 'delete_v1' || edit.kind === 'move_v1' || edit.kind === 'binary_image_v1' || edit.action === 'create') return;
     if (edit.kind === 'full_text_v1' && edit.base) return;
     if (!edit.kind && edit.expectedOriginalTextHash) return;
     const uri = vscode.Uri.parse(edit.uri);
@@ -4244,7 +4244,7 @@ export class AgentLoop {
         kind: edit.kind,
         hash: edit.kind === 'text_patch_v1'
           ? edit.patch.canonicalHash
-          : edit.kind === 'full_text_v1'
+          : edit.kind === 'full_text_v1' || edit.kind === 'binary_image_v1'
             ? edit.result.sha256
             : edit.kind === 'delete_v1' || edit.kind === 'move_v1'
               ? edit.base.sha256

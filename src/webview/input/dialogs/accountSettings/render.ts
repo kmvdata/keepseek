@@ -324,13 +324,13 @@ export const accountSettingsRenderFragment: WebviewFragment = {
           actions.append(defaultSlot);
           var enableLabel = document.createElement('label');
           enableLabel.className = 'settings-model-enable';
-          enableLabel.title = model.agentCompatible === false
+          enableLabel.title = model.agentCompatible === false && !model.imageCapabilities
             ? t('resourceUnavailableToTextAgent')
             : t('enableModel', { modelId: model.id });
           var enableCheckbox = document.createElement('input');
           enableCheckbox.type = 'checkbox';
           enableCheckbox.checked = model.enabled !== false;
-          enableCheckbox.disabled = controlsDisabled || model.agentCompatible === false;
+          enableCheckbox.disabled = controlsDisabled || (model.agentCompatible === false && !model.imageCapabilities);
           enableCheckbox.setAttribute('aria-label', enableLabel.title);
           enableCheckbox.addEventListener('change', function() {
             var nextEnabled = enableCheckbox.checked;

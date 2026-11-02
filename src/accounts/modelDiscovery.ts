@@ -1,4 +1,5 @@
 import { DEFAULT_DEEPSEEK_BASE_URL } from '../shared/config';
+import { getImageModelCapabilities } from './imageCapabilities';
 import {
   MAX_DISCOVERED_CONTEXT_WINDOW_TOKENS,
   MAX_DISCOVERED_OUTPUT_TOKENS,
@@ -424,7 +425,8 @@ function parseSourceModel(
 ): DiscoveredModelInfo | undefined {
   if (typeof value === 'string') {
     const id = value.trim();
-    return id ? { id } : undefined;
+    const imageCapabilities = getImageModelCapabilities(id);
+    return id ? { id, ...(imageCapabilities ? { imageCapabilities } : {}) } : undefined;
   }
   if (!isRecord(value)) {
     return undefined;
@@ -447,7 +449,8 @@ function parseSourceModel(
     return {
       id,
       ...(name ? { name } : {}),
-      ...(contextWindowTokens ? { contextWindowTokens } : {})
+      ...(contextWindowTokens ? { contextWindowTokens } : {}),
+      ...(getImageModelCapabilities(id) ? { imageCapabilities: getImageModelCapabilities(id) } : {})
     };
   }
   const contextWindowTokens = readBoundedPositiveInteger(

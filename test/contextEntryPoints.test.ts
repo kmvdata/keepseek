@@ -591,7 +591,7 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(styles, /\.settings-model-context-value/u);
   assert.match(styles, /\.settings-model-context-input/u);
   assert.match(inputScript, /enableCheckbox\.type = 'checkbox'/u);
-  assert.match(inputScript, /controlsDisabled \|\| model\.agentCompatible === false/u);
+  assert.match(inputScript, /controlsDisabled \|\| \(model\.agentCompatible === false && !model\.imageCapabilities\)/u);
   assert.match(inputScript, /disabledModelIds/u);
   assert.match(styles, /@media \(max-width: 540px\)/u);
   assert.match(messageSource, /type: 'addModel'/u);
