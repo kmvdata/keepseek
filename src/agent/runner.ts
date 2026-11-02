@@ -1,3 +1,4 @@
+import { draftRunPreparedMessage } from './approvalMode';
 import { applyProviderRequestBudget, createRequestBudgetUsage, resolveProviderRequestBudget } from './requestBudget';
 import { ModelSourceStore, normalizeModelSourceProvider } from '../accounts/accountStore';
 import { createModelCatalog, findModelBySelection } from '../accounts/modelCatalog';
@@ -168,7 +169,7 @@ import type {
 } from './providers/anthropicTypes';
 import type { ApprovalReviewerAdapter } from '../approvals/approvalReviewer';
 import { toReviewerModelContext } from '../approvals/approvalReviewer';
-import { createExternalFileReviewRequest, createValidationReviewRequest } from '../approvals/approvalReviewSurface';
+import { createValidationReviewRequest } from '../approvals/approvalReviewSurface';
 import { toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
 import { createBoundedReviewText } from '../approvals/approvalReviewHash';
 import {
@@ -438,6 +439,7 @@ export class AgentLoop {
       if (activeRunBudget) {
         activeRunBudget.syncUsedMs(cp.usedMs);
         cp.runBudget = activeRunBudget.state;
+        cp.budgetLimits = { ...activeRunBudget.limits };
         cp.modelRequests = activeRunBudget.state.modelRequests;
       }
       cp.updatedAt = new Date().toISOString();
@@ -486,7 +488,8 @@ export class AgentLoop {
           callbacks.onActivity?.(kind);
         },
         onStatus: (status) => {
-          if (status.phase === 'awaiting_authorization' || status.phase === 'waiting_for_apply' || status.phase === 'waiting_for_subagent') suspendClock();
+          if ((status.phase === 'awaiting_authorization' && normalizeApprovalMode(request.approvalMode) === 'ask')
+            || status.phase === 'waiting_for_apply' || status.phase === 'waiting_for_subagent') suspendClock();
           else resumeClock();
           callbacks.onStatus?.(status);
         }
@@ -875,11 +878,7 @@ export class AgentLoop {
       maxTreeUpstreamTokens: runtimeConfig.maxTreeUpstreamTokens
     };
     const parentRunBudget = request.taskRunBudget;
-    const sharedTreeBudget = parentRunBudget?.tree ?? new SharedUpstreamTokenBudget(
-      runtimeConfig.maxTreeUpstreamTokens,
-      checkpoint.runBudget?.treeUpstreamTokens ?? 0
-    );
-    const logicalBudget = new LogicalRunBudget(checkpoint.runBudget, {
+    const budgetLimits = {
       maxModelRequests: runtimeConfig.maxModelRequests,
       maxToolRounds: runtimeConfig.maxToolIterations,
       maxToolCalls: runtimeConfig.maxToolCalls,
@@ -889,7 +888,16 @@ export class AgentLoop {
       maxTreeUpstreamTokens: runtimeConfig.maxTreeUpstreamTokens,
       maxContinuationOutputTokens: 0,
       maxContinuationOutputChars: 0
-    }, sharedTreeBudget, runtimeConfig.maxRunMs, Date.now(), parentRunBudget?.deadlineAt);
+    };
+    if (checkpoint.budgetLimits) for (const key of Object.keys(budgetLimits) as Array<keyof typeof budgetLimits>) {
+      budgetLimits[key] = mergeUnlimitedBudgetLimits(budgetLimits[key], checkpoint.budgetLimits[key]);
+    }
+    const sharedTreeBudget = parentRunBudget?.tree ?? new SharedUpstreamTokenBudget(
+      budgetLimits.maxTreeUpstreamTokens,
+      checkpoint.runBudget?.treeUpstreamTokens ?? 0
+    );
+    const logicalBudget = new LogicalRunBudget(checkpoint.runBudget, budgetLimits,
+      sharedTreeBudget, runtimeConfig.maxRunMs, Date.now(), parentRunBudget?.deadlineAt);
     checkpoint.runBudget = logicalBudget.state;
     checkpoint.modelRequests = logicalBudget.state.modelRequests;
     request = { ...request, taskRunBudget: logicalBudget };
@@ -1913,7 +1921,7 @@ export class AgentLoop {
               toolCall,
               args: toolArgs,
               request,
-              agentRunId: trace.runId,
+              agentRunId: checkpoint.taskId,
               approvalMode: runAuthorizationPolicy.approvalMode
             }) ?? await abortable(this.toolAuthorization.authorize({
               toolName: toolCall.function.name,
@@ -1922,6 +1930,11 @@ export class AgentLoop {
               policy: runAuthorizationPolicy
             }), request.signal);
             if (authorizationDecision.approvalReview) approvalReviewBoundaryReached = true;
+            if (!authorizationDecision.allowed && authorizationDecision.scope === 'workspace_read'
+              && authorizationDecision.requiresExplicitConfirmation) {
+              approvalReviewBoundaryReached = true;
+              approvalReviewStopReason = authorizationDecision.reason;
+            }
             if (authorizationDecision.approvalReview?.decision === 'unavailable') {
               approvalReviewStopReason = authorizationDecision.reason ?? (request.language === 'en'
                 ? 'Approval model unavailable; automatic work stopped safely.'
@@ -3523,7 +3536,7 @@ export class AgentLoop {
       riskLevel: scope === 'workspace_read' ? 'low' : 'medium',
       scope,
       source: mode === 'model_review' ? 'model_reviewer' : 'user_denied',
-      requiresExplicitConfirmation: false,
+      requiresExplicitConfirmation: scope === 'workspace_read',
       reason,
       approvalReview,
       approvalCircuitBreakReason
@@ -3534,34 +3547,10 @@ export class AgentLoop {
       const rawPath = typeof input.args.path === 'string' ? input.args.path : '';
       const uri = rawPath ? this.workspaceTools.getReviewableExternalUri?.(rawPath) : undefined;
       if (!uri) return undefined;
-      if (!this.approvalReviewer) return deny('workspace_read', 'Approval reviewer is unavailable; exact external access was not granted.');
-      const reviewRequest = createExternalFileReviewRequest({
-        request: input.request,
-        agentRunId: input.agentRunId,
-        targetId: `${input.toolCall.id}:${uri}`,
-        uri,
-        access: 'read',
-        purpose: `Read the exact external file for tool ${input.toolCall.function.name}.`
-      });
-      const outcome = mode === 'model_review'
-        ? await this.approvalReviewer.review(reviewRequest, toReviewerModelContext(input.request), input.request.signal)
-        : await this.approvalReviewer.createHostPolicyApproval(reviewRequest);
-      if (outcome.status === 'unavailable') return deny('workspace_read', outcome.record.rationale, toApprovalReviewDisplay(outcome.record), outcome.circuitBreakReason);
-      if (outcome.record.decision !== 'approve') {
-        return deny('workspace_read', formatReviewerDenial(outcome.record.rationale, outcome.record.saferAlternative, input.request.language), toApprovalReviewDisplay(outcome.record), outcome.circuitBreakReason);
-      }
-      await this.approvalReviewer.consumeApproval(outcome.record, mode);
-      this.workspaceTools.authorizeReviewedExternalUri?.(uri);
-      return {
-        allowed: true,
-        toolName: input.toolCall.function.name,
-        riskLevel: 'low',
-        scope: 'workspace_read',
-        source: mode === 'model_review' ? 'model_reviewer' : 'delegated_approver',
-        requiresExplicitConfirmation: false,
-        reason: outcome.record.rationale,
-        approvalReview: toApprovalReviewDisplay(outcome.record)
-      };
+      return deny('workspace_read', input.request.language === 'en'
+        ? `External read requires the user's exact reference authorization: ${uri}. Ask the user to attach this file; do not retry automatically.`
+        : `外部读取需要用户精确授权：${uri}。请用户引用此文件，勿自动重试。`);
+
     }
 
     if (input.toolCall.function.name !== RUN_VALIDATION_TOOL_NAME) return undefined;
@@ -3795,7 +3784,7 @@ export class AgentLoop {
             authorization: options.authorization
           });
         case RUN_DRAFT_TOOL_NAME:
-          return await this.createDraftRun(args, draftRuns);
+          return await this.createDraftRun(args, draftRuns, options.parentRequest?.approvalMode, language);
         case CREATE_DRAFT_EDIT_TOOL_NAME:
           return await this.createDraftEdit(args, draftEdits, language);
         case CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME:
@@ -3905,7 +3894,9 @@ export class AgentLoop {
 
   private async createDraftRun(
     args: Record<string, unknown>,
-    draftRuns: DraftRunProposal[]
+    draftRuns: DraftRunProposal[],
+    approvalMode: AgentRequest['approvalMode'],
+    language: KeepseekLanguage
   ): Promise<string> {
     const rawArgs = args.args;
     if (!Array.isArray(rawArgs) || !rawArgs.every((value) => typeof value === 'string')) {
@@ -3948,7 +3939,7 @@ export class AgentLoop {
         reason: draftRun.spec.reason,
         effectAssessment: draftRun.effectAssessment
       },
-      message: 'DraftRun prepared only; no process was started. The user must review and explicitly approve this single execution in the KeepSeek panel.'
+      message: draftRunPreparedMessage(approvalMode, language)
     });
   }
 

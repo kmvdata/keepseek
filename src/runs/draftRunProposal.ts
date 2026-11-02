@@ -112,7 +112,7 @@ function resolveDraftRunCwd(
   return uri;
 }
 
-async function findCanonicalWorkspaceFolder(cwdPath: string): Promise<{
+export async function findCanonicalWorkspaceFolder(cwdPath: string): Promise<{
   folder: vscode.WorkspaceFolder;
   realPath: string;
 } | undefined> {

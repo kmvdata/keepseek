@@ -1,3 +1,6 @@
+import { normalizeUserTaskBudgets } from './userTaskBudget';
+import { normalizeApprovalProcessing } from '../approvals/approvalProcessing';
+import { normalizeUserTask } from './userTask';
 import { reconcileExecutionTime } from './executionTimeStats';
 import { normalizeRequestBudget } from '../agent/requestBudget';
 import { normalizeRunDetailsDelegation } from '../agent/logging/subagentDetails';
@@ -77,6 +80,7 @@ export interface StoredWorkspaceSessionState {
 }
 
 export interface ChatSessionStorageAdapter {
+  loadMessageCheckpoint?(workspaceKey: string, sessionId: string, messageId: string): Promise<unknown>;
   loadWorkspace(workspaceScope: WorkspaceSessionScope): Promise<StoredWorkspaceSessionState>;
   saveWorkspace(workspaceScope: WorkspaceSessionScope, state: StoredWorkspaceSessionState): Promise<void>;
   listAllWorkspaceSummaries(): Promise<WorkspaceSummary[]>;
@@ -379,6 +383,17 @@ export class ChatSessionStore {
     if (this.getActiveSession() !== session || session.messages.at(-1) !== message) return undefined;
     const cp = stored?.messages.at(-1);
     return cp?.id === messageId ? cp.runCheckpoint : undefined;
+  }
+
+  public async getTaskCheckpoint(messageId: string): Promise<import('../agent/runCheckpoint').RunCheckpoint | undefined> {
+    const session = this.getActiveSession();
+    const message = session.messages.find(item => item.id === messageId);
+    if (message?.runCheckpoint) return message.runCheckpoint;
+    if (!message?.runCheckpointArchive) return undefined;
+    const stored = await this.sessionStorage.loadMessageCheckpoint?.(this.workspaceScope.key, session.id, messageId);
+    if (this.getActiveSession() !== session || !session.messages.includes(message)) return undefined;
+    const cp = normalizeRunCheckpoint(stored);
+    return cp?.taskId === message.runCheckpointArchive.summary.taskId ? cp : undefined;
   }
 
   private startPersistenceDrain(): void {
@@ -829,6 +844,8 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       repairLoop: normalizeRepairLoopState(item.repairLoop),
       contextUsage: normalizeContextUsageEstimateValue(item.contextUsage),
       executionTime: reconcileExecutionTime(item.executionTime, messages),
+      approvalProcessing: normalizeApprovalProcessing(item.approvalProcessing),
+      userTaskBudgets: normalizeUserTaskBudgets(item.userTaskBudgets),
       usageStats: normalizeSessionUsageStatsValue(item.usageStats),
       usageLedger: normalizeUsageLedgerValue(item.usageLedger),
       usageLedgerRef: normalizeUsageLedgerRef(item.usageLedgerRef, item.id),
@@ -892,6 +909,7 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
 
   return {
     id: value.id,
+    userTask: normalizeUserTask(value.userTask),
     role,
     content: value.content,
     expandedContent: typeof value.expandedContent === 'string' ? value.expandedContent : undefined,

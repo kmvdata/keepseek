@@ -35,6 +35,7 @@ export class SafeFileEditError extends Error {
 
 export interface DelegatedEditApproval {
   authorizedUri: string;
+  authorizedUris?: readonly string[];
   isAuthorized: () => boolean;
   source?: 'model_reviewer' | 'delegated_approver';
 }
@@ -200,7 +201,7 @@ export class SafeFileEditor {
     this.assertWorkspaceTarget(uri, edit.label, approval?.authorizedUri);
     if (edit.kind === 'move_v1') {
       const target = vscode.Uri.parse(edit.targetUri);
-      this.assertWorkspaceTarget(target, edit.label, approval?.authorizedUri);
+      this.assertWorkspaceTarget(target, edit.label, approval?.authorizedUris?.includes(target.toString()) ? target.toString() : undefined);
       this.assertNoDirtyOpenEditor(target, edit.label);
       if ((await this.readIdentity(target)).exists) throw new Error(this.t('cannotApplyCreatedFileExists', { label: edit.label }));
     }

@@ -87,3 +87,5 @@ import './p0SubagentPersistence.test';
 import './p1ProtocolDelivery.test';
 import './p1SubagentResultReader.test';
 import './p1Delegation.test';
+
+import './taskApprovalIntegration.test';

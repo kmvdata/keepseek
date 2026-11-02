@@ -9,7 +9,7 @@ import { getEffectiveContextWindowTokens } from '../shared/modelProfiles';
 import { DEEPSEEK_MODEL_IDENTITY_VERSION, getCanonicalModelIdentity } from '../shared/deepSeekModels';
 import { migrateContextWindowCalibrationState } from './toolResultAdmission';
 import { normalizeExecutionMode } from './executionMode';
-import { createLogicalRunBudgetState, grantNextToolBudgetSegment, type LogicalRunBudgetState } from './executionPolicy';
+import { createLogicalRunBudgetState, grantNextToolBudgetSegment, normalizeLogicalRunBudgetLimits, type LogicalRunBudgetState } from './executionPolicy';
 import { normalizeSubagentHostContext } from './subagents/contextCapsule';
 import { normalizeDelegationState } from './delegation';
 
@@ -38,6 +38,7 @@ export interface RunCheckpoint {
   modelRequests: number;
   /** Whole logical-task counters. They never reset at Context Epoch boundaries. */
   runBudget?: LogicalRunBudgetState;
+  budgetLimits?: import('./executionPolicy').LogicalRunBudgetLimits;
   retries: number;
   lastNetworkAt?: string;
   lastEventAt?: string;
@@ -149,6 +150,7 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
       || !Array.isArray(cp.attemptIds) || !Number.isFinite(cp.usedMs) || cp.usedMs < 0
       || !Number.isFinite(cp.maxExecutionMs) || cp.maxExecutionMs < 0) return undefined;
     if (cp.maxCost !== undefined && (!Number.isFinite(cp.maxCost) || cp.maxCost < 0)) return undefined;
+    if (cp.budgetLimits !== undefined && !normalizeLogicalRunBudgetLimits(cp.budgetLimits)) return undefined;
     if (cp.usedCostByCurrency !== undefined && (!cp.usedCostByCurrency || typeof cp.usedCostByCurrency !== 'object'
       || Array.isArray(cp.usedCostByCurrency) || Object.entries(cp.usedCostByCurrency).some(([currency, cost]) =>
         !currency || typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0))) return undefined;
@@ -198,6 +200,7 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
         || ![m.oldOutputTokens, m.newOutputTokens].every((n) => Number.isSafeInteger(n) && n > 0)))) return undefined;
     if (cp.state?.epoch && !validEpochProgressState(cp.state.epoch)) return undefined;
     const copy = checkpointCopy(cp);
+    copy.budgetLimits = normalizeLogicalRunBudgetLimits(copy.budgetLimits);
     if (copy.request.subagentHostContext !== undefined) {
       const context = normalizeSubagentHostContext(copy.request.subagentHostContext);
       if (!context) return undefined;
@@ -449,4 +452,16 @@ export function grantCheckpointToolBudgetSegment(cp: RunCheckpoint): RunCheckpoi
     copy.state.budgetStopInstructionQueued = false;
   }
   return copy;
+}
+
+/** A host continuation inherits safety counters, never prior tool state or approvals. */
+export function inheritTaskBudget(cp: RunCheckpoint, budget: import('../sessions/userTaskBudget').UserTaskBudget): void {
+  cp.usedMs = budget.usedMs;
+  cp.maxExecutionMs = budget.maxExecutionMs;
+  cp.maxCost = budget.maxCost;
+  cp.usedCostByCurrency = { ...budget.usedCostByCurrency };
+  cp.budgetLimits = budget.budgetLimits ? { ...budget.budgetLimits } : undefined;
+  cp.runBudget = budget.runBudget ? createLogicalRunBudgetState(budget.runBudget) : undefined;
+  cp.modelRequests = cp.runBudget?.modelRequests ?? 0;
+  cp.delegationBudget = budget.delegationBudget ? structuredClone(budget.delegationBudget) : undefined;
 }

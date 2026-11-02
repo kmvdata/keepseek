@@ -20,6 +20,7 @@ export interface DroppedFileReferenceInput {
 }
 
 export type WebviewMessage =
+  | { type: 'resumeApprovalProcessing'; authorizeTargetId?: string }
   | { type: 'setApprovalMode'; mode: ApprovalMode }
   | { type: 'setExecutionMode'; mode: ExecutionMode }
   | { type: 'resolvePlanDecision'; planId: string; action: 'start_execution' | 'revise_plan' | 'exit_plan' }

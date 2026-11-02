@@ -1,3 +1,5 @@
+import { realpath } from 'node:fs/promises';
+import { findCanonicalWorkspaceFolder } from './draftRunProposal';
 import { writeJsonAtomic } from '../shared/atomicStorage';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
@@ -237,6 +239,7 @@ export class DraftRunStore {
     options: {
       autoContinue?: boolean;
       delegatedApproval?: () => boolean;
+      verifyScope?: () => Promise<void>;
       approvalRecord?: ApprovalRecordMatch;
       signal?: AbortSignal;
       /** Finite batch click authority, rechecked after every asynchronous boundary. */
@@ -264,6 +267,7 @@ export class DraftRunStore {
     try {
       assertAuthorized();
       await this.validateBeforeApproval(draftRun, authorizedExternalReferenceUris);
+      await options.verifyScope?.();
       assertAuthorized();
       draftRun.status = 'approved';
       draftRun.authorizationSource = options.delegatedApproval ? 'delegated_approver' : 'user_click';
@@ -280,6 +284,7 @@ export class DraftRunStore {
       await this.persistNow();
 
       await this.validateBeforeApproval(draftRun, authorizedExternalReferenceUris);
+      await options.verifyScope?.();
       assertAuthorized();
       const permit = options.delegatedApproval
         ? await this.authorization.createDelegatedPermit(draftRun, options.delegatedApproval, options.approvalRecord)
@@ -570,6 +575,11 @@ export class DraftRunStore {
     if (stat.type !== vscode.FileType.Directory || cwdUri.scheme !== 'file') {
       throw new Error('DraftRun working directory is no longer an executable local directory.');
     }
+    const canonicalCwd = await realpath(cwdUri.fsPath);
+    if (!await findCanonicalWorkspaceFolder(canonicalCwd) && !authorizedExternalReferenceUris.has(vscode.Uri.file(canonicalCwd).toString())
+      && !authorizedExternalReferenceUris.has(cwdUri.toString())) {
+      throw new Error(`Authorize the exact external working directory before running this DraftRun: ${cwdUri.toString()}`);
+    }
     this.checkApprovalBoundary(draftRun, authorizedExternalReferenceUris);
   }
 
@@ -582,7 +592,7 @@ export class DraftRunStore {
     }
     const cwdUri = vscode.Uri.parse(draftRun.spec.cwdUri);
     if (cwdUri.scheme !== 'file') throw new Error('DraftRun requires a local working directory.');
-    if (!vscode.workspace.getWorkspaceFolder(cwdUri)
+    if (draftRun.spec.externalCwd
       && !authorizedExternalReferenceUris.has(getFileReferenceAuthorizationKey(cwdUri))) {
       throw new Error(`Authorize the exact external working directory before running this DraftRun: ${draftRun.spec.cwdLabel}`);
     }

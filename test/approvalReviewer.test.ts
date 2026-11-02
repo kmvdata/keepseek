@@ -390,3 +390,22 @@ async function withApprovalFixture(run: (fixture: {
     await rm(root, { recursive: true, force: true });
   }
 }
+
+
+test('review surface uses the current user task original request across host continuations', () => {
+  const first = { version: 1 as const, id: 'task-one', originMessageId: 'first', reason: 'user' as const };
+  const second = { version: 1 as const, id: 'task-two', originMessageId: 'second', reason: 'user' as const };
+  const history: ChatMessage[] = [
+    { id: 'first', role: 'user', content: 'Old task: explain a file', createdAt: '', userTask: first },
+    { id: 'second', role: 'user', content: 'New task: create result.txt', createdAt: '', userTask: second },
+    { id: 'host', role: 'user', content: 'Approval processing outcome, not authorization', createdAt: '', userTask: { ...second, reason: 'approval' }, contextMeta: { displayKind: 'delegated_auto_continue' } }
+  ];
+  const request = createDraftEditReviewRequest({ sessionId: 's', rootTaskId: 'task-two', agentRunId: 'segment-two',
+    edit: { id: 'e', uri: 'file:///workspace/result.txt', label: 'result.txt', action: 'create', reason: 'create', newText: 'ok' }, originalText: '', history, language: 'en' });
+  assert.equal(request.originalGoalSummary, 'New task: create result.txt');
+  assert.doesNotMatch(request.originalGoalSummary, /Old task|Approval processing/u);
+  const before = JSON.stringify(history);
+  createDraftEditReviewRequest({ sessionId: 's', rootTaskId: 'task-two', agentRunId: 'segment-three',
+    edit: { id: 'e', uri: 'file:///workspace/result.txt', label: 'result.txt', action: 'create', reason: 'create', newText: 'ok' }, originalText: '', history, language: 'en' });
+  assert.equal(JSON.stringify(history), before);
+});

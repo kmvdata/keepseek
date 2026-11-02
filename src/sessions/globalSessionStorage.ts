@@ -217,6 +217,16 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     return index ? await this.readSession(normalizedWorkspaceKey, normalizedSessionId, index) : undefined;
   }
 
+  /** Resolve only a checkpoint referenced by this exact session/message. */
+  public async loadMessageCheckpoint(workspaceKey: string, sessionId: string, messageId: string): Promise<unknown> {
+    const session = await this.loadSession(workspaceKey, sessionId);
+    const message = session?.messages.find(item => item.id === messageId);
+    if (message?.runCheckpoint) return message.runCheckpoint;
+    if (!message?.runCheckpointArchive) return undefined;
+    return this.objects(this.getSessionUri(getWorkspaceHash(workspaceKey), sessionId))
+      .loadCheckpoint(message.runCheckpointArchive.objectHash);
+  }
+
   public async listWorkspaceSessionSummaries(workspaceKey: string): Promise<ChatSessionSummary[]> {
     const index = await this.loadIndexByWorkspaceKey(workspaceKey.trim());
     return index ? index.sessions.map(toPublicSummary) : [];

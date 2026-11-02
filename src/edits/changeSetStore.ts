@@ -36,6 +36,7 @@ export interface ChangeSetOperationProgress {
 
 export interface ChangeSetOperationOptions {
   onProgress?: (progress: ChangeSetOperationProgress) => void;
+  approvalForEdit?: (edit: DraftEdit) => DelegatedEditApproval;
 }
 
 interface ChangeSetIndexEntry {
@@ -710,9 +711,10 @@ export class ChangeSetStore {
         failed.push({ editId: file.id, label: file.label, error: 'This DraftEdit is already being applied.' });
         continue;
       }
-      file.approvalSource = approval?.source ?? 'user_click';
       try {
-        const checkpoint = await this.safeFileEditor.applyDraftEdit(file, changeSet.id, approval, {
+        const fileApproval = approval ?? options.approvalForEdit?.(file);
+        file.approvalSource = fileApproval?.source ?? 'user_click';
+        const checkpoint = await this.safeFileEditor.applyDraftEdit(file, changeSet.id, fileApproval, {
           persist: async (next) => {
             this.assertChangeSetArtifactQuota(changeSet, next);
             this.checkpoints.set(next.id, { ...next });

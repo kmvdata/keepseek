@@ -1223,6 +1223,13 @@ export function getScript(): string {
 
     function handleKeepseekHostMessage(event) {
       var message = event.data;
+      if (message.type === 'taskTiming') {
+        if (message.sessionId === state.activeSessionId && state.usageMetrics) {
+          state.usageMetrics.executionTime = message.executionTime;
+          renderContextProgress();
+        }
+        return;
+      }
       if (message.type === 'requestTimeoutSettingsResult') {
         var restoreTimeoutFocus = pendingModelRequestTimeoutFocus && settingsMenuOpen
           && document.activeElement === document.body;
@@ -3623,7 +3630,7 @@ export function getScript(): string {
         approve.dataset.batchSnapshot = JSON.stringify(snapshot);
         approve.dataset.batchSnapshotId = snapshot.snapshotId;
         var unauthorized = item.runs.filter(function(run) {
-          return run?.spec?.externalCwd && !(state.authorizedExternalReferenceUris || []).includes(run.spec.cwdUri);
+          return run?.spec?.externalCwd && !(state.authorizedExternalExecutionUris || []).includes(run.spec.cwdUri);
         });
         approve.disabled = approve.disabled || Boolean(pendingDraftRunBatchSnapshot) || unauthorized.length > 0;
         var hint = document.createElement('div');
@@ -3641,13 +3648,42 @@ export function getScript(): string {
       }
     }
 
+    function appendAutomaticApprovalState(container, id, review) {
+      var processing = state.approvalProcessing;
+      var target = processing && Array.isArray(processing.targets) && processing.targets.find(function(item) { return item.id === id; });
+      var denied = target && target.status === 'denied' || review && review.decision === 'deny';
+      var active = processing && processing.status === 'processing';
+      var note = document.createElement('span');
+      note.className = 'draft-chip-error';
+      note.textContent = target && target.reason || (denied && review ? review.rationale
+        : processing && processing.reason || t(active ? 'approvalProcessingNow'
+          : state.approvalMode === 'model_review' ? 'approvalModelWaiting' : 'approvalAutoWaiting'));
+      container.append(note);
+      if (denied || active || state.isBusy) return;
+      var button = document.createElement('button');
+      var needsScope = target && target.status === 'needs_authorization';
+      button.type = 'button';
+      button.textContent = t(needsScope ? 'approvalAuthorizeExact' : 'approvalResumeProcessing');
+      button.title = t('approvalResumeHint');
+      button.disabled = !state.startup?.sideEffectsReady;
+      button.addEventListener('click', function() {
+        vscode.postMessage({ type: 'resumeApprovalProcessing', authorizeTargetId: needsScope ? id : undefined });
+      });
+      container.append(button);
+    }
+
     function appendDraftRunActions(container, draftRun) {
       var statusValue = String(draftRun.status || 'pending');
       var isOwnRunning = String(state.activeDraftRunId || '') === String(draftRun.id || '');
       var externalAuthorized = !draftRun.spec?.externalCwd
-        || (Array.isArray(state.authorizedExternalReferenceUris)
-          && state.authorizedExternalReferenceUris.includes(String(draftRun.spec?.cwdUri || '')));
+        || (Array.isArray(state.authorizedExternalExecutionUris)
+          && state.authorizedExternalExecutionUris.includes(String(draftRun.spec?.cwdUri || '')));
       if (statusValue === 'pending') {
+        if (state.approvalMode !== 'ask') {
+          appendAutomaticApprovalState(container, draftRun.id, draftRun.approvalReview);
+          container.append(createDraftRunActionButton(t('draftRunReject'), 'rejectDraftRun', draftRun, true));
+          return;
+        }
         if (!externalAuthorized) {
           container.append(createDraftRunActionButton(t('draftRunAuthorizeCwd'), 'authorizeDraftRunCwd', draftRun, false));
         } else {
@@ -3791,7 +3827,7 @@ export function getScript(): string {
       var setActions = document.createElement('div');
       setActions.className = 'change-set-actions';
       if (!historical) {
-        if (applicableFiles.length >= 2) {
+        if (applicableFiles.length >= 2 && state.approvalMode === 'ask') {
           setActions.append(createChangeSetActionButton(t('changeSetApplyAll', { count: applicableFiles.length }), 'applyChangeSet', changeSet.id, false));
           setActions.append(createChangeSetActionButton(t('changeSetDiscardAll'), 'discardChangeSet', changeSet.id, true));
         }
@@ -3852,10 +3888,9 @@ export function getScript(): string {
         actions.append(createEditActionButton(t('previewDiff'), 'openDraftDiff', edit.id, true));
       }
       if (allowActions && (edit.status === 'pending' || edit.status === 'apply_failed' || edit.status === 'interrupted')) {
-        actions.append(
-          createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false),
-          createEditActionButton(t('discard'), 'discardDraftEdit', edit.id, true)
-        );
+        if (state.approvalMode === 'ask') actions.append(createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false));
+        else appendAutomaticApprovalState(actions, edit.id, edit.approvalReview);
+        actions.append(createEditActionButton(t('discard'), 'discardDraftEdit', edit.id, true));
       } else if (allowActions && (edit.status === 'applied' || edit.status === 'revert_failed')) {
         actions.append(createEditActionButton(t('revert'), 'revertDraftEdit', edit.id, true));
       }
@@ -4305,6 +4340,14 @@ export function getScript(): string {
       body.className = 'run-details-body';
       var grid = document.createElement('div');
       grid.className = 'run-details-grid';
+      if (message.userTask) appendRunDetailRow(grid, t('runDetailsUserTask'), message.userTask.id);
+      if (message.runState) appendRunDetailRow(grid, t('runDetailsExecutionSegment'), message.runState.taskId);
+      var processing = state.approvalProcessing;
+      if (processing && message.runState && processing.runId === message.runState.taskId) {
+        appendRunDetailRow(grid, t('runDetailsApprovalOutcome'), (processing.targets || []).map(function(target) {
+          return target.id + ': ' + target.status + (target.reason ? ' · ' + target.reason : '');
+        }).join('\\n') || processing.reason || processing.status);
+      }
       appendRunDetailRow(grid, t('runDetailsModel'), details.modelId || '—');
       appendRunDetailRow(grid, t('runDetailsSource'), getRunSourceLabel(details.sourceId, details.modelId));
       appendRunDetailRow(grid, t('runDetailsProtocol'), details.protocol || details.provider || '—');

@@ -62,3 +62,13 @@ export class DelegatedApprovalQueue {
     this.active?.abort();
   }
 }
+
+export function draftRunPreparedMessage(mode: ApprovalMode | undefined, language: 'zh-CN' | 'en'): string {
+  const approval = normalizeApprovalMode(mode);
+  if (language === 'en') return 'DraftRun prepared only; no process was started. ' + (approval === 'ask'
+    ? 'Wait for the user to approve this execution in KeepSeek.' : approval === 'model_review'
+      ? 'The configured model will review this exact operation before the host executes it.'
+      : 'The host will automatically process this operation after hard preflight checks.');
+  return '仅准备了 DraftRun 草稿，尚未执行。' + (approval === 'ask' ? '等待用户在 KeepSeek 中批准本次执行。'
+    : approval === 'model_review' ? '由配置的模型审核精确操作，批准后宿主执行。' : '宿主将在硬性预检通过后自动处理此操作。');
+}

@@ -260,18 +260,21 @@ type Host = {
   clearSessionTransientState(): void;
 };
 function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
-  const session = { id: 's', approvalMode: 'ask', messages: [] as ChatMessage[] };
+  const session = { id: 's', approvalMode: 'ask', messages: [
+    { id: 'u', role: 'user', content: 'task', createdAt: '' },
+    { id: 'a', role: 'assistant', content: '', createdAt: '', runCheckpointArchive: { version: 1, objectHash: 'a'.repeat(64), summary: { taskId: 'r', status: 'completed', usedMs: 0, maxExecutionMs: 0, limitSource: '', attempt: 1, modelRequests: 1, retries: 0, steps: 0, canResume: false } } }
+  ] as ChatMessage[] };
   const states = { pendingEdits: false, background: false, sends: 0 };
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     draftRuns: f.store, draftRunBatches: f.batch, delegatedApprovals: new DelegatedApprovalQueue(),
     approvalDataReady: true,
     isBusy: false, isStartingRun: false, delegatedApprovalInFlight: false, draftRunAutoContinueInFlight: false,
     selectedSourceId: 'source', selectedModelId: 'model', language: 'en', agentSettings: {},
-    repairLoopsBySession: new Map(), authorizedExternalReferenceUris: new Set(),
+    repairLoopsBySession: new Map(), authorizedExternalReferenceUris: new Set(), authorizedExternalExecutionUris: new Set(),
     fileContext: { clear: () => {} },
     changeSets: { hasPendingForSession: () => states.pendingEdits },
     hasActiveBackgroundRun: () => states.background,
-    sessionStore: { activeSessionId: 's', getActiveSession: () => session },
+    sessionStore: { activeSessionId: 's', getActiveSession: () => session, persist: async () => {} },
     t: (key: string) => key,
     postState: () => {}, postToWebview: () => {}, setAgentActivity: () => {},
     sendPromptImpl: async () => { states.sends++; return {} as AgentResponse; }
@@ -363,7 +366,7 @@ class UiElement {
 }
 function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: 'en' | 'zh-CN') {
   const source = getScript();
-  const names = ['createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
+  const names = ['appendAutomaticApprovalState', 'createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
     'isDraftRunBatchActive', 'getDraftRunBatchMembers', 'createDraftRunTimelineItem', 'renderDraftRunItems',
     'captureDraftRunActionFocus', 'findDraftRunActionFocus', 'renderTranscript', 'handleDraftRunActionClick',
     'getDraftRunTitle', 'appendDraftRunField', 'formatShellCommand', 'formatShellWord', 'getDraftRunStatusLabel', 'getDraftRunEffectLabel',
@@ -379,7 +382,8 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   const state = { draftRuns: f.store.toWebviewState('s'), draftRunBatchSnapshots: f.batch.snapshots('s'),
     draftRunBatch: f.batch.state, draftRunBatchHistory: f.store.toBatchDisplayHistory('s'), approvalMode: 'ask', isBusy: false, activeDraftRunId: '',
     startup: { sideEffectsReady: true },
-    authorizedExternalReferenceUris: [] as string[], messages: [{ id: 'assistant', role: 'assistant' }] as Array<{
+    approvalProcessing: undefined as import('../src/approvals/approvalProcessing').ApprovalProcessingState | undefined,
+    authorizedExternalReferenceUris: [] as string[], authorizedExternalExecutionUris: [] as string[], messages: [{ id: 'assistant', role: 'assistant' }] as Array<{
       id: string; role: string; isStreaming?: boolean; content?: string;
     }> };
   const unlinked = new UiElement();
@@ -400,7 +404,8 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
       return (translations[key] ?? key).replace(/\{(\w+)\}/gu, (_, name) => String(values[name] ?? ''));
     }
   };
-  const api = new Script(functions + '\n({ createDraftRunCard, createChangeSetCard, renderUnlinkedChangeSets, buildDraftRunTimelineProjection, renderTranscript, captureDraftRunActionFocus, findDraftRunActionFocus, handleDraftRunActionClick });').runInNewContext(context) as {
+  const api = new Script(functions + '\n({ appendAutomaticApprovalState, createDraftRunCard, createChangeSetCard, renderUnlinkedChangeSets, buildDraftRunTimelineProjection, renderTranscript, captureDraftRunActionFocus, findDraftRunActionFocus, handleDraftRunActionClick });').runInNewContext(context) as {
+    appendAutomaticApprovalState(container: UiElement, id: string, review?: unknown): void;
     createDraftRunCard(run: unknown): UiElement; createChangeSetCard(set: unknown): UiElement;
     renderUnlinkedChangeSets(sets: unknown[], runs: unknown[]): void;
     buildDraftRunTimelineProjection(): { byMessageId: Record<string, unknown[]>; unlinked: unknown[] };
@@ -425,6 +430,33 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   return { api, state, unlinked, transcript, context, messages, render, renderCurrentState };
 }
 function elements(cards: UiElement[]): UiElement[] { return cards.flatMap((card) => [card, ...elements(card.children)]); }
+
+test('automatic cards distinguish processing, scope authorization, hard failure and reviewer denial in both languages', async () => fixture(async f => {
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate', 'model_review']) {
+    const ui = renderHarness(f, language); ui.state.approvalMode = mode;
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const waiting = new UiElement(); ui.api.appendAutomaticApprovalState(waiting, 'A');
+    assert.equal(waiting.children[0].textContent, labels[mode === 'delegate' ? 'approvalAutoWaiting' : 'approvalModelWaiting']);
+    ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode: mode as 'delegate' | 'model_review',
+      status: 'processing', updatedAt: '', targets: [{ id: 'A', kind: 'command', status: 'pending' }] };
+    const processing = new UiElement(); ui.api.appendAutomaticApprovalState(processing, 'A');
+    assert.equal(processing.children[0].textContent, labels.approvalProcessingNow);
+    assert.equal(processing.children.filter(n => n.type === 'button').length, 0);
+    ui.state.approvalProcessing.status = 'blocked';
+    ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'needs_authorization', reason: 'file:///external/result.txt' };
+    const external = new UiElement(); ui.api.appendAutomaticApprovalState(external, 'A');
+    assert.equal(external.children[0].textContent, 'file:///external/result.txt');
+    assert.equal(external.children[1].textContent, labels.approvalAuthorizeExact);
+    ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'failed', reason: 'Dirty editor' };
+    const failure = new UiElement(); ui.api.appendAutomaticApprovalState(failure, 'A');
+    assert.equal(failure.children[0].textContent, 'Dirty editor');
+    assert.equal(failure.children[1].textContent, labels.approvalResumeProcessing);
+    ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'denied', reason: 'Denied by reviewer' };
+    const denied = new UiElement(); ui.api.appendAutomaticApprovalState(denied, 'A', { decision: 'deny', rationale: 'Denied by reviewer' });
+    assert.equal(denied.children[0].textContent, 'Denied by reviewer');
+    assert.equal(denied.children.filter(n => n.type === 'button').length, 0, 'no ordinary reviewer bypass');
+  }
+}));
 function bulk(cards: UiElement[]) {
   return elements(cards).filter((item) => item.dataset.draftRunAction === 'approveDraftRunBatch'
     || ['applyChangeSet', 'discardChangeSet', 'revertChangeSet'].includes(item.dataset.changeSetAction));
@@ -824,7 +856,7 @@ test('unauthorized cwd is identified beside the disabled batch button and author
     assert.equal(bulk(cards)[0].disabled, true);
     assert.ok(elements(cards).some((item) => item.textContent.includes(external) && item.className === 'draft-run-batch-hint'));
     assert.ok(elements(cards).some((item) => item.dataset.draftRunAction === 'authorizeDraftRunCwd' && !item.disabled));
-    ui.state.authorizedExternalReferenceUris.push(uri);
+    ui.state.authorizedExternalExecutionUris.push(uri);
     assert.equal(bulk(ui.render().cards)[0].disabled, false);
   }
 }));

@@ -1,3 +1,4 @@
+import { taskGoal } from '../sessions/userTask';
 import * as vscode from 'vscode';
 import type { AgentRequest, ChatMessage, DraftEdit, DraftRun, SafeNpmScript } from '../shared/types';
 import { createBoundedReviewText, hashApprovalText, hashApprovalValue, hashDraftEditAction, hashDraftRunAction } from './approvalReviewHash';
@@ -159,7 +160,7 @@ function createBaseRequest(input: {
   language: 'zh-CN' | 'en';
 }): ApprovalReviewRequest {
   const visible = input.history.filter((message) => message.role === 'user' || message.role === 'assistant');
-  const firstUser = visible.find((message) => message.role === 'user')?.content ?? '';
+  const firstUser = taskGoal(input.history, input.rootTaskId);
   return deepFreeze({
     version: 1,
     sessionId: input.sessionId,

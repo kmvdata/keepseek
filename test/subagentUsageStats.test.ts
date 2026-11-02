@@ -329,10 +329,11 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
   assert.match(script, /subagents\.recentRuns/u);
   assert.match(script, /details\.session\.subagent\.totalTokens/u);
   assert.match(script, /usageMetricEffectiveExecution/u);
-  assert.match(script, /function getLatestRunState\(\)/u);
+  assert.doesNotMatch(script, /function getLatestRunState\(\)/u);
+  assert.match(script, /metrics\.executionTime\.currentMs/u);
   assert.doesNotMatch(script, /usageAnalysisMode|data-usage-analysis/u);
   assert.doesNotMatch(script, /data-usage-scope|usageDetailsScope|usageOverviewLabel|usageThisTurn/u);
-  const tooltipRenderer = script.slice(script.indexOf('function renderContextProgress()'), script.indexOf('function getLatestRunState()'));
+  const tooltipRenderer = script.slice(script.indexOf('function renderContextProgress()'), script.indexOf('function renderUsageDetails()'));
   assert.doesNotMatch(tooltipRenderer, /usageMetric(?:CacheReasons|CompactThreshold|CacheHitTokens|CacheMissTokens)/u);
   assert.doesNotMatch(tooltipRenderer, /usageMetric(?:UsageGroups|LegacyUnattributed)/u);
   assert.doesNotMatch(tooltipRenderer, /usageOpenDetails/u);
@@ -343,7 +344,7 @@ test('usage details are keyboard-accessible, localized, and generated Webview sc
       const rows: string[] = [];
       const noop = () => undefined;
       const env = {
-        state: { usageMetrics: { isOfficialDeepSeek, sessionUsageStats: { totalTokens: 100 }, turnCount: 1 } },
+        state: { usageMetrics: { executionTime: {}, isOfficialDeepSeek, sessionUsageStats: { totalTokens: 100 }, turnCount: 1 } },
         normalizeUsageMetrics: (value: unknown) => value,
         contextProgress: { style: { setProperty: noop }, classList: { toggle: noop }, setAttribute: noop },
         contextProgressTitle: null, contextProgressPercent: null, contextProgressTokens: null,

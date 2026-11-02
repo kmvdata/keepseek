@@ -686,6 +686,8 @@ export interface DraftRun extends DraftRunProposal {
 }
 
 export interface ChatMessage {
+  /** Host-only user task membership; never grants authority or changes provider bytes. */
+  userTask?: import('../sessions/userTask').UserTaskLink;
   runCheckpoint?: import('../agent/runCheckpoint').RunCheckpoint;
   /** V3 immutable archive, scoped to this session's object directory. Never sent to Webview. */
   runCheckpointArchive?: { version: 1; objectHash: string; pendingTool?: boolean; summary: NonNullable<ChatMessage['runState']> };
@@ -949,6 +951,8 @@ export interface PlanWorkflowView extends Omit<PlanWorkflowRecord, 'contentHash'
 }
 
 export interface ChatSession {
+  userTaskBudgets?: Record<string, import('../sessions/userTaskBudget').UserTaskBudget>;
+  approvalProcessing?: import('../approvals/approvalProcessing').ApprovalProcessingState;
   executionTime?: import('../sessions/executionTimeStats').SessionExecutionTime;
   approvalMode?: ApprovalMode;
   executionMode?: ExecutionMode;

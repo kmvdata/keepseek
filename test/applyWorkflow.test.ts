@@ -77,6 +77,7 @@ test('Provider returns terminal feedback for busy, missing, and exceptional Appl
     isStartingRun: false,
     runContextRefreshInFlight: false,
     activeChangeActions: new Set<string>(),
+    sessionStore: { getActiveSession: () => ({ id: 's', approvalMode: 'ask', messages: [] }), persist: async () => {} },
     postToWebview: (message: Record<string, unknown>) => messages.push(message),
     postState: () => undefined,
     t: (key: string) => key
@@ -92,6 +93,7 @@ test('Provider returns terminal feedback for busy, missing, and exceptional Appl
   host.isBusy = false;
   host.changeSets = {
     getEditUris: () => [],
+    getPendingEdit: () => undefined,
     getPendingDeleteTargetsForEdit: () => [],
     applyEdit: async () => undefined
   };
@@ -100,6 +102,7 @@ test('Provider returns terminal feedback for busy, missing, and exceptional Appl
 
   host.changeSets = {
     getEditUris: () => [],
+    getPendingEdit: () => undefined,
     getPendingDeleteTargetsForEdit: () => [],
     applyEdit: async () => { throw new Error('simulated Apply failure'); }
   };

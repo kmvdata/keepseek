@@ -176,10 +176,9 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
   private readonly encoder = new TextEncoder();
   private readonly authorizedExternalReferenceUris = new Set<string>();
-  private delegatedFileAuthorization = false;
 
   public setDelegatedFileAuthorization(enabled: boolean): void {
-    this.delegatedFileAuthorization = enabled;
+    void enabled; // Approval mode cannot grant external filesystem access.
   }
 
   public setAuthorizedExternalReferenceUris(uris?: Iterable<string>): void {
@@ -203,11 +202,8 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
   }
 
   public authorizeReviewedExternalUri(uri: string): void {
-    const parsed = vscode.Uri.parse(uri);
-    if (parsed.scheme !== 'file' || !vscode.workspace.isTrusted || vscode.workspace.getWorkspaceFolder(parsed)) {
-      throw new Error('Only one exact external file URI may be authorized by model review.');
-    }
-    this.authorizedExternalReferenceUris.add(parsed.toString());
+    void uri;
+    throw new Error('External access requires explicit user authorization; a reviewer cannot grant it.');
   }
 
   public async listWorkspaceFiles(language: KeepseekLanguage): Promise<string> {
@@ -798,9 +794,6 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     }
 
     const uri = this.resolveWorkspaceFileUriCandidate(rawPath, folders);
-    if (this.delegatedFileAuthorization && vscode.workspace.isTrusted && uri.scheme === 'file') {
-      this.authorizedExternalReferenceUris.add(uri.toString());
-    }
     if (!this.isUriInsideWorkspace(uri) && !this.authorizedExternalReferenceUris.has(uri.toString())) {
       throw new Error(
         'The requested file must be inside the currently open workspace or an explicitly referenced external file.'

@@ -117,11 +117,11 @@ export const usageRenderFragment: WebviewFragment = {
               : formatUsageAvailabilityValue(sessionUsage, 'usageMetricCostUnavailableValue')]
           ];
         }
-        var latestRunState = getLatestRunState();
-        if (latestRunState) {
+        var currentMs = metrics.executionTime.currentMs;
+        if (Number.isFinite(currentMs)) {
           items.unshift([
             'usageMetricEffectiveExecution',
-            formatUsageRuntime(latestRunState.usedMs)
+            formatUsageRuntime(currentMs)
           ]);
         }
         contextProgress.style.setProperty('--context-progress-angle', angle + 'deg');
@@ -145,17 +145,6 @@ export const usageRenderFragment: WebviewFragment = {
         if (usageDetailsDialog && usageDetailsDialog.open) { renderUsageDetails(); }
       }
 
-      function getLatestRunState() {
-        var messages = Array.isArray(state.messages) ? state.messages : [];
-        for (var index = messages.length - 1; index >= 0; index -= 1) {
-          var runState = messages[index] && messages[index].runState;
-          if (runState) {
-            return runState;
-          }
-        }
-        return null;
-      }
-
       function renderUsageDetails() {
         if (!usageDetailsBody) { return; }
         var metrics = normalizeUsageMetrics(state.usageMetrics);
@@ -170,7 +159,6 @@ export const usageRenderFragment: WebviewFragment = {
           state.contextUsage,
           metrics.promptCacheDiagnostics,
           metrics.contextCompressionTriggerRatio,
-          getLatestRunState(),
           metrics.executionTime,
           metrics.isOfficialDeepSeek,
           metrics.referenceCostSourceIds,
@@ -291,7 +279,7 @@ export const usageRenderFragment: WebviewFragment = {
         var section = createUsageSection('usageSessionMetricsTitle');
         var grid = usageNode('div', 'usage-session-metrics-grid');
         var cost = formatAccountedCosts(selected.total);
-        var latestRunState = getLatestRunState();
+        var currentMs = metrics.executionTime.currentMs;
         var hasSessionUsage = hasUsageData(selected.total);
         var cacheDiagnostics = metrics.sessionUsageStats && metrics.sessionUsageStats.cacheDiagnostics;
         var metricsList = [
@@ -310,7 +298,7 @@ export const usageRenderFragment: WebviewFragment = {
             : t('usageMetricCacheUnavailableValue'), ''],
           ['usageCostLabel', cost.available ? cost.amountText
             : formatUsageAvailabilityValue(selected.total, 'usageMetricCostUnavailableValue'), ''],
-          ['usageEffectiveRuntime', latestRunState ? formatUsageRuntime(latestRunState.usedMs)
+          ['usageEffectiveRuntime', Number.isFinite(currentMs) ? formatUsageRuntime(currentMs)
             : t(hasSessionUsage ? 'usageMetricUnavailableValue' : 'usagePendingValue'), ''],
           ['usageSessionTotalTime', formatUsageRuntime(metrics.executionTime.totalMs), ''],
           ['usageProviderAttemptCount', hasSessionUsage ? (selected.total.attemptStatsIncomplete && !selected.total.providerAttemptCount ? t('usageMetricUnavailableValue') : (selected.total.attemptStatsIncomplete ? '≥ ' : '') + formatMetricInteger(selected.total.providerAttemptCount)) : t('usagePendingValue'), ''],

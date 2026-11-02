@@ -59,6 +59,16 @@ export interface LogicalRunBudgetLimits {
   maxContinuationOutputChars: number;
 }
 
+export function normalizeLogicalRunBudgetLimits(value: unknown): LogicalRunBudgetLimits | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const keys: Array<keyof LogicalRunBudgetLimits> = ['maxModelRequests', 'maxToolRounds', 'maxToolCalls',
+    'maxContinuations', 'maxContextEpochRollovers', 'maxUpstreamTokens', 'maxTreeUpstreamTokens',
+    'maxContinuationOutputTokens', 'maxContinuationOutputChars'];
+  const input = value as LogicalRunBudgetLimits;
+  if (keys.some(key => !Number.isSafeInteger(input[key]) || input[key] < 0)) return undefined;
+  return Object.fromEntries(keys.map(key => [key, input[key]])) as unknown as LogicalRunBudgetLimits;
+}
+
 export function createLogicalRunBudgetState(input: Partial<LogicalRunBudgetState> = {}): LogicalRunBudgetState {
   return {
     version: 1,

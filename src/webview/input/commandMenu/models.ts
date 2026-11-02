@@ -133,11 +133,11 @@ export const subagentAndPendingBindingsFragment: WebviewFragment = {
             var sourceId = button.dataset.sourceId || '';
             var modelId = button.dataset.modelId || '';
             if (!sourceId || !modelId) { return; }
-            vscode.postMessage({ type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId, profile: selectedProfile });
+            vscode.postMessage({ type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId, profile: selectedProfile === 'default' ? undefined : selectedProfile });
             var model = findModelForSelection(Array.isArray(state.models) ? state.models : [], sourceId, modelId);
             statusValue = getModelDisplayLabel(model);
           } else {
-            vscode.postMessage({ type: 'setSubagentModel', mode: 'follow-main', profile: selectedProfile });
+            vscode.postMessage({ type: 'setSubagentModel', mode: 'follow-main', profile: selectedProfile === 'default' ? undefined : selectedProfile });
           }
           commandSubagentModelProfile = '';
           renderCommandSubagentModel();
@@ -360,7 +360,7 @@ export const modelControlsRenderFragment: WebviewFragment = {
         commandSubagentModelList.classList.toggle('hidden', !commandSubagentModelListOpen);
         commandSubagentModelList.innerHTML = '';
 
-        ['research', 'review', 'proposal'].forEach(function(profile) {
+        ['default', 'research', 'review', 'proposal'].forEach(function(profile) {
           var rawSetting = allSettings.profiles && allSettings.profiles[profile]
             ? allSettings.profiles[profile]
             : allSettings.default && typeof allSettings.default === 'object' ? allSettings.default : { mode: 'follow-main' };

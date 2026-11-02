@@ -6,7 +6,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import { Script } from 'node:vm';
-import { DelegatedApprovalQueue, getApprovalModeUserTail, normalizeApprovalMode } from '../src/agent/approvalMode';
+import { DelegatedApprovalQueue, draftRunPreparedMessage, getApprovalModeUserTail, normalizeApprovalMode } from '../src/agent/approvalMode';
+import { localize } from '../src/shared/i18n';
 import { buildInitialAgentMessages, getAgentSystemPrompt, getAgentTools, RUN_VALIDATION_TOOL_NAME } from '../src/agent/protocol';
 import { ToolAuthorizationService } from '../src/agent/tools/toolAuthorization';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
@@ -17,6 +18,18 @@ import { getScript } from '../src/webview/script';
 import type { ApprovalMode, ChatMessage } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
 import { normalizeStoredSessions } from '../src/sessions/chatSessionStore';
+
+test('draft receipt and host authorization text describe the actual mode without claiming execution', () => {
+  for (const lang of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'model_review', 'delegate'] as const) {
+    const receipt = draftRunPreparedMessage(mode, lang);
+    assert.match(receipt, lang === 'en' ? /no process was started/u : /尚未执行/u);
+    if (mode !== 'ask') assert.doesNotMatch(receipt, /Wait for the user|等待用户/u);
+    if (mode === 'model_review') assert.match(receipt, /configured model|配置的模型/u);
+    const scope = localize(lang, 'approvalExternalPrompt', { target: 'file:///outside/result.txt' });
+    assert.match(scope, /file:\/\/\/outside\/result.txt/u);
+    assert.notEqual(localize(lang, 'approvalReviewerUnavailable'), 'approvalReviewerUnavailable');
+  }
+});
 
 test('approval defaults fail closed and queue cannot replay, cross sessions, or survive cancellation', () => {
   assert.equal(normalizeApprovalMode('delegate'), 'delegate');
@@ -167,7 +180,7 @@ test('ask mode requests approval for each validation even with prior grants and 
   }
 });
 
-test('delegated external file authorization is limited to trusted runs and is not inherited by ask mode', () => {
+test('delegation does not grant external file access, even in trusted runs', () => {
   const folders = vscode.workspace.workspaceFolders;
   const trusted = vscode.workspace.isTrusted;
   try {
@@ -176,7 +189,7 @@ test('delegated external file authorization is limited to trusted runs and is no
     const service = new WorkspaceToolService();
     assert.throws(() => service.resolveTargetUri('/external/file.txt'), /inside/u);
     service.setDelegatedFileAuthorization(true);
-    assert.equal(service.resolveTargetUri('/external/file.txt').fsPath, '/external/file.txt');
+    assert.throws(() => service.resolveTargetUri('/external/file.txt'), /inside/u);
     service.setAuthorizedExternalReferenceUris([]);
     service.setDelegatedFileAuthorization(false);
     assert.throws(() => service.resolveTargetUri('/external/file.txt'), /inside/u);
@@ -189,7 +202,7 @@ test('delegated external file authorization is limited to trusted runs and is no
   }
 });
 
-test('model-reviewed external file authorization grants only the exact URI', () => {
+test('reviewer cannot grant external access; explicit reference grants only the exact URI', () => {
   const folders = vscode.workspace.workspaceFolders;
   const trusted = vscode.workspace.isTrusted;
   try {
@@ -198,7 +211,8 @@ test('model-reviewed external file authorization grants only the exact URI', () 
     const service = new WorkspaceToolService();
     const reviewed = service.getReviewableExternalUri('/external/reviewed.txt');
     assert.equal(reviewed, vscode.Uri.file('/external/reviewed.txt').toString());
-    service.authorizeReviewedExternalUri(reviewed!);
+    assert.throws(() => service.authorizeReviewedExternalUri(reviewed!), /explicit user/u);
+    service.setAuthorizedExternalReferenceUris([reviewed!]);
     assert.equal(service.resolveTargetUri('/external/reviewed.txt').toString(), reviewed);
     assert.throws(() => service.resolveTargetUri('/external/sibling.txt'), /inside/u);
   } finally {
@@ -222,11 +236,11 @@ test('revocation during an edit prevents all subsequent edits, commands and cont
   assert.deepEqual(fixture.effects, ['edit:e1']);
 });
 
-test('failed apply never executes dependent commands and sends failure evidence to the model', async () => {
+test('failed apply stops dependent commands and retains failure evidence without a model call', async () => {
   const fixture = workflowFixture();
   fixture.failEdit = true;
   await fixture.run();
-  assert.deepEqual(fixture.effects, ['edit:e1', 'edit:e2', 'continue']);
+  assert.deepEqual(fixture.effects, ['edit:e1', 'edit:e2', 'stopped']);
   assert.match(fixture.prompts[0], /file changed/u);
   assert.match(fixture.prompts[0], /"applied":false/u);
 });
@@ -245,10 +259,10 @@ test('ask mode does not consume delegated effects even if a stale batch exists',
   assert.deepEqual(fixture.effects, []);
 });
 
-test('model denial leaves a DraftEdit pending and appends safe-alternative guidance in a new turn', async () => {
+test('model denial leaves a DraftEdit pending and records guidance without another model call', async () => {
   const fixture = workflowFixture({ mode: 'model_review', denyTarget: 'e1' });
   await fixture.run();
-  assert.deepEqual(fixture.effects, ['continue']);
+  assert.deepEqual(fixture.effects, ['stopped']);
   assert.match(fixture.prompts[0] ?? '', /denied by the configured reviewer/iu);
   assert.match(fixture.prompts[0] ?? '', /materially safer new action/u);
 });
@@ -256,7 +270,7 @@ test('model denial leaves a DraftEdit pending and appends safe-alternative guida
 test('model denial never spawns a DraftRun', async () => {
   const fixture = workflowFixture({ mode: 'model_review', denyTarget: 'd1', editIds: [], draftRunIds: ['d1'] });
   await fixture.run();
-  assert.deepEqual(fixture.effects, ['continue']);
+  assert.deepEqual(fixture.effects, ['stopped']);
   assert.match(fixture.prompts[0] ?? '', /"decision":"deny"/u);
 });
 
@@ -283,7 +297,7 @@ test('model denial of a deletion leaves the exact file unchanged', async () => {
       deleteOnApplyPath: target
     });
     await fixture.run();
-    assert.deepEqual(fixture.effects, ['continue']);
+    assert.deepEqual(fixture.effects, ['stopped']);
     assert.equal(await readFile(target, 'utf8'), 'preserve these bytes\n');
   } finally {
     vscode.workspace.workspaceFolders = folders;
@@ -300,7 +314,11 @@ function workflowFixture(options: {
   unavailableBeforeEffects?: boolean;
 } = {}) {
   const queue = new DelegatedApprovalQueue();
-  const session = { id: 's', approvalMode: options.mode ?? 'delegate', messages: [] };
+  const session = { id: 's', approvalMode: options.mode ?? 'delegate', messages: [{
+    id: 'assistant', role: 'assistant', content: '', createdAt: '',
+    userTask: { version: 1, id: 'r', originMessageId: 'u', reason: 'user' },
+    runCheckpointArchive: { version: 1, objectHash: 'a'.repeat(64), summary: { taskId: 'r' } }
+  }] };
   const fixture = {
     queue, session, effects: [] as string[], prompts: [] as string[], failEdit: false,
     onEdit: () => {}, onCommand: () => {}, run: async () => {}
@@ -340,14 +358,14 @@ function workflowFixture(options: {
         action: 'delete' as const, newText: '', reason: `delete ${id}`
       }
     : {
-        id, uri: `file:///workspace/${id}`, label: id, action: 'create' as const,
+        id, uri: vscode.Uri.file(path.join(os.tmpdir(), id)).toString(), label: id, action: 'create' as const,
         newText: `content:${id}\n`, reason: `create ${id}`
       };
   const draftRun = (id: string) => ({
     id, sessionId: 's', agentRunId: 'r', messageId: 'a', status: 'pending', specHash: `hash-${id}`,
     spec: {
-      executable: 'node', args: ['--version'], reason: `run ${id}`, externalCwd: true,
-      cwdUri: 'file:///external', cwdLabel: '/external', env: [], timeoutMs: 20_000
+      executable: 'node', args: ['--version'], reason: `run ${id}`, externalCwd: false,
+      cwdUri: vscode.Uri.file(os.tmpdir()).toString(), cwdLabel: os.tmpdir(), env: [], timeoutMs: 20_000
     },
     effectAssessment: { version: 1, verdict: 'likely_readonly', effects: ['workspace_read'], evidence: [] },
     outputHead: '', outputTail: '', outputBytes: 0, outputTruncated: false, omittedOutputBytes: 0,
@@ -371,6 +389,8 @@ function workflowFixture(options: {
       }
     },
     getApprovalReviewerModelContext: async () => ({ model: { id: 'model' } }),
+    enterTaskWork: () => undefined,
+    loadTaskBudget: async () => undefined,
     authorizedExternalReferenceUris: new Set(), selectedSourceId: 'source', selectedModelId: 'model',
     sessionStore: { activeSessionId: 's', getActiveSession: () => session, persist: async () => {} },
     changeSets: {
@@ -393,7 +413,7 @@ function workflowFixture(options: {
       attachApprovalReview: () => true,
       approveAndRun: async (id: string, uris: Set<string>, options: { delegatedApproval: () => boolean }) => {
         assert.equal(options.delegatedApproval(), true);
-        assert.equal(uris.has('file:///external'), true);
+        assert.equal(uris.size, 0);
         fixture.effects.push('command:' + id); fixture.onCommand();
         return { status: 'done' };
       }
@@ -404,6 +424,8 @@ function workflowFixture(options: {
   }) as { executeDelegatedApprovals(next: NonNullable<ReturnType<DelegatedApprovalQueue['take']>>): Promise<void> };
   fixture.run = async () => {
     vscode.workspace.isTrusted = true;
+    const priorFolders = vscode.workspace.workspaceFolders;
+    vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(os.tmpdir()), name: 'test' }];
     queue.enqueue({
       sessionId: 's',
       runId: 'r',
@@ -418,7 +440,8 @@ function workflowFixture(options: {
         createdAt: new Date().toISOString()
       }] : undefined
     });
-    await provider.executeDelegatedApprovals(queue.take('s')!);
+    try { await provider.executeDelegatedApprovals(queue.take('s')!); }
+    finally { vscode.workspace.workspaceFolders = priorFolders; }
   };
   return fixture;
 }
