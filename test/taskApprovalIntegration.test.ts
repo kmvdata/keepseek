@@ -1,7 +1,7 @@
 import './registerVscodeStub';
 import { RunDetailsBuilder } from '../src/agent/logging/runDetails';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, symlink } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { test } from 'node:test';
@@ -17,7 +17,7 @@ import { DraftDiffService } from '../src/edits/draftDiffService';
 import { DraftRunStore } from '../src/runs/draftRunStore';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { createDraftRunProposal, hashDraftRunSpec } from '../src/runs/draftRunProposal';
-import { inspectDraftRunScope } from '../src/runs/draftRunScope';
+import { inspectDraftRunScope, ExactOperationGrants, draftRunIdentity, inspectAutomaticRunAuthorization } from '../src/approvals/authorization';
 import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
 import { ApprovalReviewerService } from '../src/approvals/approvalReviewer';
 import { ModelSourceStore } from '../src/accounts/accountStore';
@@ -214,15 +214,186 @@ test('scope check detects ../, absolute paths and symlink escape without classif
     }
     for (const code of ['cat ../outside', 'rm escape/outside']) {
       const p = await createDraftRunProposal({ executable: 'sh', args: ['-c', code], reason: 'scope test' });
-      assert.ok((await inspectDraftRunScope(p as never)).externalUris.length > 0);
+      assert.equal((await inspectDraftRunScope(p as never)).uncertain, true, 'shell text must not be split as argv');
     }
     const unknown = await createDraftRunProposal({ executable: 'sh', args: ['-c', 'custom-program'], reason: 'scope test' });
     assert.equal((await inspectDraftRunScope(unknown as never)).uncertain, true);
     for (const args of [['tag', 'test-tag'], ['push', 'origin', 'refs/tags/test-tag']]) {
       const p = await createDraftRunProposal({ executable: 'git', args, reason: 'Exact requested tag' });
       const scope = await inspectDraftRunScope({ ...p } as never);
-      assert.deepEqual(scope.externalUris, []); assert.equal(scope.uncertain, false);
+      assert.deepEqual(scope.externalUris, []); assert.equal(scope.uncertain, true);
+      assert.ok(scope.diagnostics.some(reason => reason.code === 'git_runtime'));
     }
+  });
+});
+
+test('source files with spaces are actually read through all three approval modes without running their contents', async () => {
+  if (process.platform === 'win32') return; // POSIX system-executable support is deliberately bounded.
+  for (const mode of ['ask', 'delegate', 'model_review'] as const) await fixture(mode, async f => {
+    const files = ['source name.ts', 'format rm.js', '--output=script.sh'];
+    const content = '#!/bin/sh\necho should-not-run > unexpected-marker\n';
+    for (const file of files) await writeFile(path.join(f.workspace, file), content);
+    const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'read-storage')) as never,
+      new SpawnDraftRunExecutor(), new DraftRunAuthorizationService((f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews));
+    Object.assign(f.host, { draftRuns: runs });
+    try {
+      f.response.draftEdits = [];
+      const proposal = await createDraftRunProposal({ executable: '/bin/cat', args: ['--', ...files], reason: 'Read source text', timeoutMs: 120_000 });
+      f.response.draftRuns = [proposal];
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      const originalSpec = JSON.stringify(runs.get(proposal.id)!.spec);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      if (mode === 'ask') {
+        assert.equal(runs.get(proposal.id)!.status, 'pending');
+        await runs.approveAndRun(proposal.id, new Set());
+      } else {
+        assert.equal(f.session.approvalProcessing?.status, 'completed', JSON.stringify(f.session.approvalProcessing));
+        assert.equal(f.reviews(), mode === 'model_review' ? 1 : 0);
+      }
+      const result = runs.toWebviewState(f.session.id)[0];
+      assert.equal(result.status, 'done', result.error);
+      assert.equal(result.output, content.repeat(files.length));
+      assert.deepEqual(result.effectAssessment.effects, ['workspace_read']);
+      assert.equal(JSON.stringify(result.spec), originalSpec);
+      assert.equal(result.specHash, proposal.specHash);
+      await assert.rejects(readFile(path.join(f.workspace, 'unexpected-marker')), { code: 'ENOENT' });
+      assert.equal(await runs.approveAndRun(proposal.id, new Set()), undefined, 'completed reads are not re-executed');
+    } finally { await runs.flush(); runs.dispose(); }
+  });
+});
+
+test('exact scope grants bind session, run, target, kind, spec and live paths, and never survive a fresh registry', async () => {
+  await fixture('delegate', async f => {
+    const proposal = await createDraftRunProposal({ executable: 'cat', args: ['../outside file.ts'], reason: 'Read outside' });
+    f.response.draftRuns = [proposal]; f.response.draftEdits = [];
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    const run = f.runs.get(proposal.id)!;
+    const original = JSON.stringify(run);
+    const grants = new ExactOperationGrants();
+    const decision = await inspectAutomaticRunAuthorization(run, grants);
+    assert.equal(decision.allowed, false);
+    assert.ok(decision.scope.externalUris.some(uri => uri.includes('outside')));
+    const identity = draftRunIdentity(run);
+    grants.grant(identity, decision.scope);
+    assert.equal((await inspectAutomaticRunAuthorization(run, grants)).allowed, true);
+    for (const patch of [{ sessionId: 'other' }, { agentRunId: 'other' }, { id: 'other' }]) {
+      assert.equal((await inspectAutomaticRunAuthorization({ ...run, ...patch }, grants)).allowed, false);
+    }
+    await assert.rejects(inspectAutomaticRunAuthorization({ ...run, specHash: 'other' }, grants), /changed after review/u);
+    const newSpec = { ...run.spec, env: [{ name: 'EXAMPLE', value: 'changed' }] };
+    assert.equal((await inspectAutomaticRunAuthorization({ ...run, spec: newSpec, specHash: hashDraftRunSpec(newSpec) }, grants)).allowed, false);
+    assert.equal(grants.matches({ ...identity, kind: 'edit' }, decision.scope), false);
+    assert.equal(grants.matches(identity, { ...decision.scope, fingerprint: 'changed resolution' }), false);
+    assert.equal(grants.matches(identity, { ...decision.scope, externalUris: [...decision.scope.externalUris, 'file:///new'] }), false);
+    assert.equal((await inspectAutomaticRunAuthorization(run, new ExactOperationGrants())).allowed, false);
+    grants.clear();
+    assert.equal((await inspectAutomaticRunAuthorization(run, grants)).allowed, false);
+    assert.equal(JSON.stringify(run), original, 'derived diagnostics and grants do not mutate persisted drafts');
+    vscode.workspace.isTrusted = false;
+    await assert.rejects(inspectAutomaticRunAuthorization(run, grants), /not trusted/u);
+  });
+});
+
+test('PATH shims, environment overrides, foreign paths and symlink escapes cannot borrow a read command name', async () => {
+  await fixture('delegate', async f => {
+    const shim = path.join(f.workspace, 'cat');
+    await writeFile(shim, '#!/bin/sh\nexit 0\n'); await chmod(shim, 0o755);
+    for (const input of [
+      { executable: shim, args: ['file.ts'] },
+      { executable: 'cat', args: ['file.ts'], env: [{ name: 'PATH', value: f.workspace }] },
+      { executable: 'cat', args: ['file.ts'], env: [{ name: 'DYLD_INSERT_LIBRARIES', value: '/tmp/helper' }] }
+    ]) {
+      const proposal = await createDraftRunProposal({ ...input, reason: 'Read' });
+      const scope = await inspectDraftRunScope(proposal);
+      assert.equal(scope.uncertain, true);
+      assert.ok(scope.diagnostics.some(reason => ['environment_override', 'executable_identity'].includes(reason.code)));
+    }
+    const shimProposal = await createDraftRunProposal({ executable: shim, args: [], reason: 'Exact program' });
+    f.response.draftRuns = [shimProposal]; f.response.draftEdits = [];
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    const run = f.runs.get(shimProposal.id)!;
+    const grants = new ExactOperationGrants();
+    grants.grant(draftRunIdentity(run), await inspectDraftRunScope(run));
+    assert.equal((await inspectAutomaticRunAuthorization(run, grants)).allowed, true);
+    await writeFile(shim, '#!/bin/sh\necho changed-program\n');
+    assert.equal((await inspectAutomaticRunAuthorization(run, grants)).allowed, false, 'executable replacement revokes its exact grant');
+    if (process.platform !== 'win32') {
+      const proposal = await createDraftRunProposal({ executable: 'cat', args: ['C:\\outside\\script.ts'], reason: 'Read' });
+      assert.ok((await inspectDraftRunScope(proposal)).diagnostics.some(reason => reason.code === 'foreign_path'));
+    }
+    await symlink(f.root, path.join(f.workspace, 'escaped directory'));
+    const proposal = await createDraftRunProposal({ executable: 'head', args: ['-n', '1', '--', 'escaped directory/a b.sh'], reason: 'Read' });
+    const scope = await inspectDraftRunScope(proposal);
+    assert.equal(scope.externalUris.length, 1);
+    assert.ok(scope.externalUris[0].includes('a%20b.sh') || scope.externalUris[0].includes('a b.sh'));
+    await mkdir(path.join(f.root, 'outer', 'inner'), { recursive: true });
+    await symlink(path.join(f.root, 'outer', 'inner'), path.join(f.workspace, 'jump'));
+    await writeFile(path.join(f.root, 'outer', 'existing.ts'), 'outside');
+    for (const filename of ['existing.ts', 'missing.ts']) {
+      const traversal = await createDraftRunProposal({ executable: 'cat', args: [`jump/../${filename}`], reason: 'Check symlink traversal' });
+      const traversed = await inspectDraftRunScope(traversal);
+      assert.equal(traversed.externalUris.length, 1, 'symlink/.. must be resolved by the filesystem, not lexical normalization');
+      assert.ok(traversed.externalUris[0].endsWith(`/outer/${filename}`));
+    }
+  });
+});
+
+for (const mode of ['delegate', 'model_review'] as const) test(`${mode} rechecks symlink scope after review and never executes changed scope`, async () => {
+  await fixture(mode, async f => {
+    await writeFile(path.join(f.workspace, 'source.ts'), 'source');
+    const link = path.join(f.workspace, 'read.ts');
+    await symlink(path.join(f.workspace, 'source.ts'), link);
+    const proposal = await createDraftRunProposal({ executable: 'cat', args: ['read.ts'], reason: 'Read source' });
+    f.response.draftRuns = [proposal]; f.response.draftEdits = [];
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    const host = f.host as unknown as { reviewApprovalRequest: (...args: unknown[]) => Promise<unknown> };
+    const original = host.reviewApprovalRequest.bind(host);
+    host.reviewApprovalRequest = async (...args) => {
+      const result = await original(...args);
+      await rm(link); await symlink(path.join(f.root, 'external.ts'), link);
+      return result;
+    };
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.equal(f.executions(), 0);
+    assert.equal(f.runs.get(proposal.id)?.status, 'failed');
+    assert.match(f.runs.get(proposal.id)?.error ?? '', /External path|外部路径/u);
+  });
+});
+
+test('Git format/source variants report the same real uncertainty and do not reach review or execution', async () => {
+  for (const mode of ['delegate', 'model_review'] as const) await fixture(mode, async f => {
+    f.response.draftEdits = [];
+    f.response.draftRuns = [await createDraftRunProposal({ executable: 'git',
+      args: ['show', '9a95c781576170b4f819e939ada012473f67d592', '--format=%s', '--', 'src/webview/script.ts', 'src/webview/styles.ts'],
+      reason: 'Inspect history', timeoutMs: 120_000 })];
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.equal(f.executions(), 0); assert.equal(f.reviews(), 0);
+    const target = f.session.approvalProcessing?.targets[0];
+    assert.equal(target?.status, 'needs_authorization');
+    assert.match(target?.reason ?? '', /Git configuration|Git 配置/u);
+    assert.doesNotMatch(target?.reason ?? '', /Script contents|脚本内容/u);
+    assert.deepEqual(f.runs.get(f.response.draftRuns[0].id)!.effectAssessment.effects, ['workspace_read', 'unknown']);
+  });
+});
+
+test('Git scope tracks cwd/repository/output paths but does not turn format values or revisions into filenames', async () => {
+  await fixture('delegate', async f => {
+    const display = await createDraftRunProposal({ executable: 'git', args: ['show', 'refs/heads/format',
+      '--format=plain /outside/text curl format', '--', 'file with spaces.ts'], reason: 'Inspect' });
+    assert.deepEqual((await inspectDraftRunScope(display)).externalUris, []);
+    const changedCwd = await createDraftRunProposal({ executable: 'git', args: ['-C', '../other repo', 'show',
+      '--output', 'output file', '--', 'source.ts'], reason: 'Inspect' });
+    const scope = await inspectDraftRunScope(changedCwd);
+    assert.ok(scope.externalUris.some(uri => decodeURIComponent(uri).endsWith('/other repo')));
+    assert.ok(scope.externalUris.some(uri => decodeURIComponent(uri).endsWith('/other repo/output file')));
+    assert.ok(scope.externalUris.some(uri => decodeURIComponent(uri).endsWith('/other repo/source.ts')));
+    const repository = await createDraftRunProposal({ executable: 'git', args: ['--git-dir=../git data',
+      '--work-tree', '../other tree', 'show'], reason: 'Inspect' });
+    assert.equal((await inspectDraftRunScope(repository)).externalUris.length, 2);
   });
 });
 
@@ -258,7 +429,7 @@ test('reloaded pending drafts stay inert until explicit Provider resume with a f
     const clock = new UserTaskClock();
     const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), f.host, {
       sessionStore: sessions, changeSets: edits, draftRuns: runs, delegatedApprovals: queue, taskClock: clock,
-      externalEffectGrants: new Map(), authorizedExternalExecutionUris: new Set(), approvalReviews: approvals,
+      externalEffectGrants: new ExactOperationGrants(), authorizedExternalExecutionUris: new Set(), approvalReviews: approvals,
       approvalReviewer: new ApprovalReviewerService({ globalStorageUri: storageUri, workspaceKey: f.scope.key,
         sourceStore: new ModelSourceStore(storageUri), store: approvals }),
       sendPrompt: async () => { continuations++; }
@@ -277,7 +448,7 @@ test('reloaded pending drafts stay inert until explicit Provider resume with a f
   });
 });
 
-test('delegate executes specified git tag and push only in a temporary project and local bare remote', async () => {
+test('delegate executes exactly scoped git tag and push only in a temporary project and local bare remote', async () => {
   await fixture('delegate', async f => {
     const remote = path.join(f.root, 'remote.git');
     execFileSync('git', ['init', '--bare', remote], { stdio: 'pipe' });
@@ -297,6 +468,15 @@ test('delegate executes specified git tag and push only in a temporary project a
       await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
       f.host.queueResponseApprovals(f.session, f.message, f.response);
       await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.equal(f.session.approvalProcessing?.targets[0].status, 'needs_authorization');
+      const dialog = vscode.window.showWarningMessage;
+      vscode.window.showWarningMessage = async (_m, _o, ...items) => items[0] as never;
+      try {
+        for (const draft of f.response.draftRuns) {
+          await f.host.resumeApprovalProcessing(draft.id);
+          await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+        }
+      } finally { vscode.window.showWarningMessage = dialog; }
       assert.equal(f.session.approvalProcessing?.status, 'completed', JSON.stringify(f.session.approvalProcessing));
       const tag = execFileSync('git', ['--git-dir', remote, 'rev-parse', 'refs/tags/test-task-approval'], { encoding: 'utf8' }).trim();
       assert.match(tag, /^[a-f0-9]{40,64}$/u);
@@ -358,7 +538,7 @@ async function createFixture(root: string, mode: 'ask' | 'delegate' | 'model_rev
     language: 'en', sessionStore: sessions, taskClock: clock, changeSets: edits, draftRuns: runs, delegatedApprovals: queue,
     activeChangeActions: new Set(),
     approvalReviews: reviews, approvalReviewer: reviewer, repairLoopsBySession: new Map(), checkpointActivityDepth: 0,
-    externalEffectGrants: new Map(), authorizedExternalReferenceUris: new Set(), authorizedExternalExecutionUris: new Set(),
+    externalEffectGrants: new ExactOperationGrants(), authorizedExternalReferenceUris: new Set(), authorizedExternalExecutionUris: new Set(),
     agentActivity: { sequence: 0 }, getApprovalReviewerModelContext: async () => ({ model: request.model }),
     postState: () => {}, postToWebview: () => {}, setAgentActivity: () => {}, scheduleRunContextRefresh: () => {}, awaitRunContextRefresh: async () => true,
     handleAppliedRepairEdits: async () => {}, selectedSourceId: 'main', selectedModelId: 'main',

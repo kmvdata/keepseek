@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as os from 'node:os';
 import { test } from 'node:test';
 import * as vscode from 'vscode';
-import { analyzeDraftRunEffects } from '../src/runs/commandRisk';
+import { analyzeDraftRunEffects } from '../src/approvals/authorization';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { SpawnDraftRunExecutor } from '../src/runs/draftRunExecutor';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';

@@ -488,10 +488,10 @@ src/edits/
 ```text
 src/runs/
 ├── draftRunProposal.ts         规范化 executable/argv/cwd/env 并计算 specHash
-├── commandRisk.ts              命令效果和验证阻断风险分析
 ├── draftRunStore.ts            pending/running/terminal 状态、输出和持久化
 ├── draftRunAuthorization.ts    审批记录 → 一次性 ExecutionPermit
 ├── draftRunExecutor.ts         shell:false 的 spawn、取消、超时、输出流
+├── executionEnvironment.ts     执行与鉴权共用的环境变量构造规则
 └── draftRunBatchCoordinator.ts Ask 模式下一批命令的顺序执行和停止
 ```
 
@@ -520,7 +520,17 @@ src/approvals/
 ├── oneShotTextRequest.ts     隔离、无工具的一次性 reviewer 请求
 ├── approvalReviewer.ts       reviewer 服务、来源解析和记录
 ├── approvalReviewStore.ts    append-only 审批记录持久化
-└── approvalCircuitBreaker.ts 连续拒绝和累计拒绝熔断
+├── approvalCircuitBreaker.ts 连续拒绝和累计拒绝熔断
+└── authorization/
+    ├── index.ts                 宿主/Store 的统一鉴权入口
+    ├── commandSemantics.ts      executable + argv 的有限语法、参数用途与已识别效果
+    ├── commandEffects.ts        展示/reviewer 用的派生风险提示（不是授权依据）
+    ├── commandScope.ts          实际程序解析、环境、操作对象和实时范围指纹
+    ├── pathScope.ts             工作区包含关系、realpath、悬空链接及 symlink/.. 穿越
+    ├── exactOperationGrants.ts  仅内存的精确操作授权、匹配与失效
+    ├── preflight.ts             delegate/model_review 共用的范围决策及执行前复核
+    ├── executionBoundary.ts     信任、specHash、本地 cwd 与外部 cwd 硬检查
+    └── reasons.ts               可用于 UI/测试的原因码、详情及中英文说明
 ```
 
 三种模式的区别：
@@ -530,6 +540,16 @@ src/approvals/
 - `delegate`：宿主策略自动批准，但仍需写入明确的 `host_policy` 记录。
 
 无论哪种模式，底层确定性硬检查始终生效。模型判断不能关闭工作区信任、路径授权、base hash、脏编辑器、specHash、一次性 permit 或取消检查。
+
+命令分析分别表达参数角色、已识别效果和不能确定范围的原因，不拼接 argv 后搜索危险关键词，不以脚本扩展名推断执行，也不把 shell 字符串按空格拆成命令。`cat script.ts` 的文件是读取对象；`bun run script.ts` 是脚本执行；`sh -c ...` 的正文保留为内联代码。未知范围显示为未知，不自动增加写入效果。固定 validation 的原有阻断规则独立保留在 `agent/tools/validationRisk.ts`，不用于任意命令授权。
+
+自动范围判定仅覆盖有限参数集合：`cat/head/tail/wc/pwd/ls`、非递归 `grep`、字面输出命令及少量版本查询。还必须满足工作区范围、无环境覆盖及实际程序身份检查；POSIX 下核实 PATH/显式路径解析后为系统目录中的 OS 所有文件或扩展宿主运行时，不能仅凭 basename。Windows 程序搜索顺序、非系统程序、递归搜索、未知选项、脚本/包生命周期均保留具体的不确定原因，要求精确范围授权。外部读取与外部写入分别由参数用途决定，外部 cwd 本身不代表写入。
+
+Git 的 `show/diff/log` 有参数分类规则（包括 `--`、format 文本、输出路径、`-C`、仓库/配置覆盖），但普通 DraftRun 的 Git 操作仍要求精确范围授权。`--format=%s` 和 `.ts/.js/.sh` 路径不再误报执行或写入；`--output` 则识别为写入，`--ext-diff/--textconv/--show-signature` 识别为可能调用程序。即使有禁用 diff/textconv 的参数，当前执行环境仍可能读取用户/仓库配置、include 文件、仓库重定向及触发其他 helper；本次没有新增受约束 Git 自动执行入口，也不在 spawn 时追加选项或环境。相关语义对照本机 Git 2.50.1 及官方 [git-show](https://git-scm.com/docs/git-show)、[git 2.50](https://git-scm.com/docs/git/2.50.0) 文档核实。未来增加受控 Git 方案时，必须先在创建草稿前落实所有约束，并让它们进入 specHash 和展示内容。
+
+精确范围授权绑定 session/run/target/kind/actionHash，以及规范化路径、实际程序文件身份和有效环境的派生指纹。授权不持久化；停止、切换会话/模式和重启均不复用。Provider 仅编排交互与队列；Store 在持久化和消费审批记录之后再次调用共用复核，之后才交给原有一次性 permit 与 `shell:false` executor。脚本内容及 Git 隐式配置依赖不声称可静态穷尽；精确授权承认的是这些明确说明的不确定性。此预检不是操作系统隔离机制。
+
+本次无新增持久化字段、工具 schema 或请求协议变化。旧 pending 草稿的 spec、specHash、已保存风险历史不被改写；展示与新 reviewer 请求派生最新风险提示。恢复后的草稿仍惰性等待显式恢复处理，已完成或副作用未知的操作不重跑。
 
 审批结果和真实副作用结果通过新的 user-tail 追加到下一轮，不能回写历史消息。
 

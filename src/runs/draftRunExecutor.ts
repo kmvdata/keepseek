@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createControlledEnvironment } from './executionEnvironment';
 import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
 import type { DraftRun, ExecutionPermit } from '../shared/types';
@@ -328,24 +329,6 @@ function validatePermit(draftRun: DraftRun, permit: ExecutionPermit): void {
   if (draftRun.effectAssessment.effects.some((effect) => !allowed.has(effect))) {
     throw new Error('DraftRun effects exceed the execution permit.');
   }
-}
-
-function createControlledEnvironment(entries: readonly { name: string; value: string }[]): NodeJS.ProcessEnv {
-  const allowedNames = [
-    'PATH', 'PATHEXT', 'SystemRoot', 'ComSpec', 'WINDIR',
-    'HOME', 'USERPROFILE', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE',
-    'SHELL', 'TERM', 'COLORTERM'
-  ];
-  const env: NodeJS.ProcessEnv = {};
-  for (const name of allowedNames) {
-    if (process.env[name] !== undefined) {
-      env[name] = process.env[name];
-    }
-  }
-  for (const entry of entries) {
-    env[entry.name] = entry.value;
-  }
-  return env;
 }
 
 function terminateProcessTree(child: ChildProcess): void {

@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
-import { analyzeDraftRunEffects } from '../src/runs/commandRisk';
+import { analyzeDraftRunEffects } from '../src/approvals/authorization';
 import type {
   DraftRunExecutionOutcome,
   DraftRunExecutorAdapter,
@@ -15,6 +15,7 @@ import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import { DraftRunStore } from '../src/runs/draftRunStore';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
+import { createDraftRunReviewRequest } from '../src/approvals/approvalReviewSurface';
 import type { ApprovalRecordMatch } from '../src/approvals/approvalReviewTypes';
 import type { DraftRun, DraftRunProposal, DraftRunSpec, ExecutionPermit } from '../src/shared/types';
 
@@ -44,6 +45,57 @@ test('revoking delegation while persisting approval prevents process creation', 
     assert.equal(executor.executeCount, 0);
     assert.equal(result?.status, 'failed');
     assert.match(result?.error ?? '', /revoked/u);
+  });
+});
+
+test('scope is rechecked after persisted approval consumption, before any process starts', async () => {
+  await withDraftRunFixture(async ({ workspaceRoot, store, executor, approvalReviews }) => {
+    const proposal = createProposal(workspaceRoot);
+    store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
+    const approvalRecord = await addHostApproval(approvalReviews, proposal, 's', 'r');
+    let scopeValid = true;
+    const consume = approvalReviews.consumeMatchingApproval.bind(approvalReviews);
+    approvalReviews.consumeMatchingApproval = async (...args) => {
+      const record = await consume(...args);
+      scopeValid = false;
+      return record;
+    };
+    const result = await store.approveAndRun(proposal.id, new Set(), {
+      delegatedApproval: () => true, approvalRecord,
+      verifyScope: async () => { if (!scopeValid) throw new Error('Scope changed after approval consumption.'); }
+    });
+    assert.equal(result?.status, 'failed');
+    assert.match(result?.error ?? '', /Scope changed/u);
+    assert.equal(executor.executeCount, 0);
+    assert.equal(await store.approveAndRun(proposal.id, new Set()), undefined, 'failed attempt is not automatically retried');
+  });
+});
+
+test('legacy pending risk advice is derived for display/review without rewriting stored spec or history', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
+    const proposal = createProposal(workspaceRoot);
+    proposal.spec.executable = 'git';
+    proposal.spec.args = ['show', 'HEAD', '--format=%s', '--', 'script.ts'];
+    proposal.specHash = hashDraftRunSpec(proposal.spec);
+    proposal.effectAssessment = { version: 1, verdict: 'mutating_or_sensitive', effects: ['workspace_read', 'workspace_write'], evidence: ['legacy false positive'] };
+    store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
+    await store.flush();
+    const reloaded = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    try {
+      await reloaded.initialize();
+      const stored = reloaded.get(proposal.id)!;
+      const before = JSON.stringify(stored);
+      const shown = reloaded.toWebviewState('s')[0];
+      assert.equal(shown.status, 'pending');
+      assert.deepEqual(shown.effectAssessment.effects, ['workspace_read', 'unknown']);
+      assert.deepEqual(shown.spec, proposal.spec);
+      assert.equal(shown.specHash, proposal.specHash);
+      const review = createDraftRunReviewRequest({ draftRun: stored, history: [], language: 'en' });
+      assert.ok(!review.staticRiskAnalysis.includes('effect:workspace_write'));
+      assert.equal(review.actionHash, proposal.specHash);
+      assert.equal(JSON.stringify(reloaded.get(proposal.id)), before);
+      assert.equal(executor.executeCount, 0);
+    } finally { await reloaded.flush(); reloaded.dispose(); }
   });
 });
 

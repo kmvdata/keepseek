@@ -10,7 +10,7 @@ import { DraftRunStore } from '../src/runs/draftRunStore';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import { getConfiguredDraftRunMaxTranscriptBytes } from '../src/shared/config';
-import { analyzeDraftRunEffects } from '../src/runs/commandRisk';
+import { analyzeDraftRunEffects } from '../src/approvals/authorization';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
 import { getScript } from '../src/webview/script';

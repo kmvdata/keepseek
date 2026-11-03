@@ -1,3 +1,4 @@
+import { analyzeDraftRunEffects } from './authorization/commandEffects';
 import { taskGoal } from '../sessions/userTask';
 import * as vscode from 'vscode';
 import type { AgentRequest, ChatMessage, DraftEdit, DraftRun, SafeNpmScript } from '../shared/types';
@@ -69,6 +70,7 @@ export function createDraftRunReviewRequest(input: {
   history: readonly ChatMessage[];
   language: 'zh-CN' | 'en';
 }): ApprovalReviewRequest {
+  const assessment = analyzeDraftRunEffects(input.draftRun.spec);
   return createBaseRequest({
     sessionId: input.draftRun.sessionId,
     rootTaskId: input.rootTaskId ?? input.draftRun.agentRunId,
@@ -79,9 +81,9 @@ export function createDraftRunReviewRequest(input: {
     history: input.history,
     purpose: input.draftRun.spec.reason,
     staticRiskAnalysis: [
-      `verdict:${input.draftRun.effectAssessment.verdict}`,
-      ...input.draftRun.effectAssessment.effects.map((effect) => `effect:${effect}`),
-      ...input.draftRun.effectAssessment.evidence
+      `verdict:${assessment.verdict}`,
+      ...assessment.effects.map((effect) => `effect:${effect}`),
+      ...assessment.evidence
     ],
     exactAction: {
       kind: 'draft_run_execute',
@@ -90,7 +92,7 @@ export function createDraftRunReviewRequest(input: {
       cwdUri: input.draftRun.spec.cwdUri,
       env: input.draftRun.spec.env.map((entry) => ({ ...entry })),
       timeoutMs: input.draftRun.spec.timeoutMs,
-      effectAssessment: structuredClone(input.draftRun.effectAssessment),
+      effectAssessment: assessment,
       specHash: input.draftRun.specHash
     },
     language: input.language

@@ -1,5 +1,3 @@
-import { realpath } from 'node:fs/promises';
-import { findCanonicalWorkspaceFolder } from './draftRunProposal';
 import { writeJsonAtomic } from '../shared/atomicStorage';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
@@ -12,8 +10,7 @@ import type {
   DraftRunProposal,
   DraftRunStatus
 } from '../shared/types';
-import { getFileReferenceAuthorizationKey } from '../context/references/fileReference';
-import { hashDraftRunSpec } from './draftRunProposal';
+import { analyzeDraftRunEffects, checkDraftRunApprovalBoundary, validateDraftRunBeforeApproval } from '../approvals/authorization';
 import { DraftRunAuthorizationService } from './draftRunAuthorization';
 import type { ApprovalRecordMatch, ApprovalReviewRecord } from '../approvals/approvalReviewTypes';
 import { toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
@@ -214,7 +211,7 @@ export class DraftRunStore {
   public async preflightApproval(id: string, authorizedExternalReferenceUris: ReadonlySet<string>): Promise<DraftRun> {
     const draftRun = this.draftRuns.get(id);
     if (!draftRun || draftRun.status !== 'pending') throw new Error('Pending DraftRun was not found.');
-    await this.validateBeforeApproval(draftRun, authorizedExternalReferenceUris);
+    await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
     return cloneDraftRun(draftRun);
   }
 
@@ -262,11 +259,11 @@ export class DraftRunStore {
       if (this.draftRuns.get(id) !== draftRun || !['pending', 'approved', 'running'].includes(draftRun.status)) {
         throw new Error('DraftRun state changed during approval.');
       }
-      this.checkApprovalBoundary(draftRun, authorizedExternalReferenceUris, options.expectedSpecHash);
+      checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris, options.expectedSpecHash);
     };
     try {
       assertAuthorized();
-      await this.validateBeforeApproval(draftRun, authorizedExternalReferenceUris);
+      await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
       await options.verifyScope?.();
       assertAuthorized();
       draftRun.status = 'approved';
@@ -283,12 +280,15 @@ export class DraftRunStore {
       this.emitState(draftRun);
       await this.persistNow();
 
-      await this.validateBeforeApproval(draftRun, authorizedExternalReferenceUris);
+      await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
       await options.verifyScope?.();
       assertAuthorized();
       const permit = options.delegatedApproval
         ? await this.authorization.createDelegatedPermit(draftRun, options.delegatedApproval, options.approvalRecord)
         : this.authorization.createUserClickPermit(draftRun);
+      // Approval-record consumption is asynchronous: recheck scope after it too.
+      await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
+      await options.verifyScope?.();
       assertAuthorized();
       const abortController = new AbortController();
       this.abortControllers.set(draftRun.id, abortController);
@@ -420,7 +420,7 @@ export class DraftRunStore {
   public validateApprovalBoundary(id: string, authorizedUris: ReadonlySet<string>, expectedSpecHash: string): DraftRun {
     const run = this.draftRuns.get(id);
     if (!run || run.status !== 'pending' || this.approving.has(id)) throw new Error('Pending DraftRun was not found.');
-    this.checkApprovalBoundary(run, authorizedUris, expectedSpecHash);
+    checkDraftRunApprovalBoundary(run, authorizedUris, expectedSpecHash);
     return cloneDraftRun(run);
   }
 
@@ -565,39 +565,6 @@ export class DraftRunStore {
     this.schedulePersist();
   }
 
-  private async validateBeforeApproval(
-    draftRun: DraftRun,
-    authorizedExternalReferenceUris: ReadonlySet<string>
-  ): Promise<void> {
-    this.checkApprovalBoundary(draftRun, authorizedExternalReferenceUris);
-    const cwdUri = vscode.Uri.parse(draftRun.spec.cwdUri);
-    const stat = await vscode.workspace.fs.stat(cwdUri);
-    if (stat.type !== vscode.FileType.Directory || cwdUri.scheme !== 'file') {
-      throw new Error('DraftRun working directory is no longer an executable local directory.');
-    }
-    const canonicalCwd = await realpath(cwdUri.fsPath);
-    if (!await findCanonicalWorkspaceFolder(canonicalCwd) && !authorizedExternalReferenceUris.has(vscode.Uri.file(canonicalCwd).toString())
-      && !authorizedExternalReferenceUris.has(cwdUri.toString())) {
-      throw new Error(`Authorize the exact external working directory before running this DraftRun: ${cwdUri.toString()}`);
-    }
-    this.checkApprovalBoundary(draftRun, authorizedExternalReferenceUris);
-  }
-
-  private checkApprovalBoundary(draftRun: DraftRun, authorizedExternalReferenceUris: ReadonlySet<string>, expectedSpecHash?: string): void {
-    if (!vscode.workspace.isTrusted) {
-      throw new Error('DraftRun is disabled because the workspace is not trusted.');
-    }
-    if (hashDraftRunSpec(draftRun.spec) !== draftRun.specHash || (expectedSpecHash !== undefined && expectedSpecHash !== draftRun.specHash)) {
-      throw new Error('DraftRun command changed after review and cannot be executed.');
-    }
-    const cwdUri = vscode.Uri.parse(draftRun.spec.cwdUri);
-    if (cwdUri.scheme !== 'file') throw new Error('DraftRun requires a local working directory.');
-    if (draftRun.spec.externalCwd
-      && !authorizedExternalReferenceUris.has(getFileReferenceAuthorizationKey(cwdUri))) {
-      throw new Error(`Authorize the exact external working directory before running this DraftRun: ${draftRun.spec.cwdLabel}`);
-    }
-  }
-
   private recordOutput(draftRun: DraftRun, chunk: DraftRunOutputChunk): void {
     if (draftRun.status !== 'running') {
       return;
@@ -722,7 +689,11 @@ function toWebviewDraftRun(draftRun: DraftRun): WebviewDraftRun {
   const { outputHead: _head, outputTail: _tail, ...rest } = cloneDraftRun(draftRun);
   void _head;
   void _tail;
-  return { ...rest, output: getDraftRunOutput(draftRun) };
+  return { ...rest,
+    // Pending legacy drafts keep their immutable spec and stored history. Only
+    // derived presentation advice is refreshed with the current parser.
+    effectAssessment: draftRun.status === 'pending' ? analyzeDraftRunEffects(draftRun.spec) : rest.effectAssessment,
+    output: getDraftRunOutput(draftRun) };
 }
 
 function cloneProposal(proposal: DraftRunProposal): DraftRunProposal {

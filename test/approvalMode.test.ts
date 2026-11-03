@@ -7,7 +7,9 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import { Script } from 'node:vm';
 import { DelegatedApprovalQueue, draftRunPreparedMessage, getApprovalModeUserTail, normalizeApprovalMode } from '../src/agent/approvalMode';
-import { localize } from '../src/shared/i18n';
+import { localize, WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
+import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
+import { ExactOperationGrants } from '../src/approvals/authorization';
 import { buildInitialAgentMessages, getAgentSystemPrompt, getAgentTools, RUN_VALIDATION_TOOL_NAME } from '../src/agent/protocol';
 import { ToolAuthorizationService } from '../src/agent/tools/toolAuthorization';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
@@ -28,6 +30,9 @@ test('draft receipt and host authorization text describe the actual mode without
     const scope = localize(lang, 'approvalExternalPrompt', { target: 'file:///outside/result.txt' });
     assert.match(scope, /file:\/\/\/outside\/result.txt/u);
     assert.notEqual(localize(lang, 'approvalReviewerUnavailable'), 'approvalReviewerUnavailable');
+    const delegate = WEBVIEW_TRANSLATIONS[lang].approvalDelegateDescription;
+    assert.match(delegate, lang === 'en' ? /safety preflight/u : /安全预检/u);
+    assert.match(delegate, lang === 'en' ? /external or uncertain scope still requires authorization/u : /外部或无法确定的范围仍需授权/u);
   }
 });
 
@@ -361,18 +366,20 @@ function workflowFixture(options: {
         id, uri: vscode.Uri.file(path.join(os.tmpdir(), id)).toString(), label: id, action: 'create' as const,
         newText: `content:${id}\n`, reason: `create ${id}`
       };
-  const draftRun = (id: string) => ({
-    id, sessionId: 's', agentRunId: 'r', messageId: 'a', status: 'pending', specHash: `hash-${id}`,
-    spec: {
+  const draftRun = (id: string) => {
+    const spec = {
       executable: 'node', args: ['--version'], reason: `run ${id}`, externalCwd: false,
       cwdUri: vscode.Uri.file(os.tmpdir()).toString(), cwdLabel: os.tmpdir(), env: [], timeoutMs: 20_000
-    },
+    };
+    return {
+    id, sessionId: 's', agentRunId: 'r', messageId: 'a', status: 'pending', specHash: hashDraftRunSpec(spec), spec,
     effectAssessment: { version: 1, verdict: 'likely_readonly', effects: ['workspace_read'], evidence: [] },
     outputHead: '', outputTail: '', outputBytes: 0, outputTruncated: false, omittedOutputBytes: 0,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
-  });
+    };
+  };
   const provider = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
-    language: 'en', delegatedApprovals: queue, repairLoopsBySession: new Map(),
+    language: 'en', delegatedApprovals: queue, repairLoopsBySession: new Map(), externalEffectGrants: new ExactOperationGrants(),
     approvalCircuitBreaker: { record: () => ({ tripped: false }) },
     approvalReviews: {
       flush: async () => {},

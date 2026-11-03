@@ -11,7 +11,7 @@ import type {
   WorkspaceDiagnosticSummary
 } from '../../shared/types';
 import { RUN_VALIDATION_TOOL_NAME } from '../protocol';
-import { hasValidationBlockingRisk } from '../../runs/commandRisk';
+import { hasValidationBlockingRisk } from './validationRisk';
 
 const MAX_DIAGNOSTIC_ITEMS = 200;
 const SAFE_NPM_SCRIPT_ORDER: SafeNpmScript[] = ['compile', 'lint', 'test'];

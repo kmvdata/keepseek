@@ -1,6 +1,6 @@
 import { ExecutionClock, ExecutionCostBudget, LogicalRunBudget, SharedUpstreamTokenBudget } from '../agent/executionPolicy';
 import { taskBudgetFromCheckpoint } from '../sessions/userTaskBudget';
-import { inspectDraftRunScope } from '../runs/draftRunScope';
+import { inspectDraftRunScope, ExactOperationGrants, draftRunIdentity, inspectAutomaticRunAuthorization, assertAutomaticRunAuthorization, inspectAutomaticEditAuthorization } from '../approvals/authorization';
 import { executionSegmentId, migrateUserTasks, taskForSegment, type UserTaskLink } from '../sessions/userTask';
 import { executionTimeView, reconcileExecutionTime, UserTaskClock } from '../sessions/executionTimeStats';
 import { createRunCheckpoint, inheritTaskBudget, checkpointCopy, endpointHash, grantCheckpointToolBudgetSegment, isResumableToolBudgetCheckpoint, recoverNoProgressWithUserTurn, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
@@ -296,12 +296,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private activeDraftRunId: string | undefined;
   private readonly delegatedApprovals = new DelegatedApprovalQueue();
   private authorizedExternalExecutionUris = new Set<string>();
-  private externalEffectGrants = new Map<string, { hash: string; uris: string[] }>();
+  private externalEffectGrants = new ExactOperationGrants();
   private externalAuthorizationEpoch = 0;
-  private hasExternalEffectGrant(sessionId: string, id: string, hash: string, uris: string[]): boolean {
-    const grant = this.externalEffectGrants?.get(`${sessionId}:${id}`);
-    return !!grant && grant.hash === hash && uris.every(uri => grant.uris.includes(uri));
-  }
 
   private async resumeApprovalProcessing(authorizeTargetId?: string): Promise<void> {
     if (this.isBusy || this.isStartingRun || this.activeDraftRunId || this.delegatedApprovalInFlight || this.activeChangeActions?.size) return;
@@ -331,18 +327,19 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const run = target.kind === 'command' ? this.draftRuns.get(target.id) : undefined;
       if (pending && (pending.sessionId !== session.id || pending.runId !== state.runId)) return;
       if (run && (run.sessionId !== session.id || run.agentRunId !== state.runId || run.status !== 'pending')) return;
-      const uris = pending ? [pending.edit.uri, ...(pending.edit.kind === 'move_v1' ? [pending.edit.targetUri] : [])]
-        .filter(uri => !vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(uri)))
-        : run ? (await inspectDraftRunScope(run)).externalUris : [];
-      const hash = pending ? hashDraftEditAction(pending.edit) : run?.specHash;
-      if (!hash) return;
+      const commandScope = run ? await inspectDraftRunScope(run) : undefined;
+      const editAuthorization = pending ? inspectAutomaticEditAuthorization(pending, this.externalEffectGrants) : undefined;
+      const scope = commandScope ?? editAuthorization?.scope;
+      const identity = run ? draftRunIdentity(run) : editAuthorization?.identity;
+      if (!scope || !identity) return;
+      const uris = scope.externalUris;
       const confirm = this.t('approvalAuthorizeExact');
       const description = pending ? `${pending.edit.action}: ${uris.join(', ')}\n${pending.edit.reason}`
-        : `${run!.spec.executable} ${JSON.stringify(run!.spec.args)}\ncwd: ${run!.spec.cwdUri}\n${uris.join(', ')}`;
+        : `${run!.spec.executable} ${JSON.stringify(run!.spec.args)}\ncwd: ${run!.spec.cwdUri}\n${uris.join(', ')}\n${commandScope?.reasons.join('\n') ?? ''}\nenv: ${JSON.stringify(run!.spec.env)}`;
       const selected = await vscode.window.showWarningMessage(this.t('approvalExternalPrompt', { target: description }), { modal: true }, confirm);
       if (selected !== confirm || this.sessionStore.activeSessionId !== session.id || session.approvalMode !== mode
         || authorityEpoch !== (this.externalAuthorizationEpoch ?? 0) || this.isBusy || this.isStartingRun) return;
-      this.externalEffectGrants.set(`${session.id}:${authorizeTargetId}`, { hash, uris });
+      this.externalEffectGrants.grant(identity, scope);
     }
     this.delegatedApprovals.enqueue({ sessionId: session.id, runId: state.runId, rootTaskId: state.rootTaskId,
       editIds: state.targets.filter(t => t.kind === 'edit').map(t => t.id),
@@ -6504,9 +6501,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           source: approvalMode === 'model_review' ? 'model_reviewer' as const : 'delegated_approver' as const,
           authorizedUris: [] as string[]
         };
-        const externalTargets = [file.uri, ...(file.kind === 'move_v1' ? [file.targetUri] : [])]
-          .filter(uri => !vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(uri)));
-        if (externalTargets.length && !this.hasExternalEffectGrant(batch.sessionId, id, hashDraftEditAction(file), externalTargets)) {
+        const editAuthorization = inspectAutomaticEditAuthorization(pending, this.externalEffectGrants);
+        const externalTargets = editAuthorization.scope.externalUris;
+        if (!editAuthorization.allowed) {
           report(id, 'needs_authorization', this.t('approvalExternalRequired', { target: externalTargets.join(', ') })); break;
         }
         fileAuthorization.authorizedUris = externalTargets;
@@ -6593,17 +6590,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             if (draftRun.status === 'done') continue;
             break;
           }
-          const scope = await inspectDraftRunScope(draftRun);
-          if ((scope.externalUris.length || scope.uncertain) && !this.hasExternalEffectGrant(batch.sessionId, id, draftRun.specHash, scope.externalUris)) {
-            report(id, 'needs_authorization', this.t('approvalExternalRequired', { target: [...scope.externalUris, ...scope.reasons].join('; ') })); break;
-          }
-          const authorizedUris = new Set(scope.externalUris);
-          // The exact reviewed spec can retain a pre-canonicalization cwd URI
-          // in older drafts (for example macOS /var versus /private/var).
-          if (draftRun.spec.externalCwd && scope.externalUris.length) authorizedUris.add(draftRun.spec.cwdUri);
-
+          let authorization: Awaited<ReturnType<typeof inspectAutomaticRunAuthorization>>;
           try {
-            await this.draftRuns.preflightApproval(id, authorizedUris);
+            authorization = await inspectAutomaticRunAuthorization(draftRun, this.externalEffectGrants);
+            if (!authorization.allowed) {
+              report(id, 'needs_authorization', this.t('approvalExternalRequired', { target: authorization.reason })); break;
+            }
+            await this.draftRuns.preflightApproval(id, authorization.authorizedUris);
           } catch (error) {
             editResults.push({ id, applied: false, errors: [getErrorMessage(error)] });
             report(id, 'failed', getErrorMessage(error));
@@ -6628,15 +6621,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           }
           this.activeDraftRunId = id;
           this.setAgentActivity({ base: 'executing', phase: 'running_draft_run', detail: draftRun.spec.executable });
-          const result = await this.draftRuns.approveAndRun(id, authorizedUris, {
+          const result = await this.draftRuns.approveAndRun(id, authorization.authorizedUris, {
             delegatedApproval: isAuthorized,
-            verifyScope: async () => {
-              const currentScope = await inspectDraftRunScope(draftRun);
-              if ((currentScope.externalUris.length || currentScope.uncertain)
-                && !this.hasExternalEffectGrant(batch.sessionId, id, draftRun.specHash, currentScope.externalUris)) {
-                throw new Error(this.t('approvalExternalRequired', { target: currentScope.externalUris.join(', ') }));
-              }
-            },
+            verifyScope: () => assertAutomaticRunAuthorization(draftRun, this.externalEffectGrants),
             approvalRecord: toApprovalRecordMatch(review.record, approvalMode),
             signal: controller.signal
           });
