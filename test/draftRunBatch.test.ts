@@ -357,9 +357,13 @@ class UiElement {
     this.parentElement = undefined;
   }
   contains(child: UiElement): boolean { return this === child || this.children.some((item) => item.contains(child)); }
-  addEventListener() {}
+  listeners = new Map<string, () => void>();
+  addEventListener(type: string, listener: () => void) { this.listeners.set(type, listener); }
+  click() { if (!this.disabled) this.listeners.get('click')?.(); }
   closest(selector: string): UiElement | null {
     if (selector === 'button[data-draft-run-id]' && this.type === 'button' && this.dataset.draftRunId) return this;
+    if (selector === 'button[data-edit-id], button[data-change-set-id]' && this.type === 'button'
+      && (this.dataset.editId || this.dataset.changeSetId)) return this;
     return this.parentElement?.closest(selector) ?? null;
   }
   setAttribute(key: string, value: string) { this.attributes[key] = value; }
@@ -368,7 +372,8 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   const source = getScript();
   const names = ['appendAutomaticApprovalState', 'createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
     'isDraftRunBatchActive', 'getDraftRunBatchMembers', 'createDraftRunTimelineItem', 'renderDraftRunItems',
-    'captureDraftRunActionFocus', 'findDraftRunActionFocus', 'renderTranscript', 'handleDraftRunActionClick',
+    'captureDraftRunActionFocus', 'findDraftRunActionFocus', 'renderTranscript', 'handleDraftRunActionClick', 'handleChangeSetActionClick',
+    'createApprovalReviewSummary', 'getApprovalSourceLabel', 'getApprovalDecisionLabel', 'getApprovalRiskLabel',
     'getDraftRunTitle', 'appendDraftRunField', 'formatShellCommand', 'formatShellWord', 'getDraftRunStatusLabel', 'getDraftRunEffectLabel',
     'createChangeSetCard', 'createChangeSetFileRow', 'createEditActionButton', 'createEditOpenFileButton',
     'createChangeSetActionButton', 'getChangeSetStatusLabel', 'getChangeFileStatusLabel', 'isChangeSetActionable',
@@ -392,6 +397,7 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   const messages: unknown[] = [];
   const context = { state, document: { createElement: () => new UiElement() }, Element: UiElement, HTMLElement: UiElement,
     pendingDraftRunBatchSnapshot: '', pendingDraftRunActions: new Set(), pendingDraftRunApprovals: new Set(), pendingChangeActions: new Map(),
+    changeActionRequestSequence: 0,
     formatDuration: String, createDraftEditActionIcon: () => new UiElement(),
     createApprovalSourceSummary: () => new UiElement(), getEditApprovalSourceLabel: String,
     unlinkedChangeSetList: unlinked, unlinkedChangeSetRegion: unlinkedRegion,
@@ -404,8 +410,8 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
       return (translations[key] ?? key).replace(/\{(\w+)\}/gu, (_, name) => String(values[name] ?? ''));
     }
   };
-  const api = new Script(functions + '\n({ appendAutomaticApprovalState, createDraftRunCard, createChangeSetCard, renderUnlinkedChangeSets, buildDraftRunTimelineProjection, renderTranscript, captureDraftRunActionFocus, findDraftRunActionFocus, handleDraftRunActionClick });').runInNewContext(context) as {
-    appendAutomaticApprovalState(container: UiElement, id: string, review?: unknown): void;
+  const api = new Script(functions + '\n({ appendAutomaticApprovalState, createDraftRunCard, createChangeSetCard, renderUnlinkedChangeSets, buildDraftRunTimelineProjection, renderTranscript, captureDraftRunActionFocus, findDraftRunActionFocus, handleDraftRunActionClick, handleChangeSetActionClick });').runInNewContext(context) as {
+    appendAutomaticApprovalState(notices: UiElement, actions: UiElement, id: string, review?: unknown): void;
     createDraftRunCard(run: unknown): UiElement; createChangeSetCard(set: unknown): UiElement;
     renderUnlinkedChangeSets(sets: unknown[], runs: unknown[]): void;
     buildDraftRunTimelineProjection(): { byMessageId: Record<string, unknown[]>; unlinked: unknown[] };
@@ -413,6 +419,7 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
     captureDraftRunActionFocus(element: UiElement): Record<string, string>;
     findDraftRunActionFocus(buttons: UiElement[], descriptor: Record<string, string>): UiElement | undefined;
     handleDraftRunActionClick(event: { target: UiElement }): void;
+    handleChangeSetActionClick(event: { target: UiElement }): void;
   };
   const renderCurrentState = (edits: string[][] = []) => {
     const sets = edits.map((statuses, index) => ({ id: 'set-' + index, files: statuses.map((status, i) => ({ id: 'e-' + index + '-' + i, status, label: 'file' + i })) }));
@@ -435,32 +442,146 @@ test('automatic cards distinguish processing, scope authorization, hard failure 
   for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate', 'model_review']) {
     const ui = renderHarness(f, language); ui.state.approvalMode = mode;
     const labels = WEBVIEW_TRANSLATIONS[language];
-    const waiting = new UiElement(); ui.api.appendAutomaticApprovalState(waiting, 'A');
-    assert.equal(waiting.children[0].textContent, labels[mode === 'delegate' ? 'approvalAutoWaiting' : 'approvalModelWaiting']);
+    const renderState = (review?: unknown) => {
+      const notes = new UiElement(), actions = new UiElement();
+      ui.api.appendAutomaticApprovalState(notes, actions, 'A', review);
+      assert.equal(notes.childElementCount, 1);
+      assert.equal(notes.children[0].className, 'approval-state-note');
+      assert.ok(actions.children.every(n => n.type === 'button'));
+      return { note: notes.children[0], buttons: actions.children };
+    };
+    const waiting = renderState();
+    assert.equal(waiting.note.textContent, labels[mode === 'delegate' ? 'approvalAutoWaiting' : 'approvalModelWaiting']);
     ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode: mode as 'delegate' | 'model_review',
       status: 'processing', updatedAt: '', targets: [{ id: 'A', kind: 'command', status: 'pending' }] };
-    const processing = new UiElement(); ui.api.appendAutomaticApprovalState(processing, 'A');
-    assert.equal(processing.children[0].textContent, labels.approvalProcessingNow);
-    assert.equal(processing.children.filter(n => n.type === 'button').length, 0);
+    const processing = renderState();
+    assert.equal(processing.note.textContent, labels.approvalProcessingNow);
+    assert.equal(processing.buttons.length, 0);
     ui.state.approvalProcessing.status = 'blocked';
     ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'needs_authorization', reason: 'file:///external/result.txt' };
-    const external = new UiElement(); ui.api.appendAutomaticApprovalState(external, 'A');
-    assert.equal(external.children[0].textContent, 'file:///external/result.txt');
-    assert.equal(external.children[1].textContent, labels.approvalAuthorizeExact);
+    const external = renderState();
+    assert.equal(external.note.textContent, 'file:///external/result.txt');
+    assert.equal(external.buttons[0].textContent, labels.approvalAuthorizeExact);
     ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'failed', reason: 'Dirty editor' };
-    const failure = new UiElement(); ui.api.appendAutomaticApprovalState(failure, 'A');
-    assert.equal(failure.children[0].textContent, 'Dirty editor');
-    assert.equal(failure.children[1].textContent, labels.approvalResumeProcessing);
+    const failure = renderState();
+    assert.equal(failure.note.textContent, 'Dirty editor');
+    assert.equal(failure.buttons[0].textContent, labels.approvalResumeProcessing);
     ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'denied', reason: 'Denied by reviewer' };
-    const denied = new UiElement(); ui.api.appendAutomaticApprovalState(denied, 'A', { decision: 'deny', rationale: 'Denied by reviewer' });
-    assert.equal(denied.children[0].textContent, 'Denied by reviewer');
-    assert.equal(denied.children.filter(n => n.type === 'button').length, 0, 'no ordinary reviewer bypass');
+    const denied = renderState({ decision: 'deny', rationale: 'Denied by reviewer' });
+    assert.equal(denied.note.textContent, 'Denied by reviewer');
+    assert.equal(denied.buttons.length, 0, 'no ordinary reviewer bypass');
   }
 }));
 function bulk(cards: UiElement[]) {
   return elements(cards).filter((item) => item.dataset.draftRunAction === 'approveDraftRunBatch'
     || ['applyChangeSet', 'discardChangeSet', 'revertChangeSet'].includes(item.dataset.changeSetAction));
 }
+
+const longAuthorizationReason = '等待你授权精确操作范围：Command scope cannot be established statically; authorize this exact operation. / 无法静态确定命令范围，请确认这条精确操作。';
+
+test('command and file cards keep complete automatic notes outside button groups and preserve action payloads', async () => fixture(async f => {
+  f.add(['A']);
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate', 'model_review'] as const) {
+    const ui = renderHarness(f, language); ui.state.approvalMode = mode;
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const fileReason = 'file:///external/' + 'long-unbroken-path'.repeat(30) + '/<script>literal</script>.txt';
+    const set = { id: 'set', files: [{ id: 'edit-A', status: 'pending', label: 'file.ts', uri: 'file:///external/file.ts' }] };
+    ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode, status: 'blocked', updatedAt: '', targets: [
+      { id: 'A', kind: 'command', status: 'needs_authorization', reason: longAuthorizationReason },
+      { id: 'edit-A', kind: 'edit', status: 'needs_authorization', reason: fileReason }
+    ] };
+    const command = ui.api.createDraftRunCard(ui.state.draftRuns[0]);
+    const file = ui.api.createChangeSetCard(set);
+    for (const [card, reason, id, actionClass] of [
+      [command, longAuthorizationReason, 'A', 'draft-run-actions'],
+      [file, fileReason, 'edit-A', 'draft-chip-actions']
+    ] as const) {
+      const nodes = elements([card]);
+      const notes = nodes.filter(n => n.className === 'approval-state-note');
+      const actions = nodes.find(n => n.className === actionClass)!;
+      assert.equal(notes.length, 1);
+      assert.equal(notes[0].textContent, reason);
+      assert.equal(notes[0].childElementCount, 0, 'untrusted reasons stay literal text');
+      assert.equal(nodes.filter(n => n.textContent === reason).length, 1);
+      assert.equal(notes[0].parentElement, actions.parentElement, 'note occupies a sibling row');
+      assert.ok(!actions.contains(notes[0]));
+      assert.ok(actions.children.every(n => n.type === 'button'));
+      const siblings = actions.parentElement!.children;
+      assert.equal(siblings[siblings.indexOf(actions) - 1], notes[0], 'scope note is adjacent to its buttons');
+      const authorize = actions.children.find(n => n.textContent === labels.approvalAuthorizeExact)!;
+      authorize.click();
+      assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'resumeApprovalProcessing', authorizeTargetId: id });
+    }
+    const reject = elements([command]).find(n => n.dataset.draftRunAction === 'rejectDraftRun')!;
+    ui.api.handleDraftRunActionClick({ target: reject });
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'rejectDraftRun', id: 'A' });
+    const preview = elements([file]).find(n => n.dataset.editAction === 'openDraftDiff')!;
+    ui.api.handleChangeSetActionClick({ target: preview });
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'openDraftDiff', id: 'edit-A' });
+    const discard = elements([file]).find(n => n.dataset.editAction === 'discardDraftEdit')!;
+    ui.api.handleChangeSetActionClick({ target: discard });
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'discardDraftEdit', id: 'edit-A', requestId: 'change-action-1' });
+  }
+}));
+
+test('automatic notes and buttons rerender without stale scope or duplicate actions, respecting busy/startup/denial', async () => fixture(async f => {
+  f.add(['A']);
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate', 'model_review'] as const) {
+    const ui = renderHarness(f, language); ui.state.approvalMode = mode;
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const set = { id: 'set', files: [{ id: 'edit-A', status: 'pending', label: 'file.ts' }] };
+    const render = () => {
+      ui.api.renderUnlinkedChangeSets([set], [{ draftRun: ui.state.draftRuns[0] }]);
+      return elements(ui.unlinked.children);
+    };
+    for (const status of ['needs_authorization', 'failed', 'pending', 'denied'] as const) {
+      const reason = status === 'needs_authorization' ? longAuthorizationReason : status + ' reason';
+      ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode,
+        status: status === 'pending' ? 'processing' : 'blocked', updatedAt: '', targets: [
+          { id: 'A', kind: 'command', status, reason }, { id: 'edit-A', kind: 'edit', status, reason }
+        ] };
+      const nodes = render();
+      assert.equal(nodes.filter(n => n.className === 'approval-state-note').length, 2);
+      assert.equal(nodes.filter(n => n.textContent === reason).length, 2);
+      if (status !== 'needs_authorization') assert.ok(!nodes.some(n => n.textContent === longAuthorizationReason));
+      const resume = nodes.filter(n => [labels.approvalAuthorizeExact, labels.approvalResumeProcessing].includes(n.textContent));
+      assert.equal(resume.length, status === 'pending' || status === 'denied' ? 0 : 2);
+      if (status === 'failed') {
+        resume.forEach(button => button.click());
+        assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.splice(0))), [
+          { type: 'resumeApprovalProcessing' }, { type: 'resumeApprovalProcessing' }
+        ], 'ordinary retry does not grant scope');
+      }
+    }
+    ui.state.approvalProcessing = undefined;
+    ui.state.startup.sideEffectsReady = false;
+    let nodes = render();
+    assert.ok(nodes.filter(n => n.type === 'button' && n.dataset.editAction !== 'openDraftDiff').every(n => n.disabled));
+    ui.state.startup.sideEffectsReady = true; ui.state.isBusy = true;
+    nodes = render();
+    assert.ok(!nodes.some(n => n.textContent === labels.approvalResumeProcessing));
+    assert.ok(nodes.filter(n => n.dataset.editAction === 'discardDraftEdit' || n.dataset.draftRunAction === 'rejectDraftRun').every(n => n.disabled));
+    ui.state.isBusy = false;
+    const review = { decision: 'deny', rationale: 'Reviewer denied this operation' };
+    const deniedCards = [ui.api.createDraftRunCard({ ...ui.state.draftRuns[0], approvalReview: review }),
+      ui.api.createChangeSetCard({ ...set, files: [{ ...set.files[0], approvalReview: review }] })];
+    assert.equal(elements(deniedCards).filter(n => n.className === 'approval-state-note' && n.textContent === review.rationale).length, 2);
+    assert.ok(!elements(deniedCards).some(n => n.textContent === labels.approvalResumeProcessing), 'review denial alone cannot expose a bypass');
+    ui.state.approvalMode = 'ask'; nodes = render();
+    assert.ok(!nodes.some(n => n.className === 'approval-state-note'));
+    assert.equal(nodes.filter(n => n.dataset.draftRunAction === 'approveDraftRun').length, 2);
+    assert.equal(nodes.filter(n => n.dataset.editAction === 'applyDraftEdit').length, 1);
+    ui.state.approvalMode = mode;
+    for (const status of ['running', 'approved', 'done', 'failed', 'cancelled', 'rejected']) {
+      const card = ui.api.createDraftRunCard({ ...ui.state.draftRuns[0], status, startedAt: 'now', output: 'preserved output', error: 'preserved error' });
+      assert.ok(!elements([card]).some(n => n.className === 'approval-state-note'));
+      assert.ok(elements([card]).some(n => n.className === 'draft-run-output' && n.textContent.includes('preserved output') && n.textContent.includes('preserved error')));
+    }
+    for (const status of ['applied', 'discarded', 'superseded', 'reverted']) {
+      assert.ok(!elements([ui.api.createChangeSetCard({ ...set, files: [{ ...set.files[0], status }] })]).some(n => n.className === 'approval-state-note'));
+    }
+  }
+}));
 function runCards(nodes: UiElement[]) {
   return elements(nodes).filter((item) => item.classList.contains('draft-run-card'));
 }

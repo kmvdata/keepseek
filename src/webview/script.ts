@@ -3536,8 +3536,9 @@ export function getScript(): string {
       heading.append(title, meta);
       var actions = document.createElement('div');
       actions.className = 'draft-run-actions';
-      appendDraftRunActions(actions, draftRun);
-      header.append(heading, actions);
+      header.append(heading);
+      appendDraftRunActions(actions, draftRun, header);
+      header.append(actions);
 
       var fields = document.createElement('div');
       fields.className = 'draft-run-fields';
@@ -3648,17 +3649,17 @@ export function getScript(): string {
       }
     }
 
-    function appendAutomaticApprovalState(container, id, review) {
+    function appendAutomaticApprovalState(notices, actions, id, review) {
       var processing = state.approvalProcessing;
       var target = processing && Array.isArray(processing.targets) && processing.targets.find(function(item) { return item.id === id; });
       var denied = target && target.status === 'denied' || review && review.decision === 'deny';
       var active = processing && processing.status === 'processing';
-      var note = document.createElement('span');
-      note.className = 'draft-chip-error';
+      var note = document.createElement('div');
+      note.className = 'approval-state-note';
       note.textContent = target && target.reason || (denied && review ? review.rationale
         : processing && processing.reason || t(active ? 'approvalProcessingNow'
           : state.approvalMode === 'model_review' ? 'approvalModelWaiting' : 'approvalAutoWaiting'));
-      container.append(note);
+      notices.append(note);
       if (denied || active || state.isBusy) return;
       var button = document.createElement('button');
       var needsScope = target && target.status === 'needs_authorization';
@@ -3669,10 +3670,10 @@ export function getScript(): string {
       button.addEventListener('click', function() {
         vscode.postMessage({ type: 'resumeApprovalProcessing', authorizeTargetId: needsScope ? id : undefined });
       });
-      container.append(button);
+      actions.append(button);
     }
 
-    function appendDraftRunActions(container, draftRun) {
+    function appendDraftRunActions(container, draftRun, notices) {
       var statusValue = String(draftRun.status || 'pending');
       var isOwnRunning = String(state.activeDraftRunId || '') === String(draftRun.id || '');
       var externalAuthorized = !draftRun.spec?.externalCwd
@@ -3680,7 +3681,7 @@ export function getScript(): string {
           && state.authorizedExternalExecutionUris.includes(String(draftRun.spec?.cwdUri || '')));
       if (statusValue === 'pending') {
         if (state.approvalMode !== 'ask') {
-          appendAutomaticApprovalState(container, draftRun.id, draftRun.approvalReview);
+          appendAutomaticApprovalState(notices, container, draftRun.id, draftRun.approvalReview);
           container.append(createDraftRunActionButton(t('draftRunReject'), 'rejectDraftRun', draftRun, true));
           return;
         }
@@ -3881,6 +3882,7 @@ export function getScript(): string {
 
       var actions = document.createElement('div');
       actions.className = 'draft-chip-actions';
+      chip.append(content);
       if (edit.uri) {
         actions.append(createEditOpenFileButton(edit));
       }
@@ -3889,12 +3891,12 @@ export function getScript(): string {
       }
       if (allowActions && (edit.status === 'pending' || edit.status === 'apply_failed' || edit.status === 'interrupted')) {
         if (state.approvalMode === 'ask') actions.append(createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false));
-        else appendAutomaticApprovalState(actions, edit.id, edit.approvalReview);
+        else appendAutomaticApprovalState(chip, actions, edit.id, edit.approvalReview);
         actions.append(createEditActionButton(t('discard'), 'discardDraftEdit', edit.id, true));
       } else if (allowActions && (edit.status === 'applied' || edit.status === 'revert_failed')) {
         actions.append(createEditActionButton(t('revert'), 'revertDraftEdit', edit.id, true));
       }
-      chip.append(content, actions);
+      chip.append(actions);
       return chip;
     }
 
