@@ -1,16 +1,25 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import './registerVscodeStub';
-import { analyzeCommand, analyzeDraftRunEffects, inspectGitCommandReplan } from '../src/approvals/authorization';
+import * as vscode from './stubs/vscode';
+import { ModelSourceStore } from '../src/accounts/accountStore';
+import { ApprovalReviewerService } from '../src/approvals/approvalReviewer';
+import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
+import { createDraftRunReviewRequest } from '../src/approvals/approvalReviewSurface';
+import { analyzeCommand, analyzeDraftRunEffects, assertAutomaticRunAuthorization, draftRunIdentity,
+  ExactOperationGrants, inspectAutomaticRunAuthorization, inspectGitCommandReplan } from '../src/approvals/authorization';
 import { inspectLocalGitScope } from '../src/approvals/authorization/localGitScope';
 import { hasValidationBlockingRisk } from '../src/agent/tools/validationRisk';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
+import { SpawnDraftRunExecutor } from '../src/runs/draftRunExecutor';
+import { createDraftRunProposal, type DraftRunProposalInput } from '../src/runs/draftRunProposal';
+import { DraftRunStore } from '../src/runs/draftRunStore';
 import { createControlledEnvironment } from '../src/runs/executionEnvironment';
-import type { DraftRunSpec } from '../src/shared/types';
+import type { DraftRun, DraftRunSpec } from '../src/shared/types';
 
 test('DraftRun read-only analysis is conservative advice rather than authorization', () => {
   const assessment = analyzeDraftRunEffects(createSpec('cat', ['src/script.ts']));
@@ -255,12 +264,148 @@ test('scripts and unknown programs stay conservative regardless of their reason 
     .reasons.some(reason => reason.code === 'environment_override'));
 });
 
+test('auto approval binds a verified project script to its current identity and exact external operands', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX system shell verification required');
+  const { root, workspace, shell, script, relativeScript, createRun } = await projectScriptFixture(t);
+  const grants = new ExactOperationGrants();
+  const run = await createRun(shell, [relativeScript]);
+  const approval = await inspectAutomaticRunAuthorization(run, grants);
+  assert.equal(approval.allowed, true);
+  assert.equal(approval.route, 'host_policy', approval.reason);
+  assert.equal(approval.scope.trustedProjectScript, true);
+  assert.equal(approval.scope.executable, await realpath(shell));
+  assert.ok(run.effectAssessment.effects.includes('arbitrary_code'), 'project code can still have runtime effects');
+
+  const configPath = path.join(root, 'outside config.txt');
+  await writeFile(configPath, 'outside data\n');
+  const configUri = vscode.Uri.file(configPath).toString();
+  const withConfig = await createRun(shell, [relativeScript, `--config=${configPath}`]);
+  const outside = await inspectAutomaticRunAuthorization(withConfig, grants);
+  assert.equal(outside.allowed, false);
+  assert.deepEqual(outside.scope.externalUris, [configUri]);
+  grants.grant(draftRunIdentity(withConfig), outside.scope);
+  const granted = await inspectAutomaticRunAuthorization(withConfig, grants);
+  assert.equal(granted.allowed, true);
+  assert.notEqual(granted.route, 'host_policy');
+  assert.deepEqual([...granted.authorizedUris], [configUri]);
+
+  assert.equal(approval.scope.cwd, vscode.Uri.file(workspace).toString());
+  await assertAutomaticRunAuthorization(run, grants, approval.scope.fingerprint);
+  await writeFile(script, '#!/bin/sh\nprintf "%s\\n" "new version"\n');
+  const changed = await inspectAutomaticRunAuthorization(run, grants);
+  assert.equal(changed.route, 'host_policy');
+  assert.notEqual(changed.scope.fingerprint, approval.scope.fingerprint);
+  await assert.rejects(assertAutomaticRunAuthorization(run, grants, approval.scope.fingerprint), /scope or launch identity changed/u);
+  assert.equal((await inspectAutomaticRunAuthorization(withConfig, grants)).allowed, false, 'the grant is bound to the inspected script');
+});
+
+test('host policy approval executes a project script once and preserves its literal argv', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX system shell verification required');
+  const { root, shell, script, relativeScript, createRun } = await projectScriptFixture(t);
+  await writeFile(script, '#!/bin/sh\nprintf "%s\\n" "$1"\n');
+  const value = '参数 ; $(printf unexpected)';
+  const proposal = await createRun(shell, [relativeScript, value]);
+  const globalStorageUri = vscode.Uri.file(root) as never;
+  const reviews = new ApprovalReviewStore(globalStorageUri);
+  const reviewer = new ApprovalReviewerService({ globalStorageUri, workspaceKey: 'project',
+    sourceStore: new ModelSourceStore(globalStorageUri), store: reviews,
+    requestText: async () => assert.fail('host policy must not request a model review') });
+  const runs = new DraftRunStore(globalStorageUri, new SpawnDraftRunExecutor(), new DraftRunAuthorizationService(reviews));
+  try {
+    const [run] = runs.addProposals({ proposals: [proposal], sessionId: proposal.sessionId, agentRunId: proposal.agentRunId });
+    const grants = new ExactOperationGrants();
+    const { route, scope, authorizedUris } = await inspectAutomaticRunAuthorization(run, grants);
+    assert.equal(route, 'host_policy');
+    const { record } = await reviewer.createHostPolicyApproval({
+      ...createDraftRunReviewRequest({ draftRun: run, scope, history: [], language: 'en' }),
+      approvalMode: 'delegate', scopeFingerprint: scope.fingerprint
+    });
+    assert.equal(record.approvalSource, 'host_policy');
+    assert.equal(record.decision, 'approve', record.rationale);
+    assert.equal(record.risk, 'medium');
+    assert.ok(record.policyRules.includes('trusted_project_script'));
+    const result = await runs.approveAndRun(run.id, authorizedUris, {
+      delegatedApproval: () => true,
+      verifyScope: () => assertAutomaticRunAuthorization(run, grants, scope.fingerprint),
+      approvalRecord: { ...record, expectedSource: route, workspaceTrusted: vscode.workspace.isTrusted }
+    });
+    assert.equal(result?.status, 'done', result?.error);
+    assert.equal(result.exitCode, 0);
+    assert.equal(runs.toWebviewState(run.sessionId)[0].output, `${value}\n`);
+    assert.ok(reviews.get(record.reviewId)?.consumedAt);
+    assert.equal(await runs.approveAndRun(run.id, authorizedUris), undefined);
+  } finally {
+    await runs.flush();
+    runs.dispose();
+  }
+});
+
+test('inline shell, PATH shims and external scripts do not inherit project script approval', async t => {
+  if (process.platform === 'win32') return t.skip('POSIX system shell and symlinks required');
+  const { root, workspace, shell, relativeScript, createRun } = await projectScriptFixture(t);
+  const grants = new ExactOperationGrants();
+  const outsideScript = path.join(root, 'outside.sh');
+  await writeFile(outsideScript, '#!/bin/sh\nexit 0\n');
+  const escapedScript = './linked.sh';
+  await symlink(outsideScript, path.join(workspace, escapedScript));
+  const interpreter = path.basename(shell);
+  const shim = path.join(workspace, interpreter);
+  await writeFile(shim, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+
+  for (const run of [
+    await createRun(shell, ['-c', 'printf hello']),
+    await createRun(shim, [relativeScript]),
+    await createRun(interpreter, [relativeScript], [{ name: 'PATH', value: workspace }]),
+    await createRun(shell, ['./missing.sh'])
+  ]) {
+    const approval = await inspectAutomaticRunAuthorization(run, grants);
+    assert.equal(approval.route, 'user_click', JSON.stringify(run.spec));
+    assert.notEqual(approval.scope.trustedProjectScript, true);
+  }
+
+  for (const operand of [outsideScript, escapedScript]) {
+    const approval = await inspectAutomaticRunAuthorization(await createRun(shell, [operand]), grants);
+    assert.equal(approval.allowed, false);
+    assert.notEqual(approval.scope.trustedProjectScript, true);
+    assert.deepEqual(approval.scope.externalUris, [vscode.Uri.file(outsideScript).toString()]);
+  }
+});
+
 test('controlled validation retains its narrow blocking policy', () => {
   assert.equal(hasValidationBlockingRisk('bun run compile'), false);
   assert.equal(hasValidationBlockingRisk('git status --short'), false);
   assert.equal(hasValidationBlockingRisk('npm install lodash'), true);
   assert.equal(hasValidationBlockingRisk('git push origin main'), true);
 });
+
+async function projectScriptFixture(t: TestContext) {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'keepseek-script-scope-')));
+  const { workspaceFolders, isTrusted } = vscode.workspace;
+  t.after(async () => {
+    vscode.workspace.workspaceFolders = workspaceFolders;
+    vscode.workspace.isTrusted = isTrusted;
+    await rm(root, { recursive: true, force: true });
+  });
+  const workspace = path.join(root, 'workspace');
+  await mkdir(workspace);
+  vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspace), name: 'workspace' }];
+  vscode.workspace.isTrusted = true;
+  // Some Linux distributions make /bin/sh a differently named interpreter.
+  const shell = path.basename(await realpath('/bin/sh')) === 'sh' ? '/bin/sh' : '/bin/bash';
+  const relativeScript = './项目 script.sh';
+  const script = path.join(workspace, relativeScript);
+  await writeFile(script, '#!/bin/sh\nexit 0\n');
+  const createRun = async (executable: string, args: string[], env?: DraftRunProposalInput['env']): Promise<DraftRun> => {
+    const proposal = await createDraftRunProposal({ executable, args, env, reason: 'Run the project script' });
+    const now = new Date().toISOString();
+    return {
+      ...proposal, sessionId: 'session', agentRunId: 'run', messageId: 'message', status: 'pending',
+      outputHead: '', outputTail: '', outputBytes: 0, outputTruncated: false, omittedOutputBytes: 0,
+      createdAt: now, updatedAt: now
+    };
+  };
+  return { root, workspace, shell, script, relativeScript, createRun };
+}
 
 function createSpec(executable: string, args: string[]): DraftRunSpec {
   return {

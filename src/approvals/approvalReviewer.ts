@@ -153,6 +153,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     if (deterministicDenial) {
       return this.withCircuit(request, 'reviewed', await this.createLocalDenial(request, deterministicDenial));
     }
+    const projectScript = request.actionKind === 'draft_run_execute' && request.staticRiskAnalysis.includes('trusted_project_script');
     const record = await this.options.store.add({
       sessionId: request.sessionId,
       rootTaskId: request.rootTaskId,
@@ -168,11 +169,13 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
       reviewerModelId: '',
       reviewerProvider: 'host_policy',
       decision: 'approve',
-      risk: 'low',
-      rationale: request.responseLanguage === 'en'
+      risk: projectScript ? 'medium' : 'low',
+      rationale: projectScript ? (request.responseLanguage === 'en'
+        ? 'Host policy approved this verified project script with extension-host privileges, without model review.'
+        : '宿主策略批准以扩展宿主权限运行已核实的项目脚本，未经模型审查。') : request.responseLanguage === 'en'
         ? 'Automatically approved by host policy without model review.'
         : '由宿主策略自动批准，未经模型审查。',
-      policyRules: ['host_auto_approval']
+      policyRules: [projectScript ? 'trusted_project_script' : 'host_auto_approval']
     });
     return this.withCircuit(request, 'reviewed', record);
   }

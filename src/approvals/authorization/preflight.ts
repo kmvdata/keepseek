@@ -30,7 +30,7 @@ export async function inspectAutomaticRunAuthorization(run: DraftRun, grants: Ex
   if (allowed && run.spec.externalCwd && scope.externalUris.length) authorizedUris.add(run.spec.cwdUri);
   const reviewableUncertainty = scope.uncertain && scope.diagnostics.every(item => item.code === 'environment_override')
     && run.spec.env.every(({ name }) => ['LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'COLORTERM'].includes(name));
-  const route = scope.uncertain && !reviewableUncertainty ? 'user_click'
+  const route = scope.trustedProjectScript ? 'host_policy' : scope.uncertain && !reviewableUncertainty ? 'user_click'
     : scope.externalUris.length || reviewableUncertainty ? 'model_review' : 'host_policy';
   return { allowed, route, scope, authorizedUris,
     reason: [...scope.externalUris.map(uri => `External path / 外部路径: ${uri}`), ...scope.reasons].join('; ') };

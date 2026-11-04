@@ -1,7 +1,7 @@
 import './registerVscodeStub';
 import { RunDetailsBuilder } from '../src/agent/logging/runDetails';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { test } from 'node:test';
@@ -355,6 +355,64 @@ test('source files with spaces are actually read through all three approval mode
   });
 });
 
+test('trusted project scripts launch with the verified executable and cwd under each approval mode', async () => {
+  if (process.platform === 'win32') return;
+  for (const mode of ['delegate', 'model_review', 'ask'] as const) await fixture(mode, async f => {
+    const cwd = path.join(f.workspace, 'run space');
+    const marker = path.join(cwd, 'script-marker.txt');
+    const executable = '/bin/bash';
+    await mkdir(cwd);
+    await writeFile(path.join(cwd, 'project job.sh'), '#!/bin/bash\nprintf "%s\\n" "$PWD" > script-marker.txt\nprintf "script finished\\n"\n');
+    const spawn = new SpawnDraftRunExecutor();
+    const launches: Array<{ executable: string; cwd: string } | undefined> = [];
+    const executor: DraftRunExecutorAdapter = {
+      execute: input => {
+        launches.push(input.verifiedLaunch);
+        return spawn.execute(input);
+      },
+      cancel: id => spawn.cancel(id), showTerminal: id => spawn.showTerminal(id), dispose: () => spawn.dispose()
+    };
+    const approvals = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'project-script-storage')) as never,
+      executor, new DraftRunAuthorizationService(approvals));
+    Object.assign(f.host, { draftRuns: runs });
+    const dialog = vscode.window.showWarningMessage;
+    let prompts = 0;
+    vscode.window.showWarningMessage = async () => { prompts++; return undefined; };
+    try {
+      f.session.messages[0].content += ' Run the project job script from its directory.';
+      const proposal = await createDraftRunProposal({ executable, args: ['project job.sh'], cwd: 'run space', reason: 'Run the requested project job' });
+      f.response.draftEdits = [];
+      f.response.draftRuns = [proposal];
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      if (mode === 'ask') {
+        assert.equal(runs.get(proposal.id)?.status, 'pending');
+        assert.deepEqual(launches, []);
+        await assert.rejects(readFile(marker), { code: 'ENOENT' });
+        await runs.approveAndRun(proposal.id, new Set());
+      } else {
+        assert.equal(f.session.approvalProcessing?.status, 'completed', JSON.stringify(f.session.approvalProcessing));
+        assert.equal(runs.get(proposal.id)?.approvalReview?.approvalSource, mode === 'delegate' ? 'host_policy' : 'model_review');
+      }
+      const canonicalCwd = await realpath(cwd);
+      assert.deepEqual(launches, [{ executable: await realpath(executable), cwd: canonicalCwd }]);
+      assert.equal(await readFile(marker, 'utf8'), `${canonicalCwd}\n`);
+      const result = runs.toWebviewState(f.session.id)[0];
+      assert.equal(result.status, 'done', result.error);
+      assert.equal(result.output, 'script finished\n');
+      assert.equal(prompts, 0);
+      assert.equal(f.reviews(), mode === 'model_review' ? 1 : 0);
+      assert.equal(f.continuations(), mode === 'ask' ? 0 : 1);
+    } finally {
+      vscode.window.showWarningMessage = dialog;
+      await runs.flush();
+      runs.dispose();
+    }
+  });
+});
+
 test('exact scope grants bind session, run, target, kind, spec and live paths, and never survive a fresh registry', async () => {
   await fixture('delegate', async f => {
     const proposal = await createDraftRunProposal({ executable: 'cat', args: ['../outside file.ts'], reason: 'Read outside' });
@@ -560,6 +618,8 @@ for (const mode of ['delegate', 'model_review'] as const) test(`local Git status
     const before = git('rev-parse', 'HEAD').trim();
     await writeFile(path.join(f.workspace, 'existing.txt'), 'after\n');
     await writeFile(path.join(f.workspace, 'new.txt'), 'untracked content\n');
+    await mkdir(path.join(f.workspace, '.agents', 'skills', 'test'), { recursive: true });
+    await writeFile(path.join(f.workspace, '.agents', 'skills', 'test', 'SKILL.md'), '# Project skill\n');
     const hook = path.join(f.workspace, '.git', 'hooks', 'pre-commit');
     await writeFile(hook, '#!/bin/sh\nprintf "hook ran\\n" > .git/keepseek-hook-marker\n');
     await chmod(hook, 0o644);
@@ -577,6 +637,7 @@ for (const mode of ['delegate', 'model_review'] as const) test(`local Git status
       const commands = [
         ['--no-pager', 'diff', '--stat', 'HEAD'],
         ['status', '--short', '--untracked-files=all'],
+        ['add', '--', '.agents/skills'],
         ['add', '--all', '.'],
         ['diff', '--cached', '--stat'],
         ['commit', '-m', 'Update existing file and add new file']
@@ -588,9 +649,10 @@ for (const mode of ['delegate', 'model_review'] as const) test(`local Git status
       f.host.queueResponseApprovals(f.session, f.message, f.response);
       await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
       assert.equal(f.session.approvalProcessing?.status, 'completed', JSON.stringify(f.session.approvalProcessing));
-      const [diff, status, stage, stagedDiff, commit] = runs.toWebviewState(f.session.id);
+      const [diff, status, stageSkill, stage, stagedDiff, commit] = runs.toWebviewState(f.session.id);
       assert.match(diff.output, /existing\.txt/u);
       assert.match(status.output, /\?\? new\.txt/u);
+      assert.equal(stageSkill.status, 'done');
       assert.equal(stage.status, 'done');
       assert.match(stagedDiff.output, /new\.txt/u);
       assert.equal(commit.status, 'done');
@@ -599,6 +661,7 @@ for (const mode of ['delegate', 'model_review'] as const) test(`local Git status
       assert.equal(git('log', '-1', '--format=%s').trim(), 'Update existing file and add new file');
       assert.equal(git('status', '--porcelain'), '');
       assert.equal(git('show', 'HEAD:new.txt'), 'untracked content\n');
+      assert.equal(git('show', 'HEAD:.agents/skills/test/SKILL.md'), '# Project skill\n');
       await assert.rejects(readFile(path.join(f.workspace, '.git', 'keepseek-hook-marker')), { code: 'ENOENT' });
       assert.equal(prompts, 0);
       assert.equal(f.reviews(), mode === 'delegate' ? 0 : commands.length);
@@ -608,6 +671,96 @@ for (const mode of ['delegate', 'model_review'] as const) test(`local Git status
       await runs.flush();
       runs.dispose();
     }
+  });
+});
+
+test('delegate commits already staged project skills, editor settings and IDE deletions without a click', async () => {
+  if (process.platform === 'win32') return;
+  await fixture('delegate', async f => {
+    const git = (...args: string[]) => execFileSync('/usr/bin/git', args, {
+      cwd: f.workspace, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+    });
+    git('init', '-b', 'main');
+    git('config', 'user.name', 'KeepSeek Test');
+    git('config', 'user.email', 'keepseek-test@example.invalid');
+    git('config', 'commit.gpgsign', 'false');
+    git('config', 'core.hooksPath', '.git/hooks');
+    const writeProjectFile = async (file: string, contents: string) => {
+      const target = path.join(f.workspace, file);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, contents);
+    };
+    const removed = ['.idea/.gitignore', '.idea/cv_game.iml', '.idea/inspectionProfiles/Project_Default.xml',
+      '.idea/inspectionProfiles/profiles_settings.xml', '.idea/misc.xml', '.idea/modules.xml', '.idea/vcs.xml'];
+    for (const file of [...removed, '.gitignore', '.vscode/settings.json']) await writeProjectFile(file, 'baseline\n');
+    git('add', '--all', '.');
+    git('commit', '-m', 'Fixture baseline');
+    const before = git('rev-parse', 'HEAD').trim();
+    await rm(path.join(f.workspace, '.idea'), { recursive: true });
+    const files = {
+      '.agents/skills/test/SKILL.md': '# Local project skill\n',
+      '.agents/skills/test/agents/openai.yaml': 'name: local-test\n',
+      '.gitignore': '.idea/\n',
+      '.vscode/settings.json': '{}\n',
+      'AGENTS.md': '# Project instructions\n',
+      'logo.svg': '<svg/>\n',
+      'requirements.txt': 'pytest\n',
+      'run.py': 'print("ok")\n'
+    };
+    for (const [file, contents] of Object.entries(files)) await writeProjectFile(file, contents);
+    git('add', '--all', '.');
+    const expected = [...removed, ...Object.keys(files)].sort();
+    assert.deepEqual(git('diff', '--cached', '--name-only').trim().split('\n').sort(), expected);
+
+    const approvals = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'staged-config-storage')) as never,
+      new SpawnDraftRunExecutor(), new DraftRunAuthorizationService(approvals));
+    Object.assign(f.host, { draftRuns: runs });
+    const dialog = vscode.window.showWarningMessage;
+    let prompts = 0;
+    vscode.window.showWarningMessage = async () => { prompts++; return undefined; };
+    try {
+      const subject = 'feat(run): 新增跨平台统一入口与依赖清单，补充测试规范并移除 IDE 配置';
+      f.session.messages[0].content = '请将已经暂存的 15 项改动一次性提交到本地 Git 仓库。';
+      f.response.draftEdits = [];
+      const commit = await createDraftRunProposal({ executable: 'git', args: ['commit', '-a', '-m', subject], reason: '提交已暂存改动' });
+      f.response.draftRuns = [commit];
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.equal(f.session.approvalProcessing?.status, 'completed', JSON.stringify(f.session.approvalProcessing));
+      const settled = runs.get(commit.id);
+      assert.equal(settled?.approvalReview?.approvalSource, 'host_policy');
+      assert.equal(settled?.gitCommitEvidence?.outcome, 'verified');
+      assert.deepEqual(settled.gitCommitEvidence.files, expected);
+      assert.equal(git('rev-parse', 'HEAD^').trim(), before);
+      assert.equal(git('log', '-1', '--format=%s').trim(), subject);
+      assert.equal(git('status', '--porcelain'), '');
+      assert.equal(prompts, 0);
+      assert.equal(f.reviews(), 0);
+      assert.equal(f.continuations(), 1);
+    } finally {
+      vscode.window.showWarningMessage = dialog;
+      await runs.flush();
+      runs.dispose();
+    }
+  });
+});
+
+test('Git approval rejects credential candidates and direct repository control files', async () => {
+  if (process.platform === 'win32') return;
+  await fixture('delegate', async f => {
+    const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: f.workspace, stdio: 'pipe' });
+    git('init');
+    const proposal = (args: string[]) => createDraftRunProposal({ executable: '/usr/bin/git', args, reason: 'Check local Git scope' });
+    await writeFile(path.join(f.workspace, '.env'), 'FIXTURE=private\n');
+    await assert.rejects(inspectDraftRunScope(await proposal(['add', '--all', '.'])), /protected file|受保护/u);
+    await assert.rejects(inspectDraftRunScope(await proposal(['add', '--', '.git/config'])), /Protected credential|受保护/u);
+    await mkdir(path.join(f.workspace, '.agents/skills/test'), { recursive: true });
+    await writeFile(path.join(f.workspace, '.agents/skills/test/.env'), 'FIXTURE=private\n');
+    await assert.rejects(inspectDraftRunScope(await proposal(['add', '--', '.agents/skills'])), /protected file|受保护/u);
+    git('add', '--', '.env');
+    await assert.rejects(inspectDraftRunScope(await proposal(['commit', '-a', '-m', 'Local change'])), /protected file|受保护/u);
   });
 });
 

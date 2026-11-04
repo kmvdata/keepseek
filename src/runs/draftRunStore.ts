@@ -384,9 +384,10 @@ export class DraftRunStore {
       const execution = this.executor.execute({
         draftRun: cloneDraftRun(draftRun),
         permit,
-        verifiedLaunch: !verifiedScope.uncertain && verifiedScope.executable && !verifiedScope.externalUris.length
-          && verifiedScope.paths.some(target => target.role === 'repository')
-          ? { executable: verifiedScope.executable, cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath } : undefined,
+        verifiedLaunch: verifiedScope.executable && !verifiedScope.externalUris.length
+          && (verifiedScope.trustedProjectScript || (!verifiedScope.uncertain && verifiedScope.paths.some(target => target.role === 'repository')))
+          ? { executable: verifiedScope.projectScriptLaunchPath ?? verifiedScope.executable,
+              cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath } : undefined,
         signal: abortController.signal,
         onOutput: (chunk) => this.recordOutput(draftRun, chunk)
       });

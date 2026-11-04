@@ -18,6 +18,7 @@ export interface CommandSemantics {
   reasons: AuthorizationReason[];
   gitCommit?: { all: boolean; messages: string[] };
   gitReplan?: GitCommandReplan;
+  projectScript?: true;
 }
 
 export interface GitCommandReplan {
@@ -275,18 +276,34 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
       effects.add('package_install'); effects.add('workspace_write'); effects.add('network');
       if (args[0] === 'publish') effects.add('publish_or_deploy');
     }
-    const inline = args.findIndex(a => ['-c', '-e', '--eval', '-Command', '-command', '/c', '/C'].includes(a)
+    const scriptExtension = /^(?:sh|bash|zsh)$/u.test(program) ? /\.sh$/u
+      : /^python\d*$/u.test(program) ? /\.py$/u
+        : program === 'node' ? /\.(?:js|mjs|cjs)$/u : undefined;
+    if (scriptExtension?.test(args[0] ?? '') && !args[0].startsWith('-')) {
+      const operands = args.slice(1).map(value => value.replace(/^--[\w-]+=/u, '')
+        .replace(/^-[A-Za-z](?=\/|\.\.?[\\/]|[A-Za-z]:[\\/])/u, ''));
+      // The first argv is a file, so later flags are script arguments, not
+      // interpreter flags. Explicit URI arguments do not enter this lane.
+      result.projectScript = operands.some(value => /^(?:[a-z][a-z\d+.-]*:\/\/|file:|~[\\/])/iu.test(value)) ? undefined : true;
+      arg(0, 'script');
+      operands.forEach((operand, index) => {
+        arg(index + 1, operand.startsWith('-') || /^(?:[a-z][a-z\d+.-]*:\/\/|file:|~[\\/])/iu.test(operand) ? 'text' : 'read_path', operand);
+      });
+    } else {
+      const inline = args.findIndex(a => ['-c', '-e', '--eval', '-Command', '-command', '/c', '/C'].includes(a)
       || (program.endsWith('sh') && /^-[a-z]*c[a-z]*$/u.test(a)));
-    let scriptSeen = false;
-    const packageManager = ['npm', 'pnpm', 'yarn'].includes(program);
-    args.forEach((value, i) => {
-      if (inline >= 0) arg(i, i === inline + 1 ? 'inline_code' : i <= inline ? 'option' : 'text');
-      else if (packageManager) arg(i, i === 0 ? 'subcommand' : 'text');
-      else if (program === 'bun' && i === 0 && ['run', 'install', 'add', 'remove', 'update', 'test', 'build', 'x'].includes(value)) arg(i, 'subcommand');
-      else if (value.startsWith('-')) arg(i, 'option');
-      else { arg(i, scriptSeen ? 'text' : 'script'); scriptSeen = true; }
-    });
-    reason(inline >= 0 ? 'inline_code' : 'script_execution', program,
+      let scriptSeen = false;
+      const packageManager = ['npm', 'pnpm', 'yarn'].includes(program);
+      args.forEach((value, i) => {
+        if (inline >= 0) arg(i, i === inline + 1 ? 'inline_code' : i <= inline ? 'option' : 'text');
+        else if (packageManager) arg(i, i === 0 ? 'subcommand' : 'text');
+        else if (program === 'bun' && i === 0 && ['run', 'install', 'add', 'remove', 'update', 'test', 'build', 'x'].includes(value)) arg(i, 'subcommand');
+        else if (value.startsWith('-')) arg(i, 'option');
+        else { arg(i, scriptSeen ? 'text' : 'script'); scriptSeen = true; }
+      });
+      if (inline >= 0) reason('inline_code', program, 'Inline code requires separate approval.', '内联代码需单独审批。');
+    }
+    if (!result.reasons.some(item => item.code === 'inline_code')) reason('script_execution', program,
       'Script contents, shell syntax and package lifecycle commands are not statically scoped.',
       '脚本内容、shell 语法和包生命周期命令无法静态确定范围。');
   } else {

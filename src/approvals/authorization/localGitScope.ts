@@ -5,7 +5,8 @@ import { lstat, open, readFile, readdir, readlink, realpath, stat } from 'node:f
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { canonicalPath, isPathInside, joinUnresolvedPath } from './pathScope';
-import { isProtectedOperationPath } from './protectedTargets';
+import { isGitProjectSkillPath, isProtectedOperationPath } from './protectedTargets';
+import { redactSensitiveReviewText } from '../approvalPolicy';
 
 const readGit = promisify(execFile);
 const hooks = ['pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit', 'post-index-change', 'reference-transaction', 'pre-auto-gc'];
@@ -208,8 +209,13 @@ export async function inspectLocalGitScope(input: {
       const candidates = parseMutationStatus(output).filter(item => staging ? item.worktree !== ' '
         : item.index !== ' ' || (input.commitAll && item.worktree !== ' '));
       mutationStatus = JSON.stringify(candidates);
-      if (candidates.some(item => isProtectedOperationPath(path.join(repository, item.file)))) {
-        return { reason: 'Git would include a protected file. Nothing executed. / Git 会纳入受保护的文件，原命令未启动。', hardBlocked: true };
+      const protectedFile = candidates.find(({ file }) => {
+        const target = path.join(repository, file);
+        return isProtectedOperationPath(target, false, isGitProjectSkillPath(repository, target));
+      });
+      if (protectedFile) {
+        const label = redactSensitiveReviewText(JSON.stringify(protectedFile.file), 300);
+        return { reason: `Git would include a protected file ${label}. Nothing executed. / Git 会纳入受保护的文件 ${label}，原命令未启动。`, hardBlocked: true };
       }
       if (staging && candidates.some(item => item.index === '?' && item.file.endsWith('/'))) {
         scopeReason = 'Git would stage a nested repository. / Git 会暂存嵌套仓库。';

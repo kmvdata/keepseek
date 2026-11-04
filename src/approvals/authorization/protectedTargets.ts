@@ -5,6 +5,12 @@ export function isWorkspaceSkillScaffoldPath(value: string): boolean {
   return /(?:^|\/)\.agents\/skills\/[a-z0-9-]+\/(?:SKILL\.md|agents\/openai\.yaml)$/u.test(value.replace(/\\/gu, '/'));
 }
 
+/** Git may version project skills as repository content. Direct edits and
+ * skills outside this repository still use the shared-resource guard. */
+export function isGitProjectSkillPath(repository: string, target: string): boolean {
+  return /^(?:\.agents[/\\]skills)(?:[/\\]|$)/u.test(path.relative(repository, target));
+}
+
 export function isProtectedOperationPath(value: string, systemWrite = false, skillScaffold = false): boolean {
   const normalized = value.replace(/\\/gu, '/');
   if (/(?:^|\/)(?:\.aws|\.ssh|\.gnupg|\.kube|\.codex)(?:\/|$)/iu.test(normalized)

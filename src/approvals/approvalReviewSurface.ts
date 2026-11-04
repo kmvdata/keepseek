@@ -85,6 +85,7 @@ export function createDraftRunReviewRequest(input: {
       `verdict:${assessment.verdict}`,
       ...assessment.effects.map((effect) => `effect:${effect}`),
       ...assessment.evidence,
+      ...(input.scope?.trustedProjectScript ? ['trusted_project_script', 'Runs verified project code with extension-host privileges.'] : []),
       'Exact external scope, when present, requires separate user authorization.'
     ],
     exactAction: {
