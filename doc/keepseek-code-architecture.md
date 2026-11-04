@@ -530,6 +530,7 @@ src/approvals/
     ├── commandSemantics.ts      executable + argv 的有限语法、参数用途与已识别效果
     ├── commandEffects.ts        展示/reviewer 用的派生风险提示（不是授权依据）
     ├── commandScope.ts          实际程序解析、环境、操作对象和实时范围指纹
+    ├── localGitScope.ts         本地 Git 仓库、有效配置、索引和 hooks 检查
     ├── pathScope.ts             工作区包含关系、realpath、悬空链接及 symlink/.. 穿越
     ├── exactOperationGrants.ts  仅内存的精确操作授权、匹配与失效
     ├── preflight.ts             delegate/model_review 共用的范围决策及执行前复核
@@ -548,9 +549,11 @@ src/approvals/
 
 命令分析分别表达参数角色、已识别效果和不能确定范围的原因，不拼接 argv 后搜索危险关键词，不以脚本扩展名推断执行，也不把 shell 字符串按空格拆成命令。`cat script.ts` 的文件是读取对象；`bun run script.ts` 是脚本执行；`sh -c ...` 的正文保留为内联代码。未知范围显示为未知，不自动增加写入效果。固定 validation 的原有阻断规则独立保留在 `agent/tools/validationRisk.ts`，不用于任意命令授权。
 
-自动范围判定仅覆盖有限参数集合：`cat/head/tail/wc/pwd/ls`、非递归 `grep`、字面输出命令及少量版本查询。还必须满足工作区范围、无环境覆盖及实际程序身份检查；POSIX 下核实 PATH/显式路径解析后为系统目录中的 OS 所有文件或扩展宿主运行时，不能仅凭 basename。Windows 程序搜索顺序、非系统程序、递归搜索、未知选项、脚本/包生命周期均保留具体的不确定原因，需要用户逐项确认。外部读取与外部写入分别由参数用途决定，外部 cwd 本身不代表写入。
+自动范围判定仅覆盖有限参数集合：`cat/head/tail/wc/pwd/ls`、非递归 `grep`、字面输出命令、少量版本查询及下述本地 Git 操作。还必须满足工作区范围、无环境覆盖及实际程序身份检查；POSIX 下核实 PATH/显式路径解析后为系统目录中的 OS 所有文件或扩展宿主运行时，不能仅凭 basename。Windows 程序搜索顺序、非系统程序、递归搜索、未知选项、脚本/包生命周期均保留具体的不确定原因，需要用户逐项确认。外部读取与外部写入分别由参数用途决定，外部 cwd 本身不代表写入。
 
-Git 的 `show/diff/log` 有参数分类规则（包括 `--`、format 文本、输出路径、`-C`、仓库/配置覆盖），但有仓库语义的普通 Git DraftRun 仍需逐项人工决定，显式外部目标另需范围授权。`--format=%s` 和 `.ts/.js/.sh` 路径不再误报执行或写入；`--output` 则识别为写入，`--ext-diff/--textconv/--show-signature` 识别为可能调用程序。即使有禁用 diff/textconv 的参数，当前执行环境仍可能读取用户/仓库配置、include 文件、仓库重定向及触发其他 helper；本次没有新增受约束 Git 自动执行入口，也不在 spawn 时追加选项或环境。相关语义对照本机 Git 2.50.1 及官方 [git-show](https://git-scm.com/docs/git-show)、[git 2.50](https://git-scm.com/docs/git/2.50.0) 文档核实。未来增加受控 Git 方案时，必须先在创建草稿前落实所有约束，并让它们进入 specHash 和展示内容。
+在可信工作区的普通本地仓库中，参数符合规则的 `git status`、`diff`、`log`、`show`、`add` 和显式提供消息的 `commit` 可走自动批准。提交和暂存仍走独立的 DraftRun。Git 可执行文件、真实仓库、HEAD、索引、有效配置和可用 hooks 进入实时范围指纹。POSIX 系统 Git 和符合安装路径及所有权要求的 macOS Homebrew Git 可参与这项判定。原始 argv 和有效环境沿用 DraftRun 执行路径。
+
+项目内正常 hooks 可随 Git 运行，固定本地提交沿用仓库签名和钩子设置。活动签名、外部 hooks、配置 include、对象或仓库重定向、部分克隆、子模块和外部 diff/filter 等情况会退出自动通道。Push、改写历史、额外 shell 和重定向参数仍需单独处理。Git 可能刷新仓库内索引。官方行为见 [Git 配置](https://git-scm.com/docs/git-config) 和 [Git hooks](https://git-scm.com/docs/githooks)。
 
 精确范围授权绑定 session/run/target/kind/actionHash，以及规范化路径、实际程序文件身份和有效环境的派生指纹。授权不持久化；停止、切换会话/模式和重启均不复用。Provider 仅编排交互与队列；Store 在持久化和消费审批记录之后再次调用共用复核，之后才交给原有一次性 permit 与 `shell:false` executor。脚本内容及 Git 隐式配置依赖不声称可静态穷尽；精确授权承认的是这些明确说明的不确定性。此预检不是操作系统隔离机制。
 

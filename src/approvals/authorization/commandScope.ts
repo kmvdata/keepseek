@@ -7,6 +7,7 @@ import type { DraftRun } from '../../shared/types';
 import { createControlledEnvironment } from '../../runs/executionEnvironment';
 import { findSensitiveEvidence } from '../approvalPolicy';
 import { assertOperationPath } from './protectedTargets';
+import { inspectLocalGitScope } from './localGitScope';
 import { analyzeCommand } from './commandSemantics';
 import { canonicalPath, isPathInside, joinUnresolvedPath } from './pathScope';
 import { authorizationReason, type AuthorizationReason } from './reasons';
@@ -93,10 +94,28 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
   if (/[/\\]/u.test(run.spec.executable)) {
     if (!executable?.trusted) await check(joinUnresolvedPath(cwd, run.spec.executable), 'executable');
   }
+  let gitFingerprint: string | undefined;
+  const gitCommand = parsed.arguments.find(argument => argument.role === 'subcommand');
+  if (executable?.trusted && !roots.some(root => isPathInside(root, executable.path)) && gitCommand && diagnostics.length === 1 && diagnostics[0].code === 'git_runtime' && !external.size) {
+    const git = await inspectLocalGitScope({ executable: executable.path, cwd, roots, cwdChanges: gitCommand.cwdChanges,
+      subcommand: gitCommand.value, env, noSigning: parsed.arguments.some(argument => argument.role === 'option' && argument.value === '--no-gpg-sign') });
+    if ('fingerprint' in git) {
+      if (paths.some(target => target.role === 'read_path' && !isPathInside(git.repository, vscode.Uri.parse(target.uri).fsPath))) {
+        diagnostics[0] = { ...diagnostics[0], message: 'Git paths must stay inside this repository. / Git 路径必须位于当前仓库内。' };
+      } else {
+        gitFingerprint = git.fingerprint;
+        diagnostics.pop();
+        paths.push({ uri: vscode.Uri.file(git.repository).toString(), role: 'repository', external: false });
+      }
+    } else {
+      diagnostics[0] = { ...diagnostics[0], message: git.reason };
+      if (git.externalPath) await check(git.externalPath, 'repository');
+    }
+  }
   const externalUris = [...external].sort();
   if (!executable && process.platform !== 'win32') throw new Error('Executable cannot be resolved. Nothing executed. / 无法解析实际程序，尚未执行。');
   const fingerprint = createHash('sha256').update(JSON.stringify({
-    version: 1, executable, env, roots, paths, pathIdentities, externalUris, diagnostics
+    version: 1, executable, env, roots, paths, pathIdentities, gitFingerprint, externalUris, diagnostics
   })).digest('hex');
   return { externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri, executable: executable?.path, uncertain: diagnostics.length > 0, diagnostics,
     reasons: diagnostics.map(reason => reason.message), fingerprint };
@@ -116,7 +135,7 @@ export async function resolveExecutable(executable: string, cwd: string, env: No
   // Windows remains in the manual lane. Resolve an explicit filename or a
   // known executable extension to bind evidence without treating it as trusted.
   const filename = windows && !path.extname(executable) ? executable + '.exe' : executable;
-  const candidates = /[/\\]/u.test(executable) ? [joinUnresolvedPath(cwd, filename)]
+  const candidates = (windows ? /[/\\]/u : /\//u).test(executable) ? [joinUnresolvedPath(cwd, filename)]
     : (env.PATH ?? (windows ? '' : '/usr/bin:/bin')).split(path.delimiter).map(dir => joinUnresolvedPath(cwd, dir, filename));
   for (const candidate of candidates) {
     try {
@@ -129,10 +148,13 @@ export async function resolveExecutable(executable: string, cwd: string, env: No
       const systemRoots = windows ? [] : await Promise.all(['/bin', '/usr/bin'].map(dir => realpath(dir)));
       const system = info.uid === 0 && (info.mode & 0o022) === 0
         && systemRoots.some(root => path.dirname(resolved) === root);
+      const packagedGit = process.platform === 'darwin' && path.basename(executable) === 'git'
+        && /^\/(?:opt\/homebrew|usr\/local)\/Cellar\/git\/[^/]+\/bin\/git$/u.test(resolved)
+        && (info.uid === 0 || info.uid === process.getuid?.()) && (info.mode & 0o022) === 0;
       const hostRuntime = resolved === await realpath(process.execPath);
       const matchingName = path.basename(resolved) === path.basename(executable);
       return { path: resolved, identity: `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`,
-        trusted: !windows && matchingName && (system || hostRuntime) };
+        trusted: !windows && matchingName && (system || packagedGit || hostRuntime) };
     } catch { /* Continue PATH lookup as spawn does for absent/non-executable entries. */ }
   }
   return undefined;

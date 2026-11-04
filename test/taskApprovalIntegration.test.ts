@@ -368,7 +368,7 @@ for (const mode of ['delegate', 'model_review'] as const) test(`${mode} rechecks
   });
 });
 
-test('Git format/source variants report the same real uncertainty and do not reach review or execution', async () => {
+test('Git format/source variants without a local repository do not reach review or execution', async () => {
   for (const mode of ['delegate', 'model_review'] as const) await fixture(mode, async f => {
     f.response.draftEdits = [];
     f.response.draftRuns = [await createDraftRunProposal({ executable: 'git',
@@ -380,7 +380,7 @@ test('Git format/source variants report the same real uncertainty and do not rea
     assert.equal(f.executions(), 0); assert.equal(f.reviews(), 0);
     const target = f.session.approvalProcessing?.targets[0];
     assert.equal(target?.status, 'manual_required');
-    assert.match(target?.reason ?? '', /Git configuration|Git 配置/u);
+    assert.match(target?.reason ?? '', /No Git repository|未找到 Git 仓库/u);
     assert.doesNotMatch(target?.reason ?? '', /Script contents|脚本内容/u);
     assert.deepEqual(f.runs.get(f.response.draftRuns[0].id)!.effectAssessment.effects, ['workspace_read', 'unknown']);
   });
@@ -451,6 +451,113 @@ test('reloaded pending drafts stay inert until explicit Provider resume with a f
       assert.equal(executions, 1); assert.equal(continuations, 1);
       assert.equal(sessions.getActiveSession().approvalProcessing?.status, 'completed');
     } finally { await runs.flush(); await edits.flush(); runs.dispose(); diff.dispose(); clock.dispose(); }
+  });
+});
+
+for (const mode of ['delegate', 'model_review'] as const) test(`local Git status, diff, add and commit run in sequence under ${mode}`, async () => {
+  if (process.platform === 'win32') return;
+  await fixture(mode, async f => {
+    execFileSync('/usr/bin/git', ['init', f.workspace], { stdio: 'pipe' });
+    const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: f.workspace, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    git('config', 'user.name', 'KeepSeek Test');
+    git('config', 'user.email', 'keepseek-test@example.invalid');
+    git('config', 'commit.gpgsign', 'false');
+    git('config', 'core.hooksPath', '.git/hooks');
+    git('config', 'core.fsmonitor', 'false');
+    await writeFile(path.join(f.workspace, 'existing.txt'), 'before\n');
+    git('add', '--all'); git('commit', '-m', 'Fixture baseline');
+    const before = git('rev-parse', 'HEAD').trim();
+    await writeFile(path.join(f.workspace, 'existing.txt'), 'after\n');
+    await writeFile(path.join(f.workspace, 'new.txt'), 'untracked content\n');
+    const hook = path.join(f.workspace, '.git', 'hooks', 'pre-commit');
+    await writeFile(hook, '#!/bin/sh\nprintf "hook ran\\n" > .git/keepseek-hook-marker\n');
+    await chmod(hook, 0o755);
+
+    const approvals = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'local-git-storage')) as never,
+      new SpawnDraftRunExecutor(), new DraftRunAuthorizationService(approvals));
+    Object.assign(f.host, { draftRuns: runs });
+    const dialog = vscode.window.showWarningMessage;
+    let prompts = 0;
+    vscode.window.showWarningMessage = async () => { prompts++; return undefined; };
+    try {
+      f.session.messages[0].content += ' Commit the complete change locally without pushing.';
+      f.response.draftEdits = [];
+      const commands = [
+        ['--no-pager', 'diff', '--stat', 'HEAD'],
+        ['status', '--short', '--untracked-files=all'],
+        ['add', '--all'],
+        ['diff', '--cached', '--stat'],
+        ['commit', '-m', 'Update existing file and add new file']
+      ];
+      f.response.draftRuns = await Promise.all(commands.map(args => createDraftRunProposal({
+        executable: '/usr/bin/git', args, reason: 'Complete the requested local commit'
+      })));
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.equal(f.session.approvalProcessing?.status, 'completed', JSON.stringify(f.session.approvalProcessing));
+      const [diff, status, stage, stagedDiff, commit] = runs.toWebviewState(f.session.id);
+      assert.match(diff.output, /existing\.txt/u);
+      assert.match(status.output, /\?\? new\.txt/u);
+      assert.equal(stage.status, 'done');
+      assert.match(stagedDiff.output, /new\.txt/u);
+      assert.equal(commit.status, 'done');
+      assert.equal(commit.approvalReview?.approvalSource, mode === 'delegate' ? 'host_policy' : 'model_review');
+      assert.equal(git('rev-parse', 'HEAD^').trim(), before);
+      assert.equal(git('log', '-1', '--format=%s').trim(), 'Update existing file and add new file');
+      assert.equal(git('status', '--porcelain'), '');
+      assert.equal(git('show', 'HEAD:new.txt'), 'untracked content\n');
+      assert.match(await readFile(path.join(f.workspace, '.git', 'keepseek-hook-marker'), 'utf8'), /hook ran/u);
+      assert.equal(prompts, 0);
+      assert.equal(f.reviews(), mode === 'delegate' ? 0 : commands.length);
+      assert.equal(f.continuations(), 1);
+    } finally {
+      vscode.window.showWarningMessage = dialog;
+      await runs.flush();
+      runs.dispose();
+    }
+  });
+});
+
+test('local Git scope rejects redirects and detects config, hook and index changes', async () => {
+  if (process.platform === 'win32') return;
+  await fixture('delegate', async f => {
+    execFileSync('/usr/bin/git', ['init', f.workspace], { stdio: 'pipe' });
+    const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: f.workspace, stdio: 'pipe' });
+    git('config', 'commit.gpgsign', 'false');
+    git('config', 'core.fsmonitor', 'false');
+    git('config', 'core.hooksPath', '.git/hooks');
+    const proposal = await createDraftRunProposal({ executable: '/usr/bin/git', args: ['commit', '-m', 'test'], reason: 'Commit locally' });
+    const before = await inspectDraftRunScope(proposal);
+    assert.equal(before.uncertain, false);
+    const file = path.join(f.workspace, 'one.txt');
+    await writeFile(file, 'one');
+    git('add', '--', 'one.txt');
+    const staged = await inspectDraftRunScope(proposal);
+    assert.equal(staged.uncertain, false);
+    assert.notEqual(staged.fingerprint, before.fingerprint);
+
+    const hook = path.join(f.workspace, '.git', 'hooks', 'pre-commit');
+    await writeFile(hook, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const hooked = await inspectDraftRunScope(proposal);
+    assert.equal(hooked.uncertain, false);
+    assert.notEqual(hooked.fingerprint, staged.fingerprint);
+    git('config', 'core.hooksPath', f.root);
+    const external = await inspectDraftRunScope(proposal);
+    assert.equal(external.uncertain, true);
+    assert.equal(external.externalUris.length, 1);
+    git('config', 'core.hooksPath', '.git/hooks');
+    git('config', 'core.fsmonitor', 'true');
+    const fsmonitor = await inspectDraftRunScope(proposal);
+    assert.equal(fsmonitor.uncertain, true);
+    assert.match(fsmonitor.reasons.join(' '), /core.fsmonitor/u);
+    git('config', 'core.fsmonitor', 'false');
+
+    const diff = await createDraftRunProposal({ executable: '/usr/bin/git', args: ['diff', '../outside', 'one.txt'], reason: 'Compare paths' });
+    assert.ok((await inspectDraftRunScope(diff)).externalUris.some(uri => uri.endsWith('/outside')));
+    const helper = await createDraftRunProposal({ executable: '/usr/bin/git', args: ['diff', '--ext-diff', 'HEAD'], reason: 'Diff' });
+    assert.equal((await inspectDraftRunScope(helper)).uncertain, true);
   });
 });
 

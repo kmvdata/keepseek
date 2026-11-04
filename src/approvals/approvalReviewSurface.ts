@@ -71,7 +71,7 @@ export function createDraftRunReviewRequest(input: {
   history: readonly ChatMessage[];
   language: 'zh-CN' | 'en';
 }): ApprovalReviewRequest {
-  const assessment = analyzeDraftRunEffects(input.draftRun.spec);
+  const assessment = analyzeDraftRunEffects(input.draftRun.spec, input.scope?.diagnostics);
   return createBaseRequest({
     sessionId: input.draftRun.sessionId,
     rootTaskId: input.rootTaskId ?? input.draftRun.agentRunId,
@@ -85,7 +85,6 @@ export function createDraftRunReviewRequest(input: {
       `verdict:${assessment.verdict}`,
       ...assessment.effects.map((effect) => `effect:${effect}`),
       ...assessment.evidence,
-      ...(input.scope?.reasons ?? []),
       'Exact external scope, when present, requires separate user authorization.'
     ],
     exactAction: {

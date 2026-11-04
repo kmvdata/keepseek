@@ -86,18 +86,38 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     if (['add', 'apply', 'am', 'branch', 'checkout', 'clean', 'clone', 'commit', 'fetch', 'gc', 'init', 'merge', 'mv',
       'pull', 'push', 'rebase', 'remote', 'reset', 'restore', 'revert', 'rm', 'stash', 'switch', 'tag', 'worktree'].includes(subcommand)) effects.add('git_mutation');
     if (['clone', 'fetch', 'pull', 'push'].includes(subcommand)) effects.add('network');
-    if (!viewing) unsupported(subcommand ?? 'missing Git subcommand');
+    const staging = subcommand === 'add';
+    const committing = subcommand === 'commit';
+    const status = subcommand === 'status';
+    if (!viewing && !staging && !committing && !status) unsupported(subcommand ?? 'missing Git subcommand');
+    let hasCommitMessage = false;
     let paths = false;
     let noIndex = false;
     for (; i < args.length; i++) {
       const token = args[i];
       if (!paths && token === '--') { paths = true; arg(i, 'option'); continue; }
-      if (paths) {
+      if (staging || committing || status) {
+        if (committing && !paths && ['-m', '-am', '--message'].includes(token)) {
+          i = valueAfter(i, 'text');
+          hasCommitMessage ||= typeof args[i] === 'string' && !!args[i].trim();
+        } else if (committing && !paths && /^--message=.+/su.test(token)) {
+          arg(i, 'text', token.slice('--message='.length)); hasCommitMessage = true;
+        } else if (!paths && (committing ? ['-a', '--all', '--no-gpg-sign', '--allow-empty', '--quiet', '-q'].includes(token)
+          : staging ? ['-A', '--all', '-u', '--update', '--ignore-removal', '--no-all', '-v', '--verbose'].includes(token)
+            : /^(?:-s|-b|-sb|-bs|--short|--branch|--porcelain(?:=v[12])?|--long|--untracked-files(?:=(?:no|normal|all))?|-u(?:no|normal|all)?)$/u.test(token))) {
+          arg(i, 'option');
+        } else if ((staging || status) && (paths || !token.startsWith('-'))) {
+          arg(i, 'read_path');
+          if (token.startsWith(':') || /[*?[]/u.test(token)) unsupported(token);
+        } else {
+          arg(i, 'option'); unsupported(token);
+        }
+      } else if (paths) {
         arg(i, 'read_path');
         if (token.startsWith(':') || /[*?[]/u.test(token)) reason('unsupported_pathspec', token,
           'Git pathspec expansion is not resolved by this preflight.', '此预检不解析 Git pathspec 展开范围。');
       } else if (token === '--output' || token.startsWith('--output=')) {
-        effects.add('workspace_write');
+        effects.add('workspace_write'); unsupported(token);
         if (token === '--output') i = valueAfter(i, 'write_path');
         else arg(i, 'write_path', token.slice('--output='.length));
       } else if (['--ext-diff', '--textconv', '--show-signature'].includes(token)) {
@@ -105,35 +125,39 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
       } else if (token === '--remerge-diff' || /^--diff-merges=(?:remerge|r)$/u.test(token)) {
         arg(i, 'option'); effects.add('workspace_write'); unsupported(token);
       } else if (token === '-O' || token.startsWith('-O')) {
+        unsupported(token);
         if (token === '-O') i = valueAfter(i, 'read_path');
         else arg(i, 'read_path', token.slice(2));
       } else if (['-n', '--max-count', '-U', '--unified'].includes(token)) {
         i = valueAfter(i, 'option_value');
         if (!/^\d+$/u.test(args[i])) unsupported(args[i]);
       } else if (/^(?:--(?:format|pretty|date|encoding|grep|author|committer)=)/u.test(token)) {
-        arg(i, 'text', token.slice(token.indexOf('=') + 1));
+        const value = token.slice(token.indexOf('=') + 1);
+        arg(i, 'text', value);
+        if (/^--(?:format|pretty)=/u.test(token) && /%G/u.test(value)) helper(token);
       } else if (/^(?:--(?:max-count|unified)=\d+|-[nU]\d+)$/u.test(token)
+        || (subcommand === 'log' && /^-\d+$/u.test(token))
         || ['--format', '--pretty', '--oneline', '--stat', '--numstat', '--shortstat', '--name-only', '--name-status',
           '--raw', '-p', '-u', '--patch', '-s', '--no-patch', '--no-ext-diff', '--no-textconv', '--no-color',
-          '--color=never', '--cached', '--staged', '--binary', '--full-index', '--no-renames', '--exit-code', '--quiet'].includes(token)) {
+          '--color=never', '--cached', '--staged', '--summary', '--check', '--binary', '--full-index', '--no-renames', '--exit-code', '--quiet'].includes(token)) {
         arg(i, 'option');
       } else if (token === '--no-index') {
-        arg(i, 'option'); noIndex = true;
+        arg(i, 'option'); noIndex = true; unsupported(token);
       } else if (token.startsWith('-')) {
         arg(i, 'option'); unsupported(token);
       } else {
-        arg(i, noIndex ? 'read_path' : 'revision');
-        // Bare operands in supported views are revisions. No suffix or keyword
-        // can turn a revision/format/path into an executed command.
+        // A bare diff operand may be a revision or a file. Git can
+        // implicitly use --no-index when an operand is outside the worktree.
+        const obviousRevision = /^(?:HEAD|[a-f0-9]{4,64}|refs\/[a-zA-Z0-9_./-]+)(?:[~^]\d*)?$/u.test(token)
+          && !/(?:^|\/)\.\.(?:\/|$)/u.test(token);
+        arg(i, noIndex || !obviousRevision ? 'read_path' : 'revision');
       }
     }
-    // The ordinary DraftRun executor inherits HOME and reads repository config.
-    // Even --no-ext-diff/--no-textconv cannot bound include files, fsmonitor,
-    // pager overrides, lazy fetch or repository indirection. Do not silently
-    // rewrite persisted specs or use the advisory read-only classification as authority.
+    if (committing && !hasCommitMessage) unsupported('commit without an explicit message');
+    // A syntactically local Git operation still needs live repository scope.
     reason('git_runtime', subcommand ?? 'git',
-      'Git configuration, repository indirection and helper behavior are not constrained by this DraftRun; authorize the exact operation.',
-      '此 DraftRun 未约束 Git 配置、仓库重定向及外部程序行为；请授权精确操作。');
+      'Git configuration, repository location and helpers must be checked before automatic approval.',
+      '自动批准前需要核对 Git 配置、仓库位置及外部程序。');
   } else if (['cat', 'head', 'tail', 'wc', 'pwd', 'ls', 'grep', 'rg'].includes(program)) {
     effects.add('workspace_read');
     const shortOptions: Record<string, RegExp> = {
