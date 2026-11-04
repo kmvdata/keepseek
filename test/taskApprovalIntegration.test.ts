@@ -7,6 +7,8 @@ import * as os from 'node:os';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { SpawnDraftRunExecutor } from '../src/runs/draftRunExecutor';
+import { OpenAICompatibleClient } from '../src/agent/providers/openAiCompatibleClient';
+import { isExplicitLocalCommitGoal } from '../src/runs/localGitCommit';
 import * as vscode from './stubs/vscode';
 import { ChatSessionStore } from '../src/sessions/chatSessionStore';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
@@ -560,7 +562,7 @@ for (const mode of ['delegate', 'model_review'] as const) test(`local Git status
     await writeFile(path.join(f.workspace, 'new.txt'), 'untracked content\n');
     const hook = path.join(f.workspace, '.git', 'hooks', 'pre-commit');
     await writeFile(hook, '#!/bin/sh\nprintf "hook ran\\n" > .git/keepseek-hook-marker\n');
-    await chmod(hook, 0o755);
+    await chmod(hook, 0o644);
 
     const approvals = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
     const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'local-git-storage')) as never,
@@ -597,7 +599,7 @@ for (const mode of ['delegate', 'model_review'] as const) test(`local Git status
       assert.equal(git('log', '-1', '--format=%s').trim(), 'Update existing file and add new file');
       assert.equal(git('status', '--porcelain'), '');
       assert.equal(git('show', 'HEAD:new.txt'), 'untracked content\n');
-      assert.match(await readFile(path.join(f.workspace, '.git', 'keepseek-hook-marker'), 'utf8'), /hook ran/u);
+      await assert.rejects(readFile(path.join(f.workspace, '.git', 'keepseek-hook-marker')), { code: 'ENOENT' });
       assert.equal(prompts, 0);
       assert.equal(f.reviews(), mode === 'delegate' ? 0 : commands.length);
       assert.equal(f.continuations(), 1);
@@ -607,6 +609,228 @@ for (const mode of ['delegate', 'model_review'] as const) test(`local Git status
       runs.dispose();
     }
   });
+});
+
+test('the logged Git argv receive independent repairs and finish a real same-task commit without a click', async () => {
+  if (process.platform === 'win32') return;
+  await fixture('delegate', async f => {
+    const git = (...args: string[]) => execFileSync('/usr/bin/git', args, {
+      cwd: f.workspace, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+    });
+    git('init'); git('config', 'user.name', 'KeepSeek Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+    git('config', 'commit.gpgsign', 'false');
+    await writeFile(path.join(f.workspace, 'tracked.txt'), 'before\n');
+    git('add', '--all', '.'); git('commit', '-m', 'Baseline');
+    const previousHead = git('rev-parse', 'HEAD').trim();
+    await writeFile(path.join(f.workspace, 'tracked.txt'), 'after\n');
+    await writeFile(path.join(f.workspace, '新 文件.txt'), 'staged new file\n');
+    const goal = '运行 git add --all .，根据实际暂存内容编写中文说明，执行一次本地 git commit -am。';
+    f.session.messages[0].content = goal;
+    const spawned: string[][] = [];
+    const spawn = new SpawnDraftRunExecutor();
+    const executor: DraftRunExecutorAdapter = {
+      execute: input => { spawned.push(input.draftRun.spec.args); return spawn.execute(input); },
+      cancel: id => spawn.cancel(id), showTerminal: id => spawn.showTerminal(id), dispose: () => spawn.dispose()
+    };
+    const approvals = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'replan-git-storage')) as never,
+      executor, new DraftRunAuthorizationService(approvals));
+    const badStatus = ['-c', 'core.pager=cat', 'status', '--porcelain=v1'];
+    const badCommit = ['commit', '-a', '-m', '中文标题', '-m', '正文第一段', '游离片段1', '游离片段2'];
+    const title = 'chore(repo): 更新跟踪文件并加入新文件';
+    const goodCommit = ['commit', '-a', '-m', title, '-m', '正文保留 Unicode、换行\n以及 $HOME 和 ;'];
+    const stagedDiff = ['--no-pager', 'diff', '--cached', '--no-ext-diff', '--stat'];
+    const safeStatus = ['--no-pager', '--no-optional-locks', 'status', '--porcelain=v1'];
+    const stage = ['add', '--all', '.'];
+    const script = [[badStatus, badCommit], [safeStatus, stagedDiff], [goodCommit], []];
+    const previousFetch = globalThis.fetch;
+    const dialog = vscode.window.showWarningMessage;
+    const received: string[] = [];
+    let turns = 0;
+    let clicks = 0;
+    globalThis.fetch = async (url, init) => {
+      assert.match(String(url), /example\.invalid.*chat\/completions/u);
+      const request = JSON.parse(String(init?.body)) as { model: string; messages: Array<{ role: string; content: string }> };
+      assert.equal(request.model, 'deepseek-v4.1-flash-1017');
+      received.push(request.messages.at(-1)!.content);
+      const toolCalls = script[turns].map((args, index) => ({ index, id: `call-${turns}-${index}`, type: 'function',
+        function: { name: 'keepseek_run_draft', arguments: JSON.stringify({ executable: 'git', args, cwd: '.', reason: 'Local Git task' }) } }));
+      const delta = toolCalls.length ? { tool_calls: toolCalls } : { content: '本地提交已核实。' };
+      return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: toolCalls.length ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`);
+    };
+    vscode.window.showWarningMessage = async () => { clicks++; return undefined; };
+    const client = new OpenAICompatibleClient({ displayName: 'Qwen fixture' });
+    Object.assign(f.host, {
+      draftRuns: runs, hasActiveBackgroundRun: () => false,
+      scheduleDraftRunAutoContinuation: () => {},
+      sendPrompt: (KeepseekChatViewProvider.prototype as unknown as { sendPrompt: () => Promise<AgentResponse | undefined> }).sendPrompt,
+      sendPromptImpl: async (prompt: string, _source: string, _model: string, _settings: unknown,
+        options: { approvalRootTaskId: string; userTask: ChatMessage['userTask']; delegatedContinuation: { signal: AbortSignal } }) => {
+        assert.equal(options.approvalRootTaskId, f.message.userTask!.id);
+        assert.equal(options.userTask?.reason, 'approval');
+        const tail = runs.getPendingProviderTail(f.session.id, 'en');
+        const content = [prompt, tail?.content].filter(Boolean).join('\n\n');
+        const parsed = await client.createModelResponse({ apiKey: 'fixture', baseUrl: 'https://example.invalid/v1',
+          streamIdleTimeoutMs: 0, maxRequestRetries: 0, requestRetryBaseMs: 0 }, {
+          body: { model: 'deepseek-v4.1-flash-1017', messages: [{ role: 'user', content }], stream: true },
+          language: 'en', signal: options.delegatedContinuation.signal
+        });
+        assert.equal(parsed.ok, true, JSON.stringify(parsed));
+        const userTask = options.userTask!;
+        const user: ChatMessage = { id: `git-user-${turns}`, role: 'user', content, createdAt: f.message.createdAt, userTask };
+        const assistant: ChatMessage = { id: `git-assistant-${turns}`, role: 'assistant', content: '', createdAt: f.message.createdAt, userTask };
+        if (tail) runs.bindResultsToMessage(tail.draftRunIds, user.id);
+        f.session.messages.push(user, assistant);
+        turns++;
+        const proposals = await Promise.all((parsed.message?.tool_calls ?? []).map(call => {
+          assert.equal(call.function.name, 'keepseek_run_draft');
+          return createDraftRunProposal(JSON.parse(call.function.arguments));
+        }));
+        if (!proposals.length) return;
+        const response: AgentResponse = { ...f.response, draftEdits: [], draftRuns: proposals };
+        const checkpoint = createRunCheckpoint(f.cp.request as AgentRequest, 0, 'test', f.scope.folderUris);
+        checkpoint.status = 'completed'; checkpoint.finalResponse = response;
+        await f.host.saveAgentCheckpoint(f.session, assistant, checkpoint);
+        f.host.queueResponseApprovals(f.session, assistant, response);
+      }
+    });
+    try {
+      f.response.draftEdits = [];
+      f.response.draftRuns = [await createDraftRunProposal({ executable: 'git', args: stage, reason: 'Stage requested paths' })];
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.maybeAutoContinueDraftRun();
+      assert.equal(turns, 4, JSON.stringify(f.session.approvalProcessing));
+      assert.equal(clicks, 0);
+      assert.equal(f.reviews(), 0);
+      assert.deepEqual(spawned, [stage, safeStatus, stagedDiff, goodCommit]);
+      assert.match(received[1], /core\.pager/u);
+      assert.match(received[1], /(?:pathspec|positional|position)/iu);
+      assert.match(received[1], /"executed":false/u);
+      assert.match(received[2], /tracked\.txt/u);
+      assert.match(received[3], /"outcome":"verified"/u);
+      const [staging, firstStatus, firstCommit] = runs.toWebviewState(f.session.id);
+      assert.equal(staging.gitStageEvidence?.head, previousHead);
+      assert.equal(firstStatus.replan?.executed, false);
+      assert.equal(firstCommit.replan?.executed, false);
+      assert.equal(firstCommit.dependency?.targetId, firstStatus.id);
+      assert.equal(git('rev-parse', 'HEAD^').trim(), previousHead);
+      assert.equal(git('log', '-1', '--format=%s').trim(), title);
+      assert.match(git('log', '-1', '--format=%B'), /\$HOME 和 ;/u);
+      assert.equal(git('show', 'HEAD:新 文件.txt'), 'staged new file\n');
+      assert.equal(git('status', '--porcelain=v1'), '');
+    } finally {
+      globalThis.fetch = previousFetch;
+      vscode.window.showWarningMessage = dialog;
+      await runs.flush(); runs.dispose();
+    }
+  });
+});
+
+for (const scenario of ['empty', 'unborn', 'drift', 'branch-drift'] as const) test(`automatic Git commit records ${scenario} using the real index`, async () => {
+  if (process.platform === 'win32') return;
+  await fixture('delegate', async f => {
+    const git = (...args: string[]) => execFileSync('/usr/bin/git', args, {
+      cwd: f.workspace, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']
+    });
+    git('init'); git('config', 'user.name', 'KeepSeek Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+    git('config', 'commit.gpgsign', 'false');
+    if (scenario !== 'unborn') {
+      await writeFile(path.join(f.workspace, 'tracked.txt'), 'before\n');
+      git('add', '--all', '.'); git('commit', '-m', 'Baseline');
+    }
+    const before = scenario === 'unborn' ? null : git('rev-parse', 'HEAD').trim();
+    if (scenario === 'unborn') await writeFile(path.join(f.workspace, '新文件.txt'), 'initial\n');
+    if (scenario === 'drift' || scenario === 'branch-drift') await writeFile(path.join(f.workspace, 'tracked.txt'), 'stage me\n');
+    f.session.messages[0].content = 'Run git add --all . and then one local git commit -am.';
+    const launches: string[] = [];
+    const spawn = new SpawnDraftRunExecutor();
+    const executor: DraftRunExecutorAdapter = {
+      execute: async input => {
+        launches.push(input.draftRun.spec.args[0]);
+        const result = await spawn.execute(input);
+        if (scenario === 'drift' && input.draftRun.spec.args[0] === 'add') {
+          await writeFile(path.join(f.workspace, 'tracked.txt'), 'concurrent modification\n');
+        }
+        return result;
+      },
+      cancel: id => spawn.cancel(id), showTerminal: id => spawn.showTerminal(id), dispose: () => spawn.dispose()
+    };
+    const approvals = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+    const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'git-case-storage')) as never,
+      executor, new DraftRunAuthorizationService(approvals));
+    if (scenario === 'branch-drift') {
+      const record = runs.recordGitStageEvidence.bind(runs);
+      runs.recordGitStageEvidence = (...args) => {
+        const saved = record(...args);
+        git('switch', '-c', 'changed-by-another-process');
+        return saved;
+      };
+    }
+    Object.assign(f.host, { draftRuns: runs });
+    try {
+      f.response.draftEdits = [];
+      f.response.draftRuns = await Promise.all([['add', '--all', '.'], ['commit', '-am', '中文提交']].map(args =>
+        createDraftRunProposal({ executable: 'git', args, reason: 'Local Git task' })));
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      const commit = runs.get(f.response.draftRuns[1].id);
+      if (scenario === 'unborn') {
+        assert.deepEqual(launches, ['add', 'commit']);
+        assert.equal(commit?.gitCommitEvidence?.outcome, 'verified');
+        assert.equal(commit?.gitCommitEvidence?.previousHead, null);
+        assert.equal(git('rev-list', '--count', 'HEAD').trim(), '1');
+      } else {
+        assert.deepEqual(launches, ['add']);
+        assert.equal(git('rev-parse', 'HEAD').trim(), before);
+        if (scenario === 'empty') {
+          assert.equal(commit?.status, 'no_changes');
+          assert.equal(commit?.gitCommitEvidence?.executed, false);
+        } else {
+          assert.equal(f.session.approvalProcessing?.status, 'blocked');
+          assert.match(f.session.approvalProcessing?.targets[1].reason ?? '', /changed after staging/u);
+        }
+      }
+    } finally { await runs.flush(); runs.dispose(); }
+  });
+});
+
+test('an apparent model completion without Git evidence gets one host check, then stops', async () => {
+  await fixture('delegate', async f => {
+    f.session.messages[0].content = 'Run git add --all . and then one local git commit -am.';
+    const response = { ...f.response, draftEdits: [], draftRuns: [], message: 'The commit is done.' };
+    f.cp.finalResponse = response;
+    f.message.content = response.message;
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    let checks = 0;
+    Object.assign(f.host, {
+      hasActiveBackgroundRun: () => false, scheduleDraftRunAutoContinuation: () => {},
+      sendPrompt: async (prompt: string) => {
+        checks++;
+        assert.match(prompt, /Host evidence is still missing/u);
+        const assistant: ChatMessage = { ...f.message, id: 'claimed-completion', content: response.message };
+        f.session.messages.push(assistant);
+        const next = createRunCheckpoint(f.cp.request as AgentRequest, 0, 'test', f.scope.folderUris);
+        next.status = 'completed'; next.finalResponse = response;
+        await f.host.saveAgentCheckpoint(f.session, assistant, next);
+        f.host.queueResponseApprovals(f.session, assistant, response);
+      }
+    });
+    f.host.queueResponseApprovals(f.session, f.message, response);
+    await f.host.maybeAutoContinueDraftRun();
+    assert.equal(checks, 1);
+    assert.equal(f.executions(), 0);
+    assert.equal(f.session.approvalProcessing?.status, 'blocked');
+    assert.match(f.session.messages.at(-1)?.content ?? '', /no verified local commit/u);
+  });
+});
+
+test('a Git command mentioned for explanation or explicitly declined does not authorize a commit', () => {
+  assert.equal(isExplicitLocalCommitGoal('请解释 `git commit -am` 的行为'), false);
+  assert.equal(isExplicitLocalCommitGoal('Review the changes. Do not run `git commit -am`.'), false);
+  assert.equal(isExplicitLocalCommitGoal('总结改动，别提交代码'), false);
+  assert.equal(isExplicitLocalCommitGoal('请用 `git commit -am` 将改动提交到本地'), true);
 });
 
 test('local Git scope rejects redirects and detects config, hook and index changes', async () => {
@@ -630,7 +854,8 @@ test('local Git scope rejects redirects and detects config, hook and index chang
     const hook = path.join(f.workspace, '.git', 'hooks', 'pre-commit');
     await writeFile(hook, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     const hooked = await inspectDraftRunScope(proposal);
-    assert.equal(hooked.uncertain, false);
+    assert.equal(hooked.uncertain, true);
+    assert.match(hooked.reasons.join(' '), /pre-commit/u);
     assert.notEqual(hooked.fingerprint, staged.fingerprint);
     git('config', 'core.hooksPath', f.root);
     const external = await inspectDraftRunScope(proposal);

@@ -1390,6 +1390,10 @@ export function getStyles(): string {
       overflow-wrap: anywhere;
     }
 
+    .approval-state-note[data-tone='progress'] {
+      color: var(--vscode-descriptionForeground);
+    }
+
     .draft-chip-actions {
       display: flex;
       min-width: 0;

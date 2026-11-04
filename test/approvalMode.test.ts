@@ -1,5 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
@@ -8,7 +9,8 @@ import { test } from 'node:test';
 import { Script } from 'node:vm';
 import { DelegatedApprovalQueue, draftRunPreparedMessage, getApprovalModeUserTail, normalizeApprovalMode } from '../src/agent/approvalMode';
 import { localize, WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
-import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
+import { createDraftRunProposal, hashDraftRunSpec } from '../src/runs/draftRunProposal';
+import { DraftRunStore } from '../src/runs/draftRunStore';
 import { ExactOperationGrants } from '../src/approvals/authorization';
 import { buildInitialAgentMessages, getAgentSystemPrompt, getAgentTools, RUN_VALIDATION_TOOL_NAME } from '../src/agent/protocol';
 import { ToolAuthorizationService } from '../src/agent/tools/toolAuthorization';
@@ -17,9 +19,10 @@ import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvid
 import { getInputScript } from '../src/webview/input/script';
 import { getInputTemplate } from '../src/webview/input/template';
 import { getScript } from '../src/webview/script';
-import type { ApprovalMode, ChatMessage } from '../src/shared/types';
+import type { ApprovalMode, ChatMessage, ChatSession } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
 import { normalizeStoredSessions } from '../src/sessions/chatSessionStore';
+import { normalizeApprovalProcessing } from '../src/approvals/approvalProcessing';
 
 test('draft receipt and host authorization text describe the actual mode without claiming execution', () => {
   for (const lang of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'model_review', 'delegate'] as const) {
@@ -54,6 +57,23 @@ test('approval defaults fail closed and queue cannot replay, cross sessions, or 
   queue.finish(first.controller);
   assert.equal(queue.take('s'), undefined);
   assert.equal(new DelegatedApprovalQueue().take('s'), undefined);
+});
+
+test('an interrupted correction retains diagnostics and the attempt ledger without restoring execution authority', () => {
+  const state = normalizeApprovalProcessing({ version: 1, runId: 'segment', rootTaskId: 'task', mode: 'delegate',
+    status: 'replanning', replanKeys: ['a'.repeat(64)], targets: [{ id: 'run', kind: 'command', status: 'needs_replan',
+      replan: { draftRunId: 'run', specHash: 'hash', rootTaskId: 'task', executionSegmentId: 'segment',
+        phase: 'preflight', code: 'git_status_pager_override', reason: 'Use controlled status.', executed: false }
+    }, { id: 'dependent', kind: 'command', status: 'dependency_blocked', reason: 'Malformed -m.',
+      dependency: { targetId: 'run', label: 'git status', reason: 'Use controlled status.' }
+    }] });
+  assert.equal(state?.status, 'blocked');
+  assert.equal(state?.canResume, true);
+  assert.deepEqual(state?.replanKeys, ['a'.repeat(64)]);
+  assert.equal(state?.targets[0].replan?.executed, false);
+  assert.equal(state?.targets[1].reason, 'Malformed -m.');
+  assert.equal(state?.targets[1].dependency?.targetId, 'run');
+  assert.equal(new DelegatedApprovalQueue().take('session'), undefined);
 });
 
 test('stored approval modes preserve explicit legacy choices and fail closed on missing or unknown values', () => {
@@ -266,6 +286,36 @@ test('ask mode does not consume delegated effects even if a stale batch exists',
   assert.deepEqual(fixture.effects, []);
 });
 
+test('ask mode retires malformed argv and dependent drafts while leaving the valid prerequisite for an individual click', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-ask-correction-'));
+  const folders = vscode.workspace.workspaceFolders;
+  const trusted = vscode.workspace.isTrusted;
+  const store = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never);
+  try {
+    vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(root), name: 'fixture' }];
+    vscode.workspace.isTrusted = true;
+    const drafts = await Promise.all([
+      createDraftRunProposal({ executable: 'git', args: ['add', '--all', '.'], reason: 'Stage' }),
+      createDraftRunProposal({ executable: 'git', args: ['commit', '-a', '-m', 'Title', 'stray'], reason: 'Commit' }),
+      createDraftRunProposal({ executable: 'git', args: ['status', '--porcelain=v1'], reason: 'Verify' })
+    ]);
+    store.addProposals({ proposals: drafts, agentRunId: 'r', sessionId: 's' });
+    const f = workflowFixture({ mode: 'ask', runStore: store });
+    await f.provider.markAskDraftRunCorrections(f.session, 'r', 'r', drafts.map(draft => draft.id));
+    assert.equal(store.get(drafts[0].id)?.status, 'pending');
+    assert.equal(store.get(drafts[1].id)?.status, 'needs_replan');
+    assert.equal(store.get(drafts[1].id)?.replan?.executed, false);
+    assert.equal(store.get(drafts[2].id)?.dependency?.targetId, drafts[1].id);
+    assert.equal(store.get(drafts[2].id)?.status, 'cancelled');
+    assert.deepEqual(f.effects, []);
+  } finally {
+    await store.flush(); store.dispose();
+    vscode.workspace.workspaceFolders = folders;
+    vscode.workspace.isTrusted = trusted;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('model denial leaves a DraftEdit pending and records guidance without another model call', async () => {
   const fixture = workflowFixture({ mode: 'model_review', denyTarget: 'e1' });
   await fixture.run();
@@ -287,6 +337,75 @@ test('reviewer unavailability freezes every remaining effect in the batch', asyn
   assert.deepEqual(fixture.effects, ['stopped']);
   assert.equal(fixture.prompts.length, 1);
   assert.match(fixture.prompts[0], /reviewer unavailable/u);
+});
+
+test('an interrupted Git correction resumes once and a repeated malformed proposal stops the same task', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-correction-recovery-'));
+  const folders = vscode.workspace.workspaceFolders;
+  const trusted = vscode.workspace.isTrusted;
+  const workspace = vscode.Uri.file(path.join(root, 'repo'));
+  const storage = vscode.Uri.file(path.join(root, 'storage')) as never;
+  let launches = 0;
+  const executor = { execute: async () => {
+    launches++;
+    return { exitCode: 0, timedOut: false, cancelled: false };
+  }, cancel: () => false, showTerminal: () => false, dispose: () => {} };
+  const store = new DraftRunStore(storage, executor);
+  const reloaded = new DraftRunStore(storage, executor);
+  try {
+    execFileSync('git', ['init', '--template=', workspace.fsPath], { stdio: 'pipe' });
+    for (const [key, value] of [['commit.gpgsign', 'false'], ['core.fsmonitor', 'false'], ['core.hooksPath', '.git/hooks']]) {
+      execFileSync('git', ['config', '--local', key, value], { cwd: workspace.fsPath, stdio: 'pipe' });
+    }
+    vscode.workspace.workspaceFolders = [{ uri: workspace, name: 'fixture' }];
+    vscode.workspace.isTrusted = true;
+    const draft = () => createDraftRunProposal({ executable: 'git', args: ['commit', '-a', '-m', 'Title', 'stray'], reason: 'Commit' });
+    const first = await draft();
+    store.addProposals({ proposals: [first], agentRunId: 'r', sessionId: 's' });
+    const original = workflowFixture({ editIds: [], draftRunIds: [first.id], workspacePath: workspace.fsPath, runStore: store });
+    original.session.messages[0].content = 'Create a local git commit.';
+    let interruptedState: ChatSession['approvalProcessing'];
+    original.provider.sendPrompt = async () => {
+      interruptedState = structuredClone(original.session.approvalProcessing);
+      original.queue.cancel();
+    };
+    await original.run();
+    assert.equal(interruptedState?.status, 'replanning');
+    assert.equal(store.get(first.id)?.status, 'needs_replan');
+    await store.flush();
+
+    await reloaded.initialize();
+    const restarted = workflowFixture({ editIds: [], workspacePath: workspace.fsPath, runStore: reloaded });
+    restarted.session.messages[0].content = 'Create a local git commit.';
+    restarted.session.approvalProcessing = normalizeApprovalProcessing(interruptedState);
+    assert.equal(restarted.queue.take('s'), undefined);
+    await restarted.provider.resumeApprovalProcessing();
+    await restarted.provider.executeDelegatedApprovals(restarted.queue.take('s')!);
+    assert.equal(restarted.effects.filter(effect => effect === 'continue').length, 1);
+    assert.equal(restarted.session.approvalProcessing?.status, 'completed');
+    assert.equal(restarted.session.approvalProcessing?.replanKeys?.length, 1);
+    assert.match(restarted.prompts[0], /git_commit_all_with_pathspec/u);
+
+    const second = await draft();
+    reloaded.addProposals({ proposals: [second], agentRunId: 'second', sessionId: 's' });
+    const previous = restarted.session.messages[1];
+    restarted.session.messages.push({ ...previous, id: 'second-assistant', runCheckpointArchive: {
+      ...previous.runCheckpointArchive!, summary: { taskId: 'second' }
+    } });
+    restarted.queue.enqueue({ sessionId: 's', runId: 'second', rootTaskId: 'r', editIds: [], draftRunIds: [second.id] });
+    await restarted.provider.executeDelegatedApprovals(restarted.queue.take('s')!);
+    assert.equal(restarted.effects.filter(effect => effect === 'continue').length, 1);
+    assert.equal(restarted.session.approvalProcessing?.status, 'blocked');
+    assert.match(restarted.session.approvalProcessing?.reason ?? '', /same kind of preflight error/u);
+    assert.equal(reloaded.get(second.id)?.replan?.executed, false);
+    assert.equal(launches, 0);
+  } finally {
+    await store.flush(); await reloaded.flush();
+    store.dispose(); reloaded.dispose();
+    vscode.workspace.workspaceFolders = folders;
+    vscode.workspace.isTrusted = trusted;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('model denial of a deletion leaves the exact file unchanged', async () => {
@@ -319,10 +438,12 @@ function workflowFixture(options: {
   draftRunIds?: string[];
   deleteOnApplyPath?: string;
   unavailableBeforeEffects?: boolean;
+  workspacePath?: string;
+  runStore?: DraftRunStore;
 } = {}) {
   const queue = new DelegatedApprovalQueue();
   const userTask = { version: 1, id: 'r', originMessageId: 'u', reason: 'user' };
-  const session = { id: 's', approvalMode: options.mode ?? 'delegate', messages: [{
+  const session = { id: 's', approvalMode: options.mode ?? 'delegate', approvalProcessing: undefined as ChatSession['approvalProcessing'], messages: [{
     id: 'u', role: 'user', content: 'Prepare the requested workspace changes and run their commands.', createdAt: '', userTask
   }, {
     id: 'assistant', role: 'assistant', content: '', createdAt: '',
@@ -418,10 +539,11 @@ function workflowFixture(options: {
         return { appliedEditIds: fixture.failEdit ? [] : [id], failed: fixture.failEdit ? [{ error: 'file changed' }] : [] };
       }
     },
-    draftRuns: {
+    draftRuns: options.runStore ?? {
       flush: async () => {},
       get: (id: string) => draftRun(id),
       preflightApproval: async (id: string) => draftRun(id),
+      setPendingDependency: () => true,
       attachApprovalReview: () => true,
       approveAndRun: async (id: string, uris: Set<string>, options: { delegatedApproval: () => boolean }) => {
         assert.equal(options.delegatedApproval(), true);
@@ -431,13 +553,15 @@ function workflowFixture(options: {
       }
     },
     postState: () => {}, setAgentActivity: () => {}, refreshSkills: async () => {}, awaitRunContextRefresh: async () => true, scheduleRunContextRefresh: () => {}, handleAppliedRepairEdits: async () => {},
-    sendPrompt: async (prompt: string) => { fixture.effects.push('continue'); fixture.prompts.push(prompt); },
+    sendPrompt: async (prompt: string) => { fixture.effects.push('continue'); fixture.prompts.push(prompt); return {}; },
     appendStoppedApprovalOutcome: async (prompt: string) => { fixture.effects.push('stopped'); fixture.prompts.push(prompt); }
-  }) as { executeDelegatedApprovals(next: NonNullable<ReturnType<DelegatedApprovalQueue['take']>>): Promise<void> };
+  }) as { executeDelegatedApprovals(next: NonNullable<ReturnType<DelegatedApprovalQueue['take']>>): Promise<void>;
+    resumeApprovalProcessing(): Promise<void>; sendPrompt(prompt: string): Promise<unknown>;
+    markAskDraftRunCorrections(chat: typeof session, segmentId: string, rootTaskId: string, ids: string[]): Promise<void> };
   fixture.run = async () => {
     vscode.workspace.isTrusted = true;
     const priorFolders = vscode.workspace.workspaceFolders;
-    vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(os.tmpdir()), name: 'test' }];
+    vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(options.workspacePath ?? os.tmpdir()), name: 'test' }];
     queue.enqueue({
       sessionId: 's',
       runId: 'r',
@@ -455,7 +579,7 @@ function workflowFixture(options: {
     try { await provider.executeDelegatedApprovals(queue.take('s')!); }
     finally { vscode.workspace.workspaceFolders = priorFolders; }
   };
-  return fixture;
+  return Object.assign(fixture, { provider });
 }
 
 function storedSession(id: string, approvalMode: unknown) {

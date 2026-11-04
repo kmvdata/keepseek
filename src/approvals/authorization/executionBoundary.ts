@@ -1,9 +1,22 @@
 import { realpath } from 'node:fs/promises';
 import * as vscode from 'vscode';
-import type { DraftRun } from '../../shared/types';
+import type { DraftRun, DraftRunSpec } from '../../shared/types';
 import { hashDraftRunSpec } from '../../runs/draftRunProposal';
 import { getFileReferenceAuthorizationKey } from '../../context/references/fileReference';
 import { findCanonicalWorkspaceFolder } from './pathScope';
+import { inspectGitCommandReplan, type GitCommandReplan } from './commandSemantics';
+
+export class InvalidGitCommitError extends Error {
+  public constructor(public readonly diagnosis: GitCommandReplan) {
+    super(diagnosis.message);
+    this.name = 'InvalidGitCommitError';
+  }
+}
+
+export function assertValidGitCommitArguments(spec: DraftRunSpec): void {
+  const diagnosis = inspectGitCommandReplan(spec);
+  if (diagnosis && diagnosis.code !== 'git_status_pager_override') throw new InvalidGitCommitError(diagnosis);
+}
 
 export async function validateDraftRunBeforeApproval(
   draftRun: DraftRun,
@@ -21,6 +34,7 @@ export async function validateDraftRunBeforeApproval(
     throw new Error(`Authorize the exact external working directory before running this DraftRun: ${cwdUri.toString()}`);
   }
   checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris);
+  assertValidGitCommitArguments(draftRun.spec);
 }
 
 export function checkDraftRunApprovalIdentity(draftRun: DraftRun, expectedSpecHash?: string): void {

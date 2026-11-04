@@ -33,7 +33,7 @@ export class DraftRunBatchCoordinator {
   public snapshots(sessionId: string): DraftRunBatchSnapshot[] {
     const groups = new Map<string, DraftRunBatchSnapshot['entries']>();
     for (const run of this.store.toWebviewState(sessionId)) {
-      if (run.status !== 'pending') continue;
+      if (run.status !== 'pending' || run.dependency) continue;
       const entries = groups.get(run.agentRunId) ?? [];
       entries.push({ draftRunId: run.id, specHash: run.specHash });
       groups.set(run.agentRunId, entries);
@@ -82,7 +82,7 @@ export class DraftRunBatchCoordinator {
 
   private assertSnapshot(snapshot: DraftRunBatchSnapshot): void {
     const actual = this.store.toWebviewState(snapshot.sessionId)
-      .filter((run) => run.agentRunId === snapshot.agentRunId && run.status === 'pending')
+      .filter((run) => run.agentRunId === snapshot.agentRunId && run.status === 'pending' && !run.dependency)
       .map((run) => ({ draftRunId: run.id, specHash: run.specHash }));
     if (JSON.stringify(actual) !== JSON.stringify(snapshot.entries)) throw new Error('The pending command list changed. Review the refreshed cards.');
   }

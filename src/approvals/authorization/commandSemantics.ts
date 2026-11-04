@@ -16,6 +16,19 @@ export interface CommandSemantics {
   arguments: CommandArgument[];
   effects: DraftRunEffect[];
   reasons: AuthorizationReason[];
+  gitCommit?: { all: boolean; messages: string[] };
+  gitReplan?: GitCommandReplan;
+}
+
+export interface GitCommandReplan {
+  code: 'git_status_pager_override' | 'git_commit_missing_message_value'
+    | 'git_commit_all_with_pathspec' | 'git_commit_missing_message';
+  message: string;
+  candidateArgs?: string[];
+}
+
+export function inspectGitCommandReplan(spec: DraftRunSpec): GitCommandReplan | undefined {
+  return analyzeCommand(spec).gitReplan;
 }
 
 /** Bounded argv grammar, NOT a shell parser or an executable trust decision.
@@ -90,23 +103,56 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     const committing = subcommand === 'commit';
     const status = subcommand === 'status';
     if (!viewing && !staging && !committing && !status) unsupported(subcommand ?? 'missing Git subcommand');
-    let hasCommitMessage = false;
+    const commitMessages: string[] = [];
+    const commitPathspecPositions: number[] = [];
+    let commitAll = false;
+    let unsupportedCommitOption = false;
     let paths = false;
     let noIndex = false;
     for (; i < args.length; i++) {
       const token = args[i];
       if (!paths && token === '--') { paths = true; arg(i, 'option'); continue; }
-      if (staging || committing || status) {
-        if (committing && !paths && ['-m', '-am', '--message'].includes(token)) {
+      if (committing) {
+        if (!paths && ['-m', '-am', '--message'].includes(token)) {
+          commitAll ||= token === '-am';
+          if (i + 1 === args.length) {
+            result.gitReplan = {
+              code: 'git_commit_missing_message_value',
+              message: `Git commit argument ${i + 1} (${token}) needs a complete message argument. Nothing executed. / Git commit 的第 ${i + 1} 个参数（${token}）需要一个完整的提交说明参数。原命令未启动。`
+            };
+          } else {
+            commitMessages.push(args[i + 1]);
+          }
           i = valueAfter(i, 'text');
-          hasCommitMessage ||= typeof args[i] === 'string' && !!args[i].trim();
-        } else if (committing && !paths && /^--message=.+/su.test(token)) {
-          arg(i, 'text', token.slice('--message='.length)); hasCommitMessage = true;
-        } else if (!paths && (committing ? ['-a', '--all', '--no-gpg-sign', '--allow-empty', '--quiet', '-q'].includes(token)
-          : staging ? ['-A', '--all', '-u', '--update', '--ignore-removal', '--no-all', '-v', '--verbose'].includes(token)
-            : /^(?:-s|-b|-sb|-bs|--short|--branch|--porcelain(?:=v[12])?|--long|--untracked-files(?:=(?:no|normal|all))?|-u(?:no|normal|all)?)$/u.test(token))) {
+        } else if (!paths && /^(?:--message=|-a?m)/u.test(token)) {
+          commitAll ||= token.startsWith('-am');
+          const message = token.slice(token.startsWith('--') ? '--message='.length : token.startsWith('-am') ? 3 : 2);
+          arg(i, 'text', message);
+          commitMessages.push(message);
+        } else if (!paths && ['-a', '--all', '--quiet', '-q'].includes(token)) {
           arg(i, 'option');
-        } else if ((staging || status) && (paths || !token.startsWith('-'))) {
+          commitAll ||= token === '-a' || token === '--all';
+        } else if (paths || !token.startsWith('-') || token === '-') {
+          arg(i, 'read_path');
+          commitPathspecPositions.push(i + 1);
+        } else {
+          unsupportedCommitOption = true;
+          unsupported(token);
+          if (['-F', '--file', '-t', '--template', '--pathspec-from-file'].includes(token)) {
+            i = valueAfter(i, 'read_path');
+          } else if (/^(?:--(?:file|template|pathspec-from-file)=|-[Ft].)/su.test(token)) {
+            arg(i, 'read_path', token.slice(token.startsWith('--') ? token.indexOf('=') + 1 : 2));
+          } else if (['-C', '-c', '--reuse-message', '--reedit-message', '--fixup', '--squash'].includes(token)) {
+            i = valueAfter(i, 'revision');
+          } else {
+            arg(i, 'option');
+          }
+        }
+      } else if (staging || status) {
+        if (!paths && (staging ? ['-A', '--all', '-u', '--update', '--ignore-removal', '--no-all', '-v', '--verbose'].includes(token)
+            : /^(?:-s|-b|-sb|-bs|-z|--short|--branch|--porcelain(?:=v[12])?|--long|--no-renames|--untracked-files(?:=(?:no|normal|all))?|-u(?:no|normal|all)?)$/u.test(token))) {
+          arg(i, 'option');
+        } else if (paths || !token.startsWith('-')) {
           arg(i, 'read_path');
           if (token.startsWith(':') || /[*?[]/u.test(token)) unsupported(token);
         } else {
@@ -153,7 +199,37 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
         arg(i, noIndex || !obviousRevision ? 'read_path' : 'revision');
       }
     }
-    if (committing && !hasCommitMessage) unsupported('commit without an explicit message');
+    if (committing && !unsupportedCommitOption && !result.gitReplan) {
+      if (commitAll && commitPathspecPositions.length) {
+        const positions = commitPathspecPositions.join(', ');
+        result.gitReplan = {
+          code: 'git_commit_all_with_pathspec',
+          message: `Git commit -a conflicts with positional arguments ${positions}. Nothing executed. If these are message paragraphs, use a single complete message argument or repeat -m for each paragraph. / Git commit 的 -a 与第 ${positions} 个位置参数冲突。原命令未启动。若这些是提交说明，请使用一个完整的说明参数，或为每个段落显式添加 -m。`
+        };
+      } else if (!commitMessages.some(message => message.trim())) {
+        result.gitReplan = {
+          code: 'git_commit_missing_message',
+          message: 'Git commit needs an explicit nonempty message passed to -m. Nothing executed. / Git commit 需要通过 -m 提供非空的提交说明。原命令未启动。'
+        };
+      } else if (commitPathspecPositions.length) {
+        unsupported('commit pathspec');
+      } else {
+        result.gitCommit = { all: commitAll, messages: commitMessages };
+      }
+    }
+    if (result.gitReplan) {
+      result.reasons.push({ code: 'git_commit_argv', detail: result.gitReplan.code, message: result.gitReplan.message });
+    }
+    // This exact display-only override has an equivalent for captured stdout.
+    // Keep the original config override outside the automatic approval grammar.
+    if (args.length === 4 && args[0] === '-c' && args[1] === 'core.pager=cat'
+      && args[2] === 'status' && args[3] === '--porcelain=v1' && spec.env.length === 0) {
+      result.gitReplan = {
+        code: 'git_status_pager_override',
+        message: 'Use the same status format with --no-pager and --no-optional-locks. Nothing executed. / 请使用 --no-pager 和 --no-optional-locks 读取相同格式的 Git 状态。原命令未启动。',
+        candidateArgs: ['--no-pager', '--no-optional-locks', 'status', '--porcelain=v1']
+      };
+    }
     // A syntactically local Git operation still needs live repository scope.
     reason('git_runtime', subcommand ?? 'git',
       'Git configuration, repository location and helpers must be checked before automatic approval.',

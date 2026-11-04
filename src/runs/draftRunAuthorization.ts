@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { DraftRun, ExecutionPermit } from '../shared/types';
 import type { ApprovalRecordMatch } from '../approvals/approvalReviewTypes';
 import type { ApprovalReviewStore } from '../approvals/approvalReviewStore';
+import { assertValidGitCommitArguments } from '../approvals/authorization/executionBoundary';
 
 const PERMIT_TTL_MS = 30_000;
 
@@ -13,6 +14,7 @@ export class DraftRunAuthorizationService {
     isAuthorized: () => boolean,
     match?: ApprovalRecordMatch
   ): Promise<ExecutionPermit> {
+    assertValidGitCommitArguments(draftRun.spec);
     if (!isAuthorized()) throw new Error('Delegated approval was revoked or is no longer authorized.');
     if (!this.approvalReviews || !match) {
       throw new Error('Delegated permit requires a persisted matching approval record.');
@@ -28,6 +30,7 @@ export class DraftRunAuthorizationService {
   }
 
   public createUserClickPermit(draftRun: DraftRun): ExecutionPermit {
+    assertValidGitCommitArguments(draftRun.spec);
     return {
       draftRunId: draftRun.id,
       specHash: draftRun.specHash,

@@ -568,6 +568,8 @@ export type DraftRunStatus =
   | 'rejected'
   | 'running'
   | 'done'
+  | 'needs_replan'
+  | 'no_changes'
   | 'cancelled'
   | 'failed';
 
@@ -664,6 +666,10 @@ export interface DraftRun extends DraftRunProposal {
   status: DraftRunStatus;
   authorizationSource?: ExecutionPermit['source'];
   approvalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
+  replan?: import('../approvals/approvalProcessing').DraftRunReplanResult;
+  dependency?: import('../approvals/approvalProcessing').ApprovalDependency;
+  gitCommitEvidence?: import('../runs/localGitCommit').LocalGitCommitEvidence;
+  gitStageEvidence?: import('../runs/localGitCommit').LocalGitStageEvidence;
   approvedAt?: string;
   startedAt?: string;
   finishedAt?: string;

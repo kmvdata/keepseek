@@ -25,6 +25,7 @@ export interface DraftRunExecutorAdapter {
   execute(input: {
     draftRun: DraftRun;
     permit: ExecutionPermit;
+    verifiedLaunch?: { executable: string; cwd: string };
     signal?: AbortSignal;
     onOutput: (chunk: DraftRunOutputChunk) => void;
   }): Promise<DraftRunExecutionOutcome>;
@@ -56,6 +57,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
   public async execute(input: {
     draftRun: DraftRun;
     permit: ExecutionPermit;
+    verifiedLaunch?: { executable: string; cwd: string };
     signal?: AbortSignal;
     onOutput: (chunk: DraftRunOutputChunk) => void;
   }): Promise<DraftRunExecutionOutcome> {
@@ -81,8 +83,8 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     this.runTerminalSessions.set(input.draftRun.id, input.draftRun.sessionId);
     pty.write(formatTerminalHeader(input.draftRun));
 
-    const child = spawn(input.draftRun.spec.executable, input.draftRun.spec.args, {
-      cwd: vscode.Uri.parse(input.draftRun.spec.cwdUri).fsPath,
+    const child = spawn(input.verifiedLaunch?.executable ?? input.draftRun.spec.executable, input.draftRun.spec.args, {
+      cwd: input.verifiedLaunch?.cwd ?? vscode.Uri.parse(input.draftRun.spec.cwdUri).fsPath,
       env: createControlledEnvironment(input.draftRun.spec.env),
       shell: false,
       windowsHide: true,

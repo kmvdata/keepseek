@@ -11,8 +11,15 @@ export function normalizeApprovalMode(value: unknown): ApprovalMode {
 /** Append only to a new user message. Never regenerate a historical prefix. */
 export function getApprovalModeUserTail(mode: ApprovalMode): string {
   const validation = 'Use keepseek_run_validation only when validation is required for the task and the target package.json defines the matching compile, lint, or test script. A local Git-only task does not require extra validation unless the user or project explicitly requires it.';
+  const git = [
+    'For local Git, prefer keepseek_git_status and keepseek_git_diff when workspaceFolder identifies the requested repository.',
+    'Use a controlled DraftRun when exact cwd or pathspec is required.',
+    'Stage and commit through separate DraftRuns using direct Git argv.',
+    'Wait for the actual staging result, inspect the index, and write the commit message in the requested language from that evidence.',
+    'Pass -a and -m separately when needed and give every -m exactly one complete message argument.'
+  ].join(' ');
   return mode === 'delegate'
-    ? `<keepseek-approval-mode>delegate: The user selected project-wide Approve for me. Propose the exact DraftEdits and DraftRuns needed for the task. ${validation} For a requested local Git commit, use direct Git argv and separate DraftRuns for staging and committing; do not combine them in a shell. The host will apply eligible drafts after policy or model approval and report actual results. External scope and unsafe or uncertain effects may require review or explicit user action. Never retry or route around a paused or denied operation. Use actual results to check the requested outcome. Continue while authorized work remains; finish when the outcome is verified or explain the concrete blocker.</keepseek-approval-mode>`
+    ? `<keepseek-approval-mode>delegate: The user selected project-wide Approve for me. Propose the exact DraftEdits and DraftRuns needed for the task. ${validation} ${git} The host will apply eligible drafts and report actual results. Replan only from a structured never-started correction, retaining completed operations. External scope and unsafe or uncertain effects may require review or explicit user action. Never retry or route around a paused or denied operation. Continue while authorized work remains. Report completion only after actual results verify the requested outcome, or explain the concrete blocker.</keepseek-approval-mode>`
     : mode === 'model_review'
       ? `<keepseek-approval-mode>model_review: The user selected project-wide Model review. Propose exact immutable DraftEdits and DraftRuns. ${validation} An isolated reviewer will approve or deny each effect after this turn. A denial is a safety decision, not an execution error: do not retry variants or indirect equivalents. Only propose a materially safer new action with a new hash, or stop and explain when none exists. Claim effects only after real results arrive.</keepseek-approval-mode>`
     : `<keepseek-approval-mode>ask: The user selected project-wide Ask for approval. File writes and arbitrary commands require individual user approval. ${validation} Prepare pending drafts and wait for their results.</keepseek-approval-mode>`;
@@ -34,6 +41,7 @@ export interface DelegatedApprovalBatch {
     result: BoundedReviewText;
   }>;
   approvalStopReason?: string;
+  localGitCompletionCheck?: boolean;
 }
 
 /** Volatile queue: reloading the extension must never execute restored drafts. */

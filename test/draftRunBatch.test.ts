@@ -371,7 +371,8 @@ class UiElement {
 }
 function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: 'en' | 'zh-CN') {
   const source = getScript();
-  const names = ['appendAutomaticApprovalState', 'createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
+  const names = ['appendAutomaticApprovalState', 'getApprovalTarget', 'isHeldDraftRunApproval', 'formatApprovalDependency',
+    'appendApprovalStateNote', 'appendApprovalResumeAction', 'createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
     'isDraftRunBatchActive', 'getDraftRunBatchMembers', 'createDraftRunTimelineItem', 'renderDraftRunItems',
     'captureDraftRunActionFocus', 'findDraftRunActionFocus', 'renderTranscript', 'handleDraftRunActionClick', 'handleChangeSetActionClick',
     'createApprovalReviewSummary', 'getApprovalSourceLabel', 'getApprovalDecisionLabel', 'getApprovalRiskLabel',
@@ -453,6 +454,7 @@ test('automatic cards distinguish processing, scope authorization, hard failure 
     };
     const waiting = renderState();
     assert.equal(waiting.note.textContent, labels[mode === 'delegate' ? 'approvalAutoWaiting' : 'approvalModelWaiting']);
+    assert.equal(waiting.buttons.length, 0);
     ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode: mode as 'delegate' | 'model_review',
       status: 'processing', updatedAt: '', targets: [{ id: 'A', kind: 'command', status: 'pending' }] };
     const processing = renderState();
@@ -466,7 +468,7 @@ test('automatic cards distinguish processing, scope authorization, hard failure 
     ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'failed', reason: 'Dirty editor' };
     const failure = renderState();
     assert.equal(failure.note.textContent, 'Dirty editor');
-    assert.equal(failure.buttons[0].textContent, labels.approvalResumeProcessing);
+    assert.equal(failure.buttons.length, 0);
     ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'denied', reason: 'Denied by reviewer' };
     const denied = renderState({ decision: 'deny', rationale: 'Denied by reviewer' });
     assert.equal(denied.note.textContent, 'Denied by reviewer');
@@ -478,6 +480,69 @@ test('automatic cards distinguish processing, scope authorization, hard failure 
     assert.equal(renderState({ decision: 'deny', approvalSource: 'local_policy' }).buttons.length, 0);
   }
 }));
+
+test('Git draft cards separate preflight diagnostics from prerequisites and expose only explicit restart recovery', async () => fixture(async f => {
+  f.add(['A', 'B']);
+  for (const language of ['en', 'zh-CN'] as const) {
+    const ui = renderHarness(f, language);
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const [status, commit] = ui.state.draftRuns;
+    const processing: NonNullable<typeof ui.state.approvalProcessing> = {
+      version: 1, runId: status.agentRunId, rootTaskId: 'task', mode: 'delegate', status: 'replanning', updatedAt: '',
+      reason: 'Batch status must not appear as another command’s diagnostic',
+      targets: [{ id: status.id, kind: 'command', status: 'needs_replan' }, { id: commit.id, kind: 'command', status: 'dependency_blocked' }]
+    };
+    const statusReason = 'Use a controlled read for the pager override.';
+    const commitReason = 'Arguments 7 and 8 conflict with -a. <script>Literal text</script>';
+    const diagnostic = (draft: typeof status, code: string, reason: string) => ({
+      code, reason, draftRunId: draft.id, specHash: draft.specHash, rootTaskId: 'task', executionSegmentId: draft.agentRunId,
+      phase: 'preflight', executed: false
+    });
+    const first = { ...status, status: 'needs_replan', replan: diagnostic(status, 'git_status_pager', statusReason) };
+    const second = { ...commit, status: 'cancelled', replan: diagnostic(commit, 'git_commit_invalid_argv', commitReason),
+      dependency: { targetId: status.id, label: 'git status', reason: statusReason } };
+    const render = (draft: unknown) => elements([ui.api.createDraftRunCard(draft)]);
+    const texts = (nodes: UiElement[]) => nodes.filter(node => node.className === 'approval-state-note').map(node => node.textContent);
+    ui.state.approvalProcessing = processing;
+    for (const mode of ['delegate', 'ask', 'model_review']) {
+      ui.state.approvalMode = mode;
+      const statusCard = render(first);
+      const commitCard = render(second);
+      assert.ok(statusCard.some(node => node.textContent === labels.draftRunTitleNeedsReplan));
+      assert.ok(commitCard.some(node => node.textContent === labels.draftRunTitleBlocked));
+      assert.deepEqual(texts(statusCard), [labels.approvalCommandReplanReason.replace('{reason}', statusReason)]);
+      assert.deepEqual(texts(commitCard), [labels.approvalCommandDependency.replace('{target}', `git status (${status.id})`) + ' · ' + statusReason,
+        labels.approvalCommandReplanReason.replace('{reason}', commitReason)]);
+      assert.ok(![...statusCard, ...commitCard].some(node => node.type === 'button'));
+    }
+    ui.state.approvalMode = 'delegate';
+    processing.status = 'blocked';
+    processing.canResume = true;
+    assert.equal(render(second).filter(node => node.type === 'button').length, 0);
+    const resume = render(first).filter(node => node.type === 'button');
+    assert.deepEqual(resume.map(node => node.textContent), [labels.approvalResumeProcessing]);
+    resume[0].click();
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'resumeApprovalProcessing' });
+    processing.canResume = false;
+    processing.targets[0].reason = labels.approvalReplanRepeated;
+    const stopped = render(first);
+    assert.ok(!stopped.some(node => node.type === 'button'));
+    assert.deepEqual(texts(stopped), [labels.approvalCommandReplanReason.replace('{reason}', statusReason), labels.approvalReplanRepeated]);
+    ui.state.approvalProcessing = undefined;
+    const waiting = render(status);
+    assert.ok(waiting.some(node => node.textContent === labels.draftRunTitlePreparing));
+    assert.ok(!waiting.some(node => node.type === 'button'));
+    ui.state.approvalMode = 'ask';
+    assert.equal(render(status).filter(node => node.dataset.draftRunAction === 'approveDraftRun').length, 2);
+    const noChanges = render({ ...commit, status: 'no_changes' });
+    assert.ok(noChanges.some(node => node.textContent === labels.draftRunTitleNoChanges));
+    assert.ok(!noChanges.some(node => node.type === 'button'));
+    const head = '0123456789012345678901234567890123456789';
+    const verified = render({ ...commit, status: 'done', gitCommitEvidence: { outcome: 'verified', head } });
+    assert.ok(verified.some(node => node.textContent === labels.draftRunVerifiedGitHead.replace('{head}', head.slice(0, 12)) && node.title === head));
+  }
+}));
+
 function bulk(cards: UiElement[]) {
   return elements(cards).filter((item) => item.dataset.draftRunAction === 'approveDraftRunBatch'
     || ['applyChangeSet', 'discardChangeSet', 'revertChangeSet'].includes(item.dataset.changeSetAction));
@@ -543,7 +608,7 @@ test('automatic notes and buttons rerender without stale scope or duplicate acti
     for (const status of ['needs_authorization', 'failed', 'pending', 'denied'] as const) {
       const reason = status === 'needs_authorization' ? longAuthorizationReason : status + ' reason';
       ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode,
-        status: status === 'pending' ? 'processing' : 'blocked', updatedAt: '', targets: [
+        status: status === 'pending' ? 'processing' : 'blocked', canResume: status === 'failed', updatedAt: '', targets: [
           { id: 'A', kind: 'command', status, reason }, { id: 'edit-A', kind: 'edit', status, reason }
         ] };
       const nodes = render();

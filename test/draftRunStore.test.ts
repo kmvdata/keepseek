@@ -71,6 +71,61 @@ test('scope is rechecked after persisted approval consumption, before any proces
   });
 });
 
+test('a persisted correction and its dependent command stay inert and deliver separate reasons', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
+    const first = createProposal(workspaceRoot, { id: 'pager' });
+    const second = createProposal(workspaceRoot, { id: 'commit' });
+    store.addProposals({ proposals: [first, second], agentRunId: 'segment', sessionId: 'session' });
+    const dependency = { targetId: first.id, label: 'git status', reason: 'Use controlled status.' };
+    const correction = (proposal: DraftRunProposal, code: string, reason: string) => ({
+      draftRunId: proposal.id, specHash: proposal.specHash, rootTaskId: 'task', executionSegmentId: 'segment',
+      phase: 'preflight' as const, code, reason, executed: false as const
+    });
+    assert.equal(store.markNotExecuted(first.id, first.specHash, {
+      replan: { ...correction(first, 'git_status_pager_override', dependency.reason), candidateArgs: ['--no-pager', 'status'] }
+    }), true);
+    assert.equal(store.markNotExecuted(second.id, second.specHash, {
+      dependency, replan: { ...correction(second, 'git_commit_all_with_pathspec', 'Put each paragraph after -m.'), dependsOn: first.id }
+    }), true);
+    await store.flush();
+    const reloaded = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    try {
+      await reloaded.initialize();
+      const draft = reloaded.get(second.id)!;
+      assert.equal(draft.status, 'needs_replan');
+      assert.equal(draft.startedAt, undefined);
+      assert.equal(draft.replan?.reason, 'Put each paragraph after -m.');
+      assert.deepEqual(draft.dependency, dependency);
+      assert.equal(await reloaded.approveAndRun(second.id, new Set()), undefined);
+      assert.equal(reloaded.cloneAsPending(second.id), undefined);
+      assert.equal(executor.executeCount, 0);
+      const result = reloaded.getPendingProviderTail('session', 'en');
+      assert.match(result?.content ?? '', /"executed":false/u);
+      assert.deepEqual(result?.draftRunIds, [first.id, second.id]);
+      reloaded.bindResultsToMessage(result!.draftRunIds, 'handoff');
+      assert.equal(reloaded.getPendingProviderTail('session', 'en'), undefined);
+    } finally { await reloaded.flush(); reloaded.dispose(); }
+  });
+});
+
+test('a pending dependent command cannot be directly approved after reload', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
+    const draft = createProposal(workspaceRoot);
+    store.addProposals({ proposals: [draft], agentRunId: 'segment', sessionId: 'session' });
+    assert.equal(store.setPendingDependency(draft.id, draft.specHash, { targetId: 'prior', label: 'prior command' }), true);
+    await store.flush();
+    const reloaded = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    try {
+      await reloaded.initialize();
+      assert.equal(reloaded.get(draft.id)?.status, 'pending');
+      assert.equal(reloaded.get(draft.id)?.dependency?.targetId, 'prior');
+      await assert.rejects(reloaded.preflightApproval(draft.id, new Set()), /Pending executable DraftRun/u);
+      assert.equal(await reloaded.approveAndRun(draft.id, new Set()), undefined);
+      assert.equal(executor.executeCount, 0);
+    } finally { await reloaded.flush(); reloaded.dispose(); }
+  });
+});
+
 test('legacy pending risk advice is derived for display/review without rewriting stored spec or history', async () => {
   await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
     const proposal = createProposal(workspaceRoot);

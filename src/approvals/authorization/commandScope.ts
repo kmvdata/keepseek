@@ -15,6 +15,8 @@ import { authorizationReason, type AuthorizationReason } from './reasons';
 export interface CommandScope {
   externalUris: string[];
   cwd: string;
+  /** Effective Git cwd after validated global -C operands. */
+  gitCwd?: string;
   executable?: string;
   paths: Array<{ uri: string; role: string; external: boolean }>;
   uncertain: boolean;
@@ -95,29 +97,46 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
     if (!executable?.trusted) await check(joinUnresolvedPath(cwd, run.spec.executable), 'executable');
   }
   let gitFingerprint: string | undefined;
+  let gitCwd: string | undefined;
   const gitCommand = parsed.arguments.find(argument => argument.role === 'subcommand');
-  if (executable?.trusted && !roots.some(root => isPathInside(root, executable.path)) && gitCommand && diagnostics.length === 1 && diagnostics[0].code === 'git_runtime' && !external.size) {
+  const gitRuntime = diagnostics.findIndex(item => item.code === 'git_runtime');
+  if (executable?.trusted && !roots.some(root => isPathInside(root, executable.path)) && gitCommand && gitRuntime >= 0
+    && diagnostics.every(item => item.code === 'git_runtime' || item.code === 'git_commit_argv' || item.code === 'missing_option_value')
+    && !external.size) {
     const git = await inspectLocalGitScope({ executable: executable.path, cwd, roots, cwdChanges: gitCommand.cwdChanges,
-      subcommand: gitCommand.value, env, noSigning: parsed.arguments.some(argument => argument.role === 'option' && argument.value === '--no-gpg-sign') });
+      subcommand: gitCommand.value, env, commitAll: parsed.gitCommit?.all,
+      noOptionalLocks: parsed.arguments.some(argument => argument.index < gitCommand.index && argument.value === '--no-optional-locks'),
+      noIndexRefresh: gitCommand.value === 'diff' && parsed.arguments.some(argument => argument.role === 'option'
+        && argument.index > gitCommand.index && ['--cached', '--staged'].includes(argument.value)),
+      addPathspecs: parsed.arguments.filter(argument => argument.role === 'read_path' && argument.index > gitCommand.index).map(argument => argument.value),
+      addTracksOnly: parsed.arguments.some(argument => argument.role === 'option' && argument.index > gitCommand.index
+        && ['-u', '--update'].includes(argument.value)) });
     if ('fingerprint' in git) {
       if (paths.some(target => target.role === 'read_path' && !isPathInside(git.repository, vscode.Uri.parse(target.uri).fsPath))) {
-        diagnostics[0] = { ...diagnostics[0], message: 'Git paths must stay inside this repository. / Git 路径必须位于当前仓库内。' };
+        diagnostics[gitRuntime] = { ...diagnostics[gitRuntime], message: 'Git paths must stay inside this repository. / Git 路径必须位于当前仓库内。' };
       } else {
+        if (['add', 'commit'].includes(gitCommand.value) && vscode.workspace.textDocuments?.some(document =>
+          document.isDirty && document.uri.scheme === 'file' && isPathInside(git.repository, document.uri.fsPath))) {
+          throw new Error('Save the dirty editors in this repository before running Git. Nothing executed. / 请先保存当前仓库中未保存的编辑器，原命令未启动。');
+        }
         gitFingerprint = git.fingerprint;
-        diagnostics.pop();
+        gitCwd = vscode.Uri.file(git.cwd).toString();
+        diagnostics.splice(gitRuntime, 1);
         paths.push({ uri: vscode.Uri.file(git.repository).toString(), role: 'repository', external: false });
       }
     } else {
-      diagnostics[0] = { ...diagnostics[0], message: git.reason };
+      if (git.hardBlocked) throw new Error(git.reason);
+      gitFingerprint = git.binding;
+      diagnostics[gitRuntime] = { ...diagnostics[gitRuntime], message: git.reason };
       if (git.externalPath) await check(git.externalPath, 'repository');
     }
   }
   const externalUris = [...external].sort();
   if (!executable && process.platform !== 'win32') throw new Error('Executable cannot be resolved. Nothing executed. / 无法解析实际程序，尚未执行。');
   const fingerprint = createHash('sha256').update(JSON.stringify({
-    version: 1, executable, env, roots, paths, pathIdentities, gitFingerprint, externalUris, diagnostics
+    version: 1, executable, env, roots, paths, pathIdentities, gitFingerprint, gitCwd, externalUris, diagnostics
   })).digest('hex');
-  return { externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri, executable: executable?.path, uncertain: diagnostics.length > 0, diagnostics,
+  return { externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri, gitCwd, executable: executable?.path, uncertain: diagnostics.length > 0, diagnostics,
     reasons: diagnostics.map(reason => reason.message), fingerprint };
 }
 
