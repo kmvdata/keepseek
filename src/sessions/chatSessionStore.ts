@@ -1665,6 +1665,7 @@ function normalizeMessageUsedSkills(value: unknown): ChatMessage['usedSkills'] {
         || item.source === 'agentsUser'
         || item.source === 'admin'
         || item.source === 'builtin'
+        || item.source === 'codexPlugin'
         ? item.source
         : undefined;
       return id && name && source ? { id, name, source } : undefined;

@@ -186,6 +186,8 @@ export function getScript(): string {
     }
 
     function getSkillMentionNameForView(skill) {
+      var qualifiedName = getPluginSkillMentionName(skill);
+      if (qualifiedName) { return qualifiedName; }
       var name = String(skill && skill.name || '').trim();
       if (isSafeSkillMentionNameForView(name)) {
         return name;
@@ -267,6 +269,17 @@ export function getScript(): string {
     }
 
     function getSkillByMarkdownReferenceForView(name, href) {
+      var normalizedName = String(name || '').trim();
+      if (normalizedName.includes(':')) {
+        var target = normalizeSkillPathForView(href);
+        if (!target) { return null; }
+        var matches = getSkillItemsForView().filter(function(item) {
+          return getPluginSkillMentionName(item) === normalizedName
+            && (normalizeSkillPathForView(getSkillPathForView(item)) === target
+              || getPluginSkillReferenceTarget(item, false) === target || getPluginSkillReferenceTarget(item, true) === target);
+        });
+        return matches.length === 1 ? matches[0] : null;
+      }
       var skill = getSkillByMentionNameForView(name);
       if (!skill) {
         return null;
@@ -298,6 +311,26 @@ export function getScript(): string {
 
     function isSafeSkillMentionNameForView(value) {
       return /^[A-Za-z0-9_-]+$/u.test(String(value || ''));
+    }
+
+    function getPluginSkillMentionName(skill) {
+      var name = String(skill && skill.plugin && skill.plugin.qualifiedName || '').trim();
+      return /^[A-Za-z0-9][A-Za-z0-9_-]*:[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(name) ? name : '';
+    }
+
+    function getPluginSkillReferenceTarget(skill, pinSelection) {
+      var uri = String(skill && skill.skillUri || '');
+      var encoded = uri.replace(/[()]/g, function(character) {
+        return character === '(' ? '%28' : '%29';
+      });
+      var stamp = skill && skill.plugin && skill.plugin.selectionStamp;
+      return pinSelection && /^[a-f0-9]{64}$/u.test(stamp || '') ? encoded + '#keepseek-plugin-' + stamp : encoded;
+    }
+
+    function isPluginSkillLinkCurrent(link, skill) {
+      return Boolean(skill && skill.plugin && skill.enabled && !skill.unavailableReason
+        && link.dataset.skillPath === getSkillPathForView(skill)
+        && (link.dataset.skillSelectionStamp || '') === (skill.plugin.selectionStamp || ''));
     }
 
     function mergeSkillIdsForRequest() {
@@ -582,6 +615,11 @@ export function getScript(): string {
         event.stopPropagation();
         if (event.detail > 1) return;
         if (referenceLink.matches('a.rich-skill-link')) {
+          if (referenceLink.dataset.skillReferenceText
+            && !isPluginSkillLinkCurrent(referenceLink, getSkillByIdForView(referenceLink.dataset.skillId))) {
+            setTransientStatus(t('pluginSkillStale'));
+            return;
+          }
           vscode.postMessage({
             type: 'openSkill',
             skillId: referenceLink.dataset.skillId || ''
@@ -2519,6 +2557,7 @@ export function getScript(): string {
         case 'keepseek_read_workspace_file_range':
           return 'reading_file_range';
         case 'keepseek_read_workspace_file':
+        case 'keepseek_read_plugin_skill':
           return 'reading_file';
         case 'keepseek_create_draft_edit':
         case 'keepseek_delete_workspace_file':
@@ -4494,7 +4533,10 @@ export function getScript(): string {
           var item = document.createElement('div');
           item.className = 'run-details-tool' + (tool.status === 'denied' ? ' run-details-denied' : tool.status === 'failed' ? ' run-details-error' : '');
           var title = document.createElement('div');
-          title.textContent = String(tool.name || 'tool') + ' · ' + getRunToolStatusLabel(tool.status) + ' · ' + formatDuration(tool.durationMs);
+          var toolName = String(tool.name || 'tool');
+          var toolLabel = toolName === 'keepseek_read_plugin_skill' ? t('pluginSkillReadTool') : toolName;
+          title.textContent = toolLabel + ' · ' + getRunToolStatusLabel(tool.status) + ' · ' + formatDuration(tool.durationMs);
+          title.title = toolName;
           item.append(title);
           if (tool.argumentsSummary) item.append(createRunDetailText(t('runDetailsArguments') + ': ' + tool.argumentsSummary));
           if (tool.resultSummary) item.append(createRunDetailText(t('runDetailsResult') + ': ' + tool.resultSummary));
@@ -4890,7 +4932,7 @@ export function getScript(): string {
     function renderInlineEditorContent(editor, value) {
       editor.innerHTML = '';
       var text = String(value || '');
-      var pattern = /\\[\\$([A-Za-z0-9_-]+)\\]\\(([^)\\n]+)\\)|<([^<>\\n]+)>|\\$([A-Za-z0-9_-]+)/g;
+      var pattern = /\\[\\$([A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?)\\]\\(([^)\\n]+)\\)|<([^<>\\n]+)>|\\$([A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?)/g;
       var cursor = 0;
       var match;
 
@@ -4906,11 +4948,15 @@ export function getScript(): string {
           var skill = match[1]
             ? getSkillByMarkdownReferenceForView(match[1] || '', match[2] || '')
             : getSkillByMentionNameForView(match[4] || '');
-          if (!skill) {
+          if (!skill || (skill.plugin && !match[1])) {
             continue;
           }
           appendInlineEditorText(editor, text.slice(cursor, match.index));
-          editor.append(createInlineSkillLink(skill));
+          var link = createInlineSkillLink(skill);
+          if (skill.plugin) {
+            link.dataset.skillReferenceText = matchText;
+          }
+          editor.append(link);
           cursor = match.index + matchText.length;
           continue;
         }
@@ -4964,6 +5010,10 @@ export function getScript(): string {
       renderSkillReferenceContent(anchor, getSkillMentionNameForView(skill));
       anchor.dataset.skillId = skill.id;
       anchor.dataset.skillPath = getSkillPathForView(skill);
+      if (skill.plugin) {
+        anchor.dataset.skillReferenceText = '[' + getSkillPromptTextForView(skill) + '](' + getPluginSkillReferenceTarget(skill, true) + ')';
+        anchor.dataset.skillSelectionStamp = skill.plugin.selectionStamp || '';
+      }
       return anchor;
     }
 
@@ -5061,6 +5111,7 @@ export function getScript(): string {
       });
       var skillLinks = editor.querySelectorAll('a.rich-skill-link');
       skillLinks.forEach(function(link) {
+        if (link.dataset.skillReferenceText) { return; }
         var skillId = link.dataset.skillId || '';
         var skill = getSkillByIdForView(skillId);
         link.className = 'rich-skill-link';
@@ -5133,6 +5184,9 @@ export function getScript(): string {
     }
 
     function inlineSkillLinkToText(link) {
+      if (link.dataset.skillReferenceText) {
+        return link.dataset.skillReferenceText;
+      }
       var skill = getSkillByIdForView(link.dataset.skillId || '');
       if (skill) {
         return getSkillMarkdownTextForView(skill);
@@ -6197,6 +6251,10 @@ export function getScript(): string {
             skill: skill,
             priority: 1
           };
+        }
+        if (label.charAt(0) === '$' && label.includes(':')) {
+          start = text.indexOf('[', start + 1);
+          continue;
         }
         var fileReference = parseCodexMarkdownFileLinkHref(href);
         if (fileReference) {

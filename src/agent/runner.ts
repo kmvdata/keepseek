@@ -14,6 +14,8 @@ import {
   mergeDurations
 } from './executionPolicy';
 import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted, migrateLegacyCapacityCheckpoint } from './runCheckpoint';
+import { restorePluginSkillProgress, type PluginSkillProgress } from './runCheckpoint';
+import { assertPluginSkillsCurrent, executePluginSkillRead } from './pluginSkillRuntime';
 import { shapeWorkspaceListingResult } from './toolResultShaping';
 import {
   getConfiguredAgentMaxContextEpochRollovers,
@@ -101,6 +103,7 @@ import {
   READ_WORKSPACE_FILE_TOOL_NAME,
   READ_SUBAGENT_RESULT_TOOL_NAME,
   READ_EVIDENCE_TOOL_NAME,
+  READ_PLUGIN_SKILL_TOOL_NAME,
   RUN_DRAFT_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_SESSION_ARCHIVE_TOOL_NAME,
@@ -974,7 +977,14 @@ export class AgentLoop {
         skillUri: skill.skillUri,
         activation: skill.activation,
         contentLength: skill.content.length,
-        hasScripts: skill.hasScripts
+        hasScripts: skill.hasScripts,
+        plugin: skill.pluginSnapshot ? {
+          name: skill.pluginSnapshot.installation.name,
+          version: skill.pluginSnapshot.installation.version,
+          marketplace: skill.pluginSnapshot.installation.marketplace,
+          source: skill.pluginSnapshot.installation.source,
+          entryHash: skill.pluginSnapshot.progress.reached[skill.pluginSnapshot.entryPath]?.hash
+        } : undefined
       }))
     });
     trace.record({
@@ -1845,6 +1855,7 @@ export class AgentLoop {
           effectKind: this.getEvidenceEffectKind(toolCall.function.name)
         });
         if (evidenceRecord.executionStatus === 'completed') {
+          if (evidenceRecord.pluginSkillProgress) restorePluginSkillProgress(checkpoint, evidenceRecord.pluginSkillProgress);
           if (evidenceRecord.providerEnvelope === undefined) {
             const raw = await evidenceStore.readContent(evidenceRecord);
             const decision = admission.decide({
@@ -1882,6 +1893,7 @@ export class AgentLoop {
         let toolArgs: Record<string, unknown> = {};
         let authorizationDecision: ToolAuthorizationDecision | undefined;
         let validationExecuted = false;
+        let pluginSkillProgress: PluginSkillProgress | undefined;
         try {
           toolArgs = this.parseToolArguments(toolCall.function.arguments);
           runDetailsBuilderRef.current?.recordToolArguments(toolCall.id, toolCall.function.name, toolArgs);
@@ -2010,6 +2022,8 @@ export class AgentLoop {
                 evidenceStore,
                 evidenceSessionId,
                 evidenceTaskId: checkpoint.taskId,
+                exposedToolNames,
+                onPluginSkillRead: (progress) => { pluginSkillProgress = progress; },
                 delegation
               });
               const cancellableRead = !isDraftEditPreparationTool(toolCall.function.name)
@@ -2036,7 +2050,8 @@ export class AgentLoop {
         }
         rawToolResult = this.normalizeToolResultFeedback(toolCall.function.name, rawToolResult);
         rawToolResult = delegation?.attachScopeNotice(rawToolResult) ?? rawToolResult;
-        evidenceRecord = await evidenceStore.complete(evidenceRecord, rawToolResult);
+        evidenceRecord = await evidenceStore.complete(evidenceRecord, rawToolResult, { pluginSkillProgress });
+        if (pluginSkillProgress) restorePluginSkillProgress(checkpoint, pluginSkillProgress);
         if (this.isToolResultError(rawToolResult)) {
           epoch.failures.push({
             toolName: toolCall.function.name,
@@ -2778,6 +2793,9 @@ export class AgentLoop {
       beforeModelRequest: async () => {
         this.throwIfAborted(request.signal, request.language);
         if (!vscode.workspace.isTrusted) throw new AgentInterruptedError('waiting_for_user', 'Workspace trust is required / 工作区需要信任');
+        if (checkpoint) await assertPluginSkillsCurrent(checkpoint.request.currentRunContext?.skills ?? [],
+          options.toolChoice === 'none' ? [] : tools.map(tool => tool.function.name), checkpoint);
+        this.throwIfAborted(request.signal, request.language);
         this.throwIfCostLimitReached(request);
         request.taskRunBudget?.assertCanDispatch();
         const snapshot = createAttemptSnapshot(new Date().toISOString());
@@ -3482,6 +3500,7 @@ export class AgentLoop {
       case READ_WORKSPACE_FILE_RANGE_TOOL_NAME:
         return 'reading_file_range';
       case READ_WORKSPACE_FILE_TOOL_NAME:
+      case READ_PLUGIN_SKILL_TOOL_NAME:
         return 'reading_file';
       case CREATE_DRAFT_EDIT_TOOL_NAME:
       case CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME:
@@ -3606,6 +3625,8 @@ export class AgentLoop {
       evidenceStore?: ToolEvidenceStore;
       evidenceSessionId?: string;
       evidenceTaskId?: string;
+      exposedToolNames?: ReadonlySet<string>;
+      onPluginSkillRead?: (progress: PluginSkillProgress) => void;
       delegation?: DelegationTracker;
     } = {}
   ): Promise<string> {
@@ -3613,6 +3634,11 @@ export class AgentLoop {
       const args = this.parseToolArguments(toolCall.function.arguments);
       options.delegation?.observeScope(toolCall.function.name, toolCall.function.arguments);
       switch (toolCall.function.name) {
+        case READ_PLUGIN_SKILL_TOOL_NAME: {
+          const result = await executePluginSkillRead(options.parentRequest, args, [...(options.exposedToolNames ?? [])]);
+          options.onPluginSkillRead?.(result.progress);
+          return result.content;
+        }
         case DELEGATION_CHECKPOINT_TOOL_NAME: {
           if (!options.delegation) throw new Error('Delegation checkpoints require protocol V11.');
           if (args.action === 'assess') return options.delegation.assess(args);
@@ -5174,6 +5200,7 @@ export class AgentLoop {
       return;
     }
     if (evidence.executionStatus === 'completed') {
+      if (evidence.pluginSkillProgress) restorePluginSkillProgress(checkpoint, evidence.pluginSkillProgress);
       if (checkpoint.state.epoch) this.upsertEpochEvidenceRef(checkpoint.state.epoch, evidence);
       if (evidence.providerEnvelope !== undefined) checkpoint.state.pending.results[executing.id] = evidence.providerEnvelope;
       checkpoint.state.pending.executing = undefined;

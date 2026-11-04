@@ -92,7 +92,7 @@ export function buildCurrentRunContext(input: CurrentRunContextBuilderInput): Cu
       continue;
     }
     const projected = truncateSkillContent(skill.content, remainingSkillCharacters);
-    if (!projected.content) {
+    if (!projected.content || (skill.pluginSnapshot && projected.truncated)) {
       discarded.push({
         id: skill.id,
         kind: 'skill',

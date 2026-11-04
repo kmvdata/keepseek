@@ -3,11 +3,12 @@ import { taskBudgetFromCheckpoint } from '../sessions/userTaskBudget';
 import { inspectDraftRunScope, ExactOperationGrants, draftRunIdentity, inspectAutomaticRunAuthorization, assertAutomaticRunAuthorization, inspectAutomaticEditAuthorization } from '../approvals/authorization';
 import { executionSegmentId, migrateUserTasks, taskForSegment, type UserTaskLink } from '../sessions/userTask';
 import { executionTimeView, reconcileExecutionTime, UserTaskClock } from '../sessions/executionTimeStats';
-import { createRunCheckpoint, inheritTaskBudget, checkpointCopy, endpointHash, grantCheckpointToolBudgetSegment, isResumableToolBudgetCheckpoint, recoverNoProgressWithUserTurn, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
+import { createRunCheckpoint, inheritTaskBudget, checkpointCopy, endpointHash, getCheckpointPluginSnapshot, grantCheckpointToolBudgetSegment, isResumableToolBudgetCheckpoint, recoverNoProgressWithUserTurn, recoveryBlocker, type RunCheckpoint } from '../agent/runCheckpoint';
 import { createHash, randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
 import { AgentRunAbortedError, AgentRunner } from '../agent/runner';
+import { assertPluginSkillsCurrent } from '../agent/pluginSkillRuntime';
 import { SubagentRuntime } from '../agent/subagents/runtime';
 import type { SubagentModelSetting, SubagentProgressState } from '../agent/subagents/types';
 import { AgentRequestCoordinator, type BackgroundContextCompressionRefreshUpdate } from '../agent/agentRequestCoordinator';
@@ -20,7 +21,7 @@ import {
   capOversizedFirstUserProviderContent,
   maintainArchivedToolResults
 } from '../agent/historyArchive';
-import { formatCurrentRunContextForAgent, getAgentToolNamesForPrompt } from '../agent/protocol';
+import { formatActiveSkills, formatCurrentRunContextForAgent, getAgentToolNamesForPrompt, READ_PLUGIN_SKILL_TOOL_NAME } from '../agent/protocol';
 import { FileContextStore } from '../context/fileContextStore';
 import { SafeFileEditor, type DelegatedEditApproval } from '../edits/safeFileEditor';
 import {
@@ -127,6 +128,7 @@ import { getAgentRuntimeProfile } from '../shared/modelProfiles';
 import { getErrorMessage } from '../shared/errors';
 import { formatBytes } from '../shared/format';
 import { expandPromptReferencesInPrompt } from '../context/references/promptReferences';
+import { resolvePluginSkillReferences } from '../context/references/skillReference';
 import { getWorkspaceReferenceResources } from '../context/references/referenceResources';
 import { getHtmlForWebview } from '../webview/html';
 import type { StartupPerformanceTrace } from '../shared/startupPerformance';
@@ -162,7 +164,7 @@ import {
   toSubagentProgressViewModel,
   upsertSubagentRunUsageSummary
 } from '../agent/subagentUsageStats';
-import { SkillStore } from '../skills/skillStore';
+import { SkillStore, type PluginSkillToolContext } from '../skills/skillStore';
 import { SkillCreator } from '../skills/skillCreator';
 import {
   copySelectionTextWithClipboardRestore,
@@ -256,6 +258,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly approvalCircuitBreaker = new ApprovalCircuitBreaker();
   private readonly draftDiffService: DraftDiffService;
   private readonly skillStore: SkillStore;
+  private readonly pluginSkillPreviews = new Map<string, string>();
+  private pluginSkillPreviewRegistration?: vscode.Disposable;
   private readonly skillCreator = new SkillCreator();
   private readonly sharedProjectSources = new SharedProjectSources();
   private creatingSkill = false;
@@ -542,6 +546,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   public dispose(): void {
     this.sharedProjectSources?.dispose();
+    this.pluginSkillPreviewRegistration?.dispose();
+    this.pluginSkillPreviews.clear();
     this.changeActionAbortController?.abort();
     clearInterval(this.taskTimingTimer);
     this.taskClock?.dispose();
@@ -2555,14 +2561,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private async refreshCurrentRunContext(
     session: ChatSession,
     prompt: string,
-    explicitSkillIds?: readonly string[]
+    explicitSkillIds?: readonly string[],
+    pluginTools?: PluginSkillToolContext,
+    inheritedPluginSkills?: readonly ActivatedSkill[]
   ): Promise<{ context: CurrentRunContext; failures: Array<{ id: string; name: string; error: string }> }> {
     if (this.sharedProjectSources.sessionId !== session.id) {
       const snapshot = await this.sharedProjectSources.refresh(session.id, session.projectScopeUri);
       await this.skillStore.refresh(snapshot);
     }
     const projectInstructions = this.sharedProjectSources.instructions;
-    const activeSkillResult = await this.skillStore.resolveAndLoadSkills({ session, prompt, explicitSkillIds });
+    const activeSkillResult = await this.skillStore.resolveAndLoadSkills({
+      session, prompt, explicitSkillIds, pluginTools, inheritedPluginSkills
+    });
     const context = buildCurrentRunContext({
       projectInstructions,
       skills: activeSkillResult.skills,
@@ -2618,6 +2628,30 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private async openSkill(skillId: string): Promise<void> {
     const manifest = this.skillStore.getManifest(skillId);
     if (!manifest) {
+      return;
+    }
+    if (manifest.pluginInstallation) {
+      try {
+        const skill = await this.skillStore.loadPluginEntry(manifest);
+        if (!this.pluginSkillPreviewRegistration) {
+          this.pluginSkillPreviewRegistration = vscode.Disposable.from(
+            vscode.workspace.registerTextDocumentContentProvider('keepseek-plugin-skill', {
+              provideTextDocumentContent: uri => this.pluginSkillPreviews.get(uri.toString()) ?? ''
+            }),
+            vscode.workspace.onDidCloseTextDocument(document => this.pluginSkillPreviews.delete(document.uri.toString()))
+          );
+        }
+        const uri = vscode.Uri.from({ scheme: 'keepseek-plugin-skill',
+          path: `/${manifest.pluginInstallation.name}/${manifest.name}/SKILL.md`, query: randomUUID() });
+        this.pluginSkillPreviews.set(uri.toString(), skill.content);
+        try {
+          await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), { preview: true });
+        } finally {
+          this.pluginSkillPreviews.delete(uri.toString());
+        }
+      } catch (error) {
+        vscode.window.showErrorMessage(this.t('cannotOpenFileReference', { message: getErrorMessage(error) }));
+      }
       return;
     }
     try {
@@ -4941,6 +4975,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         ? await this.sessionStore.getRecoveryCheckpoint(priorTail!.id) : undefined;
       if ((priorTail?.runCheckpoint?.stopReason ?? priorTail?.runCheckpointArchive?.summary.stopReason) === 'no_progress_loop'
         && !replaceMessageId && !noProgressRecovery) throw new Error('Saved no-progress checkpoint unavailable; restore the session before continuing.');
+      const continuingTask = options?.userTask && options.userTask.reason !== 'user' ? options.userTask : undefined;
+      const pluginReferences = continuingTask || noProgressRecovery ? { ids: [], failures: [] }
+        : resolvePluginSkillReferences(trimmedPrompt, this.skillStore.getManifests());
+      if (pluginReferences.failures.length) {
+        vscode.window.showWarningMessage(this.t('skillLoadFailed', {
+          skill: pluginReferences.failures.map(failure => `${failure.name}: ${failure.error}`).join(', ')
+        }));
+        return;
+      }
       const approvalMode = normalizeApprovalMode(activeSession.approvalMode);
       const executionMode = normalizeExecutionMode(activeSession.executionMode);
       const explicitSubagentSelection = resolveExplicitSubagentSelection(trimmedPrompt);
@@ -4976,9 +5019,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.repairLoopsBySession.delete(activeSession.id);
         activeSession.repairLoop = undefined;
       }
-      previousTurnUsage = activeSession.lastTurnUsage;
-      previousPromptCacheDiagnostics = activeSession.promptCacheDiagnostics;
-      activeSession.lastTurnUsage = undefined;
       if (replaceMessageId) {
         // 编辑重发：历史将被 splice（前缀本来就从该点失效），按新 prompt 重新确定
         // implicit skill 集合与 slim 工具集，避免沿用旧请求的冻结状态。
@@ -4988,25 +5028,49 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           activeSession.requestProtocol.toolNames = [];
         }
       }
-      const runContextResult = await this.refreshCurrentRunContext(
-        activeSession,
-        expandedPrompt,
-        normalizeSkillIds(options?.skillIds)
+      let inheritedPluginSkills: ActivatedSkill[] | undefined;
+      if (continuingTask || noProgressRecovery) {
+        inheritedPluginSkills = [];
+        const priorPluginRun = [...activeSession.messages].reverse().find(message => message.role === 'assistant'
+          && message.userTask?.id === continuingTask?.id && message.usedSkills?.some(skill => skill.source === 'codexPlugin'));
+        if (priorPluginRun || noProgressRecovery?.request.currentRunContext?.skills.some(skill => skill.source === 'codexPlugin')) {
+          const checkpoint = noProgressRecovery ?? (priorPluginRun && await this.sessionStore.getTaskCheckpoint(priorPluginRun.id));
+          const priorSkills = checkpoint?.request.currentRunContext?.skills.filter(skill => skill.source === 'codexPlugin');
+          if (!checkpoint || !priorSkills?.length) throw new Error(this.t('pluginSkillRecoveryUnavailable'));
+          inheritedPluginSkills = priorSkills.map(skill => {
+            const pluginSnapshot = getCheckpointPluginSnapshot(checkpoint, skill);
+            if (!pluginSnapshot) throw new Error(this.t('pluginSkillRecoveryUnavailable'));
+            return { ...skill, pluginSnapshot };
+          });
+        }
+      }
+      const ordinarySkillIds = normalizeSkillIds(options?.skillIds)
+        ?.filter(id => this.skillStore.getManifest(id)?.source !== 'codexPlugin') ?? [];
+      // The route capability is evaluated against the actual frozen tool list.
+      const slimToolNames = this.resolveSessionToolNames(activeSession, expandedPrompt, model, sourceConfig);
+      const availableTools = options?.executionLimits?.toolsEnabled === false ? [] : slimToolNames;
+      const runContextResult = await this.refreshCurrentRunContext(activeSession, expandedPrompt,
+        [...ordinarySkillIds, ...pluginReferences.ids],
+        { availableTools, routingAvailable: availableTools.includes(READ_PLUGIN_SKILL_TOOL_NAME) },
+        inheritedPluginSkills
       );
-      if (runContextResult.failures.length) {
+      const pluginBudgetFailure = [...pluginReferences.ids, ...(inheritedPluginSkills ?? []).map(skill => skill.id)].some(id =>
+        !runContextResult.context.skills.some(skill => skill.id === id && skill.pluginSnapshot));
+      if (runContextResult.failures.length || pluginBudgetFailure) {
         vscode.window.showWarningMessage(this.t('skillLoadFailed', {
           skill: runContextResult.failures.map((failure) => `${failure.name}: ${failure.error}`).join(', ')
+            || this.t('pluginSkillBudgetUnavailable')
         }));
+        if (pluginBudgetFailure) return;
       }
+      previousTurnUsage = activeSession.lastTurnUsage;
+      previousPromptCacheDiagnostics = activeSession.promptCacheDiagnostics;
+      activeSession.lastTurnUsage = undefined;
       const currentRunContext = runContextResult.context;
       const activeSkills = currentRunContext.skills;
-      // 会话冻结的 slim 工具集：首轮请求确定后跨轮复用，保证 tools schema 前缀稳定
-      const slimToolNames = this.resolveSessionToolNames(
-        activeSession,
-        expandedPrompt,
-        model,
-        sourceConfig
-      );
+      const pluginSkills = activeSkills.filter(skill => skill.source === 'codexPlugin');
+      // A history summary can dispatch before the main Runner starts.
+      if (pluginSkills.length) await assertPluginSkillsCurrent(pluginSkills, availableTools);
       this.slimToolNamesBySession.set(activeSession.id, slimToolNames);
       const now = new Date().toISOString();
       const replacementIndex = replaceMessageId
@@ -5024,7 +5088,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           content: instruction.content
         })),
         ...contextFiles.map((file) => ({ id: file.id, kind: 'context-file', content: file.content })),
-        ...currentRunContext.skills.map((skill) => ({ id: skill.id, kind: 'skill', content: skill.content })),
+        ...currentRunContext.skills.filter(skill => skill.source !== 'codexPlugin')
+          .map((skill) => ({ id: skill.id, kind: 'skill', content: skill.content })),
       ], totalContextBudgetCharacters);
       const computedContextInstructions = formatCurrentRunContextForAgent({
         contextFiles,
@@ -5090,7 +5155,11 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       const executionModeTail = getPlanWorkflowTail(executionMode);
       const pendingApprovalTail = activeSession.approvalProcessing?.status === 'blocked'
         ? `<keepseek-operation-results>${JSON.stringify(activeSession.approvalProcessing)}</keepseek-operation-results>` : '';
-      const providerTails = [dynamicContextTail, approvalTail, pendingApprovalTail, draftRunTail?.content ?? '', explicitSubagentTail, executionModeTail].filter(Boolean);
+      const pluginTaskTail = pluginSkills.length
+        ? formatPluginSkillTaskTail(pluginSkills, this.language, activeSession.requestProtocol?.version)
+        : activeSession.messages.some(message => message.usedSkills?.some(skill => skill.source === 'codexPlugin'))
+          ? this.t('pluginSkillInactiveTail') : '';
+      const providerTails = [dynamicContextTail, pluginTaskTail, approvalTail, pendingApprovalTail, draftRunTail?.content ?? '', explicitSubagentTail, executionModeTail].filter(Boolean);
 
       const userMessage: ChatMessage = {
         id: options?.userMessageId ?? randomUUID(),
@@ -6845,4 +6914,14 @@ function toChatMessageSkills(skills: ActivatedSkill[]): ChatMessageSkill[] | und
     name: skill.name,
     source: skill.source
   }));
+}
+
+function formatPluginSkillTaskTail(skills: ActivatedSkill[], language: KeepseekLanguage, requestProtocolVersion?: number): string {
+  return [
+    '<keepseek-plugin-skills>',
+    language === 'en' ? 'The following installed plugin Skills are selected only for this task. Use the available host tools and respect all workspace rules.'
+      : '以下已安装的插件 Skill 仅为本次任务启用。请使用当前宿主可用的工具，并遵守工作区规则。',
+    formatActiveSkills({ skills, language, requestProtocolVersion }),
+    '</keepseek-plugin-skills>'
+  ].join('\n');
 }

@@ -38,6 +38,8 @@ export const DELEGATE_PARALLEL_TOOL_NAME = 'keepseek_delegate_parallel';
 export const READ_SUBAGENT_RESULT_TOOL_NAME = 'keepseek_read_subagent_result';
 export const DELEGATION_CHECKPOINT_TOOL_NAME = 'keepseek_delegation_checkpoint';
 export const READ_EVIDENCE_TOOL_NAME = 'keepseek_read_evidence';
+export const READ_PLUGIN_SKILL_TOOL_NAME = 'keepseek_read_plugin_skill';
+export const PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION = 12;
 
 const UNPROJECTED_HISTORY_MESSAGE_LIMIT = 24;
 const CORE_AGENT_TOOL_NAMES_V1 = [
@@ -103,6 +105,8 @@ const CORE_AGENT_TOOL_NAMES_V9 = [...CORE_AGENT_TOOL_NAMES_V8, APPLY_PATCH_TOOL_
 const ALL_AGENT_TOOL_NAMES_V9 = [...ALL_AGENT_TOOL_NAMES_V8, APPLY_PATCH_TOOL_NAME];
 const CORE_AGENT_TOOL_NAMES_V11 = [...CORE_AGENT_TOOL_NAMES_V9, DELEGATION_CHECKPOINT_TOOL_NAME];
 const ALL_AGENT_TOOL_NAMES_V11 = [...ALL_AGENT_TOOL_NAMES_V9, DELEGATION_CHECKPOINT_TOOL_NAME];
+const CORE_AGENT_TOOL_NAMES_V12 = [...CORE_AGENT_TOOL_NAMES_V11, READ_PLUGIN_SKILL_TOOL_NAME];
+const ALL_AGENT_TOOL_NAMES_V12 = [...ALL_AGENT_TOOL_NAMES_V11, READ_PLUGIN_SKILL_TOOL_NAME];
 
 export interface BuildAgentMessagesInput {
   prompt: string;
@@ -251,7 +255,7 @@ export function formatCurrentRunContextForAgent(input: {
   const contextBlock = formatAgentContextFiles(input);
   const projectInstructionsBlock = formatProjectInstructionsForAgent(input.currentRunContext, input.language);
   const skillsBlock = formatActiveSkills({
-    skills: input.currentRunContext?.skills,
+    skills: input.currentRunContext?.skills.filter(skill => skill.source !== 'codexPlugin'),
     language: input.language,
     requestProtocolVersion: input.requestProtocolVersion
   });
@@ -568,6 +572,7 @@ export function formatActiveSkills(input: {
     return [
       `## ${skill.name}`,
       `Source: ${skill.source}`,
+      ...(skill.source === 'codexPlugin' ? [`Skill ID: ${skill.id}`] : []),
       `Instruction file: ${skill.skillUri}`,
       `Activation: ${skill.activation?.source ?? 'session'}${skill.activation?.reason ? ` — ${skill.activation.reason}` : ''}`,
       skill.hasScripts
@@ -622,7 +627,9 @@ export function getAgentToolNamesForPrompt(
   slimModeEnabled: boolean,
   requestProtocolVersion = 5
 ): string[] {
-  const coreNames = requestProtocolVersion >= 11
+  const coreNames = requestProtocolVersion >= PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION
+    ? CORE_AGENT_TOOL_NAMES_V12
+    : requestProtocolVersion >= 11
     ? CORE_AGENT_TOOL_NAMES_V11
     : requestProtocolVersion >= 9
     ? CORE_AGENT_TOOL_NAMES_V9
@@ -635,7 +642,9 @@ export function getAgentToolNamesForPrompt(
     : requestProtocolVersion >= 2
       ? CORE_AGENT_TOOL_NAMES_V3
       : CORE_AGENT_TOOL_NAMES_V1;
-  const allNames = requestProtocolVersion >= 11
+  const allNames = requestProtocolVersion >= PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION
+    ? ALL_AGENT_TOOL_NAMES_V12
+    : requestProtocolVersion >= 11
     ? ALL_AGENT_TOOL_NAMES_V11
     : requestProtocolVersion >= 9
     ? ALL_AGENT_TOOL_NAMES_V9
@@ -698,6 +707,7 @@ export function isDraftRunPreparationTool(toolName: string): boolean {
 
 function getRawAgentTools(requestProtocolVersion: number): DeepSeekFunctionTool[] {
   const tools: DeepSeekFunctionTool[] = [
+    ...(requestProtocolVersion >= PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION ? [createPluginSkillReadTool()] : []),
     ...(requestProtocolVersion >= 8 ? [createEvidenceReadTool()] : []),
     ...(requestProtocolVersion >= 11 ? [createDelegationCheckpointTool()] : []),
     ...(requestProtocolVersion >= 5 ? createSubagentTools(requestProtocolVersion) : []),
@@ -1120,6 +1130,28 @@ function getRawAgentTools(requestProtocolVersion: number): DeepSeekFunctionTool[
     }
   ];
   return tools;
+}
+
+function createPluginSkillReadTool(): DeepSeekFunctionTool {
+  return {
+    type: 'function',
+    function: {
+      name: READ_PLUGIN_SKILL_TOOL_NAME,
+      description: 'Read a linked text resource or inspect or route to one linked workflow inside a Codex plugin explicitly selected for this task. Use the exact skillId and reference from active Skill context or a previous result. Choose read to inspect instructions and route to request workflow execution; report any capability block before taking related actions. Use keepseek_read_evidence if delivery is partial.',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: {
+          skillId: { type: 'string', description: 'Exact ID of the explicitly selected plugin Skill.' },
+          reference: { type: 'string', description: 'Declared relative or same-plugin qualified reference.' },
+          mode: { type: 'string', enum: ['read', 'route'] },
+          from: { type: 'string', description: 'Package-relative path of a previously reached Skill or text resource; omit for the selected entry.' }
+        },
+        required: ['skillId', 'reference', 'mode'],
+        additionalProperties: false
+      }
+    }
+  };
 }
 
 function createEvidenceReadTool(): DeepSeekFunctionTool {

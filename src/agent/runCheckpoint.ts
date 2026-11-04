@@ -1,7 +1,7 @@
 import { OUTPUT_BUDGET_POLICY_VERSION } from '../shared/outputBudget';
 import { normalizeRequestBudget, type RequestBudgetSnapshot } from './requestBudget';
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentRequest, AgentToolRound, DraftEdit, DraftRunProposal, RepairLoopState } from '../shared/types';
+import type { ActivatedSkill, AgentRequest, AgentToolRound, DraftEdit, DraftRunProposal, RepairLoopState } from '../shared/types';
 import type { DeepSeekAssistantMessage, DeepSeekMessage, DeepSeekUsage } from './deepseek/types';
 import type { ProviderNativeRunState } from './runner';
 import { validEpochProgressState, type ContextEpochState } from './contextEpoch';
@@ -12,6 +12,14 @@ import { normalizeExecutionMode } from './executionMode';
 import { createLogicalRunBudgetState, grantNextToolBudgetSegment, normalizeLogicalRunBudgetLimits, type LogicalRunBudgetState } from './executionPolicy';
 import { normalizeSubagentHostContext } from './subagents/contextCapsule';
 import { normalizeDelegationState } from './delegation';
+import { normalizeCodexPluginSnapshot, normalizeCodexPluginTraversalState, type CodexPluginSnapshot,
+  type CodexPluginTraversalState } from '../skills/codexPluginResources';
+
+/** Latest durable traversal for one pinned plugin entry. */
+export interface PluginSkillProgress {
+  skillId: string;
+  progress: CodexPluginTraversalState;
+}
 
 export type StopReason = 'user_stop' | 'time_budget' | 'tool_timeout' | 'connection_interrupted'
   | 'provider_error' | 'extension_restart' | 'waiting_for_user' | 'budget_pause' | 'budget_exhausted' | 'completed' | 'storage_failure' | 'resource_limit'
@@ -72,6 +80,7 @@ export interface RunCheckpoint {
   }>;
   taskPlan?: import('../shared/types').TaskPlan;
   delegationBudget?: import('./subagents/types').SubagentTreeBudget;
+  pluginSkillProgress?: PluginSkillProgress[];
   state?: {
     continuation?: { content: string; lastSegment?: string; finishReason?: string | null; requests: number; inFlight: boolean };
     completedReplay?: import('../shared/types').ProviderReplayState;
@@ -200,6 +209,7 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
         || ![m.oldOutputTokens, m.newOutputTokens].every((n) => Number.isSafeInteger(n) && n > 0)))) return undefined;
     if (cp.state?.epoch && !validEpochProgressState(cp.state.epoch)) return undefined;
     const copy = checkpointCopy(cp);
+    if (!normalizeCheckpointPluginSkills(copy)) return undefined;
     copy.budgetLimits = normalizeLogicalRunBudgetLimits(copy.budgetLimits);
     if (copy.request.subagentHostContext !== undefined) {
       const context = normalizeSubagentHostContext(copy.request.subagentHostContext);
@@ -290,6 +300,60 @@ export function normalizeRunCheckpoint(value: unknown): RunCheckpoint | undefine
     }
     return copy;
   } catch { return undefined; }
+}
+
+export function getCheckpointPluginSnapshot(checkpoint: RunCheckpoint, skill: ActivatedSkill): CodexPluginSnapshot | undefined {
+  const snapshot = skill.pluginSnapshot;
+  if (!snapshot || skill.source !== 'codexPlugin' || skill.activation?.source !== 'explicit' || skill.runAs) return undefined;
+  const progress = checkpoint.pluginSkillProgress?.find(item => item.skillId === skill.id)?.progress;
+  return progress ? { ...snapshot, progress } : snapshot;
+}
+
+/** Apply an evidence receipt only to the frozen entry that authorized the read. */
+export function restorePluginSkillProgress(checkpoint: RunCheckpoint, receipt: PluginSkillProgress): void {
+  const skill = checkpoint.request.currentRunContext?.skills.find(item => item.id === receipt.skillId);
+  const snapshot = skill && getCheckpointPluginSnapshot(checkpoint, skill);
+  const progress = snapshot && normalizeCodexPluginTraversalState(receipt.progress, snapshot);
+  const current = snapshot?.progress;
+  const invalidReceipt = 'Invalid Codex plugin read receipt / Codex 插件读取凭据无效';
+  if (!progress || !current) throw new Error(invalidReceipt);
+  if (progress.reads <= current.reads && progress.seen.every((item, index) => item === current.seen[index])) return;
+  if (progress.reads !== current.reads + 1 || progress.bytes < current.bytes
+    || !current.seen.every((item, index) => item === progress.seen[index])) throw new Error(invalidReceipt);
+  checkpoint.pluginSkillProgress = [
+    ...(checkpoint.pluginSkillProgress ?? []).filter(item => item.skillId !== receipt.skillId),
+    { skillId: receipt.skillId, progress }
+  ];
+}
+
+function normalizeCheckpointPluginSkills(checkpoint: RunCheckpoint): boolean {
+  const skills = checkpoint.request.currentRunContext?.skills ?? [];
+  if (!Array.isArray(skills)) return false;
+  const pluginIds = new Set<string>();
+  for (const skill of skills) {
+    if (skill.source !== 'codexPlugin' && skill.pluginSnapshot === undefined && skill.pluginPolicyCwd === undefined) continue;
+    if (!skill.pluginSnapshot || skill.source !== 'codexPlugin' || skill.activation?.source !== 'explicit' || skill.runAs
+      || typeof skill.id !== 'string' || !skill.id || pluginIds.has(skill.id)
+      || (skill.pluginPolicyCwd !== undefined && (typeof skill.pluginPolicyCwd !== 'string' || new URL(skill.pluginPolicyCwd).protocol !== 'file:'))) return false;
+    const normalized = normalizeCodexPluginSnapshot(skill.pluginSnapshot);
+    if (!normalized) return false;
+    skill.pluginSnapshot = normalized;
+    pluginIds.add(skill.id);
+  }
+  const receipts = checkpoint.pluginSkillProgress;
+  if (receipts === undefined) return true;
+  if (!Array.isArray(receipts) || receipts.length > pluginIds.size) return false;
+  const normalizedReceipts: PluginSkillProgress[] = [];
+  for (const receipt of receipts) {
+    if (!receipt || !pluginIds.delete(receipt.skillId)) return false;
+    const snapshot = skills.find(skill => skill.id === receipt.skillId)?.pluginSnapshot;
+    const progress = snapshot && normalizeCodexPluginTraversalState(receipt.progress, snapshot);
+    if (!snapshot || !progress || progress.reads < snapshot.progress.reads || progress.bytes < snapshot.progress.bytes
+      || !snapshot.progress.seen.every((item, index) => item === progress.seen[index])) return false;
+    normalizedReceipts.push({ skillId: receipt.skillId, progress });
+  }
+  checkpoint.pluginSkillProgress = normalizedReceipts;
+  return true;
 }
 
 export function recoveryBlocker(cp: RunCheckpoint, currentModel?: AgentRequest['model']): string | undefined {

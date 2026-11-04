@@ -191,7 +191,16 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         scopeButton.disabled = Boolean(state.isBusy);
         scopeButton.title = getSkillsState().scopeUri || t('sharedScopeRequired');
         scopeButton.addEventListener('click', function() { vscode.postMessage({ type: 'selectProjectScope' }); });
-        commandSkillList.append(scopeButton);
+        var refreshButton = document.createElement('button');
+        refreshButton.type = 'button';
+        refreshButton.className = 'command-skill-action';
+        refreshButton.textContent = t('skillsRefresh');
+        refreshButton.disabled = Boolean(state.isBusy);
+        refreshButton.addEventListener('click', function() { vscode.postMessage({ type: 'requestSkills' }); });
+        var controls = document.createElement('div');
+        controls.className = 'command-skill-actions';
+        controls.append(scopeButton, refreshButton);
+        commandSkillList.append(controls);
         var scopeInfo = document.createElement('div');
         scopeInfo.className = 'command-row-description';
         scopeInfo.textContent = getSkillsState().scopeUri || t('sharedScopeRequired');
@@ -234,7 +243,7 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
       }
 
       function createCommandSkillItem(skill) {
-        var active = isSkillActive(skill.id);
+        var active = skill.plugin ? isPluginSkillInPrompt(skill) : isSkillActive(skill.id);
         var canUse = Boolean(skill.enabled && !skill.unavailableReason);
         var item = document.createElement('div');
         item.className = 'command-skill-item' + (active ? ' is-active' : '') + (!canUse ? ' is-disabled' : '');
@@ -247,7 +256,8 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
 
         var name = document.createElement('span');
         name.className = 'command-skill-name';
-        name.textContent = (skill.interface && skill.interface.display_name) ? skill.interface.display_name + ' (' + skill.name + ')' : (skill.name || skill.id);
+        var referenceName = skill.plugin ? getSkillMentionName(skill) : (skill.name || skill.id);
+        name.textContent = skill.interface && skill.interface.display_name ? skill.interface.display_name + ' (' + referenceName + ')' : referenceName;
         name.title = name.textContent;
 
         var description = document.createElement('span');
@@ -261,6 +271,13 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         meta.title = meta.textContent;
 
         copy.append(name, description, meta);
+        if (skill.plugin) {
+          var capability = document.createElement('span');
+          capability.className = 'command-plugin-capability';
+          capability.textContent = formatPluginSkillCapability(skill.plugin).join(' · ');
+          capability.title = capability.textContent;
+          copy.append(capability);
+        }
 
         var checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
@@ -270,20 +287,21 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         checkbox.checked = active;
         checkbox.disabled = !canUse || Boolean(state.isBusy);
         checkbox.setAttribute('aria-label', t(active ? 'skillsDeselect' : 'skillsSelect', {
-          name: skill.name || skill.id
+          name: referenceName
         }));
         checkbox.title = canUse
-          ? t(active ? 'skillsDeselect' : 'skillsSelect', { name: skill.name || skill.id })
+          ? t(active ? 'skillsDeselect' : 'skillsSelect', { name: referenceName })
           : getSkillUnavailableText(skill);
 
         main.append(copy, checkbox);
 
         var actions = document.createElement('div');
         actions.className = 'command-skill-actions';
-        actions.append(
-          createSkillActionButton(skill, 'open', t('skillsOpen'), false),
-          createSkillActionButton(skill, 'workspace-default', skill.workspaceDefault ? t('skillsUnsetWorkspaceDefault') : t('skillsSetWorkspaceDefault'), !skill.enabled)
-        );
+        actions.append(createSkillActionButton(skill, 'open', t('skillsOpen'), Boolean(skill.plugin && !canUse)));
+        if (!skill.plugin) {
+          actions.append(createSkillActionButton(skill, 'workspace-default',
+            skill.workspaceDefault ? t('skillsUnsetWorkspaceDefault') : t('skillsSetWorkspaceDefault'), !skill.enabled));
+        }
 
         item.append(main, actions);
         return item;
@@ -302,9 +320,11 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
 
       function formatSkillMeta(skill) {
         var parts = [
-          skill.sourceLabel || skill.source || '',
-          skill.enabled ? t('skillsEnabled') : t('skillsDisabled'),
-          skill.allowImplicit ? t('skillsAllowAuto') : t('skillsManualOnly'),
+          skill.plugin ? formatPluginSkillOrigin(skill.plugin) : (skill.sourceLabel || skill.source || ''),
+          skill.plugin
+            ? t(skill.enabled ? 'pluginSkillEnabled' : 'pluginSkillDisabled')
+            : t(skill.enabled ? 'skillsEnabled' : 'skillsDisabled'),
+          skill.plugin ? t('pluginSkillTaskOnly') : t(skill.allowImplicit ? 'skillsAllowAuto' : 'skillsManualOnly'),
           skill.policySource || '',
           skill.workspaceDefault ? t('skillsWorkspaceDefault') : ''
         ];
@@ -337,6 +357,16 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
           if (!skill.enabled || skill.unavailableReason) {
             return;
           }
+          if (skill.plugin) {
+            if (selected && !isPluginSkillInPrompt(skill)) {
+              insertSkillChip(skill);
+              setComposerStatus(t('pluginSkillInserted', { name: getSkillMentionName(skill) }));
+            } else if (!selected) {
+              removePromptSkillChip(skillId, getSkillPath(skill));
+              setComposerStatus(t('skillRemoved', { name: getSkillMentionName(skill) }));
+            }
+            return;
+          }
           if (selected) {
             vscode.postMessage({ type: 'useSkill', skillId: skillId });
             setComposerStatus(t('skillInserted', { name: skill.name || skillId }));
@@ -350,7 +380,7 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
           vscode.postMessage({ type: 'openSkill', skillId: skillId });
           return;
         }
-        if (action === 'workspace-default') {
+        if (action === 'workspace-default' && !skill.plugin) {
           vscode.postMessage({ type: 'setSkillWorkspaceDefault', skillId: skillId, enabled: !skill.workspaceDefault });
         }
       }

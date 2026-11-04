@@ -59,6 +59,8 @@ import './executionTimeStats.test';
 import './subagentUsageRuntime.test';
 import './referenceResources.test';
 import './skillDiscovery.test';
+import './codexPluginDiscovery.test';
+import './codexPluginResources.test';
 import './skillCreator.test';
 import './skillActivationResolver.test';
 import './skillReference.test';

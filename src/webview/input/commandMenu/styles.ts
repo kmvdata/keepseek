@@ -543,10 +543,15 @@ export const commandMenuStylesFragment: WebviewFragment = {
     }
 
     .command-skill-description,
-    .command-skill-meta {
+    .command-skill-meta,
+    .command-plugin-capability {
       color: var(--vscode-descriptionForeground);
       font-size: 11px;
       line-height: 1.25;
+    }
+
+    .command-plugin-capability {
+      overflow-wrap: anywhere;
     }
 
     .command-skill-checkbox {

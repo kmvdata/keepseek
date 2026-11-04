@@ -31,6 +31,10 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
           return;
         }
         sanitizePromptContent();
+        if (hasStalePluginSkillInPrompt()) {
+          setComposerStatus(t('pluginSkillStale'));
+          return;
+        }
         var prompt = serializePrompt();
         if (!prompt.trim()) return;
         closeCommandMenu();
@@ -79,6 +83,9 @@ export const composerRenderFragment: WebviewFragment = {
         renderCommandMenu();
         renderExecutionModeControl();
         renderReferenceMenuButton();
+        if (referenceMenuOpen && referenceMenuSource === 'skill') {
+          renderReferenceMenu();
+        }
         renderSendButton();
         setApiKeyVisible(apiKeyVisible, false);
         if (settingsOverlay && !settingsOverlay.classList.contains('hidden')) {

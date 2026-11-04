@@ -87,7 +87,7 @@ export function capOversizedFirstUserProviderContent(
   maxChars = 32_000
 ): HistoryMaintenanceResult {
   const message = session.messages.find((candidate) => candidate.role === 'user');
-  if (!message) {
+  if (!message || message.usedSkills?.some(skill => skill.source === 'codexPlugin')) {
     return emptyMaintenanceResult();
   }
   const source = (message.providerContent ?? message.expandedContent ?? message.content).trim();

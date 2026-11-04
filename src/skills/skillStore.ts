@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
 import type { ChatSession } from '../shared/types';
-import { getConfiguredMaxImplicitSkills } from '../shared/config';
+import { getConfiguredMaxFileBytes, getConfiguredMaxImplicitSkills } from '../shared/config';
 import { getCurrentWorkspaceSessionScope } from '../sessions/chatSessionStore';
 import { normalizeUri } from '../agent/projectInstructions';
 import type { SharedCodexConfigSnapshot } from '../context/sharedCodexConfig';
-import { SkillDiscovery } from './skillDiscovery';
+import { SkillDiscovery, validateCodexPluginSkill } from './skillDiscovery';
 import { SkillLoader } from './skillLoader';
 import {
   SkillActivationResolver,
@@ -18,6 +18,11 @@ import {
 } from './skillTypes';
 
 const SKILL_STATE_KEY = 'keepseek.skillState.v1';
+
+export interface PluginSkillToolContext {
+  availableTools: readonly string[];
+  routingAvailable: boolean;
+}
 
 interface StoredSkillState {
   workspaceDefaultSkillRefs?: Record<string, string[]>;
@@ -84,7 +89,7 @@ export class SkillStore {
 
   public async useSkill(session: ChatSession, id: string): Promise<boolean> {
     const manifest = this.getManifest(id);
-    if (!manifest || !this.canUseSkill(manifest)) {
+    if (!manifest || manifest.pluginInstallation || !this.canUseSkill(manifest)) {
       return false;
     }
 
@@ -108,7 +113,7 @@ export class SkillStore {
 
   public async setSkillWorkspaceDefault(id: string, enabled: boolean): Promise<boolean> {
     const manifest = this.getManifest(id);
-    if (!manifest) {
+    if (!manifest || manifest.pluginInstallation) {
       return false;
     }
     const workspaceKey = this.getWorkspaceKey();
@@ -137,6 +142,8 @@ export class SkillStore {
     prompt: string;
     explicitSkillIds?: readonly string[];
     maxImplicitSkills?: number;
+    pluginTools?: PluginSkillToolContext;
+    inheritedPluginSkills?: readonly ActivatedSkill[];
   }): Promise<ActiveSkillLoadResult> {
     const hasFrozenImplicitSnapshot = Array.isArray(input.session.frozenImplicitSkillIds);
     const frozenImplicitSkillIds = hasFrozenImplicitSnapshot
@@ -166,15 +173,19 @@ export class SkillStore {
         input.session.frozenImplicitSkillIds = keptIds;
       }
     }
-    const skills: ActivatedSkill[] = [];
+    const skills: ActivatedSkill[] = [...(input.inheritedPluginSkills ?? [])];
     const failures: ActiveSkillLoadResult['failures'] = activation.skipped
       .filter(skip => (input.explicitSkillIds ?? []).includes(skip.id) && (skip.reason === 'disabled' || skip.reason === 'workspace_untrusted'))
       .map(skip => ({ id: skip.id, name: skip.name, error: this.getManifest(skip.id)?.unavailableReason ?? skip.reason }));
     for (const decision of activation.activated) {
+      if (decision.manifest.pluginInstallation && input.inheritedPluginSkills) continue;
       try {
-        const loaded = await this.loadManifest(decision.manifest);
+        const loaded = decision.manifest.pluginInstallation
+          ? await this.loadPluginEntry(decision.manifest, input.pluginTools)
+          : await this.loadManifest(decision.manifest);
         const skill = { ...loaded, activation: { ...decision.activation } };
-        this.cachedActiveSkills.set(decision.manifest.id, skill);
+        if (!decision.manifest.pluginInstallation) this.cachedActiveSkills.set(decision.manifest.id, skill);
+        this.activeSkillLoadErrors.delete(decision.manifest.id);
         skills.push(skill);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -189,6 +200,22 @@ export class SkillStore {
       }
     }
     return { skills, failures, activation };
+  }
+
+  public async loadPluginEntry(manifest: SkillManifest, tools?: PluginSkillToolContext): Promise<ActivatedSkill> {
+    const installation = manifest.pluginInstallation;
+    const cwd = this.config?.scope?.cwd.toString();
+    if (!installation) throw new Error('Plugin installation unavailable / 插件安装不可用');
+    return this.loader.loadPluginSkill(manifest,
+      this.manifests.filter(item => item.pluginInstallation && item.pluginInstallation.id === installation.id
+        && item.pluginInstallation.installationHash === installation.installationHash),
+      {
+        isTrusted: vscode.workspace.isTrusted,
+        maxFileBytes: getConfiguredMaxFileBytes(),
+        availableTools: tools?.availableTools ?? [],
+        routingAvailable: tools?.routingAvailable ?? false,
+        validateInstallation: (install, skillPath, name) => validateCodexPluginSkill(install, skillPath, cwd, name)
+      }, cwd);
   }
 
   private canUseSkill(manifest: SkillManifest): boolean {
@@ -236,7 +263,7 @@ export class SkillStore {
     const refs = this.workspaceDefaultSkillRefs.get(this.getWorkspaceKey()) ?? [];
     const refKeys = new Set(refs.map((ref) => normalizeUri(ref)));
     return this.manifests
-      .filter((manifest) => refs.includes(manifest.id) || refKeys.has(normalizeUri(manifest.skillUri)))
+      .filter((manifest) => !manifest.pluginInstallation && (refs.includes(manifest.id) || refKeys.has(normalizeUri(manifest.skillUri))))
       .map((manifest) => manifest.id);
   }
 

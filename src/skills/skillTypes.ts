@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import type { ActivatedSkill, SkillSource } from '../shared/types';
+import type { CodexPluginInstallation } from './codexPluginDiscovery';
+import type { CodexPluginCapability } from './codexPluginResources';
 
 export { type ActivatedSkill, type SkillSource };
 
@@ -35,6 +37,10 @@ export interface SkillManifest {
   documentHash?: string;
   metadataHash?: string;
   readBoundaryUri?: string;
+  pluginInstallation?: CodexPluginInstallation;
+  pluginQualifiedName?: string;
+  pluginSelectionStamp?: string;
+  pluginCapability?: CodexPluginCapability;
 }
 
 export interface SkillManifestView {
@@ -61,6 +67,16 @@ export interface SkillManifestView {
   active?: boolean;
   loadError?: string;
   workspaceDefault?: boolean;
+  plugin?: {
+    name: string;
+    version: string;
+    marketplace: string;
+    source: CodexPluginInstallation['source'];
+    qualifiedName: string;
+    selectionStamp?: string;
+    capabilityStatus: CodexPluginCapability['status'];
+    capabilityDetails?: Array<{ en: string; zh: string; status: 'available' | 'missing' | 'unverified' }>;
+  };
 }
 
 export interface SkillStateView {
@@ -126,7 +142,17 @@ export function toSkillManifestView(
     unavailableReason: manifest.unavailableReason,
     active: options.active,
     loadError: options.loadError,
-    workspaceDefault: options.workspaceDefault
+    workspaceDefault: options.workspaceDefault,
+    plugin: manifest.pluginInstallation && manifest.pluginQualifiedName ? {
+      name: manifest.pluginInstallation.name,
+      version: manifest.pluginInstallation.version,
+      marketplace: manifest.pluginInstallation.marketplace,
+      source: manifest.pluginInstallation.source,
+      qualifiedName: manifest.pluginQualifiedName,
+      selectionStamp: manifest.pluginSelectionStamp,
+      capabilityStatus: manifest.pluginCapability?.status ?? 'unverified',
+      capabilityDetails: manifest.pluginCapability?.requirements.map(requirement => ({ ...requirement.label, status: requirement.status }))
+    } : undefined
   };
 }
 

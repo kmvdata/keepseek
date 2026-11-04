@@ -10,6 +10,7 @@ import { formatLocalTimestamp } from '../src/shared/format';
 import { PerformanceTrace, recordLocalPerformance, withPerformanceTrace } from '../src/agent/logging/performanceTrace';
 import { captureRuntimeIdentity } from '../src/shared/runtimeIdentity';
 import { getAgentTools, getAgentSystemPrompt } from '../src/agent/protocol';
+import { CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION } from '../src/agent/providerRequestProjection';
 import { createHash } from 'node:crypto';
 
 test('activation identity snapshots artifact bytes and executing schema without changing provider prefix or reading again', async t => {
@@ -23,7 +24,9 @@ test('activation identity snapshots artifact bytes and executing schema without 
   const sha = (text: string) => createHash('sha256').update(text).digest('hex');
   assert.equal(identity.activationDiskSha256['extension.js'], sha('first activation bytes'));
   assert.equal(identity.activationDiskSha256['agent/delegation.js'], null, 'missing artifacts are unknown, not invented hashes');
-  assert.equal(identity.supportedToolSchemaSha256, sha(JSON.stringify(getAgentTools({ requestProtocolVersion: 11 }))));
+  assert.equal(identity.supportedToolSchemaSha256, sha(JSON.stringify(getAgentTools({
+    requestProtocolVersion: CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION
+  }))));
   assert.equal(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 11 }), before);
   assert.ok(Object.isFrozen(identity.activationDiskSha256));
   const perf = new PerformanceTrace(vscode.Uri.file(join(root, 'run')) as never, 'test-run');
@@ -31,7 +34,7 @@ test('activation identity snapshots artifact bytes and executing schema without 
   perf.record({ type: 'run_start', requestProtocolVersion: 10 });
   await perf.flush();
   const text = await readFile(join(root, 'run.perf-0.jsonl'), 'utf8');
-  assert.match(text, /"supportedRequestProtocolVersion":11/);
+  assert.equal(JSON.parse(text.trim().split('\n')[0]).supportedRequestProtocolVersion, CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION);
   assert.match(text, /"requestProtocolVersion":10/, 'supported and session protocols remain distinct');
   assert.doesNotMatch(text, /secret-fixture|private-fixture|activationDiskSha256|extensionUri/);
 });

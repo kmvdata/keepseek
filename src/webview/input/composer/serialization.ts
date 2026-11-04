@@ -59,6 +59,9 @@ export const composerSerializationFragment: WebviewFragment = {
       }
 
       function skillLinkToText(link) {
+        if (link.dataset.skillReferenceText) {
+          return link.dataset.skillReferenceText;
+        }
         var skill = getSkillById(link.dataset.skillId || '');
         if (skill) {
           return getSkillMarkdownText(skill);
@@ -217,6 +220,7 @@ export const composerSerializationFragment: WebviewFragment = {
         });
         var skillLinks = promptInput.querySelectorAll('a.rich-skill-link');
         skillLinks.forEach(function(link) {
+          if (link.dataset.skillReferenceText) { return; }
           var skillId = link.dataset.skillId || '';
           var skill = getSkillById(skillId);
           link.className = 'rich-skill-link';

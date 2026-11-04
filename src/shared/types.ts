@@ -54,7 +54,7 @@ export interface AgentSettings {
 
 export type ContextFileSource = 'workspace' | 'external';
 
-export type SkillSource = 'admin' | 'workspace' | 'agentsWorkspace' | 'user' | 'agentsUser' | 'builtin';
+export type SkillSource = 'admin' | 'workspace' | 'agentsWorkspace' | 'user' | 'agentsUser' | 'builtin' | 'codexPlugin';
 
 export type SkillActivationSource = 'explicit' | 'session' | 'workspace-default' | 'implicit';
 
@@ -1621,6 +1621,9 @@ export interface ActivatedSkill {
   activation?: SkillActivationInfo;
   description?: string;
   hasScripts?: boolean;
+  /** Task-scoped plugin package pin. Never grants general workspace access. */
+  pluginSnapshot?: import('../skills/codexPluginResources').CodexPluginSnapshot;
+  pluginPolicyCwd?: string;
   /** Full instructions for these skills are omitted from the parent context and
    * loaded only in an isolated child run. */
   runAs?: 'subagent';

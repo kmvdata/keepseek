@@ -8,6 +8,10 @@ import { getScript } from '../src/webview/script';
 import { getStyles } from '../src/webview/styles';
 import { getTemplate } from '../src/webview/template';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
+import { commandSkillsImplementationFragment } from '../src/webview/input/commandMenu/skills';
+import { composerSerializationFragment } from '../src/webview/input/composer/serialization';
+import { referenceMenuImplementationFragment } from '../src/webview/input/references/menu';
+import { skillsImplementationFragment } from '../src/webview/input/skills/script';
 
 test('header timeout dropdown offers exactly six presets with a one-hour default in both languages', async () => {
   const template = getTemplate();
@@ -368,6 +372,123 @@ test('Skills picker uses checkboxes and keeps selected Skills in activation orde
   assert.match(styles, /\.command-skill-checkbox\s*\{/u);
   assert.doesNotMatch(styles, /\.command-skill-status/u);
 });
+
+test('plugin selections insert a task reference and keep its original path when the catalog refreshes', () => {
+  const helpers = getSkillWebviewHelpers();
+  const run = new Function('translations', 'language', `
+    const state = { skills: { items: [] } };
+    const links = [];
+    const sent = [];
+    const vscode = { postMessage: message => sent.push(message) };
+    const promptInput = { querySelectorAll: () => links };
+    const activeMentionRange = { cloneRange: () => 'typed mention' };
+    const isRangeInsidePrompt = () => true;
+    const getPromptInsertionRange = () => 'cursor';
+    const makeElement = () => ({ children: [], dataset: {}, setAttribute() {},
+      append(...children) { this.children.push(...children); } });
+    const document = { createElement: makeElement, createDocumentFragment: makeElement };
+    const renderSkillReferenceContent = (link, name) => { link.textContent = name; };
+    const appendReferenceBoundarySpace = () => {};
+    const insertFragmentAtRange = (range, fragment) => {
+      fragment.children.forEach(link => { link.range = range; links.push(link); });
+    };
+    const t = (key, values = {}) => (translations[key] || key)
+      .replace(/\\{(\\w+)\\}/g, (_, name) => values[name] || '');
+    const getLanguage = () => language;
+    const referenceMenu = null;
+    const setComposerStatus = () => {};
+    ${helpers}
+    ${skillsImplementationFragment.source}
+    ${composerSerializationFragment.source}
+    ${commandSkillsImplementationFragment.source}
+    ${referenceMenuImplementationFragment.source}
+    return { state, links, sent, handleSkillAction, insertSkillFromReferenceMenu, collectActiveSkillIds,
+      refreshPromptSkillLinkLabels, skillLinkToText, isPluginSkillInPrompt, filterSkillItemsByName,
+      createCommandSkillItem, hasStalePluginSkillInPrompt };
+  `);
+  const fixture = {
+    id: 'plugin-one',
+    name: 'index',
+    skillPath: '/cache/plugin (test)/1/skills/index/SKILL.md',
+    skillUri: 'file:///cache/plugin%20(test)/1/skills/index/SKILL.md',
+    enabled: true,
+    plugin: {
+      name: 'Product Design',
+      version: '1',
+      marketplace: 'remote-fixture',
+      source: 'remote',
+      qualifiedName: 'product-design:index',
+      selectionStamp: 'a'.repeat(64),
+      capabilityStatus: 'missing',
+      capabilityDetails: [{ en: 'Interactive browser', zh: '交互式浏览器', status: 'missing' }]
+    }
+  };
+  const ordinary = { id: 'shared-one', name: 'index', enabled: true };
+  const harness = run(WEBVIEW_TRANSLATIONS.en, 'en');
+  harness.state.skills.items = [ordinary, fixture];
+  assert.deepEqual(harness.filterSkillItemsByName(harness.state.skills.items, 'remote-fixture'), [fixture]);
+  const item = harness.createCommandSkillItem(fixture);
+  assert.match(item.children[0].children[0].children[2].textContent, /Product Design 1 · Remote install · remote-fixture/u);
+  assert.equal(item.children[0].children[0].children[3].textContent, 'Tools missing · Interactive browser (Missing)');
+  assert.deepEqual(item.children[1].children.map((button: { dataset: { skillAction: string } }) => button.dataset.skillAction), ['open']);
+  const zh = run(WEBVIEW_TRANSLATIONS['zh-CN'], 'zh-CN');
+  assert.equal(zh.createCommandSkillItem(fixture).children[0].children[0].children[3].textContent, '缺少工具 · 交互式浏览器 (缺失)');
+  harness.handleSkillAction('open', fixture.id);
+  harness.handleSkillAction('toggle-use', fixture.id, true);
+  assert.deepEqual(harness.sent, [{ type: 'openSkill', skillId: fixture.id }]);
+  assert.equal(harness.links[0].range, 'cursor');
+  assert.equal(harness.isPluginSkillInPrompt(fixture), true);
+  assert.equal(harness.hasStalePluginSkillInPrompt(), false);
+  assert.deepEqual(harness.collectActiveSkillIds(), []);
+  harness.insertSkillFromReferenceMenu(fixture);
+  assert.equal(harness.links[1].range, 'typed mention');
+
+  const expected = '[$product-design:index](file:///cache/plugin%20%28test%29/1/skills/index/SKILL.md#keepseek-plugin-' + 'a'.repeat(64) + ')';
+  const next = { ...fixture, plugin: { ...fixture.plugin, version: '2', selectionStamp: 'b'.repeat(64) } };
+  harness.state.skills.items = [ordinary, next];
+  harness.refreshPromptSkillLinkLabels();
+  assert.equal(harness.isPluginSkillInPrompt(next), false);
+  assert.equal(harness.hasStalePluginSkillInPrompt(), true);
+  assert.match(harness.links[0].title, /select it again/u);
+  assert.deepEqual(harness.links.map((link: unknown) => harness.skillLinkToText(link)), [expected, expected]);
+  harness.handleSkillAction('toggle-use', ordinary.id, true);
+  assert.deepEqual(harness.sent.at(-1), { type: 'useSkill', skillId: ordinary.id });
+});
+
+test('edit and resend keeps qualified plugin references verbatim and resolves a selected path uniquely', () => {
+  const transcript = getScript();
+  const helpers = getSkillWebviewHelpers();
+  const editor = getGeneratedSection(transcript, 'function renderInlineEditorContent(editor, value)', 'function sanitizeInlineEditorContent(editor)');
+  const serialize = getGeneratedSection(transcript, 'function inlineSkillLinkToText(link)', 'function makeStandaloneInlineReferenceText(text)');
+  const run = new Function('items', 'prompt', `
+    const state = { skills: { items } };
+    const document = { createTextNode: text => text, createElement: () => ({ dataset: {}, setAttribute() {} }) };
+    const renderSkillReferenceContent = () => {};
+    const sanitizeInlineEditorContent = () => {};
+    const isOffsetInsideMarkdownFence = () => false;
+    const rendered = { children: [], append(value) { this.children.push(value); } };
+    ${helpers}
+    ${editor}
+    ${serialize}
+    renderInlineEditorContent(rendered, prompt);
+    return { chipCount: rendered.children.filter(value => typeof value !== 'string').length,
+      resent: rendered.children.map(value => typeof value === 'string' ? value : inlineSkillLinkToText(value)).join('') };
+  `);
+  const first = { id: 'first', skillPath: '/first/index/SKILL.md', plugin: { qualifiedName: 'product-design:index' } };
+  const second = { id: 'second', skillPath: '/second/index/SKILL.md', plugin: { qualifiedName: 'product-design:index' } };
+  const prompt = 'Use [$product-design:index](/second/index/SKILL.md) with $product-design:index';
+  assert.deepEqual(run([first, second], prompt), { chipCount: 1, resent: prompt });
+  assert.deepEqual(run([first], prompt), { chipCount: 0, resent: prompt });
+  assert.deepEqual(run([second, { ...second, id: 'duplicate' }], prompt), { chipCount: 0, resent: prompt });
+});
+
+function getSkillWebviewHelpers(): string {
+  const script = getScript();
+  return [
+    getGeneratedSection(script, 'function getSkillItemsForView()', 'var fileReferenceIconTemplate'),
+    getGeneratedSection(script, 'function getSkillPathForView(skill)', 'function mergeSkillIdsForRequest()')
+  ].join('\n');
+}
 
 test('command menu owns project-scoped main and subagent model selection', async () => {
   const inputTemplate = getInputTemplate();

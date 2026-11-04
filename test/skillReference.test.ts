@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import * as vscode from 'vscode';
 import { expandPromptReferencesInPrompt } from '../src/context/references/promptReferences';
+import { resolvePluginSkillReferences } from '../src/context/references/skillReference';
 import type { SkillManifest } from '../src/skills/skillTypes';
 
 test('expands allowed Codex skill Markdown reference', async () => {
@@ -86,6 +87,58 @@ test('can defer Skill content injection to the unified activation context', asyn
   assert.equal(expanded, prompt);
   assert.doesNotMatch(expanded, /Do not duplicate me/u);
 });
+
+test('qualified plugin mentions and exact menu or pasted links select the same catalog Skill', () => {
+  const skill = pluginSkill('/codex/cache/local-tools/fixture/2.0.0/skills/index/SKILL.md', 'fixture');
+  const other = pluginSkill('/codex/cache/other/fixture/2.0.0/skills/index/SKILL.md', 'other');
+  const linked = `[$fixture:index](${skill.skillUri.fsPath})`;
+  for (const text of [linked, `请用 ${linked} 检查`, `[$fixture:index](${skill.skillUri.toString()})`, '$fixture:index']) {
+    assert.deepEqual(resolvePluginSkillReferences(text, [skill]), { ids: [skill.id], failures: [] });
+  }
+  assert.deepEqual(resolvePluginSkillReferences(linked, [skill, other]), { ids: [skill.id], failures: [] });
+  const stamp = 'a'.repeat(64);
+  const stamped = `[$fixture:index](${skill.skillUri.toString()}#keepseek-plugin-${stamp})`;
+  assert.deepEqual(resolvePluginSkillReferences(stamped, [{ ...skill, pluginSelectionStamp: stamp }]), { ids: [skill.id], failures: [] });
+  assert.equal(resolvePluginSkillReferences(stamped, [{ ...skill, pluginSelectionStamp: 'b'.repeat(64) }]).failures.length, 1);
+  assert.match(resolvePluginSkillReferences('$fixture:index', [skill, other]).failures[0].error, /Ambiguous/u);
+  for (const text of [
+    linked.replace('2.0.0', '1.0.0'),
+    linked.replace('fixture:index', 'fake:index'),
+    '[$fixture:index](https://example.com/SKILL.md)',
+    '[$fixture:index](./SKILL.md)',
+    `[$fixture:index](${skill.skillUri.toString()}?forged)`
+  ]) {
+    const rejected = resolvePluginSkillReferences(text, [skill]);
+    assert.deepEqual(rejected.ids, [], text);
+    assert.equal(rejected.failures.length, 1, text);
+  }
+});
+
+test('examples, escapes, and raw file paths cannot activate a plugin', () => {
+  const skill = pluginSkill('/codex/cache/local-tools/fixture/local/skills/index/SKILL.md', 'fixture');
+  const link = `[$fixture:index](${skill.skillUri.fsPath})`;
+  for (const text of [
+    `\`\`\`md\n${link}\n$fixture:index\n\`\`\``,
+    `~~~\n${link}\n~~~`,
+    `Use \`${link}\` as an example.`,
+    `> ${link}`,
+    `    ${link}`,
+    `\\${link}`,
+    `!${link}`,
+    '\\$fixture:index',
+    skill.skillUri.fsPath
+  ]) assert.deepEqual(resolvePluginSkillReferences(text, [skill]), { ids: [], failures: [] }, text);
+});
+
+function pluginSkill(skillPath: string, id: string): SkillManifest {
+  const skillUri = vscode.Uri.file(skillPath);
+  return {
+    ...createSkillManifest(path.dirname(skillPath), skillUri),
+    id: `codexPlugin:${id}`,
+    source: 'codexPlugin',
+    pluginQualifiedName: 'fixture:index'
+  };
+}
 
 function createSkillManifest(rootPath: string, skillUri: vscode.Uri): SkillManifest {
   const rootUri = vscode.Uri.file(rootPath);

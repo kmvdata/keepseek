@@ -94,7 +94,7 @@ export class ToolEvidenceStore {
   public async complete(
     record: ToolEvidence,
     content: string,
-    metadata: { contentType?: ToolEvidenceContentType; source?: ToolEvidenceSource } = {}
+    metadata: Pick<ToolEvidence, 'contentType' | 'source' | 'pluginSkillProgress'> = {}
   ): Promise<ToolEvidence> {
     if (record.executionStatus === 'completed') {
       const hash = hashText(content);
@@ -117,6 +117,7 @@ export class ToolEvidenceStore {
       totalBytes: bytes.byteLength,
       totalTokensEstimate: estimateTokenCount(content),
       source: metadata.source,
+      pluginSkillProgress: metadata.pluginSkillProgress,
       storageKind: 'blob',
       blobName
     });

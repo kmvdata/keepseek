@@ -6,6 +6,7 @@ import { getConfiguredMaxFileBytes } from '../shared/config';
 import { getMarkdownFence } from '../shared/markdown';
 import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
 import { toActivatedSkill, type ActivatedSkill, type SkillManifest } from './skillTypes';
+import { pinCodexPluginSkill, type CodexPluginReadContext } from './codexPluginResources';
 
 const MAX_REFERENCED_SKILL_RESOURCES = 12;
 const MAX_REFERENCED_SKILL_RESOURCE_CHARS = 48_000;
@@ -18,8 +19,22 @@ interface LoadedSkillResource {
 }
 
 export class SkillLoader {
+  public async loadPluginSkill(manifest: SkillManifest, packageSkills: readonly SkillManifest[],
+    context: CodexPluginReadContext, cwd?: string): Promise<ActivatedSkill> {
+    if (!manifest.pluginInstallation || !manifest.enabled || manifest.unavailableReason) {
+      throw new Error(manifest.unavailableReason ?? 'Plugin Skill unavailable / 插件 Skill 不可用');
+    }
+    const pinned = await pinCodexPluginSkill(manifest.pluginInstallation, manifest, packageSkills, context);
+    const skill = toActivatedSkill(manifest, pinned.content);
+    skill.name = manifest.pluginQualifiedName ?? manifest.name;
+    skill.pluginSnapshot = pinned.snapshot;
+    skill.pluginPolicyCwd = cwd;
+    skill.loadedResourceUris = [...new Set([manifest.skillUri.toString(), ...pinned.resources.map(resource => resource.uri)])];
+    return skill;
+  }
 
   public async loadSkill(manifest: SkillManifest): Promise<ActivatedSkill> {
+    if (manifest.pluginInstallation) throw new Error('Plugin Skill requires explicit task activation / 插件 Skill 需要在任务中显式调用');
     if (!manifest.enabled) {
       throw new Error(manifest.unavailableReason || 'Skill is disabled.');
     }

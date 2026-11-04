@@ -67,7 +67,7 @@ export class SkillActivationResolver {
         skipped.push(createSkip(manifest, getUnavailableReason(manifest, input.workspaceTrusted)));
         return;
       }
-      if (!manifest.allowImplicit) {
+      if (!manifest.allowImplicit || manifest.pluginInstallation) {
         skipped.push(createSkip(manifest, 'allow_implicit_false'));
         return;
       }
@@ -80,7 +80,7 @@ export class SkillActivationResolver {
         implicitCandidates.push(createCandidate(manifest, index, 'implicit', 'Frozen from the first user request of this chat session.'));
         return;
       }
-      if (input.manifests.filter(item => item.name === manifest.name).length > 1) {
+      if (input.manifests.filter(item => !item.pluginInstallation && item.name === manifest.name).length > 1) {
         skipped.push(createSkip(manifest, 'ambiguous_name')); return;
       }
       const match = scoreImplicitMatch(manifest, input.prompt);
@@ -136,6 +136,7 @@ export class SkillActivationResolver {
       if (!found) {
         continue;
       }
+      if (found.manifest.pluginInstallation && source !== 'explicit') continue;
       if (!canActivate(found.manifest, input.workspaceTrusted)) {
         skipped.push(createSkip(found.manifest, getUnavailableReason(found.manifest, input.workspaceTrusted)));
         continue;
@@ -230,14 +231,14 @@ function getActivationReason(source: Exclude<SkillActivationSource, 'implicit'>)
 function canActivate(manifest: SkillManifest, workspaceTrusted: boolean): boolean {
   return manifest.enabled
     && !manifest.unavailableReason
-    && (workspaceTrusted || !WORKSPACE_SKILL_SOURCES.has(manifest.source));
+    && (workspaceTrusted || (!manifest.pluginInstallation && !WORKSPACE_SKILL_SOURCES.has(manifest.source)));
 }
 
 function getUnavailableReason(
   manifest: SkillManifest,
   workspaceTrusted: boolean
 ): SkillActivationSkip['reason'] {
-  return !workspaceTrusted && WORKSPACE_SKILL_SOURCES.has(manifest.source)
+  return !workspaceTrusted && (manifest.pluginInstallation || WORKSPACE_SKILL_SOURCES.has(manifest.source))
     ? 'workspace_untrusted'
     : 'disabled';
 }

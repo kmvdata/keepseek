@@ -429,6 +429,20 @@ export function summarizeToolResult(rawResult: string): string {
       truncated: parsed.diagnostics.truncated
     };
   }
+  if (typeof parsed.plugin === 'string') {
+    summary.plugin = compactString(parsed.plugin);
+    summary.version = compactString(parsed.version);
+    summary.status = compactString(parsed.status);
+    summary.contentHash = compactString(parsed.contentHash);
+    if (isRecord(parsed.capability)) {
+      summary.capability = compactString(parsed.capability.status);
+      if (Array.isArray(parsed.capability.requirements)) {
+        summary.missing = parsed.capability.requirements.filter(isRecord)
+          .filter(requirement => requirement.required === true && requirement.status !== 'available')
+          .map(requirement => compactString(requirement.id)).slice(0, 8);
+      }
+    }
+  }
   if (!Object.keys(summary).length) {
     summary.result = { chars: rawResult.length, keys: Object.keys(parsed).slice(0, 16) };
   }
