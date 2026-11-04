@@ -315,7 +315,7 @@ interface Trigger { kind: 'mention' | 'skill'; range: Range; query: string; }
 - 归一化：`trim().toLocaleLowerCase()`
 - 资源匹配字段：`label`（无则取路径 basename，去掉末尾 `/`），子串匹配
 - Skill 匹配字段：mention 名（`name` 若匹配 `/^[A-Za-z0-9_-]+$/`，否则用目录名 basename）与 `name`，子串匹配
-- Skill 预过滤：`enabled && userInvocable && !unavailableReason`
+- Skill 预过滤：`enabled && !unavailableReason`
 
 ### 4.8 `extractFileReferences(dataTransfer)` → `{ references, pathlessFiles }`
 

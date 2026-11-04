@@ -2,7 +2,7 @@
 
 > 面向后续接手 KeepSeek 的程序员与 AI 智能体。本文从代码目录和依赖边界出发，说明系统如何启动、一次请求如何流经各层、状态保存在哪里，以及不同类型的改动应该落到哪些文件。
 >
-> 本文按 2026-09-22 的源码整理。架构事实以当前源码为准；安全、缓存和审批不变式以仓库根目录的 [`AGENTS.md`](../AGENTS.md) 为最高优先级维护约定。
+> 主体按 2026-09-22 源码整理，共享项目配置章节于 2026-11-04 更新。架构事实以当前源码为准；安全、缓存和审批不变式以仓库根目录的 [`AGENTS.md`](../AGENTS.md) 为最高优先级维护约定。
 
 ## 1. 先建立整体心智模型
 
@@ -28,9 +28,8 @@ src/provider/KeepseekChatViewProvider.ts
       │         │          │
       │         │          ├── src/sessions/   会话与工作区状态
       │         │          ├── src/accounts/   模型来源与凭据解析
-      │         │          ├── src/context/    用户上下文与引用
-      │         │          ├── src/skills/     Skill 发现和激活
-      │         │          └── src/memory/     旧记忆迁移兼容
+      │         │          ├── src/context/    用户上下文、共享配置与来源快照
+      │         │          └── src/skills/     Skill 发现和激活
       │         │
       │         ├── src/agent/AgentRunner      模型请求与工具循环
       │         │       ├── providers/         三类上游协议
@@ -223,12 +222,15 @@ src/accounts/
 
 “账号/模型来源”与“上游协议实现”分离：账号状态在 `src/accounts/`，真正发请求的客户端在 `src/agent/providers/`。
 
-## 6. `src/context/`、`src/skills/` 和 `src/memory/`：输入上下文
+## 6. `src/context/` 和 `src/skills/`：输入上下文
 
 ### 6.1 `src/context/`
 
 ```text
 src/context/
+├── sharedConfigPaths.ts           宿主路径、Git/worktree 作用域、真实路径与有界读取
+├── sharedCodexConfig.ts            TOML 白名单、配置层级、来源与诊断
+├── sharedProjectSources.ts         会话任务快照、监听和受控刷新
 ├── fileContextStore.ts             用户附加的上下文文件集合
 ├── textReferences.ts               终端/Output/Debug 选区临时文本文件
 └── references/
@@ -249,25 +251,27 @@ src/context/
 
 | 文件 | 职责 |
 | --- | --- |
-| `skillDiscovery.ts` | 扫描用户、工作区、`.agents` 等来源并解析 frontmatter |
+| `skillDiscovery.ts` | 仅扫描作用域链 `.agents/skills`、用户 `~/.agents/skills`、Unix 管理员目录 |
+| `skillMetadata.ts` | 安全 YAML 校验、标准 interface/policy/dependencies 与可选 KeepSeek profile |
 | `skillLoader.ts` | 受限读取 Skill 指令和引用资源 |
 | `skillActivationResolver.ts` | 按 explicit → session → workspace-default → implicit 决定激活集合 |
 | `skillStore.ts` | 用户选择和默认设置持久化 |
-| `skillCreator.ts` | 在工作区 `.agents/skills/` 创建新 Skill |
+| `skillCreator.ts` | 在任务目录 `.agents/skills/` 准备标准 Markdown + YAML 的同一 ChangeSet |
 | `skillTypes.ts` | manifest、来源和视图类型 |
 
-隐式 Skill 在会话首个真实用户请求后冻结为 id 列表，避免后续 prompt 改变导致 system 上下文字节漂移。`runAs: subagent` 的 Skill 不把完整指令注入主 Agent，而是在选中的隔离子代理里加载。
+隐式 Skill 在会话首个真实用户请求后冻结为 id 列表，避免后续 prompt 改变导致 system 上下文字节漂移。`metadata.keepseek.runAs: subagent` 的 Skill 不把完整指令注入主 Agent，而是在选中的隔离子代理里加载。
 
 Skill 的 `scripts/` 只表示存在可运行资源，不能在发现或加载时自动执行。
 
-### 6.3 `src/memory/`
+### 6.3 共享配置和项目指令
 
-`memory/` 只服务旧 `.keepseek/memory.json`：
+`SharedProjectSources` 在新任务/空闲刷新边界读取单一快照；Provider 只编排，不按工具轮或 token 更新重扫。单根默认 workspace folder，多根必须选择任务目录；会话保存 `projectScopeUri`，焦点和附件不改变它。Git/worktree 根到 cwd 的链与全局指令按顺序进入上下文；无 Git 时仅 cwd。子代理保留这个顺序和隔离边界。
 
-- `legacyProjectMemoryFormat.ts` 负责只读解析；
-- `legacyProjectMemoryMigration.ts` 负责生成迁移到 `AGENTS.md` 或 Skill 的待确认改动。
+用户配置位于 `CODEX_HOME/config.toml`（默认 `~/.codex`），可信项目配置为链上的 `.codex/config.toml`。只输出已支持字段和来源，未知字段/凭据不进入 UI 或 prompt。`project_doc_max_bytes` 按 UTF-8 字节裁剪；KeepSeek 的整体上下文准入仍独立执行。Skill 禁用、隐式资格、会话选择是三层不同概念。
 
-Legacy Memory 是最低优先级兼容上下文，不是新的可写记忆系统。迁移也必须生成 DraftEdit/ChangeSet，不能直接改工作区。
+旧 `.keepseek/memory.json` 自动加载、迁移和导出入口已删除；不移动/删除用户文件。历史 Run Details 的 `legacy-memory` 审计标签与会话存储安全读取仍保留，历史 `contextInstructions` 不重写。冻结协议提示词中旧措辞保留字节，不产生新的 Memory 注入。
+
+完整范围、版本差异、故障处理与验收见 [共享配置交付报告](keepseek-codex-shared-config.md)。
 
 ## 7. `src/agent/`：Agent 运行时核心
 
@@ -304,7 +308,7 @@ Runner 不能：
 ### 7.2 上下文投影、缓存和容量
 
 ```text
-currentRunContext.ts             合并 AGENTS.md、Skills、Legacy Memory
+currentRunContext.ts             合并全局/作用域指令、Skills
 contextDeduplication.ts          按优先级去重上下文来源
 historyProjection.ts             摘要 + 保护消息 + 最近轮次投影
 historyCompressor.ts             低频摘要刷新与失败回退
@@ -572,7 +576,7 @@ src/sessions/
 
 - `messages`：UI 历史的权威记录；
 - `requestProtocol`：冻结的协议版本、工具 schema 和 lane；
-- `contextInstructions`：稳定的 AGENTS/Skills/Legacy/Context Files 块；
+- `contextInstructions`：稳定的 AGENTS/Skills/Context Files 块；
 - `contextCompression`、`historyArchive`：模型投影状态，不等于 UI 历史；
 - `usageLedgerRef`、`usageStats`、`subagentUsageStats`：用量和统计；
 - `repairLoop`：验证修复状态；
@@ -704,7 +708,6 @@ globalStorageUri/
 ├── draft-runs.json                   DraftRun 状态
 ├── approval-reviews.json             审批记录
 ├── interaction-logs/                 脱敏运行 trace
-├── project-memory/                   Legacy Memory 兼容快照
 ├── text-references/                  终端/Output/Debug 选区临时文件
 └── dropped-file-references/          Webview 拖入文件的临时副本
 ```

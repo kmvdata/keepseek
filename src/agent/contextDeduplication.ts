@@ -46,7 +46,7 @@ export function deduplicateContextSources<T>(
       continue;
     }
     const duplicateContent = contentHash ? seenHashes.get(contentHash) : undefined;
-    if (duplicateContent) {
+    if (duplicateContent && duplicateContent.kind !== candidate.kind) {
       discarded.push(createDiscarded(candidate, 'duplicate_content', duplicateContent.id));
       continue;
     }

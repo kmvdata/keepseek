@@ -33,7 +33,6 @@ src/webview/           HTML/CSS/浏览器脚本字符串；input/ 按 fragment �
 src/accounts/          来源 CRUD、模型发现/目录/选择、凭据解析
 src/context/           上下文、文件/目录/Skill 引用、外部授权
 src/skills/            Skill 发现、加载、激活、创建
-src/memory/            legacy memory.json 只读解析与迁移
 src/agent/             请求投影、模型/工具循环、压缩、evidence/epoch、用量
   providers/           Chat Completions / Responses / Anthropic Messages 客户端
   tools/               workspace / semantic / git / validation / authorization
@@ -89,10 +88,11 @@ test/                  按行为契约组织的回归测试
 ### 3.5 上下文、来源与 UI
 
 - `accounts/accountResolver.ts` 是凭据解析唯一入口；主请求、摘要、reviewer、子代理、模型发现和余额必须使用一致来源语义。密钥不进入 workspace、prompt、会话或 trace。
-- 优先级：KeepSeek 核心安全 > 当前用户请求 > workspace root `AGENTS.md` > Skills > Legacy Memory。Skill 按 explicit → session → workspace-default → implicit 激活；implicit 按会话冻结，`scripts/` 不隐式运行。
-- 外部文件/目录以精确 `uri.toString()` 授权；不可读内容不得绕过守卫。Legacy Memory 迁移只生成 ChangeSet。
+- 优先级：KeepSeek 核心安全 > 当前用户请求 > 全局与任务 root→cwd 指令 > Skills。Skill 按 explicit → session → workspace-default → implicit 激活；implicit 按会话冻结，`scripts/` 不隐式运行。
+- 外部文件/目录以精确 `uri.toString()` 授权；不可读内容不得绕过守卫。旧项目配置不扫描、不迁移；保留历史会话审计和恢复。
 - Webview → Host 消息只在 `provider/webviewMessages.ts` 定义；Host 主动消息不加入该联合类型。保持 DOM id、type 和引用格式兼容。
 - `webview/input/composition.ts` 的 fragment 顺序是运行时契约；样式、模板、行为放各自 fragment。共享编辑器快捷键只放 `richTextShortcuts.ts`。
+- 共享文件只读：`.agents/skills`、`~/.agents/skills`、`CODEX_HOME` 配置/指令；任务作用域冻结，变更仅在受控刷新边界生效。标准策略不扩大权限，版本差异见共享配置文档。
 - 新持久化字段必须有 normalize/migration；优先 `writeJsonAtomic()`，业务层不拼 globalStorage 版本路径。
 
 ## 4. 改动路由

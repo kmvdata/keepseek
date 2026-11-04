@@ -65,13 +65,13 @@ Webview 消息的唯一联合类型在 `provider/webviewMessages.ts`。Webview �
 用户提交后，Provider：
 
 1. 拒绝空输入，并确认工作区、会话和当前 run 状态。
-2. 读取当前项目指令、显式/会话/默认/隐式 Skill、Legacy Memory 和授权上下文。
+2. 读取当前项目指令、显式/会话/默认/隐式 Skill和授权上下文。
 3. 首轮把格式化结果冻结为 `ChatSession.contextInstructions`；后续变化追加到当前真实 user 消息尾部，不回写旧前缀。
 4. 按“目录引用 → 文件引用 → Skill”展开输入；外部 URI 先检查精确授权。
 5. 持久化原始 `content`、必要时的 `expandedContent`，以及真正发送的 `providerContent`。
 6. 建立请求快照与取消控制器，然后交给 `AgentRequestCoordinator`。
 
-项目指令来源只有受信任 workspace root 的 `AGENTS.md`；`.agents/**/AGENTS.md` 属于 Skill，不是全局项目指令。Skill 的脚本只可作为 DraftRun 提议，绝不因激活而执行。
+项目指令来自 CODEX_HOME 全局文件和受信任的任务 Git root→cwd 链（无 Git 仅 cwd）；每目录按 override、AGENTS、配置 fallback 选一份。任务目录由用户明确选择或单根默认，不随焦点变化。Skill 入口仅标准 skills 根内的 SKILL.md。共享配置变更在新任务或空闲刷新边界生效，详见 [共享配置](keepseek-codex-shared-config.md)。Skill 的脚本只可作为 DraftRun 提议，绝不因激活而执行。
 
 ### 4.2 历史与原生请求
 

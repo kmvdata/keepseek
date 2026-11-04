@@ -89,7 +89,6 @@ export const DEFAULT_VALIDATION_AUTHORIZATION_POLICY: ValidationAuthorizationPol
 export const DEFAULT_MAX_VALIDATION_RUNS = 3;
 export const DEFAULT_MAX_REPAIR_ITERATIONS = 2;
 export const DEFAULT_VALIDATION_TIMEOUT_MS = 120_000;
-export const DEFAULT_PROJECT_INSTRUCTIONS_CONTEXT_BUDGET_TOKENS = 4_000;
 export const DEFAULT_SKILL_CONTEXT_BUDGET_CHARS = 72_000;
 export const DEFAULT_MAX_IMPLICIT_SKILLS = 3;
 export const DEFAULT_BACKGROUND_MAX_ROUNDS = 5;
@@ -390,12 +389,6 @@ export function getConfiguredDraftRunMaxTranscriptBytes(): number {
   return normalizeIntegerInRange(configured, 4_096, 1_048_576, DEFAULT_DRAFT_RUN_MAX_TRANSCRIPT_BYTES);
 }
 
-export function getConfiguredProjectInstructionsContextBudgetTokens(): number {
-  const configured = vscode.workspace
-    .getConfiguration('keepseek')
-    .get<number>('projectInstructions.contextBudgetTokens', DEFAULT_PROJECT_INSTRUCTIONS_CONTEXT_BUDGET_TOKENS);
-  return normalizeIntegerInRange(configured, 0, 32_000, DEFAULT_PROJECT_INSTRUCTIONS_CONTEXT_BUDGET_TOKENS);
-}
 
 export function getConfiguredSkillContextBudgetChars(): number {
   const configured = vscode.workspace

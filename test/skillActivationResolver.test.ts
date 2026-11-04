@@ -21,7 +21,7 @@ test('explicit Skill wins over an implicit Skill with the same normalized name',
 
   assert.deepEqual(result.activated.map((item) => item.manifest.id), [explicit.id]);
   assert.equal(result.activated[0]?.activation.source, 'explicit');
-  assert.equal(result.skipped.find((item) => item.id === workspaceImplicit.id)?.reason, 'duplicate_skill');
+  assert.equal(result.skipped.find((item) => item.id === workspaceImplicit.id)?.reason, 'ambiguous_name');
 });
 
 test('allowImplicit false never auto-activates even when the request matches', () => {
@@ -74,7 +74,7 @@ test('activation order is explicit, session, workspace-default, then implicit', 
   ]);
 });
 
-test('workspace duplicate wins over a global duplicate for equal automatic activation', () => {
+test('same-name automatic matches require explicit source selection', () => {
   const global = manifest('global-format', 'format-flow', 'agentsUser', true);
   const workspace = manifest('workspace-format', 'format-flow', 'agentsWorkspace', true);
   const result = new SkillActivationResolver().resolve({
@@ -84,8 +84,8 @@ test('workspace duplicate wins over a global duplicate for equal automatic activ
     maxImplicitSkills: 3
   });
 
-  assert.deepEqual(result.activated.map((item) => item.manifest.id), [workspace.id]);
-  assert.equal(result.skipped.find((item) => item.id === global.id)?.reason, 'duplicate_skill');
+  assert.deepEqual(result.activated.map((item) => item.manifest.id), []);
+  assert.equal(result.skipped.find((item) => item.id === global.id)?.reason, 'ambiguous_name');
 });
 
 test('workspace-default personal Skill persists and activates in a new session', async () => {
@@ -118,27 +118,6 @@ test('workspace-default personal Skill persists and activates in a new session',
   assert.deepEqual(otherWorkspaceStore.getWorkspaceDefaultSkillIds(), []);
 });
 
-test('persisted allowImplicit override participates in automatic activation', async () => {
-  const auto = manifest('auto-toggle', 'auto-toggle', 'agentsUser', false);
-  const memento = new MemoryMemento();
-  const discovery = { discover: async () => [auto] } as SkillDiscovery;
-  const loader = {
-    loadSkill: async (item: SkillManifest) => toActivatedSkill(item, '# Auto toggle')
-  } as SkillLoader;
-  const store = new SkillStore(memento, discovery, loader, new SkillActivationResolver(), () => 'workspace-one');
-  await store.refresh();
-
-  await store.setSkillAllowImplicit(auto.id, true);
-  const reloaded = new SkillStore(memento, discovery, loader, new SkillActivationResolver(), () => 'workspace-one');
-  await reloaded.refresh();
-  const enabled = await reloaded.resolveAndLoadSkills({ session: session('implicit-on'), prompt: 'Use auto-toggle.' });
-  assert.equal(enabled.skills[0]?.activation?.source, 'implicit');
-
-  await reloaded.setSkillAllowImplicit(auto.id, false);
-  const disabled = await reloaded.resolveAndLoadSkills({ session: session('implicit-off'), prompt: 'Use auto-toggle.' });
-  assert.deepEqual(disabled.skills, []);
-  assert.ok(disabled.activation?.skipped.some((item) => item.reason === 'allow_implicit_false'));
-});
 
 test('untrusted workspaces never auto-enable workspace Skills', () => {
   const workspaceSkill = manifest('unsafe-workspace', 'unsafe-flow', 'agentsWorkspace', true);
@@ -184,7 +163,6 @@ function manifest(id: string, name: string, source: SkillManifest['source'], all
     skillUri: vscode.Uri.joinPath(rootUri, 'SKILL.md'),
     enabled: true,
     allowImplicit,
-    userInvocable: true,
     hasReferences: false,
     hasAssets: false,
     hasScripts: false
@@ -221,6 +199,14 @@ test('frozen implicitSkillIds activate regardless of the current prompt keywords
   assert.equal(result.activated[0]?.activation.source, 'implicit');
   assert.match(result.activated[0]?.activation.reason ?? '', /Frozen/u);
   assert.equal(result.skipped.find((item) => item.id === other.id)?.reason, 'not_matched');
+});
+
+test('same-name skills can both be explicitly selected by identity without silent precedence replacement', () => {
+  const first = manifest('project-name', 'same-name', 'agentsWorkspace', true);
+  const second = manifest('user-name', 'same-name', 'agentsUser', true);
+  const result = new SkillActivationResolver().resolve({ manifests: [first, second], prompt: 'same-name',
+    explicitSkillIds: [first.id, second.id], workspaceTrusted: true, maxImplicitSkills: 3 });
+  assert.deepEqual(new Set(result.activated.map(item => item.manifest.id)), new Set([first.id, second.id]));
 });
 
 test('frozen implicit activation still respects allowImplicit false', () => {

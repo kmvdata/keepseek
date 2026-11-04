@@ -1,174 +1,70 @@
 import { createHash } from 'node:crypto';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
-import {
-  getConfiguredMaxFileBytes,
-  getConfiguredProjectInstructionsContextBudgetTokens
-} from '../shared/config';
-import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
+import { getConfiguredMaxFileBytes } from '../shared/config';
+import { isReadableTextContent } from '../shared/textFileGuards';
 import type { ProjectInstructionContext, RunContextDiscardedSource } from '../shared/types';
+import { loadSharedCodexConfig, type SharedCodexConfigSnapshot, type SharedCodexConfigOptions } from '../context/sharedCodexConfig';
+import { readSharedText } from '../context/sharedConfigPaths';
 import { estimateTokenCount } from './tokenEstimate';
-
-const PROJECT_INSTRUCTIONS_FILE_NAME = 'AGENTS.md';
 
 export interface ProjectInstructionsResolution {
   instructions: ProjectInstructionContext[];
   discarded: RunContextDiscardedSource[];
 }
-
-export interface ProjectInstructionsResolverOptions {
-  workspaceFolders?: readonly vscode.WorkspaceFolder[];
-  workspaceTrusted?: boolean;
-  budgetTokens?: number;
+export interface ProjectInstructionsResolverOptions extends SharedCodexConfigOptions {
+  snapshot?: SharedCodexConfigSnapshot;
   maxFileBytes?: number;
 }
-
 export class ProjectInstructionsResolver {
-  private readonly decoder = new TextDecoder('utf-8', { fatal: false });
-  private readonly fileCache = new Map<string, {
-    mtime: number;
-    size: number;
-    maxFileBytes: number;
-    value: { content?: string; rejected: boolean };
-  }>();
-
   public async resolve(options: ProjectInstructionsResolverOptions = {}): Promise<ProjectInstructionsResolution> {
-    const folders = options.workspaceFolders ?? vscode.workspace.workspaceFolders ?? [];
-    const trusted = options.workspaceTrusted ?? vscode.workspace.isTrusted;
-    const budgetTokens = Math.max(0, Math.floor(
-      options.budgetTokens ?? getConfiguredProjectInstructionsContextBudgetTokens()
-    ));
-    const maxFileBytes = Math.max(1, Math.floor(options.maxFileBytes ?? getConfiguredMaxFileBytes()));
+    const snapshot = options.snapshot ?? await loadSharedCodexConfig(options);
     const instructions: ProjectInstructionContext[] = [];
     const discarded: RunContextDiscardedSource[] = [];
-
-    if (!trusted) {
-      for (const folder of folders) {
-        const uri = vscode.Uri.joinPath(folder.uri, PROJECT_INSTRUCTIONS_FILE_NAME);
-        if (await uriExists(uri)) {
-          discarded.push(createDiscarded(uri, 'workspace_untrusted'));
+    const maxFileBytes = options.maxFileBytes ?? getConfiguredMaxFileBytes();
+    let remaining = snapshot.projectDocMaxBytes;
+    const directories = [{ uri: snapshot.codexHome, boundary: snapshot.codexHome, global: true },
+      ...(snapshot.scope?.trusted ? snapshot.scope.chain.map(uri => ({ uri, boundary: snapshot.scope!.root, global: false })) : [])];
+    if (snapshot.scope && !snapshot.scope.trusted) {
+      discarded.push({ id: 'project-instructions:untrusted', kind: 'project-instructions', uri: snapshot.scope.cwd.toString(), reason: 'workspace_untrusted' });
+    }
+    if (snapshot.diagnostics.length) {
+      for (const item of snapshot.diagnostics) discarded.push({ id: `config:${item.uri}`, kind: 'project-instructions', uri: item.uri, reason: 'load_failed' });
+      // Malformed document policy cannot silently fall back to permissive defaults.
+      if (snapshot.diagnostics.some(item => !item.message.startsWith('Codex 0.133.0'))) return { instructions, discarded };
+    }
+    for (const directory of directories) {
+      const names = ['AGENTS.override.md', 'AGENTS.md', ...(directory.global ? [] : snapshot.fallbackFilenames)];
+      for (const name of [...new Set(names)]) {
+        const uri = vscode.Uri.joinPath(directory.uri, name);
+        const id = `project-instructions:${normalizeUri(uri)}`;
+        snapshot.watchedUris.push(uri.toString());
+        try {
+          const loaded = await readSharedText(uri, [directory.boundary], maxFileBytes);
+          if (loaded === undefined || !loaded.trim()) continue;
+          if (!isReadableTextContent(loaded)) throw new Error('Unreadable instruction');
+          if (remaining <= 0) { discarded.push({ id, uri: uri.toString(), kind: 'project-instructions', reason: 'budget_exhausted' }); break; }
+          const projected = truncateUtf8(loaded, remaining);
+          remaining = projected !== loaded ? 0 : remaining - Buffer.byteLength(projected);
+          instructions.push({ id, uri: uri.toString(), workspaceFolder: directory.global ? 'global' : path.basename(directory.uri.fsPath),
+            scopeUri: directory.uri.toString(), order: instructions.length, content: projected,
+            characterCount: projected.length, tokenEstimate: estimateTokenCount(projected), contentHash: hashContent(loaded), truncated: projected !== loaded });
+          break;
+        } catch {
+          discarded.push({ id, uri: uri.toString(), kind: 'project-instructions', reason: 'load_failed' });
+          // A rejected override cannot be bypassed by a lower-priority file.
+          break;
         }
       }
-      return { instructions, discarded };
     }
-
-    let remainingTokens = budgetTokens;
-    for (const folder of folders) {
-      const uri = vscode.Uri.joinPath(folder.uri, PROJECT_INSTRUCTIONS_FILE_NAME);
-      const loaded = await this.readInstructionFile(uri, maxFileBytes);
-      if (!loaded.content) {
-        if (loaded.rejected) {
-          discarded.push(createDiscarded(uri, 'load_failed'));
-        }
-        continue;
-      }
-      if (remainingTokens <= 0) {
-        discarded.push(createDiscarded(uri, 'budget_exhausted'));
-        continue;
-      }
-
-      const projected = truncateProjectInstructions(loaded.content, remainingTokens);
-      if (!projected.content) {
-        discarded.push(createDiscarded(uri, 'budget_exhausted'));
-        continue;
-      }
-      const tokenEstimate = estimateTokenCount(projected.content);
-      instructions.push({
-        id: `project-instructions:${normalizeUri(uri)}`,
-        uri: uri.toString(),
-        workspaceFolder: folder.name,
-        content: projected.content,
-        characterCount: projected.content.length,
-        tokenEstimate,
-        contentHash: hashContent(loaded.content),
-        truncated: projected.truncated
-      });
-      remainingTokens = Math.max(0, remainingTokens - tokenEstimate);
-    }
-
     return { instructions, discarded };
   }
-
-  private async readInstructionFile(
-    uri: vscode.Uri,
-    maxFileBytes: number
-  ): Promise<{ content?: string; rejected: boolean }> {
-    if (shouldSkipTextUri(uri)) {
-      return { rejected: true };
-    }
-    let stat: vscode.FileStat;
-    try {
-      stat = await vscode.workspace.fs.stat(uri);
-    } catch {
-      this.fileCache.delete(uri.toString());
-      return { rejected: false };
-    }
-    const cacheKey = uri.toString();
-    const cached = this.fileCache.get(cacheKey);
-    if (cached && cached.mtime === stat.mtime && cached.size === stat.size && cached.maxFileBytes === maxFileBytes) {
-      return { ...cached.value };
-    }
-    if (stat.type !== vscode.FileType.File || stat.size > maxFileBytes) {
-      const value = { rejected: true };
-      this.fileCache.set(cacheKey, { mtime: stat.mtime, size: stat.size, maxFileBytes, value });
-      return value;
-    }
-    try {
-      const bytes = await vscode.workspace.fs.readFile(uri);
-      if (bytes.byteLength > maxFileBytes) {
-        return { rejected: true };
-      }
-      const content = this.decoder.decode(bytes).replace(/\r\n?/gu, '\n').trim();
-      const value = content && isReadableTextContent(content)
-        ? { content, rejected: false }
-        : { rejected: true };
-      this.fileCache.set(cacheKey, { mtime: stat.mtime, size: stat.size, maxFileBytes, value });
-      return { ...value };
-    } catch {
-      return { rejected: true };
-    }
-  }
 }
-
-export function truncateProjectInstructions(
-  content: string,
-  budgetTokens: number
-): { content: string; truncated: boolean } {
-  const normalized = content.replace(/\r\n?/gu, '\n').trim();
-  if (estimateTokenCount(normalized) <= budgetTokens) {
-    return { content: normalized, truncated: false };
-  }
-  if (budgetTokens <= 0) {
-    return { content: '', truncated: true };
-  }
-
-  const notice = selectTruncationNotice(budgetTokens);
-  if (!notice) {
-    return { content: '', truncated: true };
-  }
-  let low = 0;
-  let high = normalized.length;
-  while (low < high) {
-    const mid = Math.ceil((low + high) / 2);
-    const candidate = createHeadTailExcerpt(normalized, mid, notice);
-    if (estimateTokenCount(candidate) <= budgetTokens) {
-      low = mid;
-    } else {
-      high = mid - 1;
-    }
-  }
-  return {
-    content: createHeadTailExcerpt(normalized, low, notice),
-    truncated: true
-  };
-}
-
-function selectTruncationNotice(budgetTokens: number): string {
-  const notices = [
-    '\n\n[KeepSeek truncated the middle of this AGENTS.md to fit the project-instruction budget.]\n\n',
-    '\n\n[AGENTS.md truncated by KeepSeek.]\n\n',
-    '[truncated]'
-  ];
-  return notices.find((notice) => estimateTokenCount(notice.trim()) <= budgetTokens) ?? '';
+export function truncateUtf8(content: string, maxBytes: number): string {
+  const bytes = Buffer.from(content);
+  let end = Math.max(0, Math.min(bytes.length, Math.floor(maxBytes)));
+  while (end > 0 && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString('utf8');
 }
 
 export function hashContent(content: string): string {
@@ -187,35 +83,4 @@ export function normalizeUri(uri: vscode.Uri | string): string {
     // Non-standard URI strings are normalized textually below.
   }
   return value.trim().replace(/\/$/u, '');
-}
-
-function createHeadTailExcerpt(content: string, keptCharacters: number, notice: string): string {
-  if (keptCharacters <= 0) {
-    return notice.trim();
-  }
-  const headCharacters = Math.ceil(keptCharacters * 0.8);
-  const tailCharacters = Math.max(0, keptCharacters - headCharacters);
-  const head = content.slice(0, headCharacters).trimEnd();
-  const tail = tailCharacters ? content.slice(-tailCharacters).trimStart() : '';
-  return [head, notice.trim(), tail].filter(Boolean).join('\n\n');
-}
-
-async function uriExists(uri: vscode.Uri): Promise<boolean> {
-  try {
-    return (await vscode.workspace.fs.stat(uri)).type === vscode.FileType.File;
-  } catch {
-    return false;
-  }
-}
-
-function createDiscarded(
-  uri: vscode.Uri,
-  reason: RunContextDiscardedSource['reason']
-): RunContextDiscardedSource {
-  return {
-    id: `project-instructions:${normalizeUri(uri)}`,
-    kind: 'project-instructions',
-    uri: uri.toString(),
-    reason
-  };
 }

@@ -126,7 +126,7 @@ test('ordinary source Apply skips Skill discovery while context-source refresh b
       refresh: async () => { skillRefreshes += 1; },
       invalidateImplicitSkillSnapshot: () => undefined
     },
-    legacyMemoryMigration: { refresh: async () => undefined },
+    sharedProjectSources: { dirty: false, matches: () => true, refresh: async () => ({}) },
     sessionStore: { getActiveSession: () => session },
     refreshCurrentRunContext: async () => { contextRefreshes += 1; await gate; },
     postState: () => undefined,

@@ -38,7 +38,7 @@ test('deduplicates exact content hashes across different URIs', () => {
   assert.equal(result.discarded[0]?.reason, 'duplicate_content');
 });
 
-test('current-run context preserves project, explicit, default, implicit, and Legacy priority', () => {
+test('current-run context preserves project, explicit, default, implicit priority', () => {
   const project = projectInstruction('Project architecture rules.');
   const context = buildCurrentRunContext({
     projectInstructions: { instructions: [project], discarded: [] },
@@ -47,12 +47,6 @@ test('current-run context preserves project, explicit, default, implicit, and Le
       skill('default', 'Default flow.', 'workspace-default'),
       skill('explicit', 'Explicit flow.', 'explicit')
     ],
-    legacyMemory: {
-      content: '- [project_note] Legacy fallback.',
-      entryIds: ['legacy-1'],
-      tokenEstimate: 8,
-      sourceUris: ['file:///workspace/.keepseek/memory.json']
-    },
     skillCharacterBudget: 10_000
   });
 
@@ -65,8 +59,7 @@ test('current-run context preserves project, explicit, default, implicit, and Le
     'project-instructions',
     'skill',
     'skill',
-    'skill',
-    'legacy-memory'
+    'skill'
   ]);
 
   const contextInstructions = formatCurrentRunContextForAgent({
@@ -85,7 +78,7 @@ test('current-run context preserves project, explicit, default, implicit, and Le
   assert.ok(instructions.indexOf('Project architecture rules.') < instructions.indexOf('Explicit flow.'));
   assert.ok(instructions.indexOf('Explicit flow.') < instructions.indexOf('Default flow.'));
   assert.ok(instructions.indexOf('Default flow.') < instructions.indexOf('Implicit flow.'));
-  assert.ok(instructions.indexOf('Implicit flow.') < instructions.indexOf('Legacy fallback.'));
+  assert.doesNotMatch(instructions, /Legacy fallback/u);
   // user 消息是纯 prompt，动态上下文全部在稳定的 contextInstructions system 消息中
   assert.equal(messages.at(-1)?.content, 'Current explicit request.');
 });

@@ -39,12 +39,6 @@ export function getScript(): string {
         activeSkillIds: [],
         workspaceDefaultSkillIds: []
       },
-      legacyMemoryMigration: {
-        detected: false,
-        status: 'pending',
-        sourceUris: [],
-        entryCount: 0
-      },
       backgroundRun: null,
       backgroundAvailableScripts: [],
       backgroundDefaults: {
@@ -4609,6 +4603,9 @@ export function getScript(): string {
         source.activation || '',
         source.reason || '',
         source.uri || '',
+        source.scopeUri ? 'scope: ' + source.scopeUri : '',
+        Number.isSafeInteger(source.order) ? '#' + String(source.order + 1) : '',
+        source.contentHash ? 'sha256: ' + source.contentHash : '',
         String(Number(source.characterCount) || 0) + ' chars',
         String(Number(source.tokenEstimate) || 0) + ' tokens',
         source.scriptsPresent ? t('skillsScriptsPresent') : '',

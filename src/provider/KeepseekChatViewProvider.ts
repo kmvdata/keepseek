@@ -41,7 +41,6 @@ import {
   DraftEdit,
   KeepseekExtensionInfo,
   KeepseekModel,
-  LegacyProjectMemoryMigrationStateView,
   PromptCacheDiagnostics,
   RunDetailsCacheSummary,
   RepairLoopState,
@@ -175,9 +174,9 @@ import {
   TEXT_REFERENCE_STORAGE_DIR,
   type TextReferenceSource
 } from '../context/textReferences';
-import { ProjectInstructionsResolver } from '../agent/projectInstructions';
+import { SharedProjectSources } from '../context/sharedProjectSources';
+import { resolveSharedScope, uriInside } from '../context/sharedConfigPaths';
 import { buildCurrentRunContext } from '../agent/currentRunContext';
-import { LegacyProjectMemoryMigration } from '../memory/legacyProjectMemoryMigration';
 import { BackgroundRunCoordinator } from '../agent/backgroundRunCoordinator';
 import { BackgroundRunStatusBar } from './backgroundRunStatusBar';
 import { getAvailableSafeValidationScripts } from '../agent/tools/validationTools';
@@ -258,8 +257,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private readonly draftDiffService: DraftDiffService;
   private readonly skillStore: SkillStore;
   private readonly skillCreator = new SkillCreator();
-  private readonly projectInstructionsResolver = new ProjectInstructionsResolver();
-  private readonly legacyMemoryMigration: LegacyProjectMemoryMigration;
+  private readonly sharedProjectSources = new SharedProjectSources();
+  private creatingSkill = false;
   private readonly backgroundRunCoordinator: BackgroundRunCoordinator;
   private readonly backgroundRunStatusBar = new BackgroundRunStatusBar();
   private readonly sessionTraceLogUris = new Map<string, string>();
@@ -484,11 +483,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     );
     // 余额快照与限流时间戳落在 globalStorageUri 下，并按 provider/source 隔离。
     this.balanceStore = new GlobalBalanceStore(this.globalStorageUri);
-    this.legacyMemoryMigration = new LegacyProjectMemoryMigration(
-      this.globalStorageUri,
-      skillState,
-      () => this.sessionStore.workspaceKey
-    );
     this.backgroundRunCoordinator = new BackgroundRunCoordinator((run) => {
       if (run && (run.status === 'completed' || run.status === 'failed' || run.status === 'stopped')) {
         this.backgroundRunModelSelections.delete(run.id);
@@ -547,6 +541,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public dispose(): void {
+    this.sharedProjectSources?.dispose();
     this.changeActionAbortController?.abort();
     clearInterval(this.taskTimingTimer);
     this.taskClock?.dispose();
@@ -595,7 +590,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.currentRunContextsBySession.clear();
     this.slimToolNamesBySession.clear();
     await this.refreshModelSourceState();
-    await this.legacyMemoryMigration.refresh();
     await this.refreshSkills({ post: false });
     await this.refreshBackgroundRunAvailability({ post: false });
     await this.sessionStore.persist();
@@ -607,11 +601,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     this.postState({ forceFull: true });
   }
 
-  public async refreshLegacyMemoryMigration(): Promise<void> {
-    await this.legacyMemoryMigration.refresh();
-    await this.refreshCurrentRunContext(this.sessionStore.getActiveSession(), '');
-    this.postState();
-  }
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.views.add(webviewView);
@@ -1186,18 +1175,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         await vscode.window.showTextDocument(document, { preview: true });
         return;
       }
-      case 'createLegacyMemoryMigrationDraft':
-        await this.createLegacyMemoryMigrationDraft();
-        return;
-      case 'exportLegacyMemory':
-        await this.exportLegacyMemory();
-        return;
-      case 'completeLegacyMemoryMigration':
-        await this.completeLegacyMemoryMigration();
-        return;
-      case 'rollbackLegacyMemoryMigration':
-        await this.rollbackLegacyMemoryMigration();
-        return;
       case 'startBackgroundRun':
         await this.startBackgroundRun(message.script, message.maxRounds);
         return;
@@ -1328,6 +1305,9 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'requestReferenceResources':
         await this.postReferenceResources(message.requestId);
         return;
+      case 'selectProjectScope':
+        await this.selectProjectScope();
+        return;
       case 'requestSkills':
         await this.refreshSkills();
         return;
@@ -1339,12 +1319,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         return;
       case 'openSkill':
         await this.openSkill(message.skillId);
-        return;
-      case 'setSkillEnabled':
-        await this.setSkillEnabled(message.skillId, message.enabled);
-        return;
-      case 'setSkillAllowImplicit':
-        await this.setSkillAllowImplicit(message.skillId, message.allowImplicit);
         return;
       case 'setSkillWorkspaceDefault':
         await this.setSkillWorkspaceDefault(message.skillId, message.enabled);
@@ -2493,9 +2467,33 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  public async refreshSkills(options: { post?: boolean } = {}): Promise<void> {
-    await this.skillStore.refresh();
+  public async selectProjectScope(): Promise<void> {
+    if (this.isBusy || this.isStartingRun) return;
     const session = this.sessionStore.getActiveSession();
+    const selected = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false,
+      defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri, title: this.t('sharedScopeSelect') });
+    if (!selected?.[0]) return;
+    if (!(vscode.workspace.workspaceFolders ?? []).some(folder => uriInside(folder.uri, selected[0]))) {
+      vscode.window.showWarningMessage(this.t('sharedScopeRequired')); return;
+    }
+    const scope = await resolveSharedScope({ cwd: selected[0] });
+    if (!scope || this.isBusy || this.isStartingRun || this.sessionStore.activeSessionId !== session.id) return;
+    session.projectScopeUri = selected[0].toString();
+    this.sharedProjectSources.dirty = true;
+    await this.refreshSkills();
+    await this.sessionStore.persist();
+  }
+
+  public notifySharedSourcesChanged(uris: readonly vscode.Uri[]): void {
+    if (uris.some(uri => this.sharedProjectSources.matches(uri.toString()))) this.sharedProjectSources.dirty = true;
+  }
+
+  public async refreshSkills(options: { post?: boolean } = {}): Promise<void> {
+    if (this.isBusy || this.isStartingRun) { this.sharedProjectSources.dirty = true; return; }
+    const session = this.sessionStore.getActiveSession();
+    const snapshot = await this.sharedProjectSources.refresh(session.id, session.projectScopeUri);
+    if (!session.projectScopeUri && snapshot.scope) session.projectScopeUri = snapshot.scope.cwd.toString();
+    await this.skillStore.refresh(snapshot);
     this.skillStore.invalidateImplicitSkillSnapshot(session);
     await this.refreshCurrentRunContext(session, '');
     if (options.post !== false) {
@@ -2505,18 +2503,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private scheduleRunContextRefresh(uris: readonly string[]): void {
     const scope = classifyRunContextRefresh(uris, this.fileContext?.getAll?.().map((file) => file.uri) ?? []);
-    if (!scope.contextFiles && !scope.projectInstructions && !scope.skills && !scope.legacyMemory) return;
+    if (this.sharedProjectSources && uris.some(uri => this.sharedProjectSources.matches(uri))) this.sharedProjectSources.dirty = true;
+    if (!scope.contextFiles && !scope.projectInstructions && !scope.skills) return;
     const previous = this.runContextRefreshPromise ?? Promise.resolve();
     const refresh = previous.catch(() => undefined).then(async () => {
       const session = this.sessionStore.getActiveSession();
       const work = this.enterTaskWork(session, session.messages?.at(-1)?.userTask);
       try {
         if (scope.contextFiles) await this.fileContext.refreshUris(uris);
-        if (scope.skills) {
-          await this.skillStore.refresh();
-          this.skillStore.invalidateImplicitSkillSnapshot(session);
-        }
-        if (scope.legacyMemory) await this.legacyMemoryMigration.refresh();
+        if ((scope.skills || scope.projectInstructions) && !this.isBusy && !this.isStartingRun) await this.refreshSkills({ post: false });
         session.contextUsage = undefined;
         await this.refreshCurrentRunContext(session, '');
       } finally { work?.finish(); if (work) await this.sessionStore.persist(); }
@@ -2562,19 +2557,16 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     prompt: string,
     explicitSkillIds?: readonly string[]
   ): Promise<{ context: CurrentRunContext; failures: Array<{ id: string; name: string; error: string }> }> {
-    const [projectInstructions, activeSkillResult] = await Promise.all([
-      this.projectInstructionsResolver.resolve(),
-      this.skillStore.resolveAndLoadSkills({
-        session,
-        prompt,
-        explicitSkillIds
-      })
-    ]);
+    if (this.sharedProjectSources.sessionId !== session.id) {
+      const snapshot = await this.sharedProjectSources.refresh(session.id, session.projectScopeUri);
+      await this.skillStore.refresh(snapshot);
+    }
+    const projectInstructions = this.sharedProjectSources.instructions;
+    const activeSkillResult = await this.skillStore.resolveAndLoadSkills({ session, prompt, explicitSkillIds });
     const context = buildCurrentRunContext({
       projectInstructions,
       skills: activeSkillResult.skills,
       skillActivationSkips: activeSkillResult.activation?.skipped,
-      legacyMemory: this.legacyMemoryMigration.createReadonlyContext(prompt),
       skillCharacterBudget: getConfiguredSkillContextBudgetChars()
     });
     this.currentRunContextsBySession.set(session.id, context);
@@ -2594,6 +2586,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
     const activeSession = this.sessionStore.getActiveSession();
     if (!(await this.skillStore.useSkill(activeSession, skillId))) {
+      const reason = this.skillStore.getManifest(skillId)?.unavailableReason;
+      if (reason) vscode.window.showWarningMessage(reason);
       this.postState();
       return;
     }
@@ -2642,31 +2636,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async setSkillEnabled(skillId: string, enabled: boolean): Promise<void> {
-    if (this.isBusy || this.isStartingRun) {
-      return;
-    }
-    const activeSession = this.sessionStore.getActiveSession();
-    if (!(await this.skillStore.setSkillEnabled(activeSession, skillId, enabled))) {
-      return;
-    }
-    activeSession.contextUsage = undefined;
-    activeSession.updatedAt = new Date().toISOString();
-    await this.refreshCurrentRunContext(activeSession, '');
-    await this.sessionStore.persist();
-    this.postState();
-  }
 
-  private async setSkillAllowImplicit(skillId: string, allowImplicit: boolean): Promise<void> {
-    if (this.isBusy || this.isStartingRun) {
-      return;
-    }
-    if (!(await this.skillStore.setSkillAllowImplicit(skillId, allowImplicit))) {
-      return;
-    }
-    await this.refreshCurrentRunContext(this.sessionStore.getActiveSession(), '');
-    this.postState();
-  }
 
   private async setSkillWorkspaceDefault(skillId: string, enabled: boolean): Promise<void> {
     if (this.isBusy || this.isStartingRun) {
@@ -2698,46 +2668,45 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async createSkillDraft(message: Extract<WebviewMessage, { type: 'createSkillDraft' }>): Promise<void> {
+    if (this.creatingSkill || this.isBusy || this.isStartingRun) return;
     if (!vscode.workspace.isTrusted) {
       vscode.window.showErrorMessage(this.t('createSkillWorkspaceUntrusted'));
       return;
     }
 
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (!workspaceFolder) {
-      vscode.window.showErrorMessage(this.t('createSkillWorkspaceRequired'));
-      return;
-    }
-
+    this.creatingSkill = true;
     try {
+      const session = this.sessionStore.getActiveSession();
+      const scope = await resolveSharedScope({ cwd: session.projectScopeUri ? vscode.Uri.parse(session.projectScopeUri) : undefined });
+      const workspaceFolder = scope ? { uri: scope.cwd, name: scope.cwd.path.split('/').at(-1) ?? 'project', index: 0 } : undefined;
+      if (!workspaceFolder) {
+        vscode.window.showErrorMessage(this.t('createSkillWorkspaceRequired'));
+        return;
+      }
       const draft = this.skillCreator.createDraft({
         workspaceFolder,
         rawName: message.name,
         description: message.description,
         allowImplicit: message.allowImplicit,
-        userInvocable: message.userInvocable,
         language: this.language
       });
 
-      if (await this.uriExists(draft.targetUri)) {
-        vscode.window.showErrorMessage(this.t('createSkillAlreadyExists', { label: draft.label }));
-        return;
+      for (const file of draft.files) {
+        if (this.changeSets.toWebviewState(session.id).some(set => set.files.some(item => item.uri === file.targetUri.toString() && !['discarded', 'reverted'].includes(item.status))) || await this.uriExists(file.targetUri)) {
+          vscode.window.showErrorMessage(this.t('createSkillAlreadyExists', { label: file.label }));
+          return;
+        }
       }
-
-      const edit: DraftEdit = createFullTextDraftEdit({
-        id: randomUUID(),
-        uri: draft.targetUri.toString(),
-        label: draft.label,
-        action: 'create',
-        content: draft.content,
-        reason: draft.reason
-      });
+      if (this.isBusy || this.isStartingRun || !vscode.workspace.isTrusted || this.sessionStore.activeSessionId !== session.id) return;
+      const edits = draft.files.map(file => createFullTextDraftEdit({
+        id: randomUUID(), uri: file.targetUri.toString(), label: file.label, action: 'create', content: file.content, reason: draft.reason
+      }));
       const timelineMessage = this.appendChangeSetTimelineMessage(
         this.t('createSkillDraftCreated', { label: draft.label })
       );
       this.changeSets.addDraftEdits({
-        edits: [edit],
-        sessionId: this.sessionStore.activeSessionId,
+        edits,
+        sessionId: session.id,
         messageId: timelineMessage.id,
         operationSummary: draft.reason
       });
@@ -2747,7 +2716,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       vscode.window.showInformationMessage(this.t('createSkillDraftCreated', { label: draft.label }));
     } catch (error) {
       vscode.window.showErrorMessage(this.t('cannotCreateSkillDraft', { message: getErrorMessage(error) }));
-    }
+    } finally { this.creatingSkill = false; }
   }
 
   private async uriExists(uri: vscode.Uri): Promise<boolean> {
@@ -4171,96 +4140,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     );
   }
 
-  private appendLegacyMemoryTrace(event: { type: string; [key: string]: unknown }): void {
-    const session = this.sessionStore.getActiveSession();
-    const latestDetails = [...session.messages].reverse().find((message) => message.runDetails)?.runDetails;
-    const uri = latestDetails?.traceLogUri ?? session.lastTraceLogUri;
-    void this.traceLogService.appendRunEvent(
-      uri && latestDetails?.runId ? { runId: latestDetails.runId, uri } : undefined,
-      event
-    );
-  }
-
-  private async createLegacyMemoryMigrationDraft(): Promise<void> {
-    if (this.isBusy || this.isStartingRun || !this.legacyMemoryMigration.getStateView().canCreateDraft) {
-      return;
-    }
-    try {
-      const draft = await this.legacyMemoryMigration.createDraft();
-      const timelineMessage = draft.edits.length
-        ? this.appendChangeSetTimelineMessage(
-            this.t('legacyMemoryMigrationDraftCreated', { count: draft.edits.length })
-          )
-        : undefined;
-      const changeSet = this.changeSets.addDraftEdits({
-        edits: draft.edits,
-        sessionId: this.sessionStore.activeSessionId,
-        messageId: timelineMessage?.id,
-        operationSummary: this.t('legacyMemoryMigrationDraftReason')
-      });
-      await this.legacyMemoryMigration.markDraftCreated(changeSet?.id);
-      if (timelineMessage) {
-        await this.sessionStore.persist();
-      }
-      this.appendLegacyMemoryTrace({
-        type: 'legacy_memory_migration_draft_created',
-        sourceUris: draft.sourceUris,
-        entryCount: draft.entryCount,
-        changeSetId: changeSet?.id,
-        editCount: draft.edits.length
-      });
-      if (!draft.edits.length && draft.exportText) {
-        await vscode.env.clipboard.writeText(draft.exportText);
-        vscode.window.showInformationMessage(this.t('legacyMemoryExportCopied'));
-      } else {
-        vscode.window.showInformationMessage(this.t('legacyMemoryMigrationDraftCreated', { count: draft.edits.length }));
-      }
-      this.postState();
-    } catch (error) {
-      vscode.window.showErrorMessage(getErrorMessage(error));
-    }
-  }
-
-  private async exportLegacyMemory(): Promise<void> {
-    try {
-      const content = await this.legacyMemoryMigration.getExportText();
-      if (!content) {
-        return;
-      }
-      await vscode.env.clipboard.writeText(content);
-      this.appendLegacyMemoryTrace({ type: 'legacy_memory_export_copied' });
-      vscode.window.showInformationMessage(this.t('legacyMemoryExportCopied'));
-    } catch (error) {
-      vscode.window.showErrorMessage(getErrorMessage(error));
-    }
-  }
-
-  private async completeLegacyMemoryMigration(): Promise<void> {
-    const state = this.legacyMemoryMigration.getStateView();
-    if (state.status !== 'draft-created' || !state.detected) {
-      return;
-    }
-    if (state.lastDraftChangeSetId) {
-      if (!this.changeSets.isChangeSetFullyApplied(state.lastDraftChangeSetId)) {
-        vscode.window.showWarningMessage(this.t('legacyMemoryApplyBeforeComplete'));
-        return;
-      }
-    }
-    await this.legacyMemoryMigration.complete();
-    await this.refreshCurrentRunContext(this.sessionStore.getActiveSession(), '');
-    this.appendLegacyMemoryTrace({ type: 'legacy_memory_migration_completed' });
-    this.postState();
-  }
-
-  private async rollbackLegacyMemoryMigration(): Promise<void> {
-    if (!this.getLegacyMemoryMigrationStateView().canRollback) {
-      return;
-    }
-    await this.legacyMemoryMigration.rollback();
-    await this.refreshCurrentRunContext(this.sessionStore.getActiveSession(), '');
-    this.appendLegacyMemoryTrace({ type: 'legacy_memory_migration_rolled_back' });
-    this.postState();
-  }
 
   private async openRunTrace(messageId: string): Promise<void> {
     const message = this.messages.find((item) => item.id === messageId);
@@ -4466,31 +4345,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     void this.sessionStore.persist();
   }
 
-  private getLegacyMemoryMigrationStateView(): LegacyProjectMemoryMigrationStateView {
-    const state = this.legacyMemoryMigration.getStateView();
-    if (!state.lastDraftChangeSetId) {
-      return state;
-    }
-    const changeSetStatus = this.changeSets.getChangeSetStatus(state.lastDraftChangeSetId);
-    if (state.status === 'completed') {
-      const canRollback = changeSetStatus === 'reverted';
-      return {
-        ...state,
-        canRollback,
-        rollbackDisabledReason: canRollback ? undefined : this.t('legacyMemoryRevertBeforeRollback')
-      };
-    }
-    if (state.status !== 'draft-created') {
-      return state;
-    }
-    const canComplete = this.changeSets.isChangeSetFullyApplied(state.lastDraftChangeSetId);
-    return {
-      ...state,
-      canComplete,
-      canRollback: state.canRollback || changeSetStatus === 'discarded' || changeSetStatus === 'reverted',
-      completeDisabledReason: canComplete ? undefined : this.t('legacyMemoryApplyBeforeComplete')
-    };
-  }
 
   private createRunStreamPublisher(sessionId: string, message: ChatMessage): {
     schedule(): void; beginModelRound(): void; resetAttempt(): void; dispose(): void;
@@ -4873,6 +4727,13 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     migrateUserTasks(taskSession.messages);
     const sendOptions = args[4] ?? {};
     const prior = taskSession.messages.at(-1);
+    const continuingSharedTask = Boolean(sendOptions.draftRunAutoContinue || sendOptions.delegatedContinuation || sendOptions.repairLoop || sendOptions.planExecutionContinuation
+      || prior?.runCheckpoint?.stopReason === 'no_progress_loop' || prior?.runCheckpointArchive?.summary.stopReason === 'no_progress_loop');
+    if (!continuingSharedTask && this.sharedProjectSources?.dirty) await this.refreshSkills({ post: false });
+    if ((vscode.workspace.workspaceFolders?.length ?? 0) > 1 && !taskSession.projectScopeUri) {
+      vscode.window.showWarningMessage(this.t('sharedScopeRequired'));
+      return;
+    }
     const planOrigin = sendOptions.planExecutionContinuation
       ? taskSession.planWorkflows?.find(plan => plan.id === sendOptions.planExecutionContinuation!.planId)?.userMessageId : undefined;
     const inherited = sendOptions.draftRunAutoContinue
@@ -5134,7 +4995,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       );
       if (runContextResult.failures.length) {
         vscode.window.showWarningMessage(this.t('skillLoadFailed', {
-          skill: runContextResult.failures.map((failure) => failure.name).join(', ')
+          skill: runContextResult.failures.map((failure) => `${failure.name}: ${failure.error}`).join(', ')
         }));
       }
       const currentRunContext = runContextResult.context;
@@ -5153,7 +5014,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         : -1;
 
       // 稳定上下文块：字节不变时跨轮复用（system 段前缀稳定），只有
-      // AGENTS.md/Skills/Legacy Memory/Context Files 真正变化才整体重写。
+      // AGENTS.md/Skills/Context Files 真正变化才整体重写。
       const contextFiles = this.fileContext.getAll();
       const totalContextBudgetCharacters = getConfiguredTotalContextBudgetTokens() * 4;
       archiveContextSourcesBeyondBudget(activeSession, [
@@ -5164,11 +5025,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         })),
         ...contextFiles.map((file) => ({ id: file.id, kind: 'context-file', content: file.content })),
         ...currentRunContext.skills.map((skill) => ({ id: skill.id, kind: 'skill', content: skill.content })),
-        ...(currentRunContext.legacyMemory ? [{
-          id: 'legacy-project-memory',
-          kind: 'legacy-memory',
-          content: currentRunContext.legacyMemory.content
-        }] : [])
       ], totalContextBudgetCharacters);
       const computedContextInstructions = formatCurrentRunContextForAgent({
         contextFiles,
@@ -5841,16 +5697,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         this.postStartupSettingsPatch();
       })();
 
-      const legacyTask = this.measureStartup(
-        'legacy-memory-loaded',
-        () => this.legacyMemoryMigration.refresh()
-      ).then(
-        () => true,
-        (error) => {
-          console.warn('KeepSeek: legacy memory initialization failed; continuing without it.', error);
-          return false;
-        }
-      );
       const modelTask = (async () => {
         try {
           await this.measureStartup('model-sources-loaded', () => this.refreshModelSourceState({
@@ -5884,7 +5730,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
       })();
       const runContextTask = (async () => {
-        await legacyTask;
         try {
           await this.measureStartup(
             'skills-and-project-instructions-loaded',
@@ -6182,7 +6027,6 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           .map(toSubagentProgressViewModel),
         subagentModelSetting: this.subagentModelSetting,
         subagentModelSettings: this.subagentModelSettings,
-        legacyMemoryMigration: this.getLegacyMemoryMigrationStateView(),
         backgroundRun: this.backgroundRunCoordinator.getActiveRun(),
         backgroundAvailableScripts: this.backgroundAvailableScripts,
         backgroundDefaults: {
@@ -6863,13 +6707,12 @@ function isChangeActionMessage(message: WebviewMessage): message is ChangeAction
 function classifyRunContextRefresh(
   changedUris: readonly string[],
   contextFileUris: readonly string[]
-): { contextFiles: boolean; projectInstructions: boolean; skills: boolean; legacyMemory: boolean } {
+): { contextFiles: boolean; projectInstructions: boolean; skills: boolean } {
   const attached = new Set(contextFileUris);
   const result = {
     contextFiles: false,
     projectInstructions: false,
     skills: false,
-    legacyMemory: false
   };
   for (const value of changedUris) {
     if (attached.has(value)) result.contextFiles = true;
@@ -6878,9 +6721,8 @@ function classifyRunContextRefresh(
     const normalized = path.replace(/\\/gu, '/').replace(/\/+$/u, '');
     const lower = normalized.toLocaleLowerCase();
     const name = lower.slice(lower.lastIndexOf('/') + 1);
-    if (name === 'agents.md') result.projectInstructions = true;
-    if (name === 'skill.md' || lower.includes('/.agents/')) result.skills = true;
-    if (lower.endsWith('/.keepseek/memory.json')) result.legacyMemory = true;
+    if (name === 'agents.md' || name === 'agents.override.md' || lower.endsWith('/.codex/config.toml')) result.projectInstructions = true;
+    if (name === 'skill.md' || lower.endsWith('/agents/openai.yaml') || lower.endsWith('/.codex/config.toml') || lower.includes('/.agents/skills/')) result.skills = true;
   }
   return result;
 }

@@ -866,18 +866,13 @@ test('retired Project Memory configuration keys are no longer contributed', asyn
   const keys = Object.keys(packageJson.contributes?.configuration?.properties ?? {});
 
   assert.ok(!keys.some((key) => key.startsWith('keepseek.memory.')));
-  assert.ok(keys.includes('keepseek.projectInstructions.contextBudgetTokens'));
+  assert.ok(!keys.includes('keepseek.projectInstructions.contextBudgetTokens'));
   assert.ok(keys.includes('keepseek.skills.maxImplicitActivations'));
 });
 
-test('Legacy Memory migration command is hidden by default and appears only from detected state', () => {
-  const inputTemplate = getInputTemplate();
-  const script = getInputScript();
-
-  assert.match(inputTemplate, /id="commandLegacyMemorySection" class="command-section hidden"/u);
-  assert.match(script, /var visible = migration\.detected === true/u);
-  assert.match(script, /classList\.toggle\('hidden', !visible\)/u);
-  assert.match(script, /createLegacyMemoryMigrationDraft/u);
+test('Legacy Memory migration menu and host messages are removed', () => {
+  assert.doesNotMatch(getInputTemplate(), /commandLegacyMemorySection/u);
+  assert.doesNotMatch(getInputScript(), /createLegacyMemoryMigrationDraft|setSkillEnabled|setSkillAllowImplicit/u);
 });
 
 test('generated Webview JavaScript passes syntax compilation', () => {
@@ -1081,14 +1076,14 @@ test('delete DraftEdits require a path-aware modal before the Provider applies t
   assert.match(providerSource, /showWarningMessage\([\s\S]*?\{ modal: true, detail \}/u);
 });
 
-test('Skill creation and Legacy Memory migration attach their ChangeSets to explicit timeline messages', async () => {
+test('Skill creation attaches its grouped ChangeSet to an explicit timeline message', async () => {
   const providerSource = await readFile(
     path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
     'utf8'
   );
 
   assert.match(providerSource, /appendChangeSetTimelineMessage\([\s\S]*?createSkillDraftCreated[\s\S]*?messageId: timelineMessage\.id/u);
-  assert.match(providerSource, /legacyMemoryMigrationDraftCreated[\s\S]*?messageId: timelineMessage\?\.id/u);
+  assert.doesNotMatch(providerSource, /legacyMemoryMigrationDraftCreated/u);
 });
 
 function getGeneratedSection(source: string, startMarker: string, endMarker: string): string {

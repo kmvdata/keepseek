@@ -1,7 +1,6 @@
 import type {
   ActivatedSkill,
   CurrentRunContext,
-  LegacyProjectMemoryContext,
   ProjectInstructionContext,
   RunContextDiscardedSource,
   RunContextSourceSummary,
@@ -21,19 +20,16 @@ export const RUN_CONTEXT_PRECEDENCE = [
   'Skills enabled for the current session',
   'Workspace-default personal or project Skills',
   'Deterministically matched implicit Skills',
-  'Read-only Legacy Project Memory during migration'
 ];
 
 type CandidateValue =
   | { type: 'project'; instruction: ProjectInstructionContext }
-  | { type: 'skill'; skill: ActivatedSkill }
-  | { type: 'legacy'; memory: LegacyProjectMemoryContext };
+  | { type: 'skill'; skill: ActivatedSkill };
 
 export interface CurrentRunContextBuilderInput {
   projectInstructions: ProjectInstructionsResolution;
   skills: ActivatedSkill[];
   skillActivationSkips?: SkillActivationSkip[];
-  legacyMemory?: LegacyProjectMemoryContext;
   skillCharacterBudget: number;
 }
 
@@ -43,7 +39,7 @@ export function buildCurrentRunContext(input: CurrentRunContextBuilderInput): Cu
     candidates.push({
       id: instruction.id,
       kind: 'project-instructions',
-      label: `${instruction.workspaceFolder}/AGENTS.md`,
+      label: `${instruction.workspaceFolder}/${instruction.uri.split('/').at(-1)}`,
       uri: instruction.uri,
       content: instruction.content,
       contentHash: instruction.contentHash,
@@ -62,24 +58,12 @@ export function buildCurrentRunContext(input: CurrentRunContextBuilderInput): Cu
       value: { type: 'skill', skill }
     });
   }
-  if (input.legacyMemory?.content.trim()) {
-    candidates.push({
-      id: 'legacy-project-memory',
-      kind: 'legacy-memory',
-      label: 'Legacy Project Memory',
-      uri: input.legacyMemory.sourceUris[0],
-      content: input.legacyMemory.content,
-      priority: 70,
-      value: { type: 'legacy', memory: input.legacyMemory }
-    });
-  }
 
   const deduplication = deduplicateContextSources(candidates);
   const activationDuplicateCount = (input.skillActivationSkips ?? [])
-    .filter((skip) => skip.reason === 'duplicate_uri' || skip.reason === 'duplicate_skill').length;
+    .filter((skip) => skip.reason === 'duplicate_uri').length;
   const projectInstructions: ProjectInstructionContext[] = [];
   const skills: ActivatedSkill[] = [];
-  let legacyMemory: LegacyProjectMemoryContext | undefined;
   const sources: RunContextSourceSummary[] = [];
   const discarded: RunContextDiscardedSource[] = [
     ...input.projectInstructions.discarded,
@@ -96,22 +80,6 @@ export function buildCurrentRunContext(input: CurrentRunContextBuilderInput): Cu
       anyTruncated ||= candidate.value.instruction.truncated;
       continue;
     }
-    if (candidate.value.type === 'legacy') {
-      legacyMemory = candidate.value.memory;
-      sources.push({
-        id: candidate.id,
-        kind: 'legacy-memory',
-        label: candidate.label,
-        uri: candidate.uri,
-        source: 'legacy-read-only',
-        characterCount: candidate.content.length,
-        tokenEstimate: candidate.value.memory.tokenEstimate,
-        contentHash: candidate.contentHash || hashContent(candidate.content),
-        truncated: false
-      });
-      continue;
-    }
-
     const skill = candidate.value.skill;
     if (remainingSkillCharacters <= 0) {
       discarded.push({
@@ -159,7 +127,6 @@ export function buildCurrentRunContext(input: CurrentRunContextBuilderInput): Cu
   return {
     projectInstructions,
     skills,
-    legacyMemory,
     metadata: {
       precedence: [...RUN_CONTEXT_PRECEDENCE],
       beforeDeduplicationCount: deduplication.beforeCount + activationDuplicateCount,
@@ -169,16 +136,7 @@ export function buildCurrentRunContext(input: CurrentRunContextBuilderInput): Cu
       truncated: anyTruncated,
       sources,
       discarded,
-      possibleConflicts: [
-        ...deduplication.possibleConflicts,
-        ...(input.skillActivationSkips ?? [])
-          .filter((skip) => skip.reason === 'duplicate_skill' && Boolean(skip.keptId))
-          .map((skip) => ({
-            leftId: skip.keptId as string,
-            rightId: skip.id,
-            reason: 'Same normalized Skill name was discovered from multiple sources; the higher-priority source was retained.'
-          }))
-      ]
+      possibleConflicts: deduplication.possibleConflicts
     }
   };
 }
@@ -197,9 +155,11 @@ function toProjectSourceSummary(instruction: ProjectInstructionContext): RunCont
   return {
     id: instruction.id,
     kind: 'project-instructions',
-    label: `${instruction.workspaceFolder}/AGENTS.md`,
+    label: `${instruction.workspaceFolder}/${instruction.uri.split('/').at(-1)}`,
     uri: instruction.uri,
-    source: 'workspace-root',
+    source: instruction.workspaceFolder === 'global' ? 'global' : 'task-scope',
+    scopeUri: instruction.scopeUri,
+    order: instruction.order,
     characterCount: instruction.characterCount,
     tokenEstimate: instruction.tokenEstimate,
     contentHash: instruction.contentHash,
@@ -246,7 +206,7 @@ function mapActivationSkipReason(
 ): RunContextDiscardedSource['reason'] {
   switch (reason) {
     case 'duplicate_uri': return 'duplicate_uri';
-    case 'duplicate_skill': return 'duplicate_skill';
+    case 'ambiguous_name': return 'ambiguous_name';
     case 'workspace_untrusted': return 'workspace_untrusted';
     case 'disabled': return 'disabled';
     case 'implicit_limit': return 'implicit_limit';

@@ -78,13 +78,6 @@ export class AgentRequestCoordinator {
               activation: skill.activation ? { ...skill.activation } : undefined,
               loadedResourceUris: skill.loadedResourceUris ? [...skill.loadedResourceUris] : undefined
             })),
-            legacyMemory: input.currentRunContext.legacyMemory
-              ? {
-                  ...input.currentRunContext.legacyMemory,
-                  entryIds: [...input.currentRunContext.legacyMemory.entryIds],
-                  sourceUris: [...input.currentRunContext.legacyMemory.sourceUris]
-                }
-              : undefined,
             metadata: {
               ...input.currentRunContext.metadata,
               precedence: [...input.currentRunContext.metadata.precedence],

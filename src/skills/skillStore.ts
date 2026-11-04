@@ -3,6 +3,7 @@ import type { ChatSession } from '../shared/types';
 import { getConfiguredMaxImplicitSkills } from '../shared/config';
 import { getCurrentWorkspaceSessionScope } from '../sessions/chatSessionStore';
 import { normalizeUri } from '../agent/projectInstructions';
+import type { SharedCodexConfigSnapshot } from '../context/sharedCodexConfig';
 import { SkillDiscovery } from './skillDiscovery';
 import { SkillLoader } from './skillLoader';
 import {
@@ -19,8 +20,6 @@ import {
 const SKILL_STATE_KEY = 'keepseek.skillState.v1';
 
 interface StoredSkillState {
-  disabledSkillIds?: string[];
-  allowImplicitOverrides?: Record<string, boolean>;
   workspaceDefaultSkillRefs?: Record<string, string[]>;
 }
 
@@ -32,8 +31,7 @@ export interface ActiveSkillLoadResult {
 
 export class SkillStore {
   private manifests: SkillManifest[] = [];
-  private disabledSkillIds = new Set<string>();
-  private allowImplicitOverrides = new Map<string, boolean>();
+  private config?: SharedCodexConfigSnapshot;
   private workspaceDefaultSkillRefs = new Map<string, string[]>();
   private cachedActiveSkills = new Map<string, ActivatedSkill>();
   private activeSkillLoadErrors = new Map<string, string>();
@@ -48,17 +46,12 @@ export class SkillStore {
     this.loadStoredState();
   }
 
-  public async refresh(): Promise<void> {
-    const discovered = await this.discovery.discover();
-    const previousFingerprints = new Map(this.manifests.map((manifest) => [manifest.id, manifest.contentFingerprint]));
-    this.manifests = discovered.map((manifest) => this.applyStoredState(manifest));
-    for (const id of this.cachedActiveSkills.keys()) {
-      const next = this.manifests.find((manifest) => manifest.id === id);
-      if (!next || next.contentFingerprint !== previousFingerprints.get(id)) {
-        this.cachedActiveSkills.delete(id);
-        this.activeSkillLoadErrors.delete(id);
-      }
-    }
+  public async refresh(config?: SharedCodexConfigSnapshot): Promise<void> {
+    this.config = config;
+    const discovered = await this.discovery.discover(config);
+    this.manifests = discovered;
+    this.cachedActiveSkills.clear();
+    this.activeSkillLoadErrors.clear();
   }
 
   public getStateView(session: ChatSession): SkillStateView {
@@ -68,6 +61,9 @@ export class SkillStore {
     const workspaceDefaults = new Set(workspaceDefaultSkillIds);
     return {
       workspaceTrusted: vscode.workspace.isTrusted,
+      scopeUri: this.config?.scope?.cwd.toString(),
+      configSummary: this.config ? { projectDocMaxBytes: this.config.projectDocMaxBytes, fallbackFilenames: [...this.config.fallbackFilenames], origins: { ...this.config.origins }, fingerprint: this.config.fingerprint } : undefined,
+      diagnostics: [...(this.config?.diagnostics.map(item => `${item.uri}: ${item.message}`) ?? []), ...(this.discovery.diagnostics ?? [])],
       items: this.manifests.map((manifest) => toSkillManifestView(manifest, {
         active: active.has(manifest.id),
         loadError: this.activeSkillLoadErrors.get(manifest.id),
@@ -107,36 +103,6 @@ export class SkillStore {
     }
     session.activeSkillIds = next;
     this.activeSkillLoadErrors.delete(id);
-    return true;
-  }
-
-  public async setSkillEnabled(session: ChatSession, id: string, enabled: boolean): Promise<boolean> {
-    const manifest = this.manifests.find((item) => item.id === id);
-    if (!manifest) {
-      return false;
-    }
-
-    if (enabled) {
-      this.disabledSkillIds.delete(id);
-    } else {
-      this.disabledSkillIds.add(id);
-      this.removeActiveSkill(session, id);
-      this.cachedActiveSkills.delete(id);
-      this.activeSkillLoadErrors.delete(id);
-    }
-    this.manifests = this.manifests.map((item) => item.id === id ? this.applyStoredState(item) : item);
-    await this.persistStoredState();
-    return true;
-  }
-
-  public async setSkillAllowImplicit(id: string, allowImplicit: boolean): Promise<boolean> {
-    const manifest = this.manifests.find((item) => item.id === id);
-    if (!manifest) {
-      return false;
-    }
-    this.allowImplicitOverrides.set(id, allowImplicit);
-    this.manifests = this.manifests.map((item) => item.id === id ? this.applyStoredState(item) : item);
-    await this.persistStoredState();
     return true;
   }
 
@@ -197,11 +163,13 @@ export class SkillStore {
       const validIds = activation.activated.map((decision) => decision.manifest.id);
       const keptIds = frozenImplicitSkillIds.filter((id) => validIds.includes(id));
       if (keptIds.length !== frozenImplicitSkillIds.length) {
-        input.session.frozenImplicitSkillIds = keptIds.length ? keptIds : undefined;
+        input.session.frozenImplicitSkillIds = keptIds;
       }
     }
     const skills: ActivatedSkill[] = [];
-    const failures: ActiveSkillLoadResult['failures'] = [];
+    const failures: ActiveSkillLoadResult['failures'] = activation.skipped
+      .filter(skip => (input.explicitSkillIds ?? []).includes(skip.id) && (skip.reason === 'disabled' || skip.reason === 'workspace_untrusted'))
+      .map(skip => ({ id: skip.id, name: skip.name, error: this.getManifest(skip.id)?.unavailableReason ?? skip.reason }));
     for (const decision of activation.activated) {
       try {
         const loaded = await this.loadManifest(decision.manifest);
@@ -224,7 +192,7 @@ export class SkillStore {
   }
 
   private canUseSkill(manifest: SkillManifest): boolean {
-    return manifest.enabled && manifest.userInvocable && !manifest.unavailableReason;
+    return manifest.enabled && !manifest.unavailableReason;
   }
 
   private async loadManifest(manifest: SkillManifest): Promise<ActivatedSkill> {
@@ -243,7 +211,7 @@ export class SkillStore {
    * 集合，下次真实请求时重新按 prompt 匹配。
    */
   public invalidateImplicitSkillSnapshot(session: ChatSession): void {
-    if (session.frozenImplicitSkillIds?.length) {
+    if (Array.isArray(session.frozenImplicitSkillIds)) {
       delete session.frozenImplicitSkillIds;
     }
   }
@@ -272,24 +240,8 @@ export class SkillStore {
       .map((manifest) => manifest.id);
   }
 
-  private applyStoredState(manifest: SkillManifest): SkillManifest {
-    const disabledByUser = this.disabledSkillIds.has(manifest.id);
-    const allowImplicitOverride = this.allowImplicitOverrides.get(manifest.id);
-    return {
-      ...manifest,
-      enabled: !disabledByUser && !manifest.unavailableReason,
-      allowImplicit: allowImplicitOverride ?? manifest.allowImplicit,
-      unavailableReason: disabledByUser ? undefined : manifest.unavailableReason
-    };
-  }
-
   private loadStoredState(): void {
     const stored = this.storage.get<StoredSkillState>(SKILL_STATE_KEY, {});
-    this.disabledSkillIds = new Set(Array.isArray(stored.disabledSkillIds)
-      ? stored.disabledSkillIds.filter((id): id is string => typeof id === 'string' && Boolean(id.trim()))
-      : []);
-    this.allowImplicitOverrides = new Map(Object.entries(stored.allowImplicitOverrides ?? {})
-      .filter((entry): entry is [string, boolean] => typeof entry[0] === 'string' && typeof entry[1] === 'boolean'));
     this.workspaceDefaultSkillRefs = new Map(Object.entries(stored.workspaceDefaultSkillRefs ?? {})
       .map(([workspaceKey, refs]) => [
         workspaceKey,
@@ -300,14 +252,7 @@ export class SkillStore {
   }
 
   private async persistStoredState(): Promise<void> {
-    const allowImplicitOverrides: Record<string, boolean> = {};
-    for (const [id, allowImplicit] of this.allowImplicitOverrides) {
-      allowImplicitOverrides[id] = allowImplicit;
-    }
-
     await this.storage.update(SKILL_STATE_KEY, {
-      disabledSkillIds: [...this.disabledSkillIds],
-      allowImplicitOverrides,
       workspaceDefaultSkillRefs: Object.fromEntries(this.workspaceDefaultSkillRefs)
     } satisfies StoredSkillState);
   }

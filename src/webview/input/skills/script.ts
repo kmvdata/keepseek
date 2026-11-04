@@ -173,6 +173,9 @@ export const skillsImplementationFragment: WebviewFragment = {
           items: Array.isArray(skills.items) ? skills.items : [],
           activeSkillIds: Array.isArray(skills.activeSkillIds) ? skills.activeSkillIds : [],
           workspaceDefaultSkillIds: Array.isArray(skills.workspaceDefaultSkillIds) ? skills.workspaceDefaultSkillIds : [],
+          scopeUri: skills.scopeUri,
+          diagnostics: Array.isArray(skills.diagnostics) ? skills.diagnostics : [],
+          configSummary: skills.configSummary,
           workspaceTrusted: skills.workspaceTrusted !== false
         };
       }
@@ -184,6 +187,7 @@ export const skillsImplementationFragment: WebviewFragment = {
         if (!Array.isArray(state.workspaceFolders) || !state.workspaceFolders.length) {
           return t('createSkillWorkspaceRequired');
         }
+        if (!getSkillsState().scopeUri) { return t('sharedScopeRequired'); }
         return '';
       }
 
@@ -218,7 +222,7 @@ export const skillsImplementationFragment: WebviewFragment = {
       }
 
       function isSkillUserSelectable(skill) {
-        return Boolean(skill && skill.enabled && skill.userInvocable && !skill.unavailableReason);
+        return Boolean(skill && skill.enabled && !skill.unavailableReason);
       }
 
       function filterSkillItemsByName(skills, query) {

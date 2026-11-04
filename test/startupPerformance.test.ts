@@ -416,7 +416,6 @@ test('command settings become ready without waiting for project context or the f
     approvalReviews: { initialize: async () => {} },
     changeSets: { initialize: async () => {}, loadSession: async () => {} },
     draftRuns: { initialize: async () => {}, loadSession: async () => {} },
-    legacyMemoryMigration: { refresh: async () => {} },
     subagentSettingsStore: {
       load: async () => ({ version: 1, mode: 'follow-main', updatedAt: new Date(0).toISOString() })
     },

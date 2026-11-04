@@ -340,7 +340,6 @@ export const commandMenuRenderFragment: WebviewFragment = {
         renderCommandSkillFilter();
         renderCommandSkills();
         renderCreateSkillCommand();
-        renderLegacyMemoryCommand();
         renderBackgroundRunCommand();
         renderEffort();
       }

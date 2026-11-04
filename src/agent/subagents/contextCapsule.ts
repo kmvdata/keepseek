@@ -31,7 +31,7 @@ export function createSubagentHostContext(request: AgentRequest, workspace: { te
     version: 1 as const,
     projectInstructions: (request.currentRunContext?.projectInstructions ?? []).map(item => ({
       uri: item.uri, workspaceFolder: item.workspaceFolder, content: item.content
-    })).sort((a, b) => compare(a.uri, b.uri)),
+    })),
     profiles,
     workspace: { text: workspace.text, hash: workspace.hash },
     workspaceTrusted,

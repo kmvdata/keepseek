@@ -11,7 +11,7 @@ export interface SkillActivationSkip {
   id: string;
   name: string;
   skillUri: string;
-  reason: 'disabled' | 'workspace_untrusted' | 'allow_implicit_false' | 'not_matched' | 'implicit_limit' | 'duplicate_uri' | 'duplicate_skill' | 'load_failed';
+  reason: 'disabled' | 'workspace_untrusted' | 'allow_implicit_false' | 'not_matched' | 'implicit_limit' | 'duplicate_uri' | 'load_failed' | 'ambiguous_name';
   keptId?: string;
 }
 
@@ -80,6 +80,9 @@ export class SkillActivationResolver {
         implicitCandidates.push(createCandidate(manifest, index, 'implicit', 'Frozen from the first user request of this chat session.'));
         return;
       }
+      if (input.manifests.filter(item => item.name === manifest.name).length > 1) {
+        skipped.push(createSkip(manifest, 'ambiguous_name')); return;
+      }
       const match = scoreImplicitMatch(manifest, input.prompt);
       if (match.score <= 0) {
         skipped.push(createSkip(manifest, 'not_matched'));
@@ -101,24 +104,14 @@ export class SkillActivationResolver {
     candidates.sort(compareCandidates);
     const activated: SkillActivationDecision[] = [];
     const seenUris = new Map<string, string>();
-    const seenNames = new Map<string, string>();
     for (const candidate of candidates) {
-      const uriKey = normalizeUri(candidate.manifest.skillUri);
-      const nameKey = normalizeSkillName(candidate.manifest.name);
+      const uriKey = candidate.manifest.physicalUri ?? normalizeUri(candidate.manifest.skillUri);
       const duplicateUri = seenUris.get(uriKey);
       if (duplicateUri) {
         skipped.push(createSkip(candidate.manifest, 'duplicate_uri', duplicateUri));
         continue;
       }
-      const duplicateName = nameKey ? seenNames.get(nameKey) : undefined;
-      if (duplicateName) {
-        skipped.push(createSkip(candidate.manifest, 'duplicate_skill', duplicateName));
-        continue;
-      }
       seenUris.set(uriKey, candidate.manifest.id);
-      if (nameKey) {
-        seenNames.set(nameKey, candidate.manifest.id);
-      }
       activated.push({ manifest: candidate.manifest, activation: candidate.activation });
     }
 
@@ -267,9 +260,7 @@ function uniqueIds(ids: readonly string[] | undefined): string[] {
   return Array.from(new Set((ids ?? []).map((id) => id.trim()).filter(Boolean)));
 }
 
-function normalizeSkillName(name: string): string {
-  return normalizeMatchText(name).replace(/\s+/gu, '-');
-}
+
 
 function normalizeMatchText(value: string): string {
   return value

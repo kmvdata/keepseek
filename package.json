@@ -27,6 +27,7 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
+      { "command": "keepseek.selectProjectScope", "title": "KeepSeek: Select Task Directory / 选择任务目录" },
       {
         "command": "keepseek.showRuntimeDiagnostics",
         "title": "KeepSeek: Runtime Diagnostics / 运行诊断"
@@ -304,7 +305,7 @@
           "minimum": 1000,
           "maximum": 96000,
           "scope": "window",
-          "markdownDescription": "Shared token budget for project instructions, activated Skills, legacy memory, and attached context files before they enter a session."
+          "markdownDescription": "Shared token budget for project instructions, activated Skills and attached context files before they enter a session."
         },
         "keepseek.maxContextFiles": {
           "type": "number",
@@ -320,14 +321,6 @@
           ],
           "description": "Tool execution authorization policy"
         },
-        "keepseek.projectInstructions.contextBudgetTokens": {
-          "type": "number",
-          "default": 4000,
-          "minimum": 0,
-          "maximum": 32000,
-          "scope": "window",
-          "markdownDescription": "Maximum estimated tokens used by root AGENTS.md project instructions in each Agent run."
-        },
         "keepseek.skills.contextBudgetChars": {
           "type": "number",
           "default": 72000,
@@ -342,7 +335,7 @@
           "minimum": 0,
           "maximum": 8,
           "scope": "window",
-          "markdownDescription": "Maximum number of allowImplicit Skills that deterministic request matching may activate per Agent run."
+          "markdownDescription": "Maximum number of Skills eligible under policy.allow_implicit_invocation that deterministic request matching may activate per Agent run."
         },
         "keepseek.contextCompression": {
           "type": "boolean",
@@ -464,7 +457,9 @@
     "reinstall:vsix": "node scripts/reinstall-vsix.js"
   },
   "dependencies": {
-    "ignore": "^7.0.0"
+    "ignore": "^7.0.0",
+    "yaml": "2.8.4",
+    "confbox": "0.2.4"
   },
   "devDependencies": {
     "@types/vscode": "^1.98.0",

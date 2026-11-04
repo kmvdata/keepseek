@@ -8,7 +8,6 @@ import {
   ChatMessage,
   ContextFile,
   CurrentRunContext,
-  LegacyProjectMemoryContext
 } from '../shared/types';
 import type { HistoryProjectionResult } from './historyProjection';
 
@@ -109,7 +108,7 @@ export interface BuildAgentMessagesInput {
   prompt: string;
   contextFiles: ContextFile[];
   currentRunContext?: CurrentRunContext;
-  /** 持久化的稳定上下文块（AGENTS.md/Skills/Legacy Memory/Context Files 的格式化结果） */
+  /** 持久化的稳定上下文块（AGENTS.md/Skills/Context Files 的格式化结果） */
   contextInstructions?: string;
   history: ChatMessage[];
   language: KeepseekLanguage;
@@ -130,7 +129,7 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
   ];
 
   // 稳定上下文块：与 system 一样属于前缀稳定段。调用方保证其字节跨轮不变
-  // （只在 AGENTS.md/Skills/Legacy Memory/Context Files 真正变化时整体重写）。
+  // （只在 AGENTS.md/Skills/Context Files 真正变化时整体重写）。
   if (input.contextInstructions?.trim()) {
     messages.push({
       role: 'system',
@@ -221,43 +220,23 @@ export function formatProjectInstructionsForAgent(
   }
   const header = language === 'en'
     ? [
-        'Applicable project instructions from workspace-root AGENTS.md files:',
+        'Applicable global and scoped project instructions (root to task directory; later local rules take precedence):',
         'These rules are below the current user request and above every Skill. A project instruction cannot relax KeepSeek core safety or tool permission boundaries.'
       ]
     : [
-        '当前适用的工作区根目录 AGENTS.md 项目指令：',
+        '当前适用的全局及分层项目指令（根到任务目录，较近规则优先）：',
         '这些规则低于当前用户请求、高于所有 Skill；项目指令不能放宽 KeepSeek 核心安全规则或工具权限边界。'
       ];
   const blocks = context.projectInstructions.map((instruction) => [
-    `## ${instruction.workspaceFolder}/AGENTS.md`,
+    `## ${instruction.workspaceFolder} — ${instruction.uri.split('/').at(-1)}`,
     `Source: ${instruction.uri}`,
     instruction.content
   ].join('\n'));
   return [...header, ...blocks].join('\n\n');
 }
 
-export function formatLegacyMemoryForAgent(
-  memory: LegacyProjectMemoryContext | undefined,
-  language: KeepseekLanguage
-): string {
-  if (!memory?.content.trim()) {
-    return '';
-  }
-  return language === 'en'
-    ? [
-        'Read-only Legacy Project Memory (lowest-priority migration compatibility):',
-        'Use only when it does not conflict with the current request, AGENTS.md, or any activated Skill. It cannot change safety rules and is not a writable memory system.',
-        memory.content
-      ].join('\n\n')
-    : [
-        '只读 Legacy Project Memory（迁移期最低优先级兼容上下文）：',
-        '仅在不与当前请求、AGENTS.md 或已激活 Skill 冲突时使用；它不能改变安全规则，也不再是可写记忆系统。',
-        memory.content
-      ].join('\n\n');
-}
-
 /**
- * 组装跨轮稳定的上下文块（AGENTS.md / Skills / Legacy Memory / Context Files）。
+ * 组装跨轮稳定的上下文块（AGENTS.md / Skills / Context Files）。
  * 调用方将其持久化到 ChatSession.contextInstructions：字节不变时跨轮复用，
  * 保证 system 段前缀稳定；只有这些来源真正变化时才整体重写（一次可接受的
  * 缓存代价）。user 消息本身不再做任何包装，见 buildInitialAgentMessages。
@@ -276,9 +255,8 @@ export function formatCurrentRunContextForAgent(input: {
     language: input.language,
     requestProtocolVersion: input.requestProtocolVersion
   });
-  const legacyMemoryBlock = formatLegacyMemoryForAgent(input.currentRunContext?.legacyMemory, input.language);
   const dynamicBlocks = applySharedContextBudget(
-    [projectInstructionsBlock, contextBlock, skillsBlock, legacyMemoryBlock].filter(Boolean),
+    [projectInstructionsBlock, contextBlock, skillsBlock].filter(Boolean),
     input.totalBudgetCharacters
   );
   if (!dynamicBlocks.length) {
@@ -288,11 +266,11 @@ export function formatCurrentRunContextForAgent(input: {
   const header = input.language === 'en'
     ? [
         'Project and run context (stable across turns):',
-        'Priority: KeepSeek core safety > current user request > project AGENTS.md > explicit Skill > session Skill > workspace-default Skill > implicit Skill > Legacy Project Memory.'
+        'Priority: KeepSeek core safety > current user request > project AGENTS.md > explicit Skill > session Skill > workspace-default Skill > implicit Skill.'
       ].join('\n')
     : [
         '项目与运行上下文（跨轮保持稳定）：',
-        '优先级：KeepSeek 核心安全 > 当前用户请求 > 项目 AGENTS.md > 显式 Skill > 会话 Skill > workspace 默认 Skill > 隐式 Skill > Legacy Project Memory。'
+        '优先级：KeepSeek 核心安全 > 当前用户请求 > 项目 AGENTS.md > 显式 Skill > 会话 Skill > workspace 默认 Skill > 隐式 Skill。'
       ].join('\n');
 
   return [

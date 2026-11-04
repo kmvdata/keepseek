@@ -57,7 +57,13 @@ KeepSeek 常驻 Secondary Sidebar。打开 `KeepSeek: Open Chat`、选择账号�
 
 模型需要细节时会重新读取当前文件，避免长期依赖几轮之前的旧代码。工作区外的文件必须先获得授权，二进制、媒体、归档和超限内容不会被当作文本上下文读取。
 
-项目中的 `AGENTS.md` 可以约定长期生效的开发规则；Codex-compatible Skills 则可以封装特定任务的流程。你可以通过命令菜单浏览 Skills，或在输入框中键入 `$` 快速选择。
+KeepSeek 与 Codex 共享项目 `.agents/skills/<name>/SKILL.md`、可选 `agents/openai.yaml`，以及全局/任务目录链中的 `AGENTS.md`、`AGENTS.override.md`。个人 Skill 放在 `~/.agents/skills`；`CODEX_HOME`（默认 `~/.codex`）用于配置和全局指令，不改变个人 Skill 目录。
+
+通过命令菜单浏览 Skills，或键入 `$` 按名称和来源选择。多根或子目录任务先用 **KeepSeek: Select Task Directory / 选择任务目录**；单根默认工作区目录。标准 YAML 的隐式资格默认开启；会话选择不能绕过共享配置禁用。创建操作将标准 Markdown 和策略 YAML 放入同一待确认 ChangeSet。
+
+相关 TOML 白名单、Codex 0.133.0 的项目 Skill 禁用限制、刷新机制和新项目验收见 [共享配置说明](doc/keepseek-codex-shared-config.md)。不再扫描旧 Skill 目录或自动读取/迁移 Legacy Memory。MCP、Codex 账号和私有工具不在共享范围内。
+
+Shared configuration: use the same standard Skill and scoped instruction files in both hosts. Choose a task directory for multi-root/subdirectory work. KeepSeek reads the documented configuration subset, preserves its own approval and execution boundaries, and does not provide a Codex MCP runtime. See the compatibility matrix and acceptance steps in the linked guide.
 
 ### 3. 让 Agent 修改和验证，但保留清晰边界
 

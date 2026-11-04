@@ -7,7 +7,6 @@ import {
   estimateDeepSeekToolsTokens,
   formatActiveSkills,
   formatAgentContextFiles,
-  formatLegacyMemoryForAgent,
   formatProjectInstructionsForAgent,
   getAgentSystemPrompt
 } from './protocol';
@@ -171,7 +170,7 @@ export function createDisplayedSessionContextUsageEstimate(input: {
 /**
  * 显示口径不变量：只有真实发送给 provider 的字节才算“已用”。会话尚未发出任何请求时，
  * 静态系统提示词、工具 schema、输出/安全预留，以及动态上下文前缀（项目指令 AGENTS.md /
- * 激活 Skills / Legacy Memory / 显式上下文文件）都还没有参与任何请求，因此一律不计入
+ * 激活 Skills / 显式上下文文件）都还没有参与任何请求，因此一律不计入
  * “已用”。仅保留窗口上限，使百分比、剩余量与压缩阈值仍可正常展示。
  */
 export function createUnsentSessionContextUsageEstimate(
@@ -426,7 +425,6 @@ function estimateInitialBreakdown(input: {
       requestProtocolVersion: input.requestProtocolVersion
     }),
     formatProjectInstructionsForAgent(input.currentRunContext, input.language),
-    formatLegacyMemoryForAgent(input.currentRunContext?.legacyMemory, input.language)
   ].filter(Boolean).join('\n\n');
 
   breakdown.systemTokensEstimate = Math.min(fullSystemTokens, systemOnlyTokens);

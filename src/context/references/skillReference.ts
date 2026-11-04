@@ -87,7 +87,7 @@ function findPromptSkillReferences(prompt: string, manifests: readonly SkillMani
     }
 
     const manifest = allowed.get(getSkillUriKey(uri));
-    if (!manifest || !manifest.enabled || !manifest.userInvocable || manifest.unavailableReason) {
+    if (!manifest || !manifest.enabled || manifest.unavailableReason) {
       continue;
     }
 

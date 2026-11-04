@@ -76,7 +76,7 @@ V11 在初始计划和有证据的调查范围扩大时，引导主模型通过 
 默认禁止注入：
 
 - 父聊天完整历史、隐藏推理和工具结果正文；
-- 父 Context Files、会话归档与 Legacy Memory；
+- 父 Context Files、会话归档和历史 Memory 内容；
 - 未选中 Skill 的模型可见正文、未经父侧授权的外部路径；
 - API key、审批 permit、父 Agent 的可变内部对象。
 
@@ -309,3 +309,5 @@ bun run test
 ## 长任务进展与结果等待
 
 父运行的进展按已交付内容/范围与真实宿主状态判断，不按新的 child/evidence ID 判断。`readResult` 对本 runtime 中确实 queued/running、且 parent session 匹配的 child，等待完成事件；不不断请求模型轮询。取消沿用 invocation signal，完成后再次通过 store 校验 lineage、scope 和结果完整性。磁盘上中断的 child 不冒充活跃操作。检查点引用按 session 独立，复制会话不继承旧 session 的可执行 checkpoint/归档引用。费用、时间与用量归属保持现有共享逻辑任务规则。
+
+共享项目指令按全局→仓库根→任务 cwd 的顺序传入隔离 capsule，不按路径重新排序。标准 Skill 不需要 KeepSeek profile；可选 `metadata.keepseek.runAs/profile` 类能力属于 KeepSeek 扩展（实际 profile 字段见源码与共享配置报告），不会因文件声明而增加权限。

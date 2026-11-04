@@ -10,12 +10,6 @@ export const commandSkillsDeclarationFragment: WebviewFragment = {
       var commandSkillFilterButton = document.getElementById('commandSkillFilterButton');
       var commandSkillFilterInput = document.getElementById('commandSkillFilterInput');
       var commandCreateSkillButton = document.getElementById('commandCreateSkillButton');
-      var commandLegacyMemorySection = document.getElementById('commandLegacyMemorySection');
-      var commandLegacyMemoryMigrateButton = document.getElementById('commandLegacyMemoryMigrateButton');
-      var commandLegacyMemoryExportButton = document.getElementById('commandLegacyMemoryExportButton');
-      var commandLegacyMemoryCompleteButton = document.getElementById('commandLegacyMemoryCompleteButton');
-      var commandLegacyMemoryRollbackButton = document.getElementById('commandLegacyMemoryRollbackButton');
-      var commandLegacyMemoryValue = document.getElementById('commandLegacyMemoryValue');
       var commandBackgroundRunSection = document.getElementById('commandBackgroundRunSection');
       var commandBackgroundRunButton = document.getElementById('commandBackgroundRunButton');
       var commandBackgroundRunValue = document.getElementById('commandBackgroundRunValue');
@@ -109,45 +103,9 @@ export const commandSkillsBindingsFragment: WebviewFragment = {
         });
       }
 
-      if (commandLegacyMemoryMigrateButton) {
-        commandLegacyMemoryMigrateButton.addEventListener('click', function(event) {
-          event.preventDefault();
-          event.stopPropagation();
-          if (commandLegacyMemoryMigrateButton.disabled) { return; }
-          closeCommandMenu();
-          vscode.postMessage({ type: 'createLegacyMemoryMigrationDraft' });
-        });
-      }
 
-      if (commandLegacyMemoryExportButton) {
-        commandLegacyMemoryExportButton.addEventListener('click', function(event) {
-          event.preventDefault();
-          event.stopPropagation();
-          if (commandLegacyMemoryExportButton.disabled) { return; }
-          closeCommandMenu();
-          vscode.postMessage({ type: 'exportLegacyMemory' });
-        });
-      }
 
-      if (commandLegacyMemoryCompleteButton) {
-        commandLegacyMemoryCompleteButton.addEventListener('click', function(event) {
-          event.preventDefault();
-          event.stopPropagation();
-          if (commandLegacyMemoryCompleteButton.disabled) { return; }
-          closeCommandMenu();
-          vscode.postMessage({ type: 'completeLegacyMemoryMigration' });
-        });
-      }
 
-      if (commandLegacyMemoryRollbackButton) {
-        commandLegacyMemoryRollbackButton.addEventListener('click', function(event) {
-          event.preventDefault();
-          event.stopPropagation();
-          if (commandLegacyMemoryRollbackButton.disabled) { return; }
-          closeCommandMenu();
-          vscode.postMessage({ type: 'rollbackLegacyMemoryMigration' });
-        });
-      }
 
       if (commandBackgroundRunButton) {
         commandBackgroundRunButton.addEventListener('click', function(event) {
@@ -226,6 +184,32 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         commandSkillList.classList.toggle('hidden', !commandSkillListOpen);
         commandSkillList.innerHTML = '';
         if (!commandSkillListOpen) { return; }
+        var scopeButton = document.createElement('button');
+        scopeButton.type = 'button';
+        scopeButton.className = 'command-skill-action';
+        scopeButton.textContent = t('sharedScopeSelect');
+        scopeButton.disabled = Boolean(state.isBusy);
+        scopeButton.title = getSkillsState().scopeUri || t('sharedScopeRequired');
+        scopeButton.addEventListener('click', function() { vscode.postMessage({ type: 'selectProjectScope' }); });
+        commandSkillList.append(scopeButton);
+        var scopeInfo = document.createElement('div');
+        scopeInfo.className = 'command-row-description';
+        scopeInfo.textContent = getSkillsState().scopeUri || t('sharedScopeRequired');
+        commandSkillList.append(scopeInfo);
+        var configSummary = getSkillsState().configSummary;
+        if (configSummary) {
+          var configInfo = document.createElement('div');
+          configInfo.className = 'command-row-description';
+          configInfo.textContent = 'project_doc_max_bytes: ' + configSummary.projectDocMaxBytes + ' · project_doc_fallback_filenames: ' + configSummary.fallbackFilenames.join(', ');
+          configInfo.title = Object.keys(configSummary.origins).map(function(key) { return key + ': ' + configSummary.origins[key]; }).join('\\n');
+          commandSkillList.append(configInfo);
+        }
+        (getSkillsState().diagnostics || []).forEach(function(message) {
+          var diagnostic = document.createElement('div');
+          diagnostic.className = 'reference-menu-empty';
+          diagnostic.textContent = message;
+          commandSkillList.append(diagnostic);
+        });
         if (!skills.length) {
           var empty = document.createElement('div');
           empty.className = 'reference-menu-empty';
@@ -249,44 +233,9 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
           : (disabledReason || t('createSkill'));
       }
 
-      function renderLegacyMemoryCommand() {
-        var migration = state.legacyMemoryMigration && typeof state.legacyMemoryMigration === 'object'
-          ? state.legacyMemoryMigration
-          : { detected: false, status: 'pending', entryCount: 0 };
-        var visible = migration.detected === true;
-        if (commandLegacyMemorySection) {
-          commandLegacyMemorySection.classList.toggle('hidden', !visible);
-        }
-        if (!visible) { return; }
-        if (commandLegacyMemoryValue) {
-          commandLegacyMemoryValue.textContent = String(Number(migration.entryCount) || 0);
-        }
-        if (commandLegacyMemoryMigrateButton) {
-          commandLegacyMemoryMigrateButton.classList.toggle('hidden', migration.status !== 'pending');
-          commandLegacyMemoryMigrateButton.disabled = state.isBusy || migration.canCreateDraft === false;
-          commandLegacyMemoryMigrateButton.title = migration.error || '';
-        }
-        if (commandLegacyMemoryExportButton) {
-          commandLegacyMemoryExportButton.disabled = state.isBusy || migration.exportAvailable === false;
-        }
-        if (commandLegacyMemoryCompleteButton) {
-          commandLegacyMemoryCompleteButton.classList.toggle('hidden', migration.status !== 'draft-created');
-          commandLegacyMemoryCompleteButton.disabled = state.isBusy || migration.canComplete === false;
-          commandLegacyMemoryCompleteButton.title = migration.completeDisabledReason || '';
-        }
-        if (commandLegacyMemoryRollbackButton) {
-          commandLegacyMemoryRollbackButton.classList.toggle(
-            'hidden',
-            migration.status !== 'completed' && migration.canRollback !== true
-          );
-          commandLegacyMemoryRollbackButton.disabled = state.isBusy || migration.canRollback === false;
-          commandLegacyMemoryRollbackButton.title = migration.rollbackDisabledReason || '';
-        }
-      }
-
       function createCommandSkillItem(skill) {
         var active = isSkillActive(skill.id);
-        var canUse = Boolean(skill.enabled && skill.userInvocable && !skill.unavailableReason);
+        var canUse = Boolean(skill.enabled && !skill.unavailableReason);
         var item = document.createElement('div');
         item.className = 'command-skill-item' + (active ? ' is-active' : '') + (!canUse ? ' is-disabled' : '');
 
@@ -298,7 +247,7 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
 
         var name = document.createElement('span');
         name.className = 'command-skill-name';
-        name.textContent = skill.name || skill.id;
+        name.textContent = (skill.interface && skill.interface.display_name) ? skill.interface.display_name + ' (' + skill.name + ')' : (skill.name || skill.id);
         name.title = name.textContent;
 
         var description = document.createElement('span');
@@ -333,8 +282,6 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         actions.className = 'command-skill-actions';
         actions.append(
           createSkillActionButton(skill, 'open', t('skillsOpen'), false),
-          createSkillActionButton(skill, skill.enabled ? 'disable' : 'enable', skill.enabled ? t('skillsDisable') : t('skillsEnable'), false),
-          createSkillActionButton(skill, 'implicit', skill.allowImplicit ? t('skillsManualOnly') : t('skillsAllowAuto'), !skill.enabled),
           createSkillActionButton(skill, 'workspace-default', skill.workspaceDefault ? t('skillsUnsetWorkspaceDefault') : t('skillsSetWorkspaceDefault'), !skill.enabled)
         );
 
@@ -358,6 +305,7 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
           skill.sourceLabel || skill.source || '',
           skill.enabled ? t('skillsEnabled') : t('skillsDisabled'),
           skill.allowImplicit ? t('skillsAllowAuto') : t('skillsManualOnly'),
+          skill.policySource || '',
           skill.workspaceDefault ? t('skillsWorkspaceDefault') : ''
         ];
         if (skill.hasScripts) {
@@ -373,7 +321,7 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
 
       function getSkillUnavailableText(skill) {
         if (skill.unavailableReason || skill.loadError) {
-          return t('skillsUnavailable');
+          return skill.unavailableReason || skill.loadError;
         }
         if (!skill.enabled) {
           return t('skillsDisabled');
@@ -386,7 +334,7 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         var skill = getSkillById(skillId);
         if (!skill) { return; }
         if (action === 'toggle-use') {
-          if (!skill.enabled || !skill.userInvocable || skill.unavailableReason) {
+          if (!skill.enabled || skill.unavailableReason) {
             return;
           }
           if (selected) {
@@ -400,14 +348,6 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         }
         if (action === 'open') {
           vscode.postMessage({ type: 'openSkill', skillId: skillId });
-          return;
-        }
-        if (action === 'enable' || action === 'disable') {
-          vscode.postMessage({ type: 'setSkillEnabled', skillId: skillId, enabled: action === 'enable' });
-          return;
-        }
-        if (action === 'implicit') {
-          vscode.postMessage({ type: 'setSkillAllowImplicit', skillId: skillId, allowImplicit: !skill.allowImplicit });
           return;
         }
         if (action === 'workspace-default') {

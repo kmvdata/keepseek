@@ -1,505 +1,151 @@
-import * as os from 'node:os';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import { getConfiguredMaxFileBytes } from '../shared/config';
-import { formatBytes } from '../shared/format';
-import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
-import { createSkillId, SKILL_FILE_NAME, SKILL_INSTRUCTION_FILE_NAMES, type SkillManifest, type SkillSource } from './skillTypes';
-
-interface SkillBaseDirectory {
-  source: SkillSource;
-  uri: vscode.Uri;
-  label: string;
-  workspaceScoped: boolean;
-  recursive: boolean;
-  instructionFileNames: readonly string[];
-}
-
-export interface ParsedSkillFrontmatter {
-  name?: string;
-  description?: string;
-  allowImplicit?: boolean;
-  userInvocable?: boolean;
-  runAs?: 'subagent';
-  profile?: string;
-  tools?: string[];
-  maxSteps?: number;
-  timeoutMs?: number;
-  canDelegate?: boolean;
-  resultMaxChars?: number;
-}
-
-const DEFAULT_WORKSPACE_SKILL_DESCRIPTION = 'Project skill disabled because the workspace is not trusted.';
-const CODEX_SKILLS_SOURCE_LABEL = 'Codex skills';
-const MAX_SKILL_DISCOVERY_DEPTH = 16;
-const SKILL_DISCOVERY_SKIPPED_DIRECTORY_NAMES = new Set([
-  '.git',
-  '.hg',
-  '.svn',
-  'node_modules',
-  'dist',
-  'out',
-  'build',
-  'coverage'
-]);
+import { isReadableTextContent } from '../shared/textFileGuards';
+import { assertRealPathInside, canonicalUri, isMissingFile, projectSkillsUri, readSharedText, userSkillsUri, uriInside } from '../context/sharedConfigPaths';
+import { loadSharedCodexConfig, type SharedCodexConfigSnapshot } from '../context/sharedCodexConfig';
+import { createSkillId, type SkillManifest, type SkillSource } from './skillTypes';
+import { parseSkillFrontmatter, parseSkillMetadata } from './skillMetadata';
+export { parseSkillFrontmatter } from './skillMetadata';
+export type { ParsedSkillFrontmatter } from './skillMetadata';
 
 export interface SkillDiscoveryOptions {
-  codexSkillsUri?: vscode.Uri;
-  includeCodexSkills?: boolean;
+  userSkillsUri?: vscode.Uri;
+  includeUserSkills?: boolean;
+  adminSkillsUri?: vscode.Uri;
+  includeAdminSkills?: boolean;
 }
+interface SkillBase { source: SkillSource; uri: vscode.Uri; boundary: vscode.Uri }
+const MAX_DEPTH = 6;
+const MAX_DIRECTORIES = 2000;
+const MAX_ENTRIES = 20000;
 
 export class SkillDiscovery {
-  private readonly decoder = new TextDecoder('utf-8', { fatal: false });
-  private readonly markdownCache = new Map<string, {
-    mtime: number;
-    size: number;
-    maxBytes: number;
-    result: { ok: true; content: string } | { ok: false; error: string };
-  }>();
-
+  public diagnostics: string[] = [];
   public constructor(private readonly options: SkillDiscoveryOptions = {}) {}
 
-  public async discover(): Promise<SkillManifest[]> {
+  public async discover(config?: SharedCodexConfigSnapshot): Promise<SkillManifest[]> {
+    config ??= await loadSharedCodexConfig();
+    this.diagnostics = [];
+    const bases: SkillBase[] = config.scope?.trusted
+      ? [...config.scope.chain].reverse().map(dir => ({ source: 'agentsWorkspace', uri: projectSkillsUri(dir), boundary: config!.scope!.root })) : [];
+    if (this.options.includeUserSkills !== false) {
+      const uri = this.options.userSkillsUri ?? userSkillsUri();
+      bases.push({ source: 'agentsUser', uri, boundary: uri });
+    }
+    if (this.options.includeAdminSkills !== false && (process.platform !== 'win32' || this.options.adminSkillsUri)) {
+      const uri = this.options.adminSkillsUri ?? vscode.Uri.file('/etc/codex/skills');
+      bases.push({ source: 'admin', uri, boundary: uri });
+    }
     const manifests: SkillManifest[] = [];
-    const seen = new Set<string>();
-    const seenSkillUris = new Set<string>();
-
-    for (const base of this.getBaseDirectories()) {
-      const discovered = await this.discoverBaseDirectory(base);
-      for (const manifest of discovered) {
-        const skillUriKey = manifest.skillUri.toString();
-        if (seen.has(manifest.id) || seenSkillUris.has(skillUriKey)) {
-          continue;
+    const seenFiles = new Set<string>();
+    for (const base of bases) {
+      try {
+        const boundary = await canonicalUri(base.boundary);
+        // User/admin roots may contain links, but replacing the configured root with an
+        // external link must not silently authorize its target. Canonical parent permits
+        // host aliases such as /tmp -> /private/tmp.
+        if (base.source !== 'agentsWorkspace') {
+          const anchor = await canonicalUri(vscode.Uri.joinPath(base.uri, '..', '..'));
+          const expected = vscode.Uri.joinPath(anchor, path.basename(path.dirname(base.uri.fsPath)), path.basename(base.uri.fsPath));
+          if (!uriInside(expected, boundary)) throw new Error('External skill root');
         }
-        seen.add(manifest.id);
-        seenSkillUris.add(skillUriKey);
-        manifests.push(manifest);
+        base.boundary = boundary;
+      } catch (error) {
+        if (!isMissingFile(error)) this.diagnostics.push(`${base.uri.toString()}: unsafe source root / 来源根目录不安全`);
+        continue;
       }
+      const visited = new Set<string>();
+      let entriesSeen = 0;
+      const walk = async (directory: vscode.Uri, depth: number): Promise<void> => {
+        if (depth > MAX_DEPTH || visited.size >= MAX_DIRECTORIES || entriesSeen >= MAX_ENTRIES) {
+          this.diagnostics.push(`${base.uri.toString()}: discovery limit / 扫描达到上限`); return;
+        }
+        try {
+          const real = await assertRealPathInside(directory, [base.boundary]);
+          if (visited.has(real.toString())) return;
+          visited.add(real.toString());
+          // Root itself is a container; only children may be skills.
+          const skillUri = vscode.Uri.joinPath(directory, 'SKILL.md');
+          if (depth > 0) {
+            try {
+              await fs.lstat(skillUri.fsPath);
+              const manifest = await this.createManifest(base, directory, skillUri, config!);
+              const identity = manifest.physicalUri ?? skillUri.toString();
+              if (!seenFiles.has(identity)) { seenFiles.add(identity); manifests.push(manifest); }
+              return;
+            } catch (error) { if (!isMissingFile(error)) throw error; }
+          }
+          const entries = [];
+          for await (const entry of await fs.opendir(real.fsPath)) {
+            entries.push(entry);
+            if (entries.length >= MAX_ENTRIES - entriesSeen) break;
+          }
+          for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+            if (++entriesSeen > MAX_ENTRIES) { this.diagnostics.push(`${base.uri.toString()}: entry limit / 条目达到上限`); break; }
+            if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+            if (entry.isDirectory() || entry.isSymbolicLink()) {
+              await walk(vscode.Uri.joinPath(directory, entry.name), depth + 1);
+            }
+          }
+        } catch (error) {
+          if (!isMissingFile(error)) this.diagnostics.push(`${directory.toString()}: source unavailable, link outside boundary or unreadable / 来源不可用、链接越界或不可读`);
+        }
+      };
+      await walk(base.uri, 0);
     }
-
-    return manifests.sort((left, right) => {
-      const sourceOrder = getSkillSourceSortRank(left) - getSkillSourceSortRank(right);
-      if (sourceOrder) {
-        return sourceOrder;
-      }
-      const labelOrder = left.sourceLabel.localeCompare(right.sourceLabel, undefined, { sensitivity: 'base' });
-      if (labelOrder) {
-        return labelOrder;
-      }
-      return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
-    });
-  }
-
-  private getBaseDirectories(): SkillBaseDirectory[] {
-    const bases: SkillBaseDirectory[] = [];
-    for (const folder of vscode.workspace.workspaceFolders ?? []) {
-      bases.push({
-        source: 'agentsWorkspace',
-        uri: vscode.Uri.joinPath(folder.uri, '.agents'),
-        label: `${folder.name}/.agents`,
-        workspaceScoped: true,
-        recursive: true,
-        instructionFileNames: SKILL_INSTRUCTION_FILE_NAMES
-      });
-    }
-
-    if (this.options.includeCodexSkills !== false) {
-      bases.push({
-        source: 'agentsUser',
-        uri: this.options.codexSkillsUri ?? vscode.Uri.file(path.join(os.homedir(), '.codex', 'skills')),
-        label: CODEX_SKILLS_SOURCE_LABEL,
-        workspaceScoped: false,
-        recursive: true,
-        instructionFileNames: [SKILL_FILE_NAME]
-      });
-    }
-    return bases;
-  }
-
-  private async discoverBaseDirectory(base: SkillBaseDirectory): Promise<SkillManifest[]> {
-    const manifests: SkillManifest[] = [];
-    const seenDirectories = new Set<string>();
-    await this.discoverDirectory(base, base.uri, 0, manifests, seenDirectories);
     return manifests;
   }
 
-  private async discoverDirectory(
-    base: SkillBaseDirectory,
-    directoryUri: vscode.Uri,
-    depth: number,
-    manifests: SkillManifest[],
-    seenDirectories: Set<string>
-  ): Promise<void> {
-    if (depth > MAX_SKILL_DISCOVERY_DEPTH) {
-      return;
-    }
-
-    const directoryKey = directoryUri.toString();
-    if (seenDirectories.has(directoryKey)) {
-      return;
-    }
-    seenDirectories.add(directoryKey);
-
-    let entries: [string, vscode.FileType][];
+  private async createManifest(base: SkillBase, rootUri: vscode.Uri, skillUri: vscode.Uri, config: SharedCodexConfigSnapshot): Promise<SkillManifest> {
+    const manifest: SkillManifest = { id: createSkillId(base.source, rootUri), name: path.basename(rootUri.fsPath),
+      description: '', source: base.source, sourceLabel: rootUri.fsPath, rootUri, skillUri, enabled: false,
+      allowImplicit: false, hasReferences: false, hasAssets: false, hasScripts: false, readBoundaryUri: base.boundary.toString() };
     try {
-      entries = await vscode.workspace.fs.readDirectory(directoryUri);
-    } catch {
-      return;
-    }
-
-    for (const [name, type] of entries) {
-      if (!isDirectoryFileType(type) || !isDiscoverableDirectoryName(name)) {
-        continue;
+      const physical = await assertRealPathInside(skillUri, [base.boundary]);
+      manifest.physicalUri = physical.toString();
+      const content = await readSharedText(skillUri, [base.boundary], getConfiguredMaxFileBytes());
+      if (content === undefined || !isReadableTextContent(content)) throw new Error('Unreadable SKILL.md / SKILL.md 不可读');
+      const parsed = parseSkillFrontmatter(content);
+      const metadataText = await readSharedText(vscode.Uri.joinPath(rootUri, 'agents', 'openai.yaml'), [base.boundary], 65536);
+      const metadata = parseSkillMetadata(metadataText);
+      Object.assign(manifest, { name: parsed.name, description: parsed.description, enabled: true, allowImplicit: metadata.allowImplicit,
+        interface: metadata.interface, dependencies: metadata.dependencies,
+        documentHash: createHash('sha256').update(content).digest('hex'),
+        metadataHash: createHash('sha256').update(metadataText ?? '').digest('hex'),
+        contentFingerprint: createHash('sha256').update(content).update('\0').update(metadataText ?? '').update(config.fingerprint).digest('hex') });
+      if (parsed.runAs === 'subagent') {
+        manifest.runAs = parsed.runAs;
+        manifest.subagentProfile = { id: parsed.profile ?? parsed.name, tools: parsed.tools, maxSteps: parsed.maxSteps,
+          timeoutMs: parsed.timeoutMs, canDelegate: parsed.canDelegate, resultMaxChars: parsed.resultMaxChars };
       }
-
-      const rootUri = vscode.Uri.joinPath(directoryUri, name);
-      const skillUri = await this.findSkillInstructionFile(rootUri, base.instructionFileNames);
-      if (skillUri) {
-        manifests.push(await this.createManifest(base, rootUri, skillUri, name));
-        continue;
+      for (const [key, directory] of [['hasReferences', 'references'], ['hasAssets', 'assets'], ['hasScripts', 'scripts']] as const) {
+        try { manifest[key] = (await fs.stat(vscode.Uri.joinPath(rootUri, directory).fsPath)).isDirectory(); } catch { /* optional */ }
       }
-
-      if (base.recursive) {
-        await this.discoverDirectory(base, rootUri, depth + 1, manifests, seenDirectories);
-      }
-    }
-  }
-
-  private async createManifest(
-    base: SkillBaseDirectory,
-    rootUri: vscode.Uri,
-    skillUri: vscode.Uri,
-    fallbackName: string
-  ): Promise<SkillManifest> {
-    const id = createSkillId(base.source, rootUri);
-    const childNames = await this.readChildNames(rootUri);
-    const hasReferences = childNames.has('references');
-    const hasAssets = childNames.has('assets');
-    const hasScripts = childNames.has('scripts');
-
-    if (base.workspaceScoped && !vscode.workspace.isTrusted) {
-      return {
-        id,
-        name: fallbackName,
-        description: DEFAULT_WORKSPACE_SKILL_DESCRIPTION,
-        source: base.source,
-        sourceLabel: base.label,
-        rootUri,
-        skillUri,
-        enabled: false,
-        allowImplicit: false,
-        userInvocable: false,
-        hasReferences,
-        hasAssets,
-        hasScripts,
-        unavailableReason: DEFAULT_WORKSPACE_SKILL_DESCRIPTION
-      };
-    }
-
-    const readResult = await this.readSkillMarkdown(skillUri);
-    if (!readResult.ok) {
-      return {
-        id,
-        name: fallbackName,
-        description: readResult.error,
-        source: base.source,
-        sourceLabel: base.label,
-        rootUri,
-        skillUri,
-        enabled: false,
-        allowImplicit: false,
-        userInvocable: false,
-        hasReferences,
-        hasAssets,
-        hasScripts,
-        unavailableReason: readResult.error
-        ,contentFingerprint: readResult.fingerprint
-      };
-    }
-
-    const parsed = parseSkillFrontmatter(readResult.content);
-    const runAs = parsed.runAs;
-    return {
-      id,
-      name: parsed.name || fallbackName,
-      description: parsed.description || deriveDescription(readResult.content),
-      source: base.source,
-      sourceLabel: base.label,
-      rootUri,
-      skillUri,
-      enabled: true,
-      allowImplicit: parsed.allowImplicit ?? false,
-      userInvocable: parsed.userInvocable ?? true,
-      contentFingerprint: readResult.fingerprint,
-      hasReferences,
-      hasAssets,
-      hasScripts,
-      ...(runAs === 'subagent' ? {
-        runAs,
-        subagentProfile: {
-          id: parsed.profile || normalizeProfileId(parsed.name || fallbackName),
-          tools: parsed.tools,
-          maxSteps: parsed.maxSteps,
-          timeoutMs: parsed.timeoutMs,
-          canDelegate: parsed.canDelegate,
-          resultMaxChars: parsed.resultMaxChars
+      for (const rule of config.skillRules) {
+        let matches = rule.name === parsed.name;
+        if (rule.path) {
+          try { matches = (await canonicalUri(vscode.Uri.file(rule.path))).toString() === physical.toString(); }
+          catch { matches = path.resolve(rule.path) === path.resolve(skillUri.fsPath); }
         }
-      } : {})
-    };
-  }
-
-  private async findSkillInstructionFile(rootUri: vscode.Uri, fileNames: readonly string[]): Promise<vscode.Uri | undefined> {
-    for (const fileName of fileNames) {
-      const skillUri = vscode.Uri.joinPath(rootUri, fileName);
-      try {
-        const stat = await vscode.workspace.fs.stat(skillUri);
-        if (stat.type === vscode.FileType.File) {
-          return skillUri;
-        }
-      } catch {
-        // Try the next supported instruction filename.
+        if (matches) { manifest.enabled = rule.enabled; manifest.policySource = rule.sourceUri; }
       }
-    }
-    return undefined;
-  }
-
-  private async readChildNames(rootUri: vscode.Uri): Promise<Set<string>> {
-    try {
-      const entries = await vscode.workspace.fs.readDirectory(rootUri);
-      return new Set(entries
-        .filter(([, type]) => type === vscode.FileType.Directory)
-        .map(([name]) => name));
-    } catch {
-      return new Set();
-    }
-  }
-
-  private async readSkillMarkdown(skillUri: vscode.Uri): Promise<
-    ({ ok: true; content: string } | { ok: false; error: string }) & { fingerprint: string }
-  > {
-    if (shouldSkipTextUri(skillUri)) {
-      return { ok: false, error: `${getUriBasename(skillUri)} is not a readable text file.`, fingerprint: 'skipped' };
-    }
-
-    const maxBytes = getConfiguredMaxFileBytes();
-    try {
-      const stat = await vscode.workspace.fs.stat(skillUri);
-      const key = skillUri.toString();
-      const cached = this.markdownCache.get(key);
-      if (cached && cached.mtime === stat.mtime && cached.size === stat.size && cached.maxBytes === maxBytes) {
-        return { ...cached.result, fingerprint: `${stat.mtime}:${stat.size}` };
+      if (!manifest.enabled) manifest.unavailableReason = `Disabled by shared config / 共享配置已禁用: ${manifest.policySource}`;
+      if (metadata.dependencies.length) {
+        manifest.enabled = false;
+        manifest.unavailableReason = `Tool dependencies unavailable in KeepSeek / KeepSeek 未接入工具依赖: ${metadata.dependencies.map(item => `${item.type}:${item.value}`).join(', ')}`;
       }
-      if (stat.size > maxBytes) {
-        const result = { ok: false as const, error: `${getUriBasename(skillUri)} is larger than ${formatBytes(maxBytes)}.` };
-        this.markdownCache.set(key, { mtime: stat.mtime, size: stat.size, maxBytes, result });
-        return { ...result, fingerprint: `${stat.mtime}:${stat.size}` };
+      const blocked = config.diagnostics.filter(item => item.blocksSkills);
+      if (blocked.length) {
+        manifest.enabled = false;
+        manifest.unavailableReason = blocked.map(item => `${item.uri}: ${item.message}`).join('\n');
       }
-      const bytes = await vscode.workspace.fs.readFile(skillUri);
-      if (bytes.byteLength > maxBytes) {
-        return { ok: false, error: `${getUriBasename(skillUri)} is larger than ${formatBytes(maxBytes)}.`, fingerprint: `${stat.mtime}:${stat.size}` };
-      }
-      const content = this.decoder.decode(bytes);
-      if (!isReadableTextContent(content)) {
-        return { ok: false, error: `${getUriBasename(skillUri)} appears to be binary or unreadable text.`, fingerprint: `${stat.mtime}:${stat.size}` };
-      }
-      const result = { ok: true as const, content };
-      this.markdownCache.set(key, { mtime: stat.mtime, size: stat.size, maxBytes, result });
-      return { ...result, fingerprint: `${stat.mtime}:${stat.size}` };
     } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-        fingerprint: 'error'
-      };
+      manifest.enabled = false;
+      manifest.unavailableReason = error instanceof Error ? error.message : 'Invalid Skill / Skill 无效';
     }
+    return manifest;
   }
-}
-
-function isDirectoryFileType(type: vscode.FileType): boolean {
-  return type === vscode.FileType.Directory || (type & vscode.FileType.Directory) !== 0;
-}
-
-function isDiscoverableDirectoryName(name: string): boolean {
-  const normalized = name.trim();
-  return Boolean(normalized) && !SKILL_DISCOVERY_SKIPPED_DIRECTORY_NAMES.has(normalized);
-}
-
-function getSkillSourceSortRank(manifest: SkillManifest): number {
-  switch (manifest.source) {
-    case 'agentsWorkspace':
-    case 'workspace':
-      return 0;
-    case 'agentsUser':
-    case 'user':
-      return 1;
-    case 'builtin':
-      return 2;
-    default:
-      return 3;
-  }
-}
-
-function getUriBasename(uri: vscode.Uri): string {
-  const value = uri.scheme === 'file' ? uri.fsPath : uri.path;
-  return path.basename(value) || 'skill instruction file';
-}
-
-export function parseSkillFrontmatter(content: string): ParsedSkillFrontmatter {
-  const normalized = content.replace(/\r\n?/gu, '\n');
-  if (!normalized.startsWith('---\n')) {
-    return {};
-  }
-
-  const lines = normalized.split('\n');
-  let closingIndex = -1;
-  for (let index = 1; index < lines.length; index += 1) {
-    if (lines[index].trim() === '---') {
-      closingIndex = index;
-      break;
-    }
-  }
-  if (closingIndex < 0) {
-    return {};
-  }
-
-  const parsed: ParsedSkillFrontmatter = {};
-  const keyPathByIndent: string[] = [];
-  let activeList: { path: string; indent: number } | undefined;
-  for (let index = 1; index < closingIndex; index += 1) {
-    const line = lines[index];
-    const listMatch = /^(\s*)-\s*(.+)$/u.exec(line);
-    if (listMatch && activeList && listMatch[1].length > activeList.indent) {
-      if (activeList.path === 'metadata.keepseek.tools') {
-        const item = normalizeScalar(listMatch[2]);
-        if (item && !(parsed.tools ?? []).includes(item)) {
-          parsed.tools = [...(parsed.tools ?? []), item];
-        }
-      }
-      continue;
-    }
-    const match = /^(\s*)([A-Za-z0-9_.-]+)\s*:\s*(.*)$/u.exec(line);
-    if (!match) {
-      continue;
-    }
-
-    const indent = Math.floor(match[1].length / 2);
-    keyPathByIndent.length = indent;
-    keyPathByIndent[indent] = match[2];
-    const pathKey = keyPathByIndent.slice(0, indent + 1).join('.');
-    const value = normalizeScalar(match[3]);
-    if (!value) {
-      activeList = { path: pathKey, indent: match[1].length };
-      continue;
-    }
-    activeList = undefined;
-
-    switch (pathKey) {
-      case 'name':
-        parsed.name = value;
-        break;
-      case 'description':
-        parsed.description = value;
-        break;
-      case 'metadata.keepseek.allowImplicit':
-        parsed.allowImplicit = parseBoolean(value);
-        break;
-      case 'metadata.keepseek.userInvocable':
-        parsed.userInvocable = parseBoolean(value);
-        break;
-      case 'metadata.keepseek.runAs':
-      case 'runAs':
-        parsed.runAs = value.toLowerCase() === 'subagent' ? 'subagent' : undefined;
-        break;
-      case 'metadata.keepseek.profile':
-      case 'profile':
-        parsed.profile = normalizeProfileId(value);
-        break;
-      case 'metadata.keepseek.tools':
-        parsed.tools = parseStringList(value);
-        break;
-      case 'metadata.keepseek.maxSteps':
-        parsed.maxSteps = parseBoundedInteger(value, 1, 32);
-        break;
-      case 'metadata.keepseek.timeoutMs':
-        parsed.timeoutMs = parseBoundedInteger(value, 1_000, 900_000);
-        break;
-      case 'metadata.keepseek.canDelegate':
-        parsed.canDelegate = parseBoolean(value);
-        break;
-      case 'metadata.keepseek.resultMaxChars':
-        parsed.resultMaxChars = parseBoundedInteger(value, 1_000, 500_000);
-        break;
-    }
-  }
-  return parsed;
-}
-
-function normalizeScalar(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return '';
-  }
-  const quote = trimmed.charAt(0);
-  if ((quote === '"' || quote === "'") && trimmed.charAt(trimmed.length - 1) === quote) {
-    return trimmed.slice(1, -1).trim();
-  }
-  return trimmed;
-}
-
-function parseBoolean(value: string): boolean | undefined {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'true' || normalized === 'yes' || normalized === 'on') {
-    return true;
-  }
-  if (normalized === 'false' || normalized === 'no' || normalized === 'off') {
-    return false;
-  }
-  return undefined;
-}
-
-function parseStringList(value: string): string[] | undefined {
-  const normalized = value.trim().replace(/^\[/u, '').replace(/\]$/u, '');
-  const values = normalized.split(',')
-    .map((item) => normalizeScalar(item))
-    .map((item) => item.trim())
-    .filter((item, index, items) => Boolean(item) && items.indexOf(item) === index);
-  return values.length ? values : undefined;
-}
-
-function parseBoundedInteger(value: string, min: number, max: number): number | undefined {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : undefined;
-}
-
-function normalizeProfileId(value: string): string {
-  return value.trim().toLocaleLowerCase()
-    .replace(/[^a-z0-9._-]+/gu, '-')
-    .replace(/^-+|-+$/gu, '')
-    .slice(0, 80) || 'subagent-profile';
-}
-
-function deriveDescription(content: string): string {
-  const body = stripFrontmatter(content).replace(/\r\n?/gu, '\n');
-  for (const rawLine of body.split('\n')) {
-    const line = rawLine.replace(/^#+\s*/u, '').trim();
-    if (!line || line === '---') {
-      continue;
-    }
-    return line.length > 160 ? `${line.slice(0, 157)}...` : line;
-  }
-  return '';
-}
-
-function stripFrontmatter(content: string): string {
-  const normalized = content.replace(/\r\n?/gu, '\n');
-  if (!normalized.startsWith('---\n')) {
-    return normalized;
-  }
-  const lines = normalized.split('\n');
-  for (let index = 1; index < lines.length; index += 1) {
-    if (lines[index].trim() === '---') {
-      return lines.slice(index + 1).join('\n');
-    }
-  }
-  return normalized;
 }

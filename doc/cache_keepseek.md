@@ -68,7 +68,7 @@ V1–V8 的已存在热会话保持原有 system/schema 字节；只有缓存自
 
 - `getAgentSystemPrompt()` 只包含协议级静态约束，不放时间戳、随机 ID、绝对路径、临时状态或激活原因。
 - 首轮解析出的 `contextInstructions` 持久化到 `ChatSession`，之后逐字节复用。
-- AGENTS.md、Skill、Legacy Memory 或 Context Files 在会话中发生变化时，不回写旧前缀；格式化后的变化以稳定的 dynamic context tail 追加到下一条真实 user 消息。
+- 共享指令/配置、Skill 或 Context Files 在会话中发生变化时，不回写旧前缀；格式化后的变化以稳定的 dynamic context tail 追加到下一条真实 user 消息。
 - 未发生变化时不重复追加 tail。项目指令大小和 token 上限仍由 `ProjectInstructionsResolver` 与配置控制。
 
 这意味着“上下文更新”通常只损失新追加部分，而不是让整段历史重新编码。

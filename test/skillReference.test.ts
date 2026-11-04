@@ -99,7 +99,6 @@ function createSkillManifest(rootPath: string, skillUri: vscode.Uri): SkillManif
     skillUri,
     enabled: true,
     allowImplicit: false,
-    userInvocable: true,
     hasReferences: false,
     hasAssets: false,
     hasScripts: false

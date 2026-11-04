@@ -51,10 +51,6 @@ export type WebviewMessage =
   | { type: 'openCurrentSessionLog' }
   | { type: 'openRunTrace'; messageId: string }
   | { type: 'openSubagentDiagnostic'; subagentId: string; diagnosticId: string }
-  | { type: 'createLegacyMemoryMigrationDraft' }
-  | { type: 'exportLegacyMemory' }
-  | { type: 'completeLegacyMemoryMigration' }
-  | { type: 'rollbackLegacyMemoryMigration' }
   | { type: 'startBackgroundRun'; script: SafeNpmScript; maxRounds: number }
   | { type: 'resumeBackgroundRun' }
   | { type: 'stopBackgroundRun' }
@@ -93,13 +89,12 @@ export type WebviewMessage =
   | { type: 'insertDroppedFileReferences'; files: DroppedFileReferenceInput[] }
   | { type: 'requestReferenceResources'; requestId: string }
   | { type: 'requestSkills' }
+  | { type: 'selectProjectScope' }
   | { type: 'useSkill'; skillId: string }
   | { type: 'removeActiveSkill'; skillId: string }
   | { type: 'openSkill'; skillId: string }
-  | { type: 'setSkillEnabled'; skillId: string; enabled: boolean }
-  | { type: 'setSkillAllowImplicit'; skillId: string; allowImplicit: boolean }
   | { type: 'setSkillWorkspaceDefault'; skillId: string; enabled: boolean }
-  | { type: 'createSkillDraft'; name: string; description: string; allowImplicit: boolean; userInvocable: boolean }
+  | { type: 'createSkillDraft'; name: string; description: string; allowImplicit: boolean }
   | { type: 'requestClipboardText'; requestId: string }
   | { type: 'writeClipboardText'; text: string }
   | { type: 'readPath'; path: string }

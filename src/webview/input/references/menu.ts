@@ -623,7 +623,7 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
 
       function insertSkillFromReferenceMenu(skill) {
         if (!skill || !skill.id) { return; }
-        if (!skill.enabled || !skill.userInvocable || skill.unavailableReason) {
+        if (!skill.enabled || skill.unavailableReason) {
           return;
         }
         consumeActiveMentionRangeForPicker();

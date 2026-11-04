@@ -54,7 +54,7 @@ export interface AgentSettings {
 
 export type ContextFileSource = 'workspace' | 'external';
 
-export type SkillSource = 'workspace' | 'agentsWorkspace' | 'user' | 'agentsUser' | 'builtin';
+export type SkillSource = 'admin' | 'workspace' | 'agentsWorkspace' | 'user' | 'agentsUser' | 'builtin';
 
 export type SkillActivationSource = 'explicit' | 'session' | 'workspace-default' | 'implicit';
 
@@ -850,18 +850,13 @@ export interface ProjectInstructionContext {
   id: string;
   uri: string;
   workspaceFolder: string;
+  scopeUri?: string;
+  order?: number;
   content: string;
   characterCount: number;
   tokenEstimate: number;
   contentHash: string;
   truncated: boolean;
-}
-
-export interface LegacyProjectMemoryContext {
-  content: string;
-  entryIds: string[];
-  tokenEstimate: number;
-  sourceUris: string[];
 }
 
 export type RunContextSourceKind = 'project-instructions' | 'skill' | 'legacy-memory';
@@ -872,6 +867,8 @@ export interface RunContextSourceSummary {
   label: string;
   uri?: string;
   source?: string;
+  scopeUri?: string;
+  order?: number;
   activation?: SkillActivationSource;
   reason?: string;
   characterCount: number;
@@ -885,7 +882,7 @@ export interface RunContextDiscardedSource {
   id: string;
   kind: RunContextSourceKind;
   uri?: string;
-  reason: 'duplicate_uri' | 'duplicate_content' | 'duplicate_skill' | 'budget_exhausted' | 'workspace_untrusted' | 'disabled' | 'implicit_not_allowed' | 'not_matched' | 'implicit_limit' | 'load_failed';
+  reason: 'duplicate_uri' | 'duplicate_content' | 'duplicate_skill' | 'budget_exhausted' | 'workspace_untrusted' | 'disabled' | 'implicit_not_allowed' | 'not_matched' | 'implicit_limit' | 'load_failed' | 'ambiguous_name';
   keptId?: string;
 }
 
@@ -904,25 +901,7 @@ export interface RunContextProjectionMetadata {
 export interface CurrentRunContext {
   projectInstructions: ProjectInstructionContext[];
   skills: ActivatedSkill[];
-  legacyMemory?: LegacyProjectMemoryContext;
   metadata: RunContextProjectionMetadata;
-}
-
-export type LegacyProjectMemoryMigrationStatus = 'pending' | 'draft-created' | 'completed';
-
-export interface LegacyProjectMemoryMigrationStateView {
-  detected: boolean;
-  status: LegacyProjectMemoryMigrationStatus;
-  sourceUris: string[];
-  entryCount: number;
-  canCreateDraft: boolean;
-  canComplete: boolean;
-  canRollback: boolean;
-  exportAvailable: boolean;
-  lastDraftChangeSetId?: string;
-  completeDisabledReason?: string;
-  rollbackDisabledReason?: string;
-  error?: string;
 }
 
 export type ApprovalMode = 'ask' | 'model_review' | 'delegate';
@@ -961,6 +940,8 @@ export interface ChatSession {
   title: string;
   messages: ChatMessage[];
   activeSkillIds?: string[];
+  /** Explicit session task scope; never follows editor focus. */
+  projectScopeUri?: string;
   /**
    * 会话内冻结的 implicit skill 激活结果（仅存 id 引用，不复制内容）。
    * 首个真实用户请求确定后写入；后续轮次不再随 prompt 波动重新匹配，

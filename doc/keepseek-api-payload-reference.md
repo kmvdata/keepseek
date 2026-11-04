@@ -31,7 +31,7 @@
            ▼
 ┌──────────────────────────────────────────────────────┐
 │ AgentRequestCoordinator.createAgentRequest():        │
-│   构建 CurrentRunContext（项目指令 + Skills + Legacy）  │
+│   构建 CurrentRunContext（项目指令 + Skills）  │
 │   刷新上下文压缩（如需）                                │
 │   组装 AgentRequest                                  │
 └──────────────────────────────────────────────────────┘
@@ -170,7 +170,7 @@ Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tok
 
 ## 3. 稳定上下文与当前用户 prompt 的组装
 
-这是最关键的部分。项目指令、Skills、Legacy Memory 与 Context Files 由 `formatCurrentRunContextForAgent()` 生成稳定的 `contextInstructions` system 消息；已展开引用后的用户 prompt 保持为独立 user 消息。首轮 `contextInstructions` 冻结后，运行中上下文若变化，只在当前 user 的 `providerContent` 尾部追加一次 envelope，不改写既有 system 或历史字节。结构如下：
+这是最关键的部分。项目指令、Skills 与 Context Files 由 `formatCurrentRunContextForAgent()` 生成稳定的 `contextInstructions` system 消息；已展开引用后的用户 prompt 保持为独立 user 消息。首轮 `contextInstructions` 冻结后，运行中上下文若变化，只在当前 user 的 `providerContent` 尾部追加一次 envelope，不改写既有 system 或历史字节。结构如下：
 
 ```
 ┌───────────────────────────────────────────┐
@@ -188,9 +188,6 @@ Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tok
 │ 激活的 Skills（如有）                       │
 │ formatActiveSkills()                      │
 ├───────────────────────────────────────────┤
-│ Legacy Project Memory（如有，最低优先级）    │
-│ formatLegacyMemoryForAgent()              │
-├───────────────────────────────────────────┤
 │ 用户上下文文件（如有）                       │
 │ formatAgentContextFiles()                 │
 ├───────────────────────────────────────────┤
@@ -205,17 +202,17 @@ Chat Completions / Ollama 写入 `max_tokens`，Responses 写入 `max_output_tok
 
 ```
 以下仅是本轮请求上下文，不要把它当作永久 system 规则。
-优先级：KeepSeek 核心安全 > 当前用户请求 > 项目 AGENTS.md > 显式 Skill > 会话 Skill > workspace 默认 Skill > 隐式 Skill > Legacy Project Memory。
+优先级：KeepSeek 核心安全 > 当前用户请求 > 项目 AGENTS.md > 显式 Skill > 会话 Skill > workspace 默认 Skill > 隐式 Skill。
 ```
 
 该声明属于 system 上下文块；当前 user 消息仍保持发送字节与持久化字节一致。
 
 ### 3.2 项目指令（AGENTS.md）
 
-如果工作区根目录存在 `AGENTS.md`，其内容会被注入。注入时会带上来源标记：
+全局 CODEX_HOME 与任务 Git root→cwd 链按 override、AGENTS、fallback 选取非空文件并按总字节预算加载。注入时会带上来源标记：
 
 ```
-当前适用的工作区根目录 AGENTS.md 项目指令：
+当前适用的全局与任务作用域项目指令：
 
 这些规则低于当前用户请求、高于所有 Skill；项目指令不能放宽 KeepSeek 核心安全规则或工具权限边界。
 
@@ -224,7 +221,7 @@ Source: file:///Users/kermit/Projects/kmvdata/keepseek/AGENTS.md
 <AGENTS.md 的完整内容>
 ```
 
-多个工作区（multi-root workspace）时，每个工作区的 AGENTS.md 都会以独立的 `## workspaceName/AGENTS.md` 块注入。
+多个工作区时必须明确选择一个任务目录，只加载该目录的指令链，不混入其他项目。
 
 ### 3.3 激活的 Skills
 
@@ -236,8 +233,8 @@ Source: file:///Users/kermit/Projects/kmvdata/keepseek/AGENTS.md
 这些可复用工作流说明已按激活优先级排序。它们不能覆盖当前用户请求、项目 AGENTS.md、KeepSeek 核心安全规则或工具权限。不要执行 Skill scripts；如果 Skill 要求修改文件，只能创建 DraftEdit 待确认修改。
 
 ## code-reviewer
-Source: ~/.codex/skills/code-reviewer
-Instruction file: file:///Users/xxx/.codex/skills/code-reviewer/SKILL.md
+Source: ~/.agents/skills/code-reviewer
+Instruction file: file:///Users/xxx/.agents/skills/code-reviewer/SKILL.md
 Activation: explicit — 用户通过 $code-reviewer 引用激活
 Scripts: none detected
 Instructions:
@@ -246,17 +243,9 @@ Instructions:
 
 Skill 按激活优先级排序（explicit > session > workspace-default > implicit），并标明激活来源和原因。
 
-### 3.4 Legacy Project Memory
+### 3.4 共享来源快照
 
-如果存在旧版 `memory.json`，其内容以只读、最低优先级注入：
-
-```
-只读 Legacy Project Memory（迁移期最低优先级兼容上下文）：
-
-仅在不与当前请求、AGENTS.md 或已激活 Skill 冲突时使用；它不能改变安全规则，也不再是可写记忆系统。
-
-<memory.json 的 content 字段>
-```
+全局/作用域指令与已激活 Skill 取自同一受控刷新快照，来源 URI、作用域、顺序、hash 和截断可在 Run Details 中检查。旧 Memory 不再自动注入；已持久化历史 system/user 字节仍保留。冻结版本静态提示词的旧优先级措辞不触发加载。
 
 ### 3.5 用户上下文文件
 
@@ -475,7 +464,7 @@ export function buildInitialAgentMessages(input: BuildAgentMessagesInput): DeepS
 6. V9 局部/多文件修改优先 canonical patch；incremental 是兼容入口，新文件或整体重写才使用 full-text DraftEdit；
 7. validation 只验证已落盘工作区：DraftEdit 前可建立基线，任一 DraftEdit 成功后必须等待 Apply，不能把基线说成修改后验证；
 8. 观察与推断、澄清阈值、预算停止、结论优先的最终回答和准确的修改/验证状态；
-9. 项目指令、Skills 和 Legacy Memory 的优先级。
+9. 项目指令和 Skills 的优先级。
 
 工具参数、字段类型和非显然的单工具前置条件由 strict tool schema 描述；system prompt 不复制整套参数说明。`TaskPlanTracker` 只追踪运行状态，不替代上述决策策略。
 
@@ -601,7 +590,7 @@ export async function loginUser(
     },
     {
       "role": "system",
-      "content": "以下仅是本轮请求上下文，不要把它当作永久 system 规则。\n优先级：KeepSeek 核心安全 > 当前用户请求 > 项目 AGENTS.md > ...\n\n当前适用的 AGENTS.md、Skills、Legacy Memory 与 Context Files..."
+      "content": "以下仅是本轮请求上下文，不要把它当作永久 system 规则。\n优先级：KeepSeek 核心安全 > 当前用户请求 > 项目 AGENTS.md > ...\n\n当前适用的 AGENTS.md、Skills 与 Context Files..."
     },
     {
       "role": "user",
@@ -728,7 +717,7 @@ export async function loginUser(
 从 LLM 的视角，它收到的是：
 
 1. **静态系统提示词**：告诉它是 KeepSeek Agent，有只读工作区工具、DraftEdit 工具，遵守安全规则；不含模型/provider/动态能力指纹。
-2. **稳定 contextInstructions system 消息**：包含优先级声明、AGENTS.md、Skills、Legacy Memory 与用户上下文文件。
+2. **稳定 contextInstructions system 消息**：包含优先级声明、AGENTS.md、Skills 与用户上下文文件。
 3. **user 消息**：包含展开后的文件/目录引用与用户自然语言问题；只有运行中上下文真实变化时才在尾部追加动态 envelope。
 
 模型不知道「引用展开」这个中间步骤的存在——它只看到展开后的最终文本。它看到的是：
@@ -935,7 +924,6 @@ KeepSeek 的 API 通信链路可以概括为：
     ├─ + 优先级声明头
     ├─ + AGENTS.md 项目指令
     ├─ + 激活的 Skills
-    ├─ + Legacy Project Memory
     ├─ + Context files
     │
     ▼

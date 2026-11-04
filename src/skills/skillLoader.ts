@@ -1,7 +1,8 @@
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
+import { canonicalUri, readSharedText } from '../context/sharedConfigPaths';
 import { getConfiguredMaxFileBytes } from '../shared/config';
-import { formatBytes } from '../shared/format';
 import { getMarkdownFence } from '../shared/markdown';
 import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
 import { toActivatedSkill, type ActivatedSkill, type SkillManifest } from './skillTypes';
@@ -13,11 +14,10 @@ const MARKDOWN_LINK_TARGET_PATTERN = /!?\[[^\]\n]*\]\(([^)\n]+)\)/gu;
 interface LoadedSkillResource {
   uri: vscode.Uri;
   content: string;
+  omitted?: boolean;
 }
 
 export class SkillLoader {
-  private readonly decoder = new TextDecoder('utf-8', { fatal: false });
-  private readonly textCache = new Map<string, { mtime: number; size: number; maxBytes: number; content: string }>();
 
   public async loadSkill(manifest: SkillManifest): Promise<ActivatedSkill> {
     if (!manifest.enabled) {
@@ -26,12 +26,21 @@ export class SkillLoader {
     if (!isUriInsideOrEqual(manifest.rootUri, manifest.skillUri)) {
       throw new Error('Skill file is outside the skill root.');
     }
-    const content = await this.readSkillTextFile(manifest.skillUri);
-    const resources = await this.loadReferencedResources(manifest.rootUri, manifest.skillUri, content);
+    if (!vscode.workspace.isTrusted && (manifest.source === 'workspace' || manifest.source === 'agentsWorkspace')) throw new Error('Workspace is not trusted / 工作区未受信任');
+    const boundary = manifest.readBoundaryUri ? vscode.Uri.parse(manifest.readBoundaryUri) : manifest.rootUri;
+    if (manifest.readBoundaryUri && (await canonicalUri(boundary)).toString() !== manifest.readBoundaryUri) throw new Error('Skill boundary changed; refresh required / Skill 边界已变更，请刷新');
+    const content = await this.readSkillTextFile(manifest.skillUri, boundary);
+    if (manifest.physicalUri && (await canonicalUri(manifest.skillUri)).toString() !== manifest.physicalUri) throw new Error('Skill target changed; refresh required / Skill 目标已变更，请刷新');
+    if (manifest.documentHash && createHash('sha256').update(content).digest('hex') !== manifest.documentHash) throw new Error('Skill changed; refresh required / Skill 已变更，请刷新');
+    if (manifest.metadataHash) {
+      const metadata = await readSharedText(vscode.Uri.joinPath(manifest.rootUri, 'agents', 'openai.yaml'), [boundary], 65536);
+      if (createHash('sha256').update(metadata ?? '').digest('hex') !== manifest.metadataHash) throw new Error('Skill policy changed; refresh required / Skill 策略已变更，请刷新');
+    }
+    const resources = await this.loadReferencedResources(manifest.rootUri, manifest.skillUri, content, boundary);
     const activated = toActivatedSkill(manifest, formatSkillContentWithResources(manifest.rootUri, content, resources));
     activated.loadedResourceUris = [
       manifest.skillUri.toString(),
-      ...resources.map((resource) => resource.uri.toString())
+      ...resources.filter(resource => !resource.omitted).map((resource) => resource.uri.toString())
     ];
     return activated;
   }
@@ -39,7 +48,8 @@ export class SkillLoader {
   private async loadReferencedResources(
     rootUri: vscode.Uri,
     skillUri: vscode.Uri,
-    skillContent: string
+    skillContent: string,
+    boundary: vscode.Uri
   ): Promise<LoadedSkillResource[]> {
     const resources: LoadedSkillResource[] = [];
     const queue: Array<{ uri: vscode.Uri; content: string }> = [{ uri: skillUri, content: skillContent }];
@@ -56,8 +66,10 @@ export class SkillLoader {
         seen.add(key);
 
         try {
-          const content = await this.readSkillTextFile(targetUri);
+          if (!isUriInsideOrEqual(rootUri, targetUri)) throw new Error('Resource outside Skill root');
+          const content = await this.readSkillTextFile(targetUri, boundary);
           if (referencedContentChars + content.length > MAX_REFERENCED_SKILL_RESOURCE_CHARS) {
+            resources.push({ uri: targetUri, omitted: true, content: '[Resource omitted: capacity limit / 资源超过容量上限]' });
             continue;
           }
           referencedContentChars += content.length;
@@ -65,7 +77,7 @@ export class SkillLoader {
           resources.push(resource);
           queue.push(resource);
         } catch {
-          // Referenced resources are best-effort; an unreadable optional file should not disable the skill.
+          resources.push({ uri: targetUri, omitted: true, content: '[Resource missing, unreadable or outside authorized boundary / 资源缺失、不可读或越过授权边界]' });
         }
       }
     }
@@ -73,37 +85,13 @@ export class SkillLoader {
     return resources;
   }
 
-  private async readSkillTextFile(uri: vscode.Uri): Promise<string> {
-    if (shouldSkipTextUri(uri)) {
-      throw new Error(`${getUriBasename(uri)} is not a readable text file.`);
-    }
-
-    const maxBytes = getConfiguredMaxFileBytes();
-    const stat = await vscode.workspace.fs.stat(uri);
-    if (stat.type !== vscode.FileType.File) {
-      throw new Error(`${getUriBasename(uri)} is not a file.`);
-    }
-    if (stat.size > maxBytes) {
-      throw new Error(`${getUriBasename(uri)} is larger than ${formatBytes(maxBytes)}.`);
-    }
-    const key = uri.toString();
-    const cached = this.textCache.get(key);
-    if (cached && cached.mtime === stat.mtime && cached.size === stat.size && cached.maxBytes === maxBytes) {
-      return cached.content;
-    }
-
-    const bytes = await vscode.workspace.fs.readFile(uri);
-    if (bytes.byteLength > maxBytes) {
-      throw new Error(`${getUriBasename(uri)} is larger than ${formatBytes(maxBytes)}.`);
-    }
-
-    const content = this.decoder.decode(bytes).replace(/\r\n?/gu, '\n');
-    if (!isReadableTextContent(content)) {
-      throw new Error(`${getUriBasename(uri)} appears to be binary or unreadable text.`);
-    }
-    this.textCache.set(key, { mtime: stat.mtime, size: stat.size, maxBytes, content });
+  private async readSkillTextFile(uri: vscode.Uri, boundary: vscode.Uri): Promise<string> {
+    if (shouldSkipTextUri(uri)) throw new Error(`${getUriBasename(uri)} is not a readable text file.`);
+    const content = await readSharedText(uri, [boundary], getConfiguredMaxFileBytes());
+    if (content === undefined || !isReadableTextContent(content)) throw new Error('Skill resource is missing or unreadable / Skill 资源缺失或不可读');
     return content;
   }
+
 }
 
 function getUriBasename(uri: vscode.Uri): string {
@@ -134,9 +122,6 @@ function findReferencedResourceUris(rootUri: vscode.Uri, currentUri: vscode.Uri,
     }
 
     const targetUri = vscode.Uri.joinPath(currentDirectoryUri, ...target.split(/[\\/]+/u).filter(Boolean));
-    if (!isUriInsideOrEqual(rootUri, targetUri)) {
-      continue;
-    }
     uris.push(targetUri);
   }
 

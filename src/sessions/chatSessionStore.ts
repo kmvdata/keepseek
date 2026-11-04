@@ -834,6 +834,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       executionMode: normalizeExecutionMode(item.executionMode),
       planWorkflows: normalizePlanWorkflowRecords(item.planWorkflows, item.id),
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
+      projectScopeUri: normalizeProjectScopeUri(item.projectScopeUri),
       frozenImplicitSkillIds: normalizeStringArray(item.frozenImplicitSkillIds),
       requestProtocol: normalizeSessionRequestProtocol(item.requestProtocol),
       historyArchive: normalizeHistoryArchive(item.historyArchive),
@@ -1429,6 +1430,8 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
           label: typeof source.label === 'string' ? source.label.slice(0, 160) : 'Context source',
           uri: typeof source.uri === 'string' ? source.uri : undefined,
           source: typeof source.source === 'string' ? source.source.slice(0, 80) : undefined,
+          scopeUri: normalizeProjectScopeUri(source.scopeUri),
+          order: typeof source.order === 'number' && Number.isSafeInteger(source.order) && source.order >= 0 ? source.order : undefined,
           activation: source.activation === 'explicit' || source.activation === 'session'
             || source.activation === 'workspace-default' || source.activation === 'implicit'
             ? source.activation
@@ -1544,6 +1547,7 @@ function normalizeRunContextDiscardReason(
     case 'duplicate_uri':
     case 'duplicate_content':
     case 'duplicate_skill':
+    case 'ambiguous_name':
     case 'budget_exhausted':
     case 'workspace_untrusted':
     case 'disabled':
@@ -1659,6 +1663,7 @@ function normalizeMessageUsedSkills(value: unknown): ChatMessage['usedSkills'] {
         || item.source === 'agentsWorkspace'
         || item.source === 'user'
         || item.source === 'agentsUser'
+        || item.source === 'admin'
         || item.source === 'builtin'
         ? item.source
         : undefined;
@@ -1848,4 +1853,10 @@ function getUriLabel(uri: vscode.Uri): string {
   const normalized = path.replace(/[\\/]+$/u, '');
   const index = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'));
   return index >= 0 ? normalized.slice(index + 1) : normalized || uri.toString();
+}
+
+function normalizeProjectScopeUri(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > 8192) return undefined;
+  try { const uri = vscode.Uri.parse(value); return uri.scheme === 'file' && uri.path.startsWith('/') ? uri.toString() : undefined; }
+  catch { return undefined; }
 }
