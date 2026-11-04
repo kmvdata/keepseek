@@ -190,7 +190,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
       'Script contents, shell syntax and package lifecycle commands are not statically scoped.',
       '脚本内容、shell 语法和包生命周期命令无法静态确定范围。');
   } else {
-    const writers = ['rm', 'rmdir', 'del', 'erase', 'unlink', 'truncate', 'mkfs', 'format', 'cp', 'mv', 'mkdir', 'touch', 'install', 'tee', 'patch'];
+    const writers = ['rm', 'rmdir', 'del', 'erase', 'unlink', 'truncate', 'mkfs', 'format', 'cp', 'mv', 'mkdir', 'touch', 'install', 'tee', 'patch', 'chmod', 'chown', 'chgrp', 'setfacl'];
     if (writers.includes(program)) effects.add('workspace_write');
     if (['curl', 'wget', 'ssh', 'scp', 'sftp', 'ftp', 'nc', 'ncat', 'telnet'].includes(program)) effects.add('network');
     if (['sudo', 'doas', 'runas', 'pkexec'].includes(program)) effects.add('privilege_escalation');

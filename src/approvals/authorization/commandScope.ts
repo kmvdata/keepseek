@@ -5,12 +5,17 @@ import { createHash } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { DraftRun } from '../../shared/types';
 import { createControlledEnvironment } from '../../runs/executionEnvironment';
+import { findSensitiveEvidence } from '../approvalPolicy';
+import { assertOperationPath } from './protectedTargets';
 import { analyzeCommand } from './commandSemantics';
 import { canonicalPath, isPathInside, joinUnresolvedPath } from './pathScope';
 import { authorizationReason, type AuthorizationReason } from './reasons';
 
 export interface CommandScope {
   externalUris: string[];
+  cwd: string;
+  executable?: string;
+  paths: Array<{ uri: string; role: string; external: boolean }>;
   uncertain: boolean;
   reasons: string[];
   diagnostics: AuthorizationReason[];
@@ -25,18 +30,42 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
     .map(f => canonicalPath(f.uri.fsPath)));
   const cwd = vscode.Uri.parse(run.spec.cwdUri).fsPath;
   const external = new Set<string>();
-  const resolvedPaths: string[] = [];
-  const check = async (value: string) => {
-    try {
-      const resolved = await canonicalPath(value);
-      resolvedPaths.push(resolved);
-      if (!roots.some(root => isPathInside(root, resolved))) external.add(vscode.Uri.file(resolved).toString());
-    } catch {
+  const paths: CommandScope['paths'] = [];
+  const pathIdentities: unknown[] = [];
+  const check = async (value: string, role: string) => {
+    const write = role === 'write_path';
+    assertOperationPath(value, write);
+    let resolved: string;
+    try { resolved = await canonicalPath(value); }
+    catch {
       diagnostics.push(authorizationReason('path_resolution', value,
         'The path cannot be resolved reliably.', '无法可靠解析该路径。'));
+      return;
     }
+    assertOperationPath(resolved, write);
+    const uri = vscode.Uri.file(resolved).toString();
+    const outside = !roots.some(root => isPathInside(root, resolved));
+    const info = await stat(resolved).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+      return undefined;
+    });
+    if (info && !info.isFile() && !info.isDirectory()) {
+      throw new Error('The command targets a special filesystem object. / 命令指向特殊文件系统对象。');
+    }
+    paths.push({ uri, role, external: outside });
+    pathIdentities.push(info && [info.dev, info.ino, info.mode, ...(role === 'script' ? [info.mtimeMs, info.ctimeMs, info.size] : [])]);
+    if (outside) external.add(uri);
   };
-  await check(cwd);
+  if (findSensitiveEvidence(JSON.stringify([run.spec.executable, run.spec.args, run.spec.env]))
+    || parsed.arguments.some(argument => argument.role === 'inline_code'
+      && /(?:^|[\s;&|])(?:sudo|doas|pkexec)(?:\s|$)|(?:^|[/~])\.(?:ssh|aws|gnupg|kube|codex)(?:[/\s]|$)|\/etc\/(?:shadow|sudoers)\b/iu.test(argument.value))
+    || parsed.effects.some(effect => ['credential_access', 'privilege_escalation'].includes(effect))
+    || (parsed.program === 'git' && parsed.arguments.some(argument => argument.role === 'subcommand' && argument.value === 'config')
+      && run.spec.args.some(argument => ['--system', '--global'].includes(argument)))
+    || run.spec.env.some(({ name }) => /^(?:LD_|DYLD_|NODE_OPTIONS$|BASH_ENV$|ENV$)|(?:^|_)(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIALS?)(?:_|$)/iu.test(name))) {
+    throw new Error('Credential access, privilege escalation or unsafe execution environment. Nothing executed. / 操作涉及凭据、提权或高风险执行环境，尚未执行。');
+  }
+  await check(cwd, 'cwd');
   for (const operand of parsed.arguments) {
     if (!['read_path', 'write_path', 'cwd', 'repository', 'script'].includes(operand.role)) continue;
     if (operand.value === '-' || operand.value === '') continue;
@@ -52,7 +81,7 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
       continue;
     }
     const base = joinUnresolvedPath(cwd, ...operand.cwdChanges.filter(Boolean));
-    await check(joinUnresolvedPath(base, operand.value));
+    await check(joinUnresolvedPath(base, operand.value), operand.role);
   }
   const env = createControlledEnvironment(run.spec.env);
   const executable = await resolveExecutable(run.spec.executable, cwd, env);
@@ -62,24 +91,33 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
   // Explicit executable paths are also filesystem targets (PATH-selected system
   // binaries are runtime dependencies, not workspace operand grants).
   if (/[/\\]/u.test(run.spec.executable)) {
-    if (!executable?.trusted) await check(joinUnresolvedPath(cwd, run.spec.executable));
+    if (!executable?.trusted) await check(joinUnresolvedPath(cwd, run.spec.executable), 'executable');
   }
   const externalUris = [...external].sort();
+  if (!executable && process.platform !== 'win32') throw new Error('Executable cannot be resolved. Nothing executed. / 无法解析实际程序，尚未执行。');
   const fingerprint = createHash('sha256').update(JSON.stringify({
-    version: 1, executable, env, roots, resolvedPaths, externalUris, diagnostics
+    version: 1, executable, env, roots, paths, pathIdentities, externalUris, diagnostics
   })).digest('hex');
-  return { externalUris, uncertain: diagnostics.length > 0, diagnostics,
+  return { externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri, executable: executable?.path, uncertain: diagnostics.length > 0, diagnostics,
     reasons: diagnostics.map(reason => reason.message), fingerprint };
+}
+
+export function hasExactCommandScope(scope: CommandScope, cwdUri: string, authorizedUris: ReadonlySet<string>): boolean {
+  return scope.externalUris.every(uri => authorizedUris.has(uri)
+    || (uri === scope.cwd && authorizedUris.has(cwdUri) && scope.paths.every(target => target.uri !== uri || target.role === 'cwd')));
 }
 
 /** Match spawn's POSIX PATH lookup, including relative/empty entries. Windows
  * search order/PATHEXT is deliberately not approximated; it requires a grant. */
-async function resolveExecutable(executable: string, cwd: string, env: NodeJS.ProcessEnv): Promise<{
+export async function resolveExecutable(executable: string, cwd: string, env: NodeJS.ProcessEnv): Promise<{
   path: string; identity: string; trusted: boolean;
 } | undefined> {
-  if (process.platform === 'win32') return undefined;
-  const candidates = executable.includes('/') ? [joinUnresolvedPath(cwd, executable)]
-    : (env.PATH ?? '/usr/bin:/bin').split(path.delimiter).map(dir => joinUnresolvedPath(cwd, dir, executable));
+  const windows = process.platform === 'win32';
+  // Windows remains in the manual lane. Resolve an explicit filename or a
+  // known executable extension to bind evidence without treating it as trusted.
+  const filename = windows && !path.extname(executable) ? executable + '.exe' : executable;
+  const candidates = /[/\\]/u.test(executable) ? [joinUnresolvedPath(cwd, filename)]
+    : (env.PATH ?? (windows ? '' : '/usr/bin:/bin')).split(path.delimiter).map(dir => joinUnresolvedPath(cwd, dir, filename));
   for (const candidate of candidates) {
     try {
       await access(candidate, constants.X_OK);
@@ -88,13 +126,13 @@ async function resolveExecutable(executable: string, cwd: string, env: NodeJS.Pr
       if (!info.isFile()) continue;
       // OS-owned system locations or the running extension host binary only.
       // A workspace/PATH shim named `cat`/`git` never gains their authority.
-      const systemRoots = await Promise.all(['/bin', '/usr/bin'].map(dir => realpath(dir)));
+      const systemRoots = windows ? [] : await Promise.all(['/bin', '/usr/bin'].map(dir => realpath(dir)));
       const system = info.uid === 0 && (info.mode & 0o022) === 0
         && systemRoots.some(root => path.dirname(resolved) === root);
       const hostRuntime = resolved === await realpath(process.execPath);
       const matchingName = path.basename(resolved) === path.basename(executable);
       return { path: resolved, identity: `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`,
-        trusted: matchingName && (system || hostRuntime) };
+        trusted: !windows && matchingName && (system || hostRuntime) };
     } catch { /* Continue PATH lookup as spawn does for absent/non-executable entries. */ }
   }
   return undefined;

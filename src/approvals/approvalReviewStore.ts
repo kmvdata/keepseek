@@ -5,7 +5,8 @@ import {
   APPROVAL_POLICY_VERSION,
   type ApprovalRecordMatch,
   type ApprovalReviewDisplay,
-  type ApprovalReviewRecord
+  type ApprovalReviewRecord,
+  type ApprovalReviewRequest
 } from './approvalReviewTypes';
 
 const MAX_RECORDS = 1_000;
@@ -59,33 +60,27 @@ export class ApprovalReviewStore {
     return record ? structuredClone(record) : undefined;
   }
 
+  public matchesSnapshot(reviewId: string, request: ApprovalReviewRequest): boolean {
+    const record = this.records.get(reviewId);
+    return !!record && record.sessionId === request.sessionId && record.rootTaskId === request.rootTaskId
+      && record.agentRunId === request.agentRunId && record.targetId === request.targetId
+      && record.actionKind === request.actionKind && record.actionHash === request.actionHash
+      && record.scopeFingerprint === request.scopeFingerprint && record.policyVersion === APPROVAL_POLICY_VERSION;
+  }
+
   public getLatestForTarget(targetId: string): ApprovalReviewDisplay | undefined {
     const record = [...this.records.values()]
-      .filter((item) => item.targetId === targetId)
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+      .reverse().find((item) => item.targetId === targetId);
     return record ? toDisplay(record) : undefined;
   }
 
-  public findCurrentRuntimeDenial(input: Omit<ApprovalRecordMatch, 'reviewId' | 'approvalMode' | 'workspaceTrusted'>): ApprovalReviewRecord | undefined {
-    const record = [...this.records.values()].reverse().find((item) => item.runtimeId === this.runtimeId
-      && item.sessionId === input.sessionId
-      && item.agentRunId === input.agentRunId
-      && item.targetId === input.targetId
-      && item.actionKind === input.actionKind
-      && item.actionHash === input.actionHash
-      && item.policyVersion === input.policyVersion
-      && item.decision === 'deny');
-    return record ? structuredClone(record) : undefined;
-  }
-
-  public findCurrentRuntimeDenialForAction(input: {
+  public findDenialForAction(input: {
     sessionId: string;
     rootTaskId: string;
     actionKind: ApprovalReviewRecord['actionKind'];
     actionHash: string;
   }): ApprovalReviewRecord | undefined {
-    const record = [...this.records.values()].reverse().find((item) => item.runtimeId === this.runtimeId
-      && item.sessionId === input.sessionId
+    const record = [...this.records.values()].reverse().find((item) => item.sessionId === input.sessionId
       && item.rootTaskId === input.rootTaskId
       && item.actionKind === input.actionKind
       && item.actionHash === input.actionHash
@@ -96,13 +91,14 @@ export class ApprovalReviewStore {
   public async consumeMatchingApproval(input: ApprovalRecordMatch): Promise<ApprovalReviewRecord> {
     if (!input.workspaceTrusted) throw new Error('Approval record cannot be consumed in an untrusted workspace.');
     const record = this.records.get(input.reviewId);
-    const expectedSource = input.approvalMode === 'model_review' ? 'model_review' : 'host_policy';
     if (!record || record.runtimeId !== this.runtimeId || record.consumedAt
-      || record.sessionId !== input.sessionId || record.agentRunId !== input.agentRunId
+      || record.sessionId !== input.sessionId || record.rootTaskId !== input.rootTaskId || record.agentRunId !== input.agentRunId
       || record.targetId !== input.targetId || record.actionKind !== input.actionKind
       || record.actionHash !== input.actionHash || input.policyVersion !== APPROVAL_POLICY_VERSION
       || record.policyVersion !== input.policyVersion
-      || record.approvalSource !== expectedSource || record.decision !== 'approve') {
+      || record.approvalSource !== input.expectedSource || record.decision !== 'approve'
+      || record.approvalMode !== input.approvalMode || record.scopeFingerprint !== input.scopeFingerprint
+      || (input.approvalMode === 'model_review' && input.expectedSource === 'host_policy')) {
       throw new Error('No current matching approval record exists for this exact operation.');
     }
     record.consumedAt = new Date().toISOString();
@@ -150,6 +146,7 @@ function toDisplay(record: ApprovalReviewRecord): ApprovalReviewDisplay {
     risk: record.risk,
     rationale: record.rationale,
     saferAlternative: record.saferAlternative,
+    affectedTargets: record.affectedTargets,
     createdAt: record.createdAt,
     consumedAt: record.consumedAt
   });
@@ -161,13 +158,15 @@ function normalizeRecord(value: unknown): ApprovalReviewRecord | undefined {
   if (!record.reviewId || !record.runtimeId || !record.sessionId || !record.agentRunId || !record.targetId
     || !['external_file_access', 'validation_run', 'draft_edit_apply', 'draft_delete_apply', 'draft_run_execute'].includes(record.actionKind)
     || !record.actionHash || !Number.isInteger(record.policyVersion)
-    || !['model_review', 'host_policy', 'local_policy'].includes(record.approvalSource)
+    || !['model_review', 'host_policy', 'local_policy', 'user_click'].includes(record.approvalSource)
     || !['approve', 'deny', 'unavailable'].includes(record.decision)
     || !['low', 'medium', 'high', 'critical'].includes(record.risk)
     || typeof record.rationale !== 'string' || !Array.isArray(record.policyRules)
     || !Number.isFinite(Date.parse(record.createdAt))) return undefined;
   return structuredClone({
     ...record,
+    affectedTargets: Array.isArray(record.affectedTargets)
+      ? record.affectedTargets.filter(target => typeof target === 'string').slice(0, 12).map(target => target.slice(0, 300)) : undefined,
     rootTaskId: typeof record.rootTaskId === 'string' && record.rootTaskId ? record.rootTaskId : record.agentRunId
   });
 }

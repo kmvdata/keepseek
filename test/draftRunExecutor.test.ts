@@ -18,9 +18,9 @@ test('delegated execution requires its matching approval record and remains sing
   const approvalStore = { consumeMatchingApproval: async () => ({}) } as unknown as ApprovalReviewStore;
   const authorization = new DraftRunAuthorizationService(approvalStore);
   const match: ApprovalRecordMatch = {
-    reviewId: 'review', sessionId: draftRun.sessionId, agentRunId: draftRun.agentRunId,
+    reviewId: 'review', sessionId: draftRun.sessionId, rootTaskId: draftRun.agentRunId, agentRunId: draftRun.agentRunId,
     targetId: draftRun.id, actionKind: 'draft_run_execute', actionHash: draftRun.specHash,
-    policyVersion: 1, approvalMode: 'model_review', workspaceTrusted: true
+    policyVersion: 1, expectedSource: 'model_review', approvalMode: 'model_review', workspaceTrusted: true
   };
   await assert.rejects(authorization.createDelegatedPermit(draftRun, () => false, match), /no longer authorized/u);
   const permit = await authorization.createDelegatedPermit(draftRun, () => true, match);

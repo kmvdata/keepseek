@@ -1,3 +1,4 @@
+import { hasExactCommandScope, inspectDraftRunScope } from '../approvals/authorization/commandScope';
 import { randomUUID } from 'node:crypto';
 import type { DraftRun, DraftRunBatchSnapshot, DraftRunBatchState } from '../shared/types';
 import type { DraftRunStore } from './draftRunStore';
@@ -117,7 +118,12 @@ export class DraftRunBatchCoordinator {
       // an earlier command may create a later command's working directory.
       for (const [index, entry] of op.state.entries.entries()) {
         op.state.currentIndex = index + 1;
-        this.store.validateApprovalBoundary(entry.draftRunId, input.authorizedUris, entry.specHash);
+        const run = this.store.validateApprovalBoundary(entry.draftRunId, input.authorizedUris, entry.specHash);
+        const scope = await inspectDraftRunScope(run);
+        assertValid();
+        if (!hasExactCommandScope(scope, run.spec.cwdUri, input.authorizedUris)) {
+          throw new Error('A command needs individual external scope authorization. / 命令需要逐项授权外部范围。');
+        }
       }
       op.state.currentIndex = 0;
       await this.store.flush();

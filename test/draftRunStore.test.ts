@@ -16,7 +16,7 @@ import { DraftRunStore } from '../src/runs/draftRunStore';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
 import { createDraftRunReviewRequest } from '../src/approvals/approvalReviewSurface';
-import type { ApprovalRecordMatch } from '../src/approvals/approvalReviewTypes';
+import { APPROVAL_POLICY_VERSION, type ApprovalRecordMatch } from '../src/approvals/approvalReviewTypes';
 import type { DraftRun, DraftRunProposal, DraftRunSpec, ExecutionPermit } from '../src/shared/types';
 
 test('delegated DraftRun records its approval source and consumes a single immutable proposal', async () => {
@@ -472,7 +472,8 @@ async function addHostApproval(
     targetId: proposal.id,
     actionKind: 'draft_run_execute',
     actionHash: proposal.specHash,
-    policyVersion: 1,
+    policyVersion: APPROVAL_POLICY_VERSION,
+    approvalMode: 'delegate',
     approvalSource: 'host_policy',
     reviewerSourceId: '',
     reviewerModelId: '',
@@ -485,11 +486,13 @@ async function addHostApproval(
   return {
     reviewId: record.reviewId,
     sessionId,
+    rootTaskId: agentRunId,
     agentRunId,
     targetId: proposal.id,
     actionKind: 'draft_run_execute',
     actionHash: proposal.specHash,
-    policyVersion: 1,
+    policyVersion: APPROVAL_POLICY_VERSION,
+    expectedSource: 'host_policy',
     approvalMode: 'delegate',
     workspaceTrusted: true
   };

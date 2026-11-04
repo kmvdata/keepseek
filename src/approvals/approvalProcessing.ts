@@ -1,4 +1,4 @@
-export type ApprovalTargetStatus = 'pending' | 'executed' | 'denied' | 'needs_authorization' | 'failed' | 'cancelled' | 'already_processed' | 'identity_mismatch' | 'missing';
+export type ApprovalTargetStatus = 'pending' | 'executed' | 'denied' | 'manual_required' | 'review_unavailable' | 'hard_blocked' | 'needs_authorization' | 'failed' | 'cancelled' | 'already_processed' | 'identity_mismatch' | 'missing';
 export interface ApprovalProcessingState {
   version: 1;
   runId: string;
@@ -15,7 +15,7 @@ export function normalizeApprovalProcessing(value: unknown): ApprovalProcessingS
     || !['delegate', 'model_review'].includes(v.mode) || !Array.isArray(v.targets)
     || !['processing', 'completed', 'blocked'].includes(v.status)) return undefined;
   const targets = v.targets.filter(t => t && typeof t.id === 'string' && ['edit', 'command'].includes(t.kind)
-    && ['pending', 'executed', 'denied', 'needs_authorization', 'failed', 'cancelled', 'already_processed', 'identity_mismatch', 'missing'].includes(t.status))
+    && ['pending', 'executed', 'denied', 'manual_required', 'review_unavailable', 'hard_blocked', 'needs_authorization', 'failed', 'cancelled', 'already_processed', 'identity_mismatch', 'missing'].includes(t.status))
     .map(t => ({ id: t.id, kind: t.kind, status: t.status === 'pending' ? 'cancelled' as const : t.status,
       reason: typeof t.reason === 'string' ? t.reason.slice(0, 2000) : undefined }));
   return { version: 1, runId: v.runId, rootTaskId: v.rootTaskId, mode: v.mode,

@@ -1,3 +1,7 @@
+import { redactSensitiveReviewText } from '../../approvals/approvalPolicy';
+import { spawn } from 'node:child_process';
+import { terminateProcessTree } from '../../runs/draftRunExecutor';
+import { inspectValidationSnapshot, type ValidationSnapshot } from './validationSnapshot';
 import * as vscode from 'vscode';
 import {
   getConfiguredValidationTimeoutMs
@@ -26,6 +30,7 @@ export interface ValidationToolAdapter {
     signal?: AbortSignal;
     runDeadlineAt?: number;
     authorization: ToolAuthorizationDecision;
+    expectedSnapshot?: string;
   }): Promise<string>;
 }
 
@@ -41,6 +46,7 @@ export class ValidationToolService implements ValidationToolAdapter {
     signal?: AbortSignal;
     runDeadlineAt?: number;
     authorization: ToolAuthorizationDecision;
+    expectedSnapshot?: string;
   }): Promise<string> {
     const startedAt = Date.now();
     const createResult = (result: Partial<ValidationToolResult>): ValidationToolResult => ({
@@ -81,22 +87,6 @@ export class ValidationToolService implements ValidationToolAdapter {
       }));
     }
 
-    const scriptDefinition = await readNpmScript(workspaceFolder, input.script);
-    if (!scriptDefinition) {
-      return JSON.stringify(createResult({
-        workspaceFolder: workspaceFolder.name,
-        errorType: 'script_missing',
-        error: localizeValidation(input.language, 'scriptMissing', input.script)
-      }));
-    }
-    if (hasValidationBlockingRisk(scriptDefinition)) {
-      return JSON.stringify(createResult({
-        workspaceFolder: workspaceFolder.name,
-        errorType: 'unsafe_script',
-        error: localizeValidation(input.language, 'scriptUnsafe', input.script)
-      }));
-    }
-
     const expectedScope = input.script === 'test' ? 'validation_test' : 'validation_compile_lint';
     if (!input.authorization.allowed
       || input.authorization.toolName !== RUN_VALIDATION_TOOL_NAME
@@ -125,20 +115,29 @@ export class ValidationToolService implements ValidationToolAdapter {
       }));
     }
 
-    const task = createValidationTask(workspaceFolder, input.script);
+    const taskName = `KeepSeek: npm run ${input.script}`;
     try {
-      const outcome = await executeTaskAndWait(task, timeoutMs, input.signal);
+      const snapshot = await inspectValidationSnapshot(workspaceFolder, input.script);
+      if (!vscode.workspace.isTrusted || input.signal?.aborted || !vscode.workspace.workspaceFolders?.includes(workspaceFolder)
+        || (input.expectedSnapshot && input.expectedSnapshot !== snapshot.fingerprint)
+        || (input.authorization.approvalReview && !input.expectedSnapshot)) {
+        throw new Error('Validation launch snapshot changed or authorization was revoked. / 验证启动快照已变化或授权已撤销。');
+      }
+      const remainingMs = input.runDeadlineAt === undefined ? timeoutMs : Math.min(timeoutMs, input.runDeadlineAt - Date.now());
+      if (remainingMs <= 0) throw new Error(localizeValidation(input.language, 'timedOut'));
+      const outcome = await executeValidation(snapshot, remainingMs, input.signal);
       const diagnostics = createWorkspaceDiagnosticSummary();
       const ok = !outcome.timedOut && !outcome.aborted && outcome.exitCode === 0;
       return JSON.stringify(createResult({
         ok,
         workspaceFolder: workspaceFolder.name,
-        taskName: task.name,
+        taskName,
         authorized: true,
         exitCode: outcome.exitCode,
         durationMs: Date.now() - startedAt,
         timedOut: outcome.timedOut,
         diagnostics,
+        output: outcome.output || undefined,
         errorType: ok
           ? undefined
           : outcome.aborted
@@ -206,6 +205,7 @@ async function readNpmScripts(workspaceFolder: vscode.WorkspaceFolder): Promise<
 export interface ValidationPreflightResult {
   ok: boolean;
   workspaceRootId?: string;
+  snapshot?: ValidationSnapshot;
   error?: string;
 }
 
@@ -225,15 +225,13 @@ export async function preflightSafeValidation(input: {
   if (!workspaceFolder) {
     return { ok: false, error: localizeValidation(input.language, 'workspaceMissing') };
   }
-  const definition = await readNpmScript(workspaceFolder, input.script);
-  if (!definition) {
-    return { ok: false, error: localizeValidation(input.language, 'scriptMissing', input.script) };
+  try {
+    const snapshot = await inspectValidationSnapshot(workspaceFolder, input.script);
+    const index = (vscode.workspace.workspaceFolders ?? []).findIndex(folder => folder.uri.toString() === workspaceFolder.uri.toString());
+    return { ok: true, workspaceRootId: `root-${index + 1}:${workspaceFolder.name}`, snapshot };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
-  if (hasValidationBlockingRisk(definition)) {
-    return { ok: false, error: localizeValidation(input.language, 'scriptUnsafe', input.script) };
-  }
-  const index = (vscode.workspace.workspaceFolders ?? []).findIndex((folder) => folder.uri.toString() === workspaceFolder.uri.toString());
-  return { ok: true, workspaceRootId: `root-${index + 1}:${workspaceFolder.name}` };
 }
 
 function createWorkspaceDiagnosticSummary(): WorkspaceDiagnosticSummary {
@@ -246,7 +244,7 @@ function createWorkspaceDiagnosticSummary(): WorkspaceDiagnosticSummary {
   };
   let total = 0;
 
-  for (const [uri, diagnostics] of vscode.languages.getDiagnostics()) {
+  for (const [uri, diagnostics] of vscode.languages?.getDiagnostics() ?? []) {
     if (!vscode.workspace.getWorkspaceFolder(uri)) {
       continue;
     }
@@ -322,90 +320,36 @@ function findWorkspaceFolder(requested: string | undefined): vscode.WorkspaceFol
   );
 }
 
-async function readNpmScript(workspaceFolder: vscode.WorkspaceFolder, script: SafeNpmScript): Promise<string | undefined> {
-  return (await readNpmScripts(workspaceFolder))?.[script];
-}
-
-function createValidationTask(workspaceFolder: vscode.WorkspaceFolder, script: SafeNpmScript): vscode.Task {
-  const problemMatchers = script === 'compile'
-    ? ['$tsc']
-    : script === 'lint'
-      ? ['$eslint-stylish']
-      : [];
-  const task = new vscode.Task(
-    { type: 'keepseek-validation', script },
-    workspaceFolder,
-    `KeepSeek: npm run ${script}`,
-    'keepseek',
-    new vscode.ProcessExecution('npm', ['run', script], { cwd: workspaceFolder.uri.fsPath }),
-    problemMatchers
-  );
-  task.presentationOptions = {
-    echo: true,
-    reveal: vscode.TaskRevealKind.Silent,
-    focus: false,
-    panel: vscode.TaskPanelKind.Dedicated,
-    showReuseMessage: true,
-    clear: true,
-    close: false
-  };
-  return task;
-}
-
-async function executeTaskAndWait(
-  task: vscode.Task,
-  timeoutMs: number,
-  signal?: AbortSignal
-): Promise<{ exitCode?: number; timedOut: boolean; aborted: boolean }> {
-  let execution: vscode.TaskExecution | undefined;
-  return await new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (result: { exitCode?: number; timedOut: boolean; aborted: boolean }) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
+function executeValidation(snapshot: ValidationSnapshot, timeoutMs: number, signal?: AbortSignal):
+Promise<{ exitCode?: number; timedOut: boolean; aborted: boolean; output?: string }> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { resolve({ timedOut: false, aborted: true }); return; }
+    const child = spawn(snapshot.executable, snapshot.argv, {
+      cwd: snapshot.cwd, env: snapshot.env, shell: false, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32'
+    });
+    let output = '';
+    const capture = (text: string) => { output = (output + text).slice(-8_000); };
+    child.stdout.setEncoding('utf8').on('data', capture);
+    child.stderr.setEncoding('utf8').on('data', capture);
+    const cleanUp = () => {
       clearTimeout(timer);
-      processEndDisposable.dispose();
-      taskEndDisposable.dispose();
-      signal?.removeEventListener('abort', abortHandler);
-      resolve(result);
+      signal?.removeEventListener('abort', stop);
     };
-    const processEndDisposable = vscode.tasks.onDidEndTaskProcess((event) => {
-      if (execution && event.execution === execution) {
-        finish({ exitCode: event.exitCode, timedOut: false, aborted: false });
-      }
-    });
-    const taskEndDisposable = vscode.tasks.onDidEndTask((event) => {
-      if (execution && event.execution === execution) {
-        finish({ exitCode: undefined, timedOut: false, aborted: false });
-      }
-    });
-    const abortHandler = () => {
-      void execution?.terminate();
-      finish({ exitCode: undefined, timedOut: false, aborted: true });
+    const stop = () => {
+      terminateProcessTree(child);
+      cleanUp();
+      resolve({ timedOut: false, aborted: true });
     };
-
-    signal?.addEventListener('abort', abortHandler, { once: true });
     const timer = setTimeout(() => {
-      void execution?.terminate();
-      finish({ exitCode: undefined, timedOut: true, aborted: false });
+      terminateProcessTree(child);
+      cleanUp();
+      resolve({ timedOut: true, aborted: false });
     }, timeoutMs);
-
-    void vscode.tasks.executeTask(task).then((startedExecution) => {
-      execution = startedExecution;
-      if (signal?.aborted) {
-        abortHandler();
-      }
-    }, (error) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        processEndDisposable.dispose();
-        taskEndDisposable.dispose();
-        signal?.removeEventListener('abort', abortHandler);
-        reject(error);
-      }
+    signal?.addEventListener('abort', stop, { once: true });
+    child.once('error', error => { cleanUp(); reject(error); });
+    child.once('close', code => {
+      cleanUp();
+      resolve({ exitCode: code ?? undefined, timedOut: false, aborted: false, output: redactSensitiveReviewText(output, 8_000) });
     });
   });
 }

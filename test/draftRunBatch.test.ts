@@ -1,5 +1,5 @@
 import * as assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { realpath, mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
@@ -208,7 +208,8 @@ test('whole snapshot requires trust and exact external cwd authorization, withou
     const external = path.join(f.root, 'external'); await mkdir(external);
     f.store.addProposals({ proposals: [f.proposal('A'), f.proposal('B', { cwdUri: vscode.Uri.file(external).toString(), cwdLabel: external, externalCwd: true })], sessionId: 's', agentRunId: 'r' });
     const id = f.accept(); if (mode === 'trust') vscode.workspace.isTrusted = false;
-    const executing = f.batch.execute(id, { authorizedUris: new Set(mode === 'authorized' ? [vscode.Uri.file(external).toString()] : []), assertContext: () => {}, onCurrent: () => {} });
+    const externalScript = vscode.Uri.file(path.join(await realpath(external), 'B')).toString();
+    const executing = f.batch.execute(id, { authorizedUris: new Set(mode === 'authorized' ? [vscode.Uri.file(external).toString(), externalScript] : []), assertContext: () => {}, onCurrent: () => {} });
     if (mode === 'authorized') { await f.executor.started(1); f.executor.finish('A'); await f.executor.started(2); f.executor.finish('B'); }
     await executing;
     assert.equal(f.executor.calls.length, mode === 'authorized' ? 2 : 0);
@@ -469,7 +470,12 @@ test('automatic cards distinguish processing, scope authorization, hard failure 
     ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'denied', reason: 'Denied by reviewer' };
     const denied = renderState({ decision: 'deny', rationale: 'Denied by reviewer' });
     assert.equal(denied.note.textContent, 'Denied by reviewer');
-    assert.equal(denied.buttons.length, 0, 'no ordinary reviewer bypass');
+    assert.equal(denied.buttons.length, 1);
+    assert.equal(denied.buttons[0].textContent, labels.approvalConfirmOnce);
+    denied.buttons[0].click();
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.at(-1))), { type: 'resumeApprovalProcessing', confirmTargetId: 'A' });
+    ui.state.approvalProcessing.targets[0].status = 'hard_blocked';
+    assert.equal(renderState({ decision: 'deny', approvalSource: 'local_policy' }).buttons.length, 0);
   }
 }));
 function bulk(cards: UiElement[]) {
@@ -921,7 +927,7 @@ test('a changed hash or revoked external authorization before B leaves B and C u
     const external = path.join(f.root, 'external'); await mkdir(external);
     const uri = vscode.Uri.file(external).toString();
     f.store.addProposals({ proposals: [f.proposal('A'), f.proposal('B', { externalCwd: true, cwdUri: uri }), f.proposal('C')], sessionId: 's', agentRunId: 'r' });
-    const authorizedUris = new Set([uri]);
+    const authorizedUris = new Set([uri, vscode.Uri.file(path.join(await realpath(external), 'B')).toString()]);
     const executing = f.batch.execute(f.accept(), { authorizedUris, assertContext: () => {}, onCurrent: () => {} });
     await f.executor.started(1);
     if (change === 'authorization') authorizedUris.clear();

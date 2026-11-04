@@ -5,6 +5,8 @@ import type { AgentRequest, ChatMessage, DraftEdit, DraftRun, SafeNpmScript } fr
 import { createBoundedReviewText, hashApprovalText, hashApprovalValue, hashDraftEditAction, hashDraftRunAction } from './approvalReviewHash';
 import type { ApprovalReviewRequest } from './approvalReviewTypes';
 import { getDraftEditBase, getDraftEditFullText, getDraftEditKind, getDraftEditResult } from '../edits/draftEdit';
+import type { CommandScope } from './authorization/commandScope';
+import { redactSensitiveReviewText } from './approvalPolicy';
 import { renderPatchReview } from '../edits/textPatch';
 
 export function createDraftEditReviewRequest(input: {
@@ -13,6 +15,7 @@ export function createDraftEditReviewRequest(input: {
   agentRunId: string;
   edit: DraftEdit;
   originalText: string;
+  metadataOnly?: boolean;
   history: readonly ChatMessage[];
   language: 'zh-CN' | 'en';
 }): ApprovalReviewRequest {
@@ -20,19 +23,15 @@ export function createDraftEditReviewRequest(input: {
   const base = getDraftEditBase(input.edit);
   const result = getDraftEditResult(input.edit);
   const originalTextHash = base?.sha256 ?? hashApprovalText(input.originalText);
-  // Create/modify reviews receive the exact proposed new content (bounded
-  // deterministically); delete reviews receive the bounded content that would
-  // disappear. The original full-file hash separately binds the baseline.
-  const change = input.edit.kind === 'text_patch_v1'
-    ? renderPatchReview(input.edit.patch)
-    : input.edit.action === 'delete'
-      ? input.originalText
-      : input.edit.kind === 'move_v1'
-        ? `${input.edit.sourceUri} -> ${input.edit.targetUri}`
+  // External authorization grants the operation, while reviewers receive
+  // metadata only. Deletion review never transmits the file being removed.
+  const change = input.edit.kind === 'move_v1'
+    ? `${input.edit.sourceUri} -> ${input.edit.targetUri}`
+    : input.metadataOnly || input.edit.action === 'delete' ? ''
+      : input.edit.kind === 'text_patch_v1' ? renderPatchReview(input.edit.patch)
         : getDraftEditFullText(input.edit)
           ?? (input.edit.kind === 'full_text_v1' && input.edit.contentBlobHash
-            ? `[content-addressed blob sha256 ${input.edit.contentBlobHash}; ${input.edit.result.sizeBytes} bytes]`
-            : '');
+            ? `[content-addressed blob sha256 ${input.edit.contentBlobHash}; ${input.edit.result.sizeBytes} bytes]` : '');
   return createBaseRequest({
     sessionId: input.sessionId,
     rootTaskId: input.rootTaskId ?? input.agentRunId,
@@ -46,7 +45,8 @@ export function createDraftEditReviewRequest(input: {
       `file_action:${input.edit.action}`,
       input.edit.action === 'delete' ? 'destructive_delete' : 'workspace_write',
       base?.sha256 ? 'baseline_hash_present' : 'baseline_hash_absent',
-      `payload_version:${getDraftEditKind(input.edit)}`
+      `payload_version:${getDraftEditKind(input.edit)}`,
+      ...(input.metadataOnly ? ['External scope authorized by the user; content intentionally withheld.'] : [])
     ],
     exactAction: {
       kind,
@@ -66,6 +66,7 @@ export function createDraftEditReviewRequest(input: {
 
 export function createDraftRunReviewRequest(input: {
   draftRun: DraftRun;
+  scope?: CommandScope;
   rootTaskId?: string;
   history: readonly ChatMessage[];
   language: 'zh-CN' | 'en';
@@ -83,14 +84,17 @@ export function createDraftRunReviewRequest(input: {
     staticRiskAnalysis: [
       `verdict:${assessment.verdict}`,
       ...assessment.effects.map((effect) => `effect:${effect}`),
-      ...assessment.evidence
+      ...assessment.evidence,
+      ...(input.scope?.reasons ?? []),
+      'Exact external scope, when present, requires separate user authorization.'
     ],
     exactAction: {
       kind: 'draft_run_execute',
       executable: input.draftRun.spec.executable,
       argv: [...input.draftRun.spec.args],
       cwdUri: input.draftRun.spec.cwdUri,
-      env: input.draftRun.spec.env.map((entry) => ({ ...entry })),
+      envNames: input.draftRun.spec.env.map(({ name }) => name),
+      scope: input.scope && { cwd: input.scope.cwd, executable: input.scope.executable, paths: input.scope.paths },
       timeoutMs: input.draftRun.spec.timeoutMs,
       effectAssessment: assessment,
       specHash: input.draftRun.specHash
@@ -105,6 +109,7 @@ export function createValidationReviewRequest(input: {
   targetId: string;
   script: SafeNpmScript;
   workspaceRootId: string;
+  snapshot: import('../agent/tools/validationSnapshot').ValidationSnapshot;
 }): ApprovalReviewRequest {
   return createBaseRequest({
     sessionId: input.request.sessionId ?? '',
@@ -112,11 +117,15 @@ export function createValidationReviewRequest(input: {
     agentRunId: input.agentRunId,
     actionKind: 'validation_run',
     targetId: input.targetId,
-    actionHash: hashApprovalValue({ script: input.script, workspaceRootId: input.workspaceRootId }),
+    actionHash: hashApprovalValue([input.script, input.workspaceRootId, input.snapshot.fingerprint]),
     history: input.request.history,
     purpose: `Run the fixed ${input.script} validation requested by the main model.`,
-    staticRiskAnalysis: ['registered_validation_tool', `fixed_script:${input.script}`, 'static_validation_preflight_passed'],
-    exactAction: { kind: 'validation_run', script: input.script, workspaceRootId: input.workspaceRootId },
+    staticRiskAnalysis: ['registered_validation_tool', `fixed_script:${input.script}`,
+      'Runs repository code and installed dependencies with extension-host privileges.',
+      ...input.snapshot.configNames.map(name => `launch configuration present: ${name}`)],
+    exactAction: { kind: 'validation_run', script: input.script, workspaceRootId: input.workspaceRootId,
+      launch: { cwdUri: input.snapshot.cwdUri, executable: input.snapshot.executable, argv: [...input.snapshot.argv],
+        envNames: Object.keys(input.snapshot.env), scripts: input.snapshot.evidence } },
     language: input.request.language
   });
 }
@@ -131,6 +140,7 @@ export function createExternalFileReviewRequest(input: {
   targetId: string;
   uri: string;
   access: 'read' | 'write' | 'delete';
+  fingerprint?: string;
   purpose: string;
 }): ApprovalReviewRequest {
   return createBaseRequest({
@@ -139,10 +149,10 @@ export function createExternalFileReviewRequest(input: {
     agentRunId: input.agentRunId,
     actionKind: 'external_file_access',
     targetId: input.targetId,
-    actionHash: hashApprovalValue({ uri: input.uri, access: input.access, purpose: input.purpose }),
+    actionHash: hashApprovalValue({ uri: input.uri, access: input.access, fingerprint: input.fingerprint, purpose: input.purpose }),
     history: input.request?.history ?? input.history ?? [],
     purpose: input.purpose,
-    staticRiskAnalysis: ['external_exact_uri', `access:${input.access}`, 'no_directory_wildcard'],
+    staticRiskAnalysis: ['external_exact_uri', `access:${input.access}`, 'User granted this exact read scope; no directory wildcard. File contents are excluded from this review.'],
     exactAction: { kind: 'external_file_access', uri: input.uri, access: input.access },
     language: input.request?.language ?? input.language ?? 'en'
   });
@@ -161,7 +171,6 @@ function createBaseRequest(input: {
   exactAction: ApprovalReviewRequest['exactAction'];
   language: 'zh-CN' | 'en';
 }): ApprovalReviewRequest {
-  const visible = input.history.filter((message) => message.role === 'user' || message.role === 'assistant');
   const firstUser = taskGoal(input.history, input.rootTaskId);
   return deepFreeze({
     version: 1,
@@ -171,8 +180,8 @@ function createBaseRequest(input: {
     actionKind: input.actionKind,
     targetId: input.targetId,
     actionHash: input.actionHash,
-    originalGoalSummary: compact(firstUser, 1_200),
-    visibleSessionEvidence: visible.slice(-6).map((message) => `${message.role}: ${compact(message.content, 1_200)}`),
+    originalGoalSummary: compact(redactSensitiveReviewText(firstUser), 1_200),
+    visibleSessionEvidence: [],
     workspaceTrusted: vscode.workspace.isTrusted,
     workspaceRootIds: (vscode.workspace.workspaceFolders ?? []).map((folder, index) => `root-${index + 1}:${folder.name}`),
     purpose: compact(input.purpose, 1_200),

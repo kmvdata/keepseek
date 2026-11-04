@@ -19,7 +19,7 @@ import { ApprovalReviewerService } from '../src/approvals/approvalReviewer';
 import { createBoundedReviewText, hashApprovalValue } from '../src/approvals/approvalReviewHash';
 import { createDraftEditReviewRequest } from '../src/approvals/approvalReviewSurface';
 import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
-import type { ApprovalReviewRequest } from '../src/approvals/approvalReviewTypes';
+import { APPROVAL_POLICY_VERSION, type ApprovalReviewRequest } from '../src/approvals/approvalReviewTypes';
 import { buildApprovalReviewerProviderBody } from '../src/approvals/oneShotTextRequest';
 import type { AgentRequest, ChatMessage } from '../src/shared/types';
 
@@ -29,6 +29,10 @@ test('reviewer JSON parsing accepts only the complete strict schema', () => {
     policyRules: ['least_privilege'], saferAlternative: ''
   });
   assert.equal(parseApprovalReviewerJson(valid).decision, 'approve');
+  assert.deepEqual(parseApprovalReviewerJson(valid.replace(/}$/, ',"affectedTargets":["workspace/result.txt"]}')).affectedTargets,
+    ['workspace/result.txt']);
+  assert.throws(() => parseApprovalReviewerJson(valid.replace('{"decision":"approve"', '{"decision":"deny","decision":"approve"')), /duplicate fields/u);
+  assert.throws(() => parseApprovalReviewerJson(valid.replace('"risk":"low"', '"risk":"high"')), /strict schema/u);
   for (const invalid of [
     '```json\n' + valid + '\n```',
     JSON.stringify({ decision: 'approve', risk: 'low', reason: 'ok', policyRules: [] }),
@@ -107,8 +111,8 @@ test('approval records require an exact current-runtime match and are one-shot',
   await withApprovalFixture(async ({ storageUri, store }) => {
     const record = await store.add(approvalRecordInput());
     const match = {
-      reviewId: record.reviewId, sessionId: 'session', agentRunId: 'run', targetId: 'target',
-      actionKind: 'draft_run_execute' as const, actionHash: 'hash', policyVersion: 1,
+      reviewId: record.reviewId, sessionId: 'session', rootTaskId: 'root', agentRunId: 'run', targetId: 'target',
+      actionKind: 'draft_run_execute' as const, actionHash: 'hash', policyVersion: APPROVAL_POLICY_VERSION, expectedSource: 'model_review' as const,
       approvalMode: 'model_review' as const, workspaceTrusted: true
     };
     for (const mismatch of [
@@ -117,7 +121,9 @@ test('approval records require an exact current-runtime match and are one-shot',
       { targetId: 'other-target' },
       { actionKind: 'validation_run' as const },
       { actionHash: 'changed' },
-      { policyVersion: 2 },
+      { policyVersion: APPROVAL_POLICY_VERSION - 1 },
+      { expectedSource: 'host_policy' as const },
+      { rootTaskId: 'other-task' },
       { approvalMode: 'delegate' as const },
       { workspaceTrusted: false }
     ]) {
@@ -298,7 +304,7 @@ test('sensitive DraftRun environment values are denied before they enter a revie
       executable: 'node',
       argv: ['script.js'],
       cwdUri: 'file:///workspace',
-      env: [{ name: 'SERVICE_API_KEY', value: 'not-shaped-like-a-token' }],
+      envNames: ['SERVICE_API_KEY'],
       timeoutMs: 20_000,
       effectAssessment: { version: 1, verdict: 'unknown', effects: ['workspace_read'], evidence: [] },
       specHash: 'secret-spec'
@@ -336,7 +342,7 @@ test('unregistered, mismatched, and changed-hash approval requests are denied be
       actionHash: 'changed',
       exactAction: {
         kind: 'draft_run_execute' as const,
-        executable: 'node', argv: ['--version'], cwdUri: 'file:///workspace', env: [], timeoutMs: 20_000,
+        executable: 'node', argv: ['--version'], cwdUri: 'file:///workspace', envNames: [], timeoutMs: 20_000,
         effectAssessment: { version: 1 as const, verdict: 'likely_readonly' as const, effects: ['workspace_read' as const], evidence: [] },
         specHash: 'original'
       }
@@ -362,7 +368,7 @@ function reviewRequest(): ApprovalReviewRequest {
 function approvalRecordInput() {
   return {
     sessionId: 'session', rootTaskId: 'root', agentRunId: 'run', targetId: 'target', actionKind: 'draft_run_execute' as const,
-    actionHash: 'hash', policyVersion: 1, approvalSource: 'model_review' as const,
+    actionHash: 'hash', policyVersion: APPROVAL_POLICY_VERSION, approvalMode: 'model_review' as const, approvalSource: 'model_review' as const,
     reviewerSourceId: 'source', reviewerModelId: 'model', reviewerProvider: 'openai-responses',
     decision: 'approve' as const, risk: 'low' as const, rationale: 'Scoped.', policyRules: ['least_privilege']
   };

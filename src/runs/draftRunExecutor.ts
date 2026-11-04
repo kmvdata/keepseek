@@ -331,7 +331,7 @@ function validatePermit(draftRun: DraftRun, permit: ExecutionPermit): void {
   }
 }
 
-function terminateProcessTree(child: ChildProcess): void {
+export function terminateProcessTree(child: ChildProcess): void {
   if (!child.pid || child.killed) {
     return;
   }

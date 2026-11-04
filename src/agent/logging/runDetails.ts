@@ -342,6 +342,7 @@ export class RunDetailsBuilder {
       source: decision.source,
       reason: decision.reason ? redactSensitiveText(decision.reason).slice(0, 240) : undefined
     });
+    if (decision.priorApprovalReview) this.approvalReviews.push({ ...decision.priorApprovalReview });
     if (decision.approvalReview) {
       this.approvalReviews = [
         ...this.approvalReviews.filter((review) => review.reviewId !== decision.approvalReview!.reviewId),

@@ -24,7 +24,7 @@ export class DraftRunAuthorizationService {
     }
     await this.approvalReviews.consumeMatchingApproval(match);
     if (!isAuthorized()) throw new Error('Delegated approval was revoked before permit issuance.');
-    return { ...this.createUserClickPermit(draftRun), source: 'delegated_approver' };
+    return { ...this.createUserClickPermit(draftRun), source: match.expectedSource === 'user_click' ? 'user_click' : 'delegated_approver' };
   }
 
   public createUserClickPermit(draftRun: DraftRun): ExecutionPermit {

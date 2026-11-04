@@ -10,7 +10,8 @@ import type {
   DraftRunProposal,
   DraftRunStatus
 } from '../shared/types';
-import { analyzeDraftRunEffects, checkDraftRunApprovalBoundary, validateDraftRunBeforeApproval } from '../approvals/authorization';
+import { hasExactCommandScope } from '../approvals/authorization/commandScope';
+import { analyzeDraftRunEffects, inspectDraftRunScope, checkDraftRunApprovalBoundary, validateDraftRunBeforeApproval } from '../approvals/authorization';
 import { DraftRunAuthorizationService } from './draftRunAuthorization';
 import type { ApprovalRecordMatch, ApprovalReviewRecord } from '../approvals/approvalReviewTypes';
 import { toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
@@ -264,10 +265,19 @@ export class DraftRunStore {
     try {
       assertAuthorized();
       await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
-      await options.verifyScope?.();
+      const scope = await inspectDraftRunScope(draftRun);
+      const verifyScope = async () => {
+        const current = await inspectDraftRunScope(draftRun);
+        if (current.fingerprint !== scope.fingerprint || !hasExactCommandScope(current, draftRun.spec.cwdUri, authorizedExternalReferenceUris)) {
+          throw new Error('Exact external operation scope is missing or changed. / 缺少精确范围授权或范围已变化。');
+        }
+        await options.verifyScope?.();
+      };
+      await verifyScope();
       assertAuthorized();
       draftRun.status = 'approved';
-      draftRun.authorizationSource = options.delegatedApproval ? 'delegated_approver' : 'user_click';
+      draftRun.authorizationSource = options.delegatedApproval && options.approvalRecord?.expectedSource !== 'user_click'
+        ? 'delegated_approver' : 'user_click';
       draftRun.approvedAt = new Date().toISOString();
       draftRun.updatedAt = draftRun.approvedAt;
       this.emitState(draftRun);
@@ -281,14 +291,14 @@ export class DraftRunStore {
       await this.persistNow();
 
       await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
-      await options.verifyScope?.();
+      await verifyScope();
       assertAuthorized();
       const permit = options.delegatedApproval
         ? await this.authorization.createDelegatedPermit(draftRun, options.delegatedApproval, options.approvalRecord)
         : this.authorization.createUserClickPermit(draftRun);
       // Approval-record consumption is asynchronous: recheck scope after it too.
       await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
-      await options.verifyScope?.();
+      await verifyScope();
       assertAuthorized();
       const abortController = new AbortController();
       this.abortControllers.set(draftRun.id, abortController);

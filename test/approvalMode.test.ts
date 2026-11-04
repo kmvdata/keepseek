@@ -31,8 +31,8 @@ test('draft receipt and host authorization text describe the actual mode without
     assert.match(scope, /file:\/\/\/outside\/result.txt/u);
     assert.notEqual(localize(lang, 'approvalReviewerUnavailable'), 'approvalReviewerUnavailable');
     const delegate = WEBVIEW_TRANSLATIONS[lang].approvalDelegateDescription;
-    assert.match(delegate, lang === 'en' ? /safety preflight/u : /安全预检/u);
-    assert.match(delegate, lang === 'en' ? /external or uncertain scope still requires authorization/u : /外部或无法确定的范围仍需授权/u);
+    assert.match(delegate, lang === 'en' ? /Host approves routine project actions/u : /常规操作和既有固定验证由宿主批准/u);
+    assert.match(delegate, lang === 'en' ? /external effects may require scope authorization/u : /外部操作可能需要范围授权/u);
   }
 });
 
@@ -207,14 +207,16 @@ test('delegation does not grant external file access, even in trusted runs', () 
   }
 });
 
-test('reviewer cannot grant external access; explicit reference grants only the exact URI', () => {
+test('reviewer cannot grant external access; explicit reference grants only the exact URI', async () => {
   const folders = vscode.workspace.workspaceFolders;
   const trusted = vscode.workspace.isTrusted;
   try {
     vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file('/workspace'), name: 'workspace' }];
     vscode.workspace.isTrusted = true;
     const service = new WorkspaceToolService();
-    const reviewed = service.getReviewableExternalUri('/external/reviewed.txt');
+    const external = await service.inspectExternalRead('/external/reviewed.txt');
+    assert.equal(external?.authorized, false);
+    const reviewed = external?.uri;
     assert.equal(reviewed, vscode.Uri.file('/external/reviewed.txt').toString());
     assert.throws(() => service.authorizeReviewedExternalUri(reviewed!), /explicit user/u);
     service.setAuthorizedExternalReferenceUris([reviewed!]);
@@ -385,7 +387,7 @@ function workflowFixture(options: {
       flush: async () => {},
       get: (id: string) => reviews.get(id),
       getLatestForTarget: () => undefined,
-      findCurrentRuntimeDenial: () => undefined
+      findDenialForAction: () => undefined
     },
     approvalReviewer: {
       createHostPolicyApproval: async (request: Record<string, unknown>) => ({ status: 'reviewed', record: makeReview(request) }),
@@ -425,7 +427,7 @@ function workflowFixture(options: {
         return { status: 'done' };
       }
     },
-    postState: () => {}, setAgentActivity: () => {}, refreshSkills: async () => {}, handleAppliedRepairEdits: async () => {},
+    postState: () => {}, setAgentActivity: () => {}, refreshSkills: async () => {}, awaitRunContextRefresh: async () => true, scheduleRunContextRefresh: () => {}, handleAppliedRepairEdits: async () => {},
     sendPrompt: async (prompt: string) => { fixture.effects.push('continue'); fixture.prompts.push(prompt); },
     appendStoppedApprovalOutcome: async (prompt: string) => { fixture.effects.push('stopped'); fixture.prompts.push(prompt); }
   }) as { executeDelegatedApprovals(next: NonNullable<ReturnType<DelegatedApprovalQueue['take']>>): Promise<void> };

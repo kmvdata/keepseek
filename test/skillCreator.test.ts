@@ -37,6 +37,8 @@ for (const scenario of ['apply', 'conflict', 'discard', 'cancel'] as const) {
     const folder = { uri: vscode.Uri.file(root), name: 'project', index: 0 };
     Object.assign(vscode.workspace, { workspaceFolders: [folder], isTrusted: true });
     const session = createEmptySession('en');
+    session.messages.push({ id: 'skill-dialog', role: 'assistant', content: 'Skill draft prepared', createdAt: new Date().toISOString(),
+      contextMeta: { isProtected: true, protectedReason: 'draft_edit_result' } });
     const store = new ChangeSetStore(new SafeFileEditor(), { openDiff: async () => undefined } as never,
       { activeSessionId: session.id, getActiveSession: () => session, persist: async () => undefined } as never,
       vscode.Uri.file(path.join(root, 'storage')), key => key);
@@ -47,7 +49,7 @@ for (const scenario of ['apply', 'conflict', 'discard', 'cancel'] as const) {
     assert.equal(parseSkillMetadata(draft.files[1].content).allowImplicit, false);
     assert.doesNotMatch(draft.content, /keepseek|DraftEdit|userInvocable|allowImplicit/u);
     await assert.rejects(readFile(draft.targetUri.fsPath));
-    const set = store.addDraftEdits({ sessionId: session.id, edits: draft.files.map((file, i) => createFullTextDraftEdit({
+    const set = store.addDraftEdits({ sessionId: session.id, messageId: 'skill-dialog', edits: draft.files.map((file, i) => createFullTextDraftEdit({
       id: `skill-${i}`, uri: file.targetUri.toString(), label: file.label, action: 'create', content: file.content, reason: draft.reason
     })) })!;
     assert.equal(set.fileCount, 2);

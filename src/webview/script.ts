@@ -556,6 +556,7 @@ export function getScript(): string {
       reading_semantic_context: ['agentStatusReadingSemanticContext'],
       reading_git_state: ['agentStatusReadingGitState'],
       awaiting_authorization: ['agentStatusAwaitingAuthorization'],
+      awaiting_manual_approval: ['approvalConfirmOnce'],
       generating_repair: ['agentStatusGeneratingRepair'],
       waiting_for_apply: ['agentStatusWaitingForApply'],
       running_validation: ['agentStatusRunningValidation'],
@@ -3693,11 +3694,25 @@ export function getScript(): string {
         : processing && processing.reason || t(active ? 'approvalProcessingNow'
           : state.approvalMode === 'model_review' ? 'approvalModelWaiting' : 'approvalAutoWaiting'));
       notices.append(note);
-      if (denied || active || state.isBusy) return;
+      var hardBlocked = target && target.status === 'hard_blocked'
+        || denied && review && (review.approvalSource === 'local_policy' || review.risk === 'critical');
+      if (hardBlocked || active || state.isBusy) return;
+      var canTakeOver = target && ['manual_required', 'review_unavailable', 'denied'].includes(target.status);
+      if (canTakeOver) {
+        var takeover = document.createElement('button');
+        takeover.type = 'button';
+        takeover.textContent = t('approvalConfirmOnce');
+        takeover.disabled = !state.startup?.sideEffectsReady;
+        takeover.addEventListener('click', function() {
+          vscode.postMessage({ type: 'resumeApprovalProcessing', confirmTargetId: id });
+        });
+        actions.append(takeover);
+      }
+      if (denied || target && target.status === 'manual_required') return;
       var button = document.createElement('button');
       var needsScope = target && target.status === 'needs_authorization';
       button.type = 'button';
-      button.textContent = t(needsScope ? 'approvalAuthorizeExact' : 'approvalResumeProcessing');
+      button.textContent = t(needsScope ? 'approvalAuthorizeExact' : canTakeOver ? 'approvalRetryReview' : 'approvalResumeProcessing');
       button.title = t('approvalResumeHint');
       button.disabled = !state.startup?.sideEffectsReady;
       button.addEventListener('click', function() {
@@ -3940,9 +3955,11 @@ export function getScript(): string {
       summary.textContent = [
         t('approvalSourceLabel') + ': ' + source,
         review.reviewerModelId ? t('approvalReviewerModel') + ': ' + review.reviewerModelId : '',
-        t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision),
+        t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision, review.approvalSource),
         t('approvalReviewRisk') + ': ' + getApprovalRiskLabel(review.risk),
         t('approvalReviewReason') + ': ' + String(review.rationale || ''),
+        Array.isArray(review.affectedTargets) && review.affectedTargets.length ? t('approvalAffectedTargets') + ': ' + review.affectedTargets.join(', ') : '',
+        review.saferAlternative ? t('approvalSaferAlternative') + ': ' + review.saferAlternative : '',
         t('approvalReviewId') + ': ' + String(review.reviewId || '')
       ].filter(Boolean).join(' · ');
       return summary;
@@ -3958,9 +3975,9 @@ export function getScript(): string {
     function getApprovalSourceLabel(review) {
       return review && review.approvalSource === 'host_policy'
         ? t('approvalSourceHost')
-        : review && (review.approvalSource === 'model_review' || review.approvalSource === 'local_policy')
+        : review && review.approvalSource === 'model_review'
           ? t('approvalSourceModel')
-          : t('approvalSourceUser');
+          : review && review.approvalSource === 'local_policy' ? t('approvalSourceSafety') : t('approvalSourceUser');
     }
 
     function getAuthorizationSourceLabel(source) {
@@ -3981,7 +3998,8 @@ export function getScript(): string {
           : t('approvalSourceUser');
     }
 
-    function getApprovalDecisionLabel(decision) {
+    function getApprovalDecisionLabel(decision, source) {
+      if (decision === 'unavailable' && source === 'local_policy') return t('approvalConfirmOnce');
       return decision === 'approve'
         ? t('approvalDecisionApprove')
         : decision === 'deny'
@@ -4281,6 +4299,29 @@ export function getScript(): string {
       }
 
       transcript.append(unlinkedChangeSetRegion);
+      var manual = state.manualToolApproval;
+      if (manual && manual.sessionId === state.activeSessionId) {
+        var card = document.createElement('div');
+        card.className = 'draft-run-card';
+        var label = document.createElement('div');
+        label.className = 'approval-state-note';
+        label.textContent = t('approvalManualPrompt', { target: manual.label, reason: manual.reason });
+        card.append(label);
+        var actions = document.createElement('div');
+        actions.className = 'draft-run-actions';
+        [true, false].forEach(function(approve) {
+          var button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = t(approve ? 'approvalConfirmOnce' : 'approvalCancelAction');
+          button.addEventListener('click', function() {
+            for (var action of actions.querySelectorAll('button')) action.disabled = true;
+            vscode.postMessage({ type: 'resolveValidationApproval', id: manual.id, approve: approve });
+          });
+          actions.append(button);
+        });
+        card.append(actions);
+        transcript.append(card);
+      }
       renderUnlinkedChangeSets(changeSetProjection.unlinked, draftRunProjection.unlinked);
 
       if (shouldStick) {
@@ -4572,9 +4613,11 @@ export function getScript(): string {
         var reviews = details.approvalReviews.map(function(review) {
           return [getApprovalActionLabel(review.actionKind), review.targetId, t('approvalSourceLabel') + ': ' + getApprovalSourceLabel(review),
             review.reviewerModelId ? t('approvalReviewerModel') + ': ' + review.reviewerModelId : '',
-            t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision),
+            t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision, review.approvalSource),
             t('approvalReviewRisk') + ': ' + getApprovalRiskLabel(review.risk),
             t('approvalReviewReason') + ': ' + review.rationale,
+            Array.isArray(review.affectedTargets) && review.affectedTargets.length ? t('approvalAffectedTargets') + ': ' + review.affectedTargets.join(', ') : '',
+            review.saferAlternative ? t('approvalSaferAlternative') + ': ' + review.saferAlternative : '',
             t('approvalReviewId') + ': ' + review.reviewId].filter(Boolean).join(' · ');
         });
         body.append(createRunTextSection(t('runDetailsApprovalReviews'), reviews,

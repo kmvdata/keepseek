@@ -1,3 +1,4 @@
+import { LogicalBudgetExceededError } from '../agent/executionPolicy';
 import type { ModelSourceConfigSnapshot } from '../accounts/types';
 import * as vscode from 'vscode';
 import { ModelSourceStore } from '../accounts/accountStore';
@@ -5,7 +6,7 @@ import { resolveConfiguredSubagentModel } from '../accounts/subagentModelResolve
 import type { AgentRequest, KeepseekModel, ProviderUsageLedgerRecord, UsageEvent } from '../shared/types';
 import { APPROVAL_REVIEWER_SYSTEM_PROMPT, findDeterministicReviewDenial, parseApprovalReviewerJson, redactSensitiveReviewText, serializeApprovalReviewRequest } from './approvalPolicy';
 import { requestApprovalReviewText } from './oneShotTextRequest';
-import { APPROVAL_POLICY_VERSION, type ApprovalReviewOutcome, type ApprovalReviewRecord, type ApprovalReviewRequest } from './approvalReviewTypes';
+import { APPROVAL_POLICY_VERSION, type ApprovalRoute, type ApprovalReviewOutcome, type ApprovalReviewRecord, type ApprovalReviewRequest } from './approvalReviewTypes';
 import { ApprovalReviewStore } from './approvalReviewStore';
 import type { ApprovalCircuitBreaker } from './approvalCircuitBreaker';
 
@@ -19,7 +20,8 @@ export interface ApprovalReviewerModelContext {
 export interface ApprovalReviewerAdapter {
   review(request: ApprovalReviewRequest, modelContext: ApprovalReviewerModelContext, signal?: AbortSignal): Promise<ApprovalReviewOutcome>;
   createHostPolicyApproval(request: ApprovalReviewRequest): Promise<ApprovalReviewOutcome>;
-  consumeApproval(record: ApprovalReviewRecord, approvalMode: 'model_review' | 'delegate'): Promise<void>;
+  createUserApproval?(request: ApprovalReviewRequest): Promise<ApprovalReviewOutcome>;
+  consumeApproval(record: ApprovalReviewRecord, expectedSource: ApprovalRoute): Promise<void>;
 }
 
 export class ApprovalReviewerService implements ApprovalReviewerAdapter {
@@ -43,7 +45,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     if (!request.workspaceTrusted) {
       return this.withCircuit(request, 'reviewed', await this.createLocalDenial(request, 'workspace_untrusted'));
     }
-    if (this.options.store.findCurrentRuntimeDenialForAction({
+    if (this.options.store.findDenialForAction({
       sessionId: request.sessionId,
       rootTaskId: request.rootTaskId,
       actionKind: request.actionKind,
@@ -93,6 +95,17 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
           onUsageLedgerRecord: this.options.onUsageLedgerRecord
         });
         const decision = parseApprovalReviewerJson(raw);
+        const action = request.exactAction;
+        const truncated = (action.kind === 'draft_edit_apply' || action.kind === 'draft_delete_apply') && action.proposedChange.truncated
+          || action.kind === 'validation_run' && action.launch?.scripts.truncated;
+        if (decision.decision === 'approve' && truncated) {
+          decision.decision = 'deny';
+          decision.risk = 'medium';
+          decision.policyRules = ['insufficient_evidence'];
+          decision.reason = request.responseLanguage === 'en'
+            ? 'The exact operation is paused because part of its approval evidence is missing.'
+            : '审批材料不完整，精确操作已暂停。';
+        }
         const record = await this.options.store.add({
           sessionId: request.sessionId,
           rootTaskId: request.rootTaskId,
@@ -101,6 +114,8 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
           actionKind: request.actionKind,
           actionHash: request.actionHash,
           policyVersion: APPROVAL_POLICY_VERSION,
+          scopeFingerprint: request.scopeFingerprint,
+          approvalMode: request.approvalMode,
           approvalSource: 'model_review',
           reviewerSourceId: resolved.sourceConfig.sourceId,
           reviewerModelId: resolved.model.id,
@@ -109,12 +124,14 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
           risk: decision.risk,
           rationale: redactSensitiveReviewText(decision.reason),
           policyRules: decision.policyRules,
+          affectedTargets: decision.affectedTargets?.map(target => redactSensitiveReviewText(target, 300)),
           saferAlternative: decision.saferAlternative ? redactSensitiveReviewText(decision.saferAlternative) : undefined
         });
         return this.withCircuit(request, 'reviewed', record);
       } catch (error) {
         if (signal?.aborted) throw signal.reason ?? error;
         lastError = error;
+        if (isApprovalBudgetFailure(error)) break;
       }
     }
     return await this.createUnavailable(request, resolved, lastError);
@@ -124,7 +141,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     if (!request.workspaceTrusted) {
       return this.withCircuit(request, 'reviewed', await this.createLocalDenial(request, 'workspace_untrusted'));
     }
-    if (this.options.store.findCurrentRuntimeDenialForAction({
+    if (this.options.store.findDenialForAction({
       sessionId: request.sessionId,
       rootTaskId: request.rootTaskId,
       actionKind: request.actionKind,
@@ -144,12 +161,14 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
       actionKind: request.actionKind,
       actionHash: request.actionHash,
       policyVersion: APPROVAL_POLICY_VERSION,
+      scopeFingerprint: request.scopeFingerprint,
+      approvalMode: request.approvalMode,
       approvalSource: 'host_policy',
       reviewerSourceId: '',
       reviewerModelId: '',
       reviewerProvider: 'host_policy',
       decision: 'approve',
-      risk: 'high',
+      risk: 'low',
       rationale: request.responseLanguage === 'en'
         ? 'Automatically approved by host policy without model review.'
         : '由宿主策略自动批准，未经模型审查。',
@@ -158,18 +177,45 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     return this.withCircuit(request, 'reviewed', record);
   }
 
-  public async consumeApproval(record: ApprovalReviewRecord, approvalMode: 'model_review' | 'delegate'): Promise<void> {
+  public async consumeApproval(record: ApprovalReviewRecord, expectedSource: ApprovalRoute): Promise<void> {
     await this.options.store.consumeMatchingApproval({
       reviewId: record.reviewId,
       sessionId: record.sessionId,
+      rootTaskId: record.rootTaskId,
       agentRunId: record.agentRunId,
       targetId: record.targetId,
       actionKind: record.actionKind,
       actionHash: record.actionHash,
       policyVersion: record.policyVersion,
-      approvalMode,
+      approvalMode: record.approvalMode,
+      scopeFingerprint: record.scopeFingerprint,
+      expectedSource,
       workspaceTrusted: vscode.workspace.isTrusted
     });
+  }
+
+  public async createManualHold(request: ApprovalReviewRequest, reason: string): Promise<ApprovalReviewRecord> {
+    return await this.options.store.add({
+      sessionId: request.sessionId, rootTaskId: request.rootTaskId, agentRunId: request.agentRunId,
+      targetId: request.targetId, actionKind: request.actionKind, actionHash: request.actionHash,
+      policyVersion: APPROVAL_POLICY_VERSION, scopeFingerprint: request.scopeFingerprint, approvalMode: request.approvalMode,
+      approvalSource: 'local_policy', reviewerSourceId: '', reviewerModelId: '', reviewerProvider: 'local_policy',
+      decision: 'unavailable', risk: 'high', rationale: redactSensitiveReviewText(reason), policyRules: ['manual_scope_required']
+    });
+  }
+
+  public async createUserApproval(request: ApprovalReviewRequest): Promise<ApprovalReviewOutcome> {
+    const denial = request.workspaceTrusted ? findDeterministicReviewDenial(request) : 'workspace_untrusted';
+    if (denial) return { status: 'reviewed', record: await this.createLocalDenial(request, denial) };
+    const record = await this.options.store.add({
+      sessionId: request.sessionId, rootTaskId: request.rootTaskId, agentRunId: request.agentRunId,
+      targetId: request.targetId, actionKind: request.actionKind, actionHash: request.actionHash,
+      policyVersion: APPROVAL_POLICY_VERSION, scopeFingerprint: request.scopeFingerprint, approvalMode: request.approvalMode,
+      approvalSource: 'user_click', reviewerSourceId: '', reviewerModelId: '', reviewerProvider: 'user_click',
+      decision: 'approve', risk: 'high', policyRules: ['user_confirmed_exact_action'],
+      rationale: request.responseLanguage === 'en' ? 'User confirmed this exact operation once.' : '用户已对该精确操作作出单次确认。'
+    });
+    return { status: 'reviewed', record };
   }
 
   private async createLocalDenial(request: ApprovalReviewRequest, rule: string) {
@@ -181,6 +227,8 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
       actionKind: request.actionKind,
       actionHash: request.actionHash,
       policyVersion: APPROVAL_POLICY_VERSION,
+      scopeFingerprint: request.scopeFingerprint,
+      approvalMode: request.approvalMode,
       approvalSource: 'local_policy',
       reviewerSourceId: '',
       reviewerModelId: '',
@@ -195,7 +243,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     });
   }
 
-  private async createUnavailable(
+  public async createUnavailable(
     request: ApprovalReviewRequest,
     modelContext: ApprovalReviewerModelContext | Awaited<ReturnType<typeof resolveConfiguredSubagentModel>> | undefined,
     error: unknown
@@ -210,6 +258,8 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
       actionKind: request.actionKind,
       actionHash: request.actionHash,
       policyVersion: APPROVAL_POLICY_VERSION,
+      scopeFingerprint: request.scopeFingerprint,
+      approvalMode: request.approvalMode,
       approvalSource: 'model_review',
       reviewerSourceId: sourceConfig?.sourceId ?? '',
       reviewerModelId: modelContext?.model.id ?? '',
@@ -217,9 +267,9 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
       decision: 'unavailable',
       risk: 'high',
       rationale: request.responseLanguage === 'en'
-        ? `Approval model unavailable after one retry: ${message}`
-        : `审批模型重试一次后仍不可用：${message}`,
-      policyRules: ['reviewer_unavailable']
+        ? `Approval model unavailable; operation did not run: ${message}`
+        : `审批模型不可用，操作尚未执行：${message}`,
+      policyRules: [isApprovalBudgetFailure(error) ? 'approval_budget_exhausted' : 'reviewer_unavailable']
     });
     return this.withCircuit(request, 'unavailable', record);
   }
@@ -229,10 +279,16 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     status: ApprovalReviewOutcome['status'],
     record: ApprovalReviewRecord
   ): ApprovalReviewOutcome {
+    if (record.approvalSource === 'host_policy' && record.decision === 'approve') return { status, record };
     const result = record.decision === 'approve' ? 'approve' : record.decision === 'deny' ? 'deny' : 'unavailable';
     const state = this.options.circuitBreaker?.record(request.rootTaskId, result);
     return { status, record, circuitBreakReason: state?.tripped ? state.reason : undefined };
   }
+}
+
+function isApprovalBudgetFailure(error: unknown): boolean {
+  return error instanceof LogicalBudgetExceededError || (error instanceof Error
+    && /Logical run budget exhausted|cannot be priced under the configured task cost limit/u.test(error.message));
 }
 
 export function toReviewerModelContext(request: AgentRequest): ApprovalReviewerModelContext {

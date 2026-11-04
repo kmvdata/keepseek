@@ -540,20 +540,23 @@ src/approvals/
 三种模式的区别：
 
 - `ask`：用户逐项点击批准；
-- `model_review`：隔离 reviewer 针对精确 actionHash 审查；
-- `delegate`：宿主策略自动批准，但仍需写入明确的 `host_policy` 记录。
+- `model_review` 对通过硬检查且具备充分证据的动作逐项调用隔离 reviewer。需要用户授权范围时，先取得授权。
+- `delegate` 对通过宿主准入的项目内操作写入 `host_policy` 记录。具备精确授权且可审查的外部操作走 reviewer，剩余无法界定的作用交用户逐项决定。
+- 人工接管独立记为 `user_click`，原模型拒绝保留。硬阻断不发出执行许可。
 
 无论哪种模式，底层确定性硬检查始终生效。模型判断不能关闭工作区信任、路径授权、base hash、脏编辑器、specHash、一次性 permit 或取消检查。
 
 命令分析分别表达参数角色、已识别效果和不能确定范围的原因，不拼接 argv 后搜索危险关键词，不以脚本扩展名推断执行，也不把 shell 字符串按空格拆成命令。`cat script.ts` 的文件是读取对象；`bun run script.ts` 是脚本执行；`sh -c ...` 的正文保留为内联代码。未知范围显示为未知，不自动增加写入效果。固定 validation 的原有阻断规则独立保留在 `agent/tools/validationRisk.ts`，不用于任意命令授权。
 
-自动范围判定仅覆盖有限参数集合：`cat/head/tail/wc/pwd/ls`、非递归 `grep`、字面输出命令及少量版本查询。还必须满足工作区范围、无环境覆盖及实际程序身份检查；POSIX 下核实 PATH/显式路径解析后为系统目录中的 OS 所有文件或扩展宿主运行时，不能仅凭 basename。Windows 程序搜索顺序、非系统程序、递归搜索、未知选项、脚本/包生命周期均保留具体的不确定原因，要求精确范围授权。外部读取与外部写入分别由参数用途决定，外部 cwd 本身不代表写入。
+自动范围判定仅覆盖有限参数集合：`cat/head/tail/wc/pwd/ls`、非递归 `grep`、字面输出命令及少量版本查询。还必须满足工作区范围、无环境覆盖及实际程序身份检查；POSIX 下核实 PATH/显式路径解析后为系统目录中的 OS 所有文件或扩展宿主运行时，不能仅凭 basename。Windows 程序搜索顺序、非系统程序、递归搜索、未知选项、脚本/包生命周期均保留具体的不确定原因，需要用户逐项确认。外部读取与外部写入分别由参数用途决定，外部 cwd 本身不代表写入。
 
-Git 的 `show/diff/log` 有参数分类规则（包括 `--`、format 文本、输出路径、`-C`、仓库/配置覆盖），但普通 DraftRun 的 Git 操作仍要求精确范围授权。`--format=%s` 和 `.ts/.js/.sh` 路径不再误报执行或写入；`--output` 则识别为写入，`--ext-diff/--textconv/--show-signature` 识别为可能调用程序。即使有禁用 diff/textconv 的参数，当前执行环境仍可能读取用户/仓库配置、include 文件、仓库重定向及触发其他 helper；本次没有新增受约束 Git 自动执行入口，也不在 spawn 时追加选项或环境。相关语义对照本机 Git 2.50.1 及官方 [git-show](https://git-scm.com/docs/git-show)、[git 2.50](https://git-scm.com/docs/git/2.50.0) 文档核实。未来增加受控 Git 方案时，必须先在创建草稿前落实所有约束，并让它们进入 specHash 和展示内容。
+Git 的 `show/diff/log` 有参数分类规则（包括 `--`、format 文本、输出路径、`-C`、仓库/配置覆盖），但有仓库语义的普通 Git DraftRun 仍需逐项人工决定，显式外部目标另需范围授权。`--format=%s` 和 `.ts/.js/.sh` 路径不再误报执行或写入；`--output` 则识别为写入，`--ext-diff/--textconv/--show-signature` 识别为可能调用程序。即使有禁用 diff/textconv 的参数，当前执行环境仍可能读取用户/仓库配置、include 文件、仓库重定向及触发其他 helper；本次没有新增受约束 Git 自动执行入口，也不在 spawn 时追加选项或环境。相关语义对照本机 Git 2.50.1 及官方 [git-show](https://git-scm.com/docs/git-show)、[git 2.50](https://git-scm.com/docs/git/2.50.0) 文档核实。未来增加受控 Git 方案时，必须先在创建草稿前落实所有约束，并让它们进入 specHash 和展示内容。
 
 精确范围授权绑定 session/run/target/kind/actionHash，以及规范化路径、实际程序文件身份和有效环境的派生指纹。授权不持久化；停止、切换会话/模式和重启均不复用。Provider 仅编排交互与队列；Store 在持久化和消费审批记录之后再次调用共用复核，之后才交给原有一次性 permit 与 `shell:false` executor。脚本内容及 Git 隐式配置依赖不声称可静态穷尽；精确授权承认的是这些明确说明的不确定性。此预检不是操作系统隔离机制。
 
-本次无新增持久化字段、工具 schema 或请求协议变化。旧 pending 草稿的 spec、specHash、已保存风险历史不被改写；展示与新 reviewer 请求派生最新风险提示。恢复后的草稿仍惰性等待显式恢复处理，已完成或副作用未知的操作不重跑。
+策略 v2 把选择的模式、审批来源和真实作用范围分开。记录消费同时校验 root task、当前 runtime、策略版本和可用的实时范围指纹。旧记录继续用于审计，恢复的草稿仍需显式处理。三协议的工具 schema 和历史字节遵守原投影规则。
+
+固定 `compile`、`lint` 和 `test` 通过专用验证入口执行，绑定项目启动快照、实际 npm/Node 身份、参数、环境和生命周期定义。常规源文件和测试内容属于可信项目验证的信任范围。入口改变时重新审查。审查后启动快照再变化时暂停执行。详细边界及现场步骤见 [审批验收报告](keepseek-approval-safety-verification.md)。
 
 审批结果和真实副作用结果通过新的 user-tail 追加到下一轮，不能回写历史消息。
 

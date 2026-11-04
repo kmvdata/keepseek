@@ -1450,6 +1450,8 @@ export interface ToolAuthorizationDecision {
   requiresExplicitConfirmation: boolean;
   reason?: string;
   approvalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
+  priorApprovalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
+  executionSnapshot?: string;
   approvalCircuitBreakReason?: 'consecutive_denials' | 'recent_denials';
 }
 
@@ -1492,6 +1494,7 @@ export interface ValidationToolResult {
   timedOut: boolean;
   authorization?: ToolAuthorizationDecision;
   diagnostics?: WorkspaceDiagnosticSummary;
+  output?: string;
   error?: string;
 }
 
@@ -1689,6 +1692,7 @@ export type AgentActivityPhase =
   | 'reading_semantic_context'
   | 'reading_git_state'
   | 'awaiting_authorization'
+  | 'awaiting_manual_approval'
   | 'generating_repair'
   | 'waiting_for_apply'
   | 'running_validation'

@@ -1383,6 +1383,8 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
           decision: (review.decision === 'approve' || review.decision === 'deny' ? review.decision : 'unavailable') as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['decision'],
           risk: (review.risk === 'low' || review.risk === 'medium' || review.risk === 'critical' ? review.risk : 'high') as import('../approvals/approvalReviewTypes').ApprovalReviewRisk,
           rationale: typeof review.rationale === 'string' ? review.rationale.slice(0, 800) : '',
+          affectedTargets: Array.isArray(review.affectedTargets)
+            ? review.affectedTargets.filter((target): target is string => typeof target === 'string').slice(0, 12).map(target => target.slice(0, 300)) : undefined,
           saferAlternative: typeof review.saferAlternative === 'string' ? review.saferAlternative.slice(0, 1200) : undefined,
           createdAt: normalizeSessionTimestamp(review.createdAt, new Date().toISOString()),
           consumedAt: normalizeOptionalTimestamp(review.consumedAt)

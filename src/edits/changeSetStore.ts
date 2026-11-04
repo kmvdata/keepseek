@@ -1,5 +1,6 @@
 import { writeJsonAtomic } from '../shared/atomicStorage';
 import { createHash, randomUUID } from 'node:crypto';
+import { isWorkspaceSkillScaffoldPath } from '../approvals/authorization/protectedTargets';
 import * as vscode from 'vscode';
 import type { ChatSessionStore } from '../sessions/chatSessionStore';
 import type {
@@ -418,13 +419,26 @@ export class ChangeSetStore {
       : [];
   }
 
-  public getPendingEdit(editId: string): { edit: DraftEdit; runId: string; sessionId: string } | undefined {
+  private isUserSkillScaffold(set: ChangeSet, edit: DraftEdit): boolean {
+    if (edit.kind !== 'full_text_v1' || edit.action !== 'create') return false;
+    const uri = vscode.Uri.parse(edit.uri);
+    if (uri.scheme !== 'file' || !vscode.workspace.getWorkspaceFolder(uri) || !isWorkspaceSkillScaffoldPath(uri.fsPath)) return false;
+    const session = this.sessionStore.getActiveSession();
+    const origin = session.id === set.sessionId ? session.messages?.find(message => message.id === set.messageId) : undefined;
+    // The explicit Create Skill dialog has a host-authored timeline message,
+    // unlike a DraftEdit issued by an Agent execution segment.
+    return origin?.role === 'assistant' && origin.contextMeta?.protectedReason === 'draft_edit_result'
+      && origin.contextMeta.isProtected === true && !origin.runDetails && !origin.runState && !origin.runCheckpoint && !origin.runCheckpointArchive;
+  }
+
+  public getPendingEdit(editId: string): { edit: DraftEdit; runId: string; sessionId: string; skillScaffold?: boolean } | undefined {
     const found = this.findEdit(editId);
     if (!found || !isApplicable(found.edit)) return undefined;
     return {
       edit: structuredClone(found.edit),
       runId: found.changeSet.runId,
-      sessionId: found.changeSet.sessionId
+      sessionId: found.changeSet.sessionId,
+      skillScaffold: this.isUserSkillScaffold(found.changeSet, found.edit) || undefined
     };
   }
 
@@ -712,7 +726,11 @@ export class ChangeSetStore {
         continue;
       }
       try {
-        const fileApproval = approval ?? options.approvalForEdit?.(file);
+        let fileApproval = approval ?? options.approvalForEdit?.(file);
+        if (this.isUserSkillScaffold(changeSet, file)) {
+          fileApproval = { authorizedUri: file.uri, isAuthorized: () => vscode.workspace.isTrusted,
+            ...fileApproval, skillScaffold: true };
+        }
         file.approvalSource = fileApproval?.source ?? 'user_click';
         const checkpoint = await this.safeFileEditor.applyDraftEdit(file, changeSet.id, fileApproval, {
           persist: async (next) => {
@@ -811,7 +829,7 @@ export class ChangeSetStore {
             await this.persistJournalIncremental(changeSet, next);
             options.onProgress?.({ changeSetId: changeSet.id, editId: file.id, status: file.status });
           }
-        });
+        }, this.isUserSkillScaffold(changeSet, file));
         this.checkpoints.set(revertedCheckpoint.id, revertedCheckpoint);
         file.status = 'reverted';
         file.error = undefined;

@@ -12,11 +12,13 @@ import {
   DELEGATE_TASK_TOOL_NAME,
   DELETE_WORKSPACE_FILE_TOOL_NAME,
   READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
+  READ_WORKSPACE_FILE_TOOL_NAME,
   RUN_DRAFT_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME
 } from '../src/agent/protocol';
 import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
-import type { ValidationToolAdapter } from '../src/agent/tools/validationTools';
+import { SafeFileEditor } from '../src/edits/safeFileEditor';
+import { ValidationToolService, type ValidationToolAdapter } from '../src/agent/tools/validationTools';
 import type { ToolAuthorizationAdapter } from '../src/agent/tools/toolAuthorization';
 import type {
   AgentRequest,
@@ -254,10 +256,165 @@ test('model-reviewed validation denial does not execute and still crosses the ne
   assert.doesNotMatch(response.toolRounds?.[0]?.toolResults[0]?.content ?? '', /Denied by reviewer/u);
   assert.equal(response.approvalToolResults?.[0]?.status, 'denied');
   const deniedResult = JSON.parse(response.approvalToolResults?.[0]?.result.content ?? '{}');
-  assert.equal(deniedResult.ok, true);
+  assert.equal(deniedResult.ok, false);
   assert.equal(deniedResult.status, 'approval_denied');
   assert.equal(deniedResult.executed, false);
-  assert.equal(Object.hasOwn(deniedResult, 'errorType'), false);
+  assert.equal(deniedResult.errorType, 'approval_denied');
+});
+
+test('delegate applies a real change, runs all three fixed entries, and delivers actual continuation results without a reviewer', async () => {
+  if (process.platform === 'win32') return;
+  const entry = 'node --test verify.cjs';
+  await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { compile: entry, lint: entry, test: entry } }));
+  await writeFile(path.join(workspaceRoot, 'verify.cjs'), [
+    "const fs = require('node:fs');",
+    "require('node:assert/strict').equal(fs.readFileSync('result.txt', 'utf8'), 'ready');",
+    "fs.appendFileSync('ran.log', process.env.npm_lifecycle_event + '\\n');"
+  ].join('\n'));
+  const reviewer = new FakeApprovalReviewer('approve');
+  const runner = createRunner(new ValidationToolService(), reviewer);
+  const request = createRequest('Create result.txt and run compile, lint and test.');
+  request.approvalMode = 'delegate';
+  request.approvalRootTaskId = 'root-validation';
+  request.sessionId = 'session-validation';
+  const draft = await withResponses([
+    toolResponse([toolCall('edit', CREATE_DRAFT_EDIT_TOOL_NAME, { path: 'result.txt', content: 'ready', reason: 'Create fixture result' })]),
+    textResponse('Prepared the requested edit.')
+  ], () => runner.run(request));
+  assert.equal(draft.draftEdits.length, 1);
+  await assert.rejects(readFile(path.join(workspaceRoot, 'result.txt')), { code: 'ENOENT' });
+  const editor = new SafeFileEditor();
+  const journalStates: string[] = [];
+  const applied = await editor.applyDraftEdit(draft.draftEdits[0], 'validation-fixture', undefined, {
+    persist: async checkpoint => { journalStates.push(checkpoint.state!); }
+  });
+  assert.equal(applied.state, 'applied');
+  assert.deepEqual(journalStates, ['prepared', 'applying', 'applied']);
+
+  for (const script of ['compile', 'lint', 'test'] as const) {
+    const response = await withResponses([
+      toolResponse([toolCall('validate-' + script, RUN_VALIDATION_TOOL_NAME, { script })])
+    ], () => runner.run(request));
+    assert.equal(response.approvalContinuationRequired, true);
+    assert.equal(response.runDetails.approvalReviews?.[0]?.approvalSource, 'host_policy');
+    assert.equal(response.approvalToolResults?.[0]?.status, 'succeeded', response.approvalToolResults?.[0]?.result.content);
+    const result = JSON.parse(response.approvalToolResults![0].result.content);
+    assert.equal(result.exitCode, 0);
+    assert.match(result.output, /tests 1/u);
+  }
+  assert.equal(reviewer.calls, 0);
+  assert.equal(await readFile(path.join(workspaceRoot, 'ran.log'), 'utf8'), 'compile\nlint\ntest\n');
+});
+
+test('reviewed validation runs only with the reviewed lifecycle snapshot; changed launch has zero effects', async () => {
+  if (process.platform === 'win32') return;
+  const marker = path.join(workspaceRoot, 'ran.txt');
+  const manifest = path.join(workspaceRoot, 'package.json');
+  const entry = 'node --test verify.cjs';
+  await writeFile(manifest, JSON.stringify({ scripts: { test: entry } }));
+  await writeFile(path.join(workspaceRoot, 'verify.cjs'), "require('node:fs').writeFileSync('ran.txt', 'executed');");
+  const request = createRequest('Run the exact test script.');
+  request.approvalMode = 'model_review';
+  request.sessionId = 'snapshot-test';
+  for (const change of [true, false]) {
+    await writeFile(manifest, JSON.stringify({ scripts: { test: entry } }));
+    const reviewer = new FakeApprovalReviewer('approve', async action => {
+      assert.equal(action.exactAction.kind, 'validation_run');
+      if (action.exactAction.kind !== 'validation_run') throw new Error('Wrong action');
+      assert.match(action.exactAction.launch?.scripts.content ?? '', /node --test verify.cjs/u);
+      assert.equal(action.exactAction.launch?.argv.at(-1), 'test');
+      assert.ok(action.scopeFingerprint);
+      await assert.rejects(readFile(marker), { code: 'ENOENT' });
+      if (change) await writeFile(manifest, JSON.stringify({ scripts: { pretest: 'node --test verify.cjs', test: entry } }));
+    });
+    const response = await withResponses([
+      toolResponse([toolCall('snapshot-validation', RUN_VALIDATION_TOOL_NAME, { script: 'test' })])
+    ], () => createRunner(new ValidationToolService(), reviewer).run(request));
+    assert.equal(reviewer.calls, 1);
+    assert.equal(response.approvalToolResults?.[0]?.status, change ? 'failed' : 'succeeded', response.approvalToolResults?.[0]?.result.content);
+    if (change) await assert.rejects(readFile(marker), { code: 'ENOENT' });
+    else assert.equal(await readFile(marker, 'utf8'), 'executed');
+  }
+});
+
+test('delegate reviews a changed fixed entry and checks a risky lifecycle script before any review or launch', async () => {
+  if (process.platform === 'win32') return;
+  const manifest = path.join(workspaceRoot, 'package.json');
+  await writeFile(manifest, JSON.stringify({ scripts: { test: 'node --test verify.cjs' } }));
+  const validation = new FakeValidationTools([]);
+  const reviewer = new FakeApprovalReviewer('approve');
+  const runner = createRunner(validation, reviewer);
+  const request = { ...createRequest('Validate after the edit.'), approvalMode: 'delegate' as const,
+    sessionId: 'changed-entry', approvalRootTaskId: 'changed-entry-root' };
+  await withResponses([textResponse('Preparing changes.')], () => runner.run(request));
+  await writeFile(manifest, JSON.stringify({ scripts: { test: 'node --test verify.cjs newer.cjs' } }));
+  await withResponses([toolResponse([toolCall('changed', RUN_VALIDATION_TOOL_NAME, { script: 'test' })])], () => runner.run(request));
+  assert.equal(reviewer.calls, 1);
+  assert.equal(validation.runCount, 1);
+  await writeFile(manifest, JSON.stringify({ scripts: { pretest: 'curl https://example.invalid', test: 'node --test verify.cjs' } }));
+  const blocked = await withResponses([toolResponse([toolCall('risky', RUN_VALIDATION_TOOL_NAME, { script: 'test' })])], () => runner.run(request));
+  assert.match(blocked.message, /prohibited effect/u);
+  assert.equal(reviewer.calls, 1);
+  assert.equal(validation.runCount, 1);
+});
+
+test('delegate reviews only metadata for an exact authorized external file and checks the file identity again', async () => {
+  const externalRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), 'keepseek-external-read-')));
+  try {
+    const target = path.join(externalRoot, 'reference.txt');
+    await writeFile(target, 'EXTERNAL_CONTENT_ONLY_FOR_MAIN_MODEL\n');
+    const request: AgentRequest = { ...createRequest('Read the attached reference.'), approvalMode: 'delegate' as const,
+      sessionId: 'external-read', approvalRootTaskId: 'external-root' };
+    const reviewer = new FakeApprovalReviewer('approve', async action => {
+      assert.equal(action.exactAction.kind, 'external_file_access');
+      assert.doesNotMatch(JSON.stringify(action), /EXTERNAL_CONTENT_ONLY_FOR_MAIN_MODEL/u);
+      assert.equal(action.scopeFingerprint?.length, 64);
+    });
+    const responseForRead = () => toolResponse([toolCall('read-external', READ_WORKSPACE_FILE_TOOL_NAME, { path: target })]);
+    const runner = createRunner(new FakeValidationTools([]), reviewer);
+    const unauthorized = await withResponses([responseForRead()], () => runner.run(request));
+    assert.equal(reviewer.calls, 0);
+    assert.match(unauthorized.message, /requires an exact reference/u);
+    request.authorizedExternalReferenceUris = [vscode.Uri.file(target).toString()];
+    const authorized = await withResponses([responseForRead()], () => runner.run(request));
+    assert.equal(reviewer.calls, 1);
+    assert.match(authorized.approvalToolResults?.[0]?.result.content ?? '', /EXTERNAL_CONTENT_ONLY_FOR_MAIN_MODEL/u);
+
+    const changing = new FakeApprovalReviewer('approve', async () => {
+      await writeFile(target, 'A_DIFFERENT_FILE_VERSION\n');
+    });
+    const changed = await withResponses([responseForRead()], () => createRunner(new FakeValidationTools([]), changing).run(request));
+    assert.equal(changed.approvalToolResults?.[0]?.status, 'failed');
+    assert.doesNotMatch(changed.approvalToolResults?.[0]?.result.content ?? '', /A_DIFFERENT_FILE_VERSION/u);
+  } finally { await rm(externalRoot, { recursive: true, force: true }); }
+});
+
+test('validation refusal requires explicit takeover and preserves both approval identities', async () => {
+  if (process.platform === 'win32') return;
+  const marker = path.join(workspaceRoot, 'manual.txt');
+  await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { test: 'node --test verify.cjs' } }));
+  await writeFile(path.join(workspaceRoot, 'verify.cjs'), "require('node:fs').appendFileSync('manual.txt', 'once');");
+  const review = new FakeApprovalReviewer('deny');
+  const request = { ...createRequest('Run the tests.'), approvalMode: 'model_review' as const, sessionId: 'manual-validation' };
+  let confirmations = 0;
+  const runner = new AgentRunner(undefined, undefined, new ValidationToolService(), undefined, undefined, undefined,
+    undefined, undefined, review, async input => {
+      assert.match(input.label, /npm run test/u);
+      assert.match(input.reason, /Denied by reviewer/u);
+      await assert.rejects(readFile(marker), { code: 'ENOENT' });
+      confirmations++;
+      return true;
+    });
+  const response = await withResponses([
+    toolResponse([toolCall('manual-validation', RUN_VALIDATION_TOOL_NAME, { script: 'test' })])
+  ], () => runner.run(request));
+  assert.equal(confirmations, 1);
+  assert.equal(review.calls, 1);
+  assert.deepEqual(response.runDetails.approvalReviews?.map(record => [record.approvalSource, record.decision]), [
+    ['model_review', 'deny'], ['user_click', 'approve']
+  ]);
+  assert.equal(response.approvalToolResults?.[0]?.status, 'succeeded', response.approvalToolResults?.[0]?.result.content);
+  assert.equal(await readFile(marker, 'utf8'), 'once');
 });
 
 class FakeValidationTools implements ValidationToolAdapter {
@@ -338,15 +495,21 @@ function createRunner(
 class FakeApprovalReviewer implements ApprovalReviewerAdapter {
   public calls = 0;
 
-  public constructor(private readonly decision: 'approve' | 'deny') {}
+  public constructor(private readonly decision: 'approve' | 'deny', private readonly onReview?: (request: ApprovalReviewRequest) => Promise<void>) {}
 
   public async review(request: ApprovalReviewRequest): Promise<{ status: 'reviewed'; record: ApprovalReviewRecord }> {
     this.calls += 1;
+    await this.onReview?.(request);
     return { status: 'reviewed', record: this.createRecord(request, 'model_review') };
   }
 
   public async createHostPolicyApproval(request: ApprovalReviewRequest): Promise<{ status: 'reviewed'; record: ApprovalReviewRecord }> {
     return { status: 'reviewed', record: this.createRecord(request, 'host_policy') };
+  }
+
+  public async createUserApproval(request: ApprovalReviewRequest): Promise<{ status: 'reviewed'; record: ApprovalReviewRecord }> {
+    return { status: 'reviewed', record: { ...this.createRecord(request, 'host_policy'), reviewId: 'user-' + request.targetId,
+      approvalSource: 'user_click', decision: 'approve', rationale: 'User confirmed.' } };
   }
 
   public async consumeApproval(): Promise<void> {}
