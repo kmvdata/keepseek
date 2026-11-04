@@ -129,7 +129,7 @@ import {
   createContextUsageEstimateFromResponses
 } from './contextUsage';
 import { WorkspaceToolAdapter, WorkspaceToolService } from './tools/workspaceTools';
-import { preflightSafeValidation, ValidationToolAdapter, ValidationToolService } from './tools/validationTools';
+import { preflightSafeValidation, type ValidationPreflightResult, ValidationToolAdapter, ValidationToolService } from './tools/validationTools';
 import { SemanticToolAdapter, SemanticToolService } from './tools/semanticTools';
 import { GitToolAdapter, GitToolService } from './tools/gitTools';
 import {
@@ -208,6 +208,7 @@ import {
 } from './usageLedger';
 import { createProviderCacheObservation } from './cacheObservation';
 import { TaskPlanTracker } from './taskPlan';
+import { taskGoal } from '../sessions/userTask';
 import { DelegationTracker } from './delegation';
 import { createChangeSet } from '../edits/changeSet';
 import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
@@ -584,11 +585,15 @@ export class AgentLoop {
       traceLogUri: traceLog?.uri
     });
     runDetailsBuilderRef.current.setRunContext(request.currentRunContext?.metadata);
+    const latestUser = request.history.at(-1);
+    const goal = request.approvalRootTaskId && latestUser?.userTask?.id === request.approvalRootTaskId
+      && latestUser.userTask.reason === 'approval'
+      ? taskGoal(request.history, request.approvalRootTaskId) : request.prompt;
     const taskPlan = new TaskPlanTracker({
       runId: trace.runId,
       initialPlan: checkpoint.taskPlan,
       sessionId: request.sessionId,
-      prompt: request.prompt,
+      prompt: goal,
       language: request.language,
       onChange: callbacks.onTaskPlan,
       recordTrace: (event) => trace.record(event)
@@ -1914,10 +1919,37 @@ export class AgentLoop {
             args: toolArgs,
             skills: request.currentRunContext?.skills
           });
+          const isValidation = toolCall.function.name === RUN_VALIDATION_TOOL_NAME;
+          const pendingValidationChanges = isValidation && validationState.hasPendingDraftEdit();
+          const validationPreflight = isValidation && !planPhaseBlockReason && !pendingValidationChanges
+            ? await preflightSafeValidation({
+                script: this.readSafeNpmScript(toolArgs, 'script'),
+                workspaceFolder: this.readOptionalString(toolArgs, 'workspaceFolder'),
+                language: request.language
+              })
+            : undefined;
           if (planPhaseBlockReason) {
             rawToolResult = createPlanPhaseBlockedToolResult(toolCall.function.name, planPhaseBlockReason);
-          } else if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && validationState.hasPendingDraftEdit()) {
+          } else if (pendingValidationChanges) {
             rawToolResult = validationState.createBlockedValidationResult(request.language);
+          } else if (validationPreflight?.status === 'unavailable') {
+            rawToolResult = JSON.stringify({
+              ok: false,
+              errorType: 'validation_unavailable',
+              script: validationPreflight.script,
+              executed: false,
+              error: validationPreflight.error
+            });
+          } else if (validationPreflight?.status === 'blocked') {
+            rawToolResult = JSON.stringify({
+              ok: false,
+              errorType: 'validation_preflight_failed',
+              executed: false,
+              error: validationPreflight.error
+            });
+            if (normalizeApprovalMode(runAuthorizationPolicy.approvalMode) !== 'ask') {
+              approvalReviewStopReason = validationPreflight.error;
+            }
           } else if (isDraftEditPreparationTool(toolCall.function.name) && !repairLoop.beginRepair()) {
             const state = repairLoop.getState();
             const detail = request.language === 'en'
@@ -1946,13 +1978,17 @@ export class AgentLoop {
               request,
               agentRunId: checkpoint.taskId,
               approvalMode: runAuthorizationPolicy.approvalMode,
-              emitStatus
+              emitStatus,
+              validationPreflight
             }) ?? await abortable(this.toolAuthorization.authorize({
               toolName: toolCall.function.name,
               args: toolArgs,
               language: request.language,
               policy: runAuthorizationPolicy
             }), request.signal);
+            if (validationPreflight && authorizationDecision.allowed && !authorizationDecision.executionSnapshot) {
+              authorizationDecision = { ...authorizationDecision, executionSnapshot: validationPreflight.snapshot.fingerprint };
+            }
             if (authorizationDecision.approvalReview) approvalReviewBoundaryReached = true;
             if (!authorizationDecision.allowed && toolCall.function.name === RUN_VALIDATION_TOOL_NAME
               && authorizationDecision.requiresExplicitConfirmation && normalizeApprovalMode(request.approvalMode) !== 'ask') {
@@ -3564,6 +3600,7 @@ export class AgentLoop {
     agentRunId: string;
     approvalMode: AgentRequest['approvalMode'];
     emitStatus: (status: AgentActivityInput) => void;
+    validationPreflight?: Extract<ValidationPreflightResult, { status: 'ready' }>;
   }): Promise<ToolAuthorizationDecision | undefined> {
     const mode = normalizeApprovalMode(input.approvalMode);
     if (input.request.persona || mode === 'ask') return undefined;
@@ -3598,14 +3635,10 @@ export class AgentLoop {
           ? `Read lines ${this.readRequiredNumber(input.args, 'startLine')}-${this.readRequiredNumber(input.args, 'endLine')} of the explicitly referenced external text file.`
           : 'Read the explicitly referenced external text file.'
       });
-    } else if (toolName === RUN_VALIDATION_TOOL_NAME) {
-      const script = this.readSafeNpmScript(input.args, 'script');
-      const workspaceFolder = this.readOptionalString(input.args, 'workspaceFolder');
+    } else if (input.validationPreflight) {
+      const preflight = input.validationPreflight;
+      const script = preflight.script;
       scope = script === 'test' ? 'validation_test' : 'validation_compile_lint';
-      const preflight = await preflightSafeValidation({ script, workspaceFolder, language });
-      if (!preflight.ok || !preflight.workspaceRootId || !preflight.snapshot) {
-        return deny(preflight.error ?? 'Validation preflight failed.');
-      }
       const launch = preflight.snapshot;
       snapshot = launch.fingerprint;
       label = `npm run ${script} · ${launch.cwdUri}

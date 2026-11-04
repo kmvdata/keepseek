@@ -36,6 +36,7 @@ type Host = {
   saveAgentCheckpoint(s: ChatSession, m: ChatMessage, cp: RunCheckpoint): Promise<void>;
   queueResponseApprovals(s: ChatSession, m: ChatMessage, r: AgentResponse): void;
   executeDelegatedApprovals(next: NonNullable<ReturnType<DelegatedApprovalQueue['take']>>): Promise<void>;
+  maybeAutoContinueDraftRun(): Promise<void>;
   resumeApprovalProcessing(id?: string, confirmTargetId?: string): Promise<void>;
   handleApplyDraftEdit(message: { type: 'applyDraftEdit'; id: string; requestId: string }): Promise<void>;
   abortPrompt(): void;
@@ -144,6 +145,94 @@ test('persisted archive with wrong logical identity blocks all effects and never
     assert.equal(f.session.approvalProcessing?.targets[0].status, 'identity_mismatch');
     assert.equal(f.runs.get(f.proposal.id)?.status, 'pending');
     assert.equal(f.session.messages.length, 2, 'blocking does not forge a user approval message');
+  });
+});
+
+test('automatic approval drains successive batches toward the same goal without a Webview refresh', async () => {
+  await fixture('delegate', async f => {
+    let turns = 0;
+    const next = await createDraftRunProposal({ executable: 'node', args: ['--version'], reason: 'Verify runtime after the change' });
+    const prototype = KeepseekChatViewProvider.prototype as unknown as { sendPrompt: () => Promise<AgentResponse | undefined> };
+    Object.assign(f.host, {
+      hasActiveBackgroundRun: () => false,
+      scheduleDraftRunAutoContinuation: () => {},
+      sendPrompt: prototype.sendPrompt,
+      sendPromptImpl: async (prompt: string, _source: string, _model: string, _settings: unknown, options: {
+        approvalRootTaskId: string;
+        userTask: ChatMessage['userTask'];
+        delegatedContinuation: { sessionId: string; agentRunId: string; signal: AbortSignal };
+      }) => {
+        const priorSegment = turns === 0 ? f.cp.taskId : executionSegmentId(f.session.messages.at(-1));
+        assert.equal(options.approvalRootTaskId, f.message.userTask!.id);
+        assert.equal(options.delegatedContinuation.sessionId, f.session.id);
+        assert.equal(options.delegatedContinuation.agentRunId, priorSegment);
+        assert.equal(options.delegatedContinuation.signal.aborted, false);
+        assert.deepEqual(options.userTask, { ...f.message.userTask, reason: 'approval' });
+        assert.match(prompt, /<keepseek-task-goal>"Create result.txt and check runtime\."<\/keepseek-task-goal>/u);
+        assert.match(prompt, /"status":"executed"/u);
+        if (++turns !== 1) return;
+        const userTask = { ...f.message.userTask!, reason: 'approval' as const };
+        const user: ChatMessage = { id: 'continue-user', role: 'user', content: prompt, createdAt: f.message.createdAt, userTask };
+        const assistant: ChatMessage = { id: 'continue-assistant', role: 'assistant', content: '', createdAt: f.message.createdAt, userTask };
+        f.session.messages.push(user, assistant);
+        const response: AgentResponse = { ...f.response, draftEdits: [], draftRuns: [next] };
+        const checkpoint = createRunCheckpoint(f.cp.request as AgentRequest, 0, 'test', f.scope.folderUris);
+        checkpoint.status = 'completed'; checkpoint.finalResponse = response;
+        await f.host.saveAgentCheckpoint(f.session, assistant, checkpoint);
+        f.host.queueResponseApprovals(f.session, assistant, response);
+      }
+    });
+    f.response.draftRuns = [];
+    f.message.contextMeta = { isProtected: true, protectedReason: 'draft_edit_result' };
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    await f.host.maybeAutoContinueDraftRun();
+    assert.equal(turns, 2);
+    assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
+    assert.equal(f.executions(), 1);
+    assert.equal(f.reviews(), 0);
+    assert.equal(f.runs.get(next.id)?.status, 'done');
+    assert.equal(f.session.approvalProcessing?.status, 'completed');
+  });
+});
+
+test('Stop between successful approval execution and next model dispatch cancels the handoff', async () => {
+  await fixture('delegate', async f => {
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    const prototype = KeepseekChatViewProvider.prototype as unknown as { sendPrompt: () => Promise<AgentResponse | undefined> };
+    let stopped = false, dispatched = 0;
+    Object.assign(f.host, {
+      sendPrompt: prototype.sendPrompt,
+      awaitRunContextRefresh: async () => {
+        if (f.session.approvalProcessing?.status === 'completed') {
+          stopped = true;
+          f.host.abortPrompt();
+        }
+        return true;
+      },
+      sendPromptImpl: async () => { dispatched++; }
+    });
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.equal(stopped, true);
+    assert.equal(dispatched, 0);
+    assert.equal(f.executions(), 1);
+    assert.equal(f.runs.get(f.proposal.id)?.status, 'done');
+    assert.equal(f.session.messages.filter(message => message.role === 'user').length, 1);
+    assert.equal(f.queue.take(f.session.id), undefined);
+  });
+});
+
+test('queued approval from a previous user task cannot execute after a new task starts', async () => {
+  await fixture('delegate', async f => {
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    f.session.messages.push({ id: 'new-user', role: 'user', content: 'A different task.', createdAt: f.message.createdAt });
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.equal(f.executions(), 0);
+    assert.equal(f.continuations(), 0);
+    assert.equal(f.runs.get(f.proposal.id)?.status, 'pending');
+    await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
   });
 });
 
@@ -486,7 +575,7 @@ for (const mode of ['delegate', 'model_review'] as const) test(`local Git status
       const commands = [
         ['--no-pager', 'diff', '--stat', 'HEAD'],
         ['status', '--short', '--untracked-files=all'],
-        ['add', '--all'],
+        ['add', '--all', '.'],
         ['diff', '--cached', '--stat'],
         ['commit', '-m', 'Update existing file and add new file']
       ];

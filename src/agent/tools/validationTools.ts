@@ -1,7 +1,7 @@
 import { redactSensitiveReviewText } from '../../approvals/approvalPolicy';
 import { spawn } from 'node:child_process';
 import { terminateProcessTree } from '../../runs/draftRunExecutor';
-import { inspectValidationSnapshot, type ValidationSnapshot } from './validationSnapshot';
+import { inspectValidationSnapshot, ValidationUnavailableError, type ValidationSnapshot } from './validationSnapshot';
 import * as vscode from 'vscode';
 import {
   getConfiguredValidationTimeoutMs
@@ -121,7 +121,7 @@ export class ValidationToolService implements ValidationToolAdapter {
       if (!vscode.workspace.isTrusted || input.signal?.aborted || !vscode.workspace.workspaceFolders?.includes(workspaceFolder)
         || (input.expectedSnapshot && input.expectedSnapshot !== snapshot.fingerprint)
         || (input.authorization.approvalReview && !input.expectedSnapshot)) {
-        throw new Error('Validation launch snapshot changed or authorization was revoked. / 验证启动快照已变化或授权已撤销。');
+        throw new Error(localizeValidation(input.language, 'snapshotChanged'));
       }
       const remainingMs = input.runDeadlineAt === undefined ? timeoutMs : Math.min(timeoutMs, input.runDeadlineAt - Date.now());
       if (remainingMs <= 0) throw new Error(localizeValidation(input.language, 'timedOut'));
@@ -154,12 +154,21 @@ export class ValidationToolService implements ValidationToolAdapter {
               : localizeValidation(input.language, 'failed', input.script, outcome.exitCode)
       }));
     } catch (error) {
+      if (error instanceof ValidationUnavailableError && !input.expectedSnapshot) {
+        return JSON.stringify(createResult({
+          workspaceFolder: workspaceFolder.name,
+          errorType: 'validation_unavailable',
+          error: unavailableValidationMessage(input.language, input.script, error)
+        }));
+      }
       return JSON.stringify(createResult({
         workspaceFolder: workspaceFolder.name,
         authorized: true,
         durationMs: Date.now() - startedAt,
         errorType: 'validation_execution_failed',
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof ValidationUnavailableError
+          ? localizeValidation(input.language, 'snapshotChanged')
+          : error instanceof Error ? error.message : String(error)
       }));
     }
   }
@@ -202,12 +211,10 @@ async function readNpmScripts(workspaceFolder: vscode.WorkspaceFolder): Promise<
   }
 }
 
-export interface ValidationPreflightResult {
-  ok: boolean;
-  workspaceRootId?: string;
-  snapshot?: ValidationSnapshot;
-  error?: string;
-}
+export type ValidationPreflightResult =
+  | { status: 'ready'; script: SafeNpmScript; workspaceRootId: string; snapshot: ValidationSnapshot }
+  | { status: 'unavailable'; script: SafeNpmScript; error: string }
+  | { status: 'blocked'; error: string };
 
 /** Hard checks that must pass before a validation request reaches a model reviewer. */
 export async function preflightSafeValidation(input: {
@@ -216,22 +223,29 @@ export async function preflightSafeValidation(input: {
   language: KeepseekLanguage;
 }): Promise<ValidationPreflightResult> {
   if (!SAFE_NPM_SCRIPTS.has(input.script)) {
-    return { ok: false, error: localizeValidation(input.language, 'unsupportedScript', input.script) };
+    return { status: 'blocked', error: localizeValidation(input.language, 'unsupportedScript', input.script) };
   }
   if (!vscode.workspace.isTrusted) {
-    return { ok: false, error: localizeValidation(input.language, 'untrusted') };
+    return { status: 'blocked', error: localizeValidation(input.language, 'untrusted') };
   }
   const workspaceFolder = findWorkspaceFolder(input.workspaceFolder);
   if (!workspaceFolder) {
-    return { ok: false, error: localizeValidation(input.language, 'workspaceMissing') };
+    return { status: 'blocked', error: localizeValidation(input.language, 'workspaceMissing') };
   }
   try {
     const snapshot = await inspectValidationSnapshot(workspaceFolder, input.script);
     const index = (vscode.workspace.workspaceFolders ?? []).findIndex(folder => folder.uri.toString() === workspaceFolder.uri.toString());
-    return { ok: true, workspaceRootId: `root-${index + 1}:${workspaceFolder.name}`, snapshot };
+    return { status: 'ready', script: input.script, workspaceRootId: `root-${index + 1}:${workspaceFolder.name}`, snapshot };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    if (error instanceof ValidationUnavailableError) {
+      return { status: 'unavailable', script: input.script, error: unavailableValidationMessage(input.language, input.script, error) };
+    }
+    return { status: 'blocked', error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function unavailableValidationMessage(language: KeepseekLanguage, script: SafeNpmScript, error: ValidationUnavailableError): string {
+  return localizeValidation(language, error.reason === 'manifest_missing' ? 'manifestMissing' : 'scriptMissing', script);
 }
 
 function createWorkspaceDiagnosticSummary(): WorkspaceDiagnosticSummary {
@@ -356,7 +370,7 @@ Promise<{ exitCode?: number; timedOut: boolean; aborted: boolean; output?: strin
 
 function localizeValidation(
   language: KeepseekLanguage,
-  key: 'unsupportedScript' | 'untrusted' | 'stopped' | 'workspaceMissing' | 'scriptMissing' | 'scriptUnsafe' | 'notAuthorized' | 'timedOut' | 'failed',
+  key: 'unsupportedScript' | 'untrusted' | 'stopped' | 'workspaceMissing' | 'manifestMissing' | 'scriptMissing' | 'snapshotChanged' | 'notAuthorized' | 'timedOut' | 'failed',
   script?: string,
   exitCode?: number
 ): string {
@@ -365,8 +379,9 @@ function localizeValidation(
     untrusted: 'Controlled validation is disabled because the workspace is not trusted.',
     stopped: 'The validation task was stopped.',
     workspaceMissing: 'Open a workspace folder before running validation.',
-    scriptMissing: `package.json does not define the safe "${script ?? ''}" script.`,
-    scriptUnsafe: `The "${script ?? ''}" script contains a command that KeepSeek does not allow automatically.`,
+    manifestMissing: 'Fixed npm validation is unavailable because this workspace folder has no package.json. No script ran. Continue with the remaining work if this check is optional.',
+    scriptMissing: `package.json does not define "${script ?? ''}". No script ran. Continue with the remaining work if this check is optional.`,
+    snapshotChanged: 'Validation launch snapshot changed or authorization was revoked.',
     notAuthorized: 'The user did not authorize this validation task.',
     timedOut: 'The validation task reached its time limit and was stopped.',
     failed: `The "${script ?? ''}" validation task exited with code ${exitCode ?? 'unknown'}.`
@@ -376,8 +391,9 @@ function localizeValidation(
     untrusted: '当前工作区未受信任，不能运行受控验证。',
     stopped: '验证任务已停止。',
     workspaceMissing: '请先打开工作区文件夹，再运行验证。',
-    scriptMissing: `package.json 未定义安全脚本“${script ?? ''}”。`,
-    scriptUnsafe: `脚本“${script ?? ''}”包含 KeepSeek 不允许自动执行的命令。`,
+    manifestMissing: '当前工作区文件夹没有 package.json，无法使用固定 npm 验证。未运行脚本。如果该验证不是任务必需项，请继续处理剩余工作。',
+    scriptMissing: `package.json 未定义脚本“${script ?? ''}”。未运行脚本。如果该验证不是任务必需项，请继续处理剩余工作。`,
+    snapshotChanged: '验证启动快照已变化或授权已撤销。',
     notAuthorized: '用户未授权本次验证任务。',
     timedOut: '验证任务达到时间上限，已停止。',
     failed: `验证任务“${script ?? ''}”退出，代码为 ${exitCode ?? '未知'}。`

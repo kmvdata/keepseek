@@ -1,6 +1,6 @@
 import './registerVscodeStub';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, test } from 'node:test';
@@ -34,6 +34,7 @@ let workspaceRoot = '';
 beforeEach(async () => {
   workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'keepseek-run-validation-'));
   vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspaceRoot), name: 'validation-run' }];
+  await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { compile: 'tsc -p .' } }));
 });
 
 afterEach(async () => {
@@ -260,6 +261,69 @@ test('model-reviewed validation denial does not execute and still crosses the ne
   assert.equal(deniedResult.status, 'approval_denied');
   assert.equal(deniedResult.executed, false);
   assert.equal(deniedResult.errorType, 'approval_denied');
+});
+
+for (const approvalMode of ['ask', 'delegate', 'model_review'] as const) {
+  test(`unavailable npm validation does not stop a local Git task under ${approvalMode}`, async () => {
+    const manifest = path.join(workspaceRoot, 'package.json');
+    for (const manifestExists of [false, true]) {
+      if (manifestExists) await writeFile(manifest, JSON.stringify({ scripts: { test: 'node --test' } }));
+      else await rm(manifest);
+      const authorization = new AllowAllToolAuthorization();
+      const validation = new FakeValidationTools([]);
+      const reviewer = new FakeApprovalReviewer('approve');
+      const request = createRequest('Run git add --all ., then summarize the staged changes and commit locally.');
+      request.approvalMode = approvalMode;
+      request.sessionId = `git-task-${approvalMode}-${manifestExists}`;
+      request.requestProtocolVersion = 4;
+      request.executionLimits = { ...request.executionLimits, maxToolIterations: 4 };
+      const stage = ['add', '--all', '.'];
+      const commit = ['commit', '-m', 'Update Python project'];
+      const response = await withResponses([
+        toolResponse([toolCall('optional-compile', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })]),
+        toolResponse([toolCall('stage', RUN_DRAFT_TOOL_NAME, { executable: 'git', args: stage, reason: 'Stage the requested changes' })]),
+        toolResponse([toolCall('commit', RUN_DRAFT_TOOL_NAME, { executable: 'git', args: commit, reason: 'Record the requested local commit' })]),
+        textResponse('The Git operations are prepared.')
+      ], () => createRunner(validation, reviewer, authorization).run(request));
+
+      const result = JSON.parse(response.toolRounds?.[0]?.toolResults[0]?.content ?? '{}');
+      assert.equal(result.errorType, 'validation_unavailable');
+      assert.equal(result.executed, false);
+      assert.match(result.error, manifestExists ? /does not define "compile"/u : /no package\.json/u);
+      assert.equal(response.runDetails.toolCalls[0]?.status, 'failed');
+      assert.deepEqual(authorization.toolNames, [RUN_DRAFT_TOOL_NAME, RUN_DRAFT_TOOL_NAME]);
+      assert.equal(reviewer.calls, 0);
+      assert.equal(validation.runCount, 0);
+      assert.equal(response.repairLoop.iteration, 0);
+      assert.equal(response.repairLoop.stopReason, undefined);
+      assert.equal(response.approvalContinuationStopReason, undefined);
+      assert.equal(response.taskPlan.steps.find(step => step.id === 'validate')?.status, 'skipped');
+      assert.deepEqual(response.taskPlan.blockers, []);
+      assert.deepEqual(response.draftRuns?.map(draft => draft.spec.args), [stage, commit]);
+    }
+  });
+}
+
+test('a dangling package.json symlink fails hard validation preflight without approval or launch', async () => {
+  if (process.platform === 'win32') return;
+  const manifest = path.join(workspaceRoot, 'package.json');
+  await rm(manifest);
+  await symlink('missing-package.json', manifest);
+  const authorization = new AllowAllToolAuthorization();
+  const validation = new FakeValidationTools([]);
+  const reviewer = new FakeApprovalReviewer('approve');
+  const request = { ...createRequest('Run compile.'), approvalMode: 'delegate' as const, sessionId: 'dangling-package' };
+  const response = await withResponses([
+    toolResponse([toolCall('compile', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })])
+  ], () => createRunner(validation, reviewer, authorization).run(request));
+
+  const result = JSON.parse(response.toolRounds?.[0]?.toolResults[0]?.content ?? '{}');
+  assert.equal(result.errorType, 'validation_preflight_failed');
+  assert.equal(result.executed, false);
+  assert.ok(response.approvalContinuationStopReason);
+  assert.deepEqual(authorization.toolNames, []);
+  assert.equal(reviewer.calls, 0);
+  assert.equal(validation.runCount, 0);
 });
 
 test('delegate applies a real change, runs all three fixed entries, and delivers actual continuation results without a reviewer', async () => {

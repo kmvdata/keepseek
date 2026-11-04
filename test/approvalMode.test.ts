@@ -321,9 +321,12 @@ function workflowFixture(options: {
   unavailableBeforeEffects?: boolean;
 } = {}) {
   const queue = new DelegatedApprovalQueue();
+  const userTask = { version: 1, id: 'r', originMessageId: 'u', reason: 'user' };
   const session = { id: 's', approvalMode: options.mode ?? 'delegate', messages: [{
+    id: 'u', role: 'user', content: 'Prepare the requested workspace changes and run their commands.', createdAt: '', userTask
+  }, {
     id: 'assistant', role: 'assistant', content: '', createdAt: '',
-    userTask: { version: 1, id: 'r', originMessageId: 'u', reason: 'user' },
+    userTask,
     runCheckpointArchive: { version: 1, objectHash: 'a'.repeat(64), summary: { taskId: 'r' } }
   }] };
   const fixture = {

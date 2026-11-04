@@ -13,9 +13,56 @@ const MAX_CONFIG_BYTES = 1_000_000;
 const VALIDATION_CONFIG = /^(?:tsconfig(?:\.[\w.-]+)?\.json|jsconfig\.json|(?:eslint|vitest|vite|jest|babel|webpack|playwright|rollup|mocha)\.config\.[\w.-]+|\.(?:eslintrc|babelrc|mocharc)(?:\.[\w.-]+)?|bunfig\.toml)$/u;
 const CONVENTIONAL_ENTRY = /^(?:tsc|eslint|node|vitest|jest|bun|ts-node|tsx|mocha)(?:[ \t]+[\w./:=,@%+-]+)*$/u;
 
+export class ValidationUnavailableError extends Error {
+  public constructor(public readonly reason: 'manifest_missing' | 'script_missing') {
+    super(reason);
+  }
+}
+
 export async function inspectValidationSnapshot(folder: vscode.WorkspaceFolder, script: SafeNpmScript) {
   if (folder.uri.scheme !== 'file') throw new Error('Validation requires a local extension-host folder. / 验证需要扩展宿主上的本地目录。');
   const cwd = await realpath(folder.uri.fsPath);
+  const readConfig = async (name: string) => {
+    const target = path.join(cwd, name);
+    const isDirty = (file: string) => vscode.workspace.textDocuments?.some(document => document.isDirty
+      && document.uri.scheme === 'file' && document.uri.fsPath === file);
+    if (isDirty(target) || isDirty(path.join(folder.uri.fsPath, name))) {
+      throw new Error('Save the validation configuration before running it. / 请保存验证配置后再运行。');
+    }
+    const actual = await realpath(target).catch(async (error: NodeJS.ErrnoException) => {
+      if (name === 'package.json' && error.code === 'ENOENT') {
+        // A dangling symlink also fails realpath. Only an absent entry is inapplicable.
+        await lstat(target).catch((statError: NodeJS.ErrnoException) => {
+          if (statError.code === 'ENOENT') throw new ValidationUnavailableError('manifest_missing');
+          throw statError;
+        });
+      }
+      throw error;
+    });
+    const info = await lstat(target);
+    if (isDirty(actual)) {
+      throw new Error('Save the validation configuration before running it. / 请保存验证配置后再运行。');
+    }
+    if (info.isSymbolicLink() || !info.isFile() || info.size > MAX_CONFIG_BYTES || !isPathInside(cwd, actual)) {
+      throw new Error('Validation configuration is outside the trusted scope or too large. / 验证配置超出可信范围或过大。');
+    }
+    return await readFile(actual, 'utf8');
+  };
+  const manifest = await readConfig('package.json');
+  const parsed = JSON.parse(manifest) as { scripts?: Record<string, unknown> } | null;
+  const scripts = parsed?.scripts;
+  const selected = scripts?.[script];
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+    || (scripts !== undefined && (!scripts || typeof scripts !== 'object' || Array.isArray(scripts)))
+    || (selected !== undefined && typeof selected !== 'string')) {
+    throw new Error('Invalid package.json validation configuration. / package.json 的验证配置无效。');
+  }
+  if (!selected?.trim()) throw new ValidationUnavailableError('script_missing');
+  const names = ['pre' + script, script, 'post' + script];
+  const entries = names.flatMap(name => typeof scripts?.[name] === 'string' ? [[name, scripts[name] as string] as const] : []);
+  if (entries.some(([, definition]) => hasValidationBlockingRisk(definition) || findSensitiveEvidence(definition))) {
+    throw new Error('A validation or lifecycle script has a prohibited effect or contains sensitive material. / 验证或生命周期脚本包含受禁止的操作或敏感内容。');
+  }
   const env = createControlledEnvironment([]);
   const windows = process.platform === 'win32';
   const node = await resolveExecutable('node', cwd, env);
@@ -33,31 +80,8 @@ export async function inspectValidationSnapshot(folder: vscode.WorkspaceFolder, 
     || (env.PATH ?? '').split(path.delimiter).some(entry => !path.isAbsolute(entry))) {
     throw new Error('Cannot establish the npm and Node launch identity. / 无法确认 npm 和 Node 的启动身份。');
   }
-  const readConfig = async (name: string) => {
-    const target = path.join(cwd, name);
-    const actual = await realpath(target);
-    const info = await lstat(target);
-    if (vscode.workspace.textDocuments?.some(document => document.isDirty
-      && document.uri.scheme === 'file' && (document.uri.fsPath === target || document.uri.fsPath === actual))) {
-      throw new Error('Save the validation configuration before running it. / 请保存验证配置后再运行。');
-    }
-    if (info.isSymbolicLink() || !info.isFile() || info.size > MAX_CONFIG_BYTES || !isPathInside(cwd, actual)) {
-      throw new Error('Validation configuration is outside the trusted scope or too large. / 验证配置超出可信范围或过大。');
-    }
-    return await readFile(actual, 'utf8');
-  };
-  const manifest = await readConfig('package.json');
-  const scripts = (JSON.parse(manifest) as { scripts?: Record<string, unknown> }).scripts;
-  const names = ['pre' + script, script, 'post' + script];
-  const entries = names.flatMap(name => typeof scripts?.[name] === 'string' ? [[name, scripts[name] as string] as const] : []);
-  if (!entries.some(([name, definition]) => name === script && definition.trim())) {
-    throw new Error('The fixed validation script is missing. / 固定验证脚本不存在。');
-  }
-  if (entries.some(([, definition]) => hasValidationBlockingRisk(definition) || findSensitiveEvidence(definition))) {
-    throw new Error('A validation or lifecycle script has a prohibited effect or contains sensitive material. / 验证或生命周期脚本包含受禁止的操作或敏感内容。');
-  }
   const configNames = (await readdir(cwd)).filter(name => VALIDATION_CONFIG.test(name)).sort();
-  const definition = entries.find(([name]) => name === script)![1].trim();
+  const definition = selected.trim();
   const args = definition.split(/\s+/u);
   let conventional = CONVENTIONAL_ENTRY.test(definition)
     && !args.some(arg => /(?:^|=)(?:\/|[a-z]:)|(?:^|\/)\.\.(?:\/|$)/iu.test(arg));
