@@ -10,6 +10,8 @@ import type {
   DraftRunProposal,
   DraftRunStatus
 } from '../shared/types';
+import type { ChatMessage } from '../shared/types';
+import { executionSegmentId } from '../sessions/userTask';
 import { hasExactCommandScope } from '../approvals/authorization/commandScope';
 import { analyzeDraftRunEffects, inspectDraftRunScope, checkDraftRunApprovalBoundary, validateDraftRunBeforeApproval } from '../approvals/authorization';
 import { DraftRunAuthorizationService } from './draftRunAuthorization';
@@ -26,6 +28,7 @@ import {
 } from './draftRunExecutor';
 
 import { prepareRestrictedPythonSyntax, verifyRestrictedPythonSyntax } from './restrictedPythonSyntax';
+import { isHistoryOriginRemoved, type HistoryTruncationScope } from '../sessions/historyTruncation';
 
 const MAX_DRAFT_RUN_HISTORY = 500;
 const TERMINAL_STATUSES = new Set<DraftRunStatus>(['rejected', 'done', 'cancelled', 'failed', 'needs_replan', 'no_changes']);
@@ -71,6 +74,8 @@ export class DraftRunStore {
   private persistenceTimer: ReturnType<typeof setTimeout> | undefined;
   private initialized = false;
   private readonly approving = new Set<string>();
+  /** Current-host tombstones reject late proposal callbacks after a committed edit. */
+  private readonly historyInvalidations = new Map<string, HistoryTruncationScope>();
 
   public constructor(
     globalStorageUri: vscode.Uri,
@@ -146,6 +151,7 @@ export class DraftRunStore {
     sessionId?: string;
     messageId?: string;
   }): DraftRun[] {
+    if (this.findHistoryInvalidation(input.sessionId ?? '', input.messageId ?? '', input.agentRunId)) return [];
     const now = new Date().toISOString();
     const added = input.proposals.filter((proposal) => !this.draftRuns.has(proposal.id)).map((proposal): DraftRun => ({
       ...cloneProposal(proposal),
@@ -171,7 +177,7 @@ export class DraftRunStore {
 
   public toWebviewState(sessionId: string): WebviewDraftRun[] {
     return Array.from(this.draftRuns.values())
-      .filter((draftRun) => draftRun.sessionId === sessionId)
+      .filter((draftRun) => draftRun.sessionId === sessionId && !isHistoryInactive(draftRun))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
       .map(toWebviewDraftRun);
   }
@@ -204,7 +210,7 @@ export class DraftRunStore {
 
   public getProtectedSessionIds(): string[] {
     return Array.from(new Set(Array.from(this.draftRuns.values())
-      .filter((run) => run.status === 'pending' || run.status === 'approved' || run.status === 'running')
+      .filter((run) => !isHistoryInactive(run) && (run.status === 'pending' || run.status === 'approved' || run.status === 'running'))
       .map((run) => run.sessionId)
       .filter(Boolean)));
   }
@@ -215,13 +221,65 @@ export class DraftRunStore {
   }
 
   public getRunsForSegments(sessionId: string, segmentIds: ReadonlySet<string>): DraftRun[] {
-    return Array.from(this.draftRuns.values()).filter(run => run.sessionId === sessionId && segmentIds.has(run.agentRunId))
+    return Array.from(this.draftRuns.values()).filter(run => run.sessionId === sessionId && !isHistoryInactive(run) && segmentIds.has(run.agentRunId))
       .map(cloneDraftRun);
+  }
+
+  /** Full host history only: a paged Webview is never evidence of deletion. */
+  public reconcileHistoryOrigins(sessionId: string, messages: readonly ChatMessage[]): string[] {
+    const messageIds = new Set(messages.map(message => message.id));
+    const segments = new Set(messages.map(executionSegmentId).filter((id): id is string => Boolean(id)));
+    const changed: string[] = [];
+    for (const run of this.draftRuns.values()) {
+      if (run.sessionId !== sessionId || run.historyInvalidationId) continue;
+      const unverified = !messageIds.has(run.messageId) && !segments.has(run.agentRunId)
+        && !run.messageId.startsWith('skill:');
+      if (Boolean(run.historyOriginUnverified) === unverified) continue;
+      run.historyOriginUnverified = unverified || undefined;
+      if (unverified) run.autoContinueRequested = undefined;
+      changed.push(run.id);
+    }
+    if (changed.length) this.schedulePersist();
+    return changed;
+  }
+
+  /** Detach source operations, preserving real outcomes and immutable evidence. */
+  public assertHistoryTruncationReady(scope: HistoryTruncationScope): void {
+    const affected = Array.from(this.draftRuns.values()).filter(run => run.sessionId === scope.sessionId
+      && isHistoryOriginRemoved(scope, run));
+    // Never hide an unsettled side effect or revoke a launch halfway through it.
+    if (affected.some(run => this.approving.has(run.id) || run.status === 'approved' || run.status === 'running')) {
+      throw new Error('Wait for command execution or approval to settle before editing this message. / 请等待命令执行或审批结束后再编辑。');
+    }
+  }
+
+  public invalidateHistory(scope: HistoryTruncationScope): string[] {
+    this.assertHistoryTruncationReady(scope);
+    const affected = Array.from(this.draftRuns.values()).filter(run => run.sessionId === scope.sessionId
+      && isHistoryOriginRemoved(scope, run));
+    this.historyInvalidations.set(scope.id, structuredClone(scope));
+    while (this.historyInvalidations.size > MAX_DRAFT_RUN_HISTORY) {
+      this.historyInvalidations.delete(this.historyInvalidations.keys().next().value!);
+    }
+    for (const run of affected) {
+      run.historyInvalidationId ??= scope.id;
+      run.autoContinueRequested = undefined;
+    }
+    this.releaseResultBindingsForMessages(scope.sessionId, scope.removedMessageIds);
+    this.schedulePersist();
+    return affected.map(run => run.id);
+  }
+
+  private findHistoryInvalidation(sessionId: string, messageId: string, agentRunId: string): string | undefined {
+    for (const scope of this.historyInvalidations.values()) {
+      if (scope.sessionId === sessionId && isHistoryOriginRemoved(scope, { messageId, agentRunId })) return scope.id;
+    }
+    return undefined;
   }
 
   public recordGitCommitPlan(id: string, specHash: string, plan: LocalGitCommitPlan): boolean {
     const run = this.draftRuns.get(id);
-    if (!run || run.status !== 'pending' || run.specHash !== specHash || this.approving.has(id)) return false;
+    if (!run || isHistoryInactive(run) || run.status !== 'pending' || run.specHash !== specHash || this.approving.has(id)) return false;
     run.gitCommitPlan = structuredClone(plan);
     this.schedulePersist();
     return true;
@@ -229,7 +287,7 @@ export class DraftRunStore {
 
   public recordGitCommitEvidence(id: string, specHash: string, evidence: LocalGitCommitEvidence): boolean {
     const draft = this.draftRuns.get(id);
-    if (!draft || draft.specHash !== specHash || this.approving.has(id) || draft.gitCommitEvidence
+    if (!draft || isHistoryInactive(draft) || draft.specHash !== specHash || this.approving.has(id) || draft.gitCommitEvidence
       || (evidence.outcome === 'verified'
         ? draft.status !== 'done' && !(draft.status === 'failed' && draft.startedAt && draft.gitCommitPlan?.rootTaskId === evidence.rootTaskId)
         : draft.status !== 'pending')) return false;
@@ -246,7 +304,7 @@ export class DraftRunStore {
 
   public recordGitStageEvidence(id: string, specHash: string, evidence: LocalGitStageEvidence): boolean {
     const draft = this.draftRuns.get(id);
-    if (!draft || draft.specHash !== specHash || draft.status !== 'done' || draft.gitStageEvidence) return false;
+    if (!draft || isHistoryInactive(draft) || draft.specHash !== specHash || draft.status !== 'done' || draft.gitStageEvidence) return false;
     draft.gitStageEvidence = evidence;
     draft.updatedAt = new Date().toISOString();
     this.emitState(draft);
@@ -257,8 +315,9 @@ export class DraftRunStore {
   public recordGitReuse(id: string, specHash: string, verifiedId: string): boolean {
     const draft = this.draftRuns.get(id);
     const prior = this.draftRuns.get(verifiedId);
-    if (!draft || draft.specHash !== specHash || draft.status !== 'pending' || this.approving.has(id)
-      || prior?.sessionId !== draft.sessionId || !(prior.gitStageEvidence || prior.gitCommitEvidence?.outcome === 'verified')) return false;
+    if (!draft || isHistoryInactive(draft) || draft.specHash !== specHash || draft.status !== 'pending' || this.approving.has(id)
+      || prior?.sessionId !== draft.sessionId || isHistoryInactive(prior)
+      || !(prior.gitStageEvidence || prior.gitCommitEvidence?.outcome === 'verified')) return false;
     draft.gitReusedDraftRunId = verifiedId;
     draft.status = 'no_changes';
     draft.updatedAt = draft.finishedAt = new Date().toISOString();
@@ -269,7 +328,7 @@ export class DraftRunStore {
 
   public recordGitPushAttempt(id: string, specHash: string, attempt: GitPushAttempt): boolean {
     const run = this.draftRuns.get(id);
-    if (!run || run.status !== 'pending' || run.specHash !== specHash || this.approving.has(id)) return false;
+    if (!run || isHistoryInactive(run) || run.status !== 'pending' || run.specHash !== specHash || this.approving.has(id)) return false;
     run.gitPushAttempt = structuredClone(attempt);
     this.schedulePersist();
     return true;
@@ -277,7 +336,7 @@ export class DraftRunStore {
 
   public recordGitReleaseEvidence(id: string, specHash: string, evidence: GitReleaseEvidence): boolean {
     const draft = this.draftRuns.get(id);
-    if (!draft || draft.specHash !== specHash || this.approving.has(id) || draft.gitReleaseEvidence
+    if (!draft || isHistoryInactive(draft) || draft.specHash !== specHash || this.approving.has(id) || draft.gitReleaseEvidence
       || !['pending', 'done', 'failed'].includes(draft.status) || (draft.status === 'pending' && evidence.executed)) return false;
     if (draft.status === 'pending') {
       draft.status = 'no_changes';
@@ -292,7 +351,7 @@ export class DraftRunStore {
 
   public recordGitVerificationFailure(id: string, specHash: string, reason: string): void {
     const draft = this.draftRuns.get(id);
-    if (!draft || draft.specHash !== specHash || draft.status !== 'done' || draft.gitCommitEvidence || draft.gitStageEvidence) return;
+    if (!draft || isHistoryInactive(draft) || draft.specHash !== specHash || draft.status !== 'done' || draft.gitCommitEvidence || draft.gitStageEvidence) return;
     draft.status = 'failed';
     draft.error = reason;
     draft.updatedAt = new Date().toISOString();
@@ -302,7 +361,7 @@ export class DraftRunStore {
 
   public attachApprovalReview(id: string, record: ApprovalReviewRecord): boolean {
     const draftRun = this.draftRuns.get(id);
-    if (!draftRun) return false;
+    if (!draftRun || isHistoryInactive(draftRun)) return false;
     draftRun.approvalReview = toApprovalReviewDisplay(record);
     this.emitState(draftRun);
     this.schedulePersist();
@@ -312,7 +371,7 @@ export class DraftRunStore {
   /** Persist both identities before reviewing or launching the replacement. */
   public async replaceWithRestrictedPython(id: string, target: string, isAuthorized: () => boolean): Promise<DraftRun> {
     const original = this.draftRuns.get(id);
-    const pending = () => original && this.draftRuns.get(id) === original && original.status === 'pending'
+    const pending = () => original && !isHistoryInactive(original) && this.draftRuns.get(id) === original && original.status === 'pending'
       && !original.dependency && !this.approving.has(id) && isAuthorized();
     if (!original || !pending()) throw new Error('Original DraftRun is no longer eligible for replacement.');
     const proposal = await prepareRestrictedPythonSyntax(original, target);
@@ -332,7 +391,7 @@ export class DraftRunStore {
 
   public async settleUnstartedRestrictedRun(id: string, reason: string, cancelled: boolean): Promise<void> {
     const run = this.draftRuns.get(id);
-    if (!run?.spec.restricted || run.status !== 'pending' || this.approving.has(id)) return;
+    if (!run?.spec.restricted || isHistoryInactive(run) || run.status !== 'pending' || this.approving.has(id)) return;
     run.status = cancelled ? 'cancelled' : 'failed';
     run.error = reason;
     run.finishedAt = new Date().toISOString();
@@ -348,7 +407,7 @@ export class DraftRunStore {
     reason?: string;
   }): boolean {
     const draft = this.draftRuns.get(id);
-    if (!draft || draft.status !== 'pending' || draft.specHash !== expectedSpecHash || this.approving.has(id)) return false;
+    if (!draft || isHistoryInactive(draft) || draft.status !== 'pending' || draft.specHash !== expectedSpecHash || this.approving.has(id)) return false;
     const replan = normalizeDraftRunReplan(result.replan, id, draft.agentRunId, draft.specHash);
     const dependency = normalizeApprovalDependency(result.dependency);
     if (!replan && !dependency && !result.reason) return false;
@@ -365,7 +424,7 @@ export class DraftRunStore {
 
   public setPendingDependency(id: string, expectedSpecHash: string, dependency?: ApprovalDependency): boolean {
     const draft = this.draftRuns.get(id);
-    if (!draft || draft.status !== 'pending' || draft.specHash !== expectedSpecHash || this.approving.has(id)) return false;
+    if (!draft || isHistoryInactive(draft) || draft.status !== 'pending' || draft.specHash !== expectedSpecHash || this.approving.has(id)) return false;
     draft.dependency = normalizeApprovalDependency(dependency);
     draft.updatedAt = new Date().toISOString();
     this.emitState(draft);
@@ -376,8 +435,9 @@ export class DraftRunStore {
   /** Reusable hard checks that run before model review and again before execution. */
   public async preflightApproval(id: string, authorizedExternalReferenceUris: ReadonlySet<string>): Promise<DraftRun> {
     const draftRun = this.draftRuns.get(id);
-    if (!draftRun || draftRun.status !== 'pending' || draftRun.dependency) throw new Error('Pending executable DraftRun was not found.');
+    if (!draftRun || isHistoryInactive(draftRun) || draftRun.status !== 'pending' || draftRun.dependency) throw new Error('Pending executable DraftRun was not found.');
     await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
+    if (isHistoryInactive(draftRun) || this.draftRuns.get(id) !== draftRun || draftRun.status !== 'pending') throw new Error('DraftRun history changed during approval.');
     return cloneDraftRun(draftRun);
   }
 
@@ -411,7 +471,7 @@ export class DraftRunStore {
     } = {}
   ): Promise<DraftRun | undefined> {
     const draftRun = this.draftRuns.get(id);
-    if (!draftRun || draftRun.status !== 'pending' || draftRun.dependency || this.approving.has(id)) {
+    if (!draftRun || isHistoryInactive(draftRun) || draftRun.status !== 'pending' || draftRun.dependency || this.approving.has(id)) {
       return undefined;
     }
     this.approving.add(id);
@@ -422,7 +482,7 @@ export class DraftRunStore {
         || (options.userApproval && !options.userApproval())) {
         throw new Error('DraftRun approval was cancelled or revoked.');
       }
-      if (this.draftRuns.get(id) !== draftRun || !['pending', 'approved', 'running'].includes(draftRun.status)) {
+      if (isHistoryInactive(draftRun) || this.draftRuns.get(id) !== draftRun || !['pending', 'approved', 'running'].includes(draftRun.status)) {
         throw new Error('DraftRun state changed during approval.');
       }
       checkDraftRunApprovalBoundary(draftRun, authorizedExternalReferenceUris, options.expectedSpecHash);
@@ -540,7 +600,7 @@ export class DraftRunStore {
 
   public reject(id: string): boolean {
     const draftRun = this.draftRuns.get(id);
-    if (!draftRun || draftRun.status !== 'pending' || this.approving.has(id)) {
+    if (!draftRun || isHistoryInactive(draftRun) || draftRun.status !== 'pending' || this.approving.has(id)) {
       return false;
     }
     draftRun.status = 'rejected';
@@ -566,7 +626,7 @@ export class DraftRunStore {
 
   public cloneAsPending(id: string): DraftRun | undefined {
     const source = this.draftRuns.get(id);
-    if (!source || !TERMINAL_STATUSES.has(source.status) || source.replan || source.dependency || source.spec.restricted || source.replacementDraftRunId) {
+    if (!source || isHistoryInactive(source) || !TERMINAL_STATUSES.has(source.status) || source.replan || source.dependency || source.spec.restricted || source.replacementDraftRunId) {
       return undefined;
     }
     const now = new Date().toISOString();
@@ -612,7 +672,7 @@ export class DraftRunStore {
 
   public validateApprovalBoundary(id: string, authorizedUris: ReadonlySet<string>, expectedSpecHash: string): DraftRun {
     const run = this.draftRuns.get(id);
-    if (!run || run.status !== 'pending' || run.dependency || this.approving.has(id)) throw new Error('Pending executable DraftRun was not found.');
+    if (!run || isHistoryInactive(run) || run.status !== 'pending' || run.dependency || this.approving.has(id)) throw new Error('Pending executable DraftRun was not found.');
     checkDraftRunApprovalBoundary(run, authorizedUris, expectedSpecHash);
     return cloneDraftRun(run);
   }
@@ -624,7 +684,7 @@ export class DraftRunStore {
    */
   public claimReadyAutoContinuation(sessionId: string): DraftRunAutoContinuationClaim | undefined {
     const sessionRuns = Array.from(this.draftRuns.values())
-      .filter((draftRun) => draftRun.sessionId === sessionId);
+      .filter((draftRun) => draftRun.sessionId === sessionId && !isHistoryInactive(draftRun));
     if (sessionRuns.some((draftRun) => !TERMINAL_STATUSES.has(draftRun.status))) {
       return undefined;
     }
@@ -657,14 +717,18 @@ export class DraftRunStore {
     };
   }
 
-  public getPendingProviderTail(sessionId: string, language: KeepseekLanguage): {
+  public getPendingProviderTail(sessionId: string, language: KeepseekLanguage, excludedScope?: HistoryTruncationScope): {
     content: string;
     draftRunIds: string[];
   } | undefined {
     const results = Array.from(this.draftRuns.values())
       .filter((draftRun) => draftRun.sessionId === sessionId
+        && !isHistoryInactive(draftRun)
+        && (!excludedScope || excludedScope.sessionId !== sessionId
+          || !isHistoryOriginRemoved(excludedScope, draftRun))
         && TERMINAL_STATUSES.has(draftRun.status)
-        && !draftRun.resultBoundMessageId)
+        && (!draftRun.resultBoundMessageId || (excludedScope?.sessionId === sessionId
+          && excludedScope.removedMessageIds.includes(draftRun.resultBoundMessageId))))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
     if (!results.length) {
       return undefined;
@@ -707,7 +771,7 @@ export class DraftRunStore {
     let changed = false;
     for (const id of ids) {
       const draftRun = this.draftRuns.get(id);
-      if (!draftRun || draftRun.resultBoundMessageId || !TERMINAL_STATUSES.has(draftRun.status)) {
+      if (!draftRun || isHistoryInactive(draftRun) || draftRun.resultBoundMessageId || !TERMINAL_STATUSES.has(draftRun.status)) {
         continue;
       }
       draftRun.resultBoundMessageId = messageId;
@@ -728,6 +792,8 @@ export class DraftRunStore {
     const now = new Date().toISOString();
     for (const draftRun of this.draftRuns.values()) {
       if (draftRun.sessionId !== sessionId
+        || isHistoryInactive(draftRun)
+        || removedMessageIds.has(draftRun.messageId)
         || !draftRun.resultBoundMessageId
         || !removedMessageIds.has(draftRun.resultBoundMessageId)) {
         continue;
@@ -744,7 +810,7 @@ export class DraftRunStore {
   public rejectPendingForSession(sessionId: string): void {
     let changed = false;
     for (const draftRun of this.draftRuns.values()) {
-      if (draftRun.sessionId === sessionId && draftRun.status === 'pending') {
+      if (draftRun.sessionId === sessionId && !isHistoryInactive(draftRun) && draftRun.status === 'pending') {
         draftRun.status = 'rejected';
         draftRun.finishedAt = new Date().toISOString();
         draftRun.updatedAt = draftRun.finishedAt;
@@ -771,7 +837,7 @@ export class DraftRunStore {
   }
 
   private recordOutput(draftRun: DraftRun, chunk: DraftRunOutputChunk): void {
-    if (draftRun.status !== 'running') {
+    if (isHistoryInactive(draftRun) || draftRun.status !== 'running') {
       return;
     }
     const text = sanitizeTranscriptText(chunk.text);
@@ -790,6 +856,7 @@ export class DraftRunStore {
   }
 
   private emitState(draftRun: DraftRun): void {
+    if (isHistoryInactive(draftRun)) return;
     this.onEvent?.({ type: 'state', draftRun: toWebviewDraftRun(draftRun) });
   }
 
@@ -970,7 +1037,7 @@ function normalizeBatchDisplay(
     ids.add(entry.draftRunId);
     const member = draftRuns.get(entry.draftRunId);
     if (member) {
-      if (member.sessionId !== record.sessionId || member.agentRunId !== record.agentRunId || member.specHash !== entry.specHash) return undefined;
+      if (isHistoryInactive(member) || member.sessionId !== record.sessionId || member.agentRunId !== record.agentRunId || member.specHash !== entry.specHash) return undefined;
       hasMember = true;
       if (member.status !== 'done') completedMismatch = true;
     }
@@ -1022,6 +1089,8 @@ function normalizeStoredDraftRun(value: unknown): DraftRun | undefined {
     || !Number.isSafeInteger(plan.snapshotBytes) || plan.snapshotBytes < 0)) return undefined;
   return cloneDraftRun({
     ...record,
+    historyOriginUnverified: record.historyOriginUnverified === true || undefined,
+    historyInvalidationId: typeof record.historyInvalidationId === 'string' && record.historyInvalidationId ? record.historyInvalidationId : undefined,
     replacementDraftRunId: typeof record.replacementDraftRunId === 'string' ? record.replacementDraftRunId : undefined,
     replan: normalizeDraftRunReplan(record.replan, record.id, record.agentRunId, record.specHash),
     dependency: normalizeApprovalDependency(record.dependency),
@@ -1043,4 +1112,8 @@ function normalizeStoredDraftRun(value: unknown): DraftRun | undefined {
       ? record.autoContinueClaimedAt
       : undefined
   } as DraftRun);
+}
+
+function isHistoryInactive(run: DraftRun): boolean {
+  return Boolean(run.historyInvalidationId || run.historyOriginUnverified);
 }

@@ -16,6 +16,7 @@ import {
   CURRENT_PROVIDER_TOOL_SCHEMA_VERSION
 } from '../src/agent/providerRequestProjection';
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
+import { createHistoryTruncationPlan } from '../src/sessions/historyTruncation';
 import type { ChatMessage, ChatSession, WorkspaceSummary } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
 
@@ -327,6 +328,41 @@ test('global storage isolates project approval modes and copied sessions use the
   const restartedSecond = new ChatSessionStore(new GlobalSessionStorage(storageUri), 'en', secondScope);
   await restartedSecond.initialize();
   assert.equal(restartedSecond.approvalMode, 'delegate');
+});
+
+test('copying another workspace session refuses a pending or malformed history journal before creating a new identity', async () => {
+  const sourceScope = { key: 'workspace:copy-source', name: 'Source', folderUris: [] };
+  const targetScope = { key: 'workspace:copy-target', name: 'Target', folderUris: [] };
+  const source = createSession('copy-source', [createMessage(0), createMessage(1)], sourceScope);
+  const target = createSession('copy-target', [], targetScope);
+  const storage = new MemorySessionStorage({ activeSessionId: target.id, sessions: [target] });
+  storage.loadWorkspaceSessions = async () => [source];
+  const store = new ChatSessionStore(storage, 'en', targetScope);
+  await store.initialize();
+  const originalSource = JSON.stringify(source);
+  const journal = createHistoryTruncationPlan(source, 'm0', { ...createMessage(2), content: 'replacement bytes' })!;
+  for (const pending of [journal, null, { version: 1, sessionId: 'wrong-session' }]) {
+    source.pendingHistoryTruncation = pending as ChatSession['pendingHistoryTruncation'];
+    await assert.rejects(store.copyOtherWorkspaceSession(sourceScope.key, source.id), /original workspace.*history recovery/);
+    assert.equal(store.activeSessionId, target.id);
+    assert.equal(store.getSessionSummaries().length, 1);
+    assert.equal(storage.saved, undefined);
+  }
+  delete source.pendingHistoryTruncation;
+  assert.equal(JSON.stringify(source), originalSource);
+  const copied = await store.copyOtherWorkspaceSession(sourceScope.key, source.id);
+  assert.ok(copied && copied.id !== source.id);
+  assert.equal(copied.pendingHistoryTruncation, undefined);
+  assert.deepEqual(copied.messages.map(message => message.content), source.messages.map(message => message.content));
+  assert.equal(storage.saved?.sessions.find(session => session.id === copied.id)?.pendingHistoryTruncation, undefined);
+});
+
+test('loading a corrupt history truncation journal fails closed instead of dropping its pending recovery boundary', () => {
+  const scope = { key: 'workspace:corrupt-truncation', name: 'Corrupt', folderUris: [] };
+  const source = createSession('corrupt-source', [createMessage(0)], scope);
+  assert.throws(() => normalizeStoredSessions({ sessions: [{ ...source, pendingHistoryTruncation: null }] }, scope), /journal/);
+  assert.throws(() => normalizeStoredSessions({ sessions: [{ ...source,
+    pendingHistoryTruncation: { version: 1, sessionId: 'another-session' } }] }, scope), /journal scope/);
 });
 
 class MemorySessionStorage implements ChatSessionStorageAdapter {

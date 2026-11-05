@@ -14,6 +14,7 @@ export class DraftRunAuthorizationService {
     isAuthorized: () => boolean,
     match?: ApprovalRecordMatch
   ): Promise<ExecutionPermit> {
+    if (draftRun.historyInvalidationId || draftRun.historyOriginUnverified) throw new Error('DraftRun was detached by editing its source history.');
     assertValidGitCommitArguments(draftRun.spec);
     if (!isAuthorized()) throw new Error('Delegated approval was revoked or is no longer authorized.');
     if (!this.approvalReviews || !match) {
@@ -30,6 +31,7 @@ export class DraftRunAuthorizationService {
   }
 
   public createUserClickPermit(draftRun: DraftRun): ExecutionPermit {
+    if (draftRun.historyInvalidationId || draftRun.historyOriginUnverified) throw new Error('DraftRun was detached by editing its source history.');
     assertValidGitCommitArguments(draftRun.spec);
     const denial = this.approvalReviews?.findHardRunDenial(draftRun.sessionId, draftRun.specHash)
       ?? (draftRun.spec.restricted && this.approvalReviews?.findHardRunDenial(draftRun.sessionId, draftRun.spec.restricted.originalSpecHash));

@@ -43,6 +43,174 @@ test('creates one structured ChangeSet for multiple draft edits', () => {
   assert.match(changeSet.operationSummary, /Update A/u);
 });
 
+test('history truncation detaches all file states and rejects stale actions while retaining execution facts', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-truncation-'));
+  const fixture = createStoreFixture(root);
+  const statuses: ChangeSetFile['status'][] = ['pending', 'apply_failed', 'interrupted', 'applied', 'revert_failed', 'uncertain', 'discarded', 'reverted'];
+  const removed = statuses.map((status, index) => {
+    const changeSet = createChangeSet({ runId: `removed-segment-${index}`, sessionId: 'session-1', messageId: 'removed-assistant',
+      edits: [draft(`removed-${index}`, `removed-${index}.ts`)] })!;
+    changeSet.files[0].status = status;
+    changeSet.files[0].error = `original ${status}`;
+    fixture.store.add(changeSet);
+    return changeSet;
+  });
+  const retained = fixture.store.addDraftEdits({ runId: 'removed-segment-0', sessionId: 'session-1', messageId: 'retained-assistant',
+    edits: [draft('retained-edit', 'retained.ts')] })!;
+  const other = fixture.store.addDraftEdits({ runId: 'removed-segment', sessionId: 'other-session', messageId: 'removed-assistant',
+    edits: [draft('other-edit', 'other.ts')] })!;
+  const skill = fixture.store.addDraftEdits({ runId: 'skill-dialog', sessionId: 'session-1', messageId: 'skill-origin',
+    edits: [draft('skill-edit', 'skill.ts')] })!;
+  const scope = { id: 'truncation-1', sessionId: 'session-1', removedMessageIds: ['removed-assistant'],
+    removedSegmentIds: statuses.map((_, index) => `removed-segment-${index}`), retainedMessageIds: ['retained-assistant'] };
+  assert.equal(fixture.store.invalidateHistory(scope).length, removed.length * 2);
+  assert.equal(fixture.store.invalidateHistory(scope).length, removed.length * 2);
+  assert.deepEqual(fixture.store.toWebviewState('session-1').map(set => set.id).sort(), [retained.id, skill.id].sort());
+  assert.equal(fixture.store.toWebviewState('other-session')[0]?.id, other.id);
+  assert.equal(fixture.store.getPendingEdit('retained-edit')?.edit.id, 'retained-edit');
+  for (const changeSet of removed) {
+    const id = changeSet.files[0].id;
+    assert.equal(fixture.store.getPendingEdit(id), undefined);
+    assert.equal(await fixture.store.applyEdit(id), undefined);
+    assert.equal(await fixture.store.applyAll(changeSet.id), undefined);
+    assert.equal(await fixture.store.revertEdit(id), undefined);
+    assert.equal(await fixture.store.revertAll(changeSet.id), undefined);
+    assert.equal(fixture.store.discardEdit(id), false);
+    assert.equal(fixture.store.discardAll(changeSet.id), false);
+    assert.deepEqual(fixture.store.getChangeSetEditUris(changeSet.id), []);
+    await assert.rejects(fixture.store.preflightEdit(id), /not found/u);
+  }
+  await fixture.store.flush();
+  const stored = await readStoredChangeSets(root);
+  for (let index = 0; index < removed.length; index += 1) {
+    const persisted = stored.find(set => set.id === removed[index].id)!;
+    assert.equal(persisted.historyInvalidationId, scope.id);
+    assert.equal(persisted.files[0].status, statuses[index]);
+    assert.equal(persisted.files[0].error, `original ${statuses[index]}`);
+  }
+  const restarted = createStoreFixture(root);
+  await restarted.store.initialize();
+  assert.deepEqual(restarted.store.toWebviewState('session-1').map(set => set.id).sort(), [retained.id, skill.id].sort());
+  assert.equal(await restarted.store.applyEdit('removed-0'), undefined);
+});
+
+test('history truncation rejects late DraftEdits and uses exact segments only without a retained origin', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-truncation-late-'));
+  const fixture = createStoreFixture(root);
+  const originless = fixture.store.addDraftEdits({ runId: 'removed-segment', sessionId: 'session-1',
+    edits: [draft('legacy-edit', 'legacy.ts')] })!;
+  const scope = { id: 'truncation-late', sessionId: 'session-1', removedMessageIds: ['removed-assistant'],
+    removedSegmentIds: ['removed-segment'], retainedMessageIds: ['retained-assistant'] };
+  assert.deepEqual(fixture.store.invalidateHistory(scope), [originless.id, 'legacy-edit']);
+  assert.equal(fixture.store.addDraftEdits({ runId: 'removed-segment', sessionId: 'session-1', messageId: 'removed-assistant',
+    edits: [draft('late-edit', 'late.ts')] }), undefined);
+  assert.equal(fixture.store.hasPendingForSession('session-1'), false);
+  assert.deepEqual(fixture.store.toWebviewState('session-1'), []);
+  assert.equal(await fixture.store.applyEdit('late-edit'), undefined);
+  await fixture.store.flush();
+  const persisted = await readStoredChangeSets(root);
+  assert.equal(persisted.find(set => set.files[0]?.id === 'late-edit')?.historyInvalidationId, scope.id);
+});
+
+test('history truncation waits for an active file operation before invalidating any records', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-truncation-busy-'));
+  let release!: () => void;
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  const fixture = createStoreFixture(root);
+  const internals = fixture.store as unknown as { safeFileEditor: { applyDraftEdit(file: ChangeSetFile, changeSetId: string): Promise<ChangeCheckpoint> } };
+  const apply = internals.safeFileEditor.applyDraftEdit.bind(internals.safeFileEditor);
+  internals.safeFileEditor.applyDraftEdit = async (file, changeSetId) => { await wait; return apply(file, changeSetId); };
+  const set = fixture.store.addDraftEdits({ runId: 'busy-segment', sessionId: 'session-1', messageId: 'busy-assistant',
+    edits: [draft('busy-edit', 'busy.ts')] })!;
+  const operation = fixture.store.applyEdit('busy-edit');
+  assert.equal(fixture.store.hasActiveOperations('session-1'), true);
+  const scope = { id: 'truncation-busy', sessionId: 'session-1', removedMessageIds: ['busy-assistant'],
+    removedSegmentIds: ['busy-segment'], retainedMessageIds: [] };
+  assert.throws(() => fixture.store.invalidateHistory(scope), /still running/u);
+  assert.equal(fixture.store.toWebviewState('session-1')[0]?.id, set.id);
+  release();
+  assert.deepEqual((await operation)?.appliedEditIds, ['busy-edit']);
+  assert.equal(fixture.store.hasActiveOperations('session-1'), false);
+  assert.deepEqual(fixture.store.invalidateHistory(scope), [set.id, 'busy-edit']);
+  await fixture.store.flush();
+  assert.equal((await readStoredChangeSets(root)).find(stored => stored.id === set.id)?.files[0].status, 'applied');
+});
+
+test('legacy orphan quarantine uses full host history and preserves audit until origin is verifiable', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-orphan-'));
+  const fixture = createStoreFixture(root);
+  const orphan = fixture.store.addDraftEdits({ runId: 'missing-segment', sessionId: 'session-1', messageId: 'missing-origin',
+    edits: [draft('orphan-edit', 'orphan.ts')] })!;
+  const paged = fixture.store.addDraftEdits({ runId: 'page-segment', sessionId: 'session-1', messageId: 'earlier-page-origin',
+    edits: [draft('paged-edit', 'paged.ts')] })!;
+  const segment = fixture.store.addDraftEdits({ runId: 'verified-segment', sessionId: 'session-1', messageId: 'legacy-no-longer-linked',
+    edits: [draft('segment-edit', 'segment.ts')] })!;
+  const skill = fixture.store.addDraftEdits({ runId: 'skill-dialog', sessionId: 'session-1', messageId: 'skill:create',
+    edits: [draft('dialog-edit', 'dialog.ts')] })!;
+  const fullMessages = [{ id: 'earlier-page-origin', role: 'assistant', content: '', createdAt: '',
+    runCheckpointArchive: { summary: { taskId: 'verified-segment' } } } as ChatMessage];
+  fixture.store.reconcileHistoryOrigins('session-1', fullMessages);
+  assert.deepEqual(fixture.store.toWebviewState('session-1').map(set => set.id).sort(), [paged.id, segment.id, skill.id].sort());
+  assert.equal(await fixture.store.applyEdit('orphan-edit'), undefined);
+  await fixture.store.flush();
+  let persisted = (await readStoredChangeSets(root)).find(set => set.id === orphan.id)!;
+  assert.equal(persisted.historyOriginUnverified, true);
+  assert.equal(persisted.files[0].status, 'pending');
+  const restarted = createStoreFixture(root);
+  await restarted.store.initialize();
+  assert.equal(await restarted.store.applyEdit('orphan-edit'), undefined);
+  restarted.store.reconcileHistoryOrigins('session-1', [...fullMessages,
+    { id: 'missing-origin', role: 'assistant', content: '', createdAt: '' } as ChatMessage]);
+  assert.equal(restarted.store.getPendingEdit('orphan-edit')?.edit.id, 'orphan-edit');
+  await restarted.store.flush();
+  persisted = (await readStoredChangeSets(root)).find(set => set.id === orphan.id)!;
+  assert.equal(persisted.historyOriginUnverified, undefined);
+});
+
+test('truncation persistence failure is observable and idempotent recovery keeps journals and real files', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-truncation-write-failure-'));
+  const fixture = createStoreFixture(root);
+  const set = fixture.store.addDraftEdits({ runId: 'failure-segment', sessionId: 'session-1', messageId: 'failure-origin',
+    edits: [draft('failure-edit', 'failure.ts')] })!;
+  await fixture.store.applyEdit('failure-edit');
+  await fixture.store.flush();
+  const realFile = path.join(root, 'already-applied.ts');
+  await writeFile(realFile, 'already applied content');
+  const originalRename = vscode.workspace.fs.rename;
+  let fail = true;
+  vscode.workspace.fs.rename = async (source, target, options) => {
+    if (fail && target.fsPath.startsWith(root) && target.fsPath.includes('/change-sets/v4/runtime/')) {
+      throw new Error('simulated truncation shard failure');
+    }
+    await originalRename(source, target, options);
+  };
+  t.after(() => { vscode.workspace.fs.rename = originalRename; });
+  const scope = { id: 'truncation-failure', sessionId: 'session-1', removedMessageIds: ['failure-origin'],
+    removedSegmentIds: ['failure-segment'], retainedMessageIds: [] };
+  fixture.store.invalidateHistory(scope);
+  await assert.rejects(fixture.store.flush(), /simulated truncation shard failure/u);
+  assert.equal(await fixture.store.revertEdit('failure-edit'), undefined);
+  fail = false;
+  assert.deepEqual(fixture.store.invalidateHistory(scope), [set.id, 'failure-edit']);
+  await fixture.store.flush();
+  // Recovery replays the durable host intent before exposing or executing old
+  // Store state; reapplying membership is safe after a partial multi-file write.
+  const restarted = createStoreFixture(root);
+  await restarted.store.initialize();
+  restarted.store.invalidateHistory(scope);
+  await restarted.store.flush();
+  assert.deepEqual(restarted.store.toWebviewState('session-1'), []);
+  const persisted = (await readStoredChangeSets(root)).find(stored => stored.id === set.id)!;
+  assert.equal(persisted.historyInvalidationId, scope.id);
+  assert.equal(persisted.files[0].status, 'applied');
+  assert.equal(persisted.files[0].checkpointId, 'checkpoint-failure-edit');
+  const index = JSON.parse(await readFile(path.join(root, 'change-sets', 'v4', 'index.json'), 'utf8')) as {
+    entries: Array<{ id: string; checkpointIds: string[] }>;
+  };
+  assert.deepEqual(index.entries.find(entry => entry.id === set.id)?.checkpointIds, ['checkpoint-failure-edit']);
+  assert.equal(await readFile(realFile, 'utf8'), 'already applied content');
+});
+
 test('merges cumulative checkpoint DraftEdits and the final response into one ChangeSet', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'keepseek-change-checkpoint-merge-'));
   const fixture = createStoreFixture(root);
@@ -605,6 +773,18 @@ function draft(id: string, label: string) {
     newText: `source for ${label}`,
     reason: `Update ${label}`
   };
+}
+
+async function readStoredChangeSets(root: string): Promise<Array<{ id: string; historyInvalidationId?: string; historyOriginUnverified?: boolean; files: ChangeSetFile[] }>> {
+  const index = JSON.parse(await readFile(path.join(root, 'change-sets', 'v4', 'index.json'), 'utf8')) as {
+    entries: Array<{ storageFile: string }>;
+  };
+  return Promise.all(index.entries.map(async entry => {
+    const stored = JSON.parse(await readFile(path.join(root, 'change-sets', 'v4', entry.storageFile), 'utf8')) as {
+      changeSet: { id: string; historyInvalidationId?: string; historyOriginUnverified?: boolean; files: ChangeSetFile[] };
+    };
+    return stored.changeSet;
+  }));
 }
 
 function versionedDraft(

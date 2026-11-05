@@ -226,7 +226,7 @@ test('reject and failed integrity checks never call the executor, while cloning 
   });
 });
 
-test('results bound to removed history become available for the replacement user message', async () => {
+test('results with retained origin and removed delivery become available once for the replacement user message', async () => {
   await withDraftRunFixture(async ({ workspaceRoot, store }) => {
     const proposal = createProposal(workspaceRoot, { id: 'rebind-after-edit' });
     store.addProposals({
@@ -241,11 +241,121 @@ test('results bound to removed history become available for the replacement user
     store.bindResultsToMessage(originalTail?.draftRunIds ?? [], 'user-removed');
     assert.equal(store.getPendingProviderTail('session-rebind', 'en'), undefined);
 
-    store.releaseResultBindingsForMessages('session-rebind', ['user-removed']);
+    const scope = { id: 'edit-rebind', sessionId: 'session-rebind', removedMessageIds: ['user-removed'],
+      removedSegmentIds: [], retainedMessageIds: ['assistant-rebind'] };
+    assert.equal(store.getPendingProviderTail('session-rebind', 'en', scope)?.content, originalTail?.content);
+    store.invalidateHistory(scope);
     const replacementTail = store.getPendingProviderTail('session-rebind', 'en');
     assert.equal(replacementTail?.content, originalTail?.content);
     store.bindResultsToMessage(replacementTail?.draftRunIds ?? [], 'user-replacement');
     assert.equal(store.getPendingProviderTail('session-rebind', 'en'), undefined);
+  });
+});
+
+test('source invalidation removes every command status from activity, retains audit, and survives reload', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
+    const statuses: DraftRun['status'][] = ['pending', 'failed', 'needs_replan', 'done', 'rejected', 'cancelled', 'no_changes'];
+    for (const status of statuses) store.addProposals({ proposals: [createProposal(workspaceRoot, { id: status })],
+      sessionId: 's', agentRunId: 'removed-segment', messageId: 'removed-assistant' });
+    store.addProposals({ proposals: [createProposal(workspaceRoot, { id: 'kept' })], sessionId: 's',
+      agentRunId: 'removed-segment', messageId: 'retained-assistant' });
+    store.addProposals({ proposals: [createProposal(workspaceRoot, { id: 'other' })], sessionId: 'other',
+      agentRunId: 'removed-segment', messageId: 'removed-assistant' });
+    store.addProposals({ proposals: [createProposal(workspaceRoot, { id: 'skill-dialog' })], sessionId: 's',
+      agentRunId: 'skill-segment', messageId: 'skill-dialog-source' });
+    await store.flush();
+    const storageFile = path.join(root, 'storage', 'draft-runs.json');
+    const saved = JSON.parse(await readFile(storageFile, 'utf8')) as { version: number; draftRuns: DraftRun[] };
+    for (const run of saved.draftRuns) if (statuses.includes(run.id as DraftRun['status'])) {
+      run.status = run.id as DraftRun['status'];
+      run.resultBoundMessageId = 'removed-user';
+      run.outputHead = `real output ${run.id}`;
+      run.autoContinueRequested = true;
+    }
+    await writeFile(storageFile, JSON.stringify(saved));
+    const reloaded = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    try {
+      await reloaded.initialize();
+      const scope = { id: 'edit', sessionId: 's', removedMessageIds: ['removed-user', 'removed-assistant'],
+        removedSegmentIds: ['removed-segment'], retainedMessageIds: ['retained-assistant'] };
+      assert.equal(reloaded.getPendingProviderTail('s', 'en', scope), undefined, 'prepared replacement excludes deleted origins');
+      assert.deepEqual(reloaded.invalidateHistory(scope), statuses);
+      reloaded.invalidateHistory(scope);
+      assert.deepEqual(reloaded.toWebviewState('s').map(run => run.id), ['kept', 'skill-dialog']);
+      assert.equal(reloaded.get('kept')?.status, 'pending');
+      assert.equal(reloaded.get('other')?.historyInvalidationId, undefined);
+      for (const status of statuses) {
+        assert.equal(reloaded.get(status)?.status, status);
+        assert.equal(reloaded.get(status)?.outputHead, `real output ${status}`);
+        assert.equal(reloaded.get(status)?.historyInvalidationId, 'edit');
+        assert.equal(reloaded.get(status)?.resultBoundMessageId, 'removed-user', 'delivery audit is preserved');
+        assert.equal(reloaded.cloneAsPending(status), undefined);
+        assert.equal(reloaded.reject(status), false);
+        assert.equal(await reloaded.approveAndRun(status, new Set()), undefined);
+        await assert.rejects(reloaded.preflightApproval(status, new Set()), /Pending executable DraftRun/u);
+        assert.throws(() => reloaded.validateApprovalBoundary(status, new Set(), reloaded.get(status)!.specHash));
+      }
+      assert.equal(reloaded.getPendingProviderTail('s', 'en'), undefined);
+      assert.equal(reloaded.claimReadyAutoContinuation('s'), undefined);
+      assert.deepEqual(reloaded.addProposals({ proposals: [createProposal(workspaceRoot, { id: 'late' })],
+        sessionId: 's', agentRunId: 'removed-segment', messageId: 'late-assistant' }), []);
+      assert.equal(executor.executeCount, 0);
+      await reloaded.flush();
+      const restarted = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+      try {
+        await restarted.initialize();
+        assert.deepEqual(restarted.toWebviewState('s').map(run => run.id), ['kept', 'skill-dialog']);
+        assert.equal(restarted.getPendingProviderTail('s', 'en'), undefined);
+        assert.equal(await restarted.approveAndRun('pending', new Set()), undefined);
+      } finally { restarted.dispose(); }
+    } finally { reloaded.dispose(); }
+  });
+});
+
+test('invalidation refuses a live command and leaves its history attached until settlement', async () => {
+  await withDraftRunFixture(async ({ workspaceRoot, store, executor }) => {
+    const proposal = createProposal(workspaceRoot, { id: 'executing-source' });
+    store.addProposals({ proposals: [proposal], sessionId: 's', agentRunId: 'segment', messageId: 'assistant' });
+    executor.prepareCancellation();
+    const running = store.approveAndRun(proposal.id, new Set());
+    await executor.started;
+    const scope = { id: 'edit', sessionId: 's', removedMessageIds: ['assistant'], removedSegmentIds: ['segment'], retainedMessageIds: [] };
+    assert.throws(() => store.invalidateHistory(scope), /settle/u);
+    assert.equal(store.get(proposal.id)?.historyInvalidationId, undefined);
+    assert.equal(store.toWebviewState('s').length, 1);
+    store.cancel(proposal.id);
+    await running;
+    store.invalidateHistory(scope);
+    assert.equal(store.get(proposal.id)?.status, 'cancelled');
+    assert.equal(store.toWebviewState('s').length, 0);
+  });
+});
+
+test('legacy missing origins are quarantined using full host history while known skill and segment origins remain usable', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
+    for (const [id, messageId, agentRunId] of [
+      ['missing', 'old-assistant', 'old-segment'], ['paged', 'retained-assistant', 'retained-segment'],
+      ['segment-origin', 'legacy-source-id', 'retained-segment'], ['skill', 'skill:create', 'skill-segment']
+    ]) store.addProposals({ proposals: [createProposal(workspaceRoot, { id })], sessionId: 's', messageId, agentRunId });
+    const messages = [{ id: 'retained-assistant', role: 'assistant', content: 'earlier page', createdAt: 'now',
+      runCheckpointArchive: { version: 1, objectHash: 'archive', summary: { taskId: 'retained-segment' } } }] as never;
+    assert.deepEqual(store.reconcileHistoryOrigins('s', messages), ['missing']);
+    assert.deepEqual(store.toWebviewState('s').map(run => run.id), ['paged', 'segment-origin', 'skill']);
+    assert.equal(store.get('missing')?.status, 'pending');
+    assert.equal(store.get('missing')?.historyOriginUnverified, true);
+    assert.equal(await store.approveAndRun('missing', new Set()), undefined);
+    assert.equal(store.cloneAsPending('missing'), undefined);
+    await store.flush();
+    const reloaded = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    try {
+      await reloaded.initialize();
+      assert.equal(reloaded.get('missing')?.historyOriginUnverified, true);
+      assert.equal(await reloaded.approveAndRun('missing', new Set()), undefined);
+      const verified = [{ id: 'old-assistant', role: 'assistant', content: 'restored valid host source', createdAt: 'now' }] as never;
+      assert.ok(reloaded.reconcileHistoryOrigins('s', verified).includes('missing'));
+      assert.equal(reloaded.get('missing')?.historyOriginUnverified, undefined);
+    } finally { reloaded.dispose(); }
+    assert.equal(executor.executeCount, 0);
   });
 });
 

@@ -144,6 +144,67 @@ test('approval records require an exact current-runtime match and are one-shot',
   });
 });
 
+test('edited history revokes unused approvals but keeps original audit decisions across reload', async () => {
+  await withApprovalFixture(async ({ storageUri, store }) => {
+    const removed = await store.add(approvalRecordInput());
+    const retained = await store.add({ ...approvalRecordInput(), agentRunId: 'retained-segment', targetId: 'retained' });
+    const other = await store.add({ ...approvalRecordInput(), sessionId: 'other', targetId: 'other' });
+    const scope = { id: 'edit-resend', sessionId: 'session', removedMessageIds: ['removed'],
+      removedSegmentIds: ['run'], retainedMessageIds: ['retained'] };
+    await store.invalidateHistory(scope);
+    await store.invalidateHistory(scope);
+    const original = store.get(removed.reviewId)!;
+    assert.equal(original.historyInvalidatedBy, scope.id);
+    assert.equal(original.decision, 'approve');
+    assert.equal(original.consumedAt, undefined);
+    assert.equal(store.getLatestForTarget(removed.targetId), undefined);
+    assert.equal(store.get(retained.reviewId)?.historyInvalidatedBy, undefined);
+    assert.equal(store.get(other.reviewId)?.historyInvalidatedBy, undefined);
+    const match = { reviewId: removed.reviewId, sessionId: removed.sessionId, rootTaskId: removed.rootTaskId,
+      agentRunId: removed.agentRunId, targetId: removed.targetId, actionKind: removed.actionKind,
+      actionHash: removed.actionHash, policyVersion: removed.policyVersion, approvalMode: 'delegate' as const,
+      expectedSource: 'user_click' as const, workspaceTrusted: true };
+    await assert.rejects(store.consumeMatchingApproval(match), /matching approval/u);
+    const request = { ...reviewRequest(), targetId: removed.targetId, actionKind: removed.actionKind, actionHash: removed.actionHash };
+    assert.equal(store.matchesSnapshot(removed.reviewId, request), false);
+    await store.consumeMatchingApproval({ ...match, reviewId: retained.reviewId, agentRunId: retained.agentRunId, targetId: retained.targetId });
+    const restored = new ApprovalReviewStore(storageUri as never);
+    await restored.initialize();
+    assert.equal(restored.get(removed.reviewId)?.historyInvalidatedBy, scope.id);
+    assert.equal(restored.get(removed.reviewId)?.decision, 'approve');
+    assert.equal(restored.getLatestForTarget(removed.targetId), undefined);
+  });
+});
+
+test('failed approval history invalidation retries persistence and stays revoked in memory', async () => {
+  await withApprovalFixture(async ({ storageUri, store }) => {
+    const record = await store.add(approvalRecordInput());
+    const scope = { id: 'edit-failed-write', sessionId: record.sessionId, removedMessageIds: [],
+      removedSegmentIds: [record.agentRunId], retainedMessageIds: [] };
+    const write = vscode.workspace.fs.writeFile;
+    vscode.workspace.fs.writeFile = async () => { throw new Error('injected disk failure'); };
+    try { await assert.rejects(store.invalidateHistory(scope), /injected disk failure/u); }
+    finally { vscode.workspace.fs.writeFile = write; }
+    assert.equal(store.getLatestForTarget(record.targetId), undefined);
+    await store.invalidateHistory(scope);
+    const restored = new ApprovalReviewStore(storageUri as never);
+    await restored.initialize();
+    assert.equal(restored.get(record.reviewId)?.historyInvalidatedBy, scope.id);
+  });
+});
+
+test('exact removed approval targets do not revoke another target in the same retained execution segment', async () => {
+  await withApprovalFixture(async ({ store }) => {
+    const removed = await store.add(approvalRecordInput());
+    const retained = await store.add({ ...approvalRecordInput(), targetId: 'retained' });
+    await store.invalidateHistory({ id: 'shared-segment-edit', sessionId: removed.sessionId,
+      removedMessageIds: ['removed'], removedSegmentIds: [], retainedMessageIds: ['retained'] }, [removed.targetId]);
+    assert.equal(store.getLatestForTarget(removed.targetId), undefined);
+    assert.equal(store.getLatestForTarget(retained.targetId)?.reviewId, retained.reviewId);
+    assert.equal(store.get(retained.reviewId)?.historyInvalidatedBy, undefined);
+  });
+});
+
 test('subagent selection is shared by reviewer resolution and fixed failures never fall back', async () => {
   await withApprovalFixture(async ({ storageUri, store }) => {
     const sourceStore = new ModelSourceStore(storageUri as never);

@@ -37,8 +37,9 @@ test('host preserves reconnect activity counters and clears them on the next nor
 test('stream publisher replaces a failed suffix, preserves complete prior rounds and cancels pending batches', async () => {
   const controller = new AbortController();
   const posted: Array<Record<string, unknown>> = [];
+  const messages: ChatMessage[] = [];
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
-    sessionStore: { getActiveSession: () => ({ id: 'session', messages: [], executionTime: { version: 1, byTask: { a: 1234 }, incomplete: false } }) },
+    sessionStore: { getActiveSession: () => ({ id: 'session', messages, executionTime: { version: 1, byTask: { a: 1234 }, incomplete: false } }) },
     currentRunAbortController: controller,
     agentActivity: { base: 'thinking', phase: 'requesting_model' },
     postToWebview: (message: Record<string, unknown>) => posted.push(message)
@@ -46,6 +47,7 @@ test('stream publisher replaces a failed suffix, preserves complete prior rounds
     schedule(): void; beginModelRound(): void; resetAttempt(): void; dispose(): void;
   } };
   const message: ChatMessage = { id: 'answer', role: 'assistant', content: '', reasoningContent: '', isStreaming: true, createdAt: new Date().toISOString() };
+  messages.push(message);
   const stream = host.createRunStreamPublisher('session', message);
   stream.beginModelRound();
   stream.resetAttempt();
@@ -412,10 +414,10 @@ test('command settings become ready without waiting for project context or the f
     },
     availableModels: [{ id: 'model', sourceId: 'source' }],
     startupTraceStages: new Set<string>(),
-    sessionStore: { activeSessionId: 'session', getActiveSession: () => ({ approvalMode: 'ask' }) },
+    sessionStore: { activeSessionId: 'session', getActiveSession: () => ({ id: 'session', messages: [], approvalMode: 'ask' }) },
     approvalReviews: { initialize: async () => {} },
-    changeSets: { initialize: async () => {}, loadSession: async () => {} },
-    draftRuns: { initialize: async () => {}, loadSession: async () => {} },
+    changeSets: { initialize: async () => {}, loadSession: async () => {}, reconcileHistoryOrigins: () => {}, flush: async () => {} },
+    draftRuns: { initialize: async () => {}, loadSession: async () => {}, reconcileHistoryOrigins: () => {}, flush: async () => {} },
     subagentSettingsStore: {
       load: async () => ({ version: 1, mode: 'follow-main', updatedAt: new Date(0).toISOString() })
     },

@@ -138,9 +138,11 @@ export interface ApprovalReviewRecord {
   /** Original reviewer outcome remains an independent audit record. */
   priorReviewId?: string;
   userRequestId?: string;
+  /** Local history membership only; never changes the original review decision. */
+  historyInvalidatedBy?: string;
 }
 
-export type ApprovalReviewDisplay = Omit<ApprovalReviewRecord, 'runtimeId' | 'actionHash' | 'policyRules' | 'scopeFingerprint' | 'reviewerConfigFingerprint' | 'originalActionHash'>;
+export type ApprovalReviewDisplay = Omit<ApprovalReviewRecord, 'runtimeId' | 'actionHash' | 'policyRules' | 'scopeFingerprint' | 'reviewerConfigFingerprint' | 'originalActionHash' | 'historyInvalidatedBy'>;
 
 export interface ApprovalReviewOutcome {
   status: 'reviewed' | 'unavailable';

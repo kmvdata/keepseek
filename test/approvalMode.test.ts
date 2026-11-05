@@ -25,7 +25,8 @@ import { getScript } from '../src/webview/script';
 import type { ApprovalMode, ChatMessage, ChatSession } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
 import { normalizeStoredSessions } from '../src/sessions/chatSessionStore';
-import { normalizeApprovalProcessing } from '../src/approvals/approvalProcessing';
+import { invalidateApprovalStateForHistory, normalizeApprovalProcessing } from '../src/approvals/approvalProcessing';
+import type { HistoryTruncationScope } from '../src/sessions/historyTruncation';
 
 test('draft receipt and host authorization text describe the actual mode without claiming execution', () => {
   for (const lang of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'delegate'] as const) {
@@ -59,6 +60,63 @@ test('approval defaults fail closed and queue cannot replay, cross sessions, or 
   queue.finish(first.controller);
   assert.equal(queue.take('s'), undefined);
   assert.equal(new DelegatedApprovalQueue().take('s'), undefined);
+});
+
+test('history truncation cancels only the matching queued or active approval segment', () => {
+  const scope: HistoryTruncationScope = { id: 'edit-resend', sessionId: 's', removedMessageIds: ['removed'],
+    removedSegmentIds: ['removed-segment'], retainedMessageIds: ['retained'] };
+  const queue = new DelegatedApprovalQueue();
+  queue.enqueue({ sessionId: 's', runId: 'retained-segment', rootTaskId: 'same-root', editIds: ['retained-edit'], draftRunIds: [] });
+  const retained = queue.take('s')!;
+  queue.enqueue({ sessionId: 's', runId: 'removed-segment', rootTaskId: 'same-root', editIds: ['removed-edit'], draftRunIds: [] });
+  queue.invalidateHistory(scope);
+  assert.equal(retained.controller.signal.aborted, false);
+  queue.finish(retained.controller);
+  assert.equal(queue.take('s'), undefined);
+
+  queue.enqueue({ sessionId: 's', runId: 'removed-segment', editIds: [], draftRunIds: ['run'] });
+  const removed = queue.take('s')!;
+  queue.invalidateHistory({ ...scope, sessionId: 'another' });
+  assert.equal(removed.controller.signal.aborted, false);
+  queue.invalidateHistory(scope);
+  assert.equal(removed.controller.signal.aborted, true);
+  queue.finish(removed.controller);
+  queue.enqueue({ sessionId: 's', runId: 'retained-segment', editIds: ['removed-target'], draftRunIds: [] });
+  queue.invalidateHistory(scope, ['removed-target']);
+  assert.equal(queue.take('s'), undefined, 'a removed message may share a retained segment; exact targets still revoke queued work');
+});
+
+test('history truncation removes only affected live approval projections without changing original decisions', () => {
+  const state = { id: 's', approvalProcessing: { version: 2 as const, runId: 'retained-segment', rootTaskId: 'same-root',
+    mode: 'delegate' as const, status: 'blocked' as const, updatedAt: '',
+    targets: [{ id: 'edit', kind: 'edit' as const, status: 'denied' as const, reason: 'Original decision.' }] },
+  pendingApproval: { version: 1 as const, id: 'manual', sessionId: 's', rootTaskId: 'same-root', agentRunId: 'removed-segment',
+    targetId: 'run', actionHash: 'hash', label: 'run', reason: 'Exact decision needed.', status: 'waiting' as const } };
+  const original = state.approvalProcessing;
+  const scope: HistoryTruncationScope = { id: 'truncation', sessionId: 's', removedMessageIds: [],
+    removedSegmentIds: ['removed-segment'], retainedMessageIds: [] };
+  assert.equal(invalidateApprovalStateForHistory(state, { ...scope, sessionId: 'other' }), false);
+  assert.equal(invalidateApprovalStateForHistory(state, scope), true);
+  assert.equal(state.pendingApproval, undefined);
+  assert.equal(state.approvalProcessing, original);
+  assert.equal(invalidateApprovalStateForHistory(state, { ...scope, removedSegmentIds: ['retained-segment'] }), true);
+  assert.equal(state.approvalProcessing, undefined);
+  assert.equal(original.targets[0].status, 'denied');
+  assert.equal(invalidateApprovalStateForHistory(state, scope), false);
+});
+
+test('exact removed targets leave approval state for other targets in the same retained segment intact', () => {
+  const state = { id: 's', approvalProcessing: { version: 2 as const, runId: 'shared-segment', rootTaskId: 'task',
+    mode: 'delegate' as const, status: 'blocked' as const, updatedAt: '',
+    targets: [{ id: 'retained', kind: 'command' as const, status: 'pending' as const },
+      { id: 'removed', kind: 'command' as const, status: 'pending' as const }] },
+  pendingApproval: { version: 1 as const, id: 'manual', sessionId: 's', rootTaskId: 'task', agentRunId: 'shared-segment',
+    targetId: 'removed', actionHash: 'hash', label: 'run', reason: 'Exact decision needed.', status: 'waiting' as const } };
+  const scope: HistoryTruncationScope = { id: 'truncation', sessionId: 's', removedMessageIds: ['removed-message'],
+    removedSegmentIds: [], retainedMessageIds: ['retained-message'] };
+  assert.equal(invalidateApprovalStateForHistory(state, scope, ['removed']), true);
+  assert.equal(state.pendingApproval, undefined);
+  assert.deepEqual(state.approvalProcessing?.targets.map(target => target.id), ['retained']);
 });
 
 test('an interrupted correction retains diagnostics and the attempt ledger without restoring execution authority', () => {

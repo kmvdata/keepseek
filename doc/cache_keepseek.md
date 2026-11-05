@@ -82,7 +82,11 @@ current user / tool continuation
 - 审批结果、执行结果、动态上下文等宿主信息只追加在下一条真实 user 消息尾部，不插入伪 user。
 - 禁止事后为旧 user 消息添加标签、日期、角色说明或重新展开引用。
 
-“编辑并重发”是显式用户操作，会从被替换轮次起截断后续历史，因此是明确的缓存边界，不属于普通 append-only 路径。
+“编辑并重发”是显式用户操作，会从被替换轮次起截断后续历史，因此是受控的后缀边界。它不表示此前公共前缀必然失效：保留消息、稳定上下文、冻结工具和同 lane replay 原字节复用；Skill 按新任务解析。仅有来源与依赖证明、只覆盖保留历史的摘要可复用；跨截断摘要或缺证据的旧摘要整段失效。动态上下文 hash 从实际可见的保留 tail 恢复，必要更新只追加到新 user。操作失效标记不进入请求，删除来源的旧命令结果不再回灌。事务、恢复与三协议字节证明见 [编辑重发验收](keepseek-edit-resend-verification.md)。
+
+编辑首条 user 且没有保留消息时，若旧稳定上下文含已删除任务的隐式 Skill，新上下文字节又确有变化，则按 `context_semantics_changed` 重建稳定上下文，并从活动 archive 排除旧 context 来源；替换内容随截断 journal 提交和恢复。新旧字节相同则保留缓存，不能用后续 tail 抵消旧 system 语义来强行复用。
+
+中间截断同样清理失去活动来源的 `context:*` archive；当前上下文来源或保留请求明确引用的 archive 继续可查。活动 archive ID 记录在截断 journal 中，避免重启恢复后已删除后缀的 Skill 内容重新被搜索交付。
 
 另一个受控例外是 `historyArchive.ts` 的缓存安全维护：Coordinator 已决定同步压缩、旧前缀本就会失效时，才可把超大的首条 providerContent 或陈旧低优先级工具结果替换为稳定 archive 占位符；完整原文按 content hash 留在 `session.historyArchive`，由 `keepseek_search_session_archive` 检索。它不能在热前缀中任意运行。
 

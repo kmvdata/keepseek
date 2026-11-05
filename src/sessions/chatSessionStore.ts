@@ -1,4 +1,5 @@
 import { normalizeProviderReplay } from './providerReplayNormalization';
+import { normalizePendingHistoryTruncation } from './historyTruncation';
 import { normalizeManualApproval } from '../approvals/manualApproval';
 import { normalizeUserTaskBudgets } from './userTaskBudget';
 import { normalizeApprovalProcessing } from '../approvals/approvalProcessing';
@@ -210,10 +211,19 @@ export class ChatSessionStore {
     if (!source) {
       return undefined;
     }
+    // The source intent owns independent operation-store commits in its original
+    // workspace. Copying either side before recovery can expose deleted history,
+    // and carrying its session-bound journal to a new ID cannot recover safely.
+    if (source.pendingHistoryTruncation !== undefined) {
+      throw new Error(this.language === 'en'
+        ? 'Open this session in its original workspace and finish history recovery before copying it.'
+        : '请先在原工作区打开此会话并完成历史恢复，再复制会话。');
+    }
 
     const now = new Date().toISOString();
     const copied: ChatSession = {
       ...source,
+      pendingHistoryTruncation: undefined,
       approvalMode: this.approvalModeValue,
       executionMode: 'normal',
       planWorkflows: undefined,
@@ -709,6 +719,7 @@ export function getVisibleMessages(messages: ChatMessage[], models: readonly imp
   return messages.map(({
     runCheckpoint,
     runCheckpointArchive,
+    dynamicContextHash: _dynamicContextHash,
     expandedContent: _expandedContent,
     providerReplay: _providerReplay,
     toolRounds: _toolRounds,
@@ -819,6 +830,7 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       approvalMode: normalizeStoredApprovalMode(item.approvalMode),
       approvalModeMigrated: item.approvalMode === 'model_review' || item.approvalModeMigrated === true || undefined,
       pendingApproval: normalizeManualApproval(item.pendingApproval),
+      pendingHistoryTruncation: normalizePendingHistoryTruncation(item.pendingHistoryTruncation, item.id, normalizeStoredMessage),
       executionMode: normalizeExecutionMode(item.executionMode),
       planWorkflows: normalizePlanWorkflowRecords(item.planWorkflows, item.id),
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
@@ -906,6 +918,8 @@ function normalizeStoredMessage(value: unknown): ChatMessage | undefined {
     modelId: typeof value.modelId === 'string' ? value.modelId : undefined,
     reasoningContent: typeof value.reasoningContent === 'string' ? value.reasoningContent : undefined,
     providerContent: typeof value.providerContent === 'string' ? value.providerContent : undefined,
+    dynamicContextHash: typeof value.dynamicContextHash === 'string' && /^[a-f0-9]{64}$/u.test(value.dynamicContextHash)
+      ? value.dynamicContextHash : undefined,
     contextMeta: normalizeMessageContextMeta(value.contextMeta),
     usedSkills: normalizeMessageUsedSkills(value.usedSkills),
     runCheckpoint: normalizeRunCheckpoint(value.runCheckpoint),
@@ -1560,8 +1574,21 @@ function normalizeHistorySummary(value: unknown): HistorySummary | undefined {
     modelId: typeof value.modelId === 'string' && value.modelId.trim() ? value.modelId.trim() : undefined,
     sourceId: typeof value.sourceId === 'string' && value.sourceId.trim() ? value.sourceId.trim() : undefined,
     provider: typeof value.provider === 'string' && value.provider.trim() ? value.provider.trim() : undefined,
+    provenance: normalizeSummaryProvenance(value.provenance),
     version: normalizePositiveInteger(value.version, 1)
   };
+}
+
+function normalizeSummaryProvenance(value: unknown): HistorySummary['provenance'] {
+  if (!isRecord(value) || value.version !== 1 || !isRecord(value.messageHashes) || !isRecord(value.summaryHashes)) return undefined;
+  const hashes = (input: Record<string, unknown>): Record<string, string> | undefined => {
+    const entries = Object.entries(input);
+    if (entries.some(([id, hash]) => !id || typeof hash !== 'string' || !/^[a-f0-9]{64}$/u.test(hash))) return undefined;
+    return Object.fromEntries(entries) as Record<string, string>;
+  };
+  const messageHashes = hashes(value.messageHashes);
+  const summaryHashes = hashes(value.summaryHashes);
+  return messageHashes && summaryHashes ? { version: 1, messageHashes, summaryHashes } : undefined;
 }
 
 function createTitleFromMessages(messages: ChatMessage[], language: KeepseekLanguage = getConfiguredKeepseekLanguage()): string {

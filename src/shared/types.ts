@@ -662,6 +662,10 @@ export type DraftRunBatchDisplay = Pick<DraftRunBatchState,
 };
 
 export interface DraftRun extends DraftRunProposal {
+  /** Audit retained, but missing host origin cannot authorize execution or result delivery. */
+  historyOriginUnverified?: boolean;
+  /** Host-only history membership; never replaces the real execution outcome. */
+  historyInvalidationId?: string;
   agentRunId: string;
   sessionId: string;
   messageId: string;
@@ -722,6 +726,8 @@ export interface ChatMessage {
   /** Exact provider-visible user content when a cache-safe tail (for example
    * archive recall) was appended without changing the text shown in the UI. */
   providerContent?: string;
+  /** Host-only proof of a dynamic context tail appended to this message; never provider-visible itself. */
+  dynamicContextHash?: string;
   isStreaming?: boolean;
   contextMeta?: ChatMessageContextMeta;
   usedSkills?: ChatMessageSkill[];
@@ -831,6 +837,12 @@ export interface HistorySummary {
   sourceId?: string;
   provider?: string;
   version: number;
+  /** Host-only source proof for safely retaining a summary after a suffix edit. */
+  provenance?: {
+    version: 1;
+    messageHashes: Record<string, string>;
+    summaryHashes: Record<string, string>;
+  };
 }
 
 export interface ContextCompressionState {
@@ -943,6 +955,8 @@ export interface PlanWorkflowView extends Omit<PlanWorkflowRecord, 'contentHash'
 }
 
 export interface ChatSession {
+  /** Durable edit/resend intent; actions stay blocked until it is reconciled. */
+  pendingHistoryTruncation?: import('../sessions/historyTruncation').PendingHistoryTruncation;
   pendingApproval?: import('../approvals/manualApproval').ManualApprovalSnapshot;
   approvalModeMigrated?: boolean;
   userTaskBudgets?: Record<string, import('../sessions/userTaskBudget').UserTaskBudget>;
@@ -1251,6 +1265,10 @@ export interface ChangeCheckpoint {
 }
 
 export interface ChangeSet {
+  /** Detached by edit/resend; blobs, journals and execution results remain audit evidence. */
+  historyInvalidationId?: string;
+  /** Legacy source cannot be verified against full host history; audit only. */
+  historyOriginUnverified?: boolean;
   id: string;
   runId: string;
   sessionId: string;

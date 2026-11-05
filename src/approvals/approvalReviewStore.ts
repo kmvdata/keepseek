@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { writeJsonAtomic } from '../shared/atomicStorage';
+import type { HistoryTruncationScope } from '../sessions/historyTruncation';
 import {
   policyVersionFor,
   reviewerRoute,
@@ -61,9 +62,23 @@ export class ApprovalReviewStore {
     return record ? structuredClone(record) : undefined;
   }
 
+  /** Preserve immutable audit results while revoking membership and unused authority. */
+  public async invalidateHistory(scope: HistoryTruncationScope, removedTargetIds: readonly string[] = []): Promise<void> {
+    let changed = false;
+    for (const record of this.records.values()) {
+      if (record.sessionId !== scope.sessionId || (!scope.removedSegmentIds.includes(record.agentRunId)
+        && !removedTargetIds.includes(record.targetId))
+        || record.historyInvalidatedBy) continue;
+      record.historyInvalidatedBy = scope.id;
+      changed = true;
+    }
+    // Persist even on retry: a prior write may have failed after the in-memory mark.
+    if (changed || [...this.records.values()].some(record => record.historyInvalidatedBy === scope.id)) await this.persist();
+  }
+
   public matchesSnapshot(reviewId: string, request: ApprovalReviewRequest): boolean {
     const record = this.records.get(reviewId);
-    return !!record && record.sessionId === request.sessionId && record.rootTaskId === request.rootTaskId
+    return !!record && !record.historyInvalidatedBy && record.sessionId === request.sessionId && record.rootTaskId === request.rootTaskId
       && record.agentRunId === request.agentRunId && record.targetId === request.targetId
       && record.actionKind === request.actionKind && record.actionHash === request.actionHash
       && record.scopeFingerprint === request.scopeFingerprint && record.policyVersion === policyVersionFor(record.approvalSource);
@@ -71,7 +86,7 @@ export class ApprovalReviewStore {
 
   public getLatestForTarget(targetId: string): ApprovalReviewDisplay | undefined {
     const record = [...this.records.values()]
-      .reverse().find((item) => item.targetId === targetId);
+      .reverse().find((item) => item.targetId === targetId && !item.historyInvalidatedBy);
     return record ? toDisplay(record) : undefined;
   }
 
@@ -81,7 +96,7 @@ export class ApprovalReviewStore {
     actionKind: ApprovalReviewRecord['actionKind'];
     actionHash: string;
   }): ApprovalReviewRecord | undefined {
-    const record = [...this.records.values()].reverse().find((item) => item.sessionId === input.sessionId
+    const record = [...this.records.values()].reverse().find((item) => !item.historyInvalidatedBy && item.sessionId === input.sessionId
       && item.rootTaskId === input.rootTaskId
       && item.actionKind === input.actionKind
       && (item.actionHash === input.actionHash || item.originalActionHash === input.actionHash)
@@ -90,14 +105,14 @@ export class ApprovalReviewStore {
   }
 
   public findHardRunDenial(sessionId: string, actionHash: string): ApprovalReviewRecord | undefined {
-    return [...this.records.values()].reverse().find(record => record.sessionId === sessionId
+    return [...this.records.values()].reverse().find(record => !record.historyInvalidatedBy && record.sessionId === sessionId
       && record.actionKind === 'draft_run_execute' && record.decision === 'deny'
       && (record.actionHash === actionHash || record.originalActionHash === actionHash)
       && (record.approvalSource === 'local_policy' || record.approvalSource === 'auto_approval_review' || record.risk === 'critical'));
   }
 
   public hasAutomaticReviewAttempt(request: ApprovalReviewRequest): boolean {
-    return [...this.records.values()].some(record => record.approvalSource === 'auto_approval_review'
+    return [...this.records.values()].some(record => !record.historyInvalidatedBy && record.approvalSource === 'auto_approval_review'
       && record.sessionId === request.sessionId && record.rootTaskId === request.rootTaskId
       && record.agentRunId === request.agentRunId && record.targetId === request.targetId);
   }
@@ -105,7 +120,7 @@ export class ApprovalReviewStore {
   public async consumeMatchingApproval(input: ApprovalRecordMatch): Promise<ApprovalReviewRecord> {
     if (!input.workspaceTrusted) throw new Error('Approval record cannot be consumed in an untrusted workspace.');
     const record = this.records.get(input.reviewId);
-    if (!record || record.runtimeId !== this.runtimeId || record.consumedAt
+    if (!record || record.historyInvalidatedBy || record.runtimeId !== this.runtimeId || record.consumedAt
       || record.sessionId !== input.sessionId || record.rootTaskId !== input.rootTaskId || record.agentRunId !== input.agentRunId
       || record.targetId !== input.targetId || record.actionKind !== input.actionKind
       || record.actionHash !== input.actionHash || input.policyVersion !== policyVersionFor(input.expectedSource)
@@ -129,7 +144,7 @@ export class ApprovalReviewStore {
     const history: Array<'approve' | 'deny'> = [];
     for (const record of this.records.values()) {
       if (record.reviewId === beforeReviewId) break;
-      if (record.sessionId === sessionId && record.rootTaskId === rootTaskId
+      if (!record.historyInvalidatedBy && record.sessionId === sessionId && record.rootTaskId === rootTaskId
         && ['auto_approval_review', 'model_review', 'local_policy'].includes(record.approvalSource)
         && (record.decision === 'approve' || record.decision === 'deny')) history.push(record.decision);
     }
@@ -198,6 +213,8 @@ function normalizeRecord(value: unknown): ApprovalReviewRecord | undefined {
     ...record,
     priorReviewId: typeof record.priorReviewId === 'string' ? record.priorReviewId.slice(0, 300) : undefined,
     userRequestId: typeof record.userRequestId === 'string' ? record.userRequestId.slice(0, 300) : undefined,
+    historyInvalidatedBy: typeof record.historyInvalidatedBy === 'string' && record.historyInvalidatedBy.length > 0
+      ? record.historyInvalidatedBy.slice(0, 300) : undefined,
     osIsolation: record.osIsolation === 'none' ? record.osIsolation : undefined,
     affectedTargets: Array.isArray(record.affectedTargets)
       ? record.affectedTargets.filter(target => typeof target === 'string').slice(0, 12).map(target => target.slice(0, 300)) : undefined,

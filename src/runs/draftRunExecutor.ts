@@ -393,6 +393,7 @@ class DraftRunPseudoterminal implements vscode.Pseudoterminal {
 }
 
 function validatePermit(draftRun: DraftRun, permit: ExecutionPermit): void {
+  if (draftRun.historyInvalidationId || draftRun.historyOriginUnverified) throw new Error('DraftRun was detached by editing its source history.');
   if (permit.source !== 'user_click' && permit.source !== 'delegated_approver') {
     throw new Error('DraftRun requires a user-click or delegated approval permit.');
   }

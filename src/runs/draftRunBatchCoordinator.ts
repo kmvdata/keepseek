@@ -2,6 +2,7 @@ import { hasExactCommandScope, inspectDraftRunScope } from '../approvals/authori
 import { randomUUID } from 'node:crypto';
 import type { DraftRun, DraftRunBatchSnapshot, DraftRunBatchState } from '../shared/types';
 import type { DraftRunStore } from './draftRunStore';
+import type { HistoryTruncationScope } from '../sessions/historyTruncation';
 
 type BatchStore = Pick<DraftRunStore, 'get' | 'toWebviewState' | 'flush' | 'approveAndRun'
   | 'validateApprovalBoundary' | 'cancelAutoContinuations' | 'recordBatchDisplay'>;
@@ -19,7 +20,27 @@ export class DraftRunBatchCoordinator {
   }
 
   public get state(): DraftRunBatchState | undefined {
+    if (this.operation && !this.hasActiveMembers(this.operation.state)) return undefined;
     return this.operation ? structuredClone(this.operation.state) : undefined;
+  }
+
+  private hasActiveMembers(snapshot: DraftRunBatchSnapshot): boolean {
+    return snapshot.entries.every(entry => {
+      const run = this.store.get(entry.draftRunId);
+      return run && !run.historyInvalidationId && !run.historyOriginUnverified;
+    });
+  }
+
+  /** Forget finite click authority and presentation when its source history leaves. */
+  public invalidateHistory(scope: HistoryTruncationScope): void {
+    for (const [key, offer] of this.offers) {
+      if (offer.sessionId === scope.sessionId && !this.hasActiveMembers(offer)) this.offers.delete(key);
+    }
+    const op = this.operation;
+    if (op?.state.sessionId !== scope.sessionId || this.hasActiveMembers(op.state)) return;
+    op.controller.abort();
+    this.operation = undefined;
+    this.changed();
   }
 
   public get pending(): boolean {
@@ -88,7 +109,8 @@ export class DraftRunBatchCoordinator {
   }
 
   public isValid(operationId: string): boolean {
-    return this.operation?.state.operationId === operationId && !this.operation.controller.signal.aborted && this.pending;
+    return this.operation?.state.operationId === operationId && !this.operation.controller.signal.aborted && this.pending
+      && this.hasActiveMembers(this.operation.state);
   }
 
   public cancel(operationId?: string): void {
@@ -190,7 +212,7 @@ export class DraftRunBatchCoordinator {
       if (reason) { op.state.phase = 'waiting'; op.state.reason = reason; return; }
       if (!op.state.entries.every((entry) => {
         const run = this.store.get(entry.draftRunId);
-        return run?.status === 'done' && run.specHash === entry.specHash
+        return run?.status === 'done' && !run.historyInvalidationId && !run.historyOriginUnverified && run.specHash === entry.specHash
           && run.sessionId === op.state.sessionId && run.agentRunId === op.state.agentRunId;
       })) throw new Error('Completed command records changed or were removed.');
       const sent = await input.send(structuredClone(op.state), op.controller.signal);

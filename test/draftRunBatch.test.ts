@@ -142,6 +142,39 @@ test('batch rejects wrong sessions, runs, hashes, duplicates, reordered/stale sn
   assert.equal(f.executor.calls.length, 0);
 }));
 
+test('edited source retires batch snapshots, display history and once-only continuation without changing real results', async () => fixture(async (f) => {
+  f.add(['A', 'B']);
+  const snapshot = f.batch.snapshots('s')[0];
+  const id = f.accept();
+  const executing = f.execute(id);
+  await f.executor.started(1); f.executor.finish('A');
+  await f.executor.started(2); f.executor.finish('B');
+  await executing;
+  assert.equal(f.batch.state?.phase, 'waiting');
+  assert.equal(f.store.toBatchDisplayHistory('s').length, 1);
+  const scope = { id: 'edit', sessionId: 's', removedMessageIds: ['assistant'], removedSegmentIds: ['r'], retainedMessageIds: [] };
+  f.store.invalidateHistory(scope);
+  f.batch.invalidateHistory(scope);
+  f.batch.invalidateHistory(scope);
+  assert.equal(f.batch.state, undefined);
+  assert.equal(f.batch.pending, false);
+  assert.deepEqual(f.batch.snapshots('s'), []);
+  assert.deepEqual(f.store.toBatchDisplayHistory('s'), []);
+  assert.equal(f.store.get('A')?.status, 'done');
+  assert.equal(f.store.get('B')?.status, 'done');
+  assert.equal(f.store.getPendingProviderTail('s', 'en'), undefined);
+  assert.throws(() => f.batch.accept(snapshot, { sessionId: 's', sourceId: 'source', modelId: 'model' }));
+  await f.batch.continueOnce({ assertContext: () => {}, blocker: () => undefined, send: async () => assert.fail('old batch cannot continue') });
+  assert.equal(f.executor.calls.length, 2);
+  await f.store.flush();
+  const restarted = new DraftRunStore(f.storage as never, f.executor);
+  try {
+    await restarted.initialize();
+    assert.deepEqual(restarted.toBatchDisplayHistory('s'), []);
+    assert.deepEqual(restarted.toWebviewState('s'), []);
+  } finally { restarted.dispose(); }
+}));
+
 test('failures and timeout in B leave C pending, without model continuation or retries', async () => {
   for (const outcome of [{ ...success, exitCode: 2 }, { ...success, timedOut: true }, { ...success, error: 'spawn error' }]) {
     await fixture(async (f) => {
@@ -834,6 +867,40 @@ test('global projection groups cross-message, mixed linked/unlinked, streaming a
   assertSharedGroup(ui.renderCurrentState().cards, ['A', 'B', 'C']); assert.equal(batchGroups(ui.unlinked.children).length, 1);
   ui.state.messages = [{ id: 'm1', role: 'assistant' }];
   assertSharedGroup(ui.renderCurrentState().cards, ['A', 'B', 'C']); assert.equal(batchGroups(ui.unlinked.children).length, 0);
+}));
+
+test('real Webview projection removes every detached status while preserving a retained command on an unloaded page', async () => fixture(async (f) => {
+  const statuses = ['pending', 'failed', 'needs_replan', 'done', 'rejected', 'cancelled', 'no_changes'] as const;
+  f.store.addProposals({ proposals: statuses.map(status => f.proposal('removed-' + status)),
+    sessionId: 's', agentRunId: 'removed-segment', messageId: 'removed-assistant' });
+  f.store.addProposals({ proposals: [f.proposal('retained-unloaded')],
+    sessionId: 's', agentRunId: 'retained-segment', messageId: 'retained-assistant' });
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'delegate']) {
+    const ui = renderHarness(f, language);
+    ui.state.approvalMode = mode;
+    ui.state.messages = [{ id: 'new-user', role: 'user' }];
+    ui.state.draftRuns = ui.state.draftRuns.map(run => ({ ...run,
+      status: statuses.find(status => run.id === 'removed-' + status) ?? run.status }));
+    ui.state.draftRunBatchSnapshots = [];
+    ui.renderCurrentState();
+    assert.equal(runCards(ui.unlinked.children).length, 8, 'a missing rendered source alone never proves truncation');
+  }
+  const scope = { id: 'edit-ui', sessionId: 's', removedMessageIds: ['removed-assistant'],
+    removedSegmentIds: ['removed-segment'], retainedMessageIds: ['retained-assistant'] };
+  f.store.invalidateHistory(scope);
+  f.batch.invalidateHistory(scope);
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'delegate']) {
+    const ui = renderHarness(f, language);
+    ui.state.approvalMode = mode;
+    ui.state.messages = [{ id: 'new-user', role: 'user' }];
+    for (let repeat = 0; repeat < 2; repeat++) {
+      ui.render();
+      assertRunOrder(ui.unlinked.children, ['retained-unloaded']);
+      assert.equal(batchGroups(ui.unlinked.children).length, 0);
+      assertRunOrder(ui.transcript.children, ['retained-unloaded']);
+    }
+  }
+  assert.equal(f.executor.calls.length, 0);
 }));
 
 test('incomplete operation data keeps a header without its first card; inconsistent membership leaves commands conservatively ungrouped', async () => fixture(async (f) => {

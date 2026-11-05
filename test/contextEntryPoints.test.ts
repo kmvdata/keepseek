@@ -159,7 +159,7 @@ test('provider focuses the contributed KeepSeek view container before inserting 
   assert.ok(match?.[1] && containerIds.includes(match[1]));
 });
 
-test('DraftRun interactions settle visibly and edit-resend requeues removed result bindings', async () => {
+test('DraftRun interactions settle visibly with clone and continuation feedback', async () => {
   const script = getScript();
   const providerSource = await readFile(
     path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
@@ -180,10 +180,6 @@ test('DraftRun interactions settle visibly and edit-resend requeues removed resu
   assert.match(providerSource, /claimReadyAutoContinuation/u);
   assert.match(providerSource, /displayKind: 'draft_run_auto_continue'/u);
   assert.match(providerSource, /type: 'draftRunCloneFeedback'/u);
-  assert.match(
-    providerSource,
-    /activeSession\.messages[\s\S]*?slice\(replacementIndex\)[\s\S]*?releaseResultBindingsForMessages/u
-  );
 });
 
 test('command menu model settings are registered and persisted for the current workspace', async () => {

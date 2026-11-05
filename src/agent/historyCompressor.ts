@@ -50,6 +50,7 @@ import { buildProviderPayloadProjection, buildProviderRequestProjection } from '
 import { createUsageEvent, normalizeDeepSeekUsage } from './usageStats';
 import { createUsageLedgerRecords, createUsagePriceSnapshot } from './usageLedger';
 import { createProviderCacheObservation } from './cacheObservation';
+import { createHistorySummaryProvenance } from '../sessions/historyTruncationContext';
 
 const SUMMARY_MAX_INPUT_CHARS = 90_000;
 // Deliberately high: every summary refresh rewrites the synthetic summary message and
@@ -287,6 +288,8 @@ export class HistoryCompressor {
         id: randomUUID(),
         content,
         coveredMessageIds: summaryBatch.includedMessageIds,
+        provenance: createHistorySummaryProvenance(summaryInput.newCompressibleMessages
+          .filter(message => summaryBatch.includedMessageIds.includes(message.id))),
         createdAt: now,
         updatedAt: now,
         tokenEstimate: estimateTokenCount(content),

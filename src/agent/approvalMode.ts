@@ -1,5 +1,6 @@
 import type { ApprovalMode } from '../shared/types';
 import type { ApprovalReviewDisplay, BoundedReviewText } from '../approvals/approvalReviewTypes';
+import type { HistoryTruncationScope } from '../sessions/historyTruncation';
 
 export const DELEGATED_APPROVAL_PROTOCOL_VERSION = 13;
 
@@ -46,6 +47,7 @@ export interface DelegatedApprovalBatch {
 export class DelegatedApprovalQueue {
   private pending?: DelegatedApprovalBatch;
   private active?: AbortController;
+  private activeBatch?: DelegatedApprovalBatch;
 
   public enqueue(batch: DelegatedApprovalBatch): void {
     if (batch.editIds.length || batch.draftRunIds.length || batch.continueAfterApprovalReview) {
@@ -58,11 +60,21 @@ export class DelegatedApprovalQueue {
     const batch = this.pending;
     this.pending = undefined;
     this.active = new AbortController();
+    this.activeBatch = batch;
     return { batch, controller: this.active };
   }
 
   public finish(controller: AbortController): void {
-    if (this.active === controller) this.active = undefined;
+    if (this.active === controller) { this.active = undefined; this.activeBatch = undefined; }
+  }
+
+  /** Revoke only work whose execution segment left the full host history. */
+  public invalidateHistory(scope: HistoryTruncationScope, removedTargetIds: readonly string[] = []): void {
+    const affected = (batch: DelegatedApprovalBatch | undefined) => batch?.sessionId === scope.sessionId
+      && (scope.removedSegmentIds.includes(batch.runId)
+        || [...batch.editIds, ...batch.draftRunIds].some(id => removedTargetIds.includes(id)));
+    if (affected(this.pending)) this.pending = undefined;
+    if (affected(this.activeBatch)) this.active?.abort(new Error('Approval source was superseded by edit and resend.'));
   }
 
   public cancel(): void {

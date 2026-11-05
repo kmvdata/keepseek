@@ -140,6 +140,12 @@ export function createProviderCacheObservation(input: CreateCacheObservationInpu
     ? selectFamilyCandidate(input.familyCandidates ?? [], input.cacheFamilyKey, laneKey, projection.stablePrefix)
     : undefined;
   const familyCommonPrefix = Boolean(familyCandidate);
+  // A suffix edit does not prove that all earlier bytes changed. This fixed
+  // segment has its own exact fingerprint; the whole-history hash cannot tell
+  // us how much of the remaining (possibly shorter) history is still shared.
+  const rewrittenStablePrefix = Boolean(input.historyRewriteReason && sameLane
+    && previous?.stablePrefix?.byteLength === projection.stablePrefix.byteLength
+    && previous.stablePrefix.hash === hashBytes(projection.stablePrefix));
   const contextEpochRollover = Boolean(previous
     && Math.max(0, Math.floor(input.contextEpochIndex ?? 0)) !== previous.contextEpochIndex);
   const protocolMigration = Boolean(input.protocolMigration || (previous
@@ -168,7 +174,8 @@ export function createProviderCacheObservation(input: CreateCacheObservationInpu
     familyCommonPrefix,
     boundary
   });
-  const effectiveCommonPrefixBytes = familyCandidate?.stablePrefix?.byteLength ?? commonPrefixBytes;
+  const effectiveCommonPrefixBytes = familyCandidate?.stablePrefix?.byteLength
+    ?? (rewrittenStablePrefix ? Math.max(commonPrefixBytes, projection.stablePrefix.byteLength) : commonPrefixBytes);
   const commonPrefixTokensEstimate = projection.full.byteLength > 0
     ? Math.min(estimatedPromptTokens, Math.floor(estimatedPromptTokens * effectiveCommonPrefixBytes / projection.full.byteLength))
     : 0;
@@ -176,12 +183,14 @@ export function createProviderCacheObservation(input: CreateCacheObservationInpu
     ? Math.min(estimatedPromptTokens, previous.estimatedPromptTokens)
     : identicalRetry && previous ? Math.min(estimatedPromptTokens, previous.estimatedPromptTokens)
       : familyCandidate ? Math.min(estimatedPromptTokens, projectionStableTokens(projection.stablePrefix, estimatedPromptTokens, projection.full))
-        : 0;
+        : rewrittenStablePrefix ? Math.min(estimatedPromptTokens,
+          fingerprint(projection.stablePrefix).tokensEstimate ?? 0, previous?.stablePrefix?.tokensEstimate ?? 0) : 0;
   const reusablePrefixTokensEstimate = floorToProviderCacheBlock(rawReusablePrefixTokens, input.provider);
   const newTailBytes = strictPrefix && previous
     ? projection.full.slice(previous.cacheableProjection.byteLength)
     : identicalRetry ? new Uint8Array()
       : familyCommonPrefix ? projection.full.slice(projection.stablePrefix.byteLength)
+        : rewrittenStablePrefix ? projection.full.slice(projection.stablePrefix.byteLength)
         : projection.full;
   const unavoidableNewTokensEstimate = Math.max(0, estimatedPromptTokens - reusablePrefixTokensEstimate);
   const eligibleForHealthTarget = (strictPrefix || familyCommonPrefix)

@@ -1,4 +1,29 @@
+import type { ChatSession } from '../shared/types';
+import type { HistoryTruncationScope } from '../sessions/historyTruncation';
+
 export type ApprovalTargetStatus = 'pending' | 'executed' | 'denied' | 'manual_required' | 'review_unavailable' | 'hard_blocked' | 'needs_authorization' | 'failed' | 'cancelled' | 'already_processed' | 'identity_mismatch' | 'missing' | 'needs_replan' | 'dependency_blocked' | 'external_authorization_required' | 'insufficient_launch_evidence';
+
+/** Runtime authority is revoked by the host before committing this projection change.
+ * Original decisions remain in the review store; these fields only project current work. */
+export function invalidateApprovalStateForHistory(session: Pick<ChatSession, 'id' | 'approvalProcessing' | 'pendingApproval'>,
+  scope: HistoryTruncationScope, removedTargetIds: readonly string[] = []): boolean {
+  if (session.id !== scope.sessionId) return false;
+  let changed = false;
+  if (session.approvalProcessing && scope.removedSegmentIds.includes(session.approvalProcessing.runId)) {
+    session.approvalProcessing = undefined;
+    changed = true;
+  } else if (session.approvalProcessing?.targets.some(target => removedTargetIds.includes(target.id))) {
+    session.approvalProcessing.targets = session.approvalProcessing.targets.filter(target => !removedTargetIds.includes(target.id));
+    if (!session.approvalProcessing.targets.length) session.approvalProcessing = undefined;
+    changed = true;
+  }
+  if (session.pendingApproval && (scope.removedSegmentIds.includes(session.pendingApproval.agentRunId)
+    || removedTargetIds.includes(session.pendingApproval.targetId))) {
+    session.pendingApproval = undefined;
+    changed = true;
+  }
+  return changed;
+}
 
 export interface ApprovalDependency {
   targetId: string;

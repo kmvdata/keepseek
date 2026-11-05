@@ -263,6 +263,7 @@ function cloneContextCompressionState(
         protectedMessageIds: [...state.protectedMessageIds],
         summaries: state.summaries.map((summary) => ({
           ...summary,
+          provenance: summary.provenance ? structuredClone(summary.provenance) : undefined,
           coveredMessageIds: [...summary.coveredMessageIds]
         }))
       }

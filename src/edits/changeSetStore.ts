@@ -3,6 +3,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isWorkspaceSkillScaffoldPath } from '../approvals/authorization/protectedTargets';
 import * as vscode from 'vscode';
 import type { ChatSessionStore } from '../sessions/chatSessionStore';
+import { isHistoryOriginRemoved, type HistoryTruncationScope } from '../sessions/historyTruncation';
+import { executionSegmentId } from '../sessions/userTask';
 import type {
   ChangeCheckpoint,
   ChangeSet,
@@ -10,6 +12,7 @@ import type {
   ChangeSetApplyResult,
   ChangeSetFile,
   ChangeSetRevertResult,
+  ChatMessage,
   DraftEdit
 } from '../shared/types';
 import { getErrorMessage } from '../shared/errors';
@@ -99,6 +102,7 @@ export class ChangeSetStore {
   private artifactGcTimer: ReturnType<typeof setTimeout> | undefined;
   private artifactGcQueued = false;
   private readonly activeEditOperations = new Set<string>();
+  private readonly historyInvalidations = new Map<string, HistoryTruncationScope[]>();
   private initialized = false;
 
   public constructor(
@@ -221,6 +225,12 @@ export class ChangeSetStore {
   }
 
   public add(changeSet: ChangeSet): ChangeSet | undefined {
+    // A checkpoint/model callback can arrive after its branch was replaced.
+    // Keep its evidence for audit, but never merge it back into active history.
+    const invalidation = this.findHistoryInvalidation(changeSet);
+    if (invalidation) changeSet = { ...changeSet, historyInvalidationId: invalidation.id };
+    const registeredBefore = this.changeSets.get(changeSet.id) ?? this.historicalChangeSets.get(changeSet.id);
+    if (registeredBefore && !hasActiveHistory(registeredBefore)) return undefined;
     this.assertChangeSetArtifactQuota(changeSet);
     const existing = this.findActiveChangeSetForRun(changeSet);
     if (existing) {
@@ -261,7 +271,7 @@ export class ChangeSetStore {
     });
     this.supersedeStaleDrafts(registered.sessionId);
     this.schedulePersist();
-    return cloneChangeSet(registered);
+    return hasActiveHistory(registered) ? cloneChangeSet(registered) : undefined;
   }
 
   public addDraftEdits(input: {
@@ -284,12 +294,14 @@ export class ChangeSetStore {
   }
 
   private findActiveChangeSetForRun(changeSet: ChangeSet): ChangeSet | undefined {
+    if (!hasActiveHistory(changeSet)) return undefined;
     const byId = this.changeSets.get(changeSet.id);
-    if (byId) {
+    if (byId && hasActiveHistory(byId)) {
       return byId;
     }
     return Array.from(this.changeSets.values()).find((existing) => (
       Boolean(changeSet.runId)
+      && hasActiveHistory(existing)
       && existing.runId === changeSet.runId
       && existing.sessionId === changeSet.sessionId
       && existing.messageId === changeSet.messageId
@@ -354,13 +366,13 @@ export class ChangeSetStore {
       merged.set(changeSet.id, toWebviewChangeSet(changeSet));
     }
     return Array.from(merged.values())
-      .filter((changeSet) => changeSet.sessionId === sessionId)
+      .filter((changeSet) => changeSet.sessionId === sessionId && hasActiveHistory(changeSet))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
   public hasPendingForSession(sessionId: string): boolean {
     return Array.from(this.changeSets.values()).some((changeSet) =>
-      changeSet.sessionId === sessionId && changeSet.files.some(isApplicable)
+      changeSet.sessionId === sessionId && hasActiveHistory(changeSet) && changeSet.files.some(isApplicable)
     );
   }
 
@@ -404,12 +416,64 @@ export class ChangeSetStore {
 
   public getLatestChangeSetId(sessionId: string): string | undefined {
     return Array.from(this.changeSets.values())
-      .filter((changeSet) => changeSet.sessionId === sessionId)
+      .filter((changeSet) => changeSet.sessionId === sessionId && hasActiveHistory(changeSet))
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]?.id;
   }
 
   public getChangeSetStatus(changeSetId: string): ChangeSet['status'] | undefined {
-    return this.changeSets.get(changeSetId)?.status ?? this.historicalChangeSets.get(changeSetId)?.status;
+    const changeSet = this.changeSets.get(changeSetId) ?? this.historicalChangeSets.get(changeSetId);
+    return changeSet && hasActiveHistory(changeSet) ? changeSet.status : undefined;
+  }
+
+  public hasActiveOperations(sessionId: string): boolean {
+    return Array.from(this.changeSets.values()).some(changeSet => changeSet.sessionId === sessionId
+      && changeSet.files.some(file => this.activeEditOperations.has(file.id)));
+  }
+
+  /** Only full host history is suitable here: a paged Webview is not evidence of deletion. */
+  public reconcileHistoryOrigins(sessionId: string, fullMessages: readonly ChatMessage[]): void {
+    const messageIds = new Set(fullMessages.map(message => message.id));
+    const segmentIds = new Set(fullMessages.map(executionSegmentId).filter((id): id is string => Boolean(id)));
+    let changed = false;
+    for (const changeSet of [...this.changeSets.values(), ...this.historicalChangeSets.values()]) {
+      if (changeSet.sessionId !== sessionId || changeSet.historyInvalidationId) continue;
+      const unverified = !changeSet.messageId.startsWith('skill:')
+        && !messageIds.has(changeSet.messageId) && !segmentIds.has(changeSet.runId);
+      if (Boolean(changeSet.historyOriginUnverified) !== unverified) {
+        changeSet.historyOriginUnverified = unverified || undefined;
+        changed = true;
+      }
+    }
+    if (changed) this.schedulePersist();
+  }
+
+  /** Detach origin-owned records without changing the execution facts or journals. */
+  public invalidateHistory(scope: HistoryTruncationScope): string[] {
+    const affected = [...this.changeSets.values(), ...this.historicalChangeSets.values()]
+      .filter(changeSet => changeSet.sessionId === scope.sessionId && isHistoryOriginRemoved(scope, changeSet));
+    if (affected.some(changeSet => changeSet.files.some(file => this.activeEditOperations.has(file.id)))) {
+      throw new Error('Cannot edit history while a file operation is still running.');
+    }
+    const scopes = this.historyInvalidations.get(scope.sessionId) ?? [];
+    if (!scopes.some(existing => existing.id === scope.id)) {
+      scopes.push(structuredClone(scope));
+      // Persisted records carry their own permanent membership marker. The
+      // recent scopes only fence late callbacks in this extension lifetime.
+      if (scopes.length > MAX_COMPACT_HISTORY_CHANGE_SETS) scopes.splice(0, scopes.length - MAX_COMPACT_HISTORY_CHANGE_SETS);
+      this.historyInvalidations.set(scope.sessionId, scopes);
+    }
+    for (const changeSet of affected) {
+      if (changeSet.historyInvalidationId) continue;
+      changeSet.historyInvalidationId = scope.id;
+    }
+    // Re-enqueue on an idempotent retry too: the earlier write may have failed
+    // after the in-memory marker was installed.
+    if (affected.length) this.schedulePersist();
+    return affected.flatMap(changeSet => [changeSet.id, ...changeSet.files.map(file => file.id)]);
+  }
+
+  private findHistoryInvalidation(changeSet: Pick<ChangeSet, 'sessionId' | 'messageId' | 'runId'>): HistoryTruncationScope | undefined {
+    return this.historyInvalidations.get(changeSet.sessionId)?.find(scope => isHistoryOriginRemoved(scope, changeSet));
   }
 
   public getPendingDeleteTargetsForEdit(editId: string): PendingDeleteTarget[] {
@@ -446,6 +510,7 @@ export class ChangeSetStore {
     const requested = new Set(editIds);
     const uris = new Set<string>();
     for (const changeSet of this.changeSets.values()) {
+      if (!hasActiveHistory(changeSet)) continue;
       for (const file of changeSet.files) {
         if (!requested.has(file.id)) continue;
         uris.add(file.uri);
@@ -457,7 +522,7 @@ export class ChangeSetStore {
 
   public getChangeSetEditUris(changeSetId: string): string[] {
     const changeSet = this.changeSets.get(changeSetId);
-    if (!changeSet) return [];
+    if (!changeSet || !hasActiveHistory(changeSet)) return [];
     const uris = new Set<string>();
     for (const file of changeSet.files) {
       uris.add(file.uri);
@@ -482,7 +547,7 @@ export class ChangeSetStore {
 
   public getPendingDeleteTargetsForChangeSet(changeSetId: string): PendingDeleteTarget[] {
     const changeSet = this.changeSets.get(changeSetId);
-    return changeSet
+    return changeSet && hasActiveHistory(changeSet)
       ? changeSet.files
         .filter((file) => file.action === 'delete' && isApplicable(file))
         .map(toPendingDeleteTarget)
@@ -491,7 +556,7 @@ export class ChangeSetStore {
 
   public isChangeSetFullyApplied(changeSetId: string): boolean {
     const changeSet = this.changeSets.get(changeSetId);
-    return Boolean(changeSet?.files.length) && changeSet?.files.every((file) => file.status === 'applied') === true;
+    return !!changeSet && hasActiveHistory(changeSet) && Boolean(changeSet.files.length) && changeSet?.files.every((file) => file.status === 'applied') === true;
   }
 
   public async openDiff(editId: string): Promise<boolean> {
@@ -546,7 +611,7 @@ export class ChangeSetStore {
     options: ChangeSetOperationOptions = {}
   ): Promise<ChangeSetApplyResult | undefined> {
     const changeSet = this.changeSets.get(changeSetId);
-    if (!changeSet) {
+    if (!changeSet || !hasActiveHistory(changeSet)) {
       return undefined;
     }
     const files = changeSet.files.filter(isApplicable);
@@ -582,7 +647,7 @@ export class ChangeSetStore {
 
   public discardAll(changeSetId: string): boolean {
     const changeSet = this.changeSets.get(changeSetId);
-    if (!changeSet) {
+    if (!changeSet || !hasActiveHistory(changeSet)) {
       return false;
     }
     if (changeSet.files.some((file) => isApplicable(file) && this.activeEditOperations.has(file.id))) {
@@ -630,7 +695,7 @@ export class ChangeSetStore {
     options: ChangeSetOperationOptions = {}
   ): Promise<ChangeSetRevertResult | undefined> {
     const changeSet = this.changeSets.get(changeSetId);
-    if (!changeSet) {
+    if (!changeSet || !hasActiveHistory(changeSet)) {
       return undefined;
     }
     const files = changeSet.files.filter(isRevertible).reverse();
@@ -645,6 +710,7 @@ export class ChangeSetStore {
   }
 
   public clearSession(sessionId: string): void {
+    this.historyInvalidations.delete(sessionId);
     if (sessionId) this.loadedSessionIds.add(sessionId);
     for (const [changeSetId, changeSet] of this.changeSets) {
       if (changeSet.sessionId !== sessionId) {
@@ -670,7 +736,7 @@ export class ChangeSetStore {
   public discardPendingForSession(sessionId: string): void {
     let changed = false;
     for (const changeSet of this.changeSets.values()) {
-      if (changeSet.sessionId !== sessionId) {
+      if (changeSet.sessionId !== sessionId || !hasActiveHistory(changeSet)) {
         continue;
       }
       let changeSetChanged = false;
@@ -698,6 +764,7 @@ export class ChangeSetStore {
   }
 
   public clear(): void {
+    this.historyInvalidations.clear();
     for (const entry of this.storageIndex.entries) this.loadedSessionIds.add(entry.sessionId);
     this.changeSets.clear();
     this.historicalChangeSets.clear();
@@ -952,6 +1019,7 @@ export class ChangeSetStore {
    */
   private supersedeStaleDrafts(sessionId?: string): boolean {
     const applied = Array.from(this.changeSets.values())
+      .filter(hasActiveHistory)
       .filter((changeSet) => !sessionId || changeSet.sessionId === sessionId)
       .flatMap((changeSet) => changeSet.files
         .filter((file) => file.status === 'applied')
@@ -960,6 +1028,7 @@ export class ChangeSetStore {
 
     const changed = new Map<ChangeSet, Array<{ editId: string; supersedingEditId: string }>>();
     for (const changeSet of this.changeSets.values()) {
+      if (!hasActiveHistory(changeSet)) continue;
       if (sessionId && changeSet.sessionId !== sessionId) continue;
       for (const file of changeSet.files) {
         if (!isApplicable(file) || this.activeEditOperations.has(file.id)) continue;
@@ -990,6 +1059,7 @@ export class ChangeSetStore {
 
   private findEdit(editId: string): { changeSet: ChangeSet; edit: ChangeSetFile } | undefined {
     for (const changeSet of this.changeSets.values()) {
+      if (!hasActiveHistory(changeSet)) continue;
       const edit = changeSet.files.find((file) => file.id === editId);
       if (edit) {
         return { changeSet, edit };
@@ -1540,6 +1610,8 @@ function isRecordWithCheckpoint(value: unknown): value is { checkpoint: unknown 
 function cloneChangeSet(changeSet: ChangeSet): ChangeSet {
   return {
     ...changeSet,
+    historyInvalidationId: normalizeHistoryInvalidationId(changeSet.historyInvalidationId),
+    historyOriginUnverified: changeSet.historyOriginUnverified === true || undefined,
     files: changeSet.files.map((file) => structuredClone(file)),
     lastApplyResult: changeSet.lastApplyResult
       ? {
@@ -1600,6 +1672,8 @@ function toPendingDeleteTarget(file: ChangeSetFile): PendingDeleteTarget {
 function cloneWebviewChangeSet(changeSet: WebviewChangeSet): WebviewChangeSet {
   return {
     ...changeSet,
+    historyInvalidationId: normalizeHistoryInvalidationId(changeSet.historyInvalidationId),
+    historyOriginUnverified: changeSet.historyOriginUnverified === true || undefined,
     messageId: typeof changeSet.messageId === 'string' ? changeSet.messageId : '',
     files: changeSet.files.map((file) => ({
       id: file.id,
@@ -1623,6 +1697,14 @@ function cloneWebviewChangeSet(changeSet: WebviewChangeSet): WebviewChangeSet {
         }
       : undefined
   };
+}
+
+function normalizeHistoryInvalidationId(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function hasActiveHistory(changeSet: Pick<ChangeSet, 'historyInvalidationId' | 'historyOriginUnverified'>): boolean {
+  return !changeSet.historyInvalidationId && !changeSet.historyOriginUnverified;
 }
 
 function toWebviewChangeSetFile(file: ChangeSetFile): WebviewChangeSetFile {
