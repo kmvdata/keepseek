@@ -7,8 +7,6 @@ export const approvalDeclarationFragment: WebviewFragment = {
       var commandApprovalModeValue = document.getElementById('commandApprovalModeValue');
       var commandApprovalModeList = document.getElementById('commandApprovalModeList');
       var commandApprovalModeDescription = document.getElementById('commandApprovalModeDescription');
-      var commandApprovalModelButton = document.getElementById('commandApprovalModelButton');
-      var commandApprovalModelValue = document.getElementById('commandApprovalModelValue');
 `.slice(1)
 };
 
@@ -36,15 +34,6 @@ export const approvalBindingsFragment: WebviewFragment = {
             commandSkillListOpen = false;
           }
           renderCommandMenu();
-        });
-      }
-
-      if (commandApprovalModelButton) {
-        commandApprovalModelButton.addEventListener('click', function(event) {
-          event.preventDefault();
-          event.stopPropagation();
-          if (commandApprovalModelButton.disabled) { return; }
-          vscode.postMessage({ type: 'configureApprovalModel' });
         });
       }
 
@@ -98,20 +87,6 @@ export const approvalRenderFragment: WebviewFragment = {
           commandApprovalModeDescription.textContent = lockText
             ? lockText
             : t(currentDescriptionKey);
-        }
-        var setting = state.approvalReviewerSetting || { mode: 'follow-main' };
-        var modelLabel = setting.error || setting.label
-          || (setting.mode === 'follow-main' ? t('approvalModelFollowMain') : (setting.sourceId || '') + ' / ' + (setting.modelId || ''));
-        if (commandApprovalModelValue) {
-          commandApprovalModelValue.textContent = modelLabel;
-          commandApprovalModelValue.title = modelLabel;
-        }
-        if (commandApprovalModelButton) {
-          var modelLocked = Boolean(state.isBusy || state.manualToolApproval || readiness !== 'ready');
-          commandApprovalModelButton.disabled = modelLocked;
-          commandApprovalModelButton.setAttribute('aria-disabled', modelLocked ? 'true' : 'false');
-          commandApprovalModelButton.setAttribute('aria-label', t('approvalModelTitle') + ': ' + modelLabel);
-          commandApprovalModelButton.title = modelLocked ? getApprovalModeLockText() : t('approvalModelHint');
         }
         if (!commandApprovalModeList) { return; }
 

@@ -19,7 +19,8 @@ import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvid
 import { getInputScript } from '../src/webview/input/script';
 import { getInputTemplate } from '../src/webview/input/template';
 import { approvalRenderFragment } from '../src/webview/input/commandMenu/approval';
-import { modelControlsLockingFragment } from '../src/webview/input/commandMenu/models';
+import { modelControlsLockingFragment, modelControlsRenderFragment, modelControlsHelpersFragment } from '../src/webview/input/commandMenu/models';
+import { commandMenuImplementationFragment } from '../src/webview/input/commandMenu/script';
 import { getScript } from '../src/webview/script';
 import type { ApprovalMode, ChatMessage, ChatSession } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
@@ -162,7 +163,7 @@ test('approval mode uses the model selector interaction directly below the subag
   assert.ok(subagentList < approvalSwitch);
   assert.ok(approvalSwitch < approvalList);
   assert.ok(approvalList < compressionThreshold);
-  assert.match(template.slice(approvalList, compressionThreshold), /<\/div>\s*<button id="commandApprovalModelButton"[^>]*class="command-row"/u);
+  assert.doesNotMatch(template, /id="commandApprovalModelButton"/u, 'reviewer is rendered inside the subagent list');
   const inputScript = getInputScript();
   const optionList = inputScript.indexOf("{ mode: 'ask'");
   assert.ok(optionList >= 0);
@@ -183,8 +184,6 @@ test('approval submenu renders exactly two modes and keeps reviewer configuratio
   for (const language of ['zh-CN', 'en'] as const) {
     const labels = WEBVIEW_TRANSLATIONS[language];
     const modeList = new ApprovalMenuElement();
-    const modelButton = new ApprovalMenuElement();
-    const modelValue = new ApprovalMenuElement();
     const posted: unknown[] = [];
     const state = {
       approvalMode: 'ask', isBusy: false, manualToolApproval: false,
@@ -195,7 +194,7 @@ test('approval submenu renders exactly two modes and keeps reviewer configuratio
       state, Element: ApprovalMenuElement, document: { createElement: () => new ApprovalMenuElement() },
       commandApprovalModeSwitch: new ApprovalMenuElement(), commandApprovalModeValue: new ApprovalMenuElement(),
       commandApprovalModeDescription: new ApprovalMenuElement(), commandApprovalModeList: modeList,
-      commandApprovalModeListOpen: true, commandApprovalModelButton: modelButton, commandApprovalModelValue: modelValue,
+      commandApprovalModeListOpen: true,
       renderCommandMenu: () => {}, t: (key: string) => labels[key],
       vscode: { postMessage: (message: unknown) => posted.push(JSON.parse(JSON.stringify(message))) }
     };
@@ -208,30 +207,98 @@ test('approval submenu renders exactly two modes and keeps reviewer configuratio
       assert.deepEqual(modeList.children.map(item => item.dataset.approvalMode), ['ask', 'delegate']);
       assert.deepEqual(modeList.children.map(item => item.attributes.role), ['menuitemradio', 'menuitemradio']);
       assert.equal(modeList.children.find(item => item.attributes['aria-checked'] === 'true')?.dataset.approvalMode, mode);
-      assert.equal(modelValue.textContent, labels.approvalModelFollowMain);
-      assert.equal(modelButton.disabled, false);
-      modelButton.dispatchClick(modelButton);
-      assert.deepEqual(posted.pop(), { type: 'configureApprovalModel' });
       const option = modeList.children[mode === 'ask' ? 1 : 0];
       modeList.dispatchClick(option.children[1].children[0]);
       assert.deepEqual(posted.pop(), { type: 'setApprovalMode', mode: option.dataset.approvalMode });
       assert.equal(context.commandApprovalModeListOpen, false);
     }
-    state.approvalReviewerSetting = { mode: 'fixed', label: 'Source · Model <literal>', error: '', sourceId: 'source', modelId: 'model' };
-    render();
-    assert.equal(modelValue.textContent, state.approvalReviewerSetting.label);
-    assert.equal(modelValue.title, modelValue.textContent);
-    state.approvalReviewerSetting.error = labels.approvalModelUnavailable;
-    render();
-    assert.equal(modelValue.textContent, labels.approvalModelUnavailable);
-    for (const patch of [{ isBusy: true }, { manualToolApproval: true },
-      { commandSettingsReadiness: { approvalMode: 'loading' } }, { commandSettingsReadiness: { approvalMode: 'error' } }]) {
+    for (const patch of [{ commandSettingsReadiness: { approvalMode: 'loading' } }, { commandSettingsReadiness: { approvalMode: 'error' } }]) {
       Object.assign(state, { isBusy: false, manualToolApproval: false, commandSettingsReadiness: { approvalMode: 'ready' } }, patch);
       render();
-      assert.equal(modelButton.disabled, true);
-      modelButton.dispatchClick(modelButton);
-      assert.equal(posted.length, 0, 'disabled reviewer configuration must not send a request');
+      assert.ok(modeList.children.every(option => option.disabled));
+      modeList.dispatchClick(modeList.children[0]);
+      assert.equal(posted.length, 0);
       assert.equal(modeList.children.length, 2, 'rerendering must not add a third entry');
+    }
+  }
+});
+
+test('approval model shares inline subagent selection, keyboard navigation and focus without sharing configuration', () => {
+  const script = getInputScript();
+  const bindings = script.slice(script.indexOf('if (commandSubagentModelList) {'), script.indexOf('if (commandModelCancelPending) {'));
+  for (const language of ['zh-CN', 'en'] as const) {
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const list = new ApprovalMenuElement();
+    const posted: unknown[] = [];
+    const models = ['source-A', 'source-B', 'image-only'].map(sourceId => ({ sourceId, id: 'same-model', label: 'Same name',
+      sourceName: sourceId, agentCompatible: sourceId !== 'image-only' }));
+    const state = {
+      models, isBusy: false, manualToolApproval: false, selectedSourceId: 'source-A', selectedModelId: 'same-model',
+      commandSettingsReadiness: { mainModel: 'ready', subagentModel: 'ready', approvalMode: 'ready' },
+      subagentModelSettings: { default: { mode: 'fixed', sourceId: 'source-B', modelId: 'same-model' }, profiles: {} },
+      approvalReviewerSetting: { mode: 'follow-main', sourceId: '', modelId: '', error: '' }
+    };
+    const before = JSON.stringify(state.subagentModelSettings);
+    const context = {
+      state, Element: ApprovalMenuElement, HTMLElement: ApprovalMenuElement,
+      document: { createElement: () => new ApprovalMenuElement(), getElementById: (id: string) => list.descendants().find(el => el.id === id) },
+      commandSubagentModelList: list, commandSubagentModelListOpen: true, commandSubagentModelProfile: '',
+      commandSubagentModelValue: null, commandSubagentModelSwitch: null, commandSubagentModelDescription: null,
+      commandMenuOpen: true, commandMenu: list, commandModelSwitch: null, commandModelListOpen: false,
+      renderCommandMenu: () => {}, setComposerStatus: () => {}, t: (key: string) => labels[key],
+      normalizeSettingsProvider: (provider: string) => provider, getModelProtocolLogoUri: () => '',
+      vscode: { postMessage: (message: unknown) => posted.push(JSON.parse(JSON.stringify(message))) }
+    };
+    const api = new Script(modelControlsRenderFragment.source + modelControlsLockingFragment.source + modelControlsHelpersFragment.source
+      + commandMenuImplementationFragment.source + bindings + '\n({ renderCommandSubagentModel, handleCommandMenuKeydown });').runInNewContext(context) as {
+        renderCommandSubagentModel(): void;
+        handleCommandMenuKeydown(event: { target: ApprovalMenuElement; key: string; preventDefault(): void }): void;
+      };
+    context.renderCommandMenu = api.renderCommandSubagentModel;
+    const render = api.renderCommandSubagentModel;
+    const profileButton = (profile: string) => list.querySelector('button[data-subagent-profile="' + profile + '"]')!;
+    const options = () => list.descendants().filter(el => el.dataset.subagentModelProfile === 'approval');
+    render();
+    assert.deepEqual(list.children.map(row => row.children[1].dataset.subagentProfile), ['default', 'research', 'review', 'proposal', 'approval']);
+    assert.equal(profileButton('approval').parent?.children[0].textContent, labels.approvalModelTitle);
+    assert.equal(profileButton('approval').className, profileButton('research').className);
+    assert.match(profileButton('approval').attributes['aria-label'], /source-A/u, 'approval follows main, never the subagent default');
+    list.dispatchClick(profileButton('approval'));
+    assert.equal(posted.length, 0, 'expanding a row never opens a native picker or saves settings');
+    assert.equal(profileButton('approval').focused, true);
+    assert.equal(options().length, 3, 'follow-main plus two compatible account/model choices');
+    assert.equal(options()[0].attributes['aria-checked'], 'true');
+    list.dispatchClick(options().find(el => el.dataset.sourceId === 'source-B')!);
+    assert.deepEqual(posted.pop(), { type: 'setApprovalModel', mode: 'fixed', sourceId: 'source-B', modelId: 'same-model' });
+    assert.equal(context.commandSubagentModelProfile, '');
+    assert.equal(profileButton('approval').focused, true);
+    state.approvalReviewerSetting = { mode: 'fixed', sourceId: 'source-B', modelId: 'same-model', error: '' };
+    render();
+    api.handleCommandMenuKeydown({ target: profileButton('approval'), key: 'ArrowRight', preventDefault() {} });
+    assert.equal(options()[0].focused, true);
+    assert.deepEqual(options().filter(el => el.attributes['aria-checked'] === 'true').map(el => el.dataset.sourceId), ['source-B']);
+    api.handleCommandMenuKeydown({ target: options()[0], key: 'ArrowLeft', preventDefault() {} });
+    assert.equal(context.commandSubagentModelProfile, '');
+    assert.equal(profileButton('approval').focused, true);
+    list.dispatchClick(profileButton('approval'));
+    list.dispatchClick(options()[0]);
+    assert.deepEqual(posted.pop(), { type: 'setApprovalModel', mode: 'follow-main' });
+    list.dispatchClick(profileButton('review'));
+    list.dispatchClick(list.descendants().find(el => el.dataset.subagentModelProfile === 'review' && el.dataset.subagentModelMode === 'follow-main')!);
+    assert.deepEqual(posted.pop(), { type: 'setSubagentModel', mode: 'follow-main', profile: 'review' });
+    assert.equal(JSON.stringify(state.subagentModelSettings), before);
+    state.approvalReviewerSetting = { mode: 'invalid', sourceId: '', modelId: '', error: labels.approvalModelUnavailable };
+    context.commandSubagentModelProfile = 'approval'; render();
+    assert.equal(options().filter(el => el.attributes['aria-checked'] === 'true').length, 0);
+    assert.equal(list.descendants().find(el => el.id === 'commandApprovalModelValue')?.textContent, labels.approvalModelUnavailable);
+    for (const patch of [{ isBusy: true }, { manualToolApproval: true },
+      { commandSettingsReadiness: { mainModel: 'ready', subagentModel: 'ready', approvalMode: 'loading' } }]) {
+      Object.assign(state, { isBusy: false, manualToolApproval: false, commandSettingsReadiness: { mainModel: 'ready', subagentModel: 'ready', approvalMode: 'ready' } }, patch);
+      render();
+      assert.equal(profileButton('approval').disabled, true);
+      assert.ok(options().every(option => option.disabled));
+      list.dispatchClick(options()[0]);
+      assert.equal(posted.length, 0);
     }
   }
 });
@@ -242,6 +309,11 @@ class ApprovalMenuElement {
   dataset: Record<string, string> = {};
   attributes: Record<string, string> = {};
   disabled = false;
+  id = '';
+  type = '';
+  className = '';
+  focused = false;
+  tabIndex = 0;
   textContent = '';
   title = '';
   classList = { toggle: () => {} };
@@ -254,8 +326,20 @@ class ApprovalMenuElement {
   setAttribute(key: string, value: string) { this.attributes[key] = value; }
   addEventListener(_type: string, listener: NonNullable<ApprovalMenuElement['onClick']>) { this.onClick = listener; }
   dispatchClick(target: ApprovalMenuElement) { this.onClick?.({ target, preventDefault() {}, stopPropagation() {} }); }
+  focus() { this.focused = true; }
+  getClientRects() { return [{}]; }
+  descendants(): ApprovalMenuElement[] { return this.children.flatMap(child => [child, ...child.descendants()]); }
+  contains(target: ApprovalMenuElement) { return this === target || this.descendants().includes(target); }
+  matches(selector: string): boolean {
+    const match = selector.match(/^button\[data-([\w-]+)(?:="([^"]+)")?\]$/u);
+    if (!match) return false;
+    const key = match[1].replace(/-([a-z])/gu, (_, c: string) => c.toUpperCase());
+    return this.type === 'button' && this.dataset[key] !== undefined && (match[2] === undefined || this.dataset[key] === match[2]);
+  }
+  querySelector(selector: string) { return this.descendants().find(el => el.matches(selector)); }
+  querySelectorAll(_selector: string) { return this.descendants().filter(el => el.type === 'button' && !el.disabled); }
   closest(selector: string): ApprovalMenuElement | null {
-    return selector === 'button[data-approval-mode]' && this.dataset.approvalMode ? this : this.parent?.closest(selector) ?? null;
+    return this.matches(selector) ? this : this.parent?.closest(selector) ?? null;
   }
 }
 

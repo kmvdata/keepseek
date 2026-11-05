@@ -523,7 +523,7 @@ test('command menu owns project-scoped main and subagent model selection', async
   assert.match(inputScript, /type: 'setSubagentModel', mode: 'follow-main'/u);
   assert.match(inputScript, /type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId/u);
   assert.match(inputScript, /function renderCommandSubagentModel\(\)/u);
-  assert.match(inputScript, /\['default', 'research', 'review', 'proposal'\]\.forEach/u);
+  assert.match(inputScript, /\['default', 'research', 'review', 'proposal', 'approval'\]\.forEach/u);
   assert.match(inputScript, /profile: selectedProfile === 'default' \? undefined : selectedProfile/u);
   assert.match(inputScript, /profileRow\.className = 'command-subagent-profile-row'/u);
   assert.match(inputScript, /profileButton\.append\(currentLogo\)/u);
@@ -578,13 +578,17 @@ test('subagent model overview renders safely before the startup model catalog ar
     return {
       rowCount: commandSubagentModelList.children.length,
       defaultLabel: commandSubagentModelList.children[0]?.children[0]?.textContent,
+      approvalLabel: commandSubagentModelList.children[4]?.children[0]?.textContent,
+      approvalDisabled: commandSubagentModelList.children[4]?.children[1]?.disabled,
       value: commandSubagentModelValue.children[0]?.textContent
     };
   `);
 
   assert.deepEqual(renderStartupState(), {
-    rowCount: 4,
+    rowCount: 5,
     defaultLabel: 'subagentProfile_default',
+    approvalLabel: 'approvalModelTitle',
+    approvalDisabled: true,
     value: 'subagentModelLoading'
   });
 });

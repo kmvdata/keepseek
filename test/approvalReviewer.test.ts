@@ -507,36 +507,47 @@ test('approval model menu saves user settings, validates account identity and ne
     const originalPick = vscode.window.showQuickPick;
     let setting: unknown = { mode: 'follow-main' };
     let fail = false;
-    let selection: 'source-B' | 'follow-main' = 'source-B';
     const writes: unknown[] = [], messages: Array<{ type?: string; success?: boolean }> = [];
     vscode.workspace.getConfiguration = () => ({ ...originalConfig(),
       inspect: () => ({ globalValue: setting, workspaceValue: { mode: 'fixed', sourceId: 'attacker', modelId: 'different' } }),
       update: async (...args: unknown[]) => { if (fail) throw new Error('settings write failed'); writes.push(args); setting = args[1]; }
-    });
-    vscode.window.showQuickPick = async <T>(items: readonly T[]) => items.find(item => {
-      const v = item as { sourceId?: string; mode?: string };
-      return selection === 'follow-main' ? v.mode === 'follow-main' : v.sourceId === selection;
     });
     const models = ['source-A', 'source-B'].map(sourceId => ({ id: 'same-model', sourceId, label: 'Same name',
       sourceName: sourceId, provider: 'openai-compatible', agentCompatible: true }));
     const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), { language: 'en', availableModels: models,
       globalStorageUri: storageUri, sourceStore: sources, activeChangeActions: new Set(),
       hasActiveBackgroundRun: () => false, postState: () => {}, postToWebview: (message: typeof messages[number]) => messages.push(message)
-    }) as { configureApprovalModel(): Promise<void>; isBusy: boolean };
+    }) as { setApprovalModel(mode: 'follow-main' | 'fixed', sourceId?: string, modelId?: string): Promise<void>; configureApprovalModel(): Promise<void>; isBusy: boolean; manualToolApproval?: object };
     try {
-      await host.configureApprovalModel();
+      await host.setApprovalModel('fixed', 'source-B', 'same-model');
       assert.deepEqual(getAutoApprovalReviewerSetting(), { mode: 'fixed', sourceId: 'source-B', modelId: 'same-model' });
       assert.deepEqual(writes[0], ['autoApprovalReviewer', setting, vscode.ConfigurationTarget.Global]);
       assert.equal(messages.at(-1)?.success, true);
       assert.deepEqual(await subagents.loadAll(), before);
       await subagents.save({ mode: 'follow-main' });
       assert.equal(getAutoApprovalReviewerSetting().sourceId, 'source-B');
-      host.isBusy = true; await host.configureApprovalModel(); assert.equal(writes.length, 1);
-      host.isBusy = false; fail = true; selection = 'follow-main';
-      await host.configureApprovalModel(); assert.equal(messages.at(-1)?.success, false);
+      host.isBusy = true; await host.setApprovalModel('follow-main'); assert.equal(writes.length, 1);
+      host.isBusy = false;
+      host.manualToolApproval = {}; await host.setApprovalModel('follow-main'); assert.equal(writes.length, 1);
+      host.manualToolApproval = undefined;
+      for (const [mode, sourceId, modelId] of [['invalid', '', ''], ['fixed', '', 'same-model'], ['fixed', 'missing-source', 'same-model'], ['fixed', 'source-B', 'missing-model']]) {
+        await host.setApprovalModel(mode as 'fixed', sourceId, modelId);
+        assert.equal(messages.at(-1)?.success, false);
+        assert.equal(writes.length, 1, 'invalid inline selections must not overwrite the saved setting');
+      }
+      models[1].agentCompatible = false;
+      await host.setApprovalModel('fixed', 'source-B', 'same-model');
+      assert.equal(writes.length, 1);
+      models[1].agentCompatible = true;
+      fail = true;
+      await host.setApprovalModel('follow-main'); assert.equal(messages.at(-1)?.success, false);
       assert.equal(getAutoApprovalReviewerSetting().sourceId, 'source-B');
-      fail = false; await host.configureApprovalModel();
+      fail = false; await host.setApprovalModel('follow-main');
       assert.equal(getAutoApprovalReviewerSetting().mode, 'follow-main');
+      assert.equal((await subagents.load('review')).sourceId, 'source-B');
+      vscode.window.showQuickPick = async <T>(items: readonly T[]) => items.find(item => (item as { sourceId?: string }).sourceId === 'source-A');
+      await host.configureApprovalModel();
+      assert.equal(getAutoApprovalReviewerSetting().sourceId, 'source-A', 'old Webview messages still use the validated save path');
       assert.equal((await subagents.load('review')).sourceId, 'source-B');
     } finally { vscode.workspace.getConfiguration = originalConfig; vscode.window.showQuickPick = originalPick; }
   });

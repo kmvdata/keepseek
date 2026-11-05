@@ -1182,6 +1182,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       case 'configureApprovalModel':
         await this.configureApprovalModel();
         return;
+      case 'setApprovalModel':
+        if (this.commandSettingsReadiness.mainModel !== 'ready'
+          || this.commandSettingsReadiness.approvalMode !== 'ready') {
+          this.postStartupSettingsPatch();
+          return;
+        }
+        await this.setApprovalModel(message.mode, message.sourceId, message.modelId);
+        return;
       case 'setSubagentModel':
         if (this.commandSettingsReadiness.mainModel !== 'ready'
           || this.commandSettingsReadiness.subagentModel !== 'ready') {
@@ -2994,10 +3002,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   private approvalModelSelectionInFlight = false;
 
-  private async configureApprovalModel(): Promise<void> {
-    const locked = () => this.isBusy || this.isStartingRun || this.delegatedApprovalInFlight
+  private isApprovalModelSettingLocked(): boolean {
+    return this.isBusy || this.isStartingRun || this.delegatedApprovalInFlight
       || Boolean(this.manualToolApproval || this.activeDraftRunId || this.activeChangeActions?.size || this.hasActiveBackgroundRun());
-    if (this.approvalModelSelectionInFlight || locked()) { vscode.window.showInformationMessage(this.t('modelSettingsReadonlyWhileBusy')); return; }
+  }
+
+  /** Compatibility for an already-open Webview using the former picker message. */
+  private async configureApprovalModel(): Promise<void> {
+    if (this.approvalModelSelectionInFlight || this.isApprovalModelSettingLocked()) return;
     this.approvalModelSelectionInFlight = true;
     try {
       const items = [{ label: this.t('approvalModelFollowMain'), description: '', mode: 'follow-main' as const,
@@ -3007,18 +3019,31 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         description: `${model.sourceId} / ${model.id}`, mode: 'fixed' as const, sourceId: model.sourceId, modelId: model.id
       }))];
       const selected = await vscode.window.showQuickPick(items, { title: this.t('approvalModelTitle'), matchOnDescription: true });
-      if (!selected) return;
+      this.approvalModelSelectionInFlight = false;
+      if (selected) await this.setApprovalModel(selected.mode, selected.sourceId, selected.modelId);
+    } finally { this.approvalModelSelectionInFlight = false; }
+  }
+
+  private async setApprovalModel(mode: 'follow-main' | 'fixed', sourceId?: string, modelId?: string): Promise<void> {
+    const locked = () => this.isApprovalModelSettingLocked();
+    if (this.approvalModelSelectionInFlight || locked()) {
+      this.postToWebview({ type: 'approvalReviewerModelResult', success: false, error: this.t('modelSettingsReadonlyWhileBusy') });
+      return;
+    }
+    this.approvalModelSelectionInFlight = true;
+    try {
       try {
         if (locked()) throw new Error(this.t('modelSettingsReadonlyWhileBusy'));
-        if (selected.mode === 'fixed') {
-          const model = findModelBySelection(this.availableModels, selected);
-          if (!model || model.agentCompatible === false || model.sourceId !== selected.sourceId) throw new Error(this.t('approvalModelUnavailable'));
-          await resolveModelSourceConfig(selected.sourceId!, this.globalStorageUri, { sourceStore: this.sourceStore, language: this.language });
+        if (mode !== 'follow-main' && mode !== 'fixed') throw new Error(this.t('approvalModelUnavailable'));
+        if (mode === 'fixed') {
+          const model = findModelBySelection(this.availableModels, { sourceId, modelId });
+          if (!sourceId || !modelId || !model || model.agentCompatible === false || model.sourceId !== sourceId) throw new Error(this.t('approvalModelUnavailable'));
+          await resolveModelSourceConfig(sourceId, this.globalStorageUri, { sourceStore: this.sourceStore, language: this.language });
         }
         if (locked()) throw new Error(this.t('modelSettingsReadonlyWhileBusy'));
-        const setting = selected.mode === 'fixed' ? { mode: 'fixed', sourceId: selected.sourceId, modelId: selected.modelId } : { mode: 'follow-main' };
+        const setting = mode === 'fixed' ? { mode: 'fixed', sourceId, modelId } : { mode: 'follow-main' };
         await vscode.workspace.getConfiguration('keepseek').update('autoApprovalReviewer', setting, vscode.ConfigurationTarget.Global);
-        if (JSON.stringify(getAutoApprovalReviewerSetting()) !== JSON.stringify({ ...setting, sourceId: selected.sourceId, modelId: selected.modelId })) {
+        if (JSON.stringify(getAutoApprovalReviewerSetting()) !== JSON.stringify(setting)) {
           throw new Error(this.t('approvalModelSaveFailed'));
         }
         this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;

@@ -46,6 +46,7 @@ export type WebviewMessage =
   | { type: 'deleteOtherWorkspace'; workspaceKey: string }
   | { type: 'setSelectedModel'; requestId: string; sourceId: string; modelId: string }
   | { type: 'configureApprovalModel' }
+  | { type: 'setApprovalModel'; mode: 'follow-main' | 'fixed'; sourceId?: string; modelId?: string }
   | { type: 'setSubagentModel'; mode: 'follow-main' | 'fixed'; profile?: 'research' | 'review' | 'proposal'; sourceId?: string; modelId?: string }
   | { type: 'cancelPendingModelSelection'; requestId: string }
   | { type: 'setAgentSettings'; settings: Partial<AgentSettings> }
