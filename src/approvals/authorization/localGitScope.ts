@@ -8,6 +8,9 @@ import { canonicalPath, isPathInside, joinUnresolvedPath } from './pathScope';
 import { isGitProjectSkillPath, isProtectedOperationPath } from './protectedTargets';
 import { redactSensitiveReviewText } from '../approvalPolicy';
 
+import type { GitRemoteCommand } from './commandSemantics';
+import { inspectGitRemoteScope, type GitRemoteScope } from './gitRemoteScope';
+
 const readGit = promisify(execFile);
 const hooks = ['pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit', 'post-index-change', 'reference-transaction', 'pre-auto-gc'];
 const metadataEntries = ['HEAD', 'index', 'config', 'config.worktree', 'objects', 'objects/info', 'refs', 'logs', 'packed-refs', 'reftable', 'objects/pack'];
@@ -15,7 +18,7 @@ const redirectedEntries = ['commondir', 'gitdir', 'objects/info/alternates', 'ob
 const inProgressEntries = ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer'];
 const maxWorkingTreeBytes = 32 * 1024 * 1024;
 
-type GitScopeResult = { fingerprint: string; repository: string; cwd: string }
+type GitScopeResult = { fingerprint: string; repository: string; cwd: string; branchRef?: string; remote?: GitRemoteScope }
   | { reason: string; externalPath?: string; binding?: string; hardBlocked?: boolean };
 
 async function inspectEntry(file: string) {
@@ -39,6 +42,7 @@ export async function inspectLocalGitScope(input: {
   commitAll?: boolean;
   addPathspecs?: readonly string[];
   addTracksOnly?: boolean;
+  remote?: GitRemoteCommand;
   refMutation?: { name: string; action: 'create' | 'delete' | 'force' };
 }): Promise<GitScopeResult> {
   try {
@@ -112,13 +116,14 @@ export async function inspectLocalGitScope(input: {
     });
     const fields = stdout.split('\0');
     if (fields.pop() !== '' || fields.length % 2) throw new Error('Malformed Git config response.');
-    const effective = new Map<string, string>();
+    const configEntries: Array<[string, string]> = [];
     for (let index = 1; index < fields.length; index += 2) {
       const field = fields[index];
       const separator = field.indexOf('\n');
       const key = (separator < 0 ? field : field.slice(0, separator)).toLowerCase();
-      effective.set(key, separator < 0 ? '' : field.slice(separator + 1));
+      configEntries.push([key, separator < 0 ? '' : field.slice(separator + 1)]);
     }
+    const effective = new Map(configEntries);
     for (const [key, value] of effective) {
       if (key === 'core.worktree') {
         const target = await canonicalPath(joinUnresolvedPath(metadata, value));
@@ -167,6 +172,7 @@ export async function inspectLocalGitScope(input: {
       const mayRefreshIndex = (input.subcommand === 'status' && !input.noOptionalLocks)
         || (input.subcommand === 'diff' && !input.noIndexRefresh && !isDisabled(effective.get('diff.autorefreshindex') ?? ''));
       const relevantHooks = input.subcommand === 'commit' ? hooks
+        : input.remote?.kind === 'push' ? ['pre-push']
         : input.refMutation ? ['reference-transaction']
         : input.subcommand === 'add' || mayRefreshIndex ? ['post-index-change'] : [];
       const hookFacts = await Promise.all(relevantHooks.map(async name => {
@@ -209,6 +215,21 @@ export async function inspectLocalGitScope(input: {
       }
       referenceIdentity = entryIdentity(await inspectEntry(target));
     }
+    let pushRefSnapshot: string | undefined;
+    if (input.remote?.kind === 'push') {
+      for (const ref of input.remote.refs) {
+        const target = path.join(metadata, ref);
+        const loose = await inspectEntry(target);
+        const tracking = ref.startsWith('refs/heads/') ? path.join('refs', 'remotes', input.remote.remote, ref.slice('refs/heads/'.length)) : undefined;
+        if (await hasSymlinkBelow(metadata, target)
+          || (tracking && (await hasSymlinkBelow(metadata, path.join(metadata, tracking))
+            || await hasSymlinkBelow(metadata, path.join(metadata, 'logs', tracking)))) || (loose && (!loose.isFile() || loose.size > 4096
+          || !objectId.test((await readFile(target, 'utf8')).trim())))) {
+          return { reason: 'A local push ref uses unverified reference storage. / 待推送本地引用的存储无法核实。', hardBlocked: true };
+        }
+      }
+      pushRefSnapshot = await readSnapshot(['for-each-ref', '--format=%(refname)%00%(objectname)', '--', ...input.remote.refs]);
+    }
     const operationMarkers = committing
       ? await Promise.all(inProgressEntries.map(async name => entryIdentity(await inspectEntry(path.join(metadata, name)))))
       : [];
@@ -237,22 +258,31 @@ export async function inspectLocalGitScope(input: {
         return { reason: 'A Git merge, rebase or sequenced operation is in progress. / Git 正在进行合并、变基或其他序列操作。', hardBlocked: true };
       } else if (committing && candidates.some(item => !isPathInside(cwd, path.join(repository, item.file)))) {
         return { reason: 'Git commit would include changes outside its working directory. / Git 提交会纳入当前工作目录外的改动。', hardBlocked: true };
-      } else if (committing && input.commitAll) {
+      } else if (staging || (committing && input.commitAll)) {
         workingTree = await fingerprintWorkingTree(repository, candidates.filter(item => item.worktree !== ' ').map(item => item.file));
+      }
+    }
+    let remote: GitRemoteScope | undefined;
+    if (input.remote && !executableHook) {
+      try { remote = await inspectGitRemoteScope({ command: input.remote, executable: input.executable, cwd, env: input.env, config: configEntries }); }
+      catch (error) {
+        // execFile errors can embed configuration values. Only return our own diagnostics.
+        return { reason: error instanceof Error && !('code' in error) ? error.message
+          : 'Git could not resolve the configured destination. / Git 无法解析配置的目的地。', hardBlocked: true };
       }
     }
     const directory = await stat(metadata);
     const fingerprint = createHash('sha256').update(JSON.stringify([
       repository, metadata, directory.dev, directory.ino, headText, headRefIdentity,
       entryIdentity(entries[1]), entryIdentity(entries[8]), stdout, hooksPath, hookIdentities,
-      operationMarkers, mutationStatus, workingTree, referenceIdentity
+      operationMarkers, mutationStatus, workingTree, referenceIdentity, pushRefSnapshot, remote
     ])).digest('hex');
     if (scopeReason) return { reason: scopeReason, binding: fingerprint };
     if (executableHook) return {
       reason: `Git can execute a repository hook: ${executableHook}. / Git 可能执行仓库 hook：${executableHook}。`,
       binding: fingerprint
     };
-    return { fingerprint, repository, cwd };
+    return { fingerprint, repository, cwd, remote, branchRef: headText.startsWith('ref: refs/heads/') ? headText.slice(5) : undefined };
   } catch {
     return { reason: 'Git repository settings could not be verified. / 无法核实 Git 仓库设置。' };
   }

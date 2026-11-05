@@ -16,7 +16,9 @@ import { DraftRunAuthorizationService } from './draftRunAuthorization';
 import type { ApprovalRecordMatch, ApprovalReviewRecord } from '../approvals/approvalReviewTypes';
 import { toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
 import { normalizeApprovalDependency, normalizeDraftRunReplan, type ApprovalDependency, type DraftRunReplanResult } from '../approvals/approvalProcessing';
-import { normalizeLocalGitCommitEvidence, normalizeLocalGitStageEvidence, type LocalGitCommitEvidence, type LocalGitStageEvidence } from './localGitCommit';
+import { normalizeGitPushAttempt, normalizeGitReleaseEvidence, type GitPushAttempt, type GitReleaseEvidence } from './gitReleaseEvidence';
+import type { VerifiedDraftRunLaunch } from './draftRunExecutor';
+import { normalizeLocalGitCommitEvidence, normalizeLocalGitCommitPlan, normalizeLocalGitStageEvidence, reconcileLocalGitCommit, type LocalGitCommitPlan, type LocalGitCommitEvidence, type LocalGitStageEvidence } from './localGitCommit';
 import {
   SpawnDraftRunExecutor,
   type DraftRunExecutorAdapter,
@@ -41,7 +43,7 @@ const ANSI_CSI_PATTERN = new RegExp('\\x1B\\[[0-?]*[ -/]*[@-~]', 'gu');
 // eslint-disable-next-line no-control-regex
 const UNSAFE_CONTROL_CHARACTER_PATTERN = new RegExp('[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1A\\x1C-\\x1F\\x7F]', 'gu');
 
-export type WebviewDraftRun = Omit<DraftRun, 'outputHead' | 'outputTail'> & {
+export type WebviewDraftRun = Omit<DraftRun, 'outputHead' | 'outputTail' | 'gitCommitPlan' | 'gitPushAttempt'> & {
   output: string;
 };
 
@@ -97,6 +99,7 @@ export class DraftRunStore {
         return;
       }
       let repairedInterruptedRun = false;
+      let gitReconciliations = 0;
       for (const value of Array.isArray(parsed.draftRuns) ? parsed.draftRuns : []) {
         const draftRun = normalizeStoredDraftRun(value);
         if (!draftRun) {
@@ -108,6 +111,14 @@ export class DraftRunStore {
           draftRun.finishedAt = new Date().toISOString();
           draftRun.updatedAt = draftRun.finishedAt;
           repairedInterruptedRun = true;
+        }
+        if (draftRun.gitCommitPlan && !draftRun.gitCommitEvidence && draftRun.startedAt
+          && ['failed', 'done'].includes(draftRun.status) && gitReconciliations++ < 4) {
+          const evidence = await reconcileLocalGitCommit(draftRun, draftRun.gitCommitPlan);
+          if (evidence) {
+            draftRun.gitCommitEvidence = evidence;
+            repairedInterruptedRun = true;
+          }
         }
         this.draftRuns.set(draftRun.id, draftRun);
       }
@@ -208,10 +219,20 @@ export class DraftRunStore {
       .map(cloneDraftRun);
   }
 
+  public recordGitCommitPlan(id: string, specHash: string, plan: LocalGitCommitPlan): boolean {
+    const run = this.draftRuns.get(id);
+    if (!run || run.status !== 'pending' || run.specHash !== specHash || this.approving.has(id)) return false;
+    run.gitCommitPlan = structuredClone(plan);
+    this.schedulePersist();
+    return true;
+  }
+
   public recordGitCommitEvidence(id: string, specHash: string, evidence: LocalGitCommitEvidence): boolean {
     const draft = this.draftRuns.get(id);
     if (!draft || draft.specHash !== specHash || this.approving.has(id) || draft.gitCommitEvidence
-      || draft.status !== (evidence.outcome === 'verified' ? 'done' : 'pending')) return false;
+      || (evidence.outcome === 'verified'
+        ? draft.status !== 'done' && !(draft.status === 'failed' && draft.startedAt && draft.gitCommitPlan?.rootTaskId === evidence.rootTaskId)
+        : draft.status !== 'pending')) return false;
     draft.gitCommitEvidence = evidence;
     if (evidence.outcome === 'no_changes') {
       draft.status = 'no_changes';
@@ -227,6 +248,42 @@ export class DraftRunStore {
     const draft = this.draftRuns.get(id);
     if (!draft || draft.specHash !== specHash || draft.status !== 'done' || draft.gitStageEvidence) return false;
     draft.gitStageEvidence = evidence;
+    draft.updatedAt = new Date().toISOString();
+    this.emitState(draft);
+    this.schedulePersist();
+    return true;
+  }
+
+  public recordGitReuse(id: string, specHash: string, verifiedId: string): boolean {
+    const draft = this.draftRuns.get(id);
+    const prior = this.draftRuns.get(verifiedId);
+    if (!draft || draft.specHash !== specHash || draft.status !== 'pending' || this.approving.has(id)
+      || prior?.sessionId !== draft.sessionId || !(prior.gitStageEvidence || prior.gitCommitEvidence?.outcome === 'verified')) return false;
+    draft.gitReusedDraftRunId = verifiedId;
+    draft.status = 'no_changes';
+    draft.updatedAt = draft.finishedAt = new Date().toISOString();
+    this.emitState(draft);
+    this.schedulePersist();
+    return true;
+  }
+
+  public recordGitPushAttempt(id: string, specHash: string, attempt: GitPushAttempt): boolean {
+    const run = this.draftRuns.get(id);
+    if (!run || run.status !== 'pending' || run.specHash !== specHash || this.approving.has(id)) return false;
+    run.gitPushAttempt = structuredClone(attempt);
+    this.schedulePersist();
+    return true;
+  }
+
+  public recordGitReleaseEvidence(id: string, specHash: string, evidence: GitReleaseEvidence): boolean {
+    const draft = this.draftRuns.get(id);
+    if (!draft || draft.specHash !== specHash || this.approving.has(id) || draft.gitReleaseEvidence
+      || !['pending', 'done', 'failed'].includes(draft.status) || (draft.status === 'pending' && evidence.executed)) return false;
+    if (draft.status === 'pending') {
+      draft.status = 'no_changes';
+      draft.finishedAt = new Date().toISOString();
+    }
+    draft.gitReleaseEvidence = evidence;
     draft.updatedAt = new Date().toISOString();
     this.emitState(draft);
     this.schedulePersist();
@@ -345,7 +402,7 @@ export class DraftRunStore {
     options: {
       autoContinue?: boolean;
       delegatedApproval?: () => boolean;
-      verifyScope?: () => Promise<void>;
+      verifyScope?: () => Promise<void | VerifiedDraftRunLaunch>;
       approvalRecord?: ApprovalRecordMatch;
       signal?: AbortSignal;
       /** Finite batch click authority, rechecked after every asynchronous boundary. */
@@ -380,13 +437,15 @@ export class DraftRunStore {
       await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
       const scope = restricted ? undefined : await inspectDraftRunScope(draftRun);
       const verifyScope = async () => {
-        await options.verifyScope?.();
-        if (restricted && original) return { restrictedLaunch: await verifyRestrictedPythonSyntax(draftRun, original) };
+        if (restricted && original) {
+          await options.verifyScope?.();
+          return { restrictedLaunch: await verifyRestrictedPythonSyntax(draftRun, original) };
+        }
         const current = await inspectDraftRunScope(draftRun);
         if (current.fingerprint !== scope?.fingerprint || !hasExactCommandScope(current, draftRun.spec.cwdUri, authorizedExternalReferenceUris)) {
           throw new Error('Exact external operation scope is missing or changed. / 缺少精确范围授权或范围已变化。');
         }
-        return { scope: current };
+        return { scope: current, verifiedRemoteLaunch: await options.verifyScope?.() };
       };
       await verifyScope();
       assertAuthorized();
@@ -413,7 +472,7 @@ export class DraftRunStore {
         : this.authorization.createUserClickPermit(draftRun);
       // Approval-record consumption is asynchronous: recheck scope after it too.
       await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
-      const { scope: verifiedScope, restrictedLaunch } = await verifyScope();
+      const { scope: verifiedScope, restrictedLaunch, verifiedRemoteLaunch } = await verifyScope();
       assertAuthorized();
       const abortController = new AbortController();
       this.abortControllers.set(draftRun.id, abortController);
@@ -428,7 +487,7 @@ export class DraftRunStore {
         permit,
         restrictedLaunch,
         verifiedLaunch: options.approvalRecord?.approvalMode === 'delegate' && verifiedScope?.boundLauncher
-          ? { executable: verifiedScope.boundLauncher, cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath, env: verifiedScope.environment }
+          ? verifiedRemoteLaunch ?? { executable: verifiedScope.boundLauncher, cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath, env: verifiedScope.environment }
           : verifiedScope?.executable && !verifiedScope.externalUris.length
           && (verifiedScope.trustedProjectScript || (!verifiedScope.uncertain && verifiedScope.paths.some(target => target.role === 'repository')))
           ? { executable: verifiedScope.projectScriptLaunchPath ?? verifiedScope.executable,
@@ -633,6 +692,9 @@ export class DraftRunStore {
       dependency: draftRun.dependency,
       gitCommitEvidence: draftRun.gitCommitEvidence,
       gitStageEvidence: draftRun.gitStageEvidence,
+      gitReleaseEvidence: draftRun.gitReleaseEvidence,
+      gitReusedDraftRunId: draftRun.gitReusedDraftRunId,
+      startedAt: draftRun.startedAt,
       fullOutput: draftRun.outputTruncated ? 'DraftRun terminal' : null
     }));
     return {
@@ -829,9 +891,11 @@ function getDraftRunOutput(draftRun: DraftRun): string {
 }
 
 function toWebviewDraftRun(draftRun: DraftRun): WebviewDraftRun {
-  const { outputHead: _head, outputTail: _tail, ...rest } = cloneDraftRun(draftRun);
+  const { outputHead: _head, outputTail: _tail, gitCommitPlan: _gitCommitPlan, gitPushAttempt: _gitPushAttempt, ...rest } = cloneDraftRun(draftRun);
   void _head;
   void _tail;
+  void _gitCommitPlan;
+  void _gitPushAttempt;
   return { ...rest,
     // Pending legacy drafts keep their immutable spec and stored history. Only
     // derived presentation advice is refreshed with the current parser.
@@ -860,8 +924,11 @@ function cloneDraftRun(draftRun: DraftRun): DraftRun {
   return { ...draftRun, ...cloneProposal(draftRun),
     replan: draftRun.replan ? { ...draftRun.replan, candidateArgs: draftRun.replan.candidateArgs?.slice() } : undefined,
     dependency: draftRun.dependency ? { ...draftRun.dependency } : undefined,
+    gitCommitPlan: draftRun.gitCommitPlan ? structuredClone(draftRun.gitCommitPlan) : undefined,
     gitCommitEvidence: draftRun.gitCommitEvidence ? structuredClone(draftRun.gitCommitEvidence) : undefined,
-    gitStageEvidence: draftRun.gitStageEvidence ? { ...draftRun.gitStageEvidence } : undefined };
+    gitPushAttempt: draftRun.gitPushAttempt ? structuredClone(draftRun.gitPushAttempt) : undefined,
+    gitReleaseEvidence: draftRun.gitReleaseEvidence ? structuredClone(draftRun.gitReleaseEvidence) : undefined,
+    gitStageEvidence: draftRun.gitStageEvidence ? structuredClone(draftRun.gitStageEvidence) : undefined };
 }
 
 function repeatedDisplayIds(values: readonly unknown[], field: 'operationId' | 'snapshotId'): Set<string> {
@@ -958,8 +1025,13 @@ function normalizeStoredDraftRun(value: unknown): DraftRun | undefined {
     replacementDraftRunId: typeof record.replacementDraftRunId === 'string' ? record.replacementDraftRunId : undefined,
     replan: normalizeDraftRunReplan(record.replan, record.id, record.agentRunId, record.specHash),
     dependency: normalizeApprovalDependency(record.dependency),
-    gitCommitEvidence: record.status === 'done' || record.status === 'no_changes'
+    gitCommitPlan: normalizeLocalGitCommitPlan(record.gitCommitPlan),
+    gitCommitEvidence: ['done', 'no_changes', 'failed'].includes(record.status)
       ? normalizeLocalGitCommitEvidence(record.gitCommitEvidence) : undefined,
+    gitReusedDraftRunId: record.status === 'no_changes' && typeof record.gitReusedDraftRunId === 'string'
+      ? record.gitReusedDraftRunId : undefined,
+    gitPushAttempt: normalizeGitPushAttempt(record.gitPushAttempt),
+    gitReleaseEvidence: ['done', 'failed', 'no_changes'].includes(record.status) ? normalizeGitReleaseEvidence(record.gitReleaseEvidence) : undefined,
     gitStageEvidence: record.status === 'done' ? normalizeLocalGitStageEvidence(record.gitStageEvidence) : undefined,
     outputHead: typeof record.outputHead === 'string' ? record.outputHead : '',
     outputTail: typeof record.outputTail === 'string' ? record.outputTail : '',

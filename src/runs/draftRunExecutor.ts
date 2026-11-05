@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import type { GitRemoteCommand } from '../approvals/authorization/commandSemantics';
+import { parseGitRefOutput, gitTransportError } from './gitReleaseEvidence';
 import { createControlledEnvironment } from './executionEnvironment';
 import type { RestrictedPythonSyntaxLaunch } from './restrictedPythonSyntax';
 import { StringDecoder } from 'node:string_decoder';
@@ -28,6 +30,7 @@ export interface VerifiedDraftRunLaunch {
   executable: string;
   cwd: string;
   env?: NodeJS.ProcessEnv;
+  gitRemote?: GitRemoteCommand;
 }
 
 export interface DraftRunExecutorAdapter {
@@ -74,6 +77,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
   }): Promise<DraftRunExecutionOutcome> {
     validatePermit(input.draftRun, input.permit);
     const restricted = input.restrictedLaunch;
+    const gitRemote = input.verifiedLaunch?.gitRemote;
     if (Boolean(input.draftRun.spec.restricted) !== Boolean(restricted)
       || (restricted && input.permit.source !== 'delegated_approver')) {
       throw new Error('Restricted DraftRun requires its verified launch and delegated permit.');
@@ -125,6 +129,8 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       let exitSignal: string | undefined;
       let outputBytes = 0;
       let outputLimitError: string | undefined;
+      let remoteStdout = '';
+      let remoteStderr = '';
       const stdoutDecoder = new StringDecoder('utf8');
       const stderrDecoder = new StringDecoder('utf8');
       const emit = (stream: DraftRunOutputChunk['stream'], text: string) => {
@@ -144,6 +150,23 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
             return;
           }
         }
+        if (gitRemote) {
+          // A Git server may print arbitrary banners, hook output or URLs.
+          // Only normalized reference evidence and fixed diagnostics leave this boundary.
+          if (stream === 'stdout' && gitRemote.kind === 'query') {
+            if (outputLimitError) return;
+            outputBytes += chunk.byteLength;
+            if (outputBytes > 512 * 1024) {
+              outputLimitError = 'Git remote query output exceeded its limit. / Git 远端查询输出超过上限。';
+              terminateAndBoundSettlement();
+              return;
+            }
+            remoteStdout += decoder.write(chunk);
+          } else if (stream === 'stderr' && remoteStderr.length < 8192) {
+            remoteStderr = (remoteStderr + decoder.write(chunk)).slice(0, 8192);
+          }
+          return;
+        }
         emit(stream, decoder.write(chunk));
       };
       child.stdout?.on('data', (chunk: Buffer) => onData('stdout', stdoutDecoder, chunk));
@@ -158,8 +181,23 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         if (exitCloseTimer) clearTimeout(exitCloseTimer);
         if (terminationSettleTimer) clearTimeout(terminationSettleTimer);
         input.signal?.removeEventListener('abort', abortExecution);
-        emit('stdout', stdoutDecoder.end());
-        emit('stderr', stderrDecoder.end());
+        if (gitRemote) {
+          if (outcome.exitCode === 0 && !outcome.error && gitRemote.kind === 'query') {
+            try {
+              const requested = gitRemote.refs.length ? gitRemote.refs : ['refs/' + gitRemote.namespace + '/*'];
+              const refs = parseGitRefOutput(remoteStdout + stdoutDecoder.end(), requested);
+              emit('stdout', refs.map(ref => `${ref.object}\t${ref.ref}\n`
+                + (ref.peeled ? `${ref.peeled}\t${ref.ref}^{}\n` : '')).join(''));
+            } catch (error) {
+              outcome.error = error instanceof Error ? error.message : 'Invalid Git response. / Git 响应无效。';
+            }
+          } else if (!outcome.cancelled && !outcome.timedOut && outcome.exitCode !== 0) {
+            outcome.error = gitTransportError(remoteStderr, gitRemote.kind, !started);
+          }
+        } else {
+          emit('stdout', stdoutDecoder.end());
+          emit('stderr', stderrDecoder.end());
+        }
         this.running.delete(input.draftRun.id);
         pty.write(`\r\n[KeepSeek DraftRun ${formatOutcomeLabel(outcome)}]\r\n`);
         pty.finishRun();

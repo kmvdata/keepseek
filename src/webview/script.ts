@@ -3576,10 +3576,13 @@ export function getScript(): string {
       heading.className = 'draft-run-heading';
       var title = document.createElement('div');
       title.className = 'draft-run-title';
-      title.textContent = getDraftRunTitle(displayStatus);
+      var release = draftRun.gitReleaseEvidence;
+      var existingRelease = release && !release.executed;
+      title.textContent = draftRun.gitReusedDraftRunId ? t('draftRunGitResultReused')
+        : existingRelease ? t('draftRunReleaseAlreadyVerified') : getDraftRunTitle(displayStatus);
       var meta = document.createElement('div');
       meta.className = 'draft-run-meta';
-      meta.textContent = [getDraftRunStatusLabel(displayStatus), spec.reason].filter(Boolean).join(' · ');
+      meta.textContent = [existingRelease || draftRun.gitReusedDraftRunId ? '' : getDraftRunStatusLabel(displayStatus), spec.reason].filter(Boolean).join(' · ');
       if (draftRun.authorizationSource === 'delegated_approver') {
         meta.textContent += ' · ' + t('approvalSourceLabel') + ': ' + getApprovalSourceLabel(draftRun.approvalReview);
       } else if (draftRun.authorizationSource === 'user_click') {
@@ -3593,6 +3596,15 @@ export function getScript(): string {
         receipt.textContent = t('draftRunVerifiedGitHead', { head: head.slice(0, 12) });
         receipt.title = head;
         heading.append(receipt);
+      }
+      if (release) {
+        var verifiedRefs = document.createElement('div');
+        verifiedRefs.className = 'draft-run-output-notice';
+        verifiedRefs.textContent = t('draftRunReleaseVerified', { count: release.refs.length });
+        verifiedRefs.title = release.refs.map(function(ref) {
+          return ref.ref + ' ' + ref.object + (ref.peeled ? ' → ' + ref.peeled : '');
+        }).join(String.fromCharCode(10));
+        heading.append(verifiedRefs);
       }
       var actions = document.createElement('div');
       actions.className = 'draft-run-actions';

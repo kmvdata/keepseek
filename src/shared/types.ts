@@ -671,7 +671,11 @@ export interface DraftRun extends DraftRunProposal {
   replacementDraftRunId?: string;
   replan?: import('../approvals/approvalProcessing').DraftRunReplanResult;
   dependency?: import('../approvals/approvalProcessing').ApprovalDependency;
+  gitCommitPlan?: import('../runs/localGitCommit').LocalGitCommitPlan;
   gitCommitEvidence?: import('../runs/localGitCommit').LocalGitCommitEvidence;
+  gitReusedDraftRunId?: string;
+  gitPushAttempt?: import('../runs/gitReleaseEvidence').GitPushAttempt;
+  gitReleaseEvidence?: import('../runs/gitReleaseEvidence').GitReleaseEvidence;
   gitStageEvidence?: import('../runs/localGitCommit').LocalGitStageEvidence;
   approvedAt?: string;
   startedAt?: string;

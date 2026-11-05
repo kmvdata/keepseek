@@ -17,7 +17,8 @@ export function draftRunIdentity(run: DraftRun): OperationIdentity {
 
 /** Shared by delegate/model_review, before review and immediately before execution.
  * Mode determines the later approver; it never changes these scope requirements. */
-export async function inspectAutomaticRunAuthorization(run: DraftRun, grants: ExactOperationGrants, mode?: ApprovalMode): Promise<{
+export async function inspectAutomaticRunAuthorization(run: DraftRun, grants: ExactOperationGrants, mode?: ApprovalMode,
+  remoteScope = false): Promise<{
   allowed: boolean;
   route: ApprovalRoute;
   refusal?: { code: 'external_authorization_required' | 'insufficient_launch_evidence' | 'hard_blocked'; reason: string };
@@ -26,7 +27,7 @@ export async function inspectAutomaticRunAuthorization(run: DraftRun, grants: Ex
   reason: string;
 }> {
   checkDraftRunApprovalIdentity(run);
-  const scope = await inspectDraftRunScope(run);
+  const scope = await inspectDraftRunScope(run, remoteScope);
   checkDraftRunApprovalIdentity(run);
   const allowed = scope.externalUris.length === 0 || grants.matches(draftRunIdentity(run), scope);
   const authorizedUris = new Set(allowed ? scope.externalUris : []);
@@ -41,10 +42,10 @@ export async function inspectAutomaticRunAuthorization(run: DraftRun, grants: Ex
     const loopbackProbe = semantics.program === 'curl' && ['-q', '--disable'].includes(run.spec.args[0])
       && run.spec.args.slice(1, -1).every(arg => /^(?:-[fsS]+|--fail|--silent|--show-error)$/u.test(arg))
       && /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/[^\s]*)?$/iu.test(run.spec.args.at(-1) ?? '');
-    const knownRemote = semantics.effects.includes('publish_or_deploy')
+    const knownRemote = !(remoteScope && semantics.gitRemote) && (semantics.effects.includes('publish_or_deploy')
       || (/^(?:npm|pnpm|yarn|bun)$/u.test(semantics.program) && run.spec.args.includes('publish'))
       || (git && ['push', 'fetch', 'pull', 'clone', 'remote', 'ls-remote', 'submodule'].includes(git.value))
-      || (semantics.effects.includes('network') && !semantics.effects.includes('package_install') && !loopbackProbe);
+      || (semantics.effects.includes('network') && !semantics.effects.includes('package_install') && !loopbackProbe));
     const packageGlobal = /^(?:npm|pnpm|yarn|bun)$/u.test(semantics.program)
       && run.spec.args.some(arg => /^(?:-[a-z]*g[a-z]*|--global|--location=global)(?:=|$)/u.test(arg) || arg === 'global');
     const pagerCorrection = semantics.gitReplan?.code === 'git_status_pager_override';
@@ -59,7 +60,10 @@ export async function inspectAutomaticRunAuthorization(run: DraftRun, grants: Ex
       || scope.diagnostics.some(item => ['foreign_path', 'path_resolution'].includes(item.code)
         || (item.code === 'missing_option_value' && !semantics.gitReplan))
       || run.spec.env.some(({ name }) => !/^(?:LANG|LC_ALL|LC_CTYPE|TERM|COLORTERM|CI|NO_COLOR|NODE_ENV|PYTHONDONTWRITEBYTECODE)$/u.test(name));
-    const refusal = !allowed || knownRemote ? { code: 'external_authorization_required' as const,
+    const unsupportedRelease = git && ['push', 'ls-remote'].includes(git.value) && !semantics.gitRemote;
+    const refusal = unsupportedRelease ? { code: 'hard_blocked' as const,
+      reason: 'Automatic Git release requires a bounded ref query or an explicit, non-forced push. / 自动 Git 发布要求范围明确的引用查询，或显式且非强制的引用推送。' }
+      : !allowed || knownRemote ? { code: 'external_authorization_required' as const,
       reason: reason || 'An exact external operation grant is required. / 此操作需要事先精确授权外部目标。' }
       : packageGlobal || gitUnverified || gitUnbounded ? { code: 'hard_blocked' as const,
         reason: reason || 'The command would use an unverified repository, configuration or system target. / 命令涉及未经核实的仓库、配置或系统目标。' }

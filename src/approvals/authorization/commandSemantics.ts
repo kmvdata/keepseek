@@ -16,10 +16,96 @@ export interface CommandSemantics {
   arguments: CommandArgument[];
   effects: DraftRunEffect[];
   reasons: AuthorizationReason[];
+  gitStage?: { pathspecs: string[] };
+  gitTagQuery?: true;
+  gitTagQueryNeedsSort?: true;
+  gitTagCreate?: { ref: string; target?: string };
+  gitRemote?: GitRemoteCommand;
   gitCommit?: { all: boolean; messages: string[] };
   gitRefMutation?: { name: string; action: 'create' | 'delete' | 'force' };
   gitReplan?: GitCommandReplan;
   projectScript?: true;
+}
+
+export type GitRemoteCommand =
+  | { kind: 'query'; remote: string; namespace?: 'tags' | 'heads'; refs: string[] }
+  | { kind: 'push'; remote: string; refs: string[] };
+
+export function isGitReleaseRef(ref: string): boolean {
+  return /^refs\/(?:heads|tags)\/[\w][\w./-]*$/u.test(ref) && !ref.includes('..')
+    && ref.split('/').every(part => part && !part.startsWith('.') && !part.endsWith('.lock')) && !ref.endsWith('.');
+}
+
+function tagQueryRoles(args: readonly string[]): ArgumentRole[] | undefined {
+  const roles: ArgumentRole[] = [];
+  let list = args.length === 0;
+  let literal = false;
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
+    if (!literal && token === '--') { literal = true; roles.push('option'); }
+    else if (!literal && ['--list', '-l'].includes(token) && !list) { list = true; roles.push('option'); }
+    else if (!literal && token === '--sort' && /^-?(?:v|version):refname$/u.test(args[i + 1] ?? '')) {
+      roles.push('option', 'option_value'); i++;
+    } else if (!literal && /^--sort=-?(?:v|version):refname$/u.test(token)) roles.push('option');
+    else if ((literal || !token.startsWith('-')) && /^[\p{L}\p{N}_.+*?@{}=,[\]/-]+$/u.test(token)
+      && !token.includes('..') && !token.includes('//')) roles.push('text');
+    else return undefined;
+  }
+  return list ? roles : undefined;
+}
+
+function tagCreateArguments(args: readonly string[]): { ref: string; target?: string; roles: ArgumentRole[] } | undefined {
+  const roles: ArgumentRole[] = [];
+  const operands: string[] = [];
+  let annotated = false;
+  let message = false;
+  let literal = false;
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
+    if (!literal && token === '--') { literal = true; roles.push('option'); }
+    else if (!literal && ['-a', '--annotate'].includes(token)) { annotated = true; roles.push('option'); }
+    else if (!literal && ['-m', '--message'].includes(token)) {
+      if (!args[i + 1]?.trim()) return undefined;
+      message = true;
+      roles.push('option', 'text'); i++;
+    } else if (!literal && /^(?:-m|--message=)/u.test(token)) {
+      if (!token.slice(token.startsWith('--') ? '--message='.length : 2).trim()) return undefined;
+      message = true;
+      roles.push('text');
+    } else if (!token.startsWith('-')) {
+      operands.push(token); roles.push('revision');
+    } else return undefined;
+  }
+  const [name, target] = operands;
+  const ref = 'refs/tags/' + name;
+  return name && operands.length <= 2 && (!annotated || message) && isGitReleaseRef(ref)
+    && (target === undefined || /^(?:HEAD|[a-f0-9]{40}|[a-f0-9]{64})$/u.test(target)) ? { ref, target, roles } : undefined;
+}
+
+function parseGitRemote(subcommand: string, operands: string[]): GitRemoteCommand | undefined {
+  if (operands.length > 130) return undefined;
+  const args = operands.slice();
+  let namespace: 'tags' | 'heads' | undefined;
+  let atomic = false;
+  if (subcommand === 'ls-remote') {
+    if (args[0] === '--tags' || args[0] === '--heads') namespace = args.shift() === '--tags' ? 'tags' : 'heads';
+  } else if (subcommand === 'push') {
+    if (args[0] === '--atomic') { atomic = true; args.shift(); }
+  } else return undefined;
+  if (args[0] === '--') args.shift();
+  const remote = args.shift();
+  if (!remote || !/^[\w][\w.-]*$/u.test(remote)) return undefined;
+  if (subcommand === 'ls-remote') {
+    if ((!namespace && !args.length) || !args.every(ref => isGitReleaseRef(ref)
+      && (!namespace || ref.startsWith('refs/' + namespace + '/')))) return undefined;
+    return { kind: 'query', remote, namespace, refs: args };
+  }
+  const refs = args.map(value => {
+    const [source, target = source, ...extra] = value.split(':');
+    return !extra.length && source === target && isGitReleaseRef(source) ? source : '';
+  });
+  return refs.length > 0 && (refs.length === 1 || atomic) && refs.every(Boolean) && new Set(refs).size === refs.length
+    ? { kind: 'push', remote, refs } : undefined;
 }
 
 export interface GitCommandReplan {
@@ -98,17 +184,23 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     const subcommand = args[i];
     if (subcommand) arg(i++, 'subcommand');
     const operands = args.slice(i);
-    const listingTags = subcommand === 'tag' && (operands.length === 0
-      || (['--list', '-l'].includes(operands[0]) && operands.slice(1)
-        .every(token => /^--sort=-?(?:v|version):refname$/u.test(token))));
+    const tagRoles = subcommand === 'tag' ? tagQueryRoles(operands) : undefined;
+    const listingTags = Boolean(tagRoles);
+    if (listingTags) result.gitTagQuery = true;
+    else if (subcommand === 'tag' && operands.at(-1) === '--sort' && tagQueryRoles(operands.slice(0, -1))?.length) {
+      result.gitTagQueryNeedsSort = true;
+    }
+    result.gitRemote = parseGitRemote(subcommand, operands);
+    const tagWrite = subcommand === 'tag' && !listingTags ? tagCreateArguments(operands) : undefined;
+    if (tagWrite) result.gitTagCreate = { ref: tagWrite.ref, target: tagWrite.target };
     const refAction = ['-d', '--delete'].includes(operands[0]) ? 'delete'
       : ['-f', '--force'].includes(operands[0]) ? 'force' : 'create';
     const refOperands = refAction === 'create' ? operands : operands.slice(1);
-    const boundedRef = ['tag', 'branch'].includes(subcommand) && !listingTags
+    const boundedRef = result.gitTagCreate || ['tag', 'branch'].includes(subcommand) && !listingTags
       && refOperands.length >= 1 && refOperands.length <= (refAction === 'delete' ? 1 : 2)
       && refOperands.every(token => /^(?![.-]|.*(?:\.\.|\/\.))[\w][\w./-]*$/u.test(token));
     if (boundedRef) {
-      result.gitRefMutation = { name: refOperands[0], action: refAction };
+      result.gitRefMutation = { name: tagWrite ? tagWrite.ref.slice('refs/tags/'.length) : refOperands[0], action: refAction };
       if (refAction !== 'create') reason('git_ref_mutation', refAction,
         'Changing an existing local reference needs task-specific review.',
         '修改已有本地引用需要结合当前任务审查。');
@@ -116,12 +208,12 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     const viewing = ['show', 'diff', 'log'].includes(subcommand);
     if (['add', 'apply', 'am', 'branch', 'checkout', 'clean', 'clone', 'commit', 'fetch', 'gc', 'init', 'merge', 'mv',
       'pull', 'push', 'rebase', 'remote', 'reset', 'restore', 'revert', 'rm', 'stash', 'switch', 'tag', 'worktree'].includes(subcommand)
-      && !listingTags) effects.add('git_mutation');
-    if (['clone', 'fetch', 'pull', 'push'].includes(subcommand)) effects.add('network');
+      && !listingTags && !result.gitTagQueryNeedsSort) effects.add('git_mutation');
+    if (['clone', 'fetch', 'pull', 'push', 'ls-remote'].includes(subcommand)) effects.add('network');
     const staging = subcommand === 'add';
     const committing = subcommand === 'commit';
     const status = subcommand === 'status';
-    if (!viewing && !staging && !committing && !status && !listingTags && !boundedRef) unsupported(subcommand ?? 'missing Git subcommand');
+    if (!viewing && !staging && !committing && !status && !listingTags && !boundedRef && !result.gitRemote) unsupported(subcommand ?? 'missing Git subcommand');
     const commitMessages: string[] = [];
     const commitPathspecPositions: number[] = [];
     let commitAll = false;
@@ -131,8 +223,12 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     for (; i < args.length; i++) {
       const token = args[i];
       if (!paths && token === '--') { paths = true; arg(i, 'option'); continue; }
-      if (listingTags) {
-        arg(i, 'option');
+      if (tagRoles) {
+        arg(i, tagRoles[i - (args.length - operands.length)]);
+      } else if (result.gitRemote) {
+        arg(i, token.startsWith('-') ? 'option' : 'text');
+      } else if (tagWrite) {
+        arg(i, tagWrite.roles[i - (args.length - operands.length)]);
       } else if (boundedRef) {
         arg(i, token.startsWith('-') ? 'option' : 'revision');
       } else if (committing) {
@@ -222,6 +318,9 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
           && !/(?:^|\/)\.\.(?:\/|$)/u.test(token);
         arg(i, noIndex || !obviousRevision ? 'read_path' : 'revision');
       }
+    }
+    if (staging && !result.reasons.length) {
+      result.gitStage = { pathspecs: result.arguments.filter(item => item.role === 'read_path').map(item => item.value) };
     }
     if (committing && !unsupportedCommitOption && !result.gitReplan) {
       if (commitAll && commitPathspecPositions.length) {

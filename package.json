@@ -85,6 +85,23 @@
           "scope": "window",
           "markdownDescription": "Selected model for the current workspace. An empty or unavailable value adopts the global default model, or the first available model when no explicit default is valid."
         },
+        "keepseek.gitReleaseGrants": {
+          "type": "array",
+          "scope": "machine",
+          "default": [],
+          "markdownDescription": "Preauthorize Git release in automatic approval for an exact real repository and resolved destination. Read grants accept exact refs or the heads/tags namespace. Push grants allow exact refs or a tag-name prefix ending in * and require matching read access for verification. The current task must also authorize the action. / 为自动审批预授权真实仓库与解析后的确切目的地。查询可授权精确引用或分支、标签命名空间。推送可授权精确引用或以 * 结尾的标签名前缀，并需要核验所需的查询授权。本次任务仍须明确授权。",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["repository", "destination", "read", "push"],
+            "properties": {
+              "repository": { "type": "string", "description": "Canonical absolute repository path / 仓库的真实绝对路径" },
+              "destination": { "type": "string", "description": "Exact resolved SSH URL or canonical bare repository path / 精确 SSH URL 或裸仓库的真实绝对路径" },
+              "read": { "type": "array", "items": { "type": "string" }, "description": "Exact refs or refs/tags/* and refs/heads/* / 精确引用或标签、分支命名空间" },
+              "push": { "type": "array", "items": { "type": "string" }, "description": "Exact refs or tag-name prefix followed by * / 精确引用或以 * 结尾的标签名前缀" }
+            }
+          }
+        },
         "keepseek.autoApprovalReviewer": {
           "type": "object",
           "default": { "mode": "follow-main" },

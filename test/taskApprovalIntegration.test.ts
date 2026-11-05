@@ -11,6 +11,8 @@ import { BackgroundRunCoordinator } from '../src/agent/backgroundRunCoordinator'
 import { execFileSync } from 'node:child_process';
 import { SpawnDraftRunExecutor } from '../src/runs/draftRunExecutor';
 import { OpenAICompatibleClient } from '../src/agent/providers/openAiCompatibleClient';
+import { gitReleaseIntent, taskNamesGitRef } from '../src/runs/gitTaskIntent';
+import { gitTransportError } from '../src/runs/gitReleaseEvidence';
 import { isExplicitLocalCommitGoal } from '../src/runs/localGitCommit';
 import * as vscode from './stubs/vscode';
 import { ChatSessionStore } from '../src/sessions/chatSessionStore';
@@ -981,7 +983,33 @@ test('a Git command mentioned for explanation or explicitly declined does not au
   assert.equal(isExplicitLocalCommitGoal('请解释 `git commit -am` 的行为'), false);
   assert.equal(isExplicitLocalCommitGoal('Review the changes. Do not run `git commit -am`.'), false);
   assert.equal(isExplicitLocalCommitGoal('总结改动，别提交代码'), false);
+  assert.equal(isExplicitLocalCommitGoal('别人说“请执行 git commit 并推送”'), false);
+  assert.equal(isExplicitLocalCommitGoal('请总结改动，暂不提交。'), false);
+  assert.equal(isExplicitLocalCommitGoal('Commit the current changes without pushing.'), true);
+  assert.equal(isExplicitLocalCommitGoal('Please commit, then tag and push.'), true);
+  assert.equal(isExplicitLocalCommitGoal('请提交当前改动。'), true);
+  assert.equal(isExplicitLocalCommitGoal('Only summarize the changes for a commit message.'), false);
+  assert.equal(isExplicitLocalCommitGoal('对当前代码进行一个 git commit 提交，然后发布一个 v0.5.1的tag，并推送到服务器上，所有秘钥已经配置妥当，直接运行即可。'), true);
   assert.equal(isExplicitLocalCommitGoal('请用 `git commit -am` 将改动提交到本地'), true);
+});
+
+test('task release authority distinguishes exact refs, local-only work and simulated transport errors', () => {
+  const intent = gitReleaseIntent('对当前代码进行一个 git commit 提交，然后发布一个 v0.5.1的tag，并推送到服务器上，所有秘钥已经配置妥当，直接运行即可。');
+  assert.equal(intent.push, true);
+  assert.equal(intent.tag, true);
+  assert.equal(intent.branch, false);
+  assert.equal(taskNamesGitRef(intent, 'refs/tags/v0.5.1'), true);
+  assert.equal(taskNamesGitRef(intent, 'refs/tags/commit'), false);
+  assert.equal(gitReleaseIntent('Commit the current changes without pushing.').push, false);
+  assert.equal(gitReleaseIntent('请提交改动，禁止推送。').push, false);
+  assert.equal(gitReleaseIntent('Please explain git push origin refs/tags/v1.').push, false);
+  assert.equal(gitReleaseIntent('Push tag release-2 to upstream.').remoteAlias, 'upstream');
+  assert.equal(gitReleaseIntent('Commit the current changes and push tag v0.5.1 to upstream.').remoteAlias, 'upstream');
+  assert.equal(gitReleaseIntent('Push a new notification to customers.').push, false);
+  assert.match(gitTransportError('test.invalid: Permission denied (publickey).', 'query'), /authentication failed/u);
+  assert.match(gitTransportError('! [rejected] (non-fast-forward)', 'push'), /conflicting ref update/u);
+  assert.match(gitTransportError('Could not resolve hostname test.invalid', 'query'), /transport or launcher is unavailable/u);
+  assert.match(gitTransportError('untrusted server output', 'push'), /^Git push failed/u);
 });
 
 test('local Git scope rejects redirects and detects config, hook and index changes', async () => {
@@ -1054,6 +1082,244 @@ test('delegate creates a local tag and stops an ungranted push without manual ap
     } finally { await runs.flush(); runs.dispose(); }
   });
 });
+
+for (const scenario of ['release', 'extra-index', 'remote-conflict', 'missing-grant', 'conditional-missing-grant', 'local-conflict', 'already-published', 'ambiguous-destination', 'changed-destination', 'late-destination', 'non-fast-forward', 'atomic-branch-tag', 'query-replan', 'lost-exit', 'pushurl', 'redirect-fetch'] as const) {
+  test(`delegate isolated Git release: ${scenario}`, { skip: process.platform === 'win32' }, async t => {
+    await fixture('delegate', async f => {
+      const workspace = await realpath(f.workspace);
+      const root = await realpath(f.root);
+      const destination = path.join(root, 'release.git');
+      const second = path.join(root, 'other.git');
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: workspace, encoding: 'utf8', stdio: 'pipe' });
+      const ref = 'refs/tags/v0.5.1';
+      const branch = 'refs/heads/main';
+      const branchPush = scenario === 'atomic-branch-tag' || scenario === 'non-fast-forward';
+      const alias = branchPush ? 'release-target' : 'origin';
+      git('init', '-b', 'main');
+      git('config', 'user.name', 'KeepSeek Test');
+      git('config', 'user.email', 'test@example.invalid');
+      git('config', 'core.hooksPath', '.git/hooks');
+      git('config', 'commit.gpgsign', 'false');
+      git('config', 'tag.gpgsign', 'false');
+      git('config', 'tag.forceSignAnnotated', 'false');
+      await writeFile(path.join(workspace, 'CHANGELOG.md'), 'fixture\n');
+      git('add', 'CHANGELOG.md');
+      git('commit', '-m', 'fixture');
+      git('tag', 'v0.5.0');
+      git('pack-refs', '--all');
+      git('init', '--bare', destination);
+      git('init', '--bare', second);
+      git('remote', 'add', alias, scenario === 'pushurl' ? second : destination);
+      if (scenario === 'pushurl') git('remote', 'set-url', '--push', alias, destination);
+      if (scenario === 'redirect-fetch') git('config', '--add', `remote.${alias}.fetch`, '+refs/heads/main:refs/heads/other');
+      let divergent: string | undefined;
+      if (scenario === 'non-fast-forward') {
+        divergent = git('commit-tree', 'HEAD^{tree}', '-m', 'Divergent remote branch').trim();
+        git('push', alias, divergent + ':' + branch);
+      }
+      if (scenario === 'remote-conflict') {
+        git('tag', 'v0.5.1');
+        git('push', alias, ref);
+        git('tag', '-d', 'v0.5.1');
+      }
+      if (scenario === 'local-conflict' || scenario === 'already-published') git('tag', 'v0.5.1');
+      if (scenario === 'already-published') git('push', alias, ref);
+      if (scenario === 'ambiguous-destination') git('remote', 'set-url', '--add', '--push', alias, destination);
+      if (scenario === 'ambiguous-destination') git('remote', 'set-url', '--add', '--push', alias, second);
+      if (scenario === 'extra-index') {
+        await writeFile(path.join(workspace, 'other.txt'), 'excluded\n');
+        git('add', 'other.txt');
+      }
+      const oldHead = git('rev-parse', 'HEAD').trim();
+      if (scenario !== 'already-published') await writeFile(path.join(workspace, 'CHANGELOG.md'), 'release fixture\n');
+      f.session.messages[0].content = scenario === 'conditional-missing-grant'
+        ? '只有远端标签 v0.5.1 不存在，才提交当前改动，创建标签 v0.5.1 并推送。'
+        : scenario === 'already-published' ? 'Push only the existing tag v0.5.1.'
+        : branchPush ? 'Commit the current changes, create tag v0.5.1, and push the current branch and tag v0.5.1.'
+        : scenario === 'pushurl' ? 'Commit the current changes, create tag v0.5.1 and push tag v0.5.1 to origin.'
+        : '对当前代码进行一个 git commit 提交，然后发布一个 v0.5.1的tag，并推送到服务器上，所有秘钥已经配置妥当，直接运行即可。';
+      const getConfiguration = vscode.workspace.getConfiguration;
+      vscode.workspace.getConfiguration = () => ({ ...getConfiguration(), inspect: (key: string) => key === 'gitReleaseGrants'
+        ? { globalValue: scenario.includes('missing-grant') ? [] : [
+          { repository: workspace, destination, read: ['refs/tags/*', branch], push: [ref, branch] },
+          ...(scenario === 'pushurl' ? [{ repository: workspace, destination: second, read: ['refs/tags/*'], push: [] }] : [])
+        ] } : undefined });
+      const store = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+      const spawn = new SpawnDraftRunExecutor();
+      const launches: string[][] = [];
+      const runs = new DraftRunStore(vscode.Uri.file(path.join(root, 'release-storage')) as never, {
+        execute: async input => {
+          const args = input.draftRun.spec.args;
+          launches.push(args);
+          if (scenario === 'changed-destination' && args[0] === 'tag' && args[1] === '-a') {
+            git('remote', 'set-url', '--push', alias, second);
+          }
+          const outcome = await spawn.execute(input);
+          if (scenario === 'lost-exit' && args[0] === 'push' && outcome.exitCode === 0) {
+            return { ...outcome, exitCode: undefined, error: 'Simulated lost exit result' };
+          }
+          return outcome;
+        },
+        cancel: id => spawn.cancel(id), showTerminal: id => spawn.showTerminal(id), dispose: () => spawn.dispose()
+      }, new DraftRunAuthorizationService(store));
+      Object.assign(f.host, { draftRuns: runs });
+      if (scenario === 'late-destination') {
+        const attach = runs.attachApprovalReview.bind(runs);
+        runs.attachApprovalReview = (id, record) => {
+          if (runs.get(id)?.spec.args[0] === 'push' && record.decision === 'approve' && !record.consumedAt) {
+            git('remote', 'set-url', '--push', alias, second);
+          }
+          return attach(id, record);
+        };
+      }
+      try {
+        const push = branchPush ? ['push', '--atomic', alias, branch, ref] : ['push', alias, ref];
+        const tag = scenario === 'release' ? ['tag', '-a', 'v0.5.1', '-m', 'Release fixture']
+          : ['tag', '-a', '-m', 'Release fixture', 'v0.5.1'];
+        const queries = [['log', '-12', '--pretty=format:%h%x09%s'], ['tag', '--list', 'v0.5*'], ['ls-remote', '--tags', alias]];
+        if (scenario === 'query-replan') queries.push(['tag', '--list', 'v0.5*', '--sort']);
+        if (scenario === 'release') queries.push(['tag', '-l', '--sort', '-v:refname', 'v0.5.0', 'v0.5?']);
+        const add = scenario === 'atomic-branch-tag' ? ['add', '--', 'CHANGELOG.md'] : ['add', 'CHANGELOG.md'];
+        const index = ['diff', '--cached', '--stat'];
+        const commit = ['commit', '-m', 'Release notes'];
+        const argv = scenario === 'already-published' ? [push] : scenario === 'release'
+          ? [queries[0], queries[1], add, queries[2], index]
+          : [...queries, push, tag, commit, index, add];
+        const proposals = (commands: string[][]) => Promise.all(commands.map(args =>
+          createDraftRunProposal({ executable: 'git', args, reason: 'Isolated release test' })));
+        if (scenario === 'query-replan') {
+          let repaired = false;
+          const continueTask = (f.host as unknown as { sendPrompt(): Promise<void> }).sendPrompt.bind(f.host);
+          Object.assign(f.host, { sendPrompt: async (prompt: string) => {
+            await continueTask();
+            if (repaired) return;
+            repaired = true;
+            assert.match(prompt, /git_tag_sort_missing/u);
+            const assistant: ChatMessage = { id: 'repaired-tag-query', role: 'assistant', content: '',
+              createdAt: f.message.createdAt, userTask: f.message.userTask };
+            f.session.messages.push(assistant);
+            const response = { ...f.response, draftRuns: await proposals([['tag', '--list', '--sort=-v:refname', 'v0.5*']]) };
+            const checkpoint = createRunCheckpoint({ ...f.cp.request, assistantMessageId: assistant.id } as AgentRequest, 0, 'test', f.scope.folderUris);
+            checkpoint.status = 'completed';
+            checkpoint.finalResponse = response;
+            await f.host.saveAgentCheckpoint(f.session, assistant, checkpoint);
+            f.host.queueResponseApprovals(f.session, assistant, response);
+            return response;
+          } });
+        }
+        f.response.draftEdits = [];
+        f.response.draftRuns = await proposals(argv);
+        await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+        f.host.queueResponseApprovals(f.session, f.message, f.response);
+        await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+        if (scenario === 'release') {
+          assert.equal(f.continuations(), 1);
+          assert.equal(git('rev-parse', 'HEAD').trim(), oldHead);
+          const assistant: ChatMessage = { id: 'release-continuation', role: 'assistant', content: '',
+            createdAt: f.message.createdAt, userTask: f.message.userTask };
+          f.session.messages.push(assistant);
+          const response = { ...f.response, draftRuns: await proposals([queries[3], add, commit, commit, tag, push]) };
+          const checkpoint = createRunCheckpoint({ ...f.cp.request, assistantMessageId: assistant.id } as AgentRequest, 0, 'test', f.scope.folderUris);
+          checkpoint.status = 'completed';
+          checkpoint.finalResponse = response;
+          await f.host.saveAgentCheckpoint(f.session, assistant, checkpoint);
+          f.host.queueResponseApprovals(f.session, assistant, response);
+          await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+        }
+        if (scenario === 'query-replan') {
+          assert.equal(f.continuations(), 1);
+          await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+        }
+        const results = runs.toWebviewState(f.session.id);
+        const record = (subcommand: string) => results.find(result => result.spec.args[0] === subcommand);
+        const newHead = git('rev-parse', 'HEAD').trim();
+        const remoteRef = () => git('--git-dir', destination, 'for-each-ref', '--format=%(objectname)', ref).trim();
+        assert.equal(f.reviews(), 0, JSON.stringify(f.session.approvalProcessing));
+        if (['extra-index', 'conditional-missing-grant', 'already-published'].includes(scenario)) {
+          assert.equal(newHead, oldHead);
+          assert.equal(launches.some(args => args[0] === 'commit' || args[0] === 'push'), false);
+          if (scenario === 'already-published') {
+            assert.equal(record('push')?.gitReleaseEvidence?.executed, false);
+            assert.equal(remoteRef(), oldHead);
+          } else {
+            assert.equal(remoteRef(), '');
+            if (scenario === 'extra-index') assert.match(record('commit')?.error ?? '', /outside the verified staging paths/u);
+            else assert.equal(launches.some(args => args[0] === 'add'), false);
+          }
+        } else {
+          assert.notEqual(newHead, oldHead, JSON.stringify(f.session.approvalProcessing));
+          assert.equal(git('rev-parse', 'HEAD^').trim(), oldHead);
+          assert.equal(git('rev-list', '--count', 'HEAD').trim(), '2');
+          assert.equal(launches.filter(args => args[0] === 'commit').length, 1);
+          if (scenario === 'release') {
+            assert.equal(launches.filter(args => args[0] === 'add').length, 1);
+            assert.equal(results.filter(result => result.gitReusedDraftRunId && result.startedAt === undefined).length, 2);
+          }
+          assert.deepEqual(record('commit')?.gitCommitEvidence?.outcome === 'verified'
+            ? (record('commit')!.gitCommitEvidence as { files: string[] }).files : [], ['CHANGELOG.md']);
+          if (scenario === 'release' || scenario === 'atomic-branch-tag' || scenario === 'query-replan' || scenario === 'lost-exit' || scenario === 'pushurl') {
+            const tagObject = git('rev-parse', ref).trim();
+            assert.notEqual(tagObject, newHead);
+            assert.equal(git('rev-parse', ref + '^{}').trim(), newHead);
+            assert.equal(remoteRef(), tagObject);
+            assert.equal(git('--git-dir', destination, 'rev-parse', ref + '^{}').trim(), newHead);
+            assert.deepEqual(record('push')?.gitReleaseEvidence?.refs.find(item => item.ref === ref), { ref, object: tagObject, peeled: newHead });
+            assert.equal(record('push')?.exitCode, scenario === 'lost-exit' ? undefined : 0);
+            if (scenario === 'pushurl') {
+              assert.notEqual(record('ls-remote')?.gitReleaseEvidence?.destinationHash, record('push')?.gitReleaseEvidence?.destinationHash);
+              assert.equal(git('--git-dir', second, 'for-each-ref', '--format=%(objectname)', ref).trim(), '');
+            }
+            assert.equal(launches.filter(args => args[0] === 'push').length, 1);
+            assert.equal(launches.some(args => JSON.stringify(args) === JSON.stringify(queries[1])), true);
+            assert.match(results.find(result => result.spec.args[1] === '--list')?.output ?? '', /v0\.5\.0/u);
+            assert.equal(git('--git-dir', destination, 'for-each-ref', '--format=%(objectname)', branch).trim(),
+              scenario === 'atomic-branch-tag' ? newHead : '');
+            assert.equal(f.session.approvalProcessing?.status, 'completed');
+            if (scenario === 'query-replan') {
+              const repair = results.find(result => result.spec.args.at(-1) === '--sort');
+              assert.equal(repair?.replan?.code, 'git_tag_sort_missing');
+              assert.equal(repair?.startedAt, undefined);
+              assert.equal(f.continuations(), 2);
+              assert.ok(results.some(result => result.spec.args.includes('--sort=-v:refname') && result.exitCode === 0));
+            }
+            if (scenario === 'release') t.diagnostic(`one commit: parent=${oldHead} head=${newHead}; remote tag object=${tagObject}, peeled=${newHead}; commit/tag/push exit=0`);
+            await runs.flush();
+            if (scenario === 'release') {
+              const storage = path.join(root, 'release-storage', 'draft-runs.json');
+              const saved = JSON.parse(await readFile(storage, 'utf8')) as { draftRuns: Array<{ id: string; status: string; gitCommitEvidence?: unknown }> };
+              const interrupted = saved.draftRuns.find(run => run.id === record('commit')?.id)!;
+              interrupted.status = 'running';
+              delete interrupted.gitCommitEvidence;
+              await writeFile(storage, JSON.stringify(saved));
+            }
+            const restored = new DraftRunStore(vscode.Uri.file(path.join(root, 'release-storage')) as never, spawn, new DraftRunAuthorizationService(store));
+            await restored.initialize();
+            assert.deepEqual(restored.get(record('push')!.id)?.gitReleaseEvidence, record('push')?.gitReleaseEvidence);
+            if (scenario === 'release') {
+              assert.deepEqual(restored.get(record('commit')!.id)?.gitCommitEvidence, record('commit')?.gitCommitEvidence);
+              assert.equal(git('rev-list', '--count', 'HEAD').trim(), '2', 'restart reconciliation does not commit again');
+            }
+          } else if (scenario === 'non-fast-forward') {
+            assert.equal(launches.filter(args => args[0] === 'push').length, 1);
+            assert.equal(record('push')?.exitCode, 1);
+            assert.match(record('push')?.error ?? '', /conflicting ref update/u);
+            assert.equal(remoteRef(), '', 'atomic failure must not publish the tag');
+            assert.equal(git('--git-dir', destination, 'rev-parse', branch).trim(), divergent);
+          } else {
+            assert.equal(launches.some(args => args[0] === 'push'), false, JSON.stringify(f.session.approvalProcessing));
+            assert.equal(remoteRef(), scenario === 'remote-conflict' ? oldHead : '');
+            if (scenario === 'redirect-fetch') assert.match(record('push')?.error ?? '', /redirects local tracking refs/u);
+            assert.equal(git('--git-dir', second, 'for-each-ref', '--format=%(objectname)', ref).trim(), '');
+          }
+        }
+      } finally {
+        vscode.workspace.getConfiguration = getConfiguration;
+        await runs.flush();
+        runs.dispose();
+      }
+    });
+  });
+}
 
 async function fixture(mode: 'ask' | 'delegate' | 'model_review', body: (f: Awaited<ReturnType<typeof createFixture>>) => Promise<void>) {
   const folders = vscode.workspace.workspaceFolders, trusted = vscode.workspace.isTrusted;

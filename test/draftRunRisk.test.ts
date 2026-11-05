@@ -45,6 +45,40 @@ test('inline shell programs expose execution and unknown scope without pretendin
   }
 });
 
+test('Git tag list consumes option values and literal patterns without granting ref writes', () => {
+  for (const args of [
+    ['tag'], ['tag', '--list'], ['tag', '-l', 'release-2'], ['tag', '--list', 'v0.5*'],
+    ['tag', '--sort=version:refname', '-l', 'release-[12]*', '发布?'],
+    ['tag', '-l', '--sort', '-v:refname', '--', 'v0.5*', 'release?']
+  ]) {
+    const parsed = analyzeCommand(createSpec('git', args));
+    assert.equal(parsed.gitTagQuery, true, JSON.stringify(args));
+    assert.deepEqual(parsed.effects, ['workspace_read']);
+    assert.equal(parsed.arguments.some(argument => argument.role === 'read_path'), false);
+  }
+  for (const args of [
+    ['tag', '-l', '--delete', 'release-2'], ['tag', '--force', '-l'], ['tag', '-l', '--sign', 'release'],
+    ['tag', '--sort', '--list'], ['tag', '--list', '--sort'], ['tag', '--sort=-v:refname', 'release'],
+    ['tag', '--list', '--sort=unknown'], ['tag', '--contains', 'HEAD']
+  ]) assert.equal(analyzeCommand(createSpec('git', args)).gitTagQuery, undefined, JSON.stringify(args));
+  const redirected = analyzeCommand(createSpec('git', ['--git-dir', '/tmp/untrusted', 'tag', '-l', 'release*']));
+  assert.ok(redirected.reasons.some(reason => reason.code === 'git_configuration'));
+});
+
+test('Git remote argv only recognizes bounded reads and non-forced explicit push refs', () => {
+  const spec = (args: string[]) => analyzeCommand(createSpec('git', args)).gitRemote;
+  assert.deepEqual(spec(['ls-remote', '--tags', 'upstream']), { kind: 'query', remote: 'upstream', namespace: 'tags', refs: [] });
+  assert.deepEqual(spec(['push', '--atomic', 'upstream', 'refs/heads/trunk', 'refs/tags/release-1:refs/tags/release-1']),
+    { kind: 'push', remote: 'upstream', refs: ['refs/heads/trunk', 'refs/tags/release-1'] });
+  for (const args of [
+    ['push', 'upstream'], ['push', '--tags', 'upstream'], ['push', '--force', 'upstream', 'refs/tags/release-1'],
+    ['push', 'upstream', '+refs/tags/release-1'], ['push', 'upstream', ':refs/tags/release-1'],
+    ['push', 'upstream', 'refs/tags/release-1:refs/tags/release-2'], ['push', 'upstream', 'refs/tags/release-*'],
+    ['push', 'upstream', 'refs/heads/trunk', 'refs/tags/release-1'], ['ls-remote', 'upstream'],
+    ['ls-remote', '--upload-pack', 'evil', 'upstream'], ['push', 'ext::evil', 'refs/tags/release-1']
+  ]) assert.equal(spec(args), undefined, JSON.stringify(args));
+});
+
 test('Git show regression: format and source suffixes are data, while Git runtime remains explicitly unbounded', () => {
   for (const file of ['src/webview/script.ts', 'script.js', 'script.sh', 'README.md']) {
     for (const format of [[], ['--format=%s']] as string[][]) {

@@ -7,6 +7,7 @@ import type { DraftRun } from '../../shared/types';
 import { createControlledEnvironment } from '../../runs/executionEnvironment';
 import { findSensitiveEvidence } from '../approvalPolicy';
 import { assertOperationPath, isGitProjectSkillPath, isProtectedOperationPath } from './protectedTargets';
+import type { GitRemoteScope } from './gitRemoteScope';
 import { inspectLocalGitScope } from './localGitScope';
 import { analyzeCommand } from './commandSemantics';
 import { canonicalPath, isPathInside, joinUnresolvedPath } from './pathScope';
@@ -18,6 +19,8 @@ export interface CommandScope {
   cwd: string;
   /** Effective Git cwd after validated global -C operands. */
   gitCwd?: string;
+  gitBranchRef?: string;
+  gitRemote?: GitRemoteScope;
   executable?: string;
   verifiedLauncher?: string;
   boundLauncher?: string;
@@ -34,7 +37,7 @@ export interface CommandScope {
   fingerprint: string;
 }
 
-export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise<CommandScope> {
+export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>, inspectRemote = false): Promise<CommandScope> {
   const parsed = analyzeCommand(run.spec);
   const diagnostics = [...parsed.reasons];
   const roots = await Promise.all((vscode.workspace.workspaceFolders ?? []).filter(f => f.uri.scheme === 'file')
@@ -143,15 +146,17 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
   }
   let gitFingerprint: string | undefined;
   let gitCwd: string | undefined;
+  let gitBranchRef: string | undefined;
+  let gitRemote: GitRemoteScope | undefined;
   const gitRuntime = diagnostics.findIndex(item => item.code === 'git_runtime');
   const boundedGitOptions = gitCommand && ['status', 'diff', 'log', 'show'].includes(gitCommand.value);
   if (executable?.trusted && !roots.some(root => isPathInside(root, executable.path)) && gitCommand && gitRuntime >= 0
     && diagnostics.every(item => ['git_runtime', 'git_commit_argv', 'git_ref_mutation', 'missing_option_value'].includes(item.code)
       || (boundedGitOptions && item.code === 'unsupported_option'))
-    && !external.size) {
+    && !external.size && (!parsed.gitRemote || inspectRemote)) {
     const git = await inspectLocalGitScope({ executable: executable.path, cwd, roots, cwdChanges: gitCommand.cwdChanges,
       subcommand: gitCommand.value, env, commitAll: parsed.gitCommit?.all,
-      refMutation: parsed.gitRefMutation,
+      refMutation: parsed.gitRefMutation, remote: parsed.gitRemote,
       noOptionalLocks: parsed.arguments.some(argument => argument.index < gitCommand.index && argument.value === '--no-optional-locks'),
       noIndexRefresh: gitCommand.value === 'diff' && parsed.arguments.some(argument => argument.role === 'option'
         && argument.index > gitCommand.index && ['--cached', '--staged'].includes(argument.value)),
@@ -162,11 +167,13 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
       if (paths.some(target => target.role === 'read_path' && !isPathInside(git.repository, vscode.Uri.parse(target.uri).fsPath))) {
         diagnostics[gitRuntime] = { ...diagnostics[gitRuntime], message: 'Git paths must stay inside this repository. / Git 路径必须位于当前仓库内。' };
       } else {
-        if (['add', 'commit'].includes(gitCommand.value) && vscode.workspace.textDocuments?.some(document =>
+        if ((['add', 'commit'].includes(gitCommand.value) || parsed.gitRefMutation || parsed.gitRemote?.kind === 'push') && vscode.workspace.textDocuments?.some(document =>
           document.isDirty && document.uri.scheme === 'file' && isPathInside(git.repository, document.uri.fsPath))) {
           throw new Error('Save the dirty editors in this repository before running Git. Nothing executed. / 请先保存当前仓库中未保存的编辑器，原命令未启动。');
         }
         gitFingerprint = git.fingerprint;
+        gitRemote = git.remote;
+        gitBranchRef = git.branchRef;
         gitCwd = vscode.Uri.file(git.cwd).toString();
         diagnostics.splice(gitRuntime, 1);
         paths.push({ uri: vscode.Uri.file(git.repository).toString(), role: 'repository', external: false });
@@ -195,7 +202,7 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
   const fingerprint = createHash('sha256').update(JSON.stringify({
     version: 1, executable, env, roots, paths, pathIdentities, gitFingerprint, gitCwd, externalUris, diagnostics, trustedProjectScript
   })).digest('hex');
-  return { externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri, gitCwd, executable: executable?.path, verifiedLauncher: executable?.trusted ? executable.launchPath : undefined,
+  return { externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri, gitCwd, gitBranchRef, gitRemote, executable: executable?.path, verifiedLauncher: executable?.trusted ? executable.launchPath : undefined,
     boundLauncher: executable?.launchPath, environment: env, environmentNames: Object.keys(env).sort(),
     trustedProjectScript, projectScriptLaunchPath, uncertain: diagnostics.length > 0, diagnostics,
     reasons: diagnostics.map(reason => reason.message), fingerprint };

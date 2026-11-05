@@ -284,7 +284,7 @@ export const workspace = {
       });
     }
   },
-  getConfiguration() {
+  getConfiguration(): { get<T>(key: string, fallback: T): T; inspect?(key: string): { globalValue?: unknown } | undefined; update(): Promise<void> } {
     return {
       get<T>(_key: string, fallback: T): T {
         return fallback;

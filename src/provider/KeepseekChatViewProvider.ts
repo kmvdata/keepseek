@@ -73,7 +73,11 @@ import {
 } from '../agent/contextUsage';
 import { ChangeSetStore, type PendingDeleteTarget } from '../edits/changeSetStore';
 import { DraftRunStore, type DraftRunStoreEvent } from '../runs/draftRunStore';
-import { isExplicitLocalCommitGoal, isSingleLocalCommitGoal, isStageThenCommitGoal, prepareLocalGitCommit, readLocalGitStage, verifyLocalGitCommit, type LocalGitStageEvidence } from '../runs/localGitCommit';
+import { gitReleaseIntent } from '../runs/gitTaskIntent';
+import { checkGitRemotePrerequisite, gitBatchKind, gitReleasePrerequisite, missingGitTaskOutcome, orderGitReleaseBatch } from '../runs/gitReleaseBatch';
+import { authorizeGitRemote, hasGitReleaseGrants, type GitRemoteLaunch } from '../runs/gitReleaseAuthorization';
+import { prepareGitRelease, type ReleaseVerification } from '../runs/gitReleaseEvidence';
+import { checkVerifiedLocalCommit, reconcileLocalGitCommit, isExplicitLocalCommitGoal, isSingleLocalCommitGoal, isStageThenCommitGoal, prepareLocalGitCommit, readLocalGitStage, verifyLocalGitCommit, type LocalGitStageEvidence } from '../runs/localGitCommit';
 import { DELEGATED_APPROVAL_PROTOCOL_VERSION, DelegatedApprovalQueue, getApprovalModeUserTail, MODEL_REVIEW_APPROVAL_PROTOCOL_VERSION, normalizeApprovalMode } from '../agent/approvalMode';
 import {
   exitPendingPlan,
@@ -6467,16 +6471,18 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const taskId = message?.userTask?.id ?? rootTaskId ?? runId;
     let localGitCompletionCheck = false;
     if (session.approvalMode === 'delegate' && response.runDetails.status === 'succeeded' && !response.draftEdits.length
-      && !response.draftRuns?.length && !response.approvalContinuationRequired && !response.approvalContinuationStopReason
-      && isStageThenCommitGoal(taskGoal(session.messages, taskId))) {
-      const runs = this.getRootTaskDraftRuns(session, taskId);
-      const prior = session.approvalProcessing?.rootTaskId === taskId ? session.approvalProcessing : undefined;
-      if (!runs.some(run => run.gitCommitEvidence?.rootTaskId === taskId)) {
-        const reason = this.language === 'en'
-          ? 'KeepSeek has no verified local commit or empty-index result for this task.'
-          : 'KeepSeek 尚无本任务的本地提交核验结果，也没有无需提交的索引证据。';
+      && !response.draftRuns?.length && !response.approvalContinuationRequired && !response.approvalContinuationStopReason) {
+      const original = session.messages.find(item => item.id === message?.userTask?.originMessageId && item.role === 'user');
+      let runs: DraftRun[] = [];
+      const missing = missingGitTaskOutcome(original?.content ?? '', () => (runs = this.getRootTaskDraftRuns(session, taskId)), taskId);
+      if (missing) {
+        const prior = session.approvalProcessing?.rootTaskId === taskId ? session.approvalProcessing : undefined;
+        const reason = missing === 'commit'
+          ? this.language === 'en' ? 'KeepSeek has no verified local commit or empty-index result for this task.'
+            : 'KeepSeek 尚无本任务的本地提交核验结果，也没有无需提交的索引证据。'
+          : missing === 'tag' ? this.t('gitReleaseMissingTag') : this.t('gitReleaseMissingPush');
         if (message) message.content = `${reason}\n\n${message.content}`;
-        const attempted = runs.some(run => run.startedAt && analyzeCommand(run.spec).gitCommit);
+        const attempted = runs.some(run => run.startedAt && gitBatchKind(run) === missing);
         if (attempted || prior?.localGitCompletionRetried || prior?.status === 'stopped') {
           session.approvalProcessing = { version: 1, rootTaskId: taskId, runId, mode: 'delegate', status: 'stopped',
             reason, targets: [], localGitCompletionRetried: prior?.localGitCompletionRetried, updatedAt: new Date().toISOString() };
@@ -6513,7 +6519,15 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     const automatic = approvalMode === 'delegate';
     const terminalStatus = automatic ? 'stopped' : 'blocked';
     const rootTaskId = taskForSegment(session, batch.runId)?.id ?? batch.rootTaskId ?? batch.runId;
-    const originalGoal = taskGoal(session.messages, rootTaskId);
+    const taskLinkForGoal = taskForSegment(session, batch.runId);
+    const originalGoal = automatic
+      ? session.messages.find(message => message.id === taskLinkForGoal?.originMessageId
+        && message.role === 'user' && message.userTask?.id === rootTaskId)?.content ?? ''
+      : taskGoal(session.messages, rootTaskId);
+    const releaseIntent = gitReleaseIntent(originalGoal);
+    const needsCommit = isExplicitLocalCommitGoal(originalGoal);
+    const legacyStage = isStageThenCommitGoal(originalGoal);
+    const releaseBatch = automatic && !legacyStage && (needsCommit || releaseIntent.tag || releaseIntent.query);
     const work = this.enterTaskWork(session, taskForSegment(session, batch.runId));
     const priorProcessing = session.approvalProcessing;
     const sameCompletedBatch = priorProcessing?.runId === batch.runId && ['completed', 'stopped'].includes(priorProcessing.status)
@@ -6615,6 +6629,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       replan = result;
     };
     const settleDependencies = (retire: boolean) => {
+      if (releaseBatch) return;
       const blockerIndex = processing.targets.findIndex(target => !['executed', 'already_processed', 'pending'].includes(target.status));
       const firstBlocker = processing.targets[blockerIndex];
       const blockerRun = firstBlocker?.kind === 'command' ? this.draftRuns.get(firstBlocker.id) : undefined;
@@ -6877,23 +6892,40 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       if (automatic || (!reviewerUnavailable && !circuitBreakReason && !currentReviews().some((result) => result.decision === 'deny')
         && !editResults.some((result) => !result.applied)
         && !processing.targets.some(target => target.kind === 'edit' && !['executed', 'already_processed'].includes(target.status)))) {
-        for (const id of batch.draftRunIds) {
+        const commandIds = releaseBatch ? orderGitReleaseBatch(batch.draftRunIds, id => this.draftRuns.get(id)) : batch.draftRunIds;
+        const attempted = new Set<string>();
+        for (const id of commandIds) {
           if (!isAuthorized()) return;
+          const preceding = new Set(attempted);
+          attempted.add(id);
           const draftRun = this.draftRuns.get(id);
           if (!draftRun) { report(id, 'missing', this.t('approvalTargetMissing')); break; }
           if (draftRun.sessionId !== batch.sessionId || draftRun.agentRunId !== batch.runId) {
             report(id, 'identity_mismatch', this.t('approvalIdentityMismatch')); break;
           }
           const index = processing.targets.findIndex(target => target.id === id);
-          const independentCheck = automatic && (Boolean(circuitBreakReason) || reviewerUnavailable
-            || processing.targets.slice(0, index).some(target => !['executed', 'already_processed'].includes(target.status)));
-          // A fixed local status query observes the current index and worktree
-          // even if an earlier operation did not run. Other dependencies are unknown.
-          if (independentCheck && (draftRun.dependency || analyzeCommand(draftRun.spec).program !== 'git'
-            || !/^(?:\["--no-optional-locks","status","--porcelain=v1"\]|\["--no-optional-locks","status"\])$/u.test(JSON.stringify(draftRun.spec.args)))) continue;
+          const kind = gitBatchKind(draftRun);
+          const blockers = processing.targets.filter(target => (target.kind === 'edit' || preceding.has(target.id))
+            && !['executed', 'already_processed'].includes(target.status));
+          const independentCheck = automatic && (Boolean(circuitBreakReason) || reviewerUnavailable || blockers.length > 0);
+          const prerequisite = releaseBatch ? gitReleasePrerequisite(kind, blockers, targetId => this.draftRuns.get(targetId)) : undefined;
+          const independentGit = releaseBatch && kind && !draftRun.dependency && !prerequisite
+            && (kind === 'read' || kind === 'remote_read' || !circuitBreakReason && !reviewerUnavailable);
+          const fixedStatus = !draftRun.dependency && analyzeCommand(draftRun.spec).program === 'git'
+            && /^(?:\["--no-optional-locks","status","--porcelain=v1"\]|\["--no-optional-locks","status"\])$/u.test(JSON.stringify(draftRun.spec.args));
+          if (independentCheck && !independentGit && !fixedStatus) {
+            if (releaseBatch && (prerequisite || blockers.length)) {
+              const blocker = prerequisite ?? blockers[0];
+              const blockedRun = this.draftRuns.get(blocker.id);
+              processing.targets[index].dependency = { targetId: blocker.id,
+                label: blockedRun ? draftDependencyLabel(blockedRun) : this.t('approvalDependencyBlocked'), reason: blocker.reason };
+              report(id, 'dependency_blocked', this.t('approvalDependencyBlocked'));
+            }
+            continue;
+          }
           const astTarget = automatic
             ? recognizePythonSyntaxIntent(draftRun.spec) : undefined;
-          if (held(id)) break;
+          if (held(id)) { if (releaseBatch) continue; break; }
           if (draftRun.replacementDraftRunId) {
             const replacement = this.draftRuns.get(draftRun.replacementDraftRunId);
             const completed = replacement?.status === 'done';
@@ -6912,7 +6944,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             break;
           }
           if (draftRun.status !== 'pending') {
-            const settled = draftRun.status === 'no_changes' && !!draftRun.gitCommitEvidence
+            const settled = Boolean(draftRun.gitReleaseEvidence || draftRun.gitReusedDraftRunId) || draftRun.status === 'no_changes' && !!draftRun.gitCommitEvidence
               || draftRun.status === 'done' && (!analyzeCommand(draftRun.spec).gitCommit || !!draftRun.gitCommitEvidence);
             report(id, settled ? 'already_processed' : 'failed', settled ? undefined : this.t('approvalResultUnknown'));
             if (settled) continue;
@@ -6920,90 +6952,182 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           }
           if (draftRun.dependency) {
             const currentIndex = processing.targets.findIndex(target => target.id === id);
-            const prerequisite = processing.targets.slice(0, currentIndex).find(target => target.id === draftRun.dependency?.targetId);
+            const prerequisite = (releaseBatch ? processing.targets.filter(target => preceding.has(target.id) || target.kind === 'edit')
+              : processing.targets.slice(0, currentIndex)).find(target => target.id === draftRun.dependency?.targetId);
             if (!prerequisite || !['executed', 'already_processed'].includes(prerequisite.status)
               || !this.draftRuns.setPendingDependency(id, draftRun.specHash)) {
               processing.targets[currentIndex].dependency = draftRun.dependency;
               report(id, 'dependency_blocked');
+              if (releaseBatch) continue;
               break;
             }
           }
           let authorization: Awaited<ReturnType<typeof inspectAutomaticRunAuthorization>>;
           let commit: Awaited<ReturnType<typeof prepareLocalGitCommit>>;
           let stageBefore: LocalGitStageEvidence | undefined;
+          let remote: GitRemoteLaunch | undefined;
+          let release: ReleaseVerification | undefined;
+          const semantics = analyzeCommand(draftRun.spec);
+          const remoteCommand = automatic ? semantics.gitRemote : undefined;
+          const priorTaskRuns = this.getRootTaskDraftRuns(session, rootTaskId).filter(run => run.id !== id);
+          const verifiedBranch = priorTaskRuns.find(run => run.gitCommitEvidence?.outcome === 'verified')?.gitCommitEvidence?.branchRef;
+          const authorizeRemote = async (scope: Awaited<ReturnType<typeof inspectDraftRunScope>>) =>
+            remoteCommand ? await authorizeGitRemote(scope, remoteCommand, releaseIntent, verifiedBranch) : undefined;
           try {
-            authorization = await inspectAutomaticRunAuthorization(draftRun, this.externalEffectGrants, approvalMode);
+            if (automatic && semantics.gitTagQueryNeedsSort) {
+              const candidate = await inspectDraftRunScope({ spec: { ...draftRun.spec, args: draftRun.spec.args.slice(0, -1) } });
+              if (!candidate.uncertain && !candidate.externalUris.length && candidate.gitCwd) {
+                setReplan(draftRun, { draftRunId: id, specHash: draftRun.specHash, rootTaskId, executionSegmentId: batch.runId,
+                  phase: 'preflight', executed: false, code: 'git_tag_sort_missing',
+                  reason: 'Git tag --sort needs a value. Use a supported version sort or omit it if order is irrelevant. / Git tag --sort 缺少参数。请指定受支持的版本排序，若无需排序可省略。' });
+                continue;
+              }
+            }
+            authorization = await inspectAutomaticRunAuthorization(draftRun, this.externalEffectGrants, approvalMode,
+              !!remoteCommand && hasGitReleaseGrants());
             if (!authorization.allowed) {
               report(id, authorization.refusal?.code ?? (diagnoses.has(id) ? 'hard_blocked' : 'needs_authorization'),
                 authorization.refusal?.reason ?? this.t('approvalExternalRequired', { target: authorization.reason }));
               if (automatic) continue;
               break;
             }
+            if (remoteCommand) {
+              remote = await authorizeRemote(authorization.scope);
+              if (!remote) {
+                report(id, 'external_authorization_required', 'This Git destination and ref operation require user preauthorization and matching task intent. / 此 Git 目的地及引用操作需用户预授权，并须符合当前任务意图。');
+                continue;
+              }
+            }
             if (independentCheck && authorization.route !== 'host_policy') continue;
-            if (automatic && this.getRootTaskDraftRuns(session, rootTaskId).some(prior => prior.id !== id
-              && !['done', 'pending', 'no_changes'].includes(prior.status)
+            if (automatic && priorTaskRuns.some(prior =>
+              !['done', 'pending', 'no_changes'].includes(prior.status)
               && JSON.stringify([analyzeCommand(prior.spec).program, prior.spec.cwdUri, prior.spec.args, prior.spec.env])
                 === JSON.stringify([analyzeCommand(draftRun.spec).program, draftRun.spec.cwdUri, draftRun.spec.args, draftRun.spec.env])
-              && (prior.startedAt || prior.approvalReview?.decision === 'unavailable' || prior.approvalReview?.decision === 'deny'
+              && ((prior.startedAt && !semantics.gitTagCreate && remoteCommand?.kind !== 'push' && !semantics.gitCommit
+                && !(needsCommit && semantics.gitStage))
+                || prior.approvalReview?.decision === 'unavailable' || prior.approvalReview?.decision === 'deny'
                 || (prior.replacementDraftRunId && this.draftRuns.get(prior.replacementDraftRunId)?.approvalReview?.decision !== 'approve')))) {
               throw new Error(this.t('approvalRepeatedOperation'));
             }
             await this.draftRuns.preflightApproval(id, authorization.authorizedUris);
-            const semantics = analyzeCommand(draftRun.spec);
             const subcommand = semantics.arguments.find(arg => arg.role === 'subcommand')?.value;
+            if (automatic && subcommand === 'tag' && semantics.gitRefMutation && !semantics.gitTagCreate
+              && (releaseBatch || semantics.gitRefMutation.action === 'create')) {
+              throw new Error('Automatic release requires a new tag at a verified commit. / 自动发布只允许在已核验提交上创建标签。');
+            }
             const stageArgs = ['add', '--all', '.'];
-            const isStage = semantics.program === 'git' && JSON.stringify(draftRun.spec.args) === JSON.stringify(stageArgs);
-            const singleCommit = isSingleLocalCommitGoal(originalGoal);
-            if (isStageThenCommitGoal(originalGoal) && semantics.program === 'git' && (semantics.effects.includes('git_mutation') || subcommand === 'config')
-              && ((!isStage && !semantics.gitCommit) || authorization.scope.diagnostics.some(item => item.code === 'git_configuration'))) {
+            if (releaseBatch && kind === 'stage' && !needsCommit) {
+              throw new Error('This release task has no staging authorization. / 本次发布任务未授权暂存。');
+            }
+            const legacyAdd = JSON.stringify(draftRun.spec.args) === JSON.stringify(stageArgs);
+            const isStage = Boolean(semantics.gitStage) && (automatic && needsCommit || legacyAdd && isSingleLocalCommitGoal(originalGoal));
+            if (legacyStage && semantics.program === 'git' && (semantics.effects.includes('git_mutation') || subcommand === 'config')
+              && ((!legacyAdd && !semantics.gitCommit) || authorization.scope.diagnostics.some(item => item.code === 'git_configuration'))) {
               throw new Error(`Git ${subcommand ?? ''} is outside the requested stage-and-commit operation. / Git ${subcommand ?? ''} 超出本次暂存并提交的授权。`);
             }
-            if (semantics.gitCommit || (isStage && singleCommit)) {
-              const prior = this.getRootTaskDraftRuns(session, rootTaskId)
-                .filter(run => run.id !== id && run.status === 'done');
-              const staged = prior.find(run => analyzeCommand(run.spec).program === 'git'
-                && JSON.stringify(run.spec.args) === JSON.stringify(stageArgs));
-              if (isStage && staged && (staged.spec.cwdUri === draftRun.spec.cwdUri
-                || staged.gitStageEvidence?.directoryUri === (authorization.scope.gitCwd ?? authorization.scope.cwd))) {
-                throw new Error('Staging already ran for this task. Read the current index to continue. / 本任务已执行暂存，请读取当前索引后继续。');
+            const repository = authorization.scope.paths.find(path => path.role === 'repository' && !path.external)?.uri;
+            const localStages = priorTaskRuns.filter(run => run.gitStageEvidence?.repositoryUri === repository && run.status === 'done');
+            const staged = localStages.at(-1);
+            if (releaseBatch && ['stage', 'commit', 'tag'].includes(kind ?? '')) {
+              checkGitRemotePrerequisite(releaseIntent, priorTaskRuns, repository);
+            }
+            if (isStage) {
+              stageBefore = await readLocalGitStage(draftRun, authorization.scope, controller.signal);
+              if (!stageBefore) throw new Error('The staging scope could not be verified. / 无法核实暂存范围。');
+              const repeated = localStages.find(run => JSON.stringify(run.spec.args) === JSON.stringify(draftRun.spec.args)
+                && run.gitStageEvidence?.directoryUri === stageBefore?.directoryUri);
+              if (repeated) {
+                if (!automatic || JSON.stringify(repeated.gitStageEvidence) !== JSON.stringify(stageBefore)) {
+                  throw new Error('Staging already ran and the current index needs review. / 本任务已执行暂存，需重新核对当前索引。');
+                }
+                if (!this.draftRuns.recordGitReuse(id, draftRun.specHash, repeated.id)) throw new Error(this.t('approvalIdentityMismatch'));
+                await this.draftRuns.flush();
+                report(id, 'already_processed');
+                continue;
               }
-              if (isStage && isStageThenCommitGoal(originalGoal)) {
-                stageBefore = await readLocalGitStage(draftRun, authorization.scope, controller.signal);
+              if (automatic && priorTaskRuns.some(run => run.startedAt && analyzeCommand(run.spec).gitStage && !run.gitStageEvidence)) {
+                throw new Error('The current index was read, but a previous staging result is still unverified. / 已读取当前索引，先前暂存结果仍无法核实。');
               }
-              if (semantics.gitCommit) {
-                if (!isExplicitLocalCommitGoal(originalGoal)) {
-                  throw new Error('The current task does not authorize a local commit. / 当前任务未授权本地提交。');
-                }
-                if (singleCommit && prior.some(run => analyzeCommand(run.spec).gitCommit)) {
-                  throw new Error('A commit already ran for this task. Check HEAD instead of running it again. / 本任务已运行过提交，请核验 HEAD。');
-                }
-                if (isStageThenCommitGoal(originalGoal) && !staged) {
-                  setReplan(draftRun, { draftRunId: id, specHash: draftRun.specHash, rootTaskId, executionSegmentId: batch.runId,
-                    phase: 'preflight', executed: false, code: 'git_commit_staging_required',
-                    reason: 'Obtain the requested git add --all . result before committing. / 提交前请先取得本任务 git add --all . 的执行结果。' });
-                  break;
-                }
-                if (isStageThenCommitGoal(originalGoal) && !staged?.gitStageEvidence) {
-                  throw new Error('Staging ran, but its index and branch could not be verified. / 暂存已运行，索引和分支尚未核实。');
-                }
-                if (isStageThenCommitGoal(originalGoal) && !semantics.gitCommit.all) {
-                  setReplan(draftRun, { draftRunId: id, specHash: draftRun.specHash, rootTaskId, executionSegmentId: batch.runId,
-                    phase: 'preflight', executed: false, code: 'git_commit_all_required',
-                    reason: 'The user requested commit -a. Prepare a fresh proposal with -a and explicit -m arguments. / 用户要求 commit -a，请使用 -a 和独立的 -m 参数重新提案。' });
-                  break;
-                }
-                commit = await prepareLocalGitCommit(draftRun, authorization.scope, rootTaskId, controller.signal, staged?.gitStageEvidence);
-                if (!isAuthorized()) return;
-                if (commit?.outcome === 'no_changes') {
-                  await assertAutomaticRunAuthorization(draftRun, this.externalEffectGrants, authorization.scope.fingerprint, approvalMode);
-                  if (!isAuthorized()) return;
-                  if (!this.draftRuns.recordGitCommitEvidence(id, draftRun.specHash, commit.evidence)) {
+            }
+            if (semantics.gitCommit) {
+              if (!needsCommit) throw new Error('The current task does not authorize a local commit. / 当前任务未授权本地提交。');
+              const previous = priorTaskRuns.find(run => (run.startedAt || run.gitCommitEvidence?.outcome === 'verified')
+                && (analyzeCommand(run.spec).gitCommit || run.gitCommitEvidence));
+              if ((automatic || isSingleLocalCommitGoal(originalGoal)) && previous) {
+                let evidence = previous.gitCommitEvidence;
+                if (automatic && !evidence && previous.gitCommitPlan?.rootTaskId === rootTaskId) {
+                  evidence = await reconcileLocalGitCommit(previous, previous.gitCommitPlan, controller.signal);
+                  if (evidence && !this.draftRuns.recordGitCommitEvidence(previous.id, previous.specHash, evidence)) {
                     throw new Error(this.t('approvalIdentityMismatch'));
                   }
-                  report(id, 'already_processed');
+                }
+                if (!isAuthorized()) return;
+                if (automatic && evidence && await checkVerifiedLocalCommit(draftRun, authorization.scope, evidence, controller.signal)) {
+                  if (!this.draftRuns.recordGitReuse(id, draftRun.specHash, previous.id)) throw new Error(this.t('approvalIdentityMismatch'));
                   await this.draftRuns.flush();
+                  report(id, 'already_processed');
                   continue;
                 }
+                throw new Error('A commit already ran for this task and its result cannot be reused. / 本任务已运行过提交，当前无法复用其结果。');
+              }
+              if (legacyStage && !staged) {
+                setReplan(draftRun, { draftRunId: id, specHash: draftRun.specHash, rootTaskId, executionSegmentId: batch.runId,
+                  phase: 'preflight', executed: false, code: 'git_commit_staging_required',
+                  reason: 'Obtain the requested git add --all . result before committing. / 提交前请先取得本任务 git add --all . 的执行结果。' });
+                break;
+              }
+              if (legacyStage && !semantics.gitCommit.all) {
+                setReplan(draftRun, { draftRunId: id, specHash: draftRun.specHash, rootTaskId, executionSegmentId: batch.runId,
+                  phase: 'preflight', executed: false, code: 'git_commit_all_required',
+                  reason: 'The user requested commit -a. Prepare a fresh proposal with -a and explicit -m arguments. / 用户要求 commit -a，请使用 -a 和独立的 -m 参数重新提案。' });
+                break;
+              }
+              if (automatic && priorTaskRuns.some(run => run.startedAt && analyzeCommand(run.spec).gitStage && !run.gitStageEvidence)) {
+                throw new Error('Staging ran but its result is unverified. / 暂存已运行，但结果尚未核验。');
+              }
+              const selected = staged && !legacyStage ? new Set(localStages.flatMap(run => run.gitStageEvidence?.files ?? [])) : undefined;
+              commit = await prepareLocalGitCommit(draftRun, authorization.scope, rootTaskId, controller.signal, staged?.gitStageEvidence, selected);
+              if (automatic && !commit) throw new Error('The commit scope could not be verified. / 无法核实提交范围。');
+              if (!isAuthorized()) return;
+              if (commit?.outcome === 'no_changes') {
+                if (releaseBatch && !staged && commit.evidence.remainingStatus
+                  && !/已暂存|仅暂存|\bstaged (?:changes|files)\b/iu.test(originalGoal)) {
+                  setReplan(draftRun, { draftRunId: id, specHash: draftRun.specHash, rootTaskId, executionSegmentId: batch.runId,
+                    phase: 'preflight', executed: false, code: 'git_commit_index_empty_with_worktree',
+                    reason: 'The index is empty and worktree changes remain. Stage the requested paths before committing. / 索引为空且工作树仍有改动。请先暂存用户要求纳入的路径。' });
+                  continue;
+                }
+                await assertAutomaticRunAuthorization(draftRun, this.externalEffectGrants, authorization.scope.fingerprint, approvalMode);
+                if (!isAuthorized()) return;
+                if (!this.draftRuns.recordGitCommitEvidence(id, draftRun.specHash, commit.evidence)) {
+                  throw new Error(this.t('approvalIdentityMismatch'));
+                }
+                report(id, 'already_processed');
+                await this.draftRuns.flush();
+                continue;
+              }
+            }
+            if (releaseBatch && (kind === 'tag' || kind === 'push') && needsCommit
+              && !priorTaskRuns.some(run => run.gitCommitEvidence?.repositoryUri === repository && run.gitCommitEvidence?.outcome === 'verified')) {
+              if (priorTaskRuns.some(run => run.gitCommitEvidence?.repositoryUri === repository && run.gitCommitEvidence?.outcome === 'no_changes')) {
+                throw new Error('The verified index is empty. This release requires a new commit. / 已核实索引为空。本次发布需要新的提交。');
+              }
+              setReplan(draftRun, { draftRunId: id, specHash: draftRun.specHash, rootTaskId, executionSegmentId: batch.runId,
+                phase: 'preflight', executed: false, code: 'git_release_commit_required',
+                reason: 'The release needs a verified task commit. Continue with the commit or reconcile an interrupted commit first. / 发布需先核验本任务提交。请先完成提交，或核对中断提交的结果。' });
+              continue;
+            }
+            if (automatic && (semantics.gitTagCreate || remote)) {
+              release = await prepareGitRelease({ run: draftRun, scope: authorization.scope, intent: releaseIntent,
+                remote, prior: priorTaskRuns, needsCommit, signal: controller.signal });
+              if (!isAuthorized()) return;
+              if (release?.completed) {
+                if (!this.draftRuns.recordGitReleaseEvidence(id, draftRun.specHash, release.completed)) {
+                  throw new Error(this.t('approvalIdentityMismatch'));
+                }
+                await this.draftRuns.flush();
+                report(id, 'already_processed');
+                continue;
               }
             }
           } catch (error) {
@@ -7067,7 +7191,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           const reviewRequest: ApprovalReviewRequest = {
             ...createDraftRunReviewRequest({ draftRun: actual, originalDraftRun: restrictedRun ? draftRun : undefined,
               scope: authorization.scope, rootTaskId, history: session.messages, language: this.language }),
-            approvalMode, scopeFingerprint: actual.spec.restricted?.boundaryFingerprint ?? authorization.scope.fingerprint
+            approvalMode, scopeFingerprint: actual.spec.restricted?.boundaryFingerprint ?? remote?.fingerprint ?? authorization.scope.fingerprint
           };
           const route = restrictedRun || (approvalMode === 'model_review' && authorization.route !== 'user_click')
             ? 'model_review' : authorization.route;
@@ -7093,6 +7217,12 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             if (automatic) continue;
             break;
           }
+          if (automatic && commit?.outcome === 'ready'
+            && !this.draftRuns.recordGitCommitPlan(id, draftRun.specHash, commit.snapshot)) throw new Error(this.t('approvalIdentityMismatch'));
+          if (release?.pushAttempt && !this.draftRuns.recordGitPushAttempt(id, draftRun.specHash, release.pushAttempt)) {
+            throw new Error(this.t('approvalIdentityMismatch'));
+          }
+          if (automatic && (commit?.outcome === 'ready' || release?.pushAttempt)) await this.draftRuns.flush();
           this.activeDraftRunId = actual.id;
           this.setAgentActivity({ base: 'executing', phase: 'running_draft_run', detail: actual.spec.executable });
           const result = await this.draftRuns.approveAndRun(actual.id, restrictedRun ? new Set() : authorization.authorizedUris, {
@@ -7101,7 +7231,14 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
               if (review.route === 'auto_approval_review' || review.route === 'model_review') {
                 await this.approvalReviewer.assertReviewerConfiguration(reviewRequest, await this.getApprovalReviewerModelContext(review.route === 'auto_approval_review' ? batch.runId : undefined), review.record);
               }
-              if (!restrictedRun) await assertAutomaticRunAuthorization(draftRun, this.externalEffectGrants, authorization.scope.fingerprint, approvalMode);
+              if (restrictedRun) return;
+              await release?.beforeLaunch();
+              if (remote) {
+                const current = await authorizeRemote(await inspectDraftRunScope(draftRun, true));
+                if (!current || current.fingerprint !== remote.fingerprint) throw new Error(this.t('approvalIdentityMismatch'));
+                return current;
+              }
+              await assertAutomaticRunAuthorization(draftRun, this.externalEffectGrants, authorization.scope.fingerprint, approvalMode);
             },
             approvalRecord: toApprovalRecordMatch(review.record, review.route),
             signal: controller.signal
@@ -7121,6 +7258,32 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
             restrictedRun = undefined;
             if (!completed) break;
             continue;
+          }
+          if (release && result && (result.status === 'done'
+            || remoteCommand?.kind === 'push' && result.startedAt && !controller.signal.aborted)) {
+            try {
+              const current = await inspectDraftRunScope(draftRun, Boolean(remote));
+              if (remote) {
+                const launch = await authorizeRemote(current);
+                if (!launch || launch.destinationHash !== remote.destinationHash) throw new Error(this.t('approvalIdentityMismatch'));
+              } else if (current.uncertain || current.executable !== authorization.scope.executable
+                || current.gitCwd !== authorization.scope.gitCwd) throw new Error(this.t('approvalIdentityMismatch'));
+              const evidence = await release.verify(result);
+              if (!this.draftRuns.recordGitReleaseEvidence(id, draftRun.specHash, evidence)) throw new Error(this.t('approvalIdentityMismatch'));
+              await this.draftRuns.flush();
+              report(id, 'executed', result.exitCode === 0 ? undefined
+                : 'The process did not exit successfully, but the requested remote objects were verified. / 进程未成功退出，但已核实目标远端对象。');
+              continue;
+            } catch (error) {
+              const detail = getErrorMessage(error);
+              const reason = remoteCommand?.kind === 'push' && result.exitCode === 0
+                ? (this.language === 'en' ? `Remote push verification did not complete. ${detail}` : `远端推送核验未完成。${detail}`)
+                : detail;
+              this.draftRuns.recordGitVerificationFailure(id, draftRun.specHash, reason);
+              await this.draftRuns.flush();
+              report(id, 'failed', reason);
+              continue;
+            }
           }
           if (result?.status === 'done' && (stageBefore || commit?.outcome === 'ready')) {
             try {
@@ -7199,8 +7362,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           ? 'The blocked operations did not start. Choose a distinct, already-authorized alternative, or report which work could not be completed. Do not request approval or retry the blocked operation.'
           : '受阻操作尚未启动。请改用已有授权的不同路径，或说明具体未完成项。无需请求审批，也不要重复受阻操作。') : '',
         batch.localGitCompletionCheck ? (this.language === 'en'
-          ? 'Host evidence is still missing for the requested local commit. Check the repository and use prior staging results. Continue only with the next authorized step, or report the blocker.'
-          : '宿主尚未核实本地提交结果。请检查当前仓库并复用已有暂存结果，执行获准的下一步，或报告具体阻塞。') : '',
+          ? 'Host evidence is still missing for the requested Git outcome. Reuse verified results and continue only with the next authorized step, or report the blocker.'
+          : '宿主尚未核实 Git 任务结果。请复用已核验的结果，执行获准的下一步，或报告具体阻塞。') : '',
         `<keepseek-task-goal>${JSON.stringify(taskGoal(session.messages, rootTaskId))}</keepseek-task-goal>`,
         processing.targets.length ? `<keepseek-operation-results>${JSON.stringify(processing.targets)}</keepseek-operation-results>` : '',
         reviewResults.length ? `<keepseek-approval-results format="v1">${JSON.stringify(reviewResults)}</keepseek-approval-results>` : '',
