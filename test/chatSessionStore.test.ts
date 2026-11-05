@@ -149,19 +149,19 @@ test('approval mode persists for the project and is inherited by every new or se
 
   await store.initialize();
   assert.equal(store.approvalMode, 'ask');
-  assert.equal(await store.setApprovalMode('model_review'), true);
-  assert.equal(storage.saved?.approvalMode, 'model_review');
+  assert.equal(await store.setApprovalMode('delegate'), true);
+  assert.equal(storage.saved?.approvalMode, 'delegate');
 
   const created = await store.createNewSession('en');
-  assert.equal(created.approvalMode, 'model_review');
+  assert.equal(created.approvalMode, 'delegate');
 
   const selected = await store.selectSession(older.id);
-  assert.equal(selected?.approvalMode, 'model_review');
+  assert.equal(selected?.approvalMode, 'delegate');
 
   const restarted = new ChatSessionStore(storage, 'en', workspaceScope);
   await restarted.initialize();
-  assert.equal(restarted.approvalMode, 'model_review');
-  assert.equal(restarted.getActiveSession().approvalMode, 'model_review');
+  assert.equal(restarted.approvalMode, 'delegate');
+  assert.equal(restarted.getActiveSession().approvalMode, 'delegate');
 });
 
 test('execution mode defaults to normal and is restored independently for each session', async () => {
@@ -221,14 +221,27 @@ test('stored project approval mode overrides stale per-session values on load', 
   active.approvalMode = 'ask';
   const storage = new MemorySessionStorage({
     activeSessionId: active.id,
-    approvalMode: 'model_review',
+    approvalMode: 'delegate',
     sessions: [active]
   });
   const store = new ChatSessionStore(storage, 'en', workspaceScope);
 
   await store.initialize();
-  assert.equal(store.approvalMode, 'model_review');
-  assert.equal(store.getActiveSession().approvalMode, 'model_review');
+  assert.equal(store.approvalMode, 'delegate');
+  assert.equal(store.getActiveSession().approvalMode, 'delegate');
+});
+
+test('legacy project model_review migrates to ask without broadening authorization and rejects new legacy selections', async () => {
+  const scope = { key: 'legacy-mode', name: 'Legacy', folderUris: [] };
+  const active = createSession('legacy-active', [createMessage(0)], scope);
+  const originalMessages = active.messages.map(message => ({ content: message.content, expandedContent: message.expandedContent, providerContent: message.providerContent }));
+  const storage = new MemorySessionStorage({ activeSessionId: active.id, approvalMode: 'model_review' as never, sessions: [active] });
+  const store = new ChatSessionStore(storage, 'en', scope);
+  await store.initialize();
+  assert.equal(store.approvalMode, 'ask');
+  assert.equal(store.getActiveSession().approvalModeMigrated, true);
+  assert.equal(await store.setApprovalMode('model_review' as never), false);
+  assert.deepEqual(store.getActiveSession().messages.map(message => ({ content: message.content, expandedContent: message.expandedContent, providerContent: message.providerContent })), originalMessages);
 });
 
 test('global storage isolates project approval modes and copied sessions use the target project mode', async (t) => {
@@ -252,9 +265,9 @@ test('global storage isolates project approval modes and copied sessions use the
   const second = new ChatSessionStore(storage, 'en', secondScope);
   await second.initialize();
   assert.equal(second.approvalMode, 'ask');
-  await second.setApprovalMode('model_review');
+  await second.setApprovalMode('delegate');
   const copied = await second.copyOtherWorkspaceSession(firstScope.key, firstSessionId);
-  assert.equal(copied?.approvalMode, 'model_review');
+  assert.equal(copied?.approvalMode, 'delegate');
   assert.equal(copied?.executionMode, 'normal');
   assert.equal(copied?.planWorkflows, undefined);
 
@@ -265,7 +278,7 @@ test('global storage isolates project approval modes and copied sessions use the
 
   const restartedSecond = new ChatSessionStore(new GlobalSessionStorage(storageUri), 'en', secondScope);
   await restartedSecond.initialize();
-  assert.equal(restartedSecond.approvalMode, 'model_review');
+  assert.equal(restartedSecond.approvalMode, 'delegate');
 });
 
 class MemorySessionStorage implements ChatSessionStorageAdapter {

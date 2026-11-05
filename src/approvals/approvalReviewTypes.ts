@@ -1,10 +1,10 @@
 import type { DraftEditAction, DraftRunEffectAssessment, SafeNpmScript } from '../shared/types';
 
 export const APPROVAL_POLICY_VERSION = 2;
-export const AUTO_APPROVAL_POLICY_VERSION = 4;
+export const AUTO_APPROVAL_POLICY_VERSION = 5;
 
-export function reviewerRoute(mode: ApprovalReviewRequest['approvalMode']): 'model_review' | 'auto_approval_review' {
-  return mode === 'delegate' ? 'auto_approval_review' : 'model_review';
+export function reviewerRoute(_mode?: unknown): 'auto_approval_review' {
+  return 'auto_approval_review';
 }
 
 export function policyVersionFor(source: ApprovalReviewSource): number {
@@ -18,10 +18,10 @@ export type ApprovalActionKind =
   | 'draft_delete_apply'
   | 'draft_run_execute';
 
-export type ApprovalReviewDecision = 'approve' | 'deny';
+export type ApprovalReviewDecision = 'approve' | 'needs_user' | 'deny';
 export type ApprovalReviewRisk = 'low' | 'medium' | 'high' | 'critical';
 export type ApprovalReviewSource = 'auto_approval_review' | 'model_review' | 'host_policy' | 'local_policy' | 'user_click';
-export type ApprovalRoute = 'host_policy' | 'auto_approval_review' | 'model_review' | 'user_click';
+export type ApprovalRoute = 'host_policy' | 'auto_approval_review' | 'user_click';
 
 export interface BoundedReviewText {
   content: string;
@@ -87,7 +87,7 @@ export interface ApprovalReviewRequest {
   targetId: string;
   actionHash: string;
   scopeFingerprint?: string;
-  approvalMode?: 'model_review' | 'delegate';
+  approvalMode?: 'delegate';
   originalGoalSummary: string;
   evidenceIncomplete?: boolean;
   visibleSessionEvidence: string[];
@@ -135,6 +135,9 @@ export interface ApprovalReviewRecord {
   affectedTargets?: string[];
   createdAt: string;
   consumedAt?: string;
+  /** Original reviewer outcome remains an independent audit record. */
+  priorReviewId?: string;
+  userRequestId?: string;
 }
 
 export type ApprovalReviewDisplay = Omit<ApprovalReviewRecord, 'runtimeId' | 'actionHash' | 'policyRules' | 'scopeFingerprint' | 'reviewerConfigFingerprint' | 'originalActionHash'>;
@@ -143,6 +146,13 @@ export interface ApprovalReviewOutcome {
   status: 'reviewed' | 'unavailable';
   record: ApprovalReviewRecord;
   circuitBreakReason?: 'consecutive_denials' | 'recent_denials';
+}
+
+/** Shared by draft processing and in-loop tools; text never determines routing. */
+export function approvalDisposition(record: ApprovalReviewRecord): 'execute' | 'request_user' | 'deny' | 'stop' {
+  if (record.decision === 'approve') return 'execute';
+  if (record.decision === 'deny') return 'deny';
+  return record.policyRules.includes('approval_budget_exhausted') ? 'stop' : 'request_user';
 }
 
 export interface ApprovalRecordMatch {
@@ -166,4 +176,8 @@ export interface ManualToolApproval {
   sessionId: string;
   label: string;
   reason: string;
+  request?: ApprovalReviewRequest;
+  priorReviewId?: string;
+  runtimeId?: string;
+  status?: 'waiting' | 'interrupted' | 'approved' | 'rejected' | 'cancelled';
 }

@@ -201,13 +201,14 @@ spawn(executable, args, { shell: false })
 
 ## 8. 审批模式
 
-项目有三档审批模式，仅 Webview 用户操作可切换，且按目标 workspace 持久化：
+项目有两档审批模式，仅 Webview 用户操作可切换，且按目标 workspace 持久化：
 
 | 模式 | 决策者 | 行为 |
 | --- | --- | --- |
 | `ask` | 用户 | 默认；逐项或批量批准 |
-| `model_review` | 隔离 reviewer | 长任务适用；逐 actionHash 审查，可拒绝 |
-| `delegate` | 宿主策略与独立自动审批 reviewer | 常规操作直批，其他可审查操作自动送审。缺少授权或无法执行时自动改路或结束 |
+| `delegate`（帮我审批） | 宿主策略、独立审批 reviewer、必要时用户 | 常规操作直批；其余可审查操作自动送审，区分 approve/needs_user/deny/unavailable。必要时绑定当前 runtime 的精确单次人工请求，之后复核并续跑同一任务 |
+
+旧 `model_review` 当前设置迁移为 ask，仅保留历史审计；审批模型与普通子代理模型独立。等待用户暂停有效计时，关闭 Webview 不取消等待；重启不恢复旧批准、队列或 permit。详细恢复与验收见 [帮我审批](keepseek-approve-for-me-verification.md)。
 
 共同规则：
 

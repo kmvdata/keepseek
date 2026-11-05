@@ -1,4 +1,6 @@
 import './registerVscodeStub';
+import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
+import { getAutoApprovalReviewerSetting } from '../src/shared/config';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import * as os from 'node:os';
@@ -112,8 +114,8 @@ test('approval records require an exact current-runtime match and are one-shot',
     const record = await store.add(approvalRecordInput());
     const match = {
       reviewId: record.reviewId, sessionId: 'session', rootTaskId: 'root', agentRunId: 'run', targetId: 'target',
-      actionKind: 'draft_run_execute' as const, actionHash: 'hash', policyVersion: APPROVAL_POLICY_VERSION, expectedSource: 'model_review' as const,
-      approvalMode: 'model_review' as const, workspaceTrusted: true
+      actionKind: 'draft_run_execute' as const, actionHash: 'hash', policyVersion: APPROVAL_POLICY_VERSION, expectedSource: 'user_click' as const,
+      approvalMode: 'delegate' as const, workspaceTrusted: true
     };
     for (const mismatch of [
       { sessionId: 'other-session' },
@@ -124,7 +126,7 @@ test('approval records require an exact current-runtime match and are one-shot',
       { policyVersion: APPROVAL_POLICY_VERSION - 1 },
       { expectedSource: 'host_policy' as const },
       { rootTaskId: 'other-task' },
-      { approvalMode: 'delegate' as const },
+      { approvalMode: 'model_review' as const },
       { workspaceTrusted: false }
     ]) {
       await assert.rejects(store.consumeMatchingApproval({ ...match, ...mismatch }), /matching approval|untrusted workspace/u);
@@ -181,6 +183,7 @@ test('subagent selection is shared by reviewer resolution and fixed failures nev
       workspaceKey: 'workspace-key',
       sourceStore,
       store,
+      getAutoSetting: () => ({ mode: 'fixed', sourceId: 'missing', modelId: 'gone' }),
       requestText: async () => {
         reviewerCalls++;
         return '{}';
@@ -202,7 +205,7 @@ test('reviewer retries once, treats invalid output as unavailable, and never aut
       requestText: async () => {
         attempts++;
         if (attempts === 1) throw new Error('temporary network failure');
-        return JSON.stringify({ decision: 'approve', risk: 'low', reason: 'Scoped.', policyRules: ['least_privilege'], saferAlternative: '' });
+        return JSON.stringify({ decision: 'approve', risk: 'low', reason: 'Scoped.', policyRules: ['least_privilege'], saferAlternative: '', affectedTargets: ['project'] });
       }
     });
     const approved = await reviewer.review(reviewRequest(), parentRequestContext());
@@ -277,7 +280,7 @@ test('a repeated denied action hash is rejected locally without another reviewer
         requests++;
         return JSON.stringify({
           decision: 'deny', risk: 'high', reason: 'Too broad.',
-          policyRules: ['least_privilege'], saferAlternative: 'Narrow the operation.'
+          policyRules: ['least_privilege'], saferAlternative: 'Narrow the operation.', affectedTargets: ['project']
         });
       }
     });
@@ -357,10 +360,10 @@ test('unregistered, mismatched, and changed-hash approval requests are denied be
 function reviewRequest(): ApprovalReviewRequest {
   return {
     version: 1, sessionId: 'session', rootTaskId: 'root', agentRunId: 'run', actionKind: 'validation_run',
-    targetId: 'validation', actionHash: hashApprovalValue({ script: 'compile' }),
+    approvalMode: 'delegate', scopeFingerprint: 'snapshot', targetId: 'validation', actionHash: hashApprovalValue({ script: 'compile' }),
     originalGoalSummary: 'Compile the project.', visibleSessionEvidence: ['user: Compile the project.'],
     workspaceTrusted: true, workspaceRootIds: ['root-1:project'], purpose: 'Run compile.',
-    staticRiskAnalysis: ['fixed_script:compile'], exactAction: { kind: 'validation_run', script: 'compile', workspaceRootId: 'root-1:project' },
+    staticRiskAnalysis: ['fixed_script:compile'], exactAction: { kind: 'validation_run', script: 'compile', workspaceRootId: 'root-1:project', launch: { cwdUri: 'file:///project', executable: '/usr/bin/npm', argv: ['run', 'compile'], envNames: [], scripts: createBoundedReviewText('compile: tsc') } },
     responseLanguage: 'en'
   };
 }
@@ -368,7 +371,7 @@ function reviewRequest(): ApprovalReviewRequest {
 function approvalRecordInput() {
   return {
     sessionId: 'session', rootTaskId: 'root', agentRunId: 'run', targetId: 'target', actionKind: 'draft_run_execute' as const,
-    actionHash: 'hash', policyVersion: APPROVAL_POLICY_VERSION, approvalMode: 'model_review' as const, approvalSource: 'model_review' as const,
+    actionHash: 'hash', policyVersion: APPROVAL_POLICY_VERSION, approvalMode: 'delegate' as const, approvalSource: 'user_click' as const,
     reviewerSourceId: 'source', reviewerModelId: 'model', reviewerProvider: 'openai-responses',
     decision: 'approve' as const, risk: 'low' as const, rationale: 'Scoped.', policyRules: ['least_privilege']
   };
@@ -436,7 +439,7 @@ test('automatic reviewer keeps independent models, policy, approval matches, and
       }
     });
     const context = parentRequestContext();
-    const review = (mode: 'delegate' | 'model_review', target: string, hash = target, extra: Partial<ApprovalReviewRequest> = {}) => {
+    const review = (mode: 'delegate', target: string, hash = target, extra: Partial<ApprovalReviewRequest> = {}) => {
       const request: ApprovalReviewRequest = { ...reviewRequest(), approvalMode: mode, targetId: target, actionHash: hash,
         scopeFingerprint: 'live-scope', visibleSessionEvidence: [],
         actionKind: 'external_file_access', exactAction: { kind: 'external_file_access', uri: 'file:///project/source.py', access: 'read' },
@@ -445,18 +448,16 @@ test('automatic reviewer keeps independent models, policy, approval matches, and
       return reviewer.review(request, context);
     };
     const a = await review('delegate', 'auto-approve');
-    const m = await review('model_review', 'model-approve');
-    assert.deepEqual(calls.map(call => [call.model, call.source]), [['auto-model', 'auto'], ['model-reviewer', 'model']]);
-    assert.match(calls[0].system, /Auto approval reviewer policy v4/u);
-    assert.match(calls[1].system, /Approval Reviewer Policy v2/u);
-    assert.equal(calls[0].user.match(/<\/UNTRUSTED_EVIDENCE>/gu)?.length, 1);
+    assert.deepEqual(calls.map(call => [call.model, call.source]), [['auto-model', 'auto']]);
+    await modelSettings.save({ mode: 'follow-main' });
+    const m = await review('delegate', 'second-approve');
+    assert.deepEqual(calls.map(call => call.model), ['auto-model', 'auto-model']);
+    assert.match(calls[0].system, /Approve for me policy v5/u);
     assert.equal(a.record.approvalSource, 'auto_approval_review');
     assert.equal(a.record.decision, 'approve');
     assert.equal(a.record.risk, 'medium');
-    assert.notEqual(a.record.policyVersion, m.record.policyVersion);
-    assert.notEqual(a.record.reviewerConfigFingerprint, m.record.reviewerConfigFingerprint);
-    await assert.rejects(reviewer.consumeApproval(a.record, 'model_review'), /matching approval/u);
-    await assert.rejects(reviewer.consumeApproval(m.record, 'auto_approval_review'), /matching approval/u);
+    assert.equal(a.record.policyVersion, m.record.policyVersion);
+    await assert.rejects(reviewer.consumeApproval(a.record, 'host_policy'), /matching approval/u);
     await assert.rejects(reviewer.consumeApproval({ ...a.record, reviewerConfigFingerprint: 'different' }, 'auto_approval_review'), /matching approval/u);
     assert.equal((await review('delegate', 'auto-approve')).record.decision, 'unavailable');
     assert.equal(calls.length, 2);
@@ -464,21 +465,21 @@ test('automatic reviewer keeps independent models, policy, approval matches, and
 
     autoSetting = { mode: 'fixed', sourceId: 'model', modelId: 'model-reviewer' };
     const same = await review('delegate', 'same-model');
-    assert.equal(same.record.reviewerModelId, m.record.reviewerModelId);
+    assert.equal(same.record.reviewerModelId, 'model-reviewer');
     assert.notEqual(same.record.reviewerConfigFingerprint, m.record.reviewerConfigFingerprint);
     assert.equal(calls.at(-1)?.system, calls[0].system);
-    assert.equal((await review('delegate', 'oversize', 'oversize', { purpose: 'x'.repeat(16_384) })).record.policyRules[0], 'insufficient_evidence');
-    assert.equal((await review('delegate', 'redacted', 'redacted', { evidenceIncomplete: true })).record.policyRules[0], 'insufficient_evidence');
+    assert.equal((await review('delegate', 'oversize', 'oversize', { purpose: 'x'.repeat(32_768) })).record.policyRules[0], 'manual_scope_required');
+    assert.equal((await review('delegate', 'redacted', 'redacted', { evidenceIncomplete: true })).record.policyRules[0], 'manual_scope_required');
     assert.equal(calls.length, 3);
 
     reply = 'deny';
     const denial = await review('delegate', 'auto-deny', 'danger');
     assert.equal(denial.record.decision, 'deny');
-    assert.equal((await review('model_review', 'same-danger', 'danger')).record.approvalSource, 'local_policy');
+    assert.equal((await review('delegate', 'same-danger', 'danger')).record.approvalSource, 'local_policy');
     assert.equal(calls.length, 4);
-    const modelDenial = await review('model_review', 'model-deny');
+    const modelDenial = await review('delegate', 'model-deny');
     assert.equal(modelDenial.record.decision, 'deny');
-    assert.equal(modelDenial.circuitBreakReason, undefined, 'automatic denials do not trip the model profile');
+    assert.equal(modelDenial.circuitBreakReason, 'consecutive_denials', 'one unified reviewer preserves denial history');
     reply = 'malformed';
     assert.equal((await review('delegate', 'auto-malformed')).record.approvalSource, 'auto_approval_review');
     assert.deepEqual(calls.slice(-2).map(call => call.system), [calls[0].system, calls[0].system]);
@@ -487,7 +488,81 @@ test('automatic reviewer keeps independent models, policy, approval matches, and
     assert.equal((await review('delegate', 'missing-fixed')).record.decision, 'unavailable');
     assert.equal(calls.length, 7);
     reply = 'approve';
-    assert.equal((await review('model_review', 'still-available')).record.decision, 'approve');
+    assert.equal((await review('delegate', 'still-unavailable')).record.decision, 'unavailable');
     assert.equal(calls.at(-1)?.system, calls[1].system);
+  });
+});
+
+
+test('approval model menu saves user settings, validates account identity and never changes subagent profiles', async () => {
+  await withApprovalFixture(async ({ storageUri }) => {
+    const sources = new ModelSourceStore(storageUri as never);
+    for (const id of ['source-A', 'source-B']) await sources.createSource({ id, name: id, provider: 'openai-compatible',
+      apiKey: 'test-key', models: [{ id: 'same-model' }] });
+    const subagents = new SubagentSettingsStore(storageUri as never, 'profiles');
+    await subagents.save({ mode: 'fixed', sourceId: 'source-A', modelId: 'same-model' });
+    await subagents.save({ mode: 'fixed', sourceId: 'source-B', modelId: 'same-model' }, 'review');
+    const before = await subagents.loadAll();
+    const originalConfig = vscode.workspace.getConfiguration;
+    const originalPick = vscode.window.showQuickPick;
+    let setting: unknown = { mode: 'follow-main' };
+    let fail = false;
+    let selection: 'source-B' | 'follow-main' = 'source-B';
+    const writes: unknown[] = [], messages: Array<{ type?: string; success?: boolean }> = [];
+    vscode.workspace.getConfiguration = () => ({ ...originalConfig(),
+      inspect: () => ({ globalValue: setting, workspaceValue: { mode: 'fixed', sourceId: 'attacker', modelId: 'different' } }),
+      update: async (...args: unknown[]) => { if (fail) throw new Error('settings write failed'); writes.push(args); setting = args[1]; }
+    });
+    vscode.window.showQuickPick = async <T>(items: readonly T[]) => items.find(item => {
+      const v = item as { sourceId?: string; mode?: string };
+      return selection === 'follow-main' ? v.mode === 'follow-main' : v.sourceId === selection;
+    });
+    const models = ['source-A', 'source-B'].map(sourceId => ({ id: 'same-model', sourceId, label: 'Same name',
+      sourceName: sourceId, provider: 'openai-compatible', agentCompatible: true }));
+    const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), { language: 'en', availableModels: models,
+      globalStorageUri: storageUri, sourceStore: sources, activeChangeActions: new Set(),
+      hasActiveBackgroundRun: () => false, postState: () => {}, postToWebview: (message: typeof messages[number]) => messages.push(message)
+    }) as { configureApprovalModel(): Promise<void>; isBusy: boolean };
+    try {
+      await host.configureApprovalModel();
+      assert.deepEqual(getAutoApprovalReviewerSetting(), { mode: 'fixed', sourceId: 'source-B', modelId: 'same-model' });
+      assert.deepEqual(writes[0], ['autoApprovalReviewer', setting, vscode.ConfigurationTarget.Global]);
+      assert.equal(messages.at(-1)?.success, true);
+      assert.deepEqual(await subagents.loadAll(), before);
+      await subagents.save({ mode: 'follow-main' });
+      assert.equal(getAutoApprovalReviewerSetting().sourceId, 'source-B');
+      host.isBusy = true; await host.configureApprovalModel(); assert.equal(writes.length, 1);
+      host.isBusy = false; fail = true; selection = 'follow-main';
+      await host.configureApprovalModel(); assert.equal(messages.at(-1)?.success, false);
+      assert.equal(getAutoApprovalReviewerSetting().sourceId, 'source-B');
+      fail = false; await host.configureApprovalModel();
+      assert.equal(getAutoApprovalReviewerSetting().mode, 'follow-main');
+      assert.equal((await subagents.load('review')).sourceId, 'source-B');
+    } finally { vscode.workspace.getConfiguration = originalConfig; vscode.window.showQuickPick = originalPick; }
+  });
+});
+
+test('follow-main approval binds the actual segment model and source snapshot, independent of later UI selection', async () => {
+  const main = parentRequestContext();
+  const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    sessionStore: { getActiveSession: () => ({ id: 's', messages: [{ id: 'a', runCheckpointArchive: { summary: { taskId: 'segment' } } }] }) },
+    approvalMainContexts: new Map([['s:a', main]]), selectedSourceId: 'different', selectedModelId: 'different'
+  }) as { getApprovalReviewerModelContext(id: string): Promise<typeof main> };
+  const resolved = await host.getApprovalReviewerModelContext('segment');
+  assert.deepEqual(resolved, main); assert.notEqual(resolved.model, main.model);
+});
+
+test('legacy model_review audit remains readable after restart without restoring approval authority', async () => {
+  await withApprovalFixture(async ({ storageUri, store }) => {
+    const legacy = await store.add({ ...approvalRecordInput(), approvalMode: 'model_review', approvalSource: 'model_review', decision: 'deny' });
+    await store.flush();
+    const restored = new ApprovalReviewStore(storageUri as never); await restored.initialize();
+    assert.equal(restored.getLatestForTarget(legacy.targetId)?.approvalSource, 'model_review');
+    assert.equal(restored.get(legacy.reviewId)?.approvalMode, 'model_review');
+    assert.equal(restored.get(legacy.reviewId)?.decision, 'deny');
+    await assert.rejects(restored.consumeMatchingApproval({ reviewId: legacy.reviewId, sessionId: legacy.sessionId,
+      rootTaskId: legacy.rootTaskId, agentRunId: legacy.agentRunId, targetId: legacy.targetId, actionKind: legacy.actionKind,
+      actionHash: legacy.actionHash, approvalMode: 'delegate', policyVersion: legacy.policyVersion,
+      expectedSource: 'user_click', workspaceTrusted: true }), /matching approval/u);
   });
 });

@@ -4,10 +4,9 @@ import type { ModelSourceConfigSnapshot } from '../accounts/types';
 import { getAutoApprovalReviewerSetting } from '../shared/config';
 import * as vscode from 'vscode';
 import { ModelSourceStore } from '../accounts/accountStore';
-import { SubagentSettingsStore } from '../accounts/subagentSettingsStore';
 import { resolveConfiguredSubagentModel } from '../accounts/subagentModelResolver';
 import type { AgentRequest, KeepseekModel, ProviderUsageLedgerRecord, UsageEvent } from '../shared/types';
-import { APPROVAL_REVIEWER_SYSTEM_PROMPT, AUTO_APPROVAL_REVIEWER_SYSTEM_PROMPT, findDeterministicReviewDenial, hasIncompleteAutomaticReviewEvidence, parseApprovalReviewerJson, parseAutoApprovalReviewerJson, redactSensitiveReviewText, serializeApprovalReviewRequest } from './approvalPolicy';
+import { AUTO_APPROVAL_REVIEWER_SYSTEM_PROMPT, findDeterministicReviewDenial, hasIncompleteAutomaticReviewEvidence, parseAutoApprovalReviewerJson, redactSensitiveReviewText, serializeApprovalReviewRequest } from './approvalPolicy';
 import { requestApprovalReviewText } from './oneShotTextRequest';
 import { APPROVAL_POLICY_VERSION, policyVersionFor, reviewerRoute, type ApprovalRoute, type ApprovalReviewOutcome, type ApprovalReviewRecord, type ApprovalReviewRequest } from './approvalReviewTypes';
 import { ApprovalReviewStore } from './approvalReviewStore';
@@ -23,7 +22,8 @@ export interface ApprovalReviewerModelContext {
 export interface ApprovalReviewerAdapter {
   review(request: ApprovalReviewRequest, modelContext: ApprovalReviewerModelContext, signal?: AbortSignal): Promise<ApprovalReviewOutcome>;
   createHostPolicyApproval(request: ApprovalReviewRequest): Promise<ApprovalReviewOutcome>;
-  createUserApproval?(request: ApprovalReviewRequest): Promise<ApprovalReviewOutcome>;
+  createUserApproval?(request: ApprovalReviewRequest, link: { priorReviewId?: string; userRequestId: string }): Promise<ApprovalReviewOutcome>;
+  createUserRejection?(request: ApprovalReviewRequest, link: { priorReviewId?: string; userRequestId: string }): Promise<ApprovalReviewRecord>;
   assertReviewerConfiguration?(request: ApprovalReviewRequest, context: ApprovalReviewerModelContext, record: ApprovalReviewRecord): Promise<void>;
   consumeApproval(record: ApprovalReviewRecord, expectedSource: ApprovalRoute): Promise<void>;
 }
@@ -44,9 +44,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
   }) {}
 
   private async resolveReviewer(request: ApprovalReviewRequest, context: ApprovalReviewerModelContext) {
-    const autoApproval = request.approvalMode === 'delegate';
-    const setting = autoApproval ? (this.options.getAutoSetting ?? getAutoApprovalReviewerSetting)()
-      : await new SubagentSettingsStore(this.options.globalStorageUri, this.options.workspaceKey).load();
+    const setting = (this.options.getAutoSetting ?? getAutoApprovalReviewerSetting)();
     const resolved = await resolveConfiguredSubagentModel({
       globalStorageUri: this.options.globalStorageUri,
       workspaceKey: this.options.workspaceKey,
@@ -54,7 +52,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
       parentRequest: context,
       language: request.responseLanguage,
       setting,
-      autoApproval
+      autoApproval: true
     });
     return {
       ...resolved,
@@ -96,15 +94,14 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
       return this.withCircuit(request, 'reviewed', await this.createLocalDenial(request, deterministicDenial));
     }
     const route = reviewerRoute(request.approvalMode);
-    const automatic = route === 'auto_approval_review';
-    if (automatic && hasIncompleteAutomaticReviewEvidence(request)) {
-      return this.withCircuit(request, 'reviewed', await this.createLocalDenial(request, 'insufficient_evidence'));
+    if (hasIncompleteAutomaticReviewEvidence(request)) {
+      return this.createEvidenceHold(request);
     }
-    if (automatic && this.options.store.hasAutomaticReviewAttempt(request)) {
+    if (this.options.store.hasAutomaticReviewAttempt(request)) {
       return this.createUnavailable(request, undefined, new Error(request.responseLanguage === 'en'
-        ? 'Automatic review was already attempted for this operation.' : '该操作已进行过自动审批专用审查。'));
+        ? 'Automatic review was already attempted for this operation.' : '该操作已进行过独立审批审查。'));
     }
-    if (automatic) {
+    {
       // Claim before any request or account resolution. A crash cannot replay
       // an in-flight automatic review or promote this marker to authority.
       await this.createUnavailable(request, undefined, undefined, 'review_in_progress');
@@ -136,7 +133,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
           globalStorageUri: this.options.globalStorageUri,
           taskCostBudget: modelContext.taskCostBudget,
           taskRunBudget: modelContext.taskRunBudget,
-          systemPrompt: automatic ? AUTO_APPROVAL_REVIEWER_SYSTEM_PROMPT : APPROVAL_REVIEWER_SYSTEM_PROMPT,
+          systemPrompt: AUTO_APPROVAL_REVIEWER_SYSTEM_PROMPT,
           userPrompt: serialized,
           language: request.responseLanguage,
           signal,
@@ -148,13 +145,13 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
         });
         if (signal?.aborted) throw signal.reason ?? new Error('Approval review cancelled.');
         validatingResponse = true;
-        const decision = automatic ? parseAutoApprovalReviewerJson(raw) : parseApprovalReviewerJson(raw);
+        const decision = parseAutoApprovalReviewerJson(raw);
         validatingResponse = false;
         const action = request.exactAction;
         const truncated = (action.kind === 'draft_edit_apply' || action.kind === 'draft_delete_apply') && action.proposedChange.truncated
           || action.kind === 'validation_run' && action.launch?.scripts.truncated;
         if (decision.decision === 'approve' && truncated) {
-          decision.decision = 'deny';
+          decision.decision = 'needs_user';
           decision.risk = 'medium';
           decision.policyRules = ['insufficient_evidence'];
           decision.reason = request.responseLanguage === 'en'
@@ -260,31 +257,55 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     });
   }
 
+  private async createEvidenceHold(request: ApprovalReviewRequest): Promise<ApprovalReviewOutcome> {
+    const record = await this.createManualHold(request, request.responseLanguage === 'en'
+      ? 'Material approval evidence is missing or truncated. Confirm the exact scope or provide the missing evidence.'
+      : '审批关键材料缺失或已截断，请确认精确范围或补充所缺材料。');
+    return { status: 'reviewed', record };
+  }
+
   public async createManualHold(request: ApprovalReviewRequest, reason: string): Promise<ApprovalReviewRecord> {
     return await this.options.store.add({
       sessionId: request.sessionId, rootTaskId: request.rootTaskId, agentRunId: request.agentRunId,
       targetId: request.targetId, actionKind: request.actionKind, actionHash: request.actionHash,
       policyVersion: APPROVAL_POLICY_VERSION, scopeFingerprint: request.scopeFingerprint, approvalMode: request.approvalMode,
       approvalSource: 'local_policy', reviewerSourceId: '', reviewerModelId: '', reviewerProvider: 'local_policy',
-      decision: 'unavailable', risk: 'high', rationale: redactSensitiveReviewText(reason), policyRules: ['manual_scope_required']
+      decision: 'needs_user', risk: 'high', rationale: redactSensitiveReviewText(reason), policyRules: ['manual_scope_required']
     });
   }
 
-  public async createUserApproval(request: ApprovalReviewRequest): Promise<ApprovalReviewOutcome> {
+  public async createUserApproval(request: ApprovalReviewRequest, link: { priorReviewId?: string; userRequestId: string }): Promise<ApprovalReviewOutcome> {
+    const reviewed = link.priorReviewId ? this.options.store.get(link.priorReviewId) : undefined;
+    if (!link.userRequestId || !reviewed || reviewed.runtimeId !== this.options.store.runtimeId
+      || !this.options.store.matchesSnapshot(reviewed.reviewId, request)
+      || !['approve', 'needs_user', 'unavailable'].includes(reviewed.decision)) {
+      throw new Error('No live matching user request review exists. Nothing executed. / 缺少本次人工请求的有效审查记录，未执行。');
+    }
     const prior = this.options.store.findDenialForAction(request);
     const denial = !request.workspaceTrusted ? 'workspace_untrusted'
-      : prior && (prior.risk === 'critical' || prior.approvalSource === 'local_policy' || prior.approvalSource === 'auto_approval_review')
+      : prior
         ? 'previously_denied_action' : findDeterministicReviewDenial(request);
     if (denial) return { status: 'reviewed', record: await this.createLocalDenial(request, denial) };
     const record = await this.options.store.add({
       sessionId: request.sessionId, rootTaskId: request.rootTaskId, agentRunId: request.agentRunId,
       targetId: request.targetId, actionKind: request.actionKind, actionHash: request.actionHash,
       policyVersion: APPROVAL_POLICY_VERSION, scopeFingerprint: request.scopeFingerprint, approvalMode: request.approvalMode,
+      priorReviewId: link?.priorReviewId, userRequestId: link?.userRequestId,
       approvalSource: 'user_click', reviewerSourceId: '', reviewerModelId: '', reviewerProvider: 'user_click',
       decision: 'approve', risk: 'high', policyRules: ['user_confirmed_exact_action'],
       rationale: request.responseLanguage === 'en' ? 'User confirmed this exact operation once.' : '用户已对该精确操作作出单次确认。'
     });
     return { status: 'reviewed', record };
+  }
+
+  public async createUserRejection(request: ApprovalReviewRequest, link: { priorReviewId?: string; userRequestId: string }): Promise<ApprovalReviewRecord> {
+    return this.options.store.add({ sessionId: request.sessionId, rootTaskId: request.rootTaskId,
+      agentRunId: request.agentRunId, targetId: request.targetId, actionKind: request.actionKind,
+      actionHash: request.actionHash, scopeFingerprint: request.scopeFingerprint, approvalMode: request.approvalMode,
+      policyVersion: APPROVAL_POLICY_VERSION, approvalSource: 'user_click', ...link,
+      reviewerSourceId: '', reviewerModelId: '', reviewerProvider: 'user_click',
+      decision: 'deny', risk: 'medium', rationale: request.responseLanguage === 'en' ? 'User rejected this operation.' : '用户已拒绝本次操作。',
+      policyRules: ['user_rejected_exact_action'] });
   }
 
   private async createLocalDenial(request: ApprovalReviewRequest, rule: string) {
@@ -340,7 +361,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
       decision: 'unavailable',
       risk: 'high',
       rationale: marker
-        ? (request.responseLanguage === 'en' ? 'Automatic review started. No permit has been issued.' : '自动审批专用审查已开始，尚未签发执行许可。')
+        ? (request.responseLanguage === 'en' ? 'Automatic review started. No permit has been issued.' : '独立审批审查已开始，尚未签发执行许可。')
         : request.responseLanguage === 'en'
           ? `Approval model unavailable; operation did not run: ${message}`
           : `审批模型不可用，操作尚未执行：${message}`,
@@ -356,8 +377,10 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     record: ApprovalReviewRecord
   ): ApprovalReviewOutcome {
     if (record.approvalSource === 'host_policy' && record.decision === 'approve') return { status, record };
-    const result = record.decision === 'approve' ? 'approve' : record.decision === 'deny' ? 'deny' : 'unavailable';
-    const state = this.options.circuitBreaker?.record(request.approvalMode === 'delegate' ? JSON.stringify([request.rootTaskId, 'auto_approval_review']) : request.rootTaskId, result);
+    const result = record.decision;
+    const key = JSON.stringify([request.sessionId, request.rootTaskId, 'auto_approval_review']);
+    this.options.circuitBreaker?.restore(key, this.options.store.decisionHistory(request.sessionId, request.rootTaskId, record.reviewId));
+    const state = this.options.circuitBreaker?.record(key, result);
     return { status, record, circuitBreakReason: state?.tripped ? state.reason : undefined };
   }
 }

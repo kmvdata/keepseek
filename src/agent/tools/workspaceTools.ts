@@ -181,11 +181,17 @@ export interface WorkspaceToolAdapter {
   setDelegatedFileAuthorization?(enabled: boolean): void;
   inspectExternalRead?(rawPath: string): Promise<ExternalReadScope | undefined>;
   authorizeReviewedExternalUri?(uri: string): void;
+  grantUserExternalReadOnce?(uri: string): void;
+  revokeUserExternalReadOnce?(): void;
 }
 
 export class WorkspaceToolService implements WorkspaceToolAdapter {
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
   private readonly encoder = new TextEncoder();
+  private userReadOnce?: string;
+  public grantUserExternalReadOnce(uri: string): void { this.userReadOnce = uri; }
+  public revokeUserExternalReadOnce(): void { this.userReadOnce = undefined; }
+
   private readonly authorizedExternalReferenceUris = new Set<string>();
 
   public setDelegatedFileAuthorization(enabled: boolean): void {
@@ -193,6 +199,7 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
   }
 
   public setAuthorizedExternalReferenceUris(uris?: Iterable<string>): void {
+    this.userReadOnce = undefined;
     this.authorizedExternalReferenceUris.clear();
     if (uris) {
       for (const uri of uris) {
@@ -212,7 +219,7 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
       if (inside) return undefined;
       throw new Error('External read requires a local extension-host file. / 外部读取需要扩展宿主上的本地文件。');
     }
-    const authorized = this.authorizedExternalReferenceUris.has(uri.toString());
+    const authorized = this.authorizedExternalReferenceUris.has(uri.toString()) || this.userReadOnce === uri.toString();
     if (!inside) assertOperationPath(uri.fsPath);
     // Avoid even statting an unauthorized external reference.
     if (!inside && !authorized) return { uri: uri.toString(), canonicalUri: uri.toString(), authorized: false, fingerprint: '' };
@@ -835,7 +842,7 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     }
 
     const uri = this.resolveWorkspaceFileUriCandidate(rawPath, folders);
-    if (!this.isUriInsideWorkspace(uri) && !this.authorizedExternalReferenceUris.has(uri.toString())) {
+    if (!this.isUriInsideWorkspace(uri) && !this.authorizedExternalReferenceUris.has(uri.toString()) && this.userReadOnce !== uri.toString()) {
       throw new Error(
         'The requested file must be inside the currently open workspace or an explicitly referenced external file.'
       );

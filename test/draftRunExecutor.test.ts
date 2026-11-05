@@ -20,7 +20,7 @@ test('delegated execution requires its matching approval record and remains sing
   const match: ApprovalRecordMatch = {
     reviewId: 'review', sessionId: draftRun.sessionId, rootTaskId: draftRun.agentRunId, agentRunId: draftRun.agentRunId,
     targetId: draftRun.id, actionKind: 'draft_run_execute', actionHash: draftRun.specHash,
-    policyVersion: 1, expectedSource: 'model_review', approvalMode: 'model_review', workspaceTrusted: true
+    policyVersion: 1, expectedSource: 'auto_approval_review', approvalMode: 'delegate', workspaceTrusted: true
   };
   await assert.rejects(authorization.createDelegatedPermit(draftRun, () => false, match), /no longer authorized/u);
   const permit = await authorization.createDelegatedPermit(draftRun, () => true, match);

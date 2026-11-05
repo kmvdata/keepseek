@@ -25,24 +25,22 @@ import { normalizeStoredSessions } from '../src/sessions/chatSessionStore';
 import { normalizeApprovalProcessing } from '../src/approvals/approvalProcessing';
 
 test('draft receipt and host authorization text describe the actual mode without claiming execution', () => {
-  for (const lang of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'model_review', 'delegate'] as const) {
+  for (const lang of ['en', 'zh-CN'] as const) for (const mode of ['ask', 'delegate'] as const) {
     const receipt = draftRunPreparedMessage(mode, lang);
     assert.match(receipt, lang === 'en' ? /no process was started/u : /尚未执行/u);
     if (mode !== 'ask') assert.doesNotMatch(receipt, /Wait for the user|等待用户/u);
-    if (mode === 'model_review') assert.match(receipt, /configured model|配置的模型/u);
     const scope = localize(lang, 'approvalExternalPrompt', { target: 'file:///outside/result.txt' });
     assert.match(scope, /file:\/\/\/outside\/result.txt/u);
     assert.notEqual(localize(lang, 'approvalReviewerUnavailable'), 'approvalReviewerUnavailable');
     const delegate = WEBVIEW_TRANSLATIONS[lang].approvalDelegateDescription;
-    assert.match(delegate, lang === 'en' ? /without individual confirmations/u : /无需逐项确认/u);
-    assert.match(delegate, lang === 'en' ? /extension-host account without an OS sandbox/u : /扩展宿主账号权限.*没有操作系统沙箱/u);
-    assert.match(delegate, lang === 'en' ? /may access resources outside the project/u : /可能访问项目外资源/u);
+    assert.match(delegate, lang === 'en' ? /decision remains unresolved/u : /仍无法决定/u);
+    assert.match(delegate, lang === 'en' ? /extension-host privileges, without an OS sandbox/u : /扩展宿主权限.*无操作系统沙箱/u);
   }
 });
 
 test('approval defaults fail closed and queue cannot replay, cross sessions, or survive cancellation', () => {
   assert.equal(normalizeApprovalMode('delegate'), 'delegate');
-  assert.equal(normalizeApprovalMode('model_review'), 'model_review');
+  assert.equal(normalizeApprovalMode('model_review'), 'ask');
   for (const value of [undefined, true, 'always', 'Delegate', 'ask']) assert.equal(normalizeApprovalMode(value), 'ask');
   const queue = new DelegatedApprovalQueue();
   const batch = { sessionId: 's', runId: 'r', editIds: ['e'], draftRunIds: ['d'] };
@@ -87,7 +85,7 @@ test('stored approval modes preserve explicit legacy choices and fail closed on 
   ] }, scope);
   const modes = Object.fromEntries(sessions.map((session) => [session.id, session.approvalMode]));
   assert.deepEqual(modes, {
-    'ask-missing': 'ask', unknown: 'ask', delegate: 'delegate', model: 'model_review'
+    'ask-missing': 'ask', unknown: 'ask', delegate: 'delegate', model: 'ask'
   });
 });
 
@@ -105,7 +103,7 @@ test('approval changes only append new user bytes; V5/V6 stay frozen and V7 adds
   assert.doesNotMatch(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 6 }), /Every arbitrary command requires a separate user click/u);
   assert.doesNotMatch(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 6 }), /model_review/u);
   assert.match(getAgentSystemPrompt({ language: 'en', requestProtocolVersion: 7 }), /model_review/u);
-  assert.match(getApprovalModeUserTail('model_review'), /materially safer new action/u);
+  assert.match(getApprovalModeUserTail('delegate'), /materially safer (?:new )?action/u);
   new Script(getInputScript());
   new Script(getScript());
 });
@@ -165,8 +163,8 @@ test('approval mode uses the model selector interaction directly below the subag
   const inputScript = getInputScript();
   const optionList = inputScript.indexOf("{ mode: 'ask'");
   assert.ok(optionList >= 0);
-  assert.ok(optionList < inputScript.indexOf("{ mode: 'model_review'", optionList));
-  assert.ok(inputScript.indexOf("{ mode: 'model_review'", optionList) < inputScript.indexOf("{ mode: 'delegate'", optionList));
+  assert.doesNotMatch(inputScript, /mode: 'model_review'/u);
+  assert.ok(optionList < inputScript.indexOf("{ mode: 'delegate'", optionList));
   assert.equal((template.match(/id="commandApprovalModeSwitch"/gu) ?? []).length, 1);
   assert.match(inputScript, /commandApprovalModeListOpen/u);
   assert.match(inputScript, /openCommandApprovalModeListAndFocus/u);
@@ -318,22 +316,22 @@ test('ask mode retires malformed argv and dependent drafts while leaving the val
 });
 
 test('model denial leaves a DraftEdit pending and records guidance without another model call', async () => {
-  const fixture = workflowFixture({ mode: 'model_review', denyTarget: 'e1' });
+  const fixture = workflowFixture({ mode: 'delegate', denyTarget: 'e1' });
   await fixture.run();
   assert.deepEqual(fixture.effects, ['stopped']);
   assert.match(fixture.prompts[0] ?? '', /denied by the configured reviewer/iu);
-  assert.match(fixture.prompts[0] ?? '', /materially safer new action/u);
+  assert.match(fixture.prompts[0] ?? '', /materially safer (?:new )?action/u);
 });
 
 test('model denial never spawns a DraftRun', async () => {
-  const fixture = workflowFixture({ mode: 'model_review', denyTarget: 'd1', editIds: [], draftRunIds: ['d1'] });
+  const fixture = workflowFixture({ mode: 'delegate', denyTarget: 'd1', editIds: [], draftRunIds: ['d1'] });
   await fixture.run();
   assert.deepEqual(fixture.effects, ['stopped']);
   assert.match(fixture.prompts[0] ?? '', /"decision":"deny"/u);
 });
 
 test('reviewer unavailability freezes every remaining effect in the batch', async () => {
-  const fixture = workflowFixture({ mode: 'model_review', unavailableBeforeEffects: true });
+  const fixture = workflowFixture({ mode: 'delegate', unavailableBeforeEffects: true });
   await fixture.run();
   assert.deepEqual(fixture.effects, ['stopped']);
   assert.equal(fixture.prompts.length, 1);
@@ -381,9 +379,9 @@ test('an interrupted Git correction stays stopped without replaying a restored d
     restarted.session.approvalProcessing = normalizeApprovalProcessing(interruptedState);
     assert.equal(restarted.queue.take('s'), undefined);
     await restarted.provider.resumeApprovalProcessing();
-    assert.equal(restarted.queue.take('s'), undefined);
+    assert.ok(restarted.queue.take('s'), 'explicit recovery only queues fresh preflight; it cannot execute by itself');
     assert.equal(restarted.effects.filter(effect => effect === 'continue').length, 0);
-    assert.equal(restarted.session.approvalProcessing?.status, 'stopped');
+    assert.equal(restarted.session.approvalProcessing?.status, 'blocked');
     assert.equal(restarted.session.approvalProcessing?.replanKeys?.length, 1);
     assert.equal(reloaded.get(first.id)?.replan?.executed, false);
     assert.equal(launches, 0);
@@ -404,7 +402,7 @@ test('model denial of a deletion leaves the exact file unchanged', async () => {
     await writeFile(target, 'preserve these bytes\n', 'utf8');
     vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(root), name: 'workspace' }];
     const fixture = workflowFixture({
-      mode: 'model_review',
+      mode: 'delegate',
       denyTarget: 'e1',
       editIds: ['e1'],
       draftRunIds: [],
@@ -456,10 +454,10 @@ function workflowFixture(options: {
       actionKind: request.actionKind,
       actionHash: request.actionHash,
       policyVersion: 1,
-      approvalSource: session.approvalMode === 'model_review' ? 'model_review' : 'host_policy',
-      reviewerSourceId: session.approvalMode === 'model_review' ? 'review-source' : '',
-      reviewerModelId: session.approvalMode === 'model_review' ? 'review-model' : '',
-      reviewerProvider: session.approvalMode === 'model_review' ? 'openai-responses' : 'host_policy',
+      approvalSource: Boolean(options.denyTarget) ? 'model_review' : 'host_policy',
+      reviewerSourceId: Boolean(options.denyTarget) ? 'review-source' : '',
+      reviewerModelId: Boolean(options.denyTarget) ? 'review-model' : '',
+      reviewerProvider: Boolean(options.denyTarget) ? 'openai-responses' : 'host_policy',
       decision: request.targetId === options.denyTarget ? 'deny' : 'approve',
       risk: request.targetId === options.denyTarget ? 'high' : 'low',
       rationale: request.targetId === options.denyTarget

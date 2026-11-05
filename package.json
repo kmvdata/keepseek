@@ -89,7 +89,7 @@
           "type": "array",
           "scope": "machine",
           "default": [],
-          "markdownDescription": "Preauthorize Git release in automatic approval for an exact real repository and resolved destination. Read grants accept exact refs or the heads/tags namespace. Push grants allow exact refs or a tag-name prefix ending in * and require matching read access for verification. The current task must also authorize the action. / 为自动审批预授权真实仓库与解析后的确切目的地。查询可授权精确引用或分支、标签命名空间。推送可授权精确引用或以 * 结尾的标签名前缀，并需要核验所需的查询授权。本次任务仍须明确授权。",
+          "markdownDescription": "Preauthorize Git release in Approve for me for an exact real repository and resolved destination. Read grants accept exact refs or the heads/tags namespace. Push grants allow exact refs or a tag-name prefix ending in * and require matching read access for verification. The current task must also authorize the action. / 为帮我审批预授权真实仓库与解析后的确切目的地。查询可授权精确引用或分支、标签命名空间。推送可授权精确引用或以 * 结尾的标签名前缀，并需要核验所需的查询授权。本次任务仍须明确授权。",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -112,7 +112,7 @@
             "modelId": { "type": "string" }
           },
           "additionalProperties": false,
-          "markdownDescription": "Dedicated reviewer for Auto approval. Follow the main model or set fixed sourceId and modelId. Model approval keeps its existing model setting. / 自动审批专用 reviewer。可跟随主模型，或填写固定账号 ID 和模型 ID。模型审批沿用原有模型配置。"
+          "markdownDescription": "Independent approval model for Approve for me. Follows the actual main model of the task segment, or uses a fixed sourceId and modelId. User settings only; independent of subagent models. / 帮我审批的独立审批模型。跟随任务执行段的实际主模型，或固定账号 ID 与模型 ID。仅使用用户设置，与普通子代理模型无关。"
         },
         "keepseek.thinkingEnabled": {
           "type": "boolean",

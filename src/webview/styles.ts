@@ -1381,6 +1381,16 @@ export function getStyles(): string {
       line-height: 1.35;
     }
 
+    .approval-exact-payload {
+      min-width: 0;
+      max-width: 100%;
+      max-height: 240px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: 11px;
+    }
+
     .approval-state-note {
       min-width: 0;
       max-width: 100%;

@@ -1,10 +1,15 @@
 export class ApprovalCircuitBreaker {
-  private readonly outcomes = new Map<string, Array<'approve' | 'deny' | 'unavailable'>>();
+  private readonly outcomes = new Map<string, Array<'approve' | 'deny' | 'needs_user' | 'unavailable'>>();
 
-  public record(rootTaskId: string, outcome: 'approve' | 'deny' | 'unavailable'): {
+  public restore(rootTaskId: string, outcomes: Array<'approve' | 'deny'>): void {
+    this.outcomes.set(rootTaskId, outcomes.slice(-50));
+  }
+
+  public record(rootTaskId: string, outcome: 'approve' | 'deny' | 'needs_user' | 'unavailable'): {
     tripped: boolean;
     reason?: 'consecutive_denials' | 'recent_denials';
   } {
+    if (outcome === 'needs_user' || outcome === 'unavailable') return { tripped: false };
     const history = [...(this.outcomes.get(rootTaskId) ?? []), outcome].slice(-50);
     this.outcomes.set(rootTaskId, history);
     if (outcome !== 'deny') return { tripped: false };

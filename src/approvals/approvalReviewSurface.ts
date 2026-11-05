@@ -46,7 +46,7 @@ export function createDraftEditReviewRequest(input: {
       input.edit.action === 'delete' ? 'destructive_delete' : 'workspace_write',
       base?.sha256 ? 'baseline_hash_present' : 'baseline_hash_absent',
       `payload_version:${getDraftEditKind(input.edit)}`,
-      ...(input.metadataOnly ? ['External scope authorized by the user; content intentionally withheld.'] : [])
+      ...(input.metadataOnly ? ['Exact external scope requires separate user permission; content intentionally withheld.'] : [])
     ],
     exactAction: {
       kind,
@@ -165,7 +165,7 @@ export function createExternalFileReviewRequest(input: {
     actionHash: hashApprovalValue({ uri: input.uri, access: input.access, fingerprint: input.fingerprint, purpose: input.purpose }),
     history: input.request?.history ?? input.history ?? [],
     purpose: input.purpose,
-    staticRiskAnalysis: ['external_exact_uri', `access:${input.access}`, 'User granted this exact read scope; no directory wildcard. File contents are excluded from this review.'],
+    staticRiskAnalysis: ['external_exact_uri', `access:${input.access}`, 'Exact read permission is checked separately; no directory wildcard. File contents are excluded from this review.'],
     exactAction: { kind: 'external_file_access', uri: input.uri, access: input.access },
     language: input.request?.language ?? input.language ?? 'en'
   });
@@ -196,7 +196,7 @@ function createBaseRequest(input: {
     originalGoalSummary: compact(redactSensitiveReviewText(firstUser), 1_200),
     evidenceIncomplete: firstUser !== redactSensitiveReviewText(firstUser) || input.purpose.length > 1_200
       || input.staticRiskAnalysis.some(item => item.length > 1_000),
-    visibleSessionEvidence: [],
+    visibleSessionEvidence: boundedTaskEvidence(input.history, input.rootTaskId, input.targetId),
     workspaceTrusted: vscode.workspace.isTrusted,
     workspaceRootIds: (vscode.workspace.workspaceFolders ?? []).map((folder, index) => `root-${index + 1}:${folder.name}`),
     purpose: compact(input.purpose, 1_200),
@@ -204,6 +204,29 @@ function createBaseRequest(input: {
     exactAction: structuredClone(input.exactAction),
     responseLanguage: input.language
   });
+}
+
+/** Public user constraints and host-produced results only; never reasoning or another task. */
+export function boundedTaskEvidence(history: readonly ChatMessage[], rootTaskId: string, targetId: string): string[] {
+  const items: string[] = [];
+  for (const message of history.filter(item => item.userTask?.id === rootTaskId)) {
+    if (message.role === 'user' && message.userTask?.reason === 'user') {
+      items.push('user_constraint: ' + compact(redactSensitiveReviewText(message.content, 1600), 1600));
+    }
+    for (const review of message.runDetails?.approvalReviews ?? []) {
+      if (review.targetId === targetId || review.decision !== 'approve') items.push(JSON.stringify({
+        type: 'prior_approval', targetId: review.targetId, decision: review.decision,
+        reason: redactSensitiveReviewText(review.rationale, 600), alternative: review.saferAlternative
+      }));
+    }
+    for (const tool of (message.runDetails?.toolCalls ?? []).slice(-4)) {
+      items.push(JSON.stringify({ type: 'actual_tool_result', name: tool.name, status: tool.status,
+        result: redactSensitiveReviewText(tool.resultSummary ?? '', 600) }));
+    }
+  }
+  const selected = items.slice(-8);
+  if (items.length > selected.length) selected.unshift('[Earlier task evidence omitted by the host context limit.]');
+  return selected;
 }
 
 function deepFreeze<T>(value: T): T {

@@ -187,7 +187,7 @@ test('Runner turns keepseek_run_draft into a pending proposal without executing 
 });
 
 test('Runner Plan phase allows read-only investigation and blocks implementation before every approval mode', async () => {
-  for (const approvalMode of ['ask', 'model_review', 'delegate'] as const) {
+  for (const approvalMode of ['ask', 'delegate'] as const) {
     const validation = new FakeValidationTools([]);
     const reviewer = new FakeApprovalReviewer('approve');
     const authorization = new AllowAllToolAuthorization();
@@ -224,7 +224,7 @@ test('model-reviewed validation persists a neutral tool placeholder and requires
   const validation = new FakeValidationTools([validationResult(true)]);
   const reviewer = new FakeApprovalReviewer('approve');
   const request = createRequest('Compile the project under model review.');
-  request.approvalMode = 'model_review';
+  request.approvalMode = 'delegate';
   request.sessionId = 'session-review';
   const response = await withResponses([
     toolResponse([toolCall('reviewed-validation', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })])
@@ -245,7 +245,7 @@ test('model-reviewed validation denial does not execute and still crosses the ne
   const validation = new FakeValidationTools([]);
   const reviewer = new FakeApprovalReviewer('deny');
   const request = createRequest('Compile the project under model review.');
-  request.approvalMode = 'model_review';
+  request.approvalMode = 'delegate';
   request.sessionId = 'session-review';
   const response = await withResponses([
     toolResponse([toolCall('denied-validation', RUN_VALIDATION_TOOL_NAME, { script: 'compile' })])
@@ -263,7 +263,7 @@ test('model-reviewed validation denial does not execute and still crosses the ne
   assert.equal(deniedResult.errorType, 'approval_denied');
 });
 
-for (const approvalMode of ['ask', 'delegate', 'model_review'] as const) {
+for (const approvalMode of ['ask', 'delegate'] as const) {
   test(`unavailable npm validation does not stop a local Git task under ${approvalMode}`, async () => {
     const manifest = path.join(workspaceRoot, 'package.json');
     for (const manifestExists of [false, true]) {
@@ -378,7 +378,7 @@ test('reviewed validation runs only with the reviewed lifecycle snapshot; change
   await writeFile(manifest, JSON.stringify({ scripts: { test: entry } }));
   await writeFile(path.join(workspaceRoot, 'verify.cjs'), "require('node:fs').writeFileSync('ran.txt', 'executed');");
   const request = createRequest('Run the exact test script.');
-  request.approvalMode = 'model_review';
+  request.approvalMode = 'delegate';
   request.sessionId = 'snapshot-test';
   for (const change of [true, false]) {
     await writeFile(manifest, JSON.stringify({ scripts: { test: entry } }));
@@ -437,11 +437,11 @@ test('delegate reviews only metadata for an exact authorized external file and c
     const responseForRead = () => toolResponse([toolCall('read-external', READ_WORKSPACE_FILE_TOOL_NAME, { path: target })]);
     const runner = createRunner(new FakeValidationTools([]), reviewer);
     const unauthorized = await withResponses([responseForRead(), textResponse('The file was unavailable.')], () => runner.run(request));
-    assert.equal(reviewer.calls, 0);
-    assert.match(unauthorized.toolRounds?.[0]?.toolResults[0]?.content ?? '', /external_authorization_required/u);
+    assert.equal(reviewer.calls, 1, 'only URI metadata is reviewed before a user grant');
+    assert.doesNotMatch(JSON.stringify(unauthorized), /EXTERNAL_CONTENT_ONLY_FOR_MAIN_MODEL/u);
     request.authorizedExternalReferenceUris = [vscode.Uri.file(target).toString()];
     const authorized = await withResponses([responseForRead()], () => runner.run(request));
-    assert.equal(reviewer.calls, 1);
+    assert.equal(reviewer.calls, 2);
     assert.match(authorized.approvalToolResults?.[0]?.result.content ?? '', /EXTERNAL_CONTENT_ONLY_FOR_MAIN_MODEL/u);
 
     const changing = new FakeApprovalReviewer('approve', async () => {
@@ -453,13 +453,13 @@ test('delegate reviews only metadata for an exact authorized external file and c
   } finally { await rm(externalRoot, { recursive: true, force: true }); }
 });
 
-test('validation refusal requires explicit takeover and preserves both approval identities', async () => {
+test('validation needs_user uses a single exact decision and preserves both approval identities', async () => {
   if (process.platform === 'win32') return;
   const marker = path.join(workspaceRoot, 'manual.txt');
   await writeFile(path.join(workspaceRoot, 'package.json'), JSON.stringify({ scripts: { test: 'node --test verify.cjs' } }));
   await writeFile(path.join(workspaceRoot, 'verify.cjs'), "require('node:fs').appendFileSync('manual.txt', 'once');");
-  const review = new FakeApprovalReviewer('deny');
-  const request = { ...createRequest('Run the tests.'), approvalMode: 'model_review' as const, sessionId: 'manual-validation' };
+  const review = new FakeApprovalReviewer('needs_user');
+  const request = { ...createRequest('Run the tests.'), approvalMode: 'delegate' as const, sessionId: 'manual-validation' };
   let confirmations = 0;
   const runner = new AgentRunner(undefined, undefined, new ValidationToolService(), undefined, undefined, undefined,
     undefined, undefined, review, async input => {
@@ -475,7 +475,7 @@ test('validation refusal requires explicit takeover and preserves both approval 
   assert.equal(confirmations, 1);
   assert.equal(review.calls, 1);
   assert.deepEqual(response.runDetails.approvalReviews?.map(record => [record.approvalSource, record.decision]), [
-    ['model_review', 'deny'], ['user_click', 'approve']
+    ['auto_approval_review', 'needs_user'], ['user_click', 'approve']
   ]);
   assert.equal(response.approvalToolResults?.[0]?.status, 'succeeded', response.approvalToolResults?.[0]?.result.content);
   assert.equal(await readFile(marker, 'utf8'), 'once');
@@ -559,12 +559,12 @@ function createRunner(
 class FakeApprovalReviewer implements ApprovalReviewerAdapter {
   public calls = 0;
 
-  public constructor(private readonly decision: 'approve' | 'deny', private readonly onReview?: (request: ApprovalReviewRequest) => Promise<void>) {}
+  public constructor(private readonly decision: 'approve' | 'needs_user' | 'deny', private readonly onReview?: (request: ApprovalReviewRequest) => Promise<void>) {}
 
   public async review(request: ApprovalReviewRequest): Promise<{ status: 'reviewed'; record: ApprovalReviewRecord }> {
     this.calls += 1;
     await this.onReview?.(request);
-    return { status: 'reviewed', record: this.createRecord(request, 'model_review') };
+    return { status: 'reviewed', record: this.createRecord(request, 'auto_approval_review') };
   }
 
   public async createHostPolicyApproval(request: ApprovalReviewRequest): Promise<{ status: 'reviewed'; record: ApprovalReviewRecord }> {
@@ -578,7 +578,7 @@ class FakeApprovalReviewer implements ApprovalReviewerAdapter {
 
   public async consumeApproval(): Promise<void> {}
 
-  private createRecord(request: ApprovalReviewRequest, source: 'model_review' | 'host_policy'): ApprovalReviewRecord {
+  private createRecord(request: ApprovalReviewRequest, source: 'auto_approval_review' | 'host_policy'): ApprovalReviewRecord {
     return {
       reviewId: `review-${this.calls}`,
       runtimeId: 'runtime',
@@ -590,9 +590,9 @@ class FakeApprovalReviewer implements ApprovalReviewerAdapter {
       actionHash: request.actionHash,
       policyVersion: 1,
       approvalSource: source,
-      reviewerSourceId: source === 'model_review' ? 'review-source' : '',
-      reviewerModelId: source === 'model_review' ? 'review-model' : '',
-      reviewerProvider: source === 'model_review' ? 'openai-responses' : 'host_policy',
+      reviewerSourceId: source === 'auto_approval_review' ? 'review-source' : '',
+      reviewerModelId: source === 'auto_approval_review' ? 'review-model' : '',
+      reviewerProvider: source === 'auto_approval_review' ? 'openai-responses' : 'host_policy',
       decision: this.decision,
       risk: this.decision === 'approve' ? 'low' : 'high',
       rationale: this.decision === 'approve' ? 'Scoped model approval.' : 'Denied by reviewer.',

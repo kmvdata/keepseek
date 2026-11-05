@@ -1,3 +1,4 @@
+import { normalizeManualApproval } from '../approvals/manualApproval';
 import { normalizeUserTaskBudgets } from './userTaskBudget';
 import { normalizeApprovalProcessing } from '../approvals/approvalProcessing';
 import { normalizeUserTask } from './userTask';
@@ -173,6 +174,7 @@ export class ChatSessionStore {
   }
 
   public async setApprovalMode(approvalMode: ApprovalMode): Promise<boolean> {
+    if (approvalMode !== 'ask' && approvalMode !== 'delegate') return false;
     const session = this.getActiveSession();
     if (this.approvalModeValue === approvalMode && session.approvalMode === approvalMode) {
       return false;
@@ -557,6 +559,7 @@ export class ChatSessionStore {
       ?? this.getCurrentWorkspaceSessions()[0];
     this.approvalModeValue = normalizeStoredApprovalMode(stored.approvalMode ?? storedActiveSession?.approvalMode);
     this.ensureActiveSession();
+    if ((stored.approvalMode as unknown) === 'model_review') this.getActiveSession().approvalModeMigrated = true;
     this.compact();
   }
 
@@ -681,7 +684,7 @@ export function createEmptySession(
 }
 
 function normalizeStoredApprovalMode(value: unknown): ApprovalMode {
-  return value === 'delegate' || value === 'model_review' ? value : 'ask';
+  return value === 'delegate' ? value : 'ask';
 }
 
 export function createSessionTitle(prompt: string, language: KeepseekLanguage = getConfiguredKeepseekLanguage()): string {
@@ -828,9 +831,9 @@ export function normalizeStoredSessions(value: unknown, workspaceScope: Workspac
       id: item.id,
       title,
       messages,
-      approvalMode: item.approvalMode === 'delegate' || item.approvalMode === 'model_review'
-        ? item.approvalMode
-        : 'ask',
+      approvalMode: normalizeStoredApprovalMode(item.approvalMode),
+      approvalModeMigrated: item.approvalMode === 'model_review' || item.approvalModeMigrated === true || undefined,
+      pendingApproval: normalizeManualApproval(item.pendingApproval),
       executionMode: normalizeExecutionMode(item.executionMode),
       planWorkflows: normalizePlanWorkflowRecords(item.planWorkflows, item.id),
       activeSkillIds: normalizeStringArray(item.activeSkillIds),
@@ -1376,17 +1379,21 @@ function normalizeRunDetails(value: unknown): ChatMessage['runDetails'] {
           targetId: typeof review.targetId === 'string' ? review.targetId : '',
           actionKind: review.actionKind as import('../approvals/approvalReviewTypes').ApprovalActionKind,
           policyVersion: normalizeNonNegativeInteger(review.policyVersion),
+          approvalMode: (review.approvalMode === 'delegate' || review.approvalMode === 'model_review' ? review.approvalMode : undefined) as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['approvalMode'],
+          osIsolation: review.osIsolation === 'none' ? 'none' as const : undefined,
           approvalSource: review.approvalSource as import('../approvals/approvalReviewTypes').ApprovalReviewSource,
           reviewerSourceId: typeof review.reviewerSourceId === 'string' ? review.reviewerSourceId : '',
           reviewerModelId: typeof review.reviewerModelId === 'string' ? review.reviewerModelId : '',
           reviewerProvider: typeof review.reviewerProvider === 'string' ? review.reviewerProvider : '',
-          decision: (review.decision === 'approve' || review.decision === 'deny' ? review.decision : 'unavailable') as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['decision'],
+          decision: (review.decision === 'approve' || review.decision === 'needs_user' || review.decision === 'deny' ? review.decision : 'unavailable') as import('../approvals/approvalReviewTypes').ApprovalReviewDisplay['decision'],
           risk: (review.risk === 'low' || review.risk === 'medium' || review.risk === 'critical' ? review.risk : 'high') as import('../approvals/approvalReviewTypes').ApprovalReviewRisk,
           rationale: typeof review.rationale === 'string' ? review.rationale.slice(0, 800) : '',
           affectedTargets: Array.isArray(review.affectedTargets)
             ? review.affectedTargets.filter((target): target is string => typeof target === 'string').slice(0, 12).map(target => target.slice(0, 300)) : undefined,
           saferAlternative: typeof review.saferAlternative === 'string' ? review.saferAlternative.slice(0, 1200) : undefined,
           createdAt: normalizeSessionTimestamp(review.createdAt, new Date().toISOString()),
+          priorReviewId: typeof review.priorReviewId === 'string' ? review.priorReviewId : undefined,
+          userRequestId: typeof review.userRequestId === 'string' ? review.userRequestId : undefined,
           consumedAt: normalizeOptionalTimestamp(review.consumedAt)
         })).filter((review) => Boolean(review.reviewId))
       : undefined,

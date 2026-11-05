@@ -20,11 +20,11 @@ export interface DraftRunReplanResult {
 }
 
 export interface ApprovalProcessingState {
-  version: 1;
+  version: 1 | 2;
   runId: string;
   rootTaskId: string;
   mode: 'delegate' | 'model_review';
-  status: 'processing' | 'completed' | 'blocked' | 'replanning' | 'stopped';
+  status: 'processing' | 'completed' | 'blocked' | 'waiting_user' | 'replanning' | 'stopped';
   targets: Array<{ id: string; kind: 'edit' | 'command'; status: ApprovalTargetStatus; reason?: string; failureCode?: string;
     dependency?: ApprovalDependency; replan?: DraftRunReplanResult }>;
   reason?: string;
@@ -60,11 +60,11 @@ function approvalReason(value: unknown): string | undefined {
 
 export function normalizeApprovalProcessing(value: unknown): ApprovalProcessingState | undefined {
   const v = value as ApprovalProcessingState | undefined;
-  if (v?.version !== 1 || typeof v.runId !== 'string' || typeof v.rootTaskId !== 'string'
+  if ((v?.version !== 1 && v?.version !== 2) || typeof v.runId !== 'string' || typeof v.rootTaskId !== 'string'
     || !['delegate', 'model_review'].includes(v.mode) || !Array.isArray(v.targets)
-    || !['processing', 'completed', 'blocked', 'replanning', 'stopped'].includes(v.status)) return undefined;
-  const interrupted = v.status === 'processing' || v.status === 'replanning';
-  const stoppedDelegate = v.mode === 'delegate' && (interrupted || v.status === 'blocked' || v.status === 'stopped'
+    || !['processing', 'completed', 'blocked', 'waiting_user', 'replanning', 'stopped'].includes(v.status)) return undefined;
+  const interrupted = v.status === 'processing' || v.status === 'replanning' || v.status === 'waiting_user';
+  const stoppedDelegate = v.version === 1 && v.mode === 'delegate' && (interrupted || v.status === 'blocked' || v.status === 'stopped'
     || v.targets.some(target => target && ['manual_required', 'needs_authorization', 'review_unavailable'].includes(target.status)));
   const targets = v.targets.filter(t => t && typeof t.id === 'string' && ['edit', 'command'].includes(t.kind)
     && ['pending', 'executed', 'denied', 'manual_required', 'review_unavailable', 'hard_blocked', 'needs_authorization', 'failed', 'cancelled', 'already_processed', 'identity_mismatch', 'missing', 'needs_replan', 'dependency_blocked', 'external_authorization_required', 'insufficient_launch_evidence'].includes(t.status))
@@ -78,9 +78,10 @@ export function normalizeApprovalProcessing(value: unknown): ApprovalProcessingS
         reason: approvalReason(t.reason), dependency: normalizeApprovalDependency(t.dependency),
         replan: replan?.rootTaskId === v.rootTaskId ? replan : undefined };
     });
-  return { version: 1, runId: v.runId, rootTaskId: v.rootTaskId, mode: v.mode,
+  return { version: v.version, runId: v.runId, rootTaskId: v.rootTaskId, mode: v.mode,
     status: stoppedDelegate ? 'stopped' : interrupted ? 'blocked' : v.status, targets,
-    canResume: !stoppedDelegate && (interrupted || v.canResume === true) || undefined,
+    canResume: v.mode === 'delegate' && v.version === 2 && (interrupted || v.canResume === true)
+      && !targets.some(target => ['denied', 'hard_blocked', 'identity_mismatch', 'missing', 'failed'].includes(target.status)) || undefined,
     localGitCompletionRetried: v.localGitCompletionRetried === true || undefined,
     replanKeys: Array.isArray(v.replanKeys) ? v.replanKeys.filter(key => typeof key === 'string' && /^[a-f0-9]{64}$/u.test(key)).slice(0, 2) : undefined,
     reason: stoppedDelegate && interrupted ? 'Approval processing was interrupted. Restored drafts were not replayed. / 审批处理已中断，未重放恢复出的草稿。'

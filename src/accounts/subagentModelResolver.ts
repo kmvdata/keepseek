@@ -41,8 +41,8 @@ export async function resolveConfiguredSubagentModel(input: {
   }
   if (!setting.sourceId || !setting.modelId) {
     if (input.autoApproval) throw new Error(input.language === 'en'
-      ? 'The fixed Auto approval reviewer requires a sourceId and modelId in KeepSeek user settings.'
-      : '固定的自动审批 reviewer 需要在 KeepSeek 用户设置中填写 sourceId 和 modelId。');
+      ? 'The fixed approval model requires a sourceId and modelId in KeepSeek user settings.'
+      : '固定的审批模型 需要在 KeepSeek 用户设置中填写 sourceId 和 modelId。');
     throw new Error(input.language === 'en'
       ? 'The fixed subagent model setting is incomplete. Choose it again in the command menu; KeepSeek will not silently fall back.'
       : '固定的子代理模型设置不完整。请在命令菜单中重新选择；KeepSeek 不会静默回退。');
@@ -54,8 +54,8 @@ export async function resolveConfiguredSubagentModel(input: {
   });
   if (!model || model.agentCompatible === false) {
     if (input.autoApproval) throw new Error(input.language === 'en'
-      ? 'The fixed Auto approval reviewer model is missing, disabled, or unavailable.'
-      : '固定的自动审批 reviewer 模型已缺失、被禁用或不可用。');
+      ? 'The fixed approval model model is missing, disabled, or unavailable.'
+      : '固定的审批模型 模型已缺失、被禁用或不可用。');
     throw new Error(input.language === 'en'
       ? 'The selected subagent model is missing, disabled, or unavailable. Choose it again in the command menu; KeepSeek will not silently fall back.'
       : '子代理模型已缺失、被禁用或不可用。请在命令菜单中重新选择；KeepSeek 不会静默回退。');

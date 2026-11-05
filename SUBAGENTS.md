@@ -1,5 +1,7 @@
 # KeepSeek 子代理架构、安全与用量
 
+当前模型配置：默认子代理模型及 research / review / proposal 的覆盖保持独立；review 显示为“代码审查”。操作审批仅使用用户级 `keepseek.autoApprovalReviewer`，默认跟随任务执行段实际主模型，不读取子代理 default。父任务选择“帮我审批”不提升任何 child 的权限。
+
 > 子代理主题的唯一交接入口。本文合并了原 `doc/subagent-runtime-security.md` 与 `doc/subagent-usage-statistics.md`，覆盖当前 V11 的隔离、调度、结果协议、恢复和统计。主 Agent 工作流见 [`doc/keepseek-agent-runtime-workflow.md`](doc/keepseek-agent-runtime-workflow.md)。P1 变更与验证限制见 [`doc/keepseek-p1-subagent-reliability.md`](doc/keepseek-p1-subagent-reliability.md)。
 
 ## 1. 设计目标

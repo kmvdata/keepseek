@@ -215,7 +215,7 @@ test('pending plans are content-bound, latest-only, restartable, and resolved on
 });
 
 test('revise, exit, replacement, edit resend, and approval modes preserve independent state', () => {
-  for (const approvalMode of ['ask', 'model_review', 'delegate'] as const) {
+  for (const approvalMode of ['ask', 'delegate'] as const) {
     const session = planSession('session-' + approvalMode, approvalMode);
     const plan = registerPendingPlan({
       session,
@@ -260,7 +260,7 @@ test('revise, exit, replacement, edit resend, and approval modes preserve indepe
   assert.equal(invalidatePlansForRemovedMessages(reviseSession, new Set(['a2'])), true);
   assert.equal(replacement.status, 'superseded');
 
-  const exitSession = planSession('exit', 'model_review');
+  const exitSession = planSession('exit', 'delegate');
   const exitPlan = registerPendingPlan({
     session: exitSession, userMessageId: 'u1', assistantMessageId: 'a1',
     content: exitSession.messages[1].content, id: 'exit-plan'
@@ -274,7 +274,7 @@ test('revise, exit, replacement, edit resend, and approval modes preserve indepe
   assert.equal(exited.ok, true);
   assert.equal(exited.ok && exited.startExecution, false);
   assert.equal(exitSession.executionMode, 'normal');
-  assert.equal(exitSession.approvalMode, 'model_review');
+  assert.equal(exitSession.approvalMode, 'delegate');
 
   const directRevision = planSession('direct-revision', 'ask');
   registerPendingPlan({
@@ -286,7 +286,7 @@ test('revise, exit, replacement, edit resend, and approval modes preserve indepe
 });
 
 test('implementation artifacts invalidate a Plan response regardless of approval mode', () => {
-  for (const approvalMode of ['ask', 'model_review', 'delegate'] as const) {
+  for (const approvalMode of ['ask', 'delegate'] as const) {
     void approvalMode;
     assert.equal(hasPlanImplementationArtifacts({
       draftEdits: [{ id: 'edit' }] as never,

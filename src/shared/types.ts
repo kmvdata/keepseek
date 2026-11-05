@@ -917,7 +917,7 @@ export interface CurrentRunContext {
   metadata: RunContextProjectionMetadata;
 }
 
-export type ApprovalMode = 'ask' | 'model_review' | 'delegate';
+export type ApprovalMode = 'ask' | 'delegate';
 
 export type ExecutionMode = 'normal' | 'plan';
 
@@ -943,6 +943,8 @@ export interface PlanWorkflowView extends Omit<PlanWorkflowRecord, 'contentHash'
 }
 
 export interface ChatSession {
+  pendingApproval?: import('../approvals/manualApproval').ManualApprovalSnapshot;
+  approvalModeMigrated?: boolean;
   userTaskBudgets?: Record<string, import('../sessions/userTaskBudget').UserTaskBudget>;
   approvalProcessing?: import('../approvals/approvalProcessing').ApprovalProcessingState;
   executionTime?: import('../sessions/executionTimeStats').SessionExecutionTime;

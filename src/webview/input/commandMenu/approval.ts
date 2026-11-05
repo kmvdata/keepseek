@@ -40,13 +40,17 @@ export const approvalBindingsFragment: WebviewFragment = {
       if (commandApprovalModeList) {
         commandApprovalModeList.addEventListener('click', function(event) {
           var target = event.target instanceof Element ? event.target : null;
+          if (target?.closest('button[data-configure-approval-model]')) {
+            event.preventDefault(); event.stopPropagation();
+            vscode.postMessage({ type: 'configureApprovalModel' }); return;
+          }
           var button = target?.closest('button[data-approval-mode]');
           if (!button || button.disabled) { return; }
           event.preventDefault();
           event.stopPropagation();
           var mode = button.dataset.approvalMode === 'delegate'
             ? 'delegate'
-            : button.dataset.approvalMode === 'model_review' ? 'model_review' : 'ask';
+            : 'ask';
           vscode.postMessage({ type: 'setApprovalMode', mode: mode });
           commandApprovalModeListOpen = false;
           renderCommandMenu();
@@ -63,7 +67,7 @@ export const approvalRenderFragment: WebviewFragment = {
       function renderCommandApprovalMode() {
         var currentMode = state.approvalMode === 'delegate'
           ? 'delegate'
-          : state.approvalMode === 'model_review' ? 'model_review' : 'ask';
+          : 'ask';
         var readiness = getCommandSettingReadiness('approvalMode');
         var readinessText = readiness === 'error' ? t('approvalModeLoadFailed')
           : readiness === 'loading' ? t('approvalModeRestoring') : '';
@@ -94,7 +98,6 @@ export const approvalRenderFragment: WebviewFragment = {
         commandApprovalModeList.innerHTML = '';
         [
           { mode: 'ask', labelKey: 'approvalAsk', descriptionKey: 'approvalAskDescription' },
-          { mode: 'model_review', labelKey: 'approvalModelReview', descriptionKey: 'approvalModelReviewDescription' },
           { mode: 'delegate', labelKey: 'approvalDelegate', descriptionKey: 'approvalDelegateDescription' }
         ].forEach(function(item) {
           var isSelected = item.mode === currentMode;
@@ -125,16 +128,26 @@ export const approvalRenderFragment: WebviewFragment = {
           option.append(check, copy);
           commandApprovalModeList.append(option);
         });
+        var setting = state.approvalReviewerSetting || { mode: 'follow-main' };
+        var modelButton = document.createElement('button');
+        modelButton.type = 'button'; modelButton.className = 'command-model-option';
+        modelButton.dataset.configureApprovalModel = 'true';
+        modelButton.setAttribute('role', 'menuitem');
+        modelButton.disabled = Boolean(state.isBusy || state.manualToolApproval || readiness !== 'ready');
+        modelButton.textContent = t('approvalModelTitle') + ': ' + (setting.error || setting.label
+          || (setting.mode === 'follow-main' ? t('approvalModelFollowMain') : (setting.sourceId || '') + ' / ' + (setting.modelId || '')));
+        modelButton.title = t('approvalModelHint');
+        commandApprovalModeList.append(modelButton);
       }
 
       function getApprovalModeLabelKey(mode) {
-        return mode === 'delegate' ? 'approvalDelegate' : mode === 'model_review' ? 'approvalModelReview' : 'approvalAsk';
+        return mode === 'delegate' ? 'approvalDelegate' : 'approvalAsk';
       }
 
       function getApprovalModeDescriptionKey(mode) {
         return mode === 'delegate'
           ? 'approvalDelegateDescription'
-          : mode === 'model_review' ? 'approvalModelReviewDescription' : 'approvalAskDescription';
+          : 'approvalAskDescription';
       }
 
 `.slice(1)

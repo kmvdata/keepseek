@@ -1,3 +1,5 @@
+import { approvalDisposition } from '../approvals/approvalReviewTypes';
+import { hashApprovalValue } from '../approvals/approvalReviewHash';
 import { draftRunPreparedMessage } from './approvalMode';
 import { applyProviderRequestBudget, createRequestBudgetUsage, resolveProviderRequestBudget } from './requestBudget';
 import { ModelSourceStore, normalizeModelSourceProvider } from '../accounts/accountStore';
@@ -2007,11 +2009,11 @@ export class AgentLoop {
             } else if (authorizationDecision.approvalCircuitBreakReason) {
               approvalReviewStopReason = request.language === 'en'
                 ? authorizationDecision.approvalCircuitBreakReason === 'consecutive_denials'
-                  ? 'Automatic work stopped after three consecutive model-review denials.'
-                  : 'Automatic work stopped after ten model-review denials in the latest fifty reviews.'
+                  ? 'Automatic work stopped after three consecutive approval-reviewer denials.'
+                  : 'Automatic work stopped after ten approval-reviewer denials in the latest fifty reviews.'
                 : authorizationDecision.approvalCircuitBreakReason === 'consecutive_denials'
-                  ? '模型审批连续拒绝三次，自动任务已停止。'
-                  : '最近五十次模型审批累计拒绝十次，自动任务已停止。';
+                  ? '审批模型连续拒绝三次，自动任务已停止。'
+                  : '最近五十次审批模型累计拒绝十次，自动任务已停止。';
             }
             this.throwIfAborted(request.signal, request.language);
             emitStatus({ base: 'executing', phase: this.getToolActivityPhase(toolCall.function.name), toolName: toolCall.function.name });
@@ -2027,10 +2029,11 @@ export class AgentLoop {
                 ? JSON.stringify({
                     ok: false,
                     errorType: authorizationDecision.approvalReview.decision === 'unavailable'
-                      ? 'approval_reviewer_unavailable' : authorizationDecision.approvalReview.approvalSource === 'local_policy'
+                      ? 'approval_reviewer_unavailable' : authorizationDecision.approvalReview.decision === 'needs_user'
+                        ? 'approval_needs_user' : authorizationDecision.approvalReview.approvalSource === 'local_policy'
                         ? 'approval_hard_blocked' : 'approval_denied',
                     status: authorizationDecision.approvalReview.decision === 'unavailable'
-                      ? 'approval_reviewer_unavailable' : 'approval_denied',
+                      ? 'approval_reviewer_unavailable' : authorizationDecision.approvalReview.decision === 'needs_user' ? 'approval_needs_user' : 'approval_denied',
                     executed: false,
                     message: authorizationDecision.reason
                       ?? 'The operation is paused and has not executed.'
@@ -2121,7 +2124,7 @@ export class AgentLoop {
           approvalToolResults.push({
             toolCallId: toolCall.id,
             toolName: toolCall.function.name,
-            status: authorizationDecision.approvalReview.decision === 'unavailable'
+            status: ['unavailable', 'needs_user'].includes(authorizationDecision.approvalReview.decision)
               ? 'failed'
               : authorizationDecision.allowed
                 ? this.isToolResultError(rawToolResult) ? 'failed' : 'succeeded'
@@ -3624,16 +3627,14 @@ export class AgentLoop {
     let snapshot: string;
     let route: ApprovalRoute = reviewerRoute(mode);
     let label: string;
+    let requiredUserScope: string | undefined;
     if (toolName === READ_WORKSPACE_FILE_TOOL_NAME || toolName === READ_WORKSPACE_FILE_RANGE_TOOL_NAME) {
       const rawPath = this.readRequiredString(input.args, 'path');
       const external = await this.workspaceTools.inspectExternalRead?.(rawPath);
       if (!external) return undefined;
-      if (!external.authorized) return deny(mode === 'delegate'
-        ? language === 'en' ? 'The external file has no prior exact read grant. Use workspace evidence.'
-          : '此外部文件缺少事先授予的精确读取权限，请使用工作区内的证据。'
-        : language === 'en' ? `External read requires an exact reference. Attach this file to authorize reading it: ${external.canonicalUri}`
-          : `外部读取需要精确引用。请附加此文件以授权读取：${external.canonicalUri}`, undefined, 'external_authorization_required');
-      snapshot = external.fingerprint;
+      const needsReadGrant = !external.authorized;
+      requiredUserScope = needsReadGrant ? external.uri : undefined;
+      snapshot = external.fingerprint || hashApprovalValue({ uri: external.uri, access: 'read' });
       label = external.canonicalUri;
       reviewRequest = createExternalFileReviewRequest({
         request: input.request, agentRunId: input.agentRunId, targetId: input.toolCall.id,
@@ -3674,31 +3675,50 @@ ${launch.evidence.content}`;
     let outcome = route === 'host_policy' ? await reviewer.createHostPolicyApproval(reviewRequest)
       : route !== 'user_click' ? await reviewer.review(reviewRequest, toReviewerModelContext(input.request), signal) : undefined;
     const prior = outcome;
-    if (mode === 'model_review' && (!outcome || (outcome.record.decision !== 'approve' && outcome.record.approvalSource === 'model_review'
-      && !outcome.record.policyRules.includes('approval_budget_exhausted')
-      && (outcome.record.decision === 'unavailable' || outcome.record.risk !== 'critical')))
+    if (mode === 'delegate' && ((requiredUserScope && outcome?.record.decision === 'approve') || !outcome || approvalDisposition(outcome.record) === 'request_user')
       && reviewer.createUserApproval && this.requestManualToolApproval && !signal?.aborted) {
-      const reason = outcome?.record.rationale ?? (language === 'en'
-        ? 'Launch configuration requires an individual decision.' : '启动配置需要你逐项确认。');
+      const reason = (requiredUserScope ? (language === 'en' ? 'Allow one read of this exact file: ' : '仅授权读取本次精确文件：') + requiredUserScope + ' · ' : '') + (outcome?.record.rationale ?? (language === 'en'
+        ? 'Launch configuration requires an individual decision.' : '启动配置需要你逐项确认。'));
       input.emitStatus({ base: 'waiting', phase: 'awaiting_manual_approval', detail: reason });
-      const approved = await this.requestManualToolApproval({
-        id: input.toolCall.id, sessionId: reviewRequest.sessionId, label, reason
-      }, signal);
-      if (!approved || signal?.aborted || !vscode.workspace.isTrusted) return deny(reason, prior);
+      const manual: ManualToolApproval = { id: input.toolCall.id, sessionId: reviewRequest.sessionId, label, reason, request: reviewRequest, priorReviewId: outcome?.record.reviewId };
+      const approved = await this.requestManualToolApproval(manual, signal);
+      if (!approved || signal?.aborted || !vscode.workspace.isTrusted) {
+        if (manual.status === 'rejected' && reviewer.createUserRejection) {
+          const rejection = await reviewer.createUserRejection(reviewRequest, { priorReviewId: prior?.record.reviewId, userRequestId: manual.id });
+          return deny(rejection.rationale, { status: 'reviewed', record: rejection }, 'user_rejected');
+        }
+        return deny(reason, prior, 'approval_request_cancelled');
+      }
       input.emitStatus({ base: 'executing', phase: 'executing_tool', toolName });
       route = 'user_click';
-      outcome = await reviewer.createUserApproval(reviewRequest);
+      outcome = await reviewer.createUserApproval(reviewRequest, { priorReviewId: prior?.record.reviewId, userRequestId: manual.id });
+      this.throwIfAborted(signal, language);
+      if (requiredUserScope) {
+        this.workspaceTools.grantUserExternalReadOnce?.(requiredUserScope);
+        let actual;
+        try { actual = await this.workspaceTools.inspectExternalRead?.(this.readRequiredString(input.args, 'path')); }
+        catch (error) { this.workspaceTools.revokeUserExternalReadOnce?.(); throw error; }
+        if (!actual?.authorized || actual.uri !== requiredUserScope || actual.canonicalUri !== requiredUserScope) {
+          this.workspaceTools.revokeUserExternalReadOnce?.();
+          return deny(language === 'en' ? 'External scope changed; no contents read.' : '外部范围发生变化，未读取内容。');
+        }
+        snapshot = actual.fingerprint;
+      }
     }
     if (!outcome) return deny(language === 'en' ? 'Individual confirmation is required; nothing executed.' : '需要逐项确认，尚未执行。');
     if (outcome.record.decision !== 'approve') {
+      this.workspaceTools.revokeUserExternalReadOnce?.();
       return deny(formatReviewerDenial(outcome.record.rationale, outcome.record.saferAlternative, language), outcome);
     }
-    this.throwIfAborted(signal, language);
-    if (route === 'auto_approval_review' || route === 'model_review') {
-      await reviewer.assertReviewerConfiguration?.(reviewRequest, toReviewerModelContext(input.request), outcome.record);
+    try {
       this.throwIfAborted(signal, language);
+      if (route === 'auto_approval_review') {
+        await reviewer.assertReviewerConfiguration?.(reviewRequest, toReviewerModelContext(input.request), outcome.record);
+        this.throwIfAborted(signal, language);
+      }
+      await reviewer.consumeApproval(outcome.record, route);
     }
-    await reviewer.consumeApproval(outcome.record, route);
+    catch (error) { this.workspaceTools.revokeUserExternalReadOnce?.(); throw error; }
     return {
       allowed: true, toolName, riskLevel: scope === 'workspace_read' ? 'low' : 'medium', scope,
       source: route === 'host_policy' ? 'delegated_approver' : route !== 'user_click' ? 'model_reviewer' : 'explicit_confirmation',
@@ -3933,6 +3953,10 @@ ${launch.evidence.content}`;
         ok: false,
         error: error instanceof Error ? error.message : String(error)
       });
+    } finally {
+      if ([READ_WORKSPACE_FILE_TOOL_NAME, READ_WORKSPACE_FILE_RANGE_TOOL_NAME].includes(toolCall.function.name)) {
+        this.workspaceTools.revokeUserExternalReadOnce?.();
+      }
     }
   }
 

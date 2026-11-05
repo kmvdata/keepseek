@@ -200,6 +200,8 @@ export function clearCreatedTerminals(): void {
 }
 
 export const window = {
+  async showInformationMessage(_message: string, ..._items: unknown[]): Promise<string | undefined> { return undefined; },
+  async showQuickPick<T>(_items: readonly T[], _options?: unknown): Promise<T | undefined> { return undefined; },
   async showErrorMessage(_message: string): Promise<undefined> {
     return undefined;
   },

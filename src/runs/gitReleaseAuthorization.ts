@@ -7,7 +7,7 @@ import { resolveExecutable, type CommandScope } from '../approvals/authorization
 import type { GitReleaseIntent } from './gitTaskIntent';
 import { taskNamesGitRef } from './gitTaskIntent';
 
-interface GitReleaseGrant {
+export interface GitReleaseGrant {
   repository: string;
   destination: string;
   read: string[];
@@ -49,22 +49,22 @@ export function hasGitReleaseGrants(): boolean {
 /** Ignore repository/workspace settings. The publisher scope is user-owned
  * and machine-local. A grant always binds the real repository and endpoint. */
 export async function authorizeGitRemote(scope: CommandScope, command: GitRemoteCommand,
-  intent: GitReleaseIntent, branchRef?: string | null): Promise<GitRemoteLaunch | undefined> {
+  intent: GitReleaseIntent, branchRef?: string | null, oneShot?: GitReleaseGrant): Promise<GitRemoteLaunch | undefined> {
   const target = scope.gitRemote;
   const repository = scope.paths.find(item => item.role === 'repository' && !item.external);
   if (!target || !repository || !scope.executable || !scope.gitCwd || scope.uncertain || scope.externalUris.length) {
     throw new Error(scope.reasons.join(' · ') || 'Git transport launch could not be verified. / 无法核实 Git 传输的启动范围。');
   }
   const repositoryPath = vscode.Uri.parse(repository.uri).fsPath;
-  const grants = configuredGrants();
+  const grants = oneShot ? [oneShot] : configuredGrants();
   const refs = command.kind === 'query' && !command.refs.length ? ['refs/' + command.namespace + '/*'] : command.refs;
   const taskAllowsPush = (ref: string) => ref.startsWith('refs/tags/')
     ? taskNamesGitRef(intent, ref)
     : intent.branch && ((intent.currentBranch && ref === (branchRef ?? scope.gitBranchRef)) || taskNamesGitRef(intent, ref));
   const readAllowed = (grant: GitReleaseGrant, ref: string) => grant.read.includes(ref)
     || (!ref.endsWith('/*') && grant.read.includes(ref.slice(0, ref.indexOf('/', 5) + 1) + '*'));
-  if (intent.remoteAlias && intent.remoteAlias !== command.remote
-    || (command.kind === 'query' ? !intent.query : !intent.push || !refs.every(taskAllowsPush))) return undefined;
+  if (!oneShot && (intent.remoteAlias && intent.remoteAlias !== command.remote
+    || (command.kind === 'query' ? !intent.query : !intent.push || !refs.every(taskAllowsPush)))) return undefined;
   const pushAllowed = (grant: GitReleaseGrant, ref: string) => grant.push.some(value =>
     value === ref || (isTagPrefix(value) && ref.startsWith(value.slice(0, -1))));
   const destinations = new Set(grants.filter(grant => grant.repository === repositoryPath

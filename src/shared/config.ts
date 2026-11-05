@@ -729,7 +729,7 @@ export function getAutoApprovalReviewerSetting(): Pick<import('../agent/subagent
   const setting = vscode.workspace.getConfiguration('keepseek')
     .inspect?.<{ mode?: unknown; sourceId?: unknown; modelId?: unknown }>('autoApprovalReviewer')?.globalValue;
   if (setting !== undefined && (!setting || (setting.mode !== 'follow-main' && setting.mode !== 'fixed'))) {
-    throw new Error('Invalid Auto approval reviewer settings. / 自动审批 reviewer 配置无效。');
+    throw new Error('Invalid approval model settings. / 审批模型 配置无效。');
   }
   return {
     mode: setting?.mode === 'fixed' ? 'fixed' : 'follow-main',

@@ -115,7 +115,7 @@ export class ApprovalReviewStore {
       || record.reviewerConfigFingerprint !== input.reviewerConfigFingerprint
       || (input.expectedSource === 'auto_approval_review' && !input.reviewerConfigFingerprint)
       || (input.expectedSource === 'host_policy' && input.approvalMode === 'model_review')
-      || (['auto_approval_review', 'model_review'].includes(input.expectedSource) && input.expectedSource !== reviewerRoute(input.approvalMode))) {
+      || (input.expectedSource === 'auto_approval_review' && input.expectedSource !== reviewerRoute(input.approvalMode))) {
       throw new Error('No current matching approval record exists for this exact operation.');
     }
     record.consumedAt = new Date().toISOString();
@@ -124,6 +124,17 @@ export class ApprovalReviewStore {
   }
 
   public async flush(): Promise<void> { await this.persistenceQueue; }
+
+  public decisionHistory(sessionId: string, rootTaskId: string, beforeReviewId: string): Array<'approve' | 'deny'> {
+    const history: Array<'approve' | 'deny'> = [];
+    for (const record of this.records.values()) {
+      if (record.reviewId === beforeReviewId) break;
+      if (record.sessionId === sessionId && record.rootTaskId === rootTaskId
+        && ['auto_approval_review', 'model_review', 'local_policy'].includes(record.approvalSource)
+        && (record.decision === 'approve' || record.decision === 'deny')) history.push(record.decision);
+    }
+    return history.slice(-50);
+  }
 
   private compact(): void {
     if (this.records.size <= MAX_RECORDS) return;
@@ -155,6 +166,7 @@ function toDisplay(record: ApprovalReviewRecord): ApprovalReviewDisplay {
     targetId: record.targetId,
     actionKind: record.actionKind,
     policyVersion: record.policyVersion,
+    approvalMode: record.approvalMode,
     approvalSource: record.approvalSource,
     osIsolation: record.osIsolation,
     reviewerSourceId: record.reviewerSourceId,
@@ -166,6 +178,7 @@ function toDisplay(record: ApprovalReviewRecord): ApprovalReviewDisplay {
     saferAlternative: record.saferAlternative,
     affectedTargets: record.affectedTargets,
     createdAt: record.createdAt,
+    priorReviewId: record.priorReviewId, userRequestId: record.userRequestId,
     consumedAt: record.consumedAt
   });
 }
@@ -177,12 +190,14 @@ function normalizeRecord(value: unknown): ApprovalReviewRecord | undefined {
     || !['external_file_access', 'validation_run', 'draft_edit_apply', 'draft_delete_apply', 'draft_run_execute'].includes(record.actionKind)
     || !record.actionHash || !Number.isInteger(record.policyVersion)
     || !['auto_approval_review', 'model_review', 'host_policy', 'local_policy', 'user_click'].includes(record.approvalSource)
-    || !['approve', 'deny', 'unavailable'].includes(record.decision)
+    || !['approve', 'needs_user', 'deny', 'unavailable'].includes(record.decision)
     || !['low', 'medium', 'high', 'critical'].includes(record.risk)
     || typeof record.rationale !== 'string' || !Array.isArray(record.policyRules)
     || !Number.isFinite(Date.parse(record.createdAt))) return undefined;
   return structuredClone({
     ...record,
+    priorReviewId: typeof record.priorReviewId === 'string' ? record.priorReviewId.slice(0, 300) : undefined,
+    userRequestId: typeof record.userRequestId === 'string' ? record.userRequestId.slice(0, 300) : undefined,
     osIsolation: record.osIsolation === 'none' ? record.osIsolation : undefined,
     affectedTargets: Array.isArray(record.affectedTargets)
       ? record.affectedTargets.filter(target => typeof target === 'string').slice(0, 12).map(target => target.slice(0, 300)) : undefined,

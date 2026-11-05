@@ -102,7 +102,7 @@ test('manual external Apply requires exact scope and Stop revokes an outstanding
   });
 });
 
-for (const mode of ['delegate', 'model_review'] as const) test(`real persisted completed checkpoint -> ${mode} -> edit + command exactly once`, async () => {
+for (const mode of ['delegate'] as const) test(`real persisted completed checkpoint -> ${mode} -> edit + command exactly once`, async () => {
   await fixture(mode, async f => {
     const work = f.clock.enter(f.session, f.message.userTask!);
     f.advance(10_000);
@@ -120,16 +120,16 @@ for (const mode of ['delegate', 'model_review'] as const) test(`real persisted c
     assert.equal(f.session.approvalProcessing?.targets[0].status, 'executed', JSON.stringify(f.session.approvalProcessing));
     assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
     assert.equal(f.executions(), 1, JSON.stringify(f.session.approvalProcessing));
-    assert.equal(f.reviews(), mode === 'model_review' ? 2 : 0);
+    assert.equal(f.reviews(), mode === ('legacy_removed' as string) ? 2 : 0);
     assert.equal(f.continuations(), 1);
     assert.equal(f.session.approvalProcessing?.status, 'completed');
     // 10 model + 2 reviewer (two targets, 1s each) + 3 command + 5 next model.
-    assert.equal(executionTimeView(f.session).currentMs, mode === 'model_review' ? 20_000 : 18_000);
-    assert.equal(executionTimeView(f.session).totalMs, mode === 'model_review' ? 20_000 : 18_000);
+    assert.equal(executionTimeView(f.session).currentMs, mode === ('legacy_removed' as string) ? 20_000 : 18_000);
+    assert.equal(executionTimeView(f.session).totalMs, mode === ('legacy_removed' as string) ? 20_000 : 18_000);
     const records = f.session.messages.flatMap(m => m.runDetails?.approvalReviews ?? []);
     assert.equal(records.length, 2);
     assert.ok(records.every(r => r.agentRunId === f.cp.taskId));
-    if (mode === 'model_review') assert.ok(records.every(r => r.reviewerModelId === 'fixed-reviewer'));
+    if (mode === ('legacy_removed' as string)) assert.ok(records.every(r => r.reviewerModelId === 'fixed-reviewer'));
     else assert.ok(records.every(r => r.approvalSource === 'host_policy'));
     const restoredCheckpoint = await (f.host as unknown as { sessionStore: ChatSessionStore }).sessionStore.getTaskCheckpoint(f.message.id);
     assert.equal(restoredCheckpoint?.taskId, f.cp.taskId);
@@ -141,7 +141,7 @@ for (const mode of ['delegate', 'model_review'] as const) test(`real persisted c
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
     assert.equal(f.executions(), 1, JSON.stringify(f.session.approvalProcessing));
-    assert.equal(f.reviews(), mode === 'model_review' ? 2 : 0);
+    assert.equal(f.reviews(), mode === ('legacy_removed' as string) ? 2 : 0);
     assert.equal(f.continuations(), 1);
   });
 });
@@ -254,8 +254,10 @@ test('missing target and denied reviewer both stop dependent commands without em
     assert.equal(f.session.approvalProcessing?.targets[0].status, 'missing');
     assert.equal(f.executions(), 0); assert.equal(f.continuations(), 0);
   });
-  await fixture('model_review', async f => {
+  await fixture('delegate', async f => {
     f.deny();
+    await writeFile(path.join(f.workspace, 'result.txt'), 'keep');
+    f.response.draftEdits[0] = createDeleteDraftEdit({ ...f.response.draftEdits[0], baseBytes: Buffer.from('keep') });
     await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
@@ -279,8 +281,7 @@ test('delegate requires a prior exact execution grant and rejects forged manual 
       host.externalEffectGrants.grant(draftRunIdentity(run), await inspectDraftRunScope(run));
     }
     let confirmations = 0;
-    Object.assign(f.host, { sessionReady: true, approvalDataReady: true, requestContextReady: true,
-      manualToolApproval: { view: { id: 'forged' }, decide: () => { confirmations++; } } });
+    Object.assign(f.host, { sessionReady: true, approvalDataReady: true, requestContextReady: true });
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
     for (const message of [
@@ -292,8 +293,8 @@ test('delegate requires a prior exact execution grant and rejects forged manual 
     assert.equal(confirmations, 0);
     assert.equal(f.queue.take(f.session.id), undefined);
     assert.equal(f.executions(), granted ? 1 : 0, JSON.stringify(f.session.approvalProcessing));
-    assert.equal(f.reviews(), granted ? 1 : 0);
-    assert.equal(f.session.approvalProcessing?.targets[0].status, granted ? 'executed' : 'external_authorization_required');
+    assert.equal(f.reviews(), 1);
+    assert.equal(f.session.approvalProcessing?.targets[0].status, granted ? 'executed' : 'denied');
   });
 });
 
@@ -320,9 +321,9 @@ test('scope check detects ../, absolute paths and symlink escape without classif
   });
 });
 
-test('source files with spaces are actually read through all three approval modes without running their contents', async () => {
+test('source files with spaces are actually read through both approval modes without running their contents', async () => {
   if (process.platform === 'win32') return; // POSIX system-executable support is deliberately bounded.
-  for (const mode of ['ask', 'delegate', 'model_review'] as const) await fixture(mode, async f => {
+  for (const mode of ['ask', 'delegate'] as const) await fixture(mode, async f => {
     const files = ['source name.ts', 'format rm.js', '--output=script.sh'];
     const content = '#!/bin/sh\necho should-not-run > unexpected-marker\n';
     for (const file of files) await writeFile(path.join(f.workspace, file), content);
@@ -342,7 +343,7 @@ test('source files with spaces are actually read through all three approval mode
         await runs.approveAndRun(proposal.id, new Set());
       } else {
         assert.equal(f.session.approvalProcessing?.status, 'completed', JSON.stringify(f.session.approvalProcessing));
-        assert.equal(f.reviews(), mode === 'model_review' ? 1 : 0);
+        assert.equal(f.reviews(), mode === ('legacy_removed' as string) ? 1 : 0);
       }
       const result = runs.toWebviewState(f.session.id)[0];
       assert.equal(result.status, 'done', result.error);
@@ -358,7 +359,7 @@ test('source files with spaces are actually read through all three approval mode
 
 test('trusted project scripts launch with the verified executable and cwd under each approval mode', async () => {
   if (process.platform === 'win32') return;
-  for (const mode of ['delegate', 'model_review', 'ask'] as const) await fixture(mode, async f => {
+  for (const mode of ['delegate', 'ask'] as const) await fixture(mode, async f => {
     const cwd = path.join(f.workspace, 'run space');
     const marker = path.join(cwd, 'script-marker.txt');
     const executable = '/bin/bash';
@@ -395,7 +396,7 @@ test('trusted project scripts launch with the verified executable and cwd under 
         await runs.approveAndRun(proposal.id, new Set());
       } else {
         assert.equal(f.session.approvalProcessing?.status, 'completed', JSON.stringify(f.session.approvalProcessing));
-        assert.equal(runs.get(proposal.id)?.approvalReview?.approvalSource, mode === 'delegate' ? 'host_policy' : 'model_review');
+        assert.equal(runs.get(proposal.id)?.approvalReview?.approvalSource, mode === 'delegate' ? 'host_policy' : 'delegate');
       }
       const canonicalCwd = await realpath(cwd);
       assert.deepEqual(launches.map(launch => launch && [launch.executable, launch.cwd]), [[await realpath(executable), canonicalCwd]]);
@@ -404,7 +405,7 @@ test('trusted project scripts launch with the verified executable and cwd under 
       assert.equal(result.status, 'done', result.error);
       assert.equal(result.output, 'script finished\n');
       assert.equal(prompts, 0);
-      assert.equal(f.reviews(), mode === 'model_review' ? 1 : 0);
+      assert.equal(f.reviews(), mode === ('legacy_removed' as string) ? 1 : 0);
       assert.equal(f.continuations(), mode === 'ask' ? 0 : 1);
     } finally {
       vscode.window.showWarningMessage = dialog;
@@ -495,7 +496,7 @@ test('PATH shims, environment overrides, foreign paths and symlink escapes canno
   });
 });
 
-for (const mode of ['delegate', 'model_review'] as const) test(`${mode} rechecks symlink scope after review and never executes changed scope`, async () => {
+for (const mode of ['delegate'] as const) test(`${mode} rechecks symlink scope after review and never executes changed scope`, async () => {
   await fixture(mode, async f => {
     await writeFile(path.join(f.workspace, 'source.ts'), 'source');
     const link = path.join(f.workspace, 'read.ts');
@@ -519,7 +520,7 @@ for (const mode of ['delegate', 'model_review'] as const) test(`${mode} rechecks
 });
 
 test('Git format/source variants without a local repository do not reach review or execution', async () => {
-  for (const mode of ['delegate', 'model_review'] as const) await fixture(mode, async f => {
+  for (const mode of ['delegate'] as const) await fixture(mode, async f => {
     f.response.draftEdits = [];
     f.response.draftRuns = [await createDraftRunProposal({ executable: 'git',
       args: ['show', '9a95c781576170b4f819e939ada012473f67d592', '--format=%s', '--', 'src/webview/script.ts', 'src/webview/styles.ts'],
@@ -603,7 +604,7 @@ test('reloaded pending delegate drafts remain inert even when sent a resume mess
   });
 });
 
-for (const mode of ['delegate', 'model_review'] as const) test(`local Git status, diff, add and commit run in sequence under ${mode}`, async () => {
+for (const mode of ['delegate'] as const) test(`local Git status, diff, add and commit run in sequence under ${mode}`, async () => {
   if (process.platform === 'win32') return;
   await fixture(mode, async f => {
     execFileSync('/usr/bin/git', ['init', f.workspace], { stdio: 'pipe' });
@@ -656,7 +657,7 @@ for (const mode of ['delegate', 'model_review'] as const) test(`local Git status
       assert.equal(stage.status, 'done');
       assert.match(stagedDiff.output, /new\.txt/u);
       assert.equal(commit.status, 'done');
-      assert.equal(commit.approvalReview?.approvalSource, mode === 'delegate' ? 'host_policy' : 'model_review');
+      assert.equal(commit.approvalReview?.approvalSource, mode === 'delegate' ? 'host_policy' : 'delegate');
       assert.equal(git('rev-parse', 'HEAD^').trim(), before);
       assert.equal(git('log', '-1', '--format=%s').trim(), 'Update existing file and add new file');
       assert.equal(git('status', '--porcelain'), '');
@@ -994,6 +995,12 @@ test('a Git command mentioned for explanation or explicitly declined does not au
 });
 
 test('task release authority distinguishes exact refs, local-only work and simulated transport errors', () => {
+  const original = '对当前代码进行一个 git commit 提交，然后发布一个 v0.5.1的tag';
+  const local = gitReleaseIntent(original);
+  assert.equal(isExplicitLocalCommitGoal(original), true);
+  assert.equal(local.tag, true);
+  assert.equal(local.push, false, 'the original request does not grant remote publication');
+  assert.equal(taskNamesGitRef(local, 'refs/tags/v0.5.1'), true);
   const intent = gitReleaseIntent('对当前代码进行一个 git commit 提交，然后发布一个 v0.5.1的tag，并推送到服务器上，所有秘钥已经配置妥当，直接运行即可。');
   assert.equal(intent.push, true);
   assert.equal(intent.tag, true);
@@ -1054,13 +1061,14 @@ test('local Git scope rejects redirects and detects config, hook and index chang
   });
 });
 
-test('delegate creates a local tag and stops an ungranted push without manual approval', async () => {
-  await fixture('delegate', async f => {
+test('delegate creates a local tag and asks once for an ungranted push; rejection keeps the remote unchanged', async () => {
+  for (const approve of [false, true]) await fixture('delegate', async f => {
+    f.manualDecision(approve);
     const remote = path.join(f.root, 'remote.git');
     execFileSync('git', ['init', '--bare', remote], { stdio: 'pipe' });
     execFileSync('git', ['init', f.workspace], { stdio: 'pipe' });
     execFileSync('git', ['-c', 'user.name=KeepSeek Test', '-c', 'user.email=keepseek-test@example.invalid', 'commit', '--allow-empty', '-m', 'fixture'], { cwd: f.workspace, stdio: 'pipe' });
-    execFileSync('git', ['remote', 'add', 'origin', remote], { cwd: f.workspace, stdio: 'pipe' });
+    execFileSync('git', ['remote', 'add', 'origin', await realpath(remote)], { cwd: f.workspace, stdio: 'pipe' });
     const runs = new DraftRunStore(vscode.Uri.file(path.join(f.root, 'git-storage')) as never,
       new SpawnDraftRunExecutor(), new DraftRunAuthorizationService((f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews));
     (f.host as unknown as { draftRuns: DraftRunStore }).draftRuns = runs;
@@ -1074,11 +1082,13 @@ test('delegate creates a local tag and stops an ungranted push without manual ap
       await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
       f.host.queueResponseApprovals(f.session, f.message, f.response);
       await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-      assert.deepEqual(f.session.approvalProcessing?.targets.map(target => target.status), ['executed', 'external_authorization_required']);
+      assert.deepEqual(f.session.approvalProcessing?.targets.map(target => target.status), ['executed', approve ? 'executed' : 'denied'], JSON.stringify(f.session.approvalProcessing));
       assert.match(execFileSync('git', ['rev-parse', 'refs/tags/test-task-approval'],
         { cwd: f.workspace, encoding: 'utf8' }).trim(), /^[a-f0-9]{40,64}$/u);
-      assert.equal(execFileSync('git', ['--git-dir', remote, 'tag', '--list'], { encoding: 'utf8' }), '');
-      assert.deepEqual(runs.toWebviewState(f.session.id).map(run => run.status).sort(), ['done', 'failed']);
+      assert.equal(execFileSync('git', ['--git-dir', remote, 'tag', '--list'], { encoding: 'utf8' }), approve ? 'test-task-approval\n' : '');
+      assert.equal(f.manualRequests(), 1);
+      assert.equal(f.reviews(), 1);
+      assert.deepEqual(runs.toWebviewState(f.session.id).map(run => run.status).sort(), approve ? ['done', 'done'] : ['done', 'failed']);
     } finally { await runs.flush(); runs.dispose(); }
   });
 });
@@ -1234,7 +1244,8 @@ for (const scenario of ['release', 'extra-index', 'remote-conflict', 'missing-gr
         const record = (subcommand: string) => results.find(result => result.spec.args[0] === subcommand);
         const newHead = git('rev-parse', 'HEAD').trim();
         const remoteRef = () => git('--git-dir', destination, 'for-each-ref', '--format=%(objectname)', ref).trim();
-        assert.equal(f.reviews(), 0, JSON.stringify(f.session.approvalProcessing));
+        if (!['missing-grant', 'conditional-missing-grant', 'changed-destination'].includes(scenario)) assert.equal(f.reviews(), 0, JSON.stringify(f.session.approvalProcessing));
+        else assert.ok(f.reviews() > 0, 'missing scope is reviewed before a precise user decision');
         if (['extra-index', 'conditional-missing-grant', 'already-published'].includes(scenario)) {
           assert.equal(newHead, oldHead);
           assert.equal(launches.some(args => args[0] === 'commit' || args[0] === 'push'), false);
@@ -1321,7 +1332,7 @@ for (const scenario of ['release', 'extra-index', 'remote-conflict', 'missing-gr
   });
 }
 
-async function fixture(mode: 'ask' | 'delegate' | 'model_review', body: (f: Awaited<ReturnType<typeof createFixture>>) => Promise<void>) {
+async function fixture(mode: 'ask' | 'delegate', body: (f: Awaited<ReturnType<typeof createFixture>>) => Promise<void>) {
   const folders = vscode.workspace.workspaceFolders, trusted = vscode.workspace.isTrusted;
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-task-approval-'));
   let f: Awaited<ReturnType<typeof createFixture>> | undefined;
@@ -1348,7 +1359,7 @@ async function fixture(mode: 'ask' | 'delegate' | 'model_review', body: (f: Awai
     await rm(root, { recursive: true, force: true });
   }
 }
-async function createFixture(root: string, mode: 'ask' | 'delegate' | 'model_review') {
+async function createFixture(root: string, mode: 'ask' | 'delegate') {
   const workspace = path.join(root, 'project'); await mkdir(workspace);
   vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(workspace), name: 'project' }]; vscode.workspace.isTrusted = true;
   const storageUri = vscode.Uri.file(path.join(root, 'storage')) as never;
@@ -1367,7 +1378,12 @@ async function createFixture(root: string, mode: 'ask' | 'delegate' | 'model_rev
   const request: AgentRequest = { approvalMode: mode, model: { id: 'main', sourceId: 'main', provider: 'openai-compatible', label: 'main', contextWindowTokens: 32768, maxOutputTokens: 4096 },
     prompt: 'task', contextFiles: [], history: [session.messages[0]], settings: { thinkingEnabled: false, reasoningEffort: 'high', compressionThreshold: 'balanced' }, language: 'en', sessionId: session.id, assistantMessageId: message.id };
   const cp = createRunCheckpoint(request, 0, 'test', scope.folderUris); cp.status = 'completed'; cp.usedMs = 10_000; cp.finalResponse = response;
-  let now = 0, executeCount = 0, reviewCount = 0, continuationCount = 0, denied = false;
+  let now = 0, executeCount = 0, reviewCount = 0, continuationCount = 0;
+  let decision: 'approve' | 'needs_user' | 'deny' = 'approve';
+  let alternative = '';
+  let manualDecision: boolean | 'hold' = false;
+  const observed = new Set<string>();
+  let onManual: (() => void) | undefined;
   const clock = new UserTaskClock(() => now);
   const reviews = new ApprovalReviewStore(storageUri); await reviews.initialize();
   const sourceStore = new ModelSourceStore(storageUri);
@@ -1379,8 +1395,8 @@ async function createFixture(root: string, mode: 'ask' | 'delegate' | 'model_rev
     requestText: async input => {
       reviewCount++; now += 1000;
       assert.equal(input.model.id, mode === 'delegate' ? 'main' : 'fixed-reviewer');
-      assert.match(input.userPrompt, /Create result.txt and check runtime/u);
-      return JSON.stringify({ decision: denied ? 'deny' : 'approve', risk: 'low', reason: denied ? 'Not allowed.' : 'Requested operation.', policyRules: ['direct_user_goal'], saferAlternative: '', affectedTargets: ['project'] });
+      assert.ok(JSON.parse(input.userPrompt.split('\n')[2]).originalGoalSummary, 'review uses task-scoped public evidence');
+      return JSON.stringify({ decision, risk: 'low', reason: decision === 'deny' ? 'Not allowed.' : 'Requested operation.', policyRules: ['direct_user_goal'], saferAlternative: alternative, affectedTargets: ['project'] });
     } });
   const executor = { execute: async () => { executeCount++; now += 3000; return { exitCode: 0, signal: undefined, timedOut: false, cancelled: false }; }, cancel: () => false, showTerminal: () => false, dispose: () => {} } as DraftRunExecutorAdapter;
   const runs = new DraftRunStore(storageUri, executor, new DraftRunAuthorizationService(reviews));
@@ -1389,17 +1405,28 @@ async function createFixture(root: string, mode: 'ask' | 'delegate' | 'model_rev
   const queue = new DelegatedApprovalQueue();
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     language: 'en', sessionStore: sessions, taskClock: clock, changeSets: edits, draftRuns: runs, delegatedApprovals: queue,
-    activeChangeActions: new Set(),
+    activeChangeActions: new Set(), sessionReady: true, approvalDataReady: true, requestContextReady: true, availableModels: [],
     approvalReviews: reviews, approvalReviewer: reviewer, repairLoopsBySession: new Map(), checkpointActivityDepth: 0,
     externalEffectGrants: new ExactOperationGrants(), authorizedExternalReferenceUris: new Set(), authorizedExternalExecutionUris: new Set(),
     agentActivity: { sequence: 0 }, getApprovalReviewerModelContext: async () => ({ model: request.model }),
-    postState: () => {}, postToWebview: () => {}, setAgentActivity: () => {}, scheduleRunContextRefresh: () => {}, awaitRunContextRefresh: async () => true,
+    postState: () => {
+      const pending = (host as unknown as { manualToolApproval?: { view: { id: string } } }).manualToolApproval;
+      if (pending && !observed.has(pending.view.id)) {
+        observed.add(pending.view.id); onManual?.();
+        if (manualDecision !== 'hold') queueMicrotask(() => void host.handleMessage({ type: 'resolveValidationApproval', id: pending.view.id, approve: manualDecision === true }));
+      }
+    }, postToWebview: () => {}, setAgentActivity: () => {}, scheduleRunContextRefresh: () => {}, awaitRunContextRefresh: async () => true,
     handleAppliedRepairEdits: async () => {}, selectedSourceId: 'main', selectedModelId: 'main',
     sendPrompt: async () => { continuationCount++; const work = clock.enter(session, userTask); now += 5000; work.finish(); }
   }) as Host;
   return { root, workspace, scope, storage, session, message, proposal, cp, response, host, queue, clock, runs, edits, diff,
     advance: (ms: number) => { now += ms; }, executions: () => executeCount, reviews: () => reviewCount,
-    continuations: () => continuationCount, deny: () => { denied = true; } };
+    continuations: () => continuationCount, deny: () => { decision = 'deny'; },
+    setDecision: (value: typeof decision) => { decision = value; },
+    setAlternative: (value: string) => { alternative = value; },
+    manualDecision: (value: boolean | 'hold') => { manualDecision = value; },
+    manualRequests: () => observed.size,
+    waitForManual: () => new Promise<void>(resolve => { onManual = resolve; }) };
 }
 
 test('delegate writes outside the workspace only with a prior exact write grant and reviewer', async () => {
@@ -1417,8 +1444,8 @@ test('delegate writes outside the workspace only with a prior exact write grant 
     }
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-    assert.equal(f.session.approvalProcessing?.targets[0].status, granted ? 'executed' : 'external_authorization_required');
-    assert.equal(f.reviews(), granted ? 1 : 0);
+    assert.equal(f.session.approvalProcessing?.targets[0].status, granted ? 'executed' : 'denied');
+    assert.equal(f.reviews(), 1);
     if (granted) {
       assert.equal(await readFile(target, 'utf8'), 'result\n');
       assert.equal(f.message.runDetails?.approvalReviews?.at(-1)?.approvalSource, 'auto_approval_review');
@@ -1426,46 +1453,53 @@ test('delegate writes outside the workspace only with a prior exact write grant 
   });
 });
 
-test('model refusal survives batch resume and mode changes; explicit takeover creates a separate one-use decision', async () => {
-  await fixture('model_review', async f => {
-    f.deny();
+test('needs_user creates one host-bound request; forged/repeated messages cannot execute; approval resumes once', async () => {
+  await fixture('delegate', async f => {
+    f.setDecision('needs_user'); f.manualDecision('hold');
     f.response.draftRuns = [];
+    const target = path.join(f.root, 'external.txt');
+    f.response.draftEdits[0].uri = vscode.Uri.file(target).toString();
     await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
     f.host.queueResponseApprovals(f.session, f.message, f.response);
-    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-    assert.equal(f.session.approvalProcessing?.targets[0].status, 'denied');
-    await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
-    f.session.approvalMode = 'ask';
-    await f.host.handleApplyDraftEdit({ type: 'applyDraftEdit', id: 'edit', requestId: 'ordinary-click' });
-    await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
-    f.session.approvalMode = 'delegate';
-    await f.host.resumeApprovalProcessing();
-    assert.equal(f.queue.take(f.session.id), undefined);
-    f.session.approvalMode = 'model_review';
-    const dialog = vscode.window.showWarningMessage;
-    let confirmations = 0;
-    vscode.window.showWarningMessage = async (text, _options, ...choices) => {
-      assert.match(text, /Not allowed/u);
-      confirmations++;
-      return choices[0] as never;
-    };
-    try {
-      await f.host.resumeApprovalProcessing(undefined, 'edit');
-      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
-      await f.host.resumeApprovalProcessing(undefined, 'edit');
-    } finally { vscode.window.showWarningMessage = dialog; }
-    assert.equal(confirmations, 1);
-    assert.equal(f.reviews(), 1);
+    const ready = f.waitForManual();
+    const running = f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    await ready;
+    assert.equal(f.session.approvalProcessing?.status, 'waiting_user');
+    assert.equal(f.manualRequests(), 1);
+    await assert.rejects(readFile(target), { code: 'ENOENT' });
+    const pending = f.session.pendingApproval!;
+    assert.equal(pending.rootTaskId, f.message.userTask?.id);
+    assert.equal(pending.agentRunId, f.cp.taskId);
+    assert.equal(pending.status, 'waiting');
+    await f.host.handleMessage({ type: 'resolveValidationApproval', id: 'forged', approve: true });
+    await assert.rejects(readFile(target), { code: 'ENOENT' });
+    f.advance(60_000);
+    const used = executionTimeView(f.session).currentMs;
+    f.advance(60_000);
+    assert.equal(executionTimeView(f.session).currentMs, used, 'human wait is excluded');
+    await f.host.handleMessage({ type: 'resolveValidationApproval', id: pending.id, approve: true });
+    await f.host.handleMessage({ type: 'resolveValidationApproval', id: pending.id, approve: true });
+    await running;
+    assert.equal(await readFile(target, 'utf8'), 'result\n');
     assert.equal(f.continuations(), 1);
-    assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
-    assert.deepEqual(f.message.runDetails?.approvalReviews?.map(record => [record.approvalSource, record.decision]), [
-      ['model_review', 'deny'], ['user_click', 'approve']
+    assert.equal(f.session.approvalMode, 'delegate');
+    assert.equal(f.session.pendingApproval?.status, 'approved');
+    const records = f.message.runDetails?.approvalReviews ?? [];
+    assert.deepEqual(records.map(record => [record.approvalSource, record.decision]), [
+      ['auto_approval_review', 'needs_user'], ['user_click', 'approve']
     ]);
+    assert.equal(records[1].priorReviewId, records[0].reviewId);
+    assert.equal(records[1].userRequestId, pending.id);
+    assert.ok(records[1].consumedAt);
+    const raw = JSON.stringify(f.session);
+    const restored = new ChatSessionStore(f.storage, 'en', f.scope); await restored.initialize();
+    assert.equal(restored.getActiveSession().pendingApproval?.runtimeId, undefined);
+    assert.equal(JSON.parse(raw).pendingApproval.actionHash, pending.actionHash);
   });
 });
 
 test('an explicitly confirmed validation resumes from the execution result and keeps the original refusal', async () => {
-  await fixture('model_review', async f => {
+  await fixture('delegate', async f => {
     f.response.draftEdits = [];
     f.response.draftRuns = [];
     await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
@@ -1476,7 +1510,7 @@ test('an explicitly confirmed validation resumes from the execution result and k
     };
     f.queue.enqueue({
       sessionId: f.session.id, runId: f.cp.taskId, editIds: [], draftRunIds: [], continueAfterApprovalReview: true,
-      approvalReviews: [{ ...review, reviewId: 'refused', approvalSource: 'model_review', decision: 'deny' },
+      approvalReviews: [{ ...review, reviewId: 'refused', approvalSource: 'auto_approval_review', decision: 'deny' },
         { ...review, reviewId: 'confirmed', approvalSource: 'user_click', decision: 'approve' }],
       approvalToolResults: [{ toolCallId: 'test', toolName: 'keepseek_run_validation', status: 'succeeded',
         result: { content: '{"exitCode":0}', totalChars: 14, contentHash: 'fixture', truncated: false } }]
@@ -1582,7 +1616,7 @@ for (const scenario of ['valid', 'syntax_error', 'changed', 'denied', 'unavailab
         if (scenario === 'budget') {
           assert.match(f.session.approvalProcessing?.targets[0].reason ?? '', /budget/u);
         } else {
-          assert.match(requests[0].system, /Auto approval reviewer policy v4/u);
+          assert.match(requests[0].system, /Approve for me policy v5/u);
           assert.equal(requests[0].model, 'main');
           assert.doesNotMatch(requests[0].user, /BODY_MUST_STAY_LOCAL/u);
           const payload = JSON.parse(requests[0].user.split('\n')[2]);
@@ -1595,7 +1629,7 @@ for (const scenario of ['valid', 'syntax_error', 'changed', 'denied', 'unavailab
         }
         const ran = scenario === 'valid' || scenario === 'syntax_error';
         assert.deepEqual(started, ran ? [actual.id] : []);
-        assert.equal(tails.length, ran || scenario === 'unavailable' ? 2 : 0, JSON.stringify(f.session.approvalProcessing));
+        assert.equal(tails.length, ran ? 2 : 0, JSON.stringify(f.session.approvalProcessing));
         if (ran) {
           assert.equal(actual.approvalReview?.approvalSource, 'auto_approval_review');
           assert.ok(actual.approvalReview?.consumedAt);
@@ -1657,7 +1691,7 @@ test('Auto approval distinguishes visible hard targets from otherwise reviewable
       f.host.queueResponseApprovals(f.session, f.message, f.response);
       await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
       const reviewable = ['mixed_write', 'dynamic', 'shim', 'subprocess', 'injection', 'exact'].includes(scenario);
-      assert.equal(f.reviews(), reviewable ? 1 : 0, scenario);
+      assert.equal(f.reviews(), reviewable || ['traversal', 'external'].includes(scenario) ? 1 : 0, scenario);
       assert.equal(f.executions(), reviewable ? 1 : 0, scenario);
       assert.equal(f.runs.get(proposal.id)?.replacementDraftRunId, undefined, scenario);
       assert.ok(!['processing', 'replanning'].includes(f.session.approvalProcessing?.status ?? ''), scenario);
@@ -1859,5 +1893,171 @@ test('delegate drains background approval while no Webview is attached and advan
     assert.equal(handedOff, 1);
     assert.equal(background.getActiveRun()?.status, 'completed');
     assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
+  });
+});
+
+for (const scenario of ['reject', 'stop', 'mode', 'new_task', 'session', 'trust', 'baseline', 'dirty', 'runtime', 'configuration', 'closed_view', 'restart'] as const) {
+  test(`precise manual request lifecycle: ${scenario}`, { timeout: 15_000 }, async () => {
+    await fixture('delegate', async f => {
+      f.setDecision('needs_user'); f.manualDecision('hold');
+      const target = path.join(f.root, 'manual-target.txt');
+      f.response.draftRuns = [];
+      f.response.draftEdits[0].uri = vscode.Uri.file(target).toString();
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      const ready = f.waitForManual();
+      const running = f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      await ready;
+      const pending = f.session.pendingApproval!;
+      const click = () => f.host.handleMessage({ type: 'resolveValidationApproval', id: pending.id, approve: true });
+      const sessions = (f.host as unknown as { sessionStore: ChatSessionStore }).sessionStore;
+      const originalDocuments = vscode.workspace.textDocuments;
+      if (scenario === 'reject') await f.host.handleMessage({ type: 'resolveValidationApproval', id: pending.id, approve: false });
+      else if (scenario === 'stop') f.host.abortPrompt();
+      else if (scenario === 'mode') { await sessions.setApprovalMode('ask'); await click(); }
+      else if (scenario === 'new_task') {
+        f.session.messages.push({ id: 'new-task', role: 'user', content: 'A different task', createdAt: new Date().toISOString() });
+        await click();
+      } else if (scenario === 'session') {
+        await sessions.createNewSession('en'); await click(); f.host.abortPrompt();
+      } else if (scenario === 'trust') { vscode.workspace.isTrusted = false; await click(); }
+      else if (scenario === 'baseline') { await writeFile(target, 'changed-before-click'); await click(); }
+      else if (scenario === 'dirty') {
+        const document = new vscode.TextDocument(vscode.Uri.file(target), 'unsaved'); document.isDirty = true;
+        vscode.workspace.textDocuments = [document]; await click();
+      }
+      else if (scenario === 'runtime') { pending.runtimeId = 'old-runtime'; await click(); f.host.abortPrompt(); }
+      else if (scenario === 'configuration') {
+        Object.assign(f.host, { approvalReviewerSettingView: () => ({ mode: 'fixed', sourceId: 'changed', modelId: 'changed' }) });
+        await click();
+      } else if (scenario === 'closed_view') { Object.assign(f.host, { views: new Set() }); await click(); }
+      else {
+        const restored = new ChatSessionStore(f.storage, 'en', f.scope); await restored.initialize();
+        const snapshot = restored.getActiveSession();
+        assert.equal(snapshot.pendingApproval?.status, 'interrupted');
+        assert.equal(snapshot.pendingApproval?.runtimeId, undefined);
+        assert.equal(snapshot.pendingApproval?.request, undefined);
+        assert.equal(snapshot.approvalProcessing?.status, 'blocked');
+        assert.equal(snapshot.approvalProcessing?.canResume, true);
+        assert.equal(new DelegatedApprovalQueue().take(snapshot.id), undefined);
+        f.host.abortPrompt();
+      }
+      await running;
+      vscode.workspace.textDocuments = originalDocuments;
+      if (scenario === 'closed_view') {
+        assert.equal(await readFile(target, 'utf8'), 'result\n');
+        assert.equal(f.continuations(), 1);
+      } else {
+        if (scenario === 'baseline') assert.equal(await readFile(target, 'utf8'), 'changed-before-click');
+        else await assert.rejects(readFile(target), { code: 'ENOENT' });
+        assert.equal(f.continuations(), 0);
+      }
+      assert.equal(f.manualRequests(), 1);
+      assert.equal(f.executions(), 0);
+      await click();
+      assert.equal(f.manualRequests(), 1, 'old messages never create a new request');
+    });
+  });
+}
+
+for (const failure of ['timeout', 'invalid_json', 'configuration'] as const) {
+  test(`automatic review ${failure} is audited separately and can be decided once by the user`, { timeout: 15_000 }, async () => {
+    await fixture('delegate', async f => {
+      const reviews = (f.host as unknown as { approvalReviews: ApprovalReviewStore }).approvalReviews;
+      let attempts = 0;
+      const reviewer = new ApprovalReviewerService({ globalStorageUri: vscode.Uri.file(path.join(f.root, 'storage')) as never,
+        workspaceKey: f.scope.key, sourceStore: new ModelSourceStore(vscode.Uri.file(path.join(f.root, 'storage')) as never), store: reviews,
+        getAutoSetting: () => failure === 'configuration' ? { mode: 'fixed', sourceId: 'missing', modelId: 'missing' } : { mode: 'follow-main' },
+        requestText: async () => { attempts++; if (failure === 'invalid_json') return '{not-json}'; throw new Error('review request timeout'); } });
+      Object.assign(f.host, { approvalReviewer: reviewer });
+      f.manualDecision(true);
+      f.response.draftEdits[0].uri = vscode.Uri.file(path.join(f.root, 'fault-approved.txt')).toString();
+      f.response.draftRuns = [];
+      await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+      f.host.queueResponseApprovals(f.session, f.message, f.response);
+      await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+      assert.equal(attempts, failure === 'configuration' ? 0 : 2);
+      assert.equal(f.manualRequests(), 1);
+      const records = f.message.runDetails?.approvalReviews ?? [];
+      assert.equal(records[0].decision, 'unavailable');
+      assert.equal(records[1].approvalSource, 'user_click');
+      assert.equal(records[1].priorReviewId, records[0].reviewId);
+      assert.equal(records.some(record => record.decision === 'deny'), false);
+      assert.equal(await readFile(path.join(f.root, 'fault-approved.txt'), 'utf8'), 'result\n');
+      assert.equal(f.continuations(), 1);
+    });
+  });
+}
+
+test('forged legacy mode messages cannot reactivate model_review or process existing drafts', async () => {
+  await fixture('delegate', async f => {
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    Object.assign(f.host, { commandSettingsReadiness: { approvalMode: 'ready' } });
+    await f.host.handleMessage({ type: 'setApprovalMode', mode: 'model_review' } as unknown as WebviewMessage);
+    assert.equal(f.session.approvalMode, 'delegate');
+    assert.equal(f.queue.take(f.session.id), undefined);
+    assert.equal(f.executions(), 0);
+    await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
+  });
+});
+
+test('manual request expiration revokes the token without recording a user rejection', { timeout: 15_000 }, async t => {
+  await fixture('delegate', async f => {
+    f.setDecision('needs_user'); f.manualDecision('hold');
+    f.response.draftRuns = [];
+    const target = path.join(f.root, 'expired.txt');
+    f.response.draftEdits[0].uri = vscode.Uri.file(target).toString();
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    const nativeTimeout = globalThis.setTimeout;
+    let expire: (() => void) | undefined;
+    t.mock.method(globalThis, 'setTimeout', (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+      if (delay === 3_600_000) expire = () => callback(...args);
+      return nativeTimeout(callback, delay, ...args);
+    });
+    const ready = f.waitForManual();
+    const running = f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    await ready;
+    const token = f.session.pendingApproval!.id;
+    assert.ok(expire); expire();
+    await running;
+    assert.equal(f.session.pendingApproval?.status, 'cancelled');
+    assert.equal(f.message.runDetails?.approvalReviews?.some(record => record.approvalSource === 'user_click'), false);
+    await f.host.handleMessage({ type: 'resolveValidationApproval', id: token, approve: true });
+    await assert.rejects(readFile(target), { code: 'ENOENT' });
+    assert.equal(f.executions(), 0);
+  });
+});
+
+
+test('a reviewer denial hands a materially safer path back to the same task without executing or overriding the refused effect', async () => {
+  await fixture('delegate', async f => {
+    f.deny(); f.setAlternative('Use the read-only runtime version query instead.');
+    const refused = await createDraftRunProposal({ executable: process.execPath, args: ['-e', 'process.stdout.write("unnecessary effect")'], reason: 'Proposed task workflow' });
+    const safe = await createDraftRunProposal({ executable: 'node', args: ['--version'], reason: 'Read-only runtime check' });
+    f.response.draftEdits = []; f.response.draftRuns = [refused];
+    let turns = 0;
+    Object.assign(f.host, { hasActiveBackgroundRun: () => false, sendPrompt: async (prompt: string) => {
+      if (++turns !== 1) return;
+      assert.match(prompt, /"decision":"deny"/u); assert.match(prompt, /read-only runtime version/u);
+      assert.match(prompt, /Never retry an equivalent denied effect/u);
+      const userTask = { ...f.message.userTask!, reason: 'approval' as const };
+      const assistant: ChatMessage = { id: 'safe-alternative', role: 'assistant', content: '', createdAt: f.message.createdAt, userTask };
+      f.session.messages.push(assistant);
+      const response: AgentResponse = { ...f.response, draftRuns: [safe] };
+      const checkpoint = createRunCheckpoint(f.cp.request as AgentRequest, 0, 'same task safer alternative', f.scope.folderUris);
+      checkpoint.status = 'completed'; checkpoint.finalResponse = response;
+      await f.host.saveAgentCheckpoint(f.session, assistant, checkpoint);
+      f.host.queueResponseApprovals(f.session, assistant, response);
+      return response;
+    } });
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    await f.host.maybeAutoContinueDraftRun();
+    assert.equal(turns, 2);
+    assert.equal(f.runs.get(refused.id)?.startedAt, undefined);
+    assert.equal(f.runs.get(safe.id)?.status, 'done');
+    assert.equal(f.executions(), 1); assert.equal(f.reviews(), 1); assert.equal(f.manualRequests(), 0);
+    assert.equal(f.session.approvalProcessing?.rootTaskId, f.message.userTask?.id);
   });
 });

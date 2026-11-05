@@ -39,7 +39,7 @@ src/provider/KeepseekChatViewProvider.ts
       │         │
       │         ├── src/edits/                 DraftEdit → ChangeSet → 安全写盘
       │         ├── src/runs/                  DraftRun → permit → 进程执行
-      │         └── src/approvals/             model_review / delegate 审批记录
+      │         └── src/approvals/             ask / delegate 与旧审批审计记录
       │
       └── src/webview/                         HTML/CSS/浏览器脚本字符串
 ```
@@ -288,7 +288,7 @@ Skill 的 `scripts/` 只表示存在可运行资源，不能在发现或加载�
 | `taskPlan.ts` | 任务计划及步骤状态 |
 | `repairLoop.ts` | 验证失败后的修复轮次状态机 |
 | `executionMode.ts` | normal/plan 模式和计划确认流程 |
-| `approvalMode.ts` | ask/model_review/delegate 模式与续轮尾部格式 |
+| `approvalMode.ts` | ask/delegate 两模式、旧设置迁移与续轮尾部格式 |
 | `backgroundRunCoordinator.ts` | 显式后台任务状态 |
 
 `AgentRunner.run()` 的主要输出是 `AgentResponse`：可见回复、推理展示、DraftEdit、DraftRun proposal、任务计划、修复状态、工具轮原始回放、原生 Provider replay、usage、trace 和 Run Details。
@@ -297,7 +297,7 @@ Runner 可以“提出”副作用：
 
 - 创建 `DraftEdit`；
 - 创建 `DraftRunProposal`；
-- 在 model_review/delegate 流程中生成待处理的审核结果。
+- 在 delegate 流程中生成待处理的审核结果。
 
 Runner 不能：
 
@@ -513,7 +513,7 @@ keepseek_run_draft
 
 Executor 必须使用 `spawn(executable, args, { shell: false })`。需要 shell 语法时，shell 本身必须是可见 executable，脚本是可见 argv。扩展重启后，`approved/running` 只能恢复为 interrupted，不能自动重跑。
 
-## 10. `src/approvals/`：模型审批与宿主策略记录
+## 10. `src/approvals/`：审批 reviewer、宿主策略与单次人工决定
 
 ```text
 src/approvals/
@@ -533,23 +533,24 @@ src/approvals/
     ├── localGitScope.ts         本地 Git 仓库、有效配置、索引和 hooks 检查
     ├── pathScope.ts             工作区包含关系、realpath、悬空链接及 symlink/.. 穿越
     ├── exactOperationGrants.ts  仅内存的精确操作授权、匹配与失效
-    ├── preflight.ts             delegate/model_review 共用的范围决策及执行前复核
+    ├── preflight.ts             审批前的范围决策及执行前复核
     ├── executionBoundary.ts     信任、specHash、本地 cwd 与外部 cwd 硬检查
     └── reasons.ts               可用于 UI/测试的原因码、详情及中英文说明
 ```
 
-三种模式的区别：
+两种当前模式（2026-11-05 合并旧版 model_review）；当前验收见 [帮我审批](keepseek-approve-for-me-verification.md)。审批模型只使用 application/用户级配置，普通子代理 default/research/review/proposal 配置保持独立。
+
+
 
 - `ask`：用户逐项点击批准；
-- `model_review` 对通过硬检查且具备充分证据的动作逐项调用隔离 reviewer。需要用户授权范围时，先取得授权。
-- `delegate` 对通过宿主准入的项目内操作写入 `host_policy` 记录。其他已绑定启动身份且可审查的项目操作，以及已取得精确授权的外部操作，走独立自动审批 reviewer。缺权、硬拒绝或证据不足由宿主记录并自动改路或结束。可见作用域与操作系统隔离分别记录，进程以扩展宿主权限运行。
-- 人工接管独立记为 `user_click`，原模型拒绝保留。硬阻断不发出执行许可。
+- `delegate` 对通过宿主准入的项目内操作写入 `host_policy` 记录。其他已绑定启动身份且可审查的操作，走独立审批 reviewer。approve 才可执行；needs_user 或 unavailable 通过绑定 runtime 的宿主单次请求交用户决定，缺少外部授权时只提供获准元数据，单次同意后再次预检。deny 只允许实质更安全且有界的替代路径。可见作用域与操作系统隔离分别记录，进程以扩展宿主权限运行。
+- 人工决定独立记为 `user_click`，关联原 needs_user／故障记录；明确安全拒绝不能转成强行执行。硬阻断不发出执行许可。
 
 无论哪种模式，底层确定性硬检查始终生效。模型判断不能关闭工作区信任、路径授权、base hash、脏编辑器、specHash、一次性 permit 或取消检查。
 
 命令分析分别表达参数角色、已识别效果和不能确定范围的原因，不拼接 argv 后搜索危险关键词，不以脚本扩展名推断执行，也不把 shell 字符串按空格拆成命令。`cat script.ts` 的文件是读取对象；`bun run script.ts` 是脚本执行；`sh -c ...` 的正文保留为内联代码。未知范围显示为未知，不自动增加写入效果。固定 validation 的原有阻断规则独立保留在 `agent/tools/validationRisk.ts`，不用于任意命令授权。
 
-自动范围判定仅覆盖有限参数集合：`cat/head/tail/wc/pwd/ls`、非递归 `grep`、字面输出命令、少量版本查询及下述本地 Git 操作。还必须满足工作区范围、无环境覆盖及实际程序身份检查；POSIX 下核实 PATH/显式路径解析后为系统目录中的 OS 所有文件或扩展宿主运行时，不能仅凭 basename。Windows 程序搜索顺序、非系统程序、递归搜索、未知选项、脚本/包生命周期均保留具体的不确定原因，需要用户逐项确认。外部读取与外部写入分别由参数用途决定，外部 cwd 本身不代表写入。
+自动范围判定仅覆盖有限参数集合：`cat/head/tail/wc/pwd/ls`、非递归 `grep`、字面输出命令、少量版本查询及下述本地 Git 操作。还必须满足工作区范围、无环境覆盖及实际程序身份检查；POSIX 下核实 PATH/显式路径解析后为系统目录中的 OS 所有文件或扩展宿主运行时，不能仅凭 basename。Windows 程序搜索顺序、非系统程序、递归搜索、未知选项、脚本/包生命周期均保留具体的不确定原因，结合真实启动信息走审批模型；必要时请求用户精确决定。外部读取与外部写入分别由参数用途决定，外部 cwd 本身不代表写入。
 
 在可信工作区的普通本地仓库中，参数符合规则的 `git status`、`diff`、`log`、`show`、`add` 和显式提供消息的 `commit` 可走自动批准。提交和暂存仍走独立的 DraftRun。Git 可执行文件、真实仓库、HEAD、索引、有效配置和可用 hooks 进入实时范围指纹。POSIX 系统 Git 和符合安装路径及所有权要求的 macOS Homebrew Git 可参与这项判定。原始 argv 和有效环境沿用 DraftRun 执行路径。
 
@@ -661,7 +662,7 @@ Webview composer
   → createChangeSet()
   → Provider 将 ChangeSet 注册到 ChangeSetStore
   → UI 展示 Diff/Apply/Discard
-  → ask：用户点击；model_review/delegate：生成绑定审批记录
+  → ask：用户点击；delegate：生成宿主／reviewer／单次人工审批记录
   → ChangeSetStore 调 SafeFileEditor
   → journal + hash + 原子写入 + read-back
   → UI、Run Details、trace、下一轮 user-tail 同步真实结果
@@ -776,7 +777,7 @@ globalStorageUri/
 
 - 未信任工作区不能自动加载项目 Skill 或执行副作用；
 - 外部文件/cwd 按精确 URI 授权；
-- `model_review` 和 `delegate` 不得绕过宿主硬检查；
+- 所有审批路径（包括历史 model_review 恢复）不得绕过宿主硬检查；
 - Git mutation 不能伪装成只读 Git 工具。
 
 ## 17. 给接手者的推荐阅读顺序

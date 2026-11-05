@@ -1343,6 +1343,8 @@ export function getScript(): string {
         pendingDraftRunApprovals.delete(String(message.draftRun?.id || ''));
         upsertDraftRun(message.draftRun);
         render();
+      } else if (message.type === 'approvalReviewerModelResult') {
+        setComposerStatus(message.success ? t('approvalModelSaved') : (message.error || t('approvalModelSaveFailed')));
       } else if (message.type === 'draftRunBatchFeedback') {
         pendingDraftRunBatchSnapshot = '';
         render();
@@ -3629,8 +3631,8 @@ export function getScript(): string {
         appendDraftRunActions(actions, draftRun, header, target, approvalBlocked);
       }
       var processing = state.approvalProcessing;
-      if (displayStatus === 'needs_replan' && state.approvalMode === 'model_review' && !state.isBusy
-        && processing?.status === 'blocked' && processing.canResume === true && processing.runId === draftRun.agentRunId
+      if (displayStatus === 'needs_replan' && state.approvalMode === 'delegate' && !state.isBusy
+        && processing?.version === 2 && processing?.status === 'blocked' && processing.canResume === true && processing.runId === draftRun.agentRunId
         && processing.targets.find(function(item) { return item.status === 'needs_replan'; })?.id === draftRun.id) {
         appendApprovalStateNote(header, t('approvalInterrupted'));
         appendApprovalResumeAction(actions, 'approvalResumeProcessing');
@@ -3771,7 +3773,7 @@ export function getScript(): string {
     }
 
     function appendApprovalResumeAction(actions, label, authorizeTargetId) {
-      if (state.approvalMode !== 'model_review') return;
+      if (state.approvalMode !== 'delegate' || state.approvalProcessing?.version !== 2) return;
       var button = document.createElement('button');
       button.type = 'button';
       button.textContent = t(label);
@@ -3788,36 +3790,18 @@ export function getScript(): string {
       var target = getApprovalTarget(id);
       var denied = target && target.status === 'denied' || review && review.decision === 'deny';
       var active = processing && ['processing', 'replanning'].includes(processing.status);
-      var recoverable = processing?.status === 'blocked' && processing.canResume === true;
+      var recoverable = processing?.version === 2 && processing?.status === 'blocked' && processing.canResume === true;
       var fallback = processing?.status === 'replanning' ? 'approvalReplanningNow' : active ? 'approvalProcessingNow'
         : state.approvalMode === 'delegate' && !state.isBusy ? (target ? 'approvalAutoStopped' : 'approvalAutoInactive')
-        : recoverable ? 'approvalInterrupted' : state.approvalMode === 'model_review' ? 'approvalModelWaiting' : 'approvalAutoWaiting';
+        : recoverable ? 'approvalInterrupted' : 'approvalAutoWaiting';
       if (target?.dependency) appendApprovalStateNote(notices, formatApprovalDependency(target.dependency));
       if (!target?.dependency || target.reason) {
         var reason = target?.reason || (denied && review ? review.rationale : undefined);
         appendApprovalStateNote(notices, reason || t(fallback), !reason && !recoverable);
       }
-      if (state.approvalMode === 'delegate') return false;
-      var hardBlocked = ['hard_blocked', 'dependency_blocked', 'needs_replan', 'identity_mismatch', 'missing'].includes(target?.status)
-        || denied && review && (review.approvalSource === 'local_policy' || review.approvalSource === 'auto_approval_review' || review.risk === 'critical');
-      if (hardBlocked || target?.dependency || active || state.isBusy || processing?.status !== 'blocked') return false;
-      var canTakeOver = target && ['manual_required', 'review_unavailable', 'denied'].includes(target.status);
-      if (canTakeOver) {
-        var takeover = document.createElement('button');
-        takeover.type = 'button';
-        takeover.textContent = t('approvalConfirmOnce');
-        takeover.disabled = !state.startup?.sideEffectsReady;
-        takeover.addEventListener('click', function() {
-          vscode.postMessage({ type: 'resumeApprovalProcessing', confirmTargetId: id });
-        });
-        actions.append(takeover);
-      }
-      if (denied || target?.status === 'manual_required') return Boolean(canTakeOver);
-      var needsScope = target && target.status === 'needs_authorization';
-      if (!target || (!needsScope && !recoverable && target.status !== 'review_unavailable')) return false;
-      appendApprovalResumeAction(actions, needsScope ? 'approvalAuthorizeExact' : canTakeOver ? 'approvalRetryReview' : 'approvalResumeProcessing',
-        needsScope ? id : undefined);
-      return true;
+      if (recoverable && !state.isBusy && !denied
+        && !['hard_blocked', 'identity_mismatch', 'missing', 'dependency_blocked'].includes(target?.status)) appendApprovalResumeAction(actions, 'approvalResumeProcessing');
+      return false;
     }
 
     function appendDraftRunActions(container, draftRun, notices, target, approvalBlocked) {
@@ -4069,7 +4053,7 @@ export function getScript(): string {
       var source = getApprovalSourceLabel(review);
       summary.textContent = [
         t('approvalSourceLabel') + ': ' + source,
-        review.reviewerModelId ? t('approvalReviewerModel') + ': ' + review.reviewerModelId : '',
+        review.reviewerModelId ? t('approvalReviewerModel') + ': ' + (review.reviewerSourceId || '') + ' / ' + review.reviewerModelId : '',
         t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision, review.approvalSource),
         t('approvalReviewRisk') + ': ' + getApprovalRiskLabel(review.risk),
         t('approvalReviewReason') + ': ' + String(review.rationale || ''),
@@ -4092,7 +4076,7 @@ export function getScript(): string {
         ? t('approvalSourceHost')
         : review && review.approvalSource === 'auto_approval_review' ? t('approvalSourceAutoReviewer')
         : review && review.approvalSource === 'model_review'
-          ? t('approvalSourceModel')
+          ? t('approvalSourceLegacyModel')
           : review && review.approvalSource === 'local_policy' ? t('approvalSourceSafety') : t('approvalSourceUser');
     }
 
@@ -4115,7 +4099,7 @@ export function getScript(): string {
     }
 
     function getApprovalDecisionLabel(decision, source) {
-      if (decision === 'unavailable' && source === 'local_policy') return t('approvalConfirmOnce');
+      if (decision === 'needs_user') return t('approvalNeedsUser');
       return decision === 'approve'
         ? t('approvalDecisionApprove')
         : decision === 'deny'
@@ -4416,13 +4400,22 @@ export function getScript(): string {
 
       transcript.append(unlinkedChangeSetRegion);
       var manual = state.manualToolApproval;
-      if (state.approvalMode !== 'delegate' && manual && manual.sessionId === state.activeSessionId) {
+      if (manual && manual.sessionId === state.activeSessionId) {
         var card = document.createElement('div');
         card.className = 'draft-run-card';
         var label = document.createElement('div');
         label.className = 'approval-state-note';
         label.textContent = t('approvalManualPrompt', { target: manual.label, reason: manual.reason });
+        card.setAttribute('role', 'region');
+        card.setAttribute('aria-label', t('approvalNeedsUser'));
         card.append(label);
+        if (manual.request?.exactAction) {
+          var exact = document.createElement('details');
+          var title = document.createElement('summary'); title.textContent = t('approvalExactDetails');
+          var payload = document.createElement('pre'); payload.className = 'approval-exact-payload';
+          payload.textContent = JSON.stringify(manual.request.exactAction, null, 2);
+          exact.append(title, payload); card.append(exact);
+        }
         var actions = document.createElement('div');
         actions.className = 'draft-run-actions';
         [true, false].forEach(function(approve) {
@@ -4437,6 +4430,11 @@ export function getScript(): string {
         });
         card.append(actions);
         transcript.append(card);
+      }
+      if (!manual && state.pendingApproval?.status === 'interrupted') {
+        var recovered = document.createElement('div'); recovered.className = 'approval-state-note';
+        recovered.textContent = t('approvalInterrupted') + ' ' + state.pendingApproval.label + ' · ' + state.pendingApproval.reason;
+        transcript.append(recovered);
       }
       renderUnlinkedChangeSets(changeSetProjection.unlinked, draftRunProjection.unlinked);
 
@@ -4732,7 +4730,7 @@ export function getScript(): string {
       if (Array.isArray(details.approvalReviews) && details.approvalReviews.length) {
         var reviews = details.approvalReviews.map(function(review) {
           return [getApprovalActionLabel(review.actionKind), review.targetId, t('approvalSourceLabel') + ': ' + getApprovalSourceLabel(review),
-            review.reviewerModelId ? t('approvalReviewerModel') + ': ' + review.reviewerModelId : '',
+            review.reviewerModelId ? t('approvalReviewerModel') + ': ' + (review.reviewerSourceId || '') + ' / ' + review.reviewerModelId : '',
             t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision, review.approvalSource),
             t('approvalReviewRisk') + ': ' + getApprovalRiskLabel(review.risk),
             t('approvalReviewReason') + ': ' + review.rationale,
