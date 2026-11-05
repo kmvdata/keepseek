@@ -18,7 +18,6 @@ import {
 import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted, migrateLegacyCapacityCheckpoint } from './runCheckpoint';
 import { restorePluginSkillProgress, type PluginSkillProgress } from './runCheckpoint';
 import { assertPluginSkillsCurrent, executePluginSkillRead } from './pluginSkillRuntime';
-import { shapeWorkspaceListingResult } from './toolResultShaping';
 import {
   getConfiguredAgentMaxContextEpochRollovers,
   getConfiguredAgentMaxContinuations,
@@ -244,16 +243,6 @@ import {
 } from './contextEpoch';
 
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 2_048;
-const SEARCH_SHAPED_RESULT_LIMIT = 120;
-const SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT = 12;
-const SEARCH_SHAPED_TOTAL_CHARS = 50_000;
-const SEARCH_SHAPED_LINE_CHARS = 500;
-const SEARCH_SNIPPED_RESULT_LIMIT = 60;
-const SEARCH_SNIPPED_RESULTS_PER_FILE_LIMIT = 6;
-const SEARCH_SNIPPED_TOTAL_CHARS = 20_000;
-const SEARCH_SNIPPED_LINE_CHARS = 300;
-const RANGE_READ_SHAPED_CONTENT_CHARS = 160_000;
-const RANGE_READ_SNIPPED_CONTENT_CHARS = 60_000;
 
 interface AgentRuntimeConfig {
   sourceId: string;
@@ -4733,32 +4722,6 @@ ${launch.evidence.content}`;
     return estimateDeepSeekMessageTokens(input.shapedToolMessage);
   }
 
-  private shapeToolResult(toolName: string, rawContent: string, snipForContextPressure: boolean): ShapedToolResult {
-    const rawLength = rawContent.length;
-    const parsed = this.parseToolResultObject(rawContent);
-    let shapedContent = rawContent;
-
-    if ((toolName === LIST_WORKSPACE_FILES_TOOL_NAME || toolName === LIST_WORKSPACE_DIRECTORY_TOOL_NAME) && parsed) {
-      shapedContent = shapeWorkspaceListingResult(parsed, snipForContextPressure);
-    } else if (toolName === SEARCH_WORKSPACE_TOOL_NAME && parsed) {
-      shapedContent = this.shapeSearchToolResult(parsed, snipForContextPressure);
-    } else if (toolName === READ_WORKSPACE_FILE_RANGE_TOOL_NAME && parsed) {
-      shapedContent = this.shapeRangeReadToolResult(parsed, snipForContextPressure);
-    }
-
-    const shapedMetadata = this.getToolResultMetadata(this.parseToolResultObject(shapedContent));
-    return {
-      content: shapedContent,
-      path: shapedMetadata.path,
-      startLine: shapedMetadata.startLine,
-      endLine: shapedMetadata.endLine,
-      rawLength,
-      shapedLength: shapedContent.length,
-      compressible: this.isCompressibleToolResult(toolName),
-      truncated: shapedMetadata.truncated || shapedContent.length < rawContent.length
-    };
-  }
-
   private normalizeToolResultFeedback(toolName: string, rawContent: string): string {
     const parsed = this.parseToolResultObject(rawContent);
     if (!parsed || parsed.ok !== false || typeof parsed.errorType === 'string') {
@@ -4772,148 +4735,6 @@ ${launch.evidence.content}`;
     });
   }
 
-  private shouldSnipToolResult(
-    request: AgentRequest,
-    messages: DeepSeekMessage[],
-    tools: DeepSeekFunctionTool[],
-    outputReserveTokens: number,
-    providerRunState?: ProviderNativeRunState,
-    pendingResponseFunctionOutputs: OpenAiResponsesItem[] = [],
-    pendingAnthropicToolResults: AnthropicUserContentBlock[] = []
-  ): boolean {
-    const settings = getAgentRuntimeProfile(request.model, request.settings).contextCompression;
-    const usage = providerRunState?.protocol === 'openai-responses'
-      ? createContextUsageEstimateFromResponses({
-          model: request.model,
-          input: [...providerRunState.input, ...pendingResponseFunctionOutputs],
-          tools: providerRunState.tools,
-          outputReserveTokens,
-          safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-        })
-      : providerRunState?.protocol === 'anthropic-messages'
-        ? createContextUsageEstimateFromAnthropic({
-            model: request.model,
-            system: providerRunState.system,
-            messages: pendingAnthropicToolResults.length
-              ? [...providerRunState.messages, { role: 'user', content: pendingAnthropicToolResults }]
-              : providerRunState.messages,
-            tools: providerRunState.tools,
-            outputReserveTokens,
-            safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-          })
-        : createContextUsageEstimateFromMessages({
-          model: request.model,
-          messages,
-          tools,
-          outputReserveTokens,
-          safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-        });
-    return usage.usedPercent / 100 >= settings.toolResultSnipRatio;
-  }
-
-  private shapeSearchToolResult(parsed: Record<string, unknown>, snipForContextPressure: boolean): string {
-    const rawResults = Array.isArray(parsed.results) ? parsed.results : [];
-    const shapedResults: unknown[] = [];
-    const perFileCounts = new Map<string, number>();
-    let totalChars = 0;
-    let truncated = parsed.truncated === true;
-    const resultLimit = snipForContextPressure ? SEARCH_SNIPPED_RESULT_LIMIT : SEARCH_SHAPED_RESULT_LIMIT;
-    const resultsPerFileLimit = snipForContextPressure ? SEARCH_SNIPPED_RESULTS_PER_FILE_LIMIT : SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT;
-    const totalCharLimit = snipForContextPressure ? SEARCH_SNIPPED_TOTAL_CHARS : SEARCH_SHAPED_TOTAL_CHARS;
-    const lineCharLimit = snipForContextPressure ? SEARCH_SNIPPED_LINE_CHARS : SEARCH_SHAPED_LINE_CHARS;
-
-    for (const rawResult of rawResults) {
-      if (!this.isRecord(rawResult)) {
-        continue;
-      }
-      if (shapedResults.length >= resultLimit) {
-        truncated = true;
-        break;
-      }
-
-      const resultPath = typeof rawResult.path === 'string' ? rawResult.path : '';
-      const fileCount = perFileCounts.get(resultPath) ?? 0;
-      if (fileCount >= resultsPerFileLimit) {
-        truncated = true;
-        continue;
-      }
-
-      const shapedResult = this.shapeSearchResult(rawResult, lineCharLimit);
-      const shapedChars = JSON.stringify(shapedResult).length;
-      if (totalChars + shapedChars > totalCharLimit) {
-        truncated = true;
-        break;
-      }
-
-      totalChars += shapedChars;
-      perFileCounts.set(resultPath, fileCount + 1);
-      shapedResults.push(shapedResult);
-    }
-
-    return JSON.stringify({
-      ...parsed,
-      results: shapedResults,
-      count: shapedResults.length,
-      limit: Math.min(readFiniteNumber(parsed.limit, resultLimit), resultLimit),
-      truncated: truncated || shapedResults.length < rawResults.length,
-      perFileLimit: resultsPerFileLimit,
-      totalCharLimit,
-      snippedForContextPressure: snipForContextPressure || undefined
-    });
-  }
-
-  private shapeSearchResult(result: Record<string, unknown>, lineCharLimit: number): Record<string, unknown> {
-    return {
-      ...result,
-      matchLine: this.shapeSearchText(typeof result.matchLine === 'string' ? result.matchLine : '', lineCharLimit),
-      matchLineTruncated: result.matchLineTruncated === true || this.isSearchTextTruncated(result.matchLine, lineCharLimit),
-      before: this.shapeSearchContextLines(result.before, lineCharLimit),
-      after: this.shapeSearchContextLines(result.after, lineCharLimit)
-    };
-  }
-
-  private shapeSearchContextLines(value: unknown, lineCharLimit: number): unknown[] {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-    return value.map((item) => {
-      if (!this.isRecord(item)) {
-        return item;
-      }
-      return {
-        ...item,
-        text: this.shapeSearchText(typeof item.text === 'string' ? item.text : '', lineCharLimit),
-        truncated: item.truncated === true || this.isSearchTextTruncated(item.text, lineCharLimit)
-      };
-    });
-  }
-
-  private shapeSearchText(value: string, lineCharLimit: number): string {
-    return value.length <= lineCharLimit
-      ? value
-      : `${value.slice(0, lineCharLimit)}...`;
-  }
-
-  private isSearchTextTruncated(value: unknown, lineCharLimit: number): boolean {
-    return typeof value === 'string' && value.length > lineCharLimit;
-  }
-
-  private shapeRangeReadToolResult(parsed: Record<string, unknown>, snipForContextPressure: boolean): string {
-    const content = typeof parsed.content === 'string' ? parsed.content : '';
-    const contentCharLimit = snipForContextPressure ? RANGE_READ_SNIPPED_CONTENT_CHARS : RANGE_READ_SHAPED_CONTENT_CHARS;
-    if (content.length <= contentCharLimit) {
-      return JSON.stringify(parsed);
-    }
-
-    return JSON.stringify({
-      ...parsed,
-      content: content.slice(0, contentCharLimit),
-      truncated: true,
-      shapedContentCharLimit: contentCharLimit,
-      snippedForContextPressure: snipForContextPressure || undefined
-    });
-  }
-
   private parseToolResultObject(content: string): Record<string, unknown> | undefined {
     try {
       const parsed: unknown = JSON.parse(content);
@@ -4921,30 +4742,6 @@ ${launch.evidence.content}`;
     } catch {
       return undefined;
     }
-  }
-
-  private getToolResultMetadata(parsed: Record<string, unknown> | undefined): {
-    path?: string;
-    startLine?: number;
-    endLine?: number;
-    truncated: boolean;
-  } {
-    if (!parsed) {
-      return { truncated: false };
-    }
-
-    return {
-      path: typeof parsed.path === 'string' ? parsed.path : undefined,
-      startLine: readOptionalFiniteNumber(parsed.startLine),
-      endLine: readOptionalFiniteNumber(parsed.endLine),
-      truncated: parsed.truncated === true
-    };
-  }
-
-  private isCompressibleToolResult(toolName: string): boolean {
-    return toolName !== READ_WORKSPACE_FILE_TOOL_NAME
-      && !isDraftEditPreparationTool(toolName)
-      && !isDraftRunPreparationTool(toolName);
   }
 
   private parseToolArguments(rawArguments: string): Record<string, unknown> {
@@ -5582,14 +5379,6 @@ function formatReviewerDenial(reason: string, saferAlternative: string | undefin
       ? 'Do not pursue the same dangerous result through a variant command, indirect execution, or another tool. Submit only a materially safer new operation with a new action hash, or stop and explain if none exists.'
       : '不得通过变体命令、间接执行或其它工具追求相同危险结果。只能提交 actionHash 不同且实质更安全的新操作；没有安全替代方案时应停止并说明。'
   ].filter(Boolean).join(' ');
-}
-
-function readFiniteNumber(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-}
-
-function readOptionalFiniteNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 function isRunDetailsBudgetPause(value: unknown): value is NonNullable<RunDetailsSummary['budgetPause']> {

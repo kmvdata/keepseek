@@ -35,6 +35,39 @@ export interface ApprovalProcessingState {
   updatedAt: string;
 }
 
+interface ApprovalBatchTargets {
+  runId: string;
+  editIds: readonly string[];
+  draftRunIds: readonly string[];
+  localGitCompletionCheck?: boolean;
+}
+
+/** A settled batch is idempotent even if its drafts are delivered again. */
+export function isCompletedApprovalBatch(prior: ApprovalProcessingState | undefined, batch: ApprovalBatchTargets): boolean {
+  return prior?.runId === batch.runId && ['completed', 'stopped'].includes(prior.status)
+    && prior.targets.length === batch.editIds.length + batch.draftRunIds.length
+    && prior.targets.every(target => [...batch.editIds, ...batch.draftRunIds].includes(target.id));
+}
+
+/** Start a current delegate batch while retaining only its task-scoped history and hard decisions. */
+export function createApprovalProcessing(batch: ApprovalBatchTargets, rootTaskId: string,
+  prior?: ApprovalProcessingState, updatedAt = new Date().toISOString()): ApprovalProcessingState {
+  const processing: ApprovalProcessingState = {
+    version: 2, runId: batch.runId, rootTaskId, mode: 'delegate', status: 'processing', updatedAt,
+    replanKeys: prior?.rootTaskId === rootTaskId ? [...(prior.replanKeys ?? [])] : [],
+    localGitCompletionRetried: batch.localGitCompletionCheck || (prior?.rootTaskId === rootTaskId && prior.localGitCompletionRetried) || undefined,
+    targets: [...batch.editIds.map(id => ({ id, kind: 'edit' as const, status: 'pending' as const })),
+      ...batch.draftRunIds.map(id => ({ id, kind: 'command' as const, status: 'pending' as const }))]
+  };
+  if (prior?.runId === batch.runId) {
+    for (const target of processing.targets) {
+      const previous = prior.targets.find(item => item.id === target.id);
+      if (previous && ['denied', 'hard_blocked'].includes(previous.status)) Object.assign(target, previous);
+    }
+  }
+  return processing;
+}
+
 export function normalizeApprovalDependency(value: unknown): ApprovalDependency | undefined {
   const v = value as ApprovalDependency | undefined;
   if (!v || typeof v.targetId !== 'string' || typeof v.label !== 'string') return undefined;

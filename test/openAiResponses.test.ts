@@ -29,9 +29,9 @@ import type {
 } from '../src/agent/providers/responsesTypes';
 import {
   getVisibleMessages,
-  normalizeOpenAiResponsesReplay,
   normalizeStoredSessions
 } from '../src/sessions/chatSessionStore';
+import { normalizeOpenAiResponsesReplay } from '../src/sessions/providerReplayNormalization';
 import type { AgentRequest, ChatMessage } from '../src/shared/types';
 
 const MODEL = {

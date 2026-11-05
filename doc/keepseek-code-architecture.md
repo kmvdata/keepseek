@@ -1,834 +1,146 @@
-# KeepSeek 代码架构交接指南
+# KeepSeek 代码架构地图
 
-> 面向后续接手 KeepSeek 的程序员与 AI 智能体。本文从代码目录和依赖边界出发，说明系统如何启动、一次请求如何流经各层、状态保存在哪里，以及不同类型的改动应该落到哪些文件。
->
-> 主体按 2026-09-22 源码整理，共享项目配置章节于 2026-11-04 更新。架构事实以当前源码为准；安全、缓存和审批不变式以仓库根目录的 [`AGENTS.md`](../AGENTS.md) 为最高优先级维护约定。
+本页按职责定位当前实现，不保存历史阶段的完整报告。开发约束见 [AGENTS.md](../AGENTS.md)，运行顺序见 [Agent 运行时](keepseek-agent-runtime-workflow.md)，专题与不同版本维度见 [文档导航](README.md)。源码与说明冲突时先追踪调用和测试。
 
-## 1. 先建立整体心智模型
+## 1. 启动与依赖方向
 
-2026-10-31 长任务续接：压缩规划与收益测量通过共享 payload 和来源隔离校准；`runCheckpoint.recoverNoProgressWithUserTurn` 只接受真实新 user，保留逻辑任务预算与进展窗口。`SessionObjectStore` 迁移有可观察阶段和提交前取消，未知/遗留锁不自动删除；`PerformanceTrace` 将 flush 与 close 分开。详见 [续接验收](long-task-rectification-resume-report.md)。
+KeepSeek 在 VS Code Extension Host 内运行。`package.json` 定义 commands/views/keybindings/menus、配置和 `main: ./out/extension.js`；[extension.ts](../src/extension.ts) 的 `activate()` 创建 `GlobalSessionStorage`、`ChatSessionStore`、`KeepseekChatViewProvider`，尽早注册 `keepseek.chat`，再异步迁移并初始化当前 workspace 会话。配置、工作区、信任与文件事件由这里接线，不在激活入口放业务规则。
 
-2026-10-30 输出预算补充：`shared/outputBudget.ts` 定义唯一单次计算规则；`agent/requestBudget.ts` 将实际三协议请求投影转换为版本化预算快照。Runner、结果准入、压缩器和 reviewer 共用该规则。能力解析仍在 accounts/modelCatalog，按 sourceId + modelId 取值；恢复策略在 runCheckpoint/runner，用户诊断在 runDetails/Webview。行为及兼容迁移见 [输出预算整改记录](model-output-budget-rectification.md)。
-
-KeepSeek 是一个运行在 VS Code Extension Host 中的编程 Agent。它由两部分组成：
-
-- 宿主侧 TypeScript：访问 VS Code API、工作区、持久化存储和模型服务；
-- Webview 侧界面：负责输入、消息展示、设置、审批卡片和状态交互，不直接访问文件系统或模型服务。
-
-核心依赖方向如下：
-
-```text
-package.json / VS Code activation
-                │
-                ▼
-        src/extension.ts
-                │
-                ▼
-src/provider/KeepseekChatViewProvider.ts
-      │         │          │
-      │         │          ├── src/sessions/   会话与工作区状态
-      │         │          ├── src/accounts/   模型来源与凭据解析
-      │         │          ├── src/context/    用户上下文、共享配置与来源快照
-      │         │          └── src/skills/     Skill 发现和激活
-      │         │
-      │         ├── src/agent/AgentRunner      模型请求与工具循环
-      │         │       ├── providers/         三类上游协议
-      │         │       ├── tools/             只读/验证工具
-      │         │       ├── evidence/          完整工具证据
-      │         │       └── subagents/         隔离子代理运行时
-      │         │
-      │         ├── src/edits/                 DraftEdit → ChangeSet → 安全写盘
-      │         ├── src/runs/                  DraftRun → permit → 进程执行
-      │         └── src/approvals/             ask / delegate 与旧审批审计记录
-      │
-      └── src/webview/                         HTML/CSS/浏览器脚本字符串
+```mermaid
+flowchart TD
+  E["extension.ts"] --> P["KeepseekChatViewProvider"]
+  W["Webview 消息与状态"] <--> P
+  P --> A["AgentRequestCoordinator / AgentLoop"]
+  P --> S["会话、来源、上下文服务"]
+  P --> D["审批、文件与命令服务"]
+  A --> N["请求投影与协议客户端"]
+  A --> T["工具、Evidence 与子代理"]
 ```
 
-最重要的边界是：
+`src/provider/` 是 VS Code/Webview 协调层，`src/agent/providers/` 是上游 API 层。领域规则下沉到所属模块；底层服务不回调整个 Provider，也不另建授权、请求投影或副作用执行权威。
 
-1. [`extension.ts`](../src/extension.ts) 只做激活和事件接线；
-2. [`KeepseekChatViewProvider.ts`](../src/provider/KeepseekChatViewProvider.ts) 是宿主侧总协调器；
-3. [`runner.ts`](../src/agent/runner.ts) 负责模型与工具循环，但不直接应用文件修改，也不直接执行任意命令；
-4. 文件副作用只由 `src/edits/` 落地，命令副作用只由 `src/runs/` 落地；
-5. Webview 只能发送消息请求宿主操作，不能绕开宿主安全边界。
+## 2. 宿主与 Webview
 
-这里有两个容易混淆的目录：
-
-- `src/provider/` 是 VS Code/Webview 的宿主协调层；
-- `src/agent/providers/` 是 DeepSeek、OpenAI Responses、Anthropic Messages 等上游 API 客户端。
-
-## 2. 仓库顶层目录
-
-```text
-keepseek/
-├── src/                 扩展源码
-├── test/                与 src 对应的契约和回归测试
-├── doc/                 专题设计与交接文档
-├── scripts/             打包、安装和行为评估脚本
-├── resources/           扩展图标、模型来源图标
-├── images/              README 截图
-├── package.json         VS Code contribution、配置项、命令和构建脚本
-├── tsconfig.json        正式构建配置，输出到 out/
-├── tsconfig.test.json   测试构建配置，输出到 out-test/
-├── AGENTS.md            维护不变式和改动影响面
-├── SUBAGENTS.md         子代理公开架构说明
-└── README*.md           产品、使用和开发入口
-```
-
-`out/`、`out-test/` 和 `.vsix` 是生成物，不是源码权威来源。正式入口由 `package.json` 的 `main: ./out/extension.js` 指定。
-
-常用验证命令：
-
-```bash
-bun run compile
-bun run lint
-bun run build:test
-bun run test
-```
-
-市场包必须使用：
-
-```bash
-bun run package:market
-```
-
-## 3. 启动与宿主协调层
-
-### 3.1 `src/extension.ts`：扩展入口
-
-[`src/extension.ts`](../src/extension.ts) 的 `activate()` 完成以下工作：
-
-1. 创建启动性能跟踪器；
-2. 创建 `GlobalSessionStorage` 和当前工作区的 `ChatSessionStore`；
-3. 创建 `KeepseekChatViewProvider`；
-4. 尽早注册 Secondary Sidebar Webview Provider；
-5. 异步迁移旧 workspaceState 并加载当前工作区会话；
-6. 注册命令、配置变更、工作区切换、信任变化和文件变化监听器。
-
-这里不应放业务逻辑。新功能通常只在这里增加：
-
-- VS Code 命令注册；
-- 生命周期级事件接线；
-- Provider 构造所需的顶层依赖。
-
-### 3.2 `src/provider/`：应用协调器
-
-| 文件 | 职责 |
-| --- | --- |
-| `KeepseekChatViewProvider.ts` | 创建各服务；处理 Webview 消息；协调会话、模型选择、Agent run、审批、Apply/Discard/Revert、DraftRun 和 UI 状态推送 |
-| `webviewMessages.ts` | Webview → Extension Host 消息联合类型的唯一来源 |
-| `modelSelection.ts` | 模型切换事务、运行中切换限制、Provider lane 影响分析 |
-| `backgroundRunStatusBar.ts` | 后台任务状态栏展示 |
-| `focusView.ts` | 打开或聚焦 KeepSeek 侧边栏 |
-
-`KeepseekChatViewProvider` 文件很大，但其角色仍然是“协调”，而不是底层实现。它持有以下主要服务：
-
-- 会话：`ChatSessionStore`；
-- 模型来源：`ModelSourceStore`、`ModelSourceService`、`DefaultModelStore`；
-- Agent：`AgentRequestCoordinator`、`AgentRunner`、`SubagentRuntime`；
-- 修改：`ChangeSetStore`、`SafeFileEditor`、`DraftDiffService`；
-- 命令：`DraftRunStore`、`DraftRunBatchCoordinator`；
-- 审批：`ApprovalReviewStore`、`ApprovalReviewerService`、`DelegatedApprovalQueue`；
-- 上下文：`FileContextStore`、`ProjectInstructionsResolver`、`SkillStore`；
-- 观察性：`InteractionTraceLogService`、`UsageLedgerStore`、余额 store；
-- 长任务：`BackgroundRunCoordinator`、检查点、自动续跑状态。
-
-Provider 中可以做跨模块编排和 UI 状态同步；可独立测试的规则、持久化、协议转换和副作用执行应继续放在对应子系统中。
-
-### 3.3 Webview 启动握手
-
-[`src/webview/html.ts`](../src/webview/html.ts) 生成带 CSP 和 nonce 的完整 HTML。页面最早加载的 bootstrap 脚本会：
-
-1. 获取 VS Code API；
-2. 暂存 Extension Host 提前发来的消息；
-3. 发送 `{ type: 'ready' }`；
-4. 等正式脚本完成初始化后消费暂存消息。
-
-Provider 收到 `ready` 后先发送轻量状态，再异步完成会话、审批恢复、模型来源和当前运行上下文初始化。涉及 Agent 请求或审批写操作的消息，在恢复数据未就绪时会被拒绝。这是启动性能与恢复安全之间的边界。
-
-## 4. `src/webview/`：侧边栏界面
-
-Webview 源码不是独立打包的前端应用，而是由 TypeScript 函数返回 HTML、CSS、JavaScript 字符串，最终在 [`html.ts`](../src/webview/html.ts) 中拼成一个页面。
-
-```text
-src/webview/
-├── html.ts                 HTML 外壳、CSP、资源 URI、bootstrap
-├── template.ts             transcript 和页面主骨架
-├── styles.ts               页面主样式聚合
-├── script.ts               transcript、会话、状态渲染和主消息监听
-├── richTextShortcuts.ts    两个编辑器共享的富文本快捷键
-└── input/
-    ├── composition.ts      输入区 fragment 的固定拼装顺序
-    ├── script.ts           输入脚本兼容入口
-    ├── styles.ts           输入样式兼容入口
-    ├── template.ts         输入模板兼容入口
-    ├── composer/           contenteditable、提交、序列化、视觉状态
-    ├── references/         @ 补全、引用 chip、拖拽、编解码和菜单
-    ├── commandMenu/        模型、审批、Agent 设置、Skills 命令菜单
-    ├── usage/              用量详情和子代理进度
-    ├── skills/             Skill 展示与选择
-    └── dialogs/            账号、历史、About、创建 Skill、后台任务
-```
-
-`input/composition.ts` 中 fragment 的顺序是行为的一部分：所有片段共享同一个生成后的 IIFE、词法作用域和监听器注册顺序。调整文件拆分时不能随意重排 fragment。
-
-Webview 与宿主的契约：
-
-- Webview 发出的消息必须加入 [`provider/webviewMessages.ts`](../src/provider/webviewMessages.ts)；
-- Provider 的 `handleMessage()` 必须增加对应分支；
-- Extension Host 主动推送的消息由 `webview/script.ts` 或相关 fragment 的 `message` 监听器处理；
-- DOM id、消息 type、引用序列化格式属于兼容性接口；
-- CSP 只允许由宿主注入 nonce 的脚本，不能引入远程脚本。
-
-功能归属建议：
-
-- transcript、会话列表、设置总状态：`webview/script.ts`；
-- 输入框、提交、拖拽和引用：`webview/input/**`；
-- 样式：对应 `styles.ts`，不要把样式散落到行为脚本；
-- 两个编辑器都需要的快捷键：`richTextShortcuts.ts`。
-
-## 5. `src/accounts/`：模型来源、账号和模型目录
-
-```text
-src/accounts/
-├── types.ts                    来源和持久化数据结构
-├── accountStore.ts             来源 CRUD、规范化、globalStorage 持久化
-├── accountResolver.ts          凭据与运行配置的唯一解析入口
-├── modelSourceService.ts       面向 Provider/UI 的来源业务操作
-├── modelDiscovery.ts           /models 探测、连接测试和缓存刷新
-├── modelCatalog.ts             合并来源模型、默认模型和项目选择
-├── defaultModelStore.ts        全局默认模型
-├── sourceCapabilities.ts       官方来源、计费、API Key 等能力判断
-├── subagentSettingsStore.ts    每工作区子代理模型设置
-└── subagentModelResolver.ts    子代理运行前解析并冻结模型配置
-```
-
-这一层回答三个问题：
-
-1. 用户配置了哪些模型来源和模型？
-2. 当前主 Agent / 子代理应该使用哪一个来源与模型？
-3. 该来源的凭据、base URL、协议和能力是什么？
-
-`accountResolver.ts` 是运行时取得凭据的唯一入口。主请求、摘要请求、审批 reviewer、子代理、余额查询和模型发现不应各自重新读取 API Key 或重新解释来源语义。
-
-目前 Provider 客户端支持：
-
-- DeepSeek 官方 Chat Completions；
-- Kimi、GLM、QwenCloud 官方预设；
-- OpenAI-compatible Chat Completions；
-- OpenAI Responses；
-- Anthropic Messages compatible；
-- 本地 Ollama。
-
-“账号/模型来源”与“上游协议实现”分离：账号状态在 `src/accounts/`，真正发请求的客户端在 `src/agent/providers/`。
-
-## 6. `src/context/` 和 `src/skills/`：输入上下文
-
-### 6.1 `src/context/`
-
-```text
-src/context/
-├── sharedConfigPaths.ts           宿主路径、Git/worktree 作用域、真实路径与有界读取
-├── sharedCodexConfig.ts            TOML 白名单、配置层级、来源与诊断
-├── sharedProjectSources.ts         会话任务快照、监听和受控刷新
-├── fileContextStore.ts             用户附加的上下文文件集合
-├── textReferences.ts               终端/Output/Debug 选区临时文本文件
-└── references/
-    ├── promptReferences.ts         目录 → 文件 → Skill 的统一展开入口
-    ├── fileReference.ts            <path#Lx-Ly> 解析、读取、授权
-    ├── directoryReference.ts       <keepseek-dir:path> 展开
-    ├── skillReference.ts           $skill-name 展开
-    ├── referenceSyntax.ts          fence、独立行和危险字符判断
-    ├── referenceResources.ts       @ 菜单可用资源
-    └── fileReferenceOpener.ts      点击引用后的打开/定位/Reveal
-```
-
-一次真实用户输入在发送前会经过 `expandPromptReferencesInPrompt()`。展开顺序固定为目录、文件、Skill；发送与持久化使用同一份 `(expandedContent ?? content).trim()` 字节，不能在 Provider 层再次包装旧 user 消息。
-
-工作区外文件以精确 `uri.toString()` 为授权键。拖入文件、终端选区等临时内容先落到扩展全局存储，再以已授权外部引用参与本轮请求。
-
-### 6.2 `src/skills/`
-
-| 文件 | 职责 |
-| --- | --- |
-| `skillDiscovery.ts` | 仅扫描作用域链 `.agents/skills`、用户 `~/.agents/skills`、Unix 管理员目录 |
-| `skillMetadata.ts` | 安全 YAML 校验、标准 interface/policy/dependencies 与可选 KeepSeek profile |
-| `skillLoader.ts` | 受限读取 Skill 指令和引用资源 |
-| `skillActivationResolver.ts` | 按 explicit → session → workspace-default → implicit 决定激活集合 |
-| `skillStore.ts` | 用户选择和默认设置持久化 |
-| `skillCreator.ts` | 在任务目录 `.agents/skills/` 准备标准 Markdown + YAML 的同一 ChangeSet |
-| `skillTypes.ts` | manifest、来源和视图类型 |
-
-隐式 Skill 在会话首个真实用户请求后冻结为 id 列表，避免后续 prompt 改变导致 system 上下文字节漂移。`metadata.keepseek.runAs: subagent` 的 Skill 不把完整指令注入主 Agent，而是在选中的隔离子代理里加载。
-
-Skill 的 `scripts/` 只表示存在可运行资源，不能在发现或加载时自动执行。
-
-### 6.3 共享配置和项目指令
-
-`SharedProjectSources` 在新任务/空闲刷新边界读取单一快照；Provider 只编排，不按工具轮或 token 更新重扫。单根默认 workspace folder，多根必须选择任务目录；会话保存 `projectScopeUri`，焦点和附件不改变它。Git/worktree 根到 cwd 的链与全局指令按顺序进入上下文；无 Git 时仅 cwd。子代理保留这个顺序和隔离边界。
-
-用户配置位于 `CODEX_HOME/config.toml`（默认 `~/.codex`），可信项目配置为链上的 `.codex/config.toml`。只输出已支持字段和来源，未知字段/凭据不进入 UI 或 prompt。`project_doc_max_bytes` 按 UTF-8 字节裁剪；KeepSeek 的整体上下文准入仍独立执行。Skill 禁用、隐式资格、会话选择是三层不同概念。
-
-旧 `.keepseek/memory.json` 自动加载、迁移和导出入口已删除；不移动/删除用户文件。历史 Run Details 的 `legacy-memory` 审计标签与会话存储安全读取仍保留，历史 `contextInstructions` 不重写。冻结协议提示词中旧措辞保留字节，不产生新的 Memory 注入。
-
-完整范围、版本差异、故障处理与验收见 [共享配置交付报告](keepseek-codex-shared-config.md)。
-
-## 7. `src/agent/`：Agent 运行时核心
-
-`src/agent/` 可以按七个子域理解。
-
-### 7.1 请求编排与主循环
-
-| 文件 | 职责 |
-| --- | --- |
-| `agentRequestCoordinator.ts` | 从会话快照创建 `AgentRequest`；维护归档和后台摘要刷新 |
-| `runner.ts` | `AgentLoop`/`AgentRunner` 主循环、模型调用、工具路由、工具结果准入、最终 `AgentResponse` |
-| `protocol.ts` | 静态 system prompt、工具名和 schema、消息拼装、上下文格式化 |
-| `providerRequestProjection.ts` | 将同一持久化状态权威投影为三类 Provider 原生请求 |
-| `taskPlan.ts` | 任务计划及步骤状态 |
-| `repairLoop.ts` | 验证失败后的修复轮次状态机 |
-| `executionMode.ts` | normal/plan 模式和计划确认流程 |
-| `approvalMode.ts` | ask/delegate 两模式、旧设置迁移与续轮尾部格式 |
-| `backgroundRunCoordinator.ts` | 显式后台任务状态 |
-
-`AgentRunner.run()` 的主要输出是 `AgentResponse`：可见回复、推理展示、DraftEdit、DraftRun proposal、任务计划、修复状态、工具轮原始回放、原生 Provider replay、usage、trace 和 Run Details。
-
-Runner 可以“提出”副作用：
-
-- 创建 `DraftEdit`；
-- 创建 `DraftRunProposal`；
-- 在 delegate 流程中生成待处理的审核结果。
-
-Runner 不能：
-
-- 直接把 DraftEdit 写入工作区；
-- 直接批准或 spawn 任意命令；
-- 把验证工具扩展成任意命令后门。
-
-### 7.2 上下文投影、缓存和容量
-
-```text
-currentRunContext.ts             合并全局/作用域指令、Skills
-contextDeduplication.ts          按优先级去重上下文来源
-historyProjection.ts             摘要 + 保护消息 + 最近轮次投影
-historyCompressor.ts             低频摘要刷新与失败回退
-historyArchive.ts                大结果归档、召回与维护
-contextUsage.ts                  基于真实投影估算上下文占用
-contextUsageCache.ts             UI 用量估算缓存
-toolResultAdmission.ts           动态工具结果准入、有效窗口校准
-toolResultShaping.ts             在压力下整形部分工具结果
-contextEpoch.ts                  同一逻辑任务的 epoch rollover
-contextWindowCalibrationStore.ts Provider context-too-long 校准持久化
-tokenEstimate.ts                 本地 token 粗估
-```
-
-[`providerRequestProjection.ts`](../src/agent/providerRequestProjection.ts) 是请求投影的权威入口。Runner、上下文用量、压缩决策、硬上限和缓存测试都应消费相同投影，不能分别重建一套 messages 或 tools。
-
-缓存稳定依赖四个冻结面：
-
-- 静态 system prompt；
-- 持久化的 `ChatSession.contextInstructions`；
-- 按会话冻结的工具 schema；
-- append-only 的历史回放字节。
-
-摘要刷新与 Context Epoch rollover 是受控缓存边界。有关字节级约束，见 [`cache_keepseek.md`](./cache_keepseek.md)。
-
-### 7.3 Provider 协议层
-
-```text
-src/agent/providers/
-├── types.ts                    ProviderClient 统一接口
-├── factory.ts                  根据来源类型选择无状态客户端
-├── deepseekClient.ts           DeepSeek Chat Completions
-├── openAiCompatibleClient.ts   OpenAI-compatible，Kimi/GLM/QwenCloud 复用
-├── ollamaClient.ts             Ollama 端点差异
-├── openAiResponsesClient.ts    OpenAI Responses
-├── responsesStreamParser.ts    Responses SSE 解析
-├── responsesTypes.ts           Responses 原生类型
-├── anthropicMessagesClient.ts  Anthropic Messages
-├── anthropicStreamParser.ts    Anthropic SSE 解析
-├── anthropicTypes.ts           Anthropic 原生类型
-└── streamParser.ts             Chat Completions SSE 解析
-```
-
-三类请求 lane：
-
-- `chat-completions`；
-- `openai-responses`；
-- `anthropic-messages`。
-
-OpenAI Responses 和 Anthropic Messages 的原生工具/推理块保存在 `ChatMessage.providerReplay`。只有来源、端点和协议 lane 一致时才原样回放；跨 lane 只保留可见文本，避免伪造不兼容的原生结构。
-
-`agent/deepseek/` 还包含 DeepSeek 类型、DSML 工具调用兜底和官方余额；`agent/kimi/` 包含 Kimi 官方余额逻辑。
-
-### 7.4 工具实现
-
-```text
-src/agent/tools/
-├── workspaceTools.ts      文件列表、目录、文本搜索、全文/行段读取
-├── semanticTools.ts       symbol、reference、document/workspace symbols
-├── gitTools.ts            status、diff、branch、patch、commit message 建议
-├── validationTools.ts     固定 compile/lint/test 验证
-└── toolAuthorization.ts   风险级别、工作区信任、外部 URI 和授权决策
-```
-
-工具 schema 定义在 `protocol.ts`，实现和路由分离：
-
-- 新增工具时，先定义稳定名称/schema；
-- 在 `runner.ts` 的工具路由中分发；
-- 具体实现放到 `tools/` 或独立子系统；
-- 返回完整结果给 evidence，再由准入控制器决定 Provider 可见信封。
-
-Git 工具保持只读。`commit`、`push` 或其他 mutation 只能成为完整可见的 DraftRun，不能加入 `gitTools.ts` 直接执行。
-
-### 7.5 Tool Evidence 与检查点
-
-```text
-src/agent/evidence/
-├── types.ts       evidence 状态、来源、内容类型和分页输入
-├── store.ts       task/session 隔离的完整结果存储和分页读取
-└── shaping.ts     确定性信封和 stable stringify
-```
-
-工具调用遵循“先意图、后执行、再交付”的顺序：
-
-1. 保存 pending intent；
-2. 执行工具；
-3. 保存完整结果、hash 和完成状态；
-4. 根据当前容量只生成一次 Provider-visible envelope；
-5. 需要更多内容时用 `keepseek_read_evidence` 分页读取。
-
-[`runCheckpoint.ts`](../src/agent/runCheckpoint.ts) 保存同一逻辑任务跨恢复/epoch 所需的宿主状态，包括任务计划、evidence、工具幂等、审批、DraftEdit/DraftRun、验证、用量和停止原因。已完成工具不能因为结果交付失败而重跑。
-
-### 7.6 子代理
-
-2026-11-01 P1：新会话与 child 进入协议 V11，新增受控宿主 capsule V1、结果合同 V2、handoff manifest V3 与独立结果索引 V1；P0 对象存储 V4、每 child 有界保存队列和统计归集保持。版本分别管理，旧热会话的 system/schema 不随轮次改写。实现与离线/现场验证区别见 [P1 整改说明](keepseek-p1-subagent-reliability.md)。
-
-```text
-src/agent/subagents/
-├── runtime.ts         为每个 child 创建隔离 AgentLoop，处理续跑和结果合并
-├── scheduler.ts       并发、深度、子节点数量和 proposal 槽位
-├── profiles.ts        research/review/proposal 及 Skill profile
-├── pathScope.ts       proposal 路径租约与冲突判断
-├── store.ts           子代理 metadata、transcript、结果分页和诊断
-├── resultEnvelope.ts  类型化结果信封与机械签收
-├── handoff.ts         单/并行有界摘要、状态与两类结果引用
-├── resultIndex.ts     独立 canonical 对象、UTF-8 分页与内容完整性
-├── contextCapsule.ts  项目/profile/workspace/精确授权的宿主继承证明
-└── types.ts           lane、状态、调用上下文和持久化类型
-```
-
-每个子代理使用新的 AgentLoop 和新的工具服务，不共享父/兄弟的可变运行状态。父会话只收到有界结果信封；完整结果保存在本地并通过分页工具读取。proposal 子代理只能准备 DraftEdit/DraftRun，不能 Apply、批准或执行。
-
-`agent/delegation.ts` 将短分工判断、自包含候选、声明依赖、宿主拒绝、回传和父验收保存在有界 TaskPlan 元数据中。主模型通过 `keepseek_delegation_checkpoint` 评估与采纳，宿主检查确定性合同和结果完整性，不证明语义独立或结论正确。未验收/partial 不能直接完成计划；显式斜杠命令未落实时准确报告，`failFast` 仍为保留参数。
-
-宿主 capsule 可传递到允许的二级解析已授权 profile，但不会整体作为模型上下文；二级仍只读且不可再委派。`resultRef` 指向 canonical child 结果；`evidenceRef` 指向不可变交付快照。profile 字符上限、宿主资源上限、父 preview 字节与用户模型输出 token 上限分别约束；结果超限生成合法 partial，不截断 JSON 或暴露不存在的原始正文引用。新 reader 不为一页结果解码私有 transcript/checkpoint。
-
-`modelRequestTimeoutSeconds` 限制单次网络请求，`agent.subagentMaxExecutionMs` 默认 5 分钟限制 child 有效执行，根 `agent.maxExecutionMs` 限制共享逻辑任务；重试、恢复和委派不能重置共享预算。
-
-更详细的隔离、调度、结果协议和用量边界统一见 [`SUBAGENTS.md`](../SUBAGENTS.md)。
-
-### 7.7 用量、缓存观测和调试
-
-| 文件 | 职责 |
-| --- | --- |
-| `usageStats.ts` | Provider usage 归一化、聚合、费用和缓存命中率 |
-| `usageLedger.ts` | 不可变请求级账本、价格快照和汇总 |
-| `usageLedgerStore.ts` | 按 session 分桶持久化账本 |
-| `subagentUsageStats.ts` | 子代理实际用量与上下文隔离估算 |
-| `cacheObservation.ts` | 请求前缀指纹、复用关系和失效归因 |
-| `logging/interactionTrace.ts` | 脱敏交互 trace |
-| `logging/runDetails.ts` | 面向 UI 的任务、工具、审批、修改、验证摘要 |
-| `behaviorEvaluation.ts` | Agent 行为评估记录与评分 |
-
-费用上限由共享 `ExecutionCostBudget` 管理，时间上限由 `ExecutionClock` 管理；主 Agent、子代理、恢复和 Context Epoch 不能重置或借用这些账本。
-
-根任务执行策略由 `shared/config.ts` + `AgentExecutionLimits` + `executionPolicy.ts` 独立管理。数值执行预算统一为 `0 = unlimited`，合并时把 unlimited 当作无穷大，只在存在正数约束时取最小值；因此 unlimited 根任务不会吞掉子代理或后台任务的正数限制。工具暴露由 `toolsEnabled`/空工具集合单独控制。正数工具额度按 segment grant 执行，累计审计计数不归零；收尾 checkpoint 是可续跑 `budget_pause`，显式时间/费用、资源失败和未知副作用仍是硬边界。
-
-## 8. `src/edits/`：文件修改事务
-
-```text
-src/edits/
-├── draftEdit.ts          DraftEdit union、构造和身份读取
-├── textPatch.ts          patch 文本解析、canonical IR、hash、应用和 inverse
-├── changeSet.ts          从一组 DraftEdit 创建 ChangeSet
-├── changeSetStore.ts     pending/Apply/Discard/Revert、恢复和持久化主管线
-├── safeFileEditor.ts     单文件 preflight、journal、原子写入、read-back 校验
-├── changeArtifactStore.ts 大内容和回滚 blob 的 content-addressed 存储
-├── draftDiffService.ts   普通 diff 与大文件 hunk-only review 文档
-└── draftEditStore.ts     DraftEdit 状态存取辅助
-```
-
-修改状态流：
-
-```text
-模型工具调用
-  → DraftEdit（未落盘）
-  → ChangeSet（可审阅、可持久化）
-  → 审批/用户 Apply
-  → SafeFileEditor preflight
-  → prepared journal
-  → base hash 再核验
-  → 同目录临时文件 + 原子替换
-  → read-back result hash
-  → applied checkpoint
-  → 可选 Revert
-```
-
-`DraftEdit` 的权威格式包括：
-
-- `text_patch_v1`：局部修改，canonical byte hunks；
-- `full_text_v1`：新建或完整替换；
-- `delete_v1`：删除；
-- `move_v1`：移动；
-- `legacy_full_text_v0`：只用于旧数据兼容。
-
-行号、原始 patch 文本和模糊匹配不是 Apply 权威。Apply 时必须依据 URI、base/result hash、size、encoding、EOL 和非重叠 byte hunks。
-
-不要绕过 `ChangeSetStore` 直接调用 VS Code 文件写 API。否则会丢失审批绑定、冲突检查、重启恢复、Diff、回滚 blob 和不确定态处理。
-
-## 9. `src/runs/`：命令提案与一次性执行
-
-```text
-src/runs/
-├── draftRunProposal.ts         规范化 executable/argv/cwd/env 并计算 specHash
-├── draftRunStore.ts            pending/running/terminal 状态、输出和持久化
-├── draftRunAuthorization.ts    审批记录 → 一次性 ExecutionPermit
-├── draftRunExecutor.ts         shell:false 的 spawn、取消、超时、输出流
-├── executionEnvironment.ts     执行与鉴权共用的环境变量构造规则
-└── draftRunBatchCoordinator.ts Ask 模式下一批命令的顺序执行和停止
-```
-
-命令状态流：
-
-```text
-keepseek_run_draft
-  → immutable DraftRunProposal
-  → DraftRun(pending)
-  → 用户批准或 delegated approval record
-  → 绑定 draftRunId + specHash 的短期一次性 permit
-  → SpawnDraftRunExecutor
-  → completed / failed / cancelled / timed_out / interrupted
-```
-
-Executor 必须使用 `spawn(executable, args, { shell: false })`。需要 shell 语法时，shell 本身必须是可见 executable，脚本是可见 argv。扩展重启后，`approved/running` 只能恢复为 interrupted，不能自动重跑。
-
-## 10. `src/approvals/`：审批 reviewer、宿主策略与单次人工决定
-
-```text
-src/approvals/
-├── approvalReviewTypes.ts    action、decision、risk、record 类型
-├── approvalReviewHash.ts     精确 action hash 和有界 review 文本
-├── approvalReviewSurface.ts  DraftEdit/DraftRun/验证/外部 URI 审核面
-├── approvalPolicy.ts         reviewer system prompt、JSON 解析、确定性拒绝
-├── oneShotTextRequest.ts     隔离、无工具的一次性 reviewer 请求
-├── approvalReviewer.ts       reviewer 服务、来源解析和记录
-├── approvalReviewStore.ts    append-only 审批记录持久化
-├── approvalCircuitBreaker.ts 连续拒绝和累计拒绝熔断
-└── authorization/
-    ├── index.ts                 宿主/Store 的统一鉴权入口
-    ├── commandSemantics.ts      executable + argv 的有限语法、参数用途与已识别效果
-    ├── commandEffects.ts        展示/reviewer 用的派生风险提示（不是授权依据）
-    ├── commandScope.ts          实际程序解析、环境、操作对象和实时范围指纹
-    ├── localGitScope.ts         本地 Git 仓库、有效配置、索引和 hooks 检查
-    ├── pathScope.ts             工作区包含关系、realpath、悬空链接及 symlink/.. 穿越
-    ├── exactOperationGrants.ts  仅内存的精确操作授权、匹配与失效
-    ├── preflight.ts             审批前的范围决策及执行前复核
-    ├── executionBoundary.ts     信任、specHash、本地 cwd 与外部 cwd 硬检查
-    └── reasons.ts               可用于 UI/测试的原因码、详情及中英文说明
-```
-
-两种当前模式（2026-11-05 合并旧版 model_review）；当前验收见 [帮我审批](keepseek-approve-for-me-verification.md)。审批模型只使用 application/用户级配置，普通子代理 default/research/review/proposal 配置保持独立。
-
-
-
-- `ask`：用户逐项点击批准；
-- `delegate` 对通过宿主准入的项目内操作写入 `host_policy` 记录。其他已绑定启动身份且可审查的操作，走独立审批 reviewer。approve 才可执行；needs_user 或 unavailable 通过绑定 runtime 的宿主单次请求交用户决定，缺少外部授权时只提供获准元数据，单次同意后再次预检。deny 只允许实质更安全且有界的替代路径。可见作用域与操作系统隔离分别记录，进程以扩展宿主权限运行。
-- 人工决定独立记为 `user_click`，关联原 needs_user／故障记录；明确安全拒绝不能转成强行执行。硬阻断不发出执行许可。
-
-无论哪种模式，底层确定性硬检查始终生效。模型判断不能关闭工作区信任、路径授权、base hash、脏编辑器、specHash、一次性 permit 或取消检查。
-
-命令分析分别表达参数角色、已识别效果和不能确定范围的原因，不拼接 argv 后搜索危险关键词，不以脚本扩展名推断执行，也不把 shell 字符串按空格拆成命令。`cat script.ts` 的文件是读取对象；`bun run script.ts` 是脚本执行；`sh -c ...` 的正文保留为内联代码。未知范围显示为未知，不自动增加写入效果。固定 validation 的原有阻断规则独立保留在 `agent/tools/validationRisk.ts`，不用于任意命令授权。
-
-自动范围判定仅覆盖有限参数集合：`cat/head/tail/wc/pwd/ls`、非递归 `grep`、字面输出命令、少量版本查询及下述本地 Git 操作。还必须满足工作区范围、无环境覆盖及实际程序身份检查；POSIX 下核实 PATH/显式路径解析后为系统目录中的 OS 所有文件或扩展宿主运行时，不能仅凭 basename。Windows 程序搜索顺序、非系统程序、递归搜索、未知选项、脚本/包生命周期均保留具体的不确定原因，结合真实启动信息走审批模型；必要时请求用户精确决定。外部读取与外部写入分别由参数用途决定，外部 cwd 本身不代表写入。
-
-在可信工作区的普通本地仓库中，参数符合规则的 `git status`、`diff`、`log`、`show`、`add` 和显式提供消息的 `commit` 可走自动批准。提交和暂存仍走独立的 DraftRun。Git 可执行文件、真实仓库、HEAD、索引、有效配置和可用 hooks 进入实时范围指纹。POSIX 系统 Git 和符合安装路径及所有权要求的 macOS Homebrew Git 可参与这项判定。原始 argv 和有效环境沿用 DraftRun 执行路径。
-
-项目内正常 hooks 可随 Git 运行，固定本地提交沿用仓库签名和钩子设置。活动签名、外部 hooks、配置 include、对象或仓库重定向、部分克隆、子模块和外部 diff/filter 等情况会退出自动通道。Push、改写历史、额外 shell 和重定向参数仍需单独处理。Git 可能刷新仓库内索引。官方行为见 [Git 配置](https://git-scm.com/docs/git-config) 和 [Git hooks](https://git-scm.com/docs/githooks)。
-
-精确范围授权绑定 session/run/target/kind/actionHash，以及规范化路径、实际程序文件身份和有效环境的派生指纹。授权不持久化；停止、切换会话/模式和重启均不复用。Provider 仅编排交互与队列；Store 在持久化和消费审批记录之后再次调用共用复核，之后才交给原有一次性 permit 与 `shell:false` executor。脚本内容及 Git 隐式配置依赖不声称可静态穷尽；精确授权承认的是这些明确说明的不确定性。此预检不是操作系统隔离机制。
-
-策略 v2 把选择的模式、审批来源和真实作用范围分开。记录消费同时校验 root task、当前 runtime、策略版本和可用的实时范围指纹。旧记录继续用于审计，恢复的草稿仍需显式处理。三协议的工具 schema 和历史字节遵守原投影规则。
-
-固定 `compile`、`lint` 和 `test` 通过专用验证入口执行，绑定项目启动快照、实际 npm/Node 身份、参数、环境和生命周期定义。常规源文件和测试内容属于可信项目验证的信任范围。入口改变时重新审查。审查后启动快照再变化时拒绝本次执行。详细边界及现场步骤见 [审批验收报告](keepseek-approval-safety-verification.md)。
-
-审批结果和真实副作用结果通过新的 user-tail 追加到下一轮，不能回写历史消息。
-
-## 11. `src/sessions/`：会话模型与持久化
-
-长任务整改后，workspace index 仍为 V2；session shard 的内容升级为 V4 manifest（兼容 V3），旁边的 `<shard>.objects/` 保存 SHA-256 不可变对象图。`sessionObjectStore.ts` 负责 scope、hash、revision、写锁及对象先于 manifest 的提交；`persistenceSnapshot.ts` 仅复用生产者不会原地修改的历史/已提交树，复制 pending journal、预算等可变状态。普通加载只展开最后一个未结束 checkpoint，其余保存 `runCheckpointArchive` 元数据；Webview 不接收 checkpoint 对象或 archive 引用。完整审计正文与对象仍在磁盘。
-
-迁移备份、失败恢复、回退边界和实际性能见 [长任务整改与验收](long-task-performance-rectification.md)。V3 不依赖旧版本能读新格式；旧版本仍标记 running 的 shard 默认拒绝写入，须使用停止写入者后的离线副本恢复流程。
-
-```text
-src/sessions/
-├── chatSessionStore.ts       当前工作区会话 CRUD、规范化、协议迁移
-├── globalSessionStorage.ts   globalStorage 中按工作区/会话分片存储
-└── sessionRetention.ts       过期清理和保留策略
-```
-
-`ChatSessionStore` 是内存中的当前工作区会话门面；`GlobalSessionStorage` 是持久化 adapter。workspace index 使用小型 V2 索引；V3/V4 session manifest 指向消息与 checkpoint 对象，避免启动时加载归档检查点。
-
-`ChatSession` 中值得特别关注的字段：
-
-- `messages`：UI 历史的权威记录；
-- `requestProtocol`：冻结的协议版本、工具 schema 和 lane；
-- `contextInstructions`：稳定的 AGENTS/Skills/Context Files 块；
-- `contextCompression`、`historyArchive`：模型投影状态，不等于 UI 历史；
-- `usageLedgerRef`、`usageStats`、`subagentUsageStats`：用量和统计；
-- `repairLoop`：验证修复状态；
-- `approvalMode`、`executionMode`、`planWorkflows`：工作流控制；
-- `lastTraceLogUri`、`promptCacheDiagnostics`：调试与缓存观测。
-
-`ChatMessage` 除可见 `content` 外，还可能保存：
-
-- `expandedContent` / `providerContent`；
-- `reasoningContent`；
-- 通用 Chat Completions 的 `toolRounds`；
-- Responses/Anthropic 的 `providerReplay`；
-- `runCheckpoint` / `runState`；
-- `runDetails`、`contextMeta` 和本轮 Skills。
-
-会话投影必须 append-only。压缩状态只影响发给模型的 projection，不得删除或改写用户在 UI 中看到的 `session.messages`。
-
-## 12. `src/shared/` 和 `src/workspace/`：横切基础设施
-
-### 12.1 `src/shared/`
-
-| 文件 | 职责 |
-| --- | --- |
-| `types.ts` | 跨目录核心领域类型的中心定义 |
-| `config.ts` | `package.json` 配置的读取、默认值和范围归一化 |
-| `modelProfiles.ts` | 模型能力画像：上下文、输出、推理/采样和压缩；不含用户执行预算 |
-| `modelContextWindowGuesses.ts` | 未显式发现时的窗口猜测 |
-| `deepSeekModels.ts` | DeepSeek 模型身份规范化 |
-| `atomicStorage.ts` | JSON 同目录临时文件原子替换 |
-| `textFileGuards.ts` | 文本/二进制/扩展名安全判断 |
-| `safeTextSnapshot.ts` | 可回滚文本快照解码 |
-| `markdown.ts` | Markdown fence 等公共解析 |
-| `i18n.ts` | 中英文文案和语言选择 |
-| `errors.ts`、`format.ts` | 公共错误与格式化 |
-| `startupPerformance.ts` | 启动阶段测量 |
-
-新增跨层状态前，先判断是否应进入 `shared/types.ts`；不要在 Provider、Runner 和 Webview 各复制一份相似结构。新增配置必须同时修改 `package.json` 和 `shared/config.ts`。
-
-### 12.2 `src/workspace/`
-
-- `workspaceDirectory.ts`：工作区目录枚举、忽略目录和资源路径；
-- `gitIgnore.ts`：`.gitignore` 规则支持。
-
-这是工作区遍历的底层公共层。新的文件搜索/列表能力应复用这里的路径和 ignore 语义。
-
-## 13. 一次请求的端到端调用链
-
-### 13.1 普通对话与只读工具
-
-```text
-Webview composer
-  → postMessage(sendPrompt)
-  → KeepseekChatViewProvider.handleMessage()
-  → sendPromptImpl()
-  → 展开文件/目录/Skill 引用
-  → 刷新 CurrentRunContext，冻结 contextInstructions/tool schema/source config
-  → AgentRequestCoordinator.createAgentRequest()
-  → AgentRunner.run()
-  → buildProviderRequestProjection()
-  → providers/factory.ts 选择 ProviderClient
-  → 流式响应 / tool call
-  → Workspace/Semantic/Git 工具
-  → EvidenceStore 保存完整结果
-  → ToolResultAdmissionController 选择信封或触发 epoch rollover
-  → 下一次模型请求
-  → AgentResponse
-  → Provider 持久化 assistant message、toolRounds/providerReplay、usage、trace
-  → postState() 更新 Webview
-```
-
-### 13.2 文件修改
-
-```text
-模型调用 edit/patch/delete tool
-  → Runner 构造 DraftEdit，不落盘
-  → createChangeSet()
-  → Provider 将 ChangeSet 注册到 ChangeSetStore
-  → UI 展示 Diff/Apply/Discard
-  → ask：用户点击；delegate：生成宿主／reviewer／单次人工审批记录
-  → ChangeSetStore 调 SafeFileEditor
-  → journal + hash + 原子写入 + read-back
-  → UI、Run Details、trace、下一轮 user-tail 同步真实结果
-```
-
-### 13.3 任意命令
-
-```text
-模型调用 keepseek_run_draft
-  → Runner 仅创建 DraftRunProposal
-  → Provider/DraftRunStore 注册 pending DraftRun
-  → UI 展示完整 spec 和风险
-  → 用户或 delegated approval 生成一次性 permit
-  → DraftRunStore 调 Executor
-  → stdout/stderr 流式写入终端和有界 transcript
-  → terminal state 持久化
-  → 根据依赖关系决定是否自动续轮
-```
-
-### 13.4 子代理
-
-```text
-主模型评估独立支线并登记自包含候选（V11 checkpoint）
-  → 主模型调用 delegate_task / delegate_parallel
-  → Runner 把调用上下文交给 SubagentRuntime
-  → Scheduler 检查深度、数量、并发和路径租约
-  → 解析并冻结子代理模型与 profile
-  → 为 child 创建隔离 AgentLoop 和工具服务
-  → child 结果存入 SubagentStore
-  → 有界 manifest 返回父 Runner（生命周期、完成程度、结构接受分别记录）
-  → 父模型按需 read_subagent_result 读取 canonical 的必要页
-  → 主模型综合核验并登记父验收；提案仍回原审批管线
-```
-
-## 14. 持久化布局
-
-以下均位于 VS Code 为扩展提供的 `globalStorageUri`，不应写入项目仓库：
-
-```text
-globalStorageUri/
-├── accounts/                         模型来源、密钥、模型缓存、余额记录
-├── subagent-settings/v1/             按工作区保存的子代理模型设置
-├── chat-sessions/v2/                 会话 manifest、workspace index、会话分片
-├── chat-sessions/v1/evidence/        工具证据 blob
-├── chat-sessions/v1/subagents/       子代理运行记录（现有兼容布局）
-├── usage-ledger/v2/                  按 session 分桶的请求级用量账本
-├── model-calibration/v*/             Provider 有效上下文窗口校准
-├── change-sets/v4/                   ChangeSet index、runtime、history、checkpoints
-├── change-artifacts/v1/blobs/        大内容回滚 blob
-├── draft-runs.json                   DraftRun 状态
-├── approval-reviews.json             审批记录
-├── interaction-logs/                 脱敏运行 trace
-├── text-references/                  终端/Output/Debug 选区临时文件
-└── dropped-file-references/          Webview 拖入文件的临时副本
-```
-
-具体版本目录可能随迁移变化，读取时应通过 Store，不要让业务层拼接这些路径。
-
-原子性和恢复原则：
-
-- JSON 持久化优先复用 `writeJsonAtomic()`；
-- 大内容以 hash 寻址，状态文件只保存引用；
-- pending、executing、completed/uncertain 分开记录；
-- 重启后只恢复可证明的状态，未知副作用不重试；
-- 密钥不进入 workspace、trace、prompt 或会话正文。
-
-## 15. 常见改动应该从哪里进入
-
-| 需求 | 首要修改点 | 必须同步检查 |
+| 入口 | 当前职责 | 变更时一起核对 |
 | --- | --- | --- |
-| 新增 VS Code 配置 | `package.json` | `shared/config.ts`、UI、测试 |
-| 新增 Webview → Host 动作 | `provider/webviewMessages.ts` | Provider `handleMessage()`、发送 fragment、状态反馈 |
-| 新增 Agent 工具 | `agent/protocol.ts` | `runner.ts` 路由、具体 service、tool authorization、缓存协议测试 |
-| 新增模型来源 | `accounts/types.ts`、`accountStore.ts` | resolver、catalog、discovery、factory、能力、余额、UI、测试 |
-| 改 Provider payload | `providerRequestProjection.ts` | 三类 replay、contextUsage、historyProjection、缓存字节测试 |
-| 改历史压缩 | `historyProjection.ts`、`historyCompressor.ts` | types、contextUsage、Runner fallback、保护消息测试 |
-| 改 evidence/epoch | `evidence/**`、`contextEpoch.ts` | checkpoint、admission、三协议配对、恢复、Run Details |
-| 改文件引用 | `context/references/**` | Webview codec/chip/拖拽/打开逻辑、外部授权测试 |
-| 改 DraftEdit | `edits/draftEdit.ts`、`textPatch.ts` | ChangeSet、SafeFileEditor、diff、hash、approval、checkpoint、Webview |
-| 改命令执行 | `runs/**` | approval、Provider、Webview、重启/取消/超时测试 |
-| 改审批模式 | `agent/approvalMode.ts`、`approvals/**` | Provider、runs/edits、user-tail、熔断、协议冻结测试 |
-| 改子代理 | `agent/subagents/**` | account resolver、protocol、usage、checkpoint、父结果准入、安全测试 |
-| 改输入区 UI | `webview/input/**` | `composition.ts` 顺序、DOM id、序列化、双编辑器行为 |
-| 改会话结构 | `shared/types.ts`、`sessions/chatSessionStore.ts` | normalize/migration、GlobalSessionStorage、Webview 状态、旧数据测试 |
+| [KeepseekChatViewProvider.ts](../src/provider/KeepseekChatViewProvider.ts) | 生命周期、`handleMessage()`、`sendPromptImpl()`、会话和运行协调、审批队列、`postState()` | 对应领域 service、消息联合类型、Host 行为测试 |
+| [webviewMessages.ts](../src/provider/webviewMessages.ts) | 唯一 Webview → Host 消息联合类型 | 发送 fragment 与 `handleMessage()`；Host 主动消息不加入此联合 |
+| [modelSelection.ts](../src/provider/modelSelection.ts) | 主模型切换事务、运行限制、lane 影响 | catalog、session requestProtocol、replay |
+| [requestTimeoutSettings.ts](../src/provider/requestTimeoutSettings.ts) | 统一模型请求超时设置 | config/i18n 与所有模型请求入口 |
+| [html.ts](../src/webview/html.ts) | CSP、nonce、资源 URI、首次 ready bootstrap | ready 之前的消息暂存和初始化门禁 |
+| [script.ts](../src/webview/script.ts) | transcript、会话、状态/设置渲染、Host 消息监听 | DOM id、状态投影、编辑重发、Apply/Discard |
+| [input/composition.ts](../src/webview/input/composition.ts) | 输入模板、样式、脚本 fragment 固定拼装顺序 | 同一 IIFE 的词法依赖和监听顺序；优先保持生成字节 |
+| [richTextShortcuts.ts](../src/webview/richTextShortcuts.ts) | 两个编辑器共享快捷键 | 输入框与编辑重发的键盘/焦点行为 |
 
-## 16. 维护时不可跨越的架构红线
+Webview 是字符串生成的页面，不是独立前端应用。`input/composer/` 管编辑/序列化，`references/` 管引用与拖拽，`commandMenu/` 管菜单，`usage/` 管用量详情，`dialogs/` 管各设置对话框。样式、模板、行为保持各自 fragment 所有权。
 
-### 16.1 缓存红线
+首次 `ready` 先获得轻量状态；会话与副作用恢复未就绪时拒绝相关写操作。消息 type、DOM id、引用格式、CSP/转义和公开控制接口都是行为契约。
 
-- system、contextInstructions、tools schema 和已发送历史必须保持字节稳定；
-- 不能为方便实现而在每轮重排工具、重写旧消息或追加动态 system 内容；
-- 时间戳、随机 UUID、绝对路径和运行原因不能进入静态 system 段；
-- 用量估算和真实请求必须共用 `buildProviderRequestProjection()`。
+当前菜单 `/` → 审批模式只有 ask/delegate；`/` → 子代理模型 → 审批模型与其他模型选择共用交互层级，但审批配置单独取用户级 `keepseek.autoApprovalReviewer`。普通子代理 default/research/review/proposal 不为审批 reviewer 提供默认值。
 
-### 16.2 副作用红线
+## 3. 来源、上下文与 Skills
 
-- 文件写入必须是 DraftEdit → ChangeSet → SafeFileEditor；
-- 任意命令必须是 DraftRun → permit → Executor；
-- reviewer 不写文件、不启动进程；
-- Runner 只准备副作用，不成为副作用执行器；
-- validation 只能运行固定 `compile`、`lint`、`test`。
+| 模块 | 权威职责 |
+| --- | --- |
+| [accountStore.ts](../src/accounts/accountStore.ts)、[modelSourceService.ts](../src/accounts/modelSourceService.ts) | 来源 CRUD、缓存与面向 UI 的来源操作 |
+| [accountResolver.ts](../src/accounts/accountResolver.ts) | 凭据、endpoint、协议与来源语义的唯一运行时解析入口；主请求、摘要、reviewer、child、发现和余额共用 |
+| [modelCatalog.ts](../src/accounts/modelCatalog.ts)、[defaultModelStore.ts](../src/accounts/defaultModelStore.ts) | sourceId+modelId 身份、能力、全局默认与项目选择 |
+| [subagentSettingsStore.ts](../src/accounts/subagentSettingsStore.ts)、[subagentModelResolver.ts](../src/accounts/subagentModelResolver.ts) | 普通子代理设置和运行前冻结 |
+| [sharedConfigPaths.ts](../src/context/sharedConfigPaths.ts)、[sharedCodexConfig.ts](../src/context/sharedCodexConfig.ts) | 宿主路径/Git scope、有界读取、TOML 白名单和来源诊断 |
+| [SharedProjectSources](../src/context/sharedProjectSources.ts)、[projectInstructions.ts](../src/agent/projectInstructions.ts) | 全局与任务 root→cwd 指令、普通 Skills 和配置的受控快照 |
+| [promptReferences.ts](../src/context/references/promptReferences.ts) | 目录→文件→Skill 的展开顺序；外部精确 URI 授权 |
+| [currentRunContext.ts](../src/agent/currentRunContext.ts)、[contextDeduplication.ts](../src/agent/contextDeduplication.ts) | 当前上下文拼装与去重，稳定 `contextInstructions` |
+| [skillDiscovery.ts](../src/skills/skillDiscovery.ts)、[skillMetadata.ts](../src/skills/skillMetadata.ts) | 标准 `.agents/skills` 根发现、YAML 元数据和策略 |
+| [skillActivationResolver.ts](../src/skills/skillActivationResolver.ts)、[skillLoader.ts](../src/skills/skillLoader.ts) | explicit→session→workspace-default→implicit；有界读取与隐式冻结 |
+| [codexPluginDiscovery.ts](../src/skills/codexPluginDiscovery.ts)、[codexPluginResources.ts](../src/skills/codexPluginResources.ts)、[pluginSkillRuntime.ts](../src/agent/pluginSkillRuntime.ts) | 同宿主本机插件安装身份、固定资源、显式任务选择和只读路由 |
 
-### 16.3 恢复红线
+任务目录来自用户选择或单根默认，不随焦点/附件变化。共享文件只读；发现/加载 Skill 不执行 scripts。普通项目 Skill 创建只准备 `SKILL.md` 与 `agents/openai.yaml` 的 ChangeSet，实际落盘仍走文件审批。插件入口不扩大通用文件、cwd、child 或写入授权。
 
-- 完成的工具不因传输失败重跑；
-- 不确定的文件/进程副作用不能自动重试；
-- 时间、费用、审批 root 和 permit 消费状态跨恢复连续；
-- Context Epoch 只能更换 Provider replay lane，不能创建伪 user 消息或新任务。
-- 工具预算 Continue 只新增可审计 segment grant；不能清空累计计数、Evidence、epoch、验证或幂等状态，也不能恢复旧 `budget_auto_continue` 伪用户消息。
+旧 `.keepseek/memory.json` 当前扫描、迁移和注入已移除；历史 `legacy-memory` 审计、旧 `contextInstructions` 与冻结 system 里的旧措辞仍需保留。不能按当前没有产品入口误删兼容读取。
 
-### 16.4 权限红线
+共享子集与版本差异查 [共享配置](keepseek-codex-shared-config.md)，插件安装与能力边界查 [插件 Skills](keepseek-codex-plugin-skills.md)，引用语法查 [文件引用](keepseek-file-reference-spec.md)。
 
-- 未信任工作区不能自动加载项目 Skill 或执行副作用；
-- 外部文件/cwd 按精确 URI 授权；
-- 所有审批路径（包括历史 model_review 恢复）不得绕过宿主硬检查；
-- Git mutation 不能伪装成只读 Git 工具。
+## 4. 请求、循环与长任务
 
-## 17. 给接手者的推荐阅读顺序
+| 关注点 | 权威入口 | 数据与边界 |
+| --- | --- | --- |
+| 请求快照 | [AgentRequestCoordinator](../src/agent/agentRequestCoordinator.ts) | 会话快照、归档与摘要刷新；送入 Runner |
+| 主循环 | [runner.ts](../src/agent/runner.ts) 的 `AgentLoop` / `AgentRunner` | 模型轮、工具路由、容量/epoch、输出接续；只生成 DraftEdit/DraftRun |
+| 静态字节 | [protocol.ts](../src/agent/protocol.ts) | system、工具名称/排序/schema、持久化 user 展开字节 |
+| 三协议投影 | [providerRequestProjection.ts](../src/agent/providerRequestProjection.ts) 的 `buildProviderRequestProjection()` | 实际 payload、token 估算、压缩、准入与硬上限共用；禁止分别重建 messages/tools |
+| 历史投影 | [historyProjection.ts](../src/agent/historyProjection.ts)、[historyCompressor.ts](../src/agent/historyCompressor.ts)、[historyArchive.ts](../src/agent/historyArchive.ts) | 摘要与保护/近期消息只改变 projection；UI 历史 append-only |
+| 容量与输出 | [outputBudget.ts](../src/shared/outputBudget.ts)、[requestBudget.ts](../src/agent/requestBudget.ts)、[toolResultAdmission.ts](../src/agent/toolResultAdmission.ts) | 用户模型输出上限、真实投影、来源隔离有效窗口；不恢复固定累计结果预算 |
+| context-too-long | [contextWindowCalibrationStore.ts](../src/agent/contextWindowCalibrationStore.ts) | 按 source/endpoint/model 校准；无进展要改变策略 |
+| Evidence | [evidence/store.ts](../src/agent/evidence/store.ts)、[shaping.ts](../src/agent/evidence/shaping.ts) | intent→执行→完整 evidence/hash→一次固定 Provider-visible envelope；分页/作用域复核 |
+| epoch/恢复 | [contextEpoch.ts](../src/agent/contextEpoch.ts)、[runCheckpoint.ts](../src/agent/runCheckpoint.ts) | 同 task 保留计划、幂等、审批、副作用、验证和用量；已完成工具不重跑、未知副作用不重试 |
+| 执行控制 | [executionMode.ts](../src/agent/executionMode.ts)、[executionPolicy.ts](../src/agent/executionPolicy.ts)、[repairLoop.ts](../src/agent/repairLoop.ts)、[backgroundRunCoordinator.ts](../src/agent/backgroundRunCoordinator.ts) | normal/plan 与审批正交，预算 grant、修复和显式后台任务 |
 
-### 17.1 第一次理解项目
+`providers/factory.ts` 根据来源选择客户端；Chat Completions、OpenAI Responses、Anthropic Messages 各有请求/流解析实现。`toolRounds` 保存 Chat Completions 工具轮，`providerReplay` 保存 Responses/Anthropic 原生块；仅同 protocol/source/endpoint lane 回放。Ollama 与官方预设的差异留在客户端/能力层。
 
-1. [`AGENTS.md`](../AGENTS.md)：先掌握不可违反的约束；
-2. [`src/extension.ts`](../src/extension.ts)：理解激活入口；
-3. `KeepseekChatViewProvider` 的 constructor、`handleMessage()`、`sendPromptImpl()` 和状态推送部分；
-4. [`agentRequestCoordinator.ts`](../src/agent/agentRequestCoordinator.ts)；
-5. [`providerRequestProjection.ts`](../src/agent/providerRequestProjection.ts)；
-6. [`runner.ts`](../src/agent/runner.ts) 的 `run()`、`runLoop()`、`createModelResponse()`、`handleToolCall()`；
-7. 根据任务选择 `edits/`、`runs/`、`approvals/`、`subagents/` 或 `sessions/` 深读；
-8. 阅读相应 `test/*.test.ts`，确认真实契约和兼容行为。
+`agent/tools/` 负责 workspace/semantic/Git 读取和固定 compile/lint/test 验证。schema 在 `protocol.ts`，Runner 负责分发，独立 service 负责具体实现；Git mutation 只能生成 DraftRun。
 
-### 17.2 AI 智能体开始改代码前
+调用链：真实 user → 引用展开与同字节持久化 → Coordinator → Runner → 唯一请求投影 → 原生客户端 → 工具事务/Evidence → `AgentResponse` → Provider 保存消息/replay/用量并推送状态。摘要刷新与 epoch 是受控缓存边界，不是新任务或授权。
 
-1. 用目录归属判断修改应落在哪一层；
-2. 搜索目标类型/消息/工具名的所有引用，而不是只改首个命中文件；
-3. 检查 `AGENTS.md` 的“改动影响面清单”；
-4. 对可能改变 Provider 字节的修改，先明确缓存边界；
-5. 对可能产生副作用的修改，先明确 Draft/审批/执行边界；
-6. 检查对应 normalize、migration、store 和重启恢复路径；
-7. 增加或更新最接近该契约的测试；
-8. 至少运行 compile、lint 和相关测试，范围足够时运行完整测试套件。
+## 5. 审批与副作用
 
-## 18. 测试目录如何映射架构
+| 子系统 | 当前职责 |
+| --- | --- |
+| [approvalMode.ts](../src/agent/approvalMode.ts) | ask/delegate 归一化、稳定 user-tail、易失性 `DelegatedApprovalQueue` |
+| [approvalReviewTypes.ts](../src/approvals/approvalReviewTypes.ts)、[approvalReviewHash.ts](../src/approvals/approvalReviewHash.ts)、[approvalReviewSurface.ts](../src/approvals/approvalReviewSurface.ts) | 精确 action、完整 canonical hash、有界 review 面 |
+| [authorization/](../src/approvals/authorization/index.ts) | 信任、外部精确范围、实际程序/环境身份、command effects、实时 preflight 和最终复核 |
+| [approvalPolicy.ts](../src/approvals/approvalPolicy.ts)、[approvalReviewer.ts](../src/approvals/approvalReviewer.ts)、[oneShotTextRequest.ts](../src/approvals/oneShotTextRequest.ts) | 宿主策略/独立无工具 reviewer、JSON 决定、来源解析与真实记录 |
+| [manualApproval.ts](../src/approvals/manualApproval.ts)、[approvalProcessing.ts](../src/approvals/approvalProcessing.ts) | runtime 绑定的单次人工生命周期；`createApprovalProcessing()` / `isCompletedApprovalBatch()` 管批次初始化与幂等判定、依赖及有界补规划状态 |
+| [approvalReviewStore.ts](../src/approvals/approvalReviewStore.ts)、[approvalCircuitBreaker.ts](../src/approvals/approvalCircuitBreaker.ts) | append-only 审计、消费绑定、拒绝熔断 |
+| [draftEdit.ts](../src/edits/draftEdit.ts)、[textPatch.ts](../src/edits/textPatch.ts) | 版本化 DraftEdit 与 canonical byte hunks；URI/base/result hash/size/encoding/EOL 是 Apply 权威 |
+| [changeSetStore.ts](../src/edits/changeSetStore.ts)、[safeFileEditor.ts](../src/edits/safeFileEditor.ts) | ChangeSet 状态、preflight、prepared journal、base 复核、原子替换与 read-back；大内容由 artifact store 寻址 |
+| [draftRunProposal.ts](../src/runs/draftRunProposal.ts)、[draftRunStore.ts](../src/runs/draftRunStore.ts) | immutable executable/argv/cwd/env/specHash、pending/运行/终态与输出 |
+| [draftRunAuthorization.ts](../src/runs/draftRunAuthorization.ts)、[draftRunExecutor.ts](../src/runs/draftRunExecutor.ts) | draftRunId+specHash 绑定的短时单次 permit；`spawn(..., { shell:false })`、取消/超时 |
+| [gitReleaseBatch.ts](../src/runs/gitReleaseBatch.ts)、[gitReleaseAuthorization.ts](../src/runs/gitReleaseAuthorization.ts)、[localGitCommit.ts](../src/runs/localGitCommit.ts) | Git 本地提交/发布的精确任务意图、依赖批次、证据与范围；不成为另一条执行通道 |
 
-`test/` 基本按行为契约而不是源码文件一一命名：
+ask 由用户逐项/批量批准；delegate 对符合宿主规则的常规操作先写 `host_policy`，其余可核实动作自动交独立 reviewer。approve、needs_user、deny、unavailable 含义不同；有界补证后仍无法判断时，仅宿主创建绑定 session/root task/segment/target/hash/scope/runtime 的单次人工请求。安全拒绝不能被人工强行放行。人工批准保持模式，不扩大永久权限，执行前仍复核。
 
-- 缓存与投影：`cacheByteStability`、`protocolCache`、`historyProjection`、`historyCompressor`、`modelLaneMigration`；
-- Provider：`openAiResponses`、`anthropicMessages`、`kimiGlmProviders`、`qwenCloudProvider`；
-- 编辑：`textPatch`、`changeSet`、`safeFileEditor`、`applyWorkflow`、`deleteDraftEdit`；
-- 命令与审批：`draftRun*`、`approvalMode`、`approvalReviewer`、`toolAuthorization`；
-- 长任务：`longRunningAgent`、`repairLoop`、`runnerValidationState`、`toolResultBudget`；
-- 上下文：`fileReference`、`referenceResources`、`currentRunContext`、`projectInstructions`、`skill*`；
-- 子代理：`subagentArchitecture`、`subagentSafety`、`subagentUsage*`；
-- 状态与观测：`chatSessionStore`、`usageStats`、`interactionTrace`、`runDetails`、`startupPerformance`。
+所有路径保留信任、外部 URI/cwd、脏编辑器、hash/状态、取消等硬检查。进程使用扩展宿主账号权限，无操作系统沙箱。重启只恢复说明与可证明状态，不恢复队列、批准或 permit；关闭 Webview 保留人工等待。决定和真实结果只追加到下一条真实 user 的固定 tail。
 
-改动时应优先找到最接近的现有契约测试扩展断言，而不是另起一套只覆盖实现细节的测试。
+文件链：模型草案 → ChangeSet → 审批/Apply → SafeFileEditor → journal/hash/原子写/read-back → 真实结果。命令链：模型草案 → pending DraftRun → 审批 → 单次 permit → executor → 终态。Runner/Provider 不直接写工作区；shell 语法必须以 shell executable 与完整 argv 可见。
 
-## 19. 专题文档索引
+## 6. 子代理与用量
 
-- [`keepseek-agent-runtime-workflow.md`](./keepseek-agent-runtime-workflow.md)：Agent 请求、工具、副作用、长任务和恢复；
-- [`keepseek-api-payload-reference.md`](./keepseek-api-payload-reference.md)：三类 Provider 的真实 payload 与引用展开；
-- [`cache_keepseek.md`](./cache_keepseek.md)：缓存前缀、压缩、投影和指纹；
-- [`keepseek-file-reference-spec.md`](./keepseek-file-reference-spec.md)：文件引用语法；
-- [`SUBAGENTS.md`](../SUBAGENTS.md)：子代理架构、profile、安全、恢复与用量。
+`SubagentRuntime` 为每个 child 创建新的 AgentLoop/工具服务。`scheduler.ts` 管深度、并发、数量和 proposal 槽位；`profiles.ts` 管研究/代码审查/提案能力；`pathScope.ts` 管路径租约。child 接收自包含任务、项目/profile 和精确授权，不复制父历史、推理或兄弟可变状态；proposal 只准备，不 Apply/批准/执行。
 
-## 20. 一句话总结
+`delegation.ts` 保存候选/依赖/父采纳；`contextCapsule.ts` 保存宿主继承证明；`resultEnvelope.ts` 做结构签收，`handoff.ts` 交付有界 manifest，`resultIndex.ts` 保存 canonical 结果与 UTF-8 分页，`store.ts` 管持久化与恢复。`resultRef` 指 canonical 结果，`evidenceRef` 指不可变交付快照。完整权限与父验收见 [SUBAGENTS](../SUBAGENTS.md)。
 
-KeepSeek 的架构核心不是“一个会调用模型的 Webview”，而是一组明确隔离的状态机：会话负责持久历史，投影层负责稳定字节，Runner 负责模型与工具循环，evidence/epoch 负责大结果和长任务，edits/runs 负责受审批的副作用，Provider 负责把这些状态协调成用户可见且可恢复的完整工作流。
+用量权威分层：`usageLedger.ts` / `usageLedgerStore.ts` 保存请求级幂等账本；`usageStats.ts` 聚合官方/参考费用与缓存数据；`subagentUsageStats.ts` 归集 child；`cacheObservation.ts` 记录前缀指纹。`ExecutionClock` / `ExecutionCostBudget` 与 `sessions/userTaskBudget.ts` 保护跨 child、续跑、恢复、epoch 的根任务上限；逻辑任务有效计时由 `sessions/executionTimeStats.ts`、`userTask.ts` 管理，UI 投影不能重定义口径。正费用上限遇不可计价来源 fail-closed。
 
-子代理统计、V4 小对象打包与恢复索引、增量账本及离线性能验收见 [P0 整改说明](keepseek-p0-subagent-persistence.md)。
+## 7. 会话、持久化与数据权威
+
+| 模块/数据 | 权威与边界 |
+| --- | --- |
+| [chatSessionStore.ts](../src/sessions/chatSessionStore.ts) | 当前 workspace 会话门面、内存状态、选择与保存协调；除原生 replay 外的 normalize/migration 仍在此 |
+| [providerReplayNormalization.ts](../src/sessions/providerReplayNormalization.ts) | 原生 Responses/Anthropic replay 的纯完整校验、容量限制和复制；Store/Provider 共用，禁止接受部分非法 replay |
+| [globalSessionStorage.ts](../src/sessions/globalSessionStorage.ts) | 按 workspace/session 分片的持久化 adapter，索引/全局 manifest V2 |
+| [sessionObjectStore.ts](../src/sessions/sessionObjectStore.ts) | session shard V4 对象图、hash/scope/revision/写锁、对象先于 manifest 提交；兼容 V3 与旧 V2 迁移 |
+| [persistenceSnapshot.ts](../src/sessions/persistenceSnapshot.ts)、[coalescedWriter.ts](../src/sessions/coalescedWriter.ts) | 不可变复用/可变状态复制、保存队列与失败/flush 语义；不能替换为普通 debounce |
+| [sessionRetention.ts](../src/sessions/sessionRetention.ts) | 过期清理、保留策略与状态审计 |
+| `ChatSession.messages` | UI 持久历史，append-only；`contextCompression` / `historyArchive` 仅是请求投影状态 |
+| `requestProtocol` / `contextInstructions` | 冻结 lane/工具 schema 与稳定上下文字节；normalizer 不反写旧前缀 |
+| `runCheckpoint` / `runCheckpointArchive` | 当前可恢复状态与归档引用；普通加载仅展开最新未结束 checkpoint，UI 不接收完整对象图 |
+
+默认存储由各 Store 通过 `globalStorageUri` 解析。来源/子代理设置、`chat-sessions/v2` 索引及 shard、兼容 `chat-sessions/v1` evidence/child、`usage-ledger/v2`、`change-sets/v4`、DraftRun 和审批文件各由所属 Store 管理。业务层不拼版本路径，也不在项目仓库保存密钥或真实会话。JSON 优先 `writeJsonAtomic()`；未知副作用不自动重试，迁移与恢复在副本验证。
+
+## 8. 改动与测试路由
+
+| 改动 | 首要入口 | 必须联查的现有回归 |
+| --- | --- | --- |
+| 配置/来源/模型 | package contributions、`shared/config.ts`、`accounts/` | `config`、`accountResolver`、`modelCatalog`、`modelSelection` |
+| Provider payload/replay/预算 | `providerRequestProjection.ts`、`protocol.ts`、`providers/` | `cacheByteStability`、`protocolCache`、`modelLaneMigration`、三协议测试、`modelOutputBudget` |
+| 工具/evidence/epoch | `protocol.ts`、Runner 路由、独立 service | `toolResultBudget`、`p1ProtocolDelivery`、`longRunningAgent`、恢复测试 |
+| 审批/文件/命令 | `approvals/`、`edits/`、`runs/` | `approvalMode`、`approvalReviewer`、`taskApprovalIntegration`、`toolAuthorization`、`applyWorkflow`、`draftRun*` |
+| 子代理 | `subagents/`、resolver、delegation | `subagentSafety`、`p1Delegation`、`p1SubagentInheritance`、`p1SubagentResultReader`、`subagentUsageRuntime` |
+| 引用/Skills/输入 | `context/references/`、`skills/`、`webview/input/` | `fileReference`、`skill*`、`codexPlugin*`、`inputComposition`、`richTextShortcuts` |
+| 会话结构/保存 | `shared/types.ts`、`sessions/`、checkpoint | `chatSessionStore`、`longTaskPerformance`、`p0SubagentPersistence`、`executionTimeStats` |
+| 用量/观测 | ledger、usage、logging | `usageStats`、`subagentUsageStats`、`interactionTrace`、`runDetails` |
+| 打包/资源 | `.vscodeignore`、`scripts/package-market.js`、`verify-vsix.js` | 市场包入口/依赖/动态 SVG 清单及包内容比较 |
+
+测试文件统一位于 `test/<name>.test.ts`，默认执行清单在 `test/runTests.ts`。缓存冻结 JSON、不同协议/scope/故障时序与历史迁移不是因文件名相似即可删去的重复测试。独立脚本保留各自使用入口；运行前检查网络、报告写入和文件副作用。
+
+默认验证：compile、lint、build:test、test、package:market；变更前先搜索全引用和消息/工具字符串，明确不变式，选择最接近的行为回归。真实模型、原生 UI 与跨平台验证应单列现场证据。历史记录及适用范围统一从 [文档导航](README.md#历史证据) 按需进入。

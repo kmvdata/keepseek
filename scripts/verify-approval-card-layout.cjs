@@ -36,7 +36,8 @@ function client() {
   let revision = 0;
   const paint = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   const check = (condition, label) => { if (!condition) throw new Error(label); };
-  function sample(language, mode, reason, status = 'needs_authorization') {
+  // V2 delegate is the current processing contract. V1 remains a display-only audit fixture.
+  function sample(language, mode, reason, status = 'needs_authorization', version = 2) {
     const runs = ['single', 'batch-A', 'batch-B'].map(id => ({ id, sessionId: 'layout', agentRunId: 'run',
       messageId: 'assistant', specHash: 'hash-' + id, status: 'pending', spec: {
         executable: 'npm', args: ['run', 'lint'], cwdLabel: 'signal_tracker_spa', cwdUri: 'file:///test/signal_tracker_spa', timeoutMs: 120000,
@@ -50,8 +51,9 @@ function client() {
         entries: runs.slice(1).map(r => ({ draftRunId: r.id, specHash: r.specHash })), currentIndex: 0, remaining: 2 }],
       changeSets: [{ id: 'set', messageId: 'assistant', status: 'pending', operationSummary: 'Layout fixture',
         files: [{ id: 'edit', status: 'pending', action: 'modify', label: 'src/example.ts', uri: 'file:///test/example.ts', reason: runs[0].spec.reason }] }],
-      approvalProcessing: { version: 1, runId: 'run', rootTaskId: 'task', mode,
+      approvalProcessing: { version, runId: 'run', rootTaskId: 'task', mode,
         status: status === 'pending' ? 'processing' : 'blocked', updatedAt: '',
+        canResume: version === 2 && mode === 'delegate' && status === 'needs_authorization',
         targets: [...runs.map(r => ({ id: r.id, kind: 'command', status, reason })), { id: 'edit', kind: 'edit', status, reason }] }
     };
   }
@@ -70,13 +72,13 @@ function client() {
       const note = card.querySelector('.approval-state-note');
       const heading = card.querySelector('.draft-run-heading, .draft-chip-content');
       check(note && note.textContent === reason, 'complete note');
-      check(!actions.contains(note) && [...actions.children].every(n => n.tagName === 'BUTTON'), 'buttons only');
-      const h = heading.getBoundingClientRect(), n = note.getBoundingClientRect(), a = actions.getBoundingClientRect();
+      check(!actions || (!actions.contains(note) && [...actions.children].every(n => n.tagName === 'BUTTON')), 'buttons only');
+      const h = heading.getBoundingClientRect(), n = note.getBoundingClientRect(), a = actions?.getBoundingClientRect();
       check(h.width >= rect.width * 0.8 && n.width >= rect.width * 0.8, 'heading and note use card width');
-      check(n.top >= h.bottom - 1 && a.top >= n.bottom - 1, 'ordered nonoverlapping rows');
+      check(n.top >= h.bottom - 1 && (!a || a.top >= n.bottom - 1), 'ordered nonoverlapping rows');
       check(card.scrollWidth <= card.clientWidth + 1, 'card has no horizontal overflow');
       check(Math.abs(parseFloat(frame.contentWindow.getComputedStyle(note).marginLeft)) < 1, 'no file icon indent');
-      const buttons = [...actions.querySelectorAll('button')];
+      const buttons = actions ? [...actions.querySelectorAll('button')] : [];
       for (const button of buttons) {
         const b = button.getBoundingClientRect();
         check(b.width > 0 && b.height > 0 && b.left >= rect.left && b.right <= rect.right + 1, 'button inside card');
@@ -101,51 +103,62 @@ function client() {
     }
     return measurements;
   }
-  async function show(width, language, mode, reason, scale) {
+  async function show(width, language, mode, reason, scale, version = 2) {
     frame.style.width = width + 'px';
     frame.contentDocument.documentElement.style.zoom = scale;
-    update(sample(language, mode, reason));
+    update(sample(language, mode, reason, 'needs_authorization', version));
     await paint();
   }
   document.querySelector('#matrix').onclick = async () => {
     const results = []; output.textContent = 'Running…';
     try {
-      for (const width of widths) for (const language of ['zh-CN', 'en']) for (const mode of ['delegate', 'model_review'])
+      const contracts = [{ mode: 'delegate', version: 2 }, { mode: 'delegate', version: 1 }, { mode: 'model_review', version: 1 }];
+      for (const width of widths) for (const language of ['zh-CN', 'en']) for (const { mode, version } of contracts)
         for (const scale of [1, 1.25, 1.5]) for (let reasonIndex = 0; reasonIndex < reasons.length; reasonIndex++) {
-          await show(width, language, mode, reasons[reasonIndex], scale);
-          results.push({ width, language, mode, scale, reasonIndex, cards: measure(reasons[reasonIndex], scale) });
+          await show(width, language, mode, reasons[reasonIndex], scale, version);
+          const doc = frame.contentDocument;
+          const resumes = [...doc.querySelectorAll('.draft-run-actions button, .draft-chip-actions button')].filter(b => !b.dataset.draftRunAction && !b.dataset.editAction);
+          check(resumes.length === (version === 2 ? 4 : 0), 'only current delegate processing offers resume');
+          results.push({ width, language, mode, version, scale, reasonIndex, cards: measure(reasons[reasonIndex], scale) });
         }
       // State updates travel through the actual Host-message handler; clicks reach only the synthetic Host.
       for (const status of ['pending', 'failed', 'denied', 'needs_authorization']) {
-        update(sample('en', 'model_review', status === 'needs_authorization' ? longReason : status, status));
+        update(sample('en', 'delegate', status === 'needs_authorization' ? longReason : status, status));
         await paint();
         const doc = frame.contentDocument;
         check(doc.querySelectorAll('.approval-state-note').length === 4, 'no stale/duplicate notes');
         const resumes = [...doc.querySelectorAll('.draft-run-actions button, .draft-chip-actions button')].filter(b => !b.dataset.draftRunAction && !b.dataset.editAction);
-        check(resumes.length === (status === 'denied' || status === 'pending' ? 0 : 4), 'state-specific buttons');
+        check(resumes.length === (status === 'needs_authorization' ? 4 : 0), 'state-specific buttons');
         if (status === 'needs_authorization') {
           const host = frame.contentWindow.fixtureMessages; host.length = 0;
           resumes.forEach(b => b.click());
-          check(host.length === 4 && host.every(m => m.type === 'resumeApprovalProcessing'), 'authorization messages');
-          check(['single', 'batch-A', 'batch-B', 'edit'].every(id => host.some(m => m.authorizeTargetId === id)), 'exact target IDs');
+          check(host.length === 4 && host.every(m => m.type === 'resumeApprovalProcessing' && m.authorizeTargetId === undefined), 'resume requests do not grant scope');
         }
       }
       output.textContent = JSON.stringify({ passed: results.length, cardMeasurements: results.length * 4, userAgent: navigator.userAgent,
         scaleMethod: 'CSS zoom (not native VS Code zoom)', results }, null, 2);
       document.querySelector('#summary').textContent = 'PASS: ' + results.length + ' layouts; ' + results.length * 4 + ' card measurements; dynamic updates and synthetic clicks.';
-      await show(380, 'zh-CN', 'model_review', longReason, 1);
+      // Ask retains explicit command/file actions and does not render delegate processing notes.
+      const ask = sample('en', 'ask', longReason);
+      ask.approvalProcessing = null;
+      update(ask);
+      await paint();
+      const askDoc = frame.contentDocument;
+      check(askDoc.querySelectorAll('.approval-state-note').length === 0, 'ask has no automatic notes');
+      check(askDoc.querySelectorAll('[data-draft-run-action="approveDraftRun"]').length === 6, 'ask command actions preserved');
+      await show(380, 'zh-CN', 'delegate', longReason, 1);
     } catch (error) {
       document.querySelector('#summary').textContent = 'FAIL: ' + error.message;
       output.textContent = JSON.stringify({ passedBeforeFailure: results.length, error: error.stack, lastPassed: results.at(-1) }, null, 2);
     }
   };
   document.querySelector('#preview').onclick = () => show(Number(document.querySelector('#width').value), document.querySelector('#language').value,
-    'model_review', reasons[Number(document.querySelector('#reason').value)], Number(document.querySelector('#scale').value));
-  frame.onload = () => show(380, 'zh-CN', 'model_review', longReason, 1);
+    'delegate', reasons[Number(document.querySelector('#reason').value)], Number(document.querySelector('#scale').value));
+  frame.onload = () => show(380, 'zh-CN', 'delegate', longReason, 1);
 }
 const page = `<!doctype html><meta charset="utf-8"><title>KeepSeek approval layout verification</title>
 <style>body{font:14px system-ui;background:#eee;color:#111}iframe{border:0;height:1600px;display:block}pre{white-space:pre-wrap;max-height:300px;overflow:auto}button,select{margin:4px}</style>
-<p id="summary">Synthetic Host; no commands or edits can execute. Actual generated Webview below.</p>
+<p id="summary">Synthetic Host; no commands or edits can execute. Current delegate/V2 and display-only legacy V1 audit fixtures; ask actions are checked separately.</p>
 <button id="matrix">Run layout matrix</button>
 <label>Width<select id="width">${[320,379,380,480,600,920].map(w=>`<option ${w===380?'selected':''}>${w}</option>`).join('')}</select></label>
 <label>Language<select id="language"><option>zh-CN</option><option>en</option></select></label>

@@ -2,7 +2,7 @@
 
 KeepSeek 是 VS Code 侧边栏编程 Agent，支持多模型/协议、项目上下文、只读工具、隔离子代理及经审批的文件修改和命令执行。
 
-本文件是仓库内 AI/维护者的高优先级约定，须低于默认 4000-token 项目指令预算。架构见 `doc/keepseek-code-architecture.md`；源码与本文冲突时先核实实现，不凭旧文档猜测。
+本文件是仓库内 AI/维护者的高优先级约定，须低于默认 4000-token 项目指令预算。定位从 `doc/README.md` → `doc/keepseek-code-architecture.md`；源码冲突先核实，不凭旧文档猜测。
 
 ## 1. 开始工作
 
@@ -41,7 +41,7 @@ src/agent/             请求投影、模型/工具循环、压缩、evidence/ep
 src/approvals/         reviewer/host policy、action hash、记录和熔断
 src/edits/             DraftEdit、canonical Patch IR、ChangeSet、SafeFileEditor
 src/runs/              DraftRun、风险、一次性 permit、store、batch、spawn
-src/sessions/          会话、协议迁移、分片持久化、retention
+src/sessions/          会话、纯 replay 归一化、协议迁移、分片持久化
 src/shared/            跨层 types/config/i18n/文本守卫/原子存储
 test/                  按行为契约组织的回归测试
 ```
@@ -106,9 +106,9 @@ test/                  按行为契约组织的回归测试
 - **引用/输入**：context/references + Webview references/composer codec + opener/授权；手测拖拽、@、编辑重发。
 - **Webview 消息**：webviewMessages 联合类型 + Provider `handleMessage()` + 发送/接收 fragment + i18n。
 - **DraftEdit**：draftEdit/textPatch/artifact + ChangeSet/SafeFileEditor/Diff + approval hash/surface + checkpoint/subagent/UI。
-- **审批/DraftRun**：approval store/reviewer + runs/* + Provider/Runner/authorization + user-tail/usage/UI。
+- **审批/DraftRun**：approvalProcessing 批次规则 + store/reviewer + runs/* + Provider/Runner/authorization + user-tail/usage/UI。
 - **子代理**：subagents runtime/scheduler/store/profile/pathScope + model resolver + protocol/admission/checkpoint/usage。
-- **会话结构**：`shared/types.ts` + chatSessionStore normalize/migration + GlobalSessionStorage + UI state + 旧数据测试。
+- **会话结构**：`shared/types.ts` + chatSessionStore normalize/migration + GlobalSessionStorage + UI/旧数据测试；原生 replay 归一化由 `sessions/providerReplayNormalization.ts` 负责。
 
 ## 5. 验证与交付
 
@@ -120,6 +120,8 @@ test/                  按行为契约组织的回归测试
 - 测试应守行为契约，优先扩展最接近的现有 `test/*.test.ts`；不要只断言内部实现。
 
 ## 6. 按需阅读
+
+- `doc/README.md`：当前专题、分维度版本权威、历史证据边界
 
 - `doc/keepseek-code-architecture.md`：目录、依赖、调用链、持久化与改动定位
 - `doc/keepseek-agent-runtime-workflow.md`：Agent 运行时、长任务与恢复

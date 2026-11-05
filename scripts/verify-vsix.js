@@ -17,6 +17,12 @@ for (const dependencyName of Object.keys(packageJson.dependencies || {})) {
   requiredEntries.add(normalizeVsixEntry(path.posix.join('extension/node_modules', dependencyName, 'package.json')));
 }
 
+// html.ts constructs provider icon names dynamically. Verify the complete resource
+// directory instead of maintaining a second list of supported providers here.
+for (const resource of fs.readdirSync(path.join(root, 'resources'))) {
+  if (/\.(svg|png)$/u.test(resource)) requiredEntries.add(`extension/resources/${resource}`);
+}
+
 const forbiddenEntries = [
   'extension/out/agentProtocol.js',
   'extension/out/agentRunner.js',
@@ -30,14 +36,15 @@ const forbiddenEntries = [
 const entries = readZipEntries(vsixPath);
 const missing = [...requiredEntries].filter((entry) => !entries.has(entry));
 const stale = forbiddenEntries.filter((entry) => entries.has(entry));
+stale.push(...[...entries].filter((entry) => entry.startsWith('extension/.reasonix/')));
 
 if (missing.length || stale.length) {
   if (missing.length) {
     console.error(`VSIX is missing required runtime files:\n${missing.map((entry) => `  - ${entry}`).join('\n')}`);
   }
   if (stale.length) {
-    console.error(`VSIX contains stale legacy build outputs:\n${stale.map((entry) => `  - ${entry}`).join('\n')}`);
-    console.error('Run npm run build so out/ is cleaned before packaging.');
+    console.error(`VSIX contains excluded build outputs or local metadata:\n${stale.map((entry) => `  - ${entry}`).join('\n')}`);
+    console.error('Run bun run package:market so out/ is cleaned before packaging.');
   }
   process.exit(1);
 }

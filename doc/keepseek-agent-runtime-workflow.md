@@ -1,7 +1,5 @@
 # KeepSeek Agent 运行时工作流
 
-2026-10-31：无进展停止的普通 Continue 仍被拒绝；真实新 user 可在兼容来源/工作区/授权条件下恢复同 task，沿用预算和进展窗口，未知工具或未完成 continuation 仍拒绝。迁移在 manifest 提交前可安全取消，停止写入者是升级前提。实际回放、故障与现场边界见 [续接验收](long-task-rectification-resume-report.md)。
-
 > 本文是运行时主线的交接文档：从扩展激活、请求构建、流式工具循环，到审批、副作用、长任务和崩溃恢复。目录职责见 [`keepseek-code-architecture.md`](keepseek-code-architecture.md)，请求字节与上下文容量见 [`cache_keepseek.md`](cache_keepseek.md)，子代理见 [`../SUBAGENTS.md`](../SUBAGENTS.md)。
 
 ## 1. 运行时边界
@@ -52,7 +50,7 @@ VS Code / Webview
 
 1. 创建账户、模型、会话、ChangeSet、DraftRun、审批、Skill 和 Usage Ledger 等服务。
 2. 恢复持久化记录；对重启时仍处于中间态的写入、命令和 Agent run 做保守归一化。
-3. 注册 `keepseek.chatView`、工作区命令、右键引用命令与 URI 打开处理。
+3. 注册 `keepseek.chat` View、工作区命令、右键引用命令与 URI 打开处理。
 4. 建立 Provider 与 Webview，推送配置、账户、会话、变更和运行状态。
 5. 监听配置、工作区、编辑器和会话变化，更新宿主状态。
 
@@ -81,7 +79,7 @@ Coordinator 先按模型画像刷新摘要，再由 `buildProviderRequestProject
 - OpenAI Responses；
 - Anthropic Messages。
 
-实际请求、token 估算、工具结果准入和缓存观测共用这一投影。当前新会话 request protocol/tool schema 是 V11；V10 引入子代理 UTF-8 byte-offset 分页，V11 增加分工评估与父验收合同。热旧会话只在受控边界迁移。现场核验方法及尚未完成的验证见 [P1 现场验收](keepseek-p1-field-acceptance.md)。
+实际请求、token 估算、工具结果准入和缓存观测共用这一投影。当前父会话 request protocol/tool schema 均为 V13（`providerRequestProjection.ts`），child runtime 协议仍为 V11（`subagents/runtime.ts`）。V10 引入子代理 UTF-8 byte-offset 分页，V11 增加分工评估与父验收合同，V12 增加插件 Skill 读取入口，V13 更新两模式审批的交付提示。热旧会话只在受控边界迁移；这些版本不等同于结果合同、存储或审批策略版本，权威来源见 [版本与文档导航](README.md#版本维度)。P1 当时的现场核验限制见 [历史验收记录](keepseek-p1-field-acceptance.md)。
 
 ### 4.3 来源解析
 
@@ -208,7 +206,7 @@ spawn(executable, args, { shell: false })
 | `ask` | 用户 | 默认；逐项或批量批准 |
 | `delegate`（帮我审批） | 宿主策略、独立审批 reviewer、必要时用户 | 常规操作直批；其余可审查操作自动送审，区分 approve/needs_user/deny/unavailable。必要时绑定当前 runtime 的精确单次人工请求，之后复核并续跑同一任务 |
 
-旧 `model_review` 当前设置迁移为 ask，仅保留历史审计；审批模型与普通子代理模型独立。等待用户暂停有效计时，关闭 Webview 不取消等待；重启不恢复旧批准、队列或 permit。详细恢复与验收见 [帮我审批](keepseek-approve-for-me-verification.md)。
+旧 `model_review` 当前设置迁移为 ask，仅保留历史审计；审批模型位于 `/` → 子代理模型 → 审批模型，配置仅取用户级 `keepseek.autoApprovalReviewer`，与普通子代理 default/角色设置独立。follow-main 跟随执行段的实际主模型。等待用户暂停有效计时，关闭 Webview 不取消等待；重启不恢复旧批准、队列或 permit。详细恢复与验收见 [帮我审批](keepseek-approve-for-me-verification.md)。
 
 共同规则：
 

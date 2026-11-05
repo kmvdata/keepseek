@@ -441,8 +441,8 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
 }
 function elements(cards: UiElement[]): UiElement[] { return cards.flatMap((card) => [card, ...elements(card.children)]); }
 
-test('automatic cards distinguish processing, scope authorization, hard failure and reviewer denial in both languages', async () => fixture(async f => {
-  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate']) {
+test('legacy delegate cards explain processing, scope, hard failure and reviewer denial in both languages', async () => fixture(async f => {
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate'] as const) {
     const ui = renderHarness(f, language); ui.state.approvalMode = mode;
     const labels = WEBVIEW_TRANSLATIONS[language];
     const renderState = (review?: unknown) => {
@@ -454,9 +454,9 @@ test('automatic cards distinguish processing, scope authorization, hard failure 
       return { note: notes.children[0], buttons: actions.children };
     };
     const waiting = renderState();
-    assert.equal(waiting.note.textContent, labels[mode === 'delegate' ? 'approvalAutoInactive' : 'approvalModelWaiting']);
+    assert.equal(waiting.note.textContent, labels.approvalAutoInactive);
     assert.equal(waiting.buttons.length, 0);
-    ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode: mode as 'delegate',
+    ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode,
       status: 'processing', updatedAt: '', targets: [{ id: 'A', kind: 'command', status: 'pending' }] };
     const processing = renderState();
     assert.equal(processing.note.textContent, labels.approvalProcessingNow);
@@ -465,7 +465,7 @@ test('automatic cards distinguish processing, scope authorization, hard failure 
     ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'needs_authorization', reason: 'file:///external/result.txt' };
     const external = renderState();
     assert.equal(external.note.textContent, 'file:///external/result.txt');
-    assert.deepEqual(external.buttons.map(button => button.textContent), mode === ('legacy_removed' as string) ? [labels.approvalAuthorizeExact] : []);
+    assert.deepEqual(external.buttons, []);
     ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'failed', reason: 'Dirty editor' };
     const failure = renderState();
     assert.equal(failure.note.textContent, 'Dirty editor');
@@ -473,14 +473,50 @@ test('automatic cards distinguish processing, scope authorization, hard failure 
     ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'denied', reason: 'Denied by reviewer' };
     const denied = renderState({ decision: 'deny', rationale: 'Denied by reviewer' });
     assert.equal(denied.note.textContent, 'Denied by reviewer');
-    assert.equal(denied.buttons.length, mode === ('legacy_removed' as string) ? 1 : 0);
-    if (mode === ('legacy_removed' as string)) {
-      assert.equal(denied.buttons[0].textContent, labels.approvalConfirmOnce);
-      denied.buttons[0].click();
-      assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.at(-1))), { type: 'resumeApprovalProcessing', confirmTargetId: 'A' });
-    }
+    assert.equal(denied.buttons.length, 0);
     ui.state.approvalProcessing.targets[0].status = 'hard_blocked';
     assert.equal(renderState({ decision: 'deny', approvalSource: 'local_policy' }).buttons.length, 0);
+  }
+}));
+
+test('current delegate cards resume V2 processing without granting scope, while V1 audit stays inert', async () => fixture(async f => {
+  f.add(['A']);
+  for (const language of ['en', 'zh-CN'] as const) {
+    const ui = renderHarness(f, language);
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    ui.state.approvalMode = 'delegate';
+    const processing: NonNullable<typeof ui.state.approvalProcessing> = {
+      version: 2, runId: 'r', rootTaskId: 'task', mode: 'delegate', status: 'blocked', canResume: true, updatedAt: '',
+      targets: [{ id: 'A', kind: 'command', status: 'needs_authorization', reason: 'Exact scope required' },
+        { id: 'edit-A', kind: 'edit', status: 'needs_authorization', reason: 'Exact scope required' }]
+    };
+    ui.state.approvalProcessing = processing;
+    const render = () => elements([
+      ui.api.createDraftRunCard(ui.state.draftRuns[0]),
+      ui.api.createChangeSetCard({ id: 'set', files: [{ id: 'edit-A', status: 'pending', label: 'file.ts' }] })
+    ]);
+    const resumes = () => render().filter(n => n.type === 'button' && n.textContent === labels.approvalResumeProcessing);
+    assert.equal(resumes().length, 2);
+    resumes().forEach(button => button.click());
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.splice(0))), [
+      { type: 'resumeApprovalProcessing' }, { type: 'resumeApprovalProcessing' }
+    ]);
+    ui.state.startup.sideEffectsReady = false;
+    assert.ok(resumes().every(button => button.disabled));
+    ui.state.startup.sideEffectsReady = true;
+    ui.state.isBusy = true;
+    assert.equal(resumes().length, 0);
+    ui.state.isBusy = false;
+    for (const target of processing.targets) target.status = 'denied';
+    assert.equal(resumes().length, 0, 'denial cannot expose a bypass');
+    for (const target of processing.targets) target.status = 'needs_authorization';
+    processing.version = 1;
+    for (const mode of ['delegate', 'model_review'] as const) {
+      processing.mode = mode;
+      ui.state.approvalMode = mode;
+      assert.equal(resumes().length, 0, 'legacy snapshots only explain past processing');
+      assert.equal(render().filter(n => n.className === 'approval-state-note').length, 2);
+    }
   }
 }));
 
@@ -576,7 +612,7 @@ test('command and file cards keep complete automatic notes outside button groups
       assert.equal(notes[0].textContent, reason);
       assert.equal(notes[0].childElementCount, 0, 'untrusted reasons stay literal text');
       assert.equal(nodes.filter(n => n.textContent === reason).length, 1);
-      if (mode === 'delegate' && id === 'A') {
+      if (id === 'A') {
         assert.equal(actions, undefined);
         continue;
       }
@@ -586,16 +622,10 @@ test('command and file cards keep complete automatic notes outside button groups
       const siblings = actions.parentElement!.children;
       assert.equal(siblings[siblings.indexOf(actions) - 1], notes[0], 'scope note is adjacent to its buttons');
       const authorize = actions.children.find(n => n.textContent === labels.approvalAuthorizeExact)!;
-      if (mode === ('legacy_removed' as string)) {
-        authorize.click();
-        assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'resumeApprovalProcessing', authorizeTargetId: id });
-      } else assert.equal(authorize, undefined);
+      assert.equal(authorize, undefined);
     }
     const reject = elements([command]).find(n => n.dataset.draftRunAction === 'rejectDraftRun')!;
-    if (mode === ('legacy_removed' as string)) {
-      ui.api.handleDraftRunActionClick({ target: reject });
-      assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'rejectDraftRun', id: 'A' });
-    } else assert.equal(reject, undefined);
+    assert.equal(reject, undefined);
     const preview = elements([file]).find(n => n.dataset.editAction === 'openDraftDiff')!;
     ui.api.handleChangeSetActionClick({ target: preview });
     assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'openDraftDiff', id: 'edit-A' });
@@ -627,12 +657,7 @@ test('automatic notes and buttons rerender without stale scope or duplicate acti
       if (status !== 'needs_authorization') assert.ok(!nodes.some(n => n.textContent === longAuthorizationReason));
       const resume = nodes.filter(n => [labels.approvalAuthorizeExact, labels.approvalResumeProcessing].includes(n.textContent));
       assert.equal(resume.length, 0, 'legacy snapshots provide explanation only');
-      if (mode === ('legacy_removed' as string) && status === 'failed') {
-        resume.forEach(button => button.click());
-        assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.splice(0))), [
-          { type: 'resumeApprovalProcessing' }, { type: 'resumeApprovalProcessing' }
-        ], 'ordinary retry does not grant scope');
-      }
+      assert.equal(ui.messages.length, 0, 'restored legacy snapshots never request execution');
     }
     ui.state.approvalProcessing = undefined;
     ui.state.startup.sideEffectsReady = false;

@@ -40,10 +40,9 @@ import { AgentRunner } from '../src/agent/runner';
 import { checkpointCopy, type RunCheckpoint } from '../src/agent/runCheckpoint';
 import {
   getVisibleMessages,
-  normalizeAnthropicMessagesReplay,
-  normalizeProviderReplay,
   normalizeStoredSessions
 } from '../src/sessions/chatSessionStore';
+import { normalizeAnthropicMessagesReplay, normalizeProviderReplay } from '../src/sessions/providerReplayNormalization';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 import { DEFAULT_GENERIC_MAX_OUTPUT_TOKENS } from '../src/shared/modelProfiles';
 import type { AgentRequest, ChatMessage, KeepseekModel, ProviderReplayState } from '../src/shared/types';

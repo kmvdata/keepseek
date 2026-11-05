@@ -1,8 +1,8 @@
 # KeepSeek 子代理架构、安全与用量
 
-当前模型配置：默认子代理模型及 research / review / proposal 的覆盖保持独立；review 显示为“代码审查”。操作审批仅使用用户级 `keepseek.autoApprovalReviewer`，默认跟随任务执行段实际主模型，不读取子代理 default。父任务选择“帮我审批”不提升任何 child 的权限。
+模型设置位于 `/` → 子代理模型：默认及 research / review / proposal 的覆盖保持独立；review 显示为“代码审查”。同一菜单下的“审批模型”仅使用用户级 `keepseek.autoApprovalReviewer`，默认跟随任务执行段实际主模型，不读取子代理 default。菜单归组不改变两套配置的独立性，父任务选择“帮我审批”不提升任何 child 的权限。
 
-> 子代理主题的唯一交接入口。本文合并了原 `doc/subagent-runtime-security.md` 与 `doc/subagent-usage-statistics.md`，覆盖当前 V11 的隔离、调度、结果协议、恢复和统计。主 Agent 工作流见 [`doc/keepseek-agent-runtime-workflow.md`](doc/keepseek-agent-runtime-workflow.md)。P1 变更与验证限制见 [`doc/keepseek-p1-subagent-reliability.md`](doc/keepseek-p1-subagent-reliability.md)。
+> 子代理主题的唯一交接入口。本文合并了原 `doc/subagent-runtime-security.md` 与 `doc/subagent-usage-statistics.md`，覆盖子代理 runtime 协议 V11 的隔离、调度、结果合同、恢复和统计。主 Agent 工作流见 [`doc/keepseek-agent-runtime-workflow.md`](doc/keepseek-agent-runtime-workflow.md)。P1 变更与验证限制见 [`doc/keepseek-p1-subagent-reliability.md`](doc/keepseek-p1-subagent-reliability.md)。
 
 ## 1. 设计目标
 
@@ -16,7 +16,7 @@
 4. proposal 只能产生草案；实际写入和命令仍回到父会话审批管线。
 5. 时间、费用和取消属于同一逻辑任务，不能通过委派重置。
 
-当前 `SUBAGENT_PROTOCOL_VERSION` 为 **11**，与新会话 provider request/tool schema V11 对齐。V11 使用结果合同 V2、handoff manifest V3、宿主继承 capsule V1 和独立结果索引 V1；它们与 P0 的会话对象存储 V4 是不同版本维度。V1–V10 旧热会话继续使用冻结的 system/schema 字节，通过新会话或既有冷边界升级。
+`subagents/runtime.ts` 的私有 `SUBAGENT_PROTOCOL_VERSION` 仍为 **11**；父会话的 request protocol/tool schema 当前为 **13**，两者不能互相替换。child V11 使用结果合同 V2、handoff manifest V3、宿主继承 capsule V1 和独立结果索引 V1；会话对象存储 V4、审批策略及审批交付协议又是不同维度。权威来源与迁移规则见 [文档导航的版本表](doc/README.md#版本维度)。旧热 lane 保持已冻结的 system/schema 字节，在已有新会话或冷边界规则下升级，不为内部移动重录 fixture。
 
 ## 2. 权威模块
 

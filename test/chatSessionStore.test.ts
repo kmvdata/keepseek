@@ -5,6 +5,8 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import {
   ChatSessionStore,
+  getVisibleMessages,
+  normalizeStoredSessions,
   type ChatSessionStorageAdapter,
   type StoredWorkspaceSessionState,
   type WorkspaceSessionScope
@@ -16,6 +18,52 @@ import {
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
 import type { ChatMessage, ChatSession, WorkspaceSummary } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
+
+test('stored replay normalization clones protocol data without changing visible history or frozen protocol metadata', () => {
+  const scope = { key: 'workspace:replay', name: 'Replay', folderUris: [] };
+  const responses = {
+    protocol: 'openai-responses', sourceId: ' source ', baseUrl: ' https://fixture.invalid/v1 ',
+    items: [{ type: 'reasoning', encrypted_content: 'opaque\n  bytes' }]
+  };
+  const anthropic = {
+    protocol: 'anthropic-messages', sourceId: ' source ', baseUrl: ' https://fixture.invalid/v1 ',
+    messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: '  thought\n', signature: 'signed' }] }]
+  };
+  const requestProtocol = {
+    version: 2, serializationStrategy: 'provider-projection-v2', toolSchemaVersion: 2,
+    toolNames: ['keepseek_read_workspace_file_range'], sourceId: 'source', createdAt: '2026-01-01T00:00:00.000Z'
+  };
+  const replays = [responses, anthropic, { ...responses, items: [{ type: 'future_item' }] }, { protocol: 'future' }];
+  const raw = {
+    ...createSession('session-replay', [], scope), requestProtocol,
+    messages: replays.map((providerReplay, index) => ({
+      ...createMessage(index), content: ' visible\n  bytes ', expandedContent: ' expanded\n bytes ', providerReplay
+    }))
+  };
+
+  const [session] = normalizeStoredSessions({ sessions: [raw] }, scope);
+  assert.deepEqual(JSON.parse(JSON.stringify(session.requestProtocol)), requestProtocol);
+  assert.deepEqual(session.messages.map(message => message.content), replays.map(() => ' visible\n  bytes '));
+  assert.deepEqual(session.messages.map(message => message.expandedContent), replays.map(() => ' expanded\n bytes '));
+  assert.deepEqual(session.messages.slice(0, 2).map(message => message.providerReplay), [
+    { ...responses, sourceId: 'source', baseUrl: 'https://fixture.invalid/v1' },
+    { ...anthropic, sourceId: 'source', baseUrl: 'https://fixture.invalid/v1' }
+  ]);
+  assert.equal(session.messages[2].providerReplay, undefined);
+  assert.equal(session.messages[3].providerReplay, undefined);
+
+  responses.items[0].encrypted_content = 'changed after load';
+  anthropic.messages[0].content[0].signature = 'changed after load';
+  const replay = session.messages[0].providerReplay;
+  assert.equal(replay?.protocol === 'openai-responses' && replay.items[0].encrypted_content, 'opaque\n  bytes');
+  const signedReplay = session.messages[1].providerReplay;
+  assert.equal(signedReplay?.protocol === 'anthropic-messages'
+    && signedReplay.messages[0].content[0].type === 'thinking'
+    && signedReplay.messages[0].content[0].signature, 'signed');
+  const visible = getVisibleMessages(session.messages);
+  assert.deepEqual(visible.map(message => message.id), session.messages.map(message => message.id));
+  assert.ok(visible.every(message => !('providerReplay' in message) && !('expandedContent' in message)));
+});
 
 test('trimActiveHistory preserves persisted active session messages', async () => {
   const workspaceScope: WorkspaceSessionScope = {

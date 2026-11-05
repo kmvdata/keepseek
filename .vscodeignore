@@ -1,6 +1,7 @@
 .gitignore
 .claude/**
 .npm-cache/**
+.reasonix/**
 .agents/**
 .codex/**
 .vscode/**

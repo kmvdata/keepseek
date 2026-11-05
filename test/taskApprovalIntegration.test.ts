@@ -120,17 +120,16 @@ for (const mode of ['delegate'] as const) test(`real persisted completed checkpo
     assert.equal(f.session.approvalProcessing?.targets[0].status, 'executed', JSON.stringify(f.session.approvalProcessing));
     assert.equal(await readFile(path.join(f.workspace, 'result.txt'), 'utf8'), 'result\n');
     assert.equal(f.executions(), 1, JSON.stringify(f.session.approvalProcessing));
-    assert.equal(f.reviews(), mode === ('legacy_removed' as string) ? 2 : 0);
+    assert.equal(f.reviews(), 0);
     assert.equal(f.continuations(), 1);
     assert.equal(f.session.approvalProcessing?.status, 'completed');
-    // 10 model + 2 reviewer (two targets, 1s each) + 3 command + 5 next model.
-    assert.equal(executionTimeView(f.session).currentMs, mode === ('legacy_removed' as string) ? 20_000 : 18_000);
-    assert.equal(executionTimeView(f.session).totalMs, mode === ('legacy_removed' as string) ? 20_000 : 18_000);
+    // 10 model + 3 command + 5 next model; host policy makes no reviewer request.
+    assert.equal(executionTimeView(f.session).currentMs, 18_000);
+    assert.equal(executionTimeView(f.session).totalMs, 18_000);
     const records = f.session.messages.flatMap(m => m.runDetails?.approvalReviews ?? []);
     assert.equal(records.length, 2);
     assert.ok(records.every(r => r.agentRunId === f.cp.taskId));
-    if (mode === ('legacy_removed' as string)) assert.ok(records.every(r => r.reviewerModelId === 'fixed-reviewer'));
-    else assert.ok(records.every(r => r.approvalSource === 'host_policy'));
+    assert.ok(records.every(r => r.approvalSource === 'host_policy'));
     const restoredCheckpoint = await (f.host as unknown as { sessionStore: ChatSessionStore }).sessionStore.getTaskCheckpoint(f.message.id);
     assert.equal(restoredCheckpoint?.taskId, f.cp.taskId);
     const reloaded = new ChatSessionStore(f.storage, 'en', f.scope);
@@ -141,8 +140,26 @@ for (const mode of ['delegate'] as const) test(`real persisted completed checkpo
     f.host.queueResponseApprovals(f.session, f.message, f.response);
     await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
     assert.equal(f.executions(), 1, JSON.stringify(f.session.approvalProcessing));
-    assert.equal(f.reviews(), mode === ('legacy_removed' as string) ? 2 : 0);
+    assert.equal(f.reviews(), 0);
     assert.equal(f.continuations(), 1);
+  });
+});
+
+for (const status of ['denied', 'hard_blocked'] as const) test(`a resumed batch retains its ${status} decision without executing dependent commands`, async () => {
+  await fixture('delegate', async f => {
+    await f.host.saveAgentCheckpoint(f.session, f.message, f.cp);
+    f.session.approvalProcessing = {
+      version: 2, runId: f.cp.taskId, rootTaskId: f.message.userTask!.id, mode: 'delegate', status: 'blocked',
+      targets: [{ id: 'edit', kind: 'edit', status, reason: 'Previously refused operation' }], updatedAt: f.message.createdAt
+    };
+    f.host.queueResponseApprovals(f.session, f.message, f.response);
+    await f.host.executeDelegatedApprovals(f.queue.take(f.session.id)!);
+    assert.equal(f.session.approvalProcessing?.targets[0].status, status);
+    assert.equal(f.session.approvalProcessing?.targets[0].reason, 'Previously refused operation');
+    assert.equal(f.session.approvalProcessing?.targets[1].status, 'dependency_blocked');
+    assert.equal(f.executions(), 0); assert.equal(f.reviews(), 0); assert.equal(f.continuations(), 0);
+    assert.equal(f.runs.get(f.proposal.id)?.startedAt, undefined);
+    await assert.rejects(readFile(path.join(f.workspace, 'result.txt')), { code: 'ENOENT' });
   });
 });
 
@@ -343,7 +360,7 @@ test('source files with spaces are actually read through both approval modes wit
         await runs.approveAndRun(proposal.id, new Set());
       } else {
         assert.equal(f.session.approvalProcessing?.status, 'completed', JSON.stringify(f.session.approvalProcessing));
-        assert.equal(f.reviews(), mode === ('legacy_removed' as string) ? 1 : 0);
+        assert.equal(f.reviews(), 0);
       }
       const result = runs.toWebviewState(f.session.id)[0];
       assert.equal(result.status, 'done', result.error);
@@ -396,7 +413,7 @@ test('trusted project scripts launch with the verified executable and cwd under 
         await runs.approveAndRun(proposal.id, new Set());
       } else {
         assert.equal(f.session.approvalProcessing?.status, 'completed', JSON.stringify(f.session.approvalProcessing));
-        assert.equal(runs.get(proposal.id)?.approvalReview?.approvalSource, mode === 'delegate' ? 'host_policy' : 'delegate');
+        assert.equal(runs.get(proposal.id)?.approvalReview?.approvalSource, 'host_policy');
       }
       const canonicalCwd = await realpath(cwd);
       assert.deepEqual(launches.map(launch => launch && [launch.executable, launch.cwd]), [[await realpath(executable), canonicalCwd]]);
@@ -405,7 +422,7 @@ test('trusted project scripts launch with the verified executable and cwd under 
       assert.equal(result.status, 'done', result.error);
       assert.equal(result.output, 'script finished\n');
       assert.equal(prompts, 0);
-      assert.equal(f.reviews(), mode === ('legacy_removed' as string) ? 1 : 0);
+      assert.equal(f.reviews(), 0);
       assert.equal(f.continuations(), mode === 'ask' ? 0 : 1);
     } finally {
       vscode.window.showWarningMessage = dialog;
@@ -657,7 +674,7 @@ for (const mode of ['delegate'] as const) test(`local Git status, diff, add and 
       assert.equal(stage.status, 'done');
       assert.match(stagedDiff.output, /new\.txt/u);
       assert.equal(commit.status, 'done');
-      assert.equal(commit.approvalReview?.approvalSource, mode === 'delegate' ? 'host_policy' : 'delegate');
+      assert.equal(commit.approvalReview?.approvalSource, 'host_policy');
       assert.equal(git('rev-parse', 'HEAD^').trim(), before);
       assert.equal(git('log', '-1', '--format=%s').trim(), 'Update existing file and add new file');
       assert.equal(git('status', '--porcelain'), '');
