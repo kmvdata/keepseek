@@ -52,7 +52,7 @@ Webview 是字符串生成的页面，不是独立前端应用。`input/composer
 | [currentRunContext.ts](../src/agent/currentRunContext.ts)、[contextDeduplication.ts](../src/agent/contextDeduplication.ts) | 当前上下文拼装与去重，稳定 `contextInstructions` |
 | [skillDiscovery.ts](../src/skills/skillDiscovery.ts)、[skillMetadata.ts](../src/skills/skillMetadata.ts) | 标准 `.agents/skills` 根发现、YAML 元数据和策略 |
 | [skillActivationResolver.ts](../src/skills/skillActivationResolver.ts)、[skillLoader.ts](../src/skills/skillLoader.ts) | explicit→session→workspace-default→implicit；有界读取与隐式冻结 |
-| [codexPluginDiscovery.ts](../src/skills/codexPluginDiscovery.ts)、[codexPluginResources.ts](../src/skills/codexPluginResources.ts)、[pluginSkillRuntime.ts](../src/agent/pluginSkillRuntime.ts) | 同宿主本机插件安装身份、固定资源、显式任务选择和只读路由 |
+| [codexPluginSupport.ts](../src/skills/codexPluginSupport.ts)、[codexPluginDiscovery.ts](../src/skills/codexPluginDiscovery.ts)、[codexPluginResources.ts](../src/skills/codexPluginResources.ts)、[pluginSkillRuntime.ts](../src/agent/pluginSkillRuntime.ts) | 插件 Skills 暂停开关；安装/资源底层和历史数据保留，当前不发现、不加载、不执行或恢复插件任务 |
 
 任务目录来自用户选择或单根默认，不随焦点/附件变化。共享文件只读；发现/加载 Skill 不执行 scripts。普通项目 Skill 创建只准备 `SKILL.md` 与 `agents/openai.yaml` 的 ChangeSet，实际落盘仍走文件审批。插件入口不扩大通用文件、cwd、child 或写入授权。
 

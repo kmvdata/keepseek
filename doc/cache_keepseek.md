@@ -51,7 +51,7 @@ current user / tool continuation
 
 ### 3.1 协议 lane
 
-新建主会话的 request protocol 与 tool schema 当前均为 **13**，分别由 `providerRequestProjection.ts` 的 `CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION` 与 `CURRENT_PROVIDER_TOOL_SCHEMA_VERSION` 定义。它们不代表 child runtime、结果合同或存储格式的版本；各维度见 [版本权威表](README.md#版本维度)。请求协议的演进边界包括：
+新建主会话的 request protocol 与 tool schema 当前均为 **14**，分别由 `providerRequestProjection.ts` 的 `CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION` 与 `CURRENT_PROVIDER_TOOL_SCHEMA_VERSION` 定义。它们不代表 child runtime、结果合同或存储格式的版本；各维度见 [版本权威表](README.md#版本维度)。请求协议的演进边界包括：
 
 - V5 引入子代理。
 - V8 引入通用 Evidence 与 Context Epoch。
@@ -60,6 +60,7 @@ current user / tool continuation
 - V11 增加分工评估、受控继承与父验收合同。
 - V12 由 `protocol.ts` 的 `PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION` 门控显式 Codex 插件 Skill 读取工具。
 - V13 更新 ask/delegate 审批提示与 DraftRun 工具说明；宿主审批模式不由模型或历史提示切换。
+- V14 隐藏已暂停的插件 Skill 读取工具；V12/V13 保留冻结 schema，旧工具实际调用拒绝，历史字节不改写。
 
 受支持的 V1–V12 热主会话保持各自 system/schema 字节，只有缓存已冷或受控 rollover 才迁移；`subagents/runtime.ts` 的 child 协议仍独立固定为 11。不同来源、endpoint、wire model、协议版本或原生协议不能共用缓存 lane。旧版三审批模式字节属于冻结协议兼容，不是当前设置入口。
 

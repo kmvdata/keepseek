@@ -14,6 +14,7 @@ import * as vscode from 'vscode';
 import { getExplorerFileUris, getFileReferenceAuthorizationKey, resolveFileReferenceUri } from '../context/references/fileReference';
 import { AgentRunAbortedError, AgentRunner } from '../agent/runner';
 import { assertPluginSkillsCurrent } from '../agent/pluginSkillRuntime';
+import { assertCodexPluginSkillsEnabled } from '../skills/codexPluginSupport';
 import { SubagentRuntime } from '../agent/subagents/runtime';
 import type { SubagentModelSetting, SubagentProgressState } from '../agent/subagents/types';
 import { AgentRequestCoordinator, type BackgroundContextCompressionRefreshUpdate } from '../agent/agentRequestCoordinator';
@@ -5257,6 +5258,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         const priorPluginRun = [...activeSession.messages].reverse().find(message => message.role === 'assistant'
           && message.userTask?.id === continuingTask?.id && message.usedSkills?.some(skill => skill.source === 'codexPlugin'));
         if (priorPluginRun || noProgressRecovery?.request.currentRunContext?.skills.some(skill => skill.source === 'codexPlugin')) {
+          assertCodexPluginSkillsEnabled();
           const checkpoint = noProgressRecovery ?? (priorPluginRun && await this.sessionStore.getTaskCheckpoint(priorPluginRun.id));
           const priorSkills = checkpoint?.request.currentRunContext?.skills.filter(skill => skill.source === 'codexPlugin');
           if (!checkpoint || !priorSkills?.length) throw new Error(this.t('pluginSkillRecoveryUnavailable'));

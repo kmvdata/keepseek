@@ -33,6 +33,24 @@ test('standard roots only: no arbitrary .agents, AGENTS.md skill, or old CODEX_H
   assert.equal(manifests.length, 1); assert.equal(manifests[0].enabled, true); assert.equal(manifests[0].allowImplicit, true);
   assert.match(manifests[0].description, /Review: changes\n检查证据/u);
 });
+test('installed Codex plugin Skills stay hidden even with the old discovery opt-in while standalone Skills still load', async () => {
+  const f = await fixture();
+  await f.put('standalone', markdown('standalone'));
+  const bundle = path.join(f.home, 'plugins/cache/fixture/workflow/local');
+  await mkdir(path.join(bundle, '.codex-plugin'), { recursive: true });
+  await writeFile(path.join(f.home, 'config.toml'), '[plugins."workflow@fixture"]\nenabled = true\n');
+  await writeFile(path.join(bundle, '.codex-plugin/plugin.json'), '{"name":"workflow","version":"1.0.0","skills":"./skills/"}');
+  await f.put('index', markdown('index'), path.join(bundle, 'skills'));
+  for (const includeCodexPlugins of [undefined, true, false]) {
+    const discovery = new SkillDiscovery({ userSkillsUri: vscode.Uri.file(f.user), includeAdminSkills: false, includeCodexPlugins });
+    const manifests = await discovery.discover(f.config);
+    assert.deepEqual(manifests.map(item => item.name), ['standalone']);
+    assert.ok(manifests.every(item => !item.pluginInstallation && item.source !== 'codexPlugin'));
+    assert.ok(discovery.diagnostics.every(item => !/plugin/iu.test(item)));
+    const loaded = await new SkillLoader().loadSkill(manifests[0]);
+    assert.match(loaded.content, /Read the diff/u);
+  }
+});
 test('same names retain paths, physical aliases deduplicate, symlink cycles and external targets are rejected', async () => {
   const f = await fixture(); const skill = await f.put('one'); await f.put('two', markdown(), f.user);
   await symlink(skill, path.join(f.repo, '.agents/skills/alias'));

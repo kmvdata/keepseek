@@ -7,6 +7,7 @@ import { getMarkdownFence } from '../shared/markdown';
 import { isReadableTextContent, shouldSkipTextUri } from '../shared/textFileGuards';
 import { toActivatedSkill, type ActivatedSkill, type SkillManifest } from './skillTypes';
 import { pinCodexPluginSkill, type CodexPluginReadContext } from './codexPluginResources';
+import { assertCodexPluginSkillsEnabled, isCodexPluginSkill } from './codexPluginSupport';
 
 const MAX_REFERENCED_SKILL_RESOURCES = 12;
 const MAX_REFERENCED_SKILL_RESOURCE_CHARS = 48_000;
@@ -21,6 +22,7 @@ interface LoadedSkillResource {
 export class SkillLoader {
   public async loadPluginSkill(manifest: SkillManifest, packageSkills: readonly SkillManifest[],
     context: CodexPluginReadContext, cwd?: string): Promise<ActivatedSkill> {
+    assertCodexPluginSkillsEnabled();
     if (!manifest.pluginInstallation || !manifest.enabled || manifest.unavailableReason) {
       throw new Error(manifest.unavailableReason ?? 'Plugin Skill unavailable / 插件 Skill 不可用');
     }
@@ -34,6 +36,7 @@ export class SkillLoader {
   }
 
   public async loadSkill(manifest: SkillManifest): Promise<ActivatedSkill> {
+    if (isCodexPluginSkill(manifest)) assertCodexPluginSkillsEnabled();
     if (manifest.pluginInstallation) throw new Error('Plugin Skill requires explicit task activation / 插件 Skill 需要在任务中显式调用');
     if (!manifest.enabled) {
       throw new Error(manifest.unavailableReason || 'Skill is disabled.');

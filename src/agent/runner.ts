@@ -389,6 +389,10 @@ export class AgentLoop {
   ) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
+    // A saved plugin activation is historical data, not permission to resume
+    // suspended functionality. Check before reconciliation or any dispatch.
+    await assertPluginSkillsCurrent(request.currentRunContext?.skills ?? [], []);
+    if (request.checkpoint) await assertPluginSkillsCurrent(request.checkpoint.request.currentRunContext?.skills ?? [], [], request.checkpoint);
     if (!request.persona && request.sessionId && !request.checkpoint && normalizeApprovalMode(request.approvalMode) !== 'ask') {
       const key = this.validationTaskKey(request);
       if (!this.validationBaselines.has(key)) {

@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import { expandPromptReferencesInPrompt } from '../src/context/references/promptReferences';
 import { resolvePluginSkillReferences } from '../src/context/references/skillReference';
 import type { SkillManifest } from '../src/skills/skillTypes';
+import { CODEX_PLUGIN_SKILLS_UNAVAILABLE } from '../src/skills/codexPluginSupport';
 
 test('expands allowed Codex skill Markdown reference', async () => {
   const skillRoot = await mkdtemp(path.join(os.tmpdir(), 'keepseek-skill-reference-'));
@@ -88,20 +89,20 @@ test('can defer Skill content injection to the unified activation context', asyn
   assert.doesNotMatch(expanded, /Do not duplicate me/u);
 });
 
-test('qualified plugin mentions and exact menu or pasted links select the same catalog Skill', () => {
+test('qualified plugin mentions and old menu links report suspension without activating a Skill', () => {
   const skill = pluginSkill('/codex/cache/local-tools/fixture/2.0.0/skills/index/SKILL.md', 'fixture');
   const other = pluginSkill('/codex/cache/other/fixture/2.0.0/skills/index/SKILL.md', 'other');
   const linked = `[$fixture:index](${skill.skillUri.fsPath})`;
   for (const text of [linked, `请用 ${linked} 检查`, `[$fixture:index](${skill.skillUri.toString()})`, '$fixture:index']) {
-    assert.deepEqual(resolvePluginSkillReferences(text, [skill]), { ids: [skill.id], failures: [] });
+    const result = resolvePluginSkillReferences(text, [skill]);
+    assert.deepEqual(result.ids, [], text);
+    assert.equal(result.failures.length, 1, text);
+    assert.equal(result.failures[0].error, CODEX_PLUGIN_SKILLS_UNAVAILABLE, text);
   }
-  assert.deepEqual(resolvePluginSkillReferences(linked, [skill, other]), { ids: [skill.id], failures: [] });
   const stamp = 'a'.repeat(64);
   const stamped = `[$fixture:index](${skill.skillUri.toString()}#keepseek-plugin-${stamp})`;
-  assert.deepEqual(resolvePluginSkillReferences(stamped, [{ ...skill, pluginSelectionStamp: stamp }]), { ids: [skill.id], failures: [] });
-  assert.equal(resolvePluginSkillReferences(stamped, [{ ...skill, pluginSelectionStamp: 'b'.repeat(64) }]).failures.length, 1);
-  assert.match(resolvePluginSkillReferences('$fixture:index', [skill, other]).failures[0].error, /Ambiguous/u);
   for (const text of [
+    stamped,
     linked.replace('2.0.0', '1.0.0'),
     linked.replace('fixture:index', 'fake:index'),
     '[$fixture:index](https://example.com/SKILL.md)',
@@ -111,6 +112,12 @@ test('qualified plugin mentions and exact menu or pasted links select the same c
     const rejected = resolvePluginSkillReferences(text, [skill]);
     assert.deepEqual(rejected.ids, [], text);
     assert.equal(rejected.failures.length, 1, text);
+    assert.equal(rejected.failures[0].error, CODEX_PLUGIN_SKILLS_UNAVAILABLE, text);
+  }
+  for (const catalog of [[], [skill, other], [{ ...skill, pluginSelectionStamp: stamp }]]) {
+    const result = resolvePluginSkillReferences('$fixture:index', catalog);
+    assert.deepEqual(result.ids, []);
+    assert.equal(result.failures[0]?.error, CODEX_PLUGIN_SKILLS_UNAVAILABLE);
   }
 });
 

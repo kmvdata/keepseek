@@ -29,7 +29,7 @@
 | `~/.agents/skills` | 使用扩展宿主的 home；不受 CODEX_HOME 改写 | skillDiscovery、路径测试 |
 | `/etc/codex/skills` | Unix 管理员目录；Windows 不默认扫描管理员来源 | admin fixture；未做原生 Windows 验收 |
 | `~/.codex/skills`、内置 Skill 缓存 | 不读取 | 旧目录负例 |
-| Codex 插件缓存 | 在本报告之后新增对已确认安装的只读复用。见[插件 Skills 实施与验收](keepseek-codex-plugin-skills.md) | 本地/远程安装与回归 |
+| Codex 插件缓存 | 2026-11-06 起暂时停用发现、菜单、调用与任务恢复。独立 Skills 不受影响，见[插件 Skills 状态与历史记录](keepseek-codex-plugin-skills.md) | 暂停入口回归；底层安装/资源历史测试保留 |
 | 相同物理文件/同名不同路径 | realpath 去重；同名保留，列表显示实际目录。无来源的隐式匹配遇歧义不选；显式 URI/ID 可以分别选择 | skillDiscovery、skillActivationResolver |
 | SKILL.md YAML `name`、`description` | 必填非空字符串，上限 64/1024 字符；多行/引号/注释/UTF-8 可用，错误 Skill 可见但不可激活 | YAML 测试、真实 CLI 模板读取 |
 | `agents/openai.yaml interface` | 白名单解析显示名、简介、图标路径、颜色、默认 prompt。显示名只用于 UI；图标/默认 prompt 不自动加载或执行 | YAML 测试、CLI displayName |

@@ -6,6 +6,7 @@ import { normalizeUri } from '../agent/projectInstructions';
 import type { SharedCodexConfigSnapshot } from '../context/sharedCodexConfig';
 import { SkillDiscovery, validateCodexPluginSkill } from './skillDiscovery';
 import { SkillLoader } from './skillLoader';
+import { assertCodexPluginSkillsEnabled, isCodexPluginSkill, isCodexPluginSkillsEnabled } from './codexPluginSupport';
 import {
   SkillActivationResolver,
   type SkillActivationResolution
@@ -54,7 +55,7 @@ export class SkillStore {
   public async refresh(config?: SharedCodexConfigSnapshot): Promise<void> {
     this.config = config;
     const discovered = await this.discovery.discover(config);
-    this.manifests = discovered;
+    this.manifests = discovered.filter(manifest => isCodexPluginSkillsEnabled() || !isCodexPluginSkill(manifest));
     this.cachedActiveSkills.clear();
     this.activeSkillLoadErrors.clear();
   }
@@ -145,6 +146,7 @@ export class SkillStore {
     pluginTools?: PluginSkillToolContext;
     inheritedPluginSkills?: readonly ActivatedSkill[];
   }): Promise<ActiveSkillLoadResult> {
+    if (input.inheritedPluginSkills?.length) assertCodexPluginSkillsEnabled();
     const hasFrozenImplicitSnapshot = Array.isArray(input.session.frozenImplicitSkillIds);
     const frozenImplicitSkillIds = hasFrozenImplicitSnapshot
       ? normalizeFrozenImplicitSkillIds(input.session.frozenImplicitSkillIds)
@@ -203,6 +205,7 @@ export class SkillStore {
   }
 
   public async loadPluginEntry(manifest: SkillManifest, tools?: PluginSkillToolContext): Promise<ActivatedSkill> {
+    assertCodexPluginSkillsEnabled();
     const installation = manifest.pluginInstallation;
     const cwd = this.config?.scope?.cwd.toString();
     if (!installation) throw new Error('Plugin installation unavailable / 插件安装不可用');
@@ -253,6 +256,7 @@ export class SkillStore {
       if (typeof id !== 'string' || !id.trim() || seen.has(id)) {
         continue;
       }
+      if (!isCodexPluginSkillsEnabled() && id.startsWith('codexPlugin:')) continue;
       seen.add(id);
       ids.push(id);
     }

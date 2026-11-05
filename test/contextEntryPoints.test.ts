@@ -449,7 +449,7 @@ test('plugin selections insert a task reference and keep its original path when 
   harness.refreshPromptSkillLinkLabels();
   assert.equal(harness.isPluginSkillInPrompt(next), false);
   assert.equal(harness.hasStalePluginSkillInPrompt(), true);
-  assert.match(harness.links[0].title, /select it again/u);
+  assert.match(harness.links[0].title, /temporarily disabled.*standalone Skills/u);
   assert.deepEqual(harness.links.map((link: unknown) => harness.skillLinkToText(link)), [expected, expected]);
   harness.handleSkillAction('toggle-use', ordinary.id, true);
   assert.deepEqual(harness.sent.at(-1), { type: 'useSkill', skillId: ordinary.id });

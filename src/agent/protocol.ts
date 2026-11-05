@@ -40,6 +40,8 @@ export const DELEGATION_CHECKPOINT_TOOL_NAME = 'keepseek_delegation_checkpoint';
 export const READ_EVIDENCE_TOOL_NAME = 'keepseek_read_evidence';
 export const READ_PLUGIN_SKILL_TOOL_NAME = 'keepseek_read_plugin_skill';
 export const PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION = 12;
+/** New lanes omit the suspended reader; V12/V13 remain byte-stable. */
+export const PLUGIN_SKILL_SUSPENSION_PROTOCOL_VERSION = 14;
 
 const UNPROJECTED_HISTORY_MESSAGE_LIMIT = 24;
 const CORE_AGENT_TOOL_NAMES_V1 = [
@@ -635,7 +637,9 @@ export function getAgentToolNamesForPrompt(
   slimModeEnabled: boolean,
   requestProtocolVersion = 5
 ): string[] {
-  const coreNames = requestProtocolVersion >= PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION
+  const coreNames = requestProtocolVersion >= PLUGIN_SKILL_SUSPENSION_PROTOCOL_VERSION
+    ? CORE_AGENT_TOOL_NAMES_V11
+    : requestProtocolVersion >= PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION
     ? CORE_AGENT_TOOL_NAMES_V12
     : requestProtocolVersion >= 11
     ? CORE_AGENT_TOOL_NAMES_V11
@@ -650,7 +654,9 @@ export function getAgentToolNamesForPrompt(
     : requestProtocolVersion >= 2
       ? CORE_AGENT_TOOL_NAMES_V3
       : CORE_AGENT_TOOL_NAMES_V1;
-  const allNames = requestProtocolVersion >= PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION
+  const allNames = requestProtocolVersion >= PLUGIN_SKILL_SUSPENSION_PROTOCOL_VERSION
+    ? ALL_AGENT_TOOL_NAMES_V11
+    : requestProtocolVersion >= PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION
     ? ALL_AGENT_TOOL_NAMES_V12
     : requestProtocolVersion >= 11
     ? ALL_AGENT_TOOL_NAMES_V11
@@ -715,7 +721,8 @@ export function isDraftRunPreparationTool(toolName: string): boolean {
 
 function getRawAgentTools(requestProtocolVersion: number): DeepSeekFunctionTool[] {
   const tools: DeepSeekFunctionTool[] = [
-    ...(requestProtocolVersion >= PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION ? [createPluginSkillReadTool()] : []),
+    ...(requestProtocolVersion >= PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION
+      && requestProtocolVersion < PLUGIN_SKILL_SUSPENSION_PROTOCOL_VERSION ? [createPluginSkillReadTool()] : []),
     ...(requestProtocolVersion >= 8 ? [createEvidenceReadTool()] : []),
     ...(requestProtocolVersion >= 11 ? [createDelegationCheckpointTool()] : []),
     ...(requestProtocolVersion >= 5 ? createSubagentTools(requestProtocolVersion) : []),

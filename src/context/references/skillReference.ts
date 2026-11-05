@@ -5,6 +5,7 @@ import { normalizeKeepseekLanguage, type KeepseekLanguage } from '../../shared/i
 import { getMarkdownFence } from '../../shared/markdown';
 import { SkillLoader } from '../../skills/skillLoader';
 import { SKILL_FILE_NAME, type SkillManifest } from '../../skills/skillTypes';
+import { CODEX_PLUGIN_SKILLS_UNAVAILABLE, isCodexPluginSkillsEnabled } from '../../skills/codexPluginSupport';
 import { resolveFileReferenceUri } from './fileReference';
 import { hasUnsafeReferenceTargetCharacters, isInsideMarkdownFence } from './referenceSyntax';
 
@@ -27,6 +28,11 @@ export function resolvePluginSkillReferences(prompt: string, manifests: readonly
     || ignored.some(span => start >= span.start && start < span.end)
     || /^\s*(?:>| {4}|\t)/u.test(prompt.slice(prompt.lastIndexOf('\n', start - 1) + 1, start));
   const resolve = (name: string, target?: string): void => {
+    if (!isCodexPluginSkillsEnabled()) {
+      const id = `${name}\0${target ?? ''}`;
+      failures.set(id, { id, name: `$${name}`, error: CODEX_PLUGIN_SKILLS_UNAVAILABLE });
+      return;
+    }
     const candidates = manifests.filter(manifest => manifest.pluginQualifiedName === name);
     const link = target === undefined ? undefined : parsePluginLinkTarget(target);
     const matches = target === undefined ? candidates

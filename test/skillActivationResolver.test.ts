@@ -4,9 +4,10 @@ import * as vscode from 'vscode';
 import type { ChatSession } from '../src/shared/types';
 import { SkillActivationResolver } from '../src/skills/skillActivationResolver';
 import type { SkillDiscovery } from '../src/skills/skillDiscovery';
-import type { SkillLoader } from '../src/skills/skillLoader';
+import { SkillLoader } from '../src/skills/skillLoader';
 import { SkillStore } from '../src/skills/skillStore';
 import { toActivatedSkill, type SkillManifest } from '../src/skills/skillTypes';
+import { CODEX_PLUGIN_SKILLS_UNAVAILABLE } from '../src/skills/codexPluginSupport';
 
 test('explicit Skill wins over an implicit Skill with the same normalized name', () => {
   const explicit = manifest('global-review', 'review-flow', 'agentsUser', true);
@@ -116,6 +117,46 @@ test('workspace-default personal Skill persists and activates in a new session',
   const otherWorkspaceStore = new SkillStore(memento, discovery, loader, new SkillActivationResolver(), () => 'workspace-two');
   await otherWorkspaceStore.refresh();
   assert.deepEqual(otherWorkspaceStore.getWorkspaceDefaultSkillIds(), []);
+});
+
+test('stale plugin catalog entries cannot be listed, selected, previewed, or inherited while standalone Skills still activate', async () => {
+  const ordinary = manifest('ordinary', 'ordinary-flow', 'agentsUser', false);
+  const plugin: SkillManifest = {
+    ...manifest('codexPlugin:stale', 'index', 'codexPlugin', false),
+    pluginQualifiedName: 'stale:index',
+    pluginInstallation: {
+      id: 'stale@fixture', name: 'stale', version: '1', marketplace: 'fixture', source: 'local',
+      rootPath: '/missing-plugin', realRootPath: '/missing-plugin', skillsPath: '/missing-plugin/skills',
+      codexHomePath: '/missing-codex', manifestHash: 'a'.repeat(64), installationHash: 'b'.repeat(64)
+    }
+  };
+  let pluginLoads = 0;
+  const loader = {
+    loadSkill: async (item: SkillManifest) => toActivatedSkill(item, 'STANDALONE_WORKFLOW'),
+    loadPluginSkill: async () => { pluginLoads++; throw new Error('Plugin loader must not be reached'); }
+  } as unknown as SkillLoader;
+  const discovery = { discover: async () => [ordinary, plugin] } as SkillDiscovery;
+  const store = new SkillStore(new MemoryMemento(), discovery, loader, new SkillActivationResolver(), () => 'workspace-one');
+  await store.refresh();
+  const chat = session('plugin-history-session');
+  chat.activeSkillIds = [plugin.id];
+  assert.deepEqual(store.getStateView(chat).items.map(item => item.id), [ordinary.id]);
+  assert.deepEqual(store.getStateView(chat).activeSkillIds, []);
+  assert.deepEqual(store.getManifests().map(item => item.id), [ordinary.id]);
+  assert.equal(store.getManifest(plugin.id), undefined);
+  assert.equal(await store.useSkill(chat, plugin.id), false);
+  assert.equal(await store.setSkillWorkspaceDefault(plugin.id, true), false);
+  await assert.rejects(store.loadPluginEntry(plugin), error => error instanceof Error && error.message === CODEX_PLUGIN_SKILLS_UNAVAILABLE);
+  const result = await store.resolveAndLoadSkills({ session: chat, prompt: 'Use the standalone workflow.', explicitSkillIds: [ordinary.id, plugin.id] });
+  assert.deepEqual(result.skills.map(item => item.id), [ordinary.id]);
+  assert.equal(result.skills[0].content, 'STANDALONE_WORKFLOW');
+  await assert.rejects(store.resolveAndLoadSkills({ session: chat, prompt: 'Continue.',
+    inheritedPluginSkills: [toActivatedSkill(plugin, 'OLD_PLUGIN_BODY')] }),
+  error => error instanceof Error && error.message === CODEX_PLUGIN_SKILLS_UNAVAILABLE);
+  assert.equal(pluginLoads, 0);
+  await assert.rejects(new SkillLoader().loadPluginSkill(plugin, [plugin], {
+    isTrusted: true, availableTools: [], routingAvailable: false, validateInstallation: async () => true
+  }), error => error instanceof Error && error.message === CODEX_PLUGIN_SKILLS_UNAVAILABLE);
 });
 
 

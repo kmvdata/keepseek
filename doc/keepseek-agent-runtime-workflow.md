@@ -79,7 +79,7 @@ Coordinator 先按模型画像刷新摘要，再由 `buildProviderRequestProject
 - OpenAI Responses；
 - Anthropic Messages。
 
-实际请求、token 估算、工具结果准入和缓存观测共用这一投影。当前父会话 request protocol/tool schema 均为 V13（`providerRequestProjection.ts`），child runtime 协议仍为 V11（`subagents/runtime.ts`）。V10 引入子代理 UTF-8 byte-offset 分页，V11 增加分工评估与父验收合同，V12 增加插件 Skill 读取入口，V13 更新两模式审批的交付提示。热旧会话只在受控边界迁移；这些版本不等同于结果合同、存储或审批策略版本，权威来源见 [版本与文档导航](README.md#版本维度)。P1 当时的现场核验限制见 [历史验收记录](keepseek-p1-field-acceptance.md)。
+实际请求、token 估算、工具结果准入和缓存观测共用这一投影。当前父会话 request protocol/tool schema 均为 V14（`providerRequestProjection.ts`），child runtime 协议仍为 V11（`subagents/runtime.ts`）。V10 引入子代理 UTF-8 byte-offset 分页，V11 增加分工评估与父验收合同，V12 增加插件 Skill 读取入口，V13 更新两模式审批的交付提示，V14 隐藏已暂停的插件读取工具。旧插件任务不可恢复执行，但历史快照与 evidence 保留只读。热旧会话只在受控边界迁移；这些版本不等同于结果合同、存储或审批策略版本，权威来源见 [版本与文档导航](README.md#版本维度)。P1 当时的现场核验限制见 [历史验收记录](keepseek-p1-field-acceptance.md)。
 
 ### 4.3 来源解析
 

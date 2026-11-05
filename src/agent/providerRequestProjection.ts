@@ -35,10 +35,10 @@ import {
 } from './protocol';
 
 export { PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION } from './protocol';
-export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 13;
+export const CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION = 14;
 export const LEGACY_PROVIDER_REQUEST_PROTOCOL_VERSION = 1;
 export const PROVIDER_PROJECTION_REQUEST_PROTOCOL_VERSION = 2;
-export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 13;
+export const CURRENT_PROVIDER_TOOL_SCHEMA_VERSION = 14;
 
 /** Final context surface shared by dispatch, candidate admission and usage.
  * Candidate results are explicit additions; native replay is never rebuilt or
@@ -471,6 +471,7 @@ function normalizeRequestProtocolVersion(value: number | undefined): number {
   if (normalized >= CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION) {
     return CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION;
   }
+  if (normalized >= 13) return 13;
   if (normalized >= 12) return 12;
   if (normalized >= 11) return 11;
   if (normalized >= 10) return 10;

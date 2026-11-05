@@ -8,16 +8,18 @@ import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
 import { AgentRunner } from '../src/agent/runner';
 import { formatActiveSkills, getAgentSystemPrompt, getAgentTools, getAgentToolNamesForPrompt, READ_PLUGIN_SKILL_TOOL_NAME, READ_SUBAGENT_RESULT_TOOL_NAME } from '../src/agent/protocol';
-import { buildProviderRequestProjection } from '../src/agent/providerRequestProjection';
+import { buildProviderPayloadProjection, buildProviderRequestProjection, CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION, CURRENT_PROVIDER_TOOL_SCHEMA_VERSION } from '../src/agent/providerRequestProjection';
 import { ToolEvidenceStore } from '../src/agent/evidence/store';
 import { prepareEvidenceEnvelope } from '../src/agent/evidence/shaping';
 import { visibleProgressFingerprint } from '../src/agent/contextEpoch';
 import type { AgentRequest } from '../src/shared/types';
 import type { SubagentToolAdapter } from '../src/agent/subagents/types';
-import { SkillDiscovery, validateCodexPluginSkill } from '../src/skills/skillDiscovery';
-import { pinCodexPluginSkill } from '../src/skills/codexPluginResources';
-import { toActivatedSkill } from '../src/skills/skillTypes';
-import { normalizeRunCheckpoint, type RunCheckpoint } from '../src/agent/runCheckpoint';
+import { discoverCodexPlugins } from '../src/skills/codexPluginDiscovery';
+import { pinCodexPluginSkill, readCodexPluginResource } from '../src/skills/codexPluginResources';
+import { CODEX_PLUGIN_SKILLS_UNAVAILABLE } from '../src/skills/codexPluginSupport';
+import { toActivatedSkill, type SkillManifest } from '../src/skills/skillTypes';
+import { AgentInterruptedError, createRunCheckpoint, normalizeRunCheckpoint } from '../src/agent/runCheckpoint';
+import { assertPluginSkillsCurrent, executePluginSkillRead } from '../src/agent/pluginSkillRuntime';
 
 test('P1 V11 preserves f313a00 V1–V10 system and full/slim schema bytes', async () => {
   const fixture = JSON.parse(await readFile(join(__dirname, '../../doc/benchmarks/keepseek-p1-frozen-protocol-f313a00.json'), 'utf8'));
@@ -117,96 +119,96 @@ test('canonical page bytes reach actual mocked Chat/Responses/Anthropic/DSML req
   } finally { globalThis.fetch = originalFetch; vscode.workspace.getConfiguration = originalConfiguration; }
 });
 
-test('V12 routes an explicitly selected local text plugin through all three Provider lanes and recovers durable reads', async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'keepseek-plugin-runtime-')));
+test('old plugin checkpoints remain readable but activation, recovery and direct reads stop before Provider dispatch', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'keepseek-plugin-suspension-')));
   const home = join(root, 'codex');
-  const storage = vscode.Uri.file(join(root, 'storage')) as unknown as import('vscode').Uri;
   const bundle = join(home, 'plugins/cache/fixture/workflow/local');
-  const configPath = join(home, 'config.toml');
-  const branchPath = join(bundle, 'skills/branch/SKILL.md');
-  const config = '[plugins."workflow@fixture"]\nenabled = true\n';
   const originalFetch = globalThis.fetch;
-  const previousHome = process.env.CODEX_HOME;
   const previousWorkspace = { isTrusted: vscode.workspace.isTrusted, workspaceFolders: vscode.workspace.workspaceFolders };
   const put = async (file: string, content: string) => {
     await mkdir(dirname(file), { recursive: true });
     await writeFile(file, content, 'utf8');
   };
+  const paused = (error: unknown) => error instanceof Error && error.message === CODEX_PLUGIN_SKILLS_UNAVAILABLE;
+  const interrupted = (error: unknown) => error instanceof AgentInterruptedError
+    && error.reason === 'waiting_for_user' && error.message.includes(CODEX_PLUGIN_SKILLS_UNAVAILABLE);
   try {
-    process.env.CODEX_HOME = home;
     Object.assign(vscode.workspace, { isTrusted: true, workspaceFolders: [] });
-    await put(configPath, config);
+    await put(join(home, 'config.toml'), '[plugins."workflow@fixture"]\nenabled = true\n');
     await put(join(bundle, '.codex-plugin/plugin.json'), '{"name":"workflow","version":"1.0.0","skills":"./skills/"}');
-    await put(join(bundle, 'skills/index/SKILL.md'), '---\nname: index\ndescription: Fixture entry\n---\nEntry marker 927. [Branch](../branch/SKILL.md)\n');
-    await put(branchPath, '---\nname: branch\ndescription: Fixture branch\n---\nBranch marker 342. Return the marker.\n');
-    const manifests = await new SkillDiscovery({ includeUserSkills: false, includeAdminSkills: false }).discover();
-    const manifest = manifests.find(item => item.pluginQualifiedName === 'workflow:index');
-    assert.ok(manifest?.pluginInstallation);
-    const initial = await pinCodexPluginSkill(manifest.pluginInstallation, manifest, manifests, {
-      isTrusted: true, routingAvailable: true, availableTools: [READ_PLUGIN_SKILL_TOOL_NAME],
-      validateInstallation: (installation, skillPath, name) => validateCodexPluginSkill(installation, skillPath, undefined, name)
-    });
+    const entryText = '---\nname: index\ndescription: Fixture entry\n---\nEntry marker 927. [Branch](../branch/SKILL.md)\n';
+    const branchText = '---\nname: branch\ndescription: Fixture branch\n---\nBranch marker 342. Return the marker.\n';
+    await put(join(bundle, 'skills/index/SKILL.md'), entryText);
+    await put(join(bundle, 'skills/branch/SKILL.md'), branchText);
+    // Build an authentic legacy snapshot with the retained low-level reader;
+    // live SkillDiscovery/SkillLoader must no longer activate this package.
+    const installations = await discoverCodexPlugins(vscode.Uri.file(home) as unknown as import('vscode').Uri);
+    const installation = installations.plugins[0];
+    assert.ok(installation);
+    const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+    const makeManifest = (name: string, content: string): SkillManifest => {
+      const rootUri = vscode.Uri.file(join(bundle, 'skills', name)) as unknown as import('vscode').Uri;
+      return { id: `codexPlugin:workflow:${name}`, name, description: 'Fixture workflow', source: 'codexPlugin', sourceLabel: 'fixture',
+        rootUri, skillUri: vscode.Uri.file(join(rootUri.fsPath, 'SKILL.md')) as unknown as import('vscode').Uri,
+        enabled: true, allowImplicit: false, hasAssets: false, hasScripts: false, hasReferences: false,
+        pluginInstallation: installation, pluginQualifiedName: `workflow:${name}`, documentHash: hash(content), metadataHash: hash('') };
+    };
+    const manifest = makeManifest('index', entryText);
+    const branch = makeManifest('branch', branchText);
+    const readContext = { isTrusted: true, routingAvailable: true, availableTools: [READ_PLUGIN_SKILL_TOOL_NAME],
+      validateInstallation: async () => true };
+    const initial = await pinCodexPluginSkill(installation, manifest, [manifest, branch], readContext);
+    const previousRoute = await readCodexPluginResource(initial.snapshot, { mode: 'route', reference: '../branch/SKILL.md' }, readContext);
+    assert.match(previousRoute.content ?? '', /Branch marker 342/u);
     const skill = { ...toActivatedSkill(manifest, initial.content), pluginSnapshot: initial.snapshot,
-      activation: { source: 'explicit' as const, reason: 'fixture user selection' } };
+      activation: { source: 'explicit' as const, reason: 'legacy user selection' } };
     const prompt = '$workflow:index Run the branch.';
     const userBytes = `${prompt}\n\n${formatActiveSkills({ skills: [skill], language: 'en', requestProtocolVersion: 12 })}`.trim();
-    const call = { id: 'read-plugin-branch', type: 'function' as const, function: { name: READ_PLUGIN_SKILL_TOOL_NAME,
-      arguments: JSON.stringify({ skillId: skill.id, mode: 'route', reference: '../branch/SKILL.md' }) } };
-    let recovery: RunCheckpoint | undefined;
-    let resumed: AgentRequest | undefined;
+    const context = { projectInstructions: [], skills: [skill], metadata: {
+      precedence: [], beforeDeduplicationCount: 1, afterDeduplicationCount: 1, totalCharacterCount: skill.content.length,
+      totalTokenEstimate: 200, truncated: false, sources: [], discarded: [], possibleConflicts: []
+    } };
+    await rm(bundle, { force: true, recursive: true });
+    let dispatches = 0;
+    const call = { id: 'never-executed-plugin-reader', function: { name: READ_PLUGIN_SKILL_TOOL_NAME, arguments: '{}' } };
     for (const [format, provider] of [
       ['chat', 'openai-compatible'], ['responses', 'openai-responses'], ['anthropic', 'anthropic-compatible']
     ] as const) {
-      const current = request(provider);
-      const run: AgentRequest = { ...current, sessionId: format, requestProtocolVersion: 12, prompt,
+      globalThis.fetch = (async () => { dispatches++; return response(format, false, call); }) as typeof fetch;
+      const run: AgentRequest = { ...request(provider), requestProtocolVersion: 12, prompt,
         history: [{ id: 'user-fixture', role: 'user', content: prompt, providerContent: userBytes, createdAt: new Date().toISOString() }],
-        currentRunContext: { projectInstructions: [], skills: [skill], metadata: {
-          precedence: [], beforeDeduplicationCount: 1, afterDeduplicationCount: 1, totalCharacterCount: skill.content.length,
-          totalTokenEstimate: 200, truncated: false, sources: [], discarded: [], possibleConflicts: []
-        } } };
-      const bodies: Record<string, unknown>[] = [];
-      globalThis.fetch = (async (_url, init) => {
-        bodies.push(JSON.parse(String(init?.body)));
-        return response(format, bodies.length === 1, call);
-      }) as typeof fetch;
-      const runner = new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, storage);
-      const result = await runner.run(run, { onCheckpoint: async checkpoint => {
-        if (format === 'chat' && checkpoint.state?.pending?.executing?.name === READ_PLUGIN_SKILL_TOOL_NAME) {
-          recovery ??= structuredClone(checkpoint);
-          resumed = run;
-        }
-      } });
-      assert.match(result.message, /Done/u);
-      assert.equal(bodies.length, 2, format);
-      assert.ok(strings(bodies[0]).includes(READ_PLUGIN_SKILL_TOOL_NAME), format);
-      assert.ok(strings(bodies[0]).includes(userBytes), format);
-      assert.ok(strings(bodies[1]).some(text => text.includes('Branch marker 342') && text.includes('"workflow_routed"')), format);
-      assert.deepEqual(bodies[0].tools, bodies[1].tools, format);
+        currentRunContext: context };
+      const legacy = createRunCheckpoint(run, 0, 'legacy fixture', []);
+      legacy.status = 'interrupted';
+      legacy.pluginSkillProgress = [{ skillId: skill.id, progress: previousRoute.snapshot.progress }];
+      const checkpoint = normalizeRunCheckpoint(JSON.parse(JSON.stringify(legacy)));
+      assert.ok(checkpoint, format);
+      assert.equal(checkpoint.request.history[0].providerContent, userBytes, format);
+      assert.equal(checkpoint.request.currentRunContext?.skills[0].pluginSnapshot?.entryPath, 'skills/index/SKILL.md');
+      assert.ok(checkpoint.pluginSkillProgress?.[0].progress.seen.includes('route:skills/branch/SKILL.md'));
+      await assert.rejects(assertPluginSkillsCurrent(checkpoint.request.currentRunContext?.skills ?? [], [READ_PLUGIN_SKILL_TOOL_NAME], checkpoint), interrupted);
+      const runner = new AgentRunner();
+      await assert.rejects(runner.run(run), interrupted);
+      await assert.rejects(runner.run({ ...run, checkpoint }), interrupted);
+      await assert.rejects(executePluginSkillRead({ ...run, checkpoint },
+        { skillId: skill.id, mode: 'read', reference: '../branch/SKILL.md' }, [READ_PLUGIN_SKILL_TOOL_NAME]), paused);
+      assert.equal(dispatches, 0, 'paused plugin tasks must stop before any Provider request');
     }
-    assert.ok(recovery && resumed);
-    const checkpoint = normalizeRunCheckpoint(recovery);
-    assert.ok(checkpoint);
-    // The filesystem can no longer produce the pinned branch bytes. Recovery
-    // has to use the completed read from the pre-crash evidence store.
-    await put(branchPath, '---\nname: branch\ndescription: Fixture branch\n---\nReplacement marker 581.\n');
-    const recoveryBodies: Record<string, unknown>[] = [];
-    globalThis.fetch = (async (_url, init) => {
-      recoveryBodies.push(JSON.parse(String(init?.body)));
-      return response('chat', false, call);
-    }) as typeof fetch;
-    let recovered: RunCheckpoint | undefined;
-    const freshRunner = new AgentRunner(undefined, undefined, undefined, undefined, undefined, undefined, storage);
-    await freshRunner.run({ ...resumed, checkpoint }, { onCheckpoint: async cp => { recovered = cp; } });
-    assert.equal(recoveryBodies.length, 1);
-    assert.ok(strings(recoveryBodies[0]).some(text => text.includes('Branch marker 342')));
-    assert.ok(!strings(recoveryBodies[0]).some(text => text.includes('Replacement marker 581')));
-    assert.ok(recovered?.pluginSkillProgress?.[0].progress.seen.includes('route:skills/branch/SKILL.md'));
-    await put(configPath, config.replace('true', 'false'));
-    await assert.rejects(freshRunner.run(resumed), /disabled, removed, or changed/u);
-    assert.equal(recoveryBodies.length, 1, 'a revoked plugin must stop before dispatch');
+    await assert.rejects(executePluginSkillRead(undefined, {}, []), paused);
+    await assertPluginSkillsCurrent([], []);
+    // Old instructions remain historical bytes; a fresh task can use the same
+    // conversation without reactivating its old plugin selection.
+    const bodies: Record<string, unknown>[] = [];
+    globalThis.fetch = (async (_url, init) => { bodies.push(JSON.parse(String(init?.body))); return response('chat', false, call); }) as typeof fetch;
+    const ordinary = await new AgentRunner().run({ ...request('openai-compatible'), requestProtocolVersion: 14,
+      prompt: 'Continue with an ordinary task.',
+      history: [{ id: 'legacy-user', role: 'user', content: prompt, providerContent: userBytes, createdAt: new Date().toISOString() }] });
+    assert.match(ordinary.message, /Done/u);
+    assert.equal(bodies.length, 1);
+    assert.ok(strings(bodies[0]).includes(userBytes));
+    assert.ok(!strings(bodies[0].tools).includes(READ_PLUGIN_SKILL_TOOL_NAME));
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
     Object.assign(vscode.workspace, previousWorkspace);
     await rm(root, { force: true, recursive: true });
   }
@@ -224,6 +226,50 @@ test('V12 exposes only the new plugin reader beyond V11 while preserving the sys
     agentSettings: request('openai-compatible').settings, requestProtocolVersion: 11 });
   assert.equal(projection.requestProtocolVersion, 11);
   assert.ok(!projection.tools.some(tool => tool.function.name === READ_PLUGIN_SKILL_TOOL_NAME));
+});
+
+test('V14 hides the suspended reader in all three payload lanes and preserves V12/V13 frozen schemas', () => {
+  const sha = (value: string) => createHash('sha256').update(value).digest('hex');
+  for (const baseline of [
+    { version: 12, full: '73f7d52b8f89ddfb78057d0a3dc643006318ebc950f7b33657636321e58be5e6',
+      slim: '0519027d3becc5499e0086fb7d2b2a6d4cd11b0509c08af414c0ded951607269',
+      system: '5ce7ea12bed2baf17c6efc2865136b1cffa4d7cf04f96843d2a112678a519c14' },
+    { version: 13, full: '360f15c2d092c834a3e5aa18ff0bb1c92a159d4be2868254df464511b3ac4ca7',
+      slim: '6a36f889decb634d4034eeeab056faa61983a24c3fb285802464f556e1aaad6b',
+      system: '1d715e5a53fa6e3a33c09efafd77a519b8ff9986c42dddf0fb47c91ce7d77104' }
+  ]) {
+    const options = { requestProtocolVersion: baseline.version };
+    const names = getAgentToolNamesForPrompt('small question', true, baseline.version);
+    assert.equal(sha(JSON.stringify(getAgentTools(options))), baseline.full);
+    assert.equal(sha(JSON.stringify(getAgentTools({ ...options, toolNames: names }))), baseline.slim);
+    assert.equal(sha(getAgentSystemPrompt({ language: 'en', ...options })), baseline.system);
+    assert.ok(names.includes(READ_PLUGIN_SKILL_TOOL_NAME));
+  }
+  assert.equal(CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION, 14);
+  assert.equal(CURRENT_PROVIDER_TOOL_SCHEMA_VERSION, 14);
+  for (const language of ['en', 'zh-CN'] as const) {
+    assert.equal(getAgentSystemPrompt({ language, requestProtocolVersion: 14 }), getAgentSystemPrompt({ language, requestProtocolVersion: 13 }));
+  }
+  assert.deepEqual(getAgentTools({ requestProtocolVersion: 14 }),
+    getAgentTools({ requestProtocolVersion: 13 }).filter(tool => tool.function.name !== READ_PLUGIN_SKILL_TOOL_NAME));
+  for (const slim of [false, true]) {
+    assert.ok(!getAgentToolNamesForPrompt('small question', slim, 14).includes(READ_PLUGIN_SKILL_TOOL_NAME));
+  }
+  for (const provider of ['openai-compatible', 'openai-responses', 'anthropic-compatible'] as const) {
+    const run = request(provider);
+    // An explicitly supplied obsolete allow-list also cannot expose the reader.
+    for (const slimToolNames of [undefined, getAgentToolNamesForPrompt('small question', true, 13)]) {
+      const projection = buildProviderRequestProjection({ ...run, agentSettings: run.settings,
+        requestProtocolVersion: 14, slimToolNames, sourceId: 'source', baseUrl: 'https://fixture.invalid/v1' });
+      const body = buildProviderPayloadProjection({ modelId: run.model.id, maxOutputTokens: projection.runtimeProfile.maxTokens,
+        provider, messages: projection.messages, tools: projection.tools,
+        native: projection.responses ? { protocol: 'openai-responses', ...projection.responses }
+          : projection.anthropic ? { protocol: 'anthropic-messages', ...projection.anthropic } : undefined });
+      assert.ok(!projection.tools.some(tool => tool.function.name === READ_PLUGIN_SKILL_TOOL_NAME), provider);
+      assert.ok(!strings(body.tools).includes(READ_PLUGIN_SKILL_TOOL_NAME), provider);
+      assert.ok(strings(body.tools).includes('keepseek_read_evidence'), provider);
+    }
+  }
 });
 
 function request(provider: 'openai-compatible' | 'openai-responses' | 'anthropic-compatible'): AgentRequest {

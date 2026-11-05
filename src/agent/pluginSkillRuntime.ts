@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { formatCodexPluginCapability } from '../skills/codexPluginCapabilities';
 import { readCodexPluginResource, validateCodexPluginSnapshot, type CodexPluginReadContext } from '../skills/codexPluginResources';
 import { validateCodexPluginSkill } from '../skills/skillDiscovery';
+import { assertCodexPluginSkillsEnabled, isCodexPluginSkill } from '../skills/codexPluginSupport';
 import type { ActivatedSkill, AgentRequest } from '../shared/types';
 import { stableStringify } from './evidence/shaping';
 import { READ_PLUGIN_SKILL_TOOL_NAME } from './protocol';
@@ -11,8 +12,9 @@ import { AgentInterruptedError, getCheckpointPluginSnapshot, type PluginSkillPro
 export async function assertPluginSkillsCurrent(skills: readonly ActivatedSkill[], availableTools: readonly string[],
   checkpoint?: RunCheckpoint): Promise<void> {
   for (const skill of skills) {
-    if (skill.source !== 'codexPlugin') continue;
+    if (!isCodexPluginSkill(skill)) continue;
     try {
+      assertCodexPluginSkillsEnabled();
       const snapshot = checkpoint ? getCheckpointPluginSnapshot(checkpoint, skill) : skill.pluginSnapshot;
       if (!snapshot) throw new Error('Missing plugin package pin / 缺少插件版本快照');
       await validateCodexPluginSnapshot(snapshot, createReadContext(skill, availableTools));
@@ -28,6 +30,7 @@ export async function executePluginSkillRead(
   args: Record<string, unknown>,
   availableTools: readonly string[]
 ): Promise<{ content: string; progress: PluginSkillProgress }> {
+  assertCodexPluginSkillsEnabled();
   const checkpoint = request?.checkpoint;
   const skill = checkpoint?.request.currentRunContext?.skills.find(item => item.id === args.skillId);
   const snapshot = checkpoint && skill && getCheckpointPluginSnapshot(checkpoint, skill);

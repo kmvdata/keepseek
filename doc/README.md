@@ -12,7 +12,7 @@
 | 三协议 payload 与 replay lane | [API Payload](keepseek-api-payload-reference.md) | `agent/providers/`；`openAiResponses`、`anthropicMessages`、`kimiGlmProviders`、`qwenCloudProvider` |
 | 子代理隔离、结果合同、分页与父验收 | [SUBAGENTS](../SUBAGENTS.md) | `agent/subagents/`、`delegation.ts`；`subagentSafety`、`p1Delegation`、`p1ProtocolDelivery` |
 | 共享指令、配置子集与普通 Skills | [共享 Codex 配置](keepseek-codex-shared-config.md) | `context/shared*`、`projectInstructions.ts`、`skills/`；`projectInstructions`、`skillDiscovery`、`skillActivationResolver` |
-| 本机 Codex 插件 Skills 的安装身份与只读路由 | [插件 Skills](keepseek-codex-plugin-skills.md) | `codexPlugin*`、`pluginSkillRuntime.ts`；`codexPluginDiscovery`、`codexPluginResources` |
+| 已暂停的 Codex 插件 Skills 与历史读取边界 | [插件 Skills](keepseek-codex-plugin-skills.md) | `codexPluginSupport.ts`、`pluginSkillRuntime.ts`；`skillDiscovery`、`skillActivationResolver`、`p1ProtocolDelivery` |
 | 引用语法、授权与打开 | [文件引用规范](keepseek-file-reference-spec.md) | `context/references/`；`fileReference`、`fileReferenceOpener`、`referenceResources` |
 | 输入、fragment、消息、快捷键 | [架构地图的 Host/Webview 入口](keepseek-code-architecture.md#2-宿主与-webview) | `webview/input/composition.ts`、`richTextShortcuts.ts`；`inputComposition`、`richTextShortcuts` |
 | 本次任务与会话累计有效计时 | [计时口径](execution-time-statistics.md) | `sessions/executionTimeStats.ts`、`userTask.ts`；`executionTimeStats`、`usageStats` |
@@ -21,16 +21,16 @@
 
 ## 版本维度
 
-以下是 2026-11-05 源码快照。改动时先查符号，不把一个维度的数字批量替换到其他维度。
+以下是 2026-11-06 源码快照。改动时先查符号，不把一个维度的数字批量替换到其他维度。
 
 | 维度 | 当前写入/选择 | 源码权威 | 兼容与冻结规则 |
 | --- | --- | --- | --- |
-| 父会话 request protocol | 13 | [providerRequestProjection.ts](../src/agent/providerRequestProjection.ts) 的 `CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION` | 会话保存 `requestProtocol`；旧热 lane 不逐轮升级，按既有冷边界迁移 |
-| 父会话 tool schema | 13 | 同文件 `CURRENT_PROVIDER_TOOL_SCHEMA_VERSION`，schema 正文在 [protocol.ts](../src/agent/protocol.ts) | 名称、排序、schema 随 lane 冻结；禁用以 `tool_choice: none` 表达 |
-| 插件 Skill 工具启用门槛 | 12 | [protocol.ts](../src/agent/protocol.ts) 的 `PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION` | V1–V11 保留原工具字节，新增工具不反写热会话 |
+| 父会话 request protocol | 14 | [providerRequestProjection.ts](../src/agent/providerRequestProjection.ts) 的 `CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION` | 会话保存 `requestProtocol`；旧热 lane 不逐轮升级，按既有冷边界迁移 |
+| 父会话 tool schema | 14 | 同文件 `CURRENT_PROVIDER_TOOL_SCHEMA_VERSION`，schema 正文在 [protocol.ts](../src/agent/protocol.ts) | V14 不含插件读取工具；V12/V13 冻结 schema 保留，活动调用拒绝 |
+| 插件 Skill 工具历史范围 | 12–13；14 起移除 | [protocol.ts](../src/agent/protocol.ts) 的 `PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION` / `PLUGIN_SKILL_SUSPENSION_PROTOCOL_VERSION` | 功能已暂停；工具列表不反写热会话，历史记录仍可读取 |
 | 委托审批交付协议 | 13 | [approvalMode.ts](../src/agent/approvalMode.ts) 的 `DELEGATED_APPROVAL_PROTOCOL_VERSION` | 当前 ask/delegate；旧 `model_review` 设置转 ask，旧审计和冻结提示仍可读取 |
 | 审批策略 | 通用 2、自动 reviewer 5 | [approvalReviewTypes.ts](../src/approvals/approvalReviewTypes.ts) 的 `APPROVAL_POLICY_VERSION` / `AUTO_APPROVAL_POLICY_VERSION` | 决定绑定各自策略与 runtime；不是 request/schema 版本，旧批准不在重启后复用 |
-| child runtime 协议 | 11 | [subagents/runtime.ts](../src/agent/subagents/runtime.ts) 的私有 `SUBAGENT_PROTOCOL_VERSION` | child 使用独立冻结 lane，不等于父会话 13 |
+| child runtime 协议 | 11 | [subagents/runtime.ts](../src/agent/subagents/runtime.ts) 的私有 `SUBAGENT_PROTOCOL_VERSION` | child 使用独立冻结 lane，不等于父会话 14 |
 | child 结果合同与 handoff | 合同 2、manifest 3 | [resultEnvelope.ts](../src/agent/subagents/resultEnvelope.ts)、[handoff.ts](../src/agent/subagents/handoff.ts)、[types.ts](../src/agent/subagents/types.ts) | 旧合同/manifest 2 仍有读取路径；结果生命周期、结构验收和父采纳分别记录 |
 | 宿主 capsule / 结果索引 | 均为 1 | [contextCapsule.ts](../src/agent/subagents/contextCapsule.ts)、[resultIndex.ts](../src/agent/subagents/resultIndex.ts) | capsule hash/scope 核验；索引保存 canonical 结果，不为读取一页解码私有 transcript |
 | workspace 索引、全局 manifest | 均为 2 | [globalSessionStorage.ts](../src/sessions/globalSessionStorage.ts) 的对应接口 | 存储目录 `chat-sessions/v2` 不表示 shard 内容仅为 V2 |

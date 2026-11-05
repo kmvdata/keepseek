@@ -10,6 +10,7 @@ import { createSkillId, type SkillManifest, type SkillSource } from './skillType
 import { parseSkillFrontmatter, parseSkillMetadata } from './skillMetadata';
 import { discoverCodexPlugins, refreshCodexPluginInstallation, type CodexPluginInstallation } from './codexPluginDiscovery';
 import { describeCodexPluginCapability } from './codexPluginResources';
+import { isCodexPluginSkillsEnabled } from './codexPluginSupport';
 export { parseSkillFrontmatter } from './skillMetadata';
 export type { ParsedSkillFrontmatter } from './skillMetadata';
 
@@ -42,7 +43,7 @@ export class SkillDiscovery {
       const uri = this.options.adminSkillsUri ?? vscode.Uri.file('/etc/codex/skills');
       bases.push({ source: 'admin', uri, boundary: uri });
     }
-    if (this.options.includeCodexPlugins !== false) {
+    if (isCodexPluginSkillsEnabled() && this.options.includeCodexPlugins !== false) {
       if (vscode.workspace.isTrusted) {
         try {
           const installed = await discoverCodexPlugins(config.codexHome, config.scope);

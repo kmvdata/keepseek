@@ -1,6 +1,7 @@
 import type { SkillActivationInfo, SkillActivationSource } from '../shared/types';
 import { normalizeUri } from '../agent/projectInstructions';
 import type { SkillManifest } from './skillTypes';
+import { isCodexPluginSkill, isCodexPluginSkillsEnabled } from './codexPluginSupport';
 
 export interface SkillActivationDecision {
   manifest: SkillManifest;
@@ -230,6 +231,7 @@ function getActivationReason(source: Exclude<SkillActivationSource, 'implicit'>)
 
 function canActivate(manifest: SkillManifest, workspaceTrusted: boolean): boolean {
   return manifest.enabled
+    && (isCodexPluginSkillsEnabled() || !isCodexPluginSkill(manifest))
     && !manifest.unavailableReason
     && (workspaceTrusted || (!manifest.pluginInstallation && !WORKSPACE_SKILL_SOURCES.has(manifest.source)));
 }
