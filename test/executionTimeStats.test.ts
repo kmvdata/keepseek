@@ -3,11 +3,12 @@ import { ExecutionClock } from '../src/agent/executionPolicy';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
-import { reconcileExecutionTime, executionTimeView } from '../src/sessions/executionTimeStats';
+import { reconcileExecutionTime, executionTimeView, UserTaskClock } from '../src/sessions/executionTimeStats';
 import { createEmptySession, normalizeStoredSessions } from '../src/sessions/chatSessionStore';
 import type { ChatMessage } from '../src/shared/types';
 import { usageFormattersFragment } from '../src/webview/input/usage/formatters';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
+import { taskGoal } from '../src/sessions/userTask';
 
 function message(taskId: string, usedMs: number, status = 'running'): ChatMessage {
   return { id: taskId, role: 'assistant', content: '', createdAt: '',
@@ -82,7 +83,100 @@ test('active-scope union feeds display totals without adding child durations or 
   now = 800;
   active();
   session.messages = [message('parent', resumed.usedMs, 'failed')];
+  session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
   assert.equal(executionTimeView(session).totalMs, 400);
   assert.equal(resumed.remainingMs, 600);
   clock.dispose(); resumed.dispose();
+});
+
+
+test('one user task covers model/reviewer/command/continuation scopes, excludes human wait and deduplicates children', () => {
+  let now = 0;
+  const clock = new UserTaskClock(() => now);
+  const session = createEmptySession();
+  const task = { version: 1 as const, id: 'u1', originMessageId: 'u1', reason: 'user' as const };
+  const model = clock.enter(session, task);
+  now += 10000; model.finish();
+  now += 60000; // manual wait
+  const review = clock.enter(session, { ...task, reason: 'approval' });
+  now += 2000; review.finish();
+  const command = clock.enter(session, task); now += 3000; command.finish();
+  const continuation = clock.enter(session, { ...task, reason: 'command' }); now += 5000; continuation.finish();
+  assert.equal(executionTimeView(session).currentMs, 20000);
+  const parent = clock.enter(session, task), child1 = clock.enter(session, task), child2 = clock.enter(session, task);
+  parent.setActive(false); now += 5000; child1.finish(); child2.finish(); parent.finish();
+  assert.equal(executionTimeView(session).currentMs, 25000);
+  const next = { ...task, id: 'u2', originMessageId: 'u2' };
+  const newTask = clock.enter(session, next);
+  assert.equal(executionTimeView(session).currentMs, 0);
+  now += 1000; newTask.setActive(false); now += 60000;
+  assert.equal(executionTimeView(session).currentMs, 1000);
+  newTask.setActive(true); now += 1000; newTask.finish();
+  assert.equal(executionTimeView(session).totalMs, 27000);
+  session.messages = []; // UI history pagination never defines the current task
+  assert.equal(executionTimeView(session).currentMs, 2000);
+  const reloaded = JSON.parse(JSON.stringify(session));
+  clock.dispose(); now += 100000;
+  const newClock = new UserTaskClock(() => now);
+  const resumed = newClock.enter(reloaded, next); now += 1000; resumed.finish();
+  assert.equal(executionTimeView(reloaded).totalMs, 28000);
+  newClock.dispose();
+});
+
+test('host measured task never sums Runner snapshots, including duplicate/old snapshots and deletion', () => {
+  let now = 0;
+  const clock = new UserTaskClock(() => now);
+  const session = createEmptySession();
+  const task = { version: 1 as const, id: 'user', originMessageId: 'user', reason: 'user' as const };
+  session.messages = [{ id: 'user', role: 'user', content: 'task', createdAt: '', userTask: task }];
+  const work = clock.enter(session, task);
+  for (const [id, ms] of [['one', 4000], ['two', 2000], ['one', 1000]] as const) {
+    const assistant = { ...message(id, ms), userTask: task };
+    session.messages.push(assistant);
+    now += 5000; clock.bindSegment(session, assistant);
+    session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
+  }
+  work.finish();
+  assert.equal(executionTimeView(session).totalMs, 15000);
+  session.messages = [];
+  session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
+  assert.equal(executionTimeView(session).totalMs, 15000);
+  assert.equal(executionTimeView(session).currentMs, 15000);
+  clock.dispose();
+});
+
+test('legacy explicit continuations join only their original user task and preserve reliable totals', () => {
+  const session = createEmptySession();
+  session.executionTime = { version: 1, byTask: { oldMissing: 5000 }, incomplete: true };
+  session.messages = [
+    { id: 'first', role: 'user', content: 'first task', createdAt: '' }, message('a', 33470),
+    { id: 'auto', role: 'user', content: 'host result', createdAt: '', contextMeta: { displayKind: 'delegated_auto_continue' } }, message('b', 8681),
+    { id: 'new', role: 'user', content: 'continue with an independent question', createdAt: '' }, message('c', 1000)
+  ];
+  session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
+  assert.equal(session.messages[3].userTask?.id, 'first');
+  assert.equal(session.messages[5].userTask?.id, 'new');
+  assert.equal(executionTimeView(session).totalMs, 48151);
+  assert.equal(executionTimeView(session).currentMs, 1000);
+  const snapshot = JSON.stringify(session.executionTime);
+  session.executionTime = reconcileExecutionTime(JSON.parse(snapshot), session.messages);
+  assert.equal(JSON.stringify(session.executionTime), snapshot);
+});
+
+test('legacy supplementary user turn with the same archived execution ID cannot double the high-water mark', () => {
+  const session = createEmptySession();
+  session.executionTime = { version: 1, byTask: { segment: 3000 }, incomplete: true };
+  session.messages = [
+    { id: 'user', role: 'user', content: 'original', createdAt: '' }, message('segment', 2000),
+    { id: 'supplement', role: 'user', content: 'additional requirement', createdAt: '' }, { ...message('segment', 4000), id: 'recovery' }
+  ];
+  const contents = session.messages.map(m => m.content);
+  session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
+  assert.equal(executionTimeView(session).totalMs, 4000);
+  assert.equal(executionTimeView(session).currentMs, 4000);
+  assert.equal(session.messages[2].userTask?.id, 'user');
+  assert.equal(taskGoal(session.messages, 'user'), 'original\n\nadditional requirement');
+  assert.deepEqual(session.messages.map(m => m.content), contents);
+  session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
+  assert.equal(executionTimeView(session).totalMs, 4000);
 });

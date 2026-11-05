@@ -77,6 +77,7 @@ test('Provider returns terminal feedback for busy, missing, and exceptional Appl
     isStartingRun: false,
     runContextRefreshInFlight: false,
     activeChangeActions: new Set<string>(),
+    sessionStore: { getActiveSession: () => ({ id: 's', approvalMode: 'ask', messages: [] }), persist: async () => {} },
     postToWebview: (message: Record<string, unknown>) => messages.push(message),
     postState: () => undefined,
     t: (key: string) => key
@@ -92,6 +93,7 @@ test('Provider returns terminal feedback for busy, missing, and exceptional Appl
   host.isBusy = false;
   host.changeSets = {
     getEditUris: () => [],
+    getPendingEdit: () => undefined,
     getPendingDeleteTargetsForEdit: () => [],
     applyEdit: async () => undefined
   };
@@ -100,6 +102,7 @@ test('Provider returns terminal feedback for busy, missing, and exceptional Appl
 
   host.changeSets = {
     getEditUris: () => [],
+    getPendingEdit: () => undefined,
     getPendingDeleteTargetsForEdit: () => [],
     applyEdit: async () => { throw new Error('simulated Apply failure'); }
   };
@@ -123,7 +126,7 @@ test('ordinary source Apply skips Skill discovery while context-source refresh b
       refresh: async () => { skillRefreshes += 1; },
       invalidateImplicitSkillSnapshot: () => undefined
     },
-    legacyMemoryMigration: { refresh: async () => undefined },
+    sharedProjectSources: { dirty: false, matches: () => true, refresh: async () => ({}) },
     sessionStore: { getActiveSession: () => session },
     refreshCurrentRunContext: async () => { contextRefreshes += 1; await gate; },
     postState: () => undefined,

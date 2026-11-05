@@ -1,3 +1,7 @@
+import { stat, realpath } from 'node:fs/promises';
+import { hashApprovalValue } from '../../approvals/approvalReviewHash';
+import { assertOperationPath } from '../../approvals/authorization/protectedTargets';
+import { findCanonicalWorkspaceFolder } from '../../approvals/authorization/pathScope';
 import { createReadStream } from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
@@ -157,32 +161,45 @@ type TextEncoderLike = {
   encode(input?: string): Uint8Array;
 };
 
+export interface ExternalReadScope {
+  uri: string;
+  canonicalUri: string;
+  authorized: boolean;
+  fingerprint: string;
+}
+
 export interface WorkspaceToolAdapter {
   listWorkspaceFiles(language: KeepseekLanguage): Promise<string>;
   listWorkspaceDirectory(rawPath: string, recursive: boolean, maxFiles: number | undefined, language: KeepseekLanguage): Promise<string>;
   searchWorkspace(input: WorkspaceSearchInput, language: KeepseekLanguage, options?: WorkspaceSearchExecutionOptions): Promise<string>;
-  readWorkspaceFile(rawPath: string, language: KeepseekLanguage): Promise<string>;
-  readWorkspaceFileRange(input: WorkspaceFileRangeInput, language: KeepseekLanguage): Promise<string>;
+  readWorkspaceFile(rawPath: string, language: KeepseekLanguage, expectedScope?: string): Promise<string>;
+  readWorkspaceFileRange(input: WorkspaceFileRangeInput, language: KeepseekLanguage, expectedScope?: string): Promise<string>;
   resolveTargetUri(targetPath: string): vscode.Uri;
   getLabel(uri: vscode.Uri): string;
   /** 设置本轮 Agent run 中用户显式引用、已授权的外部文件/目录 URI 集合（uri.toString()）。 */
   setAuthorizedExternalReferenceUris(uris?: Iterable<string>): void;
   setDelegatedFileAuthorization?(enabled: boolean): void;
-  getReviewableExternalUri?(rawPath: string): string | undefined;
+  inspectExternalRead?(rawPath: string): Promise<ExternalReadScope | undefined>;
   authorizeReviewedExternalUri?(uri: string): void;
+  grantUserExternalReadOnce?(uri: string): void;
+  revokeUserExternalReadOnce?(): void;
 }
 
 export class WorkspaceToolService implements WorkspaceToolAdapter {
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
   private readonly encoder = new TextEncoder();
+  private userReadOnce?: string;
+  public grantUserExternalReadOnce(uri: string): void { this.userReadOnce = uri; }
+  public revokeUserExternalReadOnce(): void { this.userReadOnce = undefined; }
+
   private readonly authorizedExternalReferenceUris = new Set<string>();
-  private delegatedFileAuthorization = false;
 
   public setDelegatedFileAuthorization(enabled: boolean): void {
-    this.delegatedFileAuthorization = enabled;
+    void enabled; // Approval mode cannot grant external filesystem access.
   }
 
   public setAuthorizedExternalReferenceUris(uris?: Iterable<string>): void {
+    this.userReadOnce = undefined;
     this.authorizedExternalReferenceUris.clear();
     if (uris) {
       for (const uri of uris) {
@@ -193,21 +210,46 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     }
   }
 
-  public getReviewableExternalUri(rawPath: string): string | undefined {
+  public async inspectExternalRead(rawPath: string): Promise<ExternalReadScope | undefined> {
     const folders = vscode.workspace.workspaceFolders ?? [];
     if (!folders.length) return undefined;
     const uri = this.resolveWorkspaceFileUriCandidate(rawPath, folders);
-    return !this.isUriInsideWorkspace(uri) && !this.authorizedExternalReferenceUris.has(uri.toString())
-      ? uri.toString()
-      : undefined;
+    const inside = this.isUriInsideWorkspace(uri);
+    if (uri.scheme !== 'file') {
+      if (inside) return undefined;
+      throw new Error('External read requires a local extension-host file. / 外部读取需要扩展宿主上的本地文件。');
+    }
+    const authorized = this.authorizedExternalReferenceUris.has(uri.toString()) || this.userReadOnce === uri.toString();
+    if (!inside) assertOperationPath(uri.fsPath);
+    // Avoid even statting an unauthorized external reference.
+    if (!inside && !authorized) return { uri: uri.toString(), canonicalUri: uri.toString(), authorized: false, fingerprint: '' };
+    const canonical = await realpath(uri.fsPath).catch((error: NodeJS.ErrnoException) => {
+      if (inside && error.code === 'ENOENT') return undefined;
+      throw error;
+    });
+    if (!canonical || (inside && await findCanonicalWorkspaceFolder(canonical))) return undefined;
+    assertOperationPath(canonical);
+    const canonicalUri = vscode.Uri.file(canonical).toString();
+    // A workspace symlink does not inherit reference permission from the
+    // workspace. An external symlink also needs authorization of its target.
+    const targetAuthorized = canonicalUri === uri.toString() || this.authorizedExternalReferenceUris.has(canonicalUri);
+    if (!authorized || !targetAuthorized) return { uri: uri.toString(), canonicalUri, authorized: false, fingerprint: '' };
+    const info = await stat(canonical);
+    if (!info.isFile()) throw new Error('External read target must be a regular file. / 外部读取目标必须是普通文件。');
+    return { uri: uri.toString(), canonicalUri, authorized: true,
+      fingerprint: hashApprovalValue([uri.toString(), canonicalUri, info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs]) };
+  }
+
+  private async assertReadScope(rawPath: string, expectedScope?: string): Promise<void> {
+    const scope = await this.inspectExternalRead(rawPath);
+    if ((scope && !scope.authorized) || (expectedScope && (!vscode.workspace.isTrusted || scope?.fingerprint !== expectedScope))) {
+      throw new Error('Exact external read authorization is missing or changed. / 缺少精确外部读取授权或授权已变化。');
+    }
   }
 
   public authorizeReviewedExternalUri(uri: string): void {
-    const parsed = vscode.Uri.parse(uri);
-    if (parsed.scheme !== 'file' || !vscode.workspace.isTrusted || vscode.workspace.getWorkspaceFolder(parsed)) {
-      throw new Error('Only one exact external file URI may be authorized by model review.');
-    }
-    this.authorizedExternalReferenceUris.add(parsed.toString());
+    void uri;
+    throw new Error('External access requires explicit user authorization; a reviewer cannot grant it.');
   }
 
   public async listWorkspaceFiles(language: KeepseekLanguage): Promise<string> {
@@ -408,7 +450,8 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     });
   }
 
-  public async readWorkspaceFile(rawPath: string, language: KeepseekLanguage): Promise<string> {
+  public async readWorkspaceFile(rawPath: string, language: KeepseekLanguage, expectedScope?: string): Promise<string> {
+    await this.assertReadScope(rawPath, expectedScope);
     const uri = this.resolveWorkspacePathUri(rawPath);
 
     if (shouldSkipTextUri(uri)) {
@@ -484,8 +527,9 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     });
   }
 
-  public async readWorkspaceFileRange(input: WorkspaceFileRangeInput, language: KeepseekLanguage): Promise<string> {
+  public async readWorkspaceFileRange(input: WorkspaceFileRangeInput, language: KeepseekLanguage, expectedScope?: string): Promise<string> {
     try {
+      await this.assertReadScope(input.path, expectedScope);
       const uri = this.resolveWorkspacePathUri(input.path);
       const range = this.normalizeRangeInput(input.startLine, input.endLine, input.maxBytes);
       const data = await this.readWorkspaceFileRangeData(
@@ -798,10 +842,7 @@ export class WorkspaceToolService implements WorkspaceToolAdapter {
     }
 
     const uri = this.resolveWorkspaceFileUriCandidate(rawPath, folders);
-    if (this.delegatedFileAuthorization && vscode.workspace.isTrusted && uri.scheme === 'file') {
-      this.authorizedExternalReferenceUris.add(uri.toString());
-    }
-    if (!this.isUriInsideWorkspace(uri) && !this.authorizedExternalReferenceUris.has(uri.toString())) {
+    if (!this.isUriInsideWorkspace(uri) && !this.authorizedExternalReferenceUris.has(uri.toString()) && this.userReadOnce !== uri.toString()) {
       throw new Error(
         'The requested file must be inside the currently open workspace or an explicitly referenced external file.'
       );

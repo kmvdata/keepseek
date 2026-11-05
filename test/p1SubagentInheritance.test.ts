@@ -16,6 +16,18 @@ import type { AgentRequest } from '../src/shared/types';
 
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
 
+test('child capsule preserves global/root/local instruction precedence instead of sorting paths', () => {
+  const request = parentRequest();
+  const base = request.currentRunContext!.projectInstructions[0];
+  request.currentRunContext!.projectInstructions = ['file:///z-home/AGENTS.md', 'file:///repo/AGENTS.md', 'file:///repo/a/AGENTS.override.md']
+    .map((uri, order) => ({ ...base, uri, content: `RULE ${order}`, order }));
+  const capsule = createSubagentHostContext(request, createStableWorkspaceContext([]));
+  assert.deepEqual(capsule.projectInstructions.map(item => item.content), ['RULE 0', 'RULE 1', 'RULE 2']);
+  assert.deepEqual(normalizeSubagentHostContext(capsule), capsule);
+  const reversed = { ...request, currentRunContext: { ...request.currentRunContext!, projectInstructions: [...request.currentRunContext!.projectInstructions].reverse() } };
+  assert.notEqual(createSubagentHostContext(reversed, createStableWorkspaceContext([])).hash, capsule.hash);
+});
+
 test('nested runtime inherits activated profiles and project constraints without parent or unselected Skill text in Provider payloads', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'keepseek-p1-inheritance-'));
   const originalFetch = globalThis.fetch;

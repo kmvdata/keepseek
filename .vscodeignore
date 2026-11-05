@@ -1,12 +1,15 @@
 .gitignore
 .claude/**
 .npm-cache/**
+.reasonix/**
 .agents/**
 .codex/**
 .vscode/**
 .vscode-test/**
 node_modules/**
 !node_modules/ignore/**
+!node_modules/yaml/**
+!node_modules/confbox/**
 src/**
 test/**
 scripts/**

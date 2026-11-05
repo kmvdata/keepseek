@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import type { ActivatedSkill, SkillSource } from '../shared/types';
+import type { CodexPluginInstallation } from './codexPluginDiscovery';
+import type { CodexPluginCapability } from './codexPluginResources';
 
 export { type ActivatedSkill, type SkillSource };
 
@@ -13,7 +15,6 @@ export interface SkillManifest {
   skillUri: vscode.Uri;
   enabled: boolean;
   allowImplicit: boolean;
-  userInvocable: boolean;
   hasReferences: boolean;
   hasAssets: boolean;
   hasScripts: boolean;
@@ -26,9 +27,20 @@ export interface SkillManifest {
     canDelegate?: boolean;
     resultMaxChars?: number;
   };
+  interface?: Record<string, string>;
+  dependencies?: Array<{ type: string; value: string; description?: string }>;
+  policySource?: string;
   unavailableReason?: string;
   /** Internal cache identity; omitted from the Webview projection. */
   contentFingerprint?: string;
+  physicalUri?: string;
+  documentHash?: string;
+  metadataHash?: string;
+  readBoundaryUri?: string;
+  pluginInstallation?: CodexPluginInstallation;
+  pluginQualifiedName?: string;
+  pluginSelectionStamp?: string;
+  pluginCapability?: CodexPluginCapability;
 }
 
 export interface SkillManifestView {
@@ -43,27 +55,41 @@ export interface SkillManifestView {
   skillPath: string;
   enabled: boolean;
   allowImplicit: boolean;
-  userInvocable: boolean;
   hasReferences: boolean;
   hasAssets: boolean;
   hasScripts: boolean;
   runAs?: 'subagent';
   subagentProfile?: SkillManifest['subagentProfile'];
+  interface?: Record<string, string>;
+  dependencies?: Array<{ type: string; value: string; description?: string }>;
+  policySource?: string;
   unavailableReason?: string;
   active?: boolean;
   loadError?: string;
   workspaceDefault?: boolean;
+  plugin?: {
+    name: string;
+    version: string;
+    marketplace: string;
+    source: CodexPluginInstallation['source'];
+    qualifiedName: string;
+    selectionStamp?: string;
+    capabilityStatus: CodexPluginCapability['status'];
+    capabilityDetails?: Array<{ en: string; zh: string; status: 'available' | 'missing' | 'unverified' }>;
+  };
 }
 
 export interface SkillStateView {
   workspaceTrusted: boolean;
+  scopeUri?: string;
+  diagnostics?: string[];
+  configSummary?: { projectDocMaxBytes: number; fallbackFilenames: string[]; origins: Record<string, string>; fingerprint: string };
   items: SkillManifestView[];
   activeSkillIds: string[];
   workspaceDefaultSkillIds: string[];
 }
 
 export const SKILL_FILE_NAME = 'SKILL.md';
-export const SKILL_INSTRUCTION_FILE_NAMES = [SKILL_FILE_NAME, 'AGENTS.md'] as const;
 
 export function createSkillId(source: SkillSource, rootUri: vscode.Uri): string {
   return `${source}:${encodeURIComponent(rootUri.toString())}`;
@@ -103,7 +129,6 @@ export function toSkillManifestView(
     skillPath: getUriDisplayPath(manifest.skillUri),
     enabled: manifest.enabled,
     allowImplicit: manifest.allowImplicit,
-    userInvocable: manifest.userInvocable,
     hasReferences: manifest.hasReferences,
     hasAssets: manifest.hasAssets,
     hasScripts: manifest.hasScripts,
@@ -111,10 +136,23 @@ export function toSkillManifestView(
     subagentProfile: manifest.subagentProfile
       ? { ...manifest.subagentProfile, tools: manifest.subagentProfile.tools ? [...manifest.subagentProfile.tools] : undefined }
       : undefined,
+    interface: manifest.interface,
+    dependencies: manifest.dependencies,
+    policySource: manifest.policySource,
     unavailableReason: manifest.unavailableReason,
     active: options.active,
     loadError: options.loadError,
-    workspaceDefault: options.workspaceDefault
+    workspaceDefault: options.workspaceDefault,
+    plugin: manifest.pluginInstallation && manifest.pluginQualifiedName ? {
+      name: manifest.pluginInstallation.name,
+      version: manifest.pluginInstallation.version,
+      marketplace: manifest.pluginInstallation.marketplace,
+      source: manifest.pluginInstallation.source,
+      qualifiedName: manifest.pluginQualifiedName,
+      selectionStamp: manifest.pluginSelectionStamp,
+      capabilityStatus: manifest.pluginCapability?.status ?? 'unverified',
+      capabilityDetails: manifest.pluginCapability?.requirements.map(requirement => ({ ...requirement.label, status: requirement.status }))
+    } : undefined
   };
 }
 

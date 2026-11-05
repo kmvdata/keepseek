@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as os from 'node:os';
 import { test } from 'node:test';
 import * as vscode from 'vscode';
-import { analyzeDraftRunEffects } from '../src/runs/commandRisk';
+import { analyzeDraftRunEffects } from '../src/approvals/authorization';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { SpawnDraftRunExecutor } from '../src/runs/draftRunExecutor';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
@@ -15,12 +15,12 @@ import { clearCreatedTerminals, createdTerminals } from './stubs/vscode';
 test('delegated execution requires its matching approval record and remains single-use', async () => {
   const executor = new SpawnDraftRunExecutor();
   const draftRun = createDraftRun(['-e', 'process.stdout.write("delegated")']);
-  const approvalStore = { consumeMatchingApproval: async () => ({}) } as unknown as ApprovalReviewStore;
+  const approvalStore = { consumeMatchingApproval: async () => ({}), findHardRunDenial: () => undefined } as unknown as ApprovalReviewStore;
   const authorization = new DraftRunAuthorizationService(approvalStore);
   const match: ApprovalRecordMatch = {
-    reviewId: 'review', sessionId: draftRun.sessionId, agentRunId: draftRun.agentRunId,
+    reviewId: 'review', sessionId: draftRun.sessionId, rootTaskId: draftRun.agentRunId, agentRunId: draftRun.agentRunId,
     targetId: draftRun.id, actionKind: 'draft_run_execute', actionHash: draftRun.specHash,
-    policyVersion: 1, approvalMode: 'model_review', workspaceTrusted: true
+    policyVersion: 1, expectedSource: 'auto_approval_review', approvalMode: 'delegate', workspaceTrusted: true
   };
   await assert.rejects(authorization.createDelegatedPermit(draftRun, () => false, match), /no longer authorized/u);
   const permit = await authorization.createDelegatedPermit(draftRun, () => true, match);

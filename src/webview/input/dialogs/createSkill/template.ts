@@ -25,13 +25,6 @@ export const createSkillTemplateFragment: WebviewFragment = {
             <input id="createSkillAllowImplicitInput" class="settings-toggle-input" type="checkbox" />
             <span class="settings-toggle-track" aria-hidden="true"></span>
           </label>
-          <label class="settings-field settings-toggle-field">
-            <span class="settings-toggle-copy">
-              <span class="settings-field-label" data-i18n="createSkillUserInvocableLabel">User Invocable</span>
-            </span>
-            <input id="createSkillUserInvocableInput" class="settings-toggle-input" type="checkbox" checked />
-            <span class="settings-toggle-track" aria-hidden="true"></span>
-          </label>
         </div>
         <div class="settings-dialog-footer">
           <button id="createSkillCancelBtn" type="button" class="secondary" data-i18n="cancel">取消</button>

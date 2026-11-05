@@ -46,7 +46,7 @@ export const approvalBindingsFragment: WebviewFragment = {
           event.stopPropagation();
           var mode = button.dataset.approvalMode === 'delegate'
             ? 'delegate'
-            : button.dataset.approvalMode === 'model_review' ? 'model_review' : 'ask';
+            : 'ask';
           vscode.postMessage({ type: 'setApprovalMode', mode: mode });
           commandApprovalModeListOpen = false;
           renderCommandMenu();
@@ -63,7 +63,7 @@ export const approvalRenderFragment: WebviewFragment = {
       function renderCommandApprovalMode() {
         var currentMode = state.approvalMode === 'delegate'
           ? 'delegate'
-          : state.approvalMode === 'model_review' ? 'model_review' : 'ask';
+          : 'ask';
         var readiness = getCommandSettingReadiness('approvalMode');
         var readinessText = readiness === 'error' ? t('approvalModeLoadFailed')
           : readiness === 'loading' ? t('approvalModeRestoring') : '';
@@ -94,7 +94,6 @@ export const approvalRenderFragment: WebviewFragment = {
         commandApprovalModeList.innerHTML = '';
         [
           { mode: 'ask', labelKey: 'approvalAsk', descriptionKey: 'approvalAskDescription' },
-          { mode: 'model_review', labelKey: 'approvalModelReview', descriptionKey: 'approvalModelReviewDescription' },
           { mode: 'delegate', labelKey: 'approvalDelegate', descriptionKey: 'approvalDelegateDescription' }
         ].forEach(function(item) {
           var isSelected = item.mode === currentMode;
@@ -128,13 +127,13 @@ export const approvalRenderFragment: WebviewFragment = {
       }
 
       function getApprovalModeLabelKey(mode) {
-        return mode === 'delegate' ? 'approvalDelegate' : mode === 'model_review' ? 'approvalModelReview' : 'approvalAsk';
+        return mode === 'delegate' ? 'approvalDelegate' : 'approvalAsk';
       }
 
       function getApprovalModeDescriptionKey(mode) {
         return mode === 'delegate'
           ? 'approvalDelegateDescription'
-          : mode === 'model_review' ? 'approvalModelReviewDescription' : 'approvalAskDescription';
+          : 'approvalAskDescription';
       }
 
 `.slice(1)

@@ -20,7 +20,7 @@ const compare = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
 
 export function createSubagentHostContext(request: AgentRequest, workspace: { text: string; hash: string }, workspaceTrusted = true): SubagentHostContextV1 {
   const profiles = (request.currentRunContext?.skills ?? []).flatMap(skill => {
-    if (skill.runAs !== 'subagent' || !skill.subagentProfile) return [];
+    if (skill.source === 'codexPlugin' || skill.runAs !== 'subagent' || !skill.subagentProfile) return [];
     const profile = resolveSubagentProfile({ requestedId: skill.subagentProfile.id, skills: [skill] });
     if (!profile) return [];
     const clean = projectProfile(profile);
@@ -31,7 +31,7 @@ export function createSubagentHostContext(request: AgentRequest, workspace: { te
     version: 1 as const,
     projectInstructions: (request.currentRunContext?.projectInstructions ?? []).map(item => ({
       uri: item.uri, workspaceFolder: item.workspaceFolder, content: item.content
-    })).sort((a, b) => compare(a.uri, b.uri)),
+    })),
     profiles,
     workspace: { text: workspace.text, hash: workspace.hash },
     workspaceTrusted,

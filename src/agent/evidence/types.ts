@@ -32,6 +32,8 @@ export interface ToolEvidence {
   totalBytes?: number;
   totalTokensEstimate?: number;
   source?: ToolEvidenceSource;
+  /** Host-only read journal, never projected into a tool response. */
+  pluginSkillProgress?: import('../runCheckpoint').PluginSkillProgress;
   storageKind?: 'blob' | 'replayable-source';
   blobName?: string;
   providerEnvelope?: string;

@@ -73,7 +73,7 @@ The agent can therefore complete real engineering work without silently changing
 Larger workloads stay just as controllable:
 
 - **Batched command execution**: pending commands proposed in one turn can be grouped into a batch, approved once, run in order with per-command progress, and stopped at any time. Approvals automatically expire when the session, approval mode, or workspace trust changes;
-- **Auto-continue after budget exhaustion**: when a foreground task hits the tool-turn or step limit, KeepSeek starts a new round to finish outstanding work—but only when there is real progress to show (up to 8 rounds by default, configurable). Edits still need individual approval;
+- **Auto-continue after budget exhaustion**: when a foreground task hits the tool-turn or step limit, KeepSeek starts a new round to finish outstanding work—but only when there is real progress to show (up to 8 rounds by default, configurable). Edits and commands still follow the selected approval mode;
 - **Surgical edits in huge files**: oversized files are handled with resumable range reads and precise incremental edits, so every change stays visible and reviewable.
 
 ### 4. Control the Current Task from the Command Menu
@@ -84,13 +84,16 @@ Click the **`/` button** below the input box to open the command menu. From here
   <img src="images/cmd_menu_en.png" alt="KeepSeek command menu" width="760">
 </p>
 
-There are three approval modes:
+The menu screenshot above shows a historical UI. The current approval controls work as follows.
 
-- **Ask for approval** (default): you confirm every file write and command before it runs;
-- **Model review**: an isolated, tool-free subagent model reviews each action. This is suited to long-running tasks, and the reviewer can deny risky actions;
-- **Auto approve**: KeepSeek handles the current task under your delegation without model review. It is the fastest mode and carries the highest risk.
+There are two approval modes:
 
-Auto approve does not disable workspace-trust, file-conflict, or dirty-editor safeguards. You can stop the task at any time or switch back to Ask for approval to cancel subsequent automatic actions.
+- **Ask for approval** (default, `ask`): you approve file writes and commands individually or as a batch;
+- **Approve for me** (`delegate`): the host directly approves eligible routine actions, then sends other verifiable actions to an independent, tool-free approval model. When a decision remains unresolved, the host requests a precise one-time user decision. A safety denial cannot be overridden by a user click.
+
+The selected mode is saved per workspace and reused across its sessions. Configure the approval model under **`/` → Subagent models → Approval model**, following the actual main model for the task segment or choosing a fixed account and model. This uses the separate user-level `keepseek.autoApprovalReviewer` setting and does not inherit ordinary subagent defaults or role settings. Legacy Model review settings normalize to Ask for approval; historical audit records remain readable.
+
+Approve for me retains workspace-trust, external-scope, file-conflict, dirty-editor, and one-time execution-permit checks. Processes run with extension-host privileges and have no OS sandbox. Stop the task at any time or switch back to Ask for approval to cancel subsequent automatic actions.
 
 ### 5. Keep Long Tasks Moving—and Keep Costs Visible
 
@@ -135,7 +138,7 @@ bun run build:test
 bun run test
 ```
 
-The main source directories are organized by responsibility: `src/agent/` handles task orchestration and model protocols, `src/context/` expands references, `src/edits/` and `src/runs/` manage pending edits and commands, `src/sessions/` persists conversations, and `src/webview/` implements the sidebar interface. Before maintaining the project, read [AGENTS.md](AGENTS.md) for its caching, safety, and change-impact rules.
+The main source directories are organized by responsibility: `src/agent/` handles task orchestration and model protocols, `src/context/` expands references, `src/edits/` and `src/runs/` manage pending edits and commands, `src/sessions/` persists conversations, and `src/webview/` implements the sidebar interface. Before maintaining the project, read [AGENTS.md](AGENTS.md) for its caching, safety, and change-impact rules and the [documentation map](doc/README.md) for current topic owners and historical evidence.
 
 ### Packaging and Local Verification
 

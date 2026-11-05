@@ -1,3 +1,6 @@
+import { approvalDisposition } from '../approvals/approvalReviewTypes';
+import { hashApprovalValue } from '../approvals/approvalReviewHash';
+import { draftRunPreparedMessage } from './approvalMode';
 import { applyProviderRequestBudget, createRequestBudgetUsage, resolveProviderRequestBudget } from './requestBudget';
 import { ModelSourceStore, normalizeModelSourceProvider } from '../accounts/accountStore';
 import { createModelCatalog, findModelBySelection } from '../accounts/modelCatalog';
@@ -13,7 +16,8 @@ import {
   mergeDurations
 } from './executionPolicy';
 import { createRunCheckpoint, checkpointCopy, AgentInterruptedError, recoveryBlocker, endpointHash, isCostLimitExhausted, migrateLegacyCapacityCheckpoint } from './runCheckpoint';
-import { shapeWorkspaceListingResult } from './toolResultShaping';
+import { restorePluginSkillProgress, type PluginSkillProgress } from './runCheckpoint';
+import { assertPluginSkillsCurrent, executePluginSkillRead } from './pluginSkillRuntime';
 import {
   getConfiguredAgentMaxContextEpochRollovers,
   getConfiguredAgentMaxContinuations,
@@ -100,6 +104,7 @@ import {
   READ_WORKSPACE_FILE_TOOL_NAME,
   READ_SUBAGENT_RESULT_TOOL_NAME,
   READ_EVIDENCE_TOOL_NAME,
+  READ_PLUGIN_SKILL_TOOL_NAME,
   RUN_DRAFT_TOOL_NAME,
   RUN_VALIDATION_TOOL_NAME,
   SEARCH_SESSION_ARCHIVE_TOOL_NAME,
@@ -125,7 +130,7 @@ import {
   createContextUsageEstimateFromResponses
 } from './contextUsage';
 import { WorkspaceToolAdapter, WorkspaceToolService } from './tools/workspaceTools';
-import { preflightSafeValidation, ValidationToolAdapter, ValidationToolService } from './tools/validationTools';
+import { preflightSafeValidation, type ValidationPreflightResult, ValidationToolAdapter, ValidationToolService } from './tools/validationTools';
 import { SemanticToolAdapter, SemanticToolService } from './tools/semanticTools';
 import { GitToolAdapter, GitToolService } from './tools/gitTools';
 import {
@@ -168,6 +173,8 @@ import type {
 } from './providers/anthropicTypes';
 import type { ApprovalReviewerAdapter } from '../approvals/approvalReviewer';
 import { toReviewerModelContext } from '../approvals/approvalReviewer';
+import { captureValidationBaseline, validationBaselineKey } from './tools/validationSnapshot';
+import { reviewerRoute, type ApprovalReviewRequest, type ApprovalRoute, type ApprovalReviewOutcome, type ManualToolApproval } from '../approvals/approvalReviewTypes';
 import { createExternalFileReviewRequest, createValidationReviewRequest } from '../approvals/approvalReviewSurface';
 import { toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
 import { createBoundedReviewText } from '../approvals/approvalReviewHash';
@@ -202,6 +209,7 @@ import {
 } from './usageLedger';
 import { createProviderCacheObservation } from './cacheObservation';
 import { TaskPlanTracker } from './taskPlan';
+import { taskGoal } from '../sessions/userTask';
 import { DelegationTracker } from './delegation';
 import { createChangeSet } from '../edits/changeSet';
 import { RepairLoopTracker, RunValidationStateTracker } from './repairLoop';
@@ -235,16 +243,6 @@ import {
 } from './contextEpoch';
 
 const CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS = 2_048;
-const SEARCH_SHAPED_RESULT_LIMIT = 120;
-const SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT = 12;
-const SEARCH_SHAPED_TOTAL_CHARS = 50_000;
-const SEARCH_SHAPED_LINE_CHARS = 500;
-const SEARCH_SNIPPED_RESULT_LIMIT = 60;
-const SEARCH_SNIPPED_RESULTS_PER_FILE_LIMIT = 6;
-const SEARCH_SNIPPED_TOTAL_CHARS = 20_000;
-const SEARCH_SNIPPED_LINE_CHARS = 300;
-const RANGE_READ_SHAPED_CONTENT_CHARS = 160_000;
-const RANGE_READ_SNIPPED_CONTENT_CHARS = 60_000;
 
 interface AgentRuntimeConfig {
   sourceId: string;
@@ -373,6 +371,7 @@ export class AgentRunAbortedError extends Error {
 export class AgentLoop {
   private readonly dsmlToolParser = new DsmlToolParser();
   private evidenceStore?: ToolEvidenceStore;
+  private readonly validationBaselines = new Map<string, ReadonlyMap<string, string>>();
   /** Content-free last successful projection by logical usage lane. */
   private readonly previousCacheObservationByScope = new Map<string, ProviderCacheObservation>();
 
@@ -385,10 +384,22 @@ export class AgentLoop {
     private readonly toolAuthorization: ToolAuthorizationAdapter = new ToolAuthorizationService(),
     private readonly globalStorageUri?: vscode.Uri,
     private readonly subagentTools?: SubagentToolAdapter,
-    private readonly approvalReviewer?: ApprovalReviewerAdapter
+    private readonly approvalReviewer?: ApprovalReviewerAdapter,
+    private readonly requestManualToolApproval?: (input: ManualToolApproval, signal?: AbortSignal) => Promise<boolean>
   ) {}
 
   public async run(request: AgentRequest, callbacks: AgentRunCallbacks = {}): Promise<AgentResponse> {
+    // A saved plugin activation is historical data, not permission to resume
+    // suspended functionality. Check before reconciliation or any dispatch.
+    await assertPluginSkillsCurrent(request.currentRunContext?.skills ?? [], []);
+    if (request.checkpoint) await assertPluginSkillsCurrent(request.checkpoint.request.currentRunContext?.skills ?? [], [], request.checkpoint);
+    if (!request.persona && request.sessionId && !request.checkpoint && normalizeApprovalMode(request.approvalMode) !== 'ask') {
+      const key = this.validationTaskKey(request);
+      if (!this.validationBaselines.has(key)) {
+        this.validationBaselines.set(key, await captureValidationBaseline());
+        if (this.validationBaselines.size > 32) this.validationBaselines.delete(this.validationBaselines.keys().next().value!);
+      }
+    }
     if (request.checkpoint) {
       const requestCheckpoint = migrateLegacyCapacityCheckpoint(request.checkpoint);
       request = { ...request, checkpoint: requestCheckpoint };
@@ -438,6 +449,7 @@ export class AgentLoop {
       if (activeRunBudget) {
         activeRunBudget.syncUsedMs(cp.usedMs);
         cp.runBudget = activeRunBudget.state;
+        cp.budgetLimits = { ...activeRunBudget.limits };
         cp.modelRequests = activeRunBudget.state.modelRequests;
       }
       cp.updatedAt = new Date().toISOString();
@@ -486,7 +498,8 @@ export class AgentLoop {
           callbacks.onActivity?.(kind);
         },
         onStatus: (status) => {
-          if (status.phase === 'awaiting_authorization' || status.phase === 'waiting_for_apply' || status.phase === 'waiting_for_subagent') suspendClock();
+          if ((status.phase === 'awaiting_authorization' && normalizeApprovalMode(request.approvalMode) === 'ask')
+            || status.phase === 'waiting_for_apply' || status.phase === 'waiting_for_subagent' || status.phase === 'awaiting_manual_approval') suspendClock();
           else resumeClock();
           callbacks.onStatus?.(status);
         }
@@ -567,11 +580,15 @@ export class AgentLoop {
       traceLogUri: traceLog?.uri
     });
     runDetailsBuilderRef.current.setRunContext(request.currentRunContext?.metadata);
+    const latestUser = request.history.at(-1);
+    const goal = request.approvalRootTaskId && latestUser?.userTask?.id === request.approvalRootTaskId
+      && latestUser.userTask.reason === 'approval'
+      ? taskGoal(request.history, request.approvalRootTaskId) : request.prompt;
     const taskPlan = new TaskPlanTracker({
       runId: trace.runId,
       initialPlan: checkpoint.taskPlan,
       sessionId: request.sessionId,
-      prompt: request.prompt,
+      prompt: goal,
       language: request.language,
       onChange: callbacks.onTaskPlan,
       recordTrace: (event) => trace.record(event)
@@ -875,11 +892,7 @@ export class AgentLoop {
       maxTreeUpstreamTokens: runtimeConfig.maxTreeUpstreamTokens
     };
     const parentRunBudget = request.taskRunBudget;
-    const sharedTreeBudget = parentRunBudget?.tree ?? new SharedUpstreamTokenBudget(
-      runtimeConfig.maxTreeUpstreamTokens,
-      checkpoint.runBudget?.treeUpstreamTokens ?? 0
-    );
-    const logicalBudget = new LogicalRunBudget(checkpoint.runBudget, {
+    const budgetLimits = {
       maxModelRequests: runtimeConfig.maxModelRequests,
       maxToolRounds: runtimeConfig.maxToolIterations,
       maxToolCalls: runtimeConfig.maxToolCalls,
@@ -889,7 +902,16 @@ export class AgentLoop {
       maxTreeUpstreamTokens: runtimeConfig.maxTreeUpstreamTokens,
       maxContinuationOutputTokens: 0,
       maxContinuationOutputChars: 0
-    }, sharedTreeBudget, runtimeConfig.maxRunMs, Date.now(), parentRunBudget?.deadlineAt);
+    };
+    if (checkpoint.budgetLimits) for (const key of Object.keys(budgetLimits) as Array<keyof typeof budgetLimits>) {
+      budgetLimits[key] = mergeUnlimitedBudgetLimits(budgetLimits[key], checkpoint.budgetLimits[key]);
+    }
+    const sharedTreeBudget = parentRunBudget?.tree ?? new SharedUpstreamTokenBudget(
+      budgetLimits.maxTreeUpstreamTokens,
+      checkpoint.runBudget?.treeUpstreamTokens ?? 0
+    );
+    const logicalBudget = new LogicalRunBudget(checkpoint.runBudget, budgetLimits,
+      sharedTreeBudget, runtimeConfig.maxRunMs, Date.now(), parentRunBudget?.deadlineAt);
     checkpoint.runBudget = logicalBudget.state;
     checkpoint.modelRequests = logicalBudget.state.modelRequests;
     request = { ...request, taskRunBudget: logicalBudget };
@@ -966,7 +988,14 @@ export class AgentLoop {
         skillUri: skill.skillUri,
         activation: skill.activation,
         contentLength: skill.content.length,
-        hasScripts: skill.hasScripts
+        hasScripts: skill.hasScripts,
+        plugin: skill.pluginSnapshot ? {
+          name: skill.pluginSnapshot.installation.name,
+          version: skill.pluginSnapshot.installation.version,
+          marketplace: skill.pluginSnapshot.installation.marketplace,
+          source: skill.pluginSnapshot.installation.source,
+          entryHash: skill.pluginSnapshot.progress.reached[skill.pluginSnapshot.entryPath]?.hash
+        } : undefined
       }))
     });
     trace.record({
@@ -1837,6 +1866,7 @@ export class AgentLoop {
           effectKind: this.getEvidenceEffectKind(toolCall.function.name)
         });
         if (evidenceRecord.executionStatus === 'completed') {
+          if (evidenceRecord.pluginSkillProgress) restorePluginSkillProgress(checkpoint, evidenceRecord.pluginSkillProgress);
           if (evidenceRecord.providerEnvelope === undefined) {
             const raw = await evidenceStore.readContent(evidenceRecord);
             const decision = admission.decide({
@@ -1874,6 +1904,7 @@ export class AgentLoop {
         let toolArgs: Record<string, unknown> = {};
         let authorizationDecision: ToolAuthorizationDecision | undefined;
         let validationExecuted = false;
+        let pluginSkillProgress: PluginSkillProgress | undefined;
         try {
           toolArgs = this.parseToolArguments(toolCall.function.arguments);
           runDetailsBuilderRef.current?.recordToolArguments(toolCall.id, toolCall.function.name, toolArgs);
@@ -1883,10 +1914,37 @@ export class AgentLoop {
             args: toolArgs,
             skills: request.currentRunContext?.skills
           });
+          const isValidation = toolCall.function.name === RUN_VALIDATION_TOOL_NAME;
+          const pendingValidationChanges = isValidation && validationState.hasPendingDraftEdit();
+          const validationPreflight = isValidation && !planPhaseBlockReason && !pendingValidationChanges
+            ? await preflightSafeValidation({
+                script: this.readSafeNpmScript(toolArgs, 'script'),
+                workspaceFolder: this.readOptionalString(toolArgs, 'workspaceFolder'),
+                language: request.language
+              })
+            : undefined;
           if (planPhaseBlockReason) {
             rawToolResult = createPlanPhaseBlockedToolResult(toolCall.function.name, planPhaseBlockReason);
-          } else if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && validationState.hasPendingDraftEdit()) {
+          } else if (pendingValidationChanges) {
             rawToolResult = validationState.createBlockedValidationResult(request.language);
+          } else if (validationPreflight?.status === 'unavailable') {
+            rawToolResult = JSON.stringify({
+              ok: false,
+              errorType: 'validation_unavailable',
+              script: validationPreflight.script,
+              executed: false,
+              error: validationPreflight.error
+            });
+          } else if (validationPreflight?.status === 'blocked') {
+            rawToolResult = JSON.stringify({
+              ok: false,
+              errorType: 'validation_preflight_failed',
+              executed: false,
+              error: validationPreflight.error
+            });
+            if (normalizeApprovalMode(runAuthorizationPolicy.approvalMode) !== 'ask') {
+              approvalReviewStopReason = validationPreflight.error;
+            }
           } else if (isDraftEditPreparationTool(toolCall.function.name) && !repairLoop.beginRepair()) {
             const state = repairLoop.getState();
             const detail = request.language === 'en'
@@ -1902,9 +1960,10 @@ export class AgentLoop {
           } else {
             const authorizationMetadata = getToolAuthorizationMetadata(toolCall.function.name, toolArgs);
             if (authorizationMetadata.riskLevel !== 'low') {
+              const automatic = runAuthorizationPolicy.approvalMode === 'delegate';
               emitStatus({
-                base: 'waiting',
-                phase: 'awaiting_authorization',
+                base: automatic ? 'thinking' : 'waiting',
+                phase: automatic ? 'reviewing_tool_result' : 'awaiting_authorization',
                 toolName: toolCall.function.name,
                 detail: authorizationMetadata.scope
               });
@@ -1913,15 +1972,29 @@ export class AgentLoop {
               toolCall,
               args: toolArgs,
               request,
-              agentRunId: trace.runId,
-              approvalMode: runAuthorizationPolicy.approvalMode
+              agentRunId: checkpoint.taskId,
+              approvalMode: runAuthorizationPolicy.approvalMode,
+              emitStatus,
+              validationPreflight
             }) ?? await abortable(this.toolAuthorization.authorize({
               toolName: toolCall.function.name,
               args: toolArgs,
               language: request.language,
               policy: runAuthorizationPolicy
             }), request.signal);
+            if (validationPreflight && authorizationDecision.allowed && !authorizationDecision.executionSnapshot) {
+              authorizationDecision = { ...authorizationDecision, executionSnapshot: validationPreflight.snapshot.fingerprint };
+            }
             if (authorizationDecision.approvalReview) approvalReviewBoundaryReached = true;
+            if (!authorizationDecision.allowed && toolCall.function.name === RUN_VALIDATION_TOOL_NAME
+              && authorizationDecision.requiresExplicitConfirmation && normalizeApprovalMode(request.approvalMode) !== 'ask') {
+              approvalReviewStopReason = authorizationDecision.reason;
+            }
+            if (!authorizationDecision.allowed && authorizationDecision.scope === 'workspace_read'
+              && authorizationDecision.requiresExplicitConfirmation) {
+              approvalReviewBoundaryReached = true;
+              approvalReviewStopReason = authorizationDecision.reason;
+            }
             if (authorizationDecision.approvalReview?.decision === 'unavailable') {
               approvalReviewStopReason = authorizationDecision.reason ?? (request.language === 'en'
                 ? 'Approval model unavailable; automatic work stopped safely.'
@@ -1929,11 +2002,11 @@ export class AgentLoop {
             } else if (authorizationDecision.approvalCircuitBreakReason) {
               approvalReviewStopReason = request.language === 'en'
                 ? authorizationDecision.approvalCircuitBreakReason === 'consecutive_denials'
-                  ? 'Automatic work stopped after three consecutive model-review denials.'
-                  : 'Automatic work stopped after ten model-review denials in the latest fifty reviews.'
+                  ? 'Automatic work stopped after three consecutive approval-reviewer denials.'
+                  : 'Automatic work stopped after ten approval-reviewer denials in the latest fifty reviews.'
                 : authorizationDecision.approvalCircuitBreakReason === 'consecutive_denials'
-                  ? '模型审批连续拒绝三次，自动任务已停止。'
-                  : '最近五十次模型审批累计拒绝十次，自动任务已停止。';
+                  ? '审批模型连续拒绝三次，自动任务已停止。'
+                  : '最近五十次审批模型累计拒绝十次，自动任务已停止。';
             }
             this.throwIfAborted(request.signal, request.language);
             emitStatus({ base: 'executing', phase: this.getToolActivityPhase(toolCall.function.name), toolName: toolCall.function.name });
@@ -1947,12 +2020,16 @@ export class AgentLoop {
             if (!authorizationDecision.allowed) {
               rawToolResult = authorizationDecision.approvalReview
                 ? JSON.stringify({
-                    ok: true,
+                    ok: false,
+                    errorType: authorizationDecision.approvalReview.decision === 'unavailable'
+                      ? 'approval_reviewer_unavailable' : authorizationDecision.approvalReview.decision === 'needs_user'
+                        ? 'approval_needs_user' : authorizationDecision.approvalReview.approvalSource === 'local_policy'
+                        ? 'approval_hard_blocked' : 'approval_denied',
                     status: authorizationDecision.approvalReview.decision === 'unavailable'
-                      ? 'approval_reviewer_unavailable'
-                      : 'approval_denied',
+                      ? 'approval_reviewer_unavailable' : authorizationDecision.approvalReview.decision === 'needs_user' ? 'approval_needs_user' : 'approval_denied',
                     executed: false,
-                    message: 'The exact operation was not executed. The reviewer decision will be supplied in the next user message.'
+                    message: authorizationDecision.reason
+                      ?? 'The operation is paused and has not executed.'
                   })
                 : createAuthorizationDeniedToolResult(authorizationDecision);
             } else if (toolCall.function.name === RUN_VALIDATION_TOOL_NAME && validationRunCount >= runtimeConfig.maxValidationRuns) {
@@ -1997,6 +2074,8 @@ export class AgentLoop {
                 evidenceStore,
                 evidenceSessionId,
                 evidenceTaskId: checkpoint.taskId,
+                exposedToolNames,
+                onPluginSkillRead: (progress) => { pluginSkillProgress = progress; },
                 delegation
               });
               const cancellableRead = !isDraftEditPreparationTool(toolCall.function.name)
@@ -2023,7 +2102,8 @@ export class AgentLoop {
         }
         rawToolResult = this.normalizeToolResultFeedback(toolCall.function.name, rawToolResult);
         rawToolResult = delegation?.attachScopeNotice(rawToolResult) ?? rawToolResult;
-        evidenceRecord = await evidenceStore.complete(evidenceRecord, rawToolResult);
+        evidenceRecord = await evidenceStore.complete(evidenceRecord, rawToolResult, { pluginSkillProgress });
+        if (pluginSkillProgress) restorePluginSkillProgress(checkpoint, pluginSkillProgress);
         if (this.isToolResultError(rawToolResult)) {
           epoch.failures.push({
             toolName: toolCall.function.name,
@@ -2037,7 +2117,7 @@ export class AgentLoop {
           approvalToolResults.push({
             toolCallId: toolCall.id,
             toolName: toolCall.function.name,
-            status: authorizationDecision.approvalReview.decision === 'unavailable'
+            status: ['unavailable', 'needs_user'].includes(authorizationDecision.approvalReview.decision)
               ? 'failed'
               : authorizationDecision.allowed
                 ? this.isToolResultError(rawToolResult) ? 'failed' : 'succeeded'
@@ -2072,7 +2152,11 @@ export class AgentLoop {
             for (const draftEditId of draftEditIds) validationState.recordDraftEdit(draftEditId);
             if (repairLoop.getState().status === 'generating_repair') {
               for (const draftEditId of draftEditIds) repairLoop.recordDraftEdit(draftEditId);
-              const detail = request.language === 'en'
+              const detail = runAuthorizationPolicy.approvalMode === 'delegate'
+                ? request.language === 'en'
+                  ? 'Repair prepared. KeepSeek will process it automatically before the next validation.'
+                  : '修复已准备。KeepSeek 会自动处理修改，然后继续验证。'
+                : request.language === 'en'
                 ? 'Repair prepared. Apply the pending ChangeSet before validation can continue.'
                 : '修复已准备。请先应用待确认 ChangeSet，之后才能继续验证。';
               taskPlan.markWaitingForApply(detail);
@@ -2765,6 +2849,9 @@ export class AgentLoop {
       beforeModelRequest: async () => {
         this.throwIfAborted(request.signal, request.language);
         if (!vscode.workspace.isTrusted) throw new AgentInterruptedError('waiting_for_user', 'Workspace trust is required / 工作区需要信任');
+        if (checkpoint) await assertPluginSkillsCurrent(checkpoint.request.currentRunContext?.skills ?? [],
+          options.toolChoice === 'none' ? [] : tools.map(tool => tool.function.name), checkpoint);
+        this.throwIfAborted(request.signal, request.language);
         this.throwIfCostLimitReached(request);
         request.taskRunBudget?.assertCanDispatch();
         const snapshot = createAttemptSnapshot(new Date().toISOString());
@@ -3469,6 +3556,7 @@ export class AgentLoop {
       case READ_WORKSPACE_FILE_RANGE_TOOL_NAME:
         return 'reading_file_range';
       case READ_WORKSPACE_FILE_TOOL_NAME:
+      case READ_PLUGIN_SKILL_TOOL_NAME:
         return 'reading_file';
       case CREATE_DRAFT_EDIT_TOOL_NAME:
       case CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME:
@@ -3502,99 +3590,134 @@ export class AgentLoop {
     }
   }
 
+  private validationTaskKey(request: AgentRequest): string {
+    return JSON.stringify([request.sessionId, request.approvalRootTaskId ?? request.checkpoint?.taskId ?? request.history.at(-1)?.id]);
+  }
+
   private async reviewSideEffectTool(input: {
     toolCall: DeepSeekToolCall;
     args: Record<string, unknown>;
     request: AgentRequest;
     agentRunId: string;
     approvalMode: AgentRequest['approvalMode'];
+    emitStatus: (status: AgentActivityInput) => void;
+    validationPreflight?: Extract<ValidationPreflightResult, { status: 'ready' }>;
   }): Promise<ToolAuthorizationDecision | undefined> {
-    const normalizedMode = normalizeApprovalMode(input.approvalMode);
-    if (input.request.persona || normalizedMode === 'ask') return undefined;
-    const mode = normalizedMode;
-    const deny = (
-      scope: 'workspace_read' | 'validation_compile_lint' | 'validation_test',
-      reason: string,
-      approvalReview?: ToolAuthorizationDecision['approvalReview'],
-      approvalCircuitBreakReason?: ToolAuthorizationDecision['approvalCircuitBreakReason']
-    ): ToolAuthorizationDecision => ({
-      allowed: false,
-      toolName: input.toolCall.function.name,
-      riskLevel: scope === 'workspace_read' ? 'low' : 'medium',
-      scope,
-      source: mode === 'model_review' ? 'model_reviewer' : 'user_denied',
-      requiresExplicitConfirmation: false,
-      reason,
-      approvalReview,
-      approvalCircuitBreakReason
+    const mode = normalizeApprovalMode(input.approvalMode);
+    if (input.request.persona || mode === 'ask') return undefined;
+    const toolName = input.toolCall.function.name;
+    const language = input.request.language;
+    let scope: 'workspace_read' | 'validation_compile_lint' | 'validation_test' = 'workspace_read';
+    const deny = (reason: string, outcome?: ApprovalReviewOutcome, failureCode?: string): ToolAuthorizationDecision => ({
+      allowed: false, toolName, riskLevel: scope === 'workspace_read' ? 'low' : 'medium', scope,
+      source: outcome && ['model_review', 'auto_approval_review'].includes(outcome.record.approvalSource) ? 'model_reviewer' : 'user_denied',
+      requiresExplicitConfirmation: mode !== 'delegate', reason, failureCode,
+      approvalReview: outcome && toApprovalReviewDisplay(outcome.record),
+      approvalCircuitBreakReason: outcome?.circuitBreakReason
     });
 
-    if (input.toolCall.function.name === READ_WORKSPACE_FILE_TOOL_NAME
-      || input.toolCall.function.name === READ_WORKSPACE_FILE_RANGE_TOOL_NAME) {
-      const rawPath = typeof input.args.path === 'string' ? input.args.path : '';
-      const uri = rawPath ? this.workspaceTools.getReviewableExternalUri?.(rawPath) : undefined;
-      if (!uri) return undefined;
-      if (!this.approvalReviewer) return deny('workspace_read', 'Approval reviewer is unavailable; exact external access was not granted.');
-      const reviewRequest = createExternalFileReviewRequest({
-        request: input.request,
-        agentRunId: input.agentRunId,
-        targetId: `${input.toolCall.id}:${uri}`,
-        uri,
-        access: 'read',
-        purpose: `Read the exact external file for tool ${input.toolCall.function.name}.`
+    let reviewRequest: ApprovalReviewRequest;
+    let snapshot: string;
+    let route: ApprovalRoute = reviewerRoute(mode);
+    let label: string;
+    let requiredUserScope: string | undefined;
+    if (toolName === READ_WORKSPACE_FILE_TOOL_NAME || toolName === READ_WORKSPACE_FILE_RANGE_TOOL_NAME) {
+      const rawPath = this.readRequiredString(input.args, 'path');
+      const external = await this.workspaceTools.inspectExternalRead?.(rawPath);
+      if (!external) return undefined;
+      const needsReadGrant = !external.authorized;
+      requiredUserScope = needsReadGrant ? external.uri : undefined;
+      snapshot = external.fingerprint || hashApprovalValue({ uri: external.uri, access: 'read' });
+      label = external.canonicalUri;
+      reviewRequest = createExternalFileReviewRequest({
+        request: input.request, agentRunId: input.agentRunId, targetId: input.toolCall.id,
+        uri: external.canonicalUri, access: 'read', fingerprint: snapshot,
+        purpose: toolName === READ_WORKSPACE_FILE_RANGE_TOOL_NAME
+          ? `Read lines ${this.readRequiredNumber(input.args, 'startLine')}-${this.readRequiredNumber(input.args, 'endLine')} of the explicitly referenced external text file.`
+          : 'Read the explicitly referenced external text file.'
       });
-      const outcome = mode === 'model_review'
-        ? await this.approvalReviewer.review(reviewRequest, toReviewerModelContext(input.request), input.request.signal)
-        : await this.approvalReviewer.createHostPolicyApproval(reviewRequest);
-      if (outcome.status === 'unavailable') return deny('workspace_read', outcome.record.rationale, toApprovalReviewDisplay(outcome.record), outcome.circuitBreakReason);
-      if (outcome.record.decision !== 'approve') {
-        return deny('workspace_read', formatReviewerDenial(outcome.record.rationale, outcome.record.saferAlternative, input.request.language), toApprovalReviewDisplay(outcome.record), outcome.circuitBreakReason);
+    } else if (input.validationPreflight) {
+      const preflight = input.validationPreflight;
+      const script = preflight.script;
+      scope = script === 'test' ? 'validation_test' : 'validation_compile_lint';
+      const launch = preflight.snapshot;
+      snapshot = launch.fingerprint;
+      label = `npm run ${script} · ${launch.cwdUri}
+${launch.evidence.content}`;
+      const baseline = this.validationBaselines.get(this.validationTaskKey(input.request));
+      if (mode === 'delegate' && launch.hostEligible
+        && baseline?.get(validationBaselineKey(launch.cwdUri, script)) === launch.fingerprint) route = 'host_policy';
+      else if (!launch.evidenceComplete) {
+        if (mode === 'delegate') return deny(language === 'en'
+          ? 'The fixed validation launch is missing required evidence. Nothing executed.'
+          : '固定验证的启动证据不足，尚未执行。', undefined, 'insufficient_launch_evidence');
+        route = 'user_click';
       }
-      await this.approvalReviewer.consumeApproval(outcome.record, mode);
-      this.workspaceTools.authorizeReviewedExternalUri?.(uri);
-      return {
-        allowed: true,
-        toolName: input.toolCall.function.name,
-        riskLevel: 'low',
-        scope: 'workspace_read',
-        source: mode === 'model_review' ? 'model_reviewer' : 'delegated_approver',
-        requiresExplicitConfirmation: false,
-        reason: outcome.record.rationale,
-        approvalReview: toApprovalReviewDisplay(outcome.record)
-      };
+      reviewRequest = createValidationReviewRequest({
+        request: input.request, agentRunId: input.agentRunId, targetId: input.toolCall.id, script,
+        workspaceRootId: preflight.workspaceRootId, snapshot: launch
+      });
+    } else {
+      return undefined;
     }
 
-    if (input.toolCall.function.name !== RUN_VALIDATION_TOOL_NAME) return undefined;
-    const script = this.readSafeNpmScript(input.args, 'script');
-    const workspaceFolder = this.readOptionalString(input.args, 'workspaceFolder');
-    const scope = script === 'test' ? 'validation_test' : 'validation_compile_lint';
-    const preflight = await preflightSafeValidation({ script, workspaceFolder, language: input.request.language });
-    if (!preflight.ok || !preflight.workspaceRootId) return deny(scope, preflight.error ?? 'Validation preflight failed.');
-    if (!this.approvalReviewer) return deny(scope, 'Approval reviewer is unavailable; validation was not run.');
-    const reviewRequest = createValidationReviewRequest({
-      request: input.request,
-      agentRunId: input.agentRunId,
-      targetId: input.toolCall.id,
-      script,
-      workspaceRootId: preflight.workspaceRootId
-    });
-    const outcome = mode === 'model_review'
-      ? await this.approvalReviewer.review(reviewRequest, toReviewerModelContext(input.request), input.request.signal)
-      : await this.approvalReviewer.createHostPolicyApproval(reviewRequest);
-    if (outcome.status === 'unavailable') return deny(scope, outcome.record.rationale, toApprovalReviewDisplay(outcome.record), outcome.circuitBreakReason);
-    if (outcome.record.decision !== 'approve') {
-      return deny(scope, formatReviewerDenial(outcome.record.rationale, outcome.record.saferAlternative, input.request.language), toApprovalReviewDisplay(outcome.record), outcome.circuitBreakReason);
+    const reviewer = this.approvalReviewer;
+    if (!reviewer) return deny(language === 'en' ? 'Approval model unavailable; nothing executed.' : '审批模型不可用，尚未执行。', undefined, 'approval_reviewer_unavailable');
+    reviewRequest = { ...reviewRequest, approvalMode: mode, scopeFingerprint: snapshot };
+    const signal = input.request.signal;
+    let outcome = route === 'host_policy' ? await reviewer.createHostPolicyApproval(reviewRequest)
+      : route !== 'user_click' ? await reviewer.review(reviewRequest, toReviewerModelContext(input.request), signal) : undefined;
+    const prior = outcome;
+    if (mode === 'delegate' && ((requiredUserScope && outcome?.record.decision === 'approve') || !outcome || approvalDisposition(outcome.record) === 'request_user')
+      && reviewer.createUserApproval && this.requestManualToolApproval && !signal?.aborted) {
+      const reason = (requiredUserScope ? (language === 'en' ? 'Allow one read of this exact file: ' : '仅授权读取本次精确文件：') + requiredUserScope + ' · ' : '') + (outcome?.record.rationale ?? (language === 'en'
+        ? 'Launch configuration requires an individual decision.' : '启动配置需要你逐项确认。'));
+      input.emitStatus({ base: 'waiting', phase: 'awaiting_manual_approval', detail: reason });
+      const manual: ManualToolApproval = { id: input.toolCall.id, sessionId: reviewRequest.sessionId, label, reason, request: reviewRequest, priorReviewId: outcome?.record.reviewId };
+      const approved = await this.requestManualToolApproval(manual, signal);
+      if (!approved || signal?.aborted || !vscode.workspace.isTrusted) {
+        if (manual.status === 'rejected' && reviewer.createUserRejection) {
+          const rejection = await reviewer.createUserRejection(reviewRequest, { priorReviewId: prior?.record.reviewId, userRequestId: manual.id });
+          return deny(rejection.rationale, { status: 'reviewed', record: rejection }, 'user_rejected');
+        }
+        return deny(reason, prior, 'approval_request_cancelled');
+      }
+      input.emitStatus({ base: 'executing', phase: 'executing_tool', toolName });
+      route = 'user_click';
+      outcome = await reviewer.createUserApproval(reviewRequest, { priorReviewId: prior?.record.reviewId, userRequestId: manual.id });
+      this.throwIfAborted(signal, language);
+      if (requiredUserScope) {
+        this.workspaceTools.grantUserExternalReadOnce?.(requiredUserScope);
+        let actual;
+        try { actual = await this.workspaceTools.inspectExternalRead?.(this.readRequiredString(input.args, 'path')); }
+        catch (error) { this.workspaceTools.revokeUserExternalReadOnce?.(); throw error; }
+        if (!actual?.authorized || actual.uri !== requiredUserScope || actual.canonicalUri !== requiredUserScope) {
+          this.workspaceTools.revokeUserExternalReadOnce?.();
+          return deny(language === 'en' ? 'External scope changed; no contents read.' : '外部范围发生变化，未读取内容。');
+        }
+        snapshot = actual.fingerprint;
+      }
     }
-    await this.approvalReviewer.consumeApproval(outcome.record, mode);
+    if (!outcome) return deny(language === 'en' ? 'Individual confirmation is required; nothing executed.' : '需要逐项确认，尚未执行。');
+    if (outcome.record.decision !== 'approve') {
+      this.workspaceTools.revokeUserExternalReadOnce?.();
+      return deny(formatReviewerDenial(outcome.record.rationale, outcome.record.saferAlternative, language), outcome);
+    }
+    try {
+      this.throwIfAborted(signal, language);
+      if (route === 'auto_approval_review') {
+        await reviewer.assertReviewerConfiguration?.(reviewRequest, toReviewerModelContext(input.request), outcome.record);
+        this.throwIfAborted(signal, language);
+      }
+      await reviewer.consumeApproval(outcome.record, route);
+    }
+    catch (error) { this.workspaceTools.revokeUserExternalReadOnce?.(); throw error; }
     return {
-      allowed: true,
-      toolName: input.toolCall.function.name,
-      riskLevel: 'medium',
-      scope,
-      source: mode === 'model_review' ? 'model_reviewer' : 'delegated_approver',
-      requiresExplicitConfirmation: false,
-      reason: outcome.record.rationale,
-      approvalReview: toApprovalReviewDisplay(outcome.record)
+      allowed: true, toolName, riskLevel: scope === 'workspace_read' ? 'low' : 'medium', scope,
+      source: route === 'host_policy' ? 'delegated_approver' : route !== 'user_click' ? 'model_reviewer' : 'explicit_confirmation',
+      requiresExplicitConfirmation: false, reason: outcome.record.rationale, executionSnapshot: snapshot,
+      approvalReview: toApprovalReviewDisplay(outcome.record),
+      priorApprovalReview: prior && prior !== outcome ? toApprovalReviewDisplay(prior.record) : undefined
     };
   }
 
@@ -3617,6 +3740,8 @@ export class AgentLoop {
       evidenceStore?: ToolEvidenceStore;
       evidenceSessionId?: string;
       evidenceTaskId?: string;
+      exposedToolNames?: ReadonlySet<string>;
+      onPluginSkillRead?: (progress: PluginSkillProgress) => void;
       delegation?: DelegationTracker;
     } = {}
   ): Promise<string> {
@@ -3624,6 +3749,11 @@ export class AgentLoop {
       const args = this.parseToolArguments(toolCall.function.arguments);
       options.delegation?.observeScope(toolCall.function.name, toolCall.function.arguments);
       switch (toolCall.function.name) {
+        case READ_PLUGIN_SKILL_TOOL_NAME: {
+          const result = await executePluginSkillRead(options.parentRequest, args, [...(options.exposedToolNames ?? [])]);
+          options.onPluginSkillRead?.(result.progress);
+          return result.content;
+        }
         case DELEGATION_CHECKPOINT_TOOL_NAME: {
           if (!options.delegation) throw new Error('Delegation checkpoints require protocol V11.');
           if (args.action === 'assess') return options.delegation.assess(args);
@@ -3730,9 +3860,9 @@ export class AgentLoop {
             startLine: this.readRequiredNumber(args, 'startLine'),
             endLine: this.readRequiredNumber(args, 'endLine'),
             maxBytes: this.readOptionalNumber(args, 'maxBytes')
-          }, language);
+          }, language, options.authorization?.executionSnapshot);
         case READ_WORKSPACE_FILE_TOOL_NAME:
-          return await this.workspaceTools.readWorkspaceFile(this.readRequiredString(args, 'path'), language);
+          return await this.workspaceTools.readWorkspaceFile(this.readRequiredString(args, 'path'), language, options.authorization?.executionSnapshot);
         case READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME:
           return await this.validationTools.readWorkspaceDiagnostics(language);
         case FIND_SYMBOL_TOOL_NAME:
@@ -3792,10 +3922,11 @@ export class AgentLoop {
             language,
             signal: options.signal,
             runDeadlineAt: options.runDeadlineAt,
-            authorization: options.authorization
+            authorization: options.authorization,
+            expectedSnapshot: options.authorization.executionSnapshot
           });
         case RUN_DRAFT_TOOL_NAME:
-          return await this.createDraftRun(args, draftRuns);
+          return await this.createDraftRun(args, draftRuns, options.parentRequest?.approvalMode, language);
         case CREATE_DRAFT_EDIT_TOOL_NAME:
           return await this.createDraftEdit(args, draftEdits, language);
         case CREATE_INCREMENTAL_DRAFT_EDIT_TOOL_NAME:
@@ -3815,6 +3946,10 @@ export class AgentLoop {
         ok: false,
         error: error instanceof Error ? error.message : String(error)
       });
+    } finally {
+      if ([READ_WORKSPACE_FILE_TOOL_NAME, READ_WORKSPACE_FILE_RANGE_TOOL_NAME].includes(toolCall.function.name)) {
+        this.workspaceTools.revokeUserExternalReadOnce?.();
+      }
     }
   }
 
@@ -3905,7 +4040,9 @@ export class AgentLoop {
 
   private async createDraftRun(
     args: Record<string, unknown>,
-    draftRuns: DraftRunProposal[]
+    draftRuns: DraftRunProposal[],
+    approvalMode: AgentRequest['approvalMode'],
+    language: KeepseekLanguage
   ): Promise<string> {
     const rawArgs = args.args;
     if (!Array.isArray(rawArgs) || !rawArgs.every((value) => typeof value === 'string')) {
@@ -3948,7 +4085,7 @@ export class AgentLoop {
         reason: draftRun.spec.reason,
         effectAssessment: draftRun.effectAssessment
       },
-      message: 'DraftRun prepared only; no process was started. The user must review and explicitly approve this single execution in the KeepSeek panel.'
+      message: draftRunPreparedMessage(approvalMode, language)
     });
   }
 
@@ -4589,32 +4726,6 @@ export class AgentLoop {
     return estimateDeepSeekMessageTokens(input.shapedToolMessage);
   }
 
-  private shapeToolResult(toolName: string, rawContent: string, snipForContextPressure: boolean): ShapedToolResult {
-    const rawLength = rawContent.length;
-    const parsed = this.parseToolResultObject(rawContent);
-    let shapedContent = rawContent;
-
-    if ((toolName === LIST_WORKSPACE_FILES_TOOL_NAME || toolName === LIST_WORKSPACE_DIRECTORY_TOOL_NAME) && parsed) {
-      shapedContent = shapeWorkspaceListingResult(parsed, snipForContextPressure);
-    } else if (toolName === SEARCH_WORKSPACE_TOOL_NAME && parsed) {
-      shapedContent = this.shapeSearchToolResult(parsed, snipForContextPressure);
-    } else if (toolName === READ_WORKSPACE_FILE_RANGE_TOOL_NAME && parsed) {
-      shapedContent = this.shapeRangeReadToolResult(parsed, snipForContextPressure);
-    }
-
-    const shapedMetadata = this.getToolResultMetadata(this.parseToolResultObject(shapedContent));
-    return {
-      content: shapedContent,
-      path: shapedMetadata.path,
-      startLine: shapedMetadata.startLine,
-      endLine: shapedMetadata.endLine,
-      rawLength,
-      shapedLength: shapedContent.length,
-      compressible: this.isCompressibleToolResult(toolName),
-      truncated: shapedMetadata.truncated || shapedContent.length < rawContent.length
-    };
-  }
-
   private normalizeToolResultFeedback(toolName: string, rawContent: string): string {
     const parsed = this.parseToolResultObject(rawContent);
     if (!parsed || parsed.ok !== false || typeof parsed.errorType === 'string') {
@@ -4628,148 +4739,6 @@ export class AgentLoop {
     });
   }
 
-  private shouldSnipToolResult(
-    request: AgentRequest,
-    messages: DeepSeekMessage[],
-    tools: DeepSeekFunctionTool[],
-    outputReserveTokens: number,
-    providerRunState?: ProviderNativeRunState,
-    pendingResponseFunctionOutputs: OpenAiResponsesItem[] = [],
-    pendingAnthropicToolResults: AnthropicUserContentBlock[] = []
-  ): boolean {
-    const settings = getAgentRuntimeProfile(request.model, request.settings).contextCompression;
-    const usage = providerRunState?.protocol === 'openai-responses'
-      ? createContextUsageEstimateFromResponses({
-          model: request.model,
-          input: [...providerRunState.input, ...pendingResponseFunctionOutputs],
-          tools: providerRunState.tools,
-          outputReserveTokens,
-          safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-        })
-      : providerRunState?.protocol === 'anthropic-messages'
-        ? createContextUsageEstimateFromAnthropic({
-            model: request.model,
-            system: providerRunState.system,
-            messages: pendingAnthropicToolResults.length
-              ? [...providerRunState.messages, { role: 'user', content: pendingAnthropicToolResults }]
-              : providerRunState.messages,
-            tools: providerRunState.tools,
-            outputReserveTokens,
-            safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-          })
-        : createContextUsageEstimateFromMessages({
-          model: request.model,
-          messages,
-          tools,
-          outputReserveTokens,
-          safetyReserveTokens: CONTEXT_BUDGET_SAFETY_RESERVE_TOKENS
-        });
-    return usage.usedPercent / 100 >= settings.toolResultSnipRatio;
-  }
-
-  private shapeSearchToolResult(parsed: Record<string, unknown>, snipForContextPressure: boolean): string {
-    const rawResults = Array.isArray(parsed.results) ? parsed.results : [];
-    const shapedResults: unknown[] = [];
-    const perFileCounts = new Map<string, number>();
-    let totalChars = 0;
-    let truncated = parsed.truncated === true;
-    const resultLimit = snipForContextPressure ? SEARCH_SNIPPED_RESULT_LIMIT : SEARCH_SHAPED_RESULT_LIMIT;
-    const resultsPerFileLimit = snipForContextPressure ? SEARCH_SNIPPED_RESULTS_PER_FILE_LIMIT : SEARCH_SHAPED_RESULTS_PER_FILE_LIMIT;
-    const totalCharLimit = snipForContextPressure ? SEARCH_SNIPPED_TOTAL_CHARS : SEARCH_SHAPED_TOTAL_CHARS;
-    const lineCharLimit = snipForContextPressure ? SEARCH_SNIPPED_LINE_CHARS : SEARCH_SHAPED_LINE_CHARS;
-
-    for (const rawResult of rawResults) {
-      if (!this.isRecord(rawResult)) {
-        continue;
-      }
-      if (shapedResults.length >= resultLimit) {
-        truncated = true;
-        break;
-      }
-
-      const resultPath = typeof rawResult.path === 'string' ? rawResult.path : '';
-      const fileCount = perFileCounts.get(resultPath) ?? 0;
-      if (fileCount >= resultsPerFileLimit) {
-        truncated = true;
-        continue;
-      }
-
-      const shapedResult = this.shapeSearchResult(rawResult, lineCharLimit);
-      const shapedChars = JSON.stringify(shapedResult).length;
-      if (totalChars + shapedChars > totalCharLimit) {
-        truncated = true;
-        break;
-      }
-
-      totalChars += shapedChars;
-      perFileCounts.set(resultPath, fileCount + 1);
-      shapedResults.push(shapedResult);
-    }
-
-    return JSON.stringify({
-      ...parsed,
-      results: shapedResults,
-      count: shapedResults.length,
-      limit: Math.min(readFiniteNumber(parsed.limit, resultLimit), resultLimit),
-      truncated: truncated || shapedResults.length < rawResults.length,
-      perFileLimit: resultsPerFileLimit,
-      totalCharLimit,
-      snippedForContextPressure: snipForContextPressure || undefined
-    });
-  }
-
-  private shapeSearchResult(result: Record<string, unknown>, lineCharLimit: number): Record<string, unknown> {
-    return {
-      ...result,
-      matchLine: this.shapeSearchText(typeof result.matchLine === 'string' ? result.matchLine : '', lineCharLimit),
-      matchLineTruncated: result.matchLineTruncated === true || this.isSearchTextTruncated(result.matchLine, lineCharLimit),
-      before: this.shapeSearchContextLines(result.before, lineCharLimit),
-      after: this.shapeSearchContextLines(result.after, lineCharLimit)
-    };
-  }
-
-  private shapeSearchContextLines(value: unknown, lineCharLimit: number): unknown[] {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-    return value.map((item) => {
-      if (!this.isRecord(item)) {
-        return item;
-      }
-      return {
-        ...item,
-        text: this.shapeSearchText(typeof item.text === 'string' ? item.text : '', lineCharLimit),
-        truncated: item.truncated === true || this.isSearchTextTruncated(item.text, lineCharLimit)
-      };
-    });
-  }
-
-  private shapeSearchText(value: string, lineCharLimit: number): string {
-    return value.length <= lineCharLimit
-      ? value
-      : `${value.slice(0, lineCharLimit)}...`;
-  }
-
-  private isSearchTextTruncated(value: unknown, lineCharLimit: number): boolean {
-    return typeof value === 'string' && value.length > lineCharLimit;
-  }
-
-  private shapeRangeReadToolResult(parsed: Record<string, unknown>, snipForContextPressure: boolean): string {
-    const content = typeof parsed.content === 'string' ? parsed.content : '';
-    const contentCharLimit = snipForContextPressure ? RANGE_READ_SNIPPED_CONTENT_CHARS : RANGE_READ_SHAPED_CONTENT_CHARS;
-    if (content.length <= contentCharLimit) {
-      return JSON.stringify(parsed);
-    }
-
-    return JSON.stringify({
-      ...parsed,
-      content: content.slice(0, contentCharLimit),
-      truncated: true,
-      shapedContentCharLimit: contentCharLimit,
-      snippedForContextPressure: snipForContextPressure || undefined
-    });
-  }
-
   private parseToolResultObject(content: string): Record<string, unknown> | undefined {
     try {
       const parsed: unknown = JSON.parse(content);
@@ -4777,30 +4746,6 @@ export class AgentLoop {
     } catch {
       return undefined;
     }
-  }
-
-  private getToolResultMetadata(parsed: Record<string, unknown> | undefined): {
-    path?: string;
-    startLine?: number;
-    endLine?: number;
-    truncated: boolean;
-  } {
-    if (!parsed) {
-      return { truncated: false };
-    }
-
-    return {
-      path: typeof parsed.path === 'string' ? parsed.path : undefined,
-      startLine: readOptionalFiniteNumber(parsed.startLine),
-      endLine: readOptionalFiniteNumber(parsed.endLine),
-      truncated: parsed.truncated === true
-    };
-  }
-
-  private isCompressibleToolResult(toolName: string): boolean {
-    return toolName !== READ_WORKSPACE_FILE_TOOL_NAME
-      && !isDraftEditPreparationTool(toolName)
-      && !isDraftRunPreparationTool(toolName);
   }
 
   private parseToolArguments(rawArguments: string): Record<string, unknown> {
@@ -5183,6 +5128,7 @@ export class AgentLoop {
       return;
     }
     if (evidence.executionStatus === 'completed') {
+      if (evidence.pluginSkillProgress) restorePluginSkillProgress(checkpoint, evidence.pluginSkillProgress);
       if (checkpoint.state.epoch) this.upsertEpochEvidenceRef(checkpoint.state.epoch, evidence);
       if (evidence.providerEnvelope !== undefined) checkpoint.state.pending.results[executing.id] = evidence.providerEnvelope;
       checkpoint.state.pending.executing = undefined;
@@ -5437,14 +5383,6 @@ function formatReviewerDenial(reason: string, saferAlternative: string | undefin
       ? 'Do not pursue the same dangerous result through a variant command, indirect execution, or another tool. Submit only a materially safer new operation with a new action hash, or stop and explain if none exists.'
       : '不得通过变体命令、间接执行或其它工具追求相同危险结果。只能提交 actionHash 不同且实质更安全的新操作；没有安全替代方案时应停止并说明。'
   ].filter(Boolean).join(' ');
-}
-
-function readFiniteNumber(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-}
-
-function readOptionalFiniteNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
 function isRunDetailsBudgetPause(value: unknown): value is NonNullable<RunDetailsSummary['budgetPause']> {

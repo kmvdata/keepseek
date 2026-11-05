@@ -1,6 +1,8 @@
 # KeepSeek 子代理架构、安全与用量
 
-> 子代理主题的唯一交接入口。本文合并了原 `doc/subagent-runtime-security.md` 与 `doc/subagent-usage-statistics.md`，覆盖当前 V11 的隔离、调度、结果协议、恢复和统计。主 Agent 工作流见 [`doc/keepseek-agent-runtime-workflow.md`](doc/keepseek-agent-runtime-workflow.md)。P1 变更与验证限制见 [`doc/keepseek-p1-subagent-reliability.md`](doc/keepseek-p1-subagent-reliability.md)。
+模型设置位于 `/` → 子代理模型：默认及 research / review / proposal 的覆盖保持独立；review 显示为“代码审查”。同一菜单下的“审批模型”仅使用用户级 `keepseek.autoApprovalReviewer`，默认跟随任务执行段实际主模型，不读取子代理 default。菜单归组不改变两套配置的独立性，父任务选择“帮我审批”不提升任何 child 的权限。
+
+> 子代理主题的唯一交接入口。本文合并了原 `doc/subagent-runtime-security.md` 与 `doc/subagent-usage-statistics.md`，覆盖子代理 runtime 协议 V11 的隔离、调度、结果合同、恢复和统计。主 Agent 工作流见 [`doc/keepseek-agent-runtime-workflow.md`](doc/keepseek-agent-runtime-workflow.md)。P1 变更与验证限制见 [`doc/keepseek-p1-subagent-reliability.md`](doc/keepseek-p1-subagent-reliability.md)。
 
 ## 1. 设计目标
 
@@ -14,7 +16,7 @@
 4. proposal 只能产生草案；实际写入和命令仍回到父会话审批管线。
 5. 时间、费用和取消属于同一逻辑任务，不能通过委派重置。
 
-当前 `SUBAGENT_PROTOCOL_VERSION` 为 **11**，与新会话 provider request/tool schema V11 对齐。V11 使用结果合同 V2、handoff manifest V3、宿主继承 capsule V1 和独立结果索引 V1；它们与 P0 的会话对象存储 V4 是不同版本维度。V1–V10 旧热会话继续使用冻结的 system/schema 字节，通过新会话或既有冷边界升级。
+`subagents/runtime.ts` 的私有 `SUBAGENT_PROTOCOL_VERSION` 仍为 **11**；父会话的 request protocol/tool schema 当前为 **13**，两者不能互相替换。child V11 使用结果合同 V2、handoff manifest V3、宿主继承 capsule V1 和独立结果索引 V1；会话对象存储 V4、审批策略及审批交付协议又是不同维度。权威来源与迁移规则见 [文档导航的版本表](doc/README.md#版本维度)。旧热 lane 保持已冻结的 system/schema 字节，在已有新会话或冷边界规则下升级，不为内部移动重录 fixture。
 
 ## 2. 权威模块
 
@@ -76,7 +78,7 @@ V11 在初始计划和有证据的调查范围扩大时，引导主模型通过 
 默认禁止注入：
 
 - 父聊天完整历史、隐藏推理和工具结果正文；
-- 父 Context Files、会话归档与 Legacy Memory；
+- 父 Context Files、会话归档和历史 Memory 内容；
 - 未选中 Skill 的模型可见正文、未经父侧授权的外部路径；
 - API key、审批 permit、父 Agent 的可变内部对象。
 
@@ -309,3 +311,5 @@ bun run test
 ## 长任务进展与结果等待
 
 父运行的进展按已交付内容/范围与真实宿主状态判断，不按新的 child/evidence ID 判断。`readResult` 对本 runtime 中确实 queued/running、且 parent session 匹配的 child，等待完成事件；不不断请求模型轮询。取消沿用 invocation signal，完成后再次通过 store 校验 lineage、scope 和结果完整性。磁盘上中断的 child 不冒充活跃操作。检查点引用按 session 独立，复制会话不继承旧 session 的可执行 checkpoint/归档引用。费用、时间与用量归属保持现有共享逻辑任务规则。
+
+共享项目指令按全局→仓库根→任务 cwd 的顺序传入隔离 capsule，不按路径重新排序。标准 Skill 不需要 KeepSeek profile；可选 `metadata.keepseek.runAs/profile` 类能力属于 KeepSeek 扩展（实际 profile 字段见源码与共享配置报告），不会因文件声明而增加权限。

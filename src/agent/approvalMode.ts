@@ -1,28 +1,35 @@
 import type { ApprovalMode } from '../shared/types';
 import type { ApprovalReviewDisplay, BoundedReviewText } from '../approvals/approvalReviewTypes';
 
-export const DELEGATED_APPROVAL_PROTOCOL_VERSION = 6;
-export const MODEL_REVIEW_APPROVAL_PROTOCOL_VERSION = 7;
+export const DELEGATED_APPROVAL_PROTOCOL_VERSION = 13;
 
 export function normalizeApprovalMode(value: unknown): ApprovalMode {
-  return value === 'delegate' || value === 'model_review' ? value : 'ask';
+  return value === 'delegate' ? value : 'ask';
 }
 
 /** Append only to a new user message. Never regenerate a historical prefix. */
 export function getApprovalModeUserTail(mode: ApprovalMode): string {
+  const validation = 'Use keepseek_run_validation only when validation is required for the task and the target package.json defines the matching compile, lint, or test script. A local Git-only task does not require extra validation unless the user or project explicitly requires it.';
+  const git = [
+    'For local Git, prefer keepseek_git_status and keepseek_git_diff when workspaceFolder identifies the requested repository.',
+    'Use a controlled DraftRun when exact cwd or pathspec is required.',
+    'Stage and commit through separate DraftRuns using direct Git argv.',
+    'Wait for the actual staging result, inspect the index, and write the commit message in the requested language from that evidence.',
+    'Pass -a and -m separately when needed and give every -m exactly one complete message argument.'
+  ].join(' ');
   return mode === 'delegate'
-    ? '<keepseek-approval-mode>delegate: The user selected project-wide Approve for me. Propose the exact DraftEdits and DraftRuns needed for the task. The host will approve and apply/execute them after this turn, then send the real results in a new turn automatically. Do not ask for manual approval. Continue until the task is complete; only claim effects after their results arrive.</keepseek-approval-mode>'
-    : mode === 'model_review'
-      ? '<keepseek-approval-mode>model_review: The user selected project-wide Model review. Propose exact immutable DraftEdits and DraftRuns. An isolated reviewer will approve or deny each effect after this turn. A denial is a safety decision, not an execution error: do not retry variants or indirect equivalents. Only propose a materially safer new action with a new hash, or stop and explain when none exists. Claim effects only after real results arrive.</keepseek-approval-mode>'
-    : '<keepseek-approval-mode>ask: The user selected project-wide Ask for approval. File writes and arbitrary commands require individual user approval. Prepare pending drafts and wait for their results.</keepseek-approval-mode>';
+    ? `<keepseek-approval-mode>delegate: The user selected Approve for me. Propose exact immutable DraftEdits and DraftRuns. ${validation} ${git} The host directly approves eligible routine actions and uses an independent tool-free approval reviewer for other verifiable operations. Project processes use extension-host privileges without an OS sandbox. Prefer bounded evidence gathering and already-authorized alternatives. If a decision or exact external permission remains unresolved, only the host can create a precise one-shot user request; never manufacture approval by asking for a click in prose. A user decision keeps this mode and does not grant permanent trust. Reuse completed work, never repeat an uncertain effect or pursue a denied effect through equivalents. A safety denial permits only a materially safer action. Continue authorized independent work and claim completion only from actual verified results.</keepseek-approval-mode>`
+    : `<keepseek-approval-mode>ask: The user selected project-wide Ask for approval. File writes and arbitrary commands require individual user approval. ${validation} Prepare pending drafts and wait for their results.</keepseek-approval-mode>`;
 }
 
 export interface DelegatedApprovalBatch {
   sessionId: string;
   runId: string;
   rootTaskId?: string;
+  backgroundRunId?: string;
   editIds: string[];
   draftRunIds: string[];
+  confirmTargetId?: string;
   continueAfterApprovalReview?: boolean;
   approvalReviews?: ApprovalReviewDisplay[];
   approvalToolResults?: Array<{
@@ -32,6 +39,7 @@ export interface DelegatedApprovalBatch {
     result: BoundedReviewText;
   }>;
   approvalStopReason?: string;
+  localGitCompletionCheck?: boolean;
 }
 
 /** Volatile queue: reloading the extension must never execute restored drafts. */
@@ -61,4 +69,13 @@ export class DelegatedApprovalQueue {
     this.pending = undefined;
     this.active?.abort();
   }
+}
+
+export function draftRunPreparedMessage(mode: ApprovalMode | undefined, language: 'zh-CN' | 'en'): string {
+  const approval = normalizeApprovalMode(mode);
+  if (language === 'en') return 'DraftRun prepared only; no process was started. ' + (approval === 'ask'
+    ? 'Wait for the user to approve this execution in KeepSeek.'
+    : 'The host will process this operation after hard preflight checks, requesting a precise user decision only when needed.');
+  return '仅准备了 DraftRun 草稿，尚未执行。' + (approval === 'ask' ? '等待用户在 KeepSeek 中批准本次执行。'
+    : '宿主将在硬性预检通过后处理此操作，仅在必要时请求用户作精确决定。');
 }

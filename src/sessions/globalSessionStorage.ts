@@ -57,6 +57,7 @@ export interface WorkspaceSessionIndex {
   workspaceFolders: string[];
   activeSessionId: string;
   approvalMode: ApprovalMode;
+  approvalModeMigrated?: boolean;
   sessions: SessionIndexEntry[];
   updatedAt: string;
 }
@@ -73,6 +74,7 @@ interface LegacyWorkspaceSessionFile {
   workspaceFolders: string[];
   activeSessionId: string;
   approvalMode: ApprovalMode;
+  approvalModeMigrated?: boolean;
   sessions: ChatSession[];
   updatedAt: string;
 }
@@ -132,7 +134,8 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
         return {
           activeSessionId: legacy.activeSessionId,
           approvalMode: legacy.approvalMode,
-          sessions: legacy.sessions,
+          sessions: legacy.sessions.map(session => session.id === legacy.activeSessionId && legacy.approvalModeMigrated
+            ? { ...session, approvalModeMigrated: true } : session),
           sessionSummaries: legacy.sessions.map(toSessionSummary)
         };
       }
@@ -142,6 +145,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     const activeSession = index.activeSessionId
       ? await this.readSession(index.workspaceKey, index.activeSessionId, index)
       : undefined;
+    if (activeSession && index.approvalModeMigrated) activeSession.approvalModeMigrated = true;
     return {
       activeSessionId: activeSession?.id ?? '',
       approvalMode: index.approvalMode,
@@ -215,6 +219,16 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
     if (!normalizedWorkspaceKey || !normalizedSessionId) return undefined;
     const index = await this.loadIndexByWorkspaceKey(normalizedWorkspaceKey);
     return index ? await this.readSession(normalizedWorkspaceKey, normalizedSessionId, index) : undefined;
+  }
+
+  /** Resolve only a checkpoint referenced by this exact session/message. */
+  public async loadMessageCheckpoint(workspaceKey: string, sessionId: string, messageId: string): Promise<unknown> {
+    const session = await this.loadSession(workspaceKey, sessionId);
+    const message = session?.messages.find(item => item.id === messageId);
+    if (message?.runCheckpoint) return message.runCheckpoint;
+    if (!message?.runCheckpointArchive) return undefined;
+    return this.objects(this.getSessionUri(getWorkspaceHash(workspaceKey), sessionId))
+      .loadCheckpoint(message.runCheckpointArchive.objectHash);
   }
 
   public async listWorkspaceSessionSummaries(workspaceKey: string): Promise<ChatSessionSummary[]> {
@@ -433,6 +447,7 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
       workspaceFolders: file.workspaceFolders,
       activeSessionId: chooseActiveSessionIdFromEntries(entries, file.activeSessionId),
       approvalMode: file.approvalMode,
+      approvalModeMigrated: file.approvalModeMigrated,
       sessions: sortIndexEntries(entries),
       updatedAt: file.updatedAt
     };
@@ -709,6 +724,7 @@ function normalizeWorkspaceIndex(value: unknown, fallback?: WorkspaceMetadata | 
     workspaceFolders,
     activeSessionId: chooseActiveSessionIdFromEntries(sessions, nonEmptyString(value.activeSessionId), fallbackActiveId),
     approvalMode: normalizeApprovalMode(value.approvalMode),
+    approvalModeMigrated: value.approvalMode === 'model_review' || value.approvalModeMigrated === true || undefined,
     sessions: sortIndexEntries(sessions),
     updatedAt: isoString(value.updatedAt, sessions[0]?.updatedAt ?? new Date(0).toISOString())
   };
@@ -750,6 +766,7 @@ function normalizeLegacyWorkspaceSessionFile(value: unknown, fallback?: Workspac
     workspaceName,
     workspaceFolders,
     activeSessionId,
+    approvalModeMigrated: value.approvalMode === 'model_review' || value.approvalModeMigrated === true || undefined,
     approvalMode: normalizeApprovalMode(value.approvalMode ?? sessions.find((session) => session.id === activeSessionId)?.approvalMode),
     sessions: sortSessionsByUpdatedAt(sessions),
     updatedAt: isoString(value.updatedAt, sessions[0]?.updatedAt ?? new Date(0).toISOString())
@@ -796,7 +813,7 @@ function manifestEntryToMetadata(entry: GlobalSessionWorkspaceManifestEntry | un
 }
 
 function normalizeApprovalMode(value: unknown): ApprovalMode {
-  return value === 'delegate' || value === 'model_review' ? value : 'ask';
+  return value === 'delegate' ? value : 'ask';
 }
 
 function nonEmptyString(value: unknown): string | undefined {

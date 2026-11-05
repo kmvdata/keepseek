@@ -1,7 +1,5 @@
 # KeepSeek Agent 运行时工作流
 
-2026-10-31：无进展停止的普通 Continue 仍被拒绝；真实新 user 可在兼容来源/工作区/授权条件下恢复同 task，沿用预算和进展窗口，未知工具或未完成 continuation 仍拒绝。迁移在 manifest 提交前可安全取消，停止写入者是升级前提。实际回放、故障与现场边界见 [续接验收](long-task-rectification-resume-report.md)。
-
 > 本文是运行时主线的交接文档：从扩展激活、请求构建、流式工具循环，到审批、副作用、长任务和崩溃恢复。目录职责见 [`keepseek-code-architecture.md`](keepseek-code-architecture.md)，请求字节与上下文容量见 [`cache_keepseek.md`](cache_keepseek.md)，子代理见 [`../SUBAGENTS.md`](../SUBAGENTS.md)。
 
 ## 1. 运行时边界
@@ -52,7 +50,7 @@ VS Code / Webview
 
 1. 创建账户、模型、会话、ChangeSet、DraftRun、审批、Skill 和 Usage Ledger 等服务。
 2. 恢复持久化记录；对重启时仍处于中间态的写入、命令和 Agent run 做保守归一化。
-3. 注册 `keepseek.chatView`、工作区命令、右键引用命令与 URI 打开处理。
+3. 注册 `keepseek.chat` View、工作区命令、右键引用命令与 URI 打开处理。
 4. 建立 Provider 与 Webview，推送配置、账户、会话、变更和运行状态。
 5. 监听配置、工作区、编辑器和会话变化，更新宿主状态。
 
@@ -65,13 +63,13 @@ Webview 消息的唯一联合类型在 `provider/webviewMessages.ts`。Webview �
 用户提交后，Provider：
 
 1. 拒绝空输入，并确认工作区、会话和当前 run 状态。
-2. 读取当前项目指令、显式/会话/默认/隐式 Skill、Legacy Memory 和授权上下文。
+2. 读取当前项目指令、显式/会话/默认/隐式 Skill和授权上下文。
 3. 首轮把格式化结果冻结为 `ChatSession.contextInstructions`；后续变化追加到当前真实 user 消息尾部，不回写旧前缀。
 4. 按“目录引用 → 文件引用 → Skill”展开输入；外部 URI 先检查精确授权。
 5. 持久化原始 `content`、必要时的 `expandedContent`，以及真正发送的 `providerContent`。
 6. 建立请求快照与取消控制器，然后交给 `AgentRequestCoordinator`。
 
-项目指令来源只有受信任 workspace root 的 `AGENTS.md`；`.agents/**/AGENTS.md` 属于 Skill，不是全局项目指令。Skill 的脚本只可作为 DraftRun 提议，绝不因激活而执行。
+项目指令来自 CODEX_HOME 全局文件和受信任的任务 Git root→cwd 链（无 Git 仅 cwd）；每目录按 override、AGENTS、配置 fallback 选一份。任务目录由用户明确选择或单根默认，不随焦点变化。Skill 入口仅标准 skills 根内的 SKILL.md。共享配置变更在新任务或空闲刷新边界生效，详见 [共享配置](keepseek-codex-shared-config.md)。Skill 的脚本只可作为 DraftRun 提议，绝不因激活而执行。
 
 ### 4.2 历史与原生请求
 
@@ -81,7 +79,7 @@ Coordinator 先按模型画像刷新摘要，再由 `buildProviderRequestProject
 - OpenAI Responses；
 - Anthropic Messages。
 
-实际请求、token 估算、工具结果准入和缓存观测共用这一投影。当前新会话 request protocol/tool schema 是 V11；V10 引入子代理 UTF-8 byte-offset 分页，V11 增加分工评估与父验收合同。热旧会话只在受控边界迁移。现场核验方法及尚未完成的验证见 [P1 现场验收](keepseek-p1-field-acceptance.md)。
+实际请求、token 估算、工具结果准入和缓存观测共用这一投影。当前父会话 request protocol/tool schema 均为 V14（`providerRequestProjection.ts`），child runtime 协议仍为 V11（`subagents/runtime.ts`）。V10 引入子代理 UTF-8 byte-offset 分页，V11 增加分工评估与父验收合同，V12 增加插件 Skill 读取入口，V13 更新两模式审批的交付提示，V14 隐藏已暂停的插件读取工具。旧插件任务不可恢复执行，但历史快照与 evidence 保留只读。热旧会话只在受控边界迁移；这些版本不等同于结果合同、存储或审批策略版本，权威来源见 [版本与文档导航](README.md#版本维度)。P1 当时的现场核验限制见 [历史验收记录](keepseek-p1-field-acceptance.md)。
 
 ### 4.3 来源解析
 
@@ -201,13 +199,14 @@ spawn(executable, args, { shell: false })
 
 ## 8. 审批模式
 
-项目有三档审批模式，仅 Webview 用户操作可切换，且按目标 workspace 持久化：
+项目有两档审批模式，仅 Webview 用户操作可切换，且按目标 workspace 持久化：
 
 | 模式 | 决策者 | 行为 |
 | --- | --- | --- |
 | `ask` | 用户 | 默认；逐项或批量批准 |
-| `model_review` | 隔离 reviewer | 长任务适用；逐 actionHash 审查，可拒绝 |
-| `delegate` | 宿主策略 | 不经模型审查，但必须生成 `host_policy` 记录 |
+| `delegate`（帮我审批） | 宿主策略、独立审批 reviewer、必要时用户 | 常规操作直批；其余可审查操作自动送审，区分 approve/needs_user/deny/unavailable。必要时绑定当前 runtime 的精确单次人工请求，之后复核并续跑同一任务 |
+
+旧 `model_review` 当前设置迁移为 ask，仅保留历史审计；审批模型位于 `/` → 子代理模型 → 审批模型，配置仅取用户级 `keepseek.autoApprovalReviewer`，与普通子代理 default/角色设置独立。follow-main 跟随执行段的实际主模型。等待用户暂停有效计时，关闭 Webview 不取消等待；重启不恢复旧批准、队列或 permit。详细恢复与验收见 [帮我审批](keepseek-approve-for-me-verification.md)。
 
 共同规则：
 

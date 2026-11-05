@@ -39,12 +39,6 @@ export function getScript(): string {
         activeSkillIds: [],
         workspaceDefaultSkillIds: []
       },
-      legacyMemoryMigration: {
-        detected: false,
-        status: 'pending',
-        sourceUris: [],
-        entryCount: 0
-      },
       backgroundRun: null,
       backgroundAvailableScripts: [],
       backgroundDefaults: {
@@ -192,6 +186,8 @@ export function getScript(): string {
     }
 
     function getSkillMentionNameForView(skill) {
+      var qualifiedName = getPluginSkillMentionName(skill);
+      if (qualifiedName) { return qualifiedName; }
       var name = String(skill && skill.name || '').trim();
       if (isSafeSkillMentionNameForView(name)) {
         return name;
@@ -273,6 +269,17 @@ export function getScript(): string {
     }
 
     function getSkillByMarkdownReferenceForView(name, href) {
+      var normalizedName = String(name || '').trim();
+      if (normalizedName.includes(':')) {
+        var target = normalizeSkillPathForView(href);
+        if (!target) { return null; }
+        var matches = getSkillItemsForView().filter(function(item) {
+          return getPluginSkillMentionName(item) === normalizedName
+            && (normalizeSkillPathForView(getSkillPathForView(item)) === target
+              || getPluginSkillReferenceTarget(item, false) === target || getPluginSkillReferenceTarget(item, true) === target);
+        });
+        return matches.length === 1 ? matches[0] : null;
+      }
       var skill = getSkillByMentionNameForView(name);
       if (!skill) {
         return null;
@@ -304,6 +311,26 @@ export function getScript(): string {
 
     function isSafeSkillMentionNameForView(value) {
       return /^[A-Za-z0-9_-]+$/u.test(String(value || ''));
+    }
+
+    function getPluginSkillMentionName(skill) {
+      var name = String(skill && skill.plugin && skill.plugin.qualifiedName || '').trim();
+      return /^[A-Za-z0-9][A-Za-z0-9_-]*:[A-Za-z0-9][A-Za-z0-9_-]*$/u.test(name) ? name : '';
+    }
+
+    function getPluginSkillReferenceTarget(skill, pinSelection) {
+      var uri = String(skill && skill.skillUri || '');
+      var encoded = uri.replace(/[()]/g, function(character) {
+        return character === '(' ? '%28' : '%29';
+      });
+      var stamp = skill && skill.plugin && skill.plugin.selectionStamp;
+      return pinSelection && /^[a-f0-9]{64}$/u.test(stamp || '') ? encoded + '#keepseek-plugin-' + stamp : encoded;
+    }
+
+    function isPluginSkillLinkCurrent(link, skill) {
+      return Boolean(skill && skill.plugin && skill.enabled && !skill.unavailableReason
+        && link.dataset.skillPath === getSkillPathForView(skill)
+        && (link.dataset.skillSelectionStamp || '') === (skill.plugin.selectionStamp || ''));
     }
 
     function mergeSkillIdsForRequest() {
@@ -529,6 +556,7 @@ export function getScript(): string {
       reading_semantic_context: ['agentStatusReadingSemanticContext'],
       reading_git_state: ['agentStatusReadingGitState'],
       awaiting_authorization: ['agentStatusAwaitingAuthorization'],
+      awaiting_manual_approval: ['approvalConfirmOnce'],
       generating_repair: ['agentStatusGeneratingRepair'],
       waiting_for_apply: ['agentStatusWaitingForApply'],
       running_validation: ['agentStatusRunningValidation'],
@@ -588,6 +616,11 @@ export function getScript(): string {
         event.stopPropagation();
         if (event.detail > 1) return;
         if (referenceLink.matches('a.rich-skill-link')) {
+          if (referenceLink.dataset.skillReferenceText
+            && !isPluginSkillLinkCurrent(referenceLink, getSkillByIdForView(referenceLink.dataset.skillId))) {
+            setTransientStatus(t('pluginSkillStale'));
+            return;
+          }
           vscode.postMessage({
             type: 'openSkill',
             skillId: referenceLink.dataset.skillId || ''
@@ -1223,6 +1256,13 @@ export function getScript(): string {
 
     function handleKeepseekHostMessage(event) {
       var message = event.data;
+      if (message.type === 'taskTiming') {
+        if (message.sessionId === state.activeSessionId && state.usageMetrics) {
+          state.usageMetrics.executionTime = message.executionTime;
+          renderContextProgress();
+        }
+        return;
+      }
       if (message.type === 'requestTimeoutSettingsResult') {
         var restoreTimeoutFocus = pendingModelRequestTimeoutFocus && settingsMenuOpen
           && document.activeElement === document.body;
@@ -1303,6 +1343,8 @@ export function getScript(): string {
         pendingDraftRunApprovals.delete(String(message.draftRun?.id || ''));
         upsertDraftRun(message.draftRun);
         render();
+      } else if (message.type === 'approvalReviewerModelResult') {
+        setComposerStatus(message.success ? t('approvalModelSaved') : (message.error || t('approvalModelSaveFailed')));
       } else if (message.type === 'draftRunBatchFeedback') {
         pendingDraftRunBatchSnapshot = '';
         render();
@@ -1660,7 +1702,8 @@ export function getScript(): string {
       if (backgroundLabel) {
         backgroundLabel.textContent = t('backgroundRun') + ' · ' + normalizeValidationScript(run.goal?.script);
       }
-      var statusKey = 'backgroundStatus_' + run.status;
+      var statusKey = state.approvalMode === 'delegate' && run.status === 'waiting_for_authorization'
+        ? 'approvalProcessingNow' : 'backgroundStatus_' + run.status;
       var statusLabel = t(statusKey);
       if (statusLabel === statusKey) statusLabel = run.status || t('backgroundIdle');
       statusLabel += ' · ' + t('backgroundProgress', {
@@ -1674,7 +1717,7 @@ export function getScript(): string {
       backgroundStatus.textContent = statusLabel;
       if (backgroundResume) {
         var canResume = run?.status === 'waiting_for_apply' && state.repairLoop?.status === 'ready_for_validation' && !state.isBusy;
-        backgroundResume.classList.toggle('hidden', run?.status !== 'waiting_for_apply');
+        backgroundResume.classList.toggle('hidden', state.approvalMode === 'delegate' || run?.status !== 'waiting_for_apply');
         backgroundResume.disabled = !canResume;
       }
       if (backgroundStop) {
@@ -2518,6 +2561,7 @@ export function getScript(): string {
         case 'keepseek_read_workspace_file_range':
           return 'reading_file_range';
         case 'keepseek_read_workspace_file':
+        case 'keepseek_read_plugin_skill':
           return 'reading_file';
         case 'keepseek_create_draft_edit':
         case 'keepseek_delete_workspace_file':
@@ -3194,7 +3238,8 @@ export function getScript(): string {
       renderPlanNote(planBlockers, t('planBlockers'), Array.isArray(plan.blockers) ? plan.blockers.join('\\n') : '');
       renderPlanNote(planCompletion, t('planCompletion'), plan.completionSummary || '');
       if (planContinueRepair) {
-        var canContinueRepair = state.repairLoop?.status === 'ready_for_validation' && !state.isBusy && !isBackgroundActive();
+        var canContinueRepair = state.approvalMode !== 'delegate'
+          && state.repairLoop?.status === 'ready_for_validation' && !state.isBusy && !isBackgroundActive();
         planContinueRepair.classList.toggle('hidden', !canContinueRepair);
         planContinueRepair.disabled = !canContinueRepair;
       }
@@ -3360,7 +3405,8 @@ export function getScript(): string {
           });
           if (originalRuns.length !== entries.length || pending.length !== entries.length
             || pending.some(function(run, index) {
-              return run.id !== entries[index].draftRunId || run.specHash !== entries[index].specHash;
+              return run.id !== entries[index].draftRunId || run.specHash !== entries[index].specHash
+                || run.dependency || run.replan || isHeldDraftRunApproval(getApprovalTarget(run.id));
             })) return;
         }
         // Anchor from all original members, including cards owned by a newer group.
@@ -3507,6 +3553,21 @@ export function getScript(): string {
     function createDraftRunCard(draftRun) {
       var statusValue = String(draftRun.status || 'pending');
       var spec = draftRun.spec || {};
+      var target = getApprovalTarget(draftRun.id);
+      var dependency = draftRun.dependency || target?.dependency;
+      var replan = draftRun.replan || target?.replan;
+      var approvalBlocked = ['hard_blocked', 'identity_mismatch', 'missing'].includes(target?.status);
+      var displayStatus = statusValue;
+      if (statusValue === 'pending' && state.approvalMode === 'delegate' && !state.isBusy) {
+        displayStatus = 'blocked';
+      } else if (statusValue === 'needs_replan' || target?.status === 'needs_replan') {
+        displayStatus = 'needs_replan';
+      } else if (dependency || target?.status === 'dependency_blocked' || (statusValue === 'pending' && approvalBlocked)) {
+        displayStatus = 'blocked';
+      } else if (statusValue === 'pending' && state.approvalMode !== 'ask'
+        && !['manual_required', 'denied', 'review_unavailable', 'needs_authorization'].includes(target?.status)) {
+        displayStatus = 'preparing';
+      }
       var card = document.createElement('section');
       card.className = 'draft-run-card draft-run-' + statusValue;
       card.dataset.draftRunId = String(draftRun.id || '');
@@ -3517,20 +3578,66 @@ export function getScript(): string {
       heading.className = 'draft-run-heading';
       var title = document.createElement('div');
       title.className = 'draft-run-title';
-      title.textContent = getDraftRunTitle(statusValue);
+      var release = draftRun.gitReleaseEvidence;
+      var existingRelease = release && !release.executed;
+      title.textContent = draftRun.gitReusedDraftRunId ? t('draftRunGitResultReused')
+        : existingRelease ? t('draftRunReleaseAlreadyVerified') : getDraftRunTitle(displayStatus);
       var meta = document.createElement('div');
       meta.className = 'draft-run-meta';
-      meta.textContent = getDraftRunStatusLabel(statusValue) + ' · ' + String(spec.reason || '');
+      meta.textContent = [existingRelease || draftRun.gitReusedDraftRunId ? '' : getDraftRunStatusLabel(displayStatus), spec.reason].filter(Boolean).join(' · ');
       if (draftRun.authorizationSource === 'delegated_approver') {
         meta.textContent += ' · ' + t('approvalSourceLabel') + ': ' + getApprovalSourceLabel(draftRun.approvalReview);
       } else if (draftRun.authorizationSource === 'user_click') {
         meta.textContent += ' · ' + t('approvalSourceLabel') + ': ' + t('approvalSourceUser');
       }
       heading.append(title, meta);
+      if (draftRun.gitCommitEvidence?.outcome === 'verified') {
+        var receipt = document.createElement('div');
+        var head = String(draftRun.gitCommitEvidence.head || '');
+        receipt.className = 'draft-run-output-notice';
+        receipt.textContent = t('draftRunVerifiedGitHead', { head: head.slice(0, 12) });
+        receipt.title = head;
+        heading.append(receipt);
+      }
+      if (release) {
+        var verifiedRefs = document.createElement('div');
+        verifiedRefs.className = 'draft-run-output-notice';
+        verifiedRefs.textContent = t('draftRunReleaseVerified', { count: release.refs.length });
+        verifiedRefs.title = release.refs.map(function(ref) {
+          return ref.ref + ' ' + ref.object + (ref.peeled ? ' → ' + ref.peeled : '');
+        }).join(String.fromCharCode(10));
+        heading.append(verifiedRefs);
+      }
       var actions = document.createElement('div');
       actions.className = 'draft-run-actions';
-      appendDraftRunActions(actions, draftRun);
-      header.append(heading, actions);
+      header.append(heading);
+      if (draftRun.replacementDraftRunId) {
+        appendApprovalStateNote(header, t('approvalRestrictedReplacement', { id: draftRun.replacementDraftRunId }));
+        if (target?.reason) appendApprovalStateNote(header, target.reason);
+      } else if (spec.restricted?.originalDraftRunId) {
+        appendApprovalStateNote(header, t('approvalRestrictedOriginal', { id: spec.restricted.originalDraftRunId }));
+      }
+      if (dependency) {
+        appendApprovalStateNote(header, formatApprovalDependency(dependency));
+      } else if (target?.status === 'dependency_blocked') {
+        appendApprovalStateNote(header, t('approvalDependencyBlocked'));
+      }
+      var diagnostic = replan?.reason || (target?.status === 'needs_replan' ? target.reason : undefined);
+      if (diagnostic) appendApprovalStateNote(header, t('approvalCommandReplanReason', { reason: diagnostic }));
+      if (target?.status === 'needs_replan' && target.reason && target.reason !== diagnostic) {
+        appendApprovalStateNote(header, target.reason);
+      }
+      if (!dependency && displayStatus !== 'needs_replan' && target?.status !== 'dependency_blocked') {
+        appendDraftRunActions(actions, draftRun, header, target, approvalBlocked);
+      }
+      var processing = state.approvalProcessing;
+      if (displayStatus === 'needs_replan' && state.approvalMode === 'delegate' && !state.isBusy
+        && processing?.version === 2 && processing?.status === 'blocked' && processing.canResume === true && processing.runId === draftRun.agentRunId
+        && processing.targets.find(function(item) { return item.status === 'needs_replan'; })?.id === draftRun.id) {
+        appendApprovalStateNote(header, t('approvalInterrupted'));
+        appendApprovalResumeAction(actions, 'approvalResumeProcessing');
+      }
+      if (actions.childElementCount) header.append(actions);
 
       var fields = document.createElement('div');
       fields.className = 'draft-run-fields';
@@ -3575,7 +3682,7 @@ export function getScript(): string {
         notice.textContent = t('draftRunOutputTruncated', { count: Number(draftRun.omittedOutputBytes) || 0 });
         card.append(notice);
       }
-      if ((statusValue === 'rejected' || statusValue === 'done' || statusValue === 'cancelled' || statusValue === 'failed')
+      if (!dependency && (statusValue === 'rejected' || statusValue === 'done' || statusValue === 'cancelled' || statusValue === 'failed')
         && !draftRun.resultBoundMessageId) {
         var resultNotice = document.createElement('div');
         resultNotice.className = 'draft-run-output-notice';
@@ -3623,7 +3730,7 @@ export function getScript(): string {
         approve.dataset.batchSnapshot = JSON.stringify(snapshot);
         approve.dataset.batchSnapshotId = snapshot.snapshotId;
         var unauthorized = item.runs.filter(function(run) {
-          return run?.spec?.externalCwd && !(state.authorizedExternalReferenceUris || []).includes(run.spec.cwdUri);
+          return run?.spec?.externalCwd && !(state.authorizedExternalExecutionUris || []).includes(run.spec.cwdUri);
         });
         approve.disabled = approve.disabled || Boolean(pendingDraftRunBatchSnapshot) || unauthorized.length > 0;
         var hint = document.createElement('div');
@@ -3641,13 +3748,80 @@ export function getScript(): string {
       }
     }
 
-    function appendDraftRunActions(container, draftRun) {
+    function getApprovalTarget(id) {
+      var targets = state.approvalProcessing?.targets;
+      return Array.isArray(targets) ? targets.find(function(item) { return item.id === id; }) : undefined;
+    }
+
+    function isHeldDraftRunApproval(target) {
+      return ['blocked', 'stopped'].includes(state.approvalProcessing?.status) && target
+        && !['executed', 'already_processed'].includes(target.status);
+    }
+
+    function formatApprovalDependency(dependency) {
+      var label = dependency.label || dependency.targetId;
+      var target = label !== dependency.targetId ? label + ' (' + dependency.targetId + ')' : label;
+      return [t('approvalCommandDependency', { target: target }), dependency.reason].filter(Boolean).join(' · ');
+    }
+
+    function appendApprovalStateNote(notices, text, progress) {
+      var note = document.createElement('div');
+      note.className = 'approval-state-note';
+      if (progress) note.dataset.tone = 'progress';
+      note.textContent = text;
+      notices.append(note);
+    }
+
+    function appendApprovalResumeAction(actions, label, authorizeTargetId) {
+      if (state.approvalMode !== 'delegate' || state.approvalProcessing?.version !== 2) return;
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = t(label);
+      button.title = t('approvalResumeHint');
+      button.disabled = !state.startup?.sideEffectsReady;
+      button.addEventListener('click', function() {
+        vscode.postMessage({ type: 'resumeApprovalProcessing', authorizeTargetId: authorizeTargetId });
+      });
+      actions.append(button);
+    }
+
+    function appendAutomaticApprovalState(notices, actions, id, review) {
+      var processing = state.approvalProcessing;
+      var target = getApprovalTarget(id);
+      var denied = target && target.status === 'denied' || review && review.decision === 'deny';
+      var active = processing && ['processing', 'replanning'].includes(processing.status);
+      var recoverable = processing?.version === 2 && processing?.status === 'blocked' && processing.canResume === true;
+      var fallback = processing?.status === 'replanning' ? 'approvalReplanningNow' : active ? 'approvalProcessingNow'
+        : state.approvalMode === 'delegate' && !state.isBusy ? (target ? 'approvalAutoStopped' : 'approvalAutoInactive')
+        : recoverable ? 'approvalInterrupted' : 'approvalAutoWaiting';
+      if (target?.dependency) appendApprovalStateNote(notices, formatApprovalDependency(target.dependency));
+      if (!target?.dependency || target.reason) {
+        var reason = target?.reason || (denied && review ? review.rationale : undefined);
+        appendApprovalStateNote(notices, reason || t(fallback), !reason && !recoverable);
+      }
+      if (recoverable && !state.isBusy && !denied
+        && !['hard_blocked', 'identity_mismatch', 'missing', 'dependency_blocked'].includes(target?.status)) appendApprovalResumeAction(actions, 'approvalResumeProcessing');
+      return false;
+    }
+
+    function appendDraftRunActions(container, draftRun, notices, target, approvalBlocked) {
       var statusValue = String(draftRun.status || 'pending');
       var isOwnRunning = String(state.activeDraftRunId || '') === String(draftRun.id || '');
       var externalAuthorized = !draftRun.spec?.externalCwd
-        || (Array.isArray(state.authorizedExternalReferenceUris)
-          && state.authorizedExternalReferenceUris.includes(String(draftRun.spec?.cwdUri || '')));
+        || (Array.isArray(state.authorizedExternalExecutionUris)
+          && state.authorizedExternalExecutionUris.includes(String(draftRun.spec?.cwdUri || '')));
       if (statusValue === 'pending') {
+        if (draftRun.spec?.restricted) return;
+        if (state.approvalMode !== 'ask') {
+          if (appendAutomaticApprovalState(notices, container, draftRun.id, draftRun.approvalReview)) {
+            container.append(createDraftRunActionButton(t('draftRunReject'), 'rejectDraftRun', draftRun, true));
+          }
+          return;
+        }
+        if (approvalBlocked || isHeldDraftRunApproval(target)) {
+          if (target?.reason) appendApprovalStateNote(notices, target.reason);
+          return;
+        }
         if (!externalAuthorized) {
           container.append(createDraftRunActionButton(t('draftRunAuthorizeCwd'), 'authorizeDraftRunCwd', draftRun, false));
         } else {
@@ -3658,11 +3832,13 @@ export function getScript(): string {
       } else if (statusValue === 'running') {
         container.append(createDraftRunActionButton(t('draftRunCancel'), 'cancelDraftRun', draftRun, true, !isOwnRunning));
         container.append(createDraftRunActionButton(t('draftRunOpenTerminal'), 'openDraftRunTerminal', draftRun, true, false));
-      } else if (statusValue !== 'approved') {
+      } else if (statusValue !== 'approved' && statusValue !== 'no_changes') {
         if (draftRun.startedAt) {
           container.append(createDraftRunActionButton(t('draftRunOpenTerminal'), 'openDraftRunTerminal', draftRun, true, false));
         }
-        container.append(createDraftRunActionButton(t('draftRunClone'), 'cloneDraftRun', draftRun, true));
+        if (state.approvalMode !== 'delegate' && !draftRun.spec?.restricted && !draftRun.replacementDraftRunId) {
+          container.append(createDraftRunActionButton(t('draftRunClone'), 'cloneDraftRun', draftRun, true));
+        }
       }
     }
 
@@ -3695,6 +3871,10 @@ export function getScript(): string {
 
     function getDraftRunTitle(statusValue) {
       switch (statusValue) {
+        case 'preparing': return t('draftRunTitlePreparing');
+        case 'needs_replan': return t('draftRunTitleNeedsReplan');
+        case 'blocked': return t('draftRunTitleBlocked');
+        case 'no_changes': return t('draftRunTitleNoChanges');
         case 'approved':
         case 'running': return t('draftRunTitleRunning');
         case 'done': return t('draftRunTitleDone');
@@ -3737,6 +3917,10 @@ export function getScript(): string {
 
     function getDraftRunStatusLabel(statusValue) {
       switch (statusValue) {
+        case 'preparing': return t('draftRunStatusPreparing');
+        case 'no_changes': return t('draftRunStatusNoChanges');
+        case 'needs_replan':
+        case 'blocked': return t('draftRunStatusNotExecuted');
         case 'approved': return t('draftRunStatusApproved');
         case 'rejected': return t('draftRunStatusRejected');
         case 'running': return t('draftRunStatusRunning');
@@ -3791,7 +3975,7 @@ export function getScript(): string {
       var setActions = document.createElement('div');
       setActions.className = 'change-set-actions';
       if (!historical) {
-        if (applicableFiles.length >= 2) {
+        if (applicableFiles.length >= 2 && state.approvalMode === 'ask') {
           setActions.append(createChangeSetActionButton(t('changeSetApplyAll', { count: applicableFiles.length }), 'applyChangeSet', changeSet.id, false));
           setActions.append(createChangeSetActionButton(t('changeSetDiscardAll'), 'discardChangeSet', changeSet.id, true));
         }
@@ -3845,6 +4029,7 @@ export function getScript(): string {
 
       var actions = document.createElement('div');
       actions.className = 'draft-chip-actions';
+      chip.append(content);
       if (edit.uri) {
         actions.append(createEditOpenFileButton(edit));
       }
@@ -3852,14 +4037,13 @@ export function getScript(): string {
         actions.append(createEditActionButton(t('previewDiff'), 'openDraftDiff', edit.id, true));
       }
       if (allowActions && (edit.status === 'pending' || edit.status === 'apply_failed' || edit.status === 'interrupted')) {
-        actions.append(
-          createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false),
-          createEditActionButton(t('discard'), 'discardDraftEdit', edit.id, true)
-        );
+        if (state.approvalMode === 'ask') actions.append(createEditActionButton(t('apply'), 'applyDraftEdit', edit.id, false));
+        else appendAutomaticApprovalState(chip, actions, edit.id, edit.approvalReview);
+        actions.append(createEditActionButton(t('discard'), 'discardDraftEdit', edit.id, true));
       } else if (allowActions && (edit.status === 'applied' || edit.status === 'revert_failed')) {
         actions.append(createEditActionButton(t('revert'), 'revertDraftEdit', edit.id, true));
       }
-      chip.append(content, actions);
+      chip.append(actions);
       return chip;
     }
 
@@ -3869,10 +4053,12 @@ export function getScript(): string {
       var source = getApprovalSourceLabel(review);
       summary.textContent = [
         t('approvalSourceLabel') + ': ' + source,
-        review.reviewerModelId ? t('approvalReviewerModel') + ': ' + review.reviewerModelId : '',
-        t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision),
+        review.reviewerModelId ? t('approvalReviewerModel') + ': ' + (review.reviewerSourceId || '') + ' / ' + review.reviewerModelId : '',
+        t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision, review.approvalSource),
         t('approvalReviewRisk') + ': ' + getApprovalRiskLabel(review.risk),
         t('approvalReviewReason') + ': ' + String(review.rationale || ''),
+        Array.isArray(review.affectedTargets) && review.affectedTargets.length ? t('approvalAffectedTargets') + ': ' + review.affectedTargets.join(', ') : '',
+        review.saferAlternative ? t('approvalSaferAlternative') + ': ' + review.saferAlternative : '',
         t('approvalReviewId') + ': ' + String(review.reviewId || '')
       ].filter(Boolean).join(' · ');
       return summary;
@@ -3888,9 +4074,10 @@ export function getScript(): string {
     function getApprovalSourceLabel(review) {
       return review && review.approvalSource === 'host_policy'
         ? t('approvalSourceHost')
-        : review && (review.approvalSource === 'model_review' || review.approvalSource === 'local_policy')
-          ? t('approvalSourceModel')
-          : t('approvalSourceUser');
+        : review && review.approvalSource === 'auto_approval_review' ? t('approvalSourceAutoReviewer')
+        : review && review.approvalSource === 'model_review'
+          ? t('approvalSourceLegacyModel')
+          : review && review.approvalSource === 'local_policy' ? t('approvalSourceSafety') : t('approvalSourceUser');
     }
 
     function getAuthorizationSourceLabel(source) {
@@ -3911,7 +4098,8 @@ export function getScript(): string {
           : t('approvalSourceUser');
     }
 
-    function getApprovalDecisionLabel(decision) {
+    function getApprovalDecisionLabel(decision, source) {
+      if (decision === 'needs_user') return t('approvalNeedsUser');
       return decision === 'approve'
         ? t('approvalDecisionApprove')
         : decision === 'deny'
@@ -4186,7 +4374,7 @@ export function getScript(): string {
           var planWorkflow = Array.isArray(state.planWorkflows)
             ? state.planWorkflows.find(function(plan) { return plan && plan.assistantMessageId === message.id; })
             : null;
-          if (planWorkflow) body.append(createPlanDecisionCard(planWorkflow));
+          if (planWorkflow && (state.approvalMode !== 'delegate' || planWorkflow.status !== 'pending')) body.append(createPlanDecisionCard(planWorkflow));
         }
 
         if (message.role === 'assistant' && message.runState) {
@@ -4211,6 +4399,43 @@ export function getScript(): string {
       }
 
       transcript.append(unlinkedChangeSetRegion);
+      var manual = state.manualToolApproval;
+      if (manual && manual.sessionId === state.activeSessionId) {
+        var card = document.createElement('div');
+        card.className = 'draft-run-card';
+        var label = document.createElement('div');
+        label.className = 'approval-state-note';
+        label.textContent = t('approvalManualPrompt', { target: manual.label, reason: manual.reason });
+        card.setAttribute('role', 'region');
+        card.setAttribute('aria-label', t('approvalNeedsUser'));
+        card.append(label);
+        if (manual.request?.exactAction) {
+          var exact = document.createElement('details');
+          var title = document.createElement('summary'); title.textContent = t('approvalExactDetails');
+          var payload = document.createElement('pre'); payload.className = 'approval-exact-payload';
+          payload.textContent = JSON.stringify(manual.request.exactAction, null, 2);
+          exact.append(title, payload); card.append(exact);
+        }
+        var actions = document.createElement('div');
+        actions.className = 'draft-run-actions';
+        [true, false].forEach(function(approve) {
+          var button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = t(approve ? 'approvalConfirmOnce' : 'approvalCancelAction');
+          button.addEventListener('click', function() {
+            for (var action of actions.querySelectorAll('button')) action.disabled = true;
+            vscode.postMessage({ type: 'resolveValidationApproval', id: manual.id, approve: approve });
+          });
+          actions.append(button);
+        });
+        card.append(actions);
+        transcript.append(card);
+      }
+      if (!manual && state.pendingApproval?.status === 'interrupted') {
+        var recovered = document.createElement('div'); recovered.className = 'approval-state-note';
+        recovered.textContent = t('approvalInterrupted') + ' ' + state.pendingApproval.label + ' · ' + state.pendingApproval.reason;
+        transcript.append(recovered);
+      }
       renderUnlinkedChangeSets(changeSetProjection.unlinked, draftRunProjection.unlinked);
 
       if (shouldStick) {
@@ -4282,7 +4507,9 @@ export function getScript(): string {
       var detail = document.createElement('div');
       detail.textContent = run.blocker || (run.outputFailure ? (state.language === 'en' ? 'Continue regenerates smaller complete calls from the saved round. Completed tools will be reused.' : '继续任务将从已保存的模型轮起点生成较小的完整调用，并复用已完成的工具结果。') : t('runRecoveryNotice'));
       panel.append(detail);
-      if (run.canResume) {
+      var approvalStopped = state.approvalMode === 'delegate' && state.approvalProcessing?.status === 'stopped'
+        && state.approvalProcessing?.rootTaskId === message.userTask?.id;
+      if (run.canResume && !approvalStopped) {
         var button = document.createElement('button');
         button.type = 'button'; button.textContent = t('runContinue');
         button.dataset.runAction = 'continueTask'; button.dataset.messageId = message.id;
@@ -4297,7 +4524,7 @@ export function getScript(): string {
       var panel = document.createElement('details');
       panel.className = 'run-details';
       var summary = document.createElement('summary');
-      summary.textContent = t('runDetailsSummary', {
+      summary.textContent = t(message.userTask ? 'runDetailsSegmentSummary' : 'runDetailsSummary', {
         status: getRunStatusLabel(details.status),
         duration: formatDuration(details.durationMs)
       });
@@ -4305,6 +4532,16 @@ export function getScript(): string {
       body.className = 'run-details-body';
       var grid = document.createElement('div');
       grid.className = 'run-details-grid';
+      if (message.userTask) appendRunDetailRow(grid, t('runDetailsUserTask'), message.userTask.id);
+      if (message.runState) appendRunDetailRow(grid, t('runDetailsExecutionSegment'), message.runState.taskId);
+      var processing = state.approvalProcessing;
+      if (processing && message.runState && processing.runId === message.runState.taskId) {
+        appendRunDetailRow(grid, t('runDetailsApprovalOutcome'), (processing.targets || []).map(function(target) {
+          return [target.id + ' · ' + target.status, target.failureCode, target.reason,
+            target.replan?.reason && target.replan.reason !== target.reason ? t('approvalCommandReplanReason', { reason: target.replan.reason }) : '',
+            target.dependency ? formatApprovalDependency(target.dependency) : ''].filter(Boolean).join(' · ');
+        }).concat(processing.reason || []).join('\\n') || processing.status);
+      }
       appendRunDetailRow(grid, t('runDetailsModel'), details.modelId || '—');
       appendRunDetailRow(grid, t('runDetailsSource'), getRunSourceLabel(details.sourceId, details.modelId));
       appendRunDetailRow(grid, t('runDetailsProtocol'), details.protocol || details.provider || '—');
@@ -4455,7 +4692,10 @@ export function getScript(): string {
           var item = document.createElement('div');
           item.className = 'run-details-tool' + (tool.status === 'denied' ? ' run-details-denied' : tool.status === 'failed' ? ' run-details-error' : '');
           var title = document.createElement('div');
-          title.textContent = String(tool.name || 'tool') + ' · ' + getRunToolStatusLabel(tool.status) + ' · ' + formatDuration(tool.durationMs);
+          var toolName = String(tool.name || 'tool');
+          var toolLabel = toolName === 'keepseek_read_plugin_skill' ? t('pluginSkillReadTool') : toolName;
+          title.textContent = toolLabel + ' · ' + getRunToolStatusLabel(tool.status) + ' · ' + formatDuration(tool.durationMs);
+          title.title = toolName;
           item.append(title);
           if (tool.argumentsSummary) item.append(createRunDetailText(t('runDetailsArguments') + ': ' + tool.argumentsSummary));
           if (tool.resultSummary) item.append(createRunDetailText(t('runDetailsResult') + ': ' + tool.resultSummary));
@@ -4490,10 +4730,12 @@ export function getScript(): string {
       if (Array.isArray(details.approvalReviews) && details.approvalReviews.length) {
         var reviews = details.approvalReviews.map(function(review) {
           return [getApprovalActionLabel(review.actionKind), review.targetId, t('approvalSourceLabel') + ': ' + getApprovalSourceLabel(review),
-            review.reviewerModelId ? t('approvalReviewerModel') + ': ' + review.reviewerModelId : '',
-            t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision),
+            review.reviewerModelId ? t('approvalReviewerModel') + ': ' + (review.reviewerSourceId || '') + ' / ' + review.reviewerModelId : '',
+            t('approvalReviewDecision') + ': ' + getApprovalDecisionLabel(review.decision, review.approvalSource),
             t('approvalReviewRisk') + ': ' + getApprovalRiskLabel(review.risk),
             t('approvalReviewReason') + ': ' + review.rationale,
+            Array.isArray(review.affectedTargets) && review.affectedTargets.length ? t('approvalAffectedTargets') + ': ' + review.affectedTargets.join(', ') : '',
+            review.saferAlternative ? t('approvalSaferAlternative') + ': ' + review.saferAlternative : '',
             t('approvalReviewId') + ': ' + review.reviewId].filter(Boolean).join(' · ');
         });
         body.append(createRunTextSection(t('runDetailsApprovalReviews'), reviews,
@@ -4564,6 +4806,9 @@ export function getScript(): string {
         source.activation || '',
         source.reason || '',
         source.uri || '',
+        source.scopeUri ? 'scope: ' + source.scopeUri : '',
+        Number.isSafeInteger(source.order) ? '#' + String(source.order + 1) : '',
+        source.contentHash ? 'sha256: ' + source.contentHash : '',
         String(Number(source.characterCount) || 0) + ' chars',
         String(Number(source.tokenEstimate) || 0) + ' tokens',
         source.scriptsPresent ? t('skillsScriptsPresent') : '',
@@ -4848,7 +5093,7 @@ export function getScript(): string {
     function renderInlineEditorContent(editor, value) {
       editor.innerHTML = '';
       var text = String(value || '');
-      var pattern = /\\[\\$([A-Za-z0-9_-]+)\\]\\(([^)\\n]+)\\)|<([^<>\\n]+)>|\\$([A-Za-z0-9_-]+)/g;
+      var pattern = /\\[\\$([A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?)\\]\\(([^)\\n]+)\\)|<([^<>\\n]+)>|\\$([A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)?)/g;
       var cursor = 0;
       var match;
 
@@ -4864,11 +5109,15 @@ export function getScript(): string {
           var skill = match[1]
             ? getSkillByMarkdownReferenceForView(match[1] || '', match[2] || '')
             : getSkillByMentionNameForView(match[4] || '');
-          if (!skill) {
+          if (!skill || (skill.plugin && !match[1])) {
             continue;
           }
           appendInlineEditorText(editor, text.slice(cursor, match.index));
-          editor.append(createInlineSkillLink(skill));
+          var link = createInlineSkillLink(skill);
+          if (skill.plugin) {
+            link.dataset.skillReferenceText = matchText;
+          }
+          editor.append(link);
           cursor = match.index + matchText.length;
           continue;
         }
@@ -4922,6 +5171,10 @@ export function getScript(): string {
       renderSkillReferenceContent(anchor, getSkillMentionNameForView(skill));
       anchor.dataset.skillId = skill.id;
       anchor.dataset.skillPath = getSkillPathForView(skill);
+      if (skill.plugin) {
+        anchor.dataset.skillReferenceText = '[' + getSkillPromptTextForView(skill) + '](' + getPluginSkillReferenceTarget(skill, true) + ')';
+        anchor.dataset.skillSelectionStamp = skill.plugin.selectionStamp || '';
+      }
       return anchor;
     }
 
@@ -5019,6 +5272,7 @@ export function getScript(): string {
       });
       var skillLinks = editor.querySelectorAll('a.rich-skill-link');
       skillLinks.forEach(function(link) {
+        if (link.dataset.skillReferenceText) { return; }
         var skillId = link.dataset.skillId || '';
         var skill = getSkillByIdForView(skillId);
         link.className = 'rich-skill-link';
@@ -5091,6 +5345,9 @@ export function getScript(): string {
     }
 
     function inlineSkillLinkToText(link) {
+      if (link.dataset.skillReferenceText) {
+        return link.dataset.skillReferenceText;
+      }
       var skill = getSkillByIdForView(link.dataset.skillId || '');
       if (skill) {
         return getSkillMarkdownTextForView(skill);
@@ -6155,6 +6412,10 @@ export function getScript(): string {
             skill: skill,
             priority: 1
           };
+        }
+        if (label.charAt(0) === '$' && label.includes(':')) {
+          start = text.indexOf('[', start + 1);
+          continue;
         }
         var fileReference = parseCodexMarkdownFileLinkHref(href);
         if (fileReference) {

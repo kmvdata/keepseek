@@ -89,7 +89,6 @@ export const DEFAULT_VALIDATION_AUTHORIZATION_POLICY: ValidationAuthorizationPol
 export const DEFAULT_MAX_VALIDATION_RUNS = 3;
 export const DEFAULT_MAX_REPAIR_ITERATIONS = 2;
 export const DEFAULT_VALIDATION_TIMEOUT_MS = 120_000;
-export const DEFAULT_PROJECT_INSTRUCTIONS_CONTEXT_BUDGET_TOKENS = 4_000;
 export const DEFAULT_SKILL_CONTEXT_BUDGET_CHARS = 72_000;
 export const DEFAULT_MAX_IMPLICIT_SKILLS = 3;
 export const DEFAULT_BACKGROUND_MAX_ROUNDS = 5;
@@ -390,12 +389,6 @@ export function getConfiguredDraftRunMaxTranscriptBytes(): number {
   return normalizeIntegerInRange(configured, 4_096, 1_048_576, DEFAULT_DRAFT_RUN_MAX_TRANSCRIPT_BYTES);
 }
 
-export function getConfiguredProjectInstructionsContextBudgetTokens(): number {
-  const configured = vscode.workspace
-    .getConfiguration('keepseek')
-    .get<number>('projectInstructions.contextBudgetTokens', DEFAULT_PROJECT_INSTRUCTIONS_CONTEXT_BUDGET_TOKENS);
-  return normalizeIntegerInRange(configured, 0, 32_000, DEFAULT_PROJECT_INSTRUCTIONS_CONTEXT_BUDGET_TOKENS);
-}
 
 export function getConfiguredSkillContextBudgetChars(): number {
   const configured = vscode.workspace
@@ -729,4 +722,18 @@ function normalizeOptionalNonNegativeNumber(
 function normalizeNonNegativeNumber(value: unknown, fallback: number): number {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
+/** User settings only. Project settings must not select a review destination. */
+export function getAutoApprovalReviewerSetting(): Pick<import('../agent/subagents/types').SubagentModelSetting, 'mode' | 'sourceId' | 'modelId'> {
+  const setting = vscode.workspace.getConfiguration('keepseek')
+    .inspect?.<{ mode?: unknown; sourceId?: unknown; modelId?: unknown }>('autoApprovalReviewer')?.globalValue;
+  if (setting !== undefined && (!setting || (setting.mode !== 'follow-main' && setting.mode !== 'fixed'))) {
+    throw new Error('Invalid approval model settings. / 审批模型 配置无效。');
+  }
+  return {
+    mode: setting?.mode === 'fixed' ? 'fixed' : 'follow-main',
+    sourceId: typeof setting?.sourceId === 'string' ? setting.sourceId.trim() : undefined,
+    modelId: typeof setting?.modelId === 'string' ? setting.modelId.trim() : undefined
+  };
 }

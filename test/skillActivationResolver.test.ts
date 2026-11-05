@@ -4,9 +4,10 @@ import * as vscode from 'vscode';
 import type { ChatSession } from '../src/shared/types';
 import { SkillActivationResolver } from '../src/skills/skillActivationResolver';
 import type { SkillDiscovery } from '../src/skills/skillDiscovery';
-import type { SkillLoader } from '../src/skills/skillLoader';
+import { SkillLoader } from '../src/skills/skillLoader';
 import { SkillStore } from '../src/skills/skillStore';
 import { toActivatedSkill, type SkillManifest } from '../src/skills/skillTypes';
+import { CODEX_PLUGIN_SKILLS_UNAVAILABLE } from '../src/skills/codexPluginSupport';
 
 test('explicit Skill wins over an implicit Skill with the same normalized name', () => {
   const explicit = manifest('global-review', 'review-flow', 'agentsUser', true);
@@ -21,7 +22,7 @@ test('explicit Skill wins over an implicit Skill with the same normalized name',
 
   assert.deepEqual(result.activated.map((item) => item.manifest.id), [explicit.id]);
   assert.equal(result.activated[0]?.activation.source, 'explicit');
-  assert.equal(result.skipped.find((item) => item.id === workspaceImplicit.id)?.reason, 'duplicate_skill');
+  assert.equal(result.skipped.find((item) => item.id === workspaceImplicit.id)?.reason, 'ambiguous_name');
 });
 
 test('allowImplicit false never auto-activates even when the request matches', () => {
@@ -74,7 +75,7 @@ test('activation order is explicit, session, workspace-default, then implicit', 
   ]);
 });
 
-test('workspace duplicate wins over a global duplicate for equal automatic activation', () => {
+test('same-name automatic matches require explicit source selection', () => {
   const global = manifest('global-format', 'format-flow', 'agentsUser', true);
   const workspace = manifest('workspace-format', 'format-flow', 'agentsWorkspace', true);
   const result = new SkillActivationResolver().resolve({
@@ -84,8 +85,8 @@ test('workspace duplicate wins over a global duplicate for equal automatic activ
     maxImplicitSkills: 3
   });
 
-  assert.deepEqual(result.activated.map((item) => item.manifest.id), [workspace.id]);
-  assert.equal(result.skipped.find((item) => item.id === global.id)?.reason, 'duplicate_skill');
+  assert.deepEqual(result.activated.map((item) => item.manifest.id), []);
+  assert.equal(result.skipped.find((item) => item.id === global.id)?.reason, 'ambiguous_name');
 });
 
 test('workspace-default personal Skill persists and activates in a new session', async () => {
@@ -118,27 +119,46 @@ test('workspace-default personal Skill persists and activates in a new session',
   assert.deepEqual(otherWorkspaceStore.getWorkspaceDefaultSkillIds(), []);
 });
 
-test('persisted allowImplicit override participates in automatic activation', async () => {
-  const auto = manifest('auto-toggle', 'auto-toggle', 'agentsUser', false);
-  const memento = new MemoryMemento();
-  const discovery = { discover: async () => [auto] } as SkillDiscovery;
+test('stale plugin catalog entries cannot be listed, selected, previewed, or inherited while standalone Skills still activate', async () => {
+  const ordinary = manifest('ordinary', 'ordinary-flow', 'agentsUser', false);
+  const plugin: SkillManifest = {
+    ...manifest('codexPlugin:stale', 'index', 'codexPlugin', false),
+    pluginQualifiedName: 'stale:index',
+    pluginInstallation: {
+      id: 'stale@fixture', name: 'stale', version: '1', marketplace: 'fixture', source: 'local',
+      rootPath: '/missing-plugin', realRootPath: '/missing-plugin', skillsPath: '/missing-plugin/skills',
+      codexHomePath: '/missing-codex', manifestHash: 'a'.repeat(64), installationHash: 'b'.repeat(64)
+    }
+  };
+  let pluginLoads = 0;
   const loader = {
-    loadSkill: async (item: SkillManifest) => toActivatedSkill(item, '# Auto toggle')
-  } as SkillLoader;
-  const store = new SkillStore(memento, discovery, loader, new SkillActivationResolver(), () => 'workspace-one');
+    loadSkill: async (item: SkillManifest) => toActivatedSkill(item, 'STANDALONE_WORKFLOW'),
+    loadPluginSkill: async () => { pluginLoads++; throw new Error('Plugin loader must not be reached'); }
+  } as unknown as SkillLoader;
+  const discovery = { discover: async () => [ordinary, plugin] } as SkillDiscovery;
+  const store = new SkillStore(new MemoryMemento(), discovery, loader, new SkillActivationResolver(), () => 'workspace-one');
   await store.refresh();
-
-  await store.setSkillAllowImplicit(auto.id, true);
-  const reloaded = new SkillStore(memento, discovery, loader, new SkillActivationResolver(), () => 'workspace-one');
-  await reloaded.refresh();
-  const enabled = await reloaded.resolveAndLoadSkills({ session: session('implicit-on'), prompt: 'Use auto-toggle.' });
-  assert.equal(enabled.skills[0]?.activation?.source, 'implicit');
-
-  await reloaded.setSkillAllowImplicit(auto.id, false);
-  const disabled = await reloaded.resolveAndLoadSkills({ session: session('implicit-off'), prompt: 'Use auto-toggle.' });
-  assert.deepEqual(disabled.skills, []);
-  assert.ok(disabled.activation?.skipped.some((item) => item.reason === 'allow_implicit_false'));
+  const chat = session('plugin-history-session');
+  chat.activeSkillIds = [plugin.id];
+  assert.deepEqual(store.getStateView(chat).items.map(item => item.id), [ordinary.id]);
+  assert.deepEqual(store.getStateView(chat).activeSkillIds, []);
+  assert.deepEqual(store.getManifests().map(item => item.id), [ordinary.id]);
+  assert.equal(store.getManifest(plugin.id), undefined);
+  assert.equal(await store.useSkill(chat, plugin.id), false);
+  assert.equal(await store.setSkillWorkspaceDefault(plugin.id, true), false);
+  await assert.rejects(store.loadPluginEntry(plugin), error => error instanceof Error && error.message === CODEX_PLUGIN_SKILLS_UNAVAILABLE);
+  const result = await store.resolveAndLoadSkills({ session: chat, prompt: 'Use the standalone workflow.', explicitSkillIds: [ordinary.id, plugin.id] });
+  assert.deepEqual(result.skills.map(item => item.id), [ordinary.id]);
+  assert.equal(result.skills[0].content, 'STANDALONE_WORKFLOW');
+  await assert.rejects(store.resolveAndLoadSkills({ session: chat, prompt: 'Continue.',
+    inheritedPluginSkills: [toActivatedSkill(plugin, 'OLD_PLUGIN_BODY')] }),
+  error => error instanceof Error && error.message === CODEX_PLUGIN_SKILLS_UNAVAILABLE);
+  assert.equal(pluginLoads, 0);
+  await assert.rejects(new SkillLoader().loadPluginSkill(plugin, [plugin], {
+    isTrusted: true, availableTools: [], routingAvailable: false, validateInstallation: async () => true
+  }), error => error instanceof Error && error.message === CODEX_PLUGIN_SKILLS_UNAVAILABLE);
 });
+
 
 test('untrusted workspaces never auto-enable workspace Skills', () => {
   const workspaceSkill = manifest('unsafe-workspace', 'unsafe-flow', 'agentsWorkspace', true);
@@ -184,7 +204,6 @@ function manifest(id: string, name: string, source: SkillManifest['source'], all
     skillUri: vscode.Uri.joinPath(rootUri, 'SKILL.md'),
     enabled: true,
     allowImplicit,
-    userInvocable: true,
     hasReferences: false,
     hasAssets: false,
     hasScripts: false
@@ -221,6 +240,14 @@ test('frozen implicitSkillIds activate regardless of the current prompt keywords
   assert.equal(result.activated[0]?.activation.source, 'implicit');
   assert.match(result.activated[0]?.activation.reason ?? '', /Frozen/u);
   assert.equal(result.skipped.find((item) => item.id === other.id)?.reason, 'not_matched');
+});
+
+test('same-name skills can both be explicitly selected by identity without silent precedence replacement', () => {
+  const first = manifest('project-name', 'same-name', 'agentsWorkspace', true);
+  const second = manifest('user-name', 'same-name', 'agentsUser', true);
+  const result = new SkillActivationResolver().resolve({ manifests: [first, second], prompt: 'same-name',
+    explicitSkillIds: [first.id, second.id], workspaceTrusted: true, maxImplicitSkills: 3 });
+  assert.deepEqual(new Set(result.activated.map(item => item.manifest.id)), new Set([first.id, second.id]));
 });
 
 test('frozen implicit activation still respects allowImplicit false', () => {

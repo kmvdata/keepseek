@@ -28,6 +28,7 @@ import {
   LIST_WORKSPACE_FILES_TOOL_NAME,
   READ_WORKSPACE_DIAGNOSTICS_TOOL_NAME,
   READ_EVIDENCE_TOOL_NAME,
+  READ_PLUGIN_SKILL_TOOL_NAME,
   READ_WORKSPACE_FILE_RANGE_TOOL_NAME,
   READ_WORKSPACE_FILE_TOOL_NAME,
   READ_SUBAGENT_RESULT_TOOL_NAME,
@@ -61,6 +62,7 @@ const LOW_RISK_TOOLS = new Map<string, AuthorizedToolScope>([
   // same low-risk class as other local read-only retrieval tools so a v8
   // schema can execute the infrastructure tool it exposes.
   [READ_EVIDENCE_TOOL_NAME, 'workspace_read'],
+  [READ_PLUGIN_SKILL_TOOL_NAME, 'workspace_read'],
   [LIST_WORKSPACE_FILES_TOOL_NAME, 'workspace_read'],
   [LIST_WORKSPACE_DIRECTORY_TOOL_NAME, 'workspace_read'],
   [SEARCH_WORKSPACE_TOOL_NAME, 'workspace_read'],
@@ -111,6 +113,11 @@ export class ToolAuthorizationService implements ToolAuthorizationAdapter {
     const metadata = getToolAuthorizationMetadata(input.toolName, input.args);
     if (metadata.riskLevel === 'low') {
       return createDecision(input.toolName, metadata, true, 'low_risk', false);
+    }
+
+    if (input.policy.approvalMode === 'delegate' && !vscode.workspace.isTrusted) {
+      return createDecision(input.toolName, metadata, false, 'user_denied', false,
+        input.language === 'en' ? 'The workspace is not trusted. Nothing executed.' : '工作区不受信任，尚未执行。');
     }
 
     if (metadata.riskLevel === 'high') {
@@ -272,7 +279,7 @@ export function getToolAuthorizationMetadata(
 export function createAuthorizationDeniedToolResult(decision: ToolAuthorizationDecision): string {
   return JSON.stringify({
     ok: false,
-    errorType: 'authorization_denied',
+    errorType: decision.failureCode ?? 'authorization_denied',
     authorization: decision,
     error: decision.reason ?? 'Tool authorization was denied.'
   });

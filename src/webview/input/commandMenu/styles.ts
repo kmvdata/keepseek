@@ -543,10 +543,15 @@ export const commandMenuStylesFragment: WebviewFragment = {
     }
 
     .command-skill-description,
-    .command-skill-meta {
+    .command-skill-meta,
+    .command-plugin-capability {
       color: var(--vscode-descriptionForeground);
       font-size: 11px;
       line-height: 1.25;
+    }
+
+    .command-plugin-capability {
+      overflow-wrap: anywhere;
     }
 
     .command-skill-checkbox {
@@ -560,29 +565,6 @@ export const commandMenuStylesFragment: WebviewFragment = {
 
     .command-skill-checkbox:disabled {
       cursor: default;
-    }
-
-    .command-skill-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
-    }
-
-    .command-skill-action {
-      min-height: 22px;
-      padding: 2px 6px;
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 4px;
-      background: transparent;
-      color: var(--vscode-descriptionForeground);
-      font-size: 11px;
-    }
-
-    .command-skill-action:hover:not(:disabled),
-    .command-skill-action:focus-visible:not(:disabled) {
-      color: var(--vscode-foreground);
-      background: var(--vscode-toolbar-hoverBackground);
-      outline: none;
     }
 
     .command-model-option {

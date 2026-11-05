@@ -59,8 +59,22 @@ export function normalizeExecutionMode(value: unknown): ExecutionMode {
   return value === 'plan' ? 'plan' : 'normal';
 }
 
-export function getPlanWorkflowTail(mode: ExecutionMode): string {
-  return mode === 'plan' ? PLAN_WORKFLOW_TAIL : '';
+export function getPlanWorkflowTail(mode: ExecutionMode, automatic = false): string {
+  if (mode !== 'plan') return '';
+  return automatic ? PLAN_WORKFLOW_TAIL.split('\n').slice(0, -1).join('\n') : PLAN_WORKFLOW_TAIL;
+}
+
+/** An explicit execution request can leave the plan-only phase. Ambiguous
+ * requests stay read-only while the Plan option is selected. */
+export function requestsPlanExecution(prompt: string): boolean {
+  if (isExplicitPlanOnly(prompt)
+    || /\b(?:(?:do not|don't) (?:implement|execute|change|edit)|wait for (?:my |user )?(?:confirmation|approval)|(?:build|deliver) (?:a|the) (?:implementation )?plan)\b|(?:不要|无需|先不|暂不|禁止).{0,5}(?:修改|实施|执行|开发|改代码)|等我.{0,8}(?:确认|批准)/iu.test(prompt)) return false;
+  return /(?:^|[.!?。；;]\s*|\b(?:then|and)\s+)(?:please\s+)?(?:implement|execute|fix|apply|build|deliver|modify)\b/iu.test(prompt)
+    || /(?:^|[。；，！\n]|(?:请|然后|并|持续)(?:直接|继续|完成)?)(?:实施|执行|修复|开发|修改|交付|改进)/u.test(prompt);
+}
+
+export function isExplicitPlanOnly(prompt: string): boolean {
+  return /\b(?:plan only|only (?:give|provide|write).{0,30}plan)\b|仅(?:做|给|需|提供).{0,6}(?:计划|方案)|只(?:做|给|需|要|提供).{0,8}(?:计划|方案)/iu.test(prompt);
 }
 
 export function hashPlanContent(content: string): string {

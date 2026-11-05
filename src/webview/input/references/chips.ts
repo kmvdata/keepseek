@@ -17,6 +17,11 @@ export const referenceChipClickBindingFragment: WebviewFragment = {
           event.preventDefault();
           event.stopPropagation();
           if (event.detail > 1) { return; }
+          if (skillLink.dataset.skillReferenceText
+            && !isPluginSkillLinkCurrent(skillLink, getSkillById(skillLink.dataset.skillId))) {
+            setComposerStatus(t('pluginSkillStale'));
+            return;
+          }
           vscode.postMessage({
             type: 'openSkill',
             skillId: skillLink.dataset.skillId || ''

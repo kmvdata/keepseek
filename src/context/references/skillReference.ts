@@ -1,13 +1,95 @@
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as vscode from 'vscode';
 import { normalizeKeepseekLanguage, type KeepseekLanguage } from '../../shared/i18n';
 import { getMarkdownFence } from '../../shared/markdown';
 import { SkillLoader } from '../../skills/skillLoader';
 import { SKILL_FILE_NAME, type SkillManifest } from '../../skills/skillTypes';
+import { CODEX_PLUGIN_SKILLS_UNAVAILABLE, isCodexPluginSkillsEnabled } from '../../skills/codexPluginSupport';
 import { resolveFileReferenceUri } from './fileReference';
 import { hasUnsafeReferenceTargetCharacters, isInsideMarkdownFence } from './referenceSyntax';
 
 const SKILL_MARKDOWN_LINK_PATTERN = /\[([^\]\n]+)\]\(([^)\n]+)\)/gu;
+const QUALIFIED_PLUGIN_NAME = /^[a-z\d][a-z\d_-]*:[a-z\d][a-z\d_-]*$/iu;
+const PLUGIN_MENTION = /(?<![\p{L}\p{N}_$\\])\$([a-z\d][a-z\d_-]*:[a-z\d][a-z\d_-]*)(?![\p{L}\p{N}_:/-])/giu;
+const MAX_PLUGIN_SKILLS_PER_TASK = 4;
+
+/** Resolve only references typed by the user, before file/reference expansion. */
+export function resolvePluginSkillReferences(prompt: string, manifests: readonly SkillManifest[]): {
+  ids: string[];
+  failures: Array<{ id: string; name: string; error: string }>;
+} {
+  const ids = new Set<string>();
+  const failures = new Map<string, { id: string; name: string; error: string }>();
+  const links: Array<{ start: number; end: number }> = [];
+  const ignored = Array.from(prompt.matchAll(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/gu),
+    match => ({ start: match.index, end: match.index + match[0].length }));
+  const isExample = (start: number) => isInsideMarkdownFence(prompt, start)
+    || ignored.some(span => start >= span.start && start < span.end)
+    || /^\s*(?:>| {4}|\t)/u.test(prompt.slice(prompt.lastIndexOf('\n', start - 1) + 1, start));
+  const resolve = (name: string, target?: string): void => {
+    if (!isCodexPluginSkillsEnabled()) {
+      const id = `${name}\0${target ?? ''}`;
+      failures.set(id, { id, name: `$${name}`, error: CODEX_PLUGIN_SKILLS_UNAVAILABLE });
+      return;
+    }
+    const candidates = manifests.filter(manifest => manifest.pluginQualifiedName === name);
+    const link = target === undefined ? undefined : parsePluginLinkTarget(target);
+    const matches = target === undefined ? candidates
+      : link ? candidates.filter(manifest => {
+        if (link.stamp && link.stamp !== manifest.pluginSelectionStamp) return false;
+        const actual = getSkillUriKey(manifest.skillUri);
+        const requested = path.resolve(link.path);
+        const install = manifest.pluginInstallation;
+        return actual === requested || Boolean(install
+          && path.join(install.rootPath, path.relative(install.realRootPath, actual)) === requested);
+      }) : [];
+    if (matches.length === 1) {
+      ids.add(matches[0].id);
+    } else {
+      const id = `${name}\0${target ?? ''}`;
+      failures.set(id, { id, name: `$${name}`, error: matches.length > 1
+        ? 'Ambiguous installed Skill. Choose a source in Skills / 有多个同名插件 Skill，请在 Skills 菜单选择来源'
+        : target !== undefined
+          ? 'Link does not match the current installed Skill. Refresh and select it again / 链接与当前安装不符，请刷新后重新选择'
+          : 'Installed Skill unavailable. Check Skills diagnostics / 已安装 Skill 不可用，请查看 Skills 诊断' });
+    }
+  };
+  for (const match of prompt.matchAll(SKILL_MARKDOWN_LINK_PATTERN)) {
+    const label = match[1].trim();
+    if (!label.startsWith('$') || !QUALIFIED_PLUGIN_NAME.test(label.slice(1))) continue;
+    links.push({ start: match.index, end: match.index + match[0].length });
+    if (!isExample(match.index) && prompt[match.index - 1] !== '\\' && prompt[match.index - 1] !== '!') {
+      resolve(label.slice(1), match[2].trim());
+    }
+  }
+  for (const match of prompt.matchAll(PLUGIN_MENTION)) {
+    if (isExample(match.index) || links.some(link => match.index >= link.start && match.index < link.end)
+      || prompt[match.index - 1] === '[') continue;
+    resolve(match[1]);
+  }
+  if (ids.size > MAX_PLUGIN_SKILLS_PER_TASK) {
+    failures.set('plugin-skill-limit', { id: 'plugin-skill-limit', name: 'Codex plugin Skills',
+      error: `Select up to ${MAX_PLUGIN_SKILLS_PER_TASK} per task / 每个任务最多选择 ${MAX_PLUGIN_SKILLS_PER_TASK} 个` });
+    ids.clear();
+  }
+  return { ids: [...ids], failures: [...failures.values()] };
+}
+
+function parsePluginLinkTarget(target: string): { path: string; stamp?: string } | undefined {
+  const cleaned = target.replace(/^<(.+)>$/u, '$1');
+  if (hasUnsafeReferenceTargetCharacters(cleaned)) return;
+  if (path.isAbsolute(cleaned)) return { path: cleaned };
+  if (!/^file:/iu.test(cleaned) || cleaned.includes('?')) return;
+  try {
+    const url = new URL(cleaned);
+    const stamp = /^#keepseek-plugin-([a-f0-9]{64})$/u.exec(url.hash)?.[1];
+    if (url.hostname || (cleaned.includes('#') && !stamp)) return;
+    return { path: fileURLToPath(url), stamp };
+  } catch {
+    return;
+  }
+}
 
 export interface ExpandSkillReferencesOptions {
   skillManifests?: readonly SkillManifest[];
@@ -87,7 +169,7 @@ function findPromptSkillReferences(prompt: string, manifests: readonly SkillMani
     }
 
     const manifest = allowed.get(getSkillUriKey(uri));
-    if (!manifest || !manifest.enabled || !manifest.userInvocable || manifest.unavailableReason) {
+    if (!manifest || !manifest.enabled || manifest.unavailableReason) {
       continue;
     }
 
@@ -107,6 +189,7 @@ function findPromptSkillReferences(prompt: string, manifests: readonly SkillMani
 function createAllowedSkillMap(manifests: readonly SkillManifest[]): Map<string, SkillManifest> {
   const allowed = new Map<string, SkillManifest>();
   for (const manifest of manifests) {
+    if (manifest.pluginInstallation) continue;
     if (getUriBasename(manifest.skillUri) !== SKILL_FILE_NAME) {
       continue;
     }

@@ -403,6 +403,13 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
         pathLabel.title = pathLabel.textContent;
 
         body.append(name, pathLabel);
+        if (skill.plugin) {
+          var capability = document.createElement('span');
+          capability.className = 'reference-menu-item-path';
+          capability.textContent = formatPluginSkillCapability(skill.plugin).join(' · ');
+          capability.title = capability.textContent;
+          body.append(capability);
+        }
         option.append(icon, body);
         return option;
       }
@@ -623,7 +630,16 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
 
       function insertSkillFromReferenceMenu(skill) {
         if (!skill || !skill.id) { return; }
-        if (!skill.enabled || !skill.userInvocable || skill.unavailableReason) {
+        if (!skill.enabled || skill.unavailableReason) {
+          return;
+        }
+        if (skill.plugin) {
+          var range = activeMentionRange && isRangeInsidePrompt(activeMentionRange)
+            ? activeMentionRange.cloneRange()
+            : getPromptInsertionRange();
+          insertSkillChip(skill, range);
+          closeReferenceMenu(true);
+          setComposerStatus(t('pluginSkillInserted', { name: getSkillMentionName(skill) }));
           return;
         }
         consumeActiveMentionRangeForPicker();

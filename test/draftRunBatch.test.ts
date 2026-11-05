@@ -1,5 +1,5 @@
 import * as assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
+import { realpath, mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
@@ -10,7 +10,7 @@ import { DraftRunStore } from '../src/runs/draftRunStore';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import { getConfiguredDraftRunMaxTranscriptBytes } from '../src/shared/config';
-import { analyzeDraftRunEffects } from '../src/runs/commandRisk';
+import { analyzeDraftRunEffects } from '../src/approvals/authorization';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
 import { getScript } from '../src/webview/script';
@@ -208,7 +208,8 @@ test('whole snapshot requires trust and exact external cwd authorization, withou
     const external = path.join(f.root, 'external'); await mkdir(external);
     f.store.addProposals({ proposals: [f.proposal('A'), f.proposal('B', { cwdUri: vscode.Uri.file(external).toString(), cwdLabel: external, externalCwd: true })], sessionId: 's', agentRunId: 'r' });
     const id = f.accept(); if (mode === 'trust') vscode.workspace.isTrusted = false;
-    const executing = f.batch.execute(id, { authorizedUris: new Set(mode === 'authorized' ? [vscode.Uri.file(external).toString()] : []), assertContext: () => {}, onCurrent: () => {} });
+    const externalScript = vscode.Uri.file(path.join(await realpath(external), 'B')).toString();
+    const executing = f.batch.execute(id, { authorizedUris: new Set(mode === 'authorized' ? [vscode.Uri.file(external).toString(), externalScript] : []), assertContext: () => {}, onCurrent: () => {} });
     if (mode === 'authorized') { await f.executor.started(1); f.executor.finish('A'); await f.executor.started(2); f.executor.finish('B'); }
     await executing;
     assert.equal(f.executor.calls.length, mode === 'authorized' ? 2 : 0);
@@ -260,18 +261,21 @@ type Host = {
   clearSessionTransientState(): void;
 };
 function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
-  const session = { id: 's', approvalMode: 'ask', messages: [] as ChatMessage[] };
+  const session = { id: 's', approvalMode: 'ask', messages: [
+    { id: 'u', role: 'user', content: 'task', createdAt: '' },
+    { id: 'a', role: 'assistant', content: '', createdAt: '', runCheckpointArchive: { version: 1, objectHash: 'a'.repeat(64), summary: { taskId: 'r', status: 'completed', usedMs: 0, maxExecutionMs: 0, limitSource: '', attempt: 1, modelRequests: 1, retries: 0, steps: 0, canResume: false } } }
+  ] as ChatMessage[] };
   const states = { pendingEdits: false, background: false, sends: 0 };
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     draftRuns: f.store, draftRunBatches: f.batch, delegatedApprovals: new DelegatedApprovalQueue(),
     approvalDataReady: true,
     isBusy: false, isStartingRun: false, delegatedApprovalInFlight: false, draftRunAutoContinueInFlight: false,
     selectedSourceId: 'source', selectedModelId: 'model', language: 'en', agentSettings: {},
-    repairLoopsBySession: new Map(), authorizedExternalReferenceUris: new Set(),
+    repairLoopsBySession: new Map(), authorizedExternalReferenceUris: new Set(), authorizedExternalExecutionUris: new Set(),
     fileContext: { clear: () => {} },
     changeSets: { hasPendingForSession: () => states.pendingEdits },
     hasActiveBackgroundRun: () => states.background,
-    sessionStore: { activeSessionId: 's', getActiveSession: () => session },
+    sessionStore: { activeSessionId: 's', getActiveSession: () => session, persist: async () => {} },
     t: (key: string) => key,
     postState: () => {}, postToWebview: () => {}, setAgentActivity: () => {},
     sendPromptImpl: async () => { states.sends++; return {} as AgentResponse; }
@@ -354,18 +358,25 @@ class UiElement {
     this.parentElement = undefined;
   }
   contains(child: UiElement): boolean { return this === child || this.children.some((item) => item.contains(child)); }
-  addEventListener() {}
+  listeners = new Map<string, () => void>();
+  addEventListener(type: string, listener: () => void) { this.listeners.set(type, listener); }
+  click() { if (!this.disabled) this.listeners.get('click')?.(); }
+  querySelectorAll(selector: string): UiElement[] { return elements(this.children).filter(node => selector === 'button' && node.type === 'button'); }
   closest(selector: string): UiElement | null {
     if (selector === 'button[data-draft-run-id]' && this.type === 'button' && this.dataset.draftRunId) return this;
+    if (selector === 'button[data-edit-id], button[data-change-set-id]' && this.type === 'button'
+      && (this.dataset.editId || this.dataset.changeSetId)) return this;
     return this.parentElement?.closest(selector) ?? null;
   }
   setAttribute(key: string, value: string) { this.attributes[key] = value; }
 }
 function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: 'en' | 'zh-CN') {
   const source = getScript();
-  const names = ['createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
+  const names = ['appendAutomaticApprovalState', 'getApprovalTarget', 'isHeldDraftRunApproval', 'formatApprovalDependency',
+    'appendApprovalStateNote', 'appendApprovalResumeAction', 'createDraftRunCard', 'appendDraftRunBatchControls', 'appendDraftRunActions', 'createDraftRunActionButton',
     'isDraftRunBatchActive', 'getDraftRunBatchMembers', 'createDraftRunTimelineItem', 'renderDraftRunItems',
-    'captureDraftRunActionFocus', 'findDraftRunActionFocus', 'renderTranscript', 'handleDraftRunActionClick',
+    'captureDraftRunActionFocus', 'findDraftRunActionFocus', 'renderTranscript', 'handleDraftRunActionClick', 'handleChangeSetActionClick',
+    'createApprovalReviewSummary', 'getApprovalSourceLabel', 'getApprovalDecisionLabel', 'getApprovalRiskLabel',
     'getDraftRunTitle', 'appendDraftRunField', 'formatShellCommand', 'formatShellWord', 'getDraftRunStatusLabel', 'getDraftRunEffectLabel',
     'createChangeSetCard', 'createChangeSetFileRow', 'createEditActionButton', 'createEditOpenFileButton',
     'createChangeSetActionButton', 'getChangeSetStatusLabel', 'getChangeFileStatusLabel', 'isChangeSetActionable',
@@ -379,7 +390,8 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   const state = { draftRuns: f.store.toWebviewState('s'), draftRunBatchSnapshots: f.batch.snapshots('s'),
     draftRunBatch: f.batch.state, draftRunBatchHistory: f.store.toBatchDisplayHistory('s'), approvalMode: 'ask', isBusy: false, activeDraftRunId: '',
     startup: { sideEffectsReady: true },
-    authorizedExternalReferenceUris: [] as string[], messages: [{ id: 'assistant', role: 'assistant' }] as Array<{
+    approvalProcessing: undefined as import('../src/approvals/approvalProcessing').ApprovalProcessingState | undefined,
+    authorizedExternalReferenceUris: [] as string[], authorizedExternalExecutionUris: [] as string[], messages: [{ id: 'assistant', role: 'assistant' }] as Array<{
       id: string; role: string; isStreaming?: boolean; content?: string;
     }> };
   const unlinked = new UiElement();
@@ -388,6 +400,7 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   const messages: unknown[] = [];
   const context = { state, document: { createElement: () => new UiElement() }, Element: UiElement, HTMLElement: UiElement,
     pendingDraftRunBatchSnapshot: '', pendingDraftRunActions: new Set(), pendingDraftRunApprovals: new Set(), pendingChangeActions: new Map(),
+    changeActionRequestSequence: 0,
     formatDuration: String, createDraftEditActionIcon: () => new UiElement(),
     createApprovalSourceSummary: () => new UiElement(), getEditApprovalSourceLabel: String,
     unlinkedChangeSetList: unlinked, unlinkedChangeSetRegion: unlinkedRegion,
@@ -400,7 +413,8 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
       return (translations[key] ?? key).replace(/\{(\w+)\}/gu, (_, name) => String(values[name] ?? ''));
     }
   };
-  const api = new Script(functions + '\n({ createDraftRunCard, createChangeSetCard, renderUnlinkedChangeSets, buildDraftRunTimelineProjection, renderTranscript, captureDraftRunActionFocus, findDraftRunActionFocus, handleDraftRunActionClick });').runInNewContext(context) as {
+  const api = new Script(functions + '\n({ appendAutomaticApprovalState, createDraftRunCard, createChangeSetCard, renderUnlinkedChangeSets, buildDraftRunTimelineProjection, renderTranscript, captureDraftRunActionFocus, findDraftRunActionFocus, handleDraftRunActionClick, handleChangeSetActionClick });').runInNewContext(context) as {
+    appendAutomaticApprovalState(notices: UiElement, actions: UiElement, id: string, review?: unknown): void;
     createDraftRunCard(run: unknown): UiElement; createChangeSetCard(set: unknown): UiElement;
     renderUnlinkedChangeSets(sets: unknown[], runs: unknown[]): void;
     buildDraftRunTimelineProjection(): { byMessageId: Record<string, unknown[]>; unlinked: unknown[] };
@@ -408,6 +422,7 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
     captureDraftRunActionFocus(element: UiElement): Record<string, string>;
     findDraftRunActionFocus(buttons: UiElement[], descriptor: Record<string, string>): UiElement | undefined;
     handleDraftRunActionClick(event: { target: UiElement }): void;
+    handleChangeSetActionClick(event: { target: UiElement }): void;
   };
   const renderCurrentState = (edits: string[][] = []) => {
     const sets = edits.map((statuses, index) => ({ id: 'set-' + index, files: statuses.map((status, i) => ({ id: 'e-' + index + '-' + i, status, label: 'file' + i })) }));
@@ -425,10 +440,254 @@ function renderHarness(f: Awaited<ReturnType<typeof createFixture>>, language: '
   return { api, state, unlinked, transcript, context, messages, render, renderCurrentState };
 }
 function elements(cards: UiElement[]): UiElement[] { return cards.flatMap((card) => [card, ...elements(card.children)]); }
+
+test('legacy delegate cards explain processing, scope, hard failure and reviewer denial in both languages', async () => fixture(async f => {
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate'] as const) {
+    const ui = renderHarness(f, language); ui.state.approvalMode = mode;
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const renderState = (review?: unknown) => {
+      const notes = new UiElement(), actions = new UiElement();
+      ui.api.appendAutomaticApprovalState(notes, actions, 'A', review);
+      assert.equal(notes.childElementCount, 1);
+      assert.equal(notes.children[0].className, 'approval-state-note');
+      assert.ok(actions.children.every(n => n.type === 'button'));
+      return { note: notes.children[0], buttons: actions.children };
+    };
+    const waiting = renderState();
+    assert.equal(waiting.note.textContent, labels.approvalAutoInactive);
+    assert.equal(waiting.buttons.length, 0);
+    ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode,
+      status: 'processing', updatedAt: '', targets: [{ id: 'A', kind: 'command', status: 'pending' }] };
+    const processing = renderState();
+    assert.equal(processing.note.textContent, labels.approvalProcessingNow);
+    assert.equal(processing.buttons.length, 0);
+    ui.state.approvalProcessing.status = 'blocked';
+    ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'needs_authorization', reason: 'file:///external/result.txt' };
+    const external = renderState();
+    assert.equal(external.note.textContent, 'file:///external/result.txt');
+    assert.deepEqual(external.buttons, []);
+    ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'failed', reason: 'Dirty editor' };
+    const failure = renderState();
+    assert.equal(failure.note.textContent, 'Dirty editor');
+    assert.equal(failure.buttons.length, 0);
+    ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'denied', reason: 'Denied by reviewer' };
+    const denied = renderState({ decision: 'deny', rationale: 'Denied by reviewer' });
+    assert.equal(denied.note.textContent, 'Denied by reviewer');
+    assert.equal(denied.buttons.length, 0);
+    ui.state.approvalProcessing.targets[0].status = 'hard_blocked';
+    assert.equal(renderState({ decision: 'deny', approvalSource: 'local_policy' }).buttons.length, 0);
+  }
+}));
+
+test('current delegate cards resume V2 processing without granting scope, while V1 audit stays inert', async () => fixture(async f => {
+  f.add(['A']);
+  for (const language of ['en', 'zh-CN'] as const) {
+    const ui = renderHarness(f, language);
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    ui.state.approvalMode = 'delegate';
+    const processing: NonNullable<typeof ui.state.approvalProcessing> = {
+      version: 2, runId: 'r', rootTaskId: 'task', mode: 'delegate', status: 'blocked', canResume: true, updatedAt: '',
+      targets: [{ id: 'A', kind: 'command', status: 'needs_authorization', reason: 'Exact scope required' },
+        { id: 'edit-A', kind: 'edit', status: 'needs_authorization', reason: 'Exact scope required' }]
+    };
+    ui.state.approvalProcessing = processing;
+    const render = () => elements([
+      ui.api.createDraftRunCard(ui.state.draftRuns[0]),
+      ui.api.createChangeSetCard({ id: 'set', files: [{ id: 'edit-A', status: 'pending', label: 'file.ts' }] })
+    ]);
+    const resumes = () => render().filter(n => n.type === 'button' && n.textContent === labels.approvalResumeProcessing);
+    assert.equal(resumes().length, 2);
+    resumes().forEach(button => button.click());
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.splice(0))), [
+      { type: 'resumeApprovalProcessing' }, { type: 'resumeApprovalProcessing' }
+    ]);
+    ui.state.startup.sideEffectsReady = false;
+    assert.ok(resumes().every(button => button.disabled));
+    ui.state.startup.sideEffectsReady = true;
+    ui.state.isBusy = true;
+    assert.equal(resumes().length, 0);
+    ui.state.isBusy = false;
+    for (const target of processing.targets) target.status = 'denied';
+    assert.equal(resumes().length, 0, 'denial cannot expose a bypass');
+    for (const target of processing.targets) target.status = 'needs_authorization';
+    processing.version = 1;
+    for (const mode of ['delegate', 'model_review'] as const) {
+      processing.mode = mode;
+      ui.state.approvalMode = mode;
+      assert.equal(resumes().length, 0, 'legacy snapshots only explain past processing');
+      assert.equal(render().filter(n => n.className === 'approval-state-note').length, 2);
+    }
+  }
+}));
+
+test('Git draft cards show preflight diagnostics and never offer delegate restart recovery', async () => fixture(async f => {
+  f.add(['A', 'B']);
+  for (const language of ['en', 'zh-CN'] as const) {
+    const ui = renderHarness(f, language);
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const [status, commit] = ui.state.draftRuns;
+    const processing: NonNullable<typeof ui.state.approvalProcessing> = {
+      version: 1, runId: status.agentRunId, rootTaskId: 'task', mode: 'delegate', status: 'replanning', updatedAt: '',
+      reason: 'Batch status must not appear as another command’s diagnostic',
+      targets: [{ id: status.id, kind: 'command', status: 'needs_replan' }, { id: commit.id, kind: 'command', status: 'dependency_blocked' }]
+    };
+    const statusReason = 'Use a controlled read for the pager override.';
+    const commitReason = 'Arguments 7 and 8 conflict with -a. <script>Literal text</script>';
+    const diagnostic = (draft: typeof status, code: string, reason: string) => ({
+      code, reason, draftRunId: draft.id, specHash: draft.specHash, rootTaskId: 'task', executionSegmentId: draft.agentRunId,
+      phase: 'preflight', executed: false
+    });
+    const first = { ...status, status: 'needs_replan', replan: diagnostic(status, 'git_status_pager', statusReason) };
+    const second = { ...commit, status: 'cancelled', replan: diagnostic(commit, 'git_commit_invalid_argv', commitReason),
+      dependency: { targetId: status.id, label: 'git status', reason: statusReason } };
+    const render = (draft: unknown) => elements([ui.api.createDraftRunCard(draft)]);
+    const texts = (nodes: UiElement[]) => nodes.filter(node => node.className === 'approval-state-note').map(node => node.textContent);
+    ui.state.approvalProcessing = processing;
+    for (const mode of ['delegate', 'ask']) {
+      ui.state.approvalMode = mode;
+      const statusCard = render(first);
+      const commitCard = render(second);
+      assert.ok(statusCard.some(node => node.textContent === labels.draftRunTitleNeedsReplan));
+      assert.ok(commitCard.some(node => node.textContent === labels.draftRunTitleBlocked));
+      assert.deepEqual(texts(statusCard), [labels.approvalCommandReplanReason.replace('{reason}', statusReason)]);
+      assert.deepEqual(texts(commitCard), [labels.approvalCommandDependency.replace('{target}', `git status (${status.id})`) + ' · ' + statusReason,
+        labels.approvalCommandReplanReason.replace('{reason}', commitReason)]);
+      assert.ok(![...statusCard, ...commitCard].some(node => node.type === 'button'));
+    }
+    ui.state.approvalMode = 'delegate';
+    processing.status = 'blocked';
+    processing.canResume = true;
+    assert.equal(render(second).filter(node => node.type === 'button').length, 0);
+    const resume = render(first).filter(node => node.type === 'button');
+    assert.equal(resume.length, 0);
+    assert.equal(ui.messages.length, 0);
+    processing.canResume = false;
+    processing.targets[0].reason = labels.approvalReplanRepeated;
+    const stopped = render(first);
+    assert.ok(!stopped.some(node => node.type === 'button'));
+    assert.deepEqual(texts(stopped), [labels.approvalCommandReplanReason.replace('{reason}', statusReason), labels.approvalReplanRepeated]);
+    ui.state.approvalProcessing = undefined;
+    const waiting = render(status);
+    assert.ok(waiting.some(node => node.textContent === labels.draftRunTitleBlocked));
+    assert.ok(!waiting.some(node => node.type === 'button'));
+    ui.state.approvalMode = 'ask';
+    assert.equal(render(status).filter(node => node.dataset.draftRunAction === 'approveDraftRun').length, 2);
+    const noChanges = render({ ...commit, status: 'no_changes' });
+    assert.ok(noChanges.some(node => node.textContent === labels.draftRunTitleNoChanges));
+    assert.ok(!noChanges.some(node => node.type === 'button'));
+    const head = '0123456789012345678901234567890123456789';
+    const verified = render({ ...commit, status: 'done', gitCommitEvidence: { outcome: 'verified', head } });
+    assert.ok(verified.some(node => node.textContent === labels.draftRunVerifiedGitHead.replace('{head}', head.slice(0, 12)) && node.title === head));
+  }
+}));
+
 function bulk(cards: UiElement[]) {
   return elements(cards).filter((item) => item.dataset.draftRunAction === 'approveDraftRunBatch'
     || ['applyChangeSet', 'discardChangeSet', 'revertChangeSet'].includes(item.dataset.changeSetAction));
 }
+
+const longAuthorizationReason = '等待你授权精确操作范围：Command scope cannot be established statically; authorize this exact operation. / 无法静态确定命令范围，请确认这条精确操作。';
+
+test('command and file cards keep complete automatic notes outside button groups and preserve action payloads', async () => fixture(async f => {
+  f.add(['A']);
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate'] as const) {
+    const ui = renderHarness(f, language); ui.state.approvalMode = mode;
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const fileReason = 'file:///external/' + 'long-unbroken-path'.repeat(30) + '/<script>literal</script>.txt';
+    const set = { id: 'set', files: [{ id: 'edit-A', status: 'pending', label: 'file.ts', uri: 'file:///external/file.ts' }] };
+    ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode, status: 'blocked', updatedAt: '', targets: [
+      { id: 'A', kind: 'command', status: 'needs_authorization', reason: longAuthorizationReason },
+      { id: 'edit-A', kind: 'edit', status: 'needs_authorization', reason: fileReason }
+    ] };
+    const command = ui.api.createDraftRunCard(ui.state.draftRuns[0]);
+    const file = ui.api.createChangeSetCard(set);
+    for (const [card, reason, id, actionClass] of [
+      [command, longAuthorizationReason, 'A', 'draft-run-actions'],
+      [file, fileReason, 'edit-A', 'draft-chip-actions']
+    ] as const) {
+      const nodes = elements([card]);
+      const notes = nodes.filter(n => n.className === 'approval-state-note');
+      const actions = nodes.find(n => n.className === actionClass)!;
+      assert.equal(notes.length, 1);
+      assert.equal(notes[0].textContent, reason);
+      assert.equal(notes[0].childElementCount, 0, 'untrusted reasons stay literal text');
+      assert.equal(nodes.filter(n => n.textContent === reason).length, 1);
+      if (id === 'A') {
+        assert.equal(actions, undefined);
+        continue;
+      }
+      assert.equal(notes[0].parentElement, actions.parentElement, 'note occupies a sibling row');
+      assert.ok(!actions.contains(notes[0]));
+      assert.ok(actions.children.every(n => n.type === 'button'));
+      const siblings = actions.parentElement!.children;
+      assert.equal(siblings[siblings.indexOf(actions) - 1], notes[0], 'scope note is adjacent to its buttons');
+      const authorize = actions.children.find(n => n.textContent === labels.approvalAuthorizeExact)!;
+      assert.equal(authorize, undefined);
+    }
+    const reject = elements([command]).find(n => n.dataset.draftRunAction === 'rejectDraftRun')!;
+    assert.equal(reject, undefined);
+    const preview = elements([file]).find(n => n.dataset.editAction === 'openDraftDiff')!;
+    ui.api.handleChangeSetActionClick({ target: preview });
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'openDraftDiff', id: 'edit-A' });
+    const discard = elements([file]).find(n => n.dataset.editAction === 'discardDraftEdit')!;
+    ui.api.handleChangeSetActionClick({ target: discard });
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'discardDraftEdit', id: 'edit-A', requestId: 'change-action-1' });
+  }
+}));
+
+test('automatic notes and buttons rerender without stale scope or duplicate actions, respecting busy/startup/denial', async () => fixture(async f => {
+  f.add(['A']);
+  for (const language of ['en', 'zh-CN'] as const) for (const mode of ['delegate'] as const) {
+    const ui = renderHarness(f, language); ui.state.approvalMode = mode;
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const set = { id: 'set', files: [{ id: 'edit-A', status: 'pending', label: 'file.ts' }] };
+    const render = () => {
+      ui.api.renderUnlinkedChangeSets([set], [{ draftRun: ui.state.draftRuns[0] }]);
+      return elements(ui.unlinked.children);
+    };
+    for (const status of ['needs_authorization', 'failed', 'pending', 'denied'] as const) {
+      const reason = status === 'needs_authorization' ? longAuthorizationReason : status + ' reason';
+      ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode,
+        status: status === 'pending' ? 'processing' : 'blocked', canResume: false, updatedAt: '', targets: [
+          { id: 'A', kind: 'command', status, reason }, { id: 'edit-A', kind: 'edit', status, reason }
+        ] };
+      const nodes = render();
+      assert.equal(nodes.filter(n => n.className === 'approval-state-note').length, 2);
+      assert.equal(nodes.filter(n => n.textContent === reason).length, 2);
+      if (status !== 'needs_authorization') assert.ok(!nodes.some(n => n.textContent === longAuthorizationReason));
+      const resume = nodes.filter(n => [labels.approvalAuthorizeExact, labels.approvalResumeProcessing].includes(n.textContent));
+      assert.equal(resume.length, 0, 'legacy snapshots provide explanation only');
+      assert.equal(ui.messages.length, 0, 'restored legacy snapshots never request execution');
+    }
+    ui.state.approvalProcessing = undefined;
+    ui.state.startup.sideEffectsReady = false;
+    let nodes = render();
+    assert.ok(nodes.filter(n => n.type === 'button' && n.dataset.editAction !== 'openDraftDiff').every(n => n.disabled));
+    ui.state.startup.sideEffectsReady = true; ui.state.isBusy = true;
+    nodes = render();
+    assert.ok(!nodes.some(n => n.textContent === labels.approvalResumeProcessing));
+    assert.ok(nodes.filter(n => n.dataset.editAction === 'discardDraftEdit' || n.dataset.draftRunAction === 'rejectDraftRun').every(n => n.disabled));
+    ui.state.isBusy = false;
+    const review = { decision: 'deny', rationale: 'Reviewer denied this operation' };
+    const deniedCards = [ui.api.createDraftRunCard({ ...ui.state.draftRuns[0], approvalReview: review }),
+      ui.api.createChangeSetCard({ ...set, files: [{ ...set.files[0], approvalReview: review }] })];
+    assert.equal(elements(deniedCards).filter(n => n.className === 'approval-state-note' && n.textContent === review.rationale).length, 2);
+    assert.ok(!elements(deniedCards).some(n => n.textContent === labels.approvalResumeProcessing), 'review denial alone cannot expose a bypass');
+    ui.state.approvalMode = 'ask'; nodes = render();
+    assert.ok(!nodes.some(n => n.className === 'approval-state-note'));
+    assert.equal(nodes.filter(n => n.dataset.draftRunAction === 'approveDraftRun').length, 2);
+    assert.equal(nodes.filter(n => n.dataset.editAction === 'applyDraftEdit').length, 1);
+    ui.state.approvalMode = mode;
+    for (const status of ['running', 'approved', 'done', 'failed', 'cancelled', 'rejected']) {
+      const card = ui.api.createDraftRunCard({ ...ui.state.draftRuns[0], status, startedAt: 'now', output: 'preserved output', error: 'preserved error' });
+      assert.ok(!elements([card]).some(n => n.className === 'approval-state-note'));
+      assert.ok(elements([card]).some(n => n.className === 'draft-run-output' && n.textContent.includes('preserved output') && n.textContent.includes('preserved error')));
+    }
+    for (const status of ['applied', 'discarded', 'superseded', 'reverted']) {
+      assert.ok(!elements([ui.api.createChangeSetCard({ ...set, files: [{ ...set.files[0], status }] })]).some(n => n.className === 'approval-state-note'));
+    }
+  }
+}));
 function runCards(nodes: UiElement[]) {
   return elements(nodes).filter((item) => item.classList.contains('draft-run-card'));
 }
@@ -741,7 +1000,7 @@ test('running batch with one remaining command keeps accessible progress and sto
   assert.ok(elements(cards).some((item) => item.dataset.draftRunAction === 'cancelDraftRunBatch' && !item.disabled));
   f.batch.cancel(); await executing;
   f.add(['C', 'D'], 's', 'new-batch');
-  for (const mode of ['delegate', 'model_review']) { ui.state.approvalMode = mode; assert.equal(bulk(ui.render().cards).length, 0); }
+  for (const mode of ['delegate']) { ui.state.approvalMode = mode; assert.equal(bulk(ui.render().cards).length, 0); }
 }));
 
 test('batch stop during approval persistence returns the never-started command to pending', async () => fixture(async (f) => {
@@ -768,7 +1027,7 @@ test('a changed hash or revoked external authorization before B leaves B and C u
     const external = path.join(f.root, 'external'); await mkdir(external);
     const uri = vscode.Uri.file(external).toString();
     f.store.addProposals({ proposals: [f.proposal('A'), f.proposal('B', { externalCwd: true, cwdUri: uri }), f.proposal('C')], sessionId: 's', agentRunId: 'r' });
-    const authorizedUris = new Set([uri]);
+    const authorizedUris = new Set([uri, vscode.Uri.file(path.join(await realpath(external), 'B')).toString()]);
     const executing = f.batch.execute(f.accept(), { authorizedUris, assertContext: () => {}, onCurrent: () => {} });
     await f.executor.started(1);
     if (change === 'authorization') authorizedUris.clear();
@@ -824,7 +1083,7 @@ test('unauthorized cwd is identified beside the disabled batch button and author
     assert.equal(bulk(cards)[0].disabled, true);
     assert.ok(elements(cards).some((item) => item.textContent.includes(external) && item.className === 'draft-run-batch-hint'));
     assert.ok(elements(cards).some((item) => item.dataset.draftRunAction === 'authorizeDraftRunCwd' && !item.disabled));
-    ui.state.authorizedExternalReferenceUris.push(uri);
+    ui.state.authorizedExternalExecutionUris.push(uri);
     assert.equal(bulk(ui.render().cards)[0].disabled, false);
   }
 }));
@@ -862,4 +1121,24 @@ test('model refresh changing selection during batch handoff fails before restori
     draftRunBatch: { operationId: batch.operationId, signal: controller.signal }, strictModelSelection: true
   }), /draftRunBatchModelChanged/u);
   assert.equal(host.selectedModelId, 'different'); assert.equal(session.messages.length, 0);
+}));
+
+test('Approve for me exposes one host request without a modal or per-draft bypass buttons', async () => fixture(async f => {
+  f.add(['A']);
+  for (const language of ['en', 'zh-CN'] as const) {
+    const ui = renderHarness(f, language);
+    Object.assign(ui.state, { approvalMode: 'delegate', activeSessionId: 's',
+      manualToolApproval: { id: 'host-runtime-token', sessionId: 's', label: 'file:///external/' + '长中文目标'.repeat(60),
+        reason: '<script>untrusted evidence stays literal</script>' } });
+    const rendered = ui.render();
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const nodes = elements(rendered.cards);
+    const approve = nodes.filter(node => node.type === 'button' && node.textContent === labels.approvalConfirmOnce);
+    const reject = nodes.filter(node => node.type === 'button' && node.textContent === labels.approvalCancelAction);
+    assert.equal(approve.length, 1); assert.equal(reject.length, 1);
+    assert.ok(nodes.some(node => node.className === 'approval-state-note' && node.textContent.includes('<script>')));
+    assert.ok(!nodes.some(node => node.dataset.draftRunAction === 'approveDraftRun'));
+    approve[0].click();
+    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.at(-1))), { type: 'resolveValidationApproval', id: 'host-runtime-token', approve: true });
+  }
 }));

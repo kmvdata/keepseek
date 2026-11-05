@@ -68,22 +68,26 @@ export const skillsImplementationFragment: WebviewFragment = {
         renderSkillReferenceContent(anchor, getSkillMentionName(skill));
         anchor.dataset.skillId = skill.id;
         anchor.dataset.skillPath = getSkillPath(skill);
+        if (skill.plugin) {
+          anchor.dataset.skillReferenceText = getSkillMarkdownText(skill);
+          anchor.dataset.skillSelectionStamp = skill.plugin.selectionStamp || '';
+        }
         return anchor;
       }
 
-      function insertSkillChip(skill) {
-        var range = getPromptInsertionRange();
+      function insertSkillChip(skill, range) {
         var fragment = document.createDocumentFragment();
         appendReferenceBoundarySpace(fragment);
         fragment.append(createSkillLink(skill));
         appendReferenceBoundarySpace(fragment);
-        insertFragmentAtRange(range, fragment);
+        insertFragmentAtRange(range || getPromptInsertionRange(), fragment);
       }
 
-      function removePromptSkillChip(skillId) {
+      function removePromptSkillChip(skillId, skillPath) {
         var links = promptInput.querySelectorAll('a.rich-skill-link');
         links.forEach(function(link) {
           if ((link.dataset.skillId || '') !== skillId) { return; }
+          if (skillPath && link.dataset.skillPath !== skillPath) { return; }
           var previous = link.previousSibling;
           var next = link.nextSibling;
           link.remove();
@@ -101,6 +105,12 @@ export const skillsImplementationFragment: WebviewFragment = {
         var links = promptInput.querySelectorAll('a.rich-skill-link');
         links.forEach(function(link) {
           var skill = getSkillById(link.dataset.skillId || '');
+          if (link.dataset.skillReferenceText) {
+            var current = isPluginSkillLinkCurrent(link, skill);
+            link.setAttribute('aria-invalid', current ? 'false' : 'true');
+            link.title = current ? (skill.description || getSkillMentionName(skill)) : t('pluginSkillStale');
+            return;
+          }
           if (!skill) {
             link.remove();
             return;
@@ -122,7 +132,9 @@ export const skillsImplementationFragment: WebviewFragment = {
           ids.push(normalized);
         }
         promptInput.querySelectorAll('a.rich-skill-link').forEach(function(link) {
-          add(link.dataset.skillId || '');
+          if (!link.dataset.skillReferenceText) {
+            add(link.dataset.skillId || '');
+          }
         });
         return ids;
       }
@@ -173,6 +185,9 @@ export const skillsImplementationFragment: WebviewFragment = {
           items: Array.isArray(skills.items) ? skills.items : [],
           activeSkillIds: Array.isArray(skills.activeSkillIds) ? skills.activeSkillIds : [],
           workspaceDefaultSkillIds: Array.isArray(skills.workspaceDefaultSkillIds) ? skills.workspaceDefaultSkillIds : [],
+          scopeUri: skills.scopeUri,
+          diagnostics: Array.isArray(skills.diagnostics) ? skills.diagnostics : [],
+          configSummary: skills.configSummary,
           workspaceTrusted: skills.workspaceTrusted !== false
         };
       }
@@ -184,6 +199,7 @@ export const skillsImplementationFragment: WebviewFragment = {
         if (!Array.isArray(state.workspaceFolders) || !state.workspaceFolders.length) {
           return t('createSkillWorkspaceRequired');
         }
+        if (!getSkillsState().scopeUri) { return t('sharedScopeRequired'); }
         return '';
       }
 
@@ -218,7 +234,7 @@ export const skillsImplementationFragment: WebviewFragment = {
       }
 
       function isSkillUserSelectable(skill) {
-        return Boolean(skill && skill.enabled && skill.userInvocable && !skill.unavailableReason);
+        return Boolean(skill && skill.enabled && !skill.unavailableReason);
       }
 
       function filterSkillItemsByName(skills, query) {
@@ -236,6 +252,9 @@ export const skillsImplementationFragment: WebviewFragment = {
           getSkillMentionName(skill),
           skill.name || ''
         ];
+        if (skill.plugin) {
+          fields.push(skill.plugin.name, skill.plugin.version, skill.plugin.marketplace);
+        }
         for (var i = 0; i < fields.length; i++) {
           if (normalizeReferenceQuery(fields[i]).indexOf(query) >= 0) {
             return true;
@@ -270,7 +289,22 @@ export const skillsImplementationFragment: WebviewFragment = {
         return getActiveSkillIds().indexOf(skillId) >= 0;
       }
 
+      function isPluginSkillInPrompt(skill) {
+        return Array.from(promptInput.querySelectorAll('a.rich-skill-link')).some(function(link) {
+          return link.dataset.skillId === skill.id && isPluginSkillLinkCurrent(link, skill);
+        });
+      }
+
+      function hasStalePluginSkillInPrompt() {
+        return Array.from(promptInput.querySelectorAll('a.rich-skill-link')).some(function(link) {
+          return Boolean(link.dataset.skillReferenceText)
+            && !isPluginSkillLinkCurrent(link, getSkillById(link.dataset.skillId || ''));
+        });
+      }
+
       function getSkillMentionName(skill) {
+        var qualifiedName = getPluginSkillMentionName(skill);
+        if (qualifiedName) { return qualifiedName; }
         var name = String(skill && skill.name || '').trim();
         if (isSafeSkillMentionName(name)) {
           return name;
@@ -287,7 +321,8 @@ export const skillsImplementationFragment: WebviewFragment = {
       }
 
       function getSkillMarkdownText(skill) {
-        return '[' + getSkillPromptText(skill) + '](' + getSkillPath(skill) + ')';
+        var target = skill.plugin ? getPluginSkillReferenceTarget(skill, true) : getSkillPath(skill);
+        return '[' + getSkillPromptText(skill) + '](' + target + ')';
       }
 
       function getSkillPath(skill) {
@@ -318,7 +353,39 @@ export const skillsImplementationFragment: WebviewFragment = {
       }
 
       function getSkillSourceGroupLabel(skill) {
+        if (skill && skill.plugin) {
+          return formatPluginSkillOrigin(skill.plugin);
+        }
         return String(skill && skill.sourceLabel || skill && skill.source || t('skillsTitle')).trim() || t('skillsTitle');
+      }
+
+      function formatPluginSkillOrigin(plugin) {
+        var sourceLabel = plugin.source === 'local'
+          ? 'pluginSkillSourceLocal'
+          : (plugin.source === 'remote' ? 'pluginSkillSourceRemote' : 'pluginSkillSourceManual');
+        return t('pluginSkillOrigin', {
+          plugin: plugin.name, version: plugin.version, source: t(sourceLabel), marketplace: plugin.marketplace
+        });
+      }
+
+      function formatPluginSkillCapability(plugin) {
+        var labels = {
+          readable: 'pluginSkillReadable',
+          executable: 'pluginSkillExecutable',
+          partial: 'pluginSkillPartial',
+          missing: 'pluginSkillMissing',
+          unverified: 'pluginSkillUnverified'
+        };
+        var requirementLabels = {
+          available: 'pluginSkillRequirementAvailable',
+          missing: 'pluginSkillRequirementMissing',
+          unverified: 'pluginSkillRequirementUnverified'
+        };
+        var details = Array.isArray(plugin.capabilityDetails) ? plugin.capabilityDetails : [];
+        return [t(labels[plugin.capabilityStatus] || labels.unverified)].concat(details.map(function(requirement) {
+          var name = getLanguage() === 'en' ? requirement.en : requirement.zh;
+          return name + ' (' + t(requirementLabels[requirement.status] || requirementLabels.unverified) + ')';
+        }));
       }
 
       function getSkillDirectoryName(skill) {

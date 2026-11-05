@@ -5,6 +5,8 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import {
   ChatSessionStore,
+  getVisibleMessages,
+  normalizeStoredSessions,
   type ChatSessionStorageAdapter,
   type StoredWorkspaceSessionState,
   type WorkspaceSessionScope
@@ -16,6 +18,52 @@ import {
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
 import type { ChatMessage, ChatSession, WorkspaceSummary } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
+
+test('stored replay normalization clones protocol data without changing visible history or frozen protocol metadata', () => {
+  const scope = { key: 'workspace:replay', name: 'Replay', folderUris: [] };
+  const responses = {
+    protocol: 'openai-responses', sourceId: ' source ', baseUrl: ' https://fixture.invalid/v1 ',
+    items: [{ type: 'reasoning', encrypted_content: 'opaque\n  bytes' }]
+  };
+  const anthropic = {
+    protocol: 'anthropic-messages', sourceId: ' source ', baseUrl: ' https://fixture.invalid/v1 ',
+    messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: '  thought\n', signature: 'signed' }] }]
+  };
+  const requestProtocol = {
+    version: 2, serializationStrategy: 'provider-projection-v2', toolSchemaVersion: 2,
+    toolNames: ['keepseek_read_workspace_file_range'], sourceId: 'source', createdAt: '2026-01-01T00:00:00.000Z'
+  };
+  const replays = [responses, anthropic, { ...responses, items: [{ type: 'future_item' }] }, { protocol: 'future' }];
+  const raw = {
+    ...createSession('session-replay', [], scope), requestProtocol,
+    messages: replays.map((providerReplay, index) => ({
+      ...createMessage(index), content: ' visible\n  bytes ', expandedContent: ' expanded\n bytes ', providerReplay
+    }))
+  };
+
+  const [session] = normalizeStoredSessions({ sessions: [raw] }, scope);
+  assert.deepEqual(JSON.parse(JSON.stringify(session.requestProtocol)), requestProtocol);
+  assert.deepEqual(session.messages.map(message => message.content), replays.map(() => ' visible\n  bytes '));
+  assert.deepEqual(session.messages.map(message => message.expandedContent), replays.map(() => ' expanded\n bytes '));
+  assert.deepEqual(session.messages.slice(0, 2).map(message => message.providerReplay), [
+    { ...responses, sourceId: 'source', baseUrl: 'https://fixture.invalid/v1' },
+    { ...anthropic, sourceId: 'source', baseUrl: 'https://fixture.invalid/v1' }
+  ]);
+  assert.equal(session.messages[2].providerReplay, undefined);
+  assert.equal(session.messages[3].providerReplay, undefined);
+
+  responses.items[0].encrypted_content = 'changed after load';
+  anthropic.messages[0].content[0].signature = 'changed after load';
+  const replay = session.messages[0].providerReplay;
+  assert.equal(replay?.protocol === 'openai-responses' && replay.items[0].encrypted_content, 'opaque\n  bytes');
+  const signedReplay = session.messages[1].providerReplay;
+  assert.equal(signedReplay?.protocol === 'anthropic-messages'
+    && signedReplay.messages[0].content[0].type === 'thinking'
+    && signedReplay.messages[0].content[0].signature, 'signed');
+  const visible = getVisibleMessages(session.messages);
+  assert.deepEqual(visible.map(message => message.id), session.messages.map(message => message.id));
+  assert.ok(visible.every(message => !('providerReplay' in message) && !('expandedContent' in message)));
+});
 
 test('trimActiveHistory preserves persisted active session messages', async () => {
   const workspaceScope: WorkspaceSessionScope = {
@@ -149,19 +197,19 @@ test('approval mode persists for the project and is inherited by every new or se
 
   await store.initialize();
   assert.equal(store.approvalMode, 'ask');
-  assert.equal(await store.setApprovalMode('model_review'), true);
-  assert.equal(storage.saved?.approvalMode, 'model_review');
+  assert.equal(await store.setApprovalMode('delegate'), true);
+  assert.equal(storage.saved?.approvalMode, 'delegate');
 
   const created = await store.createNewSession('en');
-  assert.equal(created.approvalMode, 'model_review');
+  assert.equal(created.approvalMode, 'delegate');
 
   const selected = await store.selectSession(older.id);
-  assert.equal(selected?.approvalMode, 'model_review');
+  assert.equal(selected?.approvalMode, 'delegate');
 
   const restarted = new ChatSessionStore(storage, 'en', workspaceScope);
   await restarted.initialize();
-  assert.equal(restarted.approvalMode, 'model_review');
-  assert.equal(restarted.getActiveSession().approvalMode, 'model_review');
+  assert.equal(restarted.approvalMode, 'delegate');
+  assert.equal(restarted.getActiveSession().approvalMode, 'delegate');
 });
 
 test('execution mode defaults to normal and is restored independently for each session', async () => {
@@ -221,14 +269,27 @@ test('stored project approval mode overrides stale per-session values on load', 
   active.approvalMode = 'ask';
   const storage = new MemorySessionStorage({
     activeSessionId: active.id,
-    approvalMode: 'model_review',
+    approvalMode: 'delegate',
     sessions: [active]
   });
   const store = new ChatSessionStore(storage, 'en', workspaceScope);
 
   await store.initialize();
-  assert.equal(store.approvalMode, 'model_review');
-  assert.equal(store.getActiveSession().approvalMode, 'model_review');
+  assert.equal(store.approvalMode, 'delegate');
+  assert.equal(store.getActiveSession().approvalMode, 'delegate');
+});
+
+test('legacy project model_review migrates to ask without broadening authorization and rejects new legacy selections', async () => {
+  const scope = { key: 'legacy-mode', name: 'Legacy', folderUris: [] };
+  const active = createSession('legacy-active', [createMessage(0)], scope);
+  const originalMessages = active.messages.map(message => ({ content: message.content, expandedContent: message.expandedContent, providerContent: message.providerContent }));
+  const storage = new MemorySessionStorage({ activeSessionId: active.id, approvalMode: 'model_review' as never, sessions: [active] });
+  const store = new ChatSessionStore(storage, 'en', scope);
+  await store.initialize();
+  assert.equal(store.approvalMode, 'ask');
+  assert.equal(store.getActiveSession().approvalModeMigrated, true);
+  assert.equal(await store.setApprovalMode('model_review' as never), false);
+  assert.deepEqual(store.getActiveSession().messages.map(message => ({ content: message.content, expandedContent: message.expandedContent, providerContent: message.providerContent })), originalMessages);
 });
 
 test('global storage isolates project approval modes and copied sessions use the target project mode', async (t) => {
@@ -252,9 +313,9 @@ test('global storage isolates project approval modes and copied sessions use the
   const second = new ChatSessionStore(storage, 'en', secondScope);
   await second.initialize();
   assert.equal(second.approvalMode, 'ask');
-  await second.setApprovalMode('model_review');
+  await second.setApprovalMode('delegate');
   const copied = await second.copyOtherWorkspaceSession(firstScope.key, firstSessionId);
-  assert.equal(copied?.approvalMode, 'model_review');
+  assert.equal(copied?.approvalMode, 'delegate');
   assert.equal(copied?.executionMode, 'normal');
   assert.equal(copied?.planWorkflows, undefined);
 
@@ -265,7 +326,7 @@ test('global storage isolates project approval modes and copied sessions use the
 
   const restartedSecond = new ChatSessionStore(new GlobalSessionStorage(storageUri), 'en', secondScope);
   await restartedSecond.initialize();
-  assert.equal(restartedSecond.approvalMode, 'model_review');
+  assert.equal(restartedSecond.approvalMode, 'delegate');
 });
 
 class MemorySessionStorage implements ChatSessionStorageAdapter {

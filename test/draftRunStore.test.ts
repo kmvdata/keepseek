@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
-import { analyzeDraftRunEffects } from '../src/runs/commandRisk';
+import { analyzeDraftRunEffects } from '../src/approvals/authorization';
 import type {
   DraftRunExecutionOutcome,
   DraftRunExecutorAdapter,
@@ -15,7 +15,8 @@ import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import { DraftRunStore } from '../src/runs/draftRunStore';
 import { DraftRunAuthorizationService } from '../src/runs/draftRunAuthorization';
 import { ApprovalReviewStore } from '../src/approvals/approvalReviewStore';
-import type { ApprovalRecordMatch } from '../src/approvals/approvalReviewTypes';
+import { createDraftRunReviewRequest } from '../src/approvals/approvalReviewSurface';
+import { APPROVAL_POLICY_VERSION, type ApprovalRecordMatch } from '../src/approvals/approvalReviewTypes';
 import type { DraftRun, DraftRunProposal, DraftRunSpec, ExecutionPermit } from '../src/shared/types';
 
 test('delegated DraftRun records its approval source and consumes a single immutable proposal', async () => {
@@ -44,6 +45,112 @@ test('revoking delegation while persisting approval prevents process creation', 
     assert.equal(executor.executeCount, 0);
     assert.equal(result?.status, 'failed');
     assert.match(result?.error ?? '', /revoked/u);
+  });
+});
+
+test('scope is rechecked after persisted approval consumption, before any process starts', async () => {
+  await withDraftRunFixture(async ({ workspaceRoot, store, executor, approvalReviews }) => {
+    const proposal = createProposal(workspaceRoot);
+    store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
+    const approvalRecord = await addHostApproval(approvalReviews, proposal, 's', 'r');
+    let scopeValid = true;
+    const consume = approvalReviews.consumeMatchingApproval.bind(approvalReviews);
+    approvalReviews.consumeMatchingApproval = async (...args) => {
+      const record = await consume(...args);
+      scopeValid = false;
+      return record;
+    };
+    const result = await store.approveAndRun(proposal.id, new Set(), {
+      delegatedApproval: () => true, approvalRecord,
+      verifyScope: async () => { if (!scopeValid) throw new Error('Scope changed after approval consumption.'); }
+    });
+    assert.equal(result?.status, 'failed');
+    assert.match(result?.error ?? '', /Scope changed/u);
+    assert.equal(executor.executeCount, 0);
+    assert.equal(await store.approveAndRun(proposal.id, new Set()), undefined, 'failed attempt is not automatically retried');
+  });
+});
+
+test('a persisted correction and its dependent command stay inert and deliver separate reasons', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
+    const first = createProposal(workspaceRoot, { id: 'pager' });
+    const second = createProposal(workspaceRoot, { id: 'commit' });
+    store.addProposals({ proposals: [first, second], agentRunId: 'segment', sessionId: 'session' });
+    const dependency = { targetId: first.id, label: 'git status', reason: 'Use controlled status.' };
+    const correction = (proposal: DraftRunProposal, code: string, reason: string) => ({
+      draftRunId: proposal.id, specHash: proposal.specHash, rootTaskId: 'task', executionSegmentId: 'segment',
+      phase: 'preflight' as const, code, reason, executed: false as const
+    });
+    assert.equal(store.markNotExecuted(first.id, first.specHash, {
+      replan: { ...correction(first, 'git_status_pager_override', dependency.reason), candidateArgs: ['--no-pager', 'status'] }
+    }), true);
+    assert.equal(store.markNotExecuted(second.id, second.specHash, {
+      dependency, replan: { ...correction(second, 'git_commit_all_with_pathspec', 'Put each paragraph after -m.'), dependsOn: first.id }
+    }), true);
+    await store.flush();
+    const reloaded = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    try {
+      await reloaded.initialize();
+      const draft = reloaded.get(second.id)!;
+      assert.equal(draft.status, 'needs_replan');
+      assert.equal(draft.startedAt, undefined);
+      assert.equal(draft.replan?.reason, 'Put each paragraph after -m.');
+      assert.deepEqual(draft.dependency, dependency);
+      assert.equal(await reloaded.approveAndRun(second.id, new Set()), undefined);
+      assert.equal(reloaded.cloneAsPending(second.id), undefined);
+      assert.equal(executor.executeCount, 0);
+      const result = reloaded.getPendingProviderTail('session', 'en');
+      assert.match(result?.content ?? '', /"executed":false/u);
+      assert.deepEqual(result?.draftRunIds, [first.id, second.id]);
+      reloaded.bindResultsToMessage(result!.draftRunIds, 'handoff');
+      assert.equal(reloaded.getPendingProviderTail('session', 'en'), undefined);
+    } finally { await reloaded.flush(); reloaded.dispose(); }
+  });
+});
+
+test('a pending dependent command cannot be directly approved after reload', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
+    const draft = createProposal(workspaceRoot);
+    store.addProposals({ proposals: [draft], agentRunId: 'segment', sessionId: 'session' });
+    assert.equal(store.setPendingDependency(draft.id, draft.specHash, { targetId: 'prior', label: 'prior command' }), true);
+    await store.flush();
+    const reloaded = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    try {
+      await reloaded.initialize();
+      assert.equal(reloaded.get(draft.id)?.status, 'pending');
+      assert.equal(reloaded.get(draft.id)?.dependency?.targetId, 'prior');
+      await assert.rejects(reloaded.preflightApproval(draft.id, new Set()), /Pending executable DraftRun/u);
+      assert.equal(await reloaded.approveAndRun(draft.id, new Set()), undefined);
+      assert.equal(executor.executeCount, 0);
+    } finally { await reloaded.flush(); reloaded.dispose(); }
+  });
+});
+
+test('legacy pending risk advice is derived for display/review without rewriting stored spec or history', async () => {
+  await withDraftRunFixture(async ({ root, workspaceRoot, store, executor }) => {
+    const proposal = createProposal(workspaceRoot);
+    proposal.spec.executable = 'git';
+    proposal.spec.args = ['show', 'HEAD', '--format=%s', '--', 'script.ts'];
+    proposal.specHash = hashDraftRunSpec(proposal.spec);
+    proposal.effectAssessment = { version: 1, verdict: 'mutating_or_sensitive', effects: ['workspace_read', 'workspace_write'], evidence: ['legacy false positive'] };
+    store.addProposals({ proposals: [proposal], agentRunId: 'r', sessionId: 's' });
+    await store.flush();
+    const reloaded = new DraftRunStore(vscode.Uri.file(path.join(root, 'storage')) as never, executor);
+    try {
+      await reloaded.initialize();
+      const stored = reloaded.get(proposal.id)!;
+      const before = JSON.stringify(stored);
+      const shown = reloaded.toWebviewState('s')[0];
+      assert.equal(shown.status, 'pending');
+      assert.deepEqual(shown.effectAssessment.effects, ['workspace_read', 'unknown']);
+      assert.deepEqual(shown.spec, proposal.spec);
+      assert.equal(shown.specHash, proposal.specHash);
+      const review = createDraftRunReviewRequest({ draftRun: stored, history: [], language: 'en' });
+      assert.ok(!review.staticRiskAnalysis.includes('effect:workspace_write'));
+      assert.equal(review.actionHash, proposal.specHash);
+      assert.equal(JSON.stringify(reloaded.get(proposal.id)), before);
+      assert.equal(executor.executeCount, 0);
+    } finally { await reloaded.flush(); reloaded.dispose(); }
   });
 });
 
@@ -420,7 +527,8 @@ async function addHostApproval(
     targetId: proposal.id,
     actionKind: 'draft_run_execute',
     actionHash: proposal.specHash,
-    policyVersion: 1,
+    policyVersion: APPROVAL_POLICY_VERSION,
+    approvalMode: 'delegate',
     approvalSource: 'host_policy',
     reviewerSourceId: '',
     reviewerModelId: '',
@@ -433,11 +541,13 @@ async function addHostApproval(
   return {
     reviewId: record.reviewId,
     sessionId,
+    rootTaskId: agentRunId,
     agentRunId,
     targetId: proposal.id,
     actionKind: 'draft_run_execute',
     actionHash: proposal.specHash,
-    policyVersion: 1,
+    policyVersion: APPROVAL_POLICY_VERSION,
+    expectedSource: 'host_policy',
     approvalMode: 'delegate',
     workspaceTrusted: true
   };

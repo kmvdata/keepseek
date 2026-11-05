@@ -8,7 +8,6 @@ export const createSkillDeclarationFragment: WebviewFragment = {
       var createSkillNameInput = document.getElementById('createSkillNameInput');
       var createSkillDescriptionInput = document.getElementById('createSkillDescriptionInput');
       var createSkillAllowImplicitInput = document.getElementById('createSkillAllowImplicitInput');
-      var createSkillUserInvocableInput = document.getElementById('createSkillUserInvocableInput');
 `.slice(1)
 };
 
@@ -38,9 +37,6 @@ export const createSkillOpenFragment: WebviewFragment = {
         }
         if (createSkillAllowImplicitInput) {
           createSkillAllowImplicitInput.checked = false;
-        }
-        if (createSkillUserInvocableInput) {
-          createSkillUserInvocableInput.checked = true;
         }
         setCreateSkillDialogStatus(t('createSkillDialogDesc'));
         createSkillOverlay.classList.remove('hidden');
@@ -108,7 +104,6 @@ export const createSkillImplementationFragment: WebviewFragment = {
           name: name,
           description: description,
           allowImplicit: createSkillAllowImplicitInput ? createSkillAllowImplicitInput.checked : false,
-          userInvocable: createSkillUserInvocableInput ? createSkillUserInvocableInput.checked : true
         });
         setCreateSkillDialogStatus(t('createSkillDraftRequested'));
         setComposerStatus(t('createSkillDraftRequested'));

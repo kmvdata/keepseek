@@ -1,8 +1,13 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import type { GitRemoteCommand } from '../approvals/authorization/commandSemantics';
+import { parseGitRefOutput, gitTransportError } from './gitReleaseEvidence';
+import { createControlledEnvironment } from './executionEnvironment';
+import type { RestrictedPythonSyntaxLaunch } from './restrictedPythonSyntax';
 import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
 import type { DraftRun, ExecutionPermit } from '../shared/types';
 
+const RESTRICTED_OUTPUT_LIMIT_BYTES = 8_192;
 const EXIT_STREAM_CLOSE_GRACE_MS = 1_500;
 const TERMINATION_SETTLE_GRACE_MS = 1_750;
 const OUTPUT_STREAM_CLOSE_ERROR = 'DraftRun process exited, but inherited output streams did not close.';
@@ -13,6 +18,7 @@ export interface DraftRunOutputChunk {
 }
 
 export interface DraftRunExecutionOutcome {
+  started?: boolean;
   exitCode?: number;
   signal?: string;
   timedOut: boolean;
@@ -20,10 +26,19 @@ export interface DraftRunExecutionOutcome {
   error?: string;
 }
 
+export interface VerifiedDraftRunLaunch {
+  executable: string;
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+  gitRemote?: GitRemoteCommand;
+}
+
 export interface DraftRunExecutorAdapter {
   execute(input: {
     draftRun: DraftRun;
     permit: ExecutionPermit;
+    verifiedLaunch?: VerifiedDraftRunLaunch;
+    restrictedLaunch?: RestrictedPythonSyntaxLaunch;
     signal?: AbortSignal;
     onOutput: (chunk: DraftRunOutputChunk) => void;
   }): Promise<DraftRunExecutionOutcome>;
@@ -55,10 +70,18 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
   public async execute(input: {
     draftRun: DraftRun;
     permit: ExecutionPermit;
+    verifiedLaunch?: VerifiedDraftRunLaunch;
+    restrictedLaunch?: RestrictedPythonSyntaxLaunch;
     signal?: AbortSignal;
     onOutput: (chunk: DraftRunOutputChunk) => void;
   }): Promise<DraftRunExecutionOutcome> {
     validatePermit(input.draftRun, input.permit);
+    const restricted = input.restrictedLaunch;
+    const gitRemote = input.verifiedLaunch?.gitRemote;
+    if (Boolean(input.draftRun.spec.restricted) !== Boolean(restricted)
+      || (restricted && input.permit.source !== 'delegated_approver')) {
+      throw new Error('Restricted DraftRun requires its verified launch and delegated permit.');
+    }
     for (const [nonce, expiresAt] of this.consumedPermitNonces) {
       if (expiresAt <= Date.now()) {
         this.consumedPermitNonces.delete(nonce);
@@ -72,7 +95,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       throw new Error('Another DraftRun is already running.');
     }
     if (input.signal?.aborted) {
-      return { timedOut: false, cancelled: true };
+      return { started: false, timedOut: false, cancelled: true };
     }
 
     const { pty, terminal } = this.getOrCreateSessionTerminal(input.draftRun.sessionId);
@@ -80,13 +103,13 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     this.runTerminalSessions.set(input.draftRun.id, input.draftRun.sessionId);
     pty.write(formatTerminalHeader(input.draftRun));
 
-    const child = spawn(input.draftRun.spec.executable, input.draftRun.spec.args, {
-      cwd: vscode.Uri.parse(input.draftRun.spec.cwdUri).fsPath,
-      env: createControlledEnvironment(input.draftRun.spec.env),
+    const child = spawn(restricted?.executable ?? input.verifiedLaunch?.executable ?? input.draftRun.spec.executable, input.draftRun.spec.args, {
+      cwd: restricted?.cwd ?? input.verifiedLaunch?.cwd ?? vscode.Uri.parse(input.draftRun.spec.cwdUri).fsPath,
+      env: restricted ? {} : input.verifiedLaunch?.env ?? createControlledEnvironment(input.draftRun.spec.env),
       shell: false,
       windowsHide: true,
       detached: process.platform !== 'win32',
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: [restricted ? 'pipe' : 'ignore', 'pipe', 'pipe']
     });
     const running: RunningProcess = {
       child,
@@ -98,10 +121,16 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     this.running.set(input.draftRun.id, running);
     return await new Promise<DraftRunExecutionOutcome>((resolve) => {
       let settled = false;
+      let started = false;
+      child.once('spawn', () => { started = true; });
       let exitCloseTimer: ReturnType<typeof setTimeout> | undefined;
       let terminationSettleTimer: ReturnType<typeof setTimeout> | undefined;
       let exitCode: number | undefined;
       let exitSignal: string | undefined;
+      let outputBytes = 0;
+      let outputLimitError: string | undefined;
+      let remoteStdout = '';
+      let remoteStderr = '';
       const stdoutDecoder = new StringDecoder('utf8');
       const stderrDecoder = new StringDecoder('utf8');
       const emit = (stream: DraftRunOutputChunk['stream'], text: string) => {
@@ -111,8 +140,37 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         pty.write(text);
         input.onOutput({ stream, text });
       };
-      child.stdout?.on('data', (chunk: Buffer) => emit('stdout', stdoutDecoder.write(chunk)));
-      child.stderr?.on('data', (chunk: Buffer) => emit('stderr', stderrDecoder.write(chunk)));
+      const onData = (stream: DraftRunOutputChunk['stream'], decoder: StringDecoder, chunk: Buffer) => {
+        if (restricted) {
+          if (outputLimitError) return;
+          outputBytes += chunk.byteLength;
+          if (outputBytes > RESTRICTED_OUTPUT_LIMIT_BYTES) {
+            outputLimitError = 'Restricted AST output exceeded its limit. / 受限 AST 验证输出超过上限。';
+            terminateAndBoundSettlement();
+            return;
+          }
+        }
+        if (gitRemote) {
+          // A Git server may print arbitrary banners, hook output or URLs.
+          // Only normalized reference evidence and fixed diagnostics leave this boundary.
+          if (stream === 'stdout' && gitRemote.kind === 'query') {
+            if (outputLimitError) return;
+            outputBytes += chunk.byteLength;
+            if (outputBytes > 512 * 1024) {
+              outputLimitError = 'Git remote query output exceeded its limit. / Git 远端查询输出超过上限。';
+              terminateAndBoundSettlement();
+              return;
+            }
+            remoteStdout += decoder.write(chunk);
+          } else if (stream === 'stderr' && remoteStderr.length < 8192) {
+            remoteStderr = (remoteStderr + decoder.write(chunk)).slice(0, 8192);
+          }
+          return;
+        }
+        emit(stream, decoder.write(chunk));
+      };
+      child.stdout?.on('data', (chunk: Buffer) => onData('stdout', stdoutDecoder, chunk));
+      child.stderr?.on('data', (chunk: Buffer) => onData('stderr', stderrDecoder, chunk));
 
       const finish = (outcome: DraftRunExecutionOutcome) => {
         if (settled) {
@@ -123,19 +181,34 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         if (exitCloseTimer) clearTimeout(exitCloseTimer);
         if (terminationSettleTimer) clearTimeout(terminationSettleTimer);
         input.signal?.removeEventListener('abort', abortExecution);
-        emit('stdout', stdoutDecoder.end());
-        emit('stderr', stderrDecoder.end());
+        if (gitRemote) {
+          if (outcome.exitCode === 0 && !outcome.error && gitRemote.kind === 'query') {
+            try {
+              const requested = gitRemote.refs.length ? gitRemote.refs : ['refs/' + gitRemote.namespace + '/*'];
+              const refs = parseGitRefOutput(remoteStdout + stdoutDecoder.end(), requested);
+              emit('stdout', refs.map(ref => `${ref.object}\t${ref.ref}\n`
+                + (ref.peeled ? `${ref.peeled}\t${ref.ref}^{}\n` : '')).join(''));
+            } catch (error) {
+              outcome.error = error instanceof Error ? error.message : 'Invalid Git response. / Git 响应无效。';
+            }
+          } else if (!outcome.cancelled && !outcome.timedOut && outcome.exitCode !== 0) {
+            outcome.error = gitTransportError(remoteStderr, gitRemote.kind, !started);
+          }
+        } else {
+          emit('stdout', stdoutDecoder.end());
+          emit('stderr', stderrDecoder.end());
+        }
         this.running.delete(input.draftRun.id);
         pty.write(`\r\n[KeepSeek DraftRun ${formatOutcomeLabel(outcome)}]\r\n`);
         pty.finishRun();
-        resolve(outcome);
+        resolve({ ...outcome, started });
       };
       const currentOutcome = (error?: string): DraftRunExecutionOutcome => ({
         exitCode,
         signal: exitSignal,
         timedOut: running.timedOut,
         cancelled: running.cancelRequested,
-        error
+        error: error ?? outputLimitError
       });
       const destroyOutputStreams = () => {
         child.stdout?.destroy();
@@ -191,11 +264,19 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         }, EXIT_STREAM_CLOSE_GRACE_MS);
         exitCloseTimer.unref?.();
       });
+      if (restricted) {
+        child.stdin?.on('error', () => {
+          // Exit or cancellation can close the pipe before all input is sent.
+          // The child lifecycle determines the actual result.
+        });
+        child.stdin?.end(restricted.stdin, 'utf8');
+      }
       child.once('close', (code, signal) => finish({
         exitCode: typeof code === 'number' ? code : undefined,
         signal: signal ?? undefined,
         timedOut: running.timedOut,
-        cancelled: running.cancelRequested
+        cancelled: running.cancelRequested,
+        error: outputLimitError
       }));
     });
   }
@@ -330,25 +411,7 @@ function validatePermit(draftRun: DraftRun, permit: ExecutionPermit): void {
   }
 }
 
-function createControlledEnvironment(entries: readonly { name: string; value: string }[]): NodeJS.ProcessEnv {
-  const allowedNames = [
-    'PATH', 'PATHEXT', 'SystemRoot', 'ComSpec', 'WINDIR',
-    'HOME', 'USERPROFILE', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE',
-    'SHELL', 'TERM', 'COLORTERM'
-  ];
-  const env: NodeJS.ProcessEnv = {};
-  for (const name of allowedNames) {
-    if (process.env[name] !== undefined) {
-      env[name] = process.env[name];
-    }
-  }
-  for (const entry of entries) {
-    env[entry.name] = entry.value;
-  }
-  return env;
-}
-
-function terminateProcessTree(child: ChildProcess): void {
+export function terminateProcessTree(child: ChildProcess): void {
   if (!child.pid || child.killed) {
     return;
   }

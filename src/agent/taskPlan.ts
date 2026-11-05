@@ -88,8 +88,12 @@ export class TaskPlanTracker {
       return;
     }
     const step = this.ensureToolStep(kind);
-    const error = readToolError(rawResult);
-    if (error) {
+    const failure = readToolError(rawResult);
+    if (kind === 'validate' && failure?.type === 'validation_unavailable') {
+      const blocker = this.blockerByStep.get(step.id);
+      this.setStepStatus(step.id, blocker ? 'blocked' : 'skipped', blocker ?? failure.message);
+    } else if (failure) {
+      const error = failure.message;
       this.setStepStatus(step.id, 'blocked', error);
       const previousBlocker = this.blockerByStep.get(step.id);
       if (previousBlocker && previousBlocker !== error) {
@@ -427,13 +431,13 @@ function getToolDetail(toolName: string, language: KeepseekLanguage): string {
     [GIT_SUGGEST_COMMIT_MESSAGE_TOOL_NAME]: ['Preparing commit message suggestions', '准备提交信息建议'],
     [CREATE_DRAFT_EDIT_TOOL_NAME]: ['Creating a pending edit', '创建待确认修改'],
     [DELETE_WORKSPACE_FILE_TOOL_NAME]: ['Preparing a pending file deletion', '准备待确认文件删除'],
-    [RUN_VALIDATION_TOOL_NAME]: ['Running an approved project script', '运行已授权的项目脚本']
+    [RUN_VALIDATION_TOOL_NAME]: ['Checking a fixed project validation script', '检查项目的固定验证脚本']
   };
   const label = labels[toolName];
   return label ? label[language === 'en' ? 0 : 1] : toolName;
 }
 
-function readToolError(rawResult: string): string | undefined {
+function readToolError(rawResult: string): { message: string; type?: string } | undefined {
   try {
     const result: unknown = JSON.parse(rawResult);
     if (!result || typeof result !== 'object' || Array.isArray(result)) {
@@ -443,7 +447,8 @@ function readToolError(rawResult: string): string | undefined {
     if (record.ok !== false) {
       return undefined;
     }
-    return compactText(typeof record.error === 'string' ? record.error : 'Tool execution failed.', 240);
+    const message = compactText(typeof record.error === 'string' ? record.error : 'Tool execution failed.', 240);
+    return message ? { message, type: typeof record.errorType === 'string' ? record.errorType : undefined } : undefined;
   } catch {
     return undefined;
   }

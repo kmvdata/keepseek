@@ -3,7 +3,7 @@
   "displayName": "KeepSeek",
   "description": "AI-powered coding agent for VS Code",
   "publisher": "keepseek",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "license": "MIT",
   "icon": "resources/keepseek.png",
   "homepage": "https://github.com/kmvdata/keepseek#readme",
@@ -27,6 +27,7 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
+      { "command": "keepseek.selectProjectScope", "title": "KeepSeek: Select Task Directory / 选择任务目录" },
       {
         "command": "keepseek.showRuntimeDiagnostics",
         "title": "KeepSeek: Runtime Diagnostics / 运行诊断"
@@ -83,6 +84,35 @@
           "default": "",
           "scope": "window",
           "markdownDescription": "Selected model for the current workspace. An empty or unavailable value adopts the global default model, or the first available model when no explicit default is valid."
+        },
+        "keepseek.gitReleaseGrants": {
+          "type": "array",
+          "scope": "machine",
+          "default": [],
+          "markdownDescription": "Preauthorize Git release in Approve for me for an exact real repository and resolved destination. Read grants accept exact refs or the heads/tags namespace. Push grants allow exact refs or a tag-name prefix ending in * and require matching read access for verification. The current task must also authorize the action. / 为帮我审批预授权真实仓库与解析后的确切目的地。查询可授权精确引用或分支、标签命名空间。推送可授权精确引用或以 * 结尾的标签名前缀，并需要核验所需的查询授权。本次任务仍须明确授权。",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["repository", "destination", "read", "push"],
+            "properties": {
+              "repository": { "type": "string", "description": "Canonical absolute repository path / 仓库的真实绝对路径" },
+              "destination": { "type": "string", "description": "Exact resolved SSH URL or canonical bare repository path / 精确 SSH URL 或裸仓库的真实绝对路径" },
+              "read": { "type": "array", "items": { "type": "string" }, "description": "Exact refs or refs/tags/* and refs/heads/* / 精确引用或标签、分支命名空间" },
+              "push": { "type": "array", "items": { "type": "string" }, "description": "Exact refs or tag-name prefix followed by * / 精确引用或以 * 结尾的标签名前缀" }
+            }
+          }
+        },
+        "keepseek.autoApprovalReviewer": {
+          "type": "object",
+          "default": { "mode": "follow-main" },
+          "scope": "application",
+          "properties": {
+            "mode": { "type": "string", "enum": ["follow-main", "fixed"], "default": "follow-main" },
+            "sourceId": { "type": "string" },
+            "modelId": { "type": "string" }
+          },
+          "additionalProperties": false,
+          "markdownDescription": "Independent approval model for Approve for me. Follows the actual main model of the task segment, or uses a fixed sourceId and modelId. User settings only; independent of subagent models. / 帮我审批的独立审批模型。跟随任务执行段的实际主模型，或固定账号 ID 与模型 ID。仅使用用户设置，与普通子代理模型无关。"
         },
         "keepseek.thinkingEnabled": {
           "type": "boolean",
@@ -304,7 +334,7 @@
           "minimum": 1000,
           "maximum": 96000,
           "scope": "window",
-          "markdownDescription": "Shared token budget for project instructions, activated Skills, legacy memory, and attached context files before they enter a session."
+          "markdownDescription": "Shared token budget for project instructions, activated Skills and attached context files before they enter a session."
         },
         "keepseek.maxContextFiles": {
           "type": "number",
@@ -320,14 +350,6 @@
           ],
           "description": "Tool execution authorization policy"
         },
-        "keepseek.projectInstructions.contextBudgetTokens": {
-          "type": "number",
-          "default": 4000,
-          "minimum": 0,
-          "maximum": 32000,
-          "scope": "window",
-          "markdownDescription": "Maximum estimated tokens used by root AGENTS.md project instructions in each Agent run."
-        },
         "keepseek.skills.contextBudgetChars": {
           "type": "number",
           "default": 72000,
@@ -342,7 +364,7 @@
           "minimum": 0,
           "maximum": 8,
           "scope": "window",
-          "markdownDescription": "Maximum number of allowImplicit Skills that deterministic request matching may activate per Agent run."
+          "markdownDescription": "Maximum number of Skills eligible under policy.allow_implicit_invocation that deterministic request matching may activate per Agent run."
         },
         "keepseek.contextCompression": {
           "type": "boolean",
@@ -464,7 +486,9 @@
     "reinstall:vsix": "node scripts/reinstall-vsix.js"
   },
   "dependencies": {
-    "ignore": "^7.0.0"
+    "ignore": "^7.0.0",
+    "yaml": "2.8.4",
+    "confbox": "0.2.4"
   },
   "devDependencies": {
     "@types/vscode": "^1.98.0",

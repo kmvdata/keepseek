@@ -97,6 +97,7 @@ test('subagent frontmatter parses typed profile policy including block-list tool
   const parsed = parseSkillFrontmatter([
     '---',
     'name: Security reviewer',
+    'description: Review security boundaries.',
     'metadata:',
     '  keepseek:',
     '    runAs: subagent',

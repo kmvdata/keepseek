@@ -1,8 +1,6 @@
 # KeepSeek 请求缓存与上下文投影
 
-2026-10-31：摘要规划、净收益和阈值测量共用最终 payload builder，并使用按source/endpoint/model加载的校准窗口。初始已有可压缩历史过满也可触发必要Epoch；completion返回时已取消不采纳新摘要。真实user/静态system/冻结schema保持。新增三协议双边界回放见 [续接验收](long-task-rectification-resume-report.md)。
-
-> 面向维护者与接手开发的 AI。本文描述当前实现中的请求字节稳定性、历史投影、Evidence/Context Epoch 与缓存诊断。运行时总流程见 [`keepseek-agent-runtime-workflow.md`](keepseek-agent-runtime-workflow.md)，字段级请求示例见 [`keepseek-api-payload-reference.md`](keepseek-api-payload-reference.md)。
+> 面向维护者与接手开发的 AI。本文描述当前实现中的请求字节稳定性、历史投影、Evidence/Context Epoch 与缓存诊断。运行时总流程见 [`keepseek-agent-runtime-workflow.md`](keepseek-agent-runtime-workflow.md)，字段级请求示例见 [`keepseek-api-payload-reference.md`](keepseek-api-payload-reference.md)。当前文档导航、各版本维度与历史证据索引见 [`README.md`](README.md)。
 
 ## 1. 核心结论
 
@@ -53,14 +51,18 @@ current user / tool continuation
 
 ### 3.1 协议 lane
 
-当前 provider 请求协议与工具 schema 版本均为 **V10**：
+新建主会话的 request protocol 与 tool schema 当前均为 **14**，分别由 `providerRequestProjection.ts` 的 `CURRENT_PROVIDER_REQUEST_PROTOCOL_VERSION` 与 `CURRENT_PROVIDER_TOOL_SCHEMA_VERSION` 定义。它们不代表 child runtime、结果合同或存储格式的版本；各维度见 [版本权威表](README.md#版本维度)。请求协议的演进边界包括：
 
 - V5 引入子代理。
 - V8 引入通用 Evidence 与 Context Epoch。
 - V9 固定加入 `keepseek_apply_patch` 与 canonical Patch IR。
 - V10 将子代理 handoff 改为小型 manifest，并把完整结果读取工具升级为 UTF-8 byte paging。
+- V11 增加分工评估、受控继承与父验收合同。
+- V12 由 `protocol.ts` 的 `PLUGIN_SKILL_REQUEST_PROTOCOL_VERSION` 门控显式 Codex 插件 Skill 读取工具。
+- V13 更新 ask/delegate 审批提示与 DraftRun 工具说明；宿主审批模式不由模型或历史提示切换。
+- V14 隐藏已暂停的插件 Skill 读取工具；V12/V13 保留冻结 schema，旧工具实际调用拒绝，历史字节不改写。
 
-V1–V8 的已存在热会话保持原有 system/schema 字节；只有缓存自然冷却或发生受控 rollover 时才迁移。不同来源、endpoint、wire model、协议版本或原生协议不能共用缓存 lane。
+受支持的 V1–V12 热主会话保持各自 system/schema 字节，只有缓存已冷或受控 rollover 才迁移；`subagents/runtime.ts` 的 child 协议仍独立固定为 11。不同来源、endpoint、wire model、协议版本或原生协议不能共用缓存 lane。旧版三审批模式字节属于冻结协议兼容，不是当前设置入口。
 
 ## 4. 字节冻结规则
 
@@ -68,7 +70,7 @@ V1–V8 的已存在热会话保持原有 system/schema 字节；只有缓存自
 
 - `getAgentSystemPrompt()` 只包含协议级静态约束，不放时间戳、随机 ID、绝对路径、临时状态或激活原因。
 - 首轮解析出的 `contextInstructions` 持久化到 `ChatSession`，之后逐字节复用。
-- AGENTS.md、Skill、Legacy Memory 或 Context Files 在会话中发生变化时，不回写旧前缀；格式化后的变化以稳定的 dynamic context tail 追加到下一条真实 user 消息。
+- 共享指令/配置、Skill 或 Context Files 在会话中发生变化时，不回写旧前缀；格式化后的变化以稳定的 dynamic context tail 追加到下一条真实 user 消息。
 - 未发生变化时不重复追加 tail。项目指令大小和 token 上限仍由 `ProjectInstructionsResolver` 与配置控制。
 
 这意味着“上下文更新”通常只损失新追加部分，而不是让整段历史重新编码。
@@ -77,7 +79,7 @@ V1–V8 的已存在热会话保持原有 system/schema 字节；只有缓存自
 
 - 原始输入先 `trim()`；存在引用展开时使用 `expandedContent`。
 - 真正送往 provider 的内容持久化为 `providerContent`，在当前热前缀内发送与恢复复用同一字符串。
-- goal、审批结果、执行结果、动态上下文等宿主信息只追加在当前真实 user 消息尾部。
+- 审批结果、执行结果、动态上下文等宿主信息只追加在下一条真实 user 消息尾部，不插入伪 user。
 - 禁止事后为旧 user 消息添加标签、日期、角色说明或重新展开引用。
 
 “编辑并重发”是显式用户操作，会从被替换轮次起截断后续历史，因此是明确的缓存边界，不属于普通 append-only 路径。
@@ -131,7 +133,7 @@ V1–V8 的已存在热会话保持原有 system/schema 字节；只有缓存自
 ### 5.2 摘要约束
 
 - 摘要只保存目标、决策、错误、路径/符号线索、完成项和待办，不复制文件正文、长日志或代码块。
-- 摘要使用当前来源和模型，关闭 thinking、禁用 tools、设置独立输出预算与短超时。
+- 独立历史摘要使用当前来源和模型，关闭 thinking、禁用 tools；按实际模型的有效输出配置和 `resolveProviderRequestBudget()` 准入，不使用阶段专用固定输出上限。模型请求超时统一取用户级 `keepseek.modelRequestTimeoutSeconds`。正费用上限下，缺少共享任务预留的独立摘要跳过，由运行时按任务账本压缩。
 - 已成功摘要持久化后逐字节复用；不要假定同一输入重新请求一定得到相同文本。
 - 摘要失败只记录原因，不阻塞用户请求。
 - 无可用摘要且投影超过强制阈值时，才退化为保留受保护消息和最近历史。
@@ -148,7 +150,7 @@ V1–V8 的已存在热会话保持原有 system/schema 字节；只有缓存自
 
 ## 6. 大工具结果与 Context Epoch
 
-当前统一口径由 `buildProviderRequestProjection()` 及其最终上下文投影 `buildProviderPayloadProjection()` 提供。源历史在 fallback 容量判断前已排除不发送的 reasoning 和不匹配 lane 的 replay；运行时请求、候选工具结果和 usage 使用同一规范化规则。候选结果与批次最小 envelope 的预留是显式差量。用户配置输出上限、已学习窗口及安全余量不因性能优化而下降。
+当前统一口径由 `buildProviderRequestProjection()` 及其最终上下文投影 `buildProviderPayloadProjection()` 提供；`measureCompressionProjection()` 同样消费最终 payload，并以 source/endpoint/model 隔离校准窗口。初始历史过满时也可触发必要 epoch，已取消的 completion 不采纳新摘要。源历史在 fallback 容量判断前已排除不发送的 reasoning 和不匹配 lane 的 replay；运行时请求、候选工具结果和 usage 使用同一规范化规则。候选结果与批次最小 envelope 的预留是显式差量。用户配置输出上限、已学习窗口及安全余量不因性能优化而下降。
 
 已结束提案不会永久保护整段工具历史。宿主事实随受控摘要保存，完整审计/evidence 留存；pending、未知副作用和当前约束仍保护。摘要的净释放量包含新 summary/seed/元数据，低收益采用现有预算 safety/minimum-envelope 余量判定，不能超限发送，也不对相同失败指纹反复摘要。详情与实际前后对比见 [长任务整改](long-task-performance-rectification.md)。
 

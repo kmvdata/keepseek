@@ -8,7 +8,8 @@ import type {
   DraftRunProposal,
   DraftRunSpec
 } from '../shared/types';
-import { analyzeDraftRunEffects } from './commandRisk';
+import { analyzeDraftRunEffects } from '../approvals/authorization/commandEffects';
+import { findCanonicalWorkspaceFolder } from '../approvals/authorization/pathScope';
 
 export interface DraftRunProposalInput {
   executable: string;
@@ -76,7 +77,8 @@ export function hashDraftRunSpec(spec: DraftRunSpec): string {
     externalCwd: spec.externalCwd,
     reason: spec.reason,
     timeoutMs: spec.timeoutMs,
-    workspaceFolder: spec.workspaceFolder ?? ''
+    workspaceFolder: spec.workspaceFolder ?? '',
+    restricted: spec.restricted
   })).digest('hex');
 }
 
@@ -110,20 +112,6 @@ function resolveDraftRunCwd(
     uri = vscode.Uri.file(path.resolve(baseFolder.uri.fsPath, cwd));
   }
   return uri;
-}
-
-async function findCanonicalWorkspaceFolder(cwdPath: string): Promise<{
-  folder: vscode.WorkspaceFolder;
-  realPath: string;
-} | undefined> {
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    const realRoot = await realpath(folder.uri.fsPath);
-    const relative = path.relative(realRoot, cwdPath);
-    if (!relative || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) {
-      return { folder, realPath: realRoot };
-    }
-  }
-  return undefined;
 }
 
 function normalizeEnvironment(value: DraftRunEnvironmentEntry[] | undefined): DraftRunEnvironmentEntry[] {

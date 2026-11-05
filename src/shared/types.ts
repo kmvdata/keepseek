@@ -54,7 +54,7 @@ export interface AgentSettings {
 
 export type ContextFileSource = 'workspace' | 'external';
 
-export type SkillSource = 'workspace' | 'agentsWorkspace' | 'user' | 'agentsUser' | 'builtin';
+export type SkillSource = 'admin' | 'workspace' | 'agentsWorkspace' | 'user' | 'agentsUser' | 'builtin' | 'codexPlugin';
 
 export type SkillActivationSource = 'explicit' | 'session' | 'workspace-default' | 'implicit';
 
@@ -568,6 +568,8 @@ export type DraftRunStatus =
   | 'rejected'
   | 'running'
   | 'done'
+  | 'needs_replan'
+  | 'no_changes'
   | 'cancelled'
   | 'failed';
 
@@ -602,6 +604,8 @@ export interface DraftRunSpec {
   externalCwd: boolean;
   timeoutMs: number;
   env: DraftRunEnvironmentEntry[];
+  /** Host-generated capability. DraftRun tool arguments cannot set it. */
+  restricted?: import('../runs/restrictedPythonSyntax').RestrictedPythonSyntaxSpec;
 }
 
 export interface DraftRunEffectAssessment {
@@ -664,6 +668,15 @@ export interface DraftRun extends DraftRunProposal {
   status: DraftRunStatus;
   authorizationSource?: ExecutionPermit['source'];
   approvalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
+  replacementDraftRunId?: string;
+  replan?: import('../approvals/approvalProcessing').DraftRunReplanResult;
+  dependency?: import('../approvals/approvalProcessing').ApprovalDependency;
+  gitCommitPlan?: import('../runs/localGitCommit').LocalGitCommitPlan;
+  gitCommitEvidence?: import('../runs/localGitCommit').LocalGitCommitEvidence;
+  gitReusedDraftRunId?: string;
+  gitPushAttempt?: import('../runs/gitReleaseEvidence').GitPushAttempt;
+  gitReleaseEvidence?: import('../runs/gitReleaseEvidence').GitReleaseEvidence;
+  gitStageEvidence?: import('../runs/localGitCommit').LocalGitStageEvidence;
   approvedAt?: string;
   startedAt?: string;
   finishedAt?: string;
@@ -686,6 +699,8 @@ export interface DraftRun extends DraftRunProposal {
 }
 
 export interface ChatMessage {
+  /** Host-only user task membership; never grants authority or changes provider bytes. */
+  userTask?: import('../sessions/userTask').UserTaskLink;
   runCheckpoint?: import('../agent/runCheckpoint').RunCheckpoint;
   /** V3 immutable archive, scoped to this session's object directory. Never sent to Webview. */
   runCheckpointArchive?: { version: 1; objectHash: string; pendingTool?: boolean; summary: NonNullable<ChatMessage['runState']> };
@@ -848,18 +863,13 @@ export interface ProjectInstructionContext {
   id: string;
   uri: string;
   workspaceFolder: string;
+  scopeUri?: string;
+  order?: number;
   content: string;
   characterCount: number;
   tokenEstimate: number;
   contentHash: string;
   truncated: boolean;
-}
-
-export interface LegacyProjectMemoryContext {
-  content: string;
-  entryIds: string[];
-  tokenEstimate: number;
-  sourceUris: string[];
 }
 
 export type RunContextSourceKind = 'project-instructions' | 'skill' | 'legacy-memory';
@@ -870,6 +880,8 @@ export interface RunContextSourceSummary {
   label: string;
   uri?: string;
   source?: string;
+  scopeUri?: string;
+  order?: number;
   activation?: SkillActivationSource;
   reason?: string;
   characterCount: number;
@@ -883,7 +895,7 @@ export interface RunContextDiscardedSource {
   id: string;
   kind: RunContextSourceKind;
   uri?: string;
-  reason: 'duplicate_uri' | 'duplicate_content' | 'duplicate_skill' | 'budget_exhausted' | 'workspace_untrusted' | 'disabled' | 'implicit_not_allowed' | 'not_matched' | 'implicit_limit' | 'load_failed';
+  reason: 'duplicate_uri' | 'duplicate_content' | 'duplicate_skill' | 'budget_exhausted' | 'workspace_untrusted' | 'disabled' | 'implicit_not_allowed' | 'not_matched' | 'implicit_limit' | 'load_failed' | 'ambiguous_name';
   keptId?: string;
 }
 
@@ -902,28 +914,10 @@ export interface RunContextProjectionMetadata {
 export interface CurrentRunContext {
   projectInstructions: ProjectInstructionContext[];
   skills: ActivatedSkill[];
-  legacyMemory?: LegacyProjectMemoryContext;
   metadata: RunContextProjectionMetadata;
 }
 
-export type LegacyProjectMemoryMigrationStatus = 'pending' | 'draft-created' | 'completed';
-
-export interface LegacyProjectMemoryMigrationStateView {
-  detected: boolean;
-  status: LegacyProjectMemoryMigrationStatus;
-  sourceUris: string[];
-  entryCount: number;
-  canCreateDraft: boolean;
-  canComplete: boolean;
-  canRollback: boolean;
-  exportAvailable: boolean;
-  lastDraftChangeSetId?: string;
-  completeDisabledReason?: string;
-  rollbackDisabledReason?: string;
-  error?: string;
-}
-
-export type ApprovalMode = 'ask' | 'model_review' | 'delegate';
+export type ApprovalMode = 'ask' | 'delegate';
 
 export type ExecutionMode = 'normal' | 'plan';
 
@@ -949,6 +943,10 @@ export interface PlanWorkflowView extends Omit<PlanWorkflowRecord, 'contentHash'
 }
 
 export interface ChatSession {
+  pendingApproval?: import('../approvals/manualApproval').ManualApprovalSnapshot;
+  approvalModeMigrated?: boolean;
+  userTaskBudgets?: Record<string, import('../sessions/userTaskBudget').UserTaskBudget>;
+  approvalProcessing?: import('../approvals/approvalProcessing').ApprovalProcessingState;
   executionTime?: import('../sessions/executionTimeStats').SessionExecutionTime;
   approvalMode?: ApprovalMode;
   executionMode?: ExecutionMode;
@@ -957,6 +955,8 @@ export interface ChatSession {
   title: string;
   messages: ChatMessage[];
   activeSkillIds?: string[];
+  /** Explicit session task scope; never follows editor focus. */
+  projectScopeUri?: string;
   /**
    * 会话内冻结的 implicit skill 激活结果（仅存 id 引用，不复制内容）。
    * 首个真实用户请求确定后写入；后续轮次不再随 prompt 波动重新匹配，
@@ -1457,6 +1457,7 @@ export interface RunAuthorizationPolicy {
 }
 
 export interface ToolAuthorizationDecision {
+  failureCode?: string;
   allowed: boolean;
   toolName: string;
   riskLevel: ToolRiskLevel;
@@ -1465,6 +1466,8 @@ export interface ToolAuthorizationDecision {
   requiresExplicitConfirmation: boolean;
   reason?: string;
   approvalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
+  priorApprovalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
+  executionSnapshot?: string;
   approvalCircuitBreakReason?: 'consecutive_denials' | 'recent_denials';
 }
 
@@ -1507,6 +1510,7 @@ export interface ValidationToolResult {
   timedOut: boolean;
   authorization?: ToolAuthorizationDecision;
   diagnostics?: WorkspaceDiagnosticSummary;
+  output?: string;
   error?: string;
 }
 
@@ -1636,6 +1640,9 @@ export interface ActivatedSkill {
   activation?: SkillActivationInfo;
   description?: string;
   hasScripts?: boolean;
+  /** Task-scoped plugin package pin. Never grants general workspace access. */
+  pluginSnapshot?: import('../skills/codexPluginResources').CodexPluginSnapshot;
+  pluginPolicyCwd?: string;
   /** Full instructions for these skills are omitted from the parent context and
    * loaded only in an isolated child run. */
   runAs?: 'subagent';
@@ -1701,6 +1708,7 @@ export type AgentActivityPhase =
   | 'reading_semantic_context'
   | 'reading_git_state'
   | 'awaiting_authorization'
+  | 'awaiting_manual_approval'
   | 'generating_repair'
   | 'waiting_for_apply'
   | 'running_validation'

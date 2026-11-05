@@ -1137,6 +1137,8 @@ export function getStyles(): string {
 
     .draft-run-header {
       display: grid;
+      /* Card-local rows also work inside a narrower batch, regardless of viewport width. */
+      grid-template-columns: minmax(0, 1fr);
       gap: 7px;
     }
 
@@ -1177,15 +1179,20 @@ export function getStyles(): string {
 
     .draft-run-actions {
       display: flex;
+      min-width: 0;
+      max-width: 100%;
       flex-wrap: wrap;
       justify-content: flex-end;
       gap: 4px;
     }
 
     .draft-run-actions button {
+      max-width: 100%;
       min-height: 21px;
       padding: 2px 7px;
       font-size: 10px;
+      overflow-wrap: anywhere;
+      white-space: normal;
     }
 
     .draft-run-fields {
@@ -1374,8 +1381,33 @@ export function getStyles(): string {
       line-height: 1.35;
     }
 
+    .approval-exact-payload {
+      min-width: 0;
+      max-width: 100%;
+      max-height: 240px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-size: 11px;
+    }
+
+    .approval-state-note {
+      min-width: 0;
+      max-width: 100%;
+      color: var(--vscode-errorForeground);
+      font-size: 10px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+
+    .approval-state-note[data-tone='progress'] {
+      color: var(--vscode-descriptionForeground);
+    }
+
     .draft-chip-actions {
       display: flex;
+      min-width: 0;
+      max-width: 100%;
       justify-content: flex-end;
       flex-wrap: wrap;
       gap: 4px;
@@ -1423,16 +1455,7 @@ export function getStyles(): string {
     }
 
     @media (min-width: 380px) {
-      .draft-chip {
-        grid-template-columns: minmax(0, 1fr) auto;
-      }
-
       .change-set-header {
-        grid-template-columns: minmax(0, 1fr) auto;
-        align-items: start;
-      }
-
-      .draft-run-header {
         grid-template-columns: minmax(0, 1fr) auto;
         align-items: start;
       }

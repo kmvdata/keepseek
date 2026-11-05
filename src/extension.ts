@@ -85,23 +85,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (/(?:^|\/)package\.json$/u.test(document.uri.path)) {
         void provider.refreshBackgroundRunAvailability();
       }
-      if (/(?:^|\/)(?:AGENTS|SKILL)\.md$/u.test(document.uri.path)) {
-        void provider.refreshSkills();
-      }
-      if (/(?:^|\/)\.keepseek\/memory\.json$/u.test(document.uri.path)) {
-        void provider.refreshLegacyMemoryMigration();
-      }
+      provider.notifySharedSourcesChanged([document.uri]);
     }),
-    vscode.workspace.onDidCreateFiles((event) => {
-      if (event.files.some((uri) => /(?:^|\/)\.keepseek\/memory\.json$/u.test(uri.path))) {
-        void provider.refreshLegacyMemoryMigration();
-      }
-    }),
-    vscode.workspace.onDidDeleteFiles((event) => {
-      if (event.files.some((uri) => /(?:^|\/)\.keepseek\/memory\.json$/u.test(uri.path))) {
-        void provider.refreshLegacyMemoryMigration();
-      }
-    })
+    vscode.workspace.onDidCreateFiles(event => provider.notifySharedSourcesChanged(event.files)),
+    vscode.workspace.onDidDeleteFiles(event => provider.notifySharedSourcesChanged(event.files)),
+    vscode.workspace.onDidRenameFiles(event => provider.notifySharedSourcesChanged(event.files.flatMap(file => [file.oldUri, file.newUri]))),
+    vscode.commands.registerCommand('keepseek.selectProjectScope', () => provider.selectProjectScope())
   );
 }
 

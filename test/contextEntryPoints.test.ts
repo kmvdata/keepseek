@@ -8,6 +8,10 @@ import { getScript } from '../src/webview/script';
 import { getStyles } from '../src/webview/styles';
 import { getTemplate } from '../src/webview/template';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
+import { commandSkillsImplementationFragment } from '../src/webview/input/commandMenu/skills';
+import { composerSerializationFragment } from '../src/webview/input/composer/serialization';
+import { referenceMenuImplementationFragment } from '../src/webview/input/references/menu';
+import { skillsImplementationFragment } from '../src/webview/input/skills/script';
 
 test('header timeout dropdown offers exactly six presets with a one-hour default in both languages', async () => {
   const template = getTemplate();
@@ -344,7 +348,7 @@ test('Skills picker uses checkboxes and keeps selected Skills in activation orde
   const skillItemRenderer = getGeneratedSection(
     inputScript,
     'function createCommandSkillItem(skill)',
-    'function createSkillActionButton(skill, action, label, disabled)'
+    'function formatSkillMeta(skill)'
   );
   const skillOrdering = getGeneratedSection(
     inputScript,
@@ -367,7 +371,173 @@ test('Skills picker uses checkboxes and keeps selected Skills in activation orde
   assert.match(skillOrdering, /leftActive \? -1 : 1[\s\S]*?leftName\.localeCompare\(rightName/u);
   assert.match(styles, /\.command-skill-checkbox\s*\{/u);
   assert.doesNotMatch(styles, /\.command-skill-status/u);
+
+  const harness = new Function('translations', `
+    const state = { isBusy: false };
+    const sent = [];
+    const items = [
+      { id: 'ready', name: 'Ready Skill', description: 'Ready description', enabled: true },
+      { id: 'failed', name: 'Failed Skill', enabled: false, loadError: 'Fixture read failed' }
+    ];
+    const skills = { items, diagnostics: ['Fixture discovery warning'], scopeUri: 'file:///fixture/task-directory',
+      configSummary: { projectDocMaxBytes: 4321, fallbackFilenames: ['FIXTURE.md'], origins: {} } };
+    const vscode = { postMessage: message => sent.push(message) };
+    const t = (key, values = {}) => (translations[key] || key)
+      .replace(/\\{(\\w+)\\}/g, (_, name) => values[name] || '');
+    const document = { createElement: tag => ({ tag, children: [], dataset: {}, textContent: '',
+      classList: { toggle() {} }, setAttribute() {}, append(...children) { this.children.push(...children); },
+      set innerHTML(value) { this.children = []; } }) };
+    const commandSkillList = document.createElement('div');
+    const commandSkillsMainButton = null, commandSkillsButton = null;
+    const commandSkillListOpen = true, commandSkillFilterQuery = '';
+    const getSkillsState = () => skills;
+    const getCommandSkillItems = () => items;
+    const getSkillById = id => items.find(skill => skill.id === id);
+    const isSkillActive = () => false;
+    const setComposerStatus = () => {};
+    function flatten(node) { return [node].concat(...node.children.map(flatten)); }
+    ${commandSkillsImplementationFragment.source}
+    renderCommandSkills();
+    return { sent, state, handleSkillAction, nodes: flatten(commandSkillList) };
+  `)(WEBVIEW_TRANSLATIONS.en);
+  assert.equal(harness.nodes.some((node: { tag: string }) => node.tag === 'button'), false);
+  const menuText = harness.nodes.map((node: { textContent: string }) => node.textContent).join('\n');
+  assert.match(menuText, /Ready Skill[\s\S]*Ready description/u);
+  assert.match(menuText, /Fixture discovery warning/u);
+  assert.match(menuText, /Fixture read failed/u);
+  assert.doesNotMatch(menuText, /fixture\/task-directory|project_doc_max_bytes|project_doc_fallback_filenames|4321|FIXTURE\.md/u);
+  assert.equal(harness.nodes.filter((node: { tag: string }) => node.tag === 'input').length, 2);
+  harness.handleSkillAction('open', 'ready');
+  harness.handleSkillAction('workspace-default', 'ready');
+  harness.handleSkillAction('toggle-use', 'failed', true);
+  assert.deepEqual(harness.sent, []);
+  harness.handleSkillAction('toggle-use', 'ready', true);
+  harness.handleSkillAction('toggle-use', 'ready', false);
+  assert.deepEqual(harness.sent, [
+    { type: 'useSkill', skillId: 'ready' },
+    { type: 'removeActiveSkill', skillId: 'ready' }
+  ]);
+  harness.state.isBusy = true;
+  harness.handleSkillAction('toggle-use', 'ready', true);
+  assert.equal(harness.sent.length, 2);
 });
+
+test('plugin selections insert a task reference and keep its original path when the catalog refreshes', () => {
+  const helpers = getSkillWebviewHelpers();
+  const run = new Function('translations', 'language', `
+    const state = { skills: { items: [] } };
+    const links = [];
+    const sent = [];
+    const vscode = { postMessage: message => sent.push(message) };
+    const promptInput = { querySelectorAll: () => links };
+    const activeMentionRange = { cloneRange: () => 'typed mention' };
+    const isRangeInsidePrompt = () => true;
+    const getPromptInsertionRange = () => 'cursor';
+    const makeElement = () => ({ children: [], dataset: {}, setAttribute() {},
+      append(...children) { this.children.push(...children); } });
+    const document = { createElement: makeElement, createDocumentFragment: makeElement };
+    const renderSkillReferenceContent = (link, name) => { link.textContent = name; };
+    const appendReferenceBoundarySpace = () => {};
+    const insertFragmentAtRange = (range, fragment) => {
+      fragment.children.forEach(link => { link.range = range; links.push(link); });
+    };
+    const t = (key, values = {}) => (translations[key] || key)
+      .replace(/\\{(\\w+)\\}/g, (_, name) => values[name] || '');
+    const getLanguage = () => language;
+    const referenceMenu = null;
+    const setComposerStatus = () => {};
+    ${helpers}
+    ${skillsImplementationFragment.source}
+    ${composerSerializationFragment.source}
+    ${commandSkillsImplementationFragment.source}
+    ${referenceMenuImplementationFragment.source}
+    return { state, links, sent, handleSkillAction, insertSkillFromReferenceMenu, collectActiveSkillIds,
+      refreshPromptSkillLinkLabels, skillLinkToText, isPluginSkillInPrompt, filterSkillItemsByName,
+      createCommandSkillItem, hasStalePluginSkillInPrompt };
+  `);
+  const fixture = {
+    id: 'plugin-one',
+    name: 'index',
+    skillPath: '/cache/plugin (test)/1/skills/index/SKILL.md',
+    skillUri: 'file:///cache/plugin%20(test)/1/skills/index/SKILL.md',
+    enabled: true,
+    plugin: {
+      name: 'Product Design',
+      version: '1',
+      marketplace: 'remote-fixture',
+      source: 'remote',
+      qualifiedName: 'product-design:index',
+      selectionStamp: 'a'.repeat(64),
+      capabilityStatus: 'missing',
+      capabilityDetails: [{ en: 'Interactive browser', zh: '交互式浏览器', status: 'missing' }]
+    }
+  };
+  const ordinary = { id: 'shared-one', name: 'index', enabled: true };
+  const harness = run(WEBVIEW_TRANSLATIONS.en, 'en');
+  harness.state.skills.items = [ordinary, fixture];
+  assert.deepEqual(harness.filterSkillItemsByName(harness.state.skills.items, 'remote-fixture'), [fixture]);
+  const item = harness.createCommandSkillItem(fixture);
+  assert.match(item.children[0].children[0].children[2].textContent, /Product Design 1 · Remote install · remote-fixture/u);
+  assert.equal(item.children[0].children[0].children[3].textContent, 'Tools missing · Interactive browser (Missing)');
+  assert.equal(item.children.length, 1);
+  const zh = run(WEBVIEW_TRANSLATIONS['zh-CN'], 'zh-CN');
+  assert.equal(zh.createCommandSkillItem(fixture).children[0].children[0].children[3].textContent, '缺少工具 · 交互式浏览器 (缺失)');
+  harness.handleSkillAction('open', fixture.id);
+  harness.handleSkillAction('toggle-use', fixture.id, true);
+  assert.deepEqual(harness.sent, []);
+  assert.equal(harness.links[0].range, 'cursor');
+  assert.equal(harness.isPluginSkillInPrompt(fixture), true);
+  assert.equal(harness.hasStalePluginSkillInPrompt(), false);
+  assert.deepEqual(harness.collectActiveSkillIds(), []);
+  harness.insertSkillFromReferenceMenu(fixture);
+  assert.equal(harness.links[1].range, 'typed mention');
+
+  const expected = '[$product-design:index](file:///cache/plugin%20%28test%29/1/skills/index/SKILL.md#keepseek-plugin-' + 'a'.repeat(64) + ')';
+  const next = { ...fixture, plugin: { ...fixture.plugin, version: '2', selectionStamp: 'b'.repeat(64) } };
+  harness.state.skills.items = [ordinary, next];
+  harness.refreshPromptSkillLinkLabels();
+  assert.equal(harness.isPluginSkillInPrompt(next), false);
+  assert.equal(harness.hasStalePluginSkillInPrompt(), true);
+  assert.match(harness.links[0].title, /temporarily disabled.*standalone Skills/u);
+  assert.deepEqual(harness.links.map((link: unknown) => harness.skillLinkToText(link)), [expected, expected]);
+  harness.handleSkillAction('toggle-use', ordinary.id, true);
+  assert.deepEqual(harness.sent.at(-1), { type: 'useSkill', skillId: ordinary.id });
+});
+
+test('edit and resend keeps qualified plugin references verbatim and resolves a selected path uniquely', () => {
+  const transcript = getScript();
+  const helpers = getSkillWebviewHelpers();
+  const editor = getGeneratedSection(transcript, 'function renderInlineEditorContent(editor, value)', 'function sanitizeInlineEditorContent(editor)');
+  const serialize = getGeneratedSection(transcript, 'function inlineSkillLinkToText(link)', 'function makeStandaloneInlineReferenceText(text)');
+  const run = new Function('items', 'prompt', `
+    const state = { skills: { items } };
+    const document = { createTextNode: text => text, createElement: () => ({ dataset: {}, setAttribute() {} }) };
+    const renderSkillReferenceContent = () => {};
+    const sanitizeInlineEditorContent = () => {};
+    const isOffsetInsideMarkdownFence = () => false;
+    const rendered = { children: [], append(value) { this.children.push(value); } };
+    ${helpers}
+    ${editor}
+    ${serialize}
+    renderInlineEditorContent(rendered, prompt);
+    return { chipCount: rendered.children.filter(value => typeof value !== 'string').length,
+      resent: rendered.children.map(value => typeof value === 'string' ? value : inlineSkillLinkToText(value)).join('') };
+  `);
+  const first = { id: 'first', skillPath: '/first/index/SKILL.md', plugin: { qualifiedName: 'product-design:index' } };
+  const second = { id: 'second', skillPath: '/second/index/SKILL.md', plugin: { qualifiedName: 'product-design:index' } };
+  const prompt = 'Use [$product-design:index](/second/index/SKILL.md) with $product-design:index';
+  assert.deepEqual(run([first, second], prompt), { chipCount: 1, resent: prompt });
+  assert.deepEqual(run([first], prompt), { chipCount: 0, resent: prompt });
+  assert.deepEqual(run([second, { ...second, id: 'duplicate' }], prompt), { chipCount: 0, resent: prompt });
+});
+
+function getSkillWebviewHelpers(): string {
+  const script = getScript();
+  return [
+    getGeneratedSection(script, 'function getSkillItemsForView()', 'var fileReferenceIconTemplate'),
+    getGeneratedSection(script, 'function getSkillPathForView(skill)', 'function mergeSkillIdsForRequest()')
+  ].join('\n');
+}
 
 test('command menu owns project-scoped main and subagent model selection', async () => {
   const inputTemplate = getInputTemplate();
@@ -402,7 +572,8 @@ test('command menu owns project-scoped main and subagent model selection', async
   assert.match(inputScript, /type: 'setSubagentModel', mode: 'follow-main'/u);
   assert.match(inputScript, /type: 'setSubagentModel', mode: 'fixed', sourceId: sourceId, modelId: modelId/u);
   assert.match(inputScript, /function renderCommandSubagentModel\(\)/u);
-  assert.match(inputScript, /\['research', 'review', 'proposal'\]\.forEach/u);
+  assert.match(inputScript, /\['default', 'research', 'review', 'proposal', 'approval'\]\.forEach/u);
+  assert.match(inputScript, /profile: selectedProfile === 'default' \? undefined : selectedProfile/u);
   assert.match(inputScript, /profileRow\.className = 'command-subagent-profile-row'/u);
   assert.match(inputScript, /profileButton\.append\(currentLogo\)/u);
   assert.match(inputScript, /profileButton\.append\(profileModelText\)/u);
@@ -455,12 +626,18 @@ test('subagent model overview renders safely before the startup model catalog ar
     renderCommandSubagentModel();
     return {
       rowCount: commandSubagentModelList.children.length,
+      defaultLabel: commandSubagentModelList.children[0]?.children[0]?.textContent,
+      approvalLabel: commandSubagentModelList.children[4]?.children[0]?.textContent,
+      approvalDisabled: commandSubagentModelList.children[4]?.children[1]?.disabled,
       value: commandSubagentModelValue.children[0]?.textContent
     };
   `);
 
   assert.deepEqual(renderStartupState(), {
-    rowCount: 3,
+    rowCount: 5,
+    defaultLabel: 'subagentProfile_default',
+    approvalLabel: 'approvalModelTitle',
+    approvalDisabled: true,
     value: 'subagentModelLoading'
   });
 });
@@ -863,18 +1040,13 @@ test('retired Project Memory configuration keys are no longer contributed', asyn
   const keys = Object.keys(packageJson.contributes?.configuration?.properties ?? {});
 
   assert.ok(!keys.some((key) => key.startsWith('keepseek.memory.')));
-  assert.ok(keys.includes('keepseek.projectInstructions.contextBudgetTokens'));
+  assert.ok(!keys.includes('keepseek.projectInstructions.contextBudgetTokens'));
   assert.ok(keys.includes('keepseek.skills.maxImplicitActivations'));
 });
 
-test('Legacy Memory migration command is hidden by default and appears only from detected state', () => {
-  const inputTemplate = getInputTemplate();
-  const script = getInputScript();
-
-  assert.match(inputTemplate, /id="commandLegacyMemorySection" class="command-section hidden"/u);
-  assert.match(script, /var visible = migration\.detected === true/u);
-  assert.match(script, /classList\.toggle\('hidden', !visible\)/u);
-  assert.match(script, /createLegacyMemoryMigrationDraft/u);
+test('Legacy Memory migration menu and host messages are removed', () => {
+  assert.doesNotMatch(getInputTemplate(), /commandLegacyMemorySection/u);
+  assert.doesNotMatch(getInputScript(), /createLegacyMemoryMigrationDraft|setSkillEnabled|setSkillAllowImplicit/u);
 });
 
 test('generated Webview JavaScript passes syntax compilation', () => {
@@ -1078,14 +1250,14 @@ test('delete DraftEdits require a path-aware modal before the Provider applies t
   assert.match(providerSource, /showWarningMessage\([\s\S]*?\{ modal: true, detail \}/u);
 });
 
-test('Skill creation and Legacy Memory migration attach their ChangeSets to explicit timeline messages', async () => {
+test('Skill creation attaches its grouped ChangeSet to an explicit timeline message', async () => {
   const providerSource = await readFile(
     path.resolve(process.cwd(), 'src/provider/KeepseekChatViewProvider.ts'),
     'utf8'
   );
 
   assert.match(providerSource, /appendChangeSetTimelineMessage\([\s\S]*?createSkillDraftCreated[\s\S]*?messageId: timelineMessage\.id/u);
-  assert.match(providerSource, /legacyMemoryMigrationDraftCreated[\s\S]*?messageId: timelineMessage\?\.id/u);
+  assert.doesNotMatch(providerSource, /legacyMemoryMigrationDraftCreated/u);
 });
 
 function getGeneratedSection(source: string, startMarker: string, endMarker: string): string {

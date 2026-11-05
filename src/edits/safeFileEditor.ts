@@ -6,6 +6,8 @@ import * as vscode from 'vscode';
 import { getConfiguredPatchSettings } from '../shared/config';
 import { formatBytes } from '../shared/format';
 import { decodeRollbackSafeUtf8Text } from '../shared/safeTextSnapshot';
+import { assertOperationPath } from '../approvals/authorization/protectedTargets';
+import { canonicalPath } from '../approvals/authorization/pathScope';
 import { shouldSkipTextUri } from '../shared/textFileGuards';
 import type { ChangeCheckpoint, DraftEdit, FileContentIdentity, TextPatchV1 } from '../shared/types';
 import { ChangeArtifactStore } from './changeArtifactStore';
@@ -35,8 +37,11 @@ export class SafeFileEditError extends Error {
 
 export interface DelegatedEditApproval {
   authorizedUri: string;
+  authorizedUris?: readonly string[];
   isAuthorized: () => boolean;
-  source?: 'model_reviewer' | 'delegated_approver';
+  source?: 'model_reviewer' | 'delegated_approver' | 'user_click';
+  verifyScope?: () => Promise<void>;
+  skillScaffold?: boolean;
 }
 
 export interface DraftEditPreflight {
@@ -106,6 +111,9 @@ export class SafeFileEditor {
       if (await this.classifyCheckpoint(checkpoint) !== 'base') {
         throw new Error(this.t('cannotApplyChangedDraftTarget', { label: edit.label }));
       }
+      await this.assertCommonPreconditions(uri, edit, approval);
+      await approval?.verifyScope?.();
+      this.checkApproval(edit, approval);
       mutationStarted = true;
 
       await this.applyMutation(edit, uri);
@@ -124,9 +132,9 @@ export class SafeFileEditor {
     }
   }
 
-  public async revertCheckpoint(checkpoint: ChangeCheckpoint, journal?: ChangeCheckpointJournal): Promise<ChangeCheckpoint> {
+  public async revertCheckpoint(checkpoint: ChangeCheckpoint, journal?: ChangeCheckpointJournal, skillScaffold = false): Promise<ChangeCheckpoint> {
     const uri = vscode.Uri.parse(checkpoint.uri);
-    await this.assertCheckpointTarget(uri, checkpoint);
+    await this.assertCheckpointTarget(uri, checkpoint, skillScaffold && !checkpoint.originalExists);
     this.assertNoDirtyOpenEditor(uri, checkpoint.label);
     const state = await this.classifyCheckpoint(checkpoint);
     if (state !== 'result') throw new Error(this.t('cannotRevertChangedAgentFile', { label: checkpoint.label }));
@@ -197,23 +205,25 @@ export class SafeFileEditor {
   private async assertCommonPreconditions(uri: vscode.Uri, edit: DraftEdit, approval?: DelegatedEditApproval): Promise<void> {
     if (!vscode.workspace.isTrusted) throw new Error('DraftEdit requires a trusted workspace.');
     this.checkApproval(edit, approval);
-    this.assertWorkspaceTarget(uri, edit.label, approval?.authorizedUri);
+    const skillScaffold = approval?.skillScaffold === true && edit.kind === 'full_text_v1'
+      && edit.action === 'create' && !!vscode.workspace.getWorkspaceFolder(uri);
+    this.assertWorkspaceTarget(uri, edit.label, approval?.authorizedUri, skillScaffold);
     if (edit.kind === 'move_v1') {
       const target = vscode.Uri.parse(edit.targetUri);
-      this.assertWorkspaceTarget(target, edit.label, approval?.authorizedUri);
+      this.assertWorkspaceTarget(target, edit.label, approval?.authorizedUris?.includes(target.toString()) ? target.toString() : undefined);
       this.assertNoDirtyOpenEditor(target, edit.label);
       if ((await this.readIdentity(target)).exists) throw new Error(this.t('cannotApplyCreatedFileExists', { label: edit.label }));
     }
-    await this.assertNoSymlinkEscape(uri, edit.action === 'create');
+    await this.assertNoSymlinkEscape(uri, edit.action === 'create', skillScaffold);
     if (edit.kind === 'move_v1') await this.assertNoSymlinkEscape(vscode.Uri.parse(edit.targetUri), true);
     this.assertNoDirtyOpenEditor(uri, edit.label);
     await this.assertSafeDraftOutput(edit);
   }
 
-  private async assertCheckpointTarget(uri: vscode.Uri, checkpoint: ChangeCheckpoint): Promise<void> {
+  private async assertCheckpointTarget(uri: vscode.Uri, checkpoint: ChangeCheckpoint, skillScaffold: boolean): Promise<void> {
     if (!vscode.workspace.isTrusted) throw new Error('DraftEdit revert requires a trusted workspace.');
-    this.assertWorkspaceTarget(uri, checkpoint.label, checkpoint.authorizedExternalUri);
-    await this.assertNoSymlinkEscape(uri, true);
+    this.assertWorkspaceTarget(uri, checkpoint.label, checkpoint.authorizedExternalUri, skillScaffold);
+    await this.assertNoSymlinkEscape(uri, true, skillScaffold);
     if (checkpoint.targetUri) {
       const target = vscode.Uri.parse(checkpoint.targetUri);
       this.assertWorkspaceTarget(target, checkpoint.label, checkpoint.authorizedExternalUri);
@@ -533,16 +543,17 @@ export class SafeFileEditor {
     if (dirtyDocument || dirtyTab) throw new Error(this.t('cannotApplyDirtyDraftEdit', { label }));
   }
 
-  private assertWorkspaceTarget(uri: vscode.Uri, label: string, authorizedUri?: string): void {
+  private assertWorkspaceTarget(uri: vscode.Uri, label: string, authorizedUri?: string, skillScaffold = false): void {
+    assertOperationPath(uri.fsPath, true, skillScaffold);
     if (authorizedUri === uri.toString() && vscode.workspace.isTrusted) return;
     if (vscode.workspace.getWorkspaceFolder(uri)) return;
     throw new Error(this.t('cannotApplyOutsideWorkspace', { label }));
   }
 
-  private async assertNoSymlinkEscape(uri: vscode.Uri, allowMissing: boolean): Promise<void> {
+  private async assertNoSymlinkEscape(uri: vscode.Uri, allowMissing: boolean, skillScaffold = false): Promise<void> {
     if (uri.scheme !== 'file') return;
+    assertOperationPath(await canonicalPath(uri.fsPath), true, skillScaffold);
     const folder = vscode.workspace.getWorkspaceFolder(uri);
-    if (!folder) return;
     let targetReal: string;
     try {
       const info = await fs.lstat(uri.fsPath);
@@ -552,6 +563,7 @@ export class SafeFileEditor {
       if (!allowMissing || !isFileNotFoundError(error)) throw error;
       targetReal = await resolveMissingRealPath(uri.fsPath);
     }
+    if (!folder) return;
     const rootReal = await fs.realpath(folder.uri.fsPath);
     const relative = path.relative(rootReal, targetReal);
     if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {

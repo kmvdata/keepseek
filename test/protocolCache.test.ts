@@ -119,46 +119,6 @@ test('project instructions and Skills live in contextInstructions, keeping the s
   assert.equal(withDynamicContext.at(-1)?.content, 'Inspect.');
 });
 
-test('Legacy Project Memory stays in the stable contextInstructions block below the explicit user request', () => {
-  const dynamicContext: CurrentRunContext = {
-    projectInstructions: [],
-    skills: [],
-    legacyMemory: {
-      content: '- [command] Always use npm.',
-      entryIds: ['memory-1'],
-      tokenEstimate: 8,
-      sourceUris: ['file:///workspace/.keepseek/memory.json']
-    },
-    metadata: {
-      precedence: [],
-      beforeDeduplicationCount: 1,
-      afterDeduplicationCount: 1,
-      totalCharacterCount: 27,
-      totalTokenEstimate: 8,
-      truncated: false,
-      sources: [],
-      discarded: [],
-      possibleConflicts: []
-    }
-  };
-  const messages = buildInitialAgentMessages({
-    prompt: 'For this run, use pnpm instead.',
-    contextFiles: [],
-    history: [],
-    language: 'en',
-    contextInstructions: formatCurrentRunContextForAgent({
-      contextFiles: [],
-      currentRunContext: dynamicContext,
-      language: 'en'
-    })
-  });
-
-  assert.equal(messages.length, 3);
-  assert.equal(messages[1]?.role, 'system');
-  assert.ok(messages[1]?.content?.includes('lowest-priority migration compatibility'));
-  assert.equal(messages[2]?.role, 'user');
-  assert.equal(messages[2]?.content, 'For this run, use pnpm instead.');
-});
 
 test('validation tool exposes only the fixed safe npm scripts', () => {
   const tool = getAgentTools({ toolNames: [RUN_VALIDATION_TOOL_NAME] })[0];
@@ -356,7 +316,6 @@ test('project rules, skills, legacy memory, and attachments share one determinis
       skillUri: 'file:///skill/SKILL.md', content: 's'.repeat(2_000), hasScripts: false,
       activation: { source: 'explicit', reason: 'selected' }
     }],
-    legacyMemory: { content: 'l'.repeat(2_000), entryIds: ['l1'], tokenEstimate: 500, sourceUris: ['file:///legacy'] },
     metadata: {
       precedence: [], beforeDeduplicationCount: 3, afterDeduplicationCount: 3,
       totalCharacterCount: 5_000, totalTokenEstimate: 1_250, truncated: false,
