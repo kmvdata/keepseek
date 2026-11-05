@@ -18,6 +18,8 @@ import { WorkspaceToolService } from '../src/agent/tools/workspaceTools';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import { getInputScript } from '../src/webview/input/script';
 import { getInputTemplate } from '../src/webview/input/template';
+import { approvalRenderFragment } from '../src/webview/input/commandMenu/approval';
+import { modelControlsLockingFragment } from '../src/webview/input/commandMenu/models';
 import { getScript } from '../src/webview/script';
 import type { ApprovalMode, ChatMessage, ChatSession } from '../src/shared/types';
 import * as vscode from './stubs/vscode';
@@ -33,8 +35,8 @@ test('draft receipt and host authorization text describe the actual mode without
     assert.match(scope, /file:\/\/\/outside\/result.txt/u);
     assert.notEqual(localize(lang, 'approvalReviewerUnavailable'), 'approvalReviewerUnavailable');
     const delegate = WEBVIEW_TRANSLATIONS[lang].approvalDelegateDescription;
-    assert.match(delegate, lang === 'en' ? /decision remains unresolved/u : /仍无法决定/u);
-    assert.match(delegate, lang === 'en' ? /extension-host privileges, without an OS sandbox/u : /扩展宿主权限.*无操作系统沙箱/u);
+    assert.match(delegate, lang === 'en' ? /ask you when needed/u : /必要时请你确认/u);
+    assert.ok(delegate.length <= WEBVIEW_TRANSLATIONS[lang].approvalAskDescription.length * 1.2);
   }
 });
 
@@ -160,6 +162,7 @@ test('approval mode uses the model selector interaction directly below the subag
   assert.ok(subagentList < approvalSwitch);
   assert.ok(approvalSwitch < approvalList);
   assert.ok(approvalList < compressionThreshold);
+  assert.match(template.slice(approvalList, compressionThreshold), /<\/div>\s*<button id="commandApprovalModelButton"[^>]*class="command-row"/u);
   const inputScript = getInputScript();
   const optionList = inputScript.indexOf("{ mode: 'ask'");
   assert.ok(optionList >= 0);
@@ -173,6 +176,88 @@ test('approval mode uses the model selector interaction directly below the subag
   assert.match(getScript(), /approvalMode: 'ask'/u);
   assert.doesNotMatch(JSON.stringify(getAgentTools({ requestProtocolVersion: 7 })), /setApprovalMode/u);
 });
+
+test('approval submenu renders exactly two modes and keeps reviewer configuration separate', () => {
+  const script = getInputScript();
+  const bindings = script.slice(script.indexOf('if (commandApprovalModeSwitch) {'), script.indexOf('if (commandSubagentModelList) {'));
+  for (const language of ['zh-CN', 'en'] as const) {
+    const labels = WEBVIEW_TRANSLATIONS[language];
+    const modeList = new ApprovalMenuElement();
+    const modelButton = new ApprovalMenuElement();
+    const modelValue = new ApprovalMenuElement();
+    const posted: unknown[] = [];
+    const state = {
+      approvalMode: 'ask', isBusy: false, manualToolApproval: false,
+      commandSettingsReadiness: { approvalMode: 'ready' },
+      approvalReviewerSetting: { mode: 'follow-main', label: '', error: '', sourceId: '', modelId: '' }
+    };
+    const context = {
+      state, Element: ApprovalMenuElement, document: { createElement: () => new ApprovalMenuElement() },
+      commandApprovalModeSwitch: new ApprovalMenuElement(), commandApprovalModeValue: new ApprovalMenuElement(),
+      commandApprovalModeDescription: new ApprovalMenuElement(), commandApprovalModeList: modeList,
+      commandApprovalModeListOpen: true, commandApprovalModelButton: modelButton, commandApprovalModelValue: modelValue,
+      renderCommandMenu: () => {}, t: (key: string) => labels[key],
+      vscode: { postMessage: (message: unknown) => posted.push(JSON.parse(JSON.stringify(message))) }
+    };
+    const render = new Script(approvalRenderFragment.source + modelControlsLockingFragment.source + bindings
+      + '\nrenderCommandApprovalMode;').runInNewContext(context) as () => void;
+    for (const mode of ['ask', 'delegate']) {
+      state.approvalMode = mode;
+      render();
+      assert.equal(modeList.children.length, 2);
+      assert.deepEqual(modeList.children.map(item => item.dataset.approvalMode), ['ask', 'delegate']);
+      assert.deepEqual(modeList.children.map(item => item.attributes.role), ['menuitemradio', 'menuitemradio']);
+      assert.equal(modeList.children.find(item => item.attributes['aria-checked'] === 'true')?.dataset.approvalMode, mode);
+      assert.equal(modelValue.textContent, labels.approvalModelFollowMain);
+      assert.equal(modelButton.disabled, false);
+      modelButton.dispatchClick(modelButton);
+      assert.deepEqual(posted.pop(), { type: 'configureApprovalModel' });
+      const option = modeList.children[mode === 'ask' ? 1 : 0];
+      modeList.dispatchClick(option.children[1].children[0]);
+      assert.deepEqual(posted.pop(), { type: 'setApprovalMode', mode: option.dataset.approvalMode });
+      assert.equal(context.commandApprovalModeListOpen, false);
+    }
+    state.approvalReviewerSetting = { mode: 'fixed', label: 'Source · Model <literal>', error: '', sourceId: 'source', modelId: 'model' };
+    render();
+    assert.equal(modelValue.textContent, state.approvalReviewerSetting.label);
+    assert.equal(modelValue.title, modelValue.textContent);
+    state.approvalReviewerSetting.error = labels.approvalModelUnavailable;
+    render();
+    assert.equal(modelValue.textContent, labels.approvalModelUnavailable);
+    for (const patch of [{ isBusy: true }, { manualToolApproval: true },
+      { commandSettingsReadiness: { approvalMode: 'loading' } }, { commandSettingsReadiness: { approvalMode: 'error' } }]) {
+      Object.assign(state, { isBusy: false, manualToolApproval: false, commandSettingsReadiness: { approvalMode: 'ready' } }, patch);
+      render();
+      assert.equal(modelButton.disabled, true);
+      modelButton.dispatchClick(modelButton);
+      assert.equal(posted.length, 0, 'disabled reviewer configuration must not send a request');
+      assert.equal(modeList.children.length, 2, 'rerendering must not add a third entry');
+    }
+  }
+});
+
+class ApprovalMenuElement {
+  children: ApprovalMenuElement[] = [];
+  parent?: ApprovalMenuElement;
+  dataset: Record<string, string> = {};
+  attributes: Record<string, string> = {};
+  disabled = false;
+  textContent = '';
+  title = '';
+  classList = { toggle: () => {} };
+  private onClick?: (event: { target: ApprovalMenuElement; preventDefault(): void; stopPropagation(): void }) => void;
+  set innerHTML(_value: string) { this.children = []; }
+  append(...children: ApprovalMenuElement[]) {
+    children.forEach(child => { child.parent = this; });
+    this.children.push(...children);
+  }
+  setAttribute(key: string, value: string) { this.attributes[key] = value; }
+  addEventListener(_type: string, listener: NonNullable<ApprovalMenuElement['onClick']>) { this.onClick = listener; }
+  dispatchClick(target: ApprovalMenuElement) { this.onClick?.({ target, preventDefault() {}, stopPropagation() {} }); }
+  closest(selector: string): ApprovalMenuElement | null {
+    return selector === 'button[data-approval-mode]' && this.dataset.approvalMode ? this : this.parent?.closest(selector) ?? null;
+  }
+}
 
 test('delegated validation is authorized without a dialog; unknown tools remain denied', async () => {
   vscode.workspace.isTrusted = true;

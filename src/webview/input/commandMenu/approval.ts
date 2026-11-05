@@ -7,6 +7,8 @@ export const approvalDeclarationFragment: WebviewFragment = {
       var commandApprovalModeValue = document.getElementById('commandApprovalModeValue');
       var commandApprovalModeList = document.getElementById('commandApprovalModeList');
       var commandApprovalModeDescription = document.getElementById('commandApprovalModeDescription');
+      var commandApprovalModelButton = document.getElementById('commandApprovalModelButton');
+      var commandApprovalModelValue = document.getElementById('commandApprovalModelValue');
 `.slice(1)
 };
 
@@ -37,13 +39,18 @@ export const approvalBindingsFragment: WebviewFragment = {
         });
       }
 
+      if (commandApprovalModelButton) {
+        commandApprovalModelButton.addEventListener('click', function(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (commandApprovalModelButton.disabled) { return; }
+          vscode.postMessage({ type: 'configureApprovalModel' });
+        });
+      }
+
       if (commandApprovalModeList) {
         commandApprovalModeList.addEventListener('click', function(event) {
           var target = event.target instanceof Element ? event.target : null;
-          if (target?.closest('button[data-configure-approval-model]')) {
-            event.preventDefault(); event.stopPropagation();
-            vscode.postMessage({ type: 'configureApprovalModel' }); return;
-          }
           var button = target?.closest('button[data-approval-mode]');
           if (!button || button.disabled) { return; }
           event.preventDefault();
@@ -92,6 +99,20 @@ export const approvalRenderFragment: WebviewFragment = {
             ? lockText
             : t(currentDescriptionKey);
         }
+        var setting = state.approvalReviewerSetting || { mode: 'follow-main' };
+        var modelLabel = setting.error || setting.label
+          || (setting.mode === 'follow-main' ? t('approvalModelFollowMain') : (setting.sourceId || '') + ' / ' + (setting.modelId || ''));
+        if (commandApprovalModelValue) {
+          commandApprovalModelValue.textContent = modelLabel;
+          commandApprovalModelValue.title = modelLabel;
+        }
+        if (commandApprovalModelButton) {
+          var modelLocked = Boolean(state.isBusy || state.manualToolApproval || readiness !== 'ready');
+          commandApprovalModelButton.disabled = modelLocked;
+          commandApprovalModelButton.setAttribute('aria-disabled', modelLocked ? 'true' : 'false');
+          commandApprovalModelButton.setAttribute('aria-label', t('approvalModelTitle') + ': ' + modelLabel);
+          commandApprovalModelButton.title = modelLocked ? getApprovalModeLockText() : t('approvalModelHint');
+        }
         if (!commandApprovalModeList) { return; }
 
         commandApprovalModeList.classList.toggle('hidden', !commandApprovalModeListOpen);
@@ -128,16 +149,6 @@ export const approvalRenderFragment: WebviewFragment = {
           option.append(check, copy);
           commandApprovalModeList.append(option);
         });
-        var setting = state.approvalReviewerSetting || { mode: 'follow-main' };
-        var modelButton = document.createElement('button');
-        modelButton.type = 'button'; modelButton.className = 'command-model-option';
-        modelButton.dataset.configureApprovalModel = 'true';
-        modelButton.setAttribute('role', 'menuitem');
-        modelButton.disabled = Boolean(state.isBusy || state.manualToolApproval || readiness !== 'ready');
-        modelButton.textContent = t('approvalModelTitle') + ': ' + (setting.error || setting.label
-          || (setting.mode === 'follow-main' ? t('approvalModelFollowMain') : (setting.sourceId || '') + ' / ' + (setting.modelId || '')));
-        modelButton.title = t('approvalModelHint');
-        commandApprovalModeList.append(modelButton);
       }
 
       function getApprovalModeLabelKey(mode) {

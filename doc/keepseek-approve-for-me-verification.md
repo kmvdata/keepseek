@@ -22,7 +22,7 @@
 
 - 仅提供 **请求批准 / Ask for approval**、**帮我审批 / Approve for me**。内部保留 ask / delegate。伪造 `setApprovalMode:model_review` 无效。
 - 旧 model_review 当前设置降为 ask，提示旧模式已合并；历史审批来源仍标记“旧版模型审批”，历史消息不重写。已有 delegate 继续使用帮我审批。
-- 审批模式菜单内的 **审批模型 / Approval model** 打开原生模型选择器，可跟随主模型或选择固定账号与模型。同名模型按 sourceId 区分。保存后复读确认，失败有确定反馈；忙碌、已有审批或并发选择时不更改。
+- `/` 菜单中，审批模式子菜单仅含 **请求批准 / Ask for approval** 和 **帮我审批 / Approve for me**。下方独立的 **审批模型 / Approval model** 设置行打开原生模型选择器，可跟随主模型或选择固定账号与模型。同名模型按 sourceId 区分。保存后复读确认，失败有确定反馈；忙碌、已有审批或并发选择时不更改。
 - 配置键继续为用户级/application `keepseek.autoApprovalReviewer`；工作区值不参与目的地选择。固定模型不可用不会回退到其他模型或普通子代理配置。
 - follow-main 优先使用执行段实际主模型及来源的内存快照；恢复后使用该执行段保存的模型身份重新解析，不能跟随后来 UI 选择的另一个模型。
 - 普通子代理 default 及 research/review/proposal 原配置均保留；review 显示为“代码审查 / Code review”。只读与仅提案权限不变。审批用量仍为 approval reviewer，不计普通 child 调用。
@@ -63,7 +63,7 @@ printf '{"scripts":{"compile":"node --version","lint":"node --version","test":"n
 ```
 
 1. 开发仓库 `bun run compile` 后 F5 启动 Extension Development Host，打开上述 project 并信任。配置有效主模型，核对首次 ready、设置恢复、中英切换和两种审批模式；菜单键盘展开、返回和焦点应可用。
-2. 在子代理模型菜单分别记录 default/research/review/proposal。审批模式菜单选择独立审批模型，再修改子代理 default 和代码审查模型。确认两套配置不串用。固定审批账号不可用时应显示不可用；用户级配置保持原选择，工作区同名配置无效。
+2. 在子代理模型菜单分别记录 default/research/review/proposal。从 `/` 菜单独立的“审批模型”设置行选择审批模型，再修改子代理 default 和代码审查模型。确认两套配置不串用。固定审批账号不可用时应显示不可用；用户级配置保持原选择，工作区同名配置无效。展开“审批模式”应仅显示两个选项；切换中英文、收窄侧栏后，审批模型文字仍应横向排列，长名称省略且悬停可见完整值。
 3. 请求批准下创建 sample2.txt、准备版本查询，点击前零副作用，逐项批准后执行。帮我审批下进行常规编辑、Git status/diff 和固定 compile/lint/test：正常直批，无 reviewer 和残留确认按钮。
 4. 帮我审批下运行无害内联 Node 或显式 shell，创建项目内标记文件。核对独立 reviewer 账号、模型、决定、一次真实结果和自动续跑；同轮子代理记录不能增加一次普通 child 调用。
 5. 请求创建 outside/confirmed.txt，或读取未附加的 outside/reference.txt。预期只向 reviewer 提供获准材料和 URI 元数据，出现一次精确授权请求；详情显示实际文件操作、命令/cwd/目标。仅批准本次后只执行一次，模式仍是帮我审批，后续其他外部目标不能继承权限。另一次选择拒绝，目标与依赖操作不执行。
