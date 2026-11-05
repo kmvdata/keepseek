@@ -1700,7 +1700,8 @@ export function getScript(): string {
       if (backgroundLabel) {
         backgroundLabel.textContent = t('backgroundRun') + ' · ' + normalizeValidationScript(run.goal?.script);
       }
-      var statusKey = 'backgroundStatus_' + run.status;
+      var statusKey = state.approvalMode === 'delegate' && run.status === 'waiting_for_authorization'
+        ? 'approvalProcessingNow' : 'backgroundStatus_' + run.status;
       var statusLabel = t(statusKey);
       if (statusLabel === statusKey) statusLabel = run.status || t('backgroundIdle');
       statusLabel += ' · ' + t('backgroundProgress', {
@@ -1714,7 +1715,7 @@ export function getScript(): string {
       backgroundStatus.textContent = statusLabel;
       if (backgroundResume) {
         var canResume = run?.status === 'waiting_for_apply' && state.repairLoop?.status === 'ready_for_validation' && !state.isBusy;
-        backgroundResume.classList.toggle('hidden', run?.status !== 'waiting_for_apply');
+        backgroundResume.classList.toggle('hidden', state.approvalMode === 'delegate' || run?.status !== 'waiting_for_apply');
         backgroundResume.disabled = !canResume;
       }
       if (backgroundStop) {
@@ -3235,7 +3236,8 @@ export function getScript(): string {
       renderPlanNote(planBlockers, t('planBlockers'), Array.isArray(plan.blockers) ? plan.blockers.join('\\n') : '');
       renderPlanNote(planCompletion, t('planCompletion'), plan.completionSummary || '');
       if (planContinueRepair) {
-        var canContinueRepair = state.repairLoop?.status === 'ready_for_validation' && !state.isBusy && !isBackgroundActive();
+        var canContinueRepair = state.approvalMode !== 'delegate'
+          && state.repairLoop?.status === 'ready_for_validation' && !state.isBusy && !isBackgroundActive();
         planContinueRepair.classList.toggle('hidden', !canContinueRepair);
         planContinueRepair.disabled = !canContinueRepair;
       }
@@ -3554,7 +3556,9 @@ export function getScript(): string {
       var replan = draftRun.replan || target?.replan;
       var approvalBlocked = ['hard_blocked', 'identity_mismatch', 'missing'].includes(target?.status);
       var displayStatus = statusValue;
-      if (statusValue === 'needs_replan' || target?.status === 'needs_replan') {
+      if (statusValue === 'pending' && state.approvalMode === 'delegate' && !state.isBusy) {
+        displayStatus = 'blocked';
+      } else if (statusValue === 'needs_replan' || target?.status === 'needs_replan') {
         displayStatus = 'needs_replan';
       } else if (dependency || target?.status === 'dependency_blocked' || (statusValue === 'pending' && approvalBlocked)) {
         displayStatus = 'blocked';
@@ -3613,7 +3617,7 @@ export function getScript(): string {
         appendDraftRunActions(actions, draftRun, header, target, approvalBlocked);
       }
       var processing = state.approvalProcessing;
-      if (displayStatus === 'needs_replan' && state.approvalMode !== 'ask' && !state.isBusy
+      if (displayStatus === 'needs_replan' && state.approvalMode === 'model_review' && !state.isBusy
         && processing?.status === 'blocked' && processing.canResume === true && processing.runId === draftRun.agentRunId
         && processing.targets.find(function(item) { return item.status === 'needs_replan'; })?.id === draftRun.id) {
         appendApprovalStateNote(header, t('approvalInterrupted'));
@@ -3736,7 +3740,7 @@ export function getScript(): string {
     }
 
     function isHeldDraftRunApproval(target) {
-      return state.approvalProcessing?.status === 'blocked' && target
+      return ['blocked', 'stopped'].includes(state.approvalProcessing?.status) && target
         && !['executed', 'already_processed'].includes(target.status);
     }
 
@@ -3755,6 +3759,7 @@ export function getScript(): string {
     }
 
     function appendApprovalResumeAction(actions, label, authorizeTargetId) {
+      if (state.approvalMode !== 'model_review') return;
       var button = document.createElement('button');
       button.type = 'button';
       button.textContent = t(label);
@@ -3773,19 +3778,17 @@ export function getScript(): string {
       var active = processing && ['processing', 'replanning'].includes(processing.status);
       var recoverable = processing?.status === 'blocked' && processing.canResume === true;
       var fallback = processing?.status === 'replanning' ? 'approvalReplanningNow' : active ? 'approvalProcessingNow'
+        : state.approvalMode === 'delegate' && !state.isBusy ? (target ? 'approvalAutoStopped' : 'approvalAutoInactive')
         : recoverable ? 'approvalInterrupted' : state.approvalMode === 'model_review' ? 'approvalModelWaiting' : 'approvalAutoWaiting';
       if (target?.dependency) appendApprovalStateNote(notices, formatApprovalDependency(target.dependency));
       if (!target?.dependency || target.reason) {
         var reason = target?.reason || (denied && review ? review.rationale : undefined);
         appendApprovalStateNote(notices, reason || t(fallback), !reason && !recoverable);
       }
+      if (state.approvalMode === 'delegate') return false;
       var hardBlocked = ['hard_blocked', 'dependency_blocked', 'needs_replan', 'identity_mismatch', 'missing'].includes(target?.status)
         || denied && review && (review.approvalSource === 'local_policy' || review.approvalSource === 'auto_approval_review' || review.risk === 'critical');
       if (hardBlocked || target?.dependency || active || state.isBusy || processing?.status !== 'blocked') return false;
-      if (target?.status === 'manual_required' && state.approvalRecheckIds?.includes(id)) {
-        appendApprovalResumeAction(actions, 'approvalAutoRecheck');
-        return true;
-      }
       var canTakeOver = target && ['manual_required', 'review_unavailable', 'denied'].includes(target.status);
       if (canTakeOver) {
         var takeover = document.createElement('button');
@@ -3797,8 +3800,7 @@ export function getScript(): string {
         });
         actions.append(takeover);
       }
-      if (denied || target?.status === 'manual_required'
-        || (state.approvalMode === 'delegate' && target?.status === 'review_unavailable')) return Boolean(canTakeOver);
+      if (denied || target?.status === 'manual_required') return Boolean(canTakeOver);
       var needsScope = target && target.status === 'needs_authorization';
       if (!target || (!needsScope && !recoverable && target.status !== 'review_unavailable')) return false;
       appendApprovalResumeAction(actions, needsScope ? 'approvalAuthorizeExact' : canTakeOver ? 'approvalRetryReview' : 'approvalResumeProcessing',
@@ -3838,7 +3840,7 @@ export function getScript(): string {
         if (draftRun.startedAt) {
           container.append(createDraftRunActionButton(t('draftRunOpenTerminal'), 'openDraftRunTerminal', draftRun, true, false));
         }
-        if (!draftRun.spec?.restricted && !draftRun.replacementDraftRunId) {
+        if (state.approvalMode !== 'delegate' && !draftRun.spec?.restricted && !draftRun.replacementDraftRunId) {
           container.append(createDraftRunActionButton(t('draftRunClone'), 'cloneDraftRun', draftRun, true));
         }
       }
@@ -4376,7 +4378,7 @@ export function getScript(): string {
           var planWorkflow = Array.isArray(state.planWorkflows)
             ? state.planWorkflows.find(function(plan) { return plan && plan.assistantMessageId === message.id; })
             : null;
-          if (planWorkflow) body.append(createPlanDecisionCard(planWorkflow));
+          if (planWorkflow && (state.approvalMode !== 'delegate' || planWorkflow.status !== 'pending')) body.append(createPlanDecisionCard(planWorkflow));
         }
 
         if (message.role === 'assistant' && message.runState) {
@@ -4402,7 +4404,7 @@ export function getScript(): string {
 
       transcript.append(unlinkedChangeSetRegion);
       var manual = state.manualToolApproval;
-      if (manual && manual.sessionId === state.activeSessionId) {
+      if (state.approvalMode !== 'delegate' && manual && manual.sessionId === state.activeSessionId) {
         var card = document.createElement('div');
         card.className = 'draft-run-card';
         var label = document.createElement('div');
@@ -4495,7 +4497,9 @@ export function getScript(): string {
       var detail = document.createElement('div');
       detail.textContent = run.blocker || (run.outputFailure ? (state.language === 'en' ? 'Continue regenerates smaller complete calls from the saved round. Completed tools will be reused.' : '继续任务将从已保存的模型轮起点生成较小的完整调用，并复用已完成的工具结果。') : t('runRecoveryNotice'));
       panel.append(detail);
-      if (run.canResume) {
+      var approvalStopped = state.approvalMode === 'delegate' && state.approvalProcessing?.status === 'stopped'
+        && state.approvalProcessing?.rootTaskId === message.userTask?.id;
+      if (run.canResume && !approvalStopped) {
         var button = document.createElement('button');
         button.type = 'button'; button.textContent = t('runContinue');
         button.dataset.runAction = 'continueTask'; button.dataset.messageId = message.id;
@@ -4523,7 +4527,7 @@ export function getScript(): string {
       var processing = state.approvalProcessing;
       if (processing && message.runState && processing.runId === message.runState.taskId) {
         appendRunDetailRow(grid, t('runDetailsApprovalOutcome'), (processing.targets || []).map(function(target) {
-          return [target.id + ' · ' + target.status, target.reason,
+          return [target.id + ' · ' + target.status, target.failureCode, target.reason,
             target.replan?.reason && target.replan.reason !== target.reason ? t('approvalCommandReplanReason', { reason: target.replan.reason }) : '',
             target.dependency ? formatApprovalDependency(target.dependency) : ''].filter(Boolean).join(' · ');
         }).concat(processing.reason || []).join('\\n') || processing.status);

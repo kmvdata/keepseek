@@ -115,6 +115,11 @@ export class ToolAuthorizationService implements ToolAuthorizationAdapter {
       return createDecision(input.toolName, metadata, true, 'low_risk', false);
     }
 
+    if (input.policy.approvalMode === 'delegate' && !vscode.workspace.isTrusted) {
+      return createDecision(input.toolName, metadata, false, 'user_denied', false,
+        input.language === 'en' ? 'The workspace is not trusted. Nothing executed.' : '工作区不受信任，尚未执行。');
+    }
+
     if (metadata.riskLevel === 'high') {
       // 未知工具：不在 LOW_RISK_TOOLS / HIGH_RISK_TOOLS 中，schema 未注册、handleToolCall 无法路由
       // （default 返回 Unsupported tool），确认弹窗没有意义（确认后也无法执行）。直接静默拒绝并返回
@@ -274,7 +279,7 @@ export function getToolAuthorizationMetadata(
 export function createAuthorizationDeniedToolResult(decision: ToolAuthorizationDecision): string {
   return JSON.stringify({
     ok: false,
-    errorType: 'authorization_denied',
+    errorType: decision.failureCode ?? 'authorization_denied',
     authorization: decision,
     error: decision.reason ?? 'Tool authorization was denied.'
   });

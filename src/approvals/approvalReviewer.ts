@@ -118,11 +118,14 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
       // Resolution failed before any reviewer request was made. Do not label
       // the parent model as the reviewer; that would look like a silent
       // fallback even though execution correctly failed closed.
-      return await this.createUnavailable(request, undefined, error);
+      return await this.createUnavailable(request, undefined, error, undefined, 'review_configuration_unavailable');
     }
 
     let lastError: unknown;
+    let failureCode: 'review_timeout' | 'invalid_review_response' | undefined;
     for (let attempt = 0; attempt < 2; attempt++) {
+      let validatingResponse = false;
+      let persistingDecision = false;
       try {
         if (signal?.aborted) throw signal.reason ?? new Error('Approval review cancelled.');
         modelContext.taskRunBudget?.assertCanDispatch();
@@ -144,7 +147,9 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
           onUsageLedgerRecord: this.options.onUsageLedgerRecord
         });
         if (signal?.aborted) throw signal.reason ?? new Error('Approval review cancelled.');
+        validatingResponse = true;
         const decision = automatic ? parseAutoApprovalReviewerJson(raw) : parseApprovalReviewerJson(raw);
+        validatingResponse = false;
         const action = request.exactAction;
         const truncated = (action.kind === 'draft_edit_apply' || action.kind === 'draft_delete_apply') && action.proposedChange.truncated
           || action.kind === 'validation_run' && action.launch?.scripts.truncated;
@@ -156,6 +161,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
             ? 'The exact operation is paused because part of its approval evidence is missing.'
             : '审批材料不完整，精确操作已暂停。';
         }
+        persistingDecision = true;
         const record = await this.options.store.add({
           sessionId: request.sessionId,
           rootTaskId: request.rootTaskId,
@@ -167,6 +173,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
           scopeFingerprint: request.scopeFingerprint,
           approvalMode: request.approvalMode,
           approvalSource: route,
+          osIsolation: action.kind === 'draft_run_execute' || action.kind === 'validation_run' ? 'none' : undefined,
           reviewerConfigFingerprint: resolved.configFingerprint,
           originalActionHash: originalActionHash(request),
           reviewerSourceId: resolved.sourceConfig.sourceId,
@@ -181,12 +188,14 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
         });
         return this.withCircuit(request, 'reviewed', record);
       } catch (error) {
-        if (signal?.aborted) throw signal.reason ?? error;
+        if (signal?.aborted || persistingDecision) throw signal?.reason ?? error;
         lastError = error;
+        failureCode = validatingResponse ? 'invalid_review_response'
+          : error instanceof Error && /timeout|timed out|超时/iu.test(error.name + ' ' + error.message) ? 'review_timeout' : undefined;
         if (isApprovalBudgetFailure(error)) break;
       }
     }
-    return await this.createUnavailable(request, resolved, lastError);
+    return await this.createUnavailable(request, resolved, lastError, undefined, failureCode);
   }
 
   public async createHostPolicyApproval(request: ApprovalReviewRequest): Promise<ApprovalReviewOutcome> {
@@ -217,6 +226,7 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
       scopeFingerprint: request.scopeFingerprint,
       approvalMode: request.approvalMode,
       approvalSource: 'host_policy',
+      osIsolation: request.actionKind === 'draft_run_execute' || request.actionKind === 'validation_run' ? 'none' : undefined,
       reviewerSourceId: '',
       reviewerModelId: '',
       reviewerProvider: 'host_policy',
@@ -307,7 +317,8 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
     request: ApprovalReviewRequest,
     modelContext: ApprovalReviewerModelContext | Awaited<ReturnType<typeof resolveConfiguredSubagentModel>> | undefined,
     error: unknown,
-    marker?: 'review_in_progress'
+    marker?: 'review_in_progress',
+    failureCode?: 'review_configuration_unavailable' | 'review_timeout' | 'invalid_review_response'
   ): Promise<ApprovalReviewOutcome> {
     const sourceConfig = modelContext?.sourceConfig;
     const route = reviewerRoute(request.approvalMode);
@@ -333,7 +344,8 @@ export class ApprovalReviewerService implements ApprovalReviewerAdapter {
         : request.responseLanguage === 'en'
           ? `Approval model unavailable; operation did not run: ${message}`
           : `审批模型不可用，操作尚未执行：${message}`,
-      policyRules: [marker ?? (isApprovalBudgetFailure(error) ? 'approval_budget_exhausted' : 'reviewer_unavailable')]
+      policyRules: [marker ?? (isApprovalBudgetFailure(error) ? 'approval_budget_exhausted'
+        : request.approvalMode === 'delegate' && failureCode ? failureCode : 'reviewer_unavailable')]
     });
     return marker ? { status: 'unavailable', record } : this.withCircuit(request, 'unavailable', record);
   }

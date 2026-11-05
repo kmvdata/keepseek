@@ -16,6 +16,7 @@ export interface DraftRunOutputChunk {
 }
 
 export interface DraftRunExecutionOutcome {
+  started?: boolean;
   exitCode?: number;
   signal?: string;
   timedOut: boolean;
@@ -23,11 +24,17 @@ export interface DraftRunExecutionOutcome {
   error?: string;
 }
 
+export interface VerifiedDraftRunLaunch {
+  executable: string;
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+}
+
 export interface DraftRunExecutorAdapter {
   execute(input: {
     draftRun: DraftRun;
     permit: ExecutionPermit;
-    verifiedLaunch?: { executable: string; cwd: string };
+    verifiedLaunch?: VerifiedDraftRunLaunch;
     restrictedLaunch?: RestrictedPythonSyntaxLaunch;
     signal?: AbortSignal;
     onOutput: (chunk: DraftRunOutputChunk) => void;
@@ -60,7 +67,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
   public async execute(input: {
     draftRun: DraftRun;
     permit: ExecutionPermit;
-    verifiedLaunch?: { executable: string; cwd: string };
+    verifiedLaunch?: VerifiedDraftRunLaunch;
     restrictedLaunch?: RestrictedPythonSyntaxLaunch;
     signal?: AbortSignal;
     onOutput: (chunk: DraftRunOutputChunk) => void;
@@ -84,7 +91,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       throw new Error('Another DraftRun is already running.');
     }
     if (input.signal?.aborted) {
-      return { timedOut: false, cancelled: true };
+      return { started: false, timedOut: false, cancelled: true };
     }
 
     const { pty, terminal } = this.getOrCreateSessionTerminal(input.draftRun.sessionId);
@@ -94,7 +101,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
 
     const child = spawn(restricted?.executable ?? input.verifiedLaunch?.executable ?? input.draftRun.spec.executable, input.draftRun.spec.args, {
       cwd: restricted?.cwd ?? input.verifiedLaunch?.cwd ?? vscode.Uri.parse(input.draftRun.spec.cwdUri).fsPath,
-      env: restricted ? {} : createControlledEnvironment(input.draftRun.spec.env),
+      env: restricted ? {} : input.verifiedLaunch?.env ?? createControlledEnvironment(input.draftRun.spec.env),
       shell: false,
       windowsHide: true,
       detached: process.platform !== 'win32',
@@ -110,6 +117,8 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     this.running.set(input.draftRun.id, running);
     return await new Promise<DraftRunExecutionOutcome>((resolve) => {
       let settled = false;
+      let started = false;
+      child.once('spawn', () => { started = true; });
       let exitCloseTimer: ReturnType<typeof setTimeout> | undefined;
       let terminationSettleTimer: ReturnType<typeof setTimeout> | undefined;
       let exitCode: number | undefined;
@@ -154,7 +163,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         this.running.delete(input.draftRun.id);
         pty.write(`\r\n[KeepSeek DraftRun ${formatOutcomeLabel(outcome)}]\r\n`);
         pty.finishRun();
-        resolve(outcome);
+        resolve({ ...outcome, started });
       };
       const currentOutcome = (error?: string): DraftRunExecutionOutcome => ({
         exitCode,

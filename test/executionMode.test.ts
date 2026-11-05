@@ -18,6 +18,8 @@ import {
   PLAN_PHASE_BLOCKED_ERROR_TYPE,
   PLAN_WORKFLOW_TAIL,
   registerPendingPlan,
+  requestsPlanExecution,
+  isExplicitPlanOnly,
   requestPlanRevisionForNewPrompt,
   resolvePlanDecision
 } from '../src/agent/executionMode';
@@ -337,8 +339,12 @@ test('only the host plan-decision message starts a fresh protected implementatio
   };
 
   await provider.handleMessage({ type: 'resolvePlanDecision', planId: plan.id, action: 'start_execution' });
+  assert.equal(session.executionMode, 'plan');
+  assert.equal(sends.length, 0, 'an old plan card cannot grant delegate authority');
+  session.approvalMode = 'ask';
+  await provider.handleMessage({ type: 'resolvePlanDecision', planId: plan.id, action: 'start_execution' });
   assert.equal(session.executionMode, 'normal');
-  assert.equal(session.approvalMode, 'delegate');
+  assert.equal(session.approvalMode, 'ask');
   assert.equal(sends.length, 1);
   assert.equal(sends[0]?.prompt, PLAN_EXECUTION_CONTINUATION_PROMPT);
   assert.deepEqual(sends[0]?.options, { planExecutionContinuation: { planId: plan.id } });
@@ -442,3 +448,16 @@ function storedSession(id: string, executionMode: unknown): Record<string, unkno
     workspaceKey: 'workspace:test'
   };
 }
+
+test('delegate distinguishes an execution request from a plan-only task in both languages', () => {
+  for (const text of ['Plan only. Do not implement.', '只提供修复方案，先不要改代码。']) {
+    assert.equal(isExplicitPlanOnly(text), true);
+    assert.equal(requestsPlanExecution(text), false);
+  }
+  for (const text of ['Make a plan and implement it.', '给出短计划，然后实施修复。']) {
+    assert.equal(isExplicitPlanOnly(text), false);
+    assert.equal(requestsPlanExecution(text), true);
+  }
+  assert.equal(requestsPlanExecution('Analyze how to implement this.'), false);
+  assert.doesNotMatch(getPlanWorkflowTail('plan', true), /host will ask/u);
+});

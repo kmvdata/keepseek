@@ -19,7 +19,7 @@ export function isProtectedOperationPath(value: string, systemWrite = false, ski
     || /(?:^|\/)\.git\/(?:hooks|config|config\.worktree)(?:\/|$)/iu.test(normalized)
     || /^(?:\/(?:etc|private\/etc)\/(?:shadow|sudoers(?:\.d)?|ssl\/private)|\/proc\/(?:self|\d+)\/environ)(?:\/|$)/u.test(normalized)) return true;
   if (!systemWrite) return false;
-  return normalized === '/' || /^(?:\/(?:etc|private\/etc|System|Library|usr|bin|sbin|dev|proc|sys|boot)(?:\/|$)|[A-Z]:\/(?:Windows|Program Files)(?:\/|$))/iu.test(normalized)
+  return normalized === '/' || /^(?:\/(?:etc|private\/etc|System|Library|usr|bin|sbin|dev|proc|sys|boot)(?:\/|$)|[A-Z]:\/(?:Windows|Program Files(?: \(x86\))?)(?:\/|$))/iu.test(normalized)
     || /^(?:\.gitconfig|\.bashrc|\.zshrc|\.profile|\.zprofile)$/iu.test(path.posix.basename(normalized));
 }
 

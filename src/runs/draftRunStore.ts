@@ -288,15 +288,17 @@ export class DraftRunStore {
   public markNotExecuted(id: string, expectedSpecHash: string, result: {
     replan?: DraftRunReplanResult;
     dependency?: ApprovalDependency;
+    reason?: string;
   }): boolean {
     const draft = this.draftRuns.get(id);
     if (!draft || draft.status !== 'pending' || draft.specHash !== expectedSpecHash || this.approving.has(id)) return false;
     const replan = normalizeDraftRunReplan(result.replan, id, draft.agentRunId, draft.specHash);
     const dependency = normalizeApprovalDependency(result.dependency);
-    if (!replan && !dependency) return false;
-    draft.status = replan ? 'needs_replan' : 'cancelled';
+    if (!replan && !dependency && !result.reason) return false;
+    draft.status = replan ? 'needs_replan' : dependency ? 'cancelled' : 'failed';
     draft.replan = replan;
     draft.dependency = dependency;
+    draft.error = result.reason;
     draft.finishedAt = new Date().toISOString();
     draft.updatedAt = draft.finishedAt;
     this.emitState(draft);
@@ -425,8 +427,8 @@ export class DraftRunStore {
         draftRun: cloneDraftRun(draftRun),
         permit,
         restrictedLaunch,
-        verifiedLaunch: options.approvalRecord?.expectedSource === 'auto_approval_review' && verifiedScope?.verifiedLauncher
-          ? { executable: verifiedScope.verifiedLauncher, cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath }
+        verifiedLaunch: options.approvalRecord?.approvalMode === 'delegate' && verifiedScope?.boundLauncher
+          ? { executable: verifiedScope.boundLauncher, cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath, env: verifiedScope.environment }
           : verifiedScope?.executable && !verifiedScope.externalUris.length
           && (verifiedScope.trustedProjectScript || (!verifiedScope.uncertain && verifiedScope.paths.some(target => target.role === 'repository')))
           ? { executable: verifiedScope.projectScriptLaunchPath ?? verifiedScope.executable,
@@ -438,6 +440,7 @@ export class DraftRunStore {
         this.executor.cancel(draftRun.id);
       }
       const outcome = await execution.finally(() => options.signal?.removeEventListener('abort', abort));
+      if (outcome.started === false) draftRun.startedAt = undefined;
       draftRun.exitCode = outcome.exitCode;
       draftRun.signal = outcome.signal;
       draftRun.timedOut = outcome.timedOut;
@@ -462,7 +465,7 @@ export class DraftRunStore {
         draftRun.error = undefined;
       } else {
         draftRun.status = options.signal?.aborted && !executionStarted && draftRun.spec.restricted ? 'cancelled' : 'failed';
-        if (!executionStarted && draftRun.spec.restricted) draftRun.startedAt = undefined;
+        if (!executionStarted) draftRun.startedAt = undefined;
         draftRun.error = error instanceof Error ? error.message : String(error);
       }
     }

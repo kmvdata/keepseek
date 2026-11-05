@@ -156,6 +156,7 @@ function toDisplay(record: ApprovalReviewRecord): ApprovalReviewDisplay {
     actionKind: record.actionKind,
     policyVersion: record.policyVersion,
     approvalSource: record.approvalSource,
+    osIsolation: record.osIsolation,
     reviewerSourceId: record.reviewerSourceId,
     reviewerModelId: record.reviewerModelId,
     reviewerProvider: record.reviewerProvider,
@@ -182,6 +183,7 @@ function normalizeRecord(value: unknown): ApprovalReviewRecord | undefined {
     || !Number.isFinite(Date.parse(record.createdAt))) return undefined;
   return structuredClone({
     ...record,
+    osIsolation: record.osIsolation === 'none' ? record.osIsolation : undefined,
     affectedTargets: Array.isArray(record.affectedTargets)
       ? record.affectedTargets.filter(target => typeof target === 'string').slice(0, 12).map(target => target.slice(0, 300)) : undefined,
     reviewerConfigFingerprint: typeof record.reviewerConfigFingerprint === 'string' && /^[a-f0-9]{64}$/u.test(record.reviewerConfigFingerprint)

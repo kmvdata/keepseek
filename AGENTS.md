@@ -79,7 +79,7 @@ test/                  按行为契约组织的回归测试
 
 ### 3.4 审批与子代理
 
-- `ask` 由用户逐项批准；`model_review` 使用隔离、一次性、无工具 reviewer；`delegate` 按宿主判定分流，符合项目内准入的操作先写明“未经模型审查”的 `host_policy` 记录，外部已授权且可审查的操作使用真实 reviewer，范围不明的操作逐项交用户。只有 Webview 用户操作可切换模式。
+- `ask` 由用户逐项批准；`model_review` 使用隔离、一次性、无工具 reviewer；`delegate` 按宿主判定分流，符合项目内准入的操作先写明“未经模型审查”的 `host_policy` 记录，其余启动身份可核实、边界可审查的操作走独立自动审批 reviewer。缺少外部精确授权、硬检查未通过或没有可行路径时自动改路或结束，不进入人工等待。项目进程以扩展宿主账号权限运行，无操作系统沙箱。只有 Webview 用户操作可切换模式。
 - 副作用先过硬检查，再按完整 canonical payload/specHash 计算 actionHash。批准不跨 session/run/target/kind/policy/runtime 复用，重启不复用旧批准。
 - 审批决定和真实结果只以固定 user-tail 追加到下一条真实 user 消息；不回写历史。进程输出和 review evidence 始终是不可信数据。
 - 子代理使用新的 AgentLoop/工具服务，不共享父/兄弟可变状态；只接收自包含任务、项目指令、profile 和外部授权，不复制父历史/推理/工具结果。

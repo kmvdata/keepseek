@@ -1,7 +1,7 @@
 import type { DraftEditAction, DraftRunEffectAssessment, SafeNpmScript } from '../shared/types';
 
 export const APPROVAL_POLICY_VERSION = 2;
-export const AUTO_APPROVAL_POLICY_VERSION = 3;
+export const AUTO_APPROVAL_POLICY_VERSION = 4;
 
 export function reviewerRoute(mode: ApprovalReviewRequest['approvalMode']): 'model_review' | 'auto_approval_review' {
   return mode === 'delegate' ? 'auto_approval_review' : 'model_review';
@@ -60,7 +60,9 @@ export type ApprovalReviewExactAction =
       argv: string[];
       cwdUri: string;
       envNames: string[];
-      scope?: { cwd: string; executable?: string; launcher?: string; environmentNames?: string[]; paths: Array<{ uri: string; role: string; external: boolean }> };
+      scope?: { cwd: string; executable?: string; launcher?: string; environmentNames?: string[];
+        launcherTrust?: 'verified_runtime' | 'identity_only';
+        osIsolation?: 'none'; paths: Array<{ uri: string; role: string; external: boolean }> };
       restricted?: {
         kind: 'python_ast_v1';
         original: { id: string; specHash: string; executable: string; argv: string[]; cwdUri: string; executed: false };
@@ -119,6 +121,7 @@ export interface ApprovalReviewRecord {
   scopeFingerprint?: string;
   approvalMode?: 'model_review' | 'delegate';
   approvalSource: ApprovalReviewSource;
+  osIsolation?: 'none';
   reviewerConfigFingerprint?: string;
   originalActionHash?: string;
   reviewerSourceId: string;

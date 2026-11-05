@@ -207,7 +207,7 @@ spawn(executable, args, { shell: false })
 | --- | --- | --- |
 | `ask` | 用户 | 默认；逐项或批量批准 |
 | `model_review` | 隔离 reviewer | 长任务适用；逐 actionHash 审查，可拒绝 |
-| `delegate` | 宿主策略 | 不经模型审查，但必须生成 `host_policy` 记录 |
+| `delegate` | 宿主策略与独立自动审批 reviewer | 常规操作直批，其他可审查操作自动送审。缺少授权或无法执行时自动改路或结束 |
 
 共同规则：
 

@@ -560,13 +560,14 @@ export class ChangeSetStore {
     return result;
   }
 
-  public discardEdit(editId: string): boolean {
+  public discardEdit(editId: string, automaticStopReason?: string): boolean {
     const found = this.findEdit(editId);
-    if (!found || !isApplicable(found.edit) || this.activeEditOperations.has(found.edit.id)) {
+    if (!found || !isApplicable(found.edit) || this.activeEditOperations.has(found.edit.id)
+      || (automaticStopReason && found.edit.status !== 'pending')) {
       return false;
     }
     found.edit.status = 'discarded';
-    found.edit.error = undefined;
+    found.edit.error = automaticStopReason;
     this.updateChangeSetStatus(found.changeSet);
     this.recordTrace(found.changeSet, {
       type: 'change_set_file_discarded',

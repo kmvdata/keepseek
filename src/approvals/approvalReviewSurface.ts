@@ -100,8 +100,9 @@ export function createDraftRunReviewRequest(input: {
       envNames: input.draftRun.spec.env.map(({ name }) => name),
       scope: plan ? { cwd: input.draftRun.spec.cwdUri, executable: input.draftRun.spec.executable,
         paths: [{ uri: plan.targetUri, role: 'read_snapshot', external: false }] }
-        : input.scope && { cwd: input.scope.cwd, executable: input.scope.executable, launcher: input.scope.verifiedLauncher,
-          environmentNames: input.scope.environmentNames, paths: input.scope.paths },
+        : input.scope && { cwd: input.scope.cwd, executable: input.scope.executable, launcher: input.scope.boundLauncher,
+          launcherTrust: input.scope.verifiedLauncher ? 'verified_runtime' : 'identity_only',
+          osIsolation: 'none', environmentNames: input.scope.environmentNames, paths: input.scope.paths },
       restricted: plan && original && { kind: plan.kind, original: {
         id: original.id, specHash: original.specHash, executable: original.spec.executable,
         argv: [...original.spec.args], cwdUri: original.spec.cwdUri, executed: false

@@ -39,6 +39,7 @@ export async function inspectLocalGitScope(input: {
   commitAll?: boolean;
   addPathspecs?: readonly string[];
   addTracksOnly?: boolean;
+  refMutation?: { name: string; action: 'create' | 'delete' | 'force' };
 }): Promise<GitScopeResult> {
   try {
     const cwd = await realpath(joinUnresolvedPath(input.cwd, ...input.cwdChanges.filter(Boolean)));
@@ -133,6 +134,7 @@ export async function inspectLocalGitScope(input: {
         || (key === 'core.fsmonitor' && !isDisabled(value))
         || (key === 'core.splitindex' && !isDisabled(value))
         || (input.subcommand === 'commit' && key === 'commit.gpgsign' && !isDisabled(value))
+        || (input.subcommand === 'tag' && input.refMutation && /^(?:tag\.gpgsign|tag\.forcesignannotated)$/u.test(key) && !isDisabled(value))
         || /^maintenance\..*\.enabled$/u.test(key) && !isDisabled(value)) {
         return { reason: `Git configuration requires separate review: ${key}. / Git 配置需要单独核对：${key}。` };
       }
@@ -140,7 +142,9 @@ export async function inspectLocalGitScope(input: {
     const { stdout: discovered } = await readGit(input.executable, ['rev-parse', '--show-toplevel', '--absolute-git-dir'], {
       cwd, env: input.env, timeout: 3000, maxBuffer: 32 * 1024, windowsHide: true
     });
-    if (discovered !== `${repository}\n${metadata}\n`) {
+    const [foundRepository, foundMetadata, remainder] = discovered.trimEnd().split(/\r?\n/u);
+    if (remainder !== undefined || !foundRepository || !foundMetadata
+      || await realpath(foundRepository) !== repository || await realpath(foundMetadata) !== metadata) {
       return { reason: 'Git discovery does not match the inspected repository. / Git 实际发现的仓库与已核对的仓库不一致。' };
     }
 
@@ -163,6 +167,7 @@ export async function inspectLocalGitScope(input: {
       const mayRefreshIndex = (input.subcommand === 'status' && !input.noOptionalLocks)
         || (input.subcommand === 'diff' && !input.noIndexRefresh && !isDisabled(effective.get('diff.autorefreshindex') ?? ''));
       const relevantHooks = input.subcommand === 'commit' ? hooks
+        : input.refMutation ? ['reference-transaction']
         : input.subcommand === 'add' || mayRefreshIndex ? ['post-index-change'] : [];
       const hookFacts = await Promise.all(relevantHooks.map(async name => {
         const file = path.join(resolved, name);
@@ -195,6 +200,15 @@ export async function inspectLocalGitScope(input: {
 
     const committing = input.subcommand === 'commit';
     const staging = input.subcommand === 'add';
+    let referenceIdentity;
+    if (input.refMutation) {
+      const ref = path.join('refs', input.subcommand === 'tag' ? 'tags' : 'heads', input.refMutation.name);
+      const target = path.join(metadata, ref);
+      if (await hasSymlinkBelow(metadata, target) || await hasSymlinkBelow(metadata, path.join(metadata, 'logs', ref))) {
+        return { reason: 'Git reference storage is redirected. / Git 引用存储已重定向。', hardBlocked: true };
+      }
+      referenceIdentity = entryIdentity(await inspectEntry(target));
+    }
     const operationMarkers = committing
       ? await Promise.all(inProgressEntries.map(async name => entryIdentity(await inspectEntry(path.join(metadata, name)))))
       : [];
@@ -231,7 +245,7 @@ export async function inspectLocalGitScope(input: {
     const fingerprint = createHash('sha256').update(JSON.stringify([
       repository, metadata, directory.dev, directory.ino, headText, headRefIdentity,
       entryIdentity(entries[1]), entryIdentity(entries[8]), stdout, hooksPath, hookIdentities,
-      operationMarkers, mutationStatus, workingTree
+      operationMarkers, mutationStatus, workingTree, referenceIdentity
     ])).digest('hex');
     if (scopeReason) return { reason: scopeReason, binding: fingerprint };
     if (executableHook) return {

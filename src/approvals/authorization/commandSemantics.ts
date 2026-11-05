@@ -17,6 +17,7 @@ export interface CommandSemantics {
   effects: DraftRunEffect[];
   reasons: AuthorizationReason[];
   gitCommit?: { all: boolean; messages: string[] };
+  gitRefMutation?: { name: string; action: 'create' | 'delete' | 'force' };
   gitReplan?: GitCommandReplan;
   projectScript?: true;
 }
@@ -50,8 +51,8 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     result.reasons.push(authorizationReason(code, detail, en, zh));
   };
   const unsupported = (value: string) => reason('unsupported_option', value,
-    'This argument or behavior is outside the supported command grammar; authorize the exact operation.',
-    '该参数或行为不在支持的命令语法内；请授权精确操作。');
+    'This argument or behavior is outside the host command grammar.',
+    '该参数或行为不在宿主命令语法内。');
   const valueAfter = (index: number, role: ArgumentRole): number => {
     arg(index, 'option');
     if (index + 1 >= args.length) {
@@ -96,14 +97,31 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     }
     const subcommand = args[i];
     if (subcommand) arg(i++, 'subcommand');
+    const operands = args.slice(i);
+    const listingTags = subcommand === 'tag' && (operands.length === 0
+      || (['--list', '-l'].includes(operands[0]) && operands.slice(1)
+        .every(token => /^--sort=-?(?:v|version):refname$/u.test(token))));
+    const refAction = ['-d', '--delete'].includes(operands[0]) ? 'delete'
+      : ['-f', '--force'].includes(operands[0]) ? 'force' : 'create';
+    const refOperands = refAction === 'create' ? operands : operands.slice(1);
+    const boundedRef = ['tag', 'branch'].includes(subcommand) && !listingTags
+      && refOperands.length >= 1 && refOperands.length <= (refAction === 'delete' ? 1 : 2)
+      && refOperands.every(token => /^(?![.-]|.*(?:\.\.|\/\.))[\w][\w./-]*$/u.test(token));
+    if (boundedRef) {
+      result.gitRefMutation = { name: refOperands[0], action: refAction };
+      if (refAction !== 'create') reason('git_ref_mutation', refAction,
+        'Changing an existing local reference needs task-specific review.',
+        '修改已有本地引用需要结合当前任务审查。');
+    }
     const viewing = ['show', 'diff', 'log'].includes(subcommand);
     if (['add', 'apply', 'am', 'branch', 'checkout', 'clean', 'clone', 'commit', 'fetch', 'gc', 'init', 'merge', 'mv',
-      'pull', 'push', 'rebase', 'remote', 'reset', 'restore', 'revert', 'rm', 'stash', 'switch', 'tag', 'worktree'].includes(subcommand)) effects.add('git_mutation');
+      'pull', 'push', 'rebase', 'remote', 'reset', 'restore', 'revert', 'rm', 'stash', 'switch', 'tag', 'worktree'].includes(subcommand)
+      && !listingTags) effects.add('git_mutation');
     if (['clone', 'fetch', 'pull', 'push'].includes(subcommand)) effects.add('network');
     const staging = subcommand === 'add';
     const committing = subcommand === 'commit';
     const status = subcommand === 'status';
-    if (!viewing && !staging && !committing && !status) unsupported(subcommand ?? 'missing Git subcommand');
+    if (!viewing && !staging && !committing && !status && !listingTags && !boundedRef) unsupported(subcommand ?? 'missing Git subcommand');
     const commitMessages: string[] = [];
     const commitPathspecPositions: number[] = [];
     let commitAll = false;
@@ -113,7 +131,11 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
     for (; i < args.length; i++) {
       const token = args[i];
       if (!paths && token === '--') { paths = true; arg(i, 'option'); continue; }
-      if (committing) {
+      if (listingTags) {
+        arg(i, 'option');
+      } else if (boundedRef) {
+        arg(i, token.startsWith('-') ? 'option' : 'revision');
+      } else if (committing) {
         if (!paths && ['-m', '-am', '--message'].includes(token)) {
           commitAll ||= token === '-am';
           if (i + 1 === args.length) {
@@ -184,6 +206,7 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
         if (/^--(?:format|pretty)=/u.test(token) && /%G/u.test(value)) helper(token);
       } else if (/^(?:--(?:max-count|unified)=\d+|-[nU]\d+)$/u.test(token)
         || (subcommand === 'log' && /^-\d+$/u.test(token))
+        || (subcommand === 'log' && /^--decorate(?:=(?:short|full|auto|no))?$/u.test(token))
         || ['--format', '--pretty', '--oneline', '--stat', '--numstat', '--shortstat', '--name-only', '--name-status',
           '--raw', '-p', '-u', '--patch', '-s', '--no-patch', '--no-ext-diff', '--no-textconv', '--no-color',
           '--color=never', '--cached', '--staged', '--summary', '--check', '--binary', '--full-index', '--no-renames', '--exit-code', '--quiet'].includes(token)) {
@@ -293,11 +316,16 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
       const inline = args.findIndex(a => ['-c', '-e', '--eval', '-Command', '-command', '/c', '/C'].includes(a)
       || (program.endsWith('sh') && /^-[a-z]*c[a-z]*$/u.test(a)));
       let scriptSeen = false;
-      const packageManager = ['npm', 'pnpm', 'yarn'].includes(program);
+      const packageManager = ['npm', 'pnpm', 'yarn', 'bun'].includes(program);
+      const bunFile = program === 'bun' && /\.(?:[cm]?[jt]s|[jt]sx)$/iu.test(args[0] ?? '');
+      const directoryOption = /^(?:--prefix|--cwd|--dir|--cache|-C)$/u;
       args.forEach((value, i) => {
+        const attachedDirectory = /^(?:--(?:prefix|cwd|dir|cache)=|-C(?=\/|\.|[a-z]:))(.*)$/iu.exec(value);
         if (inline >= 0) arg(i, i === inline + 1 ? 'inline_code' : i <= inline ? 'option' : 'text');
-        else if (packageManager) arg(i, i === 0 ? 'subcommand' : 'text');
-        else if (program === 'bun' && i === 0 && ['run', 'install', 'add', 'remove', 'update', 'test', 'build', 'x'].includes(value)) arg(i, 'subcommand');
+        else if (bunFile && i === 0) arg(i, 'script');
+        else if (packageManager && attachedDirectory) arg(i, 'write_path', attachedDirectory[1]);
+        else if (packageManager && directoryOption.test(args[i - 1] ?? '')) arg(i, 'write_path');
+        else if (packageManager) arg(i, i === 0 && !value.startsWith('-') ? 'subcommand' : value.startsWith('-') ? 'option' : 'text');
         else if (value.startsWith('-')) arg(i, 'option');
         else { arg(i, scriptSeen ? 'text' : 'script'); scriptSeen = true; }
       });
@@ -307,12 +335,16 @@ export function analyzeCommand(spec: DraftRunSpec): CommandSemantics {
       'Script contents, shell syntax and package lifecycle commands are not statically scoped.',
       '脚本内容、shell 语法和包生命周期命令无法静态确定范围。');
   } else {
-    const writers = ['rm', 'rmdir', 'del', 'erase', 'unlink', 'truncate', 'mkfs', 'format', 'cp', 'mv', 'mkdir', 'touch', 'install', 'tee', 'patch', 'chmod', 'chown', 'chgrp', 'setfacl'];
+    const writers = ['rm', 'rmdir', 'del', 'erase', 'unlink', 'truncate', 'mkfs', 'format', 'dd', 'cp', 'mv', 'mkdir', 'touch', 'install', 'tee', 'patch', 'chmod', 'chown', 'chgrp', 'setfacl'];
     if (writers.includes(program)) effects.add('workspace_write');
     if (['curl', 'wget', 'ssh', 'scp', 'sftp', 'ftp', 'nc', 'ncat', 'telnet'].includes(program)) effects.add('network');
     if (['sudo', 'doas', 'runas', 'pkexec'].includes(program)) effects.add('privilege_escalation');
     if (['printenv', 'env', 'set'].includes(program)) effects.add('credential_access');
     args.forEach((value, i) => {
+      if (program === 'dd' && /^(?:if|of)=/u.test(value)) {
+        arg(i, value.startsWith('of=') ? 'write_path' : 'read_path', value.slice(3));
+        return;
+      }
       // This fallback only identifies explicit path-shaped operands. It never
       // claims unknown arguments/effects are fully covered.
       const operand = value.replace(/^--[\w-]+=/u, '').replace(/^-[Cof](?=\/|\.\.?[\\/]|[A-Za-z]:[\\/])/u, '');

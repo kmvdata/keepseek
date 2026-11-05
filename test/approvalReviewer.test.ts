@@ -447,7 +447,7 @@ test('automatic reviewer keeps independent models, policy, approval matches, and
     const a = await review('delegate', 'auto-approve');
     const m = await review('model_review', 'model-approve');
     assert.deepEqual(calls.map(call => [call.model, call.source]), [['auto-model', 'auto'], ['model-reviewer', 'model']]);
-    assert.match(calls[0].system, /Auto approval reviewer policy v3/u);
+    assert.match(calls[0].system, /Auto approval reviewer policy v4/u);
     assert.match(calls[1].system, /Approval Reviewer Policy v2/u);
     assert.equal(calls[0].user.match(/<\/UNTRUSTED_EVIDENCE>/gu)?.length, 1);
     assert.equal(a.record.approvalSource, 'auto_approval_review');

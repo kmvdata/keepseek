@@ -1965,9 +1965,10 @@ export class AgentLoop {
           } else {
             const authorizationMetadata = getToolAuthorizationMetadata(toolCall.function.name, toolArgs);
             if (authorizationMetadata.riskLevel !== 'low') {
+              const automatic = runAuthorizationPolicy.approvalMode === 'delegate';
               emitStatus({
-                base: 'waiting',
-                phase: 'awaiting_authorization',
+                base: automatic ? 'thinking' : 'waiting',
+                phase: automatic ? 'reviewing_tool_result' : 'awaiting_authorization',
                 toolName: toolCall.function.name,
                 detail: authorizationMetadata.scope
               });
@@ -2155,7 +2156,11 @@ export class AgentLoop {
             for (const draftEditId of draftEditIds) validationState.recordDraftEdit(draftEditId);
             if (repairLoop.getState().status === 'generating_repair') {
               for (const draftEditId of draftEditIds) repairLoop.recordDraftEdit(draftEditId);
-              const detail = request.language === 'en'
+              const detail = runAuthorizationPolicy.approvalMode === 'delegate'
+                ? request.language === 'en'
+                  ? 'Repair prepared. KeepSeek will process it automatically before the next validation.'
+                  : '修复已准备。KeepSeek 会自动处理修改，然后继续验证。'
+                : request.language === 'en'
                 ? 'Repair prepared. Apply the pending ChangeSet before validation can continue.'
                 : '修复已准备。请先应用待确认 ChangeSet，之后才能继续验证。';
               taskPlan.markWaitingForApply(detail);
@@ -3607,10 +3612,10 @@ export class AgentLoop {
     const toolName = input.toolCall.function.name;
     const language = input.request.language;
     let scope: 'workspace_read' | 'validation_compile_lint' | 'validation_test' = 'workspace_read';
-    const deny = (reason: string, outcome?: ApprovalReviewOutcome): ToolAuthorizationDecision => ({
+    const deny = (reason: string, outcome?: ApprovalReviewOutcome, failureCode?: string): ToolAuthorizationDecision => ({
       allowed: false, toolName, riskLevel: scope === 'workspace_read' ? 'low' : 'medium', scope,
       source: outcome && ['model_review', 'auto_approval_review'].includes(outcome.record.approvalSource) ? 'model_reviewer' : 'user_denied',
-      requiresExplicitConfirmation: true, reason,
+      requiresExplicitConfirmation: mode !== 'delegate', reason, failureCode,
       approvalReview: outcome && toApprovalReviewDisplay(outcome.record),
       approvalCircuitBreakReason: outcome?.circuitBreakReason
     });
@@ -3623,9 +3628,11 @@ export class AgentLoop {
       const rawPath = this.readRequiredString(input.args, 'path');
       const external = await this.workspaceTools.inspectExternalRead?.(rawPath);
       if (!external) return undefined;
-      if (!external.authorized) return deny(language === 'en'
-        ? `External read requires an exact reference. Attach this file to authorize reading it: ${external.canonicalUri}`
-        : `外部读取需要精确引用。请附加此文件以授权读取：${external.canonicalUri}`);
+      if (!external.authorized) return deny(mode === 'delegate'
+        ? language === 'en' ? 'The external file has no prior exact read grant. Use workspace evidence.'
+          : '此外部文件缺少事先授予的精确读取权限，请使用工作区内的证据。'
+        : language === 'en' ? `External read requires an exact reference. Attach this file to authorize reading it: ${external.canonicalUri}`
+          : `外部读取需要精确引用。请附加此文件以授权读取：${external.canonicalUri}`, undefined, 'external_authorization_required');
       snapshot = external.fingerprint;
       label = external.canonicalUri;
       reviewRequest = createExternalFileReviewRequest({
@@ -3646,7 +3653,12 @@ ${launch.evidence.content}`;
       const baseline = this.validationBaselines.get(this.validationTaskKey(input.request));
       if (mode === 'delegate' && launch.hostEligible
         && baseline?.get(validationBaselineKey(launch.cwdUri, script)) === launch.fingerprint) route = 'host_policy';
-      else if (!launch.evidenceComplete) route = 'user_click';
+      else if (!launch.evidenceComplete) {
+        if (mode === 'delegate') return deny(language === 'en'
+          ? 'The fixed validation launch is missing required evidence. Nothing executed.'
+          : '固定验证的启动证据不足，尚未执行。', undefined, 'insufficient_launch_evidence');
+        route = 'user_click';
+      }
       reviewRequest = createValidationReviewRequest({
         request: input.request, agentRunId: input.agentRunId, targetId: input.toolCall.id, script,
         workspaceRootId: preflight.workspaceRootId, snapshot: launch
@@ -3656,13 +3668,13 @@ ${launch.evidence.content}`;
     }
 
     const reviewer = this.approvalReviewer;
-    if (!reviewer) return deny(language === 'en' ? 'Approval model unavailable; nothing executed.' : '审批模型不可用，尚未执行。');
+    if (!reviewer) return deny(language === 'en' ? 'Approval model unavailable; nothing executed.' : '审批模型不可用，尚未执行。', undefined, 'approval_reviewer_unavailable');
     reviewRequest = { ...reviewRequest, approvalMode: mode, scopeFingerprint: snapshot };
     const signal = input.request.signal;
     let outcome = route === 'host_policy' ? await reviewer.createHostPolicyApproval(reviewRequest)
       : route !== 'user_click' ? await reviewer.review(reviewRequest, toReviewerModelContext(input.request), signal) : undefined;
     const prior = outcome;
-    if ((!outcome || (outcome.record.decision !== 'approve' && outcome.record.approvalSource === 'model_review'
+    if (mode === 'model_review' && (!outcome || (outcome.record.decision !== 'approve' && outcome.record.approvalSource === 'model_review'
       && !outcome.record.policyRules.includes('approval_budget_exhausted')
       && (outcome.record.decision === 'unavailable' || outcome.record.risk !== 'critical')))
       && reviewer.createUserApproval && this.requestManualToolApproval && !signal?.aborted) {

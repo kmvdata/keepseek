@@ -1451,6 +1451,7 @@ export interface RunAuthorizationPolicy {
 }
 
 export interface ToolAuthorizationDecision {
+  failureCode?: string;
   allowed: boolean;
   toolName: string;
   riskLevel: ToolRiskLevel;

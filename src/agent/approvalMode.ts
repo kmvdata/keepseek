@@ -19,7 +19,7 @@ export function getApprovalModeUserTail(mode: ApprovalMode): string {
     'Pass -a and -m separately when needed and give every -m exactly one complete message argument.'
   ].join(' ');
   return mode === 'delegate'
-    ? `<keepseek-approval-mode>delegate: The user selected project-wide Approve for me. Propose the exact DraftEdits and DraftRuns needed for the task. ${validation} ${git} Run an existing project script with a direct interpreter and the script path as its first argument, followed by separate script arguments. This can be approved as trusted project code. The host approves eligible drafts first. A dedicated Auto approval reviewer can review host-verified operations outside the direct policy, including a restricted syntax-only replacement when available. The host reports actual results and identifies any original command that did not start. Replan only from a structured never-started correction, retaining completed operations. External scope and unsafe or uncertain effects may require review or explicit user action. Never retry or route around a paused or denied operation. Continue while authorized work remains. Report completion only after actual results verify the requested outcome, or explain the concrete blocker.</keepseek-approval-mode>`
+    ? `<keepseek-approval-mode>delegate: The user selected unattended Auto approval for this task. Propose the exact DraftEdits and DraftRuns needed for the task. ${validation} ${git} The host approves eligible drafts and sends other verifiable operations to the dedicated Auto approval reviewer. Normal project scripts, shell, dependency operations and inline code may run with extension-host privileges. Exact external scope must be granted in advance. Use verified workspace alternatives when required evidence or authority is unavailable. The host reports actual results and distinguishes commands that never started from known and unknown effects. Do not ask the user to click, grant access, retry review, or resume. Reuse completed work. Never repeat an uncertain effect or pursue an operation denied on safety grounds. Continue while authorized work remains. Report completion only after actual results verify the requested outcome, or explain the concrete blocker and unfinished work.</keepseek-approval-mode>`
     : mode === 'model_review'
       ? `<keepseek-approval-mode>model_review: The user selected project-wide Model review. Propose exact immutable DraftEdits and DraftRuns. ${validation} An isolated reviewer will approve or deny each effect after this turn. A denial is a safety decision, not an execution error: do not retry variants or indirect equivalents. Only propose a materially safer new action with a new hash, or stop and explain when none exists. Claim effects only after real results arrive.</keepseek-approval-mode>`
     : `<keepseek-approval-mode>ask: The user selected project-wide Ask for approval. File writes and arbitrary commands require individual user approval. ${validation} Prepare pending drafts and wait for their results.</keepseek-approval-mode>`;
@@ -29,6 +29,7 @@ export interface DelegatedApprovalBatch {
   sessionId: string;
   runId: string;
   rootTaskId?: string;
+  backgroundRunId?: string;
   editIds: string[];
   draftRunIds: string[];
   confirmTargetId?: string;

@@ -453,7 +453,7 @@ test('automatic cards distinguish processing, scope authorization, hard failure 
       return { note: notes.children[0], buttons: actions.children };
     };
     const waiting = renderState();
-    assert.equal(waiting.note.textContent, labels[mode === 'delegate' ? 'approvalAutoWaiting' : 'approvalModelWaiting']);
+    assert.equal(waiting.note.textContent, labels[mode === 'delegate' ? 'approvalAutoInactive' : 'approvalModelWaiting']);
     assert.equal(waiting.buttons.length, 0);
     ui.state.approvalProcessing = { version: 1, runId: 'r', rootTaskId: 'task', mode: mode as 'delegate' | 'model_review',
       status: 'processing', updatedAt: '', targets: [{ id: 'A', kind: 'command', status: 'pending' }] };
@@ -464,7 +464,7 @@ test('automatic cards distinguish processing, scope authorization, hard failure 
     ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'needs_authorization', reason: 'file:///external/result.txt' };
     const external = renderState();
     assert.equal(external.note.textContent, 'file:///external/result.txt');
-    assert.equal(external.buttons[0].textContent, labels.approvalAuthorizeExact);
+    assert.deepEqual(external.buttons.map(button => button.textContent), mode === 'model_review' ? [labels.approvalAuthorizeExact] : []);
     ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'failed', reason: 'Dirty editor' };
     const failure = renderState();
     assert.equal(failure.note.textContent, 'Dirty editor');
@@ -472,16 +472,18 @@ test('automatic cards distinguish processing, scope authorization, hard failure 
     ui.state.approvalProcessing.targets[0] = { id: 'A', kind: 'command', status: 'denied', reason: 'Denied by reviewer' };
     const denied = renderState({ decision: 'deny', rationale: 'Denied by reviewer' });
     assert.equal(denied.note.textContent, 'Denied by reviewer');
-    assert.equal(denied.buttons.length, 1);
-    assert.equal(denied.buttons[0].textContent, labels.approvalConfirmOnce);
-    denied.buttons[0].click();
-    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.at(-1))), { type: 'resumeApprovalProcessing', confirmTargetId: 'A' });
+    assert.equal(denied.buttons.length, mode === 'model_review' ? 1 : 0);
+    if (mode === 'model_review') {
+      assert.equal(denied.buttons[0].textContent, labels.approvalConfirmOnce);
+      denied.buttons[0].click();
+      assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.at(-1))), { type: 'resumeApprovalProcessing', confirmTargetId: 'A' });
+    }
     ui.state.approvalProcessing.targets[0].status = 'hard_blocked';
     assert.equal(renderState({ decision: 'deny', approvalSource: 'local_policy' }).buttons.length, 0);
   }
 }));
 
-test('Git draft cards separate preflight diagnostics from prerequisites and expose only explicit restart recovery', async () => fixture(async f => {
+test('Git draft cards show preflight diagnostics and never offer delegate restart recovery', async () => fixture(async f => {
   f.add(['A', 'B']);
   for (const language of ['en', 'zh-CN'] as const) {
     const ui = renderHarness(f, language);
@@ -520,9 +522,8 @@ test('Git draft cards separate preflight diagnostics from prerequisites and expo
     processing.canResume = true;
     assert.equal(render(second).filter(node => node.type === 'button').length, 0);
     const resume = render(first).filter(node => node.type === 'button');
-    assert.deepEqual(resume.map(node => node.textContent), [labels.approvalResumeProcessing]);
-    resume[0].click();
-    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'resumeApprovalProcessing' });
+    assert.equal(resume.length, 0);
+    assert.equal(ui.messages.length, 0);
     processing.canResume = false;
     processing.targets[0].reason = labels.approvalReplanRepeated;
     const stopped = render(first);
@@ -530,7 +531,7 @@ test('Git draft cards separate preflight diagnostics from prerequisites and expo
     assert.deepEqual(texts(stopped), [labels.approvalCommandReplanReason.replace('{reason}', statusReason), labels.approvalReplanRepeated]);
     ui.state.approvalProcessing = undefined;
     const waiting = render(status);
-    assert.ok(waiting.some(node => node.textContent === labels.draftRunTitlePreparing));
+    assert.ok(waiting.some(node => node.textContent === labels.draftRunTitleBlocked));
     assert.ok(!waiting.some(node => node.type === 'button'));
     ui.state.approvalMode = 'ask';
     assert.equal(render(status).filter(node => node.dataset.draftRunAction === 'approveDraftRun').length, 2);
@@ -574,18 +575,26 @@ test('command and file cards keep complete automatic notes outside button groups
       assert.equal(notes[0].textContent, reason);
       assert.equal(notes[0].childElementCount, 0, 'untrusted reasons stay literal text');
       assert.equal(nodes.filter(n => n.textContent === reason).length, 1);
+      if (mode === 'delegate' && id === 'A') {
+        assert.equal(actions, undefined);
+        continue;
+      }
       assert.equal(notes[0].parentElement, actions.parentElement, 'note occupies a sibling row');
       assert.ok(!actions.contains(notes[0]));
       assert.ok(actions.children.every(n => n.type === 'button'));
       const siblings = actions.parentElement!.children;
       assert.equal(siblings[siblings.indexOf(actions) - 1], notes[0], 'scope note is adjacent to its buttons');
       const authorize = actions.children.find(n => n.textContent === labels.approvalAuthorizeExact)!;
-      authorize.click();
-      assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'resumeApprovalProcessing', authorizeTargetId: id });
+      if (mode === 'model_review') {
+        authorize.click();
+        assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'resumeApprovalProcessing', authorizeTargetId: id });
+      } else assert.equal(authorize, undefined);
     }
     const reject = elements([command]).find(n => n.dataset.draftRunAction === 'rejectDraftRun')!;
-    ui.api.handleDraftRunActionClick({ target: reject });
-    assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'rejectDraftRun', id: 'A' });
+    if (mode === 'model_review') {
+      ui.api.handleDraftRunActionClick({ target: reject });
+      assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'rejectDraftRun', id: 'A' });
+    } else assert.equal(reject, undefined);
     const preview = elements([file]).find(n => n.dataset.editAction === 'openDraftDiff')!;
     ui.api.handleChangeSetActionClick({ target: preview });
     assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.pop())), { type: 'openDraftDiff', id: 'edit-A' });
@@ -616,8 +625,8 @@ test('automatic notes and buttons rerender without stale scope or duplicate acti
       assert.equal(nodes.filter(n => n.textContent === reason).length, 2);
       if (status !== 'needs_authorization') assert.ok(!nodes.some(n => n.textContent === longAuthorizationReason));
       const resume = nodes.filter(n => [labels.approvalAuthorizeExact, labels.approvalResumeProcessing].includes(n.textContent));
-      assert.equal(resume.length, status === 'pending' || status === 'denied' ? 0 : 2);
-      if (status === 'failed') {
+      assert.equal(resume.length, mode === 'delegate' || status === 'pending' || status === 'denied' ? 0 : 2);
+      if (mode === 'model_review' && status === 'failed') {
         resume.forEach(button => button.click());
         assert.deepEqual(JSON.parse(JSON.stringify(ui.messages.splice(0))), [
           { type: 'resumeApprovalProcessing' }, { type: 'resumeApprovalProcessing' }

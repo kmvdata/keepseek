@@ -11,6 +11,7 @@ import { inspectLocalGitScope } from './localGitScope';
 import { analyzeCommand } from './commandSemantics';
 import { canonicalPath, isPathInside, joinUnresolvedPath } from './pathScope';
 import { authorizationReason, type AuthorizationReason } from './reasons';
+import { assertCommandTarget, inspectVisibleCommandTargets } from './visibleCommandTargets';
 
 export interface CommandScope {
   externalUris: string[];
@@ -19,6 +20,8 @@ export interface CommandScope {
   gitCwd?: string;
   executable?: string;
   verifiedLauncher?: string;
+  boundLauncher?: string;
+  environment: NodeJS.ProcessEnv;
   environmentNames?: string[];
   /** The interpreter, on-disk entry and explicit argv paths were verified. The script runs with host privileges. */
   trustedProjectScript?: boolean;
@@ -59,8 +62,13 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
       }
       gitSkillOperands.push(resolved);
     } else assertOperationPath(resolved, write);
+    assertCommandTarget(resolved, write);
     const uri = vscode.Uri.file(resolved).toString();
     const outside = !roots.some(root => isPathInside(root, resolved));
+    if ((write || role === 'script' || role === 'executable') && vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === 'file'
+      && [resolved, value].some(target => isPathInside(path.resolve(target), path.resolve(document.uri.fsPath))))) {
+      throw new Error('Command targets a dirty editor. Nothing executed. / 命令涉及未保存的编辑器，尚未执行。');
+    }
     const info = await stat(resolved).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'ENOENT') throw error;
       return undefined;
@@ -68,13 +76,12 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
     if (info && !info.isFile() && !info.isDirectory()) {
       throw new Error('The command targets a special filesystem object. / 命令指向特殊文件系统对象。');
     }
-    if (parsed.projectScript && role === 'script' && info?.isFile() && info.nlink === 1 && !outside
-      && !vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === 'file'
-        && (document.uri.toString() === uri || path.resolve(document.uri.fsPath) === path.resolve(value)))) {
+    if (parsed.projectScript && role === 'script' && info?.isFile() && info.nlink === 1 && !outside) {
       localScript = resolved;
     }
     paths.push({ uri, role, external: outside });
-    pathIdentities.push(info && [info.dev, info.ino, info.mode, ...(role === 'script' ? [info.mtimeMs, info.ctimeMs, info.size] : [])]);
+    pathIdentities.push(info && [info.dev, info.ino, info.mode,
+      ...(['script', 'write_path', 'executable'].includes(role) ? [info.mtimeMs, info.ctimeMs, info.size] : [])]);
     if (outside) external.add(uri);
   };
   if (findSensitiveEvidence(JSON.stringify([run.spec.executable, run.spec.args, run.spec.env]))
@@ -86,6 +93,7 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
     || run.spec.env.some(({ name }) => /^(?:LD_|DYLD_|NODE_OPTIONS$|BASH_ENV$|ENV$)|(?:^|_)(?:TOKEN|SECRET|PASSWORD|KEY|CREDENTIALS?)(?:_|$)/iu.test(name))) {
     throw new Error('Credential access, privilege escalation or unsafe execution environment. Nothing executed. / 操作涉及凭据、提权或高风险执行环境，尚未执行。');
   }
+  const visibleTargets = inspectVisibleCommandTargets(parsed);
   await check(cwd, 'cwd');
   const gitCommand = parsed.program === 'git' ? parsed.arguments.find(argument => argument.role === 'subcommand') : undefined;
   for (const operand of parsed.arguments) {
@@ -105,24 +113,45 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
     const base = joinUnresolvedPath(cwd, ...operand.cwdChanges.filter(Boolean));
     await check(joinUnresolvedPath(base, operand.value), operand.role, gitCommand?.value === 'add' && operand.role === 'read_path');
   }
+  for (const target of visibleTargets) {
+    if (process.platform !== 'win32' && /^(?:[A-Za-z]:|\\\\)/u.test(target.value)) {
+      diagnostics.push(authorizationReason('foreign_path', target.value,
+        'This platform cannot resolve the supplied Windows path.', '当前平台无法解析该 Windows 路径。'));
+    } else {
+      await check(joinUnresolvedPath(cwd, target.value), target.write ? 'write_path' : 'read_path');
+    }
+  }
   const env = createControlledEnvironment(run.spec.env);
   const executable = await resolveExecutable(run.spec.executable, cwd, env);
+  if (executable && vscode.workspace.textDocuments?.some(document => document.isDirty && document.uri.scheme === 'file'
+    && [executable.path, executable.launchPath].includes(path.resolve(document.uri.fsPath)))) {
+    throw new Error('The launcher has unsaved changes. Nothing executed. / 启动程序有未保存的修改，尚未执行。');
+  }
   if (!executable?.trusted) diagnostics.push(authorizationReason('executable_identity', run.spec.executable,
     'The resolved executable is not a verified system command; its basename is not authority.',
     '解析后的可执行文件不是已核实的系统命令；文件名不能作为授权依据。'));
   // Explicit executable paths are also filesystem targets (PATH-selected system
   // binaries are runtime dependencies, not workspace operand grants).
   if (/[/\\]/u.test(run.spec.executable)) {
-    if (!executable?.trusted) await check(joinUnresolvedPath(cwd, run.spec.executable), 'executable');
+    if (!executable?.trusted) {
+      const selected = await resolveExecutable(path.basename(run.spec.executable), cwd, env);
+      if (!executable || selected?.launchPath !== executable.launchPath) await check(joinUnresolvedPath(cwd, run.spec.executable), 'executable');
+    }
+  } else if (executable && !executable.trusted && roots.some(root => isPathInside(root, executable.launchPath))
+    && !roots.some(root => isPathInside(root, executable.path))) {
+    await check(executable.launchPath, 'executable');
   }
   let gitFingerprint: string | undefined;
   let gitCwd: string | undefined;
   const gitRuntime = diagnostics.findIndex(item => item.code === 'git_runtime');
+  const boundedGitOptions = gitCommand && ['status', 'diff', 'log', 'show'].includes(gitCommand.value);
   if (executable?.trusted && !roots.some(root => isPathInside(root, executable.path)) && gitCommand && gitRuntime >= 0
-    && diagnostics.every(item => item.code === 'git_runtime' || item.code === 'git_commit_argv' || item.code === 'missing_option_value')
+    && diagnostics.every(item => ['git_runtime', 'git_commit_argv', 'git_ref_mutation', 'missing_option_value'].includes(item.code)
+      || (boundedGitOptions && item.code === 'unsupported_option'))
     && !external.size) {
     const git = await inspectLocalGitScope({ executable: executable.path, cwd, roots, cwdChanges: gitCommand.cwdChanges,
       subcommand: gitCommand.value, env, commitAll: parsed.gitCommit?.all,
+      refMutation: parsed.gitRefMutation,
       noOptionalLocks: parsed.arguments.some(argument => argument.index < gitCommand.index && argument.value === '--no-optional-locks'),
       noIndexRefresh: gitCommand.value === 'diff' && parsed.arguments.some(argument => argument.role === 'option'
         && argument.index > gitCommand.index && ['--cached', '--staged'].includes(argument.value)),
@@ -167,7 +196,8 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
     version: 1, executable, env, roots, paths, pathIdentities, gitFingerprint, gitCwd, externalUris, diagnostics, trustedProjectScript
   })).digest('hex');
   return { externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri, gitCwd, executable: executable?.path, verifiedLauncher: executable?.trusted ? executable.launchPath : undefined,
-    environmentNames: Object.keys(env).sort(), trustedProjectScript, projectScriptLaunchPath, uncertain: diagnostics.length > 0, diagnostics,
+    boundLauncher: executable?.launchPath, environment: env, environmentNames: Object.keys(env).sort(),
+    trustedProjectScript, projectScriptLaunchPath, uncertain: diagnostics.length > 0, diagnostics,
     reasons: diagnostics.map(reason => reason.message), fingerprint };
 }
 
@@ -176,14 +206,12 @@ export function hasExactCommandScope(scope: CommandScope, cwdUri: string, author
     || (uri === scope.cwd && authorizedUris.has(cwdUri) && scope.paths.every(target => target.uri !== uri || target.role === 'cwd')));
 }
 
-/** Match spawn's POSIX PATH lookup, including relative/empty entries. Windows
- * search order/PATHEXT is deliberately not approximated; it requires a grant. */
+/** Match POSIX PATH lookup, including relative/empty entries. On Windows,
+ * bind an explicit filename or a PATH-selected .exe and spawn its full path. */
 export async function resolveExecutable(executable: string, cwd: string, env: NodeJS.ProcessEnv): Promise<{
   path: string; launchPath: string; identity: string; trusted: boolean;
 } | undefined> {
   const windows = process.platform === 'win32';
-  // Windows remains in the manual lane. Resolve an explicit filename or a
-  // known executable extension to bind evidence without treating it as trusted.
   const filename = windows && !path.extname(executable) ? executable + '.exe' : executable;
   const candidates = (windows ? /[/\\]/u : /\//u).test(executable) ? [joinUnresolvedPath(cwd, filename)]
     : (env.PATH ?? (windows ? '' : '/usr/bin:/bin')).split(path.delimiter).map(dir => joinUnresolvedPath(cwd, dir, filename));
@@ -206,8 +234,10 @@ export async function resolveExecutable(executable: string, cwd: string, env: No
       const installedInterpreter = ownerControlled && isInstalledInterpreter(name, resolved, env.HOME, system, info.uid === 0);
       const hostRuntime = resolved === await realpath(process.execPath);
       const matchingName = path.basename(resolved) === name;
+      const standardWindowsGit = windows && /^git(?:\.exe)?$/iu.test(name)
+        && /^([a-z]:)\\Program Files(?: \(x86\))?\\Git\\(?:cmd|bin)\\git\.exe$/iu.test(resolved);
       return { path: resolved, launchPath: candidate, identity: `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`,
-        trusted: !windows && (installedInterpreter || (matchingName && (system || packagedGit || hostRuntime))) };
+        trusted: standardWindowsGit || (!windows && (installedInterpreter || (matchingName && (system || packagedGit || hostRuntime)))) };
     } catch { /* Continue PATH lookup as spawn does for absent/non-executable entries. */ }
   }
   return undefined;

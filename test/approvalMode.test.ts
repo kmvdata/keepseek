@@ -34,9 +34,9 @@ test('draft receipt and host authorization text describe the actual mode without
     assert.match(scope, /file:\/\/\/outside\/result.txt/u);
     assert.notEqual(localize(lang, 'approvalReviewerUnavailable'), 'approvalReviewerUnavailable');
     const delegate = WEBVIEW_TRANSLATIONS[lang].approvalDelegateDescription;
-    assert.match(delegate, lang === 'en' ? /Host policy approves eligible operations first.*dedicated Auto approval reviewer/u : /宿主优先批准.*自动审批专用 reviewer/u);
-    assert.match(delegate, lang === 'en' ? /extension-host privileges/u : /扩展宿主权限/u);
-    assert.match(delegate, lang === 'en' ? /External actions may require exact authorization/u : /外部操作可能需要精确授权/u);
+    assert.match(delegate, lang === 'en' ? /without individual confirmations/u : /无需逐项确认/u);
+    assert.match(delegate, lang === 'en' ? /extension-host account without an OS sandbox/u : /扩展宿主账号权限.*没有操作系统沙箱/u);
+    assert.match(delegate, lang === 'en' ? /may access resources outside the project/u : /可能访问项目外资源/u);
   }
 });
 
@@ -68,8 +68,8 @@ test('an interrupted correction retains diagnostics and the attempt ledger witho
     }, { id: 'dependent', kind: 'command', status: 'dependency_blocked', reason: 'Malformed -m.',
       dependency: { targetId: 'run', label: 'git status', reason: 'Use controlled status.' }
     }] });
-  assert.equal(state?.status, 'blocked');
-  assert.equal(state?.canResume, true);
+  assert.equal(state?.status, 'stopped');
+  assert.equal(state?.canResume, undefined);
   assert.deepEqual(state?.replanKeys, ['a'.repeat(64)]);
   assert.equal(state?.targets[0].replan?.executed, false);
   assert.equal(state?.targets[1].reason, 'Malformed -m.');
@@ -340,7 +340,7 @@ test('reviewer unavailability freezes every remaining effect in the batch', asyn
   assert.match(fixture.prompts[0], /reviewer unavailable/u);
 });
 
-test('an interrupted Git correction resumes once and a repeated malformed proposal stops the same task', async () => {
+test('an interrupted Git correction stays stopped without replaying a restored draft', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-correction-recovery-'));
   const folders = vscode.workspace.workspaceFolders;
   const trusted = vscode.workspace.isTrusted;
@@ -381,24 +381,11 @@ test('an interrupted Git correction resumes once and a repeated malformed propos
     restarted.session.approvalProcessing = normalizeApprovalProcessing(interruptedState);
     assert.equal(restarted.queue.take('s'), undefined);
     await restarted.provider.resumeApprovalProcessing();
-    await restarted.provider.executeDelegatedApprovals(restarted.queue.take('s')!);
-    assert.equal(restarted.effects.filter(effect => effect === 'continue').length, 1);
-    assert.equal(restarted.session.approvalProcessing?.status, 'completed');
+    assert.equal(restarted.queue.take('s'), undefined);
+    assert.equal(restarted.effects.filter(effect => effect === 'continue').length, 0);
+    assert.equal(restarted.session.approvalProcessing?.status, 'stopped');
     assert.equal(restarted.session.approvalProcessing?.replanKeys?.length, 1);
-    assert.match(restarted.prompts[0], /git_commit_all_with_pathspec/u);
-
-    const second = await draft();
-    reloaded.addProposals({ proposals: [second], agentRunId: 'second', sessionId: 's' });
-    const previous = restarted.session.messages[1];
-    restarted.session.messages.push({ ...previous, id: 'second-assistant', runCheckpointArchive: {
-      ...previous.runCheckpointArchive!, summary: { taskId: 'second' }
-    } });
-    restarted.queue.enqueue({ sessionId: 's', runId: 'second', rootTaskId: 'r', editIds: [], draftRunIds: [second.id] });
-    await restarted.provider.executeDelegatedApprovals(restarted.queue.take('s')!);
-    assert.equal(restarted.effects.filter(effect => effect === 'continue').length, 1);
-    assert.equal(restarted.session.approvalProcessing?.status, 'blocked');
-    assert.match(restarted.session.approvalProcessing?.reason ?? '', /same kind of preflight error/u);
-    assert.equal(reloaded.get(second.id)?.replan?.executed, false);
+    assert.equal(reloaded.get(first.id)?.replan?.executed, false);
     assert.equal(launches, 0);
   } finally {
     await store.flush(); await reloaded.flush();
@@ -533,6 +520,7 @@ function workflowFixture(options: {
       getPendingEdit: (id: string) => ({ edit: edit(id), runId: 'r', sessionId: 's' }),
       preflightEdit: async () => ({ originalText: '' }),
       attachApprovalReview: () => true,
+      discardEdit: () => true,
       applyEdit: async (id: string, approval: { isAuthorized: () => boolean }) => {
         assert.equal(approval.isAuthorized(), true);
         fixture.effects.push('edit:' + id); fixture.onEdit();
@@ -545,6 +533,8 @@ function workflowFixture(options: {
       get: (id: string) => draftRun(id),
       preflightApproval: async (id: string) => draftRun(id),
       setPendingDependency: () => true,
+      markNotExecuted: () => true,
+      getRunsForSegments: () => [],
       attachApprovalReview: () => true,
       approveAndRun: async (id: string, uris: Set<string>, options: { delegatedApproval: () => boolean }) => {
         assert.equal(options.delegatedApproval(), true);

@@ -436,9 +436,9 @@ test('delegate reviews only metadata for an exact authorized external file and c
     });
     const responseForRead = () => toolResponse([toolCall('read-external', READ_WORKSPACE_FILE_TOOL_NAME, { path: target })]);
     const runner = createRunner(new FakeValidationTools([]), reviewer);
-    const unauthorized = await withResponses([responseForRead()], () => runner.run(request));
+    const unauthorized = await withResponses([responseForRead(), textResponse('The file was unavailable.')], () => runner.run(request));
     assert.equal(reviewer.calls, 0);
-    assert.match(unauthorized.message, /requires an exact reference/u);
+    assert.match(unauthorized.toolRounds?.[0]?.toolResults[0]?.content ?? '', /external_authorization_required/u);
     request.authorizedExternalReferenceUris = [vscode.Uri.file(target).toString()];
     const authorized = await withResponses([responseForRead()], () => runner.run(request));
     assert.equal(reviewer.calls, 1);
