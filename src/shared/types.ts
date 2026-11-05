@@ -604,6 +604,8 @@ export interface DraftRunSpec {
   externalCwd: boolean;
   timeoutMs: number;
   env: DraftRunEnvironmentEntry[];
+  /** Host-generated capability. DraftRun tool arguments cannot set it. */
+  restricted?: import('../runs/restrictedPythonSyntax').RestrictedPythonSyntaxSpec;
 }
 
 export interface DraftRunEffectAssessment {
@@ -666,6 +668,7 @@ export interface DraftRun extends DraftRunProposal {
   status: DraftRunStatus;
   authorizationSource?: ExecutionPermit['source'];
   approvalReview?: import('../approvals/approvalReviewTypes').ApprovalReviewDisplay;
+  replacementDraftRunId?: string;
   replan?: import('../approvals/approvalProcessing').DraftRunReplanResult;
   dependency?: import('../approvals/approvalProcessing').ApprovalDependency;
   gitCommitEvidence?: import('../runs/localGitCommit').LocalGitCommitEvidence;

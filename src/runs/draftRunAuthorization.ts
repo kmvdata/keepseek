@@ -31,6 +31,9 @@ export class DraftRunAuthorizationService {
 
   public createUserClickPermit(draftRun: DraftRun): ExecutionPermit {
     assertValidGitCommitArguments(draftRun.spec);
+    const denial = this.approvalReviews?.findHardRunDenial(draftRun.sessionId, draftRun.specHash)
+      ?? (draftRun.spec.restricted && this.approvalReviews?.findHardRunDenial(draftRun.sessionId, draftRun.spec.restricted.originalSpecHash));
+    if (denial) throw new Error(denial.rationale);
     return {
       draftRunId: draftRun.id,
       specHash: draftRun.specHash,

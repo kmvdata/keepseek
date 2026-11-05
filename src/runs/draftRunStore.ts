@@ -23,6 +23,8 @@ import {
   type DraftRunOutputChunk
 } from './draftRunExecutor';
 
+import { prepareRestrictedPythonSyntax, verifyRestrictedPythonSyntax } from './restrictedPythonSyntax';
+
 const MAX_DRAFT_RUN_HISTORY = 500;
 const TERMINAL_STATUSES = new Set<DraftRunStatus>(['rejected', 'done', 'cancelled', 'failed', 'needs_replan', 'no_changes']);
 const BATCH_DISPLAY_PHASES = new Set<DraftRunBatchDisplay['phase']>([
@@ -100,7 +102,7 @@ export class DraftRunStore {
         if (!draftRun) {
           continue;
         }
-        if (draftRun.status === 'approved' || draftRun.status === 'running') {
+        if (draftRun.status === 'approved' || draftRun.status === 'running' || (draftRun.status === 'pending' && draftRun.spec.restricted)) {
           draftRun.status = 'failed';
           draftRun.error = 'DraftRun was interrupted by an extension restart and was not resumed.';
           draftRun.finishedAt = new Date().toISOString();
@@ -250,6 +252,38 @@ export class DraftRunStore {
     return true;
   }
 
+  /** Persist both identities before reviewing or launching the replacement. */
+  public async replaceWithRestrictedPython(id: string, target: string, isAuthorized: () => boolean): Promise<DraftRun> {
+    const original = this.draftRuns.get(id);
+    const pending = () => original && this.draftRuns.get(id) === original && original.status === 'pending'
+      && !original.dependency && !this.approving.has(id) && isAuthorized();
+    if (!original || !pending()) throw new Error('Original DraftRun is no longer eligible for replacement.');
+    const proposal = await prepareRestrictedPythonSyntax(original, target);
+    if (!pending()) throw new Error('Original DraftRun changed before replacement.');
+    const now = new Date().toISOString();
+    original.status = 'needs_replan';
+    original.replacementDraftRunId = proposal.id;
+    original.finishedAt = now;
+    original.updatedAt = now;
+    const [replacement] = this.addProposals({
+      proposals: [proposal], agentRunId: original.agentRunId, sessionId: original.sessionId, messageId: original.messageId
+    });
+    this.emitState(original);
+    await this.persistNow();
+    return replacement;
+  }
+
+  public async settleUnstartedRestrictedRun(id: string, reason: string, cancelled: boolean): Promise<void> {
+    const run = this.draftRuns.get(id);
+    if (!run?.spec.restricted || run.status !== 'pending' || this.approving.has(id)) return;
+    run.status = cancelled ? 'cancelled' : 'failed';
+    run.error = reason;
+    run.finishedAt = new Date().toISOString();
+    run.updatedAt = run.finishedAt;
+    this.emitState(run);
+    await this.persistNow();
+  }
+
   /** Retire a never-started proposal without issuing any approval or permit. */
   public markNotExecuted(id: string, expectedSpecHash: string, result: {
     replan?: DraftRunReplanResult;
@@ -336,15 +370,21 @@ export class DraftRunStore {
     };
     try {
       assertAuthorized();
+      const restricted = draftRun.spec.restricted;
+      const original = restricted && this.draftRuns.get(restricted.originalDraftRunId);
+      if (restricted && (!original || !options.delegatedApproval || options.approvalRecord?.expectedSource !== 'auto_approval_review'
+        || options.approvalRecord.scopeFingerprint !== restricted.boundaryFingerprint
+        || !options.verifyScope)) throw new Error('Restricted validation requires its own automatic approval.');
       await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
-      const scope = await inspectDraftRunScope(draftRun);
+      const scope = restricted ? undefined : await inspectDraftRunScope(draftRun);
       const verifyScope = async () => {
+        await options.verifyScope?.();
+        if (restricted && original) return { restrictedLaunch: await verifyRestrictedPythonSyntax(draftRun, original) };
         const current = await inspectDraftRunScope(draftRun);
-        if (current.fingerprint !== scope.fingerprint || !hasExactCommandScope(current, draftRun.spec.cwdUri, authorizedExternalReferenceUris)) {
+        if (current.fingerprint !== scope?.fingerprint || !hasExactCommandScope(current, draftRun.spec.cwdUri, authorizedExternalReferenceUris)) {
           throw new Error('Exact external operation scope is missing or changed. / 缺少精确范围授权或范围已变化。');
         }
-        await options.verifyScope?.();
-        return current;
+        return { scope: current };
       };
       await verifyScope();
       assertAuthorized();
@@ -371,7 +411,7 @@ export class DraftRunStore {
         : this.authorization.createUserClickPermit(draftRun);
       // Approval-record consumption is asynchronous: recheck scope after it too.
       await validateDraftRunBeforeApproval(draftRun, authorizedExternalReferenceUris);
-      const verifiedScope = await verifyScope();
+      const { scope: verifiedScope, restrictedLaunch } = await verifyScope();
       assertAuthorized();
       const abortController = new AbortController();
       this.abortControllers.set(draftRun.id, abortController);
@@ -384,7 +424,10 @@ export class DraftRunStore {
       const execution = this.executor.execute({
         draftRun: cloneDraftRun(draftRun),
         permit,
-        verifiedLaunch: verifiedScope.executable && !verifiedScope.externalUris.length
+        restrictedLaunch,
+        verifiedLaunch: options.approvalRecord?.expectedSource === 'auto_approval_review' && verifiedScope?.verifiedLauncher
+          ? { executable: verifiedScope.verifiedLauncher, cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath }
+          : verifiedScope?.executable && !verifiedScope.externalUris.length
           && (verifiedScope.trustedProjectScript || (!verifiedScope.uncertain && verifiedScope.paths.some(target => target.role === 'repository')))
           ? { executable: verifiedScope.projectScriptLaunchPath ?? verifiedScope.executable,
               cwd: vscode.Uri.parse(verifiedScope.cwd).fsPath } : undefined,
@@ -418,7 +461,8 @@ export class DraftRunStore {
         draftRun.startedAt = undefined;
         draftRun.error = undefined;
       } else {
-        draftRun.status = 'failed';
+        draftRun.status = options.signal?.aborted && !executionStarted && draftRun.spec.restricted ? 'cancelled' : 'failed';
+        if (!executionStarted && draftRun.spec.restricted) draftRun.startedAt = undefined;
         draftRun.error = error instanceof Error ? error.message : String(error);
       }
     }
@@ -460,7 +504,7 @@ export class DraftRunStore {
 
   public cloneAsPending(id: string): DraftRun | undefined {
     const source = this.draftRuns.get(id);
-    if (!source || !TERMINAL_STATUSES.has(source.status) || source.replan || source.dependency) {
+    if (!source || !TERMINAL_STATUSES.has(source.status) || source.replan || source.dependency || source.spec.restricted || source.replacementDraftRunId) {
       return undefined;
     }
     const now = new Date().toISOString();
@@ -579,6 +623,9 @@ export class DraftRunStore {
       omittedOutputBytes: draftRun.omittedOutputBytes,
       output: getDraftRunOutput(draftRun),
       error: draftRun.error ?? null,
+      replacementDraftRunId: draftRun.replacementDraftRunId,
+      originalDraftRunId: draftRun.spec.restricted?.originalDraftRunId,
+      executed: draftRun.replacementDraftRunId ? false : undefined,
       replan: draftRun.replan,
       dependency: draftRun.dependency,
       gitCommitEvidence: draftRun.gitCommitEvidence,
@@ -785,7 +832,7 @@ function toWebviewDraftRun(draftRun: DraftRun): WebviewDraftRun {
   return { ...rest,
     // Pending legacy drafts keep their immutable spec and stored history. Only
     // derived presentation advice is refreshed with the current parser.
-    effectAssessment: draftRun.status === 'pending' ? analyzeDraftRunEffects(draftRun.spec) : rest.effectAssessment,
+    effectAssessment: draftRun.status === 'pending' && !draftRun.spec.restricted ? analyzeDraftRunEffects(draftRun.spec) : rest.effectAssessment,
     output: getDraftRunOutput(draftRun) };
 }
 
@@ -795,7 +842,8 @@ function cloneProposal(proposal: DraftRunProposal): DraftRunProposal {
     spec: {
       ...proposal.spec,
       args: [...proposal.spec.args],
-      env: proposal.spec.env.map((entry) => ({ ...entry }))
+      env: proposal.spec.env.map((entry) => ({ ...entry })),
+      ...(proposal.spec.restricted ? { restricted: { ...proposal.spec.restricted } } : {})
     },
     effectAssessment: {
       ...proposal.effectAssessment,
@@ -897,8 +945,14 @@ function normalizeStoredDraftRun(value: unknown): DraftRun | undefined {
     || typeof record.status !== 'string') {
     return undefined;
   }
+  const plan = record.spec.restricted;
+  if (plan !== undefined && (!plan || plan.kind !== 'python_ast_v1'
+    || typeof plan.originalDraftRunId !== 'string' || typeof plan.target !== 'string' || typeof plan.targetUri !== 'string'
+    || ![plan.originalSpecHash, plan.snapshotHash, plan.boundaryFingerprint].every(hash => typeof hash === 'string' && /^[a-f0-9]{64}$/u.test(hash))
+    || !Number.isSafeInteger(plan.snapshotBytes) || plan.snapshotBytes < 0)) return undefined;
   return cloneDraftRun({
     ...record,
+    replacementDraftRunId: typeof record.replacementDraftRunId === 'string' ? record.replacementDraftRunId : undefined,
     replan: normalizeDraftRunReplan(record.replan, record.id, record.agentRunId, record.specHash),
     dependency: normalizeApprovalDependency(record.dependency),
     gitCommitEvidence: record.status === 'done' || record.status === 'no_changes'

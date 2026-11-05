@@ -77,7 +77,8 @@ export function hashDraftRunSpec(spec: DraftRunSpec): string {
     externalCwd: spec.externalCwd,
     reason: spec.reason,
     timeoutMs: spec.timeoutMs,
-    workspaceFolder: spec.workspaceFolder ?? ''
+    workspaceFolder: spec.workspaceFolder ?? '',
+    restricted: spec.restricted
   })).digest('hex');
 }
 

@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import { writeJsonAtomic } from '../shared/atomicStorage';
 import {
-  APPROVAL_POLICY_VERSION,
+  policyVersionFor,
+  reviewerRoute,
   type ApprovalRecordMatch,
   type ApprovalReviewDisplay,
   type ApprovalReviewRecord,
@@ -65,7 +66,7 @@ export class ApprovalReviewStore {
     return !!record && record.sessionId === request.sessionId && record.rootTaskId === request.rootTaskId
       && record.agentRunId === request.agentRunId && record.targetId === request.targetId
       && record.actionKind === request.actionKind && record.actionHash === request.actionHash
-      && record.scopeFingerprint === request.scopeFingerprint && record.policyVersion === APPROVAL_POLICY_VERSION;
+      && record.scopeFingerprint === request.scopeFingerprint && record.policyVersion === policyVersionFor(record.approvalSource);
   }
 
   public getLatestForTarget(targetId: string): ApprovalReviewDisplay | undefined {
@@ -83,9 +84,22 @@ export class ApprovalReviewStore {
     const record = [...this.records.values()].reverse().find((item) => item.sessionId === input.sessionId
       && item.rootTaskId === input.rootTaskId
       && item.actionKind === input.actionKind
-      && item.actionHash === input.actionHash
+      && (item.actionHash === input.actionHash || item.originalActionHash === input.actionHash)
       && item.decision === 'deny');
     return record ? structuredClone(record) : undefined;
+  }
+
+  public findHardRunDenial(sessionId: string, actionHash: string): ApprovalReviewRecord | undefined {
+    return [...this.records.values()].reverse().find(record => record.sessionId === sessionId
+      && record.actionKind === 'draft_run_execute' && record.decision === 'deny'
+      && (record.actionHash === actionHash || record.originalActionHash === actionHash)
+      && (record.approvalSource === 'local_policy' || record.approvalSource === 'auto_approval_review' || record.risk === 'critical'));
+  }
+
+  public hasAutomaticReviewAttempt(request: ApprovalReviewRequest): boolean {
+    return [...this.records.values()].some(record => record.approvalSource === 'auto_approval_review'
+      && record.sessionId === request.sessionId && record.rootTaskId === request.rootTaskId
+      && record.agentRunId === request.agentRunId && record.targetId === request.targetId);
   }
 
   public async consumeMatchingApproval(input: ApprovalRecordMatch): Promise<ApprovalReviewRecord> {
@@ -94,11 +108,14 @@ export class ApprovalReviewStore {
     if (!record || record.runtimeId !== this.runtimeId || record.consumedAt
       || record.sessionId !== input.sessionId || record.rootTaskId !== input.rootTaskId || record.agentRunId !== input.agentRunId
       || record.targetId !== input.targetId || record.actionKind !== input.actionKind
-      || record.actionHash !== input.actionHash || input.policyVersion !== APPROVAL_POLICY_VERSION
+      || record.actionHash !== input.actionHash || input.policyVersion !== policyVersionFor(input.expectedSource)
       || record.policyVersion !== input.policyVersion
       || record.approvalSource !== input.expectedSource || record.decision !== 'approve'
       || record.approvalMode !== input.approvalMode || record.scopeFingerprint !== input.scopeFingerprint
-      || (input.approvalMode === 'model_review' && input.expectedSource === 'host_policy')) {
+      || record.reviewerConfigFingerprint !== input.reviewerConfigFingerprint
+      || (input.expectedSource === 'auto_approval_review' && !input.reviewerConfigFingerprint)
+      || (input.expectedSource === 'host_policy' && input.approvalMode === 'model_review')
+      || (['auto_approval_review', 'model_review'].includes(input.expectedSource) && input.expectedSource !== reviewerRoute(input.approvalMode))) {
       throw new Error('No current matching approval record exists for this exact operation.');
     }
     record.consumedAt = new Date().toISOString();
@@ -158,7 +175,7 @@ function normalizeRecord(value: unknown): ApprovalReviewRecord | undefined {
   if (!record.reviewId || !record.runtimeId || !record.sessionId || !record.agentRunId || !record.targetId
     || !['external_file_access', 'validation_run', 'draft_edit_apply', 'draft_delete_apply', 'draft_run_execute'].includes(record.actionKind)
     || !record.actionHash || !Number.isInteger(record.policyVersion)
-    || !['model_review', 'host_policy', 'local_policy', 'user_click'].includes(record.approvalSource)
+    || !['auto_approval_review', 'model_review', 'host_policy', 'local_policy', 'user_click'].includes(record.approvalSource)
     || !['approve', 'deny', 'unavailable'].includes(record.decision)
     || !['low', 'medium', 'high', 'critical'].includes(record.risk)
     || typeof record.rationale !== 'string' || !Array.isArray(record.policyRules)
@@ -167,6 +184,10 @@ function normalizeRecord(value: unknown): ApprovalReviewRecord | undefined {
     ...record,
     affectedTargets: Array.isArray(record.affectedTargets)
       ? record.affectedTargets.filter(target => typeof target === 'string').slice(0, 12).map(target => target.slice(0, 300)) : undefined,
+    reviewerConfigFingerprint: typeof record.reviewerConfigFingerprint === 'string' && /^[a-f0-9]{64}$/u.test(record.reviewerConfigFingerprint)
+      ? record.reviewerConfigFingerprint : undefined,
+    originalActionHash: typeof record.originalActionHash === 'string' && /^[a-f0-9]{64}$/u.test(record.originalActionHash)
+      ? record.originalActionHash : undefined,
     rootTaskId: typeof record.rootTaskId === 'string' && record.rootTaskId ? record.rootTaskId : record.agentRunId
   });
 }

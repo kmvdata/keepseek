@@ -3593,6 +3593,12 @@ export function getScript(): string {
       var actions = document.createElement('div');
       actions.className = 'draft-run-actions';
       header.append(heading);
+      if (draftRun.replacementDraftRunId) {
+        appendApprovalStateNote(header, t('approvalRestrictedReplacement', { id: draftRun.replacementDraftRunId }));
+        if (target?.reason) appendApprovalStateNote(header, target.reason);
+      } else if (spec.restricted?.originalDraftRunId) {
+        appendApprovalStateNote(header, t('approvalRestrictedOriginal', { id: spec.restricted.originalDraftRunId }));
+      }
       if (dependency) {
         appendApprovalStateNote(header, formatApprovalDependency(dependency));
       } else if (target?.status === 'dependency_blocked') {
@@ -3774,8 +3780,12 @@ export function getScript(): string {
         appendApprovalStateNote(notices, reason || t(fallback), !reason && !recoverable);
       }
       var hardBlocked = ['hard_blocked', 'dependency_blocked', 'needs_replan', 'identity_mismatch', 'missing'].includes(target?.status)
-        || denied && review && (review.approvalSource === 'local_policy' || review.risk === 'critical');
+        || denied && review && (review.approvalSource === 'local_policy' || review.approvalSource === 'auto_approval_review' || review.risk === 'critical');
       if (hardBlocked || target?.dependency || active || state.isBusy || processing?.status !== 'blocked') return false;
+      if (target?.status === 'manual_required' && state.approvalRecheckIds?.includes(id)) {
+        appendApprovalResumeAction(actions, 'approvalAutoRecheck');
+        return true;
+      }
       var canTakeOver = target && ['manual_required', 'review_unavailable', 'denied'].includes(target.status);
       if (canTakeOver) {
         var takeover = document.createElement('button');
@@ -3787,7 +3797,8 @@ export function getScript(): string {
         });
         actions.append(takeover);
       }
-      if (denied || target?.status === 'manual_required') return Boolean(canTakeOver);
+      if (denied || target?.status === 'manual_required'
+        || (state.approvalMode === 'delegate' && target?.status === 'review_unavailable')) return Boolean(canTakeOver);
       var needsScope = target && target.status === 'needs_authorization';
       if (!target || (!needsScope && !recoverable && target.status !== 'review_unavailable')) return false;
       appendApprovalResumeAction(actions, needsScope ? 'approvalAuthorizeExact' : canTakeOver ? 'approvalRetryReview' : 'approvalResumeProcessing',
@@ -3802,6 +3813,7 @@ export function getScript(): string {
         || (Array.isArray(state.authorizedExternalExecutionUris)
           && state.authorizedExternalExecutionUris.includes(String(draftRun.spec?.cwdUri || '')));
       if (statusValue === 'pending') {
+        if (draftRun.spec?.restricted) return;
         if (state.approvalMode !== 'ask') {
           if (appendAutomaticApprovalState(notices, container, draftRun.id, draftRun.approvalReview)) {
             container.append(createDraftRunActionButton(t('draftRunReject'), 'rejectDraftRun', draftRun, true));
@@ -3826,7 +3838,9 @@ export function getScript(): string {
         if (draftRun.startedAt) {
           container.append(createDraftRunActionButton(t('draftRunOpenTerminal'), 'openDraftRunTerminal', draftRun, true, false));
         }
-        container.append(createDraftRunActionButton(t('draftRunClone'), 'cloneDraftRun', draftRun, true));
+        if (!draftRun.spec?.restricted && !draftRun.replacementDraftRunId) {
+          container.append(createDraftRunActionButton(t('draftRunClone'), 'cloneDraftRun', draftRun, true));
+        }
       }
     }
 
@@ -4062,6 +4076,7 @@ export function getScript(): string {
     function getApprovalSourceLabel(review) {
       return review && review.approvalSource === 'host_policy'
         ? t('approvalSourceHost')
+        : review && review.approvalSource === 'auto_approval_review' ? t('approvalSourceAutoReviewer')
         : review && review.approvalSource === 'model_review'
           ? t('approvalSourceModel')
           : review && review.approvalSource === 'local_policy' ? t('approvalSourceSafety') : t('approvalSourceUser');

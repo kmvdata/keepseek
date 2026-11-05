@@ -1,9 +1,11 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createControlledEnvironment } from './executionEnvironment';
+import type { RestrictedPythonSyntaxLaunch } from './restrictedPythonSyntax';
 import { StringDecoder } from 'node:string_decoder';
 import * as vscode from 'vscode';
 import type { DraftRun, ExecutionPermit } from '../shared/types';
 
+const RESTRICTED_OUTPUT_LIMIT_BYTES = 8_192;
 const EXIT_STREAM_CLOSE_GRACE_MS = 1_500;
 const TERMINATION_SETTLE_GRACE_MS = 1_750;
 const OUTPUT_STREAM_CLOSE_ERROR = 'DraftRun process exited, but inherited output streams did not close.';
@@ -26,6 +28,7 @@ export interface DraftRunExecutorAdapter {
     draftRun: DraftRun;
     permit: ExecutionPermit;
     verifiedLaunch?: { executable: string; cwd: string };
+    restrictedLaunch?: RestrictedPythonSyntaxLaunch;
     signal?: AbortSignal;
     onOutput: (chunk: DraftRunOutputChunk) => void;
   }): Promise<DraftRunExecutionOutcome>;
@@ -58,10 +61,16 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     draftRun: DraftRun;
     permit: ExecutionPermit;
     verifiedLaunch?: { executable: string; cwd: string };
+    restrictedLaunch?: RestrictedPythonSyntaxLaunch;
     signal?: AbortSignal;
     onOutput: (chunk: DraftRunOutputChunk) => void;
   }): Promise<DraftRunExecutionOutcome> {
     validatePermit(input.draftRun, input.permit);
+    const restricted = input.restrictedLaunch;
+    if (Boolean(input.draftRun.spec.restricted) !== Boolean(restricted)
+      || (restricted && input.permit.source !== 'delegated_approver')) {
+      throw new Error('Restricted DraftRun requires its verified launch and delegated permit.');
+    }
     for (const [nonce, expiresAt] of this.consumedPermitNonces) {
       if (expiresAt <= Date.now()) {
         this.consumedPermitNonces.delete(nonce);
@@ -83,13 +92,13 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
     this.runTerminalSessions.set(input.draftRun.id, input.draftRun.sessionId);
     pty.write(formatTerminalHeader(input.draftRun));
 
-    const child = spawn(input.verifiedLaunch?.executable ?? input.draftRun.spec.executable, input.draftRun.spec.args, {
-      cwd: input.verifiedLaunch?.cwd ?? vscode.Uri.parse(input.draftRun.spec.cwdUri).fsPath,
-      env: createControlledEnvironment(input.draftRun.spec.env),
+    const child = spawn(restricted?.executable ?? input.verifiedLaunch?.executable ?? input.draftRun.spec.executable, input.draftRun.spec.args, {
+      cwd: restricted?.cwd ?? input.verifiedLaunch?.cwd ?? vscode.Uri.parse(input.draftRun.spec.cwdUri).fsPath,
+      env: restricted ? {} : createControlledEnvironment(input.draftRun.spec.env),
       shell: false,
       windowsHide: true,
       detached: process.platform !== 'win32',
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: [restricted ? 'pipe' : 'ignore', 'pipe', 'pipe']
     });
     const running: RunningProcess = {
       child,
@@ -105,6 +114,8 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
       let terminationSettleTimer: ReturnType<typeof setTimeout> | undefined;
       let exitCode: number | undefined;
       let exitSignal: string | undefined;
+      let outputBytes = 0;
+      let outputLimitError: string | undefined;
       const stdoutDecoder = new StringDecoder('utf8');
       const stderrDecoder = new StringDecoder('utf8');
       const emit = (stream: DraftRunOutputChunk['stream'], text: string) => {
@@ -114,8 +125,20 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         pty.write(text);
         input.onOutput({ stream, text });
       };
-      child.stdout?.on('data', (chunk: Buffer) => emit('stdout', stdoutDecoder.write(chunk)));
-      child.stderr?.on('data', (chunk: Buffer) => emit('stderr', stderrDecoder.write(chunk)));
+      const onData = (stream: DraftRunOutputChunk['stream'], decoder: StringDecoder, chunk: Buffer) => {
+        if (restricted) {
+          if (outputLimitError) return;
+          outputBytes += chunk.byteLength;
+          if (outputBytes > RESTRICTED_OUTPUT_LIMIT_BYTES) {
+            outputLimitError = 'Restricted AST output exceeded its limit. / 受限 AST 验证输出超过上限。';
+            terminateAndBoundSettlement();
+            return;
+          }
+        }
+        emit(stream, decoder.write(chunk));
+      };
+      child.stdout?.on('data', (chunk: Buffer) => onData('stdout', stdoutDecoder, chunk));
+      child.stderr?.on('data', (chunk: Buffer) => onData('stderr', stderrDecoder, chunk));
 
       const finish = (outcome: DraftRunExecutionOutcome) => {
         if (settled) {
@@ -138,7 +161,7 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         signal: exitSignal,
         timedOut: running.timedOut,
         cancelled: running.cancelRequested,
-        error
+        error: error ?? outputLimitError
       });
       const destroyOutputStreams = () => {
         child.stdout?.destroy();
@@ -194,11 +217,19 @@ export class SpawnDraftRunExecutor implements DraftRunExecutorAdapter {
         }, EXIT_STREAM_CLOSE_GRACE_MS);
         exitCloseTimer.unref?.();
       });
+      if (restricted) {
+        child.stdin?.on('error', () => {
+          // Exit or cancellation can close the pipe before all input is sent.
+          // The child lifecycle determines the actual result.
+        });
+        child.stdin?.end(restricted.stdin, 'utf8');
+      }
       child.once('close', (code, signal) => finish({
         exitCode: typeof code === 'number' ? code : undefined,
         signal: signal ?? undefined,
         timedOut: running.timedOut,
-        cancelled: running.cancelRequested
+        cancelled: running.cancelRequested,
+        error: outputLimitError
       }));
     });
   }

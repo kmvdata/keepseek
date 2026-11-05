@@ -15,7 +15,7 @@ import { clearCreatedTerminals, createdTerminals } from './stubs/vscode';
 test('delegated execution requires its matching approval record and remains single-use', async () => {
   const executor = new SpawnDraftRunExecutor();
   const draftRun = createDraftRun(['-e', 'process.stdout.write("delegated")']);
-  const approvalStore = { consumeMatchingApproval: async () => ({}) } as unknown as ApprovalReviewStore;
+  const approvalStore = { consumeMatchingApproval: async () => ({}), findHardRunDenial: () => undefined } as unknown as ApprovalReviewStore;
   const authorization = new DraftRunAuthorizationService(approvalStore);
   const match: ApprovalRecordMatch = {
     reviewId: 'review', sessionId: draftRun.sessionId, rootTaskId: draftRun.agentRunId, agentRunId: draftRun.agentRunId,

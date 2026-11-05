@@ -723,3 +723,17 @@ function normalizeNonNegativeNumber(value: unknown, fallback: number): number {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : fallback;
 }
+
+/** User settings only. Project settings must not select a review destination. */
+export function getAutoApprovalReviewerSetting(): Pick<import('../agent/subagents/types').SubagentModelSetting, 'mode' | 'sourceId' | 'modelId'> {
+  const setting = vscode.workspace.getConfiguration('keepseek')
+    .inspect?.<{ mode?: unknown; sourceId?: unknown; modelId?: unknown }>('autoApprovalReviewer')?.globalValue;
+  if (setting !== undefined && (!setting || (setting.mode !== 'follow-main' && setting.mode !== 'fixed'))) {
+    throw new Error('Invalid Auto approval reviewer settings. / 自动审批 reviewer 配置无效。');
+  }
+  return {
+    mode: setting?.mode === 'fixed' ? 'fixed' : 'follow-main',
+    sourceId: typeof setting?.sourceId === 'string' ? setting.sourceId.trim() : undefined,
+    modelId: typeof setting?.modelId === 'string' ? setting.modelId.trim() : undefined
+  };
+}

@@ -34,9 +34,9 @@ test('draft receipt and host authorization text describe the actual mode without
     assert.match(scope, /file:\/\/\/outside\/result.txt/u);
     assert.notEqual(localize(lang, 'approvalReviewerUnavailable'), 'approvalReviewerUnavailable');
     const delegate = WEBVIEW_TRANSLATIONS[lang].approvalDelegateDescription;
-    assert.match(delegate, lang === 'en' ? /auto-approves.*verified scripts.*trusted project/u : /自动批准可信项目内.*已核实的脚本/u);
+    assert.match(delegate, lang === 'en' ? /Host policy approves eligible operations first.*dedicated Auto approval reviewer/u : /宿主优先批准.*自动审批专用 reviewer/u);
     assert.match(delegate, lang === 'en' ? /extension-host privileges/u : /扩展宿主权限/u);
-    assert.match(delegate, lang === 'en' ? /External actions may require authorization/u : /外部操作可能需要授权/u);
+    assert.match(delegate, lang === 'en' ? /External actions may require exact authorization/u : /外部操作可能需要精确授权/u);
   }
 });
 

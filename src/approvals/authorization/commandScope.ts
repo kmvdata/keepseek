@@ -18,6 +18,8 @@ export interface CommandScope {
   /** Effective Git cwd after validated global -C operands. */
   gitCwd?: string;
   executable?: string;
+  verifiedLauncher?: string;
+  environmentNames?: string[];
   /** The interpreter, on-disk entry and explicit argv paths were verified. The script runs with host privileges. */
   trustedProjectScript?: boolean;
   projectScriptLaunchPath?: string;
@@ -164,7 +166,8 @@ export async function inspectDraftRunScope(run: Pick<DraftRun, 'spec'>): Promise
   const fingerprint = createHash('sha256').update(JSON.stringify({
     version: 1, executable, env, roots, paths, pathIdentities, gitFingerprint, gitCwd, externalUris, diagnostics, trustedProjectScript
   })).digest('hex');
-  return { externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri, gitCwd, executable: executable?.path, trustedProjectScript, projectScriptLaunchPath, uncertain: diagnostics.length > 0, diagnostics,
+  return { externalUris, paths, cwd: paths[0]?.uri ?? run.spec.cwdUri, gitCwd, executable: executable?.path, verifiedLauncher: executable?.trusted ? executable.launchPath : undefined,
+    environmentNames: Object.keys(env).sort(), trustedProjectScript, projectScriptLaunchPath, uncertain: diagnostics.length > 0, diagnostics,
     reasons: diagnostics.map(reason => reason.message), fingerprint };
 }
 

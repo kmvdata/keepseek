@@ -173,7 +173,7 @@ import type {
 import type { ApprovalReviewerAdapter } from '../approvals/approvalReviewer';
 import { toReviewerModelContext } from '../approvals/approvalReviewer';
 import { captureValidationBaseline, validationBaselineKey } from './tools/validationSnapshot';
-import type { ApprovalReviewRequest, ApprovalRoute, ApprovalReviewOutcome, ManualToolApproval } from '../approvals/approvalReviewTypes';
+import { reviewerRoute, type ApprovalReviewRequest, type ApprovalRoute, type ApprovalReviewOutcome, type ManualToolApproval } from '../approvals/approvalReviewTypes';
 import { createExternalFileReviewRequest, createValidationReviewRequest } from '../approvals/approvalReviewSurface';
 import { toApprovalReviewDisplay } from '../approvals/approvalReviewStore';
 import { createBoundedReviewText } from '../approvals/approvalReviewHash';
@@ -3609,7 +3609,7 @@ export class AgentLoop {
     let scope: 'workspace_read' | 'validation_compile_lint' | 'validation_test' = 'workspace_read';
     const deny = (reason: string, outcome?: ApprovalReviewOutcome): ToolAuthorizationDecision => ({
       allowed: false, toolName, riskLevel: scope === 'workspace_read' ? 'low' : 'medium', scope,
-      source: outcome?.record.approvalSource === 'model_review' ? 'model_reviewer' : 'user_denied',
+      source: outcome && ['model_review', 'auto_approval_review'].includes(outcome.record.approvalSource) ? 'model_reviewer' : 'user_denied',
       requiresExplicitConfirmation: true, reason,
       approvalReview: outcome && toApprovalReviewDisplay(outcome.record),
       approvalCircuitBreakReason: outcome?.circuitBreakReason
@@ -3617,7 +3617,7 @@ export class AgentLoop {
 
     let reviewRequest: ApprovalReviewRequest;
     let snapshot: string;
-    let route: ApprovalRoute = 'model_review';
+    let route: ApprovalRoute = reviewerRoute(mode);
     let label: string;
     if (toolName === READ_WORKSPACE_FILE_TOOL_NAME || toolName === READ_WORKSPACE_FILE_RANGE_TOOL_NAME) {
       const rawPath = this.readRequiredString(input.args, 'path');
@@ -3660,7 +3660,7 @@ ${launch.evidence.content}`;
     reviewRequest = { ...reviewRequest, approvalMode: mode, scopeFingerprint: snapshot };
     const signal = input.request.signal;
     let outcome = route === 'host_policy' ? await reviewer.createHostPolicyApproval(reviewRequest)
-      : route === 'model_review' ? await reviewer.review(reviewRequest, toReviewerModelContext(input.request), signal) : undefined;
+      : route !== 'user_click' ? await reviewer.review(reviewRequest, toReviewerModelContext(input.request), signal) : undefined;
     const prior = outcome;
     if ((!outcome || (outcome.record.decision !== 'approve' && outcome.record.approvalSource === 'model_review'
       && !outcome.record.policyRules.includes('approval_budget_exhausted')
@@ -3682,10 +3682,14 @@ ${launch.evidence.content}`;
       return deny(formatReviewerDenial(outcome.record.rationale, outcome.record.saferAlternative, language), outcome);
     }
     this.throwIfAborted(signal, language);
+    if (route === 'auto_approval_review' || route === 'model_review') {
+      await reviewer.assertReviewerConfiguration?.(reviewRequest, toReviewerModelContext(input.request), outcome.record);
+      this.throwIfAborted(signal, language);
+    }
     await reviewer.consumeApproval(outcome.record, route);
     return {
       allowed: true, toolName, riskLevel: scope === 'workspace_read' ? 'low' : 'medium', scope,
-      source: route === 'host_policy' ? 'delegated_approver' : route === 'model_review' ? 'model_reviewer' : 'explicit_confirmation',
+      source: route === 'host_policy' ? 'delegated_approver' : route !== 'user_click' ? 'model_reviewer' : 'explicit_confirmation',
       requiresExplicitConfirmation: false, reason: outcome.record.rationale, executionSnapshot: snapshot,
       approvalReview: toApprovalReviewDisplay(outcome.record),
       priorApprovalReview: prior && prior !== outcome ? toApprovalReviewDisplay(prior.record) : undefined

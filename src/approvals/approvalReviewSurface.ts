@@ -66,12 +66,15 @@ export function createDraftEditReviewRequest(input: {
 
 export function createDraftRunReviewRequest(input: {
   draftRun: DraftRun;
+  originalDraftRun?: DraftRun;
   scope?: CommandScope;
   rootTaskId?: string;
   history: readonly ChatMessage[];
   language: 'zh-CN' | 'en';
 }): ApprovalReviewRequest {
-  const assessment = analyzeDraftRunEffects(input.draftRun.spec, input.scope?.diagnostics);
+  const plan = input.draftRun.spec.restricted;
+  const original = input.originalDraftRun;
+  const assessment = plan ? input.draftRun.effectAssessment : analyzeDraftRunEffects(input.draftRun.spec, input.scope?.diagnostics);
   return createBaseRequest({
     sessionId: input.draftRun.sessionId,
     rootTaskId: input.rootTaskId ?? input.draftRun.agentRunId,
@@ -85,6 +88,7 @@ export function createDraftRunReviewRequest(input: {
       `verdict:${assessment.verdict}`,
       ...assessment.effects.map((effect) => `effect:${effect}`),
       ...assessment.evidence,
+      ...(plan ? ['Host-constrained fixed parser, one UTF-8 snapshot via stdin, empty environment, bounded input and timeout.'] : []),
       ...(input.scope?.trustedProjectScript ? ['trusted_project_script', 'Runs verified project code with extension-host privileges.'] : []),
       'Exact external scope, when present, requires separate user authorization.'
     ],
@@ -94,7 +98,15 @@ export function createDraftRunReviewRequest(input: {
       argv: [...input.draftRun.spec.args],
       cwdUri: input.draftRun.spec.cwdUri,
       envNames: input.draftRun.spec.env.map(({ name }) => name),
-      scope: input.scope && { cwd: input.scope.cwd, executable: input.scope.executable, paths: input.scope.paths },
+      scope: plan ? { cwd: input.draftRun.spec.cwdUri, executable: input.draftRun.spec.executable,
+        paths: [{ uri: plan.targetUri, role: 'read_snapshot', external: false }] }
+        : input.scope && { cwd: input.scope.cwd, executable: input.scope.executable, launcher: input.scope.verifiedLauncher,
+          environmentNames: input.scope.environmentNames, paths: input.scope.paths },
+      restricted: plan && original && { kind: plan.kind, original: {
+        id: original.id, specHash: original.specHash, executable: original.spec.executable,
+        argv: [...original.spec.args], cwdUri: original.spec.cwdUri, executed: false
+      }, targetUri: plan.targetUri, inputBytes: plan.snapshotBytes, environment: 'empty',
+      stdin: 'single UTF-8 snapshot', launchIdentity: plan.boundaryFingerprint },
       timeoutMs: input.draftRun.spec.timeoutMs,
       effectAssessment: assessment,
       specHash: input.draftRun.specHash
@@ -181,6 +193,8 @@ function createBaseRequest(input: {
     targetId: input.targetId,
     actionHash: input.actionHash,
     originalGoalSummary: compact(redactSensitiveReviewText(firstUser), 1_200),
+    evidenceIncomplete: firstUser !== redactSensitiveReviewText(firstUser) || input.purpose.length > 1_200
+      || input.staticRiskAnalysis.some(item => item.length > 1_000),
     visibleSessionEvidence: [],
     workspaceTrusted: vscode.workspace.isTrusted,
     workspaceRootIds: (vscode.workspace.workspaceFolders ?? []).map((folder, index) => `root-${index + 1}:${folder.name}`),

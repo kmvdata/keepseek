@@ -85,6 +85,18 @@
           "scope": "window",
           "markdownDescription": "Selected model for the current workspace. An empty or unavailable value adopts the global default model, or the first available model when no explicit default is valid."
         },
+        "keepseek.autoApprovalReviewer": {
+          "type": "object",
+          "default": { "mode": "follow-main" },
+          "scope": "application",
+          "properties": {
+            "mode": { "type": "string", "enum": ["follow-main", "fixed"], "default": "follow-main" },
+            "sourceId": { "type": "string" },
+            "modelId": { "type": "string" }
+          },
+          "additionalProperties": false,
+          "markdownDescription": "Dedicated reviewer for Auto approval. Follow the main model or set fixed sourceId and modelId. Model approval keeps its existing model setting. / 自动审批专用 reviewer。可跟随主模型，或填写固定账号 ID 和模型 ID。模型审批沿用原有模型配置。"
+        },
         "keepseek.thinkingEnabled": {
           "type": "boolean",
           "default": true,
