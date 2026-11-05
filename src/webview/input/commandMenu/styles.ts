@@ -567,29 +567,6 @@ export const commandMenuStylesFragment: WebviewFragment = {
       cursor: default;
     }
 
-    .command-skill-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
-    }
-
-    .command-skill-action {
-      min-height: 22px;
-      padding: 2px 6px;
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 4px;
-      background: transparent;
-      color: var(--vscode-descriptionForeground);
-      font-size: 11px;
-    }
-
-    .command-skill-action:hover:not(:disabled),
-    .command-skill-action:focus-visible:not(:disabled) {
-      color: var(--vscode-foreground);
-      background: var(--vscode-toolbar-hoverBackground);
-      outline: none;
-    }
-
     .command-model-option {
       display: grid;
       grid-template-columns: 14px minmax(0, 1fr);

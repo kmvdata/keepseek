@@ -70,22 +70,6 @@ export const commandSkillsBindingsFragment: WebviewFragment = {
       }
 
       if (commandSkillList) {
-        commandSkillList.addEventListener('mousedown', function(event) {
-          var target = event.target instanceof Element ? event.target : null;
-          if (target?.closest('button[data-skill-action]')) {
-            event.preventDefault();
-          }
-        });
-
-        commandSkillList.addEventListener('click', function(event) {
-          var target = event.target instanceof Element ? event.target : null;
-          var control = target?.closest('button[data-skill-action][data-skill-id]');
-          if (!control) { return; }
-          event.preventDefault();
-          event.stopPropagation();
-          handleSkillAction(control.dataset.skillAction || '', control.dataset.skillId || '');
-        });
-
         commandSkillList.addEventListener('change', function(event) {
           var target = event.target instanceof HTMLInputElement ? event.target : null;
           if (!target || target.type !== 'checkbox' || target.dataset.skillAction !== 'toggle-use') { return; }
@@ -184,35 +168,6 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         commandSkillList.classList.toggle('hidden', !commandSkillListOpen);
         commandSkillList.innerHTML = '';
         if (!commandSkillListOpen) { return; }
-        var scopeButton = document.createElement('button');
-        scopeButton.type = 'button';
-        scopeButton.className = 'command-skill-action';
-        scopeButton.textContent = t('sharedScopeSelect');
-        scopeButton.disabled = Boolean(state.isBusy);
-        scopeButton.title = getSkillsState().scopeUri || t('sharedScopeRequired');
-        scopeButton.addEventListener('click', function() { vscode.postMessage({ type: 'selectProjectScope' }); });
-        var refreshButton = document.createElement('button');
-        refreshButton.type = 'button';
-        refreshButton.className = 'command-skill-action';
-        refreshButton.textContent = t('skillsRefresh');
-        refreshButton.disabled = Boolean(state.isBusy);
-        refreshButton.addEventListener('click', function() { vscode.postMessage({ type: 'requestSkills' }); });
-        var controls = document.createElement('div');
-        controls.className = 'command-skill-actions';
-        controls.append(scopeButton, refreshButton);
-        commandSkillList.append(controls);
-        var scopeInfo = document.createElement('div');
-        scopeInfo.className = 'command-row-description';
-        scopeInfo.textContent = getSkillsState().scopeUri || t('sharedScopeRequired');
-        commandSkillList.append(scopeInfo);
-        var configSummary = getSkillsState().configSummary;
-        if (configSummary) {
-          var configInfo = document.createElement('div');
-          configInfo.className = 'command-row-description';
-          configInfo.textContent = 'project_doc_max_bytes: ' + configSummary.projectDocMaxBytes + ' · project_doc_fallback_filenames: ' + configSummary.fallbackFilenames.join(', ');
-          configInfo.title = Object.keys(configSummary.origins).map(function(key) { return key + ': ' + configSummary.origins[key]; }).join('\\n');
-          commandSkillList.append(configInfo);
-        }
         (getSkillsState().diagnostics || []).forEach(function(message) {
           var diagnostic = document.createElement('div');
           diagnostic.className = 'reference-menu-empty';
@@ -295,27 +250,8 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
 
         main.append(copy, checkbox);
 
-        var actions = document.createElement('div');
-        actions.className = 'command-skill-actions';
-        actions.append(createSkillActionButton(skill, 'open', t('skillsOpen'), Boolean(skill.plugin && !canUse)));
-        if (!skill.plugin) {
-          actions.append(createSkillActionButton(skill, 'workspace-default',
-            skill.workspaceDefault ? t('skillsUnsetWorkspaceDefault') : t('skillsSetWorkspaceDefault'), !skill.enabled));
-        }
-
-        item.append(main, actions);
+        item.append(main);
         return item;
-      }
-
-      function createSkillActionButton(skill, action, label, disabled) {
-        var button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'command-skill-action';
-        button.dataset.skillAction = action;
-        button.dataset.skillId = skill.id;
-        button.textContent = label;
-        button.disabled = Boolean(disabled) || Boolean(state.isBusy);
-        return button;
       }
 
       function formatSkillMeta(skill) {
@@ -375,13 +311,6 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
             setComposerStatus(t('skillRemoved', { name: skill.name || skillId }));
           }
           return;
-        }
-        if (action === 'open') {
-          vscode.postMessage({ type: 'openSkill', skillId: skillId });
-          return;
-        }
-        if (action === 'workspace-default' && !skill.plugin) {
-          vscode.postMessage({ type: 'setSkillWorkspaceDefault', skillId: skillId, enabled: !skill.workspaceDefault });
         }
       }
 

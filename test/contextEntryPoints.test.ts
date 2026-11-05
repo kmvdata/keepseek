@@ -348,7 +348,7 @@ test('Skills picker uses checkboxes and keeps selected Skills in activation orde
   const skillItemRenderer = getGeneratedSection(
     inputScript,
     'function createCommandSkillItem(skill)',
-    'function createSkillActionButton(skill, action, label, disabled)'
+    'function formatSkillMeta(skill)'
   );
   const skillOrdering = getGeneratedSection(
     inputScript,
@@ -371,6 +371,55 @@ test('Skills picker uses checkboxes and keeps selected Skills in activation orde
   assert.match(skillOrdering, /leftActive \? -1 : 1[\s\S]*?leftName\.localeCompare\(rightName/u);
   assert.match(styles, /\.command-skill-checkbox\s*\{/u);
   assert.doesNotMatch(styles, /\.command-skill-status/u);
+
+  const harness = new Function('translations', `
+    const state = { isBusy: false };
+    const sent = [];
+    const items = [
+      { id: 'ready', name: 'Ready Skill', description: 'Ready description', enabled: true },
+      { id: 'failed', name: 'Failed Skill', enabled: false, loadError: 'Fixture read failed' }
+    ];
+    const skills = { items, diagnostics: ['Fixture discovery warning'], scopeUri: 'file:///fixture/task-directory',
+      configSummary: { projectDocMaxBytes: 4321, fallbackFilenames: ['FIXTURE.md'], origins: {} } };
+    const vscode = { postMessage: message => sent.push(message) };
+    const t = (key, values = {}) => (translations[key] || key)
+      .replace(/\\{(\\w+)\\}/g, (_, name) => values[name] || '');
+    const document = { createElement: tag => ({ tag, children: [], dataset: {}, textContent: '',
+      classList: { toggle() {} }, setAttribute() {}, append(...children) { this.children.push(...children); },
+      set innerHTML(value) { this.children = []; } }) };
+    const commandSkillList = document.createElement('div');
+    const commandSkillsMainButton = null, commandSkillsButton = null;
+    const commandSkillListOpen = true, commandSkillFilterQuery = '';
+    const getSkillsState = () => skills;
+    const getCommandSkillItems = () => items;
+    const getSkillById = id => items.find(skill => skill.id === id);
+    const isSkillActive = () => false;
+    const setComposerStatus = () => {};
+    function flatten(node) { return [node].concat(...node.children.map(flatten)); }
+    ${commandSkillsImplementationFragment.source}
+    renderCommandSkills();
+    return { sent, state, handleSkillAction, nodes: flatten(commandSkillList) };
+  `)(WEBVIEW_TRANSLATIONS.en);
+  assert.equal(harness.nodes.some((node: { tag: string }) => node.tag === 'button'), false);
+  const menuText = harness.nodes.map((node: { textContent: string }) => node.textContent).join('\n');
+  assert.match(menuText, /Ready Skill[\s\S]*Ready description/u);
+  assert.match(menuText, /Fixture discovery warning/u);
+  assert.match(menuText, /Fixture read failed/u);
+  assert.doesNotMatch(menuText, /fixture\/task-directory|project_doc_max_bytes|project_doc_fallback_filenames|4321|FIXTURE\.md/u);
+  assert.equal(harness.nodes.filter((node: { tag: string }) => node.tag === 'input').length, 2);
+  harness.handleSkillAction('open', 'ready');
+  harness.handleSkillAction('workspace-default', 'ready');
+  harness.handleSkillAction('toggle-use', 'failed', true);
+  assert.deepEqual(harness.sent, []);
+  harness.handleSkillAction('toggle-use', 'ready', true);
+  harness.handleSkillAction('toggle-use', 'ready', false);
+  assert.deepEqual(harness.sent, [
+    { type: 'useSkill', skillId: 'ready' },
+    { type: 'removeActiveSkill', skillId: 'ready' }
+  ]);
+  harness.state.isBusy = true;
+  harness.handleSkillAction('toggle-use', 'ready', true);
+  assert.equal(harness.sent.length, 2);
 });
 
 test('plugin selections insert a task reference and keep its original path when the catalog refreshes', () => {
@@ -430,12 +479,12 @@ test('plugin selections insert a task reference and keep its original path when 
   const item = harness.createCommandSkillItem(fixture);
   assert.match(item.children[0].children[0].children[2].textContent, /Product Design 1 · Remote install · remote-fixture/u);
   assert.equal(item.children[0].children[0].children[3].textContent, 'Tools missing · Interactive browser (Missing)');
-  assert.deepEqual(item.children[1].children.map((button: { dataset: { skillAction: string } }) => button.dataset.skillAction), ['open']);
+  assert.equal(item.children.length, 1);
   const zh = run(WEBVIEW_TRANSLATIONS['zh-CN'], 'zh-CN');
   assert.equal(zh.createCommandSkillItem(fixture).children[0].children[0].children[3].textContent, '缺少工具 · 交互式浏览器 (缺失)');
   harness.handleSkillAction('open', fixture.id);
   harness.handleSkillAction('toggle-use', fixture.id, true);
-  assert.deepEqual(harness.sent, [{ type: 'openSkill', skillId: fixture.id }]);
+  assert.deepEqual(harness.sent, []);
   assert.equal(harness.links[0].range, 'cursor');
   assert.equal(harness.isPluginSkillInPrompt(fixture), true);
   assert.equal(harness.hasStalePluginSkillInPrompt(), false);

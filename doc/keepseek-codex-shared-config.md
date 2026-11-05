@@ -34,7 +34,7 @@
 | SKILL.md YAML `name`、`description` | 必填非空字符串，上限 64/1024 字符；多行/引号/注释/UTF-8 可用，错误 Skill 可见但不可激活 | YAML 测试、真实 CLI 模板读取 |
 | `agents/openai.yaml interface` | 白名单解析显示名、简介、图标路径、颜色、默认 prompt。显示名只用于 UI；图标/默认 prompt 不自动加载或执行 | YAML 测试、CLI displayName |
 | `policy.allow_implicit_invocation` | 唯一文件级隐式策略；缺省 true，false 仍可显式/会话选择。创建 UI 的初始选择为 false，并明确写入 YAML | activation、creator；Codex 模型行为待验 |
-| `dependencies.tools` | 识别 type/value/description；MCP 和其他未接入依赖阻止激活，显示具体依赖，可 Open 文件。transport/url 不转成连接 | metadata/loader 负例；无新增 MCP 客户端 |
+| `dependencies.tools` | 识别 type/value/description；MCP 和其他未接入依赖阻止激活，显示具体依赖。transport/url 不转成连接 | metadata/loader 负例；无新增 MCP 客户端 |
 | `$CODEX_HOME/config.toml` | 默认 `~/.codex/config.toml`，白名单只读；CODEX_HOME 必须是绝对路径 | config/path 测试、CLI |
 | 可信项目 `.codex/config.toml` | Git root→cwd 合并受支持文档字段；较近目录覆盖标量，数组整体替换，不拼接。VS Code 未信任时不加载项目层 | config/trust 测试、CLI fallback |
 | 用户 `skills.config` | enabled 布尔值；每项恰好 name 或绝对 SKILL.md path；name 匹配全部同名，path 匹配规范物理文件；最后匹配规则生效，保留来源 | config/activation、CLI 用户禁用 |
@@ -77,7 +77,7 @@ Provider 只做编排。创建生成 SKILL.md 和 agents/openai.yaml 的同一�
 
 一次逻辑任务沿用已解析快照。文件监听/保存/Apply 仅标记变化，在空闲的显式 Skills 刷新或下个真实新任务边界重读；自动命令继续、审批继续、计划执行、修复和 no-progress 继续不按工具轮重扫。配置内容不进入静态 system；旧 user 和稳定 `contextInstructions` 不回写，已有受控动态上下文尾部继续承担新字节交付。刷新不新建 epoch 循环、不执行任何脚本。
 
-Skills 菜单显示当前目录、文档字节预算、fallback、配置来源、诊断及 Skill 来源/禁用原因。Run Details 显示实际指令 URI、作用域、顺序、hash、截断/丢弃。白名单以外的 TOML 内容（含潜在密钥）不输出到 Webview/prompt/trace；解析器错误不打印原文片段。
+Skills 选择菜单保留筛选、创建、勾选及 Skill 来源/禁用原因与诊断；不展示任务目录、文档预算/fallback 配置提示，也不提供目录选择、手动刷新、Open 或项目默认操作。展开菜单仍请求最新 Skills；任务目录可通过 VS Code 命令选择，既有默认配置继续生效。Run Details 显示实际指令 URI、作用域、顺序、hash、截断/丢弃。白名单以外的 TOML 内容（含潜在密钥）不输出到 Webview/prompt/trace；解析器错误不打印原文片段。
 
 读取上限：TOML 1 MiB，YAML 元数据 64 KiB / 4096 节点 / 32 层，目录遍历每个标准根最多 6 层/2000 目录/20000 条目；资源最多 12 项/48000 字符，并遵守单文件保护。`project_doc_max_bytes`、Skill 字符预算、整体上下文准入是不同阶段，UI 不把它们伪装成同一 Codex 设置。
 
@@ -159,7 +159,7 @@ git -C "$fixture_dir/repo" init --quiet
 
 7. 修改 AGENTS、fallback、YAML 和 TOML：运行中不改变已提交请求前缀，新任务/空闲刷新后来源/hash更新；内容不变再刷新时上下文字节稳定，历史消息不被改写。检查 Run Details/trace 的三协议 context/tools/history hash 和 usage 投影，而不是只看最终回答。附带其他目录文件、切编辑器焦点不应改变任务目录。
 
-8. 关闭 VS Code 工作区信任并按 VS Code 要求重载；项目指令/配置/Skill 停用，Codex TOML 的 trust_level 不能恢复 KeepSeek 权限。个人/全局来源与项目来源分别检查。加入有 MCP 依赖的测试 Skill，确认未接入说明和 Open 文件可用，不出现连接、脚本运行或工具成功假象。
+8. 关闭 VS Code 工作区信任并按 VS Code 要求重载；项目指令/配置/Skill 停用，Codex TOML 的 trust_level 不能恢复 KeepSeek 权限。个人/全局来源与项目来源分别检查。加入有 MCP 依赖的测试 Skill，确认未接入说明可见，不出现连接、脚本运行或工具成功假象。
 
 9. 临时创建 `.agents/old/SKILL.md`、`.agents/skills/old-agent/AGENTS.md` 和 `.keepseek/memory.json`，确认不会发现旧 Skill、弹出迁移 UI 或注入 Memory。只检查夹具；实现不会删除或搬移任何用户旧文件。
 
