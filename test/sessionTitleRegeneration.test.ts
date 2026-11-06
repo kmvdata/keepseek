@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import * as vscode from './stubs/vscode';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
+import type { InteractionCoordinator } from '../src/provider/interactionState';
 import { ChatSessionStore, createEmptySession, type ChatSessionStorageAdapter,
   type StoredWorkspaceSessionState } from '../src/sessions/chatSessionStore';
 import { buildProviderRequestProjection } from '../src/agent/providerRequestProjection';
@@ -79,6 +80,7 @@ interface TitleHost {
   requestContextReady: boolean;
   isBusy: boolean;
   isStartingRun: boolean;
+  interactions: InteractionCoordinator;
   availableModels: KeepseekModel[];
   selectedSourceId: string;
   selectedModelId: string;
@@ -274,11 +276,14 @@ test('manual regeneration records already-spent usage in A after switching witho
 
 test('busy, unready, unknown and untrusted manual requests are rejected and release only their own UI gesture', async t => {
   const { host, session, posts, inputs } = await fixture(t);
-  for (const property of ['isBusy', 'isStartingRun'] as const) {
-    host[property] = true;
-    await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: property });
-    host[property] = false;
-  }
+  host.isBusy = true;
+  await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'isBusy' });
+  host.isBusy = false;
+  const preparation = host.interactions.begin('task', session.id, 'preparing_task')!;
+  try {
+    assert.equal(host.isStartingRun, true);
+    await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: 'isStartingRun' });
+  } finally { host.interactions.finish(preparation); }
   for (const property of ['sessionReady', 'approvalDataReady', 'requestContextReady'] as const) {
     host[property] = false;
     await host.handleMessage({ type: 'regenerateSessionTitle', sessionId: session.id, requestId: property });

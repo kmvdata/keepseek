@@ -223,9 +223,10 @@ test('complete webview handles timing ticks and keeps new/history session naviga
 
   view.element('newChatTab').click();
   assert.equal(view.posted.at(-1)?.type, 'newSession');
-  assert.equal(prompt.textContent, '');
+  assert.equal(prompt.textContent, 'Unsent draft', 'a navigation request cannot discard a draft before the Host commits the new session');
   view.receive({ type: 'sessionChanged' });
   publishSession(b, 2);
+  assert.equal(prompt.textContent, '');
   assert.equal(view.element('currentSessionTitle').textContent, b.title);
   assert.doesNotMatch(view.element('transcript').textContent, /Inspect the approval record/u);
   const bTiming = view.state.usageMetrics.executionTime;
@@ -243,6 +244,7 @@ test('complete webview handles timing ticks and keeps new/history session naviga
   assert.equal(view.posted.at(-1)?.sessionId, a.id);
   view.receive({ type: 'sessionChanged' });
   publishSession(a, 3);
+  assert.equal(prompt.textContent, 'Unsent draft', 'returning to a session restores its draft');
   tick(a.id, 66_000);
   assert.equal(view.element('currentSessionTitle').textContent, a.title);
   assert.match(view.element('transcript').textContent, /Inspect the approval record\./u);

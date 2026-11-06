@@ -1,3 +1,4 @@
+import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
@@ -12,6 +13,7 @@ import { commandSkillsImplementationFragment } from '../src/webview/input/comman
 import { composerSerializationFragment } from '../src/webview/input/composer/serialization';
 import { referenceMenuImplementationFragment } from '../src/webview/input/references/menu';
 import { skillsImplementationFragment } from '../src/webview/input/skills/script';
+import { createWebviewDomHarness } from './webviewDomHarness';
 
 test('header timeout dropdown offers exactly six presets with a one-hour default in both languages', async () => {
   const template = getTemplate();
@@ -173,10 +175,7 @@ test('DraftRun interactions settle visibly with clone and continuation feedback'
   assert.match(script, /getDraftRunTitle/u);
   assert.match(script, /draftRunCloneFeedback/u);
   assert.match(script, /draftRunCloneCreating/u);
-  assert.match(
-    providerSource,
-    /isBusy: this\.isBusy \|\| this\.isStartingRun \|\| this\.runContextRefreshInFlight \|\| Boolean\(this\.activeDraftRunId\)/u
-  );
+  // Busy/capability behavior is exercised by sessionNavigation and complete Webview tests.
   assert.match(providerSource, /claimReadyAutoContinuation/u);
   assert.match(providerSource, /displayKind: 'draft_run_auto_continue'/u);
   assert.match(providerSource, /type: 'draftRunCloneFeedback'/u);
@@ -370,6 +369,7 @@ test('Skills picker uses checkboxes and keeps selected Skills in activation orde
 
   const harness = new Function('translations', `
     const state = { isBusy: false };
+    const canChangeContext = () => !state.isBusy;
     const sent = [];
     const items = [
       { id: 'ready', name: 'Ready Skill', description: 'Ready description', enabled: true },
@@ -422,6 +422,7 @@ test('plugin selections insert a task reference and keep its original path when 
   const helpers = getSkillWebviewHelpers();
   const run = new Function('translations', 'language', `
     const state = { skills: { items: [] } };
+    const canChangeContext = () => !state.isBusy;
     const links = [];
     const sent = [];
     const vscode = { postMessage: message => sent.push(message) };
@@ -731,14 +732,14 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.match(inputScript, /function blockAccountSettingsWhileRunBusy/u);
   assert.match(inputScript, /function syncAccountSettingsRunBusyStatus/u);
   assert.match(inputScript, /function trapSettingsDialogFocus/u);
-  assert.match(inputScript, /var runBusy = Boolean\(state\.isBusy \|\| isModelSelectionLocked\(\)\)/u);
+  assert.match(inputScript, /var runBusy = !canChangeContext\(\) \|\| isModelSelectionLocked\(\)/u);
   assert.match(inputScript, /var controlsDisabled = operationBusy \|\| runBusy/u);
   assert.match(inputScript, /button\.disabled = controlsDisabled \|\| !account\.enabled/u);
   assert.match(inputScript, /settingsCancelBtn\.disabled = operationBusy/u);
   assert.match(inputScript, /modelSettingsReadonlyWhileBusy/u);
   assert.match(inputScript, /modelSelectionLockedByBackground/u);
   assert.ok((inputScript.match(/blockAccountSettingsWhileRunBusy\(\)/gu) ?? []).length >= 9);
-  assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: '正在生成回复；完成或停止后才能修改模型设置。'/u);
+  assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: '当前操作完成并且会话就绪后可修改模型设置。'/u);
   assert.match(inputScript, /var settingsSaveCompleted = false/u);
   assert.match(inputScript, /settingsSaveCompleted = values\.settingsSaved === true/u);
   assert.match(inputScript, /settingsSaveCompleted && !settingsDialogBusyAction/u);
@@ -748,7 +749,7 @@ test('model settings dialog manages flat logo-led accounts and per-source models
   assert.ok(providerSource.includes('settingsSaved: outcome.settingsSaved === true'));
   assert.ok(providerSource.includes('private postModelSettingsDialog(outcome: { settingsSaved?: boolean } = {}): void'));
   assert.ok((providerSource.match(/settingsSaved: true/gu) ?? []).length >= 2);
-  assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: 'Model settings are read-only while a response is being generated\. Finish or stop it first\.'/u);
+  assert.match(i18nSource, /modelSettingsReadonlyWhileBusy: 'Model settings are available when the current operation finishes and the conversation is ready\.'/u);
   assert.match(
     inputScript,
     /settingsDialogBusyTimer = setTimeout\(function\(\) \{[\s\S]*?setSettingsDialogStatus\(t\('modelOperationStillPending'\)\)[\s\S]*?\}, 15000\)/u
@@ -1080,28 +1081,21 @@ test('context usage shows a placeholder instead of 0.00% before the session star
   assert.equal(formatContextPercent.value(12), '12.00%');
 });
 
-test('composer status fades after eight seconds and reveals a tooltip only above 24 UTF-8 bytes', () => {
-  const inputTemplate = getInputTemplate();
-  const inputScript = getInputScript();
-  const script = getScript();
-  const styles = getStyles();
-
-  assert.match(script, /const STATUS_MESSAGE_DURATION_MS = 8000/u);
-  assert.match(script, /const STATUS_TOOLTIP_MIN_BYTES = 24/u);
-  assert.match(script, /status\.classList\.add\('is-fading'\)/u);
-  assert.match(script, /statusText\.textContent = transientStatus/u);
-  assert.match(script, /getUtf8ByteLength\(transientStatus\) > STATUS_TOOLTIP_MIN_BYTES/u);
-  assert.match(script, /new TextEncoder\(\)\.encode\(String\(value \|\| ''\)\)\.length/u);
-  assert.match(script, /statusTooltip\.textContent = showTooltip \? transientStatus : ''/u);
-  assert.match(script, /statusTooltip\.classList\.toggle\('hidden', !showTooltip\)/u);
-  assert.match(script, /setTransientStatus\(getAgentActivityStatusText\(activity\) \|\| t\('processing'\)\)/u);
-  assert.match(inputScript, /function setComposerStatus\(message\) \{\s*setTransientStatus\(message\);\s*\}/u);
-  assert.match(inputTemplate, /id="statusText" class="composer-status-text"/u);
-  assert.match(inputTemplate, /id="statusTooltip" class="composer-status-tooltip hidden" role="tooltip"/u);
-  assert.match(styles, /\.composer-status:hover \.composer-status-tooltip\s*\{[\s\S]*?visibility:\s*visible/u);
-  assert.match(styles, /\.composer-status-tooltip\s*\{[\s\S]*?white-space:\s*pre-wrap/u);
-  assert.doesNotMatch(script, /durationMs \|\| 2200/u);
-  assert.doesNotMatch(inputScript, /\}, 2200\);/u);
+test('ordinary notifications fade after eight seconds and expose long UTF-8 text in their tooltip', () => {
+  const view = createWebviewDomHarness();
+  view.receive({ type: 'state', revision: 1, state: { activeSessionId: 'A',
+    startup: { interactiveReady: true }, isBusy: false } });
+  view.window.keepseekInputControls.showStatus('short');
+  assert.equal(view.element('statusTooltip').classList.contains('hidden'), true);
+  view.window.keepseekInputControls.showStatus('超过二十四个UTF8字节的提示');
+  assert.equal(view.element('statusTooltip').classList.contains('hidden'), false);
+  view.advance(7999);
+  assert.equal(view.element('status').classList.contains('is-active'), true);
+  view.advance(1);
+  assert.equal(view.element('status').classList.contains('is-fading'), true);
+  view.advance(120);
+  assert.equal(view.element('statusText').textContent, '');
+  assert.equal(view.element('statusTooltip').classList.contains('hidden'), true);
 });
 
 test('stream reconnect replaces only the failed model attempt and rejects stale or already consumed deltas', () => {
@@ -1131,63 +1125,25 @@ test('stream reconnect replaces only the failed model attempt and rejects stale 
   assert.equal(apply(delta), null);
 });
 
-test('reconnect status uses structured counts, stays visible through backoff and leaves no recovery timer on stop', () => {
-  const state = { language: 'en', startup: { interactiveReady: true }, isBusy: true, messages: [],
-    agentActivity: { base: 'thinking', phase: 'reconnecting', reconnectAttempt: 2, maxReconnectAttempts: 5, retryDelayMs: 16000 } };
-  const harness = new Function('state', 'translations', `
-    let transientStatus = '', transientStatusTimer = 0, transientStatusClearTimer = 0, transientStatusSequence = 0;
-    let agentStatusRotationTimer = 0, agentStatusRotationIndex = 0, agentStatusRotationKey = '', terminalAgentStatusKey = '', reconnectStatusActive = false;
-    const STATUS_MESSAGE_DURATION_MS = 8000, STATUS_MESSAGE_FADE_MS = 200, STATUS_TOOLTIP_MIN_BYTES = 24, AGENT_STATUS_ROTATION_MS = 2000;
-    const timeouts = new Map(), intervals = new Map(); let serial = 0;
-    const setTimeout = (fn, ms) => { timeouts.set(++serial, { fn, ms }); return serial; }, clearTimeout = id => timeouts.delete(id);
-    const setInterval = (fn, ms) => { intervals.set(++serial, { fn, ms }); return serial; }, clearInterval = id => intervals.delete(id);
-    const classes = { add() {}, remove() {}, toggle() {} };
-    const status = { classList: classes }, statusText = { textContent: '' }, statusTooltip = { textContent: '', classList: classes };
-    const getLanguage = () => state.language;
-    const t = (key, values = {}) => (translations[state.language][key] || key).replace(/\\{(\\w+)\\}/g, (_, name) => values[name] ?? '');
-    const agentStatusPools = { generating: ['agentStatusGenerating'], preparing: ['agentStatusPreparingContext'] };
-    ${getGeneratedSection(getScript(), 'function renderStatus()', 'function syncEditingState()')}
-    return { render: renderStatus, terminal: rememberTerminalAgentActivity, statusText, timeouts, intervals };
-  `)(state, WEBVIEW_TRANSLATIONS) as {
-    render(): void; terminal(activity: Record<string, unknown>): void;
-    statusText: { textContent: string }; timeouts: Map<number, unknown>; intervals: Map<number, unknown>;
-  };
-  harness.render();
-  assert.equal(harness.statusText.textContent, 'Connection interrupted. Reconnecting (2/5).');
-  assert.equal(harness.timeouts.size, 0, 'reconnect must not disappear after the normal eight second status timeout');
-  assert.equal(harness.intervals.size, 0, 'reconnect status does not rotate into ordinary model status');
-  state.agentActivity.reconnectAttempt = 5;
-  state.language = 'zh-CN';
-  harness.render();
-  assert.equal(harness.statusText.textContent, '网络连接中断，正在重连（第 5/5 次）');
-  state.agentActivity.phase = 'generating';
-  harness.render();
-  assert.equal(harness.statusText.textContent, '生成回答...');
-  assert.equal(harness.timeouts.size, 1);
-  assert.equal(harness.intervals.size, 1);
-  state.agentActivity.phase = 'reconnecting';
-  harness.render();
-  assert.equal(harness.timeouts.size, 0);
-  assert.equal(harness.intervals.size, 0);
-  state.isBusy = false;
-  state.agentActivity = { ...state.agentActivity, base: 'stopped', phase: 'finalizing' };
-  harness.terminal(state.agentActivity);
-  harness.render();
-  assert.equal(harness.statusText.textContent, '已中止');
-  assert.equal(harness.timeouts.size, 1, 'only the ordinary stopped notice timer remains');
-  state.isBusy = true;
-  state.agentActivity.phase = 'reconnecting';
-  state.startup.interactiveReady = false;
-  harness.render();
-  assert.equal(harness.statusText.textContent, '正在恢复会话与安全状态…');
-  state.startup.interactiveReady = true;
-  harness.render();
-  assert.equal(harness.statusText.textContent, '网络连接中断，正在重连（第 5/5 次）');
-  state.isBusy = false;
-  state.agentActivity.phase = 'idle';
-  harness.render();
-  assert.equal(harness.statusText.textContent, '');
-  assert.equal(harness.timeouts.size, 0);
+test('reconnect status follows the operation through backoff and clears immediately on stop', () => {
+  const view = createWebviewDomHarness();
+  const activity = { base: 'thinking', phase: 'reconnecting', reconnectAttempt: 2,
+    maxReconnectAttempts: 5, retryDelayMs: 16000 };
+  view.receive({ type: 'state', revision: 1, state: { activeSessionId: 'A', language: 'en',
+    startup: { interactiveReady: true }, isBusy: true, agentActivity: activity } });
+  assert.equal(view.element('statusText').textContent, 'Connection interrupted. Reconnecting (2/5).');
+  view.advance(32000);
+  assert.equal(view.element('statusText').textContent, 'Connection interrupted. Reconnecting (2/5).');
+  view.receive({ type: 'state', revision: 2, state: { language: 'zh-CN',
+    agentActivity: { ...activity, reconnectAttempt: 5 } } });
+  assert.equal(view.element('statusText').textContent, '网络连接中断，正在重连（第 5/5 次）');
+  view.receive({ type: 'state', revision: 3, state: { agentActivity: { ...activity, phase: 'generating' } } });
+  assert.equal(view.element('statusText').textContent, '生成回答...');
+  view.receive({ type: 'state', revision: 4, state: { isBusy: false,
+    agentActivity: { base: 'stopped', phase: 'finalizing' } } });
+  assert.equal(view.element('statusText').textContent, '已中止');
+  view.advance(8120);
+  assert.equal(view.element('statusText').textContent, '');
 });
 
 test('ChangeSets render in their assistant timeline entry with an unlinked actionable fallback', () => {

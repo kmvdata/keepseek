@@ -10,7 +10,9 @@ import { ChatSessionStore, type StoredWorkspaceSessionState } from '../src/sessi
 import { GlobalSessionStorage } from '../src/sessions/globalSessionStorage';
 import type { SessionTitleCoordinator } from '../src/sessions/sessionTitleCoordinator';
 import type { SharedProjectSources } from '../src/context/sharedProjectSources';
-import type { ChatMessage } from '../src/shared/types';
+import type { InteractionSnapshot } from '../src/provider/interactionState';
+import type { WebviewMessage } from '../src/provider/webviewMessages';
+import type { AgentResponse, ChatMessage, ChatSession } from '../src/shared/types';
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -19,7 +21,7 @@ function deferred<T = void>() {
 }
 
 interface NavigationHost {
-  handleMessage(message: { type: 'newSession' } | { type: 'selectSession'; sessionId: string }): Promise<void>;
+  handleMessage(message: WebviewMessage): Promise<void>;
   initializeAfterWebviewReady(): Promise<void>;
   postState(options: { immediate?: boolean; forceFull?: boolean }): void;
   isStartingRun: boolean;
@@ -32,8 +34,58 @@ interface NavigationHost {
   sessionTitles: SessionTitleCoordinator;
   sharedProjectSources: SharedProjectSources;
   currentRunContextsBySession: Map<string, unknown>;
+  activeRunSettled?: Promise<void>;
+  awaitRunContextRefresh(): Promise<boolean>;
+  sendPromptImpl(prompt: string, sourceId: string, modelId: string, settings: unknown, options?: {
+    userMessageId?: string; userTask?: NonNullable<ChatMessage['userTask']>; onSubmissionAccepted?: () => void;
+  }): Promise<AgentResponse | undefined>;
+  queueUsageLedgerFlush(session: ChatSession): void;
+  recoverSubagentUsage(session: ChatSession): Promise<void>;
+  usageLedgerFlushes: Map<string, Promise<void>>;
+  usageDisplayReadiness: Map<string, 'loading' | 'ready' | 'incomplete'>;
+  changeSets: { loadSession?(sessionId: string): Promise<void> };
   views: Set<unknown>;
 }
+
+interface PostedState {
+  activeSessionId?: string;
+  isBusy?: boolean;
+  interaction?: InteractionSnapshot;
+  messages?: ChatMessage[];
+  usageMetrics?: { displayReadiness?: 'loading' | 'ready' | 'incomplete' };
+}
+
+interface HostPost {
+  type: string;
+  sessionId?: string;
+  requestId?: string;
+  revision?: number;
+  status?: 'accepted' | 'rejected' | 'failed';
+  reason?: string;
+  state?: PostedState;
+}
+
+test('navigation preparation never advertises a running task or a Stop action', async t => {
+  const { host, second, publish, posts } = await fixture(t);
+  const reading = deferred();
+  const release = deferred();
+  t.after(() => release.resolve());
+  const refresh = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
+  host.sharedProjectSources.refresh = async (...args) => { reading.resolve(); await release.promise; return refresh(...args); };
+  const navigation = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await reading.promise;
+  publish();
+  const during = posts.at(-1)?.state as { isBusy?: boolean; interaction?: { phase: string; canCancel: boolean; canSubmit: boolean; canEdit: boolean } };
+  // Capture before releasing the barrier, but always settle the operation even
+  // when this regression is run against the old implementation.
+  release.resolve();
+  await navigation;
+  assert.equal(during.isBusy, false, 'context I/O is not a main model task');
+  assert.equal(during.interaction?.phase, 'preparing_context');
+  assert.equal(during.interaction?.canCancel, false);
+  assert.equal(during.interaction?.canSubmit, false);
+  assert.equal(during.interaction?.canEdit, true);
+});
 
 function messages(taskId: string): ChatMessage[] {
   const userTask = { version: 1 as const, id: taskId, originMessageId: `${taskId}-user`, reason: 'user' as const };
@@ -88,7 +140,7 @@ async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailu
     { displayName: 'KeepSeek', version: 'test', publisher: 'keepseek', author: 'keepseek', repositoryUrl: '', license: 'MIT' },
     initialization);
   const host = provider as unknown as NavigationHost;
-  const posts: Array<{ type: string; state?: { activeSessionId?: string; isBusy?: boolean } }> = [];
+  const posts: HostPost[] = [];
   host.views.add({ webview: { postMessage(message: typeof posts[number]) { posts.push(message); return Promise.resolve(true); } } });
   t.after(async () => {
     releaseLoad.resolve();
@@ -104,8 +156,314 @@ async function fixture(t: TestContext, options: { delayLoad?: boolean; loadFailu
   });
   if (!options.delayLoad) await host.initializeAfterWebviewReady();
   const publish = () => host.postState({ immediate: true, forceFull: true });
-  return { host, store, storage, first, second, posts, errors, releaseLoad, initialization, publish };
+  return { host, store, storage, scope, first, second, posts, errors, releaseLoad, initialization, publish };
 }
+
+/** The real Host admission, ownership and final persistence remain in use. */
+function acceptedRun(host: NavigationHost, store: ChatSessionStore) {
+  const calls: Array<{ prompt: string; sessionId: string; rootTaskId: string }> = [];
+  host.sendPromptImpl = async (prompt, _source, _model, _settings, options) => {
+    assert.ok(options?.userMessageId && options.userTask);
+    const session = store.getActiveSession();
+    calls.push({ prompt, sessionId: session.id, rootTaskId: options.userTask.id });
+    session.messages.push({ id: options.userMessageId, role: 'user', content: prompt,
+      createdAt: new Date(0).toISOString(), userTask: options.userTask });
+    options.onSubmissionAccepted?.();
+    return { message: 'controlled response', draftEdits: [] } as unknown as AgentResponse;
+  };
+  return calls;
+}
+
+function submission(sessionId: string, requestId: string, messageId?: string): Extract<WebviewMessage, { type: 'sendPrompt' | 'editUserPrompt' }> {
+  const shared = { sessionId, requestId, prompt: `Question ${requestId}`, sourceId: 'test-source', modelId: 'test-model' };
+  return messageId ? { type: 'editUserPrompt', messageId, ...shared } : { type: 'sendPrompt', ...shared };
+}
+
+function lastState(posts: readonly HostPost[]): PostedState {
+  const state = [...posts].reverse().find(post => Boolean(post.state))?.state;
+  assert.ok(state);
+  return state;
+}
+
+for (const kind of ['sendPrompt', 'editUserPrompt'] as const) {
+  test(`${kind} reserves before its first context await; duplicates and navigation cannot cross it`, async t => {
+    const { host, store, first, second, posts, publish } = await fixture(t);
+    const entered = deferred();
+    const release = deferred<boolean>();
+    t.after(() => release.resolve(true));
+    host.awaitRunContextRefresh = async () => { entered.resolve(); return release.promise; };
+    const calls = acceptedRun(host, store);
+    const request = submission(first.id, 'original', kind === 'editUserPrompt' ? first.messages[0].id : undefined);
+    const running = host.handleMessage(request);
+    await entered.promise;
+    try {
+      await host.handleMessage(request); // Same transport request is still pending.
+      await host.handleMessage(submission(first.id, 'conflicting-send'));
+      await host.handleMessage(submission(first.id, 'conflicting-edit', first.messages[0].id));
+      await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+      await host.handleMessage({ type: 'newSession' });
+      publish();
+      const pending = lastState(posts);
+      assert.equal(pending.interaction?.phase, 'preparing_task');
+      assert.equal(pending.interaction?.canSubmit, false);
+      assert.equal(pending.interaction?.canNavigate, false);
+      assert.equal(pending.interaction?.canEdit, true);
+      assert.equal(store.activeSessionId, first.id);
+      assert.equal(calls.length, 0, 'nothing dispatches before the required context barrier');
+      assert.deepEqual(posts.filter(post => post.type === 'submissionResult').map(post => [post.requestId, post.status]),
+        [['conflicting-send', 'rejected'], ['conflicting-edit', 'rejected']]);
+    } finally { release.resolve(true); await running; }
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].sessionId, first.id);
+    assert.equal(posts.filter(post => post.type === 'submissionResult' && post.requestId === 'original' && post.status === 'accepted').length, 1);
+    await host.handleMessage(request);
+    assert.equal(calls.length, 1, 'replaying accepted transport feedback never reruns the task');
+    publish();
+    assert.equal(lastState(posts).interaction?.canSubmit, true);
+    t.diagnostic(JSON.stringify({ boundary: 'first-context-await', request: kind, acceptedTasks: calls.length,
+      pendingPhase: 'preparing_task', navigationCommitted: false, finalPhase: lastState(posts).interaction?.phase }));
+  });
+}
+
+test('request feedback closes wrong-session, unready and failed admission without consuming another request', async t => {
+  const { host, store, first, second, posts, publish } = await fixture(t);
+  const calls = acceptedRun(host, store);
+  await host.handleMessage(submission(second.id, 'wrong-session'));
+  host.requestContextReady = false;
+  await host.handleMessage(submission(first.id, 'not-ready'));
+  host.requestContextReady = true;
+  await host.handleMessage(submission(first.id, 'not-ready')); // Repeated old rejection is idempotent.
+  assert.equal(calls.length, 0);
+  const original = host.sendPromptImpl;
+  host.sendPromptImpl = async () => { throw new Error('injected preparation failure'); };
+  await host.handleMessage(submission(first.id, 'failed-preparation'));
+  host.sendPromptImpl = original;
+  await host.handleMessage(submission(first.id, 'valid-next-request'));
+  assert.deepEqual(posts.filter(post => post.type === 'submissionResult').map(post => [post.sessionId, post.requestId, post.status]), [
+    [second.id, 'wrong-session', 'rejected'], [first.id, 'not-ready', 'rejected'], [first.id, 'not-ready', 'rejected'],
+    [first.id, 'failed-preparation', 'failed'], [first.id, 'valid-next-request', 'accepted']
+  ]);
+  assert.match(posts.find(post => post.requestId === 'failed-preparation')?.reason ?? '', /injected preparation failure/u);
+  assert.equal(calls.length, 1);
+  assert.equal(store.activeSessionId, first.id);
+  publish();
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+});
+
+test('a preparation cancel must match its owner and cannot release still-pending context I/O', async t => {
+  const { host, store, first, second, posts, publish } = await fixture(t);
+  const entered = deferred();
+  const release = deferred<boolean>();
+  t.after(() => release.resolve(true));
+  host.awaitRunContextRefresh = async () => { entered.resolve(); return release.promise; };
+  const calls = acceptedRun(host, store);
+  const before = store.getActiveSession().messages.length;
+  const pending = host.handleMessage(submission(first.id, 'cancel-preparation'));
+  await entered.promise;
+  try {
+    publish();
+    const owner = lastState(posts).interaction?.cancelOperationId;
+    assert.ok(owner);
+    await host.handleMessage({ type: 'abortPrompt', sessionId: first.id, operationId: 'old-operation' });
+    publish();
+    assert.equal(lastState(posts).interaction?.canCancel, true, 'a stale Stop cannot cancel the current owner');
+    await host.handleMessage({ type: 'abortPrompt', sessionId: first.id, operationId: owner });
+    publish();
+    const stopping = lastState(posts);
+    assert.equal(stopping.interaction?.canCancel, false);
+    assert.equal(stopping.interaction?.canSubmit, false, 'an abort signal cannot prove the pending read has settled');
+    await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+    assert.equal(store.activeSessionId, first.id);
+  } finally { release.resolve(true); await pending; }
+  assert.equal(calls.length, 0);
+  assert.equal(store.getActiveSession().messages.length, before);
+  assert.equal(posts.find(post => post.requestId === 'cancel-preparation')?.status, 'rejected');
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+});
+
+test('rapid history navigation drops concurrent targets and persists the same final selection it displays', async t => {
+  const { host, store, storage, scope, first, second, posts } = await fixture(t);
+  const entered = deferred();
+  const release = deferred();
+  t.after(() => release.resolve());
+  const read = host.sharedProjectSources.refresh.bind(host.sharedProjectSources);
+  host.sharedProjectSources.refresh = async (...args) => { entered.resolve(); await release.promise; return read(...args); };
+  const navigating = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await entered.promise;
+  try {
+    await host.handleMessage({ type: 'selectSession', sessionId: first.id });
+    await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+    await host.handleMessage({ type: 'newSession' });
+    assert.equal(store.activeSessionId, second.id, 'the original navigation retains its ownership');
+  } finally { release.resolve(); await navigating; }
+  await host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  assert.equal(store.activeSessionId, second.id);
+  assert.equal(lastState(posts).activeSessionId, second.id);
+  const durable = await storage.loadWorkspace(scope);
+  assert.equal(durable?.activeSessionId, second.id);
+  assert.equal(durable.sessionSummaries?.length, 2, 'ignored concurrent New never created a hidden third session');
+});
+
+test('final durability keeps admission and settlement pending with Saving, then releases in the same state update', async t => {
+  const { host, store, first, second, posts, publish } = await fixture(t);
+  const calls = acceptedRun(host, store);
+  const saving = deferred();
+  const release = deferred();
+  t.after(() => release.resolve());
+  const persist = store.persist.bind(store);
+  store.persist = async (...args) => { saving.resolve(); await release.promise; await persist(...args); };
+  const running = host.handleMessage(submission(first.id, 'slow-final-save'));
+  await saving.promise;
+  const settled = host.activeRunSettled;
+  assert.ok(settled);
+  let completed = false;
+  void settled.then(() => { completed = true; });
+  try {
+    publish();
+    const during = lastState(posts);
+    assert.equal(during.isBusy, false);
+    assert.equal(during.interaction?.phase, 'saving');
+    assert.equal(during.interaction?.canCancel, false);
+    assert.equal(during.interaction?.canSubmit, false);
+    await host.handleMessage(submission(first.id, 'during-save'));
+    await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+    await Promise.resolve();
+    assert.equal(completed, false, 'scope changes must still await necessary durability');
+    assert.equal(store.activeSessionId, first.id);
+    assert.equal(calls.length, 1);
+  } finally { release.resolve(); await running; }
+  assert.equal(completed, true);
+  assert.equal(host.activeRunSettled, undefined);
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  assert.equal(posts.find(post => post.requestId === 'during-save')?.status, 'rejected');
+  t.diagnostic(JSON.stringify({ boundary: 'final-durability', modelFinished: true, phaseUntilWrite: 'saving',
+    cancelAvailable: false, settledBeforeWrite: false, terminalPhase: lastState(posts).interaction?.phase }));
+});
+
+test('failed final durability preserves accepted content and retry saves it without rerunning the model', async t => {
+  const { host, store, storage, scope, first, posts, publish } = await fixture(t);
+  const calls = acceptedRun(host, store);
+  const persist = store.persist.bind(store);
+  let fail = true;
+  store.persist = async (...args) => { if (fail) throw new Error('injected final write failure'); await persist(...args); };
+  await host.handleMessage(submission(first.id, 'save-failure'));
+  publish();
+  const failed = lastState(posts);
+  assert.equal(failed.interaction?.phase, 'failed');
+  assert.equal(failed.interaction?.canSubmit, false);
+  assert.equal(failed.interaction?.canCancel, false);
+  assert.match(failed.interaction?.blockingReason ?? '', /injected final write failure/u);
+  assert.ok(store.getActiveSession().messages.some(message => message.content === 'Question save-failure'));
+  assert.equal(posts.find(post => post.requestId === 'save-failure')?.status, 'accepted');
+  await host.handleMessage(submission(first.id, 'blocked-by-write'));
+  assert.equal(calls.length, 1);
+  fail = false;
+  await host.handleMessage({ type: 'retryInteraction' });
+  assert.equal(calls.length, 1, 'retry has no model or side-effect execution');
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  const durable = await storage.loadWorkspace(scope);
+  assert.ok(durable.sessions[0].messages.some(message => message.content === 'Question save-failure'),
+    'retry really commits the retained accepted content to temporary session storage');
+});
+
+test('display ledger and child summaries can stay pending while critical operation recovery controls readiness', async t => {
+  const { host, store, first, second, posts, publish } = await fixture(t);
+  const ledger = deferred();
+  const summaries = deferred();
+  const recovery = deferred();
+  const recoveryStarted = deferred();
+  t.after(() => { ledger.resolve(); summaries.resolve(); recovery.resolve(); });
+  let ledgerReads = 0, summaryReads = 0;
+  host.queueUsageLedgerFlush = session => { ledgerReads++; host.usageLedgerFlushes.set(session.id, ledger.promise); };
+  host.recoverSubagentUsage = async () => { summaryReads++; await summaries.promise; };
+  const loadOperations = host.changeSets.loadSession!.bind(host.changeSets);
+  host.changeSets.loadSession = async sessionId => { recoveryStarted.resolve(); await recovery.promise; await loadOperations(sessionId); };
+  const navigation = host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await recoveryStarted.promise;
+  try {
+    publish();
+    const visible = lastState(posts);
+    assert.equal(visible.activeSessionId, second.id);
+    assert.ok(visible.messages?.some(message => message.id === 'task-second-user'), 'the correct body is safe to show before operation recovery');
+    assert.equal(visible.interaction?.phase, 'preparing_context');
+    assert.equal(visible.interaction?.canSubmit, false, 'operation consistency remains a required barrier');
+    assert.equal(visible.usageMetrics?.displayReadiness, 'loading');
+  } finally { recovery.resolve(); await navigation; }
+  assert.equal(ledgerReads, 1);
+  assert.equal(summaryReads, 1);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+  assert.equal(lastState(posts).usageMetrics?.displayReadiness, 'loading', 'pending statistics are not invented as complete zeroes');
+  await host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  assert.equal(store.activeSessionId, first.id, 'the next session does not await old display work');
+  ledger.resolve(); summaries.resolve();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(store.activeSessionId, first.id);
+  assert.equal(lastState(posts).activeSessionId, first.id);
+  assert.equal(host.usageDisplayReadiness.get(second.id), 'ready');
+  assert.equal(lastState(posts).interaction?.phase, 'idle');
+  t.diagnostic(JSON.stringify({ boundary: 'navigation-dependencies', criticalRecoveryBlocksSubmit: true,
+    ledgerReads, summaryReads, displayPendingAtSubmitReady: true, lateDisplayChangedActiveSession: false }));
+});
+
+test('an older queued context refresh failure cannot replace a newer successful refresh', async t => {
+  const { host, posts, publish } = await fixture(t);
+  const runtime = host as unknown as {
+    fileContext: { getAll(): unknown[]; refreshUris(uris: readonly string[]): Promise<void> };
+    scheduleRunContextRefresh(uris: readonly string[]): void;
+    runContextRefreshPromise?: Promise<void>;
+    runContextRefreshError?: unknown;
+  };
+  const entered = deferred(); const release = deferred();
+  t.after(() => release.resolve());
+  const uri = 'file:///temporary-context.txt';
+  runtime.fileContext.getAll = () => [{ id: 'context', uri, label: 'context', fsPath: '/temporary-context.txt',
+    languageId: 'plaintext', source: 'workspace', content: '', sizeBytes: 0 }];
+  let reads = 0;
+  runtime.fileContext.refreshUris = async () => {
+    if (++reads === 1) { entered.resolve(); await release.promise; throw new Error('obsolete refresh failure'); }
+  };
+  runtime.scheduleRunContextRefresh([uri]);
+  await entered.promise;
+  runtime.scheduleRunContextRefresh([uri]);
+  const latest = runtime.runContextRefreshPromise;
+  release.resolve();
+  await latest;
+  await new Promise<void>(resolve => setImmediate(resolve));
+  publish();
+  assert.equal(reads, 2);
+  assert.equal(runtime.runContextRefreshError, undefined);
+  assert.equal(lastState(posts).interaction?.canSubmit, true);
+});
+
+test('A to B to A rejects submissions from the previous entry revision without losing a newer draft', async t => {
+  const { host, store, first, second, posts, publish } = await fixture(t);
+  const calls = acceptedRun(host, store);
+  publish();
+  const revision = lastState(posts).interaction!.revision;
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  await host.handleMessage({ type: 'selectSession', sessionId: first.id });
+  await host.handleMessage({ ...submission(first.id, 'old-entry'), stateRevision: revision });
+  assert.equal(posts.find(post => post.requestId === 'old-entry')?.status, 'rejected');
+  assert.equal(calls.length, 0);
+  await host.handleMessage({ ...submission(first.id, 'current-entry'), stateRevision: lastState(posts).interaction!.revision });
+  assert.equal(calls.length, 1);
+  assert.equal(posts.find(post => post.requestId === 'current-entry')?.status, 'accepted');
+});
+
+test('failed startup safety recovery cannot be bypassed through navigation into a store flush', async t => {
+  const { host, store, first, second, posts } = await fixture(t);
+  host.approvalDataReady = false;
+  let loads = 0;
+  host.changeSets.loadSession = async () => { loads++; };
+  await host.handleMessage({ type: 'selectSession', sessionId: second.id });
+  assert.equal(store.activeSessionId, first.id);
+  assert.equal(loads, 0, 'a failed safety store must not be flushed from partial in-memory data');
+  assert.equal(lastState(posts).interaction?.canSubmit, false);
+  assert.match(lastState(posts).interaction?.blockingReason ?? '', /Safety recovery failed|操作记录恢复失败/u);
+});
 
 for (const type of ['newSession', 'selectSession'] as const) {
   test(`session navigation ${type} waits for the initial persisted session load`, async t => {

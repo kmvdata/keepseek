@@ -66,6 +66,19 @@ export const usageRenderFragment: WebviewFragment = {
   source: `
       function renderContextProgress() {
         if (!contextProgress) { return; }
+        var readiness = state.usageMetrics?.displayReadiness;
+        if (readiness === 'loading' || readiness === 'incomplete') {
+          var readinessText = t(readiness === 'loading' ? 'usageDisplayLoading' : 'usageDisplayIncomplete');
+          contextProgress.style.setProperty('--context-progress-angle', '0deg');
+          contextProgress.classList.remove('is-warning', 'is-danger');
+          contextProgress.setAttribute('aria-label', readinessText);
+          if (contextProgressTitle) contextProgressTitle.textContent = t('usageStatsTitle');
+          if (contextProgressPercent) contextProgressPercent.textContent = readinessText;
+          if (contextProgressTokens) contextProgressTokens.textContent = '';
+          if (contextProgressBreakdown) contextProgressBreakdown.replaceChildren();
+          if (usageDetailsDialog?.open) renderUsageDetails();
+          return;
+        }
         var metrics = normalizeUsageMetrics(state.usageMetrics);
         var details = metrics.usageDetails;
         var subagents = details && details.subagents;
@@ -147,6 +160,13 @@ export const usageRenderFragment: WebviewFragment = {
 
       function renderUsageDetails() {
         if (!usageDetailsBody) { return; }
+        var readiness = state.usageMetrics?.displayReadiness;
+        if (readiness === 'loading' || readiness === 'incomplete') {
+          usageDetailsRenderKey = '';
+          usageDetailsBody.replaceChildren(usageNode('p', 'usage-note',
+            t(readiness === 'loading' ? 'usageDisplayLoading' : 'usageDisplayIncomplete')));
+          return;
+        }
         var metrics = normalizeUsageMetrics(state.usageMetrics);
         var details = metrics.usageDetails;
         var sessionUsage = metrics.sessionUsageStats;

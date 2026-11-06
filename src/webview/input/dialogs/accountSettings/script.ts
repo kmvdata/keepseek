@@ -310,7 +310,7 @@ export const accountSettingsHelpersFragment: WebviewFragment = {
       }
 
       function blockAccountSettingsWhileRunBusy() {
-        if (!state.isBusy && !isModelSelectionLocked()) { return false; }
+        if (canChangeContext() && !isModelSelectionLocked()) { return false; }
         settingsRunBusyStatusVisible = true;
         setSettingsDialogStatus(t(isModelSelectionLocked()
           ? 'modelSelectionLockedByBackground'
@@ -384,7 +384,7 @@ export const accountSettingsOpenFragment: WebviewFragment = {
         setApiKeyVisible(false, false);
         renderAccountSettings();
         settingsOverlay.classList.remove('hidden');
-        if (state.isBusy && settingsDialogStatus) {
+        if (!canChangeContext() && settingsDialogStatus) {
           settingsDialogStatus.focus();
         } else if (settingsAccountName && getSettingsActiveAccount()) {
           settingsAccountName.focus();

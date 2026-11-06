@@ -26,12 +26,13 @@ export type WebviewMessage =
   | { type: 'setExecutionMode'; mode: ExecutionMode }
   | { type: 'resolvePlanDecision'; planId: string; action: 'start_execution' | 'revise_plan' | 'exit_plan' }
   | { type: 'ready' }
+  | { type: 'retryInteraction' }
   | { type: 'startupRendered'; revision?: number }
   | { type: 'loadOlderMessages' }
   | { type: 'refreshBalance' }
-  | { type: 'sendPrompt'; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
-  | { type: 'editUserPrompt'; messageId: string; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
-  | { type: 'abortPrompt' }
+  | { type: 'sendPrompt'; requestId?: string; sessionId?: string; stateRevision?: number; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
+  | { type: 'editUserPrompt'; requestId?: string; sessionId?: string; stateRevision?: number; messageId: string; prompt: string; sourceId: string; modelId: string; settings?: Partial<AgentSettings>; references?: PromptReferenceInput[]; skillIds?: string[] }
+  | { type: 'abortPrompt'; operationId?: string; sessionId?: string }
   | { type: 'continueAgentTask'; messageId: string }
   | { type: 'continueRepair' }
   | { type: 'newSession' }

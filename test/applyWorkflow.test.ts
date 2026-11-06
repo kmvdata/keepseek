@@ -71,13 +71,16 @@ test('Apply click immediately shows checking/writing and terminal feedback alway
 test('Provider returns terminal feedback for busy, missing, and exceptional Apply paths', async () => {
   const messages: Array<Record<string, unknown>> = [];
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
+    sessionReady: true,
     approvalDataReady: true,
     requestContextReady: true,
+    commandSettingsReadiness: { mainModel: 'ready', subagentModel: 'ready', executionMode: 'ready', approvalMode: 'ready' },
+    runContextReadiness: 'ready', stateRevision: 0,
+    hasActiveBackgroundRun: () => false,
     isBusy: true,
-    isStartingRun: false,
     runContextRefreshInFlight: false,
     activeChangeActions: new Set<string>(),
-    sessionStore: { getActiveSession: () => ({ id: 's', approvalMode: 'ask', messages: [] }), persist: async () => {} },
+    sessionStore: { activeSessionId: 's', getActiveSession: () => ({ id: 's', approvalMode: 'ask', messages: [] }), persist: async () => {} },
     postToWebview: (message: Record<string, unknown>) => messages.push(message),
     postState: () => undefined,
     t: (key: string) => key
@@ -127,7 +130,7 @@ test('ordinary source Apply skips Skill discovery while context-source refresh b
       invalidateImplicitSkillSnapshot: () => undefined
     },
     sharedProjectSources: { dirty: false, matches: () => true, refresh: async () => ({}) },
-    sessionStore: { getActiveSession: () => session },
+    sessionStore: { activeSessionId: session.id, getActiveSession: () => session },
     refreshCurrentRunContext: async () => { contextRefreshes += 1; await gate; },
     postState: () => undefined,
     t: (key: string) => key

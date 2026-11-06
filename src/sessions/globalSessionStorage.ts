@@ -164,12 +164,13 @@ export class GlobalSessionStorage implements ChatSessionStorageAdapter {
 
   public async flush(): Promise<void> {
     const pending = manifestRefreshes.get(this.rootUri.toString());
-    if (!pending) return;
-    if (pending.timer) { clearTimeout(pending.timer); pending.timer = undefined; }
-    const indexes = [...pending.indexes.values()];
-    pending.indexes.clear();
-    if (!indexes.length) return;
+    if (pending?.timer) { clearTimeout(pending.timer); pending.timer = undefined; }
+    const indexes = [...(pending?.indexes.values() ?? [])];
+    pending?.indexes.clear();
+    // A timer may already have transferred its indexes into the coordinator.
+    // Even an empty flush must cross that barrier before shutdown/cleanup.
     await withStorageCoordinator(this.rootUri, async () => {
+      if (!indexes.length) return;
       const manifest = await this.readManifestWithoutRebuild();
       indexes.forEach(index => this.setManifestWorkspace(manifest, index));
       await this.writeManifestBestEffort(manifest, 'flush');

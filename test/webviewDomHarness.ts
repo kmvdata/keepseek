@@ -155,6 +155,14 @@ function parseHtml(html: string, parent: WebviewNode, owner?: WebviewNode): void
 }
 
 export function createWebviewDomHarness() {
+  let now = 0;
+  let timerSequence = 0;
+  const timers = new Map<number, { at: number; interval: number; callback: () => void }>();
+  const schedule = (callback: () => void, delay = 0, interval = 0) => {
+    const id = ++timerSequence;
+    timers.set(id, { callback, at: now + delay, interval });
+    return id;
+  };
   const document = new WebviewNode('document');
   document.body = new WebviewNode('body', '', document);
   document.documentElement = new WebviewNode('html', '', document);
@@ -186,7 +194,10 @@ export function createWebviewDomHarness() {
     URL, TextEncoder, TextDecoder, performance, console, Intl,
     navigator: { platform: 'MacIntel', userAgent: 'test' },
     getComputedStyle: () => ({ lineHeight: '16px', fontSize: '14px' }),
-    setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {},
+    setTimeout: (callback: () => void, delay: number) => schedule(callback, delay),
+    clearTimeout: (id: number) => timers.delete(id),
+    setInterval: (callback: () => void, delay: number) => schedule(callback, delay, delay),
+    clearInterval: (id: number) => timers.delete(id),
     requestAnimationFrame: (callback: () => void) => { callback(); return 1; }, cancelAnimationFrame() {},
     CSS: { escape: (value: string) => value }
   });
@@ -195,6 +206,18 @@ export function createWebviewDomHarness() {
     document, window, posted,
     state: new Script('state').runInContext(context) as Record<string, any>,
     receive: (data: unknown) => window.dispatchEvent({ type: 'message', data }),
+    advance: (ms: number) => {
+      const until = now + ms;
+      for (let count = 0; count < 10000; count++) {
+        const next = [...timers].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) { now = until; return; }
+        const [id, timer] = next;
+        now = timer.at;
+        if (timer.interval) timer.at += timer.interval; else timers.delete(id);
+        timer.callback();
+      }
+      throw new Error('Unbounded Webview timer loop');
+    },
     element: (id: string) => document.getElementById(id) as WebviewNode
   };
 }

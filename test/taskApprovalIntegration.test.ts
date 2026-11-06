@@ -1424,6 +1424,9 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     language: 'en', sessionStore: sessions, taskClock: clock, changeSets: edits, draftRuns: runs, delegatedApprovals: queue,
     activeChangeActions: new Set(), sessionReady: true, approvalDataReady: true, requestContextReady: true, availableModels: [],
+    backgroundRunCoordinator: { getActiveRun: () => undefined },
+    commandSettingsReadiness: { mainModel: 'ready', subagentModel: 'ready', executionMode: 'ready', approvalMode: 'ready' },
+    runContextReadiness: 'ready', stateRevision: 0,
     approvalReviews: reviews, approvalReviewer: reviewer, repairLoopsBySession: new Map(), checkpointActivityDepth: 0,
     externalEffectGrants: new ExactOperationGrants(), authorizedExternalReferenceUris: new Set(), authorizedExternalExecutionUris: new Set(),
     agentActivity: { sequence: 0 }, getApprovalReviewerModelContext: async () => ({ model: request.model }),

@@ -35,7 +35,7 @@ export const commandSkillsBindingsFragment: WebviewFragment = {
         toggleButton.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
-          if (state.isBusy) { return; }
+          if (!canChangeContext()) { return; }
           commandSkillListOpen = !commandSkillListOpen;
           if (commandSkillListOpen) {
             commandModelListOpen = false;
@@ -51,7 +51,7 @@ export const commandSkillsBindingsFragment: WebviewFragment = {
         commandSkillFilterButton.addEventListener('click', function(event) {
           event.preventDefault();
           event.stopPropagation();
-          if (state.isBusy || !commandSkillListOpen) { return; }
+          if (!canChangeContext() || !commandSkillListOpen) { return; }
           setCommandSkillFilterOpen(!commandSkillFilterOpen, true);
         });
       }
@@ -136,16 +136,16 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         }
         if (commandSkillFilterButton) {
           var filterButtonLabel = t(commandSkillFilterOpen ? 'skillsFilterClose' : 'skillsFilter');
-          commandSkillFilterButton.disabled = Boolean(state.isBusy) || !commandSkillListOpen;
+          commandSkillFilterButton.disabled = !canChangeContext() || !commandSkillListOpen;
           commandSkillFilterButton.setAttribute('aria-expanded', commandSkillFilterOpen ? 'true' : 'false');
           commandSkillFilterButton.setAttribute('aria-label', filterButtonLabel);
-          commandSkillFilterButton.title = state.isBusy ? t('commandMenuReadonlyWhileBusy') : filterButtonLabel;
+          commandSkillFilterButton.title = !canChangeContext() ? t('commandMenuReadonlyWhileBusy') : filterButtonLabel;
         }
         if (commandSkillFilterInput) {
           if (commandSkillFilterInput.value !== commandSkillFilterQuery) {
             commandSkillFilterInput.value = commandSkillFilterQuery;
           }
-          commandSkillFilterInput.disabled = Boolean(state.isBusy) || !commandSkillListOpen || !commandSkillFilterOpen;
+          commandSkillFilterInput.disabled = !canChangeContext() || !commandSkillListOpen || !commandSkillFilterOpen;
           commandSkillFilterInput.tabIndex = commandSkillFilterOpen ? 0 : -1;
           commandSkillFilterInput.setAttribute('aria-hidden', commandSkillFilterOpen ? 'false' : 'true');
         }
@@ -156,12 +156,12 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         var toggleLabel = t(commandSkillListOpen ? 'skillsCollapse' : 'skillsExpand');
         [commandSkillsMainButton, commandSkillsButton].forEach(function(toggleButton) {
           if (!toggleButton) { return; }
-          toggleButton.disabled = Boolean(state.isBusy);
+          toggleButton.disabled = !canChangeContext();
           toggleButton.setAttribute('aria-expanded', commandSkillListOpen ? 'true' : 'false');
           toggleButton.setAttribute('aria-label', toggleButton === commandSkillsMainButton
             ? t('skillsCommandToggle', { action: toggleLabel })
             : toggleLabel);
-          toggleButton.title = state.isBusy ? t('commandMenuReadonlyWhileBusy') : toggleLabel;
+          toggleButton.title = !canChangeContext() ? t('commandMenuReadonlyWhileBusy') : toggleLabel;
         });
         if (!commandSkillList) { return; }
 
@@ -191,8 +191,8 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         if (!commandCreateSkillButton) { return; }
         var disabledReason = getCreateSkillDisabledReason();
         commandCreateSkillButton.classList.toggle('hidden', !commandSkillListOpen);
-        commandCreateSkillButton.disabled = Boolean(state.isBusy) || Boolean(disabledReason);
-        commandCreateSkillButton.title = state.isBusy
+        commandCreateSkillButton.disabled = !canChangeContext() || Boolean(disabledReason);
+        commandCreateSkillButton.title = !canChangeContext()
           ? t('commandMenuReadonlyWhileBusy')
           : (disabledReason || t('createSkill'));
       }
@@ -240,7 +240,7 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
         checkbox.dataset.skillAction = 'toggle-use';
         checkbox.dataset.skillId = skill.id;
         checkbox.checked = active;
-        checkbox.disabled = !canUse || Boolean(state.isBusy);
+        checkbox.disabled = !canUse || !canChangeContext();
         checkbox.setAttribute('aria-label', t(active ? 'skillsDeselect' : 'skillsSelect', {
           name: referenceName
         }));
@@ -286,7 +286,7 @@ export const commandSkillsImplementationFragment: WebviewFragment = {
       }
 
       function handleSkillAction(action, skillId, selected) {
-        if (state.isBusy) { return; }
+        if (!canChangeContext()) { return; }
         var skill = getSkillById(skillId);
         if (!skill) { return; }
         if (action === 'toggle-use') {

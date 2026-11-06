@@ -13,6 +13,7 @@ import { hashDraftRunSpec } from '../src/runs/draftRunProposal';
 import { getConfiguredDraftRunMaxTranscriptBytes } from '../src/shared/config';
 import { analyzeDraftRunEffects } from '../src/approvals/authorization';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
+import type { InteractionSnapshot } from '../src/provider/interactionState';
 import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
 import { getScript } from '../src/webview/script';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
@@ -397,6 +398,7 @@ type Host = {
   handleMessage(message: unknown): Promise<void>; abortPrompt(): void;
   sendPrompt(prompt: string, source: string, model: string): Promise<AgentResponse | undefined>;
   isBusy: boolean; isStartingRun: boolean; selectedModelId: string;
+  interactionSnapshot(revision: number): InteractionSnapshot;
   activeDraftRunId?: string; repairLoopsBySession: Map<string, unknown>;
   clearSessionTransientState(): void;
 };
@@ -408,8 +410,10 @@ function hostFixture(f: Awaited<ReturnType<typeof createFixture>>) {
   const states = { pendingEdits: false, background: false, sends: 0 };
   const host = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     draftRuns: f.store, draftRunBatches: f.batch, delegatedApprovals: new DelegatedApprovalQueue(),
-    approvalDataReady: true,
-    isBusy: false, isStartingRun: false, delegatedApprovalInFlight: false, draftRunAutoContinueInFlight: false,
+    sessionReady: true, approvalDataReady: true, requestContextReady: true,
+    commandSettingsReadiness: { mainModel: 'ready', subagentModel: 'ready', executionMode: 'ready', approvalMode: 'ready' },
+    runContextReadiness: 'ready', stateRevision: 0, activeChangeActions: new Set(),
+    isBusy: false, delegatedApprovalInFlight: false, draftRunAutoContinueInFlight: false,
     selectedSourceId: 'source', selectedModelId: 'model', language: 'en', agentSettings: {},
     repairLoopsBySession: new Map(), authorizedExternalReferenceUris: new Set(), authorizedExternalExecutionUris: new Set(),
     fileContext: { clear: () => {} },
@@ -435,9 +439,18 @@ test('Provider holds the batch lock across all commands and blocks duplicate mes
   await host.handleMessage({ type: 'approveDraftRunBatch', snapshot });
   await host.handleMessage({ type: 'approveDraftRun', id: 'B', specHash: f.store.get('B')!.specHash, autoContinue: true });
   await host.sendPrompt('new prompt', 'source', 'model');
-  f.executor.finish('A'); await f.executor.started(2); assert.equal(host.isBusy, true);
+  f.executor.finish('A'); await f.executor.started(2);
+  assert.equal(host.isBusy, false, 'command execution does not claim a main-model run');
+  assert.equal(host.isStartingRun, true, 'the batch retains foreground ownership between commands');
+  assert.equal(host.activeDraftRunId, 'B');
+  assert.equal(host.interactionSnapshot(1).phase, 'action');
+  assert.equal(host.interactionSnapshot(1).canSubmit, false);
+  assert.equal(host.interactionSnapshot(1).canNavigate, false);
   await host.maybeAutoContinueDraftRun(); assert.equal(states.sends, 0);
-  f.executor.finish('B'); await f.executor.started(3); assert.equal(host.isBusy, true);
+  f.executor.finish('B'); await f.executor.started(3);
+  assert.equal(host.isBusy, false);
+  assert.equal(host.isStartingRun, true);
+  assert.equal(host.activeDraftRunId, 'C');
   f.executor.finish('C'); await executing;
   await Promise.all([host.maybeAutoContinueDraftRun(), host.maybeAutoContinueDraftRun()]);
   await host.maybeAutoContinueDraftRun();

@@ -43,6 +43,7 @@ import { getInputStyles } from '../src/webview/input/styles';
 import { getInputTemplate } from '../src/webview/input/template';
 import { getScript } from '../src/webview/script';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
+import type { InteractionCoordinator, InteractionOperation } from '../src/provider/interactionState';
 import type { ApprovalMode, ChatMessage, ChatSession, KeepseekModel } from '../src/shared/types';
 
 const MODEL: KeepseekModel = {
@@ -315,7 +316,6 @@ test('only the host plan-decision message starts a fresh protected implementatio
   const posts: unknown[] = [];
   const provider = Object.assign(Object.create(KeepseekChatViewProvider.prototype), {
     isBusy: false,
-    isStartingRun: false,
     activeDraftRunId: undefined,
     approvalDataReady: true,
     requestContextReady: true,
@@ -332,10 +332,13 @@ test('only the host plan-decision message starts a fresh protected implementatio
     postToWebview: (message: unknown) => { posts.push(message); },
     t: (key: string) => key,
     sendPrompt: async (prompt: string, _sourceId: string, _modelId: string, _settings: unknown, options: unknown) => {
+      const token = (options as { interactionOperation: InteractionOperation }).interactionOperation;
+      assert.equal(provider.interactions.owns(token), true, 'plan execution transfers an existing reservation without an admission gap');
       sends.push({ prompt, options });
     }
   }) as unknown as {
     handleMessage(message: unknown): Promise<void>;
+    interactions: InteractionCoordinator;
   };
 
   await provider.handleMessage({ type: 'resolvePlanDecision', planId: plan.id, action: 'start_execution' });
@@ -347,7 +350,12 @@ test('only the host plan-decision message starts a fresh protected implementatio
   assert.equal(session.approvalMode, 'ask');
   assert.equal(sends.length, 1);
   assert.equal(sends[0]?.prompt, PLAN_EXECUTION_CONTINUATION_PROMPT);
-  assert.deepEqual(sends[0]?.options, { planExecutionContinuation: { planId: plan.id } });
+  const { interactionOperation, ...requestOptions } = sends[0].options as {
+    interactionOperation: InteractionOperation; planExecutionContinuation: { planId: string };
+  };
+  assert.equal(interactionOperation.sessionId, session.id);
+  assert.equal(provider.interactions.owns(interactionOperation), false, 'the owner is released after the mocked continuation settles');
+  assert.deepEqual(requestOptions, { planExecutionContinuation: { planId: plan.id } });
 
   const revisionSession = planSession('revision-host', 'ask');
   const revision = registerPendingPlan({

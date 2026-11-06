@@ -64,7 +64,7 @@ export const referenceMenuBindingsFragment: WebviewFragment = {
           if (!button) { return; }
           event.preventDefault();
           event.stopPropagation();
-          if (state.isBusy) {
+          if (!canChangeContext()) {
             setComposerStatus(t('referenceFileDisabledWhileBusy'));
             return;
           }
@@ -289,7 +289,7 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
         }
         referenceMenu.append(list);
         // 推理期间引用菜单保持可见但只读，与 "+" 按钮禁用保持一致。
-        var isBusy = Boolean(state.isBusy);
+        var isBusy = !canChangeContext();
         list.querySelectorAll('button[data-reference-index]').forEach(function(button) {
           button.disabled = isBusy;
         });
@@ -573,7 +573,7 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
       }
 
       function insertActiveReferenceResource() {
-        if (state.isBusy) {
+        if (!canChangeContext()) {
           setComposerStatus(t('referenceFileDisabledWhileBusy'));
           return;
         }
@@ -581,7 +581,7 @@ export const referenceMenuImplementationFragment: WebviewFragment = {
       }
 
       function insertReferenceResourceAtIndex(index) {
-        if (state.isBusy) { return; }
+        if (!canChangeContext()) { return; }
         var entries = getReferenceMenuEntries();
         var entry = entries[index];
         if (!entry) { return; }

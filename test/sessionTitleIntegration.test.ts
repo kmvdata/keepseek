@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as vscode from './stubs/vscode';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
+import type { InteractionCoordinator } from '../src/provider/interactionState';
 import { DelegatedApprovalQueue } from '../src/agent/approvalMode';
 import { createEmptySession } from '../src/sessions/chatSessionStore';
 import type { SessionTitleCompletion } from '../src/provider/sessionTitleCompletion';
@@ -26,6 +27,7 @@ type Host = {
   };
   isBusy: boolean;
   isStartingRun: boolean;
+  interactions: InteractionCoordinator;
   selectedSourceId: string;
   selectedModelId: string;
 };
@@ -65,7 +67,7 @@ function fixture() {
       calls.push({ sessionId, taskId, request }); return true;
     }, cancel: () => {}, cancelAll: () => {} },
     delegatedApprovals: queue, delegatedApprovalInFlight: false, draftRunAutoContinueInFlight: false,
-    isBusy: false, isStartingRun: false, activeChangeActions: new Set(),
+    isBusy: false, activeChangeActions: new Set(),
     draftRunBatches: { pending: false, locked: false, cancel: () => {} },
     draftRuns: { claimReadyAutoContinuation: () => undefined },
     changeSets: { hasPendingForSession: () => false },
@@ -166,7 +168,12 @@ for (const fail of [false, true]) {
     } });
     const sent = f.host.sendPrompt('排查审批失败', 'source-a', 'main-a');
     await startedSaving.promise;
-    assert.equal(f.host.isStartingRun, false, 'title barrier is independent from the released main UI lock');
+    assert.equal(f.host.isStartingRun, true, 'necessary final persistence retains admission ownership');
+    const saving = f.host.interactions.snapshot({ sessionId: f.a.id, revision: 1, sessionReady: true,
+      requestContextReady: true, approvalDataReady: true, cancellable: true });
+    assert.equal(saving.phase, 'saving');
+    assert.equal(saving.canSubmit, false);
+    assert.equal(saving.canCancel, false, 'final persistence has no model cancellation target');
     await f.host.maybeAutoContinueDraftRun();
     assert.equal(f.calls.length, 0, 'a timer running during persistence cannot dispatch title');
     if (fail) saved.reject(new Error('simulated storage failure'));

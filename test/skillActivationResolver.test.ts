@@ -8,6 +8,62 @@ import { SkillLoader } from '../src/skills/skillLoader';
 import { SkillStore } from '../src/skills/skillStore';
 import { toActivatedSkill, type SkillManifest } from '../src/skills/skillTypes';
 import { CODEX_PLUGIN_SKILLS_UNAVAILABLE } from '../src/skills/codexPluginSupport';
+import type { SharedCodexConfigSnapshot } from '../src/context/sharedCodexConfig';
+
+test('unchanged Skill source scans merge and navigation preserves session-owned activation', async () => {
+  const skill = manifest('reusable', 'reuse-flow', 'agentsUser', true);
+  let scans = 0; let loads = 0; let release!: () => void; let started!: () => void;
+  const ready = new Promise<void>(yes => { started = yes; });
+  const barrier = new Promise<void>(yes => { release = yes; });
+  const discovery = { discover: async () => { scans++; started(); await barrier; return [{ ...skill }]; } } as unknown as SkillDiscovery;
+  const loader = { loadSkill: async (item: SkillManifest) => { loads++; return toActivatedSkill(item, 'STABLE BODY'); } } as SkillLoader;
+  const store = new SkillStore(new MemoryMemento(), discovery, loader, new SkillActivationResolver(), () => 'scope');
+  const config: SharedCodexConfigSnapshot = { codexHome: vscode.Uri.file('/fixture/source'), projectDocMaxBytes: 32768,
+    fallbackFilenames: [], skillRules: [], origins: {}, diagnostics: [], watchedUris: [], fingerprint: 'source-version-one' };
+  const first = store.refresh(config); const merged = store.refresh(config);
+  await ready; release(); await Promise.all([first, merged]);
+  assert.equal(scans, 1);
+  const a = session('A');
+  const aResult = await store.resolveAndLoadSkills({ session: a, prompt: 'Use reuse-flow.' });
+  assert.equal(aResult.skills[0].activation?.source, 'implicit');
+  assert.deepEqual(a.frozenImplicitSkillIds, [skill.id]);
+  await store.refresh(config);
+  const b = session('B');
+  const bResult = await store.resolveAndLoadSkills({ session: b, prompt: 'Explicit use.', explicitSkillIds: [skill.id] });
+  assert.equal(bResult.skills[0].activation?.source, 'explicit');
+  assert.deepEqual(b.frozenImplicitSkillIds, []);
+  assert.deepEqual(a.frozenImplicitSkillIds, [skill.id], 'B cannot rewrite A\'s frozen implicit set');
+  assert.equal(aResult.skills[0].activation?.source, 'implicit');
+  assert.equal(scans, 1); assert.equal(loads, 1, 'unchanged source body is reused without activation state');
+  await store.refresh({ ...config });
+  assert.equal(scans, 2, 'a replaced source version rescans even when effective config fingerprint is unchanged');
+  assert.equal(store.sourceDiagnostics.merged, 1);
+  assert.equal(store.sourceDiagnostics.hits, 1);
+});
+
+test('a late Skill body read cannot enter the next source version or its error state', async () => {
+  const skill = manifest('reused-id', 'shared-flow', 'agentsUser', false);
+  let release!: () => void; let started!: () => void; let loads = 0;
+  const ready = new Promise<void>(yes => { started = yes; });
+  const barrier = new Promise<void>(yes => { release = yes; });
+  const discovery = { discover: async () => [{ ...skill }] } as unknown as SkillDiscovery;
+  const loader = { loadSkill: async (item: SkillManifest) => {
+    const load = ++loads; if (load === 1) { started(); await barrier; }
+    return toActivatedSkill(item, `BODY VERSION ${load}`);
+  } } as SkillLoader;
+  const store = new SkillStore(new MemoryMemento(), discovery, loader, new SkillActivationResolver(), () => 'scope');
+  const config: SharedCodexConfigSnapshot = { codexHome: vscode.Uri.file('/fixture/source'), projectDocMaxBytes: 32768,
+    fallbackFilenames: [], skillRules: [], origins: {}, diagnostics: [], watchedUris: [], fingerprint: 'same-effective-policy' };
+  await store.refresh(config);
+  const old = store.resolveAndLoadSkills({ session: session('A'), prompt: 'read', explicitSkillIds: [skill.id] });
+  await ready;
+  await store.refresh({ ...config });
+  release();
+  await assert.rejects(old, /Skill sources changed during loading/u);
+  const current = await store.resolveAndLoadSkills({ session: session('B'), prompt: 'read', explicitSkillIds: [skill.id] });
+  assert.equal(current.skills[0].content, 'BODY VERSION 2');
+  assert.equal(store.getStateView(session('B')).items[0].loadError, undefined);
+});
 
 test('explicit Skill wins over an implicit Skill with the same normalized name', () => {
   const explicit = manifest('global-review', 'review-flow', 'agentsUser', true);

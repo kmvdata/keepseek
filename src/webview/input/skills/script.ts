@@ -18,7 +18,7 @@ export const skillsBarBindingsFragment: WebviewFragment = {
           if (removeButton) {
             event.preventDefault();
             event.stopPropagation();
-            if (state.isBusy) { return; }
+            if (!canChangeContext()) { return; }
             var skillId = removeButton.dataset.skillId || '';
             var skill = getSkillById(skillId);
             vscode.postMessage({ type: 'removeActiveSkill', skillId: skillId });
@@ -30,7 +30,7 @@ export const skillsBarBindingsFragment: WebviewFragment = {
           if (!pill) { return; }
           event.preventDefault();
           event.stopPropagation();
-          if (state.isBusy) { return; }
+          if (!canChangeContext()) { return; }
           var pillSkillId = pill.dataset.skillId || '';
           var pillSkill = getSkillById(pillSkillId);
           vscode.postMessage({ type: 'openSkill', skillId: pillSkillId });
@@ -43,7 +43,7 @@ export const skillsBarBindingsFragment: WebviewFragment = {
           if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault();
             event.stopPropagation();
-            if (state.isBusy) { return; }
+            if (!canChangeContext()) { return; }
             var skillId = pill.dataset.skillId || '';
             var skill = getSkillById(skillId);
             vscode.postMessage({ type: 'openSkill', skillId: skillId });
@@ -170,9 +170,9 @@ export const skillsImplementationFragment: WebviewFragment = {
         remove.type = 'button';
         remove.className = 'skill-pill-remove';
         remove.dataset.skillId = skill.id;
-        remove.disabled = Boolean(state.isBusy);
-        remove.title = state.isBusy ? t('skillRemoveDisabledWhileBusy') : t('removeSkill');
-        remove.setAttribute('aria-label', state.isBusy ? t('skillRemoveDisabledWhileBusy') : t('removeSkill'));
+        remove.disabled = !canChangeContext();
+        remove.title = !canChangeContext() ? t('skillRemoveDisabledWhileBusy') : t('removeSkill');
+        remove.setAttribute('aria-label', !canChangeContext() ? t('skillRemoveDisabledWhileBusy') : t('removeSkill'));
         remove.textContent = '×';
 
         pill.append(icon, name, remove);

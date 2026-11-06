@@ -22,11 +22,11 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
   source: `
       composer.addEventListener('submit', function(event) {
         event.preventDefault();
-        if (state.isBusy) {
+        if (!canSubmitPrompt()) {
           closeCommandMenu();
           closeExecutionModeMenu(false);
           closeReferenceMenu(false);
-          setComposerStatus(t('taskAlreadyRunning'));
+          setComposerStatus(t(state.isBusy ? 'taskAlreadyRunning' : 'submissionNotReady'));
           promptInput.focus();
           return;
         }
@@ -37,11 +37,16 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
         }
         var prompt = serializePrompt();
         if (!prompt.trim()) return;
+        var requestId = beginPromptSubmission('composer', prompt);
+        if (!requestId) return;
         closeCommandMenu();
         closeExecutionModeMenu(false);
         closeReferenceMenu(false);
         vscode.postMessage({
           type: 'sendPrompt',
+          requestId: requestId,
+          sessionId: state.activeSessionId,
+          stateRevision: currentInteraction()?.revision || lastStateRevision,
           prompt: prompt,
           sourceId: state.selectedSourceId,
           modelId: state.selectedModelId,
@@ -49,14 +54,13 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
           references: collectPromptFileReferences(),
           skillIds: collectActiveSkillIds()
         });
-        state.isBusy = true;
         renderInputControls();
-        clearPrompt();
+        syncSendButtonAvailability();
       });
 
       if (sendButton) {
         sendButton.addEventListener('click', function(event) {
-          if (!state.isBusy) {
+          if (!canCancelPrompt()) {
             return;
           }
           event.preventDefault();
@@ -64,8 +68,7 @@ export const composerSubmitBindingsFragment: WebviewFragment = {
           closeCommandMenu();
           closeExecutionModeMenu(false);
           closeReferenceMenu(false);
-          vscode.postMessage({ type: 'abortPrompt' });
-          setComposerStatus(t('stoppingTask'));
+          vscode.postMessage({ type: 'abortPrompt', operationId: currentInteraction()?.cancelOperationId });
         });
       }
 
@@ -76,6 +79,8 @@ export const composerRenderFragment: WebviewFragment = {
   id: 'composer.render',
   source: `
       function renderInputControls() {
+        var interaction = currentInteraction();
+        promptInput.setAttribute('contenteditable', interaction?.canEdit === false ? 'false' : 'true');
         refreshPromptFileLinkLabels();
         refreshPromptSkillLinkLabels();
         renderActiveSkillsBar();
@@ -95,7 +100,7 @@ export const composerRenderFragment: WebviewFragment = {
 
       function renderReferenceMenuButton() {
         if (!referenceMenuButton) { return; }
-        var busy = Boolean(state.isBusy);
+        var busy = !canChangeContext();
         referenceMenuButton.disabled = busy;
         referenceMenuButton.title = busy ? t('referenceFileDisabledWhileBusy') : t('referenceFileTitle');
         referenceMenuButton.setAttribute('aria-disabled', busy ? 'true' : 'false');
@@ -104,10 +109,10 @@ export const composerRenderFragment: WebviewFragment = {
 
       function renderSendButton(isEmpty) {
         if (!sendButton) { return; }
-        var isAbortMode = Boolean(state.isBusy);
+        var isAbortMode = canCancelPrompt();
         var mode = isAbortMode ? 'abort' : 'send';
         var label = t(isAbortMode ? 'stop' : 'send');
-        sendButton.disabled = !isAbortMode && isPromptSubmittableEmpty();
+        sendButton.disabled = !isAbortMode && (!canSubmitPrompt() || isPromptSubmittableEmpty());
         sendButton.classList.toggle('is-abort', isAbortMode);
         sendButton.title = label;
         sendButton.setAttribute('aria-label', label);
@@ -123,8 +128,8 @@ export const composerRenderFragment: WebviewFragment = {
 export const composerStatusFragment: WebviewFragment = {
   id: 'composer.status',
   source: `
-      function setComposerStatus(message) {
-        setTransientStatus(message);
+      function setComposerStatus(message, scope) {
+        setTransientStatus(message, false, scope);
       }
 
       function clearPrompt() {
@@ -154,6 +159,14 @@ export const composerPublicApiFragment: WebviewFragment = {
         showStatus: setComposerStatus,
         isPromptSubmittableEmpty: isPromptSubmittableEmpty,
         clearPrompt: clearPrompt
+        ,acceptSubmission: function(prompt) {
+          if (serializePrompt() === prompt) clearPrompt();
+        }
+        ,restoreDraft: function(markup) {
+          promptInput.innerHTML = markup;
+          sanitizePromptContent();
+          updatePromptVisualState();
+        }
       };
       renderInputControls();
       updatePromptVisualState();

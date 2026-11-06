@@ -63,6 +63,7 @@ import './subagentSafety.test';
 import './subagentUsageStats.test';
 import './executionTimeStats.test';
 import './sessionNavigation.test';
+import './interactionState.test';
 import './subagentUsageRuntime.test';
 import './referenceResources.test';
 import './skillDiscovery.test';

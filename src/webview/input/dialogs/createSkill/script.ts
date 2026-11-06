@@ -66,7 +66,7 @@ export const createSkillImplementationFragment: WebviewFragment = {
       }
 
       function submitCreateSkillDraft() {
-        if (state.isBusy) {
+        if (!canChangeContext()) {
           setCreateSkillDialogStatus(t('commandMenuReadonlyWhileBusy'));
           return;
         }

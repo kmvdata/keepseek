@@ -24,6 +24,7 @@ flowchart TD
 | 入口 | 当前职责 | 变更时一起核对 |
 | --- | --- | --- |
 | [KeepseekChatViewProvider.ts](../src/provider/KeepseekChatViewProvider.ts) | 生命周期、`handleMessage()`、`sendPromptImpl()`、会话和运行协调、审批队列、`postState()` | 对应领域 service、消息联合类型、Host 行为测试 |
+| [interactionState.ts](../src/provider/interactionState.ts) | 操作预占/拥有者、阶段与统一交互能力派生 | 导航、提交、续跑/审批交接、状态 revision、Webview 生命周期 |
 | [webviewMessages.ts](../src/provider/webviewMessages.ts) | 唯一 Webview → Host 消息联合类型 | 发送 fragment 与 `handleMessage()`；Host 主动消息不加入此联合 |
 | [modelSelection.ts](../src/provider/modelSelection.ts) | 主模型切换事务、运行限制、lane 影响 | catalog、session requestProtocol、replay |
 | [requestTimeoutSettings.ts](../src/provider/requestTimeoutSettings.ts) | 统一模型请求超时设置 | config/i18n 与所有模型请求入口 |
@@ -35,6 +36,8 @@ flowchart TD
 Webview 是字符串生成的页面，不是独立前端应用。`input/composer/` 管编辑/序列化，`references/` 管引用与拖拽，`commandMenu/` 管菜单，`usage/` 管用量详情，`dialogs/` 管各设置对话框。样式、模板、行为保持各自 fragment 所有权。
 
 首次 `ready` 先获得轻量状态；会话与副作用恢复未就绪时拒绝相关写操作。消息 type、DOM id、引用格式、CSP/转义和公开控制接口都是行为契约。
+
+轻量状态、完整状态和 patch 共用宿主派生的 `interaction`：编辑、提交、导航和取消分别表达；导航/准备/保存不等于模型运行。状态与提交反馈绑定会话和 revision/requestId，持续提示跟随有效操作而不依赖通知计时器。`isStartingRun` 只读派生互斥；旧 `isBusy` 兼容字段不能重新成为输入框权威。具体拥有者、接受屏障和后台工作规则见 [交互生命周期](keepseek-interaction-lifecycle.md)。
 
 当前菜单 `/` → 审批模式只有 ask/delegate；`/` → 子代理模型 → 审批模型与其他模型选择共用交互层级，但审批配置单独取用户级 `keepseek.autoApprovalReviewer`。普通子代理 default/research/review/proposal 不为审批 reviewer 提供默认值。
 
@@ -53,6 +56,8 @@ Webview 是字符串生成的页面，不是独立前端应用。`input/composer
 | [skillDiscovery.ts](../src/skills/skillDiscovery.ts)、[skillMetadata.ts](../src/skills/skillMetadata.ts) | 标准 `.agents/skills` 根发现、YAML 元数据和策略 |
 | [skillActivationResolver.ts](../src/skills/skillActivationResolver.ts)、[skillLoader.ts](../src/skills/skillLoader.ts) | explicit→session→workspace-default→implicit；有界读取与隐式冻结 |
 | [codexPluginSupport.ts](../src/skills/codexPluginSupport.ts)、[codexPluginDiscovery.ts](../src/skills/codexPluginDiscovery.ts)、[codexPluginResources.ts](../src/skills/codexPluginResources.ts)、[pluginSkillRuntime.ts](../src/agent/pluginSkillRuntime.ts) | 插件 Skills 暂停开关；安装/资源底层和历史数据保留，当前不发现、不加载、不执行或恢复插件任务 |
+
+共享来源缓存只复用有界、可失效的读取快照；同版本并发读取合并。会话激活、冻结 implicit 集合、权限与错误状态仍归各自拥有者，不能作为共享缓存数据。普通导航不重算热会话的冻结集合，来源 dirty/force、信任/目录/配置变化和重启按受控边界重验。
 
 任务目录来自用户选择或单根默认，不随焦点/附件变化。共享文件只读；发现/加载 Skill 不执行 scripts。普通项目 Skill 创建只准备 `SKILL.md` 与 `agents/openai.yaml` 的 ChangeSet，实际落盘仍走文件审批。插件入口不扩大通用文件、cwd、child 或写入授权。
 
@@ -137,6 +142,7 @@ ask 由用户逐项/批量批准；delegate 对符合宿主规则的常规操作
 | 审批/文件/命令 | `approvals/`、`edits/`、`runs/` | `approvalMode`、`approvalReviewer`、`taskApprovalIntegration`、`toolAuthorization`、`applyWorkflow`、`draftRun*` |
 | 子代理 | `subagents/`、resolver、delegation | `subagentSafety`、`p1Delegation`、`p1SubagentInheritance`、`p1SubagentResultReader`、`subagentUsageRuntime` |
 | 引用/Skills/输入 | `context/references/`、`skills/`、`webview/input/` | `fileReference`、`skill*`、`codexPlugin*`、`inputComposition`、`richTextShortcuts` |
+| 交互/导航/后台工作 | `provider/interactionState.ts`、Provider 接线、Webview 状态入口 | `sessionNavigation`、`inputComposition`；拥有者/迟到结果、提交闭环与保存故障测试 |
 | 会话结构/保存 | `shared/types.ts`、`sessions/`、checkpoint | `chatSessionStore`、`longTaskPerformance`、`p0SubagentPersistence`、`executionTimeStats` |
 | 用量/观测 | ledger、usage、logging | `usageStats`、`subagentUsageStats`、`interactionTrace`、`runDetails` |
 | 打包/资源 | `.vscodeignore`、`scripts/package-market.js`、`verify-vsix.js` | 市场包入口/依赖/动态 SVG 清单及包内容比较 |

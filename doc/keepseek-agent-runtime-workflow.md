@@ -56,18 +56,20 @@ VS Code / Webview
 
 Webview 消息的唯一联合类型在 `provider/webviewMessages.ts`。Webview → 扩展的新消息必须同时更新类型、`handleMessage()` 和发送点；扩展主动推送消息不加入该联合类型。
 
+宿主通过 `provider/interactionState.ts` 从任务、导航、上下文和必要保存等事实统一派生交互能力。会话正文可安全展示与可接收任务是两个条件；用量展示恢复不占发送关键路径，预算/操作一致性恢复仍是硬屏障。轻量状态、patch 和重新 ready 使用同一作用域/revision 规则，详见 [交互生命周期](keepseek-interaction-lifecycle.md)。
+
 ## 4. 一次用户请求
 
 ### 4.1 输入规范化与上下文冻结
 
 用户提交后，Provider：
 
-1. 拒绝空输入，并确认工作区、会话和当前 run 状态。
+1. 同步校验目标会话和请求身份，在首个异步屏障前取得冲突操作预占；拒绝空输入、未就绪或不允许的冲突请求，并发送可关联的提交结果。
 2. 读取当前项目指令、显式/会话/默认/隐式 Skill和授权上下文。
 3. 首轮把格式化结果冻结为 `ChatSession.contextInstructions`；后续变化追加到当前真实 user 消息尾部，不回写旧前缀。
 4. 按“目录引用 → 文件引用 → Skill”展开输入；外部 URI 先检查精确授权。
 5. 持久化原始 `content`、必要时的 `expandedContent`，以及真正发送的 `providerContent`。
-6. 建立请求快照与取消控制器，然后交给 `AgentRequestCoordinator`。
+6. 正文持久化成功后反馈接受；Webview 仅清除匹配请求的草稿。准备失败或拒绝保留草稿，不自动重发；建立请求快照与实际取消控制器后交给 `AgentRequestCoordinator`。
 
 项目指令来自 CODEX_HOME 全局文件和受信任的任务 Git root→cwd 链（无 Git 仅 cwd）；每目录按 override、AGENTS、配置 fallback 选一份。任务目录由用户明确选择或单根默认，不随焦点变化。Skill 入口仅标准 skills 根内的 SKILL.md。共享配置变更在新任务或空闲刷新边界生效，详见 [共享配置](keepseek-codex-shared-config.md)。Skill 的脚本只可作为 DraftRun 提议，绝不因激活而执行。
 
@@ -79,7 +81,7 @@ Coordinator 先按模型画像刷新摘要，再由 `buildProviderRequestProject
 - OpenAI Responses；
 - Anthropic Messages。
 
-实际请求、token 估算、工具结果准入和缓存观测共用这一投影。当前父会话 request protocol/tool schema 均为 V14（`providerRequestProjection.ts`），child runtime 协议仍为 V11（`subagents/runtime.ts`）。V10 引入子代理 UTF-8 byte-offset 分页，V11 增加分工评估与父验收合同，V12 增加插件 Skill 读取入口，V13 更新两模式审批的交付提示，V14 隐藏已暂停的插件读取工具。旧插件任务不可恢复执行，但历史快照与 evidence 保留只读。热旧会话只在受控边界迁移；这些版本不等同于结果合同、存储或审批策略版本，权威来源见 [版本与文档导航](README.md#版本维度)。P1 当时的现场核验限制见 [历史验收记录](keepseek-p1-field-acceptance.md)。
+实际请求、token 估算、工具结果准入和缓存观测共用这一投影。父会话 request protocol/tool schema 和 child runtime 各自版本以 [版本维度](README.md#版本维度) 及对应源码常量为准。V10 引入子代理 UTF-8 byte-offset 分页，V11 增加分工评估与父验收合同，V12 增加插件 Skill 读取入口，V13 更新两模式审批的交付提示，V14 隐藏已暂停的插件读取工具。旧插件任务不可恢复执行，但历史快照与 evidence 保留只读。热旧会话只在受控边界迁移；这些版本不等同于结果合同、存储或审批策略版本，权威来源见 [版本与文档导航](README.md#版本维度)。P1 当时的现场核验限制见 [历史验收记录](keepseek-p1-field-acceptance.md)。
 
 ### 4.3 来源解析
 
@@ -343,11 +345,13 @@ checkpoint 在请求边界、工具意图/结果、审批、Apply、Run、epoch 
 - 摘要不进入聊天 UI；Evidence 大正文也不进入 session JSON。
 - 归档搜索只读全局会话存储，不改变当前会话上下文。
 
+任务模型/工具终态、必要保存完成、根任务可续跑/终结和后台工作完成分别记录。结束执行后立即发布保存/准备或空闲阶段，只有持有真实取消入口的操作显示停止。内部续跑/审批交接同步转移预占；旧 finally 不能释放新拥有者。`activeRunSettled` 与标题 durable 标记必须遵守必要持久化屏障；保存失败保留内存状态和明确阻塞，不借通知超时恢复执行能力。完整约束及原生 UI 验收见 [交互生命周期](keepseek-interaction-lifecycle.md)。
+
 ### 12.2 用量
 
 Usage Ledger 记录每个实际 provider 请求的来源、模型、输入/输出、缓存字段、费用和诊断。主请求、摘要、reviewer、子代理必须用不同 usage source 分类；缺失的 provider 计量是 unknown，不得当作 0。
 
-会话/UI 只接收必要汇总。API key、endpoint identity hash、原始 prompt、私有 child transcript 和内部审批证据不得下发。
+会话/UI 只接收必要汇总。参考费用和部分子代理活动/摘要可后台补齐，并显示加载中或不完整；`userTaskBudgets`、checkpoint 的 `usedMs/maxExecutionMs/maxCost/usedCostByCurrency/runBudget/delegationBudget` 及恢复键仍在继续前恢复，不从展示汇总重建。正费用上限遇不可计价来源保持 fail-closed。API key、endpoint identity hash、原始 prompt、私有 child transcript 和内部审批证据不得下发。
 
 ### 12.3 Run Details
 

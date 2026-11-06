@@ -52,6 +52,28 @@ type Host = {
   collectAuthorizedExternalReferenceUris(references: undefined, inheritExisting?: boolean): Set<string>;
 };
 
+test('real submission preparation never acknowledges acceptance or dispatches a model before user bytes are durable', async () => {
+  await fixture('ask', async f => {
+    const prompt = 'Keep this draft when the initial user write fails';
+    f.queue.cancel();
+    const feedback: Array<{ type?: string; requestId?: string; status?: string }> = [];
+    Object.assign(f.host, { postToWebview: (message: typeof feedback[number]) => feedback.push(message) });
+    const persist = f.sessions.persist.bind(f.sessions);
+    f.sessions.persist = async (...args) => {
+      if (f.session.messages.some(message => message.role === 'user' && message.content === prompt)) throw new Error('initial user durability failed');
+      await persist(...args);
+    };
+    try {
+      await f.host.handleMessage({ type: 'sendPrompt', sessionId: f.session.id, requestId: 'initial-write',
+        prompt, sourceId: 'source', modelId: 'model' });
+      assert.equal(f.requests.length, 0);
+      assert.ok(!feedback.some(message => message.requestId === 'initial-write' && message.status === 'accepted'));
+      assert.ok(feedback.some(message => message.requestId === 'initial-write' && ['failed', 'rejected'].includes(message.status ?? '')));
+      assert.ok(f.session.messages.some(message => message.content === prompt), 'uncommitted user bytes remain recoverable in memory');
+    } finally { f.sessions.persist = persist; }
+  });
+});
+
 for (const mode of ['ask', 'delegate'] as const) {
   for (const index of [0, 1, 2]) {
     for (const changed of [false, true]) {
@@ -175,7 +197,7 @@ test('history recovery reserves the session through asynchronous persistence and
       assert.equal(f.session.messages.length, 6);
       assert.equal(f.runs.toWebviewState(f.session.id).length, 6, 'independent records wait for the write-ahead boundary');
     } finally { release(); await recovering; f.sessions.persist = persist; f.sessions.selectSession = select; }
-    assert.equal(f.host.isStartingRun, undefined);
+    assert.equal(f.host.isStartingRun, false);
     assert.equal(f.session.pendingHistoryTruncation, undefined);
     assert.equal(f.session.messages.at(-1)?.id, replacement.id);
     assert.equal(f.requests.length, 0, 'recovery never runs a new request automatically');
@@ -228,7 +250,11 @@ test('editing a stopped no-progress task still refreshes dirty project sources a
     let refreshed = 0;
     Object.assign(f.host, {
       sharedProjectSources: { dirty: true },
-      refreshSkills: async () => { refreshed++; }
+      refreshSessionSkills: async (session: typeof f.session) => {
+        assert.equal(session, f.session);
+        assert.equal(f.host.isStartingRun, true, 'source refresh belongs to the already reserved submission');
+        refreshed++;
+      }
     });
     await f.host.sendPrompt('Instruction 3 revised', 'source', 'model', {}, { replaceMessageId: f.users[2].id });
     assert.equal(refreshed, 1);
@@ -404,6 +430,8 @@ async function createFixture(root: string, mode: 'ask' | 'delegate') {
     changeSets: edits, draftRuns: runs, draftRunBatches: new DraftRunBatchCoordinator(runs), approvalReviews: reviews,
     delegatedApprovals: queue, externalEffectGrants: new ExactOperationGrants(), authorizedExternalExecutionUris: new Set(),
     authorizedExternalReferenceUris: new Set(), activeChangeActions: new Set(), sessionReady: true, approvalDataReady: true, requestContextReady: true,
+    commandSettingsReadiness: { mainModel: 'ready', subagentModel: 'ready', executionMode: 'ready', approvalMode: 'ready' },
+    runContextReadiness: 'ready', stateRevision: 0,
     fileContext: { getAll: () => [] }, agentSettings: settings, availableModels: [model], selectedSourceId: 'source', selectedModelId: 'model',
     modelSelectionTransactions: { beginRun: () => {} }, repairLoopsBySession: new Map(), taskPlansBySession: new Map(),
     currentRunContextsBySession: new Map(), slimToolNamesBySession: new Map(), sessionTraceLogUris: new Map(), approvalMainContexts: new Map(),

@@ -170,3 +170,124 @@ test('session normalization preserves chosen scope, immutable old context bytes 
   assert.equal(audit.messages[0].runDetails?.contextSources[1].order, 2);
   assert.equal(audit.messages[0].runDetails?.contextDiscarded[0].reason, 'ambiguous_name');
 });
+
+test('session navigation reuses one unchanged project-source read and merges concurrent consumers', async () => {
+  const f = await fixture(); const previousHome = process.env.CODEX_HOME;
+  const previousFolders = vscode.workspace.workspaceFolders; const previousTrust = vscode.workspace.isTrusted;
+  process.env.CODEX_HOME = f.home; Object.assign(vscode.workspace, { workspaceFolders: f.folders, isTrusted: true });
+  const sources = new SharedProjectSources();
+  const resolve = ProjectInstructionsResolver.prototype.resolve;
+  let reads = 0;
+  ProjectInstructionsResolver.prototype.resolve = async function(options) { reads++; return resolve.call(this, options); };
+  try {
+    await writeFile(path.join(f.repo, 'AGENTS.md'), 'STABLE SOURCE BYTES');
+    const cwd = vscode.Uri.file(f.cwd).toString();
+    const [first, second] = await Promise.all([sources.refresh('A', cwd), sources.refresh('B', cwd)]);
+    assert.equal(reads, 1, 'concurrent same-version navigation must merge one source/config read');
+    assert.equal(first, second, 'immutable source snapshot belongs to a scope/version, not a session');
+    const ownedInstructions = sources.getInstructions(first);
+    const third = await sources.refresh('C', cwd);
+    assert.equal(third, first);
+    assert.equal(reads, 1, 'warm navigation must not rediscover unchanged sources');
+    assert.equal(sources.sessionId, 'C');
+    assert.equal(Object.isFrozen(first), true);
+    assert.equal(Object.isFrozen(sources.instructions.instructions), true);
+    assert.throws(() => first.fallbackFilenames.push('MUTATION.md'), TypeError);
+    sources.dirty = true;
+    await writeFile(path.join(f.repo, 'AGENTS.md'), 'NEW SOURCE BYTES');
+    const updated = await sources.refresh('C', cwd);
+    assert.notEqual(updated, first);
+    assert.equal(reads, 2);
+    assert.equal(sources.instructions.instructions[0].content, 'NEW SOURCE BYTES');
+    assert.equal(ownedInstructions.instructions[0].content, 'STABLE SOURCE BYTES', 'a later selection cannot replace an owned immutable read');
+  } finally {
+    ProjectInstructionsResolver.prototype.resolve = resolve;
+    sources.dispose(); if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    Object.assign(vscode.workspace, { workspaceFolders: previousFolders, isTrusted: previousTrust });
+  }
+});
+
+test('project-source watcher create/change/delete, explicit refresh, trust and directory changes invalidate snapshots', async () => {
+  const f = await fixture(); const previousHome = process.env.CODEX_HOME;
+  const previousFolders = vscode.workspace.workspaceFolders; const previousTrust = vscode.workspace.isTrusted;
+  const runtime = vscode.workspace as unknown as { createFileSystemWatcher?: unknown };
+  const previousWatcher = runtime.createFileSystemWatcher;
+  type FakeWatcher = { change?: () => void; create?: () => void; delete?: () => void; disposed: boolean };
+  const watchers: FakeWatcher[] = [];
+  Object.assign(vscode.workspace, { workspaceFolders: f.folders, isTrusted: true,
+    createFileSystemWatcher: () => {
+      const watcher: FakeWatcher = { disposed: false }; watchers.push(watcher);
+      return { onDidChange: (listener: () => void) => { watcher.change = listener; },
+        onDidCreate: (listener: () => void) => { watcher.create = listener; },
+        onDidDelete: (listener: () => void) => { watcher.delete = listener; },
+        dispose: () => { watcher.disposed = true; } };
+    }
+  });
+  process.env.CODEX_HOME = f.home;
+  const sources = new SharedProjectSources();
+  try {
+    const cwd = vscode.Uri.file(f.cwd).toString();
+    await writeFile(path.join(f.repo, 'AGENTS.md'), 'BEFORE');
+    const first = await sources.refresh('A', cwd);
+    await writeFile(path.join(f.repo, 'AGENTS.md'), 'AFTER');
+    watchers.find(item => !item.disposed)!.change!();
+    assert.equal(sources.dirty, true);
+    const changed = await sources.refresh('A', cwd);
+    assert.notEqual(changed, first);
+    assert.equal(sources.instructions.instructions[0].content, 'AFTER');
+    await rm(path.join(f.repo, 'AGENTS.md'));
+    watchers.find(item => !item.disposed)!.delete!();
+    await sources.refresh('A', cwd);
+    assert.equal(sources.instructions.instructions.length, 0);
+    await writeFile(path.join(f.repo, 'AGENTS.md'), 'CREATED');
+    watchers.find(item => !item.disposed)!.create!();
+    const created = await sources.refresh('A', cwd);
+    assert.equal(sources.instructions.instructions[0].content, 'CREATED');
+    assert.notEqual(await sources.refresh('A', cwd, { force: true }), created);
+    const trusted = sources.snapshot;
+    Object.assign(vscode.workspace, { isTrusted: false });
+    await sources.refresh('A', cwd);
+    assert.notEqual(sources.snapshot, trusted);
+    assert.equal(sources.instructions.instructions.length, 0);
+    assert.equal(sources.snapshot?.scope?.trusted, false);
+    Object.assign(vscode.workspace, { isTrusted: true });
+    await sources.refresh('B', vscode.Uri.file(f.repo).toString());
+    assert.equal(sources.snapshot?.scope?.cwd.fsPath, f.repo);
+    assert.equal(sources.instructions.instructions[0].content, 'CREATED');
+  } finally {
+    sources.dispose(); if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    Object.assign(vscode.workspace, { workspaceFolders: previousFolders, isTrusted: previousTrust });
+    if (previousWatcher === undefined) delete runtime.createFileSystemWatcher; else runtime.createFileSystemWatcher = previousWatcher;
+  }
+});
+
+test('invalidated in-flight source reads cannot publish or repopulate a cache', async () => {
+  const f = await fixture(); const previousHome = process.env.CODEX_HOME;
+  const previousFolders = vscode.workspace.workspaceFolders; const previousTrust = vscode.workspace.isTrusted;
+  process.env.CODEX_HOME = f.home; Object.assign(vscode.workspace, { workspaceFolders: f.folders, isTrusted: true });
+  const sources = new SharedProjectSources();
+  const resolve = ProjectInstructionsResolver.prototype.resolve;
+  let started!: () => void; let release!: () => void;
+  const ready = new Promise<void>(yes => { started = yes; });
+  const barrier = new Promise<void>(yes => { release = yes; });
+  ProjectInstructionsResolver.prototype.resolve = async function(options) {
+    const result = await resolve.call(this, options); started(); await barrier; return result;
+  };
+  try {
+    const stale = sources.refresh('A', vscode.Uri.file(f.cwd).toString());
+    await ready;
+    sources.dirty = true;
+    release();
+    await assert.rejects(stale, /sources changed while loading/u);
+    assert.equal(sources.sessionId, undefined);
+    assert.equal(sources.snapshot, undefined);
+    ProjectInstructionsResolver.prototype.resolve = resolve;
+    await sources.refresh('B', vscode.Uri.file(f.cwd).toString());
+    assert.equal(sources.sessionId, 'B');
+    assert.equal(sources.diagnostics.misses, 2);
+  } finally {
+    release(); ProjectInstructionsResolver.prototype.resolve = resolve;
+    sources.dispose(); if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    Object.assign(vscode.workspace, { workspaceFolders: previousFolders, isTrusted: previousTrust });
+  }
+});

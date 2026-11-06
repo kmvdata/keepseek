@@ -204,7 +204,8 @@ export const composerStatusStylesFragment: WebviewFragment = {
   source: `
     .composer-status,
     #status {
-      display: block;
+      display: flex;
+      align-items: center;
       flex: 1 1 auto;
       min-width: 0;
       height: 26px;
@@ -215,13 +216,22 @@ export const composerStatusStylesFragment: WebviewFragment = {
 
     .composer-status-text {
       display: block;
-      width: 100%;
+      flex: 1 1 auto;
+      min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
       color: var(--vscode-descriptionForeground);
       opacity: 0.82;
       transition: opacity 120ms ease;
+    }
+
+    .composer-status-retry {
+      flex: 0 0 auto;
+      margin-left: 5px;
+      padding: 1px 5px;
+      font-size: 11px;
+      line-height: 20px;
     }
 
     .composer-status.is-active .composer-status-text,

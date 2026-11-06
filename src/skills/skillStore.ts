@@ -29,6 +29,12 @@ interface StoredSkillState {
   workspaceDefaultSkillRefs?: Record<string, string[]>;
 }
 
+interface SkillSourceSnapshot {
+  manifests: SkillManifest[];
+  diagnostics: string[];
+  loaded: Map<string, ActivatedSkill>;
+}
+
 export interface ActiveSkillLoadResult {
   skills: ActivatedSkill[];
   failures: Array<{ id: string; name: string; error: string }>;
@@ -40,7 +46,14 @@ export class SkillStore {
   private config?: SharedCodexConfigSnapshot;
   private workspaceDefaultSkillRefs = new Map<string, string[]>();
   private cachedActiveSkills = new Map<string, ActivatedSkill>();
+  private readonly activeSkillReads = new WeakMap<Map<string, ActivatedSkill>, Map<string, Promise<ActivatedSkill>>>();
   private activeSkillLoadErrors = new Map<string, string>();
+  private discoveryDiagnostics: string[] = [];
+  private readonly sourceSnapshots = new Map<SharedCodexConfigSnapshot, SkillSourceSnapshot>();
+  private readonly pendingSources = new Map<SharedCodexConfigSnapshot, Promise<SkillSourceSnapshot>>();
+  private refreshSelection = 0;
+  private sourceReadTail = Promise.resolve();
+  public readonly sourceDiagnostics = { hits: 0, scans: 0, merged: 0, stale: 0 };
 
   public constructor(
     private readonly storage: vscode.Memento,
@@ -53,11 +66,47 @@ export class SkillStore {
   }
 
   public async refresh(config?: SharedCodexConfigSnapshot): Promise<void> {
+    const selection = ++this.refreshSelection;
+    let snapshot = config ? this.sourceSnapshots.get(config) : undefined;
+    if (snapshot) {
+      this.sourceDiagnostics.hits++;
+      this.sourceSnapshots.delete(config!); this.sourceSnapshots.set(config!, snapshot);
+    } else {
+      let pending = config ? this.pendingSources.get(config) : undefined;
+      if (pending) this.sourceDiagnostics.merged++;
+      else {
+        this.sourceDiagnostics.scans++;
+        pending = this.discoverSource(config);
+        if (config) this.pendingSources.set(config, pending);
+      }
+      try {
+        snapshot = await pending;
+        if (config) {
+          this.sourceSnapshots.set(config, snapshot);
+          while (this.sourceSnapshots.size > 4) this.sourceSnapshots.delete(this.sourceSnapshots.keys().next().value!);
+        }
+      } finally { if (config && this.pendingSources.get(config) === pending) this.pendingSources.delete(config); }
+    }
+    if (selection !== this.refreshSelection) { this.sourceDiagnostics.stale++; return; }
     this.config = config;
-    const discovered = await this.discovery.discover(config);
-    this.manifests = discovered.filter(manifest => isCodexPluginSkillsEnabled() || !isCodexPluginSkill(manifest));
-    this.cachedActiveSkills.clear();
+    this.manifests = snapshot.manifests;
+    this.discoveryDiagnostics = snapshot.diagnostics;
+    this.cachedActiveSkills = snapshot.loaded;
     this.activeSkillLoadErrors.clear();
+  }
+
+  private async discoverSource(config?: SharedCodexConfigSnapshot): Promise<SkillSourceSnapshot> {
+    // SkillDiscovery owns mutable diagnostics. Different versions cannot borrow that mutable state.
+    const previous = this.sourceReadTail;
+    let release!: () => void;
+    this.sourceReadTail = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+      const discovered = await this.discovery.discover(config);
+      const manifests = discovered.filter(manifest => isCodexPluginSkillsEnabled() || !isCodexPluginSkill(manifest));
+      for (const manifest of manifests) freezeSkillSource(manifest);
+      return { manifests, diagnostics: [...(this.discovery.diagnostics ?? [])], loaded: new Map() };
+    } finally { release(); }
   }
 
   public getStateView(session: ChatSession): SkillStateView {
@@ -69,7 +118,7 @@ export class SkillStore {
       workspaceTrusted: vscode.workspace.isTrusted,
       scopeUri: this.config?.scope?.cwd.toString(),
       configSummary: this.config ? { projectDocMaxBytes: this.config.projectDocMaxBytes, fallbackFilenames: [...this.config.fallbackFilenames], origins: { ...this.config.origins }, fingerprint: this.config.fingerprint } : undefined,
-      diagnostics: [...(this.config?.diagnostics.map(item => `${item.uri}: ${item.message}`) ?? []), ...(this.discovery.diagnostics ?? [])],
+      diagnostics: [...(this.config?.diagnostics.map(item => `${item.uri}: ${item.message}`) ?? []), ...this.discoveryDiagnostics],
       items: this.manifests.map((manifest) => toSkillManifestView(manifest, {
         active: active.has(manifest.id),
         loadError: this.activeSkillLoadErrors.get(manifest.id),
@@ -146,6 +195,7 @@ export class SkillStore {
     pluginTools?: PluginSkillToolContext;
     inheritedPluginSkills?: readonly ActivatedSkill[];
   }): Promise<ActiveSkillLoadResult> {
+    const sourceSelection = this.refreshSelection;
     if (input.inheritedPluginSkills?.length) assertCodexPluginSkillsEnabled();
     const hasFrozenImplicitSnapshot = Array.isArray(input.session.frozenImplicitSkillIds);
     const frozenImplicitSkillIds = hasFrozenImplicitSnapshot
@@ -185,11 +235,12 @@ export class SkillStore {
         const loaded = decision.manifest.pluginInstallation
           ? await this.loadPluginEntry(decision.manifest, input.pluginTools)
           : await this.loadManifest(decision.manifest);
+        if (sourceSelection !== this.refreshSelection) throw new Error('Skill sources changed during loading; refresh to retry / Skill 来源在加载期间变化，请刷新重试');
         const skill = { ...loaded, activation: { ...decision.activation } };
-        if (!decision.manifest.pluginInstallation) this.cachedActiveSkills.set(decision.manifest.id, skill);
         this.activeSkillLoadErrors.delete(decision.manifest.id);
         skills.push(skill);
       } catch (error) {
+        if (sourceSelection !== this.refreshSelection) throw error;
         const message = error instanceof Error ? error.message : String(error);
         this.activeSkillLoadErrors.set(decision.manifest.id, message);
         failures.push({ id: decision.manifest.id, name: decision.manifest.name, error: message });
@@ -226,14 +277,24 @@ export class SkillStore {
   }
 
   private async loadManifest(manifest: SkillManifest): Promise<ActivatedSkill> {
-    const cached = this.cachedActiveSkills.get(manifest.id);
+    const cache = this.cachedActiveSkills;
+    const cached = cache.get(manifest.id);
     if (cached) {
       return cached;
     }
-    const skill = await this.loader.loadSkill(manifest);
-    this.cachedActiveSkills.set(manifest.id, skill);
-    this.activeSkillLoadErrors.delete(manifest.id);
-    return skill;
+    let reads = this.activeSkillReads.get(cache);
+    if (!reads) { reads = new Map(); this.activeSkillReads.set(cache, reads); }
+    let read = reads.get(manifest.id);
+    if (!read) {
+      read = this.loader.loadSkill(manifest).then(skill => {
+        freezeSkillSource(skill);
+        cache.set(manifest.id, skill);
+        return skill;
+      });
+      reads.set(manifest.id, read);
+    }
+    try { return await read; }
+    finally { if (reads.get(manifest.id) === read) reads.delete(manifest.id); }
   }
 
   /**
@@ -287,6 +348,15 @@ export class SkillStore {
       workspaceDefaultSkillRefs: Object.fromEntries(this.workspaceDefaultSkillRefs)
     } satisfies StoredSkillState);
   }
+}
+
+/** Activation is copied per call; only immutable parsed source data is reused across sessions. */
+function freezeSkillSource<T>(value: T): T {
+  if (value && typeof value === 'object' && (Array.isArray(value) || Object.getPrototypeOf(value) === Object.prototype)) {
+    for (const item of Object.values(value)) freezeSkillSource(item);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 function normalizeFrozenImplicitSkillIds(value: string[] | undefined): string[] {

@@ -129,6 +129,75 @@ export function getScript(): string {
     };
     var lastStateRevision = 0;
     var runStreamRevisions = new Map();
+    var pendingSubmission = null;
+    var submissionSequence = 0;
+    var sessionPromptDrafts = new Map();
+
+    function currentInteraction() {
+      return state.interaction && state.interaction.sessionId === state.activeSessionId ? state.interaction : null;
+    }
+
+    function canSubmitPrompt() {
+      var interaction = currentInteraction();
+      return !pendingSubmission && (interaction ? interaction.canSubmit === true
+        : state.startup?.interactiveReady === true && !state.isBusy);
+    }
+
+    function canNavigateSessions() {
+      var interaction = currentInteraction();
+      return !pendingSubmission && (interaction ? interaction.canNavigate === true : !state.isBusy && !isBackgroundActive());
+    }
+
+    function canChangeContext() {
+      var interaction = currentInteraction();
+      return interaction ? (interaction.canChangeContext ?? interaction.canSubmit) === true : !state.isBusy;
+    }
+
+    function canCancelPrompt() {
+      var interaction = currentInteraction();
+      return interaction ? interaction.canCancel === true && !!interaction.cancelOperationId : Boolean(state.isBusy);
+    }
+
+    function beginPromptSubmission(kind, prompt, messageId) {
+      if (!canSubmitPrompt()) return null;
+      var requestId = 'submission-' + Date.now().toString(36) + '-' + (++submissionSequence);
+      pendingSubmission = { requestId: requestId, sessionId: state.activeSessionId,
+        kind: kind, prompt: prompt, messageId: messageId || '' };
+      return requestId;
+    }
+
+    function applySubmissionResult(message) {
+      var pending = pendingSubmission;
+      if (!pending || message.requestId !== pending.requestId || message.sessionId !== pending.sessionId) return;
+      if (message.status !== 'accepted' && message.status !== 'rejected' && message.status !== 'failed') return;
+      pendingSubmission = null;
+      if (message.status === 'accepted' && pending.sessionId === state.activeSessionId) {
+        if (pending.kind === 'composer' && window.keepseekInputControls?.acceptSubmission) {
+          window.keepseekInputControls.acceptSubmission(pending.prompt);
+        } else if (pending.kind === 'edit' && editingMessageId === pending.messageId && editingDraftText === pending.prompt) {
+          editingMessageId = ''; editingDraftText = ''; pendingEditFocusId = ''; savedEditRange = null;
+          inlineShortcutController.deactivateMark(); closeEditReferenceMenu(false);
+        }
+      } else if (message.status !== 'accepted' && pending.sessionId === state.activeSessionId) {
+        setTransientStatus(String(message.reason || t('submissionNotAccepted')));
+      }
+      render();
+    }
+
+    function changeVisibleSession(previousSessionId, nextSessionId) {
+      if (previousSessionId === nextSessionId) return;
+      var startupDraft = !previousSessionId && promptInput ? promptInput.innerHTML : '';
+      if (previousSessionId && promptInput) sessionPromptDrafts.set(previousSessionId, promptInput.innerHTML);
+      stopAgentStatusRotation(); agentStatusRotationKey = ''; reconnectStatusActive = false;
+      operationStatus = ''; operationStatusKey = '';
+      if (transientStatusScope !== 'global') setTransientStatus('');
+      clearPromptDraft();
+      var draft = sessionPromptDrafts.get(nextSessionId) || startupDraft || '';
+      if (window.keepseekInputControls?.restoreDraft) window.keepseekInputControls.restoreDraft(draft);
+      else if (promptInput) promptInput.innerHTML = draft;
+      if (window.keepseekInputControls) window.keepseekInputControls.render();
+      planExpanded = false; runStreamRevisions.clear();
+    }
 
     function getLanguage() {
       return state.language === 'en' ? 'en' : 'zh-CN';
@@ -472,9 +541,18 @@ export function getScript(): string {
     const status = document.getElementById('status');
     const statusText = document.getElementById('statusText');
     const statusTooltip = document.getElementById('statusTooltip');
+    const interactionRetry = document.getElementById('interactionRetry');
+    if (interactionRetry) interactionRetry.addEventListener('click', function() {
+      var interaction = currentInteraction();
+      if (!interaction || interaction.phase !== 'failed') return;
+      vscode.postMessage({ type: 'retryInteraction', sessionId: interaction.sessionId });
+    });
     const sendButton = document.getElementById('sendButton');
     const editReferenceMenu = document.createElement('div');
     let transientStatus = '';
+    let transientStatusScope = '';
+    let operationStatus = '';
+    let operationStatusKey = '';
     let transientStatusTimer = 0;
     let transientStatusClearTimer = 0;
     let transientStatusSequence = 0;
@@ -582,6 +660,7 @@ export function getScript(): string {
         var runMessage = state.messages.find(function(message) { return message.id === runButton.dataset.messageId; });
         if (!runMessage) return;
         if (runButton.dataset.runAction === 'continueTask') {
+          if (!canSubmitPrompt()) return;
           runButton.disabled = true;
           vscode.postMessage({ type: 'continueAgentTask', messageId: runMessage.id });
           return;
@@ -884,7 +963,7 @@ export function getScript(): string {
 
     if (planContinueRepair) {
       planContinueRepair.addEventListener('click', function() {
-        if (state.isBusy || state.repairLoop?.status !== 'ready_for_validation') return;
+        if (!canSubmitPrompt() || state.repairLoop?.status !== 'ready_for_validation') return;
         planContinueRepair.disabled = true;
         vscode.postMessage({ type: 'continueRepair' });
       });
@@ -892,11 +971,10 @@ export function getScript(): string {
 
     if (newChatTab) {
       newChatTab.addEventListener('click', function() {
-        if (state.isBusy || isBackgroundActive()) return;
+        if (!canNavigateSessions()) return;
         closeSettingsMenu();
         closeSessionMenu();
         resetLocalContextUsageEstimate();
-        clearPromptDraft();
         vscode.postMessage({ type: 'newSession' });
       });
     }
@@ -1080,7 +1158,7 @@ export function getScript(): string {
       historyTab.addEventListener('click', function(event) {
         event.preventDefault();
         event.stopPropagation();
-        if (state.isBusy) return;
+        if (!canNavigateSessions()) return;
         closeSettingsMenu();
         toggleSessionMenu();
       });
@@ -1106,6 +1184,7 @@ export function getScript(): string {
         if (target.closest('input, select, button, label')) {
           return;
         }
+        if (!canNavigateSessions()) return;
 
         var item = target.closest('[data-session-id]');
         var sessionId = item?.dataset.sessionId || '';
@@ -1116,7 +1195,6 @@ export function getScript(): string {
 
         if (sessionId !== state.activeSessionId || item?.dataset.sessionOrigin === 'other') {
           resetLocalContextUsageEstimate();
-          clearPromptDraft();
         }
         closeSessionMenu();
         if (item?.dataset.sessionOrigin === 'other') {
@@ -1197,12 +1275,12 @@ export function getScript(): string {
         var item = target.closest('[data-session-id]');
         if (item && (event.key === 'Enter' || event.key === ' ')) {
           event.preventDefault();
+          if (!canNavigateSessions()) return;
           var keyboardSessionId = item.dataset.sessionId || '';
           if (keyboardSessionId) {
             var keyboardWorkspaceKey = item.dataset.workspaceKey || activeWorkspaceTab;
             if (keyboardSessionId !== state.activeSessionId || item.dataset.sessionOrigin === 'other') {
               resetLocalContextUsageEstimate();
-              clearPromptDraft();
             }
             closeSessionMenu();
             if (item.dataset.sessionOrigin === 'other' && keyboardWorkspaceKey) {
@@ -1258,6 +1336,10 @@ export function getScript(): string {
 
     function handleKeepseekHostMessage(event) {
       var message = event.data;
+      if (message.type === 'submissionResult') {
+        applySubmissionResult(message);
+        return;
+      }
       if (message.type === 'sessionTitleRegeneration') {
         applySessionTitleRegeneration(message);
         return;
@@ -1286,11 +1368,20 @@ export function getScript(): string {
         renderSettingsControls();
         if (restoreTimeoutFocus) settingsRequestTimeoutValue.focus();
       } else if (message.type === 'state' || message.type === 'statePatch') {
+        if (message.type === 'statePatch' && message.sessionId && message.sessionId !== state.activeSessionId) return;
         var incomingRevision = Number(message.revision || 0);
         if (incomingRevision && incomingRevision <= lastStateRevision) return;
         if (incomingRevision) lastStateRevision = incomingRevision;
         var previousActiveSessionId = state.activeSessionId || '';
+        if (message.state?.activeSessionId && previousActiveSessionId !== message.state.activeSessionId) {
+          // Missing fields in an old or partial message cannot carry another
+          // session's interaction lease into the newly selected session.
+          delete state.interaction;
+          state.isBusy = false;
+          state.agentActivity = { base: 'idle', phase: 'idle' };
+        }
         Object.assign(state, message.state);
+        changeVisibleSession(previousActiveSessionId, state.activeSessionId);
         if (message.type === 'statePatch' && message.scope === 'startupSettings') {
           rememberTerminalAgentActivity(state.agentActivity);
           renderStatus();
@@ -1303,10 +1394,6 @@ export function getScript(): string {
         pendingDraftRunApprovals.clear();
         pendingDraftRunActions.clear();
         pendingDraftRunBatchSnapshot = '';
-        if (previousActiveSessionId && previousActiveSessionId !== state.activeSessionId) {
-          planExpanded = false;
-          runStreamRevisions.clear();
-        }
         rememberTerminalAgentActivity(state.agentActivity);
         render();
       } else if (message.type === 'agentRunDelta' || message.type === 'agentRunAttemptReset') {
@@ -1358,7 +1445,7 @@ export function getScript(): string {
         upsertDraftRun(message.draftRun);
         render();
       } else if (message.type === 'approvalReviewerModelResult') {
-        setComposerStatus(message.success ? t('approvalModelSaved') : (message.error || t('approvalModelSaveFailed')));
+        setTransientStatus(message.success ? t('approvalModelSaved') : (message.error || t('approvalModelSaveFailed')), false, 'global');
       } else if (message.type === 'draftRunBatchFeedback') {
         pendingDraftRunBatchSnapshot = '';
         render();
@@ -1372,13 +1459,17 @@ export function getScript(): string {
       } else if (message.type === 'changeActionFeedback') {
         handleChangeActionFeedback(message);
       } else if (message.type === 'sessionChanged') {
+        if (message.revision && message.revision < lastStateRevision) return;
+        if (message.sessionId && message.sessionId !== state.activeSessionId) return;
         pendingChangeActions.clear();
         resetLocalContextUsageEstimate();
-        clearPromptDraft();
+        stopAgentStatusRotation(); agentStatusRotationKey = ''; reconnectStatusActive = false;
+        setOperationStatus('', '');
+        renderStatus();
       } else if (message.type === 'modelSelectionFeedback') {
         var feedbackMessage = String(message.message || '');
         if (window.keepseekInputControls && window.keepseekInputControls.showStatus) {
-          window.keepseekInputControls.showStatus(feedbackMessage);
+          window.keepseekInputControls.showStatus(feedbackMessage, 'global');
         }
       } else if (message.type === 'focusComposer') {
         if (window.keepseekInputControls && window.keepseekInputControls.showStatus) {
@@ -1440,6 +1531,7 @@ export function getScript(): string {
 
     function applyAgentRunStreamPatch(message) {
       if (message.sessionId !== state.activeSessionId) return null;
+      if (message.operationId && currentInteraction()?.operationId !== message.operationId) return null;
       var targetMessage = state.messages.find(function(item) { return item.id === message.messageId; });
       if (!targetMessage?.isStreaming || targetMessage.runState?.attempt !== message.attempt) return null;
       var streamKey = [message.sessionId, message.messageId, message.attempt].join('|');
@@ -1542,7 +1634,7 @@ export function getScript(): string {
     }
 
     function syncSendButtonAvailability() {
-      sendButton.disabled = !state.startup?.interactiveReady || (!state.isBusy && (
+      sendButton.disabled = !canCancelPrompt() && (!canSubmitPrompt() || (
         window.keepseekInputControls && window.keepseekInputControls.isPromptSubmittableEmpty
           ? window.keepseekInputControls.isPromptSubmittableEmpty()
           : promptInput.classList.contains('is-empty')
@@ -1853,10 +1945,10 @@ export function getScript(): string {
 
     function renderSessionControls() {
       if (newChatTab) {
-        newChatTab.disabled = state.isBusy || isBackgroundActive();
+        newChatTab.disabled = !canNavigateSessions();
       }
       if (historyTab) {
-        historyTab.disabled = state.isBusy || isBackgroundActive();
+        historyTab.disabled = !canNavigateSessions();
         historyTab.classList.toggle('active', sessionMenuOpen);
         historyTab.setAttribute('aria-expanded', sessionMenuOpen ? 'true' : 'false');
       }
@@ -2487,83 +2579,82 @@ export function getScript(): string {
     }
 
     function renderStatus() {
-      if (!state.startup?.interactiveReady) {
-        stopAgentStatusRotation();
-        agentStatusRotationKey = '';
-        var phase = state.startup?.phase;
-        setTransientStatus(t(phase === 'loading-sessions'
-          ? 'startupLoadingSessions'
-          : phase === 'loading-request-context'
-            ? 'startupLoadingRequestContext'
-            : phase === 'startup-error'
-              ? 'startupLoadFailed'
-              : 'startupRestoringSafetyState'));
+      var interaction = currentInteraction();
+      var phase = interaction?.phase;
+      if (interactionRetry) interactionRetry.classList.toggle('hidden', phase !== 'failed');
+      if (interaction && phase !== 'running') {
+        stopAgentStatusRotation(); agentStatusRotationKey = ''; reconnectStatusActive = false;
+        var key = phase === 'loading_session' ? 'startupLoadingSessions'
+          : phase === 'preparing_context' ? 'startupLoadingRequestContext'
+          : phase === 'preparing_task' ? 'agentStatusPreparingRequest'
+          : phase === 'saving' ? 'runSavingState'
+          : phase === 'action' ? 'interactionApplyingAction'
+          : phase === 'failed' ? 'interactionPreparationFailed' : '';
+        setOperationStatus(phase === 'failed' && interaction.blockingReason ? interaction.blockingReason : key ? t(key) : '', [interaction.sessionId, interaction.operationId, phase].join('|'));
         return;
       }
-      if (!state.isBusy) {
-        stopAgentStatusRotation();
-        agentStatusRotationKey = '';
-        if (reconnectStatusActive) setTransientStatus('');
-        reconnectStatusActive = false;
+      if (!interaction && !state.startup?.interactiveReady) {
+        stopAgentStatusRotation(); agentStatusRotationKey = '';
+        var startupPhase = state.startup?.phase;
+        setOperationStatus(t(startupPhase === 'loading-sessions' ? 'startupLoadingSessions'
+          : startupPhase === 'loading-request-context' ? 'startupLoadingRequestContext'
+          : startupPhase === 'startup-error' ? 'startupLoadFailed' : 'startupRestoringSafetyState'), 'startup');
         return;
       }
-
+      if (interaction ? phase !== 'running' : !state.isBusy) {
+        stopAgentStatusRotation(); agentStatusRotationKey = ''; reconnectStatusActive = false;
+        setOperationStatus('', '');
+        return;
+      }
       var activity = normalizeAgentActivity(state.agentActivity);
-      var activityKey = getAgentActivityKey(activity);
+      var activityKey = [state.activeSessionId, interaction?.operationId || '', getAgentActivityKey(activity)].join('|');
       if (activity.phase === 'reconnecting') {
-        stopAgentStatusRotation();
-        agentStatusRotationKey = activityKey;
-        reconnectStatusActive = true;
-        setTransientStatus(getAgentActivityStatusText(activity), true);
+        stopAgentStatusRotation(); agentStatusRotationKey = activityKey; reconnectStatusActive = true;
+        setOperationStatus(getAgentActivityStatusText(activity), activityKey);
         return;
       }
       reconnectStatusActive = false;
       if (activityKey !== agentStatusRotationKey) {
-        agentStatusRotationKey = activityKey;
-        agentStatusRotationIndex = 0;
-        setTransientStatus(getAgentActivityStatusText(activity) || t('processing'));
+        agentStatusRotationKey = activityKey; agentStatusRotationIndex = 0;
       }
+      setOperationStatus(getAgentActivityStatusText(activity) || t('processing'), activityKey);
       startAgentStatusRotation();
     }
 
-    function setTransientStatus(message, persistent) {
+    function paintStatus() {
+      var text = transientStatus || operationStatus;
+      statusText.textContent = text;
+      var showTooltip = getUtf8ByteLength(text) > STATUS_TOOLTIP_MIN_BYTES;
+      statusTooltip.textContent = showTooltip ? text : '';
+      statusTooltip.classList.toggle('hidden', !showTooltip);
+      status.classList.toggle('is-active', Boolean(text));
+    }
+
+    function setOperationStatus(message, key) {
+      operationStatus = String(message || ''); operationStatusKey = String(key || '');
+      status.classList.remove('is-fading');
+      paintStatus();
+    }
+
+    function setTransientStatus(message, persistent, scope) {
+      // Notifications have their own sequence and timer. Operation status is
+      // derived exclusively from the current host snapshot and never expires.
       transientStatus = String(message || '');
+      transientStatusScope = scope === 'global' ? 'global' : state.activeSessionId;
       transientStatusSequence += 1;
       var sequence = transientStatusSequence;
-      if (transientStatusTimer) {
-        clearTimeout(transientStatusTimer);
-        transientStatusTimer = 0;
-      }
-      if (transientStatusClearTimer) {
-        clearTimeout(transientStatusClearTimer);
-        transientStatusClearTimer = 0;
-      }
-      status.classList.remove('is-fading');
-      statusText.textContent = transientStatus;
-      var showTooltip = getUtf8ByteLength(transientStatus) > STATUS_TOOLTIP_MIN_BYTES;
-      statusTooltip.textContent = showTooltip ? transientStatus : '';
-      statusTooltip.classList.toggle('hidden', !showTooltip);
-      status.classList.toggle('is-active', Boolean(transientStatus));
-      if (!transientStatus || persistent) {
-        return;
-      }
+      if (transientStatusTimer) { clearTimeout(transientStatusTimer); transientStatusTimer = 0; }
+      if (transientStatusClearTimer) { clearTimeout(transientStatusClearTimer); transientStatusClearTimer = 0; }
+      status.classList.remove('is-fading'); paintStatus();
+      if (!transientStatus || persistent) return;
       transientStatusTimer = setTimeout(function() {
-        if (sequence !== transientStatusSequence) {
-          return;
-        }
+        if (sequence !== transientStatusSequence) return;
         transientStatusTimer = 0;
-        status.classList.remove('is-active');
         status.classList.add('is-fading');
         transientStatusClearTimer = setTimeout(function() {
-          if (sequence !== transientStatusSequence) {
-            return;
-          }
-          transientStatusClearTimer = 0;
-          transientStatus = '';
-          statusText.textContent = '';
-          statusTooltip.textContent = '';
-          statusTooltip.classList.add('hidden');
-          status.classList.remove('is-fading');
+          if (sequence !== transientStatusSequence) return;
+          transientStatusClearTimer = 0; transientStatus = '';
+          status.classList.remove('is-fading'); paintStatus();
         }, STATUS_MESSAGE_FADE_MS);
       }, STATUS_MESSAGE_DURATION_MS);
     }
@@ -2627,8 +2718,8 @@ export function getScript(): string {
         var previousStatusText = getAgentActivityStatusText(activity) || t('processing');
         agentStatusRotationIndex += 1;
         var nextStatusText = getAgentActivityStatusText(activity) || t('processing');
-        if (nextStatusText !== previousStatusText || nextStatusText !== transientStatus) {
-          setTransientStatus(nextStatusText);
+        if (nextStatusText !== previousStatusText || nextStatusText !== operationStatus) {
+          setOperationStatus(nextStatusText, agentStatusRotationKey);
         }
       }, AGENT_STATUS_ROTATION_MS);
     }
@@ -2710,8 +2801,10 @@ export function getScript(): string {
 
     function syncEditingState() {
       if (!editingMessageId) return;
+      if (pendingSubmission?.kind === 'edit' && pendingSubmission.sessionId === state.activeSessionId
+        && pendingSubmission.messageId === editingMessageId) return;
       var message = getMessageById(editingMessageId);
-      if (state.isBusy || !message || message.role !== 'user') {
+      if (!message || message.role !== 'user') {
         editingMessageId = '';
         editingDraftText = '';
         pendingEditFocusId = '';
@@ -2846,7 +2939,7 @@ export function getScript(): string {
     }
 
     function submitEditedMessage(messageId) {
-      if (!messageId || messageId !== editingMessageId || state.isBusy) return;
+      if (!messageId || messageId !== editingMessageId || !canSubmitPrompt()) return;
       var editor = getActiveInlineEditor();
       if (editor) {
         sanitizeInlineEditorContent(editor);
@@ -2858,8 +2951,13 @@ export function getScript(): string {
         return;
       }
 
+      var requestId = beginPromptSubmission('edit', editingDraftText, messageId);
+      if (!requestId) return;
       vscode.postMessage({
         type: 'editUserPrompt',
+        requestId: requestId,
+        sessionId: state.activeSessionId,
+        stateRevision: currentInteraction()?.revision || lastStateRevision,
         messageId: messageId,
         prompt: editingDraftText,
         sourceId: state.selectedSourceId,
@@ -2871,12 +2969,6 @@ export function getScript(): string {
           editor ? collectInlineEditorSkillIds(editor) : []
         )
       });
-      editingMessageId = '';
-      editingDraftText = '';
-      pendingEditFocusId = '';
-      savedEditRange = null;
-      inlineShortcutController.deactivateMark();
-      closeEditReferenceMenu(false);
       render();
     }
 
@@ -3376,7 +3468,7 @@ export function getScript(): string {
       renderPlanNote(planCompletion, t('planCompletion'), plan.completionSummary || '');
       if (planContinueRepair) {
         var canContinueRepair = state.approvalMode !== 'delegate'
-          && state.repairLoop?.status === 'ready_for_validation' && !state.isBusy && !isBackgroundActive();
+          && state.repairLoop?.status === 'ready_for_validation' && canSubmitPrompt() && !isBackgroundActive();
         planContinueRepair.classList.toggle('hidden', !canContinueRepair);
         planContinueRepair.disabled = !canContinueRepair;
       }
@@ -4655,7 +4747,7 @@ export function getScript(): string {
           button.dataset.planAction = item.action;
           button.textContent = t(item.labelKey);
           button.setAttribute('aria-label', t(item.labelKey));
-          button.disabled = Boolean(state.isBusy);
+          button.disabled = !canSubmitPrompt();
           button.addEventListener('click', function() {
             if (button.disabled) return;
             button.disabled = true;
@@ -4691,7 +4783,7 @@ export function getScript(): string {
         var button = document.createElement('button');
         button.type = 'button'; button.textContent = t('runContinue');
         button.dataset.runAction = 'continueTask'; button.dataset.messageId = message.id;
-        button.disabled = Boolean(state.isBusy);
+        button.disabled = !canSubmitPrompt();
         panel.append(button);
       }
       return panel;
@@ -5761,7 +5853,7 @@ export function getScript(): string {
       var editor = form.querySelector('.message-edit-input');
       var send = form.querySelector('button[type="submit"]');
       if (!send || !editor) return;
-      send.disabled = state.isBusy || !serializeInlineEditor(editor).trim();
+      send.disabled = !canSubmitPrompt() || !serializeInlineEditor(editor).trim();
     }
 
     function renderMarkdownContent(container, value, hideExpandedReferences, options) {

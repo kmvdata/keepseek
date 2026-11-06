@@ -251,7 +251,7 @@ export const commandMenuImplementationFragment: WebviewFragment = {
       }
 
       function openCommandSkillListAndFocus() {
-        if ((!commandSkillsMainButton && !commandSkillsButton) || state.isBusy) { return; }
+        if ((!commandSkillsMainButton && !commandSkillsButton) || !canChangeContext()) { return; }
         commandSkillListOpen = true;
         commandModelListOpen = false;
         commandSubagentModelListOpen = false;
@@ -330,7 +330,7 @@ export const commandMenuRenderFragment: WebviewFragment = {
         if (commandMenuButton) {
           commandMenuButton.title = t('showCommandMenuTitle') + ' · ' + t(getApprovalModeLabelKey(state.approvalMode));
         }
-        commandMenu.classList.toggle('is-readonly', Boolean(state.isBusy));
+        commandMenu.classList.toggle('is-readonly', !canChangeContext());
         commandMenu.classList.toggle('allows-model-selection', Boolean(state.isBusy && !isModelSelectionLocked()));
         commandMenu.classList.toggle('allows-approval-selection', Boolean(state.isBusy && !isApprovalModeSelectionLocked()));
         renderCommandModel();

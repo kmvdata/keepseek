@@ -17,6 +17,25 @@ import { getScript } from '../src/webview/script';
 import { getHtmlForWebview } from '../src/webview/html';
 import { KeepseekChatViewProvider } from '../src/provider/KeepseekChatViewProvider';
 import type { AgentActivityInput } from '../src/shared/types';
+import { withStorageCoordinator } from '../src/shared/atomicStorage';
+
+test('storage flush waits for an already transferred commit even when its pending index list is empty', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-flush-barrier-'));
+  const uri = vscode.Uri.file(root);
+  const storage = new GlobalSessionStorage(uri as never);
+  let entered!: () => void; let release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  t.after(async () => { release(); await storage.flush(); await rm(root, { recursive: true, force: true }); });
+  const committing = withStorageCoordinator(vscode.Uri.joinPath(uri, 'chat-sessions', 'v2') as never, async () => { entered(); await barrier; });
+  await started;
+  let flushed = false;
+  const flush = storage.flush().then(() => { flushed = true; });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(flushed, false, 'flush cannot infer durability from an empty pending buffer');
+  release(); await Promise.all([committing, flush]);
+  assert.equal(flushed, true);
+});
 
 test('host preserves reconnect activity counters and clears them on the next normal status', () => {
   let posts = 0;
@@ -136,7 +155,7 @@ test('failed V1 migration keeps the old file as a readable fallback', async (t) 
 
 test('cleanup is single-flight, limited to once per 24 hours, and preserves favorites', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'keepseek-cleanup-flight-'));
-  t.after(async () => await rm(root, { recursive: true, force: true }));
+  t.after(async () => { await storage.flush(); await rm(root, { recursive: true, force: true }); });
   const scope = workspaceScope('cleanup');
   const current = session('current', scope, 1, 0);
   const expired = session('expired', scope, 1, 1);
@@ -429,7 +448,7 @@ test('command settings become ready without waiting for project context or the f
       if (Object.values(snapshot).every((value) => value === 'ready')) settingsReady();
     },
     refreshModelSourceState: async (options?: { onResolved?: () => void }) => { options?.onResolved?.(); },
-    refreshSkills: async () => { await contextGate; },
+    refreshSessionSkills: async () => { await contextGate; },
     refreshBackgroundRunAvailability: async () => {},
     postState: () => { fullStatePosts += 1; },
     cleanupExpiredSessions: async () => {},

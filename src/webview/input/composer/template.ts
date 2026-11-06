@@ -87,6 +87,7 @@ export const composerTemplateFragment: WebviewFragment = {
               </span>
               <span id="status" class="composer-status" aria-describedby="statusTooltip">
                 <span id="statusText" class="composer-status-text"></span>
+                <button id="interactionRetry" class="composer-status-retry hidden" type="button" data-i18n="interactionRetry">重试</button>
                 <span id="statusTooltip" class="composer-status-tooltip hidden" role="tooltip"></span>
               </span>
             </div>
