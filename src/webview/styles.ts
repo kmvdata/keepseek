@@ -286,11 +286,7 @@ export function getStyles(): string {
       text-overflow: ellipsis;
       white-space: nowrap;
       margin-right: 8px;
-      cursor: pointer;
     }
-
-    .header-title[aria-disabled="true"] { cursor: default; }
-    .header-title:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
 
     .header-actions {
       display: flex;
@@ -583,7 +579,7 @@ export function getStyles(): string {
 
     .session-menu-item {
       display: grid;
-      grid-template-columns: 24px minmax(0, 1fr) 28px;
+      grid-template-columns: 24px minmax(0, 1fr) 26px 28px;
       align-items: center;
       gap: 6px;
       width: 100%;
@@ -598,7 +594,7 @@ export function getStyles(): string {
     }
 
     .session-menu.is-multi-select .session-menu-item {
-      grid-template-columns: 18px 24px minmax(0, 1fr) 28px;
+      grid-template-columns: 18px 24px minmax(0, 1fr) 26px 28px;
     }
 
     .session-menu-item.is-other-workspace {
@@ -686,7 +682,8 @@ export function getStyles(): string {
       color: var(--vscode-textLink-foreground);
     }
 
-    .session-menu-rename {
+    .session-menu-rename,
+    .session-menu-refresh {
       display: grid;
       place-items: center;
       width: 26px;
@@ -702,17 +699,29 @@ export function getStyles(): string {
     }
 
     .session-menu-item:hover .session-menu-rename,
-    .session-menu-item:focus-within .session-menu-rename {
+    .session-menu-item:focus-within .session-menu-rename,
+    .session-menu-item:hover .session-menu-refresh,
+    .session-menu-item:focus-within .session-menu-refresh,
+    .session-menu-refresh.is-regenerating {
       opacity: 1;
       transform: translateX(0);
     }
 
     .session-menu-rename:hover,
-    .session-menu-rename:focus-visible {
+    .session-menu-rename:focus-visible,
+    .session-menu-refresh:hover,
+    .session-menu-refresh:focus-visible {
       color: var(--vscode-textLink-foreground);
       background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
       outline: none;
     }
+
+    .session-menu-refresh:disabled { cursor: default; }
+    .session-menu-refresh.is-regenerating svg {
+      animation: session-title-refresh-spin 900ms linear infinite;
+      transform-origin: center;
+    }
+    @keyframes session-title-refresh-spin { to { transform: rotate(360deg); } }
 
     .session-menu-item-main {
       display: grid;

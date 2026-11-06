@@ -604,8 +604,8 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   public dispose(): void {
     this.titleLifecycleDisposed = true;
+    this.cancelAllSessionTitleWork();
     this.sessionTitles?.dispose();
-    this.sessionTitleCandidates?.clear();
     this.sharedProjectSources?.dispose();
     this.pluginSkillPreviewRegistration?.dispose();
     this.pluginSkillPreviews.clear();
@@ -647,8 +647,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async refreshWorkspaceScope(): Promise<void> {
-    this.sessionTitles?.cancelAll();
-    this.sessionTitleCandidates?.clear();
+    this.cancelAllSessionTitleWork();
     this.draftRunBatches?.cancel();
     this.currentRunAbortController?.abort();
     await this.activeRunSettled;
@@ -1198,8 +1197,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
         }
         return;
       case 'renameSession':
-        this.sessionTitles?.cancel(message.sessionId);
-        this.sessionTitleCandidates?.delete(message.sessionId);
+        this.cancelSessionTitleWork(message.sessionId);
         if (await this.sessionStore.renameSession(message.sessionId, message.title)) {
           this.postState();
         }
@@ -2463,8 +2461,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     for (const id of uniqueSessionIds) {
-      this.sessionTitles?.cancel(id);
-      this.sessionTitleCandidates?.delete(id);
+      this.cancelSessionTitleWork(id);
     }
     const result = await this.sessionStore.deleteSessions(uniqueSessionIds);
     if (!result.deletedCount) {
@@ -4084,8 +4081,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private abortPrompt(): void {
     if (this.isBusy || this.isStartingRun || this.activeDraftRunId) {
       const id = this.sessionStore.activeSessionId;
-      this.sessionTitleCandidates?.delete(id);
-      this.sessionTitles?.cancel(id);
+      this.cancelSessionTitleWork(id);
     }
     this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
     this.manualToolApproval?.decide(false);
@@ -5113,8 +5109,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     if (!this.isBusy && !this.isStartingRun && !incoming?.delegatedContinuation && !incoming?.draftRunAutoContinue
       && !incoming?.repairLoop && !incoming?.planExecutionContinuation) {
       const id = this.sessionStore.activeSessionId;
-      this.sessionTitles?.cancel(id);
-      this.sessionTitleCandidates?.delete(id);
+      this.cancelSessionTitleWork(id);
     }
     if (!await this.awaitRunContextRefresh()) return;
     if (args[4]?.replaceMessageId && (this.activeDraftRunId || this.delegatedApprovalInFlight
@@ -5175,8 +5170,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       : { version: 1, id: userMessageId, originMessageId: userMessageId, reason: 'user' };
     args[4] = { ...sendOptions, userMessageId, userTask, approvalRootTaskId: userTask.id };
     if (!inherited || sendOptions.replaceMessageId) {
-      this.sessionTitles?.cancel(taskSession.id);
-      this.sessionTitleCandidates?.delete(taskSession.id);
+      this.cancelSessionTitleWork(taskSession.id);
     }
     const work = this.enterTaskWork(taskSession, userTask);
     this.activeTaskScope = work;
@@ -5224,8 +5218,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     return {
       persistSession: () => this.sessionStore.persist(),
       invalidateOperations: async (scope: HistoryTruncationScope) => {
-        this.sessionTitles?.cancel(session.id);
-        this.sessionTitleCandidates?.delete(session.id);
+        this.cancelSessionTitleWork(session.id);
         this.externalAuthorizationEpoch = (this.externalAuthorizationEpoch ?? 0) + 1;
         this.manualToolApproval?.decide(false);
         this.externalEffectGrants?.clear();
@@ -6785,34 +6778,60 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     } });
   }
 
-  /** An explicit title action owns only its local request slot, never the main
-   * run lock. Capture the selected model and visible conversation before awaits. */
+  private cancelSessionTitleWork(sessionId: string): void {
+    const requestId = this.manualSessionTitleRequests?.get(sessionId);
+    if (requestId) {
+      this.manualSessionTitleRequests.delete(sessionId);
+      this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running: false });
+    }
+    this.sessionTitles?.cancel(sessionId);
+    this.sessionTitleCandidates?.delete(sessionId);
+  }
+
+  private cancelAllSessionTitleWork(): void {
+    for (const [sessionId, requestId] of this.manualSessionTitleRequests ?? []) {
+      this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running: false });
+    }
+    this.manualSessionTitleRequests?.clear();
+    this.sessionTitles?.cancelAll();
+    this.sessionTitleCandidates?.clear();
+  }
+
+  private canRegenerateSessionTitle(): boolean {
+    return !this.titleLifecycleDisposed && vscode.workspace.isTrusted && this.sessionReady
+      && this.approvalDataReady && this.requestContextReady && !this.isBusy && !this.isStartingRun
+      && !this.activeDraftRunId && !this.activeChangeActions?.size && !this.hasActiveBackgroundRun();
+  }
+
+  /** A history-row action owns only its request slot, never the main run lock.
+   * Capture the model before loading that row without selecting its session. */
   private async regenerateSessionTitle(sessionId: string, requestId: string): Promise<void> {
     if (typeof sessionId !== 'string' || typeof requestId !== 'string' || !requestId || requestId.length > 128) return;
     const status = (running: boolean) => this.postToWebview({ type: 'sessionTitleRegeneration', sessionId, requestId, running });
-    if (this.titleLifecycleDisposed || !vscode.workspace.isTrusted || !this.sessionReady
-      || !this.approvalDataReady || !this.requestContextReady || this.isBusy || this.isStartingRun
-      || this.activeDraftRunId || this.activeChangeActions?.size || this.hasActiveBackgroundRun()
-      || this.manualSessionTitleRequests.has(sessionId) || this.sessionStore.activeSessionId !== sessionId) {
+    if (!this.canRegenerateSessionTitle() || this.manualSessionTitleRequests.has(sessionId)) {
       status(false); return;
     }
-    const session = this.sessionStore.getSessionById(sessionId);
     const model = findModelBySelection(this.availableModels, { sourceId: this.selectedSourceId, modelId: this.selectedModelId });
-    if (!session || session.pendingHistoryTruncation || !model) { status(false); return; }
-    const taskId = getSessionTitleRegenerationTaskId(session.messages);
-    if (!taskId) { status(false); return; }
-    const material = buildSessionTitleRegenerationMaterial(session.messages, taskId, { historyStartKnown: true });
-    if (!material) {
-      console.info('[KeepSeek] session_title', { sessionId, outcome: 'material_unavailable' });
-      status(false); return;
-    }
+    if (!model) { status(false); return; }
     const parentRequest = { model: { ...model } };
+    const workspaceKey = this.sessionStore.workspaceKey;
+    // Occupy synchronously, including the asynchronous history-loading phase.
     this.manualSessionTitleRequests.set(sessionId, requestId);
     this.sessionTitleCandidates.delete(sessionId);
     status(true);
     try {
-      await this.sessionTitles.regenerate(sessionId, taskId,
-        request => this.requestManualSessionTitle(sessionId, request, parentRequest), material);
+      await this.sessionStore.withSessionForTitle(sessionId, async session => {
+        if (this.manualSessionTitleRequests.get(sessionId) !== requestId || !this.canRegenerateSessionTitle()
+          || this.sessionStore.workspaceKey !== workspaceKey || session.pendingHistoryTruncation) return;
+        const taskId = getSessionTitleRegenerationTaskId(session.messages);
+        if (!taskId) return;
+        const material = buildSessionTitleRegenerationMaterial(session.messages, taskId, { historyStartKnown: true });
+        if (!material) {
+          console.info('[KeepSeek] session_title', { sessionId, outcome: 'material_unavailable' }); return;
+        }
+        await this.sessionTitles.regenerate(sessionId, taskId,
+          request => this.requestManualSessionTitle(sessionId, request, parentRequest), material);
+      });
     } catch {
       // An explicit auxiliary failure leaves the existing title and input alone.
       console.info('[KeepSeek] session_title', { sessionId, outcome: 'failed' });
@@ -6848,7 +6867,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       },
       onBudgetChanged: async next => {
         if (!vscode.workspace.isTrusted || this.titleLifecycleDisposed) {
-          this.sessionTitles.cancel(sessionId); throw new Error('stale');
+          this.cancelSessionTitleWork(sessionId); throw new Error('stale');
         }
         const latest = this.sessionStore.getSessionById(sessionId);
         const current = latest?.userTaskBudgets?.[taskId];
@@ -6865,7 +6884,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   private flushSessionTitleCompletions(): void {
     if (!this.sessionTitles || this.titleLifecycleDisposed) return;
     if (!vscode.workspace.isTrusted) {
-      this.sessionTitles.cancelAll(); this.sessionTitleCandidates.clear(); return;
+      this.cancelAllSessionTitleWork(); return;
     }
     for (const [sessionId, candidate] of this.sessionTitleCandidates) {
       if (!candidate.durable) continue;
@@ -6906,7 +6925,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
           },
           onBudgetChanged: async next => {
             if (!vscode.workspace.isTrusted || this.titleLifecycleDisposed) {
-              this.sessionTitles.cancel(sessionId);
+              this.cancelSessionTitleWork(sessionId);
               throw new Error('stale');
             }
             const latest = this.sessionStore.getSessionById(sessionId);

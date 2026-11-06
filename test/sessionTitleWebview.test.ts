@@ -2,6 +2,7 @@ import './registerVscodeStub';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { getScript } from '../src/webview/script';
+import { getStyles } from '../src/webview/styles';
 import { createWebviewDomHarness } from './webviewDomHarness';
 
 const script = getScript();
@@ -131,7 +132,8 @@ test('title usage events refresh active-session totals without changing reply me
 function titleView(language = 'en') {
   const view = createWebviewDomHarness();
   let revision = 0;
-  const summaries = [{ id: 'a', title: 'A', customTitle: 'A' }, { id: 'b', title: 'B' }];
+  const summaries = [{ id: 'a', title: 'A', customTitle: 'A' }, { id: 'b', title: 'B' }]
+    .map(session => ({ ...session, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
   const publish = (sessionId = 'a', patch: Record<string, unknown> = {}) => view.receive({
     type: 'state', revision: ++revision, state: {
       activeSessionId: sessionId, sessionSummaries: summaries,
@@ -141,28 +143,59 @@ function titleView(language = 'en') {
   });
   publish();
   const requests = () => view.posted.filter(message => message.type === 'regenerateSessionTitle');
-  const doubleClick = () => view.element('currentSessionTitle').dispatchEvent({ type: 'dblclick' });
-  return { ...view, publish, requests, doubleClick };
+  const openHistory = () => {
+    if (view.element('sessionMenu').classList.contains('hidden')) view.element('historyTab').click();
+  };
+  const refreshButton = (sessionId = 'a') => {
+    openHistory();
+    const row = view.element('sessionMenu').querySelector(`[data-session-id="${sessionId}"]`);
+    const button = row?.querySelector('button[data-session-action="regenerateTitle"]');
+    assert.ok(button);
+    return button;
+  };
+  const refresh = (sessionId = 'a') => {
+    const button = refreshButton(sessionId);
+    view.element('sessionMenu').dispatchEvent({ type: 'click', target: button });
+  };
+  return { ...view, publish, requests, openHistory, refreshButton, refresh };
 }
 
-test('double-clicking the current title requests one background regeneration without locking navigation or disturbing the composer', () => {
+test('history refresh is before edit and spins once without selecting a session or disturbing the composer', () => {
   const view = titleView();
   const prompt = view.element('promptInput');
   prompt.textContent = 'Unsent draft';
   prompt.focus();
   const title = view.element('currentSessionTitle');
-  assert.equal(title.getAttribute('role'), 'button');
-  assert.match(title.title, /Double-click to regenerate/u);
-  title.click();
-  assert.equal(view.requests().length, 0, 'a single click does not spend model usage');
-  view.doubleClick();
-  view.doubleClick();
+  assert.equal(title.getAttribute('role'), null);
+  assert.equal(title.getAttribute('tabindex'), null);
+  assert.equal(title.title, 'A');
+  title.dispatchEvent({ type: 'dblclick' });
+  title.dispatchEvent({ type: 'keydown', key: 'Enter' });
+  assert.equal(view.requests().length, 0, 'the former title shortcuts no longer spend model usage');
+  const button = view.refreshButton();
+  const row = button.closest('.session-menu-item')!;
+  const rename = row.querySelector('button[data-session-action="startRename"]');
+  assert.ok(rename);
+  assert.ok(row.children.indexOf(button) < row.children.indexOf(rename), 'refresh is immediately left of edit');
+  assert.equal(button.tagName, 'BUTTON');
+  assert.match(button.title, /Regenerate session title/u);
+  assert.equal(button.disabled, false);
+  view.refresh();
+  view.refresh();
   assert.equal(view.requests().length, 1);
   assert.equal(view.requests()[0].sessionId, 'a');
   assert.equal(typeof view.requests()[0].requestId, 'string');
-  assert.equal(title.textContent, 'A', 'keep the original title while the request runs');
-  assert.equal(title.getAttribute('aria-busy'), 'true');
-  assert.equal(title.getAttribute('aria-disabled'), 'true');
+  assert.equal(button.disabled, true);
+  assert.equal(button.classList.contains('is-regenerating'), true);
+  assert.equal(button.getAttribute('aria-busy'), 'true');
+  const styles = getStyles();
+  assert.match(styles, /\.session-menu-item:hover \.session-menu-refresh/u);
+  assert.match(styles, /\.session-menu-refresh\.is-regenerating\s*\{\s*opacity:\s*1/u,
+    'the in-flight control stays visible after hover ends');
+  assert.match(styles, /\.session-menu-refresh\.is-regenerating svg\s*\{\s*animation:\s*session-title-refresh-spin [^;]*infinite/u);
+  assert.match(styles, /@keyframes session-title-refresh-spin\s*\{ to \{ transform: rotate\(360deg\)/u);
+  assert.equal(view.element('sessionMenu').classList.contains('hidden'), false);
+  assert.equal(view.posted.some(message => message.type === 'selectSession'), false);
   assert.equal(view.state.isBusy, false);
   assert.equal(view.element('newChatTab').disabled, false);
   assert.equal(view.element('historyTab').disabled, false);
@@ -171,43 +204,61 @@ test('double-clicking the current title requests one background regeneration wit
 
   const requestId = view.requests()[0].requestId;
   view.receive({ type: 'sessionTitleRegeneration', sessionId: 'a', requestId: 'obsolete', running: false });
-  view.doubleClick();
+  assert.equal(view.refreshButton(), button, 'status patches update the original control in place');
+  view.refresh();
   assert.equal(view.requests().length, 1, 'a stale completion cannot unlock a newer request');
   view.receive({ type: 'sessionTitleUpdated', sessionId: 'a', requestId, regenerated: true, title: 'Approval diagnostics' });
-  assert.equal(title.textContent, 'Approval diagnostics', 'an explicit regeneration can replace the previous manual name');
+  assert.equal(title.textContent, 'Approval diagnostics');
   assert.equal(view.state.sessionSummaries[0].customTitle, undefined);
+  assert.equal(button.classList.contains('is-regenerating'), true, 'keep spinning through the title commit notification');
   view.receive({ type: 'sessionTitleRegeneration', sessionId: 'a', requestId, running: false });
-  assert.equal(title.getAttribute('aria-busy'), 'false');
-  assert.equal(title.getAttribute('aria-disabled'), 'false');
-  view.doubleClick();
-  assert.equal(view.requests().length, 2, 'ending or rejecting one request permits a later explicit retry');
+  assert.equal(button.disabled, false);
+  assert.equal(button.classList.contains('is-regenerating'), false);
+  assert.equal(button.getAttribute('aria-busy'), 'false');
+  view.refresh();
+  assert.equal(view.requests().length, 2, 'a later explicit refresh can run again');
 });
 
-test('title regeneration is disabled during startup, a main answer, or an active background run and supports the keyboard', () => {
+test('history refresh guards startup, main/background runs and preserves its pending spinner across menu and state refreshes', () => {
   const view = titleView('zh-CN');
-  assert.match(view.element('currentSessionTitle').title, /双击根据会话内容重建标题/u);
+  assert.match(view.refreshButton().title, /重新生成会话标题/u);
   for (const patch of [
     { startup: { interactiveReady: false } }, { isBusy: true },
     ...['running', 'waiting_for_apply', 'waiting_for_authorization'].map(status => ({ backgroundRun: { status } }))
   ]) {
     view.publish('a', { backgroundRun: undefined, ...patch });
-    view.doubleClick();
+    assert.equal(view.refreshButton().disabled, true);
+    view.refresh();
     assert.equal(view.requests().length, 0);
-    assert.equal(view.element('currentSessionTitle').getAttribute('aria-disabled'), 'true');
   }
   view.publish('a', { backgroundRun: undefined });
-  view.element('currentSessionTitle').dispatchEvent({ type: 'keydown', key: 'Enter', repeat: true });
-  assert.equal(view.requests().length, 0, 'holding Enter does not repeat model requests');
-  view.element('currentSessionTitle').dispatchEvent({ type: 'keydown', key: ' ' });
+  view.refresh('b');
+  const requestId = view.requests()[0].requestId;
+  assert.equal(view.requests()[0].sessionId, 'b', 'an inactive row refreshes its own conversation');
+  assert.equal(view.state.activeSessionId, 'a');
+  view.element('historyTab').click();
+  assert.equal(view.element('sessionMenu').classList.contains('hidden'), true);
+  view.openHistory();
+  assert.equal(view.refreshButton('b').classList.contains('is-regenerating'), true);
+  assert.equal(view.refreshButton('b').disabled, true);
+  view.publish('a');
+  assert.equal(view.refreshButton('b').classList.contains('is-regenerating'), true);
+  view.refresh('b');
   assert.equal(view.requests().length, 1);
+  view.receive({ type: 'sessionTitleRegeneration', sessionId: 'b', requestId, running: false });
+  assert.equal(view.refreshButton('b').classList.contains('is-regenerating'), false);
+  assert.equal(view.refreshButton('b').disabled, false);
+  assert.equal(view.state.sessionSummaries[1].title, 'B', 'failure or defer leaves the title intact');
+  view.refresh('b');
+  assert.equal(view.requests().length, 2);
 });
 
 test('late title regeneration events remain scoped to their session and cannot override a later locally submitted manual name', () => {
   const view = titleView();
-  view.doubleClick();
+  view.refresh();
   const requestId = view.requests()[0].requestId;
   view.publish('b');
-  assert.equal(view.element('currentSessionTitle').getAttribute('aria-busy'), 'false');
+  assert.equal(view.refreshButton('a').getAttribute('aria-busy'), 'true');
   view.receive({ type: 'sessionTitleUpdated', sessionId: 'a', requestId, regenerated: true, title: 'Regenerated A' });
   view.receive({ type: 'sessionTitleRegeneration', sessionId: 'a', requestId, running: false });
   assert.equal(view.state.activeSessionId, 'b');
@@ -215,7 +266,7 @@ test('late title regeneration events remain scoped to their session and cannot o
   assert.equal(view.state.sessionSummaries[0].title, 'Regenerated A');
 
   view.publish('a');
-  view.doubleClick();
+  view.refresh();
   const staleId = view.requests()[1].requestId;
   // Use the actual production commit handler, sharing the complete script's
   // state, to reproduce an optimistic manual rename before Host delivery.
@@ -234,17 +285,38 @@ test('late title regeneration events remain scoped to their session and cannot o
   assert.equal(view.state.sessionTitleRegenerations.a, undefined);
 });
 
+test('other-workspace history does not expose a title refresh control', () => {
+  const view = titleView();
+  view.openHistory();
+  view.receive({ type: 'otherWorkspaces', workspaces: [{ workspaceKey: 'other', workspaceName: 'Other project' }] });
+  const menu = view.element('sessionMenu');
+  const select = menu.querySelector('select[data-session-workspace="true"]')!;
+  select.value = 'other';
+  menu.dispatchEvent({ type: 'change', target: select });
+  view.receive({ type: 'otherWorkspaceSessions', workspaceKey: 'other', sessions: [
+    { id: 'a', title: 'Other project session', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
+  ] });
+  assert.ok(menu.querySelector('.session-menu-item.is-other-workspace'));
+  assert.equal(menu.querySelector('button[data-session-action="regenerateTitle"]'), null);
+  assert.equal(view.requests().length, 0);
+  assert.equal(view.state.activeSessionId, 'a');
+});
+
 test('a newly mounted webview restores the Host in-flight title request before session state and applies its result without disturbing input', () => {
   const view = createWebviewDomHarness();
   assert.equal(view.state.activeSessionId, '');
   view.receive({ type: 'sessionTitleRegeneration', sessionId: 'a', requestId: 'host-pending', running: true, restored: true });
   view.receive({ type: 'state', revision: 1, state: {
-    activeSessionId: 'a', sessionSummaries: [{ id: 'a', title: 'Manual before reload', customTitle: 'Manual before reload' }],
+    activeSessionId: 'a', sessionSummaries: [{ id: 'a', title: 'Manual before reload', customTitle: 'Manual before reload',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
     messages: [], language: 'en', isBusy: false, startup: { interactiveReady: true, sideEffectsReady: true }
   } });
   const title = view.element('currentSessionTitle');
-  assert.equal(title.getAttribute('aria-busy'), 'true');
   assert.equal(title.textContent, 'Manual before reload');
+  view.element('historyTab').click();
+  const button = view.element('sessionMenu').querySelector('button[data-session-action="regenerateTitle"]')!;
+  assert.equal(button.disabled, true);
+  assert.equal(button.classList.contains('is-regenerating'), true);
   const prompt = view.element('promptInput');
   prompt.textContent = 'Draft after reload';
   prompt.focus();
@@ -252,7 +324,8 @@ test('a newly mounted webview restores the Host in-flight title request before s
   view.receive({ type: 'sessionTitleRegeneration', sessionId: 'a', requestId: 'host-pending', running: false });
   assert.equal(title.textContent, 'Restored title result');
   assert.equal(view.state.sessionSummaries[0].customTitle, undefined);
-  assert.equal(title.getAttribute('aria-busy'), 'false');
+  assert.equal(button.disabled, false);
+  assert.equal(button.classList.contains('is-regenerating'), false);
   assert.equal(prompt.textContent, 'Draft after reload');
   assert.equal(view.document.activeElement, prompt);
 });

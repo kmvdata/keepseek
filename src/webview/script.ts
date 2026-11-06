@@ -422,17 +422,6 @@ export function getScript(): string {
     }
 
     const currentSessionTitle = document.getElementById('currentSessionTitle');
-    if (currentSessionTitle) {
-      currentSessionTitle.addEventListener('dblclick', function(event) {
-        event.preventDefault();
-        requestCurrentSessionTitleRegeneration();
-      });
-      currentSessionTitle.addEventListener('keydown', function(event) {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        event.preventDefault();
-        if (!event.repeat) requestCurrentSessionTitleRegeneration();
-      });
-    }
     const historyTab = document.getElementById('historyTab');
     const newChatTab = document.getElementById('newChatTab');
     const settingsTab = document.getElementById('settingsTab');
@@ -1581,31 +1570,43 @@ export function getScript(): string {
       }
       if (currentSessionTitle) {
         currentSessionTitle.textContent = title;
-        var pending = state.sessionTitleRegenerations?.[state.activeSessionId];
-        var hint = t(pending ? 'regeneratingSessionTitle' : 'regenerateSessionTitle');
-        currentSessionTitle.title = title + ' · ' + hint;
-        currentSessionTitle.setAttribute?.('aria-label', title + ' · ' + hint);
-        currentSessionTitle.setAttribute?.('aria-disabled', canRegenerateCurrentSessionTitle() ? 'false' : 'true');
-        currentSessionTitle.setAttribute?.('aria-busy', pending ? 'true' : 'false');
+        currentSessionTitle.title = title;
       }
     }
 
-    function canRegenerateCurrentSessionTitle() {
+    function canRegenerateSessionTitle(sessionId) {
       var background = state.backgroundRun?.status;
-      return !!state.activeSessionId && state.startup?.interactiveReady === true && !state.isBusy
-        && !state.sessionTitleRegenerations?.[state.activeSessionId]
-        && editingSessionTitleId !== state.activeSessionId
+      return !!sessionId && state.startup?.interactiveReady === true && !state.isBusy
+        && (Array.isArray(state.sessionSummaries) ? state.sessionSummaries : []).some(function(session) { return session.id === sessionId; })
+        && !state.sessionTitleRegenerations?.[sessionId]
+        && editingSessionTitleId !== sessionId
         && background !== 'running' && background !== 'waiting_for_apply' && background !== 'waiting_for_authorization';
     }
 
-    function requestCurrentSessionTitleRegeneration() {
-      if (!canRegenerateCurrentSessionTitle()) return;
-      var sessionId = state.activeSessionId;
+    function syncSessionTitleRefreshButton(button) {
+      var sessionId = button.dataset.sessionId || '';
+      var pending = !!state.sessionTitleRegenerations?.[sessionId];
+      button.disabled = !canRegenerateSessionTitle(sessionId);
+      button.classList.toggle('is-regenerating', pending);
+      button.setAttribute('aria-busy', pending ? 'true' : 'false');
+      button.setAttribute('aria-label', t(pending ? 'regeneratingSessionTitle' : 'regenerateSessionTitle'));
+      button.title = t(pending ? 'regeneratingSessionTitle' : 'regenerateSessionTitle');
+    }
+
+    function syncSessionTitleRefreshButtons(sessionId) {
+      if (!sessionMenu) return;
+      sessionMenu.querySelectorAll('button[data-session-action="regenerateTitle"]').forEach(function(button) {
+        if (!sessionId || button.dataset.sessionId === sessionId) syncSessionTitleRefreshButton(button);
+      });
+    }
+
+    function requestSessionTitleRegeneration(sessionId) {
+      if (!isCurrentWorkspaceTab() || !canRegenerateSessionTitle(sessionId)) return;
       // This UI correlation ID never enters model input or the main request.
       var requestId = Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
       if (!state.sessionTitleRegenerations) state.sessionTitleRegenerations = {};
       state.sessionTitleRegenerations[sessionId] = requestId;
-      renderCurrentSessionTitle();
+      syncSessionTitleRefreshButtons(sessionId);
       vscode.postMessage({ type: 'regenerateSessionTitle', sessionId: sessionId, requestId: requestId });
     }
 
@@ -1622,7 +1623,7 @@ export function getScript(): string {
       }
       if (state.sessionTitleRegenerations?.[message.sessionId] !== message.requestId) return;
       if (message.running === false) delete state.sessionTitleRegenerations[message.sessionId];
-      if (state.activeSessionId === message.sessionId) renderCurrentSessionTitle();
+      syncSessionTitleRefreshButtons(message.sessionId);
     }
 
     // A background title must leave the composer, open title editor, and
@@ -2128,6 +2129,14 @@ export function getScript(): string {
         }
         item.append(main);
         if (currentTab) {
+          var refreshButton = document.createElement('button');
+          refreshButton.type = 'button';
+          refreshButton.className = 'session-menu-refresh';
+          refreshButton.dataset.sessionAction = 'regenerateTitle';
+          refreshButton.dataset.sessionId = session.id;
+          refreshButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.6-2.2L20 7M4 17l2.3 2.2A7 7 0 0 0 17.9 17"/></svg>';
+          syncSessionTitleRefreshButton(refreshButton);
+          item.append(refreshButton);
           var renameButton = document.createElement('button');
           renameButton.type = 'button';
           renameButton.className = 'session-menu-rename';
@@ -2301,7 +2310,12 @@ export function getScript(): string {
     }
 
     function handleSessionMenuAction(button) {
+      if (button.disabled) return;
       var action = button.dataset.sessionAction || '';
+      if (action === 'regenerateTitle') {
+        requestSessionTitleRegeneration(button.dataset.sessionId || '');
+        return;
+      }
       if (action === 'switchWorkspaceTab') {
         switchSessionWorkspace(button.dataset.workspaceTab || 'current');
         return;

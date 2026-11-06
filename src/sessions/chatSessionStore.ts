@@ -106,10 +106,28 @@ export class ChatSessionStore {
   private readonly stagedTitles = new Map<string, {
     token: string; revision: number; title: string; metadata: SessionTitleMetadata; clearCustomTitle?: boolean;
   }>();
+  private readonly titleSessionPins = new Map<string, number>();
 
   /** Loaded sessions only: background naming must never load an entire old history. */
   public getSessionById(sessionId: string): ChatSession | undefined {
     return this.sessions.find(session => session.id === sessionId && this.isInCurrentWorkspace(session));
+  }
+
+  /** Explicit history-row requests load only that session and keep it resident
+   * through commit/notification, without changing the active conversation. */
+  public async withSessionForTitle<T>(sessionId: string, action: (session: ChatSession) => Promise<T>): Promise<T | undefined> {
+    const workspaceKey = this.workspaceScope.key;
+    const key = JSON.stringify([workspaceKey, sessionId]);
+    this.titleSessionPins.set(key, (this.titleSessionPins.get(key) ?? 0) + 1);
+    try {
+      const session = await this.loadSessionById(sessionId);
+      if (!session || this.workspaceScope.key !== workspaceKey || this.getSessionById(sessionId) !== session) return undefined;
+      return await action(session);
+    } finally {
+      const remaining = (this.titleSessionPins.get(key) ?? 1) - 1;
+      if (remaining > 0) this.titleSessionPins.set(key, remaining);
+      else this.titleSessionPins.delete(key);
+    }
   }
 
   /** Synchronous invalidation wins against a response arriving during a new turn. */
@@ -758,7 +776,7 @@ export class ChatSessionStore {
       let storedNonFavoriteContentSessions = 0;
       for (const session of sorted) {
         const isActive = session.id === activeSession.id;
-        if (isActive || session.isFavorite) {
+        if (isActive || session.isFavorite || this.titleSessionPins.has(JSON.stringify([session.workspaceKey, session.id]))) {
           compacted.push(session);
           continue;
         }
@@ -785,10 +803,14 @@ export class ChatSessionStore {
     if (!this.sessionSummaries.has(sessionId) || !this.sessionStorage.loadSession) {
       return undefined;
     }
-    const session = await this.sessionStorage.loadSession(this.workspaceScope.key, sessionId);
-    if (!session || !this.isInCurrentWorkspace(session)) {
+    const workspaceKey = this.workspaceScope.key;
+    const session = await this.sessionStorage.loadSession(workspaceKey, sessionId);
+    if (!session || session.id !== sessionId || workspaceKey !== this.workspaceScope.key
+      || !this.sessionSummaries.has(sessionId) || !this.isInCurrentWorkspace(session)) {
       return undefined;
     }
+    const current = this.getSessionById(sessionId);
+    if (current) return current;
     this.sessions.push(session);
     return session;
   }
