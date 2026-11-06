@@ -9,6 +9,9 @@ import type { ChatMessage } from '../src/shared/types';
 import { usageFormattersFragment } from '../src/webview/input/usage/formatters';
 import { WEBVIEW_TRANSLATIONS } from '../src/shared/i18n';
 import { taskGoal } from '../src/sessions/userTask';
+import { createUsageDetailsViewModel } from '../src/agent/subagentUsageStats';
+import { createEmptySessionUsageStats } from '../src/agent/usageStats';
+import { createWebviewDomHarness } from './webviewDomHarness';
 
 function message(taskId: string, usedMs: number, status = 'running'): ChatMessage {
   return { id: taskId, role: 'assistant', content: '', createdAt: '',
@@ -179,4 +182,77 @@ test('legacy supplementary user turn with the same archived execution ID cannot 
   assert.deepEqual(session.messages.map(m => m.content), contents);
   session.executionTime = reconcileExecutionTime(session.executionTime, session.messages);
   assert.equal(executionTimeView(session).totalMs, 4000);
+});
+
+test('complete webview handles timing ticks and keeps new/history session navigation working', () => {
+  const view = createWebviewDomHarness();
+  const a = createEmptySession('en');
+  const b = createEmptySession('en');
+  a.title = 'Approval diagnostics';
+  b.title = 'New task';
+  a.messages = [
+    { id: 'question-a', role: 'user', content: 'Investigate approval failures', createdAt: a.createdAt },
+    { id: 'answer-a', role: 'assistant', content: 'Inspect the approval record.', createdAt: a.createdAt }
+  ];
+  const sessionUsageStats = createEmptySessionUsageStats();
+  const publishSession = (session: typeof a, revision: number) => view.receive({
+    type: 'state', revision,
+    state: {
+      activeSessionId: session.id,
+      sessionSummaries: [a, b].map(item => ({ id: item.id, title: item.title, messageCount: item.messages.length,
+        createdAt: item.createdAt, updatedAt: item.updatedAt })),
+      messages: session.messages, language: 'en', isBusy: false,
+      startup: { interactiveReady: true, sideEffectsReady: true },
+      usageMetrics: { executionTime: executionTimeView(session), sessionUsageStats,
+        usageDetails: createUsageDetailsViewModel({ sessionUsageStats }), turnCount: session.messages.length / 2 }
+    }
+  });
+  const tick = (sessionId: string, currentMs: number) => view.receive({
+    type: 'taskTiming', sessionId, executionTime: { currentMs, totalMs: currentMs, incomplete: false }
+  });
+
+  publishSession(a, 1);
+  const prompt = view.element('promptInput');
+  prompt.textContent = 'Unsent draft';
+  assert.doesNotThrow(() => tick(a.id, 65_000));
+  assert.match(view.element('contextProgressBreakdown').textContent, /00:01:05/u);
+  assert.equal(prompt.textContent, 'Unsent draft');
+  assert.equal(view.element('currentSessionTitle').textContent, a.title);
+  assert.match(view.element('transcript').textContent, /Inspect the approval record\./u);
+  assert.equal(view.state.isBusy, false);
+
+  view.element('newChatTab').click();
+  assert.equal(view.posted.at(-1)?.type, 'newSession');
+  assert.equal(prompt.textContent, '');
+  view.receive({ type: 'sessionChanged' });
+  publishSession(b, 2);
+  assert.equal(view.element('currentSessionTitle').textContent, b.title);
+  assert.doesNotMatch(view.element('transcript').textContent, /Inspect the approval record/u);
+  const bTiming = view.state.usageMetrics.executionTime;
+  const bUsage = view.element('contextProgressBreakdown').textContent;
+  tick(a.id, 99_000);
+  assert.equal(view.state.usageMetrics.executionTime, bTiming, 'late ticks from the previous session are ignored');
+  assert.equal(view.element('contextProgressBreakdown').textContent, bUsage);
+
+  view.element('historyTab').click();
+  const menu = view.element('sessionMenu');
+  const aRow = menu.querySelector(`[data-session-id="${a.id}"]`);
+  assert.ok(aRow);
+  menu.dispatchEvent({ type: 'click', target: aRow.querySelector('.session-menu-item-title') });
+  assert.equal(view.posted.at(-1)?.type, 'selectSession');
+  assert.equal(view.posted.at(-1)?.sessionId, a.id);
+  view.receive({ type: 'sessionChanged' });
+  publishSession(a, 3);
+  tick(a.id, 66_000);
+  assert.equal(view.element('currentSessionTitle').textContent, a.title);
+  assert.match(view.element('transcript').textContent, /Inspect the approval record\./u);
+  assert.match(view.element('contextProgressBreakdown').textContent, /00:01:06/u);
+  const activeTiming = view.state.usageMetrics.executionTime;
+  tick(b.id, 120_000);
+  assert.equal(view.state.usageMetrics.executionTime, activeTiming);
+
+  // An early/teardown tick can arrive without a mounted public input API.
+  delete view.window.keepseekInputControls;
+  assert.doesNotThrow(() => tick(a.id, 67_000));
+  assert.equal(view.state.usageMetrics.executionTime.currentMs, 67_000);
 });

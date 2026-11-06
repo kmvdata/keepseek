@@ -1268,7 +1268,7 @@ export function getScript(): string {
       if (message.type === 'taskTiming') {
         if (message.sessionId === state.activeSessionId && state.usageMetrics) {
           state.usageMetrics.executionTime = message.executionTime;
-          renderContextProgress();
+          if (window.keepseekInputControls?.renderUsage) window.keepseekInputControls.renderUsage();
         }
         return;
       }

@@ -74,3 +74,15 @@ bun run test
 | 轻量三协议传输与审批兼容入口 | `src/agent/oneShotTextRequest.ts`、`src/approvals/oneShotTextRequest.ts` |
 | 存储认领/提交、索引提交标记、截断 | `src/sessions/chatSessionStore.ts`、`src/sessions/globalSessionStorage.ts`、`src/sessions/historyTruncation.ts` |
 | 事件接线、界面与用量 | `src/provider/KeepseekChatViewProvider.ts`、`src/webview/script.ts`、`src/webview/input/usage/script.ts` |
+
+## 会话导航故障修复（2026-11-06）
+
+排查基线为 `9c28b3b25282e4da66fd742c9be37b345a385be6`。原生 Webview 控制台确认反复抛出 `renderContextProgress is not defined`：计时事件跨作用域调用了输入组件内部函数。现改用已有公开的 `keepseekInputControls.renderUsage()`，并容忍组件尚未挂载或已卸载。
+
+宿主导航另有可控回归确认的失败路径：初始 load 尚未结束就执行新建/历史选择，晚到的 load 会覆盖活动会话；重复“＋”可并发新建；新建成功后上下文刷新失败会漏发切换通知。现在新建与选择均先等待会话加载，同步取得导航锁并在 finally 释放；已经持久化的切换即使后续上下文刷新失败也发布完整状态。内部上下文刷新保留实际执行，外部 Skills 刷新与主运行的 busy 保护保持原规则。普通会话切换不取消自动标题，A 的晚到标题仍只能更新 A。
+
+修前导航回归 6 项中有 4 项失败；修后导航 8 项及计时/标题生产接线合计 23 项通过。测试运行真实 Host、临时 GlobalSessionStorage 与完整生成的 Webview 脚本，使用可控 load/save/标题响应，不依赖长时间 sleep。该结果不能证明上述任一问题是现场所有无法切换现象的唯一原因；标题改动审查未发现占用主任务锁或覆盖活动会话的证据。
+
+现场复验：使用本地源码 F5 启动扩展宿主，先在启动加载时点击“＋”，加载结束后应保持新会话；反复点击“＋”不并发创建；打开历史来回选择，标题与消息同步变化；运行一个回答并观察计时，再新建/选择历史，控制台不再出现上述 ReferenceError；标题请求在途时选择 B，返回后仍停留 B。主任务执行中的导航保护保持原行为。
+
+未安装或发布修复后的扩展，因此原生 VS Code 中修复版本的现场复验仍待执行。

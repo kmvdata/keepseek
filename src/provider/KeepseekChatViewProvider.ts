@@ -2351,11 +2351,31 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    this.clearSessionTransientState();
-    await this.sessionStore.createNewSession(this.language);
-    await this.refreshSkills({ post: false });
-    this.postToWebview({ type: 'sessionChanged' });
-    this.postState({ forceFull: true });
+    this.isStartingRun = true;
+    let sessionChanged = false;
+    try {
+      await this.ensureSessionNavigationReady();
+      if (this.isBusy || this.hasActiveBackgroundRun()) return;
+      this.clearSessionTransientState();
+      const session = await this.sessionStore.createNewSession(this.language);
+      sessionChanged = true;
+      await this.refreshSessionSkills(session);
+    } catch (error) {
+      vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error));
+    } finally {
+      this.isStartingRun = false;
+      if (sessionChanged) this.postToWebview({ type: 'sessionChanged' });
+      this.postState({ forceFull: true });
+    }
+  }
+
+  private async ensureSessionNavigationReady(): Promise<void> {
+    if (this.sessionReady) return;
+    // Session loading can replace the complete in-memory store. Navigation must
+    // cross that barrier, independently of model discovery and request context.
+    await this.sessionInitialization;
+    this.sessionReady = true;
+    this.commandSettingsReadiness.executionMode = 'ready';
   }
 
   private async selectSession(sessionId: string): Promise<void> {
@@ -2364,32 +2384,33 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     this.isStartingRun = true;
+    let sessionChanged = false;
     try {
-    const wasActiveSession = sessionId === this.sessionStore.activeSessionId;
-    const session = await this.sessionStore.selectSession(sessionId);
-    if (!session) {
-      return;
-    }
+      await this.ensureSessionNavigationReady();
+      if (this.isBusy || this.hasActiveBackgroundRun()) return;
+      const wasActiveSession = sessionId === this.sessionStore.activeSessionId;
+      const session = await this.sessionStore.selectSession(sessionId);
+      if (!session) return;
 
-    if (!wasActiveSession) {
-      this.clearSessionTransientState();
-      this.queueUsageLedgerFlush(session);
-      await this.usageLedgerFlushes.get(session.id);
-      await this.recoverSubagentUsage(session);
-      await Promise.all([
-        this.changeSets.loadSession?.(session.id),
-        this.draftRuns.loadSession?.(session.id)
-      ]);
-      await this.recoverHistoryTruncation(session);
-      await this.refreshCurrentRunContext(session, '');
-      this.postToWebview({ type: 'sessionChanged' });
-    }
-    this.postState({ forceFull: true });
+      if (!wasActiveSession) {
+        sessionChanged = true;
+        this.clearSessionTransientState();
+        this.queueUsageLedgerFlush(session);
+        await this.usageLedgerFlushes.get(session.id);
+        await this.recoverSubagentUsage(session);
+        await Promise.all([
+          this.changeSets.loadSession?.(session.id),
+          this.draftRuns.loadSession?.(session.id)
+        ]);
+        await this.recoverHistoryTruncation(session);
+        await this.refreshCurrentRunContext(session, '');
+      }
     } catch (error) {
       vscode.window.showErrorMessage(this.t('runStorageFailed') + ': ' + getErrorMessage(error));
     } finally {
       this.isStartingRun = false;
-      this.postState();
+      if (sessionChanged) this.postToWebview({ type: 'sessionChanged' });
+      this.postState({ forceFull: true });
     }
   }
 
@@ -2634,15 +2655,19 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
 
   public async refreshSkills(options: { post?: boolean } = {}): Promise<void> {
     if (this.isBusy || this.isStartingRun) { this.sharedProjectSources.dirty = true; return; }
-    const session = this.sessionStore.getActiveSession();
+    await this.refreshSessionSkills(this.sessionStore.getActiveSession());
+    if (options.post !== false) {
+      this.postState();
+    }
+  }
+
+  /** Navigation already owns the host lock; external refreshes retain their guard. */
+  private async refreshSessionSkills(session: ChatSession): Promise<void> {
     const snapshot = await this.sharedProjectSources.refresh(session.id, session.projectScopeUri);
     if (!session.projectScopeUri && snapshot.scope) session.projectScopeUri = snapshot.scope.cwd.toString();
     await this.skillStore.refresh(snapshot);
     this.skillStore.invalidateImplicitSkillSnapshot(session);
     await this.refreshCurrentRunContext(session, '');
-    if (options.post !== false) {
-      this.postState();
-    }
   }
 
   private scheduleRunContextRefresh(uris: readonly string[]): void {
@@ -6812,6 +6837,7 @@ export class KeepseekChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private scheduleDraftRunAutoContinuation(): void {
+    if (!this.approvalDataReady || !this.requestContextReady) return;
     if (this.draftRunAutoContinueTimer || this.draftRunAutoContinueInFlight || this.delegatedApprovalInFlight) {
       return;
     }
